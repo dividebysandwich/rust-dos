@@ -236,6 +236,15 @@ impl Voodoo {
                     if data & 2 != 0 {
                         self.reset_counters();
                         self.reg[FBI_TRIANGLES_OUT] = 0;
+                        // The graphics reset turns chroma-ranging off.
+                        // 3dfx's Voodoo2 driver tests the TMUs with a
+                        // range that passes one colour only
+                        // (sst1InitCheckTmuMemConst), resets the
+                        // graphics engine after it and doesn't write
+                        // chromaRange again: kept, the range would drop
+                        // every texel a Direct3D game draws with its
+                        // colour key on.
+                        self.reg[CHROMA_RANGE] = 0;
                     }
                     self.recompute_video_memory();
                 }
@@ -383,5 +392,52 @@ impl Voodoo {
             FBI_PIXELS_OUT => counter(regnum, counted().pixels_out),
             _ => self.reg[regnum],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::regs::*;
+    use super::super::{Board, Now, Voodoo};
+
+    fn reg(v: &mut Voodoo, r: usize, data: u32) {
+        v.write((r as u32) << 2, data, !0, Now::default());
+    }
+
+    /// A red triangle over pixel (1, 1) of the front buffer, which is
+    /// what the pixel is after it.
+    fn red_triangle(v: &mut Voodoo) -> u16 {
+        reg(v, START_R, 255 << 12);
+        reg(v, START_G, 0);
+        reg(v, START_B, 0);
+        for (r, value) in [(VERTEX_AX, 0), (VERTEX_AY, 0), (VERTEX_BX, 16 << 4), (VERTEX_BY, 0)] {
+            reg(v, r, value);
+        }
+        reg(v, VERTEX_CX, 0);
+        reg(v, VERTEX_CY, 16 << 4);
+        reg(v, TRIANGLE_CMD, 0);
+        v.frame_buffer().get(640 + 1)
+    }
+
+    #[test]
+    fn a_graphics_reset_turns_chroma_ranging_off() {
+        let mut v = Voodoo::with_workers(Board::Voodoo2Max, 0);
+        v.config_write(0x40, 1);
+        reg(&mut v, FBI_INIT1, 10 << 4);
+        reg(&mut v, FBI_INIT2, 150 << 11);
+        reg(&mut v, CLIP_LEFT_RIGHT, 640);
+        reg(&mut v, CLIP_LOW_Y_HIGH_Y, 480);
+        reg(&mut v, FBZ_MODE, 1 << 9 | 1 << 1);
+        // The last colour of 3dfx's TMU test: only A6A6A6h passes, as
+        // every colour component outside its range blocks the pixel.
+        reg(&mut v, CHROMA_KEY, 0xA6A6A6);
+        reg(&mut v, CHROMA_RANGE, 0x1FA6_A6A6);
+        assert_eq!(red_triangle(&mut v), 0, "red is outside the range");
+        // The driver's reset after the test (sst1InitResetFbi).
+        for data in [0x5E, 0x5A, 0x58] {
+            reg(&mut v, FBI_INIT0, data);
+        }
+        assert_eq!(v.reg[CHROMA_RANGE], 0);
+        assert_eq!(red_triangle(&mut v), 0xF800);
     }
 }
