@@ -454,7 +454,8 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let brush = if value != 0 {
                 value
             } else {
-                button::default_color(cpu, hdc, WM_CTLCOLORSTATIC)
+                let parent = button::parent_of(cpu, hwnd);
+                button::default_color(cpu, parent, hdc, WM_CTLCOLORSTATIC)
             };
             let r = button::client_rect(cpu, hwnd);
             paint::fill(cpu, hdc, r, brush);
@@ -503,7 +504,8 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let brush = if value != 0 {
                 value
             } else {
-                button::default_color(cpu, hdc, WM_CTLCOLORSTATIC)
+                let parent = button::parent_of(cpu, hwnd);
+                button::default_color(cpu, parent, hdc, WM_CTLCOLORSTATIC)
             };
             let r = button::client_rect(cpu, hwnd);
             match type_of(style) {

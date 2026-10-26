@@ -1314,6 +1314,7 @@ static void test_ctlcolor(void)
     COLORREF window = GetSysColor(COLOR_WINDOW);
     COLORREF text = GetSysColor(COLOR_WINDOWTEXT);
     COLORREF face = GetSysColor(COLOR_BTNFACE);
+    COLORREF highlight = GetSysColor(COLOR_BTNHIGHLIGHT);
     HWND hDlg;
     HDC hdc;
     int type, dlg;
@@ -1344,7 +1345,7 @@ static void test_ctlcolor(void)
             ok(brush != 0, "%d %d: no brush\n", dlg, type);
             if (type == CTLCOLOR_SCROLLBAR)
             {
-                ok(GetBkColor(hdc) == RGB(255, 255, 255), "%d %d: background %08lx\n",
+                ok(GetBkColor(hdc) == highlight, "%d %d: background %08lx\n",
                    dlg, type, GetBkColor(hdc));
                 ok(GetTextColor(hdc) == face, "%d %d: text %08lx\n",
                    dlg, type, GetTextColor(hdc));
