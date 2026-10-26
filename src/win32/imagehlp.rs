@@ -187,7 +187,7 @@ fn sym_get_module_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[_, address, info] = args else {
         unreachable!()
     };
-    if info == 0 || !cpu.bus.guest_probe(info, IMAGEHLP_MODULE as usize, true) {
+    if info == 0 || !allows(cpu, info, IMAGEHLP_MODULE, true) {
         process(cpu).last_error = ERROR_INVALID_PARAMETER;
         return Some(FALSE);
     }
@@ -293,7 +293,7 @@ fn stack_walk(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     if machine != IMAGE_FILE_MACHINE_I386
         || frame == 0
-        || !cpu.bus.guest_probe(frame, STACKFRAME as usize, true)
+        || !allows(cpu, frame, STACKFRAME, true)
     {
         process(cpu).last_error = ERROR_INVALID_PARAMETER;
         return Some(FALSE);
