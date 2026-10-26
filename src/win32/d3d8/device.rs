@@ -20,7 +20,7 @@ use super::super::ddraw::directdraw::{
 use super::super::ddraw::surface as dd_surface;
 use super::super::ddraw::{self, V_DD7, V_DEVICE7};
 use super::resource::{
-    self, FMT_A8R8G8B8, FMT_R5G6B5, FMT_X1R5G5B5, FMT_X8R8G8B8, POOL_DEFAULT, Role, SwapChain,
+    self, FMT_A8R8G8B8, FMT_R5G6B5, FMT_X8R8G8B8, POOL_DEFAULT, Role, SwapChain,
     USAGE_DEPTHSTENCIL, USAGE_RENDERTARGET,
 };
 use super::{
@@ -215,11 +215,18 @@ pub fn dd_surface_of(cpu: &mut Cpu, id: u32) -> u32 {
 /// Whether the device `device` draws with the object `id`, or has it as
 /// a part of itself: it stays while the device does then.
 pub fn uses(cpu: &mut Cpu, device: u32, id: u32) -> bool {
+    // A texture is drawn into while one of its levels is the target.
+    let levels = state(cpu)
+        .object(id)
+        .and_then(|o| o.texture.as_ref())
+        .map(|t| t.levels.clone())
+        .unwrap_or_default();
     let Some(d) = state(cpu).object(device).and_then(|o| o.dev.as_ref()) else {
         return false;
     };
     d.target == id
         || d.depth == id
+        || levels.iter().any(|&l| d.target == l || d.depth == l)
         || d.auto_depth == id
         || d.backbuffers.contains(&id)
         || d.textures.contains(&id)
@@ -251,6 +258,7 @@ pub fn forget(cpu: &mut Cpu, device: u32, id: u32) {
     if d.depth == id {
         d.depth = 0;
     }
+    super::states::forget_in_blocks(d, id);
 }
 
 /// The device `id` goes: its objects go with it, and it lets go of its
@@ -293,10 +301,11 @@ pub fn destroyed(cpu: &mut Cpu, id: u32, o: &Object) {
 // Making a device.
 
 /// The D3DFORMAT a back buffer of full screen has the display depth of:
-/// its bits a pixel.
+/// its bits a pixel. The card's 16-bit modes are 565, so X1R5G5B5 is
+/// none of them.
 fn display_bpp(format: u32) -> Option<u32> {
     match format {
-        FMT_R5G6B5 | FMT_X1R5G5B5 => Some(16),
+        FMT_R5G6B5 => Some(16),
         FMT_X8R8G8B8 | FMT_A8R8G8B8 => Some(32),
         _ => None,
     }
@@ -372,16 +381,46 @@ struct Chain {
 }
 
 /// Make the device `id`'s display and swap chain for the parameters `p`:
-/// the cooperative level and mode, and the surfaces.
+/// the cooperative level and mode, and the surfaces. On an error what
+/// was made of the chain goes again.
 fn build(cpu: &mut Cpu, id: u32, p: &[u32]) -> Result<Chain, u32> {
-    let d = get(cpu, id).cloned().ok_or(D3DERR_INVALIDCALL)?;
-    let windowed = p[PP_WINDOWED] != 0;
     let mut chain = Chain {
         front: 0,
         front_iface: 0,
         backbuffers: Vec::new(),
         depth: 0,
     };
+    match build_into(cpu, id, p, &mut chain) {
+        Ok(()) => Ok(chain),
+        Err(e) => {
+            discard(cpu, &chain);
+            Err(e)
+        }
+    }
+}
+
+/// Let go of the surfaces of a swap chain: they go if nothing else has
+/// them.
+fn discard(cpu: &mut Cpu, chain: &Chain) {
+    let mut parts = chain.backbuffers.clone();
+    if chain.depth != 0 {
+        parts.push(chain.depth);
+    }
+    for s in parts {
+        if let Some(o) = object(cpu, s) {
+            o.implicit = false;
+        }
+        super::let_go(cpu, s);
+    }
+    if chain.front_iface != 0 {
+        ddraw::release(cpu, chain.front_iface);
+    }
+}
+
+/// `build`'s work, the surfaces put in `chain` as they are made.
+fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<(), u32> {
+    let d = get(cpu, id).cloned().ok_or(D3DERR_INVALIDCALL)?;
+    let windowed = p[PP_WINDOWED] != 0;
     let size = (p[PP_WIDTH], p[PP_HEIGHT]);
     let ok = |hr: Option<u32>| match hr {
         Some(0) => Ok(()),
@@ -455,33 +494,21 @@ fn build(cpu: &mut Cpu, id: u32, p: &[u32]) -> Result<Chain, u32> {
             true,
         );
     }
-    Ok(chain)
+    Ok(())
 }
 
 /// The device `id`'s swap chain goes.
 fn drop_chain(cpu: &mut Cpu, id: u32) {
-    let Some(d) = get(cpu, id).cloned() else {
+    let Some(d) = get(cpu, id) else {
         return;
     };
-    if let Some(d) = get(cpu, id) {
-        d.backbuffers.clear();
-        d.auto_depth = 0;
-        d.front = 0;
-        d.front_iface = 0;
-    }
-    let mut parts = d.backbuffers.clone();
-    if d.auto_depth != 0 {
-        parts.push(d.auto_depth);
-    }
-    for s in parts {
-        if let Some(o) = object(cpu, s) {
-            o.implicit = false;
-        }
-        super::let_go(cpu, s);
-    }
-    if d.front_iface != 0 {
-        ddraw::release(cpu, d.front_iface);
-    }
+    let chain = Chain {
+        front: std::mem::take(&mut d.front),
+        front_iface: std::mem::take(&mut d.front_iface),
+        backbuffers: std::mem::take(&mut d.backbuffers),
+        depth: std::mem::take(&mut d.auto_depth),
+    };
+    discard(cpu, &chain);
 }
 
 /// Put the swap chain on the device, its first back buffer the render
@@ -538,7 +565,9 @@ pub fn set_targets(cpu: &mut Cpu, id: u32, target: u32, depth: u32) {
     }
     for old in [old_target, old_depth] {
         if old != 0 && old != target && old != depth {
-            super::let_go(cpu, old);
+            // A texture's level goes with its texture.
+            let container = state(cpu).object(old).map_or(0, |o| o.container);
+            super::let_go(cpu, if container != 0 { container } else { old });
         }
     }
 }

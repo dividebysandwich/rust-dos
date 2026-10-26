@@ -255,10 +255,27 @@ fn set_texture_now(cpu: &mut Cpu, id: u32, stage: u32, tex: u32) {
     }
 }
 
-/// The change as it is on the device now.
-fn current(cpu: &mut Cpu, id: u32, c: &Change) -> Change {
+/// The object `id` went: the state blocks of the device `d` that set a
+/// texture, stream or index buffer to it set none there instead, so
+/// that they don't set an object made later with its id.
+pub fn forget_in_blocks(d: &mut Device, id: u32) {
+    let blocks = d.blocks.iter_mut().flatten().chain(d.recording.as_mut());
+    for c in blocks.flatten() {
+        if matches!(c.kind, TEXTURE | STREAM | INDICES) && c.data.first() == Some(&id) {
+            c.data[0] = 0;
+        }
+    }
+}
+
+/// The changes `list` as they are on the device `id` now.
+fn current_all(cpu: &mut Cpu, id: u32, list: &[Change]) -> Vec<Change> {
     let d = get(cpu, id).cloned().unwrap_or_default();
     let i = inner(cpu, id).cloned().unwrap_or_default();
+    list.iter().map(|c| current(&d, &i, c)).collect()
+}
+
+/// The change as it is on the device `d`, whose inner device is `i`.
+fn current(d: &Device, i: &super::super::ddraw::d3d::device::Device, c: &Change) -> Change {
     let mut b = c.b;
     let data = match c.kind {
         RENDER => vec![i.state(c.a)],
@@ -268,7 +285,7 @@ fn current(cpu: &mut Cpu, id: u32, c: &Change) -> Change {
                 .copied()
                 .unwrap_or(0),
         ],
-        TRANSFORM => transform_words(&d, &i, c.a).to_vec(),
+        TRANSFORM => transform_words(d, i, c.a).to_vec(),
         VIEWPORT => {
             let v = i.viewport;
             vec![
@@ -688,8 +705,8 @@ pub fn get_viewport(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(D3DERR_INVALIDCALL);
     };
     let (id, _) = hr!(this_device(cpu, this));
-    let c = current(cpu, id, &change(VIEWPORT, 0, 0, Vec::new()));
-    if !write_words(cpu, at, &c.data) {
+    let c = current_all(cpu, id, &[change(VIEWPORT, 0, 0, Vec::new())]);
+    if !write_words(cpu, at, &c[0].data) {
         return Some(D3DERR_INVALIDCALL);
     }
     Some(D3D_OK)
@@ -810,8 +827,8 @@ pub fn get_clip_plane(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if index >= super::caps::MAX_CLIP_PLANES {
         return Some(D3DERR_INVALIDCALL);
     }
-    let c = current(cpu, id, &change(PLANE, index, 0, Vec::new()));
-    if !write_words(cpu, at, &c.data) {
+    let c = current_all(cpu, id, &[change(PLANE, index, 0, Vec::new())]);
+    if !write_words(cpu, at, &c[0].data) {
         return Some(D3DERR_INVALIDCALL);
     }
     Some(D3D_OK)
@@ -1192,7 +1209,7 @@ pub fn capture_state_block(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(b) = block(&d, handle) else {
         return Some(D3DERR_INVALIDCALL);
     };
-    let captured: Vec<Change> = b.iter().map(|c| current(cpu, id, c)).collect();
+    let captured = current_all(cpu, id, &b);
     if let Some(d) = get(cpu, id) {
         d.blocks[handle as usize - 1] = Some(captured);
     }
@@ -1300,7 +1317,7 @@ pub fn create_state_block(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         list.push(change(INDICES, 0, 0, Vec::new()));
     }
-    let captured: Vec<Change> = list.iter().map(|c| current(cpu, id, c)).collect();
+    let captured = current_all(cpu, id, &list);
     let Some(d) = get(cpu, id) else {
         return Some(D3DERR_INVALIDCALL);
     };

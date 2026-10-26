@@ -294,6 +294,8 @@ const R_TEXCRDOUT: u32 = 6;
 struct Machine<'a> {
     v: &'a [[f32; 4]; 16],
     c: &'a [[f32; 4]],
+    /// The constants DEF gave: the register and its value.
+    defs: Vec<(usize, [f32; 4])>,
     r: [[f32; 4]; 12],
     a0: i32,
     out: Output,
@@ -317,7 +319,10 @@ impl Machine<'_> {
                 };
                 usize::try_from(n)
                     .ok()
-                    .and_then(|n| self.c.get(n).copied())
+                    .and_then(|n| {
+                        let def = self.defs.iter().rev().find(|d| d.0 == n);
+                        def.map(|d| d.1).or_else(|| self.c.get(n).copied())
+                    })
                     .unwrap_or_default()
             }
             R_ADDR => [self.a0 as f32; 4],
@@ -340,8 +345,9 @@ impl Machine<'_> {
         let reg: &mut [f32; 4] = match kind {
             R_TEMP if num < 12 => &mut self.r[num],
             R_ADDR => {
+                // vs.1.1's MOV to a0 rounds down.
                 if mask & 1 != 0 {
-                    self.a0 = (value[0] + 0.5).floor() as i32;
+                    self.a0 = value[0].floor() as i32;
                 }
                 return;
             }
@@ -385,6 +391,7 @@ pub fn run(f: &[u32], v: &[[f32; 4]; 16], c: &[[f32; 4]]) -> Output {
     let mut m = Machine {
         v,
         c,
+        defs: Vec::new(),
         r: [[0.0; 4]; 12],
         a0: 0,
         out: Output::default(),
@@ -410,6 +417,12 @@ pub fn run(f: &[u32], v: &[[f32; 4]; 16], c: &[[f32; 4]]) -> Output {
             continue;
         }
         let d = args[0];
+        // DEF: a constant register the function gives itself.
+        if op == 81 {
+            let v = std::array::from_fn(|k| f32::from_bits(args[1 + k]));
+            m.defs.push(((d & 0x7FF) as usize, v));
+            continue;
+        }
         let s = |k: usize, row: u32| m.src(args[k], row);
         let value = match op {
             1 => s(1, 0),
@@ -448,12 +461,16 @@ pub fn run(f: &[u32], v: &[[f32; 4]; 16], c: &[[f32; 4]]) -> Output {
                     _ => (a[k] >= b[k]) as u32 as f32,
                 })
             }
-            14 | 78 => {
+            // EXP and LOG: full precision, in every component.
+            14 => splat(s(1, 0)[3].exp2()),
+            15 => splat(s(1, 0)[3].abs().log2()),
+            // EXPP and LOGP: the parts of the partial precision ones.
+            78 => {
                 let x = s(1, 0)[3];
                 let fl = x.floor();
                 [fl.exp2(), x - fl, x.exp2(), 1.0]
             }
-            15 | 79 => {
+            79 => {
                 let x = s(1, 0)[3].abs();
                 if x == 0.0 {
                     [f32::NEG_INFINITY, 1.0, f32::NEG_INFINITY, 1.0]

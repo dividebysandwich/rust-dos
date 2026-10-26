@@ -488,8 +488,11 @@ pub fn create_texture(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 s.level = i as u32;
             }
         }
-        // `new_surface` took a reference on the device for it.
-        super::release(cpu, device);
+        // `new_surface` took a reference on the device for it, unless it
+        // made none.
+        if level != 0 {
+            super::release(cpu, device);
+        }
         list.push(level);
     }
     if let Some(t) = object(cpu, id).and_then(|o| o.texture.as_mut()) {
