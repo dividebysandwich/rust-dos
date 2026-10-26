@@ -1224,7 +1224,10 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             );
             let r = window::adjust(client, style, ex, t.var(C_MENU) != 0);
             let (cx, cy) = (r.width(), r.height());
-            let (mut x, mut y) = (r.left, r.top);
+            // Windows 98 puts the window's corner where the template
+            // says, not its client area: the frame and the edges make the
+            // window bigger to the right and down.
+            let (mut x, mut y) = (0, 0);
             let owner = t.var(C_OWNER);
             let state = user(cpu);
             if h.x == i16::MIN {
@@ -1257,9 +1260,12 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     if dy > 0 {
                         y -= dy;
                     }
-                    x = x.max(0);
-                    y = y.max(0);
                 }
+                // A child dialog left of or above its parent's client
+                // area starts at its edge, as on Windows 98; one past the
+                // right or the bottom stays there.
+                x = x.max(0);
+                y = y.max(0);
             }
             t.set(C_STYLE, style);
             t.set(C_EX, ex);
