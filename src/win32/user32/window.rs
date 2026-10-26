@@ -533,6 +533,11 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         ex |= WS_EX_TOPMOST;
     }
     let class_info = state.classes[class_index as usize].clone().unwrap();
+    // The window's procedure may be in COMCTL32's image.
+    if !super::class::map_dll(cpu, class_index) {
+        set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
+        return Some(0);
+    }
     // CW_USEDEFAULT: an overlapped window gets a place and three
     // quarters of the screen; a popup or child window none.
     let (sw, sh) = super::sysparams::screen_size();

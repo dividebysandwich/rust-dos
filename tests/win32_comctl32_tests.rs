@@ -17,6 +17,7 @@ const BASE: u32 = 0x40_0000;
 struct Layout {
     data: u32,
     iat: Vec<u32>,
+    imports: &'static [(&'static str, &'static [&'static str])],
 }
 
 impl Layout {
@@ -95,7 +96,8 @@ const IMPORTS: &[(&str, &[&str])] = &[
 
 /// The import slot of `name`.
 fn import(l: &Layout, name: &str) -> AsmMemoryOperand {
-    let index = IMPORTS
+    let index = l
+        .imports
         .iter()
         .flat_map(|(_, names)| names.iter())
         .position(|n| *n == name)
@@ -127,13 +129,22 @@ fn call(name: &'static str, args: &[Arg]) -> Call {
 /// A program making `calls`, with `data` (DATA_SIZE bytes) and where its
 /// data is.
 fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
+    program_with(IMPORTS, data, calls)
+}
+
+/// A program making `calls`, as `program`, importing `imports` only.
+fn program_with(
+    imports: &'static [(&'static str, &'static [&'static str])],
+    data: &[u8],
+    calls: &[Call],
+) -> (Vec<u8>, u32) {
     assert!(calls.len() as u32 <= MAX_CALLS);
     let mut b = Builder::exe(BASE);
-    let lists: Vec<Vec<Imp>> = IMPORTS
+    let lists: Vec<Vec<Imp>> = imports
         .iter()
         .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
         .collect();
-    let dlls: Vec<(&str, &[Imp])> = IMPORTS
+    let dlls: Vec<(&str, &[Imp])> = imports
         .iter()
         .zip(&lists)
         .map(|((dll, _), list)| (*dll, list.as_slice()))
@@ -147,6 +158,7 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
     let l = Layout {
         data: BASE + data_rva,
         iat,
+        imports,
     };
     let code_rva = b.next_rva();
     // The timer procedure, first in the code.
@@ -240,7 +252,11 @@ fn peek_str(cpu: &Cpu, lin: u32) -> String {
 /// Run `calls` with `data`: the machine, still running the program,
 /// and where its data is.
 fn run(test: &str, data: &[u8], calls: &[Call]) -> (Cpu, u32) {
-    let (exe, at) = program(data, calls);
+    run_program(test, program(data, calls))
+}
+
+/// Run the program `exe`, whose data is at `at`, as `run` does.
+fn run_program(test: &str, (exe, at): (Vec<u8>, u32)) -> (Cpu, u32) {
     let mut cpu = machine(test, exe);
     for _ in 0..2000 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
@@ -386,6 +402,45 @@ fn a_progress_bar_keeps_its_range_and_steps() {
     assert_eq!(r[6], 20, "STEPIT gives the position before");
     assert_eq!(r[7], 25);
     assert_eq!(r[9], 50, "a position past the range stops at its end");
+}
+
+#[test]
+fn a_program_without_comctl32_makes_a_progress_bar() {
+    use Arg::*;
+    const PBM_SETPOS: u32 = 0x0402;
+    const PBM_GETPOS: u32 = 0x0408;
+    const S_COMCTL32: u32 = 0x260;
+    // The timer procedure's functions, and those the calls make: no
+    // COMCTL32, as in a setup program that uses SHELL32.
+    const USER_ONLY: &[(&str, &[&str])] = &[
+        (
+            "USER32.DLL",
+            &[
+                "CreateWindowExA",
+                "SendMessageA",
+                "GetActiveWindow",
+                "PostMessageA",
+            ],
+        ),
+        ("KERNEL32.DLL", &["GetModuleHandleA"]),
+    ];
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_COMCTL32, b"COMCTL32.DLL\0");
+    let calls = [
+        call("GetModuleHandleA", &[At(S_COMCTL32)]),
+        parent(),
+        child(S_PROGRESS, 0, 200, 20, 1, 1),
+        send(2, PBM_SETPOS, I(30), I(0)),
+        send(2, PBM_GETPOS, I(0), I(0)),
+        call("GetModuleHandleA", &[At(S_COMCTL32)]),
+    ];
+    let (cpu, at) = run_program("no_comctl32", program_with(USER_ONLY, &d, &calls));
+    let r = results(&cpu, at, calls.len());
+    assert_eq!(r[0], 0, "the program starts without COMCTL32");
+    assert_ne!(r[2], 0, "the progress bar is made");
+    assert_eq!(r[4], 30, "its procedure runs");
+    assert_ne!(r[5], 0, "COMCTL32 is mapped for it");
 }
 
 #[test]
