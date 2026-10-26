@@ -191,10 +191,13 @@ impl DiskController {
                 self.insert(handle, file);
                 Ok(handle)
             }
-            // Missing: file not found (02h) when its folder is there, path
-            // not found (03h) when a folder on the way isn't.
+            // Missing: file not found (02h) when its folder is there, or is
+            // one of the system files' that the drive hasn't, path not found
+            // (03h) when a folder on the way isn't.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(if path.parent().is_some_and(hostfs::is_dir) { 0x02 } else { 0x03 })
+                let folder =
+                    path.parent().is_some_and(hostfs::is_dir) || self.in_system_dir(filename);
+                Err(if folder { 0x02 } else { 0x03 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(0x03),
             // A name Windows refuses (a wildcard in it) is a file that
