@@ -18,7 +18,9 @@
 //!
 //! The desktop is 640x480 at 32 bits a pixel on the first kind, and at
 //! 16 (5-6-5) on the second, as Windows 95 with a Voodoo3 was usually
-//! set up; it is at the start of video memory.
+//! set up; it is at the start of video memory. With `win32_depth=8` it
+//! is 640x480 at 8 bits a pixel on both, its colours GDI's system
+//! palette, which the DAC (or the card's lookup table) holds.
 
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
@@ -90,10 +92,13 @@ pub fn linear_memory(cpu: &mut Cpu) {
     }
 }
 
-/// The desktop's mode: 16 bits a pixel on the card, 24 (packed) on an S3
-/// ViRGE, whose VESA mode `DESKTOP_MODE` is that, else 32.
+/// The desktop's mode: 8 bits a pixel with `win32_depth=8`, else 16 on
+/// the card, 24 (packed) on an S3 ViRGE, whose VESA mode `DESKTOP_MODE`
+/// is that, and 32 on the others.
 pub fn desktop(cpu: &Cpu) -> Mode {
-    let bpp = if is_card(cpu) {
+    let bpp = if super::version::palette_desktop(cpu) {
+        8
+    } else if is_card(cpu) {
         16
     } else if cpu.bus.vga.adapter.is_virge() {
         24
@@ -166,8 +171,15 @@ pub fn set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<Mode
     mode(cpu)
 }
 
-/// Set the desktop's mode.
+/// Set the desktop's mode. At 8 bits a pixel the DAC gets the system
+/// palette.
 pub fn set_desktop_mode(cpu: &mut Cpu) {
+    if super::version::palette_desktop(cpu) {
+        let d = desktop(cpu);
+        set_mode(cpu, d.width, d.height, d.bpp);
+        super::gdi32::palette::show_system_palette(cpu);
+        return;
+    }
     if is_card(cpu) {
         let d = desktop(cpu);
         set_mode(cpu, d.width, d.height, d.bpp);
@@ -338,16 +350,17 @@ pub fn set_colors(cpu: &mut Cpu, first: usize, colors: &[u32]) {
     vga.mark_dirty_full();
 }
 
-// The desktop's rows, for GDI, which draws on 32-bit pixels.
+// The desktop's rows, for GDI, which draws on 32-bit pixels, or on the
+// 8-bit pixels of a desktop of 256 colours.
 
 /// The desktop's rows `top..top + rows` as 32-bit pixels (0x00RRGGBB),
-/// `width * 4` bytes a row.
+/// `width * 4` bytes a row, or as they are at 8 bits a pixel.
 pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
     let d = desktop(cpu);
     let mut raw = vec![0u8; (d.pitch * rows) as usize];
     read(cpu, top * d.pitch, &mut raw);
     match d.bpp {
-        32 => raw,
+        32 | 8 => raw,
         24 => raw
             .as_chunks::<3>()
             .0
@@ -363,11 +376,11 @@ pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
     }
 }
 
-/// Store 32-bit pixels, `width * 4` bytes a row, as the desktop's rows
-/// from `top` on.
+/// Store 32-bit pixels, `width * 4` bytes a row (or 8-bit ones on a
+/// desktop of 256 colours), as the desktop's rows from `top` on.
 pub fn store_desktop(cpu: &mut Cpu, top: u32, data: &[u8]) {
     let d = desktop(cpu);
-    if d.bpp == 32 {
+    if d.bpp == 32 || d.bpp == 8 {
         write(cpu, top * d.pitch, data);
         return;
     }

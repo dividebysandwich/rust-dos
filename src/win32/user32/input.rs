@@ -18,7 +18,8 @@
 use super::message::{
     self, Msg, QS_KEY, QS_MOUSEBUTTON, QS_MOUSEMOVE, WM_ACTIVATE, WM_ACTIVATEAPP, WM_CHAR,
     WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCACTIVATE,
-    WM_NCLBUTTONDOWN, WM_NCMOUSEMOVE, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_NCLBUTTONDOWN, WM_NCMOUSEMOVE, WM_QUERYNEWPALETTE, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
 use super::sysparams::{metric, screen_size};
 use super::window::{
@@ -1055,6 +1056,8 @@ pub fn set_active_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// messages to send, three words each, start at `A_LIST`.
 const A_AT: usize = 4;
 const A_LIST: usize = 5;
+/// Whether WM_QUERYNEWPALETTE was sent.
+const A_PALETTE: usize = 3;
 
 fn iconic(state: &State, hwnd: u32) -> u32 {
     state
@@ -1125,6 +1128,15 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 t.step = 3;
             }
             3 => {
+                // On a desktop of 256 colours the window may realize its
+                // palette in the foreground: WM_QUERYNEWPALETTE, once.
+                if t.var(A_PALETTE) == 0
+                    && crate::win32::version::palette_desktop(cpu)
+                    && user(cpu).is_window(hwnd)
+                {
+                    t.set(A_PALETTE, 1);
+                    return activate_send(cpu, hwnd, WM_QUERYNEWPALETTE, 0, 0, 3);
+                }
                 // WM_ACTIVATEAPP when the active window's thread changes.
                 let state = user(cpu);
                 let old_tid = state.window(previous).map_or(0, |w| w.tid);

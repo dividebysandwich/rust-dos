@@ -180,6 +180,9 @@ pub struct Bitmap {
 pub struct Palette {
     /// The entries: red, green, blue and flags.
     pub entries: Vec<[u8; 4]>,
+    /// On a desktop of 256 colours, the system palette's index of each
+    /// entry, from when it was last realized; empty before.
+    pub mapping: Vec<u8>,
 }
 
 /// What an object is.
@@ -248,6 +251,19 @@ pub struct State {
     pub next: usize,
     /// The system palette: 256 entries, the 20 static colors at its ends.
     pub system_palette: Vec<[u8; 4]>,
+    /// What each entry of the system palette is (palette.rs): free,
+    /// static, a logical palette's or a PC_RESERVED one's.
+    pub system_use: Vec<u8>,
+    /// The logical palette whose realization took each entry of the
+    /// system palette, 0 for a static or free entry and for one whose
+    /// palette was deleted.
+    pub system_owner: Vec<u32>,
+    /// SetSystemPaletteUse's setting: SYSPAL_STATIC or SYSPAL_NOSTATIC.
+    pub static_use: u32,
+    /// The palette realized in the foreground (USER's primary palette),
+    /// and the one realized last.
+    pub primary_palette: u32,
+    pub last_realized: u32,
     /// The fonts AddFontResourceA added, by file name.
     pub font_files: Vec<String>,
 }
@@ -521,6 +537,7 @@ pub fn init(cpu: &mut Cpu) {
                 .iter()
                 .map(|&c| [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0])
                 .collect(),
+            mapping: (0..10).chain(246..=255).collect(),
         },
     });
     let state = gdi(cpu);
@@ -544,6 +561,9 @@ pub fn init(cpu: &mut Cpu) {
         system[at] = [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0];
     }
     state.system_palette = system;
+    state.static_use = palette::SYSPAL_STATIC;
+    state.system_use = palette::static_uses(palette::SYSPAL_STATIC);
+    state.system_owner = vec![0; 256];
 }
 
 /// The static colors of the system palette as COLORREFs, for the
@@ -643,6 +663,9 @@ pub fn free(cpu: &mut Cpu, handle: u32) {
     let Some(Some(object)) = gdi(cpu).objects.get_mut(i).map(|o| o.take()) else {
         return;
     };
+    if let Kind::Palette { .. } = object.kind {
+        palette::palette_deleted(cpu, handle);
+    }
     if let Kind::Bitmap { bitmap } = object.kind
         && let Some(dib) = bitmap.dib
         && dib.bits != 0
@@ -786,7 +809,10 @@ pub fn get_current_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// UnrealizeObject(handle): TRUE for a brush or palette.
 pub fn unrealize_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     match gdi(cpu).get(args[0]).map(Object::type_of) {
-        Some(OBJ_BRUSH | OBJ_PAL) => Some(TRUE),
+        Some(OBJ_PAL) => {
+            palette::unrealize(cpu, args[0]);
+            Some(TRUE)
+        }
         Some(_) => Some(TRUE),
         None => {
             if args[0] != 0 {
@@ -1047,11 +1073,15 @@ const CB_LIST: usize = 4;
 pub const CB_OBJECTS: u32 = 0;
 pub const CB_FONTS: u32 = 1;
 pub const CB_LINE_DDA: u32 = 2;
+/// WM_PALETTECHANGED broadcast to the top-level windows after
+/// RealizePalette: the variables are its result and the window.
+pub const CB_PALETTE_CHANGED: u32 = 3;
 
 pub const TASK_CALLBACK: u16 = 14;
 
 /// The callbacks of GDI's enumerations (EnumObjects, EnumFontFamiliesA,
-/// LineDDA): each item in turn until the callback returns 0.
+/// LineDDA): each item in turn until the callback returns 0. And
+/// RealizePalette's WM_PALETTECHANGED to each top-level window.
 pub fn callback_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.step == 1 && value == 0 {
         return Next::Done(0);
@@ -1070,6 +1100,17 @@ pub fn callback_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             Next::call(t.var(CB_PROC), &[t.scratch, t.var(CB_PARAM)], 1)
         }
         CB_FONTS => font::enum_callback(cpu, t, at),
+        CB_PALETTE_CHANGED => {
+            if at != 0 {
+                return Next::Done(t.var(CB_PROC));
+            }
+            t.set(CB_AT, 1);
+            t.step = 2;
+            let send = super::user32::address_of("SendMessageA");
+            let msg = super::user32::message::WM_PALETTECHANGED;
+            let to = super::user32::message::HWND_BROADCAST;
+            Next::call(send, &[to, msg, t.var(CB_PARAM), 0], 2)
+        }
         CB_LINE_DDA => {
             let Some(&p) = t.vars.get(CB_LIST + at) else {
                 return Next::Done(TRUE);
@@ -1555,7 +1596,7 @@ crate::state_fields!(Bitmap {
     dc,
     dimension
 });
-crate::state_fields!(Palette { entries });
+crate::state_fields!(Palette { entries, mapping });
 crate::state_fields!(Object {
     kind,
     stock,
@@ -1566,7 +1607,12 @@ crate::state_fields!(State {
     objects,
     next,
     system_palette,
-    font_files
+    font_files,
+    system_use,
+    system_owner,
+    static_use,
+    primary_palette,
+    last_realized
 });
 super::state_variants!(Kind {
     Pen { pen },

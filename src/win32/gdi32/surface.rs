@@ -2,8 +2,10 @@
 //! of GDI's own, or a DIB section in the program's memory. A drawing
 //! function loads the rows it draws on into a `Surface`, works on their
 //! pixels as the bitmap stores them, and stores them back. The screen's
-//! rows are 32 bits a pixel here whatever the desktop's depth is: a
-//! 16-bit desktop's are converted as they are loaded and stored.
+//! rows are 32 bits a pixel here whatever the desktop's depth is (a
+//! 16-bit desktop's are converted as they are loaded and stored), but
+//! on a desktop of 256 colours they are its 8-bit pixels, indices into
+//! the system palette, as are those of GDI's 8-bit bitmaps (`device`).
 //!
 //! Colors are COLORREFs (0x00BBGGRR); a pixel's value is what its bits
 //! say, an index into the color table for 8 bits a pixel and fewer.
@@ -40,6 +42,13 @@ pub struct Surface {
     /// A monochrome bitmap of GDI's: its pixels are 0 and 1, which blits
     /// from and to color take as the DCs' colors.
     pub mono: bool,
+    /// Its pixels are indices into the system palette, which `colors`
+    /// is: the screen at 8 bits a pixel, or an 8-bit bitmap of GDI's.
+    /// Colors are matched to them through the DC's logical palette.
+    pub device: bool,
+    /// A DIB given with DIB_PAL_COLORS: the logical palette's index each
+    /// entry of its color table was, which `colors` has the colors of.
+    pub pal_indices: Option<Vec<u16>>,
     /// Where a DIB section's bits are, and whether its rows run top
     /// down.
     dib: Option<(u32, bool)>,
@@ -47,10 +56,14 @@ pub struct Surface {
 }
 
 /// The screen's size, and the depth and pitch of its rows as GDI works
-/// on them.
-pub fn screen(_cpu: &Cpu) -> (i32, i32, u32, usize) {
+/// on them: 32 bits a pixel, or 8 on a desktop of 256 colours.
+pub fn screen(cpu: &Cpu) -> (i32, i32, u32, usize) {
     let (w, h) = crate::win32::user32::sysparams::screen_size();
-    (w, h, 32, w as usize * 4)
+    if crate::win32::version::palette_desktop(cpu) {
+        (w, h, 8, w as usize)
+    } else {
+        (w, h, 32, w as usize * 4)
+    }
 }
 
 /// The size and depth of what `target` is, if it is there.
@@ -112,6 +125,8 @@ impl Surface {
             colors,
             masks,
             mono: false,
+            device: false,
+            pal_indices: None,
             dib: None,
             changed: false,
         }
@@ -129,6 +144,12 @@ impl Surface {
             Target::Screen => {
                 let (_, _, _, pitch) = screen(cpu);
                 let data = crate::win32::screen::load_desktop(cpu, y0 as u32, rows as u32);
+                let device = bpp == 8;
+                let colors = if device {
+                    super::palette::system_colors(cpu)
+                } else {
+                    Vec::new()
+                };
                 Some(Surface {
                     target,
                     width,
@@ -138,9 +159,11 @@ impl Surface {
                     top: y0,
                     rows,
                     data,
-                    colors: Vec::new(),
+                    colors,
                     masks: MASKS_32,
                     mono: false,
+                    device,
+                    pal_indices: None,
                     dib: None,
                     changed: false,
                 })
@@ -161,8 +184,10 @@ impl Surface {
                         (d.colors.clone(), masks, false)
                     }
                     None if bpp == 1 => (vec![0x000000, 0xFFFFFF], MASKS_32, true),
+                    None if bpp == 8 => (super::palette::system_colors(cpu), MASKS_32, false),
                     None => (Vec::new(), ddb_masks(cpu, bpp), false),
                 };
+                let device = b.dib.is_none() && bpp == 8;
                 match dib {
                     Some((bits, top_down)) => {
                         for r in 0..rows {
@@ -196,6 +221,8 @@ impl Surface {
                     colors,
                     masks,
                     mono,
+                    device,
+                    pal_indices: None,
                     dib,
                     changed: false,
                 })

@@ -55,7 +55,7 @@ pub(crate) mod thread;
 pub mod user32;
 pub mod version;
 mod verdll;
-mod winmm;
+pub(crate) mod winmm;
 mod winspool;
 mod ws2_32;
 mod wsock32;
@@ -288,6 +288,11 @@ pub struct Win32 {
     /// when the first of them started (version.rs).
     pub version: version::WindowsVersion,
     os: version::WindowsVersion,
+    /// The depth of the desktop (the `win32_depth` setting), and the
+    /// depth the running processes have, the setting's when the first
+    /// of them started.
+    pub depth: crate::config::DesktopDepth,
+    desktop_depth: crate::config::DesktopDepth,
     /// The built-in DLLs the system directory shows as files
     /// (dll_files.rs), as last shown.
     dll_files: Option<dll_files::Shown>,
@@ -380,6 +385,7 @@ impl Win32 {
             guest_dlls: self.guest_dlls.take(),
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
+            depth: self.depth,
             dll_files: self.dll_files.take(),
             ..Win32::default()
         };
@@ -1257,4 +1263,5 @@ crate::state_fields!(Win32 {
     dde,
     pending_win16,
     win16,
-} skip { enabled, guest_dlls, guest_replace, version, pending_arguments, dll_files });
+    desktop_depth,
+} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });
