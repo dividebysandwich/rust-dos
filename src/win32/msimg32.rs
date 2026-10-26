@@ -343,8 +343,7 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-// GradientFill's modes.
-const GRADIENT_FILL_RECT_H: u32 = 0;
+// GradientFill's modes besides GRADIENT_FILL_RECT_H, 0.
 const GRADIENT_FILL_RECT_V: u32 = 1;
 const GRADIENT_FILL_TRIANGLE: u32 = 2;
 
