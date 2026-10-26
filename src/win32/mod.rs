@@ -873,9 +873,46 @@ fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
 }
 
 fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
+    if !remove_process(cpu, index, code) {
+        return;
+    }
+    let win32 = &mut cpu.bus.win32;
+    if win32.running != index {
+        // Another process's thread runs on.
+        if win32.running > index {
+            win32.running -= 1;
+        }
+        thread::wake(cpu);
+        return;
+    }
+    win32.running = 0;
+    if !win32.processes.is_empty() {
+        thread::wake(cpu);
+        thread::run_next(cpu);
+        return;
+    }
+    let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
+    system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
+    if let Some(pool) = cpu.bus.win32.pool.take() {
+        pool.release(&mut cpu.bus);
+    }
+    object::close_all_files(&mut cpu.bus);
+    cpu.bus.win32.objects = object::Objects::default();
+    cpu.bus.win32.sections.clear();
+    cpu.bus.set_a20(a20);
+    cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
+    if cpu.state == CpuState::Halted {
+        cpu.state = CpuState::Running;
+    }
+}
+
+/// Take the process at `index` away: its threads end with `code`, and
+/// its handles, memory and what the DLLs kept for it go. False when
+/// there is no such process.
+fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     let win32 = &mut cpu.bus.win32;
     let Some(process) = win32.processes.get(index) else {
-        return;
+        return false;
     };
     let (name, threads) = (process.name.clone(), process.threads.len());
     let tids: Vec<u32> = process.threads.iter().map(|t| t.id).collect();
@@ -923,33 +960,21 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     if process.id == cpu.bus.win32.win16.pid {
         cpu.bus.win32.win16 = crate::win16::State::default();
     }
+    true
+}
+
+/// Take away the process `pid`, whose threads never ran, when what it
+/// was made for can't start (a Win16 program's first task).
+pub(crate) fn discard_process(cpu: &mut Cpu, pid: u32) {
+    let Some(index) = cpu.bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return;
+    };
+    remove_process(cpu, index, 1);
     let win32 = &mut cpu.bus.win32;
-    if win32.running != index {
-        // Another process's thread runs on.
-        if win32.running > index {
-            win32.running -= 1;
-        }
-        thread::wake(cpu);
-        return;
-    }
-    win32.running = 0;
-    if !win32.processes.is_empty() {
-        thread::wake(cpu);
-        thread::run_next(cpu);
-        return;
-    }
-    let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
-    system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
-    if let Some(pool) = cpu.bus.win32.pool.take() {
-        pool.release(&mut cpu.bus);
-    }
-    object::close_all_files(&mut cpu.bus);
-    cpu.bus.win32.objects = object::Objects::default();
-    cpu.bus.win32.sections.clear();
-    cpu.bus.set_a20(a20);
-    cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
-    if cpu.state == CpuState::Halted {
-        cpu.state = CpuState::Running;
+    if win32.running > index {
+        win32.running -= 1;
+    } else if win32.running == index {
+        win32.running = 0;
     }
 }
 
