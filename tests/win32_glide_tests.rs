@@ -766,12 +766,14 @@ fn query_program() -> (Vec<u8>, u32) {
 }
 
 #[test]
-fn without_a_3dfx_card_glide_finds_none() {
-    let (program, data) = query_program();
+fn without_a_3dfx_card_there_is_no_glide() {
+    // As on Windows without 3dfx's driver: no GLIDE2X.DLL, and a program
+    // that imports it doesn't start.
+    let (program, _) = query_program();
     let mut cpu = machine("none", None, program);
-    run_until_done(&mut cpu, data);
-    assert_eq!(result(&cpu, data, R_QUERY), 0, "grSstQueryHardware");
-    assert_eq!(result(&cpu, data, R_OPEN), 0, "grSstWinOpen");
+    run_to_exit(&mut cpu);
+    assert_eq!(cpu.errorlevel, 1);
+    assert!(printed(&cpu).contains("GLIDE2X.DLL"), "{}", printed(&cpu));
 }
 
 /// A program that opens the card, clears and swaps, and ends without
