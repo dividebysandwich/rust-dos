@@ -264,8 +264,9 @@ impl GamePort {
     }
 
     /// The joysticks plugged in, as Windows' joystick driver has them:
-    /// the axes and buttons of each. Two of two axes take the port's
-    /// axes and buttons in halves, joystick A's first.
+    /// the axes and buttons of each, which take the port's axes and
+    /// buttons in that order. Two of two axes take them in halves,
+    /// joystick A's first.
     pub fn joysticks(&self) -> &'static [(u32, u32)] {
         match self.layout() {
             Layout::Mouse => &[(2, 2)],
@@ -312,6 +313,32 @@ impl GamePort {
     pub fn bios_axes(&self, mouse: &MouseState) -> [u16; 4] {
         let (trips, _) = self.state(mouse);
         trips.map(|t| t.unwrap_or(0) as u16)
+    }
+
+    /// The axes and buttons of the joystick `index` of `joysticks`, or
+    /// the driver's standard joystick's, two of each, for one that isn't
+    /// plugged in.
+    pub fn shape(&self, index: usize) -> (u32, u32) {
+        self.joysticks().get(index).copied().unwrap_or((2, 2))
+    }
+
+    /// The joystick `index` of `joysticks`, as the port has it now: the
+    /// counts of its axes and its buttons held (bit n for button n + 1),
+    /// or None when it isn't plugged in. Each joystick takes the port's
+    /// axes and buttons that follow the ones before it.
+    pub fn joystick(&self, mouse: &MouseState, index: usize) -> Option<(Vec<u32>, u32)> {
+        let sticks = self.joysticks();
+        let &(axes, buttons) = sticks.get(index)?;
+        let (first_axis, first_button) = sticks[..index]
+            .iter()
+            .fold((0, 0), |(a, b), &(axes, buttons)| (a + axes, b + buttons));
+        let (trips, held) = self.state(mouse);
+        let counts = trips[first_axis as usize..][..axes as usize]
+            .iter()
+            .map(|t| t.unwrap_or(0))
+            .collect();
+        let held = u32::from(held) >> first_button & ((1 << buttons) - 1);
+        Some((counts, held))
     }
 }
 

@@ -217,13 +217,7 @@ pub fn shape(cpu: &Cpu, kind: u32) -> (u32, u32) {
     match kind {
         KEYBOARD => (0, KEYS.len() as u32),
         MOUSE => (2, 3),
-        _ => cpu
-            .bus
-            .joystick
-            .joysticks()
-            .get((kind - JOYSTICK) as usize)
-            .copied()
-            .unwrap_or((2, 2)),
+        _ => cpu.bus.joystick.shape((kind - JOYSTICK) as usize),
     }
 }
 
