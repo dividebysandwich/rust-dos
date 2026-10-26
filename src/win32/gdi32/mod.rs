@@ -254,6 +254,10 @@ pub struct State {
     /// What each entry of the system palette is (palette.rs): free,
     /// static, a logical palette's or a PC_RESERVED one's.
     pub system_use: Vec<u8>,
+    /// The logical palette whose realization took each entry of the
+    /// system palette, 0 for a static or free entry and for one whose
+    /// palette was deleted.
+    pub system_owner: Vec<u32>,
     /// SetSystemPaletteUse's setting: SYSPAL_STATIC or SYSPAL_NOSTATIC.
     pub static_use: u32,
     /// The palette realized in the foreground (USER's primary palette),
@@ -559,6 +563,7 @@ pub fn init(cpu: &mut Cpu) {
     state.system_palette = system;
     state.static_use = palette::SYSPAL_STATIC;
     state.system_use = palette::static_uses(palette::SYSPAL_STATIC);
+    state.system_owner = vec![0; 256];
 }
 
 /// The static colors of the system palette as COLORREFs, for the
@@ -808,7 +813,6 @@ pub fn unrealize_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             palette::unrealize(cpu, args[0]);
             Some(TRUE)
         }
-        Some(OBJ_BRUSH) => Some(TRUE),
         Some(_) => Some(TRUE),
         None => {
             if args[0] != 0 {
@@ -1069,8 +1073,8 @@ const CB_LIST: usize = 4;
 pub const CB_OBJECTS: u32 = 0;
 pub const CB_FONTS: u32 = 1;
 pub const CB_LINE_DDA: u32 = 2;
-/// WM_PALETTECHANGED to the top-level windows after RealizePalette: the
-/// variables are its result and the window, then the windows.
+/// WM_PALETTECHANGED broadcast to the top-level windows after
+/// RealizePalette: the variables are its result and the window.
 pub const CB_PALETTE_CHANGED: u32 = 3;
 
 pub const TASK_CALLBACK: u16 = 14;
@@ -1096,18 +1100,17 @@ pub fn callback_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             Next::call(t.var(CB_PROC), &[t.scratch, t.var(CB_PARAM)], 1)
         }
         CB_FONTS => font::enum_callback(cpu, t, at),
-        CB_PALETTE_CHANGED => loop {
-            let Some(&hwnd) = t.vars.get(CB_LIST + t.var(CB_AT) as usize) else {
+        CB_PALETTE_CHANGED => {
+            if at != 0 {
                 return Next::Done(t.var(CB_PROC));
-            };
-            t.set(CB_AT, t.var(CB_AT) + 1);
-            if cpu.bus.win32.user.is_window(hwnd) {
-                t.step = 2;
-                let send = super::user32::address_of("SendMessageA");
-                let msg = super::user32::message::WM_PALETTECHANGED;
-                return Next::call(send, &[hwnd, msg, t.var(CB_PARAM), 0], 2);
             }
-        },
+            t.set(CB_AT, 1);
+            t.step = 2;
+            let send = super::user32::address_of("SendMessageA");
+            let msg = super::user32::message::WM_PALETTECHANGED;
+            let to = super::user32::message::HWND_BROADCAST;
+            Next::call(send, &[to, msg, t.var(CB_PARAM), 0], 2)
+        }
         CB_LINE_DDA => {
             let Some(&p) = t.vars.get(CB_LIST + at) else {
                 return Next::Done(TRUE);
@@ -1606,6 +1609,7 @@ crate::state_fields!(State {
     system_palette,
     font_files,
     system_use,
+    system_owner,
     static_use,
     primary_palette,
     last_realized

@@ -1380,9 +1380,9 @@ pub fn blit_from(
         .surface
         .device
         .then(|| super::palette::DeviceMap::new(cpu, ddc.attrs.palette));
-    let mut xlat = source.as_ref().map(|(src, _)| {
-        Translate::new(&src.surface, &c.surface, map.as_ref(), src.bk_color, text, bk)
-    });
+    let mut xlat = source
+        .as_ref()
+        .map(|(src, _)| Translate::new(&src.surface, map, src.bk_color, text, bk));
     let (ox, oy) = c.origin;
     let rects = c.rects.clone();
     let dst_rect = r.offset(ox, oy);
@@ -1441,11 +1441,11 @@ pub fn blit_from(
 }
 
 /// How a blit's source values become the destination's: for a source of
-/// 8 bits a pixel or fewer a table made once, for a deeper one the
-/// conversion of each value (remembered on a palette device, where it
-/// is a search).
+/// 8 bits a pixel or fewer a table filled in as values come up, for a
+/// deeper one the conversion of each value (remembered on a palette
+/// device, where it is a search).
 pub struct Translate {
-    table: Vec<u32>,
+    table: Vec<Option<u32>>,
     cache: Option<std::collections::HashMap<u32, u32>>,
     map: Option<super::palette::DeviceMap>,
     src_bk: u32,
@@ -1454,31 +1454,30 @@ pub struct Translate {
 }
 
 impl Translate {
-    /// The translation from `src` to `dst`, `map` the destination DC's if
-    /// `dst` is a palette device; the DCs' colors as `convert` takes them.
+    /// The translation from `src`, `map` the destination DC's if the
+    /// destination is a palette device; the DCs' colors as `convert`
+    /// takes them.
     pub fn new(
         src: &Surface,
-        dst: &Surface,
-        map: Option<&super::palette::DeviceMap>,
+        map: Option<super::palette::DeviceMap>,
         src_bk: u32,
         text: u32,
         bk: u32,
     ) -> Translate {
-        let map = map.cloned();
-        let mut t = Translate {
-            table: Vec::new(),
-            cache: None,
+        let table = if src.bpp <= 8 {
+            vec![None; 1 << src.bpp]
+        } else {
+            Vec::new()
+        };
+        let cache = (src.bpp > 8 && map.is_some()).then(std::collections::HashMap::new);
+        Translate {
+            table,
+            cache,
             map,
             src_bk,
             text,
             bk,
-        };
-        if src.bpp <= 8 {
-            t.table = (0..1u32 << src.bpp).map(|v| t.one(src, v, dst)).collect();
-        } else if t.map.is_some() {
-            t.cache = Some(std::collections::HashMap::new());
         }
-        t
     }
 
     fn one(&self, src: &Surface, v: u32, dst: &Surface) -> u32 {
@@ -1500,7 +1499,12 @@ impl Translate {
     /// The destination's value of the source's value `v`.
     #[inline]
     pub fn get(&mut self, src: &Surface, v: u32, dst: &Surface) -> u32 {
-        if let Some(&t) = self.table.get(v as usize) {
+        if let Some(&slot) = self.table.get(v as usize) {
+            if let Some(t) = slot {
+                return t;
+            }
+            let t = self.one(src, v, dst);
+            self.table[v as usize] = Some(t);
             return t;
         }
         if self.cache.is_some() {

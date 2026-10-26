@@ -798,7 +798,7 @@ fn set_bits(
         let hpal = gdi(cpu).dc(hdc).map_or(0, |d| d.attrs.palette);
         super::palette::DeviceMap::new(cpu, hpal)
     });
-    let mut xlat = draw::Translate::new(&src, &dst, map.as_ref(), 0, 0, 1);
+    let mut xlat = draw::Translate::new(&src, map, 0, 0, 1);
     let mut set = 0;
     for i in 0..src.height {
         let scan = start as i32 + i;

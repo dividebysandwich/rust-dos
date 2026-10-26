@@ -931,6 +931,9 @@ fn time_set_event(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 use crate::win32::winmm::mmio as wmmio;
 
 const MMIO_ALLOCBUF: u32 = 0x0001_0000;
+const MMIO_PARSE: u32 = 0x0100;
+const MMIO_EXIST: u32 = 0x4000;
+const MMIO_GETTEMP: u32 = 0x0002_0000;
 const MMIO_DEFAULTBUFFER: u32 = 8192;
 const MMIOERR_CANNOTOPEN: u32 = 259;
 const MMIOERR_OUTOFMEMORY: u32 = 258;
@@ -1042,6 +1045,11 @@ fn mmio_info32(cpu: &mut Cpu, hmmio: u32, at16: u32) -> Option<u32> {
 /// open.
 fn mmio_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (name, info16, mut flags) = (args[0], args[1], args[2]);
+    // MMIO_PARSE, MMIO_EXIST and MMIO_GETTEMP open no file: TRUE or FALSE,
+    // with no buffer to give.
+    if flags & (MMIO_PARSE | MMIO_EXIST | MMIO_GETTEMP) != 0 {
+        return wmmio::mmio_open(cpu, &[name, 0, flags]);
+    }
     let at16 = super::linear(cpu, info16);
     let r = |cpu: &Cpu, o: u32| if at16 == 0 { 0 } else { r32(cpu, at16 + o) };
     if r(cpu, 8) != 0 {

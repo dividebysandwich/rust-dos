@@ -13,6 +13,8 @@
 //! - In the foreground (the palette USER's SelectPalette made the
 //!   primary one, selected into a DC of the foreground window without
 //!   bForceBackground), every entry but the static ones is freed first.
+//!   In the background, only the entries the same palette took last
+//!   time that no other palette maps to.
 //! - An entry with PC_EXPLICIT is the system palette's entry its low
 //!   word names.
 //! - One with PC_RESERVED takes a free entry of its own, which no other
@@ -99,11 +101,17 @@ pub fn system_colors(cpu: &mut Cpu) -> Vec<u32> {
 /// Put the system palette in the DAC, on a desktop of 256 colours that
 /// shows (not while DirectDraw has the display).
 pub fn show_system_palette(cpu: &mut Cpu) {
+    show_system_entries(cpu, 0, 255);
+}
+
+/// Put the system palette's entries `first..=last` in the DAC, as
+/// `show_system_palette` does.
+fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
     if !palette_desktop(cpu) || crate::win32::ddraw::owns_display(cpu) {
         return;
     }
     let colors = system_colors(cpu);
-    crate::win32::screen::set_colors(cpu, 0, &colors);
+    crate::win32::screen::set_colors(cpu, first, &colors[first..=last.min(255)]);
 }
 
 /// How colors become the pixels of a palette device (`Surface::device`)
@@ -372,6 +380,11 @@ pub fn palette_deleted(cpu: &mut Cpu, handle: u32) {
     if state.primary_palette == handle {
         state.primary_palette = 0;
     }
+    // Its entries stay taken until the next foreground realization, but
+    // no longer as its own.
+    for o in state.system_owner.iter_mut().filter(|o| **o == handle) {
+        *o = 0;
+    }
     unrealize(cpu, handle);
 }
 
@@ -390,10 +403,12 @@ pub fn animate_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let end = (start + count).min(n);
     let words = read_words(cpu, at, end - start);
-    let mut changed = false;
+    // The system palette's entries that changed, lowest and highest.
+    let mut changed: Option<(usize, usize)> = None;
     let state = gdi(cpu);
     let mut system = std::mem::take(&mut state.system_palette);
     let uses = std::mem::take(&mut state.system_use);
+    let owners = std::mem::take(&mut state.system_owner);
     if let Some(super::Object {
         kind: Kind::Palette { palette },
         ..
@@ -407,16 +422,19 @@ pub fn animate_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             *e = entry_of(*w);
             if let Some(&m) = palette.mapping.get(start + i)
                 && uses.get(m as usize) == Some(&USE_RESERVED)
+                && owners.get(m as usize) == Some(&handle)
             {
-                system[m as usize][..3].copy_from_slice(&e[..3]);
-                changed = true;
+                let m = m as usize;
+                system[m][..3].copy_from_slice(&e[..3]);
+                changed = Some(changed.map_or((m, m), |(lo, hi)| (lo.min(m), hi.max(m))));
             }
         }
     }
     state.system_palette = system;
     state.system_use = uses;
-    if changed {
-        show_system_palette(cpu);
+    state.system_owner = owners;
+    if let Some((first, last)) = changed {
+        show_system_entries(cpu, first, last);
     }
     Some(TRUE)
 }
@@ -442,8 +460,14 @@ pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !background && handle != gdi(cpu).stock(DEFAULT_PALETTE) && hwnd != 0 {
         let user = &cpu.bus.win32.user;
         let foreground = user.input.foreground;
-        if foreground != 0 && (foreground == hwnd || user.is_descendant(foreground, hwnd)) {
+        if foreground != 0
+            && (foreground == hwnd || user.is_descendant(foreground, hwnd))
+            && gdi(cpu).primary_palette != handle
+        {
+            // A palette realized last in the background is realized
+            // again, in the foreground.
             gdi(cpu).primary_palette = handle;
+            unrealize(cpu, handle);
         }
     }
     dc::free_if_deleted(cpu, old);
@@ -467,14 +491,36 @@ fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     }
     state.last_realized = hpal;
     let primary = hpal == state.primary_palette;
+    // How many entries of the other palettes' mappings point at each
+    // entry of the system palette.
+    let mut shared = [0u32; 256];
+    for o in state.objects.iter().flatten() {
+        if let Kind::Palette { palette } = &o.kind {
+            for &m in &palette.mapping {
+                shared[m as usize] += 1;
+            }
+        }
+    }
+    for &m in &palette.mapping {
+        shared[m as usize] -= 1;
+    }
     let mut uses = std::mem::take(&mut state.system_use);
+    let mut owners = std::mem::take(&mut state.system_owner);
+    owners.resize(256, 0);
     let mut system = std::mem::take(&mut state.system_palette);
     let before = system.clone();
-    if primary {
-        for u in uses.iter_mut() {
-            if *u != USE_STATIC {
-                *u = USE_FREE;
-            }
+    for i in 0..256 {
+        // In the foreground every entry but the static ones is freed; in
+        // the background, those the palette's last realization took
+        // that no other palette maps to.
+        let free = if primary {
+            uses[i] != USE_STATIC
+        } else {
+            owners[i] == hpal && shared[i] == 0
+        };
+        if free {
+            uses[i] = USE_FREE;
+            owners[i] = 0;
         }
     }
     // Free entries are taken from the bottom up.
@@ -487,6 +533,7 @@ fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
             return None;
         }
         uses[next_free] = how;
+        owners[next_free] = hpal;
         system[next_free] = [e[0], e[1], e[2], 0];
         Some(next_free as u8)
     };
@@ -529,7 +576,9 @@ fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
         .count() as u32;
     let state = gdi(cpu);
     state.system_use = uses;
-    let shown = system != before;
+    state.system_owner = owners;
+    let differs = |i: &usize| system[*i] != before[*i];
+    let shown = (0..256).find(differs).zip((0..256).rev().find(differs));
     state.system_palette = system;
     if let Some(super::Object {
         kind: Kind::Palette { palette },
@@ -538,8 +587,8 @@ fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     {
         palette.mapping = mapping;
     }
-    if shown {
-        show_system_palette(cpu);
+    if let Some((first, last)) = shown {
+        show_system_entries(cpu, first, last);
     }
     (changed, primary)
 }
@@ -561,8 +610,7 @@ pub fn realize_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if changed == 0 || !primary || hwnd == 0 {
         return Some(changed);
     }
-    let mut vars = vec![super::CB_PALETTE_CHANGED, changed, hwnd, 0];
-    vars.extend(cpu.bus.win32.user.top_levels());
+    let vars = vec![super::CB_PALETTE_CHANGED, changed, hwnd, 0];
     crate::win32::task::start(cpu, super::TASK_CALLBACK, vars, 0)
 }
 
@@ -615,10 +663,12 @@ pub fn set_system_palette_use(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (was, now) = (is_static(old, i), is_static(new, i));
         if was && !now {
             state.system_use[i] = USE_FREE;
+            state.system_owner[i] = 0;
         } else if now && !was {
             let c = static_colors()[if i < 10 { i } else { i - 236 }];
-            state.system_palette[i] = [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0];
+            state.system_palette[i] = entry_of(c);
             state.system_use[i] = USE_STATIC;
+            state.system_owner[i] = 0;
         }
     }
     state.last_realized = 0;
@@ -651,6 +701,88 @@ mod tests {
         assert_eq!(c[255], 0xFFFFFF);
         // Red 5, green 0, blue 0.
         assert_eq!(c[15], 0x0000FF);
+    }
+
+    /// A machine with a desktop of 256 colours and a memory DC, which
+    /// realizes its palette in the background.
+    fn palette_machine() -> (Cpu, u32) {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.desktop_depth = crate::config::DesktopDepth::Palette;
+        let hdc = dc::create_compatible_dc(&mut cpu, &[0]).unwrap();
+        (cpu, hdc)
+    }
+
+    /// A palette of PC_RESERVED entries of the colors `colors`.
+    fn reserved_palette(cpu: &mut Cpu, colors: impl Iterator<Item = u32>) -> u32 {
+        let entries = colors.map(|c| entry_of(c | (PC_RESERVED as u32) << 24));
+        let palette = Palette {
+            entries: entries.collect(),
+            mapping: Vec::new(),
+        };
+        add(cpu, Kind::Palette { palette })
+    }
+
+    fn select(cpu: &mut Cpu, hdc: u32, hpal: u32) {
+        dc::with(cpu, hdc, |d| d.attrs.palette = hpal);
+    }
+
+    /// A fade in the background (SetPaletteEntries, then RealizePalette)
+    /// gives back the entries the palette took the last time, so every
+    /// frame gets entries of its own.
+    #[test]
+    fn a_background_realization_reuses_its_own_entries() {
+        let (mut cpu, hdc) = palette_machine();
+        let hpal = reserved_palette(&mut cpu, (0..200).map(|i| i << 8));
+        select(&mut cpu, hdc, hpal);
+        for frame in 1..4u32 {
+            if let Some(super::super::Object {
+                kind: Kind::Palette { palette },
+                ..
+            }) = gdi(&mut cpu).get_mut(hpal)
+            {
+                for (i, e) in palette.entries.iter_mut().enumerate() {
+                    e[2] = frame as u8;
+                    e[1] = i as u8;
+                }
+            }
+            unrealize(&mut cpu, hpal);
+            let (_, primary) = realize(&mut cpu, hdc);
+            assert!(!primary);
+            let state = gdi(&mut cpu);
+            let mapping = state.palette(hpal).unwrap().mapping.clone();
+            for (i, &m) in mapping.iter().enumerate() {
+                assert_eq!(state.system_use[m as usize], USE_RESERVED, "frame {frame}");
+                assert_eq!(state.system_palette[m as usize][2], frame as u8);
+                assert_eq!(state.system_palette[m as usize][1], i as u8);
+            }
+        }
+    }
+
+    /// AnimatePalette changes the system entries a palette took only
+    /// while they are still its own.
+    #[test]
+    fn animate_palette_leaves_another_palettes_entries() {
+        let (mut cpu, hdc) = palette_machine();
+        let a = reserved_palette(&mut cpu, [0x010101, 0x020202].into_iter());
+        let b = reserved_palette(&mut cpu, [0x030303, 0x040404].into_iter());
+        select(&mut cpu, hdc, a);
+        realize(&mut cpu, hdc);
+        let taken = gdi(&mut cpu).palette(a).unwrap().mapping.clone();
+        // B becomes primary: every entry is freed, and B takes A's.
+        gdi(&mut cpu).primary_palette = b;
+        select(&mut cpu, hdc, b);
+        realize(&mut cpu, hdc);
+        assert_eq!(gdi(&mut cpu).palette(b).unwrap().mapping, taken);
+        let at = 0x10000;
+        write_words(&mut cpu, at, &[0x0105_0505, 0x0106_0606]);
+        assert_eq!(animate_palette(&mut cpu, &[a, 0, 2, at]), Some(TRUE));
+        let colors = system_colors(&mut cpu);
+        let shown: Vec<u32> = taken.iter().map(|&m| colors[m as usize]).collect();
+        assert_eq!(shown, [0x030303, 0x040404]);
+        assert_eq!(animate_palette(&mut cpu, &[b, 0, 2, at]), Some(TRUE));
+        let colors = system_colors(&mut cpu);
+        let shown: Vec<u32> = taken.iter().map(|&m| colors[m as usize]).collect();
+        assert_eq!(shown, [0x050505, 0x060606]);
     }
 
     #[test]
