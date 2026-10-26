@@ -52,3 +52,23 @@ around it.
   for example `LIB='C:\SDL2-2.30.0\lib\x64' cargo test` in Git Bash.
 - The tests start the built `rust-dos.exe`, which needs `SDL2.dll` from
   the same folder on `PATH`.
+
+## Behaviour: closer to the real machine beats unchanged results
+
+A fix that makes the emulator behave more like the real hardware or the
+real Windows is welcome even when it changes recorded results: the game
+suite's golden hashes, test assertions that captured the old behaviour,
+and save states or recorded input that no longer play out the same way.
+Don't hold such a fix back, or bend it, to keep them as they were.
+
+- Update what it changes in the same pull request: re-bless the goldens
+  after looking at the new shots (see `docs/game-suite.md`), and change
+  the assertions that encoded the old behaviour, saying in the commit
+  what the real system does.
+- Say in the pull request which recorded results changed and why the
+  new ones are right.
+- Reproducibility still has to hold. The determinism tests
+  (`src/debug/determinism_tests.rs`) run one build twice with different
+  host timing and compare the two runs; they don't compare against an
+  older build. A fix that makes them fail has made the emulator depend
+  on the host's timing, and that is a bug in the fix.
