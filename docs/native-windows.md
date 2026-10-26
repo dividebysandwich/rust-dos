@@ -282,11 +282,13 @@ exceptions run as the program's own code on top of that.
   copies its own DLL there has it. `DiskController` shows them
   (`src/disk/system_files.rs`), under the drive's own files, so DOS
   sees them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h
-  list and open them, as in a DOS box of Windows 98, and a save state
-  opens a file that was open again by its path. While C: has no
-  `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories with
-  just the DLLs in them, and are made on C: when a program makes a
-  file or directory in them.
+  list and open them, as in a DOS box of Windows 98. A save state
+  opens a file that was open again by its path, and once loaded the
+  files are of the version of Windows its programs run under. While C:
+  has no `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories
+  with just the DLLs in them, and are made on C: when a program makes a
+  file or directory in them; neither can be removed while it holds
+  them.
 
 ### Video
 

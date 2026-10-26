@@ -13,7 +13,8 @@
 //!
 //! Which DLLs are there is the loader's call (`loader::builtin_for`), so
 //! LoadLibrary and the files agree. They follow the settings: `sync` runs
-//! when the settings are applied and as a program starts.
+//! when the settings are applied, as a program starts and after a save
+//! state loads.
 
 use super::loader::{self, SYSTEM_DIR};
 use super::stubs::{self, DLLS};
