@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 const REGS: usize = 0xD400_0000;
 const TEXTURES: usize = 0xD440_0000;
+/// Where `start_empty_render` puts its object list.
+const EMPTY_LIST: u32 = 0x8_0000;
 
 /// A machine with a PCX2.
 fn bus() -> Bus {
@@ -49,6 +51,16 @@ fn w(bus: &mut Bus, reg: usize, value: u32) {
 
 fn r(bus: &Bus, reg: usize) -> u32 {
     bus.read_32(REGS + 4 * reg)
+}
+
+/// Start a render of an empty scene: an object list that ends at its
+/// first dword. Left at 0, OBJECT_OFFSET has the card read its list from
+/// the interrupt table at address 0, and the render of what it finds
+/// there takes half a minute in a debug build.
+fn start_empty_render(bus: &mut Bus) {
+    bus.write_32(EMPTY_LIST as usize, 0);
+    w(bus, regs::OBJECT_OFFSET, EMPTY_LIST);
+    w(bus, regs::STARTRENDER, 0);
 }
 
 #[test]
@@ -107,7 +119,7 @@ fn a_render_ends_and_the_reset_pulse_clears_its_status() {
     assert_eq!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
     w(&mut bus, regs::SOFTRESET, 1);
     w(&mut bus, regs::SOFTRESET, 0);
-    w(&mut bus, regs::STARTRENDER, 0);
+    start_empty_render(&mut bus);
     wait_ms(&mut bus, 1.0);
     assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
     w(&mut bus, regs::SOFTRESET, 1);
@@ -124,7 +136,7 @@ fn the_card_is_revision_1_as_the_windows_driver_wants() {
 #[test]
 fn reading_the_status_acknowledges_it() {
     let mut bus = bus();
-    w(&mut bus, regs::STARTRENDER, 0);
+    start_empty_render(&mut bus);
     wait_ms(&mut bus, 1.0);
     assert_ne!(r(&bus, regs::INTSTATUS) & regs::END_OF_RENDER, 0);
     assert_eq!(r(&bus, regs::INTSTATUS), 0, "the read cleared it");
@@ -135,7 +147,7 @@ fn each_render_interrupts_when_the_handler_only_reads_the_status() {
     let mut bus = bus();
     w(&mut bus, regs::INTMASK, regs::END_OF_RENDER);
     for n in 0..2 {
-        w(&mut bus, regs::STARTRENDER, 0);
+        start_empty_render(&mut bus);
         wait_ms(&mut bus, 1.0);
         assert!(bus.pic.busy(11), "render {} interrupts", n);
         bus.pic.acknowledge(11);
@@ -151,7 +163,7 @@ fn each_render_interrupts_when_the_handler_only_reads_the_status() {
 fn the_end_of_a_render_interrupts_when_unmasked() {
     let mut bus = bus();
     w(&mut bus, regs::INTMASK, regs::END_OF_RENDER);
-    w(&mut bus, regs::STARTRENDER, 0);
+    start_empty_render(&mut bus);
     wait_ms(&mut bus, 1.0);
     assert!(bus.pic.busy(11), "IRQ 11 requested");
 }
