@@ -1765,6 +1765,16 @@ fn win32_without_a_program_has_no_processes() {
 }
 
 #[test]
+fn ddraw_without_a_program_has_no_surfaces() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    let v = reply(&mut cpu, &mut hub, Cmd::Win32Ddraw).unwrap();
+    let expected = json!({"mode": null, "mode_owner": 0, "exclusive": 0, "surfaces": []});
+    assert_eq!(v, expected);
+    let e = reply(&mut cpu, &mut hub, Cmd::Win32Surface { id: 1, keyed: false }).unwrap_err();
+    assert_eq!(e.0, 404, "{}", e.1);
+}
+
+#[test]
 fn win32_snapshot_reads_as_json() {
     use rust_dos::win32::snapshot::*;
     let event = ObjectInfo {

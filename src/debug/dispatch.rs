@@ -532,6 +532,11 @@ impl DebugHub {
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Win32 => Reply::Json(super::win32::win32_json(cpu)),
+            Cmd::Win32Ddraw => Reply::Json(super::win32::ddraw_json(cpu)),
+            Cmd::Win32Surface { id, keyed } => match rust_dos::win32::snapshot::surface_image(cpu, id, keyed) {
+                Ok((width, height, rgba)) => Reply::Frame(video::Frame::from_rgba(width, height, rgba)),
+                Err(e) => Reply::Error(404, format!("surface {}: {}", id, e)),
+            },
             Cmd::Drives => Reply::Json(drives_json(cpu)),
             Cmd::SyncShared => {
                 let messages = cpu.bus.sync_shared(None);

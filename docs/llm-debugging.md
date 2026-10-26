@@ -1173,6 +1173,28 @@ Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
 holds still: the threads take turns as the timer's interrupts come.
 
+`GET /api/win32/ddraw` lists DirectDraw's surfaces, with the display
+`mode` DirectDraw set (null on the desktop's) and the ids of the
+DirectDraw objects that set it (`mode_owner`) and have exclusive mode
+(`exclusive`). Each surface has its `id`, the `pid` of its process, its
+`interfaces` (the addresses the program passes as `this`, which the
+log's `[W32]` lines show), `width`, `height`, `pitch`, `format` (flags,
+FourCC, bits a pixel, red, green, blue and alpha masks), `caps`,
+`memory` (`system`, `video`, `card`, the 3dfx card's, or `none`) and
+`address`, `locked`, `lost`, its color `keys` (`src_blt`, `dest_blt`
+and the overlay ones, each a low and high value), the ids of its
+`palette`, `clipper`, `root` and `attached` surfaces, and the `version`
+of the interfaces it was made through (1, 4 or 7).
+
+`GET /api/win32/ddraw/surface/{id}` shows a surface's pixels as a PNG
+(`?format=raw` for RGB24 rows). With `?keyed=true` the pixels its source
+blit key matches are transparent, which shows what a blit with
+DDBLT_KEYSRC leaves out (the PNG only: raw rows have no alpha). A
+surface in system memory is read through its own process's page tables,
+whichever process runs, and the read changes nothing in the machine. A
+surface on the 3dfx card has no picture here; `/api/screenshot` shows
+the card's.
+
 ## 5. Addresses
 
 Addresses are always hex, as in DEBUG.COM:
