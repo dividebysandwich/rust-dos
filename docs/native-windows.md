@@ -452,10 +452,10 @@ shortcut:
   `C:\Program Files` and the case of names. The registry keys are the
   same but for the time of the last update check and the case of the
   Start menu folder's path. The setup asks for the second CD halfway
-  through, as on Windows 98. It warns that the disk is too small, as
-  DOS reports 80 MB free on a drive that is a host folder; Ignore goes
-  on. The game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which
-  aren't there.
+  through, as on Windows 98. It warned that the disk was too small
+  while the built-in Windows reported DOS's 80 MB free on a drive that
+  is a host folder (Ignore went on); it now reports about 1 GB. The
+  game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which aren't there.
 
 Some differences hold for every setup:
 
