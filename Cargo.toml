@@ -256,3 +256,15 @@ harness = false
 [[bench]]
 name = "cpu"
 harness = false
+
+# `cargo test`'s build. Most of the suite's time goes to running guest
+# code on the emulator: optimized (opt-level 1), the tests run five to six
+# times faster than in a debug build, for about four more minutes of
+# compiling on CI. Debug assertions and overflow checks stay on, as in
+# the dev profile. Line tables only: backtraces keep their files and
+# lines, and the 128 test programs in tests/ link without full debug
+# information, which on Windows made a PDB of 300 MB for each. For a
+# debugger's view of a test's variables, set CARGO_PROFILE_TEST_DEBUG=full.
+[profile.test]
+opt-level = 1
+debug = "line-tables-only"
