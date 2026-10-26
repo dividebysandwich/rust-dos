@@ -113,8 +113,10 @@ const CDFS_FLAGS: u32 = 0x4;
 /// (`args[3]`), longest name (`args[4]`), file system flags (`args[5]`)
 /// and file system's name (`args[6]`, `args[7]` bytes), each only where
 /// its pointer isn't NULL. The label is DOS's for the drive, a CD's the
-/// one its check compares; the serial number is the disk image's, or 0
-/// for a host folder.
+/// one its check compares; the serial number is the disk image's, or for
+/// the other drives the one DOS and GetFileInformationByHandle give
+/// (`VOLUME_SERIAL` plus the drive). The file system is "FAT32" for a
+/// FAT32 image, as Windows 98 names it, and "FAT" for the other disks.
 pub(super) fn get_volume_information(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let drive = match root(cpu, args[0])? {
         Ok(drive) => drive,
@@ -128,9 +130,15 @@ pub(super) fn get_volume_information(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
         return Some(FALSE);
     };
     let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
-    let serial = cpu.bus.disk.volume_serial(drive).unwrap_or(0);
+    let serial = cpu
+        .bus
+        .disk
+        .volume_serial(drive)
+        .unwrap_or(crate::interrupts::int21::VOLUME_SERIAL + drive as u32);
+    let fat32 = cpu.bus.disk.layout(drive).is_some_and(|l| l.fat32.is_some());
     let (fs, flags) = match kind {
         DriveKind::CdRom => ("CDFS", CDFS_FLAGS),
+        _ if fat32 => ("FAT32", FAT_FLAGS),
         _ => ("FAT", FAT_FLAGS),
     };
     for (at, size, s) in [(args[1], args[2], label.as_str()), (args[6], args[7], fs)] {
