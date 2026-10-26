@@ -120,18 +120,31 @@ impl Document {
             Kind::Picture(picture) => scale(picture, width, height),
             #[cfg(feature = "manuals")]
             Kind::Pdf(pdf) => {
+                use hayro::hayro_interpret::util::TransformExt;
+                use hayro::kurbo::Affine;
                 use hayro::vello_cpu::color::palette::css::WHITE;
+                use hayro::vello_cpu::{
+                    Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit,
+                };
                 let Some(p) = pdf.pages().get(page) else { return Frame::new(width, height) };
                 let (w, h) = p.render_dimensions();
-                let settings = hayro::RenderSettings {
-                    x_scale: width as f32 / w,
-                    y_scale: height as f32 / h,
-                    width: Some(width as u16),
-                    height: Some(height as u16),
-                    bg_color: WHITE,
-                };
+                // As hayro::render, but `width` x `height` exactly: its own
+                // size, the page's times the scale, can round a pixel short.
+                let (width, height) = (width as u16, height as u16);
+                let scale =
+                    Affine::scale_non_uniform(width as f64 / w as f64, height as f64 / h as f64);
+                let transform = scale * p.initial_transform(true).to_kurbo();
                 let cache = hayro::RenderCache::new();
-                let pixmap = hayro::render(p, &cache, &Default::default(), &settings);
+                let mut ctx = RenderContext::new(width, height);
+                let (interpret, render) = (Default::default(), Default::default());
+                hayro::render_into(p, &cache, &interpret, &render, &mut ctx, transform);
+                ctx.flush();
+                let mut pixmap = Pixmap::new(width, height);
+                let target = RasterizerSettings {
+                    target_init: TargetInit::Clear(WHITE),
+                    ..Default::default()
+                };
+                ctx.render_with(&mut pixmap, &mut Resources::default(), target);
                 // On white: opaque, so premultiplied is as it is.
                 Frame::from_rgba(
                     pixmap.width() as u32,
@@ -372,6 +385,9 @@ mod tests {
         let pixel = |x: usize, y: usize| &page.rgba[(y * 40 + x) * 4..][..3];
         assert_eq!(pixel(5, 10), [0, 0, 0], "the square");
         assert_eq!(pixel(35, 10), [255, 255, 255], "the paper");
+        // A size the page's times the scale rounds a pixel short of.
+        let odd = doc.render(0, 106, 53);
+        assert_eq!((odd.width, odd.height), (106, 53));
     }
 
     #[test]

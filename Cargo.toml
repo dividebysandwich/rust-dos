@@ -95,7 +95,7 @@ serde_json = "1"
 png = "0.18"
 # The virtual printer's TrueType and OpenType fonts (src/printer/font.rs).
 ab_glyph_rasterizer = "0.1"
-skrifa = { version = "0.42", default-features = false, features = ["std"] }
+skrifa = { version = "0.46", default-features = false, features = ["std"] }
 # zlib for the ZMBV video codec of the AVI recordings.
 flate2 = "1"
 # Checksums of BPS patches (src/archive/patch.rs).
@@ -112,13 +112,13 @@ md-5 = "0.11"
 # Compressed audio tracks of CD images (Ogg Vorbis, FLAC, MP3).
 symphonia = { version = "0.6", default-features = false, features = ["ogg", "vorbis", "flac", "mp3", "wav", "pcm"], optional = true }
 # CD images in MAME's compressed CHD files (src/cdrom/chd.rs).
-chd = { version = "0.3.5", optional = true }
+chd = { version = "0.4", optional = true }
 # The manuals and extras of game profiles (src/manuals): JPEG pictures, and
 # PDF pages rasterized.
 jpeg-decoder = { version = "0.3", default-features = false, optional = true }
-hayro = { version = "0.7", optional = true }
+hayro = { version = "0.8", optional = true }
 # 7z archives as drives (src/archive/sevenz.rs).
-sevenz-rust2 = { version = "0.22", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["bzip2", "deflate", "ppmd"], optional = true }
 
 # The window, the sound device and the debug server of the rust-dos program,
 # which the browser build (web/) has in JavaScript instead.
@@ -218,7 +218,7 @@ rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
 # Writes the InstallShield archives of the install tests.
 rust-dos-installshield = { path = "crates/installshield", features = ["test-util"] }
 # Writes the 7z archives of src/archive's tests.
-sevenz-rust2 = { version = "0.22", default-features = false, features = ["compress"] }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress"] }
 # Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.
 flate2 = "1"
 # The assembler builds the protected-mode test programs in tests/pm_*.rs.
