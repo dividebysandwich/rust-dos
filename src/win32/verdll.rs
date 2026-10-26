@@ -488,6 +488,14 @@ fn builtin_resource(name: &str) -> Resource {
     Resource::Unicode(write_unicode(&root))
 }
 
+/// The version resource of the built-in DLL `name`, as its file in the
+/// system directory has it (dll_files.rs).
+pub(super) fn builtin_version(name: &str) -> Vec<u8> {
+    match builtin_resource(name) {
+        Resource::Unicode(b) | Resource::Ansi(b) => b,
+    }
+}
+
 /// The version resource of the file `name` names: a file on disk, found
 /// where OpenFile looks, or a built-in DLL; or the error.
 fn file_resource(cpu: &mut Cpu, name: &str) -> Result<Resource, u32> {

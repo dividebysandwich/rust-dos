@@ -258,6 +258,35 @@ exceptions run as the program's own code on top of that.
   doesn't load, as on Windows 95, and `GetProcAddress` doesn't find it.
   The setting is read when the first process starts, and kept in save
   states.
+- The built-in DLLs are files in the system directory,
+  `C:\WINDOWS\SYSTEM`, as Windows has its DLLs there: programs and
+  setups that look for a DLL by its file (`CreateFile` or `fopen` for
+  reading, `OpenFile` with `OF_EXIST`, `GetFileAttributes`,
+  `FindFirstFile`) find the ones `LoadLibrary` loads
+  (`src/win32/dll_files.rs`). Xenocracy's hardware profiler opens
+  `GLIDE2X.DLL` there to tell whether the machine has Glide. Each file
+  is the DLL's PE image: its headers, sections and export directory as
+  it is mapped in a process, with the functions the version of Windows
+  has, and the version resource `GetFileVersionInfo` gives for it. They
+  are there while the built-in Windows is on, and follow the loader's
+  rules: `GLIDE2X.DLL` with a 3dfx card alone (`voodoo=true`, or a
+  Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
+  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with
+  one of the folder's not at all.
+
+  The files are read-only: they open for reading alone, show as
+  read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
+  writing, making, deleting or renaming one, copying a file over it or
+  changing its attributes fails with ERROR_ACCESS_DENIED, as for a
+  read-only file. A file of the same name on C: wins: a game that
+  copies its own DLL there has it. `DiskController` shows them
+  (`src/disk/system_files.rs`), under the drive's own files, so DOS
+  sees them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h
+  list and open them, as in a DOS box of Windows 98, and a save state
+  opens a file that was open again by its path. While C: has no
+  `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories with
+  just the DLLs in them, and are made on C: when a program makes a
+  file or directory in them.
 
 ### Video
 

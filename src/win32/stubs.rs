@@ -245,6 +245,26 @@ pub fn stub(id: u16, args: u8, conv: Conv) -> [u8; STUB as usize] {
 /// The image of the built-in DLL `dll`: its stubs and export directory,
 /// with the functions `version` of Windows has (version.rs).
 pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image {
+    pe::Image::load(&builder(index, version).build()).expect("a built-in DLL's image")
+}
+
+/// The file of the built-in DLL `dll` in the system directory
+/// (dll_files.rs): its image, and the version resource GetFileVersionInfo
+/// gives for it (verdll.rs).
+pub fn file(index: usize, version: super::version::WindowsVersion) -> Vec<u8> {
+    let mut b = builder(index, version);
+    let resource = super::verdll::builtin_version(DLLS[index].name);
+    b.resource(RT_VERSION, VS_VERSION_INFO, LANG_ENGLISH_US, &resource);
+    b.build()
+}
+
+/// RT_VERSION, the version resource's name, and the language it is in.
+const RT_VERSION: u16 = 16;
+const VS_VERSION_INFO: u16 = 1;
+const LANG_ENGLISH_US: u16 = 0x0409;
+
+/// The image of the built-in DLL `dll` as `image` has it, to build.
+fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder {
     let dll = DLLS[index];
     let mut b = pe::Builder::dll(dll.base, dll.name);
     let mut code: Vec<u8> = dll
@@ -282,7 +302,7 @@ pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image
             }
         }
     }
-    pe::Image::load(&b.build()).expect("a built-in DLL's image")
+    b
 }
 
 /// Run the function the trap with id `id` is the stub of, on the

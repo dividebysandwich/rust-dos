@@ -32,6 +32,8 @@ impl Bus {
         }
         self.vga.mark_dirty_full();
         self.clock.schedule(self.next_event());
+        // GLIDE2X.DLL comes and goes with the card.
+        crate::win32::dll_files::sync(self);
     }
 
     /// A PCI reset of the 3dfx card, as at power-on.
