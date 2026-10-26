@@ -18,11 +18,7 @@ const PERFORMANCE_FREQUENCY: u64 = 1_193_182;
 /// ignored.
 fn value_of(cpu: &mut Cpu, name: &[u8]) -> Option<Vec<u8>> {
     let name = crate::dosstr::from_bytes(name);
-    process(cpu).environment.iter().find_map(|s| {
-        let (n, v) = s.split_once('=')?;
-        n.eq_ignore_ascii_case(&name)
-            .then(|| crate::dosstr::to_bytes(v))
-    })
+    crate::win32::variable_value(&process(cpu).environment, &name).map(crate::dosstr::to_bytes)
 }
 
 /// GetEnvironmentStrings(A): a copy of the environment, its strings one

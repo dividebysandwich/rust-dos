@@ -1095,10 +1095,10 @@ fn get_tick_count(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// The environment variable `name`'s place in the environment: names are
 /// found whatever their case.
 fn variable(process: &super::Process, name: &str) -> Option<usize> {
-    process.environment.iter().position(|s| {
-        s.split_once('=')
-            .is_some_and(|(n, _)| n.eq_ignore_ascii_case(name))
-    })
+    process
+        .environment
+        .iter()
+        .position(|s| super::split_variable(s).is_some_and(|(n, _)| n.eq_ignore_ascii_case(name)))
 }
 
 /// The value of the variable at `args[0]` into the buffer at `args[1]` of
@@ -1114,13 +1114,10 @@ fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let name = string_at(cpu, name)?;
     let process = super::process(cpu);
-    let Some(i) = variable(process, &name) else {
+    let Some(value) = super::variable_value(&process.environment, &name) else {
         process.last_error = ERROR_ENVVAR_NOT_FOUND;
         return Some(0);
     };
-    let value = process.environment[i]
-        .split_once('=')
-        .map_or("", |(_, v)| v);
     let mut bytes = crate::dosstr::to_bytes(value);
     let len = bytes.len() as u32;
     if size <= len {
@@ -1132,14 +1129,17 @@ fn get_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// Set the variable at `args[0]` to the string at `args[1]`, or with NULL
-/// or, as on Windows 95, an empty string remove it.
+/// or, as on Windows 95, an empty string remove it. A name can start with
+/// "=" but not have one further on: MSVCRT's _chdir keeps each drive's
+/// current directory as "=C:", and fails when it can't.
 fn set_environment_variable(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let name = string_at(cpu, args[0])?;
     let value = match args[1] {
         0 => None,
         at => Some(string_at(cpu, at)?).filter(|v| !v.is_empty()),
     };
-    if name.is_empty() || name.contains('=') {
+    // A name is one that split_variable can't split.
+    if name.is_empty() || super::split_variable(&name).is_some() {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }

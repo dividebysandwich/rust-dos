@@ -498,12 +498,7 @@ fn find_file(l: &Loader, name: &str, file: &str) -> Option<String> {
     dirs.extend(disk.qualify_directory("X"));
     dirs.push(SYSTEM_DIR.to_string());
     dirs.push(WINDOWS_DIR.to_string());
-    let path = l.process.environment.iter().find_map(|s| {
-        s.split_once('=')
-            .filter(|(n, _)| n.eq_ignore_ascii_case("PATH"))
-            .map(|(_, v)| v.to_string())
-    });
-    if let Some(path) = path {
+    if let Some(path) = super::variable_value(&l.process.environment, "PATH") {
         dirs.extend(
             path.split(';')
                 .map(str::trim)
