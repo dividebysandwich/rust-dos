@@ -710,6 +710,12 @@ fn int2f(cpu: &mut Cpu, ctx: &mut Context) -> bool {
         }
         // The MS-DOS extensions' entry point: none.
         0x168A => {}
+        // A VxD's API entry point (BX its id): 0:0, as for a VxD that
+        // isn't loaded. There are none to call.
+        0x1684 => {
+            set_w(ctx, EDI, 0);
+            ctx.seg[Seg::ES as usize] = 0;
+        }
         // XMS: none for protected-mode programs.
         0x4300 => set_al(ctx, 0),
         _ => {

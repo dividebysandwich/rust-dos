@@ -34,7 +34,7 @@ gdi/palette: palette: 29 tests executed (0 marked as todo, 0 failures), 0 skippe
 gdi/pen: pen: 190 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/alloc: alloc: 196 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/atom: atom: 328244 tests executed (0 marked as todo, 0 failures), 0 skipped.
-kernel/dpmi: dpmi: 74 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/dpmi: dpmi: 75 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/file: file: 487243 tests executed (0 marked as todo, 8 failures), 0 skipped.
 kernel/file: failed file.c:427
 kernel/file: failed file.c:429

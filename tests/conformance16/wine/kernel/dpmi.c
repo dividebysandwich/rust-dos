@@ -11,7 +11,8 @@
  * descriptors (0000h to 0003h, 0006h to 0008h, 000Ah, 000Bh), DOS memory
  * (0100h to 0102h), interrupt vectors (0200h, 0204h), a real-mode
  * interrupt (0300h), the version (0400h), free memory (0500h), linear
- * memory (0501h, 0502h) and the page size (0604h).
+ * memory (0501h, 0502h) and the page size (0604h). It also asks INT 2Fh
+ * for a VxD's entry point (1684h).
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -508,6 +509,30 @@ static void test_errors(void)
     ok(CARRY(&r), "INT 31h AX=0E5Eh succeeded\n");
 }
 
+/* INT 2Fh AX=1684h, the API entry point of a VxD that isn't there:
+ * 0:0. Shadowgate's sound library asks for two and calls what it gets
+ * unless that is 0:0. */
+static void test_vxd_entry(void)
+{
+    WORD es_, di_;
+
+    _asm {
+        push es
+        push di
+        mov ax, ds
+        mov es, ax
+        mov di, ax
+        mov ax, 1684h
+        mov bx, 21E1h
+        int 2Fh
+        mov es_, es
+        mov di_, di
+        pop di
+        pop es
+    }
+    ok(es_ == 0 && di_ == 0, "VxD 21E1h's entry point is %04x:%04x\n", es_, di_);
+}
+
 START_TEST(dpmi)
 {
     test_version();
@@ -517,4 +542,5 @@ START_TEST(dpmi)
     test_real_mode_int();
     test_memory();
     test_errors();
+    test_vxd_entry();
 }
