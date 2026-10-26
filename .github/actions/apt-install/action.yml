@@ -1,0 +1,118 @@
+name: Install apt packages
+description: >-
+  apt-get install with the downloaded .deb files kept in the Actions cache,
+  so a job doesn't wait on a slow Ubuntu mirror for packages an earlier run
+  already fetched.
+
+# The runner's Ubuntu mirror now and then serves at a few tens of kB/s,
+# which turns a 25 s install of libsdl2-dev's dependencies into 8 to 16
+# minutes. apt keeps the .deb files it downloads in Dir::Cache::Archives
+# and doesn't download one again when the file there matches the package
+# lists, so that directory is restored from the cache before the install
+# and saved after it.
+#
+# The cache key is a prefix (the distribution, the architecture, the runner
+# image or a container, and the package list) followed by a hash of the
+# .deb files' names, which carry the versions. The restore takes the latest
+# entry with the prefix; after the install, the files of packages not
+# installed at that version are deleted, and the rest is saved under a new
+# key when the set of files differs from the one restored. An entry from
+# before a package update still restores: apt downloads the new versions,
+# and the next entry has them. An empty or missing entry means an ordinary
+# download.
+#
+# It runs as root where there is no sudo, as in the container jobs, where
+# it can run before checkout (`uses: $/...` needs none) to install git.
+
+inputs:
+  packages:
+    description: The packages to install, separated by spaces.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # actions/cache compresses with zstd when it finds it and with gzip
+    # otherwise, and an entry only restores with the same one; so a bare
+    # container gets zstd before the restore, or the restore would look
+    # for gzip entries and the save after the install write zstd ones.
+    - name: Prepare the package cache
+      id: prepare
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        SUDO=
+        if [ "$(id -u)" -ne 0 ]; then
+          SUDO=sudo
+        fi
+        if ! command -v zstd > /dev/null; then
+          $SUDO apt-get update
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends zstd
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+        fi
+        . /etc/os-release
+        dir="$RUNNER_TEMP/apt-archives"
+        # apt needs partial/ to exist, and makes it its own.
+        mkdir -p "$dir/partial"
+        # $PACKAGES unquoted: one line per package.
+        # shellcheck disable=SC2086
+        list=$(printf '%s\n' $PACKAGES | sort -u | sha256sum | cut -c1-16)
+        prefix="apt-$ID-$VERSION_ID-$(dpkg --print-architecture)-${ImageOS:-container}-$list-"
+        {
+          echo "sudo=$SUDO"
+          echo "dir=$dir"
+          echo "prefix=$prefix"
+        } >> "$GITHUB_OUTPUT"
+
+    # partial/ is left out: apt makes it readable by its _apt user only.
+    - name: Restore the package cache
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.prepare.outputs.dir }}/*.deb
+        key: ${{ steps.prepare.outputs.prefix }}
+        restore-keys: ${{ steps.prepare.outputs.prefix }}
+
+    - name: Install the packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        SUDO: ${{ steps.prepare.outputs.sudo }}
+        UPDATED: ${{ steps.prepare.outputs.updated }}
+        ARCHIVES: ${{ steps.prepare.outputs.dir }}
+        PREFIX: ${{ steps.prepare.outputs.prefix }}
+      run: |
+        echo "Restored $(find "$ARCHIVES" -maxdepth 1 -name '*.deb' | wc -l) .deb files"
+        if [ "$UPDATED" != true ]; then
+          $SUDO apt-get update
+        fi
+        # $PACKAGES unquoted: one argument per package.
+        # shellcheck disable=SC2086
+        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          -o Dir::Cache::Archives="$ARCHIVES" $PACKAGES
+        # Keeps the files of the packages installed now, at the version
+        # installed, so the cache doesn't grow with each update.
+        format='${Package} ${Version} ${Architecture}\n'
+        installed=$(dpkg-query -W -f "$format")
+        for deb in "$ARCHIVES"/*.deb; do
+          [ -e "$deb" ] || continue
+          if ! grep -qxF "$(dpkg-deb -W --showformat "$format" "$deb")" <<< "$installed"; then
+            $SUDO rm -f "$deb"
+          fi
+        done
+        files=$(find "$ARCHIVES" -maxdepth 1 -name '*.deb' -printf '%f\n' | sort)
+        echo "Keeping $(printf '%s' "$files" | grep -c .) .deb files"
+        if [ -n "$files" ]; then
+          echo "key=$PREFIX$(printf '%s\n' "$files" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save the package cache
+      if: >-
+        steps.install.outputs.key != '' &&
+        steps.install.outputs.key != steps.restore.outputs.cache-matched-key
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.prepare.outputs.dir }}/*.deb
+        key: ${{ steps.install.outputs.key }}

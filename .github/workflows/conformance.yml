@@ -31,6 +31,7 @@ on:
       - "tests/conformance16/**"
       - "tests/win16_conformance_tests.rs"
       - ".github/workflows/conformance.yml"
+      - ".github/actions/apt-install/**"
   pull_request:
     paths: *paths
   schedule:
@@ -54,12 +55,14 @@ jobs:
       # The container has no sudo, git or compiler; see rust.yml's compat
       # builds.
       - name: Install build environment
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev \
+        uses: $/.github/actions/apt-install
+        with:
+          packages: >-
+            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev
             gcc-mingw-w64-i686-win32
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,9 +99,9 @@ jobs:
       OW_SHA256: e6aa1b1e40ac8bbf97658d2c70fff8a4242d6ca4a1c60806f2baa5317083d4fe
     steps:
       - name: Install build environment
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends             libsdl2-dev libasound2-dev
+        uses: $/.github/actions/apt-install
+        with:
+          packages: libsdl2-dev libasound2-dev
 
       - name: Install OpenWatcom
         run: |
