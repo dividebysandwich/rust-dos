@@ -398,15 +398,16 @@ pub fn peek(cpu: &Cpu, at: u32, len: usize) -> Option<Vec<u8>> {
 /// before a page that isn't there.
 pub fn peek_upto(cpu: &Cpu, at: u32, len: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut from = at;
-    let end = at as u64 + len as u64;
-    while (from as u64) < end {
-        let next = ((from as u64 | 0xFFF) + 1).min(end);
-        match peek(cpu, from, (next - from as u64) as usize) {
+    let mut from = at as u64;
+    // Not past the top of memory, where `from` would wrap to 0.
+    let end = (at as u64 + len as u64).min(1 << 32);
+    while from < end {
+        let next = ((from | 0xFFF) + 1).min(end);
+        match peek(cpu, from as u32, (next - from) as usize) {
             Some(bytes) => out.extend(bytes),
             None => break,
         }
-        from = next as u32;
+        from = next;
     }
     out
 }

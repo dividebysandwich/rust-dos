@@ -1743,7 +1743,8 @@ fn format16(cpu: &mut Cpu, buffer: u32, format: u32, list: u32) -> u32 {
         }
         let mut width = 0usize;
         while i < fmt.len() && fmt[i].is_ascii_digit() {
-            width = width * 10 + (fmt[i] - b'0') as usize;
+            // wsprintf's output is at most 1024 bytes anyway.
+            width = (width * 10 + (fmt[i] - b'0') as usize).min(1024);
             i += 1;
         }
         let mut precision = None;
@@ -1751,7 +1752,7 @@ fn format16(cpu: &mut Cpu, buffer: u32, format: u32, list: u32) -> u32 {
             i += 1;
             let mut p = 0usize;
             while i < fmt.len() && fmt[i].is_ascii_digit() {
-                p = p * 10 + (fmt[i] - b'0') as usize;
+                p = (p * 10 + (fmt[i] - b'0') as usize).min(1024);
                 i += 1;
             }
             precision = Some(p);
