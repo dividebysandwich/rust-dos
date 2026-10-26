@@ -521,7 +521,14 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
         let launcher = cpu.program_path(filename);
         match launcher::engine(cpu, &launcher, bytes) {
             Some((engine, arguments)) => (engine, Some(arguments), false),
-            None => (launcher, None, true),
+            // OS/2 programs, Borland's DPMI16 (RTM) ones among them, and
+            // files that don't parse run their DOS stub as before.
+            None if rust_dos_ne::Module::parse(bytes)
+                .is_ok_and(|m| m.target_os != rust_dos_ne::OS_OS2) =>
+            {
+                (launcher, None, true)
+            }
+            None => return false,
         }
     } else {
         return false;
