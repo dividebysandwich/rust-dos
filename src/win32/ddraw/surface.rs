@@ -757,7 +757,13 @@ pub fn make(
     if caps[0] & DDSCAPS_SYSTEMMEMORY != 0 && caps[0] & DDSCAPS_VIDEOMEMORY != 0 {
         return Err(DDERR_INVALIDCAPS);
     }
+    // Before IDirectDraw7 a back buffer can be made on its own, to be
+    // attached to a front buffer later (AddAttachedSurface), but not as
+    // the primary surface or a flipping chain.
+    let front_back = DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER;
     if caps[0] & DDSCAPS_BACKBUFFER != 0
+        && (version >= 7 || caps[0] & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP) != 0)
+        || caps[0] & front_back == front_back
         || caps[1] & (DDSCAPS2_CUBEMAP | DDSCAPS2_VOLUME) != 0
         || caps[0] & DDSCAPS_FRONTBUFFER != 0 && version >= 7
     {
@@ -1281,9 +1287,23 @@ pub fn add_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if a.caps[0] & DDSCAPS_ZBUFFER != 0 {
         return Some(DDERR_CANNOTATTACHSURFACE);
     }
+    // A back buffer attached to a front buffer, or to a primary surface
+    // that doesn't flip yet, makes a flipping chain with it, as a
+    // complex surface's would be: Windows 98 gives both DDSCAPS_FLIP,
+    // and the primary DDSCAPS_FRONTBUFFER too.
+    let flips = b.caps[0] & (DDSCAPS_BACKBUFFER | DDSCAPS_FLIP) == DDSCAPS_BACKBUFFER
+        && a.caps[0] & DDSCAPS_BACKBUFFER == 0
+        && (a.caps[0] & DDSCAPS_FRONTBUFFER != 0 || a.is_primary() && a.backbuffers == 0);
     super::add_ref(cpu, other);
     if let Some(s) = surface(cpu, id) {
         s.attached.push((other_id, other));
+        if flips {
+            s.caps[0] |= DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER;
+            s.backbuffers += 1;
+        }
+    }
+    if flips && let Some(s) = surface(cpu, other_id) {
+        s.caps[0] |= DDSCAPS_FLIP;
     }
     Some(DD_OK)
 }
@@ -1308,6 +1328,21 @@ pub fn delete_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_CANNOTDETACHSURFACE);
     }
     s.attached.remove(i);
+    // A back buffer attached to make a flipping chain leaves it.
+    let flipped = state(cpu)
+        .surface(other_id)
+        .is_some_and(|b| b.caps[0] & (DDSCAPS_BACKBUFFER | DDSCAPS_FLIP) == DDSCAPS_BACKBUFFER | DDSCAPS_FLIP);
+    if flipped {
+        if let Some(s) = surface(cpu, id) {
+            s.backbuffers = s.backbuffers.saturating_sub(1);
+            if s.backbuffers == 0 {
+                s.caps[0] &= !(DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER);
+            }
+        }
+        if let Some(b) = surface(cpu, other_id) {
+            b.caps[0] &= !DDSCAPS_FLIP;
+        }
+    }
     super::release(cpu, held);
     Some(DD_OK)
 }
@@ -1363,15 +1398,28 @@ const DDFLIP_NOVSYNC: u32 = 0x8;
 fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
     let mut list = vec![front];
     let mut at = front;
-    while let Some(next) = state(cpu)
-        .surface(at)
-        .and_then(|s| s.attached.iter().find(|a| a.1 == 0).map(|a| a.0))
-    {
-        if list.contains(&next) {
-            break;
+    loop {
+        let attached = state(cpu)
+            .surface(at)
+            .map(|s| s.attached.clone())
+            .unwrap_or_default();
+        // The next buffer: the complex surface's own, or a back buffer
+        // attached to make the chain (AddAttachedSurface).
+        let next = attached.iter().find(|a| a.1 == 0).map(|a| a.0).or_else(|| {
+            attached.iter().map(|a| a.0).find(|&b| {
+                state(cpu).surface(b).is_some_and(|b| {
+                    b.caps[0] & (DDSCAPS_BACKBUFFER | DDSCAPS_FLIP)
+                        == DDSCAPS_BACKBUFFER | DDSCAPS_FLIP
+                })
+            })
+        });
+        match next {
+            Some(next) if !list.contains(&next) => {
+                list.push(next);
+                at = next;
+            }
+            _ => break,
         }
-        list.push(next);
-        at = next;
     }
     list
 }
