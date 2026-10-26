@@ -134,6 +134,9 @@ impl DiskController {
     /// Whether the directory `dos_path` is in is the system files' or one
     /// on its way, which the drive hasn't.
     pub(super) fn in_system_dir(&self, dos_path: &str) -> bool {
+        if self.system_files.files.is_empty() {
+            return false;
+        }
         let Some(path) = self.qualify_path(dos_path) else {
             return false;
         };

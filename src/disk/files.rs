@@ -88,6 +88,15 @@ impl DiskController {
             }
             return self.open_system_file(filename, data, mode, owner);
         }
+        // A system directory the drive hasn't is no file to open (05h), and
+        // a file in it that isn't a system file is not found (02h), as in
+        // a directory that is there, on a disk image as on the host.
+        if self.is_system_dir(filename) {
+            return Err(0x05);
+        }
+        if !create && self.in_system_dir(filename) {
+            return Err(if mode & 0x03 == 3 { 0x0C } else { 0x02 });
+        }
         // Files held in memory are read-only: read/write opens are
         // downgraded as on a CD-ROM.
         if let Some((drive, d, path)) = self.locate_in_memory(filename) {
@@ -191,13 +200,10 @@ impl DiskController {
                 self.insert(handle, file);
                 Ok(handle)
             }
-            // Missing: file not found (02h) when its folder is there, or is
-            // one of the system files' that the drive hasn't, path not found
-            // (03h) when a folder on the way isn't.
+            // Missing: file not found (02h) when its folder is there, path
+            // not found (03h) when a folder on the way isn't.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let folder =
-                    path.parent().is_some_and(hostfs::is_dir) || self.in_system_dir(filename);
-                Err(if folder { 0x02 } else { 0x03 })
+                Err(if path.parent().is_some_and(hostfs::is_dir) { 0x02 } else { 0x03 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(0x03),
             // A name Windows refuses (a wildcard in it) is a file that
@@ -222,7 +228,8 @@ impl DiskController {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
-        if self.system_file(filename).is_some() {
+        // A system file or directory is there already.
+        if self.is_system_entry(filename) {
             return Err(0x05);
         }
         self.make_system_dirs(filename);
@@ -319,7 +326,7 @@ impl DiskController {
     pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
         // Before the file is replaced: a FAT image's entry may move.
         self.settle_named(dos_path);
-        if self.system_file(dos_path).is_some() {
+        if self.is_system_entry(dos_path) {
             return Err(0x05);
         }
         self.make_system_dirs(dos_path);
@@ -361,6 +368,11 @@ impl DiskController {
         if self.system_file(filename).is_some() {
             return Err(0x05);
         }
+        // A system directory the drive hasn't, or a file in it, is not
+        // found (02h), as a directory or a missing file is on the host.
+        if self.is_system_dir(filename) || self.in_system_dir(filename) {
+            return Err(0x02);
+        }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
             let entry = volume.find(&parts)?;
@@ -392,6 +404,11 @@ impl DiskController {
         // A system file is read-only, and a system directory has them.
         if self.is_system_entry(from) || self.is_system_entry(to) {
             return Err(0x05);
+        }
+        // A file in a system directory the drive hasn't is not found
+        // (02h), on a disk image as on the host.
+        if self.in_system_dir(from) {
+            return Err(0x02);
         }
         self.make_system_dirs(to);
         if let Some((drive, volume, from_parts)) = self.locate_fat(from) {
