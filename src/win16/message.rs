@@ -63,6 +63,7 @@ const LB_ADDSTRING: u32 = 0x0180;
 const CB_GETEDITSEL: u32 = 0x0140;
 const BM_GETCHECK: u32 = 0x00F0;
 const STM_SETICON: u32 = 0x0170;
+const STM_GETICON: u32 = 0x0171;
 
 /// The controls' messages that take strings and other pointers.
 const EM_GETRECT: u32 = 0x00B2;
@@ -543,6 +544,10 @@ fn to32(
             data.push(FIX_NONE);
             (msg, wp, icon32(lp as u16))
         }
+        STM_SETICON => {
+            data.push(FIX_NONE);
+            (msg, icon32(wp as u16), lp)
+        }
         _ => {
             data.push(FIX_NONE);
             (msg, sx_wparam(msg, wp), lp)
@@ -622,7 +627,7 @@ fn returned16(cpu: &mut Cpu, value: u32, data: &[u32]) -> u32 {
         }
     }
     match msg {
-        WM_GETICON | WM_QUERYDRAGICON => icon16(value) as u32,
+        WM_GETICON | WM_QUERYDRAGICON | STM_SETICON | STM_GETICON => icon16(value) as u32,
         _ => value,
     }
 }
@@ -830,6 +835,10 @@ fn to16(
             data.push(FIX_NONE);
             (msg, lo(wp), icon16(lp) as u32)
         }
+        STM_SETICON => {
+            data.push(FIX_NONE);
+            (control_msg16(cpu, hwnd, msg), icon16(wp) as u32, lp)
+        }
         _ => {
             data.push(FIX_NONE);
             let msg16 = control_msg16(cpu, hwnd, msg);
@@ -917,7 +926,7 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
     match msg {
         WM_NCHITTEST => sx(value),
         WM_CTLCOLORMSGBOX..=WM_CTLCOLORSTATIC | WM_GETFONT => value & 0xFFFF,
-        WM_QUERYDRAGICON | WM_GETICON => icon32(value as u16),
+        WM_QUERYDRAGICON | WM_GETICON | STM_SETICON | STM_GETICON => icon32(value as u16),
         WM_GETTEXT => value & 0xFFFF,
         _ => value,
     }

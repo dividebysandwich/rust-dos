@@ -55,7 +55,7 @@ user/menu: failed menu.c:110
 user/msg: msg: 223 tests executed (0 marked as todo, 3 failures), 0 skipped.
 user/msg: failed msg.c:515 (x3)
 user/text: text: 88 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user/win: win: 555 tests executed (0 marked as todo, 12 failures), 0 skipped.
+user/win: win: 559 tests executed (0 marked as todo, 12 failures), 0 skipped.
 user/win: failed win.c:1097
 user/win: failed win.c:1100
 user/win: failed win.c:1108

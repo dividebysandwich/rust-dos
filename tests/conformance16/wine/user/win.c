@@ -1413,6 +1413,32 @@ static void test_wrapped_move(HWND parent)
     DestroyWindow(child);
 }
 
+/* STM_SETICON (WM_USER) and STM_GETICON (WM_USER + 1) on an SS_ICON
+ * static (added for Win16): the static takes the icon's size, and gives
+ * back the icon it was set to. Castle of the Winds sets the icons of
+ * its Character Creation dialog this way. */
+static void test_static_icon(HWND parent)
+{
+    HWND child;
+    HICON hand = LoadIcon(0, IDI_HAND), asterisk = LoadIcon(0, IDI_ASTERISK);
+    RECT rc;
+    LONG old;
+
+    child = CreateWindow("static", "", WS_CHILD | SS_ICON, 0, 0, 0, 0,
+                         parent, (HMENU)8, main_instance, NULL);
+    ok(child != 0, "CreateWindow failed\n");
+
+    SendMessage(child, WM_USER, (WPARAM)hand, 0);
+    GetClientRect(child, &rc);
+    ok(rc.right == GetSystemMetrics(SM_CXICON) && rc.bottom == GetSystemMetrics(SM_CYICON),
+       "invalid client rect %d,%d-%d,%d after STM_SETICON\n", rc.left, rc.top, rc.right, rc.bottom);
+    ok((HICON)SendMessage(child, WM_USER + 1, 0, 0) == hand, "STM_GETICON gave another icon\n");
+    old = SendMessage(child, WM_USER, (WPARAM)asterisk, 0);
+    ok((HICON)old == hand, "STM_SETICON gave back %lx\n", old);
+
+    DestroyWindow(child);
+}
+
 START_TEST(win)
 {
     /* A program's instance handle is its data segment's selector. */
@@ -1454,6 +1480,7 @@ START_TEST(win)
     test_subclass();
     test_text();
     test_wrapped_move(hwndMain);
+    test_static_icon(hwndMain);
 
     DestroyWindow(hwndMain2);
     DestroyWindow(hwndMain);
