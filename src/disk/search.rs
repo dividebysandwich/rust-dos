@@ -47,6 +47,22 @@ impl DiskController {
     /// tells it: (sectors per cluster, free clusters, bytes per sector,
     /// total clusters), whatever their size.
     pub fn get_disk_free_space32(&self, drive: u8) -> Result<(u32, u32, u32, u32), u16> {
+        self.free_space(drive, false)
+    }
+
+    /// The free space of `drive` (0 the current one, 1 A:) as the built-in
+    /// Windows tells it, in the numbers of `get_disk_free_space32`. A
+    /// folder hard disk is a larger fake disk here than DOS's 80 MB
+    /// (`WINDOWS_HARD_DISK_STEP`): Windows 95 and 98 report a real disk's
+    /// space, up to 2 GB through GetDiskFreeSpaceA, and their setup
+    /// programs check whole installs of a few hundred MB against it.
+    pub fn windows_free_space(&self, drive: u8) -> Result<(u32, u32, u32, u32), u16> {
+        self.free_space(drive, true)
+    }
+
+    /// The free space of `drive` (0 the current one, 1 A:), for DOS or,
+    /// with `windows`, for the built-in Windows (`windows_free_space`).
+    fn free_space(&self, drive: u8, windows: bool) -> Result<(u32, u32, u32, u32), u16> {
         let target_drive = if drive == 0 {
             self.current_drive
         } else {
@@ -72,14 +88,20 @@ impl DiskController {
             DriveKind::Floppy => (spc, total - used(total as u64) as u32, bps, total),
             // A hard disk counts it too, so the free space drops as files
             // are written: Sierra's installer takes a disk whose free space
-            // doesn't for a compressed one.
+            // doesn't for a compressed one. DOS sees a fake 80 MB disk in
+            // no more clusters than AH=36h holds, so that it doesn't count
+            // in larger clusters (`old_space`) and every 4 KB written
+            // shows. The built-in Windows sees a fake 1 GB one
+            // (`WINDOWS_HARD_DISK_STEP`).
             DriveKind::HardDisk => {
+                let (step, max_total) = if windows {
+                    (WINDOWS_HARD_DISK_STEP, u32::MAX)
+                } else {
+                    (total, 0xFFFF)
+                };
                 let used = used(u64::MAX);
-                let free = hard_disk_free(total, used);
-                // No more clusters than AH=36h holds, so that it doesn't
-                // count in larger clusters (`old_space`) and every 4 KB
-                // written shows.
-                let total = (used + free as u64).min(0xFFFF) as u32;
+                let free = hard_disk_free(step, used);
+                let total = (used + free as u64).min(max_total as u64) as u32;
                 (spc, free, bps, total)
             }
             DriveKind::CdRom => (spc, 0, bps, total),
@@ -605,12 +627,20 @@ impl DiskController {
 }
 
 /// The free clusters of a hard disk made of a host folder, `used` of them
-/// in use: what is left of the fake size `step` (80 MB), or of as many
-/// times that as leaves more than half of it free. Free space then drops
-/// cluster by cluster as files are written, and a folder holding more than
-/// 80 MB still has room for a save. Free clusters stay between half a step
-/// and one and a half (10,001 to 30,000), which signed 16-bit numbers hold.
+/// in use: what is left of the fake size `step`, or of as many times that
+/// as leaves more than half of it free. Free space then drops cluster by
+/// cluster as files are written, and a folder holding more than the fake
+/// size still has room for a save. Free clusters stay between half a step
+/// and one and a half: 10,001 to 30,000 of DOS's 80 MB, which signed
+/// 16-bit numbers hold, and just over 512 MB to 1.5 GB of the built-in
+/// Windows's 1 GB (`WINDOWS_HARD_DISK_STEP`).
 fn hard_disk_free(step: u32, used: u64) -> u32 {
     let step = step as u64;
     (((used + step / 2) / step + 1) * step - used) as u32
 }
+
+/// The step of a folder hard disk's fake size for the built-in Windows
+/// (`windows_free_space`): 1 GB of 4 KB clusters. Its free space then
+/// stays between 512 MB and 1.5 GB, below the 2 GB that programs of the
+/// time multiply out in signed 32-bit numbers.
+const WINDOWS_HARD_DISK_STEP: u32 = 1 << 18;

@@ -1,9 +1,10 @@
-//! Drives: which there are, their kinds and their free space, from DOS's.
+//! Drives: which there are and their kinds, from DOS's, and their free
+//! space as the built-in Windows sees it.
 
 use super::path::put_string;
 use super::{ERROR_INVALID_DRIVE, ERROR_PATH_NOT_FOUND, FALSE, TRUE, set_error, string_at};
 use crate::cpu::Cpu;
-use crate::disk::{DriveKind, LASTDRIVE, drive_letter};
+use crate::disk::{DriveKind, LASTDRIVE, drive_letter, old_space};
 
 /// GetDriveType's answers.
 const DRIVE_NO_ROOT_DIR: u32 = 1;
@@ -69,8 +70,10 @@ pub(super) fn get_drive_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The free space of the root directory `args[0]` names: sectors per
-/// cluster, bytes per sector, free and total clusters, as INT 21h AH=36h
-/// gives them, which keeps them below 65536 clusters as Windows 95 does.
+/// cluster, bytes per sector, free and total clusters, of the drive as the
+/// built-in Windows sees it (`windows_free_space`), in larger clusters
+/// past 65535 and below 2 GB in all (`old_space`), as Windows 95 and 98
+/// give them.
 pub(super) fn get_disk_free_space(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let drive = match root(cpu, args[0])? {
         Ok(drive) => drive,
@@ -79,7 +82,12 @@ pub(super) fn get_disk_free_space(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(FALSE);
         }
     };
-    let Ok((sectors, free, bytes, total)) = cpu.bus.disk.get_disk_free_space(drive + 1) else {
+    let Ok((sectors, free, bytes, total)) = cpu
+        .bus
+        .disk
+        .windows_free_space(drive + 1)
+        .map(|(spc, free, bps, total)| old_space(spc, free, bps, total))
+    else {
         set_error(cpu, ERROR_INVALID_DRIVE);
         return Some(FALSE);
     };
