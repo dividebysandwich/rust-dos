@@ -535,19 +535,18 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
             return (scale, COMBINE_FACTOR_ONE, it, other_of(arg));
         }
         if !any_texture {
-            if arg_is_factor(a1) != arg_is_factor(a2) && matches!(op, TOP_MODULATE | TOP_ADD) {
-                // The diffuse color with the texture factor.
-                let f = if op == TOP_ADD {
-                    COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL
-                } else {
-                    scale
+            if (arg_is_factor(a1) || arg_is_factor(a2)) && matches!(op, TOP_MODULATE | TOP_ADD | 10)
+            {
+                // The diffuse color and the texture factor, or the factor
+                // twice: the first argument is the other color and the
+                // second the local one, so SUBTRACT is the first less
+                // the second.
+                let (f, factor) = match op {
+                    TOP_ADD => (COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL, COMBINE_FACTOR_ONE),
+                    10 => (COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL, COMBINE_FACTOR_ONE),
+                    _ => (scale, COMBINE_FACTOR_LOCAL),
                 };
-                let factor = if op == TOP_ADD {
-                    COMBINE_FACTOR_ONE
-                } else {
-                    COMBINE_FACTOR_LOCAL
-                };
-                return (f, factor, it, COMBINE_OTHER_CONSTANT);
+                return (f, factor, local_of(a2), other_of(a1));
             }
             // The diffuse color, which is the current one here too.
             return (scale, COMBINE_FACTOR_ONE, it, other_it);
