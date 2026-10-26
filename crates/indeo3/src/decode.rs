@@ -68,6 +68,7 @@ const BAD_DATA: Error = Error::Invalid("invalid VQ data");
 const OUTSIDE: Error = Error::Invalid("a block reaches outside the plane");
 
 /// One plane's two buffers.
+#[derive(Clone)]
 pub(crate) struct Plane {
     bufs: [Vec<u8>; 2],
     pub width: usize,

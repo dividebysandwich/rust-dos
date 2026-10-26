@@ -82,6 +82,7 @@ impl PixelFormat {
 }
 
 /// Decodes the frames of one stream, in order.
+#[derive(Clone)]
 pub struct Decoder {
     width: usize,
     height: usize,
