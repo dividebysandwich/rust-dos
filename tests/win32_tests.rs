@@ -3631,3 +3631,71 @@ fn get_logical_drive_strings_lists_the_drives_roots() {
         roots
     );
 }
+
+/// GetVolumeInformationA on C:\, a host folder: it gives "FAT" as the
+/// file system, which the program writes out, and 255 as the longest
+/// name; with a file system name buffer too small for "FAT" and its NUL
+/// it fails with ERROR_INSUFFICIENT_BUFFER. Bit 0 of the exit code: the
+/// first call worked; bit 1: the longest name was 255; bit 2: the second
+/// call failed with error 122.
+#[test]
+fn get_volume_information_names_the_file_system() {
+    let names: &[&str] = &[
+        "GetVolumeInformationA",
+        "GetLastError",
+        "GetStdHandle",
+        "WriteFile",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0u8; 0x100];
+    data[0x80..0x83].copy_from_slice(b"C:\\");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        // Label (32 bytes), serial, longest name, flags, file system (16).
+        let call = |a: &mut CodeAssembler, fs_size: i32| -> Result<(), IcedError> {
+            a.push(fs_size)?;
+            a.push(l.at(0x40) as i32)?;
+            a.push(l.at(0x38) as i32)?;
+            a.push(l.at(0x34) as i32)?;
+            a.push(l.at(0x30) as i32)?;
+            a.push(32)?;
+            a.push(l.at(0x10) as i32)?;
+            a.push(l.at(0x80) as i32)?;
+            a.call(l.import(0))
+        };
+        call(a, 16)?;
+        a.cmp(eax, 0)?;
+        a.setne(bl)?;
+        a.movzx(edi, bl)?;
+        a.cmp(dword_ptr(l.at(0x34)), 255)?;
+        a.sete(bl)?;
+        a.movzx(ebx, bl)?;
+        a.shl(ebx, 1)?;
+        a.or(edi, ebx)?;
+        // "FAT" to standard output.
+        a.push(0)?;
+        a.push(l.at(0x50) as i32)?;
+        a.push(3)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(-11)?;
+        a.call(l.import(2))?;
+        a.push(eax)?;
+        a.call(l.import(3))?;
+        // Too small for "FAT" and its NUL.
+        call(a, 3)?;
+        a.mov(esi, eax)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, 122)?;
+        a.sete(bl)?;
+        a.cmp(esi, 0)?;
+        a.sete(cl)?;
+        a.and(bl, cl)?;
+        a.movzx(ebx, bl)?;
+        a.shl(ebx, 2)?;
+        a.or(edi, ebx)?;
+        a.mov(eax, edi)?;
+        a.ret()
+    });
+    let (code, text) = run("volume_information", exe);
+    assert_eq!(code, 7, "{:?}", text);
+    assert_eq!(text, "FAT");
+}
