@@ -253,9 +253,11 @@ const DD_CREATE_PALETTE: u32 = 5;
 const DD_CREATE_SURFACE: u32 = 6;
 const DD_SET_COOPERATIVE_LEVEL: u32 = 20;
 const DD_SET_DISPLAY_MODE: u32 = 21;
+const S_ADD_ATTACHED_SURFACE: u32 = 3;
 const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
 const S_GET_ATTACHED_SURFACE: u32 = 12;
+const S_GET_CAPS: u32 = 14;
 const S_LOCK: u32 = 25;
 const S_SET_CLIPPER: u32 = 28;
 const S_SET_COLOR_KEY: u32 = 29;
@@ -272,6 +274,7 @@ const DDSD_PIXELFORMAT: u32 = 0x1000;
 const DDSCAPS_BACKBUFFER: u32 = 0x4;
 const DDSCAPS_COMPLEX: u32 = 0x8;
 const DDSCAPS_FLIP: u32 = 0x10;
+const DDSCAPS_FRONTBUFFER: u32 = 0x20;
 const DDSCAPS_OFFSCREENPLAIN: u32 = 0x40;
 const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
@@ -438,6 +441,155 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
     // The pointer Lock gave is in the program's view of video memory.
     let pointer = peek(&cpu, data + LOCKED + 0x24);
     assert_eq!(pointer & 0x3F_FFFF, 64000);
+}
+
+/// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER
+/// with a size) and attached to a plain primary surface, as Glover makes
+/// its flip chain: a pixel written to the back buffer and a flip of the
+/// primary that shows it. The back buffer has `back_caps` besides
+/// DDSCAPS_BACKBUFFER. The two surfaces' caps go to CAPS after the
+/// attach.
+fn attached_back_buffer_program(back_caps: u32) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    let back_desc = DESC + 0x70;
+    desc(
+        &mut d,
+        back_desc,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_BACKBUFFER | back_caps,
+        320,
+        200,
+        0,
+    );
+    put32(&mut d, LOCKED, 108);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(back_desc), Arg::At(BACK), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_ADD_ATTACHED_SURFACE, &[Arg::Val(BACK)])?;
+        c.com(a, l, FRONT, S_GET_CAPS, &[Arg::At(CAPS)])?;
+        c.com(a, l, BACK, S_GET_CAPS, &[Arg::At(CAPS + 4)])?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edi, dword_ptr(l.at(LOCKED + 0x24)))?;
+        a.mov(dword_ptr(edi), 0x4433_2211)?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_back_buffer_attached_to_the_primary_surface_flips_with_it() {
+    let (program, data) = attached_back_buffer_program(0);
+    let mut cpu = machine("attached_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 12)[1..], [0; 11]);
+    // Windows 98 makes them a flip chain: both flip, and the primary is
+    // its front buffer.
+    let front = peek(&cpu, data + CAPS);
+    let back = peek(&cpu, data + CAPS + 4);
+    let flip_front = DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER | DDSCAPS_PRIMARYSURFACE;
+    assert_eq!(front & flip_front, flip_front);
+    let flip_back = DDSCAPS_FLIP | DDSCAPS_BACKBUFFER;
+    assert_eq!(back & flip_back, flip_back);
+    // The flip shows the back buffer's pixels, away from the screen's
+    // first 64000 bytes.
+    let start = cpu.bus.vbe.start as usize;
+    assert_ne!(start, 0);
+    assert_eq!(cpu.bus.vbe.vram[start..start + 4], [0x11, 0x22, 0x33, 0x44]);
+}
+
+#[test]
+fn a_back_buffer_in_system_memory_doesnt_flip_with_the_primary_surface() {
+    let (program, data) = attached_back_buffer_program(DDSCAPS_SYSTEMMEMORY);
+    let mut cpu = machine("attached_system_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    // The attach works, but the screen can't show system memory, so
+    // the two make no flip chain and the primary doesn't flip.
+    const DDERR_NOTFLIPPABLE: u32 = 0x8876_0246;
+    let mut expected = [0; 11];
+    expected[10] = DDERR_NOTFLIPPABLE;
+    assert_eq!(results(&mut cpu, data, 12)[1..], expected);
+    let front = peek(&cpu, data + CAPS);
+    let back = peek(&cpu, data + CAPS + 4);
+    assert_eq!(front & (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER), 0);
+    assert_eq!(back & DDSCAPS_FLIP, 0);
+}
+
+/// A primary surface that says it is a back buffer.
+fn primary_back_buffer_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_BACKBUFFER,
+        0,
+        0,
+        0,
+    );
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_primary_surface_cant_be_a_back_buffer() {
+    let (program, data) = primary_back_buffer_program();
+    let mut cpu = machine("primary_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+    assert_eq!(results(&mut cpu, data, 4)[1..], [0, 0, DDERR_INVALIDCAPS]);
 }
 
 /// A program in a window: an offscreen surface filled with a color and

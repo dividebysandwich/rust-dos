@@ -7,6 +7,8 @@ use rust_dos::voodoo::{Board, banshee};
 use std::path::PathBuf;
 
 const PVR_REGS: usize = 0xD400_0000;
+/// Where `powervr_interrupts` puts the render's object list.
+const EMPTY_LIST: u32 = 0x8_0000;
 
 fn bus() -> Bus {
     let mut bus = Bus::new(PathBuf::from("."));
@@ -44,8 +46,13 @@ fn banshee_interrupts(bus: &mut Bus) {
     wait_ms(bus, 40.0);
 }
 
-/// End a render on the PCX2 with its interrupt unmasked.
+/// End a render on the PCX2 with its interrupt unmasked. The render is
+/// of an empty object list: left at 0, OBJECT_OFFSET has the card read
+/// its list from the interrupt table at address 0, and the render of
+/// what it finds there takes half a minute in a debug build.
 fn powervr_interrupts(bus: &mut Bus) {
+    bus.write_32(EMPTY_LIST as usize, 0);
+    bus.write_32(PVR_REGS + 4 * regs::OBJECT_OFFSET, EMPTY_LIST);
     bus.write_32(PVR_REGS + 4 * regs::INTMASK, regs::END_OF_RENDER);
     bus.write_32(PVR_REGS + 4 * regs::STARTRENDER, 0);
     wait_ms(bus, 1.0);
