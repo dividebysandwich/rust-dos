@@ -527,6 +527,32 @@ mod tests {
     }
 
     #[test]
+    fn the_card_is_busy_while_a_swap_waits_for_its_retrace() {
+        // 3dfx's driver on Windows 95 flips Moto Racer's menus with a
+        // swap at the retrace, then waits for the card to go idle before
+        // it draws the next frame into the buffer still shown (#202).
+        let mut v = card();
+        let now = Now::default();
+        let busy = |v: &Voodoo, now: Now| v.banshee_status(now) & 0x780 != 0;
+        assert!(!busy(&v, now));
+        reg3d(&mut v, LEFT_OVERLAY_BUF, 0x10_0000);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        assert!(!busy(&v, now), "a swap at once is done at once");
+        reg3d(&mut v, LEFT_OVERLAY_BUF, 0x20_0000);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        assert!(busy(&v, now), "busy until the retrace");
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, now), 0x10_0000);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        let then = Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        };
+        v.service(then);
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, then), 0x20_0000);
+        assert!(!busy(&v, then));
+    }
+
+    #[test]
     fn a_lower_refresh_rate_doesnt_put_swaps_off() {
         // A swap at once after ten minutes at 70 Hz, then a mode at 60
         // Hz: the next swap at a retrace waits about a frame, not for the
