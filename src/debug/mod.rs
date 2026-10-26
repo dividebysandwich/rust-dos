@@ -292,7 +292,7 @@ pub struct TraceQuery {
 pub enum Cmd {
     Status,
     Stats,
-    Screenshot,
+    Screenshot { shader: bool },
     ScreenText,
     TraceQuery(TraceQuery),
     /// `count`: record that many more instructions, then stop.
@@ -718,7 +718,7 @@ pub struct DebugHub {
     /// Keys the remote client holds down on the machine.
     remote_held: Vec<PcKey>,
 
-    frame_waiters: Vec<(Ctx, oneshot::Sender<Answer>)>,
+    frame_waiters: Vec<(bool, Ctx, oneshot::Sender<Answer>)>,
     /// The video mode and picture size last reported as an event.
     last_mode: Option<(VideoMode, (u32, u32))>,
     frames: u64,

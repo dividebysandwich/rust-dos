@@ -56,9 +56,9 @@ impl DebugHub {
                 self.speed_requests.push(SpeedRequest { cycles, ctx, if_state, reply: tx });
                 return;
             }
-            Cmd::Screenshot => {
+            Cmd::Screenshot { shader } => {
                 // Answered by the next capture_frame call.
-                self.frame_waiters.push((ctx, tx));
+                self.frame_waiters.push((shader, ctx, tx));
                 return;
             }
             cmd => cmd,
@@ -81,7 +81,10 @@ impl DebugHub {
             Cmd::ProfileControl(c) => self.profile_control(cpu, c),
             Cmd::ProfileStatus => Reply::Json(self.profile_status(cpu)),
             Cmd::ProfileGet { query, format } => self.profile_report(cpu, &query, format),
-            Cmd::Screenshot | Cmd::SaveState { .. } | Cmd::LoadState { .. } | Cmd::Speed { .. } => {
+            Cmd::Screenshot { .. }
+            | Cmd::SaveState { .. }
+            | Cmd::LoadState { .. }
+            | Cmd::Speed { .. } => {
                 unreachable!("answered later, by `handle`'s arrangement")
             }
             Cmd::Quit => {

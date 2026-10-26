@@ -2027,10 +2027,13 @@ fn main() -> Result<(), String> {
             }
             macro_rules! debug_frame {
                 () => {
-                    match ui.with_layer(&screen, (1.0, 1.0)) {
-                        Some(paged) => dbg.capture_frame(&paged),
-                        None => dbg.capture_frame(&screen),
-                    }
+                    let paged = ui.with_layer(&screen, (1.0, 1.0));
+                    let frame = paged.as_ref().unwrap_or(&screen);
+                    let shaded = dbg
+                        .wants_shader_frame()
+                        .then(|| display.shaded(frame, &cached_frame))
+                        .flatten();
+                    dbg.capture_frame(frame, shaded.as_ref());
                 };
             }
             // In deterministic mode the debug server's pictures leave out

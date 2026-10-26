@@ -877,10 +877,14 @@ async fn profile_get(State(s): State<AppState>, Query(q): Query<ProfileQuery>) -
 #[derive(Deserialize)]
 struct FormatQuery {
     format: Option<String>,
+    shader: Option<bool>,
 }
 
 async fn screenshot(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> ApiResult {
-    let (Reply::Frame(frame), meta) = s.call(Cmd::Screenshot, DEFAULT_TIMEOUT).await? else {
+    let (Reply::Frame(frame), meta) = s
+        .call(Cmd::Screenshot { shader: q.shader.unwrap_or(false) }, DEFAULT_TIMEOUT)
+        .await?
+    else {
         return Err(unexpected());
     };
     Ok(with_meta(frame_response(frame, q.format.as_deref()).await?, &meta))
@@ -2156,10 +2160,9 @@ STATUS / SCREEN
                                            bucket=16 (EIP rounded down), disasm=4 (lines a place),
                                            timeline=true (zones a second), wait_ms=N (wait for a
                                            profile with a duration to end); docs/profiling.md
-  GET  /api/screenshot[?format=png|raw]    the screen with its cursors, at the picture's
-                                           size: 640x400 in text modes, the mode's size
-                                           (small ones doubled) otherwise (raw = RGB24
-                                           bytes, size in x-width/x-height)
+  GET  /api/screenshot[?shader=true]      screen with cursors; shader=true returns
+                                           filtered output size; format=png|raw works
+                                           with either (raw = RGB24 with x-width/x-height)
   GET  /api/screen/text[?format=text]      text-mode screen contents (CP437 -> Unicode);
                                            JSON has attrs: each row's attribute runs {col,len,attr},
                                            blink (bit 7 blinks, else bright background),
