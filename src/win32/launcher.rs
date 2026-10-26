@@ -198,13 +198,8 @@ pub fn engine(cpu: &mut Cpu, path: &str, bytes: &[u8]) -> Option<(String, String
 /// can't be made.
 fn temp_directory(cpu: &mut Cpu) -> Option<String> {
     let environment = super::dos_environment(cpu, cpu.current_psp);
-    let variable = |name: &str| {
-        environment.iter().find_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            key.eq_ignore_ascii_case(name)
-                .then(|| value.trim().to_string())
-        })
-    };
+    let variable =
+        |name: &str| super::variable_value(&environment, name).map(|v| v.trim().to_string());
     let wanted = variable("TEMP")
         .or_else(|| variable("TMP"))
         .filter(|v| !v.is_empty())

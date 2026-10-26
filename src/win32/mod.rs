@@ -19,14 +19,17 @@ mod com;
 mod comctl32;
 mod comdlg32;
 mod convert;
+mod d3d8;
 mod ddraw;
 mod dinput;
+pub mod dll_files;
 mod dmusic;
 mod dplayx;
 mod dsound;
 pub mod gdi32;
 mod glide;
 pub(crate) mod heap;
+mod imagehlp;
 pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
@@ -54,6 +57,7 @@ pub mod version;
 mod verdll;
 pub(crate) mod winmm;
 mod winspool;
+mod ws2_32;
 mod wsock32;
 
 pub use snapshot::snapshot;
@@ -227,6 +231,13 @@ pub struct Process {
     exiting: bool,
     /// The compressed files LZInit opened (kernel32/lz.rs).
     lz_files: Vec<kernel32::lz::LzFile>,
+    /// The object of its input idle event, which a program that isn't a
+    /// console one has: a manual-reset event USER32 signals the first
+    /// time one of its threads looks for input with none there, which
+    /// WaitForInputIdle and WinExec wait for, as in Wine.
+    idle_event: Option<u32>,
+    /// Its IMAGEHLP options.
+    imagehlp: imagehlp::State,
 }
 
 impl Process {
@@ -282,6 +293,9 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The built-in DLLs the system directory shows as files
+    /// (dll_files.rs), as last shown.
+    dll_files: Option<dll_files::Shown>,
     /// The program DOS loaded, which starts at `START`, and whether it is
     /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
     pending: Option<String>,
@@ -345,6 +359,7 @@ pub struct Win32 {
     /// and how many GUIDs CoCreateGuid made.
     ole: ole32::State,
     ddraw: ddraw::State,
+    d3d8: d3d8::State,
     dsound: dsound::State,
     dinput: dinput::State,
     winmm: winmm::State,
@@ -371,6 +386,7 @@ impl Win32 {
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
             depth: self.depth,
+            dll_files: self.dll_files.take(),
             ..Win32::default()
         };
     }
@@ -522,7 +538,14 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
         let launcher = cpu.program_path(filename);
         match launcher::engine(cpu, &launcher, bytes) {
             Some((engine, arguments)) => (engine, Some(arguments), false),
-            None => (launcher, None, true),
+            // OS/2 programs, Borland's DPMI16 (RTM) ones among them, and
+            // files that don't parse run their DOS stub as before.
+            None if rust_dos_ne::Module::parse(bytes)
+                .is_ok_and(|m| m.target_os != rust_dos_ne::OS_OS2) =>
+            {
+                (launcher, None, true)
+            }
+            None => return false,
         }
     } else {
         return false;
@@ -597,6 +620,7 @@ fn start(cpu: &mut Cpu) {
     win32.a20 = a20;
     win32.cr4 = cr4;
     version::start(win32);
+    dll_files::sync(&mut cpu.bus);
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = match cpu.bus.win32.pending_arguments.take() {
         Some(arguments) => format!("{} {}", path, arguments),
@@ -712,6 +736,17 @@ pub(crate) fn create_process_from(
         },
         None,
     );
+    // As in Wine, every program but a console one gets an input idle
+    // event.
+    let console = rust_dos_pe::Headers::parse(file)
+        .is_ok_and(|h| h.subsystem == rust_dos_pe::SUBSYSTEM_CONSOLE);
+    if !console {
+        let idle = object::Kind::Event {
+            manual: true,
+            signaled: false,
+        };
+        process.idle_event = Some(objects.add(idle, None));
+    }
     for (handle, id) in inherited {
         if process.handles.add_at(handle, id) {
             objects.hold(id);
@@ -738,6 +773,9 @@ pub(crate) fn create_process_from(
             objects.release(id);
         }
         objects.release(process.object);
+        if let Some(idle) = process.idle_event {
+            objects.release(idle);
+        }
         process.memory.release(&mut cpu.bus);
         return Err(format!(
             "There isn't enough extended memory to run {}.",
@@ -818,6 +856,23 @@ fn dos_environment(cpu: &mut Cpu, psp: u16) -> Vec<String> {
     strings
 }
 
+/// The name and value of an environment string, "NAME=value", split at
+/// its first "=" after the first character: a name can start with one, as
+/// the current directory of each drive does ("=C:=C:\GAMES").
+fn split_variable(entry: &str) -> Option<(&str, &str)> {
+    let (at, _) = entry.char_indices().skip(1).find(|&(_, c)| c == '=')?;
+    Some((&entry[..at], &entry[at + 1..]))
+}
+
+/// The value of the variable `name` among the environment strings
+/// `environment`, its name's case ignored.
+fn variable_value<'a>(environment: &'a [String], name: &str) -> Option<&'a str> {
+    environment.iter().find_map(|entry| {
+        let (n, value) = split_variable(entry)?;
+        n.eq_ignore_ascii_case(name).then_some(value)
+    })
+}
+
 /// End the running process with exit code `code`: its threads end, its
 /// handles close and its memory goes back to the pool. Another process's
 /// thread runs on; when there is none, back in real mode, the DOS process
@@ -836,50 +891,8 @@ fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
 }
 
 fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
-    let win32 = &mut cpu.bus.win32;
-    let Some(process) = win32.processes.get(index) else {
+    if !remove_process(cpu, index, code) {
         return;
-    };
-    let (name, threads) = (process.name.clone(), process.threads.len());
-    let tids: Vec<u32> = process.threads.iter().map(|t| t.id).collect();
-    for i in 0..threads {
-        thread::end(win32, index, i, code);
-    }
-    let process = &mut win32.processes[index];
-    let handles: Vec<u32> = process.handles.iter().map(|(_, id)| id).collect();
-    let own = process.object;
-    for id in handles {
-        win32.objects.release(id);
-    }
-    if let Some(object) = win32.objects.get_mut(own)
-        && let object::Kind::Process { exit_code, .. } = &mut object.kind
-    {
-        *exit_code = Some(code);
-    }
-    win32.objects.release(own);
-    if process.id == win32.root {
-        win32.exit_code = code;
-    }
-    cpu.bus.log_string(&format!(
-        "[W32] {} ended with exit code {:X}",
-        name, code
-    ));
-    let process = cpu.bus.win32.processes.remove(index);
-    process.memory.release(&mut cpu.bus);
-    registry::process_ended(cpu, process.id);
-    user32::process_ended(cpu, process.id, &tids);
-    gdi32::process_ended(cpu, process.id);
-    ole32::process_ended(cpu, process.id, &tids);
-    ddraw::process_ended(cpu, process.id, &tids);
-    dsound::process_ended(cpu, process.id, &tids);
-    dinput::process_ended(cpu, process.id, &tids);
-    winmm::process_ended(cpu, process.id, &tids);
-    glide::process_ended(cpu, process.id, &tids);
-    dmusic::process_ended(cpu, process.id);
-    shell32::process_ended(cpu, process.id);
-    user32::ddeml::process_ended(cpu, process.id);
-    if process.id == cpu.bus.win32.win16.pid {
-        cpu.bus.win32.win16 = crate::win16::State::default();
     }
     let win32 = &mut cpu.bus.win32;
     if win32.running != index {
@@ -908,6 +921,79 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
     if cpu.state == CpuState::Halted {
         cpu.state = CpuState::Running;
+    }
+}
+
+/// Take the process at `index` away: its threads end with `code`, and
+/// its handles, memory and what the DLLs kept for it go. False when
+/// there is no such process.
+fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
+    let win32 = &mut cpu.bus.win32;
+    let Some(process) = win32.processes.get(index) else {
+        return false;
+    };
+    let (name, threads) = (process.name.clone(), process.threads.len());
+    let tids: Vec<u32> = process.threads.iter().map(|t| t.id).collect();
+    for i in 0..threads {
+        thread::end(win32, index, i, code);
+    }
+    let process = &mut win32.processes[index];
+    let handles: Vec<u32> = process.handles.iter().map(|(_, id)| id).collect();
+    let own = process.object;
+    for id in handles {
+        win32.objects.release(id);
+    }
+    if let Some(object) = win32.objects.get_mut(own)
+        && let object::Kind::Process { exit_code, .. } = &mut object.kind
+    {
+        *exit_code = Some(code);
+    }
+    win32.objects.release(own);
+    // Its idle event goes, as in Wine: a wait for it ends as the
+    // process's object is signaled.
+    if let Some(idle) = process.idle_event.take() {
+        win32.objects.release(idle);
+    }
+    if process.id == win32.root {
+        win32.exit_code = code;
+    }
+    cpu.bus.log_string(&format!(
+        "[W32] {} ended with exit code {:X}",
+        name, code
+    ));
+    let process = cpu.bus.win32.processes.remove(index);
+    process.memory.release(&mut cpu.bus);
+    registry::process_ended(cpu, process.id);
+    user32::process_ended(cpu, process.id, &tids);
+    gdi32::process_ended(cpu, process.id);
+    ole32::process_ended(cpu, process.id, &tids);
+    d3d8::process_ended(cpu, process.id);
+    ddraw::process_ended(cpu, process.id, &tids);
+    dsound::process_ended(cpu, process.id, &tids);
+    dinput::process_ended(cpu, process.id, &tids);
+    winmm::process_ended(cpu, process.id, &tids);
+    glide::process_ended(cpu, process.id, &tids);
+    dmusic::process_ended(cpu, process.id);
+    shell32::process_ended(cpu, process.id);
+    user32::ddeml::process_ended(cpu, process.id);
+    if process.id == cpu.bus.win32.win16.pid {
+        cpu.bus.win32.win16 = crate::win16::State::default();
+    }
+    true
+}
+
+/// Take away the process `pid`, whose threads never ran, when what it
+/// was made for can't start (a Win16 program's first task).
+pub(crate) fn discard_process(cpu: &mut Cpu, pid: u32) {
+    let Some(index) = cpu.bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return;
+    };
+    remove_process(cpu, index, 1);
+    let win32 = &mut cpu.bus.win32;
+    if win32.running > index {
+        win32.running -= 1;
+    } else if win32.running == index {
+        win32.running = 0;
     }
 }
 
@@ -1055,6 +1141,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.gdi = gdi32::State::default();
         cpu.bus.win32.ole = ole32::State::default();
         cpu.bus.win32.ddraw = ddraw::State::default();
+        cpu.bus.win32.d3d8 = d3d8::State::default();
         cpu.bus.win32.dsound = dsound::State::default();
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
@@ -1133,6 +1220,8 @@ crate::state_fields!(Process {
     dll_tls,
     exiting,
     lz_files,
+    idle_event,
+    imagehlp,
 });
 crate::state_fields!(Win32 {
     pending,
@@ -1160,6 +1249,7 @@ crate::state_fields!(Win32 {
 
     ole,
     ddraw,
+    d3d8,
     dsound,
     dinput,
     winmm,
@@ -1174,4 +1264,4 @@ crate::state_fields!(Win32 {
     pending_win16,
     win16,
     desktop_depth,
-} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments });
+} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });

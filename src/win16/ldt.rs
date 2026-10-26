@@ -63,6 +63,10 @@ impl Ldt {
     pub fn alloc(&mut self, count: u16) -> Option<u16> {
         let count = count.max(1);
         let end = crate::win32::system::LDT_ENTRIES as u16;
+        // More than the table holds, which would also wrap `start + count`.
+        if count > end {
+            return None;
+        }
         let mut start = FIRST;
         while start + count <= end {
             match (start..start + count).find(|&i| self.taken(i)) {
@@ -96,7 +100,7 @@ impl Ldt {
     pub fn free_after(&self, selector: u16, count: u16) -> bool {
         let first = index(selector) + 1;
         let end = crate::win32::system::LDT_ENTRIES as u16;
-        first + count <= end && (first..first + count).all(|i| !self.taken(i))
+        first as u32 + count as u32 <= end as u32 && (first..first + count).all(|i| !self.taken(i))
     }
 
     /// Take the entries after `selector`'s (see `free_after`).

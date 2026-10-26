@@ -6,7 +6,20 @@
 
 ## Introduction
 
-Rust-DOS is a DOS emulator aimed at the golden age of DOS gaming from the early days up to the dawn of Windows 95, which it can [boot from a disk image](CONFIGURATION.md#windows-95). It is a work in progress and some games and programs may not run yet.
+Rust-DOS is an emulator for PC games, from the early DOS days to the
+Windows 95 and 98 years.
+
+* **DOS games** run on its built-in DOS. No copy of MS-DOS is needed.
+* **Windows 95 and 98 games** run one of two ways:
+  * in a real copy of Windows, booted from a disk image
+    ([docs/win9x-howto.md](docs/win9x-howto.md));
+  * on its built-in Windows, with no Windows image needed
+    ([Windows games](CONFIGURATION.md#windows-games)). This is
+    experimental and under active development: some games already run
+    well, and more are tested and fixed all the time.
+
+Rust-DOS as a whole is a work in progress, and some games and programs
+may not run yet.
 
 *Rust-DOS is looking for contributors!*
 
@@ -24,6 +37,15 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   for DOS extenders, upper memory (`LOADHIGH`), a mouse driver, keyboard
   layouts, and a [DOS prompt](#the-dos-prompt) with batch files and a
   `COMMAND.COM` programs can shell out to
+* **Windows built in (experimental):** Windows 95 and 98 games without
+  a Windows image (`win32=true`, or `windows=builtin` in a
+  [game profile](CONFIGURATION.md#windows-games)). Rust-DOS has its own
+  KERNEL32, USER32 and GDI32, DirectX 3 to 6 (with Direct3D and Glide
+  on an emulated 3dfx card), and WinMM's wave audio, MIDI and CD audio.
+  It runs InstallShield and Wise setups. It runs fewer games than
+  booting Windows: a program that calls a function it doesn't have yet
+  stops with a message naming it
+  ([docs/native-windows.md](docs/native-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
   Trio64 with its 2D accelerator, an

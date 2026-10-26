@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 8;
+const WIN32_VERSION: u16 = 11;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -736,5 +736,8 @@ impl Bus {
             awe.after_load();
         }
         self.verite_after_load();
+        // The built-in DLLs' files are of the version of Windows the
+        // state's programs run under, which may not be the settings'.
+        crate::win32::dll_files::sync(self);
     }
 }

@@ -57,22 +57,13 @@ comctl32/subclass: skipped subclass.c:301
 comctl32/tab: tab: 1110 tests executed (0 marked as todo, 2 failures), 0 skipped.
 comctl32/tab: failed tab.c:918
 comctl32/tab: failed tab.c:919
-comctl32/toolbar: toolbar: 1287 tests executed (0 marked as todo, 48 failures), 0 skipped.
+comctl32/toolbar: toolbar: 1287 tests executed (0 marked as todo, 28 failures), 0 skipped.
 comctl32/toolbar: failed toolbar.c:888 (x9)
 comctl32/toolbar: failed toolbar.c:895 (x4)
 comctl32/toolbar: failed toolbar.c:899 (x5)
 comctl32/toolbar: failed toolbar.c:917 (x5)
-comctl32/toolbar: failed toolbar.c:985
-comctl32/toolbar: failed toolbar.c:987 (x3)
-comctl32/toolbar: failed toolbar.c:991
-comctl32/toolbar: failed toolbar.c:1030
-comctl32/toolbar: failed toolbar.c:1032
-comctl32/toolbar: failed toolbar.c:1034 (x6)
-comctl32/toolbar: failed toolbar.c:1037 (x6)
-comctl32/toolbar: failed toolbar.c:1044
-comctl32/toolbar: failed toolbar.c:1046
+comctl32/toolbar: failed toolbar.c:1037 (x2)
 comctl32/toolbar: failed toolbar.c:1066 (x3)
-comctl32/toolbar: failed toolbar.c:1074
 comctl32/tooltips: tooltips: 64 tests executed (0 marked as todo, 0 failures), 2 skipped.
 comctl32/tooltips: skipped tooltips.c:392
 comctl32/tooltips: skipped tooltips.c:549
@@ -88,6 +79,38 @@ comdlg32/filedlg: skipped filedlg.c:141
 comdlg32/filedlg: skipped filedlg.c:153
 comdlg32/filedlg: skipped filedlg.c:184
 comdlg32/filedlg: skipped filedlg.c:353 (x6)
+d3d8/buffer: buffer: 1 tests executed (0 marked as todo, 0 failures), 1 skipped.
+d3d8/buffer: skipped buffer.c:65
+d3d8/d3d8_main: d3d8_main: 18 tests executed (0 marked as todo, 0 failures), 0 skipped.
+d3d8/device: skipped device.c:1869
+d3d8/device: skipped device.c:532
+d3d8/device: skipped device.c:541
+d3d8/device: skipped device.c:1136
+d3d8/device: skipped device.c:1271
+d3d8/device: skipped device.c:1359
+d3d8/device: skipped device.c:1418
+d3d8/device: failed device.c:1612
+d3d8/device: failed device.c:1629
+d3d8/device: failed device.c:1749
+d3d8/device: failed device.c:1764
+d3d8/device: did not end
+d3d8/stateblock: stateblock: 8691 tests executed (0 marked as todo, 0 failures), 0 skipped.
+d3d8/surface: surface: 59 tests executed (0 marked as todo, 0 failures), 0 skipped.
+d3d8/texture: texture: 40 tests executed (0 marked as todo, 1 failure), 0 skipped.
+d3d8/texture: failed texture.c:116
+d3d8/visual: visual: 283 tests executed (0 marked as todo, 7 failures), 17 skipped.
+d3d8/visual: failed visual.c:1411
+d3d8/visual: failed visual.c:1413
+d3d8/visual: failed visual.c:1415
+d3d8/visual: failed visual.c:888
+d3d8/visual: failed visual.c:892
+d3d8/visual: failed visual.c:896
+d3d8/visual: skipped visual.c:949
+d3d8/visual: skipped visual.c:1262 (x15)
+d3d8/visual: failed visual.c:1279
+d3d8/visual: skipped visual.c:1631
+d3d8/volume: volume: 1 tests executed (0 marked as todo, 0 failures), 1 skipped.
+d3d8/volume: skipped volume.c:146
 ddraw/d3d: d3d: 514 tests executed (0 marked as todo, 1 failure), 3 skipped.
 ddraw/d3d: skipped d3d.c:377
 ddraw/d3d: failed d3d.c:891
@@ -354,7 +377,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11076 tests executed (0 marked as todo, 619 failures), 6 skipped.
+user32/msg: msg: 11076 tests executed (0 marked as todo, 594 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -363,8 +386,6 @@ user32/msg: failed msg.c:10731 (x3)
 user32/msg: failed msg.c:10729 (x2)
 user32/msg: failed msg.c:9529
 user32/msg: skipped msg.c:9545
-user32/msg: failed msg.c:12484 (x4)
-user32/msg: failed msg.c:12493 (x21)
 user32/msg: failed msg.c:8756
 user32/msg: failed msg.c:8760
 user32/msg: failed msg.c:8781

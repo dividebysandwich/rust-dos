@@ -18,6 +18,7 @@ use super::{
     current_tid, read_words, set_error, string_at, user, write_words,
 };
 use crate::cpu::Cpu;
+use crate::win32::object::{self, Kind};
 use crate::win32::task::{self, Next, Task};
 use crate::win32::thread::{self, Wait};
 use std::collections::VecDeque;
@@ -172,6 +173,7 @@ pub const QS_ALLINPUT: u32 = 0x00FF;
 
 /// PeekMessageA's flags.
 const PM_REMOVE: u32 = 0x0001;
+const PM_NOYIELD: u32 = 0x0002;
 
 pub const HWND_BROADCAST: u32 = 0xFFFF;
 const ERROR_TIMEOUT: u32 = 1460;
@@ -456,6 +458,7 @@ const TASK_SEND: u16 = 0;
 const TASK_DISPATCH: u16 = 1;
 const TASK_GET: u16 = 2;
 const TASK_BROADCAST: u16 = 12;
+const TASK_IDLE: u16 = task::INPUT_IDLE;
 
 pub const WH_CALLWNDPROC: u32 = 4;
 pub const WH_CALLWNDPROCRET: u32 = 12;
@@ -1032,6 +1035,8 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// WaitMessage: the thread waits for a message to come.
 pub fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::input::poll(cpu);
+    input_idle(cpu);
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
@@ -1064,6 +1069,10 @@ pub fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// Take the message the filter `f` wants from the thread `tid`'s queue,
 /// if one is there; `remove` takes it out.
 fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg> {
+    // What the devices did since they were last read comes first: a move
+    // replaces the one SetCursorPos queued, which the program's next
+    // SetCursorPos would otherwise undo before any poll saw it.
+    super::input::poll(cpu);
     let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
     // Posted messages.
@@ -1158,6 +1167,9 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 let flags = t.var(GET_FLAGS);
                 let remove = flags & PM_REMOVE != 0;
                 if let Some(m) = take_message(cpu, tid, f, remove) {
+                    if matches!(m.message, WM_TIMER | WM_SYSTIMER) && flags & PM_NOYIELD == 0 {
+                        input_idle(cpu);
+                    }
                     let state = user(cpu);
                     let q = state.queue_mut(tid);
                     q.last_time = m.time;
@@ -1186,6 +1198,9 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         );
                     }
                     return Next::Done(result);
+                }
+                if flags & PM_NOYIELD == 0 {
+                    input_idle(cpu);
                 }
                 if flags & WAITS == 0 {
                     // Peeking finds nothing.
@@ -1339,6 +1354,7 @@ pub fn broadcast_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
 /// GetQueueStatus(flags): what is in the queue (the high word) and what
 /// came since it was last asked (the low word).
 pub fn get_queue_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::input::poll(cpu);
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let mask = args[0];
@@ -1369,6 +1385,7 @@ pub fn get_queue_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetInputState: whether keyboard or mouse input waits.
 pub fn get_input_state(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::input::poll(cpu);
     let tid = current_tid(cpu);
     let any = user(cpu).queue(tid).is_some_and(|q| !q.input.is_empty());
     Some(any as u32)
@@ -1459,6 +1476,8 @@ fn msg_wait(
     timeout: u32,
     mask: u32,
 ) -> Option<u32> {
+    super::input::poll(cpu);
+    input_idle(cpu);
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let wait = QueueWait {
@@ -1507,6 +1526,126 @@ fn msg_wait(
     w.queue = Some(wait);
     thread::block(cpu, w);
     None
+}
+
+/// The running thread looks for input and finds none, or waits for it:
+/// its process is idle. Its input idle event is signaled, which ends
+/// WaitForInputIdle in the process that started it. As in Wine, it stays
+/// signaled after that, and getting a timer's message counts too. Unlike
+/// Wine, so does a PeekMessageA that finds nothing, as on older Windows
+/// (the answers Wine's tests take as theirs) and ReactOS: else a program
+/// that only peeks would make WinExec wait out its time-out.
+fn input_idle(cpu: &mut Cpu) {
+    let Some(id) = crate::win32::running(cpu).and_then(|p| p.idle_event) else {
+        return;
+    };
+    let win32 = &mut cpu.bus.win32;
+    match win32.objects.get_mut(id).map(|o| &mut o.kind) {
+        Some(Kind::Event { signaled, .. }) if !*signaled => *signaled = true,
+        _ => return,
+    }
+    // A thread that waits for it goes on now, not at the next tick.
+    let waited = win32
+        .processes
+        .iter()
+        .flat_map(|p| &p.threads)
+        .any(|t| t.wait.as_ref().is_some_and(|w| w.objects.contains(&id)));
+    if waited {
+        thread::wake(cpu);
+    }
+}
+
+const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+const INFINITE: u32 = 0xFFFF_FFFF;
+
+/// The variables of WaitForInputIdle's task: the process's handle, a
+/// handle of its idle event, the time-out and when the wait started, in
+/// milliseconds.
+const IDLE_PROCESS: usize = 0;
+const IDLE_EVENT: usize = 1;
+const IDLE_MS: usize = 2;
+const IDLE_START: usize = 3;
+
+/// WaitForInputIdle(process, ms): wait until the process is idle (see
+/// `input_idle`) or ends, handling the messages other threads send
+/// meanwhile, as Wine does. 0 then, or WAIT_TIMEOUT once `ms` passed.
+/// WAIT_FAILED at once for a process that has no idle event, a console
+/// one or one that ended, and for a handle that isn't a process's.
+pub fn wait_for_input_idle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[handle, ms] = args else { unreachable!() };
+    let Some(Kind::Process { id, .. }) = object::kind_of(cpu, handle) else {
+        set_error(cpu, super::ERROR_INVALID_HANDLE);
+        return Some(WAIT_FAILED);
+    };
+    let processes = &cpu.bus.win32.processes;
+    let Some(idle) = processes
+        .iter()
+        .find(|p| p.id == id)
+        .and_then(|p| p.idle_event)
+    else {
+        return Some(WAIT_FAILED);
+    };
+    object::objects(cpu).hold(idle);
+    let event = object::new_handle(cpu, idle);
+    let start = now_ms(cpu);
+    task::start(cpu, TASK_IDLE, vec![handle, event, ms, start], 8)
+}
+
+/// WaitForInputIdle's steps: MsgWaitForMultipleObjects for the process
+/// and its idle event, and for messages sent to the thread, which it
+/// handles before it waits on.
+pub fn idle_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    loop {
+        match t.step {
+            0 => {
+                let ms = t.var(IDLE_MS);
+                let mut left = ms;
+                if ms != INFINITE {
+                    let elapsed = now_ms(cpu).wrapping_sub(t.var(IDLE_START));
+                    if elapsed > ms {
+                        return idle_done(cpu, t, thread::WAIT_TIMEOUT);
+                    }
+                    left = ms - elapsed;
+                }
+                write_words(cpu, t.scratch, &[t.var(IDLE_PROCESS), t.var(IDLE_EVENT)]);
+                let args = [2, t.scratch, FALSE, left, QS_SENDMESSAGE];
+                return Next::call(address_of("MsgWaitForMultipleObjects"), &args, 1);
+            }
+            1 => match value {
+                2 => {
+                    if let Some(next) = handle_sent(cpu, 2) {
+                        return next;
+                    }
+                    // Nothing was sent after all: that it changed no
+                    // longer ends the wait at once.
+                    let tid = current_tid(cpu);
+                    if let Some(q) = user(cpu).queues.iter_mut().find(|q| q.tid == tid) {
+                        q.changed &= !QS_SENDMESSAGE;
+                    }
+                    t.step = 0;
+                }
+                thread::WAIT_TIMEOUT | WAIT_FAILED => return idle_done(cpu, t, value),
+                _ => return idle_done(cpu, t, 0),
+            },
+            2 => {
+                finish_sent(cpu, value);
+                let tid = current_tid(cpu);
+                let q = user(cpu).queue_mut(tid);
+                if q.waiting.last() == Some(&(0, 0)) {
+                    q.waiting.pop();
+                }
+                t.step = 0;
+            }
+            _ => return idle_done(cpu, t, 0),
+        }
+    }
+}
+
+/// WaitForInputIdle is done: it returns `result`, having closed its
+/// handle of the idle event.
+fn idle_done(cpu: &mut Cpu, t: &Task, result: u32) -> Next {
+    object::close(cpu, t.var(IDLE_EVENT));
+    Next::Done(result)
 }
 
 /// The smallest time between a timer's messages, in milliseconds.
@@ -1662,3 +1801,70 @@ crate::state_fields!(QueueWait {
     filter,
     reply
 });
+
+#[cfg(test)]
+mod tests {
+    use super::super::input;
+    use super::*;
+
+    /// A desktop with one window, which has the capture: the thread that
+    /// gets its mouse messages.
+    fn captured(cpu: &mut Cpu) -> u32 {
+        let hwnd = user(cpu).new_window(super::super::window::Window::default());
+        let hwnd = hwnd.expect("a window");
+        user(cpu).desktop = true;
+        user(cpu).input.capture = hwnd;
+        user(cpu).window(hwnd).map(|w| w.tid).unwrap_or(0)
+    }
+
+    /// The next message for `tid`, taken: its message and lParam.
+    fn take(cpu: &mut Cpu, tid: u32) -> Option<(u32, u32)> {
+        take_message(cpu, tid, Filter::default(), true).map(|m| (m.message, m.lparam))
+    }
+
+    /// A program that puts the cursor back in the middle after each move
+    /// (Xenocracy's dialogs in flight) gets the move the mouse made while
+    /// it drew its frame, not the one its SetCursorPos queued.
+    #[test]
+    fn a_move_between_frames_outlives_set_cursor_pos() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let tid = captured(&mut cpu);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        // The frame: the mouse moves before the program asks again.
+        cpu.bus.mouse.move_by(50.0, 0.0);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// A click the mouse made before the program put the cursor back is
+    /// where the mouse was, not where the cursor went.
+    #[test]
+    fn a_click_before_set_cursor_pos_stays_where_it_was() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let tid = captured(&mut cpu);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        cpu.bus.mouse.move_by(50.0, 0.0);
+        cpu.bus.mouse.button_down(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu, tid), Some((WM_LBUTTONDOWN, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// GetQueueStatus and GetInputState see a move the mouse made since
+    /// the devices were last read, as a program asks before it peeks.
+    #[test]
+    fn queue_status_sees_a_fresh_move() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        captured(&mut cpu);
+        assert_eq!(get_input_state(&mut cpu, &[]), Some(0));
+        cpu.bus.mouse.move_by(10.0, 0.0);
+        let status = get_queue_status(&mut cpu, &[QS_MOUSEMOVE]);
+        assert_eq!(status, Some(QS_MOUSEMOVE << 16 | QS_MOUSEMOVE));
+        assert_eq!(get_input_state(&mut cpu, &[]), Some(1));
+    }
+}

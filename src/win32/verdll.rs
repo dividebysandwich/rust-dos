@@ -411,6 +411,8 @@ fn builtin_resource(name: &str) -> Resource {
         "OLE32" => [2, 10, 35, 35],
         "MSVCRT" => [6, 0, 8168, 0],
         "GLIDE2X" => [2, 46, 0, 0],
+        // DirectX 8.1's.
+        "D3D8" => [4, 8, 1, 881],
         _ => [4, 0, 0, 950],
     };
     let text = match version {
@@ -486,6 +488,14 @@ fn builtin_resource(name: &str) -> Resource {
         ],
     };
     Resource::Unicode(write_unicode(&root))
+}
+
+/// The version resource of the built-in DLL `name`, as its file in the
+/// system directory has it (dll_files.rs).
+pub(super) fn builtin_version(name: &str) -> Vec<u8> {
+    match builtin_resource(name) {
+        Resource::Unicode(b) | Resource::Ansi(b) => b,
+    }
 }
 
 /// The version resource of the file `name` names: a file on disk, found

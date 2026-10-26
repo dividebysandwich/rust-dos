@@ -425,14 +425,30 @@ pub fn unregister_class(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// Whether `c` is one of COMCTL32's classes.
+fn is_comctl32(c: &Class) -> bool {
+    c.system && c.instance == crate::win32::comctl32::DLL.base
+}
+
+/// Map COMCTL32 in the running process when the class at `index` is one
+/// of its classes, before the process gets the class's procedure: the
+/// classes are there in every process, as on Windows 98, where SHELL32
+/// and others load COMCTL32 into the processes that import them, but
+/// the procedures are in its image, which the process may not have
+/// mapped yet. False when it couldn't be mapped.
+pub fn map_dll(cpu: &mut Cpu, index: u32) -> bool {
+    let comctl32 = user(cpu)
+        .classes
+        .get(index as usize)
+        .and_then(|c| c.as_ref())
+        .is_some_and(is_comctl32);
+    !comctl32 || crate::win32::loader::map_builtin_named(cpu, "COMCTL32.DLL").is_some()
+}
+
 /// COMCTL32's classes are global classes its DLL registers, as on
 /// Windows, and say so: USER32's own system classes don't.
 fn comctl32_global(c: &Class) -> u32 {
-    if c.system && c.instance == crate::win32::comctl32::DLL.base {
-        CS_GLOBALCLASS
-    } else {
-        0
-    }
+    if is_comctl32(c) { CS_GLOBALCLASS } else { 0 }
 }
 
 /// GetClassInfoA(instance, name, class): TRUE, with the WNDCLASSA.
@@ -442,6 +458,10 @@ pub fn get_class_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_CLASS_DOES_NOT_EXIST);
         return Some(FALSE);
     };
+    if !map_dll(cpu, index) {
+        set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
+        return Some(FALSE);
+    }
     let c = user(cpu).classes[index as usize].clone().unwrap();
     let words = [
         c.style & !CS_GLOBALCLASS | comctl32_global(&c),
@@ -466,6 +486,10 @@ pub fn get_class_info_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_CLASS_DOES_NOT_EXIST);
         return Some(FALSE);
     };
+    if !map_dll(cpu, index) {
+        set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
+        return Some(FALSE);
+    }
     let c = user(cpu).classes[index as usize].clone().unwrap();
     let words = [
         48,

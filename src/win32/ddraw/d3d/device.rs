@@ -98,6 +98,9 @@ pub struct Device {
     /// The render target, and the interface of it the device holds.
     pub target: u32,
     pub target_iface: u32,
+    /// Direct3D 8's depth buffer, set apart from the render target (0
+    /// for none). The others take the one attached to the target.
+    pub depth: u32,
     /// The card's texture units.
     pub tmus: u32,
     pub in_scene: bool,
@@ -169,6 +172,7 @@ crate::state_fields!(Device {
     ddraw,
     target,
     target_iface,
+    depth,
     tmus,
     in_scene,
     render,
@@ -284,11 +288,12 @@ pub const TOP_BLENDTEXTUREALPHA: u32 = 13;
 pub const TA_DIFFUSE: u32 = 0;
 pub const TA_CURRENT: u32 = 1;
 pub const TA_TEXTURE: u32 = 2;
+pub const TA_TFACTOR: u32 = 3;
 
 pub const TRANSFORMS: usize = 24;
 
 impl Device {
-    fn new(version: u32, ddraw: u32, target: u32, target_iface: u32, tmus: u32) -> Device {
+    pub fn new(version: u32, ddraw: u32, target: u32, target_iface: u32, tmus: u32) -> Device {
         let mut d = Device {
             version,
             ddraw,
@@ -470,6 +475,15 @@ pub fn z_buffer(cpu: &mut Cpu, id: u32) -> Option<u32> {
             .surface(a)
             .is_some_and(|z| z.caps[0] & DDSCAPS_ZBUFFER != 0)
     })
+}
+
+/// The depth buffer the device `d` draws with: Direct3D 8's own, or
+/// the one attached to its render target.
+pub fn depth_buffer(cpu: &mut Cpu, d: &Device) -> Option<u32> {
+    if d.version == 8 {
+        return (d.depth != 0 && state(cpu).surface(d.depth).is_some()).then_some(d.depth);
+    }
+    z_buffer(cpu, d.target)
 }
 
 /// Make a device of the DirectDraw object `dd` on the render target

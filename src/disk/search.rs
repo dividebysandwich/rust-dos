@@ -155,6 +155,9 @@ impl DiskController {
     // Returns: Attribute Byte (0x20 = Archive, 0x10 = Subdir, etc.)
     #[allow(dead_code)]
     pub fn get_file_attribute(&self, filename: &str) -> Result<u16, u8> {
+        if let Some(attr) = self.system_attribute(filename) {
+            return Ok(attr);
+        }
         if let Some((_, drive, path)) = self.locate_in_memory(filename) {
             let files = drive.tree().ok_or(0x03u8)?;
             return match files.file(&path) {
@@ -192,6 +195,9 @@ impl DiskController {
     /// Hidden/System bits. Directory and Volume Label bits cannot be set via
     /// this call on real DOS either.
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
+        if self.is_system_entry(filename) {
+            return Err(0x05);
+        }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
             volume.find(&parts)?;
@@ -216,6 +222,16 @@ impl DiskController {
 
     /// DOS AH=39h: Create a directory at the given DOS path.
     pub fn create_directory(&self, path: &str) -> Result<(), u8> {
+        // A system file or directory is there already.
+        if self.is_system_entry(path) {
+            return Err(0x05);
+        }
+        self.make_system_dirs(path);
+        self.create_drive_directory(path)
+    }
+
+    /// Make the directory `path` on its drive.
+    pub(super) fn create_drive_directory(&self, path: &str) -> Result<(), u8> {
         let normalized = path.replace('/', "\\");
         let (drive, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
@@ -256,6 +272,10 @@ impl DiskController {
 
     /// DOS AH=3Ah: Remove an empty directory.
     pub fn remove_directory(&self, path: &str) -> Result<(), u8> {
+        // It has the system files, whether the drive has it or not.
+        if self.holds_system_files(path) {
+            return Err(0x05);
+        }
         let normalized = path.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized).ok_or(0x03)?;
         if let Some((_, volume, parts)) = self.locate_fat(path) {
@@ -302,7 +322,7 @@ impl DiskController {
     }
 
     /// Helper: Simple DOS wildcard matching (? and *)
-    fn matches_pattern(filename: &str, pattern: &str) -> bool {
+    pub(super) fn matches_pattern(filename: &str, pattern: &str) -> bool {
         if pattern == "*.*" {
             return true;
         }
@@ -392,7 +412,7 @@ impl DiskController {
     /// the directory's own for ".". Being directories, they are found only
     /// by a search whose attributes take directories (an installer copying
     /// "*.*" with attribute 0 gets files alone).
-    fn dot_entries(
+    pub(super) fn dot_entries(
         pattern: &str,
         search_attr: u16,
         times: [(u16, u16); 2],
@@ -473,8 +493,19 @@ impl DiskController {
     }
 
     /// All entries matching a search spec, in the order FindFirst/FindNext
-    /// return them. Directory listings (DIR) use this directly.
+    /// return them, the system files after the drive's own
+    /// (system_files.rs). Directory listings (DIR) use this directly.
     pub fn list_directory(
+        &self,
+        search_spec: &str,
+        search_attr: u16,
+    ) -> Result<Vec<DosDirEntry>, u8> {
+        let listed = self.list_drive_directory(search_spec, search_attr);
+        self.with_system_entries(search_spec, search_attr, listed)
+    }
+
+    /// The entries of the drive's own matching a search spec.
+    fn list_drive_directory(
         &self,
         search_spec: &str,
         search_attr: u16,

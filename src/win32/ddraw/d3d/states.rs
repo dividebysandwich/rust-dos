@@ -165,7 +165,7 @@ fn viewport_words(v: &Viewport7) -> [u32; 6] {
 
 /// The light `index`, made as Direct3D 7's default light if there is
 /// none: white and directional, shining along z.
-fn light_slot(d: &mut Device, index: u32) -> &mut LightSlot {
+pub fn light_slot(d: &mut Device, index: u32) -> &mut LightSlot {
     let i = match d.lights.iter().position(|l| l.index == index) {
         Some(i) => i,
         None => {
@@ -188,7 +188,7 @@ fn light_slot(d: &mut Device, index: u32) -> &mut LightSlot {
 
 /// Set the texture of a stage: the interface `iface` (0 for none), on
 /// which the device holds a reference.
-fn set_stage_texture(cpu: &mut Cpu, id: u32, stage: u32, iface: u32) {
+pub fn set_stage_texture(cpu: &mut Cpu, id: u32, stage: u32, iface: u32) {
     if iface != 0 && super::super::this(cpu, iface).is_none() {
         return;
     }

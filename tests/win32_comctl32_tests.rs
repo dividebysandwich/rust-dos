@@ -17,6 +17,7 @@ const BASE: u32 = 0x40_0000;
 struct Layout {
     data: u32,
     iat: Vec<u32>,
+    imports: &'static [(&'static str, &'static [&'static str])],
 }
 
 impl Layout {
@@ -91,11 +92,31 @@ const IMPORTS: &[(&str, &[&str])] = &[
         &["SetTimer", "GetActiveWindow", "PostMessageA"],
     ),
     ("KERNEL32.DLL", &["GetModuleHandleA"]),
+    (
+        "USER32.DLL",
+        &[
+            "CreateDialogIndirectParamA",
+            "GetWindowRect",
+            "GetDialogBaseUnits",
+        ],
+    ),
+    (
+        "GDI32.DLL",
+        &[
+            "CreateCompatibleDC",
+            "SelectObject",
+            "GetStockObject",
+            "CreateFontA",
+            "GetTextMetricsA",
+            "GetTextExtentPoint32A",
+        ],
+    ),
 ];
 
 /// The import slot of `name`.
 fn import(l: &Layout, name: &str) -> AsmMemoryOperand {
-    let index = IMPORTS
+    let index = l
+        .imports
         .iter()
         .flat_map(|(_, names)| names.iter())
         .position(|n| *n == name)
@@ -127,13 +148,22 @@ fn call(name: &'static str, args: &[Arg]) -> Call {
 /// A program making `calls`, with `data` (DATA_SIZE bytes) and where its
 /// data is.
 fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
+    program_with(IMPORTS, data, calls)
+}
+
+/// A program making `calls`, as `program`, importing `imports` only.
+fn program_with(
+    imports: &'static [(&'static str, &'static [&'static str])],
+    data: &[u8],
+    calls: &[Call],
+) -> (Vec<u8>, u32) {
     assert!(calls.len() as u32 <= MAX_CALLS);
     let mut b = Builder::exe(BASE);
-    let lists: Vec<Vec<Imp>> = IMPORTS
+    let lists: Vec<Vec<Imp>> = imports
         .iter()
         .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
         .collect();
-    let dlls: Vec<(&str, &[Imp])> = IMPORTS
+    let dlls: Vec<(&str, &[Imp])> = imports
         .iter()
         .zip(&lists)
         .map(|((dll, _), list)| (*dll, list.as_slice()))
@@ -147,6 +177,7 @@ fn program(data: &[u8], calls: &[Call]) -> (Vec<u8>, u32) {
     let l = Layout {
         data: BASE + data_rva,
         iat,
+        imports,
     };
     let code_rva = b.next_rva();
     // The timer procedure, first in the code.
@@ -240,7 +271,11 @@ fn peek_str(cpu: &Cpu, lin: u32) -> String {
 /// Run `calls` with `data`: the machine, still running the program,
 /// and where its data is.
 fn run(test: &str, data: &[u8], calls: &[Call]) -> (Cpu, u32) {
-    let (exe, at) = program(data, calls);
+    run_program(test, program(data, calls))
+}
+
+/// Run the program `exe`, whose data is at `at`, as `run` does.
+fn run_program(test: &str, (exe, at): (Vec<u8>, u32)) -> (Cpu, u32) {
     let mut cpu = machine(test, exe);
     for _ in 0..2000 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
@@ -386,6 +421,45 @@ fn a_progress_bar_keeps_its_range_and_steps() {
     assert_eq!(r[6], 20, "STEPIT gives the position before");
     assert_eq!(r[7], 25);
     assert_eq!(r[9], 50, "a position past the range stops at its end");
+}
+
+#[test]
+fn a_program_without_comctl32_makes_a_progress_bar() {
+    use Arg::*;
+    const PBM_SETPOS: u32 = 0x0402;
+    const PBM_GETPOS: u32 = 0x0408;
+    const S_COMCTL32: u32 = 0x260;
+    // The timer procedure's functions, and those the calls make: no
+    // COMCTL32, as in a setup program that uses SHELL32.
+    const USER_ONLY: &[(&str, &[&str])] = &[
+        (
+            "USER32.DLL",
+            &[
+                "CreateWindowExA",
+                "SendMessageA",
+                "GetActiveWindow",
+                "PostMessageA",
+            ],
+        ),
+        ("KERNEL32.DLL", &["GetModuleHandleA"]),
+    ];
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_COMCTL32, b"COMCTL32.DLL\0");
+    let calls = [
+        call("GetModuleHandleA", &[At(S_COMCTL32)]),
+        parent(),
+        child(S_PROGRESS, 0, 200, 20, 1, 1),
+        send(2, PBM_SETPOS, I(30), I(0)),
+        send(2, PBM_GETPOS, I(0), I(0)),
+        call("GetModuleHandleA", &[At(S_COMCTL32)]),
+    ];
+    let (cpu, at) = run_program("no_comctl32", program_with(USER_ONLY, &d, &calls));
+    let r = results(&cpu, at, calls.len());
+    assert_eq!(r[0], 0, "the program starts without COMCTL32");
+    assert_ne!(r[2], 0, "the progress bar is made");
+    assert_eq!(r[4], 30, "its procedure runs");
+    assert_ne!(r[5], 0, "COMCTL32 is mapped for it");
 }
 
 #[test]
@@ -995,4 +1069,102 @@ fn a_sorted_report_list_view_keeps_its_items_in_order() {
     assert_ne!(r[8], 0, "the report view has a header");
     assert_eq!(r[9], 1, "the column is the header's item");
     assert_eq!(r[10], 80);
+}
+
+// GDI's raster fonts and the dialog base units USER takes from them.
+
+const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// The TEXTMETRICA at `at`: tmHeight, tmAscent, tmDescent,
+/// tmInternalLeading, tmAveCharWidth and tmMaxCharWidth.
+fn text_metric(cpu: &Cpu, at: u32) -> [u32; 6] {
+    [0, 4, 8, 12, 20, 24].map(|o| peek(cpu, at + o))
+}
+
+#[test]
+fn ms_sans_serif_8_and_system_have_windows_98s_metrics() {
+    use Arg::*;
+    const SYSTEM_FONT: u32 = 13;
+    const FACE: u32 = FREE;
+    const LETTERS: u32 = FREE + 0x20;
+    const TM: [u32; 2] = [FREE + 0x60, FREE + 0xA0];
+    const SIZE: [u32; 2] = [FREE + 0xE0, FREE + 0xE8];
+    let mut font = vec![I(-11i32 as u32)];
+    font.extend([I(0); 3]);
+    font.push(I(400));
+    font.extend([I(0); 8]);
+    font.push(At(FACE));
+    let calls = [
+        call("CreateCompatibleDC", &[I(0)]),
+        call("CreateFontA", &font),
+        call("SelectObject", &[Res(0), Res(1)]),
+        call("GetTextMetricsA", &[Res(0), At(TM[0])]),
+        call(
+            "GetTextExtentPoint32A",
+            &[Res(0), At(LETTERS), I(52), At(SIZE[0])],
+        ),
+        call("GetStockObject", &[I(SYSTEM_FONT)]),
+        call("SelectObject", &[Res(0), Res(5)]),
+        call("GetTextMetricsA", &[Res(0), At(TM[1])]),
+        call(
+            "GetTextExtentPoint32A",
+            &[Res(0), At(LETTERS), I(52), At(SIZE[1])],
+        ),
+        call("GetDialogBaseUnits", &[]),
+    ];
+    let mut d = data();
+    put(&mut d, FACE, b"MS Sans Serif\0");
+    put(&mut d, LETTERS, ALPHABET);
+    let (cpu, at) = run("font_metrics", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[1], 0, "the font is made");
+    assert_eq!(r[3], 1);
+    assert_eq!(r[4], 1);
+    // SSERIFE.FON's 8 point size and VGASYS.FON's System, as Windows 98
+    // SE gives them at 96 dots an inch.
+    assert_eq!(text_metric(&cpu, at + TM[0]), [13, 11, 2, 2, 5, 11]);
+    let extent = |i: usize| (peek(&cpu, at + SIZE[i]), peek(&cpu, at + SIZE[i] + 4));
+    assert_eq!(extent(0), (323, 13), "the alphabet in MS Sans Serif 8");
+    assert_eq!(text_metric(&cpu, at + TM[1]), [16, 13, 3, 3, 7, 14]);
+    assert_eq!(extent(1), (429, 16), "the alphabet in System");
+    // (429 / 26 + 1) / 2 = 8 by 16.
+    assert_eq!(r[9], 0x0010_0008, "the dialog base units");
+}
+
+#[test]
+fn a_dialog_in_ms_sans_serif_8_is_6_by_13_units() {
+    use Arg::*;
+    const DS_SETFONT: u32 = 0x40;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const TEMPLATE: u32 = FREE;
+    const RECT: u32 = FREE + 0x80;
+    let calls = [
+        call("GetModuleHandleA", &[I(0)]),
+        call(
+            "CreateDialogIndirectParamA",
+            &[Res(0), At(TEMPLATE), I(0), I(0), I(0)],
+        ),
+        call("GetWindowRect", &[Res(1), At(RECT)]),
+    ];
+    let mut d = data();
+    // DLGTEMPLATE: no controls, at (10, 10) and 200 by 100 units, no
+    // menu, class or title, then the font: 8 points, MS Sans Serif.
+    let mut t = Vec::new();
+    t.extend((WS_POPUP | DS_SETFONT).to_le_bytes());
+    t.extend(0u32.to_le_bytes());
+    for v in [0u16, 10, 10, 200, 100, 0, 0, 0, 8] {
+        t.extend(v.to_le_bytes());
+    }
+    for c in "MS Sans Serif\0".encode_utf16() {
+        t.extend(c.to_le_bytes());
+    }
+    put(&mut d, TEMPLATE, &t);
+    let (cpu, at) = run("dialog_units", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[1], 0, "the dialog is made");
+    assert_eq!(r[2], 1);
+    let rect = [0, 4, 8, 12].map(|o| peek(&cpu, at + RECT + o) as i32);
+    // x 10 * 6 / 4, y 10 * 13 / 8, 200 * 6 / 4 wide and 100 * 13 / 8
+    // high, rounded.
+    assert_eq!(rect, [15, 16, 15 + 300, 16 + 163]);
 }

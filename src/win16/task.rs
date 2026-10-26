@@ -67,6 +67,22 @@ fn ensure_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<bool, Strin
     if super::win16_ref(cpu).is_some() {
         return Ok(false);
     }
+    make_process(cpu, environment).inspect_err(|_| discard_process(cpu))?;
+    Ok(true)
+}
+
+/// Take away the Win16 process `ensure_process` made, when it or its
+/// first task couldn't be made: no task of it ever ran.
+fn discard_process(cpu: &mut Cpu) {
+    let pid = cpu.bus.win32.win16.pid;
+    if pid != 0 {
+        crate::win32::discard_process(cpu, pid);
+    }
+    cpu.bus.win32.win16 = super::State::default();
+}
+
+/// Make the Win16 process (see `ensure_process`).
+fn make_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<(), String> {
     cpu.bus.win32.win16 = super::State::default();
     let path = format!("{}\\{}", crate::win32::loader::SYSTEM_DIR, PROCESS_NAME);
     let created = crate::win32::create_process_from(
@@ -140,7 +156,7 @@ fn ensure_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<bool, Strin
         module::load(cpu, name, "", &mut inits)?;
     }
     cpu.bus.log_string("[W16] Made the Win16 process");
-    Ok(true)
+    Ok(())
 }
 
 /// The selector KERNEL exports for the place `seg` of the first
@@ -165,8 +181,13 @@ pub fn start(
     environment: Vec<String>,
 ) -> Result<(), String> {
     let arguments = line.get(path.len()..).unwrap_or("").to_string();
-    ensure_process(cpu, environment)?;
-    create_task(cpu, path, &arguments, 1, 0)?;
+    let made = ensure_process(cpu, environment)?;
+    if let Err(e) = create_task(cpu, path, &arguments, 1, 0) {
+        if made {
+            discard_process(cpu);
+        }
+        return Err(e);
+    }
     cpu.bus.win32.root = cpu.bus.win32.win16.pid;
     Ok(())
 }
@@ -190,8 +211,16 @@ pub fn spawn(
     parent: u16,
     environment: Vec<String>,
 ) -> Result<Spawned, String> {
-    ensure_process(cpu, environment)?;
-    let i = create_task(cpu, path, arguments, show, parent)?;
+    let made = ensure_process(cpu, environment)?;
+    let i = match create_task(cpu, path, arguments, show, parent) {
+        Ok(i) => i,
+        Err(e) => {
+            if made {
+                discard_process(cpu);
+            }
+            return Err(e);
+        }
+    };
     let task = &cpu.bus.win32.win16.tasks[i];
     let tid = task.tid;
     let thread_object = super::win16_ref(cpu)

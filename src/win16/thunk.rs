@@ -223,6 +223,12 @@ pub fn enter32_at(
 /// KERNEL32's `Win16Return`: 32-bit code 16-bit code called returned.
 pub fn win16_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let value = cpu.eax();
+    // A Win32 program can call it by name from a thread that isn't a
+    // task's.
+    if super::current_task(cpu).is_none() {
+        crate::win32::fatal(cpu, "a return to 16-bit code from a Win32 thread", None);
+        return None;
+    }
     let Some(Frame::To32 {
         mut ctx,
         post,

@@ -4,6 +4,13 @@
 //! lit columns and a column between glyphs. The glyphs are code page 437's,
 //! so ANSI text is drawn with the glyph of the same character, or of its
 //! letter without the accent, or a question mark.
+//!
+//! System and MS Sans Serif, the faces dialogs and window frames use, move
+//! on as far as Windows 98's own raster fonts do instead: each character
+//! has the width it has in VGASYS.FON or SSERIFE.FON, and its ROM glyph is
+//! squeezed or stretched to fit. Dialogs size themselves from these widths
+//! (GdiGetCharDimensions), so a dialog's size and the way its text wraps
+//! come out as on Windows.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -155,6 +162,228 @@ const SANS_FACE: usize = 3;
 const SERIF_FACE: usize = 4;
 const COURIER_FACE: usize = 5;
 
+/// A size of a face that Windows 98 has as a raster font: its metrics in
+/// pixels and how far each character from 20h to FFh moves on, as
+/// VGASYS.FON and SSERIFE.FON have them at 96 dots an inch.
+struct Raster {
+    face: usize,
+    height: i32,
+    ascent: i32,
+    internal: i32,
+    /// tmAveCharWidth.
+    average: i32,
+    /// The character drawn for a byte the font doesn't have.
+    default: u8,
+    widths: [u8; 224],
+}
+
+#[rustfmt::skip]
+const RASTERS: &[Raster] = &[
+    // System 10 (16 pixels).
+    Raster {
+        face: SYSTEM_FACE,
+        height: 16,
+        ascent: 13,
+        internal: 3,
+        average: 7,
+        default: 128,
+        widths: [
+            4, 4, 6, 8, 8, 11, 9, 4, 4, 4, 6, 8, 4, 4, 4, 4,
+            8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 8, 8, 8, 8,
+            14, 8, 10, 9, 10, 9, 8, 10, 10, 4, 7, 9, 8, 12, 10, 10,
+            9, 10, 10, 9, 8, 10, 8, 14, 9, 10, 9, 4, 4, 4, 5, 8,
+            5, 8, 8, 7, 8, 8, 4, 8, 8, 4, 4, 7, 4, 12, 8, 8,
+            8, 8, 5, 8, 4, 8, 8, 10, 8, 8, 8, 5, 4, 5, 5, 4,
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+            9, 4, 8, 8, 8, 8, 4, 8, 5, 10, 5, 7, 8, 4, 10, 8,
+            5, 8, 4, 4, 5, 8, 7, 4, 5, 4, 5, 7, 11, 11, 11, 8,
+            8, 8, 8, 8, 8, 8, 13, 9, 9, 9, 9, 9, 4, 4, 4, 4,
+            10, 10, 10, 10, 10, 10, 10, 8, 10, 10, 10, 10, 10, 10, 9, 8,
+            8, 8, 8, 8, 8, 8, 12, 7, 8, 8, 8, 8, 4, 4, 4, 4,
+            8, 8, 8, 8, 8, 8, 8, 6, 8, 8, 8, 8, 8, 8, 8, 8,
+        ],
+    },
+    // MS Sans Serif 8 (13 pixels).
+    Raster {
+        face: SANS_FACE,
+        height: 13,
+        ascent: 11,
+        internal: 2,
+        average: 5,
+        default: 129,
+        widths: [
+            3, 3, 5, 7, 6, 8, 6, 2, 3, 3, 4, 6, 3, 3, 3, 5,
+            6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 6, 6, 6, 6,
+            11, 7, 7, 7, 8, 7, 6, 8, 8, 3, 5, 7, 6, 9, 8, 8,
+            7, 8, 8, 7, 7, 8, 7, 11, 7, 7, 7, 3, 5, 3, 6, 6,
+            3, 6, 6, 6, 6, 6, 3, 6, 6, 2, 2, 6, 2, 8, 6, 6,
+            6, 6, 3, 5, 3, 6, 6, 8, 5, 5, 5, 4, 2, 4, 7, 3,
+            6, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 6, 6, 6, 6, 2, 6, 3, 9, 4, 6, 6, 3, 8, 6,
+            4, 6, 3, 3, 3, 6, 6, 3, 3, 3, 4, 6, 8, 8, 8, 6,
+            7, 7, 7, 7, 7, 7, 10, 7, 7, 7, 7, 7, 3, 3, 3, 3,
+            8, 8, 8, 8, 8, 8, 8, 6, 8, 8, 8, 8, 8, 7, 7, 6,
+            6, 6, 6, 6, 6, 6, 10, 6, 6, 6, 6, 6, 2, 4, 4, 4,
+            6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 6, 5,
+        ],
+    },
+    // MS Sans Serif 10 (16 pixels).
+    Raster {
+        face: SANS_FACE,
+        height: 16,
+        ascent: 13,
+        internal: 3,
+        average: 7,
+        default: 129,
+        widths: [
+            3, 3, 5, 7, 7, 12, 9, 3, 4, 4, 5, 7, 3, 4, 3, 4,
+            7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 3, 3, 7, 7, 7, 7,
+            14, 9, 9, 9, 10, 9, 8, 10, 10, 3, 7, 8, 7, 11, 10, 10,
+            9, 10, 10, 9, 9, 10, 9, 13, 8, 9, 8, 4, 4, 4, 7, 7,
+            4, 8, 8, 7, 8, 8, 3, 8, 7, 3, 3, 7, 3, 11, 7, 8,
+            8, 8, 4, 7, 3, 7, 7, 9, 6, 7, 6, 5, 3, 5, 9, 4,
+            7, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+            4, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+            3, 3, 7, 7, 7, 7, 3, 7, 4, 8, 5, 7, 7, 4, 8, 7,
+            4, 7, 4, 4, 4, 7, 7, 3, 4, 4, 5, 7, 9, 9, 9, 7,
+            9, 9, 9, 9, 9, 9, 13, 9, 9, 9, 9, 9, 3, 3, 3, 3,
+            9, 10, 10, 10, 10, 10, 10, 7, 10, 10, 10, 10, 10, 9, 9, 8,
+            8, 8, 8, 8, 8, 8, 13, 7, 8, 8, 8, 8, 3, 3, 3, 3,
+            8, 7, 8, 8, 8, 8, 8, 7, 8, 7, 7, 7, 7, 7, 8, 7,
+        ],
+    },
+    // MS Sans Serif 12 (20 pixels).
+    Raster {
+        face: SANS_FACE,
+        height: 20,
+        ascent: 16,
+        internal: 4,
+        average: 8,
+        default: 129,
+        widths: [
+            4, 4, 6, 9, 9, 14, 11, 3, 5, 5, 6, 9, 4, 5, 4, 4,
+            9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 4, 4, 9, 9, 9, 9,
+            16, 11, 11, 11, 12, 11, 10, 13, 12, 5, 8, 10, 9, 13, 11, 12,
+            10, 12, 12, 11, 9, 12, 11, 15, 11, 11, 10, 4, 4, 4, 7, 9,
+            5, 9, 9, 8, 9, 9, 5, 9, 9, 3, 3, 8, 3, 13, 9, 9,
+            9, 9, 5, 8, 5, 9, 7, 11, 7, 7, 8, 5, 5, 5, 9, 5,
+            9, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+            5, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+            4, 4, 9, 9, 9, 9, 5, 9, 5, 11, 6, 9, 9, 5, 11, 9,
+            5, 9, 5, 5, 5, 8, 8, 4, 5, 5, 6, 9, 12, 12, 12, 9,
+            11, 11, 11, 11, 11, 11, 16, 11, 11, 11, 11, 11, 5, 5, 5, 5,
+            12, 11, 12, 12, 12, 12, 12, 9, 12, 12, 12, 12, 12, 11, 10, 10,
+            9, 9, 9, 9, 9, 9, 15, 8, 9, 9, 9, 9, 3, 3, 3, 3,
+            9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 7, 9, 7,
+        ],
+    },
+    // MS Sans Serif 14 (24 pixels).
+    Raster {
+        face: SANS_FACE,
+        height: 24,
+        ascent: 19,
+        internal: 6,
+        average: 9,
+        default: 129,
+        widths: [
+            5, 5, 7, 10, 10, 15, 13, 4, 6, 6, 7, 11, 5, 6, 5, 5,
+            10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 5, 5, 11, 11, 11, 10,
+            19, 13, 12, 13, 13, 13, 12, 14, 14, 4, 9, 12, 10, 16, 14, 15,
+            12, 15, 13, 12, 12, 13, 13, 18, 14, 12, 12, 5, 5, 5, 9, 10,
+            6, 10, 11, 10, 11, 11, 4, 11, 11, 4, 4, 9, 4, 16, 11, 11,
+            11, 11, 6, 9, 4, 11, 9, 14, 10, 9, 9, 6, 4, 6, 11, 6,
+            10, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+            6, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+            5, 5, 10, 10, 10, 10, 4, 10, 6, 14, 7, 10, 11, 6, 14, 10,
+            6, 11, 5, 5, 6, 9, 10, 5, 6, 5, 7, 10, 15, 15, 15, 10,
+            13, 13, 13, 13, 13, 13, 19, 13, 13, 13, 13, 13, 4, 4, 4, 6,
+            13, 14, 15, 15, 15, 15, 15, 11, 15, 13, 13, 13, 13, 12, 13, 11,
+            10, 10, 10, 10, 10, 10, 17, 10, 11, 11, 11, 11, 4, 4, 4, 4,
+            11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 9, 11, 9,
+        ],
+    },
+    // MS Sans Serif 18 (29 pixels).
+    Raster {
+        face: SANS_FACE,
+        height: 29,
+        ascent: 23,
+        internal: 5,
+        average: 12,
+        default: 129,
+        widths: [
+            6, 6, 8, 13, 13, 22, 16, 4, 8, 8, 10, 14, 6, 8, 6, 7,
+            13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 6, 6, 14, 14, 14, 12,
+            24, 15, 16, 17, 17, 16, 15, 18, 17, 6, 12, 16, 13, 20, 18, 19,
+            16, 19, 17, 16, 16, 17, 15, 22, 17, 16, 14, 7, 7, 7, 11, 13,
+            8, 13, 14, 12, 14, 14, 6, 14, 13, 6, 6, 12, 6, 20, 13, 14,
+            14, 14, 8, 12, 6, 13, 11, 18, 11, 11, 11, 9, 6, 9, 14, 8,
+            13, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+            8, 6, 6, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+            6, 6, 13, 13, 13, 13, 6, 13, 8, 20, 8, 13, 14, 8, 20, 13,
+            8, 14, 7, 7, 8, 13, 12, 6, 8, 7, 8, 13, 18, 18, 18, 12,
+            15, 15, 15, 15, 15, 15, 24, 17, 16, 16, 16, 16, 6, 6, 6, 6,
+            17, 18, 19, 19, 19, 19, 19, 14, 19, 17, 17, 17, 17, 16, 16, 15,
+            13, 13, 13, 13, 13, 13, 21, 12, 14, 14, 14, 14, 6, 6, 6, 6,
+            14, 13, 14, 14, 14, 14, 14, 14, 14, 13, 13, 13, 13, 11, 14, 11,
+        ],
+    },
+    // MS Sans Serif 24 (37 pixels).
+    Raster {
+        face: SANS_FACE,
+        height: 37,
+        ascent: 29,
+        internal: 5,
+        average: 16,
+        default: 129,
+        widths: [
+            9, 9, 11, 18, 18, 28, 22, 7, 11, 11, 12, 19, 9, 10, 9, 9,
+            18, 16, 18, 18, 18, 18, 18, 18, 18, 18, 9, 9, 19, 19, 19, 17,
+            30, 22, 21, 23, 23, 21, 20, 25, 23, 8, 16, 21, 18, 26, 24, 25,
+            21, 25, 22, 21, 20, 23, 22, 31, 21, 22, 20, 9, 9, 9, 15, 18,
+            11, 18, 18, 16, 18, 17, 9, 18, 18, 7, 7, 16, 7, 27, 18, 18,
+            18, 18, 11, 16, 9, 18, 15, 23, 15, 15, 16, 11, 7, 11, 19, 11,
+            18, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+            11, 9, 9, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+            9, 9, 18, 18, 18, 18, 7, 18, 11, 24, 12, 18, 19, 10, 24, 16,
+            11, 19, 9, 9, 11, 18, 17, 9, 11, 9, 12, 18, 23, 23, 23, 17,
+            22, 22, 22, 22, 22, 22, 32, 23, 21, 21, 21, 21, 8, 8, 8, 8,
+            23, 24, 25, 25, 25, 25, 25, 19, 25, 23, 23, 23, 23, 22, 21, 19,
+            18, 18, 18, 18, 18, 18, 29, 16, 17, 17, 17, 17, 7, 7, 7, 7,
+            18, 18, 18, 18, 18, 18, 18, 19, 18, 18, 18, 18, 18, 15, 18, 15,
+        ],
+    },
+];
+
+/// The raster size of the face `fi` a font gets, if the face has any: the
+/// one as high as `device_height`, or with characters as high for a
+/// negative one, and true; or else the one nearest the `cell` the font
+/// is drawn at, and false.
+fn raster_of(fi: usize, device_height: i32, cell: i32) -> Option<(usize, bool)> {
+    let sizes = || (0..RASTERS.len()).filter(|&i| RASTERS[i].face == fi);
+    let r = |i: usize| &RASTERS[i];
+    let exact = match device_height {
+        0 => sizes().find(|&i| r(i).height == FACES[fi].cell),
+        h if h < 0 => sizes().find(|&i| r(i).height - r(i).internal == -h),
+        h => sizes().find(|&i| r(i).height == h),
+    };
+    match exact {
+        Some(i) => Some((i, true)),
+        None => sizes()
+            .min_by_key(|&i| (r(i).height - cell).abs())
+            .map(|i| (i, false)),
+    }
+}
+
+/// How far the byte `b` moves on in the raster size `r` drawn `cell`
+/// pixels high.
+fn raster_width(r: &Raster, b: u8, cell: i32) -> i32 {
+    let c = if b < 0x20 { r.default } else { b };
+    let w = r.widths[(c - 0x20) as usize] as i32;
+    ((w * cell + r.height / 2) / r.height).max(1)
+}
+
 /// A LOGFONTA, 60 bytes.
 pub fn logfont(
     height: i32,
@@ -239,6 +468,8 @@ struct Key {
     glyph_width: i32,
     bold: bool,
     fixed: bool,
+    /// The raster size (in RASTERS) whose widths the glyphs take.
+    raster: Option<usize>,
 }
 
 /// A glyph: its rows' lit pixels as bit masks (bit 0 the leftmost), how
@@ -251,41 +482,99 @@ struct Glyph {
 
 struct Glyphs {
     glyphs: Vec<Glyph>,
+    /// The glyphs are the font's ANSI characters', not code page 437's.
+    ansi: bool,
 }
 
 thread_local! {
     static CACHE: RefCell<HashMap<Key, Rc<Glyphs>>> = RefCell::new(HashMap::new());
 }
 
-fn make_glyphs(key: Key) -> Glyphs {
+/// The rows of the ROM glyph `g`, scaled to the key's cell height and
+/// `gw` columns.
+fn rom_rows(key: &Key, g: usize, gw: i32) -> Vec<u64> {
     let (data, base_h) = match key.base {
         8 => (GLYPHS_8, 8),
         14 => (GLYPHS_14, 14),
         _ => (GLYPHS_16, 16),
     };
+    let mut rows = Vec::with_capacity(key.cell as usize);
+    for ty in 0..key.cell {
+        let byte = match g.checked_sub(256) {
+            Some(e) => EXTRA_GLYPHS[e].1[ty as usize * 16 / key.cell as usize],
+            None => {
+                let sy = (ty as usize * base_h) / key.cell as usize;
+                data.get(g * base_h + sy).copied().unwrap_or(0)
+            }
+        };
+        let mut bits = 0u64;
+        for tx in 0..gw {
+            let sx = (tx * 8) / gw;
+            if byte & (0x80 >> sx) != 0 {
+                bits |= 1 << tx;
+            }
+        }
+        rows.push(bits);
+    }
+    rows
+}
+
+/// The glyphs of a raster size: each byte's ROM glyph, its lit columns
+/// squeezed or stretched to the character's width less the column
+/// between characters. A bold face's widths have its extra column in
+/// them; a font made bold moves on a column more.
+fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
+    let native_bold = FACES[r.face].weight >= 600;
+    let made_bold = key.bold && !native_bold;
+    let glyphs = (0..256usize)
+        .map(|b| {
+            let w = raster_width(r, b as u8, key.cell);
+            let mut rows = rom_rows(&key, ansi_glyph(b as u8) as usize, 8);
+            let all = rows.iter().fold(0u64, |a, &r| a | r);
+            if all != 0 {
+                let left = all.trailing_zeros() as i32;
+                let lit = 64 - all.leading_zeros() as i32 - left;
+                // A row holds 64 columns: past 60, as for the other
+                // faces, the glyph keeps its advance but no wider.
+                let body = (w - 1 - native_bold as i32).clamp(1, 60);
+                for bits in &mut rows {
+                    let mut out = 0u64;
+                    for tx in 0..body {
+                        // The source columns this one covers, at least one.
+                        let from = left + tx * lit / body;
+                        let to = (left + (tx + 1) * lit / body).max(from + 1);
+                        if *bits >> from & ((1 << (to - from)) - 1) != 0 {
+                            out |= 1 << tx;
+                        }
+                    }
+                    if key.bold {
+                        out |= out << 1;
+                    }
+                    *bits = out;
+                }
+            }
+            Glyph {
+                rows,
+                advance: w + made_bold as i32,
+                offset: 0,
+            }
+        })
+        .collect();
+    Glyphs { glyphs, ansi: true }
+}
+
+fn make_glyphs(key: Key) -> Glyphs {
+    if let Some(i) = key.raster {
+        return raster_glyphs(key, &RASTERS[i]);
+    }
     let gw = key.glyph_width.clamp(1, 60);
     let mut glyphs = Vec::with_capacity(256 + EXTRA_GLYPHS.len());
     for g in 0..256 + EXTRA_GLYPHS.len() {
-        let mut rows = Vec::with_capacity(key.cell as usize);
-        for ty in 0..key.cell {
-            let byte = match g.checked_sub(256) {
-                Some(e) => EXTRA_GLYPHS[e].1[ty as usize * 16 / key.cell as usize],
-                None => {
-                    let sy = (ty as usize * base_h) / key.cell as usize;
-                    data.get(g * base_h + sy).copied().unwrap_or(0)
-                }
-            };
-            let mut bits = 0u64;
-            for tx in 0..gw {
-                let sx = (tx * 8) / gw;
-                if byte & (0x80 >> sx) != 0 {
-                    bits |= 1 << tx;
-                }
+        let mut rows = rom_rows(&key, g, gw);
+        if key.bold {
+            for bits in &mut rows {
+                *bits |= *bits << 1;
             }
-            if key.bold {
-                bits |= bits << 1;
-            }
-            rows.push(bits);
         }
         let all = rows.iter().fold(0u64, |a, &r| a | r);
         let width = gw + key.bold as i32;
@@ -305,7 +594,10 @@ fn make_glyphs(key: Key) -> Glyphs {
             offset,
         });
     }
-    Glyphs { glyphs }
+    Glyphs {
+        glyphs,
+        ansi: false,
+    }
 }
 
 fn glyphs_of(key: Key) -> Rc<Glyphs> {
@@ -331,6 +623,7 @@ pub struct Realized {
     pub strike: bool,
     pub charset: u8,
     pub pitch_family: u8,
+    average: i32,
     glyphs: Rc<Glyphs>,
 }
 
@@ -341,7 +634,11 @@ impl Realized {
 
     /// The glyph of the byte `b` of the font's character set.
     fn glyph(&self, b: u8) -> &Glyph {
-        let g = if self.oem() { b as u16 } else { ansi_glyph(b) };
+        let g = if self.oem() || self.glyphs.ansi {
+            b as u16
+        } else {
+            ansi_glyph(b)
+        };
         &self.glyphs.glyphs[g as usize]
     }
 
@@ -351,7 +648,7 @@ impl Realized {
     }
 
     pub fn average_width(&self) -> i32 {
-        self.advance(b'x')
+        self.average
     }
 
     pub fn max_width(&self) -> i32 {
@@ -404,8 +701,18 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
         }
         h => (h, (h + 3) / 6),
     };
-    let cell = cell.clamp(4, 128);
-    let internal = internal.min(cell - 1);
+    let mut cell = cell.clamp(4, 128);
+    let mut internal = internal.min(cell - 1);
+    // A face Windows has as raster fonts gets the widths of one of its
+    // sizes, and the metrics too if it is one of them. Windows doesn't
+    // stretch those to a width asked for, so neither does this.
+    let raster = raster_of(fi, device_height, cell);
+    let mut ascent = None;
+    if let Some((i, true)) = raster {
+        let r = &RASTERS[i];
+        (cell, internal) = (r.height, r.internal);
+        ascent = Some(r.ascent);
+    }
     let base: u8 = if cell <= 9 {
         8
     } else if cell <= 14 {
@@ -427,11 +734,25 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
     let key = Key {
         base,
         cell,
-        glyph_width,
+        // The raster faces' glyphs don't depend on it: one cache entry.
+        glyph_width: if raster.is_some() { 0 } else { glyph_width },
         bold: weight >= 600,
         fixed,
+        raster: raster.map(|(i, _)| i),
     };
-    let descent = ((cell * 4 + 8) / 16).max(1);
+    let glyphs = glyphs_of(key);
+    let average = match raster {
+        Some((i, _)) => {
+            let r = &RASTERS[i];
+            let made_bold = key.bold && face.weight < 600;
+            ((r.average * cell + r.height / 2) / r.height).max(1) + made_bold as i32
+        }
+        None => glyphs.glyphs[b'x' as usize].advance,
+    };
+    let descent = match ascent {
+        Some(a) => cell - a,
+        None => ((cell * 4 + 8) / 16).max(1),
+    };
     Realized {
         face: face.name,
         height: cell,
@@ -444,7 +765,8 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
         strike: log.strike,
         charset: face.charset,
         pitch_family: face.pitch_family,
-        glyphs: glyphs_of(key),
+        average,
+        glyphs,
     }
 }
 
@@ -1273,6 +1595,19 @@ mod tests {
         let f = realize(&log, -11, 0);
         assert_eq!(f.height, 13);
         assert_eq!(f.internal_leading, 2);
+    }
+
+    #[test]
+    fn big_ms_sans_serif_glyphs_stay_in_their_rows() {
+        // 128 pixels scales the 37 pixel size's widths past the 64
+        // columns a glyph row holds. The glyph is drawn no wider than
+        // the other faces' widest, but moves on as far.
+        let log = Log::of(&logfont(128, 0, 700, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, 128, 0);
+        assert!(f.advance(b'W') > 64);
+        let all = f.glyph(b'W').rows.iter().fold(0, |a, &r| a | r);
+        assert_ne!(all, 0);
+        assert!(all >> 62 == 0, "no lit column wraps around");
     }
 
     #[test]
