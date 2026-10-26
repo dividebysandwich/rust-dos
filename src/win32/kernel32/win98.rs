@@ -55,7 +55,7 @@ pub(super) fn get_disk_free_space_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32>
         }
         full.as_bytes()[0].to_ascii_uppercase().wrapping_sub(b'A')
     };
-    let Ok((sectors, free, bytes, total)) = cpu.bus.disk.get_disk_free_space(drive + 1) else {
+    let Ok((sectors, free, bytes, total)) = cpu.bus.disk.windows_free_space(drive + 1) else {
         set_error(cpu, ERROR_INVALID_DRIVE);
         return Some(FALSE);
     };

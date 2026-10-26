@@ -578,14 +578,22 @@ fn a_program_uses_the_heap_tls_environment_and_exports() {
     assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
 
-#[test]
-fn a_program_starts_another_and_waits_for_its_exit_code() {
-    // C.EXE says hello and ends with 7.
-    let child = {
-        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+/// Run T.EXE, which starts the program the command line `line` names
+/// with CreateProcessA, waits for it and ends with what it learned, from
+/// a folder with the folders `dirs` and C.EXE at `child`. C.EXE ends with
+/// 7, or 8 when its command line starts with a quote, so 71h is the
+/// program started, waited for and its exit code read.
+fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
+    let child_program = {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetCommandLineA", "ExitProcess"])];
         program(BASE, false, imports, &[0; 4], |a, l| {
-            a.push(7)?;
             a.call(l.import(0))?;
+            a.cmp(byte_ptr(eax), b'"' as i32)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.add(eax, 7)?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
             a.int3()
         })
     };
@@ -599,7 +607,8 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
     // the exit code at 0xA0.
-    let mut data = b"C.EXE an argument\0".to_vec();
+    let mut data = line.as_bytes().to_vec();
+    assert!(data.len() < 0x40);
     data.resize(0xB0, 0);
     data[0x40] = 68;
     let parent = program(BASE, false, imports, &data, |a, l| {
@@ -634,17 +643,27 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
         a.call(f("ExitProcess"))?;
         a.int3()
     });
-    let mut cpu = Cpu::new(scratch(
-        "child_process",
-        &[("T.EXE", parent), ("C.EXE", child)],
-    ));
+    let base = scratch(test, &[("T.EXE", parent)]);
+    for dir in dirs {
+        fs::create_dir_all(base.join(dir)).unwrap();
+    }
+    let child = base.join(child);
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(child, child_program).unwrap();
+    let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
-    assert_eq!(cpu.errorlevel, 0x71, "{}", printed(&cpu));
     assert!(!cpu.bus.win32.active());
+    cpu.errorlevel
+}
+
+#[test]
+fn a_program_starts_another_and_waits_for_its_exit_code() {
+    let code = start_child("child_process", "C.EXE an argument", "C.EXE", &[]);
+    assert_eq!(code, 0x71);
 }
 
 #[test]
@@ -693,6 +712,22 @@ fn win_exec_starts_a_program_or_says_why_not() {
     assert!(cpu.load_executable("T.EXE", None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
     assert_eq!(cpu.errorlevel, 3, "{}", printed(&cpu));
+}
+
+/// A command line naming its program without quotes, in a folder with
+/// spaces in its name: the program is found by the line up to each space
+/// in turn ("V1.0", "V1.0 GAME\C.EXE"), as Windows finds it, and starts.
+/// The folder V1.0 isn't a program, so the search goes on past it. The
+/// program gets its name in quotes, as on Windows 98, so 81h, also when
+/// blanks come before it.
+#[test]
+fn an_unquoted_program_path_with_spaces_is_found() {
+    let line = "V1.0 GAME\\C.EXE an argument";
+    let code = start_child("unquoted_path", line, "V1.0 GAME/C.EXE", &["V1.0"]);
+    assert_eq!(code, 0x81);
+    let line = " \tV1.0 GAME\\C.EXE an argument";
+    let code = start_child("unquoted_path_blanks", line, "V1.0 GAME/C.EXE", &["V1.0"]);
+    assert_eq!(code, 0x81);
 }
 
 #[test]
@@ -2899,4 +2934,69 @@ fn a_program_catches_its_cxx_exceptions() {
     let (code, text) = run("msvcrt_cxx", exe);
     assert_eq!(text, "f\r\n");
     assert_eq!(code, 0);
+}
+
+/// GetLogicalDriveStringsA: asked with no buffer, and then with one a
+/// byte too small, it writes nothing and gives the size it needs; asked
+/// with exactly that size, it writes the list, which the program writes
+/// out with its last NUL. Bit 0 of the exit code: the size was the list's
+/// length and one; bit 1: the short buffer was left alone and the size
+/// given again.
+#[test]
+fn get_logical_drive_strings_lists_the_drives_roots() {
+    let names: &[&str] = &["GetLogicalDriveStringsA", "GetStdHandle", "WriteFile"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0u8; 0x100];
+    data[0x10] = 0xAA;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        // The size needed, with no buffer.
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, eax)?;
+        // A buffer one byte short of it.
+        a.lea(ecx, dword_ptr(ebx - 1))?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(ecx)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, ebx)?;
+        a.sete(dl)?;
+        a.cmp(byte_ptr(l.at(0x10)), 0xAA)?;
+        a.sete(al)?;
+        a.and(dl, al)?;
+        a.movzx(edi, dl)?;
+        // The list, in a buffer of exactly that size.
+        a.push(l.at(0x10) as i32)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        a.lea(ecx, dword_ptr(eax + 1))?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.push(ecx)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(-11)?;
+        a.call(l.import(1))?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.lea(ecx, dword_ptr(esi + 1))?;
+        a.cmp(ebx, ecx)?;
+        a.sete(al)?;
+        a.movzx(eax, al)?;
+        a.shl(edi, 1)?;
+        a.or(eax, edi)?;
+        a.ret()
+    });
+    let (code, text) = run("logical_drive_strings", exe);
+    assert_eq!(code, 3, "{:?}", text);
+    let list = text
+        .strip_suffix("\0\0")
+        .expect("the list ends in two NULs");
+    let roots: Vec<&str> = list.split('\0').collect();
+    assert!(roots.contains(&"C:\\"), "{:?}", roots);
+    assert!(
+        roots.iter().all(|r| r.len() == 3 && r.ends_with(":\\")),
+        "{:?}",
+        roots
+    );
 }

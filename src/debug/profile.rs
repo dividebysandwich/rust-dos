@@ -328,13 +328,15 @@ impl DebugHub {
     /// same in the CPU's mode now.
     fn place_disasm(&self, cpu: &Cpu, loc: Loc, lines: usize) -> Value {
         let Some((cs, eip)) = loc.cs_eip() else { return Value::Null };
-        let addr = match (loc.mode().segmented(), cpu.pm()) {
-            (true, false) => format!("{:04X}:{:04X}", cs, eip),
-            (true, true) => format!("lin:{:X}", ((cs as u32) << 4).wrapping_add(eip)),
-            (false, true) => format!("{:04X}:{:08X}", cs, eip),
+        // Real-mode or virtual-8086 code seen from protected mode has no
+        // selector: its linear address, and 16-bit code.
+        let (addr, bits) = match (loc.mode().segmented(), cpu.pm()) {
+            (true, false) => (format!("{:04X}:{:04X}", cs, eip), None),
+            (true, true) => (format!("lin:{:X}", ((cs as u32) << 4).wrapping_add(eip)), Some(16)),
+            (false, true) => (format!("{:04X}:{:08X}", cs, eip), None),
             (false, false) => return Value::Null,
         };
-        match self.disasm(cpu, Some(addr), lines) {
+        match self.disasm(cpu, Some(addr), lines, bits) {
             Reply::Json(v) => v["rows"]
                 .as_array()
                 .map(|rows| {
