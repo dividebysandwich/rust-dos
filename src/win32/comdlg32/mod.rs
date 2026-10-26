@@ -1,7 +1,8 @@
 //! COMDLG32.DLL: the common dialogs. The file dialogs are real:
 //! GetOpenFileNameA and GetSaveFileNameA show Windows 98's Explorer-style
 //! dialog, or Windows 3.1's when a program with a hook or a template
-//! doesn't ask for the Explorer style (filedlg.rs, explorer.rs, old.rs).
+//! doesn't ask for the Explorer style, and always to a Windows 3.1
+//! program, through COMMDLG (filedlg.rs, explorer.rs, old.rs).
 //! ChooseColorA, ChooseFontA, PrintDlgA and PageSetupDlgA are cancelled,
 //! as when the user closes them, with no extended error; FindTextA and
 //! ReplaceTextA make no dialog. The Unicode functions fail with
@@ -105,6 +106,8 @@ static APIS: &[Api] = &[
         3,
         browser::view_query_interface,
     ),
+    stdcall("GetOpenFileName16", 0, 1, filedlg::get_open_file_name16),
+    stdcall("GetSaveFileName16", 0, 1, filedlg::get_save_file_name16),
 ];
 
 /// The tables of methods of the file dialog's shell objects: the

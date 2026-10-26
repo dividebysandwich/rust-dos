@@ -248,6 +248,18 @@ pub fn get_save_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     get_file_name(cpu, args[0], true)
 }
 
+/// COMMDLG's GetOpenFileName(ofn), with the 16-bit structure made a
+/// 32-bit one: Windows 95's 16-bit COMMDLG has no Explorer style, so a
+/// Windows 3.1 program always gets Windows 3.1's dialog.
+pub fn get_open_file_name16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    get_file_name_as(cpu, args[0], false, true)
+}
+
+/// COMMDLG's GetSaveFileName(ofn), as `get_open_file_name16`.
+pub fn get_save_file_name16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    get_file_name_as(cpu, args[0], true, true)
+}
+
 /// The string at `at`, or an empty one for NULL.
 fn string(cpu: &mut Cpu, at: u32) -> Option<String> {
     if at == 0 {
@@ -615,6 +627,12 @@ pub const ATOM_COMBOBOX: u16 = 0x85;
 /// Start a file dialog: the dialog runs as a modal dialog, and its
 /// result is the function's.
 fn get_file_name(cpu: &mut Cpu, ofn: u32, save: bool) -> Option<u32> {
+    get_file_name_as(cpu, ofn, save, false)
+}
+
+/// `get_file_name`, with Windows 3.1's dialog whatever the flags say
+/// when `win16`.
+fn get_file_name_as(cpu: &mut Cpu, ofn: u32, save: bool, win16: bool) -> Option<u32> {
     if ofn == 0 {
         set_extended_error(cpu, CDERR_INITIALIZATION);
         return Some(0);
@@ -656,7 +674,7 @@ fn get_file_name(cpu: &mut Cpu, ofn: u32, save: bool) -> Option<u32> {
         0
     };
     let customized = OFN_ALLOWMULTISELECT | OFN_ENABLEHOOK | OFN_ENABLETEMPLATE;
-    let old = flags & customized != 0 && flags & OFN_EXPLORER == 0;
+    let old = win16 || flags & customized != 0 && flags & OFN_EXPLORER == 0;
 
     // A template that isn't there is an error before any dialog.
     let mut template = 0;

@@ -638,11 +638,11 @@ fn open_file_name(cpu: &mut Cpu, name: &str, ofn16: u32) -> Option<u32> {
 }
 
 fn get_open_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    open_file_name(cpu, "GetOpenFileNameA", args[0])
+    open_file_name(cpu, "GetOpenFileName16", args[0])
 }
 
 fn get_save_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    open_file_name(cpu, "GetSaveFileNameA", args[0])
+    open_file_name(cpu, "GetSaveFileName16", args[0])
 }
 
 fn choose_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
