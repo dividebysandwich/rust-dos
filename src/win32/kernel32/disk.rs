@@ -2,7 +2,10 @@
 //! space as the built-in Windows sees it.
 
 use super::path::put_string;
-use super::{ERROR_INVALID_DRIVE, ERROR_PATH_NOT_FOUND, FALSE, TRUE, set_error, string_at};
+use super::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DRIVE, ERROR_PATH_NOT_FOUND, FALSE, TRUE, set_error,
+    string_at,
+};
 use crate::cpu::Cpu;
 use crate::disk::{DriveKind, LASTDRIVE, drive_letter, old_space};
 
@@ -94,6 +97,53 @@ pub(super) fn get_disk_free_space(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     for (at, value) in args[1..].iter().zip([sectors, bytes, free, total]) {
         if *at != 0 {
             cpu.bus.guest_write_32(*at, value as u32);
+        }
+    }
+    Some(TRUE)
+}
+
+/// GetVolumeInformation's file system flags: FS_CASE_IS_PRESERVED and
+/// FS_UNICODE_STORED_ON_DISK, what Windows 95's VFAT gives, and the
+/// latter alone for a CD's Joliet names.
+const FAT_FLAGS: u32 = 0x2 | 0x4;
+const CDFS_FLAGS: u32 = 0x4;
+
+/// GetVolumeInformationA: the volume of the root directory `args[0]`
+/// names. Its label (`args[1]`, `args[2]` bytes), serial number
+/// (`args[3]`), longest name (`args[4]`), file system flags (`args[5]`)
+/// and file system's name (`args[6]`, `args[7]` bytes), each only where
+/// its pointer isn't NULL. The label is DOS's for the drive, a CD's the
+/// one its check compares; the serial number is the disk image's, or 0
+/// for a host folder.
+pub(super) fn get_volume_information(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let drive = match root(cpu, args[0])? {
+        Ok(drive) => drive,
+        Err(()) => {
+            set_error(cpu, ERROR_PATH_NOT_FOUND);
+            return Some(FALSE);
+        }
+    };
+    let Some(kind) = cpu.bus.disk.drive_kind(drive) else {
+        set_error(cpu, ERROR_INVALID_DRIVE);
+        return Some(FALSE);
+    };
+    let label = cpu.bus.disk.volume_label(drive).unwrap_or_default();
+    let serial = cpu.bus.disk.volume_serial(drive).unwrap_or(0);
+    let (fs, flags) = match kind {
+        DriveKind::CdRom => ("CDFS", CDFS_FLAGS),
+        _ => ("FAT", FAT_FLAGS),
+    };
+    for (at, size, s) in [(args[1], args[2], label.as_str()), (args[6], args[7], fs)] {
+        // put_string gives the size it needs, NUL included, when the
+        // buffer is too small, and the length it wrote otherwise.
+        if at != 0 && put_string(cpu, at, size, s)? >= size {
+            set_error(cpu, ERROR_INSUFFICIENT_BUFFER);
+            return Some(FALSE);
+        }
+    }
+    for (at, value) in [(args[3], serial), (args[4], 255), (args[5], flags)] {
+        if at != 0 {
+            cpu.bus.guest_write_32(at, value);
         }
     }
     Some(TRUE)

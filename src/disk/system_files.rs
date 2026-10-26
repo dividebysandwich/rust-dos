@@ -131,6 +131,18 @@ impl DiskController {
         matches!(self.shown(dos_path), Some(Shown::Dir))
     }
 
+    /// Whether the directory `dos_path` is in is the system files' or one
+    /// on its way, which the drive hasn't.
+    pub(super) fn in_system_dir(&self, dos_path: &str) -> bool {
+        if self.system_files.files.is_empty() {
+            return false;
+        }
+        let Some(path) = self.qualify_path(dos_path) else {
+            return false;
+        };
+        split(path.trim_end_matches('\\')).is_some_and(|(dir, _)| self.is_system_dir(dir))
+    }
+
     /// Whether `dos_path` names a system file or directory the drive
     /// hasn't.
     pub(super) fn is_system_entry(&self, dos_path: &str) -> bool {

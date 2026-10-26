@@ -67,6 +67,7 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.bus.win32.guest_dlls = settings.win32_dlls.clone();
     cpu.bus.win32.guest_replace = settings.win32_dlls_replace.clone();
     cpu.bus.win32.version = settings.win32_version;
+    cpu.bus.win32.depth = settings.win32_depth;
     crate::win32::dll_files::sync(&mut cpu.bus);
     crate::dos_data::set_version(&mut cpu.bus, settings.dos_version);
     cpu.bus.ide_hard_disks = settings.ide_hard_disks;

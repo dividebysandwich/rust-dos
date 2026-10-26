@@ -1327,6 +1327,15 @@ fn system_files_show_in_a_directory_the_drive_lacks() {
     assert_eq!(disk.rename_file("DDRAW.DLL", "OTHER.DLL"), Err(0x05));
     assert_eq!(disk.create_directory("C:\\WINDOWS\\SYSTEM"), Err(0x05));
     assert!(!base.join("WINDOWS").exists());
+    // A file that isn't there is not found, its directory being there:
+    // Iron Helix's installer opens one before it makes it.
+    assert_eq!(disk.open_file("C:\\WINDOWS\\SYSTEM\\MINE.DLL", 1, PSP), Err(0x02));
+    assert_eq!(disk.open_file("C:\\WINDOWS\\WIN.INI", 0, PSP), Err(0x02));
+    // The directory isn't a file to open or make.
+    assert_eq!(disk.open_file("C:\\WINDOWS\\SYSTEM", 0, PSP), Err(0x05));
+    assert_eq!(disk.create_file("C:\\WINDOWS\\SYSTEM", PSP), Err(0x05));
+    assert_eq!(disk.write_whole_file("C:\\WINDOWS\\SYSTEM", b"x", None), Err(0x05));
+    assert!(!base.join("WINDOWS").exists());
     // A file made there makes the directories on the drive.
     let h = disk
         .create_file("C:\\WINDOWS\\SYSTEM\\MINE.DLL", PSP)
@@ -1385,6 +1394,12 @@ fn system_files_on_a_disk_image() {
     assert!(disk.is_directory(r"A:\WINDOWS\SYSTEM\"));
     assert!(!disk.is_file(r"C:\WINDOWS\SYSTEM\DDRAW.DLL"));
     assert_eq!(disk.remove_directory(r"A:\WINDOWS"), Err(0x05));
+    assert_eq!(disk.open_file(r"A:\WINDOWS\SYSTEM\MINE.DLL", 0, PSP), Err(0x02));
+    assert_eq!(disk.get_file_attribute(r"A:\WINDOWS\SYSTEM\MINE.DLL"), Err(0x02));
+    assert_eq!(disk.set_file_attribute(r"A:\WINDOWS\SYSTEM\MINE.DLL", 0), Err(0x02));
+    assert_eq!(disk.delete_file(r"A:\WINDOWS\SYSTEM\MINE.DLL"), Err(0x02));
+    assert_eq!(disk.delete_file(r"A:\WINDOWS\SYSTEM"), Err(0x02));
+    assert_eq!(disk.rename_file(r"A:\WINDOWS\SYSTEM\MINE.DLL", r"A:\MINE.DLL"), Err(0x02));
     // A directory made there makes those on the way on the image, and
     // they can't go while the files are in them.
     disk.create_directory(r"A:\WINDOWS\SYSTEM\SUB").unwrap();

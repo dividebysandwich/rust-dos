@@ -244,11 +244,22 @@ pub fn get_front_buffer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         read_argb(cpu, &s, &r)
     } else {
         let raw = screen::load_desktop(cpu, 0, h);
-        raw.as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| 0xFF00_0000 | u32::from_le_bytes(*p))
-            .collect()
+        if screen::desktop(cpu).bpp == 8 {
+            // Indices into the system palette, whose colors are COLORREFs.
+            let system = crate::win32::gdi32::palette::system_colors(cpu);
+            raw.iter()
+                .map(|&i| {
+                    let c = system[i as usize];
+                    0xFF00_0000 | (c & 0xFF) << 16 | c & 0xFF00 | (c >> 16) & 0xFF
+                })
+                .collect()
+        } else {
+            raw.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| 0xFF00_0000 | u32::from_le_bytes(*p))
+                .collect()
+        }
     };
     let width = (pixels.len() as u32).checked_div(h).unwrap_or(0);
     for y in 0..h {
@@ -299,6 +310,10 @@ pub fn present_window(cpu: &mut Cpu, back: u32, src: Option<Rect>, dst: Option<R
     let (width, height, bpp, pitch) = ddraw::display::current(cpu);
     let screen_rect = Rect::new(0, 0, width as i32, height as i32);
     let bytes = bpp.div_ceil(8);
+    // On a desktop of 256 colours, the nearest color of the system
+    // palette, remembered for each color.
+    let system = (bytes == 1).then(|| crate::win32::gdi32::palette::system_colors(cpu));
+    let mut indices = std::collections::HashMap::new();
     for r in &visible.rects {
         let r = r.intersect(&dst).intersect(&screen_rect);
         if r.left >= r.right || r.top >= r.bottom {
@@ -311,6 +326,14 @@ pub fn present_window(cpu: &mut Cpu, back: u32, src: Option<Rect>, dst: Option<R
                 let sx = ((x - dst.left) as i64 * sw / dw) as usize;
                 let p = pixels[sy * sw as usize + sx] & 0xFF_FFFF;
                 match bytes {
+                    1 => {
+                        let table = system.as_deref().unwrap_or_default();
+                        let i = *indices.entry(p).or_insert_with(|| {
+                            let c = (p & 0xFF) << 16 | p & 0xFF00 | (p >> 16) & 0xFF;
+                            crate::win32::gdi32::surface::nearest(table, c) as u8
+                        });
+                        row.push(i);
+                    }
                     2 => row.extend_from_slice(&screen::to_565(p).to_le_bytes()),
                     3 => row.extend_from_slice(&p.to_le_bytes()[..3]),
                     _ => row.extend_from_slice(&p.to_le_bytes()),

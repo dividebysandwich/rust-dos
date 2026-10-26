@@ -101,6 +101,10 @@ pub struct State {
     /// The menu names (16:16 pointers) classes were registered with, by
     /// the class's name in capitals or "#atom", for GetClassInfo.
     pub class_menus: Vec<(String, u32)>,
+    /// The multimedia files' buffers (misc.rs): each file's handle, its
+    /// buffer's 16:16 and flat addresses, and the handle of the global
+    /// block it is, or 0 if it is the program's.
+    pub mmio_buffers: Vec<[u32; 4]>,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -528,7 +532,8 @@ crate::state_fields!(State {
     wave_headers,
     dpmi_blocks,
     missing,
-    class_menus
+    class_menus,
+    mmio_buffers
 });
 crate::state_fields!(Module16 {
     name,

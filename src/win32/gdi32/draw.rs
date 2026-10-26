@@ -6,6 +6,14 @@
 //! (`Canvas`), draws the pixels its clip region lets through and stores
 //! the rows back. Raster operations work on pixel values, as Windows
 //! does: on a DIB of 8 bits a pixel they combine the indices.
+//!
+//! On a palette device (the screen of a desktop of 256 colours, and
+//! GDI's 8-bit bitmaps) colors become system palette indices through
+//! the DC's logical palette (`palette::DeviceMap`): PALETTEINDEX and
+//! PALETTERGB take its entries, RGB colors of pens, brushes and text
+//! the nearest static color, and the pixels of blits from DIBs and
+//! other bitmaps the nearest color of the palette's and the static
+//! ones.
 
 use super::dc::{self, Dc, OPAQUE};
 use super::surface::Surface;
@@ -277,12 +285,25 @@ pub fn value_for(cpu: &mut Cpu, canvas_dc: &Dc, s: &Surface, color: u32) -> u32 
             _ => s.value_of(0),
         };
     }
+    if s.device {
+        let map = super::palette::DeviceMap::new(cpu, canvas_dc.attrs.palette);
+        return device_value(&map, color);
+    }
     let color = dc::resolve_color(cpu, canvas_dc, color);
     if s.mono {
         let sum = (color & 0xFF) + ((color >> 8) & 0xFF) + ((color >> 16) & 0xFF);
         return (sum >= 384) as u32;
     }
     s.value_of(color)
+}
+
+/// The value of the COLORREF `color` on a palette device.
+pub fn device_value(map: &super::palette::DeviceMap, color: u32) -> u32 {
+    match color >> 24 {
+        1 => map.index((color & 0xFFFF) as usize),
+        2 => map.palette_rgb(color & 0xFF_FFFF),
+        _ => map.solid(color & 0xFF_FFFF),
+    }
 }
 
 /// How the brush `handle` fills on the canvas.
@@ -305,6 +326,10 @@ pub fn brush_fill(cpu: &mut Cpu, c: &Canvas, handle: u32) -> Fill {
             let fg = value_for(cpu, dc, &c.surface, dc.attrs.text_color);
             let bg = value_for(cpu, dc, &c.surface, dc.attrs.bk_color);
             let line = value_for(cpu, dc, &c.surface, brush.color);
+            let map = c
+                .surface
+                .device
+                .then(|| super::palette::DeviceMap::new(cpu, dc.attrs.palette));
             let opaque = dc.attrs.bk_mode == OPAQUE;
             let values = pattern
                 .pixels
@@ -325,6 +350,8 @@ pub fn brush_fill(cpu: &mut Cpu, c: &Canvas, handle: u32) -> Fill {
                         // pixels' brightness.
                         let sum = (p & 0xFF) + ((p >> 8) & 0xFF) + ((p >> 16) & 0xFF);
                         Some((sum >= 384) as u32)
+                    } else if let Some(map) = &map {
+                        Some(map.blit_color(p, None))
                     } else {
                         Some(c.surface.value_of(p))
                     }
@@ -1349,6 +1376,13 @@ pub fn blit_from(
     // WHITENESS sets every bit of a pixel without a color table, as the
     // other operations do: a 32-bit pixel's top byte too.
     let white = if c.surface.bpp > 8 { mask } else { white };
+    let map = c
+        .surface
+        .device
+        .then(|| super::palette::DeviceMap::new(cpu, ddc.attrs.palette));
+    let mut xlat = source
+        .as_ref()
+        .map(|(src, _)| Translate::new(&src.surface, map, src.bk_color, text, bk));
     let (ox, oy) = c.origin;
     let rects = c.rects.clone();
     let dst_rect = r.offset(ox, oy);
@@ -1379,7 +1413,10 @@ pub fn blit_from(
                             continue;
                         }
                         let v = src.surface.get(sx, sy);
-                        convert(&src.surface, v, &c.surface, src.bk_color, text, bk)
+                        match &mut xlat {
+                            Some(t) => t.get(&src.surface, v, &c.surface),
+                            None => 0,
+                        }
                     }
                     None => 0,
                 };
@@ -1401,6 +1438,87 @@ pub fn blit_from(
     c.drawn = dst_rect;
     c.close(cpu);
     true
+}
+
+/// How a blit's source values become the destination's: for a source of
+/// 8 bits a pixel or fewer a table filled in as values come up, for a
+/// deeper one the conversion of each value (remembered on a palette
+/// device, where it is a search).
+pub struct Translate {
+    table: Vec<Option<u32>>,
+    cache: Option<std::collections::HashMap<u32, u32>>,
+    map: Option<super::palette::DeviceMap>,
+    src_bk: u32,
+    text: u32,
+    bk: u32,
+}
+
+impl Translate {
+    /// The translation from `src`, `map` the destination DC's if the
+    /// destination is a palette device; the DCs' colors as `convert`
+    /// takes them.
+    pub fn new(
+        src: &Surface,
+        map: Option<super::palette::DeviceMap>,
+        src_bk: u32,
+        text: u32,
+        bk: u32,
+    ) -> Translate {
+        let table = if src.bpp <= 8 {
+            vec![None; 1 << src.bpp]
+        } else {
+            Vec::new()
+        };
+        let cache = (src.bpp > 8 && map.is_some()).then(std::collections::HashMap::new);
+        Translate {
+            table,
+            cache,
+            map,
+            src_bk,
+            text,
+            bk,
+        }
+    }
+
+    fn one(&self, src: &Surface, v: u32, dst: &Surface) -> u32 {
+        if let Some(map) = &self.map
+            && !src.mono
+        {
+            if let Some(indices) = &src.pal_indices {
+                return indices.get(v as usize).map_or(0, |&i| map.index(i as usize));
+            }
+            if src.device {
+                return v;
+            }
+            let hint = (src.bpp <= 8).then_some(v);
+            return map.blit_color(src.color_of(v), hint);
+        }
+        convert(src, v, dst, self.src_bk, self.text, self.bk)
+    }
+
+    /// The destination's value of the source's value `v`.
+    #[inline]
+    pub fn get(&mut self, src: &Surface, v: u32, dst: &Surface) -> u32 {
+        if let Some(&slot) = self.table.get(v as usize) {
+            if let Some(t) = slot {
+                return t;
+            }
+            let t = self.one(src, v, dst);
+            self.table[v as usize] = Some(t);
+            return t;
+        }
+        if self.cache.is_some() {
+            if let Some(&t) = self.cache.as_ref().and_then(|c| c.get(&v)) {
+                return t;
+            }
+            let t = self.one(src, v, dst);
+            if let Some(c) = &mut self.cache {
+                c.insert(v, t);
+            }
+            return t;
+        }
+        self.one(src, v, dst)
+    }
 }
 
 /// A source pixel's value `v` as the destination's: a monochrome

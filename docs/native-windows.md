@@ -298,7 +298,12 @@ All output goes through the emulated video hardware:
   16 or 32 bits per pixel, or the size the game asks for). Windows are
   drawn into it; the fonts are a bundled bitmap font under a license that
   lets us ship it. Most games have one top-level window, and HX gets far
-  with that alone.
+  with that alone. With `win32_depth=8` the desktop is 640x480 at 8 bits
+  per pixel, and GDI keeps a system palette in the DAC as Windows does
+  on a 256-colour display: palettes realized in the foreground or the
+  background, `PC_RESERVED` entries for `AnimatePalette`,
+  `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
+  `WM_QUERYNEWPALETTE` for the windows (gdi32/palette.rs).
 - **DirectDraw** in exclusive full-screen mode sets the VBE mode the game
   asks for. The primary surface is the linear frame buffer, so `Lock`
   returns a pointer into it and the game's own pixel loops write straight
@@ -490,8 +495,8 @@ shortcut:
   makes an empty `HKLM\SharedDLLs`: the engine creates SharedDLLs
   under the wrong key when it doesn't find it, which Windows 98, where
   it is always there, never shows. The game says it must run in
-  256-colour mode and stops: the built-in Windows' desktop has 32 bits
-  per pixel.
+  256-colour mode and stops on the default desktop, which has 32 bits
+  per pixel; `win32_depth=8` gives the desktop 256 colours.
 - **Grom** (Wise, two CDs, the minimum installation): 1931 of 1932
   files are the same, all but the install log `INSTALL.LOG`, which
   differs in the time, the CD's letter, a `Made Dir` line for

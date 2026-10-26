@@ -1659,3 +1659,193 @@ fn textures_fill_a_voodoo2s_texture_memory() {
     assert_eq!((s(3), s(4)), (4 << 20, 0), "total and free after");
     assert_eq!(s(5) & DDSCAPS_SYSTEMMEMORY, DDSCAPS_SYSTEMMEMORY);
 }
+
+const USER32_PAL: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC"]);
+const GDI32_PAL: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "GetDeviceCaps",
+        "SetPixel",
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "AnimatePalette",
+        "GetSystemPaletteEntries",
+        "GetNearestColor",
+        "GetNearestPaletteIndex",
+        "SetDIBitsToDevice",
+    ],
+);
+const P_SET_PIXEL: usize = 3;
+const CREATE_PALETTE: usize = 4;
+const SELECT_PALETTE: usize = 5;
+const REALIZE_PALETTE: usize = 6;
+const ANIMATE_PALETTE: usize = 7;
+const GET_SYSTEM_PALETTE_ENTRIES: usize = 8;
+const GET_NEAREST_COLOR: usize = 9;
+const GET_NEAREST_PALETTE_INDEX: usize = 10;
+const SET_DI_BITS_TO_DEVICE: usize = 11;
+
+// The palette program's data.
+const LOGPALETTE: u32 = 0x400;
+const ANIMATED: u32 = 0x480;
+const SYSTEM: u32 = 0x500;
+const BMI: u32 = 0x600;
+const BITS: u32 = 0x700;
+
+const PC_RESERVED: u32 = 0x01;
+const PC_NOCOLLAPSE: u32 = 0x04;
+
+/// On a desktop of 256 colours: GetDeviceCaps, a palette of four entries
+/// realized, pixels set through it, one of its entries animated, the
+/// system palette read back, the nearest colors, and a DIB_PAL_COLORS
+/// bitmap drawn.
+fn palette_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    put32(&mut d, LOGPALETTE, 0x300 | 4 << 16);
+    put32(&mut d, LOGPALETTE + 4, 0x1E140A);
+    put32(&mut d, LOGPALETTE + 8, 0x3C3228 | PC_RESERVED << 24);
+    put32(&mut d, LOGPALETTE + 12, 0x800000);
+    put32(&mut d, LOGPALETTE + 16, 0x1E140A | PC_NOCOLLAPSE << 24);
+    put32(&mut d, ANIMATED, 0xC08040 | PC_RESERVED << 24);
+    // A BITMAPINFOHEADER of 2x1 at 8 bits, and its four indices into the
+    // DC's palette.
+    put32(&mut d, BMI, 40);
+    put32(&mut d, BMI + 4, 2);
+    put32(&mut d, BMI + 8, 1);
+    put32(&mut d, BMI + 12, 1 | 8 << 16);
+    put32(&mut d, BMI + 32, 4);
+    put(&mut d, BMI + 40, &[0, 0, 1, 0, 2, 0, 3, 0]);
+    put(&mut d, BITS, &[3, 2, 0, 0]);
+    program(&[USER32_PAL, GDI32_PAL], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let (x, y, w, h) = (0, 0, 64, 64);
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(x),
+                Arg::I(y),
+                Arg::I(w),
+                Arg::I(h),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        // BITSPIXEL, RASTERCAPS, SIZEPALETTE, NUMRESERVED, NUMCOLORS and
+        // COLORRES.
+        for index in [12, 38, 104, 106, 24, 108] {
+            c.api(a, l, GET_DEVICE_CAPS, &[Arg::Val(HDC), Arg::I(index)])?;
+        }
+        c.api(a, l, CREATE_PALETTE, &[Arg::At(LOGPALETTE)])?;
+        a.mov(dword_ptr(l.at(PALETTE)), eax)?;
+        c.api(
+            a,
+            l,
+            SELECT_PALETTE,
+            &[Arg::Val(HDC), Arg::Val(PALETTE), Arg::I(0)],
+        )?;
+        c.api(a, l, REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        c.api(a, l, REALIZE_PALETTE, &[Arg::Val(HDC)])?;
+        // PALETTEINDEX(1), a plain RGB and PALETTERGB.
+        for (x, color) in [(0, 0x0100_0001), (1, 0x1E140A), (2, 0x0200_0000 | 0x3C3228)] {
+            c.api(
+                a,
+                l,
+                P_SET_PIXEL,
+                &[Arg::Val(HDC), Arg::I(x), Arg::I(0), Arg::I(color)],
+            )?;
+        }
+        c.api(
+            a,
+            l,
+            ANIMATE_PALETTE,
+            &[Arg::Val(PALETTE), Arg::I(1), Arg::I(1), Arg::At(ANIMATED)],
+        )?;
+        c.api(
+            a,
+            l,
+            GET_SYSTEM_PALETTE_ENTRIES,
+            &[Arg::Val(HDC), Arg::I(10), Arg::I(3), Arg::At(SYSTEM)],
+        )?;
+        c.api(a, l, GET_NEAREST_COLOR, &[Arg::Val(HDC), Arg::I(0x1E140B)])?;
+        c.api(
+            a,
+            l,
+            GET_NEAREST_COLOR,
+            &[Arg::Val(HDC), Arg::I(0x0100_0002)],
+        )?;
+        c.api(
+            a,
+            l,
+            GET_NEAREST_PALETTE_INDEX,
+            &[Arg::Val(PALETTE), Arg::I(0x3C3228)],
+        )?;
+        c.api(
+            a,
+            l,
+            SET_DI_BITS_TO_DEVICE,
+            &[
+                Arg::Val(HDC),
+                Arg::I(10),
+                Arg::I(10),
+                Arg::I(2),
+                Arg::I(1),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(1),
+                Arg::At(BITS),
+                Arg::At(BMI),
+                Arg::I(1),
+            ],
+        )?;
+        finish(a, l, 1)
+    })
+}
+
+/// With win32_depth=8 the desktop is 640x480 at 8 bits a pixel, its DAC
+/// the system palette: a logical palette's entries take free system
+/// entries (or match a static color), pixels are their indices, and
+/// AnimatePalette changes the DAC.
+#[test]
+fn a_256_colour_desktop_has_a_system_palette() {
+    let (program, data) = palette_program();
+    let mut cpu = card_machine("palette", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 21);
+    assert_eq!((r[2], r[3] & 0x100), (8, 0x100), "BITSPIXEL, RC_PALETTE");
+    assert_eq!(r[4..8], [256, 20, 20, 18], "{r:X?}");
+    assert_ne!(r[8], 0, "CreatePalette");
+    assert_eq!(r[10], 4, "the first RealizePalette maps the four entries");
+    assert_eq!(r[11], 0, "the second has nothing to do");
+    assert_eq!(r[15], 1, "AnimatePalette");
+    assert_eq!(r[16], 3, "GetSystemPaletteEntries");
+    let system: Vec<u32> = (0..3)
+        .map(|i| peek(&cpu, data + SYSTEM + 4 * i) & 0xFF_FFFF)
+        .collect();
+    assert_eq!(system, [0x1E140A, 0xC08040, 0x1E140A]);
+    assert_eq!(r[17], 0, "a plain color's nearest is a static one, black");
+    assert_eq!(r[18], 0x80_0000, "PALETTEINDEX(2) is static dark blue");
+    // Entry 1 is animated to (0x40, 0x80, 0xC0) by now.
+    assert_eq!(r[19], 0, "GetNearestPaletteIndex");
+    assert_eq!(r[20], 1, "SetDIBitsToDevice's lines");
+    let vbe = &cpu.bus.vbe;
+    let pixel = |x: usize, y: usize| vbe.vram[y * 640 + x];
+    assert_eq!((pixel(0, 0), pixel(1, 0), pixel(2, 0)), (11, 0, 11));
+    assert_eq!((pixel(10, 10), pixel(11, 10)), (12, 4));
+    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
+    let dac = &cpu.bus.vga.palette;
+    assert_eq!(dac[11 * 3..12 * 3], [0x40 >> shift, 0x80 >> shift, 0xC0 >> shift]);
+    assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
+}

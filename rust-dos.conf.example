@@ -230,6 +230,11 @@
 # 98se. Programs are told it, and under 98 the DLLs have Windows 98's
 # functions.
 #win32_version=95
+# The depth of the built-in Windows' desktop: auto (the default), the
+# display adapter's own (32 bits a pixel, 24 on an S3 ViRGE, 16 on a 3dfx
+# Banshee or Voodoo3), or 8, 256 colours from a palette, for programs that
+# need them.
+#win32_depth=auto
 # The DOS version programs are told, such as 5.00 (the default), 6.22 or
 # 7.10. The FAT32 functions of MS-DOS 7 (INT 21h AX=7302h to 7305h), which
 # disk utilities use, answer from 7.00 on; FAT32 drives mount at any
