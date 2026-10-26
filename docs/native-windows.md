@@ -683,6 +683,43 @@ DOS, but needs Windows 3.1's own files.
 winevdm's scope (GPL-2.0, Wine's 16-bit DLLs) is the reference for what a
 complete layer needs.
 
+What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
+
+- A Windows 3.1 program starts as a task of KRNL386.EXE, a Win32
+  process whose threads are the tasks. They share its LDT and global
+  heap, and run one at a time under the Win16 lock, giving it up when
+  they wait for messages.
+- KERNEL, USER, GDI, KEYBOARD, SOUND, SYSTEM, DISPLAY, WIN87EM,
+  TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING and DDEML are
+  NE images made at start-up, of stubs that trap into Rust. Most
+  functions go on to the 32-bit function of the same name through a
+  thunk that converts handles, structures and 16:16 pointers. Window,
+  dialog, enumeration and font enumeration procedures are called back
+  through thunks the other way. A program's own DLLs, such as
+  VBRUN300.DLL, load from its folder.
+- KERNEL's global and local heaps are Windows 3.1's: selectors tiled
+  for huge blocks, moveable and discardable blocks, lock counts, local
+  heaps in any segment (LocalInit). Resources come from the NE file,
+  names from RT_NAMETABLE included, and AccessResource opens the file at
+  them.
+- INT 21h from a Windows program goes to DOS with its 16:16 pointers
+  translated, and INT 31h to a DPMI 0.9 host of the task's LDT: its
+  descriptors, DOS memory, interrupt vectors, real-mode calls and
+  linear memory. A descriptor that changes under a segment register is
+  loaded into it again, as Windows' host does.
+- Windows 3.1 programs see version 3.95, Windows 95's, and not the
+  WS_EX_WINDOWEDGE style USER32 gives their windows.
+- A call of a function the built-in modules don't have yet stops the
+  program with a message that names it.
+
+Games tried, all of which start and draw their windows: SkiFree,
+BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
+Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
+Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
+two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
+and Prairie Dog Hunt (VB2). The 16-bit setup programs, InstallShield's
+among them, are still to be tried.
+
 Some choices in the earlier phases keep this phase from having to rework
 them:
 
@@ -755,6 +792,15 @@ traces call, not whole DLLs.
     passes with a note, so `cargo test` works on any machine.
   - They are under the LGPL 2.1 or later, kept with their notices,
     which rust-dos's GPL-2.0-or-later allows.
+- Wine's tests ported to Windows 3.1 programs, for Win16, in
+  `tests/conformance16/` (its README lists them): five of KERNEL's,
+  seven of USER's and nine of GDI's, each cut from the Win32 test of
+  the same functions in the 1.2.3 tree to what Windows 3.1 has, and a
+  test of the DPMI services written here.
+  `tests/win16_conformance_tests.rs` builds them with OpenWatcom and
+  checks their results against `expected.txt` as the Win32 tests are
+  checked. CI runs them in the conformance workflow with a pinned
+  OpenWatcom snapshot.
 - The same test programs on the booted Windows 95 and 98 images give
   the expected output where Wine's tests don't say what 9x does: a test
   passes when the built-in layer prints what Windows printed. Wine's

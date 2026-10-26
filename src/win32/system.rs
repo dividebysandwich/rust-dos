@@ -22,6 +22,8 @@ const TSS: u32 = 0x2000;
 const IOPB: u32 = TSS + 0x68;
 const IOPB_END: u32 = IOPB + 0x2000;
 const LDT: u32 = 0x5000;
+/// The LDT's offset in the system block, for the Win16 selectors there.
+pub const LDT_OFFSET: u32 = LDT;
 pub const LDT_ENTRIES: u32 = 0x2000;
 const RING0_STACK: u32 = LDT + 8 * LDT_ENTRIES;
 const RING0_STACK_TOP: u32 = RING0_STACK + 2 * PAGE;
@@ -118,6 +120,18 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
     Some(())
 }
 
+/// Let level 3 use INT n for the vectors from 10h on, in the IDT of the
+/// system block at `phys`: the Win16 process's, whose tasks call DOS,
+/// DPMI and the BIOS so (src/win16/dos.rs). The exceptions' vectors below
+/// stay the system's.
+pub fn open_soft_ints(cpu: &mut Cpu, phys: u32) {
+    for vector in 0x10..256u32 {
+        let at = (phys + IDT + 8 * vector + 5) as usize;
+        let access = cpu.bus.read_8(at);
+        cpu.bus.write_8(at, access | 0x60);
+    }
+}
+
 /// Write the descriptor of a thread's TIB, at `tib`, with the selector
 /// `selector`, in the LDT of the system block at `phys`.
 pub fn set_tib(cpu: &mut Cpu, phys: u32, selector: u16, tib: u32) {
@@ -139,6 +153,7 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
         .iter()
         .map(|t| (t.selector, t.tib))
         .collect();
+    let system = process.system;
     if !cpu.pe() {
         cpu.note_mode_switch(true);
     }
@@ -159,6 +174,33 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
     cpu.ldtr = SegCache::from_descriptor(LDT_SEL, SYSTEM + LDT, 8 * LDT_ENTRIES - 1, 0x82);
     cpu.tr = SegCache::from_descriptor(TSS_SEL, SYSTEM + TSS, IOPB_END - TSS, 0x8B);
     cpu.cpl = 3;
+    load_segments(cpu, ctx, &tibs, system);
+    load_registers(cpu, ctx);
+}
+
+/// Put the program's context `ctx` in the processor when it runs the
+/// process's code already, at level 3: as `enter_user` without loading
+/// the tables and flushing the TLB, for the switches between a Win16
+/// task's 16-bit code and the 32-bit code it calls.
+pub fn load_context(cpu: &mut Cpu, ctx: &Context) {
+    let process = super::running(cpu).expect("a Win32 process");
+    let tibs: Vec<(u16, u32)> = process
+        .threads
+        .iter()
+        .map(|t| (t.selector, t.tib))
+        .collect();
+    let system = process.system;
+    // From the system's handlers too (a Win16 task's INT 21h), which run
+    // at level 0.
+    cpu.cpl = 3;
+    load_segments(cpu, ctx, &tibs, system);
+    load_registers(cpu, ctx);
+}
+
+/// Load the segment registers of `ctx`: the flat selectors, the threads'
+/// TIB selectors (`tibs`), and the other selectors of the LDT of the
+/// system block at `system` (a Win16 task's) as their descriptors say.
+fn load_segments(cpu: &mut Cpu, ctx: &Context, tibs: &[(u16, u32)], system: u32) {
     let code = SegCache::from_descriptor(CODE3, 0, 0xFFFF_FFFF, attr(ACCESS_CODE3, FLAT));
     let data = SegCache::from_descriptor(DATA3, 0, 0xFFFF_FFFF, attr(ACCESS_DATA3, FLAT));
     for seg in Seg::ALL {
@@ -169,11 +211,33 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
                 Some(&(_, tib)) => {
                     SegCache::from_descriptor(selector, tib, PAGE - 1, attr(ACCESS_DATA3, BIG))
                 }
-                None => SegCache::null(selector),
+                None => ldt_segment(cpu, system, selector),
             },
         };
         cpu.set_seg_cache(seg, cache);
     }
+}
+
+/// The segment `selector` selects in the LDT of the system block at
+/// `system`, if it is a present segment at level 3; else a null one.
+fn ldt_segment(cpu: &Cpu, system: u32, selector: u16) -> SegCache {
+    let index = selector as u32 >> 3;
+    if selector & 4 == 0 || index >= LDT_ENTRIES || system == 0 {
+        return SegCache::null(selector);
+    }
+    let at = (system + LDT + 8 * index) as usize;
+    let desc = crate::cpu::Descriptor(
+        cpu.bus.read_32(at) as u64 | (cpu.bus.read_32(at + 4) as u64) << 32,
+    );
+    let access = desc.attr() as u8;
+    if access & 0x80 == 0 || access & 0x60 != 0x60 || !desc.is_segment() {
+        return SegCache::null(selector);
+    }
+    SegCache::from_descriptor(selector, desc.base(), desc.limit(), desc.attr())
+}
+
+/// The general registers, EIP and the flags of `ctx`.
+fn load_registers(cpu: &mut Cpu, ctx: &Context) {
     let mut snapshot = cpu.snapshot();
     snapshot.gpr = ctx.gpr;
     cpu.restore(&snapshot);
@@ -253,6 +317,11 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         );
         return;
     };
+    // A Win16 task's INT n: DOS, DPMI and the BIOS (src/win16/dos.rs).
+    if error.is_none() && crate::win16::is_soft_int(cpu, vector, &ctx) {
+        crate::win16::dos::interrupt(cpu, vector, ctx);
+        return;
+    }
     // The first PIC's vectors are exceptions 8-15 too; those push an
     // error code (#DF, #TS, #NP, #SS, #GP, #PF), the interrupts don't.
     let exception = vector < 0x20 && (vector < 8 || error.is_some() || !is_irq(cpu, vector));
@@ -268,6 +337,10 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
 
 /// An exception in the program: its handlers get it (seh.rs).
 fn exception_entry(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
+    if crate::win16::is_task_context(cpu, &ctx) {
+        crate::win16::task::fault(cpu, vector, error, ctx);
+        return;
+    }
     super::seh::fault(cpu, vector, error, ctx);
 }
 

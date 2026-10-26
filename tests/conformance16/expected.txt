@@ -1,0 +1,69 @@
+# The results of Wine's conformance tests ported to Windows 3.1 programs,
+# under the built-in Windows's Win16, as tests/win16_conformance_tests.rs
+# makes them: for each test file its summary, the checks that failed and
+# the tests skipped (by file and line), or how the program ended before
+# its summary. Write them anew with
+# CONFORMANCE_BLESS=1 cargo test --test win16_conformance_tests.
+gdi/bitmap: bitmap: 2215 tests executed (0 marked as todo, 1 failures), 0 skipped.
+gdi/bitmap: failed bitmap.c:1254
+gdi/brush: brush: 60 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi/clipping: clipping: 89 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi/dc: dc: 87 tests executed (0 marked as todo, 0 failures), 2 skipped.
+gdi/dc: skipped dc.c:276
+gdi/dc: skipped dc.c:299
+gdi/font: font: 3016 tests executed (0 marked as todo, 508 failures), 3 skipped.
+gdi/font: failed font.c:224 (x37)
+gdi/font: failed font.c:243 (x12)
+gdi/font: failed font.c:226 (x89)
+gdi/font: failed font.c:227 (x89)
+gdi/font: failed font.c:228 (x72)
+gdi/font: failed font.c:236 (x96)
+gdi/font: failed font.c:244 (x89)
+gdi/font: failed font.c:229
+gdi/font: failed font.c:230
+gdi/font: failed font.c:248
+gdi/font: failed font.c:451 (x6)
+gdi/font: failed font.c:452 (x6)
+gdi/font: failed font.c:455 (x5)
+gdi/font: failed font.c:460 (x3)
+gdi/font: failed font.c:453
+gdi/font: skipped font.c:572 (x3)
+gdi/gdiobj: gdiobj: 43 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi/mapping: mapping: 142 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi/palette: palette: 29 tests executed (0 marked as todo, 0 failures), 0 skipped.
+gdi/pen: pen: 190 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/alloc: alloc: 196 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/atom: atom: 328244 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/dpmi: dpmi: 75 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/file: file: 487243 tests executed (0 marked as todo, 8 failures), 0 skipped.
+kernel/file: failed file.c:427
+kernel/file: failed file.c:429
+kernel/file: failed file.c:431
+kernel/file: failed file.c:433
+kernel/file: failed file.c:447
+kernel/file: failed file.c:449
+kernel/file: failed file.c:466
+kernel/file: failed file.c:472
+kernel/module: module: 142 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/profile: profile: 153 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user/class: class: 205 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user/dialog: dialog: 112 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user/menu: menu: 139 tests executed (0 marked as todo, 3 failures), 0 skipped.
+user/menu: failed menu.c:210
+user/menu: failed menu.c:226
+user/menu: failed menu.c:110
+user/msg: msg: 223 tests executed (0 marked as todo, 3 failures), 0 skipped.
+user/msg: failed msg.c:515 (x3)
+user/text: text: 88 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user/win: win: 559 tests executed (0 marked as todo, 12 failures), 0 skipped.
+user/win: failed win.c:1097
+user/win: failed win.c:1100
+user/win: failed win.c:1108
+user/win: failed win.c:1111
+user/win: failed win.c:95 (x2)
+user/win: failed win.c:277 (x2)
+user/win: failed win.c:336
+user/win: failed win.c:393
+user/win: failed win.c:664
+user/win: failed win.c:666
+user/wsprintf: wsprintf: 22 tests executed (0 marked as todo, 0 failures), 0 skipped.

@@ -1343,6 +1343,7 @@ dependencies = [
  "rust-dos-lpt-dac",
  "rust-dos-mpu401",
  "rust-dos-mt32",
+ "rust-dos-ne",
  "rust-dos-opl",
  "rust-dos-pe",
  "rust-dos-rc",
@@ -1439,6 +1440,10 @@ dependencies = [
  "libloading",
  "rust-dos-hostdirs",
 ]
+
+[[package]]
+name = "rust-dos-ne"
+version = "1.7.5"
 
 [[package]]
 name = "rust-dos-opl"

@@ -345,7 +345,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11048 tests executed (0 marked as todo, 593 failures), 6 skipped.
+user32/msg: msg: 11076 tests executed (0 marked as todo, 594 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -400,12 +400,12 @@ user32/msg: failed msg.c:4165
 user32/msg: failed msg.c:4171
 user32/msg: failed msg.c:4177
 user32/msg: failed msg.c:4205
-user32/msg: failed msg.c:4220 (x9)
+user32/msg: failed msg.c:4220 (x10)
 user32/msg: failed msg.c:4223
 user32/msg: failed msg.c:4239
-user32/msg: failed msg.c:4244 (x9)
+user32/msg: failed msg.c:4244 (x10)
 user32/msg: failed msg.c:4256 (x10)
-user32/msg: failed msg.c:4269 (x7)
+user32/msg: failed msg.c:4269 (x6)
 user32/msg: failed msg.c:4274 (x2)
 user32/msg: failed msg.c:4951 (x2)
 user32/msg: failed msg.c:4959 (x2)
@@ -600,7 +600,7 @@ user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
 user32/text: skipped text.c:119
 user32/text: skipped text.c:554
 user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/win: win: 10408 tests executed (0 marked as todo, 64 failures), 8 skipped.
+user32/win: win: 10408 tests executed (0 marked as todo, 63 failures), 8 skipped.
 user32/win: skipped win.c:5400
 user32/win: skipped win.c:2891
 user32/win: failed win.c:4616
@@ -621,7 +621,6 @@ user32/win: failed win.c:120
 user32/win: skipped win.c:390
 user32/win: skipped win.c:469
 user32/win: failed win.c:496
-user32/win: failed win.c:537
 user32/win: failed win.c:573
 user32/win: skipped win.c:3390
 user32/win: failed win.c:2366

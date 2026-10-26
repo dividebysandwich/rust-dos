@@ -934,7 +934,7 @@ fn ansi_char(b: u8) -> char {
 
 /// The ANSI byte of `c`'s upper or lower case, or `b` itself when it has
 /// none in the code page.
-fn ansi_case(b: u8, upper: bool) -> u8 {
+pub(crate) fn ansi_case(b: u8, upper: bool) -> u8 {
     let c = ansi_char(b);
     let mapped: Vec<char> = if upper {
         c.to_uppercase().collect()

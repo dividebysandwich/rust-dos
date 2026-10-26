@@ -193,6 +193,17 @@ fn get(state: &State, h: u32) -> Option<&Menu> {
     state.menus.get(slot(h)?)?.as_ref()
 }
 
+/// Whether `h` is a menu.
+pub(crate) fn exists(state: &State, h: u32) -> bool {
+    get(state, h).is_some()
+}
+
+/// Whether the menu `h` (or one of its popups) has an item whose id is
+/// `id`.
+pub(crate) fn has_command(state: &State, h: u32, id: u32) -> bool {
+    find(state, h, id, false).is_some()
+}
+
 fn get_mut(state: &mut State, h: u32) -> Option<&mut Menu> {
     state.menus.get_mut(slot(h)?)?.as_mut()
 }

@@ -27,7 +27,7 @@ pub use win98::is_directory;
 pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
-pub(super) use path::{change_directory, current_directory, find_entries, full_path, matches};
+pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
 pub(super) use process::{STARTUPINFO_SIZE, spawn, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
@@ -557,6 +557,11 @@ static APIS: &[Api] = &[
         disk::get_logical_drive_strings,
     ),
     stdcall("GetLogicalDriveStringsW", 914, 2, not_implemented),
+    // Win16 (src/win16/thunk.rs): where 32-bit code a 16-bit function
+    // went on to returns, and the trap of the 32-bit slots that call
+    // 16-bit procedures.
+    stdcall("Win16Return", 950, 0, crate::win16::thunk::win16_return),
+    stdcall("Win16Thunk", 951, 0, crate::win16::thunk::thunk32_trap),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -721,6 +726,25 @@ pub fn address_of(name: &str) -> u32 {
         .position(|d| d.name == DLL.name)
         .expect("KERNEL32 is a built-in DLL");
     super::stubs::stub_address(dll, index)
+}
+
+/// Where 32-bit code that 16-bit code called returns to (Win16Return).
+pub fn win16_return_address() -> u32 {
+    address_of("Win16Return")
+}
+
+/// The trap id of the 32-bit slots that call 16-bit procedures
+/// (Win16Thunk).
+pub fn win16_thunk_id() -> u16 {
+    let index = APIS
+        .iter()
+        .position(|a| a.name == "Win16Thunk")
+        .expect("KERNEL32 has Win16Thunk");
+    let dll = super::stubs::DLLS
+        .iter()
+        .position(|d| d.name == DLL.name)
+        .expect("KERNEL32 is a built-in DLL");
+    super::stubs::id(dll, index)
 }
 
 /// Path operations for other DLLs (SHELL32's file operations), on Win32

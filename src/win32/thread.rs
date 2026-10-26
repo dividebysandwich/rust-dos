@@ -138,6 +138,8 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     }
     win32.running = p;
     win32.slice_start = now;
+    let tid = win32.processes[p].threads[t].id;
+    crate::win16::task::entered(win32, tid);
     let process = &mut win32.processes[p];
     process.current = Some(t);
     let thread = &process.threads[t];
@@ -181,7 +183,9 @@ fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
         .map_or(0, |i| i + 1);
     (0..all.len())
         .map(|k| all[(start + k) % all.len()])
-        .find(|&(p, t)| win32.processes[p].threads[t].ready())
+        .find(|&(p, t)| {
+            win32.processes[p].threads[t].ready() && crate::win16::task::may_run(win32, p, t)
+        })
 }
 
 /// The running thread doesn't go on for now (it waits, was suspended or
@@ -275,10 +279,9 @@ pub fn preempt(cpu: &mut Cpu) {
     };
     let mine = win32.processes[p].threads[t].priority;
     let higher = win32.processes.iter().enumerate().find_map(|(q, process)| {
-        let u = process
-            .threads
-            .iter()
-            .position(|th| th.ready() && th.priority > mine)?;
+        let u = process.threads.iter().enumerate().position(|(u, th)| {
+            th.ready() && th.priority > mine && crate::win16::task::may_run(win32, q, u)
+        })?;
         Some((q, u))
     });
     if let Some(next) = higher.filter(|&n| n != (p, t)) {
