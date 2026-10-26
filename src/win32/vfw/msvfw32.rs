@@ -9,13 +9,15 @@
 //! DDF_UPDATE draws it again and DDF_DONTDRAW decompresses without
 //! drawing. Indeo Video 3 (IV31, IV32) is the one codec; DrawDibBegin
 //! fails for a DIB of another. An uncompressed DIB goes to StretchDIBits
-//! as it is. A save state doesn't keep the decoder's picture: the frames
-//! after a restore that change it start from black.
+//! as it is. The `oxideav-indeo` crate decodes Indeo 3 to YUV 4:1:0,
+//! which is converted to RGB here. A save state doesn't keep the
+//! decoder's picture: the frames after a restore that change it start
+//! from black.
 
 use crate::cpu::Cpu;
 use crate::win32::gdi32::bitmap;
 use crate::win32::stubs::{self, Api, Conv, Dll};
-use rust_dos_indeo3::{Decoder, PixelFormat};
+use oxideav_indeo::indeo3::{DecodedPicture, Indeo3PictureDecoder};
 
 pub static DLL: Dll = Dll {
     name: "MSVFW32.DLL",
@@ -79,9 +81,16 @@ const DIB_RGB_COLORS: u32 = 0;
 const PD_CAN_DRAW_DIB: u32 = 0x0001;
 const PD_CAN_STRETCHDIB: u32 = 0x0002;
 
-/// The decompressor of a DrawDib, which a save state doesn't keep.
-#[derive(Clone, Default)]
-pub struct Codec(Option<Decoder>);
+/// The decompressor of a DrawDib, which a save state doesn't keep: a
+/// copy starts a new one, as a restore does.
+#[derive(Default)]
+pub struct Codec(Option<Box<Indeo3PictureDecoder>>);
+
+impl Clone for Codec {
+    fn clone(&self) -> Codec {
+        Codec(None)
+    }
+}
 
 impl std::fmt::Debug for Codec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -255,10 +264,10 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
             .log_string(&format!("[W32] DrawDibBegin: no codec for {fourcc:?}"));
         return false;
     }
-    let Ok(decoder) = Decoder::new(width, height) else {
+    if !(1..=640).contains(&width) || !(1..=480).contains(&height) {
         return false;
-    };
-    let stride = PixelFormat::Bgr24.dib_stride(width) as u32;
+    }
+    let stride = dib_stride(width) as u32;
     let size = HEADER + stride * height;
     let Some(buffer) =
         crate::win32::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size))
@@ -278,7 +287,7 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
         .guest_fill(buffer + HEADER, (stride * height) as usize, 0);
     let d = dd(cpu, slot);
     d.buffer = buffer;
-    d.codec = Codec(Some(decoder));
+    d.codec = Codec(Some(Box::default()));
     true
 }
 
@@ -368,16 +377,15 @@ fn decode(cpu: &mut Cpu, slot: usize, info: u32, bits: u32) {
     let mut frame = vec![0; size as usize];
     cpu.bus.guest_read_bytes(bits, &mut frame);
     let d = dd(cpu, slot);
-    if d.codec.0.is_none() {
-        // After a restore.
-        d.codec = Codec(Decoder::new(d.width, d.height).ok());
-    }
-    let Some(decoder) = d.codec.0.as_mut() else {
+    // A copy's (after a restore) starts again.
+    let decoder = d.codec.0.get_or_insert_default();
+    // An empty frame repeats the one before.
+    if frame.is_empty() {
         return;
-    };
+    }
     match decoder.decode(&frame) {
-        Ok(()) => d.dirty = true,
-        Err(e) => cpu.bus.log_string(&format!("[W32] DrawDibDraw: {e}")),
+        Ok(_) => d.dirty = true,
+        Err(e) => cpu.bus.log_string(&format!("[W32] DrawDibDraw: {e:?}")),
     }
 }
 
@@ -386,15 +394,49 @@ fn write_picture(cpu: &mut Cpu, slot: usize) {
     let d = dd(cpu, slot);
     d.dirty = false;
     let (buffer, width, height) = (d.buffer, d.width, d.height);
-    let Some(decoder) = d.codec.0.as_ref() else {
+    let Some(picture) = d.codec.0.as_ref().and_then(|c| c.previous()) else {
         return;
     };
-    let stride = PixelFormat::Bgr24.dib_stride(width);
-    let mut out = vec![0; stride * height as usize];
-    if decoder
-        .write_picture(PixelFormat::Bgr24, true, stride, &mut out)
-        .is_ok()
-    {
-        cpu.bus.guest_write_bytes(buffer + HEADER, &out);
+    if picture.width != width || picture.height != height {
+        return;
     }
+    let out = bgr24_dib(picture);
+    cpu.bus.guest_write_bytes(buffer + HEADER, &out);
+}
+
+/// The distance between rows of a 24-bit DIB `width` pixels wide: rows
+/// are padded to 4 bytes.
+fn dib_stride(width: u32) -> usize {
+    (width as usize * 3).next_multiple_of(4)
+}
+
+/// BT.601 limited range to RGB, in 16.16 fixed point.
+const CY: i32 = 76309; // 255 / 219
+const CRV: i32 = 104597; // 1.402 * 255 / 224
+const CGU: i32 = 25675; // 0.344136 * 255 / 224
+const CGV: i32 = 53279; // 0.714136 * 255 / 224
+const CBU: i32 = 132201; // 1.772 * 255 / 224
+
+/// `picture` as a bottom-up 24-bit DIB, what ICDecompress gives for a
+/// BI_RGB output of 24 bits: each chroma sample colours its 4x4 block.
+fn bgr24_dib(picture: &DecodedPicture) -> Vec<u8> {
+    let (w, h) = (picture.width as usize, picture.height as usize);
+    let cw = picture.chroma_width as usize;
+    let stride = dib_stride(picture.width);
+    let mut out = vec![0; stride * h];
+    for y in 0..h {
+        let crow = y / 4 * cw;
+        let ys = &picture.luma[y * w..y * w + w];
+        let row = &mut out[(h - 1 - y) * stride..][..w * 3];
+        for (x, (&yv, d)) in ys.iter().zip(row.as_chunks_mut::<3>().0).enumerate() {
+            let u = picture.chroma_u[crow + x / 4] as i32 - 128;
+            let v = picture.chroma_v[crow + x / 4] as i32 - 128;
+            let l = CY * (yv as i32 - 16) + (1 << 15);
+            let r = (l + CRV * v) >> 16;
+            let g = (l - CGU * u - CGV * v) >> 16;
+            let b = (l + CBU * u) >> 16;
+            *d = [b, g, r].map(|c| c.clamp(0, 255) as u8);
+        }
+    }
+    out
 }

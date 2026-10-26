@@ -3,7 +3,7 @@
 //! frames. Games of the late 1990s play their movies with the two:
 //! Grom reads its intro with AVIStreamRead and draws each frame with
 //! DrawDibDraw. Indeo Video 3 (IV31, IV32), which Windows 98 has a
-//! codec for, is decompressed by the `rust-dos-indeo3` crate; frames of
+//! codec for, is decompressed by the `oxideav-indeo` crate; frames of
 //! other codecs draw as black.
 
 pub mod avi;
