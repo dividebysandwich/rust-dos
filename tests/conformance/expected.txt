@@ -57,22 +57,13 @@ comctl32/subclass: skipped subclass.c:301
 comctl32/tab: tab: 1110 tests executed (0 marked as todo, 2 failures), 0 skipped.
 comctl32/tab: failed tab.c:918
 comctl32/tab: failed tab.c:919
-comctl32/toolbar: toolbar: 1287 tests executed (0 marked as todo, 48 failures), 0 skipped.
+comctl32/toolbar: toolbar: 1287 tests executed (0 marked as todo, 28 failures), 0 skipped.
 comctl32/toolbar: failed toolbar.c:888 (x9)
 comctl32/toolbar: failed toolbar.c:895 (x4)
 comctl32/toolbar: failed toolbar.c:899 (x5)
 comctl32/toolbar: failed toolbar.c:917 (x5)
-comctl32/toolbar: failed toolbar.c:985
-comctl32/toolbar: failed toolbar.c:987 (x3)
-comctl32/toolbar: failed toolbar.c:991
-comctl32/toolbar: failed toolbar.c:1030
-comctl32/toolbar: failed toolbar.c:1032
-comctl32/toolbar: failed toolbar.c:1034 (x6)
-comctl32/toolbar: failed toolbar.c:1037 (x6)
-comctl32/toolbar: failed toolbar.c:1044
-comctl32/toolbar: failed toolbar.c:1046
+comctl32/toolbar: failed toolbar.c:1037 (x2)
 comctl32/toolbar: failed toolbar.c:1066 (x3)
-comctl32/toolbar: failed toolbar.c:1074
 comctl32/tooltips: tooltips: 64 tests executed (0 marked as todo, 0 failures), 2 skipped.
 comctl32/tooltips: skipped tooltips.c:392
 comctl32/tooltips: skipped tooltips.c:549
