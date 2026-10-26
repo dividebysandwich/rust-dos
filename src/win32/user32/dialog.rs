@@ -1207,8 +1207,12 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             t.set(C_SCALE, pack(sx, sy));
             let mut style = h.style;
             let mut ex = h.ex;
-            if style & WS_CHILD != 0 {
+            // A child dialog has no caption, but keeps a border of its
+            // own: WS_BORDER alone is half of WS_CAPTION.
+            if style & WS_CHILD != 0 && style & WS_CAPTION == WS_CAPTION {
                 style &= !(WS_CAPTION | WS_SYSMENU);
+            } else if style & WS_CHILD != 0 {
+                style &= !WS_SYSMENU;
             }
             if style & DS_MODALFRAME != 0 {
                 ex |= WS_EX_DLGMODALFRAME;
