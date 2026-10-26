@@ -250,8 +250,8 @@ impl DiskController {
 
     /// DOS AH=3Ah: Remove an empty directory.
     pub fn remove_directory(&self, path: &str) -> Result<(), u8> {
-        // It has the system files.
-        if self.is_system_dir(path) {
+        // It has the system files, whether the drive has it or not.
+        if self.holds_system_files(path) {
             return Err(0x05);
         }
         let normalized = path.replace('/', "\\");

@@ -41,6 +41,8 @@ fn split(path: &str) -> Option<(&str, &str)> {
 impl DiskController {
     /// Show `files` (name, contents) in the directory `dir`, fully
     /// qualified, in place of those shown before; none takes them away.
+    /// A file open already reads as its new contents: a save state opens
+    /// its files before the built-in Windows says which version they are.
     pub fn set_system_files(&mut self, dir: &str, files: Vec<(String, Bytes)>) {
         self.system_files = SystemFiles {
             dir: dir.trim_end_matches('\\').to_ascii_uppercase(),
@@ -49,8 +51,45 @@ impl DiskController {
                 .map(|(name, data)| (name.to_ascii_uppercase(), data))
                 .collect(),
         };
+        let keys: Vec<(u64, Bytes)> = self
+            .system_files
+            .files
+            .iter()
+            .map(|(name, data)| {
+                let path = format!("{}\\{}", self.system_files.dir, name);
+                (self.file_key(&path), data.clone())
+            })
+            .collect();
+        let mut changed = Vec::new();
+        for (&sft, open) in self.open_files.iter_mut() {
+            if let OpenData::Memory(data, _) = &mut open.data
+                && let Some((_, new)) = keys.iter().find(|(key, _)| *key == open.key)
+                && data[..] != new[..]
+            {
+                *data = new.clone();
+                changed.push(sft);
+            }
+        }
+        for sft in changed {
+            self.mark_dirty(sft);
+        }
         // Searches kept from before listed the files as they were.
         self.host_dirs.forget();
+    }
+
+    /// Whether the directory `dos_path` names holds the system files or a
+    /// directory on the way to them, whether the drive has it or not: it
+    /// isn't empty.
+    pub(super) fn holds_system_files(&self, dos_path: &str) -> bool {
+        let shown = &self.system_files;
+        if shown.files.is_empty() {
+            return false;
+        }
+        let Some(path) = self.qualify_path(dos_path) else {
+            return false;
+        };
+        let path = path.trim_end_matches('\\');
+        path.len() > 2 && (shown.dir == path || shown.dir.starts_with(&format!("{}\\", path)))
     }
 
     /// What the DOS path `dos_path` names of the system files, the drive
