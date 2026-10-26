@@ -476,17 +476,6 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, super::ERROR_CLASS_DOES_NOT_EXIST);
         return Some(0);
     };
-    // COMCTL32's classes are there in every process, as on Windows 98,
-    // where SHELL32 and others load COMCTL32 into the processes that
-    // import them. Their procedures are in its image, which the process
-    // may not have mapped yet.
-    let comctl32 = crate::win32::comctl32::DLL.base;
-    if user(cpu).classes[class_index as usize]
-        .as_ref()
-        .is_some_and(|c| c.system && c.instance == comctl32)
-    {
-        crate::win32::loader::map_builtin_named(cpu, "COMCTL32.DLL")?;
-    }
     if name != 0 && string_at(cpu, name).is_none() {
         return None;
     }
@@ -544,6 +533,11 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         ex |= WS_EX_TOPMOST;
     }
     let class_info = state.classes[class_index as usize].clone().unwrap();
+    // The window's procedure may be in COMCTL32's image.
+    if !super::class::map_dll(cpu, class_index) {
+        set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
+        return Some(0);
+    }
     // CW_USEDEFAULT: an overlapped window gets a place and three
     // quarters of the screen; a popup or child window none.
     let (sw, sh) = super::sysparams::screen_size();
