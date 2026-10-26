@@ -1381,6 +1381,38 @@ static void test_text(void)
     ok(FindWindow("ToolWindowClass", "") == 0, "FindWindow found a destroyed window\n");
 }
 
+/* A window moved where its right edge passes 32767 and back (added for
+ * Win16). Castle of the Winds slides its title screen's buttons in from
+ * there. Windows 3.1 works on such coordinates modulo 64K, so the client
+ * area the subclassed button's WM_NCCALCSIZE gives it there is right
+ * again once it moves back at the same size, which sends none. */
+static WNDPROC old_wrap_proc;
+
+LRESULT CALLBACK __export wrap_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    return CallWindowProc((FARPROC)old_wrap_proc, hwnd, msg, wparam, lparam);
+}
+
+static void test_wrapped_move(HWND parent)
+{
+    HWND child;
+    RECT rc;
+
+    child = CreateWindow("button", "wrap", WS_CHILD | BS_PUSHBUTTON, 0, 0, 10, 10,
+                         parent, (HMENU)7, main_instance, NULL);
+    ok(child != 0, "CreateWindow failed\n");
+    old_wrap_proc = (WNDPROC)SetWindowLong(child, GWL_WNDPROC, (LONG)wrap_proc);
+
+    MoveWindow(child, 32678, 6, 180, 24, FALSE);
+    MoveWindow(child, 230, 6, 180, 24, FALSE);
+    GetClientRect(child, &rc);
+    ok(rc.left == 0 && rc.top == 0 && rc.right == 180 && rc.bottom == 24,
+       "invalid client rect %d,%d-%d,%d after moving back\n", rc.left, rc.top, rc.right, rc.bottom);
+
+    SetWindowLong(child, GWL_WNDPROC, (LONG)old_wrap_proc);
+    DestroyWindow(child);
+}
+
 START_TEST(win)
 {
     /* A program's instance handle is its data segment's selector. */
@@ -1421,6 +1453,7 @@ START_TEST(win)
     test_ShowWindow();
     test_subclass();
     test_text();
+    test_wrapped_move(hwndMain);
 
     DestroyWindow(hwndMain2);
     DestroyWindow(hwndMain);

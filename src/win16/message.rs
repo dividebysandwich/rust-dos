@@ -187,6 +187,38 @@ fn copy_ints(cpu: &mut Cpu, from: u32, to: u32, n: u32, widen: bool) {
     }
 }
 
+/// Copy `n` 16-bit RECTs at `from` to 32-bit ones at `to`: the left and
+/// top edges sign-extended, the right and bottom ones that far from them.
+/// A window near x = 32767 has a right edge that wraps to a negative
+/// number in 16 bits; widened alone, it would make the rectangle empty.
+fn widen_rects(cpu: &mut Cpu, from: u32, to: u32, n: u32) {
+    for k in 0..n {
+        for j in 0..2 {
+            let (at16, at) = (from + 8 * k + 2 * j, to + 16 * k + 4 * j);
+            let first = r16(cpu, at16);
+            let second = r16(cpu, at16 + 4);
+            let size = (second as u16).wrapping_sub(first as u16) as i16 as i32 as u32;
+            w32(cpu, at, sx(first));
+            w32(cpu, at + 8, sx(first).wrapping_add(size));
+        }
+    }
+}
+
+/// Copy `n` 16-bit integers at `from` back over the 32-bit ones at `to`
+/// that they were made from, each widened to the value nearest the one
+/// it replaces. A 16-bit procedure works on coordinates modulo 64K, as
+/// Windows 3.1's USER does: a window moved to x = 32700 has a right
+/// edge that wraps to a negative number, and the client rectangle its
+/// WM_NCCALCSIZE gives back has to keep the 32-bit edges it came from,
+/// or the client area stays empty after the window moves back.
+fn copy_ints_back(cpu: &mut Cpu, from: u32, to: u32, n: u32) {
+    for i in 0..n {
+        let old = r32(cpu, to + 4 * i);
+        let delta = (r16(cpu, from + 2 * i) as u16).wrapping_sub(old as u16) as i16;
+        w32(cpu, to + 4 * i, old.wrapping_add(delta as i32 as u32));
+    }
+}
+
 /// Copy a string (with its NUL) at the linear `from` to `to`.
 fn copy_string(cpu: &mut Cpu, from: u32, to: u32) {
     let mut s = super::string_bytes(cpu, from, 0x1_0000);
@@ -339,7 +371,7 @@ fn to32(
             let p16 = flat(cpu, lp);
             if wp != 0 {
                 let p = stack.alloc(52);
-                copy_ints(cpu, p16, p, 12, true);
+                widen_rects(cpu, p16, p, 3);
                 let pos16 = flat(cpu, r32(cpu, p16 + 24));
                 let pos = stack.alloc(28);
                 if pos16 != 0 {
@@ -350,7 +382,7 @@ fn to32(
                 (msg, wp, p)
             } else {
                 let p = stack.alloc(16);
-                copy_ints(cpu, p16, p, 4, true);
+                widen_rects(cpu, p16, p, 1);
                 data.extend([FIX_RECT, p, p16]);
                 (msg, wp, p)
             }
@@ -856,10 +888,10 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
     let fix = &data[1.min(data.len())..];
     if let [kind, p, p16, ..] = *fix {
         match kind {
-            FIX_MINMAX => copy_ints(cpu, p16, p, 10, true),
+            FIX_MINMAX => copy_ints_back(cpu, p16, p, 10),
             FIX_WINDOWPOS => windowpos32(cpu, p16, p),
-            FIX_RECT => copy_ints(cpu, p16, p, 4, true),
-            FIX_NCCALC => copy_ints(cpu, p16, p, 12, true),
+            FIX_RECT => copy_ints_back(cpu, p16, p, 4),
+            FIX_NCCALC => copy_ints_back(cpu, p16, p, 12),
             FIX_MEASURE => {
                 for i in 3..5 {
                     let v = r16(cpu, p16 + 2 * i);
