@@ -34,12 +34,23 @@ pub fn is_98(cpu: &Cpu) -> bool {
     current(cpu).is_98()
 }
 
-/// The first program starts: the setting becomes the version the
-/// processes see.
+crate::state_enum!(crate::config::DesktopDepth {
+    crate::config::DesktopDepth::Adapter,
+    crate::config::DesktopDepth::Palette,
+});
+
+/// The first program starts: the settings become the version the
+/// processes see and the depth of their desktop.
 pub fn start(win32: &mut super::Win32) {
     if win32.processes.is_empty() {
         win32.os = win32.version;
+        win32.desktop_depth = win32.depth;
     }
+}
+
+/// Whether the desktop has 256 colours from a palette (`win32_depth=8`).
+pub fn palette_desktop(cpu: &Cpu) -> bool {
+    cpu.bus.win32.desktop_depth == crate::config::DesktopDepth::Palette
 }
 
 /// What a version of Windows reports about itself.

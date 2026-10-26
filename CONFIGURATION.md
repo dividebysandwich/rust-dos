@@ -453,6 +453,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   had under Windows 95 too, so a program that imports them needs `98`.
   A change takes effect for the next program that starts when none
   runs.
+* `win32_depth` is the depth of the built-in Windows' desktop: `auto`
+  (the default) is the display adapter's own, 32 bits a pixel (24 on an
+  S3 ViRGE, 16 on a 3dfx Banshee or Voodoo3); `8` is 640x480 with 256
+  colours from a palette, as a Windows 3.1 or 95 display driver of 256
+  colours gave it. Programs that say they need 256 colours, such as
+  Iron Helix, need `8`. GetDeviceCaps then reports a palette device
+  (RC_PALETTE, 256 palette entries, 20 of them static), logical palettes
+  take entries of the system palette when they are realized, and
+  AnimatePalette changes the colors on the screen at once. Like
+  `win32_version`, a change takes effect for the next program that
+  starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
   AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
   `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS

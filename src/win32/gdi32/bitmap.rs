@@ -38,6 +38,9 @@ pub struct DibInfo {
     pub core: bool,
     /// How many entries its color table has.
     pub table_len: u32,
+    /// With DIB_PAL_COLORS, the logical palette's indices its color
+    /// table had, which `colors` has the colors of.
+    pub pal_indices: Option<Vec<u16>>,
 }
 
 impl DibInfo {
@@ -136,17 +139,22 @@ pub fn read_info(cpu: &mut Cpu, at: u32, usage: u32, hdc: u32) -> Option<DibInfo
                     .and_then(|p| gdi(cpu).palette(p))
                     .map(|p| p.entries.clone())
                     .unwrap_or_default();
-                (0..n)
-                    .map(|i| {
+                let indices: Vec<u16> = (0..n)
+                    .map(|i| cpu.bus.guest_read_16(colors_at + 2 * i))
+                    .collect();
+                let colors = indices
+                    .iter()
+                    .map(|&index| {
                         // An index past the palette's end wraps around it.
-                        let index = cpu.bus.guest_read_16(colors_at + 2 * i) as usize;
                         let e = match palette.len() {
                             0 => [0; 4],
-                            n => palette[index % n],
+                            n => palette[index as usize % n],
                         };
                         e[0] as u32 | (e[1] as u32) << 8 | (e[2] as u32) << 16
                     })
-                    .collect()
+                    .collect();
+                info.pal_indices = Some(indices);
+                colors
             }
             _ if info.core => (0..n)
                 .map(|i| {
@@ -675,6 +683,9 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         match &b.dib {
             Some(d) if bitmap_bpp == bpp => d.colors.clone(),
             _ if bitmap_bpp == 1 && b.dib.is_none() && bpp == 1 => vec![0, 0xFFFFFF],
+            // A palette device's bitmap: its indices, with the system
+            // palette's colors.
+            None if bitmap_bpp == 8 && bpp == 8 => super::palette::system_colors(cpu),
             _ => default_table(bpp),
         }
     } else {
@@ -737,7 +748,12 @@ pub fn get_di_bits(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         for x in 0..info.width.min(b.width) {
             let v = src.get(x, row);
             let color = src.color_of(v);
-            let same = bpp == bitmap_bpp && bpp > 8 && src.masks == dib.masks;
+            let same = bpp == bitmap_bpp
+                && if bpp > 8 {
+                    src.masks == dib.masks
+                } else {
+                    src.colors == dib.colors
+                };
             let nv = if same || (bpp == 1 && src.mono) {
                 v
             } else {
@@ -778,6 +794,11 @@ fn set_bits(
         return 0;
     };
     let height = info.abs_height();
+    let map = dst.device.then(|| {
+        let hpal = gdi(cpu).dc(hdc).map_or(0, |d| d.attrs.palette);
+        super::palette::DeviceMap::new(cpu, hpal)
+    });
+    let mut xlat = draw::Translate::new(&src, &dst, map.as_ref(), 0, 0, 1);
     let mut set = 0;
     for i in 0..src.height {
         let scan = start as i32 + i;
@@ -798,7 +819,7 @@ fn set_bits(
             let nv = if dst.mono && src.bpp == 1 && src.colors == [0, 0xFFFFFF] {
                 v
             } else {
-                draw::convert(&src, v, &dst, 0, 0, 1)
+                xlat.get(&src, v, &dst)
             };
             let nv = if dst.mono && !(src.bpp == 1 && src.colors == [0, 0xFFFFFF]) {
                 let c = src.color_of(v);
@@ -829,6 +850,7 @@ pub fn read_dib(
     let height = info.abs_height();
     let lines = (lines as i32).min(height - start as i32).max(0);
     let mut s = Surface::memory(info.width, lines, info.bpp, info.colors.clone(), info.masks);
+    s.pal_indices = info.pal_indices.clone();
     if info.compression == BI_RLE8 || info.compression == BI_RLE4 {
         let size = if info.image_size != 0 {
             info.image_size.min(MAX_BITS as u32)

@@ -277,6 +277,11 @@ pub struct Win32 {
     /// when the first of them started (version.rs).
     pub version: version::WindowsVersion,
     os: version::WindowsVersion,
+    /// The depth of the desktop (the `win32_depth` setting), and the
+    /// depth the running processes have, the setting's when the first
+    /// of them started.
+    pub depth: crate::config::DesktopDepth,
+    desktop_depth: crate::config::DesktopDepth,
     /// The program DOS loaded, which starts at `START`, and whether it is
     /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
     pending: Option<String>,
@@ -365,6 +370,7 @@ impl Win32 {
             guest_dlls: self.guest_dlls.take(),
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
+            depth: self.depth,
             ..Win32::default()
         };
     }
@@ -1167,4 +1173,5 @@ crate::state_fields!(Win32 {
     dde,
     pending_win16,
     win16,
-} skip { enabled, guest_dlls, guest_replace, version, pending_arguments });
+    desktop_depth,
+} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments });

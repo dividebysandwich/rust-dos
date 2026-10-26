@@ -549,7 +549,9 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetDeviceCaps(hdc, index): the display's, 640x480 at 96 pixels an
 /// inch, with the desktop's depth: 32 bits a pixel, 24 on an S3 ViRGE,
-/// or 16 on a Banshee or Voodoo3.
+/// or 16 on a Banshee or Voodoo3. A desktop of 256 colours is a palette
+/// device: 8 bits a pixel, RC_PALETTE, a palette of 256 entries with 20
+/// static colors, and 6 bits a channel in the DAC.
 pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
@@ -558,14 +560,26 @@ pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     match args[1] {
         BITSPIXEL => return Some(bpp),
         // COLORRES: the bits of a color the display shows.
-        108 if bpp == 16 => return Some(16),
+        COLORRES if bpp == 16 => return Some(16),
+        _ if bpp != 8 => {}
+        NUMCOLORS => return Some(20),
+        RASTERCAPS => return Some(device_cap(RASTERCAPS) | RC_PALETTE),
+        SIZEPALETTE => return Some(256),
+        NUMRESERVED => return Some(20),
+        COLORRES => return Some(18),
         _ => {}
     }
     Some(device_cap(args[1]))
 }
 
-/// GetDeviceCaps' index of the bits a pixel.
+/// GetDeviceCaps' indices.
 const BITSPIXEL: u32 = 12;
+const NUMCOLORS: u32 = 24;
+const RASTERCAPS: u32 = 38;
+const SIZEPALETTE: u32 = 104;
+const NUMRESERVED: u32 = 106;
+const COLORRES: u32 = 108;
+const RC_PALETTE: u32 = 0x0100;
 
 /// The depth of the display's bitmaps (compatible bitmaps, and those a
 /// display DC's memory DCs take): the desktop's.
@@ -779,11 +793,23 @@ pub fn get_graphics_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     get_attr(cpu, args[0], 0, |a| a.graphics_mode)
 }
 
-/// GetNearestColor(hdc, color): on a 32-bit display, the color itself.
+/// GetNearestColor(hdc, color): on a 32-bit display, the color itself;
+/// on a palette device, the system palette's color the DC draws it with.
 pub fn get_nearest_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(dc) = get(cpu, args[0]) else {
         return Some(super::CLR_INVALID);
     };
+    let device = match dc.kind {
+        MEMORY => gdi(cpu)
+            .bitmap(dc.attrs.bitmap)
+            .is_some_and(|b| b.dib.is_none() && b.bpp == 8),
+        _ => crate::win32::version::palette_desktop(cpu),
+    };
+    if device {
+        let map = super::palette::DeviceMap::new(cpu, dc.attrs.palette);
+        let index = super::draw::device_value(&map, args[1]);
+        return Some(super::palette::system_colors(cpu)[index as usize & 0xFF]);
+    }
     let color = resolve_color(cpu, &dc, args[1]);
     if dc.kind == MEMORY
         && let Some(b) = gdi(cpu).bitmap(dc.attrs.bitmap)
