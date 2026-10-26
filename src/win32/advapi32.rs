@@ -377,7 +377,19 @@ fn reg_query_value_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         write_32(cpu, ptype, 0);
         return Some(ERROR_FILE_NOT_FOUND);
     };
+    make_shell_folder(cpu, key, &value);
     give_data(cpu, &value.data, value.kind, (ptype, data, size))
+}
+
+/// On Windows, Explorer has made every folder Shell Folders names by the
+/// time a program runs. Setup programs read the Start Menu's path there
+/// and go into it without making it (Zanzarah's), so a folder is made
+/// when a program reads its path, by RegQueryValueExA or RegEnumValueA,
+/// as SHELL32 makes one it is asked for.
+fn make_shell_folder(cpu: &mut Cpu, key: u32, value: &registry::Value) {
+    if value.kind == REG_SZ && registry::get(cpu).is_shell_folders(key) {
+        super::shell32::make_directories(cpu, &value.text());
+    }
 }
 
 /// RegSetValueA: set the default value of the subkey `args[1]` of the
@@ -564,6 +576,7 @@ fn reg_enum_value(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !writable(cpu, &[size]) {
         return None;
     }
+    make_shell_folder(cpu, key, &value);
     let result = give_data(cpu, &value.data, value.kind, (ptype, data, data_size))?;
     if result != ERROR_SUCCESS {
         return Some(result);

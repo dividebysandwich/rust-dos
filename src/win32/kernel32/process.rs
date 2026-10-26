@@ -25,18 +25,74 @@ const SI_CB_RESERVED2: u32 = 50;
 const SI_RESERVED2: u32 = 52;
 const SI_STD_INPUT: u32 = 56;
 
-/// The first word of a command line: quoted, or up to a space.
-fn first_word(line: &str) -> &str {
-    let line = line.trim_start();
-    match line.strip_prefix('"') {
-        Some(rest) => rest.split('"').next().unwrap_or(rest),
-        None => line.split([' ', '\t']).next().unwrap_or(line),
+/// The program a command line names first, as Windows finds it with no
+/// application name (`program_in_line`).
+pub struct ProgramInLine<'a> {
+    /// Its DOS path, with ".EXE" added if the line gave no extension.
+    pub path: String,
+    /// The text of the line that names it, without quotes.
+    pub name: &'a str,
+    /// The rest of the line: after the closing quote of a quoted name
+    /// (empty if it has none), else right after the name.
+    pub args: &'a str,
+    quoted: bool,
+}
+
+impl ProgramInLine<'_> {
+    /// The command line the program gets for `line`, the line it was
+    /// found in: with its name put in quotes if it was found past a space
+    /// or tab, as Windows 98 SE does. WinExec of
+    /// C:\Program Files\XENO\xeno3dfx.exe -ar3 gives the game
+    /// "C:\Program Files\XENO\xeno3dfx.exe" -ar3 for GetCommandLineA.
+    /// The C runtime skips an unquoted program name up to its first blank
+    /// to find WinMain's command line, and would take the rest of the
+    /// path for arguments. That line is built anew, so blanks before the
+    /// name go; any other line is given as it is.
+    pub fn command_line(&self, line: &str) -> String {
+        if self.quoted || !self.name.contains([' ', '\t']) {
+            return line.to_string();
+        }
+        format!("\"{}\"{}", self.name, self.args)
     }
 }
 
-/// The DOS path of the program `name`: as named, with ".EXE" added if it
-/// has no extension, looked for where it says, in the directory of the
-/// running program, then in the directories of PATH.
+/// The program a command line names first, as Windows finds it with no
+/// application name. That is the quoted name, or for an unquoted one,
+/// the line up to each space or tab in turn, the shortest first, until
+/// one is a program (`find_program`). "C:\Program Files\Game\Game.exe -x"
+/// tries C:\Program, C:\Program Files\Game\Game.exe and stops there.
+pub(super) fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<ProgramInLine<'a>> {
+    let line = line.trim_start();
+    if let Some(rest) = line.strip_prefix('"') {
+        let (name, args) = rest.split_once('"').unwrap_or((rest, ""));
+        let path = find_program(cpu, name)?;
+        return Some(ProgramInLine {
+            path,
+            name,
+            args,
+            quoted: true,
+        });
+    }
+    let (path, end) = line
+        .match_indices([' ', '\t'])
+        .map(|(i, _)| i)
+        .chain([line.len()])
+        .filter(|&i| i > 0 && !line[..i].ends_with([' ', '\t']))
+        .find_map(|end| Some((find_program(cpu, &line[..end])?, end)))?;
+    let (name, args) = line.split_at(end);
+    Some(ProgramInLine {
+        path,
+        name,
+        args,
+        quoted: false,
+    })
+}
+
+/// The DOS path of the program `name`, with ".EXE" added if it has no
+/// extension: there if it has a directory in it, else where SearchPathA
+/// looks (the running program's directory, the current one, the system
+/// and Windows directories, then PATH). A directory isn't a program, so
+/// a name that is one isn't found.
 fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
     let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let name = if file.contains('.') {
@@ -44,23 +100,8 @@ fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
     } else {
         format!("{}.EXE", name)
     };
-    let mut candidates = vec![name.clone()];
-    if !name.contains(['\\', '/', ':']) {
-        let own = process(cpu).path.clone();
-        if let Some(i) = own.rfind('\\') {
-            candidates.push(format!("{}\\{}", &own[..i], name));
-        }
-        let path = crate::win32::variable_value(&process(cpu).environment, "PATH")
-            .unwrap_or_default()
-            .to_string();
-        for dir in path.split(';').filter(|d| !d.is_empty()) {
-            candidates.push(format!("{}\\{}", dir.trim_end_matches('\\'), name));
-        }
-    }
-    candidates.into_iter().find_map(|c| {
-        let path = cpu.program_path(&c);
-        cpu.bus.disk.exists(&path).then_some(path)
-    })
+    let found = super::path::search(cpu, None, &name)?;
+    Some(cpu.program_path(&super::path::dos_path(&found)))
 }
 
 /// The environment block at `at`: "NAME=value" strings, each ended by a
@@ -159,13 +200,20 @@ pub(crate) fn spawn(
     flags: u32,
     mut startup: Vec<u8>,
 ) -> Result<[u32; 4], u32> {
-    let name = match (app, line) {
-        (Some(app), _) => app,
-        (None, Some(line)) => first_word(line),
+    let (path, line) = match (app, line) {
+        // Given the program, Windows passes the line on as it is.
+        (Some(app), line) => {
+            let path = find_program(cpu, app).ok_or(ERROR_FILE_NOT_FOUND)?;
+            let line = line.map_or_else(|| path.clone(), str::to_string);
+            (path, line)
+        }
+        (None, Some(line)) => {
+            let found = program_in_line(cpu, line).ok_or(ERROR_FILE_NOT_FOUND)?;
+            let line = found.command_line(line);
+            (found.path, line)
+        }
         (None, None) => return Err(ERROR_INVALID_PARAMETER),
     };
-    let path = find_program(cpu, name).ok_or(ERROR_FILE_NOT_FOUND)?;
-    let line = line.map_or_else(|| path.clone(), str::to_string);
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
     let fields = startup.clone();
     let field = |i: u32| u32::from_le_bytes(fields[i as usize..][..4].try_into().unwrap());
@@ -487,4 +535,46 @@ pub(super) fn fatal_app_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub(super) fn fatal_exit(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     crate::win32::fatal(cpu, &format!("FatalExit({})", args[0]), None);
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProgramInLine;
+
+    fn found<'a>(name: &'a str, args: &'a str, quoted: bool) -> ProgramInLine<'a> {
+        let path = String::new();
+        ProgramInLine {
+            path,
+            name,
+            args,
+            quoted,
+        }
+    }
+
+    #[test]
+    fn a_program_found_past_a_blank_gets_quotes() {
+        let line = r"C:\Program Files\X.EXE -ar3";
+        let program = found(r"C:\Program Files\X.EXE", " -ar3", false);
+        assert_eq!(
+            program.command_line(line),
+            r#""C:\Program Files\X.EXE" -ar3"#
+        );
+        // A tab is a blank too, and blanks before the name go.
+        let line = " C:\\A\tB\\X.EXE";
+        let program = found("C:\\A\tB\\X.EXE", "", false);
+        assert_eq!(program.command_line(line), "\"C:\\A\tB\\X.EXE\"");
+    }
+
+    #[test]
+    fn other_lines_are_given_as_they_are() {
+        let line = " X.EXE  -a";
+        assert_eq!(found("X.EXE", "  -a", false).command_line(line), line);
+        let line = r#""C:\Program Files\X.EXE" -a"#;
+        let program = found(r"C:\Program Files\X.EXE", " -a", true);
+        assert_eq!(program.command_line(line), line);
+        // No closing quote.
+        let line = r#""C:\Program Files\X.EXE"#;
+        let program = found(r"C:\Program Files\X.EXE", "", true);
+        assert_eq!(program.command_line(line), line);
+    }
 }

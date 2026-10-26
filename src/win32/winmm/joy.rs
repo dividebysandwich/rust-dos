@@ -1,9 +1,11 @@
 //! The joystick functions on the emulated game port (Bus::joystick).
 //!
-//! Joystick 1 is the port's stick A, with stick B's axes as its Z and R
-//! axes and the port's four buttons, as Windows 95's standard driver has
-//! a four-axis joystick; joystick 2 is stick B with buttons 3 and 4. An
-//! axis reads 0 to 65535 over the travel the port's one-shots time.
+//! Joysticks 1 and 2 are the ones the port has (`GamePort::joysticks`),
+//! as Windows 95's standard driver has them configured: a four-axis
+//! joystick takes stick B's axes as its Z and R and the port's four
+//! buttons, two two-axis ones take the port in halves, and the mouse is
+//! a two-axis one. An axis reads 0 to 65535 over the travel the port's
+//! one-shots time.
 //!
 //! joySetCapture has the joystick's messages (MM_JOY1MOVE and the
 //! others) posted to a window every so many milliseconds while it holds
@@ -81,8 +83,8 @@ fn joy(cpu: &mut Cpu) -> &mut Joy {
 }
 
 /// An axis's count of the game port as 0 to 65535.
-fn axis(count: u16) -> u32 {
-    let c = (count as u32).clamp(TRIP_MIN, TRIP_MIN + TRIP_RANGE) - TRIP_MIN;
+fn axis(count: u32) -> u32 {
+    let c = count.clamp(TRIP_MIN, TRIP_MIN + TRIP_RANGE) - TRIP_MIN;
     c * 65535 / TRIP_RANGE
 }
 
@@ -91,27 +93,17 @@ fn position(cpu: &mut Cpu, id: u32) -> Result<Position, u32> {
     if id >= JOYSTICKS {
         return Err(JOYERR_PARMS);
     }
-    let port = &cpu.bus.joystick;
-    if !port.present() {
-        return Err(JOYERR_UNPLUGGED);
+    let (counts, buttons) = cpu
+        .bus
+        .joystick
+        .joystick(&cpu.bus.mouse, id as usize)
+        .ok_or(JOYERR_UNPLUGGED)?;
+    // An axis the joystick doesn't have reads 0.
+    let mut axes = [0; 4];
+    for (a, &c) in axes.iter_mut().zip(&counts) {
+        *a = axis(c);
     }
-    let counts = port.bios_axes(&cpu.bus.mouse);
-    let held = !(port.bios_switches(&cpu.bus.mouse) >> 4) as u32 & 0xF;
-    let (x, y) = if id == 0 { (0, 1) } else { (2, 3) };
-    if counts[x] == 0 {
-        return Err(JOYERR_UNPLUGGED);
-    }
-    Ok(if id == 0 {
-        Position {
-            axes: counts.map(axis),
-            buttons: held,
-        }
-    } else {
-        Position {
-            axes: [axis(counts[x]), axis(counts[y]), 0, 0],
-            buttons: held >> 2,
-        }
-    })
+    Ok(Position { axes, buttons })
 }
 
 /// joyGetNumDevs: the joysticks the driver takes, none without a game
@@ -122,6 +114,20 @@ pub fn joy_get_num_devs(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     } else {
         0
     })
+}
+
+/// The axes, buttons and JOYCAPS flags of the joystick `id`; one that
+/// isn't plugged in has the driver's standard joystick's.
+fn shape(cpu: &Cpu, id: u32) -> (u32, u32, u32) {
+    let (axes, buttons) = cpu.bus.joystick.shape(id as usize);
+    let mut flags = 0;
+    if axes > 2 {
+        flags |= JOYCAPS_HASZ;
+    }
+    if axes > 3 {
+        flags |= JOYCAPS_HASR;
+    }
+    (axes, buttons, flags)
 }
 
 /// joyGetDevCapsA(id, caps, size).
@@ -138,7 +144,7 @@ pub fn joy_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if at == 0 {
         return Some(MMSYSERR_INVALPARAM);
     }
-    let (axes, buttons) = if id == 0 { (4u32, 4u32) } else { (2, 2) };
+    let (axes, buttons, flags) = shape(cpu, id);
     let mut caps = Vec::with_capacity(JOYCAPS_SIZE as usize);
     let put = |c: &mut Vec<u8>, v: u32| c.extend_from_slice(&v.to_le_bytes());
     caps.extend_from_slice(&MM_MICROSOFT.to_le_bytes());
@@ -157,14 +163,7 @@ pub fn joy_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         put(&mut caps, 0);
         put(&mut caps, 65535);
     }
-    put(
-        &mut caps,
-        if id == 0 {
-            JOYCAPS_HASZ | JOYCAPS_HASR
-        } else {
-            0
-        },
-    );
+    put(&mut caps, flags);
     put(&mut caps, 4);
     put(&mut caps, axes);
     put(&mut caps, 4);
@@ -342,7 +341,9 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) {
         if moved(p.axes[0], c.last.axes[0]) || moved(p.axes[1], c.last.axes[1]) || !c.changed {
             post(cpu, MM_JOY1MOVE, p.buttons, xy);
         }
-        if j == 0 && (moved(p.axes[2], c.last.axes[2]) || !c.changed) {
+        // Only a joystick with a Z axis has Z moves.
+        let has_z = shape(cpu, j).2 & JOYCAPS_HASZ != 0;
+        if has_z && (moved(p.axes[2], c.last.axes[2]) || !c.changed) {
             post(cpu, MM_JOY1ZMOVE, p.buttons, p.axes[2] & 0xFFFF);
         }
         if changes & p.buttons != 0 {
@@ -388,3 +389,57 @@ crate::state_fields!(Joy {
     captures,
     thresholds
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::joystick::{JoystickSettings, JoystickType, PAD_A, PadState};
+
+    fn machine(kind: JoystickType) -> Cpu {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.set_joystick(JoystickSettings { kind, deadzone: 0 });
+        cpu
+    }
+
+    /// The mouse is a joystick of two axes: its caps say so, and it has
+    /// no Z or R to read at one end of their travel.
+    #[test]
+    fn the_mouse_is_a_two_axis_joystick() {
+        let mut cpu = machine(JoystickType::Mouse);
+        cpu.bus.mouse.set_position(639, 0);
+        assert_eq!(shape(&cpu, 0), (2, 2, 0));
+        let p = position(&mut cpu, 0).expect("joystick 1");
+        assert_eq!(p.axes, [65535, 0, 0, 0]);
+        assert_eq!(position(&mut cpu, 1), Err(JOYERR_UNPLUGGED));
+    }
+
+    /// One controller is a joystick of four axes and four buttons; two
+    /// are two joysticks of two, each with its own buttons.
+    #[test]
+    fn controllers_are_the_joysticks_the_port_has() {
+        let pad = |x: f32, buttons| {
+            Some(PadState {
+                axes: [x, 0.0, 0.0, 0.0],
+                buttons,
+            })
+        };
+        let mut cpu = machine(JoystickType::FourAxis);
+        cpu.bus.joystick.set_pad(0, pad(1.0, PAD_A));
+        assert_eq!(shape(&cpu, 0), (4, 4, JOYCAPS_HASZ | JOYCAPS_HASR));
+        assert_eq!(
+            position(&mut cpu, 0).map(|p| (p.axes[0], p.buttons)),
+            Ok((65535, 1))
+        );
+        assert_eq!(position(&mut cpu, 1), Err(JOYERR_UNPLUGGED));
+
+        let mut cpu = machine(JoystickType::TwoAxis);
+        cpu.bus.joystick.set_pad(0, pad(-1.0, 0));
+        cpu.bus.joystick.set_pad(1, pad(1.0, PAD_A));
+        assert_eq!((shape(&cpu, 0), shape(&cpu, 1)), ((2, 2, 0), (2, 2, 0)));
+        let a = position(&mut cpu, 0).expect("joystick 1");
+        let b = position(&mut cpu, 1).expect("joystick 2");
+        assert_eq!((a.axes[0], a.buttons), (0, 0));
+        assert_eq!((b.axes[0], b.buttons), (65535, 1));
+        assert_eq!((a.axes[2], a.axes[3]), (0, 0), "no Z or R");
+    }
+}
