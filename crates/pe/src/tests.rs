@@ -261,9 +261,7 @@ fn a_section_without_a_file_offset_is_zeros() {
     );
     b.entry(code);
     let mut file = b.build();
-    let pe = u32::from_le_bytes(file[0x3C..0x40].try_into().unwrap()) as usize;
-    let optional = u16::from_le_bytes([file[pe + 20], file[pe + 21]]) as usize;
-    let header = pe + 24 + optional + 40;
+    let header = section_header(&file, 1);
     assert_eq!(&file[header..header + 4], b".bss");
     file[header + 16..header + 20].copy_from_slice(&0x2000u32.to_le_bytes());
     file[header + 20..header + 24].copy_from_slice(&0u32.to_le_bytes());
@@ -284,9 +282,7 @@ fn raw_data_past_the_virtual_size_is_mapped_to_the_page_end() {
     b.section(".text", &text, SCN_CODE | SCN_EXECUTE | SCN_READ);
     b.entry(code);
     let mut file = b.build();
-    let pe = u32::from_le_bytes(file[0x3C..0x40].try_into().unwrap()) as usize;
-    let optional = u16::from_le_bytes([file[pe + 20], file[pe + 21]]) as usize;
-    let header = pe + 24 + optional;
+    let header = section_header(&file, 0);
     assert_eq!(&file[header..header + 5], b".text");
     file[header + 8..header + 12].copy_from_slice(&0x10u32.to_le_bytes());
 
@@ -294,4 +290,30 @@ fn raw_data_past_the_virtual_size_is_mapped_to_the_page_end() {
     let at = code as usize;
     assert_eq!(image.data[at + 0x800], 0x90);
     assert_eq!(image.data[at + 0xFFF], 0xC3);
+}
+
+#[test]
+fn raw_data_past_the_image_end_is_cut_short() {
+    // An image size that ends in the last section's last page: the raw
+    // data past it isn't mapped.
+    let mut b = Builder::exe(0x40_0000);
+    let code = b.next_rva();
+    b.section(".text", &[0xC3; 0x1000], SCN_CODE | SCN_EXECUTE | SCN_READ);
+    b.entry(code);
+    let mut file = b.build();
+    let header = section_header(&file, 0);
+    file[header + 8..header + 12].copy_from_slice(&0x10u32.to_le_bytes());
+    let size_of_image = pe_offset(&file).unwrap() + 24 + 56;
+    file[size_of_image..size_of_image + 4].copy_from_slice(&(code + 0x10).to_le_bytes());
+
+    let image = Image::load(&file).unwrap();
+    assert_eq!(image.data.len(), code as usize + 0x10);
+    assert_eq!(image.data[code as usize + 0xF], 0xC3);
+}
+
+/// Where the section header `index` of the PE file `file` is.
+fn section_header(file: &[u8], index: usize) -> usize {
+    let pe = pe_offset(file).unwrap();
+    let optional = u16::from_le_bytes([file[pe + 20], file[pe + 21]]) as usize;
+    pe + 24 + optional + 40 * index
 }
