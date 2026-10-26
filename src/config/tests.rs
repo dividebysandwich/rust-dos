@@ -17,6 +17,16 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
+fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
+    let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
+    assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));
+    assert!(config.warnings.is_empty());
+    let invalid = parse("[emulator]\nshader=unknown\n", Path::new("/cfg"), None);
+    assert_eq!(invalid.shader, None);
+    assert!(invalid.warnings.iter().any(|w| w.contains("invalid shader") && w.contains("xbrz")));
+}
+
+#[test]
 fn vr_settings_saved_before_auto_are_auto() {
     let old = parse("[vr]\nquality=high\nresolution=100\n", Path::new("/cfg"), None);
     assert_eq!((old.vr.quality, old.vr.resolution), (crate::vr::VrQuality::Auto, None));

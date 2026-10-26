@@ -1955,7 +1955,7 @@ fn main() -> Result<(), String> {
                     let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
                     let base = paged.as_ref().unwrap_or(&screen);
                     let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                        .then(|| display.shaded(base))
+                        .then(|| display.shaded(base, &cached_frame))
                         .flatten();
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
@@ -2067,6 +2067,7 @@ fn main() -> Result<(), String> {
                 voodoo_gl.then_some(&cached_frame),
                 ui.layer(),
                 composed_rows,
+                (settings.shader == video::shader::Shader::Xbrz).then_some(&cached_frame),
             )?;
             last_screen_key = Some(screen_key);
         }

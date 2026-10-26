@@ -346,6 +346,10 @@ that runs it, in `web/www`. It needs the `wasm32-unknown-unknown` Rust target
 and the `wasm-bindgen` program in the version `web/Cargo.lock` has (the build
 script says which); `wasm-opt` is used if it is installed.
 
+`cd web && cargo test --locked` tests the browser module. With Node.js
+installed, `node --test web/tests/shader.test.mjs` tests the page's shader
+uploads, overlays and fallback handling without opening a browser.
+
 ```sh
 rustup target add wasm32-unknown-unknown
 ./web/build.sh

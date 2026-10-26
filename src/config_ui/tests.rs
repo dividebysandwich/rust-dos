@@ -1087,9 +1087,12 @@ fn the_crt_shader_steps_through_the_looks() {
     use UiKey::*;
     ui.show_page(Page::Display);
     ui.row = ui.items().iter().position(|&i| i == Item::Shader).unwrap();
-    keys(&mut ui, &mut host, &[Right, Right, Right, Right]);
+    keys(&mut ui, &mut host, &[Right, Right, Right, Right, Right]);
     let looks: Vec<Shader> = host.applied.iter().map(|s| s.shader).collect();
-    assert_eq!(looks, [Shader::Scanlines, Shader::Aperture, Shader::Crt, Shader::None]);
+    assert_eq!(
+        looks,
+        [Shader::Scanlines, Shader::Aperture, Shader::Crt, Shader::Xbrz, Shader::None]
+    );
     assert_eq!(listed(&mut ui, &mut host), Shader::ALL.map(Shader::describe));
     pick(&mut ui, &mut host, "CRT");
     assert_eq!(host.applied.last().unwrap().shader, Shader::Crt);

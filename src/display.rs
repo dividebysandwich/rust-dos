@@ -65,6 +65,8 @@ pub struct Display<'a> {
     filter: Filter,
     shader: Shader,
     crt: CrtSettings,
+    /// Current tint; xBRZ applies it before filtering and uses it for captures.
+    monochrome: Monochrome,
     /// What draws the picture, for the log.
     renderer: String,
     /// Why the shader the settings ask for isn't shown, if it isn't.
@@ -180,6 +182,7 @@ impl<'a> Display<'a> {
             filter: settings.filter,
             shader: settings.shader,
             crt: settings.crt,
+            monochrome: settings.monochrome,
             renderer,
             warning,
             shown: Vec::new(),
@@ -260,6 +263,7 @@ impl<'a> Display<'a> {
         let mut problem = None;
         self.redraw = true;
         self.crt = settings.crt;
+        self.monochrome = settings.monochrome;
         if let Output::Gl(gl) = &mut self.out {
             gl.set_color_mask(settings.monochrome == Monochrome::Off);
             gl.set_crt(settings.crt);
@@ -389,18 +393,20 @@ impl<'a> Display<'a> {
     /// `layer` goes over the picture, at as many of the window's pixels as
     /// it has (`output_scale`).
     pub fn present(&mut self, frame: &mut Frame, voodoo: Option<&Frame>, layer: Option<&Layer>) -> Result<(), String> {
-        self.present_rows(frame, voodoo, layer, 0..frame.height as usize)
+        self.present_rows(frame, voodoo, layer, 0..frame.height as usize, None)
     }
 
     /// Present a persistent composition, comparing only rows that may
     /// have changed since the last presentation. Keep its pixels in place
     /// so the next composition can restore just its dirty rows.
+    /// For xBRZ, `base` keeps overlays out of native edge detection.
     pub fn present_rows(
         &mut self,
         frame: &Frame,
         voodoo: Option<&Frame>,
         layer: Option<&Layer>,
         candidates: std::ops::Range<usize>,
+        base: Option<&Frame>,
     ) -> Result<(), String> {
         let row_bytes = frame.width as usize * 4;
         // The layer covers the 3dfx card's picture.
@@ -433,7 +439,11 @@ impl<'a> Display<'a> {
             Output::Gl(gl) => {
                 self.voodoo_shown = voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
                 if !self.voodoo_shown {
-                    gl.present(frame, rows, display, layer);
+                    if let Some(base) = base.filter(|_| gl.active() == Shader::Xbrz) {
+                        gl.present_xbrz(frame, base, rows, display, layer, self.monochrome)?;
+                    } else {
+                        gl.present(frame, rows, display, layer);
+                    }
                 }
                 Ok(())
             }
@@ -494,9 +504,14 @@ impl<'a> Display<'a> {
     /// screenshot or a recording; None where the window shows it without
     /// one. Drawing it again and reading it back takes time, so only
     /// captures that show the shader ask for it.
-    pub fn shaded(&mut self, frame: &Frame) -> Option<Frame> {
+    pub fn shaded(&mut self, frame: &Frame, base: &Frame) -> Option<Frame> {
         match &mut self.out {
-            Output::Gl(gl) => gl.capture(frame, display_size(frame.width, frame.height, self.aspect)),
+            Output::Gl(gl) => gl.capture(
+                frame,
+                base,
+                self.monochrome,
+                display_size(frame.width, frame.height, self.aspect),
+            ),
             Output::Sdl { .. } => None,
         }
     }

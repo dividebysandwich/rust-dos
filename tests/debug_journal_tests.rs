@@ -48,14 +48,28 @@ impl Drop for Emulator {
 /// The emulator with `dir`'s `c` folder as C:, and where its debug server
 /// listens.
 fn start(dir: &std::path::Path) -> (Emulator, SocketAddr) {
+    start_with_config(dir, None)
+}
+
+fn start_with_config(
+    dir: &std::path::Path,
+    config: Option<&std::path::Path>,
+) -> (Emulator, SocketAddr) {
     let exe = env!("CARGO_BIN_EXE_rust-dos");
     // What the emulator says on stderr, shown if it doesn't come up.
     let stderr_path = dir.join("stderr.txt");
-    let mut child = Command::new(exe)
-        .args(["--no-config", "-d"])
+    let mut command = Command::new(exe);
+    if let Some(config) = config {
+        command.arg("--config").arg(config).env("SDL_VIDEODRIVER", "x11");
+    } else {
+        command.arg("--no-config").env("SDL_VIDEODRIVER", "dummy");
+    }
+    let mut child = command
+        .arg("-d")
         .arg(dir.join("c"))
         .args(["--debug-server", "127.0.0.1:0"])
-        .env("SDL_VIDEODRIVER", "dummy")
+        .arg("--log")
+        .arg(dir.join("emulator.log"))
         .env("SDL_AUDIODRIVER", "dummy")
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr_path).unwrap())
@@ -93,6 +107,79 @@ fn start(dir: &std::path::Path) -> (Emulator, SocketAddr) {
         }
     };
     (emulator, at.parse().unwrap())
+}
+
+#[test]
+#[cfg(all(feature = "gl", target_os = "linux"))]
+#[ignore = "requires X11, desktop OpenGL and xdotool"]
+fn xbrz_window_screenshots_use_the_selected_shader() {
+    let dir = std::env::temp_dir().join(format!("rust-dos-shader-window-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(dir.join("c")).unwrap();
+    let config = dir.join("rust-dos.conf");
+    std::fs::write(
+        &config,
+        format!(
+            "[emulator]\nshader=xbrz\nscale=1\nrecord_shader=true\ncapture_dir={}\n",
+            dir.join("captures").display(),
+        ),
+    )
+    .unwrap();
+    let (mut emulator, addr) = start_with_config(&dir, Some(&config));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let window = loop {
+        let found = Command::new("xdotool")
+            .args([
+                "search",
+                "--onlyvisible",
+                "--pid",
+                &emulator.0.id().to_string(),
+            ])
+            .output()
+            .unwrap();
+        if found.status.success() {
+            break String::from_utf8(found.stdout)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_string();
+        }
+        assert!(Instant::now() < deadline, "the shader test window opens");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        Command::new("xdotool")
+            .args(["key", "--window", &window, "ctrl+F5"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let capture = loop {
+        if let Ok(entries) = std::fs::read_dir(dir.join("captures"))
+            && let Some(path) = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|ext| ext == "png"))
+        {
+            break path;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Ctrl+F5 saves a shader screenshot"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(
+        http(addr, "POST", "/api/control/quit", &[], Some(json!({}))).0,
+        200
+    );
+    assert!(emulator.0.wait().unwrap().success());
+    assert_eq!(&std::fs::read(capture).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let log = std::fs::read_to_string(dir.join("emulator.log")).unwrap();
+    assert!(log.contains("[DISPLAY] OpenGL"));
+    assert!(!log.contains("shader doesn't work"));
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

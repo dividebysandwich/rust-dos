@@ -108,7 +108,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "shader" => match Shader::parse(value) {
                             Some(shader) => config.shader = Some(shader),
-                            None => warn(format!("invalid shader '{}' (none, scanlines, aperture or crt)", value)),
+                            None => warn(format!(
+                                "invalid shader '{}' (none, scanlines, aperture, crt or xbrz)",
+                                value
+                            )),
                         },
                         "crt_curvature" | "crt_glow" => match crate::video::shader::parse_amount(value) {
                             Some(percent) if key.eq_ignore_ascii_case("crt_curvature") => {

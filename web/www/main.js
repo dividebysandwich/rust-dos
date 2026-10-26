@@ -47,7 +47,7 @@ aspect=4:3
 # How the picture is scaled up: nearest (sharp pixels) or linear (smooth),
 # without a CRT shader.
 #filter=nearest
-# A CRT look: none, scanlines, aperture or crt. It needs WebGL 2.
+# A look: none, scanlines, aperture, crt or xbrz (xBRZ 2x). It needs WebGL 2.
 #shader=none
 # How far the crt look's tube bends, in percent (0 flat to 100), and how
 # much light glows around bright parts (0 none to 100).
@@ -409,8 +409,17 @@ function draw() {
   // The pixels stay in the module's memory; the view is made anew each
   // time, as the memory can grow.
   if (screenGl) {
-    const pixels = new Uint8Array(wasm.memory.buffer, machine.screen_pixels(), width * height * 4);
-    if (screenGl.upload(pixels, width, height)) {
+    const xbrz = screenGl.xbrz();
+    const sourceWidth = xbrz ? machine.shader_width() : width;
+    const sourceHeight = xbrz ? machine.shader_height() : height;
+    const pointer = xbrz ? machine.shader_pixels() : machine.screen_pixels();
+    const pixels = new Uint8Array(wasm.memory.buffer, pointer, sourceWidth * sourceHeight * 4);
+    const overlay = xbrz && machine.shader_overlay_visible() ? {
+      pixels: new Uint8Array(wasm.memory.buffer, machine.shader_overlay_pixels(), width * height * 4),
+      width,
+      height,
+    } : null;
+    if (screenGl.upload(pixels, sourceWidth, sourceHeight, overlay)) {
       layout();
     } else {
       screenGl.render();
@@ -435,6 +444,8 @@ function makeGlScreen() {
     return null;
   }
   let texture;
+  let overlayTexture;
+  let overlayVisible = false;
   let vao;
   /// The looks compiled so far, by name; null for one that doesn't work.
   let programs;
@@ -450,6 +461,14 @@ function makeGlScreen() {
   let glow = 0;
 
   function setUp() {
+    overlayTexture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    overlayVisible = false;
+    gl.activeTexture(gl.TEXTURE0);
     texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -485,6 +504,7 @@ function makeGlScreen() {
     }
     gl.useProgram(program);
     gl.uniform1i(gl.getUniformLocation(program, 'u_frame'), 0);
+    gl.uniform1i(gl.getUniformLocation(program, 'u_overlay'), 1);
     return {
       program,
       source: gl.getUniformLocation(program, 'u_source'),
@@ -493,6 +513,7 @@ function makeGlScreen() {
       curvature: gl.getUniformLocation(program, 'u_curvature'),
       glow: gl.getUniformLocation(program, 'u_glow'),
       line: gl.getUniformLocation(program, 'u_line'),
+      overlay: gl.getUniformLocation(program, 'u_overlay_enabled'),
     };
   }
 
@@ -509,7 +530,7 @@ function makeGlScreen() {
   /// Set the texture's filter: the CRT looks read its mipmap, and the
   /// picture without one is sharp or smooth.
   function filter() {
-    const mipmaps = look !== 'none';
+    const mipmaps = look !== 'none' && look !== 'xbrz';
     gl.bindTexture(gl.TEXTURE_2D, texture);
     const magnify = mipmaps || smooth ? gl.LINEAR : gl.NEAREST;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mipmaps ? gl.LINEAR_MIPMAP_LINEAR : magnify);
@@ -531,6 +552,10 @@ function makeGlScreen() {
   setUp();
 
   return {
+    xbrz() {
+      return look === 'xbrz';
+    },
+
     /// Draw through the look `name`, or the plain picture, `smooth` or
     /// sharp, on a colour or a monochrome (`isMono`) tube that bends and
     /// glows as `bend` and `shine` say. A look that doesn't compile leaves
@@ -546,7 +571,14 @@ function makeGlScreen() {
     },
 
     /// Take the picture's pixels (RGBA). Returns whether its size changed.
-    upload(pixels, width, height) {
+    upload(pixels, width, height, overlay = null) {
+      overlayVisible = overlay !== null;
+      if (overlayVisible) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, overlay.width, overlay.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels);
+      }
+      gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       const resized = frame?.width !== width || frame?.height !== height;
       if (resized) {
@@ -554,7 +586,7 @@ function makeGlScreen() {
         frame = { width, height };
       }
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-      if (look !== 'none') {
+      if (look !== 'none' && look !== 'xbrz') {
         gl.generateMipmap(gl.TEXTURE_2D);
       }
       return resized;
@@ -574,6 +606,9 @@ function makeGlScreen() {
       gl.uniform2f(entry.curvature, curvature[0], curvature[1]);
       gl.uniform1f(entry.glow, glow);
       gl.uniform1f(entry.line, 1);
+      gl.uniform1i(entry.overlay, look === 'xbrz' && overlayVisible ? 1 : 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
       gl.bindVertexArray(vao);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);

@@ -60,6 +60,18 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn present_xbrz(
+        &mut self,
+        _screen: &Frame,
+        _base: &Frame,
+        _rows: std::ops::Range<usize>,
+        _display: (u32, u32),
+        _layer: Option<&Layer>,
+        _mono: crate::video::mono::Monochrome,
+    ) -> Result<(), String> {
+        match *self {}
+    }
+
     pub fn voodoo_problem(&self) -> Option<&str> {
         match *self {}
     }
@@ -91,7 +103,13 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn capture(&mut self, _frame: &Frame, _display: (u32, u32)) -> Option<Frame> {
+    pub fn capture(
+        &mut self,
+        _frame: &Frame,
+        _base: &Frame,
+        _mono: crate::video::mono::Monochrome,
+        _display: (u32, u32),
+    ) -> Option<Frame> {
         match *self {}
     }
 }

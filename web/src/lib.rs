@@ -156,6 +156,8 @@ pub struct Machine {
     /// being put together.
     screen: Frame,
     next: Frame,
+    xbrz_frame: shader::XbrzFrame,
+    xbrz_overlay: bool,
     /// Whether `screen` has been composed once, so the page has a
     /// picture to keep.
     composed: bool,
@@ -229,6 +231,8 @@ impl Machine {
             picture: blank.clone(),
             screen: blank.clone(),
             next: blank,
+            xbrz_frame: shader::XbrzFrame::default(),
+            xbrz_overlay: false,
             composed: false,
             osd: Osd::new(),
             paused: false,
@@ -444,6 +448,33 @@ impl Machine {
     /// canvas's `ImageData` takes them.
     pub fn screen_pixels(&self) -> *const u8 {
         self.screen.rgba.as_ptr()
+    }
+
+    /// Native input for xBRZ; the canvas keeps the composed screen's size.
+    pub fn shader_width(&self) -> u32 {
+        self.xbrz_frame.source.width
+    }
+
+    /// Height of the native input; the composed screen uses `screen_height`.
+    pub fn shader_height(&self) -> u32 {
+        self.xbrz_frame.source.height
+    }
+
+    /// RGBA pixels for `shader_width() * shader_height()`. Read them from
+    /// the current WASM memory buffer.
+    pub fn shader_pixels(&self) -> *const u8 {
+        self.xbrz_frame.source.rgba.as_ptr()
+    }
+
+    /// RGBA overlay pixels for `screen_width() * screen_height()`. Read
+    /// them from the current WASM memory buffer when the overlay is visible.
+    pub fn shader_overlay_pixels(&self) -> *const u8 {
+        self.xbrz_frame.overlay.rgba.as_ptr()
+    }
+
+    /// Whether `shader_overlay_pixels()` contains visible overlay pixels.
+    pub fn shader_overlay_visible(&self) -> bool {
+        self.xbrz_overlay
     }
 
     /// Emulated instructions per millisecond, as the speed setting or the
@@ -1073,6 +1104,13 @@ impl Machine {
         self.ui.draw(&mut self.next);
         self.ui.draw_overlay(&mut self.next);
         self.osd.draw(&mut self.next);
+        if self.shown_shader() == Shader::Xbrz {
+            self.xbrz_overlay = self.xbrz_frame.prepare(
+                &self.next,
+                &self.picture,
+                self.settings.monochrome,
+            );
+        }
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgba == self.screen.rgba;
         if same && self.composed {
@@ -1572,6 +1610,33 @@ fn cp437(c: char) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xbrz_exposes_native_monochrome_input_and_separate_overlays() {
+        let mut m = Machine::new("[emulator]\nshader=xbrz\nmonochrome=amber\n", "");
+        m.set_shaders_available(true);
+        rust_dos::interrupts::int10::set_mode(&mut m.cpu, 0x13);
+        m.render();
+        assert_eq!((m.screen_width(), m.screen_height()), (640, 400));
+        assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
+        let mut expected = shader::XbrzFrame::default();
+        let overlay = expected.prepare(&m.screen, &m.picture, m.settings.monochrome);
+        assert_eq!(m.xbrz_frame.source, expected.source);
+        assert_eq!(m.shader_pixels(), m.xbrz_frame.source.rgba.as_ptr());
+        assert_eq!(m.shader_overlay_visible(), overlay);
+        m.osd.show("Overlay regression");
+        m.render();
+        assert!(m.shader_overlay_visible());
+        assert_eq!(m.shader_overlay_pixels(), m.xbrz_frame.overlay.rgba.as_ptr());
+        assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
+        m.osd = Osd::new();
+        m.render();
+        assert_eq!(m.xbrz_frame.source, expected.source);
+        assert_eq!(m.shader_overlay_visible(), overlay);
+        m.set_shaders_available(false);
+        assert_eq!(m.shader(), "none");
+        assert_eq!(m.screen_pixels(), m.screen.rgba.as_ptr());
+    }
 
     #[test]
     fn keys_by_code() {

@@ -7,6 +7,7 @@ mod present_tests;
 use rust_dos::voodoo::gl::VoodooGl;
 use crate::config::Filter;
 use crate::video::Frame;
+use crate::video::mono::Monochrome;
 use rust_dos::config_ui::Layer;
 use crate::video::shader::{self, CrtSettings, Glsl, Shader};
 use glow::HasContext;
@@ -30,6 +31,7 @@ struct Program {
     curvature: Option<glow::UniformLocation>,
     glow: Option<glow::UniformLocation>,
     line: Option<glow::UniformLocation>,
+    overlay_enabled: Option<glow::UniformLocation>,
 }
 
 // Every `unsafe` below is a call into OpenGL, whose context `open` makes
@@ -46,8 +48,14 @@ pub struct GlScreen {
     texture: glow::Texture,
     /// The texture's size; nothing before the first frame.
     texture_size: (u32, u32),
+    /// Composed frame pixels per uploaded texel.
+    texture_scale: u32,
     /// Subsampled rows when a doubled VGA picture is shown at half size.
     rgba: Vec<u8>,
+    /// Composed pixels that differ from the native xBRZ base.
+    xbrz_overlay: Option<glow::Texture>,
+    xbrz_overlay_visible: bool,
+    xbrz_frame: shader::XbrzFrame,
     /// The looks compiled so far, or why one doesn't compile.
     programs: HashMap<Shader, Result<Program, String>>,
     /// The look drawn with: the one chosen, or none if it doesn't compile.
@@ -170,14 +178,13 @@ impl GlScreen {
             Err(e) => return Err(no_gl(Some(window), e)),
         };
         // SAFETY: see `GlScreen`.
-        let renderer = unsafe {
-            format!(
-                "OpenGL {} on {}, {:?}",
+        let (version_name, device_name) = unsafe {
+            (
                 gl.get_parameter_string(glow::VERSION),
                 gl.get_parameter_string(glow::RENDERER),
-                glsl
             )
         };
+        let renderer = format!("OpenGL {} on {}, {:?}", version_name, device_name, glsl);
         Ok(Self {
             gl,
             _context: context,
@@ -186,7 +193,11 @@ impl GlScreen {
             vao,
             texture,
             texture_size: (0, 0),
+            texture_scale: 1,
             rgba: Vec::new(),
+            xbrz_overlay: None,
+            xbrz_overlay_visible: false,
+            xbrz_frame: shader::XbrzFrame::default(),
             programs: HashMap::from([(Shader::None, Ok(plain))]),
             active: Shader::None,
             mask: 1.0,
@@ -277,16 +288,101 @@ impl GlScreen {
         self.scale_lines = on;
     }
 
+    /// Prepare the same native input for the window and shader captures.
+    fn prepare_xbrz(
+        &mut self,
+        screen: &Frame,
+        base: &Frame,
+        rows: std::ops::Range<usize>,
+        mono: Monochrome,
+    ) -> Result<(), String> {
+        let mut prepared = std::mem::take(&mut self.xbrz_frame);
+        let visible = prepared.prepare(screen, base, mono);
+        let scale = if base.doubled { 2 } else { 1 };
+        self.upload(
+            &prepared.source,
+            rows.start / scale..rows.end.div_ceil(scale),
+            None,
+        );
+        self.texture_scale = scale as u32;
+        self.xbrz_frame = prepared;
+        if visible {
+            let texture = match self.xbrz_overlay {
+                Some(texture) => texture,
+                None => {
+                    // SAFETY: this screen owns the current context.
+                    let texture = unsafe { self.gl.create_texture()? };
+                    self.xbrz_overlay = Some(texture);
+                    texture
+                }
+            };
+            let gl = &self.gl;
+            // SAFETY: this screen owns the current context and texture.
+            unsafe {
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    screen.width as i32,
+                    screen.height as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&self.xbrz_frame.overlay.rgba)),
+                );
+                gl.active_texture(glow::TEXTURE0);
+            }
+        }
+        self.xbrz_overlay_visible = visible;
+        Ok(())
+    }
+
+    /// Filter the clean base and preserve composed overlay pixels above it.
+    pub fn present_xbrz(
+        &mut self,
+        screen: &Frame,
+        base: &Frame,
+        rows: std::ops::Range<usize>,
+        display: (u32, u32),
+        layer: Option<&Layer>,
+        mono: Monochrome,
+    ) -> Result<(), String> {
+        self.prepare_xbrz(screen, base, rows, mono)?;
+        self.draw(self.texture, self.texture_size, display, layer, 1.0);
+        self.xbrz_overlay_visible = false;
+        Ok(())
+    }
+
     /// Show `frame`, letterboxed at `display` proportions, of which `rows`
     /// changed since the last.
     pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32), layer: Option<&Layer>) {
+        self.upload(frame, rows, layer);
+        self.draw(self.texture, self.texture_size, display, layer, 1.0);
+    }
+
+    fn upload(&mut self, frame: &Frame, rows: std::ops::Range<usize>, layer: Option<&Layer>) {
         let gl = &self.gl;
-        // A picture of 2x2 blocks goes up at half the size where the look
-        // scales it without filtering (and no layer is drawn over it, in
-        // the frame's coordinates): nearest-neighbour scaling shows the
-        // same pixels, from a quarter of the bytes to convert and upload.
-        let half = frame.doubled && layer.is_none() && self.active == Shader::None && self.filter == Filter::Nearest;
+        // Recover native pixels for xBRZ's edge detection. Nearest scaling
+        // also preserves the picture with a quarter of the upload bytes.
+        let half = frame.doubled
+            && (self.active == Shader::Xbrz
+                || (layer.is_none()
+                    && self.active == Shader::None
+                    && self.filter == Filter::Nearest));
         let (scale, rows) = if half { (2, rows.start / 2..rows.end.div_ceil(2)) } else { (1, rows) };
+        self.texture_scale = scale;
         let size = (frame.width / scale, frame.height / scale);
         let (width, height) = (size.0 as i32, size.1 as i32);
         let rows = if size != self.texture_size { 0..size.1 as usize } else { rows };
@@ -330,7 +426,6 @@ impl GlScreen {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
-        self.draw(self.texture, size, display, layer, 1.0);
     }
 
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.
@@ -455,7 +550,11 @@ impl GlScreen {
             // OpenGL counts rows from the bottom.
             self.draw_look(texture, size, (x as i32, (dh - y - h) as i32, w, h), line);
             if let Some(layer) = layer {
-                let (sx, sy) = (w as f32 / size.0.max(1) as f32, h as f32 / size.1.max(1) as f32);
+                let scale = self.texture_scale as f32;
+                let (sx, sy) = (
+                    w as f32 / (size.0.max(1) as f32 * scale),
+                    h as f32 / (size.1.max(1) as f32 * scale),
+                );
                 let (lx, ly, lw, lh) = layer.rect;
                 let top = y as f32 + ly * sy;
                 let at = ((x as f32 + lx * sx) as i32, (dh as f32 - top - lh * sy) as i32);
@@ -500,12 +599,17 @@ impl GlScreen {
             }
             let (x, y, w, h) = rect;
             gl.viewport(x, y, w as i32, h as i32);
+            // The full-screen triangle can extend beyond the viewport;
+            // clip it to the layer rectangle to prevent bleed.
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(x, y, w as i32, h as i32);
             gl.use_program(Some(plain.program));
             gl.uniform_2_f32(plain.source.as_ref(), picture.width as f32, picture.height as f32);
             gl.uniform_2_f32(plain.output.as_ref(), w as f32, h as f32);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.disable(glow::SCISSOR_TEST);
             // The look's own texture, as `select` left it.
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
         }
@@ -528,6 +632,11 @@ impl GlScreen {
             gl.uniform_2_f32(program.curvature.as_ref(), cx, cy);
             gl.uniform_1_f32(program.glow.as_ref(), self.active.glow(self.crt));
             gl.uniform_1_f32(program.line.as_ref(), line);
+            gl.uniform_1_i32(program.overlay_enabled.as_ref(), self.xbrz_overlay_visible as i32);
+            if self.xbrz_overlay_visible {
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, self.xbrz_overlay);
+            }
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.vao));
@@ -611,7 +720,13 @@ impl GlScreen {
     /// for a screenshot or a recording. None without a look, or if OpenGL
     /// can't draw it away from the window. It costs drawing the picture
     /// again and reading it back, so only captures ask for it.
-    pub fn capture(&mut self, frame: &Frame, display: (u32, u32)) -> Option<Frame> {
+    pub fn capture(
+        &mut self,
+        frame: &Frame,
+        base: &Frame,
+        mono: Monochrome,
+        display: (u32, u32),
+    ) -> Option<Frame> {
         let (w, h) = self.capture_size(display)?;
         if self.capture.is_none() {
             match self.make_capture() {
@@ -619,19 +734,36 @@ impl GlScreen {
                 Err(e) => eprintln!("[DISPLAY] Captures can't show the shader: {}", e),
             }
         }
+        self.capture.as_ref()?;
+        let native = self.active == Shader::Xbrz;
+        if native {
+            self.prepare_xbrz(frame, base, 0..frame.height as usize, mono).ok()?;
+        }
         let mut capture = self.capture.take()?;
         let gl = &self.gl;
         capture.rgba.resize(w as usize * h as usize * 4, 0);
         // SAFETY: see `GlScreen`.
         let complete = unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(capture.source));
-            let pixels = glow::PixelUnpackData::Slice(Some(&frame.rgba));
-            let (fw, fh) = (frame.width as i32, frame.height as i32);
             let rgba8 = glow::RGBA8 as i32;
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, rgba8, fw, fh, 0, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
-            self.set_filter();
-            if shader::needs_mipmaps(self.active) {
-                gl.generate_mipmap(glow::TEXTURE_2D);
+            if !native {
+                gl.bind_texture(glow::TEXTURE_2D, Some(capture.source));
+                let pixels = glow::PixelUnpackData::Slice(Some(&frame.rgba));
+                let (fw, fh) = (frame.width as i32, frame.height as i32);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    rgba8,
+                    fw,
+                    fh,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    pixels,
+                );
+                self.set_filter();
+                if shader::needs_mipmaps(self.active) {
+                    gl.generate_mipmap(glow::TEXTURE_2D);
+                }
             }
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(capture.framebuffer));
             if capture.size != (w, h) {
@@ -645,7 +777,12 @@ impl GlScreen {
             }
             let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
             if complete {
-                self.draw_look(capture.source, (frame.width, frame.height), (0, 0, w, h), 1.0);
+                let (texture, size) = if native {
+                    (self.texture, self.texture_size)
+                } else {
+                    (capture.source, (frame.width, frame.height))
+                };
+                self.draw_look(texture, size, (0, 0, w, h), 1.0);
                 gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
                 let pixels = glow::PixelPackData::Slice(Some(&mut capture.rgba));
                 gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
@@ -653,6 +790,7 @@ impl GlScreen {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             complete
         };
+        self.xbrz_overlay_visible = false;
         // Rows from the top, four bytes a pixel.
         let shaded = complete.then(|| {
             let mut frame = Frame::new(w, h);
@@ -735,6 +873,7 @@ fn compile(gl: &glow::Context, glsl: Glsl, shader: Shader) -> Result<Program, St
         }
         gl.use_program(Some(program));
         gl.uniform_1_i32(gl.get_uniform_location(program, "u_frame").as_ref(), 0);
+        gl.uniform_1_i32(gl.get_uniform_location(program, "u_overlay").as_ref(), 1);
         Ok(Program {
             program,
             source: gl.get_uniform_location(program, "u_source"),
@@ -743,6 +882,7 @@ fn compile(gl: &glow::Context, glsl: Glsl, shader: Shader) -> Result<Program, St
             curvature: gl.get_uniform_location(program, "u_curvature"),
             glow: gl.get_uniform_location(program, "u_glow"),
             line: gl.get_uniform_location(program, "u_line"),
+            overlay_enabled: gl.get_uniform_location(program, "u_overlay_enabled"),
         })
     }
 }

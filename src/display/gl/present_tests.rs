@@ -74,6 +74,141 @@ fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
     screen.present(&doubled, 0..0, (8, 6), None);
     assert_eq!(screen.texture_size, (8, 6));
     assert_eq!(texture(&screen), doubled.rgba);
+
+    // xBRZ needs native pixels even when the plain filter is linear.
+    screen.select(Shader::Xbrz, Filter::Linear).unwrap();
+    screen.present(&doubled, 0..0, (8, 6), None);
+    assert_eq!(screen.texture_size, (4, 3));
+    assert_eq!(texture(&screen), small.rgba);
+    small.rgba[16..32]
+        .as_chunks_mut::<4>()
+        .0
+        .fill([55, 66, 77, 255]);
+    let doubled = double(&small);
+    screen.present(&doubled, 3..4, (8, 6), None);
+    assert_eq!(texture(&screen), small.rgba);
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn xbrz_overlays_preserve_native_input_and_filtered_background() {
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let native = Frame::from_rgb(
+        8,
+        6,
+        (0..48)
+            .flat_map(|i| {
+                if i % 9 < 4 {
+                    [200, 40, 40]
+                } else {
+                    [30, 60, 200]
+                }
+            })
+            .collect(),
+    );
+    let base = double(&native);
+    let mut screen = GlScreen::open(&video, "xBRZ overlay regression", (16, 12))
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    let layer = Layer {
+        rect: (4.0, 4.0, 2.0, 2.0),
+        picture: Frame::from_rgb(1, 1, vec![20, 220, 80]),
+        generation: 1,
+    };
+    use crate::video::mono::{self, Monochrome};
+    for (overlay, manual, mono) in [
+        (false, false, Monochrome::Off),
+        (true, false, Monochrome::Off),
+        (false, false, Monochrome::Off),
+        (true, true, Monochrome::Off),
+        (false, false, Monochrome::White),
+        (false, false, Monochrome::Amber),
+        (true, false, Monochrome::Green),
+        (true, true, Monochrome::White),
+    ] {
+        let mut composed = base.clone();
+        mono::apply(&mut composed, mono);
+        let mut tinted = native.clone();
+        mono::apply(&mut tinted, mono);
+        let mut expected = screen.capture(&composed, &base, mono, (16, 12)).unwrap().rgba;
+        assert_ne!(expected, composed.rgba, "xBRZ must smooth the diagonal edges");
+        if overlay {
+            composed.doubled = false;
+            composed.rgba[68..72].copy_from_slice(&[11, 222, 33, 255]);
+            expected[68..72].copy_from_slice(&[11, 222, 33, 255]);
+        }
+        if manual {
+            for y in 4..6 {
+                for x in 4..6 {
+                    expected[(y * 16 + x) * 4..(y * 16 + x + 1) * 4]
+                        .copy_from_slice(&[20, 220, 80, 255]);
+                }
+            }
+        }
+        screen
+            .present_xbrz(
+                &composed,
+                &base,
+                0..12,
+                (16, 12),
+                manual.then_some(&layer),
+                mono,
+            )
+            .unwrap();
+        assert_eq!(screen.texture_size, (8, 6));
+        assert_eq!(texture(&screen), tinted.rgba);
+        let mut pixels = vec![0; expected.len()];
+        // SAFETY: the test owns the current context and reads its window.
+        unsafe {
+            screen.gl.read_buffer(glow::BACK);
+            screen.gl.read_pixels(
+                0,
+                0,
+                16,
+                12,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
+        }
+        let top_first: Vec<_> = pixels.chunks_exact(64).rev().flatten().copied().collect();
+        let differences: Vec<_> = top_first
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .filter(|(_, (got, want))| got != want)
+            .take(8)
+            .collect();
+        assert!(
+            differences.is_empty(),
+            "overlay: {overlay}, manual: {manual}, mono: {mono:?}: {differences:?}"
+        );
+        if manual {
+            for y in 4..6 {
+                for x in 4..6 {
+                    composed.rgba[(y * 16 + x) * 4..(y * 16 + x + 1) * 4]
+                        .copy_from_slice(&[20, 220, 80, 255]);
+                }
+            }
+        }
+        let captured = screen.capture(&composed, &base, mono, (16, 12)).unwrap();
+        assert_eq!(captured.rgba, expected, "capture, mono: {mono:?}");
+    }
+    let doubled = screen.capture(&base, &base, Monochrome::Off, (16, 12)).unwrap();
+    let undoubled = screen.capture(&native, &native, Monochrome::Off, (8, 6)).unwrap();
+    assert_eq!(doubled.rgba, undoubled.rgba);
+    screen
+        .present_xbrz(&native, &native, 0..6, (8, 6), None, Monochrome::Off)
+        .unwrap();
+    assert_eq!(texture(&screen), native.rgba);
+    screen.select(Shader::Scanlines, Filter::Nearest).unwrap();
+    let captured = screen.capture(&base, &base, Monochrome::Off, (16, 12)).unwrap();
+    assert_eq!((captured.width, captured.height), (16, 12));
+    assert!(captured.rgba.as_chunks::<4>().0.iter().any(|p| p[..3] != [0; 3]));
+    screen.select(Shader::None, Filter::Nearest).unwrap();
+    assert!(screen.capture(&base, &base, Monochrome::Off, (16, 12)).is_none());
 }
 
 #[test]
@@ -92,7 +227,7 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
     .unwrap();
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());
     display.set_frame_size(5, 4).unwrap();
-    display.present_rows(&frame, None, None, 0..0).unwrap();
+    display.present_rows(&frame, None, None, 0..0, None).unwrap();
     let check = |display: &Display<'_>, frame: &Frame| {
         assert_eq!(display.shown, frame.rgba);
         let Output::Gl(gl) = &display.out else { panic!("OpenGL is required") };
@@ -106,16 +241,43 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
             .0
             .fill([step as u8, 99, 37, 255]);
         let before = frame.rgba.clone();
-        display.present_rows(&frame, None, None, y..y + 1).unwrap();
+        display.present_rows(&frame, None, None, y..y + 1, None).unwrap();
         assert_eq!(frame.rgba, before, "presenting must retain the composed pixels");
         check(&display, &frame);
     }
     // A redraw and a mode change cannot rely on decoder damage alone.
     display.redraw();
-    display.present_rows(&frame, None, None, 0..0).unwrap();
+    display.present_rows(&frame, None, None, 0..0, None).unwrap();
     check(&display, &frame);
     frame = Frame::from_rgb(4, 5, (0..60).rev().collect());
     display.set_frame_size(4, 5).unwrap();
-    display.present_rows(&frame, None, None, 0..0).unwrap();
+    display.present_rows(&frame, None, None, 0..0, None).unwrap();
+    check(&display, &frame);
+    // Exercise the frontend's settings and clean-base handoff, including
+    // a partial native row update and a return to the plain renderer.
+    use crate::config::Settings;
+    use crate::video::mono::{self, Monochrome};
+    let settings = Settings {
+        shader: Shader::Xbrz,
+        monochrome: Monochrome::Green,
+        ..Default::default()
+    };
+    display.apply(&settings).unwrap();
+    for (step, rows) in [0..frame.height as usize * 2, 2..4].into_iter().enumerate() {
+        frame.rgba[16..32].as_chunks_mut::<4>().0.fill([40 + step as u8 * 40, 80, 120, 255]);
+        let base = double(&frame);
+        let mut composed = base.clone();
+        mono::apply(&mut composed, settings.monochrome);
+        display.set_frame_size(composed.width, composed.height).unwrap();
+        display.present_rows(&composed, None, None, rows, Some(&base)).unwrap();
+        let mut tinted = frame.clone();
+        mono::apply(&mut tinted, settings.monochrome);
+        let Output::Gl(gl) = &display.out else { panic!("OpenGL is required") };
+        assert_eq!(texture(gl), tinted.rgba);
+        assert!(display.shaded(&composed, &base).is_some());
+    }
+    display.apply(&Default::default()).unwrap();
+    display.set_frame_size(frame.width, frame.height).unwrap();
+    display.present(&mut frame, None, None).unwrap();
     check(&display, &frame);
 }

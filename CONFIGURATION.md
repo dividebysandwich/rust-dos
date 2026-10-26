@@ -85,8 +85,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   it. `--vrr` turns it on.
 * `filter` is how the picture is scaled up: `nearest` (the default, sharp
   pixels) or `linear` (smooth). It applies without a CRT shader.
-* `shader` gives the picture a CRT look: `none` (the default),
-  `scanlines`, `aperture` or `crt`. See [CRT shaders](#crt-shaders).
+* `shader` gives the picture a look: `none` (the default), one of the
+  CRT looks `scanlines`, `aperture` or `crt`, or `xbrz`, which scales the
+  picture 2x with xBRZ, a pixel-art upscaler, without a CRT look. See
+  [CRT shaders](#crt-shaders).
 * `monochrome` shows the picture on a monochrome monitor: `off` (the
   default, a colour monitor), `white`, `amber` or `green`. Each colour
   shows as bright as it is, in the phosphor's colour, and the CRT
@@ -3027,6 +3029,12 @@ picture as a monitor of the time would have:
   `crt_glow` how much light glows around its bright parts: `0` none,
   `100` the most, `20` the default. The Display page has both below the
   shader while the CRT look is chosen.
+
+For pixel art, `xbrz` scales the native picture 2x with xBRZ instead of
+giving it a CRT look. It recovers the original pixels of doubled VGA
+modes before scaling. The `scale` setting still controls the window's
+size independently. Cursors and settings overlays stay sharp, and the
+same native input is used in the browser and in shader captures.
 
 With `monochrome`, the aperture grille and the shadow mask are left out, as
 a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
