@@ -3077,7 +3077,7 @@ fn ne(a: &mut CodeAssembler, r: AsmRegister8) -> Result<(), IcedError> {
 
 /// CreateProcessA of the command line at `line` of the data, with the
 /// STARTUPINFO at 0x40 and the PROCESS_INFORMATION at 0x90.
-fn start_child(
+fn create_child(
     a: &mut CodeAssembler,
     l: &Layout,
     f: &dyn Fn(&str) -> AsmMemoryOperand,
@@ -3214,7 +3214,7 @@ fn wait_for_input_idle_waits_for_the_program_or_times_out() {
             a.xor(ebx, ebx)?;
             // A.EXE: 0 once it waits for input, by when it wrote
             // A.DAT; once it ended, WAIT_FAILED.
-            start_child(a, l, f, 0)?;
+            create_child(a, l, f, 0)?;
             idle(a, l, f, 5000)?;
             a.test(eax, eax)?;
             bit_if(a, eq, 0)?;
@@ -3230,7 +3230,7 @@ fn wait_for_input_idle_waits_for_the_program_or_times_out() {
             bit_if(a, eq, 2)?;
             // B.EXE never gets messages: WAIT_TIMEOUT once the 200 ms
             // passed.
-            start_child(a, l, f, 0x10)?;
+            create_child(a, l, f, 0x10)?;
             started(a)?;
             idle(a, l, f, 200)?;
             a.cmp(eax, WAIT_TIMEOUT)?;
@@ -3240,7 +3240,7 @@ fn wait_for_input_idle_waits_for_the_program_or_times_out() {
             bit_if(a, |a, r| a.setae(r), 4)?;
             terminate(a)?;
             // E.EXE is a console program: WAIT_FAILED at once.
-            start_child(a, l, f, 0x20)?;
+            create_child(a, l, f, 0x20)?;
             started(a)?;
             idle(a, l, f, 5000)?;
             a.cmp(eax, WAIT_FAILED)?;
@@ -3311,7 +3311,7 @@ fn wait_for_input_idle_handles_messages_sent_to_the_waiting_thread() {
         a.call(f("CreateWindowExA"))?;
         a.mov(esi, eax)?;
         a.xor(ebx, ebx)?;
-        start_child(a, l, f, 0)?;
+        create_child(a, l, f, 0)?;
         a.call(f("GetTickCount"))?;
         a.mov(dword_ptr(l.at(0xA0)), eax)?;
         idle(a, l, f, 10000)?;
