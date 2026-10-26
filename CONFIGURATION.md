@@ -3036,6 +3036,10 @@ modes before scaling. The `scale` setting still controls the window's
 size independently. Cursors and settings overlays stay sharp, and the
 same native input is used in the browser and in shader captures.
 
+Choose `xbrz` when you want to magnify pixel art, such as DOS games,
+while smoothing jagged diagonal edges. It works well with Ultima VI,
+Dungeon Master II and Blood and Magic.
+
 With `monochrome`, the aperture grille and the shadow mask are left out, as
 a monochrome tube has a single phosphor; the scanlines, glow and curve stay.
 

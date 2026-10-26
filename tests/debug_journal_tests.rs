@@ -45,15 +45,24 @@ impl Drop for Emulator {
     }
 }
 
+struct RemoveTestDir(std::path::PathBuf);
+
+impl Drop for RemoveTestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// The emulator with `dir`'s `c` folder as C:, and where its debug server
 /// listens.
 fn start(dir: &std::path::Path) -> (Emulator, SocketAddr) {
-    start_with_config(dir, None)
+    start_with_config(dir, None, false)
 }
 
 fn start_with_config(
     dir: &std::path::Path,
     config: Option<&std::path::Path>,
+    capture_log: bool,
 ) -> (Emulator, SocketAddr) {
     let exe = env!("CARGO_BIN_EXE_rust-dos");
     // What the emulator says on stderr, shown if it doesn't come up.
@@ -64,12 +73,13 @@ fn start_with_config(
     } else {
         command.arg("--no-config").env("SDL_VIDEODRIVER", "dummy");
     }
+    if capture_log {
+        command.arg("--log").arg(dir.join("emulator.log"));
+    }
     let mut child = command
         .arg("-d")
         .arg(dir.join("c"))
         .args(["--debug-server", "127.0.0.1:0"])
-        .arg("--log")
-        .arg(dir.join("emulator.log"))
         .env("SDL_AUDIODRIVER", "dummy")
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr_path).unwrap())
@@ -114,7 +124,9 @@ fn start_with_config(
 #[ignore = "requires X11, desktop OpenGL and xdotool"]
 fn xbrz_window_screenshots_use_the_selected_shader() {
     let dir = std::env::temp_dir().join(format!("rust-dos-shader-window-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir(&dir).unwrap();
+    let _cleanup = RemoveTestDir(dir.clone());
     std::fs::create_dir(dir.join("c")).unwrap();
     let config = dir.join("rust-dos.conf");
     std::fs::write(
@@ -125,7 +137,7 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         ),
     )
     .unwrap();
-    let (mut emulator, addr) = start_with_config(&dir, Some(&config));
+    let (mut emulator, addr) = start_with_config(&dir, Some(&config), true);
     let deadline = Instant::now() + Duration::from_secs(30);
     let window = loop {
         let found = Command::new("xdotool")
@@ -179,7 +191,6 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
     let log = std::fs::read_to_string(dir.join("emulator.log")).unwrap();
     assert!(log.contains("[DISPLAY] OpenGL"));
     assert!(!log.contains("shader doesn't work"));
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
