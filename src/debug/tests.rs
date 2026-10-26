@@ -1717,6 +1717,44 @@ fn an_fpu_value_beyond_a_double_reads_back_by_its_tag() {
     assert_eq!(fpu["xmm"][0]["ps"][0], Value::Null, "a NaN single");
 }
 
+/// The first instruction `/api/disasm` decodes at `addr`: its length
+/// and text.
+fn first_instruction(cpu: &mut Cpu, addr: &str, bits: Option<u32>) -> (u64, String) {
+    let (mut hub, cmd) = (DebugHub::disabled(), Cmd::Disasm { addr: Some(addr.into()), count: 1, bits });
+    let v = reply(cpu, &mut hub, cmd).unwrap();
+    (v["rows"][0]["len"].as_u64().unwrap(), v["rows"][0]["asm"].as_str().unwrap().to_string())
+}
+
+#[test]
+fn a_linear_address_disassembles_as_the_running_code() {
+    let mut cpu = Cpu::new(".".into());
+    // mov eax,[esp+14h] in 32-bit code; 16-bit code reads its first three
+    // bytes as mov ax,[si+24h].
+    for (i, &b) in [0x8B, 0x44, 0x24, 0x14].iter().enumerate() {
+        cpu.bus.write_8(0x2000 + i, b);
+    }
+    assert_eq!(first_instruction(&mut cpu, "lin:2000", None).0, 3, "real mode: 16-bit");
+    // The running code is 32-bit, as under the built-in Windows.
+    cpu.cr0 |= crate::cpu::CR0_PE;
+    let mut cs = *cpu.seg_cache(crate::cpu::Seg::CS);
+    cs.attr |= crate::cpu::ATTR_DB;
+    cpu.set_seg_cache(crate::cpu::Seg::CS, cs);
+    for addr in ["lin:2000", "phys:2000"] {
+        let (len, asm) = first_instruction(&mut cpu, addr, None);
+        assert_eq!(len, 4, "{}: {}", addr, asm);
+        assert!(asm.contains("eax") && asm.contains("esp"), "{}: {}", addr, asm);
+    }
+    assert_eq!(first_instruction(&mut cpu, "lin:2000", Some(16)).0, 3, "bits=16 says so");
+    // A branch's target is a linear address, like the rows' labels.
+    for (i, &b) in [0xE8, 0x10, 0x00, 0x00, 0x00].iter().enumerate() {
+        cpu.bus.write_8(0x3000 + i, b);
+    }
+    let (_, asm) = first_instruction(&mut cpu, "lin:3000", None);
+    assert!(asm.contains("3015"), "{}", asm);
+    let bad = Cmd::Disasm { addr: Some("lin:2000".into()), count: 1, bits: Some(8) };
+    assert_eq!(reply(&mut cpu, &mut DebugHub::disabled(), bad).unwrap_err().0, 400);
+}
+
 #[test]
 fn win32_without_a_program_has_no_processes() {
     let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());

@@ -301,13 +301,25 @@ impl DebugHub {
         Reply::Trace { entries, next: self.trace.total(), dropped: 0, truncated }
     }
 
-    pub(super) fn disasm(&self, cpu: &Cpu, addr: Option<String>, count: usize) -> Reply {
+    pub(super) fn disasm(&self, cpu: &Cpu, addr: Option<String>, count: usize, bits: Option<u32>) -> Reply {
         let addr = addr.unwrap_or_else(|| "CS:EIP".to_string());
         let start = match parse_addr(cpu, &addr) {
             Ok(a) => a,
             Err(e) => return Reply::bad(e),
         };
-        let code32 = start.segoff.is_some_and(|(sel, _)| pm::code32(cpu, sel));
+        // An address with a selector is code of its segment's size. A
+        // linear or physical one has no segment: it is taken to be code
+        // like the running code, which under the built-in Windows or a
+        // 32-bit DOS extender is 32-bit.
+        let code32 = match bits {
+            Some(32) => true,
+            Some(16) => false,
+            Some(b) => return Reply::bad(format!("bits {}: 16 or 32", b)),
+            None => match start.segoff {
+                Some((sel, _)) => pm::code32(cpu, sel),
+                None => cpu.pm() && pm::code32(cpu, cpu.cs()),
+            },
+        };
         let cur = cpu.peek_translate(cpu.seg_cache(crate::cpu::Seg::CS).base.wrapping_add(cpu.eip())).map(|p| p as usize);
         let mut lines = Vec::new();
         let mut rows = Vec::new();
@@ -320,7 +332,14 @@ impl DebugHub {
             let (len, text) = if let Some(name) = trace::trap_name(&bytes, None, cpu.pm()) {
                 (trace::trap_len(&bytes), name)
             } else {
-                let ip = start.segoff.map_or(at as u32, |(_, off)| off.wrapping_add(at as u32));
+                // 32-bit code without a segment is taken to be flat, so
+                // branch targets read as the addresses the rows are
+                // labelled with.
+                let ip = match start.segoff {
+                    Some((_, off)) => off.wrapping_add(at as u32),
+                    None if code32 => start.lin.unwrap_or(start.phys.unwrap_or(0) as u32).wrapping_add(at as u32),
+                    None => at as u32,
+                };
                 trace::disasm_one(&bytes, ip, code32)
             };
             let current = p.is_some() && p == cur;
