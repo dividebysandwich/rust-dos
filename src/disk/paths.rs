@@ -191,16 +191,28 @@ impl DiskController {
         self.virtual_file(filename).is_some()
     }
 
-    /// Whether a DOS path names an existing file, on any drive.
+    /// Whether a DOS path names an existing file, on any drive, or a
+    /// system file (system_files.rs).
     pub fn is_file(&self, dos_path: &str) -> bool {
+        self.real_is_file(dos_path) || self.system_file(dos_path).is_some()
+    }
+
+    /// Whether a DOS path names an existing directory, on any drive, or a
+    /// system directory.
+    pub fn is_directory(&self, dos_path: &str) -> bool {
+        self.real_is_directory(dos_path) || self.is_system_dir(dos_path)
+    }
+
+    /// Whether a DOS path names a file the drive has.
+    pub(super) fn real_is_file(&self, dos_path: &str) -> bool {
         if let Some(found) = self.find_fat(dos_path) {
             return found.is_ok_and(|e| !e.is_dir());
         }
         self.is_virtual_file(dos_path) || self.resolve_path(dos_path).is_some_and(|p| hostfs::is_file(&p))
     }
 
-    /// Whether a DOS path names an existing directory, on any drive.
-    pub fn is_directory(&self, dos_path: &str) -> bool {
+    /// Whether a DOS path names a directory the drive has.
+    pub(super) fn real_is_directory(&self, dos_path: &str) -> bool {
         if let Some(found) = self.find_fat(dos_path) {
             return found.is_ok_and(|e| e.is_dir());
         }
@@ -218,6 +230,9 @@ impl DiskController {
 
     /// Where the contents of the file a DOS path names are, on any drive.
     pub fn file_data(&self, dos_path: &str) -> Option<FileData> {
+        if let Some(data) = self.system_file(dos_path) {
+            return Some(FileData::Memory(data));
+        }
         if let Some((_, volume, parts)) = self.locate_fat(dos_path) {
             let entry = volume.find(&refs(&parts)).ok().filter(|e| !e.is_dir())?;
             return Some(FileData::Fat(volume, entry));
@@ -274,6 +289,14 @@ impl DiskController {
     /// DOS CHDIR: changes the current directory of the drive named in `path`
     /// (or of the current drive) without switching drives.
     pub fn set_current_directory(&mut self, path: &str) -> bool {
+        if self.is_system_dir(path)
+            && let Some(dir) = self.qualify_path(path)
+            && let Some((drive, rest)) = self.split_drive(&dir).map(|(d, r)| (d, r.to_string()))
+            && let Some(d) = self.drives[drive as usize].as_mut()
+        {
+            d.current_dir = rest.trim_matches('\\').to_string();
+            return true;
+        }
         let normalized = path.replace('/', "\\");
         let Some((drive_num, rest)) = self.split_drive(&normalized) else {
             return false;

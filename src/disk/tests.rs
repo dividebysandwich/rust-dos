@@ -1291,3 +1291,135 @@ fn a_state_whose_cd_image_moved_says_the_image_is_gone() {
         message
     );
 }
+
+#[test]
+fn system_files_show_in_a_directory_the_drive_lacks() {
+    let base = scratch("system-files");
+    let mut disk = DiskController::new(base.clone());
+    let files = vec![("DDRAW.DLL".to_string(), Bytes::from(&b"MZddraw"[..]))];
+    disk.set_system_files("C:\\WINDOWS\\SYSTEM", files);
+    let names = |disk: &DiskController, spec: &str, attr: u16| -> Vec<String> {
+        disk.list_directory(spec, attr)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.filename)
+            .collect()
+    };
+    // The directories on the way, and the file, as DOS sees them.
+    assert!(names(&disk, "C:\\*.*", 0x10).contains(&"WINDOWS".to_string()));
+    assert_eq!(
+        names(&disk, "C:\\WINDOWS\\*.*", 0x10),
+        ["..", ".", "SYSTEM"]
+    );
+    assert_eq!(names(&disk, "C:\\WINDOWS\\SYSTEM\\*.DLL", 0), ["DDRAW.DLL"]);
+    assert_eq!(
+        disk.get_file_attribute("C:\\WINDOWS\\SYSTEM\\DDRAW.DLL"),
+        Ok(0x21)
+    );
+    assert_eq!(disk.get_file_attribute("C:\\WINDOWS"), Ok(0x10));
+    assert!(disk.set_current_directory("C:\\WINDOWS\\SYSTEM"));
+    let h = disk.open_file("DDRAW.DLL", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"MZddraw");
+    disk.close_file(h);
+    assert_eq!(disk.open_file("DDRAW.DLL", 2, PSP), Err(0x05));
+    assert_eq!(disk.create_file("DDRAW.DLL", PSP), Err(0x05));
+    assert_eq!(disk.delete_file("DDRAW.DLL"), Err(0x05));
+    assert_eq!(disk.rename_file("DDRAW.DLL", "OTHER.DLL"), Err(0x05));
+    assert_eq!(disk.create_directory("C:\\WINDOWS\\SYSTEM"), Err(0x05));
+    assert!(!base.join("WINDOWS").exists());
+    // A file made there makes the directories on the drive.
+    let h = disk
+        .create_file("C:\\WINDOWS\\SYSTEM\\MINE.DLL", PSP)
+        .unwrap();
+    disk.close_file(h);
+    assert!(base.join("WINDOWS/SYSTEM/MINE.DLL").is_file());
+    assert_eq!(
+        names(&disk, "C:\\WINDOWS\\SYSTEM\\*.DLL", 0),
+        ["MINE.DLL", "DDRAW.DLL"]
+    );
+    // One of the drive's own wins.
+    fs::write(base.join("WINDOWS/SYSTEM/DDRAW.DLL"), b"own").unwrap();
+    disk.host_dirs.forget();
+    assert_eq!(
+        names(&disk, "C:\\WINDOWS\\SYSTEM\\DDRAW.DLL", 0),
+        ["DDRAW.DLL"]
+    );
+    assert_eq!(
+        disk.get_file_attribute("C:\\WINDOWS\\SYSTEM\\DDRAW.DLL"),
+        Ok(0x20)
+    );
+    let h = disk
+        .open_file("C:\\WINDOWS\\SYSTEM\\DDRAW.DLL", 0, PSP)
+        .unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"own");
+    disk.close_file(h);
+    // None shown, none there.
+    disk.set_system_files("C:\\WINDOWS\\SYSTEM", Vec::new());
+    assert!(!disk.is_file("C:\\WINDOWS\\SYSTEM\\OTHER.DLL"));
+}
+
+#[test]
+fn system_files_on_a_disk_image() {
+    let base = scratch("system-files-fat");
+    let mut disk = DiskController::new(base.clone());
+    let blank =
+        DiskImage::from_memory("F.IMA", MemoryImage::new(1_474_560), true, None, false).unwrap();
+    fat::format(&blank, 0, 2880, None).unwrap();
+    let bytes = blank.memory().unwrap().clone();
+    disk.mount_memory_image(0, "DISK1.IMA", bytes, MountOptions::default())
+        .unwrap();
+    let files = vec![
+        ("DDRAW.DLL".to_string(), Bytes::from(&b"MZddraw"[..])),
+        ("DSOUND.DLL".to_string(), Bytes::from(&b"MZdsound"[..])),
+    ];
+    disk.set_system_files(r"A:\WINDOWS\SYSTEM", files);
+    // FindFirst and FindNext, by the path in other cases and forms.
+    let spec = r"a:\windows\.\system\*.dll";
+    let found: Vec<String> = (0..)
+        .map_while(|i| disk.find_directory_entry(spec, i, 0).ok())
+        .map(|e| e.filename)
+        .collect();
+    assert_eq!(found, ["DDRAW.DLL", "DSOUND.DLL"]);
+    assert_eq!(disk.find_directory_entry(spec, 2, 0).err(), Some(0x12));
+    assert!(disk.is_file(r"A:\WINDOWS\SYSTEM32\..\SYSTEM\DSOUND.DLL"));
+    assert!(disk.is_directory(r"A:\WINDOWS\SYSTEM\"));
+    assert!(!disk.is_file(r"C:\WINDOWS\SYSTEM\DDRAW.DLL"));
+    assert_eq!(disk.remove_directory(r"A:\WINDOWS"), Err(0x05));
+    // A directory made there makes those on the way on the image, and
+    // they can't go while the files are in them.
+    disk.create_directory(r"A:\WINDOWS\SYSTEM\SUB").unwrap();
+    assert!(disk.real_is_directory(r"A:\WINDOWS\SYSTEM\SUB"));
+    assert_eq!(disk.remove_directory(r"A:\WINDOWS\SYSTEM\SUB"), Ok(()));
+    assert_eq!(disk.remove_directory(r"A:\WINDOWS\SYSTEM"), Err(0x05));
+    let listed = disk.list_directory(r"A:\WINDOWS\SYSTEM\*.*", 0x10).unwrap();
+    let names: Vec<&str> = listed.iter().map(|e| e.filename.as_str()).collect();
+    assert_eq!(names, [".", "..", "DDRAW.DLL", "DSOUND.DLL"]);
+    assert_eq!(
+        disk.open_file(r"A:\WINDOWS\SYSTEM\DDRAW.DLL", 1, PSP),
+        Err(0x05)
+    );
+}
+
+#[test]
+fn an_open_system_file_reads_as_the_files_shown() {
+    let base = scratch("system-files-state");
+    let mut disk = DiskController::new(base.clone());
+    let shown = |data: &'static [u8]| vec![("DDRAW.DLL".to_string(), Bytes::from(data))];
+    disk.set_system_files(r"C:\WINDOWS\SYSTEM", shown(b"MZ95"));
+    let h = disk
+        .open_file(r"C:\WINDOWS\SYSTEM\DDRAW.DLL", 0, PSP)
+        .unwrap();
+    assert_eq!(disk.read_file(h, 2).unwrap(), b"MZ");
+    // A save state opens it again by its path, where it was.
+    let mut w = crate::savestate::Writer::new();
+    disk.save_state(&mut w);
+    let mut loaded = DiskController::new(base.clone());
+    loaded.set_system_files(r"C:\WINDOWS\SYSTEM", shown(b"MZ95"));
+    let lost = loaded
+        .load_state(&mut crate::savestate::Reader::new(&w.buf))
+        .unwrap();
+    assert!(lost.is_empty());
+    // Then the state's version of Windows shows other files.
+    loaded.set_system_files(r"C:\WINDOWS\SYSTEM", shown(b"MZ98"));
+    assert_eq!(loaded.read_file(h, 2).unwrap(), b"98");
+}

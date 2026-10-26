@@ -616,10 +616,18 @@ pub(super) fn load_module(
         } else {
             ERROR_DLL_NOT_FOUND
         },
-        message: format!(
-            "{} needs {}, which the built-in Windows doesn't have yet.",
-            importer, name
-        ),
+        message: if file == super::glide::DLL.name {
+            format!(
+                "{} needs {}, which the built-in Windows has with a 3dfx card \
+                 alone (the voodoo setting).",
+                importer, name
+            )
+        } else {
+            format!(
+                "{} needs {}, which the built-in Windows doesn't have yet.",
+                importer, name
+            )
+        },
     };
     if file.is_empty() {
         return Err(not_found());
@@ -954,23 +962,27 @@ fn bind_imports(
 /// names. With the `win32_dlls` setting, NTDLL.DLL is one, UCRT's
 /// ucrtbase.dll and api-ms-win-crt-*.dll are MSVCRT.DLL and
 /// KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs import; a DLL the
-/// setting replaces, which the folder has, isn't.
+/// setting replaces, which the folder has, isn't. GLIDE2X.DLL is there
+/// with a 3dfx card alone, as 3dfx's driver brings it. The system
+/// directory shows the same DLLs as files (dll_files.rs).
 pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;
-    if win32.guest_dlls.is_none() {
-        return index.filter(|&i| stubs::DLLS[i].name != super::ntdll::DLL.name);
-    }
-    let stem = file.strip_suffix(".DLL").unwrap_or(file).to_ascii_lowercase();
-    if win32.guest_replace.contains(&stem) && guest_file(bus, file).is_some() {
-        return None;
-    }
-    match stem.as_str() {
-        "ucrtbase" => stubs::find_dll("MSVCRT.DLL"),
-        _ if stem.starts_with("api-ms-win-crt-") => stubs::find_dll("MSVCRT.DLL"),
-        "kernelbase" => stubs::find_dll("KERNEL32.DLL"),
-        _ => index,
-    }
+    let found = if win32.guest_dlls.is_none() {
+        index.filter(|&i| stubs::DLLS[i].name != super::ntdll::DLL.name)
+    } else {
+        let stem = file.strip_suffix(".DLL").unwrap_or(file).to_ascii_lowercase();
+        if win32.guest_replace.contains(&stem) && guest_file(bus, file).is_some() {
+            return None;
+        }
+        match stem.as_str() {
+            "ucrtbase" => stubs::find_dll("MSVCRT.DLL"),
+            _ if stem.starts_with("api-ms-win-crt-") => stubs::find_dll("MSVCRT.DLL"),
+            "kernelbase" => stubs::find_dll("KERNEL32.DLL"),
+            _ => index,
+        }
+    };
+    found.filter(|&i| stubs::DLLS[i].name != super::glide::DLL.name || bus.voodoo.is_some())
 }
 
 /// The DLL `file` in the host folder the `win32_dlls` setting names,

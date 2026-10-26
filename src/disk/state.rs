@@ -67,6 +67,8 @@ impl DiskController {
             media: _,
             // Read again from the host folders.
             host_dirs: _,
+            // The built-in Windows's, which shows them as configured.
+            system_files: _,
         } = self;
         current_drive.save(w);
         for drive in &drives[..LASTDRIVE as usize] {

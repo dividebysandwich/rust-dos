@@ -258,6 +258,37 @@ exceptions run as the program's own code on top of that.
   doesn't load, as on Windows 95, and `GetProcAddress` doesn't find it.
   The setting is read when the first process starts, and kept in save
   states.
+- The built-in DLLs are files in the system directory,
+  `C:\WINDOWS\SYSTEM`, as Windows has its DLLs there: programs and
+  setups that look for a DLL by its file (`CreateFile` or `fopen` for
+  reading, `OpenFile` with `OF_EXIST`, `GetFileAttributes`,
+  `FindFirstFile`) find the ones `LoadLibrary` loads
+  (`src/win32/dll_files.rs`). Xenocracy's hardware profiler opens
+  `GLIDE2X.DLL` there to tell whether the machine has Glide. Each file
+  is the DLL's PE image: its headers, sections and export directory as
+  it is mapped in a process, with the functions the version of Windows
+  has, and the version resource `GetFileVersionInfo` gives for it. They
+  are there while the built-in Windows is on, and follow the loader's
+  rules: `GLIDE2X.DLL` with a 3dfx card alone (`voodoo=true`, or a
+  Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
+  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with
+  one of the folder's not at all.
+
+  The files are read-only: they open for reading alone, show as
+  read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
+  writing, making, deleting or renaming one, copying a file over it or
+  changing its attributes fails with ERROR_ACCESS_DENIED, as for a
+  read-only file. A file of the same name on C: wins: a game that
+  copies its own DLL there has it. `DiskController` shows them
+  (`src/disk/system_files.rs`), under the drive's own files, so DOS
+  sees them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h
+  list and open them, as in a DOS box of Windows 98. A save state
+  opens a file that was open again by its path, and once loaded the
+  files are of the version of Windows its programs run under. While C:
+  has no `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories
+  with just the DLLs in them, and are made on C: when a program makes a
+  file or directory in them; neither can be removed while it holds
+  them.
 
 ### Video
 
@@ -565,21 +596,23 @@ Glide, Expendable with Direct3D.
 
 GLIDE2X.DLL drives the card's registers as 3dfx's library did, on a
 Voodoo Graphics, a Voodoo2, a Banshee and a Voodoo3, and Direct3D's HAL
-(Direct3D 1 to 7's interfaces in DDRAW.DLL) draws through the same
-code. On a Banshee or Voodoo3 the desktop is 640x480 at 16 bits a pixel
-in the card's own memory and modes, so DirectDraw's surfaces there are
-what the 3D engine renders into, in a window too. A Voodoo Graphics or
-Voodoo2 add-on card is a second DirectDraw device, as 3dfx's driver
-made it, with the card's full-screen modes and buffers. There is no
-software rasterizer, so the RGB and Ramp devices aren't there. The 3D
-engine draws 16-bit color and depth only, so on a Banshee or Voodoo3 a
-24- or 32-bit render target or depth buffer is drawn into a 16-bit
-shadow of it in the card's memory, which the HAL loads from the
-surface before drawing and widens into it when the program can see it
-(Lock, GetDC, Blt, Flip, EndScene): the surface stays 32-bit, what is
-drawn has 16-bit precision, and a Clear writes its exact color. On a
-Voodoo Graphics or Voodoo2 such targets fail, as they did with 3dfx's
-driver.
+(Direct3D 1 to 7's interfaces in DDRAW.DLL) draws through the same code.
+On a Banshee or Voodoo3 the desktop is 640x480 at 16 bits a pixel in the
+card's own memory and modes, so DirectDraw's surfaces there are what the
+3D engine renders into, in a window too. A Voodoo Graphics or Voodoo2
+add-on card is a second DirectDraw device, as 3dfx's driver made it,
+with the card's full-screen modes and buffers. Without a 3dfx card there
+is no GLIDE2X.DLL, as on Windows without 3dfx's driver: `LoadLibrary`
+doesn't find it (or finds the game's own copy), and a program that
+imports it doesn't start. There is no software rasterizer, so the RGB
+and Ramp devices aren't there. The 3D engine draws 16-bit color and
+depth only, so on a Banshee or Voodoo3 a 24- or 32-bit render target or
+depth buffer is drawn into a 16-bit shadow of it in the card's memory,
+which the HAL loads from the surface before drawing and widens into it
+when the program can see it (Lock, GetDC, Blt, Flip, EndScene): the
+surface stays 32-bit, what is drawn has 16-bit precision, and a Clear
+writes its exact color. On a Voodoo Graphics or Voodoo2 such targets
+fail, as they did with 3dfx's driver.
 
 Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its
 levels with Glide, its intro and menus with Direct3D. Quake 2's 3.14

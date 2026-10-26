@@ -419,11 +419,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   it, and one that needs a DLL that is neither among them nor beside it is
   refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
   first time a program uses it, so a host folder mounted as C: gets that
-  file. A Windows 3.1 program (an NE .EXE) runs too, as Windows 95 runs it:
-  its KERNEL, USER, GDI and other 16-bit modules are written into the
-  emulator as well and go on to the 32-bit ones, and its own DLLs, such as
-  Visual Basic's runtimes, load from beside it. Off, such a program runs its
-  DOS stub, which says it needs Windows. The plan is in
+  file. The built-in DLLs show as read-only files in `C:\WINDOWS\SYSTEM`, to
+  DOS programs too, and `GLIDE2X.DLL` is among them only with a 3dfx card. A
+  Windows 3.1 program (an NE .EXE) runs too, as Windows 95 runs it: its
+  KERNEL, USER, GDI and other 16-bit modules are written into the emulator
+  as well and go on to the 32-bit ones, and its own DLLs, such as Visual
+  Basic's runtimes, load from beside it. Off, such a program runs its DOS
+  stub, which says it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit

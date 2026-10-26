@@ -21,6 +21,7 @@ mod mount;
 mod paths;
 mod search;
 mod state;
+mod system_files;
 
 use host_dir::{HostDirCache, SearchKey, Usage};
 pub use layout::{DriveKind, Fat32Layout, FatLayout, old_space};
@@ -656,6 +657,9 @@ pub struct DiskController {
     pub(crate) media: Cell<Option<crate::savestate::media::Kept>>,
     /// The entries of host folders as last read (`host_entries`).
     host_dirs: HostDirCache,
+    /// The files shown in a directory that the drive doesn't have: the
+    /// built-in Windows's DLLs (system_files.rs).
+    system_files: system_files::SystemFiles,
 }
 
 impl DiskController {
@@ -708,6 +712,7 @@ impl DiskController {
             notes: Vec::new(),
             media: Cell::new(None),
             host_dirs: HostDirCache::default(),
+            system_files: Default::default(),
         };
         disk.open_standard_devices();
         disk

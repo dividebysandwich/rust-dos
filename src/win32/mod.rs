@@ -22,6 +22,7 @@ mod convert;
 mod d3d8;
 mod ddraw;
 mod dinput;
+pub mod dll_files;
 mod dmusic;
 mod dplayx;
 mod dsound;
@@ -287,6 +288,9 @@ pub struct Win32 {
     /// when the first of them started (version.rs).
     pub version: version::WindowsVersion,
     os: version::WindowsVersion,
+    /// The built-in DLLs the system directory shows as files
+    /// (dll_files.rs), as last shown.
+    dll_files: Option<dll_files::Shown>,
     /// The program DOS loaded, which starts at `START`, and whether it is
     /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
     pending: Option<String>,
@@ -376,6 +380,7 @@ impl Win32 {
             guest_dlls: self.guest_dlls.take(),
             guest_replace: std::mem::take(&mut self.guest_replace),
             version: self.version,
+            dll_files: self.dll_files.take(),
             ..Win32::default()
         };
     }
@@ -609,6 +614,7 @@ fn start(cpu: &mut Cpu) {
     win32.a20 = a20;
     win32.cr4 = cr4;
     version::start(win32);
+    dll_files::sync(&mut cpu.bus);
     let environment = dos_environment(cpu, cpu.current_psp);
     let line = match cpu.bus.win32.pending_arguments.take() {
         Some(arguments) => format!("{} {}", path, arguments),
@@ -1251,4 +1257,4 @@ crate::state_fields!(Win32 {
     dde,
     pending_win16,
     win16,
-} skip { enabled, guest_dlls, guest_replace, version, pending_arguments });
+} skip { enabled, guest_dlls, guest_replace, version, pending_arguments, dll_files });

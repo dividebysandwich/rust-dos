@@ -736,5 +736,8 @@ impl Bus {
             awe.after_load();
         }
         self.verite_after_load();
+        // The built-in DLLs' files are of the version of Windows the
+        // state's programs run under, which may not be the settings'.
+        crate::win32::dll_files::sync(self);
     }
 }
