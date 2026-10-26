@@ -67,9 +67,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+      # Saved only from main: every PR restores main's entries, while a
+      # PR's own entries are visible to that PR alone and push main's out
+      # of the 10 GB repository cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: conformance
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # In release: a debug build runs the user32 and gdi32 programs,
       # msg.c and win.c above all, many times slower.
@@ -120,6 +124,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: conformance16
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run the Win16 conformance tests
         env:
