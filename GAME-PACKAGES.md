@@ -210,7 +210,9 @@ START
   (see [an operating system](#an-operating-system)). `windows=builtin`
   runs a Windows game in the built-in Windows instead, and an
   `[install]` section unpacks its installer's archives the first time it
-  starts (see [Windows games](CONFIGURATION.md#windows-games)).
+  starts (see [Windows games](CONFIGURATION.md#windows-games)). The
+  package can't hold the game's `.reg` file: it goes beside the profile
+  the package makes in the `games` folder (`games/<profile>.reg`).
 * **Settings sections** (`[emulator]`, `[sound]`, `[joystick]` and the
   rest) are the game's settings, applied over yours while it runs. List
   only what the game needs; [CONFIGURATION.md](CONFIGURATION.md) has every
