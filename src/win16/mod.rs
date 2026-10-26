@@ -482,6 +482,23 @@ pub fn module_index(cpu: &Cpu, handle: u16) -> Option<usize> {
         })
 }
 
+/// Whether a window of the process `pid` made with the instance
+/// `instance`, as USER32 keeps it (`handles::instance32`), belongs to a
+/// Windows 3.x program: a module of the Win16 process whose header
+/// expects a version of Windows before 4.0.
+pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
+    let win16 = &cpu.bus.win32.win16;
+    if pid == 0 || pid != win16.pid {
+        return false;
+    }
+    let index = if instance < 0x1_0000 {
+        module_index(cpu, instance as u16)
+    } else {
+        win16.modules.iter().position(|m| m.resources32 == instance)
+    };
+    index.is_some_and(|i| win16.modules[i].expected_version < 0x0400)
+}
+
 crate::state_fields!(State {
     pid,
     lock,
