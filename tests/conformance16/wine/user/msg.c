@@ -17,7 +17,10 @@
  * the id a timer without a window is given, so Wine's check that it
  * replaces the timer is left out. Added for Win16 are checks of the
  * order PostMessage, PostAppMessage and SendMessage deliver messages in,
- * PeekMessage's filters and PM_NOREMOVE, and GetMessage.
+ * PeekMessage's filters and PM_NOREMOVE, and GetMessage, and that
+ * PeekMessage with no message lets another task run (test_peek_yields),
+ * which a setup program waiting in a PeekMessage loop for the program
+ * it started counts on.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -35,6 +38,7 @@
  */
 
 #include "test.h"
+#include <stdlib.h>
 
 /* undocumented SWP flags - from SDK 3.1 */
 #define SWP_NOCLIENTSIZE	0x0800
@@ -764,8 +768,47 @@ static void test_timers_no_wnd(void)
     FreeProcInstance((FARPROC)proc);
 }
 
+/* The atom the copy of this program test_peek_yields starts adds. */
+static const char peek_child_atom[] = "msg test peek child";
+
+/* PeekMessage with no message for the task lets the other tasks run
+ * before it returns: a copy of this program started with WinExec gets
+ * to add its atom while this one only calls PeekMessage. */
+static void test_peek_yields(void)
+{
+    char line[160];
+    MSG msg;
+    UINT ret;
+    int i, len;
+    ATOM atom = 0;
+
+    len = GetModuleFileName(main_instance, line, sizeof(line) - 16);
+    ok(len > 0, "GetModuleFileName failed\n");
+    if (len <= 0) return;
+    lstrcpy(line + len, " peek_child");
+    ret = WinExec(line, SW_HIDE);
+    ok(ret >= 32, "WinExec failed: %u\n", ret);
+    if (ret < 32) return;
+    for (i = 0; i < 200; i++)
+    {
+        atom = GlobalFindAtom(peek_child_atom);
+        if (atom) break;
+        while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) DispatchMessage(&msg);
+    }
+    ok(atom != 0, "the started program didn't run while PeekMessage was called\n");
+    if (atom) GlobalDeleteAtom(atom);
+}
+
 START_TEST(msg)
 {
+    /* The copy test_peek_yields starts: it adds its atom and ends,
+     * writing nothing. */
+    if (!lstrcmp(winetest_cmdline, "peek_child"))
+    {
+        GlobalAddAtom(peek_child_atom);
+        exit(0);
+    }
+
     /* A program's instance handle is its data segment's selector. */
     main_instance = (HINSTANCE)get_ds();
 
@@ -780,4 +823,5 @@ START_TEST(msg)
     test_timers();
     test_timers_no_wnd();
     test_quit_message();
+    test_peek_yields();
 }

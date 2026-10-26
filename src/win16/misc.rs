@@ -5,6 +5,7 @@
 //! here, or answer as Windows 3.1 does when there is no such device.
 
 use super::builtin::{Def, register, rust, win32};
+use super::lz;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
 use crate::cpu::Cpu;
@@ -265,22 +266,21 @@ pub static MMSYSTEM: Def = Def {
     library: true,
 };
 
-/// LZEXPAND: compressed files are read as they are (the programs that
-/// ship them have them expanded by their setup programs).
+/// LZEXPAND: compressed files read expanded (lz.rs).
 pub static LZEXPAND: Def = Def {
     name: "LZEXPAND",
     file: "LZEXPAND.DLL",
     apis: &[
-        rust("LZCopy", 1, "ww", lz_copy),
-        rust("LZOpenFile", 2, "ppw", super::kernel::open_file),
-        rust("LZInit", 3, "w", first),
-        rust("LZSeek", 4, "wlw", super::kernel::llseek),
-        rust("LZRead", 5, "wpw", super::kernel::lread),
-        rust("LZClose", 6, "w", super::kernel::lclose),
+        rust("LZCopy", 1, "ww", lz::lz_copy),
+        rust("LZOpenFile", 2, "ppw", lz::lz_open_file),
+        rust("LZInit", 3, "w", lz::lz_init),
+        rust("LZSeek", 4, "wlw", lz::lz_seek),
+        rust("LZRead", 5, "wpw", lz::lz_read),
+        rust("LZClose", 6, "w", lz::lz_close),
         rust("LZStart", 7, "", one),
-        rust("CopyLZFile", 8, "ww", lz_copy),
+        rust("CopyLZFile", 8, "ww", lz::lz_copy),
         rust("LZDone", 9, "", zero),
-        rust("GetExpandedName", 10, "pp", get_expanded_name),
+        rust("GetExpandedName", 10, "pp", lz::get_expanded_name),
     ],
     library: true,
 };
@@ -382,10 +382,6 @@ fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0xFFFF)
-}
-
-fn first(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(args[0])
 }
 
 fn code_page(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1198,47 +1194,6 @@ fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         args[0], args[1]
     ));
     Some(274)
-}
-
-// LZEXPAND.
-
-/// LZCopy(from, to): the file copied as it is. The bytes copied, or
-/// LZERROR_READ.
-fn lz_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (from, to) = (args[0] as u16, args[1] as u16);
-    let mut total = 0u32;
-    let chunk = super::global::alloc(cpu, 0, 0x8000, 0, false);
-    if chunk == 0 {
-        return Some(0xFFFF_FFFE);
-    }
-    let at = super::lin(cpu, super::global::handle_to_sel(chunk), 0);
-    loop {
-        let Ok(n) = super::dos::transfer(cpu, from, at, 0x8000, false) else {
-            super::global::free(cpu, chunk);
-            return Some(0xFFFF_FFFE);
-        };
-        if n == 0 {
-            break;
-        }
-        if super::dos::transfer(cpu, to, at, n, true).is_err() {
-            super::global::free(cpu, chunk);
-            return Some(0xFFFF_FFFB);
-        }
-        total += n;
-        if n < 0x8000 {
-            break;
-        }
-    }
-    super::global::free(cpu, chunk);
-    Some(total)
-}
-
-/// GetExpandedName(from, to): the name as it is.
-fn get_expanded_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let mut name = super::string_bytes(cpu, args[0], 0x100);
-    name.push(0);
-    super::poke(cpu, args[1], &name);
-    Some(1)
 }
 
 // VER.
