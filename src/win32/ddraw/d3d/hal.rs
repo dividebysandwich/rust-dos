@@ -388,7 +388,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         && first
             .and_then(|id| state(cpu).surface(id))
             .is_some_and(|s| s.format.a == 0);
-    fbi_combine(cpu, d, textured, diffuse_alpha);
+    fbi_combine(cpu, d, textured, diffuse_alpha, keyed);
     if d.state(RS_SPECULARENABLE) != 0 {
         card.specular = if textured {
             Specular::Pass {
@@ -400,10 +400,13 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         };
     }
 
-    // The alpha test, and the keyed texels it leaves out.
-    if d.state(RS_ALPHATESTENABLE) != 0 {
-        api::alpha_test_function(cpu, compare(d.state(RS_ALPHAFUNC)));
-        api::alpha_test_reference_value(cpu, d.state(RS_ALPHAREF) & 0xFF);
+    // The alpha test, and the keyed texels it leaves out: the program's
+    // test, unless it lets alpha 0 through.
+    let (func, reference) = (d.state(RS_ALPHAFUNC), d.state(RS_ALPHAREF) & 0xFF);
+    let passes_zero = func == 8 || func == 7 && reference == 0;
+    if d.state(RS_ALPHATESTENABLE) != 0 && !(keyed && passes_zero) {
+        api::alpha_test_function(cpu, compare(func));
+        api::alpha_test_reference_value(cpu, reference);
     } else if keyed {
         api::alpha_test_function(cpu, compare(5));
         api::alpha_test_reference_value(cpu, 0);
@@ -503,7 +506,9 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
 /// The color and alpha combine units for stage 0's operations: the
 /// texture units' result is the texture, the iterated color the diffuse
 /// color. `diffuse_alpha` makes stage 0's alpha the diffuse one.
-fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
+/// `keyed`: the texture is a keyed copy, whose keyed texels have alpha 0
+/// and the others 1, and the alpha test leaves out what comes to 0.
+fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, keyed: bool) {
     let it = api::COMBINE_LOCAL_ITERATED;
     let (other_tex, other_it) = (api::COMBINE_OTHER_TEXTURE, api::COMBINE_OTHER_ITERATED);
     let arg_is_texture = |arg: u32| textured && arg & 0xF == TA_TEXTURE;
@@ -596,12 +601,27 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
     }
     let (f, factor, local, other) = pick(d.stage(0, TSS_COLOROP), a1, a2);
     api::color_combine(cpu, f, factor, local, other, false);
-    let (f, factor, local, other) = pick(alpha_op, aa1, aa2);
+    let (mut f, factor, local, mut other) = pick(alpha_op, aa1, aa2);
     // The alpha unit's factor is alpha already.
-    let factor = match factor {
+    let mut factor = match factor {
         api::COMBINE_FACTOR_LOCAL => api::COMBINE_FACTOR_LOCAL_ALPHA,
         f => f,
     };
+    // Direct3D leaves a keyed texel out whatever the stage does with
+    // alpha. When the alpha isn't the texture's scaled (the diffuse
+    // alpha of MODULATE with a texture without alpha, DECALALPHA, ADD),
+    // it is the local alpha scaled by the texture's, which is 0 for a
+    // keyed texel and the local alpha for the others.
+    let scales_texture = other == api::COMBINE_OTHER_TEXTURE
+        && f == api::COMBINE_FUNCTION_SCALE_OTHER
+        && factor != api::COMBINE_FACTOR_ONE_MINUS_LOCAL_ALPHA;
+    if keyed && !scales_texture {
+        (f, factor, other) = (
+            api::COMBINE_FUNCTION_SCALE_OTHER,
+            api::COMBINE_FACTOR_LOCAL_ALPHA,
+            api::COMBINE_OTHER_TEXTURE,
+        );
+    }
     api::alpha_combine(cpu, f, factor, local, other, false);
 }
 
