@@ -323,7 +323,10 @@ pub enum Cmd {
     /// Write `data` at an address; with `expect`, only if the bytes there
     /// match it.
     WriteMem { addr: String, data: Vec<u8>, expect: Option<Vec<u8>> },
-    Disasm { addr: Option<String>, count: usize },
+    /// `bits`: decode as 16 or 32-bit code instead of the address's
+    /// segment's size (or, for a linear or physical address, the running
+    /// code's).
+    Disasm { addr: Option<String>, count: usize, bits: Option<u32> },
     ListBreakpoints,
     /// A breakpoint; with `once` it goes once it stops the machine.
     AddBreakpoint { addr: String, once: bool },

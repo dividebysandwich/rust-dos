@@ -444,7 +444,9 @@ pub(super) fn get_private_profile_section_w(cpu: &mut Cpu, args: &[u32]) -> Opti
 }
 
 /// The value of `key` in `section` of the profile `file`, for the
-/// system's own use: OpenDriver's aliases in SYSTEM.INI.
+/// system's own use: OpenDriver's aliases in SYSTEM.INI, and the
+/// InstallShield setup launcher's language in SETUP.LID. None when the
+/// file isn't there or doesn't have the key.
 pub(in crate::win32) fn profile_value(
     cpu: &mut Cpu,
     file: &[u8],

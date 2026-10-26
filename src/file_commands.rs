@@ -366,10 +366,10 @@ impl ShellCommand for RenCommand {
 pub struct MdCommand;
 impl ShellCommand for MdCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        match args.split_whitespace().next() {
+        match crate::command::path_argument(args) {
             None => print_string(cpu, "Required parameter missing\r\n"),
             Some(dir) => {
-                if cpu.bus.disk.create_directory(dir).is_err() {
+                if cpu.bus.disk.create_directory(&dir).is_err() {
                     print_string(cpu, "Unable to create directory\r\n");
                 }
             }
@@ -381,10 +381,10 @@ impl ShellCommand for MdCommand {
 pub struct RdCommand;
 impl ShellCommand for RdCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        match args.split_whitespace().next() {
+        match crate::command::path_argument(args) {
             None => print_string(cpu, "Required parameter missing\r\n"),
             Some(dir) => {
-                if cpu.bus.disk.remove_directory(dir).is_err() {
+                if cpu.bus.disk.remove_directory(&dir).is_err() {
                     print_string(cpu, "Invalid path, not directory,\r\nor directory not empty\r\n");
                 }
             }

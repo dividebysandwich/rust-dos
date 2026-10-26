@@ -547,6 +547,24 @@ fn floppy_free_space_tracks_usage() {
     assert_eq!(disk.get_disk_free_space(5), Err(0x0F));
 }
 
+/// The built-in Windows sees a folder hard disk as a fake 1 GB one whose
+/// free space drops as files are written, while DOS keeps its 80 MB one.
+#[test]
+fn windows_sees_a_larger_hard_disk() {
+    let base = scratch("windows_hd");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let disk = DiskController::new(base.join("c"));
+    assert_eq!(disk.windows_free_space(3), Ok((8, 1 << 18, 512, 1 << 18)));
+
+    fs::write(base.join("c/SETUP.DAT"), vec![0u8; 16 * 1024]).unwrap();
+    assert_eq!(
+        disk.windows_free_space(3),
+        Ok((8, (1 << 18) - 4, 512, 1 << 18))
+    );
+    assert_eq!(disk.get_disk_free_space32(3), Ok((8, 19996, 512, 20000)));
+    assert_eq!(disk.windows_free_space(5), Err(0x0F));
+}
+
 #[test]
 fn a_and_b_are_always_floppies() {
     let base = scratch("floppy_letters");
