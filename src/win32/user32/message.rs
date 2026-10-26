@@ -1032,6 +1032,7 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// WaitMessage: the thread waits for a message to come.
 pub fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::input::poll(cpu);
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
@@ -1064,6 +1065,10 @@ pub fn wait_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// Take the message the filter `f` wants from the thread `tid`'s queue,
 /// if one is there; `remove` takes it out.
 fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg> {
+    // What the devices did since they were last read comes first: a move
+    // replaces the one SetCursorPos queued, which the program's next
+    // SetCursorPos would otherwise undo before any poll saw it.
+    super::input::poll(cpu);
     let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
     // Posted messages.
@@ -1339,6 +1344,7 @@ pub fn broadcast_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
 /// GetQueueStatus(flags): what is in the queue (the high word) and what
 /// came since it was last asked (the low word).
 pub fn get_queue_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::input::poll(cpu);
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let mask = args[0];
@@ -1369,6 +1375,7 @@ pub fn get_queue_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetInputState: whether keyboard or mouse input waits.
 pub fn get_input_state(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::input::poll(cpu);
     let tid = current_tid(cpu);
     let any = user(cpu).queue(tid).is_some_and(|q| !q.input.is_empty());
     Some(any as u32)
@@ -1459,6 +1466,7 @@ fn msg_wait(
     timeout: u32,
     mask: u32,
 ) -> Option<u32> {
+    super::input::poll(cpu);
     let tid = current_tid(cpu);
     let now = cpu.bus.clock.now_micros();
     let wait = QueueWait {
@@ -1662,3 +1670,70 @@ crate::state_fields!(QueueWait {
     filter,
     reply
 });
+
+#[cfg(test)]
+mod tests {
+    use super::super::input;
+    use super::*;
+
+    /// A desktop with one window, which has the capture: the thread that
+    /// gets its mouse messages.
+    fn captured(cpu: &mut Cpu) -> u32 {
+        let hwnd = user(cpu).new_window(super::super::window::Window::default());
+        let hwnd = hwnd.expect("a window");
+        user(cpu).desktop = true;
+        user(cpu).input.capture = hwnd;
+        user(cpu).window(hwnd).map(|w| w.tid).unwrap_or(0)
+    }
+
+    /// The next message for `tid`, taken: its message and lParam.
+    fn take(cpu: &mut Cpu, tid: u32) -> Option<(u32, u32)> {
+        take_message(cpu, tid, Filter::default(), true).map(|m| (m.message, m.lparam))
+    }
+
+    /// A program that puts the cursor back in the middle after each move
+    /// (Xenocracy's dialogs in flight) gets the move the mouse made while
+    /// it drew its frame, not the one its SetCursorPos queued.
+    #[test]
+    fn a_move_between_frames_outlives_set_cursor_pos() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let tid = captured(&mut cpu);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        // The frame: the mouse moves before the program asks again.
+        cpu.bus.mouse.move_by(50.0, 0.0);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// A click the mouse made before the program put the cursor back is
+    /// where the mouse was, not where the cursor went.
+    #[test]
+    fn a_click_before_set_cursor_pos_stays_where_it_was() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let tid = captured(&mut cpu);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        cpu.bus.mouse.move_by(50.0, 0.0);
+        cpu.bus.mouse.button_down(0);
+        input::set_cursor_pos(&mut cpu, &[100, 100]);
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu, tid), Some((WM_LBUTTONDOWN, 100 << 16 | 150)));
+        assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
+        assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// GetQueueStatus and GetInputState see a move the mouse made since
+    /// the devices were last read, as a program asks before it peeks.
+    #[test]
+    fn queue_status_sees_a_fresh_move() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        captured(&mut cpu);
+        assert_eq!(get_input_state(&mut cpu, &[]), Some(0));
+        cpu.bus.mouse.move_by(10.0, 0.0);
+        let status = get_queue_status(&mut cpu, &[QS_MOUSEMOVE]);
+        assert_eq!(status, Some(QS_MOUSEMOVE << 16 | QS_MOUSEMOVE));
+        assert_eq!(get_input_state(&mut cpu, &[]), Some(1));
+    }
+}
