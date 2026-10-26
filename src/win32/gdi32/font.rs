@@ -25,6 +25,24 @@ static GLYPHS_8: &[u8] = include_bytes!("../../video/assets/IBM_VGA_8x8.bin");
 static GLYPHS_14: &[u8] = include_bytes!("../../video/assets/IBM_EGA_8x14.bin");
 static GLYPHS_16: &[u8] = include_bytes!("../../video/assets/IBM_VGA_8x16.bin");
 
+/// Glyphs of ANSI characters that code page 437 has none of, drawn 8x16
+/// in the VGA font's style, after its 256: the copyright and registered
+/// signs, which programs put in their title screens and about boxes.
+const EXTRA_GLYPHS: &[(u16, [u8; 16])] = &[
+    (
+        0xA9,
+        [
+            0, 0, 0x3C, 0x42, 0x99, 0xA5, 0xA1, 0xA1, 0xA5, 0x99, 0x42, 0x3C, 0, 0, 0, 0,
+        ],
+    ),
+    (
+        0xAE,
+        [
+            0, 0, 0x3C, 0x42, 0xB9, 0xA5, 0xA5, 0xB9, 0xA9, 0xA5, 0x42, 0x3C, 0, 0, 0, 0,
+        ],
+    ),
+];
+
 pub const ANSI_CHARSET: u8 = 0;
 pub const DEFAULT_CHARSET: u8 = 1;
 pub const SYMBOL_CHARSET: u8 = 2;
@@ -246,12 +264,17 @@ fn make_glyphs(key: Key) -> Glyphs {
         _ => (GLYPHS_16, 16),
     };
     let gw = key.glyph_width.clamp(1, 60);
-    let mut glyphs = Vec::with_capacity(256);
-    for g in 0..256usize {
+    let mut glyphs = Vec::with_capacity(256 + EXTRA_GLYPHS.len());
+    for g in 0..256 + EXTRA_GLYPHS.len() {
         let mut rows = Vec::with_capacity(key.cell as usize);
         for ty in 0..key.cell {
-            let sy = (ty as usize * base_h) / key.cell as usize;
-            let byte = data.get(g * base_h + sy).copied().unwrap_or(0);
+            let byte = match g.checked_sub(256) {
+                Some(e) => EXTRA_GLYPHS[e].1[ty as usize * 16 / key.cell as usize],
+                None => {
+                    let sy = (ty as usize * base_h) / key.cell as usize;
+                    data.get(g * base_h + sy).copied().unwrap_or(0)
+                }
+            };
             let mut bits = 0u64;
             for tx in 0..gw {
                 let sx = (tx * 8) / gw;
@@ -318,7 +341,7 @@ impl Realized {
 
     /// The glyph of the byte `b` of the font's character set.
     fn glyph(&self, b: u8) -> &Glyph {
-        let g = if self.oem() { b } else { ansi_glyph(b) };
+        let g = if self.oem() { b as u16 } else { ansi_glyph(b) };
         &self.glyphs.glyphs[g as usize]
     }
 
@@ -336,18 +359,24 @@ impl Realized {
     }
 }
 
-/// The code page 437 glyph that shows the ANSI byte `b`.
-fn ansi_glyph(b: u8) -> u8 {
+/// The glyph that shows the ANSI byte `b`: code page 437's, or one of
+/// `EXTRA_GLYPHS` after them.
+fn ansi_glyph(b: u8) -> u16 {
     if (0x20..0x7F).contains(&b) {
-        return b;
+        return b as u16;
     }
     let c = CodePage::Ansi.char(b);
+    // Code page 437's glyphs below 20h are the control characters', but
+    // the paragraph and section signs (14h and 15h) are ANSI's too.
     if let Some(g) = CodePage::Oem.byte(c)
-        && g >= 0x20
+        && (g >= 0x20 || c >= 0xA0)
     {
-        return g;
+        return g as u16;
     }
-    match c {
+    if let Some(i) = EXTRA_GLYPHS.iter().position(|&(e, _)| e == c) {
+        return 256 + i as u16;
+    }
+    let g = match c {
         0xA0 => 0xFF,
         0x2018 | 0x2019 | 0xB4 => b'\'',
         0x201C | 0x201D | 0xA8 => b'"',
@@ -358,7 +387,8 @@ fn ansi_glyph(b: u8) -> u8 {
             Some((base, _)) if base < 0x80 => base as u8,
             _ => b'?',
         },
-    }
+    };
+    g as u16
 }
 
 /// Realize the logical font `log` for heights in device units.
@@ -1217,11 +1247,14 @@ mod tests {
 
     #[test]
     fn ansi_text_gets_code_page_437_glyphs() {
-        assert_eq!(ansi_glyph(b'A'), b'A');
+        assert_eq!(ansi_glyph(b'A'), b'A' as u16);
         // e acute is 82h in code page 437.
         assert_eq!(ansi_glyph(0xE9), 0x82);
         // A tilde has no glyph of its own: the plain letter.
-        assert_eq!(ansi_glyph(0xC3), b'A');
+        assert_eq!(ansi_glyph(0xC3), b'A' as u16);
+        // The section sign is 15h; the copyright sign isn't in 437.
+        assert_eq!(ansi_glyph(0xA7), 0x15);
+        assert_eq!(ansi_glyph(0xA9), 256);
     }
 
     #[test]
