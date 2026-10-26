@@ -380,10 +380,10 @@ The results that aren't clean, and why:
 - comctl32 `toolbar.c:888` (one), `895`, `899` and `917`: sizes that
   Wine marks `todo_wine`, as Wine's toolbar, which the built-in one
   follows, doesn't give them.
-- comctl32 `toolbar.c:985` to `1074`, 26 checks: the widths of buttons
-  with text, measured in the System font, whose glyphs are narrower
-  here than on the machine the results come from ("MMMMMMMMMMMMM" is
-  117 pixels wide here, 156 there).
+- comctl32 `toolbar.c:1037` (two) and `1066` (three): widths of buttons
+  with text that still differ from the machine the results come from,
+  after the System font and MS Sans Serif got Windows 98's character
+  widths.
 - comctl32 `trackbar.c:518` and `1000`, and `tab.c:918` and `919`:
   message sequences Wine marks `todo_wine`. In `trackbar.c` USER32
   activates a top-level window that SetWindowPos moves, and doesn't
