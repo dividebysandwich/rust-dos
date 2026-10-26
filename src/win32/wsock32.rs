@@ -165,23 +165,32 @@ pub(super) fn wsa_set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// WSAStartup(version, data): Winsock 1.1, in WSADATA (400 bytes).
 fn wsa_startup(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    startup(cpu, args, 0x0101, b"WinSock 1.1 (no network)")
+    startup(cpu, args, 0x0101, 0x0101, b"WinSock 1.1 (no network)")
 }
 
-/// WSAStartup(version, data) of a Winsock whose highest version is
-/// `highest` (minor version in the high byte, as WSADATA has it): the
-/// version asked for, or the highest if it asks for a later one.
-pub(super) fn startup(cpu: &mut Cpu, args: &[u32], highest: u16, text: &[u8]) -> Option<u32> {
+/// WSAStartup(version, data) of a Winsock whose versions go from
+/// `lowest` to `highest` (minor version in the high byte, as WSADATA has
+/// it): the version asked for, or the highest if it asks for a later
+/// one, and WSAVERNOTSUPPORTED below the lowest.
+pub(super) fn startup(
+    cpu: &mut Cpu,
+    args: &[u32],
+    lowest: u16,
+    highest: u16,
+    text: &[u8],
+) -> Option<u32> {
     let [version, at] = args[..] else {
         return Some(WSAEFAULT);
     };
-    let (major, minor) = (version & 0xFF, (version >> 8) & 0xFF);
-    if major < 1 || (major == 1 && minor < 1) {
+    let asked = version as u16;
+    if asked.swap_bytes() < lowest.swap_bytes() {
         return Some(WSAVERNOTSUPPORTED);
     }
-    let asked = (minor << 8 | major) as u16;
-    let swap = |v: u16| v.rotate_left(8);
-    let used = if swap(asked) < swap(highest) { asked } else { highest };
+    let used = if asked.swap_bytes() < highest.swap_bytes() {
+        asked
+    } else {
+        highest
+    };
     if at == 0 {
         return Some(WSAEFAULT);
     }

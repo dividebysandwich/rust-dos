@@ -5,6 +5,7 @@
 //! found and described, symbols aren't, and a stack is walked by its
 //! frame pointers.
 
+use super::kernel32::virtual_memory::allows;
 use super::process;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -99,7 +100,9 @@ fn imagehlp_api_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     if kept != 0 {
         return Some(kept);
     }
-    let at = super::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, 8))?;
+    let Some(at) = super::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, 8)) else {
+        return Some(0);
+    };
     super::process(cpu).imagehlp.api_version = at;
     // MajorVersion, MinorVersion, Revision, Reserved.
     for (i, v) in [4u16, 0, 5, 0].iter().enumerate() {
@@ -109,7 +112,12 @@ fn imagehlp_api_version(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 fn sym_get_options(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(super::process(cpu).imagehlp.options.unwrap_or(SYMOPT_UNDNAME))
+    Some(
+        super::process(cpu)
+            .imagehlp
+            .options
+            .unwrap_or(SYMOPT_UNDNAME),
+    )
 }
 
 fn sym_set_options(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -118,11 +126,13 @@ fn sym_set_options(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The module of the running process that `address` is in: its base,
-/// size, file name and path.
+/// size, file name and path. Images mapped as data files aren't modules
+/// (as for GetModuleHandle).
 fn module_at(cpu: &mut Cpu, address: u32) -> Option<(u32, u32, String, String)> {
     process(cpu)
         .modules
         .iter()
+        .filter(|m| m.flags & super::loader::DATAFILE == 0)
         .find(|m| address >= m.base && address - m.base < m.size)
         .map(|m| (m.base, m.size, m.name.clone(), m.path.clone()))
 }
@@ -148,12 +158,7 @@ fn sym_load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         super::user32::string_at(cpu, image)?
     };
-    let file = name.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-    let found = process(cpu)
-        .modules
-        .iter()
-        .find(|m| !file.is_empty() && m.name.eq_ignore_ascii_case(&file))
-        .map(|m| m.base);
+    let found = process(cpu).module(&name);
     if found.is_none() {
         process(cpu).last_error = ERROR_MOD_NOT_FOUND;
     }
@@ -163,10 +168,17 @@ fn sym_load_module(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Write `text` at `at` as a string of at most `room` bytes with its
 /// zero.
 fn write_string(cpu: &mut Cpu, at: u32, room: usize, text: &str) {
-    let mut bytes = crate::dosstr::to_bytes(text);
+    write_bytes(cpu, at, room, crate::dosstr::to_bytes(text));
+}
+
+/// Write the string `bytes` at `at`, cut to at most `room` bytes with its
+/// zero. How many bytes of it were written, without the zero.
+fn write_bytes(cpu: &mut Cpu, at: u32, room: usize, mut bytes: Vec<u8>) -> usize {
     bytes.truncate(room - 1);
+    let len = bytes.len();
     bytes.push(0);
     cpu.bus.guest_write_bytes(at, &bytes);
+    len
 }
 
 /// SymGetModuleInfo(process, address, info): IMAGEHLP_MODULE of the
@@ -205,8 +217,9 @@ fn sym_get_sym_from_addr(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
-/// SymUnDName(symbol, name, length): the IMAGEHLP_SYMBOL's name (at 24)
-/// as it is: names aren't undecorated (see UnDecorateSymbolName).
+/// SymUnDName(symbol, name, length): the IMAGEHLP_SYMBOL's name (at 20,
+/// after five DWORDs) as it is: names aren't undecorated (see
+/// UnDecorateSymbolName).
 fn sym_und_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[symbol, out, length] = args else {
         unreachable!()
@@ -214,8 +227,8 @@ fn sym_und_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if symbol == 0 || out == 0 || length == 0 {
         return Some(FALSE);
     }
-    let name = super::user32::string_at(cpu, symbol + 24)?;
-    write_string(cpu, out, length as usize, &name);
+    let name = super::user32::bytes_at(cpu, symbol.wrapping_add(20))?;
+    write_bytes(cpu, out, length as usize, name);
     Some(TRUE)
 }
 
@@ -230,22 +243,23 @@ fn undecorate_symbol_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         process(cpu).last_error = ERROR_INVALID_PARAMETER;
         return Some(0);
     }
-    let text = super::user32::string_at(cpu, name)?;
-    write_string(cpu, out, length as usize, &text);
-    Some(text.len().min(length as usize - 1) as u32)
+    let text = super::user32::bytes_at(cpu, name)?;
+    Some(write_bytes(cpu, out, length as usize, text) as u32)
 }
 
 /// ImageNtHeader(base): the PE header of the image at `base`, or NULL.
+/// Memory the program can't read gives NULL, as it does on Windows,
+/// which catches the fault.
 fn image_nt_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let base = args[0];
-    if base == 0 || !cpu.bus.guest_probe(base, 0x40, false) {
+    if base == 0 || !allows(cpu, base, 0x40, false) {
         return Some(0);
     }
     if cpu.bus.guest_read_16(base) != 0x5A4D {
         return Some(0);
     }
     let at = base.wrapping_add(cpu.bus.guest_read_32(base + 0x3C));
-    if !cpu.bus.guest_probe(at, 4, false) || cpu.bus.guest_read_32(at) != 0x4550 {
+    if !allows(cpu, at, 4, false) || cpu.bus.guest_read_32(at) != 0x4550 {
         return Some(0);
     }
     Some(at)
@@ -258,8 +272,8 @@ const ADDR_RETURN: u32 = 12;
 const ADDR_FRAME: u32 = 24;
 const ADDR_STACK: u32 = 36;
 const PARAMS: u32 = 52;
-/// STACKFRAME's size up to and with Reserved, the part written here.
-const STACKFRAME: u32 = 100;
+/// STACKFRAME's size up to and with Reserved (KdHelp follows).
+const STACKFRAME: u32 = 88;
 /// ADDRESS's AddrModeFlat.
 const ADDR_MODE_FLAT: u32 = 3;
 const IMAGE_FILE_MACHINE_I386: u32 = 0x14C;
@@ -269,9 +283,10 @@ const IMAGE_FILE_MACHINE_I386: u32 = 0x14C;
 /// The first call takes the PC, frame and stack the program set in the
 /// STACKFRAME, and gives the return address and parameters of that
 /// frame; each later one moves to the frame the saved EBP points to.
-/// FALSE at the end of the chain, or when a frame can't be read. The
-/// program's memory callbacks aren't called: the memory is the
-/// process's own.
+/// FALSE at the end of the chain, or when a frame can't be read, which
+/// it checks without touching the memory: the chain of a crashed
+/// program may lead anywhere. The program's memory callbacks aren't
+/// called: the memory is the process's own.
 fn stack_walk(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[machine, _, _, frame, ..] = args else {
         unreachable!()
@@ -287,7 +302,7 @@ fn stack_walk(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let ret = cpu.bus.guest_read_32(frame + ADDR_RETURN);
     if ret != 0 {
         // A later call: the caller's frame.
-        if !cpu.bus.guest_probe(ebp, 4, false) {
+        if !allows(cpu, ebp, 4, false) {
             return Some(FALSE);
         }
         let next = cpu.bus.guest_read_32(ebp);
@@ -295,11 +310,12 @@ fn stack_walk(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(FALSE);
         }
         cpu.bus.guest_write_32(frame + ADDR_PC, ret);
-        cpu.bus.guest_write_32(frame + ADDR_STACK, ebp + 8);
+        cpu.bus
+            .guest_write_32(frame + ADDR_STACK, ebp.wrapping_add(8));
         ebp = next;
         cpu.bus.guest_write_32(frame + ADDR_FRAME, ebp);
     }
-    if ebp == 0 || !cpu.bus.guest_probe(ebp, 24, false) {
+    if ebp == 0 || !allows(cpu, ebp, 24, false) {
         return Some(FALSE);
     }
     let ret = cpu.bus.guest_read_32(ebp + 4);

@@ -74,7 +74,7 @@ static APIS: &[Api] = &[
     stdcall("__WSAFDIsSet", 151, 2, w::zero),
 ];
 
-/// WSAStartup(version, data): Winsock 2.2 at most.
+/// WSAStartup(version, data): Winsock 1.0 to 2.2, as WS2_32 takes them.
 fn wsa_startup(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    w::startup(cpu, args, 0x0202, b"WinSock 2.0 (no network)")
+    w::startup(cpu, args, 0x0001, 0x0202, b"WinSock 2.0 (no network)")
 }
