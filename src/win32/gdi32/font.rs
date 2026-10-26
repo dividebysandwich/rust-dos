@@ -511,7 +511,9 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
             if all != 0 {
                 let left = all.trailing_zeros() as i32;
                 let lit = 64 - all.leading_zeros() as i32 - left;
-                let body = (w - 1 - native_bold as i32).max(1);
+                // A row holds 64 columns: past 60, as for the other
+                // faces, the glyph keeps its advance but no wider.
+                let body = (w - 1 - native_bold as i32).clamp(1, 60);
                 for bits in &mut rows {
                     let mut out = 0u64;
                     for tx in 0..body {
@@ -535,10 +537,7 @@ fn raster_glyphs(key: Key, r: &Raster) -> Glyphs {
             }
         })
         .collect();
-    Glyphs {
-        glyphs,
-        ansi: true,
-    }
+    Glyphs { glyphs, ansi: true }
 }
 
 fn make_glyphs(key: Key) -> Glyphs {
@@ -705,7 +704,8 @@ fn realize(log: &Log, device_height: i32, device_width: i32) -> Realized {
     let key = Key {
         base,
         cell,
-        glyph_width,
+        // The raster faces' glyphs don't depend on it: one cache entry.
+        glyph_width: if raster.is_some() { 0 } else { glyph_width },
         bold: weight >= 600,
         fixed,
         raster: raster.map(|(i, _)| i),
@@ -1562,6 +1562,19 @@ mod tests {
         let f = realize(&log, -11, 0);
         assert_eq!(f.height, 13);
         assert_eq!(f.internal_leading, 2);
+    }
+
+    #[test]
+    fn big_ms_sans_serif_glyphs_stay_in_their_rows() {
+        // 128 pixels scales the 37 pixel size's widths past the 64
+        // columns a glyph row holds. The glyph is drawn no wider than
+        // the other faces' widest, but moves on as far.
+        let log = Log::of(&logfont(128, 0, 700, 0, 0, "MS Sans Serif"));
+        let f = realize(&log, 128, 0);
+        assert!(f.advance(b'W') > 64);
+        let all = f.glyph(b'W').rows.iter().fold(0, |a, &r| a | r);
+        assert_ne!(all, 0);
+        assert!(all >> 62 == 0, "no lit column wraps around");
     }
 
     #[test]

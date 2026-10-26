@@ -1058,7 +1058,7 @@ fn ms_sans_serif_8_and_system_have_windows_98s_metrics() {
         call("GetDialogBaseUnits", &[]),
     ];
     let mut d = data();
-    put(&mut d, FACE, b"MS Sans Serif ");
+    put(&mut d, FACE, b"MS Sans Serif\0");
     put(&mut d, LETTERS, ALPHABET);
     let (cpu, at) = run("font_metrics", &d, &calls);
     let r = results(&cpu, at, calls.len());
@@ -1100,7 +1100,7 @@ fn a_dialog_in_ms_sans_serif_8_is_6_by_13_units() {
     for v in [0u16, 10, 10, 200, 100, 0, 0, 0, 8] {
         t.extend(v.to_le_bytes());
     }
-    for c in "MS Sans Serif ".encode_utf16() {
+    for c in "MS Sans Serif\0".encode_utf16() {
         t.extend(c.to_le_bytes());
     }
     put(&mut d, TEMPLATE, &t);
