@@ -404,18 +404,23 @@ mod tests {
         v.write((r as u32) << 2, data, !0, Now::default());
     }
 
-    /// A red triangle over pixel (1, 1) of the front buffer, which is
-    /// what the pixel is after it.
+    /// Draws a red triangle over pixel (1, 1) of the front buffer and
+    /// returns that pixel.
     fn red_triangle(v: &mut Voodoo) -> u16 {
-        reg(v, START_R, 255 << 12);
-        reg(v, START_G, 0);
-        reg(v, START_B, 0);
-        for (r, value) in [(VERTEX_AX, 0), (VERTEX_AY, 0), (VERTEX_BX, 16 << 4), (VERTEX_BY, 0)] {
+        for (r, value) in [
+            (START_R, 255 << 12),
+            (START_G, 0),
+            (START_B, 0),
+            (VERTEX_AX, 0),
+            (VERTEX_AY, 0),
+            (VERTEX_BX, 16 << 4),
+            (VERTEX_BY, 0),
+            (VERTEX_CX, 0),
+            (VERTEX_CY, 16 << 4),
+            (TRIANGLE_CMD, 0),
+        ] {
             reg(v, r, value);
         }
-        reg(v, VERTEX_CX, 0);
-        reg(v, VERTEX_CY, 16 << 4);
-        reg(v, TRIANGLE_CMD, 0);
         v.frame_buffer().get(640 + 1)
     }
 
@@ -433,6 +438,8 @@ mod tests {
         reg(&mut v, CHROMA_KEY, 0xA6A6A6);
         reg(&mut v, CHROMA_RANGE, 0x1FA6_A6A6);
         assert_eq!(red_triangle(&mut v), 0, "red is outside the range");
+        let chroma_fail = v.read((FBI_CHROMA_FAIL as u32) << 2, Now::default());
+        assert!(chroma_fail > 0, "the chroma test blocked the triangle");
         // The driver's reset after the test (sst1InitResetFbi).
         for data in [0x5E, 0x5A, 0x58] {
             reg(&mut v, FBI_INIT0, data);
