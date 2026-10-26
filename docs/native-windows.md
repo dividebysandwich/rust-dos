@@ -768,8 +768,15 @@ BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
 Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
 Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
 two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
-and Prairie Dog Hunt (VB2). The 16-bit setup programs, InstallShield's
-among them, are still to be tried.
+and Prairie Dog Hunt (VB2).
+
+Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
+the SimTower demo, and the InstallShield of the Lemmings demo. All three
+copy and expand their files. None of them can make its Program Manager
+group, because nothing answers the WM_DDE_INITIATE they send to PROGMAN
+(only DDEML conversations reach shell32's Program Manager): the Setup
+Toolkit asks whether to ignore that for each item and then finishes, and
+InstallShield stays running with no window once its files are in.
 
 Some choices in the earlier phases keep this phase from having to rework
 them:

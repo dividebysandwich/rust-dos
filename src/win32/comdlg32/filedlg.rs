@@ -936,8 +936,8 @@ pub fn scratch_text(cpu: &mut Cpu, c: &Ctx, at: u32, size: u32) -> String {
 
 /// Paint an owner-drawn entry of a list or a combo box, as the
 /// DRAWITEMSTRUCT at `lp` asks: its background, a small picture of its
-/// kind (0 a file, 1 a folder, 2 a drive) `indent` steps in, its text,
-/// and the focus.
+/// kind (0 a file, 1 a folder, 2 a drive, 3 an open folder) `indent`
+/// steps in, its text, and the focus.
 pub fn paint_item(
     cpu: &mut Cpu,
     hdc: u32,
@@ -967,6 +967,14 @@ pub fn paint_item(
             gfx::fill_rgb(cpu, hdc, Rect::sized(x, y + 2, 14, 10), 0x0000_FFFF);
             gfx::frame(cpu, hdc, Rect::sized(x, y + 2, 14, 10), black);
             gfx::frame(cpu, hdc, Rect::sized(x, y, 6, 3), black);
+        }
+        // An open folder: the same box with its front lowered.
+        3 => {
+            gfx::fill_rgb(cpu, hdc, Rect::sized(x, y + 2, 14, 10), 0x0000_FFFF);
+            gfx::frame(cpu, hdc, Rect::sized(x, y + 2, 14, 10), black);
+            gfx::frame(cpu, hdc, Rect::sized(x, y, 6, 3), black);
+            gfx::fill_rgb(cpu, hdc, Rect::sized(x + 2, y + 6, 14, 6), 0x0080_FFFF);
+            gfx::frame(cpu, hdc, Rect::sized(x + 2, y + 6, 14, 6), black);
         }
         // A drive: a gray box with a green light.
         2 => {

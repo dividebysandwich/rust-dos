@@ -545,10 +545,13 @@ pub(super) const P_GDI: u32 = 100;
 /// And from here on misc.rs's.
 pub(super) const P_MISC: u32 = 200;
 
+/// PeekMessage's flag that keeps the task from yielding.
+const PM_NOYIELD: u32 = 0x0002;
+
 /// A USER32 function a function of this module went on to returned
 /// `value`: the structures it filled converted to 16-bit ones, what it
 /// returned as 16-bit code gets it.
-pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<u32> {
+pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
     if d(0) >= P_MISC {
         return super::misc::post(cpu, value, data);
@@ -561,6 +564,15 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<
         P_PEEK => {
             if value != 0 {
                 message::msg16(cpu, d(1), d(2));
+            } else if d(3) & PM_NOYIELD == 0 {
+                // With no message, Windows 3.1's PeekMessage lets the
+                // other tasks run before it returns, so a task that waits
+                // in a PeekMessage loop for another to end lets it run.
+                let mut resume = *ctx;
+                thunk::set_ax(&mut resume, 0);
+                resume.gpr[thunk::EDX] &= 0xFFFF_0000;
+                super::task::yield_now(cpu, resume);
+                return None;
             }
         }
         P_PAINT => {
@@ -1505,7 +1517,7 @@ fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         m,
         "PeekMessageA",
         &[m, args[1], args[2], args[3], args[4]],
-        vec![P_PEEK, m, args[0]],
+        vec![P_PEEK, m, args[0], args[4]],
     )
 }
 
