@@ -680,6 +680,17 @@ dialogs never show. The W functions fail with
 ERROR_CALL_NOT_IMPLEMENTED, and FindTextA and ReplaceTextA make no
 window.
 
+WinHelpA (and Win16 WinHelp, which goes to it) opens a help viewer in
+place of WINHELP.EXE. It reads Windows 3.0 and 3.1 .HLP files with a
+parser ported from Wine's winhlp32 (user32/winhelp/hlpfile.rs), shows
+the contents topic or the one HELP_CONTEXT names, draws the text in its
+fonts with its pictures, and follows jumps and popups, with Contents,
+Back and the browse buttons. It has no Search, History window or
+bookmarks, runs no help macros, doesn't follow jumps into other help
+files, and lays tables out one cell after another. Save states leave the
+viewer out: one open when a state is saved is an empty window after
+loading.
+
 For setup programs, SHELL32 has shell links (CLSID_ShellLink with
 IShellLinkA and IPersistFile, reading and writing `.lnk` files as
 Windows does), SHFileOperationA, the special folders laid out as
