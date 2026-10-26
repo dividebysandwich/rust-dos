@@ -411,6 +411,8 @@ fn builtin_resource(name: &str) -> Resource {
         "OLE32" => [2, 10, 35, 35],
         "MSVCRT" => [6, 0, 8168, 0],
         "GLIDE2X" => [2, 46, 0, 0],
+        // DirectX 8.1's.
+        "D3D8" => [4, 8, 1, 881],
         _ => [4, 0, 0, 950],
     };
     let text = match version {

@@ -19,6 +19,7 @@ mod com;
 mod comctl32;
 mod comdlg32;
 mod convert;
+mod d3d8;
 mod ddraw;
 mod dinput;
 mod dmusic;
@@ -345,6 +346,7 @@ pub struct Win32 {
     /// and how many GUIDs CoCreateGuid made.
     ole: ole32::State,
     ddraw: ddraw::State,
+    d3d8: d3d8::State,
     dsound: dsound::State,
     dinput: dinput::State,
     winmm: winmm::State,
@@ -949,6 +951,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
     ole32::process_ended(cpu, process.id, &tids);
+    d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
     dsound::process_ended(cpu, process.id, &tids);
     dinput::process_ended(cpu, process.id, &tids);
@@ -1122,6 +1125,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.gdi = gdi32::State::default();
         cpu.bus.win32.ole = ole32::State::default();
         cpu.bus.win32.ddraw = ddraw::State::default();
+        cpu.bus.win32.d3d8 = d3d8::State::default();
         cpu.bus.win32.dsound = dsound::State::default();
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
@@ -1228,6 +1232,7 @@ crate::state_fields!(Win32 {
 
     ole,
     ddraw,
+    d3d8,
     dsound,
     dinput,
     winmm,

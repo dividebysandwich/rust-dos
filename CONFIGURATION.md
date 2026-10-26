@@ -401,30 +401,29 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   clients can call DOS with INT 21h in protected mode, with selectors
   for their buffers. Off, they run as they do on plain DOS with HIMEM. A
   change takes effect for the programs started after it.
-* `win32` turns on the built-in Windows: `true` or `false` (the
-  default). A Win32 program, a Windows 95 .EXE, then runs from the DOS
-  prompt in protected mode with paging, as Windows 95 runs it, and ends
-  back at the prompt. Its system DLLs are written into the emulator:
-  KERNEL32, ADVAPI32 and MSVCRT for heaps and virtual memory, files,
-  modules, threads, structured exceptions, child processes, the registry
-  and the C runtime; USER32 and GDI32 for windows, dialogs and drawing
-  on a 640x480 desktop in a VESA mode; DDRAW, DSOUND, DINPUT, WINMM and
-  OLE32 for DirectX 3 to 6 games: DirectDraw in full screen on the
-  card's VESA modes or in a window, DirectSound and wave audio in the
-  `windows` mixer channel, MIDI to the MPU-401's synthesizer, CD audio
-  and MIDI files through MCI, and the keyboard, mouse and joystick
-  through DirectInput; DMUSIC, DMIME, DMLOADER, DMSTYLE, DMBAND and
-  DMCOMPOS play DirectX 6.1's DirectMusic on the same synthesizer. A
-  program that calls a function they don't have ends with a message
-  naming it, and one that needs a DLL that is neither among them nor
-  beside it is refused. The registry is kept in `C:\REGISTRY.REG`, which
-  is made the first time a program uses it, so a host folder mounted as
-  C: gets that file. A Windows 3.1 program (an NE .EXE) runs too, as
-  Windows 95 runs it: its KERNEL, USER, GDI and other 16-bit modules
-  are written into the emulator as well and go on to the 32-bit ones,
-  and its own DLLs, such as Visual Basic's runtimes, load from beside
-  it. Off, such a program runs its DOS stub, which says it needs
-  Windows. The plan is in
+* `win32` turns on the built-in Windows: `true` or `false` (the default). A
+  Win32 program, a Windows 95 .EXE, then runs from the DOS prompt in
+  protected mode with paging, as Windows 95 runs it, and ends back at the
+  prompt. Its system DLLs are written into the emulator: KERNEL32, ADVAPI32
+  and MSVCRT for heaps and virtual memory, files, modules, threads,
+  structured exceptions, child processes, the registry and the C runtime;
+  USER32 and GDI32 for windows, dialogs and drawing on a 640x480 desktop in
+  a VESA mode; DDRAW, DSOUND, DINPUT, WINMM and OLE32 for DirectX 3 to 6
+  games: DirectDraw in full screen on the card's VESA modes or in a window,
+  DirectSound and wave audio in the `windows` mixer channel, MIDI to the
+  MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
+  keyboard, mouse and joystick through DirectInput; DMUSIC, DMIME, DMLOADER,
+  DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
+  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3. A
+  program that calls a function they don't have ends with a message naming
+  it, and one that needs a DLL that is neither among them nor beside it is
+  refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
+  first time a program uses it, so a host folder mounted as C: gets that
+  file. A Windows 3.1 program (an NE .EXE) runs too, as Windows 95 runs it:
+  its KERNEL, USER, GDI and other 16-bit modules are written into the
+  emulator as well and go on to the 32-bit ones, and its own DLLs, such as
+  Visual Basic's runtimes, load from beside it. Off, such a program runs its
+  DOS stub, which says it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
