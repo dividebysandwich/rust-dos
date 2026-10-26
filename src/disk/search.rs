@@ -158,6 +158,11 @@ impl DiskController {
         if let Some(attr) = self.system_attribute(filename) {
             return Ok(attr);
         }
+        // A file in a system directory the drive hasn't is not found
+        // (02h), on a disk image as on the host.
+        if self.in_system_dir(filename) {
+            return Err(0x02);
+        }
         if let Some((_, drive, path)) = self.locate_in_memory(filename) {
             let files = drive.tree().ok_or(0x03u8)?;
             return match files.file(&path) {
@@ -197,6 +202,11 @@ impl DiskController {
     pub fn set_file_attribute(&self, filename: &str, attr: u16) -> Result<(), u8> {
         if self.is_system_entry(filename) {
             return Err(0x05);
+        }
+        // A file in a system directory the drive hasn't is not found
+        // (02h), on a disk image as on the host.
+        if self.in_system_dir(filename) {
+            return Err(0x02);
         }
         if let Some((drive, volume, parts)) = self.locate_fat(filename) {
             let parts = refs(&parts);
