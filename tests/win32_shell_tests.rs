@@ -265,7 +265,9 @@ fn program_manager_makes_a_group_through_ddeml() {
     const APPCMD_CLIENTONLY: i32 = 0x10;
     const CP_WINANSI: i32 = 1004;
     const XTYP_EXECUTE: i32 = 0x4050;
-    let command = b"[CreateGroup(Games)][AddItem(C:\\T.EXE,Test)]\0";
+    // The second item's program has a space in its path and no quotes.
+    let command =
+        b"[CreateGroup(Games)][AddItem(C:\\T.EXE,Test)][AddItem(C:\\SUB DIR\\G.EXE -x,Game)]\0";
     let mut data = vec![0u8; 0x100];
     // 0x00: the instance, 0x04: the result.
     put(&mut data, 0x10, b"PROGMAN\0");
@@ -332,11 +334,20 @@ fn program_manager_makes_a_group_through_ddeml() {
     });
     for core in CORES {
         let mut cpu = machine("progman", core, &[("T.EXE", code.clone())]);
+        let dir = scratch_path("progman").join("SUB DIR");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("G.EXE"), b"x").unwrap();
         run_to_exit(&mut cpu);
         assert_eq!(cpu.errorlevel, 7, "{core:?}: {}", printed(&cpu));
         let item = "WINDOWS\\Start Menu\\Programs\\Games\\Test.lnk";
         let link = fs::read(host_file("progman", item).expect(item)).unwrap();
         assert_eq!(&link[..4], &[0x4C, 0, 0, 0], "{core:?}");
+        // The program is the whole path, "-x" its argument.
+        let item = "WINDOWS\\Start Menu\\Programs\\Games\\Game.lnk";
+        let link = fs::read(host_file("progman", item).expect(item)).unwrap();
+        let text = String::from_utf8_lossy(&link);
+        assert!(text.contains("C:\\SUB DIR\\G.EXE"), "{core:?}: {text:?}");
+        assert!(!text.contains("DIR\\G.EXE -x"), "{core:?}: {text:?}");
     }
 }
 
