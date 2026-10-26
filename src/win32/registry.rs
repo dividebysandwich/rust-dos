@@ -86,6 +86,11 @@ const SEED: &str = r#"REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall]
 
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Setup]
+"BootDir"="C:\\"
+"WinDir"="C:\\WINDOWS"
+"SysDir"="C:\\WINDOWS\\SYSTEM"
+
 [HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\ComputerName\ComputerName]
 "ComputerName"="RUSTDOS"
 
@@ -732,6 +737,21 @@ mod tests {
         let value = registry.value(key, "versionnumber").unwrap();
         assert_eq!(value.data, b"4.00.950\0");
         assert!(registry.find(USERS, ".Default\\Software").is_some());
+    }
+
+    #[test]
+    fn the_seed_says_where_windows_is() {
+        let registry = Registry::seeded(None, Win95);
+        let key = registry
+            .find(
+                LOCAL_MACHINE,
+                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Setup",
+            )
+            .unwrap();
+        let value = |name| registry.value(key, name).unwrap().data.clone();
+        assert_eq!(value("WinDir"), b"C:\\WINDOWS\0");
+        assert_eq!(value("SysDir"), b"C:\\WINDOWS\\SYSTEM\0");
+        assert_eq!(value("BootDir"), b"C:\\\0");
     }
 
     #[test]
