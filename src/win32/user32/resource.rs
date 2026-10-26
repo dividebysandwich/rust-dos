@@ -56,10 +56,11 @@ pub struct Icon {
     pub mask: u32,
     pub color: u32,
     /// Loaded as a shared resource (LoadIconA, LR_SHARED): it stays, and
-    /// DestroyIcon leaves it. The module and name it came from.
+    /// DestroyIcon leaves it. The module it came from, and the name as
+    /// name_key gives it.
     pub shared: bool,
     pub module: u32,
-    pub name: u32,
+    pub name: String,
     /// The process that made it, or 0 for the system's.
     pub pid: u32,
 }
@@ -320,9 +321,10 @@ pub fn system_cursor(cpu: &mut Cpu, id: u32) -> u32 {
 }
 
 fn system_image(cpu: &mut Cpu, id: u32, cursor: bool) -> u32 {
+    let key = format!("#{id}");
     let found = user(cpu).icons.iter().position(|i| {
         i.as_ref()
-            .is_some_and(|i| i.module == 0 && i.name == id && i.cursor == cursor && i.shared)
+            .is_some_and(|i| i.module == 0 && i.name == key && i.cursor == cursor && i.shared)
     });
     if let Some(i) = found {
         return ICON_BASE + STEP * i as u32;
@@ -343,7 +345,7 @@ fn system_image(cpu: &mut Cpu, id: u32, cursor: bool) -> u32 {
     }
     ic.cursor = cursor;
     ic.shared = true;
-    ic.name = id;
+    ic.name = key;
     ic.pid = 0;
     add_icon(cpu, ic)
 }
@@ -546,10 +548,11 @@ fn load_from_module(
     flags: u32,
 ) -> Option<u32> {
     let shared = flags & LR_SHARED != 0;
+    let key = name_key(cpu, name);
     if shared {
         let found = user(cpu).icons.iter().position(|i| {
             i.as_ref().is_some_and(|i| {
-                i.shared && i.module == module && i.name == name && i.cursor != is_icon
+                i.shared && i.module == module && i.name == key && i.cursor != is_icon
             })
         });
         if let Some(i) = found {
@@ -586,14 +589,21 @@ fn load_from_module(
     };
     ic.shared = shared;
     ic.module = module;
-    ic.name = name;
+    ic.name = key;
     Some(add_icon(cpu, ic))
 }
 
-/// A resource name kept to find a shared icon by: a number, or a string
-/// kept by its address.
-fn name_key(name: u32) -> u32 {
-    name
+/// A resource name as a shared icon keeps it to be found by: "#123" for
+/// a number, given as one or as that string, and a string in capitals
+/// otherwise, as resource names are compared without case. Not the
+/// string's address, which a caller may reuse for the next name, as the
+/// 16-bit CREATESTRUCT conversion does for each SS_ICON static.
+fn name_key(cpu: &mut Cpu, name: u32) -> String {
+    match super::Name::read(cpu, name) {
+        Some(super::Name::Id(id)) => format!("#{id}"),
+        Some(super::Name::Text(text)) => text.to_ascii_uppercase(),
+        None => String::new(),
+    }
 }
 
 /// LoadIconA(module, name).
@@ -607,7 +617,7 @@ pub fn load_icon(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_RESOURCE_NAME_NOT_FOUND);
         return Some(0);
     }
-    load_from_module(cpu, module, name_key(name), true, 0, 0, LR_SHARED)
+    load_from_module(cpu, module, name, true, 0, 0, LR_SHARED)
 }
 
 /// LoadCursorA(module, name).
@@ -621,7 +631,7 @@ pub fn load_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_RESOURCE_NAME_NOT_FOUND);
         return Some(0);
     }
-    load_from_module(cpu, module, name_key(name), false, 0, 0, LR_SHARED)
+    load_from_module(cpu, module, name, false, 0, 0, LR_SHARED)
 }
 
 /// The bits of the packed DIB at `at` (its header and color table
@@ -795,7 +805,7 @@ pub fn load_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     load_cursor(cpu, &[0, name])
                 };
             }
-            load_from_module(cpu, module, name_key(name), is_icon, cx, cy, flags)
+            load_from_module(cpu, module, name, is_icon, cx, cy, flags)
         }
         _ => {
             set_error(cpu, ERROR_INVALID_PARAMETER);
@@ -1345,5 +1355,23 @@ mod tests {
             cpu.bus.write_8(dir as usize + i, *b);
         }
         assert_eq!(best_entry(&mut cpu, dir, true, 32, 32, 0), Some(5));
+    }
+
+    /// A shared icon is found by the name the string holds, so a string
+    /// rewritten in place names another icon, and "#5" names icon 5.
+    #[test]
+    fn shared_icons_are_found_by_the_names_text() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let at = 0x1_0000;
+        let key = |cpu: &mut Cpu, text: &str| {
+            for (i, b) in text.bytes().chain([0]).enumerate() {
+                cpu.bus.write_8(at as usize + i, b);
+            }
+            name_key(cpu, at)
+        };
+        assert_eq!(key(&mut cpu, "#253"), "#253");
+        assert_eq!(key(&mut cpu, "#323"), "#323");
+        assert_eq!(key(&mut cpu, "Hero"), key(&mut cpu, "HERO"));
+        assert_eq!(name_key(&mut cpu, 5), key(&mut cpu, "#5"));
     }
 }
