@@ -85,8 +85,7 @@ fn disk_path(cpu: &mut Cpu, value: Option<&str>, default: &str) -> String {
     if let Some(v) = registry.value(key, value)
         && v.kind == REG_SZ
     {
-        let end = v.data.iter().position(|&b| b == 0).unwrap_or(v.data.len());
-        let path = crate::dosstr::from_bytes(&v.data[..end]);
+        let path = v.text();
         if !path.is_empty() {
             return path;
         }
@@ -98,7 +97,16 @@ fn disk_path(cpu: &mut Cpu, value: Option<&str>, default: &str) -> String {
 }
 
 /// Make the directory `path` and those it is in, where they aren't.
+/// Only a full path ("C:\...") is made: a path from the registry can be
+/// anything a program wrote there.
 pub fn make_directories(cpu: &mut Cpu, path: &str) {
+    let b = path.as_bytes();
+    if b.len() <= 3 || b[1] != b':' || b[2] != b'\\' {
+        return;
+    }
+    if crate::win32::kernel32::files::attributes(cpu, path).is_ok() {
+        return;
+    }
     let mut at = 3;
     while at <= path.len() {
         let end = path[at..].find('\\').map_or(path.len(), |i| at + i);

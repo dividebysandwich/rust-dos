@@ -132,6 +132,14 @@ pub struct Value {
     pub data: Vec<u8>,
 }
 
+impl Value {
+    /// The string the data holds, up to its first zero.
+    pub fn text(&self) -> String {
+        let end = self.data.iter().position(|&b| b == 0);
+        crate::dosstr::from_bytes(&self.data[..end.unwrap_or(self.data.len())])
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Key {
     pub name: String,
@@ -293,8 +301,10 @@ impl Registry {
         self.dirty = true;
     }
 
-    /// Whether `key` is a user's Shell Folders key, whose values are the
-    /// paths of the special folders (shell32/folders.rs).
+    /// Whether `key` is a Shell Folders key under Explorer (the user's,
+    /// or the one under HKEY_LOCAL_MACHINE for the folders all users
+    /// share), whose values are the paths of the special folders
+    /// (shell32/folders.rs).
     pub fn is_shell_folders(&self, key: u32) -> bool {
         let k = self.key(key);
         k.name.eq_ignore_ascii_case("Shell Folders")
@@ -665,9 +675,7 @@ pub fn string_value(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> Option<
         return None;
     };
     let key = registry.find(root, path)?;
-    let data = &registry.value(key, name)?.data;
-    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    Some(crate::dosstr::from_bytes(&data[..end]))
+    Some(registry.value(key, name)?.text())
 }
 
 /// Whether the key `path` is under the predefined key `hkey`.
@@ -763,6 +771,20 @@ mod tests {
             .unwrap();
         assert_eq!(registry.value(dx, "Version").unwrap().data, b"4.06.03.0518\0");
         assert!(registry.value(dx, "InstalledVersion").is_none());
+    }
+
+    #[test]
+    fn shell_folders_is_known_by_its_name_under_explorer() {
+        let mut registry = Registry::seeded(None, Win95);
+        let explorer = ".Default\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
+        let parent = registry.find(USERS, explorer).unwrap();
+        let key = registry.find(parent, "Shell Folders").unwrap();
+        assert!(registry.is_shell_folders(key));
+        assert!(!registry.is_shell_folders(parent));
+        let (other, _) = registry.create(USERS, ".Default\\Software\\Shell Folders");
+        assert!(!registry.is_shell_folders(other));
+        let value = registry.value(key, "Start Menu").unwrap();
+        assert_eq!(value.text(), "C:\\WINDOWS\\Start Menu");
     }
 
     #[test]
