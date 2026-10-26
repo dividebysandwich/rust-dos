@@ -988,11 +988,7 @@ pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
         }
     };
     // MSIMG32.DLL came with Windows 98.
-    let version = if win32.processes.is_empty() {
-        win32.version
-    } else {
-        win32.os
-    };
+    let version = super::version::shown(win32);
     found
         .filter(|&i| stubs::DLLS[i].name != super::glide::DLL.name || bus.voodoo.is_some())
         .filter(|&i| {

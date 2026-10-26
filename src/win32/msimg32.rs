@@ -85,12 +85,17 @@ struct Source {
     bk_color: u32,
 }
 
-/// Load the source rectangle (`x0`, `y0`)-(`x1`, `y1`) of `hsrc`, in
-/// its device coordinates. None when it runs backwards or isn't all on
-/// the surface, which Windows 98 fails without an error.
-fn load_source(cpu: &mut Cpu, hsrc: u32, sdc: &Dc, r: (i32, i32, i32, i32)) -> Option<Source> {
+/// Load the source rectangle (`x0`, `y0`)-(`x1`, `y1`) of the source DC
+/// `sdc`, which draws on `place`, in its device coordinates. None when
+/// it runs backwards or isn't all on the surface, which Windows 98 fails
+/// without an error.
+fn load_source(
+    cpu: &mut Cpu,
+    place: &dc::Place,
+    sdc: &Dc,
+    r: (i32, i32, i32, i32),
+) -> Option<Source> {
     let (x0, y0, x1, y1) = r;
-    let place = dc::place(cpu, hsrc)?;
     let (width, height, _) = surface::dimensions(cpu, place.target)?;
     let (ox, oy) = place.origin;
     let (x0, y0, x1, y1) = (x0 + ox, y0 + oy, x1 + ox, y1 + oy);
@@ -194,7 +199,7 @@ fn blend(s: u32, d: u32, sca: u32, per_pixel: bool) -> u32 {
     s.wrapping_add(scale(d, 255 - a))
 }
 
-// D3D's BLENDFUNCTION, as the program passes it in a doubleword.
+// GDI's BLENDFUNCTION, as the program passes it in a doubleword.
 const AC_SRC_OVER: u32 = 0;
 const AC_SRC_ALPHA: u32 = 1;
 
@@ -234,7 +239,10 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(sdc) = gdi(cpu).dc(hsrc).cloned() else {
         return Some(FALSE);
     };
-    let Some(src) = load_source(cpu, hsrc, &sdc, device_rect(&sdc, xs, ys, ws, hs)) else {
+    let Some(place) = dc::place(cpu, hsrc) else {
+        return Some(FALSE);
+    };
+    let Some(src) = load_source(cpu, &place, &sdc, device_rect(&sdc, xs, ys, ws, hs)) else {
         return Some(FALSE);
     };
     let per_pixel = format & AC_SRC_ALPHA != 0;
@@ -252,6 +260,8 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (ox, oy) = c.origin;
     let (sx0, sy0, sx1, sy1) = src.rect;
     let area = Rect::new(r.0, r.1, r.2, r.3).offset(ox, oy);
+    // A palette's nearest colors, which are a search.
+    let mut nearest = std::collections::HashMap::new();
     for clip in c.rects.clone() {
         let a = clip.intersect(&area);
         for py in a.top..a.bottom {
@@ -261,9 +271,15 @@ fn alpha_blend(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let s = argb(&src.surface, src.surface.get(sx, sy));
                 let d = argb(&c.surface, c.surface.get(px, py));
                 let v = blend(s, d, sca, per_pixel);
-                c.surface.put(px, py, value(&c.surface, v));
+                let out = if c.surface.bpp <= 8 {
+                    *nearest.entry(v).or_insert_with(|| value(&c.surface, v))
+                } else {
+                    value(&c.surface, v)
+                };
+                c.surface.put(px, py, out);
             }
         }
+        c.drew(a);
     }
     c.close(cpu);
     Some(TRUE)
@@ -307,7 +323,7 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
-    let Some(src) = load_source(cpu, hsrc, &sdc, sr) else {
+    let Some(src) = load_source(cpu, &place, &sdc, sr) else {
         return Some(FALSE);
     };
     let r = device_rect(&ddc, x, y, w, h);
@@ -338,6 +354,7 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 c.surface.put(px, py, out);
             }
         }
+        c.drew(a);
     }
     c.close(cpu);
     Some(TRUE)
@@ -362,8 +379,14 @@ const BAYER: [[i64; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15,
 /// The pixel value of the 16-bit color `c` (red, green, blue, alpha) on
 /// `s` at surface pixel (`x`, `y`): 32-bit pixels take its top 8 bits
 /// and alpha too, 16-bit ones are dithered, palette ones take the
-/// nearest color.
-fn gradient_value(s: &Surface, c: [i64; 4], x: i32, y: i32) -> u32 {
+/// nearest color, which `nearest` keeps.
+fn gradient_value(
+    s: &Surface,
+    c: [i64; 4],
+    x: i32,
+    y: i32,
+    nearest: &mut std::collections::HashMap<u32, u32>,
+) -> u32 {
     let [r, g, b, a] = c.map(|v| (v >> 8).clamp(0, 255) as u32);
     if has_alpha(s) {
         return a << 24 | r << 16 | g << 8 | b;
@@ -386,7 +409,11 @@ fn gradient_value(s: &Surface, c: [i64; 4], x: i32, y: i32) -> u32 {
         };
         return channel(c[0], s.masks[0]) | channel(c[1], s.masks[1]) | channel(c[2], s.masks[2]);
     }
-    s.value_of(r | g << 8 | b << 16)
+    let color = r | g << 8 | b << 16;
+    if s.bpp > 8 {
+        return s.value_of(color);
+    }
+    *nearest.entry(color).or_insert_with(|| s.value_of(color))
 }
 
 /// The vertices of the mesh's element: the indices, as many as it has.
@@ -485,6 +512,7 @@ fn rectangle(cpu: &mut Cpu, hdc: u32, v: [Vertex; 2], vertical: bool) {
     } else {
         r.right - r.left
     } as i64;
+    let mut nearest = std::collections::HashMap::new();
     for clip in c.rects.clone() {
         let ar = clip.intersect(&area);
         for py in ar.top..ar.bottom {
@@ -496,10 +524,11 @@ fn rectangle(cpu: &mut Cpu, hdc: u32, v: [Vertex; 2], vertical: bool) {
                 } as i64;
                 let color: [i64; 4] =
                     std::array::from_fn(|i| (a.c[i] * (len - pos) + b.c[i] * pos) / len);
-                let value = gradient_value(&c.surface, color, px, py);
+                let value = gradient_value(&c.surface, color, px, py, &mut nearest);
                 c.surface.put(px, py, value);
             }
         }
+        c.drew(ar);
     }
     c.close(cpu);
 }
@@ -524,8 +553,8 @@ fn triangle(cpu: &mut Cpu, hdc: u32, mut v: [Vertex; 3]) -> bool {
     if v[0].y == v[2].y {
         return true;
     }
-    let det = ((v[2].y - v[1].y) as i64 * (v[2].x - v[0].x) as i64)
-        - ((v[2].x - v[1].x) as i64 * (v[2].y - v[0].y) as i64);
+    let [(x0, y0), (x1, y1), (x2, y2)] = v.map(|p| (p.x as i64, p.y as i64));
+    let det = (y2 - y1) * (x2 - x0) - (x2 - x1) * (y2 - y0);
     if det == 0 {
         return false;
     }
@@ -538,29 +567,39 @@ fn triangle(cpu: &mut Cpu, hdc: u32, mut v: [Vertex; 3]) -> bool {
         return true;
     };
     let (ox, oy) = c.origin;
+    // Only the rows and columns the clip region has, in device
+    // coordinates: a triangle may run far past the surface.
+    let clip = c
+        .rects
+        .iter()
+        .fold(Rect::default(), |a, q| a.union(q))
+        .offset(-ox, -oy)
+        .intersect(&r);
     let p = |q: &Vertex| (q.x, q.y);
-    for y in r.top..r.bottom {
-        let x1 = if y < v[1].y {
+    let mut nearest = std::collections::HashMap::new();
+    for y in clip.top..clip.bottom {
+        let e1 = if y < v[1].y {
             edge_x(y, p(&v[0]), p(&v[1]))
         } else {
             edge_x(y, p(&v[1]), p(&v[2]))
         };
-        let x2 = edge_x(y, p(&v[0]), p(&v[2]));
-        let (from, to) = (x1.min(x2).max(r.left), x1.max(x2).min(r.right));
+        let e2 = edge_x(y, p(&v[0]), p(&v[2]));
+        let (from, to) = (e1.min(e2).max(clip.left), e1.max(e2).min(clip.right));
         for x in from..to {
             let (px, py) = (x + ox, y + oy);
             if !c.visible(px, py) {
                 continue;
             }
-            let (dx, dy) = ((x - v[2].x) as i64, (y - v[2].y) as i64);
-            let l1 = (v[1].y - v[2].y) as i64 * dx - (v[1].x - v[2].x) as i64 * dy;
-            let l2 = (v[2].y - v[0].y) as i64 * dx - (v[2].x - v[0].x) as i64 * dy;
+            let (dx, dy) = (x as i64 - x2, y as i64 - y2);
+            let l1 = (y1 - y2) * dx - (x1 - x2) * dy;
+            let l2 = (y2 - y0) * dx - (x2 - x0) * dy;
             let color: [i64; 4] = std::array::from_fn(|i| {
                 (v[0].c[i] * l1 + v[1].c[i] * l2 + v[2].c[i] * (det - l1 - l2)) / det
             });
-            let value = gradient_value(&c.surface, color, px, py);
+            let value = gradient_value(&c.surface, color, px, py, &mut nearest);
             c.surface.put(px, py, value);
         }
+        c.drew(Rect::new(from + ox, y + oy, to + ox, y + oy + 1));
     }
     c.close(cpu);
     true

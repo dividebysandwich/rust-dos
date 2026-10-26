@@ -65,7 +65,7 @@ fn name(cpu: &mut Cpu, at: u32) -> Option<Name> {
             Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
                 digits.parse().ok().and_then(integer)
             }
-            _ if text.is_empty() || text.len() > LONGEST => None,
+            _ if text.is_empty() || crate::dosstr::to_bytes(&text).len() > LONGEST => None,
             _ => Some(Name::Text(text)),
         }
     };
