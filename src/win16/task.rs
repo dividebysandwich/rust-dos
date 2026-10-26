@@ -451,9 +451,11 @@ fn write_tdb(
         tail.insert(0, b' ');
     }
     tail.truncate(0x7E);
+    // Windows 95 ends a command tail with a NUL, as WinMain's command
+    // line needs, and only an empty one with DOS's carriage return.
     let mut line = vec![tail.len() as u8];
     line.extend_from_slice(&tail);
-    line.push(0x0D);
+    line.push(if tail.is_empty() { 0x0D } else { 0 });
     super::poke(cpu, pdb + 0x80, &line);
 }
 
@@ -580,7 +582,8 @@ pub fn init_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     if heap != 0 {
         super::local::init(cpu, ds, 0, heap);
     }
-    // The command line, past its blanks.
+    // The command line, past its blanks. An empty one is the tail's
+    // length byte, 0, as an empty string, where Windows 95 points.
     let pdb = super::lin(cpu, task.psp, 0);
     let len = super::peek(cpu, pdb + 0x80, 1).map_or(0, |b| b[0]);
     let tail = super::peek(cpu, pdb + 0x81, len as usize).unwrap_or_default();
@@ -589,7 +592,7 @@ pub fn init_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         .take_while(|&&b| b == b' ' || b == b'\t')
         .count();
     cpu.set_ax(1);
-    cpu.set_bx(0x81 + blanks as u16);
+    cpu.set_bx(if len == 0 { 0x80 } else { 0x81 + blanks as u16 });
     cpu.set_cx(stacktop);
     cpu.set_dx(task.show);
     let prev = super::read_16(cpu, super::lin(cpu, task.handle, 0x0E));

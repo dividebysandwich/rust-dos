@@ -24,6 +24,8 @@
 static const char *winetest_file;
 static int winetest_line;
 static const char *winetest_name;
+/* WinMain's command line, which KERNEL's tests look at. */
+static LPSTR winetest_cmdline;
 /* Longs: a test file's checks can be more than an int counts. */
 static long winetest_successes;
 static long winetest_failures;
@@ -132,7 +134,8 @@ static void winetest_skip(const char *msg, ...)
                        LPSTR line, int show)                                \
     {                                                                       \
         winetest_name = #name;                                              \
-        func_##name();                                                      \
+        winetest_cmdline = line;                                            \
+        func_##name();                                                    \
         winetest_printf("%s: %ld tests executed (%ld marked as todo, "      \
                         "%ld failures), %ld skipped.\r\n",                  \
                         winetest_name,                                      \

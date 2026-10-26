@@ -12,8 +12,8 @@
  * GetModuleHandle, GetModuleUsage, GetProcAddress by name and by
  * ordinal on KERNEL, USER and GDI, GetVersion, GetWinFlags,
  * GetCurrentTask and GetCurrentPDB, KERNEL's and USER's string
- * functions (lstrcpy and the others, AnsiUpper and the others), and
- * Catch and Throw.
+ * functions (lstrcpy and the others, AnsiUpper and the others), Catch
+ * and Throw, and WinMain's command line.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -424,6 +424,15 @@ static void test_catch_throw(void)
     ok(ret == -1 && passes == 2, "Catch returned %d on pass %d\n", ret, passes);
 }
 
+/* The command line of a program started without one is an empty
+ * string, without the carriage return that ends the PSP's command tail
+ * (added for Win16). */
+static void test_command_line(void)
+{
+    ok(lstrlen(winetest_cmdline) == 0, "command line of %d characters\n",
+       lstrlen(winetest_cmdline));
+}
+
 START_TEST(module)
 {
     this_instance = get_instance();
@@ -435,4 +444,5 @@ START_TEST(module)
     test_task();
     test_strings();
     test_catch_throw();
+    test_command_line();
 }

@@ -44,7 +44,7 @@ kernel/file: failed file.c:447
 kernel/file: failed file.c:449
 kernel/file: failed file.c:466
 kernel/file: failed file.c:472
-kernel/module: module: 140 tests executed (0 marked as todo, 0 failures), 0 skipped.
+kernel/module: module: 141 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/profile: profile: 153 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user/class: class: 205 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user/dialog: dialog: 112 tests executed (0 marked as todo, 0 failures), 0 skipped.
