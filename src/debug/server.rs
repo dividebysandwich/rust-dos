@@ -120,6 +120,8 @@ fn router(state: AppState) -> Router {
         .route("/api/awe32", get(awe32))
         .route("/api/exceptions", get(exceptions))
         .route("/api/win32", get(win32))
+        .route("/api/win32/ddraw", get(win32_ddraw))
+        .route("/api/win32/ddraw/surface/{id}", get(win32_surface))
         .route("/ws/trace", get(ws_trace))
         .route("/ws/events", get(ws_events))
         .route("/ws/screen", get(ws_screen))
@@ -881,7 +883,12 @@ async fn screenshot(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> 
     let (Reply::Frame(frame), meta) = s.call(Cmd::Screenshot, DEFAULT_TIMEOUT).await? else {
         return Err(unexpected());
     };
-    let response = match q.format.as_deref().unwrap_or("png") {
+    Ok(with_meta(frame_response(frame, q.format.as_deref()).await?, &meta))
+}
+
+/// A picture as a PNG, or with `format=raw` as RGB24 rows.
+async fn frame_response(frame: video::Frame, format: Option<&str>) -> Result<Response, ApiError> {
+    Ok(match format.unwrap_or("png") {
         "png" => {
             let png = tokio::task::spawn_blocking(move || encode_png(&frame))
                 .await
@@ -901,8 +908,7 @@ async fn screenshot(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> 
         )
             .into_response(),
         f => return Err(bad(format!("unknown format '{}' (png, raw)", f))),
-    };
-    Ok(with_meta(response, &meta))
+    })
 }
 
 async fn screen_text(State(s): State<AppState>, Query(q): Query<FormatQuery>) -> ApiResult {
@@ -1693,6 +1699,27 @@ async fn win32(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Win32, DEFAULT_TIMEOUT).await
 }
 
+async fn win32_ddraw(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Win32Ddraw, DEFAULT_TIMEOUT).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SurfaceQuery {
+    /// `png` (the default) or `raw`.
+    format: Option<String>,
+    /// Make the pixels the source blit key matches transparent.
+    keyed: Option<bool>,
+}
+
+async fn win32_surface(State(s): State<AppState>, Path(id): Path<u32>, Query(q): Query<SurfaceQuery>) -> ApiResult {
+    let cmd = Cmd::Win32Surface { id, keyed: q.keyed.unwrap_or(false) };
+    let (Reply::Frame(frame), meta) = s.call(cmd, DEFAULT_TIMEOUT).await? else {
+        return Err(unexpected());
+    };
+    Ok(with_meta(frame_response(frame, q.format.as_deref()).await?, &meta))
+}
+
 // ---------------------------------------------------------------------------
 // WebSockets
 // ---------------------------------------------------------------------------
@@ -2262,6 +2289,13 @@ BUILT-IN WINDOWS
                              threads (state, wait objects and timeout, CS:EIP, ESP,
                              TIB, last error, priority, suspend count) and its handles
                              (object kind, state, name, reference count)
+  GET  /api/win32/ddraw      DirectDraw's display mode and surfaces: interfaces (the
+                             addresses the log shows), size, pixel format, caps,
+                             memory, lock, color keys, palette, clipper, attached
+  GET  /api/win32/ddraw/surface/{id}
+                             a surface's pixels as PNG (?format=raw: RGB24);
+                             ?keyed=true makes what its source blit key matches
+                             transparent
 
 MEMORY HEATMAP
   GET  /api/heat             the address ranges written in about the last second, while
