@@ -562,6 +562,8 @@ static APIS: &[Api] = &[
     // 16-bit procedures.
     stdcall("Win16Return", 950, 0, crate::win16::thunk::win16_return),
     stdcall("Win16Thunk", 951, 0, crate::win16::thunk::thunk32_trap),
+    stdcall("GetVolumeInformationA", 915, 8, disk::get_volume_information),
+    stdcall("GetVolumeInformationW", 916, 8, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
