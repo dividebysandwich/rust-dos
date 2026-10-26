@@ -13,6 +13,10 @@
 //! the built-in DLLs, which their export tables have only under 98, so
 //! GetProcAddress doesn't find them under 95 and a program that imports
 //! one doesn't load, as on Windows 95.
+//!
+//! The desktop's depth, the `win32_depth` setting, is read at the same
+//! time and kept the same way: the adapter's own, or 8 bits a pixel with
+//! a system palette (`palette_desktop`).
 
 use crate::cpu::Cpu;
 
