@@ -212,16 +212,9 @@ fn read_mouse(cpu: &mut Cpu) {
 /// one that isn't there), and its buttons held, bit n for button n.
 pub fn joystick_raw(cpu: &Cpu, index: u32) -> (Vec<u32>, u32) {
     let port = &cpu.bus.joystick;
-    let counts = port.bios_axes(&cpu.bus.mouse).map(u32::from);
-    let held = !(port.bios_switches(&cpu.bus.mouse) as u32 >> 4) & 0xF;
-    let sticks = port.joysticks();
-    let (axes, buttons) = sticks.get(index as usize).copied().unwrap_or((2, 2));
-    if sticks.len() == 2 && index == 1 {
-        // The second of two takes the port's second half.
-        return (counts[2..4].to_vec(), held >> 2 & 3);
-    }
-    let axes = (axes as usize).min(4);
-    (counts[..axes].to_vec(), held & ((1 << buttons) - 1))
+    let index = index as usize;
+    port.joystick(&cpu.bus.mouse, index)
+        .unwrap_or_else(|| (vec![0; port.shape(index).0 as usize], 0))
 }
 
 /// The acquired joysticks whose axes or buttons changed: their buffered
