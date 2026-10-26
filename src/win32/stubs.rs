@@ -113,6 +113,8 @@ pub static DLLS: &[&Dll] = &[
     &super::winspool::DLL,
     &super::mpr::DLL,
     &super::d3d8::DLL,
+    &super::imagehlp::DLL,
+    &super::ws2_32::DLL,
 ];
 
 /// Bytes each function's stub takes.

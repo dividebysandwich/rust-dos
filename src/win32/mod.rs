@@ -28,6 +28,7 @@ mod dsound;
 pub mod gdi32;
 mod glide;
 pub(crate) mod heap;
+mod imagehlp;
 pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
@@ -55,6 +56,7 @@ pub mod version;
 mod verdll;
 mod winmm;
 mod winspool;
+mod ws2_32;
 mod wsock32;
 
 pub use snapshot::snapshot;
@@ -233,6 +235,8 @@ pub struct Process {
     /// time one of its threads looks for input with none there, which
     /// WaitForInputIdle and WinExec wait for, as in Wine.
     idle_event: Option<u32>,
+    /// Its IMAGEHLP options.
+    imagehlp: imagehlp::State,
 }
 
 impl Process {
@@ -1205,6 +1209,7 @@ crate::state_fields!(Process {
     exiting,
     lz_files,
     idle_event,
+    imagehlp,
 });
 crate::state_fields!(Win32 {
     pending,
