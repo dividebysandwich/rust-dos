@@ -24,6 +24,7 @@ mod handles;
 mod kernel;
 mod ldt;
 mod local;
+mod lz;
 mod message;
 mod misc;
 mod module;
@@ -105,6 +106,8 @@ pub struct State {
     /// buffer's 16:16 and flat addresses, and the handle of the global
     /// block it is, or 0 if it is the program's.
     pub mmio_buffers: Vec<[u32; 4]>,
+    /// The compressed files LZEXPAND's LZInit opened (lz.rs).
+    pub lz_files: Vec<crate::win32::kernel32::lz::LzFile>,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -533,7 +536,8 @@ crate::state_fields!(State {
     dpmi_blocks,
     missing,
     class_menus,
-    mmio_buffers
+    mmio_buffers,
+    lz_files
 });
 crate::state_fields!(Module16 {
     name,

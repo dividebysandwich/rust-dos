@@ -20,7 +20,8 @@ is a port of the Win32 test of the same functions, from Wine 1.2.3 (tag
   `wsprintf.c` from `dlls/user32/tests/`;
 - `gdi/`: `bitmap.c`, `brush.c`, `clipping.c`, `dc.c`, `font.c`,
   `gdiobj.c`, `mapping.c`, `palette.c`, `pen.c` from
-  `dlls/gdi32/tests/`.
+  `dlls/gdi32/tests/`;
+- `lzexpand/`: `lzmain.c` from `dlls/lz32/tests/lzexpand_main.c`.
 
 The comment at the top of each file says which of the Win32 tests it
 keeps and what it leaves out: functions Windows 3.1 doesn't have

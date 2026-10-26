@@ -7,7 +7,7 @@ mod env;
 mod file;
 mod global;
 mod locale;
-pub(super) mod lz;
+pub(crate) mod lz;
 mod mapping;
 mod memory;
 mod message;
