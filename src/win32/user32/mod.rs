@@ -702,7 +702,7 @@ static APIS: &[Api] = &[
     stdcall("KillTimer", 125, 2, message::kill_timer),
     stdcall("SetSystemTimer", 126, 4, message::set_system_timer),
     stdcall("KillSystemTimer", 127, 2, message::kill_system_timer),
-    stdcall("WaitForInputIdle", 128, 2, nothing),
+    stdcall("WaitForInputIdle", 128, 2, message::wait_for_input_idle),
     stdcall("BroadcastSystemMessage", 129, 5, nothing),
     stdcall("SetMessageQueue", 130, 1, succeed),
     stdcall("SendMessageW", 131, 4, not_implemented),

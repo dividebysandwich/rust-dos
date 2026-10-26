@@ -6,6 +6,7 @@ use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_erro
 use crate::cpu::Cpu;
 use crate::win32::memory::{PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
+use crate::win32::task::{self, Next, Task};
 use crate::win32::{create_process, process};
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -275,10 +276,19 @@ pub(crate) fn spawn(
     Ok([process_handle, thread_handle, pid, tid])
 }
 
+/// How long WinExec waits for the program it started to be idle, in
+/// milliseconds: Wine's 30 seconds.
+const WIN_EXEC_IDLE_MS: u32 = 30_000;
+
 /// WinExec(command line, show): the program the command line names
 /// first, started by CreateProcessA with `show` for its first window.
 /// As on Windows 95, 33 once it started, or the error: 2 for a program
 /// not found, 11 for one that isn't a program.
+///
+/// Like Windows, it returns once the program waits for input (or after
+/// a time-out), so that what the program does first is done: a launcher
+/// may read the file it writes. As in Wine, it waits with USER32's
+/// WaitForInputIdle, and only when the caller has USER32.
 pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     const STARTF_USESHOWWINDOW: u32 = 1;
     const SI_SHOW_WINDOW: usize = 48;
@@ -292,6 +302,9 @@ pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     startup[SI_SHOW_WINDOW..][..2].copy_from_slice(&(show as u16).to_le_bytes());
     match spawn(cpu, None, Some(&line), None, false, 0, startup) {
         Ok([process, thread, _, _]) => {
+            if self::process(cpu).module("USER32.DLL").is_some() {
+                return task::start(cpu, task::WIN_EXEC, vec![process, thread], 0);
+            }
             object::close(cpu, process);
             object::close(cpu, thread);
             Some(33)
@@ -299,6 +312,19 @@ pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Err(ERROR_FILE_NOT_FOUND | ERROR_INVALID_PARAMETER) => Some(ERROR_FILE_NOT_FOUND),
         Err(_) => Some(ERROR_BAD_FORMAT),
     }
+}
+
+/// WinExec's steps: WaitForInputIdle for the program it started, then
+/// its handles close.
+pub(crate) fn win_exec_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
+    let (process, thread) = (t.var(0), t.var(1));
+    if t.step == 0 {
+        let wait = crate::win32::user32::address_of("WaitForInputIdle");
+        return Next::call(wait, &[process, WIN_EXEC_IDLE_MS], 1);
+    }
+    object::close(cpu, process);
+    object::close(cpu, thread);
+    Next::Done(33)
 }
 
 /// OpenProcess(access, inherit, id): a handle of the process with the id

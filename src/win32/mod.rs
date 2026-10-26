@@ -227,6 +227,11 @@ pub struct Process {
     exiting: bool,
     /// The compressed files LZInit opened (kernel32/lz.rs).
     lz_files: Vec<kernel32::lz::LzFile>,
+    /// The object of its input idle event, which a program that isn't a
+    /// console one has: a manual-reset event USER32 signals the first
+    /// time one of its threads looks for input with none there, which
+    /// WaitForInputIdle and WinExec wait for, as in Wine.
+    idle_event: Option<u32>,
 }
 
 impl Process {
@@ -660,6 +665,17 @@ fn create_process(
         },
         None,
     );
+    // As in Wine, every program but a console one gets an input idle
+    // event.
+    let console = rust_dos_pe::Headers::parse(&file)
+        .is_ok_and(|h| h.subsystem == rust_dos_pe::SUBSYSTEM_CONSOLE);
+    if !console {
+        let idle = object::Kind::Event {
+            manual: true,
+            signaled: false,
+        };
+        process.idle_event = Some(objects.add(idle, None));
+    }
     for (handle, id) in inherited {
         if process.handles.add_at(handle, id) {
             objects.hold(id);
@@ -686,6 +702,9 @@ fn create_process(
             objects.release(id);
         }
         objects.release(process.object);
+        if let Some(idle) = process.idle_event {
+            objects.release(idle);
+        }
         process.memory.release(&mut cpu.bus);
         return Err(format!(
             "There isn't enough extended memory to run {}.",
@@ -822,6 +841,11 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         *exit_code = Some(code);
     }
     win32.objects.release(own);
+    // Its idle event goes, as in Wine: a wait for it ends as the
+    // process's object is signaled.
+    if let Some(idle) = process.idle_event.take() {
+        win32.objects.release(idle);
+    }
     if process.id == win32.root {
         win32.exit_code = code;
     }
@@ -1095,6 +1119,7 @@ crate::state_fields!(Process {
     dll_tls,
     exiting,
     lz_files,
+    idle_event,
 });
 crate::state_fields!(Win32 {
     pending,
