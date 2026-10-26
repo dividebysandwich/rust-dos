@@ -809,6 +809,22 @@ fn first_word(text: &str) -> (&str, &str) {
     first_word_in(text, WHITESPACE)
 }
 
+/// The first argument of `args` as a path. A part in double quotes may
+/// hold spaces, and the quotes go: COMMAND.COM in Windows 95 and 98 takes
+/// `MD "New Folder"` and `RD "C:\Program Files\Old"`.
+pub fn path_argument(args: &str) -> Option<String> {
+    let mut path = String::new();
+    let mut quoted = false;
+    for c in args.trim_start().chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => break,
+            c => path.push(c),
+        }
+    }
+    (!path.is_empty()).then_some(path)
+}
+
 /// `first_word`, with words separated by any of `delimiters`.
 fn first_word_in<'a>(text: &'a str, delimiters: &[char]) -> (&'a str, &'a str) {
     let text = text.trim_start_matches(delimiters);
@@ -991,7 +1007,10 @@ fn for_lines(cpu: &Cpu, args: &str) -> Option<Vec<String>> {
 struct CdCommand;
 impl ShellCommand for CdCommand {
     fn execute(&self, cpu: &mut Cpu, args: &str) {
-        let path = args.trim();
+        // The path may be in quotes, whole or in part (CD "\Program
+        // Files"), as COMMAND.COM in Windows 95 and 98 takes it.
+        let path = args.trim().replace('"', "");
+        let path = path.trim();
         // "CD" and "CD D:" print the current directory of that drive
         let (drive_spec, rest) = parse_drive_prefix(path);
         if rest.is_empty() {
