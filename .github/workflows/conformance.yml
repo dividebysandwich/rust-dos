@@ -60,6 +60,7 @@ jobs:
           packages: >-
             git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev
             gcc-mingw-w64-i686-win32
+          update: true
 
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -102,6 +103,7 @@ jobs:
         uses: $/.github/actions/apt-install
         with:
           packages: libsdl2-dev libasound2-dev
+          update: false
 
       - name: Install OpenWatcom
         run: |

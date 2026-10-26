@@ -52,6 +52,7 @@ jobs:
         uses: $/.github/actions/apt-install
         with:
           packages: libsdl2-dev libasound2-dev
+          update: false
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -164,6 +165,7 @@ jobs:
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev
             libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev
             libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
+          update: true
 
       # The workspace belongs to the runner's user and the container runs as
       # root, so git would refuse the checkout as "dubious ownership" and the
@@ -190,12 +192,15 @@ jobs:
             echo "PKG=rust-dos-$RELEASE_VERSION-${{ matrix.label }}"
           } >> "$GITHUB_ENV"
 
+      # With the package lists updated, as these builds make the release's
+      # packages.
       - name: Install dependencies (Linux)
         # The -compat container jobs installed everything above, pre-checkout.
         if: runner.os == 'Linux' && !matrix.container
         uses: $/.github/actions/apt-install
         with:
           packages: libsdl2-dev libasound2-dev
+          update: true
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -516,6 +521,7 @@ jobs:
         uses: $/.github/actions/apt-install
         with:
           packages: git ca-certificates curl zstd build-essential pkg-config zip
+          update: true
 
       # The workspace belongs to the runner's user and the container runs as
       # root, so git would refuse the checkout as "dubious ownership" and the
