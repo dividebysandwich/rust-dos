@@ -136,9 +136,7 @@ fn ensure_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<bool, Strin
     }
     // The system modules every program has.
     let mut inits = Vec::new();
-    for name in [
-        "KERNEL", "USER", "GDI", "KEYBOARD", "SYSTEM", "DISPLAY", "SOUND",
-    ] {
+    for name in module::SYSTEM_MODULES {
         module::load(cpu, name, "", &mut inits)?;
     }
     cpu.bus.log_string("[W16] Made the Win16 process");

@@ -90,6 +90,9 @@ static void testLoadLibrary(void)
 
     module = GetModuleHandle("MMSYSTEM");
     usage = module ? GetModuleUsage(module) : 0;
+    /* Windows loads it when it starts, SYSTEM.INI's drivers=mmsystem.dll
+     * (added for Win16). */
+    ok( module != NULL, "MMSYSTEM isn't loaded before the program loads it\n");
 
     hModule = LoadLibrary("mmsystem.dll");
     ok( hModule >= (HINSTANCE)32, "mmsystem.dll should be loadable (%x)\n", hModule);

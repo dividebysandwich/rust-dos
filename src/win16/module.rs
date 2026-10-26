@@ -588,6 +588,14 @@ fn patch_prologues(
     }
 }
 
+/// The system modules, which the Win16 process loads when it starts and
+/// which stay. MMSYSTEM is one, as SYSTEM.INI's "drivers=mmsystem.dll"
+/// has it on Windows 3.1 and 95: programs ask GetModuleHandle for it to
+/// see whether there is multimedia sound.
+pub const SYSTEM_MODULES: [&str; 8] = [
+    "KERNEL", "USER", "GDI", "KEYBOARD", "SYSTEM", "DISPLAY", "SOUND", "MMSYSTEM",
+];
+
 /// Let go of a reference to the module `handle`: at the last, it goes,
 /// and so do the references it held to the modules it imports from.
 pub fn release(cpu: &mut Cpu, handle: u16) {
@@ -597,10 +605,7 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
     let m = &mut cpu.bus.win32.win16.modules[index];
     // The system's own modules stay; the other built-in libraries go when
     // the last user frees them, as DLLs do.
-    const SYSTEM: [&str; 7] = [
-        "KERNEL", "USER", "GDI", "KEYBOARD", "SYSTEM", "DISPLAY", "SOUND",
-    ];
-    if m.builtin.is_some() && SYSTEM.contains(&m.name.as_str()) {
+    if m.builtin.is_some() && SYSTEM_MODULES.contains(&m.name.as_str()) {
         m.refs = m.refs.saturating_sub(1).max(1);
         return;
     }
