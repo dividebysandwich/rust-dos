@@ -119,6 +119,8 @@ fn run(dir: &Path, name: &str, unit: &str) -> (String, Option<u8>) {
         let path = dir.join(format!("{}.trace", unit));
         let log = rust_dos::log::LogFile::create_with_limit(&path, 1 << 30);
         cpu.bus.log_file = Some(log.unwrap());
+        // Every call, not the first few from each place.
+        rust_dos::win32::trace::set_level(&mut cpu, rust_dos::config::Win32Trace::All);
     }
     let mut ended = false;
     for _ in 0..BATCHES {

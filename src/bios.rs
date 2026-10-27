@@ -219,6 +219,14 @@ fn write_ivt(bus: &mut Bus, ivt: &[u32; 256]) {
     bus.arm_ipx_irq();
 }
 
+/// The bits of the equipment word (40:10) that the POST sets on every
+/// machine the emulator has, whatever is mounted or attached: bit 1, the
+/// math coprocessor (the 486 and later have it on chip, the 386 runs with
+/// a 387 beside it, as CR0.ET and CMOS register 14h say), and bit 2, a
+/// PS/2 mouse (INT 15h AH=C2h). The built-in DOS and a booted system both
+/// start from these.
+pub const EQUIPMENT_FIXED: u16 = 0x0006;
+
 /// Set up the vector table and the BIOS data area as a PC's BIOS leaves
 /// them for the operating system it boots, in memory cleared to zeros,
 /// with `hard_disks` the geometries of the hard disks as INT 13h has them
@@ -236,11 +244,11 @@ pub fn install_for_boot(bus: &mut Bus, hard_disks: &[(crate::diskimage::Chs, u64
         bus.write_16(0x0400 + 2 * n, *base);
     }
     // The equipment word: two floppy drives (bits 0 and 6-7), the
-    // coprocessor (bit 1), a PS/2 mouse (bit 2), the video adapter's
+    // coprocessor and the mouse (`EQUIPMENT_FIXED`), the video adapter's
     // initial mode (bits 4-5, from `video::bios::install`), the game port
     // (bit 12), the serial ports (bits 9-11) and the parallel port (bits
     // 14-15).
-    let mut equipment = 0x0047 | (serial.len() as u16) << 9;
+    let mut equipment = EQUIPMENT_FIXED | 0x0041 | (serial.len() as u16) << 9;
     equipment |= if bus.vga.setup().mono() { 0x0030 } else { 0x0020 };
     if bus.joystick.present() {
         equipment |= 0x1000;

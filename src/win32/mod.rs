@@ -53,6 +53,7 @@ pub(crate) mod stubs;
 pub(crate) mod system;
 mod task;
 pub(crate) mod thread;
+pub mod trace;
 pub mod user32;
 pub mod version;
 mod verdll;
@@ -300,6 +301,9 @@ pub struct Win32 {
     /// The built-in DLLs the system directory shows as files
     /// (dll_files.rs), as last shown.
     dll_files: Option<dll_files::Shown>,
+    /// The log's trace of the calls of the built-in functions (the
+    /// `win32_trace` setting), which outlives the programs.
+    pub(crate) trace: trace::Trace,
     /// The program DOS loaded, which starts at `START`, and whether it is
     /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
     pending: Option<String>,
@@ -393,6 +397,7 @@ impl Win32 {
             version: self.version,
             depth: self.depth,
             dll_files: self.dll_files.take(),
+            trace: trace::Trace::new(self.trace.level()),
             ..Win32::default()
         };
     }
@@ -916,6 +921,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         return;
     }
     let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
+    // The last program's loops get their summaries.
+    trace::flush(cpu);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
     if let Some(pool) = cpu.bus.win32.pool.take() {
         pool.release(&mut cpu.bus);
@@ -1275,4 +1282,4 @@ crate::state_fields!(Win32 {
     desktop_depth,
     atoms,
     desktop_size,
-} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });
+} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files, trace });

@@ -253,6 +253,8 @@ fn machine(test: &str, program: Vec<u8>) -> Cpu {
     if std::env::var_os("DINPUT_LOG").is_some() {
         let log = rust_dos::log::LogFile::create_with_limit(&dir.join("trace.log"), 1 << 28);
         cpu.bus.log_file = Some(log.unwrap());
+        // Every call, not the first few from each place.
+        rust_dos::win32::trace::set_level(&mut cpu, rust_dos::config::Win32Trace::All);
     }
     cpu
 }
