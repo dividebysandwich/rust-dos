@@ -127,7 +127,7 @@ impl GlScreen {
         attr.set_depth_size(0);
         let mut builder = video.window(title, width, height);
         builder.position_centered().opengl().allow_highdpi();
-        if hidden || cfg!(test) {
+        if hidden {
             builder.hidden();
         }
         let window = builder

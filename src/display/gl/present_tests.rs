@@ -88,6 +88,7 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
         "Persistent composition regression",
         &Default::default(),
         &textures,
+        true,
     )
     .unwrap();
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());

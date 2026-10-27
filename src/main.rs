@@ -166,7 +166,13 @@ fn main() -> Result<(), String> {
     // it to the window. The textures are for SDL's renderer, which draws
     // where there is no OpenGL 3.
     let textures = std::cell::OnceCell::new();
-    let mut display = Display::open(&video_subsystem, "Rust DOS Emulator", &settings, &textures, args.hidden)?;
+    let mut display = Display::open(
+        &video_subsystem,
+        "Rust DOS Emulator",
+        &settings,
+        &textures,
+        args.hidden,
+    )?;
     // The picture on a screen in a 3D scene, in a headset or the window.
     let stage_notes = if settings.vr.mode == rust_dos::vr::VrMode::Off {
         Vec::new()
