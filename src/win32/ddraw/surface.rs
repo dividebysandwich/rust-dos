@@ -422,6 +422,14 @@ pub fn changed(cpu: &mut Cpu, id: u32) {
     }
 }
 
+/// Count a frame at the next retrace if `s` is the primary surface: the
+/// program flipped it, blitted to it or wrote to it through a lock.
+pub fn shown(cpu: &mut Cpu, s: &Surface) {
+    if s.is_primary() {
+        cpu.bus.vga.presented = true;
+    }
+}
+
 // Pixel memory.
 
 /// Where the program sees a surface's pixels: None if they aren't
@@ -1232,9 +1240,12 @@ pub fn unlock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NOTLOCKED);
     }
     s.locked = false;
-    let (memory, role) = (s.memory, s.bits);
+    let (memory, role, primary) = (s.memory, s.bits, s.is_primary());
     if memory == MEM_CARD {
         voodoo::unlock(cpu, role);
+    }
+    if primary {
+        cpu.bus.vga.presented = true;
     }
     changed(cpu, id);
     Some(DD_OK)
@@ -1492,6 +1503,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0, flags & DDFLIP_WAIT != 0) {
             return Some(super::DDERR_WASSTILLDRAWING);
         }
+        shown(cpu, &s);
         for &m in &list {
             changed(cpu, m);
         }
@@ -1512,6 +1524,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         state(cpu).display.flip_at = timing.next_display(now);
     }
+    shown(cpu, &s);
     // The pixels go round.
     let order: Vec<u32> = match target_id {
         Some(t) => vec![id, t],

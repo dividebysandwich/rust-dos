@@ -622,6 +622,30 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     assert!(desktop(&cpu) == before, "the desktop as it was");
 }
 
+/// Let the next retrace come, as the frontend does before it draws.
+fn next_retrace(cpu: &mut Cpu) {
+    cpu.bus.clock.icount += cpu.bus.clock.cycles_per_ms() as u64 * 20;
+    cpu.bus.sync_display();
+}
+
+#[test]
+fn a_flip_on_the_card_counts_as_a_frame() {
+    let (program, data) = fullscreen_program();
+    let mut cpu = machine("flip_frames", program);
+    run_until(&mut cpu, data, 1);
+    go_on(&mut cpu, data);
+    // The program stops right after its flip.
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    // The flip is one frame, at the retrace after it, and nothing after
+    // it is another.
+    let before = cpu.bus.frames_drawn;
+    for _ in 0..3 {
+        next_retrace(&mut cpu);
+    }
+    assert_eq!(cpu.bus.frames_drawn - before, 1);
+}
+
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
 fn modes_program() -> (Vec<u8>, u32) {
     let mut d = data();

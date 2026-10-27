@@ -2852,16 +2852,19 @@ impl Bus {
     /// A retrace began: count a frame if the program drew one. A program
     /// that flips pages draws the next frame out of sight, so while it
     /// flips (a flip within the last second or so) only the flips count.
-    /// The 3dfx card only ever flips.
+    /// The 3dfx card only ever flips. A frame the built-in Windows'
+    /// DirectDraw showed counts once, however many blits made it.
     fn count_frame(&mut self) {
         self.retraces += 1;
         let flipped = std::mem::take(&mut self.vga.flipped);
         let drawn = std::mem::take(&mut self.vga.drawn);
-        // While the 3dfx card shows, its buffer swaps are the frames.
+        let presented = std::mem::take(&mut self.vga.presented);
+        // While the 3dfx card shows, its buffer swaps are the frames, or
+        // on a Banshee or Voodoo3, what DirectDraw shows in its memory.
         if let Some(v) = &mut self.voodoo {
             let swapped = std::mem::take(&mut v.swapped);
             if v.output() {
-                self.frames_drawn += swapped;
+                self.frames_drawn += swapped.max(u64::from(presented));
                 self.activity.swapped(swapped);
                 return;
             }
@@ -2870,7 +2873,7 @@ impl Bus {
             self.last_flip = Some(self.retraces);
         }
         let flipping = self.last_flip.is_some_and(|at| self.retraces - at < 70);
-        if flipped || (drawn && !flipping) {
+        if flipped || presented || (drawn && !flipping) {
             self.frames_drawn += 1;
         }
     }
