@@ -1173,6 +1173,15 @@ Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
 holds still: the threads take turns as the timer's interrupts come.
 
+`trace` is the `win32_trace` level: which calls of the built-in
+functions get a `[W32]` (or `[W16]`) line in the log. `collapsed`, the
+default, writes the first 3 calls from each call site in a second of
+emulated time and then a line with the count of the rest, such as
+`[W32] 004D72B6: WINMM.timeGetTime x49812 more in 1.0 s`; a loop that
+goes on gets one line and a count a second. To see every call while
+reproducing a problem, `POST /api/win32 {"trace":"all"}`, and set it
+back to `collapsed` after; `off` writes none.
+
 `GET /api/win32/ddraw` lists DirectDraw's surfaces, with the display
 `mode` DirectDraw set (null on the desktop's) and the ids of the
 DirectDraw objects that set it (`mode_owner`) and have exclusive mode

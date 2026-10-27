@@ -1,7 +1,8 @@
 //! The settings in effect, and every setting as the file writes it.
 
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, SoundConfig, WindowsVersion,
+    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, SoundConfig, Win32Trace,
+    WindowsVersion,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::diskio::DiskSettings;
@@ -83,6 +84,8 @@ pub struct Settings {
     pub win32_version: WindowsVersion,
     /// The depth of the built-in Windows' desktop.
     pub win32_depth: DesktopDepth,
+    /// Which calls of its functions the log gets a line for.
+    pub win32_trace: Win32Trace,
     /// DOS's tables packed below the first MCB, as DOS=HIGH leaves
     /// conventional memory, rather than spread out up to 64 KB.
     pub dos_high: bool,
@@ -178,6 +181,7 @@ impl Default for Settings {
             win32_dlls_replace: Vec::new(),
             win32_version: WindowsVersion::Win95,
             win32_depth: DesktopDepth::Adapter,
+            win32_trace: Win32Trace::Collapsed,
             dos_high: true,
             dos_version: DosVersion::default(),
             ide_hard_disks: true,
@@ -320,6 +324,7 @@ impl Settings {
                 .unwrap_or(default.win32_dlls_replace),
             win32_version: config.win32_version.unwrap_or(default.win32_version),
             win32_depth: config.win32_depth.unwrap_or(default.win32_depth),
+            win32_trace: config.win32_trace.unwrap_or(default.win32_trace),
             dos_high: config.dos_high.unwrap_or(default.dos_high),
             dos_version: config.dos_version.unwrap_or(default.dos_version),
             ide_hard_disks: config.ide_hard_disks.unwrap_or(default.ide_hard_disks),
@@ -440,6 +445,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         ),
         (Emulator, "win32_version", Some(settings.win32_version.name().to_string())),
         (Emulator, "win32_depth", Some(settings.win32_depth.name().to_string())),
+        (Emulator, "win32_trace", Some(settings.win32_trace.name().to_string())),
         (Emulator, "dos_high", yes_no(settings.dos_high)),
         (Emulator, "dos_version", Some(settings.dos_version.name())),
         (Emulator, "ide_hard_disks", yes_no(settings.ide_hard_disks)),

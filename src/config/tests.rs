@@ -685,6 +685,7 @@ fn changed_settings() -> Settings {
         win32_dlls_replace: Vec::new(),
         win32_version: WindowsVersion::Win98Se,
         win32_depth: DesktopDepth::Palette,
+        win32_trace: Win32Trace::Off,
         dos_high: false,
         dos_version: DosVersion::new(7, 10),
         ide_hard_disks: false,

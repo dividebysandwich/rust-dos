@@ -455,6 +455,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   had under Windows 95 too, so a program that imports them needs `98`.
   A change takes effect for the next program that starts when none
   runs.
+* `win32_trace` picks which calls of the built-in Windows' functions
+  get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
+  for the 16-bit modules), with the caller's address, the arguments and
+  the result. `collapsed` (the default) writes the first 3 calls from
+  each place in a program in a second of emulated time and counts the
+  rest, then writes a line with the count, such as
+  `[W32] 004D72B6: WINMM.timeGetTime x49812 more in 1.0 s`; a loop that
+  goes on gets one line and a count a second. A game that polls tens of
+  thousands of times a second thus leaves room in the log for what
+  comes later. `all` writes every call, and `off` none. The debug
+  server's `POST /api/win32 {"trace":"all"}` changes it while a program
+  runs.
 * `win32_depth` is the depth of the built-in Windows' desktop: `auto`
   (the default) is the display adapter's own, 32 bits a pixel (24 on an
   S3 ViRGE, 16 on a 3dfx Banshee or Voodoo3); `8` is 640x480 with 256

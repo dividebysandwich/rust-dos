@@ -45,6 +45,8 @@ fn run(dir: &Path, name: &str, dlls: &Path) -> (String, Option<u8>) {
     if std::env::var_os("WINE_DLLS_LOG").is_some() {
         let log = rust_dos::log::LogFile::create_with_limit(&dir.join("acm.trace"), 1 << 30);
         cpu.bus.log_file = Some(log.unwrap());
+        // Every call, not the first few from each place.
+        rust_dos::win32::trace::set_level(&mut cpu, rust_dos::config::Win32Trace::All);
     }
     let mut ended = false;
     for _ in 0..BATCHES {

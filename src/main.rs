@@ -2162,6 +2162,10 @@ fn shut_down(
         power_off(power, display, screen, &mut cpu.bus, settings.monitor_effects)?;
     }
 
+    // The loops of a program still running get their summaries.
+    rust_dos::win32::trace::flush(cpu);
+    cpu.bus.flush_log();
+
     // The journal ends, and the debug server's clients get what they
     // waited for.
     dbg.shutdown(cpu, shutdown, 0);
