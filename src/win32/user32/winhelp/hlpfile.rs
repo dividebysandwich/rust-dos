@@ -122,7 +122,7 @@ pub fn lz77(src: &[u8]) -> Vec<u8> {
 fn rle(src: &[u8], size: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(size);
     let mut i = 0;
-    while i < src.len() {
+    while i < src.len() && out.len() < size {
         let c = src[i];
         i += 1;
         let n = (c & 0x7F) as usize;
@@ -171,9 +171,22 @@ struct Phrases {
     /// Windows 95's |PhrIndex and |PhrImage (Uncompress3), rather than
     /// |Phrases (Uncompress2).
     hall: bool,
+    /// The length of the longest phrase.
+    longest: usize,
 }
 
 impl Phrases {
+    fn new(offsets: Vec<usize>, text: Vec<u8>, hall: bool) -> Phrases {
+        let lengths = offsets.windows(2).map(|w| w[1].saturating_sub(w[0]));
+        let longest = lengths.max().unwrap_or(0).min(text.len());
+        Phrases {
+            offsets,
+            text,
+            hall,
+            longest,
+        }
+    }
+
     fn phrase(&self, i: usize) -> &[u8] {
         match (self.offsets.get(i), self.offsets.get(i + 1)) {
             (Some(&a), Some(&b)) if a <= b => self.text.get(a..b).unwrap_or(&[]),
@@ -183,6 +196,11 @@ impl Phrases {
 
     /// The text of `src`, `size` bytes, with the phrases put in.
     fn expand(&self, src: &[u8], size: usize) -> Vec<u8> {
+        // The size comes from the record: no more than the codes of
+        // `src` can give, each a phrase, or at most 16 bytes of a run,
+        // and no more than 1 MB, far more than a paragraph's text.
+        let most = self.longest.max(16) + 1;
+        let size = size.min(src.len().saturating_mul(most)).min(0x10_0000);
         let mut out = Vec::with_capacity(size);
         let mut i = 0;
         if !self.hall {
@@ -203,7 +221,7 @@ impl Phrases {
             }
         } else {
             // HLPFILE_Uncompress3.
-            while i < src.len() {
+            while i < src.len() && out.len() < size {
                 let c = src[i];
                 if c & 1 == 0 {
                     out.extend_from_slice(self.phrase(c as usize / 2));
@@ -330,6 +348,10 @@ pub struct HelpFile {
     /// The |SYSTEM minor version: 15 for Windows 3.0, 21 for 3.1, 33
     /// for Windows 95's.
     version: u16,
+    /// The size of a topic block in |TOPIC, and whether its data is
+    /// LZ77-compressed.
+    tbsize: usize,
+    compressed: bool,
     /// The size of a topic block in the decompressed topic data.
     dsize: u32,
     /// The topic data, its blocks one after the other, and where each
@@ -387,9 +409,10 @@ fn tree_leaves(b: &[u8], entry: &dyn Fn(&[u8], usize) -> usize) -> Vec<usize> {
     for _ in 1..levels {
         page = u16_at(b, pages + page * page_size + 4) as usize;
     }
-    let mut seen = 0;
-    while page != 0xFFFF && seen < 0x10000 {
-        seen += 1;
+    // A page met again would add its entries again, for ever: a leaf
+    // page is read once.
+    let mut seen = vec![false; 0x1_0000];
+    while page != 0xFFFF && !std::mem::replace(&mut seen[page], true) {
         let start = pages + page * page_size;
         if start + 8 > b.len() {
             break;
@@ -462,8 +485,9 @@ impl HelpFile {
         };
         let leaves = tree_leaves(tree, &|b, at| c_str(b, at).len() + 5);
         for at in leaves {
-            let name = String::from_utf8_lossy(c_str(tree, at)).into_owned();
-            let off = u32_at(tree, at + name.len() + 1) as usize;
+            let raw = c_str(tree, at);
+            let name = String::from_utf8_lossy(raw).into_owned();
+            let off = u32_at(tree, at + raw.len() + 1) as usize;
             // A file's header: the space it has, the space it uses and
             // a flag byte.
             let used = u32_at(&self.data, off + 4) as usize;
@@ -517,8 +541,8 @@ impl HelpFile {
         self.dsize = dsize;
         self.title = title;
         self.contents = contents;
-        // Kept for read_topic.
-        self.blocks = vec![tbsize as usize, compressed as usize];
+        self.tbsize = tbsize as usize;
+        self.compressed = compressed;
         Ok(())
     }
 
@@ -538,11 +562,7 @@ impl HelpFile {
             let offsets = (0..=n)
                 .map(|i| (u16_at(p, head + 2 * i) as usize).saturating_sub(2 * n + 2))
                 .collect();
-            return Some(Phrases {
-                offsets,
-                text,
-                hall: false,
-            });
+            return Some(Phrases::new(offsets, text, false));
         }
         let index = self.file("|PhrIndex")?;
         let image = self.file("|PhrImage")?;
@@ -578,15 +598,11 @@ impl HelpFile {
         } else {
             lz77(image)
         };
-        Some(Phrases {
-            offsets,
-            text,
-            hall: true,
-        })
+        Some(Phrases::new(offsets, text, true))
     }
 
     fn read_topic(&mut self) -> Result<(), &'static str> {
-        let (tbsize, compressed) = (self.blocks[0], self.blocks[1] != 0);
+        let (tbsize, compressed) = (self.tbsize, self.compressed);
         let t = self.file("|TOPIC").ok_or("no |TOPIC")?;
         let n = (t.len().max(1) - 1) / tbsize + 1;
         let mut topic = Vec::new();
@@ -694,12 +710,17 @@ impl HelpFile {
                 if next == 0 {
                     break;
                 }
-                r = r.wrapping_add(next);
+                let Some(n) = r.checked_add(next) else {
+                    break;
+                };
+                r = n;
             } else {
-                r = next;
-                if r == 0xFFFF_FFFF {
+                // The records follow each other: a link back would go
+                // round the same records again.
+                if next == 0xFFFF_FFFF || next <= r {
                     break;
                 }
+                r = next;
             }
         }
     }
@@ -984,6 +1005,11 @@ impl HelpFile {
         let mut column = 0;
         while column < columns {
             if table {
+                // Text that ran out before a cell's end leaves the
+                // format behind: past its end there is no -1 to stop at.
+                if f.at >= format_end {
+                    break;
+                }
                 let c = i16_at(rec, f.at);
                 if c == -1 {
                     break;
@@ -1180,13 +1206,29 @@ mod tests {
 
     #[test]
     fn phrases_expand_as_windows_3_0_does() {
-        let p = Phrases {
-            offsets: vec![0, 5, 10],
-            text: b"Hellothere".to_vec(),
-            hall: false,
-        };
+        let p = Phrases::new(vec![0, 5, 10], b"Hellothere".to_vec(), false);
         // Phrase 1 with a space after, then "!".
         let src = [0x01, 0x03, b'!'];
         assert_eq!(p.expand(&src, 7), b"there !");
+    }
+
+    #[test]
+    fn a_leaf_page_linked_to_itself_is_read_once() {
+        // One level, page 0 the root and the only leaf: one entry, and
+        // page 0 again as the next leaf.
+        let mut b = vec![0u8; 38 + 16];
+        b[0..2].copy_from_slice(&0x293Bu16.to_le_bytes());
+        b[4..6].copy_from_slice(&16u16.to_le_bytes());
+        b[32..34].copy_from_slice(&1u16.to_le_bytes());
+        b[38 + 2..38 + 4].copy_from_slice(&1i16.to_le_bytes());
+        assert_eq!(tree_leaves(&b, &|_, _| 8), vec![38 + 8]);
+    }
+
+    #[test]
+    fn a_record_size_past_what_its_codes_give_is_cut() {
+        // A size of 4 GB from a record of three bytes: no more than 17
+        // bytes for each of them, the longest phrase being 5.
+        let p = Phrases::new(vec![0, 5, 10], b"Hellothere".to_vec(), true);
+        assert_eq!(p.expand(&[0x02, 0x00, 0x02], 0xFFFF_FFFF).len(), 3 * 17);
     }
 }

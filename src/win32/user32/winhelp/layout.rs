@@ -234,7 +234,8 @@ pub fn layout(
     out
 }
 
-fn trailing_spaces(text: &[u8]) -> usize {
+/// The number of spaces at the end of `text`.
+pub fn trailing_spaces(text: &[u8]) -> usize {
     text.iter().rev().take_while(|&&c| c == b' ').count()
 }
 

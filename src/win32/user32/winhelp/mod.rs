@@ -16,7 +16,7 @@ pub mod layout;
 
 use std::collections::HashMap;
 
-use hlpfile::{HelpFile, Picture, Target};
+use hlpfile::{HelpFile, Target};
 use layout::{Layout, Measure};
 
 use crate::cpu::Cpu;
@@ -78,6 +78,10 @@ const HELP_SETCONTENTS: u32 = 0x0005;
 const HELP_CONTEXTPOPUP: u32 = 0x0008;
 const HELP_COMMAND: u32 = 0x0102;
 const HELP_HELPONHELP: u32 = 0x0004;
+const HELP_SETPOPUP_POS: u32 = 0x000D;
+const HELP_WM_HELP: u32 = 0x000C;
+/// The flag a training card's call adds to its command.
+const HELP_TCARD: u32 = 0x8000;
 
 /// The viewer's classes, as the system's classes register them.
 pub const FRAME_CLASS: &str = "MS_WINHELP";
@@ -101,8 +105,9 @@ const MARGIN: i32 = 6;
 const POPUP_WIDTH: i32 = 360;
 /// A jump's colour.
 const GREEN: u32 = 0x00_8000;
-/// The cursor over a link.
+/// The cursor over a link, and elsewhere.
 const IDC_HAND: u32 = 32649;
+const IDC_ARROW: u32 = 32512;
 
 /// The viewer task's kinds, its first variable.
 const K_OPEN: u32 = 0;
@@ -124,6 +129,8 @@ const S_INFO: u32 = 160;
 #[derive(Debug, Default)]
 pub struct Help {
     pub viewer: Option<Viewer>,
+    /// Where HELP_SETPOPUP_POS put the next popup, on the screen.
+    popup_at: Option<(i32, i32)>,
 }
 
 /// The open viewer.
@@ -146,8 +153,18 @@ pub struct Viewer {
     popup_layout: Layout,
     /// The fonts of the file's fonts, made when they are first used.
     fonts: Vec<u32>,
-    /// The pictures, read when first shown, and where their DIBs are.
-    pictures: HashMap<u16, Option<(Picture, u32)>>,
+    /// The pictures, read when first shown.
+    pictures: HashMap<u16, Option<Shown>>,
+}
+
+/// A picture read for showing: its size, and where its packed DIB and
+/// the bits after the DIB's header are in memory.
+#[derive(Clone, Copy, Debug)]
+struct Shown {
+    width: i32,
+    height: i32,
+    at: u32,
+    bits: u32,
 }
 
 fn viewer(cpu: &mut Cpu) -> Option<&mut Viewer> {
@@ -171,7 +188,7 @@ fn read_file(cpu: &mut Cpu, name: &str) -> Option<Vec<u8>> {
 
 /// WinHelpA(hwnd, file, command, data).
 pub fn win_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (file, command, data) = (args[1], args[2], args[3]);
+    let (file, command, data) = (args[1], args[2] & !HELP_TCARD, args[3]);
     if command == HELP_QUIT {
         return match viewer(cpu) {
             Some(v) if v.frame != 0 => {
@@ -180,6 +197,11 @@ pub fn win_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             }
             _ => Some(1),
         };
+    }
+    // HELP_SETPOPUP_POS only places the next popup: it shows nothing.
+    if command == HELP_SETPOPUP_POS {
+        user(cpu).help.popup_at = Some((data as i16 as i32, (data >> 16) as i16 as i32));
+        return Some(1);
     }
     if matches!(command, HELP_COMMAND | HELP_HELPONHELP) {
         return Some(1);
@@ -203,14 +225,16 @@ pub fn win_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(0);
         };
         let old = user(cpu).help.viewer.take();
-        let (frame, topic) = old.as_ref().map_or((0, 0), |v| (v.frame, v.topic));
+        let (frame, topic, popup) = old
+            .as_ref()
+            .map_or((0, 0, 0), |v| (v.frame, v.topic, v.popup));
         if let Some(old) = old {
             free(cpu, old);
         }
         user(cpu).help.viewer = Some(Viewer {
             frame,
             topic,
-            popup: 0,
+            popup,
             path: name,
             fonts: vec![0; help.fonts.len()],
             file: help,
@@ -227,10 +251,37 @@ pub fn win_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let v = viewer(cpu)?;
     let contents = v.contents.unwrap_or_else(|| v.file.contents());
     let page = match command {
-        HELP_CONTEXT | HELP_CONTEXTPOPUP => v.file.page_by_map(data).unwrap_or(contents),
+        HELP_CONTEXT => v.file.page_by_map(data).unwrap_or(contents),
+        HELP_CONTEXTPOPUP => {
+            let page = v.file.page_by_map(data).unwrap_or(contents);
+            return show_popup(cpu, page);
+        }
+        HELP_WM_HELP => {
+            // `data` is the program's list of control ids and their
+            // context numbers, ended by a 0; the window is the control.
+            let id = user(cpu).window(args[0]).map_or(0, |w| w.id);
+            let number = (0..1024)
+                .map(|i| {
+                    let at = data.wrapping_add(i * 8);
+                    (cpu.bus.guest_read_32(at), cpu.bus.guest_read_32(at + 4))
+                })
+                .take_while(|&(c, _)| c != 0)
+                .find(|&(c, _)| c == id)
+                .map(|(_, n)| n);
+            let v = viewer(cpu)?;
+            return match number.and_then(|n| v.file.page_by_map(n)) {
+                Some(page) => show_popup(cpu, page),
+                None => Some(1),
+            };
+        }
         HELP_SETCONTENTS => {
             v.contents = v.file.page_by_map(data);
-            return Some(1);
+            // A file new to the open window shows its contents there:
+            // the topic it showed was the old file's.
+            if loaded || v.frame == 0 {
+                return Some(1);
+            }
+            v.contents.unwrap_or_else(|| v.file.contents())
         }
         _ => contents,
     };
@@ -242,7 +293,20 @@ pub fn win_help(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     v.scroll = 0;
     v.width = -1;
     let kind = if v.frame == 0 { K_OPEN } else { K_SHOW };
-    task::start(cpu, task::WINHELP, vec![kind], SCRATCH)
+    // Another file in the open viewer: its window takes the file's title.
+    let retitle = !loaded as u32;
+    task::start(cpu, task::WINHELP, vec![kind, 0, retitle], SCRATCH)
+}
+
+/// Show the topic `page` in a popup, where HELP_SETPOPUP_POS put it or
+/// at the mouse.
+fn show_popup(cpu: &mut Cpu, page: usize) -> Option<u32> {
+    let (x, y) = match user(cpu).help.popup_at.take() {
+        Some(at) => at,
+        None => user(cpu).input.cursor,
+    };
+    let vars = vec![K_POPUP, page as u32, x as u32, y as u32];
+    task::start(cpu, task::WINHELP, vars, SCRATCH)
 }
 
 /// Give back what the viewer `v` made.
@@ -252,8 +316,8 @@ fn free(cpu: &mut Cpu, v: Viewer) {
             gdi32::delete_object(cpu, &[font]);
         }
     }
-    for (_, at) in v.pictures.into_values().flatten() {
-        kernel32::free_pages(cpu, at);
+    for p in v.pictures.into_values().flatten() {
+        kernel32::free_pages(cpu, p.at);
     }
 }
 
@@ -327,19 +391,28 @@ impl Measure for Gdi<'_> {
     }
 }
 
-/// The picture `n` and where its DIB is in memory, read the first time.
-fn picture(cpu: &mut Cpu, n: u16) -> Option<(Picture, u32)> {
+/// The picture `n`, its DIB put in memory the first time.
+fn picture(cpu: &mut Cpu, n: u16) -> Option<Shown> {
     let v = viewer(cpu)?;
     if let Some(p) = v.pictures.get(&n) {
-        return p.clone();
+        return *p;
     }
     let white = 0xFF_FFFF;
     let read = v.file.picture(n, white).and_then(|p| {
         let at = kernel32::alloc_pages(cpu, p.dib.len() as u32)?;
         cpu.bus.guest_write_bytes(at, &p.dib);
-        Some((p, at))
+        let colors = p
+            .dib
+            .get(32..36)
+            .map_or(0, |c| u32::from_le_bytes(c.try_into().unwrap_or([0; 4])));
+        Some(Shown {
+            width: p.width,
+            height: p.height,
+            at,
+            bits: at + 40 + 4 * colors,
+        })
     });
-    viewer(cpu)?.pictures.insert(n, read.clone());
+    viewer(cpu)?.pictures.insert(n, read);
     read
 }
 
@@ -356,7 +429,7 @@ fn lay_out(cpu: &mut Cpu, hwnd: u32, page: usize, width: i32) -> Layout {
     }
     let first = font(cpu, 0);
     let old = gdi32::dc::select_object(cpu, &[hdc, first]).unwrap_or(0);
-    let sizes = |cpu: &mut Cpu, n: u16| picture(cpu, n).map(|(p, _)| (p.width, p.height));
+    let sizes = |cpu: &mut Cpu, n: u16| picture(cpu, n).map(|p| (p.width, p.height));
     let mut known: HashMap<u16, Option<(i32, i32)>> = HashMap::new();
     for par in &pars {
         for item in &par.items {
@@ -391,7 +464,8 @@ fn refresh(cpu: &mut Cpu) {
     };
     let (topic, page, laid) = (v.topic, v.page, v.width);
     let (w, h) = client(cpu, topic);
-    if w != laid {
+    // A minimized window has no width to lay the topic out in.
+    if w != laid && w > 0 {
         let l = lay_out(cpu, topic, page, w);
         let Some(v) = viewer(cpu) else {
             return;
@@ -469,8 +543,8 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         },
         K_POPUP => popup_step(cpu, t, value),
         K_CLOSE_POPUP => match t.step {
-            0 => Next::call(address_of("ReleaseCapture"), &[], 1),
-            1 => Next::call(address_of("DestroyWindow"), &[t.var(1)], 2),
+            0 if t.var(2) != 0 => Next::call(address_of("ReleaseCapture"), &[], 1),
+            0 | 1 => Next::call(address_of("DestroyWindow"), &[t.var(1)], 2),
             _ => Next::Done(0),
         },
         K_QUIT => match t.step {
@@ -482,6 +556,15 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             _ => Next::Done(0),
         },
         _ => Next::Done(0),
+    }
+}
+
+/// The viewer window's title: the file's, or "Windows Help".
+fn title(cpu: &mut Cpu) -> String {
+    match viewer(cpu) {
+        Some(v) if !v.file.title.is_empty() => v.file.title.clone(),
+        Some(_) => "Windows Help".to_string(),
+        None => String::new(),
     }
 }
 
@@ -500,15 +583,9 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let create = address_of("CreateWindowExA");
     match t.step {
         0 => {
-            let title = viewer(cpu).map(|v| {
-                if v.file.title.is_empty() {
-                    "Windows Help".to_string()
-                } else {
-                    v.file.title.clone()
-                }
-            });
+            let title = title(cpu);
             write_str(cpu, class, FRAME_CLASS, 32);
-            write_str(cpu, text, &title.unwrap_or_default(), 128);
+            write_str(cpu, text, &title, 128);
             let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
             let d = CW_USEDEFAULT;
             let args = [0, class, text, style, d, d, d, d, 0, 0, instance, 0];
@@ -574,7 +651,9 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 /// Show the topic chosen in the open viewer; `t.var(1)` is set when the
-/// viewer itself goes there, so its window is left as it is.
+/// viewer itself goes there, so its window is left as it is, and
+/// `t.var(2)` when the viewer has a file it didn't have, whose title its
+/// window then takes.
 fn show_step(cpu: &mut Cpu, t: &mut Task) -> Next {
     let Some(v) = viewer(cpu) else {
         return Next::Done(0);
@@ -595,7 +674,14 @@ fn show_step(cpu: &mut Cpu, t: &mut Task) -> Next {
             let show = if iconic { SW_RESTORE } else { SW_SHOWNORMAL };
             Next::call(address_of("ShowWindow"), &[frame, show], 3)
         }
+        2 => Next::call(address_of("SetFocus"), &[topic], 5),
         3 => Next::call(address_of("SetForegroundWindow"), &[frame], 4),
+        4 if t.var(2) != 0 => {
+            let text = t.scratch + S_TEXT;
+            let title = title(cpu);
+            write_str(cpu, text, &title, 128);
+            Next::call(address_of("SetWindowTextA"), &[frame, text], 5)
+        }
         _ => Next::Done(1),
     }
 }
@@ -623,11 +709,12 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) {
     let Some(v) = viewer(cpu) else {
         return;
     };
+    // The layout is lent out for the drawing and put back after it.
     let popup = hwnd == v.popup;
     let (l, scroll) = if popup {
-        (v.popup_layout.clone(), 0)
+        (std::mem::take(&mut v.popup_layout), 0)
     } else {
-        (v.layout.clone(), v.scroll)
+        (std::mem::take(&mut v.layout), v.scroll)
     };
     let colors: Vec<u32> = v.file.fonts.iter().map(|f| f.color).collect();
     gdi32::dc::set_bk_mode(cpu, &[hdc, gdi32::dc::TRANSPARENT]);
@@ -654,7 +741,7 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) {
             // next word on the line.
             let next = l.runs.get(i + 1);
             let goes_on = next.is_some_and(|n| n.link == r.link && n.x == r.x + r.width);
-            let n = r.text.len() - r.text.iter().rev().take_while(|&&c| c == b' ').count();
+            let n = r.text.len() - layout::trailing_spaces(&r.text);
             let ink = if goes_on {
                 r.width
             } else {
@@ -672,10 +759,9 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) {
         if y + p.height < 0 || y > h {
             continue;
         }
-        let Some((pic, at)) = picture(cpu, p.number) else {
+        let Some(pic) = picture(cpu, p.number) else {
             continue;
         };
-        let header = 40 + 4 * u32::from_le_bytes(pic.dib[32..36].try_into().unwrap_or([0; 4]));
         let args = [
             hdc,
             p.x as u32,
@@ -686,11 +772,18 @@ fn draw(cpu: &mut Cpu, hwnd: u32, hdc: u32) {
             0,
             0,
             pic.height as u32,
-            at + header,
-            at,
+            pic.bits,
+            pic.at,
             0,
         ];
         gdi32::bitmap::set_di_bits_to_device(cpu, &args);
+    }
+    if let Some(v) = viewer(cpu) {
+        if popup {
+            v.popup_layout = l;
+        } else {
+            v.layout = l;
+        }
     }
 }
 
@@ -713,7 +806,15 @@ fn underline(cpu: &mut Cpu, hdc: u32, x: i32, y: i32, width: i32, dotted: bool) 
 /// `t.var(3)`), and take the mouse so that the next click closes it.
 fn popup_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
-        0 => {
+        // A popup already open goes first.
+        0 => match viewer(cpu).map(|v| std::mem::take(&mut v.popup)) {
+            Some(old) if old != 0 => Next::call(address_of("DestroyWindow"), &[old], 1),
+            _ => {
+                t.step = 1;
+                popup_step(cpu, t, 0)
+            }
+        },
+        1 => {
             let Some(v) = viewer(cpu) else {
                 return Next::Done(0);
             };
@@ -747,9 +848,9 @@ fn popup_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 DLL.base,
                 0,
             ];
-            Next::call(address_of("CreateWindowExA"), &args, 1)
+            Next::call(address_of("CreateWindowExA"), &args, 2)
         }
-        1 => {
+        2 => {
             if value == 0 {
                 return Next::Done(0);
             }
@@ -757,10 +858,10 @@ fn popup_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 v.popup = value;
             }
             t.set(4, value);
-            Next::call(address_of("ShowWindow"), &[value, SW_SHOWNA], 2)
+            Next::call(address_of("ShowWindow"), &[value, SW_SHOWNA], 3)
         }
-        2 => Next::call(address_of("SetCapture"), &[t.var(4)], 3),
-        _ => Next::Done(0),
+        3 => Next::call(address_of("SetCapture"), &[t.var(4)], 4),
+        _ => Next::Done(1),
     }
 }
 
@@ -771,7 +872,9 @@ fn close_popup(cpu: &mut Cpu) -> Option<u32> {
     if popup == 0 {
         return Some(0);
     }
-    task::start(cpu, task::WINHELP, vec![K_CLOSE_POPUP, popup], 0)
+    // When another window took the mouse, it keeps it.
+    let held = (user(cpu).input.capture == popup) as u32;
+    task::start(cpu, task::WINHELP, vec![K_CLOSE_POPUP, popup, held], 0)
 }
 
 /// Scroll the topic to `pos`.
@@ -824,9 +927,12 @@ pub fn frame_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     .and_then(|o| v.file.page_by_offset(o)),
                 _ => None,
             };
+            // The topic window keeps the focus, for the keys that scroll
+            // it: a click leaves it on the button.
+            let topic = v.topic;
             match page {
                 Some(p) => go(cpu, p),
-                None => Some(0),
+                None => task::start(cpu, task::WINHELP, vec![K_FOCUS, topic], 0),
             }
         }
         WM_DESTROY if ours => {
@@ -886,6 +992,9 @@ pub fn topic_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let pos = v.scroll - delta / 120 * 48;
             scroll_to(cpu, pos)
         }
+        // The popup doesn't get the focus: a key goes to the topic window,
+        // and closes the popup.
+        WM_KEYDOWN if v.popup != 0 => close_popup(cpu),
         WM_KEYDOWN => {
             let (_, h) = client(cpu, hwnd);
             let v = viewer(cpu)?;
@@ -904,14 +1013,20 @@ pub fn topic_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             };
             scroll_to(cpu, pos)
         }
-        WM_MOUSEMOVE => {
-            if v.layout.link_at(x, y + v.scroll).is_some() {
-                let hand = crate::win32::user32::resource::system_cursor(cpu, IDC_HAND);
-                crate::win32::user32::input::set_cursor(cpu, &[hand]);
-            }
+        // No WM_SETCURSOR comes as the mouse moves, so the cursor is set
+        // here, back to the arrow off a link. The popup's links aren't
+        // followed, and while it is open the mouse is its own.
+        WM_MOUSEMOVE if topic => {
+            let id = if v.layout.link_at(x, y + v.scroll).is_some() {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            };
+            let cursor = crate::win32::user32::resource::system_cursor(cpu, id);
+            crate::win32::user32::input::set_cursor(cpu, &[cursor]);
             Some(0)
         }
-        WM_SETCURSOR => {
+        WM_SETCURSOR if topic => {
             if lp & 0xFFFF == HTCLIENT {
                 let at = user(cpu).input.cursor;
                 let origin = user(cpu).screen_client(hwnd);

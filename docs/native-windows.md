@@ -685,11 +685,14 @@ place of WINHELP.EXE. It reads Windows 3.0 and 3.1 .HLP files with a
 parser ported from Wine's winhlp32 (user32/winhelp/hlpfile.rs), shows
 the contents topic or the one HELP_CONTEXT names, draws the text in its
 fonts with its pictures, and follows jumps and popups, with Contents,
-Back and the browse buttons. It has no Search, History window or
-bookmarks, runs no help macros, doesn't follow jumps into other help
-files, and lays tables out one cell after another. Save states leave the
-viewer out: one open when a state is saved is an empty window after
-loading.
+Back and the browse buttons. HELP_CONTEXTPOPUP, and HELP_WM_HELP for a
+control the program's list names, show their topic in a popup, at the
+point HELP_SETPOPUP_POS gave or at the mouse. It has no Search, History
+window or bookmarks, runs no help macros (HELP_COMMAND does nothing),
+shows the contents for HELP_CONTEXTMENU instead of its What's This?
+menu, doesn't follow jumps into other help files, and lays tables out
+one cell after another. Save states leave the viewer out: one open when
+a state is saved is an empty window after loading.
 
 For setup programs, SHELL32 has shell links (CLSID_ShellLink with
 IShellLinkA and IPersistFile, reading and writing `.lnk` files as

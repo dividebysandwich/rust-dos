@@ -184,7 +184,7 @@ const ARROW: [&str; 19] = [
 ];
 
 /// The hand cursor, over links: X black, . white.
-const HAND: [&str; 22] = [
+const HAND: [&str; 21] = [
     "    XX",
     "   X..X",
     "   X..X",
@@ -206,7 +206,6 @@ const HAND: [&str; 22] = [
     "     X......X",
     "     X......X",
     "     XXXXXXXX",
-    "",
 ];
 
 /// The pixel of a picture in characters at (`x`, `y`).
