@@ -320,7 +320,7 @@ impl Voodoo {
         let size = self.fbi.mask as usize + 1;
         let start = addr as usize & (size - 1);
         let (here, wrapped) = data.split_at(data.len().min(size - start));
-        if !self.spare(start as u32, (start + here.len()) as u32) {
+        if self.queued_reach(start as u32, (start + here.len()) as u32) {
             self.flush();
         }
         self.fbi.ram.store_bytes(start, here);

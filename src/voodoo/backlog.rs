@@ -364,9 +364,6 @@ impl Default for Footprint {
 /// Texture ranges kept apart; past them, one range takes in them all.
 const FOOTPRINT_TEXTURES: usize = 64;
 
-/// The most texture memory `Backlog::spare` copies for a texture.
-const SPARE_BYTES: u64 = 4 << 20;
-
 impl Footprint {
     /// The jobs are all done: they reach nothing.
     pub fn clear(&mut self) {
@@ -415,14 +412,9 @@ impl Footprint {
         self.textures.push((first.min(start), last.max(end)));
     }
 
-    /// Whether the jobs may write below byte `end`.
-    pub fn writes(&self, end: u64) -> bool {
-        end > self.writes_from
-    }
-
     /// Whether bytes `start..end` are memory the jobs may read or write.
     pub fn touches(&self, start: u64, end: u64) -> bool {
-        self.writes(end) || self.textures.iter().any(|&(a, b)| start < b && a < end)
+        end > self.writes_from || self.textures.iter().any(|&(a, b)| start < b && a < end)
     }
 }
 
@@ -513,29 +505,11 @@ const MAX_JOBS: usize = 16_384;
 /// Frame buffer words it holds at most.
 const MAX_WORDS: usize = 1 << 20;
 
-/// The bytes of the frame buffer's memory a triangle's texture units
-/// take texels from (`texture_bytes`), empty for a unit that takes none
-/// from there.
-type Texels = [(u64, u64); 2];
-
-fn texels(job: &Job) -> Texels {
-    let mut ranges = Texels::default();
-    if let Job::Triangle { st, .. } = job {
-        for (range, t) in ranges.iter_mut().zip(&st.tmu) {
-            if let Some(t) = t.as_ref().filter(|t| t.ram.same(&st.fb)) {
-                *range = texture_bytes(t);
-            }
-        }
-    }
-    ranges
-}
-
-/// The jobs held back, oldest first, each with what it does to the
-/// tiles, the texels it reads and its number.
+/// The jobs held back, oldest first, each with its number.
 #[derive(Default)]
 pub struct Backlog {
     pub layout: TileLayout,
-    jobs: Vec<(Job, Access, Texels, u64)>,
+    jobs: Vec<(Job, Access, u64)>,
     words: usize,
     /// Which jobs pruning keeps, held on to between prunings.
     keep: Vec<bool>,
@@ -571,8 +545,7 @@ impl Backlog {
         self.reach(&job, &access);
         self.track(&job, &access);
         let kills = access.kills.iter().any(|&k| k != 0);
-        let read = texels(&job);
-        self.jobs.push((job, access, read, self.numbered));
+        self.jobs.push((job, access, self.numbered));
         self.since_prune += 1;
         // A fill may have made the frames before it invisible; prune
         // when enough came since the last time.
@@ -589,14 +562,14 @@ impl Backlog {
         self.words += new.len();
         if matches!(self.jobs.last(), Some((Job::Pixels { .. }, ..))) {
             self.footprint.words(new);
-            let (mut job, mut last, read, n) = self.jobs.pop().expect("a last job");
+            let (mut job, mut last, n) = self.jobs.pop().expect("a last job");
             self.reach(&job, &access);
             self.track(&job, &access);
             if let Job::Pixels { words, .. } = &mut job {
                 words.extend_from_slice(new);
             }
             last.add(&access);
-            self.jobs.push((job, last, read, n));
+            self.jobs.push((job, last, n));
             return self.overflow();
         }
         self.push(Job::Pixels { fb: fb.clone(), words: new.to_vec() }, access)
@@ -638,7 +611,7 @@ impl Backlog {
         let mut live = [ALL; 4];
         self.keep.clear();
         self.keep.resize(self.jobs.len(), true);
-        for (i, (_, a, ..)) in self.jobs.iter().enumerate().rev() {
+        for (i, (_, a, _)) in self.jobs.iter().enumerate().rev() {
             if a.pinned {
                 live = [ALL; 4];
             } else if !a.kept && (0..4).all(|r| a.writes[r] & live[r] == 0) {
@@ -672,60 +645,6 @@ impl Backlog {
     /// The memory the jobs held may read or write.
     pub fn footprint(&self) -> &Footprint {
         &self.footprint
-    }
-
-    /// Make bytes `start..end` of the frame buffer's memory free to be
-    /// written while the jobs are held: the triangles that take texels
-    /// from there take them from a copy of their texture's levels as they
-    /// are now, in memory of their own. False if a job draws into those
-    /// bytes or a texture is too large to copy (more than 4 MB, or all of
-    /// the memory where its levels wrap round): the jobs have to be drawn
-    /// first. The footprint stays as it was, as working it out again
-    /// would take longer than the copies: it still says the jobs read
-    /// those bytes.
-    pub fn spare(&mut self, start: u64, end: u64) -> bool {
-        if !self.footprint.touches(start, end) {
-            return true;
-        }
-        if self.footprint.writes(end) {
-            return false;
-        }
-        let mut copies: Vec<(u64, u64, Vram)> = Vec::new();
-        for (job, _, read, _) in &mut self.jobs {
-            let Job::Triangle { st, .. } = job else { continue };
-            for (unit, range) in read.iter_mut().enumerate() {
-                let (first, last) = *range;
-                if first >= end || last <= start {
-                    continue;
-                }
-                // From a word's start, so that bytes keep their halves.
-                let first = first & !1;
-                if last - first > SPARE_BYTES {
-                    return false;
-                }
-                let Some(t) = &mut st.tmu[unit] else { continue };
-                let fb = &st.fb;
-                let ram = match copies.iter().find(|c| (c.0, c.1) == (first, last)) {
-                    Some(c) => c.2.clone(),
-                    None => {
-                        let ram = Vram::new(((last - first) as usize).next_power_of_two().max(2));
-                        let words = first as usize / 2..(last as usize).div_ceil(2);
-                        for (i, w) in words.enumerate() {
-                            ram.set(i, fb.get(w));
-                        }
-                        copies.push((first, last, ram.clone()));
-                        ram
-                    }
-                };
-                t.mask = ram.bytes() as u32 - 1;
-                t.ram = ram;
-                for base in &mut t.lodoffset {
-                    *base = base.wrapping_sub(first as u32);
-                }
-                *range = (0, 0);
-            }
-        }
-        true
     }
 
     /// Widen `reach` to the columns `job` may draw into. A triangle with
@@ -769,7 +688,7 @@ impl Backlog {
                     Some((slot, tiles)) => {
                         let fill = cleared.fill;
                         let held = self.jobs.iter_mut().rev().find(|(.., n)| *n == fill);
-                        if let Some((_, clear, ..)) = held {
+                        if let Some((_, clear, _)) = held {
                             clear.kills[slot] |= tiles;
                             return;
                         }
@@ -984,7 +903,7 @@ mod tests {
         let mut b = Backlog { layout: layout(), ..Default::default() };
         for a in accesses {
             let words = Vec::new();
-            b.jobs.push((Job::Pixels { fb: Vram::new(16), words }, *a, Texels::default(), 0));
+            b.jobs.push((Job::Pixels { fb: Vram::new(16), words }, *a, 0));
         }
         b
     }
@@ -1168,47 +1087,5 @@ mod tests {
         assert!(f.touches(0x3000, 0x3004) && !f.touches(0x10_4000, 0x10_4004));
         f.clear();
         assert!(!f.touches(0, u64::MAX));
-    }
-
-    #[test]
-    fn a_triangle_held_takes_its_texels_from_a_copy_when_spared() {
-        let mut st = crate::voodoo::raster::tests::two_unit_state([0; 6]);
-        let base = 0x30_0001;
-        let t = st.tmu[0].as_mut().expect("unit 0");
-        t.ram = st.fb.clone();
-        t.mask = st.fb.bytes() as u32 - 1;
-        for offset in &mut t.lodoffset {
-            *offset += base;
-        }
-        let old = t.lodoffset;
-        st.tmu[1] = None;
-        // The buffers above the texture, as Glide puts them.
-        (st.dest, st.aux) = (0x1C_0000, Some(0x1E_0000));
-        let fb = st.fb.clone();
-        let before: Vec<u8> = (0..fb.bytes()).map(|a| fb.byte(a)).collect();
-        let p = Default::default();
-        let job = Job::Triangle { st, p, verts: [(0.0, 0.0); 3], texcount: 1 };
-        let mut b = Backlog { layout: layout(), ..Default::default() };
-        assert!(b.push(job, Access::default()).is_empty());
-        assert!(b.footprint().touches(0x31_0000, 0x31_1000));
-        assert!(b.spare(0x31_0000, 0x31_1000));
-        assert_eq!(b.jobs[0].2, Texels::default(), "nothing reads the texture");
-        for a in 0x31_0000..0x31_1000 {
-            fb.set_byte(a, 0xEE);
-        }
-        let Job::Triangle { st, .. } = &b.jobs[0].0 else { panic!("a triangle") };
-        let t = st.tmu[0].as_ref().expect("unit 0");
-        assert!(!t.ram.same(&fb));
-        for (level, (&now, &was)) in t.lodoffset.iter().zip(&old).enumerate() {
-            let texels = (256 >> level) * (256 >> level);
-            for i in 0..texels {
-                let a = (now.wrapping_add(i) & t.mask) as usize;
-                assert_eq!(t.ram.byte(a), before[(was + i) as usize], "level {level}");
-            }
-        }
-        // A job that writes there has to be drawn first.
-        let words = vec![Word { row: 0, at: 0x18_8100, value: 0 }];
-        let _ = b.push(Job::Pixels { fb: fb.clone(), words }, Access::default());
-        assert!(!b.spare(0x31_0000, 0x31_1000));
     }
 }

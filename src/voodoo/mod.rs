@@ -1032,18 +1032,6 @@ impl Voodoo {
                 || self.backlog.borrow().footprint().touches(start, end))
     }
 
-    /// Make bytes `start..end` of the frame buffer's memory free to be
-    /// written before the jobs given out or held back are drawn, where
-    /// that can be done: the jobs held back that take texels from there
-    /// get a copy of them as they are (`Backlog::spare`). False if the
-    /// jobs have to be drawn first.
-    pub(crate) fn spare(&self, start: u32, end: u32) -> bool {
-        let (start, end) = (start as u64, end as u64);
-        !self.writes_queue()
-            || !self.footprint.borrow().touches(start, end)
-                && self.backlog.borrow_mut().spare(start, end)
-    }
-
     /// Whether frame buffer writes have to wait their turn behind jobs.
     pub(crate) fn writes_queue(&self) -> bool {
         self.outstanding.get() || !self.words.borrow().is_empty() || !self.backlog.borrow().is_empty()
