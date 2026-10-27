@@ -443,6 +443,99 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
     assert_eq!(pointer & 0x3F_FFFF, 64000);
 }
 
+const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
+/// Where the polling program counts its calls of Flip, and keeps the
+/// last one's result.
+const POLLS: u32 = 0x880;
+const LAST: u32 = 0x884;
+
+/// Full screen with a flip chain: a flip, then Flip without DDFLIP_WAIT
+/// called again and again until it succeeds, with a loop of `work`
+/// passes in between (none: as Enemy Infestation waits for its frames).
+fn flip_polling_program(work: u32) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.inc(dword_ptr(l.at(POLLS)))?;
+        if work > 0 {
+            a.mov(ecx, work)?;
+            let mut busy = a.create_label();
+            a.set_label(&mut busy)?;
+            a.dec(ecx)?;
+            a.jnz(busy)?;
+        }
+        push(a, l, &[Arg::I(0), Arg::I(0)])?;
+        a.mov(eax, dword_ptr(l.at(FRONT)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * S_FLIP))?;
+        a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
+        a.je(again)?;
+        a.mov(dword_ptr(l.at(LAST)), eax)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn flip_polled_with_nothing_in_between_waits_for_the_frame() {
+    let (program, data) = flip_polling_program(0);
+    let mut cpu = machine("flip_polling", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 6)[1..], [0; 5]);
+    // The flip came at the next frame, after calls that failed: a few
+    // that ran, then one that waited for the frame, instead of one for
+    // each pass of the loop until then.
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!((2..=17).contains(&polls), "{polls} calls of Flip");
+}
+
+#[test]
+fn flip_polled_with_work_in_between_runs_every_call() {
+    // 3000 instructions between two calls: the program has more to do
+    // than poll, and each call runs, failing until the frame.
+    let (program, data) = flip_polling_program(1500);
+    let mut cpu = machine("flip_polling_work", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of Flip");
+}
+
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER
 /// with a size) and attached to a plain primary surface, as Glover makes
 /// its flip chain: a pixel written to the back buffer and a flip of the
