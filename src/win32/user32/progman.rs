@@ -26,23 +26,19 @@ use super::{DESKTOP, address_of, current_tid, user};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 
+use super::ddeml::{
+    CF_TEXT, DDE_FACK, WM_DDE_ACK, WM_DDE_ADVISE, WM_DDE_DATA, WM_DDE_EXECUTE, WM_DDE_POKE,
+};
+
 pub const WM_DDE_INITIATE: u32 = 0x3E0;
 pub const WM_DDE_TERMINATE: u32 = 0x3E1;
-const WM_DDE_ADVISE: u32 = 0x3E2;
 const WM_DDE_UNADVISE: u32 = 0x3E3;
-const WM_DDE_ACK: u32 = 0x3E4;
-const WM_DDE_DATA: u32 = 0x3E5;
 const WM_DDE_REQUEST: u32 = 0x3E6;
-const WM_DDE_POKE: u32 = 0x3E7;
-const WM_DDE_EXECUTE: u32 = 0x3E8;
 
-/// WM_DDE_ACK's status: the message was taken.
-const DDE_FACK: u32 = 0x8000;
 /// DDEDATA's flags for data answering a request: fResponse, and
 /// fRelease, the client freeing it.
 const DDE_FRESPONSE: u16 = 0x1000;
 const DDE_FRELEASE: u16 = 0x2000;
-const CF_TEXT: u32 = 1;
 const GMEM_MOVEABLE: u32 = 0x0002;
 const GMEM_DDESHARE: u32 = 0x2000;
 /// The most bytes of commands read from an execute's block.
@@ -51,7 +47,7 @@ const MAX_COMMANDS: u32 = 0x1_0000;
 /// The window's class and title, as Explorer's Program Manager window
 /// has them.
 pub const CLASS: &str = "Progman";
-const TITLE: &[u8] = b"Program Manager";
+pub const TITLE: &[u8] = b"Program Manager";
 /// The application and topic it answers to.
 const NAME: &str = "PROGMAN";
 
@@ -198,15 +194,9 @@ fn is_16bit(cpu: &mut Cpu, client: u32) -> bool {
 /// The two values of a DDE message's lParam that has them in a global
 /// block for a 32-bit program, which the block is freed of.
 fn unpack(cpu: &mut Cpu, lp: u32) -> (u32, u32) {
-    let at = if lp == 0 {
-        0
-    } else {
-        crate::win32::kernel32::global_address(cpu, lp)
-    };
-    if at == 0 || !cpu.bus.guest_probe(at, 8, false) {
+    let Some(values) = super::ddeml::unpacked(cpu, lp) else {
         return (0, 0);
-    }
-    let values = (cpu.bus.guest_read_32(at), cpu.bus.guest_read_32(at + 4));
+    };
     crate::win32::kernel32::global_free(cpu, lp);
     values
 }
@@ -214,13 +204,13 @@ fn unpack(cpu: &mut Cpu, lp: u32) -> (u32, u32) {
 /// Post `msg` from the server to `client`, its lParam `lo` and `hi`
 /// as a 16-bit or a 32-bit program takes them.
 fn reply(cpu: &mut Cpu, server: u32, client: u32, msg: u32, lo: u32, hi: u32, sixteen: bool) {
+    let Some(tid) = user(cpu).window(client).map(|w| w.tid) else {
+        return;
+    };
     let lp = if sixteen || !matches!(msg, WM_DDE_ACK | WM_DDE_DATA) {
         (lo & 0xFFFF) | hi << 16
     } else {
         super::ddeml::pack_dde_lparam(cpu, &[msg, lo, hi]).unwrap_or(0)
-    };
-    let Some(tid) = user(cpu).window(client).map(|w| w.tid) else {
-        return;
     };
     let msg = Msg {
         hwnd: client,
@@ -289,6 +279,10 @@ pub fn posted(cpu: &mut Cpu, hwnd: u32, msg: u32, client: u32, lp: u32) -> Optio
             }
         }
         WM_DDE_REQUEST => {
+            // A client that is gone would never free the data's block.
+            if !user(cpu).is_window(client) {
+                return Some(1);
+            }
             let (format, item) = (lp & 0xFFFF, lp >> 16);
             let name = atom_name(cpu, item, sixteen).unwrap_or_default();
             let text = match format {
@@ -322,6 +316,11 @@ pub fn posted(cpu: &mut Cpu, hwnd: u32, msg: u32, client: u32, lp: u32) -> Optio
             Some(1)
         }
         // A client's acknowledgement or data: the server asked for none.
+        // A 32-bit client's packed lParam is the receiver's to free.
+        WM_DDE_ACK | WM_DDE_DATA if !sixteen => {
+            unpack(cpu, lp);
+            Some(1)
+        }
         _ => Some(1),
     }
 }

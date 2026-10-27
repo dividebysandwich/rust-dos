@@ -935,7 +935,12 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     if hwnd == HWND_BROADCAST || hwnd == 0xFFFF_FFFF {
         for h in user(cpu).top_levels() {
-            let Some(tid) = user(cpu).window(h).map(|w| w.tid) else {
+            // Program Manager's window has no thread whose queue is read.
+            let Some(tid) = user(cpu)
+                .window(h)
+                .filter(|w| !super::progman::is_server(w))
+                .map(|w| w.tid)
+            else {
                 continue;
             };
             post(

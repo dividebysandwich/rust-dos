@@ -549,10 +549,9 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
 pub fn covered(state: &State, hwnd: u32) -> Region {
     let siblings = state
         .window(state.parent(hwnd))
-        .map(|p| p.children.clone())
-        .unwrap_or_default();
+        .map_or(&[][..], |p| &p.children[..]);
     let mut area = Region::new();
-    for h in siblings.into_iter().take_while(|&h| h != hwnd) {
+    for &h in siblings.iter().take_while(|&&h| h != hwnd) {
         if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
             area = area.or(&shape(state, h));
         }

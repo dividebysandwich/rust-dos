@@ -177,18 +177,8 @@ pub(super) fn global_delete_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// number for an integer atom, cut to `size` - 1 characters and ended
 /// with a NUL; its length, or 0 when there is no such atom or no room.
 pub(super) fn global_get_atom_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (atom, buffer, size) = (args[0] & 0xFFFF, args[1], args[2]);
-    let text = if atom == 0 {
-        None
-    } else if atom < FIRST as u32 {
-        Some(format!("#{}", atom))
-    } else {
-        let slots = &table(cpu).slots;
-        slots
-            .get((atom - FIRST as u32) as usize)
-            .and_then(|s| s.as_ref().map(|a| a.name.clone()))
-    };
-    let Some(text) = text.filter(|_| size > 0) else {
+    let (atom, buffer, size) = (args[0] as u16, args[1], args[2]);
+    let Some(text) = name_of(cpu, atom).filter(|_| size > 0) else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };

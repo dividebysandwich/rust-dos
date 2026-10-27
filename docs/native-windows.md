@@ -708,12 +708,12 @@ DDEML in USER32 talks to that server alone, as no program can be a
 DDE server or client of another yet. Setup programs that send raw DDE
 messages instead (the Microsoft Setup Toolkit, 16-bit InstallShield)
 reach it through a hidden window of class Progman, made at the first
-WM_DDE_INITIATE broadcast, which answers INITIATE for PROGMAN,
-EXECUTE, REQUEST for the groups and TERMINATE, with Windows 3.1's
-lParam for 16-bit programs and PackDDElParam's for 32-bit ones.
-VERSION.DLL reads version resources and installs files with
-VerFindFileA and VerInstallFileA, and LZ32 and KERNEL32 expand files
-that COMPRESS.EXE packed. OLE32
+WM_DDE_INITIATE broadcast or the first FindWindow for its class or its
+title, which answers INITIATE for PROGMAN, EXECUTE, REQUEST for the
+groups and TERMINATE, with Windows 3.1's lParam for 16-bit programs
+and PackDDElParam's for 32-bit ones. VERSION.DLL reads version
+resources and installs files with VerFindFileA and VerInstallFileA,
+and LZ32 and KERNEL32 expand files that COMPRESS.EXE packed. OLE32
 creates objects from the class objects programs register, from the
 in-process servers the registry names and from the built-in classes;
 it keeps CoInitialize's rules for apartments, maps ProgIDs to CLSIDs

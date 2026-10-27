@@ -532,6 +532,37 @@ fn program_manager_answers_raw_dde_messages() {
 }
 
 #[test]
+fn find_window_finds_program_manager() {
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, 0x00, b"Progman\0");
+    put(&mut data, 0x10, b"Program Manager\0");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("USER32.dll", &["FindWindowA"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        // By its class, before anything broadcast WM_DDE_INITIATE.
+        call(a, l.import(1), &[l.at(0), 0])?;
+        a.mov(esi, eax)?;
+        check_nonzero(a, 0)?;
+        // By its title, the same window.
+        call(a, l.import(1), &[0, l.at(0x10)])?;
+        let mut other = a.create_label();
+        a.cmp(eax, esi)?;
+        a.jne(other)?;
+        a.or(ebx, 1 << 1)?;
+        a.set_label(&mut other)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("progman_find", core, &[("T.EXE", code.clone())]);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 3, "{core:?}: {}", printed(&cpu));
+    }
+}
+
+#[test]
 fn shfileoperation_copies_a_file() {
     const FO_COPY: u8 = 2;
     const FOF_SILENT_NOCONFIRMATION: u16 = 0x14;

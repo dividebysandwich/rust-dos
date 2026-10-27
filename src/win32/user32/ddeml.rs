@@ -31,15 +31,15 @@ const XTYP_REQUEST: u32 = 0x20B0;
 const XTYPF_MASK: u32 = 0x000F;
 
 const HDATA_APPOWNED: u32 = 0x0001;
-const DDE_FACK: u32 = 0x8000;
+pub(super) const DDE_FACK: u32 = 0x8000;
 const CP_WINUNICODE: u32 = 1200;
-const CF_TEXT: u32 = 1;
+pub(super) const CF_TEXT: u32 = 1;
 
-const WM_DDE_ACK: u32 = 0x3E4;
-const WM_DDE_ADVISE: u32 = 0x3E2;
-const WM_DDE_DATA: u32 = 0x3E5;
-const WM_DDE_POKE: u32 = 0x3E7;
-const WM_DDE_EXECUTE: u32 = 0x3E8;
+pub(super) const WM_DDE_ACK: u32 = 0x3E4;
+pub(super) const WM_DDE_ADVISE: u32 = 0x3E2;
+pub(super) const WM_DDE_DATA: u32 = 0x3E5;
+pub(super) const WM_DDE_POKE: u32 = 0x3E7;
+pub(super) const WM_DDE_EXECUTE: u32 = 0x3E8;
 
 /// The first string handle; they are numbers as atoms are.
 const FIRST_STRING: u32 = 0xC000;
@@ -819,25 +819,29 @@ pub fn pack_dde_lparam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((lo & 0xFFFF) | hi << 16)
 }
 
+/// The two values in the global block `lparam` that PackDDElParam made,
+/// if it is one.
+pub(super) fn unpacked(cpu: &mut Cpu, lparam: u32) -> Option<(u32, u32)> {
+    let at = if lparam == 0 {
+        0
+    } else {
+        crate::win32::kernel32::global_address(cpu, lparam)
+    };
+    if at == 0 || !cpu.bus.guest_probe(at, 8, false) {
+        return None;
+    }
+    Some((cpu.bus.guest_read_32(at), cpu.bus.guest_read_32(at + 4)))
+}
+
 /// UnpackDDElParam(message, lParam, low, high).
 pub fn unpack_dde_lparam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [msg, lparam, lo_out, hi_out] = args[..] else {
         return Some(0);
     };
     let (lo, hi, ok) = if is_global(msg) {
-        let at = if lparam == 0 {
-            0
-        } else {
-            crate::win32::kernel32::global_address(cpu, lparam)
-        };
-        if at == 0 || !cpu.bus.guest_probe(at, 8, false) {
-            (0, 0, false)
-        } else {
-            (
-                cpu.bus.guest_read_32(at),
-                cpu.bus.guest_read_32(at + 4),
-                true,
-            )
+        match unpacked(cpu, lparam) {
+            Some((lo, hi)) => (lo, hi, true),
+            None => (0, 0, false),
         }
     } else if msg == WM_DDE_EXECUTE {
         (0, lparam, true)
