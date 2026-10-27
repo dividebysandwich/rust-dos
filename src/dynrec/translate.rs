@@ -1567,8 +1567,8 @@ pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut
         OpKind::Immediate8 => (1, false),
         OpKind::Immediate16 => (2, false),
         OpKind::Immediate32 => (4, false),
-        // (Sign-extended to 32 bits, as the other operand's size is.)
-        OpKind::Immediate8to32 => (1, true),
+        // (Sign-extended to the other operand's size, 32 or 16 bits.)
+        OpKind::Immediate8to32 | OpKind::Immediate8to16 => (1, true),
         _ => return false,
     };
     // The immediate is the last bytes of these forms.
@@ -1576,45 +1576,72 @@ pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut
     if watched.iter().any(|&w| w < start) {
         return false;
     }
-    // The temporaries each operation uses.
-    let mut used = Vec::with_capacity(u.len());
+    // The temporaries the operations from the site on use.
+    let mut later = 0u8;
     let mut site = None;
     for (k, uop) in u.iter().enumerate() {
         let (a, b) = match *uop {
             Uop::Get { t, .. } | Uop::Set { t, .. } | Uop::Ea { t, .. } | Uop::MemRef { t, .. } => (t, None),
             Uop::Load { dst, m, .. } => (dst, Some(m)),
             Uop::Store { m, src, .. } => (m, Some(src)),
-            Uop::Alu { a, b: Src::T(b), .. } | Uop::Imul { a, b: Src::T(b), .. } => (a, Some(b)),
+            Uop::Alu {
+                a, b: Src::T(b), ..
+            }
+            | Uop::Imul {
+                a, b: Src::T(b), ..
+            } => (a, Some(b)),
             Uop::Copy { dst, src } => (dst, Some(src)),
             Uop::Const { t, .. }
-            | Uop::Alu { a: t, b: Src::Imm(_), .. }
-            | Uop::Imul { a: t, b: Src::Imm(_), .. } => {
+            | Uop::Alu {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            }
+            | Uop::Imul {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            } => {
                 if site.replace(k).is_some() {
                     return false;
                 }
+                later = 0;
                 (t, None)
             }
             _ => return false,
         };
-        used.push(1u8 << a.0 | b.map_or(0, |b| 1 << b.0));
+        later |= 1 << a.0 | b.map_or(0, |b| 1 << b.0);
     }
     let Some(site) = site else { return false };
-    let load = |t| Uop::LoadCode { t, phys: phys + start as u32, size, signed };
-    if let Uop::Const { t, .. } = u[site] {
-        u[site] = load(t);
-        return true;
-    }
-    // The immediate goes into a temporary that nothing from the site on
-    // uses, just before it: the three-operand IMUL of memory uses all
-    // three, but T2 and T1 only before it. (The load neither faults nor
-    // changes anything.)
-    let later = used[site..].iter().fold(0, |m, &u| m | u);
-    let Some(b) = [T0, T1, T2].into_iter().find(|t| later & 1 << t.0 == 0) else { return false };
-    u[site] = match u[site] {
-        Uop::Alu { op, size, a, .. } => Uop::Alu { op, size, a, b: Src::T(b) },
-        Uop::Imul { size, a, .. } => Uop::Imul { size, a, b: Src::T(b) },
+    let (t, at) = match &mut u[site] {
+        // The constant's temporary, in place of it.
+        Uop::Const { t, .. } => (*t, site..site + 1),
+        // A temporary that nothing from the site on uses, just before it:
+        // the three-operand IMUL of memory uses all three, but T2 and T1
+        // only before it. (The load neither faults nor changes anything.)
+        Uop::Alu { b, .. } | Uop::Imul { b, .. } => {
+            let Some(free) = [T0, T1, T2].into_iter().find(|t| later & 1 << t.0 == 0) else {
+                return false;
+            };
+            *b = Src::T(free);
+            (free, site..site)
+        }
         _ => unreachable!(),
     };
-    u.insert(site, load(b));
+    let load = Uop::LoadCode {
+        t,
+        phys: phys + start as u32,
+        size,
+        signed,
+    };
+    // A byte sign-extended to 16 bits is cut to them, as a 16-bit
+    // operation's constant and registers are.
+    let cut = instr.op_kind(last) == OpKind::Immediate8to16;
+    let cut = cut.then_some(Uop::Extend {
+        t,
+        from: 2,
+        signed: false,
+    });
+    u.splice(at, [load].into_iter().chain(cut));
     true
 }

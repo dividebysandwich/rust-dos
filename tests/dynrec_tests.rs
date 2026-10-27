@@ -2878,6 +2878,67 @@ fn twelve_immediates_poked_into_one_block_are_read_where_they_are() {
     }
 }
 
+#[test]
+fn byte_immediates_poked_into_one_block_are_sign_extended() {
+    // A byte poked into the sign-extended immediates of a three-operand
+    // IMUL of registers, its 16-bit form and a 16-bit ADD, half the time
+    // negative. Read where they are, they are sign-extended as decoded.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            f,
+            &asm32(f, |a| {
+                a.db(&[0x6B, 0xC3, 0])?; // imul eax, ebx, imm8
+                a.db(&[0x01, 0xC5])?; // add ebp, eax
+                a.db(&[0x66, 0x6B, 0xC3, 0])?; // imul ax, bx, imm8
+                a.db(&[0x66, 0x01, 0xC7])?; // add di, ax
+                a.db(&[0x66, 0x83, 0xC6, 0])?; // add si, imm8
+                a.ret()
+            }),
+        );
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(ebp, ebp)?;
+                a.xor(edi, edi)?;
+                a.xor(esi, esi)?;
+                a.mov(ebx, 300u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        rig.load(
+            top,
+            &asm32(top, |a| {
+                a.imul_3(ecx, ebx, 37)?;
+                a.mov(byte_ptr(f + 2), cl)?;
+                a.mov(byte_ptr(f + 8), cl)?;
+                a.mov(byte_ptr(f + 15), cl)?;
+                a.call(f as u64)?;
+                a.dec(ebx)?;
+                a.jnz(top as u64)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let factor = |n: u32| n.wrapping_mul(37) as u8 as i8 as i32 as u32;
+    let products = (1..=300u32).fold(0u32, |s, n| s.wrapping_add(n.wrapping_mul(factor(n))));
+    let factors = (1..=300u32).fold(0u16, |s, n| s.wrapping_add(factor(n) as u16));
+    assert_eq!(
+        (b.cpu.ebp(), b.cpu.edi(), b.cpu.esi()),
+        (products, products & 0xFFFF, factors as u32)
+    );
+    if AVAILABLE {
+        assert!(stats.stale < 10, "{:?}", stats);
+        assert!(
+            stats.watched < 10,
+            "left at the poked immediates: {:?}",
+            stats
+        );
+    }
+}
+
 /// A loop at `top`, one block, that works out a value into ECX
 /// (`value`), stores it twice into the dword of its own later
 /// instructions (`body`) that holds `marker` as assembled (the second
