@@ -410,6 +410,12 @@ impl Win32 {
         !self.processes.is_empty()
     }
 
+    /// Whether a program has the 3dfx card open through Glide
+    /// (grSstWinOpen), whose picture the card then shows.
+    pub fn glide_open(&self) -> bool {
+        self.glide.owner != 0
+    }
+
     /// Whether DOS loaded a Win32 program that hasn't started yet.
     pub fn pending(&self) -> bool {
         self.pending.is_some()
