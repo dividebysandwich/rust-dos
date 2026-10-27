@@ -138,6 +138,7 @@ pub static TASKS: &[Step] = &[
     super::shell32::browse::step,
     super::user32::message::idle_step,
     super::kernel32::win_exec_step,
+    super::user32::winhelp::step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -155,6 +156,7 @@ pub const DDEML: u16 = 31;
 pub const SHELL32: u16 = 32;
 pub const INPUT_IDLE: u16 = 33;
 pub const WIN_EXEC: u16 = 34;
+pub const WINHELP: u16 = 35;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's

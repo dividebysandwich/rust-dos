@@ -25,6 +25,7 @@ pub mod resource;
 pub mod sysparams;
 pub mod text;
 pub mod window;
+pub mod winhelp;
 
 use super::gdi32::Rect;
 use super::stubs::{Api, Conv, Dll};
@@ -141,6 +142,8 @@ pub struct State {
     /// the hooks' kind; and the number of the last hook set.
     pub in_hooks: Vec<(u32, i32)>,
     pub last_hook: u32,
+    /// The help viewer (winhelp), which save states leave out.
+    pub help: winhelp::Help,
 }
 
 impl State {
@@ -1198,7 +1201,7 @@ static APIS: &[Api] = &[
     ),
     stdcall("GetThreadDesktop", 425, 1, sysparams::get_thread_desktop),
     stdcall("GetUserObjectInformationA", 426, 5, not_implemented),
-    stdcall("WinHelpA", 427, 4, succeed),
+    stdcall("WinHelpA", 427, 4, winhelp::win_help),
     stdcall("GetSystemDefaultLangID", 428, 0, nothing),
     stdcall("EnumDisplayDevicesA", 429, 4, monitor::enum_display_devices),
     // No monitor functions (430 to 433): they came with Windows 98, and
@@ -1297,6 +1300,9 @@ static APIS: &[Api] = &[
     stdcall("DdeEnableCallback", 621, 3, succeed),
     stdcall("DdePostAdvise", 622, 3, succeed),
     stdcall("DdeSetUserHandle", 623, 3, succeed),
+    // The help viewer's window procedures (winhelp).
+    stdcall("WinHelpWndProc", 0, 4, winhelp::frame_proc),
+    stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),
 ];
 
 crate::state_fields!(State {
@@ -1321,4 +1327,6 @@ crate::state_fields!(State {
     registered,
     in_hooks,
     last_hook
+} skip {
+    help
 });
