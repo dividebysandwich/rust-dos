@@ -58,6 +58,18 @@ fn program_for(
 ) -> Vec<u8> {
     let mut b = Builder::exe(base);
     b.subsystem(subsystem);
+    program_with(b, relocatable, imports, data, f)
+}
+
+/// `program`, made with `b`, a builder whose headers are set up already.
+fn program_with(
+    mut b: Builder,
+    relocatable: bool,
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> Vec<u8> {
+    let base = b.image_base();
     let lists: Vec<Vec<Imp>> = imports
         .iter()
         .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
@@ -1292,6 +1304,152 @@ fn a_program_reserves_commits_and_protects_memory() {
         0x7F,
         "the checks that failed: {:07b} {}",
         !code & 0x7F,
+        text
+    );
+}
+
+/// A program builder at `BASE` whose stack reserve and commit sizes are
+/// `reserve` and `commit`.
+fn with_stack(reserve: u32, commit: u32) -> Builder {
+    let mut b = Builder::exe(BASE);
+    b.stack(reserve, commit);
+    b
+}
+
+/// A stack's reservation goes 64 KB below its 64 KB multiple of the
+/// reserve, as on Windows 98, whose main thread and CreateThread's
+/// threads of a program with a 20 KB reserve have 128 KB between
+/// VirtualQuery's AllocationBase and the TIB's stack top. Watcom's C
+/// library takes the allocation base plus 76 KB as the lowest its
+/// stack may go on Windows 95 and 98 (Cryo's Riverworld stops with
+/// "Stack Overflow!" without it). A bit each in the exit code.
+#[test]
+fn a_stack_reservation_has_64_kb_below_the_stack() {
+    let names: &[&str] = &["VirtualQuery", "CreateThread", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let b = with_stack(0x5000, 0x5000);
+    let program = program_with(b, false, imports, &[0; 0x100], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let info = l.at(0x40) as i32;
+        let thread_info = l.at(0x80) as i32;
+        let thread_span = l.at(0xC0);
+        let mut over = a.create_label();
+        a.xor(ebx, ebx)?;
+        // The main thread's stack, from its allocation base to its top.
+        push_args(a, &[info, 28])?;
+        a.push(esp)?;
+        a.call(f("VirtualQuery"))?;
+        a.mov(eax, dword_ptr(4).fs())?;
+        a.sub(eax, dword_ptr(info as u64 + 4))?;
+        a.cmp(eax, 0x2_0000)?;
+        bit_if_equal(a, 0)?;
+        // Its committed pages end at the top.
+        a.mov(eax, dword_ptr(info as u64))?;
+        a.add(eax, dword_ptr(info as u64 + 12))?;
+        a.cmp(eax, dword_ptr(4).fs())?;
+        bit_if_equal(a, 1)?;
+        // A thread with the program's stack size, which measures its own:
+        // its parameter, flags and where its id goes (which Windows 98
+        // needs).
+        push_args(a, &[0, 0, l.at(0xC4) as i32])?;
+        // Its address, which the CALL over it pushes.
+        a.call(over)?;
+        push_args(a, &[thread_info, 28])?;
+        a.push(esp)?;
+        a.call(f("VirtualQuery"))?;
+        a.mov(eax, dword_ptr(4).fs())?;
+        a.sub(eax, dword_ptr(thread_info as u64 + 4))?;
+        a.mov(dword_ptr(thread_span), eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        push_args(a, &[0, 0])?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.cmp(dword_ptr(thread_span), 0x2_0000)?;
+        bit_if_equal(a, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run("stack_floor", program);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b} {}",
+        !code & 7,
+        text
+    );
+}
+
+/// A thread's stack grows down to the floor below it, and a page fault in
+/// the floor is a stack overflow: a thread with a 128 KB stack, 64 KB of
+/// it committed, reads 96 KB below its top and then 32 KB into the floor,
+/// and the unhandled exception filter ends the program with a bit each
+/// for the exception's code, its address and the read that grew the
+/// stack.
+#[test]
+fn a_stack_grows_to_its_floor_and_overflows_in_it() {
+    let names: &[&str] = &[
+        "SetUnhandledExceptionFilter",
+        "CreateThread",
+        "WaitForSingleObject",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let b = with_stack(0x1_0000, 0x1000);
+    let program = program_with(b, false, imports, &[0; 0x10], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (grew, floor, id) = (l.at(0), l.at(4), l.at(8));
+        let mut over_filter = a.create_label();
+        let mut over_thread = a.create_label();
+        // The filter, whose address the CALL over it pushes as
+        // SetUnhandledExceptionFilter's argument: the record's code at
+        // 0, the fault's address at 24.
+        a.call(over_filter)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax))?;
+        a.xor(ebx, ebx)?;
+        a.cmp(dword_ptr(ecx), 0xC000_00FDu32 as i32)?;
+        bit_if_equal(a, 0)?;
+        a.mov(eax, dword_ptr(ecx + 24))?;
+        a.cmp(eax, dword_ptr(floor))?;
+        bit_if_equal(a, 1)?;
+        a.cmp(dword_ptr(grew), 1)?;
+        bit_if_equal(a, 2)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()?;
+        a.set_label(&mut over_filter)?;
+        a.call(f("SetUnhandledExceptionFilter"))?;
+        // A thread with a 128 KB stack: its parameter, flags and where
+        // its id goes, then its address, which the CALL over it pushes.
+        push_args(a, &[0, 0, id as i32])?;
+        a.call(over_thread)?;
+        a.mov(eax, dword_ptr(4).fs())?;
+        a.mov(ecx, dword_ptr(eax - 0x1_8000))?;
+        a.mov(dword_ptr(grew), 1)?;
+        a.sub(eax, 0x2_8000)?;
+        a.mov(dword_ptr(floor), eax)?;
+        a.mov(ecx, dword_ptr(eax))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over_thread)?;
+        push_args(a, &[0, 0x2_0000])?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        // The thread ended without a fault.
+        a.xor(eax, eax)?;
+        a.ret()
+    });
+    let (code, text) = run("stack_overflow", program);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b} {}",
+        !code & 7,
         text
     );
 }

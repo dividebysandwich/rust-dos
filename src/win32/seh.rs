@@ -149,12 +149,13 @@ fn present(cpu: &Cpu, lin: u32, len: u32) -> bool {
 }
 
 /// A page fault at `address` in the running thread's stack, below what is
-/// committed of it: commit down to there. Whether it was one.
+/// committed of it and above its floor: commit down to there. Whether it
+/// was one.
 fn grow_stack(cpu: &mut Cpu, address: u32) -> bool {
     let Some(thread) = process(cpu).current_thread() else {
         return false;
     };
-    let (bottom, tib) = (thread.stack.0, thread.tib);
+    let (bottom, tib) = (thread.stack_bottom(), thread.tib);
     let Some(limit) = super::peek_32(cpu, tib + TIB_STACK_LIMIT) else {
         return false;
     };
@@ -298,11 +299,13 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
     raise(cpu, ctx, &fpu, code, 0, ctx.eip, &params);
 }
 
-/// Whether `address` is in the running thread's stack reserve.
+/// Whether `address` is in the running thread's stack reserve, its floor
+/// included: a stack that runs past what it may grow to faults there
+/// first, and the page below the reservation is another region's.
 fn in_stack_reserve(cpu: &mut Cpu, address: u32) -> bool {
     process(cpu)
         .current_thread()
-        .is_some_and(|t| (t.stack.0.saturating_sub(PAGE)..t.stack.1).contains(&address))
+        .is_some_and(|t| (t.stack.0..t.stack.1).contains(&address))
 }
 
 /// Raise the exception `code` in the running thread, at the context

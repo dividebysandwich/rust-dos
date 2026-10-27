@@ -97,23 +97,19 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let selector = thread::selector_of(index);
     let reserve = stack_size
         .max(process(cpu).stack_reserve)
-        .clamp(GRANULARITY, 0x100_0000)
-        .next_multiple_of(GRANULARITY);
+        .clamp(GRANULARITY, 0x100_0000);
     let made = with_process(cpu, |p, bus| {
         if let Some(t) = ended {
             release(bus, p, t);
         }
         let memory = &mut p.memory;
-        let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
-        let top = stack + reserve;
-        let commit = reserve.min(STACK_COMMIT);
-        memory.commit(bus, top - commit, commit, USER | WRITABLE)?;
+        let ((stack, top), limit) = thread::reserve_stack(memory, bus, reserve, STACK_COMMIT)?;
         let tib = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;
         memory.commit(bus, tib, PAGE, USER | WRITABLE)?;
         for (field, value) in [
             (TIB_EXCEPTION_LIST, 0xFFFF_FFFF),
             (TIB_STACK_TOP, top),
-            (TIB_STACK_LIMIT, top - commit),
+            (TIB_STACK_LIMIT, limit),
             (TIB_SELF, tib),
             (TIB_TLS_ARRAY, tib + TLS_ARRAY),
             (
