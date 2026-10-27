@@ -12,10 +12,12 @@
 //! queue. A 16-bit program's messages have Windows 3.1's lParam, the
 //! global handle and the atom or status in its two words; a 32-bit
 //! program's have Win32's, WM_DDE_ACK's and WM_DDE_DATA's two values in
-//! a global block (PackDDElParam). The other DDE messages (WM_DDE_POKE,
-//! WM_DDE_ADVISE and WM_DDE_UNADVISE) get a negative WM_DDE_ACK, and
-//! the topics Explorer has besides Program Manager's (the "Shell" and
-//! "AppProperties" topics, the "Folders" application) get no answer.
+//! a global block (PackDDElParam). Their atoms are in the global atom
+//! table of their kind, Win16's or KERNEL32's, which are apart here.
+//! The other DDE messages (WM_DDE_POKE, WM_DDE_ADVISE and
+//! WM_DDE_UNADVISE) get a negative WM_DDE_ACK, and the topics Explorer
+//! has besides Program Manager's (the "Shell" and "AppProperties"
+//! topics, the "Folders" application) get no answer.
 
 use super::class::{self, CS_GLOBALCLASS, Class};
 use super::message::{self, Msg};
@@ -126,20 +128,40 @@ pub fn wnd_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
+/// The name of the global atom `a`, from the table of 16-bit programs'
+/// atoms or of 32-bit ones'.
+fn atom_name(cpu: &mut Cpu, a: u32, sixteen: bool) -> Option<String> {
+    if sixteen {
+        crate::win16::atom_name(cpu, a as u16)
+    } else {
+        crate::win32::kernel32::atom::name_of(cpu, a as u16)
+    }
+}
+
+/// A global atom of `name` for a 16-bit or 32-bit program.
+fn add_atom(cpu: &mut Cpu, name: &str, sixteen: bool) -> u32 {
+    if sixteen {
+        crate::win16::atom_of(cpu, name.to_string(), true) as u32
+    } else {
+        crate::win32::kernel32::atom::add(cpu, name) as u32
+    }
+}
+
 /// Whether the name the atom `a` has is Program Manager's; 0 stands for
 /// any.
-fn is_progman(cpu: &Cpu, a: u32) -> bool {
-    a == 0 || crate::win16::atom_name(cpu, a as u16).is_some_and(|n| n.eq_ignore_ascii_case(NAME))
+fn is_progman(cpu: &mut Cpu, a: u32, sixteen: bool) -> bool {
+    a == 0 || atom_name(cpu, a, sixteen).is_some_and(|n| n.eq_ignore_ascii_case(NAME))
 }
 
 /// WM_DDE_INITIATE from `client` for the application and topic whose
 /// atoms `lp` has: Program Manager's (or any) is acknowledged with
 /// WM_DDE_ACK, sent back with atoms of its own, as the server sends it.
 fn initiate(cpu: &mut Cpu, hwnd: u32, client: u32, lp: u32) -> Option<u32> {
+    let sixteen = is_16bit(cpu, client);
     if client == hwnd
         || !user(cpu).is_window(client)
-        || !is_progman(cpu, lp & 0xFFFF)
-        || !is_progman(cpu, lp >> 16)
+        || !is_progman(cpu, lp & 0xFFFF, sixteen)
+        || !is_progman(cpu, lp >> 16, sixteen)
     {
         return Some(0);
     }
@@ -147,8 +169,8 @@ fn initiate(cpu: &mut Cpu, hwnd: u32, client: u32, lp: u32) -> Option<u32> {
         "[W32] Program Manager: DDE conversation with {:04X}",
         client
     ));
-    let app = crate::win16::atom_of(cpu, NAME.to_string(), true) as u32;
-    let topic = crate::win16::atom_of(cpu, NAME.to_string(), true) as u32;
+    let app = add_atom(cpu, NAME, sixteen);
+    let topic = add_atom(cpu, NAME, sixteen);
     let vars = vec![client, WM_DDE_ACK, hwnd, app | topic << 16];
     task::start(cpu, task::PROGMAN, vars, 0)
 }
@@ -268,7 +290,7 @@ pub fn posted(cpu: &mut Cpu, hwnd: u32, msg: u32, client: u32, lp: u32) -> Optio
         }
         WM_DDE_REQUEST => {
             let (format, item) = (lp & 0xFFFF, lp >> 16);
-            let name = crate::win16::atom_name(cpu, item as u16).unwrap_or_default();
+            let name = atom_name(cpu, item, sixteen).unwrap_or_default();
             let text = match format {
                 CF_TEXT => crate::win32::shell32::progman_request(cpu, &name),
                 _ => None,

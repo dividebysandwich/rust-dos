@@ -1200,8 +1200,6 @@ fn direct_res_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // The atom tables: the tasks' local ones and the global one are one
 // table here, whose atoms are C000h on, an integer atom its number.
-// KERNEL32's global atoms are this table too, as Windows 95 shares the
-// global one between 16-bit and 32-bit programs.
 
 /// The atom of `name` (a 16:16 pointer, or an integer atom when its
 /// selector is 0), added to the table with `add` or used once more; 0
@@ -1263,14 +1261,9 @@ pub fn add_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// DeleteAtom: a string atom's count of uses less one, the atom gone at
 /// 0. 0 when it went (or is an integer atom), the atom when it didn't.
 pub fn delete_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(release_atom(cpu, args[0] as u16) as u32)
-}
-
-/// DeleteAtom's work: 0 when the atom went or is an integer atom, the
-/// atom when it isn't one.
-pub fn release_atom(cpu: &mut Cpu, a: u16) -> u16 {
+    let a = args[0] as u16;
     if a < 0xC000 {
-        return 0;
+        return Some(0);
     }
     match cpu.bus.win32.win16.atoms.get_mut((a - 0xC000) as usize) {
         Some((name, n)) if *n > 0 => {
@@ -1278,9 +1271,9 @@ pub fn release_atom(cpu: &mut Cpu, a: u16) -> u16 {
             if *n == 0 {
                 name.clear();
             }
-            0
+            Some(0)
         }
-        _ => a,
+        _ => Some(a as u32),
     }
 }
 
