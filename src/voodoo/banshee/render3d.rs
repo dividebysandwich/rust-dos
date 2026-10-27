@@ -547,6 +547,9 @@ mod tests {
             ns: 1_000_000_000,
             ticks: due,
         };
+        // Busy until the overlay shows the new buffer, which the timer
+        // event at the retrace does.
+        assert!(busy(&v, then), "busy until the swap is done");
         v.service(then);
         assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, then), 0x20_0000);
         assert!(!busy(&v, then));
