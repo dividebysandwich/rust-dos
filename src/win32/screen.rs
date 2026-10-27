@@ -556,7 +556,7 @@ fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()>
     }
     let half = height < 300;
     let lines = if half { height * 2 } else { height };
-    let narrow = width < 400;
+    let narrow = width < card::NARROW_WIDTH;
     let t = if narrow {
         let t = card_timing(width * 2, lines);
         Timing {

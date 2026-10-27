@@ -732,8 +732,15 @@ fn eight_and_32_bit_modes_are_the_cards() {
     let clut = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap().clut;
     assert_eq!(clut[7], 0x07_40F8);
     assert_eq!(clut[200], 0xC8_4037);
-    assert_eq!(shown(&mut cpu, 5, 0), [7, 0x40, 0xF8]);
-    assert_eq!(shown(&mut cpu, 5, 1), [7, 0x40, 0xF8]);
+    // The card runs it at half the pixel clock, so the monitor shows each
+    // pixel twice as wide as well as twice as high: the picture spans
+    // the screen as a 640x400 one does, as mode 13h's does.
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+    for (x, y) in [(10, 0), (11, 0), (10, 1), (11, 1)] {
+        assert_eq!(shown(&mut cpu, x, y), [7, 0x40, 0xF8], "({x}, {y})");
+    }
+    assert_eq!(shown(&mut cpu, 9, 0), [0, 0x40, 0xFF]);
+    assert_eq!(shown(&mut cpu, 12, 0), [0, 0x40, 0xFF]);
     let timing = cpu.bus.vga.timing();
     assert_eq!(timing.display, 400);
     assert!((timing.hz() - 70.0).abs() < 1.0, "{}", timing.hz());
@@ -2038,7 +2045,8 @@ fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
     the_cursor_shows_in_a_small_mode("cursor_vesa_320", None, (320, 240));
 }
 
-/// A Voodoo3 shows 320x200 with its lines doubled.
+/// A Voodoo3 shows 320x200 at twice its size both ways: its lines
+/// doubled, and its pixels at half the pixel clock.
 #[test]
 fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
     the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
