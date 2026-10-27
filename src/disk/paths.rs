@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// The entries of a host folder, as (host name, DOS name).
+type HostEntries = Rc<[(String, String)]>;
+
 impl DiskController {
     // ========================================================================
     // PATH RESOLUTION
@@ -268,18 +271,45 @@ impl DiskController {
     /// component names: its long name in any case, or its short name. A
     /// name that matches nothing comes back uppercased, for creating it.
     fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
-        let target_upper = target.to_ascii_uppercase();
+        self.find_host_entry(dir, target).1.unwrap_or_else(|| {
+            let upper = target.to_ascii_uppercase();
+            (upper.clone(), upper)
+        })
+    }
+
+    /// The entries of the host folder `dir`, and the one named `name`: by
+    /// its long name in any case, or by its short name. A name the kept
+    /// entries lack is looked for in a fresh read, unless a recent read
+    /// lacked it too (`HostDirCache`).
+    pub(super) fn find_host_entry(
+        &self,
+        dir: &Path,
+        name: &str,
+    ) -> (HostEntries, Option<(String, String)>) {
+        let upper = name.to_ascii_uppercase();
         let find = |entries: &[(String, String)]| {
             entries
                 .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(target))
-                .or_else(|| entries.iter().find(|(_, short)| *short == target_upper))
+                .find(|(long, _)| long.eq_ignore_ascii_case(name))
+                .or_else(|| entries.iter().find(|(_, short)| *short == upper))
                 .cloned()
         };
-        let (entries, kept) = self.host_entries(dir);
-        find(&entries)
-            .or_else(|| kept.then(|| find(&self.host_dirs.reread(dir, || Self::read_host_entries(dir)))).flatten())
-            .unwrap_or((target_upper.clone(), target_upper))
+        let (mut entries, kept) = self.host_entries(dir);
+        if let Some(found) = find(&entries) {
+            return (entries, Some(found));
+        }
+        if kept {
+            if self.host_dirs.known_missing(dir, &upper) {
+                return (entries, None);
+            }
+            entries = self.host_dirs.reread(dir, || Self::read_host_entries(dir));
+            if let Some(found) = find(&entries) {
+                return (entries, Some(found));
+            }
+        }
+        // The entries were just read.
+        self.host_dirs.note_missing(dir, &upper);
+        (entries, None)
     }
 
     // ========================================================================

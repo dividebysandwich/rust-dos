@@ -1024,27 +1024,19 @@ fn age(dir: &Path) {
     options.open(dir).unwrap().set_modified(at).unwrap();
 }
 
-/// Files enough for a folder's entries to be kept (`MIN_ENTRIES`).
-fn fill(dir: &Path) {
-    for i in 0..HostDirCache::MIN_ENTRIES {
-        fs::write(dir.join(format!("FILL{:02}.DAT", i)), b"x").unwrap();
-    }
-}
-
 #[test]
 fn host_folder_entries_are_kept_until_the_folder_changes() {
     let root = scratch("host_dir_cache");
     fs::create_dir(root.join("DATA")).unwrap();
     fs::write(root.join("DATA").join("RGN001.GFF"), b"x").unwrap();
-    fill(&root.join("DATA"));
     age(&root.join("DATA"));
     let disk = DiskController::new(root.clone());
     let data = disk.resolve_path(r"C:\DATA").unwrap();
     assert!(disk.is_file(r"C:\DATA\RGN001.GFF"));
     assert!(disk.host_dirs.dirs.borrow().contains_key(&data), "an old folder is kept");
 
-    // Another program adds a file: the folder's time moves, and it is
-    // read again.
+    // Another program adds a file: a name the kept entries lack is looked
+    // for in a fresh read, which takes the folder's time again.
     fs::write(data.join("Long Name.txt"), b"x").unwrap();
     assert!(disk.is_file(r"C:\DATA\LONGNA~1.TXT"));
 
@@ -1057,7 +1049,6 @@ fn host_folder_entries_are_kept_until_the_folder_changes() {
 fn host_folders_are_read_again_after_the_guest_changes_one() {
     let root = scratch("host_dir_cache_guest");
     fs::write(root.join("OLD.DAT"), b"x").unwrap();
-    fill(&root);
     age(&root);
     let mut disk = DiskController::new(root.clone());
     assert!(disk.is_file(r"C:\OLD.DAT"));
@@ -1156,19 +1147,31 @@ fn find_next_sees_the_guest_s_changes_mid_search() {
 }
 
 #[test]
-fn small_host_folders_are_read_each_time() {
-    let root = scratch("host_dir_cache_small");
+fn a_kept_folder_is_checked_again_after_a_while() {
+    let root = scratch("host_dir_cache_trust");
     fs::write(root.join("GAME.EXE"), b"x").unwrap();
     age(&root);
     let disk = DiskController::new(root.clone());
     assert!(disk.is_file(r"C:\GAME.EXE"));
-    assert!(disk.host_dirs.dirs.borrow().is_empty());
+    let host_root = disk.resolve_path(r"C:\").unwrap();
+    assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root), "a small folder is kept too");
+
+    // Another program adds a file and the folder's time moves. The time
+    // isn't checked again within `TRUST`.
+    fs::write(root.join("SAVE.DAT"), b"x").unwrap();
+    assert!(disk.is_file(r"C:\GAME.EXE"));
+    assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
+
+    // Then it is: the folder changed within the last two seconds, and
+    // isn't kept.
+    disk.host_dirs.expire();
+    assert!(disk.is_file(r"C:\GAME.EXE"));
+    assert!(!disk.host_dirs.dirs.borrow().contains_key(&host_root));
 }
 
 #[test]
 fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     let root = scratch("host_dir_cache_unmoved");
-    fill(&root);
     age(&root);
     let disk = DiskController::new(root.clone());
     assert!(!disk.is_file(r"C:\PATCH.DAT"));
@@ -1176,29 +1179,74 @@ fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
 
     // Another program adds a file and the folder's time stays where it
-    // was, as on FAT under Windows or after an unpacker restores it.
+    // was, as on FAT under Windows or after an unpacker restores it. A
+    // name looked for in vain less than `TRUST` ago is still missing,
+    // without the folder being read again: it comes back uppercased, as a
+    // name to create. Then it is looked for again. (A Windows host finds
+    // the file by the uppercased name too, so `is_file` can't tell.)
     fs::write(root.join("Patch.dat"), b"x").unwrap();
     age(&root);
+    let name = |disk: &DiskController| {
+        let path = disk.resolve_path(r"C:\PATCH.DAT").unwrap();
+        path.file_name().unwrap().to_owned()
+    };
+    assert_eq!(name(&disk), "PATCH.DAT");
+    disk.host_dirs.expire();
+    assert_eq!(name(&disk), "Patch.dat");
     assert!(disk.is_file(r"C:\PATCH.DAT"));
-    let found: Vec<String> = disk.list_directory(r"C:\PATCH2.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
-    assert!(found.is_empty());
+    // A name not looked for before is looked for in a fresh read at once.
+    fs::write(root.join("Other.dat"), b"x").unwrap();
+    age(&root);
+    assert!(disk.is_file(r"C:\OTHER.DAT"));
+    // A search for one name looks it up the same way.
+    let list = |disk: &DiskController, spec: &str| -> Vec<String> {
+        disk.list_directory(spec, 0).unwrap().into_iter().map(|e| e.filename).collect()
+    };
+    assert!(list(&disk, r"C:\PATCH2.DAT").is_empty());
     fs::write(root.join("PATCH2.DAT"), b"x").unwrap();
     age(&root);
-    let found: Vec<String> = disk.list_directory(r"C:\PATCH2.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
-    assert_eq!(found, ["PATCH2.DAT"]);
+    assert!(list(&disk, r"C:\PATCH2.DAT").is_empty());
+    disk.host_dirs.expire();
+    assert_eq!(list(&disk, r"C:\PATCH2.DAT"), ["PATCH2.DAT"]);
 
     // A wildcard search lists the folder as it is.
     fs::write(root.join("PATCH3.DAT"), b"x").unwrap();
     age(&root);
-    let found: Vec<String> = disk.list_directory(r"C:\PATCH*.DAT", 0).unwrap().into_iter().map(|e| e.filename).collect();
-    assert_eq!(found, ["PATCH.DAT", "PATCH2.DAT", "PATCH3.DAT"]);
+    assert_eq!(list(&disk, r"C:\PATCH*.DAT"), ["PATCH.DAT", "PATCH2.DAT", "PATCH3.DAT"]);
+}
+
+#[test]
+fn a_file_another_program_made_after_a_miss_isn_t_made_again() {
+    let root = scratch("host_dir_cache_create");
+    age(&root);
+    let mut disk = DiskController::new(root.clone());
+    assert!(!disk.is_file(r"C:\SCORES.DAT"));
+    assert!(!disk.is_file(r"C:\CONFIG.DAT"));
+
+    // Another program makes both files within `TRUST` of the misses, and
+    // the folder's time stays. The guest's creates find them, rather than
+    // making a second file of each in capitals beside them (on a host
+    // that tells cases apart).
+    fs::write(root.join("Scores.dat"), b"old").unwrap();
+    fs::write(root.join("Config.dat"), b"old").unwrap();
+    age(&root);
+    assert_eq!(disk.create_new_file(r"C:\SCORES.DAT", PSP), Err(0x50));
+    let handle = disk.create_file(r"C:\CONFIG.DAT", PSP).unwrap();
+    disk.write_file(handle, b"new").unwrap();
+    disk.close_file(handle);
+    let mut names: Vec<String> = fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Config.dat", "Scores.dat"]);
+    assert_eq!(fs::read(root.join("Config.dat")).unwrap(), b"new");
 }
 
 #[test]
 fn a_create_over_an_existing_file_keeps_the_folders() {
     let root = scratch("host_dir_cache_recreate");
     fs::write(root.join("CONFIG.DAT"), b"x").unwrap();
-    fill(&root);
     age(&root);
     let mut disk = DiskController::new(root.clone());
     assert!(disk.is_file(r"C:\CONFIG.DAT"));
