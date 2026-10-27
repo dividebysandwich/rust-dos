@@ -557,14 +557,18 @@ fn mmio_reads_and_writes_riff_chunks() {
     }
 }
 
-// The sequencer test's data: its two MCI strings, the alias, and an
+// The sequencer test's data: its two MCI strings, the alias, an
 // MCI_SEQ_SET_PARMS (dwCallback, dwTimeFormat, dwAudio, dwTempo, dwPort,
-// dwSlave, dwMaster, dwOffset).
+// dwSlave, dwMaster, dwOffset) and an MCI_STATUS_PARMS (dwCallback,
+// dwReturn, dwItem, dwTrack).
 const SEQ_OPEN: u32 = 0x00;
 const SEQ_CLOSE: u32 = 0x40;
 const SEQ_ALIAS: u32 = 0x60;
 const SEQ_PARMS: u32 = 0x80;
 const SEQ_PORT: u32 = SEQ_PARMS + 16;
+const SEQ_STATUS: u32 = 0xA0;
+const SEQ_RETURN: u32 = SEQ_STATUS + 4;
+const SEQ_ITEM: u32 = SEQ_STATUS + 8;
 
 /// A Standard MIDI File of one empty track.
 fn empty_midi() -> Vec<u8> {
@@ -578,14 +582,27 @@ fn empty_midi() -> Vec<u8> {
 }
 
 /// M.MID opened on the sequencer, its port set to Win32's MIDI_MAPPER,
-/// (UINT)-1, then to port 2, which doesn't exist, and closed. Bits 0 to 3
-/// of the exit code: the open worked, the mapper was taken, port 2 was
-/// out of range, the close worked.
+/// (UINT)-1, then to port 0, then to port 2, which doesn't exist, and
+/// closed, with MCI_STATUS of the port after each set. Bits of the exit
+/// code: 0, the open worked; 1 and 2, the mapper was taken and reported
+/// as 65535, the 16-bit driver's word; 3 and 4, port 0 was taken and
+/// reported; 5 and 6, port 2 was out of range and port 0 stayed; 7, the
+/// close worked.
 fn sequencer_program() -> Vec<u8> {
     let mut data = vec![0u8; 0xC0];
-    put(&mut data, SEQ_OPEN as usize, b"open M.MID type sequencer alias m");
+    put(
+        &mut data,
+        SEQ_OPEN as usize,
+        b"open M.MID type sequencer alias m",
+    );
     put(&mut data, SEQ_CLOSE as usize, b"close m");
     put(&mut data, SEQ_ALIAS as usize, b"m");
+    const MCI_SEQ_STATUS_PORT: u32 = 0x4003;
+    put(
+        &mut data,
+        SEQ_ITEM as usize,
+        &MCI_SEQ_STATUS_PORT.to_le_bytes(),
+    );
     let imports: &[(&str, &[&str])] = &[
         ("KERNEL32.dll", &["ExitProcess"]),
         (
@@ -594,15 +611,22 @@ fn sequencer_program() -> Vec<u8> {
         ),
     ];
     const MCI_SET: i32 = 0x80D;
+    const MCI_STATUS: i32 = 0x814;
     const MCI_SEQ_SET_PORT: i32 = 0x0002_0000;
+    const MCI_STATUS_ITEM: i32 = 0x100;
     const MCIERR_OUTOFRANGE: i32 = 282;
+    let sets = [
+        (-1, 0, 65535, 1),
+        (0, 0, 0, 3),
+        (2, MCIERR_OUTOFRANGE, 0, 5),
+    ];
     program(imports, &data, |a, l| {
         a.xor(ebx, ebx)?;
         call(a, l.import(1), &[l.at(SEQ_OPEN) as i32, 0, 0, 0])?;
         check_eax(a, 0, 0)?;
         call(a, l.import(2), &[l.at(SEQ_ALIAS) as i32])?;
         a.mov(esi, eax)?;
-        for (port, result, bit) in [(-1, 0, 1), (2, MCIERR_OUTOFRANGE, 2)] {
+        for (port, result, reported, bit) in sets {
             a.mov(dword_ptr(l.at(SEQ_PORT)), port)?;
             a.push(l.at(SEQ_PARMS) as i32)?;
             a.push(MCI_SEQ_SET_PORT)?;
@@ -610,9 +634,22 @@ fn sequencer_program() -> Vec<u8> {
             a.push(esi)?;
             a.call(l.import(3))?;
             check_eax(a, result, bit)?;
+            a.mov(dword_ptr(l.at(SEQ_RETURN)), -2)?;
+            a.push(l.at(SEQ_STATUS) as i32)?;
+            a.push(MCI_STATUS_ITEM)?;
+            a.push(MCI_STATUS)?;
+            a.push(esi)?;
+            a.call(l.import(3))?;
+            a.test(eax, eax)?;
+            let mut failed = a.create_label();
+            a.jne(failed)?;
+            a.mov(eax, dword_ptr(l.at(SEQ_RETURN)))?;
+            check_eax(a, reported, bit + 1)?;
+            a.set_label(&mut failed)?;
+            a.nop()?;
         }
         call(a, l.import(1), &[l.at(SEQ_CLOSE) as i32, 0, 0, 0])?;
-        check_eax(a, 0, 3)?;
+        check_eax(a, 0, 7)?;
         a.push(ebx)?;
         a.call(l.import(0))?;
         a.int3()
@@ -625,6 +662,6 @@ fn the_sequencer_takes_win32s_midi_mapper_as_its_port() {
         let files = [("T.EXE", sequencer_program()), ("M.MID", empty_midi())];
         let mut cpu = machine("sequencer", core, &files, |_| {});
         run_to_exit(&mut cpu, 20_000, |_| {});
-        assert_eq!(cpu.errorlevel, 0x0F, "{core:?}: {:?}", printed(&cpu));
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
     }
 }

@@ -59,7 +59,8 @@ pub struct Seq {
     pub started: Option<u64>,
     pub until: u64,
     pub next: usize,
-    /// Whether it sends to the synthesizer (port none doesn't).
+    /// The MIDI port: 0, the mapper, or none, which doesn't send to the
+    /// synthesizer.
     pub port: u32,
     pub paused: bool,
 }
@@ -406,9 +407,11 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
             if flags & MCI_SEQ_SET_PORT != 0 {
                 // Windows 9x's sequencer is a 16-bit driver and sees the
                 // port's low word, so Win32's MIDI_MAPPER, (UINT)-1, is
-                // the mapper there too. Wages of War passes that.
-                match p.port & 0xFFFF {
-                    0 | MCI_SEQ_MAPPER => seq(cpu, i).port = MCI_SEQ_MAPPER,
+                // the mapper there too. Wages of War passes that. The
+                // word is kept as given, and MCI_STATUS reports it.
+                let port = p.port & 0xFFFF;
+                match port {
+                    0 | MCI_SEQ_MAPPER => seq(cpu, i).port = port,
                     MCI_SEQ_NONE => {
                         halt_notes(cpu, i);
                         seq(cpu, i).port = MCI_SEQ_NONE;
