@@ -236,7 +236,21 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
 /// AdjustWindowRectEx puts around an empty rectangle, without the
 /// caption. A WS_OVERLAPPEDWINDOW keeps its 4-pixel thick frame, so it
 /// is maximized at (-4, -4), as on Windows 98.
+///
+/// A child window (an MDI child, say) takes WS_BORDER out of a
+/// WS_CAPTION style first, leaving WS_DLGFRAME | WS_THICKFRAME, which
+/// AdjustWindowRectEx gives no thick frame. Wine's user32 win.c tests
+/// check that on Windows a maximized child with WS_CAPTION |
+/// WS_THICKFRAME fills its parent's client area exactly.
 fn max_frame(style: u32, ex: u32) -> Rect {
+    if style & WS_CHILD != 0 {
+        let framed = if style & WS_CAPTION == WS_CAPTION {
+            style & !WS_BORDER
+        } else {
+            style
+        };
+        return adjust(Rect::default(), framed, ex, false);
+    }
     let mut frame = adjust(Rect::default(), style, ex, false);
     if style & WS_CAPTION == WS_CAPTION {
         frame.top += if ex & WS_EX_TOOLWINDOW != 0 {
@@ -3164,6 +3178,32 @@ mod tests {
         assert_eq!(
             (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
             (646, 486, -3, -3)
+        );
+    }
+
+    /// A child with WS_CAPTION | WS_THICKFRAME, an MDI child say, is
+    /// maximized to its parent's client area with no frame off it, as
+    /// Wine's win.c tests check on Windows.
+    #[test]
+    fn a_maximized_thick_frame_child_fills_its_parent() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let parent = Window {
+            client: Rect::new(0, 0, 374, 235),
+            ..Window::default()
+        };
+        let parent = user(&mut cpu).new_window(parent).expect("a parent");
+        let w = Window {
+            style: WS_CHILD | WS_CAPTION | WS_THICKFRAME,
+            parent,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let at = 0x8000;
+        write_min_max(&mut cpu, hwnd, at);
+        let mm = read_words(&mut cpu, at, 6);
+        assert_eq!(
+            (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
+            (374, 235, 0, 0)
         );
     }
 }
