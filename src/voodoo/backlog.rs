@@ -357,11 +357,15 @@ pub struct Footprint {
 
 impl Default for Footprint {
     fn default() -> Self {
-        Self { textures: Vec::new(), writes_from: u64::MAX }
+        Self {
+            textures: Vec::new(),
+            writes_from: u64::MAX,
+        }
     }
 }
 
-/// Texture ranges kept apart; past them, one range takes in them all.
+/// Texture ranges kept apart; past them, the nearest range takes in a
+/// new one.
 const FOOTPRINT_TEXTURES: usize = 64;
 
 impl Footprint {
@@ -398,18 +402,27 @@ impl Footprint {
         }
     }
 
+    /// Add what the jobs of `other` may read and write.
+    pub fn merge(&mut self, other: &Footprint) {
+        self.writes_from = self.writes_from.min(other.writes_from);
+        for &range in &other.textures {
+            self.texture(range);
+        }
+    }
+
     fn texture(&mut self, (start, end): (u64, u64)) {
-        if self.textures.contains(&(start, end)) {
+        if start >= end || self.textures.iter().any(|&(a, b)| a <= start && end <= b) {
             return;
         }
         if self.textures.len() < FOOTPRINT_TEXTURES {
             self.textures.push((start, end));
             return;
         }
-        let first = self.textures.iter().map(|r| r.0).min().unwrap_or(start);
-        let last = self.textures.iter().map(|r| r.1).max().unwrap_or(end);
-        self.textures.clear();
-        self.textures.push((first.min(start), last.max(end)));
+        // The range nearest to it takes it in.
+        let gap = |&(a, b): &(u64, u64)| start.saturating_sub(b).max(a.saturating_sub(end));
+        if let Some(near) = self.textures.iter_mut().min_by_key(|r| gap(r)) {
+            *near = (near.0.min(start), near.1.max(end));
+        }
     }
 
     /// Whether bytes `start..end` are memory the jobs may read or write.
@@ -1074,17 +1087,36 @@ mod tests {
         assert!(!f.touches(0, u64::MAX), "nothing queued reaches nothing");
         f.texture((0x1000, 0x3000));
         f.texture((0x8000, 0x9000));
-        let word = Word { row: 0, at: 0x40_0000, value: 0 };
-        f.add(&Job::Pixels { fb: Vram::new(16), words: vec![word] });
+        let word = Word {
+            row: 0,
+            at: 0x40_0000,
+            value: 0,
+        };
+        f.add(&Job::Pixels {
+            fb: Vram::new(16),
+            words: vec![word],
+        });
         assert!(f.touches(0x2FFF, 0x3001) && f.touches(0x8FFF, 0x9000));
         assert!(!f.touches(0x3000, 0x8000), "between the textures");
         assert!(f.touches(0x80_0000, 0x80_0004), "above the words written");
         assert!(!f.touches(0x7F_FFFC, 0x80_0000));
-        // Past so many textures, one range takes them all in.
+        // A range within one held already adds nothing.
+        f.texture((0x1800, 0x2000));
+        // Past so many textures, the nearest range takes a new one in:
+        // the last three become one, the first ones stay apart.
         for i in 0..FOOTPRINT_TEXTURES as u64 {
             f.texture((0x10_0000 + 0x100 * i, 0x10_0080 + 0x100 * i));
         }
-        assert!(f.touches(0x3000, 0x3004) && !f.touches(0x10_4000, 0x10_4004));
+        assert!(!f.touches(0x3000, 0x3004) && !f.touches(0x10_4000, 0x10_4004));
+        assert!(
+            !f.touches(0x10_3C80, 0x10_3D00),
+            "between ranges kept apart"
+        );
+        assert!(f.touches(0x10_3D80, 0x10_3E00) && f.touches(0x10_3E80, 0x10_3F00));
+        let mut g = Footprint::default();
+        g.merge(&f);
+        assert!(g.touches(0x2FFF, 0x3001) && g.touches(0x80_0000, 0x80_0004));
+        assert!(!g.touches(0x3000, 0x8000));
         f.clear();
         assert!(!f.touches(0, u64::MAX));
     }

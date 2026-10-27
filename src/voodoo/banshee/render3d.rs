@@ -1131,7 +1131,11 @@ mod tests {
             let value = u32::from_le_bytes(bytes);
             dwords.write(0x60_0000 + dword - port, value, u32::MAX, Now::default());
         }
-        let around = |v: &Voodoo| (0x3F_FFE0..0x40_0080).map(|a| v.fbi.ram.byte(a)).collect::<Vec<_>>();
+        let around = |v: &Voodoo| {
+            (0x3F_FFE0..0x40_0080)
+                .map(|a| v.fbi.ram.byte(a))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(around(&bulk), around(&dwords));
         assert_eq!(bulk.fbi.ram.byte(at as usize - 1), 0xC3);
         assert_eq!(bulk.fbi.ram.byte(at as usize), data[0]);

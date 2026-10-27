@@ -991,9 +991,14 @@ impl Voodoo {
         if !self.backlog.borrow().is_empty() && !self.deferring() {
             self.release_backlog();
         }
+        // Without workers a job is drawn as it is given: it reaches
+        // nothing after.
+        let workers = self.pool.workers() > 0;
         for job in jobs {
-            self.footprint.borrow_mut().add(&job);
-            self.outstanding.set(self.pool.workers() > 0);
+            if workers {
+                self.footprint.borrow_mut().add(&job);
+            }
+            self.outstanding.set(workers);
             self.pool.submit(job);
         }
     }
@@ -1003,10 +1008,18 @@ impl Voodoo {
         if self.backlog.borrow().is_empty() {
             return;
         }
-        let held = self.backlog.borrow_mut().take();
+        // What they reach is the backlog's footprint, which they take
+        // along.
+        let workers = self.pool.workers() > 0;
+        let held = {
+            let mut backlog = self.backlog.borrow_mut();
+            if workers {
+                self.footprint.borrow_mut().merge(backlog.footprint());
+            }
+            backlog.take()
+        };
         for job in held {
-            self.footprint.borrow_mut().add(&job);
-            self.outstanding.set(self.pool.workers() > 0);
+            self.outstanding.set(workers);
             self.pool.submit(job);
         }
     }
