@@ -817,6 +817,218 @@ fn render_targets_and_z_buffers_are_in_the_cards_memory() {
     assert!(offsets[1] >= offsets[0] + 512 * 128);
 }
 
+const S_SET_COLOR_KEY: u32 = 29;
+const DDCKEY_SRCBLT: u32 = 8;
+const DDBLT_KEYDESTOVERRIDE: u32 = 0x4000;
+const DDBLT_KEYSRC: u32 = 0x8000;
+/// The destination rectangles of the blits, 16 bytes each.
+const BLT_RECTS: u32 = 0x800;
+/// The source's color key.
+const KEY: u32 = 0x840;
+/// The source's key color, magenta.
+const MAGENTA: u16 = 0xF81F;
+/// The 4x2 source's pixels, row by row: the key and colors.
+const SOURCE: [[u16; 4]; 2] = [
+    [MAGENTA, 0x1234, MAGENTA, 0x5678],
+    [0x9ABC, MAGENTA, 0xDEF0, MAGENTA],
+];
+/// The color the back buffer is filled with first.
+const FILL: u16 = 0x0841;
+
+/// Full screen at 640x480x16 with a back buffer, which is filled, then
+/// gets a 16-bit system memory surface blitted onto it: through the
+/// source's color key at (101, 50), copied as it is at (200, 10),
+/// stretched twice as wide and high through the key at (300, 100), and
+/// at (101, 50) again through a destination key of the fill's color.
+fn keyed_blit_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    desc(
+        &mut d,
+        SYSDESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+        4,
+        2,
+        0,
+    );
+    let pf = SYSDESC + 0x48;
+    for (i, v) in [32, 0x40, 0, 16, 0xF800, 0x07E0, 0x001F].iter().enumerate() {
+        put32(&mut d, pf + 4 * i as u32, *v);
+    }
+    put32(&mut d, LOCK2, 108);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, FILL as u32);
+    // The destination key: the fill's color.
+    put32(&mut d, FX + 0x54, FILL as u32);
+    put32(&mut d, FX + 0x58, FILL as u32);
+    put32(&mut d, KEY, MAGENTA as u32);
+    put32(&mut d, KEY + 4, MAGENTA as u32);
+    let rects = [[101, 50, 105, 52], [200, 10, 204, 12], [300, 100, 308, 104]];
+    for (i, r) in rects.iter().enumerate() {
+        for (j, v) in r.iter().enumerate() {
+            put32(&mut d, BLT_RECTS + 16 * i as u32 + 4 * j as u32, *v);
+        }
+    }
+    program(&[USER32, GDI32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(SYS), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            SYS,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCK2), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edi, dword_ptr(l.at(LOCK2 + 0x24)))?;
+        for row in SOURCE {
+            for (i, &pixel) in row.iter().enumerate() {
+                a.mov(word_ptr(edi + 2 * i as i32), pixel as u32)?;
+            }
+            a.add(edi, dword_ptr(l.at(LOCK2 + 0x10)))?;
+        }
+        c.com(a, l, SYS, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(
+            a,
+            l,
+            SYS,
+            S_SET_COLOR_KEY,
+            &[Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        for (i, flags) in [DDBLT_KEYSRC, 0, DDBLT_KEYSRC].into_iter().enumerate() {
+            c.com(
+                a,
+                l,
+                BACK,
+                S_BLT,
+                &[
+                    Arg::At(BLT_RECTS + 16 * i as u32),
+                    Arg::Val(SYS),
+                    Arg::I(0),
+                    Arg::I(flags | DDBLT_WAIT),
+                    Arg::I(0),
+                ],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(BLT_RECTS),
+                Arg::Val(SYS),
+                Arg::I(0),
+                Arg::I(DDBLT_KEYDESTOVERRIDE | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        finish(a, l, 1)
+    })
+}
+
+/// Blits from system memory into the card's memory, a 16-bit back
+/// buffer, keep the pixels the color keys say and only those.
+#[test]
+fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program();
+    let mut cpu = machine("keyed_blit", program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 15)[1..], [0; 14]);
+    // The back buffer is after the screen's 614400 bytes.
+    let pixel = |cpu: &Cpu, x: u32, y: u32| card_word(cpu, 640 * 480 * 2 + y * 1280 + x * 2);
+    let rows = |cpu: &Cpu, x: u32, y: u32, w: u32, h: u32| {
+        (y..y + h)
+            .map(|y| (x..x + w).map(|x| pixel(cpu, x, y)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    let [[k, a, _, b], [c, _, e, _]] = SOURCE;
+    // Through the source's key, then the key's pixels through the
+    // destination's: the source as it is, framed by the fill.
+    assert_eq!(
+        rows(&cpu, 100, 49, 6, 4),
+        [
+            [FILL; 6].to_vec(),
+            vec![FILL, k, a, k, b, FILL],
+            vec![FILL, c, k, e, k, FILL],
+            [FILL; 6].to_vec(),
+        ]
+    );
+    // Copied as it is, the key's pixels too.
+    assert_eq!(rows(&cpu, 200, 10, 4, 2), SOURCE.map(|r| r.to_vec()));
+    // Each pixel twice across and down; the fill where the key was.
+    let stretched: Vec<Vec<u16>> = SOURCE
+        .iter()
+        .flat_map(|row| {
+            let wide: Vec<u16> = row
+                .iter()
+                .flat_map(|&p| [if p == MAGENTA { FILL } else { p }; 2])
+                .collect();
+            [wide.clone(), wide]
+        })
+        .collect();
+    assert_eq!(rows(&cpu, 300, 100, 8, 4), stretched);
+    assert_eq!(pixel(&cpu, 299, 100), FILL);
+    assert_eq!(pixel(&cpu, 308, 103), FILL);
+}
+
 // The 3dfx device of a Voodoo Graphics or Voodoo2 add-on card.
 
 /// A machine with its usual display adapter, the add-on card `board`
