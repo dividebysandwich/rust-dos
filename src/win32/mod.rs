@@ -294,6 +294,9 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The desktop's size as ChangeDisplaySettings set it, and the
+    /// process that set it: None while it is its own (screen.rs).
+    desktop_size: Option<(u32, u32, u32)>,
     /// The built-in DLLs the system directory shows as files
     /// (dll_files.rs), as last shown.
     dll_files: Option<dll_files::Shown>,
@@ -972,6 +975,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     ole32::process_ended(cpu, process.id, &tids);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
+    user32::sysparams::process_ended(cpu, process.id);
     dsound::process_ended(cpu, process.id, &tids);
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
@@ -1268,4 +1272,5 @@ crate::state_fields!(Win32 {
     win16,
     desktop_depth,
     atoms,
+    desktop_size,
 } skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });

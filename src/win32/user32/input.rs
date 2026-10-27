@@ -570,10 +570,11 @@ fn poll_mouse(cpu: &mut Cpu, taken: bool) {
         input.buttons = buttons;
         return;
     }
+    let screen = screen_size(cpu);
     let input = &mut user(cpu).input;
     if (x, y) != input.device_pos {
         input.device_pos = (x, y);
-        input.cursor = clipped(input, x, y);
+        input.cursor = clipped(input, screen, x, y);
         mouse_event_at(cpu, WM_MOUSEMOVE, 0);
     }
     for b in 0..3 {
@@ -598,15 +599,34 @@ fn poll_mouse(cpu: &mut Cpu, taken: bool) {
     }
 }
 
-/// The cursor at (`x`, `y`), kept on the screen and in ClipCursor's
-/// rectangle.
-fn clipped(input: &Input, x: i32, y: i32) -> (i32, i32) {
-    let (w, h) = screen_size();
+/// The cursor at (`x`, `y`), kept on the screen of size `(w, h)` and in
+/// ClipCursor's rectangle.
+fn clipped(input: &Input, (w, h): (i32, i32), x: i32, y: i32) -> (i32, i32) {
     let r = input.clip.unwrap_or(Rect::new(0, 0, w, h));
     (
         x.clamp(r.left, (r.right - 1).max(r.left)),
         y.clamp(r.top, (r.bottom - 1).max(r.top)),
     )
+}
+
+/// The screen's size changed (`sysparams::display_changed`): the cursor
+/// and ClipCursor's rectangle stay on it, and on the desktop the mouse
+/// moves over all of it.
+pub fn screen_changed(cpu: &mut Cpu) {
+    let (w, h) = screen_size(cpu);
+    if user(cpu).desktop {
+        let mouse = &mut cpu.bus.mouse;
+        (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
+        let (x, y) = (mouse.x.min(w - 1), mouse.y.min(h - 1));
+        if (x, y) != (mouse.x, mouse.y) {
+            mouse.warp(x, y);
+            let (x, y) = (mouse.x, mouse.y);
+            user(cpu).input.device_pos = (x, y);
+        }
+    }
+    let input = &mut user(cpu).input;
+    input.clip = input.clip.map(|r| r.intersect(&Rect::new(0, 0, w, h)));
+    input.cursor = clipped(input, (w, h), input.cursor.0, input.cursor.1);
 }
 
 /// The mouse button `b` (left, right, middle) went down or up.
@@ -1672,14 +1692,14 @@ pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     const MOVE: u32 = 0x0001;
     const ABSOLUTE: u32 = 0x8000;
     if flags & MOVE != 0 {
-        let (w, h) = screen_size();
+        let (w, h) = screen_size(cpu);
         let input = &mut user(cpu).input;
         let (x, y) = if flags & ABSOLUTE != 0 {
             (dx * w / 65536, dy * h / 65536)
         } else {
             (input.cursor.0 + dx, input.cursor.1 + dy)
         };
-        input.cursor = clipped(input, x, y);
+        input.cursor = clipped(input, (w, h), x, y);
         mouse_event_at(cpu, WM_MOUSEMOVE, 0);
     }
     for (b, down_bit) in [(0usize, 0x0002u32), (1, 0x0008), (2, 0x0020)] {
@@ -1712,8 +1732,9 @@ pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// went down there, not where the cursor is put.
 pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     poll(cpu);
+    let screen = screen_size(cpu);
     let input = &mut user(cpu).input;
-    let (x, y) = clipped(input, args[0] as i32, args[1] as i32);
+    let (x, y) = clipped(input, screen, args[0] as i32, args[1] as i32);
     input.cursor = (x, y);
     cpu.bus.mouse.warp(x, y);
     let (mx, my) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
@@ -1733,20 +1754,21 @@ pub fn clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if cpu.bus.guest_faulted() {
             return None;
         }
-        let (sw, sh) = screen_size();
+        let (sw, sh) = screen_size(cpu);
         let r = Rect::new(w[0] as i32, w[1] as i32, w[2] as i32, w[3] as i32)
             .intersect(&Rect::new(0, 0, sw, sh));
         Some(r)
     };
+    let screen = screen_size(cpu);
     let input = &mut user(cpu).input;
     input.clip = clip;
-    input.cursor = clipped(input, input.cursor.0, input.cursor.1);
+    input.cursor = clipped(input, screen, input.cursor.0, input.cursor.1);
     Some(TRUE)
 }
 
 /// GetClipCursor(rect).
 pub fn get_clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (w, h) = screen_size();
+    let (w, h) = screen_size(cpu);
     let r = user(cpu).input.clip.unwrap_or(Rect::new(0, 0, w, h));
     write_words(
         cpu,

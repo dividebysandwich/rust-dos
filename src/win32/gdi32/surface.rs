@@ -55,10 +55,12 @@ pub struct Surface {
     changed: bool,
 }
 
-/// The screen's size, and the depth and pitch of its rows as GDI works
-/// on them: 32 bits a pixel, or 8 on a desktop of 256 colours.
+/// The size of the screen GDI draws on, the desktop's, and the depth
+/// and pitch of its rows as GDI works on them: 32 bits a pixel, or 8 on
+/// a desktop of 256 colours.
 pub fn screen(cpu: &Cpu) -> (i32, i32, u32, usize) {
-    let (w, h) = crate::win32::user32::sysparams::screen_size();
+    let d = crate::win32::screen::desktop(cpu);
+    let (w, h) = (d.width as i32, d.height as i32);
     if crate::win32::version::palette_desktop(cpu) {
         (w, h, 8, w as usize)
     } else {

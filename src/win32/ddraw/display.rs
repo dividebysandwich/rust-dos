@@ -26,6 +26,7 @@ use super::{DD_OK, DDERR_INVALIDMODE, DDERR_OUTOFVIDEOMEMORY, current_pid, state
 use crate::cpu::Cpu;
 use crate::win32::memory::{MEM_MAPPED, PAGE, PAGE_READWRITE, SHARED, SYSTEM, USER, WRITABLE};
 use crate::win32::screen::{self, Mode};
+use crate::win32::user32::sysparams::{display_changed, display_mode};
 
 /// Where a process's view of video memory goes, if that is free.
 const VIEW_AT: u32 = 0x9FC0_0000;
@@ -61,6 +62,14 @@ pub struct Display {
 /// the screen.
 pub fn owns_display(cpu: &mut Cpu) -> bool {
     state(cpu).display.mode.0 != 0
+}
+
+/// The mode DirectDraw set, which is the screen's (USER32's
+/// `sysparams::display_mode`): width, height and bits a pixel. None
+/// while the display is the desktop's, or Glide's.
+pub fn screen_mode(cpu: &Cpu) -> Option<(u32, u32, u32)> {
+    let display = &cpu.bus.win32.ddraw.display;
+    (display.mode.0 != 0 && display.mode_owner != GLIDE).then_some(display.mode)
 }
 
 /// The modes DirectDraw offers, as width, height and bits a pixel, by
@@ -109,8 +118,10 @@ pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
 }
 
 /// Set the mode for `owner`, any the adapter has: the surfaces in video
-/// memory are lost, and the mouse moves over the picture.
+/// memory are lost, and the mouse moves over the picture. Unless it is
+/// Glide's, the screen takes the mode's size (`display_changed`).
 fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
+    let old = display_mode(cpu);
     let mode = screen::set_mode(cpu, w, h, bpp)?;
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
@@ -119,6 +130,7 @@ fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
     display.mode_owner = owner;
     let mouse = &mut cpu.bus.mouse;
     (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w as i32 - 1, 0, h as i32 - 1);
+    display_changed(cpu, old);
     Some(mode)
 }
 
@@ -147,11 +159,14 @@ pub fn restore(cpu: &mut Cpu) {
     if !owns_display(cpu) {
         return;
     }
+    let old = display_mode(cpu);
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
     display.mode = (0, 0, 0);
     display.mode_owner = 0;
+    // The desktop window takes the screen's size before it is painted.
+    display_changed(cpu, old);
     restore_screen(cpu);
 }
 
@@ -159,7 +174,8 @@ pub fn restore(cpu: &mut Cpu) {
 fn restore_screen(cpu: &mut Cpu) {
     if cpu.bus.win32.user.desktop {
         crate::win32::user32::paint::restore_desktop(cpu);
-        let (w, h) = crate::win32::user32::sysparams::screen_size();
+        // The mouse's range may still be Glide's mode's.
+        let (w, h) = crate::win32::user32::sysparams::screen_size(cpu);
         let mouse = &mut cpu.bus.mouse;
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
     } else {

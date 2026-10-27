@@ -437,7 +437,7 @@ pub fn unlink(state: &mut State, hwnd: u32) {
 
 /// The desktop window, which every top-level window is a child of.
 pub fn create_desktop(cpu: &mut Cpu) {
-    let (w, h) = super::sysparams::screen_size();
+    let (w, h) = super::sysparams::screen_size(cpu);
     let class = super::class::find_system(user(cpu), "#32769").unwrap_or(0);
     let proc = user(cpu)
         .classes
@@ -570,7 +570,7 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // CW_USEDEFAULT: an overlapped window gets a place and three
     // quarters of the screen; a popup or child window none.
-    let (sw, sh) = super::sysparams::screen_size();
+    let (sw, sh) = super::sysparams::screen_size(cpu);
     let (mut x, mut y, mut cx, mut cy) = (x as i32, y as i32, cx as i32, cy as i32);
     let default = CW_USEDEFAULT as i32;
     if style & (WS_CHILD | WS_POPUP) == 0 {
@@ -948,12 +948,14 @@ pub fn send(hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
 /// does: the maximized size and place, and the tracking limits.
 pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
     let m = super::sysparams::metric;
+    let (sw, sh) = super::sysparams::screen_size(cpu);
+    // SM_CXMAXTRACK and SM_CYMAXTRACK.
+    let max_track = [59, 60].map(|i| super::sysparams::screen_metric(cpu, i) as u32);
     let state = user(cpu);
     let Some(w) = state.window(hwnd) else {
         return;
     };
     let (style, ex) = (w.style, w.ex_style);
-    let (sw, sh) = super::sysparams::screen_size();
     // The maximized window's frame is off the screen.
     let frame = max_frame(style, ex);
     let (xinc, yinc) = (-frame.left, -frame.top);
@@ -978,8 +980,8 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
         (-yinc) as u32,
         min_w as u32,
         min_h as u32,
-        m(59) as u32,
-        m(60) as u32,
+        max_track[0],
+        max_track[1],
     ];
     write_words(cpu, at, &words);
 }
@@ -1521,13 +1523,14 @@ fn minimize(cpu: &mut Cpu, hwnd: u32) -> Rect {
     let (x, y) = if w.icon_pos.0 >= 0 {
         w.icon_pos
     } else {
-        let (_, sh) = super::sysparams::screen_size();
+        let (_, sh) = super::sysparams::screen_size(cpu);
         (0, sh - m(58))
     };
     Rect::sized(x, y, m(57), m(58))
 }
 
 fn maximize(cpu: &mut Cpu, hwnd: u32) -> Rect {
+    let (sw, sh) = super::sysparams::screen_size(cpu);
     let state = user(cpu);
     let Some(w) = state.window(hwnd) else {
         return Rect::default();
@@ -1537,7 +1540,6 @@ fn maximize(cpu: &mut Cpu, hwnd: u32) -> Rect {
     let area = if style & WS_CHILD != 0 {
         state.window(parent).map(|p| p.client).unwrap_or_default()
     } else {
-        let (sw, sh) = super::sysparams::screen_size();
         Rect::new(0, 0, sw, sh)
     };
     let area = Rect::sized(0, 0, area.width(), area.height());
