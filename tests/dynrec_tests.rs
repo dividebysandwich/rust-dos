@@ -2900,6 +2900,42 @@ fn an_immediate_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
 }
 
 #[test]
+fn an_imul_factor_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
+    // Riverworld's transforms: the factors poked into three-operand
+    // IMULs (of memory here, which needs all three temporaries) just
+    // ahead of them. The IMULs read them where they are, without
+    // leaving the block.
+    let top = CODE + 0x40;
+    let data = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(ebp, ebp)?;
+                a.mov(dword_ptr(data), 3)?;
+                a.mov(ebx, 300u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        let factor = |a: &mut CodeAssembler| a.imul_3(ecx, ebx, 0x0101_0101);
+        let body = |a: &mut CodeAssembler| {
+            a.imul_3(eax, dword_ptr(data), 0x1234_5678)?; // 69 05 disp32 imm32
+            a.add(ebp, eax)
+        };
+        rig.load(top, &self_poking_loop(top, 0x1234_5678, factor, body));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let sum = (1..=300u32).fold(0u32, |s, n| {
+        s.wrapping_add(n.wrapping_mul(0x0101_0101).wrapping_mul(3))
+    });
+    assert_eq!(b.cpu.ebp(), sum);
+    if AVAILABLE {
+        assert!(stats.watched < 10, "left at the poked factor: {:?}", stats);
+        assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
 fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
     // The same with the address of an ADD's operand: the block leaves
     // before the ADD where its watched bytes changed, and the interpreter

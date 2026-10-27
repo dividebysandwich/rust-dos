@@ -223,11 +223,13 @@ counted twice (`block::WATCH_AFTER`), blocks translated over it watch it:
   translated from before it runs. If they differ, the block leaves before
   the instruction (`EXIT_WATCHED`), with the instructions before it done,
   and the interpreter runs whatever is there now.
-- Where the watched bytes are all in the immediate of a MOV or an ALU
-  operation (the Doom engine also pokes each column's and span's step
-  into the `ADD EBP, imm32` of its drawing loops), the instruction reads
-  the immediate from RAM instead (`translate::live_immediate`,
-  `Uop::LoadCode`), and never leaves the block for it.
+- Where the watched bytes are all in the immediate of a MOV, an ALU
+  operation or a three-operand IMUL (the Doom engine also pokes each
+  column's and span's step into the `ADD EBP, imm32` of its drawing
+  loops, and Riverworld the factors of its transforms into IMULs), the
+  instruction reads the immediate from RAM instead
+  (`translate::live_immediate`, `Uop::LoadCode`), and never leaves the
+  block for it.
 - The block's own checks leave the watched bytes out, so it stays valid
   while only they change. That holds for its own stores too: a block that
   pokes the immediates of its later instructions just ahead of running
@@ -683,7 +685,7 @@ The host's time is fixed for both (`hosttime::fix`).
 | Test | Checks |
 |---|---|
 | `tests/dyndiff_tests.rs` | A protected-mode program with a fast timer interrupt |
-| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, immediates poked into three places of a block, an immediate and an address a block pokes just ahead of itself, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, LAR and stack switches like DOS/4GW's thunks into 16-bit code, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
+| `tests/dynrec_tests.rs` | Stores into the rest of a block, faults and page faults in the middle of one, interrupt shadows, an interrupt a POPF lets through, a switch to a stack of another width, timer reads, a full code memory, the auto latch, rewriting a linked block, a RET poked into an unrolled loop, immediates poked before each loop, immediates poked into three places of a block, an immediate, an IMUL's factor and an address a block pokes just ahead of itself, the translated FPU instructions on singles of every kind under each rounding mode, on empty registers, without the coprocessor and past a segment's limit, returns and indirect calls to several places, a return to more places than it has links, indirect jumps, flags set in one block and read in the next, stack operations faulting after the instructions before them, REP MOVS and STOS of a few elements, faulting part of the way, over the rest of their block and into the video memory, video memory, ROMs and unmapped addresses read and written with paging off and through the TLB, PUSHAD and POPAD past the stack's limit, a smaller CS limit under a link, conditional jumps within a block and out of it (counts, cached registers, a fault after one), STI ending a full block, and plain writes into the VGA's planes as the map mask and write mode change, far calls, returns and interrupts in real and protected mode going on in translated code, segment loads in big real mode, LAR and stack switches like DOS/4GW's thunks into 16-bit code, a link to a page the TLB lost, and the translated MMX and SSE instructions on singles of every kind under each rounding mode and flush to zero, with exceptions MXCSR unmasks, misaligned operands, MMX registers the FPU left stale, and stores into video memory and a block of RAM with code |
 
 Local DOS programs run in lockstep opt-in, from the git-ignored
 `programs/` directory:
