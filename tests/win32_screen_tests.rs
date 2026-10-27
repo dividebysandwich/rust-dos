@@ -1950,3 +1950,65 @@ fn the_cursor_shows_on_a_vesa_desktop() {
 fn the_cursor_shows_on_a_voodoo3_desktop() {
     the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
 }
+
+/// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
+/// as the cursor and the cursor put at (100, 100) (step 1).
+fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
+    program(&[USER32_CURSOR, DDRAW], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &[Arg::I(w), Arg::I(h), Arg::I(8)])?;
+        c.api(a, l, LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        a.push(eax)?;
+        a.call(l.import(SET_CURSOR))?;
+        c.keep(a, l)?;
+        c.api(a, l, SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    })
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
+/// mode's pixels, as large as they show: the arrow's inside, one pixel
+/// right of the tip and two down, covers that pixel of the mode on the
+/// frame, however much larger the frame shows it.
+fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (program, data) = mode_cursor_program(w, h);
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_eq!(r[2..4], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    assert_ne!(r[4], 0, "LoadCursorA(IDC_ARROW)");
+    assert_eq!(r[6], 1, "SetCursorPos");
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let (sx, sy) = ((frame_w / w) as usize, (frame_h / h) as usize);
+    let inside = (101 * sx, 102 * sy);
+    let corners = [inside, (inside.0 + sx - 1, inside.1 + sy - 1)];
+    for (i, pixel) in with_cursors(&cpu, &corners).into_iter().enumerate() {
+        assert_eq!(pixel, [0xFF, 0xFF, 0xFF], "the arrow's inside, corner {i}");
+    }
+    let beside = with_cursors(&cpu, &[(120 * sx, 102 * sy)])[0];
+    assert_ne!(beside, [0xFF, 0xFF, 0xFF], "beside the arrow");
+}
+
+/// The VESA kind shows 320x240 at twice its size both ways.
+#[test]
+fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
+    the_cursor_shows_in_a_small_mode("cursor_vesa_320", None, (320, 240));
+}
+
+/// A Voodoo3 shows 320x200 with its lines doubled.
+#[test]
+fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
+    the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
+}

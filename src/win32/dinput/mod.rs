@@ -298,6 +298,17 @@ impl State {
         self.sequence
     }
 
+    /// Whether a device has the mouse exclusively: USER32 then leaves it
+    /// alone, and Windows hides the cursor.
+    pub fn mouse_taken(&self) -> bool {
+        self.objects
+            .iter()
+            .filter_map(|o| o.as_ref()?.device.as_ref())
+            .any(|d| {
+                d.kind == objects::MOUSE && d.acquired && d.coop & device::DISCL_EXCLUSIVE != 0
+            })
+    }
+
     /// The devices, with their ids.
     fn devices_mut(&mut self) -> impl Iterator<Item = (u32, &mut device::Device)> {
         self.objects.iter_mut().enumerate().filter_map(|(i, o)| {

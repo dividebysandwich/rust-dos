@@ -49,26 +49,23 @@ impl CursorImage {
 /// SetCursor's work: `handle` becomes the cursor (0 for none), and its
 /// picture the one the screen shows. The cursor it replaced.
 pub fn set(cpu: &mut Cpu, handle: u32) -> u32 {
-    let image = image_of(cpu, handle);
+    let image = image_of(cpu, handle).unwrap_or_default();
     let input = &mut user(cpu).input;
     input.cursor_image = image;
     std::mem::replace(&mut input.cursor_handle, handle)
 }
 
-/// The picture of the icon or cursor `handle`: empty for none. The
-/// screen's pixel is ANDed with the mask and XORed with the image, as
-/// DrawIcon does, so the picture keeps which of the two each pixel needs.
-fn image_of(cpu: &mut Cpu, handle: u32) -> CursorImage {
-    let Some(ic) = super::resource::icon(cpu, handle) else {
-        return CursorImage::default();
-    };
-    let Some(mask) = Surface::load_all(cpu, Target::Bitmap(ic.mask)) else {
-        return CursorImage::default();
-    };
+/// The picture of the icon or cursor `handle`: None for none, or when
+/// one of its bitmaps can't be read. The screen's pixel is ANDed with
+/// the mask and XORed with the image, as DrawIcon does, so the picture
+/// keeps which of the two each pixel needs.
+fn image_of(cpu: &mut Cpu, handle: u32) -> Option<CursorImage> {
+    let ic = super::resource::icon(cpu, handle)?;
+    let mask = Surface::load_all(cpu, Target::Bitmap(ic.mask))?;
     // Without a color bitmap, the image is the mask's lower half.
     let (color, image_top) = match ic.color {
         0 => (None, ic.height),
-        c => (Surface::load_all(cpu, Target::Bitmap(c)), 0),
+        c => (Some(Surface::load_all(cpu, Target::Bitmap(c))?), 0),
     };
     let image = color.as_ref().unwrap_or(&mask);
     let (w, h) = (ic.width.max(0), ic.height.max(0));
@@ -89,22 +86,35 @@ fn image_of(cpu: &mut Cpu, handle: u32) -> CursorImage {
             });
         }
     }
-    CursorImage {
+    Some(CursorImage {
         width: w,
         height: h,
         hotspot: ic.hotspot,
         pixels,
-    }
+    })
 }
 
 /// The cursor the screen shows, if it shows one: its picture and where
-/// its hot spot is, in the mouse's coordinates. It shows while a Win32
-/// program runs with the desktop on the screen, a cursor is set and
-/// ShowCursor's count is 0 or more.
+/// its hot spot is, in the screen's pixels (`screen_size`). It shows
+/// while a Win32 program runs with the desktop on the screen, a cursor
+/// is set, ShowCursor's count is 0 or more and DirectInput doesn't have
+/// the mouse exclusively, which hides it on Windows.
 pub fn shown(win32: &crate::win32::Win32) -> Option<(&CursorImage, (i32, i32))> {
     let user = &win32.user;
     let input = &user.input;
     let shows = win32.active() && user.desktop && input.cursor_count >= 0;
-    (shows && input.cursor_handle != 0 && !input.cursor_image.pixels.is_empty())
-        .then_some((&input.cursor_image, input.cursor))
+    (shows
+        && input.cursor_handle != 0
+        && !input.cursor_image.pixels.is_empty()
+        && !win32.dinput.mouse_taken())
+    .then_some((&input.cursor_image, input.cursor))
+}
+
+/// The size of the screen the cursor moves over, in its pixels:
+/// DirectDraw's mode while it has the display, else the desktop's.
+pub fn screen_size(win32: &crate::win32::Win32) -> (i32, i32) {
+    match win32.ddraw.display.mode {
+        (0, ..) => super::sysparams::screen_size(),
+        (w, h, _) => (w as i32, h as i32),
+    }
 }

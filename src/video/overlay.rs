@@ -59,17 +59,18 @@ pub fn cursor_rows(frame: &Frame, bus: &Bus, cursor_visible: bool) -> std::ops::
 }
 
 /// Where the built-in Windows' cursor goes on `frame`: its top left
-/// corner, its size and how many frame pixels a pixel of it takes.
+/// corner, its height and how many frame pixels across and down a pixel
+/// of it takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CursorRect {
     x: i32,
     y: i32,
     h: i32,
-    scale: i32,
+    scale: (i32, i32),
 }
 
 /// The cursor of the built-in Windows, if the screen shows one: its
-/// picture and where its hot spot is, in the mouse's coordinates.
+/// picture and where its hot spot is, in the screen's pixels.
 /// Windows draws it on the desktop and over DirectDraw's modes, which a
 /// Voodoo3 or Banshee shows in its extended modes; Glide's picture on a
 /// 3dfx card has none.
@@ -82,18 +83,21 @@ fn shown_windows_cursor(bus: &Bus) -> Option<(&CursorImage, (i32, i32))> {
 }
 
 /// The cursor of the built-in Windows, if it shows one, and where it
-/// goes on `frame`: its pixels are the screen's, as many frame pixels
-/// each as the frame has to a pixel of the mouse's screen.
+/// goes on `frame`. Its place and its pixels are in the pixels of
+/// Windows' screen (the desktop's or DirectDraw's mode), which the frame
+/// may show larger: a 320x200 mode twice as high, or twice as wide too.
 fn windows_cursor<'a>(frame: &Frame, bus: &'a Bus) -> Option<(&'a CursorImage, CursorRect)> {
     let (image, (x, y)) = shown_windows_cursor(bus)?;
-    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
-    let scale = (frame.width as i32 / virt_w.max(1)).max(1);
-    let x = (x as i64 * frame.width as i64 / virt_w.max(1) as i64) as i32;
-    let y = (y as i64 * frame.height as i64 / virt_h.max(1) as i64) as i32;
+    let (screen_w, screen_h) = cursor::screen_size(&bus.win32);
+    let (screen_w, screen_h) = (screen_w.max(1), screen_h.max(1));
+    let (frame_w, frame_h) = (frame.width as i32, frame.height as i32);
+    let scale = ((frame_w / screen_w).max(1), (frame_h / screen_h).max(1));
+    let x = (x as i64 * frame_w as i64 / screen_w as i64) as i32;
+    let y = (y as i64 * frame_h as i64 / screen_h as i64) as i32;
     let rect = CursorRect {
-        x: x - image.hotspot.0 * scale,
-        y: y - image.hotspot.1 * scale,
-        h: image.height * scale,
+        x: x - image.hotspot.0 * scale.0,
+        y: y - image.hotspot.1 * scale.1,
+        h: image.height * scale.1,
         scale,
     };
     Some((image, rect))
@@ -103,17 +107,18 @@ fn windows_cursor<'a>(frame: &Frame, bus: &'a Bus) -> Option<(&'a CursorImage, C
 /// sets the frame's or XORs it with its color.
 fn draw_windows_cursor(frame: &mut Frame, image: &CursorImage, rect: CursorRect) {
     let (w, h) = (frame.width as i32, frame.height as i32);
+    let (sx, sy) = rect.scale;
     for y in 0..rect.h {
         let fy = rect.y + y;
         if !(0..h).contains(&fy) {
             continue;
         }
-        for x in 0..image.width * rect.scale {
+        for x in 0..image.width * sx {
             let fx = rect.x + x;
             if !(0..w).contains(&fx) {
                 continue;
             }
-            let p = image.pixel(x / rect.scale, y / rect.scale);
+            let p = image.pixel(x / sx, y / sy);
             let rgb = [p as u8, (p >> 8) as u8, (p >> 16) as u8];
             let at = (fy * w + fx) as usize * 4;
             let to = &mut frame.rgba[at..at + 3];
@@ -213,7 +218,7 @@ pub fn cursors_key(bus: &Bus, cursor_visible: bool) -> u64 {
         (bus.mouse.virtual_screen(bus), bus.mouse.x, bus.mouse.y).hash(&mut h);
     }
     if let Some((image, at)) = shown_windows_cursor(bus) {
-        (bus.mouse.virtual_screen(bus), at, image).hash(&mut h);
+        (cursor::screen_size(&bus.win32), at, image).hash(&mut h);
     }
     h.finish()
 }
