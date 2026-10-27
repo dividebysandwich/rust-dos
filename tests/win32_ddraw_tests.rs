@@ -924,3 +924,238 @@ fn a_debugger_sees_the_surfaces_their_keys_and_their_pixels() {
     );
     assert!(snapshot::surface_image(&cpu, 999, false).is_err());
 }
+
+// The screen's size, which follows the display mode.
+
+const SCREEN_USER32: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetSystemMetrics",
+        "SetCursorPos",
+        "GetCursorPos",
+        "PeekMessageA",
+        "ChangeDisplaySettingsA",
+        "EnumDisplaySettingsA",
+        "GetDesktopWindow",
+        "GetWindowRect",
+    ],
+);
+const S_CREATE_WINDOW: usize = 0;
+const S_GET_SYSTEM_METRICS: usize = 1;
+const S_SET_CURSOR_POS: usize = 2;
+const S_GET_CURSOR_POS: usize = 3;
+const S_PEEK_MESSAGE: usize = 4;
+const S_CHANGE_DISPLAY_SETTINGS: usize = 5;
+const S_ENUM_DISPLAY_SETTINGS: usize = 6;
+const S_GET_DESKTOP_WINDOW: usize = 7;
+const S_GET_WINDOW_RECT: usize = 8;
+/// DirectDrawCreate, after SCREEN_USER32's.
+const S_DIRECT_DRAW_CREATE: usize = 9;
+
+const DD_RESTORE_DISPLAY_MODE: u32 = 19;
+const WM_DISPLAYCHANGE: u32 = 0x7E;
+const PM_REMOVE: u32 = 1;
+const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
+const DISP_CHANGE_BADMODE: u32 = -2i32 as u32;
+
+// The screen programs' data, after the others'.
+const POINT: u32 = 0x900;
+const POINT2: u32 = 0x908;
+const MSG: u32 = 0x910;
+const MODE: u32 = 0x940;
+const MODE2: u32 = 0x9C0;
+const SCREEN_DATA_SIZE: usize = 0xA40;
+
+/// The data of the screen programs: `data`'s, and room for their own.
+fn screen_data() -> Vec<u8> {
+    let mut d = data();
+    d.resize(SCREEN_DATA_SIZE, 0);
+    d
+}
+
+/// A visible popup window of `w` x `h` at the screen's corner.
+fn screen_window(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    (w, h): (u32, u32),
+) -> Result<(), IcedError> {
+    c.api(
+        a,
+        l,
+        S_CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(w),
+            Arg::I(h),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ],
+    )?;
+    a.mov(dword_ptr(l.at(HWND)), eax)
+}
+
+/// GetSystemMetrics of SM_CXSCREEN and SM_CYSCREEN.
+fn screen_metrics(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    c.api(a, l, S_GET_SYSTEM_METRICS, &[Arg::I(0)])?;
+    c.api(a, l, S_GET_SYSTEM_METRICS, &[Arg::I(1)])
+}
+
+/// The first WM_DISPLAYCHANGE in the queue, taken out of it into MSG.
+fn display_change(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    let filter = Arg::I(WM_DISPLAYCHANGE);
+    let args = [Arg::At(MSG), Arg::I(0), filter, filter, Arg::I(PM_REMOVE)];
+    c.api(a, l, S_PEEK_MESSAGE, &args)
+}
+
+/// Full screen at 800x600 from a 640x480 window, as Enemy Infestation
+/// sets it: the screen's size, the cursor put at the bottom right, the
+/// window's rectangle, the WM_DISPLAYCHANGE the window got, and the
+/// size and the cursor after RestoreDisplayMode.
+fn mode_screen_program() -> (Vec<u8>, u32) {
+    program(
+        &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
+        &screen_data(),
+        |a, l| {
+            let mut c = Calls { next: 0 };
+            screen_window(a, l, &mut c, (640, 480))?;
+            let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+            c.api(a, l, S_DIRECT_DRAW_CREATE, &create)?;
+            let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+            let mode = [Arg::I(800), Arg::I(600), Arg::I(8)];
+            c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+            screen_metrics(a, l, &mut c)?;
+            c.api(a, l, S_SET_CURSOR_POS, &[Arg::I(760), Arg::I(580)])?;
+            c.api(a, l, S_GET_CURSOR_POS, &[Arg::At(POINT)])?;
+            let rect = [Arg::Val(HWND), Arg::At(RECT)];
+            c.api(a, l, S_GET_WINDOW_RECT, &rect)?;
+            display_change(a, l, &mut c)?;
+            c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
+            screen_metrics(a, l, &mut c)?;
+            c.api(a, l, S_GET_CURSOR_POS, &[Arg::At(POINT2)])?;
+            finish(a, l)
+        },
+    )
+}
+
+#[test]
+fn the_screen_takes_the_size_of_the_mode_directdraw_sets() {
+    let (program, data) = mode_screen_program();
+    let mut cpu = machine("mode_screen", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 14);
+    assert_eq!(r[1..4], [0; 3]);
+    // GetSystemMetrics gives the mode's size, and the cursor goes to
+    // its bottom right.
+    assert_eq!(r[4..6], [800, 600]);
+    assert_eq!(r[6..8], [1, 1]);
+    let point = (peek(&cpu, data + POINT), peek(&cpu, data + POINT + 4));
+    assert_eq!(point, (760, 580));
+    // The window of exclusive mode covers the screen, where the cursor
+    // reaches it.
+    assert_eq!(r[8], 1);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 800, 600]);
+    // The window is told: 8 bits a pixel, 800x600.
+    assert_eq!(r[9], 1);
+    assert_eq!(peek(&cpu, data + MSG + 4), WM_DISPLAYCHANGE);
+    assert_eq!(peek(&cpu, data + MSG + 8), 8);
+    assert_eq!(peek(&cpu, data + MSG + 12), 600 << 16 | 800);
+    // RestoreDisplayMode gives the desktop's size back, and the cursor
+    // and the mouse stay on it.
+    assert_eq!(r[10], 0);
+    assert_eq!(r[11..13], [640, 480]);
+    let point = (peek(&cpu, data + POINT2), peek(&cpu, data + POINT2 + 4));
+    assert_eq!(point, (639, 479));
+    let mouse = &cpu.bus.mouse;
+    assert_eq!((mouse.max_x, mouse.max_y), (639, 479));
+}
+
+/// A DEVMODEA at `offset` with `fields` and the size and depth given.
+fn devmode(data: &mut [u8], offset: u32, fields: u32, (w, h, bpp): (u32, u32, u32)) {
+    put32(data, offset + 36, 124);
+    put32(data, offset + 40, fields);
+    put32(data, offset + 104, bpp);
+    put32(data, offset + 108, w);
+    put32(data, offset + 112, h);
+}
+
+/// ChangeDisplaySettingsA: a size EnumDisplaySettingsA doesn't list,
+/// then 800x600 with the depth left out, the screen's size, the
+/// WM_DISPLAYCHANGE the window got, the desktop window's rectangle and
+/// EnumDisplaySettingsA's mode now; with `restore`, then the desktop's
+/// own mode again.
+fn change_settings_program(restore: bool) -> (Vec<u8>, u32) {
+    // DM_PELSWIDTH and DM_PELSHEIGHT.
+    const SIZE: u32 = 0x18_0000;
+    let mut d = screen_data();
+    devmode(&mut d, MODE, SIZE, (1000, 700, 0));
+    devmode(&mut d, MODE2, SIZE, (800, 600, 0));
+    program(&[SCREEN_USER32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        screen_window(a, l, &mut c, (200, 100))?;
+        c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::At(MODE), Arg::I(0)])?;
+        c.api(
+            a,
+            l,
+            S_CHANGE_DISPLAY_SETTINGS,
+            &[Arg::At(MODE2), Arg::I(0)],
+        )?;
+        screen_metrics(a, l, &mut c)?;
+        display_change(a, l, &mut c)?;
+        c.api(a, l, S_GET_DESKTOP_WINDOW, &[])?;
+        a.push(l.at(RECT) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(S_GET_WINDOW_RECT))?;
+        c.keep(a, l)?;
+        let current = [Arg::I(0), Arg::I(ENUM_CURRENT_SETTINGS), Arg::At(MODE)];
+        c.api(a, l, S_ENUM_DISPLAY_SETTINGS, &current)?;
+        if restore {
+            c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::I(0), Arg::I(0)])?;
+            screen_metrics(a, l, &mut c)?;
+        }
+        finish(a, l)
+    })
+}
+
+#[test]
+fn change_display_settings_sets_the_desktops_size() {
+    let (program, data) = change_settings_program(false);
+    let mut cpu = machine("change_settings", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 9);
+    assert_eq!(r[1..3], [DISP_CHANGE_BADMODE, 0]);
+    assert_eq!(r[3..5], [800, 600]);
+    assert_eq!(r[5], 1);
+    assert_eq!(peek(&cpu, data + MSG + 4), WM_DISPLAYCHANGE);
+    assert_eq!(peek(&cpu, data + MSG + 12), 600 << 16 | 800);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 800, 600]);
+    assert_eq!(r[7..9], [1, 1]);
+    let size = (peek(&cpu, data + MODE + 108), peek(&cpu, data + MODE + 112));
+    assert_eq!(size, (800, 600));
+    // The display shows the desktop at 800x600.
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height), (800, 600));
+}
+
+#[test]
+fn change_display_settings_without_a_mode_gives_the_desktops_back() {
+    let (program, data) = change_settings_program(true);
+    let mut cpu = machine("change_settings_back", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 12);
+    assert_eq!(r[3..5], [800, 600]);
+    assert_eq!(r[9..12], [0, 640, 480]);
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height), (640, 480));
+}

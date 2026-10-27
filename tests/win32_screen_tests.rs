@@ -617,9 +617,16 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     run_until(&mut cpu, data, 3);
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted.
+    // The window, which the mode changes made cover the screen, as
+    // DirectDraw does on Windows 98, is over all of it: its corner with
+    // its text as before, and its background where the desktop's was.
     assert_eq!(card_mode(&cpu), (640, 480, 1, 1280));
     assert_eq!(card_reg(&cpu, VID_DESKTOP_START_ADDR), 0);
-    assert!(desktop(&cpu) == before, "the desktop as it was");
+    let after = desktop(&cpu);
+    let at = |x: usize, y: usize| y * 640 + x;
+    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    assert!(before[at(639, 479)] != before[at(319, 239)]);
+    assert!(after[at(639, 479)] == before[at(319, 239)], "covered");
 }
 
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
