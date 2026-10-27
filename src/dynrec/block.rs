@@ -55,7 +55,7 @@ pub const RETURN_MISS: usize = LINKS;
 /// the old changes longer runs.
 pub const WATCH_AFTER: u8 = 2;
 pub const POKE_BYTES: usize = 4;
-pub const POKES: usize = 4;
+pub const POKES: usize = 16;
 
 /// What a link to another page was made under. Translated code takes it
 /// only while fetching its target would go the same way, as the
@@ -452,12 +452,13 @@ impl BlockData {
     /// Offsets in `bytes` of the bytes in the block's page that changed
     /// since the block was translated, if they are pokes: in at most
     /// `POKES` runs of at most `POKE_BYTES` (SkyNET pokes two or three
-    /// immediates into a block before running it). A run may skip bytes
-    /// that stayed as they were, as the middle byte of a new immediate
-    /// can, but never has more than `POKE_BYTES` changed in a row. A
-    /// change to the bytes of the last instruction in the next page
-    /// (`crosses`) counts as one to its first byte, which has a count of
-    /// pokes: once that is watched, blocks stop before it.
+    /// immediates into a block before running it, Riverworld the twelve
+    /// factors of a transform). A run may skip bytes that stayed as they
+    /// were, as the middle byte of a new immediate can, but never has more
+    /// than `POKE_BYTES` changed in a row. A change to the bytes of the
+    /// last instruction in the next page (`crosses`) counts as one to its
+    /// first byte, which has a count of pokes: once that is watched,
+    /// blocks stop before it.
     pub fn poked(&self, ram: &[u8]) -> Option<Vec<usize>> {
         let len = self.len as usize;
         let now = &ram[self.phys as usize..][..len];

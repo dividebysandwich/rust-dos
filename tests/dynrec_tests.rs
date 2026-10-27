@@ -2825,6 +2825,59 @@ fn immediates_poked_into_one_block_before_each_call_are_read_where_they_are() {
     }
 }
 
+#[test]
+fn twelve_immediates_poked_into_one_block_are_read_where_they_are() {
+    // Riverworld's transform setup: the twelve factors of a matrix poked
+    // into the immediates of one block before each call of it. Those
+    // are pokes too, however many runs of them a block has, up to
+    // `block::POKES`.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(
+            f,
+            &asm32(f, |a| {
+                for _ in 0..12 {
+                    a.db(&[0x81, 0xC5, 0, 0, 0, 0])?; // add ebp, imm32
+                }
+                a.ret()
+            }),
+        );
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(ebp, ebp)?;
+                a.mov(ebx, 300u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        rig.load(
+            top,
+            &asm32(top, |a| {
+                for i in 0..12u32 {
+                    a.imul_3(eax, ebx, 0x0101_0101 * (i as i32 + 1))?;
+                    a.mov(dword_ptr(f + 2 + 6 * i), eax)?;
+                }
+                a.call(f as u64)?;
+                a.dec(ebx)?;
+                a.jnz(top as u64)?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    let sum: u32 = (1..=300).sum();
+    assert_eq!(b.cpu.ebp(), sum.wrapping_mul(78 * 0x0101_0101));
+    if AVAILABLE {
+        assert!(stats.stale < 10, "{:?}", stats);
+        assert!(
+            stats.watched < 10,
+            "left at the poked immediates: {:?}",
+            stats
+        );
+    }
+}
+
 /// A loop at `top`, one block, that works out a value into ECX
 /// (`value`), stores it twice into the dword of its own later
 /// instructions (`body`) that holds `marker` as assembled (the second
