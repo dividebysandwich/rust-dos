@@ -1835,8 +1835,8 @@ fn changing_a_linked_block_unlinks_it() {
 
 /// Code that writes CL into every byte of the immediates of `add ebx,
 /// imm32` and `add edx, imm32` at `at`, and makes the second a SUB where
-/// CL is odd: new code each time CL changes (five bytes in a row of it),
-/// not a poke.
+/// CL is odd: each change of CL changes five bytes in a row, which the
+/// engine takes for new code (more than `POKE_BYTES`).
 fn rewrite_immediates(a: &mut CodeAssembler, at: u32) -> Result<(), IcedError> {
     a.movzx(eax, cl)?;
     a.imul_3(eax, eax, 0x0101_0101)?;
@@ -2773,39 +2773,55 @@ fn immediates_poked_into_one_block_before_each_call_are_read_where_they_are() {
     let f = CODE + 0x1000;
     let top = CODE + 0x40;
     let (mut a, mut b) = twins(|rig| {
-        rig.load(f, &asm32(f, |a| {
-            a.db(&[0x81, 0xC5, 0, 0, 0, 0])?; // add ebp, imm32
-            a.db(&[0x81, 0xC7, 0, 0, 0, 0])?; // add edi, imm32
-            a.db(&[0x81, 0xC6, 0, 0, 0, 0])?; // add esi, imm32
-            a.ret()
-        }));
-        rig.load(CODE, &asm32(CODE, |a| {
-            a.xor(ebp, ebp)?;
-            a.xor(edi, edi)?;
-            a.xor(esi, esi)?;
-            a.mov(ebx, 300u32)?;
-            a.jmp(top as u64)
-        }));
-        rig.load(top, &asm32(top, |a| {
-            a.imul_3(eax, ebx, 0x0101_0101)?;
-            a.mov(dword_ptr(f + 2), eax)?;
-            a.mov(dword_ptr(f + 8), ebx)?;
-            a.not(eax)?;
-            a.mov(dword_ptr(f + 14), eax)?;
-            a.call(f as u64)?;
-            a.dec(ebx)?;
-            a.jnz(top as u64)?;
-            a.hlt()
-        }));
+        rig.load(
+            f,
+            &asm32(f, |a| {
+                a.db(&[0x81, 0xC5, 0, 0, 0, 0])?; // add ebp, imm32
+                a.db(&[0x81, 0xC7, 0, 0, 0, 0])?; // add edi, imm32
+                a.db(&[0x81, 0xC6, 0, 0, 0, 0])?; // add esi, imm32
+                a.ret()
+            }),
+        );
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(ebp, ebp)?;
+                a.xor(edi, edi)?;
+                a.xor(esi, esi)?;
+                a.mov(ebx, 300u32)?;
+                a.jmp(top as u64)
+            }),
+        );
+        rig.load(
+            top,
+            &asm32(top, |a| {
+                a.imul_3(eax, ebx, 0x0101_0101)?;
+                a.mov(dword_ptr(f + 2), eax)?;
+                a.mov(dword_ptr(f + 8), ebx)?;
+                a.not(eax)?;
+                a.mov(dword_ptr(f + 14), eax)?;
+                a.call(f as u64)?;
+                a.dec(ebx)?;
+                a.jnz(top as u64)?;
+                a.hlt()
+            }),
+        );
     });
     let stats = run_both(&mut a, &mut b);
     let steps = (1..=300u32).map(|n| n.wrapping_mul(0x0101_0101));
     let sum = steps.clone().fold(0u32, |s, v| s.wrapping_add(v));
     let nots = steps.fold(0u32, |s, v| s.wrapping_add(!v));
-    assert_eq!((b.cpu.ebp(), b.cpu.edi(), b.cpu.esi()), (sum, (1..=300).sum(), nots));
+    assert_eq!(
+        (b.cpu.ebp(), b.cpu.edi(), b.cpu.esi()),
+        (sum, (1..=300).sum(), nots)
+    );
     if AVAILABLE {
         assert!(stats.stale < 10, "{:?}", stats);
-        assert!(stats.watched < 10, "left at the poked immediates: {:?}", stats);
+        assert!(
+            stats.watched < 10,
+            "left at the poked immediates: {:?}",
+            stats
+        );
     }
 }
 
@@ -2831,7 +2847,10 @@ fn self_poking_loop(
         })
     };
     let first = code(top);
-    let at = first.windows(4).rposition(|w| w == marker.to_le_bytes()).expect("the marker");
+    let at = first
+        .windows(4)
+        .rposition(|w| w == marker.to_le_bytes())
+        .expect("the marker");
     code(top + at as u32)
 }
 
@@ -2844,12 +2863,15 @@ fn an_immediate_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
     let top = CODE + 0x40;
     let data = CODE + 0x3000;
     let (mut a, mut b) = twins(|rig| {
-        rig.load(CODE, &asm32(CODE, |a| {
-            a.xor(ebp, ebp)?;
-            a.mov(dword_ptr(data), 0)?;
-            a.mov(ebx, 300u32)?;
-            a.jmp(top as u64)
-        }));
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(ebp, ebp)?;
+                a.mov(dword_ptr(data), 0)?;
+                a.mov(ebx, 300u32)?;
+                a.jmp(top as u64)
+            }),
+        );
         let step = |a: &mut CodeAssembler| a.imul_3(ecx, ebx, 0x0101_0101);
         let body = |a: &mut CodeAssembler| {
             a.add(dword_ptr(data), ebp)?;
@@ -2858,13 +2880,19 @@ fn an_immediate_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
         rig.load(top, &self_poking_loop(top, 0x1234_5678, step, body));
     });
     let stats = run_both(&mut a, &mut b);
-    let steps: Vec<u32> = (1..=300u32).rev().map(|n| n.wrapping_mul(0x0101_0101)).collect();
+    let steps: Vec<u32> = (1..=300u32)
+        .rev()
+        .map(|n| n.wrapping_mul(0x0101_0101))
+        .collect();
     let (mut total, mut sum) = (0u32, 0u32);
     for s in steps {
         sum = sum.wrapping_add(total);
         total = total.wrapping_add(s);
     }
-    assert_eq!((b.cpu.ebp(), b.cpu.bus.read_32(data as usize)), (total, sum));
+    assert_eq!(
+        (b.cpu.ebp(), b.cpu.bus.read_32(data as usize)),
+        (total, sum)
+    );
     if AVAILABLE {
         assert!(stats.smc < 10, "stopped at the stores: {:?}", stats);
         assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
@@ -2882,11 +2910,14 @@ fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
         for i in 0..=200u32 {
             rig.write32(table + 4 * i, i * 3 + 1);
         }
-        rig.load(CODE, &asm32(CODE, |a| {
-            a.xor(edx, edx)?;
-            a.mov(ebx, 200u32)?;
-            a.jmp(top as u64)
-        }));
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.xor(edx, edx)?;
+                a.mov(ebx, 200u32)?;
+                a.jmp(top as u64)
+            }),
+        );
         let entry = |a: &mut CodeAssembler| a.lea(ecx, dword_ptr(ebx * 4 + table));
         // ADD EDX, [disp32]: 03 15 disp32.
         let body = |a: &mut CodeAssembler| a.add(edx, dword_ptr(0x1234_5678u64));

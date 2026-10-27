@@ -148,13 +148,16 @@ pub fn trampoline() -> Trampoline {
         thunks[thunk as usize] = ops.offset().0;
         dev_thunk(&mut ops, thunk.tlb(), memref);
     }
+    thunks[Thunk::SmcCheck as usize] = ops.offset().0;
+    smc_check_thunk(&mut ops);
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub, thunks }
 }
 
-/// The trampoline's routines for the slow paths of memory operands, which
-/// each operand would otherwise carry a copy of: translated code calls them
-/// through `JitCtx::thunks` with its arguments in RAX, RCX and RDX, and
-/// they keep every other register but those three.
+/// The trampoline's routines for the slow paths of memory operands and of
+/// stores into the block's later bytes, which each would otherwise carry a
+/// copy of: translated code calls them through `JitCtx::thunks` with its
+/// arguments in RAX, RCX and RDX, and they keep every other register but
+/// those three.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Thunk {
     /// `jit_memref` of the offset in EDX, ECX its `memref_desc`: RAX the
@@ -185,9 +188,13 @@ enum Thunk {
     DevTlbWrite,
     DevTlbUserRead,
     DevTlbUserWrite,
+    /// A store hit the block's later bytes (`JitCtx::smc`): clear that
+    /// note, and EAX = `jit_smc_check` of block RDX and its instruction
+    /// ECX, 0 for the block to go on.
+    SmcCheck,
 }
 
-const _: () = assert!(Thunk::DevTlbUserWrite as usize + 1 == THUNKS);
+const _: () = assert!(Thunk::SmcCheck as usize + 1 == THUNKS);
 
 impl Thunk {
     fn store(size: u8) -> Thunk {
@@ -399,6 +406,14 @@ fn code_store_thunk(ops: &mut Asm, size: u8) {
         ; done:
         ; ret
     );
+}
+
+fn smc_check_thunk(ops: &mut Asm) {
+    dynasm!(ops ; .arch x64 ; mov BYTE [r12 + CTX_SMC], 0);
+    thunk_save(ops);
+    dynasm!(ops ; .arch x64 ; call QWORD [r12 + CTX_SMC_CHECK]);
+    thunk_restore(ops);
+    dynasm!(ops ; .arch x64 ; ret);
 }
 
 fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
@@ -1116,7 +1131,15 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
                     dynasm!(g.ops ; .arch x64 ; cmp BYTE [r12 + CTX_SMC], 0 ; jne =>at ; =>back);
                     let (dirty, lazy) = (g.dirty, g.lazy_end[ix]);
-                    g.slow.push(Slow::Smc { at, back, ix, next, dirty, lazy, join });
+                    g.slow.push(Slow::Smc {
+                        at,
+                        back,
+                        ix,
+                        next,
+                        dirty,
+                        lazy,
+                        join,
+                    });
                 }
             }
         }
@@ -1387,9 +1410,6 @@ impl Gen<'_> {
                 ; jmp QWORD [r12 + CTX_EXIT]
             );
         }
-        // `jit_smc_check` of the block and instruction ECX, with the note
-        // of the store cleared, which the stores' slow paths share.
-        let mut smc_check = None;
         for slow in std::mem::take(&mut self.slow) {
             match slow {
                 Slow::MemRef { at, dev, back, t, desc, fail, addr, thunk } => {
@@ -1473,13 +1493,21 @@ impl Gen<'_> {
                         ; jmp =>back
                     );
                 }
-                Slow::Smc { at, back, ix, next, dirty, lazy, join } => {
-                    let check = *smc_check.get_or_insert_with(|| self.ops.new_dynamic_label());
+                Slow::Smc {
+                    at,
+                    back,
+                    ix,
+                    next,
+                    dirty,
+                    lazy,
+                    join,
+                } => {
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
+                        ; mov rdx, QWORD data_ptr
                         ; mov ecx, ix as i32
-                        ; call =>check
+                        ; call QWORD [BYTE r12 + Thunk::SmcCheck.slot()]
                         ; test eax, eax
                         ; jz =>back
                         ; mov DWORD [rbx + EIP], next as i32
@@ -1618,19 +1646,6 @@ impl Gen<'_> {
                     );
                 }
             }
-        }
-        if let Some(check) = smc_check {
-            // (Called as a thunk is, from where the instruction's own calls
-            // are aligned.)
-            dynasm!(self.ops ; .arch x64 ; =>check ; mov BYTE [r12 + CTX_SMC], 0);
-            thunk_save(&mut self.ops);
-            dynasm!(self.ops
-                ; .arch x64
-                ; mov rdx, QWORD data_ptr
-                ; call QWORD [r12 + CTX_SMC_CHECK]
-            );
-            thunk_restore(&mut self.ops);
-            dynasm!(self.ops ; .arch x64 ; ret);
         }
     }
 

@@ -90,7 +90,8 @@ pub struct Calls {
     pub lar: u64,
     /// `jit_fetch`.
     pub fetch: u64,
-    /// `jit_smc_check`: stores into the running block's later bytes.
+    /// `jit_smc_check`: translated stores into the running block's later
+    /// bytes.
     pub smc_check: u64,
     /// The FPU handlers' code (`helpers::fpu_helper`).
     pub fpu: u64,

@@ -77,8 +77,9 @@ pub struct JitCtx {
     /// Where translated code jumps to return to the execution loop.
     pub exit: usize,
     /// The trampoline's routines that the slow paths of memory operands
-    /// call (x86-64, `x64::Thunk`): early in the context, where the code
-    /// reaches them with a byte's displacement.
+    /// and of stores into the block's later bytes call (x86-64,
+    /// `x64::Thunk`): early in the context, where the code reaches them
+    /// with a byte's displacement.
     pub thunks: [usize; THUNKS],
     /// Set where a store hit the running block's later bytes (x86-64):
     /// within a byte's displacement too, for the check after each store.
@@ -219,7 +220,7 @@ pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_THUNKS: i32 = offset_of!(JitCtx, thunks) as i32;
 /// The number of `JitCtx::thunks`.
-pub const THUNKS: usize = 10;
+pub const THUNKS: usize = 11;
 const _: () = assert!(CTX_THUNKS + 8 * THUNKS as i32 <= 128 && CTX_SMC < 128);
 const _: () = assert!(CTX_SMC_HI == CTX_SMC_LO + 4);
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;

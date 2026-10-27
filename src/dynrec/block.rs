@@ -51,8 +51,8 @@ pub const RETURN_MISS: usize = LINKS;
 
 /// A byte is watched once blocks have gone stale this often because it
 /// changed, each time with their changed bytes in at most `POKES` runs of
-/// at most `POKE_BYTES` (pokes of immediates or addresses, not new code
-/// over the old, which changes longer runs).
+/// at most `POKE_BYTES`: pokes of immediates or addresses. New code over
+/// the old changes longer runs.
 pub const WATCH_AFTER: u8 = 2;
 pub const POKE_BYTES: usize = 4;
 pub const POKES: usize = 4;
