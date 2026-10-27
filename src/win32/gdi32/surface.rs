@@ -264,8 +264,9 @@ impl Surface {
                         for r in 0..rows as usize {
                             let start = (y0 as usize + r) * pitch + skip;
                             let row = &mut data[r * stride..(r + 1) * stride];
-                            let len = stride.min(bits.len().saturating_sub(start));
-                            row[..len].copy_from_slice(&bits[start..start + len]);
+                            let from = bits.get(start..).unwrap_or_default();
+                            let len = stride.min(from.len());
+                            row[..len].copy_from_slice(&from[..len]);
                         }
                     }
                 }
@@ -336,8 +337,10 @@ impl Surface {
                         for r in 0..self.rows as usize {
                             let start = (self.top as usize + r) * self.pitch + skip;
                             let row = &self.data[r * self.stride..(r + 1) * self.stride];
-                            let len = row.len().min(b.bits.len().saturating_sub(start));
-                            b.bits[start..start + len].copy_from_slice(&row[..len]);
+                            if let Some(to) = b.bits.get_mut(start..) {
+                                let len = row.len().min(to.len());
+                                to[..len].copy_from_slice(&row[..len]);
+                            }
                         }
                     }
                 }

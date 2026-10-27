@@ -306,7 +306,7 @@ pub fn value_for(cpu: &mut Cpu, canvas_dc: &Dc, s: &Surface, color: u32) -> u32 
 
 /// `value_for`, through `map` on a palette device if the caller has the
 /// DC's map already.
-fn value_through(
+pub fn value_through(
     cpu: &mut Cpu,
     canvas_dc: &Dc,
     s: &Surface,
@@ -1594,11 +1594,25 @@ impl Translate {
         text: u32,
         bk: u32,
     ) -> Translate {
-        let table = if src.bpp <= 8 {
-            vec![None; 1 << src.bpp]
-        } else {
-            Vec::new()
-        };
+        Translate::with_table(src, map, src_bk, text, bk, None)
+    }
+
+    /// `new`, with `table` as the translation table when one is given.
+    fn with_table(
+        src: &Surface,
+        map: Option<super::palette::DeviceMap>,
+        src_bk: u32,
+        text: u32,
+        bk: u32,
+        table: Option<Vec<Option<u32>>>,
+    ) -> Translate {
+        let table = table.unwrap_or_else(|| {
+            if src.bpp <= 8 {
+                vec![None; 1 << src.bpp]
+            } else {
+                Vec::new()
+            }
+        });
         let cache = (src.bpp > 8 && map.is_some()).then(std::collections::HashMap::new);
         Translate {
             table,
@@ -1623,14 +1637,15 @@ impl Translate {
         text: u32,
         bk: u32,
     ) -> Translate {
-        let key = table_key(src, map.as_ref());
-        let kept = key
-            .as_ref()
-            .and_then(|key| gdi(cpu).kept_table.take_if(|k| k.key == *key));
-        let mut t = Translate::new(src, map, src_bk, text, bk);
-        if let Some(kept) = kept {
-            t.table = kept.table;
-        }
+        let keyed = map.as_ref().filter(|_| !src.mono && src.bpp <= 8);
+        let kept = keyed.and_then(|m| gdi(cpu).kept_table.take_if(|k| k.key.is_of(src, m)));
+        let (key, table) = match kept {
+            // The kept key is equal to this blit's: no copy of the colors
+            // and the map, and no new table.
+            Some(k) => (Some(k.key), Some(k.table)),
+            None => (keyed.and_then(|m| table_key(src, Some(m))), None),
+        };
+        let mut t = Translate::with_table(src, map, src_bk, text, bk, table);
         t.key = key;
         t
     }
@@ -1709,6 +1724,18 @@ pub struct TableKey {
     pal_indices: Option<Vec<u16>>,
     device: bool,
     map: super::palette::DeviceMap,
+}
+
+impl TableKey {
+    /// Whether it is the key `table_key` gives for `src` and `map`,
+    /// compared without copying them.
+    fn is_of(&self, src: &Surface, map: &super::palette::DeviceMap) -> bool {
+        self.bpp == src.bpp
+            && self.device == src.device
+            && self.colors == src.colors
+            && self.pal_indices == src.pal_indices
+            && self.map == *map
+    }
 }
 
 /// The table of the last blit from a color table onto a palette device.

@@ -330,13 +330,15 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(mut c) = Canvas::open(cpu, hdst, Rect::new(r.0, r.1, r.2, r.3)) else {
         return Some(TRUE);
     };
-    let text = draw::value_for(cpu, &ddc, &c.surface, ddc.attrs.text_color);
-    let bk = draw::value_for(cpu, &ddc, &c.surface, ddc.attrs.bk_color);
+    // The DC's palette map, built once, and the translation table kept
+    // from the last blit of the same colors, as BitBlt's.
     let map = c
         .surface
         .device
         .then(|| super::gdi32::palette::DeviceMap::new(cpu, ddc.attrs.palette));
-    let mut xlat = Translate::new(&src.surface, map, src.bk_color, text, bk);
+    let text = draw::value_through(cpu, &ddc, &c.surface, ddc.attrs.text_color, map.as_ref());
+    let bk = draw::value_through(cpu, &ddc, &c.surface, ddc.attrs.bk_color, map.as_ref());
+    let mut xlat = Translate::kept(cpu, &src.surface, map, src.bk_color, text, bk);
     let (ox, oy) = c.origin;
     let (sx0, sy0, sx1, sy1) = src.rect;
     let area = Rect::new(r.0, r.1, r.2, r.3).offset(ox, oy);
@@ -356,6 +358,7 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         c.drew(a);
     }
+    xlat.keep(cpu);
     c.close(cpu);
     Some(TRUE)
 }

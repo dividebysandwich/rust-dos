@@ -423,12 +423,6 @@ pub fn load_area(cpu: &Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u
     out
 }
 
-/// Store rows as `load_rows` gives them as the rows from `top` on of
-/// the picture in `mode`.
-pub fn store_rows(cpu: &mut Cpu, mode: &Mode, top: u32, data: &[u8]) {
-    store_area(cpu, mode, top, 0, mode.width, data);
-}
-
 /// Store pixels as `load_area` gives them, `cols` a row, as the pixels
 /// `left..left + cols` of the rows from `top` on of the picture in
 /// `mode`.
