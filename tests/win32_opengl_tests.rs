@@ -62,6 +62,12 @@ const OPENGL32: &[&str] = &[
     "glDrawElements",
     "glVertex3f",
     "glDisable",
+    "glViewport",
+    "glMatrixMode",
+    "glLoadIdentity",
+    "glOrtho",
+    "glFrustum",
+    "glDepthRange",
 ];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
@@ -94,6 +100,12 @@ const TEX_COORD_POINTER: usize = GL + 21;
 const DRAW_ELEMENTS: usize = GL + 22;
 const VERTEX3F: usize = GL + 23;
 const DISABLE: usize = GL + 24;
+const VIEWPORT: usize = GL + 25;
+const MATRIX_MODE: usize = GL + 26;
+const LOAD_IDENTITY: usize = GL + 27;
+const ORTHO: usize = GL + 28;
+const FRUSTUM: usize = GL + 29;
+const DEPTH_RANGE: usize = GL + 30;
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -245,6 +257,8 @@ const GL_UNSIGNED_BYTE: u32 = 0x1401;
 const GL_UNSIGNED_SHORT: u32 = 0x1403;
 const GL_UNSIGNED_INT: u32 = 0x1405;
 const GL_MODULATE: u32 = 0x2100;
+const GL_PROJECTION: u32 = 0x1701;
+const GL_MODELVIEW: u32 = 0x1700;
 const GL_FLOAT: u32 = 0x1406;
 const GL_DEPTH_TEST: u32 = 0x0B71;
 const GL_LESS: u32 = 0x0201;
@@ -715,4 +729,131 @@ fn two_texture_units_modulate_a_lightmap_as_quake_iii_draws_walls() {
     // Green by the lightmap's half.
     let [r, g, b] = pixel(&cpu, data, 32, 32);
     assert!(r == 0 && b == 0 && (120..=136).contains(&g), "{r} {g} {b}");
+}
+
+/// Push a double as two dwords, low first.
+fn double(v: f64) -> [Arg; 2] {
+    let bits = v.to_bits();
+    [Arg::I(bits as u32), Arg::I((bits >> 32) as u32)]
+}
+
+#[test]
+fn a_small_viewport_in_a_corner_keeps_what_it_draws_there() {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(
+            a,
+            l,
+            CLEAR,
+            &[Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)],
+        )?;
+        // A 16x16 viewport at the bottom right, as Quake III's engine
+        // draws a HUD model in a refdef of its own, with a perspective
+        // projection and the depth range cut down.
+        c.api(
+            a,
+            l,
+            VIEWPORT,
+            &[Arg::I(48), Arg::I(0), Arg::I(16), Arg::I(16)],
+        )?;
+        c.api(a, l, DEPTH_RANGE, &[double(0.0), double(0.3)].concat())?;
+        c.api(a, l, MATRIX_MODE, &[Arg::I(GL_PROJECTION)])?;
+        c.api(a, l, LOAD_IDENTITY, &[])?;
+        let frustum = [
+            double(-1.0),
+            double(1.0),
+            double(-1.0),
+            double(1.0),
+            double(1.0),
+            double(100.0),
+        ]
+        .concat();
+        c.api(a, l, FRUSTUM, &frustum)?;
+        c.api(a, l, MATRIX_MODE, &[Arg::I(GL_MODELVIEW)])?;
+        c.api(a, l, LOAD_IDENTITY, &[])?;
+        // A tall red triangle filling the viewport's view at z -2.
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        c.api(a, l, VERTEX3F, &[Arg::F(-4.0), Arg::F(-4.0), Arg::F(-2.0)])?;
+        c.api(a, l, VERTEX3F, &[Arg::F(4.0), Arg::F(-4.0), Arg::F(-2.0)])?;
+        c.api(a, l, VERTEX3F, &[Arg::F(0.0), Arg::F(4.0), Arg::F(-2.0)])?;
+        c.api(a, l, END, &[])?;
+        // The whole window again, and a 2D green square at its top left
+        // with an orthographic projection.
+        c.api(
+            a,
+            l,
+            VIEWPORT,
+            &[Arg::I(0), Arg::I(0), Arg::I(64), Arg::I(64)],
+        )?;
+        c.api(a, l, DEPTH_RANGE, &[double(0.0), double(1.0)].concat())?;
+        c.api(a, l, MATRIX_MODE, &[Arg::I(GL_PROJECTION)])?;
+        c.api(a, l, LOAD_IDENTITY, &[])?;
+        let ortho = [
+            double(0.0),
+            double(64.0),
+            double(64.0),
+            double(0.0),
+            double(0.0),
+            double(1.0),
+        ]
+        .concat();
+        c.api(a, l, ORTHO, &ortho)?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(0.0), Arg::F(1.0), Arg::F(0.0)])?;
+        for (x, y) in [(0.0, 0.0), (8.0, 0.0), (8.0, 8.0), (0.0, 8.0)] {
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("small_viewport", true, exe);
+    run_until_done(&mut cpu, data);
+    // The calls before glGetError.
+    let n = 34;
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * n), 0, "glGetError");
+    // Red only inside the bottom right 16x16.
+    assert_eq!(pixel(&cpu, data, 56, 4), [255, 0, 0]);
+    for (x, y) in [(56, 24), (56, 40), (56, 60), (40, 4), (24, 8), (32, 32)] {
+        assert_eq!(pixel(&cpu, data, x, y), [0, 0, 0], "({x}, {y})");
+    }
+    // Green at the top left, y from the bottom.
+    assert_eq!(pixel(&cpu, data, 4, 60), [0, 255, 0]);
+    assert_eq!(pixel(&cpu, data, 4, 52), [0, 0, 0]);
+}
+
+#[test]
+fn a_viewport_hanging_off_the_window_keeps_its_center_where_opengl_puts_it() {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        // As Alice draws its health vial: a viewport the window's size
+        // moved off its left edge, the model at its center.
+        let vp = [Arg::I((-24i32) as u32), Arg::I(8), Arg::I(64), Arg::I(64)];
+        c.api(a, l, VIEWPORT, &vp)?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_QUADS)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        for (x, y) in [
+            (-0.125, -0.125),
+            (0.125, -0.125),
+            (0.125, 0.125),
+            (-0.125, 0.125),
+        ] {
+            c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+        }
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("offset_viewport", true, exe);
+    run_until_done(&mut cpu, data);
+    // The quad's center is at x -24 + 32 = 8, y 8 + 32 = 40 from the
+    // bottom, 8 pixels square.
+    assert_eq!(pixel(&cpu, data, 8, 40), [255, 0, 0]);
+    for (x, y) in [(20, 40), (32, 40), (8, 28), (8, 52)] {
+        assert_eq!(pixel(&cpu, data, x, y), [0, 0, 0], "({x}, {y})");
+    }
 }
