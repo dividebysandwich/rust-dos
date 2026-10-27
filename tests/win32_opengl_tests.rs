@@ -469,8 +469,8 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
 
 #[test]
 fn a_triangle_reaching_far_off_the_window_is_drawn_where_it_covers_it() {
-    // A red triangle whose bottom right corner is 200 widths of the
-    // view to the right: thousands of pixels past the window, and past
+    // A red triangle whose bottom right corner is a hundred widths of
+    // the view to the right: thousands of pixels past the window, past
     // the band the card's vertices are clipped to. OpenGL draws the
     // part in the view. The card's vertex registers hold 12.4 fixed
     // point, and a vertex clipped at their end wraps round to the far

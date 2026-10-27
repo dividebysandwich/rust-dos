@@ -71,7 +71,7 @@ pub fn words(cpu: &Cpu) -> [u32; 53] {
     w[27] = 1;
     w[28] = 65536.0f32.to_bits();
     // The guard band, as Direct3D 7's HAL has it.
-    for (i, g) in [-2048.0f32, -2048.0, 2048.0, 2048.0].iter().enumerate() {
+    for (i, g) in crate::win32::ddraw::d3d::caps::GUARD_BAND.iter().enumerate() {
         w[29 + i] = g.to_bits();
     }
     // Eight sets of texture coordinates.
