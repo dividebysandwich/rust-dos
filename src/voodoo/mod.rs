@@ -57,7 +57,7 @@ use regs::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use texture::Tmu;
-use backlog::{Access, Backlog, TileLayout};
+use backlog::{Access, Backlog, Footprint, TileLayout};
 use workers::{Job, Word};
 
 /// The size of the card's memory window.
@@ -569,6 +569,9 @@ pub struct Voodoo {
     /// texture units queued triangles read.
     outstanding: Cell<bool>,
     tmu_in_use: Cell<u8>,
+    /// The memory the jobs given out since then, and the frame buffer
+    /// writes waiting to be, may read or write.
+    footprint: RefCell<Footprint>,
     /// Frame buffer writes behind queued jobs, not yet a job themselves.
     words: RefCell<Vec<Word>>,
     /// While the OpenGL renderer draws the picture: the jobs held back
@@ -660,6 +663,7 @@ impl Voodoo {
             drawn_to: Vec::new(),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
+            footprint: RefCell::new(Footprint::default()),
             words: RefCell::new(Vec::new()),
             backlog: RefCell::new(Backlog::default()),
             prune: std::env::var("RUST_DOS_VOODOO_PRUNE").map_or(true, |v| v != "0"),
@@ -928,6 +932,7 @@ impl Voodoo {
         self.pool.flush();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
+        self.footprint.borrow_mut().clear();
     }
 
     /// Whether the workers are still drawing, with everything queued
@@ -948,6 +953,7 @@ impl Voodoo {
         if !busy && self.words.borrow().is_empty() && self.backlog.borrow().is_empty() {
             self.outstanding.set(false);
             self.tmu_in_use.set(0);
+            self.footprint.borrow_mut().clear();
         }
         busy
     }
@@ -985,8 +991,14 @@ impl Voodoo {
         if !self.backlog.borrow().is_empty() && !self.deferring() {
             self.release_backlog();
         }
+        // Without workers a job is drawn as it is given: it reaches
+        // nothing after.
+        let workers = self.pool.workers() > 0;
         for job in jobs {
-            self.outstanding.set(self.pool.workers() > 0);
+            if workers {
+                self.footprint.borrow_mut().add(&job);
+            }
+            self.outstanding.set(workers);
             self.pool.submit(job);
         }
     }
@@ -996,9 +1008,18 @@ impl Voodoo {
         if self.backlog.borrow().is_empty() {
             return;
         }
-        let held = self.backlog.borrow_mut().take();
+        // What they reach is the backlog's footprint, which they take
+        // along.
+        let workers = self.pool.workers() > 0;
+        let held = {
+            let mut backlog = self.backlog.borrow_mut();
+            if workers {
+                self.footprint.borrow_mut().merge(backlog.footprint());
+            }
+            backlog.take()
+        };
         for job in held {
-            self.outstanding.set(self.pool.workers() > 0);
+            self.outstanding.set(workers);
             self.pool.submit(job);
         }
     }
@@ -1012,6 +1033,16 @@ impl Voodoo {
             self.outstanding.set(self.pool.workers() > 0);
             self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
         }
+    }
+
+    /// Whether bytes `start..end` of the frame buffer's memory are memory
+    /// the jobs given out or held back may read or write, so that a
+    /// write there has to wait for them.
+    pub(crate) fn queued_reach(&self, start: u32, end: u32) -> bool {
+        let (start, end) = (start as u64, end as u64);
+        self.writes_queue()
+            && (self.footprint.borrow().touches(start, end)
+                || self.backlog.borrow().footprint().touches(start, end))
     }
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
@@ -1028,6 +1059,7 @@ impl Voodoo {
             self.hand_over(out);
             return;
         }
+        self.footprint.borrow_mut().words(new);
         self.release_backlog();
         let mut words = self.words.borrow_mut();
         words.extend_from_slice(new);
@@ -1046,6 +1078,7 @@ impl Voodoo {
             }
             self.outstanding.set(false);
             self.tmu_in_use.set(0);
+            self.footprint.borrow_mut().clear();
         }
     }
 

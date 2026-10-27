@@ -342,6 +342,95 @@ fn texture_bytes(t: &TmuRaster) -> (u64, u64) {
     (start, end)
 }
 
+/// The card's memory the jobs given out or held back may read or write,
+/// for a write by the CPU that needn't wait for them when it is
+/// elsewhere (`Voodoo::banshee_texture_download`): the bytes their
+/// texture units take texels from in the frame buffer's memory, and the
+/// lowest byte of a buffer they draw into or of a word they write. A
+/// buffer is taken to reach from there to the end of the memory, which
+/// Glide's buffers on a Banshee do, above its textures.
+#[derive(Clone, Debug)]
+pub struct Footprint {
+    textures: Vec<(u64, u64)>,
+    writes_from: u64,
+}
+
+impl Default for Footprint {
+    fn default() -> Self {
+        Self {
+            textures: Vec::new(),
+            writes_from: u64::MAX,
+        }
+    }
+}
+
+/// Texture ranges kept apart; past them, the nearest range takes in a
+/// new one.
+const FOOTPRINT_TEXTURES: usize = 64;
+
+impl Footprint {
+    /// The jobs are all done: they reach nothing.
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.writes_from = u64::MAX;
+    }
+
+    /// What `job` may read and write.
+    pub fn add(&mut self, job: &Job) {
+        match job {
+            Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
+                for base in std::iter::once(st.dest).chain(st.aux) {
+                    self.writes_from = self.writes_from.min(2 * base as u64);
+                }
+                if let Job::Triangle { .. } = job {
+                    for t in st.tmu.iter().flatten().filter(|t| t.ram.same(&st.fb)) {
+                        self.texture(texture_bytes(t));
+                    }
+                }
+            }
+            Job::Pixels { words, .. } => self.words(words),
+            Job::Rows { base, .. } => self.writes_from = self.writes_from.min(2 * *base as u64),
+            #[cfg(test)]
+            Job::Panic => {}
+        }
+    }
+
+    /// Frame buffer words to be written.
+    pub fn words(&mut self, words: &[Word]) {
+        if let Some(low) = words.iter().map(|w| w.at).min() {
+            self.writes_from = self.writes_from.min(2 * low as u64);
+        }
+    }
+
+    /// Add what the jobs of `other` may read and write.
+    pub fn merge(&mut self, other: &Footprint) {
+        self.writes_from = self.writes_from.min(other.writes_from);
+        for &range in &other.textures {
+            self.texture(range);
+        }
+    }
+
+    fn texture(&mut self, (start, end): (u64, u64)) {
+        if start >= end || self.textures.iter().any(|&(a, b)| a <= start && end <= b) {
+            return;
+        }
+        if self.textures.len() < FOOTPRINT_TEXTURES {
+            self.textures.push((start, end));
+            return;
+        }
+        // The range nearest to it takes it in.
+        let gap = |&(a, b): &(u64, u64)| start.saturating_sub(b).max(a.saturating_sub(end));
+        if let Some(near) = self.textures.iter_mut().min_by_key(|r| gap(r)) {
+            *near = (near.0.min(start), near.1.max(end));
+        }
+    }
+
+    /// Whether bytes `start..end` are memory the jobs may read or write.
+    pub fn touches(&self, start: u64, end: u64) -> bool {
+        end > self.writes_from || self.textures.iter().any(|&(a, b)| start < b && a < end)
+    }
+}
+
 /// A fastfill of columns `x0..x1` and rows `y0..y1` with `st`.
 pub fn fastfill(layout: &TileLayout, st: &RasterState, (x0, x1, y0, y1): (i32, i32, i32, i32)) -> Access {
     let fbz = st.fbz_mode;
@@ -446,6 +535,8 @@ pub struct Backlog {
     /// For each colour buffer, the columns the jobs held may draw into
     /// are left of this one.
     reach: [u32; 3],
+    /// The memory the jobs held may read or write.
+    footprint: Footprint,
     /// Jobs dropped, for the debugger.
     pub pruned: u64,
 }
@@ -463,6 +554,7 @@ impl Backlog {
     /// oldest jobs, when there are too many.
     pub fn push(&mut self, job: Job, access: Access) -> Vec<Job> {
         self.numbered += 1;
+        self.footprint.add(&job);
         self.reach(&job, &access);
         self.track(&job, &access);
         let kills = access.kills.iter().any(|&k| k != 0);
@@ -482,6 +574,7 @@ impl Backlog {
         let access = words(&self.layout, new);
         self.words += new.len();
         if matches!(self.jobs.last(), Some((Job::Pixels { .. }, ..))) {
+            self.footprint.words(new);
             let (mut job, mut last, n) = self.jobs.pop().expect("a last job");
             self.reach(&job, &access);
             self.track(&job, &access);
@@ -558,7 +651,13 @@ impl Backlog {
         self.words = 0;
         self.cleared = None;
         self.reach = [0; 3];
+        self.footprint.clear();
         self.jobs.drain(..).map(|(job, ..)| job).collect()
+    }
+
+    /// The memory the jobs held may read or write.
+    pub fn footprint(&self) -> &Footprint {
+        &self.footprint
     }
 
     /// Widen `reach` to the columns `job` may draw into. A triangle with
@@ -980,5 +1079,45 @@ mod tests {
         let bases = [Some(0), Some(size - 1), None, None];
         let overlapping = TileLayout::new(bases, (640, 480), tiles, tiles, 2 * size);
         assert!(!overlapping.prunable, "tiles span their rows");
+    }
+
+    #[test]
+    fn a_footprint_holds_the_textures_read_and_the_buffers_written() {
+        let mut f = Footprint::default();
+        assert!(!f.touches(0, u64::MAX), "nothing queued reaches nothing");
+        f.texture((0x1000, 0x3000));
+        f.texture((0x8000, 0x9000));
+        let word = Word {
+            row: 0,
+            at: 0x40_0000,
+            value: 0,
+        };
+        f.add(&Job::Pixels {
+            fb: Vram::new(16),
+            words: vec![word],
+        });
+        assert!(f.touches(0x2FFF, 0x3001) && f.touches(0x8FFF, 0x9000));
+        assert!(!f.touches(0x3000, 0x8000), "between the textures");
+        assert!(f.touches(0x80_0000, 0x80_0004), "above the words written");
+        assert!(!f.touches(0x7F_FFFC, 0x80_0000));
+        // A range within one held already adds nothing.
+        f.texture((0x1800, 0x2000));
+        // Past so many textures, the nearest range takes a new one in:
+        // the last three become one, the first ones stay apart.
+        for i in 0..FOOTPRINT_TEXTURES as u64 {
+            f.texture((0x10_0000 + 0x100 * i, 0x10_0080 + 0x100 * i));
+        }
+        assert!(!f.touches(0x3000, 0x3004) && !f.touches(0x10_4000, 0x10_4004));
+        assert!(
+            !f.touches(0x10_3C80, 0x10_3D00),
+            "between ranges kept apart"
+        );
+        assert!(f.touches(0x10_3D80, 0x10_3E00) && f.touches(0x10_3E80, 0x10_3F00));
+        let mut g = Footprint::default();
+        g.merge(&f);
+        assert!(g.touches(0x2FFF, 0x3001) && g.touches(0x80_0000, 0x80_0004));
+        assert!(!g.touches(0x3000, 0x8000));
+        f.clear();
+        assert!(!f.touches(0, u64::MAX));
     }
 }

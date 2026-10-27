@@ -134,6 +134,27 @@ impl Vram {
         bytes
     }
 
+    /// `data` written from byte address `at` on, which with it is within
+    /// the memory: a byte at each end that is half a word, the words
+    /// between whole.
+    pub fn store_bytes(&self, at: usize, data: &[u8]) {
+        let (mut at, mut data) = (at, data);
+        if at & 1 != 0
+            && let Some((&first, rest)) = data.split_first()
+        {
+            self.set_byte(at, first);
+            (at, data) = (at + 1, rest);
+        }
+        let (pairs, tail) = data.as_chunks::<2>();
+        let words = &self.words[at / 2..at / 2 + pairs.len()];
+        for (w, b) in words.iter().zip(pairs) {
+            w.store(u16::from_le_bytes(*b), Relaxed);
+        }
+        if let [last] = tail {
+            self.set_byte(at + 2 * pairs.len(), *last);
+        }
+    }
+
     /// Put `bytes` (little-endian words, as long as the memory) in it.
     pub fn load_bytes(&self, bytes: &[u8]) {
         for (w, b) in self.words.iter().zip(bytes.as_chunks::<2>().0) {
@@ -178,5 +199,18 @@ mod tests {
         assert!(!copied.unique());
         drop(other);
         assert!(copied.unique());
+    }
+
+    #[test]
+    fn stored_bytes_leave_the_halves_of_words_around_them() {
+        let m = Vram::new(8);
+        m.load_bytes(&[0xEE; 8]);
+        m.store_bytes(1, &[1, 2, 3, 4, 5]);
+        assert_eq!(m.to_bytes(), [0xEE, 1, 2, 3, 4, 5, 0xEE, 0xEE]);
+        m.store_bytes(2, &[6, 7]);
+        assert_eq!(m.to_bytes(), [0xEE, 1, 6, 7, 4, 5, 0xEE, 0xEE]);
+        m.store_bytes(7, &[8]);
+        m.store_bytes(0, &[]);
+        assert_eq!(m.to_bytes(), [0xEE, 1, 6, 7, 4, 5, 0xEE, 8]);
     }
 }

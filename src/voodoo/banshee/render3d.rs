@@ -294,16 +294,40 @@ impl Voodoo {
     }
 
     /// TMU 0's texture space from 600000h: texture memory from its
-    /// texBaseAddr on, linear (86Box's `voodoo_tex_writel`).
+    /// texBaseAddr on, linear (86Box's `voodoo_tex_writel`). The
+    /// triangles queued before are drawn first if they may read or draw
+    /// into the dword.
     pub(crate) fn banshee_texture_write(&mut self, offset: u32, data: u32) {
-        if self.tmu_in_use.get() != 0 || self.writes_queue() {
+        let base = self.reg[0x100 + TEX_BASE_ADDR] & 0xFF_FFF0;
+        let addr = base.wrapping_add(offset & 0x1F_FFFC) & self.fbi.mask;
+        if self.queued_reach(addr, addr + 4) {
             self.flush();
         }
-        let base = self.reg[0x100 + TEX_BASE_ADDR] & 0xFF_FFF0;
-        let addr = base.wrapping_add(offset & 0x1F_FFFC);
         super::blit2d::write(&self.fbi.ram, addr, 4, data, self.fbi.mask);
-        let addr = addr & self.fbi.mask;
         self.mirror_memory(addr, addr + 4);
+    }
+
+    /// `data` downloaded into the card's memory from byte `addr` on, as
+    /// writes of it through TMU 0's texture space would put it, all at
+    /// once: Glide's texture downloads. The triangles queued before are
+    /// drawn first if they may read or draw into that memory, and the
+    /// recording hears of the bytes once. Past the end of the memory
+    /// they wrap round.
+    pub(crate) fn banshee_texture_download(&mut self, addr: u32, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let size = self.fbi.mask as usize + 1;
+        let start = addr as usize & (size - 1);
+        let (here, wrapped) = data.split_at(data.len().min(size - start));
+        if self.queued_reach(start as u32, (start + here.len()) as u32) {
+            self.flush();
+        }
+        self.fbi.ram.store_bytes(start, here);
+        self.mirror_memory(start as u32, (start + here.len()) as u32);
+        if !wrapped.is_empty() {
+            self.banshee_texture_download(0, wrapped);
+        }
     }
 
     /// For the debugger: where the 3D engine draws and what it shows.
@@ -1079,5 +1103,41 @@ mod tests {
         // A download from 600000h lands from there on.
         v.write(0x60_0008, 0x1122_3344, 0xFFFF_FFFF, Now::default());
         assert_eq!(v.fbi.ram.get(0x50_0018 / 2), 0x3344);
+    }
+
+    #[test]
+    fn a_texture_download_is_what_writes_through_the_texture_space_make() {
+        // Rows of an odd length at an odd address: the bytes around them
+        // stay as they were.
+        let data: Vec<u8> = (0..37u8).map(|i| i.wrapping_mul(7) ^ 0x5A).collect();
+        let (at, end) = (0x40_0003u32, 0x40_0003 + data.len() as u32);
+        let (mut bulk, mut dwords) = (card(), card());
+        for v in [&bulk, &dwords] {
+            v.fbi.ram.fill(0x1F_FFF0..0x20_0040, 0xA5C3);
+        }
+        bulk.banshee_texture_download(at, &data);
+        // The same bytes a dword at a time, merged into what is there.
+        let port = at & !0xF;
+        reg3d(&mut dwords, TEX_BASE_ADDR, port);
+        for dword in (at & !3..end).step_by(4) {
+            let bytes: [u8; 4] = std::array::from_fn(|i| {
+                let a = dword + i as u32;
+                if (at..end).contains(&a) {
+                    data[(a - at) as usize]
+                } else {
+                    dwords.fbi.ram.byte(a as usize)
+                }
+            });
+            let value = u32::from_le_bytes(bytes);
+            dwords.write(0x60_0000 + dword - port, value, u32::MAX, Now::default());
+        }
+        let around = |v: &Voodoo| {
+            (0x3F_FFE0..0x40_0080)
+                .map(|a| v.fbi.ram.byte(a))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(around(&bulk), around(&dwords));
+        assert_eq!(bulk.fbi.ram.byte(at as usize - 1), 0xC3);
+        assert_eq!(bulk.fbi.ram.byte(at as usize), data[0]);
     }
 }
