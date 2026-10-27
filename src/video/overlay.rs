@@ -1,15 +1,21 @@
 //! What the screen shows on top of the video card's picture: the blinking
-//! text cursor and the mouse pointer, which the front ends draw over each
-//! frame (see `render_screen`).
+//! text cursor and the mouse pointer (the mouse driver's, or the cursor
+//! of the built-in Windows), which the front ends draw over each frame
+//! (see `render_screen`).
 
 use super::Frame;
 use crate::bus::Bus;
+use crate::win32::user32::cursor::{self, CursorImage, PIXEL_SET, PIXEL_XOR};
 
-/// Draw the text mode cursor, if `cursor_visible` (the blink phase), and the
-/// mouse pointer while the driver shows it over `frame`, which is the
-/// picture of `bus`'s current video mode.
+/// Draw the text mode cursor, if `cursor_visible` (the blink phase), the
+/// mouse pointer while the driver shows it and the built-in Windows'
+/// cursor while Windows shows it over `frame`, which is the picture of
+/// `bus`'s current video mode.
 pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
-    // The 3dfx card's picture has neither.
+    if let Some((image, rect)) = windows_cursor(frame, bus) {
+        draw_windows_cursor(frame, image, rect);
+    }
+    // The 3dfx card's picture has neither of the others.
     if bus.voodoo_output() {
         return;
     }
@@ -30,10 +36,17 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
 /// Rows that drawing the cursors may touch. Use the same clipped geometry
 /// as drawing, so their old rows can be restored after a move or a blink.
 pub fn cursor_rows(frame: &Frame, bus: &Bus, cursor_visible: bool) -> std::ops::Range<usize> {
-    if bus.voodoo_output() {
-        return 0..0;
+    let mut rows = 0..0;
+    if let Some((_, r)) = windows_cursor(frame, bus) {
+        let h = frame.height as i32;
+        rows = r.y.clamp(0, h) as usize..(r.y + r.h).clamp(0, h) as usize;
     }
-    let mut rows = text_cursor(frame, bus, cursor_visible).map_or(0..0, |(_, rows)| rows);
+    if bus.voodoo_output() {
+        return rows;
+    }
+    if let Some((_, text)) = text_cursor(frame, bus, cursor_visible) {
+        rows = super::compose::union(rows, text);
+    }
     if let Some((x, y)) = mouse_origin(frame, bus) {
         let (w, h) = (frame.width as i32, frame.height as i32);
         if x < w && x + 16 > 0 {
@@ -43,6 +56,74 @@ pub fn cursor_rows(frame: &Frame, bus: &Bus, cursor_visible: bool) -> std::ops::
         }
     }
     rows
+}
+
+/// Where the built-in Windows' cursor goes on `frame`: its top left
+/// corner, its size and how many frame pixels a pixel of it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CursorRect {
+    x: i32,
+    y: i32,
+    h: i32,
+    scale: i32,
+}
+
+/// The cursor of the built-in Windows, if the screen shows one: its
+/// picture and where its hot spot is, in the mouse's coordinates.
+/// Windows draws it on the desktop and over DirectDraw's modes, which a
+/// Voodoo3 or Banshee shows in its extended modes; Glide's picture on a
+/// 3dfx card has none.
+fn shown_windows_cursor(bus: &Bus) -> Option<(&CursorImage, (i32, i32))> {
+    let glide = bus.banshee().is_none() || bus.win32.glide_open();
+    if bus.voodoo_output() && glide {
+        return None;
+    }
+    cursor::shown(&bus.win32)
+}
+
+/// The cursor of the built-in Windows, if it shows one, and where it
+/// goes on `frame`: its pixels are the screen's, as many frame pixels
+/// each as the frame has to a pixel of the mouse's screen.
+fn windows_cursor<'a>(frame: &Frame, bus: &'a Bus) -> Option<(&'a CursorImage, CursorRect)> {
+    let (image, (x, y)) = shown_windows_cursor(bus)?;
+    let (virt_w, virt_h) = bus.mouse.virtual_screen(bus);
+    let scale = (frame.width as i32 / virt_w.max(1)).max(1);
+    let x = (x as i64 * frame.width as i64 / virt_w.max(1) as i64) as i32;
+    let y = (y as i64 * frame.height as i64 / virt_h.max(1) as i64) as i32;
+    let rect = CursorRect {
+        x: x - image.hotspot.0 * scale,
+        y: y - image.hotspot.1 * scale,
+        h: image.height * scale,
+        scale,
+    };
+    Some((image, rect))
+}
+
+/// Draw the built-in Windows' cursor `image` at `rect`: a pixel of it
+/// sets the frame's or XORs it with its color.
+fn draw_windows_cursor(frame: &mut Frame, image: &CursorImage, rect: CursorRect) {
+    let (w, h) = (frame.width as i32, frame.height as i32);
+    for y in 0..rect.h {
+        let fy = rect.y + y;
+        if !(0..h).contains(&fy) {
+            continue;
+        }
+        for x in 0..image.width * rect.scale {
+            let fx = rect.x + x;
+            if !(0..w).contains(&fx) {
+                continue;
+            }
+            let p = image.pixel(x / rect.scale, y / rect.scale);
+            let rgb = [p as u8, (p >> 8) as u8, (p >> 16) as u8];
+            let at = (fy * w + fx) as usize * 4;
+            let to = &mut frame.rgba[at..at + 3];
+            match p & 0xFF00_0000 {
+                PIXEL_SET => to.copy_from_slice(&rgb),
+                PIXEL_XOR => to.iter_mut().zip(rgb).for_each(|(t, c)| *t ^= c),
+                _ => {}
+            }
+        }
+    }
 }
 
 fn mouse_origin(frame: &Frame, bus: &Bus) -> Option<(i32, i32)> {
@@ -97,9 +178,18 @@ fn text_cursor(
     (!columns.is_empty() && !rows.is_empty()).then_some((columns, rows))
 }
 
-/// Whether `draw_cursors` may draw anything (a text cursor, the mouse's).
+/// Whether `draw_cursors` may draw anything (a text cursor, the mouse's,
+/// Windows').
 pub fn draws_cursors(bus: &Bus) -> bool {
-    !bus.voodoo_output() && (super::text::geometry(bus).is_some() || (bus.mouse.installed && bus.mouse.hide_counter <= 0))
+    let dos = super::text::geometry(bus).is_some()
+        || (bus.mouse.installed && bus.mouse.hide_counter <= 0);
+    (!bus.voodoo_output() && dos) || draws_windows_cursor(bus)
+}
+
+/// Whether `draw_cursors` draws the built-in Windows' cursor, which then
+/// stands for the host's pointer over the picture.
+pub fn draws_windows_cursor(bus: &Bus) -> bool {
+    shown_windows_cursor(bus).is_some()
 }
 
 /// What `draw_cursors` draws from, as one number: where it would draw the
@@ -121,6 +211,9 @@ pub fn cursors_key(bus: &Bus, cursor_visible: bool) -> u64 {
     }
     if bus.mouse.installed && bus.mouse.hide_counter <= 0 {
         (bus.mouse.virtual_screen(bus), bus.mouse.x, bus.mouse.y).hash(&mut h);
+    }
+    if let Some((image, at)) = shown_windows_cursor(bus) {
+        (bus.mouse.virtual_screen(bus), at, image).hash(&mut h);
     }
     h.finish()
 }

@@ -104,8 +104,9 @@ pub struct Input {
     pub async_keys: Vec<u8>,
     /// ClipCursor's rectangle.
     pub clip: Option<Rect>,
-    /// SetCursor's cursor, and ShowCursor's count.
+    /// SetCursor's cursor, its picture, and ShowCursor's count.
     pub cursor_handle: u32,
+    pub cursor_image: super::cursor::CursorImage,
     pub cursor_count: i32,
     /// What the devices had when they were last read: the keys held, the
     /// mouse's place, its buttons and how often each was pressed and
@@ -1758,8 +1759,7 @@ pub fn get_clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SetCursor(cursor): the cursor it had.
 pub fn set_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let input = &mut user(cpu).input;
-    Some(std::mem::replace(&mut input.cursor_handle, args[0]))
+    Some(super::cursor::set(cpu, args[0]))
 }
 
 /// GetCursor.
@@ -2087,6 +2087,7 @@ crate::state_fields!(Input {
     async_keys,
     clip,
     cursor_handle,
+    cursor_image,
     cursor_count,
     held,
     device_pos,

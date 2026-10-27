@@ -1849,3 +1849,104 @@ fn a_256_colour_desktop_has_a_system_palette() {
     assert_eq!(dac[11 * 3..12 * 3], [0x40 >> shift, 0x80 >> shift, 0xC0 >> shift]);
     assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
 }
+
+const USER32_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "LoadCursorA", "SetCursor", "SetCursorPos", "ShowCursor"],
+);
+const LOAD_CURSOR: usize = 1;
+const SET_CURSOR: usize = 2;
+const SET_CURSOR_POS: usize = 3;
+const SHOW_CURSOR: usize = 4;
+const IDC_ARROW: u32 = 32512;
+
+/// A window on the desktop, the arrow set as the cursor and the cursor
+/// put at (100, 100) (step 1); then the cursor hidden (step 2).
+fn cursor_program() -> (Vec<u8>, u32) {
+    program(&[USER32_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        a.push(eax)?;
+        a.call(l.import(SET_CURSOR))?;
+        c.keep(a, l)?;
+        c.api(a, l, SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        wait(a, l, 1)?;
+        c.api(a, l, SHOW_CURSOR, &[Arg::I(0)])?;
+        finish(a, l, 2)
+    })
+}
+
+/// The pixels (`x`, `y`) of the screen with the cursors drawn over it,
+/// as the front ends and /api/screenshot show it.
+fn with_cursors(cpu: &Cpu, at: &[(usize, usize)]) -> Vec<[u8; 3]> {
+    let (width, height) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    video::render_screen(&mut frame, &cpu.bus);
+    video::overlay::draw_cursors(&mut frame, &cpu.bus, false);
+    at.iter()
+        .map(|&(x, y)| {
+            let i = (y * width as usize + x) * 4;
+            [frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2]]
+        })
+        .collect()
+}
+
+/// The built-in Windows draws the cursor SetCursor set where the mouse
+/// is, on a desktop of 256 colours: the arrow's tip at the cursor's place
+/// is black and its inside white. ShowCursor(FALSE) takes it away.
+fn the_cursor_shows(test: &str, board: Option<Board>) {
+    let (program, data) = cursor_program();
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_ne!(r[1], 0, "LoadCursorA(IDC_ARROW)");
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let points = [(100, 100), (101, 102), (300, 300)];
+    let shown = with_cursors(&cpu, &points);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+    let desktop = shown[2];
+    assert_ne!(desktop, [0xFF, 0xFF, 0xFF], "the desktop isn't white");
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 5)[4], u32::MAX, "ShowCursor(FALSE)");
+    let hidden = with_cursors(&cpu, &points);
+    assert_eq!(hidden[1], desktop, "no cursor over the desktop");
+}
+
+#[test]
+fn the_cursor_shows_on_a_vesa_desktop() {
+    the_cursor_shows("cursor_vesa", None);
+}
+
+/// A Voodoo3 shows the desktop in its extended mode, the 3dfx card's own
+/// picture, and Windows' cursor is drawn over it.
+#[test]
+fn the_cursor_shows_on_a_voodoo3_desktop() {
+    the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
+}
