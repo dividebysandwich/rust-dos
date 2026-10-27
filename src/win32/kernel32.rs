@@ -1,13 +1,14 @@
 //! KERNEL32.DLL: the process, its console and the table of functions;
 //! the other parts in the modules below.
 
+pub(super) mod atom;
 mod console;
 mod disk;
 mod env;
 mod file;
 mod global;
 mod locale;
-pub(super) mod lz;
+pub(crate) mod lz;
 mod mapping;
 mod memory;
 mod message;
@@ -566,6 +567,10 @@ static APIS: &[Api] = &[
     // addresses.
     stdcall("GetVolumeInformationA", 915, 8, disk::get_volume_information),
     stdcall("GetVolumeInformationW", 916, 8, not_implemented),
+    stdcall("GlobalAddAtomA", 917, 1, atom::global_add_atom),
+    stdcall("GlobalFindAtomA", 918, 1, atom::global_find_atom),
+    stdcall("GlobalDeleteAtom", 919, 1, atom::global_delete_atom),
+    stdcall("GlobalGetAtomNameA", 920, 3, atom::global_get_atom_name),
 ];
 
 /// The places in `APIS` of the system's own stubs.

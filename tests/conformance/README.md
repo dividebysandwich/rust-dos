@@ -77,10 +77,42 @@ changes listed below:
 - `comdlg32/`: `filedlg.c` and its resources, `rsrc.rc`, from
   `dlls/comdlg32/tests/`. `fontdlg.c` and `printdlg.c` are left out:
   they test the font and print dialogs, which stay cancelled.
+- `msimg32/`: `bitmap.c` is `test_GdiAlphaBlend`, `test_GdiGradientFill`
+  and `test_32bit_ddb` of `dlls/gdi32/tests/bitmap.c` of Wine 1.4.1
+  (tag `wine-1.4.1`, commit `c6f036f73dd0a652d23bd1a15e4c8519b6903c7c`),
+  the first release whose tests check pixels that AlphaBlend draws
+  (in `test_32bit_ddb`, which runs on a 32-bit desktop). The rest of
+  that file tests GDI32 alone. `pixels.c` is rust-dos's own, written
+  with Wine's framework: Wine's tests check few of the pixels the three
+  functions draw, so it checks what Windows 98 SE drew and returned
+  for AlphaBlend with constant and per-pixel alpha into 32, 24 and
+  16-bit DIBs, stretched too, TransparentBlt from 32, 24, 16 and 8-bit
+  DIBs, stretched too, and GradientFill's rectangles and triangles,
+  dithered at 16 bits, and its failures. Wine's `dib.c` is left out: it
+  compares hashes of what is drawn into formats Windows 98 doesn't
+  have.
 
 `heap.c` has the values of the `FLG_HEAP_*` and `FLG_POOL_ENABLE_TAGGING`
 flags defined after its includes, from Wine's `winternl.h`, as MinGW's
 lacks them.
+
+`msimg32/bitmap.c` has these changes:
+
+- its START_TEST finds AlphaBlend and GradientFill in MSIMG32.DLL when
+  GDI32 has no GdiAlphaBlend and GdiGradientFill, as Windows 98's
+  hasn't;
+- the GradientFill calls with NULL vertices, a NULL mesh or a NULL DC
+  skip on Windows 9x (`win_skip`): Windows 98 SE's reads through the
+  NULL pointers and the program dies;
+- what Windows 98 SE returned where it differs from NT is accepted
+  through `broken()`: AlphaBlend and GradientFill fail without setting
+  an error where NT sets ERROR_INVALID_PARAMETER; AlphaBlend blends a
+  source and destination that overlap in one bitmap, succeeds with a
+  source rectangle mirrored back past the bitmap's corner, and fails
+  into a destination mirrored by the DC's mapping; GradientFill
+  succeeds with an empty mesh and with a mesh index past the vertices,
+  which it reads past the array; GDI32 makes no DIB section with
+  BI_BITFIELDS masks in blue, green, red order.
 
 `shlexec.c` doesn't call `test_dde` and `test_dde_default_app`. They
 patch the import table of SHELL32, which the built-in DLL doesn't have,
@@ -254,6 +286,21 @@ The results that aren't clean, and why:
 - gdi32 `bitmap.c:2527`, a StretchBlt with both rectangles given
   backwards, and `2755`, a StretchDIBits that shrinks, give other
   pixels than Windows did. Wine marks both `todo_wine`.
+- msimg32 `bitmap.c:460`: a 32-bit DIB pattern brush draws its
+  color without the alpha byte, which the test wants kept. Windows 98
+  SE skipped this check, as its desktop had 256 colors.
+- msimg32: `pixels.c` checks Windows 98 SE's results where the built-in
+  MSIMG32 gives the same ones. Where Windows 98 SE draws past what a
+  program asked for, the built-in one keeps to it: TransparentBlt
+  ignores the clip region there, a destination partly outside the
+  bitmap is drawn moved inside it, stretching and shrinking write
+  pixels past the destination rectangle, and GradientFill dithers into
+  8-bit DIBs in a way that isn't known. A 5-5-5 BI_RGB DIB and the
+  first draw into a 16-bit DIB on a 256-color desktop come out through
+  the system palette there. Palette entries equally near a color can
+  be picked differently, and a TransparentBlt without a source and
+  with a negative source x fails with ERROR_INVALID_PARAMETER here and
+  without an error there.
 - gdi32 `dc.c:453`: DeleteDC of a class DC leaves it there, as on
   Windows 9x, which the test allows only through `broken()`.
 - user32 `msg.c` and `win.c` compare the messages a window gets with

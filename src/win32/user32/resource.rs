@@ -183,6 +183,31 @@ const ARROW: [&str; 19] = [
     "       XX",
 ];
 
+/// The hand cursor, over links: X black, . white.
+const HAND: [&str; 21] = [
+    "    XX",
+    "   X..X",
+    "   X..X",
+    "   X..X",
+    "   X..X",
+    "   X..XXX",
+    "   X..X..XXX",
+    "   X..X..X..XX",
+    "XX X..X..X..X.X",
+    "X..X........X..X",
+    "X...X..........X",
+    " X.............X",
+    "  X............X",
+    "  X...........X",
+    "   X..........X",
+    "   X.........X",
+    "    X........X",
+    "    X........X",
+    "     X......X",
+    "     X......X",
+    "     XXXXXXXX",
+];
+
 /// The pixel of a picture in characters at (`x`, `y`).
 fn art(lines: &[&str], x: i32, y: i32) -> Option<u32> {
     let row = lines.get(y as usize)?;
@@ -242,6 +267,8 @@ fn cursor_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
             (d.sqrt() > 9.0 && d.sqrt() < 12.0 || (x - y).abs() < 2 && (6..25).contains(&x))
                 .then_some(0)
         }
+        // IDC_HAND: a pointing hand.
+        32649 => art(&HAND, x, y),
         _ => art(&ARROW, x, y),
     }
 }
@@ -250,6 +277,7 @@ fn cursor_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
 fn cursor_hotspot(id: u32) -> (i32, i32) {
     match id {
         32513 | 32514 | 32515 | 32644 | 32645 | 32646 | 32648 => (15, 15),
+        32649 => (5, 0),
         _ => (0, 0),
     }
 }
