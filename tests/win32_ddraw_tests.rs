@@ -151,6 +151,11 @@ const KEY: u32 = 0x310;
 const CLASS: u32 = 0x320;
 const ENTRIES: u32 = 0x400;
 const PIXELS: u32 = 0x800;
+/// Where the polling program counts its calls of Flip, keeps the last
+/// one's result, and has GetScanLine put the line.
+const POLLS: u32 = 0x880;
+const LAST: u32 = 0x884;
+const LINE: u32 = 0x888;
 const DATA_SIZE: usize = 0x900;
 
 /// The data the programs start with: the window class's name.
@@ -251,8 +256,10 @@ fn results(cpu: &mut Cpu, data: u32, n: u32) -> Vec<u32> {
 // Methods' places in their vtables.
 const DD_CREATE_PALETTE: u32 = 5;
 const DD_CREATE_SURFACE: u32 = 6;
+const DD_GET_SCAN_LINE: u32 = 16;
 const DD_SET_COOPERATIVE_LEVEL: u32 = 20;
 const DD_SET_DISPLAY_MODE: u32 = 21;
+const DD_WAIT_FOR_VERTICAL_BLANK: u32 = 22;
 const S_ADD_ATTACHED_SURFACE: u32 = 3;
 const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
@@ -284,6 +291,7 @@ const DDSCL_EXCLUSIVE: u32 = 0x10;
 const DDBLT_COLORFILL: u32 = 0x400;
 const DDBLT_KEYSRC: u32 = 0x8000;
 const DDBLT_WAIT: u32 = 0x100_0000;
+const DDWAITVB_BLOCKEND: u32 = 0x4;
 const DDCKEY_SRCBLT: u32 = 0x8;
 const DDPCAPS_8BIT: u32 = 0x4;
 const DDPCAPS_ALLOW256: u32 = 0x40;
@@ -441,6 +449,136 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
     // The pointer Lock gave is in the program's view of video memory.
     let pointer = peek(&cpu, data + LOCKED + 0x24);
     assert_eq!(pointer & 0x3F_FFFF, 64000);
+}
+
+const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
+
+/// What the polling program does between two calls of Flip.
+enum Between {
+    /// Nothing, as Enemy Infestation waits for its frames.
+    Nothing,
+    /// A loop of so many passes.
+    Work(u32),
+    /// A call of another built-in function, GetScanLine.
+    Call,
+}
+
+/// Full screen with a flip chain: a flip at the start of a frame, so
+/// that it shows a whole frame later, then Flip without DDFLIP_WAIT
+/// called again and again until it succeeds, with `between` in between.
+fn flip_polling_program(between: Between) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_WAIT_FOR_VERTICAL_BLANK,
+            &[Arg::I(DDWAITVB_BLOCKEND), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.inc(dword_ptr(l.at(POLLS)))?;
+        match between {
+            Between::Nothing => {}
+            Between::Work(passes) => {
+                a.mov(ecx, passes)?;
+                let mut busy = a.create_label();
+                a.set_label(&mut busy)?;
+                a.dec(ecx)?;
+                a.jnz(busy)?;
+            }
+            Between::Call => {
+                push(a, l, &[Arg::At(LINE)])?;
+                a.mov(eax, dword_ptr(l.at(DD)))?;
+                a.push(eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+                a.call(dword_ptr(eax + 4 * DD_GET_SCAN_LINE))?;
+            }
+        }
+        push(a, l, &[Arg::I(0), Arg::I(0)])?;
+        a.mov(eax, dword_ptr(l.at(FRONT)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * S_FLIP))?;
+        a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
+        a.je(again)?;
+        a.mov(dword_ptr(l.at(LAST)), eax)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn flip_polled_with_nothing_in_between_waits_for_the_frame() {
+    let (program, data) = flip_polling_program(Between::Nothing);
+    let mut cpu = machine("flip_polling", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    // The flip came at the next frame, after 15 calls that failed and a
+    // 16th that waited for the frame and flipped, instead of one call
+    // for each pass of the loop until then.
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of Flip");
+}
+
+#[test]
+fn flip_polled_with_work_in_between_runs_every_call() {
+    // 3000 instructions between two calls: the program has more to do
+    // than poll, and each call runs, failing until the frame.
+    let (program, data) = flip_polling_program(Between::Work(1500));
+    let mut cpu = machine("flip_polling_work", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of Flip");
+}
+
+#[test]
+fn flip_polled_with_other_calls_in_between_runs_every_call() {
+    // Another function called between two calls, as a loop that keeps
+    // its sound buffer filled or its messages read while it waits: each
+    // call of Flip runs, however few instructions the loop takes.
+    let (program, data) = flip_polling_program(Between::Call);
+    let mut cpu = machine("flip_polling_call", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of Flip");
 }
 
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER

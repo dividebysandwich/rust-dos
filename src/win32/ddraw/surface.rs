@@ -1454,7 +1454,8 @@ fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
 /// back buffer (or of `target`), the back buffers the next ones', and
 /// the last the front buffer's. A primary front buffer is shown from
 /// the next frame. With a flip still to show, it waits for that frame
-/// with DDFLIP_WAIT.
+/// with DDFLIP_WAIT, and fails without it; a thread that calls it again
+/// and again with nothing else in between waits too (`display::Polls`).
 pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1503,14 +1504,20 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (timing, now) = display::timing(cpu);
         let pending = state(cpu).display.flip_at;
         if pending.div_ceil(1000) > cpu.bus.clock.now_micros() {
-            if flags & DDFLIP_WAIT == 0 {
+            // Without DDFLIP_WAIT it fails, but a thread that does
+            // nothing but call again waits as with it: the call that
+            // ends the wait stands for the polls until the frame, the
+            // last of which flips.
+            if flags & DDFLIP_WAIT == 0 && !display::flip_poll_failed(cpu) {
                 return Some(super::DDERR_WASSTILLDRAWING);
             }
             // Flip runs again when that frame begins.
             cpu.set_eip(cpu.eip().wrapping_sub(4));
             return super::directdraw::wait_until(cpu, pending, DD_OK);
         }
-        state(cpu).display.flip_at = timing.next_display(now);
+        let display = &mut state(cpu).display;
+        display.flip_at = timing.next_display(now);
+        display.flip_polls = Default::default();
     }
     // The pixels go round.
     let order: Vec<u32> = match target_id {
