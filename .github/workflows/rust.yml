@@ -78,9 +78,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+      # Saved only from main: every PR restores main's entries, while a
+      # PR's own entries are visible to that PR alone and push main's out
+      # of the 10 GB repository cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.label }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run tests
         if: matrix.full
@@ -292,6 +296,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.label }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         if: ${{ !matrix.win7 }}
@@ -442,6 +447,7 @@ jobs:
         with:
           key: web
           workspaces: web
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # web/build.sh runs the wasm-bindgen program, which must be the version
       # web/Cargo.lock has.
@@ -536,6 +542,7 @@ jobs:
         with:
           key: libretro-${{ matrix.label }}
           workspaces: libretro
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test
         run: cd libretro && cargo test --locked
@@ -607,6 +614,7 @@ jobs:
         with:
           key: libretro-android-${{ matrix.abi }}
           workspaces: libretro
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
