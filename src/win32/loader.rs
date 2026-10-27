@@ -622,6 +622,11 @@ pub(super) fn load_module(
                  alone (the voodoo setting).",
                 importer, name
             )
+        } else if file == super::msimg32::DLL.name {
+            format!(
+                "{} needs {}, a DLL of Windows 98: win32_version=98 has it.",
+                importer, name
+            )
         } else {
             format!(
                 "{} needs {}, which the built-in Windows doesn't have yet.",
@@ -982,7 +987,13 @@ pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
             _ => index,
         }
     };
-    found.filter(|&i| stubs::DLLS[i].name != super::glide::DLL.name || bus.voodoo.is_some())
+    // MSIMG32.DLL came with Windows 98.
+    let version = super::version::shown(win32);
+    found
+        .filter(|&i| stubs::DLLS[i].name != super::glide::DLL.name || bus.voodoo.is_some())
+        .filter(|&i| {
+            stubs::DLLS[i].name != super::msimg32::DLL.name || super::msimg32::present(version)
+        })
 }
 
 /// The DLL `file` in the host folder the `win32_dlls` setting names,

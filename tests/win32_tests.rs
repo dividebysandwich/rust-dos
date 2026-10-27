@@ -3699,3 +3699,70 @@ fn get_volume_information_names_the_file_system() {
     assert_eq!(code, 7, "{:?}", text);
     assert_eq!(text, "FAT");
 }
+
+/// The global atom table, as Delphi's VCL uses it when a program
+/// starts. Bit 0 of the exit code: a name's atom is a string atom; bit
+/// 1: the name in other case gives the same atom; bit 2:
+/// GlobalFindAtomA finds it; bit 3: GlobalGetAtomNameA gives the name
+/// as it was first added; bit 4: after two deletes it is gone; bit 5:
+/// "#123" and MAKEINTATOM(77) are integer atoms.
+#[test]
+fn global_atoms_count_their_adds_and_deletes() {
+    let names: &[&str] = &[
+        "GlobalAddAtomA",
+        "GlobalFindAtomA",
+        "GlobalDeleteAtom",
+        "GlobalGetAtomNameA",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0, b"Delphi1234\0");
+    put(&mut data, 0x10, b"DELPHI1234\0");
+    put(&mut data, 0x20, b"delphi1234\0");
+    put(&mut data, 0x30, b"#123\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let at = |offset: u32| Arg::I(l.at(offset) as u32);
+        a.xor(ebx, ebx)?;
+        call_with(a, l.import(0), &[at(0)])?;
+        a.mov(esi, eax)?;
+        a.cmp(eax, 0xC000)?;
+        a.setae(al)?;
+        a.movzx(eax, al)?;
+        a.or(ebx, eax)?;
+        call_with(a, l.import(0), &[at(0x10)])?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        call_with(a, l.import(1), &[at(0x20)])?;
+        a.cmp(eax, esi)?;
+        check(a, false, 2)?;
+        call_with(a, l.import(3), &[Arg::Esi, at(0x80), Arg::I(64)])?;
+        a.cmp(eax, 10)?;
+        check(a, false, 3)?;
+        a.cmp(byte_ptr(l.at(0x84)), b'h' as i32)?;
+        a.jne(0)?;
+        // Once deleted it is still there, twice it is gone.
+        call_with(a, l.import(2), &[Arg::Esi])?;
+        call_with(a, l.import(1), &[at(0)])?;
+        a.cmp(eax, esi)?;
+        a.jne(0)?;
+        call_with(a, l.import(2), &[Arg::Esi])?;
+        call_with(a, l.import(1), &[at(0)])?;
+        a.cmp(eax, 0)?;
+        check(a, false, 4)?;
+        call_with(a, l.import(0), &[at(0x30)])?;
+        a.mov(esi, eax)?;
+        call_with(a, l.import(0), &[Arg::I(77)])?;
+        a.cmp(eax, 77)?;
+        a.sete(al)?;
+        a.cmp(esi, 123)?;
+        a.sete(cl)?;
+        a.and(al, cl)?;
+        a.movzx(eax, al)?;
+        a.shl(eax, 5)?;
+        a.or(ebx, eax)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run("global_atoms", exe);
+    assert_eq!(code, 0x3F, "{:?}", text);
+}
