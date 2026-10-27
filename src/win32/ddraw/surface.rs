@@ -451,7 +451,7 @@ pub fn card_memory(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
 pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
     match s.memory {
         MEM_VIDEO => screen::read(cpu, s.bits + offset, data),
-        MEM_CARD => voodoo::read(cpu, s, offset, data),
+        MEM_CARD => voodoo::read(cpu, s, offset, data.len(), data),
         MEM_SYSTEM => cpu.bus.guest_read_bytes(s.bits + offset, data),
         _ => data.fill(0),
     }
@@ -461,9 +461,45 @@ pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
 pub fn write_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     match s.memory {
         MEM_VIDEO => screen::write(cpu, s.bits + offset, data),
-        MEM_CARD => voodoo::write(cpu, s, offset, data),
+        MEM_CARD => voodoo::write(cpu, s, offset, data.len(), data),
         MEM_SYSTEM => cpu.bus.guest_write_bytes(s.bits + offset, data),
         _ => {}
+    }
+}
+
+/// Read rows of `len` bytes of a surface's pixels into `data`, one after
+/// another: the first from byte `offset`, each of the others a pitch
+/// after the one before. Rows as long as the pitch are read at once,
+/// and a card surface's frame buffer is set up once for all of them.
+pub fn read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &mut [u8]) {
+    if len == 0 {
+        return;
+    }
+    if len == s.pitch as usize {
+        return read_bytes(cpu, s, offset, data);
+    }
+    if s.memory == MEM_CARD {
+        return voodoo::read(cpu, s, offset, len, data);
+    }
+    for (row, y) in data.chunks_mut(len).zip(0u32..) {
+        read_bytes(cpu, s, offset + y * s.pitch, row);
+    }
+}
+
+/// Write rows of `len` bytes of `data` into a surface's pixels, as
+/// `read_rows` reads them.
+pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u8]) {
+    if len == 0 {
+        return;
+    }
+    if len == s.pitch as usize {
+        return write_bytes(cpu, s, offset, data);
+    }
+    if s.memory == MEM_CARD {
+        return voodoo::write(cpu, s, offset, len, data);
+    }
+    for (row, y) in data.chunks(len).zip(0u32..) {
+        write_bytes(cpu, s, offset + y * s.pitch, row);
     }
 }
 

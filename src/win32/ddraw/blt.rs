@@ -5,6 +5,8 @@
 //! are the card's fastfills, and copies go through its linear frame
 //! buffer.
 
+use std::borrow::Cow;
+
 use super::surface::{self, KEY_DEST_BLT, KEY_SRC_BLT, Surface, surface_of};
 use super::{
     DD_OK, DDERR_BLTFASTCANTCLIP, DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS,
@@ -65,7 +67,7 @@ struct Op {
 /// A color key, with the test of a pixel against it worked out once a
 /// blit rather than for each pixel.
 #[derive(Clone, Copy)]
-enum Key {
+pub(super) enum Key {
     /// The pixels whose bits under `mask` are `value`: a key of one
     /// color, the usual one.
     Exact { mask: u32, value: u32 },
@@ -80,7 +82,7 @@ enum Key {
 
 impl Key {
     /// The key `key` of pixels of the surface `s`'s format.
-    fn new(key: (u32, u32), s: &Surface) -> Key {
+    pub(super) fn new(key: (u32, u32), s: &Surface) -> Key {
         let f = &s.format;
         let masks = [f.r, f.g, f.b];
         let (low, high) = key;
@@ -113,7 +115,7 @@ impl Key {
     }
 
     /// Whether the pixel `value` is in the key.
-    fn holds(&self, value: u32) -> bool {
+    pub(super) fn holds(&self, value: u32) -> bool {
         match *self {
             Key::Exact { mask, value: key } => value & mask == key,
             Key::Ranges { masks, low, high } => masks
@@ -122,12 +124,6 @@ impl Key {
                 .all(|&m| (low & m..=high & m).contains(&(value & m))),
         }
     }
-}
-
-/// Whether `value` is in the key `key`: each of the format's channels
-/// between the key's low and high values of it.
-pub(super) fn keyed(value: u32, key: (u32, u32), s: &Surface) -> bool {
-    Key::new(key, s).holds(value)
 }
 
 fn get(data: &[u8], at: usize, bytes: usize) -> u32 {
@@ -182,38 +178,25 @@ fn offset(s: &Surface, x: i32, y: i32) -> u32 {
     y as u32 * s.pitch + x as u32 * s.bytes_per_pixel()
 }
 
+/// The bytes of a row of the rectangle `r` of a surface.
+fn row_len(s: &Surface, r: &Rect) -> usize {
+    r.width().max(0) as usize * s.bytes_per_pixel() as usize
+}
+
 /// The pixels of the rectangle `r` of a surface, `r.width()` a row: only
 /// its columns are read, which on a card is what takes the time.
 fn load(cpu: &mut Cpu, s: &Surface, r: &Rect) -> Vec<u8> {
-    let len = r.width().max(0) as usize * s.bytes_per_pixel() as usize;
+    let len = row_len(s, r);
     let mut data = vec![0u8; len * r.height().max(0) as usize];
-    if len == 0 {
-        return data;
-    }
-    if r.left == 0 && len == s.pitch as usize {
-        surface::read_bytes(cpu, s, offset(s, 0, r.top), &mut data);
-        return data;
-    }
-    for (row, y) in data.chunks_exact_mut(len).zip(r.top..) {
-        surface::read_bytes(cpu, s, offset(s, r.left, y), row);
-    }
+    surface::read_rows(cpu, s, offset(s, r.left, r.top), len, &mut data);
     data
 }
 
 /// Pixels as `load` gives them stored as the rectangle `r` of a
 /// surface.
 fn store(cpu: &mut Cpu, s: &Surface, r: &Rect, data: &[u8]) {
-    let len = r.width().max(0) as usize * s.bytes_per_pixel() as usize;
-    if len == 0 {
-        return;
-    }
-    if r.left == 0 && len == s.pitch as usize {
-        surface::write_bytes(cpu, s, offset(s, 0, r.top), data);
-        return;
-    }
-    for (row, y) in data.chunks_exact(len).zip(r.top..) {
-        surface::write_bytes(cpu, s, offset(s, r.left, y), row);
-    }
+    let len = row_len(s, r);
+    surface::write_rows(cpu, s, offset(s, r.left, r.top), len, data);
 }
 
 /// Do the blit `op` on the surface `dst_id`.
@@ -257,41 +240,40 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         _ => None,
     };
     let dst_key = op.dst_key.map(|k| Key::new(k, &d));
-    // Where the pixels under the destination's `r` are in the source's.
-    let src_row = |r: &Rect, y: i32| {
-        let (_, _, sr) = source.as_ref().expect("a copy");
-        let sx = (r.left - op.dst.left) as usize;
-        (y - op.dst.top) as usize * sr.width() as usize * bytes + sx * bytes
+    // Where the pixel under the destination's (`x`, `y`) is in the
+    // source's, of an unscaled copy.
+    let src_width = source.as_ref().map_or(0, |(_, _, sr)| sr.width() as usize);
+    let src_at = |x: i32, y: i32| {
+        ((y - op.dst.top) as usize * src_width + (x - op.dst.left) as usize) * bytes
     };
     // A fill, or a copy through no key, puts its pixels over what was
     // there: the destination isn't read.
-    if dst_key.is_none() && src_key.is_none() && (source.is_none() || unscaled) {
-        for r in &rects {
-            let len = r.width() as usize * bytes;
-            let data: Vec<u8> = match &source {
+    let overwrite = dst_key.is_none() && src_key.is_none() && (source.is_none() || unscaled);
+    for r in &rects {
+        let len = r.width() as usize * bytes;
+        let rows = r.height() as usize;
+        if overwrite {
+            let data: Cow<[u8]> = match &source {
+                // The source's rows as they are, when they are as wide.
+                Some((data, ..)) if r.width() as usize == src_width => {
+                    Cow::Borrowed(&data[src_at(r.left, r.top)..][..len * rows])
+                }
                 Some((data, ..)) => (r.top..r.bottom)
-                    .flat_map(|y| &data[src_row(r, y)..][..len])
+                    .flat_map(|y| &data[src_at(r.left, y)..][..len])
                     .copied()
                     .collect(),
                 None => {
                     let value = &op.fill.to_le_bytes()[..bytes];
-                    value.repeat(r.width() as usize * r.height() as usize)
+                    Cow::Owned(value.repeat(r.width() as usize * rows))
                 }
             };
             store(cpu, &d, r, &data);
+            continue;
         }
-        surface::changed(cpu, dst_id);
-        return Ok(());
-    }
-    let mut out = load(cpu, &d, &area);
-    let pitch = area.width() as usize * bytes;
-    for r in &rects {
-        let len = r.width() as usize * bytes;
-        for y in r.top..r.bottom {
-            let row = (y - area.top) as usize * pitch + (r.left - area.left) as usize * bytes;
-            let dst_row = &mut out[row..row + len];
+        let mut out = load(cpu, &d, r);
+        for (dst_row, y) in out.chunks_exact_mut(len).zip(r.top..) {
             if let Some((data, ..)) = source.as_ref().filter(|_| unscaled) {
-                let from = src_row(r, y);
+                let from = src_at(r.left, y);
                 merge(bytes, dst_row, &data[from..from + len], src_key, dst_key);
                 continue;
             }
@@ -324,8 +306,8 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
                 put(dst_row, at, bytes, value);
             }
         }
+        store(cpu, &d, r, &out);
     }
-    store(cpu, &d, &area, &out);
     surface::changed(cpu, dst_id);
     Ok(())
 }

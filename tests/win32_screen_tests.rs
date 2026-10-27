@@ -824,7 +824,9 @@ const DDBLT_KEYSRC: u32 = 0x8000;
 /// The destination rectangles of the blits, 16 bytes each.
 const BLT_RECTS: u32 = 0x800;
 /// The source's color key.
-const KEY: u32 = 0x840;
+const KEY: u32 = 0x880;
+/// The source's middle two columns, a rectangle not at its corner.
+const SRC_RECT: u32 = 0x890;
 /// The source's key color, magenta.
 const MAGENTA: u16 = 0xF81F;
 /// The 4x2 source's pixels, row by row: the key and colors.
@@ -838,8 +840,10 @@ const FILL: u16 = 0x0841;
 /// Full screen at 640x480x16 with a back buffer, which is filled, then
 /// gets a 16-bit system memory surface blitted onto it: through the
 /// source's color key at (101, 50), copied as it is at (200, 10),
-/// stretched twice as wide and high through the key at (300, 100), and
-/// at (101, 50) again through a destination key of the fill's color.
+/// stretched twice as wide and high through the key at (300, 100), its
+/// middle two columns through the key at (400, 20) and stretched twice
+/// as wide and high at (500, 20), and at (101, 50) again through a
+/// destination key of the fill's color.
 fn keyed_blit_program() -> (Vec<u8>, u32) {
     let mut d = data();
     desc(
@@ -873,11 +877,20 @@ fn keyed_blit_program() -> (Vec<u8>, u32) {
     put32(&mut d, FX + 0x58, FILL as u32);
     put32(&mut d, KEY, MAGENTA as u32);
     put32(&mut d, KEY + 4, MAGENTA as u32);
-    let rects = [[101, 50, 105, 52], [200, 10, 204, 12], [300, 100, 308, 104]];
+    let rects = [
+        [101, 50, 105, 52],
+        [200, 10, 204, 12],
+        [300, 100, 308, 104],
+        [400, 20, 402, 22],
+        [500, 20, 504, 24],
+    ];
     for (i, r) in rects.iter().enumerate() {
         for (j, v) in r.iter().enumerate() {
             put32(&mut d, BLT_RECTS + 16 * i as u32 + 4 * j as u32, *v);
         }
+    }
+    for (j, v) in [1, 0, 3, 2].iter().enumerate() {
+        put32(&mut d, SRC_RECT + 4 * j as u32, *v);
     }
     program(&[USER32, GDI32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
@@ -952,7 +965,14 @@ fn keyed_blit_program() -> (Vec<u8>, u32) {
                 Arg::At(FX),
             ],
         )?;
-        for (i, flags) in [DDBLT_KEYSRC, 0, DDBLT_KEYSRC].into_iter().enumerate() {
+        let blits = [
+            (DDBLT_KEYSRC, Arg::I(0)),
+            (0, Arg::I(0)),
+            (DDBLT_KEYSRC, Arg::I(0)),
+            (DDBLT_KEYSRC, Arg::At(SRC_RECT)),
+            (0, Arg::At(SRC_RECT)),
+        ];
+        for (i, (flags, src_rect)) in blits.into_iter().enumerate() {
             c.com(
                 a,
                 l,
@@ -961,7 +981,7 @@ fn keyed_blit_program() -> (Vec<u8>, u32) {
                 &[
                     Arg::At(BLT_RECTS + 16 * i as u32),
                     Arg::Val(SYS),
-                    Arg::I(0),
+                    src_rect,
                     Arg::I(flags | DDBLT_WAIT),
                     Arg::I(0),
                 ],
@@ -991,7 +1011,7 @@ fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
     let (program, data) = keyed_blit_program();
     let mut cpu = machine("keyed_blit", program);
     run_until(&mut cpu, data, 1);
-    assert_eq!(results(&cpu, data, 15)[1..], [0; 14]);
+    assert_eq!(results(&cpu, data, 17)[1..], [0; 16]);
     // The back buffer is after the screen's 614400 bytes.
     let pixel = |cpu: &Cpu, x: u32, y: u32| card_word(cpu, 640 * 480 * 2 + y * 1280 + x * 2);
     let rows = |cpu: &Cpu, x: u32, y: u32, w: u32, h: u32| {
@@ -1027,6 +1047,13 @@ fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
     assert_eq!(rows(&cpu, 300, 100, 8, 4), stretched);
     assert_eq!(pixel(&cpu, 299, 100), FILL);
     assert_eq!(pixel(&cpu, 308, 103), FILL);
+    // The middle columns, from the source's second on: through the key,
+    // and stretched with the key's pixels copied.
+    assert_eq!(rows(&cpu, 400, 20, 2, 2), [[a, FILL], [FILL, e]]);
+    assert_eq!(
+        rows(&cpu, 500, 20, 4, 4),
+        [[a, a, k, k], [a, a, k, k], [k, k, e, e], [k, k, e, e]]
+    );
 }
 
 // The 3dfx device of a Voodoo Graphics or Voodoo2 add-on card.
