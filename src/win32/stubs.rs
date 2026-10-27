@@ -334,7 +334,6 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let traced = super::trace::on(cpu);
     let caller = traced.then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
-    cpu.bus.win32.calls = cpu.bus.win32.calls.wrapping_add(1);
     let result = (api.handler)(cpu, &args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.

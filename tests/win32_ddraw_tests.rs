@@ -151,6 +151,11 @@ const KEY: u32 = 0x310;
 const CLASS: u32 = 0x320;
 const ENTRIES: u32 = 0x400;
 const PIXELS: u32 = 0x800;
+/// Where the polling program counts its calls of Flip, keeps the last
+/// one's result, and has GetScanLine put the line.
+const POLLS: u32 = 0x880;
+const LAST: u32 = 0x884;
+const LINE: u32 = 0x888;
 const DATA_SIZE: usize = 0x900;
 
 /// The data the programs start with: the window class's name.
@@ -447,12 +452,6 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
 }
 
 const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
-/// Where the polling program counts its calls of Flip, and keeps the
-/// last one's result.
-const POLLS: u32 = 0x880;
-const LAST: u32 = 0x884;
-/// Where GetScanLine puts the line.
-const LINE: u32 = 0x888;
 
 /// What the polling program does between two calls of Flip.
 enum Between {
@@ -548,11 +547,11 @@ fn flip_polled_with_nothing_in_between_waits_for_the_frame() {
     let mut cpu = machine("flip_polling", program);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
-    // The flip came at the next frame, after 16 calls that failed (15
-    // that ran, then one that waited for the frame) instead of one for
-    // each pass of the loop until then.
+    // The flip came at the next frame, after 15 calls that failed and a
+    // 16th that waited for the frame and flipped, instead of one call
+    // for each pass of the loop until then.
     assert_eq!(peek(&cpu, data + LAST), 0);
-    assert_eq!(peek(&cpu, data + POLLS), 17, "calls of Flip");
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of Flip");
 }
 
 #[test]

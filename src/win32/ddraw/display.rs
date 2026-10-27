@@ -68,8 +68,8 @@ pub struct Polls {
     thread: u32,
     executed: u64,
     calls: u64,
-    /// The polls in a row, each the thread's next call of a built-in
-    /// function after the one before and no more than `POLL_GAP`
+    /// The polls in a row, each the next call of a built-in function by
+    /// any thread after the one before, and no more than `POLL_GAP`
     /// instructions after it.
     count: u32,
 }
@@ -84,13 +84,13 @@ impl Polls {
     /// The thread `thread` polled and found the display not done yet,
     /// with `Cpu::executed` at `executed` and `Win32::calls` at `calls`:
     /// whether it has done next to nothing else for `POLLS` polls, with
-    /// no other built-in function called in between. A loop like that
-    /// does the same until the frame the display waits for, so the caller
-    /// can make the thread wait for that frame instead of running each
-    /// poll (a game calling Flip without DDFLIP_WAIT until it succeeds
-    /// makes hundreds of calls a millisecond). A loop that does more
-    /// while it waits, such as filling its sound buffer or reading its
-    /// messages, keeps every poll.
+    /// no other built-in function called in between by any thread. A
+    /// loop like that does the same until the frame the display waits
+    /// for, so the caller can make the thread wait for that frame instead
+    /// of running each poll (a game calling Flip without DDFLIP_WAIT until
+    /// it succeeds makes hundreds of calls a millisecond). A loop that
+    /// does more while it waits, such as filling its sound buffer or
+    /// reading its messages, keeps every poll.
     pub fn failed(&mut self, thread: u32, executed: u64, calls: u64) -> bool {
         let close = self.thread == thread
             && calls == self.calls.wrapping_add(1)

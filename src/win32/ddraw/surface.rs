@@ -1504,17 +1504,11 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (timing, now) = display::timing(cpu);
         let pending = state(cpu).display.flip_at;
         if pending.div_ceil(1000) > cpu.bus.clock.now_micros() {
-            if flags & DDFLIP_WAIT == 0 {
-                // A thread that does nothing but call again waits for
-                // that frame instead, and its call fails as the polls it
-                // stands for would have.
-                if display::flip_poll_failed(cpu) {
-                    return super::directdraw::wait_until(
-                        cpu,
-                        pending,
-                        super::DDERR_WASSTILLDRAWING,
-                    );
-                }
+            // Without DDFLIP_WAIT it fails, but a thread that does
+            // nothing but call again waits as with it: the call that
+            // ends the wait stands for the polls until the frame, the
+            // last of which flips.
+            if flags & DDFLIP_WAIT == 0 && !display::flip_poll_failed(cpu) {
                 return Some(super::DDERR_WASSTILLDRAWING);
             }
             // Flip runs again when that frame begins.
