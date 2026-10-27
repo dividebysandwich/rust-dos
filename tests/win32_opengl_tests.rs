@@ -468,6 +468,47 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
 }
 
 #[test]
+fn a_triangle_reaching_far_off_the_window_is_drawn_where_it_covers_it() {
+    // A red triangle whose bottom right corner is 200 widths of the
+    // view to the right: thousands of pixels past the window, and past
+    // the band the card's vertices are clipped to. OpenGL draws the
+    // part in the view. The card's vertex registers hold 12.4 fixed
+    // point, and a vertex clipped at their end wraps round to the far
+    // left, where nothing of the triangle shows.
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &blue)?;
+        c.api(
+            a,
+            l,
+            CLEAR,
+            &[Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)],
+        )?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(-1.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(200.0), Arg::F(-1.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(1.0)])?;
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("far_triangle", true, exe);
+    run_until_done(&mut cpu, data);
+    // SwapBuffers, and no error.
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * 15), 1, "SwapBuffers");
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * 16), 0, "glGetError");
+    // Its top edge falls a hundredth of the view's height across the
+    // window: the triangle covers the window but for its top right
+    // corner.
+    for (x, y) in [(4, 4), (60, 4), (4, 60), (60, 60)] {
+        assert_eq!(pixel(&cpu, data, x, y), [255, 0, 0], "({x}, {y})");
+    }
+}
+
+#[test]
 fn vertex_arrays_draw_a_textured_depth_tested_quad() {
     let mut d = data();
     // A 2x2 green texture, RGBA (rows of RGB would be padded to 4
