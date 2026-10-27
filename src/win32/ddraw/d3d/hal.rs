@@ -1266,6 +1266,14 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 
 // Drawing.
 
+/// The band on the screen the pipeline clips what the card draws to:
+/// left, top, right and bottom. The card's vertex registers hold 12.4
+/// fixed point, -2048 to 2047.9375, and a coordinate past either end
+/// wraps round to the other, so a triangle clipped at 2048 would have
+/// its vertices there drawn at -2048. A pixel in from those ends
+/// leaves room for the half pixel lines are drawn out by.
+pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2047.0, 2047.0];
+
 /// The card as the pipeline's rasterizer.
 pub struct Raster<'a> {
     pub cpu: &'a mut Cpu,
