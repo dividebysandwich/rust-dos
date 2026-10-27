@@ -203,9 +203,20 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let right = ((m.ox + m.bounds[1] * m.sx).max(0.0) as u32).min(width);
     let top = (m.oy - m.bounds[3] * m.sy).max(0.0) as u32;
     let bottom = ((m.oy - m.bounds[2] * m.sy).max(0.0) as u32).min(height);
+    // OpenGL's scissor box cuts it down further.
+    let [left, top, right, bottom] = match d.scissor {
+        Some(s) => [
+            left.max(s[0]),
+            top.max(s[1]),
+            right.min(s[2]),
+            bottom.min(s[3]),
+        ],
+        None => [left, top, right, bottom],
+    };
     api::clip_window(cpu, left, top, right.max(left), bottom.max(top));
     api::cull_mode(cpu, api::CULL_DISABLE);
-    api::color_mask(cpu, true, false);
+    api::color_mask(cpu, !d.color_off, false);
+    api::depth_bias_level(cpu, d.depth_bias);
     api::chromakey_mode(cpu, api::CHROMAKEY_DISABLE);
     let dither = d.state(RS_DITHERENABLE) != 0;
     api::dither_mode(
@@ -368,6 +379,11 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         }
     }
     let textured = loaded[0];
+    // Each unit's own texture coordinates when both draw: without the
+    // hint the upstream unit takes the downstream one's.
+    if loaded[0] && loaded[1] {
+        api::hints(cpu, api::HINT_STWHINT, hint | api::STWHINT_ST_DIFF_TMU1);
+    }
     // A keyed texture on the upstream unit alone isn't drawn.
     let keyed = keyed && textured;
     if textured {

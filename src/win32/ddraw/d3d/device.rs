@@ -136,6 +136,13 @@ pub struct Device {
     /// recorded.
     pub blocks: Vec<Option<Vec<Change>>>,
     pub recording: Option<Vec<Change>>,
+    /// What OpenGL (`win32::opengl32`) draws with that Direct3D 7
+    /// hasn't: the scissor box (left, top, right, bottom on the
+    /// target), the depth bias in steps of the 16-bit depth buffer, and
+    /// whether the color buffer is left as it is (glColorMask).
+    pub scissor: Option<[u32; 4]>,
+    pub depth_bias: i16,
+    pub color_off: bool,
 }
 
 crate::state_fields!(Handle {
@@ -192,7 +199,10 @@ crate::state_fields!(Device {
     stats,
     begin,
     blocks,
-    recording
+    recording,
+    scissor,
+    depth_bias,
+    color_off
 });
 
 /// The version of IDirect3DDevice a vtable is.

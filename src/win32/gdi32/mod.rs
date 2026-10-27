@@ -14,6 +14,7 @@ pub mod bitmap;
 pub mod dc;
 pub mod draw;
 pub mod font;
+mod gamma;
 pub mod metafile;
 pub mod palette;
 pub mod region;
@@ -22,6 +23,7 @@ pub mod surface;
 
 pub use region::{Rect, Region};
 
+use super::opengl32::wgl;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 use crate::win32::task::{Next, Task};
@@ -1184,6 +1186,12 @@ pub fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
+/// SwapBuffers(hdc): the ICD shows what OpenGL drew in the DC's
+/// window.
+fn swap_buffers(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(wgl::swap_dc(cpu, args[0]) as u32)
+}
+
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
@@ -1517,8 +1525,8 @@ static APIS: &[Api] = &[
     stdcall("SetColorSpace", 207, 2, nothing),
     stdcall("DeleteColorSpace", 208, 1, delete_object),
     stdcall("SetICMMode", 209, 2, nothing),
-    stdcall("GetDeviceGammaRamp", 210, 2, not_implemented),
-    stdcall("SetDeviceGammaRamp", 211, 2, not_implemented),
+    stdcall("GetDeviceGammaRamp", 210, 2, gamma::get_device_gamma_ramp),
+    stdcall("SetDeviceGammaRamp", 211, 2, gamma::set_device_gamma_ramp),
     stdcall("StartDocA", 212, 2, nothing),
     stdcall("EndDoc", 213, 1, nothing),
     stdcall("StartPage", 214, 1, nothing),
@@ -1527,11 +1535,11 @@ static APIS: &[Api] = &[
     stdcall("SetAbortProc", 217, 2, nothing),
     stdcall("Escape", 218, 5, nothing),
     stdcall("ExtEscape", 219, 6, nothing),
-    stdcall("ChoosePixelFormat", 220, 2, nothing),
-    stdcall("SetPixelFormat", 221, 3, nothing),
-    stdcall("GetPixelFormat", 222, 1, nothing),
-    stdcall("DescribePixelFormat", 223, 4, nothing),
-    stdcall("SwapBuffers", 224, 1, nothing),
+    stdcall("ChoosePixelFormat", 220, 2, wgl::choose_pixel_format),
+    stdcall("SetPixelFormat", 221, 3, wgl::set_pixel_format),
+    stdcall("GetPixelFormat", 222, 1, wgl::get_pixel_format),
+    stdcall("DescribePixelFormat", 223, 4, wgl::describe_pixel_format),
+    stdcall("SwapBuffers", 224, 1, swap_buffers),
     stdcall("GdiComment", 225, 3, succeed),
     stdcall("CombineTransform", 226, 3, not_implemented),
     // Paths.

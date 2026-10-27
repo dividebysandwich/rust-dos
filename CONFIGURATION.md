@@ -414,10 +414,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
   keyboard, mouse and joystick through DirectInput; DMUSIC, DMIME, DMLOADER,
   DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
-  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3. A
-  program that calls a function they don't have ends with a message naming
-  it, and one that needs a DLL that is neither among them nor beside it is
-  refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
+  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3,
+  and OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's
+  pixel formats, SwapBuffers and gamma ramp. A program that calls a
+  function they don't have ends with a message naming it, and one that
+  needs a DLL that is neither among them nor beside it is refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
   first time a program uses it, so a host folder mounted as C: gets that
   file. The built-in DLLs show as read-only files in `C:\WINDOWS\SYSTEM`, to
   DOS programs too, and `GLIDE2X.DLL` is among them only with a 3dfx card. A
