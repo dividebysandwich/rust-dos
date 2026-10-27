@@ -452,25 +452,30 @@ impl BlockData {
     /// Offsets in `bytes` of the bytes in the block's page that changed
     /// since the block was translated, if they are pokes: in at most
     /// `POKES` runs of at most `POKE_BYTES` (SkyNET pokes two or three
-    /// immediates into a block before running it). A change to the bytes
-    /// of the last instruction in the next page (`crosses`) counts as one
-    /// to its first byte, which has a count of pokes: once that is
-    /// watched, blocks stop before it.
+    /// immediates into a block before running it). A run may skip bytes
+    /// that stayed as they were, as the middle byte of a new immediate
+    /// can, but never has more than `POKE_BYTES` changed in a row. A
+    /// change to the bytes of the last instruction in the next page
+    /// (`crosses`) counts as one to its first byte, which has a count of
+    /// pokes: once that is watched, blocks stop before it.
     pub fn poked(&self, ram: &[u8]) -> Option<Vec<usize>> {
         let len = self.len as usize;
         let now = &ram[self.phys as usize..][..len];
         let mut changed = Vec::new();
-        let (mut runs, mut run) = (0, 0);
+        // The runs so far, where the last one starts, and the bytes
+        // changed in a row up to here.
+        let (mut runs, mut start, mut row) = (0, 0, 0);
         for (i, (a, b)) in now.iter().zip(&self.bytes[..len]).enumerate() {
             if a == b {
-                run = 0;
+                row = 0;
                 continue;
             }
-            if run == 0 {
+            if runs == 0 || i >= start + POKE_BYTES {
                 runs += 1;
+                start = i;
             }
-            run += 1;
-            if run > POKE_BYTES || runs > POKES {
+            row += 1;
+            if row > POKE_BYTES || runs > POKES {
                 return None;
             }
             changed.push(i);

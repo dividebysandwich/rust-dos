@@ -1620,24 +1620,17 @@ impl Gen<'_> {
             }
         }
         if let Some(check) = smc_check {
-            // (The return address and the padding keep the call aligned as
-            // the instruction's own calls are.)
+            // (Called as a thunk is, from where the instruction's own calls
+            // are aligned.)
+            dynasm!(self.ops ; .arch x64 ; =>check ; mov BYTE [r12 + CTX_SMC], 0);
+            thunk_save(&mut self.ops);
             dynasm!(self.ops
                 ; .arch x64
-                ; =>check
-                ; mov BYTE [r12 + CTX_SMC], 0
-                ; sub rsp, 8
-            );
-            self.save_for_call();
-            dynasm!(self.ops
-                ; .arch x64
-                ; mov rdi, rbx
-                ; mov rsi, r12
                 ; mov rdx, QWORD data_ptr
                 ; call QWORD [r12 + CTX_SMC_CHECK]
             );
-            self.restore_after_call();
-            dynasm!(self.ops ; .arch x64 ; add rsp, 8 ; ret);
+            thunk_restore(&mut self.ops);
+            dynasm!(self.ops ; .arch x64 ; ret);
         }
     }
 

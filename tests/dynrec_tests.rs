@@ -2888,7 +2888,8 @@ fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
             a.jmp(top as u64)
         }));
         let entry = |a: &mut CodeAssembler| a.lea(ecx, dword_ptr(ebx * 4 + table));
-        let body = |a: &mut CodeAssembler| a.add(edx, dword_ptr(0x1234_5678u64)); // 03 15 disp32
+        // ADD EDX, [disp32]: 03 15 disp32.
+        let body = |a: &mut CodeAssembler| a.add(edx, dword_ptr(0x1234_5678u64));
         rig.load(top, &self_poking_loop(top, 0x1234_5678, entry, body));
     });
     let stats = run_both(&mut a, &mut b);
