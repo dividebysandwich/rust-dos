@@ -149,7 +149,7 @@ fn blit_everything(depth: DesktopDepth) -> u64 {
     let grays: Vec<u32> = (0..256u32).map(|i| i * 0x01_0101).collect();
     let other = BITS + 640 * 480;
     let gray = dib_dc(&mut cpu, other, &grays, true, |x, y| (x + 2 * y) as u8);
-    let blits: [((i32, i32, i32, i32), i32, i32); 7] = [
+    let blits = [
         ((0, 0, 640, 480), 0, 0),
         ((100, 50, 32, 32), 300, 200),
         ((620, 470, 32, 32), 10, 10),
@@ -180,6 +180,20 @@ fn blit_everything(depth: DesktopDepth) -> u64 {
     dc::set_viewport_org_ex(&mut cpu, &[screen, 7, 3, 0]);
     bit_blt(&mut cpu, screen, (200, 200, 64, 64), mem, 50, 60);
     bit_blt(&mut cpu, screen, (210, 260, 64, 64), gray, 5, 6);
+    // Between bitmaps, cut by their edges: into the top-down DIB, whose
+    // rows go back to the program's memory, and into a bitmap of GDI's,
+    // from itself too; then from each onto the screen.
+    bit_blt(&mut cpu, gray, (600, 10, 64, 20), mem, 7, 9);
+    bit_blt(&mut cpu, gray, (-8, 470, 30, 30), mem, 100, 100);
+    let ddb = bitmap::create_compatible_bitmap(&mut cpu, &[screen, 300, 200]).unwrap();
+    let dev = dc::create_compatible_dc(&mut cpu, &[screen]).unwrap();
+    dc::select_object(&mut cpu, &[dev, ddb]);
+    bit_blt(&mut cpu, dev, (0, 0, 300, 200), mem, 0, 0);
+    bit_blt(&mut cpu, dev, (250, 150, 64, 64), gray, 590, 0);
+    bit_blt(&mut cpu, dev, (10, 20, 30, 40), dev, 15, 25);
+    bit_blt(&mut cpu, screen, (330, 0, 300, 200), dev, 0, 0);
+    bit_blt(&mut cpu, screen, (0, 400, 640, 80), gray, 0, 400);
+    bit_blt(&mut cpu, screen, (560, 0, 80, 40), gray, 560, 0);
     fnv(&screen_pixels(&mut cpu))
 }
 
@@ -192,14 +206,14 @@ fn fnv(data: &[u8]) -> u64 {
 #[test]
 fn blits_to_the_palette_screen_leave_the_same_pixels() {
     let hash = blit_everything(DesktopDepth::Palette);
-    assert_eq!(hash, 0xf5a0_a6ee_3f30_4f9a, "{hash:#018x}");
+    assert_eq!(hash, 0xb63f_3df0_a605_f819, "{hash:#018x}");
 }
 
 /// The Voodoo3's own desktop is 16 bits a pixel.
 #[test]
 fn blits_to_the_16_bit_screen_leave_the_same_pixels() {
     let hash = blit_everything(DesktopDepth::Adapter);
-    assert_eq!(hash, 0x54f5_e12c_48eb_2b89, "{hash:#018x}");
+    assert_eq!(hash, 0x1280_930d_72d1_d005, "{hash:#018x}");
 }
 
 /// How long the game's blits take: a 32x32 tile and the whole screen.

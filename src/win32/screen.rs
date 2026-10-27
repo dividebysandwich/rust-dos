@@ -356,9 +356,24 @@ pub fn set_colors(cpu: &mut Cpu, first: usize, colors: &[u32]) {
 /// The desktop's rows `top..top + rows` as 32-bit pixels (0x00RRGGBB),
 /// `width * 4` bytes a row, or as they are at 8 bits a pixel.
 pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
+    load_desktop_area(cpu, top, rows, 0, desktop(cpu).width)
+}
+
+/// The pixels `left..left + cols` of the desktop's rows
+/// `top..top + rows`, as `load_desktop` gives them: `cols` pixels a
+/// row.
+pub fn load_desktop_area(cpu: &Cpu, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
     let d = desktop(cpu);
-    let mut raw = vec![0u8; (d.pitch * rows) as usize];
-    read(cpu, top * d.pitch, &mut raw);
+    let bytes = d.bpp / 8;
+    let row = (cols * bytes) as usize;
+    let mut raw = vec![0u8; row * rows as usize];
+    if row as u32 == d.pitch {
+        read(cpu, top * d.pitch, &mut raw);
+    } else if row > 0 {
+        for (r, out) in raw.chunks_exact_mut(row).enumerate() {
+            read(cpu, (top + r as u32) * d.pitch + left * bytes, out);
+        }
+    }
     match d.bpp {
         32 | 8 => raw,
         24 => raw
@@ -376,23 +391,33 @@ pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
     }
 }
 
-/// Store 32-bit pixels, `width * 4` bytes a row (or 8-bit ones on a
-/// desktop of 256 colours), as the desktop's rows from `top` on.
-pub fn store_desktop(cpu: &mut Cpu, top: u32, data: &[u8]) {
+/// Store pixels as `load_desktop_area` gives them, `cols` a row, as the
+/// pixels `left..left + cols` of the desktop's rows from `top` on.
+pub fn store_desktop_area(cpu: &mut Cpu, top: u32, left: u32, cols: u32, data: &[u8]) {
     let d = desktop(cpu);
-    if d.bpp == 32 || d.bpp == 8 {
-        write(cpu, top * d.pitch, data);
-        return;
-    }
-    let pixels = data.as_chunks::<4>().0.iter();
-    let raw: Vec<u8> = if d.bpp == 24 {
-        pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect()
+    let bytes = d.bpp / 8;
+    let converted: Vec<u8>;
+    let raw = if d.bpp == 32 || d.bpp == 8 {
+        data
     } else {
-        pixels
-            .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
-            .collect()
+        let pixels = data.as_chunks::<4>().0.iter();
+        converted = if d.bpp == 24 {
+            pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect()
+        } else {
+            pixels
+                .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
+                .collect()
+        };
+        &converted
     };
-    write(cpu, top * d.pitch, &raw);
+    let row = (cols * bytes) as usize;
+    if row as u32 == d.pitch {
+        write(cpu, top * d.pitch, raw);
+    } else if row > 0 {
+        for (r, line) in raw.chunks_exact(row).enumerate() {
+            write(cpu, (top + r as u32) * d.pitch + left * bytes, line);
+        }
+    }
 }
 
 /// A 5-6-5 pixel as 0x00RRGGBB, each channel widened by repeating its top

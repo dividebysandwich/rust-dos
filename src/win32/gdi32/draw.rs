@@ -44,6 +44,17 @@ impl Canvas {
     /// device coordinates. None if it can't draw or nothing of `bounds`
     /// may be drawn on.
     pub fn open(cpu: &mut Cpu, hdc: u32, bounds: Rect) -> Option<Canvas> {
+        Canvas::open_area(cpu, hdc, bounds, false)
+    }
+
+    /// `open` for a function that reads and draws only the pixels the
+    /// clip region lets it within `bounds`: on a surface of 8 bits a
+    /// pixel or more it loads only their columns.
+    pub fn open_columns(cpu: &mut Cpu, hdc: u32, bounds: Rect) -> Option<Canvas> {
+        Canvas::open_area(cpu, hdc, bounds, true)
+    }
+
+    fn open_area(cpu: &mut Cpu, hdc: u32, bounds: Rect, columns: bool) -> Option<Canvas> {
         let dc = gdi(cpu).dc(hdc)?.clone();
         let place = dc::place(cpu, hdc)?;
         let (ox, oy) = place.origin;
@@ -61,10 +72,14 @@ impl Canvas {
             dc::accumulate(cpu, hdc, bounds);
             return None;
         }
-        let surface = Surface::load(cpu, place.target, area.top, area.bottom)?;
+        let surface = if columns {
+            Surface::load_area(cpu, place.target, area)?
+        } else {
+            Surface::load(cpu, place.target, area.top, area.bottom)?
+        };
         let rects = rects
             .into_iter()
-            .map(|r| r.intersect(&surface.rect()))
+            .map(|r| r.intersect(&surface.loaded()))
             .filter(|r| !r.is_empty())
             .collect();
         Some(Canvas {
@@ -285,6 +300,18 @@ impl Fill {
 /// monochrome bitmap's 1 for the DC's background color and 0 for the
 /// rest, as Windows draws colors on it.
 pub fn value_for(cpu: &mut Cpu, canvas_dc: &Dc, s: &Surface, color: u32) -> u32 {
+    value_through(cpu, canvas_dc, s, color, None)
+}
+
+/// `value_for`, through `map` on a palette device if the caller has the
+/// DC's map already.
+fn value_through(
+    cpu: &mut Cpu,
+    canvas_dc: &Dc,
+    s: &Surface,
+    color: u32,
+    map: Option<&super::palette::DeviceMap>,
+) -> u32 {
     if color >> 16 == 0x10FF {
         // DIBINDEX: the index itself on a surface with a color table,
         // black on others.
@@ -294,8 +321,13 @@ pub fn value_for(cpu: &mut Cpu, canvas_dc: &Dc, s: &Surface, color: u32) -> u32 
         };
     }
     if s.device {
-        let map = super::palette::DeviceMap::new(cpu, canvas_dc.attrs.palette);
-        return device_value(&map, color);
+        return match map {
+            Some(map) => device_value(map, color),
+            None => device_value(
+                &super::palette::DeviceMap::new(cpu, canvas_dc.attrs.palette),
+                color,
+            ),
+        };
     }
     let color = dc::resolve_color(cpu, canvas_dc, color);
     if s.mono {
@@ -1321,15 +1353,14 @@ pub fn blit(
                 return false;
             };
             let (ox, oy) = place.origin;
-            // A rectangle that runs backwards covers its start row and
-            // those above it.
-            let (top, bottom) = if sy1 >= sy0 {
-                (sy0, sy1)
-            } else {
-                (sy1 + 1, sy0 + 1)
-            };
-            let (top, bottom) = (top + oy, bottom + oy);
-            let Some(surface) = Surface::load(cpu, place.target, top, bottom) else {
+            // The pixels it reads: a rectangle that runs backwards covers
+            // its start pixel and those before it, and one of no width
+            // reads its start column all the same.
+            let (top, bottom) = span(sy0, sy1);
+            let (left, right) = span(sx0, sx1);
+            let (left, right) = (left.min(sx0), right.max(sx0 + 1));
+            let area = Rect::new(left + ox, top + oy, right + ox, bottom + oy);
+            let Some(surface) = Surface::load_area(cpu, place.target, area) else {
                 return false;
             };
             let bk_color = dc::resolve_color(cpu, &sdc, sdc.attrs.bk_color);
@@ -1347,6 +1378,40 @@ pub fn blit(
     blit_from(cpu, hdst, (x0, y0, x1, y1), source, rop)
 }
 
+/// The pixels from `a` to `b`, first and after last: a range that runs
+/// backwards covers its start pixel and those before it.
+fn span(a: i32, b: i32) -> (i32, i32) {
+    if b >= a { (a, b) } else { (b + 1, a + 1) }
+}
+
+/// A raster operation's work on one pixel.
+struct Rop {
+    rop3: u8,
+    fill: Fill,
+    mask: u32,
+    /// BLACKNESS's and WHITENESS's values.
+    black: u32,
+    white: u32,
+}
+
+impl Rop {
+    /// The destination pixel (`x`, `y`)'s new value from the source's
+    /// `s` and its own `d`: None where the pattern leaves it.
+    #[inline]
+    fn apply(&self, x: i32, y: i32, s: u32, d: u32) -> Option<u32> {
+        let p = match self.fill.value_at(x, y) {
+            Some(p) => p,
+            None if uses_pattern(self.rop3) => return None,
+            None => 0,
+        };
+        Some(match self.rop3 {
+            0x00 => self.black,
+            0xFF => self.white,
+            _ => apply_rop3(self.rop3, p, s, d) & self.mask,
+        })
+    }
+}
+
 /// A blit to the device rectangle from (`x0`, `y0`) to (`x1`, `y1`) of
 /// `hdst` (mirrored where they run backwards) from `source`, whose
 /// rectangle is in its device coordinates.
@@ -1361,15 +1426,12 @@ pub fn blit_from(
         return false;
     };
     let rop3 = (rop >> 16) as u8;
-    // A rectangle that runs backwards covers its start pixel and those
-    // before it.
-    let span = |a: i32, b: i32| if b >= a { (a, b) } else { (b + 1, a + 1) };
     let ((left, right), (top, bottom)) = (span(x0, x1), span(y0, y1));
     let r = Rect::new(left, top, right, bottom);
     if r.is_empty() {
         return true;
     }
-    let Some(mut c) = Canvas::open(cpu, hdst, r) else {
+    let Some(mut c) = Canvas::open_columns(cpu, hdst, r) else {
         return true;
     };
     let fill = if uses_pattern(rop3) {
@@ -1377,25 +1439,69 @@ pub fn blit_from(
     } else {
         Fill::Solid(0)
     };
-    let text = value_for(cpu, &ddc, &c.surface, ddc.attrs.text_color);
-    let bk = value_for(cpu, &ddc, &c.surface, ddc.attrs.bk_color);
-    let mask = c.surface.value_mask();
-    let (black, white) = black_white(&c.surface);
-    // WHITENESS sets every bit of a pixel without a color table, as the
-    // other operations do: a 32-bit pixel's top byte too.
-    let white = if c.surface.bpp > 8 { mask } else { white };
     let map = c
         .surface
         .device
         .then(|| super::palette::DeviceMap::new(cpu, ddc.attrs.palette));
+    let text = value_through(cpu, &ddc, &c.surface, ddc.attrs.text_color, map.as_ref());
+    let bk = value_through(cpu, &ddc, &c.surface, ddc.attrs.bk_color, map.as_ref());
+    let mask = c.surface.value_mask();
+    let (black, white) = match rop3 {
+        0x00 | 0xFF => black_white(&c.surface),
+        _ => (0, 0),
+    };
+    let op = Rop {
+        rop3,
+        fill,
+        mask,
+        black,
+        // WHITENESS sets every bit of a pixel without a color table, as
+        // the other operations do: a 32-bit pixel's top byte too.
+        white: if c.surface.bpp > 8 { mask } else { white },
+    };
     let mut xlat = source
         .as_ref()
-        .map(|(src, _)| Translate::new(&src.surface, map, src.bk_color, text, bk));
+        .map(|(src, _)| Translate::kept(cpu, &src.surface, map, src.bk_color, text, bk));
     let (ox, oy) = c.origin;
-    let rects = c.rects.clone();
+    let rects = std::mem::take(&mut c.rects);
     let dst_rect = r.offset(ox, oy);
-    for clip in rects {
+    // A blit that is neither stretched nor mirrored reads the source
+    // pixel at the destination's place moved by this.
+    let shift = source.as_ref().and_then(|(src, (sx0, sy0, sx1, sy1))| {
+        (sx1 - sx0 == x1 - x0 && sy1 - sy0 == y1 - y0)
+            .then_some((sx0 + src.origin.0 - x0 - ox, sy0 + src.origin.1 - y0 - oy))
+    });
+    let mut values = Vec::new();
+    for clip in &rects {
         let area = clip.intersect(&dst_rect);
+        if let (Some((src, _)), Some((dx, dy)), Some(t)) = (&source, shift, &mut xlat) {
+            // A pixel whose source pixel isn't there stays as it is.
+            let area = area.intersect(&src.surface.loaded().offset(-dx, -dy));
+            if area.is_empty() {
+                continue;
+            }
+            values.resize((area.right - area.left) as usize, 0);
+            for y in area.top..area.bottom {
+                src.surface.get_row(area.left + dx, y + dy, &mut values);
+                for v in values.iter_mut() {
+                    *v = t.get(&src.surface, *v, &c.surface);
+                }
+                if rop3 == 0xCC {
+                    // SRCCOPY: the source's values, a row at a time.
+                    for v in values.iter_mut() {
+                        *v &= mask;
+                    }
+                    c.surface.put_row(area.left, y, &values);
+                    continue;
+                }
+                for (x, &s) in (area.left..area.right).zip(&values) {
+                    if let Some(v) = op.apply(x, y, s, c.surface.get(x, y)) {
+                        c.surface.put(x, y, v);
+                    }
+                }
+            }
+            continue;
+        }
         for y in area.top..area.bottom {
             for x in area.left..area.right {
                 let s = match &source {
@@ -1428,20 +1534,14 @@ pub fn blit_from(
                     }
                     None => 0,
                 };
-                let p = match fill.value_at(x, y) {
-                    Some(p) => p,
-                    None if uses_pattern(rop3) => continue,
-                    None => 0,
-                };
-                let d = c.surface.get(x, y);
-                let v = match rop3 {
-                    0x00 => black,
-                    0xFF => white,
-                    _ => apply_rop3(rop3, p, s, d) & mask,
-                };
-                c.surface.put(x, y, v);
+                if let Some(v) = op.apply(x, y, s, c.surface.get(x, y)) {
+                    c.surface.put(x, y, v);
+                }
             }
         }
+    }
+    if let (Some(t), Some((src, _))) = (xlat, &source) {
+        t.keep(cpu, &src.surface);
     }
     c.drawn = dst_rect;
     c.close(cpu);
@@ -1488,6 +1588,51 @@ impl Translate {
         }
     }
 
+    /// `new`, with the table the last blit kept if it was of the same
+    /// translation: on a palette device each of a table's colors takes a
+    /// search of the palette, and a program blits from the same colors
+    /// many times.
+    pub fn kept(
+        cpu: &mut Cpu,
+        src: &Surface,
+        map: Option<super::palette::DeviceMap>,
+        src_bk: u32,
+        text: u32,
+        bk: u32,
+    ) -> Translate {
+        let mut t = Translate::new(src, map, src_bk, text, bk);
+        if let Some(key) = t.key(src)
+            && let Some(kept) = gdi(cpu).kept_table.take_if(|k| k.key == key)
+        {
+            t.table = kept.table;
+        }
+        t
+    }
+
+    /// Keep the table for the next blit, as `kept` takes it.
+    pub fn keep(self, cpu: &mut Cpu, src: &Surface) {
+        if let Some(key) = self.key(src) {
+            gdi(cpu).kept_table = Some(Box::new(KeptTable {
+                key,
+                table: self.table,
+            }));
+        }
+    }
+
+    /// What the table is of when it can be kept: a source with a color
+    /// table onto a palette device, where a value's translation depends
+    /// on these and nothing else (`one`).
+    fn key(&self, src: &Surface) -> Option<TableKey> {
+        let map = self.map.as_ref()?;
+        (!src.mono && src.bpp <= 8).then(|| TableKey {
+            bpp: src.bpp,
+            colors: src.colors.clone(),
+            pal_indices: src.pal_indices.clone(),
+            device: src.device,
+            map: map.clone(),
+        })
+    }
+
     fn one(&self, src: &Surface, v: u32, dst: &Surface) -> u32 {
         if let Some(map) = &self.map
             && !src.mono
@@ -1527,6 +1672,23 @@ impl Translate {
         }
         self.one(src, v, dst)
     }
+}
+
+/// What a kept translation table is of (`Translate::key`).
+#[derive(Debug, PartialEq)]
+pub struct TableKey {
+    bpp: u32,
+    colors: Vec<u32>,
+    pal_indices: Option<Vec<u16>>,
+    device: bool,
+    map: super::palette::DeviceMap,
+}
+
+/// The table of the last blit from a color table onto a palette device.
+#[derive(Debug)]
+pub struct KeptTable {
+    key: TableKey,
+    table: Vec<Option<u32>>,
 }
 
 /// A source pixel's value `v` as the destination's: a monochrome

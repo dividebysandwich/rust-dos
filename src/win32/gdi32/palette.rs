@@ -117,7 +117,7 @@ fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
 /// How colors become the pixels of a palette device (`Surface::device`)
 /// in a DC: through its logical palette's entries, mapped to the system
 /// palette, and the static colors.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DeviceMap {
     /// The system palette's index of each of the logical palette's
     /// entries, and their colors.

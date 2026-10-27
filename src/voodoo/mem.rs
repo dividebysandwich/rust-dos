@@ -70,6 +70,46 @@ impl Vram {
         word.store((old & !(0xFF << shift)) | (value as u16) << shift, Relaxed);
     }
 
+    /// The bytes from byte address `a` on, into `out`: a word at a time
+    /// where they cover one whole. They must be within the memory.
+    pub fn read_bytes(&self, a: usize, out: &mut [u8]) {
+        let (a, out) = match out.split_first_mut() {
+            Some((first, rest)) if a & 1 != 0 => {
+                *first = self.byte(a);
+                (a + 1, rest)
+            }
+            _ => (a, out),
+        };
+        let (pairs, last) = out.as_chunks_mut::<2>();
+        let words = &self.words[a >> 1..][..pairs.len()];
+        for (pair, w) in pairs.iter_mut().zip(words) {
+            *pair = w.load(Relaxed).to_le_bytes();
+        }
+        if let [b] = last {
+            *b = self.byte(a + 2 * pairs.len());
+        }
+    }
+
+    /// `data` written from byte address `a` on, a word at a time where
+    /// it covers one whole. It must be within the memory.
+    pub fn write_bytes(&self, a: usize, data: &[u8]) {
+        let (a, data) = match data.split_first() {
+            Some((&first, rest)) if a & 1 != 0 => {
+                self.set_byte(a, first);
+                (a + 1, rest)
+            }
+            _ => (a, data),
+        };
+        let (pairs, last) = data.as_chunks::<2>();
+        let words = &self.words[a >> 1..][..pairs.len()];
+        for (pair, w) in pairs.iter().zip(words) {
+            w.store(u16::from_le_bytes(*pair), Relaxed);
+        }
+        if let [b] = last {
+            self.set_byte(a + 2 * pairs.len(), *b);
+        }
+    }
+
     /// Fill words `range` with `value`.
     pub fn fill(&self, range: std::ops::Range<usize>, value: u16) {
         for w in &self.words[range] {
@@ -178,5 +218,26 @@ mod tests {
         assert!(!copied.unique());
         drop(other);
         assert!(copied.unique());
+    }
+
+    /// Runs of bytes read and written a word at a time are the bytes
+    /// one at a time, from odd and even addresses, of odd and even
+    /// lengths.
+    #[test]
+    fn runs_of_bytes_are_the_bytes() {
+        let m = Vram::new(16);
+        for at in 0..4 {
+            for len in 0..8 {
+                let data: Vec<u8> = (0..len as u8).map(|i| 0x40 + i).collect();
+                m.fill(0..8, 0xA5A5);
+                m.write_bytes(at, &data);
+                let mut want = vec![0xA5u8; 16];
+                want[at..at + len].copy_from_slice(&data);
+                assert_eq!(m.to_bytes(), want, "at {at}, {len} bytes");
+                let mut out = vec![0; len];
+                m.read_bytes(at, &mut out);
+                assert_eq!(out, data, "at {at}, {len} bytes");
+            }
+        }
     }
 }
