@@ -19,25 +19,19 @@ const DEPTH_MSW: u32 = 8;
 
 impl Voodoo {
     /// Whether the dwords written to the `len` bytes of the window from
-    /// `offset` on go to memory and do nothing else: into the linear
-    /// frame buffer, or a Banshee's memory through BAR1 outside the
-    /// command FIFOs' rings. A string move's writes there can go in one
-    /// call, in order (`Bus::move_to_voodoo`).
+    /// `offset` on all go to the frame buffer or the card's memory, where
+    /// they change no register or the window's layout: into the linear
+    /// frame buffer (`lfb_run`, and a Voodoo Graphics' or Voodoo2's), or a
+    /// Banshee's memory through BAR1 (`linear_run`). A string move's
+    /// writes there can go in one call, in order (`Bus::move_to_voodoo`).
     pub fn memory_run(&self, offset: u32, len: u32) -> bool {
         let Some(end) = offset.checked_add(len) else {
             return false;
         };
-        let Some(b) = &self.banshee else {
+        if self.banshee.is_none() {
             return offset >= 0x40_0000 && end <= 0x80_0000;
-        };
-        if offset < super::banshee::LINEAR {
-            return offset >= 0x100_0000 && end <= 0x200_0000;
         }
-        let ring = |at: u32| {
-            let addr = b.linear_addr(at - super::banshee::LINEAR);
-            b.fifo.iter().any(|f| f.holds(addr))
-        };
-        end <= 2 * super::banshee::LINEAR && !(offset..end).step_by(4).any(ring)
+        self.lfb_run(offset, len).is_some() || self.linear_run(offset, len).is_some()
     }
 
     /// Where the `len` bytes of a Banshee's window from `offset` on are in
@@ -48,6 +42,22 @@ impl Voodoo {
         let lfb = 0x100_0000..=0x200_0000;
         (self.banshee.is_some() && lfb.contains(&offset) && lfb.contains(&end))
             .then_some((offset & 0xFF_FFFC) >> 2)
+    }
+
+    /// Where the `len` bytes of a Banshee's window from `offset` on are in
+    /// its memory, all of them through BAR1 below the tile base, one
+    /// after the other, and outside the command FIFOs' rings: the first
+    /// byte's address, for `banshee_memory_write`.
+    pub fn linear_run(&self, offset: u32, len: u32) -> Option<u32> {
+        use super::banshee::LINEAR;
+        let b = self.banshee.as_ref()?;
+        let end = offset.checked_add(len)?;
+        if offset < LINEAR || end > 2 * LINEAR {
+            return None;
+        }
+        let addr = b.linear_run(offset - LINEAR, len)?;
+        let ring = b.fifo.iter().any(|f| f.enabled && f.base < addr + len && addr < f.end);
+        (!ring).then_some(addr)
     }
 
     /// A write to the frame buffer at dword `offset` of the window: `data`,
@@ -62,9 +72,9 @@ impl Voodoo {
     /// pipeline, the drawing queued before is done and the pipeline's
     /// state read once for all of them, as nothing between the writes
     /// changes either.
-    pub(crate) fn lfb_write_run(&mut self, offset: u32, data: &[u32]) {
+    pub(crate) fn lfb_write_run(&mut self, offset: u32, data: impl IntoIterator<Item = u32>) {
         let mut pipeline = None;
-        for (i, &value) in (0..).zip(data) {
+        for (i, value) in (0..).zip(data) {
             self.lfb_write_with(offset.wrapping_add(i), value, u32::MAX, &mut pipeline);
         }
     }

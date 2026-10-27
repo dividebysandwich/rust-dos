@@ -1023,7 +1023,7 @@ mod tests {
         setup(&mut each);
         let offset = 0x100_0000 + 3 * 4096 + 6 * 2;
         let index = run.lfb_run(offset, 4 * data.len() as u32).expect("in the LFB");
-        run.lfb_write_run(index, &data);
+        run.lfb_write_run(index, data.iter().copied());
         for (i, &value) in (0..).zip(&data) {
             each.write(offset + 4 * i, value, u32::MAX, Now::default());
         }

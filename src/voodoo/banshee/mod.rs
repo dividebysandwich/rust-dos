@@ -415,6 +415,15 @@ impl Banshee {
         tile_base + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * tile_x
     }
 
+    /// The memory address of BAR1 offset `addr`, where the `len` bytes
+    /// from it on are all below the tile base, so in memory one after the
+    /// other as they are in the BAR (`linear_addr`).
+    pub fn linear_run(&self, addr: u32, len: u32) -> Option<u32> {
+        let tile_base = (self.reg(LFB_MEMORY_CONFIG) & 0x1FFF) << 12;
+        let addr = addr & (BAR_SIZE - 1);
+        (addr.checked_add(len)? <= tile_base).then_some(addr)
+    }
+
     // --- Video ---
 
     /// Whether the video processor shows the desktop from the card's

@@ -634,6 +634,57 @@ fn a_string_move_into_the_frame_buffer_writes_what_its_dwords_write() {
 }
 
 #[test]
+fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
+    const BAR1: usize = 0xD200_0000;
+    const D3: usize = BASE + 0x20_0000;
+    // 1-5-5-5 pixels, every fifth dword the chroma key, as Sub Culture
+    // writes its overlay through the pixel pipeline.
+    let data: Vec<u32> = (0..40u32)
+        .map(|i| if i % 5 == 0 { 0 } else { i.wrapping_mul(0x9E37_79B9) | 0x8000_8000 })
+        .collect();
+    let bytes: Vec<u8> = data.iter().flat_map(|d| d.to_le_bytes()).collect();
+    // Row 3 of a tiled colour buffer at 4 MB, through BAR1.
+    let row = BAR1 + 0x40_0000 + 3 * 128;
+    let lfb = BASE + 0x100_0000 + 3 * 4096 + 6 * 2;
+    let (mut one, mut each) = (bus(Board::Voodoo3), bus(Board::Voodoo3));
+    for bus in [&mut one, &mut each] {
+        // lfbMemoryConfig: the tile base at the top, all of BAR1 linear.
+        bus.write_32(BASE + 0x0C, 0x1FFF);
+        bus.write_32(D3 + 0x1EC, 0x40_0000);
+        bus.write_32(D3 + 0x1F0, 1 << 15 | 8);
+        bus.write_32(D3 + LFB_MODE as usize, 2 | 1 << 8);
+        bus.write_32(D3 + FBZ_MODE as usize, CHROMA | RGB_WRITE);
+        bus.write_32(D3 + CHROMA_KEY as usize, 0);
+        for i in (0..256).step_by(4) {
+            bus.write_32(row + i, 0x1234_1234);
+        }
+        bus.load_bytes(0x1000, &bytes);
+    }
+    let words = |bus: &Bus, at: usize| -> Vec<u32> {
+        (0..bytes.len()).step_by(4).map(|i| bus.read_32(at + i)).collect()
+    };
+    // Through the 3D engine's linear frame buffer.
+    assert!(one.move_to_voodoo(0x1000, lfb, bytes.len(), 4, false));
+    for i in (0..bytes.len()).step_by(4) {
+        each.write_32(lfb + i, each.read_32(0x1000 + i));
+    }
+    assert_eq!(words(&one, row), words(&each, row));
+    assert_eq!(one.read_32(row + 12), 0x1234_1234, "keyed");
+    assert_ne!(one.read_32(row + 16), 0x1234_1234);
+    // Into the memory through BAR1, below the tile base.
+    let memory = BAR1 + 0x10_0000;
+    assert!(one.move_to_voodoo(0x1000, memory, bytes.len(), 4, false));
+    for i in (0..bytes.len()).step_by(4) {
+        each.write_32(memory + i, each.read_32(0x1000 + i));
+    }
+    assert_eq!(words(&one, memory), data);
+    assert_eq!(words(&each, memory), data);
+    // Above the tile base, BAR1 is tiled: a dword at a time.
+    one.write_32(BASE + 0x0C, 0);
+    assert!(!one.move_to_voodoo(0x1000, memory, bytes.len(), 4, false));
+}
+
+#[test]
 fn frame_buffer_writes_and_reads() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
