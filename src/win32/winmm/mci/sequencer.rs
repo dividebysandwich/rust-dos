@@ -404,7 +404,10 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
                 device(cpu, i).time_format = p.time_format;
             }
             if flags & MCI_SEQ_SET_PORT != 0 {
-                match p.port {
+                // Windows 9x's sequencer is a 16-bit driver and sees the
+                // port's low word, so Win32's MIDI_MAPPER, (UINT)-1, is
+                // the mapper there too. Wages of War passes that.
+                match p.port & 0xFFFF {
                     0 | MCI_SEQ_MAPPER => seq(cpu, i).port = MCI_SEQ_MAPPER,
                     MCI_SEQ_NONE => {
                         halt_notes(cpu, i);
