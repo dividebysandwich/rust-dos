@@ -188,9 +188,10 @@ impl Bus {
         self.write_16(0x0463, 0x03D4);
 
         // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
-        // the video adapter's bits come with it below. Bit 2: a PS/2 mouse
-        // (INT 15h AH=C2h).
-        self.write_16(0x0410, 0x0005);
+        // the video adapter's bits come with it below. Bit 1: the math
+        // coprocessor, which every processor the emulator has includes,
+        // as the POST found it. Bit 2: a PS/2 mouse (INT 15h AH=C2h).
+        self.write_16(0x0410, 0x0007);
 
         // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
         // (101-key) keyboard.
