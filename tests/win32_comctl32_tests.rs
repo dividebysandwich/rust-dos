@@ -1134,7 +1134,6 @@ fn ms_sans_serif_8_and_system_have_windows_98s_metrics() {
 #[test]
 fn a_dialog_in_ms_sans_serif_8_is_6_by_13_units() {
     use Arg::*;
-    const DS_SETFONT: u32 = 0x40;
     const WS_POPUP: u32 = 0x8000_0000;
     const TEMPLATE: u32 = FREE;
     const RECT: u32 = FREE + 0x80;
@@ -1147,17 +1146,8 @@ fn a_dialog_in_ms_sans_serif_8_is_6_by_13_units() {
         call("GetWindowRect", &[Res(1), At(RECT)]),
     ];
     let mut d = data();
-    // DLGTEMPLATE: no controls, at (10, 10) and 200 by 100 units, no
-    // menu, class or title, then the font: 8 points, MS Sans Serif.
-    let mut t = Vec::new();
-    t.extend((WS_POPUP | DS_SETFONT).to_le_bytes());
-    t.extend(0u32.to_le_bytes());
-    for v in [0u16, 10, 10, 200, 100, 0, 0, 0, 8] {
-        t.extend(v.to_le_bytes());
-    }
-    for c in "MS Sans Serif\0".encode_utf16() {
-        t.extend(c.to_le_bytes());
-    }
+    // A DLGTEMPLATE at (10, 10) and 200 by 100 units.
+    let t = dialog_template(false, WS_POPUP, 0, [10, 10], [200, 100]);
     put(&mut d, TEMPLATE, &t);
     let (cpu, at) = run("dialog_units", &d, &calls);
     let r = results(&cpu, at, calls.len());
@@ -1167,4 +1157,183 @@ fn a_dialog_in_ms_sans_serif_8_is_6_by_13_units() {
     // x 10 * 6 / 4, y 10 * 13 / 8, 200 * 6 / 4 wide and 100 * 13 / 8
     // high, rounded.
     assert_eq!(rect, [15, 16, 15 + 300, 16 + 163]);
+}
+
+/// A dialog template with no controls, no menu, class or title, and the
+/// font 8 point MS Sans Serif: a DLGTEMPLATEEX if `ex_form`.
+fn dialog_template(ex_form: bool, style: u32, ex: u32, at: [i16; 2], size: [i16; 2]) -> Vec<u8> {
+    const DS_SETFONT: u32 = 0x40;
+    let mut t = Vec::new();
+    if ex_form {
+        for v in [1u16, 0xFFFF, 0, 0] {
+            t.extend(v.to_le_bytes());
+        }
+        t.extend(ex.to_le_bytes());
+        t.extend((style | DS_SETFONT).to_le_bytes());
+    } else {
+        t.extend((style | DS_SETFONT).to_le_bytes());
+        t.extend(ex.to_le_bytes());
+    }
+    let [x, y] = at.map(|v| v as u16);
+    let [width, height] = size.map(|v| v as u16);
+    for v in [0, x, y, width, height, 0, 0, 0, 8] {
+        t.extend(v.to_le_bytes());
+    }
+    if ex_form {
+        // The weight, italic and the character set.
+        t.extend(400u16.to_le_bytes());
+        t.extend(0u16.to_le_bytes());
+    }
+    for c in "MS Sans Serif\0".encode_utf16() {
+        t.extend(c.to_le_bytes());
+    }
+    t
+}
+
+#[test]
+fn a_dialogs_window_starts_where_its_template_says() {
+    use Arg::*;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const WS_BORDER: u32 = 0x0080_0000;
+    const WS_SYSMENU: u32 = 0x0008_0000;
+    const WS_EX_EDGES: u32 = 0x0002_0200;
+    let template: [u32; 6] = [0, 1, 2, 3, 4, 5].map(|i| FREE + 0x80 * i);
+    const RECT: u32 = FREE + 0x300;
+    let mut calls = vec![
+        call("GetModuleHandleA", &[I(0)]),
+        call(
+            "CreateDialogIndirectParamA",
+            &[Res(0), At(template[0]), I(0), I(0), I(0)],
+        ),
+    ];
+    for t in &template[1..] {
+        calls.push(call(
+            "CreateDialogIndirectParamA",
+            &[Res(0), At(*t), Res(1), I(0), I(0)],
+        ));
+    }
+    for i in 0..6 {
+        calls.push(call(
+            "GetWindowRect",
+            &[Res(1 + i), At(RECT + 16 * i as u32)],
+        ));
+    }
+    let mut d = data();
+    let popup = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    put(
+        &mut d,
+        template[0],
+        &dialog_template(false, popup, 0, [10, 10], [250, 150]),
+    );
+    // Glover's CONFIG.EXE has its pages as DLGTEMPLATEEXs at (0, 0)
+    // with a client and a static edge.
+    let pages = [
+        (true, WS_CHILD, WS_EX_EDGES, [0, 0]),
+        (false, WS_CHILD | WS_BORDER, 0, [-2, 40]),
+        (true, WS_CHILD, WS_EX_EDGES, [-2, 70]),
+        (true, WS_CHILD | WS_BORDER, 0, [230, 140]),
+        (true, WS_CHILD | WS_BORDER, 0, [100, -2]),
+    ];
+    for (i, (ex_form, style, ex, at)) in pages.into_iter().enumerate() {
+        put(
+            &mut d,
+            template[1 + i],
+            &dialog_template(ex_form, style, ex, at, [40, 20]),
+        );
+    }
+    let (cpu, at) = run("dialog_position", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    for (i, v) in r[1..7].iter().enumerate() {
+        assert_ne!(*v, 0, "dialog {i} is made");
+    }
+    let rect = |i: u32| [0, 4, 8, 12].map(|o| peek(&cpu, at + RECT + 16 * i + o) as i32);
+    // What Windows 98 SE gives. The popup's window, not its client area,
+    // is at (10 * 6 / 4, 10 * 13 / 8); its client area is at (18, 38).
+    assert_eq!(rect(0), [15, 16, 396, 285]);
+    // The pages' windows are at their template's place in the client
+    // area, their edges inside: 40 * 6 / 4 + 6 by 20 * 13 / 8 + 6.
+    assert_eq!(rect(1), [18, 38, 84, 77]);
+    // One left of the client area starts at its edge, and so does one
+    // above it.
+    assert_eq!(rect(2), [18, 103, 80, 138]);
+    assert_eq!(rect(3), [18, 152, 84, 191]);
+    assert_eq!(rect(5), [168, 38, 230, 73]);
+    // One past the right and the bottom stays there.
+    assert_eq!(rect(4), [363, 266, 425, 301]);
+}
+
+#[test]
+fn owned_popups_child_captions_and_ds_control_are_placed_as_on_windows_98() {
+    use Arg::*;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const WS_SYSMENU: u32 = 0x0008_0000;
+    const DS_ABSALIGN: u32 = 0x0001;
+    const DS_CONTROL: u32 = 0x0400;
+    let pop = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    let child = WS_CHILD | WS_CAPTION | WS_SYSMENU;
+    // Each dialog's style, place, and whether the first one owns it.
+    let dialogs: [(u32, [i16; 2], bool); 10] = [
+        (pop, [10, 10], false),
+        (pop, [20, 20], true),
+        (pop | DS_ABSALIGN, [20, 20], true),
+        (pop, [-1, -1], true),
+        (pop, [-9, -9], true),
+        (pop | DS_CONTROL, [20, 20], true),
+        (child, [0, 0], true),
+        (child | DS_CONTROL, [50, 0], true),
+        (pop, [400, 10], false),
+        (pop, [10, 300], false),
+    ];
+    let n = dialogs.len();
+    let template = |i: usize| FREE + 0x80 * i as u32;
+    let rect_at = |i: usize| FREE + 0x80 * n as u32 + 16 * i as u32;
+    let mut d = data();
+    let mut calls = vec![call("GetModuleHandleA", &[I(0)])];
+    for (i, (style, at, owned)) in dialogs.into_iter().enumerate() {
+        // The owner is 150 by 80 units, the others 40 by 20.
+        let size = if i == 0 { [150, 80] } else { [40, 20] };
+        put(
+            &mut d,
+            template(i),
+            &dialog_template(false, style, 0, at, size),
+        );
+        let owner = if owned { Res(1) } else { I(0) };
+        calls.push(call(
+            "CreateDialogIndirectParamA",
+            &[Res(0), At(template(i)), owner, I(0), I(0)],
+        ));
+    }
+    for i in 0..n {
+        calls.push(call("GetWindowRect", &[Res(1 + i), At(rect_at(i))]));
+    }
+    let (cpu, at) = run("dialog_owned", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    for (i, v) in r[1..=n].iter().enumerate() {
+        assert_ne!(*v, 0, "dialog {i} is made");
+    }
+    let rect = |i: usize| [0, 4, 8, 12].map(|o| peek(&cpu, at + rect_at(i) + o) as i32);
+    // What Windows 98 SE gives the same templates. The owner's client
+    // area is at (18, 38), and an owned popup's window corner goes at its
+    // template's place in it; DS_ABSALIGN makes the place the screen's.
+    assert_eq!(rect(0), [15, 16, 246, 171]);
+    assert_eq!(rect(1), [48, 71, 114, 129]);
+    assert_eq!(rect(2), [30, 33, 96, 91]);
+    // A place left of or above the client area rounds toward it: -1
+    // unit is -1 pixel across and down, -9 units -13 and -14.
+    assert_eq!(rect(3), [17, 37, 83, 95]);
+    assert_eq!(rect(4), [5, 24, 71, 82]);
+    // DS_CONTROL takes the caption and the frame away from a popup and
+    // a child; a child dialog without it keeps its caption.
+    assert_eq!(rect(5), [48, 71, 108, 104]);
+    assert_eq!(rect(6), [18, 38, 84, 96]);
+    assert_eq!(rect(7), [93, 38, 153, 71]);
+    // A popup past the right of the screen ends at its edge; one past
+    // the bottom ends 4 pixels above the bottom of the work area, which
+    // Windows 98 SE had at 452 and the built-in Windows has at 480.
+    assert_eq!(rect(8), [574, 16, 640, 74]);
+    assert_eq!(rect(9), [15, 418, 81, 476]);
 }
