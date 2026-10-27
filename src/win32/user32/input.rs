@@ -1747,6 +1747,7 @@ pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ClipCursor(rect): 0 frees it.
 pub fn clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let screen = screen_size(cpu);
     let clip = if args[0] == 0 {
         None
     } else {
@@ -1754,12 +1755,10 @@ pub fn clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if cpu.bus.guest_faulted() {
             return None;
         }
-        let (sw, sh) = screen_size(cpu);
         let r = Rect::new(w[0] as i32, w[1] as i32, w[2] as i32, w[3] as i32)
-            .intersect(&Rect::new(0, 0, sw, sh));
+            .intersect(&Rect::new(0, 0, screen.0, screen.1));
         Some(r)
     };
-    let screen = screen_size(cpu);
     let input = &mut user(cpu).input;
     input.clip = clip;
     input.cursor = clipped(input, screen, input.cursor.0, input.cursor.1);

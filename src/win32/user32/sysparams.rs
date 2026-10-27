@@ -68,8 +68,9 @@ fn settable(cpu: &Cpu, (w, h, bpp): (u32, u32, u32)) -> bool {
 /// The desktop takes the size: the adapter is set to it at once if the
 /// desktop is on the screen and DirectDraw doesn't have the display,
 /// and everything is painted again; else when the desktop next shows.
-/// GDI goes on drawing at the desktop's own depth, whatever depth was
-/// asked for. The screen's size and the metrics follow, and the
+/// Unless DirectDraw has the display, its surfaces in video memory are
+/// lost. GDI goes on drawing at the desktop's own depth, whatever depth
+/// was asked for. The screen's size and the metrics follow, and the
 /// windows are told (`display_changed`). The process's end gives the
 /// desktop's own mode back (`process_ended`).
 pub fn set_display_mode(cpu: &mut Cpu, mode: Option<(u32, u32, u32)>) -> u32 {
@@ -81,9 +82,11 @@ pub fn set_display_mode(cpu: &mut Cpu, mode: Option<(u32, u32, u32)>) -> u32 {
     let pid = super::current_pid(cpu);
     screen::set_desktop_size(cpu, mode.map(|(w, h, _)| (w, h)), pid);
     display_changed(cpu, old);
-    let shown = user(cpu).desktop && !crate::win32::ddraw::owns_display(cpu);
-    if shown && screen::desktop(cpu) != before {
-        super::paint::restore_desktop(cpu);
+    if screen::desktop(cpu) != before {
+        crate::win32::ddraw::display::desktop_changed(cpu);
+        if user(cpu).desktop && !crate::win32::ddraw::owns_display(cpu) {
+            super::paint::restore_desktop(cpu);
+        }
     }
     DISP_CHANGE_SUCCESSFUL
 }

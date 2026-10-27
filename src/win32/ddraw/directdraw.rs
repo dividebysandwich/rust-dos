@@ -466,11 +466,17 @@ pub fn restore_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         return Some(DD_OK);
     }
+    // With no mode of DirectDraw's to give back, the window stays as it
+    // is.
+    let changed = display::owns_display(cpu);
     display::restore(cpu);
     for other in state(cpu).ids(|o| o.ddraw.is_some()) {
         if let Some(d) = ddraw(cpu, other) {
             d.mode_changed = false;
         }
+    }
+    if !changed {
+        return Some(DD_OK);
     }
     cover_screen(cpu, id)
 }

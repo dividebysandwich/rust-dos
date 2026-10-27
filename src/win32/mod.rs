@@ -972,10 +972,12 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
+    // The desktop's own mode is set before DirectDraw gives the display
+    // back, so that the desktop is put on the screen once.
+    user32::sysparams::process_ended(cpu, process.id);
     ole32::process_ended(cpu, process.id, &tids);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
-    user32::sysparams::process_ended(cpu, process.id);
     dsound::process_ended(cpu, process.id, &tids);
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);

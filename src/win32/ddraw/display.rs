@@ -128,10 +128,23 @@ fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
     display.blocks.clear();
     display.mode = (w, h, bpp);
     display.mode_owner = owner;
+    display_changed(cpu, old);
+    // After `display_changed`, which keeps the mouse on the screen as
+    // Windows sees it: a mode Glide set can be larger.
     let mouse = &mut cpu.bus.mouse;
     (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w as i32 - 1, 0, h as i32 - 1);
-    display_changed(cpu, old);
     Some(mode)
+}
+
+/// The desktop's mode changed (ChangeDisplaySettings): unless
+/// DirectDraw has the display, the surfaces in video memory are lost,
+/// as the desktop's picture may now cover them.
+pub fn desktop_changed(cpu: &mut Cpu) {
+    if owns_display(cpu) {
+        return;
+    }
+    super::surface::video_memory_lost(cpu);
+    state(cpu).display.blocks.clear();
 }
 
 /// Take the display for Glide on a Banshee or Voodoo3: the mode `w` x
