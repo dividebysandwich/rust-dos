@@ -150,6 +150,18 @@ pub const VIDPROC_OVERLAY_TILED: u32 = 1 << 25;
 pub const VIDPROC_2X: u32 = 1 << 26;
 pub const VIDPROC_CURSOR: u32 = 1 << 27;
 
+/// Desktops less than this many pixels wide are the narrow modes: 3dfx's
+/// driver sets them at half the pixel clock (the built-in Windows'
+/// `card_set_mode` does too), so the monitor shows each of their pixels
+/// twice across (`Banshee::wide_pixels`).
+pub const NARROW_WIDTH: u32 = 400;
+
+/// Whether a desktop `width` pixels wide is a narrow mode
+/// (`NARROW_WIDTH`).
+fn narrow(width: u32) -> bool {
+    width < NARROW_WIDTH
+}
+
 // vidSerialParallelPort: the DDC and I2C lines, written and read back.
 const DDC_ENABLE: u32 = 1 << 18;
 const DDC_CLOCK_W: u32 = 1 << 19;
@@ -470,13 +482,13 @@ impl Banshee {
     }
 
     /// Whether the monitor shows each of the desktop's pixels twice as
-    /// wide as it has them: a desktop less than 400 pixels wide. 3dfx's
-    /// driver runs such a mode (320x200, 320x240) at half the pixel
-    /// clock of the mode twice as wide, at the same line rate, so its
-    /// pixels last twice as long and the picture spans the screen as the
-    /// wider mode's does, the way a VGA's 320-pixel modes do.
+    /// wide as it has them: a desktop less than `NARROW_WIDTH` pixels
+    /// wide. 3dfx's driver runs such a mode (320x200, 320x240) at half
+    /// the pixel clock of the mode twice as wide, at the same line rate,
+    /// so its pixels last twice as long and the picture spans the screen
+    /// as the wider mode's does, the way a VGA's 320-pixel modes do.
     pub fn wide_pixels(&self) -> bool {
-        self.desktop_size().0 < 400
+        narrow(self.desktop_size().0)
     }
 
     /// The size of the picture as the monitor shows it: the desktop's
@@ -484,7 +496,7 @@ impl Banshee {
     /// the CRTC's, which half mode already counts twice.
     pub fn picture_size(&self) -> (u32, u32) {
         let (width, height) = self.desktop_size();
-        let across = if self.wide_pixels() { 2 } else { 1 };
+        let across = if narrow(width) { 2 } else { 1 };
         (width * across, height)
     }
 

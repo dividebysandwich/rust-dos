@@ -1,9 +1,10 @@
 // A Banshee's or Voodoo3's picture as its video processor shows it, at
-// u_scale times its size and each pixel u_across times across: the desktop, the overlay window over it and
-// the hardware cursor on top, as src/voodoo/banshee/display.rs draws it
-// in software. A surface is the card's memory (bytes in rows of 4096,
-// from the surface's first byte on) or, where the OpenGL renderer draws
-// it, the texture of one of its colour buffers.
+// u_scale times its size and each pixel u_across times across: the
+// desktop, the overlay window over it and the hardware cursor on top, as
+// src/voodoo/banshee/display.rs draws it in software. A surface is the
+// card's memory (bytes in rows of 4096, from the surface's first byte
+// on) or, where the OpenGL renderer draws it, the texture of one of its
+// colour buffers.
 
 // OpenGL ES has no default precision for integer samplers.
 #ifdef GL_ES

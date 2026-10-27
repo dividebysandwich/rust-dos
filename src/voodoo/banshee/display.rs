@@ -98,7 +98,7 @@ impl Banshee {
             stride: if tiled { stride * TILE } else { stride },
             tiled,
             half: cfg & VIDPROC_HALF_MODE != 0,
-            wide: self.wide_pixels(),
+            wide: narrow(w),
         }
     }
 
