@@ -42,6 +42,13 @@ jobs:
             os: macos-latest
           - label: windows-x86_64
             os: windows-latest
+    # The test profile's opt-level 1 (Cargo.toml) on Linux only, where the
+    # whole suite runs and the optimized build saves far more time running
+    # it than compiling it costs. macOS and Windows run a few short tests,
+    # so there it only adds compiling: 2.5 and 3 minutes. Windows also
+    # starts the debug build of the program, to check its stack frames.
+    env:
+      CARGO_PROFILE_TEST_OPT_LEVEL: ${{ matrix.full && '1' || '0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,9 +106,13 @@ jobs:
           cargo test --locked --bin rust-dos determinis
 
       # Starts the debug build of the program, whose large frames must fit
-      # in Windows's 1 MB main thread stack.
+      # in Windows's 1 MB main thread stack. The test profile is optimized,
+      # and optimized frames are smaller, so this step builds the program
+      # unoptimized, as the dev profile does.
       - name: Run the debug build of the program (Windows)
         if: runner.os == 'Windows'
+        env:
+          CARGO_PROFILE_TEST_OPT_LEVEL: 0
         run: cargo test --locked --test debug_journal_tests
 
   build:

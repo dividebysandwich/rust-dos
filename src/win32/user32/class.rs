@@ -238,6 +238,31 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
     // Explorer's folder windows, which the shell opens for Program
     // Manager's groups (user32/ddeml.rs).
     ("CabinetWClass", 0, "DefWindowProcA", 0, 32512, 6),
+    // The help viewer's windows (winhelp).
+    (
+        "MS_WINHELP",
+        CS_VREDRAW | CS_HREDRAW,
+        "WinHelpWndProc",
+        0,
+        32512,
+        16,
+    ),
+    (
+        "MS_WINTOPIC",
+        CS_DBLCLKS | CS_VREDRAW | CS_HREDRAW,
+        "WinHelpTopicWndProc",
+        0,
+        32512,
+        6,
+    ),
+    (
+        "MS_WINPOPUP",
+        CS_SAVEBITS,
+        "WinHelpTopicWndProc",
+        0,
+        32512,
+        6,
+    ),
 ];
 
 /// Register the system's classes.

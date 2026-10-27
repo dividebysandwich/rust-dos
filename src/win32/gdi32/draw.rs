@@ -119,6 +119,14 @@ impl Canvas {
         self.mark(x, y);
     }
 
+    /// Count the surface rectangle `r` as drawn on, for a function that
+    /// puts the surface's pixels itself.
+    pub fn drew(&mut self, r: Rect) {
+        if !r.is_empty() {
+            self.drawn = self.drawn.union(&r);
+        }
+    }
+
     #[inline]
     fn mark(&mut self, x: i32, y: i32) {
         if self.drawn.is_empty() {

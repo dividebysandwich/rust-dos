@@ -845,6 +845,7 @@ const RECT: u32 = 0x900;
 const FILL_DESC: u32 = 0x910;
 const FILLED: u32 = 0x990;
 const FRONT: u32 = 0x994;
+const KEY: u32 = 0x998;
 const SCENE: u32 = 0xA00;
 
 const DDSD_PIXELFORMAT: u32 = 0x1000;
@@ -870,6 +871,7 @@ const SURF_ADD_ATTACHED_SURFACE: u32 = 3;
 const SURF_GET_ATTACHED_SURFACE: u32 = 12;
 const SURF_FLIP: u32 = 11;
 const SURF_LOCK: u32 = 25;
+const SURF_SET_COLOR_KEY: u32 = 29;
 const SURF_UNLOCK: u32 = 32;
 const D3D3_CREATE_VIEWPORT: u32 = 6;
 const D3D3_CREATE_DEVICE: u32 = 8;
@@ -884,6 +886,14 @@ const DEV7_CLEAR: u32 = 10;
 const DEV7_SET_RENDER_STATE: u32 = 20;
 const DEV7_DRAW_PRIMITIVE: u32 = 25;
 const DEV7_SET_TEXTURE: u32 = 35;
+const DEV7_SET_TEXTURE_STAGE_STATE: u32 = 37;
+const DDCKEY_SRCBLT: u32 = 8;
+const TSS_ALPHAOP: u32 = 4;
+const TOP_SELECTARG2: u32 = 3;
+const TOP_SELECTARG1: u32 = 2;
+const TOP_ADD: u32 = 7;
+const TSS_ALPHAARG1: u32 = 5;
+const TA_TFACTOR: u32 = 3;
 
 // Render states.
 const RS_ZENABLE: u32 = 7;
@@ -898,6 +908,10 @@ const RS_FOGTABLEMODE: u32 = 35;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
 const RS_SPECULARENABLE: u32 = 29;
+const RS_ALPHATESTENABLE: u32 = 15;
+const RS_ALPHAFUNC: u32 = 25;
+const RS_COLORKEYENABLE: u32 = 41;
+const RS_TEXTUREFACTOR: u32 = 60;
 
 /// A D3DTLVERTEX: its position, rhw, diffuse and specular colors and
 /// texture coordinates.
@@ -950,6 +964,11 @@ enum Step {
     Fill,
     /// Flip of the flip chain, without waiting for the frame.
     Flip,
+    /// SetTextureStageState of stage 0 (Direct3D 7).
+    Stage(u32, u32),
+    /// SetColorKey of the texture: its source blit key (Direct3D 7).
+    /// A scene has one key: every Key step sets the last one's.
+    Key(u32),
 }
 
 /// Which Direct3D draws a scene.
@@ -1066,6 +1085,14 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
     let mut draws = Vec::new();
     let mut at = SCENE;
     for step in &scene.steps {
+        if matches!(step, Step::Stage(..) | Step::Key(_)) {
+            assert!(scene.api == Api::D3D7, "a Direct3D 7 step");
+        }
+        if let Step::Key(key) = step {
+            assert!(scene.texture.is_some(), "a key without a texture");
+            put32(&mut d, KEY, *key);
+            put32(&mut d, KEY + 4, *key);
+        }
         if let Step::Draw(verts) = step {
             draws.push(at);
             for v in verts {
@@ -1228,6 +1255,14 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
             match step {
                 Step::State(s, v) => {
                     c.com(a, l, DEVICE, set_state, &[Arg::I(*s), Arg::I(*v)])?;
+                }
+                Step::Stage(s, v) => {
+                    let args = [Arg::I(0), Arg::I(*s), Arg::I(*v)];
+                    c.com(a, l, DEVICE, DEV7_SET_TEXTURE_STAGE_STATE, &args)?;
+                }
+                Step::Key(_) => {
+                    let args = [Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)];
+                    c.com(a, l, TEXTURE, SURF_SET_COLOR_KEY, &args)?;
                 }
                 Step::Flip => {
                     let flags = DDFLIP_WAIT | DDFLIP_NOVSYNC;
@@ -1662,6 +1697,83 @@ fn card_scene(test: &str, board: Board) {
 #[test]
 fn the_3dfx_device_draws_on_a_voodoo2() {
     card_scene("card_v2", Board::Voodoo2);
+}
+
+#[test]
+fn keyed_texels_stay_out_whatever_the_alpha_on_a_voodoo2() {
+    // A texture keyed on black in its left half, white in its right. The
+    // stage's alpha is the diffuse one, as Moto Racer's textures without
+    // alpha have it under MODULATE, or the program's alpha test lets
+    // everything through: Direct3D leaves the keyed texels out all the
+    // same.
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0 } else { 0xFFFF });
+    let alpha_steps = [
+        vec![Step::Stage(TSS_ALPHAOP, TOP_SELECTARG2)],
+        vec![
+            Step::State(RS_ALPHATESTENABLE, 1),
+            Step::State(RS_ALPHAFUNC, 8),
+        ],
+    ];
+    for (i, steps) in alpha_steps.into_iter().enumerate() {
+        let mut all = vec![Step::Key(0), Step::State(RS_COLORKEYENABLE, 1)];
+        all.extend(steps);
+        all.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: Some(Board::Voodoo2),
+            clear: 0xFF00_0080,
+            zbuffer: None,
+            texture: Some(texels),
+            steps: all,
+        };
+        let p = draw_scene(&format!("card_v2_keyed{i}"), &scene);
+        // The clear color where the texture is keyed, its white beside.
+        assert_rgb(&p, 16, 32, [0, 0, 0x84], 4);
+        assert_rgb(&p, 48, 32, [255, 255, 255], 8);
+    }
+}
+
+#[test]
+fn keyed_texels_blend_with_the_stages_alpha_on_a_voodoo2() {
+    // The keyed texture again, blended by its alpha over blue, with a
+    // diffuse alpha of 0. ALPHAOP ADD of the texture gives the texels
+    // that aren't keyed alpha 1, so they come out white; the texture
+    // factor's alpha selected, 0x80, mixes them half and half. The keyed
+    // texels stay out either way.
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0 } else { 0xFFFF });
+    let cases = [
+        (vec![Step::Stage(TSS_ALPHAOP, TOP_ADD)], [255, 255, 255]),
+        (
+            vec![
+                Step::Stage(TSS_ALPHAOP, TOP_SELECTARG1),
+                Step::Stage(TSS_ALPHAARG1, TA_TFACTOR),
+                Step::State(RS_TEXTUREFACTOR, 0x80FF_FFFF),
+            ],
+            [128, 128, 255],
+        ),
+    ];
+    for (i, (steps, right)) in cases.into_iter().enumerate() {
+        let mut all = vec![
+            Step::Key(0),
+            Step::State(RS_COLORKEYENABLE, 1),
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 5),
+            Step::State(RS_DESTBLEND, 6),
+        ];
+        all.extend(steps);
+        all.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x00FF_FFFF)));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: Some(Board::Voodoo2),
+            clear: BLUE,
+            zbuffer: None,
+            texture: Some(texels),
+            steps: all,
+        };
+        let p = draw_scene(&format!("card_v2_keyed_blend{i}"), &scene);
+        assert_rgb(&p, 16, 32, [0, 0, 255], 4);
+        assert_rgb(&p, 48, 32, right, 12);
+    }
 }
 
 #[test]

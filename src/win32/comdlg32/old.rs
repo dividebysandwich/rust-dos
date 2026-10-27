@@ -135,15 +135,7 @@ pub fn then(cpu: &mut Cpu, id: u16, c: &mut Ctx) -> Vec<Op> {
             selected(&d, &mut o, LST1, index);
         }
         T_FOLDER => {
-            let lst2 = item(cpu, dlg, LST2);
-            if let Some((text, _)) = user32::controls::listbox::item(cpu, lst2, index as i32) {
-                let text = crate::dosstr::from_bytes(&text);
-                let name = text.trim_start_matches('[').trim_end_matches(']');
-                let dir = if name == ".." {
-                    parent_of(&d.dir).unwrap_or(d.dir.clone())
-                } else {
-                    join(&d.dir, name)
-                };
+            if let Some((dir, _)) = d.look_in.get(index as usize).cloned() {
                 scan(cpu, &mut d, &dir, &mut o);
             }
             selected(&d, &mut o, LST2, index);
@@ -281,9 +273,37 @@ fn drive_label(drive: u8) -> String {
     format!("{}:", (b'a' + drive) as char)
 }
 
+/// The folder list's entries for the folder `dir`, a full path, with the
+/// folders `subfolders` in it, as Windows 3.1's and 98's dialog shows
+/// them: open folders from the drive's root down to `dir`, each one
+/// deeper, then `dir`'s folders, one deeper again. Each entry is its
+/// name as the list shows it, the path it goes to and how deep it is.
+fn folder_list(dir: &str, subfolders: &[String]) -> Vec<(String, String, u32)> {
+    let root = &dir[..dir.len().min(3)];
+    let mut list = vec![(root.to_ascii_lowercase(), folder(root), 0)];
+    let mut path = folder(root);
+    for name in dir[root.len()..].split('\\').filter(|n| !n.is_empty()) {
+        path = join(&path, name);
+        let depth = list.len() as u32;
+        list.push((name.to_ascii_lowercase(), path.clone(), depth));
+    }
+    let depth = list.len() as u32;
+    for name in subfolders {
+        list.push((name.clone(), join(dir, name), depth));
+    }
+    list
+}
+
+/// How many of the folder list's entries for the folder `dir` are open
+/// folders, `dir` and the folders it is in.
+fn open_folders(dir: &str) -> usize {
+    1 + dir.get(3..).unwrap_or("").split('\\').filter(|n| !n.is_empty()).count()
+}
+
 /// Show the folder `dir` (Wine's FD31_ScanDir): it becomes the current
-/// directory; its files that match the filter fill the file list, its
-/// folders the folder list, in lowercase as Windows 3.1 shows them.
+/// directory; its files that match the filter fill the file list, and
+/// the folder list shows the folders it is in and its own folders
+/// (`folder_list`), in lowercase as Windows 3.1 shows them.
 fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     let full = folder(&kernel32::full_path(cpu, dir));
     if kernel32::change_directory(cpu, &full).is_err() {
@@ -294,9 +314,6 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     let entries = kernel32::find_entries(cpu, &d.dir, "*").unwrap_or_default();
     let mut files = Vec::new();
     let mut dirs = Vec::new();
-    if parent_of(&d.dir).is_some() {
-        dirs.push("[..]".to_string());
-    }
     for e in entries {
         if e.name == "." || e.name == ".." || e.attributes & 0x0E != 0 && e.attributes & 0x10 == 0 {
             continue;
@@ -309,7 +326,7 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
         let shown = shown.to_ascii_lowercase();
         if e.attributes & 0x10 != 0 {
             if e.attributes & 0x06 == 0 {
-                dirs.push(format!("[{}]", shown));
+                dirs.push(shown);
             }
         } else if matches_filter(&e.name, &d.filter) || matches_filter(&shown, &d.filter) {
             files.push(shown);
@@ -322,10 +339,13 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     for f in &files {
         o.send_text(lst1, LB_ADDSTRING, 0, f);
     }
+    dirs.sort();
+    let list = folder_list(&d.dir, &dirs);
     o.send(lst2, LB_RESETCONTENT, 0, 0);
-    for f in &dirs {
-        o.send_text(lst2, LB_ADDSTRING, 0, f);
+    for (name, _, _) in &list {
+        o.send_text(lst2, LB_ADDSTRING, 0, name);
     }
+    d.look_in = list.into_iter().map(|(_, path, depth)| (path, depth)).collect();
     o.set_item_text(dlg, STC1, &d.dir.to_ascii_lowercase());
     let drive = d.dir.as_bytes()[0].to_ascii_uppercase().wrapping_sub(b'A');
     if let Some(i) = d.drives.iter().position(|&x| x == drive) {
@@ -498,18 +518,73 @@ fn draw(cpu: &mut Cpu, dlg: u32, lp: u32) -> Option<u32> {
     let Some(d) = dialog(cpu, dlg).cloned() else {
         return Some(0);
     };
-    let (text, kind) = match ctl {
+    let (text, kind, indent) = match ctl {
         LST1 | LST2 => {
             let text = user32::controls::listbox::item(cpu, hwnd_item, item_id as i32)
                 .map(|(t, _)| crate::dosstr::from_bytes(&t));
-            (text, if ctl == LST2 { 1 } else { 0 })
+            if ctl == LST1 {
+                (text, 0, 0)
+            } else {
+                // An open folder for the folder shown and those it is in.
+                let open = (item_id as usize) < open_folders(&d.dir);
+                let indent = d.look_in.get(item_id as usize).map_or(0, |&(_, n)| n);
+                (text, if open { 3 } else { 1 }, indent)
+            }
         }
         CMB2 => {
             let text = d.drives.get(item_id as usize).map(|&x| drive_label(x));
-            (text, 2)
+            (text, 2, 0)
         }
         _ => return Some(0),
     };
-    paint_item(cpu, hdc, lp, text.as_deref(), kind, 0, item_state);
+    paint_item(cpu, hdc, lp, text.as_deref(), kind, indent, item_state);
     Some(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(dir: &str, subfolders: &[&str]) -> Vec<(String, String, u32)> {
+        let subfolders: Vec<String> = subfolders.iter().map(|s| s.to_string()).collect();
+        folder_list(dir, &subfolders)
+    }
+
+    fn entry(name: &str, path: &str, depth: u32) -> (String, String, u32) {
+        (name.to_string(), path.to_string(), depth)
+    }
+
+    #[test]
+    fn a_root_lists_itself_and_its_folders() {
+        let list = entries("C:\\", &["saves", "windows"]);
+        assert_eq!(
+            list,
+            [
+                entry("c:\\", "C:\\", 0),
+                entry("saves", "C:\\saves", 1),
+                entry("windows", "C:\\windows", 1),
+            ]
+        );
+        assert_eq!(open_folders("C:\\"), 1);
+    }
+
+    #[test]
+    fn a_root_without_folders_still_lists_itself() {
+        assert_eq!(entries("D:\\", &[]), [entry("d:\\", "D:\\", 0)]);
+    }
+
+    #[test]
+    fn a_folder_lists_the_folders_it_is_in_then_its_own() {
+        let list = entries("C:\\GAMES\\SHADOW", &["saves"]);
+        assert_eq!(
+            list,
+            [
+                entry("c:\\", "C:\\", 0),
+                entry("games", "C:\\GAMES", 1),
+                entry("shadow", "C:\\GAMES\\SHADOW", 2),
+                entry("saves", "C:\\GAMES\\SHADOW\\saves", 3),
+            ]
+        );
+        assert_eq!(open_folders("C:\\GAMES\\SHADOW"), 3);
+    }
 }

@@ -680,6 +680,20 @@ dialogs never show. The W functions fail with
 ERROR_CALL_NOT_IMPLEMENTED, and FindTextA and ReplaceTextA make no
 window.
 
+WinHelpA (and Win16 WinHelp, which goes to it) opens a help viewer in
+place of WINHELP.EXE. It reads Windows 3.0 and 3.1 .HLP files with a
+parser ported from Wine's winhlp32 (user32/winhelp/hlpfile.rs), shows
+the contents topic or the one HELP_CONTEXT names, draws the text in its
+fonts with its pictures, and follows jumps and popups, with Contents,
+Back and the browse buttons. HELP_CONTEXTPOPUP, and HELP_WM_HELP for a
+control the program's list names, show their topic in a popup, at the
+point HELP_SETPOPUP_POS gave or at the mouse. It has no Search, History
+window or bookmarks, runs no help macros (HELP_COMMAND does nothing),
+shows the contents for HELP_CONTEXTMENU instead of its What's This?
+menu, doesn't follow jumps into other help files, and lays tables out
+one cell after another. Save states leave the viewer out: one open when
+a state is saved is an empty window after loading.
+
 For setup programs, SHELL32 has shell links (CLSID_ShellLink with
 IShellLinkA and IPersistFile, reading and writing `.lnk` files as
 Windows does), SHFileOperationA, the special folders laid out as
@@ -768,8 +782,15 @@ BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
 Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
 Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
 two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
-and Prairie Dog Hunt (VB2). The 16-bit setup programs, InstallShield's
-among them, are still to be tried.
+and Prairie Dog Hunt (VB2).
+
+Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
+the SimTower demo, and the InstallShield of the Lemmings demo. All three
+copy and expand their files. None of them can make its Program Manager
+group, because nothing answers the WM_DDE_INITIATE they send to PROGMAN
+(only DDEML conversations reach shell32's Program Manager): the Setup
+Toolkit asks whether to ignore that for each item and then finishes, and
+InstallShield stays running with no window once its files are in.
 
 Some choices in the earlier phases keep this phase from having to rework
 them:

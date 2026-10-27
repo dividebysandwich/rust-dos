@@ -632,11 +632,18 @@ impl Voodoo {
     }
 
     /// The status register, in the init registers, the 2D and the 3D
-    /// space alike.
+    /// space alike. A swap waiting for its retrace keeps the card busy
+    /// until the overlay shows its buffer, as it holds up the FIFO it
+    /// came through (86Box's `banshee_status` counts it until the swap is
+    /// done). 3dfx's driver on Windows 95 waits for the card to go idle
+    /// before it draws into the buffer a flip is taking off the screen.
+    /// The jobs queued go to the workers first, so they draw while the
+    /// program waits for the swap.
     pub(crate) fn banshee_status(&self, now: Now) -> u32 {
         let Some(b) = &self.banshee else { return 0 };
         let in_retrace = self.timing.status(now.ns) & 0x08 != 0;
-        b.status(in_retrace, self.drawing())
+        let drawing = self.drawing();
+        b.status(in_retrace, drawing || self.banshee_fifo_waits())
     }
 
     /// CRTC register 11h now holds `value`: bit 4 written 0 clears the

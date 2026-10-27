@@ -33,6 +33,16 @@ pub fn current(cpu: &Cpu) -> WindowsVersion {
     cpu.bus.win32.os
 }
 
+/// The version the next program sees: the setting while no program
+/// runs, else the version the running ones see.
+pub fn shown(win32: &super::Win32) -> WindowsVersion {
+    if win32.processes.is_empty() {
+        win32.version
+    } else {
+        win32.os
+    }
+}
+
 /// Whether the running programs see Windows 98 (either edition).
 pub fn is_98(cpu: &Cpu) -> bool {
     current(cpu).is_98()

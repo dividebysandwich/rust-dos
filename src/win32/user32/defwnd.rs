@@ -516,7 +516,7 @@ fn clip_box(cpu: &mut Cpu, hdc: u32) -> Rect {
 /// go to `hdc`, and the brush is the result. As on Windows 95, the window
 /// `hwnd` of a Windows 3.x program gets Windows 3.1's colors, the
 /// window's for every kind but scroll bars, so its dialogs are white.
-fn control_color(cpu: &mut Cpu, hwnd: u32, hdc: u32, kind: u32) -> u32 {
+pub(crate) fn control_color(cpu: &mut Cpu, hwnd: u32, hdc: u32, kind: u32) -> u32 {
     let state = user(cpu);
     if kind == CTLCOLOR_SCROLLBAR {
         let (text, back) = (state.color(sysparams::COLOR_BTNFACE), state.color(20));
@@ -527,8 +527,8 @@ fn control_color(cpu: &mut Cpu, hwnd: u32, hdc: u32, kind: u32) -> u32 {
     let text = state.color(sysparams::COLOR_WINDOWTEXT);
     gdi32::dc::set_text_color(cpu, &[hdc, text]);
     let owner = user(cpu).window(hwnd).map(|w| (w.pid, w.instance));
-    let win3 = owner.is_some_and(|(pid, inst)| crate::win16::expects_win3(cpu, pid, inst));
-    let index = if win3 || kind == CTLCOLOR_EDIT || kind == CTLCOLOR_LISTBOX {
+    let win3 = || owner.is_some_and(|(pid, inst)| crate::win16::expects_win3(cpu, pid, inst));
+    let index = if kind == CTLCOLOR_EDIT || kind == CTLCOLOR_LISTBOX || win3() {
         sysparams::COLOR_WINDOW
     } else {
         sysparams::COLOR_BTNFACE

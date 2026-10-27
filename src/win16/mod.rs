@@ -24,6 +24,7 @@ mod handles;
 mod kernel;
 mod ldt;
 mod local;
+mod lz;
 mod message;
 mod misc;
 mod module;
@@ -105,6 +106,8 @@ pub struct State {
     /// buffer's 16:16 and flat addresses, and the handle of the global
     /// block it is, or 0 if it is the program's.
     pub mmio_buffers: Vec<[u32; 4]>,
+    /// The compressed files LZEXPAND's LZInit opened (lz.rs).
+    pub lz_files: Vec<crate::win32::kernel32::lz::LzFile>,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -489,7 +492,9 @@ pub fn module_index(cpu: &Cpu, handle: u16) -> Option<usize> {
 /// Whether a window of the process `pid` made with the instance
 /// `instance`, as USER32 keeps it (`handles::instance32`), belongs to a
 /// Windows 3.x program: a module of the Win16 process whose header
-/// expects a version of Windows before 4.0.
+/// expects a version of Windows before 4.0. The system's modules don't
+/// count, though their rebuilt headers say 3.10: Windows 95's own
+/// expect 4.0.
 pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
     let win16 = &cpu.bus.win32.win16;
     if pid == 0 || pid != win16.pid {
@@ -500,7 +505,10 @@ pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
     } else {
         win16.modules.iter().position(|m| m.resources32 == instance)
     };
-    index.is_some_and(|i| win16.modules[i].expected_version < 0x0400)
+    index.is_some_and(|i| {
+        let m = &win16.modules[i];
+        m.builtin.is_none() && m.expected_version < 0x0400
+    })
 }
 
 crate::state_fields!(State {
@@ -528,7 +536,8 @@ crate::state_fields!(State {
     dpmi_blocks,
     missing,
     class_menus,
-    mmio_buffers
+    mmio_buffers,
+    lz_files
 });
 crate::state_fields!(Module16 {
     name,
