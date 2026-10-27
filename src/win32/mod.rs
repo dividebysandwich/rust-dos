@@ -43,6 +43,7 @@ mod ntdll;
 pub(crate) mod object;
 mod ole32;
 mod oleaut32;
+mod opengl32;
 mod advpack;
 mod registry;
 mod screen;
@@ -369,6 +370,8 @@ pub struct Win32 {
     dinput: dinput::State,
     winmm: winmm::State,
     glide: glide::State,
+    /// OpenGL's contexts and pixel formats (opengl32/).
+    opengl32: opengl32::State,
     guids: u32,
     /// DirectMusic's objects (dmusic/).
     dmusic: dmusic::State,
@@ -983,6 +986,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    opengl32::process_ended(cpu, process.id);
     dmusic::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
@@ -1156,6 +1160,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.win32.glide = glide::State::default();
+        cpu.bus.win32.opengl32 = opengl32::State::default();
         cpu.bus.win32.shell = shell32::State::default();
         cpu.bus.win32.dde = user32::ddeml::State::default();
         cpu.bus.set_a20(a20);
@@ -1264,6 +1269,7 @@ crate::state_fields!(Win32 {
     dinput,
     winmm,
     glide,
+    opengl32,
     guids,
     os,
     dmusic,
