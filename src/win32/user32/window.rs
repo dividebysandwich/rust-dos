@@ -3139,7 +3139,11 @@ mod tests {
         write_min_max(&mut cpu, hwnd, at);
         let mm = read_words(&mut cpu, at, 6);
         assert_eq!((mm[2], mm[3]), (648, 488), "the maximized size");
-        assert_eq!((mm[4] as i32, mm[5] as i32), (-4, -4), "the maximized place");
+        assert_eq!(
+            (mm[4] as i32, mm[5] as i32),
+            (-4, -4),
+            "the maximized place"
+        );
         let c = client_for(user(&mut cpu), hwnd, Rect::new(-4, -4, 644, 484));
         assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
     }
@@ -3157,6 +3161,9 @@ mod tests {
         let at = 0x8000;
         write_min_max(&mut cpu, hwnd, at);
         let mm = read_words(&mut cpu, at, 6);
-        assert_eq!((mm[2], mm[3], mm[4] as i32, mm[5] as i32), (646, 486, -3, -3));
+        assert_eq!(
+            (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
+            (646, 486, -3, -3)
+        );
     }
 }

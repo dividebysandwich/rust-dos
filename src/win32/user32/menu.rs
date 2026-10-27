@@ -1401,7 +1401,12 @@ fn init_sys_popup(cpu: &mut Cpu, h: u32, hwnd: u32) {
 /// 8-point MS Sans Serif, regular.
 fn with_font<T>(cpu: &mut Cpu, hdc: u32, f: impl FnOnce(&mut Cpu) -> T) -> T {
     let log = super::sysparams::sans_serif(false);
-    let font = gdi32::add(cpu, gdi32::Kind::Font { font: gdi32::Font { log } });
+    let font = gdi32::add(
+        cpu,
+        gdi32::Kind::Font {
+            font: gdi32::Font { log },
+        },
+    );
     let saved = gdi32::dc::with(cpu, hdc, |d| {
         let old = (d.attrs.font, d.attrs.text_color, d.attrs.bk_mode);
         d.attrs.font = font;
@@ -1451,9 +1456,19 @@ fn bitmap_size(cpu: &mut Cpu, b: u32) -> (i32, i32) {
         .map_or((0, 0), |b| (b.width, b.height))
 }
 
-/// Where a popup item's text starts, from its left.
+/// Where a popup item's text starts, from its left. Windows 98 lays out
+/// "Save As...\tCtrl+S" in 8-point MS Sans Serif as 22 pixels, the text
+/// (49), 8, "Ctrl+S" (28) and 18: an item 125 wide.
 fn text_x() -> i32 {
-    metric(71) + 6
+    metric(71) + 9
+}
+
+/// The space between a popup item's text and the text after its tab.
+const TAB_SPACE: i32 = 8;
+
+/// The space a popup item has after its text, for a submenu's arrow.
+fn arrow_space() -> i32 {
+    metric(71) + 5
 }
 
 /// The space a menu bar item has around its text, as Windows 98 lays
@@ -1473,7 +1488,11 @@ fn measure(cpu: &mut Cpu, hdc: u32, it: &Item, bar: bool) -> (i32, i32, i32) {
         return (0, 0, if bar { 0 } else { metric(55) / 2 });
     }
     if it.kind & MF_OWNERDRAW != 0 {
-        return if bar { (2 * avg, 0, bar_h) } else { (0, 0, line) };
+        return if bar {
+            (2 * avg, 0, bar_h)
+        } else {
+            (0, 0, line)
+        };
     }
     if let Some(text) = &it.text {
         if bar {
@@ -1559,7 +1578,6 @@ fn layout_popup(cpu: &mut Cpu, h: u32) -> (i32, i32) {
     };
     let n = items.len();
     let (rects, tabs, size) = with_font(cpu, mem, |cpu| {
-        let avg = font::metrics(cpu, mem).map_or(8, |m| m.average_width.max(1));
         let sizes: Vec<_> = items
             .iter()
             .map(|it| measure(cpu, mem, it, false))
@@ -1577,12 +1595,12 @@ fn layout_popup(cpu: &mut Cpu, h: u32) -> (i32, i32) {
             }
             let left = sizes[start..i].iter().map(|s| s.0).max().unwrap_or(0);
             let right = sizes[start..i].iter().map(|s| s.1).max().unwrap_or(0);
-            let gap = if right > 0 { 2 * avg + right } else { 0 };
-            let width = text_x() + left + gap + metric(71) + 4;
+            let gap = if right > 0 { TAB_SPACE + right } else { 0 };
+            let width = text_x() + left + gap + arrow_space();
             let mut y = POPUP_BORDER;
             for j in start..i {
                 rects[j] = Rect::new(x, y, x + width, y + sizes[j].2);
-                tabs[j] = x + text_x() + left + 2 * avg;
+                tabs[j] = x + text_x() + left + TAB_SPACE;
                 y += sizes[j].2;
             }
             bottom = bottom.max(y);
@@ -2874,5 +2892,35 @@ mod tests {
         let rect = |pos| item(state, (h, pos)).unwrap().rect.offset(x, y);
         assert_eq!(rect(0), Rect::new(24, 43, 52, 61), "File");
         assert_eq!(rect(3), Rect::new(150, 43, 184, 61), "Help");
+    }
+
+    /// Windows 98 SE's File popup from the same window: at (24, 61), 131
+    /// by 66, items 17 high and a separator 9 high, item text 22 pixels
+    /// in and "Ctrl+S" at x = 106 on the screen.
+    #[test]
+    fn popup_items_are_laid_out_as_windows_98_does() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let h = new_menu(user(&mut cpu), MF_POPUP, 0);
+        let items: [(u32, Option<&str>); 4] = [
+            (0, Some("&Open...")),
+            (0, Some("Save &As...\tCtrl+S")),
+            (MF_SEPARATOR, None),
+            (0, Some("E&xit")),
+        ];
+        for (i, (flags, text)) in items.iter().enumerate() {
+            let text = text.map(|t| t.as_bytes().to_vec());
+            let info = info_of(*flags, i as u32 + 1, 0, text);
+            insert_item(&mut cpu, h, NONE, MF_BYPOSITION, &info);
+        }
+        assert_eq!(layout_popup(&mut cpu, h), (131, 66));
+        let state = user(&mut cpu);
+        let rect = |pos| item(state, (h, pos)).unwrap().rect;
+        assert_eq!(rect(0), Rect::new(3, 3, 128, 20), "Open");
+        assert_eq!(rect(1), Rect::new(3, 20, 128, 37), "Save As");
+        assert_eq!(rect(2), Rect::new(3, 37, 128, 46), "the separator");
+        assert_eq!(rect(3), Rect::new(3, 46, 128, 63), "Exit");
+        assert_eq!(item(state, (h, 1)).unwrap().tab + 24, 106, "Ctrl+S");
+        assert_eq!(text_x(), 22);
     }
 }

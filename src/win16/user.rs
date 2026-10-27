@@ -479,11 +479,13 @@ fn get_system_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     use crate::win32::user32::sysparams;
     let index = args[0];
     let value = sysparams::get_system_metrics(cpu, &[index])?;
-    Some(match index {
-        SM_CYCAPTION => value.wrapping_add(1),
-        SM_CYMENU => value.wrapping_sub(1),
-        _ => value,
-    } & 0xFFFF)
+    Some(
+        match index {
+            SM_CYCAPTION => value.wrapping_add(1),
+            SM_CYMENU => value.wrapping_sub(1),
+            _ => value,
+        } & 0xFFFF,
+    )
 }
 
 const SM_CYCAPTION: u32 = 4;
