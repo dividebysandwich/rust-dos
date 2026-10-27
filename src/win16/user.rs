@@ -272,7 +272,7 @@ static APIS: &[Api16] = &[
     win32("LoadString", 176, "nwps", U, "LoadStringA", b'w'),
     win32("LoadAccelerators", 177, "nr", U, "LoadAcceleratorsA", b'a'),
     rust("TranslateAccelerator", 178, "wwp", translate_accelerator),
-    win32("GetSystemMetrics", 179, "s", U, "GetSystemMetrics", b'w'),
+    rust("GetSystemMetrics", 179, "s", get_system_metrics),
     win32("GetSysColor", 180, "w", U, "GetSysColor", b'w'),
     rust("SetSysColors", 181, "wpp", zero),
     win32("GetCaretPos", 183, "P", U, "GetCaretPos", b'b'),
@@ -470,6 +470,27 @@ fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// GetTimerResolution: 1000, as Wine says.
+/// GetSystemMetrics(index). Windows 98 gives Windows 3.x programs the
+/// caption and menu bar heights Windows 3.1 counted: a caption one pixel
+/// taller (SM_CYCAPTION 20) and a menu bar one pixel lower (SM_CYMENU
+/// 18) than Win32 programs get. Their windows are drawn the same as
+/// Win32 ones, with the client area 42 pixels below the window's top.
+fn get_system_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    use crate::win32::user32::sysparams;
+    let index = args[0];
+    let value = sysparams::get_system_metrics(cpu, &[index])?;
+    Some(
+        match index {
+            SM_CYCAPTION => value.wrapping_add(1),
+            SM_CYMENU => value.wrapping_sub(1),
+            _ => value,
+        } & 0xFFFF,
+    )
+}
+
+const SM_CYCAPTION: u32 = 4;
+const SM_CYMENU: u32 = 15;
+
 fn timer_resolution(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(1000)
 }
@@ -1932,4 +1953,20 @@ fn ansi_prev(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         args[0]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What Windows 98 SE's GetSystemMetrics gives a Windows 3.1
+    /// program: SM_CYMENU 18, SM_CYCAPTION 20 and SM_CYFRAME 4, where a
+    /// Win32 program gets 19, 19 and 4.
+    #[test]
+    fn windows_3_programs_get_windows_3_caption_and_menu_heights() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        assert_eq!(get_system_metrics(&mut cpu, &[15]), Some(18), "SM_CYMENU");
+        assert_eq!(get_system_metrics(&mut cpu, &[4]), Some(20), "SM_CYCAPTION");
+        assert_eq!(get_system_metrics(&mut cpu, &[33]), Some(4), "SM_CYFRAME");
+    }
 }
