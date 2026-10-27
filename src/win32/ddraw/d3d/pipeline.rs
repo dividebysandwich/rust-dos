@@ -519,6 +519,19 @@ pub struct Processed {
 }
 
 impl Processed {
+    /// Take the colors of `provoking`, as flat shading does: its diffuse
+    /// color and the red, green and blue of its specular one. The fog
+    /// factor in the specular alpha stays this vertex's own, so fog is
+    /// still interpolated across the face, as Wine has it (the fog
+    /// coordinate, which OpenGL's flat shading leaves alone) and as a
+    /// Voodoo iterates it (through W or Z, never flat).
+    fn take_flat_colors(&mut self, provoking: &Processed) {
+        let fog = self.specular[3];
+        self.diffuse = provoking.diffuse;
+        self.specular = provoking.specular;
+        self.specular[3] = fog;
+    }
+
     fn lerp(&self, o: &Processed, t: f32) -> Processed {
         let l = |a: f32, b: f32| a + (b - a) * t;
         let l4 =
@@ -1031,8 +1044,7 @@ pub fn draw(
                 };
                 let mut vb = *vb;
                 if flat {
-                    vb.diffuse = va.diffuse;
-                    vb.specular = va.specular;
+                    vb.take_flat_colors(va);
                 }
                 if line(setup, va, &vb, &planes, &tl_planes, raster) {
                     drawn.lines += 1;
@@ -1051,8 +1063,7 @@ pub fn draw(
                 }
                 if flat && let Some(p) = verts.get(provoking as usize) {
                     for t in tri.iter_mut() {
-                        t.diffuse = p.diffuse;
-                        t.specular = p.specular;
+                        t.take_flat_colors(p);
                     }
                 }
                 triangle(setup, tri, edges, &planes, &tl_planes, raster, &mut drawn);

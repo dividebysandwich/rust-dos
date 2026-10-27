@@ -1668,6 +1668,41 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     assert_rgb(&p, 32, 48, [128, 255, 128], 20);
 }
 
+#[test]
+fn flat_shading_keeps_each_vertex_fog() {
+    // A red first vertex without fog, and fully fogged vertices of
+    // another color: the face is red, fogged as the vertices say.
+    let fog = |v: Tl, alpha: u32| Tl {
+        specular: alpha << 24,
+        ..v
+    };
+    let tri = vec![
+        fog(tl(4.0, 4.0, 0.5, RED), 0xFF),
+        fog(tl(60.0, 4.0, 0.5, BLUE), 0),
+        fog(tl(4.0, 60.0, 0.5, BLUE), 0),
+    ];
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: None,
+        steps: vec![
+            Step::State(RS_SHADEMODE, 1),
+            Step::State(RS_FOGENABLE, 1),
+            Step::State(RS_FOGCOLOR, 0x00_FF00),
+            Step::Draw(tri),
+        ],
+    };
+    let p = draw_scene("flat-fog", &scene);
+    // At the first corner red, at the others the fog color, and half
+    // of each between them.
+    assert_rgb(&p, 5, 5, [255, 0, 0], 24);
+    assert_rgb(&p, 56, 6, [0, 255, 0], 32);
+    assert_rgb(&p, 6, 56, [0, 255, 0], 32);
+    assert_rgb(&p, 18, 18, [128, 128, 0], 32);
+}
+
 /// A scene with the add-on card `board`: flat, gouraud, z-tested and
 /// textured quads on its back buffer.
 fn card_scene(test: &str, board: Board) {
