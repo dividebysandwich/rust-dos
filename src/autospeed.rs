@@ -68,7 +68,8 @@ const FINE_STEP: f64 = 1.15;
 /// The share is of the held frame rate, not the last step's: a game whose
 /// frame rate falls a little with each step (Myth's 3Dfx renderer, whose
 /// frames also wait for the card) would otherwise be stepped down for as
-/// long as each step loses less than this, to half its frames.
+/// long as each step loses less than this: Myth went from 18.5 frames a
+/// second to 13.5.
 const FOLLOWS: f64 = 0.5;
 const KEPT: f64 = 0.9;
 /// Kept above the speed the frame rate stopped following at.
@@ -353,8 +354,10 @@ pub struct AutoSpeed {
     unsettled: Option<(f64, u32)>,
     step: Step,
     /// The highest frame rate the search held at since it started, which
-    /// steps down keep `KEPT` of.
-    held: Option<f64>,
+    /// steps down keep `KEPT` of, and the speed it held at there. A hold
+    /// at that speed or more that draws less than `KEPT` of it replaces
+    /// it: the scene got heavier, or the record was a lighter one's.
+    held: Option<(f64, u32)>,
     /// While a protected-mode program gets all the host has for its reads
     /// and writes, the speed it had before.
     working: Option<u32>,
@@ -637,7 +640,7 @@ impl AutoSpeed {
                 }
             }
             Step::Lowered { from, fps: before } if current < from => {
-                let kept = self.held.map_or(before, |held| held.max(before));
+                let kept = self.held.map_or(before, |(held, _)| held.max(before));
                 if fps >= kept * KEPT {
                     down(self)
                 } else {
@@ -654,7 +657,14 @@ impl AutoSpeed {
                     self.held = None;
                     return up(self, FIRST_STEP, here);
                 }
-                self.held = Some(self.held.map_or(recent, |most| most.max(recent)));
+                self.held = match self.held {
+                    Some((most, at))
+                        if recent <= most && (current < at || recent >= most * KEPT) =>
+                    {
+                        Some((most, at))
+                    }
+                    _ => Some((recent, current)),
+                };
                 if left > 1 {
                     self.step = Step::Hold { fps: held, left: left - 1, more, recent };
                     current
@@ -765,6 +775,28 @@ mod tests {
         assert!(later.iter().all(|&s| s >= 40_000), "{:?}", speeds);
         let fewer = later.iter().filter(|&&s| fps(s) < 15.5).count();
         assert!(fewer <= later.len() / 20, "{:?}", speeds);
+    }
+
+    #[test]
+    fn a_lighter_scene_held_at_does_not_stop_later_steps_down() {
+        // Heretic, which draws half as many frames again for a few
+        // seconds while it holds (looking at the sky), up to 50.
+        let heretic = game(35.0 / 60_000.0, 35.0);
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 3000;
+        let mut speeds = Vec::new();
+        for i in 0..80 {
+            let mut m = heretic(speed);
+            if (15..20).contains(&i) {
+                m.fps = m.fps.map(|fps| (fps * 1.5).min(50.0));
+            }
+            speed = auto.decide(speed, &m, true, HOST);
+            speeds.push(speed);
+        }
+        // Back to 35 at the same speed, the 50 says nothing of what a step
+        // down loses: a step down that keeps the 35 goes on to another.
+        let twice = speeds[20..].windows(3).any(|w| w[2] < w[1] && w[1] < w[0]);
+        assert!(twice, "{:?}", speeds);
     }
 
     #[test]
