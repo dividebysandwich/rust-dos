@@ -1016,9 +1016,10 @@ fn display_change(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<()
     c.api(a, l, S_PEEK_MESSAGE, &args)
 }
 
-/// Full screen at 800x600, as Enemy Infestation sets it: the screen's
-/// size, the cursor put at the bottom right, the WM_DISPLAYCHANGE the
-/// window got, and the size and the cursor after RestoreDisplayMode.
+/// Full screen at 800x600 from a 640x480 window, as Enemy Infestation
+/// sets it: the screen's size, the cursor put at the bottom right, the
+/// window's rectangle, the WM_DISPLAYCHANGE the window got, and the
+/// size and the cursor after RestoreDisplayMode.
 fn mode_screen_program() -> (Vec<u8>, u32) {
     program(
         &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
@@ -1035,6 +1036,8 @@ fn mode_screen_program() -> (Vec<u8>, u32) {
             screen_metrics(a, l, &mut c)?;
             c.api(a, l, S_SET_CURSOR_POS, &[Arg::I(760), Arg::I(580)])?;
             c.api(a, l, S_GET_CURSOR_POS, &[Arg::At(POINT)])?;
+            let rect = [Arg::Val(HWND), Arg::At(RECT)];
+            c.api(a, l, S_GET_WINDOW_RECT, &rect)?;
             display_change(a, l, &mut c)?;
             c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
             screen_metrics(a, l, &mut c)?;
@@ -1049,7 +1052,7 @@ fn the_screen_takes_the_size_of_the_mode_directdraw_sets() {
     let (program, data) = mode_screen_program();
     let mut cpu = machine("mode_screen", program);
     run_until_done(&mut cpu, data);
-    let r = results(&mut cpu, data, 13);
+    let r = results(&mut cpu, data, 14);
     assert_eq!(r[1..4], [0; 3]);
     // GetSystemMetrics gives the mode's size, and the cursor goes to
     // its bottom right.
@@ -1057,15 +1060,20 @@ fn the_screen_takes_the_size_of_the_mode_directdraw_sets() {
     assert_eq!(r[6..8], [1, 1]);
     let point = (peek(&cpu, data + POINT), peek(&cpu, data + POINT + 4));
     assert_eq!(point, (760, 580));
-    // The window is told: 8 bits a pixel, 800x600.
+    // The window of exclusive mode covers the screen, where the cursor
+    // reaches it.
     assert_eq!(r[8], 1);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 800, 600]);
+    // The window is told: 8 bits a pixel, 800x600.
+    assert_eq!(r[9], 1);
     assert_eq!(peek(&cpu, data + MSG + 4), WM_DISPLAYCHANGE);
     assert_eq!(peek(&cpu, data + MSG + 8), 8);
     assert_eq!(peek(&cpu, data + MSG + 12), 600 << 16 | 800);
     // RestoreDisplayMode gives the desktop's size back, and the cursor
     // and the mouse stay on it.
-    assert_eq!(r[9], 0);
-    assert_eq!(r[10..12], [640, 480]);
+    assert_eq!(r[10], 0);
+    assert_eq!(r[11..13], [640, 480]);
     let point = (peek(&cpu, data + POINT2), peek(&cpu, data + POINT2 + 4));
     assert_eq!(point, (639, 479));
     let mouse = &cpu.bus.mouse;
