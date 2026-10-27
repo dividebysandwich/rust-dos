@@ -232,6 +232,22 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
     r
 }
 
+/// The frame a maximized window puts off the screen: what
+/// AdjustWindowRectEx puts around an empty rectangle, without the
+/// caption. A WS_OVERLAPPEDWINDOW keeps its 4-pixel thick frame, so it
+/// is maximized at (-4, -4), as on Windows 98.
+fn max_frame(style: u32, ex: u32) -> Rect {
+    let mut frame = adjust(Rect::default(), style, ex, false);
+    if style & WS_CAPTION == WS_CAPTION {
+        frame.top += if ex & WS_EX_TOOLWINDOW != 0 {
+            super::sysparams::metric(51)
+        } else {
+            super::sysparams::metric(4)
+        };
+    }
+    frame
+}
+
 /// The client area for the window rectangle `r`: what DefWindowProcA's
 /// WM_NCCALCSIZE makes.
 pub fn client_for(state: &State, hwnd: u32, r: Rect) -> Rect {
@@ -924,14 +940,8 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
     };
     let (style, ex) = (w.style, w.ex_style);
     let (sw, sh) = super::sysparams::screen_size();
-    // The maximized window's frame is off the screen; a caption's
-    // border doesn't count.
-    let framed = if style & WS_CAPTION == WS_CAPTION {
-        style & !WS_BORDER
-    } else {
-        style
-    };
-    let frame = adjust(Rect::default(), framed, ex, false);
+    // The maximized window's frame is off the screen.
+    let frame = max_frame(style, ex);
     let (xinc, yinc) = (-frame.left, -frame.top);
     let (max_w, max_h) = if style & WS_CHILD != 0 {
         let parent = state.window(w.parent).map(|p| p.client).unwrap_or_default();
@@ -1509,12 +1519,7 @@ fn maximize(cpu: &mut Cpu, hwnd: u32) -> Rect {
         return Rect::default();
     };
     let (style, ex, parent) = (w.style, w.ex_style, w.parent);
-    let framed = if style & WS_CAPTION == WS_CAPTION {
-        style & !WS_BORDER
-    } else {
-        style
-    };
-    let frame = adjust(Rect::default(), framed, ex, false);
+    let frame = max_frame(style, ex);
     let area = if style & WS_CHILD != 0 {
         state.window(parent).map(|p| p.client).unwrap_or_default()
     } else {
@@ -3113,3 +3118,45 @@ crate::state_fields!(Window {
     last_popup,
     help_id
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows 98 SE maximizes a WS_OVERLAPPEDWINDOW with a menu bar at
+    /// (-4, -4), its 4-pixel thick frame off the screen, and its client
+    /// area starts at (0, 38): Win32 and Win16 programs alike.
+    #[test]
+    fn a_maximized_overlapped_window_hides_its_thick_frame() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let w = Window {
+            style: WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
+            id: 1,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let at = 0x8000;
+        write_min_max(&mut cpu, hwnd, at);
+        let mm = read_words(&mut cpu, at, 6);
+        assert_eq!((mm[2], mm[3]), (648, 488), "the maximized size");
+        assert_eq!((mm[4] as i32, mm[5] as i32), (-4, -4), "the maximized place");
+        let c = client_for(user(&mut cpu), hwnd, Rect::new(-4, -4, 644, 484));
+        assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
+    }
+
+    /// A caption without a thick frame keeps its 3-pixel dialog frame
+    /// off the screen.
+    #[test]
+    fn a_maximized_dialog_frame_window_hides_3_pixels() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let w = Window {
+            style: WS_CAPTION | WS_SYSMENU,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let at = 0x8000;
+        write_min_max(&mut cpu, hwnd, at);
+        let mm = read_words(&mut cpu, at, 6);
+        assert_eq!((mm[2], mm[3], mm[4] as i32, mm[5] as i32), (646, 486, -3, -3));
+    }
+}

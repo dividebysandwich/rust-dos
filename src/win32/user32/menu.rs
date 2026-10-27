@@ -1397,9 +1397,11 @@ fn init_sys_popup(cpu: &mut Cpu, h: u32, hwnd: u32) {
 // Laying out and drawing.
 
 /// Run `f` with the menu font on `hdc`, drawing text without a
-/// background.
+/// background. The menu font is the one SPI_GETNONCLIENTMETRICS gives:
+/// 8-point MS Sans Serif, regular.
 fn with_font<T>(cpu: &mut Cpu, hdc: u32, f: impl FnOnce(&mut Cpu) -> T) -> T {
-    let font = gdi32::gdi(cpu).stock(gdi32::SYSTEM_FONT);
+    let log = super::sysparams::sans_serif(false);
+    let font = gdi32::add(cpu, gdi32::Kind::Font { font: gdi32::Font { log } });
     let saved = gdi32::dc::with(cpu, hdc, |d| {
         let old = (d.attrs.font, d.attrs.text_color, d.attrs.bk_mode);
         d.attrs.font = font;
@@ -1414,6 +1416,7 @@ fn with_font<T>(cpu: &mut Cpu, hdc: u32, f: impl FnOnce(&mut Cpu) -> T) -> T {
             d.attrs.bk_mode = old.2;
         });
     }
+    gdi32::delete_object(cpu, &[font]);
     result
 }
 
@@ -1453,32 +1456,39 @@ fn text_x() -> i32 {
     metric(71) + 6
 }
 
+/// The space a menu bar item has around its text, as Windows 98 lays
+/// it out: "File" in 8-point MS Sans Serif is 16 wide, its item 28.
+const BAR_ITEM_SPACE: i32 = 12;
+
 /// The size an item needs: the width of its text before a tab and after
-/// it, and its height.
+/// it, and its height. A menu bar item is one pixel lower than the bar
+/// (SM_CYMENU), and a popup item with text is 4 pixels taller than it:
+/// 18 and 17 on Windows 98.
 fn measure(cpu: &mut Cpu, hdc: u32, it: &Item, bar: bool) -> (i32, i32, i32) {
     let fm = font::metrics(cpu, hdc).unwrap_or_default();
     let (th, avg) = (fm.height, fm.average_width.max(1));
     let line = (th + 4).max(metric(55));
+    let bar_h = th.max(metric(15) - 1);
     if it.kind & MF_SEPARATOR != 0 {
         return (0, 0, if bar { 0 } else { metric(55) / 2 });
     }
     if it.kind & MF_OWNERDRAW != 0 {
-        return (if bar { 2 * avg } else { 0 }, 0, line);
+        return if bar { (2 * avg, 0, bar_h) } else { (0, 0, line) };
     }
     if let Some(text) = &it.text {
         if bar {
             let (w, _) = text_size(cpu, hdc, text);
-            return (w + 2 * avg, 0, th);
+            return (w + BAR_ITEM_SPACE, 0, bar_h);
         }
         let (left, right) = split_tab(text);
         let (lw, lh) = text_size(cpu, hdc, left);
         let rw = right.map_or(0, |r| text_size(cpu, hdc, r).0);
-        return (lw, rw, (lh + 4).max(metric(55)));
+        return (lw, rw, lh.max(th) + 4);
     }
     if it.bitmap != 0 {
         let (bw, bh) = bitmap_size(cpu, it.bitmap);
         return if bar {
-            (bw + 4, 0, bh)
+            (bw + 4, 0, bh.max(bar_h))
         } else {
             (bw, 0, (bh + 2).max(line))
         };
@@ -1500,8 +1510,8 @@ fn layout_bar(cpu: &mut Cpu, h: u32, hwnd: u32, hdc: u32, rect: Rect) {
         if right_from.is_none() && it.kind & MF_RIGHTJUSTIFY != 0 {
             right_from = Some(i);
         }
-        let (w, _, _) = measure(cpu, hdc, it, true);
-        rects.push(Rect::new(x, rect.top, x + w, rect.bottom));
+        let (w, _, h) = measure(cpu, hdc, it, true);
+        rects.push(Rect::new(x, rect.top, x + w, rect.top + h));
         x += w;
     }
     if let Some(i) = right_from {
@@ -2832,3 +2842,37 @@ crate::state_fields!(Menu {
     focus,
     help_id
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::user32::window::WS_CAPTION;
+
+    /// Windows 98 SE's menu bar on a WS_OVERLAPPEDWINDOW at (20, 20),
+    /// with "File", "Special", "Window" and "Help" in 8-point MS Sans
+    /// Serif: GetMenuItemRect gives (24, 43)-(52, 61) for "File" and
+    /// (150, 43)-(184, 61) for "Help", items 18 high on a bar 19 high.
+    #[test]
+    fn bar_items_are_laid_out_as_windows_98_does() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::init(&mut cpu);
+        let h = new_menu(user(&mut cpu), 0, 0);
+        for (i, text) in ["&File", "&Special", "&Window", "&Help"].iter().enumerate() {
+            let info = info_of(0, i as u32 + 1, 0, Some(text.as_bytes().to_vec()));
+            insert_item(&mut cpu, h, NONE, MF_BYPOSITION, &info);
+        }
+        let w = Window {
+            style: WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+            rect: Rect::new(20, 20, 440, 220),
+            id: h,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        layout_bar_now(&mut cpu, hwnd);
+        let state = user(&mut cpu);
+        let (x, y) = state.window_origin(hwnd);
+        let rect = |pos| item(state, (h, pos)).unwrap().rect.offset(x, y);
+        assert_eq!(rect(0), Rect::new(24, 43, 52, 61), "File");
+        assert_eq!(rect(3), Rect::new(150, 43, 184, 61), "Help");
+    }
+}
