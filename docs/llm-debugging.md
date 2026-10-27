@@ -18,6 +18,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   which changes timing-sensitive behaviour.
 - **Dummy drivers:** they need no window or sound device. Audio is still
   mixed and streamed.
+- **OpenGL without a window:** the dummy video driver has no OpenGL, so
+  `voodoo_renderer=opengl` falls back to the software rasterizer. To run
+  the OpenGL renderer on the host's GPU, leave `SDL_VIDEODRIVER` unset
+  and pass `--hidden`: the window is made with its OpenGL context but
+  never shown.
 - **C: drive:** `-d` sets it. `AUTOEXEC.BAT` in that directory runs at
   startup.
 - **`--no-config`:** without it, rust-dos reads `rust-dos.conf` from the

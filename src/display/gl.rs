@@ -104,8 +104,14 @@ struct Capture {
 
 impl GlScreen {
     /// Make a window of `size` with an OpenGL 3 context: 3.2 core, which is
-    /// what macOS has, or else 3.0 or later with the older functions.
-    pub fn open(video: &VideoSubsystem, title: &str, (width, height): (u32, u32)) -> Result<Self, NoGl> {
+    /// what macOS has, or else 3.0 or later with the older functions. A
+    /// `hidden` window isn't shown, and its context draws all the same.
+    pub fn open(
+        video: &VideoSubsystem,
+        title: &str,
+        (width, height): (u32, u32),
+        hidden: bool,
+    ) -> Result<Self, NoGl> {
         let no_gl = |window, reason: String| NoGl { window, reason };
         // It has no OpenGL, and SDL would refuse the window.
         if video.current_video_driver() == "dummy" {
@@ -121,8 +127,9 @@ impl GlScreen {
         attr.set_depth_size(0);
         let mut builder = video.window(title, width, height);
         builder.position_centered().opengl().allow_highdpi();
-        #[cfg(test)]
-        builder.hidden();
+        if hidden || cfg!(test) {
+            builder.hidden();
+        }
         let window = builder
             .build()
             .map_err(|e| no_gl(None, e.to_string()))?;
