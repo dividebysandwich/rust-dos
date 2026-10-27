@@ -556,11 +556,13 @@ jobs:
           components: clippy
       # The cache of the libretro job's linux-x86_64 entry, which main's
       # runs save. rust-cache names that one after its `key` and the job's
-      # ID: this shared-key is the two together.
+      # ID: this shared-key is the two together. Only pull requests run this
+      # job, so it never saves, as the other jobs save only from main.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: libretro-linux-x86_64-libretro
           workspaces: libretro
+          save-if: false
 
       - name: Test
         run: cd libretro && cargo test --locked
