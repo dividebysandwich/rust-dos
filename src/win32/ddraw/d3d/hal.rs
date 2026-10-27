@@ -111,18 +111,18 @@ fn hal(cpu: &mut Cpu) -> &mut Hal {
 }
 
 // Render states the HAL reads.
-const RS_ALPHATESTENABLE: u32 = 15;
+pub const RS_ALPHATESTENABLE: u32 = 15;
 const RS_SRCBLEND: u32 = 19;
 const RS_DESTBLEND: u32 = 20;
-const RS_ALPHAREF: u32 = 24;
+pub const RS_ALPHAREF: u32 = 24;
 const RS_ALPHAFUNC: u32 = 25;
-const RS_DITHERENABLE: u32 = 26;
-const RS_ALPHABLENDENABLE: u32 = 27;
-const RS_FOGCOLOR: u32 = 34;
+pub const RS_DITHERENABLE: u32 = 26;
+pub const RS_ALPHABLENDENABLE: u32 = 27;
+pub const RS_FOGCOLOR: u32 = 34;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
 const RS_FOGDENSITY: u32 = 38;
-const RS_COLORKEYENABLE: u32 = 41;
+pub const RS_COLORKEYENABLE: u32 = 41;
 
 /// The heap's size at the most, and the least worth having.
 const HEAP_MAX: u32 = 4 << 20;

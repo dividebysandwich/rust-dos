@@ -9,6 +9,7 @@
 //! accumulation buffer. A window's pixel format is set once.
 
 use super::super::ddraw::d3d::device::{self as inner_device, Device as Inner, Viewport7};
+use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::super::ddraw::d3d::{D3dObject, hal, shadow};
 use super::super::ddraw::directdraw::{self, DDSCL_NORMAL};
 use super::super::ddraw::surface::{
@@ -705,17 +706,32 @@ pub fn get_extensions_string(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The viewport the inner device draws with: OpenGL's, from the
-/// bottom left, as Direct3D's from the top left of a target `height`
-/// high.
-pub fn inner_viewport(c: &Context) -> Viewport7 {
-    let [x, y, w, h] = c.viewport;
-    let top = c.height as i32 - (y + h);
-    Viewport7 {
-        x: x.max(0) as u32,
-        y: top.max(0) as u32,
-        width: w.max(0) as u32,
-        height: h.max(0) as u32,
+/// bottom left, cut to the context's buffers, as Direct3D's from their
+/// top left. With it the scale and offset in clip space that keep
+/// vertices where OpenGL's whole viewport puts them, for one that goes
+/// past the buffers' edges (the identity for one inside them). None if
+/// none of it is on the buffers.
+pub fn inner_viewport(c: &Context) -> Option<(Viewport7, Matrix)> {
+    let [x, y, w, h] = c.viewport.map(i64::from);
+    let (width, height) = (i64::from(c.width), i64::from(c.height));
+    let (left, right) = (x.max(0), (x + w).min(width));
+    let (bottom, top) = (y.max(0), (y + h).min(height));
+    if right <= left || top <= bottom {
+        return None;
+    }
+    let (cw, ch) = (right - left, top - bottom);
+    let mut fit = IDENTITY;
+    fit[0] = w as f32 / cw as f32;
+    fit[5] = h as f32 / ch as f32;
+    fit[12] = (2 * (x - left) + w - cw) as f32 / cw as f32;
+    fit[13] = (2 * (y - bottom) + h - ch) as f32 / ch as f32;
+    let viewport = Viewport7 {
+        x: left as u32,
+        y: (height - top) as u32,
+        width: cw as u32,
+        height: ch as u32,
         min_z: c.depth_range[0],
         max_z: c.depth_range[1],
-    }
+    };
+    Some((viewport, fit))
 }

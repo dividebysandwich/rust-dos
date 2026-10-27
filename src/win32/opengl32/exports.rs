@@ -272,7 +272,7 @@ pub static APIS: &[Api] = &[
     stdcall("glRectfv", 242, 2, draw::rectfv),
     stdcall("glRecti", 243, 4, draw::recti),
     stdcall("glRectiv", 244, 2, missing),
-    stdcall("glRects", 245, 4, draw::recti),
+    stdcall("glRects", 245, 4, draw::rects),
     stdcall("glRectsv", 246, 2, missing),
     stdcall("glRenderMode", 247, 1, missing),
     stdcall("glRotated", 248, 8, matrix::rotated),

@@ -11,13 +11,17 @@
 //! strips, polygons and line loops).
 
 use super::super::ddraw::d3d::device::{
-    self as inner_device, RS_CLIPPING, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE, RS_FOGDENSITY,
-    RS_FOGENABLE, RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE, RS_LIGHTING,
-    RS_SHADEMODE, RS_SPECULARENABLE, RS_SRCBLEND, RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE,
-    TA_CURRENT, TA_DIFFUSE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE,
-    TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
-    TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
-    TSS_MIPFILTER, TSS_TEXCOORDINDEX,
+    self as inner_device, RS_ALPHAFUNC, RS_CLIPPING, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE,
+    RS_FOGDENSITY, RS_FOGENABLE, RS_FOGEND, RS_FOGSTART, RS_FOGTABLEMODE, RS_FOGVERTEXMODE,
+    RS_LIGHTING, RS_SHADEMODE, RS_SPECULARENABLE, RS_SRCBLEND, RS_ZENABLE, RS_ZFUNC,
+    RS_ZWRITEENABLE, TA_CURRENT, TA_DIFFUSE, TA_TEXTURE, TOP_ADD, TOP_BLENDTEXTUREALPHA,
+    TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV,
+    TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP,
+    TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER, TSS_TEXCOORDINDEX,
+};
+use super::super::ddraw::d3d::hal::{
+    RS_ALPHABLENDENABLE, RS_ALPHAREF, RS_ALPHATESTENABLE, RS_COLORKEYENABLE, RS_DITHERENABLE,
+    RS_FOGCOLOR,
 };
 use super::super::ddraw::d3d::pipeline::{
     self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_XYZ, IDENTITY, Layout, Matrix, Vertex,
@@ -201,8 +205,10 @@ struct Applied {
     color_off: bool,
 }
 
-/// The device's state for drawing what the context `c` draws.
-fn applied(c: &Context) -> Applied {
+/// The device's state for drawing what the context `c` draws: None
+/// when its viewport is off its buffers, and nothing is drawn.
+fn applied(c: &Context) -> Option<Applied> {
+    let (viewport, fit) = super::wgl::inner_viewport(c)?;
     let on = |cap: u32| c.caps & cap != 0;
     let depth = on(CAP_DEPTH_TEST);
     let cull = if !on(CAP_CULL_FACE) {
@@ -229,17 +235,17 @@ fn applied(c: &Context) -> Applied {
         (RS_ZENABLE, depth as u32),
         (RS_ZWRITEENABLE, (depth && c.depth_mask) as u32),
         (RS_ZFUNC, compare(c.depth_func)),
-        // D3DRENDERSTATE_ALPHATESTENABLE, ALPHAREF and ALPHAFUNC.
-        (15, on(CAP_ALPHA_TEST) as u32),
-        (24, (c.alpha_ref.clamp(0.0, 1.0) * 255.0 + 0.5) as u32),
-        (25, compare(c.alpha_func)),
-        // D3DRENDERSTATE_ALPHABLENDENABLE.
-        (27, on(CAP_BLEND) as u32),
+        (RS_ALPHATESTENABLE, on(CAP_ALPHA_TEST) as u32),
+        (
+            RS_ALPHAREF,
+            (c.alpha_ref.clamp(0.0, 1.0) * 255.0 + 0.5) as u32,
+        ),
+        (RS_ALPHAFUNC, compare(c.alpha_func)),
+        (RS_ALPHABLENDENABLE, on(CAP_BLEND) as u32),
         (RS_SRCBLEND, blend_factor(c.blend[0])),
         (RS_DESTBLEND, blend_factor(c.blend[1])),
-        // D3DRENDERSTATE_DITHERENABLE, COLORKEYENABLE.
-        (26, on(CAP_DITHER) as u32),
-        (41, 0),
+        (RS_DITHERENABLE, on(CAP_DITHER) as u32),
+        (RS_COLORKEYENABLE, 0),
         (RS_SPECULARENABLE, 0),
         (RS_FOGENABLE, on(CAP_FOG) as u32),
         (RS_FOGVERTEXMODE, fog_mode),
@@ -247,8 +253,7 @@ fn applied(c: &Context) -> Applied {
         (RS_FOGSTART, c.fog[1].to_bits()),
         (RS_FOGEND, c.fog[2].to_bits()),
         (RS_FOGDENSITY, c.fog[0].to_bits()),
-        // D3DRENDERSTATE_FOGCOLOR.
-        (34, argb(c.fog_color)),
+        (RS_FOGCOLOR, argb(c.fog_color)),
         (RS_CULLMODE, cull),
         (RS_FILLMODE, fill),
         (RS_SHADEMODE, if c.shade_model == GL_FLAT { 1 } else { 2 }),
@@ -301,18 +306,18 @@ fn applied(c: &Context) -> Applied {
         0
     };
     let projection = c.projection.last().copied().unwrap_or(IDENTITY);
-    Applied {
+    Some(Applied {
         inner: c.inner,
         render,
         stages,
         textures,
         world: c.modelview.last().copied().unwrap_or(IDENTITY),
-        projection: mul(&DEPTH_HALF, &projection),
-        viewport: super::wgl::inner_viewport(c),
+        projection: mul(&fit, &mul(&DEPTH_HALF, &projection)),
+        viewport,
         scissor: on(CAP_SCISSOR_TEST).then(|| scissor_rect(c)),
         depth_bias,
         color_off: !c.color_mask[..3].iter().any(|&m| m),
-    }
+    })
 }
 
 /// Put the current context's state on its device: its index, the
@@ -325,7 +330,7 @@ fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
         return None;
     }
     let faces = !(c.caps & CAP_CULL_FACE != 0 && c.cull_face == GL_FRONT_AND_BACK);
-    let a = applied(c);
+    let a = applied(c)?;
     let d = inner_device::get(cpu, a.inner)?;
     for (s, v) in a.render {
         d.render[s as usize] = v;
@@ -730,13 +735,19 @@ fn values(b: &[u8], kind: u32, size: u32, normalize: bool) -> [f32; 4] {
 
 /// The vertices `first` to `last` of the current context's arrays,
 /// with the current color and texture coordinates where an array is
-/// off. None without a vertex array.
-fn gather(cpu: &mut Cpu, first: u32, last: u32) -> Option<Vec<Vertex>> {
+/// off. The texture coordinates go through the texture matrices when
+/// `transform` is set; glArrayElement's don't, as glEnd puts them
+/// through. None without a vertex array.
+fn gather(cpu: &mut Cpu, first: u32, last: u32, transform: bool) -> Option<Vec<Vertex>> {
     let c = ctx(cpu)?;
     let (va, ca, ta) = (c.vertex_array, c.color_array, c.tex_array);
     let color = argb(c.color);
     let tex = c.tex_coord;
-    let matrices = texture_matrices(c);
+    let matrices = if transform {
+        texture_matrices(c)
+    } else {
+        [None; UNITS]
+    };
     if !va.enabled || last < first {
         return None;
     }
@@ -798,7 +809,7 @@ fn gather(cpu: &mut Cpu, first: u32, last: u32) -> Option<Vec<Vertex>> {
 /// glEnd.
 pub fn array_element(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let i = args[0];
-    let Some(v) = gather(cpu, i, i).and_then(|v| v.into_iter().next()) else {
+    let Some(v) = gather(cpu, i, i, false).and_then(|v| v.into_iter().next()) else {
         return Some(0);
     };
     let Some(c) = ctx(cpu) else {
@@ -828,7 +839,11 @@ pub fn draw_arrays(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if count == 0 || ctx(cpu).is_some_and(|c| c.begin.is_some()) {
         return Some(0);
     }
-    if let Some(v) = gather(cpu, first, first + count - 1) {
+    // A range past the end of the address space is a program's error.
+    let Some(last) = first.checked_add(count - 1) else {
+        return Some(0);
+    };
+    if let Some(v) = gather(cpu, first, last, true) {
         draw(cpu, kind, &v, None);
     }
     Some(0)
@@ -884,7 +899,7 @@ pub fn draw_elements(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if last - first > 0x10_0000 {
         return Some(0);
     }
-    let Some(v) = gather(cpu, first, last) else {
+    let Some(v) = gather(cpu, first, last, true) else {
         return Some(0);
     };
     let order: Vec<u32> = indices.iter().map(|i| i - first).collect();
@@ -941,9 +956,16 @@ pub fn rectd(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// glRecti(x1, y1, x2, y2), glRects.
+/// glRecti(x1, y1, x2, y2).
 pub fn recti(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     rect(cpu, std::array::from_fn(|i| args[i] as i32 as f32));
+    Some(0)
+}
+
+/// glRects(x1, y1, x2, y2): shorts, whose words' top halves the caller
+/// may leave as they were.
+pub fn rects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    rect(cpu, std::array::from_fn(|i| args[i] as u16 as i16 as f32));
     Some(0)
 }
 
@@ -1051,7 +1073,8 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         GL_RGB | GL_BGR_EXT => 3,
         GL_RGBA | GL_BGRA_EXT => 4,
         GL_DEPTH_COMPONENT => {
-            // No depth is read back; zeros are written.
+            // No depth is read back: the program's buffer is left as it
+            // is.
             return Some(0);
         }
         _ => {
@@ -1067,16 +1090,29 @@ pub fn read_pixels(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let pack = ctx(cpu).map_or([4, 0, 0, 0], |c| c.pack);
+    let row_pixels = if pack[1] > 0 { pack[1] } else { width };
+    // The program's buffer first: sizes it can't hold aren't read.
+    let place = || {
+        let stride = row_pixels
+            .checked_mul(components)?
+            .checked_next_multiple_of(pack[0].max(1))?;
+        let skip = pack[2]
+            .checked_mul(stride)?
+            .checked_add(pack[3].checked_mul(components)?)?;
+        let len = stride
+            .checked_mul(height - 1)?
+            .checked_add(width.checked_mul(components)?)?;
+        Some((stride, at.checked_add(skip)?, len))
+    };
+    let Some((stride, start, len)) = place() else {
+        return Some(0);
+    };
+    if !cpu.bus.guest_probe(start, len as usize, true) {
+        return Some(0);
+    }
     let Some(pixels) = texture::read_frame(cpu, x as i32, y as i32, width, height) else {
         return Some(0);
     };
-    let row_pixels = if pack[1] > 0 { pack[1] } else { width };
-    let stride = (row_pixels * components).next_multiple_of(pack[0].max(1));
-    let start = at + pack[2] * stride + pack[3] * components;
-    let len = (stride * (height - 1) + width * components) as usize;
-    if !cpu.bus.guest_probe(start, len, true) {
-        return Some(0);
-    }
     let mut row = Vec::with_capacity((width * components) as usize);
     for r in 0..height {
         row.clear();
@@ -1104,6 +1140,25 @@ mod tests {
         assert_eq!(compare(0x0200), 1);
         assert_eq!(compare(0x0203), 4);
         assert_eq!(compare(0x0207), 8);
+    }
+
+    #[test]
+    fn a_viewport_past_the_left_edge_keeps_its_place() {
+        let mut c = super::super::new_context(0, 0, 1);
+        c.width = 640;
+        c.height = 480;
+        c.viewport = [-100, 0, 700, 480];
+        let (v, fit) = super::super::wgl::inner_viewport(&c).expect("on the buffers");
+        assert_eq!((v.x, v.width), (0, 600));
+        // OpenGL's left edge, x -1, is 100 pixels left of the buffers.
+        let x = matrix::apply(&fit, [-1.0, 0.0, 0.0, 1.0])[0];
+        let pixel = (x + 1.0) / 2.0 * v.width as f32 + v.x as f32;
+        assert!((pixel + 100.0).abs() < 1e-3);
+        // One inside the buffers is drawn as it is.
+        c.viewport = [10, 20, 300, 200];
+        let (v, fit) = super::super::wgl::inner_viewport(&c).expect("on the buffers");
+        assert_eq!((v.x, v.y, v.width, v.height), (10, 260, 300, 200));
+        assert_eq!(fit, IDENTITY);
     }
 
     #[test]

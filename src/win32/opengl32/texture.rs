@@ -156,9 +156,18 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>>
     let pixel = n * size;
     let row_pixels = if unpack[1] > 0 { unpack[1] } else { src.width };
     let align = unpack[0].max(1);
-    let stride = (row_pixels * pixel).next_multiple_of(align);
-    let start = src.at + unpack[2] * stride + unpack[3] * pixel;
-    let len = (src.height.saturating_sub(1) * stride + src.width * pixel) as usize;
+    let stride = row_pixels
+        .checked_mul(pixel)?
+        .checked_next_multiple_of(align)?;
+    let skip = unpack[2]
+        .checked_mul(stride)?
+        .checked_add(unpack[3].checked_mul(pixel)?)?;
+    let start = src.at.checked_add(skip)?;
+    let len = src
+        .height
+        .saturating_sub(1)
+        .checked_mul(stride)?
+        .checked_add(src.width.checked_mul(pixel)?)? as usize;
     if src.at == 0 || len > 0x400_0000 || !cpu.bus.guest_probe(start, len, false) {
         return None;
     }
@@ -432,13 +441,19 @@ fn make_surface(
     Some((ids, iface))
 }
 
+/// Whether `len` texels from `at` are in a level `size` texels wide or
+/// high (a negative `at` from the program is not).
+fn fits(at: u32, len: u32, size: u32) -> bool {
+    at.checked_add(len).is_some_and(|end| end <= size)
+}
+
 /// Write `texels` (16 bits each), `w` by `h`, into level surface `id`
 /// at (`x`, `y`).
 fn write_level(cpu: &mut Cpu, id: u32, x: u32, y: u32, w: u32, h: u32, texels: &[u16]) {
     let Some(s) = ddraw::state(cpu).surface(id).cloned() else {
         return;
     };
-    if x + w > s.width || y + h > s.height {
+    if !fits(x, w, s.width) || !fits(y, h, s.height) {
         return;
     }
     let mut row = Vec::with_capacity(w as usize * 2);
@@ -607,6 +622,13 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_OPERATION);
         return Some(0);
     };
+    let inside = ddraw::state(cpu)
+        .surface(id)
+        .is_some_and(|s| fits(x, width, s.width) && fits(y, height, s.height));
+    if !inside {
+        error(cpu, GL_INVALID_VALUE);
+        return Some(0);
+    }
     let src = Source {
         width,
         height,
@@ -620,13 +642,6 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let base = base_of(t.internal).unwrap_or(if t.alpha { Base::Rgba } else { Base::Rgb });
     let words: Vec<u16> = texels.into_iter().map(|p| encode(p, base)).collect();
-    let fits = ddraw::state(cpu)
-        .surface(id)
-        .is_some_and(|s| x + width <= s.width && y + height <= s.height);
-    if !fits {
-        error(cpu, GL_INVALID_VALUE);
-        return Some(0);
-    }
     write_level(cpu, id, x, y, width, height, &words);
     Some(0)
 }
@@ -635,21 +650,21 @@ pub fn tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// left, `w` by `h`, as red, green, blue and alpha, from the bottom row
 /// up.
 pub fn read_frame(cpu: &mut Cpu, x: i32, y: i32, w: u32, h: u32) -> Option<Vec<[u8; 4]>> {
-    let c = ctx(cpu)?.clone();
-    super::super::ddraw::d3d::shadow::expose(cpu, c.target);
-    let s = ddraw::state(cpu).surface(c.target)?.clone();
-    let mut out = Vec::with_capacity((w * h) as usize);
+    let (target, height) = ctx(cpu).map(|c| (c.target, c.height))?;
+    super::super::ddraw::d3d::shadow::expose(cpu, target);
+    let s = ddraw::state(cpu).surface(target)?.clone();
+    let mut out = Vec::with_capacity(w as usize * h as usize);
     let mut row = vec![0u8; s.pitch as usize];
-    for r in 0..h as i32 {
-        let sy = c.height as i32 - 1 - (y + r);
-        if sy < 0 || sy >= s.height as i32 {
+    for r in 0..i64::from(h) {
+        let sy = i64::from(height) - 1 - (i64::from(y) + r);
+        if sy < 0 || sy >= i64::from(s.height) {
             out.extend(std::iter::repeat_n([0, 0, 0, 255], w as usize));
             continue;
         }
         dd_surface::read_bytes(cpu, &s, sy as u32 * s.pitch, &mut row);
-        for i in 0..w as i32 {
-            let sx = x + i;
-            if sx < 0 || sx >= s.width as i32 {
+        for i in 0..i64::from(w) {
+            let sx = i64::from(x) + i;
+            if sx < 0 || sx >= i64::from(s.width) {
                 out.push([0, 0, 0, 255]);
                 continue;
             }
@@ -678,6 +693,11 @@ pub fn copy_tex_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         error(cpu, GL_INVALID_ENUM);
         return Some(0);
     }
+    // No texture is bigger than the card's: a larger size isn't read.
+    if width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE {
+        error(cpu, GL_INVALID_VALUE);
+        return Some(0);
+    }
     let Some(texels) = read_frame(cpu, x as i32, y as i32, width, height) else {
         return Some(0);
     };
@@ -703,6 +723,10 @@ pub fn copy_tex_sub_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     if target != GL_TEXTURE_2D {
         error(cpu, GL_INVALID_ENUM);
+        return Some(0);
+    }
+    if width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE {
+        error(cpu, GL_INVALID_VALUE);
         return Some(0);
     }
     let Some(texels) = read_frame(cpu, x as i32, y as i32, width, height) else {
