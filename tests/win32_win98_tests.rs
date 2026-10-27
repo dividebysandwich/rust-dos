@@ -605,3 +605,46 @@ fn get_long_path_name_gives_the_long_names() {
     let file = ("Long File Name.dat", vec![1u8; 3]);
     assert_eq!(run_with(Win98Se, "long_path", exe, &[file]).0, 18);
 }
+
+/// A program that ends with 7 when MSIMG32.DLL is a file of the system
+/// directory (1), loads (2) and has GradientFill (4).
+fn finds_msimg32() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetFileAttributesA", "LoadLibraryA", "GetProcAddress"],
+    )];
+    let mut data = b"C:\\WINDOWS\\SYSTEM\\MSIMG32.DLL\0".to_vec();
+    data.resize(0x40, 0);
+    data.extend_from_slice(b"MSIMG32.DLL\0");
+    data.resize(0x60, 0);
+    data.extend_from_slice(b"GradientFill\0");
+    program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, -1)?;
+        a.setne(bl)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        let mut done = a.create_label();
+        a.jz(done)?;
+        a.or(ebx, 2)?;
+        a.push(l.at(0x60) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        a.test(eax, eax)?;
+        a.jz(done)?;
+        a.or(ebx, 4)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn msimg32_dll_comes_with_windows_98() {
+    assert_eq!(run(Win95, "msimg32", finds_msimg32()).0, 0);
+    assert_eq!(run(Win98, "msimg32", finds_msimg32()).0, 7);
+    assert_eq!(run(Win98Se, "msimg32", finds_msimg32()).0, 7);
+}

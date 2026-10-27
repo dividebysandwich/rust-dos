@@ -285,6 +285,10 @@ kernel32/virtual: skipped virtual.c:795
 kernel32/virtual: skipped virtual.c:952
 lz32/lzexpand_main: lzexpand_main: 112 tests executed (0 marked as todo, 0 failures), 1 skipped.
 lz32/lzexpand_main: skipped lzexpand_main.c:775
+msimg32/bitmap: bitmap: 88 tests executed (0 marked as todo, 1 failure), 1 skipped.
+msimg32/bitmap: skipped bitmap.c:319
+msimg32/bitmap: failed bitmap.c:460
+msimg32/pixels: pixels: 43 tests executed (0 marked as todo, 0 failures), 0 skipped.
 msvcrt/data: data: 7 tests executed (0 marked as todo, 0 failures), 1 skipped.
 msvcrt/data: skipped data.c:96
 msvcrt/dir: dir: 53 tests executed (0 marked as todo, 0 failures), 1 skipped.
