@@ -14,7 +14,7 @@ use super::memory::{
 };
 use super::stubs::{self, STUB};
 use super::system::{self, SYSTEM_BLOCK_PAGES};
-use super::thread::STACK_FLOOR;
+use super::thread;
 use super::{FIRST_MISSING, MAX_MISSING, Module, Process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -266,11 +266,8 @@ fn build(
     let headers = &image.headers;
     process.subsystem_version =
         (headers.major_subsystem as u32) << 16 | headers.minor_subsystem as u32;
-    let reserve = reserve.next_multiple_of(GRANULARITY);
-    let stack = memory.reserve(None, STACK_FLOOR + reserve, PRIVATE, SHARED)?;
-    let commit = reserve.min(MAX_STACK_COMMIT);
-    let stack_top = stack + STACK_FLOOR + reserve;
-    memory.commit(bus, stack_top - commit, commit, USER | WRITABLE)?;
+    let (stack, stack_limit) = thread::reserve_stack(memory, bus, reserve, MAX_STACK_COMMIT)?;
+    let stack_top = stack.1;
 
     // The idle loop's stack, which only interrupts use.
     let idle = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;
@@ -300,7 +297,7 @@ fn build(
     for (field, value) in [
         (TIB_EXCEPTION_LIST, 0xFFFF_FFFF),
         (TIB_STACK_TOP, stack_top),
-        (TIB_STACK_LIMIT, stack_top - commit),
+        (TIB_STACK_LIMIT, stack_limit),
         (TIB_SELF, tib),
         (TIB_TLS_ARRAY, tib + TLS_ARRAY),
         (TIB_PROCESS, process_block(data)),
@@ -318,7 +315,7 @@ fn build(
         process: Process::default(),
         entry: base + image.headers.entry,
         stack_top,
-        stack: (stack, stack_top),
+        stack,
     }))
 }
 

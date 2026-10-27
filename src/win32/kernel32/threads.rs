@@ -11,7 +11,7 @@ use crate::win32::loader::{TLS_ARRAY, TLS_SLOTS};
 use crate::win32::memory::{GRANULARITY, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE};
 use crate::win32::object::{self, CURRENT_PROCESS, Kind};
 use crate::win32::seh::{self, CONTEXT_SIZE};
-use crate::win32::thread::{self, STACK_FLOOR, Thread};
+use crate::win32::thread::{self, Thread};
 use crate::win32::{Context, Process, process, with_process};
 
 const STILL_ACTIVE: u32 = 0x103;
@@ -97,23 +97,19 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let selector = thread::selector_of(index);
     let reserve = stack_size
         .max(process(cpu).stack_reserve)
-        .clamp(GRANULARITY, 0x100_0000)
-        .next_multiple_of(GRANULARITY);
+        .clamp(GRANULARITY, 0x100_0000);
     let made = with_process(cpu, |p, bus| {
         if let Some(t) = ended {
             release(bus, p, t);
         }
         let memory = &mut p.memory;
-        let stack = memory.reserve(None, STACK_FLOOR + reserve, PRIVATE, SHARED)?;
-        let top = stack + STACK_FLOOR + reserve;
-        let commit = reserve.min(STACK_COMMIT);
-        memory.commit(bus, top - commit, commit, USER | WRITABLE)?;
+        let ((stack, top), limit) = thread::reserve_stack(memory, bus, reserve, STACK_COMMIT)?;
         let tib = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;
         memory.commit(bus, tib, PAGE, USER | WRITABLE)?;
         for (field, value) in [
             (TIB_EXCEPTION_LIST, 0xFFFF_FFFF),
             (TIB_STACK_TOP, top),
-            (TIB_STACK_LIMIT, top - commit),
+            (TIB_STACK_LIMIT, limit),
             (TIB_SELF, tib),
             (TIB_TLS_ARRAY, tib + TLS_ARRAY),
             (

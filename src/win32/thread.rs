@@ -14,8 +14,10 @@
 //! for (an auto-reset event's signal, a semaphore's count, a mutex).
 
 use super::call::{self, THREAD_ATTACHED};
+use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
 use super::object::{Kind, Objects};
 use super::{Context, ESP, Win32, process};
+use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::instructions::fpu::control;
 use crate::instructions::sse::float::MXCSR_DEFAULT;
@@ -45,7 +47,26 @@ const DLL_THREAD_ATTACH: u32 = 2;
 /// program with a 64 KB stack and nothing below it fails at its first
 /// checked call with "Stack Overflow!". A page fault in it is a stack
 /// overflow.
-pub const STACK_FLOOR: u32 = 0x1_0000;
+const STACK_FLOOR: u32 = 0x1_0000;
+
+/// Reserve a thread's stack in `memory`: `reserve` rounded up to 64 KB,
+/// on top of `STACK_FLOOR`, and the top of it committed, at most
+/// `max_commit` bytes. The base of the reservation and the top (the
+/// thread's `stack`), and the lowest committed address (the TIB's stack
+/// limit).
+pub fn reserve_stack(
+    memory: &mut Memory,
+    bus: &mut Bus,
+    reserve: u32,
+    max_commit: u32,
+) -> Option<((u32, u32), u32)> {
+    let reserve = reserve.next_multiple_of(GRANULARITY);
+    let base = memory.reserve(None, STACK_FLOOR + reserve, PRIVATE, SHARED)?;
+    let top = base + STACK_FLOOR + reserve;
+    let limit = top - reserve.min(max_commit);
+    memory.commit(bus, limit, top - limit, USER | WRITABLE)?;
+    Some(((base, top), limit))
+}
 
 /// What a thread waits for.
 #[derive(Clone, Debug, Default)]
@@ -103,6 +124,12 @@ impl Thread {
     /// Whether it can run.
     pub fn ready(&self) -> bool {
         self.exit_code.is_none() && self.wait.is_none() && self.suspended == 0
+    }
+
+    /// The lowest address its stack can grow down to, `STACK_FLOOR` above
+    /// the base of its reservation.
+    pub fn stack_bottom(&self) -> u32 {
+        self.stack.0 + STACK_FLOOR
     }
 }
 

@@ -17,7 +17,6 @@
 
 use super::call::{self, Call, SEH_FILTER, SEH_HANDLER, SEH_UNWIND};
 use super::memory::{PAGE, PAGE_READWRITE, USER, WRITABLE};
-use super::thread::STACK_FLOOR;
 use super::{Context, ESP, process};
 use crate::cpu::{Cpu, Seg};
 use crate::instructions::fpu::control;
@@ -156,7 +155,7 @@ fn grow_stack(cpu: &mut Cpu, address: u32) -> bool {
     let Some(thread) = process(cpu).current_thread() else {
         return false;
     };
-    let (bottom, tib) = (thread.stack.0 + STACK_FLOOR, thread.tib);
+    let (bottom, tib) = (thread.stack_bottom(), thread.tib);
     let Some(limit) = super::peek_32(cpu, tib + TIB_STACK_LIMIT) else {
         return false;
     };
@@ -300,11 +299,13 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
     raise(cpu, ctx, &fpu, code, 0, ctx.eip, &params);
 }
 
-/// Whether `address` is in the running thread's stack reserve.
+/// Whether `address` is in the running thread's stack reserve, its floor
+/// included: a stack that runs past what it may grow to faults there
+/// first, and the page below the reservation is another region's.
 fn in_stack_reserve(cpu: &mut Cpu, address: u32) -> bool {
     process(cpu)
         .current_thread()
-        .is_some_and(|t| (t.stack.0.saturating_sub(PAGE)..t.stack.1).contains(&address))
+        .is_some_and(|t| (t.stack.0..t.stack.1).contains(&address))
 }
 
 /// Raise the exception `code` in the running thread, at the context
