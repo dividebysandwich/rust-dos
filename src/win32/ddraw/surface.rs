@@ -422,10 +422,11 @@ pub fn changed(cpu: &mut Cpu, id: u32) {
     }
 }
 
-/// Count a frame at the next retrace if `s` is the primary surface: the
-/// program flipped it, blitted to it or wrote to it through a lock.
-pub fn shown(cpu: &mut Cpu, s: &Surface) {
-    if s.is_primary() {
+/// Count a frame at the next retrace if the surface `id` is the primary
+/// surface: the program flipped it, blitted to it, or wrote to it
+/// through a lock or a device context.
+pub fn shown(cpu: &mut Cpu, id: u32) {
+    if state(cpu).surface(id).is_some_and(Surface::is_primary) {
         cpu.bus.vga.presented = true;
     }
 }
@@ -1240,13 +1241,11 @@ pub fn unlock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NOTLOCKED);
     }
     s.locked = false;
-    let (memory, role, primary) = (s.memory, s.bits, s.is_primary());
+    let (memory, role) = (s.memory, s.bits);
     if memory == MEM_CARD {
         voodoo::unlock(cpu, role);
     }
-    if primary {
-        cpu.bus.vga.presented = true;
-    }
+    shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)
 }
@@ -1503,7 +1502,9 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0, flags & DDFLIP_WAIT != 0) {
             return Some(super::DDERR_WASSTILLDRAWING);
         }
-        shown(cpu, &s);
+        // The card counts its swap as a frame (`Voodoo::swapped`) when
+        // it makes it, which under a frame rate cap is a frame or more
+        // later: counting the flip here as well would count it twice.
         for &m in &list {
             changed(cpu, m);
         }
@@ -1524,7 +1525,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         state(cpu).display.flip_at = timing.next_display(now);
     }
-    shown(cpu, &s);
+    shown(cpu, id);
     // The pixels go round.
     let order: Vec<u32> = match target_id {
         Some(t) => vec![id, t],
@@ -1950,6 +1951,7 @@ pub fn release_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NODC);
     }
     end_dc(cpu, id);
+    shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)
 }

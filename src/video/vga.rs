@@ -94,8 +94,9 @@ pub struct VgaCard {
     pub drawn: bool,
     pub flipped: bool,
     /// Whether the built-in Windows' DirectDraw showed a frame since the
-    /// last retrace: a flip of the primary surface, or a blit to it or
-    /// writes through a lock of it (`Bus::frames_drawn`).
+    /// last retrace: a flip of the primary surface, a blit to it, or
+    /// writes through a lock or a device context of it
+    /// (`Bus::frames_drawn`).
     pub presented: bool,
 
     /// Whether blinking characters show (the blink's phase, which the
