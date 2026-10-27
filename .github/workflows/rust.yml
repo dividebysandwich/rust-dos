@@ -495,11 +495,85 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # Whether this run builds the libretro core for every target (libretro
+  # and libretro-android) or tests it on Linux x86-64 alone (libretro-pr).
+  # Every target on pushes, tags and manual runs, and on pull requests that
+  # change the core, the manifests or this workflow. A pull request that
+  # changes the rest still needs the core tested: it builds the whole
+  # rust-dos crate with the core's features (no `sdl`, no `hostmidi`), so
+  # code that needs those breaks it.
+  libretro-scope:
+    name: libretro scope
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - name: Look at the files the pull request changes
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          full=true
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            full=false
+            # The API lists at most 3000 files: a longer list counts as a
+            # match.
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+            if [[ $(wc -l <<< "$files") -ge 3000 ]]; then
+              full=true
+            fi
+            while IFS= read -r file; do
+              case "$file" in
+                libretro/* | Cargo.toml | Cargo.lock | .github/workflows/rust.yml)
+                  echo "$file"
+                  full=true
+                  ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "full=$full"
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
+  # The libretro core on Linux x86-64 alone, for the pull requests
+  # libretro-scope picks: its tests and clippy, without the release build
+  # or the package.
+  libretro-pr:
+    name: libretro (linux-x86_64, tests and clippy)
+    needs: [test, libretro-scope]
+    if: needs.libretro-scope.outputs.full != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy
+      # The cache of the libretro job's linux-x86_64 entry, which main's
+      # runs save. rust-cache names that one after its `key` and the job's
+      # ID: this shared-key is the two together.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: libretro-linux-x86_64-libretro
+          workspaces: libretro
+
+      - name: Test
+        run: cd libretro && cargo test --locked
+
+      - name: Clippy
+        run: cd libretro && cargo clippy --locked --all-targets
+
   # The libretro core (libretro/), for RetroArch and the other frontends:
   # the library without SDL or ALSA, which the frontend has in their place.
   libretro:
     name: libretro (${{ matrix.label }})
-    needs: test
+    needs: [test, libretro-scope]
+    if: needs.libretro-scope.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     strategy:
@@ -554,6 +628,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: libretro-${{ matrix.label }}
@@ -562,6 +637,12 @@ jobs:
 
       - name: Test
         run: cd libretro && cargo test --locked
+
+      # As libretro-pr does, which restores this entry's cache: main's runs
+      # save what clippy builds for it.
+      - name: Clippy
+        if: matrix.label == 'linux-x86_64'
+        run: cd libretro && cargo clippy --locked --all-targets
 
       - name: Build
         run: cd libretro && cargo build --release --locked
@@ -605,7 +686,8 @@ jobs:
   # Cross-built, so its tests run in the libretro job above instead.
   libretro-android:
     name: libretro (android-${{ matrix.abi }})
-    needs: test
+    needs: [test, libretro-scope]
+    if: needs.libretro-scope.outputs.full == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
