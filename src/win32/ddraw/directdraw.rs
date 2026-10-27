@@ -273,17 +273,31 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let user = &cpu.bus.win32.user;
         let top = user.top_level(hwnd);
         if user.input.active != top {
-            return task::start(cpu, task::DD_ACTIVATE, vec![top], 0);
+            return task::start(cpu, task::DD_ACTIVATE, vec![WINDOW_ACTIVATE, top], 0);
         }
     }
     Some(DD_OK)
 }
 
-/// SetCooperativeLevel's task, which makes the window of exclusive mode
-/// (its variable) the active one and returns DD_OK.
+/// What DirectDraw's window task does to the window of exclusive mode.
+const WINDOW_ACTIVATE: u32 = 0;
+const WINDOW_FULLSCREEN: u32 = 1;
+
+/// DirectDraw's task on the window of exclusive mode, which returns
+/// DD_OK: SetCooperativeLevel makes it the active one
+/// (`WINDOW_ACTIVATE`, the window), SetDisplayMode makes it cover the
+/// screen (`WINDOW_FULLSCREEN`, the window, the screen's width and
+/// height), as DirectDraw's MakeFullscreen does on Windows 98 when the
+/// mode changes.
 pub fn activate_step(_: &mut Cpu, t: &mut Task, _: u32) -> Next {
-    match t.step {
-        0 => Next::call(user32::address_of("SetActiveWindow"), &[t.var(0)], 1),
+    let hwnd = t.var(1);
+    match (t.step, t.var(0)) {
+        (0, WINDOW_ACTIVATE) => Next::call(user32::address_of("SetActiveWindow"), &[hwnd], 1),
+        (0, _) => {
+            let flags = user32::window::SWP_NOZORDER | user32::window::SWP_NOACTIVATE;
+            let args = [hwnd, 0, 0, 0, t.var(2), t.var(3), flags];
+            Next::call(user32::address_of("SetWindowPos"), &args, 1)
+        }
         _ => Next::Done(DD_OK),
     }
 }
@@ -407,14 +421,35 @@ pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NOEXCLUSIVEMODE);
     }
     let hr = display::set_mode(cpu, id, w, h, bpp);
-    if hr == DD_OK {
-        for other in state(cpu).ids(|o| o.ddraw.is_some()) {
-            if let Some(d) = ddraw(cpu, other) {
-                d.mode_changed = other != id;
-            }
+    if hr != DD_OK {
+        return Some(hr);
+    }
+    for other in state(cpu).ids(|o| o.ddraw.is_some()) {
+        if let Some(d) = ddraw(cpu, other) {
+            d.mode_changed = other != id;
         }
     }
-    Some(hr)
+    cover_screen(cpu, id)
+}
+
+/// The display's mode changed for the object `id`: its window of
+/// exclusive mode is made to cover the screen, unless it was set with
+/// DDSCL_NOWINDOWCHANGES. DD_OK.
+fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    let Some(d) = ddraw(cpu, id) else {
+        return Some(DD_OK);
+    };
+    let (level, hwnd) = (d.level, d.hwnd);
+    let (w, h) = user32::sysparams::screen_size(cpu);
+    let user = &cpu.bus.win32.user;
+    let top = user.top_level(hwnd);
+    let screen = crate::win32::gdi32::Rect::new(0, 0, w, h);
+    let fits = user.window(top).is_none_or(|win| win.rect == screen);
+    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || fits {
+        return Some(DD_OK);
+    }
+    let vars = vec![WINDOW_FULLSCREEN, top, w as u32, h as u32];
+    task::start(cpu, task::DD_ACTIVATE, vars, 0)
 }
 
 /// RestoreDisplayMode(this).
@@ -431,13 +466,19 @@ pub fn restore_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         return Some(DD_OK);
     }
+    // With no mode of DirectDraw's to give back, the window stays as it
+    // is.
+    let changed = display::owns_display(cpu);
     display::restore(cpu);
     for other in state(cpu).ids(|o| o.ddraw.is_some()) {
         if let Some(d) = ddraw(cpu, other) {
             d.mode_changed = false;
         }
     }
-    Some(DD_OK)
+    if !changed {
+        return Some(DD_OK);
+    }
+    cover_screen(cpu, id)
 }
 
 /// GetDisplayMode(this, desc).

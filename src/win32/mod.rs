@@ -296,6 +296,9 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The desktop's size as ChangeDisplaySettings set it, and the
+    /// process that set it: None while it is its own (screen.rs).
+    desktop_size: Option<(u32, u32, u32)>,
     /// The built-in DLLs the system directory shows as files
     /// (dll_files.rs), as last shown.
     dll_files: Option<dll_files::Shown>,
@@ -336,6 +339,10 @@ pub struct Win32 {
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     slice_start: u64,
+    /// How many times programs have called functions of the system's
+    /// modules, built-in or missing (`service`), to tell whether a thread
+    /// called anything between two polls.
+    pub calls: u64,
     /// How many process and thread ids have been given out.
     ids: u32,
     /// The id of the process DOS started, whose exit code DOS gets.
@@ -405,6 +412,12 @@ impl Win32 {
     /// Whether a Win32 program is running.
     pub fn active(&self) -> bool {
         !self.processes.is_empty()
+    }
+
+    /// Whether a program has the 3dfx card open through Glide
+    /// (grSstWinOpen), whose picture the card then shows.
+    pub fn glide_open(&self) -> bool {
+        self.glide.owner != 0
     }
 
     /// Whether DOS loaded a Win32 program that hasn't started yet.
@@ -611,10 +624,19 @@ pub fn service(cpu: &mut Cpu, id: u16) {
         ID_START => start(cpu),
         ID_IRQ_RETURN => system::irq_return(cpu),
         _ if id & 0xFF00 == ID_IDT => system::idt(cpu, id as u8),
-        _ if id >= FIRST_MISSING => missing(cpu, id - FIRST_MISSING),
-        // A system module's stub, called by 16-bit code.
-        _ if crate::win16::in_16bit_code(cpu) => crate::win16::call(cpu, id),
-        _ => stubs::call(cpu, id),
+        // The rest are calls: of built-in functions, or of functions the
+        // built-in Windows doesn't have.
+        _ => {
+            cpu.bus.win32.calls = cpu.bus.win32.calls.wrapping_add(1);
+            if id >= FIRST_MISSING {
+                missing(cpu, id - FIRST_MISSING);
+            } else if crate::win16::in_16bit_code(cpu) {
+                // A system module's stub, called by 16-bit code.
+                crate::win16::call(cpu, id);
+            } else {
+                stubs::call(cpu, id);
+            }
+        }
     }
 }
 
@@ -979,6 +1001,9 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
+    // The desktop's own mode is set before DirectDraw gives the display
+    // back, so that the desktop is put on the screen once.
+    user32::sysparams::process_ended(cpu, process.id);
     ole32::process_ended(cpu, process.id, &tids);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
@@ -1251,6 +1276,7 @@ crate::state_fields!(Win32 {
     interrupted,
     exit_code,
     slice_start,
+    calls,
     ids,
     root,
     registry,
@@ -1281,4 +1307,5 @@ crate::state_fields!(Win32 {
     win16,
     desktop_depth,
     atoms,
+    desktop_size,
 } skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files, trace });

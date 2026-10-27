@@ -1,12 +1,13 @@
-//! What GDI draws on: the screen (the desktop in video memory), a bitmap
-//! of GDI's own, or a DIB section in the program's memory. A drawing
-//! function loads the rows it draws on into a `Surface` (a blit only
-//! their columns it works on), works on their pixels as the bitmap
-//! stores them, and stores them back. The screen's rows are 32 bits a
-//! pixel here whatever the desktop's depth is (a 16-bit desktop's are
-//! converted as they are loaded and stored), but on a desktop of 256
-//! colours they are its 8-bit pixels, indices into the system palette,
-//! as are those of GDI's 8-bit bitmaps (`device`).
+//! What GDI draws on: the screen (the picture in video memory, the
+//! desktop's or that of the mode DirectDraw set), a bitmap of GDI's
+//! own, or a DIB section in the program's memory. A drawing function
+//! loads the rows it draws on into a `Surface` (a blit only the columns
+//! it works on), works on their pixels as the bitmap stores them, and
+//! stores them back. The screen's rows are 32 bits a pixel here whatever
+//! the mode's depth is (16 and 24 bits are converted as they are loaded
+//! and stored), but in a mode of 256 colours they are its 8-bit pixels,
+//! indices into the system palette, as are those of GDI's 8-bit bitmaps
+//! (`device`).
 //!
 //! Colors are COLORREFs (0x00BBGGRR); a pixel's value is what its bits
 //! say, an index into the color table for 8 bits a pixel and fewer.
@@ -65,15 +66,23 @@ pub struct Surface {
     changed: bool,
 }
 
-/// The screen's size, and the depth and pitch of its rows as GDI works
-/// on them: 32 bits a pixel, or 8 on a desktop of 256 colours.
+/// The size of the screen GDI draws on (`screen::gdi_mode`), and the
+/// depth and pitch of its rows as GDI works on them: 32 bits a pixel,
+/// or 8 in a mode of 256 colours.
 pub fn screen(cpu: &Cpu) -> (i32, i32, u32, usize) {
-    let (w, h) = crate::win32::user32::sysparams::screen_size();
-    if crate::win32::version::palette_desktop(cpu) {
+    let m = screen_mode(cpu);
+    let (w, h) = (m.width as i32, m.height as i32);
+    if m.bpp == 8 {
         (w, h, 8, w as usize)
     } else {
         (w, h, 32, w as usize * 4)
     }
+}
+
+/// The mode of the screen GDI draws on: the desktop's while Glide has
+/// the display, where nothing GDI draws shows.
+pub fn screen_mode(cpu: &Cpu) -> crate::win32::screen::Mode {
+    crate::win32::screen::gdi_mode(cpu).unwrap_or_else(|| crate::win32::screen::desktop(cpu))
 }
 
 /// The size and depth of what `target` is, if it is there.
@@ -173,14 +182,19 @@ impl Surface {
         match target {
             Target::Memory => None,
             Target::Screen => {
-                let (_, _, _, pitch) = screen(cpu);
-                let data = crate::win32::screen::load_desktop_area(
-                    cpu,
-                    y0 as u32,
-                    rows as u32,
-                    x0 as u32,
-                    cols as u32,
-                );
+                // 8 or 32 bits a pixel (`screen`).
+                let pitch = width as usize * bpp as usize / 8;
+                let data = match crate::win32::screen::gdi_mode(cpu) {
+                    Some(m) => crate::win32::screen::load_area(
+                        cpu,
+                        &m,
+                        y0 as u32,
+                        rows as u32,
+                        x0 as u32,
+                        cols as u32,
+                    ),
+                    None => vec![0; span * rows as usize],
+                };
                 let device = bpp == 8;
                 let colors = if device {
                     super::palette::system_colors(cpu)
@@ -292,17 +306,19 @@ impl Surface {
         let skip = self.left as usize * self.bpp as usize / 8;
         match self.target {
             Target::Memory => {}
-            // While DirectDraw has the display, GDI's drawing on the
-            // screen goes nowhere.
-            Target::Screen if crate::win32::ddraw::owns_display(cpu) => {}
             Target::Screen => {
-                crate::win32::screen::store_desktop_area(
-                    cpu,
-                    self.top as u32,
-                    self.left as u32,
-                    self.cols as u32,
-                    &self.data,
-                );
+                // In the mode DirectDraw set too; while Glide has the
+                // display, nowhere.
+                if let Some(m) = crate::win32::screen::gdi_mode(cpu) {
+                    crate::win32::screen::store_area(
+                        cpu,
+                        &m,
+                        self.top as u32,
+                        self.left as u32,
+                        self.cols as u32,
+                        &self.data,
+                    );
+                }
             }
             Target::Bitmap(handle) => match self.dib {
                 Some((bits, top_down)) => {

@@ -56,7 +56,10 @@ jobs:
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev libasound2-dev
+        uses: $/.github/actions/apt-install
+        with:
+          packages: libsdl2-dev libasound2-dev
+          update: false
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -78,9 +81,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+      # Saved only from main: every PR restores main's entries, while a
+      # PR's own entries are visible to that PR alone and push main's out
+      # of the 10 GB repository cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.label }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run tests
         if: matrix.full
@@ -161,17 +168,26 @@ jobs:
       # without git in the container, actions/checkout falls back to
       # downloading through the REST API. zstd is for the cache archives, and
       # build-essential also brings binutils (strip) and dpkg-dev
-      # (dpkg-shlibdeps, which cargo-deb runs for the .deb's Depends).
+      # (dpkg-shlibdeps, which cargo-deb runs for the .deb's Depends). The
+      # packages from libx11-dev on are what the AppImage's SDL2 is built
+      # against.
       - name: Install build environment (compat container)
         if: matrix.container
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        uses: $/.github/actions/apt-install
+        with:
+          packages: >-
             git ca-certificates curl zstd build-essential cmake pkg-config libsdl2-dev libasound2-dev
-          # The workspace belongs to the runner's user and the container
-          # runs as root, so git would refuse the checkout as "dubious
-          # ownership" and the binaries would report `commit unknown`.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev
+            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
+          update: true
+
+      # The workspace belongs to the runner's user and the container runs as
+      # root, so git would refuse the checkout as "dubious ownership" and the
+      # binaries would report `commit unknown`.
+      - name: Trust the workspace (compat container)
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -191,10 +207,15 @@ jobs:
             echo "PKG=rust-dos-$RELEASE_VERSION-${{ matrix.label }}"
           } >> "$GITHUB_ENV"
 
+      # With the package lists updated, as these builds make the release's
+      # packages.
       - name: Install dependencies (Linux)
         # The -compat container jobs installed everything above, pre-checkout.
         if: runner.os == 'Linux' && !matrix.container
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev libasound2-dev
+        uses: $/.github/actions/apt-install
+        with:
+          packages: libsdl2-dev libasound2-dev
+          update: true
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -292,6 +313,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.label }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         if: ${{ !matrix.win7 }}
@@ -338,10 +360,6 @@ jobs:
           APPIMAGETOOL_VERSION: 1.9.1
           APPIMAGE_RUNTIME_VERSION: "20251108"
         run: |
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
-            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev \
-            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
           curl -fsSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-$SDL_VERSION.tar.gz"
           tar xzf sdl.tar.gz
           cmake -S "SDL2-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TEST=OFF
@@ -442,6 +460,7 @@ jobs:
         with:
           key: web
           workspaces: web
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # web/build.sh runs the wasm-bindgen program, which must be the version
       # web/Cargo.lock has.
@@ -476,11 +495,87 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # Whether this run builds the libretro core for every target (libretro
+  # and libretro-android) or tests it on Linux x86-64 alone (libretro-pr).
+  # Every target on pushes, tags and manual runs, and on pull requests that
+  # change the core, the manifests or this workflow. A pull request that
+  # changes the rest still needs the core tested: it builds the whole
+  # rust-dos crate with the core's features (no `sdl`, no `hostmidi`), so
+  # code that needs those breaks it.
+  libretro-scope:
+    name: libretro scope
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - name: Look at the files the pull request changes
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          full=true
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            full=false
+            # The API lists at most 3000 files: a longer list counts as a
+            # match.
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+            if [[ $(wc -l <<< "$files") -ge 3000 ]]; then
+              full=true
+            fi
+            while IFS= read -r file; do
+              case "$file" in
+                libretro/* | Cargo.toml | Cargo.lock | .github/workflows/rust.yml)
+                  echo "$file"
+                  full=true
+                  ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "full=$full"
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
+  # The libretro core on Linux x86-64 alone, for the pull requests
+  # libretro-scope picks: its tests and clippy, without the release build
+  # or the package.
+  libretro-pr:
+    name: libretro (linux-x86_64, tests and clippy)
+    needs: [test, libretro-scope]
+    if: needs.libretro-scope.outputs.full != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy
+      # The cache of the libretro job's linux-x86_64 entry, which main's
+      # runs save. rust-cache names that one after its `key` and the job's
+      # ID: this shared-key is the two together. Only pull requests run this
+      # job, so it never saves, as the other jobs save only from main.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: libretro-linux-x86_64-libretro
+          workspaces: libretro
+          save-if: false
+
+      - name: Test
+        run: cd libretro && cargo test --locked
+
+      - name: Clippy
+        run: cd libretro && cargo clippy --locked --all-targets
+
   # The libretro core (libretro/), for RetroArch and the other frontends:
   # the library without SDL or ALSA, which the frontend has in their place.
   libretro:
     name: libretro (${{ matrix.label }})
-    needs: test
+    needs: [test, libretro-scope]
+    if: needs.libretro-scope.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     strategy:
@@ -516,14 +611,17 @@ jobs:
     steps:
       - name: Install build environment (compat container)
         if: matrix.container
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates curl zstd build-essential pkg-config zip
-          # The workspace belongs to the runner's user and the container
-          # runs as root, so git would refuse the checkout as "dubious
-          # ownership" and the binaries would report `commit unknown`.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        uses: $/.github/actions/apt-install
+        with:
+          packages: git ca-certificates curl zstd build-essential pkg-config zip
+          update: true
+
+      # The workspace belongs to the runner's user and the container runs as
+      # root, so git would refuse the checkout as "dubious ownership" and the
+      # binaries would report `commit unknown`.
+      - name: Trust the workspace (compat container)
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -532,13 +630,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: libretro-${{ matrix.label }}
           workspaces: libretro
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test
         run: cd libretro && cargo test --locked
+
+      # As libretro-pr does, which restores this entry's cache: main's runs
+      # save what clippy builds for it.
+      - name: Clippy
+        if: matrix.label == 'linux-x86_64'
+        run: cd libretro && cargo clippy --locked --all-targets
 
       - name: Build
         run: cd libretro && cargo build --release --locked
@@ -582,7 +688,8 @@ jobs:
   # Cross-built, so its tests run in the libretro job above instead.
   libretro-android:
     name: libretro (android-${{ matrix.abi }})
-    needs: test
+    needs: [test, libretro-scope]
+    if: needs.libretro-scope.outputs.full == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -607,6 +714,7 @@ jobs:
         with:
           key: libretro-android-${{ matrix.abi }}
           workspaces: libretro
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked

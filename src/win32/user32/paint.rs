@@ -522,7 +522,7 @@ fn paint_background(cpu: &mut Cpu, area: &Region) {
         return;
     }
     let brush = sysparams::brush(cpu, COLOR_BACKGROUND);
-    let (w, h) = sysparams::screen_size();
+    let (w, h) = sysparams::screen_size(cpu);
     draw::fill_device_rect(cpu, hdc, Rect::new(0, 0, w, h), brush);
     gdi32::dc::free_window_dc(cpu, hdc);
 }
@@ -638,7 +638,7 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     if !crate::win32::ddraw::owns_display(cpu) {
         enter_desktop_mode(cpu);
         // The mouse moves over the whole desktop, from its middle.
-        let (w, h) = sysparams::screen_size();
+        let (w, h) = sysparams::screen_size(cpu);
         let mouse = &mut cpu.bus.mouse;
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
         mouse.warp(w / 2, h / 2);
@@ -677,7 +677,7 @@ pub fn redraw_screen(cpu: &mut Cpu) {
     if !user(cpu).desktop {
         return;
     }
-    let (w, h) = sysparams::screen_size();
+    let (w, h) = sysparams::screen_size(cpu);
     expose(cpu, &Region::from_rect(Rect::new(0, 0, w, h)));
 }
 

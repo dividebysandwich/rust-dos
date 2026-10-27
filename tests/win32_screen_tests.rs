@@ -617,9 +617,16 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     run_until(&mut cpu, data, 3);
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted.
+    // The window, which the mode changes made cover the screen, as
+    // DirectDraw does on Windows 98, is over all of it: its corner with
+    // its text as before, and its background where the desktop's was.
     assert_eq!(card_mode(&cpu), (640, 480, 1, 1280));
     assert_eq!(card_reg(&cpu, VID_DESKTOP_START_ADDR), 0);
-    assert!(desktop(&cpu) == before, "the desktop as it was");
+    let after = desktop(&cpu);
+    let at = |x: usize, y: usize| y * 640 + x;
+    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    assert!(before[at(639, 479)] != before[at(319, 239)]);
+    assert!(after[at(639, 479)] == before[at(319, 239)], "covered");
 }
 
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
@@ -1848,4 +1855,167 @@ fn a_256_colour_desktop_has_a_system_palette() {
     let dac = &cpu.bus.vga.palette;
     assert_eq!(dac[11 * 3..12 * 3], [0x40 >> shift, 0x80 >> shift, 0xC0 >> shift]);
     assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
+}
+
+const USER32_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "LoadCursorA", "SetCursor", "SetCursorPos", "ShowCursor"],
+);
+const LOAD_CURSOR: usize = 1;
+const SET_CURSOR: usize = 2;
+const SET_CURSOR_POS: usize = 3;
+const SHOW_CURSOR: usize = 4;
+const IDC_ARROW: u32 = 32512;
+
+/// A window on the desktop, the arrow set as the cursor and the cursor
+/// put at (100, 100) (step 1); then the cursor hidden (step 2).
+fn cursor_program() -> (Vec<u8>, u32) {
+    program(&[USER32_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        a.push(eax)?;
+        a.call(l.import(SET_CURSOR))?;
+        c.keep(a, l)?;
+        c.api(a, l, SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        wait(a, l, 1)?;
+        c.api(a, l, SHOW_CURSOR, &[Arg::I(0)])?;
+        finish(a, l, 2)
+    })
+}
+
+/// The pixels (`x`, `y`) of the screen with the cursors drawn over it,
+/// as the front ends and /api/screenshot show it.
+fn with_cursors(cpu: &Cpu, at: &[(usize, usize)]) -> Vec<[u8; 3]> {
+    let (width, height) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    video::render_screen(&mut frame, &cpu.bus);
+    video::overlay::draw_cursors(&mut frame, &cpu.bus, false);
+    at.iter()
+        .map(|&(x, y)| {
+            let i = (y * width as usize + x) * 4;
+            [frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2]]
+        })
+        .collect()
+}
+
+/// The built-in Windows draws the cursor SetCursor set where the mouse
+/// is, on a desktop of 256 colours: the arrow's tip at the cursor's place
+/// is black and its inside white. ShowCursor(FALSE) takes it away.
+fn the_cursor_shows(test: &str, board: Option<Board>) {
+    let (program, data) = cursor_program();
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_ne!(r[1], 0, "LoadCursorA(IDC_ARROW)");
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let points = [(100, 100), (101, 102), (300, 300)];
+    let shown = with_cursors(&cpu, &points);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+    let desktop = shown[2];
+    assert_ne!(desktop, [0xFF, 0xFF, 0xFF], "the desktop isn't white");
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 5)[4], u32::MAX, "ShowCursor(FALSE)");
+    let hidden = with_cursors(&cpu, &points);
+    assert_eq!(hidden[1], desktop, "no cursor over the desktop");
+}
+
+#[test]
+fn the_cursor_shows_on_a_vesa_desktop() {
+    the_cursor_shows("cursor_vesa", None);
+}
+
+/// A Voodoo3 shows the desktop in its extended mode, the 3dfx card's own
+/// picture, and Windows' cursor is drawn over it.
+#[test]
+fn the_cursor_shows_on_a_voodoo3_desktop() {
+    the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
+}
+
+/// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
+/// as the cursor and the cursor put at (100, 100) (step 1).
+fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
+    program(&[USER32_CURSOR, DDRAW], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &[Arg::I(w), Arg::I(h), Arg::I(8)])?;
+        c.api(a, l, LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        a.push(eax)?;
+        a.call(l.import(SET_CURSOR))?;
+        c.keep(a, l)?;
+        c.api(a, l, SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    })
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
+/// mode's pixels, as large as they show: the arrow's inside, one pixel
+/// right of the tip and two down, covers that pixel of the mode on the
+/// frame, however much larger the frame shows it.
+fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (program, data) = mode_cursor_program(w, h);
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_eq!(r[2..4], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    assert_ne!(r[4], 0, "LoadCursorA(IDC_ARROW)");
+    assert_eq!(r[6], 1, "SetCursorPos");
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let (sx, sy) = ((frame_w / w) as usize, (frame_h / h) as usize);
+    let inside = (101 * sx, 102 * sy);
+    let corners = [inside, (inside.0 + sx - 1, inside.1 + sy - 1)];
+    for (i, pixel) in with_cursors(&cpu, &corners).into_iter().enumerate() {
+        assert_eq!(pixel, [0xFF, 0xFF, 0xFF], "the arrow's inside, corner {i}");
+    }
+    let beside = with_cursors(&cpu, &[(120 * sx, 102 * sy)])[0];
+    assert_ne!(beside, [0xFF, 0xFF, 0xFF], "beside the arrow");
+}
+
+/// The VESA kind shows 320x240 at twice its size both ways.
+#[test]
+fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
+    the_cursor_shows_in_a_small_mode("cursor_vesa_320", None, (320, 240));
+}
+
+/// A Voodoo3 shows 320x200 with its lines doubled.
+#[test]
+fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
+    the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
 }

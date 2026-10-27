@@ -790,6 +790,14 @@ impl Machine {
         self.cpu.bus.mouse.installed
     }
 
+    /// Whether the picture has the built-in Windows' cursor drawn where
+    /// the mouse is, for the page to hide the browser's pointer over it,
+    /// as the rust-dos program does with the host's. The settings window
+    /// keeps the browser's.
+    pub fn draws_pointer(&self) -> bool {
+        !self.ui.is_open() && video::overlay::draws_windows_cursor(&self.cpu.bus)
+    }
+
     /// Whether holding the right button still opens the settings window
     /// (`mouse_menu_hold`).
     pub fn mouse_menu_hold(&self) -> bool {

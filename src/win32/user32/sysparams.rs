@@ -1,21 +1,144 @@
 //! The system's metrics, colors and parameters, as Windows 95 has them
-//! on a 640x480 screen with its standard color scheme.
+//! with its standard color scheme, and the display's mode, which the
+//! screen's size follows.
+//!
+//! The screen is as large as the display mode: the desktop's, 640x480
+//! unless ChangeDisplaySettings set another, or the one DirectDraw set
+//! while it has the display. GetSystemMetrics, the desktop window, the
+//! monitor, the cursor's range and the rest take their size from
+//! `screen_size`. A change of the mode (`set_display_mode`, DirectDraw's
+//! SetDisplayMode and RestoreDisplayMode, the end of the process that
+//! set it) resizes the desktop window, keeps the cursor on the screen
+//! and tells the top-level windows with WM_DISPLAYCHANGE
+//! (`display_changed`).
 
 use super::{FALSE, TRUE, read_words, user, write_words};
 use crate::cpu::Cpu;
 use crate::win32::gdi32::{self, Brush, Kind};
+use crate::win32::screen;
 
-/// The screen's size: the desktop's display mode.
-pub fn screen_size() -> (i32, i32) {
-    (640, 480)
+const WM_DISPLAYCHANGE: u32 = 0x007E;
+
+/// ChangeDisplaySettings' results.
+pub const DISP_CHANGE_SUCCESSFUL: u32 = 0;
+pub const DISP_CHANGE_BADMODE: u32 = -2i32 as u32;
+
+/// The display's mode: width, height and bits a pixel. While DirectDraw
+/// has set a mode it is that one; else the desktop's, which
+/// ChangeDisplaySettings may have changed (`set_display_mode`). A mode
+/// Glide set on a Banshee or Voodoo3 isn't, as Windows doesn't know of
+/// it.
+pub fn display_mode(cpu: &Cpu) -> (u32, u32, u32) {
+    crate::win32::ddraw::display::screen_mode(cpu).unwrap_or_else(|| {
+        let d = screen::desktop(cpu);
+        (d.width, d.height, d.bpp)
+    })
 }
 
-/// GetSystemMetrics' value of `index`.
-pub fn metric(index: u32) -> i32 {
-    let (w, h) = screen_size();
+/// The screen's size, the display mode's (`display_mode`): what
+/// GetSystemMetrics(SM_CXSCREEN) and SM_CYSCREEN give, the desktop
+/// window's and the monitor's size, and where the cursor can go.
+pub fn screen_size(cpu: &Cpu) -> (i32, i32) {
+    let (w, h, _) = display_mode(cpu);
+    (w as i32, h as i32)
+}
+
+/// The modes EnumDisplaySettings lists and ChangeDisplaySettings sets,
+/// as width, height and bits a pixel, by size and then depth.
+pub fn display_modes() -> Vec<(u32, u32, u32)> {
+    screen::DESKTOP_SIZES
+        .iter()
+        .flat_map(|&(w, h)| [8, 16, 32].map(|bpp| (w, h, bpp)))
+        .collect()
+}
+
+/// Whether ChangeDisplaySettings sets the mode `w` x `h` x `bpp`: one of
+/// `display_modes`, or one of their sizes at the desktop's own depth.
+fn settable(cpu: &Cpu, (w, h, bpp): (u32, u32, u32)) -> bool {
+    screen::DESKTOP_SIZES.contains(&(w, h))
+        && ([8, 16, 32].contains(&bpp) || bpp == screen::desktop(cpu).bpp)
+}
+
+/// Set the desktop's display mode, as ChangeDisplaySettings does, for
+/// the running process: `mode` is width, height and bits a pixel, one
+/// of `display_modes` or the desktop's own depth, and None gives the
+/// desktop's own mode back. DISP_CHANGE_SUCCESSFUL, or
+/// DISP_CHANGE_BADMODE for a mode there isn't, and nothing changes.
+///
+/// The desktop takes the size: the adapter is set to it at once if the
+/// desktop is on the screen and DirectDraw doesn't have the display,
+/// and everything is painted again; else when the desktop next shows.
+/// Unless DirectDraw has the display, its surfaces in video memory are
+/// lost. GDI goes on drawing at the desktop's own depth, whatever depth
+/// was asked for. The screen's size and the metrics follow, and the
+/// windows are told (`display_changed`). The process's end gives the
+/// desktop's own mode back (`process_ended`).
+pub fn set_display_mode(cpu: &mut Cpu, mode: Option<(u32, u32, u32)>) -> u32 {
+    if mode.is_some_and(|m| !settable(cpu, m)) {
+        return DISP_CHANGE_BADMODE;
+    }
+    let old = display_mode(cpu);
+    let before = screen::desktop(cpu);
+    let pid = super::current_pid(cpu);
+    screen::set_desktop_size(cpu, mode.map(|(w, h, _)| (w, h)), pid);
+    display_changed(cpu, old);
+    if screen::desktop(cpu) != before {
+        crate::win32::ddraw::display::desktop_changed(cpu);
+        if user(cpu).desktop && !crate::win32::ddraw::owns_display(cpu) {
+            super::paint::restore_desktop(cpu);
+        }
+    }
+    DISP_CHANGE_SUCCESSFUL
+}
+
+/// The display's mode may have changed from `old` (`display_mode`). If
+/// it has, the desktop window takes the new size, the cursor stays on
+/// the screen (`input::screen_changed`), and each top-level window gets
+/// WM_DISPLAYCHANGE with the bits a pixel and the size. Windows sends
+/// it with SendNotifyMessage, which to the broadcast address posts it.
+pub fn display_changed(cpu: &mut Cpu, old: (u32, u32, u32)) {
+    let mode = display_mode(cpu);
+    if mode == old {
+        return;
+    }
+    let (w, h) = (mode.0 as i32, mode.1 as i32);
+    if let Some(d) = user(cpu).window_mut(super::DESKTOP) {
+        d.rect = super::Rect::new(0, 0, w, h);
+        d.client = d.rect;
+    }
+    super::input::screen_changed(cpu);
+    let lparam = super::make_long(w, h);
+    let broadcast = super::message::HWND_BROADCAST;
+    super::message::post_message(cpu, &[broadcast, WM_DISPLAYCHANGE, mode.2, lparam]);
+}
+
+/// The process `pid` ended: a desktop mode it set is given back.
+pub fn process_ended(cpu: &mut Cpu, pid: u32) {
+    if screen::desktop_size_owner(cpu) == Some(pid) {
+        set_display_mode(cpu, None);
+    }
+}
+
+/// GetSystemMetrics' value of `index` on the screen as it is now.
+pub fn screen_metric(cpu: &Cpu, index: u32) -> i32 {
+    let (w, h) = screen_size(cpu);
     match index {
-        0 => w,
+        0 | 16 => w,
         1 => h,
+        17 => h - 19,
+        59 => w + 12,
+        60 => h + 12,
+        61 => w + 8,
+        62 => h + 8,
+        _ => metric(index),
+    }
+}
+
+/// GetSystemMetrics' value of `index`, of the metrics that don't depend
+/// on the screen's size: SM_CXSCREEN, SM_CYSCREEN and the full-screen,
+/// maximized and largest window sizes come from `screen_metric`.
+pub fn metric(index: u32) -> i32 {
+    match index {
         2 | 3 => 16,
         4 => 19,
         5 | 6 => 1,
@@ -23,8 +146,6 @@ pub fn metric(index: u32) -> i32 {
         9 | 10 => 16,
         11..=14 => 32,
         15 => 19,
-        16 => w,
-        17 => h - 19,
         19 => 1,
         20 | 21 => 16,
         28 => 112,
@@ -46,10 +167,6 @@ pub fn metric(index: u32) -> i32 {
         56 => 8,
         57 => 160,
         58 => 24,
-        59 => w + 12,
-        60 => h + 12,
-        61 => w + 8,
-        62 => h + 8,
         68 | 69 => 2,
         71 | 72 => 13,
         _ => 0,
@@ -60,11 +177,11 @@ pub fn metric(index: u32) -> i32 {
 /// Windows 98 adds the virtual screen's and the monitors' (monitor.rs).
 pub fn get_system_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if crate::win32::version::is_98(cpu)
-        && let Some(value) = super::monitor::metric(args[0])
+        && let Some(value) = super::monitor::metric(cpu, args[0])
     {
         return Some(value as u32);
     }
-    Some(metric(args[0]) as u32)
+    Some(screen_metric(cpu, args[0]) as u32)
 }
 
 /// The standard scheme's colors, by COLOR_ index.
@@ -208,7 +325,7 @@ fn set_param(cpu: &mut Cpu, action: u32, value: u32) {
 /// SystemParametersInfoA(action, ui, pv, flags).
 pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (action, ui, pv) = (args[0], args[1], args[2]);
-    let (w, h) = screen_size();
+    let (w, h) = screen_size(cpu);
     let result = match action {
         // The GET actions whose value a SET action keeps: SPI_GETBEEP,
         // SPI_GETKEYBOARDSPEED, SPI_GETSCREENSAVETIMEOUT,
@@ -372,9 +489,8 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(result)
 }
 
-/// The DEVMODEA of the desktop's mode.
-fn devmode(bpp: u32) -> Vec<u8> {
-    let (w, h) = screen_size();
+/// The DEVMODEA of the mode `w` x `h` x `bpp`.
+fn devmode((w, h, bpp): (u32, u32, u32)) -> Vec<u8> {
     let mut b = vec![0u8; 124];
     b[..7].copy_from_slice(b"DISPLAY");
     b[32..34].copy_from_slice(&0x0400u16.to_le_bytes());
@@ -382,46 +498,70 @@ fn devmode(bpp: u32) -> Vec<u8> {
     // DM_BITSPERPEL, DM_PELSWIDTH, DM_PELSHEIGHT, DM_DISPLAYFREQUENCY.
     b[40..44].copy_from_slice(&0x005C_0000u32.to_le_bytes());
     b[104..108].copy_from_slice(&bpp.to_le_bytes());
-    b[108..112].copy_from_slice(&(w as u32).to_le_bytes());
-    b[112..116].copy_from_slice(&(h as u32).to_le_bytes());
+    b[108..112].copy_from_slice(&w.to_le_bytes());
+    b[112..116].copy_from_slice(&h.to_le_bytes());
     b[120..124].copy_from_slice(&60u32.to_le_bytes());
     b
 }
 
-/// EnumDisplaySettingsA(device, mode, devmode): the desktop's mode, at
-/// the depths GDI draws.
+/// EnumDisplaySettingsA(device, mode, devmode): the display's mode now
+/// (ENUM_CURRENT_SETTINGS), the desktop's own (ENUM_REGISTRY_SETTINGS),
+/// or the `mode`th of `display_modes`.
 pub fn enum_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (mode, out) = (args[1], args[2]);
-    let bpp = match mode {
-        // ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS.
-        0xFFFF_FFFF | 0xFFFF_FFFE => crate::win32::screen::desktop(cpu).bpp,
-        0 => 8,
-        1 => 16,
-        2 => 32,
-        _ => return Some(FALSE),
+    let mode = match mode {
+        0xFFFF_FFFF => display_mode(cpu),
+        0xFFFF_FFFE => {
+            let (w, h) = screen::DESKTOP;
+            (w, h, screen::desktop(cpu).bpp)
+        }
+        i => match display_modes().get(i as usize) {
+            Some(&m) => m,
+            None => return Some(FALSE),
+        },
     };
     if out == 0 {
         return Some(FALSE);
     }
-    cpu.bus.guest_write_bytes(out, &devmode(bpp));
+    cpu.bus.guest_write_bytes(out, &devmode(mode));
     Some(TRUE)
 }
 
-/// ChangeDisplaySettingsA(devmode, flags): the desktop's size at any
-/// depth succeeds, as GDI draws all of them on its own mode.
+/// ChangeDisplaySettingsA(devmode, flags): set the mode the DEVMODEA
+/// gives (`set_display_mode`), the desktop's for what it leaves out;
+/// with no DEVMODEA the desktop's own mode again. CDS_TEST only says
+/// whether the mode is there.
 pub fn change_display_settings(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let at = args[0];
+    const CDS_TEST: u32 = 2;
+    let (at, flags) = (args[0], args[1]);
     if at == 0 {
-        return Some(0);
+        return Some(set_display_mode(cpu, None));
     }
     let fields = cpu.bus.guest_read_32(at + 40);
-    let (w, h) = screen_size();
-    let width = cpu.bus.guest_read_32(at + 108) as i32;
-    let height = cpu.bus.guest_read_32(at + 112) as i32;
-    // DM_PELSWIDTH and DM_PELSHEIGHT.
-    let size_ok =
-        (fields & 0x8_0000 == 0 || width == w) && (fields & 0x10_0000 == 0 || height == h);
-    Some(if size_ok { 0 } else { (-2i32) as u32 })
+    let d = screen::desktop(cpu);
+    let field = |cpu: &mut Cpu, bit: u32, offset: u32, own: u32| {
+        if fields & bit != 0 {
+            cpu.bus.guest_read_32(at + offset)
+        } else {
+            own
+        }
+    };
+    // DM_BITSPERPEL, DM_PELSWIDTH and DM_PELSHEIGHT.
+    let bpp = field(cpu, 0x4_0000, 104, d.bpp);
+    let width = field(cpu, 0x8_0000, 108, d.width);
+    let height = field(cpu, 0x10_0000, 112, d.height);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    let mode = (width, height, bpp);
+    if flags & CDS_TEST != 0 {
+        return Some(if settable(cpu, mode) {
+            DISP_CHANGE_SUCCESSFUL
+        } else {
+            DISP_CHANGE_BADMODE
+        });
+    }
+    Some(set_display_mode(cpu, Some(mode)))
 }
 
 /// GetProcessWindowStation: the one window station.
