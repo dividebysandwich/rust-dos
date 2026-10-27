@@ -43,6 +43,7 @@ mod ntdll;
 pub(crate) mod object;
 mod ole32;
 mod oleaut32;
+mod opengl32;
 mod advpack;
 mod registry;
 mod screen;
@@ -53,6 +54,7 @@ pub(crate) mod stubs;
 pub(crate) mod system;
 mod task;
 pub(crate) mod thread;
+pub mod trace;
 pub mod user32;
 pub mod version;
 mod verdll;
@@ -300,6 +302,9 @@ pub struct Win32 {
     /// The built-in DLLs the system directory shows as files
     /// (dll_files.rs), as last shown.
     dll_files: Option<dll_files::Shown>,
+    /// The log's trace of the calls of the built-in functions (the
+    /// `win32_trace` setting), which outlives the programs.
+    pub(crate) trace: trace::Trace,
     /// The program DOS loaded, which starts at `START`, and whether it is
     /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
     pending: Option<String>,
@@ -368,6 +373,8 @@ pub struct Win32 {
     dinput: dinput::State,
     winmm: winmm::State,
     glide: glide::State,
+    /// OpenGL's contexts and pixel formats (opengl32/).
+    opengl32: opengl32::State,
     guids: u32,
     /// DirectMusic's objects (dmusic/).
     dmusic: dmusic::State,
@@ -393,6 +400,7 @@ impl Win32 {
             version: self.version,
             depth: self.depth,
             dll_files: self.dll_files.take(),
+            trace: trace::Trace::new(self.trace.level()),
             ..Win32::default()
         };
     }
@@ -916,6 +924,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         return;
     }
     let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
+    // The last program's loops get their summaries.
+    trace::flush(cpu);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
     if let Some(pool) = cpu.bus.win32.pool.take() {
         pool.release(&mut cpu.bus);
@@ -982,6 +992,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    opengl32::process_ended(cpu, process.id);
     dmusic::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
@@ -1155,6 +1166,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.win32.glide = glide::State::default();
+        cpu.bus.win32.opengl32 = opengl32::State::default();
         cpu.bus.win32.shell = shell32::State::default();
         cpu.bus.win32.dde = user32::ddeml::State::default();
         cpu.bus.set_a20(a20);
@@ -1263,6 +1275,7 @@ crate::state_fields!(Win32 {
     dinput,
     winmm,
     glide,
+    opengl32,
     guids,
     os,
     dmusic,
@@ -1275,4 +1288,4 @@ crate::state_fields!(Win32 {
     desktop_depth,
     atoms,
     desktop_size,
-} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });
+} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files, trace });

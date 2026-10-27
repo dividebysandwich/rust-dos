@@ -414,19 +414,20 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
   keyboard, mouse and joystick through DirectInput; DMUSIC, DMIME, DMLOADER,
   DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
-  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3. A
-  program that calls a function they don't have ends with a message naming
-  it, and one that needs a DLL that is neither among them nor beside it is
-  refused. The registry is kept in `C:\REGISTRY.REG`, which is made the
-  first time a program uses it, so a host folder mounted as C: gets that
-  file. The built-in DLLs show as read-only files in `C:\WINDOWS\SYSTEM`, to
-  DOS programs too, and `GLIDE2X.DLL` is among them only with a 3dfx card. A
-  Windows 3.1 program (an NE .EXE) runs too, as Windows 95 runs it: its
-  KERNEL, USER, GDI and other 16-bit modules are written into the emulator
-  as well and go on to the 32-bit ones, and its own DLLs, such as Visual
-  Basic's runtimes, load from beside it. Off, such a program runs its DOS
-  stub, which says it needs Windows. The plan is in
-  [docs/native-windows.md](docs/native-windows.md).
+  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3, and
+  OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's pixel
+  formats, SwapBuffers and gamma ramp. A program that calls a function they
+  don't have ends with a message naming it, and one that needs a DLL that is
+  neither among them nor beside it is refused. The registry is kept in
+  `C:\REGISTRY.REG`, which is made the first time a program uses it, so a
+  host folder mounted as C: gets that file. The built-in DLLs show as
+  read-only files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and
+  `GLIDE2X.DLL` is among them only with a 3dfx card. A Windows 3.1 program
+  (an NE .EXE) runs too, as Windows 95 runs it: its KERNEL, USER, GDI and
+  other 16-bit modules are written into the emulator as well and go on to
+  the 32-bit ones, and its own DLLs, such as Visual Basic's runtimes, load
+  from beside it. Off, such a program runs its DOS stub, which says it needs
+  Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
   `lib/wine/i386-windows` folder. A DLL a program needs that is neither
@@ -454,6 +455,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   TrackMouseEvent and GetWindowInfo, which earlier releases of rust-dos
   had under Windows 95 too, so a program that imports them needs `98`.
   A change takes effect for the next program that starts when none
+  runs.
+* `win32_trace` picks which calls of the built-in Windows' functions
+  get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
+  for the 16-bit modules), with the caller's address, the arguments and
+  the result. `collapsed` (the default) writes the first 3 calls from
+  each place in a program in a second of emulated time and counts the
+  rest, then writes a line with the count, such as
+  `[W32] 004D72B6: WINMM.timeGetTime x49812 more in 1.0 s`; a loop that
+  goes on gets one line and a count a second. A game that polls tens of
+  thousands of times a second thus leaves room in the log for what
+  comes later. `all` writes every call, and `off` none. The debug
+  server's `POST /api/win32 {"trace":"all"}` changes it while a program
   runs.
 * `win32_depth` is the depth of the built-in Windows' desktop: `auto`
   (the default) is the display adapter's own, 32 bits a pixel (24 on an

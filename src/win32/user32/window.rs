@@ -991,6 +991,7 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
 /// activation leave it.
 pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     super::message::kill_window_timers(cpu, hwnd);
+    crate::win32::opengl32::wgl::window_destroyed(cpu, hwnd);
     let state = user(cpu);
     let Some(slot) = super::slot(hwnd) else {
         return;

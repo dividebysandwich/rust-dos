@@ -3766,3 +3766,58 @@ fn global_atoms_count_their_adds_and_deletes() {
     let (code, text) = run("global_atoms", exe);
     assert_eq!(code, 0x3F, "{:?}", text);
 }
+
+/// Calls GetTickCount `n` times in a loop, then ends.
+fn poll_loop(n: i32) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.dll", &["GetTickCount", "ExitProcess"])];
+    program(BASE, false, imports, &[0; 16], |a, l| {
+        let mut top = a.create_label();
+        a.mov(esi, n)?;
+        a.set_label(&mut top)?;
+        a.call(l.import(0))?;
+        a.dec(esi)?;
+        a.jnz(top)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// The log's lines for the program's calls of GetTickCount, with the
+/// trace at `level`.
+fn poll_trace(test: &str, level: rust_dos::config::Win32Trace) -> Vec<String> {
+    let mut cpu = machine(test, poll_loop(10_000));
+    let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        if line.contains("KERNEL32.GetTickCount") {
+            log.borrow_mut().push(line.to_string());
+        }
+    }));
+    rust_dos::win32::trace::set_level(&mut cpu, level);
+    assert!(run_to_exit(&mut cpu, 2000));
+    lines.take()
+}
+
+#[test]
+fn a_polling_loop_gets_its_first_calls_and_a_count_in_the_log() {
+    let lines = poll_trace("trace_collapsed", rust_dos::config::Win32Trace::Collapsed);
+    // A few lines in full, and the count of the rest, which the program's
+    // end writes if its loop was shorter than a second.
+    let (summaries, calls): (Vec<&String>, Vec<&String>) =
+        lines.iter().partition(|l| l.contains(" more in "));
+    assert!(calls.len() <= 12, "{lines:#?}");
+    assert!(calls.iter().all(|l| l.contains("GetTickCount() = ")), "{calls:?}");
+    let counted: usize = summaries
+        .iter()
+        .map(|l| {
+            let count = l.split(" x").nth(1).unwrap();
+            count.split(' ').next().unwrap().parse::<usize>().unwrap()
+        })
+        .sum();
+    assert_eq!(calls.len() + counted, 10_000, "{lines:#?}");
+
+    let all = poll_trace("trace_all", rust_dos::config::Win32Trace::All);
+    assert_eq!(all.len(), 10_000);
+    assert!(poll_trace("trace_off", rust_dos::config::Win32Trace::Off).is_empty());
+}
