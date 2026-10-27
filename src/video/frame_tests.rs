@@ -59,8 +59,13 @@ fn overlay_coverage_survives_clones_and_clears_when_base_rows_are_restored() {
     let mut clone_from = Frame::new(1, 1);
     clone_from.clone_from(&frame);
     assert_eq!(clone_from.overlay_mask().unwrap(), &[0, 1, 0, 0]);
+    clone_from.mark_overlay(1, 0);
+    clone_from.clone_from(&Frame::new(2, 2));
+    assert_eq!(clone_from.overlay_mask().unwrap(), &[0, 0, 0, 0]);
     copy.copy_rows_from(&Frame::new(2, 2), 0..1);
     assert_eq!(copy.overlay_mask().unwrap(), &[0, 0, 0, 0]);
+    assert!(copy.resize(1, 2));
+    assert_eq!(copy.overlay_mask().unwrap(), &[0, 0]);
 }
 
 #[test]

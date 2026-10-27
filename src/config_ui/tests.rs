@@ -1792,7 +1792,9 @@ fn a_games_manuals_open_over_the_picture() {
     keys(&mut ui, &mut host, &[Up, Enter]);
     assert!(ui.manual_page_shown());
     let mut frame = Frame::new(640, 400);
+    frame.track_overlays(true);
     ui.draw(&mut frame);
+    assert_eq!(frame.overlay_mask().unwrap()[200 * 640 + 320], 1);
     let pixel = |frame: &Frame, x: usize, y: usize| frame.rgba[(y * 640 + x) * 4..][..3].to_vec();
     assert_eq!(pixel(&frame, 320, 200), [200, 0, 0], "the page in the middle");
     assert_eq!(pixel(&frame, 20, 200), [0x18, 0x1C, 0x24], "around it");

@@ -307,6 +307,13 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
     display.present_rows(&composed, None, None, 2..3, Some(&base)).unwrap();
     let Output::Gl(gl) = &display.out else { unreachable!() };
     assert_eq!(gl.xbrz_frame.overlay.rgba[(2 * composed.width as usize + 2) * 4 + 3], 255);
+    composed.track_overlays(false);
+    composed.track_overlays(true);
+    display.present_rows(&composed, None, None, 2..3, Some(&base)).unwrap();
+    let Output::Gl(gl) = &display.out else { unreachable!() };
+    assert_eq!(gl.xbrz_frame.overlay.rgba[(2 * composed.width as usize + 2) * 4 + 3], 0);
+    composed.mark_overlay(2, 2);
+    display.present_rows(&composed, None, None, 2..3, Some(&base)).unwrap();
     let source = match &display.out {
         Output::Gl(gl) => gl.xbrz_frame.source.clone(),
         _ => unreachable!(),

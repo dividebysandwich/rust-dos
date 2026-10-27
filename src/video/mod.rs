@@ -199,6 +199,8 @@ impl Clone for Frame {
         (self.width, self.height, self.doubled) = (source.width, source.height, source.doubled);
         self.rgba.clone_from(&source.rgba);
         if let Some(mask) = &mut self.overlay {
+            // Keep the tracking buffer for the next composition, but clear
+            // its coverage because these pixels are the restored base.
             mask.resize(source.width as usize * source.height as usize, 0);
             mask.fill(0);
         } else {
@@ -304,7 +306,9 @@ impl Frame {
         if (width, height) == (self.width, self.height) {
             return false;
         }
+        let track_overlays = self.overlay.is_some();
         *self = Self::new(width, height);
+        self.track_overlays(track_overlays);
         true
     }
 

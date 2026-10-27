@@ -337,6 +337,7 @@ impl ConfigUi {
                 pixel.copy_from_slice(&[0x18, 0x1C, 0x24, 255]);
             }
         }
+        frame.mark_overlay_rect(area.0, area.1, area.2, area.3);
 
         // The page's size and place in the frontend's pixels, from the
         // top left of the area.

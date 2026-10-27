@@ -142,6 +142,10 @@ test('WebGL handles overlay removal, shader fallback and context restoration', (
   renderer.render();
   assert.ok(calls.some(([name, uniform, value]) =>
     name === 'uniform1i' && uniform === 'u_overlay_enabled' && value === 0));
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { pixels: new Uint8Array(64), width: 4, height: 4 });
+  assert.ok(calls.some(call => call[0] === 'texImage2D' && call[4] === 4 && call[5] === 4));
+  assert.ok(calls.some(([name]) => name === 'texSubImage2D'));
 });
 
 test('showPicture uploads the current frame when switching shaders', () => {

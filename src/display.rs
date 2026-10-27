@@ -493,7 +493,9 @@ impl<'a> Display<'a> {
                 if !self.voodoo_shown {
                     if let Some(base) = base.filter(|_| gl.active() == Shader::Xbrz) {
                         if let Err(error) = gl.present_xbrz(frame, base, rows.clone(), display, layer, self.monochrome) {
-                            self.warning = Some(format!("xBRZ couldn't prepare this frame: {error}"));
+                            let warning = format!("xBRZ couldn't prepare this frame: {error}");
+                            eprintln!("[DISPLAY] {warning}");
+                            self.warning = Some(warning);
                             self.shader = Shader::None;
                             gl.select(Shader::None, self.filter)?;
                             gl.present(frame, rows, display, layer);
