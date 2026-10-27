@@ -40,11 +40,15 @@ impl Bus {
     }
 
     pub fn guest_read_16(&mut self, lin: u32) -> u16 {
-        u16::from_le_bytes([self.guest_read_8(lin), self.guest_read_8(lin.wrapping_add(1))])
+        let mut bytes = [0; 2];
+        self.guest_read_bytes(lin, &mut bytes);
+        u16::from_le_bytes(bytes)
     }
 
     pub fn guest_read_32(&mut self, lin: u32) -> u32 {
-        self.guest_read_16(lin) as u32 | (self.guest_read_16(lin.wrapping_add(2)) as u32) << 16
+        let mut bytes = [0; 4];
+        self.guest_read_bytes(lin, &mut bytes);
+        u32::from_le_bytes(bytes)
     }
 
     pub fn guest_write_8(&mut self, lin: u32, value: u8) {
@@ -54,14 +58,11 @@ impl Bus {
     }
 
     pub fn guest_write_16(&mut self, lin: u32, value: u16) {
-        let [lo, hi] = value.to_le_bytes();
-        self.guest_write_8(lin, lo);
-        self.guest_write_8(lin.wrapping_add(1), hi);
+        self.guest_write_bytes(lin, &value.to_le_bytes());
     }
 
     pub fn guest_write_32(&mut self, lin: u32, value: u32) {
-        self.guest_write_16(lin, value as u16);
-        self.guest_write_16(lin.wrapping_add(2), (value >> 16) as u16);
+        self.guest_write_bytes(lin, &value.to_le_bytes());
     }
 
     /// The parts of `len` bytes at `lin` that lie in one page each: their
@@ -85,8 +86,13 @@ impl Bus {
             let Some(addr) = self.guest_physical(lin.wrapping_add(offset as u32), false) else {
                 return;
             };
-            for (i, byte) in data[offset..offset + run].iter_mut().enumerate() {
-                *byte = self.read_8(addr + i);
+            let to = &mut data[offset..offset + run];
+            if self.is_plain_ram(addr, run) {
+                to.copy_from_slice(&self.ram[addr..addr + run]);
+            } else {
+                for (i, byte) in to.iter_mut().enumerate() {
+                    *byte = self.read_8(addr + i);
+                }
             }
         }
     }

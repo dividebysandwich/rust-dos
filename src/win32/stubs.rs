@@ -322,9 +322,21 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
     let esp = cpu.esp();
-    let args: Vec<u32> = (0..api.args as u32)
-        .map(|i| cpu.bus.guest_read_32(esp.wrapping_add(4 + 4 * i)))
-        .collect();
+    // The arguments, in an array on the stack unless there are more than
+    // 16: this runs for every call the program makes.
+    let mut few = [0u32; 16];
+    let mut many = Vec::new();
+    let args: &mut [u32] = match few.get_mut(..api.args as usize) {
+        Some(args) => args,
+        None => {
+            many.resize(api.args as usize, 0);
+            &mut many
+        }
+    };
+    for (i, arg) in args.iter_mut().enumerate() {
+        *arg = cpu.bus.guest_read_32(esp.wrapping_add(4 + 4 * i as u32));
+    }
+    let args = &*args;
     if cpu.bus.guest_faulted() {
         return;
     }
@@ -332,7 +344,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     // as a function the entry point returns to has no caller there.
     let caller = cpu.bus.logs().then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
-    let result = (api.handler)(cpu, &args);
+    let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
     if !cpu.bus.win32.sections.is_empty() {

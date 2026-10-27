@@ -161,8 +161,16 @@ impl Bus {
 
     pub(crate) fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
         let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
-        // A write behind a swap the frame rate cap holds back (the rest of
-        // the code the program ran before it was held) waits for the swap.
+        self.wait_for_deferred_swap();
+        let now = self.voodoo_now();
+        let Some(v) = &mut self.voodoo else { return };
+        let effect = v.write(offset, value, mask, now);
+        self.voodoo_effect(effect);
+    }
+
+    /// A write behind a swap the frame rate cap holds back (the rest of
+    /// the code the program ran before it was held) waits for the swap.
+    fn wait_for_deferred_swap(&mut self) {
         if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
             self.clock.stall_to(due);
             let now = self.voodoo_now();
@@ -170,10 +178,19 @@ impl Bus {
                 v.service(now);
             }
         }
-        let now = self.voodoo_now();
-        let Some(v) = &mut self.voodoo else { return };
-        let effect = v.write(offset, value, mask, now);
-        self.voodoo_effect(effect);
+    }
+
+    /// Texture data put into a Banshee's or Voodoo3's memory from byte
+    /// `addr` on, as a burst of writes through TMU 0's texture space
+    /// would put it, in one copy: Glide's texture downloads.
+    pub(crate) fn banshee_texture_download(&mut self, addr: u32, data: &[u8]) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.wait_for_deferred_swap();
+        if let Some(v) = &mut self.voodoo
+            && v.banshee.is_some()
+        {
+            v.banshee_texture_download(addr, data);
+        }
     }
 
     /// Carry out what a write asked for: the CPU waiting for a full FIFO,
