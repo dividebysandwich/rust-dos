@@ -755,10 +755,20 @@ enum Slow {
     },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
-    /// A store hit the rest of the block: it leaves after the instruction,
-    /// at `next`, with the flags in EBP (`dirty`) or a recorded
-    /// operation's (`lazy`), through `join`.
-    Smc { at: DynamicLabel, next: u32, dirty: bool, lazy: bool, join: DynamicLabel },
+    /// A store of instruction `ix` hit the rest of the block: it goes on at
+    /// `back` where `jit_smc_check` finds the bytes still as translated
+    /// but for the watched ones, else it leaves after the instruction, at
+    /// `next`, with the flags in EBP (`dirty`) or a recorded operation's
+    /// (`lazy`), through `join`.
+    Smc {
+        at: DynamicLabel,
+        back: DynamicLabel,
+        ix: usize,
+        next: u32,
+        dirty: bool,
+        lazy: bool,
+        join: DynamicLabel,
+    },
     /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
     /// TLB: if the link is made, `jit_fetch` looks the page up and the
     /// guard checks again from `back`, else the link's `stub`. RDX is the
@@ -1099,13 +1109,14 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     .any(|u| matches!(u, Uop::Store { .. } | Uop::VStore { .. }))
                 {
                     // A store hit the rest of the block: leave after this
-                    // instruction.
-                    let at = g.ops.new_dynamic_label();
+                    // instruction, unless it changed only watched bytes.
+                    let (at, back) = (g.ops.new_dynamic_label(), g.ops.new_dynamic_label());
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
                     g.fail();
                     let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
-                    dynasm!(g.ops ; .arch x64 ; cmp BYTE [r12 + CTX_SMC], 0 ; jne =>at);
-                    g.slow.push(Slow::Smc { at, next, dirty: g.dirty, lazy: g.lazy_end[ix], join });
+                    dynasm!(g.ops ; .arch x64 ; cmp BYTE [r12 + CTX_SMC], 0 ; jne =>at ; =>back);
+                    let (dirty, lazy) = (g.dirty, g.lazy_end[ix]);
+                    g.slow.push(Slow::Smc { at, back, ix, next, dirty, lazy, join });
                 }
             }
         }
@@ -1376,6 +1387,9 @@ impl Gen<'_> {
                 ; jmp QWORD [r12 + CTX_EXIT]
             );
         }
+        // `jit_smc_check` of the block and instruction ECX, with the note
+        // of the store cleared, which the stores' slow paths share.
+        let mut smc_check = None;
         for slow in std::mem::take(&mut self.slow) {
             match slow {
                 Slow::MemRef { at, dev, back, t, desc, fail, addr, thunk } => {
@@ -1459,11 +1473,15 @@ impl Gen<'_> {
                         ; jmp =>back
                     );
                 }
-                Slow::Smc { at, next, dirty, lazy, join } => {
+                Slow::Smc { at, back, ix, next, dirty, lazy, join } => {
+                    let check = *smc_check.get_or_insert_with(|| self.ops.new_dynamic_label());
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
-                        ; mov BYTE [r12 + CTX_SMC], 0
+                        ; mov ecx, ix as i32
+                        ; call =>check
+                        ; test eax, eax
+                        ; jz =>back
                         ; mov DWORD [rbx + EIP], next as i32
                         ; mov eax, (EXIT_SMC | if dirty { EXIT_FLAGS } else { 0 }) as i32
                     );
@@ -1600,6 +1618,26 @@ impl Gen<'_> {
                     );
                 }
             }
+        }
+        if let Some(check) = smc_check {
+            // (The return address and the padding keep the call aligned as
+            // the instruction's own calls are.)
+            dynasm!(self.ops
+                ; .arch x64
+                ; =>check
+                ; mov BYTE [r12 + CTX_SMC], 0
+                ; sub rsp, 8
+            );
+            self.save_for_call();
+            dynasm!(self.ops
+                ; .arch x64
+                ; mov rdi, rbx
+                ; mov rsi, r12
+                ; mov rdx, QWORD data_ptr
+                ; call QWORD [r12 + CTX_SMC_CHECK]
+            );
+            self.restore_after_call();
+            dynasm!(self.ops ; .arch x64 ; add rsp, 8 ; ret);
         }
     }
 

@@ -164,6 +164,8 @@ pub struct JitCtx {
     pub dev: [usize; 2],
     /// `jit_fetch`.
     pub fetch: usize,
+    /// `jit_smc_check`.
+    pub smc_check: usize,
     /// `jit_lazy_flags`, and the operation it works the flags out from (see
     /// `flags::Plan::record`): its kind and size (`kind | size << 8`), and
     /// its operands. With the exit code a way out keeps there while it
@@ -255,6 +257,7 @@ pub const CTX_FPU: i32 = offset_of!(JitCtx, fpu) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_DEV: i32 = offset_of!(JitCtx, dev) as i32;
 pub const CTX_FETCH: i32 = offset_of!(JitCtx, fetch) as i32;
+pub const CTX_SMC_CHECK: i32 = offset_of!(JitCtx, smc_check) as i32;
 /// On x86-64, a memory operand handle with this bit set is the physical
 /// address (its low dword) of an operand within one page that isn't plain
 /// RAM (video memory, a frame buffer, a card's registers): loads and
@@ -340,6 +343,7 @@ impl JitCtx {
             ],
             dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
             fetch: jit_fetch as *const () as usize,
+            smc_check: jit_smc_check as *const () as usize,
             lazy_fn: jit_lazy_flags as *const () as usize,
             lazy: [0; 3],
             lazy_code: 0,
@@ -779,6 +783,20 @@ fn written(cpu: &Cpu, data: &mut BlockData, ix: usize) -> u32 {
         0
     } else {
         EXIT_SMC
+    }
+}
+
+jit_fn! {
+    /// A store of instruction `ix` hit the block's later bytes
+    /// (`smc_lo..smc_hi`): 0 if they are still as translated but for the
+    /// watched ones, which their instructions read or check as they run
+    /// (a program that pokes the immediates of its loop just ahead of
+    /// them, as texture mappers do), so the block goes on; else EXIT_SMC.
+    fn jit_smc_check(cpu: *mut Cpu, ctx: *mut JitCtx, data: *mut BlockData, ix: u32) -> u32 {
+        // SAFETY: as in `jit_fallback`.
+        let (cpu, ctx, data) = unsafe { (&*cpu, &mut *ctx, &mut *data) };
+        ctx.calls.smc_check += 1;
+        written(cpu, data, ix as usize)
     }
 }
 

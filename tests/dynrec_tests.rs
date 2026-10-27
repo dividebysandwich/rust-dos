@@ -1834,13 +1834,20 @@ fn changing_a_linked_block_unlinks_it() {
 }
 
 /// Code that writes CL into every byte of the immediates of `add ebx,
-/// imm32` and `add edx, imm32` at `at`: new code each time CL changes
-/// (eight bytes of it), not a poke.
+/// imm32` and `add edx, imm32` at `at`, and makes the second a SUB where
+/// CL is odd: new code each time CL changes (five bytes in a row of it),
+/// not a poke.
 fn rewrite_immediates(a: &mut CodeAssembler, at: u32) -> Result<(), IcedError> {
     a.movzx(eax, cl)?;
     a.imul_3(eax, eax, 0x0101_0101)?;
     a.mov(dword_ptr(at as u64 + 2), eax)?;
-    a.mov(dword_ptr(at as u64 + 8), eax)
+    a.mov(dword_ptr(at as u64 + 8), eax)?;
+    // ModRM C2h (ADD EDX) or EAh (SUB EDX).
+    a.mov(eax, ecx)?;
+    a.and(eax, 1)?;
+    a.imul_3(eax, eax, 0x28)?;
+    a.add(eax, 0xC2)?;
+    a.mov(byte_ptr(at as u64 + 7), al)
 }
 
 /// What EBX sums to after `add ebx, imm32` with CL in every byte of the
@@ -2754,6 +2761,141 @@ fn an_immediate_poked_before_each_loop_is_read_where_it_is() {
     if AVAILABLE {
         assert!(stats.watched < 20, "left at the poked immediates: {:?}", stats);
         assert!(stats.blocks < 100, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
+fn immediates_poked_into_one_block_before_each_call_are_read_where_they_are() {
+    // SkyNET's span setup: the steps poked into the immediates of three
+    // ADDs of one block before each call of it, twelve bytes in three
+    // places. Those are pokes too: the block is translated once they are
+    // watched, and not again.
+    let f = CODE + 0x1000;
+    let top = CODE + 0x40;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(f, &asm32(f, |a| {
+            a.db(&[0x81, 0xC5, 0, 0, 0, 0])?; // add ebp, imm32
+            a.db(&[0x81, 0xC7, 0, 0, 0, 0])?; // add edi, imm32
+            a.db(&[0x81, 0xC6, 0, 0, 0, 0])?; // add esi, imm32
+            a.ret()
+        }));
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebp, ebp)?;
+            a.xor(edi, edi)?;
+            a.xor(esi, esi)?;
+            a.mov(ebx, 300u32)?;
+            a.jmp(top as u64)
+        }));
+        rig.load(top, &asm32(top, |a| {
+            a.imul_3(eax, ebx, 0x0101_0101)?;
+            a.mov(dword_ptr(f + 2), eax)?;
+            a.mov(dword_ptr(f + 8), ebx)?;
+            a.not(eax)?;
+            a.mov(dword_ptr(f + 14), eax)?;
+            a.call(f as u64)?;
+            a.dec(ebx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        }));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let steps = (1..=300u32).map(|n| n.wrapping_mul(0x0101_0101));
+    let sum = steps.clone().fold(0u32, |s, v| s.wrapping_add(v));
+    let nots = steps.fold(0u32, |s, v| s.wrapping_add(!v));
+    assert_eq!((b.cpu.ebp(), b.cpu.edi(), b.cpu.esi()), (sum, (1..=300).sum(), nots));
+    if AVAILABLE {
+        assert!(stats.stale < 10, "{:?}", stats);
+        assert!(stats.watched < 10, "left at the poked immediates: {:?}", stats);
+    }
+}
+
+/// A loop at `top`, one block, that works out a value into ECX
+/// (`value`), stores it twice into the dword of its own later
+/// instructions (`body`) that holds `marker` as assembled (the second
+/// store changing nothing), and runs them, EBX times.
+fn self_poking_loop(
+    top: u32,
+    marker: u32,
+    value: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy,
+    body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError> + Copy,
+) -> Vec<u8> {
+    let code = |poke: u32| {
+        asm32(top, |a| {
+            value(a)?;
+            a.mov(dword_ptr(poke), ecx)?; // 89 0D disp32
+            a.mov(dword_ptr(poke), ecx)?;
+            body(a)?;
+            a.dec(ebx)?;
+            a.jnz(top as u64)?;
+            a.hlt()
+        })
+    };
+    let first = code(top);
+    let at = first.windows(4).rposition(|w| w == marker.to_le_bytes()).expect("the marker");
+    code(top + at as u32)
+}
+
+#[test]
+fn an_immediate_a_block_pokes_just_ahead_of_itself_is_read_where_it_is() {
+    // SkyNET's texture mappers: each span's step stored into the
+    // immediate of an ADD after the store, in the same block, which then
+    // runs. Once those bytes are watched, the store no longer stops the
+    // block to have it translated again: it goes on and reads them.
+    let top = CODE + 0x40;
+    let data = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(ebp, ebp)?;
+            a.mov(dword_ptr(data), 0)?;
+            a.mov(ebx, 300u32)?;
+            a.jmp(top as u64)
+        }));
+        let step = |a: &mut CodeAssembler| a.imul_3(ecx, ebx, 0x0101_0101);
+        let body = |a: &mut CodeAssembler| {
+            a.add(dword_ptr(data), ebp)?;
+            a.add(ebp, 0x1234_5678) // 81 C5 imm32
+        };
+        rig.load(top, &self_poking_loop(top, 0x1234_5678, step, body));
+    });
+    let stats = run_both(&mut a, &mut b);
+    let steps: Vec<u32> = (1..=300u32).rev().map(|n| n.wrapping_mul(0x0101_0101)).collect();
+    let (mut total, mut sum) = (0u32, 0u32);
+    for s in steps {
+        sum = sum.wrapping_add(total);
+        total = total.wrapping_add(s);
+    }
+    assert_eq!((b.cpu.ebp(), b.cpu.bus.read_32(data as usize)), (total, sum));
+    if AVAILABLE {
+        assert!(stats.smc < 10, "stopped at the stores: {:?}", stats);
+        assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
+    }
+}
+
+#[test]
+fn a_displacement_a_block_pokes_just_ahead_of_itself_is_run_as_it_is_now() {
+    // The same with the address of an ADD's operand: the block leaves
+    // before the ADD where its watched bytes changed, and the interpreter
+    // runs it, rather than being translated again for each new address.
+    let top = CODE + 0x40;
+    let table = CODE + 0x3000;
+    let (mut a, mut b) = twins(|rig| {
+        for i in 0..=200u32 {
+            rig.write32(table + 4 * i, i * 3 + 1);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            a.xor(edx, edx)?;
+            a.mov(ebx, 200u32)?;
+            a.jmp(top as u64)
+        }));
+        let entry = |a: &mut CodeAssembler| a.lea(ecx, dword_ptr(ebx * 4 + table));
+        let body = |a: &mut CodeAssembler| a.add(edx, dword_ptr(0x1234_5678u64)); // 03 15 disp32
+        rig.load(top, &self_poking_loop(top, 0x1234_5678, entry, body));
+    });
+    let stats = run_both(&mut a, &mut b);
+    assert_eq!(b.cpu.edx(), (1..=200u32).map(|i| i * 3 + 1).sum::<u32>());
+    if AVAILABLE {
+        assert!(stats.watched > 150, "{:?}", stats);
+        assert!(stats.blocks < 60, "translated again and again: {:?}", stats);
     }
 }
 

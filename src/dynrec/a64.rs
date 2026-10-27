@@ -382,10 +382,20 @@ enum Slow {
     /// with the flags in W28 there (`dirty`), and goes on at `end`.
     /// With `leave`, the block stops after it (`Uop::FpuGuard`).
     Bail { at: DynamicLabel, end: DynamicLabel, ix: usize, dirty: bool, leave: bool },
-    /// A store hit the rest of the block: it leaves after the instruction,
-    /// at `next`, with the flags in W28 (`dirty`) or a recorded
-    /// operation's (`lazy`), through `join`.
-    Smc { at: DynamicLabel, next: u32, dirty: bool, lazy: bool, join: DynamicLabel },
+    /// A store of instruction `ix` hit the rest of the block: it goes on at
+    /// `back` where `jit_smc_check` finds the bytes still as translated
+    /// but for the watched ones, else it leaves after the instruction, at
+    /// `next`, with the flags in W28 (`dirty`) or a recorded operation's
+    /// (`lazy`), through `join`.
+    Smc {
+        at: DynamicLabel,
+        back: DynamicLabel,
+        ix: usize,
+        next: u32,
+        dirty: bool,
+        lazy: bool,
+        join: DynamicLabel,
+    },
     /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
     /// TLB: if the link is made, `jit_fetch` looks the page up and the
     /// guard checks again from `back`, else the link's `stub`. X1 is the
@@ -659,13 +669,14 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                 }
                 if uops.iter().any(|u| matches!(u, Uop::Store { .. })) {
                     // A store hit the rest of the block: leave after this
-                    // instruction.
+                    // instruction, unless it changed only watched bytes.
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
                     g.fail();
                     let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
-                    let at = g.ops.new_dynamic_label();
-                    dynasm!(g.ops ; .arch aarch64 ; cbnz w23, =>at);
-                    g.slow.push(Slow::Smc { at, next, dirty: g.dirty, lazy: g.lazy_end[ix], join });
+                    let (at, back) = (g.ops.new_dynamic_label(), g.ops.new_dynamic_label());
+                    dynasm!(g.ops ; .arch aarch64 ; cbnz w23, =>at ; =>back);
+                    let (dirty, lazy) = (g.dirty, g.lazy_end[ix]);
+                    g.slow.push(Slow::Smc { at, back, ix, next, dirty, lazy, join });
                 }
             }
         }
@@ -1447,8 +1458,23 @@ impl Gen<'_> {
                     self.mov32(0, code);
                     dynasm!(self.ops ; .arch aarch64 ; b =>fail);
                 }
-                Slow::Smc { at, next, dirty, lazy, join } => {
-                    dynasm!(self.ops ; .arch aarch64 ; =>at);
+                Slow::Smc { at, back, ix, next, dirty, lazy, join } => {
+                    let lit = self.data_lit;
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; =>at
+                        ; movz w23, 0
+                        ; mov x0, x19
+                        ; mov x1, x20
+                        ; ldr x2, =>lit
+                    );
+                    self.mov32(3, ix as u32);
+                    dynasm!(self.ops
+                        ; .arch aarch64
+                        ; ldr x16, [x20, CTX_SMC_CHECK as u32]
+                        ; blr x16
+                        ; cbz w0, =>back
+                    );
                     self.mov32(0, next);
                     self.field(Access::Str32, 0, layout::EIP);
                     self.mov32(0, EXIT_SMC | if dirty { EXIT_FLAGS } else { 0 });
