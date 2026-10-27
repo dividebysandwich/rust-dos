@@ -368,6 +368,8 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         }
     }
     let textured = loaded[0];
+    // A keyed texture on the upstream unit alone isn't drawn.
+    let keyed = keyed && textured;
     if textured {
         if loaded[1] {
             api::tex_combine(cpu, 1, local(), 0, local(), 0, false, false);
@@ -388,7 +390,7 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         && first
             .and_then(|id| state(cpu).surface(id))
             .is_some_and(|s| s.format.a == 0);
-    fbi_combine(cpu, d, textured, diffuse_alpha);
+    fbi_combine(cpu, d, textured, diffuse_alpha, keyed);
     if d.state(RS_SPECULARENABLE) != 0 {
         card.specular = if textured {
             Specular::Pass {
@@ -400,10 +402,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         };
     }
 
-    // The alpha test, and the keyed texels it leaves out.
-    if d.state(RS_ALPHATESTENABLE) != 0 {
-        api::alpha_test_function(cpu, compare(d.state(RS_ALPHAFUNC)));
-        api::alpha_test_reference_value(cpu, d.state(RS_ALPHAREF) & 0xFF);
+    // The alpha test, and the keyed texels it leaves out: the program's
+    // test, unless it passes every alpha (ALWAYS, GREATEREQUAL 0,
+    // LESSEQUAL 255). A test that passes alpha 0 and not every alpha
+    // can't also leave the keyed texels out, and stays the program's.
+    let (func, reference) = (d.state(RS_ALPHAFUNC), d.state(RS_ALPHAREF) & 0xFF);
+    let passes_all = func == 8 || (func == 7 && reference == 0) || (func == 4 && reference == 0xFF);
+    if d.state(RS_ALPHATESTENABLE) != 0 && !(keyed && passes_all) {
+        api::alpha_test_function(cpu, compare(func));
+        api::alpha_test_reference_value(cpu, reference);
     } else if keyed {
         api::alpha_test_function(cpu, compare(5));
         api::alpha_test_reference_value(cpu, 0);
@@ -503,7 +510,10 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
 /// The color and alpha combine units for stage 0's operations: the
 /// texture units' result is the texture, the iterated color the diffuse
 /// color. `diffuse_alpha` makes stage 0's alpha the diffuse one.
-fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
+/// `keyed`: the texture is a keyed copy, whose keyed texels have alpha 0
+/// and the others their alpha's top bit (1 for a texture without
+/// alpha), and the alpha test leaves out what comes to 0.
+fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, keyed: bool) {
     let it = api::COMBINE_LOCAL_ITERATED;
     let (other_tex, other_it) = (api::COMBINE_OTHER_TEXTURE, api::COMBINE_OTHER_ITERATED);
     let arg_is_texture = |arg: u32| textured && arg & 0xF == TA_TEXTURE;
@@ -601,6 +611,43 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool) {
     let factor = match factor {
         api::COMBINE_FACTOR_LOCAL => api::COMBINE_FACTOR_LOCAL_ALPHA,
         f => f,
+    };
+    // Direct3D leaves a keyed texel out whatever the stage does with
+    // alpha. When the alpha isn't the texture's scaled, it becomes the
+    // texture's scaled by a factor, which is 0 for a keyed texel and,
+    // as the texels the alpha test keeps have alpha 1, the stage's
+    // alpha for the others: 1 for ADD and BLENDTEXTUREALPHA of the
+    // texture, one less the local alpha for SUBTRACT, the selected
+    // alpha for SELECTARG (the diffuse alpha of MODULATE with a texture
+    // without alpha, DECALALPHA, ADD before Direct3D 7), and the local
+    // alpha for the rest. The card's alpha test compares the alpha unit's
+    // other alpha, the texture's then, so a test the program sets on the
+    // stage's alpha sees the texture's instead.
+    let scales_texture =
+        f == api::COMBINE_FUNCTION_SCALE_OTHER && other == api::COMBINE_OTHER_TEXTURE;
+    let (f, factor, local, other) = if keyed && !scales_texture {
+        use api::*;
+        let (factor, local) = match (f, factor, other) {
+            (COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL, _, COMBINE_OTHER_TEXTURE)
+            | (COMBINE_FUNCTION_BLEND, COMBINE_FACTOR_TEXTURE_ALPHA, COMBINE_OTHER_TEXTURE) => {
+                (COMBINE_FACTOR_ONE, local)
+            }
+            (COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL, _, COMBINE_OTHER_TEXTURE) => {
+                (COMBINE_FACTOR_ONE_MINUS_LOCAL_ALPHA, local)
+            }
+            (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_ONE, COMBINE_OTHER_CONSTANT) => {
+                (COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_LOCAL_CONSTANT)
+            }
+            _ => (COMBINE_FACTOR_LOCAL_ALPHA, local),
+        };
+        (
+            COMBINE_FUNCTION_SCALE_OTHER,
+            factor,
+            local,
+            COMBINE_OTHER_TEXTURE,
+        )
+    } else {
+        (f, factor, local, other)
     };
     api::alpha_combine(cpu, f, factor, local, other, false);
 }
