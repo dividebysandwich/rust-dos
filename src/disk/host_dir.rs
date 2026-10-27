@@ -1,6 +1,8 @@
 //! The cache of host folder entries and FindNext listings.
 
 use super::*;
+use std::collections::VecDeque;
+use std::time::Duration;
 use web_time::Instant;
 
 /// The entries of host folders as last read, with their DOS names. Each
@@ -29,7 +31,9 @@ use web_time::Instant;
 /// (`missing`) and count as missing without another read: programs poll
 /// for files that aren't there (Sub Culture opens a missing sound file
 /// fifty times a second), and a read of a large folder takes far longer
-/// than the call should.
+/// than the call should. A name the guest is about to create is looked
+/// for again (`creating`), so that a file another program made in the
+/// meantime is the one the guest gets.
 ///
 /// The listings of the last few searches are kept the same way, for
 /// FindNext (`DiskController::find_directory_entry`), whatever their size:
@@ -52,6 +56,11 @@ pub(super) struct HostDirCache {
     /// then stats only the files of the folder written to. A file another
     /// program resizes shows after the guest's next change in its folder.
     pub(super) usage: RefCell<HashMap<(PathBuf, u64, u64), DirUsage>>,
+    /// The time `TRUST` is measured by in tests: it stands still from the
+    /// first look and moves on only by `expire`, so how long a test takes
+    /// doesn't change what it sees.
+    #[cfg(test)]
+    clock: Cell<Option<Instant>>,
 }
 
 /// The clusters a host folder's own files take, and its folders.
@@ -91,8 +100,9 @@ pub(super) struct HostDir {
     /// When `entries` were read.
     read: Instant,
     entries: Rc<[(String, String)]>,
-    /// Names, uppercased, that were looked up and aren't in `entries`.
-    missing: Vec<String>,
+    /// Names, uppercased, that were looked up and aren't in `entries`, the
+    /// oldest first.
+    missing: VecDeque<String>,
 }
 
 impl HostDirCache {
@@ -102,7 +112,7 @@ impl HostDirCache {
     /// How long a folder's entries are used without checking its time, and
     /// how long a name a read didn't have counts as missing without
     /// reading the folder again.
-    const TRUST: std::time::Duration = std::time::Duration::from_secs(1);
+    const TRUST: Duration = Duration::from_secs(1);
     /// Folders kept at most; one is dropped to make room for another.
     const MAX_DIRS: usize = 64;
     /// Searches kept at most: a program walking a tree has one open per
@@ -110,6 +120,23 @@ impl HostDirCache {
     const MAX_SEARCHES: usize = 8;
     /// Missing names noted per folder at most; the oldest goes first.
     const MAX_MISSING: usize = 32;
+
+    /// Now, as `TRUST` is measured.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        {
+            let now = self.clock.get().unwrap_or_else(Instant::now);
+            self.clock.set(Some(now));
+            now
+        }
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    /// How long ago `then` was, as `TRUST` is measured.
+    fn since(&self, then: Instant) -> Duration {
+        self.now().saturating_duration_since(then)
+    }
 
     /// The guest created, wrote, deleted or renamed something on a host
     /// drive: every folder is read again.
@@ -195,7 +222,7 @@ impl HostDirCache {
         match modified {
             Some(modified) => {
                 if let Some(kept) = dirs.get_mut(dir) {
-                    let now = Instant::now();
+                    let now = self.now();
                     if kept.entries != entries {
                         kept.missing.clear();
                     }
@@ -218,7 +245,7 @@ impl HostDirCache {
     pub(super) fn known_missing(&self, dir: &Path, upper: &str) -> bool {
         self.dirs.borrow().get(dir).is_some_and(|kept| {
             kept.changes == self.changes.get()
-                && kept.read.elapsed() < Self::TRUST
+                && self.since(kept.read) < Self::TRUST
                 && kept.missing.iter().any(|name| name == upper)
         })
     }
@@ -230,9 +257,19 @@ impl HostDirCache {
             && !kept.missing.iter().any(|name| name == upper)
         {
             if kept.missing.len() >= Self::MAX_MISSING {
-                kept.missing.remove(0);
+                kept.missing.pop_front();
             }
-            kept.missing.push(upper.to_string());
+            kept.missing.push_back(upper.to_string());
+        }
+    }
+
+    /// The guest is about to create a file: the names noted missing are
+    /// looked for again, so that a file another program made since isn't
+    /// made a second time beside it (in another case, on a host that
+    /// tells cases apart).
+    pub(super) fn creating(&self) {
+        for kept in self.dirs.borrow_mut().values_mut() {
+            kept.missing.clear();
         }
     }
 
@@ -244,7 +281,7 @@ impl HostDirCache {
             .dirs
             .borrow()
             .get(dir)
-            .filter(|k| k.changes == changes && k.checked.elapsed() < Self::TRUST)
+            .filter(|k| k.changes == changes && self.since(k.checked) < Self::TRUST)
             .map(|k| k.entries.clone());
         if let Some(entries) = trusted {
             return (entries, true);
@@ -258,7 +295,7 @@ impl HostDirCache {
             .get_mut(dir)
             .filter(|k| k.modified == modified && k.changes == changes)
         {
-            kept.checked = Instant::now();
+            kept.checked = self.now();
             return (kept.entries.clone(), true);
         }
         drop(dirs);
@@ -272,31 +309,24 @@ impl HostDirCache {
         {
             dirs.remove(&dropped);
         }
-        let now = Instant::now();
+        let now = self.now();
         let kept = HostDir {
             modified,
             changes,
             checked: now,
             read: now,
             entries: entries.clone(),
-            missing: Vec::new(),
+            missing: VecDeque::new(),
         };
         dirs.insert(dir.to_path_buf(), kept);
         (entries, false)
     }
 
-    /// Makes what is kept as old as `TRUST`, as if that time had passed:
-    /// the next look at each folder checks its time again.
+    /// Moves the test clock on by `TRUST`: the next look at each folder
+    /// checks its time again, and a name noted missing is looked for again.
     #[cfg(test)]
     pub(super) fn expire(&self) {
-        for kept in self.dirs.borrow_mut().values_mut() {
-            if let Some(then) = kept.checked.checked_sub(Self::TRUST) {
-                kept.checked = then;
-            }
-            if let Some(then) = kept.read.checked_sub(Self::TRUST) {
-                kept.read = then;
-            }
-        }
+        self.clock.set(Some(self.now() + Self::TRUST));
     }
 
     /// The listing of the search `key`: the one kept, unless `first` (a
