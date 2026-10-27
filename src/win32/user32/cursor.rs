@@ -111,10 +111,14 @@ pub fn shown(win32: &crate::win32::Win32) -> Option<(&CursorImage, (i32, i32))> 
 }
 
 /// The size of the screen the cursor moves over, in its pixels:
-/// DirectDraw's mode while it has the display, else the desktop's.
+/// DirectDraw's mode while it has the display, else the desktop's, as
+/// ChangeDisplaySettings may have set it (`screen::desktop`).
 pub fn screen_size(win32: &crate::win32::Win32) -> (i32, i32) {
-    match win32.ddraw.display.mode {
-        (0, ..) => super::sysparams::screen_size(),
-        (w, h, _) => (w as i32, h as i32),
-    }
+    let (w, h) = match win32.ddraw.display.mode {
+        (0, ..) => win32
+            .desktop_size
+            .map_or(crate::win32::screen::DESKTOP, |(w, h, _)| (w, h)),
+        (w, h, _) => (w, h),
+    };
+    (w as i32, h as i32)
 }
