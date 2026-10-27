@@ -940,6 +940,15 @@ fn tl(x: f32, y: f32, z: f32, diffuse: u32) -> Tl {
     }
 }
 
+/// `v` with the vertex fog factor `factor` (255 no fog, 0 all fog) in
+/// its specular alpha.
+fn with_fog(v: Tl, factor: u32) -> Tl {
+    Tl {
+        specular: factor << 24,
+        ..v
+    }
+}
+
 /// Two triangles covering the rectangle from (x0, y0) to (x1, y1), its
 /// texture coordinates 0 to 1, all with depth `z` and `color`.
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: u32) -> Vec<Tl> {
@@ -1633,10 +1642,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     let fogged = |alpha: u32, x0: f32, x1: f32| {
         quad(x0, 0.0, x1, 32.0, 0.5, WHITE)
             .into_iter()
-            .map(|v| Tl {
-                specular: alpha << 24,
-                ..v
-            })
+            .map(|v| with_fog(v, alpha))
             .collect()
     };
     // Table fog by W, linear from 0 to 4: half at W 2.
@@ -1672,14 +1678,10 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
 fn flat_shading_keeps_each_vertex_fog() {
     // A red first vertex without fog, and fully fogged vertices of
     // another color: the face is red, fogged as the vertices say.
-    let fog = |v: Tl, alpha: u32| Tl {
-        specular: alpha << 24,
-        ..v
-    };
     let tri = vec![
-        fog(tl(4.0, 4.0, 0.5, RED), 0xFF),
-        fog(tl(60.0, 4.0, 0.5, BLUE), 0),
-        fog(tl(4.0, 60.0, 0.5, BLUE), 0),
+        with_fog(tl(4.0, 4.0, 0.5, RED), 0xFF),
+        with_fog(tl(60.0, 4.0, 0.5, BLUE), 0),
+        with_fog(tl(4.0, 60.0, 0.5, BLUE), 0),
     ];
     let scene = Scene {
         api: Api::D3D7,
