@@ -13,6 +13,8 @@
 pub mod bitmap;
 pub mod dc;
 pub mod draw;
+#[cfg(test)]
+mod draw_tests;
 pub mod font;
 mod gamma;
 pub mod metafile;
