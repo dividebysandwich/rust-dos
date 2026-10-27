@@ -496,6 +496,16 @@ impl<'a> Display<'a> {
         }
     }
 
+    /// The 3dfx card's picture as OpenGL drew and composed it last
+    /// (`run_voodoo`, `present`), with what was drawn over it, at the
+    /// card's resolution; None while OpenGL doesn't show it.
+    pub fn voodoo_picture(&mut self) -> Option<Frame> {
+        match &mut self.out {
+            Output::Gl(gl) if self.voodoo_shown => gl.voodoo_picture(),
+            _ => None,
+        }
+    }
+
     /// `frame` through the CRT shader, as the window shows it, for a
     /// screenshot or a recording; None where the window shows it without
     /// one. Drawing it again and reading it back takes time, so only

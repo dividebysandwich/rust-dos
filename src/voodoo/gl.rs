@@ -1047,6 +1047,39 @@ impl VoodooGl {
         }
     }
 
+    /// The picture last composed (`composite`), read back from the GPU
+    /// at the card's resolution: of each block of `scale` by `scale`
+    /// pixels, the one at its middle. Rows from the top, RGBA.
+    pub fn read_picture(&self, gl: &glow::Context) -> Option<Frame> {
+        let (target, (w, h)) = self.composite.as_ref()?;
+        let (w, h) = (*w, *h);
+        let scale = self.scale.max(1);
+        let mut rgba = vec![0u8; w as usize * h as usize * 4];
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            let pixels = glow::PixelPackData::Slice(Some(&mut rgba));
+            let (rw, rh) = size_i32((w, h));
+            gl.read_pixels(0, 0, rw, rh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        // The composed picture's first row is the picture's top.
+        let (fw, fh) = (w / scale, h / scale);
+        let mut frame = Frame::new(fw, fh);
+        let half = scale / 2;
+        for y in 0..fh {
+            let from = ((y * scale + half) * w) as usize * 4;
+            let to = (y * fw) as usize * 4;
+            for x in 0..fw as usize {
+                let at = from + (x * scale as usize + half as usize) * 4;
+                let [r, g, b, _] = rgba[at..at + 4] else { unreachable!() };
+                frame.rgba[to + x * 4..to + x * 4 + 4].copy_from_slice(&[r, g, b, 0xFF]);
+            }
+        }
+        Some(frame)
+    }
+
     /// Draw over the picture being composed, of `size` of the card's
     /// pixels, `screen`'s pixels where they differ from `base`, through
     /// `texture`, as big as the picture.

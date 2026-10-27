@@ -402,6 +402,12 @@ impl GlScreen {
         }))
     }
 
+    /// The 3dfx card's picture as OpenGL last composed it, read back at
+    /// the card's resolution (`VoodooGl::read_picture`).
+    pub fn voodoo_picture(&mut self) -> Option<Frame> {
+        self.voodoo.as_ref()?.read_picture(&self.gl)
+    }
+
     /// Show the 3dfx card's picture, with what `screen` has over `base`
     /// (the settings window, messages) on it, letterboxed at `display`
     /// proportions. False if it has none to show.
