@@ -336,6 +336,9 @@ pub struct Win32 {
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     slice_start: u64,
+    /// How many times programs have called built-in functions (`stubs`),
+    /// to tell whether a thread called anything between two polls.
+    pub calls: u64,
     /// How many process and thread ids have been given out.
     ids: u32,
     /// The id of the process DOS started, whose exit code DOS gets.
@@ -1251,6 +1254,7 @@ crate::state_fields!(Win32 {
     interrupted,
     exit_code,
     slice_start,
+    calls,
     ids,
     root,
     registry,

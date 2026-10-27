@@ -1508,9 +1508,7 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 // A thread that does nothing but call again waits for
                 // that frame instead, and its call fails as the polls it
                 // stands for would have.
-                let thread = crate::win32::user32::current_tid(cpu);
-                let executed = cpu.executed;
-                if state(cpu).display.flip_polls.failed(thread, executed) {
+                if display::flip_poll_failed(cpu) {
                     return super::directdraw::wait_until(
                         cpu,
                         pending,

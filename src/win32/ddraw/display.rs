@@ -63,11 +63,14 @@ pub struct Display {
 /// one thread.
 #[derive(Clone, Debug, Default)]
 pub struct Polls {
-    /// The thread that polled, and `Cpu::executed` when it last did.
+    /// The thread that polled, and when it last did: `Cpu::executed` and
+    /// `Win32::calls`.
     thread: u32,
     executed: u64,
-    /// The polls in a row, none of them more than `POLL_GAP`
-    /// instructions after the one before.
+    calls: u64,
+    /// The polls in a row, each the thread's next call of a built-in
+    /// function after the one before and no more than `POLL_GAP`
+    /// instructions after it.
     count: u32,
 }
 
@@ -78,20 +81,42 @@ const POLLS: u32 = 16;
 const POLL_GAP: u64 = 2_000;
 
 impl Polls {
-    /// The thread `thread` polled, `executed` instructions from the start
-    /// (`Cpu::executed`), and found the display not done yet: whether it
-    /// has done next to nothing else for `POLLS` polls. A loop like that
+    /// The thread `thread` polled and found the display not done yet,
+    /// with `Cpu::executed` at `executed` and `Win32::calls` at `calls`:
+    /// whether it has done next to nothing else for `POLLS` polls, with
+    /// no other built-in function called in between. A loop like that
     /// does the same until the frame the display waits for, so the caller
     /// can make the thread wait for that frame instead of running each
     /// poll (a game calling Flip without DDFLIP_WAIT until it succeeds
-    /// makes hundreds of calls a millisecond).
-    pub fn failed(&mut self, thread: u32, executed: u64) -> bool {
-        let close = self.thread == thread && executed.saturating_sub(self.executed) <= POLL_GAP;
-        self.count = if close { self.count.saturating_add(1) } else { 1 };
+    /// makes hundreds of calls a millisecond). A loop that does more
+    /// while it waits, such as filling its sound buffer or reading its
+    /// messages, keeps every poll.
+    pub fn failed(&mut self, thread: u32, executed: u64, calls: u64) -> bool {
+        let close = self.thread == thread
+            && calls == self.calls.wrapping_add(1)
+            && executed.saturating_sub(self.executed) <= POLL_GAP;
+        self.count = if close {
+            self.count.saturating_add(1)
+        } else {
+            1
+        };
         self.thread = thread;
         self.executed = executed;
+        self.calls = calls;
         self.count >= POLLS
     }
+}
+
+/// The running thread polled for the pending flip of the primary
+/// surface and found it still to show: whether it only polls
+/// (`Polls::failed`).
+pub fn flip_poll_failed(cpu: &mut Cpu) -> bool {
+    let thread = crate::win32::user32::current_tid(cpu);
+    let (executed, calls) = (cpu.executed, cpu.bus.win32.calls);
+    state(cpu)
+        .display
+        .flip_polls
+        .failed(thread, executed, calls)
 }
 
 /// Whether DirectDraw (or Glide) has the display: GDI doesn't draw on
@@ -322,5 +347,6 @@ crate::state_fields!(Display {
 crate::state_fields!(Polls {
     thread,
     executed,
+    calls,
     count
 });
