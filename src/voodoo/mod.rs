@@ -39,6 +39,7 @@ pub mod lfb;
 pub mod mem;
 pub mod mirror;
 pub mod overlay;
+pub mod pages;
 pub mod raster;
 pub mod register;
 pub mod regs;
@@ -585,9 +586,9 @@ pub struct Voodoo {
     software_picture: bool,
     /// The drawing recorded for the OpenGL renderer, while it draws.
     mirror: Option<Box<mirror::Mirror>>,
-    /// The first bytes of the memory a Banshee's desktop and overlay show
-    /// that the renderer has (`banshee_scanout`).
-    scanout_sent: [Option<u32>; 2],
+    /// Which pages of a Banshee's memory the renderer's copy of it lacks
+    /// (`banshee_scanout`).
+    pages: pages::Pages,
     /// A Banshee's picture changed, which the software picture took
     /// first (`prepare_display`), so the renderer's scanout still has to
     /// hear of it.
@@ -667,7 +668,7 @@ impl Voodoo {
             catch_ups: Cell::new(0),
             software_picture: true,
             mirror: None,
-            scanout_sent: [None; 2],
+            pages: pages::Pages::new(board.frame_buffer()),
             scanout_dirty: false,
             logged: 0,
             recorder: std::cell::RefCell::new(None),
@@ -1579,6 +1580,7 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        self.pages.mark_all();
         if let Some(mirror) = &mut self.mirror {
             mirror.invalidate();
             mirror.forget_textures();
@@ -1594,7 +1596,7 @@ impl Voodoo {
             self.release_backlog();
             self.update_tiles();
             // A renderer starting over has none of the picture.
-            self.scanout_sent = [None; 2];
+            self.pages.mark_all();
             self.display_dirty = true;
         }
     }
@@ -1711,6 +1713,11 @@ impl Voodoo {
     /// pixels of its buffers there, from memory, which has what the 3D
     /// engine drew before (the writers catch up first).
     pub(crate) fn mirror_memory(&mut self, start: u32, end: u32) {
+        if self.mirror.is_none() {
+            return;
+        }
+        // The renderer's copy of the memory gets the pages again.
+        self.pages.mark(start, end);
         let Some(mirror) = &mut self.mirror else {
             return;
         };

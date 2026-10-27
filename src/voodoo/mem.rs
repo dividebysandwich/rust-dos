@@ -125,6 +125,50 @@ impl Vram {
         Arc::ptr_eq(&self.words, &other.words)
     }
 
+    /// Bytes from byte address `start` on into `out`, as many as fit
+    /// before the end; the rest of `out` is left as it is.
+    pub fn read_bytes(&self, start: usize, out: &mut [u8]) {
+        let end = (start + out.len()).min(self.bytes());
+        if start >= end {
+            return;
+        }
+        let out = &mut out[..end - start];
+        let (mut at, mut i) = (start, 0);
+        if at & 1 != 0 {
+            out[0] = self.byte(at);
+            (at, i) = (at + 1, 1);
+        }
+        let (pairs, last) = out[i..].as_chunks_mut::<2>();
+        for (k, pair) in pairs.iter_mut().enumerate() {
+            *pair = self.get(at / 2 + k).to_le_bytes();
+        }
+        if let [byte] = last {
+            *byte = self.byte(end - 1);
+        }
+    }
+
+    /// Bytes from byte address `start` on written from `data`, as many as
+    /// fit before the end.
+    pub fn write_bytes(&self, start: usize, data: &[u8]) {
+        let end = (start + data.len()).min(self.bytes());
+        if start >= end {
+            return;
+        }
+        let data = &data[..end - start];
+        let (mut at, mut i) = (start, 0);
+        if at & 1 != 0 {
+            self.set_byte(at, data[0]);
+            (at, i) = (at + 1, 1);
+        }
+        let (pairs, last) = data[i..].as_chunks::<2>();
+        for (k, pair) in pairs.iter().enumerate() {
+            self.set(at / 2 + k, u16::from_le_bytes(*pair));
+        }
+        if let [byte] = last {
+            self.set_byte(end - 1, *byte);
+        }
+    }
+
     /// All of it as little-endian bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.bytes());

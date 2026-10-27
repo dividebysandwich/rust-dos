@@ -148,6 +148,7 @@ locations!(Banshee {
     u_size: [f32; 2],
     u_scale: i32,
     u_across: i32,
+    u_mem_mask: i32,
     u_desk: [i32; 4],
     u_desk_layout: [i32; 4],
     u_ovl: [i32; 4],

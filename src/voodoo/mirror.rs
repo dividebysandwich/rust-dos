@@ -275,6 +275,10 @@ pub enum Command {
     Pixels(Pixels),
     Texture(Box<Texture>),
     FreeTexture(u32),
+    /// Bytes of a Banshee's or Voodoo3's memory of `size` bytes, from
+    /// byte `at` on (whole pages, `pages::PAGE`), for the renderer's copy
+    /// of it.
+    Memory { size: u32, at: u32, bytes: Vec<u8> },
 }
 
 /// The drawing since the last frame, and what the card shows now.
@@ -350,10 +354,10 @@ pub struct Cursor {
 /// renderer to compose as `Banshee::render` draws it: the desktop of
 /// `width` by `height` pixels, each line twice in half mode and each
 /// pixel twice across when `wide`, the overlay window over it and the
-/// cursor on top, through the CLUT (512 entries of RGB). The memory the
-/// desktop and the overlay show (bytes from their first on), where they
-/// aren't buffers the renderer draws, comes when the picture may have
-/// changed since the last frame; None keeps what came before.
+/// cursor on top, through the CLUT (512 entries of RGB). The desktop and
+/// the overlay, where they aren't buffers the renderer draws, show the
+/// renderer's copy of the card's memory, which `Command::Memory` keeps up
+/// to date.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scanout {
     pub width: u32,
@@ -364,8 +368,6 @@ pub struct Scanout {
     pub overlay: Option<Overlay>,
     pub cursor: Option<Cursor>,
     pub clut: Vec<u32>,
-    pub desktop_memory: Option<Vec<u8>>,
-    pub overlay_memory: Option<Vec<u8>>,
 }
 
 /// Frames a texture stays decoded without being drawn with.
@@ -411,6 +413,9 @@ struct LastTexture {
 
 /// The recording.
 pub struct Mirror {
+    /// Commands were dropped since the card last asked (`take_dropped`),
+    /// and the memory they carried with them.
+    dropped: bool,
     commands: Vec<Command>,
     textures: HashMap<TexKey, Cached>,
     next_id: u32,
@@ -437,6 +442,7 @@ impl Default for Mirror {
 impl Mirror {
     pub fn new() -> Self {
         Self {
+            dropped: false,
             commands: Vec::new(),
             textures: HashMap::new(),
             next_id: 1,
@@ -461,8 +467,11 @@ impl Mirror {
     }
 
     pub(crate) fn resync(&mut self, snapshot: Snapshot, key: LayoutKey) {
-        // What was recorded before is drawn over.
-        self.commands.retain(|c| matches!(c, Command::Texture(_) | Command::FreeTexture(_)));
+        // What was recorded before is drawn over, but for what isn't in
+        // the buffers.
+        self.commands.retain(|c| {
+            matches!(c, Command::Texture(_) | Command::FreeTexture(_) | Command::Memory { .. })
+        });
         self.open.clear();
         self.layout = Some(key);
         self.commands.push(Command::Resync(Box::new(snapshot)));
@@ -499,8 +508,21 @@ impl Mirror {
             self.open.clear();
             self.forget_textures();
             self.layout = None;
+            self.dropped = true;
         }
         self.commands.push(command);
+    }
+
+    /// Bytes of the card's memory of `size` bytes from byte `at` on, for
+    /// the renderer's copy of it.
+    pub(crate) fn memory(&mut self, size: u32, at: u32, bytes: Vec<u8>) {
+        self.push_command(Command::Memory { size, at, bytes });
+    }
+
+    /// Whether commands were dropped since the last call, with the memory
+    /// they carried: the renderer's copy of it needs all of it again.
+    pub(crate) fn take_dropped(&mut self) -> bool {
+        std::mem::take(&mut self.dropped)
     }
 
     /// The rows of pixels being written, as commands.
