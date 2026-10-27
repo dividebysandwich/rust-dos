@@ -159,6 +159,66 @@ impl Bus {
         0xFF
     }
 
+    /// Write the `len` bytes of plain RAM at `src` into the 3dfx card's
+    /// window at `dst`, a dword at a time in order, as a string move's
+    /// writes through `write_32` do (a game's 2D picture copied into the
+    /// linear frame buffer row by row), in one call. Returns false,
+    /// having written nothing, where the elements aren't dwords going up,
+    /// or the range isn't all memory of the card's (`Voodoo::memory_run`).
+    pub fn move_to_voodoo(&mut self, src: usize, dst: usize, len: usize, size: usize, backward: bool) -> bool {
+        if size != 4 || backward || dst & 3 != 0 || len == 0 {
+            return false;
+        }
+        let Some(first) = self.voodoo_at(dst) else { return false };
+        let last = dst + len - 4;
+        if self.voodoo_at(last) != Some(first + len as u32 - 4)
+            || !self.voodoo.as_ref().is_some_and(|v| v.memory_run(first, len as u32))
+            || self.vbe.lfb_offset(dst, len).is_some()
+            || self.s3_mmio(dst).is_some()
+            || self.mach64_mmio(dst).is_some()
+        {
+            return false;
+        }
+        let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        let dwords: Vec<u32> = self.ram[src..src + len]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&d| u32::from_le_bytes(d))
+            .collect();
+        match self.voodoo.as_ref().and_then(|v| v.lfb_run(first, len as u32)) {
+            Some(index) => self.voodoo_lfb_run(index, &dwords),
+            None => {
+                for (at, &value) in (first..).step_by(4).zip(&dwords) {
+                    self.voodoo_write_32(at, value);
+                }
+            }
+        }
+        true
+    }
+
+    /// Dwords written one after the other into a Banshee's linear frame
+    /// buffer from dword `index` on, as `voodoo_write` writes them there
+    /// (`Voodoo::lfb_write_run`).
+    fn voodoo_lfb_run(&mut self, index: u32, data: &[u32]) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
+        // A write behind a swap the frame rate cap holds back waits for
+        // the swap, as in `voodoo_write`.
+        if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
+            self.clock.stall_to(due);
+            let now = self.voodoo_now();
+            if let Some(v) = &mut self.voodoo {
+                v.service(now);
+            }
+        }
+        if let Some(v) = &mut self.voodoo {
+            v.lfb_write_run(index, data);
+        }
+    }
+
     pub(crate) fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
         let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
         // A write behind a swap the frame rate cap holds back (the rest of

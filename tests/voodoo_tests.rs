@@ -609,6 +609,31 @@ fn the_tmus_hand_out_their_configuration() {
 }
 
 #[test]
+fn a_string_move_into_the_frame_buffer_writes_what_its_dwords_write() {
+    // A row of 64 RGB565 pixels in RAM, as a game's 2D picture.
+    let row: Vec<u8> = (0..128u32).map(|i| (i * 37 + 5) as u8).collect();
+    let lfb = BASE + 0x40_0000 + 5 * 2048 + 8 * 2;
+    let (mut one, mut each) = (bus(Board::Standard), bus(Board::Standard));
+    for bus in [&mut one, &mut each] {
+        init(bus);
+        w(bus, LFB_MODE, 0);
+        bus.load_bytes(0x1000, &row);
+    }
+    assert!(one.move_to_voodoo(0x1000, lfb, row.len(), 4, false));
+    for i in (0..row.len()).step_by(4) {
+        each.write_32(lfb + i, each.read_32(0x1000 + i));
+    }
+    for x in 0..80 {
+        assert_eq!(pixel(&one, 0, x, 5), pixel(&each, 0, x, 5), "pixel {x}");
+    }
+    assert_eq!(pixel(&one, 0, 8, 5), u16::from_le_bytes([row[0], row[1]]));
+    // Registers, words, and moves going down go a dword at a time.
+    assert!(!one.move_to_voodoo(0x1000, BASE + 0x100, 16, 4, false));
+    assert!(!one.move_to_voodoo(0x1000, lfb, 16, 2, false));
+    assert!(!one.move_to_voodoo(0x1000, lfb, 16, 4, true));
+}
+
+#[test]
 fn frame_buffer_writes_and_reads() {
     let mut bus = bus(Board::Standard);
     init(&mut bus);
