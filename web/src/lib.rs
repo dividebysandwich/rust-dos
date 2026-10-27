@@ -1080,6 +1080,7 @@ impl Machine {
             // Blinking characters keep the cursor's time.
             self.cpu.bus.vga.set_blink(self.cursor_visible);
         }
+        let xbrz = self.shown_shader() == Shader::Xbrz;
         let bus = &mut self.cpu.bus;
         // The CRTC picks up the Start Address the program flipped to at the
         // vertical retraces that passed.
@@ -1092,6 +1093,7 @@ impl Machine {
             video::render_screen(&mut self.picture, bus);
             bus.vga.clear_dirty();
         }
+        self.next.track_overlays(xbrz);
         self.next.clone_from(&self.picture);
         video::overlay::draw_cursors(&mut self.next, bus, self.cursor_visible);
         video::mono::apply(&mut self.next, self.settings.monochrome);
@@ -1104,17 +1106,30 @@ impl Machine {
         self.ui.draw(&mut self.next);
         self.ui.draw_overlay(&mut self.next);
         self.osd.draw(&mut self.next);
-        if self.shown_shader() == Shader::Xbrz {
-            self.xbrz_overlay = self.xbrz_frame.prepare(
+        let screen_rows = if (self.next.width, self.next.height) != (self.screen.width, self.screen.height) {
+            0..self.next.height as usize
+        } else if self.next.width == 0 {
+            0..0
+        } else {
+            video::changed_rows(&self.screen.rgba, &self.next.rgba, self.next.width as usize * 4)
+                .unwrap_or(0..0)
+        };
+        let shader_changed = if xbrz {
+            let (visible, shader_changed, _) = self.xbrz_frame.prepare(
                 &self.next,
                 &self.picture,
                 self.settings.monochrome,
+                screen_rows,
             );
-        }
+            self.xbrz_overlay = visible;
+            shader_changed
+        } else {
+            false
+        };
         let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
             && self.next.rgba == self.screen.rgba;
         if same && self.composed {
-            return false;
+            return shader_changed;
         }
         std::mem::swap(&mut self.next, &mut self.screen);
         self.composed = true;
@@ -1620,7 +1635,12 @@ mod tests {
         assert_eq!((m.screen_width(), m.screen_height()), (640, 400));
         assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
         let mut expected = shader::XbrzFrame::default();
-        let overlay = expected.prepare(&m.screen, &m.picture, m.settings.monochrome);
+        let overlay = expected.prepare(
+            &m.screen,
+            &m.picture,
+            m.settings.monochrome,
+            0..m.screen.height as usize,
+        ).0;
         assert_eq!(m.xbrz_frame.source, expected.source);
         assert_eq!(m.shader_pixels(), m.xbrz_frame.source.rgba.as_ptr());
         assert_eq!(m.shader_overlay_visible(), overlay);

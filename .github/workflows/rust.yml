@@ -53,14 +53,20 @@ jobs:
         if: matrix.label == 'linux-x86_64'
         run: |
           if [[ "$GITHUB_EVENT_NAME" == 'pull_request' ]]; then
-            base=HEAD^1
+            base='${{ github.event.pull_request.base.sha }}'
           elif [[ "$GITHUB_EVENT_NAME" == 'push' ]] && git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            base=HEAD^
+            base='${{ github.event.before }}'
           else
             echo 'needed=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git diff --name-only "$base" HEAD | grep -Eq '^(src/video/shader/|src/display/gl(\.rs|/)|tests/debug_journal_tests\.rs$|Cargo\.(toml|lock)$|\.github/workflows/rust\.yml$)'; then
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$base" || {
+              echo 'needed=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+          if git diff --name-only "$base" HEAD | grep -Eq '^(src/(video/|display\.rs$|display/gl(\.rs|/)|config_ui/|clipboard\.rs$|main\.rs$|debug/)|web/(src/|www/)|tests/debug_journal_tests\.rs$|Cargo\.(toml|lock)$|\.github/workflows/rust\.yml$)'; then
             echo 'needed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=false' >> "$GITHUB_OUTPUT"

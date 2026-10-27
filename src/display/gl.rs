@@ -54,6 +54,7 @@ pub struct GlScreen {
     rgba: Vec<u8>,
     /// Composed pixels that differ from the native xBRZ base.
     xbrz_overlay: Option<glow::Texture>,
+    xbrz_overlay_size: Option<(u32, u32)>,
     xbrz_overlay_visible: bool,
     xbrz_frame: shader::XbrzFrame,
     /// The looks compiled so far, or why one doesn't compile.
@@ -196,6 +197,7 @@ impl GlScreen {
             texture_scale: 1,
             rgba: Vec::new(),
             xbrz_overlay: None,
+            xbrz_overlay_size: None,
             xbrz_overlay_visible: false,
             xbrz_frame: shader::XbrzFrame::default(),
             programs: HashMap::from([(Shader::None, Ok(plain))]),
@@ -297,7 +299,7 @@ impl GlScreen {
         mono: Monochrome,
     ) -> Result<(), String> {
         let mut prepared = std::mem::take(&mut self.xbrz_frame);
-        let visible = prepared.prepare(screen, base, mono);
+        let (visible, _, overlay_changed) = prepared.prepare(screen, base, mono, rows.clone());
         let scale = if base.doubled { 2 } else { 1 };
         self.upload(
             &prepared.source,
@@ -306,7 +308,7 @@ impl GlScreen {
         );
         self.texture_scale = scale as u32;
         self.xbrz_frame = prepared;
-        if visible {
+        if visible && (overlay_changed || self.xbrz_overlay_size != Some((screen.width, screen.height))) {
             let texture = match self.xbrz_overlay {
                 Some(texture) => texture,
                 None => {
@@ -331,17 +333,20 @@ impl GlScreen {
                     glow::TEXTURE_MAG_FILTER,
                     glow::NEAREST as i32,
                 );
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA8 as i32,
-                    screen.width as i32,
-                    screen.height as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&self.xbrz_frame.overlay.rgba)),
-                );
+                if self.xbrz_overlay_size == Some((screen.width, screen.height)) {
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D, 0, 0, 0, screen.width as i32,
+                        screen.height as i32, glow::RGBA, glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&self.xbrz_frame.overlay.rgba)),
+                    );
+                } else {
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D, 0, glow::RGBA8 as i32, screen.width as i32,
+                        screen.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&self.xbrz_frame.overlay.rgba)),
+                    );
+                    self.xbrz_overlay_size = Some((screen.width, screen.height));
+                }
                 gl.active_texture(glow::TEXTURE0);
             }
         }

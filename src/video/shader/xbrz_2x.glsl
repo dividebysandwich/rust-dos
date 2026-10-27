@@ -235,8 +235,9 @@ void blend_rotation(vec4 n[9], ivec4 blend, int rot, inout vec4 blk[4]) {
 
     float fg = dist(f, g);
     float hc = dist(h, c);
-    bool shallow = STEEP_THRESHOLD * fg <= hc && !same(e, g) && !same(d, g);
-    bool steep = STEEP_THRESHOLD * hc <= fg && !same(e, c) && !same(b, c);
+    // xBRZ uses exact colour inequality for these line-adjacency tests.
+    bool shallow = STEEP_THRESHOLD * fg <= hc && any(notEqual(e, g)) && any(notEqual(d, g));
+    bool steep = STEEP_THRESHOLD * hc <= fg && any(notEqual(e, c)) && any(notEqual(b, c));
 
     if (shallow && steep) {
         mix(blk, rot, 1, 0, col, 1.0, 4.0);

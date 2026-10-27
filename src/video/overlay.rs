@@ -18,6 +18,7 @@ pub fn draw_cursors(frame: &mut Frame, bus: &Bus, cursor_visible: bool) {
         for y in rows {
             for x in columns.clone() {
                 let at = (y * width + x) * 4;
+                frame.mark_overlay(x, y);
                 frame.rgba[at..at + 3].fill(0xDD);
             }
         }
@@ -211,6 +212,7 @@ fn draw_default_mouse_cursor(frame: &mut Frame, origin_x: i32, origin_y: i32) {
                 continue;
             }
             let idx = (y * w + x) as usize * 4;
+            frame.mark_overlay(x as usize, y as usize);
             let (r, g, b) = if cell == 1 {
                 (0xFF, 0xFF, 0xFF)
             } else {

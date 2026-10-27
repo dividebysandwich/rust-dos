@@ -109,12 +109,17 @@ test('WebGL handles overlay removal, shader fallback and context restoration', (
     true);
   renderer.render();
   assert.ok(calls.some(call =>
-    call[0] === 'texImage2D' && call[4] === 4 && call[5] === 4 && call[9]?.length === 64));
+    call[0] === 'texImage2D' && call[4] === 4 && call[5] === 4 && call[9] === null));
+  assert.ok(calls.some(call => call[0] === 'texSubImage2D' && call[9]?.length === 64));
   assert.ok(calls.some(([name, uniform, width, height]) =>
     name === 'uniform2f' && uniform === 'u_source' && width === 2 && height === 2));
   assert.ok(calls.some(([name, uniform, value]) =>
     name === 'uniform1i' && uniform === 'u_overlay_enabled' && value === 1));
   assert.equal(calls.some(([name]) => name === 'generateMipmap'), false);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { pixels: new Uint8Array(64), width: 4, height: 4 });
+  assert.equal(calls.some(([name]) => name === 'texImage2D'), false);
+  assert.ok(calls.some(([name]) => name === 'texSubImage2D'));
   calls.length = 0;
   assert.equal(renderer.upload(pixels, 2, 2), false);
   renderer.render();
@@ -137,4 +142,24 @@ test('WebGL handles overlay removal, shader fallback and context restoration', (
   renderer.render();
   assert.ok(calls.some(([name, uniform, value]) =>
     name === 'uniform1i' && uniform === 'u_overlay_enabled' && value === 0));
+});
+
+test('showPicture uploads the current frame when switching shaders', () => {
+  let renders = 0;
+  let selected;
+  let draws = 0;
+  const show = load('showPicture', {
+    screenGl: { select: (...args) => { selected = args; }, xbrz: () => true, render: () => renders++ },
+    machine: {
+      screen_width: () => 4, screen_height: () => 4,
+      shader_width: () => 2, shader_height: () => 2,
+      shader: () => 'xbrz', smooth: () => false, mono: () => false,
+      shader_curvature: () => [0, 0], shader_glow: () => 0, aspect: () => '4:3',
+    },
+    shownLook: null, shownAspect: '4:3', layout() {}, draw: () => draws++,
+  });
+  show();
+  assert.equal(selected[0], 'xbrz');
+  assert.equal(renders, 0);
+  assert.equal(draws, 1);
 });

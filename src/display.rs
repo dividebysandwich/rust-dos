@@ -75,6 +75,8 @@ pub struct Display<'a> {
     /// again whatever the picture: frames that show nothing new aren't
     /// uploaded or drawn, and those that do upload the rows that changed.
     shown: Vec<u8>,
+    xbrz_base_shown: Vec<u8>,
+    xbrz_overlay_shown: Vec<u8>,
     redraw: bool,
     /// Why OpenGL doesn't draw the 3dfx card although the settings ask for
     /// it, once said; and whether the last picture shown was the card's
@@ -186,6 +188,8 @@ impl<'a> Display<'a> {
             renderer,
             warning,
             shown: Vec::new(),
+            xbrz_base_shown: Vec::new(),
+            xbrz_overlay_shown: Vec::new(),
             redraw: true,
             voodoo_said: false,
             voodoo_shown: false,
@@ -413,6 +417,30 @@ impl<'a> Display<'a> {
         let voodoo = voodoo.filter(|_| layer.is_none());
         let layer_changed = layer.map(|l| l.generation) != self.layer_shown;
         self.layer_shown = layer.map(|l| l.generation);
+        let xbrz_base_rows = if self.shader == Shader::Xbrz && matches!(&self.out, Output::Gl(_)) {
+            base.and_then(|base| {
+                if self.xbrz_base_shown.len() != base.rgba.len() {
+                    Some(0..base.height as usize)
+                } else {
+                    video::changed_rows_in(&self.xbrz_base_shown, &base.rgba, row_bytes, candidates.clone())
+                }
+            })
+        } else {
+            None
+        };
+        let xbrz_overlay_rows = if self.shader == Shader::Xbrz && matches!(&self.out, Output::Gl(_)) {
+            if self.xbrz_overlay_shown.len() != frame.width as usize * frame.height as usize {
+                Some(0..frame.height as usize)
+            } else {
+                frame.changed_overlay_rows(&self.xbrz_overlay_shown, candidates.clone())
+            }
+        } else {
+            None
+        };
+        let xbrz_rows = xbrz_base_rows
+            .into_iter()
+            .chain(xbrz_overlay_rows)
+            .reduce(video::compose::union);
         let rows = if self.redraw
             || layer_changed
             || self.shown.len() != frame.rgba.len()
@@ -421,7 +449,8 @@ impl<'a> Display<'a> {
             0..frame.height as usize
         } else {
             match video::changed_rows_in(&self.shown, &frame.rgba, row_bytes, candidates) {
-                Some(rows) => rows,
+                Some(rows) => xbrz_rows.clone().map_or(rows.clone(), |extra| video::compose::union(rows, extra)),
+                None if xbrz_rows.is_some() => xbrz_rows.clone().unwrap(),
                 None => {
                     // The 3D scene is drawn every frame all the same.
                     #[cfg(feature = "vr")]
@@ -434,13 +463,41 @@ impl<'a> Display<'a> {
         };
         self.redraw = false;
         let updated = rows.start * row_bytes..rows.end * row_bytes;
+        if self.shader == Shader::Xbrz && let Some(base) = base {
+            if self.xbrz_base_shown.len() != base.rgba.len() {
+                self.xbrz_base_shown.clone_from(&base.rgba);
+            } else {
+                self.xbrz_base_shown[updated.clone()].copy_from_slice(&base.rgba[updated.clone()]);
+            }
+        } else {
+            self.xbrz_base_shown.clear();
+        }
+        if self.shader == Shader::Xbrz {
+            if self.xbrz_overlay_shown.len() != frame.width as usize * frame.height as usize {
+                self.xbrz_overlay_shown.resize(frame.width as usize * frame.height as usize, 0);
+            }
+            if let Some(mask) = frame.overlay_mask() {
+                self.xbrz_overlay_shown[updated.start / 4..updated.end / 4].copy_from_slice(
+                    &mask[updated.start / 4..updated.end / 4],
+                );
+            } else {
+                self.xbrz_overlay_shown[updated.start / 4..updated.end / 4].fill(0);
+            }
+        } else {
+            self.xbrz_overlay_shown.clear();
+        }
         let display = display_size(frame.width, frame.height, self.aspect);
         let shown = match &mut self.out {
             Output::Gl(gl) => {
                 self.voodoo_shown = voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
                 if !self.voodoo_shown {
                     if let Some(base) = base.filter(|_| gl.active() == Shader::Xbrz) {
-                        gl.present_xbrz(frame, base, rows, display, layer, self.monochrome)?;
+                        if let Err(error) = gl.present_xbrz(frame, base, rows.clone(), display, layer, self.monochrome) {
+                            self.warning = Some(format!("xBRZ couldn't prepare this frame: {error}"));
+                            self.shader = Shader::None;
+                            gl.select(Shader::None, self.filter)?;
+                            gl.present(frame, rows, display, layer);
+                        }
                     } else {
                         gl.present(frame, rows, display, layer);
                     }

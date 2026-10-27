@@ -451,6 +451,7 @@ function makeGlScreen() {
   let programs;
   /// The picture's size, once there is one.
   let frame;
+  let overlayFrame;
   let look = 'none';
   let smooth = false;
   /// A monochrome tube, whose phosphor is one colour: no colour mask.
@@ -576,7 +577,11 @@ function makeGlScreen() {
       if (overlayVisible) {
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, overlay.width, overlay.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels);
+        if (overlayFrame?.width !== overlay.width || overlayFrame?.height !== overlay.height) {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, overlay.width, overlay.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+          overlayFrame = { width: overlay.width, height: overlay.height };
+        }
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, overlay.width, overlay.height, gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels);
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -2049,7 +2054,10 @@ function showPicture() {
     if (!same || look.curvature.join() !== shownLook.curvature.join()) {
       shownLook = look;
       screenGl.select(look.name, look.smooth, look.mono, look.curvature, look.glow);
-      screenGl.render();
+      if (machine.screen_width() && machine.screen_height()
+        && (!screenGl.xbrz() || (machine.shader_width() && machine.shader_height()))) {
+        draw();
+      }
     }
   } else {
     canvas.classList.toggle('smooth', machine.smooth());

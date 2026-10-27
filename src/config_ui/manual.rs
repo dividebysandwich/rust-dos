@@ -187,6 +187,7 @@ impl ConfigUi {
             let to = ((y0 as usize + r) * size.0 as usize + x0 as usize) * 4;
             out.rgba[to..to + row].copy_from_slice(&scaled.rgba[r * row..(r + 1) * row]);
         }
+        out.mark_overlay_rect(x0 as usize, y0 as usize, page.0 as usize, page.1 as usize);
         Some(out)
     }
 

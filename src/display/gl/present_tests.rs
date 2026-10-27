@@ -128,6 +128,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
         (true, true, Monochrome::White),
     ] {
         let mut composed = base.clone();
+        composed.track_overlays(true);
         mono::apply(&mut composed, mono);
         let mut tinted = native.clone();
         mono::apply(&mut tinted, mono);
@@ -136,6 +137,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
         if overlay {
             composed.doubled = false;
             composed.rgba[68..72].copy_from_slice(&[11, 222, 33, 255]);
+            composed.mark_overlay(1, 1);
             expected[68..72].copy_from_slice(&[11, 222, 33, 255]);
         }
         if manual {
@@ -145,6 +147,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
                         .copy_from_slice(&[20, 220, 80, 255]);
                 }
             }
+            composed.mark_overlay_rect(4, 4, 2, 2);
         }
         screen
             .present_xbrz(
@@ -212,6 +215,25 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
 }
 
 #[test]
+#[ignore = "requires an OpenGL display; run in CI under Xvfb"]
+fn xbrz_near_colour_edges_use_exact_colour_inequality() {
+    use crate::video::mono::Monochrome;
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let values = [
+        160, 32, 160, 0, 32, 32, 16, 16, 160, 0, 32, 16, 0, 0, 16, 255, 16, 0, 16, 255, 16,
+        32, 160, 255, 160,
+    ];
+    let native = Frame::from_rgb(5, 5, values.into_iter().flat_map(|v| [v, v, v]).collect());
+    let base = double(&native);
+    let mut screen = GlScreen::open(&video, "xBRZ near colour regression", (10, 10))
+        .unwrap_or_else(|e| panic!("{}", e.reason));
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    let output = screen.capture(&base, &base, Monochrome::Off, (10, 10)).unwrap();
+    assert_eq!(&output.rgba[(2 * 10 + 7) * 4..][..3], &[40, 40, 40]);
+}
+
+#[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
     use crate::display::{Display, Output};
@@ -276,6 +298,26 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
         assert_eq!(texture(gl), tinted.rgba);
         assert!(display.shaded(&composed, &base).is_some());
     }
+    let base = double(&frame);
+    let mut composed = base.clone();
+    composed.track_overlays(true);
+    display.set_frame_size(composed.width, composed.height).unwrap();
+    display.present_rows(&composed, None, None, 0..composed.height as usize, Some(&base)).unwrap();
+    composed.mark_overlay(2, 2);
+    display.present_rows(&composed, None, None, 2..3, Some(&base)).unwrap();
+    let Output::Gl(gl) = &display.out else { unreachable!() };
+    assert_eq!(gl.xbrz_frame.overlay.rgba[(2 * composed.width as usize + 2) * 4 + 3], 255);
+    let source = match &display.out {
+        Output::Gl(gl) => gl.xbrz_frame.source.clone(),
+        _ => unreachable!(),
+    };
+    let mut changed_base = base.clone();
+    changed_base.rgba[(2 * changed_base.width as usize + 2) * 4..][..3]
+        .copy_from_slice(&[250, 1, 2]);
+    display.present_rows(&composed, None, None, 2..3, Some(&changed_base)).unwrap();
+    let Output::Gl(gl) = &display.out else { unreachable!() };
+    assert_ne!(gl.xbrz_frame.source, source, "base updates under a stable overlay reach xBRZ");
+    assert_eq!(&gl.xbrz_frame.source.rgba[(4 + 1) * 4..][..3], &[15, 76, 15]);
     display.apply(&Default::default()).unwrap();
     display.set_frame_size(frame.width, frame.height).unwrap();
     display.present(&mut frame, None, None).unwrap();

@@ -1890,6 +1890,7 @@ fn main() -> Result<(), String> {
         ui.set_display(display.output_scale(), true);
         let mut composed_rows = 0..0;
         if !still {
+            screen.track_overlays(settings.shader == video::shader::Shader::Xbrz);
             // Restore the affected base and overlay rows. A monochrome
             // monitor shows the cursors in its phosphor's colour, but not
             // the settings window.
@@ -1932,6 +1933,7 @@ fn main() -> Result<(), String> {
             video::mono::apply_rows(&mut screen, settings.monochrome, composed_rows.clone());
             if let Some(look) = &power_look {
                 video::power::apply(&mut screen, look);
+                screen.mark_overlay_rect(0, 0, width as usize, height as usize);
             }
             clipboard.draw(&mut screen, &cpu.bus);
             let frame_w = width as usize;
@@ -2209,6 +2211,7 @@ fn draw_recording_indicator(screen: &mut video::Frame, frame_w: usize) {
             if dx * dx + dy * dy <= (radius * radius) as isize {
                 let idx = (y * frame_w + x) * 4;
                 if idx + 2 < screen.rgba.len() {
+                    screen.mark_overlay(x, y);
                     screen.rgba[idx] = 0xFF; // R
                     screen.rgba[idx + 1] = 0x00; // G
                     screen.rgba[idx + 2] = 0x00; // B
