@@ -1,11 +1,12 @@
 //! What GDI draws on: the screen (the desktop in video memory), a bitmap
 //! of GDI's own, or a DIB section in the program's memory. A drawing
-//! function loads the rows it draws on into a `Surface`, works on their
-//! pixels as the bitmap stores them, and stores them back. The screen's
-//! rows are 32 bits a pixel here whatever the desktop's depth is (a
-//! 16-bit desktop's are converted as they are loaded and stored), but
-//! on a desktop of 256 colours they are its 8-bit pixels, indices into
-//! the system palette, as are those of GDI's 8-bit bitmaps (`device`).
+//! function loads the rows it draws on into a `Surface` (a blit only
+//! their columns it works on), works on their pixels as the bitmap
+//! stores them, and stores them back. The screen's rows are 32 bits a
+//! pixel here whatever the desktop's depth is (a 16-bit desktop's are
+//! converted as they are loaded and stored), but on a desktop of 256
+//! colours they are its 8-bit pixels, indices into the system palette,
+//! as are those of GDI's 8-bit bitmaps (`device`).
 //!
 //! Colors are COLORREFs (0x00BBGGRR); a pixel's value is what its bits
 //! say, an index into the color table for 8 bits a pixel and fewer.
@@ -191,7 +192,9 @@ impl Surface {
                     width,
                     height,
                     bpp,
-                    stride: if cols == width { pitch } else { span },
+                    // `pitch` when every column is loaded: the screen's
+                    // rows have no padding.
+                    stride: span,
                     top: y0,
                     rows,
                     data,
@@ -596,6 +599,34 @@ impl super::Bitmap {
             dib: self.dib.clone(),
             dc: self.dc,
             dimension: self.dimension,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs of pixels read and written at once are the pixels one at a
+    /// time, at each depth of whole bytes a pixel.
+    #[test]
+    fn rows_are_their_pixels() {
+        for bpp in [8, 16, 24, 32] {
+            let mut s = Surface::memory(9, 2, bpp, Vec::new(), MASKS_32);
+            let mask = s.value_mask();
+            let value = |i: u32| 0x9E37_79B9u32.wrapping_mul(i + 1) & mask;
+            for x in 0..9 {
+                s.put(x, 1, value(x as u32));
+            }
+            let mut row = vec![0; 6];
+            s.get_row(2, 1, &mut row);
+            let want: Vec<u32> = (2..8).map(|x| s.get(x, 1)).collect();
+            assert_eq!(row, want, "{bpp} bits");
+            let values: Vec<u32> = (0..6).map(|i| value(i + 20)).collect();
+            s.put_row(3, 0, &values);
+            let got: Vec<u32> = (2..9).map(|x| s.get(x, 0)).collect();
+            assert_eq!(got[0], 0, "{bpp} bits");
+            assert_eq!(got[1..], values, "{bpp} bits");
         }
     }
 }

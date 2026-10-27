@@ -25,8 +25,9 @@ use super::{
 use crate::cpu::Cpu;
 use crate::win32::user32::{read_words, write_words};
 
-/// What a drawing function draws on: the rows of the surface it loaded,
-/// and the rectangles of the clip region within them.
+/// What a drawing function draws on: the rows of the surface it loaded
+/// (or, from `open_columns`, some of their columns), and the rectangles
+/// of the clip region within them.
 pub struct Canvas {
     pub surface: Surface,
     pub rects: Vec<Rect>,
@@ -348,28 +349,46 @@ pub fn device_value(map: &super::palette::DeviceMap, color: u32) -> u32 {
 
 /// How the brush `handle` fills on the canvas.
 pub fn brush_fill(cpu: &mut Cpu, c: &Canvas, handle: u32) -> Fill {
+    brush_fill_through(cpu, c, handle, None)
+}
+
+/// `brush_fill`, through `map` on a palette device if the caller has the
+/// DC's map already: otherwise it builds the map once for all the
+/// brush's colors.
+fn brush_fill_through(
+    cpu: &mut Cpu,
+    c: &Canvas,
+    handle: u32,
+    map: Option<&super::palette::DeviceMap>,
+) -> Fill {
     let Some(brush) = gdi(cpu).brush(handle).cloned() else {
         return Fill::None;
     };
+    if brush.style == BS_NULL {
+        return Fill::None;
+    }
     let dc = &c.dc;
+    let built;
+    let map = match map {
+        None if c.surface.device => {
+            built = super::palette::DeviceMap::new(cpu, dc.attrs.palette);
+            Some(&built)
+        }
+        _ => map,
+    };
     let org = (
         c.origin.0 + dc.attrs.brush_org.0,
         c.origin.1 + dc.attrs.brush_org.1,
     );
     match brush.style {
-        BS_NULL => Fill::None,
-        BS_SOLID => Fill::Solid(value_for(cpu, dc, &c.surface, brush.color)),
+        BS_SOLID => Fill::Solid(value_through(cpu, dc, &c.surface, brush.color, map)),
         _ => {
             let Some(pattern) = brush.pattern else {
-                return Fill::Solid(value_for(cpu, dc, &c.surface, brush.color));
+                return Fill::Solid(value_through(cpu, dc, &c.surface, brush.color, map));
             };
-            let fg = value_for(cpu, dc, &c.surface, dc.attrs.text_color);
-            let bg = value_for(cpu, dc, &c.surface, dc.attrs.bk_color);
-            let line = value_for(cpu, dc, &c.surface, brush.color);
-            let map = c
-                .surface
-                .device
-                .then(|| super::palette::DeviceMap::new(cpu, dc.attrs.palette));
+            let fg = value_through(cpu, dc, &c.surface, dc.attrs.text_color, map);
+            let bg = value_through(cpu, dc, &c.surface, dc.attrs.bk_color, map);
+            let line = value_through(cpu, dc, &c.surface, brush.color, map);
             let opaque = dc.attrs.bk_mode == OPAQUE;
             let values = pattern
                 .pixels
@@ -390,7 +409,7 @@ pub fn brush_fill(cpu: &mut Cpu, c: &Canvas, handle: u32) -> Fill {
                         // pixels' brightness.
                         let sum = (p & 0xFF) + ((p >> 8) & 0xFF) + ((p >> 16) & 0xFF);
                         Some((sum >= 384) as u32)
-                    } else if let Some(map) = &map {
+                    } else if let Some(map) = map {
                         Some(map.blit_color(p, None))
                     } else {
                         Some(c.surface.value_of(p))
@@ -1384,6 +1403,19 @@ fn span(a: i32, b: i32) -> (i32, i32) {
     if b >= a { (a, b) } else { (b + 1, a + 1) }
 }
 
+/// The source coordinate a stretched blit reads for the destination's
+/// `p`, of a destination from `d0` to `d1` and a source from `s0` to
+/// `s1`: the pixel's steps from the destination's start, scaled down,
+/// and backwards where a range runs backwards.
+fn scale(p: i32, d0: i32, d1: i32, s0: i32, s1: i32) -> i32 {
+    let (d, s) = ((d1 - d0) as i64, (s1 - s0) as i64);
+    if d == 0 {
+        return s0;
+    }
+    let f = (p - d0) as i64 * d.signum();
+    (s0 as i64 + f * s.abs() / d.abs() * s.signum()) as i32
+}
+
 /// A raster operation's work on one pixel.
 struct Rop {
     rop3: u8,
@@ -1434,15 +1466,15 @@ pub fn blit_from(
     let Some(mut c) = Canvas::open_columns(cpu, hdst, r) else {
         return true;
     };
-    let fill = if uses_pattern(rop3) {
-        brush_fill(cpu, &c, ddc.attrs.brush)
-    } else {
-        Fill::Solid(0)
-    };
     let map = c
         .surface
         .device
         .then(|| super::palette::DeviceMap::new(cpu, ddc.attrs.palette));
+    let fill = if uses_pattern(rop3) {
+        brush_fill_through(cpu, &c, ddc.attrs.brush, map.as_ref())
+    } else {
+        Fill::Solid(0)
+    };
     let text = value_through(cpu, &ddc, &c.surface, ddc.attrs.text_color, map.as_ref());
     let bk = value_through(cpu, &ddc, &c.surface, ddc.attrs.bk_color, map.as_ref());
     let mask = c.surface.value_mask();
@@ -1465,8 +1497,9 @@ pub fn blit_from(
     let (ox, oy) = c.origin;
     let rects = std::mem::take(&mut c.rects);
     let dst_rect = r.offset(ox, oy);
-    // A blit that is neither stretched nor mirrored reads the source
-    // pixel at the destination's place moved by this.
+    // A blit whose source and destination have the same size and run
+    // the same way (one mirrored on both sides included) reads the
+    // source pixel at the destination's place moved by this.
     let shift = source.as_ref().and_then(|(src, (sx0, sy0, sx1, sy1))| {
         (sx1 - sx0 == x1 - x0 && sy1 - sy0 == y1 - y0)
             .then_some((sx0 + src.origin.0 - x0 - ox, sy0 + src.origin.1 - y0 - oy))
@@ -1503,26 +1536,13 @@ pub fn blit_from(
             continue;
         }
         for y in area.top..area.bottom {
+            let sy = source.as_ref().map_or(0, |(src, (_, sy0, _, sy1))| {
+                scale(y - oy, y0, y1, *sy0, *sy1) + src.origin.1
+            });
             for x in area.left..area.right {
                 let s = match &source {
-                    Some((src, (sx0, sy0, sx1, sy1))) => {
-                        // The source pixel for this one: the pixels' steps
-                        // from the rectangles' starts, scaled down, and
-                        // backwards where a rectangle runs backwards.
-                        let (dw, dh) = ((x1 - x0) as i64, (y1 - y0) as i64);
-                        let (sw, sh) = ((sx1 - sx0) as i64, (sy1 - sy0) as i64);
-                        let fx = (x - ox - x0) as i64 * dw.signum();
-                        let fy = (y - oy - y0) as i64 * dh.signum();
-                        let map = |f: i64, s: i64, d: i64| -> i64 {
-                            if d == 0 {
-                                0
-                            } else {
-                                f * s.abs() / d.abs() * s.signum()
-                            }
-                        };
-                        let sx = *sx0 as i64 + map(fx, sw, dw) + src.origin.0 as i64;
-                        let sy = *sy0 as i64 + map(fy, sh, dh) + src.origin.1 as i64;
-                        let (sx, sy) = (sx as i32, sy as i32);
+                    Some((src, (sx0, _, sx1, _))) => {
+                        let sx = scale(x - ox, x0, x1, *sx0, *sx1) + src.origin.0;
                         if !src.surface.has(sx, sy) {
                             continue;
                         }
@@ -1540,8 +1560,8 @@ pub fn blit_from(
             }
         }
     }
-    if let (Some(t), Some((src, _))) = (xlat, &source) {
-        t.keep(cpu, &src.surface);
+    if let Some(t) = xlat {
+        t.keep(cpu);
     }
     c.drawn = dst_rect;
     c.close(cpu);
@@ -1559,6 +1579,8 @@ pub struct Translate {
     src_bk: u32,
     text: u32,
     bk: u32,
+    /// What `table` is of, when it can be kept for the next blit.
+    key: Option<TableKey>,
 }
 
 impl Translate {
@@ -1585,6 +1607,7 @@ impl Translate {
             src_bk,
             text,
             bk,
+            key: None,
         }
     }
 
@@ -1600,37 +1623,26 @@ impl Translate {
         text: u32,
         bk: u32,
     ) -> Translate {
+        let key = table_key(src, map.as_ref());
+        let kept = key
+            .as_ref()
+            .and_then(|key| gdi(cpu).kept_table.take_if(|k| k.key == *key));
         let mut t = Translate::new(src, map, src_bk, text, bk);
-        if let Some(key) = t.key(src)
-            && let Some(kept) = gdi(cpu).kept_table.take_if(|k| k.key == key)
-        {
+        if let Some(kept) = kept {
             t.table = kept.table;
         }
+        t.key = key;
         t
     }
 
     /// Keep the table for the next blit, as `kept` takes it.
-    pub fn keep(self, cpu: &mut Cpu, src: &Surface) {
-        if let Some(key) = self.key(src) {
+    pub fn keep(self, cpu: &mut Cpu) {
+        if let Some(key) = self.key {
             gdi(cpu).kept_table = Some(Box::new(KeptTable {
                 key,
                 table: self.table,
             }));
         }
-    }
-
-    /// What the table is of when it can be kept: a source with a color
-    /// table onto a palette device, where a value's translation depends
-    /// on these and nothing else (`one`).
-    fn key(&self, src: &Surface) -> Option<TableKey> {
-        let map = self.map.as_ref()?;
-        (!src.mono && src.bpp <= 8).then(|| TableKey {
-            bpp: src.bpp,
-            colors: src.colors.clone(),
-            pal_indices: src.pal_indices.clone(),
-            device: src.device,
-            map: map.clone(),
-        })
     }
 
     fn one(&self, src: &Surface, v: u32, dst: &Surface) -> u32 {
@@ -1674,7 +1686,22 @@ impl Translate {
     }
 }
 
-/// What a kept translation table is of (`Translate::key`).
+/// What a table of translations from `src` through `map` is of when it
+/// can be kept: a source with a color table onto a palette device, where
+/// a value's translation depends on these and nothing else
+/// (`Translate::one`).
+fn table_key(src: &Surface, map: Option<&super::palette::DeviceMap>) -> Option<TableKey> {
+    let map = map?;
+    (!src.mono && src.bpp <= 8).then(|| TableKey {
+        bpp: src.bpp,
+        colors: src.colors.clone(),
+        pal_indices: src.pal_indices.clone(),
+        device: src.device,
+        map: map.clone(),
+    })
+}
+
+/// What a kept translation table is of (`table_key`).
 #[derive(Debug, PartialEq)]
 pub struct TableKey {
     bpp: u32,
