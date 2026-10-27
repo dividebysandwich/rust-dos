@@ -9,10 +9,11 @@
 //!
 //! The servers a client can talk to are the shell's own: Program
 //! Manager's ("PROGMAN"), which setup programs ask to make Start Menu
-//! groups and items (SHELL32's progman.rs). DdeNameService registers a
-//! program's services, but conversations with servers that are programs
-//! aren't made: DdeConnect fails for them with
-//! DMLERR_NO_CONV_ESTABLISHED.
+//! groups and items (SHELL32's progman.rs); programs that talk to it in
+//! raw DDE messages reach it through its window (user32/progman.rs).
+//! DdeNameService registers a program's services, but conversations
+//! with servers that are programs aren't made: DdeConnect fails for
+//! them with DMLERR_NO_CONV_ESTABLISHED.
 
 use super::{current_tid, string_at};
 use crate::cpu::Cpu;
@@ -30,15 +31,15 @@ const XTYP_REQUEST: u32 = 0x20B0;
 const XTYPF_MASK: u32 = 0x000F;
 
 const HDATA_APPOWNED: u32 = 0x0001;
-const DDE_FACK: u32 = 0x8000;
+pub(super) const DDE_FACK: u32 = 0x8000;
 const CP_WINUNICODE: u32 = 1200;
-const CF_TEXT: u32 = 1;
+pub(super) const CF_TEXT: u32 = 1;
 
-const WM_DDE_ACK: u32 = 0x3E4;
-const WM_DDE_ADVISE: u32 = 0x3E2;
-const WM_DDE_DATA: u32 = 0x3E5;
-const WM_DDE_POKE: u32 = 0x3E7;
-const WM_DDE_EXECUTE: u32 = 0x3E8;
+pub(super) const WM_DDE_ACK: u32 = 0x3E4;
+pub(super) const WM_DDE_ADVISE: u32 = 0x3E2;
+pub(super) const WM_DDE_DATA: u32 = 0x3E5;
+pub(super) const WM_DDE_POKE: u32 = 0x3E7;
+pub(super) const WM_DDE_EXECUTE: u32 = 0x3E8;
 
 /// The first string handle; they are numbers as atoms are.
 const FIRST_STRING: u32 = 0xC000;
@@ -703,8 +704,27 @@ pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub const FOLDER_CLASS: &str = "CabinetWClass";
 
 /// Open a window titled with each of `titles`, through CreateWindowExA
-/// called as the program would call it, and return TRUE.
-fn open_windows(cpu: &mut Cpu, titles: Vec<String>) -> Option<u32> {
+/// called as the program would call it, and return TRUE. A group whose
+/// window is open already keeps that one, as Explorer's does.
+pub fn open_windows(cpu: &mut Cpu, titles: Vec<String>) -> Option<u32> {
+    let mut titles = titles;
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let state = &cpu.bus.win32.user;
+    for h in state.top_levels() {
+        if super::class::is_class(state, h, FOLDER_CLASS)
+            && let Some(w) = state.window(h)
+        {
+            seen.push(w.text.clone());
+        }
+    }
+    titles.retain(|t| {
+        let text = crate::dosstr::to_bytes(t);
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(&text)) {
+            return false;
+        }
+        seen.push(text);
+        true
+    });
     if titles.is_empty() {
         return Some(1);
     }
@@ -799,25 +819,29 @@ pub fn pack_dde_lparam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((lo & 0xFFFF) | hi << 16)
 }
 
+/// The two values in the global block `lparam` that PackDDElParam made,
+/// if it is one.
+pub(super) fn unpacked(cpu: &mut Cpu, lparam: u32) -> Option<(u32, u32)> {
+    let at = if lparam == 0 {
+        0
+    } else {
+        crate::win32::kernel32::global_address(cpu, lparam)
+    };
+    if at == 0 || !cpu.bus.guest_probe(at, 8, false) {
+        return None;
+    }
+    Some((cpu.bus.guest_read_32(at), cpu.bus.guest_read_32(at + 4)))
+}
+
 /// UnpackDDElParam(message, lParam, low, high).
 pub fn unpack_dde_lparam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [msg, lparam, lo_out, hi_out] = args[..] else {
         return Some(0);
     };
     let (lo, hi, ok) = if is_global(msg) {
-        let at = if lparam == 0 {
-            0
-        } else {
-            crate::win32::kernel32::global_address(cpu, lparam)
-        };
-        if at == 0 || !cpu.bus.guest_probe(at, 8, false) {
-            (0, 0, false)
-        } else {
-            (
-                cpu.bus.guest_read_32(at),
-                cpu.bus.guest_read_32(at + 4),
-                true,
-            )
+        match unpacked(cpu, lparam) {
+            Some((lo, hi)) => (lo, hi, true),
+            None => (0, 0, false),
         }
     } else if msg == WM_DDE_EXECUTE {
         (0, lparam, true)

@@ -20,6 +20,7 @@ pub mod menu;
 pub mod message;
 pub mod monitor;
 pub mod paint;
+pub mod progman;
 pub mod rect;
 pub mod resource;
 pub mod sysparams;
@@ -1303,6 +1304,8 @@ static APIS: &[Api] = &[
     // The help viewer's window procedures (winhelp).
     stdcall("WinHelpWndProc", 0, 4, winhelp::frame_proc),
     stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),
+    // Program Manager's window, the raw DDE messages' server.
+    stdcall("ProgmanWndProc", 0, 4, progman::wnd_proc),
 ];
 
 crate::state_fields!(State {

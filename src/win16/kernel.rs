@@ -1210,6 +1210,13 @@ fn atom(cpu: &mut Cpu, name: u32, add: bool) -> u16 {
         return if name < 0xC000 { name as u16 } else { 0 };
     }
     let text = super::string(cpu, super::linear(cpu, name));
+    atom_of(cpu, text, add)
+}
+
+/// The atom of the string `text` ("#n" for an integer atom), added to
+/// the table with `add` or used once more; 0 when it isn't there or
+/// can't be.
+pub fn atom_of(cpu: &mut Cpu, text: String, add: bool) -> u16 {
     if let Some(n) = text.strip_prefix('#').and_then(|n| n.parse::<u16>().ok()) {
         return if n < 0xC000 { n } else { 0 };
     }
@@ -1270,18 +1277,25 @@ pub fn delete_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-pub fn get_atom_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let a = args[0] as u16;
-    let name = if a == 0 {
-        return Some(0);
+/// The string of the atom `a` ("#n" for an integer atom), if it is one.
+pub fn atom_name(cpu: &Cpu, a: u16) -> Option<String> {
+    if a == 0 {
+        None
     } else if a < 0xC000 {
-        format!("#{}", a).into_bytes()
+        Some(format!("#{}", a))
     } else {
         match cpu.bus.win32.win16.atoms.get((a - 0xC000) as usize) {
-            Some((n, uses)) if *uses > 0 => crate::dosstr::to_bytes(n),
-            _ => return Some(0),
+            Some((n, uses)) if *uses > 0 => Some(n.clone()),
+            _ => None,
         }
+    }
+}
+
+pub fn get_atom_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(name) = atom_name(cpu, args[0] as u16) else {
+        return Some(0);
     };
+    let name = crate::dosstr::to_bytes(&name);
     Some(copy_string(cpu, args[1], args[2] & 0xFFFF, &name))
 }
 

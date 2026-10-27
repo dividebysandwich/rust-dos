@@ -325,6 +325,37 @@ pub fn is_task(win32: &crate::win32::Win32, tid: u32) -> bool {
     win32.win16.pid != 0 && win32.win16.tasks.iter().any(|t| t.tid == tid)
 }
 
+pub use kernel::{atom_name, atom_of};
+
+/// The bytes of the global block `handle`, as a 16-bit program passes
+/// one in a DDE message: None if it isn't a block that is there.
+pub fn global_bytes(cpu: &Cpu, handle: u16) -> Option<Vec<u8>> {
+    let size = global::size(cpu, handle);
+    let at = linear(cpu, (global::handle_to_sel(handle) as u32) << 16);
+    if size == 0 || at == 0 {
+        return None;
+    }
+    Some(peek_upto(cpu, at, size as usize))
+}
+
+/// A global block of the running task holding `bytes`, as a 16-bit
+/// program allocates one to pass in a DDE message (GMEM_MOVEABLE and
+/// GMEM_DDESHARE): its handle, or 0.
+pub fn global_block_of(cpu: &mut Cpu, bytes: &[u8]) -> u16 {
+    let owner = current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
+    let flags = global::GMEM_MOVEABLE | global::GMEM_DDESHARE;
+    let handle = global::alloc(cpu, flags, bytes.len() as u32, owner, false);
+    if handle == 0 {
+        return 0;
+    }
+    let at = linear(cpu, (global::handle_to_sel(handle) as u32) << 16);
+    if at == 0 || !poke(cpu, at, bytes) {
+        global::free(cpu, handle);
+        return 0;
+    }
+    handle
+}
+
 /// Whether the context `ctx` the IDT's gate was entered from is a Win16
 /// task's: its faults end the task (task.rs).
 pub fn is_task_context(cpu: &Cpu, _ctx: &Context) -> bool {

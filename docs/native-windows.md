@@ -701,11 +701,17 @@ Windows 95 has them and made when first asked for, item id lists,
 ShellExecuteA and ShellExecuteExA (programs, documents by the types
 the registry gives their extensions, folders, URLs by their scheme's
 key) and SHBrowseForFolderA as a dialog with a list of folders.
-Program Manager's DDE server, which InstallShield 5 makes its program
+Program Manager's DDE server, which setup programs make their program
 groups through, is built in, as Explorer answered for it: a group is a
 folder under the Start menu's Programs, an item a shell link in it.
 DDEML in USER32 talks to that server alone, as no program can be a
-DDE server or client of another yet. VERSION.DLL reads version
+DDE server or client of another yet. Setup programs that send raw DDE
+messages instead (the Microsoft Setup Toolkit, 16-bit InstallShield)
+reach it through a hidden window of class Progman, made at the first
+WM_DDE_INITIATE broadcast or the first FindWindow for its class or its
+title, which answers INITIATE for PROGMAN, EXECUTE, REQUEST for the
+groups and TERMINATE, with Windows 3.1's lParam for 16-bit programs
+and PackDDElParam's for 32-bit ones. VERSION.DLL reads version
 resources and installs files with VerFindFileA and VerInstallFileA,
 and LZ32 and KERNEL32 expand files that COMPRESS.EXE packed. OLE32
 creates objects from the class objects programs register, from the
@@ -786,11 +792,12 @@ and Prairie Dog Hunt (VB2).
 
 Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
 the SimTower demo, and the InstallShield of the Lemmings demo. All three
-copy and expand their files. None of them can make its Program Manager
-group, because nothing answers the WM_DDE_INITIATE they send to PROGMAN
-(only DDEML conversations reach shell32's Program Manager): the Setup
-Toolkit asks whether to ignore that for each item and then finishes, and
-InstallShield stays running with no window once its files are in.
+copy and expand their files. The WinG SDK's and the Lemmings demo's make
+their Program Manager groups through raw DDE messages, and the WinG
+SDK's setup finishes. The Lemmings demo's SETUP.EXE, which starts
+InstallShield, then waits for TOOLHELP's NotifyRegister to tell it the
+installer ended, which the built-in TOOLHELP doesn't do, so it stays
+running with no window.
 
 Some choices in the earlier phases keep this phase from having to rework
 them:

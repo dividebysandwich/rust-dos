@@ -75,6 +75,45 @@ fn name(cpu: &mut Cpu, at: u32) -> Option<Name> {
     found
 }
 
+/// The atom of the string atom `name`, added if it isn't there and
+/// counted once more if it is (Program Manager's DDE replies): 0 when
+/// there is no room.
+pub fn add(cpu: &mut Cpu, name: &str) -> u16 {
+    let t = table(cpu);
+    let slot = match t.find(name) {
+        Some(i) => i,
+        None => match t.slots.iter().position(Option::is_none) {
+            Some(free) => free,
+            None if t.slots.len() < 0x1_0000 - FIRST as usize => {
+                t.slots.push(None);
+                t.slots.len() - 1
+            }
+            None => return 0,
+        },
+    };
+    let entry = t.slots[slot].get_or_insert(Atom {
+        name: name.to_string(),
+        count: 0,
+    });
+    entry.count += 1;
+    FIRST + slot as u16
+}
+
+/// The name of the atom `atom`, "#" and the number for an integer atom;
+/// None when there is no such atom.
+pub fn name_of(cpu: &mut Cpu, atom: u16) -> Option<String> {
+    if atom == 0 {
+        None
+    } else if atom < FIRST {
+        Some(format!("#{}", atom))
+    } else {
+        let slots = &table(cpu).slots;
+        slots
+            .get((atom - FIRST) as usize)
+            .and_then(|s| s.as_ref().map(|a| a.name.clone()))
+    }
+}
+
 /// GlobalAddAtomA(name): the atom of `name`, added if it isn't there and
 /// counted once more if it is; 0 when the name isn't one.
 pub(super) fn global_add_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -82,27 +121,11 @@ pub(super) fn global_add_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         None => 0,
         Some(Name::Integer(n)) => n,
         Some(Name::Text(text)) => {
-            let t = table(cpu);
-            let slot = match t.find(&text) {
-                Some(i) => i,
-                None => match t.slots.iter().position(Option::is_none) {
-                    Some(free) => free,
-                    None if t.slots.len() < 0x1_0000 - FIRST as usize => {
-                        t.slots.push(None);
-                        t.slots.len() - 1
-                    }
-                    None => {
-                        set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
-                        return Some(0);
-                    }
-                },
-            };
-            let entry = t.slots[slot].get_or_insert(Atom {
-                name: text,
-                count: 0,
-            });
-            entry.count += 1;
-            FIRST + slot as u16
+            let atom = add(cpu, &text);
+            if atom == 0 {
+                set_error(cpu, super::ERROR_NOT_ENOUGH_MEMORY);
+            }
+            atom
         }
     };
     Some(atom as u32)
@@ -154,18 +177,8 @@ pub(super) fn global_delete_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// number for an integer atom, cut to `size` - 1 characters and ended
 /// with a NUL; its length, or 0 when there is no such atom or no room.
 pub(super) fn global_get_atom_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (atom, buffer, size) = (args[0] & 0xFFFF, args[1], args[2]);
-    let text = if atom == 0 {
-        None
-    } else if atom < FIRST as u32 {
-        Some(format!("#{}", atom))
-    } else {
-        let slots = &table(cpu).slots;
-        slots
-            .get((atom - FIRST as u32) as usize)
-            .and_then(|s| s.as_ref().map(|a| a.name.clone()))
-    };
-    let Some(text) = text.filter(|_| size > 0) else {
+    let (atom, buffer, size) = (args[0] as u16, args[1], args[2]);
+    let Some(text) = name_of(cpu, atom).filter(|_| size > 0) else {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(0);
     };
