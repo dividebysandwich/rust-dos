@@ -235,6 +235,10 @@
 # Banshee or Voodoo3), or 8, 256 colours from a palette, for programs that
 # need them.
 #win32_depth=auto
+# Which calls of the built-in Windows' functions the log gets a line for:
+# all, every call; collapsed (the default), the first few calls from each
+# place in a program a second and a count of the rest; or off.
+#win32_trace=collapsed
 # The DOS version programs are told, such as 5.00 (the default), 6.22 or
 # 7.10. The FAT32 functions of MS-DOS 7 (INT 21h AX=7302h to 7305h), which
 # disk utilities use, answer from 7.00 on; FAT32 drives mount at any

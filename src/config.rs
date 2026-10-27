@@ -42,7 +42,8 @@ pub use edit::{
 pub use parse::{MAX_MEMSIZE, MIN_MEMSIZE, parse, parse_memsize};
 pub use settings::{Settings, parse_mouse_sensitivity};
 pub use types::{
-    AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, WindowsVersion,
+    AspectRatio, DesktopDepth, DosVersion, Filter, MidiSynth, Mt32Model, SoundConfig, Win32Trace,
+    WindowsVersion,
 };
 
 /// Written to the default location on first start.
@@ -206,6 +207,8 @@ pub struct Config {
     pub win32_version: Option<WindowsVersion>,
     /// The depth of its desktop (`win32_depth`).
     pub win32_depth: Option<DesktopDepth>,
+    /// Which of its functions' calls the log gets (`win32_trace`).
+    pub win32_trace: Option<Win32Trace>,
     /// DOS's tables packed low, as DOS=HIGH has them (`dos_high`).
     pub dos_high: Option<bool>,
     /// The DOS version programs are told (`dos_version`).

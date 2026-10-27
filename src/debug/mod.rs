@@ -46,7 +46,9 @@ pub(crate) use status::stop_fields;
 pub use status::{folders_json, regs_json};
 use trace::{TraceEntry, TraceRing};
 
-const LOG_RING_CAPACITY: usize = 5000;
+/// The log lines `/api/log` keeps: some minutes of a game's, with the
+/// built-in Windows' calls collapsed (src/win32/trace.rs).
+const LOG_RING_CAPACITY: usize = 50_000;
 
 /// State shared between the emulator thread and the server thread.
 pub struct Shared {
@@ -362,6 +364,8 @@ pub enum Cmd {
     Exceptions,
     /// The built-in Windows's processes, modules, threads and handles.
     Win32,
+    /// Set the level of the log's trace of its calls (`win32_trace`).
+    Win32Trace(rust_dos::config::Win32Trace),
     /// DirectDraw's display mode and surfaces.
     Win32Ddraw,
     /// A DirectDraw surface's pixels; `keyed` makes those its source blit

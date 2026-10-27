@@ -15,7 +15,9 @@ fn hex(v: u32) -> String {
 
 /// The built-in Windows as it is now.
 pub fn win32_json(cpu: &Cpu) -> Value {
-    snapshot_json(&rust_dos::win32::snapshot(cpu))
+    let mut json = snapshot_json(&rust_dos::win32::snapshot(cpu));
+    json["trace"] = json!(rust_dos::win32::trace::level(cpu).name());
+    json
 }
 
 pub fn snapshot_json(s: &Snapshot) -> Value {
