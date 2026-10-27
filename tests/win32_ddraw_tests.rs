@@ -1159,3 +1159,119 @@ fn change_display_settings_without_a_mode_gives_the_desktops_back() {
     let mode = cpu.bus.vbe.mode.expect("a VBE mode");
     assert_eq!((mode.width, mode.height), (640, 480));
 }
+
+// GDI on the screen in a mode DirectDraw set.
+
+const GDI_USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC", "FillRect"]);
+const GDI_GDI32: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "CreateSolidBrush",
+    ],
+);
+const G_CREATE_WINDOW: usize = 0;
+const G_GET_DC: usize = 1;
+const G_FILL_RECT: usize = 2;
+const G_DIRECT_DRAW_CREATE: usize = 3;
+const G_CREATE_PALETTE: usize = 4;
+const G_SELECT_PALETTE: usize = 5;
+const G_REALIZE_PALETTE: usize = 6;
+const G_CREATE_SOLID_BRUSH: usize = 7;
+
+// The GDI program's data, after the others'.
+const G_HDC: u32 = 0xA00;
+const G_HPAL: u32 = 0xA04;
+const G_BRUSH: u32 = 0xA08;
+const G_RECT: u32 = 0xA10;
+const G_LOGPAL: u32 = 0xA20;
+
+/// The color the GDI program's palette has.
+const G_COLOR: [u8; 3] = [0x40, 0x80, 0xC0];
+
+/// Full screen at 640x480x8, then GDI on the window's DC, as Smacker
+/// draws Myth's movies: a palette of one color realized, and a
+/// rectangle filled with it from 10,10 to 20,20.
+fn gdi_in_mode_program() -> (Vec<u8>, u32) {
+    let mut d = screen_data();
+    put32(&mut d, G_RECT, 10);
+    put32(&mut d, G_RECT + 4, 10);
+    put32(&mut d, G_RECT + 8, 20);
+    put32(&mut d, G_RECT + 12, 20);
+    // LOGPALETTE: version 0x300, one entry, PC_NOCOLLAPSE.
+    put32(&mut d, G_LOGPAL, 0x0001_0300);
+    put(
+        &mut d,
+        G_LOGPAL + 4,
+        &[G_COLOR[0], G_COLOR[1], G_COLOR[2], 4],
+    );
+    let dlls = [
+        GDI_USER32,
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        GDI_GDI32,
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            G_CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, G_DIRECT_DRAW_CREATE, &create)?;
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mode = [Arg::I(640), Arg::I(480), Arg::I(8)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        c.api(a, l, G_GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(G_HDC)), eax)?;
+        c.api(a, l, G_CREATE_PALETTE, &[Arg::At(G_LOGPAL)])?;
+        a.mov(dword_ptr(l.at(G_HPAL)), eax)?;
+        let select = [Arg::Val(G_HDC), Arg::Val(G_HPAL), Arg::I(0)];
+        c.api(a, l, G_SELECT_PALETTE, &select)?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        // PALETTEINDEX(0).
+        c.api(a, l, G_CREATE_SOLID_BRUSH, &[Arg::I(0x0100_0000)])?;
+        a.mov(dword_ptr(l.at(G_BRUSH)), eax)?;
+        let fill = [Arg::Val(G_HDC), Arg::At(G_RECT), Arg::Val(G_BRUSH)];
+        c.api(a, l, G_FILL_RECT, &fill)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn gdi_draws_on_the_screen_in_the_mode_directdraw_set() {
+    let (program, data) = gdi_in_mode_program();
+    let mut cpu = machine("gdi_in_mode", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 10);
+    assert_eq!(r[1..4], [0; 3]);
+    // The palette's color takes the first entry after the static ones,
+    // in the DAC too, and the rectangle is that entry.
+    assert_eq!(r[7], 1);
+    assert_eq!(r[9], 1);
+    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
+    let dac = &cpu.bus.vga.palette[10 * 3..11 * 3];
+    assert_eq!(dac, G_COLOR.map(|v| v >> shift));
+    let vram = &cpu.bus.vbe.vram;
+    assert_eq!(vram[10 * 640 + 10..10 * 640 + 20], [10; 10]);
+    assert_eq!(vram[19 * 640 + 19], 10);
+    assert_eq!(vram[20 * 640 + 20], 0);
+}

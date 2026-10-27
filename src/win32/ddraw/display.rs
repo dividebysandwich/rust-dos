@@ -5,12 +5,13 @@
 //! A mode DirectDraw sets is one the display adapter has (`screen`):
 //! one of the VESA BIOS's, or of DirectDraw's own sizes, or on a Banshee
 //! or Voodoo3 the card's own. While it is set the display is
-//! DirectDraw's: GDI's drawing on the screen goes nowhere, and USER32
-//! doesn't put the desktop back when a window shows. RestoreDisplayMode,
-//! the end of exclusive mode and the end of the process give the screen
-//! back: the desktop's mode again, repainted, or text mode when there is
-//! no desktop. Glide on a Banshee or Voodoo3 takes the display the same
-//! way (`take`, `give_back`).
+//! DirectDraw's: GDI draws on its picture in that mode
+//! (`screen::gdi_mode`), and USER32 doesn't put the desktop back when a
+//! window shows. RestoreDisplayMode, the end of exclusive mode and the
+//! end of the process give the screen back: the desktop's mode again,
+//! repainted, or text mode when there is no desktop. Glide on a Banshee
+//! or Voodoo3 takes the display the same way (`take`, `give_back`), and
+//! GDI's drawing on the screen goes nowhere then.
 //!
 //! Video memory is the adapter's: the VESA BIOS's 4 MB, or the card's
 //! 16 MB, which its 3D engine draws into. The picture on the screen is
@@ -58,8 +59,8 @@ pub struct Display {
     pub flip_at: u64,
 }
 
-/// Whether DirectDraw (or Glide) has the display: GDI doesn't draw on
-/// the screen.
+/// Whether DirectDraw (or Glide) has the display: GDI draws on the
+/// picture in its mode, or nowhere for Glide (`screen::gdi_mode`).
 pub fn owns_display(cpu: &mut Cpu) -> bool {
     state(cpu).display.mode.0 != 0
 }

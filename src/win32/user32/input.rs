@@ -1148,10 +1148,11 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 t.step = 3;
             }
             3 => {
-                // On a desktop of 256 colours the window may realize its
+                // On a palette device (a desktop of 256 colours, or an
+                // 8-bit mode DirectDraw set) the window may realize its
                 // palette in the foreground: WM_QUERYNEWPALETTE, once.
                 if t.var(A_PALETTE) == 0
-                    && crate::win32::version::palette_desktop(cpu)
+                    && crate::win32::gdi32::palette::palette_device(cpu)
                     && user(cpu).is_window(hwnd)
                 {
                     t.set(A_PALETTE, 1);

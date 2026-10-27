@@ -271,7 +271,8 @@ pub fn colors(cpu: &mut Cpu, pal: u32) -> Option<Vec<u32>> {
 }
 
 /// Put the palette at the interface `pal` in the DAC, if DirectDraw has
-/// the display.
+/// the display. GDI's next RealizePalette puts the system palette back
+/// even for the palette it realized last.
 pub fn show(cpu: &mut Cpu, pal: u32) {
     if !super::display::owns_display(cpu) {
         return;
@@ -280,6 +281,7 @@ pub fn show(cpu: &mut Cpu, pal: u32) {
         return;
     };
     crate::win32::screen::set_colors(cpu, 0, &colors);
+    crate::win32::gdi32::gdi(cpu).last_realized = 0;
 }
 
 crate::state_fields!(Palette { caps, entries });
