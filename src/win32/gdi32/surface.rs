@@ -151,7 +151,8 @@ impl Surface {
         match target {
             Target::Memory => None,
             Target::Screen => {
-                let (_, _, _, pitch) = screen(cpu);
+                // 8 or 32 bits a pixel (`screen`).
+                let pitch = width as usize * bpp as usize / 8;
                 let data = match crate::win32::screen::gdi_mode(cpu) {
                     Some(m) => crate::win32::screen::load_rows(cpu, &m, y0 as u32, rows as u32),
                     None => vec![0; pitch * rows as usize],

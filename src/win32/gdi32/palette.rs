@@ -398,9 +398,8 @@ pub fn palette_deleted(cpu: &mut Cpu, handle: u32) {
 }
 
 /// AnimatePalette(hpal, start, count, entries): only the entries that
-/// are PC_RESERVED change. On a desktop of 256 colours, the entries of
-/// the system palette they took change with them, and the screen at
-/// once.
+/// are PC_RESERVED change. On a palette device, the entries of the
+/// system palette they took change with them, and the screen at once.
 pub fn animate_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (handle, start, count, at) = (args[0], args[1] as usize, args[2] as usize, args[3]);
     let Some(n) = gdi(cpu).palette(handle).map(|p| p.entries.len()) else {
@@ -483,9 +482,8 @@ pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(old)
 }
 
-/// Realize the palette of the DC `hdc` on a desktop of 256 colours: how
-/// many of its entries' mappings changed, and whether it is the primary
-/// palette.
+/// Realize the palette of the DC `hdc` on a palette device: how many of
+/// its entries' mappings changed, and whether it is the primary palette.
 fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
     let hpal = gdi(cpu).dc(hdc).map_or(0, |d| d.attrs.palette);
     let state = gdi(cpu);
@@ -583,11 +581,17 @@ fn realize(cpu: &mut Cpu, hdc: u32) -> (u32, bool) {
         .enumerate()
         .filter(|&(i, m)| palette.mapping.get(i) != Some(m))
         .count() as u32;
+    // In a mode DirectDraw set, its palette may have put other colors in
+    // the DAC: all of the system palette goes there.
+    let differs = |i: &usize| system[*i] != before[*i];
+    let shown = if crate::win32::ddraw::owns_display(cpu) {
+        Some((0, 255))
+    } else {
+        (0..256).find(differs).zip((0..256).rev().find(differs))
+    };
     let state = gdi(cpu);
     state.system_use = uses;
     state.system_owner = owners;
-    let differs = |i: &usize| system[*i] != before[*i];
-    let shown = (0..256).find(differs).zip((0..256).rev().find(differs));
     state.system_palette = system;
     if let Some(super::Object {
         kind: Kind::Palette { palette },
@@ -650,9 +654,9 @@ pub fn get_system_palette_use(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
 }
 
 /// SetSystemPaletteUse(hdc, use): the use it had. A screen without a
-/// palette keeps its static colors. On a desktop of 256 colours,
-/// SYSPAL_NOSTATIC leaves black and white the only static colors, and
-/// SYSPAL_STATIC puts the 20 back.
+/// palette keeps its static colors. On a palette device, SYSPAL_NOSTATIC
+/// leaves black and white the only static colors, and SYSPAL_STATIC
+/// puts the 20 back.
 pub fn set_system_palette_use(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     init(cpu);
     if !palette_device(cpu) {

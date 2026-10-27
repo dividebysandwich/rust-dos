@@ -369,14 +369,10 @@ pub fn set_colors(cpu: &mut Cpu, first: usize, colors: &[u32]) {
 /// desktop's. None while Glide has the display, where GDI's drawing
 /// goes nowhere.
 pub fn gdi_mode(cpu: &Cpu) -> Option<Mode> {
-    let display = &cpu.bus.win32.ddraw.display;
-    let (width, height, bpp) = display.mode;
-    if width == 0 {
+    if cpu.bus.win32.ddraw.display.mode.0 == 0 {
         return Some(desktop(cpu));
     }
-    if display.mode_owner == super::ddraw::display::GLIDE {
-        return None;
-    }
+    let (width, height, bpp) = super::ddraw::display::screen_mode(cpu)?;
     let pitch = mode(cpu)
         .filter(|m| (m.width, m.height, m.bpp) == (width, height, bpp))
         .map_or(width * bpp / 8, |m| m.pitch);
@@ -429,8 +425,8 @@ pub fn store_rows(cpu: &mut Cpu, mode: &Mode, top: u32, data: &[u8]) {
     for (i, row) in data.chunks_exact(row_len).enumerate() {
         let at = (top + i as u32) * mode.pitch;
         let pixels = row.as_chunks::<4>().0.iter();
-        let raw: Vec<u8> = match mode.bpp {
-            32 | 8 => row.to_vec(),
+        let raw: std::borrow::Cow<[u8]> = match mode.bpp {
+            32 | 8 => row.into(),
             24 => pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect(),
             _ => pixels
                 .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
