@@ -1,14 +1,15 @@
 //! Logical palettes and the system palette.
 //!
-//! On a desktop of 32, 24 or 16 bits a pixel a palette only says what
+//! In a mode of 32, 24 or 16 bits a pixel a palette only says what
 //! PALETTEINDEX colors and DIB_PAL_COLORS tables are: realizing one
 //! changes nothing on the screen.
 //!
-//! On a desktop of 256 colours (`win32_depth=8`) the screen's pixels are
-//! indices into the system palette, which the DAC holds, as with a
-//! palette display driver of Windows 3.1 and 95. Its 20 static colors
-//! are at its ends (2 with SYSPAL_NOSTATIC), and realizing a logical
-//! palette maps each of its entries to an entry of the system palette:
+//! On a desktop of 256 colours (`win32_depth=8`), and in an 8-bit mode
+//! DirectDraw set, the screen's pixels are indices into the system
+//! palette, which the DAC holds, as with a palette display driver of
+//! Windows 3.1 and 95. Its 20 static colors are at its ends (2 with
+//! SYSPAL_NOSTATIC), and realizing a logical palette maps each of its
+//! entries to an entry of the system palette:
 //!
 //! - In the foreground (the palette USER's SelectPalette made the
 //!   primary one, selected into a DC of the foreground window without
@@ -36,7 +37,6 @@ use super::{
 };
 use crate::cpu::Cpu;
 use crate::win32::user32::{read_words, write_words};
-use crate::win32::version::palette_desktop;
 
 pub const PC_RESERVED: u8 = 1;
 pub const PC_EXPLICIT: u8 = 2;
@@ -91,6 +91,13 @@ pub fn static_uses(static_use: u32) -> Vec<u8> {
         .collect()
 }
 
+/// Whether the screen GDI draws on is a palette device, its pixels
+/// indices into the system palette: a desktop of 256 colours, or an
+/// 8-bit mode DirectDraw set (`screen::gdi_mode`).
+pub fn palette_device(cpu: &Cpu) -> bool {
+    crate::win32::screen::gdi_mode(cpu).is_some_and(|m| m.bpp == 8)
+}
+
 /// The system palette's colors, as COLORREFs: the colors of a desktop of
 /// 256 colours.
 pub fn system_colors(cpu: &mut Cpu) -> Vec<u32> {
@@ -98,8 +105,10 @@ pub fn system_colors(cpu: &mut Cpu) -> Vec<u32> {
     gdi(cpu).system_palette.iter().map(|&e| rgb(e)).collect()
 }
 
-/// Put the system palette in the DAC, on a desktop of 256 colours that
-/// shows (not while DirectDraw has the display).
+/// Put the system palette in the DAC, on a palette device
+/// (`palette_device`): in an 8-bit mode DirectDraw set too, as GDI's
+/// palette manager on Windows 95 and 98 sets the hardware's palette
+/// whatever set the mode.
 pub fn show_system_palette(cpu: &mut Cpu) {
     show_system_entries(cpu, 0, 255);
 }
@@ -107,7 +116,7 @@ pub fn show_system_palette(cpu: &mut Cpu) {
 /// Put the system palette's entries `first..=last` in the DAC, as
 /// `show_system_palette` does.
 fn show_system_entries(cpu: &mut Cpu, first: usize, last: usize) {
-    if !palette_desktop(cpu) || crate::win32::ddraw::owns_display(cpu) {
+    if !palette_device(cpu) {
         return;
     }
     let colors = system_colors(cpu);
@@ -603,7 +612,7 @@ pub fn realize_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0xFFFF_FFFF);
     };
-    if !palette_desktop(cpu) {
+    if !palette_device(cpu) {
         return Some(0);
     }
     let (changed, primary) = realize(cpu, hdc);
@@ -634,7 +643,7 @@ pub fn get_system_palette_entries(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// GetSystemPaletteUse(hdc).
 pub fn get_system_palette_use(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
     init(cpu);
-    if !palette_desktop(cpu) {
+    if !palette_device(cpu) {
         return Some(SYSPAL_STATIC);
     }
     Some(gdi(cpu).static_use)
@@ -646,7 +655,7 @@ pub fn get_system_palette_use(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
 /// SYSPAL_STATIC puts the 20 back.
 pub fn set_system_palette_use(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     init(cpu);
-    if !palette_desktop(cpu) {
+    if !palette_device(cpu) {
         return Some(SYSPAL_STATIC);
     }
     let new = args[1];

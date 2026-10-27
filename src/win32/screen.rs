@@ -360,49 +360,84 @@ pub fn set_colors(cpu: &mut Cpu, first: usize, colors: &[u32]) {
     vga.mark_dirty_full();
 }
 
-// The desktop's rows, for GDI, which draws on 32-bit pixels, or on the
-// 8-bit pixels of a desktop of 256 colours.
+// The rows of the picture GDI draws on, which it works on as 32-bit
+// pixels, or as 8-bit ones in a mode of 256 colours.
 
-/// The desktop's rows `top..top + rows` as 32-bit pixels (0x00RRGGBB),
-/// `width * 4` bytes a row, or as they are at 8 bits a pixel.
-pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
-    let d = desktop(cpu);
-    let mut raw = vec![0u8; (d.pitch * rows) as usize];
-    read(cpu, top * d.pitch, &mut raw);
-    match d.bpp {
-        32 | 8 => raw,
-        24 => raw
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|&[b, g, r]| [b, g, r, 0])
-            .collect(),
-        _ => raw
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|p| from_565(u16::from_le_bytes(*p)).to_le_bytes())
-            .collect(),
+/// The picture GDI draws on, at the start of video memory: the mode
+/// DirectDraw set while it has the display, as GDI on Windows 95 and 98
+/// draws on the primary surface in whatever mode is set, else the
+/// desktop's. None while Glide has the display, where GDI's drawing
+/// goes nowhere.
+pub fn gdi_mode(cpu: &Cpu) -> Option<Mode> {
+    let display = &cpu.bus.win32.ddraw.display;
+    let (width, height, bpp) = display.mode;
+    if width == 0 {
+        return Some(desktop(cpu));
     }
+    if display.mode_owner == super::ddraw::display::GLIDE {
+        return None;
+    }
+    let pitch = mode(cpu)
+        .filter(|m| (m.width, m.height, m.bpp) == (width, height, bpp))
+        .map_or(width * bpp / 8, |m| m.pitch);
+    Some(Mode {
+        width,
+        height,
+        bpp,
+        pitch,
+    })
 }
 
-/// Store 32-bit pixels, `width * 4` bytes a row (or 8-bit ones on a
-/// desktop of 256 colours), as the desktop's rows from `top` on.
-pub fn store_desktop(cpu: &mut Cpu, top: u32, data: &[u8]) {
-    let d = desktop(cpu);
-    if d.bpp == 32 || d.bpp == 8 {
-        write(cpu, top * d.pitch, data);
-        return;
+/// The desktop's rows `top..top + rows`, as `load_rows` gives them.
+pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
+    load_rows(cpu, &desktop(cpu), top, rows)
+}
+
+/// The rows `top..top + rows` of the picture in `mode` at the start of
+/// video memory, as 32-bit pixels (0x00RRGGBB), `width * 4` bytes a
+/// row, or at 8 bits a pixel as they are, `width` bytes a row.
+pub fn load_rows(cpu: &Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
+    let len = (mode.width * mode.bpp / 8) as usize;
+    let mut raw = vec![0u8; len];
+    let mut out = Vec::with_capacity(mode.width as usize * 4 * rows as usize);
+    for y in top..top + rows {
+        read(cpu, y * mode.pitch, &mut raw);
+        match mode.bpp {
+            32 | 8 => out.extend_from_slice(&raw),
+            24 => out.extend(
+                raw.as_chunks::<3>()
+                    .0
+                    .iter()
+                    .flat_map(|&[b, g, r]| [b, g, r, 0]),
+            ),
+            _ => out.extend(
+                raw.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .flat_map(|p| from_565(u16::from_le_bytes(*p)).to_le_bytes()),
+            ),
+        }
     }
-    let pixels = data.as_chunks::<4>().0.iter();
-    let raw: Vec<u8> = if d.bpp == 24 {
-        pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect()
-    } else {
-        pixels
-            .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
-            .collect()
-    };
-    write(cpu, top * d.pitch, &raw);
+    out
+}
+
+/// Store rows as `load_rows` gives them as the rows from `top` on of
+/// the picture in `mode`.
+pub fn store_rows(cpu: &mut Cpu, mode: &Mode, top: u32, data: &[u8]) {
+    let bytes = if mode.bpp == 8 { 1 } else { 4 };
+    let row_len = (mode.width * bytes) as usize;
+    for (i, row) in data.chunks_exact(row_len).enumerate() {
+        let at = (top + i as u32) * mode.pitch;
+        let pixels = row.as_chunks::<4>().0.iter();
+        let raw: Vec<u8> = match mode.bpp {
+            32 | 8 => row.to_vec(),
+            24 => pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect(),
+            _ => pixels
+                .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
+                .collect(),
+        };
+        write(cpu, at, &raw);
+    }
 }
 
 /// A 5-6-5 pixel as 0x00RRGGBB, each channel widened by repeating its top

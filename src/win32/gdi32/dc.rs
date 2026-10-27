@@ -549,15 +549,16 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetDeviceCaps(hdc, index): the display's, the screen's size at 96
-/// pixels an inch, with the desktop's depth: 32 bits a pixel, 24 on an
-/// S3 ViRGE, or 16 on a Banshee or Voodoo3. A desktop of 256 colours is
-/// a palette device: 8 bits a pixel, RC_PALETTE, a palette of 256
+/// pixels an inch, with the depth of the mode GDI draws on: the
+/// desktop's, 32 bits a pixel, 24 on an S3 ViRGE, or 16 on a Banshee or
+/// Voodoo3, or that of the mode DirectDraw set. A mode of 256 colours
+/// is a palette device: 8 bits a pixel, RC_PALETTE, a palette of 256
 /// entries with 20 static colors, and 6 bits a channel in the DAC.
 pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
-    let bpp = crate::win32::screen::desktop(cpu).bpp;
+    let bpp = super::surface::screen_mode(cpu).bpp;
     match args[1] {
         BITSPIXEL => return Some(bpp),
         // COLORRES: the bits of a color the display shows.
@@ -811,7 +812,7 @@ pub fn get_nearest_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MEMORY => gdi(cpu)
             .bitmap(dc.attrs.bitmap)
             .is_some_and(|b| b.dib.is_none() && b.bpp == 8),
-        _ => crate::win32::version::palette_desktop(cpu),
+        _ => super::palette::palette_device(cpu),
     };
     if device {
         let map = super::palette::DeviceMap::new(cpu, dc.attrs.palette);
