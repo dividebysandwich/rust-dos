@@ -11,7 +11,7 @@ use crate::win32::loader::{TLS_ARRAY, TLS_SLOTS};
 use crate::win32::memory::{GRANULARITY, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE};
 use crate::win32::object::{self, CURRENT_PROCESS, Kind};
 use crate::win32::seh::{self, CONTEXT_SIZE};
-use crate::win32::thread::{self, Thread};
+use crate::win32::thread::{self, STACK_FLOOR, Thread};
 use crate::win32::{Context, Process, process, with_process};
 
 const STILL_ACTIVE: u32 = 0x103;
@@ -104,8 +104,8 @@ pub(super) fn create_thread(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             release(bus, p, t);
         }
         let memory = &mut p.memory;
-        let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
-        let top = stack + reserve;
+        let stack = memory.reserve(None, STACK_FLOOR + reserve, PRIVATE, SHARED)?;
+        let top = stack + STACK_FLOOR + reserve;
         let commit = reserve.min(STACK_COMMIT);
         memory.commit(bus, top - commit, commit, USER | WRITABLE)?;
         let tib = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;

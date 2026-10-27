@@ -17,6 +17,7 @@
 
 use super::call::{self, Call, SEH_FILTER, SEH_HANDLER, SEH_UNWIND};
 use super::memory::{PAGE, PAGE_READWRITE, USER, WRITABLE};
+use super::thread::STACK_FLOOR;
 use super::{Context, ESP, process};
 use crate::cpu::{Cpu, Seg};
 use crate::instructions::fpu::control;
@@ -149,12 +150,13 @@ fn present(cpu: &Cpu, lin: u32, len: u32) -> bool {
 }
 
 /// A page fault at `address` in the running thread's stack, below what is
-/// committed of it: commit down to there. Whether it was one.
+/// committed of it and above its floor: commit down to there. Whether it
+/// was one.
 fn grow_stack(cpu: &mut Cpu, address: u32) -> bool {
     let Some(thread) = process(cpu).current_thread() else {
         return false;
     };
-    let (bottom, tib) = (thread.stack.0, thread.tib);
+    let (bottom, tib) = (thread.stack.0 + STACK_FLOOR, thread.tib);
     let Some(limit) = super::peek_32(cpu, tib + TIB_STACK_LIMIT) else {
         return false;
     };

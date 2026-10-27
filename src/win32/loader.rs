@@ -14,6 +14,7 @@ use super::memory::{
 };
 use super::stubs::{self, STUB};
 use super::system::{self, SYSTEM_BLOCK_PAGES};
+use super::thread::STACK_FLOOR;
 use super::{FIRST_MISSING, MAX_MISSING, Module, Process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -258,16 +259,17 @@ fn build(
     }
     let bus = &mut cpu.bus;
 
-    // The stack: the reserve, its top committed.
+    // The stack: the reserve in whole 64 KB, its top committed, and the
+    // floor below it.
     let reserve = image.headers.stack_reserve.clamp(GRANULARITY, 0x100_0000);
     process.stack_reserve = reserve;
     let headers = &image.headers;
     process.subsystem_version =
         (headers.major_subsystem as u32) << 16 | headers.minor_subsystem as u32;
-    let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
     let reserve = reserve.next_multiple_of(GRANULARITY);
+    let stack = memory.reserve(None, STACK_FLOOR + reserve, PRIVATE, SHARED)?;
     let commit = reserve.min(MAX_STACK_COMMIT);
-    let stack_top = stack + reserve;
+    let stack_top = stack + STACK_FLOOR + reserve;
     memory.commit(bus, stack_top - commit, commit, USER | WRITABLE)?;
 
     // The idle loop's stack, which only interrupts use.

@@ -36,6 +36,17 @@ pub const WAIT_TIMEOUT: u32 = 0x102;
 /// DllMain's reason for a thread that starts.
 const DLL_THREAD_ATTACH: u32 = 2;
 
+/// The bottom of every thread's stack reservation, which the stack never
+/// grows into: Windows 95 and 98 reserve 64 KB more than the stack's
+/// size, below it, so VirtualQuery's AllocationBase for an address on
+/// the stack is that much lower than the stack can reach. Watcom's C
+/// library counts on it: its stack check takes the allocation base plus
+/// 76 KB as the lowest the stack may go on Windows 95 and 98, and a
+/// program with a 64 KB stack and nothing below it fails at its first
+/// checked call with "Stack Overflow!". A page fault in it is a stack
+/// overflow.
+pub const STACK_FLOOR: u32 = 0x1_0000;
+
 /// What a thread waits for.
 #[derive(Clone, Debug, Default)]
 pub struct Wait {
@@ -63,7 +74,8 @@ pub struct Thread {
     pub tib: u32,
     /// Its TIB's selector, which FS has.
     pub selector: u16,
-    /// Its stack: the lowest address of its reserve, and its top.
+    /// Its stack: the lowest address of its reserve, `STACK_FLOOR` below
+    /// the lowest it can grow to, and its top.
     pub stack: (u32, u32),
     /// Its context while it doesn't run.
     pub ctx: Context,

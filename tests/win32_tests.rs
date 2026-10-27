@@ -1296,6 +1296,81 @@ fn a_program_reserves_commits_and_protects_memory() {
     );
 }
 
+/// The PE file `exe` with the stack reserve and commit sizes in its
+/// optional header changed.
+fn with_stack(mut exe: Vec<u8>, reserve: u32, commit: u32) -> Vec<u8> {
+    let pe = u32::from_le_bytes(exe[0x3C..0x40].try_into().unwrap()) as usize;
+    let optional = pe + 24;
+    exe[optional + 72..optional + 76].copy_from_slice(&reserve.to_le_bytes());
+    exe[optional + 76..optional + 80].copy_from_slice(&commit.to_le_bytes());
+    exe
+}
+
+/// A stack's reservation goes 64 KB below its 64 KB multiple of the
+/// reserve, as on Windows 98, whose main thread and CreateThread's
+/// threads of a program with a 20 KB reserve have 128 KB between
+/// VirtualQuery's AllocationBase and the TIB's stack top. Watcom's C
+/// library takes the allocation base plus 76 KB as the lowest its
+/// stack may go on Windows 95 and 98 (Cryo's Riverworld stops with
+/// "Stack Overflow!" without it). A bit each in the exit code.
+#[test]
+fn a_stack_reservation_has_64_kb_below_the_stack() {
+    let names: &[&str] = &["VirtualQuery", "CreateThread", "WaitForSingleObject"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let program = program(BASE, false, imports, &[0; 0x100], |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let info = l.at(0x40) as i32;
+        let thread_info = l.at(0x80) as i32;
+        let thread_span = l.at(0xC0);
+        let mut over = a.create_label();
+        a.xor(ebx, ebx)?;
+        // The main thread's stack, from its allocation base to its top.
+        push_args(a, &[info, 28])?;
+        a.push(esp)?;
+        a.call(f("VirtualQuery"))?;
+        a.mov(eax, dword_ptr(4).fs())?;
+        a.sub(eax, dword_ptr(info as u64 + 4))?;
+        a.cmp(eax, 0x2_0000)?;
+        bit_if_equal(a, 0)?;
+        // Its committed pages end at the top.
+        a.mov(eax, dword_ptr(info as u64))?;
+        a.add(eax, dword_ptr(info as u64 + 12))?;
+        a.cmp(eax, dword_ptr(4).fs())?;
+        bit_if_equal(a, 1)?;
+        // A thread with the program's stack size, which measures its own:
+        // its parameter, flags and where its id goes (which Windows 98
+        // needs).
+        push_args(a, &[0, 0, l.at(0xC4) as i32])?;
+        // Its address, which the CALL over it pushes.
+        a.call(over)?;
+        push_args(a, &[thread_info, 28])?;
+        a.push(esp)?;
+        a.call(f("VirtualQuery"))?;
+        a.mov(eax, dword_ptr(4).fs())?;
+        a.sub(eax, dword_ptr(thread_info as u64 + 4))?;
+        a.mov(dword_ptr(thread_span), eax)?;
+        a.ret_1(4)?;
+        a.set_label(&mut over)?;
+        push_args(a, &[0, 0])?;
+        a.call(f("CreateThread"))?;
+        a.push(-1)?;
+        a.push(eax)?;
+        a.call(f("WaitForSingleObject"))?;
+        a.cmp(dword_ptr(thread_span), 0x2_0000)?;
+        bit_if_equal(a, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, text) = run("stack_floor", with_stack(program, 0x5000, 0x5000));
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b} {}",
+        !code & 7,
+        text
+    );
+}
+
 /// A heap of its own with a maximum size, a moveable global block, and a
 /// mapping of the swap file viewed twice. A bit each in the exit code.
 #[test]
