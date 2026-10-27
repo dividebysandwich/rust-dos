@@ -20,6 +20,7 @@ pub mod menu;
 pub mod message;
 pub mod monitor;
 pub mod paint;
+pub mod progman;
 pub mod rect;
 pub mod resource;
 pub mod sysparams;
@@ -1297,6 +1298,8 @@ static APIS: &[Api] = &[
     stdcall("DdeEnableCallback", 621, 3, succeed),
     stdcall("DdePostAdvise", 622, 3, succeed),
     stdcall("DdeSetUserHandle", 623, 3, succeed),
+    // Program Manager's window, the raw DDE messages' server.
+    stdcall("ProgmanWndProc", 0, 4, progman::wnd_proc),
 ];
 
 crate::state_fields!(State {

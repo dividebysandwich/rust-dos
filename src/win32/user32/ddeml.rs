@@ -9,10 +9,11 @@
 //!
 //! The servers a client can talk to are the shell's own: Program
 //! Manager's ("PROGMAN"), which setup programs ask to make Start Menu
-//! groups and items (SHELL32's progman.rs). DdeNameService registers a
-//! program's services, but conversations with servers that are programs
-//! aren't made: DdeConnect fails for them with
-//! DMLERR_NO_CONV_ESTABLISHED.
+//! groups and items (SHELL32's progman.rs); programs that talk to it in
+//! raw DDE messages reach it through its window (user32/progman.rs).
+//! DdeNameService registers a program's services, but conversations
+//! with servers that are programs aren't made: DdeConnect fails for
+//! them with DMLERR_NO_CONV_ESTABLISHED.
 
 use super::{current_tid, string_at};
 use crate::cpu::Cpu;
@@ -703,8 +704,27 @@ pub fn dde_client_transaction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub const FOLDER_CLASS: &str = "CabinetWClass";
 
 /// Open a window titled with each of `titles`, through CreateWindowExA
-/// called as the program would call it, and return TRUE.
-fn open_windows(cpu: &mut Cpu, titles: Vec<String>) -> Option<u32> {
+/// called as the program would call it, and return TRUE. A group whose
+/// window is open already keeps that one, as Explorer's does.
+pub fn open_windows(cpu: &mut Cpu, titles: Vec<String>) -> Option<u32> {
+    let mut titles = titles;
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let state = &cpu.bus.win32.user;
+    for h in state.top_levels() {
+        if super::class::is_class(state, h, FOLDER_CLASS)
+            && let Some(w) = state.window(h)
+        {
+            seen.push(w.text.clone());
+        }
+    }
+    titles.retain(|t| {
+        let text = crate::dosstr::to_bytes(t);
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(&text)) {
+            return false;
+        }
+        seen.push(text);
+        true
+    });
     if titles.is_empty() {
         return Some(1);
     }

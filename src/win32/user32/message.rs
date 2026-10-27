@@ -481,6 +481,10 @@ fn send(
     timeout: Option<(u32, u32)>,
 ) -> Option<u32> {
     if hwnd == HWND_BROADCAST || hwnd == 0xFFFF_FFFF {
+        // Program Manager answers DDE from its first broadcast on.
+        if msg == super::progman::WM_DDE_INITIATE {
+            super::progman::server(cpu);
+        }
         let mut vars = vec![msg, wp, lp, 0, 0];
         vars.extend(user(cpu).top_levels());
         return task::start(cpu, TASK_BROADCAST, vars, 0);
@@ -949,6 +953,11 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
         return Some(FALSE);
     };
+    // Program Manager's window, of no thread, handles what is posted to
+    // it now.
+    if super::progman::is_server(w) {
+        return super::progman::posted(cpu, hwnd, msg, wp, lp);
+    }
     let tid = w.tid;
     post(cpu, tid, m);
     Some(TRUE)

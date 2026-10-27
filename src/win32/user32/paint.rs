@@ -544,6 +544,33 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
     thread::wake(cpu);
 }
 
+/// What of the window `hwnd` the visible siblings above it cover, on the
+/// screen.
+pub fn covered(state: &State, hwnd: u32) -> Region {
+    let siblings = state
+        .window(state.parent(hwnd))
+        .map(|p| p.children.clone())
+        .unwrap_or_default();
+    let mut area = Region::new();
+    for h in siblings.into_iter().take_while(|&h| h != hwnd) {
+        if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+            area = area.or(&shape(state, h));
+        }
+    }
+    area.and(&shape(state, hwnd))
+}
+
+/// SetWindowPos brought `hwnd` above siblings that covered `before` of
+/// it: what they no longer cover needs painting.
+pub fn raised(cpu: &mut Cpu, hwnd: u32, before: &Region) {
+    let state = user(cpu);
+    let shown = before.diff(&covered(state, hwnd));
+    if !shown.is_empty() {
+        invalidate_screen(state, hwnd, &shown);
+        thread::wake(cpu);
+    }
+}
+
 /// SetWindowPos moved, sized, showed or hid `hwnd`: what it uncovered
 /// shows what is under it, and the window needs painting where it is.
 pub fn moved(

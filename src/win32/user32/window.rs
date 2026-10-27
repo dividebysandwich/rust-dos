@@ -1707,6 +1707,12 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                // What siblings above it cover, which a raise shows.
+                let was_covered = if was_visible && flags & SWP_NOZORDER == 0 {
+                    super::paint::covered(state, hwnd)
+                } else {
+                    Region::new()
+                };
                 let Some(w) = state.window_mut(hwnd) else {
                     return Next::Done(FALSE);
                 };
@@ -1742,6 +1748,15 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let now_visible = user(cpu).is_visible(hwnd);
                 if flags & SWP_NOREDRAW == 0 || flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW) != 0 {
                     super::paint::moved(cpu, hwnd, old_screen, was_visible, now_visible, flags);
+                }
+                // Moved or shown, it is painted whole; raised in place,
+                // where the windows above it were.
+                if now_visible
+                    && flags & SWP_NOREDRAW == 0
+                    && !was_covered.is_empty()
+                    && user(cpu).screen_rect(hwnd) == old_screen
+                {
+                    super::paint::raised(cpu, hwnd, &was_covered);
                 }
                 if flags & SWP_HIDEWINDOW != 0 {
                     let state = user(cpu);
