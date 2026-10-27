@@ -56,7 +56,10 @@ jobs:
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev libasound2-dev
+        uses: $/.github/actions/apt-install
+        with:
+          packages: libsdl2-dev libasound2-dev
+          update: false
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -165,17 +168,26 @@ jobs:
       # without git in the container, actions/checkout falls back to
       # downloading through the REST API. zstd is for the cache archives, and
       # build-essential also brings binutils (strip) and dpkg-dev
-      # (dpkg-shlibdeps, which cargo-deb runs for the .deb's Depends).
+      # (dpkg-shlibdeps, which cargo-deb runs for the .deb's Depends). The
+      # packages from libx11-dev on are what the AppImage's SDL2 is built
+      # against.
       - name: Install build environment (compat container)
         if: matrix.container
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        uses: $/.github/actions/apt-install
+        with:
+          packages: >-
             git ca-certificates curl zstd build-essential cmake pkg-config libsdl2-dev libasound2-dev
-          # The workspace belongs to the runner's user and the container
-          # runs as root, so git would refuse the checkout as "dubious
-          # ownership" and the binaries would report `commit unknown`.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev
+            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
+          update: true
+
+      # The workspace belongs to the runner's user and the container runs as
+      # root, so git would refuse the checkout as "dubious ownership" and the
+      # binaries would report `commit unknown`.
+      - name: Trust the workspace (compat container)
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -195,10 +207,15 @@ jobs:
             echo "PKG=rust-dos-$RELEASE_VERSION-${{ matrix.label }}"
           } >> "$GITHUB_ENV"
 
+      # With the package lists updated, as these builds make the release's
+      # packages.
       - name: Install dependencies (Linux)
         # The -compat container jobs installed everything above, pre-checkout.
         if: runner.os == 'Linux' && !matrix.container
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev libasound2-dev
+        uses: $/.github/actions/apt-install
+        with:
+          packages: libsdl2-dev libasound2-dev
+          update: true
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -343,10 +360,6 @@ jobs:
           APPIMAGETOOL_VERSION: 1.9.1
           APPIMAGE_RUNTIME_VERSION: "20251108"
         run: |
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
-            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev \
-            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
           curl -fsSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-$SDL_VERSION.tar.gz"
           tar xzf sdl.tar.gz
           cmake -S "SDL2-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TEST=OFF
@@ -522,14 +535,17 @@ jobs:
     steps:
       - name: Install build environment (compat container)
         if: matrix.container
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates curl zstd build-essential pkg-config zip
-          # The workspace belongs to the runner's user and the container
-          # runs as root, so git would refuse the checkout as "dubious
-          # ownership" and the binaries would report `commit unknown`.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        uses: $/.github/actions/apt-install
+        with:
+          packages: git ca-certificates curl zstd build-essential pkg-config zip
+          update: true
+
+      # The workspace belongs to the runner's user and the container runs as
+      # root, so git would refuse the checkout as "dubious ownership" and the
+      # binaries would report `commit unknown`.
+      - name: Trust the workspace (compat container)
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
