@@ -348,9 +348,9 @@ pub struct Cursor {
 
 /// What a Banshee's or Voodoo3's video processor shows, for the OpenGL
 /// renderer to compose as `Banshee::render` draws it: the desktop of
-/// `width` by `height` pixels, each line twice in half mode, the overlay
-/// window over it and the cursor on top, through the CLUT (512 entries of
-/// RGB). The memory the desktop and the overlay show (bytes from their
+/// `width` by `height` pixels, each line twice in half mode and each
+/// pixel twice across when `wide`, the overlay window over it and the
+/// cursor on top, through the CLUT (512 entries of RGB). The memory the desktop and the overlay show (bytes from their
 /// first on), where they aren't buffers the renderer draws, comes when
 /// the picture may have changed since the last frame; None keeps what
 /// came before.
@@ -359,6 +359,7 @@ pub struct Scanout {
     pub width: u32,
     pub height: u32,
     pub half: bool,
+    pub wide: bool,
     pub desktop: Surface,
     pub overlay: Option<Overlay>,
     pub cursor: Option<Cursor>,

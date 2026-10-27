@@ -1107,8 +1107,9 @@ impl VoodooGl {
     /// A Banshee's or Voodoo3's picture (`Scanout`), composed as its
     /// video processor does: the desktop, the overlay and the cursor, each
     /// surface from the buffer the renderer draws or from the memory that
-    /// came with the scanout, at `scale` times the desktop's size. Then
-    /// what `screen` has over `base`, as `composite`.
+    /// came with the scanout, at `scale` times the picture's size (the
+    /// desktop's, twice as wide when its pixels are wide). Then what
+    /// `screen` has over `base`, as `composite`.
     fn compose(
         &mut self,
         gl: &glow::Context,
@@ -1118,7 +1119,8 @@ impl VoodooGl {
         let scaled = self.scaled();
         let s = self.scanout.as_deref()?;
         let banshee = self.banshee.as_mut().ok()?;
-        let (w, h) = (s.width.max(1), s.height.max(1));
+        let across = if s.wide { 2 } else { 1 };
+        let (w, h) = (s.width.max(1) * across, s.height.max(1));
         let size = (w * self.scale, h * self.scale);
         let buffer = |surface: &Surface| surface.buffer.and_then(|b| self.targets.get(&b));
         let desktop = buffer(&s.desktop);
@@ -1209,6 +1211,7 @@ impl VoodooGl {
             u.u_rect.set(gl, [0.0, 0.0, w as f32, h as f32]);
             u.u_size.set(gl, [w as f32, h as f32]);
             u.u_scale.set(gl, self.scale as i32);
+            u.u_across.set(gl, across as i32);
             let i = |v: u32| v as i32;
             let d = &s.desktop;
             let bypass = d.bypass as i32;
@@ -1705,7 +1708,8 @@ mod tests {
         let gl =
             unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
 
-        // A 160x100 desktop at 1000h, memory and CLUT of noise.
+        // A 160x100 desktop at 1000h, memory and CLUT of noise. It is
+        // narrow, so the picture shows each pixel twice across.
         let (w, h) = (160usize, 100usize);
         let card = |cfg: u32, stride: u32, overlay: Option<(u32, u32, [u32; 2])>| {
             let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
@@ -1807,6 +1811,12 @@ mod tests {
                     Some((0x8_0000, 320, [at(5, 5), at(100, 60)])),
                 ),
             ),
+            ("8 bits, 480 pixels across, not widened", {
+                let mut v = card(0, 480, None);
+                // 60 characters of 8 pixels.
+                v.banshee.as_mut().unwrap().crtc[0x01] = 59;
+                v
+            }),
         ];
         let mut cases = cases;
         // A 3D buffer the overlay shows, as it is and scaled, and one the
@@ -1845,6 +1855,11 @@ mod tests {
                     .as_ref()
                     .is_some_and(|o| o.surface.buffer.is_some());
             assert_eq!(from_buffer, n >= buffers, "{name}: drawn by the renderer");
+            // The picture's size: the desktop's, twice as wide when it is
+            // less than 400 pixels wide.
+            let (w, h) = v.picture_size();
+            assert_eq!(s.wide, w == 2 * 160, "{name}: widened");
+            let (w, h) = (w as usize, h as usize);
             let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, 1, 1).unwrap();
             assert!(renderer.banshee_problem().is_none());
             renderer.run(&gl, recording);
