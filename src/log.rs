@@ -86,6 +86,9 @@ impl LogFile {
                 // The line is longer than a cut can make room for.
                 Ok(false) => return,
                 Err(_) => {
+                    // At the end, wherever the failed cut left the
+                    // file's position.
+                    let _ = self.writer.seek(SeekFrom::End(0));
                     let _ = writeln!(self.writer, "{}", STOPPED);
                     self.stopped = true;
                     return;
@@ -116,13 +119,18 @@ impl LogFile {
         }
         self.writer.flush()?;
         let keep = (room / 2).min(room - len);
-        let from = self.written.saturating_sub(keep).max(self.tail);
+        let mut from = self.written.saturating_sub(keep).max(self.tail);
+        // From the first whole line on: read the byte before `from` too,
+        // so that a line starting at `from` counts as whole.
+        let whole = from > self.tail;
+        if whole {
+            from -= 1;
+        }
         let file = self.writer.get_mut();
         file.seek(SeekFrom::Start(from))?;
         let mut latest = Vec::new();
         file.read_to_end(&mut latest)?;
-        // From the first whole line on.
-        let skip = if from > self.tail {
+        let skip = if whole {
             latest
                 .iter()
                 .position(|&b| b == b'\n')

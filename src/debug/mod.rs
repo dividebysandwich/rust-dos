@@ -136,7 +136,9 @@ impl Shared {
             events: broadcast::channel(1024).0,
             trace: broadcast::channel(64).0,
             audio: broadcast::channel(256).0,
-            log: Mutex::new(VecDeque::with_capacity(LOG_RING_CAPACITY)),
+            // It grows as lines come: room for all of them at the start
+            // would take megabytes no log may need.
+            log: Mutex::new(VecDeque::new()),
             log_n: watch::channel(0).0,
             start_time,
             journal: Mutex::new(Journal::new(capacity)),

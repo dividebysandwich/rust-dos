@@ -128,7 +128,10 @@ impl Site {
     }
 }
 
-/// A hasher for the sites' keys, which are one word each.
+/// A hasher for the sites' keys, which are one word each. The multiply
+/// carries a bit only upwards, and the table picks a bucket by the low
+/// bits: `finish` turns the high bits, where the caller's address is,
+/// down to them, or the sites of one function would share a bucket.
 #[derive(Default)]
 struct KeyHasher(u64);
 
@@ -144,7 +147,7 @@ impl std::hash::Hasher for KeyHasher {
     }
 
     fn finish(&self) -> u64 {
-        self.0
+        self.0.rotate_left(26)
     }
 }
 
@@ -211,14 +214,19 @@ impl Trace {
     /// the sites idle for long.
     fn sweep(&mut self, now: u64) {
         self.next_sweep = now + WINDOW;
-        let due = &mut self.due;
+        let mut due = Vec::new();
         self.sites.retain(|_, site| {
             if !site.ended(now) {
                 return true;
             }
-            due.extend(site.summary());
+            let order = (site.start, site.call.key());
+            due.extend(site.summary().map(|line| (order, line)));
             now >= site.last && now - site.last < IDLE
         });
+        // In the order the windows started, as `flush` writes them: the
+        // table's order changes with every site added.
+        due.sort_unstable_by_key(|&(order, _)| order);
+        self.due.extend(due.into_iter().map(|(_, line)| line));
     }
 
     /// Queue every summary, and start the sites again.
