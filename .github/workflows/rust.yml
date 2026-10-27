@@ -144,8 +144,10 @@ jobs:
     needs: [test, scope]
     if: needs.scope.outputs.builds != '[]'
     runs-on: ${{ matrix.os }}
-    # Empty for every non-compat entry, which means "no container".
-    container: ${{ matrix.container }}
+    # Empty for every non-compat entry, which means "no container". zizmor
+    # can't see the images in a matrix that comes from `scope`, so it
+    # reports this line; they are in the BUILDS list there.
+    container: ${{ matrix.container }} # zizmor: ignore[unpinned-images]
     # The Windows 7 build is on nightly, which may break now and then: the
     # release goes ahead without it.
     continue-on-error: ${{ matrix.win7 == true }}
