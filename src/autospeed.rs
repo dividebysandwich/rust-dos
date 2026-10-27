@@ -63,8 +63,12 @@ const FIRST_STEP: f64 = 4.0;
 const FINE_STEP: f64 = 1.15;
 /// A step up whose frame rate grew by at least this share of the speed's
 /// growth (in the logarithm) found the program still wanting more: frame
-/// rates grow in jumps where a game paces its frames by timer ticks. A
-/// step down that kept this share of the frames lost nothing.
+/// rates grow in jumps where a game paces its frames by timer ticks. Steps
+/// down that kept this share of the frames the speed held at lost nothing.
+/// The share is of the held frame rate, not the last step's: a game whose
+/// frame rate falls a little with each step (Myth's 3Dfx renderer, whose
+/// frames also wait for the card) would otherwise be stepped down for as
+/// long as each step loses less than this, to half its frames.
 const FOLLOWS: f64 = 0.5;
 const KEPT: f64 = 0.9;
 /// Kept above the speed the frame rate stopped following at.
@@ -348,6 +352,9 @@ pub struct AutoSpeed {
     /// didn't agree yet, and how many.
     unsettled: Option<(f64, u32)>,
     step: Step,
+    /// The highest frame rate the search held at since it started, which
+    /// steps down keep `KEPT` of.
+    held: Option<f64>,
     /// While a protected-mode program gets all the host has for its reads
     /// and writes, the speed it had before.
     working: Option<u32>,
@@ -375,6 +382,7 @@ impl AutoSpeed {
             settle_until: 0,
             unsettled: None,
             step: Step::Start,
+            held: None,
             working: None,
             output: (0, 0),
             protected_least: PROTECTED_LEAST,
@@ -439,6 +447,7 @@ impl AutoSpeed {
         self.settle_until = 0;
         self.unsettled = None;
         self.step = Step::Start;
+        self.held = None;
         self.working = None;
     }
 
@@ -553,10 +562,12 @@ impl AutoSpeed {
         }
         if m.polling >= WAITING {
             self.step = Step::Start;
+            self.held = None;
             return clamp(c * WAITING_STEP);
         }
         let Some(fps) = m.fps else {
             self.step = Step::Start;
+            self.held = None;
             // A protected-mode program at work without frames loads, or
             // compiles, or is Windows: it reads and writes. Under a system
             // that idles, one that keeps the processor from halting works
@@ -626,7 +637,8 @@ impl AutoSpeed {
                 }
             }
             Step::Lowered { from, fps: before } if current < from => {
-                if fps >= before * KEPT {
+                let kept = self.held.map_or(before, |held| held.max(before));
+                if fps >= kept * KEPT {
                     down(self)
                 } else {
                     let knee = (c * before / fps).clamp(c, from as f64);
@@ -637,8 +649,13 @@ impl AutoSpeed {
                 let held = if held.is_nan() { fps } else { held };
                 let recent = if recent.is_nan() { fps } else { (recent + fps) / 2.0 };
                 if recent < held * DROPPED {
-                    up(self, FIRST_STEP, here)
-                } else if left > 1 {
+                    // A heavier scene: what the last one held at says
+                    // nothing of it.
+                    self.held = None;
+                    return up(self, FIRST_STEP, here);
+                }
+                self.held = Some(self.held.map_or(recent, |most| most.max(recent)));
+                if left > 1 {
                     self.step = Step::Hold { fps: held, left: left - 1, more, recent };
                     current
                 } else if more {
@@ -726,6 +743,28 @@ mod tests {
         };
         let speeds = run(f117, false, 20);
         assert!((20_000..=30_000).contains(&speeds[19]), "{:?}", speeds);
+    }
+
+    #[test]
+    fn steps_down_lose_no_more_than_kept_of_the_held_frame_rate() {
+        // Myth's 3Dfx renderer: its frames take the CPU's time and the
+        // card's, 9 a second at 20000, 17 at 60000 and no more than 18.5.
+        // Below that each step down loses 6-8% of the frames.
+        let myth = |speed: u32| Measurement {
+            fps: Some((1.0 / (1569.0 / speed as f64 + 0.0327)).min(18.5)),
+            polling: 0.0,
+            halted: 0.0,
+            output: 0.0,
+            refresh: 60.0,
+        };
+        let speeds = run(myth, true, 300);
+        let fps = |speed| myth(speed).fps.unwrap();
+        // Steps down from 59000 (17.3 frames a second) stop above 15.6
+        // and go back up; the one that went too far is a measurement.
+        let later = &speeds[100..];
+        assert!(later.iter().all(|&s| s >= 40_000), "{:?}", speeds);
+        let fewer = later.iter().filter(|&&s| fps(s) < 15.5).count();
+        assert!(fewer <= later.len() / 20, "{:?}", speeds);
     }
 
     #[test]
