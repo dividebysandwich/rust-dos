@@ -267,6 +267,8 @@ impl DiskController {
     /// The host name and the DOS name of the entry of `dir` that a DOS path
     /// component names: its long name in any case, or its short name. A
     /// name that matches nothing comes back uppercased, for creating it.
+    /// A name the kept entries lack is looked for in a fresh read, unless
+    /// a recent read lacked it too (`HostDirCache`).
     fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
         let target_upper = target.to_ascii_uppercase();
         let find = |entries: &[(String, String)]| {
@@ -277,9 +279,21 @@ impl DiskController {
                 .cloned()
         };
         let (entries, kept) = self.host_entries(dir);
-        find(&entries)
-            .or_else(|| kept.then(|| find(&self.host_dirs.reread(dir, || Self::read_host_entries(dir)))).flatten())
-            .unwrap_or((target_upper.clone(), target_upper))
+        if let Some(found) = find(&entries) {
+            return found;
+        }
+        if kept {
+            if self.host_dirs.known_missing(dir, &target_upper) {
+                return (target_upper.clone(), target_upper);
+            }
+            let entries = self.host_dirs.reread(dir, || Self::read_host_entries(dir));
+            if let Some(found) = find(&entries) {
+                return found;
+            }
+        }
+        // The entries were just read.
+        self.host_dirs.note_missing(dir, &target_upper);
+        (target_upper.clone(), target_upper)
     }
 
     // ========================================================================
