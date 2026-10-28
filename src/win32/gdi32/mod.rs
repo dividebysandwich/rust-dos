@@ -13,6 +13,8 @@
 pub mod bitmap;
 pub mod dc;
 pub mod draw;
+#[cfg(test)]
+mod draw_tests;
 pub mod font;
 mod gamma;
 pub mod metafile;
@@ -268,6 +270,10 @@ pub struct State {
     pub last_realized: u32,
     /// The fonts AddFontResourceA added, by file name.
     pub font_files: Vec<String>,
+    /// The last blit's translation table from a color table onto a
+    /// palette device (`draw::Translate::kept`). Not saved: a blit
+    /// uses it only when it is of the same colors through the same map.
+    pub kept_table: Option<Box<draw::KeptTable>>,
 }
 
 /// The stock objects, by GetStockObject's index; the default bitmap
@@ -1621,6 +1627,8 @@ crate::state_fields!(State {
     static_use,
     primary_palette,
     last_realized
+} skip {
+    kept_table
 });
 super::state_variants!(Kind {
     Pen { pen },
