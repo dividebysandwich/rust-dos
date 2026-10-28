@@ -6,9 +6,10 @@
 //! viewport, render states and texture stages, and the scissor box,
 //! depth bias and color mask the HAL takes from the device beside
 //! Direct3D 7's. The vertices then go through Direct3D's pipeline as
-//! DrawIndexedPrimitive's would, with the indices of glDrawElements or
-//! of the primitives OpenGL has and Direct3D hasn't (quads, quad
-//! strips, polygons and line loops).
+//! DrawIndexedPrimitive's would, with the indices of glDrawElements.
+//! OpenGL's primitives are assembled here (`primitives`), with the
+//! vertex flat shading takes the colors of where OpenGL has it, which
+//! is not where Direct3D has it.
 
 use super::super::ddraw::d3d::device::{
     self as inner_device, RS_ALPHAFUNC, RS_CLIPPING, RS_CULLMODE, RS_DESTBLEND, RS_FILLMODE,
@@ -24,7 +25,7 @@ use super::super::ddraw::d3d::hal::{
     RS_FOGCOLOR,
 };
 use super::super::ddraw::d3d::pipeline::{
-    self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_XYZ, IDENTITY, Layout, Matrix, Vertex,
+    self, CULL_CCW, CULL_CW, FVF_DIFFUSE, FVF_XYZ, IDENTITY, Layout, Matrix, Prim, Vertex,
 };
 use super::super::ddraw::d3d::{draw as d3d_draw, hal, states};
 use super::matrix::{self, mul};
@@ -50,14 +51,6 @@ const GL_TRIANGLE_FAN: u32 = 6;
 const GL_QUADS: u32 = 7;
 const GL_QUAD_STRIP: u32 = 8;
 const GL_POLYGON: u32 = 9;
-
-// Direct3D's primitives.
-const D3DPT_POINTLIST: u32 = 1;
-const D3DPT_LINELIST: u32 = 2;
-const D3DPT_LINESTRIP: u32 = 3;
-const D3DPT_TRIANGLELIST: u32 = 4;
-const D3DPT_TRIANGLESTRIP: u32 = 5;
-const D3DPT_TRIANGLEFAN: u32 = 6;
 
 // Types of arrays and indices.
 const GL_BYTE: u32 = 0x1400;
@@ -354,6 +347,82 @@ fn apply(cpu: &mut Cpu) -> Option<(usize, u32, bool)> {
     Some((index, a.inner, faces))
 }
 
+/// The primitives of `kind` (OpenGL's) that the vertices `order`
+/// (places in the vertices) make. Each takes its flat color from the
+/// vertex the OpenGL 1.1 specification gives (table 2.6): the last
+/// vertex of a line, of an independent triangle and of a quad, the
+/// third of each triangle of a strip or fan, and the first of a
+/// polygon. Direct3D takes the first vertex of a line or triangle and
+/// the second of a fan's triangle.
+fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
+    let n = order.len();
+    let mut out = Vec::new();
+    match kind {
+        GL_POINTS => out.extend(order.iter().map(|&i| Prim::Point(i))),
+        GL_LINES => out.extend(
+            order
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[a, b]| Prim::Line(a, b, b)),
+        ),
+        GL_LINE_STRIP | GL_LINE_LOOP => {
+            out.extend(order.windows(2).map(|w| Prim::Line(w[0], w[1], w[1])));
+            // A loop's last line goes back to the first vertex, and
+            // takes its color.
+            if kind == GL_LINE_LOOP && n >= 2 {
+                out.push(Prim::Line(order[n - 1], order[0], order[0]));
+            }
+        }
+        GL_TRIANGLES => out.extend(
+            order
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[a, b, c]| Prim::Triangle([a, b, c], c, 7)),
+        ),
+        // A quad strip's vertices are a triangle strip's, two triangles
+        // to a quad, both with the quad's last vertex's color.
+        GL_TRIANGLE_STRIP | GL_QUAD_STRIP => {
+            let n = if kind == GL_QUAD_STRIP { n & !1 } else { n };
+            for i in 0..n.saturating_sub(2) {
+                let (a, b, c) = (order[i], order[i + 1], order[i + 2]);
+                // Every other triangle the other way round, so that all
+                // wind as the first does.
+                let v = if i % 2 == 0 { [a, b, c] } else { [b, a, c] };
+                let provoking = if kind == GL_QUAD_STRIP {
+                    order[i / 2 * 2 + 3]
+                } else {
+                    c
+                };
+                out.push(Prim::Triangle(v, provoking, 7));
+            }
+        }
+        GL_TRIANGLE_FAN | GL_POLYGON => {
+            for i in 1..n.saturating_sub(1) {
+                let provoking = if kind == GL_POLYGON {
+                    order[0]
+                } else {
+                    order[i + 1]
+                };
+                out.push(Prim::Triangle(
+                    [order[0], order[i], order[i + 1]],
+                    provoking,
+                    7,
+                ));
+            }
+        }
+        GL_QUADS => {
+            for &[a, b, c, d] in order.as_chunks::<4>().0 {
+                out.push(Prim::Triangle([a, b, c], d, 7));
+                out.push(Prim::Triangle([a, c, d], d, 7));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Draw `kind` primitives (OpenGL's) of `vertices`, in the order
 /// `order` or as they are.
 fn draw(cpu: &mut Cpu, kind: u32, vertices: &[Vertex], order: Option<&[u32]>) {
@@ -378,40 +447,11 @@ fn draw(cpu: &mut Cpu, kind: u32, vertices: &[Vertex], order: Option<&[u32]>) {
     if triangles && !faces {
         return;
     }
-    let quads: Vec<u32>;
-    let looped: Vec<u32>;
-    let (d3d_kind, order) = match kind {
-        GL_POINTS => (D3DPT_POINTLIST, order),
-        GL_LINES => (D3DPT_LINELIST, &order[..order.len() & !1]),
-        GL_LINE_STRIP => (D3DPT_LINESTRIP, order),
-        GL_LINE_LOOP => {
-            looped = order.iter().chain(order.first()).copied().collect();
-            (D3DPT_LINESTRIP, &looped[..])
-        }
-        GL_TRIANGLES => (D3DPT_TRIANGLELIST, &order[..order.len() / 3 * 3]),
-        GL_TRIANGLE_STRIP => (D3DPT_TRIANGLESTRIP, order),
-        GL_TRIANGLE_FAN | GL_POLYGON => (D3DPT_TRIANGLEFAN, order),
-        GL_QUADS => {
-            quads = order
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|q| [q[0], q[1], q[2], q[0], q[2], q[3]])
-                .collect();
-            (D3DPT_TRIANGLELIST, &quads[..])
-        }
-        // A quad strip's vertices are a triangle strip's.
-        _ => (D3DPT_TRIANGLESTRIP, &order[..order.len() & !1]),
-    };
-    let min = match d3d_kind {
-        D3DPT_POINTLIST => 1,
-        D3DPT_LINELIST | D3DPT_LINESTRIP => 2,
-        _ => 3,
-    };
-    if order.len() < min {
+    let prims = primitives(kind, order);
+    if prims.is_empty() {
         return;
     }
-    let _ = d3d_draw::draw(cpu, inner, 8, &layout(), d3d_kind, vertices, Some(order), 0);
+    let _ = d3d_draw::draw_prims(cpu, inner, 8, &layout(), vertices, &prims, 0);
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
         c.drawn = true;
     }
@@ -1159,6 +1199,54 @@ mod tests {
         let (v, fit) = super::super::wgl::inner_viewport(&c).expect("on the buffers");
         assert_eq!((v.x, v.y, v.width, v.height), (10, 260, 300, 200));
         assert_eq!(fit, IDENTITY);
+    }
+
+    /// The vertex each primitive takes its flat color from.
+    fn provoking(kind: u32, n: u32) -> Vec<u32> {
+        let order: Vec<u32> = (0..n).collect();
+        primitives(kind, &order)
+            .iter()
+            .map(|p| match *p {
+                Prim::Point(i) => i,
+                Prim::Line(_, _, p) | Prim::Triangle(_, p, _) => p,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flat_colors_come_from_the_vertices_opengl_gives() {
+        // Table 2.6 of the OpenGL 1.1 specification, counting from 0.
+        assert_eq!(provoking(GL_POINTS, 3), [0, 1, 2]);
+        assert_eq!(provoking(GL_LINES, 5), [1, 3]);
+        assert_eq!(provoking(GL_LINE_STRIP, 4), [1, 2, 3]);
+        assert_eq!(provoking(GL_LINE_LOOP, 3), [1, 2, 0]);
+        assert_eq!(provoking(GL_TRIANGLES, 7), [2, 5]);
+        assert_eq!(provoking(GL_TRIANGLE_STRIP, 5), [2, 3, 4]);
+        assert_eq!(provoking(GL_TRIANGLE_FAN, 5), [2, 3, 4]);
+        assert_eq!(provoking(GL_QUADS, 9), [3, 3, 7, 7]);
+        assert_eq!(provoking(GL_QUAD_STRIP, 7), [3, 3, 5, 5]);
+        assert_eq!(provoking(GL_POLYGON, 5), [0, 0, 0]);
+    }
+
+    #[test]
+    fn primitives_keep_their_winding() {
+        assert_eq!(
+            primitives(GL_TRIANGLE_STRIP, &[0, 1, 2, 3]),
+            [
+                Prim::Triangle([0, 1, 2], 2, 7),
+                Prim::Triangle([2, 1, 3], 3, 7),
+            ]
+        );
+        assert_eq!(
+            primitives(GL_QUADS, &[0, 1, 2, 3]),
+            [
+                Prim::Triangle([0, 1, 2], 3, 7),
+                Prim::Triangle([0, 2, 3], 3, 7),
+            ]
+        );
+        // Too few vertices make nothing, a loop of one no line.
+        assert!(primitives(GL_LINE_LOOP, &[0]).is_empty());
+        assert!(primitives(GL_TRIANGLE_FAN, &[0, 1]).is_empty());
     }
 
     #[test]
