@@ -382,40 +382,50 @@ fn primitives(kind: u32, order: &[u32]) -> Vec<Prim> {
                 .map(|&[a, b, c]| Prim::Triangle([a, b, c], c, 7)),
         ),
         // A quad strip's vertices are a triangle strip's, two triangles
-        // to a quad, both with the quad's last vertex's color.
+        // to a quad, both with the quad's last vertex's color. The
+        // diagonal between them is no edge of the quad, so wireframe
+        // leaves it out: the first triangle's second edge, the second's
+        // first.
         GL_TRIANGLE_STRIP | GL_QUAD_STRIP => {
-            let n = if kind == GL_QUAD_STRIP { n & !1 } else { n };
+            let quads = kind == GL_QUAD_STRIP;
+            let n = if quads { n & !1 } else { n };
             for i in 0..n.saturating_sub(2) {
                 let (a, b, c) = (order[i], order[i + 1], order[i + 2]);
                 // Every other triangle the other way round, so that all
                 // wind as the first does.
                 let v = if i % 2 == 0 { [a, b, c] } else { [b, a, c] };
-                let provoking = if kind == GL_QUAD_STRIP {
-                    order[i / 2 * 2 + 3]
-                } else {
-                    c
+                let (provoking, edges) = match (quads, i % 2) {
+                    (true, 0) => (order[i + 3], 5),
+                    (true, _) => (c, 6),
+                    (false, _) => (c, 7),
                 };
-                out.push(Prim::Triangle(v, provoking, 7));
+                out.push(Prim::Triangle(v, provoking, edges));
             }
         }
+        // A polygon's wireframe is its outline: of the triangles of the
+        // fan it is cut into, only the first's first edge and the last's
+        // third are on it, besides each one's second.
         GL_TRIANGLE_FAN | GL_POLYGON => {
             for i in 1..n.saturating_sub(1) {
-                let provoking = if kind == GL_POLYGON {
-                    order[0]
+                let (provoking, edges) = if kind == GL_POLYGON {
+                    let first = if i == 1 { 1 } else { 0 };
+                    let last = if i + 2 == n { 4 } else { 0 };
+                    (order[0], 2 | first | last)
                 } else {
-                    order[i + 1]
+                    (order[i + 1], 7)
                 };
                 out.push(Prim::Triangle(
                     [order[0], order[i], order[i + 1]],
                     provoking,
-                    7,
+                    edges,
                 ));
             }
         }
+        // Two triangles to a quad, without the diagonal in wireframe.
         GL_QUADS => {
             for &[a, b, c, d] in order.as_chunks::<4>().0 {
-                out.push(Prim::Triangle([a, b, c], d, 7));
-                out.push(Prim::Triangle([a, c, d], d, 7));
+                out.push(Prim::Triangle([a, b, c], d, 3));
+                out.push(Prim::Triangle([a, c, d], d, 6));
             }
         }
         _ => {}
@@ -1240,13 +1250,34 @@ mod tests {
         assert_eq!(
             primitives(GL_QUADS, &[0, 1, 2, 3]),
             [
-                Prim::Triangle([0, 1, 2], 3, 7),
-                Prim::Triangle([0, 2, 3], 3, 7),
+                Prim::Triangle([0, 1, 2], 3, 3),
+                Prim::Triangle([0, 2, 3], 3, 6),
             ]
         );
         // Too few vertices make nothing, a loop of one no line.
         assert!(primitives(GL_LINE_LOOP, &[0]).is_empty());
         assert!(primitives(GL_TRIANGLE_FAN, &[0, 1]).is_empty());
+    }
+
+    #[test]
+    fn wireframe_leaves_out_the_diagonals_of_quads_and_polygons() {
+        let edges = |kind: u32, n: u32| -> Vec<u8> {
+            let order: Vec<u32> = (0..n).collect();
+            primitives(kind, &order)
+                .iter()
+                .map(|p| match *p {
+                    Prim::Triangle(_, _, e) => e,
+                    _ => 0,
+                })
+                .collect()
+        };
+        assert_eq!(edges(GL_QUADS, 4), [3, 6]);
+        assert_eq!(edges(GL_QUAD_STRIP, 6), [5, 6, 5, 6]);
+        assert_eq!(edges(GL_POLYGON, 3), [7]);
+        assert_eq!(edges(GL_POLYGON, 5), [3, 2, 6]);
+        // A strip's and a fan's triangles are each drawn whole.
+        assert_eq!(edges(GL_TRIANGLE_STRIP, 4), [7, 7]);
+        assert_eq!(edges(GL_TRIANGLE_FAN, 4), [7, 7]);
     }
 
     #[test]
