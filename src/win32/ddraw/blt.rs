@@ -3,7 +3,8 @@
 //! A destination with a clipper is drawn on only where its clip list
 //! says; BltFast takes no clipper. On the 3dfx device's card, fills
 //! are the card's fastfills, and copies go through its linear frame
-//! buffer.
+//! buffer. While the OpenGL renderer draws a Voodoo3, blits within its
+//! memory are the renderer's (`gpu_blt`).
 
 use super::surface::{self, KEY_DEST_BLT, KEY_SRC_BLT, Surface, surface_of};
 use super::{
@@ -114,6 +115,21 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     surface::shown(cpu, dst_id);
     if d.memory == surface::MEM_CARD && op.src.is_none() && op.dst_key.is_none() {
         super::voodoo::fill(cpu, &d, &rects, op.fill);
+        surface::changed(cpu, dst_id);
+        return Ok(());
+    }
+    let gpu = super::gpu_blt::Blit {
+        dst_id,
+        dst: &d,
+        area: op.dst,
+        rects: &rects,
+        src: op.src,
+        fill: op.fill,
+        src_key: op.src_key,
+        dst_key: op.dst_key,
+        mirror: [op.mirror_x, op.mirror_y],
+    };
+    if super::gpu_blt::run(cpu, &gpu) {
         surface::changed(cpu, dst_id);
         return Ok(());
     }

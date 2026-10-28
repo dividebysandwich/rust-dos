@@ -45,6 +45,7 @@ pub(super) mod directdraw;
 pub(super) mod display;
 pub mod enumerate;
 mod gamma;
+mod gpu_blt;
 pub(super) mod inspect;
 mod palette;
 pub(super) mod surface;

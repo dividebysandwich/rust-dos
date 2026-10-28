@@ -70,46 +70,6 @@ impl Vram {
         word.store((old & !(0xFF << shift)) | (value as u16) << shift, Relaxed);
     }
 
-    /// The bytes from byte address `a` on, into `out`: a word at a time
-    /// where they cover one whole. They must be within the memory.
-    pub fn read_bytes(&self, a: usize, out: &mut [u8]) {
-        let (a, out) = match out.split_first_mut() {
-            Some((first, rest)) if a & 1 != 0 => {
-                *first = self.byte(a);
-                (a + 1, rest)
-            }
-            _ => (a, out),
-        };
-        let (pairs, last) = out.as_chunks_mut::<2>();
-        let words = &self.words[a >> 1..][..pairs.len()];
-        for (pair, w) in pairs.iter_mut().zip(words) {
-            *pair = w.load(Relaxed).to_le_bytes();
-        }
-        if let [b] = last {
-            *b = self.byte(a + 2 * pairs.len());
-        }
-    }
-
-    /// `data` written from byte address `a` on, a word at a time where
-    /// it covers one whole. It must be within the memory.
-    pub fn write_bytes(&self, a: usize, data: &[u8]) {
-        let (a, data) = match data.split_first() {
-            Some((&first, rest)) if a & 1 != 0 => {
-                self.set_byte(a, first);
-                (a + 1, rest)
-            }
-            _ => (a, data),
-        };
-        let (pairs, last) = data.as_chunks::<2>();
-        let words = &self.words[a >> 1..][..pairs.len()];
-        for (pair, w) in pairs.iter().zip(words) {
-            w.store(u16::from_le_bytes(*pair), Relaxed);
-        }
-        if let [b] = last {
-            self.set_byte(a + 2 * pairs.len(), *b);
-        }
-    }
-
     /// Fill words `range` with `value`.
     pub fn fill(&self, range: std::ops::Range<usize>, value: u16) {
         for w in &self.words[range] {
@@ -163,6 +123,50 @@ impl Vram {
     /// Whether this and `other` are the same memory.
     pub fn same(&self, other: &Vram) -> bool {
         Arc::ptr_eq(&self.words, &other.words)
+    }
+
+    /// Bytes from byte address `start` on into `out`, as many as fit
+    /// before the end; the rest of `out` is left as it is.
+    pub fn read_bytes(&self, start: usize, out: &mut [u8]) {
+        let end = (start + out.len()).min(self.bytes());
+        if start >= end {
+            return;
+        }
+        let out = &mut out[..end - start];
+        let (mut at, mut i) = (start, 0);
+        if at & 1 != 0 {
+            out[0] = self.byte(at);
+            (at, i) = (at + 1, 1);
+        }
+        let (pairs, last) = out[i..].as_chunks_mut::<2>();
+        for (k, pair) in pairs.iter_mut().enumerate() {
+            *pair = self.get(at / 2 + k).to_le_bytes();
+        }
+        if let [byte] = last {
+            *byte = self.byte(end - 1);
+        }
+    }
+
+    /// Bytes from byte address `start` on written from `data`, as many as
+    /// fit before the end.
+    pub fn write_bytes(&self, start: usize, data: &[u8]) {
+        let end = (start + data.len()).min(self.bytes());
+        if start >= end {
+            return;
+        }
+        let data = &data[..end - start];
+        let (mut at, mut i) = (start, 0);
+        if at & 1 != 0 {
+            self.set_byte(at, data[0]);
+            (at, i) = (at + 1, 1);
+        }
+        let (pairs, last) = data[i..].as_chunks::<2>();
+        for (k, pair) in pairs.iter().enumerate() {
+            self.set(at / 2 + k, u16::from_le_bytes(*pair));
+        }
+        if let [byte] = last {
+            self.set_byte(end - 1, *byte);
+        }
     }
 
     /// All of it as little-endian bytes.

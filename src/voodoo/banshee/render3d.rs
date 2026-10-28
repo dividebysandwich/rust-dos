@@ -304,6 +304,7 @@ impl Voodoo {
         if self.queued_reach(addr, addr + 4) {
             self.flush();
         }
+        self.gpu_sync_bytes(addr, 4);
         super::blit2d::write(&self.fbi.ram, addr, 4, data, self.fbi.mask);
         self.mirror_memory(addr, addr + 4);
     }
@@ -324,6 +325,7 @@ impl Voodoo {
         if !self.spare(start as u32, (start + here.len()) as u32) {
             self.flush();
         }
+        self.gpu_sync_bytes(start as u32, here.len());
         self.fbi.ram.write_bytes(start, here);
         self.mirror_memory(start as u32, (start + here.len()) as u32);
         if !wrapped.is_empty() {
@@ -1097,8 +1099,19 @@ mod tests {
         assert_eq!(rows[0].values, [0xF800]);
     }
 
+    /// The pages of memory a frame's recording carries for the
+    /// renderer's copy of it: where each run starts and its bytes.
+    fn memory(frame: &Frame) -> Vec<(u32, &[u8])> {
+        let runs = frame.commands.iter().filter_map(|c| match c {
+            Command::Memory { at, bytes, .. } => Some((*at, &bytes[..])),
+            _ => None,
+        });
+        runs.collect()
+    }
+
     #[test]
-    fn the_scanout_sends_memory_only_when_it_may_have_changed() {
+    fn the_scanout_sends_the_pages_written_since_the_renderer_had_them() {
+        use super::super::super::pages::PAGE;
         use super::super::{LINEAR, VID_DESKTOP_OVERLAY_STRIDE};
         let mut v = mirrored();
         v.set_software_picture(false);
@@ -1106,18 +1119,20 @@ mod tests {
         v.write(VID_DESKTOP_OVERLAY_STRIDE, 1280, u32::MAX, now);
         reg3d(&mut v, COL_BUFFER_ADDR, 0x10_0000);
         reg3d(&mut v, COL_BUFFER_STRIDE, 1 << 15 | 10);
-        let scanout = |v: &mut Voodoo| v.take_mirror().unwrap().scanout.unwrap();
-        // The desktop at 0 isn't a buffer the renderer draws: its memory
-        // goes the first time, and not again until something changes.
-        let first = scanout(&mut v);
-        assert_eq!(first.desktop.buffer, None);
-        assert!(first.desktop_memory.is_some());
-        assert!(scanout(&mut v).desktop_memory.is_none());
+        // The desktop at 0 isn't a buffer the renderer draws: its pages
+        // go the first time, and not again until something writes them.
+        let first = v.take_mirror().unwrap();
+        assert_eq!(first.scanout.as_ref().unwrap().desktop.buffer, None);
+        assert_eq!(memory(&first).first().map(|m| m.0), Some(0));
+        assert!(memory(&v.take_mirror().unwrap()).is_empty());
         v.write(LINEAR + 4, 0x1234_5678, u32::MAX, now);
-        let memory = scanout(&mut v).desktop_memory.unwrap();
-        assert_eq!(memory[4..8], [0x78, 0x56, 0x34, 0x12]);
-        // Moved onto the colour buffer, it's drawn from there, and moved
-        // back, its memory goes again.
+        let frame = v.take_mirror().unwrap();
+        let sent = memory(&frame);
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].0, sent[0].1.len()), (0, PAGE as usize));
+        assert_eq!(sent[0].1[4..8], [0x78, 0x56, 0x34, 0x12]);
+        // Moved onto the colour buffer, it's drawn from there; moved back,
+        // the renderer still has its pages, and none go again.
         v.write(VID_DESKTOP_START_ADDR, 0x10_0000, u32::MAX, now);
         v.write(
             VID_PROC_CFG,
@@ -1126,22 +1141,26 @@ mod tests {
             now,
         );
         v.write(VID_DESKTOP_OVERLAY_STRIDE, 10, u32::MAX, now);
-        let on_buffer = scanout(&mut v);
-        assert_eq!(on_buffer.desktop.buffer, Some(0x10_0000 / 2));
-        assert!(on_buffer.desktop_memory.is_none());
+        let on_buffer = v.take_mirror().unwrap();
+        let scanout = on_buffer.scanout.as_ref().unwrap();
+        assert_eq!(scanout.desktop.buffer, Some(0x10_0000 / 2));
+        assert!(memory(&on_buffer).is_empty());
         v.write(VID_DESKTOP_START_ADDR, 0, u32::MAX, now);
         v.write(VID_PROC_CFG, VIDPROC_ENABLE | 1 << 18, u32::MAX, now);
         v.write(VID_DESKTOP_OVERLAY_STRIDE, 1280, u32::MAX, now);
-        assert!(scanout(&mut v).desktop_memory.is_some());
-        assert!(scanout(&mut v).desktop_memory.is_none());
+        assert!(memory(&v.take_mirror().unwrap()).is_empty());
         // A recording wants the software picture too, which looks at the
-        // change first: the scanout still hears of it.
+        // change first: the renderer still gets the page.
         v.set_software_picture(true);
         v.prepare_display();
         v.write(LINEAR + 8, 0x0BAD_F00D, u32::MAX, now);
         assert!(v.prepare_display());
-        let memory = scanout(&mut v).desktop_memory.unwrap();
-        assert_eq!(memory[8..12], [0x0D, 0xF0, 0xAD, 0x0B]);
+        let frame = v.take_mirror().unwrap();
+        assert_eq!(memory(&frame)[0].1[8..12], [0x0D, 0xF0, 0xAD, 0x0B]);
+        // A renderer starting over gets them all again.
+        v.set_mirror(false);
+        v.set_mirror(true);
+        assert_eq!(memory(&v.take_mirror().unwrap()).first().map(|m| m.0), Some(0));
     }
 
     #[test]

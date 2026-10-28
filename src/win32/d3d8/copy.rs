@@ -10,6 +10,7 @@ use super::device::{dd_surface_of, this_device};
 use super::resource::{self, FMT_A8R8G8B8};
 use super::{D3D_OK, D3DERR_INVALIDCALL, state};
 use crate::cpu::Cpu;
+use crate::voodoo::mirror::{Blit, BlitSource, Convert, Plane};
 use crate::win32::gdi32::Rect;
 use crate::win32::gdi32::dc::DCX_CLIPSIBLINGS;
 use crate::win32::screen;
@@ -304,21 +305,26 @@ pub fn present_window(cpu: &mut Cpu, back: u32, src: Option<Rect>, dst: Option<R
         return;
     }
     let visible = crate::win32::user32::paint::visible_region(user, window, DCX_CLIPSIBLINGS);
-    let pixels = read_argb(cpu, &s, &src);
-    let (sw, sh) = ((src.right - src.left) as i64, (src.bottom - src.top) as i64);
-    let (dw, dh) = ((dst.right - dst.left) as i64, (dst.bottom - dst.top) as i64);
     let (width, height, bpp, pitch) = ddraw::display::current(cpu);
     let screen_rect = Rect::new(0, 0, width as i32, height as i32);
     let bytes = bpp.div_ceil(8);
+    let rects: Vec<Rect> = visible
+        .rects
+        .iter()
+        .map(|r| r.intersect(&dst).intersect(&screen_rect))
+        .filter(|r| r.left < r.right && r.top < r.bottom)
+        .collect();
+    if rects.is_empty() || present_on_gpu(cpu, back, &src, &dst, &rects, pitch, bytes) {
+        return;
+    }
+    let pixels = read_argb(cpu, &s, &src);
+    let (sw, sh) = ((src.right - src.left) as i64, (src.bottom - src.top) as i64);
+    let (dw, dh) = ((dst.right - dst.left) as i64, (dst.bottom - dst.top) as i64);
     // On a desktop of 256 colours, the nearest color of the system
     // palette, remembered for each color.
     let system = (bytes == 1).then(|| crate::win32::gdi32::palette::system_colors(cpu));
     let mut indices = std::collections::HashMap::new();
-    for r in &visible.rects {
-        let r = r.intersect(&dst).intersect(&screen_rect);
-        if r.left >= r.right || r.top >= r.bottom {
-            continue;
-        }
+    for r in &rects {
         for y in r.top..r.bottom {
             let sy = ((y - dst.top) as i64 * sh / dh) as usize;
             let mut row = Vec::with_capacity(((r.right - r.left) as u32 * bytes) as usize);
@@ -342,4 +348,69 @@ pub fn present_window(cpu: &mut Cpu, back: u32, src: Option<Rect>, dst: Option<R
             screen::write(cpu, y as u32 * pitch + r.left as u32 * bytes, &row);
         }
     }
+}
+
+/// `present_window` on the GPU, when the OpenGL renderer has the card's
+/// memory (`voodoo::gpu`): the rectangle `src` of the back buffer `back`
+/// stretched onto `dst` of the desktop, `pitch` bytes a row and `bytes`
+/// a pixel, where `rects` are. A back buffer the 3D engine draws comes
+/// from the renderer's picture of it, without the software renderer
+/// drawing it first. False, with nothing done, for what goes on in
+/// software: a desktop of 256 colours, whose colours are the nearest of
+/// the palette's, and a back buffer in a format other than 5-6-5 or
+/// X8R8G8B8 or outside the card's memory.
+fn present_on_gpu(
+    cpu: &mut Cpu,
+    back: u32,
+    src: &Rect,
+    dst: &Rect,
+    rects: &[Rect],
+    pitch: u32,
+    bytes: u32,
+) -> bool {
+    if bytes < 2 || !cpu.bus.voodoo.as_ref().is_some_and(|v| v.gpu_ready()) {
+        return false;
+    }
+    let Some(format) = ddraw::state(cpu).surface(back).map(|s| s.format) else {
+        return false;
+    };
+    let Some((at, stride)) = dd_surface::card_memory(cpu, back) else {
+        return false;
+    };
+    let Some(card) = cpu.bus.voodoo.as_mut() else {
+        return false;
+    };
+    let masks = (format.bits, format.r, format.g, format.b);
+    let rgb565 = masks == (16, 0xF800, 0x07E0, 0x001F);
+    let rgb888 = masks == (32, 0xFF_0000, 0xFF00, 0xFF);
+    let rect = [src.left, src.top, src.right, src.bottom];
+    let (source, convert) = match card.gpu_color_buffer(at, stride) {
+        // The renderer's picture is 8 bits a channel.
+        Some(buffer) if rgb565 => {
+            let convert = if bytes == 2 { Convert::Narrow } else { Convert::None };
+            (BlitSource::Buffer { buffer, rect }, convert)
+        }
+        _ => {
+            let plane = Plane { start: at, stride, bpp: format.bits / 8 };
+            let convert = match (rgb565, rgb888, bytes) {
+                (true, _, 2) => Convert::None,
+                (true, _, _) => Convert::Widen,
+                // Bytes the same but the top one, which `present_window`
+                // leaves 0.
+                (_, true, 2) => Convert::Narrow,
+                _ => return false,
+            };
+            (BlitSource::Memory { plane, rect }, convert)
+        }
+    };
+    card.gpu_blit(Blit {
+        dst: Plane { start: 0, stride: pitch, bpp: bytes },
+        area: [dst.left, dst.top, dst.right, dst.bottom],
+        rects: rects.iter().map(|r| [r.left, r.top, r.right, r.bottom]).collect(),
+        src: source,
+        convert,
+        mirror: [false; 2],
+        src_key: None,
+        dst_key: None,
+    })
 }
