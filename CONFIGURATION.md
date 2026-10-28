@@ -1264,21 +1264,82 @@ directory.
 
 ### Windows games
 
-`windows=` in `[game]` says which Windows a game runs in:
+A Windows 95 or 98 game, or a Windows 3.1 program, runs in one of two
+Windows. `windows=` in the profile's `[game]` picks which:
 
-- `windows=builtin` runs it in the built-in Windows while the game
-  plays, as [`win32=true`](#emulator) does.
-- `windows=image` runs it in a Windows disk image that the profile's
-  `[autoexec]` boots (see
-  [an operating system](GAME-PACKAGES.md#an-operating-system)). The
-  profile gets a warning when its `[autoexec]` boots nothing.
+| | `windows=builtin` | `windows=image` |
+|---|---|---|
+| What runs the game | rust-dos's own Windows: the system DLLs are written into the emulator, and the game starts from the DOS prompt | A real Windows 95 or 98, installed on a disk image that the profile's `[autoexec]` boots |
+| What you need besides the game | Nothing | A Windows CD, and the time to install Windows and its drivers on an image ([docs/win9x-howto.md](docs/win9x-howto.md)) |
+| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
+| State | Experimental: not every game runs yet | Depends on how well the emulated display, sound and 3D cards run their Windows drivers |
 
-The rest of this section is about the built-in Windows.
+Start with `windows=builtin`. If the game doesn't run there, see
+[when a game doesn't run](#when-a-game-doesnt-run), and please
+[open an issue](https://github.com/dividebysandwich/rust-dos/issues)
+that names the game, so the built-in Windows can learn to run it. Until
+then, run it in an image.
+
+`windows=builtin` turns [`win32`](#emulator) on while the game plays
+and off when it ends. With `windows=image` the profile gets a warning
+when its `[autoexec]` boots nothing (see
+[an operating system](GAME-PACKAGES.md#an-operating-system)). A GOG
+install whose launcher starts a Windows program gets a `windows=builtin`
+profile when it is [imported](#game-profiles). The rest of this section
+is about the built-in Windows.
+
+#### A profile to start from
+
+Once the game is [installed](#getting-the-game-installed), a profile
+like this one runs it:
+
+```ini
+[game]
+name=Enemy Infestation
+windows=builtin
+
+[emulator]
+machine=svga_voodoo3
+cpu=pentium_ii
+memsize=64
+win32_version=98se
+
+[drives]
+C=~/dos/ei
+D=~/cd/EnemyInfestation.iso cdrom
+
+[autoexec]
+SET TEMP=C:\WINDOWS\TEMP
+C:
+CD \PROGRA~1\ENEMYI~1
+EI.EXE
+```
+
+The settings in `[emulator]` are the ones a Windows game cares about.
+Their defaults suit DOS games, so set them in every Windows game's
+profile:
+
+| Setting | Set it to | Why |
+|---|---|---|
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too, and with the Banshee it is the only card Direct3D 8 and OpenGL run on. `GLIDE2X.DLL` is there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
+| `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
+| `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
+| `win32_depth` | `8` only for a game that says it needs 256 colours | The default desktop has the card's own depth (16 bits on a Voodoo3). A GDI game that draws with a palette needs `8`. DirectDraw games set their own mode and don't need it |
+| `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
+
+The `[autoexec]` lines run in the built-in DOS, so they use 8.3 names
+(`PROGRA~1` for `Program Files`; `DIR` at the prompt shows them).
+`SET TEMP` points the temporary folder at a writable drive: the built-in
+DOS sets none, and without it a program that asks Windows for that
+folder gets the current one, which is the read-only CD when a setup
+starts from there.
 
 #### Getting the game installed
 
-Most Windows 95 games on CD have to be installed before they run. Try
-these in order:
+A digital release, such as GOG's, is installed already: import it, or
+[copy its folder](#copying-an-installed-game). Most games on CD have to
+be installed before they run. Try these in order:
 
 | Way | Use it when | Registry keys |
 |---|---|---|
@@ -1298,6 +1359,9 @@ name=Enemy Infestation
 windows=builtin
 
 [emulator]
+machine=svga_voodoo3
+cpu=pentium_ii
+memsize=64
 win32_version=98se
 
 [drives]
@@ -1318,23 +1382,14 @@ files, registry keys and shortcuts on the game's drives. With
 `overlay=true` they go to the saves folder, so **R** on the Games page
 takes the install away and the next start runs the setup again.
 
-Things to get right in the profile:
-
-- **`SET TEMP`** to a folder on a writable drive. The built-in DOS sets
-  no `TEMP`, and without it a program that asks Windows for the
-  temporary folder gets the current folder, which is the read-only CD
-  when the setup starts from there.
-- **8.3 names in `[autoexec]`.** Its commands run in the built-in DOS,
-  so `Program Files` is `PROGRA~1`. Run `DIR` at the prompt after the
-  setup to see the names it made.
-- **`win32_version=98se`.** It applies to the setup as well as the
-  game. The setups in
-  [docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
-  were checked against Windows 98 SE. Under `95`, a setup or game that
-  imports a function Windows 98 added doesn't start, and its message
-  names this setting.
-- **More than one CD:** list every image on the drive's `[drives]` line.
-  When the setup asks for the next disc, Ctrl+F4 puts it in.
+The settings of [the profile above](#a-profile-to-start-from) apply to
+the setup as well as the game, and `SET TEMP` matters most here. The
+setups listed in
+[docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
+are known to run. For a game on more than one CD, list every image on
+the drive's `[drives]` line; when the setup asks for the next disc,
+Ctrl+F4 puts it in. Run `DIR` at the prompt after the setup to find the
+8.3 names of the folders it made.
 
 InstallShield's `SETUP.EXE` is a 16-bit launcher, which the built-in
 Windows doesn't run. When `_INST32I.EX_` is beside it, the built-in
@@ -1440,6 +1495,29 @@ registry keys or its own files, and often by the disc's label too.
   profile's.
 - A CD image carries the disc's label. A folder copied from the CD needs
   the label given with `-label` (`D=~/cd/ei cdrom -label EI`).
+
+#### When a game doesn't run
+
+The [log file](README.md#log-file) says what the built-in Windows did
+last. Go through these in order:
+
+1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
+2. **Its message names `win32_version`:** set `win32_version=98se`.
+3. **It says it needs 256 colours:** set `win32_depth=8`.
+4. **It says there isn't enough memory:** raise `memsize`.
+5. **It can't find its CD or its files:** check its
+   [registry keys](#registry-keys) and
+   [the CD's drive letter and label](#the-cds-drive-letter-and-label).
+6. **It ends with a message naming a function, or a DLL it can't
+   find:** the built-in Windows doesn't have that yet. The last `[W32]`
+   lines of the log name it.
+
+For anything else, and for the last case,
+[open an issue](https://github.com/dividebysandwich/rust-dos/issues)
+with the game's name, its profile and the last lines of the log, and
+run the game in a [Windows image](docs/win9x-howto.md) until it is
+fixed. Issues about games that start but look, sound or play wrong are
+welcome too.
 
 ### Keys at the start
 
@@ -3300,7 +3378,7 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--no-boot` | Start at the DOS prompt, without booting the disk image marked `-boot` in `[drives]` |
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
-| `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server |
+| `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
 | `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
 | `--vr-desktop` | Show the picture in a 3D scene in the window (`mode=desktop`) |
 | `--vr-scene FILE` | The 3D scene, a glTF file from Blender (`scene`); on its own it means `--vr-desktop` |

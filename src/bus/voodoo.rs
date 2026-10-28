@@ -4,6 +4,7 @@
 //! the timer events, and putting it in or taking it out.
 
 use super::{Bus, Hold};
+use crate::voodoo::lfb::MemoryRun;
 use crate::voodoo::{Board, Effect, Now, Voodoo, WINDOW};
 
 impl Bus {
@@ -159,10 +160,80 @@ impl Bus {
         0xFF
     }
 
-    pub(crate) fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
-        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
-        // A write behind a swap the frame rate cap holds back (the rest of
-        // the code the program ran before it was held) waits for the swap.
+    /// Write the `len` bytes of plain RAM at `src` into the 3dfx card's
+    /// window at `dst`, a dword at a time in order, as a string move's
+    /// writes through `write_32` do (a game's 2D picture copied into the
+    /// linear frame buffer row by row), in one call. Returns false,
+    /// having written nothing, where the elements aren't dwords going up,
+    /// or the range isn't all memory of the card's (`Voodoo::memory_run`).
+    pub fn move_to_voodoo(
+        &mut self,
+        src: usize,
+        dst: usize,
+        len: usize,
+        size: usize,
+        backward: bool,
+    ) -> bool {
+        if size != 4 || backward || dst & 3 != 0 || len == 0 || !len.is_multiple_of(4) {
+            return false;
+        }
+        let Some(first) = self.voodoo_at(dst) else {
+            return false;
+        };
+        let last = dst + len - 4;
+        // `write_32` gives the VESA frame buffer and the S3's and Mach64's
+        // registers the dwords of theirs before the card: a run that
+        // starts or ends in one of them goes a dword at a time.
+        let other = |at: usize| {
+            self.vbe.lfb_offset(at, 4).is_some()
+                || self.s3_mmio(at).is_some()
+                || self.mach64_mmio(at).is_some()
+        };
+        let len32 = len as u32;
+        if self.voodoo_at(last) != Some(first + len32 - 4) || other(dst) || other(last) {
+            return false;
+        }
+        let Some(run) = self
+            .voodoo
+            .as_ref()
+            .and_then(|v| v.memory_run(first, len32))
+        else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        if self.observe.on {
+            self.observe.mapped_write(dst, self.ram.len());
+        }
+        let bytes = src..src + len;
+        if run == MemoryRun::Fifo {
+            for i in bytes.step_by(4) {
+                let value = u32::from_le_bytes(self.ram[i..i + 4].try_into().unwrap());
+                self.voodoo_write_32(first + (i - src) as u32, value);
+            }
+            return true;
+        }
+        let _zone = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
+        let Some(v) = &mut self.voodoo else {
+            return true;
+        };
+        match run {
+            MemoryRun::Lfb(index) => {
+                let dwords = self.ram[bytes].as_chunks::<4>().0.iter();
+                v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
+            }
+            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, &self.ram[bytes]),
+            MemoryRun::Fifo => {}
+        }
+        true
+    }
+
+    /// A write behind a swap the frame rate cap holds back (the rest of
+    /// the code the program ran before it was held) waits for the swap.
+    fn voodoo_swap_wait(&mut self) {
         if let Some(due) = self.voodoo.as_ref().and_then(|v| v.deferred_swap()) {
             self.clock.stall_to(due);
             let now = self.voodoo_now();
@@ -170,6 +241,11 @@ impl Bus {
                 v.service(now);
             }
         }
+    }
+
+    pub(crate) fn voodoo_write(&mut self, offset: u32, value: u32, mask: u32) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
         let now = self.voodoo_now();
         let Some(v) = &mut self.voodoo else { return };
         let effect = v.write(offset, value, mask, now);

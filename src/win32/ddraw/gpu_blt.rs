@@ -41,7 +41,7 @@ fn plane(cpu: &mut Cpu, id: u32, s: &Surface) -> Option<Plane> {
     })
 }
 
-/// The colour key `key` of the surface `s`, as `blt::keyed` compares it.
+/// The colour key `key` of the surface `s`, as `blt::Key` compares it.
 fn key(key: (u32, u32), s: &Surface) -> Key {
     let f = &s.format;
     let rgb = f.flags & DDPF_RGB != 0 && f.flags & DDPF_PALETTEINDEXED8 == 0;
@@ -143,6 +143,7 @@ fn into_buffer(cpu: &mut Cpu, b: &Blit, dst: Plane) -> bool {
     surface::read_bytes(cpu, &s, sr.top as u32 * s.pitch, &mut data);
     let (dw, dh) = (b.area.width() as i64, b.area.height() as i64);
     let (sw, sh) = (sr.width() as i64, sr.height() as i64);
+    let src_key = b.src_key.map(|k| super::blt::Key::new(k, &s));
     let mut pixels = Vec::new();
     for r in b.rects {
         for y in r.top..r.bottom {
@@ -158,9 +159,7 @@ fn into_buffer(cpu: &mut Cpu, b: &Blit, dst: Plane) -> bool {
                 }
                 let at = row + (sr.left as i64 + u * sw / dw) as usize * 2;
                 let value = u16::from_le_bytes([data[at], data[at + 1]]);
-                if b.src_key
-                    .is_some_and(|k| super::blt::keyed(value as u32, k, &s))
-                {
+                if src_key.is_some_and(|k| k.holds(value as u32)) {
                     continue;
                 }
                 let to = dst.start + y as u32 * dst.stride + x as u32 * 2;

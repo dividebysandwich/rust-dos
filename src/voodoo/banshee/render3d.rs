@@ -1003,6 +1003,56 @@ mod tests {
     }
 
     #[test]
+    fn a_run_through_the_pipeline_writes_what_its_dwords_write() {
+        // 1-5-5-5 through the pixel pipeline with chroma keying, as Sub
+        // Culture writes its overlay: the keyed pixels stay as they were.
+        let setup = |v: &mut Voodoo| {
+            reg3d(v, COL_BUFFER_ADDR, 0x40_0000);
+            reg3d(v, COL_BUFFER_STRIDE, 1 << 15 | 8);
+            reg3d(v, LFB_MODE, 2 | 1 << 8);
+            reg3d(v, FBZ_MODE, 1 << 1 | 1 << 9);
+            reg3d(v, CHROMA_KEY, 0);
+            // The first two tiles, 64 pixels by 32 rows each.
+            for i in 0..2 * 2048 {
+                v.fbi.ram.set(0x40_0000 / 2 + i, 0x1234);
+            }
+        };
+        let data: Vec<u32> = (0..40u32)
+            .map(|i| {
+                if i % 5 == 0 {
+                    0
+                } else {
+                    i.wrapping_mul(0x9E37_79B9) | 0x8000_8000
+                }
+            })
+            .collect();
+        let (mut run, mut each) = (card(), card());
+        setup(&mut run);
+        setup(&mut each);
+        // Pixels 6 to 85 of row 3: into the second tile from pixel 64 on.
+        let offset = 0x100_0000 + 3 * 4096 + 6 * 2;
+        let index = run
+            .lfb_run(offset, 4 * data.len() as u32)
+            .expect("in the LFB");
+        run.lfb_write_run(index, data.iter().copied());
+        for (i, &value) in (0..).zip(&data) {
+            each.write(offset + 4 * i, value, u32::MAX, Now::default());
+        }
+        let base = 0x40_0000 / 2;
+        for i in 0..2 * 2048 {
+            assert_eq!(
+                run.fbi.ram.get(base + i),
+                each.fbi.ram.get(base + i),
+                "word {i}"
+            );
+        }
+        let (row, next_tile) = (base + 3 * 64, base + 2048 + 3 * 64);
+        assert_eq!(run.fbi.ram.get(row + 6), 0x1234, "keyed");
+        assert_ne!(run.fbi.ram.get(row + 8), 0x1234);
+        assert_ne!(run.fbi.ram.get(next_tile), 0x1234, "pixel 64");
+    }
+
+    #[test]
     fn pipeline_writes_are_recorded_from_a_tiled_buffer() {
         let mut v = mirrored();
         reg3d(&mut v, COL_BUFFER_ADDR, 0x10_0000);

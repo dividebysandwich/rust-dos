@@ -38,6 +38,14 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# A push to a pull request cancels that pull request's run still going.
+# Every other run has a group of its own (its run ID), so pushes to main,
+# the nightly run and manual runs neither wait for each other nor get
+# cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

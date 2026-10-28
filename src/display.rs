@@ -61,6 +61,8 @@ pub struct Display<'a> {
     frame: (u32, u32),
     scale: u32,
     fullscreen: bool,
+    /// The window is never shown (`--hidden`), so it stays a window.
+    hidden: bool,
     aspect: AspectRatio,
     filter: Filter,
     shader: Shader,
@@ -182,6 +184,7 @@ impl<'a> Display<'a> {
             frame,
             scale: settings.scale,
             fullscreen: false,
+            hidden,
             aspect: settings.aspect,
             filter: settings.filter,
             shader: settings.shader,
@@ -303,6 +306,9 @@ impl<'a> Display<'a> {
     }
 
     fn set_fullscreen(&mut self, on: bool) -> Result<(), String> {
+        // SDL makes a hidden window fullscreen only once it is shown, and
+        // until then it would keep its first size, whatever the picture's.
+        let on = on && !self.hidden;
         let mode = if on { FullscreenType::Desktop } else { FullscreenType::Off };
         self.out.window_mut().set_fullscreen(mode)?;
         self.fullscreen = on;

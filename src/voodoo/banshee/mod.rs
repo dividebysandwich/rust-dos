@@ -415,7 +415,7 @@ impl Banshee {
     /// `banshee_write_linear`).
     pub fn linear_addr(&self, addr: u32) -> u32 {
         let config = self.reg(LFB_MEMORY_CONFIG);
-        let tile_base = (config & 0x1FFF) << 12;
+        let tile_base = self.tile_base();
         let addr = addr & (BAR_SIZE - 1);
         if addr < tile_base {
             return addr;
@@ -425,6 +425,20 @@ impl Banshee {
         let offset = addr - tile_base;
         let (x, y) = (offset & ((1 << shift) - 1), offset >> shift);
         tile_base + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * tile_x
+    }
+
+    /// The memory address of BAR1 offset `addr`, where the `len` bytes
+    /// from it on are all below the tile base, so in memory one after the
+    /// other as they are in the BAR (`linear_addr`).
+    pub fn linear_run(&self, addr: u32, len: u32) -> Option<u32> {
+        let addr = addr & (BAR_SIZE - 1);
+        (addr.checked_add(len)? <= self.tile_base()).then_some(addr)
+    }
+
+    /// Where BAR1's tiles begin (lfbMemoryConfig): below it, BAR1 is the
+    /// memory in order.
+    fn tile_base(&self) -> u32 {
+        (self.reg(LFB_MEMORY_CONFIG) & 0x1FFF) << 12
     }
 
     // --- Video ---
@@ -827,6 +841,11 @@ impl Voodoo {
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
+        let start = (addr & mask) as usize;
+        if start + data.len() <= self.fbi.ram.bytes() {
+            self.fbi.ram.read_bytes(start, data);
+            return;
+        }
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = self.fbi.ram.byte((addr.wrapping_add(i as u32) & mask) as usize);
         }
@@ -845,12 +864,16 @@ impl Voodoo {
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
-        for (i, &byte) in data.iter().enumerate() {
-            let at = addr.wrapping_add(i as u32) & mask;
-            self.fbi.ram.set_byte(at as usize, byte);
+        let start = addr & mask;
+        if start as usize + data.len() <= self.fbi.ram.bytes() {
+            self.fbi.ram.write_bytes(start as usize, data);
+        } else {
+            for (i, &byte) in data.iter().enumerate() {
+                let at = addr.wrapping_add(i as u32) & mask;
+                self.fbi.ram.set_byte(at as usize, byte);
+            }
         }
         self.display_dirty = true;
-        let start = addr & mask;
         let end = (start as u64 + data.len() as u64).min(mask as u64 + 1) as u32;
         self.mirror_memory(start, end);
     }
