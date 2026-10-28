@@ -63,7 +63,7 @@ fn process_image() -> Vec<u8> {
 /// environment `environment`, its tables, the global heap, the system
 /// modules. Its main thread, which doesn't run, is the first task's.
 /// Whether it was made now.
-fn ensure_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<bool, String> {
+pub(super) fn ensure_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<bool, String> {
     if super::win16_ref(cpu).is_some() {
         return Ok(false);
     }
@@ -412,6 +412,153 @@ fn create_task(
     Ok(cpu.bus.win32.win16.tasks.len() - 1)
 }
 
+/// The bytes of a client task's 16-bit stack.
+const CLIENT_STACK: u32 = 0x8000;
+
+/// Make a task with no program of its own, which runs the 16-bit code a
+/// Win32 process calls (flat.rs), as Windows 95 gives each Win32 process
+/// a task database: named `name`, its thread starting at the 32-bit
+/// context `ctx`, which gets its stack and TIB selector, waiting. Its
+/// thread's id and its handle.
+pub(super) fn client_task(
+    cpu: &mut Cpu,
+    name: &str,
+    mut ctx: Context,
+) -> Result<(u32, u16), String> {
+    let live = cpu
+        .bus
+        .win32
+        .win16
+        .tasks
+        .iter()
+        .filter(|t| t.exit_code.is_none())
+        .count();
+    let full = || "There are too many Windows programs running.".to_string();
+    if live >= MAX_TASKS {
+        return Err(full());
+    }
+    let memory = || format!("There isn't enough memory for {}'s 16-bit calls.", name);
+    let tdb = global::alloc(cpu, global::GMEM_ZEROINIT, 0x200, 0, false);
+    let psp = cpu.bus.win32.win16.ldt.alloc(1).unwrap_or(0);
+    let stack = global::alloc(cpu, global::GMEM_ZEROINIT, CLIENT_STACK, tdb, false);
+    if tdb == 0 || psp == 0 || stack == 0 {
+        for h in [stack, tdb] {
+            if h != 0 {
+                global::free(cpu, h);
+            }
+        }
+        if psp != 0 {
+            cpu.bus.win32.win16.ldt.free(psp, 1);
+        }
+        return Err(memory());
+    }
+    let tdb_base = global::get(cpu, tdb).map_or(0, |a| a.base);
+    let system = super::win16(cpu).system;
+    ldt::write(
+        cpu,
+        system,
+        psp,
+        ldt::segment(tdb_base + 0x100, 0xFF, ldt::ACCESS_DATA),
+    );
+    if let Some(a) = cpu.bus.win32.win16.arena.get_mut(&ldt::index(tdb)) {
+        a.owner = tdb;
+    }
+    let module = super::Module16 {
+        name: name.to_ascii_uppercase(),
+        expected_version: 0x0400,
+        ..super::Module16::default()
+    };
+    let environment = environment_block(cpu, name, tdb);
+    write_tdb(
+        cpu,
+        tdb_base,
+        tdb,
+        psp,
+        &module,
+        0,
+        0,
+        1,
+        0,
+        environment,
+        "",
+    );
+    // Its thread: the Win16 process's main thread if no task has it,
+    // else a new one.
+    let first = cpu.bus.win32.win16.tasks.is_empty();
+    let made = if first {
+        let p = super::win16(cpu);
+        let thread = &mut p.threads[0];
+        thread.suspended = 0;
+        Some((thread.id, thread.stack.1))
+    } else {
+        new_thread(cpu, ctx)
+    };
+    let Some((tid, stack32)) = made else {
+        cpu.bus.win32.win16.ldt.free(psp, 1);
+        global::free(cpu, stack);
+        global::free(cpu, tdb);
+        return Err(memory());
+    };
+    let p = super::win16(cpu);
+    let thread = p
+        .threads
+        .iter_mut()
+        .find(|t| t.id == tid)
+        .expect("the task's thread");
+    ctx.gpr[ESP] = stack32;
+    ctx.seg[Seg::FS as usize] = thread.selector;
+    thread.ctx = ctx;
+    thread.wait = Some(crate::win32::thread::Wait::default());
+    let process_id = p.id;
+    cpu.bus.win32.win16.tasks.push(Task16 {
+        tid,
+        handle: tdb,
+        psp,
+        stack16: (global::handle_to_sel(stack), CLIENT_STACK as u16),
+        stack32,
+        show: 1,
+        process_id,
+        dta: (psp as u32) << 16 | 0x80,
+        ..Task16::default()
+    });
+    cpu.bus.log_string(&format!(
+        "[W16] Task {:04X} runs {}'s 16-bit calls",
+        tdb, name
+    ));
+    Ok((tid, tdb))
+}
+
+/// The client task `tid` (`client_task`) ends with its Win32 process:
+/// its thread, its blocks and its selectors go. The Win16 process stays,
+/// even without tasks; whoever ends the Win32 process sees to that.
+pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
+    let Some(t) = cpu.bus.win32.win16.tasks.iter().position(|k| k.tid == tid) else {
+        return;
+    };
+    let task = cpu.bus.win32.win16.tasks[t].clone();
+    if task.exit_code.is_some() {
+        return;
+    }
+    cpu.bus.win32.win16.tasks[t].exit_code = Some(0);
+    cpu.bus.win32.win16.tasks[t].frames.clear();
+    if cpu.bus.win32.win16.lock == tid {
+        cpu.bus.win32.win16.lock = 0;
+    }
+    let pid = cpu.bus.win32.win16.pid;
+    if let Some(p) = cpu.bus.win32.processes.iter().position(|k| k.id == pid)
+        && let Some(i) = cpu.bus.win32.processes[p]
+            .threads
+            .iter()
+            .position(|k| k.id == tid)
+    {
+        crate::win32::thread::end(&mut cpu.bus.win32, p, i, 0);
+    }
+    crate::win32::user32::destroy_thread_windows(cpu, tid);
+    global::free_owned(cpu, task.handle);
+    cpu.bus.win32.win16.ldt.free(task.psp, 1);
+    global::free(cpu, task.handle);
+}
+
 /// The task's environment block: the Win16 process's environment, then
 /// a word 1 and the program's path, as DOS has them. Its selector.
 fn environment_block(cpu: &mut Cpu, path: &str, owner: u16) -> u16 {
@@ -590,7 +737,7 @@ pub fn init_task(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         let mut resume = Context::of(cpu);
         // Back to the trap, to go on.
         resume.eip = resume.eip.wrapping_sub(4);
-        call_lib_main(cpu, dll, resume, thunk::THEN_TASK, Vec::new());
+        call_lib_init(cpu, dll, resume, thunk::THEN_TASK, Vec::new());
         return None;
     }
     let task = cpu.bus.win32.win16.tasks[t].clone();
@@ -644,6 +791,60 @@ fn next_init(cpu: &mut Cpu, t: usize) -> Option<u16> {
         return None;
     }
     Some(task.inits.remove(0))
+}
+
+/// Initialize the library `module` as Windows 95 does when it loads one:
+/// its entry point (`call_lib_main`), then, for a library made for
+/// Windows 4.0, the DllEntryPoint it exports, with DLL_PROCESS_ATTACH.
+/// `then` runs, with `data`, after both.
+pub fn call_lib_init(cpu: &mut Cpu, module: u16, resume: Context, then: u16, data: Vec<u32>) {
+    let mut chained = vec![then as u32, module as u32];
+    chained.extend(data);
+    call_lib_main(cpu, module, resume, thunk::THEN_DLL_ENTRY, chained);
+}
+
+/// A library's entry point returned (`call_lib_init`): its DllEntryPoint
+/// runs next, if it has one, and then the `then` it was given.
+pub fn then_dll_entry(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    let then = data.first().copied().unwrap_or(0) as u16;
+    let module = data.get(1).copied().unwrap_or(0) as u16;
+    let rest = data.get(2..).map(<[u32]>::to_vec).unwrap_or_default();
+    let Some((target, instance, ds, heap)) = dll_entry_point(cpu, module) else {
+        return thunk::THENS[then as usize](cpu, 0, &rest, ctx);
+    };
+    cpu.bus.log_string(&format!(
+        "[W16] Calling DllEntryPoint at {:04X}:{:04X}",
+        target >> 16,
+        target & 0xFFFF
+    ));
+    let mut regs = Context::default();
+    regs.seg[Seg::DS as usize] = ds;
+    regs.seg[Seg::ES as usize] = ds;
+    regs.gpr[EAX] = ds as u32;
+    // DllEntryPoint(dwReason, hInst, wDS, wHeapSize, dwReserved1,
+    // wReserved2), Pascal's order.
+    let args = [0, 1, instance, ds, heap, 0, 0, 0];
+    let stack = thunk::stack16_for(cpu, ctx);
+    thunk::call16_regs(cpu, target, &args, regs, *ctx, then, rest, stack);
+    None
+}
+
+/// The DllEntryPoint of the library `module`, if it is one made for
+/// Windows 4.0 that exports one: its 16:16 address, the library's
+/// instance, its data segment's selector and its local heap's size.
+fn dll_entry_point(cpu: &Cpu, module: u16) -> Option<(u32, u16, u16, u16)> {
+    let m = &cpu.bus.win32.win16.modules[super::module_index(cpu, module)?];
+    if m.builtin.is_some() || m.flags & ne::LIBMODULE == 0 || m.expected_version < 0x0400 {
+        return None;
+    }
+    let ordinal = module::ordinal_of(cpu, m.handle, "DllEntryPoint")?;
+    let target = module::entry_point(cpu, m.handle, ordinal);
+    if target == 0 {
+        return None;
+    }
+    let heap = module::parsed_of(cpu, m)?.heap;
+    let instance = if m.dgroup != 0 { m.dgroup } else { m.handle };
+    Some((target, instance, global::handle_to_sel(m.dgroup), heap))
 }
 
 /// Call the entry point (LibMain's startup) of the library `module`, the

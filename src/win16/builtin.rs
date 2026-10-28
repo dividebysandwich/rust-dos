@@ -160,6 +160,7 @@ pub static MODULES: &[&Def] = &[
     &super::misc::WING,
     &super::misc::DDEML,
     &super::misc::DISPLAY,
+    &super::misc::SETUPX,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
