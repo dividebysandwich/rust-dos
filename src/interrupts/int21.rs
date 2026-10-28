@@ -84,6 +84,16 @@ pub(crate) fn write_handle(cpu: &mut Cpu, handle: u16, data: &[u8]) -> Result<u1
     write_open_file(cpu, handle, sft, data)
 }
 
+/// Read up to `count` bytes of the open file `sft` (AH=3Fh on a file),
+/// charging the drive for them. Kernel32's ReadFile and the C runtime's
+/// reads go so to the files they opened, so that `cycles=auto` sees a
+/// Windows program load as it sees a DOS one.
+pub(crate) fn read_open_file(cpu: &mut Cpu, sft: u16, count: usize) -> Result<Vec<u8>, u16> {
+    let bytes = cpu.bus.disk.read_file(sft, count)?;
+    file_io(cpu, sft, bytes.len() as u32, Some(false));
+    Ok(bytes)
+}
+
 /// Write `data` to the open file `sft`, handle `handle` of the running
 /// program (AH=40h with bytes to write). Kernel32's WriteFile writes so
 /// to the files it opened, which have no handle (0FFFFh).
@@ -1407,9 +1417,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.set_ax(taken.len() as u16);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             } else {
-                match cpu.bus.disk.read_file(sft, count) {
+                match read_open_file(cpu, sft, count) {
                     Ok(bytes) => {
-                        file_io(cpu, sft, bytes.len() as u32, Some(false));
                         cpu.bus.guest_write_bytes(buf_addr, &bytes);
                         cpu.set_ax(bytes.len() as u16);
                         cpu.set_cpu_flag(CpuFlags::CF, false);

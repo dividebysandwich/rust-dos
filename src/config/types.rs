@@ -197,6 +197,37 @@ impl DesktopDepth {
     }
 }
 
+/// Which calls of the built-in Windows' functions the log gets a line
+/// for (`win32_trace`): every call; the first few of each call site's
+/// calls a second and a count of the rest (src/win32/trace.rs); or none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Win32Trace {
+    All,
+    #[default]
+    Collapsed,
+    Off,
+}
+
+impl Win32Trace {
+    /// "all", "collapsed" or "off".
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "all" => Some(Self::All),
+            "collapsed" => Some(Self::Collapsed),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Collapsed => "collapsed",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// A yes/no setting: true, on, yes or 1, or false, off, no or 0.
 pub(super) fn parse_bool(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {

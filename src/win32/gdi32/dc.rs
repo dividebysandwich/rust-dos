@@ -277,15 +277,16 @@ pub struct Place {
     pub clip: Region,
 }
 
-/// The device's size: the screen's for all but a memory DC, whose
-/// bitmap's it is.
+/// The device's size: the screen's GDI draws on (the desktop's) for all
+/// but a memory DC, whose bitmap's it is.
 pub fn device_size(cpu: &Cpu, dc: &Dc) -> (i32, i32) {
     if dc.kind == MEMORY
         && let Some(b) = cpu.bus.win32.gdi.bitmap(dc.attrs.bitmap)
     {
         return (b.width, b.height);
     }
-    crate::win32::user32::sysparams::screen_size()
+    let (w, h, _, _) = super::surface::screen(cpu);
+    (w, h)
 }
 
 /// The visible region of the DC, in device coordinates, and where its
@@ -547,29 +548,30 @@ pub fn restore_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-/// GetDeviceCaps(hdc, index): the display's, 640x480 at 96 pixels an
-/// inch, with the desktop's depth: 32 bits a pixel, 24 on an S3 ViRGE,
-/// or 16 on a Banshee or Voodoo3. A desktop of 256 colours is a palette
-/// device: 8 bits a pixel, RC_PALETTE, a palette of 256 entries with 20
-/// static colors, and 6 bits a channel in the DAC.
+/// GetDeviceCaps(hdc, index): the display's, the screen's size at 96
+/// pixels an inch, with the depth of the mode GDI draws on: the
+/// desktop's, 32 bits a pixel, 24 on an S3 ViRGE, or 16 on a Banshee or
+/// Voodoo3, or that of the mode DirectDraw set. A mode of 256 colours
+/// is a palette device: 8 bits a pixel, RC_PALETTE, a palette of 256
+/// entries with 20 static colors, and 6 bits a channel in the DAC.
 pub fn get_device_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if get(cpu, args[0]).is_none() {
         return Some(0);
     }
-    let bpp = crate::win32::screen::desktop(cpu).bpp;
+    let bpp = super::surface::screen_mode(cpu).bpp;
     match args[1] {
         BITSPIXEL => return Some(bpp),
         // COLORRES: the bits of a color the display shows.
         COLORRES if bpp == 16 => return Some(16),
         _ if bpp != 8 => {}
         NUMCOLORS => return Some(20),
-        RASTERCAPS => return Some(device_cap(RASTERCAPS) | RC_PALETTE),
+        RASTERCAPS => return Some(device_cap(cpu, RASTERCAPS) | RC_PALETTE),
         SIZEPALETTE => return Some(256),
         NUMRESERVED => return Some(20),
         COLORRES => return Some(18),
         _ => {}
     }
-    Some(device_cap(args[1]))
+    Some(device_cap(cpu, args[1]))
 }
 
 /// GetDeviceCaps' indices.
@@ -588,11 +590,18 @@ pub fn device_depth(cpu: &Cpu) -> u32 {
 }
 
 /// The display's capability `index`, the depth that of the pixels GDI
-/// works on (32 bits).
-pub fn device_cap(index: u32) -> u32 {
-    let (w, h) = crate::win32::user32::sysparams::screen_size();
-    // Millimeters at 96 pixels an inch.
-    let mm = |pixels: i32| ((pixels as f64 * 25.4 / 96.0) + 0.5) as u32;
+/// works on (32 bits), the size the screen's.
+pub fn device_cap(cpu: &Cpu, index: u32) -> u32 {
+    screen_cap(index, crate::win32::user32::sysparams::screen_size(cpu))
+}
+
+/// The display's pixels an inch, LOGPIXELSX and LOGPIXELSY.
+const DPI: u32 = 96;
+
+/// The display's capability `index` on a screen of `w` x `h`.
+fn screen_cap(index: u32, (w, h): (i32, i32)) -> u32 {
+    // Millimeters at DPI pixels an inch.
+    let mm = |pixels: i32| ((pixels as f64 * 25.4 / DPI as f64) + 0.5) as u32;
     match index {
         0 => 0x400,
         2 => 1,
@@ -614,7 +623,7 @@ pub fn device_cap(index: u32) -> u32 {
         38 => 0x7E99,
         40 | 42 => 36,
         44 => 51,
-        88 | 90 => 96,
+        88 | 90 => DPI,
         104 | 106 => 0,
         108 => 24,
         116 => 60,
@@ -803,7 +812,7 @@ pub fn get_nearest_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MEMORY => gdi(cpu)
             .bitmap(dc.attrs.bitmap)
             .is_some_and(|b| b.dib.is_none() && b.bpp == 8),
-        _ => crate::win32::version::palette_desktop(cpu),
+        _ => super::palette::palette_device(cpu),
     };
     if device {
         let map = super::palette::DeviceMap::new(cpu, dc.attrs.palette);
@@ -1216,7 +1225,7 @@ pub fn get_bounds_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// has them: the viewport is an inch of LOGPIXELSX by LOGPIXELSY, the
 /// window that inch in the mode's units, with y going up.
 fn extents_of(mode: u32) -> Option<((i32, i32), (i32, i32))> {
-    let dpi = (device_cap(88) as i32, device_cap(90) as i32);
+    let dpi = (DPI as i32, DPI as i32);
     let units = match mode {
         MM_TEXT => return Some(((1, 1), (1, 1))),
         MM_LOMETRIC | MM_ISOTROPIC => 254,
@@ -1337,16 +1346,17 @@ pub fn get_viewport_ext_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     get_point(cpu, args[0], args[1], |a| a.viewport_ext)
 }
 
-/// MM_ISOTROPIC keeps a unit as long along x as along y: the viewport's
-/// extent shrinks along the axis where it is longer.
-fn fix_isotropic(a: &mut Attrs) {
+/// MM_ISOTROPIC keeps a unit as long along x as along y on a screen of
+/// size `screen`: the viewport's extent shrinks along the axis where it
+/// is longer.
+fn fix_isotropic(a: &mut Attrs, screen: (i32, i32)) {
     if a.map_mode != MM_ISOTROPIC || a.window_ext.0 == 0 || a.window_ext.1 == 0 {
         return;
     }
-    let hs = device_cap(4) as f64;
-    let vs = device_cap(6) as f64;
-    let hr = device_cap(8) as f64;
-    let vr = device_cap(10) as f64;
+    let hs = screen_cap(4, screen) as f64;
+    let vs = screen_cap(6, screen) as f64;
+    let hr = screen_cap(8, screen) as f64;
+    let vr = screen_cap(10, screen) as f64;
     let xdim = (a.viewport_ext.0 as f64 * hs / (hr * a.window_ext.0 as f64)).abs();
     let ydim = (a.viewport_ext.1 as f64 * vs / (vr * a.window_ext.1 as f64)).abs();
     if xdim > ydim {
@@ -1384,13 +1394,14 @@ fn set_extent(cpu: &mut Cpu, args: &[u32], window: bool) -> Option<u32> {
     if x == 0 || y == 0 {
         return Some(FALSE);
     }
+    let screen = crate::win32::user32::sysparams::screen_size(cpu);
     with(cpu, args[0], |d| {
         if window {
             d.attrs.window_ext = (x, y);
         } else {
             d.attrs.viewport_ext = (x, y);
         }
-        fix_isotropic(&mut d.attrs);
+        fix_isotropic(&mut d.attrs, screen);
     });
     Some(TRUE)
 }
@@ -1430,13 +1441,14 @@ fn scale_extent(cpu: &mut Cpu, args: &[u32], window: bool) -> Option<u32> {
     if new.0 == 0 || new.1 == 0 {
         return Some(FALSE);
     }
+    let screen = crate::win32::user32::sysparams::screen_size(cpu);
     with(cpu, args[0], |d| {
         if window {
             d.attrs.window_ext = new;
         } else {
             d.attrs.viewport_ext = new;
         }
-        fix_isotropic(&mut d.attrs);
+        fix_isotropic(&mut d.attrs, screen);
     });
     Some(TRUE)
 }

@@ -119,7 +119,7 @@ fn router(state: AppState) -> Router {
         .route("/api/sound", get(sound))
         .route("/api/awe32", get(awe32))
         .route("/api/exceptions", get(exceptions))
-        .route("/api/win32", get(win32))
+        .route("/api/win32", get(win32).post(win32_post))
         .route("/api/win32/ddraw", get(win32_ddraw))
         .route("/api/win32/ddraw/surface/{id}", get(win32_surface))
         .route("/ws/trace", get(ws_trace))
@@ -1699,6 +1699,21 @@ async fn win32(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Win32, DEFAULT_TIMEOUT).await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Win32Body {
+    /// The `win32_trace` level: `all`, `collapsed` or `off`.
+    trace: String,
+}
+
+async fn win32_post(State(s): State<AppState>, body: Bytes) -> ApiResult {
+    let b: Win32Body = from_value(parse_body(&body)?)?;
+    let Some(level) = rust_dos::config::Win32Trace::parse(&b.trace) else {
+        return Err(bad(format!("trace '{}' is not all, collapsed or off", b.trace)));
+    };
+    s.call_json(Cmd::Win32Trace(level), DEFAULT_TIMEOUT).await
+}
+
 async fn win32_ddraw(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Win32Ddraw, DEFAULT_TIMEOUT).await
 }
@@ -2168,7 +2183,8 @@ STATUS / SCREEN
                                            (features has "screen_attrs")
   GET  /api/log[?since_ms=&limit=&grep=&format=text]   emulator log lines, each with its
                                            number n, the journal's last entry "at", and the
-                                           request that wrote it ("cause")
+                                           request that wrote it ("cause"); the
+                                           latest 50,000 are kept
   GET  /api/log?after_n=N[&wait=MS]        the lines after line N, oldest first
   POST /api/ports {"enabled":true, "clear":true, "capacity":100000, "ports":"3C0-3CF"}  log port accesses
   GET  /api/ports[?port=3C0-3CF&dir=in|out&last_n=200]  the logged accesses, oldest first
@@ -2288,7 +2304,10 @@ BUILT-IN WINDOWS
                              (base, size, entry point, built-in or from a file), its
                              threads (state, wait objects and timeout, CS:EIP, ESP,
                              TIB, last error, priority, suspend count) and its handles
-                             (object kind, state, name, reference count)
+                             (object kind, state, name, reference count); "trace",
+                             the win32_trace level
+  POST /api/win32 {"trace":"all"}   set the win32_trace level (all, collapsed or off)
+                             until the emulator stops; the reply is GET's
   GET  /api/win32/ddraw      DirectDraw's display mode and surfaces: interfaces (the
                              addresses the log shows), size, pixel format, caps,
                              memory, lock, color keys, palette, clipper, attached

@@ -1241,12 +1241,12 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             // window bigger to the right and down.
             let (mut x, mut y) = (0, 0);
             let owner = t.var(C_OWNER);
+            let (sw, sh) = super::sysparams::screen_size(cpu);
             let state = user(cpu);
             if h.x == i16::MIN {
                 x = CW_USEDEFAULT as i32;
                 y = CW_USEDEFAULT as i32;
             } else {
-                let (sw, sh) = super::sysparams::screen_size();
                 if style & DS_CENTER != 0 {
                     x = (sw - cx) / 2;
                     y = (sh - cy) / 2;

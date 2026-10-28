@@ -218,3 +218,64 @@ fn a_loaded_state_brings_its_clock_and_ticks_back() {
     // The program got the key after the load.
     assert_eq!(cpu.bus.ram()[RESULTS + 8], b'a');
 }
+
+/// What a program polling a Voodoo3's status register reads after it
+/// queued a screenful of triangles: the busy bits (7-10) of `POLLS` reads,
+/// one after another, or with time between them for the host's render
+/// threads to draw what the first read gave them (`host_draws`), as a
+/// faster host would have.
+fn busy_bits(host_draws: bool) -> Vec<u32> {
+    use rust_dos::voodoo::banshee::render3d::{COL_BUFFER_ADDR, COL_BUFFER_STRIDE};
+    use rust_dos::voodoo::regs::*;
+    use rust_dos::voodoo::{Board, Now, Voodoo};
+    const POLLS: usize = 4;
+    let now = Now::default();
+    let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+    let reg = |v: &mut Voodoo, regnum: usize, data: u32| {
+        v.write(0x20_0000 + 4 * regnum as u32, data, u32::MAX, now);
+    };
+    reg(&mut v, COL_BUFFER_ADDR, 0x10_0000);
+    reg(&mut v, COL_BUFFER_STRIDE, 1280);
+    reg(&mut v, CLIP_LEFT_RIGHT, 640);
+    reg(&mut v, CLIP_LOW_Y_HIGH_Y, 480);
+    // RGB writes, clipped to the screen.
+    reg(&mut v, FBZ_MODE, 1 << 9 | 1);
+    // Half the screen, 8 times over.
+    let triangle = [
+        (FVERTEX_AX, 0.0f32),
+        (FVERTEX_AY, 0.0),
+        (FVERTEX_BX, 640.0),
+        (FVERTEX_BY, 0.0),
+        (FVERTEX_CX, 640.0),
+        (FVERTEX_CY, 480.0),
+        (FSTART_R, 255.0),
+    ];
+    for _ in 0..8 {
+        for (regnum, value) in triangle {
+            reg(&mut v, regnum, value.to_bits());
+        }
+        reg(&mut v, FTRIANGLE_CMD, 0);
+    }
+    (0..POLLS)
+        .map(|poll| {
+            if host_draws && poll > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            v.read(0, now) & 0x780
+        })
+        .collect()
+}
+
+/// A program that polls a Voodoo3's busy bits until they clear (3dfx's
+/// Windows driver does before drawing into a buffer a flip takes off the
+/// screen) reads the same bits in deterministic mode however fast the
+/// host's render threads draw: otherwise it loops a different number of
+/// times on another host.
+#[test]
+fn a_voodoo3s_busy_bits_dont_follow_the_hosts_render_threads() {
+    let _mode = Deterministic::new(start());
+    let at_once = busy_bits(false);
+    assert_eq!(at_once, busy_bits(true));
+    // The card reads idle from the first read, as if it drew at once.
+    assert!(at_once.iter().all(|&bits| bits == 0), "{:X?}", at_once);
+}

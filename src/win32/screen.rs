@@ -21,6 +21,9 @@
 //! set up; it is at the start of video memory. With `win32_depth=8` it
 //! is 640x480 at 8 bits a pixel on both, its colours GDI's system
 //! palette, which the DAC (or the card's lookup table) holds.
+//! ChangeDisplaySettings can make it one of the other `DESKTOP_SIZES`
+//! at the same depth, until it gives the desktop's own size back or the
+//! process that set it ends.
 
 use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
@@ -36,12 +39,12 @@ pub struct Mode {
     pub pitch: u32,
 }
 
-/// The desktop's size.
-const DESKTOP: (u32, u32) = (640, 480);
+/// The desktop's own size.
+pub const DESKTOP: (u32, u32) = (640, 480);
 
-/// The VBE mode of the desktop on the VESA kind: 640x480 at 32 bits a
-/// pixel (24 on an S3 ViRGE).
-const DESKTOP_MODE: u16 = 0x112;
+/// The sizes the desktop can have: the ones EnumDisplaySettings lists
+/// and ChangeDisplaySettings sets.
+pub const DESKTOP_SIZES: [(u32, u32); 3] = [(640, 480), (800, 600), (1024, 768)];
 
 /// The sizes of the modes DirectDraw offers, which have numbers of the
 /// VESA kind's own where the BIOS's list hasn't them.
@@ -92,9 +95,10 @@ pub fn linear_memory(cpu: &mut Cpu) {
     }
 }
 
-/// The desktop's mode: 8 bits a pixel with `win32_depth=8`, else 16 on
-/// the card, 24 (packed) on an S3 ViRGE, whose VESA mode `DESKTOP_MODE`
-/// is that, and 32 on the others.
+/// The desktop's mode: its size, 640x480 unless ChangeDisplaySettings
+/// set another (`set_desktop_size`), at 8 bits a pixel with
+/// `win32_depth=8`, else 16 on the card, 24 (packed) on an S3 ViRGE,
+/// whose VESA BIOS has that instead of 32, and 32 on the others.
 pub fn desktop(cpu: &Cpu) -> Mode {
     let bpp = if super::version::palette_desktop(cpu) {
         8
@@ -105,7 +109,11 @@ pub fn desktop(cpu: &Cpu) -> Mode {
     } else {
         32
     };
-    let (width, height) = DESKTOP;
+    let (width, height) = cpu
+        .bus
+        .win32
+        .desktop_size
+        .map_or(DESKTOP, |(w, h, _)| (w, h));
     Mode {
         width,
         height,
@@ -174,21 +182,23 @@ pub fn set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<Mode
 /// Set the desktop's mode. At 8 bits a pixel the DAC gets the system
 /// palette.
 pub fn set_desktop_mode(cpu: &mut Cpu) {
+    let d = desktop(cpu);
+    set_mode(cpu, d.width, d.height, d.bpp);
     if super::version::palette_desktop(cpu) {
-        let d = desktop(cpu);
-        set_mode(cpu, d.width, d.height, d.bpp);
         super::gdi32::palette::show_system_palette(cpu);
-        return;
     }
-    if is_card(cpu) {
-        let d = desktop(cpu);
-        set_mode(cpu, d.width, d.height, d.bpp);
-        return;
-    }
-    let packed24 = cpu.bus.vga.adapter.is_virge();
-    if let Some(mode) = vbe::find_mode(DESKTOP_MODE, packed24) {
-        crate::interrupts::vbe::enter_mode(&mut cpu.bus, &mode, true, false);
-    }
+}
+
+/// Make the desktop `size` (one of `DESKTOP_SIZES`) for the process
+/// `pid`, or with None its own size again. Only the setting changes:
+/// the caller sets the mode on the adapter if the desktop shows.
+pub fn set_desktop_size(cpu: &mut Cpu, size: Option<(u32, u32)>, pid: u32) {
+    cpu.bus.win32.desktop_size = size.filter(|&s| s != DESKTOP).map(|(w, h)| (w, h, pid));
+}
+
+/// The process that set the desktop's size, if it isn't its own.
+pub fn desktop_size_owner(cpu: &Cpu) -> Option<u32> {
+    cpu.bus.win32.desktop_size.map(|(_, _, pid)| pid)
 }
 
 /// Put the adapter back in text mode (mode 3), as the BIOS sets it: the
@@ -350,49 +360,90 @@ pub fn set_colors(cpu: &mut Cpu, first: usize, colors: &[u32]) {
     vga.mark_dirty_full();
 }
 
-// The desktop's rows, for GDI, which draws on 32-bit pixels, or on the
-// 8-bit pixels of a desktop of 256 colours.
+// The rows of the picture GDI draws on, which it works on as 32-bit
+// pixels, or as 8-bit ones in a mode of 256 colours.
 
-/// The desktop's rows `top..top + rows` as 32-bit pixels (0x00RRGGBB),
-/// `width * 4` bytes a row, or as they are at 8 bits a pixel.
-pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
-    let d = desktop(cpu);
-    let mut raw = vec![0u8; (d.pitch * rows) as usize];
-    read(cpu, top * d.pitch, &mut raw);
-    match d.bpp {
-        32 | 8 => raw,
-        24 => raw
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|&[b, g, r]| [b, g, r, 0])
-            .collect(),
-        _ => raw
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|p| from_565(u16::from_le_bytes(*p)).to_le_bytes())
-            .collect(),
+/// The picture GDI draws on, at the start of video memory: the mode
+/// DirectDraw set while it has the display, as GDI on Windows 95 and 98
+/// draws on the primary surface in whatever mode is set, else the
+/// desktop's. None while Glide has the display, where GDI's drawing
+/// goes nowhere.
+pub fn gdi_mode(cpu: &Cpu) -> Option<Mode> {
+    if cpu.bus.win32.ddraw.display.mode.0 == 0 {
+        return Some(desktop(cpu));
     }
+    let (width, height, bpp) = super::ddraw::display::screen_mode(cpu)?;
+    let pitch = mode(cpu)
+        .filter(|m| (m.width, m.height, m.bpp) == (width, height, bpp))
+        .map_or(width * bpp / 8, |m| m.pitch);
+    Some(Mode {
+        width,
+        height,
+        bpp,
+        pitch,
+    })
 }
 
-/// Store 32-bit pixels, `width * 4` bytes a row (or 8-bit ones on a
-/// desktop of 256 colours), as the desktop's rows from `top` on.
-pub fn store_desktop(cpu: &mut Cpu, top: u32, data: &[u8]) {
-    let d = desktop(cpu);
-    if d.bpp == 32 || d.bpp == 8 {
-        write(cpu, top * d.pitch, data);
+/// The desktop's rows `top..top + rows`, as `load_rows` gives them.
+pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
+    load_rows(cpu, &desktop(cpu), top, rows)
+}
+
+/// The rows `top..top + rows` of the picture in `mode` at the start of
+/// video memory, as 32-bit pixels (0x00RRGGBB), `width * 4` bytes a
+/// row, or at 8 bits a pixel as they are, `width` bytes a row.
+pub fn load_rows(cpu: &Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
+    load_area(cpu, mode, top, rows, 0, mode.width)
+}
+
+/// The pixels `left..left + cols` of the rows `top..top + rows` of the
+/// picture in `mode`, as `load_rows` gives them: `cols` pixels a row.
+pub fn load_area(cpu: &Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
+    let bytes = mode.bpp / 8;
+    let mut raw = vec![0u8; (cols * bytes) as usize];
+    let mut out = Vec::with_capacity(cols as usize * 4 * rows as usize);
+    for y in top..top + rows {
+        read(cpu, y * mode.pitch + left * bytes, &mut raw);
+        match mode.bpp {
+            32 | 8 => out.extend_from_slice(&raw),
+            24 => out.extend(
+                raw.as_chunks::<3>()
+                    .0
+                    .iter()
+                    .flat_map(|&[b, g, r]| [b, g, r, 0]),
+            ),
+            _ => out.extend(
+                raw.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .flat_map(|p| from_565(u16::from_le_bytes(*p)).to_le_bytes()),
+            ),
+        }
+    }
+    out
+}
+
+/// Store pixels as `load_area` gives them, `cols` a row, as the pixels
+/// `left..left + cols` of the rows from `top` on of the picture in
+/// `mode`.
+pub fn store_area(cpu: &mut Cpu, mode: &Mode, top: u32, left: u32, cols: u32, data: &[u8]) {
+    let bytes = if mode.bpp == 8 { 1 } else { 4 };
+    let row_len = (cols * bytes) as usize;
+    if row_len == 0 {
         return;
     }
-    let pixels = data.as_chunks::<4>().0.iter();
-    let raw: Vec<u8> = if d.bpp == 24 {
-        pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect()
-    } else {
-        pixels
-            .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
-            .collect()
-    };
-    write(cpu, top * d.pitch, &raw);
+    for (i, row) in data.chunks_exact(row_len).enumerate() {
+        let at = (top + i as u32) * mode.pitch + left * mode.bpp / 8;
+        let pixels = row.as_chunks::<4>().0.iter();
+        let raw: std::borrow::Cow<[u8]> = match mode.bpp {
+            32 | 8 => row.into(),
+            24 => pixels.flat_map(|&[b, g, r, _]| [b, g, r]).collect(),
+            _ => pixels
+                .flat_map(|p| to_565(u32::from_le_bytes(*p)).to_le_bytes())
+                .collect(),
+        };
+        write(cpu, at, &raw);
+    }
 }
 
 /// A 5-6-5 pixel as 0x00RRGGBB, each channel widened by repeating its top
@@ -515,7 +566,7 @@ fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()>
     }
     let half = height < 300;
     let lines = if half { height * 2 } else { height };
-    let narrow = width < 400;
+    let narrow = width < card::NARROW_WIDTH;
     let t = if narrow {
         let t = card_timing(width * 2, lines);
         Timing {

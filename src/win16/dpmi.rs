@@ -6,7 +6,7 @@
 
 use super::ldt;
 use super::thunk::{EAX, EBX, ECX, EDI, EDX, ESI};
-use crate::cpu::{Cpu, CpuFlags, Seg};
+use crate::cpu::{ATTR_DB, Cpu, CpuFlags, Seg};
 use crate::dpmi::Context;
 use crate::win32::memory::{PAGE, PRIVATE, SHARED, USER, WRITABLE};
 
@@ -135,9 +135,9 @@ fn set_rights(cpu: &mut Cpu, sel: u16, access: u8, extended: u8) -> bool {
 
 /// A selector for the segment `sel` is, of the other kind: data for
 /// code, code for data (AllocCStoDSAlias, AllocDStoCSAlias, function
-/// 000Ah).
+/// 000Ah), of the same size, as the D/B bit says.
 pub fn alias(cpu: &mut Cpu, sel: u16, code: bool) -> u16 {
-    let Some((base, limit, _)) = super::selector_base(cpu, sel) else {
+    let Some((base, limit, attr)) = super::selector_base(cpu, sel) else {
         return 0;
     };
     let Some(new) = cpu.bus.win32.win16.ldt.alloc(1) else {
@@ -149,12 +149,13 @@ pub fn alias(cpu: &mut Cpu, sel: u16, code: bool) -> u16 {
         ldt::ACCESS_DATA
     };
     let system = system(cpu);
-    ldt::write(cpu, system, new, ldt::segment(base, limit, access));
+    let big = attr & ATTR_DB != 0;
+    ldt::write(cpu, system, new, ldt::segment_sized(base, limit, access, big));
     new
 }
 
 /// PrestoChangoSelector: make `dest` an alias of the other kind of
-/// `source`.
+/// `source`, of the same size.
 pub fn presto_chango(cpu: &mut Cpu, source: u16, dest: u16) -> u16 {
     let Some((base, limit, attr)) = super::selector_base(cpu, source) else {
         return 0;
@@ -165,7 +166,8 @@ pub fn presto_chango(cpu: &mut Cpu, source: u16, dest: u16) -> u16 {
     } else {
         ldt::ACCESS_CODE
     };
-    if !with_desc(cpu, dest, |_| ldt::segment(base, limit, access)) {
+    let big = attr & ATTR_DB != 0;
+    if !with_desc(cpu, dest, |_| ldt::segment_sized(base, limit, access, big)) {
         return 0;
     }
     dest

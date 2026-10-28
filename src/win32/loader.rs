@@ -14,6 +14,7 @@ use super::memory::{
 };
 use super::stubs::{self, STUB};
 use super::system::{self, SYSTEM_BLOCK_PAGES};
+use super::thread;
 use super::{FIRST_MISSING, MAX_MISSING, Module, Process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -124,9 +125,12 @@ pub fn load(
             name
         )
     })?;
+    // The path as Windows keeps it, full and with backslashes, whatever
+    // form the program was started with.
+    let path = cpu.bus.disk.qualify_path(path).unwrap_or_else(|| path.to_string());
     let mut process = Process {
         name: name.clone(),
-        path: path.to_string(),
+        path,
         environment,
         ..Process::default()
     };
@@ -258,17 +262,15 @@ fn build(
     }
     let bus = &mut cpu.bus;
 
-    // The stack: the reserve, its top committed.
+    // The stack: the reserve in whole 64 KB, its top committed, and the
+    // floor below it.
     let reserve = image.headers.stack_reserve.clamp(GRANULARITY, 0x100_0000);
     process.stack_reserve = reserve;
     let headers = &image.headers;
     process.subsystem_version =
         (headers.major_subsystem as u32) << 16 | headers.minor_subsystem as u32;
-    let stack = memory.reserve(None, reserve, PRIVATE, SHARED)?;
-    let reserve = reserve.next_multiple_of(GRANULARITY);
-    let commit = reserve.min(MAX_STACK_COMMIT);
-    let stack_top = stack + reserve;
-    memory.commit(bus, stack_top - commit, commit, USER | WRITABLE)?;
+    let (stack, stack_limit) = thread::reserve_stack(memory, bus, reserve, MAX_STACK_COMMIT)?;
+    let stack_top = stack.1;
 
     // The idle loop's stack, which only interrupts use.
     let idle = memory.reserve(None, GRANULARITY, SHARED, SYSTEM)?;
@@ -298,7 +300,7 @@ fn build(
     for (field, value) in [
         (TIB_EXCEPTION_LIST, 0xFFFF_FFFF),
         (TIB_STACK_TOP, stack_top),
-        (TIB_STACK_LIMIT, stack_top - commit),
+        (TIB_STACK_LIMIT, stack_limit),
         (TIB_SELF, tib),
         (TIB_TLS_ARRAY, tib + TLS_ARRAY),
         (TIB_PROCESS, process_block(data)),
@@ -316,7 +318,7 @@ fn build(
         process: Process::default(),
         entry: base + image.headers.entry,
         stack_top,
-        stack: (stack, stack_top),
+        stack,
     }))
 }
 
@@ -465,10 +467,13 @@ pub(super) fn module_file_name(name: &str) -> String {
     file.to_ascii_uppercase()
 }
 
-/// The directory of the DOS path `path`, without a final backslash.
+/// The directory of the DOS path `path`, without a final backslash. DOS
+/// and Windows take `/` for a backslash, as programs that build a path
+/// from parts may write it (Metal Marines' setup starts the game as
+/// `D:/METAL.EXE`); the directory has backslashes.
 pub(crate) fn directory_of(path: &str) -> String {
-    match path.rfind('\\') {
-        Some(i) => path[..i].to_string(),
+    match path.rfind(['\\', '/']) {
+        Some(i) => path[..i].replace('/', "\\"),
         None => String::new(),
     }
 }
@@ -1266,5 +1271,18 @@ pub(super) fn roll_back(
         if let Some(m) = process.modules.iter_mut().find(|m| m.base == base) {
             m.refs = m.refs.saturating_sub(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::directory_of;
+
+    #[test]
+    fn a_directory_ends_at_the_last_separator_of_either_kind() {
+        assert_eq!(directory_of(r"C:\WINDOWS\SYSTEM\X.DLL"), r"C:\WINDOWS\SYSTEM");
+        assert_eq!(directory_of("D:/METAL.EXE"), "D:");
+        assert_eq!(directory_of(r"C:/WINDOWS\SYSTEM/X.DLL"), r"C:\WINDOWS\SYSTEM");
+        assert_eq!(directory_of("X.DLL"), "");
     }
 }

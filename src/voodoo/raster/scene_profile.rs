@@ -179,7 +179,7 @@ fn profile_saved_voodoo_scene() {
     .unwrap();
     let card = cpu.bus.voodoo.as_mut().unwrap();
     card.prepare_display();
-    let (width, height) = card.size();
+    let (width, height) = card.picture_size();
     let mut picture = crate::video::Frame::new(width, height);
     card.render(&mut picture.rgba, width as usize);
     crate::capture::png::save(&picture, &dir.join("last-frame.png")).unwrap();

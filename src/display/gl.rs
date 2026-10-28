@@ -4,7 +4,10 @@
 #[path = "gl/present_tests.rs"]
 mod present_tests;
 
-use rust_dos::voodoo::gl::VoodooGl;
+use rust_dos::voodoo::gl::{SharedGl, VoodooGl};
+use rust_dos::voodoo::gpu::GpuLink;
+use std::cell::RefCell;
+use std::rc::Rc;
 use crate::config::Filter;
 use crate::video::Frame;
 use rust_dos::config_ui::Layer;
@@ -37,7 +40,9 @@ struct Program {
 // `GlScreen`: nothing else in the program makes one.
 pub struct GlScreen {
     // Dropped in this order: the functions, the context, then the window.
-    gl: glow::Context,
+    // The 3dfx card shares the functions and its renderer (`voodoo_link`)
+    // until this ends, which ends the renderer.
+    gl: Rc<glow::Context>,
     _context: GLContext,
     window: Window,
     glsl: Glsl,
@@ -64,8 +69,11 @@ pub struct GlScreen {
     filter: Filter,
     renderer: String,
     /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
-    voodoo: Option<VoodooGl>,
+    voodoo: Rc<RefCell<Option<VoodooGl>>>,
     voodoo_failed: Option<String>,
+    /// Whether the log said that a Banshee's 2D operations stay on the
+    /// CPU (`VoodooGl::gpu_2d_problem`).
+    gpu_2d_logged: bool,
     /// What screenshots and recordings of the look are drawn with, made
     /// the first time one is (`capture`).
     capture: Option<Capture>,
@@ -87,6 +95,8 @@ pub struct GlScreen {
 impl Drop for GlScreen {
     fn drop(&mut self) {
         drop(self.stage.take());
+        // A link the card still has finds no renderer from now on.
+        self.drop_voodoo();
     }
 }
 
@@ -104,8 +114,14 @@ struct Capture {
 
 impl GlScreen {
     /// Make a window of `size` with an OpenGL 3 context: 3.2 core, which is
-    /// what macOS has, or else 3.0 or later with the older functions.
-    pub fn open(video: &VideoSubsystem, title: &str, (width, height): (u32, u32)) -> Result<Self, NoGl> {
+    /// what macOS has, or else 3.0 or later with the older functions. A
+    /// `hidden` window isn't shown, and its context draws all the same.
+    pub fn open(
+        video: &VideoSubsystem,
+        title: &str,
+        (width, height): (u32, u32),
+        hidden: bool,
+    ) -> Result<Self, NoGl> {
         let no_gl = |window, reason: String| NoGl { window, reason };
         // It has no OpenGL, and SDL would refuse the window.
         if video.current_video_driver() == "dummy" {
@@ -121,8 +137,9 @@ impl GlScreen {
         attr.set_depth_size(0);
         let mut builder = video.window(title, width, height);
         builder.position_centered().opengl().allow_highdpi();
-        #[cfg(test)]
-        builder.hidden();
+        if hidden {
+            builder.hidden();
+        }
         let window = builder
             .build()
             .map_err(|e| no_gl(None, e.to_string()))?;
@@ -179,7 +196,7 @@ impl GlScreen {
             )
         };
         Ok(Self {
-            gl,
+            gl: Rc::new(gl),
             _context: context,
             window,
             glsl,
@@ -194,8 +211,9 @@ impl GlScreen {
             scale_lines: true,
             filter: Filter::Nearest,
             renderer,
-            voodoo: None,
+            voodoo: Rc::new(RefCell::new(None)),
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
+            gpu_2d_logged: false,
             capture: None,
             layer: None,
             layer_generation: None,
@@ -340,14 +358,25 @@ impl GlScreen {
 
     /// The 3dfx card's OpenGL settings, if it is drawn.
     pub fn voodoo_scale(&self) -> Option<(u32, u32, u32)> {
-        self.voodoo.as_ref().map(|v| (v.scale(), v.samples(), v.anisotropy()))
+        let voodoo = self.voodoo.borrow();
+        voodoo.as_ref().map(|v| (v.scale(), v.samples(), v.anisotropy()))
     }
 
     /// Stop drawing the 3dfx card.
     pub fn drop_voodoo(&mut self) {
-        if let Some(voodoo) = self.voodoo.take() {
+        let voodoo = self.voodoo.borrow_mut().take();
+        if let Some(voodoo) = voodoo {
             voodoo.destroy(&self.gl);
         }
+    }
+
+    /// The renderer for the 3dfx card to do its 2D operations with
+    /// between frames (`voodoo::gpu`).
+    pub fn voodoo_link(&self) -> Box<dyn GpuLink> {
+        Box::new(SharedGl {
+            gl: self.gl.clone(),
+            renderer: self.voodoo.clone(),
+        })
     }
 
     /// Draw what the 3dfx card recorded, at `scale` times its size with
@@ -365,12 +394,12 @@ impl GlScreen {
         if self.voodoo_scale().is_some_and(|now| now != (scale, samples, anisotropy)) {
             self.drop_voodoo();
         }
-        if self.voodoo.is_none() {
+        if self.voodoo.borrow().is_none() {
             if let Some(problem) = &self.voodoo_failed {
                 return Err(problem.clone());
             }
             match VoodooGl::new(&self.gl, self.glsl, scale, samples, anisotropy) {
-                Ok(voodoo) => self.voodoo = Some(voodoo),
+                Ok(voodoo) => *self.voodoo.borrow_mut() = Some(voodoo),
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);
                     self.voodoo_failed = Some(e.clone());
@@ -380,28 +409,47 @@ impl GlScreen {
         }
         // A Banshee's picture needs its compositor, which may not compile
         // here: the software renderer draws it from then on.
-        if recording.scanout.is_some()
-            && let Some(problem) = self.voodoo.as_ref().and_then(|v| v.banshee_problem())
-        {
-            let problem = problem.to_string();
+        let problem = recording
+            .scanout
+            .as_ref()
+            .and_then(|_| self.voodoo.borrow().as_ref()?.banshee_problem().map(str::to_string));
+        if let Some(problem) = problem {
             eprintln!("[DISPLAY] {}", problem);
             self.voodoo_failed = Some(problem.clone());
             self.drop_voodoo();
             return Err(problem);
         }
-        Ok(self.voodoo.as_mut().is_some_and(|voodoo| {
+        // Without the 2D operations' program, a Banshee does them in
+        // software, which the log says the first time it draws.
+        if recording.scanout.is_some() && !self.gpu_2d_logged {
+            let voodoo = self.voodoo.borrow();
+            if let Some(problem) = voodoo.as_ref().and_then(|v| v.gpu_2d_problem()) {
+                eprintln!("[DISPLAY] 2D operations stay on the CPU: {problem}");
+                self.gpu_2d_logged = true;
+            }
+        }
+        Ok(self.voodoo.borrow_mut().as_mut().is_some_and(|voodoo| {
             voodoo.set_dither(dither);
             voodoo.run(&self.gl, recording)
         }))
+    }
+
+    /// The 3dfx card's picture as OpenGL last composed it, read back at
+    /// the card's resolution (`VoodooGl::read_picture`).
+    pub fn voodoo_picture(&mut self) -> Option<Frame> {
+        self.voodoo.borrow().as_ref()?.read_picture(&self.gl)
     }
 
     /// Show the 3dfx card's picture, with what `screen` has over `base`
     /// (the settings window, messages) on it, letterboxed at `display`
     /// proportions. False if it has none to show.
     pub fn present_voodoo(&mut self, screen: &Frame, base: &Frame, display: (u32, u32)) -> bool {
-        let Some(voodoo) = &mut self.voodoo else { return false };
-        let Some((texture, size)) = voodoo.composite(&self.gl, screen, base) else { return false };
-        let line = shader::line_scale(self.scale_lines.then_some(voodoo.scale()));
+        let composed = self.voodoo.borrow_mut().as_mut().and_then(|voodoo| {
+            let (texture, size) = voodoo.composite(&self.gl, screen, base)?;
+            Some((texture, size, voodoo.scale()))
+        });
+        let Some((texture, size, scale)) = composed else { return false };
+        let line = shader::line_scale(self.scale_lines.then_some(scale));
         // SAFETY: see `GlScreen`.
         unsafe {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));

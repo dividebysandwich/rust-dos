@@ -331,23 +331,27 @@ impl DiskController {
         None
     }
 
+    /// The name and the extension a search pattern looks for. DOS packs
+    /// the pattern into a name of 8 and an extension of 3, padded with
+    /// spaces, so what goes past them is dropped and trailing spaces are
+    /// padding: Comanche looks for "LH66.RLE    ".
+    fn pattern_fields(pattern: &str) -> (String, String) {
+        let (name, ext) = pattern.split_once('.').unwrap_or((pattern, ""));
+        let field = |part: &str, len: usize| {
+            let end = part.char_indices().nth(len).map_or(part.len(), |(i, _)| i);
+            part[..end].trim_end_matches(' ').to_string()
+        };
+        (field(name, 8), field(ext, 3))
+    }
+
     /// Helper: Simple DOS wildcard matching (? and *)
     pub(super) fn matches_pattern(filename: &str, pattern: &str) -> bool {
         if pattern == "*.*" {
             return true;
         }
 
-        // Split filename and pattern by '.'
         let (f_name, f_ext) = filename.split_once('.').unwrap_or((filename, ""));
-        let (p_name, p_ext) = pattern.split_once('.').unwrap_or((pattern, ""));
-        // DOS packs the pattern into a name of 8 and an extension of 3,
-        // padded with spaces, so what goes past them is dropped and
-        // trailing spaces are padding: Comanche looks for "LH66.RLE    ".
-        let field = |part: &'_ str, len: usize| {
-            let end = part.char_indices().nth(len).map_or(part.len(), |(i, _)| i);
-            part[..end].trim_end_matches(' ').to_string()
-        };
-        let (p_name, p_ext) = (field(p_name, 8), field(p_ext, 3));
+        let (p_name, p_ext) = Self::pattern_fields(pattern);
 
         let match_part = |f: &str, p: &str| -> bool {
             if p == "*" {
@@ -620,15 +624,23 @@ impl DiskController {
             valid_entries.extend(Self::dot_entries(pattern, search_attr, [(0, 0); 2]));
         }
 
-        let (mut entries, kept) = self.host_entries(&host_dir);
         // The folder may have changed without its time moving
         // (`HostDirCache`). A wildcard search lists what is there now: it
         // stats every match anyway, so the read adds little. A search for
-        // one name reads again only when nothing kept matches.
-        let wild = pattern.contains(['*', '?']);
-        if kept && (wild || !entries.iter().any(|(_, name)| Self::matches_pattern(name, pattern))) {
-            entries = self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir));
-        }
+        // one name looks it up as a path does: the folder is read again
+        // when nothing kept has it, unless a recent read hadn't it either.
+        let entries = if pattern.contains(['*', '?']) {
+            let (entries, kept) = self.host_entries(&host_dir);
+            if kept {
+                self.host_dirs.reread(&host_dir, || Self::read_host_entries(&host_dir))
+            } else {
+                entries
+            }
+        } else {
+            let (name, ext) = Self::pattern_fields(pattern);
+            let name = if ext.is_empty() { name } else { format!("{}.{}", name, ext) };
+            self.find_host_entry(&host_dir, &name).0
+        };
         for (original_name, final_name) in entries.iter() {
             // The name decides first: a stat per entry is what a listing
             // costs, and a search for one name needs only its own.

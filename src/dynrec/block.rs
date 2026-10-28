@@ -50,10 +50,12 @@ pub const RETURN_LINKS: usize = 4;
 pub const RETURN_MISS: usize = LINKS;
 
 /// A byte is watched once blocks have gone stale this often because it
-/// changed, each time with at most `POKE_BYTES` of their bytes changed
-/// (a poke, not new code over the old).
+/// changed, each time with their changed bytes in at most `POKES` runs of
+/// at most `POKE_BYTES`: pokes of immediates or addresses. New code over
+/// the old changes longer runs.
 pub const WATCH_AFTER: u8 = 2;
 pub const POKE_BYTES: usize = 4;
+pub const POKES: usize = 16;
 
 /// What a link to another page was made under. Translated code takes it
 /// only while fetching its target would go the same way, as the
@@ -448,26 +450,41 @@ impl BlockData {
     }
 
     /// Offsets in `bytes` of the bytes in the block's page that changed
-    /// since the block was translated, if they are few enough to be a poke
-    /// (`POKE_BYTES`). A change to the bytes of the last instruction in the
-    /// next page (`crosses`) counts as one to its first byte, which has a
-    /// count of pokes: once that is watched, blocks stop before it.
+    /// since the block was translated, if they are pokes: in at most
+    /// `POKES` runs of at most `POKE_BYTES` (SkyNET pokes two or three
+    /// immediates into a block before running it, Riverworld the twelve
+    /// factors of a transform). A run may skip bytes that stayed as they
+    /// were, as the middle byte of a new immediate can, but never has more
+    /// than `POKE_BYTES` changed in a row. A change to the bytes of the
+    /// last instruction in the next page (`crosses`) counts as one to its
+    /// first byte, which has a count of pokes: once that is watched,
+    /// blocks stop before it.
     pub fn poked(&self, ram: &[u8]) -> Option<Vec<usize>> {
         let len = self.len as usize;
         let now = &ram[self.phys as usize..][..len];
         let mut changed = Vec::new();
+        // The runs so far, where the last one starts, and the bytes
+        // changed in a row up to here.
+        let (mut runs, mut start, mut row) = (0, 0, 0);
         for (i, (a, b)) in now.iter().zip(&self.bytes[..len]).enumerate() {
-            if a != b {
-                if changed.len() == POKE_BYTES {
-                    return None;
-                }
-                changed.push(i);
+            if a == b {
+                row = 0;
+                continue;
             }
+            if runs == 0 || i >= start + POKE_BYTES {
+                runs += 1;
+                start = i;
+            }
+            row += 1;
+            if row > POKE_BYTES || runs > POKES {
+                return None;
+            }
+            changed.push(i);
         }
         if ram[self.next as usize..][..self.next_len as usize] != self.bytes[len..] {
             let first = self.offset(self.count() - 1);
             if !changed.contains(&first) {
-                if changed.len() == POKE_BYTES {
+                if runs == POKES {
                     return None;
                 }
                 changed.push(first);

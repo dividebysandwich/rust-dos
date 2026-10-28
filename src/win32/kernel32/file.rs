@@ -382,7 +382,7 @@ fn read_open(cpu: &mut Cpu, open: Open, buffer: u32, n: u32) -> Option<(u32, Opt
     let mut count = 0u32;
     while count < n {
         let len = (n - count).min(CHUNK);
-        match cpu.bus.disk.read_file(open.sft, len as usize) {
+        match crate::interrupts::int21::read_open_file(cpu, open.sft, len as usize) {
             Ok(bytes) => {
                 cpu.bus
                     .guest_write_bytes(buffer.wrapping_add(count), &bytes);

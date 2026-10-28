@@ -561,9 +561,9 @@ fn set_cursor_for(cpu: &mut Cpu, hwnd: u32, lp: u32) -> u32 {
             };
             super::resource::system_cursor(cpu, id)
         }
-        _ => super::resource::system_cursor(cpu, 32512),
+        _ => super::resource::system_cursor(cpu, super::resource::IDC_ARROW),
     };
-    user(cpu).input.cursor_handle = cursor;
+    super::cursor::set(cpu, cursor);
     TRUE
 }
 

@@ -150,6 +150,18 @@ pub const VIDPROC_OVERLAY_TILED: u32 = 1 << 25;
 pub const VIDPROC_2X: u32 = 1 << 26;
 pub const VIDPROC_CURSOR: u32 = 1 << 27;
 
+/// Desktops less than this many pixels wide are the narrow modes: 3dfx's
+/// driver sets them at half the pixel clock (the built-in Windows'
+/// `card_set_mode` does too), so the monitor shows each of their pixels
+/// twice across (`Banshee::wide_pixels`).
+pub const NARROW_WIDTH: u32 = 400;
+
+/// Whether a desktop `width` pixels wide is a narrow mode
+/// (`NARROW_WIDTH`).
+fn narrow(width: u32) -> bool {
+    width < NARROW_WIDTH
+}
+
 // vidSerialParallelPort: the DDC and I2C lines, written and read back.
 const DDC_ENABLE: u32 = 1 << 18;
 const DDC_CLOCK_W: u32 = 1 << 19;
@@ -403,7 +415,7 @@ impl Banshee {
     /// `banshee_write_linear`).
     pub fn linear_addr(&self, addr: u32) -> u32 {
         let config = self.reg(LFB_MEMORY_CONFIG);
-        let tile_base = (config & 0x1FFF) << 12;
+        let tile_base = self.tile_base();
         let addr = addr & (BAR_SIZE - 1);
         if addr < tile_base {
             return addr;
@@ -413,6 +425,20 @@ impl Banshee {
         let offset = addr - tile_base;
         let (x, y) = (offset & ((1 << shift) - 1), offset >> shift);
         tile_base + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * tile_x
+    }
+
+    /// The memory address of BAR1 offset `addr`, where the `len` bytes
+    /// from it on are all below the tile base, so in memory one after the
+    /// other as they are in the BAR (`linear_addr`).
+    pub fn linear_run(&self, addr: u32, len: u32) -> Option<u32> {
+        let addr = addr & (BAR_SIZE - 1);
+        (addr.checked_add(len)? <= self.tile_base()).then_some(addr)
+    }
+
+    /// Where BAR1's tiles begin (lfbMemoryConfig): below it, BAR1 is the
+    /// memory in order.
+    fn tile_base(&self) -> u32 {
+        (self.reg(LFB_MEMORY_CONFIG) & 0x1FFF) << 12
     }
 
     // --- Video ---
@@ -467,6 +493,25 @@ impl Banshee {
             | ((c[0x1B] as u32 >> 2) & 1) << 10)
             + 1;
         (width.clamp(8, 2048), height.clamp(1, 2048))
+    }
+
+    /// Whether the monitor shows each of the desktop's pixels twice as
+    /// wide as it has them: a desktop less than `NARROW_WIDTH` pixels
+    /// wide. 3dfx's driver runs such a mode (320x200, 320x240) at half
+    /// the pixel clock of the mode twice as wide, at the same line rate,
+    /// so its pixels last twice as long and the picture spans the screen
+    /// as the wider mode's does, the way a VGA's 320-pixel modes do.
+    pub fn wide_pixels(&self) -> bool {
+        narrow(self.desktop_size().0)
+    }
+
+    /// The size of the picture as the monitor shows it: the desktop's
+    /// (`desktop_size`), twice as wide with `wide_pixels`. Its lines are
+    /// the CRTC's, which half mode already counts twice.
+    pub fn picture_size(&self) -> (u32, u32) {
+        let (width, height) = self.desktop_size();
+        let across = if narrow(width) { 2 } else { 1 };
+        (width * across, height)
     }
 
     /// The swap count, pending swaps and busy bits of the status register
@@ -717,6 +762,8 @@ impl Voodoo {
             if self.writes_queue() {
                 self.catch_up();
             }
+            let at = addr & self.fbi.mask;
+            self.gpu_sync(at, at + 4);
             return blit2d::read(&self.fbi.ram, addr, 4, self.fbi.mask);
         }
         match offset & 0x1F0_0000 {
@@ -792,7 +839,13 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
+        let start = (addr & mask) as usize;
+        if start + data.len() <= self.fbi.ram.bytes() {
+            self.fbi.ram.read_bytes(start, data);
+            return;
+        }
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = self.fbi.ram.byte((addr.wrapping_add(i as u32) & mask) as usize);
         }
@@ -809,13 +862,18 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
-        for (i, &byte) in data.iter().enumerate() {
-            let at = addr.wrapping_add(i as u32) & mask;
-            self.fbi.ram.set_byte(at as usize, byte);
+        let start = addr & mask;
+        if start as usize + data.len() <= self.fbi.ram.bytes() {
+            self.fbi.ram.write_bytes(start as usize, data);
+        } else {
+            for (i, &byte) in data.iter().enumerate() {
+                let at = addr.wrapping_add(i as u32) & mask;
+                self.fbi.ram.set_byte(at as usize, byte);
+            }
         }
         self.display_dirty = true;
-        let start = addr & mask;
         let end = (start as u64 + data.len() as u64).min(mask as u64 + 1) as u32;
         self.mirror_memory(start, end);
     }
@@ -825,6 +883,8 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        // The engine may read and draw anywhere in the memory.
+        self.gpu_sync_all();
         let Some(b) = &mut self.banshee else { return };
         b.engine.write(&self.fbi.ram, reg, data);
         if std::mem::take(&mut b.engine.drawn) {
@@ -863,6 +923,7 @@ impl Voodoo {
         if self.writes_queue() && !in_ring {
             self.catch_up();
         }
+        self.gpu_sync(addr & self.fbi.mask, (addr & self.fbi.mask) + 4);
         let ram = &self.fbi.ram;
         let fbmask = self.fbi.mask;
         if mask == 0xFFFF_FFFF {
@@ -875,6 +936,12 @@ impl Voodoo {
             }
         }
         if in_ring {
+            // The renderer gets the page again: a read back of a GPU 2D
+            // operation there would otherwise undo the packet.
+            if self.mirror.is_some() {
+                let at = addr & fbmask;
+                self.gpu.get_mut().pages.mark(at, at + 4);
+            }
             self.banshee_fifo_written(addr, now, effect);
         } else {
             self.display_dirty = true;
@@ -960,6 +1027,26 @@ mod tests {
         b.crtc[0x01] = 0x0F;
         b.crtc[0x1A] = 0x04;
         assert_eq!(b.desktop_size().0, 2048);
+    }
+
+    #[test]
+    fn narrow_desktops_show_their_pixels_twice_across() {
+        let mut b = Banshee::new(Kind::Voodoo3);
+        // 320x200 in half mode, as 3dfx's driver sets it: 40 characters
+        // across and 400 lines.
+        b.crtc[0x01] = 39;
+        b.crtc[0x12] = 0x8F;
+        b.crtc[0x07] = 0x02;
+        b.ext_write(VID_PROC_CFG, VIDPROC_HALF_MODE);
+        assert_eq!(b.desktop_size(), (320, 400));
+        assert!(b.wide_pixels());
+        assert_eq!(b.picture_size(), (640, 400));
+        // 640x480 is shown as it is.
+        b.crtc[0x01] = 79;
+        b.crtc[0x12] = 0xDF;
+        b.ext_write(VID_PROC_CFG, 0);
+        assert!(!b.wide_pixels());
+        assert_eq!(b.picture_size(), (640, 480));
     }
 
     #[test]

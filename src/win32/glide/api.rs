@@ -1668,25 +1668,17 @@ pub fn tex_download_level(
         let level = base
             .wrapping_add(start)
             .wrapping_add(levels_bytes(large_lod, lod, aspect, format, even_odd));
-        let first = level + t0 * row;
-        let end = level + (t1 + 1) * row;
-        let port_base = first & 0xFF_FFF0;
-        hw::write(cpu, tmu_chip(0), TEX_BASE_ADDR, port_base);
-        let mut at = first & !3;
-        while at < end {
-            let mut bytes = hw::memory_read(cpu, at).unwrap_or(0).to_le_bytes();
-            for (i, byte) in bytes.iter_mut().enumerate() {
-                let a = at + i as u32;
-                if a >= first && a < end {
-                    let offset = a - level;
-                    *byte = texel(offset / row, offset % row);
-                }
-            }
-            hw::texture_port_write(cpu, at - port_base, u32::from_le_bytes(bytes));
-            at += 4;
-        }
-        let shadow = gc(cpu).tmu[0].tex_base[0];
-        hw::write(cpu, tmu_chip(0), TEX_BASE_ADDR, shadow);
+        // The rows in one copy, as a burst through the texture space
+        // puts them; rows the program didn't give are zeros.
+        let len = ((t1 - t0 + 1) * row) as usize;
+        let rows = if data.len() >= len {
+            std::borrow::Cow::Borrowed(&data[..len])
+        } else {
+            let mut rows = data.to_vec();
+            rows.resize(len, 0);
+            std::borrow::Cow::Owned(rows)
+        };
+        cpu.bus.banshee_texture_download(level + t0 * row, &rows);
         return;
     }
     // A Voodoo Graphics or Voodoo2: the unit's registers for this
@@ -1991,10 +1983,13 @@ pub fn draw_point(cpu: &mut Cpu, p: &Vertex) {
     if !active(cpu) {
         return;
     }
-    // 12.4 fixed point: the pixel, and half a pixel.
+    // 12.4 fixed point: the pixel, and half a pixel. The triangle's
+    // far corners are at the pixel's far edge, 2048 for pixel 2047,
+    // which the card's registers take as -2048: the pixel is at most
+    // 2046.
     let fixed = |v: f32| -> u32 {
         let v = if v.is_finite() {
-            v.clamp(-2048.0, 2047.0)
+            v.clamp(-2048.0, 2046.0)
         } else {
             0.0
         };

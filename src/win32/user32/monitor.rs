@@ -35,15 +35,15 @@ const MONITORINFOEXW: u32 = 104;
 const DEVICE: &str = "\\\\.\\Display1";
 
 /// The screen's rectangle, which the monitor is.
-fn screen() -> Rect {
-    let (w, h) = screen_size();
+fn screen(cpu: &Cpu) -> Rect {
+    let (w, h) = screen_size(cpu);
     Rect::new(0, 0, w, h)
 }
 
 /// GetSystemMetrics' values Windows 98 adds: SM_XVIRTUALSCREEN to
 /// SM_CYVIRTUALSCREEN, SM_CMONITORS and SM_SAMEDISPLAYFORMAT.
-pub fn metric(index: u32) -> Option<i32> {
-    let (w, h) = screen_size();
+pub fn metric(cpu: &Cpu, index: u32) -> Option<i32> {
+    let (w, h) = screen_size(cpu);
     Some(match index {
         76 | 77 => 0,
         78 => w,
@@ -69,15 +69,15 @@ pub fn monitor_from_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// MonitorFromPoint(point, flags), the point by value.
-pub fn monitor_from_point(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let on = screen().contains(args[0] as i32, args[1] as i32);
+pub fn monitor_from_point(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let on = screen(cpu).contains(args[0] as i32, args[1] as i32);
     Some(monitor_for(on, args[2]))
 }
 
 /// MonitorFromRect(rect, flags).
 pub fn monitor_from_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let r = Rect::read(cpu, args[0]);
-    let on = !r.intersect(&screen()).is_empty();
+    let on = !r.intersect(&screen(cpu)).is_empty();
     Some(monitor_for(on, args[1]))
 }
 
@@ -104,7 +104,7 @@ fn monitor_info(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
     if size != MONITORINFO && size != ex {
         return Some(FALSE);
     }
-    let r = screen();
+    let r = screen(cpu);
     let rect = [r.left, r.top, r.right, r.bottom].map(|v| v as u32);
     let mut words = vec![size];
     words.extend(rect);
@@ -139,7 +139,7 @@ pub fn enum_display_monitors(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hdc, clip, proc, data] = args else {
         unreachable!()
     };
-    let mut r = screen();
+    let mut r = screen(cpu);
     if hdc != 0 {
         // GetDCOrgEx and GetClipBox, through the stack below the
         // arguments, which nothing uses then.
@@ -253,6 +253,7 @@ pub fn get_cursor_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
+    super::init(cpu);
     let input = &user(cpu).input;
     let showing = if input.cursor_count >= 0 {
         CURSOR_SHOWING

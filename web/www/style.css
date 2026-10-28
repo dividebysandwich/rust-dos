@@ -113,7 +113,8 @@ select {
   cursor: default;
 }
 #screen.smooth { image-rendering: auto; }
-#screen.captured { cursor: none; }
+#screen.captured,
+#screen.drawn-pointer { cursor: none; }
 
 #stage:fullscreen { padding: 0; background: #000; }
 

@@ -402,6 +402,7 @@ impl Voodoo {
                             self.catch_up();
                         }
                         let start = addr & self.fbi.mask;
+                        self.gpu_sync_bytes(start, 4 * count as usize);
                         for _ in 0..count {
                             let data = self.fifo_take(n);
                             super::blit2d::write(&self.fbi.ram, addr, 4, data, self.fbi.mask);

@@ -423,12 +423,26 @@ fn inside(s: &Surface, at: u32) -> bool {
     at % PITCH < s.width * 2 && at / PITCH < s.height
 }
 
-/// Read bytes of a card surface's buffer from byte `offset`, rows of
-/// `PITCH` bytes; bytes past its width read as 0.
-pub fn read(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
+/// Read runs of `len` bytes of a card surface's buffer, rows of `PITCH`
+/// bytes, into `data` one after another: the first from byte `offset`,
+/// each of the others `PITCH` bytes after the one before. Bytes past
+/// its width read as 0. The linear frame buffer is set up once for all
+/// of them.
+pub fn read(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &mut [u8]) {
+    if len == 0 {
+        return;
+    }
     let saved = glide::state(cpu).gc.lfb_mode;
     let mode = (saved & !(LFB_READ_BUFFER | LFB_YORIGIN)) | s.bits << 6;
     hw::write(cpu, hw::ALL, LFB_MODE, mode);
+    for (run, y) in data.chunks_mut(len).zip(0u32..) {
+        read_run(cpu, s, offset + y * PITCH, run);
+    }
+    hw::write(cpu, hw::ALL, LFB_MODE, saved);
+}
+
+/// `read` of one run, the frame buffer set up for it.
+fn read_run(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
     let end = offset + data.len() as u32;
     let mut at = offset & !3;
     while at < end {
@@ -445,12 +459,16 @@ pub fn read(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
         }
         at += 4;
     }
-    hw::write(cpu, hw::ALL, LFB_MODE, saved);
 }
 
-/// Write bytes of a card surface's buffer at byte `offset`; bytes past
-/// its width are left.
-pub fn write(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
+/// Write runs of `len` bytes of `data`, one after another, into a card
+/// surface's buffer: the first at byte `offset`, each of the others
+/// `PITCH` bytes after the one before. Bytes past its width are left.
+/// The linear frame buffer is set up once for all of them.
+pub fn write(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u8]) {
+    if len == 0 {
+        return;
+    }
     let g = glide::state(cpu).gc.clone();
     let target = if s.bits == BUFFER_AUXBUFFER {
         0
@@ -462,6 +480,15 @@ pub fn write(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
         | format(s.bits);
     hw::write(cpu, hw::ALL, LFB_MODE, mode);
     hw::write(cpu, hw::ALL, FBZ_MODE, g.fbz_mode & !(ENZBIAS | ENDITHER));
+    for (run, y) in data.chunks(len).zip(0u32..) {
+        write_run(cpu, s, offset + y * PITCH, run);
+    }
+    hw::write(cpu, hw::ALL, LFB_MODE, g.lfb_mode);
+    hw::write(cpu, hw::ALL, FBZ_MODE, g.fbz_mode);
+}
+
+/// `write` of one run, the frame buffer set up for it.
+fn write_run(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     let end = offset + data.len() as u32;
     let mut at = offset & !3;
     while at < end {
@@ -479,8 +506,6 @@ pub fn write(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
         }
         at += 4;
     }
-    hw::write(cpu, hw::ALL, LFB_MODE, g.lfb_mode);
-    hw::write(cpu, hw::ALL, FBZ_MODE, g.fbz_mode);
 }
 
 /// Fill rectangles of a card surface's buffer with `value` (a 5-6-5
@@ -514,12 +539,23 @@ pub fn fill(cpu: &mut Cpu, s: &Surface, rects: &[crate::win32::gdi32::Rect], val
 }
 
 /// Flip: the card's back buffer shows, at the next vertical retrace
-/// unless `vsync` is false. With swaps still waiting for theirs, it
-/// doesn't if `wait` is false: whether it did.
-pub fn swap(cpu: &mut Cpu, vsync: bool, wait: bool) -> bool {
-    if !wait && api::buffer_num_pending(cpu) > 0 {
-        return false;
-    }
+/// unless `vsync` is false.
+pub fn swap(cpu: &mut Cpu, vsync: bool) {
     api::buffer_swap(cpu, vsync as u32);
-    true
+}
+
+/// When the card's swaps still waiting for their retraces are all done,
+/// by the clock's nanoseconds: None while none waits
+/// (grBufferNumPending gives 0).
+pub fn swaps_pending_until(cpu: &Cpu) -> Option<u64> {
+    let due = cpu
+        .bus
+        .voodoo
+        .as_ref()?
+        .swaps_done_at(cpu.bus.clock.now_ticks())?;
+    Some(crate::timer::mul_div_ceil(
+        due,
+        1_000_000_000,
+        crate::timer::PIT_HZ,
+    ))
 }

@@ -1772,6 +1772,8 @@ impl Cpu {
         // a cold boot.
         let a20 = self.bus.xms.program_ended();
         self.bus.dpmi.reset();
+        // The loops of a program that ends here get their summaries.
+        crate::win32::trace::flush(self);
         self.bus.win32.reset();
         // The addresses of its values mean nothing to the next program.
         self.bus.freezes.clear();

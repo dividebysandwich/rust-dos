@@ -111,18 +111,18 @@ fn hal(cpu: &mut Cpu) -> &mut Hal {
 }
 
 // Render states the HAL reads.
-const RS_ALPHATESTENABLE: u32 = 15;
+pub const RS_ALPHATESTENABLE: u32 = 15;
 const RS_SRCBLEND: u32 = 19;
 const RS_DESTBLEND: u32 = 20;
-const RS_ALPHAREF: u32 = 24;
+pub const RS_ALPHAREF: u32 = 24;
 const RS_ALPHAFUNC: u32 = 25;
-const RS_DITHERENABLE: u32 = 26;
-const RS_ALPHABLENDENABLE: u32 = 27;
-const RS_FOGCOLOR: u32 = 34;
+pub const RS_DITHERENABLE: u32 = 26;
+pub const RS_ALPHABLENDENABLE: u32 = 27;
+pub const RS_FOGCOLOR: u32 = 34;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
 const RS_FOGDENSITY: u32 = 38;
-const RS_COLORKEYENABLE: u32 = 41;
+pub const RS_COLORKEYENABLE: u32 = 41;
 
 /// The heap's size at the most, and the least worth having.
 const HEAP_MAX: u32 = 4 << 20;
@@ -203,9 +203,20 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let right = ((m.ox + m.bounds[1] * m.sx).max(0.0) as u32).min(width);
     let top = (m.oy - m.bounds[3] * m.sy).max(0.0) as u32;
     let bottom = ((m.oy - m.bounds[2] * m.sy).max(0.0) as u32).min(height);
+    // OpenGL's scissor box cuts it down further.
+    let [left, top, right, bottom] = match d.scissor {
+        Some(s) => [
+            left.max(s[0]),
+            top.max(s[1]),
+            right.min(s[2]),
+            bottom.min(s[3]),
+        ],
+        None => [left, top, right, bottom],
+    };
     api::clip_window(cpu, left, top, right.max(left), bottom.max(top));
     api::cull_mode(cpu, api::CULL_DISABLE);
-    api::color_mask(cpu, true, false);
+    api::color_mask(cpu, !d.color_off, false);
+    api::depth_bias_level(cpu, d.depth_bias);
     api::chromakey_mode(cpu, api::CHROMAKEY_DISABLE);
     let dither = d.state(RS_DITHERENABLE) != 0;
     api::dither_mode(
@@ -368,6 +379,11 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         }
     }
     let textured = loaded[0];
+    // Each unit's own texture coordinates when both draw: without the
+    // hint the upstream unit takes the downstream one's.
+    if loaded[0] && loaded[1] {
+        api::hints(cpu, api::HINT_STWHINT, hint | api::STWHINT_ST_DIFF_TMU1);
+    }
     // A keyed texture on the upstream unit alone isn't drawn.
     let keyed = keyed && textured;
     if textured {
@@ -1250,6 +1266,14 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 
 // Drawing.
 
+/// The band on the screen the pipeline clips what the card draws to:
+/// left, top, right and bottom. The card's vertex registers hold 12.4
+/// fixed point, -2048 to 2047.9375, and a coordinate past either end
+/// wraps round to the other, so a triangle clipped at 2048 would have
+/// its vertices there drawn at -2048. A pixel in from those ends
+/// leaves room for the half pixel lines are drawn out by.
+pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2047.0, 2047.0];
+
 /// The card as the pipeline's rasterizer.
 pub struct Raster<'a> {
     pub cpu: &'a mut Cpu,
@@ -1382,6 +1406,87 @@ impl Rasterizer for Raster<'_> {
 
 // Clearing.
 
+/// Fill `rects` of the 16-bit surface `s` (`id`) in a Banshee's or
+/// Voodoo3's memory with `value` by the card's fastfill, as the Voodoo3's
+/// HAL clears: the 3D engine fills it after what it drew before, and with
+/// the OpenGL renderer the GPU does, where the software renderer would
+/// otherwise draw all that first to have the memory to write into. A
+/// depth buffer gets `value` as zaColor's depth, a render target as
+/// color1, the 5-6-5 value's channels widened and not dithered, which
+/// the fill takes back to `value`. False, with nothing done, while the
+/// card isn't set up for the HAL's drawing (Glide closed or another
+/// process's, or no render target or depth buffer of the HAL's given to
+/// it yet) or the surface isn't in its memory.
+pub(in crate::win32::ddraw) fn card_fill(
+    cpu: &mut Cpu,
+    s: &Surface,
+    id: u32,
+    rects: &[[i32; 4]],
+    value: u16,
+) -> bool {
+    use crate::voodoo::banshee::render3d::{
+        AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
+    };
+    use crate::voodoo::regs::{
+        CLIP_LEFT_RIGHT, CLIP_LOW_Y_HIGH_Y, COLOR1, FASTFILL_CMD, FBZ_MODE, ZA_COLOR,
+    };
+    const ENRECTCLIP: u32 = 1;
+    const RGBWRMASK: u32 = 1 << 9;
+    const ZAWRMASK: u32 = 1 << 10;
+    const DRAWBUFFER: u32 = 3 << 14;
+    if !hw::banshee(cpu) {
+        return false;
+    }
+    let pid = current_pid(cpu);
+    let glide = crate::win32::glide::state(cpu);
+    let (owner, g) = (glide.owner, glide.gc.clone());
+    if !g.active || (owner != 0 && owner != pid) {
+        return false;
+    }
+    let depth = s.format.flags & surface::DDPF_ZBUFFER != 0;
+    // The registers the fill takes the place of, put back after it.
+    let (at_reg, stride_reg, value_reg, saved) = if depth {
+        (AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, ZA_COLOR, (g.target[2], g.target[3], g.za_color))
+    } else {
+        (COL_BUFFER_ADDR, COL_BUFFER_STRIDE, COLOR1, (g.target[0], g.target[1], g.color1))
+    };
+    if saved.1 == 0 {
+        return false;
+    }
+    let Some((at, pitch)) = surface::card_memory(cpu, id) else {
+        return false;
+    };
+    let (fbz, fill) = if depth {
+        (ENRECTCLIP | ZAWRMASK, g.za_color & !0xFFFF | value as u32)
+    } else {
+        let rgb = crate::win32::screen::from_565(value);
+        (ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER, rgb)
+    };
+    hw::write(cpu, hw::ALL, at_reg, at);
+    hw::write(cpu, hw::ALL, stride_reg, pitch);
+    hw::write(cpu, hw::ALL, FBZ_MODE, fbz);
+    hw::write(cpu, hw::ALL, value_reg, fill);
+    let whole = [[0, 0, s.width as i32, s.height as i32]];
+    for r in if rects.is_empty() { &whole[..] } else { rects } {
+        let x = |v: i32| v.clamp(0, s.width as i32) as u32;
+        let y = |v: i32| v.clamp(0, s.height as i32) as u32;
+        let (left, right, top, bottom) = (x(r[0]), x(r[2]), y(r[1]), y(r[3]));
+        if left >= right || top >= bottom {
+            continue;
+        }
+        hw::write(cpu, hw::ALL, CLIP_LEFT_RIGHT, left << 16 | right);
+        hw::write(cpu, hw::ALL, CLIP_LOW_Y_HIGH_Y, top << 16 | bottom);
+        hw::write(cpu, hw::ALL, FASTFILL_CMD, 1);
+    }
+    hw::write(cpu, hw::ALL, at_reg, saved.0);
+    hw::write(cpu, hw::ALL, stride_reg, saved.1);
+    hw::write(cpu, hw::ALL, FBZ_MODE, g.fbz_mode);
+    hw::write(cpu, hw::ALL, value_reg, saved.2);
+    hw::write(cpu, hw::ALL, CLIP_LEFT_RIGHT, g.clip_left_right);
+    hw::write(cpu, hw::ALL, CLIP_LOW_Y_HIGH_Y, g.clip_bottom_top);
+    true
+}
+
 /// Fill rectangles (left, top, right, bottom) of the device `d`'s render
 /// target with `color` (ARGB) and of its depth buffer with `z`, as
 /// `target` and `depth` say, or the whole of them with no rectangles.
@@ -1413,6 +1518,10 @@ pub fn clear(
                 })
                 .collect();
             voodoo::fill(cpu, &s, &list, value as u32);
+            surface::changed(cpu, id);
+            return;
+        }
+        if card_fill(cpu, &s, id, rects, value) {
             surface::changed(cpu, id);
             return;
         }

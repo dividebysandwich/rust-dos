@@ -543,7 +543,7 @@ impl Ctx {
                 }
             }
         }
-        if rect.bottom + height >= sysparams::metric(SM_CYSCREEN) {
+        if rect.bottom + height >= sysparams::screen_metric(cpu, SM_CYSCREEN) {
             rect.bottom = rect.top - height;
         }
         let args = [

@@ -445,13 +445,17 @@ flame graphs. Without a profile running it costs nothing.
 ## Log file
 
 Rust-DOS logs what it does to `Rust-DOS.log` in the
-[per-user configuration directory](CONFIGURATION.md#configuration-file): the
-programs it runs, DOS and BIOS functions and I/O ports it doesn't emulate,
-failed file operations, CPU exceptions and configuration warnings. Attach it
-to bug reports. It is replaced on every start and stops growing at 64 MB.
-`--log FILE` writes it to `FILE` instead, so instances running at the same
-time keep separate logs. Rust-DOS stops with an error if it cannot create
-`FILE`.
+[per-user configuration directory](CONFIGURATION.md#configuration-file):
+the programs it runs, DOS and BIOS functions and I/O ports it doesn't
+emulate, failed file operations, CPU exceptions, configuration warnings
+and the calls of the built-in Windows' functions (`win32_trace`). Attach
+it to bug reports. It is replaced on every start and holds at most
+64 MB: its first 16 MB stay, and once it is full, the lines after them
+are cut down to the latest 24 MB, behind a `[LOG]` line that says how
+much was left out, so it keeps the start of the session and its latest
+lines. `--log FILE` writes it to `FILE` instead, so instances running
+at the same time keep separate logs. Rust-DOS stops with an error if it
+cannot create `FILE`.
 
 ## Acknowledgements
 

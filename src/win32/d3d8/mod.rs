@@ -47,7 +47,7 @@ macro_rules! hr {
 }
 
 mod caps;
-mod copy;
+pub mod copy;
 mod device;
 mod direct3d;
 mod draw;

@@ -17,10 +17,92 @@ const DEPTH: u32 = 4;
 /// The depth in the upper half of a 32-bit write, for its one pixel.
 const DEPTH_MSW: u32 = 8;
 
+/// Where a run of dwords written to the card's window goes, when all of
+/// them go to the frame buffer or the card's memory (`memory_run`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryRun {
+    /// A Voodoo Graphics' or Voodoo2's linear frame buffer, whose writes
+    /// go through its FIFO one by one.
+    Fifo,
+    /// A Banshee's 3D linear frame buffer, from this dword of the window
+    /// (`lfb_run`).
+    Lfb(u32),
+    /// A Banshee's memory through BAR1, from this address (`linear_run`).
+    Linear(u32),
+}
+
 impl Voodoo {
+    /// Where the dwords written to the `len` bytes of the window from
+    /// `offset` on go, if all of them go to the frame buffer or the card's
+    /// memory, where they change no register or the window's layout. A
+    /// string move's writes there can go in one call, in order
+    /// (`Bus::move_to_voodoo`).
+    pub fn memory_run(&self, offset: u32, len: u32) -> Option<MemoryRun> {
+        let end = offset.checked_add(len)?;
+        if self.banshee.is_none() {
+            return (offset >= 0x40_0000 && end <= 0x80_0000).then_some(MemoryRun::Fifo);
+        }
+        let lfb = self.lfb_run(offset, len).map(MemoryRun::Lfb);
+        lfb.or_else(|| self.linear_run(offset, len).map(MemoryRun::Linear))
+    }
+
+    /// Where the `len` bytes of a Banshee's window from `offset` on are in
+    /// its 3D engine's linear frame buffer, all of them: the dword
+    /// `lfb_write` takes for the first.
+    pub fn lfb_run(&self, offset: u32, len: u32) -> Option<u32> {
+        let end = offset.checked_add(len)?;
+        let lfb = 0x100_0000..=0x200_0000;
+        (self.banshee.is_some() && lfb.contains(&offset) && lfb.contains(&end))
+            .then_some((offset & 0xFF_FFFC) >> 2)
+    }
+
+    /// Where the `len` bytes of a Banshee's window from `offset` on are in
+    /// its memory, all of them through BAR1 below the tile base, one
+    /// after the other, and outside the command FIFOs' rings: the first
+    /// byte's address, for `banshee_memory_write`.
+    pub fn linear_run(&self, offset: u32, len: u32) -> Option<u32> {
+        use super::banshee::LINEAR;
+        let b = self.banshee.as_ref()?;
+        let end = offset.checked_add(len)?;
+        if offset < LINEAR || end > 2 * LINEAR {
+            return None;
+        }
+        let addr = b.linear_run(offset - LINEAR, len)?;
+        let ring = b
+            .fifo
+            .iter()
+            .any(|f| f.enabled && f.base < addr + len && addr < f.end);
+        (!ring).then_some(addr)
+    }
+
     /// A write to the frame buffer at dword `offset` of the window: `data`,
     /// of which `mem_mask` selects the halves written (`lfb_w`).
-    pub(crate) fn lfb_write(&mut self, offset: u32, mut data: u32, mut mem_mask: u32) {
+    pub(crate) fn lfb_write(&mut self, offset: u32, data: u32, mem_mask: u32) {
+        self.lfb_write_with(offset, data, mem_mask, &mut None);
+    }
+
+    /// Whole dwords written to the frame buffer from dword `offset` of
+    /// the window on, one after the other, as `lfb_write` writes them:
+    /// a string move into the linear frame buffer. Through the pixel
+    /// pipeline, the drawing queued before is done and the pipeline's
+    /// state read once for all of them, as nothing between the writes
+    /// changes either.
+    pub(crate) fn lfb_write_run(&mut self, offset: u32, data: impl IntoIterator<Item = u32>) {
+        let mut pipeline = None;
+        for (i, value) in (0..).zip(data) {
+            self.lfb_write_with(offset.wrapping_add(i), value, u32::MAX, &mut pipeline);
+        }
+    }
+
+    /// `lfb_write`, with the pipeline's state from an earlier write of
+    /// the same run in `pipeline`, or put there.
+    fn lfb_write_with(
+        &mut self,
+        offset: u32,
+        mut data: u32,
+        mut mem_mask: u32,
+        pipeline: &mut Option<raster::RasterState>,
+    ) {
         self.mirror_sync();
         let lfb_mode = self.reg[LFB_MODE];
         if lfb_mode & (1 << 12) != 0 {
@@ -238,18 +320,23 @@ impl Voodoo {
             }
         } else {
             // Through the pixel pipeline, which reads the buffers.
-            self.flush();
-            let st = self.raster_state(dest, 0);
+            let st = match pipeline {
+                Some(st) => st,
+                None => {
+                    self.flush();
+                    pipeline.insert(self.raster_state(dest, 0))
+                }
+            };
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             let mut pix = 0;
-            let scry = raster::screen_y(&st, y, fbz & (1 << 17) != 0);
+            let scry = raster::screen_y(st, y, fbz & (1 << 17) != 0);
             let mut written = [0i32; 2];
             let mut count = 0;
             while mask != 0 {
                 if mask & 0x0F != 0 {
                     let color = sa[pix] << 24 | sr[pix] << 16 | sg[pix] << 8 | sb[pix];
-                    raster::lfb_pixel(&st, x, y, color, sw[pix], &mut stipple, &mut stats);
+                    raster::lfb_pixel(st, x, y, color, sw[pix], &mut stipple, &mut stats);
                     written[count] = x;
                     count += 1;
                 }
