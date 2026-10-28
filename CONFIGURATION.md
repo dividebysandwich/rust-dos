@@ -488,8 +488,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   extended drive parameter block and free space (INT 21h AX=7302h and
   7303h) and, from 7.10, absolute disk reads and writes (AX=7305h), and
   INT 25h and 26h refuse FAT32 drives as MS-DOS 7.1 does. FAT32 drives
-  mount at any version, as programs reach their files through DOS. A
-  change takes effect at once.
+  mount at any version, as programs reach their files through DOS, and
+  at any version the FAT32 functions answer for a FAT32 drive, as
+  MS-DOS 7.1 does under SETVER: its drive parameter block (AH=32h) is
+  MS-DOS 7.1's, which only AX=7302h completes. Windows 98 Setup checks
+  a FAT32 C: this way. A change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and
@@ -1800,8 +1803,8 @@ that programs read and write like any other drive's; what they write goes
 into the image file. A FAT32 drive mounts at any `dos_version`, as
 programs reach its files through DOS; the functions of before FAT32
 (INT 21h AH=36h, 1Ch) report no more than just under 2 GB of it, as
-MS-DOS 7.1 does, and from DOS 7.00 on the FAT32 functions tell the rest
-(see `dos_version`). An image whose size is a floppy disk's (160 KB to 2.88 MB,
+MS-DOS 7.1 does, and the FAT32 functions tell the rest (see
+`dos_version`). An image whose size is a floppy disk's (160 KB to 2.88 MB,
 as in DOSBox's table), or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or
 `.1440`, is a floppy, anything else a hard disk: an image of a
 whole disk with a partition table, whose first FAT12 or FAT16 partition
