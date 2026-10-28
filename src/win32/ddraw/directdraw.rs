@@ -35,6 +35,10 @@ pub struct DirectDraw {
     /// The window procedure of the window of exclusive mode, `hwnd`,
     /// while DirectDraw's own (`window_proc`) is in front of it; else 0.
     pub proc: u32,
+    /// A cooperative level was set through IDirectDraw, the first
+    /// interface: from then on the end of exclusive mode leaves the mode
+    /// as it is (`display::leave_exclusive`), as Wine's DDRAW_SCL_DDRAW1.
+    pub level_v1: bool,
 }
 
 pub const DDSCL_FULLSCREEN: u32 = 0x1;
@@ -209,9 +213,10 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, hwnd, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
-    let (_, id) = hr!(ddraw_of(cpu, this));
+    let (vtable, id) = hr!(ddraw_of(cpu, this));
     let card = is_card(cpu, id);
     let exclusive = exclusive_of(cpu, card);
+    let v1 = vtable == V_DD1;
     let window = |cpu: &mut Cpu, hwnd: u32| cpu.bus.win32.user.is_window(hwnd);
     if flags & DDSCL_SETFOCUSWINDOW != 0 {
         if flags & !(DDSCL_SETFOCUSWINDOW | DDSCL_NOWINDOWCHANGES) != 0 {
@@ -225,6 +230,7 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         if let Some(d) = ddraw(cpu, id) {
             d.focus = hwnd;
+            d.level_v1 |= v1;
         }
         return Some(DD_OK);
     }
@@ -258,7 +264,13 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // The card's mode ends with exclusive mode.
             voodoo::end_exclusive(cpu, id);
         } else if exclusive == id {
-            state(cpu).display.exclusive = 0;
+            // Through IDirectDraw2 and later, the mode the object set
+            // ends with exclusive mode, unless it ever set a level
+            // through IDirectDraw.
+            let restore = !v1 && ddraw(cpu, id).is_some_and(|d| !d.level_v1);
+            if display::leave_exclusive(cpu, id, restore) {
+                modes_restored(cpu);
+            }
         }
     }
     let exclusive = flags & DDSCL_EXCLUSIVE != 0;
@@ -266,6 +278,7 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if let Some(d) = ddraw(cpu, id) {
         d.level = flags;
         d.hwnd = hwnd;
+        d.level_v1 |= v1;
     }
     // The window of exclusive mode becomes the active one, and gets the
     // focus, as with SetActiveWindow.
@@ -470,15 +483,21 @@ pub fn restore_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // is.
     let changed = display::owns_display(cpu);
     display::restore(cpu);
+    modes_restored(cpu);
+    if !changed {
+        return Some(DD_OK);
+    }
+    cover_screen(cpu, id)
+}
+
+/// The desktop's mode is back: no object's mode was changed by another
+/// one's any more (TestCooperativeLevel).
+fn modes_restored(cpu: &mut Cpu) {
     for other in state(cpu).ids(|o| o.ddraw.is_some()) {
         if let Some(d) = ddraw(cpu, other) {
             d.mode_changed = false;
         }
     }
-    if !changed {
-        return Some(DD_OK);
-    }
-    cover_screen(cpu, id)
 }
 
 /// GetDisplayMode(this, desc).
@@ -866,5 +885,6 @@ crate::state_fields!(DirectDraw {
     focus,
     mode_changed,
     card,
-    proc
+    proc,
+    level_v1
 });

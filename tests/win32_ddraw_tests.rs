@@ -1558,3 +1558,89 @@ fn gdi_draws_on_the_screen_in_the_mode_directdraw_set() {
     assert_eq!(vram[19 * 640 + 19], 10);
     assert_eq!(vram[20 * 640 + 20], 0);
 }
+
+const DD_QUERY_INTERFACE: u32 = 0;
+/// Where the program that leaves exclusive mode keeps the IDirectDraw2
+/// it asks for, and IID_IDirectDraw2.
+const DD2: u32 = 0x20;
+const IID: u32 = 0x330;
+const IID_IDIRECTDRAW2: [u8; 16] = [
+    0xE0, 0xF3, 0xA6, 0xB3, 0x43, 0x2B, 0xCF, 0x11, 0xA2, 0xDE, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56,
+];
+
+/// Full screen at 640x480 in 8 bits, a palette of its own on the primary
+/// surface, and back to DDSCL_NORMAL with the object kept, as The Tone
+/// Rebellion's windowed mode and MechCommander's assert dialog do: all
+/// through IDirectDraw2 with `v2`, else through IDirectDraw.
+fn leave_exclusive_program(v2: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    for i in 0..256u32 {
+        put(&mut d, ENTRIES + 4 * i, &[i as u8, 0x40, 255 - i as u8, 0]);
+    }
+    put(&mut d, IID, &IID_IDIRECTDRAW2);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 640, 480))?;
+        let dd = if v2 {
+            let query = [Arg::At(IID), Arg::At(DD2)];
+            c.com(a, l, DD, DD_QUERY_INTERFACE, &query)?;
+            DD2
+        } else {
+            DD
+        };
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, dd, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mut mode = vec![Arg::I(640), Arg::I(480), Arg::I(8)];
+        if v2 {
+            mode.extend([Arg::I(0), Arg::I(0)]);
+        }
+        c.com(a, l, dd, DD_SET_DISPLAY_MODE, &mode)?;
+        let primary = [Arg::At(DESC), Arg::At(FRONT), Arg::I(0)];
+        c.com(a, l, dd, DD_CREATE_SURFACE, &primary)?;
+        let caps = Arg::I(DDPCAPS_8BIT | DDPCAPS_ALLOW256);
+        let palette = [caps, Arg::At(ENTRIES), Arg::At(PALETTE), Arg::I(0)];
+        c.com(a, l, dd, DD_CREATE_PALETTE, &palette)?;
+        c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
+        let normal = Arg::I(DDSCL_NORMAL);
+        c.com(a, l, dd, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), normal])?;
+        finish(a, l)
+    })
+}
+
+/// The DAC's entry `i`, as the DAC has it, and `color` as it has it.
+fn dac_entry(cpu: &Cpu, i: usize, color: [u8; 3]) -> ([u8; 3], [u8; 3]) {
+    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
+    let dac = &cpu.bus.vga.palette[i * 3..i * 3 + 3];
+    ([dac[0], dac[1], dac[2]], color.map(|v| v >> shift))
+}
+
+#[test]
+fn leaving_exclusive_mode_through_idirectdraw2_gives_the_desktop_back() {
+    let (program, data) = leave_exclusive_program(true);
+    let mut cpu = machine("leave_exclusive_v2", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 9)[1..], [0; 8]);
+    // The desktop's mode is back, not the program's 8 bits.
+    let bpp = cpu.bus.vbe.mode.map(|m| m.bpp);
+    assert!(bpp.is_some_and(|b| b > 8), "{bpp:?}");
+}
+
+#[test]
+fn leaving_exclusive_mode_through_idirectdraw_keeps_the_mode_with_gdis_palette() {
+    let (program, data) = leave_exclusive_program(false);
+    let mut cpu = machine("leave_exclusive_v1", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 8)[1..], [0; 7]);
+    // Windows keeps the mode for a program that set its level through
+    // IDirectDraw, but GDI's system palette is in the DAC again in place
+    // of the program's, so what GDI draws has its colors: the static
+    // ones at both ends.
+    assert_eq!(cpu.bus.vbe.mode.map(|m| m.bpp), Some(8));
+    for (i, color) in [(0, [0, 0, 0]), (1, [0x80, 0, 0]), (3, [0x80, 0x80, 0])] {
+        let (dac, expected) = dac_entry(&cpu, i, color);
+        assert_eq!(dac, expected, "entry {i}");
+    }
+    let (dac, expected) = dac_entry(&cpu, 255, [0xFF; 3]);
+    assert_eq!(dac, expected, "entry 255");
+}

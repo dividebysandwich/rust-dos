@@ -7,10 +7,15 @@
 //! or Voodoo3 the card's own. While it is set the display is
 //! DirectDraw's: GDI draws on its picture in that mode
 //! (`screen::gdi_mode`), and USER32 doesn't put the desktop back when a
-//! window shows. RestoreDisplayMode, the end of exclusive mode and the
-//! end of the process give the screen back: the desktop's mode again,
-//! repainted, or text mode when there is no desktop. Glide on a Banshee
-//! or Voodoo3 takes the display the same way (`take`, `give_back`), and
+//! window shows. RestoreDisplayMode, the release of the object that set
+//! the mode and the end of the process give the screen back: the
+//! desktop's mode again, repainted, or text mode when there is no
+//! desktop. So does the end of exclusive mode (SetCooperativeLevel with
+//! DDSCL_NORMAL), unless the object ever set its cooperative level
+//! through IDirectDraw, the first interface: then the mode stays, as on
+//! Windows (Wine's tests show it), and GDI draws on it with its own
+//! palette in the DAC again (`leave_exclusive`). Glide on a Banshee or
+//! Voodoo3 takes the display the same way (`take`, `give_back`), and
 //! GDI's drawing on the screen goes nowhere then.
 //!
 //! Video memory is the adapter's: the VESA BIOS's 4 MB, or the card's
@@ -333,14 +338,33 @@ pub fn view(cpu: &mut Cpu) -> Option<u32> {
     Some(at)
 }
 
-/// The DirectDraw object `id` goes: what it had of the display goes
-/// with it.
-pub fn object_gone(cpu: &mut Cpu, id: u32) {
+/// The DirectDraw object `id` leaves exclusive mode, if it has it. With
+/// `restore_mode`, a mode it set is given back, as RestoreDisplayMode
+/// does. GDI has the screen again: in a mode that stays, on a palette
+/// device, its system palette goes back in the DAC in place of the
+/// program's, as DirectDraw on Windows 95 and 98 has GDI put it there
+/// (with SetSystemPaletteUse), and every window is painted again.
+/// Whether the mode was given back.
+pub fn leave_exclusive(cpu: &mut Cpu, id: u32, restore_mode: bool) -> bool {
     let display = &mut state(cpu).display;
-    if display.exclusive == id {
-        display.exclusive = 0;
+    if id == 0 || display.exclusive != id {
+        return false;
     }
-    if display.mode_owner == id {
+    display.exclusive = 0;
+    if restore_mode && display.mode_owner == id {
+        restore(cpu);
+        return true;
+    }
+    crate::win32::gdi32::palette::show_system_palette(cpu);
+    crate::win32::user32::paint::redraw_screen(cpu);
+    false
+}
+
+/// The DirectDraw object `id` goes: what it had of the display goes
+/// with it, the mode it set too.
+pub fn object_gone(cpu: &mut Cpu, id: u32) {
+    leave_exclusive(cpu, id, true);
+    if state(cpu).display.mode_owner == id {
         restore(cpu);
     }
 }
