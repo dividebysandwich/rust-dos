@@ -560,12 +560,14 @@ pub struct Pacer {
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
-    /// The host's time the frames that ran emulated time have taken, and
-    /// when the last frame ended and the emulated time it ended at: whether
-    /// the host keeps up with the speed, for `Auto`. A paused machine's
-    /// frames don't count.
-    ran_ns: u64,
-    last_frame: Option<(Instant, u64)>,
+    /// The emulated time dropped behind the wall clock so far
+    /// (`MAX_LAG`): whether the host keeps up with the speed, for `Auto`.
+    /// And the emulated time the last frame ended at, and whether it ran
+    /// on from the one before: the backlog after frames of a paused
+    /// machine, which the frontend goes on drawing, is the pause's.
+    lost_ns: u64,
+    last_ns: Option<u64>,
+    ran: bool,
     /// Wall-clock instant that corresponds to emulated time `anchor_ticks`.
     anchor_wall: Instant,
     anchor_ticks: u64,
@@ -590,8 +592,9 @@ impl Pacer {
             protected: false,
             host_max: None,
             sample: HostSample::default(),
-            ran_ns: 0,
-            last_frame: None,
+            lost_ns: 0,
+            last_ns: None,
+            ran: false,
             anchor_wall: now,
             anchor_ticks: 0,
             next_frame: now,
@@ -695,6 +698,7 @@ impl Pacer {
         let target = if wall > emulated + duration_to_ticks(MAX_LAG) {
             self.anchor_wall = now;
             self.anchor_ticks = emulated + duration_to_ticks(FRAME);
+            self.lose(wall - self.anchor_ticks);
             self.anchor_ticks
         } else {
             wall.max(emulated)
@@ -721,6 +725,7 @@ impl Pacer {
         let mut wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
         if wall > emulated + duration_to_ticks(MAX_LAG) {
+            self.lose(wall - emulated);
             self.anchor_wall = now;
             self.anchor_ticks = emulated;
             wall = emulated;
@@ -734,6 +739,20 @@ impl Pacer {
         self.deadline = Some((self.anchor_wall + ticks_to_duration(target - self.anchor_ticks), target));
         self.period = Duration::from_nanos(refresh.frame_ns());
         clock.icount_at(target)
+    }
+
+    /// Emulated time fell `ticks` behind the wall clock, and the backlog is
+    /// dropped: lost, unless the machine was paused until now.
+    fn lose(&mut self, ticks: u64) {
+        if self.ran {
+            self.lost_ns += ticks_to_duration(ticks).as_nanos() as u64;
+        }
+    }
+
+    /// The emulated time dropped behind the wall clock so far, for `Auto`
+    /// (`AutoSpeed::update`).
+    pub fn lost(&self) -> Duration {
+        Duration::from_nanos(self.lost_ns)
     }
 
     /// Wait for the frame's deadline (`retrace_batch_end`), if the batch
@@ -770,13 +789,9 @@ impl Pacer {
         overhead: Duration,
     ) -> Option<u32> {
         let current = bus.clock.cycles_per_ms();
-        let (now, ns) = (Instant::now(), bus.clock.now_ns());
-        if let Some((at, before)) = self.last_frame
-            && ns > before
-        {
-            self.ran_ns += now.saturating_duration_since(at).as_nanos() as u64;
-        }
-        self.last_frame = Some((now, ns));
+        let ns = bus.clock.now_ns();
+        self.ran = self.last_ns.is_some_and(|before| ns > before);
+        self.last_ns = Some(ns);
         let ideal = self.sample.add(executed, exec, overhead).map(|(ns_per_instr, overhead_ns)| {
             let frame_ns = self.period.as_nanos() as f64;
             let budget_ns = (frame_ns * MAX_BUSY_SHARE - overhead_ns).max(frame_ns * 0.1);
@@ -836,7 +851,7 @@ impl Pacer {
                 let next = if self.fast_forward {
                     None
                 } else {
-                    self.auto.update(bus, protected, host_max, self.ran_ns)
+                    self.auto.update(bus, protected, host_max, self.lost_ns)
                 };
                 // A heavier scene than the host keeps up with at this speed.
                 match next.unwrap_or(current) {

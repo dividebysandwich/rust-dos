@@ -390,6 +390,32 @@ fn pacer_drops_a_large_backlog() {
 }
 
 #[test]
+fn pacer_counts_the_backlog_it_drops_but_not_a_pause() {
+    let start = Instant::now();
+    let mut bus = bus_at(1000);
+    let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
+    // A frame that runs its batch, at `ms` on the wall clock.
+    let frame = |bus: &mut Bus, pacer: &mut Pacer, ms: u64| {
+        bus.clock.icount = pacer.batch_end(&bus.clock, start + Duration::from_millis(ms));
+        pacer.end_frame(bus, false, 0, Duration::ZERO, Duration::ZERO);
+    };
+    frame(&mut bus, &mut pacer, 0);
+    frame(&mut bus, &mut pacer, 16);
+    // The host took a second over the next frame: the backlog past the
+    // frame it runs is lost.
+    frame(&mut bus, &mut pacer, 1016);
+    let lost = pacer.lost();
+    assert!((950..1000).contains(&lost.as_millis()), "{:?}", lost);
+    // Paused for five seconds, the frontend drawing frames that run
+    // nothing: the backlog is the pause's.
+    for _ in 0..3 {
+        pacer.end_frame(&bus, false, 0, Duration::ZERO, Duration::ZERO);
+    }
+    frame(&mut bus, &mut pacer, 6016);
+    assert_eq!(pacer.lost(), lost);
+}
+
+#[test]
 fn auto_speed_follows_the_program() {
     let start = Instant::now();
     let fast = Duration::from_millis(2);

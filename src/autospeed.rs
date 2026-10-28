@@ -293,15 +293,15 @@ struct Mark {
     polls: u64,
     status_reads: u64,
     output: u64,
-    /// The host's time the frames that ran had taken.
-    wall_ns: u64,
+    /// The emulated time dropped behind the wall clock.
+    lost_ns: u64,
 }
 
 impl Mark {
-    fn of(bus: &Bus, wall_ns: u64) -> Self {
+    fn of(bus: &Bus, lost_ns: u64) -> Self {
         let a = &bus.activity;
         Mark {
-            wall_ns,
+            lost_ns,
             ns: bus.clock.now_ns(),
             icount: bus.clock.icount,
             idle: bus.clock.idle,
@@ -331,7 +331,7 @@ pub struct Measurement {
     /// user's (`auto_fps`).
     pub refresh: f64,
     /// Emulated seconds a second of the host's time: 1 kept real time,
-    /// less fell behind.
+    /// less fell behind (and dropped what it didn't catch up on).
     pub pace: f64,
 }
 
@@ -474,27 +474,33 @@ impl AutoSpeed {
         self.mark = None;
         self.settle_until = 0;
         self.unsettled = None;
+        self.restart_search();
+        self.working = None;
+    }
+
+    /// The search starts again from the next measurement, forgetting the
+    /// frame rate it held and how the host kept up.
+    fn restart_search(&mut self) {
         self.step = Step::Start;
         self.held = None;
         self.lagged = None;
         self.behind = false;
-        self.working = None;
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
     /// for, if that isn't the one `bus` runs at. `protected` says whether
     /// the program switched to protected mode, `host_max` is as fast as
-    /// the host keeps up with, as estimated from its frames, and `wall_ns`
-    /// the host's time the frames that ran emulated time have taken so
-    /// far (`Pacer` leaves out those of a paused machine).
+    /// the host keeps up with, as estimated from its frames, and `lost_ns`
+    /// the emulated time the host has dropped behind the wall clock so far
+    /// (`Pacer::lost`).
     pub fn update(
         &mut self,
         bus: &Bus,
         protected: bool,
         host_max: u32,
-        wall_ns: u64,
+        lost_ns: u64,
     ) -> Option<u32> {
-        let now = Mark::of(bus, wall_ns);
+        let now = Mark::of(bus, lost_ns);
         if now.output != self.output.0 {
             self.output = (now.output, now.ns);
         }
@@ -556,10 +562,7 @@ impl AutoSpeed {
             halted: now.idle.saturating_sub(mark.idle) as f64 / ran,
             output: (now.output - mark.output) as f64 / seconds,
             refresh,
-            pace: match now.wall_ns.saturating_sub(mark.wall_ns) {
-                0 => f64::INFINITY,
-                wall => ns as f64 / wall as f64,
-            },
+            pace: ns as f64 / (ns + now.lost_ns.saturating_sub(mark.lost_ns)) as f64,
         };
         let current = bus.clock.cycles_per_ms();
         let working = self.working.take();
@@ -603,15 +606,11 @@ impl AutoSpeed {
             self.idles = true;
         }
         if m.polling >= WAITING {
-            self.step = Step::Start;
-            self.held = None;
-            (self.lagged, self.behind) = (None, false);
+            self.restart_search();
             return clamp(c * WAITING_STEP);
         }
         let Some(fps) = m.fps else {
-            self.step = Step::Start;
-            self.held = None;
-            (self.lagged, self.behind) = (None, false);
+            self.restart_search();
             // A protected-mode program at work without frames loads, or
             // compiles, or is Windows: it reads and writes. Under a system
             // that idles, one that keeps the processor from halting works
@@ -652,7 +651,10 @@ impl AutoSpeed {
         } else if let Some((most, left)) = self.lagged {
             self.lagged = (left > 1).then_some((most, left - 1));
         }
-        let top = self.lagged.map_or(top, |(most, _)| most.min(top));
+        // The cap was clamped to the least speed of its own measurement; a
+        // host estimate that has risen since raises the least speed of a
+        // faster CPU model past it.
+        let top = self.lagged.map_or(top, |(most, _)| most.clamp(base, top));
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         // Frames nobody sees: as many less as the frame rate is too high
         // (it follows the speed there).
@@ -763,8 +765,14 @@ mod tests {
     const HOST: u32 = 800_000;
 
     /// A measurement without frames, of a program that keeps real time.
-    const STILL: Measurement =
-        Measurement { fps: None, polling: 0.0, halted: 0.0, output: 0.0, refresh: 70.0, pace: 1.0 };
+    const STILL: Measurement = Measurement {
+        fps: None,
+        polling: 0.0,
+        halted: 0.0,
+        output: 0.0,
+        refresh: 70.0,
+        pace: 1.0,
+    };
 
     /// A game that draws `per_cycle` frames a second for each instruction
     /// per ms, up to `cap` frames a second.
@@ -841,7 +849,11 @@ mod tests {
     /// each step down loses 6-8% of the frames.
     fn myth(speed: u32) -> Measurement {
         let fps = (1.0 / (1569.0 / speed as f64 + 0.0327)).min(18.5);
-        Measurement { fps: Some(fps), refresh: 60.0, ..STILL }
+        Measurement {
+            fps: Some(fps),
+            refresh: 60.0,
+            ..STILL
+        }
     }
 
     #[test]
@@ -888,7 +900,15 @@ mod tests {
         (0..measurements)
             .map(|i| {
                 let pace = (keeps_up(i) as f64 / speed as f64).min(1.0);
-                speed = auto.decide(speed, &Measurement { pace, ..myth(speed) }, true, HOST);
+                speed = auto.decide(
+                    speed,
+                    &Measurement {
+                        pace,
+                        ..myth(speed)
+                    },
+                    true,
+                    HOST,
+                );
                 speed
             })
             .collect()
@@ -900,15 +920,31 @@ mod tests {
         // to 40,000 only, below the 50,000 the speed held at before and
         // the frame rate held there.
         let battle = 150..300;
-        let speeds = run_myth_behind(|i| if battle.contains(&i) { 40_000 } else { u32::MAX }, 450);
+        let speeds = run_myth_behind(
+            |i| {
+                if battle.contains(&i) {
+                    40_000
+                } else {
+                    u32::MAX
+                }
+            },
+            450,
+        );
         assert!(speeds[battle.start - 1] >= 45_000, "{:?}", speeds);
         // Measured behind (`speeds[i]` is the speed of measurement i + 1):
         // the first, and a few when a step up tries more again.
         let behind = |s: &&u32| **s as f64 * 0.95 > 40_000.0;
-        let lost = speeds[battle.start - 1..battle.end - 1].iter().filter(behind).count();
+        let lost = speeds[battle.start - 1..battle.end - 1]
+            .iter()
+            .filter(behind)
+            .count();
         assert!(lost <= battle.len() / 10, "{} behind: {:?}", lost, speeds);
         // Without sliding to the floor, and back up after the battle.
-        assert!(speeds[battle.start..].iter().all(|&s| s >= 25_000), "{:?}", speeds);
+        assert!(
+            speeds[battle.start..].iter().all(|&s| s >= 25_000),
+            "{:?}",
+            speeds
+        );
         assert!(speeds[400..].iter().all(|&s| s >= 40_000), "{:?}", speeds);
     }
 
@@ -919,6 +955,27 @@ mod tests {
         let speeds = run_myth_behind(|i| if i == 200 { 10_000 } else { u32::MAX }, 450);
         assert!(speeds[200..].iter().all(|&s| s >= 30_000), "{:?}", speeds);
         assert!(speeds[400..].iter().all(|&s| s >= 40_000), "{:?}", speeds);
+    }
+
+    #[test]
+    fn a_host_estimate_rising_past_the_lagged_cap_raises_it() {
+        // A Pentium II's least speed, 112500, is the host's estimate while
+        // that is less. Behind at 60000, the cap is that least speed; the
+        // estimate rises to 70000 and the least speed with it, above the
+        // cap.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.set_protected_least(112_500);
+        let behind = Measurement {
+            pace: 0.5,
+            ..myth(60_000)
+        };
+        assert_eq!(auto.decide(60_000, &behind, true, 60_000), 60_000);
+        // The hold goes on at 60000, then goes to the least speed.
+        let mut speed = 60_000;
+        for _ in 0..2 * HOLD_WINDOWS {
+            speed = auto.decide(speed, &myth(speed), true, 70_000);
+        }
+        assert_eq!(speed, 70_000);
     }
 
     #[test]
@@ -938,7 +995,11 @@ mod tests {
             speeds.push(speed);
         }
         // The lighter scene comes while the speed holds, so it is held at.
-        assert!(speeds[14..20].iter().all(|&s| s == speeds[14]), "{:?}", speeds);
+        assert!(
+            speeds[14..20].iter().all(|&s| s == speeds[14]),
+            "{:?}",
+            speeds
+        );
         // Back to 35 at the same speed, the 50 says nothing of what a step
         // down loses: a step down that keeps the 35 goes on to another.
         let twice = speeds[20..].windows(3).any(|w| w[2] < w[1] && w[1] < w[0]);
@@ -963,7 +1024,13 @@ mod tests {
 
     #[test]
     fn no_frames_to_go_by() {
-        let nothing = |halted, output| move |_| Measurement { halted, output, ..STILL };
+        let nothing = |halted, output| {
+            move |_| Measurement {
+                halted,
+                output,
+                ..STILL
+            }
+        };
         // Real mode: the real-mode speed; protected mode: all the host has
         // while it reads and writes, unless it sits halted.
         assert_eq!(run(nothing(0.0, 1e6), false, 3), [3000, 3000, 3000]);
@@ -977,7 +1044,10 @@ mod tests {
     #[test]
     fn a_program_at_work_keeps_the_speed_to_go_back_to() {
         let mut auto = AutoSpeed::new(3000, None);
-        let loading = Measurement { output: 1e6, ..STILL };
+        let loading = Measurement {
+            output: 1e6,
+            ..STILL
+        };
         assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
         assert_eq!(auto.working, Some(PROTECTED_LEAST), "where it goes back to");
         // Anything else isn't work.
@@ -990,7 +1060,10 @@ mod tests {
     #[test]
     fn a_waiting_program_gets_less() {
         let mut auto = AutoSpeed::new(3000, None);
-        let waiting = Measurement { polling: 0.5, ..STILL };
+        let waiting = Measurement {
+            polling: 0.5,
+            ..STILL
+        };
         let mut speed = 100_000;
         for _ in 0..30 {
             speed = auto.decide(speed, &waiting, false, HOST);
@@ -1016,7 +1089,11 @@ mod tests {
 
     #[test]
     fn a_busy_program_under_a_system_that_idles_gets_all_the_host_has() {
-        let measure = |halted| Measurement { halted, refresh: 60.0, ..STILL };
+        let measure = |halted| Measurement {
+            halted,
+            refresh: 60.0,
+            ..STILL
+        };
         // 3DMark 2000 building a scene: no frames, no I/O it can see, never
         // halted. Before the system was seen idling, it is a spinning menu.
         let mut auto = AutoSpeed::new(3000, None);
@@ -1047,7 +1124,10 @@ mod tests {
 
     #[test]
     fn a_faster_model_goes_less_far_down() {
-        let waiting = Measurement { polling: 0.5, ..STILL };
+        let waiting = Measurement {
+            polling: 0.5,
+            ..STILL
+        };
         let settle = |auto: &mut AutoSpeed, protected, host| {
             let mut speed = 200_000;
             for _ in 0..30 {
@@ -1149,8 +1229,8 @@ mod tests {
             bus.clock.icount += per_frame;
             copy_changes(bus);
             bus.sync_display();
-            // Keeping real time.
-            if let Some(speed) = auto.update(bus, protected, 2_000_000, bus.clock.now_ns()) {
+            // Keeping real time: nothing dropped.
+            if let Some(speed) = auto.update(bus, protected, 2_000_000, 0) {
                 bus.set_cycles_per_ms(speed);
                 speeds.push(speed);
             }
