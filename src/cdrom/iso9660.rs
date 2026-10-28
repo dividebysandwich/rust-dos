@@ -68,11 +68,11 @@ fn le32(b: &[u8], at: usize) -> u32 {
 }
 
 /// The volume descriptors of the disc, from sector 16 to the terminator.
-fn volume_descriptors(image: &CdImage) -> Result<Vec<Box<[u8; DATA_SECTOR]>>, String> {
+fn volume_descriptors(image: &CdImage) -> Result<Vec<[u8; DATA_SECTOR]>, String> {
     let track = image.data_track().ok_or("no data track")?;
     let mut descriptors = Vec::new();
     for lba in track.start + FIRST_DESCRIPTOR..track.end {
-        let mut sector = Box::new([0u8; DATA_SECTOR]);
+        let mut sector = [0u8; DATA_SECTOR];
         image.read_data(lba, &mut sector).map_err(|e| e.to_string())?;
         if &sector[1..6] != b"CD001" {
             // A disc without a terminator ends its descriptors with
@@ -95,17 +95,18 @@ pub fn primary_descriptor(image: &CdImage) -> Result<Box<[u8; DATA_SECTOR]>, Str
     volume_descriptors(image)?
         .into_iter()
         .find(|d| d[0] == 1)
+        .map(Box::new)
         .ok_or_else(|| "no primary volume descriptor".to_string())
 }
 
 /// The root directory of the Joliet tree, if the disc has one: a
 /// Supplementary Volume Descriptor whose escape sequences select UCS-2
 /// level 1, 2 or 3 (%/@, %/C or %/E).
-fn joliet_root(descriptors: &[Box<[u8; DATA_SECTOR]>]) -> Option<Extent> {
+fn joliet_root(descriptors: &[[u8; DATA_SECTOR]]) -> Option<Extent> {
     descriptors
         .iter()
         .find(|d| d[0] == 2 && &d[88..90] == b"%/" && matches!(d[90], b'@' | b'C' | b'E'))
-        .map(|d| root(d))
+        .map(root)
 }
 
 /// The DOS time and date of a directory record's 7-byte date (years since
@@ -137,10 +138,8 @@ fn record_name(id: &[u8], tree: Tree) -> String {
     let name = match tree {
         Tree::Primary => String::from_utf8_lossy(id).to_ascii_uppercase(),
         Tree::Joliet => {
-            let units: Vec<u16> = id
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
+            let (units, _) = id.as_chunks::<2>();
+            let units: Vec<u16> = units.iter().map(|&unit| u16::from_be_bytes(unit)).collect();
             String::from_utf16_lossy(&units)
         }
     };
@@ -362,7 +361,7 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
     let descriptor = descriptors
         .iter()
         .find(|d| d[0] == 1)
-        .cloned()
+        .map(|d| Box::new(*d))
         .ok_or("no primary volume descriptor")?;
     // Padded with spaces, or on some discs with NULs.
     let label = String::from_utf8_lossy(&descriptor[40..72]).trim_matches([' ', '\0']).to_string();
