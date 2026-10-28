@@ -332,8 +332,11 @@ impl<'a> Display<'a> {
 
     /// With `voodoo_renderer=opengl`, draw what the 3dfx card recorded
     /// with OpenGL; true if its picture is the one to show
-    /// (`present`'s `voodoo`). Otherwise the card stops recording.
-    pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings) -> bool {
+    /// (`present`'s `voodoo`). Otherwise the card stops recording. With
+    /// `gpu_2d` the card does its 2D operations with the renderer too
+    /// (`voodoo::gpu`); a deterministic run leaves them on the CPU, as
+    /// the GPU's pixels depend on the host's GPU and the scale.
+    pub fn run_voodoo(&mut self, bus: &mut Bus, settings: &VoodooSettings, gpu_2d: bool) -> bool {
         let want = settings.renderer == Renderer::OpenGl;
         let problem = match &mut self.out {
             Output::Gl(gl) => {
@@ -370,6 +373,12 @@ impl<'a> Display<'a> {
                             // the card's picture, which the software
                             // renderer no longer draws into it.
                             self.redraw |= changed;
+                            // The card does its 2D operations with the
+                            // renderer from now on, until `set_mirror(false)`
+                            // takes the link away.
+                            if gpu_2d && !card.gpu_linked() && gl.voodoo_scale().is_some() {
+                                card.set_gpu_link(Some(gl.voodoo_link()));
+                            }
                             return shown;
                         }
                         Err(e) => {
@@ -499,6 +508,16 @@ impl<'a> Display<'a> {
         match &self.out {
             Output::Gl(gl) => gl.capture_size(display_size(width, height, self.aspect)),
             Output::Sdl { .. } => None,
+        }
+    }
+
+    /// The 3dfx card's picture as OpenGL drew and composed it last
+    /// (`run_voodoo`, `present`), with what was drawn over it, at the
+    /// card's resolution; None while OpenGL doesn't show it.
+    pub fn voodoo_picture(&mut self) -> Option<Frame> {
+        match &mut self.out {
+            Output::Gl(gl) if self.voodoo_shown => gl.voodoo_picture(),
+            _ => None,
         }
     }
 

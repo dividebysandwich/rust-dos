@@ -1725,6 +1725,39 @@ fn held_back_drawing_leaves_the_memory_as_drawing_at_once() {
     );
 }
 
+/// Pixels written into a buffer while drawing is held back go after that
+/// drawing without drawing it first, and the memory ends up as when they
+/// are written in order.
+#[test]
+fn pixels_written_into_a_buffer_wait_behind_the_drawing() {
+    let mut gl = gl_bus(Board::Standard, 2);
+    let mut sw = bus(Board::Standard);
+    init(&mut sw);
+    let back = 150 * 0x1000;
+    let pixels: Vec<(u32, u16)> = (0..400u32)
+        .map(|i| {
+            let at = back + ((i * 7 % 480) * 640 + i * 13 % 640) * 2;
+            (at, (i.wrapping_mul(2654435761) >> 16) as u16)
+        })
+        .collect();
+    for bus in [&mut gl, &mut sw] {
+        frames(bus, 3);
+    }
+    take_mirror(&mut gl);
+    let before = status_of(&gl)["catch_ups"].clone();
+    assert!(gl.voodoo.as_mut().unwrap().write_buffer_pixels(&pixels));
+    assert_eq!(status_of(&gl)["catch_ups"], before, "drawn first");
+    let fb = sw.voodoo.as_ref().unwrap().frame_buffer();
+    for &(at, value) in &pixels {
+        fb.set(at as usize / 2, value);
+    }
+    for bus in [&mut gl, &mut sw] {
+        frames(bus, 2);
+    }
+    let picture = |bus: &Bus| bus.voodoo.as_ref().unwrap().frame_buffer().to_bytes();
+    assert!(picture(&gl) == picture(&sw));
+}
+
 /// Frame buffer write speed, with and without the OpenGL renderer's
 /// recording: `cargo test --release --test voodoo_tests benchmark_lfb --
 /// --ignored --nocapture`.
@@ -1752,5 +1785,278 @@ fn benchmark_lfb_writes() {
         }
         let per_frame = start.elapsed() / frames;
         println!("mirror {}: {:?} a frame, {} commands a frame", mirror, per_frame, commands as u32 / frames);
+    }
+}
+
+// --- 2D operations on the GPU ---
+
+/// The pixel of `bpp` bytes at byte `at` of `mem`, little-endian.
+#[cfg(feature = "gl")]
+fn pixel_in(mem: &[u8], at: usize, bpp: usize) -> u32 {
+    mem[at..at + bpp].iter().rev().fold(0, |v, &b| v << 8 | b as u32)
+}
+
+/// `blit` done in `mem` as `mirror::Blit` says, one pixel after another.
+#[cfg(feature = "gl")]
+fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
+    use rust_dos::voodoo::mirror::{BlitSource, Convert, Key};
+    let before = mem.to_vec();
+    let keyed = |v: u32, k: &Key| {
+        if k.masks == [0; 3] {
+            return (k.low..=k.high).contains(&v);
+        }
+        k.masks.iter().all(|&m| m == 0 || (k.low & m..=k.high & m).contains(&(v & m)))
+    };
+    let d = blit.dst;
+    let [left, top, right, bottom] = blit.area;
+    for r in &blit.rects {
+        for y in r[1]..r[3] {
+            for x in r[0]..r[2] {
+                let mut value = match &blit.src {
+                    BlitSource::Fill(v) => *v,
+                    BlitSource::Memory { plane, rect } => {
+                        let (mut u, mut v) = (x - left, y - top);
+                        if blit.mirror[0] {
+                            u = right - left - 1 - u;
+                        }
+                        if blit.mirror[1] {
+                            v = bottom - top - 1 - v;
+                        }
+                        let sx = rect[0] + u * (rect[2] - rect[0]) / (right - left);
+                        let sy = rect[1] + v * (rect[3] - rect[1]) / (bottom - top);
+                        let at = plane.start + sy as u32 * plane.stride + sx as u32 * plane.bpp;
+                        pixel_in(&before, at as usize, plane.bpp as usize)
+                    }
+                    BlitSource::Buffer { .. } => unreachable!(),
+                };
+                if blit.src_key.is_some_and(|k| keyed(value, &k)) {
+                    continue;
+                }
+                value = match blit.convert {
+                    Convert::None => value,
+                    Convert::Widen => {
+                        let (r, g, b) = ((value >> 11) & 31, (value >> 5) & 63, value & 31);
+                        (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2)
+                    }
+                    Convert::Narrow => {
+                        (value >> 19 & 31) << 11 | (value >> 10 & 63) << 5 | (value >> 3 & 31)
+                    }
+                    Convert::ClearTop => value & 0xFF_FFFF,
+                };
+                let at = (d.start + y as u32 * d.stride + x as u32 * d.bpp) as usize;
+                let bpp = d.bpp as usize;
+                if blit.dst_key.is_some_and(|k| !keyed(pixel_in(&before, at, bpp), &k)) {
+                    continue;
+                }
+                mem[at..at + bpp].copy_from_slice(&value.to_le_bytes()[..bpp]);
+            }
+        }
+    }
+}
+
+/// The OpenGL renderer's 2D operations in its copy of a Voodoo3's
+/// memory (`voodoo::gpu`) leave the memory as the same operations done
+/// pixel by pixel do, once it is read back: copies, stretches, mirrors,
+/// colour keys, fills and conversions between 16 and 24 or 32 bits.
+/// Needs OpenGL 3.2: `cargo test --test voodoo_tests gpu_blits --
+/// --ignored`.
+#[cfg(feature = "gl")]
+#[test]
+#[ignore]
+fn gpu_blits_leave_the_memory_as_software_does() {
+    use glow::HasContext;
+    use rust_dos::voodoo::gl::{SharedGl, VoodooGl};
+    use rust_dos::voodoo::mirror::{Blit, BlitSource, Convert, Key, Plane};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let attr = video.gl_attr();
+    attr.set_context_profile(sdl2::video::GLProfile::Core);
+    attr.set_context_version(3, 2);
+    let window = video.window("gpu blits", 64, 64).opengl().hidden().build().unwrap();
+    let _context = window.gl_create_context().unwrap();
+    // SAFETY: the context just made is current.
+    let gl = unsafe {
+        glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast())
+    };
+    let v = gl.version();
+    let glsl = rust_dos::video::shader::Glsl::for_gl(v.major, v.minor, v.is_embedded).unwrap();
+    let renderer = VoodooGl::new(&gl, glsl, 1, 1, 1).unwrap();
+    let (gl, renderer) = (Rc::new(gl), Rc::new(RefCell::new(Some(renderer))));
+
+    let mut bus = bus(Board::Voodoo3);
+    let card = bus.voodoo.as_mut().unwrap();
+    card.set_mirror(true);
+    card.set_software_picture(false);
+    let link = SharedGl {
+        gl: gl.clone(),
+        renderer: renderer.clone(),
+    };
+    card.set_gpu_link(Some(Box::new(link)));
+    // A few byte values over and over, so that the keys match some
+    // pixels.
+    let size = 0x20_0000;
+    let bytes = [0x00, 0x1F, 0xF8, 0x07, 0xE0, 0x55, 0xAA, 0xFF];
+    let mut mem: Vec<u8> = (0..size as u32)
+        .map(|i| bytes[(i.wrapping_mul(2654435761) >> 29) as usize])
+        .collect();
+    card.banshee_memory_write(0, &mem);
+
+    let p16 = |start, stride| Plane {
+        start,
+        stride,
+        bpp: 2,
+    };
+    let p32 = Plane {
+        start: 0x10_0000,
+        stride: 2560,
+        bpp: 4,
+    };
+    let plain = Blit {
+        dst: p16(0x8_0000, 1280),
+        area: [10, 10, 74, 42],
+        rects: vec![[10, 10, 74, 42]],
+        src: BlitSource::Memory {
+            plane: p16(0x1_0000, 256),
+            rect: [0, 0, 64, 32],
+        },
+        convert: Convert::None,
+        mirror: [false; 2],
+        src_key: None,
+        dst_key: None,
+    };
+    let at = |area: [i32; 4]| Blit {
+        area,
+        rects: vec![area],
+        ..plain.clone()
+    };
+    let blits = [
+        plain.clone(),
+        // Stretched and mirrored both ways, drawn where two rectangles
+        // are.
+        Blit {
+            rects: vec![[100, 50, 160, 90], [120, 90, 200, 130]],
+            src: BlitSource::Memory {
+                plane: p16(0x1_0000, 256),
+                rect: [3, 5, 40, 30],
+            },
+            mirror: [true, true],
+            ..at([100, 50, 200, 130])
+        },
+        // Into itself, overlapping: the source as it was before.
+        Blit {
+            src: BlitSource::Memory {
+                plane: p16(0x8_0000, 1280),
+                rect: [10, 10, 74, 42],
+            },
+            ..at([20, 20, 84, 52])
+        },
+        Blit {
+            src_key: Some(Key {
+                low: 0x07F8,
+                high: 0x07F8,
+                masks: [0; 3],
+            }),
+            ..at([300, 200, 364, 232])
+        },
+        Blit {
+            dst_key: Some(Key {
+                low: 0x0000,
+                high: 0x1FFF,
+                masks: [0xF800, 0x07E0, 0x001F],
+            }),
+            ..at([400, 200, 464, 232])
+        },
+        Blit {
+            dst: p32,
+            src: BlitSource::Fill(0x0012_3456),
+            ..at([5, 5, 300, 100])
+        },
+        Blit {
+            dst: p32,
+            convert: Convert::Widen,
+            ..at([0, 120, 128, 184])
+        },
+        Blit {
+            dst: Plane {
+                start: 0x18_0000,
+                stride: 1920,
+                bpp: 3,
+            },
+            convert: Convert::Widen,
+            ..plain.clone()
+        },
+        Blit {
+            src: BlitSource::Memory {
+                plane: p32,
+                rect: [0, 120, 80, 200],
+            },
+            convert: Convert::Narrow,
+            ..at([500, 300, 540, 340])
+        },
+        Blit {
+            dst: Plane {
+                start: 0x14_0000,
+                stride: 2560,
+                bpp: 4,
+            },
+            src: BlitSource::Memory {
+                plane: p32,
+                rect: [300, 0, 364, 32],
+            },
+            convert: Convert::ClearTop,
+            ..plain.clone()
+        },
+        Blit {
+            dst: Plane {
+                start: 0x1C_0000,
+                stride: 640,
+                bpp: 1,
+            },
+            src: BlitSource::Memory {
+                plane: Plane {
+                    start: 0x2_0000,
+                    stride: 640,
+                    bpp: 1,
+                },
+                rect: [0, 0, 64, 32],
+            },
+            src_key: Some(Key {
+                low: 0x55,
+                high: 0xAA,
+                masks: [0; 3],
+            }),
+            ..at([0, 0, 64, 32])
+        },
+    ];
+    for blit in &blits {
+        assert!(card.gpu_blit(blit.clone()), "{:?}", blit);
+        blit_in_software(&mut mem, blit);
+    }
+    // A write into a page the GPU drew reads it back first, and a blit
+    // after it reads what was written.
+    let written = 0x8_0000 + 12 * 1280 + 24;
+    card.banshee_memory_write(written, &[1, 2, 3, 4]);
+    mem[written as usize..][..4].copy_from_slice(&[1, 2, 3, 4]);
+    let after = Blit {
+        area: [500, 400, 564, 432],
+        rects: vec![[500, 400, 564, 432]],
+        ..blits[2].clone()
+    };
+    assert!(card.gpu_blit(after.clone()));
+    blit_in_software(&mut mem, &after);
+
+    let mut got = vec![0; size];
+    card.banshee_memory_read(0, &mut got);
+    if let Some(i) = (0..size).find(|&i| got[i] != mem[i]) {
+        panic!("byte {:06X} is {:02X}, not {:02X}", i, got[i], mem[i]);
+    }
+    let status = card.describe(rust_dos::voodoo::Now::default());
+    assert_eq!(status["gpu_2d"]["blits"], blits.len() as u64 + 1, "{}", status);
+    card.set_mirror(false);
+    if let Some(r) = renderer.borrow_mut().take() {
+        r.destroy(&gl);
     }
 }
