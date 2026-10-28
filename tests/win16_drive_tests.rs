@@ -65,3 +65,32 @@ fn a_hard_disk_is_fixed_and_a_missing_drive_is_0() {
     let (exit, log) = run_with("hard_disk_drive", program(&code, CODE), |_, _| {});
     assert_eq!(exit, 0x30, "{log}");
 }
+
+#[test]
+fn a_floppy_is_removable_and_z_is_fixed() {
+    // GetDriveType(A:), a floppy, and GetDriveType(Z:), the drive held in
+    // memory, as the two nibbles of the exit code: 23h. Windows 3.1 has
+    // no DRIVE_RAMDISK, so Z: is fixed, as a RAM drive is.
+    let mut code = Code::new();
+    code.push(0) // A:
+        .call("KERNEL", GET_DRIVE_TYPE)
+        .emit(&[0x8B, 0xF0]) // mov si,ax
+        .push(25) // Z:
+        .call("KERNEL", GET_DRIVE_TYPE)
+        .emit(&[
+            0x8B, 0xCE, // mov cx,si
+            0xC0, 0xE1, 0x04, // shl cl,4
+            0x0A, 0xC1, // or al,cl
+        ])
+        .exit_al();
+    let (exit, log) = run_with("floppy_drive", program(&code, CODE), |cpu, base| {
+        let a = base.join("a");
+        fs::create_dir_all(&a).unwrap();
+        let opts = MountOptions {
+            kind: DriveKind::Floppy,
+            ..Default::default()
+        };
+        cpu.bus.mount_drive(0, &a, opts, false).unwrap();
+    });
+    assert_eq!(exit, 0x23, "{log}");
+}

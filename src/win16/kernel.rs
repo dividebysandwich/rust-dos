@@ -6,7 +6,7 @@ use super::builtin::{Api16, Def, register, rust, value, win32};
 use super::thunk::{self, EBP, EDI, ESI, ESP};
 use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
-use crate::disk::DriveKind;
+use crate::disk::LASTDRIVE;
 use crate::dpmi::Context;
 
 pub static MODULE: Def = Def {
@@ -1501,25 +1501,32 @@ fn get_temp_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// GetDriveType(drive): removable, fixed, or remote for a CD-ROM drive,
-/// 0 for a drive there isn't. Windows 3.1 has no DRIVE_CDROM: MSCDEX's
-/// drives are redirector drives, and Windows 95 and 98 give 16-bit
+/// GetDriveType(drive): removable, fixed, or remote, 0 for a drive DOS
+/// hasn't, as Windows 3.1's KERNEL asks DOS: remote if IOCTL 4409h says
+/// the drive is redirected, else removable or fixed as 4408h says. So a
+/// CD-ROM drive, which MSCDEX makes a redirector drive, is remote:
+/// Windows 3.1 has no DRIVE_CDROM, and Windows 95 and 98 give 16-bit
 /// programs the same. Programs that look for their disc ask MSCDEX
 /// (INT 2Fh AX=150Bh) which of the remote drives is a CD-ROM.
 fn get_drive_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     const DRIVE_REMOVABLE: u32 = 2;
     const DRIVE_FIXED: u32 = 3;
     const DRIVE_REMOTE: u32 = 4;
-    let Ok(drive) = u8::try_from(args[0] as u16) else {
+    /// IOCTL 4409h's bit for a redirected drive.
+    const REMOTE: u16 = 0x1000;
+    let drive = args[0] as u16;
+    if drive >= LASTDRIVE as u16 {
         return Some(0);
-    };
-    Some(match cpu.bus.disk.drive_kind(drive) {
-        None => 0,
-        Some(DriveKind::Floppy) => DRIVE_REMOVABLE,
-        Some(DriveKind::CdRom) => DRIVE_REMOTE,
-        // Z: and the other drives held in memory are fixed, as a RAM
-        // drive is.
-        Some(DriveKind::HardDisk | DriveKind::Virtual) => DRIVE_FIXED,
+    }
+    let number = drive + 1;
+    match dos::call21(cpu, [0x4409, number, 0, 0], None) {
+        Err(_) => return Some(0),
+        Ok((_, dx)) if dx & REMOTE != 0 => return Some(DRIVE_REMOTE),
+        Ok(_) => {}
+    }
+    Some(match dos::call21(cpu, [0x4408, number, 0, 0], None) {
+        Ok((0, _)) => DRIVE_REMOVABLE,
+        _ => DRIVE_FIXED,
     })
 }
 
