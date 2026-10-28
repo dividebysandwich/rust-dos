@@ -489,13 +489,26 @@ fn a_range_of_a_narrow_modes_width_spans_its_pixels() {
     let mut cpu = Cpu::new(PathBuf::from("."));
     int10(&mut cpu, 0x0013, 0);
     call(&mut cpu, 0x0000);
-    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 200), "the driver's default");
+    assert_eq!(
+        cpu.bus.mouse.virtual_screen(&cpu.bus),
+        (640, 200),
+        "the driver's default"
+    );
     range(&mut cpu, 0x0007, 0, 319);
     assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (320, 200));
     let frame = Frame::new(640, 400);
-    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (320, 200)), (160, 100));
-    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (639, 399)), (319, 199));
-    assert_eq!(overlay::frame_motion_to_mouse(&cpu.bus, &frame, (2.0, 2.0)), (1.0, 1.0));
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (320, 200)),
+        (160, 100)
+    );
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (639, 399)),
+        (319, 199)
+    );
+    assert_eq!(
+        overlay::frame_motion_to_mouse(&cpu.bus, &frame, (2.0, 2.0)),
+        (1.0, 1.0)
+    );
 
     // Daggerfall's 0-310 is that screen too.
     range(&mut cpu, 0x0007, 0, 310);
