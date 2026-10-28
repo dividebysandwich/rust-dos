@@ -901,6 +901,23 @@ pub fn message_taken(state: &mut State, msg: &Msg) {
     }
 }
 
+/// The WM_SETCURSOR Windows sends as the thread takes the mouse message
+/// `msg`: the window under the cursor, and the lParam, the hit-test code
+/// and the client mouse message. None for other messages, and while the
+/// mouse is captured, when Windows sends none.
+pub fn sets_cursor(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
+    let (hit, mouse) = match msg.message {
+        m @ (WM_MOUSEMOVE..=0x0209) => (HTCLIENT, m),
+        m @ (WM_NCMOUSEMOVE..=0x00A9) => (msg.wparam & 0xFFFF, m - WM_NCMOUSEMOVE + WM_MOUSEMOVE),
+        _ => return None,
+    };
+    let state = user(cpu);
+    if state.input.capture != 0 || !state.is_window(msg.hwnd) {
+        return None;
+    }
+    Some((msg.hwnd, super::make_long(hit as i32, mouse as i32)))
+}
+
 /// Whether the button message `msg`, which GetMessageA takes, activates
 /// a window first: the top-level window it is for, if that isn't active.
 pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<u32> {
@@ -1781,11 +1798,13 @@ pub fn get_clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SetCursor(cursor): the cursor it had.
 pub fn set_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::init(cpu);
     Some(super::cursor::set(cpu, args[0]))
 }
 
-/// GetCursor.
+/// GetCursor: the arrow until a program sets another.
 pub fn get_cursor(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::init(cpu);
     Some(user(cpu).input.cursor_handle)
 }
 
