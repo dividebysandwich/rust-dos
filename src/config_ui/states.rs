@@ -120,6 +120,7 @@ impl ConfigUi {
                 for x in 0..picture.width as usize {
                     let (fx, fy) = (x0 + x, y0 + y);
                     if fx < width && fy < height {
+                        frame.mark_overlay(fx, fy);
                         let from = (y * picture.width as usize + x) * 4;
                         let to = (fy * width + fx) * 4;
                         frame.rgba[to..to + 3].copy_from_slice(&picture.rgba[from..from + 3]);

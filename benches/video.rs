@@ -11,6 +11,8 @@ mod common;
 mod voodoo_dispatch;
 #[path = "video/voodoo.rs"]
 mod voodoo;
+#[path = "video/xbrz.rs"]
+mod xbrz;
 
 use common::*;
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -388,6 +390,7 @@ criterion_group!(
     planar_program,
     planar_dos_rows,
     cga_composite,
+    xbrz::prepare,
     voodoo::pipelines,
     voodoo::frames,
     voodoo_dispatch::lookup

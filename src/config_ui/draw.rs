@@ -171,6 +171,7 @@ pub fn render_area(grid: &Grid, layout: &Layout, frame: &mut Frame, alpha: u32, 
     for row in rows.start..rows.end.min(grid.rows).min(layout.rows) {
         for col in cols.start..cols.end.min(grid.cols).min(layout.cols) {
             let cell = grid.cells[row * grid.cols + col];
+            frame.mark_overlay_rect(layout.x + col * 8, layout.y + row * layout.cell_h, 8, layout.cell_h);
             let glyph = &font[cell.ch as usize * layout.cell_h..][..layout.cell_h];
             for (gy, bits) in glyph.iter().enumerate() {
                 let y = layout.y + row * layout.cell_h + gy;
@@ -225,6 +226,7 @@ pub fn plot(frame: &mut Frame, layout: &Layout, cells: (usize, usize, usize, usi
                 _ => (FIELD, alpha),
             };
             let at = (y * width + x) * 4;
+            frame.mark_overlay(x, y);
             let px = &mut frame.rgba[at..at + 3];
             px.copy_from_slice(&blend([px[0], px[1], px[2]], c, a));
         }
