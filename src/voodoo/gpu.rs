@@ -97,7 +97,9 @@ impl Voodoo {
     /// the card's memory itself. False leaves it to the caller, in
     /// software.
     pub fn gpu_blit(&mut self, blit: Blit) -> bool {
-        if !self.gpu_ready() || blit.rects.is_empty() {
+        // While the software picture is wanted (a recording, the settings
+        // window), it reads back every page the GPU drew each frame.
+        if !self.gpu_ready() || self.software_picture || blit.rects.is_empty() {
             return false;
         }
         let (start, end) = blit.dst_span();

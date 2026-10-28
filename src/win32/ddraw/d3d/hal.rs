@@ -1459,9 +1459,7 @@ pub(in crate::win32::ddraw) fn card_fill(
     let (fbz, fill) = if depth {
         (ENRECTCLIP | ZAWRMASK, g.za_color & !0xFFFF | value as u32)
     } else {
-        let v = value as u32;
-        let (r, gr, b) = ((v >> 11) & 0x1F, (v >> 5) & 0x3F, v & 0x1F);
-        let rgb = (r << 3 | r >> 2) << 16 | (gr << 2 | gr >> 4) << 8 | (b << 3 | b >> 2);
+        let rgb = crate::win32::screen::from_565(value);
         (ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER, rgb)
     };
     hw::write(cpu, hw::ALL, at_reg, at);
