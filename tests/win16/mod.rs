@@ -25,6 +25,8 @@ pub struct Code {
     /// Each far call's module reference (from 1), ordinal and the offset
     /// of its address.
     calls: Vec<(u16, u16, u16)>,
+    /// Other relocations of the segment.
+    fixups: Vec<ne::Relocation>,
 }
 
 impl Code {
@@ -68,6 +70,18 @@ impl Code {
         self.emit(&[0x9A, 0xFF, 0xFF, 0x00, 0x00])
     }
 
+    /// Relocate `at` as `source` (an `ne::ADDR_` value) to `target`, the
+    /// place's chain ending there: what is at `at` is FFFFh.
+    pub fn fixup(&mut self, at: u16, source: u8, target: ne::Target) -> &mut Code {
+        self.fixups.push(ne::Relocation {
+            source,
+            additive: false,
+            offset: at,
+            target,
+        });
+        self
+    }
+
     /// End the program with AL as its exit code: `mov ah,4Ch`, `int 21h`.
     pub fn exit_al(&mut self) -> &mut Code {
         self.emit(&[0xB4, 0x4C, 0xCD, 0x21])
@@ -94,6 +108,7 @@ pub fn program(code: &Code, flags: u16) -> Vec<u8> {
             offset,
             target: ne::Target::Ordinal { module, ordinal },
         })
+        .chain(code.fixups.iter().cloned())
         .collect();
     let text = b.segment(ne::SegmentSpec {
         data: code.bytes.clone(),
