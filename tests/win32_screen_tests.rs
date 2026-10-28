@@ -836,6 +836,17 @@ const SOURCE: [[u16; 4]; 2] = [
 ];
 /// The color the back buffer is filled with first.
 const FILL: u16 = 0x0841;
+/// The boxes of the back buffer the test looks at, (x, y, w, h).
+const LOOKED_AT: [(u32, u32, u32, u32); 5] = [
+    (100, 49, 6, 4),
+    (200, 10, 4, 2),
+    (299, 100, 10, 4),
+    (400, 20, 2, 2),
+    (500, 20, 4, 4),
+];
+/// Where the program copies those boxes' pixels, one box after another,
+/// row by row.
+const READBACK: u32 = 0xA00;
 
 /// Full screen at 640x480x16 with a back buffer, which is filled, then
 /// gets a 16-bit system memory surface blitted onto it: through the
@@ -843,9 +854,12 @@ const FILL: u16 = 0x0841;
 /// stretched twice as wide and high through the key at (300, 100), its
 /// middle two columns through the key at (400, 20) and stretched twice
 /// as wide and high at (500, 20), and at (101, 50) again through a
-/// destination key of the fill's color.
-fn keyed_blit_program() -> (Vec<u8>, u32) {
+/// destination key of the fill's color. The back buffer is then locked
+/// and LOOKED_AT's boxes copied to READBACK. With `card`, the DirectDraw
+/// object is the 3dfx device's, of a Voodoo Graphics or Voodoo2.
+fn keyed_blit_program(card: bool) -> (Vec<u8>, u32) {
     let mut d = data();
+    put32(&mut d, LOCKED, 108);
     desc(
         &mut d,
         DESC,
@@ -892,9 +906,28 @@ fn keyed_blit_program() -> (Vec<u8>, u32) {
     for (j, v) in [1, 0, 3, 2].iter().enumerate() {
         put32(&mut d, SRC_RECT + 4 * j as u32, *v);
     }
-    program(&[USER32, GDI32, DDRAW], &d, |a, l| {
+    let ddraw = if card { DDRAW_CARD } else { DDRAW };
+    program(&[USER32, GDI32, ddraw], &d, |a, l| {
         let mut c = Calls { next: 0 };
+        if card {
+            device_callback(a, l)?;
+        }
         start(a, l, &mut c, (0, 0, 64, 64))?;
+        if card {
+            // The 3dfx device's object in DD's place.
+            c.api(
+                a,
+                l,
+                DIRECT_DRAW_ENUMERATE,
+                &[Arg::Val(CALLBACKS), Arg::I(0)],
+            )?;
+            c.api(
+                a,
+                l,
+                DIRECT_DRAW_CREATE,
+                &[Arg::At(DEVICE_GUID), Arg::At(DD), Arg::I(0)],
+            )?;
+        }
         c.com(
             a,
             l,
@@ -1000,20 +1033,53 @@ fn keyed_blit_program() -> (Vec<u8>, u32) {
                 Arg::At(FX),
             ],
         )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edx, dword_ptr(l.at(LOCKED + 0x24)))?;
+        a.mov(ebx, dword_ptr(l.at(LOCKED + 0x10)))?;
+        a.cld()?;
+        let mut to = READBACK;
+        for (x, y, w, h) in LOOKED_AT {
+            for row in y..y + h {
+                a.imul_3(eax, ebx, row as i32)?;
+                a.lea(esi, edx + eax + 2 * x as i32)?;
+                a.mov(edi, l.at(to) as u32)?;
+                a.mov(ecx, w)?;
+                a.rep().movsw()?;
+                to += 2 * w;
+            }
+        }
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
         finish(a, l, 1)
     })
 }
 
-/// Blits from system memory into the card's memory, a 16-bit back
-/// buffer, keep the pixels the color keys say and only those.
-#[test]
-fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
-    let (program, data) = keyed_blit_program();
-    let mut cpu = machine("keyed_blit", program);
-    run_until(&mut cpu, data, 1);
-    assert_eq!(results(&cpu, data, 17)[1..], [0; 16]);
-    // The back buffer is after the screen's 614400 bytes.
-    let pixel = |cpu: &Cpu, x: u32, y: u32| card_word(cpu, 640 * 480 * 2 + y * 1280 + x * 2);
+/// The back buffer's pixel at (`x`, `y`) as the keyed blits' program
+/// copied it, from one of LOOKED_AT's boxes.
+fn looked_at(cpu: &Cpu, data: u32, x: u32, y: u32) -> u16 {
+    let mut at = READBACK;
+    for (left, top, w, h) in LOOKED_AT {
+        if (left..left + w).contains(&x) && (top..top + h).contains(&y) {
+            return peek(cpu, data + at + 2 * ((y - top) * w + x - left)) as u16;
+        }
+        at += 2 * w * h;
+    }
+    panic!("({x}, {y}) isn't in a box the program copied");
+}
+
+/// The keyed blits' program run on `cpu` to its end, its `calls` calls
+/// all fine, and the pixels the color keys say kept and only those.
+fn keyed_blits_keep_what_the_keys_say(cpu: &mut Cpu, data: u32, calls: u32) {
+    run_until(cpu, data, 1);
+    let r = results(cpu, data, calls);
+    assert!(r[1..].iter().all(|&v| v == 0), "{r:X?}");
+    let cpu = &*cpu;
+    let pixel = |cpu: &Cpu, x: u32, y: u32| looked_at(cpu, data, x, y);
     let rows = |cpu: &Cpu, x: u32, y: u32, w: u32, h: u32| {
         (y..y + h)
             .map(|y| (x..x + w).map(|x| pixel(cpu, x, y)).collect::<Vec<_>>())
@@ -1023,7 +1089,7 @@ fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
     // Through the source's key, then the key's pixels through the
     // destination's: the source as it is, framed by the fill.
     assert_eq!(
-        rows(&cpu, 100, 49, 6, 4),
+        rows(cpu, 100, 49, 6, 4),
         [
             [FILL; 6].to_vec(),
             vec![FILL, k, a, k, b, FILL],
@@ -1032,7 +1098,7 @@ fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
         ]
     );
     // Copied as it is, the key's pixels too.
-    assert_eq!(rows(&cpu, 200, 10, 4, 2), SOURCE.map(|r| r.to_vec()));
+    assert_eq!(rows(cpu, 200, 10, 4, 2), SOURCE.map(|r| r.to_vec()));
     // Each pixel twice across and down; the fill where the key was.
     let stretched: Vec<Vec<u16>> = SOURCE
         .iter()
@@ -1044,16 +1110,35 @@ fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
             [wide.clone(), wide]
         })
         .collect();
-    assert_eq!(rows(&cpu, 300, 100, 8, 4), stretched);
-    assert_eq!(pixel(&cpu, 299, 100), FILL);
-    assert_eq!(pixel(&cpu, 308, 103), FILL);
+    assert_eq!(rows(cpu, 300, 100, 8, 4), stretched);
+    assert_eq!(pixel(cpu, 299, 100), FILL);
+    assert_eq!(pixel(cpu, 308, 103), FILL);
     // The middle columns, from the source's second on: through the key,
     // and stretched with the key's pixels copied.
-    assert_eq!(rows(&cpu, 400, 20, 2, 2), [[a, FILL], [FILL, e]]);
+    assert_eq!(rows(cpu, 400, 20, 2, 2), [[a, FILL], [FILL, e]]);
     assert_eq!(
-        rows(&cpu, 500, 20, 4, 4),
+        rows(cpu, 500, 20, 4, 4),
         [[a, a, k, k], [a, a, k, k], [k, k, e, e], [k, k, e, e]]
     );
+}
+
+/// Blits from system memory into the card's memory, a 16-bit back
+/// buffer, keep the pixels the color keys say and only those.
+#[test]
+fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program(false);
+    let mut cpu = machine("keyed_blit", program);
+    keyed_blits_keep_what_the_keys_say(&mut cpu, data, 19);
+}
+
+/// The same blits into the back buffer of a Voodoo Graphics' 3dfx
+/// device, whose pixels go through the card's linear frame buffer, rows
+/// starting at odd columns among them.
+#[test]
+fn keyed_blits_on_a_voodoo_graphics_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program(true);
+    let mut cpu = card_machine("keyed_blit_v1", Some(Board::Standard), program);
+    keyed_blits_keep_what_the_keys_say(&mut cpu, data, 21);
 }
 
 // The 3dfx device of a Voodoo Graphics or Voodoo2 add-on card.

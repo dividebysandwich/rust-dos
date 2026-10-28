@@ -246,9 +246,12 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     let src_at = |x: i32, y: i32| {
         ((y - op.dst.top) as usize * src_width + (x - op.dst.left) as usize) * bytes
     };
-    // A fill, or a copy through no key, puts its pixels over what was
-    // there: the destination isn't read.
-    let overwrite = dst_key.is_none() && src_key.is_none() && (source.is_none() || unscaled);
+    // A blit through no key puts its pixels over all that was there: the
+    // destination isn't read. A fill or an unscaled copy stores its rows
+    // as they are.
+    let keyless = dst_key.is_none() && src_key.is_none();
+    let overwrite = keyless && (source.is_none() || unscaled);
+    let unscaled_source = source.as_ref().filter(|_| unscaled).map(|(data, ..)| data);
     for r in &rects {
         let len = r.width() as usize * bytes;
         let rows = r.height() as usize;
@@ -270,9 +273,13 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
             store(cpu, &d, r, &data);
             continue;
         }
-        let mut out = load(cpu, &d, r);
+        let mut out = if keyless {
+            vec![0; len * rows]
+        } else {
+            load(cpu, &d, r)
+        };
         for (dst_row, y) in out.chunks_exact_mut(len).zip(r.top..) {
-            if let Some((data, ..)) = source.as_ref().filter(|_| unscaled) {
+            if let Some(data) = unscaled_source {
                 let from = src_at(r.left, y);
                 merge(bytes, dst_row, &data[from..from + len], src_key, dst_key);
                 continue;
