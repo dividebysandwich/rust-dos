@@ -55,7 +55,6 @@ const WM_MOUSEACTIVATE: u32 = 0x0021;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_COMMAND: u32 = 0x0111;
 const WM_VSCROLL: u32 = 0x0115;
-const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_RBUTTONDOWN: u32 = 0x0204;
 const WM_MOUSEWHEEL: u32 = 0x020A;
@@ -105,9 +104,8 @@ const MARGIN: i32 = 6;
 const POPUP_WIDTH: i32 = 360;
 /// A jump's colour.
 const GREEN: u32 = 0x00_8000;
-/// The cursor over a link, and elsewhere.
+/// The cursor over a link.
 const IDC_HAND: u32 = 32649;
-const IDC_ARROW: u32 = 32512;
 
 /// The viewer task's kinds, its first variable.
 const K_OPEN: u32 = 0;
@@ -1013,19 +1011,9 @@ pub fn topic_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             };
             scroll_to(cpu, pos)
         }
-        // No WM_SETCURSOR comes as the mouse moves, so the cursor is set
-        // here, back to the arrow off a link. The popup's links aren't
-        // followed, and while it is open the mouse is its own.
-        WM_MOUSEMOVE if topic => {
-            let id = if v.layout.link_at(x, y + v.scroll).is_some() {
-                IDC_HAND
-            } else {
-                IDC_ARROW
-            };
-            let cursor = crate::win32::user32::resource::system_cursor(cpu, id);
-            crate::win32::user32::input::set_cursor(cpu, &[cursor]);
-            Some(0)
-        }
+        // The hand over a link; elsewhere the class's arrow. The popup's
+        // links aren't followed, and while it is open the mouse is its
+        // own.
         WM_SETCURSOR if topic => {
             if lp & 0xFFFF == HTCLIENT {
                 let at = user(cpu).input.cursor;
