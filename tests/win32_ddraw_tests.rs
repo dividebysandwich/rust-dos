@@ -151,11 +151,13 @@ const KEY: u32 = 0x310;
 const CLASS: u32 = 0x320;
 const ENTRIES: u32 = 0x400;
 const PIXELS: u32 = 0x800;
-/// Where the polling program counts its calls of Flip, keeps the last
-/// one's result, and has GetScanLine put the line.
+/// Where the polling program counts its calls of Flip (or of
+/// GetFlipStatus), keeps the first one's result and the last one's, and
+/// has GetScanLine put the line.
 const POLLS: u32 = 0x880;
 const LAST: u32 = 0x884;
 const LINE: u32 = 0x888;
+const FIRST: u32 = 0x88C;
 const DATA_SIZE: usize = 0x900;
 
 /// The data the programs start with: the window class's name.
@@ -265,6 +267,7 @@ const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
 const S_GET_ATTACHED_SURFACE: u32 = 12;
 const S_GET_CAPS: u32 = 14;
+const S_GET_FLIP_STATUS: u32 = 18;
 const S_LOCK: u32 = 25;
 const S_SET_CLIPPER: u32 = 28;
 const S_SET_COLOR_KEY: u32 = 29;
@@ -463,10 +466,27 @@ enum Between {
     Call,
 }
 
+/// What the polling program calls until it succeeds.
+#[derive(Clone, Copy)]
+enum Poll {
+    /// Flip without DDFLIP_WAIT.
+    Flip,
+    /// GetFlipStatus with these flags, of the back buffer.
+    FlipStatus(u32),
+}
+
+const DDGFS_CANFLIP: u32 = 1;
+const DDGFS_ISFLIPDONE: u32 = 2;
+
 /// Full screen with a flip chain: a flip at the start of a frame, so
 /// that it shows a whole frame later, then Flip without DDFLIP_WAIT
 /// called again and again until it succeeds, with `between` in between.
 fn flip_polling_program(between: Between) -> (Vec<u8>, u32) {
+    polling_program(Poll::Flip, between)
+}
+
+/// The same, with `poll` called again and again until it succeeds.
+fn polling_program(poll: Poll, between: Between) -> (Vec<u8>, u32) {
     let mut d = data();
     desc(
         &mut d,
@@ -477,6 +497,7 @@ fn flip_polling_program(between: Between) -> (Vec<u8>, u32) {
         0,
         1,
     );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c, (0, 0, 320, 200))?;
@@ -501,6 +522,15 @@ fn flip_polling_program(between: Between) -> (Vec<u8>, u32) {
             DD_CREATE_SURFACE,
             &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
         )?;
+        if let Poll::FlipStatus(_) = poll {
+            c.com(
+                a,
+                l,
+                FRONT,
+                S_GET_ATTACHED_SURFACE,
+                &[Arg::At(CAPS), Arg::At(BACK)],
+            )?;
+        }
         c.com(
             a,
             l,
@@ -529,11 +559,28 @@ fn flip_polling_program(between: Between) -> (Vec<u8>, u32) {
                 a.call(dword_ptr(eax + 4 * DD_GET_SCAN_LINE))?;
             }
         }
-        push(a, l, &[Arg::I(0), Arg::I(0)])?;
-        a.mov(eax, dword_ptr(l.at(FRONT)))?;
-        a.push(eax)?;
-        a.mov(eax, dword_ptr(eax))?;
-        a.call(dword_ptr(eax + 4 * S_FLIP))?;
+        match poll {
+            Poll::Flip => {
+                push(a, l, &[Arg::I(0), Arg::I(0)])?;
+                a.mov(eax, dword_ptr(l.at(FRONT)))?;
+                a.push(eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+                a.call(dword_ptr(eax + 4 * S_FLIP))?;
+            }
+            Poll::FlipStatus(flags) => {
+                push(a, l, &[Arg::I(flags)])?;
+                a.mov(eax, dword_ptr(l.at(BACK)))?;
+                a.push(eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+                a.call(dword_ptr(eax + 4 * S_GET_FLIP_STATUS))?;
+            }
+        }
+        // The first call's result, kept.
+        let mut kept = a.create_label();
+        a.cmp(dword_ptr(l.at(POLLS)), 1)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(FIRST)), eax)?;
+        a.set_label(&mut kept)?;
         a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
         a.je(again)?;
         a.mov(dword_ptr(l.at(LAST)), eax)?;
@@ -579,6 +626,34 @@ fn flip_polled_with_other_calls_in_between_runs_every_call() {
     assert_eq!(peek(&cpu, data + LAST), 0);
     let polls = peek(&cpu, data + POLLS);
     assert!(polls > 50, "{polls} calls of Flip");
+}
+
+#[test]
+fn flip_status_polled_with_nothing_in_between_waits_for_the_frame() {
+    // GetFlipStatus of the back buffer right after a flip: the flip is
+    // still to show, as on Windows. A loop that only asks waits for the
+    // frame at its 16th call, which then finds the flip done.
+    let (program, data) = polling_program(Poll::FlipStatus(DDGFS_ISFLIPDONE), Between::Nothing);
+    let mut cpu = machine("flip_status_polling", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 8)[1..], [0; 7]);
+    assert_eq!(peek(&cpu, data + FIRST), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of GetFlipStatus");
+}
+
+#[test]
+fn flip_status_polled_with_work_in_between_runs_every_call() {
+    // DDGFS_CANFLIP the same: a flip would fail until the frame. With
+    // more to do between two calls, each call runs.
+    let (program, data) = polling_program(Poll::FlipStatus(DDGFS_CANFLIP), Between::Work(1500));
+    let mut cpu = machine("flip_status_polling_work", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 8)[1..], [0; 7]);
+    assert_eq!(peek(&cpu, data + FIRST), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of GetFlipStatus");
 }
 
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER

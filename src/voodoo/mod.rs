@@ -1530,6 +1530,12 @@ impl Voodoo {
         self.swaps.iter().filter(|s| s.due > ticks).count()
     }
 
+    /// When the last of the swaps pending at `ticks` is done, in PIT
+    /// ticks: None if none is pending.
+    pub fn swaps_done_at(&self, ticks: u64) -> Option<u64> {
+        self.swaps.iter().map(|s| s.due).filter(|&due| due > ticks).max()
+    }
+
     /// When the card next needs attention: its oldest pending swap's
     /// retrace, or the turn of a swap the frame rate cap holds back.
     pub fn next_event(&self) -> Option<u64> {

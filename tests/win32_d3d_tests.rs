@@ -1818,6 +1818,107 @@ fn the_3dfx_device_draws_on_a_voodoo_graphics() {
     card_scene("card_v1", Board::Standard);
 }
 
+/// Where the card polling program counts its polls and keeps the first
+/// one's result and the last one's.
+const POLLS: u32 = 0x9A0;
+const FIRST_POLL: u32 = 0x9A4;
+const LAST_POLL: u32 = 0x9A8;
+const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
+const SURF_GET_FLIP_STATUS: u32 = 18;
+const DDGFS_ISFLIPDONE: u32 = 2;
+
+/// A flip chain on the Voodoo2's 3dfx device and a flip, whose swap
+/// waits for the card's next retrace; then, again and again with
+/// nothing in between until it succeeds, Flip without DDFLIP_WAIT, or
+/// GetFlipStatus of the back buffer when `status`.
+fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    guid(
+        &mut d,
+        CARD_GUID,
+        0x472B_EA00,
+        0x40DF,
+        0x11D1,
+        [0xA9, 0xDF, 0x00, 0x60, 0x97, 0xC2, 0xED, 0xB2],
+    );
+    put32(&mut d, DESC, 124);
+    put32(&mut d, DESC + 0x04, DDSD_CAPS | DDSD_BACKBUFFERCOUNT);
+    put32(&mut d, DESC + 0x14, 1);
+    let caps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE;
+    put32(&mut d, DESC + 0x68, caps);
+    put32(&mut d, BACK_CAPS, DDSCAPS_BACKBUFFER);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, true, true)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            SURF_GET_ATTACHED_SURFACE,
+            &[Arg::At(BACK_CAPS), Arg::At(TARGET)],
+        )?;
+        c.com(a, l, FRONT, SURF_FLIP, &[Arg::I(0), Arg::I(0)])?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.inc(dword_ptr(l.at(POLLS)))?;
+        let (object, method) = if status {
+            push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
+            (TARGET, SURF_GET_FLIP_STATUS)
+        } else {
+            push(a, l, &[Arg::I(0), Arg::I(0)])?;
+            (FRONT, SURF_FLIP)
+        };
+        a.mov(eax, dword_ptr(l.at(object)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * method))?;
+        let mut kept = a.create_label();
+        a.cmp(dword_ptr(l.at(POLLS)), 1)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(FIRST_POLL)), eax)?;
+        a.set_label(&mut kept)?;
+        a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
+        a.je(again)?;
+        a.mov(dword_ptr(l.at(LAST_POLL)), eax)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
+    // The swap is pending until the card's next retrace, and each call
+    // of Flip fails until then. A loop that only polls waits for that
+    // retrace at its 16th call, which flips, instead of making a call
+    // for each pass until then.
+    let (exe, data) = card_polling_program(false);
+    let mut cpu = machine_with("card_flip_polling", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of Flip");
+}
+
+#[test]
+fn flip_status_on_a_voodoo2_follows_the_swap() {
+    // GetFlipStatus says the flip is still to show while the card's swap
+    // waits for its retrace, and a loop that only asks waits for it.
+    let (exe, data) = card_polling_program(true);
+    let mut cpu = machine_with("card_flip_status", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of GetFlipStatus");
+}
+
 #[test]
 fn the_specular_color_adds_to_textured_and_untextured_triangles() {
     let gray = |textured: bool| Scene {
