@@ -18,6 +18,13 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) vrr: bool,
 
+    /// Keep the window hidden, for runs driven through the debug server:
+    /// the 3dfx card is still drawn with OpenGL (voodoo_renderer=opengl),
+    /// on the host's GPU, where SDL_VIDEODRIVER=dummy has no OpenGL. A
+    /// host without OpenGL 3 gets SDL's renderer and the software card
+    #[arg(long)]
+    pub(crate) hidden: bool,
+
     /// Show the picture on a screen in a 3D scene in a VR headset, through
     /// OpenXR (SteamVR, Monado) [default: the config file's [vr] mode]
     #[arg(long, conflicts_with = "vr_desktop")]
