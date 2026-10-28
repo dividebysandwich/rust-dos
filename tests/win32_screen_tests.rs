@@ -1739,26 +1739,167 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
     assert_eq!(mode(0x48 + 12), 24);
 }
 
-// DirectPlay, with no service providers.
+// DirectPlay, with no service provider it can use: objects are made,
+// and list no connections.
 
-#[test]
-fn directplay_objects_cant_be_made() {
-    const DPERR_UNAVAILABLE: u32 = 0x8877_00FA;
+const DPERR_INVALIDPARAMS: u32 = 0x8007_0057;
+const DPERR_ALREADYINITIALIZED: u32 = 0x8877_0005;
+const DPERR_NOMESSAGES: u32 = 0x8877_00BE;
+const DPERR_UNAVAILABLE: u32 = 0x8877_00FA;
+const DPERR_UNINITIALIZED: u32 = 0x8877_0384;
+const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
+// Methods' places in IDirectPlay2 to 4's vtables, then in IDirectPlay's.
+const DP_QUERY_INTERFACE: u32 = 0;
+const DP_RELEASE: u32 = 2;
+const DP_CLOSE: u32 = 4;
+const DP_ENUM_SESSIONS: u32 = 13;
+const DP_GET_CAPS: u32 = 14;
+const DP_OPEN: u32 = 24;
+const DP_RECEIVE: u32 = 25;
+const DP_ENUM_CONNECTIONS: u32 = 35;
+const DP_INITIALIZE_CONNECTION: u32 = 38;
+const DP1_ENUM_SESSIONS: u32 = 14;
+const DP1_INITIALIZE: u32 = 19;
+/// The data's GUIDs: CLSID_DirectPlay, IID_IDirectPlay3A,
+/// IID_IDirectPlay4A and GUID_NULL.
+const DP_CLSID: u32 = DESC;
+const DP_IID3A: u32 = DESC + 16;
+const DP_IID4A: u32 = DESC + 32;
+const DP_GUID_NULL: u32 = DESC + 48;
+/// A DPSESSIONDESC2 and a DPCAPS.
+const DP_SESSION: u32 = CAPS;
+const DP_CAPS: u32 = LOCKED;
+/// How many times the callbacks were called, and Receive's player IDs
+/// and size.
+const DP_CALLED: u32 = 0x340;
+const DP_FROM: u32 = 0x344;
+const DP_TO: u32 = 0x348;
+const DP_SIZE: u32 = 0x34C;
+
+/// The data of the DirectPlay tests: their GUIDs and structures, and
+/// the pointers the calls give filled with something else.
+fn directplay_data() -> Vec<u8> {
     let mut d = data();
-    // CLSID_DirectPlay, and IID_IDirectPlay3A after it.
-    let clsid = [
-        0x20, 0x6D, 0xEB, 0xD1, 0x23, 0x89, 0xD0, 0x11, 0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
-        0xCB,
+    let guids = [
+        [
+            0x20, 0x6D, 0xEB, 0xD1, 0x23, 0x89, 0xD0, 0x11, 0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A,
+            0x43, 0xCB,
+        ],
+        [
+            0x41, 0xFE, 0x3E, 0x13, 0xDC, 0x32, 0xD0, 0x11, 0x9C, 0xFB, 0x00, 0xA0, 0xC9, 0x0A,
+            0x43, 0xCB,
+        ],
+        [
+            0x31, 0xC5, 0xB1, 0x0A, 0x45, 0x47, 0xD1, 0x11, 0xA7, 0xA1, 0x00, 0x00, 0xF8, 0x03,
+            0xAB, 0xFC,
+        ],
     ];
-    let iid = [
-        0x41, 0xFE, 0x3E, 0x13, 0xDC, 0x32, 0xD0, 0x11, 0x9C, 0xFB, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
-        0xCB,
-    ];
-    put(&mut d, DESC, &clsid);
-    put(&mut d, DESC + 16, &iid);
-    for out in [DD, FRONT, BACK] {
+    for (i, guid) in guids.iter().enumerate() {
+        put(&mut d, DESC + 16 * i as u32, guid);
+    }
+    put32(&mut d, DP_SESSION, 80);
+    put32(&mut d, DP_CAPS, 40);
+    for out in [DD, FRONT, BACK, TARGET, ZBUF] {
         put32(&mut d, out, 0x1234_5678);
     }
+    d
+}
+
+/// A callback taking `args` arguments that counts its calls in
+/// DP_CALLED and asks for more, in CALLBACKS' slot `slot`.
+fn counting_callback(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    slot: u32,
+    args: u32,
+) -> Result<(), IcedError> {
+    callback(a, l, slot, |a| {
+        a.inc(dword_ptr(l.at(DP_CALLED)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(4 * args)
+    })
+}
+
+/// CoCreateInstance makes a DirectPlay object, as Windows 98 does with
+/// no network card, which has the later interfaces too. It lists no
+/// connections, can't be given one the program made up, and the
+/// methods that need one say it has none.
+#[test]
+fn cocreateinstance_makes_a_directplay_with_no_connections() {
+    let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
+    let (program, data) = program(&[ole32], &directplay_data(), |a, l| {
+        counting_callback(a, l, 0, 6)?;
+        counting_callback(a, l, 1, 4)?;
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 0, &[none])?;
+        let create = [
+            Arg::At(DP_CLSID),
+            none,
+            Arg::I(1),
+            Arg::At(DP_IID3A),
+            Arg::At(DD),
+        ];
+        c.api(a, l, 1, &create)?;
+        let query = [Arg::At(DP_IID4A), Arg::At(FRONT)];
+        c.com(a, l, DD, DP_QUERY_INTERFACE, &query)?;
+        let enum_connections = [none, Arg::Val(CALLBACKS), none, none];
+        c.com(a, l, FRONT, DP_ENUM_CONNECTIONS, &enum_connections)?;
+        c.com(a, l, FRONT, DP_ENUM_CONNECTIONS, &[none, none, none, none])?;
+        let session = Arg::At(DP_SESSION);
+        let enum_sessions = [session, none, Arg::Val(CALLBACKS + 4), none, none];
+        c.com(a, l, FRONT, DP_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, FRONT, DP_OPEN, &[session, Arg::I(1)])?;
+        // A connection the program made up: CLSID_DirectPlay's bytes.
+        let made_up = [Arg::At(DP_CLSID), none];
+        c.com(a, l, FRONT, DP_INITIALIZE_CONNECTION, &made_up)?;
+        c.com(a, l, FRONT, DP_GET_CAPS, &[Arg::At(DP_CAPS), none])?;
+        let receive = [
+            Arg::At(DP_FROM),
+            Arg::At(DP_TO),
+            none,
+            none,
+            Arg::At(DP_SIZE),
+        ];
+        c.com(a, l, FRONT, DP_RECEIVE, &receive)?;
+        c.com(a, l, FRONT, DP_CLOSE, &[])?;
+        c.com(a, l, FRONT, DP_RELEASE, &[])?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay_cocreate", None, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(
+        results(&cpu, data, 13),
+        [
+            0,
+            0,
+            0,
+            0,
+            DPERR_INVALIDPARAMS,
+            DPERR_UNINITIALIZED,
+            DPERR_UNINITIALIZED,
+            DPERR_UNAVAILABLE,
+            DPERR_UNINITIALIZED,
+            DPERR_NOMESSAGES,
+            0,
+            1,
+            0
+        ]
+    );
+    for out in [DD, FRONT] {
+        let this = peek(&cpu, data + out);
+        assert!(this != 0 && this != 0x1234_5678, "{this:X}");
+    }
+    assert_eq!(peek(&cpu, data + DP_CALLED), 0, "callbacks called");
+}
+
+/// DirectPlayCreate with GUID_NULL makes an IDirectPlay with no service
+/// provider, which has IDirectPlay3A too and keeps its interfaces'
+/// counts apart. With any other provider it fails, as there is none,
+/// and there are no providers to enumerate and no lobby.
+#[test]
+fn directplaycreate_makes_a_directplay_with_no_service_provider() {
     let dplayx: (&str, &[&str]) = (
         "DPLAYX.DLL",
         &[
@@ -1767,37 +1908,54 @@ fn directplay_objects_cant_be_made() {
             "DirectPlayLobbyCreateA",
         ],
     );
-    let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
-    let (program, data) = program(&[dplayx, ole32], &d, |a, l| {
+    let (program, data) = program(&[dplayx], &directplay_data(), |a, l| {
         let mut c = Calls { next: 0 };
         let none = Arg::I(0);
-        c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), none])?;
+        let null = Arg::At(DP_GUID_NULL);
+        c.api(a, l, 0, &[null, Arg::At(DD), none])?;
+        c.api(a, l, 0, &[Arg::At(DP_CLSID), Arg::At(FRONT), none])?;
+        c.api(a, l, 0, &[none, Arg::At(BACK), none])?;
+        c.api(a, l, 0, &[null, Arg::At(BACK), Arg::I(1)])?;
+        let query = [Arg::At(DP_IID3A), Arg::At(TARGET)];
+        c.com(a, l, DD, DP_QUERY_INTERFACE, &query)?;
+        // A callback that isn't code, which mustn't be called.
+        let session = Arg::At(DP_SESSION);
+        let enum_sessions = [session, none, Arg::I(BASE), none, none];
+        c.com(a, l, TARGET, DP_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, DD, DP1_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, DD, DP1_INITIALIZE, &[null])?;
+        c.com(a, l, TARGET, DP_RELEASE, &[])?;
+        // The IDirectPlay is still there.
+        c.com(a, l, DD, DP_CLOSE, &[])?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
         c.api(a, l, 1, &[Arg::I(BASE), none])?;
-        c.api(a, l, 2, &[none, Arg::At(FRONT), none, none, none])?;
-        c.api(a, l, 3, &[none])?;
-        let iid = Arg::At(DESC + 16);
-        c.api(
-            a,
-            l,
-            4,
-            &[Arg::At(DESC), none, Arg::I(1), iid, Arg::At(BACK)],
-        )?;
+        c.api(a, l, 2, &[none, Arg::At(ZBUF), none, none, none])?;
         finish(a, l, 1)
     });
-    let mut cpu = card_machine("directplay", None, program);
+    let mut cpu = card_machine("directplay_create", None, program);
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 5);
     assert_eq!(
-        r,
+        results(&cpu, data, 13),
         [
-            DPERR_UNAVAILABLE,
             0,
             DPERR_UNAVAILABLE,
+            DPERR_INVALIDPARAMS,
+            CLASS_E_NOAGGREGATION,
+            0,
+            DPERR_UNINITIALIZED,
+            DPERR_UNINITIALIZED,
+            DPERR_ALREADYINITIALIZED,
+            0,
+            0,
+            0,
             0,
             DPERR_UNAVAILABLE
         ]
     );
-    for out in [DD, FRONT, BACK] {
+    let this = peek(&cpu, data + DD);
+    assert!(this != 0 && this != 0x1234_5678, "{this:X}");
+    assert_ne!(peek(&cpu, data + TARGET), this);
+    for out in [FRONT, BACK, ZBUF] {
         assert_eq!(peek(&cpu, data + out), 0);
     }
 }
