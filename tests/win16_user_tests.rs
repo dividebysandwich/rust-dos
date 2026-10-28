@@ -1,0 +1,39 @@
+//! Win16's USER: what Windows 3.1 programs get from its functions on the
+//! built-in Windows. The programs are made byte by byte (tests/win16).
+
+mod win16;
+
+use win16::{CODE, Code, program, run};
+
+/// USER's ordinals.
+const FIND_WINDOW: u16 = 50;
+const GET_ACTIVE_WINDOW: u16 = 60;
+
+#[test]
+fn with_no_window_active_get_active_window_gives_program_managers() {
+    // Exit code 1 when GetActiveWindow gives the window FindWindow finds
+    // for Program Manager's class, 0 when it gives another or none.
+    let mut code = Code::new();
+    code.call("USER", GET_ACTIVE_WINDOW).emit(&[0x50]); // push ax
+    let class_at = code.here() + 2;
+    code.push_far(0)
+        .push(0)
+        .push(0) // no title
+        .call("USER", FIND_WINDOW)
+        .emit(&[
+            0x59, // pop cx
+            0x3B, 0xC1, // cmp ax,cx
+            0x75, 0x08, // jne bad
+            0x0B, 0xC0, // or ax,ax
+            0x74, 0x04, // jz bad
+            0xB0, 0x01, // mov al,1
+            0xEB, 0x02, // jmp over the next
+            0xB0, 0x00, // bad: mov al,0
+        ])
+        .exit_al();
+    let class = code.here();
+    code.emit(b"Progman\0");
+    code.patch(class_at, class);
+    let (exit, log) = run("active_none", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}

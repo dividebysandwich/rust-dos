@@ -165,7 +165,7 @@ fn dos_read(cpu: &mut Cpu, handle: u32, count: u32) -> Read {
             }
         }
         Some(_) => Read::Data(Vec::new()),
-        None => match cpu.bus.disk.read_file(sft, count as usize) {
+        None => match crate::interrupts::int21::read_open_file(cpu, sft, count as usize) {
             Ok(data) => Read::Data(data),
             Err(code) => Read::Error(code as u32),
         },

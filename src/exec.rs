@@ -595,6 +595,11 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
         return;
     }
 
+    // With `almanac_auto`, the program waits for its settings first.
+    let plain = redirect.input.is_none() && redirect.output.is_none();
+    if plain && crate::almanac::ask_first(cpu, &cmd, command) {
+        return;
+    }
     match start(cpu, command, args.trim(), false, false) {
         None => bad_command(cpu),
         Some(Started::Program) => redirect_program(cpu, &redirect),
@@ -881,6 +886,7 @@ fn load_program(cpu: &mut Cpu, filename: &str, args: &str, high: bool) -> bool {
     if !loaded {
         return false;
     }
+    cpu.almanac.last_program = Some(filename.to_string());
     cpu.set_command_tail(cpu.current_psp, args);
     let ax = crate::interrupts::fcb::set_psp_fcbs(&mut cpu.bus, cpu.current_psp, &crate::dosstr::to_bytes(args));
     cpu.set_ax(ax);
@@ -1484,7 +1490,13 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.bus.guest_paging = Some(cpu.guest_paging(cpu.cpl == 3));
         (cpu.snapshot(), cpu.bus.port_accesses.len())
     });
+    // The built-in Windows doesn't hold a thread back for the time its
+    // file calls would take on the drive: what one charges sets only how
+    // long the drive's noise goes on, so it starts from none and is
+    // dropped when the call is done.
+    cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
+    cpu.bus.disk_io.clear();
     if let Some(before) = &before
         && guest_page_fault(cpu, before)
     {

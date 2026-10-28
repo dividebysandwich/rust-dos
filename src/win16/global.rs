@@ -95,7 +95,7 @@ pub fn create_block(
         // A discarded block: a selector that isn't present.
         ldt::write(cpu, system, sel, ldt::segment(0, 0, access & !0x80));
     } else {
-        ldt::set_block(cpu, system, sel, base, size, access);
+        ldt::set_block(cpu, system, sel, base, size, access, false);
     }
     let handle = if flags & GMEM_MOVEABLE != 0 {
         sel - 1
@@ -218,7 +218,9 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
     };
     let sel = handle_to_sel(handle);
     let system = win16(cpu).system;
-    let code = ldt::read(cpu, system, sel) >> 43 & 1 != 0;
+    let desc = ldt::read(cpu, system, sel);
+    let code = desc >> 43 & 1 != 0;
+    let big = ldt::is_big(desc);
     let access = if code { ACCESS_CODE } else { ACCESS_DATA };
 
     // Discard the block.
@@ -326,7 +328,7 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
     if moved {
         give_memory(cpu, a.base);
     }
-    ldt::set_block(cpu, system, new_sel, base, size, access);
+    ldt::set_block(cpu, system, new_sel, base, size, access, big);
     let state = &mut cpu.bus.win32.win16;
     let mut entry = state.arena.remove(&ldt::index(sel)).expect("the block");
     entry.base = base;

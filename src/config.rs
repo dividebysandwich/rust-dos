@@ -236,6 +236,9 @@ pub struct Config {
     pub pause_in_settings: Option<bool>,
     /// The check for a newer rust-dos at startup (`version_check`).
     pub version_check: Option<bool>,
+    /// Programs started from the prompt with the almanac's settings
+    /// (`almanac_auto`, almanac.rs).
+    pub almanac_auto: Option<bool>,
     /// Rewind (`rewind`), and the memory its states may take in MB
     /// (`rewind_memory`).
     pub rewind: Option<bool>,
@@ -392,6 +395,18 @@ impl Section {
     }
 }
 
+
+/// Every setting as the file writes it: its section's name, its key and
+/// its value, or None for one that is not set.
+pub fn values(
+    settings: &Settings,
+    home: Option<&Path>,
+) -> Vec<(&'static str, &'static str, Option<String>)> {
+    settings::entries(settings, home)
+        .into_iter()
+        .map(|(section, key, value)| (section.name(), key, value))
+        .collect()
+}
 
 /// Write the commented template to `path`, creating parent directories.
 /// Never overwrites an existing file.

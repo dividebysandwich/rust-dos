@@ -365,6 +365,8 @@ impl Item {
             ShellColors => "shell-colors",
             SaveShellHistory => "save-shell-history",
             VersionCheck => "version-check",
+            AlmanacAuto => "almanac-auto",
+            AlmanacFetch | AlmanacReport => "almanac",
             Rewind => "rewind",
             RewindMemory => "rewind-memory",
             SbType => "sb-type",

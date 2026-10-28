@@ -7,6 +7,7 @@
 //! `Host`. What the frontend doesn't have (`Frontend`) isn't offered.
 
 mod achievements;
+mod almanac;
 mod autoexec;
 mod browser;
 mod cheats;
@@ -43,6 +44,7 @@ pub use draw::cp437;
 use games::{GameDialog, GameField};
 use image::{ImageDialog, ImageField};
 use rooms::{RoomBrowser, RoomButton, RoomField};
+use almanac::AlmanacView;
 use phonebook::PhoneList;
 use scenes::SceneList;
 pub use manual::Layer;
@@ -193,7 +195,8 @@ impl Page {
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
-                ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck,
+                ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck, AlmanacAuto,
+                AlmanacFetch, AlmanacReport,
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
@@ -340,6 +343,8 @@ enum Target {
     /// A line of the VR page's scene list.
     SceneRow(usize),
     PhoneRow(usize),
+    /// A line of the almanac's list.
+    AlmanacRow(usize),
     /// A value of the popup list, and the rest of it.
     PopupRow(usize),
     Popup,
@@ -452,6 +457,9 @@ pub struct ConfigUi {
     /// for (phonebook.rs).
     phonebook: Option<PhoneList>,
     phone_catalog: phonebook::Catalog,
+    /// The almanac's games and their settings, to fetch from or report to
+    /// (almanac.rs).
+    almanac: Option<AlmanacView>,
     /// The sound visualizer while it shows (sound_viz.rs).
     sound_viz: Option<sound_viz::SoundViz>,
     /// The settings as a BIOS setup, while it shows (setup.rs).
@@ -535,6 +543,7 @@ impl ConfigUi {
             scene_catalog: scenes::Catalog::default(),
             phonebook: None,
             phone_catalog: phonebook::Catalog::default(),
+            almanac: None,
             sound_viz: None,
             setup: None,
             scene_download: None,
@@ -569,6 +578,7 @@ impl ConfigUi {
         self.poll_glide_download(host);
         self.poll_scenes(host);
         self.poll_phonebook();
+        self.poll_almanac();
     }
 
     /// Download the AWE32's ROM on a thread of its own, into rust-dos's
@@ -677,6 +687,7 @@ impl ConfigUi {
         self.rooms = None;
         self.scenes = None;
         self.phonebook = None;
+        self.almanac = None;
         self.help = None;
         self.put_away_manual();
         self.manual = None;

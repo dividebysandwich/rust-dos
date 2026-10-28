@@ -70,6 +70,8 @@ impl ConfigUi {
             self.draw_scenes(&mut g, content.clone());
         } else if self.phonebook.is_some() {
             self.draw_phonebook(&mut g, content.clone());
+        } else if self.almanac.is_some() {
+            self.draw_almanac(&mut g, content.clone());
         } else if self.confirm_sc55.is_some() {
             self.draw_sc55_question(&mut g, content.clone());
         } else if self.confirm_glide {
@@ -651,6 +653,8 @@ impl ConfigUi {
             Some("vr-scenes")
         } else if self.phonebook.is_some() {
             Some("phonebook")
+        } else if self.almanac.is_some() {
+            Some("almanac")
         } else {
             self.page.help().or_else(|| self.item().map(Item::help))
         }
@@ -770,6 +774,8 @@ impl ConfigUi {
             self.scene_hints()
         } else if self.phonebook.is_some() {
             self.phone_hints()
+        } else if self.almanac.is_some() {
+            self.almanac_hints()
         } else if self.confirm_launch.is_some() {
             vec![("Enter", "Close and start", Enter), ("Esc", "Keep running", Esc)]
         } else if self.confirm_delete.is_some() {
@@ -841,7 +847,16 @@ impl ConfigUi {
                 }
                 Some(Input::Text) => vec![("Enter", "Type", Enter)],
                 Some(Input::File) => vec![("Enter", "Pick", Enter), ("Del", "None", Delete)],
-                Some(Input::Link) if matches!(self.item(), Some(Item::Rooms | Item::Phonebook)) => vec![("Enter", "Open", Enter)],
+                Some(Input::Link)
+                    if matches!(
+                        self.item(),
+                        Some(
+                            Item::Rooms | Item::Phonebook | Item::AlmanacFetch | Item::AlmanacReport
+                        )
+                    ) =>
+                {
+                    vec![("Enter", "Open", Enter)]
+                }
                 Some(Input::Link) => vec![("Enter", "Edit", Enter)],
                 None => Vec::new(),
             };

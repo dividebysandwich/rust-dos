@@ -165,6 +165,12 @@ pub trait Host {
         Err("There is no RetroAchievements here".to_string())
     }
     fn achievements_logout(&mut self) {}
+    /// The program the prompt started last, for the almanac: its file's
+    /// name and checksums, and the game's name (its profile's while one
+    /// plays). None where no program has run.
+    fn almanac_program(&mut self) -> Option<crate::almanac::Program> {
+        None
+    }
     /// Tell RetroAchievements which version the game playing is: the zip
     /// or .dosz `archive` it came in, whose hash its profile keeps.
     /// Returns what to tell the user.

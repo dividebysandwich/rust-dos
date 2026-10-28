@@ -815,6 +815,21 @@ impl Host for MainHost<'_, '_> {
         self.achievements.logout();
     }
 
+    fn almanac_program(&mut self) -> Option<rust_dos::almanac::Program> {
+        let last = self.cpu.almanac.last_program.clone();
+        let mut program = match last.and_then(|path| rust_dos::almanac::program(self.cpu, &path)) {
+            Some(program) => program,
+            None => {
+                let name = self.game.as_ref()?.name.clone();
+                rust_dos::almanac::Program { name, ..Default::default() }
+            }
+        };
+        if let Some(game) = self.game.as_ref() {
+            program.name = game.name.clone();
+        }
+        Some(program)
+    }
+
     fn identify_game(&mut self, archive: &std::path::Path) -> Result<String, String> {
         let Some(game) = self.game.as_ref() else {
             return Err("Launch the game from its profile first (the Games page)".to_string());

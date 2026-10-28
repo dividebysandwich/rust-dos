@@ -27,10 +27,11 @@
 //! speed, or a quarter of a faster CPU model's clock: it spins in a loop,
 //! as game menus do. (It was written for a 386 or better, and paces
 //! itself.) Under an operating system that halts the processor when it has
-//! nothing to run (Windows, OS/2, Linux), a program that keeps it from
-//! halting is at work and gets all the host has as well. Once a program
-//! stops reading and writing, it goes back to the speed it had at once,
-//! not a measurement later: programs time their delay loops right after
+//! nothing to run (Windows, OS/2, Linux, and the built-in Windows, which
+//! is known to from the start), a program that keeps it from halting is
+//! at work and gets all the host has as well. Once a program stops
+//! reading and writing, it goes back to the speed it had at once, not a
+//! measurement later: programs time their delay loops right after
 //! loading, and a loop timed at all the host has waits for ever (Sam &
 //! Max's General MIDI driver counts to a million in a timer tick, and
 //! hangs if it gets there first).

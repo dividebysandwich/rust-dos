@@ -344,6 +344,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.version_check = Some(on),
                             None => warn(format!("invalid version_check '{}' (true or false)", value)),
                         },
+                        "almanac_auto" => match parse_bool(value) {
+                            Some(on) => config.almanac_auto = Some(on),
+                            None => {
+                                warn(format!("invalid almanac_auto '{}' (true or false)", value))
+                            }
+                        },
                         "mouse_autocapture" => match parse_bool(value) {
                             Some(on) => config.mouse_autocapture = Some(on),
                             None => warn(format!("invalid mouse_autocapture '{}' (true or false)", value)),

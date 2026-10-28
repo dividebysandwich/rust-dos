@@ -1,19 +1,25 @@
 // A 2D operation (src/voodoo/mirror.rs's `Blit`) drawn into the card's
-// memory, which is the framebuffer here: a fragment is a byte, in rows
-// of 4096, and works out the pixel of the destination it is part of,
-// that pixel's value and which of its bytes to write. The pixels are
-// those src/win32/ddraw/blt.rs's `run` works out in software.
+// memory, which is the framebuffer here: a fragment is a byte of the
+// layer u_layer of the memory's texture array, and works out the pixel
+// of the destination it is part of, that pixel's value and which of its
+// bytes to write. The pixels are those src/win32/ddraw/blt.rs's `run`
+// works out in software.
 
 #ifdef GL_ES
 precision highp usampler2D;
+precision highp usampler2DArray;
 #endif
 
 // The card's memory as it was before the operation (a copy of the rows
 // it reads), and a colour buffer the renderer draws, as a source.
-uniform usampler2D u_mem;
+uniform usampler2DArray u_mem;
 uniform sampler2D u_buf;
-// The card's memory's size less one: addresses wrap there.
-uniform int u_mem_mask;
+// The card's memory: its size less one, where addresses wrap, and how
+// its bytes lie in the layers of u_mem (src/voodoo/gl.rs's
+// `MemoryLayout`): log2 of the bytes a row and of the bytes a layer.
+uniform ivec3 u_mem_layout;
+// The layer drawn into.
+uniform int u_layer;
 // The destination: its first byte, its stride and its bytes a pixel.
 uniform ivec3 u_dst;
 // The rectangle drawn now, and the one the source is stretched onto:
@@ -40,8 +46,12 @@ uniform ivec3 u_dst_masks;
 out uvec4 o_color;
 
 uint byte_at(uint a) {
-    a &= uint(u_mem_mask);
-    return texelFetch(u_mem, ivec2(int(a & 4095u), int(a >> 12)), 0).r;
+    a &= uint(u_mem_layout.x);
+    uint row = uint(u_mem_layout.y);
+    uint layer = uint(u_mem_layout.z);
+    uint x = a & ((1u << row) - 1u);
+    uint y = (a & ((1u << layer) - 1u)) >> row;
+    return texelFetch(u_mem, ivec3(int(x), int(y), int(a >> layer)), 0).r;
 }
 
 // The pixel of `bpp` bytes from byte `a` on, little-endian.
@@ -86,7 +96,8 @@ uint narrow(uint p) {
 
 void main() {
     ivec2 t = ivec2(gl_FragCoord.xy);
-    uint a = uint(t.y) * 4096u + uint(t.x);
+    uint a = uint(u_layer) << uint(u_mem_layout.z) | uint(t.y) << uint(u_mem_layout.y)
+        | uint(t.x);
     uint start = uint(u_dst.x);
     uint stride = uint(u_dst.y);
     int bpp = u_dst.z;

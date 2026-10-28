@@ -1739,67 +1739,581 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
     assert_eq!(mode(0x48 + 12), 24);
 }
 
-// DirectPlay, with no service providers.
+// DirectPlay, with no service provider it can use: objects are made,
+// and list no connections; and its lobby, with no lobby.
 
-#[test]
-fn directplay_objects_cant_be_made() {
-    const DPERR_UNAVAILABLE: u32 = 0x8877_00FA;
+const DPERR_INVALIDPARAMS: u32 = 0x8007_0057;
+const DPERR_ALREADYINITIALIZED: u32 = 0x8877_0005;
+const DPERR_BUFFERTOOSMALL: u32 = 0x8877_001E;
+const DPERR_INVALIDFLAGS: u32 = 0x8877_0078;
+const DPERR_INVALIDOBJECT: u32 = 0x8877_0082;
+const DPERR_NOMESSAGES: u32 = 0x8877_00BE;
+const DPERR_UNAVAILABLE: u32 = 0x8877_00FA;
+const DPERR_UNINITIALIZED: u32 = 0x8877_0140;
+const DPERR_NOTLOBBIED: u32 = 0x8877_042E;
+const E_NOINTERFACE: u32 = 0x8000_4002;
+const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
+// Methods' places in IDirectPlay2 to 4's vtables, in IDirectPlay's and
+// in the lobby's.
+const DP_QUERY_INTERFACE: u32 = 0;
+const DP_ADD_REF: u32 = 1;
+const DP_RELEASE: u32 = 2;
+const DP_CLOSE: u32 = 4;
+const DP_ENUM_SESSIONS: u32 = 13;
+const DP_GET_CAPS: u32 = 14;
+const DP_OPEN: u32 = 24;
+const DP_RECEIVE: u32 = 25;
+const DP_ENUM_CONNECTIONS: u32 = 35;
+const DP_INITIALIZE_CONNECTION: u32 = 38;
+const DP1_ENUM_SESSIONS: u32 = 14;
+const DP1_INITIALIZE: u32 = 19;
+const DPL_CREATE_ADDRESS: u32 = 4;
+const DPL_ENUM_ADDRESS: u32 = 5;
+const DPL_ENUM_ADDRESS_TYPES: u32 = 6;
+const DPL_ENUM_LOCAL_APPLICATIONS: u32 = 7;
+const DPL_GET_CONNECTION_SETTINGS: u32 = 8;
+/// The data's GUIDs.
+const DP_CLSID: u32 = 0x500;
+const DP_IID3A: u32 = 0x510;
+const DP_IID4A: u32 = 0x520;
+const DP_GUID_NULL: u32 = 0x530;
+const DP_IUNKNOWN: u32 = 0x540;
+const DP_IID4: u32 = 0x550;
+const DP_IID2A: u32 = 0x560;
+const DPL_CLSID: u32 = 0x570;
+const DPL_IID3A: u32 = 0x580;
+const DP_TCPIP: u32 = 0x590;
+const DP_INET: u32 = 0x5A0;
+const DP_SERIAL: u32 = 0x5B0;
+/// A host's name, a DPSESSIONDESC2 and a DPCAPS.
+const DP_HOST: u32 = 0x5C0;
+const DP_SESSION: u32 = 0x5D0;
+const DP_CAPS: u32 = 0x620;
+/// What the callbacks counted, Receive's player IDs and size, an
+/// address's size, a vtable kept, the sizes of an address's chunks, and
+/// the address.
+const DP_CALLED: u32 = 0x650;
+const DP_TYPES: u32 = 0x654;
+const DP_FROM: u32 = 0x658;
+const DP_TO: u32 = 0x65C;
+const DP_SIZE: u32 = 0x660;
+const DP_ADDRESS_SIZE: u32 = 0x664;
+const DP_VTABLE: u32 = 0x668;
+const DP_APPS: u32 = 0x66C;
+const DP_SIZES: u32 = 0x670;
+const DP_ADDRESS: u32 = 0x6A0;
+/// Interfaces' pointers, past the ones the data's layout has.
+const DP_UNKNOWN1: u32 = 0x740;
+const DP_UNKNOWN2: u32 = 0x744;
+const DP_PLAY4: u32 = 0x748;
+const DP_PLAY2A: u32 = 0x74C;
+const DP_NONE: u32 = 0x750;
+const DP_LOBBY: u32 = 0x754;
+const DP_LOBBY3A: u32 = 0x758;
+
+/// A GUID's bytes as dplay.h writes it.
+fn guid_bytes(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Vec<u8> {
+    [
+        &d1.to_le_bytes()[..],
+        &d2.to_le_bytes(),
+        &d3.to_le_bytes(),
+        &d4,
+    ]
+    .concat()
+}
+
+/// The data of the DirectPlay tests: their GUIDs and structures, and
+/// the pointers the calls give filled with something else.
+fn directplay_data() -> Vec<u8> {
     let mut d = data();
-    // CLSID_DirectPlay, and IID_IDirectPlay3A after it.
-    let clsid = [
-        0x20, 0x6D, 0xEB, 0xD1, 0x23, 0x89, 0xD0, 0x11, 0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
-        0xCB,
+    let guids = [
+        (
+            DP_CLSID,
+            guid_bytes(
+                0xD1EB_6D20,
+                0x8923,
+                0x11D0,
+                [0x9D, 0x97, 0, 0xA0, 0xC9, 0x0A, 0x43, 0xCB],
+            ),
+        ),
+        (
+            DP_IID3A,
+            guid_bytes(
+                0x133E_FE41,
+                0x32DC,
+                0x11D0,
+                [0x9C, 0xFB, 0, 0xA0, 0xC9, 0x0A, 0x43, 0xCB],
+            ),
+        ),
+        (
+            DP_IID4A,
+            guid_bytes(
+                0x0AB1_C531,
+                0x4745,
+                0x11D1,
+                [0xA7, 0xA1, 0, 0, 0xF8, 0x03, 0xAB, 0xFC],
+            ),
+        ),
+        (
+            DP_IUNKNOWN,
+            guid_bytes(0, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]),
+        ),
+        (
+            DP_IID4,
+            guid_bytes(
+                0x0AB1_C530,
+                0x4745,
+                0x11D1,
+                [0xA7, 0xA1, 0, 0, 0xF8, 0x03, 0xAB, 0xFC],
+            ),
+        ),
+        (
+            DP_IID2A,
+            guid_bytes(
+                0x9D46_0580,
+                0xA822,
+                0x11CF,
+                [0x96, 0x0C, 0, 0x80, 0xC7, 0x53, 0x4E, 0x82],
+            ),
+        ),
+        (
+            DPL_CLSID,
+            guid_bytes(
+                0x2FE8_F810,
+                0xB2A5,
+                0x11D0,
+                [0xA7, 0x87, 0, 0, 0xF8, 0x03, 0xAB, 0xFC],
+            ),
+        ),
+        (
+            DPL_IID3A,
+            guid_bytes(
+                0x2DB7_2491,
+                0x652C,
+                0x11D1,
+                [0xA7, 0xA8, 0, 0, 0xF8, 0x03, 0xAB, 0xFC],
+            ),
+        ),
+        (
+            DP_TCPIP,
+            guid_bytes(
+                0x36E9_5EE0,
+                0x8577,
+                0x11CF,
+                [0x96, 0x0C, 0, 0x80, 0xC7, 0x53, 0x4E, 0x82],
+            ),
+        ),
+        (
+            DP_INET,
+            guid_bytes(
+                0xC4A5_4DA0,
+                0xE0AF,
+                0x11CF,
+                [0x9C, 0x4E, 0, 0xA0, 0xC9, 0x05, 0x42, 0x5E],
+            ),
+        ),
+        (
+            DP_SERIAL,
+            guid_bytes(
+                0x0F1D_6860,
+                0x88D9,
+                0x11CF,
+                [0x9C, 0x4E, 0, 0xA0, 0xC9, 0x05, 0x42, 0x5E],
+            ),
+        ),
     ];
-    let iid = [
-        0x41, 0xFE, 0x3E, 0x13, 0xDC, 0x32, 0xD0, 0x11, 0x9C, 0xFB, 0x00, 0xA0, 0xC9, 0x0A, 0x43,
-        0xCB,
-    ];
-    put(&mut d, DESC, &clsid);
-    put(&mut d, DESC + 16, &iid);
-    for out in [DD, FRONT, BACK] {
+    for (at, guid) in guids {
+        put(&mut d, at, &guid);
+    }
+    put(&mut d, DP_HOST, b"10.0.2.2\0");
+    put32(&mut d, DP_SESSION, 80);
+    put32(&mut d, DP_CAPS, 40);
+    for out in [DD, FRONT, BACK, TARGET, DP_NONE] {
         put32(&mut d, out, 0x1234_5678);
     }
-    let dplayx: (&str, &[&str]) = (
-        "DPLAYX.DLL",
-        &[
-            "DirectPlayCreate",
-            "DirectPlayEnumerateA",
-            "DirectPlayLobbyCreateA",
-        ],
-    );
+    d
+}
+
+/// A callback taking `args` arguments that counts its calls in the
+/// data's dword `counter` and asks for more, in CALLBACKS' slot `slot`.
+fn counting_callback(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    slot: u32,
+    args: u32,
+    counter: u32,
+) -> Result<(), IcedError> {
+    callback(a, l, slot, |a| {
+        a.inc(dword_ptr(l.at(counter)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(4 * args)
+    })
+}
+
+/// EnumAddress's callback (type, size, data, context), in CALLBACKS'
+/// slot `slot`: it counts the chunks in DP_CALLED and keeps their sizes
+/// in DP_SIZES.
+fn chunk_callback(a: &mut CodeAssembler, l: &Layout, slot: u32) -> Result<(), IcedError> {
+    callback(a, l, slot, |a| {
+        a.mov(eax, dword_ptr(l.at(DP_CALLED)))?;
+        a.inc(dword_ptr(l.at(DP_CALLED)))?;
+        a.shl(eax, 2)?;
+        a.add(eax, l.at(DP_SIZES) as i32)?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax), ecx)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)
+    })
+}
+
+/// Keep the vtable of the interface at data offset `object` in
+/// DP_VTABLE, to call it after the interface is gone.
+fn keep_vtable(a: &mut CodeAssembler, l: &Layout, object: u32) -> Result<(), IcedError> {
+    a.mov(eax, dword_ptr(l.at(object)))?;
+    a.mov(eax, dword_ptr(eax))?;
+    a.mov(dword_ptr(l.at(DP_VTABLE)), eax)
+}
+
+/// Call method `method` of the vtable kept in DP_VTABLE, with the
+/// interface pointer at data offset `object` and no other arguments.
+fn call_kept(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    object: u32,
+    method: u32,
+) -> Result<(), IcedError> {
+    a.push(dword_ptr(l.at(object)))?;
+    a.mov(eax, dword_ptr(l.at(DP_VTABLE)))?;
+    a.call(dword_ptr(eax + 4 * method))?;
+    c.keep(a, l)
+}
+
+/// The program's dword at its data's offset `offset`.
+fn data_word(cpu: &Cpu, data: u32, offset: u32) -> u32 {
+    peek(cpu, data + offset)
+}
+
+/// CoCreateInstance makes a DirectPlay object, as Windows 98 does with
+/// no network card. Each IID is an interface of its own with its own
+/// count, IUnknown is the same pointer whichever interface it is asked
+/// of, and an IID it hasn't gives E_NOINTERFACE. It lists no
+/// connections, can't be given one the program made up, and the methods
+/// that need one say it has none. A call through an interface of an
+/// object that is gone gives DPERR_INVALIDOBJECT.
+#[test]
+fn cocreateinstance_makes_a_directplay_with_no_connections() {
     let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
-    let (program, data) = program(&[dplayx, ole32], &d, |a, l| {
+    let (program, data) = program(&[ole32], &directplay_data(), |a, l| {
+        counting_callback(a, l, 0, 6, DP_CALLED)?;
+        counting_callback(a, l, 1, 4, DP_CALLED)?;
         let mut c = Calls { next: 0 };
         let none = Arg::I(0);
-        c.api(a, l, 0, &[Arg::At(DESC), Arg::At(DD), none])?;
-        c.api(a, l, 1, &[Arg::I(BASE), none])?;
-        c.api(a, l, 2, &[none, Arg::At(FRONT), none, none, none])?;
-        c.api(a, l, 3, &[none])?;
-        let iid = Arg::At(DESC + 16);
-        c.api(
+        c.api(a, l, 0, &[none])?;
+        let create = [
+            Arg::At(DP_CLSID),
+            none,
+            Arg::I(1),
+            Arg::At(DP_IID3A),
+            Arg::At(DD),
+        ];
+        c.api(a, l, 1, &create)?;
+        let query = |iid, out| [Arg::At(iid), Arg::At(out)];
+        c.com(a, l, DD, DP_QUERY_INTERFACE, &query(DP_IID4A, FRONT))?;
+        c.com(
             a,
             l,
-            4,
-            &[Arg::At(DESC), none, Arg::I(1), iid, Arg::At(BACK)],
+            DD,
+            DP_QUERY_INTERFACE,
+            &query(DP_IUNKNOWN, DP_UNKNOWN1),
         )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            DP_QUERY_INTERFACE,
+            &query(DP_IUNKNOWN, DP_UNKNOWN2),
+        )?;
+        c.com(a, l, FRONT, DP_QUERY_INTERFACE, &query(DP_IID4, DP_PLAY4))?;
+        c.com(
+            a,
+            l,
+            DP_PLAY4,
+            DP_QUERY_INTERFACE,
+            &query(DP_IID2A, DP_PLAY2A),
+        )?;
+        c.com(a, l, FRONT, DP_QUERY_INTERFACE, &query(DP_CLSID, DP_NONE))?;
+        let enum_connections = [none, Arg::Val(CALLBACKS), none, none];
+        c.com(a, l, FRONT, DP_ENUM_CONNECTIONS, &enum_connections)?;
+        c.com(a, l, FRONT, DP_ENUM_CONNECTIONS, &[none, none, none, none])?;
+        let session = Arg::At(DP_SESSION);
+        let enum_sessions = [session, none, Arg::Val(CALLBACKS + 4), none, none];
+        c.com(a, l, DP_PLAY4, DP_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, DP_PLAY2A, DP_OPEN, &[session, Arg::I(1)])?;
+        // A connection the program made up: CLSID_DirectPlay's bytes.
+        let made_up = [Arg::At(DP_CLSID), none];
+        c.com(a, l, FRONT, DP_INITIALIZE_CONNECTION, &made_up)?;
+        // No caps, whatever the arguments.
+        c.com(a, l, FRONT, DP_GET_CAPS, &[none, none])?;
+        let receive = |flags| {
+            [
+                Arg::At(DP_FROM),
+                Arg::At(DP_TO),
+                Arg::I(flags),
+                none,
+                Arg::At(DP_SIZE),
+            ]
+        };
+        c.com(a, l, FRONT, DP_RECEIVE, &receive(0))?;
+        c.com(a, l, FRONT, DP_RECEIVE, &receive(0x10))?;
+        c.com(a, l, FRONT, DP_CLOSE, &[])?;
+        for object in [FRONT, DP_PLAY2A, DP_PLAY4, DP_UNKNOWN2, DP_UNKNOWN1] {
+            c.com(a, l, object, DP_RELEASE, &[])?;
+        }
+        keep_vtable(a, l, DD)?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
+        call_kept(&mut c, a, l, DD, DP_CLOSE)?;
         finish(a, l, 1)
     });
-    let mut cpu = card_machine("directplay", None, program);
+    let mut cpu = card_machine("directplay_cocreate", None, program);
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 5);
     assert_eq!(
-        r,
+        results(&cpu, data, 24),
         [
-            DPERR_UNAVAILABLE,
             0,
-            DPERR_UNAVAILABLE,
             0,
-            DPERR_UNAVAILABLE
+            0,
+            0,
+            0,
+            0,
+            0,
+            E_NOINTERFACE,
+            0,
+            DPERR_INVALIDPARAMS,
+            DPERR_UNINITIALIZED,
+            DPERR_UNINITIALIZED,
+            DPERR_UNAVAILABLE,
+            DPERR_UNINITIALIZED,
+            DPERR_NOMESSAGES,
+            DPERR_INVALIDFLAGS,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            DPERR_INVALIDOBJECT
         ]
     );
-    for out in [DD, FRONT, BACK] {
-        assert_eq!(peek(&cpu, data + out), 0);
+    let word = |offset| data_word(&cpu, data, offset);
+    let interfaces = [DD, FRONT, DP_PLAY4, DP_PLAY2A, DP_UNKNOWN1];
+    for (i, &one) in interfaces.iter().enumerate() {
+        assert!(
+            word(one) != 0 && word(one) != 0x1234_5678,
+            "{:X}",
+            word(one)
+        );
+        for &other in &interfaces[i + 1..] {
+            assert_ne!(word(one), word(other), "{one:X} and {other:X}");
+        }
     }
+    assert_eq!(word(DP_UNKNOWN1), word(DP_UNKNOWN2), "COM identity");
+    assert_eq!(word(DP_NONE), 0);
+    assert_eq!(word(DP_CALLED), 0, "callbacks called");
+}
+
+/// DirectPlayCreate with GUID_NULL makes an IDirectPlay with no service
+/// provider, which has IDirectPlay3A too and keeps its interfaces'
+/// counts apart. With any other provider it fails, as there is none,
+/// and an outer object is refused before the arguments are looked at.
+/// There are no providers to enumerate.
+#[test]
+fn directplaycreate_makes_a_directplay_with_no_service_provider() {
+    let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayCreate", "DirectPlayEnumerateA"]);
+    let (program, data) = program(&[dplayx], &directplay_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        let null = Arg::At(DP_GUID_NULL);
+        c.api(a, l, 0, &[null, Arg::At(DD), none])?;
+        c.api(a, l, 0, &[Arg::At(DP_CLSID), Arg::At(FRONT), none])?;
+        c.api(a, l, 0, &[none, Arg::At(BACK), none])?;
+        c.api(a, l, 0, &[none, Arg::At(BACK), Arg::I(1)])?;
+        let query = [Arg::At(DP_IID3A), Arg::At(TARGET)];
+        c.com(a, l, DD, DP_QUERY_INTERFACE, &query)?;
+        // A callback that isn't code, which mustn't be called.
+        let session = Arg::At(DP_SESSION);
+        let enum_sessions = [session, none, Arg::I(BASE), none, none];
+        c.com(a, l, TARGET, DP_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, DD, DP1_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, DD, DP1_INITIALIZE, &[null])?;
+        c.com(a, l, TARGET, DP_RELEASE, &[])?;
+        // The IDirectPlay is still there.
+        c.com(a, l, DD, DP_CLOSE, &[])?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
+        c.api(a, l, 1, &[Arg::I(BASE), none])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay_create", None, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(
+        results(&cpu, data, 12),
+        [
+            0,
+            DPERR_UNAVAILABLE,
+            DPERR_INVALIDPARAMS,
+            CLASS_E_NOAGGREGATION,
+            0,
+            DPERR_UNINITIALIZED,
+            DPERR_UNINITIALIZED,
+            DPERR_ALREADYINITIALIZED,
+            0,
+            0,
+            0,
+            0
+        ]
+    );
+    let this = peek(&cpu, data + DD);
+    assert!(this != 0 && this != 0x1234_5678, "{this:X}");
+    assert_ne!(peek(&cpu, data + TARGET), this);
+    assert_eq!(peek(&cpu, data + FRONT), 0);
+    assert_eq!(peek(&cpu, data + BACK), 0x1234_5678, "BACK written");
+}
+
+/// A DirectPlay object is in the save state: loaded, the program goes
+/// on with its interfaces and their counts.
+#[test]
+fn a_directplay_object_is_kept_in_a_saved_state() {
+    let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayCreate"]);
+    let (program, data) = program(&[dplayx], &directplay_data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 0, &[Arg::At(DP_GUID_NULL), Arg::At(DD), none])?;
+        let query = [Arg::At(DP_IID4A), Arg::At(FRONT)];
+        c.com(a, l, DD, DP_QUERY_INTERFACE, &query)?;
+        wait(a, l, 1)?;
+        c.com(a, l, FRONT, DP_ADD_REF, &[])?;
+        let enum_sessions = [Arg::At(DP_SESSION), none, Arg::I(BASE), none, none];
+        c.com(a, l, FRONT, DP_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, FRONT, DP_RELEASE, &[])?;
+        c.com(a, l, FRONT, DP_RELEASE, &[])?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
+        finish(a, l, 2)
+    });
+    let mut cpu = card_machine("directplay_state", None, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 2), [0, 0]);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    let after = [2, DPERR_UNINITIALIZED, 1, 0, 0];
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 7)[2..], after, "before the load");
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert_eq!(results(&cpu, data, 7)[2..], [0; 5]);
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 7)[2..], after, "after the load");
+}
+
+/// The lobby, made both ways: no lobby launched the program, so it has
+/// no connection settings, and no application is registered. It builds
+/// an address, the size first, enumerates it back chunk by chunk, and
+/// lists the address types of the serial and TCP/IP providers.
+#[test]
+fn the_lobby_builds_addresses_and_is_not_lobbied() {
+    let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayLobbyCreateA"]);
+    let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
+    let (program, data) = program(&[dplayx, ole32], &directplay_data(), |a, l| {
+        chunk_callback(a, l, 0)?;
+        counting_callback(a, l, 1, 3, DP_TYPES)?;
+        counting_callback(a, l, 2, 3, DP_APPS)?;
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 0, &[none, Arg::At(DP_LOBBY), none, none, none])?;
+        c.api(a, l, 0, &[none, Arg::At(DP_NONE), Arg::I(1), none, none])?;
+        c.api(a, l, 1, &[none])?;
+        let create = [
+            Arg::At(DPL_CLSID),
+            none,
+            Arg::I(1),
+            Arg::At(DPL_IID3A),
+            Arg::At(DP_LOBBY3A),
+        ];
+        c.api(a, l, 2, &create)?;
+        let settings = [none, none, Arg::At(DP_SIZE)];
+        c.com(a, l, DP_LOBBY, DPL_GET_CONNECTION_SETTINGS, &settings)?;
+        c.com(a, l, DP_LOBBY3A, DPL_GET_CONNECTION_SETTINGS, &settings)?;
+        let address = |buffer| {
+            [
+                Arg::At(DP_TCPIP),
+                Arg::At(DP_INET),
+                Arg::At(DP_HOST),
+                Arg::I(9),
+                buffer,
+                Arg::At(DP_ADDRESS_SIZE),
+            ]
+        };
+        c.com(a, l, DP_LOBBY3A, DPL_CREATE_ADDRESS, &address(none))?;
+        let buffer = Arg::At(DP_ADDRESS);
+        c.com(a, l, DP_LOBBY3A, DPL_CREATE_ADDRESS, &address(buffer))?;
+        let chunks = [Arg::Val(CALLBACKS), buffer, Arg::Val(DP_ADDRESS_SIZE), none];
+        c.com(a, l, DP_LOBBY3A, DPL_ENUM_ADDRESS, &chunks)?;
+        let types = |provider| [Arg::Val(CALLBACKS + 4), Arg::At(provider), none, none];
+        c.com(a, l, DP_LOBBY3A, DPL_ENUM_ADDRESS_TYPES, &types(DP_SERIAL))?;
+        c.com(a, l, DP_LOBBY3A, DPL_ENUM_ADDRESS_TYPES, &types(DP_TCPIP))?;
+        let apps = [Arg::Val(CALLBACKS + 8), none, none];
+        c.com(a, l, DP_LOBBY, DPL_ENUM_LOCAL_APPLICATIONS, &apps)?;
+        c.com(a, l, DP_LOBBY3A, DP_RELEASE, &[])?;
+        c.com(a, l, DP_LOBBY, DP_RELEASE, &[])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay_lobby", None, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(
+        results(&cpu, data, 14),
+        [
+            0,
+            CLASS_E_NOAGGREGATION,
+            0,
+            0,
+            DPERR_NOTLOBBIED,
+            DPERR_NOTLOBBIED,
+            DPERR_BUFFERTOOSMALL,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        ]
+    );
+    let word = |offset| data_word(&cpu, data, offset);
+    assert_eq!(word(DP_NONE), 0);
+    // DPAID_TotalSize, 4 bytes: 89; DPAID_ServiceProvider, 16 bytes:
+    // TCP/IP's GUID; DPAID_INet, 9 bytes: the host.
+    let size = 24 + 36 + 29;
+    assert_eq!(word(DP_ADDRESS_SIZE), size);
+    let address = [
+        (0, 0x1318_F560),
+        (16, 4),
+        (20, size),
+        (24, 0x07D9_16C0),
+        (40, 16),
+        (44, 0x36E9_5EE0),
+        (60, 0xC4A5_4DA0),
+        (76, 9),
+        (80, u32::from_le_bytes(*b"10.0")),
+    ];
+    for (offset, value) in address {
+        assert_eq!(word(DP_ADDRESS + offset), value, "the address at {offset}");
+    }
+    assert_eq!(word(DP_CALLED), 3, "chunks");
+    let sizes: Vec<u32> = (0..3).map(|i| word(DP_SIZES + 4 * i)).collect();
+    assert_eq!(sizes, [4, 16, 9]);
+    // DPAID_ComPort; DPAID_INet, INetW and INetPort.
+    assert_eq!(word(DP_TYPES), 4, "address types");
+    assert_eq!(word(DP_APPS), 0, "applications");
 }
 
 /// On a Voodoo3, DirectDraw made with GUID_NULL, as programs that keep
@@ -2313,6 +2827,151 @@ fn the_cursor_shows_on_a_voodoo3_desktop() {
     the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
 }
 
+const USER32_FIRST_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursor",
+        "SetCursorPos",
+    ],
+);
+const FIRST_GET_CURSOR: usize = 1;
+const FIRST_LOAD_CURSOR: usize = 2;
+const FIRST_SET_CURSOR: usize = 3;
+const FIRST_SET_CURSOR_POS: usize = 4;
+
+/// CreateWindowExA of a visible 64 x 64 popup at the screen's corner.
+fn popup_window(c: &mut Calls, a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    c.api(
+        a,
+        l,
+        CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(64),
+            Arg::I(64),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ],
+    )
+}
+
+/// Windows starts with the arrow as the cursor: a program that never
+/// calls SetCursor gets the arrow's handle from GetCursor, its first
+/// call, and the arrow shows where the mouse is.
+#[test]
+fn the_arrow_is_the_cursor_from_the_start() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, FIRST_GET_CURSOR, &[])?;
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FIRST_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, FIRST_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "GetCursor");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(
+        r[0], r[2],
+        "GetCursor gives LoadCursorA(IDC_ARROW)'s cursor"
+    );
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(100, 100), (101, 102)]);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+}
+
+/// SetCursor(NULL) as a program's first call replaces the arrow USER
+/// starts with: it returns the arrow, and the windows made after it
+/// don't bring the arrow back.
+#[test]
+fn set_cursor_null_first_hides_the_arrow() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, FIRST_SET_CURSOR, &[Arg::I(0)])?;
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FIRST_GET_CURSOR, &[])?;
+        c.api(a, l, FIRST_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, FIRST_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_null_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 5);
+    assert_eq!(r[0], r[3], "SetCursor(NULL) gives the arrow it replaced");
+    assert_ne!(r[0], 0, "SetCursor(NULL)");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(r[2], 0, "GetCursor after SetCursor(NULL)");
+    assert_eq!(r[4], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(101, 102)]);
+    assert_ne!(shown[0], [0xFF, 0xFF, 0xFF], "no arrow over the desktop");
+}
+
+const USER32_CLASS_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursorPos",
+        "PeekMessageA",
+    ],
+);
+const CLASS_GET_CURSOR: usize = 1;
+const CLASS_LOAD_CURSOR: usize = 2;
+const CLASS_SET_CURSOR_POS: usize = 3;
+const CLASS_PEEK_MESSAGE: usize = 4;
+const IDC_IBEAM: u32 = 32513;
+const WM_MOUSEMOVE: u32 = 0x200;
+const PM_REMOVE: u32 = 1;
+/// The MSG PeekMessageA fills.
+const CURSOR_MSG: u32 = 0xF00;
+
+/// As the thread takes a mouse message, Windows sends the window under
+/// the mouse WM_SETCURSOR, and DefWindowProc sets its class's cursor: an
+/// Edit control's I-beam, which replaces the arrow.
+#[test]
+fn a_mouse_message_sets_the_class_cursor() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_CLASS_CURSOR], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, CLASS_SET_CURSOR_POS, &[Arg::I(20), Arg::I(20)])?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        let mv = Arg::I(WM_MOUSEMOVE);
+        let peek = [Arg::At(CURSOR_MSG), Arg::I(0), mv, mv, Arg::I(PM_REMOVE)];
+        c.api(a, l, CLASS_PEEK_MESSAGE, &peek)?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_IBEAM)])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_class", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_eq!(r[1], 1, "SetCursorPos");
+    assert_eq!(r[2], r[6], "the arrow before the message");
+    assert_eq!(r[3], 1, "PeekMessageA finds the WM_MOUSEMOVE");
+    assert_eq!(r[4], r[5], "the I-beam after it");
+    assert_ne!(r[4], r[6]);
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
@@ -2336,11 +2995,9 @@ fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
     })
 }
 
-/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
-/// mode's pixels, as large as they show: the arrow's inside, one pixel
-/// right of the tip and two down, covers that pixel of the mode on the
-/// frame, however much larger the frame shows it.
-fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+/// `mode_cursor_program(w, h)` run to its step 1 on `board`, the mode
+/// set: a Voodoo3 shows it on the card, the others on the VGA.
+fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Cpu, u32) {
     let (program, data) = mode_cursor_program(w, h);
     let mut cpu = if board == Some(Board::Voodoo3) {
         machine(test, program)
@@ -2348,8 +3005,18 @@ fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u
         card_machine(test, board, program)
     };
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 7);
+    let r = results(&cpu, data, 4);
     assert_eq!(r[2..4], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    (cpu, data)
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
+/// mode's pixels, as large as they show: the arrow's inside, one pixel
+/// right of the tip and two down, covers that pixel of the mode on the
+/// frame, however much larger the frame shows it.
+fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (cpu, data) = small_mode_machine(test, board, (w, h));
+    let r = results(&cpu, data, 7);
     assert_ne!(r[4], 0, "LoadCursorA(IDC_ARROW)");
     assert_eq!(r[6], 1, "SetCursorPos");
     let (frame_w, frame_h) = video::frame_size(&cpu.bus);
@@ -2374,4 +3041,37 @@ fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
 #[test]
 fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
     the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the host's pointer
+/// spans the mode's pixels, whatever size the frame shows them at: the
+/// middle of the picture is the middle of the screen, its bottom-right
+/// corner the screen's, and a captured mouse moves the cursor as far as
+/// the picture moves under it.
+fn the_pointer_spans_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (cpu, _) = small_mode_machine(test, board, (w, h));
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let frame = Frame::new(frame_w, frame_h);
+    let (fw, fh) = (frame_w as i32, frame_h as i32);
+    let (w, h) = (w as i32, h as i32);
+    let to_mouse = |at| video::overlay::frame_to_mouse(&cpu.bus, &frame, at);
+    assert_eq!(to_mouse((fw / 2, fh / 2)), (w / 2, h / 2), "the middle");
+    assert_eq!(
+        to_mouse((fw - 1, fh - 1)),
+        (w - 1, h - 1),
+        "the bottom-right corner"
+    );
+    let (sx, sy) = ((frame_w / w as u32) as f64, (frame_h / h as u32) as f64);
+    let motion = video::overlay::frame_motion_to_mouse(&cpu.bus, &frame, (sx * 10.0, sy * 10.0));
+    assert_eq!(motion, (10.0, 10.0), "ten of the mode's pixels");
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_240_vesa_mode() {
+    the_pointer_spans_a_small_mode("pointer_vesa_320", None, (320, 240));
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_200_voodoo3_mode() {
+    the_pointer_spans_a_small_mode("pointer_voodoo3_320", Some(Board::Voodoo3), (320, 200));
 }

@@ -852,7 +852,9 @@ pub const TRIANGLEFAN: u32 = 6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prim {
     Point(u32),
-    Line(u32, u32),
+    /// The vertices from and to, and the one flat shading takes the
+    /// colors of.
+    Line(u32, u32, u32),
     /// The vertices in order, the one flat shading takes the colors of,
     /// and the edges wireframe draws (bit 0 the first to the second, 1
     /// the second to the third, 2 the third to the first).
@@ -871,9 +873,9 @@ pub fn assemble(kind: u32, order: &[u32]) -> Option<Vec<Prim>> {
                 .as_chunks::<2>()
                 .0
                 .iter()
-                .map(|c| Prim::Line(c[0], c[1])),
+                .map(|c| Prim::Line(c[0], c[1], c[0])),
         ),
-        LINESTRIP => out.extend(order.windows(2).map(|c| Prim::Line(c[0], c[1]))),
+        LINESTRIP => out.extend(order.windows(2).map(|c| Prim::Line(c[0], c[1], c[0]))),
         TRIANGLELIST => out.extend(
             order
                 .as_chunks::<3>()
@@ -1041,15 +1043,16 @@ pub fn draw(
                 raster.point(&screen(setup, v));
                 drawn.points += 1;
             }
-            Prim::Line(a, b) => {
+            Prim::Line(a, b, provoking) => {
                 let (Some(va), Some(vb)) = (verts.get(a as usize), verts.get(b as usize)) else {
                     continue;
                 };
-                let mut vb = *vb;
-                if flat {
-                    vb.take_flat_colors(va);
+                let (mut va, mut vb) = (*va, *vb);
+                if flat && let Some(p) = verts.get(provoking as usize) {
+                    va.take_flat_colors(p);
+                    vb.take_flat_colors(p);
                 }
-                if line(setup, va, &vb, &planes, &tl_planes, raster) {
+                if line(setup, &va, &vb, &planes, &tl_planes, raster) {
                     drawn.lines += 1;
                 }
             }
@@ -1434,7 +1437,7 @@ mod tests {
             &assemble(TRIANGLEFAN, &[0, 1, 2]).unwrap(),
             &mut r,
         );
-        draw(&setup, &verts, &[Prim::Line(0, 2)], &mut r);
+        draw(&setup, &verts, &[Prim::Line(0, 2, 0)], &mut r);
         let colors = |v: &[ScreenVertex]| -> Vec<(u32, u32)> {
             v.iter().map(|v| (v.diffuse, v.specular)).collect()
         };

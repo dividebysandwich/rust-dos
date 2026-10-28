@@ -162,7 +162,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   or in a busy-wait loop the emulator skips), a program that keeps it
   from idling (under 5% idle, no frames, such as a 3D benchmark
   building its next scene) runs at max instead of slowing down as a
-  spinning menu would.
+  spinning menu would. The built-in Windows (`win32`) idles so too,
+  and `auto` knows it from the start: a Win32 program that computes
+  without drawing, such as a game unpacking its level, runs at max.
   What `auto` has seen goes into save states, and is forgotten when the
   machine goes back to real mode (a reboot, a DOS program's end). It
   applies at once.
@@ -521,6 +523,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   version the last check found, and the notification follows once the
   answer is in. `true` (the default) or `false`. Deterministic mode and
   the debug server never check.
+* `almanac_auto` asks almanac.rust-dos.com for the settings players
+  found best for a program started from the prompt, by its file's name,
+  size and checksums, and starts it with them; your own settings come
+  back once it has ended. A moderator's blessed settings win over the
+  ones most reports chose. The program waits ten seconds at most for the
+  answer, and Esc ends the wait. Only the machine's settings (CPU,
+  memory, sound cards and the like) come from it, never drives,
+  commands or paths. A game launched from its profile and
+  deterministic mode never ask. `true` or `false` (the default).
 * `mouse_autocapture` captures the mouse as it moves over the focused
   window while a program uses the mouse driver (INT 33h), and lets it go
   as the program's cursor reaches the edge of the screen and the mouse

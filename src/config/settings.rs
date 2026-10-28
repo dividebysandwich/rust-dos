@@ -114,6 +114,9 @@ pub struct Settings {
     pub pause_in_settings: bool,
     /// Ask rust-dos.com at startup whether there is a newer version.
     pub version_check: bool,
+    /// Ask almanac.rust-dos.com for a program's settings as it starts from
+    /// the prompt, and play it with them (almanac.rs).
+    pub almanac_auto: bool,
     /// Rewind with held Alt+F11, and the memory in MB its states may take.
     pub rewind: bool,
     pub rewind_memory: usize,
@@ -194,6 +197,7 @@ impl Default for Settings {
             mouse_menu_hold: true,
             pause_in_settings: true,
             version_check: true,
+            almanac_auto: false,
             rewind: false,
             rewind_memory: 256,
             idle_skip: true,
@@ -336,6 +340,7 @@ impl Settings {
             mouse_menu_hold: config.mouse_menu_hold.unwrap_or(default.mouse_menu_hold),
             pause_in_settings: config.pause_in_settings.unwrap_or(default.pause_in_settings),
             version_check: config.version_check.unwrap_or(default.version_check),
+            almanac_auto: config.almanac_auto.unwrap_or(default.almanac_auto),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             idle_skip: config.idle_skip.unwrap_or(default.idle_skip),
@@ -458,6 +463,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "mouse_menu_hold", yes_no(settings.mouse_menu_hold)),
         (Emulator, "pause_in_settings", yes_no(settings.pause_in_settings)),
         (Emulator, "version_check", yes_no(settings.version_check)),
+        (Emulator, "almanac_auto", yes_no(settings.almanac_auto)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "idle_skip", yes_no(settings.idle_skip)),

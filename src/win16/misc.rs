@@ -372,6 +372,16 @@ pub static DISPLAY: Def = Def {
     library: true,
 };
 
+/// SETUPX: Windows 95's setup engine, which DirectX's setup DLL and
+/// other installers' 16-bit DLLs import. None of its functions is there
+/// yet: a call of one stops the program and names it.
+pub static SETUPX: Def = Def {
+    name: "SETUPX",
+    file: "SETUPX.DLL",
+    apis: &[],
+    library: true,
+};
+
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
@@ -441,6 +451,17 @@ const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 
+/// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
+/// SMPTE time being hour, minute, second, frame, fps and a pad byte
+/// (Win32's has two, and a DWORD wType).
+const MMTIME16_SIZE: u32 = 8;
+/// MMTIME's kinds whose union is SMPTE time; the others are a DWORD.
+const TIME_SMPTE: u32 = 8;
+/// What a short structure gets from the wave functions, and from
+/// timeGetDevCaps.
+const MMSYSERR_INVALPARAM: u32 = 11;
+const TIMERR_NOCANDO: u32 = 97;
+
 /// A 32-bit function returned `value`: what 16-bit code gets.
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
@@ -489,11 +510,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
         }
         P_MMTIME => {
             if value == 0 {
-                // MMTIME16: wType, then the union as it is.
-                let kind = r32(cpu, d(1));
-                super::write_16(cpu, d(2), kind as u16);
-                let rest = super::peek(cpu, d(1) + 4, 8).unwrap_or(vec![0; 8]);
-                super::poke(cpu, d(2) + 2, &rest);
+                mmtime16(cpu, d(1), d(2));
             }
             Some(value)
         }
@@ -837,8 +854,9 @@ fn unprepared(cpu: &mut Cpu, at: u32) {
     }
 }
 
-/// The 16:16 address of the wave header at the linear `at`, for the
-/// MM_WOM_DONE message's lParam.
+/// The 16:16 address of the wave header at the linear `at`, which WINMM
+/// puts in MM_WOM_DONE for a 16-bit program; `at` for a header that
+/// isn't a 16-bit program's.
 pub fn wave_header16(cpu: &Cpu, at: u32) -> u32 {
     cpu.bus
         .win32
@@ -877,6 +895,9 @@ fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 || args[2] < MMTIME16_SIZE {
+        return Some(MMSYSERR_INVALPARAM);
+    }
     let time = thunk::scratch32(cpu, 12);
     let kind = r16(cpu, args[1]);
     w32(cpu, time, kind);
@@ -890,7 +911,12 @@ fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// timeGetSystemTime: with a short MMTIME or none, nothing is written
+/// and the answer is still 0, as Windows has it.
 fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] == 0 || args[1] < MMTIME16_SIZE {
+        return Some(0);
+    }
     let time = thunk::scratch32(cpu, 12);
     go_at(
         cpu,
@@ -902,8 +928,23 @@ fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// The MMTIME at `time` as Windows 3.1's at `time16`: wType, and the
+/// union as far as its kind fills it (6 bytes of SMPTE time, else a
+/// DWORD), as MMSYSTEM leaves the rest of the caller's MMTIME as it was.
+/// The caller's size was checked to hold it.
+fn mmtime16(cpu: &mut Cpu, time: u32, time16: u32) {
+    let kind = r32(cpu, time);
+    let len = if kind == TIME_SMPTE { 6 } else { 4 };
+    let mut bytes = (kind as u16).to_le_bytes().to_vec();
+    bytes.extend(super::peek(cpu, time + 4, len).unwrap_or(vec![0; len]));
+    super::poke(cpu, time16, &bytes);
+}
+
 fn time_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    // TIMECAPS16: the shortest and the longest period.
+    // TIMECAPS16: the shortest and the longest period, 4 bytes.
+    if args[0] == 0 || args[1] < 4 {
+        return Some(TIMERR_NOCANDO);
+    }
     super::write_16(cpu, args[0], 1);
     super::write_16(cpu, args[0] + 2, 0xFFFF);
     Some(0)

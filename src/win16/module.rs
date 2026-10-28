@@ -153,9 +153,10 @@ pub fn load_file(
             file_name
         ));
     }
-    if parsed.segments.iter().any(|s| s.flags & ne::SEG_32BIT != 0) {
-        return Err(format!("{} has 32-bit segments.", file_name));
-    }
+    // A segment flagged 32-bit (`ne::SEG_32BIT`) loads as a 16-bit one,
+    // as Windows 3.1 and 95 load it. The programs that have one, such as
+    // Metal Marines, set the D bit of its selector themselves with DPMI
+    // functions 000Bh and 000Ch.
     let name = parsed.name().to_ascii_uppercase();
 
     // The module database.
@@ -470,6 +471,18 @@ fn relocate(
                 b.copy_from_slice(&v.to_le_bytes());
             }
         };
+        // The 32-bit offsets of a segment flagged 32-bit: the offset
+        // widened, which the program's 32-bit code reads whole.
+        let dword = |bytes: &[u8], at: usize| {
+            bytes
+                .get(at..at + 4)
+                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        let put32 = |bytes: &mut [u8], at: usize, v: u32| {
+            if let Some(b) = bytes.get_mut(at..at + 4) {
+                b.copy_from_slice(&v.to_le_bytes());
+            }
+        };
         let kind = r.source & 0x7F;
         let mut at = r.offset as usize;
         if r.additive {
@@ -488,10 +501,21 @@ fn relocate(
                     put(bytes, at, v);
                     put(bytes, at + 2, sel);
                 }
-                ne::ADDR_SELECTOR if word(bytes, at) == 0 => {
-                    put(bytes, at, sel);
+                ne::ADDR_SELECTOR => {
+                    if word(bytes, at) == 0 {
+                        put(bytes, at, sel);
+                    }
                 }
-                _ => {}
+                ne::ADDR_OFFSET32 => {
+                    let v = dword(bytes, at).wrapping_add(off as u32);
+                    put32(bytes, at, v);
+                }
+                ne::ADDR_FARPTR48 => {
+                    let v = dword(bytes, at).wrapping_add(off as u32);
+                    put32(bytes, at, v);
+                    put(bytes, at + 4, sel);
+                }
+                _ => unknown_fixup(cpu, kind),
             }
             continue;
         }
@@ -510,7 +534,15 @@ fn relocate(
                     put(bytes, at + 2, sel);
                 }
                 ne::ADDR_SELECTOR => put(bytes, at, sel),
-                _ => break,
+                ne::ADDR_OFFSET32 => put32(bytes, at, off as u32),
+                ne::ADDR_FARPTR48 => {
+                    put32(bytes, at, off as u32);
+                    put(bytes, at + 4, sel);
+                }
+                _ => {
+                    unknown_fixup(cpu, kind);
+                    break;
+                }
             }
             if next as usize == at || next as usize >= bytes.len() {
                 break;
@@ -518,6 +550,13 @@ fn relocate(
             at = next as usize;
         }
     }
+}
+
+/// A relocation of a kind the loader doesn't know, left as the file has
+/// it.
+fn unknown_fixup(cpu: &mut Cpu, kind: u8) {
+    cpu.bus
+        .log_string(&format!("[W16] A relocation of kind {kind} isn't applied"));
 }
 
 /// An import of `what` from `module`, which it doesn't have: where a
@@ -623,6 +662,13 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
 /// Take the module at `index` away: its blocks, and its entry.
 fn unload(cpu: &mut Cpu, index: usize) {
     let m = cpu.bus.win32.win16.modules.remove(index);
+    let code: Vec<u16> = m
+        .segments
+        .iter()
+        .filter(|s| s.flags & ne::SEG_DATA == 0)
+        .map(|s| s.selector | 3)
+        .collect();
+    super::hook::module_unloaded(cpu, &code);
     for s in &m.segments {
         global::free(cpu, s.handle);
     }

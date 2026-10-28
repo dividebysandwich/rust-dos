@@ -539,12 +539,23 @@ pub fn fill(cpu: &mut Cpu, s: &Surface, rects: &[crate::win32::gdi32::Rect], val
 }
 
 /// Flip: the card's back buffer shows, at the next vertical retrace
-/// unless `vsync` is false. With swaps still waiting for theirs, it
-/// doesn't if `wait` is false: whether it did.
-pub fn swap(cpu: &mut Cpu, vsync: bool, wait: bool) -> bool {
-    if !wait && api::buffer_num_pending(cpu) > 0 {
-        return false;
-    }
+/// unless `vsync` is false.
+pub fn swap(cpu: &mut Cpu, vsync: bool) {
     api::buffer_swap(cpu, vsync as u32);
-    true
+}
+
+/// When the card's swaps still waiting for their retraces are all done,
+/// by the clock's nanoseconds: None while none waits
+/// (grBufferNumPending gives 0).
+pub fn swaps_pending_until(cpu: &Cpu) -> Option<u64> {
+    let due = cpu
+        .bus
+        .voodoo
+        .as_ref()?
+        .swaps_done_at(cpu.bus.clock.now_ticks())?;
+    Some(crate::timer::mul_div_ceil(
+        due,
+        1_000_000_000,
+        crate::timer::PIT_HZ,
+    ))
 }

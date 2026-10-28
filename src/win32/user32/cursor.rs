@@ -110,6 +110,16 @@ pub fn shown(win32: &crate::win32::Win32) -> Option<(&CursorImage, (i32, i32))> 
     .then_some((&input.cursor_image, input.cursor))
 }
 
+/// The screen the host's pointer spans while the built-in Windows has
+/// the mouse, a Win32 program running with the desktop or a DirectDraw
+/// mode on the screen: Windows' screen (`screen_size`), which the
+/// mouse's range covers and in whose pixels programs get the cursor.
+/// None otherwise, for the DOS driver's virtual screen.
+pub fn pointer_screen(win32: &crate::win32::Win32) -> Option<(i32, i32)> {
+    let shows = win32.user.desktop || win32.ddraw.display.mode.0 != 0;
+    (win32.active() && shows).then(|| screen_size(win32))
+}
+
 /// The size of the screen the cursor moves over, in its pixels:
 /// DirectDraw's mode while it has the display, else the desktop's, as
 /// ChangeDisplaySettings may have set it (`screen::desktop`).

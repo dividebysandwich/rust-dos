@@ -145,21 +145,45 @@ pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
 
 /// A descriptor's present bit.
 const PRESENT: u64 = 1 << 47;
+/// A descriptor's D/B bit: 32-bit code, or a big stack.
+const BIG: u64 = 1 << 54;
 
 /// A 16-bit segment's descriptor: `base`, `limit`, an access byte.
 pub fn segment(base: u32, limit: u32, access: u8) -> u64 {
     descriptor(base, limit, access, 0)
 }
 
+/// A segment's descriptor, 32-bit (D/B set) when `big` is.
+pub fn segment_sized(base: u32, limit: u32, access: u8, big: bool) -> u64 {
+    let desc = segment(base, limit, access);
+    if big { desc | BIG } else { desc }
+}
+
+/// Whether the descriptor `desc` has the D/B bit.
+pub fn is_big(desc: u64) -> bool {
+    desc & BIG != 0
+}
+
 /// Point the `count` selectors from `selector` at a block of `size`
-/// bytes at `base`, as Windows tiles a huge block.
-pub fn set_block(cpu: &mut Cpu, system: u32, selector: u16, base: u32, size: u32, access: u8) {
+/// bytes at `base`, as Windows tiles a huge block; 32-bit ones when
+/// `big` is, as a block whose program set the D bit stays when Windows
+/// moves or resizes it (it sets the base and limit with DPMI, which keep
+/// the rest of the descriptor).
+pub fn set_block(
+    cpu: &mut Cpu,
+    system: u32,
+    selector: u16,
+    base: u32,
+    size: u32,
+    access: u8,
+    big: bool,
+) {
     let count = tiles(size);
     for i in 0..count {
         let offset = i as u32 * 0x1_0000;
         let limit = size.max(1) - 1 - offset;
         let sel = selector + i * AHINCR;
-        write(cpu, system, sel, segment(base + offset, limit, access));
+        write(cpu, system, sel, segment_sized(base + offset, limit, access, big));
     }
 }
 

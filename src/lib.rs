@@ -1,3 +1,4 @@
+pub mod almanac;
 pub mod achievements;
 pub mod apm;
 pub mod archive;

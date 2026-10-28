@@ -663,7 +663,11 @@ impl Pacer {
     /// clock sets how slow a protected-mode program may go
     /// (`CpuModel::auto_least`) and which the settings window can change,
     /// and whether its system was seen idling (`Cpu::os_idles`, which a
-    /// state loaded brings); the machine keeps what `Auto` saw.
+    /// state loaded brings); the machine keeps what `Auto` saw. The
+    /// built-in Windows is such a system from the start: its idle loop
+    /// halts the processor whenever none of its threads can run, so a
+    /// Win32 program that keeps it from halting is at work, even one that
+    /// never waits long enough for `Auto` to see the halt.
     pub fn end_cpu_frame(
         &mut self,
         cpu: &mut crate::cpu::Cpu,
@@ -672,7 +676,7 @@ impl Pacer {
         overhead: Duration,
     ) -> Option<u32> {
         self.auto.set_protected_least(cpu.model.auto_least());
-        self.auto.set_idles(cpu.os_idles);
+        self.auto.set_idles(cpu.os_idles || cpu.bus.win32.active());
         // What the idle skip's watching cost (`Observe::take_watched`) is
         // work of the frame's own, as the rest of `overhead` is: counted
         // per instruction, the proofs that come with each timer event would
