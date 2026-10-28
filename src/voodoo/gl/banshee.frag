@@ -1,10 +1,9 @@
 // A Banshee's or Voodoo3's picture as its video processor shows it, at
 // u_scale times its size and each pixel u_across times across: the
 // desktop, the overlay window over it and the hardware cursor on top, as
-// src/voodoo/banshee/display.rs draws it in software. A surface is the
-// card's memory (bytes in rows of 4096, from the surface's first byte
-// on) or, where the OpenGL renderer draws it, the texture of one of its
-// colour buffers.
+// src/voodoo/banshee/display.rs draws it in software. A surface is in
+// the card's memory (all of it, bytes in rows of 4096) or, where the
+// OpenGL renderer draws it, the texture of one of its colour buffers.
 
 // OpenGL ES has no default precision for integer samplers.
 #ifdef GL_ES
@@ -15,9 +14,10 @@ uniform int u_scale;
 // 2 when the monitor shows each of the desktop's pixels twice across
 // (a narrow mode at half the pixel clock), else 1.
 uniform int u_across;
-uniform usampler2D u_desk_mem;
+uniform usampler2D u_mem;
+// The card's memory's size less one: addresses wrap there.
+uniform int u_mem_mask;
 uniform sampler2D u_desk_buf;
-uniform usampler2D u_ovl_mem;
 uniform sampler2D u_ovl_buf;
 uniform usampler2D u_cursor;
 uniform sampler2D u_clut;
@@ -25,7 +25,7 @@ uniform sampler2D u_clut;
 // The desktop: its format, CLUT half (0 or 256), whether it bypasses the
 // CLUT and where it comes from (0 memory, 1 a buffer); its stride in
 // bytes (a row's, or a row of tiles'), whether it is tiled, whether
-// half mode shows each line twice, and the bytes of memory it has.
+// half mode shows each line twice, and its first byte in the memory.
 uniform ivec4 u_desk;
 uniform ivec4 u_desk_layout;
 // The overlay likewise, its source -1 when it is off; its rectangle on
@@ -44,11 +44,10 @@ uniform vec3 u_cur_c1;
 
 out vec4 o_color;
 
-uint byte_at(usampler2D mem, uint a, uint len) {
-    if (a >= len) {
-        return 0u;
-    }
-    return texelFetch(mem, ivec2(int(a & 4095u), int(a >> 12)), 0).r;
+// The byte at address `a` of the card's memory.
+uint byte_at(uint a) {
+    a &= uint(u_mem_mask);
+    return texelFetch(u_mem, ivec2(int(a & 4095u), int(a >> 12)), 0).r;
 }
 
 // Byte x of row y of a surface (display.rs's `surface_addr`).
@@ -105,22 +104,22 @@ vec3 desktop(ivec2 p, vec2 f) {
     }
     uint stride = uint(u_desk_layout.x);
     bool tiled = u_desk_layout.y != 0;
-    uint len = uint(u_desk_layout.w);
+    uint start = uint(u_desk_layout.w);
     uint line = uint(half_mode ? p.y / 2 : p.y);
     uint x = uint(p.x);
     if (format == 0) {
-        int i = int(byte_at(u_desk_mem, surface_addr(x, line, stride, tiled), len));
+        int i = int(byte_at(start + surface_addr(x, line, stride, tiled)));
         return bypass ? vec3(float(i) / 255.0) : clut(u_desk.y + i);
     }
     if (format == 1) {
-        uint a = surface_addr(2u * x, line, stride, tiled);
-        uint word = byte_at(u_desk_mem, a, len) | byte_at(u_desk_mem, a + 1u, len) << 8;
+        uint a = start + surface_addr(2u * x, line, stride, tiled);
+        uint word = byte_at(a) | byte_at(a + 1u) << 8;
         return through(rgb565(word), u_desk.y, bypass);
     }
     uint a = (format == 2 ? 3u : 4u) * x;
-    uint r = byte_at(u_desk_mem, surface_addr(a + 2u, line, stride, tiled), len);
-    uint g = byte_at(u_desk_mem, surface_addr(a + 1u, line, stride, tiled), len);
-    uint b = byte_at(u_desk_mem, surface_addr(a, line, stride, tiled), len);
+    uint r = byte_at(start + surface_addr(a + 2u, line, stride, tiled));
+    uint g = byte_at(start + surface_addr(a + 1u, line, stride, tiled));
+    uint b = byte_at(start + surface_addr(a, line, stride, tiled));
     return vec3(r, g, b) / 255.0;
 }
 
@@ -142,16 +141,16 @@ vec3 overlay(ivec2 p, vec2 f) {
     }
     uint stride = uint(u_ovl_layout.x);
     bool tiled = u_ovl_layout.y != 0;
-    uint len = uint(u_ovl_layout.w);
+    uint start = uint(u_ovl_layout.w);
     uint sx = (uint(p.x - u_ovl_rect.x) * dudx) >> 20;
     uint sy = (v0 + uint(p.y - u_ovl_rect.y) * dvdy) >> 20;
     if (format == 5 || format == 6) {
         // Two pixels in four bytes: YUYV or UYVY.
-        uint pair = surface_addr((sx & ~1u) * 2u, sy, stride, tiled);
-        int b0 = int(byte_at(u_ovl_mem, pair, len));
-        int b1 = int(byte_at(u_ovl_mem, pair + 1u, len));
-        int b2 = int(byte_at(u_ovl_mem, pair + 2u, len));
-        int b3 = int(byte_at(u_ovl_mem, pair + 3u, len));
+        uint pair = start + surface_addr((sx & ~1u) * 2u, sy, stride, tiled);
+        int b0 = int(byte_at(pair));
+        int b1 = int(byte_at(pair + 1u));
+        int b2 = int(byte_at(pair + 2u));
+        int b3 = int(byte_at(pair + 3u));
         bool odd = (sx & 1u) != 0u;
         if (format == 5) {
             return yuv(odd ? b2 : b0, b1, b3);
@@ -159,10 +158,10 @@ vec3 overlay(ivec2 p, vec2 f) {
         return yuv(odd ? b3 : b1, b0, b2);
     }
     if (format == 0) {
-        return clut(u_ovl.y + int(byte_at(u_ovl_mem, surface_addr(sx, sy, stride, tiled), len)));
+        return clut(u_ovl.y + int(byte_at(start + surface_addr(sx, sy, stride, tiled))));
     }
-    uint a = surface_addr(sx * 2u, sy, stride, tiled);
-    uint word = byte_at(u_ovl_mem, a, len) | byte_at(u_ovl_mem, a + 1u, len) << 8;
+    uint a = start + surface_addr(sx * 2u, sy, stride, tiled);
+    uint word = byte_at(a) | byte_at(a + 1u) << 8;
     return through(rgb565(word), u_ovl.y, bypass);
 }
 

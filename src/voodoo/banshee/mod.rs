@@ -762,6 +762,8 @@ impl Voodoo {
             if self.writes_queue() {
                 self.catch_up();
             }
+            let at = addr & self.fbi.mask;
+            self.gpu_sync(at, at + 4);
             return blit2d::read(&self.fbi.ram, addr, 4, self.fbi.mask);
         }
         match offset & 0x1F0_0000 {
@@ -837,6 +839,7 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
         let start = (addr & mask) as usize;
         if start + data.len() <= self.fbi.ram.bytes() {
@@ -859,6 +862,7 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
         let start = addr & mask;
         if start as usize + data.len() <= self.fbi.ram.bytes() {
@@ -879,6 +883,8 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        // The engine may read and draw anywhere in the memory.
+        self.gpu_sync_all();
         let Some(b) = &mut self.banshee else { return };
         b.engine.write(&self.fbi.ram, reg, data);
         if std::mem::take(&mut b.engine.drawn) {
@@ -917,6 +923,7 @@ impl Voodoo {
         if self.writes_queue() && !in_ring {
             self.catch_up();
         }
+        self.gpu_sync(addr & self.fbi.mask, (addr & self.fbi.mask) + 4);
         let ram = &self.fbi.ram;
         let fbmask = self.fbi.mask;
         if mask == 0xFFFF_FFFF {
@@ -929,6 +936,12 @@ impl Voodoo {
             }
         }
         if in_ring {
+            // The renderer gets the page again: a read back of a GPU 2D
+            // operation there would otherwise undo the packet.
+            if self.mirror.is_some() {
+                let at = addr & fbmask;
+                self.gpu.get_mut().pages.mark(at, at + 4);
+            }
             self.banshee_fifo_written(addr, now, effect);
         } else {
             self.display_dirty = true;
