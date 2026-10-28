@@ -2315,7 +2315,12 @@ fn the_cursor_shows_on_a_voodoo3_desktop() {
 
 const USER32_FIRST_CURSOR: (&str, &[&str]) = (
     "USER32.DLL",
-    &["CreateWindowExA", "GetCursor", "LoadCursorA", "SetCursorPos"],
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursorPos",
+    ],
 );
 
 /// Windows starts with the arrow as the cursor: a program that never
