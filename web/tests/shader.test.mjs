@@ -37,6 +37,7 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
         shader_overlay_visible: () => visible,
         shader_revision: () => 7,
         shader_overlay_revision: () => 9,
+        shader_overlay_top: () => 1, shader_overlay_bottom: () => 3,
       },
       screenGl: {
         xbrz: () => xbrz,
@@ -353,6 +354,7 @@ test('showPicture uploads the current frame when switching shaders', () => {
     machine: {
       screen_width: () => 4, screen_height: () => 4,
       shader_width: () => 2, shader_height: () => 2,
+      refresh_picture() {},
       shader: () => 'xbrz', smooth: () => false, mono: () => false,
       shader_curvature: () => [0, 0], shader_glow: () => 0, aspect: () => '4:3',
     },
@@ -362,4 +364,63 @@ test('showPicture uploads the current frame when switching shaders', () => {
   assert.equal(selected[0], 'xbrz');
   assert.equal(renders, 0);
   assert.equal(draws, 1);
+});
+
+
+test('immediate xBRZ switch refreshes the picture before reading its dimensions', () => {
+  let prepared = false;
+  const events = [];
+  const show = load('showPicture', {
+    screenGl: { select() {}, xbrz: () => true },
+    machine: {
+      refresh_picture() { prepared = true; events.push('prepare'); },
+      screen_width: () => 4, screen_height: () => 4,
+      shader_width: () => prepared ? 3 : 2, shader_height: () => 2,
+      shader: () => 'xbrz', smooth: () => false, mono: () => false,
+      shader_curvature: () => [0, 0], shader_glow: () => 0, aspect: () => '4:3',
+    },
+    shownLook: null, shownAspect: '4:3', layout() {},
+    draw() { events.push('draw'); assert.equal(prepared, true); },
+  });
+  show();
+  assert.deepEqual(events, ['prepare', 'draw']);
+});
+
+
+test('overlay uploads use row bands and fall back fully after skipped revisions or restoration', () => {
+  const { renderer, calls, events } = rendererFixture();
+  const pixels = new Uint8Array(16);
+  const overlay = { pixels: new Uint8Array(96), width: 4, height: 6,
+    revision: 10, rows: [1, 2] };
+  const uploads = () => calls.filter(call => call[0] === 'texSubImage2D' && call[5] === 4);
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(pixels, 2, 2, overlay, 1);
+  assert.equal(uploads()[0][4], 0);
+  assert.equal(uploads()[0][6], 6);
+  calls.length = 0;
+  overlay.pixels[16] = 99;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 11 }, 1);
+  assert.equal(uploads().length, 1);
+  assert.equal(uploads()[0][4], 1);
+  assert.equal(uploads()[0][6], 1);
+  assert.equal(uploads()[0][9].length, 16);
+  assert.equal(uploads()[0][9][0], 99);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 13, rows: [4, 5] }, 1);
+  assert.equal(uploads()[0][4], 0);
+  assert.equal(uploads()[0][6], 6);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 13, rows: [4, 5] }, 1);
+  assert.equal(uploads().length, 0);
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 0xffffffff }, 1);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 0, rows: [3, 4] }, 1);
+  assert.equal(uploads()[0][4], 3);
+  assert.equal(uploads()[0][6], 1);
+  events.get('webglcontextrestored')();
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 0, rows: [3, 4] }, 1);
+  assert.equal(uploads()[0][4], 0);
+  assert.equal(uploads()[0][6], 6);
 });

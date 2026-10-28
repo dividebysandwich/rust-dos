@@ -354,30 +354,6 @@ impl Frame {
         self.overlay.as_deref()
     }
 
-    /// Rows whose overlay coverage differs from `old` within the candidate
-    /// band, including pixels whose colour is the same as the base. `old`
-    /// must have one byte per pixel in this frame.
-    pub fn changed_overlay_rows(
-        &self,
-        old: &[u8],
-        rows: std::ops::Range<usize>,
-    ) -> Option<std::ops::Range<usize>> {
-        let width = self.width as usize;
-        let new = self.overlay.as_deref();
-        let mut changed = None;
-        for y in rows {
-            let start = y * width;
-            if (0..width).any(|x| {
-                new.is_some_and(|mask| mask[start + x] != 0) != (old[start + x] != 0)
-            }) {
-                changed = Some(changed.map_or(y..y + 1, |range: std::ops::Range<usize>| {
-                    range.start..y + 1
-                }));
-            }
-        }
-        changed
-    }
-
     /// Copy a band from a complete picture. A geometry change copies the
     /// whole picture instead. The returned band is what was copied.
     pub fn copy_rows_from(

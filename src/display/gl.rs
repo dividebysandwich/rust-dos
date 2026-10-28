@@ -62,10 +62,13 @@ pub struct GlScreen {
     /// Composed pixels that differ from the native xBRZ base.
     xbrz_overlay: Option<glow::Texture>,
     xbrz_overlay_size: Option<(u32, u32)>,
+    xbrz_overlay_uploaded_revision: Option<u32>,
     xbrz_overlay_visible: bool,
     xbrz_frame: shader::XbrzFrame,
     xbrz_uploaded_revision: Option<u32>,
     xbrz_gpu: Option<Result<xbrz::XbrzGpu, String>>,
+    #[cfg(test)]
+    fail_overlay_upload: bool,
     /// The looks compiled so far, or why one doesn't compile.
     programs: HashMap<Shader, Result<Program, String>>,
     /// The look drawn with: the one chosen, or none if it doesn't compile.
@@ -219,10 +222,13 @@ impl GlScreen {
             rgba: Vec::new(),
             xbrz_overlay: None,
             xbrz_overlay_size: None,
+            xbrz_overlay_uploaded_revision: None,
             xbrz_overlay_visible: false,
             xbrz_frame: shader::XbrzFrame::default(),
             xbrz_uploaded_revision: None,
             xbrz_gpu: None,
+            #[cfg(test)]
+            fail_overlay_upload: false,
             programs: HashMap::from([(Shader::None, Ok(plain))]),
             active: Shader::None,
             mask: 1.0,
@@ -276,7 +282,11 @@ impl GlScreen {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("The {} shader doesn't work here: {}", shader.describe(), e)),
         };
-        self.active = if result.is_ok() { shader } else { Shader::None };
+        let active = if result.is_ok() { shader } else { Shader::None };
+        if active != self.active {
+            self.xbrz_frame.invalidate_overlay();
+        }
+        self.active = active;
         self.filter = filter;
         let mipmaps = shader::needs_mipmaps(self.active);
         // SAFETY: see `GlScreen`.
@@ -328,11 +338,12 @@ impl GlScreen {
         base: Option<&Frame>,
         rows: std::ops::Range<usize>,
         mono: Monochrome,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut prepared = std::mem::take(&mut self.xbrz_frame);
-        let (visible, _, overlay_changed) = prepared.prepare(screen, base, mono, rows.clone());
+        let (visible, changed, _) = prepared.prepare(screen, base, mono, rows.clone());
         let scale = if base.unwrap_or(screen).doubled { 2 } else { 1 };
-        if self.xbrz_uploaded_revision != Some(prepared.source_revision()) {
+        let source_changed = self.xbrz_uploaded_revision != Some(prepared.source_revision());
+        if source_changed {
             let rows = if self.xbrz_uploaded_revision.is_some() {
                 prepared.source_rows()
             } else {
@@ -343,7 +354,16 @@ impl GlScreen {
         }
         self.texture_scale = scale as u32;
         self.xbrz_frame = prepared;
-        if visible && (overlay_changed || self.xbrz_overlay_size != Some((screen.width, screen.height))) {
+        // Exercise fallback after the source texture has been replaced.
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_overlay_upload) {
+            return Err("injected overlay allocation failure".into());
+        }
+        let revision = self.xbrz_frame.overlay_revision();
+        let overlay_changed = visible
+            && (self.xbrz_overlay_uploaded_revision != Some(revision)
+                || self.xbrz_overlay_size != Some((screen.width, screen.height)));
+        if overlay_changed {
             let texture = match self.xbrz_overlay {
                 Some(texture) => texture,
                 None => {
@@ -369,10 +389,29 @@ impl GlScreen {
                     glow::NEAREST as i32,
                 );
                 if self.xbrz_overlay_size == Some((screen.width, screen.height)) {
+                    // Missed revisions may change rows outside the latest
+                    // band, so recover with a complete upload.
+                    let rows = if self
+                        .xbrz_overlay_uploaded_revision
+                        .is_some_and(|old| old.wrapping_add(1) == revision)
+                    {
+                        self.xbrz_frame.overlay_rows()
+                    } else {
+                        0..screen.height as usize
+                    };
+                    let row_bytes = screen.width as usize * 4;
+                    let pixels =
+                        &self.xbrz_frame.overlay.rgba[rows.start * row_bytes..rows.end * row_bytes];
                     gl.tex_sub_image_2d(
-                        glow::TEXTURE_2D, 0, 0, 0, screen.width as i32,
-                        screen.height as i32, glow::RGBA, glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(Some(&self.xbrz_frame.overlay.rgba)),
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        rows.start as i32,
+                        screen.width as i32,
+                        rows.len() as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(pixels)),
                     );
                 } else {
                     gl.tex_image_2d(
@@ -384,9 +423,10 @@ impl GlScreen {
                 }
                 gl.active_texture(glow::TEXTURE0);
             }
+            self.xbrz_overlay_uploaded_revision = Some(revision);
         }
         self.xbrz_overlay_visible = visible;
-        Ok(())
+        Ok(changed || source_changed || overlay_changed)
     }
 
     /// Show the frame, using a clean base for xBRZ when one is available.
@@ -401,8 +441,16 @@ impl GlScreen {
         mono: Monochrome,
     ) -> Result<(), String> {
         if self.active == Shader::Xbrz {
-            self.prepare_xbrz(frame, base, rows, mono)?;
+            let damaged = !rows.is_empty();
+            let changed = self.prepare_xbrz(frame, base, rows, mono)?;
+            if !changed && !damaged {
+                self.xbrz_overlay_visible = false;
+                #[cfg(feature = "vr")]
+                self.render_stage();
+                return Ok(());
+            }
         } else {
+            self.xbrz_frame.invalidate_overlay();
             self.texture_scale = self.upload(frame, rows, layer);
         }
         self.draw(self.texture, self.texture_size, display, layer, 1.0);
@@ -574,6 +622,7 @@ impl GlScreen {
             Some((texture, size, voodoo.scale()))
         });
         let Some((texture, size, scale)) = composed else { return false };
+        self.xbrz_frame.invalidate_overlay();
         let line = shader::line_scale(self.scale_lines.then_some(scale));
         // SAFETY: see `GlScreen`.
         unsafe {

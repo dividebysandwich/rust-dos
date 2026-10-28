@@ -66,6 +66,140 @@ fn reference_capture(
 
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
+fn xbrz_overlay_uploads_preserve_other_rows_and_recover_missed_revisions() {
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "xBRZ overlay bands", (4, 6), true)
+        .unwrap_or_else(|error| panic!("{}", error.reason));
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    let base = Frame::from_rgb(4, 6, vec![80; 4 * 6 * 3]);
+    let mut composed = base.clone();
+    composed.track_overlays(true);
+    composed.mark_overlay(1, 1);
+    screen
+        .present(&composed, Some(&base), 0..6, (4, 6), None, Monochrome::Off)
+        .unwrap();
+    let read = |screen: &GlScreen| {
+        let mut pixels = vec![0; 4 * 6 * 4];
+        // SAFETY: this test owns the context, texture and sized readback.
+        unsafe {
+            screen
+                .gl
+                .bind_texture(glow::TEXTURE_2D, screen.xbrz_overlay);
+            screen.gl.get_tex_image(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
+        }
+        pixels
+    };
+    // A sentinel outside the dirty band detects an accidental full upload.
+    let sentinel = [88, 77, 66, 255];
+    // SAFETY: the test owns the context and writes one texel in its texture.
+    unsafe {
+        screen
+            .gl
+            .bind_texture(glow::TEXTURE_2D, screen.xbrz_overlay);
+        screen.gl.tex_sub_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            0,
+            0,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&sentinel)),
+        );
+    }
+    composed.rgba[(4 + 1) * 4] ^= 127;
+    screen
+        .present(&composed, Some(&base), 1..2, (4, 6), None, Monochrome::Off)
+        .unwrap();
+    let uploaded = read(&screen);
+    assert_eq!(&uploaded[..4], &sentinel);
+    assert_eq!(&uploaded[16..32], &screen.xbrz_frame.overlay.rgba[16..32]);
+    composed.rgba[(4 + 1) * 4] ^= 64;
+    screen
+        .xbrz_frame
+        .prepare(&composed, Some(&base), Monochrome::Off, 1..2);
+    composed.mark_overlay(1, 4);
+    screen
+        .xbrz_frame
+        .prepare(&composed, Some(&base), Monochrome::Off, 0..0);
+    screen
+        .present(&composed, Some(&base), 0..0, (4, 6), None, Monochrome::Off)
+        .unwrap();
+    assert_eq!(read(&screen), screen.xbrz_frame.overlay.rgba);
+    let source = screen.xbrz_frame.source_revision();
+    screen.select(Shader::None, Filter::Nearest).unwrap();
+    composed.rgba[(4 + 1) * 4] ^= 32;
+    screen
+        .present(&composed, None, 0..6, (4, 6), None, Monochrome::Off)
+        .unwrap();
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    screen
+        .present(&composed, Some(&base), 0..0, (4, 6), None, Monochrome::Off)
+        .unwrap();
+    assert_eq!(read(&screen), screen.xbrz_frame.overlay.rgba);
+    assert_eq!(read(&screen)[(4 + 1) * 4], composed.rgba[(4 + 1) * 4]);
+    assert_eq!(screen.xbrz_frame.source_revision(), source);
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn failed_xbrz_preparation_reuploads_the_complete_composed_frame() {
+    use crate::config::Settings;
+    use crate::display::{Display, Output};
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let textures = std::cell::OnceCell::new();
+    let settings = Settings {
+        shader: Shader::Xbrz,
+        ..Default::default()
+    };
+    let mut display =
+        Display::open(&video, "xBRZ failure recovery", &settings, &textures, true).unwrap();
+    display.set_frame_size(4, 6).unwrap();
+    let mut base = Frame::from_rgb(4, 6, vec![80; 4 * 6 * 3]);
+    let mut composed = base.clone();
+    composed.track_overlays(true);
+    composed.mark_overlay_rect(0, 4, 4, 1);
+    composed.rgba[4 * 4 * 4..5 * 4 * 4].fill(127);
+    display
+        .present_rows(&composed, None, None, 0..6, Some(&base))
+        .unwrap();
+    base.rgba[4 * 4] ^= 127;
+    let Output::Gl(gl) = &mut display.out else {
+        panic!("OpenGL is required")
+    };
+    gl.fail_overlay_upload = true;
+    display
+        .present_rows(&composed, None, None, 1..2, Some(&base))
+        .unwrap();
+    let Output::Gl(gl) = &display.out else {
+        unreachable!()
+    };
+    assert_eq!(gl.active(), Shader::None);
+    assert_eq!(
+        texture(gl),
+        composed.rgba,
+        "rows outside the source damage retain overlays"
+    );
+    assert!(
+        display
+            .shader_warning()
+            .unwrap()
+            .contains("injected overlay")
+    );
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
 fn xbrz_clean_and_flattened_presentations_share_preparation() {
     use crate::video::{mono, power};
     let sdl = sdl2::init().unwrap();

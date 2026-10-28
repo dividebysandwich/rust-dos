@@ -419,6 +419,7 @@ function draw() {
       width,
       height,
       revision: machine.shader_overlay_revision(),
+      rows: [machine.shader_overlay_top(), machine.shader_overlay_bottom()],
     } : null;
     const revision = xbrz ? machine.shader_revision() : undefined;
     if (screenGl.upload(pixels, sourceWidth, sourceHeight, overlay, revision)) {
@@ -695,7 +696,13 @@ function makeGlScreen() {
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, overlay.width, overlay.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
         }
         if (resized || overlay.revision === undefined || overlayFrame?.revision !== overlay.revision) {
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, overlay.width, overlay.height, gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels);
+          // The latest band is safe only when no overlay revision was missed.
+          const sequential = !resized && overlay.rows && overlayFrame?.revision !== undefined
+            && overlay.revision === ((overlayFrame.revision + 1) >>> 0);
+          const [top, bottom] = sequential ? overlay.rows : [0, overlay.height];
+          const rowBytes = overlay.width * 4;
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, top, overlay.width, bottom - top,
+            gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels.subarray(top * rowBytes, bottom * rowBytes));
         }
         if (resized) overlayFrame = { width: overlay.width, height: overlay.height };
         overlayFrame.revision = overlay.revision;
@@ -2195,6 +2202,7 @@ function showPicture() {
     if (!same || look.curvature.join() !== shownLook.curvature.join()) {
       shownLook = look;
       screenGl.select(look.name, look.smooth, look.mono, look.curvature, look.glow);
+      machine.refresh_picture();
       if (machine.screen_width() && machine.screen_height()
         && (!screenGl.xbrz() || (machine.shader_width() && machine.shader_height()))) {
         draw();

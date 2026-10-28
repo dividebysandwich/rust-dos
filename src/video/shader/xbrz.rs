@@ -13,6 +13,8 @@ pub struct XbrzFrame {
     source_revision: u32,
     overlay_revision: u32,
     source_rows: std::ops::Range<usize>,
+    overlay_rows: std::ops::Range<usize>,
+    overlay_valid: bool,
 }
 
 impl Default for XbrzFrame {
@@ -27,6 +29,8 @@ impl Default for XbrzFrame {
             source_revision: 0,
             overlay_revision: 0,
             source_rows: 0..0,
+            overlay_rows: 0..0,
+            overlay_valid: false,
         }
     }
 }
@@ -45,6 +49,17 @@ impl XbrzFrame {
     /// Native rows changed by the last preparation, for partial uploads.
     pub fn source_rows(&self) -> std::ops::Range<usize> {
         self.source_rows.clone()
+    }
+
+    /// Rows changed at the current overlay revision, retained until its
+    /// next change so a delayed upload can still use the correct band.
+    pub fn overlay_rows(&self) -> std::ops::Range<usize> {
+        self.overlay_rows.clone()
+    }
+
+    /// A bypassed composition may change pixels without changing coverage.
+    pub fn invalidate_overlay(&mut self) {
+        self.overlay_valid = false;
     }
 
     /// Recover native pixels, tint them like the composed screen, and
@@ -119,10 +134,13 @@ impl XbrzFrame {
         }
         mono::apply_rows(&mut self.source, mono, native_rows);
         self.mono = Some(mono);
+        let previous_rows = std::mem::replace(&mut self.overlay_rows, 0..0);
         let (visible, overlay_changed) =
             self.prepare_overlay(screen, screen_rows, separate_overlays);
         if overlay_changed {
             self.overlay_revision = self.overlay_revision.wrapping_add(1);
+        } else {
+            self.overlay_rows = previous_rows;
         }
         (visible, changed || overlay_changed, overlay_changed)
     }
@@ -133,8 +151,13 @@ impl XbrzFrame {
         mut rows: std::ops::Range<usize>,
         separate: bool,
     ) -> (bool, bool) {
+        if !self.overlay_valid {
+            rows = 0..screen.height as usize;
+            self.overlay_valid = true;
+        }
         let mut changed = self.overlay.resize(screen.width, screen.height);
         if changed {
+            self.overlay_rows = 0..screen.height as usize;
             self.overlay.rgba.fill(0);
             self.overlay_pixels = 0;
             self.coverage = Vec::new();
@@ -144,7 +167,10 @@ impl XbrzFrame {
             .filter(|mask| separate && mask.contains(&1));
         let Some(mask) = mask else {
             if !self.coverage.is_empty() {
-                changed |= self.overlay.rgba.iter().any(|&byte| byte != 0);
+                if self.overlay.rgba.iter().any(|&byte| byte != 0) {
+                    changed = true;
+                    self.overlay_rows = 0..screen.height as usize;
+                }
                 self.overlay.rgba.fill(0);
                 self.overlay_pixels = 0;
                 self.coverage.clear();
@@ -162,6 +188,7 @@ impl XbrzFrame {
             let previous = &mut self.coverage[range.clone()];
             let output = &mut self.overlay.rgba[range.start * 4..range.end * 4];
             let input = &screen.rgba[range.start * 4..range.end * 4];
+            let mut row_changed = false;
             if current.iter().all(|&byte| byte == 1) {
                 if output != input {
                     self.overlay_pixels -= output
@@ -177,7 +204,7 @@ impl XbrzFrame {
                         .filter(|pixel| pixel[3] != 0)
                         .count();
                     output.copy_from_slice(input);
-                    changed = true;
+                    row_changed = true;
                 }
             } else {
                 let covered = || current.iter().zip(previous.iter());
@@ -195,11 +222,16 @@ impl XbrzFrame {
                         self.overlay_pixels -= usize::from(out[3] != 0);
                         self.overlay_pixels += usize::from(next[3] != 0);
                         *out = next;
-                        changed = true;
+                        row_changed = true;
                     }
                 }
             }
             previous.copy_from_slice(current);
+            if row_changed {
+                changed = true;
+                self.overlay_rows =
+                    crate::video::compose::union(self.overlay_rows.clone(), y..y + 1);
+            }
         }
         (self.overlay_pixels != 0, changed)
     }
@@ -208,6 +240,48 @@ impl XbrzFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_damage_tracks_pixels_movement_and_delayed_uploads() {
+        let base = Frame::from_rgb(8, 6, vec![80; 8 * 6 * 3]);
+        let mut screen = base.clone();
+        screen.track_overlays(true);
+        screen.mark_overlay_rect(1, 1, 2, 1);
+        let mut prepared = XbrzFrame::default();
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..6);
+        let source = prepared.source_revision();
+        screen.rgba[(8 + 1) * 4] ^= 127;
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 1..2);
+        let revision = prepared.overlay_revision();
+        assert_eq!(prepared.overlay_rows(), 1..2);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..6);
+        assert_eq!(prepared.overlay_rows(), 1..2);
+        assert_eq!(prepared.overlay_revision(), revision);
+        let mut moved = base.clone();
+        moved.track_overlays(true);
+        moved.mark_overlay_rect(3, 4, 2, 1);
+        prepared.prepare(&moved, Some(&base), mono::Monochrome::Off, 0..0);
+        assert_eq!(prepared.overlay_rows(), 1..5);
+        assert!(
+            prepared.overlay.rgba[8 * 4..2 * 8 * 4]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        prepared.invalidate_overlay();
+        moved.rgba[(4 * 8 + 3) * 4] ^= 127;
+        prepared.overlay_revision = u32::MAX;
+        prepared.prepare(&moved, Some(&base), mono::Monochrome::Off, 0..0);
+        assert_eq!(prepared.overlay_rows(), 4..5);
+        assert_eq!(prepared.overlay_revision(), 0);
+        assert_eq!(prepared.source_revision(), source);
+        assert_eq!(
+            prepared.overlay.rgba[(4 * 8 + 3) * 4],
+            moved.rgba[(4 * 8 + 3) * 4]
+        );
+        prepared.prepare(&base, Some(&base), mono::Monochrome::Off, 0..0);
+        assert_eq!(prepared.overlay_rows(), 0..6);
+        assert!(prepared.overlay.rgba.iter().all(|&byte| byte == 0));
+    }
 
     #[test]
     fn flattened_input_ignores_tint_and_coverage_after_clean_presentation() {

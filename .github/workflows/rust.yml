@@ -90,7 +90,7 @@ jobs:
               exit 0
             }
           fi
-          if git diff --name-only "$base" HEAD | grep -Eq '^(src/(video/|display\.rs$|display/gl(\.rs|/)|config_ui/|clipboard\.rs$|main\.rs$|debug/)|web/(src/|www/)|tests/debug_journal_tests\.rs$|Cargo\.(toml|lock)$|\.github/workflows/rust\.yml$)'; then
+          if git diff --name-only "$base" HEAD | grep -Eq '^(src/(video/|display\.rs$|display/(gl(\.rs|/)|nogl\.rs$)|config_ui/|clipboard\.rs$|main\.rs$|debug/)|web/(src/|www/)|tests/debug_journal_tests\.rs$|Cargo\.(toml|lock)$|\.github/workflows/rust\.yml$)'; then
             echo 'needed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=false' >> "$GITHUB_OUTPUT"
@@ -141,6 +141,10 @@ jobs:
       - name: Run tests
         if: matrix.full
         run: cargo test --workspace --locked --verbose
+
+      - name: Check SDL renderer without OpenGL (Linux x86_64)
+        if: matrix.label == 'linux-x86_64' && steps.shader_changes.outputs.needed == 'true'
+        run: cargo check --locked --no-default-features --features sdl --bin rust-dos
 
       - name: Run OpenGL shader tests (Linux x86_64)
         if: matrix.label == 'linux-x86_64' && steps.shader_changes.outputs.needed == 'true'
