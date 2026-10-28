@@ -566,11 +566,7 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
             Some((engine, arguments)) => (engine, Some(arguments), false),
             // OS/2 programs, Borland's DPMI16 (RTM) ones among them, and
             // files that don't parse run their DOS stub as before.
-            None if rust_dos_ne::Module::parse(bytes)
-                .is_ok_and(|m| m.target_os != rust_dos_ne::OS_OS2) =>
-            {
-                (launcher, None, true)
-            }
+            None if launcher::is_win16(bytes) => (launcher, None, true),
             None => return false,
         }
     } else {
