@@ -464,10 +464,13 @@ pub(super) fn module_file_name(name: &str) -> String {
     file.to_ascii_uppercase()
 }
 
-/// The directory of the DOS path `path`, without a final backslash.
+/// The directory of the DOS path `path`, without a final backslash. DOS
+/// and Windows take `/` for a backslash, as programs that build a path
+/// from parts may write it (Metal Marines' setup starts the game as
+/// `D:/METAL.EXE`); the directory has backslashes.
 pub(crate) fn directory_of(path: &str) -> String {
-    match path.rfind('\\') {
-        Some(i) => path[..i].to_string(),
+    match path.rfind(['\\', '/']) {
+        Some(i) => path[..i].replace('/', "\\"),
         None => String::new(),
     }
 }
