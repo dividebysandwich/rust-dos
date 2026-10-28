@@ -479,14 +479,10 @@ impl Voodoo {
                 (start, start + len.min(bytes.saturating_sub(start as u64)) as u32)
             })
         });
+        self.gpu_resend_dropped();
         // The 3D engine draws into its buffers without marking the pages
         // it changes: memory shown that shares pages with them goes again
         // whenever the picture may have changed, after the drawing queued.
-        if let Some(mirror) = &mut self.mirror
-            && mirror.take_dropped()
-        {
-            self.gpu.get_mut().pages.mark_all();
-        }
         let shared: Vec<(u32, u32)> = spans
             .iter()
             .flatten()

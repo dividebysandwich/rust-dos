@@ -1839,7 +1839,7 @@ fn main() -> Result<(), String> {
             Zone::FrameCompose
         });
         cpu.bus.sync_display();
-        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
+        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
         if !voodoo_gl
             && !voodoo_picture
             && let Some(v) = &mut cpu.bus.voodoo
@@ -2093,10 +2093,16 @@ fn main() -> Result<(), String> {
                 composed_rows,
             )?;
             last_screen_key = Some(screen_key);
-            if det.is_none() && voodoo_gl && dbg.wants_frame() {
-                match display.voodoo_picture() {
-                    Some(picture) => dbg.capture_frame(&picture),
-                    None => dbg.capture_frame(&screen),
+            if det.is_none() && voodoo_gl {
+                // The frame counts for the debugger's fps whether or not
+                // anything wants its picture.
+                if !dbg.wants_frame() {
+                    dbg.count_frame();
+                } else {
+                    match display.voodoo_picture() {
+                        Some(picture) => dbg.capture_frame(&picture),
+                        None => dbg.capture_frame(&screen),
+                    }
                 }
             }
         }

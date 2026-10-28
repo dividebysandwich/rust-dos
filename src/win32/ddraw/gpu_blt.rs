@@ -1,11 +1,12 @@
 //! Blt and BltFast between surfaces in a Banshee's or Voodoo3's memory,
 //! and fills of them, done by the OpenGL renderer in its copy of the
 //! card's memory (`voodoo::gpu`) while it draws the card's picture. What
-//! it can't do (a source in system memory, the add-on cards) stays in
-//! `blt::run`, which does the same pixel by pixel.
+//! it can't do (a source in system memory, a texture as the destination,
+//! the add-on cards) stays in `blt::run`, which does the same pixel by
+//! pixel.
 
 use super::state;
-use super::surface::{self, DDPF_PALETTEINDEXED8, DDPF_RGB, MEM_VIDEO, Surface};
+use super::surface::{self, DDPF_PALETTEINDEXED8, DDPF_RGB, DDSCAPS_TEXTURE, MEM_VIDEO, Surface};
 use crate::cpu::Cpu;
 use crate::voodoo::mirror::{self, BlitSource, Convert, Key, Plane};
 use crate::win32::gdi32::Rect;
@@ -40,7 +41,7 @@ fn plane(cpu: &mut Cpu, id: u32, s: &Surface) -> Option<Plane> {
     })
 }
 
-/// The colour key `key` of the surface `s`, as `blt::keyed` compares it.
+/// The colour key `key` of the surface `s`, as `blt::Key` compares it.
 fn key(key: (u32, u32), s: &Surface) -> Key {
     let f = &s.format;
     let rgb = f.flags & DDPF_RGB != 0 && f.flags & DDPF_PALETTEINDEXED8 == 0;
@@ -67,6 +68,11 @@ pub(super) fn run(cpu: &mut Cpu, b: &Blit) -> bool {
     let card = cpu.bus.voodoo.as_ref();
     if card.is_some_and(|v| v.gpu_color_buffer(dst.start, dst.stride).is_some()) {
         return into_buffer(cpu, b, dst);
+    }
+    // The card's texture units read a texture where it is in the memory
+    // (`d3d::hal`), without having the GPU's pages read back first.
+    if b.dst.caps[0] & DDSCAPS_TEXTURE != 0 {
+        return false;
     }
     let (src, convert, src_key) = match b.src {
         None => (BlitSource::Fill(b.fill), Convert::None, None),
@@ -153,7 +159,7 @@ fn into_buffer(cpu: &mut Cpu, b: &Blit, dst: Plane) -> bool {
                 }
                 let at = row + (sr.left as i64 + u * sw / dw) as usize * 2;
                 let value = u16::from_le_bytes([data[at], data[at + 1]]);
-                if src_key.as_ref().is_some_and(|k| k.holds(value as u32)) {
+                if src_key.is_some_and(|k| k.holds(value as u32)) {
                     continue;
                 }
                 let to = dst.start + y as u32 * dst.stride + x as u32 * 2;

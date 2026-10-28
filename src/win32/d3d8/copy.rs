@@ -395,9 +395,10 @@ fn present_on_gpu(
             let convert = match (rgb565, rgb888, bytes) {
                 (true, _, 2) => Convert::None,
                 (true, _, _) => Convert::Widen,
+                (_, true, 2) => Convert::Narrow,
                 // Bytes the same but the top one, which `present_window`
                 // leaves 0.
-                (_, true, 2) => Convert::Narrow,
+                (_, true, _) => Convert::ClearTop,
                 _ => return false,
             };
             (BlitSource::Memory { plane, rect }, convert)

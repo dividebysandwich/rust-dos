@@ -912,9 +912,11 @@ impl Voodoo {
         }
     }
 
-    /// The frame buffer's memory, with everything drawn into it.
+    /// The frame buffer's memory, with everything drawn into it, the
+    /// GPU's 2D operations too.
     pub fn frame_buffer(&self) -> &Vram {
         self.catch_up();
+        self.gpu_sync_all();
         &self.fbi.ram
     }
 
@@ -1638,9 +1640,7 @@ impl Voodoo {
         if on != self.mirror.is_some() {
             // What only the renderer has comes back before it goes, and
             // the card has no link to it from then on.
-            if on {
-                self.gpu_sync_all();
-            } else {
+            if !on {
                 self.set_gpu_link(None);
             }
             self.mirror = on.then(|| Box::new(mirror::Mirror::new()));
@@ -1675,16 +1675,24 @@ impl Voodoo {
     /// since it last did, or it wants them.
     pub(crate) fn mirror_sync(&mut self) {
         let Some(mirror) = &self.mirror else { return };
-        let key = self.mirror_key(mirror.layout());
+        let old = mirror.layout().copied();
+        let key = self.mirror_key(old.as_ref());
         if !mirror.needs_snapshot(&key) {
             return;
         }
         self.flush();
+        let size = self.fbi.ram.bytes() as u64;
+        let clamp = |(start, end): (u64, u64)| (start.min(size) as u32, end.min(size) as u32);
+        // The 3D engine drew into the buffers before without marking the
+        // pages it changed, which the renderer's copy of the memory may
+        // now be read or drawn into at: it gets them again.
+        for (start, end) in old.iter().flat_map(|old| old.spans()).map(clamp) {
+            self.gpu.get_mut().pages.mark(start, end);
+        }
         // The software renderer draws the buffers into the memory from
         // now on, where the GPU may have done a 2D operation.
-        for (start, end) in key.spans() {
-            let size = self.fbi.ram.bytes() as u64;
-            self.gpu_sync(start.min(size) as u32, end.min(size) as u32);
+        for (start, end) in key.spans().map(clamp) {
+            self.gpu_sync(start, end);
         }
         let snapshot = self.snapshot(key.layout());
         if let Some(mirror) = &mut self.mirror {
@@ -1770,14 +1778,11 @@ impl Voodoo {
     /// pixels of its buffers there, from memory, which has what the 3D
     /// engine drew before (the writers catch up first).
     pub(crate) fn mirror_memory(&mut self, start: u32, end: u32) {
-        if self.mirror.is_none() {
-            return;
-        }
-        // The renderer's copy of the memory gets the pages again.
-        self.gpu.get_mut().pages.mark(start, end);
         let Some(mirror) = &mut self.mirror else {
             return;
         };
+        // The renderer's copy of the memory gets the pages again.
+        self.gpu.get_mut().pages.mark(start, end);
         // The texture units read the same memory: what the recording
         // decoded from there is out of date.
         for tmu in &mut self.tmu {

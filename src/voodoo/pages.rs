@@ -101,6 +101,15 @@ impl Pages {
         self.gpu_count = 0;
     }
 
+    /// The renderer lost pages sent to it, which the recording dropped:
+    /// every page goes again but those newer on the GPU, which it still
+    /// has.
+    pub fn resend(&mut self) {
+        for (dirty, gpu) in self.dirty.iter_mut().zip(&self.gpu) {
+            *dirty = !gpu;
+        }
+    }
+
     /// The runs of dirty pages within bytes `start..end`, as byte ranges
     /// of whole pages, which are clean from now on: the caller sends them
     /// to the renderer.
@@ -142,8 +151,9 @@ impl Pages {
 
     /// The runs of pages within bytes `start..end` that are newer on the
     /// GPU, as byte ranges; the same in both from now on, as the caller
-    /// reads them back.
-    pub fn take_gpu(&mut self, start: u32, end: u32) -> Vec<(u32, u32)> {
+    /// reads them back, and hot if `hot` (the program reads or writes
+    /// them).
+    pub fn take_gpu(&mut self, start: u32, end: u32, hot: bool) -> Vec<(u32, u32)> {
         let mut runs = Vec::new();
         if self.gpu_count == 0 {
             return runs;
@@ -151,7 +161,9 @@ impl Pages {
         for page in self.span(start, end) {
             if get(&self.gpu, page) {
                 set(&mut self.gpu, page, false);
-                set(&mut self.hot, page, true);
+                if hot {
+                    set(&mut self.hot, page, true);
+                }
                 self.gpu_count -= 1;
                 add_run(&mut runs, page);
             }
@@ -197,8 +209,8 @@ mod tests {
         p.drawn_on_gpu(PAGE, 3 * PAGE);
         assert!(p.any_gpu() && p.gpu_in(2 * PAGE + 5, 2 * PAGE + 6));
         assert!(!p.gpu_in(0, PAGE) && !p.gpu_in(3 * PAGE, 4 * PAGE));
-        assert_eq!(p.take_gpu(0, 2 * PAGE), [(PAGE, 2 * PAGE)]);
-        assert_eq!(p.take_gpu(0, 8 * PAGE), [(2 * PAGE, 3 * PAGE)]);
+        assert_eq!(p.take_gpu(0, 2 * PAGE, true), [(PAGE, 2 * PAGE)]);
+        assert_eq!(p.take_gpu(0, 8 * PAGE, true), [(2 * PAGE, 3 * PAGE)]);
         assert!(!p.any_gpu());
         // Read back, a page can be written again.
         p.mark(PAGE, PAGE + 1);
@@ -206,14 +218,28 @@ mod tests {
     }
 
     #[test]
-    fn pages_read_back_are_hot_until_they_cool() {
+    fn pages_read_back_for_the_program_are_hot_until_they_cool() {
         let mut p = Pages::new(8 * PAGE as usize);
         p.take_dirty(0, 8 * PAGE);
         p.drawn_on_gpu(PAGE, 3 * PAGE);
         assert!(!p.hot_in(0, 8 * PAGE));
-        p.take_gpu(2 * PAGE, 3 * PAGE);
+        p.take_gpu(2 * PAGE, 3 * PAGE, true);
         assert!(p.hot_in(2 * PAGE + 1, 2 * PAGE + 2) && !p.hot_in(0, 2 * PAGE));
+        // Read back for the emulator (a save state), a page stays cool.
+        p.take_gpu(PAGE, 2 * PAGE, false);
+        assert!(!p.hot_in(PAGE, 2 * PAGE));
         p.cool();
         assert!(!p.hot_in(0, 8 * PAGE));
+    }
+
+    #[test]
+    fn pages_resent_are_all_but_those_newer_on_the_gpu() {
+        let mut p = Pages::new(8 * PAGE as usize);
+        p.take_dirty(0, 8 * PAGE);
+        p.drawn_on_gpu(2 * PAGE, 3 * PAGE);
+        p.resend();
+        let runs = [(0, 2 * PAGE), (3 * PAGE, 8 * PAGE)];
+        assert_eq!(p.take_dirty(0, 8 * PAGE), runs);
+        assert!(p.gpu_in(2 * PAGE, 3 * PAGE));
     }
 }

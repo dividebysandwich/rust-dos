@@ -182,8 +182,8 @@ impl CardMemory {
                 let r8ui = glow::R8UI as i32;
                 gl.tex_image_2d(glow::TEXTURE_2D, 0, r8ui, w, h, 0, format, kind, none);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-                let at = glow::COLOR_ATTACHMENT0;
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, at, glow::TEXTURE_2D, Some(texture), 0);
+                let (at, target) = (glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D);
+                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, at, target, Some(texture), 0);
                 let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 if status != glow::FRAMEBUFFER_COMPLETE {
@@ -216,13 +216,16 @@ impl CardMemory {
         }
     }
 
-    /// Bytes from byte `at` on (which starts a row) into `out`.
-    fn read(&self, gl: &glow::Context, at: u32, out: &mut [u8]) {
+    /// Bytes from byte `at` on (which starts a row) into `out`, whole
+    /// rows. False, with `out` as it was, if the texture hasn't them all.
+    fn read(&self, gl: &glow::Context, at: u32, out: &mut [u8]) -> bool {
         let first = at as usize / MEMORY_ROW;
         let rows = out.len() / MEMORY_ROW;
-        let rows = rows.min((self.rows() as usize).saturating_sub(first));
+        if !out.len().is_multiple_of(MEMORY_ROW) || first + rows > self.rows() as usize {
+            return false;
+        }
         if rows == 0 {
-            return;
+            return true;
         }
         let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
         // SAFETY: see `VoodooGl`.
@@ -236,6 +239,7 @@ impl CardMemory {
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         }
+        true
     }
 
     /// `bytes` of a memory of `size` bytes, from byte `at` on, which
@@ -442,16 +446,19 @@ pub struct SharedGl {
 }
 
 impl GpuLink for SharedGl {
+    fn ready(&self) -> bool {
+        self.renderer.borrow().as_ref().is_some_and(|r| r.banshee.is_ok())
+    }
+
     fn run(&mut self, commands: Vec<Command>) {
         if let Some(renderer) = self.renderer.borrow_mut().as_mut() {
             renderer.run_early(&self.gl, &commands);
         }
     }
 
-    fn read(&mut self, at: u32, out: &mut [u8]) {
-        if let Some(renderer) = self.renderer.borrow().as_ref() {
-            renderer.read_memory(&self.gl, at, out);
-        }
+    fn read(&mut self, at: u32, out: &mut [u8]) -> bool {
+        let renderer = self.renderer.borrow();
+        renderer.as_ref().is_some_and(|r| r.read_memory(&self.gl, at, out))
     }
 }
 
@@ -642,11 +649,11 @@ impl VoodooGl {
     }
 
     /// Bytes of the card's memory from byte `at` on (which starts a
-    /// page) as the renderer has them, into `out`.
-    pub fn read_memory(&self, gl: &glow::Context, at: u32, out: &mut [u8]) {
-        if let Ok(banshee) = &self.banshee {
-            banshee.memory.read(gl, at, out);
-        }
+    /// page) as the renderer has them, into `out`. False, with `out` as
+    /// it was, if it hasn't them: it keeps no copy of the memory, or one
+    /// too small.
+    pub fn read_memory(&self, gl: &glow::Context, at: u32, out: &mut [u8]) -> bool {
+        self.banshee.as_ref().is_ok_and(|b| b.memory.read(gl, at, out))
     }
 
     fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
@@ -706,9 +713,12 @@ impl VoodooGl {
         let memory = &banshee.memory;
         let row = |a: u32| (a as usize / MEMORY_ROW) as i32;
         let rows = |(a, b): (u32, u32)| (row(a), row(b.saturating_sub(1)) + 1);
-        // What the blit reads, as it was before it.
-        let dst = rows(blit.dst_span());
-        memory.copy_rows(gl, dst.0, dst.1);
+        // What the blit reads, as it was before it: the source, and the
+        // destination only for its key.
+        if blit.dst_key.is_some() {
+            let (first, last) = rows(blit.dst_span());
+            memory.copy_rows(gl, first, last);
+        }
         if let Some(span) = blit.src_span() {
             let (first, last) = rows(span);
             memory.copy_rows(gl, first, last);
@@ -730,6 +740,7 @@ impl VoodooGl {
             Convert::None => 0,
             Convert::Widen => 1,
             Convert::Narrow => 2,
+            Convert::ClearTop => 3,
         };
         let (w, h) = (MEMORY_ROW as i32, memory.rows());
         // SAFETY: see `VoodooGl`.

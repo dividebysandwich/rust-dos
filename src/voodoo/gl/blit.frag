@@ -27,7 +27,8 @@ uniform ivec4 u_src;
 uniform ivec4 u_src_rect;
 uniform int u_fill;
 // Mirrored across and down, the conversion (0 none, 1 5-6-5 to 8-8-8,
-// 2 8-8-8 to 5-6-5), and the colour buffer's scale.
+// 2 8-8-8 to 5-6-5, 3 8-8-8 with the top byte 0), and the colour
+// buffer's scale.
 uniform ivec4 u_mode;
 // The colour keys: lowest and highest values, and whether there is one;
 // and the format's red, green and blue masks, all 0 to compare whole.
@@ -134,6 +135,8 @@ void main() {
             value = widen(value);
         } else if (u_mode.z == 2) {
             value = narrow(value);
+        } else if (u_mode.z == 3) {
+            value &= 0xFFFFFFu;
         }
     }
     if (u_dst_key.z != 0 && !keyed(pixel_at(a - uint(k), bpp), u_dst_key, u_dst_masks)) {

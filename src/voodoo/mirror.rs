@@ -338,6 +338,8 @@ pub enum Convert {
     Widen,
     /// 8 bits a channel into 5-6-5, each channel's top bits.
     Narrow,
+    /// 8 bits a channel as they are, with the byte above them 0.
+    ClearTop,
 }
 
 /// A colour key: the lowest and highest values in it, and the format's

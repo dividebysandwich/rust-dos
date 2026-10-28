@@ -1417,7 +1417,13 @@ impl Rasterizer for Raster<'_> {
 /// card isn't set up for the HAL's drawing (Glide closed or another
 /// process's, or no render target or depth buffer of the HAL's given to
 /// it yet) or the surface isn't in its memory.
-pub(in crate::win32::ddraw) fn card_fill(cpu: &mut Cpu, s: &Surface, id: u32, rects: &[[i32; 4]], value: u16) -> bool {
+pub(in crate::win32::ddraw) fn card_fill(
+    cpu: &mut Cpu,
+    s: &Surface,
+    id: u32,
+    rects: &[[i32; 4]],
+    value: u16,
+) -> bool {
     use crate::voodoo::banshee::render3d::{
         AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
     };
@@ -1453,9 +1459,7 @@ pub(in crate::win32::ddraw) fn card_fill(cpu: &mut Cpu, s: &Surface, id: u32, re
     let (fbz, fill) = if depth {
         (ENRECTCLIP | ZAWRMASK, g.za_color & !0xFFFF | value as u32)
     } else {
-        let v = value as u32;
-        let (r, gr, b) = ((v >> 11) & 0x1F, (v >> 5) & 0x3F, v & 0x1F);
-        let rgb = (r << 3 | r >> 2) << 16 | (gr << 2 | gr >> 4) << 8 | (b << 3 | b >> 2);
+        let rgb = crate::win32::screen::from_565(value);
         (ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER, rgb)
     };
     hw::write(cpu, hw::ALL, at_reg, at);
