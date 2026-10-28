@@ -1,25 +1,20 @@
 //! Windows 3.1 programs (NE files) made byte by byte for the tests of the
 //! built-in Windows's Win16, and a machine that runs one from the shell.
-//! A program has one code segment, with the calls of system functions
-//! its code makes relocated by ordinal, and an automatic data segment
-//! for its stack.
+//! A program, which ne::Builder writes, has one code segment, with the
+//! calls of system functions its code makes relocated by ordinal, and
+//! an automatic data segment for its stack.
 
 #![allow(dead_code)]
 
 use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos_ne as ne;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Where the NE header starts in the programs made here.
-const NE: usize = 0x40;
-/// The alignment shift of their segments: 512-byte sectors.
-const SHIFT: u16 = 9;
-/// A code segment's flags: movable, with level 3, with relocations
-/// when it has calls to relocate.
-pub const CODE: u16 = 0x0C10;
-const SEG_RELOCINFO: u16 = 0x0100;
+/// A code segment's flags: movable, with level 3.
+pub const CODE: u16 = ne::SEG_MOVEABLE | 0x0C00;
 
 /// A code segment's bytes, and the far calls in it to relocate.
 #[derive(Default)]
@@ -89,95 +84,36 @@ impl Code {
 /// flags `flags` (and relocations if it calls functions), starting at the
 /// code's first byte.
 pub fn program(code: &Code, flags: u16) -> Vec<u8> {
-    let mut b = vec![0u8; 0x200];
-    // The MZ header, with the new header at 40h. Like a linker's, it asks
-    // DOS for all the memory there is (e_maxalloc FFFFh), so the stub
-    // loads low, with a stack at its end.
-    b[0..2].copy_from_slice(b"MZ");
-    b[2..4].copy_from_slice(&0x200u16.to_le_bytes());
-    b[4..6].copy_from_slice(&1u16.to_le_bytes());
-    b[8..10].copy_from_slice(&4u16.to_le_bytes());
-    b[0x0A..0x0C].copy_from_slice(&0x10u16.to_le_bytes());
-    b[0x0C..0x0E].copy_from_slice(&0xFFFFu16.to_le_bytes());
-    b[0x10..0x12].copy_from_slice(&0x2FEu16.to_le_bytes());
-    b[0x18..0x1A].copy_from_slice(&0x40u16.to_le_bytes());
-    b[0x3C..0x40].copy_from_slice(&(NE as u32).to_le_bytes());
-
-    // The tables after the 40h-byte NE header: the segment table, the
-    // resident names (the module's name), the module references, the
-    // imported names (a 0, then the modules' names) and an empty entry
-    // table.
-    let seg_table = 0x40;
-    let res_names = seg_table + 2 * 8;
-    let names = b"\x01T\x00\x00\x00";
-    let mod_refs = res_names + names.len();
-    let imp_names = mod_refs + 2 * code.modules.len();
-    let mut imported = vec![0u8];
-    let mut refs = Vec::new();
+    let mut b = ne::Builder::new("T", ne::MULTIPLEDATA);
+    let relocations = code
+        .calls
+        .iter()
+        .map(|&(module, ordinal, offset)| ne::Relocation {
+            source: ne::ADDR_FARPTR,
+            additive: false,
+            offset,
+            target: ne::Target::Ordinal { module, ordinal },
+        })
+        .collect();
+    let text = b.segment(ne::SegmentSpec {
+        data: code.bytes.clone(),
+        flags,
+        alloc: 0,
+        relocations,
+    });
+    let data = b.segment(ne::SegmentSpec {
+        data: Vec::new(),
+        flags: ne::SEG_DATA | 0x0C00,
+        alloc: 0x100,
+        relocations: Vec::new(),
+    });
     for m in &code.modules {
-        refs.extend_from_slice(&(imported.len() as u16).to_le_bytes());
-        imported.push(m.len() as u8);
-        imported.extend_from_slice(m.as_bytes());
+        b.import_module(m);
     }
-    let entry_table = imp_names + imported.len();
-    let tables = [names.as_slice(), &refs, &imported, &[0, 0]].concat();
-    b[NE + res_names..NE + res_names + tables.len()].copy_from_slice(&tables);
-
-    let w = |b: &mut Vec<u8>, at: usize, v: u16| {
-        b[NE + at..NE + at + 2].copy_from_slice(&v.to_le_bytes());
-    };
-    b[NE..NE + 2].copy_from_slice(b"NE");
-    b[NE + 2] = 5;
-    b[NE + 3] = 10;
-    w(&mut b, 0x04, entry_table as u16);
-    w(&mut b, 0x06, 2);
-    w(&mut b, 0x0C, 0x0302);
-    w(&mut b, 0x0E, 2);
-    w(&mut b, 0x10, 0x400);
-    w(&mut b, 0x12, 0x800);
-    w(&mut b, 0x16, 1);
-    w(&mut b, 0x1A, 2);
-    w(&mut b, 0x1C, 2);
-    w(&mut b, 0x1E, code.modules.len() as u16);
-    w(&mut b, 0x22, seg_table as u16);
-    w(&mut b, 0x24, res_names as u16);
-    w(&mut b, 0x26, res_names as u16);
-    w(&mut b, 0x28, mod_refs as u16);
-    w(&mut b, 0x2A, imp_names as u16);
-    w(&mut b, 0x32, SHIFT);
-    b[NE + 0x36] = 2;
-    w(&mut b, 0x3E, 0x030A);
-
-    // Segment 1: the code, in the second sector, its relocations after
-    // it. Segment 2: the data, with nothing in the file.
-    let seg = |b: &mut Vec<u8>, i: usize, sector: u16, len: u16, flags: u16, alloc: u16| {
-        let at = seg_table + 8 * i;
-        w(b, at, sector);
-        w(b, at + 2, len);
-        w(b, at + 4, flags);
-        w(b, at + 6, alloc);
-    };
-    let len = code.bytes.len() as u16;
-    let flags = if code.calls.is_empty() {
-        flags
-    } else {
-        flags | SEG_RELOCINFO
-    };
-    seg(&mut b, 0, 1, len, flags, len);
-    seg(&mut b, 1, 0, 0, 0x0C01, 0x100);
-
-    b.extend_from_slice(&code.bytes);
-    if !code.calls.is_empty() {
-        b.extend_from_slice(&(code.calls.len() as u16).to_le_bytes());
-        for &(module, ordinal, at) in &code.calls {
-            // A far address, imported by ordinal.
-            b.extend_from_slice(&[3, 1]);
-            for v in [at, module, ordinal] {
-                b.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-    b
+    b.auto_data(data, 0x400, 0x800);
+    b.entry_point(text, 0);
+    b.initial_stack(data, 0);
+    b.build()
 }
 
 fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
