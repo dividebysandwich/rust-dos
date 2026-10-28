@@ -71,6 +71,9 @@ pub struct GlScreen {
     /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
     voodoo: Rc<RefCell<Option<VoodooGl>>>,
     voodoo_failed: Option<String>,
+    /// Whether the log said that a Banshee's 2D operations stay on the
+    /// CPU (`VoodooGl::gpu_2d_problem`).
+    gpu_2d_logged: bool,
     /// What screenshots and recordings of the look are drawn with, made
     /// the first time one is (`capture`).
     capture: Option<Capture>,
@@ -210,6 +213,7 @@ impl GlScreen {
             renderer,
             voodoo: Rc::new(RefCell::new(None)),
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
+            gpu_2d_logged: false,
             capture: None,
             layer: None,
             layer_generation: None,
@@ -395,12 +399,7 @@ impl GlScreen {
                 return Err(problem.clone());
             }
             match VoodooGl::new(&self.gl, self.glsl, scale, samples, anisotropy) {
-                Ok(voodoo) => {
-                    if let Some(problem) = voodoo.gpu_2d_problem() {
-                        eprintln!("[DISPLAY] 2D operations stay on the CPU: {problem}");
-                    }
-                    *self.voodoo.borrow_mut() = Some(voodoo);
-                }
+                Ok(voodoo) => *self.voodoo.borrow_mut() = Some(voodoo),
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);
                     self.voodoo_failed = Some(e.clone());
@@ -419,6 +418,15 @@ impl GlScreen {
             self.voodoo_failed = Some(problem.clone());
             self.drop_voodoo();
             return Err(problem);
+        }
+        // Without the 2D operations' program, a Banshee does them in
+        // software, which the log says the first time it draws.
+        if recording.scanout.is_some() && !self.gpu_2d_logged {
+            let voodoo = self.voodoo.borrow();
+            if let Some(problem) = voodoo.as_ref().and_then(|v| v.gpu_2d_problem()) {
+                eprintln!("[DISPLAY] 2D operations stay on the CPU: {problem}");
+                self.gpu_2d_logged = true;
+            }
         }
         Ok(self.voodoo.borrow_mut().as_mut().is_some_and(|voodoo| {
             voodoo.set_dither(dither);

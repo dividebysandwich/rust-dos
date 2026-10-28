@@ -220,6 +220,20 @@ impl MemoryLayout {
         })
     }
 
+    /// `spans` of rows `first..last`, each with the bytes it takes of
+    /// those rows' bytes in order.
+    fn parts(
+        self,
+        first: u32,
+        last: u32,
+    ) -> impl Iterator<Item = (u32, u32, u32, std::ops::Range<usize>)> {
+        let (n, w) = (self.layer_rows(), self.width() as usize);
+        self.spans(first, last).map(move |(layer, top, bottom)| {
+            let from = (layer * n + top - first) as usize * w;
+            (layer, top, bottom, from..from + (bottom - top) as usize * w)
+        })
+    }
+
     /// What the shaders' `u_mem_layout` takes for memory of `size`
     /// bytes.
     fn uniform(self, size: u32) -> [i32; 3] {
@@ -253,23 +267,60 @@ struct CardMemory {
 
 impl CardMemory {
     fn new(gl: &glow::Context, most: (u32, u32)) -> Result<Self, String> {
-        let (texture, copy) = (texture_array(gl)?, texture_array(gl)?);
+        let layout = MemoryLayout::new(MEMORY_ROW, most.0, most.1)?;
+        let texture = texture_array(gl)?;
+        let copy = match texture_array(gl) {
+            Ok(copy) => copy,
+            Err(e) => {
+                // SAFETY: see `VoodooGl`.
+                unsafe { gl.delete_texture(texture) };
+                return Err(e);
+            }
+        };
         let mut memory = Self {
             texture,
             copy,
             fbos: Vec::new(),
             copy_fbos: Vec::new(),
             size: 0,
-            layout: MemoryLayout::new(MEMORY_ROW, most.0, most.1)?,
+            layout,
             most,
         };
-        memory.allocate(gl, MEMORY_ROW)?;
+        // What was made goes again when the memory can't be drawn into.
+        if let Err(e) = memory.allocate(gl, MEMORY_ROW) {
+            memory.delete(gl);
+            return Err(e);
+        }
         Ok(memory)
     }
 
-    /// Rows for `size` bytes, their contents not yet known.
+    /// Rows for `size` bytes, their contents not yet known. When OpenGL
+    /// can't make them, the memory has no rows (`usable`): nothing goes
+    /// into it or is read back, and the card does its 2D operations in
+    /// software.
     fn allocate(&mut self, gl: &glow::Context, size: u32) -> Result<(), String> {
-        let layout = MemoryLayout::new(size, self.most.0, self.most.1)?;
+        self.size = size;
+        let made = MemoryLayout::new(size, self.most.0, self.most.1)
+            .and_then(|layout| self.storage(gl, layout).map(|()| layout));
+        match made {
+            Ok(layout) => {
+                self.layout = layout;
+                Ok(())
+            }
+            Err(e) => {
+                self.layout.layers = 0;
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether the memory has its rows (`allocate`).
+    fn usable(&self) -> bool {
+        self.layout.layers > 0
+    }
+
+    /// The textures and framebuffers for `layout`.
+    fn storage(&mut self, gl: &glow::Context, layout: MemoryLayout) -> Result<(), String> {
         let (w, h) = (layout.width() as i32, layout.layer_rows() as i32);
         let layers = layout.layers as usize;
         let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
@@ -283,8 +334,8 @@ impl CardMemory {
                 gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(texture));
                 let (target, r8ui) = (glow::TEXTURE_2D_ARRAY, glow::R8UI as i32);
                 gl.tex_image_3d(target, 0, r8ui, w, h, layers as i32, 0, format, kind, none);
-                while fbos.len() > layers {
-                    gl.delete_framebuffer(fbos.pop().unwrap());
+                for fbo in fbos.drain(layers.min(fbos.len())..) {
+                    gl.delete_framebuffer(fbo);
                 }
                 while fbos.len() < layers {
                     fbos.push(gl.create_framebuffer()?);
@@ -305,8 +356,6 @@ impl CardMemory {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
         }
-        self.size = size;
-        self.layout = layout;
         Ok(())
     }
 
@@ -343,16 +392,14 @@ impl CardMemory {
             return false;
         }
         let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
-        let spans = self.layout.spans(first as u32, (first + rows) as u32);
+        let parts = self.layout.parts(first as u32, (first + rows) as u32);
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-            for (layer, top, bottom) in spans {
-                let from = (layer * self.layout.layer_rows() + top) as usize - first;
-                let part = &mut out[from * w..(from + (bottom - top) as usize) * w];
+            for (layer, top, bottom, bytes) in parts {
                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[layer as usize]));
                 gl.read_buffer(glow::COLOR_ATTACHMENT0);
-                let pixels = glow::PixelPackData::Slice(Some(part));
+                let pixels = glow::PixelPackData::Slice(Some(&mut out[bytes]));
                 let (y, h) = (top as i32, (bottom - top) as i32);
                 gl.read_pixels(0, y, w as i32, h, format, kind, pixels);
             }
@@ -365,7 +412,10 @@ impl CardMemory {
     /// `bytes` of a memory of `size` bytes, from byte `at` on, which
     /// starts a page.
     fn put(&mut self, gl: &glow::Context, size: u32, at: u32, bytes: &[u8]) {
-        if size != self.size && self.allocate(gl, size).is_err() {
+        if size != self.size
+            && let Err(e) = self.allocate(gl, size)
+        {
+            eprintln!("[DISPLAY] {e}: 2D operations stay on the CPU");
             return;
         }
         let layout = self.layout;
@@ -376,10 +426,8 @@ impl CardMemory {
         let full = bytes.len() / w;
         let put = |first: usize, data: &[u8]| {
             let last = first + data.len() / w;
-            for (layer, top, bottom) in layout.spans(first as u32, last as u32) {
-                let from = (layer * layout.layer_rows() + top) as usize - first;
-                let part = &data[from * w..(from + (bottom - top) as usize) * w];
-                let pixels = glow::PixelUnpackData::Slice(Some(part));
+            for (layer, top, bottom, bytes) in layout.parts(first as u32, last as u32) {
+                let pixels = glow::PixelUnpackData::Slice(Some(&data[bytes]));
                 let (y, h, z) = (top as i32, (bottom - top) as i32, layer as i32);
                 let (target, format, kind) = (
                     glow::TEXTURE_2D_ARRAY,
@@ -594,9 +642,8 @@ pub struct SharedGl {
 impl GpuLink for SharedGl {
     fn ready(&self) -> bool {
         let renderer = self.renderer.borrow();
-        renderer
-            .as_ref()
-            .is_some_and(|r| r.banshee.as_ref().is_ok_and(|b| b.blit.is_ok()))
+        let ready = |b: &BansheeGl| b.blit.is_ok() && b.memory.usable();
+        renderer.as_ref().is_some_and(|r| r.banshee.as_ref().is_ok_and(ready))
     }
 
     fn run(&mut self, commands: Vec<Command>) {
@@ -941,13 +988,18 @@ impl VoodooGl {
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(buffer.unwrap_or(self.lut)));
             gl.bind_vertex_array(Some(self.quad_vao));
+            // The layer drawn into last: most rectangles stay in it.
+            let mut bound = None;
             for &r in &blit.rects {
                 let (first, last) = rows(blit.dst.span(r));
                 u.u_clip.set(gl, r);
                 for (layer, top, bottom) in layout.spans(first, last) {
-                    let fbo = memory.fbos[layer as usize];
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-                    u.u_layer.set(gl, layer as i32);
+                    if bound != Some(layer) {
+                        let fbo = memory.fbos[layer as usize];
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                        u.u_layer.set(gl, layer as i32);
+                        bound = Some(layer);
+                    }
                     u.u_rect.set(gl, [0.0, top as f32, w as f32, bottom as f32]);
                     gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
@@ -1796,28 +1848,23 @@ fn restore(gl: &glow::Context) {
 
 /// A texture with `filter`, clamped at its edges, bound.
 fn texture(gl: &glow::Context, filter: u32) -> Result<glow::Texture, String> {
-    // SAFETY: see `VoodooGl`.
-    unsafe {
-        let texture = gl.create_texture()?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-        Ok(texture)
-    }
+    texture_of(gl, glow::TEXTURE_2D, filter)
 }
 
 /// A 2D array texture, unfiltered and clamped at its edges, bound.
 fn texture_array(gl: &glow::Context) -> Result<glow::Texture, String> {
-    let target = glow::TEXTURE_2D_ARRAY;
+    texture_of(gl, glow::TEXTURE_2D_ARRAY, glow::NEAREST)
+}
+
+/// A texture of `target` with `filter`, clamped at its edges, bound.
+fn texture_of(gl: &glow::Context, target: u32, filter: u32) -> Result<glow::Texture, String> {
     // SAFETY: see `VoodooGl`.
     unsafe {
         let texture = gl.create_texture()?;
         gl.bind_texture(target, Some(texture));
         for (name, value) in [
-            (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
-            (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+            (glow::TEXTURE_MIN_FILTER, filter),
+            (glow::TEXTURE_MAG_FILTER, filter),
             (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
             (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
         ] {
