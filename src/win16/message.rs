@@ -801,12 +801,6 @@ pub(super) fn to16(
             data.push(FIX_NONE);
             (msg, lo(wp), icon16(lp) as u32)
         }
-        // The wave header played: the program's own 16:16 pointer, which
-        // MMSYSTEM posts, whichever loop reads the message.
-        MM_WOM_DONE => {
-            data.push(FIX_NONE);
-            (msg, lo(wp), super::misc::wave_header16(cpu, lp))
-        }
         STM_SETICON => {
             data.push(FIX_NONE);
             (control_msg16(cpu, hwnd, msg), icon16(wp) as u32, lp)
@@ -1159,8 +1153,7 @@ pub(super) fn posted16(
 ) -> (u32, u32, u32) {
     match msg {
         WM_COMMAND | WM_ACTIVATE | WM_CHARTOITEM | WM_VKEYTOITEM | WM_HSCROLL | WM_VSCROLL
-        | WM_MENUSELECT | WM_MENUCHAR | WM_INITMENU | WM_INITMENUPOPUP | WM_PARENTNOTIFY
-        | MM_WOM_DONE => {
+        | WM_MENUSELECT | WM_MENUCHAR | WM_INITMENU | WM_INITMENUPOPUP | WM_PARENTNOTIFY => {
             let mut stack = Stack16 {
                 ss: 0,
                 base: 0,
@@ -1172,5 +1165,3 @@ pub(super) fn posted16(
         _ => (control_msg16(cpu, hwnd, msg), lo(wp), lp),
     }
 }
-
-const MM_WOM_DONE: u32 = 0x3BD;

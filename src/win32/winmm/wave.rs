@@ -263,7 +263,9 @@ pub fn next_event(w: &Wave, now: u64) -> Option<u64> {
     w.due.filter(|&t| t > now)
 }
 
-/// Mark the header at `header` done and tell the program.
+/// Mark the header at `header` done and tell the program: a Windows 3.1
+/// program its own 16:16 pointer to it, as MMSYSTEM posts it, which stays
+/// right in the queue whatever the program does with the header after.
 fn done(cpu: &mut Cpu, i: usize, header: u32) {
     let (pid, handle, instance, cb) = {
         let o = &wave(cpu).outs[i];
@@ -276,6 +278,7 @@ fn done(cpu: &mut Cpu, i: usize, header: u32) {
         header + HDR_FLAGS,
         flags & !WHDR_INQUEUE | WHDR_DONE,
     );
+    let header = crate::win16::wave_header16(cpu, header);
     callback::notify(cpu, &cb, handle, WOM_DONE, instance, header, 0);
 }
 
