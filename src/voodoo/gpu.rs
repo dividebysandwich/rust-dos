@@ -16,6 +16,7 @@
 //! a read back then only has to read.
 
 use super::Voodoo;
+use super::workers::Word;
 use super::mirror::{Blit, BlitSource, Command};
 use super::pages::{PAGE, Pages};
 
@@ -38,7 +39,15 @@ pub struct Gpu {
     read_back: u64,
     /// 2D operations done on the GPU.
     blits: u64,
+    /// 2D operations left to the CPU as the program reads or writes
+    /// where they draw (`Pages`' hot pages).
+    hot: u64,
+    /// Frames since the hot pages last cooled.
+    frames: u32,
 }
+
+/// Frames a page read back from the GPU stays hot: about a second.
+const HOT_FRAMES: u32 = 60;
 
 impl Gpu {
     pub fn new(bytes: usize) -> Self {
@@ -88,6 +97,12 @@ impl Voodoo {
         // without a word to `pages`: a page the blit draws into or reads
         // must hold none of them (`mirror_sync` reads back the pages
         // under buffers that move).
+        // Where the program reads or writes the result, a blit on the CPU
+        // costs less than one on the GPU read back.
+        if self.gpu.get_mut().pages.hot_in(start, end) {
+            self.gpu.get_mut().hot += 1;
+            return false;
+        }
         let touches = |a: u32, b: u32| {
             key.is_some_and(|k| k.overlaps(a & !(PAGE - 1), b.div_ceil(PAGE) * PAGE))
         };
@@ -136,6 +151,60 @@ impl Voodoo {
         let key = self.mirror.as_ref()?.layout()?;
         let linear = !key.stride.tiled && key.stride.words as u32 * 2 == stride;
         (linear && key.color.contains(&at)).then_some(at / 2)
+    }
+
+    /// A frame of the card's picture went by: pages read back long
+    /// enough ago may be drawn on the GPU again.
+    pub(crate) fn gpu_frame(&mut self) {
+        let gpu = self.gpu.get_mut();
+        gpu.frames += 1;
+        if gpu.frames >= HOT_FRAMES {
+            gpu.frames = 0;
+            gpu.pages.cool();
+        }
+    }
+
+    /// 16-bit pixels written into buffers of the 3D engine's: each one's
+    /// byte address in the memory and its value. While the renderer
+    /// draws and the engine's drawing is held back, they go after that
+    /// drawing in the same queue, and to the renderer's pictures of the
+    /// buffers, without the software renderer drawing all that first:
+    /// what reads the memory later still finds them where they belong.
+    /// False, with nothing written, if any of them is not on a buffer's
+    /// pixel or nothing is held back: the caller writes them into the
+    /// memory itself.
+    pub fn write_buffer_pixels(&mut self, pixels: &[(u32, u16)]) -> bool {
+        if !self.deferring() || pixels.is_empty() {
+            return false;
+        }
+        self.mirror_sync();
+        let Some(key) = self.mirror.as_ref().and_then(|m| m.layout().copied()) else {
+            return false;
+        };
+        let mut words = Vec::with_capacity(pixels.len());
+        let mut placed = Vec::with_capacity(pixels.len());
+        let (mut low, mut high) = (u32::MAX, 0);
+        for &(at, value) in pixels {
+            let Some((dest, x, y)) = (at % 2 == 0).then(|| key.locate(at / 2)).flatten() else {
+                return false;
+            };
+            let row = u16::try_from(y).unwrap_or(u16::MAX);
+            words.push(Word { row, at: at / 2, value });
+            placed.push((dest, x, y, value));
+            (low, high) = (low.min(at), high.max(at + 2));
+        }
+        self.queue_words(&words);
+        // The texture units read the same memory.
+        for tmu in &mut self.tmu {
+            tmu.note_written(low, high);
+        }
+        if let Some(mirror) = &mut self.mirror {
+            for (dest, x, y, value) in placed {
+                mirror.pixel(dest, x, y, value, key.width);
+            }
+        }
+        self.display_dirty = true;
+        true
     }
 
     /// Record the dirty pages within bytes `start..end` for the renderer.
@@ -216,6 +285,7 @@ impl Voodoo {
         serde_json::json!({
             "linked": gpu.link.is_some(),
             "blits": gpu.blits,
+            "left_to_cpu": gpu.hot,
             "pages_read_back": gpu.read_back,
         })
     }

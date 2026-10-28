@@ -367,6 +367,7 @@ impl Voodoo {
     /// memory, which gets the pages shown that were written since it last
     /// had them (`pages`), first in the recording.
     pub(crate) fn banshee_scanout(&mut self, key: &LayoutKey) -> Option<Box<Scanout>> {
+        self.gpu_frame();
         let b = self.banshee.as_deref_mut()?;
         let dirty = std::mem::take(&mut b.dirty)
             | std::mem::take(&mut self.display_dirty)

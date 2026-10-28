@@ -15,6 +15,10 @@
 //!
 //! A page is never both dirty and newer on the GPU: the GPU only draws
 //! into pages it has.
+//!
+//! A page read back is hot for a while (`cool`): the program reads or
+//! writes it, and a 2D operation there is cheaper on the CPU than drawn
+//! on the GPU and read back again.
 
 /// Bytes a page, a row of the renderer's texture of the memory.
 pub const PAGE: u32 = 4096;
@@ -27,6 +31,8 @@ pub struct Pages {
     /// How many pages are newer on the GPU, so that the memory's
     /// accesses look no further while there are none.
     gpu_count: usize,
+    /// Pages read back since the last `cool`.
+    hot: Vec<u64>,
 }
 
 /// Add page `page` to `runs`, byte ranges of whole pages in order.
@@ -62,6 +68,7 @@ impl Pages {
             dirty: vec![0; words],
             gpu: vec![0; words],
             gpu_count: 0,
+            hot: vec![0; words],
         };
         p.mark_all();
         p
@@ -144,11 +151,24 @@ impl Pages {
         for page in self.span(start, end) {
             if get(&self.gpu, page) {
                 set(&mut self.gpu, page, false);
+                set(&mut self.hot, page, true);
                 self.gpu_count -= 1;
                 add_run(&mut runs, page);
             }
         }
         runs
+    }
+
+    /// Whether any of bytes `start..end` is on a page read back since the
+    /// last `cool`.
+    pub fn hot_in(&self, start: u32, end: u32) -> bool {
+        self.span(start, end).any(|p| get(&self.hot, p))
+    }
+
+    /// No page is hot any more: the program may have stopped reading
+    /// them.
+    pub fn cool(&mut self) {
+        self.hot.fill(0);
     }
 }
 
@@ -183,5 +203,17 @@ mod tests {
         // Read back, a page can be written again.
         p.mark(PAGE, PAGE + 1);
         assert_eq!(p.take_dirty(0, 8 * PAGE), [(PAGE, 2 * PAGE)]);
+    }
+
+    #[test]
+    fn pages_read_back_are_hot_until_they_cool() {
+        let mut p = Pages::new(8 * PAGE as usize);
+        p.take_dirty(0, 8 * PAGE);
+        p.drawn_on_gpu(PAGE, 3 * PAGE);
+        assert!(!p.hot_in(0, 8 * PAGE));
+        p.take_gpu(2 * PAGE, 3 * PAGE);
+        assert!(p.hot_in(2 * PAGE + 1, 2 * PAGE + 2) && !p.hot_in(0, 2 * PAGE));
+        p.cool();
+        assert!(!p.hot_in(0, 8 * PAGE));
     }
 }

@@ -1639,6 +1639,36 @@ fn held_back_drawing_leaves_the_memory_as_drawing_at_once() {
     );
 }
 
+/// Pixels written into a buffer while drawing is held back go after that
+/// drawing without drawing it first, and the memory ends up as when they
+/// are written in order.
+#[test]
+fn pixels_written_into_a_buffer_wait_behind_the_drawing() {
+    let mut gl = gl_bus(Board::Standard, 2);
+    let mut sw = bus(Board::Standard);
+    init(&mut sw);
+    let back = 150 * 0x1000;
+    let pixels: Vec<(u32, u16)> = (0..400u32)
+        .map(|i| (back + ((i * 7 % 480) * 640 + i * 13 % 640) * 2, (i.wrapping_mul(2654435761) >> 16) as u16))
+        .collect();
+    for bus in [&mut gl, &mut sw] {
+        frames(bus, 3);
+    }
+    take_mirror(&mut gl);
+    let before = status_of(&gl)["catch_ups"].clone();
+    assert!(gl.voodoo.as_mut().unwrap().write_buffer_pixels(&pixels));
+    assert_eq!(status_of(&gl)["catch_ups"], before, "drawn first");
+    let fb = sw.voodoo.as_ref().unwrap().frame_buffer();
+    for &(at, value) in &pixels {
+        fb.set(at as usize / 2, value);
+    }
+    for bus in [&mut gl, &mut sw] {
+        frames(bus, 2);
+    }
+    let picture = |bus: &Bus| bus.voodoo.as_ref().unwrap().frame_buffer().to_bytes();
+    assert!(picture(&gl) == picture(&sw));
+}
+
 /// Frame buffer write speed, with and without the OpenGL renderer's
 /// recording: `cargo test --release --test voodoo_tests benchmark_lfb --
 /// --ignored --nocapture`.
