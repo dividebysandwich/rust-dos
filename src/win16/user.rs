@@ -467,13 +467,15 @@ fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// GetActiveWindow: the system's active window, as Windows 3.1 has one
 /// for all its tasks, where USER32 gives only the calling thread's. With
-/// none, the desktop window: on a Windows desktop the shell's window is
+/// none, the shell's Program Manager window (made if it isn't there, as
+/// FindWindow makes it): on a Windows desktop the shell's window is
 /// active when no program's is, and 16-bit programs count on there being
 /// one (Metal Marines' setup asks whether it is the active program while
-/// it makes its first window).
+/// it makes its first window). On Windows 98 the setup started from the
+/// Run dialog gets Explorer's window.
 fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     match cpu.bus.win32.user.input.active {
-        0 => go(cpu, "GetDesktopWindow", &[]),
+        0 => Some(crate::win32::user32::progman::server(cpu)),
         active => Some(active),
     }
 }
