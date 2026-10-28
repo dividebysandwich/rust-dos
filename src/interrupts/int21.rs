@@ -2211,6 +2211,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             set_result(cpu, result.map(|(_, handle)| handle));
         }
 
+        // AH = 5Fh: the network redirector's functions (redirection
+        // mode, the redirection list, redirecting and cancelling
+        // devices), which go to a network that isn't there: CF set,
+        // AX=0001h, as MS-DOS answers without a network and DOSBox does.
+        // Left alone, CF stays clear, and Windows 98's DOS Setup, which
+        // compares the drive in its buffer with the entry it asked for
+        // and finds them the same, takes every drive for a network one
+        // and says it cannot create a temporary directory.
+        0x5F => set_result(cpu, Err(0x01)),
+
         // AH = 60h: Canonical ("true") name of DS:SI into ES:DI.
         0x60 => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
@@ -2451,4 +2461,23 @@ fn extended_free_space(cpu: &mut Cpu) -> Result<(), u16> {
     cpu.bus.guest_write_bytes(at, &info);
     cpu.set_ax(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::{Cpu, CpuFlags};
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_redirector_functions_fail_without_a_network() {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        for ax in [0x5F00, 0x5F02, 0x5F03] {
+            cpu.set_ax(ax);
+            cpu.set_bx(0);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+            crate::interrupts::handle_hle(&mut cpu, 0x21);
+            assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+            assert_eq!(cpu.ax(), 0x0001, "invalid function, AX={:04X}", ax);
+        }
+    }
 }

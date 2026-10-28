@@ -253,12 +253,21 @@ fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
     crate::interrupts::mscdex::install_device(bus, nul);
     crate::ems::install_device(bus, nul);
     bus.write_8(base + 0x43, 3); // 43: boot drive C:
+    bus.write_16(base + 0x45, extended_kb(bus)); // 45: extended memory
     // 63: whether upper memory is linked; 66: its first MCB, the one
     // that covers the memory below it; 68: where allocations search from.
     bus.write_8(base + 0x63, bus.umb.is_some_and(|u| u.linked) as u8);
     bus.write_16(base + 0x66, if bus.umb.is_some() { crate::mcb::umb_cover_seg(bus) } else { 0xFFFF });
     bus.write_16(base + 0x68, layout(bus).first_mcb);
     bus.write_8(address(DEVICE_RETF), 0xCB); // RETF for the driver entries
+}
+
+/// The extended memory DOS records in the List of Lists, in KB: what
+/// INT 15h AH=88h said when DOS started, before HIMEM.SYS took the memory
+/// and that call began to say 0 (`int15`). Windows 98's Setup takes the
+/// machine's memory from here, and says it needs 16 MB when it is 0.
+fn extended_kb(bus: &Bus) -> u16 {
+    ((bus.ram().len() >> 10).saturating_sub(1024)).min(0xFFFF) as u16
 }
 
 /// A device driver's header: the next driver, its attributes, its
@@ -468,5 +477,31 @@ fn load_current_directories(bus: &mut Bus) {
         if bus.disk.get_current_directory_of(drive).is_some_and(|current| current != dir) {
             bus.disk.set_current_directory(&format!("{}:\\{}", letter as char, dir));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::Cpu;
+    use std::path::PathBuf;
+
+    /// The extended memory in the List of Lists (INT 21h AH=52h) of a
+    /// machine with `mb` MB.
+    fn extended_kb(mb: usize) -> u16 {
+        let mut cpu = Cpu::with_memory(PathBuf::from("."), mb);
+        super::write(&mut cpu.bus);
+        cpu.set_ax(0x5200);
+        crate::interrupts::handle_hle(&mut cpu, 0x21);
+        let at = cpu.get_physical_addr(cpu.es(), cpu.bx()) + 0x45;
+        cpu.bus.read_16(at)
+    }
+
+    #[test]
+    fn the_list_of_lists_has_the_memory_above_1_mb() {
+        // Windows 98's Setup takes (KB >> 10) + 1 for the machine's MB,
+        // and wants at least 12.
+        assert_eq!(extended_kb(16), 15 * 1024);
+        assert_eq!(extended_kb(64), 63 * 1024);
+        assert_eq!(extended_kb(128), 0xFFFF, "a word, as INT 15h AH=88h gives");
     }
 }
