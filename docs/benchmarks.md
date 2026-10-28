@@ -34,8 +34,9 @@ Close other programs while it runs, and run it twice when a result is
 borderline: a laptop's power management, a virus scanner or a build in
 another terminal moves file system numbers by 10% or more.
 
-`cargo test --benches` runs each benchmark once, in a debug build, as a
-quick check that it still works.
+`cargo test --benches` runs each benchmark once, in the test profile's
+build (opt-level 1, with debug assertions), as a quick check that it
+still works.
 
 ## In CI
 

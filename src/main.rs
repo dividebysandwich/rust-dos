@@ -166,7 +166,13 @@ fn main() -> Result<(), String> {
     // it to the window. The textures are for SDL's renderer, which draws
     // where there is no OpenGL 3.
     let textures = std::cell::OnceCell::new();
-    let mut display = Display::open(&video_subsystem, "Rust DOS Emulator", &settings, &textures)?;
+    let mut display = Display::open(
+        &video_subsystem,
+        "Rust DOS Emulator",
+        &settings,
+        &textures,
+        args.hidden,
+    )?;
     // The picture on a screen in a 3D scene, in a headset or the window.
     let stage_notes = if settings.vr.mode == rust_dos::vr::VrMode::Off {
         Vec::new()
@@ -431,6 +437,9 @@ fn main() -> Result<(), String> {
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
+    // The host's pointer hidden over the window while the built-in
+    // Windows draws its own cursor in the picture.
+    let mut pointer_hidden = false;
     // A click the 3D scene took, whose release the machine doesn't see.
     let mut swallowed_click = false;
     let mut last_steer = std::time::Instant::now();
@@ -1216,6 +1225,17 @@ fn main() -> Result<(), String> {
             dbg.host_input(&cpu);
         }
 
+        // The built-in Windows' cursor is drawn in the picture where the
+        // host's pointer is, so that pointer would show twice. The settings
+        // window and the 3D scene keep the host's.
+        let hide_pointer = !ui.is_open()
+            && !display.every_frame()
+            && video::overlay::draws_windows_cursor(&cpu.bus);
+        if hide_pointer != pointer_hidden {
+            sdl_mouse.show_cursor(!hide_pointer);
+            pointer_hidden = hide_pointer;
+        }
+
         // The mouse in relative mode while flying, so that it doesn't stop
         // at the window's edges; Q and E move the camera down and up while
         // held.
@@ -1799,14 +1819,16 @@ fn main() -> Result<(), String> {
         // vertical retraces that passed, whether or not it polled port 3DAh.
         // The 3dfx card's picture from its memory, unless the OpenGL
         // renderer draws it and nothing looks at it: screenshots,
-        // recordings, the debugger, and overlays that mix with it.
+        // recordings, overlays that mix with it, and the debugger in
+        // deterministic mode. Otherwise the debugger sees what OpenGL
+        // drew, read back (`voodoo_picture` below).
         let voodoo_picture = !voodoo_gl_shown
             || screenshot
             || recorder.is_active()
             || video_recording.is_some()
             || ui.is_open()
             || ui.overlay_shown()
-            || dbg.wants_frame()
+            || (dbg.wants_frame() && det.is_some())
             || settings.monochrome.phosphor().is_some();
         if let Some(v) = &mut cpu.bus.voodoo {
             v.set_software_picture(voodoo_picture);
@@ -1817,7 +1839,7 @@ fn main() -> Result<(), String> {
             Zone::FrameCompose
         });
         cpu.bus.sync_display();
-        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
+        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
         if !voodoo_gl
             && !voodoo_picture
             && let Some(v) = &mut cpu.bus.voodoo
@@ -2049,7 +2071,9 @@ fn main() -> Result<(), String> {
                 composed_rows = 0..height as usize;
             }
             osd.draw(&mut screen);
-            if det.is_none() {
+            // While OpenGL shows the 3dfx card's picture, the debugger's
+            // is read back from it once it is drawn (below).
+            if det.is_none() && !voodoo_gl {
                 debug_frame!();
             }
 
@@ -2076,6 +2100,18 @@ fn main() -> Result<(), String> {
                 (settings.shader == video::shader::Shader::Xbrz).then_some(&cached_frame),
             )?;
             last_screen_key = Some(screen_key);
+            if det.is_none() && voodoo_gl {
+                // The frame counts for the debugger's fps whether or not
+                // anything wants its picture.
+                if !dbg.wants_frame() {
+                    dbg.count_frame();
+                } else {
+                    match display.voodoo_picture() {
+                        Some(picture) => dbg.capture_frame(&picture),
+                        None => dbg.capture_frame(&screen),
+                    }
+                }
+            }
         }
 
         profile::set_host(Zone::Frontend);
@@ -2168,6 +2204,10 @@ fn shut_down(
     if settings.monitor_effects != video::power::MonitorEffects::Off {
         power_off(power, display, screen, &mut cpu.bus, settings.monitor_effects)?;
     }
+
+    // The loops of a program still running get their summaries.
+    rust_dos::win32::trace::flush(cpu);
+    cpu.bus.flush_log();
 
     // The journal ends, and the debug server's clients get what they
     // waited for.

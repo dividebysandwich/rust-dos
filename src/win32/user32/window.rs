@@ -232,6 +232,36 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
     r
 }
 
+/// The frame a maximized window puts off the screen: what
+/// AdjustWindowRectEx puts around an empty rectangle, without the
+/// caption. A WS_OVERLAPPEDWINDOW keeps its 4-pixel thick frame, so it
+/// is maximized at (-4, -4), as on Windows 98.
+///
+/// A child window (an MDI child, say) takes WS_BORDER out of a
+/// WS_CAPTION style first, leaving WS_DLGFRAME | WS_THICKFRAME, which
+/// AdjustWindowRectEx gives no thick frame. Wine's user32 win.c tests
+/// check that on Windows a maximized child with WS_CAPTION |
+/// WS_THICKFRAME fills its parent's client area exactly.
+fn max_frame(style: u32, ex: u32) -> Rect {
+    if style & WS_CHILD != 0 {
+        let framed = if style & WS_CAPTION == WS_CAPTION {
+            style & !WS_BORDER
+        } else {
+            style
+        };
+        return adjust(Rect::default(), framed, ex, false);
+    }
+    let mut frame = adjust(Rect::default(), style, ex, false);
+    if style & WS_CAPTION == WS_CAPTION {
+        frame.top += if ex & WS_EX_TOOLWINDOW != 0 {
+            super::sysparams::metric(51)
+        } else {
+            super::sysparams::metric(4)
+        };
+    }
+    frame
+}
+
 /// The client area for the window rectangle `r`: what DefWindowProcA's
 /// WM_NCCALCSIZE makes.
 pub fn client_for(state: &State, hwnd: u32, r: Rect) -> Rect {
@@ -407,7 +437,7 @@ pub fn unlink(state: &mut State, hwnd: u32) {
 
 /// The desktop window, which every top-level window is a child of.
 pub fn create_desktop(cpu: &mut Cpu) {
-    let (w, h) = super::sysparams::screen_size();
+    let (w, h) = super::sysparams::screen_size(cpu);
     let class = super::class::find_system(user(cpu), "#32769").unwrap_or(0);
     let proc = user(cpu)
         .classes
@@ -540,7 +570,7 @@ pub fn create_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     // CW_USEDEFAULT: an overlapped window gets a place and three
     // quarters of the screen; a popup or child window none.
-    let (sw, sh) = super::sysparams::screen_size();
+    let (sw, sh) = super::sysparams::screen_size(cpu);
     let (mut x, mut y, mut cx, mut cy) = (x as i32, y as i32, cx as i32, cy as i32);
     let default = CW_USEDEFAULT as i32;
     if style & (WS_CHILD | WS_POPUP) == 0 {
@@ -918,20 +948,16 @@ pub fn send(hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
 /// does: the maximized size and place, and the tracking limits.
 pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
     let m = super::sysparams::metric;
+    let (sw, sh) = super::sysparams::screen_size(cpu);
+    // SM_CXMAXTRACK and SM_CYMAXTRACK.
+    let max_track = [59, 60].map(|i| super::sysparams::screen_metric(cpu, i) as u32);
     let state = user(cpu);
     let Some(w) = state.window(hwnd) else {
         return;
     };
     let (style, ex) = (w.style, w.ex_style);
-    let (sw, sh) = super::sysparams::screen_size();
-    // The maximized window's frame is off the screen; a caption's
-    // border doesn't count.
-    let framed = if style & WS_CAPTION == WS_CAPTION {
-        style & !WS_BORDER
-    } else {
-        style
-    };
-    let frame = adjust(Rect::default(), framed, ex, false);
+    // The maximized window's frame is off the screen.
+    let frame = max_frame(style, ex);
     let (xinc, yinc) = (-frame.left, -frame.top);
     let (max_w, max_h) = if style & WS_CHILD != 0 {
         let parent = state.window(w.parent).map(|p| p.client).unwrap_or_default();
@@ -954,8 +980,8 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
         (-yinc) as u32,
         min_w as u32,
         min_h as u32,
-        m(59) as u32,
-        m(60) as u32,
+        max_track[0],
+        max_track[1],
     ];
     write_words(cpu, at, &words);
 }
@@ -965,6 +991,7 @@ pub fn write_min_max(cpu: &mut Cpu, hwnd: u32, at: u32) {
 /// activation leave it.
 pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     super::message::kill_window_timers(cpu, hwnd);
+    crate::win32::opengl32::wgl::window_destroyed(cpu, hwnd);
     let state = user(cpu);
     let Some(slot) = super::slot(hwnd) else {
         return;
@@ -1497,28 +1524,23 @@ fn minimize(cpu: &mut Cpu, hwnd: u32) -> Rect {
     let (x, y) = if w.icon_pos.0 >= 0 {
         w.icon_pos
     } else {
-        let (_, sh) = super::sysparams::screen_size();
+        let (_, sh) = super::sysparams::screen_size(cpu);
         (0, sh - m(58))
     };
     Rect::sized(x, y, m(57), m(58))
 }
 
 fn maximize(cpu: &mut Cpu, hwnd: u32) -> Rect {
+    let (sw, sh) = super::sysparams::screen_size(cpu);
     let state = user(cpu);
     let Some(w) = state.window(hwnd) else {
         return Rect::default();
     };
     let (style, ex, parent) = (w.style, w.ex_style, w.parent);
-    let framed = if style & WS_CAPTION == WS_CAPTION {
-        style & !WS_BORDER
-    } else {
-        style
-    };
-    let frame = adjust(Rect::default(), framed, ex, false);
+    let frame = max_frame(style, ex);
     let area = if style & WS_CHILD != 0 {
         state.window(parent).map(|p| p.client).unwrap_or_default()
     } else {
-        let (sw, sh) = super::sysparams::screen_size();
         Rect::new(0, 0, sw, sh)
     };
     let area = Rect::sized(0, 0, area.width(), area.height());
@@ -1707,6 +1729,12 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                // What siblings above it cover, which a raise shows.
+                let was_covered = if was_visible && flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0 {
+                    super::paint::covered(state, hwnd)
+                } else {
+                    Region::new()
+                };
                 let Some(w) = state.window_mut(hwnd) else {
                     return Next::Done(FALSE);
                 };
@@ -1742,6 +1770,15 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let now_visible = user(cpu).is_visible(hwnd);
                 if flags & SWP_NOREDRAW == 0 || flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW) != 0 {
                     super::paint::moved(cpu, hwnd, old_screen, was_visible, now_visible, flags);
+                }
+                // Moved or shown, it is painted whole; raised in place,
+                // where the windows above it were.
+                if now_visible
+                    && flags & SWP_NOREDRAW == 0
+                    && !was_covered.is_empty()
+                    && user(cpu).screen_rect(hwnd) == old_screen
+                {
+                    super::paint::raised(cpu, hwnd, &was_covered);
                 }
                 if flags & SWP_HIDEWINDOW != 0 {
                     let state = user(cpu);
@@ -2491,6 +2528,18 @@ pub fn find_window_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         Some(super::bytes_at(cpu, title)?)
     };
     let parent = if parent == 0 { DESKTOP } else { parent };
+    // Program Manager's window is there for a program that looks for it
+    // as well as for one that broadcasts WM_DDE_INITIATE.
+    let progman = match &class {
+        Some(Name::Text(name)) => name.eq_ignore_ascii_case(super::progman::CLASS),
+        Some(Name::Id(_)) => false,
+        None => title
+            .as_ref()
+            .is_some_and(|t| t.eq_ignore_ascii_case(super::progman::TITLE)),
+    };
+    if parent == DESKTOP && progman {
+        super::progman::server(cpu);
+    }
     let state = user(cpu);
     let Some(p) = state.window(parent) else {
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
@@ -3113,3 +3162,78 @@ crate::state_fields!(Window {
     last_popup,
     help_id
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows 98 SE maximizes a WS_OVERLAPPEDWINDOW with a menu bar at
+    /// (-4, -4), its 4-pixel thick frame off the screen, and its client
+    /// area starts at (0, 38): Win32 and Win16 programs alike.
+    #[test]
+    fn a_maximized_overlapped_window_hides_its_thick_frame() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let w = Window {
+            style: WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
+            id: 1,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let at = 0x8000;
+        write_min_max(&mut cpu, hwnd, at);
+        let mm = read_words(&mut cpu, at, 6);
+        assert_eq!((mm[2], mm[3]), (648, 488), "the maximized size");
+        assert_eq!(
+            (mm[4] as i32, mm[5] as i32),
+            (-4, -4),
+            "the maximized place"
+        );
+        let c = client_for(user(&mut cpu), hwnd, Rect::new(-4, -4, 644, 484));
+        assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
+    }
+
+    /// A caption without a thick frame keeps its 3-pixel dialog frame
+    /// off the screen.
+    #[test]
+    fn a_maximized_dialog_frame_window_hides_3_pixels() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let w = Window {
+            style: WS_CAPTION | WS_SYSMENU,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let at = 0x8000;
+        write_min_max(&mut cpu, hwnd, at);
+        let mm = read_words(&mut cpu, at, 6);
+        assert_eq!(
+            (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
+            (646, 486, -3, -3)
+        );
+    }
+
+    /// A child with WS_CAPTION | WS_THICKFRAME, an MDI child say, is
+    /// maximized to its parent's client area with no frame off it, as
+    /// Wine's win.c tests check on Windows.
+    #[test]
+    fn a_maximized_thick_frame_child_fills_its_parent() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let parent = Window {
+            client: Rect::new(0, 0, 374, 235),
+            ..Window::default()
+        };
+        let parent = user(&mut cpu).new_window(parent).expect("a parent");
+        let w = Window {
+            style: WS_CHILD | WS_CAPTION | WS_THICKFRAME,
+            parent,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let at = 0x8000;
+        write_min_max(&mut cpu, hwnd, at);
+        let mm = read_words(&mut cpu, at, 6);
+        assert_eq!(
+            (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
+            (374, 235, 0, 0)
+        );
+    }
+}

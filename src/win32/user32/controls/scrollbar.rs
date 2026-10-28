@@ -465,7 +465,7 @@ pub fn draw_nc(cpu: &mut Cpu, hwnd: u32, hdc: u32, bar: u32, rect: Rect) {
     if !shown || rect.is_empty() {
         return;
     }
-    let brush = button::default_color(cpu, hdc, WM_CTLCOLORSCROLLBAR);
+    let brush = button::default_color(cpu, hwnd, hdc, WM_CTLCOLORSCROLLBAR);
     draw_bar(cpu, hdc, rect, bar == SB_VERT, &si, brush);
 }
 
@@ -980,7 +980,7 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let brush = if value != 0 {
                 value
             } else {
-                button::default_color(cpu, hdc, WM_CTLCOLORSCROLLBAR)
+                button::default_color(cpu, hwnd, hdc, WM_CTLCOLORSCROLLBAR)
             };
             if let (Some(si), Some((r, vertical))) =
                 (info(cpu, hwnd, SB_CTL, true), bar_rect(cpu, hwnd, SB_CTL))
@@ -1503,7 +1503,7 @@ fn event(cpu: &mut Cpu, t: &mut Task, brush: u32) {
             let brush = if brush != 0 {
                 brush
             } else {
-                button::default_color(cpu, hdc, WM_CTLCOLORSCROLLBAR)
+                button::default_color(cpu, hwnd, hdc, WM_CTLCOLORSCROLLBAR)
             };
             draw_bar(cpu, hdc, r, vertical, &si, brush);
         }

@@ -481,6 +481,47 @@ fn a_range_set_after_the_mode_stays() {
 }
 
 #[test]
+fn a_range_of_a_narrow_modes_width_spans_its_pixels() {
+    // Dark Sun 2 sets x 0-319 in mode 13h and draws its cursor at the
+    // driver's x: the host pointer spans those 320 pixels, so the right
+    // edge of the window is x 319 and its middle 160.
+    use rust_dos::video::{Frame, overlay};
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    assert_eq!(
+        cpu.bus.mouse.virtual_screen(&cpu.bus),
+        (640, 200),
+        "the driver's default"
+    );
+    range(&mut cpu, 0x0007, 0, 319);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (320, 200));
+    let frame = Frame::new(640, 400);
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (320, 200)),
+        (160, 100)
+    );
+    assert_eq!(
+        overlay::frame_to_mouse(&cpu.bus, &frame, (639, 399)),
+        (319, 199)
+    );
+    assert_eq!(
+        overlay::frame_motion_to_mouse(&cpu.bus, &frame, (2.0, 2.0)),
+        (1.0, 1.0)
+    );
+
+    // Daggerfall's 0-310 is that screen too.
+    range(&mut cpu, 0x0007, 0, 310);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (320, 200));
+    // A range that doesn't start at 0, or ends well short of the width,
+    // is a window in the driver's 640.
+    range(&mut cpu, 0x0007, 8, 319);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 200));
+    range(&mut cpu, 0x0007, 0, 199);
+    assert_eq!(cpu.bus.mouse.virtual_screen(&cpu.bus), (640, 200));
+}
+
+#[test]
 fn a_font_load_that_changes_the_rows_gives_the_new_range() {
     // 80x25, then the 8x8 font for 80x50: CuteMouse takes AH=11h AL=10h-1Fh
     // for a mode set.

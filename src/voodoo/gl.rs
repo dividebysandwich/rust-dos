@@ -16,10 +16,14 @@
 use glow::HasContext;
 use crate::video::Frame;
 use crate::video::shader::Glsl;
+use super::gpu::GpuLink;
 use super::mirror::{
-    Command, Draw, Fill, Frame as Recording, Pixels, Scanout, Snapshot, Surface, Texture, Vertex,
+    Blit, BlitSource, Command, Convert, Draw, Fill, Frame as Recording, Key, Pixels, Scanout,
+    Snapshot, Surface, Texture, Vertex,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 const TRIANGLE_VERT: &str = include_str!("gl/triangle.vert");
 const TRIANGLE_FRAG: &str = include_str!("gl/triangle.frag");
@@ -29,12 +33,35 @@ const DEPTH_FRAG: &str = include_str!("gl/depth.frag");
 const FILL_FRAG: &str = include_str!("gl/fill.frag");
 const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 const BANSHEE_FRAG: &str = include_str!("gl/banshee.frag");
+const BLIT_FRAG: &str = include_str!("gl/blit.frag");
 
 mod uniforms;
-use uniforms::{Banshee, FillQuad, Locations, Quad, Triangle};
+use uniforms::{Banshee, Blit2d, FillQuad, Locations, Quad, Triangle};
 
-/// Bytes a row of a texture of the card's memory (`Memory`).
-const MEMORY_ROW: usize = 4096;
+/// Bytes a row of the textures of the card's memory (`CardMemory`) at
+/// most: a page (`pages::PAGE`).
+const MEMORY_ROW: u32 = 4096;
+
+/// Limits below what the host's OpenGL allows, to try the renderer as a
+/// smaller driver runs it: `RUST_DOS_GL_MAX_TEXTURE_SIZE=<texels>` lowers
+/// the largest texture it assumes, and `RUST_DOS_GL_NO_BLIT=1` leaves out
+/// the program of the 2D operations, as if it didn't compile.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Limits {
+    pub max_texture_size: Option<u32>,
+    pub no_blit: bool,
+}
+
+impl Limits {
+    pub fn from_env() -> Self {
+        Self {
+            max_texture_size: std::env::var("RUST_DOS_GL_MAX_TEXTURE_SIZE")
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
+            no_blit: std::env::var("RUST_DOS_GL_NO_BLIT").is_ok_and(|v| v != "0"),
+        }
+    }
+}
 
 /// The card's depth functions as OpenGL's.
 const DEPTH_FUNCS: [u32; 8] =
@@ -132,97 +159,363 @@ struct GlTexture {
     anisotropy: Option<f32>,
 }
 
-/// Bytes of the card's memory as an integer texture, rows of
-/// `MEMORY_ROW`, and how many bytes it has.
-struct Memory {
-    texture: glow::Texture,
-    rows: usize,
-    len: usize,
+/// How `CardMemory` lays the card's memory out in the layers of a 2D
+/// array texture: byte `a` is texel `a % width` of row `a / width % rows`
+/// of layer `a / (width * rows)`, all of them powers of two. A row is
+/// `MEMORY_ROW` bytes, and a layer as many rows as OpenGL allows, so with
+/// textures of 4096 texels or more 16 MB is one layer of 4096 rows. Under
+/// a smaller limit (OpenGL 3 promises only 1024) the rows are narrower
+/// and the memory takes several layers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MemoryLayout {
+    /// The bytes a row and a layer, as powers of two.
+    row_bits: u32,
+    layer_bits: u32,
+    layers: u32,
 }
 
-impl Memory {
-    fn new(gl: &glow::Context) -> Result<Self, String> {
-        let mut memory = Self {
-            texture: texture(gl, glow::NEAREST)?,
-            rows: 0,
-            len: 0,
+impl MemoryLayout {
+    /// The layout of `size` bytes in textures of at most `most` texels
+    /// across and down, with at most `layers` layers.
+    fn new(size: u32, most: u32, layers: u32) -> Result<Self, String> {
+        let side = 1 << most.max(1).ilog2();
+        let width = MEMORY_ROW.min(side);
+        let rows = size.div_ceil(width).max(1).next_power_of_two();
+        let layer_rows = rows.min(side);
+        let layout = Self {
+            row_bits: width.ilog2(),
+            layer_bits: width.ilog2() + layer_rows.ilog2(),
+            layers: rows / layer_rows,
         };
-        memory.upload(gl, &[]);
+        if layout.layers > layers {
+            return Err(format!(
+                "OpenGL's textures have at most {most} texels a side and {layers} layers, \
+                 too few for the card's memory of {size} bytes"
+            ));
+        }
+        Ok(layout)
+    }
+
+    fn width(self) -> u32 {
+        1 << self.row_bits
+    }
+
+    fn layer_rows(self) -> u32 {
+        1 << (self.layer_bits - self.row_bits)
+    }
+
+    /// The rows of all the layers.
+    fn rows(self) -> u32 {
+        self.layers * self.layer_rows()
+    }
+
+    /// Rows `first..last` of the memory as the rows of the layers they
+    /// are in: each layer's number and its rows `first..last`.
+    fn spans(self, first: u32, last: u32) -> impl Iterator<Item = (u32, u32, u32)> {
+        let n = self.layer_rows();
+        let last = last.min(self.rows());
+        (first / n..last.div_ceil(n)).filter_map(move |layer| {
+            let (top, bottom) = (first.max(layer * n), last.min(layer * n + n));
+            (top < bottom).then(|| (layer, top - layer * n, bottom - layer * n))
+        })
+    }
+
+    /// `spans` of rows `first..last`, each with the bytes it takes of
+    /// those rows' bytes in order.
+    fn parts(
+        self,
+        first: u32,
+        last: u32,
+    ) -> impl Iterator<Item = (u32, u32, u32, std::ops::Range<usize>)> {
+        let (n, w) = (self.layer_rows(), self.width() as usize);
+        self.spans(first, last).map(move |(layer, top, bottom)| {
+            let from = (layer * n + top - first) as usize * w;
+            (layer, top, bottom, from..from + (bottom - top) as usize * w)
+        })
+    }
+
+    /// What the shaders' `u_mem_layout` takes for memory of `size`
+    /// bytes.
+    fn uniform(self, size: u32) -> [i32; 3] {
+        [
+            size.max(1) as i32 - 1,
+            self.row_bits as i32,
+            self.layer_bits as i32,
+        ]
+    }
+}
+
+/// A Banshee's or Voodoo3's memory as an integer texture array of bytes
+/// (`MemoryLayout`), which the picture is composed from.
+/// `Command::Memory` brings it the pages the card's memory changed, and
+/// 2D operations draw into it (`blit`) through a framebuffer a layer,
+/// reading what was there before from a copy of the rows they read
+/// (`copy`).
+struct CardMemory {
+    texture: glow::Texture,
+    copy: glow::Texture,
+    /// A framebuffer drawing into each layer of `texture`, and of `copy`.
+    fbos: Vec<glow::Framebuffer>,
+    copy_fbos: Vec<glow::Framebuffer>,
+    /// The card's memory in bytes, which the textures have rows for, and
+    /// how they hold it.
+    size: u32,
+    layout: MemoryLayout,
+    /// OpenGL's largest texture: texels a side, and layers.
+    most: (u32, u32),
+}
+
+impl CardMemory {
+    fn new(gl: &glow::Context, most: (u32, u32)) -> Result<Self, String> {
+        let layout = MemoryLayout::new(MEMORY_ROW, most.0, most.1)?;
+        let texture = texture_array(gl)?;
+        let copy = match texture_array(gl) {
+            Ok(copy) => copy,
+            Err(e) => {
+                // SAFETY: see `VoodooGl`.
+                unsafe { gl.delete_texture(texture) };
+                return Err(e);
+            }
+        };
+        let mut memory = Self {
+            texture,
+            copy,
+            fbos: Vec::new(),
+            copy_fbos: Vec::new(),
+            size: 0,
+            layout,
+            most,
+        };
+        // What was made goes again when the memory can't be drawn into.
+        if let Err(e) = memory.allocate(gl, MEMORY_ROW) {
+            memory.delete(gl);
+            return Err(e);
+        }
         Ok(memory)
     }
 
-    fn upload(&mut self, gl: &glow::Context, bytes: &[u8]) {
-        let rows = bytes.len().div_ceil(MEMORY_ROW).max(1);
-        let full = bytes.len() / MEMORY_ROW;
-        let put = |y: usize, rows: usize, data: &[u8]| {
-            let pixels = glow::PixelUnpackData::Slice(Some(data));
-            let (w, y, h) = (MEMORY_ROW as i32, y as i32, rows as i32);
-            let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
+    /// Rows for `size` bytes, their contents not yet known. When OpenGL
+    /// can't make them, the memory has no rows (`usable`): nothing goes
+    /// into it or is read back, and the card does its 2D operations in
+    /// software.
+    fn allocate(&mut self, gl: &glow::Context, size: u32) -> Result<(), String> {
+        self.size = size;
+        let made = MemoryLayout::new(size, self.most.0, self.most.1)
+            .and_then(|layout| self.storage(gl, layout).map(|()| layout));
+        match made {
+            Ok(layout) => {
+                self.layout = layout;
+                Ok(())
+            }
+            Err(e) => {
+                self.layout.layers = 0;
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether the memory has its rows (`allocate`).
+    fn usable(&self) -> bool {
+        self.layout.layers > 0
+    }
+
+    /// The textures and framebuffers for `layout`.
+    fn storage(&mut self, gl: &glow::Context, layout: MemoryLayout) -> Result<(), String> {
+        let (w, h) = (layout.width() as i32, layout.layer_rows() as i32);
+        let layers = layout.layers as usize;
+        let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            for (texture, fbos) in [
+                (self.texture, &mut self.fbos),
+                (self.copy, &mut self.copy_fbos),
+            ] {
+                let none = glow::PixelUnpackData::Slice(None);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(texture));
+                let (target, r8ui) = (glow::TEXTURE_2D_ARRAY, glow::R8UI as i32);
+                gl.tex_image_3d(target, 0, r8ui, w, h, layers as i32, 0, format, kind, none);
+                for fbo in fbos.drain(layers.min(fbos.len())..) {
+                    gl.delete_framebuffer(fbo);
+                }
+                while fbos.len() < layers {
+                    fbos.push(gl.create_framebuffer()?);
+                }
+                for (layer, &fbo) in fbos.iter().enumerate() {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                    let (target, at, layer) =
+                        (glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, layer as i32);
+                    gl.framebuffer_texture_layer(target, at, Some(texture), 0, layer);
+                    let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                    if status != glow::FRAMEBUFFER_COMPLETE {
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                        return Err(format!(
+                            "the card's memory can't be drawn into ({status:04X}h)"
+                        ));
+                    }
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+        Ok(())
+    }
+
+    /// The row byte `a` is in.
+    fn row(&self, a: u32) -> u32 {
+        a >> self.layout.row_bits
+    }
+
+    /// Copy rows `first..last` into the copy the 2D operations read.
+    fn copy_rows(&self, gl: &glow::Context, first: u32, last: u32) {
+        let w = self.layout.width() as i32;
+        for (layer, top, bottom) in self.layout.spans(first, last) {
+            let (top, bottom) = (top as i32, bottom as i32);
+            let layer = layer as usize;
             // SAFETY: see `VoodooGl`.
-            unsafe { gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, y, w, h, format, kind, pixels) };
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[layer]));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.copy_fbos[layer]));
+                let (bits, nearest) = (glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                gl.blit_framebuffer(0, top, w, bottom, 0, top, w, bottom, bits, nearest);
+            }
+        }
+        // SAFETY: see `VoodooGl`.
+        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+    }
+
+    /// Bytes from byte `at` on (which starts a page) into `out`, whole
+    /// pages. False, with `out` as it was, if the texture hasn't them all.
+    fn read(&self, gl: &glow::Context, at: u32, out: &mut [u8]) -> bool {
+        let w = self.layout.width() as usize;
+        let (first, rows) = (at as usize / w, out.len() / w);
+        let whole = (at as usize).is_multiple_of(w) && out.len().is_multiple_of(w);
+        if !whole || first + rows > self.layout.rows() as usize {
+            return false;
+        }
+        let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
+        let parts = self.layout.parts(first as u32, (first + rows) as u32);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            for (layer, top, bottom, bytes) in parts {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbos[layer as usize]));
+                gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                let pixels = glow::PixelPackData::Slice(Some(&mut out[bytes]));
+                let (y, h) = (top as i32, (bottom - top) as i32);
+                gl.read_pixels(0, y, w as i32, h, format, kind, pixels);
+            }
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        true
+    }
+
+    /// `bytes` of a memory of `size` bytes, from byte `at` on, which
+    /// starts a page.
+    fn put(&mut self, gl: &glow::Context, size: u32, at: u32, bytes: &[u8]) {
+        if size != self.size
+            && let Err(e) = self.allocate(gl, size)
+        {
+            eprintln!("[DISPLAY] {e}: 2D operations stay on the CPU");
+            return;
+        }
+        let layout = self.layout;
+        let w = layout.width() as usize;
+        let first = at as usize / w;
+        let rows = (size as usize).div_ceil(w).saturating_sub(first);
+        let bytes = &bytes[..bytes.len().min(rows * w)];
+        let full = bytes.len() / w;
+        let put = |first: usize, data: &[u8]| {
+            let last = first + data.len() / w;
+            for (layer, top, bottom, bytes) in layout.parts(first as u32, last as u32) {
+                let pixels = glow::PixelUnpackData::Slice(Some(&data[bytes]));
+                let (y, h, z) = (top as i32, (bottom - top) as i32, layer as i32);
+                let (target, format, kind) = (
+                    glow::TEXTURE_2D_ARRAY,
+                    glow::RED_INTEGER,
+                    glow::UNSIGNED_BYTE,
+                );
+                // SAFETY: see `VoodooGl`.
+                unsafe {
+                    gl.tex_sub_image_3d(target, 0, 0, y, z, w as i32, h, 1, format, kind, pixels)
+                };
+            }
         };
         // SAFETY: see `VoodooGl`.
         unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
-            if rows != self.rows {
-                let none = glow::PixelUnpackData::Slice(None);
-                let (w, h) = (MEMORY_ROW as i32, rows as i32);
-                let (format, kind) = (glow::RED_INTEGER, glow::UNSIGNED_BYTE);
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::R8UI as i32,
-                    w,
-                    h,
-                    0,
-                    format,
-                    kind,
-                    none,
-                );
-                self.rows = rows;
-            }
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(self.texture));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         }
         if full > 0 {
-            put(0, full, &bytes[..full * MEMORY_ROW]);
+            put(first, &bytes[..full * w]);
         }
-        if bytes.len() > full * MEMORY_ROW {
-            let mut last = bytes[full * MEMORY_ROW..].to_vec();
-            last.resize(MEMORY_ROW, 0);
-            put(full, 1, &last);
+        if bytes.len() > full * w {
+            let mut last = bytes[full * w..].to_vec();
+            last.resize(w, 0);
+            put(first + full, &last);
         }
         // SAFETY: see `VoodooGl`.
         unsafe { gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4) };
-        self.len = bytes.len();
+    }
+
+    fn delete(&mut self, gl: &glow::Context) {
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.delete_texture(self.texture);
+            gl.delete_texture(self.copy);
+            for fbo in self.fbos.drain(..).chain(self.copy_fbos.drain(..)) {
+                gl.delete_framebuffer(fbo);
+            }
+        }
     }
 }
 
 /// What composes a Banshee's or Voodoo3's picture (`compose`): the
-/// program, the memory its desktop and overlay show, its cursor's planes
-/// and its CLUT as textures, and the texture of what the frame has over
-/// the picture.
+/// program, the card's memory, its cursor's planes and its CLUT as
+/// textures, and the texture of what the frame has over the picture.
+/// The program of the 2D operations (`blit`), or why there is none: the
+/// picture is composed without it, and the card does its 2D operations
+/// in software.
 struct BansheeGl {
     program: Program<Banshee>,
-    desktop: Memory,
-    overlay: Memory,
+    blit: Result<Program<Blit2d>, String>,
+    memory: CardMemory,
     cursor: glow::Texture,
     clut: glow::Texture,
     screen: Option<(glow::Texture, (u32, u32))>,
 }
 
 impl BansheeGl {
-    fn new(gl: &glow::Context, glsl: Glsl) -> Result<Self, String> {
+    fn new(gl: &glow::Context, glsl: Glsl, limits: Limits) -> Result<Self, String> {
+        // SAFETY: see `VoodooGl`.
+        let (side, layers) = unsafe {
+            let side = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(1) as u32;
+            let layers = gl.get_parameter_i32(glow::MAX_ARRAY_TEXTURE_LAYERS).max(1) as u32;
+            let side = limits.max_texture_size.map_or(side, |m| m.clamp(1, side));
+            (side, layers)
+        };
+        // All of the card's memory has to fit, not only what it has now.
+        MemoryLayout::new(super::banshee::MEMORY as u32, side, layers)?;
         let program: Program<Banshee> = compile(gl, glsl, QUAD_VERT, BANSHEE_FRAG, &[])?;
+        let blit: Result<Program<Blit2d>, String> = if limits.no_blit {
+            Err("RUST_DOS_GL_NO_BLIT is set".to_string())
+        } else {
+            compile(gl, glsl, QUAD_VERT, BLIT_FRAG, &[])
+        };
         // SAFETY: see `VoodooGl`.
         unsafe {
+            if let Ok(blit) = &blit {
+                gl.use_program(Some(blit.program));
+                for (name, unit) in [("u_mem", 0), ("u_buf", 1)] {
+                    gl.uniform_1_i32(gl.get_uniform_location(blit.program, name).as_ref(), unit);
+                }
+            }
             gl.use_program(Some(program.program));
             for (name, unit) in [
-                ("u_desk_mem", 0),
+                ("u_mem", 0),
                 ("u_desk_buf", 1),
-                ("u_ovl_mem", 2),
-                ("u_ovl_buf", 3),
-                ("u_cursor", 4),
-                ("u_clut", 5),
+                ("u_ovl_buf", 2),
+                ("u_cursor", 3),
+                ("u_clut", 4),
             ] {
                 gl.uniform_1_i32(
                     gl.get_uniform_location(program.program, name).as_ref(),
@@ -259,8 +552,8 @@ impl BansheeGl {
             );
             Ok(Self {
                 program,
-                desktop: Memory::new(gl)?,
-                overlay: Memory::new(gl)?,
+                blit,
+                memory: CardMemory::new(gl, (side, layers))?,
                 cursor,
                 clut,
                 screen: None,
@@ -272,12 +565,11 @@ impl BansheeGl {
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.delete_program(self.program.program);
-            for t in [
-                self.desktop.texture,
-                self.overlay.texture,
-                self.cursor,
-                self.clut,
-            ] {
+            if let Ok(blit) = &self.blit {
+                gl.delete_program(blit.program);
+            }
+            self.memory.delete(gl);
+            for t in [self.cursor, self.clut] {
                 gl.delete_texture(t);
             }
             if let Some((t, _)) = self.screen.take() {
@@ -334,17 +626,60 @@ pub struct VoodooGl {
     /// textures.
     scanout: Option<Box<Scanout>>,
     banshee: Result<BansheeGl, String>,
+    /// Commands the card handed over before the frame ended
+    /// (`run_early`) since the last frame.
+    ran_early: bool,
+}
+
+/// The renderer and its context as the card reaches them between frames
+/// (`gpu::GpuLink`), shared with the front end that shows the picture.
+/// The renderer is None while there is none.
+pub struct SharedGl {
+    pub gl: Rc<glow::Context>,
+    pub renderer: Rc<RefCell<Option<VoodooGl>>>,
+}
+
+impl GpuLink for SharedGl {
+    fn ready(&self) -> bool {
+        let renderer = self.renderer.borrow();
+        let ready = |b: &BansheeGl| b.blit.is_ok() && b.memory.usable();
+        renderer.as_ref().is_some_and(|r| r.banshee.as_ref().is_ok_and(ready))
+    }
+
+    fn run(&mut self, commands: Vec<Command>) {
+        if let Some(renderer) = self.renderer.borrow_mut().as_mut() {
+            renderer.run_early(&self.gl, &commands);
+        }
+    }
+
+    fn read(&mut self, at: u32, out: &mut [u8]) -> bool {
+        let renderer = self.renderer.borrow();
+        renderer.as_ref().is_some_and(|r| r.read_memory(&self.gl, at, out))
+    }
 }
 
 impl VoodooGl {
     /// Draw at `scale` times the card's size with `samples` a pixel (as
-    /// many as OpenGL has at most), and the requested texture anisotropy.
+    /// many as OpenGL has at most), and the requested texture anisotropy,
+    /// within the `Limits` the environment sets.
     pub fn new(
         gl: &glow::Context,
         glsl: Glsl,
         scale: u32,
         samples: u32,
         anisotropy: u32,
+    ) -> Result<Self, String> {
+        Self::with_limits(gl, glsl, scale, samples, anisotropy, Limits::from_env())
+    }
+
+    /// `new` within `limits`.
+    pub fn with_limits(
+        gl: &glow::Context,
+        glsl: Glsl,
+        scale: u32,
+        samples: u32,
+        anisotropy: u32,
+        limits: Limits,
     ) -> Result<Self, String> {
         if glsl == Glsl::Es300 {
             return Err("OpenGL ES has no noperspective interpolation".to_string());
@@ -356,7 +691,7 @@ impl VoodooGl {
         let pixels: Program<Quad> = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[])?;
         let depth_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[])?;
         let clut_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[])?;
-        let banshee = BansheeGl::new(gl, glsl);
+        let banshee = BansheeGl::new(gl, glsl, limits);
         // SAFETY: see `VoodooGl`.
         unsafe {
             for (program, samplers) in [
@@ -425,6 +760,7 @@ impl VoodooGl {
                 clut: [0; 33],
                 scanout: None,
                 banshee,
+                ran_early: false,
             })
         }
     }
@@ -499,27 +835,45 @@ impl VoodooGl {
         self.banshee.as_ref().err().map(String::as_str)
     }
 
+    /// Why a Banshee's 2D operations can't be done here (the card then
+    /// does them in software), if its picture can be composed and they
+    /// can't.
+    pub fn gpu_2d_problem(&self) -> Option<&str> {
+        self.banshee.as_ref().ok()?.blit.as_ref().err().map(String::as_str)
+    }
+
     /// Draw `recording`; whether the picture may have changed with it.
     pub fn run(&mut self, gl: &glow::Context, mut recording: Recording) -> bool {
-        let mut changed = !recording.commands.is_empty()
+        let mut changed = std::mem::take(&mut self.ran_early)
+            || !recording.commands.is_empty()
             || self.front != recording.front
             || self.clut != recording.clut;
-        if let Some(s) = &mut recording.scanout
-            && let Ok(banshee) = &mut self.banshee
-        {
-            for (memory, bytes) in [
-                (&mut banshee.desktop, &mut s.desktop_memory),
-                (&mut banshee.overlay, &mut s.overlay_memory),
-            ] {
-                if let Some(bytes) = bytes.take() {
-                    memory.upload(gl, &bytes);
-                    changed = true;
-                }
-            }
-        }
         changed |= recording.scanout != self.scanout;
         self.scanout = recording.scanout.take();
-        for command in &recording.commands {
+        self.run_commands(gl, &recording.commands);
+        self.front = recording.front;
+        self.clut = recording.clut;
+        changed
+    }
+
+    /// Do `commands`, part of a frame's recording that the card hands
+    /// over before the frame ends (`gpu`): the picture may change with
+    /// them, which the frame's `run` says.
+    pub fn run_early(&mut self, gl: &glow::Context, commands: &[Command]) {
+        self.ran_early |= !commands.is_empty();
+        self.run_commands(gl, commands);
+    }
+
+    /// Bytes of the card's memory from byte `at` on (which starts a
+    /// page) as the renderer has them, into `out`. False, with `out` as
+    /// it was, if it hasn't them: it keeps no copy of the memory, or one
+    /// too small.
+    pub fn read_memory(&self, gl: &glow::Context, at: u32, out: &mut [u8]) -> bool {
+        self.banshee.as_ref().is_ok_and(|b| b.memory.read(gl, at, out))
+    }
+
+    fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
+        for command in commands {
             match command {
                 Command::Resync(snapshot) => self.resync(gl, snapshot),
                 Command::Draw(draw) => {
@@ -540,16 +894,118 @@ impl VoodooGl {
                         unsafe { gl.delete_texture(t.texture) };
                     }
                 }
+                Command::Memory { size, at, bytes } => {
+                    if let Ok(banshee) = &mut self.banshee {
+                        banshee.memory.put(gl, *size, *at, bytes);
+                    }
+                }
+                Command::Blit(blit) => {
+                    if let BlitSource::Buffer { buffer, .. } = blit.src {
+                        self.flush_staging(gl, Some(buffer));
+                    }
+                    self.blit(gl, blit);
+                }
             }
         }
         let keys: Vec<_> = self.staging.keys().copied().collect();
         for key in keys {
             self.flush_staging(gl, key);
         }
-        self.front = recording.front;
-        self.clut = recording.clut;
         restore(gl);
-        changed
+    }
+
+    /// A 2D operation in the card's memory (`mirror::Blit`).
+    fn blit(&mut self, gl: &glow::Context, blit: &Blit) {
+        let scaled = self.scaled();
+        let buffer = match blit.src {
+            BlitSource::Buffer { buffer, .. } => {
+                let Some(target) = self.targets.get(&buffer) else { return };
+                target.resolve(gl, scaled);
+                Some(target.color)
+            }
+            _ => None,
+        };
+        let Ok(banshee) = &mut self.banshee else { return };
+        let Ok(p) = &banshee.blit else { return };
+        let memory = &banshee.memory;
+        let layout = memory.layout;
+        let rows = |(a, b): (u32, u32)| (memory.row(a), memory.row(b.saturating_sub(1)) + 1);
+        // What the blit reads, as it was before it: the source, and the
+        // destination only for its key.
+        if blit.dst_key.is_some() {
+            let (first, last) = rows(blit.dst_span());
+            memory.copy_rows(gl, first, last);
+        }
+        if let Some(span) = blit.src_span() {
+            let (first, last) = rows(span);
+            memory.copy_rows(gl, first, last);
+        }
+        let i = |v: u32| v as i32;
+        let key = |k: &Option<Key>| match k {
+            Some(k) => ([i(k.low), i(k.high), 1], k.masks.map(i)),
+            None => ([0; 3], [0; 3]),
+        };
+        let (src_key, src_masks) = key(&blit.src_key);
+        let (dst_key, dst_masks) = key(&blit.dst_key);
+        let (kind, plane, rect, fill) = match &blit.src {
+            BlitSource::Fill(v) => (0, None, [0; 4], *v),
+            BlitSource::Memory { plane, rect } => (1, Some(*plane), *rect, 0),
+            BlitSource::Buffer { rect, .. } => (2, None, *rect, 0),
+        };
+        let src = plane.map_or([kind, 0, 0, 1], |p| [kind, i(p.start), i(p.stride), i(p.bpp)]);
+        let convert = match blit.convert {
+            Convert::None => 0,
+            Convert::Widen => 1,
+            Convert::Narrow => 2,
+            Convert::ClearTop => 3,
+        };
+        let (w, h) = (layout.width() as i32, layout.layer_rows() as i32);
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.viewport(0, 0, w, h);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.use_program(Some(p.program));
+            let u = &p.uniforms;
+            u.u_size.set(gl, [w as f32, h as f32]);
+            u.u_mem_layout.set(gl, layout.uniform(memory.size));
+            let d = &blit.dst;
+            u.u_dst.set(gl, [i(d.start), i(d.stride.max(1)), i(d.bpp.clamp(1, 4))]);
+            u.u_area.set(gl, blit.area);
+            u.u_src.set(gl, src);
+            u.u_src_rect.set(gl, rect);
+            u.u_fill.set(gl, i(fill));
+            let [mx, my] = blit.mirror.map(i32::from);
+            u.u_mode.set(gl, [mx, my, convert, self.scale as i32]);
+            u.u_src_key.set(gl, src_key);
+            u.u_src_masks.set(gl, src_masks);
+            u.u_dst_key.set(gl, dst_key);
+            u.u_dst_masks.set(gl, dst_masks);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(memory.copy));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(buffer.unwrap_or(self.lut)));
+            gl.bind_vertex_array(Some(self.quad_vao));
+            // The layer drawn into last: most rectangles stay in it.
+            let mut bound = None;
+            for &r in &blit.rects {
+                let (first, last) = rows(blit.dst.span(r));
+                u.u_clip.set(gl, r);
+                for (layer, top, bottom) in layout.spans(first, last) {
+                    if bound != Some(layer) {
+                        let fbo = memory.fbos[layer as usize];
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                        u.u_layer.set(gl, layer as i32);
+                        bound = Some(layer);
+                    }
+                    u.u_rect.set(gl, [0.0, top as f32, w as f32, bottom as f32]);
+                    gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+            gl.active_texture(glow::TEXTURE0);
+        }
     }
 
     /// The buffers as they are in the card's memory, in its layout.
@@ -1047,6 +1503,51 @@ impl VoodooGl {
         }
     }
 
+    /// The picture last composed (`composite`), read back from the GPU
+    /// at the card's resolution: of each block of `scale` by `scale`
+    /// pixels, their average. Rows from the top, RGBA.
+    pub fn read_picture(&self, gl: &glow::Context) -> Option<Frame> {
+        let (target, (w, h)) = self.composite.as_ref()?;
+        let (w, h) = (*w, *h);
+        let scale = self.scale.max(1);
+        let mut rgba = vec![0u8; w as usize * h as usize * 4];
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            let pixels = glow::PixelPackData::Slice(Some(&mut rgba));
+            let (rw, rh) = size_i32((w, h));
+            gl.read_pixels(0, 0, rw, rh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        // The composed picture's first row is the picture's top. Each of
+        // the card's pixels is the average of its block of scale by scale,
+        // as the player sees it at that size.
+        let (fw, fh) = (w / scale, h / scale);
+        let mut frame = Frame::new(fw, fh);
+        let area = scale * scale;
+        let mut sums = vec![[0u32; 3]; fw as usize];
+        for y in 0..fh {
+            sums.fill([0; 3]);
+            for row in y * scale..(y + 1) * scale {
+                let from = (row * w) as usize * 4;
+                for (x, sum) in sums.iter_mut().enumerate() {
+                    let at = from + x * scale as usize * 4;
+                    for px in rgba[at..at + scale as usize * 4].as_chunks::<4>().0 {
+                        sum.iter_mut().zip(px).for_each(|(s, &c)| *s += c as u32);
+                    }
+                }
+            }
+            let to = (y * fw) as usize * 4;
+            let out = &mut frame.rgba[to..to + fw as usize * 4];
+            for (px, sum) in out.as_chunks_mut::<4>().0.iter_mut().zip(&sums) {
+                let [r, g, b] = sum.map(|s| ((s + area / 2) / area) as u8);
+                *px = [r, g, b, 0xFF];
+            }
+        }
+        Some(frame)
+    }
+
     /// Draw over the picture being composed, of `size` of the card's
     /// pixels, `screen`'s pixels where they differ from `base`, through
     /// `texture`, as big as the picture.
@@ -1107,8 +1608,9 @@ impl VoodooGl {
     /// A Banshee's or Voodoo3's picture (`Scanout`), composed as its
     /// video processor does: the desktop, the overlay and the cursor, each
     /// surface from the buffer the renderer draws or from the memory that
-    /// came with the scanout, at `scale` times the desktop's size. Then
-    /// what `screen` has over `base`, as `composite`.
+    /// came with the scanout, at `scale` times the picture's size (the
+    /// desktop's, twice as wide when its pixels are wide). Then what
+    /// `screen` has over `base`, as `composite`.
     fn compose(
         &mut self,
         gl: &glow::Context,
@@ -1118,7 +1620,8 @@ impl VoodooGl {
         let scaled = self.scaled();
         let s = self.scanout.as_deref()?;
         let banshee = self.banshee.as_mut().ok()?;
-        let (w, h) = (s.width.max(1), s.height.max(1));
+        let across = if s.wide { 2 } else { 1 };
+        let (w, h) = (s.width.max(1) * across, s.height.max(1));
         let size = (w * self.scale, h * self.scale);
         let buffer = |surface: &Surface| surface.buffer.and_then(|b| self.targets.get(&b));
         let desktop = buffer(&s.desktop);
@@ -1209,19 +1712,22 @@ impl VoodooGl {
             u.u_rect.set(gl, [0.0, 0.0, w as f32, h as f32]);
             u.u_size.set(gl, [w as f32, h as f32]);
             u.u_scale.set(gl, self.scale as i32);
+            u.u_across.set(gl, across as i32);
             let i = |v: u32| v as i32;
+            let memory = &banshee.memory;
+            u.u_mem_layout.set(gl, memory.layout.uniform(memory.size));
             let d = &s.desktop;
             let bypass = d.bypass as i32;
             u.u_desk.set(gl, [i(d.format), i(d.clut), bypass, desktop.is_some() as i32]);
-            let len = banshee.desktop.len as i32;
-            u.u_desk_layout.set(gl, [i(d.stride), d.tiled as i32, s.half as i32, len]);
+            let start = i(d.start);
+            u.u_desk_layout.set(gl, [i(d.stride), d.tiled as i32, s.half as i32, start]);
             match &s.overlay {
                 Some(o) => {
                     let v = &o.surface;
                     let bypass = v.bypass as i32;
                     u.u_ovl.set(gl, [i(v.format), i(v.clut), bypass, overlay.is_some() as i32]);
-                    let len = banshee.overlay.len as i32;
-                    u.u_ovl_layout.set(gl, [i(v.stride), v.tiled as i32, 0, len]);
+                    let start = i(v.start);
+                    u.u_ovl_layout.set(gl, [i(v.stride), v.tiled as i32, 0, start]);
                     u.u_ovl_rect.set(gl, o.rect.map(i));
                     u.u_ovl_step.set(gl, [i(o.dudx), i(o.dvdy), i(o.v_offset)]);
                 }
@@ -1242,17 +1748,18 @@ impl VoodooGl {
                 }
                 None => u.u_cur.set(gl, [0, 0, 0, 0]),
             }
-            // Every sampler has a texture of its kind, used or not.
+            // Every sampler has a texture of its kind, used or not: the
+            // memory on unit 0, 2D textures on the others.
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(memory.texture));
             let units = [
-                banshee.desktop.texture,
                 desktop.unwrap_or(self.lut),
-                banshee.overlay.texture,
                 overlay.unwrap_or(self.lut),
                 banshee.cursor,
                 banshee.clut,
             ];
-            for (unit, texture) in units.into_iter().enumerate() {
-                gl.active_texture(glow::TEXTURE0 + unit as u32);
+            for (unit, texture) in (1..).zip(units) {
+                gl.active_texture(glow::TEXTURE0 + unit);
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             }
             gl.bind_vertex_array(Some(self.quad_vao));
@@ -1341,14 +1848,28 @@ fn restore(gl: &glow::Context) {
 
 /// A texture with `filter`, clamped at its edges, bound.
 fn texture(gl: &glow::Context, filter: u32) -> Result<glow::Texture, String> {
+    texture_of(gl, glow::TEXTURE_2D, filter)
+}
+
+/// A 2D array texture, unfiltered and clamped at its edges, bound.
+fn texture_array(gl: &glow::Context) -> Result<glow::Texture, String> {
+    texture_of(gl, glow::TEXTURE_2D_ARRAY, glow::NEAREST)
+}
+
+/// A texture of `target` with `filter`, clamped at its edges, bound.
+fn texture_of(gl: &glow::Context, target: u32, filter: u32) -> Result<glow::Texture, String> {
     // SAFETY: see `VoodooGl`.
     unsafe {
         let texture = gl.create_texture()?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.bind_texture(target, Some(texture));
+        for (name, value) in [
+            (glow::TEXTURE_MIN_FILTER, filter),
+            (glow::TEXTURE_MAG_FILTER, filter),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(target, name, value as i32);
+        }
         Ok(texture)
     }
 }
@@ -1677,7 +2198,9 @@ mod tests {
     /// A Banshee's picture composed with OpenGL is the software one, pixel
     /// for pixel: desktops of every format, linear and tiled, the overlay
     /// in YUV, 8 bits and 5-6-5 with and without scaling, the cursor in
-    /// both modes, and surfaces that are buffers the renderer draws.
+    /// both modes, and surfaces that are buffers the renderer draws. So
+    /// is it with the memory in many small textures, and without the 2D
+    /// operations' program.
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
     fn banshee_composition_matches_the_software_picture() {
@@ -1705,7 +2228,8 @@ mod tests {
         let gl =
             unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
 
-        // A 160x100 desktop at 1000h, memory and CLUT of noise.
+        // A 160x100 desktop at 1000h, memory and CLUT of noise. It is
+        // narrow, so the picture shows each pixel twice across.
         let (w, h) = (160usize, 100usize);
         let card = |cfg: u32, stride: u32, overlay: Option<(u32, u32, [u32; 2])>| {
             let mut v = Voodoo::with_workers(Board::Voodoo3, 0);
@@ -1807,6 +2331,12 @@ mod tests {
                     Some((0x8_0000, 320, [at(5, 5), at(100, 60)])),
                 ),
             ),
+            ("8 bits, 480 pixels across, not widened", {
+                let mut v = card(0, 480, None);
+                // 60 characters of 8 pixels.
+                v.banshee.as_mut().unwrap().crtc[0x01] = 59;
+                v
+            }),
         ];
         let mut cases = cases;
         // A 3D buffer the overlay shows, as it is and scaled, and one the
@@ -1845,55 +2375,105 @@ mod tests {
                     .as_ref()
                     .is_some_and(|o| o.surface.buffer.is_some());
             assert_eq!(from_buffer, n >= buffers, "{name}: drawn by the renderer");
-            let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, 1, 1).unwrap();
-            assert!(renderer.banshee_problem().is_none());
-            renderer.run(&gl, recording);
-            // Something drawn over the picture (a message) goes on top.
-            let base = Frame::new(w as u32, h as u32);
-            let mut screen = base.clone();
-            screen.rgba[..3].copy_from_slice(&[1, 2, 3]);
-            let (_, size) = renderer.composite(&gl, &screen, &base).unwrap();
-            assert_eq!(size, (w as u32, h as u32));
-            let mut composed = vec![0; w * h * 4];
-            // SAFETY: the context and framebuffer belong to this thread.
-            unsafe {
-                gl.bind_framebuffer(
-                    glow::FRAMEBUFFER,
-                    Some(renderer.composite.as_ref().unwrap().0.fbo),
-                );
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-                let pixels = glow::PixelPackData::Slice(Some(&mut composed));
-                gl.read_pixels(
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    pixels,
-                );
-                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            // The picture's size: the desktop's, twice as wide when it is
+            // less than 400 pixels wide.
+            let (w, h) = v.picture_size();
+            assert_eq!(s.wide, w == 2 * 160, "{name}: widened");
+            let (w, h) = (w as usize, h as usize);
+            // The picture as composed by renderers within each of
+            // `limits`: the host's OpenGL; textures of 256 texels, which
+            // lay the memory out in 256 layers of 64 KB; and no program
+            // for 2D operations.
+            let limits = [
+                Limits::default(),
+                Limits {
+                    max_texture_size: Some(256),
+                    no_blit: false,
+                },
+                Limits {
+                    max_texture_size: None,
+                    no_blit: true,
+                },
+            ];
+            let mut pictures = Vec::new();
+            for limits in limits {
+                let mut renderer =
+                    VoodooGl::with_limits(&gl, Glsl::Gl150, 1, 1, 1, limits).unwrap();
+                assert!(renderer.banshee_problem().is_none(), "{name}: {limits:?}");
+                assert_eq!(renderer.gpu_2d_problem().is_some(), limits.no_blit);
+                renderer.run(&gl, recording.clone());
+                // Something drawn over the picture (a message) goes on top.
+                let base = Frame::new(w as u32, h as u32);
+                let mut screen = base.clone();
+                screen.rgba[..3].copy_from_slice(&[1, 2, 3]);
+                let (_, size) = renderer.composite(&gl, &screen, &base).unwrap();
+                assert_eq!(size, (w as u32, h as u32));
+                let mut composed = vec![0; w * h * 4];
+                // SAFETY: the context and framebuffer belong to this thread.
+                unsafe {
+                    let fbo = renderer.composite.as_ref().unwrap().0.fbo;
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                    gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                    let pixels = glow::PixelPackData::Slice(Some(&mut composed));
+                    let (format, kind) = (glow::RGBA, glow::UNSIGNED_BYTE);
+                    gl.read_pixels(0, 0, w as i32, h as i32, format, kind, pixels);
+                    assert_eq!(gl.get_error(), glow::NO_ERROR);
+                }
+                renderer.destroy(&gl);
+                pictures.push((limits, composed));
             }
             v.set_software_picture(true);
             v.prepare_display();
             let mut reference = vec![0; w * h * 4];
             v.render(&mut reference, w);
             reference[..3].copy_from_slice(&[1, 2, 3]);
-            let bad: Vec<usize> = (0..w * h)
-                .filter(|&i| composed[i * 4..i * 4 + 3] != reference[i * 4..i * 4 + 3])
-                .collect();
-            if let Some(&i) = bad.first() {
-                panic!(
-                    "{name}: {} pixels differ, the first at ({}, {}): {:?} composed, {:?} in software",
-                    bad.len(),
-                    i % w,
-                    i / w,
-                    &composed[i * 4..i * 4 + 3],
-                    &reference[i * 4..i * 4 + 3],
-                );
+            for (limits, composed) in pictures {
+                let bad: Vec<usize> = (0..w * h)
+                    .filter(|&i| composed[i * 4..i * 4 + 3] != reference[i * 4..i * 4 + 3])
+                    .collect();
+                if let Some(&i) = bad.first() {
+                    panic!(
+                        "{name}, {limits:?}: {} pixels differ, the first at ({}, {}): {:?} composed, {:?} in software",
+                        bad.len(),
+                        i % w,
+                        i / w,
+                        &composed[i * 4..i * 4 + 3],
+                        &reference[i * 4..i * 4 + 3],
+                    );
+                }
             }
-            renderer.destroy(&gl);
         }
+    }
+
+    /// 16 MB is one layer of 4096 rows of 4096 bytes where OpenGL allows
+    /// textures that big, and narrower rows in several layers where it
+    /// doesn't; the layers take rows in order.
+    #[test]
+    fn memory_layout_fits_the_texture_limits() {
+        use super::MemoryLayout;
+        let mb16 = 16 << 20;
+        let layout = |most, layers| MemoryLayout::new(mb16, most, layers).unwrap();
+        for (most, width, rows, layers) in [
+            (16384, 4096, 4096, 1),
+            (4096, 4096, 4096, 1),
+            (3000, 2048, 2048, 4),
+            (1024, 1024, 1024, 16),
+            (256, 256, 256, 256),
+        ] {
+            let l = layout(most, 2048);
+            assert_eq!((l.width(), l.layer_rows(), l.layers), (width, rows, layers), "{most}");
+            assert_eq!(l.width() * l.rows(), mb16);
+        }
+        assert!(MemoryLayout::new(mb16, 1024, 8).is_err());
+        // A small memory takes one layer of as many rows as it needs.
+        let small = MemoryLayout::new(4096, 1024, 8).unwrap();
+        assert_eq!((small.width(), small.layer_rows(), small.layers), (1024, 4, 1));
+
+        let l = layout(1024, 2048);
+        let spans: Vec<_> = l.spans(1000, 3100).collect();
+        assert_eq!(spans, [(0, 1000, 1024), (1, 0, 1024), (2, 0, 1024), (3, 0, 28)]);
+        assert_eq!(l.spans(5, 5).count(), 0);
+        assert_eq!(l.spans(16380, 20000).collect::<Vec<_>>(), [(15, 1020, 1024)]);
     }
 
     #[test]

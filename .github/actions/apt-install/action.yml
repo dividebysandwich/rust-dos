@@ -1,0 +1,83 @@
+name: Install apt packages
+description: >-
+  apt-get install from Ubuntu's own archive instead of the runner image's
+  Azure mirror, with the image's extra package sources removed.
+
+# The x86-64 runner images fetch packages from azure.archive.ubuntu.com,
+# which now and then serves at a few tens of kB/s and turns a 25 s install
+# of libsdl2-dev's dependencies into 8 to 16 minutes. The container jobs,
+# which use archive.ubuntu.com and ports.ubuntu.com, have not had that
+# problem. So on a runner image this takes the Azure mirror out of apt's
+# mirror list, or out of the sources where they name it directly, and
+# removes the sources the image adds beside Ubuntu's own (Microsoft's and
+# others), which these jobs never install from.
+#
+# With `update: false` the install first runs against the package lists
+# the image was built with, which are up to a week old. When the archive
+# has dropped a version they name, the download fails with a 404, and the
+# install runs again after `apt-get update`.
+#
+# It runs as root where there is no sudo, as in the container jobs, where
+# it can run before checkout (`uses: $/...` needs none) to install git.
+
+inputs:
+  packages:
+    description: The packages to install, separated by spaces.
+    required: true
+  update:
+    description: >-
+      true to run apt-get update before the install: in a container, which
+      starts without package lists, and for release builds, which should
+      get the current versions. false to update only when the install
+      fails.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install the packages
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        UPDATE: ${{ inputs.update }}
+      run: |
+        SUDO=
+        if [ "$(id -u)" -ne 0 ]; then
+          SUDO=sudo
+        fi
+
+        # The image's mirror list puts Azure's mirror first and Ubuntu's
+        # archive after it. Deleting the Azure line leaves the sources and
+        # the names of the package lists, which follow the sources, as they
+        # are, so the lists the image has still count.
+        if [ -f /etc/apt/apt-mirrors.txt ]; then
+          $SUDO sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          echo "Mirror list:"
+          cat /etc/apt/apt-mirrors.txt
+        fi
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+          if [ -f "$f" ] && grep -q azure.archive.ubuntu.com "$f"; then
+            $SUDO sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' "$f"
+          fi
+        done
+        # Everything in sources.list.d but Ubuntu's own sources (on 22.04
+        # and earlier those are in sources.list).
+        if [ -d /etc/apt/sources.list.d ]; then
+          find /etc/apt/sources.list.d -mindepth 1 ! -name ubuntu.sources -print \
+            -exec $SUDO rm -f {} +
+        fi
+
+        install() {
+          # $PACKAGES unquoted: one argument per package.
+          # shellcheck disable=SC2086
+          $SUDO env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends $PACKAGES
+        }
+        if [ "$UPDATE" = true ]; then
+          $SUDO apt-get update
+          install
+        elif ! install; then
+          echo "The install failed with the image's package lists; updating them."
+          $SUDO apt-get update
+          install
+        fi

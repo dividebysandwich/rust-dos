@@ -2,8 +2,8 @@
 
 use super::types::parse_bool;
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, Settings, WindowsVersion,
-    parse_mouse_sensitivity,
+    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, Settings, Win32Trace,
+    WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -298,6 +298,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_depth" => match DesktopDepth::parse(value) {
                             Some(depth) => config.win32_depth = Some(depth),
                             None => warn(format!("invalid win32_depth '{}' (auto or 8)", value)),
+                        },
+                        "win32_trace" => match Win32Trace::parse(value) {
+                            Some(trace) => config.win32_trace = Some(trace),
+                            None => warn(format!(
+                                "invalid win32_trace '{}' (all, collapsed or off)",
+                                value
+                            )),
                         },
                         "ide_hard_disks" => match parse_bool(value) {
                             Some(on) => config.ide_hard_disks = Some(on),

@@ -292,6 +292,7 @@ impl DebugHub {
                 "port": c.port,
                 "load_seg": c.load_seg,
                 "lar": c.lar,
+                "smc_check": c.smc_check,
                 "fpu": c.fpu,
             })
         }

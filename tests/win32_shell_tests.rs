@@ -1,10 +1,11 @@
 //! The built-in Windows' shell: special folders made on first use, a
 //! shell link saved through IShellLinkA and IPersistFile, a Program
-//! Manager group made through DDEML as InstallShield makes one, a file
-//! copied by SHFileOperationA, and FindExecutableA following the
-//! registry's associations. Each runs on the interpreter and on the
-//! dynamic recompiler. The programs are PE files made with rust-dos-pe's
-//! builder, their code assembled with iced.
+//! Manager group made through DDEML as InstallShield makes one and
+//! through raw DDE messages, a file copied by SHFileOperationA, and
+//! FindExecutableA following the registry's associations. Each runs on
+//! the interpreter and on the dynamic recompiler. The programs are PE
+//! files made with rust-dos-pe's builder, their code assembled with
+//! iced.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{CoreMode, Cpu, HostConsole};
@@ -348,6 +349,216 @@ fn program_manager_makes_a_group_through_ddeml() {
         let text = String::from_utf8_lossy(&link);
         assert!(text.contains("C:\\SUB DIR\\G.EXE"), "{core:?}: {text:?}");
         assert!(!text.contains("DIR\\G.EXE -x"), "{core:?}: {text:?}");
+    }
+}
+
+/// Get messages until one is `msg`, dispatching the others.
+fn wait_for_message(a: &mut CodeAssembler, l: &Layout, msg: i32) -> Result<(), IcedError> {
+    // The MSG at 0x60 of the data; GetMessageA and DispatchMessageA.
+    let mut top = a.create_label();
+    let mut done = a.create_label();
+    a.set_label(&mut top)?;
+    call(a, l.import(11), &[l.at(0x60), 0, 0, 0])?;
+    a.cmp(dword_ptr(l.at(0x64) as u64), msg)?;
+    a.je(done)?;
+    call(a, l.import(12), &[l.at(0x60)])?;
+    a.jmp(top)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+#[test]
+fn program_manager_answers_raw_dde_messages() {
+    const WM_DDE_INITIATE: i32 = 0x3E0;
+    const WM_DDE_TERMINATE: i32 = 0x3E1;
+    const WM_DDE_ACK: i32 = 0x3E4;
+    const WM_DDE_DATA: i32 = 0x3E5;
+    const WM_DDE_REQUEST: i32 = 0x3E6;
+    const WM_DDE_EXECUTE: i32 = 0x3E8;
+    const GMEM_DDESHARE_MOVEABLE: i32 = 0x2002;
+    const CF_TEXT: i32 = 1;
+    let command = b"[CreateGroup(Games)][AddItem(C:\\T.EXE,Test)][ShowGroup(Games,1)]\0";
+    // 0x00: the window, 0x04: the server's, 0x08: the lParam of the
+    // initiate's acknowledgement, 0x0C: the commands' block, 0x28 and
+    // 0x2C: the values UnpackDDElParam gives, 0x60: a MSG, 0x80: an
+    // atom's name.
+    let mut data = vec![0u8; 0x100];
+    put(&mut data, 0x10, b"PROGMAN\0");
+    put(&mut data, 0x18, b"Groups\0");
+    put(&mut data, 0x20, b"DdeTest\0");
+    // 0x30: the WNDCLASSA, its procedure and name put in by the code.
+    put(&mut data, 0x30 + 16, &BASE.to_le_bytes());
+    put(&mut data, 0xA0, command);
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &[
+                "ExitProcess",
+                "GlobalAddAtomA",
+                "GlobalGetAtomNameA",
+                "GlobalAlloc",
+                "GlobalLock",
+                "GlobalUnlock",
+                "lstrcpyA",
+            ],
+        ),
+        (
+            "USER32.dll",
+            &[
+                "RegisterClassA",
+                "CreateWindowExA",
+                "SendMessageA",
+                "PostMessageA",
+                "GetMessageA",
+                "DispatchMessageA",
+                "UnpackDDElParam",
+                "DefWindowProcA",
+            ],
+        ),
+    ];
+    let code = program(imports, &data, |a, l| {
+        // The window procedure, its address in EBP: it keeps the
+        // server's window and lParam of a WM_DDE_ACK sent to it.
+        let mut start = a.create_label();
+        let mut default = a.create_label();
+        a.call(start)?;
+        a.cmp(dword_ptr(esp + 8), WM_DDE_ACK)?;
+        a.jne(default)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(l.at(4) as u64), eax)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.mov(dword_ptr(l.at(8) as u64), eax)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut default)?;
+        a.jmp(l.import(14))?;
+        a.set_label(&mut start)?;
+        a.pop(ebp)?;
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[l.at(0x10)])?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(l.at(0x34) as u64), ebp)?;
+        a.mov(dword_ptr(l.at(0x54) as u64), l.at(0x20))?;
+        call(a, l.import(7), &[l.at(0x30)])?;
+        let window = [0, l.at(0x20), 0, 0, 0, 0, 0, 0, 0, 0, BASE as i32, 0];
+        call(a, l.import(8), &window)?;
+        a.mov(dword_ptr(l.at(0) as u64), eax)?;
+        a.mov(edi, eax)?;
+        // WM_DDE_INITIATE to all, for PROGMAN's application and topic.
+        a.mov(eax, esi)?;
+        a.shl(eax, 16)?;
+        a.or(eax, esi)?;
+        a.push(eax)?;
+        a.push(edi)?;
+        a.push(WM_DDE_INITIATE)?;
+        a.push(0xFFFF)?;
+        a.call(l.import(9))?;
+        a.mov(eax, dword_ptr(l.at(4) as u64))?;
+        check_nonzero(a, 0)?;
+        // The acknowledgement's application atom is PROGMAN's.
+        a.movzx(eax, word_ptr(l.at(8) as u64))?;
+        a.push(16)?;
+        a.push(l.at(0x80))?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        check_eax(a, 7, 1)?;
+        // WM_DDE_EXECUTE with the commands in a global block.
+        call(a, l.import(3), &[GMEM_DDESHARE_MOVEABLE, 0x60])?;
+        a.mov(dword_ptr(l.at(0x0C) as u64), eax)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.push(l.at(0xA0))?;
+        a.push(eax)?;
+        a.call(l.import(6))?;
+        a.push(dword_ptr(l.at(0x0C) as u64))?;
+        a.call(l.import(5))?;
+        a.push(dword_ptr(l.at(0x0C) as u64))?;
+        a.push(edi)?;
+        a.push(WM_DDE_EXECUTE)?;
+        a.push(dword_ptr(l.at(4) as u64))?;
+        a.call(l.import(10))?;
+        wait_for_message(a, l, WM_DDE_ACK)?;
+        // Acknowledged with DDE_FACK, the commands' block given back.
+        a.push(l.at(0x2C))?;
+        a.push(l.at(0x28))?;
+        a.push(dword_ptr(l.at(0x6C) as u64))?;
+        a.push(WM_DDE_ACK)?;
+        a.call(l.import(13))?;
+        a.mov(eax, dword_ptr(l.at(0x28) as u64))?;
+        check_eax(a, 0x8000, 2)?;
+        let mut other = a.create_label();
+        a.mov(eax, dword_ptr(l.at(0x2C) as u64))?;
+        a.cmp(eax, dword_ptr(l.at(0x0C) as u64))?;
+        a.jne(other)?;
+        a.or(ebx, 1 << 3)?;
+        a.set_label(&mut other)?;
+        // WM_DDE_REQUEST for the groups, answered with CF_TEXT data.
+        call(a, l.import(1), &[l.at(0x18)])?;
+        a.shl(eax, 16)?;
+        a.or(eax, CF_TEXT)?;
+        a.push(eax)?;
+        a.push(edi)?;
+        a.push(WM_DDE_REQUEST)?;
+        a.push(dword_ptr(l.at(4) as u64))?;
+        a.call(l.import(10))?;
+        wait_for_message(a, l, WM_DDE_DATA)?;
+        a.push(l.at(0x2C))?;
+        a.push(l.at(0x28))?;
+        a.push(dword_ptr(l.at(0x6C) as u64))?;
+        a.push(WM_DDE_DATA)?;
+        a.call(l.import(13))?;
+        a.push(dword_ptr(l.at(0x28) as u64))?;
+        a.call(l.import(4))?;
+        a.movzx(eax, word_ptr(eax + 2))?;
+        check_eax(a, CF_TEXT, 4)?;
+        // WM_DDE_TERMINATE, answered with one.
+        a.push(0)?;
+        a.push(edi)?;
+        a.push(WM_DDE_TERMINATE)?;
+        a.push(dword_ptr(l.at(4) as u64))?;
+        a.call(l.import(10))?;
+        wait_for_message(a, l, WM_DDE_TERMINATE)?;
+        a.or(ebx, 1 << 5)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("progman_raw", core, &[("T.EXE", code.clone())]);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {}", printed(&cpu));
+        let item = "WINDOWS\\Start Menu\\Programs\\Games\\Test.lnk";
+        let link = fs::read(host_file("progman_raw", item).expect(item)).unwrap();
+        assert_eq!(&link[..4], &[0x4C, 0, 0, 0], "{core:?}");
+    }
+}
+
+#[test]
+fn find_window_finds_program_manager() {
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, 0x00, b"Progman\0");
+    put(&mut data, 0x10, b"Program Manager\0");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("USER32.dll", &["FindWindowA"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        // By its class, before anything broadcast WM_DDE_INITIATE.
+        call(a, l.import(1), &[l.at(0), 0])?;
+        a.mov(esi, eax)?;
+        check_nonzero(a, 0)?;
+        // By its title, the same window.
+        call(a, l.import(1), &[0, l.at(0x10)])?;
+        let mut other = a.create_label();
+        a.cmp(eax, esi)?;
+        a.jne(other)?;
+        a.or(ebx, 1 << 1)?;
+        a.set_label(&mut other)?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let mut cpu = machine("progman_find", core, &[("T.EXE", code.clone())]);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 3, "{core:?}: {}", printed(&cpu));
     }
 }
 

@@ -5,12 +5,13 @@
 //! A mode DirectDraw sets is one the display adapter has (`screen`):
 //! one of the VESA BIOS's, or of DirectDraw's own sizes, or on a Banshee
 //! or Voodoo3 the card's own. While it is set the display is
-//! DirectDraw's: GDI's drawing on the screen goes nowhere, and USER32
-//! doesn't put the desktop back when a window shows. RestoreDisplayMode,
-//! the end of exclusive mode and the end of the process give the screen
-//! back: the desktop's mode again, repainted, or text mode when there is
-//! no desktop. Glide on a Banshee or Voodoo3 takes the display the same
-//! way (`take`, `give_back`).
+//! DirectDraw's: GDI draws on its picture in that mode
+//! (`screen::gdi_mode`), and USER32 doesn't put the desktop back when a
+//! window shows. RestoreDisplayMode, the end of exclusive mode and the
+//! end of the process give the screen back: the desktop's mode again,
+//! repainted, or text mode when there is no desktop. Glide on a Banshee
+//! or Voodoo3 takes the display the same way (`take`, `give_back`), and
+//! GDI's drawing on the screen goes nowhere then.
 //!
 //! Video memory is the adapter's: the VESA BIOS's 4 MB, or the card's
 //! 16 MB, which its 3D engine draws into. The picture on the screen is
@@ -26,6 +27,7 @@ use super::{DD_OK, DDERR_INVALIDMODE, DDERR_OUTOFVIDEOMEMORY, current_pid, state
 use crate::cpu::Cpu;
 use crate::win32::memory::{MEM_MAPPED, PAGE, PAGE_READWRITE, SHARED, SYSTEM, USER, WRITABLE};
 use crate::win32::screen::{self, Mode};
+use crate::win32::user32::sysparams::{display_changed, display_mode};
 
 /// Where a process's view of video memory goes, if that is free.
 const VIEW_AT: u32 = 0x9FC0_0000;
@@ -55,12 +57,90 @@ pub struct Display {
     /// When the last flip of the primary surface shows, by the clock's
     /// nanoseconds.
     pub flip_at: u64,
+    /// The polls of that flip, or of the 3D-only card's pending swap,
+    /// that found it still to show: calls of Flip or GetFlipStatus.
+    pub flip_polls: Polls,
 }
 
-/// Whether DirectDraw (or Glide) has the display: GDI doesn't draw on
-/// the screen.
+/// Failed polls in a row of something the display does at a frame, by
+/// one thread.
+#[derive(Clone, Debug, Default)]
+pub struct Polls {
+    /// The thread that polled, and when it last did: `Cpu::executed` and
+    /// `Win32::calls`.
+    thread: u32,
+    executed: u64,
+    calls: u64,
+    /// The polls in a row, each the next call of a built-in function by
+    /// any thread after the one before, and no more than `POLL_GAP`
+    /// instructions after it.
+    count: u32,
+}
+
+/// Polls in a row after which a thread is taken to be doing nothing but
+/// polling.
+const POLLS: u32 = 16;
+/// Instructions between two polls of one loop, at most.
+const POLL_GAP: u64 = 2_000;
+
+impl Polls {
+    /// The thread `thread` polled and found the display not done yet,
+    /// with `Cpu::executed` at `executed` and `Win32::calls` at `calls`:
+    /// whether it has done next to nothing else for `POLLS` polls, with
+    /// no other built-in function called in between by any thread. A
+    /// loop like that does the same until the frame the display waits
+    /// for, so the caller can make the thread wait for that frame instead
+    /// of running each poll (a game calling Flip without DDFLIP_WAIT until
+    /// it succeeds makes hundreds of calls a millisecond). A loop that
+    /// does more while it waits, such as filling its sound buffer or
+    /// reading its messages, keeps every poll.
+    pub fn failed(&mut self, thread: u32, executed: u64, calls: u64) -> bool {
+        let close = self.thread == thread
+            && calls == self.calls.wrapping_add(1)
+            && executed.saturating_sub(self.executed) <= POLL_GAP;
+        self.count = if close {
+            self.count.saturating_add(1)
+        } else {
+            1
+        };
+        self.thread = thread;
+        self.executed = executed;
+        self.calls = calls;
+        self.count >= POLLS
+    }
+}
+
+/// When the last flip of the primary surface shows, by the clock's
+/// nanoseconds, while it is still to show.
+pub fn flip_pending(cpu: &mut Cpu) -> Option<u64> {
+    let at = state(cpu).display.flip_at;
+    (at.div_ceil(1000) > cpu.bus.clock.now_micros()).then_some(at)
+}
+
+/// The running thread polled for the pending flip of the primary
+/// surface and found it still to show: whether it only polls
+/// (`Polls::failed`).
+pub fn flip_poll_failed(cpu: &mut Cpu) -> bool {
+    let thread = crate::win32::user32::current_tid(cpu);
+    let (executed, calls) = (cpu.executed, cpu.bus.win32.calls);
+    state(cpu)
+        .display
+        .flip_polls
+        .failed(thread, executed, calls)
+}
+
+/// Whether DirectDraw (or Glide) has the display: GDI draws on the
+/// picture in its mode, or nowhere for Glide (`screen::gdi_mode`).
 pub fn owns_display(cpu: &mut Cpu) -> bool {
     state(cpu).display.mode.0 != 0
+}
+
+/// The mode DirectDraw set, which is the screen's (USER32's
+/// `sysparams::display_mode`): width, height and bits a pixel. None
+/// while the display is the desktop's, or Glide's.
+pub fn screen_mode(cpu: &Cpu) -> Option<(u32, u32, u32)> {
+    let display = &cpu.bus.win32.ddraw.display;
+    (display.mode.0 != 0 && display.mode_owner != GLIDE).then_some(display.mode)
 }
 
 /// The modes DirectDraw offers, as width, height and bits a pixel, by
@@ -109,17 +189,33 @@ pub fn set_mode(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> u32 {
 }
 
 /// Set the mode for `owner`, any the adapter has: the surfaces in video
-/// memory are lost, and the mouse moves over the picture.
+/// memory are lost, and the mouse moves over the picture. Unless it is
+/// Glide's, the screen takes the mode's size (`display_changed`).
 fn set(cpu: &mut Cpu, owner: u32, w: u32, h: u32, bpp: u32) -> Option<Mode> {
+    let old = display_mode(cpu);
     let mode = screen::set_mode(cpu, w, h, bpp)?;
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
     display.mode = (w, h, bpp);
     display.mode_owner = owner;
+    display_changed(cpu, old);
+    // After `display_changed`, which keeps the mouse on the screen as
+    // Windows sees it: a mode Glide set can be larger.
     let mouse = &mut cpu.bus.mouse;
     (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w as i32 - 1, 0, h as i32 - 1);
     Some(mode)
+}
+
+/// The desktop's mode changed (ChangeDisplaySettings): unless
+/// DirectDraw has the display, the surfaces in video memory are lost,
+/// as the desktop's picture may now cover them.
+pub fn desktop_changed(cpu: &mut Cpu) {
+    if owns_display(cpu) {
+        return;
+    }
+    super::surface::video_memory_lost(cpu);
+    state(cpu).display.blocks.clear();
 }
 
 /// Take the display for Glide on a Banshee or Voodoo3: the mode `w` x
@@ -147,11 +243,14 @@ pub fn restore(cpu: &mut Cpu) {
     if !owns_display(cpu) {
         return;
     }
+    let old = display_mode(cpu);
     super::surface::video_memory_lost(cpu);
     let display = &mut state(cpu).display;
     display.blocks.clear();
     display.mode = (0, 0, 0);
     display.mode_owner = 0;
+    // The desktop window takes the screen's size before it is painted.
+    display_changed(cpu, old);
     restore_screen(cpu);
 }
 
@@ -159,7 +258,8 @@ pub fn restore(cpu: &mut Cpu) {
 fn restore_screen(cpu: &mut Cpu) {
     if cpu.bus.win32.user.desktop {
         crate::win32::user32::paint::restore_desktop(cpu);
-        let (w, h) = crate::win32::user32::sysparams::screen_size();
+        // The mouse's range may still be Glide's mode's.
+        let (w, h) = crate::win32::user32::sysparams::screen_size(cpu);
         let mouse = &mut cpu.bus.mouse;
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
     } else {
@@ -278,5 +378,13 @@ crate::state_fields!(Display {
     exclusive,
     blocks,
     views,
-    flip_at
+    flip_at,
+    flip_polls
+});
+
+crate::state_fields!(Polls {
+    thread,
+    executed,
+    calls,
+    count
 });

@@ -640,6 +640,36 @@ vertex declaration, and vs.1.1 shaders run in an interpreter before
 the HAL draws what they give. On a Voodoo Graphics or Voodoo2 add-on
 card CreateDevice fails with D3DERR_NOTAVAILABLE.
 
+OPENGL32.DLL is OpenGL 1.1 on the same HAL, as 3dfx's ICD for the
+Banshee and Voodoo3 had it, for Quake III Arena's engine (American
+McGee's Alice). Its pixel formats are the ICD's two, 5-6-5 color with a
+16-bit depth buffer, single or double buffered; ChoosePixelFormat,
+DescribePixelFormat, SetPixelFormat, GetPixelFormat and SwapBuffers in
+GDI32 go to it, as Windows sends them to the ICD of the DC's device. A
+context is a DirectDraw object of its own with a Direct3D 7 device
+drawing into a 16-bit color buffer and depth buffer the size of the
+window's client area; SwapBuffers copies the color buffer to the
+window, which covers the screen when the game changed the mode. Each
+draw puts OpenGL's state on the device: the modelview matrix as the
+world transform, the projection with OpenGL's depth range turned into
+Direct3D's, the viewport, blending, the alpha and depth tests, culling,
+fog and the texture environments as texture stages, and the scissor
+box, polygon offset (as the card's depth bias) and color mask, which
+the HAL takes from the device. glBegin and glEnd, vertex arrays with
+glDrawArrays, glDrawElements and glArrayElement go through Direct3D's
+vertex pipeline; quads, quad strips, polygons and line loops become
+triangle lists, strips, fans and line strips. Textures are DirectDraw
+texture surfaces with their mipmaps, 5-6-5 or 4-4-4-4, in video memory
+while there is room past the HAL's texture heap and in system memory
+after. The extensions are GL_ARB_multitexture (two units, as the card's
+two TMUs), GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
+WGL_EXT_swap_control. The functions OpenGL 1.1 has and the ICD doesn't
+(display lists, lighting, evaluators, feedback, the accumulation and
+stencil buffers) are exported and do nothing, and their first call is
+logged. Without a Banshee or Voodoo3 the DLL loads but there is no
+pixel format, so a context can't be made. SetDeviceGammaRamp sets the
+card's lookup table for 16- and 32-bit modes until the next mode set.
+
 **Phase 5: breadth.**
 
 - 32-bit installers (InstallShield 5's 32-bit engine, Wise) and
@@ -680,6 +710,20 @@ dialogs never show. The W functions fail with
 ERROR_CALL_NOT_IMPLEMENTED, and FindTextA and ReplaceTextA make no
 window.
 
+WinHelpA (and Win16 WinHelp, which goes to it) opens a help viewer in
+place of WINHELP.EXE. It reads Windows 3.0 and 3.1 .HLP files with a
+parser ported from Wine's winhlp32 (user32/winhelp/hlpfile.rs), shows
+the contents topic or the one HELP_CONTEXT names, draws the text in its
+fonts with its pictures, and follows jumps and popups, with Contents,
+Back and the browse buttons. HELP_CONTEXTPOPUP, and HELP_WM_HELP for a
+control the program's list names, show their topic in a popup, at the
+point HELP_SETPOPUP_POS gave or at the mouse. It has no Search, History
+window or bookmarks, runs no help macros (HELP_COMMAND does nothing),
+shows the contents for HELP_CONTEXTMENU instead of its What's This?
+menu, doesn't follow jumps into other help files, and lays tables out
+one cell after another. Save states leave the viewer out: one open when
+a state is saved is an empty window after loading.
+
 For setup programs, SHELL32 has shell links (CLSID_ShellLink with
 IShellLinkA and IPersistFile, reading and writing `.lnk` files as
 Windows does), SHFileOperationA, the special folders laid out as
@@ -687,11 +731,17 @@ Windows 95 has them and made when first asked for, item id lists,
 ShellExecuteA and ShellExecuteExA (programs, documents by the types
 the registry gives their extensions, folders, URLs by their scheme's
 key) and SHBrowseForFolderA as a dialog with a list of folders.
-Program Manager's DDE server, which InstallShield 5 makes its program
+Program Manager's DDE server, which setup programs make their program
 groups through, is built in, as Explorer answered for it: a group is a
 folder under the Start menu's Programs, an item a shell link in it.
 DDEML in USER32 talks to that server alone, as no program can be a
-DDE server or client of another yet. VERSION.DLL reads version
+DDE server or client of another yet. Setup programs that send raw DDE
+messages instead (the Microsoft Setup Toolkit, 16-bit InstallShield)
+reach it through a hidden window of class Progman, made at the first
+WM_DDE_INITIATE broadcast or the first FindWindow for its class or its
+title, which answers INITIATE for PROGMAN, EXECUTE, REQUEST for the
+groups and TERMINATE, with Windows 3.1's lParam for 16-bit programs
+and PackDDElParam's for 32-bit ones. VERSION.DLL reads version
 resources and installs files with VerFindFileA and VerInstallFileA,
 and LZ32 and KERNEL32 expand files that COMPRESS.EXE packed. OLE32
 creates objects from the class objects programs register, from the
@@ -760,16 +810,37 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   loaded into it again, as Windows' host does.
 - Windows 3.1 programs see version 3.95, Windows 95's, and not the
   WS_EX_WINDOWEDGE style USER32 gives their windows.
+- KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a
+  CD-ROM drive as DRIVE_REMOTE: Windows 3.1 has no DRIVE_CDROM. A
+  program finds its disc among the remote drives with MSCDEX's INT 2Fh
+  AX=150Bh.
 - A call of a function the built-in modules don't have yet stops the
   program with a message that names it.
+- Flat thunks (`src/win16/flat.rs`): a Win32 DLL made with the thunk
+  compiler joins its 16-bit DLL with ThunkConnect32 and calls it through
+  QT_Thunk, as DirectX 5's DSETUP does. The Win32 process gets a task in
+  the Win16 process, which runs its 16-bit calls while the calling
+  thread waits, and MapLS and MapSL map pointers both ways by mapping
+  the same physical pages into the other process. 16-bit DLLs made for
+  Windows 4.0 get their DllEntryPoint called after LibMain. Calls the
+  other way, from 16-bit code to a Win32 DLL, fail with the error value
+  the thunk data gives.
 
 Games tried, all of which start and draw their windows: SkiFree,
 BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
 Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
 Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
 two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
-and Prairie Dog Hunt (VB2). The 16-bit setup programs, InstallShield's
-among them, are still to be tried.
+and Prairie Dog Hunt (VB2).
+
+Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
+the SimTower demo, and the InstallShield of the Lemmings demo. All three
+copy and expand their files. The WinG SDK's and the Lemmings demo's make
+their Program Manager groups through raw DDE messages, and the WinG
+SDK's setup finishes. The Lemmings demo's SETUP.EXE, which starts
+InstallShield, then waits for TOOLHELP's NotifyRegister to tell it the
+installer ended, which the built-in TOOLHELP doesn't do, so it stays
+running with no window.
 
 Some choices in the earlier phases keep this phase from having to rework
 them:

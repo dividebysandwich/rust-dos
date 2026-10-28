@@ -125,11 +125,9 @@ pub fn check_foreground(cpu: &mut Cpu) {
 }
 
 /// Whether a device has the mouse exclusively: USER32 then leaves it
-/// alone.
+/// alone (`State::mouse_taken`).
 pub fn mouse_taken(cpu: &mut Cpu) -> bool {
-    state(cpu)
-        .devices_mut()
-        .any(|(_, d)| d.kind == MOUSE && d.acquired && d.coop & DISCL_EXCLUSIVE != 0)
+    state(cpu).mouse_taken()
 }
 
 fn read_mouse(cpu: &mut Cpu) {

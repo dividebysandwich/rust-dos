@@ -1,6 +1,9 @@
 //! The cache of host folder entries and FindNext listings.
 
 use super::*;
+use std::collections::VecDeque;
+use std::time::Duration;
+use web_time::Instant;
 
 /// The entries of host folders as last read, with their DOS names. Each
 /// component of a DOS path is looked up among the entries of its folder,
@@ -13,13 +16,24 @@ use super::*;
 /// that time is under `RECENT` old, too close to tell a change made in the
 /// same tick of a coarse clock (2 seconds on FAT) from the read. Folders
 /// that only a backend reaches (the libretro frontend's, a write overlay's
-/// layer) aren't kept: their times aren't known. Nor are folders of fewer
-/// than `MIN_ENTRIES` entries, which take no longer to read than to check.
+/// layer) aren't kept: their times aren't known.
+///
+/// Checking a folder's time costs a stat, and a path names several
+/// folders, so a folder whose time was checked less than `TRUST` ago is
+/// used without checking it again. Another program's change shows within
+/// `TRUST`; the guest's own changes show at once.
 ///
 /// A folder's time doesn't always move when another program changes it:
 /// Windows doesn't update it on FAT and exFAT, and unpackers and copy tools
 /// set it back. So a name that isn't among a folder's kept entries is
 /// looked for again in a fresh read (`reread`) before it counts as missing.
+/// The names that a read less than `TRUST` ago didn't have are noted
+/// (`missing`) and count as missing without another read: programs poll
+/// for files that aren't there (Sub Culture opens a missing sound file
+/// fifty times a second), and a read of a large folder takes far longer
+/// than the call should. A name the guest is about to create is looked
+/// for again (`creating`), so that a file another program made in the
+/// meantime is the one the guest gets.
 ///
 /// The listings of the last few searches are kept the same way, for
 /// FindNext (`DiskController::find_directory_entry`), whatever their size:
@@ -42,6 +56,11 @@ pub(super) struct HostDirCache {
     /// then stats only the files of the folder written to. A file another
     /// program resizes shows after the guest's next change in its folder.
     pub(super) usage: RefCell<HashMap<(PathBuf, u64, u64), DirUsage>>,
+    /// The time `TRUST` is measured by in tests: it stands still from the
+    /// first look and moves on only by `expire`, so how long a test takes
+    /// doesn't change what it sees.
+    #[cfg(test)]
+    clock: Cell<Option<Instant>>,
 }
 
 /// The clusters a host folder's own files take, and its folders.
@@ -76,22 +95,48 @@ pub(super) struct SearchKey {
 pub(super) struct HostDir {
     modified: std::time::SystemTime,
     changes: u64,
+    /// When the folder's time was last found to be `modified`.
+    checked: Instant,
+    /// When `entries` were read.
+    read: Instant,
     entries: Rc<[(String, String)]>,
+    /// Names, uppercased, that were looked up and aren't in `entries`, the
+    /// oldest first.
+    missing: VecDeque<String>,
 }
 
 impl HostDirCache {
     /// How recent a folder's modification time can be for its entries to
     /// be kept.
     const RECENT: std::time::Duration = std::time::Duration::from_secs(2);
+    /// How long a folder's entries are used without checking its time, and
+    /// how long a name a read didn't have counts as missing without
+    /// reading the folder again.
+    const TRUST: Duration = Duration::from_secs(1);
     /// Folders kept at most; one is dropped to make room for another.
     const MAX_DIRS: usize = 64;
     /// Searches kept at most: a program walking a tree has one open per
     /// level.
     const MAX_SEARCHES: usize = 8;
-    /// The fewest entries a folder is kept with. Checking a folder's time
-    /// costs a stat, which on Windows takes about as long as reading a
-    /// folder of a dozen entries.
-    pub(super) const MIN_ENTRIES: usize = 16;
+    /// Missing names noted per folder at most; the oldest goes first.
+    const MAX_MISSING: usize = 32;
+
+    /// Now, as `TRUST` is measured.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        {
+            let now = self.clock.get().unwrap_or_else(Instant::now);
+            self.clock.set(Some(now));
+            now
+        }
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    /// How long ago `then` was, as `TRUST` is measured.
+    fn since(&self, then: Instant) -> Duration {
+        self.now().saturating_duration_since(then)
+    }
 
     /// The guest created, wrote, deleted or renamed something on a host
     /// drive: every folder is read again.
@@ -166,36 +211,94 @@ impl HostDirCache {
     }
 
     /// The entries of `dir` from `read`, kept in place of the ones kept:
-    /// what was kept lacked a name the guest looked for.
+    /// what was kept lacked a name the guest looked for. The folder's time
+    /// is taken again first, and a folder changed within `RECENT` isn't
+    /// kept any more. The missing names noted stay noted if the entries
+    /// came out the same.
     pub(super) fn reread(&self, dir: &Path, read: impl Fn() -> Vec<(String, String)>) -> Rc<[(String, String)]> {
+        let modified = Self::settled(dir);
         let entries: Rc<[(String, String)]> = read().into();
-        if let Some(kept) = self.dirs.borrow_mut().get_mut(dir) {
-            kept.entries = entries.clone();
+        let mut dirs = self.dirs.borrow_mut();
+        match modified {
+            Some(modified) => {
+                if let Some(kept) = dirs.get_mut(dir) {
+                    let now = self.now();
+                    if kept.entries != entries {
+                        kept.missing.clear();
+                    }
+                    kept.modified = modified;
+                    kept.checked = now;
+                    kept.read = now;
+                    kept.entries = entries.clone();
+                }
+            }
+            None => {
+                dirs.remove(dir);
+            }
         }
         entries
+    }
+
+    /// Whether the name `upper` (uppercased) was looked up in the kept
+    /// folder `dir` and not found in a read less than `TRUST` ago, with no
+    /// change by the guest since.
+    pub(super) fn known_missing(&self, dir: &Path, upper: &str) -> bool {
+        self.dirs.borrow().get(dir).is_some_and(|kept| {
+            kept.changes == self.changes.get()
+                && self.since(kept.read) < Self::TRUST
+                && kept.missing.iter().any(|name| name == upper)
+        })
+    }
+
+    /// The name `upper` (uppercased) isn't among the entries of the kept
+    /// folder `dir`, which were just read.
+    pub(super) fn note_missing(&self, dir: &Path, upper: &str) {
+        if let Some(kept) = self.dirs.borrow_mut().get_mut(dir)
+            && !kept.missing.iter().any(|name| name == upper)
+        {
+            if kept.missing.len() >= Self::MAX_MISSING {
+                kept.missing.pop_front();
+            }
+            kept.missing.push_back(upper.to_string());
+        }
+    }
+
+    /// The guest is about to create a file: the names noted missing are
+    /// looked for again, so that a file another program made since isn't
+    /// made a second time beside it (in another case, on a host that
+    /// tells cases apart).
+    pub(super) fn creating(&self) {
+        for kept in self.dirs.borrow_mut().values_mut() {
+            kept.missing.clear();
+        }
     }
 
     /// The entries of `dir`, kept or from `read`, and whether they are the
     /// kept ones.
     pub(super) fn entries(&self, dir: &Path, read: impl Fn() -> Vec<(String, String)>) -> (Rc<[(String, String)]>, bool) {
-        // Small folders are read each time; a first read tells.
-        let mut first = None;
-        if !self.dirs.borrow().contains_key(dir) {
-            let entries = read();
-            if entries.len() < Self::MIN_ENTRIES {
-                return (entries.into(), false);
-            }
-            first = Some(entries);
+        let changes = self.changes.get();
+        let trusted = self
+            .dirs
+            .borrow()
+            .get(dir)
+            .filter(|k| k.changes == changes && self.since(k.checked) < Self::TRUST)
+            .map(|k| k.entries.clone());
+        if let Some(entries) = trusted {
+            return (entries, true);
         }
         let Some(modified) = Self::settled(dir) else {
             self.dirs.borrow_mut().remove(dir);
-            return (first.unwrap_or_else(read).into(), false);
+            return (read().into(), false);
         };
-        let changes = self.changes.get();
-        let kept = self.dirs.borrow().get(dir).filter(|k| k.modified == modified && k.changes == changes).map(|k| k.entries.clone());
-        if let Some(entries) = kept {
-            return (entries, true);
+        let mut dirs = self.dirs.borrow_mut();
+        if let Some(kept) = dirs
+            .get_mut(dir)
+            .filter(|k| k.modified == modified && k.changes == changes)
+        {
+            kept.checked = self.now();
+            return (kept.entries.clone(), true);
         }
+        drop(dirs);
         // Read after the time was taken, so that a change made in between
         // shows as a newer time on the next call.
         let entries: Rc<[(String, String)]> = read().into();
@@ -206,8 +309,24 @@ impl HostDirCache {
         {
             dirs.remove(&dropped);
         }
-        dirs.insert(dir.to_path_buf(), HostDir { modified, changes, entries: entries.clone() });
+        let now = self.now();
+        let kept = HostDir {
+            modified,
+            changes,
+            checked: now,
+            read: now,
+            entries: entries.clone(),
+            missing: VecDeque::new(),
+        };
+        dirs.insert(dir.to_path_buf(), kept);
         (entries, false)
+    }
+
+    /// Moves the test clock on by `TRUST`: the next look at each folder
+    /// checks its time again, and a name noted missing is looked for again.
+    #[cfg(test)]
+    pub(super) fn expire(&self) {
+        self.clock.set(Some(self.now() + Self::TRUST));
     }
 
     /// The listing of the search `key`: the one kept, unless `first` (a

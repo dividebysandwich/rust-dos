@@ -240,6 +240,7 @@ impl Voodoo {
     /// `voodoo_reg_writel`). The address is taken now, so a program can
     /// set the next one while the swap waits.
     fn banshee_swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        self.backlog.borrow_mut().swapped();
         let addr = self.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF;
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
@@ -294,16 +295,44 @@ impl Voodoo {
     }
 
     /// TMU 0's texture space from 600000h: texture memory from its
-    /// texBaseAddr on, linear (86Box's `voodoo_tex_writel`).
+    /// texBaseAddr on, linear (86Box's `voodoo_tex_writel`). The
+    /// triangles queued before are drawn first if they may read or draw
+    /// into the dword and can't be given a copy of what they read
+    /// (`spare`).
     pub(crate) fn banshee_texture_write(&mut self, offset: u32, data: u32) {
-        if self.tmu_in_use.get() != 0 || self.writes_queue() {
+        let base = self.reg[0x100 + TEX_BASE_ADDR] & 0xFF_FFF0;
+        let addr = base.wrapping_add(offset & 0x1F_FFFC) & self.fbi.mask;
+        if !self.spare(addr, addr + 4) {
             self.flush();
         }
-        let base = self.reg[0x100 + TEX_BASE_ADDR] & 0xFF_FFF0;
-        let addr = base.wrapping_add(offset & 0x1F_FFFC);
+        self.gpu_sync_bytes(addr, 4);
         super::blit2d::write(&self.fbi.ram, addr, 4, data, self.fbi.mask);
-        let addr = addr & self.fbi.mask;
         self.mirror_memory(addr, addr + 4);
+    }
+
+    /// `data` downloaded into the card's memory from byte `addr` on, as
+    /// writes of it through TMU 0's texture space would put it, all at
+    /// once: Glide's texture downloads. The triangles queued before are
+    /// drawn first if they may read or draw into that memory and can't
+    /// be given a copy of what they read (`spare`), and the recording
+    /// hears of the bytes once. Past the end of the memory they wrap
+    /// round.
+    pub(crate) fn banshee_texture_download(&mut self, addr: u32, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let size = self.fbi.mask as usize + 1;
+        let start = addr as usize & (size - 1);
+        let (here, wrapped) = data.split_at(data.len().min(size - start));
+        if !self.spare(start as u32, (start + here.len()) as u32) {
+            self.flush();
+        }
+        self.gpu_sync_bytes(start as u32, here.len());
+        self.fbi.ram.write_bytes(start, here);
+        self.mirror_memory(start as u32, (start + here.len()) as u32);
+        if !wrapped.is_empty() {
+            self.banshee_texture_download(0, wrapped);
+        }
     }
 
     /// For the debugger: where the 3D engine draws and what it shows.
@@ -524,6 +553,35 @@ mod tests {
         });
         assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, now), 0x20_0000);
         assert_eq!(v.banshee_status(now) >> 28, 0);
+    }
+
+    #[test]
+    fn the_card_is_busy_while_a_swap_waits_for_its_retrace() {
+        // 3dfx's driver on Windows 95 flips Moto Racer's menus with a
+        // swap at the retrace, then waits for the card to go idle before
+        // it draws the next frame into the buffer still shown (#202).
+        let mut v = card();
+        let now = Now::default();
+        let busy = |v: &Voodoo, now: Now| v.banshee_status(now) & 0x780 != 0;
+        assert!(!busy(&v, now));
+        reg3d(&mut v, LEFT_OVERLAY_BUF, 0x10_0000);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        assert!(!busy(&v, now), "a swap at once is done at once");
+        reg3d(&mut v, LEFT_OVERLAY_BUF, 0x20_0000);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        assert!(busy(&v, now), "busy until the retrace");
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, now), 0x10_0000);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        let then = Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        };
+        // Busy until the overlay shows the new buffer, which the timer
+        // event at the retrace does.
+        assert!(busy(&v, then), "busy until the swap is done");
+        v.service(then);
+        assert_eq!(v.read(VID_CURR_OVERLAY_START_ADDR, then), 0x20_0000);
+        assert!(!busy(&v, then));
     }
 
     #[test]
@@ -973,6 +1031,56 @@ mod tests {
     }
 
     #[test]
+    fn a_run_through_the_pipeline_writes_what_its_dwords_write() {
+        // 1-5-5-5 through the pixel pipeline with chroma keying, as Sub
+        // Culture writes its overlay: the keyed pixels stay as they were.
+        let setup = |v: &mut Voodoo| {
+            reg3d(v, COL_BUFFER_ADDR, 0x40_0000);
+            reg3d(v, COL_BUFFER_STRIDE, 1 << 15 | 8);
+            reg3d(v, LFB_MODE, 2 | 1 << 8);
+            reg3d(v, FBZ_MODE, 1 << 1 | 1 << 9);
+            reg3d(v, CHROMA_KEY, 0);
+            // The first two tiles, 64 pixels by 32 rows each.
+            for i in 0..2 * 2048 {
+                v.fbi.ram.set(0x40_0000 / 2 + i, 0x1234);
+            }
+        };
+        let data: Vec<u32> = (0..40u32)
+            .map(|i| {
+                if i % 5 == 0 {
+                    0
+                } else {
+                    i.wrapping_mul(0x9E37_79B9) | 0x8000_8000
+                }
+            })
+            .collect();
+        let (mut run, mut each) = (card(), card());
+        setup(&mut run);
+        setup(&mut each);
+        // Pixels 6 to 85 of row 3: into the second tile from pixel 64 on.
+        let offset = 0x100_0000 + 3 * 4096 + 6 * 2;
+        let index = run
+            .lfb_run(offset, 4 * data.len() as u32)
+            .expect("in the LFB");
+        run.lfb_write_run(index, data.iter().copied());
+        for (i, &value) in (0..).zip(&data) {
+            each.write(offset + 4 * i, value, u32::MAX, Now::default());
+        }
+        let base = 0x40_0000 / 2;
+        for i in 0..2 * 2048 {
+            assert_eq!(
+                run.fbi.ram.get(base + i),
+                each.fbi.ram.get(base + i),
+                "word {i}"
+            );
+        }
+        let (row, next_tile) = (base + 3 * 64, base + 2048 + 3 * 64);
+        assert_eq!(run.fbi.ram.get(row + 6), 0x1234, "keyed");
+        assert_ne!(run.fbi.ram.get(row + 8), 0x1234);
+        assert_ne!(run.fbi.ram.get(next_tile), 0x1234, "pixel 64");
+    }
+
+    #[test]
     fn pipeline_writes_are_recorded_from_a_tiled_buffer() {
         let mut v = mirrored();
         reg3d(&mut v, COL_BUFFER_ADDR, 0x10_0000);
@@ -993,8 +1101,19 @@ mod tests {
         assert_eq!(rows[0].values, [0xF800]);
     }
 
+    /// The pages of memory a frame's recording carries for the
+    /// renderer's copy of it: where each run starts and its bytes.
+    fn memory(frame: &Frame) -> Vec<(u32, &[u8])> {
+        let runs = frame.commands.iter().filter_map(|c| match c {
+            Command::Memory { at, bytes, .. } => Some((*at, &bytes[..])),
+            _ => None,
+        });
+        runs.collect()
+    }
+
     #[test]
-    fn the_scanout_sends_memory_only_when_it_may_have_changed() {
+    fn the_scanout_sends_the_pages_written_since_the_renderer_had_them() {
+        use super::super::super::pages::PAGE;
         use super::super::{LINEAR, VID_DESKTOP_OVERLAY_STRIDE};
         let mut v = mirrored();
         v.set_software_picture(false);
@@ -1002,18 +1121,20 @@ mod tests {
         v.write(VID_DESKTOP_OVERLAY_STRIDE, 1280, u32::MAX, now);
         reg3d(&mut v, COL_BUFFER_ADDR, 0x10_0000);
         reg3d(&mut v, COL_BUFFER_STRIDE, 1 << 15 | 10);
-        let scanout = |v: &mut Voodoo| v.take_mirror().unwrap().scanout.unwrap();
-        // The desktop at 0 isn't a buffer the renderer draws: its memory
-        // goes the first time, and not again until something changes.
-        let first = scanout(&mut v);
-        assert_eq!(first.desktop.buffer, None);
-        assert!(first.desktop_memory.is_some());
-        assert!(scanout(&mut v).desktop_memory.is_none());
+        // The desktop at 0 isn't a buffer the renderer draws: its pages
+        // go the first time, and not again until something writes them.
+        let first = v.take_mirror().unwrap();
+        assert_eq!(first.scanout.as_ref().unwrap().desktop.buffer, None);
+        assert_eq!(memory(&first).first().map(|m| m.0), Some(0));
+        assert!(memory(&v.take_mirror().unwrap()).is_empty());
         v.write(LINEAR + 4, 0x1234_5678, u32::MAX, now);
-        let memory = scanout(&mut v).desktop_memory.unwrap();
-        assert_eq!(memory[4..8], [0x78, 0x56, 0x34, 0x12]);
-        // Moved onto the colour buffer, it's drawn from there, and moved
-        // back, its memory goes again.
+        let frame = v.take_mirror().unwrap();
+        let sent = memory(&frame);
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].0, sent[0].1.len()), (0, PAGE as usize));
+        assert_eq!(sent[0].1[4..8], [0x78, 0x56, 0x34, 0x12]);
+        // Moved onto the colour buffer, it's drawn from there; moved back,
+        // the renderer still has its pages, and none go again.
         v.write(VID_DESKTOP_START_ADDR, 0x10_0000, u32::MAX, now);
         v.write(
             VID_PROC_CFG,
@@ -1022,22 +1143,26 @@ mod tests {
             now,
         );
         v.write(VID_DESKTOP_OVERLAY_STRIDE, 10, u32::MAX, now);
-        let on_buffer = scanout(&mut v);
-        assert_eq!(on_buffer.desktop.buffer, Some(0x10_0000 / 2));
-        assert!(on_buffer.desktop_memory.is_none());
+        let on_buffer = v.take_mirror().unwrap();
+        let scanout = on_buffer.scanout.as_ref().unwrap();
+        assert_eq!(scanout.desktop.buffer, Some(0x10_0000 / 2));
+        assert!(memory(&on_buffer).is_empty());
         v.write(VID_DESKTOP_START_ADDR, 0, u32::MAX, now);
         v.write(VID_PROC_CFG, VIDPROC_ENABLE | 1 << 18, u32::MAX, now);
         v.write(VID_DESKTOP_OVERLAY_STRIDE, 1280, u32::MAX, now);
-        assert!(scanout(&mut v).desktop_memory.is_some());
-        assert!(scanout(&mut v).desktop_memory.is_none());
+        assert!(memory(&v.take_mirror().unwrap()).is_empty());
         // A recording wants the software picture too, which looks at the
-        // change first: the scanout still hears of it.
+        // change first: the renderer still gets the page.
         v.set_software_picture(true);
         v.prepare_display();
         v.write(LINEAR + 8, 0x0BAD_F00D, u32::MAX, now);
         assert!(v.prepare_display());
-        let memory = scanout(&mut v).desktop_memory.unwrap();
-        assert_eq!(memory[8..12], [0x0D, 0xF0, 0xAD, 0x0B]);
+        let frame = v.take_mirror().unwrap();
+        assert_eq!(memory(&frame)[0].1[8..12], [0x0D, 0xF0, 0xAD, 0x0B]);
+        // A renderer starting over gets them all again.
+        v.set_mirror(false);
+        v.set_mirror(true);
+        assert_eq!(memory(&v.take_mirror().unwrap()).first().map(|m| m.0), Some(0));
     }
 
     #[test]
@@ -1050,5 +1175,41 @@ mod tests {
         // A download from 600000h lands from there on.
         v.write(0x60_0008, 0x1122_3344, 0xFFFF_FFFF, Now::default());
         assert_eq!(v.fbi.ram.get(0x50_0018 / 2), 0x3344);
+    }
+
+    #[test]
+    fn a_texture_download_is_what_writes_through_the_texture_space_make() {
+        // Rows of an odd length at an odd address: the bytes around them
+        // stay as they were.
+        let data: Vec<u8> = (0..37u8).map(|i| i.wrapping_mul(7) ^ 0x5A).collect();
+        let (at, end) = (0x40_0003u32, 0x40_0003 + data.len() as u32);
+        let (mut bulk, mut dwords) = (card(), card());
+        for v in [&bulk, &dwords] {
+            v.fbi.ram.fill(0x1F_FFF0..0x20_0040, 0xA5C3);
+        }
+        bulk.banshee_texture_download(at, &data);
+        // The same bytes a dword at a time, merged into what is there.
+        let port = at & !0xF;
+        reg3d(&mut dwords, TEX_BASE_ADDR, port);
+        for dword in (at & !3..end).step_by(4) {
+            let bytes: [u8; 4] = std::array::from_fn(|i| {
+                let a = dword + i as u32;
+                if (at..end).contains(&a) {
+                    data[(a - at) as usize]
+                } else {
+                    dwords.fbi.ram.byte(a as usize)
+                }
+            });
+            let value = u32::from_le_bytes(bytes);
+            dwords.write(0x60_0000 + dword - port, value, u32::MAX, Now::default());
+        }
+        let around = |v: &Voodoo| {
+            (0x3F_FFE0..0x40_0080)
+                .map(|a| v.fbi.ram.byte(a))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(around(&bulk), around(&dwords));
+        assert_eq!(bulk.fbi.ram.byte(at as usize - 1), 0xC3);
+        assert_eq!(bulk.fbi.ram.byte(at as usize), data[0]);
     }
 }

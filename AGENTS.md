@@ -53,6 +53,49 @@ around it.
 - The tests start the built `rust-dos.exe`, which needs `SDL2.dll` from
   the same folder on `PATH`.
 
+## Checking a change: build what you touched, CI runs the rest
+
+`tests/` holds about 128 test programs, and each links the whole crate.
+`cargo build --all-targets`, `cargo clippy --all-targets` and a plain
+`cargo test` build and link every one of them. CI does that on every
+push, on Linux, Windows and macOS, so you don't need to before you push.
+
+- Build the library and the program with `cargo build`, and lint them
+  with `cargo clippy`.
+- Run the tests that cover what you changed: `cargo test --test <name>`
+  for the files in `tests/`, and `cargo test --lib <module>` for unit
+  tests. When you change a test file, lint it with
+  `cargo clippy --test <name>`.
+- Push, and fix the branch if CI fails. Run the whole suite locally only
+  when you can't use CI.
+
+## Several agents on one machine
+
+Agents often work on several branches at once, each in its own git
+worktree. Their builds compete for the same processors, memory and
+disk.
+
+- Give each worktree its own target directory outside the repository
+  (`CARGO_TARGET_DIR`), on a drive with room. Builds that share a target
+  directory wait for each other ("Blocking waiting for file lock"), and
+  each one overwrites the binaries the one before it built, so
+  concurrent builds need separate ones.
+- Reuse the target directory of a finished task instead of starting an
+  empty one. It keeps the compiled dependencies, so a build of another
+  worktree compiles only the rust-dos crates again. A compiler cache
+  such as sccache doesn't do this across directories: its cache keys
+  include the target directory's path, so a new directory gets no hits.
+- Cargo starts as many jobs as there are processors, and every agent's
+  build does. With more than two or three builds at once, pass `-j 2`
+  or so. Otherwise the machine thrashes, and on Windows rustc and the
+  linker can run out of memory (`os error 1455`, the paging file is too
+  small).
+- Stop the emulators you start, by their process ID, before you finish:
+  one left running holds its files, its debug server's port and a
+  processor.
+- Don't take timings while other builds run. Measure on a quiet machine,
+  or compare CI's step times instead.
+
 ## Behaviour: closer to the real machine beats unchanged results
 
 A fix that makes the emulator behave more like the real hardware or the

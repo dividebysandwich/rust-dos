@@ -181,21 +181,6 @@ pub fn texture_write(cpu: &mut Cpu, tmu: u32, offset: u32, value: u32) {
     cpu.bus.voodoo_write(at, value, u32::MAX);
 }
 
-/// Write a dword of a Banshee's texture download space: memory from
-/// texture unit 0's texBaseAddr on.
-pub fn texture_port_write(cpu: &mut Cpu, offset: u32, value: u32) {
-    cpu.bus
-        .voodoo_write(0x60_0000 + (offset & 0x1F_FFFC), value, u32::MAX);
-}
-
-/// A dword of a Banshee's memory at `addr`, read through BAR1 where
-/// that is linear (below lfbMemoryConfig's tile base), or None.
-pub fn memory_read(cpu: &Cpu, addr: u32) -> Option<u32> {
-    let b = cpu.bus.banshee()?;
-    let addr = addr & (b::MEMORY as u32 - 1) & !3;
-    (b.linear_addr(addr) == addr).then(|| cpu.bus.voodoo_read_32(b::LINEAR + addr))
-}
-
 // --- The display ---
 
 /// A view of the card mapped into the process that has it open.

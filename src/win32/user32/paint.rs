@@ -522,7 +522,7 @@ fn paint_background(cpu: &mut Cpu, area: &Region) {
         return;
     }
     let brush = sysparams::brush(cpu, COLOR_BACKGROUND);
-    let (w, h) = sysparams::screen_size();
+    let (w, h) = sysparams::screen_size(cpu);
     draw::fill_device_rect(cpu, hdc, Rect::new(0, 0, w, h), brush);
     gdi32::dc::free_window_dc(cpu, hdc);
 }
@@ -542,6 +542,32 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
     }
     paint_background(cpu, area);
     thread::wake(cpu);
+}
+
+/// What of the window `hwnd` the visible siblings above it cover, on the
+/// screen.
+pub fn covered(state: &State, hwnd: u32) -> Region {
+    let siblings = state
+        .window(state.parent(hwnd))
+        .map_or(&[][..], |p| &p.children[..]);
+    let mut area = Region::new();
+    for &h in siblings.iter().take_while(|&&h| h != hwnd) {
+        if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+            area = area.or(&shape(state, h));
+        }
+    }
+    area.and(&shape(state, hwnd))
+}
+
+/// SetWindowPos brought `hwnd` above siblings that covered `before` of
+/// it: what they no longer cover needs painting.
+pub fn raised(cpu: &mut Cpu, hwnd: u32, before: &Region) {
+    let state = user(cpu);
+    let shown = before.diff(&covered(state, hwnd));
+    if !shown.is_empty() {
+        invalidate_screen(state, hwnd, &shown);
+        thread::wake(cpu);
+    }
 }
 
 /// SetWindowPos moved, sized, showed or hid `hwnd`: what it uncovered
@@ -612,7 +638,7 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     if !crate::win32::ddraw::owns_display(cpu) {
         enter_desktop_mode(cpu);
         // The mouse moves over the whole desktop, from its middle.
-        let (w, h) = sysparams::screen_size();
+        let (w, h) = sysparams::screen_size(cpu);
         let mouse = &mut cpu.bus.mouse;
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
         mouse.warp(w / 2, h / 2);
@@ -651,7 +677,7 @@ pub fn redraw_screen(cpu: &mut Cpu) {
     if !user(cpu).desktop {
         return;
     }
-    let (w, h) = sysparams::screen_size();
+    let (w, h) = sysparams::screen_size(cpu);
     expose(cpu, &Region::from_rect(Rect::new(0, 0, w, h)));
 }
 
@@ -1684,6 +1710,63 @@ fn square_in(r: Rect) -> Rect {
     Rect::sized(x, y, size, size)
 }
 
+/// The rows of the glyph of the caption button `glyph` (DFCS_CAPTION*)
+/// drawn on the button `r`, as `spans` takes them. They are Windows
+/// 98's Marlett glyphs: on the usual 16 by 14 button a 9-pixel square
+/// two in from the left and the top holds the maximize box, the restore
+/// boxes and the minimize bar, and the close cross is 8 by 7, centered.
+fn caption_glyph(r: Rect, glyph: u32) -> Vec<(i32, i32, i32)> {
+    let g = (r.height() - 5).max(3);
+    let (x0, y0) = (r.left + (r.width() - g) / 2 - 1, r.top + (r.height() - g) / 2);
+    // A box with a top two pixels thick.
+    let boxed = |rows: &mut Vec<(i32, i32, i32)>, x: i32, y: i32, size: i32| {
+        rows.push((y, x, x + size));
+        rows.push((y + 1, x, x + size));
+        for row in y + 2..y + size - 1 {
+            rows.push((row, x, x + 1));
+            rows.push((row, x + size - 1, x + size));
+        }
+        rows.push((y + size - 1, x, x + size));
+    };
+    let mut rows = Vec::new();
+    match glyph {
+        DFCS_CAPTIONCLOSE => {
+            let n = g - 2;
+            for i in 0..n {
+                let y = y0 + 1 + i;
+                rows.push((y, x0 + 2 + i, x0 + 4 + i));
+                rows.push((y, x0 + 1 + n - i, x0 + 3 + n - i));
+            }
+        }
+        DFCS_CAPTIONMIN => {
+            for y in [y0 + g - 2, y0 + g - 1] {
+                rows.push((y, x0 + 2, x0 + g - 1));
+            }
+        }
+        DFCS_CAPTIONMAX => boxed(&mut rows, x0, y0, g),
+        _ => {
+            // Restore: a box behind and to the right of another.
+            let s = g - 3;
+            boxed(&mut rows, x0 + 3, y0, s);
+            let (fx, fy) = (x0 + 1, y0 + 3);
+            // The front box hides what of the back one it covers.
+            rows = rows
+                .into_iter()
+                .flat_map(|(y, a, b)| {
+                    if y < fy || y >= fy + s {
+                        vec![(y, a, b)]
+                    } else {
+                        vec![(y, a, b.min(fx)), (y, a.max(fx + s), b)]
+                    }
+                })
+                .filter(|&(_, a, b)| b > a)
+                .collect();
+            boxed(&mut rows, fx, fy, s);
+        }
+    }
+    rows
+}
+
 /// Fill the rows of a shape: for each row `y` of `rows`, the columns
 /// `x0..x1` it gives, in a system color.
 fn spans(cpu: &mut Cpu, hdc: u32, rows: &[(i32, i32, i32)], color: u32) {
@@ -1845,63 +1928,10 @@ pub fn frame_control(
             true
         }
         DFC_CAPTION => {
-            let inner = push_frame(cpu, hdc, r, state);
-            let s = square_in(inner).inflate(-2, -2);
-            match state & 0xFF {
-                DFCS_CAPTIONCLOSE => {
-                    for i in 0..s.width().max(0) {
-                        let rows = [
-                            (s.top + i, s.left + i, s.left + i + 2),
-                            (s.top + i, s.right - i - 2, s.right - i),
-                        ];
-                        spans(cpu, hdc, &rows, text);
-                    }
-                }
-                DFCS_CAPTIONMIN => {
-                    let rows = [
-                        (s.bottom - 2, s.left + 1, s.right - 3),
-                        (s.bottom - 1, s.left + 1, s.right - 3),
-                    ];
-                    spans(cpu, hdc, &rows, text);
-                }
-                DFCS_CAPTIONMAX => {
-                    let b = Rect::new(s.left, s.top, s.right, s.bottom);
-                    spans(
-                        cpu,
-                        hdc,
-                        &[(b.top, b.left, b.right), (b.top + 1, b.left, b.right)],
-                        text,
-                    );
-                    let edges: Vec<_> = (b.top..b.bottom)
-                        .flat_map(|y| [(y, b.left, b.left + 1), (y, b.right - 1, b.right)])
-                        .chain([(b.bottom - 1, b.left, b.right)])
-                        .collect();
-                    spans(cpu, hdc, &edges, text);
-                }
-                _ => {
-                    let b = Rect::new(s.left, s.top + 3, s.right - 3, s.bottom);
-                    let edges: Vec<_> = (b.top..b.bottom)
-                        .flat_map(|y| [(y, b.left, b.left + 1), (y, b.right - 1, b.right)])
-                        .chain([
-                            (b.top, b.left, b.right),
-                            (b.top + 1, b.left, b.right),
-                            (b.bottom - 1, b.left, b.right),
-                        ])
-                        .collect();
-                    spans(cpu, hdc, &edges, text);
-                    let t = Rect::new(s.left + 3, s.top, s.right, s.bottom - 3);
-                    spans(
-                        cpu,
-                        hdc,
-                        &[(t.top, t.left, t.right), (t.top + 1, t.left, t.right)],
-                        text,
-                    );
-                    let right: Vec<_> = (t.top..t.bottom)
-                        .map(|y| (y, t.right - 1, t.right))
-                        .collect();
-                    spans(cpu, hdc, &right, text);
-                }
-            }
+            push_frame(cpu, hdc, r, state);
+            let shift = (state & DFCS_PUSHED != 0) as i32;
+            let rows = caption_glyph(r.offset(shift, shift), state & 0xFF);
+            spans(cpu, hdc, &rows, text);
             true
         }
         DFC_SCROLL => {
@@ -2121,7 +2151,10 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
             .map(|w| w.text.clone())
             .unwrap_or_default();
         if !text.is_empty() {
-            let font = gdi32::gdi(cpu).stock(gdi32::SYSTEM_FONT);
+            // The caption font SPI_GETNONCLIENTMETRICS gives: 8-point MS
+            // Sans Serif, bold.
+            let log = sysparams::sans_serif(true);
+            let font = gdi32::add(cpu, gdi32::Kind::Font { font: gdi32::Font { log } });
             let rgb = user(cpu).color(text_color);
             let saved = gdi32::dc::with(cpu, hdc, |d| {
                 let old = (d.attrs.font, d.attrs.text_color, d.attrs.bk_mode);
@@ -2143,6 +2176,7 @@ pub fn caption(cpu: &mut Cpu, hwnd: u32, hdc: u32, r: Rect, flags: u32) {
                     d.attrs.bk_mode = old.2;
                 });
             }
+            gdi32::delete_object(cpu, &[font]);
         }
     }
 }
@@ -2170,4 +2204,93 @@ pub fn paint_desktop(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         brush,
     );
     Some(TRUE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The glyph `glyph` on a 16 by 14 caption button, a line a row.
+    fn grid(glyph: u32) -> Vec<String> {
+        let mut g = vec![vec![b'.'; 16]; 14];
+        for (y, a, b) in caption_glyph(Rect::new(0, 0, 16, 14), glyph) {
+            for x in a..b {
+                g[y as usize][x as usize] = b'#';
+            }
+        }
+        g.into_iter().map(|r| String::from_utf8(r).unwrap()).collect()
+    }
+
+    // Windows 98 SE's caption buttons, from screenshots of Shadowgate.
+    #[test]
+    fn caption_glyphs_are_windows_98_s() {
+        let close = [
+            "................",
+            "................",
+            "................",
+            "....##....##....",
+            ".....##..##.....",
+            "......####......",
+            ".......##.......",
+            "......####......",
+            ".....##..##.....",
+            "....##....##....",
+            "................",
+            "................",
+            "................",
+            "................",
+        ];
+        assert_eq!(grid(DFCS_CAPTIONCLOSE), close);
+        let min = [
+            "................",
+            "................",
+            "................",
+            "................",
+            "................",
+            "................",
+            "................",
+            "................",
+            "................",
+            "....######......",
+            "....######......",
+            "................",
+            "................",
+            "................",
+        ];
+        assert_eq!(grid(DFCS_CAPTIONMIN), min);
+        let max = [
+            "................",
+            "................",
+            "..#########.....",
+            "..#########.....",
+            "..#.......#.....",
+            "..#.......#.....",
+            "..#.......#.....",
+            "..#.......#.....",
+            "..#.......#.....",
+            "..#.......#.....",
+            "..#########.....",
+            "................",
+            "................",
+            "................",
+        ];
+        assert_eq!(grid(DFCS_CAPTIONMAX), max);
+        let restore = [
+            "................",
+            "................",
+            ".....######.....",
+            ".....######.....",
+            ".....#....#.....",
+            "...######.#.....",
+            "...######.#.....",
+            "...#....###.....",
+            "...#....#.......",
+            "...#....#.......",
+            "...######.......",
+            "................",
+            "................",
+            "................",
+        ];
+        assert_eq!(grid(DFCS_CAPTIONRESTORE), restore);
+    }
 }

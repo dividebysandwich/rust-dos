@@ -25,6 +25,8 @@ struct Frame {
     stride: u32,
     tiled: bool,
     half: bool,
+    /// Each pixel shown twice across (`Banshee::wide_pixels`).
+    wide: bool,
 }
 
 /// The byte address of byte `x` of row `y` of a surface at `start`.
@@ -96,6 +98,7 @@ impl Banshee {
             stride: if tiled { stride * TILE } else { stride },
             tiled,
             half: cfg & VIDPROC_HALF_MODE != 0,
+            wide: narrow(w),
         }
     }
 
@@ -130,10 +133,35 @@ impl Banshee {
     }
 
     /// Draw the desktop, the overlay and the cursor into `out` (RGBA8,
-    /// `pitch` pixels a row), as big as `desktop_size` says.
+    /// `pitch` pixels a row), as big as `picture_size` says: each pixel
+    /// twice across with `wide_pixels`.
     pub fn render(&self, ram: &Vram, out: &mut [u8], pitch: usize) {
-        let mask = (ram.bytes() - 1) as u32;
         let f = self.frame();
+        self.render_desktop(ram, out, pitch, &f);
+        if !f.wide {
+            return;
+        }
+        // Drawn at the desktop's size, each row is spread over twice the
+        // width from its right end, so that no pixel is overwritten
+        // before it is copied.
+        let width = f.width.min(pitch / 2);
+        for y in 0..f.height {
+            let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + 2 * width) * 4) else {
+                break;
+            };
+            let pixels = row.as_chunks_mut::<4>().0;
+            for x in (0..width).rev() {
+                let px = pixels[x];
+                pixels[2 * x] = px;
+                pixels[2 * x + 1] = px;
+            }
+        }
+    }
+
+    /// Draw the desktop, the overlay and the cursor into `out` (RGBA8,
+    /// `pitch` pixels a row), as big as `desktop_size` says.
+    fn render_desktop(&self, ram: &Vram, out: &mut [u8], pitch: usize, f: &Frame) {
+        let mask = (ram.bytes() - 1) as u32;
         let desktop_clut = &self.clut[if f.cfg & VIDPROC_DESKTOP_CLUT_SEL != 0 {
             256
         } else {
@@ -204,10 +232,10 @@ impl Banshee {
             }
         }
         if f.cfg & VIDPROC_OVERLAY_ENABLE != 0 {
-            self.render_overlay(ram, out, pitch, &f);
+            self.render_overlay(ram, out, pitch, f);
         }
         if f.cfg & VIDPROC_CURSOR != 0 {
-            self.render_cursor(ram, out, pitch, &f);
+            self.render_cursor(ram, out, pitch, f);
         }
     }
 
@@ -335,11 +363,11 @@ impl Voodoo {
     /// What the video processor shows, for the OpenGL renderer to compose
     /// (`mirror::Scanout`), `key` the buffers it draws. A surface that is
     /// one of them, in 5-6-5 and with its stride, comes from its drawing.
-    /// The other surfaces' memory comes along when the picture may have
-    /// changed since the last frame (the flags `prepare_display` takes
-    /// otherwise), and after the queued drawing if it shares memory with
-    /// the buffers.
+    /// The other surfaces come from the renderer's copy of the card's
+    /// memory, which gets the pages shown that were written since it last
+    /// had them (`pages`), first in the recording.
     pub(crate) fn banshee_scanout(&mut self, key: &LayoutKey) -> Option<Box<Scanout>> {
+        self.gpu_frame();
         let b = self.banshee.as_deref_mut()?;
         let dirty = std::mem::take(&mut b.dirty)
             | std::mem::take(&mut self.display_dirty)
@@ -424,25 +452,13 @@ impl Voodoo {
             let [x0, y0, x1, y1] = o.rect;
             x0 == 0 && y0 == 0 && x1 + 1 >= w && y1 + 1 >= h
         });
-        // A surface's memory goes again when it may have changed, or the
-        // renderer hasn't the memory from its first byte.
-        let wanted = [
-            (desktop.buffer.is_none() && !covered).then_some(f.start),
-            overlay
-                .as_ref()
-                .filter(|o| o.surface.buffer.is_none())
-                .map(|o| o.surface.start),
-        ];
-        let send =
-            [0, 1].map(|i| wanted[i].is_some() && (dirty || self.scanout_sent[i] != wanted[i]));
-        self.scanout_sent = wanted;
         let mut spans = [None, None];
-        if send[0] {
+        if desktop.buffer.is_none() && !covered {
             let bpp = [1, 2, 3, 4][format.min(3) as usize];
             let rows = if f.half { h.div_ceil(2) } else { h };
             spans[0] = Some((f.start, surface_len(w * bpp, rows, f.stride, f.tiled)));
         }
-        if let Some(o) = overlay.as_ref().filter(|_| send[1]) {
+        if let Some(o) = overlay.as_ref().filter(|o| o.surface.buffer.is_none()) {
             let [x0, y0, x1, y1] = o.rect;
             let (x1, y1) = (x1.min(w.saturating_sub(1)), y1.min(h.saturating_sub(1)));
             if x0 <= x1 && y0 <= y1 {
@@ -460,32 +476,42 @@ impl Voodoo {
         let bytes = ram.bytes() as u64;
         let spans = spans.map(|span| {
             span.map(|(start, len): (u32, u64)| {
-                (start, len.min(bytes.saturating_sub(start as u64)) as u32)
+                (start, start + len.min(bytes.saturating_sub(start as u64)) as u32)
             })
         });
-        // Drawing still queued may go into the memory shown.
-        let shared = spans
+        self.gpu_resend_dropped();
+        // The 3D engine draws into its buffers without marking the pages
+        // it changes: memory shown that shares pages with them goes again
+        // whenever the picture may have changed, after the drawing queued.
+        let shared: Vec<(u32, u32)> = spans
             .iter()
             .flatten()
-            .any(|&(start, len)| key.overlaps(start, start + len));
-        if shared && self.writes_queue() {
-            self.flush();
+            .copied()
+            .filter(|&(start, end)| key.overlaps(start, end))
+            .collect();
+        if dirty && !shared.is_empty() {
+            if self.writes_queue() {
+                self.flush();
+            }
+            for &(start, end) in &shared {
+                self.gpu_sync(start, end);
+                self.gpu.get_mut().pages.mark(start, end);
+            }
         }
-        let ram = &self.fbi.ram;
-        let [desktop_memory, overlay_memory] = spans.map(|span| {
-            span.map(|(start, len)| (start..start + len).map(|a| ram.byte(a as usize)).collect())
-        });
+        // The pages shown that the renderer lacks.
+        for (start, end) in spans.into_iter().flatten() {
+            self.send_pages(start, end);
+        }
         let b = self.banshee.as_deref()?;
         Some(Box::new(Scanout {
             width: w,
             height: h,
             half: f.half,
+            wide: f.wide,
             desktop,
             overlay,
             cursor,
             clut: b.clut.to_vec(),
-            desktop_memory,
-            overlay_memory,
         }))
     }
 }

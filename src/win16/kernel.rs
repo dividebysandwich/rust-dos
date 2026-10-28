@@ -6,6 +6,7 @@ use super::builtin::{Api16, Def, register, rust, value, win32};
 use super::thunk::{self, EBP, EDI, ESI, ESP};
 use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
+use crate::disk::LASTDRIVE;
 use crate::dpmi::Context;
 
 pub static MODULE: Def = Def {
@@ -277,6 +278,9 @@ static APIS: &[Api16] = &[
     rust("RegEnumKey", 216, "llpl", reg_fail),
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
+    // Flat thunks (flat.rs).
+    register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
+    rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -872,11 +876,7 @@ fn task_dir(cpu: &Cpu) -> String {
     };
     let handle = cpu.bus.win32.win16.tasks[t].module;
     super::module_index(cpu, handle)
-        .map(|i| {
-            let path = &cpu.bus.win32.win16.modules[i].path;
-            path.rfind('\\')
-                .map_or(String::new(), |n| path[..n].to_string())
-        })
+        .map(|i| crate::win32::loader::directory_of(&cpu.bus.win32.win16.modules[i].path))
         .unwrap_or_default()
 }
 
@@ -925,7 +925,7 @@ pub fn then_libs(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opti
     }
     let mut rest = vec![data[0]];
     rest.extend_from_slice(&data[2..]);
-    task::call_lib_main(cpu, data[1] as u16, *ctx, thunk::THEN_LIBS, rest);
+    task::call_lib_init(cpu, data[1] as u16, *ctx, thunk::THEN_LIBS, rest);
     None
 }
 
@@ -1210,6 +1210,13 @@ fn atom(cpu: &mut Cpu, name: u32, add: bool) -> u16 {
         return if name < 0xC000 { name as u16 } else { 0 };
     }
     let text = super::string(cpu, super::linear(cpu, name));
+    atom_of(cpu, text, add)
+}
+
+/// The atom of the string `text` ("#n" for an integer atom), added to
+/// the table with `add` or used once more; 0 when it isn't there or
+/// can't be.
+pub fn atom_of(cpu: &mut Cpu, text: String, add: bool) -> u16 {
     if let Some(n) = text.strip_prefix('#').and_then(|n| n.parse::<u16>().ok()) {
         return if n < 0xC000 { n } else { 0 };
     }
@@ -1270,18 +1277,25 @@ pub fn delete_atom(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
-pub fn get_atom_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let a = args[0] as u16;
-    let name = if a == 0 {
-        return Some(0);
+/// The string of the atom `a` ("#n" for an integer atom), if it is one.
+pub fn atom_name(cpu: &Cpu, a: u16) -> Option<String> {
+    if a == 0 {
+        None
     } else if a < 0xC000 {
-        format!("#{}", a).into_bytes()
+        Some(format!("#{}", a))
     } else {
         match cpu.bus.win32.win16.atoms.get((a - 0xC000) as usize) {
-            Some((n, uses)) if *uses > 0 => crate::dosstr::to_bytes(n),
-            _ => return Some(0),
+            Some((n, uses)) if *uses > 0 => Some(n.clone()),
+            _ => None,
         }
+    }
+}
+
+pub fn get_atom_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(name) = atom_name(cpu, args[0] as u16) else {
+        return Some(0);
     };
+    let name = crate::dosstr::to_bytes(&name);
     Some(copy_string(cpu, args[1], args[2] & 0xFFFF, &name))
 }
 
@@ -1483,16 +1497,32 @@ fn get_temp_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// GetDriveType(drive): removable for A: and B:, fixed for the others
-/// DOS has, 0 for those it hasn't.
+/// GetDriveType(drive): removable, fixed, or remote, 0 for a drive DOS
+/// hasn't, as Windows 3.1's KERNEL asks DOS: remote if IOCTL 4409h says
+/// the drive is redirected, else removable or fixed as 4408h says. So a
+/// CD-ROM drive, which MSCDEX makes a redirector drive, is remote:
+/// Windows 3.1 has no DRIVE_CDROM, and Windows 95 and 98 give 16-bit
+/// programs the same. Programs that look for their disc ask MSCDEX
+/// (INT 2Fh AX=150Bh) which of the remote drives is a CD-ROM.
 fn get_drive_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    const DRIVE_REMOTE: u32 = 4;
+    /// IOCTL 4409h's bit for a redirected drive.
+    const REMOTE: u16 = 0x1000;
     let drive = args[0] as u16;
-    let exists =
-        matches!(dos::call21(cpu, [0x3600, 0, 0, drive + 1], None), Ok((ax, _)) if ax != 0xFFFF);
-    Some(match (exists, drive) {
-        (false, _) => 0,
-        (true, 0 | 1) => 2,
-        _ => 3,
+    if drive >= LASTDRIVE as u16 {
+        return Some(0);
+    }
+    let number = drive + 1;
+    match dos::call21(cpu, [0x4409, number, 0, 0], None) {
+        Err(_) => return Some(0),
+        Ok((_, dx)) if dx & REMOTE != 0 => return Some(DRIVE_REMOTE),
+        Ok(_) => {}
+    }
+    Some(match dos::call21(cpu, [0x4408, number, 0, 0], None) {
+        Ok((0, _)) => DRIVE_REMOVABLE,
+        _ => DRIVE_FIXED,
     })
 }
 

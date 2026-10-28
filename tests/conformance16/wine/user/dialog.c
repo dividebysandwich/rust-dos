@@ -12,7 +12,8 @@
  * and passed to DialogBoxIndirect and CreateDialogIndirect. The
  * message box font test (CreateDialogIndirectParamW) and the
  * SetLastError checks are left out. Checks of SetDlgItemInt,
- * GetDlgItemInt, CheckDlgButton and CheckRadioButton are added.
+ * GetDlgItemInt, CheckDlgButton and CheckRadioButton are added, and of
+ * the colors WM_CTLCOLOR gives a Windows 3.x program's dialog.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -1300,6 +1301,70 @@ static void test_DlgItemInt(void)
     FreeProcInstance((FARPROC)proc);
 }
 
+/* The colors DefWindowProc and DefDlgProc give for WM_CTLCOLOR, written
+ * here. A Windows 3.x program (this one expects 3.0) gets Windows 3.1's
+ * on Windows 95 and 98: the window's color for every type of control
+ * but the scroll bar, dialogs included, where a program that expects
+ * 4.0 gets the button face's. The values are those Windows 98 SE gives
+ * with its default colors. Windows 98 returns a pattern brush for the
+ * scroll bar, whose color isn't checked. */
+static void test_ctlcolor(void)
+{
+    DLGPROC proc = (DLGPROC)MakeProcInstance((FARPROC)messageBoxFontDlgWinProc, g_hinst);
+    COLORREF window = GetSysColor(COLOR_WINDOW);
+    COLORREF text = GetSysColor(COLOR_WINDOWTEXT);
+    COLORREF face = GetSysColor(COLOR_BTNFACE);
+    COLORREF highlight = GetSysColor(COLOR_BTNHIGHLIGHT);
+    HWND hDlg;
+    HDC hdc;
+    int type, dlg;
+
+    begin_dialog(WS_POPUP | WS_CAPTION | DS_SETFONT, 0, 0, 0, 100, 50, "Colors");
+    hDlg = CreateDialogIndirect(g_hinst, tmpl, NULL, proc);
+    ok(hDlg != 0, "Failed to create test dialog.\n");
+    if (!hDlg)
+    {
+        FreeProcInstance((FARPROC)proc);
+        return;
+    }
+    hdc = GetDC(hDlg);
+    for (dlg = 0; dlg < 2; dlg++)
+    {
+        for (type = CTLCOLOR_MSGBOX; type <= CTLCOLOR_STATIC; type++)
+        {
+            LPARAM lp = MAKELPARAM(hDlg, type);
+            LOGBRUSH lb;
+            HBRUSH brush;
+
+            SetBkColor(hdc, RGB(1, 2, 3));
+            SetTextColor(hdc, RGB(4, 5, 6));
+            if (dlg)
+                brush = (HBRUSH)DefDlgProc(hDlg, WM_CTLCOLOR, (WPARAM)hdc, lp);
+            else
+                brush = (HBRUSH)DefWindowProc(hDlg, WM_CTLCOLOR, (WPARAM)hdc, lp);
+            ok(brush != 0, "%d %d: no brush\n", dlg, type);
+            if (type == CTLCOLOR_SCROLLBAR)
+            {
+                ok(GetBkColor(hdc) == highlight, "%d %d: background %08lx\n",
+                   dlg, type, GetBkColor(hdc));
+                ok(GetTextColor(hdc) == face, "%d %d: text %08lx\n",
+                   dlg, type, GetTextColor(hdc));
+                continue;
+            }
+            lb.lbColor = 0xffffffffL;
+            GetObject(brush, sizeof(lb), &lb);
+            ok(lb.lbColor == window, "%d %d: brush %08lx\n", dlg, type, lb.lbColor);
+            ok(GetBkColor(hdc) == window, "%d %d: background %08lx\n",
+               dlg, type, GetBkColor(hdc));
+            ok(GetTextColor(hdc) == text, "%d %d: text %08lx\n",
+               dlg, type, GetTextColor(hdc));
+        }
+    }
+    ReleaseDC(hDlg, hdc);
+    DestroyWindow(hDlg);
+    FreeProcInstance((FARPROC)proc);
+}
+
 START_TEST(dialog)
 {
     /* A program's instance handle is its data segment's selector. */
@@ -1322,4 +1387,5 @@ START_TEST(dialog)
     test_SaveRestoreFocus();
     test_timer_message();
     test_DlgItemInt();
+    test_ctlcolor();
 }

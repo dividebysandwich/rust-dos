@@ -93,6 +93,11 @@ pub struct VgaCard {
     /// frames it draws (`Bus::frames_drawn`).
     pub drawn: bool,
     pub flipped: bool,
+    /// Whether the built-in Windows' DirectDraw showed a frame since the
+    /// last retrace: a flip of the primary surface, a blit to it, or
+    /// writes through a lock or a device context of it
+    /// (`Bus::frames_drawn`).
+    pub presented: bool,
 
     /// Whether blinking characters show (the blink's phase, which the
     /// front end sets).
@@ -194,6 +199,7 @@ impl VgaCard {
             mode12_rows: false,
             drawn: false,
             flipped: false,
+            presented: false,
             blink_on: true,
             cga_mode: 0x29,
             cga_color: 0x30,
@@ -1348,6 +1354,8 @@ crate::state_fields!(VgaCard {
     svga_ext,
     // The front end's.
     blink_on,
+    // Counted at the next retrace, as the frame counter isn't saved.
+    presented,
 });
 
 impl VgaCard {

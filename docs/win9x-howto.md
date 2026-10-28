@@ -1,5 +1,21 @@
 # Windows 95 and 98 system images
 
+Before you make an image, try the built-in Windows. rust-dos has
+experimental built-in support for Windows 3.1, 95 and 98 programs: with
+`win32=true` in `[emulator]`, or `windows=builtin` in a game package's
+`[game]`, a Windows game runs from the DOS prompt on system DLLs written
+into the emulator, with no Windows image to install. `win32_version`
+picks Windows 95, 98 or 98 SE, and Windows 3.1 programs run under each
+of them. The settings are under `win32` in
+[CONFIGURATION.md](../CONFIGURATION.md#emulator), and "Windows games"
+there says how to install a game for it. Not every game runs this way
+yet: if one doesn't start, or something in it looks, sounds or behaves
+wrong, please
+[open an issue](https://github.com/dividebysandwich/rust-dos/issues)
+that names the game, its settings and what happened. Make your own
+image, as the rest of this page describes, for the games the built-in
+Windows can't run yet.
+
 This is how to make a Windows 95 or 98 hard disk image that games can
 name as their operating system, and how to use it: as a desktop of its
 own, with games that run from a folder, and with games that have to be

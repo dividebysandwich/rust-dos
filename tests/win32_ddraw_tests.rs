@@ -151,6 +151,13 @@ const KEY: u32 = 0x310;
 const CLASS: u32 = 0x320;
 const ENTRIES: u32 = 0x400;
 const PIXELS: u32 = 0x800;
+/// Where the polling program counts its calls of Flip (or of
+/// GetFlipStatus), keeps the first one's result and the last one's, and
+/// has GetScanLine put the line.
+const POLLS: u32 = 0x880;
+const LAST: u32 = 0x884;
+const LINE: u32 = 0x888;
+const FIRST: u32 = 0x88C;
 const DATA_SIZE: usize = 0x900;
 
 /// The data the programs start with: the window class's name.
@@ -251,11 +258,16 @@ fn results(cpu: &mut Cpu, data: u32, n: u32) -> Vec<u32> {
 // Methods' places in their vtables.
 const DD_CREATE_PALETTE: u32 = 5;
 const DD_CREATE_SURFACE: u32 = 6;
+const DD_GET_SCAN_LINE: u32 = 16;
 const DD_SET_COOPERATIVE_LEVEL: u32 = 20;
 const DD_SET_DISPLAY_MODE: u32 = 21;
+const DD_WAIT_FOR_VERTICAL_BLANK: u32 = 22;
+const S_ADD_ATTACHED_SURFACE: u32 = 3;
 const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
 const S_GET_ATTACHED_SURFACE: u32 = 12;
+const S_GET_CAPS: u32 = 14;
+const S_GET_FLIP_STATUS: u32 = 18;
 const S_LOCK: u32 = 25;
 const S_SET_CLIPPER: u32 = 28;
 const S_SET_COLOR_KEY: u32 = 29;
@@ -272,6 +284,7 @@ const DDSD_PIXELFORMAT: u32 = 0x1000;
 const DDSCAPS_BACKBUFFER: u32 = 0x4;
 const DDSCAPS_COMPLEX: u32 = 0x8;
 const DDSCAPS_FLIP: u32 = 0x10;
+const DDSCAPS_FRONTBUFFER: u32 = 0x20;
 const DDSCAPS_OFFSCREENPLAIN: u32 = 0x40;
 const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 const DDSCAPS_SYSTEMMEMORY: u32 = 0x800;
@@ -281,6 +294,7 @@ const DDSCL_EXCLUSIVE: u32 = 0x10;
 const DDBLT_COLORFILL: u32 = 0x400;
 const DDBLT_KEYSRC: u32 = 0x8000;
 const DDBLT_WAIT: u32 = 0x100_0000;
+const DDWAITVB_BLOCKEND: u32 = 0x4;
 const DDCKEY_SRCBLT: u32 = 0x8;
 const DDPCAPS_8BIT: u32 = 0x4;
 const DDPCAPS_ALLOW256: u32 = 0x40;
@@ -438,6 +452,427 @@ fn a_full_screen_program_draws_on_its_back_buffer_and_flips() {
     // The pointer Lock gave is in the program's view of video memory.
     let pointer = peek(&cpu, data + LOCKED + 0x24);
     assert_eq!(pointer & 0x3F_FFFF, 64000);
+}
+
+const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
+
+/// What the polling program does between two calls of Flip.
+enum Between {
+    /// Nothing, as Enemy Infestation waits for its frames.
+    Nothing,
+    /// A loop of so many passes.
+    Work(u32),
+    /// A call of another built-in function, GetScanLine.
+    Call,
+}
+
+/// What the polling program calls until it succeeds.
+#[derive(Clone, Copy)]
+enum Poll {
+    /// Flip without DDFLIP_WAIT.
+    Flip,
+    /// GetFlipStatus with these flags, of the back buffer.
+    FlipStatus(u32),
+}
+
+const DDGFS_CANFLIP: u32 = 1;
+const DDGFS_ISFLIPDONE: u32 = 2;
+
+/// Full screen with a flip chain: a flip at the start of a frame, so
+/// that it shows a whole frame later, then Flip without DDFLIP_WAIT
+/// called again and again until it succeeds, with `between` in between.
+fn flip_polling_program(between: Between) -> (Vec<u8>, u32) {
+    polling_program(Poll::Flip, between)
+}
+
+/// The same, with `poll` called again and again until it succeeds.
+fn polling_program(poll: Poll, between: Between) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        if let Poll::FlipStatus(_) = poll {
+            c.com(
+                a,
+                l,
+                FRONT,
+                S_GET_ATTACHED_SURFACE,
+                &[Arg::At(CAPS), Arg::At(BACK)],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            DD,
+            DD_WAIT_FOR_VERTICAL_BLANK,
+            &[Arg::I(DDWAITVB_BLOCKEND), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.inc(dword_ptr(l.at(POLLS)))?;
+        match between {
+            Between::Nothing => {}
+            Between::Work(passes) => {
+                a.mov(ecx, passes)?;
+                let mut busy = a.create_label();
+                a.set_label(&mut busy)?;
+                a.dec(ecx)?;
+                a.jnz(busy)?;
+            }
+            Between::Call => {
+                push(a, l, &[Arg::At(LINE)])?;
+                a.mov(eax, dword_ptr(l.at(DD)))?;
+                a.push(eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+                a.call(dword_ptr(eax + 4 * DD_GET_SCAN_LINE))?;
+            }
+        }
+        match poll {
+            Poll::Flip => {
+                push(a, l, &[Arg::I(0), Arg::I(0)])?;
+                a.mov(eax, dword_ptr(l.at(FRONT)))?;
+                a.push(eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+                a.call(dword_ptr(eax + 4 * S_FLIP))?;
+            }
+            Poll::FlipStatus(flags) => {
+                push(a, l, &[Arg::I(flags)])?;
+                a.mov(eax, dword_ptr(l.at(BACK)))?;
+                a.push(eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+                a.call(dword_ptr(eax + 4 * S_GET_FLIP_STATUS))?;
+            }
+        }
+        // The first call's result, kept.
+        let mut kept = a.create_label();
+        a.cmp(dword_ptr(l.at(POLLS)), 1)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(FIRST)), eax)?;
+        a.set_label(&mut kept)?;
+        a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
+        a.je(again)?;
+        a.mov(dword_ptr(l.at(LAST)), eax)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn flip_polled_with_nothing_in_between_waits_for_the_frame() {
+    let (program, data) = flip_polling_program(Between::Nothing);
+    let mut cpu = machine("flip_polling", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    // The flip came at the next frame, after 15 calls that failed and a
+    // 16th that waited for the frame and flipped, instead of one call
+    // for each pass of the loop until then.
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of Flip");
+}
+
+#[test]
+fn flip_polled_with_work_in_between_runs_every_call() {
+    // 3000 instructions between two calls: the program has more to do
+    // than poll, and each call runs, failing until the frame.
+    let (program, data) = flip_polling_program(Between::Work(1500));
+    let mut cpu = machine("flip_polling_work", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of Flip");
+}
+
+#[test]
+fn flip_polled_with_other_calls_in_between_runs_every_call() {
+    // Another function called between two calls, as a loop that keeps
+    // its sound buffer filled or its messages read while it waits: each
+    // call of Flip runs, however few instructions the loop takes.
+    let (program, data) = flip_polling_program(Between::Call);
+    let mut cpu = machine("flip_polling_call", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of Flip");
+}
+
+#[test]
+fn flip_status_polled_with_nothing_in_between_waits_for_the_frame() {
+    // GetFlipStatus of the back buffer right after a flip: the flip is
+    // still to show, as on Windows. A loop that only asks waits for the
+    // frame at its 16th call, which then finds the flip done.
+    let (program, data) = polling_program(Poll::FlipStatus(DDGFS_ISFLIPDONE), Between::Nothing);
+    let mut cpu = machine("flip_status_polling", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 8)[1..], [0; 7]);
+    assert_eq!(peek(&cpu, data + FIRST), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of GetFlipStatus");
+}
+
+#[test]
+fn flip_status_polled_with_work_in_between_runs_every_call() {
+    // DDGFS_CANFLIP the same: a flip would fail until the frame. With
+    // more to do between two calls, each call runs.
+    let (program, data) = polling_program(Poll::FlipStatus(DDGFS_CANFLIP), Between::Work(1500));
+    let mut cpu = machine("flip_status_polling_work", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 8)[1..], [0; 7]);
+    assert_eq!(peek(&cpu, data + FIRST), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST), 0);
+    let polls = peek(&cpu, data + POLLS);
+    assert!(polls > 50, "{polls} calls of GetFlipStatus");
+}
+
+const DDERR_SURFACEBUSY: u32 = 0x8876_01AE;
+
+#[test]
+fn flip_status_says_a_locked_chain_cant_flip() {
+    // With the back buffer locked, Flip would fail with
+    // DDERR_SURFACEBUSY, and DDGFS_CANFLIP says so; DDGFS_ISFLIPDONE
+    // doesn't, since no flip is pending. Once unlocked, it can flip.
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, LOCKED, 108);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, BACK, S_GET_FLIP_STATUS, &[Arg::I(DDGFS_CANFLIP)])?;
+        c.com(a, l, BACK, S_GET_FLIP_STATUS, &[Arg::I(DDGFS_ISFLIPDONE)])?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, FRONT, S_GET_FLIP_STATUS, &[Arg::I(DDGFS_CANFLIP)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("flip_status_locked", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 11);
+    assert_eq!(r[1..7], [0; 6]);
+    assert_eq!(r[7..], [DDERR_SURFACEBUSY, 0, 0, 0]);
+}
+
+/// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER
+/// with a size) and attached to a plain primary surface, as Glover makes
+/// its flip chain: a pixel written to the back buffer and a flip of the
+/// primary that shows it. The back buffer has `back_caps` besides
+/// DDSCAPS_BACKBUFFER. The two surfaces' caps go to CAPS after the
+/// attach.
+fn attached_back_buffer_program(back_caps: u32) -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    let back_desc = DESC + 0x70;
+    desc(
+        &mut d,
+        back_desc,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_BACKBUFFER | back_caps,
+        320,
+        200,
+        0,
+    );
+    put32(&mut d, LOCKED, 108);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(back_desc), Arg::At(BACK), Arg::I(0)],
+        )?;
+        c.com(a, l, FRONT, S_ADD_ATTACHED_SURFACE, &[Arg::Val(BACK)])?;
+        c.com(a, l, FRONT, S_GET_CAPS, &[Arg::At(CAPS)])?;
+        c.com(a, l, BACK, S_GET_CAPS, &[Arg::At(CAPS + 4)])?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edi, dword_ptr(l.at(LOCKED + 0x24)))?;
+        a.mov(dword_ptr(edi), 0x4433_2211)?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_back_buffer_attached_to_the_primary_surface_flips_with_it() {
+    let (program, data) = attached_back_buffer_program(0);
+    let mut cpu = machine("attached_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 12)[1..], [0; 11]);
+    // Windows 98 makes them a flip chain: both flip, and the primary is
+    // its front buffer.
+    let front = peek(&cpu, data + CAPS);
+    let back = peek(&cpu, data + CAPS + 4);
+    let flip_front = DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER | DDSCAPS_PRIMARYSURFACE;
+    assert_eq!(front & flip_front, flip_front);
+    let flip_back = DDSCAPS_FLIP | DDSCAPS_BACKBUFFER;
+    assert_eq!(back & flip_back, flip_back);
+    // The flip shows the back buffer's pixels, away from the screen's
+    // first 64000 bytes.
+    let start = cpu.bus.vbe.start as usize;
+    assert_ne!(start, 0);
+    assert_eq!(cpu.bus.vbe.vram[start..start + 4], [0x11, 0x22, 0x33, 0x44]);
+}
+
+#[test]
+fn a_back_buffer_in_system_memory_doesnt_flip_with_the_primary_surface() {
+    let (program, data) = attached_back_buffer_program(DDSCAPS_SYSTEMMEMORY);
+    let mut cpu = machine("attached_system_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    // The attach works, but the screen can't show system memory, so
+    // the two make no flip chain and the primary doesn't flip.
+    const DDERR_NOTFLIPPABLE: u32 = 0x8876_0246;
+    let mut expected = [0; 11];
+    expected[10] = DDERR_NOTFLIPPABLE;
+    assert_eq!(results(&mut cpu, data, 12)[1..], expected);
+    let front = peek(&cpu, data + CAPS);
+    let back = peek(&cpu, data + CAPS + 4);
+    assert_eq!(front & (DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER), 0);
+    assert_eq!(back & DDSCAPS_FLIP, 0);
+}
+
+/// A primary surface that says it is a back buffer.
+fn primary_back_buffer_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_BACKBUFFER,
+        0,
+        0,
+        0,
+    );
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_primary_surface_cant_be_a_back_buffer() {
+    let (program, data) = primary_back_buffer_program();
+    let mut cpu = machine("primary_back_buffer", program);
+    run_until_done(&mut cpu, data);
+    const DDERR_INVALIDCAPS: u32 = 0x8876_0064;
+    assert_eq!(results(&mut cpu, data, 4)[1..], [0, 0, DDERR_INVALIDCAPS]);
 }
 
 /// A program in a window: an offscreen surface filled with a color and
@@ -771,4 +1206,355 @@ fn a_debugger_sees_the_surfaces_their_keys_and_their_pixels() {
         "the color fill the key left"
     );
     assert!(snapshot::surface_image(&cpu, 999, false).is_err());
+}
+
+// The screen's size, which follows the display mode.
+
+const SCREEN_USER32: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetSystemMetrics",
+        "SetCursorPos",
+        "GetCursorPos",
+        "PeekMessageA",
+        "ChangeDisplaySettingsA",
+        "EnumDisplaySettingsA",
+        "GetDesktopWindow",
+        "GetWindowRect",
+    ],
+);
+const S_CREATE_WINDOW: usize = 0;
+const S_GET_SYSTEM_METRICS: usize = 1;
+const S_SET_CURSOR_POS: usize = 2;
+const S_GET_CURSOR_POS: usize = 3;
+const S_PEEK_MESSAGE: usize = 4;
+const S_CHANGE_DISPLAY_SETTINGS: usize = 5;
+const S_ENUM_DISPLAY_SETTINGS: usize = 6;
+const S_GET_DESKTOP_WINDOW: usize = 7;
+const S_GET_WINDOW_RECT: usize = 8;
+/// DirectDrawCreate, after SCREEN_USER32's.
+const S_DIRECT_DRAW_CREATE: usize = 9;
+
+const DD_RESTORE_DISPLAY_MODE: u32 = 19;
+const WM_DISPLAYCHANGE: u32 = 0x7E;
+const PM_REMOVE: u32 = 1;
+const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
+const DISP_CHANGE_BADMODE: u32 = -2i32 as u32;
+
+// The screen programs' data, after the others'.
+const POINT: u32 = 0x900;
+const POINT2: u32 = 0x908;
+const MSG: u32 = 0x910;
+const MODE: u32 = 0x940;
+const MODE2: u32 = 0x9C0;
+const SCREEN_DATA_SIZE: usize = 0xA40;
+
+/// The data of the screen programs: `data`'s, and room for their own.
+fn screen_data() -> Vec<u8> {
+    let mut d = data();
+    d.resize(SCREEN_DATA_SIZE, 0);
+    d
+}
+
+/// A visible popup window of `w` x `h` at the screen's corner.
+fn screen_window(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    (w, h): (u32, u32),
+) -> Result<(), IcedError> {
+    c.api(
+        a,
+        l,
+        S_CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(w),
+            Arg::I(h),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ],
+    )?;
+    a.mov(dword_ptr(l.at(HWND)), eax)
+}
+
+/// GetSystemMetrics of SM_CXSCREEN and SM_CYSCREEN.
+fn screen_metrics(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    c.api(a, l, S_GET_SYSTEM_METRICS, &[Arg::I(0)])?;
+    c.api(a, l, S_GET_SYSTEM_METRICS, &[Arg::I(1)])
+}
+
+/// The first WM_DISPLAYCHANGE in the queue, taken out of it into MSG.
+fn display_change(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    let filter = Arg::I(WM_DISPLAYCHANGE);
+    let args = [Arg::At(MSG), Arg::I(0), filter, filter, Arg::I(PM_REMOVE)];
+    c.api(a, l, S_PEEK_MESSAGE, &args)
+}
+
+/// Full screen at 800x600 from a 640x480 window, as Enemy Infestation
+/// sets it: the screen's size, the cursor put at the bottom right, the
+/// window's rectangle, the WM_DISPLAYCHANGE the window got, and the
+/// size and the cursor after RestoreDisplayMode.
+fn mode_screen_program() -> (Vec<u8>, u32) {
+    program(
+        &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
+        &screen_data(),
+        |a, l| {
+            let mut c = Calls { next: 0 };
+            screen_window(a, l, &mut c, (640, 480))?;
+            let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+            c.api(a, l, S_DIRECT_DRAW_CREATE, &create)?;
+            let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+            let mode = [Arg::I(800), Arg::I(600), Arg::I(8)];
+            c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+            screen_metrics(a, l, &mut c)?;
+            c.api(a, l, S_SET_CURSOR_POS, &[Arg::I(760), Arg::I(580)])?;
+            c.api(a, l, S_GET_CURSOR_POS, &[Arg::At(POINT)])?;
+            let rect = [Arg::Val(HWND), Arg::At(RECT)];
+            c.api(a, l, S_GET_WINDOW_RECT, &rect)?;
+            display_change(a, l, &mut c)?;
+            c.com(a, l, DD, DD_RESTORE_DISPLAY_MODE, &[])?;
+            screen_metrics(a, l, &mut c)?;
+            c.api(a, l, S_GET_CURSOR_POS, &[Arg::At(POINT2)])?;
+            finish(a, l)
+        },
+    )
+}
+
+#[test]
+fn the_screen_takes_the_size_of_the_mode_directdraw_sets() {
+    let (program, data) = mode_screen_program();
+    let mut cpu = machine("mode_screen", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 14);
+    assert_eq!(r[1..4], [0; 3]);
+    // GetSystemMetrics gives the mode's size, and the cursor goes to
+    // its bottom right.
+    assert_eq!(r[4..6], [800, 600]);
+    assert_eq!(r[6..8], [1, 1]);
+    let point = (peek(&cpu, data + POINT), peek(&cpu, data + POINT + 4));
+    assert_eq!(point, (760, 580));
+    // The window of exclusive mode covers the screen, where the cursor
+    // reaches it.
+    assert_eq!(r[8], 1);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 800, 600]);
+    // The window is told: 8 bits a pixel, 800x600.
+    assert_eq!(r[9], 1);
+    assert_eq!(peek(&cpu, data + MSG + 4), WM_DISPLAYCHANGE);
+    assert_eq!(peek(&cpu, data + MSG + 8), 8);
+    assert_eq!(peek(&cpu, data + MSG + 12), 600 << 16 | 800);
+    // RestoreDisplayMode gives the desktop's size back, and the cursor
+    // and the mouse stay on it.
+    assert_eq!(r[10], 0);
+    assert_eq!(r[11..13], [640, 480]);
+    let point = (peek(&cpu, data + POINT2), peek(&cpu, data + POINT2 + 4));
+    assert_eq!(point, (639, 479));
+    let mouse = &cpu.bus.mouse;
+    assert_eq!((mouse.max_x, mouse.max_y), (639, 479));
+}
+
+/// A DEVMODEA at `offset` with `fields` and the size and depth given.
+fn devmode(data: &mut [u8], offset: u32, fields: u32, (w, h, bpp): (u32, u32, u32)) {
+    put32(data, offset + 36, 124);
+    put32(data, offset + 40, fields);
+    put32(data, offset + 104, bpp);
+    put32(data, offset + 108, w);
+    put32(data, offset + 112, h);
+}
+
+/// ChangeDisplaySettingsA: a size EnumDisplaySettingsA doesn't list,
+/// then 800x600 with the depth left out, the screen's size, the
+/// WM_DISPLAYCHANGE the window got, the desktop window's rectangle and
+/// EnumDisplaySettingsA's mode now; with `restore`, then the desktop's
+/// own mode again.
+fn change_settings_program(restore: bool) -> (Vec<u8>, u32) {
+    // DM_PELSWIDTH and DM_PELSHEIGHT.
+    const SIZE: u32 = 0x18_0000;
+    let mut d = screen_data();
+    devmode(&mut d, MODE, SIZE, (1000, 700, 0));
+    devmode(&mut d, MODE2, SIZE, (800, 600, 0));
+    program(&[SCREEN_USER32], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        screen_window(a, l, &mut c, (200, 100))?;
+        c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::At(MODE), Arg::I(0)])?;
+        c.api(
+            a,
+            l,
+            S_CHANGE_DISPLAY_SETTINGS,
+            &[Arg::At(MODE2), Arg::I(0)],
+        )?;
+        screen_metrics(a, l, &mut c)?;
+        display_change(a, l, &mut c)?;
+        c.api(a, l, S_GET_DESKTOP_WINDOW, &[])?;
+        a.push(l.at(RECT) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(S_GET_WINDOW_RECT))?;
+        c.keep(a, l)?;
+        let current = [Arg::I(0), Arg::I(ENUM_CURRENT_SETTINGS), Arg::At(MODE)];
+        c.api(a, l, S_ENUM_DISPLAY_SETTINGS, &current)?;
+        if restore {
+            c.api(a, l, S_CHANGE_DISPLAY_SETTINGS, &[Arg::I(0), Arg::I(0)])?;
+            screen_metrics(a, l, &mut c)?;
+        }
+        finish(a, l)
+    })
+}
+
+#[test]
+fn change_display_settings_sets_the_desktops_size() {
+    let (program, data) = change_settings_program(false);
+    let mut cpu = machine("change_settings", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 9);
+    assert_eq!(r[1..3], [DISP_CHANGE_BADMODE, 0]);
+    assert_eq!(r[3..5], [800, 600]);
+    assert_eq!(r[5], 1);
+    assert_eq!(peek(&cpu, data + MSG + 4), WM_DISPLAYCHANGE);
+    assert_eq!(peek(&cpu, data + MSG + 12), 600 << 16 | 800);
+    let rect: Vec<u32> = (0..4).map(|i| peek(&cpu, data + RECT + 4 * i)).collect();
+    assert_eq!(rect, [0, 0, 800, 600]);
+    assert_eq!(r[7..9], [1, 1]);
+    let size = (peek(&cpu, data + MODE + 108), peek(&cpu, data + MODE + 112));
+    assert_eq!(size, (800, 600));
+    // The display shows the desktop at 800x600.
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height), (800, 600));
+}
+
+#[test]
+fn change_display_settings_without_a_mode_gives_the_desktops_back() {
+    let (program, data) = change_settings_program(true);
+    let mut cpu = machine("change_settings_back", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 12);
+    assert_eq!(r[3..5], [800, 600]);
+    assert_eq!(r[9..12], [0, 640, 480]);
+    let mode = cpu.bus.vbe.mode.expect("a VBE mode");
+    assert_eq!((mode.width, mode.height), (640, 480));
+}
+
+// GDI on the screen in a mode DirectDraw set.
+
+const GDI_USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC", "FillRect"]);
+const GDI_GDI32: (&str, &[&str]) = (
+    "GDI32.DLL",
+    &[
+        "CreatePalette",
+        "SelectPalette",
+        "RealizePalette",
+        "CreateSolidBrush",
+    ],
+);
+const G_CREATE_WINDOW: usize = 0;
+const G_GET_DC: usize = 1;
+const G_FILL_RECT: usize = 2;
+const G_DIRECT_DRAW_CREATE: usize = 3;
+const G_CREATE_PALETTE: usize = 4;
+const G_SELECT_PALETTE: usize = 5;
+const G_REALIZE_PALETTE: usize = 6;
+const G_CREATE_SOLID_BRUSH: usize = 7;
+
+// The GDI program's data, after the others'.
+const G_HDC: u32 = 0xA00;
+const G_HPAL: u32 = 0xA04;
+const G_BRUSH: u32 = 0xA08;
+const G_RECT: u32 = 0xA10;
+const G_LOGPAL: u32 = 0xA20;
+
+/// The color the GDI program's palette has.
+const G_COLOR: [u8; 3] = [0x40, 0x80, 0xC0];
+
+/// Full screen at 640x480x8, then GDI on the window's DC, as Smacker
+/// draws Myth's movies: a palette of one color realized, and a
+/// rectangle filled with it from 10,10 to 20,20.
+fn gdi_in_mode_program() -> (Vec<u8>, u32) {
+    let mut d = screen_data();
+    put32(&mut d, G_RECT, 10);
+    put32(&mut d, G_RECT + 4, 10);
+    put32(&mut d, G_RECT + 8, 20);
+    put32(&mut d, G_RECT + 12, 20);
+    // LOGPALETTE: version 0x300, one entry, PC_NOCOLLAPSE.
+    put32(&mut d, G_LOGPAL, 0x0001_0300);
+    put(
+        &mut d,
+        G_LOGPAL + 4,
+        &[G_COLOR[0], G_COLOR[1], G_COLOR[2], 4],
+    );
+    let dlls = [
+        GDI_USER32,
+        ("DDRAW.DLL", &["DirectDrawCreate"][..]),
+        GDI_GDI32,
+    ];
+    program(&dlls, &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            G_CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+        c.api(a, l, G_DIRECT_DRAW_CREATE, &create)?;
+        let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        let mode = [Arg::I(640), Arg::I(480), Arg::I(8)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        c.api(a, l, G_GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(G_HDC)), eax)?;
+        c.api(a, l, G_CREATE_PALETTE, &[Arg::At(G_LOGPAL)])?;
+        a.mov(dword_ptr(l.at(G_HPAL)), eax)?;
+        let select = [Arg::Val(G_HDC), Arg::Val(G_HPAL), Arg::I(0)];
+        c.api(a, l, G_SELECT_PALETTE, &select)?;
+        c.api(a, l, G_REALIZE_PALETTE, &[Arg::Val(G_HDC)])?;
+        // PALETTEINDEX(0).
+        c.api(a, l, G_CREATE_SOLID_BRUSH, &[Arg::I(0x0100_0000)])?;
+        a.mov(dword_ptr(l.at(G_BRUSH)), eax)?;
+        let fill = [Arg::Val(G_HDC), Arg::At(G_RECT), Arg::Val(G_BRUSH)];
+        c.api(a, l, G_FILL_RECT, &fill)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn gdi_draws_on_the_screen_in_the_mode_directdraw_set() {
+    let (program, data) = gdi_in_mode_program();
+    let mut cpu = machine("gdi_in_mode", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 10);
+    assert_eq!(r[1..4], [0; 3]);
+    // The palette's color takes the first entry after the static ones,
+    // in the DAC too, and the rectangle is that entry.
+    assert_eq!(r[7], 1);
+    assert_eq!(r[9], 1);
+    let shift = if cpu.bus.vga.dac_8bit { 0 } else { 2 };
+    let dac = &cpu.bus.vga.palette[10 * 3..11 * 3];
+    assert_eq!(dac, G_COLOR.map(|v| v >> shift));
+    let vram = &cpu.bus.vbe.vram;
+    assert_eq!(vram[10 * 640 + 10..10 * 640 + 20], [10; 10]);
+    assert_eq!(vram[19 * 640 + 19], 10);
+    assert_eq!(vram[20 * 640 + 20], 0);
 }

@@ -14,11 +14,10 @@ use crate::cpu::Cpu;
 use crate::win32::gdi32::{self, Rect};
 use crate::win32::task::{Next, Task};
 use crate::win32::user32::message::{
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSCROLLBAR, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE,
-    WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_PRINTCLIENT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT,
-    WM_SYSCOLORCHANGE,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM,
+    WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE, WM_GETFONT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
+    WM_PRINTCLIENT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT, WM_SYSCOLORCHANGE,
 };
 use crate::win32::user32::paint::{
     self, BF_FLAT, BF_RECT, DFC_BUTTON, DFCS_BUTTON3STATE, DFCS_BUTTONCHECK, DFCS_BUTTONPUSH,
@@ -26,8 +25,8 @@ use crate::win32::user32::paint::{
     EDGE_ETCHED,
 };
 use crate::win32::user32::sysparams::{
-    self, COLOR_BTNFACE, COLOR_BTNHIGHLIGHT, COLOR_BTNSHADOW, COLOR_BTNTEXT, COLOR_GRAYTEXT,
-    COLOR_SCROLLBAR, COLOR_WINDOW, COLOR_WINDOWFRAME, COLOR_WINDOWTEXT,
+    COLOR_BTNFACE, COLOR_BTNHIGHLIGHT, COLOR_BTNSHADOW, COLOR_BTNTEXT, COLOR_GRAYTEXT,
+    COLOR_WINDOWFRAME,
 };
 use crate::win32::user32::text::{
     self, DT_BOTTOM, DT_CALCRECT, DT_CENTER, DT_NOCLIP, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
@@ -190,20 +189,11 @@ pub fn client_rect(cpu: &mut Cpu, hwnd: u32) -> Rect {
     Rect::new(0, 0, c.width(), c.height())
 }
 
-/// What DefWindowProcA does with WM_CTLCOLOR* (`msg`): set the DC's
-/// colors for the kind of control and give its brush. A control uses it
-/// when its parent gives no brush back.
-pub fn default_color(cpu: &mut Cpu, hdc: u32, msg: u32) -> u32 {
-    let (text, back, brush) = match msg {
-        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => (COLOR_WINDOWTEXT, COLOR_WINDOW, COLOR_WINDOW),
-        WM_CTLCOLORSCROLLBAR => (COLOR_BTNFACE, COLOR_BTNHIGHLIGHT, COLOR_SCROLLBAR),
-        _ => (COLOR_WINDOWTEXT, COLOR_BTNFACE, COLOR_BTNFACE),
-    };
-    let state = user(cpu);
-    let (text, back) = (state.color(text), state.color(back));
-    gdi32::dc::set_text_color(cpu, &[hdc, text]);
-    gdi32::dc::set_bk_color(cpu, &[hdc, back]);
-    sysparams::brush(cpu, brush)
+/// What DefWindowProcA of `parent` does with WM_CTLCOLOR* (`msg`): set
+/// the DC's colors for the kind of control and give its brush. A control
+/// uses it when its parent gives no brush back.
+pub fn default_color(cpu: &mut Cpu, parent: u32, hdc: u32, msg: u32) -> u32 {
+    defwnd::control_color(cpu, parent, hdc, msg - WM_CTLCOLORMSGBOX)
 }
 
 /// Clip `hdc` to the client area of `hwnd`, as a control does while it
@@ -721,7 +711,8 @@ fn settext_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let brush = if value != 0 {
                 value
             } else {
-                default_color(cpu, hdc, WM_CTLCOLORSTATIC)
+                let parent = parent_of(cpu, hwnd);
+                default_color(cpu, parent, hdc, WM_CTLCOLORSTATIC)
             };
             let client = client_rect(cpu, hwnd);
             if let Some((_, r)) = label_rect(cpu, hwnd, hdc, client) {
@@ -853,7 +844,8 @@ fn erase_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let brush = if value != 0 {
                 value
             } else {
-                default_color(cpu, hdc, WM_CTLCOLORBTN)
+                let parent = parent_of(cpu, hwnd);
+                default_color(cpu, parent, hdc, WM_CTLCOLORBTN)
             };
             let r = client_rect(cpu, hwnd);
             paint::fill(cpu, hdc, r, brush);
@@ -902,7 +894,8 @@ fn paint_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 } else {
                     WM_CTLCOLORSTATIC
                 };
-                default_color(cpu, hdc, msg)
+                let parent = parent_of(cpu, hwnd);
+                default_color(cpu, parent, hdc, msg)
             };
             match kind {
                 BS_OWNERDRAW => {

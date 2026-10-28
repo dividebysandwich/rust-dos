@@ -35,12 +35,7 @@ fn present(bus: &Bus) -> Vec<usize> {
 /// version of Windows the programs see; none while the built-in Windows
 /// is off.
 pub fn sync(bus: &mut Bus) {
-    let win32 = &bus.win32;
-    let version = if win32.processes.is_empty() {
-        win32.version
-    } else {
-        win32.os
-    };
+    let version = super::version::shown(&bus.win32);
     let wanted = (version, present(bus));
     if bus.win32.dll_files.as_ref() == Some(&wanted) {
         return;

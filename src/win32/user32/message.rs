@@ -481,6 +481,10 @@ fn send(
     timeout: Option<(u32, u32)>,
 ) -> Option<u32> {
     if hwnd == HWND_BROADCAST || hwnd == 0xFFFF_FFFF {
+        // Program Manager answers DDE from its first broadcast on.
+        if msg == super::progman::WM_DDE_INITIATE {
+            super::progman::server(cpu);
+        }
         let mut vars = vec![msg, wp, lp, 0, 0];
         vars.extend(user(cpu).top_levels());
         return task::start(cpu, TASK_BROADCAST, vars, 0);
@@ -931,7 +935,12 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     if hwnd == HWND_BROADCAST || hwnd == 0xFFFF_FFFF {
         for h in user(cpu).top_levels() {
-            let Some(tid) = user(cpu).window(h).map(|w| w.tid) else {
+            // Program Manager's window has no thread whose queue is read.
+            let Some(tid) = user(cpu)
+                .window(h)
+                .filter(|w| !super::progman::is_server(w))
+                .map(|w| w.tid)
+            else {
                 continue;
             };
             post(
@@ -949,6 +958,11 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
         return Some(FALSE);
     };
+    // Program Manager's window, of no thread, handles what is posted to
+    // it now.
+    if super::progman::is_server(w) {
+        return super::progman::posted(cpu, hwnd, msg, wp, lp);
+    }
     let tid = w.tid;
     post(cpu, tid, m);
     Some(TRUE)
@@ -997,6 +1011,9 @@ const GET_MAX: usize = 3;
 const GET_FLAGS: usize = 4;
 const GET_RESULT: usize = 5;
 const GET_REMOVE: usize = 6;
+/// The window to send WM_SETCURSOR to (0 for none), and its lParam.
+const GET_CURSOR_HWND: usize = 7;
+const GET_CURSOR_LP: usize = 8;
 const WAITS: u32 = 0x8000_0000;
 
 /// GetMessageA(msg, hwnd, min, max).
@@ -1182,22 +1199,18 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         TRUE
                     };
                     t.set(GET_RESULT, result);
+                    t.set(GET_REMOVE, remove as u32);
+                    let cursor = super::input::sets_cursor(cpu, &m).filter(|_| remove);
+                    let (hwnd, lp) = cursor.unwrap_or((0, 0));
+                    t.set(GET_CURSOR_HWND, hwnd);
+                    t.set(GET_CURSOR_LP, lp);
                     // A click on a window that isn't active activates it
                     // first.
                     if remove && let Some(top) = super::input::click_activates(cpu, &m) {
-                        t.set(GET_REMOVE, remove as u32);
                         return Next::call(address_of("SetActiveWindow"), &[top], 3);
                     }
-                    if super::hook::has(cpu, WH_GETMESSAGE) {
-                        return super::hook::call(
-                            WH_GETMESSAGE,
-                            0,
-                            remove as u32,
-                            t.var(GET_MSG),
-                            2,
-                        );
-                    }
-                    return Next::Done(result);
+                    t.step = 3;
+                    continue;
                 }
                 if flags & PM_NOYIELD == 0 {
                     input_idle(cpu);
@@ -1230,6 +1243,16 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.step = 0;
             }
             3 => {
+                // Windows sends WM_SETCURSOR for the mouse message, and
+                // the window's answer sets the cursor.
+                let hwnd = t.var(GET_CURSOR_HWND);
+                if hwnd != 0 {
+                    t.set(GET_CURSOR_HWND, 0);
+                    if user(cpu).is_window(hwnd) {
+                        let lp = t.var(GET_CURSOR_LP);
+                        return super::window::send(hwnd, WM_SETCURSOR, hwnd, lp, 3);
+                    }
+                }
                 if super::hook::has(cpu, WH_GETMESSAGE) {
                     let remove = t.var(GET_REMOVE);
                     return super::hook::call(WH_GETMESSAGE, 0, remove, t.var(GET_MSG), 2);

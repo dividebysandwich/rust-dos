@@ -188,9 +188,9 @@ impl Bus {
         self.write_16(0x0463, 0x03D4);
 
         // 0x0410: Equipment List. Bit 0 = Floppy (see `sync_drive_bda`);
-        // the video adapter's bits come with it below. Bit 2: a PS/2 mouse
-        // (INT 15h AH=C2h).
-        self.write_16(0x0410, 0x0005);
+        // the video adapter's bits come with it below. Bits 1 and 2: the
+        // coprocessor and the PS/2 mouse every machine has.
+        self.write_16(0x0410, crate::bios::EQUIPMENT_FIXED | 0x0001);
 
         // 0x0417: Num Lock on, as the BIOS leaves it; 0x0496: an enhanced
         // (101-key) keyboard.

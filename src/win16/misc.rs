@@ -5,6 +5,7 @@
 //! here, or answer as Windows 3.1 does when there is no such device.
 
 use super::builtin::{Def, register, rust, win32};
+use super::lz;
 use super::thunk;
 use super::user::{P_MISC, P_WORDS};
 use crate::cpu::Cpu;
@@ -265,22 +266,21 @@ pub static MMSYSTEM: Def = Def {
     library: true,
 };
 
-/// LZEXPAND: compressed files are read as they are (the programs that
-/// ship them have them expanded by their setup programs).
+/// LZEXPAND: compressed files read expanded (lz.rs).
 pub static LZEXPAND: Def = Def {
     name: "LZEXPAND",
     file: "LZEXPAND.DLL",
     apis: &[
-        rust("LZCopy", 1, "ww", lz_copy),
-        rust("LZOpenFile", 2, "ppw", super::kernel::open_file),
-        rust("LZInit", 3, "w", first),
-        rust("LZSeek", 4, "wlw", super::kernel::llseek),
-        rust("LZRead", 5, "wpw", super::kernel::lread),
-        rust("LZClose", 6, "w", super::kernel::lclose),
+        rust("LZCopy", 1, "ww", lz::lz_copy),
+        rust("LZOpenFile", 2, "ppw", lz::lz_open_file),
+        rust("LZInit", 3, "w", lz::lz_init),
+        rust("LZSeek", 4, "wlw", lz::lz_seek),
+        rust("LZRead", 5, "wpw", lz::lz_read),
+        rust("LZClose", 6, "w", lz::lz_close),
         rust("LZStart", 7, "", one),
-        rust("CopyLZFile", 8, "ww", lz_copy),
+        rust("CopyLZFile", 8, "ww", lz::lz_copy),
         rust("LZDone", 9, "", zero),
-        rust("GetExpandedName", 10, "pp", get_expanded_name),
+        rust("GetExpandedName", 10, "pp", lz::get_expanded_name),
     ],
     library: true,
 };
@@ -372,6 +372,16 @@ pub static DISPLAY: Def = Def {
     library: true,
 };
 
+/// SETUPX: Windows 95's setup engine, which DirectX's setup DLL and
+/// other installers' 16-bit DLLs import. None of its functions is there
+/// yet: a call of one stops the program and names it.
+pub static SETUPX: Def = Def {
+    name: "SETUPX",
+    file: "SETUPX.DLL",
+    apis: &[],
+    library: true,
+};
+
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
@@ -382,10 +392,6 @@ fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0xFFFF)
-}
-
-fn first(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(args[0])
 }
 
 fn code_page(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -445,6 +451,17 @@ const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 
+/// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
+/// SMPTE time being hour, minute, second, frame, fps and a pad byte
+/// (Win32's has two, and a DWORD wType).
+const MMTIME16_SIZE: u32 = 8;
+/// MMTIME's kinds whose union is SMPTE time; the others are a DWORD.
+const TIME_SMPTE: u32 = 8;
+/// What a short structure gets from the wave functions, and from
+/// timeGetDevCaps.
+const MMSYSERR_INVALPARAM: u32 = 11;
+const TIMERR_NOCANDO: u32 = 97;
+
 /// A 32-bit function returned `value`: what 16-bit code gets.
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
@@ -493,11 +510,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
         }
         P_MMTIME => {
             if value == 0 {
-                // MMTIME16: wType, then the union as it is.
-                let kind = r32(cpu, d(1));
-                super::write_16(cpu, d(2), kind as u16);
-                let rest = super::peek(cpu, d(1) + 4, 8).unwrap_or(vec![0; 8]);
-                super::poke(cpu, d(2) + 2, &rest);
+                mmtime16(cpu, d(1), d(2));
             }
             Some(value)
         }
@@ -881,6 +894,9 @@ fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 || args[2] < MMTIME16_SIZE {
+        return Some(MMSYSERR_INVALPARAM);
+    }
     let time = thunk::scratch32(cpu, 12);
     let kind = r16(cpu, args[1]);
     w32(cpu, time, kind);
@@ -894,7 +910,12 @@ fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// timeGetSystemTime: with a short MMTIME or none, nothing is written
+/// and the answer is still 0, as Windows has it.
 fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] == 0 || args[1] < MMTIME16_SIZE {
+        return Some(0);
+    }
     let time = thunk::scratch32(cpu, 12);
     go_at(
         cpu,
@@ -906,8 +927,23 @@ fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     )
 }
 
+/// The MMTIME at `time` as Windows 3.1's at `time16`: wType, and the
+/// union as far as its kind fills it (6 bytes of SMPTE time, else a
+/// DWORD), as MMSYSTEM leaves the rest of the caller's MMTIME as it was.
+/// The caller's size was checked to hold it.
+fn mmtime16(cpu: &mut Cpu, time: u32, time16: u32) {
+    let kind = r32(cpu, time);
+    let len = if kind == TIME_SMPTE { 6 } else { 4 };
+    let mut bytes = (kind as u16).to_le_bytes().to_vec();
+    bytes.extend(super::peek(cpu, time + 4, len).unwrap_or(vec![0; len]));
+    super::poke(cpu, time16, &bytes);
+}
+
 fn time_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    // TIMECAPS16: the shortest and the longest period.
+    // TIMECAPS16: the shortest and the longest period, 4 bytes.
+    if args[0] == 0 || args[1] < 4 {
+        return Some(TIMERR_NOCANDO);
+    }
     super::write_16(cpu, args[0], 1);
     super::write_16(cpu, args[0] + 2, 0xFFFF);
     Some(0)
@@ -1198,47 +1234,6 @@ fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         args[0], args[1]
     ));
     Some(274)
-}
-
-// LZEXPAND.
-
-/// LZCopy(from, to): the file copied as it is. The bytes copied, or
-/// LZERROR_READ.
-fn lz_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (from, to) = (args[0] as u16, args[1] as u16);
-    let mut total = 0u32;
-    let chunk = super::global::alloc(cpu, 0, 0x8000, 0, false);
-    if chunk == 0 {
-        return Some(0xFFFF_FFFE);
-    }
-    let at = super::lin(cpu, super::global::handle_to_sel(chunk), 0);
-    loop {
-        let Ok(n) = super::dos::transfer(cpu, from, at, 0x8000, false) else {
-            super::global::free(cpu, chunk);
-            return Some(0xFFFF_FFFE);
-        };
-        if n == 0 {
-            break;
-        }
-        if super::dos::transfer(cpu, to, at, n, true).is_err() {
-            super::global::free(cpu, chunk);
-            return Some(0xFFFF_FFFB);
-        }
-        total += n;
-        if n < 0x8000 {
-            break;
-        }
-    }
-    super::global::free(cpu, chunk);
-    Some(total)
-}
-
-/// GetExpandedName(from, to): the name as it is.
-fn get_expanded_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let mut name = super::string_bytes(cpu, args[0], 0x100);
-    name.push(0);
-    super::poke(cpu, args[1], &name);
-    Some(1)
 }
 
 // VER.

@@ -228,6 +228,7 @@ impl DiskController {
         let normalized = filename.replace('/', "\\");
         let (drive, _) = self.split_drive(&normalized).ok_or(0x03)?;
         self.check_writable(drive)?;
+        self.host_dirs.creating();
         // A system file or directory is there already.
         if self.is_system_entry(filename) {
             return Err(0x05);
@@ -301,6 +302,7 @@ impl DiskController {
 
     /// INT 21h, AH=5Bh: create a file that must not exist yet.
     pub fn create_new_file(&mut self, filename: &str, owner: u16) -> Result<u16, u8> {
+        self.host_dirs.creating();
         if self.device(filename).is_none() && self.exists(filename) {
             return Err(0x50); // File exists
         }
@@ -324,6 +326,7 @@ impl DiskController {
     /// replacing a file that is there, dated `stamp` (the packed DOS time
     /// and date) or now.
     pub fn write_whole_file(&mut self, dos_path: &str, data: &[u8], stamp: Option<(u16, u16)>) -> Result<(), u8> {
+        self.host_dirs.creating();
         // Before the file is replaced: a FAT image's entry may move.
         self.settle_named(dos_path);
         if self.is_system_entry(dos_path) {

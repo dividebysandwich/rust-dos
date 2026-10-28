@@ -348,9 +348,9 @@ pub fn def_window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         WM_GETDLGCODE => Some(0),
         m if (WM_CTLCOLORMSGBOX..=WM_CTLCOLORSTATIC).contains(&m) => {
-            Some(control_color(cpu, wp, m - WM_CTLCOLORMSGBOX))
+            Some(control_color(cpu, hwnd, wp, m - WM_CTLCOLORMSGBOX))
         }
-        WM_CTLCOLOR => Some(control_color(cpu, wp, lp >> 16)),
+        WM_CTLCOLOR => Some(control_color(cpu, hwnd, wp, lp >> 16)),
         WM_SETCURSOR => {
             let state = user(cpu);
             let hit = lp & 0xFFFF;
@@ -513,8 +513,10 @@ fn clip_box(cpu: &mut Cpu, hdc: u32) -> Rect {
 }
 
 /// The colors a control of type `kind` (CTLCOLOR_*) is drawn with: they
-/// go to `hdc`, and the brush is the result.
-fn control_color(cpu: &mut Cpu, hdc: u32, kind: u32) -> u32 {
+/// go to `hdc`, and the brush is the result. As on Windows 95, the window
+/// `hwnd` of a Windows 3.x program gets Windows 3.1's colors, the
+/// window's for every kind but scroll bars, so its dialogs are white.
+pub(crate) fn control_color(cpu: &mut Cpu, hwnd: u32, hdc: u32, kind: u32) -> u32 {
     let state = user(cpu);
     if kind == CTLCOLOR_SCROLLBAR {
         let (text, back) = (state.color(sysparams::COLOR_BTNFACE), state.color(20));
@@ -524,7 +526,9 @@ fn control_color(cpu: &mut Cpu, hdc: u32, kind: u32) -> u32 {
     }
     let text = state.color(sysparams::COLOR_WINDOWTEXT);
     gdi32::dc::set_text_color(cpu, &[hdc, text]);
-    let index = if kind == CTLCOLOR_EDIT || kind == CTLCOLOR_LISTBOX {
+    let owner = user(cpu).window(hwnd).map(|w| (w.pid, w.instance));
+    let win3 = || owner.is_some_and(|(pid, inst)| crate::win16::expects_win3(cpu, pid, inst));
+    let index = if kind == CTLCOLOR_EDIT || kind == CTLCOLOR_LISTBOX || win3() {
         sysparams::COLOR_WINDOW
     } else {
         sysparams::COLOR_BTNFACE
@@ -557,9 +561,9 @@ fn set_cursor_for(cpu: &mut Cpu, hwnd: u32, lp: u32) -> u32 {
             };
             super::resource::system_cursor(cpu, id)
         }
-        _ => super::resource::system_cursor(cpu, 32512),
+        _ => super::resource::system_cursor(cpu, super::resource::IDC_ARROW),
     };
-    user(cpu).input.cursor_handle = cursor;
+    super::cursor::set(cpu, cursor);
     TRUE
 }
 

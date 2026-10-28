@@ -617,9 +617,40 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     run_until(&mut cpu, data, 3);
     assert_eq!(results(&cpu, data, 11)[9..], [0; 2]);
     // The desktop's mode again, from the start of memory, repainted.
+    // The window, which the mode changes made cover the screen, as
+    // DirectDraw does on Windows 98, is over all of it: its corner with
+    // its text as before, and its background where the desktop's was.
     assert_eq!(card_mode(&cpu), (640, 480, 1, 1280));
     assert_eq!(card_reg(&cpu, VID_DESKTOP_START_ADDR), 0);
-    assert!(desktop(&cpu) == before, "the desktop as it was");
+    let after = desktop(&cpu);
+    let at = |x: usize, y: usize| y * 640 + x;
+    assert!(after[..at(320, 0)] == before[..at(320, 0)], "its top");
+    assert!(before[at(639, 479)] != before[at(319, 239)]);
+    assert!(after[at(639, 479)] == before[at(319, 239)], "covered");
+}
+
+/// Let the next retrace come, as the frontend does before it draws.
+fn next_retrace(cpu: &mut Cpu) {
+    cpu.bus.clock.icount += cpu.bus.clock.cycles_per_ms() as u64 * 20;
+    cpu.bus.sync_display();
+}
+
+#[test]
+fn a_flip_on_the_card_counts_as_a_frame() {
+    let (program, data) = fullscreen_program();
+    let mut cpu = machine("flip_frames", program);
+    run_until(&mut cpu, data, 1);
+    go_on(&mut cpu, data);
+    // The program stops right after its flip.
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    // The flip is one frame, at the retrace after it, and nothing after
+    // it is another.
+    let before = cpu.bus.frames_drawn;
+    for _ in 0..3 {
+        next_retrace(&mut cpu);
+    }
+    assert_eq!(cpu.bus.frames_drawn - before, 1);
 }
 
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
@@ -701,8 +732,15 @@ fn eight_and_32_bit_modes_are_the_cards() {
     let clut = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap().clut;
     assert_eq!(clut[7], 0x07_40F8);
     assert_eq!(clut[200], 0xC8_4037);
-    assert_eq!(shown(&mut cpu, 5, 0), [7, 0x40, 0xF8]);
-    assert_eq!(shown(&mut cpu, 5, 1), [7, 0x40, 0xF8]);
+    // The card runs it at half the pixel clock, so the monitor shows each
+    // pixel twice as wide as well as twice as high: the picture spans
+    // the screen as a 640x400 one does, as mode 13h's does.
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+    for (x, y) in [(10, 0), (11, 0), (10, 1), (11, 1)] {
+        assert_eq!(shown(&mut cpu, x, y), [7, 0x40, 0xF8], "({x}, {y})");
+    }
+    assert_eq!(shown(&mut cpu, 9, 0), [0, 0x40, 0xFF]);
+    assert_eq!(shown(&mut cpu, 12, 0), [0, 0x40, 0xFF]);
     let timing = cpu.bus.vga.timing();
     assert_eq!(timing.display, 400);
     assert!((timing.hz() - 70.0).abs() < 1.0, "{}", timing.hz());
@@ -808,6 +846,330 @@ fn render_targets_and_z_buffers_are_in_the_cards_memory() {
         offsets.push(offset);
     }
     assert!(offsets[1] >= offsets[0] + 512 * 128);
+}
+
+const S_SET_COLOR_KEY: u32 = 29;
+const DDCKEY_SRCBLT: u32 = 8;
+const DDBLT_KEYDESTOVERRIDE: u32 = 0x4000;
+const DDBLT_KEYSRC: u32 = 0x8000;
+/// The destination rectangles of the blits, 16 bytes each.
+const BLT_RECTS: u32 = 0x800;
+/// The source's color key.
+const KEY: u32 = 0x880;
+/// The source's middle two columns, a rectangle not at its corner.
+const SRC_RECT: u32 = 0x890;
+/// The source's key color, magenta.
+const MAGENTA: u16 = 0xF81F;
+/// The 4x2 source's pixels, row by row: the key and colors.
+const SOURCE: [[u16; 4]; 2] = [
+    [MAGENTA, 0x1234, MAGENTA, 0x5678],
+    [0x9ABC, MAGENTA, 0xDEF0, MAGENTA],
+];
+/// The color the back buffer is filled with first.
+const FILL: u16 = 0x0841;
+/// The boxes of the back buffer the test looks at, (x, y, w, h).
+const LOOKED_AT: [(u32, u32, u32, u32); 5] = [
+    (100, 49, 6, 4),
+    (200, 10, 4, 2),
+    (299, 100, 10, 4),
+    (400, 20, 2, 2),
+    (500, 20, 4, 4),
+];
+/// Where the program copies those boxes' pixels, one box after another,
+/// row by row.
+const READBACK: u32 = 0xA00;
+
+/// Full screen at 640x480x16 with a back buffer, which is filled, then
+/// gets a 16-bit system memory surface blitted onto it: through the
+/// source's color key at (101, 50), copied as it is at (200, 10),
+/// stretched twice as wide and high through the key at (300, 100), its
+/// middle two columns through the key at (400, 20) and stretched twice
+/// as wide and high at (500, 20), and at (101, 50) again through a
+/// destination key of the fill's color. The back buffer is then locked
+/// and LOOKED_AT's boxes copied to READBACK. With `card`, the DirectDraw
+/// object is the 3dfx device's, of a Voodoo Graphics or Voodoo2.
+fn keyed_blit_program(card: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    put32(&mut d, LOCKED, 108);
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    desc(
+        &mut d,
+        SYSDESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+        4,
+        2,
+        0,
+    );
+    let pf = SYSDESC + 0x48;
+    for (i, v) in [32, 0x40, 0, 16, 0xF800, 0x07E0, 0x001F].iter().enumerate() {
+        put32(&mut d, pf + 4 * i as u32, *v);
+    }
+    put32(&mut d, LOCK2, 108);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, FILL as u32);
+    // The destination key: the fill's color.
+    put32(&mut d, FX + 0x54, FILL as u32);
+    put32(&mut d, FX + 0x58, FILL as u32);
+    put32(&mut d, KEY, MAGENTA as u32);
+    put32(&mut d, KEY + 4, MAGENTA as u32);
+    let rects = [
+        [101, 50, 105, 52],
+        [200, 10, 204, 12],
+        [300, 100, 308, 104],
+        [400, 20, 402, 22],
+        [500, 20, 504, 24],
+    ];
+    for (i, r) in rects.iter().enumerate() {
+        for (j, v) in r.iter().enumerate() {
+            put32(&mut d, BLT_RECTS + 16 * i as u32 + 4 * j as u32, *v);
+        }
+    }
+    for (j, v) in [1, 0, 3, 2].iter().enumerate() {
+        put32(&mut d, SRC_RECT + 4 * j as u32, *v);
+    }
+    let ddraw = if card { DDRAW_CARD } else { DDRAW };
+    program(&[USER32, GDI32, ddraw], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        if card {
+            device_callback(a, l)?;
+        }
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        if card {
+            // The 3dfx device's object in DD's place.
+            c.api(
+                a,
+                l,
+                DIRECT_DRAW_ENUMERATE,
+                &[Arg::Val(CALLBACKS), Arg::I(0)],
+            )?;
+            c.api(
+                a,
+                l,
+                DIRECT_DRAW_CREATE,
+                &[Arg::At(DEVICE_GUID), Arg::At(DD), Arg::I(0)],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(SYSDESC), Arg::At(SYS), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            SYS,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCK2), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edi, dword_ptr(l.at(LOCK2 + 0x24)))?;
+        for row in SOURCE {
+            for (i, &pixel) in row.iter().enumerate() {
+                a.mov(word_ptr(edi + 2 * i as i32), pixel as u32)?;
+            }
+            a.add(edi, dword_ptr(l.at(LOCK2 + 0x10)))?;
+        }
+        c.com(a, l, SYS, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(
+            a,
+            l,
+            SYS,
+            S_SET_COLOR_KEY,
+            &[Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        let blits = [
+            (DDBLT_KEYSRC, Arg::I(0)),
+            (0, Arg::I(0)),
+            (DDBLT_KEYSRC, Arg::I(0)),
+            (DDBLT_KEYSRC, Arg::At(SRC_RECT)),
+            (0, Arg::At(SRC_RECT)),
+        ];
+        for (i, (flags, src_rect)) in blits.into_iter().enumerate() {
+            c.com(
+                a,
+                l,
+                BACK,
+                S_BLT,
+                &[
+                    Arg::At(BLT_RECTS + 16 * i as u32),
+                    Arg::Val(SYS),
+                    src_rect,
+                    Arg::I(flags | DDBLT_WAIT),
+                    Arg::I(0),
+                ],
+            )?;
+        }
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(BLT_RECTS),
+                Arg::Val(SYS),
+                Arg::I(0),
+                Arg::I(DDBLT_KEYDESTOVERRIDE | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        a.mov(edx, dword_ptr(l.at(LOCKED + 0x24)))?;
+        a.mov(ebx, dword_ptr(l.at(LOCKED + 0x10)))?;
+        a.cld()?;
+        let mut to = READBACK;
+        for (x, y, w, h) in LOOKED_AT {
+            for row in y..y + h {
+                a.imul_3(eax, ebx, row as i32)?;
+                a.lea(esi, edx + eax + 2 * x as i32)?;
+                a.mov(edi, l.at(to) as u32)?;
+                a.mov(ecx, w)?;
+                a.rep().movsw()?;
+                to += 2 * w;
+            }
+        }
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        finish(a, l, 1)
+    })
+}
+
+/// The back buffer's pixel at (`x`, `y`) as the keyed blits' program
+/// copied it, from one of LOOKED_AT's boxes.
+fn looked_at(cpu: &Cpu, data: u32, x: u32, y: u32) -> u16 {
+    let mut at = READBACK;
+    for (left, top, w, h) in LOOKED_AT {
+        if (left..left + w).contains(&x) && (top..top + h).contains(&y) {
+            return peek(cpu, data + at + 2 * ((y - top) * w + x - left)) as u16;
+        }
+        at += 2 * w * h;
+    }
+    panic!("({x}, {y}) isn't in a box the program copied");
+}
+
+/// The keyed blits' program run on `cpu` to its end, its `calls` calls
+/// all fine, and the pixels the color keys say kept and only those.
+fn keyed_blits_keep_what_the_keys_say(cpu: &mut Cpu, data: u32, calls: u32) {
+    run_until(cpu, data, 1);
+    let r = results(cpu, data, calls);
+    assert!(r[1..].iter().all(|&v| v == 0), "{r:X?}");
+    let cpu = &*cpu;
+    let pixel = |cpu: &Cpu, x: u32, y: u32| looked_at(cpu, data, x, y);
+    let rows = |cpu: &Cpu, x: u32, y: u32, w: u32, h: u32| {
+        (y..y + h)
+            .map(|y| (x..x + w).map(|x| pixel(cpu, x, y)).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    let [[k, a, _, b], [c, _, e, _]] = SOURCE;
+    // Through the source's key, then the key's pixels through the
+    // destination's: the source as it is, framed by the fill.
+    assert_eq!(
+        rows(cpu, 100, 49, 6, 4),
+        [
+            [FILL; 6].to_vec(),
+            vec![FILL, k, a, k, b, FILL],
+            vec![FILL, c, k, e, k, FILL],
+            [FILL; 6].to_vec(),
+        ]
+    );
+    // Copied as it is, the key's pixels too.
+    assert_eq!(rows(cpu, 200, 10, 4, 2), SOURCE.map(|r| r.to_vec()));
+    // Each pixel twice across and down; the fill where the key was.
+    let stretched: Vec<Vec<u16>> = SOURCE
+        .iter()
+        .flat_map(|row| {
+            let wide: Vec<u16> = row
+                .iter()
+                .flat_map(|&p| [if p == MAGENTA { FILL } else { p }; 2])
+                .collect();
+            [wide.clone(), wide]
+        })
+        .collect();
+    assert_eq!(rows(cpu, 300, 100, 8, 4), stretched);
+    assert_eq!(pixel(cpu, 299, 100), FILL);
+    assert_eq!(pixel(cpu, 308, 103), FILL);
+    // The middle columns, from the source's second on: through the key,
+    // and stretched with the key's pixels copied.
+    assert_eq!(rows(cpu, 400, 20, 2, 2), [[a, FILL], [FILL, e]]);
+    assert_eq!(
+        rows(cpu, 500, 20, 4, 4),
+        [[a, a, k, k], [a, a, k, k], [k, k, e, e], [k, k, e, e]]
+    );
+}
+
+/// Blits from system memory into the card's memory, a 16-bit back
+/// buffer, keep the pixels the color keys say and only those.
+#[test]
+fn keyed_blits_into_the_cards_memory_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program(false);
+    let mut cpu = machine("keyed_blit", program);
+    keyed_blits_keep_what_the_keys_say(&mut cpu, data, 19);
+}
+
+/// The same blits into the back buffer of a Voodoo Graphics' 3dfx
+/// device, whose pixels go through the card's linear frame buffer, rows
+/// starting at odd columns among them.
+#[test]
+fn keyed_blits_on_a_voodoo_graphics_keep_what_the_keys_say() {
+    let (program, data) = keyed_blit_program(true);
+    let mut cpu = card_machine("keyed_blit_v1", Some(Board::Standard), program);
+    keyed_blits_keep_what_the_keys_say(&mut cpu, data, 21);
 }
 
 // The 3dfx device of a Voodoo Graphics or Voodoo2 add-on card.
@@ -1848,4 +2210,354 @@ fn a_256_colour_desktop_has_a_system_palette() {
     let dac = &cpu.bus.vga.palette;
     assert_eq!(dac[11 * 3..12 * 3], [0x40 >> shift, 0x80 >> shift, 0xC0 >> shift]);
     assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
+}
+
+const USER32_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "LoadCursorA", "SetCursor", "SetCursorPos", "ShowCursor"],
+);
+const LOAD_CURSOR: usize = 1;
+const SET_CURSOR: usize = 2;
+const SET_CURSOR_POS: usize = 3;
+const SHOW_CURSOR: usize = 4;
+const IDC_ARROW: u32 = 32512;
+
+/// A window on the desktop, the arrow set as the cursor and the cursor
+/// put at (100, 100) (step 1); then the cursor hidden (step 2).
+fn cursor_program() -> (Vec<u8>, u32) {
+    program(&[USER32_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        a.push(eax)?;
+        a.call(l.import(SET_CURSOR))?;
+        c.keep(a, l)?;
+        c.api(a, l, SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        wait(a, l, 1)?;
+        c.api(a, l, SHOW_CURSOR, &[Arg::I(0)])?;
+        finish(a, l, 2)
+    })
+}
+
+/// The pixels (`x`, `y`) of the screen with the cursors drawn over it,
+/// as the front ends and /api/screenshot show it.
+fn with_cursors(cpu: &Cpu, at: &[(usize, usize)]) -> Vec<[u8; 3]> {
+    let (width, height) = video::frame_size(&cpu.bus);
+    let mut frame = Frame::new(width, height);
+    video::render_screen(&mut frame, &cpu.bus);
+    video::overlay::draw_cursors(&mut frame, &cpu.bus, false);
+    at.iter()
+        .map(|&(x, y)| {
+            let i = (y * width as usize + x) * 4;
+            [frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2]]
+        })
+        .collect()
+}
+
+/// The built-in Windows draws the cursor SetCursor set where the mouse
+/// is, on a desktop of 256 colours: the arrow's tip at the cursor's place
+/// is black and its inside white. ShowCursor(FALSE) takes it away.
+fn the_cursor_shows(test: &str, board: Option<Board>) {
+    let (program, data) = cursor_program();
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_ne!(r[1], 0, "LoadCursorA(IDC_ARROW)");
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let points = [(100, 100), (101, 102), (300, 300)];
+    let shown = with_cursors(&cpu, &points);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+    let desktop = shown[2];
+    assert_ne!(desktop, [0xFF, 0xFF, 0xFF], "the desktop isn't white");
+    go_on(&mut cpu, data);
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 5)[4], u32::MAX, "ShowCursor(FALSE)");
+    let hidden = with_cursors(&cpu, &points);
+    assert_eq!(hidden[1], desktop, "no cursor over the desktop");
+}
+
+#[test]
+fn the_cursor_shows_on_a_vesa_desktop() {
+    the_cursor_shows("cursor_vesa", None);
+}
+
+/// A Voodoo3 shows the desktop in its extended mode, the 3dfx card's own
+/// picture, and Windows' cursor is drawn over it.
+#[test]
+fn the_cursor_shows_on_a_voodoo3_desktop() {
+    the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
+}
+
+const USER32_FIRST_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursor",
+        "SetCursorPos",
+    ],
+);
+const FIRST_GET_CURSOR: usize = 1;
+const FIRST_LOAD_CURSOR: usize = 2;
+const FIRST_SET_CURSOR: usize = 3;
+const FIRST_SET_CURSOR_POS: usize = 4;
+
+/// CreateWindowExA of a visible 64 x 64 popup at the screen's corner.
+fn popup_window(c: &mut Calls, a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    c.api(
+        a,
+        l,
+        CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(64),
+            Arg::I(64),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ],
+    )
+}
+
+/// Windows starts with the arrow as the cursor: a program that never
+/// calls SetCursor gets the arrow's handle from GetCursor, its first
+/// call, and the arrow shows where the mouse is.
+#[test]
+fn the_arrow_is_the_cursor_from_the_start() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, FIRST_GET_CURSOR, &[])?;
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FIRST_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, FIRST_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "GetCursor");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(
+        r[0], r[2],
+        "GetCursor gives LoadCursorA(IDC_ARROW)'s cursor"
+    );
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(100, 100), (101, 102)]);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+}
+
+/// SetCursor(NULL) as a program's first call replaces the arrow USER
+/// starts with: it returns the arrow, and the windows made after it
+/// don't bring the arrow back.
+#[test]
+fn set_cursor_null_first_hides_the_arrow() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, FIRST_SET_CURSOR, &[Arg::I(0)])?;
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FIRST_GET_CURSOR, &[])?;
+        c.api(a, l, FIRST_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, FIRST_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_null_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 5);
+    assert_eq!(r[0], r[3], "SetCursor(NULL) gives the arrow it replaced");
+    assert_ne!(r[0], 0, "SetCursor(NULL)");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(r[2], 0, "GetCursor after SetCursor(NULL)");
+    assert_eq!(r[4], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(101, 102)]);
+    assert_ne!(shown[0], [0xFF, 0xFF, 0xFF], "no arrow over the desktop");
+}
+
+const USER32_CLASS_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursorPos",
+        "PeekMessageA",
+    ],
+);
+const CLASS_GET_CURSOR: usize = 1;
+const CLASS_LOAD_CURSOR: usize = 2;
+const CLASS_SET_CURSOR_POS: usize = 3;
+const CLASS_PEEK_MESSAGE: usize = 4;
+const IDC_IBEAM: u32 = 32513;
+const WM_MOUSEMOVE: u32 = 0x200;
+const PM_REMOVE: u32 = 1;
+/// The MSG PeekMessageA fills.
+const CURSOR_MSG: u32 = 0xF00;
+
+/// As the thread takes a mouse message, Windows sends the window under
+/// the mouse WM_SETCURSOR, and DefWindowProc sets its class's cursor: an
+/// Edit control's I-beam, which replaces the arrow.
+#[test]
+fn a_mouse_message_sets_the_class_cursor() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_CLASS_CURSOR], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, CLASS_SET_CURSOR_POS, &[Arg::I(20), Arg::I(20)])?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        let mv = Arg::I(WM_MOUSEMOVE);
+        let peek = [Arg::At(CURSOR_MSG), Arg::I(0), mv, mv, Arg::I(PM_REMOVE)];
+        c.api(a, l, CLASS_PEEK_MESSAGE, &peek)?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_IBEAM)])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_class", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_eq!(r[1], 1, "SetCursorPos");
+    assert_eq!(r[2], r[6], "the arrow before the message");
+    assert_eq!(r[3], 1, "PeekMessageA finds the WM_MOUSEMOVE");
+    assert_eq!(r[4], r[5], "the I-beam after it");
+    assert_ne!(r[4], r[6]);
+}
+
+/// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
+/// as the cursor and the cursor put at (100, 100) (step 1).
+fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
+    program(&[USER32_CURSOR, DDRAW], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &[Arg::I(w), Arg::I(h), Arg::I(8)])?;
+        c.api(a, l, LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        a.push(eax)?;
+        a.call(l.import(SET_CURSOR))?;
+        c.keep(a, l)?;
+        c.api(a, l, SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    })
+}
+
+/// `mode_cursor_program(w, h)` run to its step 1 on `board`, the mode
+/// set: a Voodoo3 shows it on the card, the others on the VGA.
+fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Cpu, u32) {
+    let (program, data) = mode_cursor_program(w, h);
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_eq!(r[2..4], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    (cpu, data)
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
+/// mode's pixels, as large as they show: the arrow's inside, one pixel
+/// right of the tip and two down, covers that pixel of the mode on the
+/// frame, however much larger the frame shows it.
+fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (cpu, data) = small_mode_machine(test, board, (w, h));
+    let r = results(&cpu, data, 7);
+    assert_ne!(r[4], 0, "LoadCursorA(IDC_ARROW)");
+    assert_eq!(r[6], 1, "SetCursorPos");
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let (sx, sy) = ((frame_w / w) as usize, (frame_h / h) as usize);
+    let inside = (101 * sx, 102 * sy);
+    let corners = [inside, (inside.0 + sx - 1, inside.1 + sy - 1)];
+    for (i, pixel) in with_cursors(&cpu, &corners).into_iter().enumerate() {
+        assert_eq!(pixel, [0xFF, 0xFF, 0xFF], "the arrow's inside, corner {i}");
+    }
+    let beside = with_cursors(&cpu, &[(120 * sx, 102 * sy)])[0];
+    assert_ne!(beside, [0xFF, 0xFF, 0xFF], "beside the arrow");
+}
+
+/// The VESA kind shows 320x240 at twice its size both ways.
+#[test]
+fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
+    the_cursor_shows_in_a_small_mode("cursor_vesa_320", None, (320, 240));
+}
+
+/// A Voodoo3 shows 320x200 at twice its size both ways: its lines
+/// doubled, and its pixels at half the pixel clock.
+#[test]
+fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
+    the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the host's pointer
+/// spans the mode's pixels, whatever size the frame shows them at: the
+/// middle of the picture is the middle of the screen, its bottom-right
+/// corner the screen's, and a captured mouse moves the cursor as far as
+/// the picture moves under it.
+fn the_pointer_spans_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (cpu, _) = small_mode_machine(test, board, (w, h));
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let frame = Frame::new(frame_w, frame_h);
+    let (fw, fh) = (frame_w as i32, frame_h as i32);
+    let (w, h) = (w as i32, h as i32);
+    let to_mouse = |at| video::overlay::frame_to_mouse(&cpu.bus, &frame, at);
+    assert_eq!(to_mouse((fw / 2, fh / 2)), (w / 2, h / 2), "the middle");
+    assert_eq!(
+        to_mouse((fw - 1, fh - 1)),
+        (w - 1, h - 1),
+        "the bottom-right corner"
+    );
+    let (sx, sy) = ((frame_w / w as u32) as f64, (frame_h / h as u32) as f64);
+    let motion = video::overlay::frame_motion_to_mouse(&cpu.bus, &frame, (sx * 10.0, sy * 10.0));
+    assert_eq!(motion, (10.0, 10.0), "ten of the mode's pixels");
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_240_vesa_mode() {
+    the_pointer_spans_a_small_mode("pointer_vesa_320", None, (320, 240));
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_200_voodoo3_mode() {
+    the_pointer_spans_a_small_mode("pointer_voodoo3_320", Some(Board::Voodoo3), (320, 200));
 }

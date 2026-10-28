@@ -18,12 +18,15 @@
 mod builtin;
 pub mod dos;
 mod dpmi;
+pub(crate) mod flat;
 mod gdi;
 mod global;
 mod handles;
+mod hook;
 mod kernel;
 mod ldt;
 mod local;
+mod lz;
 mod message;
 mod misc;
 mod module;
@@ -105,6 +108,17 @@ pub struct State {
     /// buffer's 16:16 and flat addresses, and the handle of the global
     /// block it is, or 0 if it is the program's.
     pub mmio_buffers: Vec<[u32; 4]>,
+    /// The compressed files LZEXPAND's LZInit opened (lz.rs).
+    pub lz_files: Vec<crate::win32::kernel32::lz::LzFile>,
+    /// The Win32 processes that call 16-bit code through flat thunks,
+    /// the aliases of memory between them and this process, and the
+    /// 16-bit to 32-bit thunks joined (flat.rs).
+    pub clients: Vec<flat::Client>,
+    pub aliases: Vec<flat::Alias>,
+    pub links: Vec<flat::Link>,
+    /// The exit code of the last task that ended other than a client's,
+    /// which the Win16 process ends with when a client outlived it.
+    pub exit_code: u16,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -322,6 +336,37 @@ pub fn is_task(win32: &crate::win32::Win32, tid: u32) -> bool {
     win32.win16.pid != 0 && win32.win16.tasks.iter().any(|t| t.tid == tid)
 }
 
+pub use kernel::{atom_name, atom_of};
+
+/// The bytes of the global block `handle`, as a 16-bit program passes
+/// one in a DDE message: None if it isn't a block that is there.
+pub fn global_bytes(cpu: &Cpu, handle: u16) -> Option<Vec<u8>> {
+    let size = global::size(cpu, handle);
+    let at = linear(cpu, (global::handle_to_sel(handle) as u32) << 16);
+    if size == 0 || at == 0 {
+        return None;
+    }
+    Some(peek_upto(cpu, at, size as usize))
+}
+
+/// A global block of the running task holding `bytes`, as a 16-bit
+/// program allocates one to pass in a DDE message (GMEM_MOVEABLE and
+/// GMEM_DDESHARE): its handle, or 0.
+pub fn global_block_of(cpu: &mut Cpu, bytes: &[u8]) -> u16 {
+    let owner = current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].handle);
+    let flags = global::GMEM_MOVEABLE | global::GMEM_DDESHARE;
+    let handle = global::alloc(cpu, flags, bytes.len() as u32, owner, false);
+    if handle == 0 {
+        return 0;
+    }
+    let at = linear(cpu, (global::handle_to_sel(handle) as u32) << 16);
+    if at == 0 || !poke(cpu, at, bytes) {
+        global::free(cpu, handle);
+        return 0;
+    }
+    handle
+}
+
 /// Whether the context `ctx` the IDT's gate was entered from is a Win16
 /// task's: its faults end the task (task.rs).
 pub fn is_task_context(cpu: &Cpu, _ctx: &Context) -> bool {
@@ -341,25 +386,35 @@ pub fn call(cpu: &mut Cpu, id: u16) {
 
 /// Whether `ctx` is in 16-bit code of the Win16 process.
 fn is_16bit(cpu: &Cpu, ctx: &Context) -> bool {
+    task_code(cpu, ctx).is_some_and(|(_, _, attr)| attr & ATTR_DB == 0)
+}
+
+/// The base, limit and attributes of the code segment of `ctx` if it is
+/// the Win16 process's own, a selector of its LDT: 16-bit, or 32-bit if
+/// its program set the D bit (module.rs).
+fn task_code(cpu: &Cpu, ctx: &Context) -> Option<(u32, u32, u16)> {
     let cs = ctx.seg[Seg::CS as usize];
-    cs & 4 != 0
-        && cs != crate::win32::system::CODE3
-        && selector_base(cpu, cs).is_some_and(|(_, _, attr)| attr & ATTR_DB == 0)
+    if cs & 4 == 0 || cs == crate::win32::system::CODE3 {
+        return None;
+    }
+    selector_base(cpu, cs)
 }
 
 /// Whether the IDT's gate for `vector` was entered by an INT n of a
-/// Win16 task's 16-bit code: the instruction before where it goes on is
-/// `CD vector`.
+/// Win16 task's code: the instruction before where it goes on is `CD
+/// vector`. The code may be 32-bit, a segment of the task whose selector
+/// it set the D bit of itself (module.rs); Windows serves its INT n the
+/// same way, with the 16-bit registers of its 16-bit DPMI client.
 pub fn is_soft_int(cpu: &mut Cpu, vector: u8, ctx: &Context) -> bool {
-    if current_task(cpu).is_none() || !is_16bit(cpu, ctx) {
+    if current_task(cpu).is_none() {
         return false;
     }
-    let cs = ctx.seg[Seg::CS as usize];
-    let Some((base, _, _)) = selector_base(cpu, cs) else {
+    let Some((base, _, attr)) = task_code(cpu, ctx) else {
         return false;
     };
-    let at = base.wrapping_add(ctx.eip.wrapping_sub(2) & 0xFFFF);
-    peek(cpu, at, 2).is_some_and(|b| b == [0xCD, vector])
+    let eip = ctx.eip.wrapping_sub(2);
+    let offset = if attr & ATTR_DB != 0 { eip } else { eip & 0xFFFF };
+    peek(cpu, base.wrapping_add(offset), 2).is_some_and(|b| b == [0xCD, vector])
 }
 
 /// The base, limit and attributes (as `SegCache::attr` has them) of the
@@ -486,6 +541,28 @@ pub fn module_index(cpu: &Cpu, handle: u16) -> Option<usize> {
         })
 }
 
+/// Whether a window of the process `pid` made with the instance
+/// `instance`, as USER32 keeps it (`handles::instance32`), belongs to a
+/// Windows 3.x program: a module of the Win16 process whose header
+/// expects a version of Windows before 4.0. The system's modules don't
+/// count, though their rebuilt headers say 3.10: Windows 95's own
+/// expect 4.0.
+pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
+    let win16 = &cpu.bus.win32.win16;
+    if pid == 0 || pid != win16.pid {
+        return false;
+    }
+    let index = if instance < 0x1_0000 {
+        module_index(cpu, instance as u16)
+    } else {
+        win16.modules.iter().position(|m| m.resources32 == instance)
+    };
+    index.is_some_and(|i| {
+        let m = &win16.modules[i];
+        m.builtin.is_none() && m.expected_version < 0x0400
+    })
+}
+
 crate::state_fields!(State {
     pid,
     lock,
@@ -511,7 +588,12 @@ crate::state_fields!(State {
     dpmi_blocks,
     missing,
     class_menus,
-    mmio_buffers
+    mmio_buffers,
+    lz_files,
+    clients,
+    aliases,
+    links,
+    exit_code
 });
 crate::state_fields!(Module16 {
     name,

@@ -69,7 +69,7 @@ fn reference_capture(
 fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
-    let mut screen = GlScreen::open(&video, "xBRZ cache regression", (32, 24))
+    let mut screen = GlScreen::open(&video, "xBRZ cache regression", (32, 24), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
     for glsl in [Glsl::Gl130, Glsl::Gl150] {
         for pass in [
@@ -230,7 +230,7 @@ fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
 fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
-    let mut screen = GlScreen::open(&video, "RGBA presentation regression", (8, 8))
+    let mut screen = GlScreen::open(&video, "RGBA presentation regression", (8, 8), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());
     screen.present(&frame, 0..4, (5, 4), None);
@@ -295,7 +295,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
             .collect(),
     );
     let base = double(&native);
-    let mut screen = GlScreen::open(&video, "xBRZ overlay regression", (16, 12))
+    let mut screen = GlScreen::open(&video, "xBRZ overlay regression", (16, 12), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
     screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
     let layer = Layer {
@@ -420,7 +420,7 @@ fn xbrz_near_colour_edges_use_exact_colour_inequality() {
     ];
     let native = Frame::from_rgb(5, 5, values.into_iter().flat_map(|v| [v, v, v]).collect());
     let base = double(&native);
-    let mut screen = GlScreen::open(&video, "xBRZ near colour regression", (10, 10))
+    let mut screen = GlScreen::open(&video, "xBRZ near colour regression", (10, 10), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
     screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
     let output = screen.capture(&base, &base, Monochrome::Off, (10, 10)).unwrap();
@@ -439,6 +439,7 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
         "Persistent composition regression",
         &Default::default(),
         &textures,
+        true,
     )
     .unwrap();
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());

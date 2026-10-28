@@ -95,6 +95,10 @@ impl GlScreen {
         match *self {}
     }
 
+    pub fn voodoo_picture(&mut self) -> Option<Frame> {
+        match *self {}
+    }
+
     pub fn present_voodoo(&mut self, _screen: &Frame, _base: &Frame, _display: (u32, u32)) -> bool {
         match *self {}
     }

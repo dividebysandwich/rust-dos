@@ -11,6 +11,7 @@
 
 pub mod class;
 pub mod controls;
+pub mod cursor;
 pub mod ddeml;
 pub mod defwnd;
 pub mod dialog;
@@ -20,11 +21,13 @@ pub mod menu;
 pub mod message;
 pub mod monitor;
 pub mod paint;
+pub mod progman;
 pub mod rect;
 pub mod resource;
 pub mod sysparams;
 pub mod text;
 pub mod window;
+pub mod winhelp;
 
 use super::gdi32::Rect;
 use super::stubs::{Api, Conv, Dll};
@@ -141,6 +144,8 @@ pub struct State {
     /// the hooks' kind; and the number of the last hook set.
     pub in_hooks: Vec<(u32, i32)>,
     pub last_hook: u32,
+    /// The help viewer (winhelp), which save states leave out.
+    pub help: winhelp::Help,
 }
 
 impl State {
@@ -454,7 +459,9 @@ pub fn address_of(name: &str) -> u32 {
     super::stubs::stub_address(dll_index(), index)
 }
 
-/// The system starts: the desktop window and the system's classes.
+/// The system starts: the desktop window, the system's classes, and the
+/// arrow as the cursor, which Windows shows from the start until a
+/// program sets another.
 pub fn init(cpu: &mut Cpu) {
     if !user(cpu).windows.is_empty() {
         return;
@@ -462,6 +469,8 @@ pub fn init(cpu: &mut Cpu) {
     sysparams::init_colors(cpu);
     class::register_system(cpu);
     window::create_desktop(cpu);
+    let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
+    cursor::set(cpu, arrow);
 }
 
 /// The process `pid` ended: its windows, classes, hooks, timers, menus,
@@ -483,6 +492,13 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, tids: &[u32]) {
         }
     }
     resource::process_ended(cpu, pid);
+    // The cursor was the process's own and has gone with it: the arrow,
+    // which the desktop sets as the mouse moves over it.
+    let current = user(cpu).input.cursor_handle;
+    if current != 0 && resource::icon(cpu, current).is_none() {
+        let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
+        cursor::set(cpu, arrow);
+    }
     redraw_after(cpu);
 }
 
@@ -1198,7 +1214,7 @@ static APIS: &[Api] = &[
     ),
     stdcall("GetThreadDesktop", 425, 1, sysparams::get_thread_desktop),
     stdcall("GetUserObjectInformationA", 426, 5, not_implemented),
-    stdcall("WinHelpA", 427, 4, succeed),
+    stdcall("WinHelpA", 427, 4, winhelp::win_help),
     stdcall("GetSystemDefaultLangID", 428, 0, nothing),
     stdcall("EnumDisplayDevicesA", 429, 4, monitor::enum_display_devices),
     // No monitor functions (430 to 433): they came with Windows 98, and
@@ -1297,6 +1313,11 @@ static APIS: &[Api] = &[
     stdcall("DdeEnableCallback", 621, 3, succeed),
     stdcall("DdePostAdvise", 622, 3, succeed),
     stdcall("DdeSetUserHandle", 623, 3, succeed),
+    // The help viewer's window procedures (winhelp).
+    stdcall("WinHelpWndProc", 0, 4, winhelp::frame_proc),
+    stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),
+    // Program Manager's window, the raw DDE messages' server.
+    stdcall("ProgmanWndProc", 0, 4, progman::wnd_proc),
 ];
 
 crate::state_fields!(State {
@@ -1321,4 +1342,6 @@ crate::state_fields!(State {
     registered,
     in_hooks,
     last_hook
+} skip {
+    help
 });

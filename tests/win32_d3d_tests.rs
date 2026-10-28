@@ -845,6 +845,7 @@ const RECT: u32 = 0x900;
 const FILL_DESC: u32 = 0x910;
 const FILLED: u32 = 0x990;
 const FRONT: u32 = 0x994;
+const KEY: u32 = 0x998;
 const SCENE: u32 = 0xA00;
 
 const DDSD_PIXELFORMAT: u32 = 0x1000;
@@ -870,6 +871,7 @@ const SURF_ADD_ATTACHED_SURFACE: u32 = 3;
 const SURF_GET_ATTACHED_SURFACE: u32 = 12;
 const SURF_FLIP: u32 = 11;
 const SURF_LOCK: u32 = 25;
+const SURF_SET_COLOR_KEY: u32 = 29;
 const SURF_UNLOCK: u32 = 32;
 const D3D3_CREATE_VIEWPORT: u32 = 6;
 const D3D3_CREATE_DEVICE: u32 = 8;
@@ -884,6 +886,14 @@ const DEV7_CLEAR: u32 = 10;
 const DEV7_SET_RENDER_STATE: u32 = 20;
 const DEV7_DRAW_PRIMITIVE: u32 = 25;
 const DEV7_SET_TEXTURE: u32 = 35;
+const DEV7_SET_TEXTURE_STAGE_STATE: u32 = 37;
+const DDCKEY_SRCBLT: u32 = 8;
+const TSS_ALPHAOP: u32 = 4;
+const TOP_SELECTARG2: u32 = 3;
+const TOP_SELECTARG1: u32 = 2;
+const TOP_ADD: u32 = 7;
+const TSS_ALPHAARG1: u32 = 5;
+const TA_TFACTOR: u32 = 3;
 
 // Render states.
 const RS_ZENABLE: u32 = 7;
@@ -898,6 +908,10 @@ const RS_FOGTABLEMODE: u32 = 35;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
 const RS_SPECULARENABLE: u32 = 29;
+const RS_ALPHATESTENABLE: u32 = 15;
+const RS_ALPHAFUNC: u32 = 25;
+const RS_COLORKEYENABLE: u32 = 41;
+const RS_TEXTUREFACTOR: u32 = 60;
 
 /// A D3DTLVERTEX: its position, rhw, diffuse and specular colors and
 /// texture coordinates.
@@ -926,6 +940,15 @@ fn tl(x: f32, y: f32, z: f32, diffuse: u32) -> Tl {
     }
 }
 
+/// `v` with the vertex fog factor `factor` (255 no fog, 0 all fog) in
+/// its specular alpha.
+fn with_fog(v: Tl, factor: u32) -> Tl {
+    Tl {
+        specular: factor << 24,
+        ..v
+    }
+}
+
 /// Two triangles covering the rectangle from (x0, y0) to (x1, y1), its
 /// texture coordinates 0 to 1, all with depth `z` and `color`.
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: u32) -> Vec<Tl> {
@@ -950,6 +973,11 @@ enum Step {
     Fill,
     /// Flip of the flip chain, without waiting for the frame.
     Flip,
+    /// SetTextureStageState of stage 0 (Direct3D 7).
+    Stage(u32, u32),
+    /// SetColorKey of the texture: its source blit key (Direct3D 7).
+    /// A scene has one key: every Key step sets the last one's.
+    Key(u32),
 }
 
 /// Which Direct3D draws a scene.
@@ -1066,6 +1094,14 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
     let mut draws = Vec::new();
     let mut at = SCENE;
     for step in &scene.steps {
+        if matches!(step, Step::Stage(..) | Step::Key(_)) {
+            assert!(scene.api == Api::D3D7, "a Direct3D 7 step");
+        }
+        if let Step::Key(key) = step {
+            assert!(scene.texture.is_some(), "a key without a texture");
+            put32(&mut d, KEY, *key);
+            put32(&mut d, KEY + 4, *key);
+        }
         if let Step::Draw(verts) = step {
             draws.push(at);
             for v in verts {
@@ -1228,6 +1264,14 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
             match step {
                 Step::State(s, v) => {
                     c.com(a, l, DEVICE, set_state, &[Arg::I(*s), Arg::I(*v)])?;
+                }
+                Step::Stage(s, v) => {
+                    let args = [Arg::I(0), Arg::I(*s), Arg::I(*v)];
+                    c.com(a, l, DEVICE, DEV7_SET_TEXTURE_STAGE_STATE, &args)?;
+                }
+                Step::Key(_) => {
+                    let args = [Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)];
+                    c.com(a, l, TEXTURE, SURF_SET_COLOR_KEY, &args)?;
                 }
                 Step::Flip => {
                     let flags = DDFLIP_WAIT | DDFLIP_NOVSYNC;
@@ -1598,10 +1642,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     let fogged = |alpha: u32, x0: f32, x1: f32| {
         quad(x0, 0.0, x1, 32.0, 0.5, WHITE)
             .into_iter()
-            .map(|v| Tl {
-                specular: alpha << 24,
-                ..v
-            })
+            .map(|v| with_fog(v, alpha))
             .collect()
     };
     // Table fog by W, linear from 0 to 4: half at W 2.
@@ -1631,6 +1672,37 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     assert_rgb(&p, 16, 16, [0, 255, 0], 8);
     assert_rgb(&p, 48, 16, [255, 255, 255], 8);
     assert_rgb(&p, 32, 48, [128, 255, 128], 20);
+}
+
+#[test]
+fn flat_shading_keeps_each_vertex_fog() {
+    // A red first vertex without fog, and fully fogged vertices of
+    // another color: the face is red, fogged as the vertices say.
+    let tri = vec![
+        with_fog(tl(4.0, 4.0, 0.5, RED), 0xFF),
+        with_fog(tl(60.0, 4.0, 0.5, BLUE), 0),
+        with_fog(tl(4.0, 60.0, 0.5, BLUE), 0),
+    ];
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: None,
+        steps: vec![
+            Step::State(RS_SHADEMODE, 1),
+            Step::State(RS_FOGENABLE, 1),
+            Step::State(RS_FOGCOLOR, 0x00_FF00),
+            Step::Draw(tri),
+        ],
+    };
+    let p = draw_scene("flat-fog", &scene);
+    // At the first corner red, at the others the fog color, and half
+    // of each between them.
+    assert_rgb(&p, 5, 5, [255, 0, 0], 24);
+    assert_rgb(&p, 56, 6, [0, 255, 0], 32);
+    assert_rgb(&p, 6, 56, [0, 255, 0], 32);
+    assert_rgb(&p, 18, 18, [128, 128, 0], 32);
 }
 
 /// A scene with the add-on card `board`: flat, gouraud, z-tested and
@@ -1665,8 +1737,186 @@ fn the_3dfx_device_draws_on_a_voodoo2() {
 }
 
 #[test]
+fn keyed_texels_stay_out_whatever_the_alpha_on_a_voodoo2() {
+    // A texture keyed on black in its left half, white in its right. The
+    // stage's alpha is the diffuse one, as Moto Racer's textures without
+    // alpha have it under MODULATE, or the program's alpha test lets
+    // everything through: Direct3D leaves the keyed texels out all the
+    // same.
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0 } else { 0xFFFF });
+    let alpha_steps = [
+        vec![Step::Stage(TSS_ALPHAOP, TOP_SELECTARG2)],
+        vec![
+            Step::State(RS_ALPHATESTENABLE, 1),
+            Step::State(RS_ALPHAFUNC, 8),
+        ],
+    ];
+    for (i, steps) in alpha_steps.into_iter().enumerate() {
+        let mut all = vec![Step::Key(0), Step::State(RS_COLORKEYENABLE, 1)];
+        all.extend(steps);
+        all.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: Some(Board::Voodoo2),
+            clear: 0xFF00_0080,
+            zbuffer: None,
+            texture: Some(texels),
+            steps: all,
+        };
+        let p = draw_scene(&format!("card_v2_keyed{i}"), &scene);
+        // The clear color where the texture is keyed, its white beside.
+        assert_rgb(&p, 16, 32, [0, 0, 0x84], 4);
+        assert_rgb(&p, 48, 32, [255, 255, 255], 8);
+    }
+}
+
+#[test]
+fn keyed_texels_blend_with_the_stages_alpha_on_a_voodoo2() {
+    // The keyed texture again, blended by its alpha over blue, with a
+    // diffuse alpha of 0. ALPHAOP ADD of the texture gives the texels
+    // that aren't keyed alpha 1, so they come out white; the texture
+    // factor's alpha selected, 0x80, mixes them half and half. The keyed
+    // texels stay out either way.
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0 } else { 0xFFFF });
+    let cases = [
+        (vec![Step::Stage(TSS_ALPHAOP, TOP_ADD)], [255, 255, 255]),
+        (
+            vec![
+                Step::Stage(TSS_ALPHAOP, TOP_SELECTARG1),
+                Step::Stage(TSS_ALPHAARG1, TA_TFACTOR),
+                Step::State(RS_TEXTUREFACTOR, 0x80FF_FFFF),
+            ],
+            [128, 128, 255],
+        ),
+    ];
+    for (i, (steps, right)) in cases.into_iter().enumerate() {
+        let mut all = vec![
+            Step::Key(0),
+            Step::State(RS_COLORKEYENABLE, 1),
+            Step::State(RS_ALPHABLENDENABLE, 1),
+            Step::State(RS_SRCBLEND, 5),
+            Step::State(RS_DESTBLEND, 6),
+        ];
+        all.extend(steps);
+        all.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x00FF_FFFF)));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: Some(Board::Voodoo2),
+            clear: BLUE,
+            zbuffer: None,
+            texture: Some(texels),
+            steps: all,
+        };
+        let p = draw_scene(&format!("card_v2_keyed_blend{i}"), &scene);
+        assert_rgb(&p, 16, 32, [0, 0, 255], 4);
+        assert_rgb(&p, 48, 32, right, 12);
+    }
+}
+
+#[test]
 fn the_3dfx_device_draws_on_a_voodoo_graphics() {
     card_scene("card_v1", Board::Standard);
+}
+
+/// Where the card polling program counts its polls and keeps the first
+/// one's result and the last one's.
+const POLLS: u32 = 0x9A0;
+const FIRST_POLL: u32 = 0x9A4;
+const LAST_POLL: u32 = 0x9A8;
+const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
+const SURF_GET_FLIP_STATUS: u32 = 18;
+const DDGFS_ISFLIPDONE: u32 = 2;
+
+/// A flip chain on the Voodoo2's 3dfx device and a flip, whose swap
+/// waits for the card's next retrace; then, again and again with
+/// nothing in between until it succeeds, Flip without DDFLIP_WAIT, or
+/// GetFlipStatus of the back buffer when `status`.
+fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    guid(
+        &mut d,
+        CARD_GUID,
+        0x472B_EA00,
+        0x40DF,
+        0x11D1,
+        [0xA9, 0xDF, 0x00, 0x60, 0x97, 0xC2, 0xED, 0xB2],
+    );
+    put32(&mut d, DESC, 124);
+    put32(&mut d, DESC + 0x04, DDSD_CAPS | DDSD_BACKBUFFERCOUNT);
+    put32(&mut d, DESC + 0x14, 1);
+    let caps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE;
+    put32(&mut d, DESC + 0x68, caps);
+    put32(&mut d, BACK_CAPS, DDSCAPS_BACKBUFFER);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, true, true)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            SURF_GET_ATTACHED_SURFACE,
+            &[Arg::At(BACK_CAPS), Arg::At(TARGET)],
+        )?;
+        c.com(a, l, FRONT, SURF_FLIP, &[Arg::I(0), Arg::I(0)])?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.inc(dword_ptr(l.at(POLLS)))?;
+        let (object, method) = if status {
+            push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
+            (TARGET, SURF_GET_FLIP_STATUS)
+        } else {
+            push(a, l, &[Arg::I(0), Arg::I(0)])?;
+            (FRONT, SURF_FLIP)
+        };
+        a.mov(eax, dword_ptr(l.at(object)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * method))?;
+        let mut kept = a.create_label();
+        a.cmp(dword_ptr(l.at(POLLS)), 1)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(FIRST_POLL)), eax)?;
+        a.set_label(&mut kept)?;
+        a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
+        a.je(again)?;
+        a.mov(dword_ptr(l.at(LAST_POLL)), eax)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
+    // The swap is pending until the card's next retrace, and each call
+    // of Flip fails until then. A loop that only polls waits for that
+    // retrace at its 16th call, which flips, instead of making a call
+    // for each pass until then.
+    let (exe, data) = card_polling_program(false);
+    let mut cpu = machine_with("card_flip_polling", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of Flip");
+}
+
+#[test]
+fn flip_status_on_a_voodoo2_follows_the_swap() {
+    // GetFlipStatus says the flip is still to show while the card's swap
+    // waits for its retrace, and a loop that only asks waits for it.
+    let (exe, data) = card_polling_program(true);
+    let mut cpu = machine_with("card_flip_status", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of GetFlipStatus");
 }
 
 #[test]

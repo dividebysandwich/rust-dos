@@ -36,14 +36,15 @@ kernel/file: failed file.c:466
 kernel/file: failed file.c:472
 kernel/module: module: 142 tests executed (0 marked as todo, 0 failures), 0 skipped.
 kernel/profile: profile: 153 tests executed (0 marked as todo, 0 failures), 0 skipped.
+lzexpand/lzmain: lzmain: 41 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user/class: class: 205 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user/dialog: dialog: 112 tests executed (0 marked as todo, 0 failures), 0 skipped.
+user/dialog: dialog: 167 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user/menu: menu: 139 tests executed (0 marked as todo, 3 failures), 0 skipped.
 user/menu: failed menu.c:210
 user/menu: failed menu.c:226
 user/menu: failed menu.c:110
-user/msg: msg: 223 tests executed (0 marked as todo, 3 failures), 0 skipped.
-user/msg: failed msg.c:515 (x3)
+user/msg: msg: 226 tests executed (0 marked as todo, 3 failures), 0 skipped.
+user/msg: failed msg.c:519 (x3)
 user/text: text: 88 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user/win: win: 559 tests executed (0 marked as todo, 12 failures), 0 skipped.
 user/win: failed win.c:1097

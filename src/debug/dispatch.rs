@@ -535,6 +535,10 @@ impl DebugHub {
             }),
             Cmd::Exceptions => Reply::Json(pm::exceptions_json(cpu)),
             Cmd::Win32 => Reply::Json(super::win32::win32_json(cpu)),
+            Cmd::Win32Trace(level) => {
+                rust_dos::win32::trace::set_level(cpu, level);
+                Reply::Json(super::win32::win32_json(cpu))
+            }
             Cmd::Win32Ddraw => Reply::Json(super::win32::ddraw_json(cpu)),
             Cmd::Win32Surface { id, keyed } => match rust_dos::win32::snapshot::surface_image(cpu, id, keyed) {
                 Ok((width, height, rgba)) => Reply::Frame(video::Frame::from_rgba(width, height, rgba)),

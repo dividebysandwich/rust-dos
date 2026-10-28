@@ -8,7 +8,6 @@
 //! what comes out of the pipeline is only counted (`pipeline::Counter`).
 
 use super::super::DDERR_INVALIDPARAMS;
-use super::caps::GUARD_BAND;
 use super::device::{
     Begin, Device, RS_AMBIENT, RS_AMBIENTMATERIALSOURCE, RS_CLIPPING, RS_CLIPPLANEENABLE,
     RS_COLORVERTEX, RS_CULLMODE, RS_DIFFUSEMATERIALSOURCE, RS_EMISSIVEMATERIALSOURCE, RS_FILLMODE,
@@ -231,7 +230,7 @@ pub fn setup_in(
         lighting,
         fog,
         clip: s(RS_CLIPPING) != 0 && flags & D3DDP_DONOTCLIP == 0,
-        guard_band: GUARD_BAND,
+        guard_band: super::hal::VERTEX_BAND,
         cull: s(RS_CULLMODE),
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),

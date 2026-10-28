@@ -821,6 +821,9 @@ function frame(now) {
     if (changed) {
       draw();
     }
+    // The built-in Windows' cursor is drawn in the picture, so the
+    // browser's pointer would show twice.
+    canvas.classList.toggle('drawn-pointer', machine.draws_pointer());
     showActivity(machine.take_drive_activity(), now);
     // DOSCONFIG opens the settings window.
     if (machine.settings_open() !== settingsShown) {

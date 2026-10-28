@@ -112,7 +112,8 @@ pub fn image(cpu: &Cpu, id: u32, keyed: bool) -> Result<(u32, u32, Vec<u8>), Str
     let bytes = sf.bytes_per_pixel() as usize;
     let row = sf.width as usize * bytes;
     let mut data = vec![0u8; row];
-    let key = (keyed && sf.key_set & 1 << KEY_SRC_BLT != 0).then(|| sf.keys[KEY_SRC_BLT]);
+    let key = (keyed && sf.key_set & 1 << KEY_SRC_BLT != 0)
+        .then(|| super::blt::Key::new(sf.keys[KEY_SRC_BLT], sf));
     let mut rgba = Vec::with_capacity(sf.width as usize * sf.height as usize * 4);
     for y in 0..sf.height {
         read_row(cpu, o.pid, sf, y * sf.pitch, &mut data)?;
@@ -129,7 +130,7 @@ pub fn image(cpu: &Cpu, id: u32, keyed: bool) -> Result<(u32, u32, Vec<u8>), Str
                     channel(value, sf.format.b),
                 ]
             };
-            let a = if key.is_some_and(|k| super::blt::keyed(value, k, sf)) {
+            let a = if key.is_some_and(|k| k.holds(value)) {
                 0
             } else {
                 255

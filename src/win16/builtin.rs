@@ -160,6 +160,7 @@ pub static MODULES: &[&Def] = &[
     &super::misc::WING,
     &super::misc::DDEML,
     &super::misc::DISPLAY,
+    &super::misc::SETUPX,
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
@@ -397,7 +398,7 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     if cpu.bus.guest_faulted() {
         return;
     }
-    let logs = cpu.bus.logs();
+    let logs = crate::win32::trace::on(cpu);
     let caller = if logs {
         let base = cpu.seg_cache(Seg::SS).base;
         cpu.bus.guest_read_32(base.wrapping_add(cpu.sp() as u32))
@@ -435,7 +436,14 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         cpu.set_ax(value as u16);
         cpu.set_dx((value >> 16) as u16);
     }
-    if logs {
+    let call = crate::win32::trace::Call {
+        kind: crate::win32::trace::Kind::W16,
+        caller,
+        id,
+        module: def.name,
+        name: api.name,
+    };
+    if logs && crate::win32::trace::admit(cpu, call) {
         let args: Vec<String> = raw.iter().map(|a| format!("{:X}", a)).collect();
         let result = result.map_or("...".to_string(), |r| format!("{:X}", r));
         cpu.bus.log_string(&format!(

@@ -535,6 +535,7 @@ fn dynrec_json(a: &Totals, b: &Totals, c: &rust_dos::profile::Counters, top: usi
                 "load_seg": d(p.load_seg, q.load_seg),
                 "lar": d(p.lar, q.lar),
                 "fetch": d(p.fetch, q.fetch),
+                "smc_check": d(p.smc_check, q.smc_check),
                 "fpu": d(p.fpu, q.fpu),
             })
         }
