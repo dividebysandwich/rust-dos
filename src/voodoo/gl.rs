@@ -1049,7 +1049,7 @@ impl VoodooGl {
 
     /// The picture last composed (`composite`), read back from the GPU
     /// at the card's resolution: of each block of `scale` by `scale`
-    /// pixels, the one at its middle. Rows from the top, RGBA.
+    /// pixels, their average. Rows from the top, RGBA.
     pub fn read_picture(&self, gl: &glow::Context) -> Option<Frame> {
         let (target, (w, h)) = self.composite.as_ref()?;
         let (w, h) = (*w, *h);
@@ -1064,17 +1064,29 @@ impl VoodooGl {
             gl.read_pixels(0, 0, rw, rh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         }
-        // The composed picture's first row is the picture's top.
+        // The composed picture's first row is the picture's top. Each of
+        // the card's pixels is the average of its block of scale by scale,
+        // as the player sees it at that size.
         let (fw, fh) = (w / scale, h / scale);
         let mut frame = Frame::new(fw, fh);
-        let half = scale / 2;
+        let area = scale * scale;
+        let mut sums = vec![[0u32; 3]; fw as usize];
         for y in 0..fh {
-            let from = ((y * scale + half) * w) as usize * 4;
+            sums.fill([0; 3]);
+            for row in y * scale..(y + 1) * scale {
+                let from = (row * w) as usize * 4;
+                for (x, sum) in sums.iter_mut().enumerate() {
+                    let at = from + x * scale as usize * 4;
+                    for px in rgba[at..at + scale as usize * 4].as_chunks::<4>().0 {
+                        sum.iter_mut().zip(px).for_each(|(s, &c)| *s += c as u32);
+                    }
+                }
+            }
             let to = (y * fw) as usize * 4;
-            for x in 0..fw as usize {
-                let at = from + (x * scale as usize + half as usize) * 4;
-                let [r, g, b, _] = rgba[at..at + 4] else { unreachable!() };
-                frame.rgba[to + x * 4..to + x * 4 + 4].copy_from_slice(&[r, g, b, 0xFF]);
+            let out = &mut frame.rgba[to..to + fw as usize * 4];
+            for (px, sum) in out.as_chunks_mut::<4>().0.iter_mut().zip(&sums) {
+                let [r, g, b] = sum.map(|s| ((s + area / 2) / area) as u8);
+                *px = [r, g, b, 0xFF];
             }
         }
         Some(frame)
