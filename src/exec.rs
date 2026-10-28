@@ -213,6 +213,12 @@ pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReaso
         (true, false, true) => run::<true, false, true>(cpu, &mut fetch, hook),
         (true, true, true) => run::<true, true, true>(cpu, &mut fetch, hook),
     };
+    // Watching ends with the batch: the host's time until the next one
+    // (drawing, presenting, waiting for the frame) isn't its own
+    // (`Observe::take_watched`).
+    if cpu.bus.observe.in_watch() {
+        cpu.bus.observe.watch_to(cpu.bus.clock.run_count());
+    }
     fetch.finish(cpu);
     reason
 }
@@ -281,7 +287,7 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
         // which can set TF, ends translated blocks, and POPF stops one
         // where it sets TF.)
         let watching = !HOT && cpu.bus.observe.watching();
-        if watching != cpu.bus.observe.in_watch() {
+        if !HOT && watching != cpu.bus.observe.in_watch() {
             // The host time this takes is kept apart (`Observe::watch_from`).
             let run = cpu.bus.clock.run_count();
             if watching {

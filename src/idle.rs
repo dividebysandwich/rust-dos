@@ -417,16 +417,12 @@ impl Observe {
     }
 
     /// The host time spent watching and the instructions run meanwhile
-    /// since the last call, up to run count `run`. Watching costs far more
-    /// per instruction than running the code does, and comes with timer
-    /// events rather than with the instructions a frame runs: the host
-    /// speed estimate counts it as a frame's fixed work
-    /// (`Pacer::end_cpu_frame`).
-    pub fn take_watched(&mut self, run: u64) -> (std::time::Duration, u64) {
-        if self.watch_since.is_some() {
-            self.watch_to(run);
-            self.watch_from(run);
-        }
+    /// since the last call, in the batches run since (`run_batch` ends a
+    /// span of watching when it returns). Watching costs far more per
+    /// instruction than running the code does, and comes with timer events
+    /// rather than with the instructions a frame runs: the host speed
+    /// estimate counts it as a frame's fixed work (`Pacer::end_cpu_frame`).
+    pub fn take_watched(&mut self) -> (std::time::Duration, u64) {
         std::mem::take(&mut self.watched)
     }
 

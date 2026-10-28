@@ -92,6 +92,31 @@ fn a_keyboard_poll_is_skipped() {
 }
 
 #[test]
+fn watching_is_timed_within_the_batches() {
+    // The host's time between batches isn't watching's, even where a
+    // batch ends in the middle of a proof (`Observe::take_watched`).
+    let code = assemble(|a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    let mut a = machine("watched", "a", &code, CoreMode::Normal, false);
+    let mut b = machine("watched", "b", &code, CoreMode::Dynamic, true);
+    let mut watched = 0;
+    let each = |_: usize, cpu: &mut Cpu| {
+        assert!(!cpu.bus.observe.in_watch(), "a span of watching outlived its batch");
+        watched += cpu.bus.observe.take_watched().1;
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 50, 100_000, each) {
+        panic!("{}", e);
+    }
+    assert!(watched > 0, "nothing was watched: {:?}", b.bus.observe.stats);
+}
+
+#[test]
 fn a_wait_for_the_next_tick_is_skipped() {
     // Wait for 20 ticks of the BIOS's count, in a tight loop.
     let stats = compare("ticks", |a| {

@@ -676,10 +676,14 @@ impl Pacer {
         // What the idle skip's watching cost (`Observe::take_watched`) is
         // work of the frame's own, as the rest of `overhead` is: counted
         // per instruction, the proofs that come with each timer event would
-        // make the host look slower at running code than it is.
-        let (watched, run) = cpu.bus.observe.take_watched(cpu.bus.clock.run_count());
+        // make the host look slower at running code than it is. A frame
+        // that ran little but the watched instructions counts as one that
+        // hardly ran anything, as a frame of waiting does: it mostly
+        // waited, in the passes that were skipped.
+        let (watched, run) = cpu.bus.observe.take_watched();
         let watched = watched.min(exec);
-        let (executed, exec, overhead) = (executed.saturating_sub(run), exec - watched, overhead + watched);
+        let (executed, exec, overhead) =
+            (executed.saturating_sub(run), exec - watched, overhead + watched);
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
         next
