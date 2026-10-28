@@ -10,7 +10,7 @@ use rust_dos::cpu::{Cpu, HostConsole};
 use rust_dos::exec::{NoHook, StopReason, run_batch};
 use rust_dos_ne as ne;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// A code segment's flags: movable, with level 3.
@@ -152,7 +152,15 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 /// Run `program` as T.EXE from the shell with the built-in Windows on,
 /// to its end: its exit code and the log.
 pub fn run(test: &str, program: Vec<u8>) -> (u8, String) {
-    let mut cpu = Cpu::new(scratch(test, &[("T.EXE", program)]));
+    run_with(test, program, |_, _| {})
+}
+
+/// `run`, with `setup` given the machine and the test's folder first, to
+/// mount drives or add files.
+pub fn run_with(test: &str, program: Vec<u8>, setup: impl FnOnce(&mut Cpu, &Path)) -> (u8, String) {
+    let base = scratch(test, &[("T.EXE", program)]);
+    let mut cpu = Cpu::new(base.clone());
+    setup(&mut cpu, &base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     let lines = Arc::new(Mutex::new(Vec::new()));
