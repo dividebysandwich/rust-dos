@@ -184,7 +184,12 @@ impl Clock {
 
     /// Current emulated time in PIT ticks.
     pub fn now_ticks(&self) -> u64 {
-        let delta = self.icount.saturating_sub(self.base_icount);
+        self.ticks_at(self.icount)
+    }
+
+    /// The emulated time in PIT ticks at instruction count `icount`.
+    pub fn ticks_at(&self, icount: u64) -> u64 {
+        let delta = icount.saturating_sub(self.base_icount);
         self.base_ticks + mul_div(delta, PIT_HZ, self.instructions_per_second())
     }
 

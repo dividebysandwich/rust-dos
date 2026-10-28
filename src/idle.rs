@@ -28,15 +28,25 @@
 //! run, and count as executed instructions: the registers, memory and
 //! counts come out as without the skip.
 //!
+//! **Loops that read the time.** A loop that latches the PIT's count and
+//! reads it in every pass, as Windows 98's QueryPerformanceCounter does,
+//! never leaves the machine as it was, but may leave it the same function
+//! of the count it read. A proof that sees the count latched hands the loop
+//! to `time`, which proves that and skips such passes from the instruction
+//! that latches.
+//!
 //! **Where loops come from.** A head is armed at the service trap where the
-//! BIOS keyboard's status call found no key many times in a row, and where
-//! two timer events in a row found the CPU at the same instruction with the
-//! same flags and registers but for one (a loop, whose register may be a
-//! time read that the event between moved on). A head whose passes were
-//! skipped is armed again at the next event, as its loop usually goes on
-//! after it, and whenever an event finds the CPU there later, as a game
-//! comes back to its frame limiter every frame. Failed proofs at a head
-//! make the next tries at it rarer.
+//! BIOS keyboard's status call found no key many times in a row, after
+//! many reads of the VGA's status or latches of the PIT's count with no
+//! other port between them, and where two timer events in a row found the
+//! CPU at the same instruction with the same flags and registers but for
+//! one (a loop, whose register may be a time read that the event between
+//! moved on). A head whose passes were skipped is armed again at the next
+//! event, as its loop usually goes on after it, and whenever an event finds
+//! the CPU there later, as a game comes back to its frame limiter every
+//! frame. Failed proofs at a head make the next tries at it rarer.
+
+mod time;
 
 use std::cell::Cell;
 
@@ -124,6 +134,8 @@ enum Phase {
     /// passes after it run the same until their counters reach where one
     /// of them would take another way (see `count`).
     Count { head: Head, base: Box<Visit>, copies: Vec<(usize, [u8; CHUNK])>, pass: Box<Pass>, until: u64 },
+    /// A loop that reads the time from the PIT (see `time`).
+    Time(Box<time::TimeProof>),
 }
 
 /// The pass `Phase::Count` records.
@@ -294,8 +306,23 @@ pub struct Observe {
     al_read: u64,
     /// Reads of the VGA's status port in a row, which arm the loop.
     polls: u32,
+    /// Latches of the PIT's count with no other port access between them,
+    /// which arm the loop too.
+    latch_polls: u32,
+    /// A proof that isn't a time proof read the PIT's channel 0.
+    pit_read: bool,
     /// The heads whose last proofs failed, the most recent `BACKOFF_HEADS`.
     backoffs: Vec<Backoff>,
+    /// The instruction running, during a proof.
+    current: Option<Head>,
+    /// Where a proof saw the PIT's count latched: a loop that reads the
+    /// time, proven from there instead (`time`).
+    latch_head: Option<Head>,
+    /// When a time proof's pass latched the count.
+    latch_at: Option<u64>,
+    /// The bytes written since the last look, `start..end`, during a time
+    /// proof.
+    writes: Vec<(usize, usize)>,
     pub stats: IdleStats,
 }
 
@@ -328,7 +355,13 @@ impl Default for Observe {
             al_port: 0,
             al_read: 0,
             polls: 0,
+            latch_polls: 0,
+            pit_read: false,
             backoffs: Vec::new(),
+            current: None,
+            latch_head: None,
+            latch_at: None,
+            writes: Vec::new(),
             stats: IdleStats::default(),
         }
     }
@@ -348,10 +381,13 @@ impl Observe {
         !matches!(self.phase, Phase::Off)
     }
 
-    /// Blocks `first..=last` of RAM were written.
+    /// The bytes of RAM `start..end` were written.
     #[cold]
-    pub fn wrote(&mut self, first: usize, last: usize) {
-        for chunk in first..=last {
+    pub fn wrote(&mut self, start: usize, end: usize) {
+        if self.timing() {
+            self.writes.push((start, end));
+        }
+        for chunk in start >> GEN_SHIFT..=(end - 1) >> GEN_SHIFT {
             self.chunks.push(chunk as u32);
         }
         if self.chunks.len() > 4 * CHUNKS {
@@ -383,11 +419,19 @@ impl Observe {
 
     /// A port is read: one the proof allowed (`port_ok`), or something it
     /// can't follow. Outside proofs, reads of the VGA's status in a row arm
-    /// the loop they are in.
+    /// the loop they are in. A proof that isn't a time proof lets the PIT's
+    /// channel 0 be read until it latches the count, where a time proof
+    /// starts, but fails at the head before that.
     #[inline(always)]
     pub fn port_read(&mut self, port: u16) {
+        if port != 0x40 {
+            self.latch_polls = 0;
+        }
         if self.on {
-            if self.port_ok.take() != Some(port) {
+            if port == 0x40 && !self.timing() {
+                self.pit_read = true;
+                self.port_ok = None;
+            } else if self.port_ok.take() != Some(port) {
                 self.opaque_because("port read");
             }
         } else if matches!(port, 0x3DA | 0x3BA) {
@@ -401,11 +445,41 @@ impl Observe {
         }
     }
 
-    /// A port is written.
+    /// A port is written, at instruction count `at`. A command that
+    /// latches the PIT's channel 0 is a read of the time, which a time
+    /// proof follows (`time`); in another proof it starts one where it is.
     #[inline(always)]
-    pub fn port_write(&mut self) {
+    pub fn port_write(&mut self, port: u16, value: u8, at: u64) {
         self.polls = 0;
+        let latch = port == 0x43 && value & 0xF0 == 0;
+        if !latch {
+            self.latch_polls = 0;
+        } else if !self.on {
+            // Latches with no other port between them: a loop that reads
+            // the time, armed at the next instruction.
+            self.latch_polls += 1;
+            if self.latch_polls >= STATUS_POLLS {
+                self.latch_polls = 0;
+                self.arm_here();
+            }
+        }
+        if self.on && latch {
+            if self.timing() {
+                if self.latch_at.replace(at).is_some() {
+                    self.opaque_because("time latches");
+                }
+            } else {
+                self.latch_head = self.current;
+            }
+            return;
+        }
         self.opaque_because("port write");
+    }
+
+    /// A time proof's pass runs: the bytes written are noted one by one.
+    #[inline(always)]
+    fn timing(&self) -> bool {
+        self.on && matches!(self.phase, Phase::Time(_))
     }
 
     /// Arm the loop the CPU is in, at the next instruction.
@@ -427,11 +501,12 @@ impl Observe {
     }
 
     /// A write at `addr` that isn't plain RAM, as `mapped`: the ROMs ignore
-    /// it, and the RAM between them is noted.
+    /// it, and the RAM between them is noted, but for a time proof, which
+    /// follows the bytes written one by one and isn't told them here.
     #[cold]
     pub fn mapped_write(&mut self, addr: usize, ram_len: usize) {
-        if (0xC_0000..0x10_0000).contains(&addr) && addr + 4 <= ram_len {
-            self.wrote(addr >> GEN_SHIFT, (addr + 3) >> GEN_SHIFT);
+        if (0xC_0000..0x10_0000).contains(&addr) && addr + 4 <= ram_len && !self.timing() {
+            self.wrote(addr, addr + 4);
         } else {
             self.opaque_because("device write");
         }
@@ -453,6 +528,10 @@ impl Observe {
         self.phase = Phase::Off;
         self.forget_ports();
         self.tainted = false;
+        self.latch_head = None;
+        self.latch_at = None;
+        self.pit_read = false;
+        self.writes.clear();
     }
 
     fn forget_ports(&mut self) {
@@ -479,6 +558,7 @@ impl Observe {
             | Phase::Learn { head, .. }
             | Phase::Verify { head, .. }
             | Phase::Count { head, .. } => Some(*head),
+            Phase::Time(t) => Some(t.head),
         }
     }
 
@@ -560,6 +640,33 @@ impl Observe {
     /// again.
     fn succeed(&mut self, head: Option<Head>) {
         self.backoffs.retain(|b| Some(b.head) != head);
+    }
+
+    /// Passes were skipped at `head`: it is armed again at the next event,
+    /// and whenever an event finds the CPU there.
+    fn proved(&mut self, head: Option<Head>) {
+        self.tally(head, |h| h.proofs += 1);
+        self.proven = head;
+        if let Some(head) = head {
+            self.known.retain(|&k| k != head);
+            if self.known.len() == KNOWN_HEADS {
+                self.known.remove(0);
+            }
+            self.known.push(head);
+        }
+    }
+
+    /// A proof saw the PIT's count latched at `head`: the loop reads the
+    /// time, and is proven from there as such (`time`), unless proofs at
+    /// `head` failed lately.
+    fn time_from(&mut self, head: Head, now: u64) {
+        self.stop();
+        if !self.enabled || self.backs_off(head) {
+            return;
+        }
+        self.stats.arms += 1;
+        self.tally(Some(head), |h| h.arms += 1);
+        self.phase = Phase::Time(Box::new(time::TimeProof::new(head, now + ARM_LIMIT)));
     }
 
     /// The blocks written since the last look, each once.
@@ -676,8 +783,14 @@ enum Step {
 /// look at the instruction, during a proof.
 pub fn before_instruction(cpu: &mut Cpu) {
     let now = cpu.bus.clock.icount;
+    if cpu.bus.observe.timing() {
+        time::settle(cpu);
+    }
     visit(cpu, now);
-    if cpu.bus.observe.on {
+    if cpu.bus.observe.timing() {
+        time::analyze(cpu);
+    } else if cpu.bus.observe.on {
+        cpu.bus.observe.current = Some(head_of(cpu));
         if matches!(cpu.bus.observe.phase, Phase::Count { .. }) {
             record(cpu);
         }
@@ -691,6 +804,12 @@ fn visit(cpu: &mut Cpu, now: u64) {
     if let Some(why) = o.failed.get() {
         return o.fail(why);
     }
+    if let Some(head) = o.latch_head.take() {
+        return o.time_from(head, now);
+    }
+    if matches!(o.phase, Phase::Time(_)) {
+        return time::visit(cpu, here, now);
+    }
     if matches!(o.phase, Phase::ArmHere) {
         if o.backs_off(here) {
             return o.stop();
@@ -700,7 +819,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
         o.phase = Phase::Armed { head: here, until: now + ARM_LIMIT };
     }
     let (head, until) = match &o.phase {
-        Phase::Off | Phase::ArmHere => return,
+        Phase::Off | Phase::ArmHere | Phase::Time(_) => return,
         Phase::Armed { head, until } => (*head, *until),
         Phase::Learn { head, until, .. } | Phase::Verify { head, until, .. } | Phase::Count { head, until, .. } => {
             (*head, *until)
@@ -712,6 +831,10 @@ fn visit(cpu: &mut Cpu, now: u64) {
     if here != head {
         return;
     }
+    if o.pit_read {
+        // A pass read the PIT's count without latching it.
+        return o.fail("port read");
+    }
     let mut key = cpu.idle_key();
     if cpu.bus.observe.tainted {
         key.regs.gpr[0] &= !0xFF;
@@ -720,7 +843,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
     let visit = Visit { key, icount: now, executed: cpu.executed };
     let o = &mut cpu.bus.observe;
     let step = match &o.phase {
-        Phase::Off | Phase::ArmHere => return,
+        Phase::Off | Phase::ArmHere | Phase::Time(_) => return,
         Phase::Armed { .. } => Step::Start,
         Phase::Learn { visits, .. } if visits.iter().any(|v| v.key == visit.key) => Step::Copy,
         Phase::Learn { visits, .. } if visits.len() < VISITS => Step::Remember,
@@ -858,16 +981,7 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
         }
         let skipped = skip(cpu, period, executed, limit, passes);
         if skipped > 0 {
-            let o = &mut cpu.bus.observe;
-            o.tally(head, |h| h.proofs += 1);
-            o.proven = head;
-            if let Some(head) = head {
-                o.known.retain(|&k| k != head);
-                if o.known.len() == KNOWN_HEADS {
-                    o.known.remove(0);
-                }
-                o.known.push(head);
-            }
+            cpu.bus.observe.proved(head);
         }
         if let Some((port, read)) = held
             && skipped > 0
@@ -1187,6 +1301,10 @@ fn inspect(cpu: &mut Cpu, now: u64) {
     let o = &mut cpu.bus.observe;
     if instr.mnemonic() == Mnemonic::In && instr.op0_register() == Register::AL {
         let port = if instr.op1_kind() == OpKind::Immediate8 { instr.immediate8() as u16 } else { cpu.dx() };
+        if port == 0x40 {
+            // The PIT's count, which only a time proof follows.
+            return;
+        }
         let o = &mut cpu.bus.observe;
         o.port_ok = Some(port);
         o.first_read.get_or_insert(now);

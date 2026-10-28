@@ -468,3 +468,164 @@ fn retraces_then(a: &mut CodeAssembler) -> Result<(), IcedError> {
     a.jz(start)?;
     a.loop_(end)
 }
+
+/// The PIT's channel 0 count Windows 98 runs it at, 200 times a second.
+const VTD_COUNT: u16 = 5965;
+
+/// Read the time as Windows 98's VTD does for QueryPerformanceCounter:
+/// latch channel 0's count and read it, and add the counts gone since the
+/// last reload to the BIOS's ticks times the reload, in EAX. The last
+/// count read is in the program's data at `DATA + 4`, which the timer's
+/// interrupt sets to FFFFh: a count above it means the counter reloaded
+/// before the interrupt came, and reads as the end of the period.
+fn vtd_read(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let (mut wrapped, mut store) = (a.create_label(), a.create_label());
+    a.pushfd()?;
+    a.xor(eax, eax)?;
+    a.cli()?;
+    a.out(0x43, al)?;
+    a.in_(al, 0x40)?;
+    a.mov(ah, al)?;
+    a.in_(al, 0x40)?;
+    a.xchg(ah, al)?;
+    a.cmp(eax, dword_ptr(DATA + 4))?;
+    a.ja(wrapped)?;
+    a.set_label(&mut store)?;
+    a.mov(dword_ptr(DATA + 4), eax)?;
+    a.sub(eax, VTD_COUNT as u32)?;
+    a.neg(eax)?;
+    a.movzx(ebx, word_ptr(0x46C).es())?;
+    a.imul_3(ebx, ebx, VTD_COUNT as i32)?;
+    a.add(eax, ebx)?;
+    a.popfd()?;
+    a.ret()?;
+    a.set_label(&mut wrapped)?;
+    a.xor(eax, eax)?;
+    a.jmp(store)
+}
+
+/// Wait with `vtd_read` until `length` counts have gone since the start,
+/// `frames` times over, as a game paces its frames with
+/// QueryPerformanceCounter. The PIT's channel 0 counts `VTD_COUNT` in
+/// `mode`. Then end.
+fn pit_limiter(a: &mut CodeAssembler, mode: u8, frames: u16, length: u32) -> Result<(), IcedError> {
+    const OLD: u64 = DATA + 0x10;
+    let (mut start, mut frame) = (a.create_label(), a.create_label());
+    let (mut wait, mut read) = (a.create_label(), a.create_label());
+    a.jmp(start)?;
+    // The timer's handler, at 102h.
+    a.mov(dword_ptr(DATA + 4).cs(), 0xFFFF)?;
+    a.jmp(dword_ptr(OLD).cs())?;
+    a.set_label(&mut start)?;
+    a.mov(dword_ptr(DATA + 4), 0xFFFF)?;
+    a.mov(ax, 0x3508)?;
+    a.int(0x21)?;
+    a.mov(word_ptr(OLD), bx)?;
+    a.mov(word_ptr(OLD + 2), es)?;
+    a.mov(ax, 0x2508)?;
+    a.mov(dx, 0x102)?;
+    a.int(0x21)?;
+    a.mov(al, (0x30 | mode << 1) as u32)?;
+    a.out(0x43, al)?;
+    a.mov(ax, VTD_COUNT as u32)?;
+    a.out(0x40, al)?;
+    a.mov(al, ah)?;
+    a.out(0x40, al)?;
+    a.xor(ax, ax)?;
+    a.mov(es, ax)?;
+    a.mov(cx, frames as u32)?;
+    a.set_label(&mut frame)?;
+    a.call(read)?;
+    a.mov(dword_ptr(DATA + 8), eax)?;
+    a.set_label(&mut wait)?;
+    a.call(read)?;
+    a.sub(eax, dword_ptr(DATA + 8))?;
+    a.mov(dword_ptr(DATA + 12), eax)?;
+    a.cmp(eax, length)?;
+    a.jb(wait)?;
+    a.loop_(frame)?;
+    pit(a, 0)?;
+    a.lds(dx, dword_ptr(OLD))?;
+    a.mov(ax, 0x2508)?;
+    a.int(0x21)?;
+    a.mov(ax, 0x4C00)?;
+    a.int(0x21)?;
+    a.set_label(&mut read)?;
+    vtd_read(a)
+}
+
+#[test]
+fn a_frame_limiter_that_reads_the_pit_is_skipped() {
+    // 60 frames of 20,000 counts (about 17 ms each), the time read from
+    // the PIT in every pass (#219): no pass leaves the machine as it was,
+    // each leaves it the same function of the count it read.
+    let stats = compare("pit_limiter", |a| pit_limiter(a, 2, 60, 20_000));
+    assert!(stats.skipped > LIMITER_SKIPS, "{:?}", stats);
+}
+
+#[test]
+fn a_frame_limiter_on_a_square_wave_count_is_skipped() {
+    // In mode 3 the count runs down by two, twice a period: it reloads
+    // halfway between two interrupts, where the skipped passes stop.
+    let stats = compare("pit_limiter_mode_3", |a| pit_limiter(a, 3, 60, 20_000));
+    assert!(stats.skipped > LIMITER_SKIPS, "{:?}", stats);
+}
+
+#[test]
+fn a_delay_on_the_pit_count_is_skipped() {
+    // A delay as DOS programs time short waits: latch the count, and wait
+    // until it has gone down by the delay's counts, in 16 bits, with the
+    // counts in registers.
+    let stats = compare("pit_delay", |a| {
+        let (mut delay, mut wait) = (a.create_label(), a.create_label());
+        pit(a, 0)?;
+        a.mov(cx, 300)?;
+        a.set_label(&mut delay)?;
+        a.xor(al, al)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x40)?;
+        a.mov(bl, al)?;
+        a.in_(al, 0x40)?;
+        a.mov(bh, al)?;
+        a.set_label(&mut wait)?;
+        a.xor(al, al)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x40)?;
+        a.mov(dl, al)?;
+        a.in_(al, 0x40)?;
+        a.mov(dh, al)?;
+        a.mov(ax, bx)?;
+        a.sub(ax, dx)?;
+        a.cmp(ax, 10_000)?;
+        a.jb(wait)?;
+        a.loop_(delay)?;
+        a.mov(ax, 0x4C00)?;
+        a.int(0x21)
+    });
+    assert!(stats.skipped > LIMITER_SKIPS, "{:?}", stats);
+}
+
+#[test]
+fn a_loop_that_adds_up_the_pit_count_is_not_skipped() {
+    // Each pass adds the count it read to a sum: the machine after a pass
+    // depends on every count read before, not on the last alone.
+    let stats = compare("pit_sum", |a| {
+        let mut wait = a.create_label();
+        pit(a, VTD_COUNT)?;
+        a.set_label(&mut wait)?;
+        a.xor(al, al)?;
+        a.out(0x43, al)?;
+        a.in_(al, 0x40)?;
+        a.mov(ah, al)?;
+        a.in_(al, 0x40)?;
+        a.xchg(ah, al)?;
+        a.add(word_ptr(DATA + 16), ax)?;
+        a.adc(word_ptr(DATA + 18), 0)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        pit(a, 0)?;
+        finish(a)
+    });
+    assert_eq!(stats.proofs, 0, "{:?}", stats);
+}
