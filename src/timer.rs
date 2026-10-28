@@ -560,6 +560,12 @@ pub struct Pacer {
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
+    /// The host's time the frames that ran emulated time have taken, and
+    /// when the last frame ended and the emulated time it ended at: whether
+    /// the host keeps up with the speed, for `Auto`. A paused machine's
+    /// frames don't count.
+    ran_ns: u64,
+    last_frame: Option<(Instant, u64)>,
     /// Wall-clock instant that corresponds to emulated time `anchor_ticks`.
     anchor_wall: Instant,
     anchor_ticks: u64,
@@ -584,6 +590,8 @@ impl Pacer {
             protected: false,
             host_max: None,
             sample: HostSample::default(),
+            ran_ns: 0,
+            last_frame: None,
             anchor_wall: now,
             anchor_ticks: 0,
             next_frame: now,
@@ -762,6 +770,13 @@ impl Pacer {
         overhead: Duration,
     ) -> Option<u32> {
         let current = bus.clock.cycles_per_ms();
+        let (now, ns) = (Instant::now(), bus.clock.now_ns());
+        if let Some((at, before)) = self.last_frame
+            && ns > before
+        {
+            self.ran_ns += now.saturating_duration_since(at).as_nanos() as u64;
+        }
+        self.last_frame = Some((now, ns));
         let ideal = self.sample.add(executed, exec, overhead).map(|(ns_per_instr, overhead_ns)| {
             let frame_ns = self.period.as_nanos() as f64;
             let budget_ns = (frame_ns * MAX_BUSY_SHARE - overhead_ns).max(frame_ns * 0.1);
@@ -818,7 +833,11 @@ impl Pacer {
                 }
                 // Fast forwarding, the host's time says nothing of the
                 // program's needs.
-                let next = if self.fast_forward { None } else { self.auto.update(bus, protected, host_max) };
+                let next = if self.fast_forward {
+                    None
+                } else {
+                    self.auto.update(bus, protected, host_max, self.ran_ns)
+                };
                 // A heavier scene than the host keeps up with at this speed.
                 match next.unwrap_or(current) {
                     speed if speed > host_max && current > host_max => Some(host_max),

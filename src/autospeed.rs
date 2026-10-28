@@ -81,6 +81,15 @@ const AT_REFRESH: f64 = 0.95;
 /// which tries more at once (a scene that takes more work).
 const HOLD_WINDOWS: u32 = 30;
 const DROPPED: f64 = 0.8;
+/// A measurement whose emulated time ran slower than this share of the
+/// host's didn't keep up: the host can't run that speed now, whatever its
+/// estimate says (a battle in Myth at 40,000 instructions per ms ran at
+/// 0.25 to 0.6 of real time, the sound running dry, while the estimate
+/// stayed above 80,000). The speed then goes no higher than a step below
+/// it, or what the host ran if it falls behind again, until the host has
+/// kept up for `LAGGED_WINDOWS` measurements.
+const KEPT_UP: f64 = 0.95;
+const LAGGED_WINDOWS: u32 = 2 * HOLD_WINDOWS;
 /// A program that spends this share of its time polling is waiting, and
 /// its speed goes down by `WAITING_STEP` a measurement.
 const WAITING: f64 = 0.3;
@@ -284,12 +293,15 @@ struct Mark {
     polls: u64,
     status_reads: u64,
     output: u64,
+    /// The host's time the frames that ran had taken.
+    wall_ns: u64,
 }
 
 impl Mark {
-    fn of(bus: &Bus) -> Self {
+    fn of(bus: &Bus, wall_ns: u64) -> Self {
         let a = &bus.activity;
         Mark {
+            wall_ns,
             ns: bus.clock.now_ns(),
             icount: bus.clock.icount,
             idle: bus.clock.idle,
@@ -318,6 +330,9 @@ pub struct Measurement {
     /// The frame rate to aim for: the display's refresh rate, or the
     /// user's (`auto_fps`).
     pub refresh: f64,
+    /// Emulated seconds a second of the host's time: 1 kept real time,
+    /// less fell behind.
+    pub pace: f64,
 }
 
 /// Where the search for the speed is.
@@ -357,8 +372,15 @@ pub struct AutoSpeed {
     /// held at there: the highest it held at, or what a later hold at that
     /// speed or more draws (the scene got heavier, or the record was a
     /// lighter one's), whichever came last. A frame rate falling by a
-    /// fifth while holding, and a new search, clear it.
+    /// fifth while holding, and a new search, clear it. Only measurements
+    /// the host kept up in set it, and one it fell behind in at the
+    /// record's speed or less clears it.
     held: Option<(f64, u32)>,
+    /// Since the host last fell behind (`KEPT_UP`): the most the speed
+    /// goes to, and the measurements left that keep to it; and whether
+    /// the last measurement fell behind.
+    lagged: Option<(u32, u32)>,
+    behind: bool,
     /// While a protected-mode program gets all the host has for its reads
     /// and writes, the speed it had before.
     working: Option<u32>,
@@ -387,6 +409,8 @@ impl AutoSpeed {
             unsettled: None,
             step: Step::Start,
             held: None,
+            lagged: None,
+            behind: false,
             working: None,
             output: (0, 0),
             protected_least: PROTECTED_LEAST,
@@ -452,15 +476,25 @@ impl AutoSpeed {
         self.unsettled = None;
         self.step = Step::Start;
         self.held = None;
+        self.lagged = None;
+        self.behind = false;
         self.working = None;
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
     /// for, if that isn't the one `bus` runs at. `protected` says whether
-    /// the program switched to protected mode, and `host_max` is as fast
-    /// as the host keeps up with.
-    pub fn update(&mut self, bus: &Bus, protected: bool, host_max: u32) -> Option<u32> {
-        let now = Mark::of(bus);
+    /// the program switched to protected mode, `host_max` is as fast as
+    /// the host keeps up with, as estimated from its frames, and `wall_ns`
+    /// the host's time the frames that ran emulated time have taken so
+    /// far (`Pacer` leaves out those of a paused machine).
+    pub fn update(
+        &mut self,
+        bus: &Bus,
+        protected: bool,
+        host_max: u32,
+        wall_ns: u64,
+    ) -> Option<u32> {
+        let now = Mark::of(bus, wall_ns);
         if now.output != self.output.0 {
             self.output = (now.output, now.ns);
         }
@@ -522,6 +556,10 @@ impl AutoSpeed {
             halted: now.idle.saturating_sub(mark.idle) as f64 / ran,
             output: (now.output - mark.output) as f64 / seconds,
             refresh,
+            pace: match now.wall_ns.saturating_sub(mark.wall_ns) {
+                0 => f64::INFINITY,
+                wall => ns as f64 / wall as f64,
+            },
         };
         let current = bus.clock.cycles_per_ms();
         let working = self.working.take();
@@ -567,11 +605,13 @@ impl AutoSpeed {
         if m.polling >= WAITING {
             self.step = Step::Start;
             self.held = None;
+            (self.lagged, self.behind) = (None, false);
             return clamp(c * WAITING_STEP);
         }
         let Some(fps) = m.fps else {
             self.step = Step::Start;
             self.held = None;
+            (self.lagged, self.behind) = (None, false);
             // A protected-mode program at work without frames loads, or
             // compiles, or is Windows: it reads and writes. Under a system
             // that idles, one that keeps the processor from halting works
@@ -591,6 +631,29 @@ impl AutoSpeed {
                 clamp(c * WAITING_STEP)
             };
         };
+        // The host fell behind at this speed: a step less, and no more than
+        // that until it has kept up for a while. Behind again right after,
+        // down to what it ran (no less than half): a step a measurement
+        // from where a step up went too far would leave it behind for
+        // many. A frame rate held at this speed or more can't be had now,
+        // and steps down don't keep to it.
+        let lagged = m.pace < KEPT_UP;
+        let again = std::mem::replace(&mut self.behind, lagged);
+        if lagged {
+            let cut = if again {
+                (m.pace * KEPT_UP).clamp(0.5, 1.0 / FINE_STEP)
+            } else {
+                1.0 / FINE_STEP
+            };
+            self.lagged = Some((clamp(c * cut), LAGGED_WINDOWS));
+            if self.held.is_some_and(|(_, at)| at >= current) {
+                self.held = None;
+            }
+        } else if let Some((most, left)) = self.lagged {
+            self.lagged = (left > 1).then_some((most, left - 1));
+        }
+        let top = self.lagged.map_or(top, |(most, _)| most.min(top));
+        let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         // Frames nobody sees: as many less as the frame rate is too high
         // (it follows the speed there).
         if fps > m.refresh / AT_REFRESH {
@@ -605,6 +668,11 @@ impl AutoSpeed {
             this.step = Step::Hold { fps, left, more, recent: fps };
             speed
         };
+        // Whatever the search was doing, it holds there, and measures the
+        // frame rate it draws.
+        if lagged && current > top {
+            return hold(self, top as f64, HOLD_WINDOWS, false);
+        }
         // More, by as much as would take the frame rate to the display's.
         let up = |this: &mut Self, most: f64, below: (u32, f64)| {
             if fps >= m.refresh * AT_REFRESH || current >= top {
@@ -669,7 +737,7 @@ impl AutoSpeed {
                 let keep = self
                     .held
                     .is_some_and(|(most, at)| recent <= most && current < at.min(top));
-                if !keep {
+                if !keep && !lagged {
                     self.held = Some((recent, current));
                 }
                 if left > 1 {
@@ -694,6 +762,10 @@ mod tests {
 
     const HOST: u32 = 800_000;
 
+    /// A measurement without frames, of a program that keeps real time.
+    const STILL: Measurement =
+        Measurement { fps: None, polling: 0.0, halted: 0.0, output: 0.0, refresh: 70.0, pace: 1.0 };
+
     /// A game that draws `per_cycle` frames a second for each instruction
     /// per ms, up to `cap` frames a second.
     fn game(per_cycle: f64, cap: f64) -> impl Fn(u32) -> Measurement {
@@ -703,6 +775,7 @@ mod tests {
             halted: 0.0,
             output: 0.0,
             refresh: 70.0,
+            pace: 1.0,
         }
     }
 
@@ -757,23 +830,22 @@ mod tests {
             halted: 0.0,
             output: 0.0,
             refresh: 70.0,
+            pace: 1.0,
         };
         let speeds = run(f117, false, 20);
         assert!((20_000..=30_000).contains(&speeds[19]), "{:?}", speeds);
     }
 
+    /// Myth's 3Dfx renderer: its frames take the CPU's time and the card's,
+    /// 9 a second at 20000, 17 at 60000 and no more than 18.5. Below that
+    /// each step down loses 6-8% of the frames.
+    fn myth(speed: u32) -> Measurement {
+        let fps = (1.0 / (1569.0 / speed as f64 + 0.0327)).min(18.5);
+        Measurement { fps: Some(fps), refresh: 60.0, ..STILL }
+    }
+
     #[test]
     fn steps_down_lose_no_more_than_kept_of_the_held_frame_rate() {
-        // Myth's 3Dfx renderer: its frames take the CPU's time and the
-        // card's, 9 a second at 20000, 17 at 60000 and no more than 18.5.
-        // Below that each step down loses 6-8% of the frames.
-        let myth = |speed: u32| Measurement {
-            fps: Some((1.0 / (1569.0 / speed as f64 + 0.0327)).min(18.5)),
-            polling: 0.0,
-            halted: 0.0,
-            output: 0.0,
-            refresh: 60.0,
-        };
         let speeds = run(myth, true, 300);
         let fps = |speed| myth(speed).fps.unwrap();
         // Steps down from 59000 (16.9 frames a second) stop above 15.2
@@ -794,13 +866,6 @@ mod tests {
         // Myth again, with the host slowed to 40000 after a while: the
         // record held at 59000 can't be reached again, and what the hold
         // at 40000 draws is the frame rate to keep.
-        let myth = |speed: u32| Measurement {
-            fps: Some((1.0 / (1569.0 / speed as f64 + 0.0327)).min(18.5)),
-            polling: 0.0,
-            halted: 0.0,
-            output: 0.0,
-            refresh: 60.0,
-        };
         let mut auto = AutoSpeed::new(3000, None);
         let mut speed = 3000;
         let mut speeds = Vec::new();
@@ -811,6 +876,49 @@ mod tests {
         }
         let below = speeds[300..].iter().filter(|&&s| s < 40_000).count();
         assert!(below >= 100 / 3, "{:?}", speeds);
+    }
+
+    /// The speeds `auto` runs Myth at, one a measurement, on a host that
+    /// keeps real time up to `keeps_up(i)` instructions per ms at the
+    /// `i`th measurement and falls behind in proportion above it, while
+    /// its estimate says it has `HOST`.
+    fn run_myth_behind(keeps_up: impl Fn(usize) -> u32, measurements: usize) -> Vec<u32> {
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 3000;
+        (0..measurements)
+            .map(|i| {
+                let pace = (keeps_up(i) as f64 / speed as f64).min(1.0);
+                speed = auto.decide(speed, &Measurement { pace, ..myth(speed) }, true, HOST);
+                speed
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_speed_the_host_does_not_keep_up_with_is_left() {
+        // Myth's battle: for 150 measurements the host keeps real time up
+        // to 40,000 only, below the 50,000 the speed held at before and
+        // the frame rate held there.
+        let battle = 150..300;
+        let speeds = run_myth_behind(|i| if battle.contains(&i) { 40_000 } else { u32::MAX }, 450);
+        assert!(speeds[battle.start - 1] >= 45_000, "{:?}", speeds);
+        // Measured behind (`speeds[i]` is the speed of measurement i + 1):
+        // the first, and a few when a step up tries more again.
+        let behind = |s: &&u32| **s as f64 * 0.95 > 40_000.0;
+        let lost = speeds[battle.start - 1..battle.end - 1].iter().filter(behind).count();
+        assert!(lost <= battle.len() / 10, "{} behind: {:?}", lost, speeds);
+        // Without sliding to the floor, and back up after the battle.
+        assert!(speeds[battle.start..].iter().all(|&s| s >= 25_000), "{:?}", speeds);
+        assert!(speeds[400..].iter().all(|&s| s >= 40_000), "{:?}", speeds);
+    }
+
+    #[test]
+    fn a_host_that_stalls_for_a_moment_costs_a_step_not_the_slide() {
+        // The whole host stalls during a measurement: emulated time runs
+        // at about a fifth of real time there, whatever the speed.
+        let speeds = run_myth_behind(|i| if i == 200 { 10_000 } else { u32::MAX }, 450);
+        assert!(speeds[200..].iter().all(|&s| s >= 30_000), "{:?}", speeds);
+        assert!(speeds[400..].iter().all(|&s| s >= 40_000), "{:?}", speeds);
     }
 
     #[test]
@@ -855,7 +963,7 @@ mod tests {
 
     #[test]
     fn no_frames_to_go_by() {
-        let nothing = |halted, output| move |_| Measurement { fps: None, polling: 0.0, halted, output, refresh: 70.0 };
+        let nothing = |halted, output| move |_| Measurement { halted, output, ..STILL };
         // Real mode: the real-mode speed; protected mode: all the host has
         // while it reads and writes, unless it sits halted.
         assert_eq!(run(nothing(0.0, 1e6), false, 3), [3000, 3000, 3000]);
@@ -869,7 +977,7 @@ mod tests {
     #[test]
     fn a_program_at_work_keeps_the_speed_to_go_back_to() {
         let mut auto = AutoSpeed::new(3000, None);
-        let loading = Measurement { fps: None, polling: 0.0, halted: 0.0, output: 1e6, refresh: 70.0 };
+        let loading = Measurement { output: 1e6, ..STILL };
         assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
         assert_eq!(auto.working, Some(PROTECTED_LEAST), "where it goes back to");
         // Anything else isn't work.
@@ -882,7 +990,7 @@ mod tests {
     #[test]
     fn a_waiting_program_gets_less() {
         let mut auto = AutoSpeed::new(3000, None);
-        let waiting = Measurement { fps: None, polling: 0.5, halted: 0.0, output: 0.0, refresh: 70.0 };
+        let waiting = Measurement { polling: 0.5, ..STILL };
         let mut speed = 100_000;
         for _ in 0..30 {
             speed = auto.decide(speed, &waiting, false, HOST);
@@ -908,8 +1016,7 @@ mod tests {
 
     #[test]
     fn a_busy_program_under_a_system_that_idles_gets_all_the_host_has() {
-        let measure =
-            |halted| Measurement { fps: None, polling: 0.0, halted, output: 0.0, refresh: 60.0 };
+        let measure = |halted| Measurement { halted, refresh: 60.0, ..STILL };
         // 3DMark 2000 building a scene: no frames, no I/O it can see, never
         // halted. Before the system was seen idling, it is a spinning menu.
         let mut auto = AutoSpeed::new(3000, None);
@@ -940,8 +1047,7 @@ mod tests {
 
     #[test]
     fn a_faster_model_goes_less_far_down() {
-        let waiting =
-            Measurement { fps: None, polling: 0.5, halted: 0.0, output: 0.0, refresh: 70.0 };
+        let waiting = Measurement { polling: 0.5, ..STILL };
         let settle = |auto: &mut AutoSpeed, protected, host| {
             let mut speed = 200_000;
             for _ in 0..30 {
@@ -1043,7 +1149,8 @@ mod tests {
             bus.clock.icount += per_frame;
             copy_changes(bus);
             bus.sync_display();
-            if let Some(speed) = auto.update(bus, protected, 2_000_000) {
+            // Keeping real time.
+            if let Some(speed) = auto.update(bus, protected, 2_000_000, bus.clock.now_ns()) {
                 bus.set_cycles_per_ms(speed);
                 speeds.push(speed);
             }
