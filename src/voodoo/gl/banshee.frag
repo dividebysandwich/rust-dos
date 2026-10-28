@@ -2,21 +2,25 @@
 // u_scale times its size and each pixel u_across times across: the
 // desktop, the overlay window over it and the hardware cursor on top, as
 // src/voodoo/banshee/display.rs draws it in software. A surface is in
-// the card's memory (all of it, bytes in rows of 4096) or, where the
-// OpenGL renderer draws it, the texture of one of its colour buffers.
+// the card's memory (all of it, bytes in the rows of a texture array's
+// layers) or, where the OpenGL renderer draws it, the texture of one of
+// its colour buffers.
 
 // OpenGL ES has no default precision for integer samplers.
 #ifdef GL_ES
 precision highp usampler2D;
+precision highp usampler2DArray;
 #endif
 
 uniform int u_scale;
 // 2 when the monitor shows each of the desktop's pixels twice across
 // (a narrow mode at half the pixel clock), else 1.
 uniform int u_across;
-uniform usampler2D u_mem;
-// The card's memory's size less one: addresses wrap there.
-uniform int u_mem_mask;
+uniform usampler2DArray u_mem;
+// The card's memory: its size less one, where addresses wrap, and how
+// its bytes lie in the layers of u_mem (src/voodoo/gl.rs's
+// `MemoryLayout`): log2 of the bytes a row and of the bytes a layer.
+uniform ivec3 u_mem_layout;
 uniform sampler2D u_desk_buf;
 uniform sampler2D u_ovl_buf;
 uniform usampler2D u_cursor;
@@ -46,8 +50,12 @@ out vec4 o_color;
 
 // The byte at address `a` of the card's memory.
 uint byte_at(uint a) {
-    a &= uint(u_mem_mask);
-    return texelFetch(u_mem, ivec2(int(a & 4095u), int(a >> 12)), 0).r;
+    a &= uint(u_mem_layout.x);
+    uint row = uint(u_mem_layout.y);
+    uint layer = uint(u_mem_layout.z);
+    uint x = a & ((1u << row) - 1u);
+    uint y = (a & ((1u << layer) - 1u)) >> row;
+    return texelFetch(u_mem, ivec3(int(x), int(y), int(a >> layer)), 0).r;
 }
 
 // Byte x of row y of a surface (display.rs's `surface_addr`).

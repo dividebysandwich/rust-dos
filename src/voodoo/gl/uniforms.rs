@@ -146,7 +146,8 @@ locations!(FillQuad {
 locations!(Blit2d {
     u_rect: [f32; 4],
     u_size: [f32; 2],
-    u_mem_mask: i32,
+    u_mem_layout: [i32; 3],
+    u_layer: i32,
     u_dst: [i32; 3],
     u_clip: [i32; 4],
     u_area: [i32; 4],
@@ -164,7 +165,7 @@ locations!(Banshee {
     u_size: [f32; 2],
     u_scale: i32,
     u_across: i32,
-    u_mem_mask: i32,
+    u_mem_layout: [i32; 3],
     u_desk: [i32; 4],
     u_desk_layout: [i32; 4],
     u_ovl: [i32; 4],

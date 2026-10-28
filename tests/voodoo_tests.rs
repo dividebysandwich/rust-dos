@@ -1864,26 +1864,113 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
 #[test]
 #[ignore]
 fn gpu_blits_leave_the_memory_as_software_does() {
-    use glow::HasContext;
-    use rust_dos::voodoo::gl::{SharedGl, VoodooGl};
-    use rust_dos::voodoo::mirror::{Blit, BlitSource, Convert, Key, Plane};
+    gpu_blits_within(rust_dos::voodoo::gl::Limits::default());
+}
+
+/// The same with textures of at most 256 texels, as a driver with a
+/// small limit has them: the memory is 256 layers of 64 KB, and the
+/// operations cross from one into the next.
+#[cfg(feature = "gl")]
+#[test]
+#[ignore]
+fn gpu_blits_in_small_textures_leave_the_memory_as_software_does() {
+    gpu_blits_within(rust_dos::voodoo::gl::Limits {
+        max_texture_size: Some(256),
+        no_blit: false,
+    });
+}
+
+/// Without the program of the 2D operations (it didn't compile), the
+/// card does them in software, and the renderer still has its memory.
+#[cfg(feature = "gl")]
+#[test]
+#[ignore]
+fn without_the_blit_program_blits_stay_on_the_cpu() {
+    use rust_dos::voodoo::gl::{Limits, SharedGl, VoodooGl};
+    use rust_dos::voodoo::mirror::{Blit, BlitSource, Convert, Plane};
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    let (_sdl, _window, _context, gl, glsl) = gl_context("no blit program");
+    let limits = Limits {
+        max_texture_size: None,
+        no_blit: true,
+    };
+    let renderer = VoodooGl::with_limits(&gl, glsl, 1, 1, 1, limits).unwrap();
+    assert!(renderer.banshee_problem().is_none());
+    assert!(renderer.gpu_2d_problem().is_some());
+    let (gl, renderer) = (Rc::new(gl), Rc::new(RefCell::new(Some(renderer))));
+    let mut bus = bus(Board::Voodoo3);
+    let card = bus.voodoo.as_mut().unwrap();
+    card.set_mirror(true);
+    card.set_software_picture(false);
+    let link = SharedGl {
+        gl: gl.clone(),
+        renderer: renderer.clone(),
+    };
+    card.set_gpu_link(Some(Box::new(link)));
+    assert!(card.gpu_linked());
+    assert!(!card.gpu_ready());
+    let plane = Plane {
+        start: 0x8_0000,
+        stride: 1280,
+        bpp: 2,
+    };
+    let fill = Blit {
+        dst: plane,
+        area: [0, 0, 64, 32],
+        rects: vec![[0, 0, 64, 32]],
+        src: BlitSource::Fill(0x1234),
+        convert: Convert::None,
+        mirror: [false; 2],
+        src_key: None,
+        dst_key: None,
+    };
+    assert!(!card.gpu_blit(fill));
+    card.set_mirror(false);
+    if let Some(r) = renderer.borrow_mut().take() {
+        r.destroy(&gl);
+    }
+}
+
+/// A hidden window with an OpenGL 3.2 core context, current, and the
+/// GLSL that goes with it.
+#[cfg(feature = "gl")]
+fn gl_context(
+    title: &str,
+) -> (
+    sdl2::Sdl,
+    sdl2::video::Window,
+    sdl2::video::GLContext,
+    glow::Context,
+    rust_dos::video::shader::Glsl,
+) {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
     let attr = video.gl_attr();
     attr.set_context_profile(sdl2::video::GLProfile::Core);
     attr.set_context_version(3, 2);
-    let window = video.window("gpu blits", 64, 64).opengl().hidden().build().unwrap();
-    let _context = window.gl_create_context().unwrap();
+    let window = video.window(title, 64, 64).opengl().hidden().build().unwrap();
+    let context = window.gl_create_context().unwrap();
     // SAFETY: the context just made is current.
     let gl = unsafe {
         glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast())
     };
-    let v = gl.version();
+    let v = glow::HasContext::version(&gl);
     let glsl = rust_dos::video::shader::Glsl::for_gl(v.major, v.minor, v.is_embedded).unwrap();
-    let renderer = VoodooGl::new(&gl, glsl, 1, 1, 1).unwrap();
+    (sdl, window, context, gl, glsl)
+}
+
+#[cfg(feature = "gl")]
+fn gpu_blits_within(limits: rust_dos::voodoo::gl::Limits) {
+    use rust_dos::voodoo::gl::{SharedGl, VoodooGl};
+    use rust_dos::voodoo::mirror::{Blit, BlitSource, Convert, Key, Plane};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let (_sdl, _window, _context, gl, glsl) = gl_context("gpu blits");
+    let renderer = VoodooGl::with_limits(&gl, glsl, 1, 1, 1, limits).unwrap();
+    assert!(renderer.gpu_2d_problem().is_none());
     let (gl, renderer) = (Rc::new(gl), Rc::new(RefCell::new(Some(renderer))));
 
     let mut bus = bus(Board::Voodoo3);
