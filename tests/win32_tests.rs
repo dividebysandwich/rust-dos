@@ -135,7 +135,13 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and what it prints kept.
 fn machine(test: &str, program: Vec<u8>) -> Cpu {
-    let mut cpu = Cpu::new(scratch(test, &[("T.EXE", program)]));
+    machine_with(test, &[("T.EXE", program)])
+}
+
+/// A machine with the built-in Windows on, T.EXE of `files` loaded from
+/// the shell, and what it prints kept.
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)]) -> Cpu {
+    let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
@@ -1777,11 +1783,7 @@ fn a_programs_file_reads_count_as_disk_activity() {
         a.ret()
     });
     let files = [("T.EXE", program), ("R.DAT", vec![0x5A; SIZE])];
-    let mut cpu = Cpu::new(scratch("file_reads", &files));
-    cpu.bus.win32.enabled = true;
-    cpu.host_console = Some(HostConsole::default());
-    cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    let mut cpu = machine_with("file_reads", &files);
     let before = cpu.bus.activity.io_bytes;
     assert!(
         run_to_exit(&mut cpu, 200),
@@ -1945,11 +1947,7 @@ fn module_image(
 /// Run T.EXE from a folder with `files` to its end; its exit code and
 /// what it printed.
 fn run_files(test: &str, files: &[(&str, Vec<u8>)]) -> (u8, String) {
-    let mut cpu = Cpu::new(scratch(test, files));
-    cpu.bus.win32.enabled = true;
-    cpu.host_console = Some(HostConsole::default());
-    cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    let mut cpu = machine_with(test, files);
     assert!(
         run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
