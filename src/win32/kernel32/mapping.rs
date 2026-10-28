@@ -155,8 +155,8 @@ fn read_file(cpu: &mut Cpu, sft: u16, len: Option<u32>, grow: bool) -> Result<Ve
         }
     }
     let _ = disk.seek_file(sft, 0, 0);
-    let data = disk.read_file(sft, len as usize).unwrap_or_default();
-    let _ = disk.seek_file(sft, position as i64, 0);
+    let data = crate::interrupts::int21::read_open_file(cpu, sft, len as usize).unwrap_or_default();
+    let _ = cpu.bus.disk.seek_file(sft, position as i64, 0);
     Ok(data)
 }
 

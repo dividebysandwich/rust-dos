@@ -162,7 +162,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   or in a busy-wait loop the emulator skips), a program that keeps it
   from idling (under 5% idle, no frames, such as a 3D benchmark
   building its next scene) runs at max instead of slowing down as a
-  spinning menu would.
+  spinning menu would. The built-in Windows (`win32`) idles so too,
+  and `auto` knows it from the start: a Win32 program that computes
+  without drawing, such as a game unpacking its level, runs at max.
   What `auto` has seen goes into save states, and is forgotten when the
   machine goes back to real mode (a reboot, a DOS program's end). It
   applies at once.

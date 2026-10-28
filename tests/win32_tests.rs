@@ -135,7 +135,13 @@ fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and what it prints kept.
 fn machine(test: &str, program: Vec<u8>) -> Cpu {
-    let mut cpu = Cpu::new(scratch(test, &[("T.EXE", program)]));
+    machine_with(test, &[("T.EXE", program)])
+}
+
+/// A machine with the built-in Windows on, T.EXE of `files` loaded from
+/// the shell, and what it prints kept.
+fn machine_with(test: &str, files: &[(&str, Vec<u8>)]) -> Cpu {
+    let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
@@ -1689,6 +1695,106 @@ fn a_program_makes_reads_finds_moves_and_deletes_files() {
     assert!(!dir.join("D").exists() && !dir.join("G.TXT").exists());
 }
 
+/// `cycles=auto` gives a Win32 program that computes without drawing,
+/// reading or waiting (a game unpacking its level) all the host has: the
+/// built-in Windows halts the processor when no thread can run, so one
+/// that keeps it from halting is at work, as under Windows 98.
+#[test]
+fn auto_speed_gives_a_busy_win32_program_all_the_host_has() {
+    use rust_dos::timer::{CpuSpeed, Pacer};
+    use std::time::{Duration, Instant};
+    // A loop that counts for ever.
+    let mut cpu = machine(
+        "busy",
+        program(BASE, false, &[], &[0; 4], |a, _| {
+            let mut top = a.create_label();
+            a.set_label(&mut top)?;
+            a.inc(eax)?;
+            a.jmp(top)
+        }),
+    );
+    let mut pacer = Pacer::new(CpuSpeed::default(), None, Instant::now());
+    // Up to two seconds of emulated time, a 16 ms frame at a time, on a
+    // host that runs 333,000 instructions in 2 ms.
+    for _ in 0..125 {
+        if cpu.bus.clock.cycles_per_ms() > 100_000 {
+            break;
+        }
+        let frame = cpu.bus.clock.cycles_per_ms() as u64 * 16;
+        cpu.bus.start_batch(cpu.bus.clock.icount + frame);
+        run_batch(&mut cpu, &mut NoHook, false);
+        let fast = Duration::from_millis(2);
+        if let Some(speed) = pacer.end_cpu_frame(&mut cpu, 333_000, fast, Duration::ZERO) {
+            cpu.bus.set_cycles_per_ms(speed);
+        }
+    }
+    assert!(cpu.bus.win32.active());
+    let speed = cpu.bus.clock.cycles_per_ms();
+    assert!(speed > 100_000, "{}", speed);
+}
+
+/// A program that reads a file with ReadFile and the C runtime's _read
+/// moves its bytes on the drive, as a DOS program's reads do: what
+/// `cycles=auto` sees a program load by.
+#[test]
+fn a_programs_file_reads_count_as_disk_activity() {
+    use Arg::I;
+    const SIZE: usize = 0x10000;
+    let names: &[&str] = &["VirtualAlloc", "CreateFileA", "ReadFile", "CloseHandle"];
+    let crt: &[&str] = &["_open", "_read", "_close"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names), ("MSVCRT.dll", crt)];
+    // The file's name at 0, a count at 10h. The buffer is allocated, so
+    // that the program, which DOS reads to start it, stays small.
+    let mut data = vec![0; 0x20];
+    put(&mut data, 0, b"R.DAT\0");
+    let program = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let c = |name: &str| l.import(names.len() + crt.iter().position(|n| *n == name).unwrap());
+        let (file, count) = (I(l.at(0) as u32), l.at(0x10) as i32);
+        // VirtualAlloc(NULL, SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        call_with(
+            a,
+            f("VirtualAlloc"),
+            &[I(0), I(SIZE as u32), I(0x3000), I(4)],
+        )?;
+        a.mov(edi, eax)?;
+        let open = [file, I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, f("CreateFileA"), &open)?;
+        a.mov(esi, eax)?;
+        a.push(0)?;
+        a.push(count)?;
+        a.push(SIZE as i32)?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(f("ReadFile"))?;
+        call_with(a, f("CloseHandle"), &[Arg::Esi])?;
+        // _open(name, O_RDONLY | O_BINARY), cdecl.
+        call_with(a, c("_open"), &[file, I(0x8000)])?;
+        a.add(esp, 8)?;
+        a.mov(esi, eax)?;
+        a.push(SIZE as i32)?;
+        a.push(edi)?;
+        a.push(esi)?;
+        a.call(c("_read"))?;
+        a.add(esp, 12)?;
+        call_with(a, c("_close"), &[Arg::Esi])?;
+        a.add(esp, 4)?;
+        a.xor(eax, eax)?;
+        a.ret()
+    });
+    let files = [("T.EXE", program), ("R.DAT", vec![0x5A; SIZE])];
+    let mut cpu = machine_with("file_reads", &files);
+    let before = cpu.bus.activity.io_bytes;
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0);
+    let moved = cpu.bus.activity.io_bytes - before;
+    assert!(moved >= 2 * SIZE as u64, "{} bytes moved", moved);
+}
+
 #[test]
 fn a_program_finds_its_paths_and_console() {
     use Arg::{Esi, I};
@@ -1841,11 +1947,7 @@ fn module_image(
 /// Run T.EXE from a folder with `files` to its end; its exit code and
 /// what it printed.
 fn run_files(test: &str, files: &[(&str, Vec<u8>)]) -> (u8, String) {
-    let mut cpu = Cpu::new(scratch(test, files));
-    cpu.bus.win32.enabled = true;
-    cpu.host_console = Some(HostConsole::default());
-    cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    let mut cpu = machine_with(test, files);
     assert!(
         run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",

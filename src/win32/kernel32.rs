@@ -678,10 +678,7 @@ pub fn read_file(cpu: &mut Cpu, handle: u32, n: u32) -> Result<Vec<u8>, u32> {
     if open.access & file::GENERIC_READ == 0 {
         return Err(ERROR_ACCESS_DENIED);
     }
-    cpu.bus
-        .disk
-        .read_file(open.sft, n as usize)
-        .map_err(|e| e as u32)
+    crate::interrupts::int21::read_open_file(cpu, open.sft, n as usize).map_err(|e| e as u32)
 }
 
 /// Write `data` to the file `handle` at its pointer: the count written,
