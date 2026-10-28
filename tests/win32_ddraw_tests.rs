@@ -656,6 +656,76 @@ fn flip_status_polled_with_work_in_between_runs_every_call() {
     assert!(polls > 50, "{polls} calls of GetFlipStatus");
 }
 
+const DDERR_SURFACEBUSY: u32 = 0x8876_01AE;
+
+#[test]
+fn flip_status_says_a_locked_chain_cant_flip() {
+    // With the back buffer locked, Flip would fail with
+    // DDERR_SURFACEBUSY, and DDGFS_CANFLIP says so; DDGFS_ISFLIPDONE
+    // doesn't, since no flip is pending. Once unlocked, it can flip.
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, LOCKED, 108);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+        )?;
+        c.com(a, l, BACK, S_GET_FLIP_STATUS, &[Arg::I(DDGFS_CANFLIP)])?;
+        c.com(a, l, BACK, S_GET_FLIP_STATUS, &[Arg::I(DDGFS_ISFLIPDONE)])?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, FRONT, S_GET_FLIP_STATUS, &[Arg::I(DDGFS_CANFLIP)])?;
+        finish(a, l)
+    });
+    let mut cpu = machine("flip_status_locked", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 11);
+    assert_eq!(r[1..7], [0; 6]);
+    assert_eq!(r[7..], [DDERR_SURFACEBUSY, 0, 0, 0]);
+}
+
 /// Full screen with a back buffer made on its own (DDSCAPS_BACKBUFFER
 /// with a size) and attached to a plain primary surface, as Glover makes
 /// its flip chain: a pixel written to the back buffer and a flip of the

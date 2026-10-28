@@ -1299,29 +1299,39 @@ const DDGFS_CANFLIP: u32 = 0x1;
 const DDGFS_ISFLIPDONE: u32 = 0x2;
 
 /// GetFlipStatus(this, flags): DDERR_WASSTILLDRAWING while the last flip
-/// of the surface's chain is still to show, for DDGFS_CANFLIP (a flip
-/// would fail) and DDGFS_ISFLIPDONE alike. That is a flip of the primary
-/// surface's chain that waits for its frame, or a swap of the 3D-only
-/// card's that waits for its retrace; the flips of other chains show at
-/// once. A thread that does nothing but call it again waits for the
-/// flip (`still_to_show`).
+/// of the surface's chain is still to show, for DDGFS_CANFLIP and
+/// DDGFS_ISFLIPDONE alike. That is a flip of the primary surface's chain
+/// that waits for its frame, or a swap of the 3D-only card's that waits
+/// for its retrace; the flips of other chains show at once. (On the card,
+/// Flip with DDFLIP_WAIT still goes ahead then: its swap goes behind the
+/// pending one.) A thread that does nothing but call it again waits for
+/// the flip (`still_to_show`). DDGFS_CANFLIP also fails with
+/// DDERR_SURFACEBUSY while a surface of the chain is locked or has a DC,
+/// as Flip does, and a lost surface gives DDERR_SURFACELOST.
 pub fn get_flip_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (_, id) = hr!(surface_of(cpu, args[0]));
+    let (_, id) = hr!(usable(cpu, args[0]));
     if args[1] != DDGFS_CANFLIP && args[1] != DDGFS_ISFLIPDONE {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let Some(s) = state(cpu).surface(id).cloned() else {
+    let Some((caps, memory)) = state(cpu).surface(id).map(|s| (s.caps[0], s.memory)) else {
         return Some(DDERR_INVALIDOBJECT);
     };
-    if s.caps[0] & DDSCAPS_FLIP == 0 {
+    if caps & DDSCAPS_FLIP == 0 {
         return Some(DDERR_NOTFLIPPABLE);
     }
-    let pending = if s.memory == MEM_CARD {
+    if args[1] == DDGFS_CANFLIP {
+        let busy = flip_chain(cpu, id)
+            .iter()
+            .any(|&m| state(cpu).surface(m).is_some_and(|s| s.locked || s.dc != 0));
+        if busy {
+            return Some(DDERR_SURFACEBUSY);
+        }
+    }
+    // The flip chains are looked for only with a flip still to show.
+    let pending = if memory == MEM_CARD {
         voodoo::swaps_pending_until(cpu)
-    } else if on_display(cpu, id) {
-        display::flip_pending(cpu)
     } else {
-        None
+        display::flip_pending(cpu).filter(|_| on_display(cpu, id))
     };
     match pending {
         Some(until) => still_to_show(cpu, until, false),
@@ -1329,11 +1339,26 @@ pub fn get_flip_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
+/// The flip chain surface `id` is in, the front buffer first (`chain`);
+/// just `id` if it is in none.
+fn flip_chain(cpu: &mut Cpu, id: u32) -> Vec<u32> {
+    let fronts = state(cpu).ids(|o| {
+        o.surface
+            .as_ref()
+            .is_some_and(|s| s.caps[0] & DDSCAPS_FRONTBUFFER != 0)
+    });
+    fronts
+        .into_iter()
+        .map(|f| chain(cpu, f))
+        .find(|c| c.contains(&id))
+        .unwrap_or_else(|| vec![id])
+}
+
 /// Whether surface `id` is in the flip chain of a primary surface, whose
 /// flips show at a frame.
 fn on_display(cpu: &mut Cpu, id: u32) -> bool {
-    let primaries = state(cpu).ids(|o| o.surface.as_ref().is_some_and(Surface::is_primary));
-    primaries.into_iter().any(|p| chain(cpu, p).contains(&id))
+    let front = flip_chain(cpu, id)[0];
+    state(cpu).surface(front).is_some_and(Surface::is_primary)
 }
 
 /// A call of Flip or GetFlipStatus that finds the last flip still to
