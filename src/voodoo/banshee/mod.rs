@@ -860,8 +860,9 @@ impl Voodoo {
             self.catch_up();
         }
         let mask = self.fbi.mask;
-        if (addr & mask) as usize + data.len() <= self.fbi.ram.bytes() {
-            self.fbi.ram.write_bytes((addr & mask) as usize, data);
+        let start = addr & mask;
+        if start as usize + data.len() <= self.fbi.ram.bytes() {
+            self.fbi.ram.write_bytes(start as usize, data);
         } else {
             for (i, &byte) in data.iter().enumerate() {
                 let at = addr.wrapping_add(i as u32) & mask;
@@ -869,7 +870,6 @@ impl Voodoo {
             }
         }
         self.display_dirty = true;
-        let start = addr & mask;
         let end = (start as u64 + data.len() as u64).min(mask as u64 + 1) as u32;
         self.mirror_memory(start, end);
     }
