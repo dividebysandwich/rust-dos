@@ -60,7 +60,8 @@ pub const SEG_PRELOAD: u16 = 0x0040;
 pub const SEG_READONLY: u16 = 0x0080;
 pub const SEG_RELOCINFO: u16 = 0x0100;
 pub const SEG_DISCARDABLE: u16 = 0x1000;
-/// A 32-bit segment (OS/2 2.x linkers set it; Windows never has it).
+/// A 32-bit segment. OS/2 2.x linkers set it, and so do some Windows 3.1
+/// programs' tools; Windows ignores it and loads the segment as 16-bit.
 pub const SEG_32BIT: u16 = 0x2000;
 
 /// The target operating systems (`Module::target_os`).

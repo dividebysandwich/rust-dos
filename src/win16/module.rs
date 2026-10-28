@@ -153,9 +153,10 @@ pub fn load_file(
             file_name
         ));
     }
-    if parsed.segments.iter().any(|s| s.flags & ne::SEG_32BIT != 0) {
-        return Err(format!("{} has 32-bit segments.", file_name));
-    }
+    // A segment flagged 32-bit (`ne::SEG_32BIT`) loads as a 16-bit one,
+    // as Windows 3.1 and 95 load it. The programs that have one, such as
+    // Metal Marines, set the D bit of its selector themselves with DPMI
+    // functions 000Bh and 000Ch.
     let name = parsed.name().to_ascii_uppercase();
 
     // The module database.
