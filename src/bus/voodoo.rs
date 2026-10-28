@@ -252,6 +252,19 @@ impl Bus {
         self.voodoo_effect(effect);
     }
 
+    /// Texture data put into a Banshee's or Voodoo3's memory from byte
+    /// `addr` on, as a burst of writes through TMU 0's texture space
+    /// would put it, in one copy: Glide's texture downloads.
+    pub(crate) fn banshee_texture_download(&mut self, addr: u32, data: &[u8]) {
+        let _profile = crate::profile::zone(crate::profile::Zone::Voodoo);
+        self.voodoo_swap_wait();
+        if let Some(v) = &mut self.voodoo
+            && v.banshee.is_some()
+        {
+            v.banshee_texture_download(addr, data);
+        }
+    }
+
     /// Carry out what a write asked for: the CPU waiting for a full FIFO,
     /// a swap's retrace among the timer events, the program held until a
     /// swap's turn under the frame rate cap.

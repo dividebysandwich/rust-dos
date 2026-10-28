@@ -59,7 +59,7 @@ use regs::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use texture::Tmu;
-use backlog::{Access, Backlog, TileLayout};
+use backlog::{Access, Backlog, Footprint, TileLayout};
 use workers::{Job, Word};
 
 /// The size of the card's memory window.
@@ -571,6 +571,9 @@ pub struct Voodoo {
     /// texture units queued triangles read.
     outstanding: Cell<bool>,
     tmu_in_use: Cell<u8>,
+    /// The memory the jobs given out since then, and the frame buffer
+    /// writes waiting to be, may read or write.
+    footprint: RefCell<Footprint>,
     /// Frame buffer writes behind queued jobs, not yet a job themselves.
     words: RefCell<Vec<Word>>,
     /// While the OpenGL renderer draws the picture: the jobs held back
@@ -662,6 +665,7 @@ impl Voodoo {
             drawn_to: Vec::new(),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
+            footprint: RefCell::new(Footprint::default()),
             words: RefCell::new(Vec::new()),
             backlog: RefCell::new(Backlog::default()),
             prune: std::env::var("RUST_DOS_VOODOO_PRUNE").map_or(true, |v| v != "0"),
@@ -932,6 +936,7 @@ impl Voodoo {
         self.pool.flush();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
+        self.footprint.borrow_mut().clear();
     }
 
     /// Whether the workers are still drawing, with everything queued
@@ -939,6 +944,12 @@ impl Voodoo {
     /// bits, which a program polls until they clear. Jobs held back
     /// (`backlog`) stay held: as far as the program can tell they are
     /// drawn, since whatever reads what they draw catches up first.
+    ///
+    /// In deterministic mode the workers' progress would show the
+    /// program the host's speed, and a polling loop would run a different
+    /// number of times on another host. The card reads idle there, as if
+    /// it drew at once, the same way as held jobs: the workers go on, and
+    /// what reads what they draw still waits for them.
     pub(crate) fn drawing(&self) -> bool {
         if !self.writes_queue() {
             return false;
@@ -948,10 +959,18 @@ impl Voodoo {
             self.release_backlog();
         }
         self.pool.give_out();
+        if crate::deterministic::active() {
+            return false;
+        }
         let busy = self.pool.busy();
-        if !busy && self.words.borrow().is_empty() && self.backlog.borrow().is_empty() {
-            self.outstanding.set(false);
-            self.tmu_in_use.set(0);
+        if !busy && self.words.borrow().is_empty() {
+            // The jobs given out are drawn; those held keep their own
+            // footprint.
+            self.footprint.borrow_mut().clear();
+            if self.backlog.borrow().is_empty() {
+                self.outstanding.set(false);
+                self.tmu_in_use.set(0);
+            }
         }
         busy
     }
@@ -989,8 +1008,14 @@ impl Voodoo {
         if !self.backlog.borrow().is_empty() && !self.deferring() {
             self.release_backlog();
         }
+        // Without workers a job is drawn as it is given: it reaches
+        // nothing after.
+        let workers = self.pool.workers() > 0;
         for job in jobs {
-            self.outstanding.set(self.pool.workers() > 0);
+            if workers {
+                self.footprint.borrow_mut().add(&job);
+            }
+            self.outstanding.set(workers);
             self.pool.submit(job);
         }
     }
@@ -1000,9 +1025,13 @@ impl Voodoo {
         if self.backlog.borrow().is_empty() {
             return;
         }
-        let held = self.backlog.borrow_mut().take();
+        let (held, reach) = self.backlog.borrow_mut().take();
+        let workers = self.pool.workers() > 0;
+        if workers {
+            self.footprint.borrow_mut().merge(&reach);
+        }
         for job in held {
-            self.outstanding.set(self.pool.workers() > 0);
+            self.outstanding.set(workers);
             self.pool.submit(job);
         }
     }
@@ -1016,6 +1045,22 @@ impl Voodoo {
             self.outstanding.set(self.pool.workers() > 0);
             self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
         }
+    }
+
+    /// Make bytes `start..end` of the frame buffer's memory free to be
+    /// written before the jobs given out or held back are drawn, where
+    /// that can be done: the jobs held back that take texels from there
+    /// get a copy of them as they are (`Backlog::spare`). False if the
+    /// jobs have to be drawn first.
+    pub(crate) fn spare(&self, start: u32, end: u32) -> bool {
+        if !self.writes_queue() {
+            return true;
+        }
+        let given_out = self.footprint.borrow();
+        let range = (start as u64, end as u64);
+        self.backlog
+            .borrow_mut()
+            .spare(range, &given_out, |a, b| self.gpu_sync_quiet(a as u32, b as u32))
     }
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
@@ -1032,6 +1077,7 @@ impl Voodoo {
             self.hand_over(out);
             return;
         }
+        self.footprint.borrow_mut().words(new);
         self.release_backlog();
         let mut words = self.words.borrow_mut();
         words.extend_from_slice(new);
@@ -1050,6 +1096,7 @@ impl Voodoo {
             }
             self.outstanding.set(false);
             self.tmu_in_use.set(0);
+            self.footprint.borrow_mut().clear();
         }
     }
 
@@ -1433,6 +1480,7 @@ impl Voodoo {
     /// the last, and the program waits with it (`Effect::hold_to`), so
     /// frames come at an even pace when it could draw them faster.
     pub(crate) fn swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        self.backlog.borrow_mut().swapped();
         if let Some(cap) = self.cap_timing() {
             let frame = cap.frame_ns();
             let earliest = if self.capped_at == 0 { now.ns } else { now.ns.max(self.capped_at + frame) };
@@ -1858,6 +1906,7 @@ impl Voodoo {
             "held_jobs": self.backlog.borrow().len(),
             "pruned_jobs": self.backlog.borrow().pruned,
             "catch_ups": self.catch_ups.get(),
+            "released_jobs": self.backlog.borrow().released,
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),
             "gpu_2d": self.banshee.is_some().then(|| self.gpu_describe()),
