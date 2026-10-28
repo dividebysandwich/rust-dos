@@ -327,6 +327,13 @@ pub struct Observe {
     /// proof.
     writes: Vec<(usize, usize)>,
     pub stats: IdleStats,
+    /// Since when the execution loop has been watching (one instruction
+    /// at a time on the interpreter), with the clock's run count then
+    /// (`run_count`).
+    watch_since: Option<(web_time::Instant, u64)>,
+    /// The host time spent watching and the instructions run meanwhile,
+    /// since `take_watched`.
+    watched: (std::time::Duration, u64),
 }
 
 /// Chances to arm `head` to let pass (`left`), after `in_row` failed proofs
@@ -367,6 +374,8 @@ impl Default for Observe {
             latch_at: None,
             writes: Vec::new(),
             stats: IdleStats::default(),
+            watch_since: None,
+            watched: (std::time::Duration::ZERO, 0),
         }
     }
 }
@@ -383,6 +392,42 @@ impl Observe {
     #[inline(always)]
     pub fn watching(&self) -> bool {
         !matches!(self.phase, Phase::Off)
+    }
+
+    /// The execution loop watches from here, with the clock's run count
+    /// `run`.
+    #[cold]
+    pub fn watch_from(&mut self, run: u64) {
+        self.watch_since.get_or_insert_with(|| (web_time::Instant::now(), run));
+    }
+
+    /// The execution loop stopped watching, at run count `run`.
+    #[cold]
+    pub fn watch_to(&mut self, run: u64) {
+        if let Some((since, from)) = self.watch_since.take() {
+            self.watched.0 += since.elapsed();
+            self.watched.1 += run.saturating_sub(from);
+        }
+    }
+
+    /// Whether the execution loop is in a span of watching.
+    #[inline(always)]
+    pub fn in_watch(&self) -> bool {
+        self.watch_since.is_some()
+    }
+
+    /// The host time spent watching and the instructions run meanwhile
+    /// since the last call, up to run count `run`. Watching costs far more
+    /// per instruction than running the code does, and comes with timer
+    /// events rather than with the instructions a frame runs: the host
+    /// speed estimate counts it as a frame's fixed work
+    /// (`Pacer::end_cpu_frame`).
+    pub fn take_watched(&mut self, run: u64) -> (std::time::Duration, u64) {
+        if self.watch_since.is_some() {
+            self.watch_to(run);
+            self.watch_from(run);
+        }
+        std::mem::take(&mut self.watched)
     }
 
     /// The bytes of RAM `start..end` were written.

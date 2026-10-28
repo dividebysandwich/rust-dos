@@ -182,6 +182,12 @@ impl Clock {
         self.cycles_per_ms as u64 * 1000
     }
 
+    /// The instructions executed since start: `icount` less the counts
+    /// skipped while waiting and charged for I/O.
+    pub fn run_count(&self) -> u64 {
+        self.icount.saturating_sub(self.idle + self.stalled)
+    }
+
     /// Current emulated time in PIT ticks.
     pub fn now_ticks(&self) -> u64 {
         self.ticks_at(self.icount)
@@ -667,6 +673,13 @@ impl Pacer {
     ) -> Option<u32> {
         self.auto.set_protected_least(cpu.model.auto_least());
         self.auto.set_idles(cpu.os_idles);
+        // What the idle skip's watching cost (`Observe::take_watched`) is
+        // work of the frame's own, as the rest of `overhead` is: counted
+        // per instruction, the proofs that come with each timer event would
+        // make the host look slower at running code than it is.
+        let (watched, run) = cpu.bus.observe.take_watched(cpu.bus.clock.run_count());
+        let watched = watched.min(exec);
+        let (executed, exec, overhead) = (executed.saturating_sub(run), exec - watched, overhead + watched);
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
         next
