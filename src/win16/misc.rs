@@ -855,7 +855,8 @@ fn unprepared(cpu: &mut Cpu, at: u32) {
 }
 
 /// The 16:16 address of the wave header at the linear `at`, for the
-/// MM_WOM_DONE message's lParam.
+/// MM_WOM_DONE message's lParam; anything else, such as a 16:16 pointer
+/// a 16-bit program posted itself, as it is.
 pub fn wave_header16(cpu: &Cpu, at: u32) -> u32 {
     cpu.bus
         .win32
