@@ -385,25 +385,35 @@ pub fn call(cpu: &mut Cpu, id: u16) {
 
 /// Whether `ctx` is in 16-bit code of the Win16 process.
 fn is_16bit(cpu: &Cpu, ctx: &Context) -> bool {
+    task_code(cpu, ctx).is_some_and(|(_, _, attr)| attr & ATTR_DB == 0)
+}
+
+/// The base, limit and attributes of the code segment of `ctx` if it is
+/// the Win16 process's own, a selector of its LDT: 16-bit, or 32-bit if
+/// its program set the D bit (module.rs).
+fn task_code(cpu: &Cpu, ctx: &Context) -> Option<(u32, u32, u16)> {
     let cs = ctx.seg[Seg::CS as usize];
-    cs & 4 != 0
-        && cs != crate::win32::system::CODE3
-        && selector_base(cpu, cs).is_some_and(|(_, _, attr)| attr & ATTR_DB == 0)
+    if cs & 4 == 0 || cs == crate::win32::system::CODE3 {
+        return None;
+    }
+    selector_base(cpu, cs)
 }
 
 /// Whether the IDT's gate for `vector` was entered by an INT n of a
-/// Win16 task's 16-bit code: the instruction before where it goes on is
-/// `CD vector`.
+/// Win16 task's code: the instruction before where it goes on is `CD
+/// vector`. The code may be 32-bit, a segment of the task whose selector
+/// it set the D bit of itself (module.rs); Windows serves its INT n the
+/// same way, with the 16-bit registers of its 16-bit DPMI client.
 pub fn is_soft_int(cpu: &mut Cpu, vector: u8, ctx: &Context) -> bool {
-    if current_task(cpu).is_none() || !is_16bit(cpu, ctx) {
+    if current_task(cpu).is_none() {
         return false;
     }
-    let cs = ctx.seg[Seg::CS as usize];
-    let Some((base, _, _)) = selector_base(cpu, cs) else {
+    let Some((base, _, attr)) = task_code(cpu, ctx) else {
         return false;
     };
-    let at = base.wrapping_add(ctx.eip.wrapping_sub(2) & 0xFFFF);
-    peek(cpu, at, 2).is_some_and(|b| b == [0xCD, vector])
+    let eip = ctx.eip.wrapping_sub(2);
+    let offset = if attr & ATTR_DB != 0 { eip } else { eip & 0xFFFF };
+    peek(cpu, base.wrapping_add(offset), 2).is_some_and(|b| b == [0xCD, vector])
 }
 
 /// The base, limit and attributes (as `SegCache::attr` has them) of the
