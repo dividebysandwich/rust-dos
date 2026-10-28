@@ -810,6 +810,10 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   loaded into it again, as Windows' host does.
 - Windows 3.1 programs see version 3.95, Windows 95's, and not the
   WS_EX_WINDOWEDGE style USER32 gives their windows.
+- KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a
+  CD-ROM drive as DRIVE_REMOTE: Windows 3.1 has no DRIVE_CDROM. A
+  program finds its disc among the remote drives with MSCDEX's INT 2Fh
+  AX=150Bh.
 - A call of a function the built-in modules don't have yet stops the
   program with a message that names it.
 - Flat thunks (`src/win16/flat.rs`): a Win32 DLL made with the thunk
