@@ -102,7 +102,11 @@ pub fn translate(
             flag(IF, Some(false), &mut u)
         }
         Std => flag(DF, Some(true), &mut u),
-        Nop => instr.op_count() == 0,
+        // A P6's hinting NOPs (0F 18 to 0F 1F, PREFETCHh among them) do
+        // nothing, as `system::hint_nop` runs them; earlier CPUs fault.
+        Nop => instr.op_count() == 0 || p6,
+        Reservednop | Prefetchnta | Prefetcht0 | Prefetcht1 | Prefetcht2 | Cldemote | Endbr32
+        | Endbr64 | Rdsspd => p6,
         Imul => imul(instr, &mut u),
         Mul => mul_wide(instr, false, &mut u),
         Div => div_wide(instr, false, &mut u),

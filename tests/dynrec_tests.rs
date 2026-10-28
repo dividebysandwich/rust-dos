@@ -5549,6 +5549,61 @@ fn sse_arithmetic_runs_as_its_handlers() {
 }
 
 #[test]
+fn sse_prefetches_approximations_compares_and_conversions_run_as_their_handlers() {
+    let (_, b, _) = sse_loop(|a| {
+        a.prefetchnta(byte_ptr(esi + 0x100))?;
+        a.prefetcht0(byte_ptr(edi))?;
+        a.movups(xmm0, xmmword_ptr(esi))?;
+        a.movaps(xmm1, xmmword_ptr(esi + 32))?;
+        a.rcpps(xmm2, xmm0)?;
+        a.rcpps(xmm3, xmmword_ptr(esi + 32))?;
+        a.rsqrtps(xmm4, xmm1)?;
+        a.rsqrtps(xmm5, xmmword_ptr(esi))?;
+        a.movaps(xmm6, xmm1)?;
+        a.rcpss(xmm6, xmm0)?;
+        a.rsqrtss(xmm6, dword_ptr(esi + 4))?;
+        a.movaps(xmm7, xmm0)?;
+        a.rsqrtss(xmm7, xmm1)?;
+        a.rcpss(xmm7, dword_ptr(esi + 8))?;
+        a.movups(xmmword_ptr(edi), xmm2)?;
+        a.movups(xmmword_ptr(edi + 16), xmm4)?;
+        a.movups(xmmword_ptr(edi + 32), xmm6)?;
+        a.movups(xmmword_ptr(edi + 48), xmm7)?;
+        a.xorps(xmm3, xmm5)?;
+        a.movmskps(eax, xmm3)?;
+        a.add(ebx, eax)?;
+        // The compares' flags, each read by SETcc and as a whole by
+        // PUSHFD after a reload that clears OF, SF and AF.
+        a.comiss(xmm0, xmm1)?;
+        a.setb(al)?;
+        a.add(bl, al)?;
+        a.ucomiss(xmm1, dword_ptr(esi + 4))?;
+        a.setp(al)?;
+        a.add(bl, al)?;
+        a.cmp(ecx, 0x7FFF_FFFF)?;
+        a.comiss(xmm1, dword_ptr(esi))?;
+        a.pushfd()?;
+        a.pop(eax)?;
+        a.add(ebx, eax)?;
+        a.ucomiss(xmm0, xmm0)?;
+        a.sete(al)?;
+        a.add(bl, al)?;
+        a.cvtss2si(eax, xmm0)?;
+        a.add(ebx, eax)?;
+        a.cvttss2si(edx, dword_ptr(esi + 36))?;
+        a.add(ebx, edx)?;
+        a.cvtsi2ss(xmm0, dword_ptr(esi + 20))?;
+        a.cvtsi2ss(xmm1, ebx)?;
+        a.movups(xmmword_ptr(edi), xmm0)?;
+        a.movss(dword_ptr(edi + 16), xmm1)?;
+        a.stmxcsr(dword_ptr(edi + 52))?;
+        a.add(ebx, dword_ptr(edi + 52))
+    });
+    assert_ne!(b.cpu.ebx(), 0);
+    assert_handled_only(&b, &[]);
+}
+
+#[test]
 fn sse_exception_flags_are_the_handlers_after_every_operation() {
     // A run of operations without LDMXCSR between them, the flags read
     // after each: each must add exactly the flags it raises, whether the
@@ -5557,14 +5612,18 @@ fn sse_exception_flags_are_the_handlers_after_every_operation() {
         a.movups(xmm0, xmmword_ptr(esi))?;
         a.movups(xmm1, xmmword_ptr(esi + 32))?;
         type Op = fn(&mut CodeAssembler) -> Result<(), IcedError>;
-        let ops: [Op; 8] = [
+        let ops: [Op; 12] = [
             |a| a.addps(xmm0, xmm1),
             |a| a.mulss(xmm1, xmm0),
+            |a| a.rcpps(xmm2, xmm0),
+            |a| a.comiss(xmm1, xmm0),
             |a| a.divps(xmm1, xmm0),
+            |a| a.cvtss2si(eax, xmm1),
             |a| a.subss(xmm0, xmm1),
             |a| a.sqrtps(xmm2, xmm1),
             |a| a.divss(xmm0, xmm2),
             |a| a.cvtps2pi(mm0, xmm0),
+            |a| a.rsqrtss(xmm2, xmm1),
             |a| a.maxps(xmm1, xmm0),
         ];
         for (k, op) in ops.iter().enumerate() {
@@ -5743,6 +5802,31 @@ fn sse_exceptions_mxcsr_unmasks_go_through_the_handlers() {
     assert_eq!((b.recorded().0, b.cpu.ebx()), (UD as u32, 99));
     assert_eq!(b.cpu.sse.xmm[0], 0x3F80_0000_3F80_0000_3F80_0000_3F80_0000);
     assert_eq!(b.cpu.sse.mxcsr, 0x1D84);
+}
+
+#[test]
+fn comiss_of_a_nan_with_ie_unmasked_goes_through_the_handler() {
+    // COMISS of a QNaN with IE unmasked: #UD on the 100th iteration, with
+    // IE set. UCOMISS of the same QNaN, before it, raises nothing.
+    let b = sse_fault_loop(
+        UD,
+        |rig| {
+            for k in 0..100 {
+                let x = if k == 99 { 0x7FC0_0000 } else { 0x3F80_0000 };
+                rig.write32(DATA + 16 * k, x);
+            }
+            rig.write32(DATA + 0x1000, 0x1F00);
+        },
+        |a| {
+            a.ldmxcsr(dword_ptr(DATA + 0x1000))?;
+            a.movss(xmm0, dword_ptr(esi))?;
+            a.ucomiss(xmm0, xmm0)?;
+            a.cmp(ebx, 0x7FFF_FFFF)?;
+            a.comiss(xmm0, dword_ptr(esi))
+        },
+    );
+    assert_eq!((b.recorded().0, b.cpu.ebx()), (UD as u32, 99));
+    assert_eq!(b.cpu.sse.mxcsr, 0x1F01);
 }
 
 #[test]

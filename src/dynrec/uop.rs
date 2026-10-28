@@ -164,6 +164,13 @@ pub enum VOp {
     Punpckhdq,
     /// PSHUFW: a's low four words, from b's as the constant names them.
     Pshufw(u8),
+    /// RCPPS, or RCPSS (`scalar`: b's low single into a's, the others
+    /// stay): the reciprocal of each single, as
+    /// `sse::float::reciprocal` approximates it.
+    Rcp { scalar: bool },
+    /// RSQRTPS and RSQRTSS: the reciprocal square root, as
+    /// `sse::float::reciprocal_sqrt` approximates it.
+    Rsqrt { scalar: bool },
 }
 
 /// The shift of `VOp::ShiftImm`.
@@ -193,11 +200,17 @@ pub enum VFloatOp {
     /// CMPPS and CMPSS with predicate 0 to 7.
     Cmp(u8),
     /// CVTPS2PI and CVTTPS2PI (`truncate`): b's low two singles into
-    /// dwords in a's low quadword (`scalar` is false).
+    /// dwords in a's low quadword. With `scalar`, CVTSS2SI and CVTTSS2SI:
+    /// b's low single into a's low dword.
     ToInt { truncate: bool },
     /// CVTPI2PS: the two dwords in b's low quadword into a's low two
-    /// singles (`scalar` is false).
+    /// singles. With `scalar`, CVTSI2SS: b's low dword into a's low
+    /// single.
     FromInt,
+    /// COMISS, or UCOMISS without `signaling`: a's and b's low singles
+    /// compared, and a's low dword = ZF, PF and CF as the instruction sets
+    /// them in EFLAGS, the other bits clear (`scalar` is true).
+    Compare { signaling: bool },
 }
 
 /// What `Uop::VToT` takes from a host register.

@@ -8,14 +8,16 @@
 //! else within a page, such as the linear frame buffer that DirectDraw's
 //! MMX blits write, which goes a dword at a time through `jit_dev_write`
 //! (`BailUnlessStorable`, `VStore`). RCPPS, RSQRTPS and their scalar
-//! forms, whose approximations the host's don't match, the compares into
-//! EFLAGS, the conversions to and from 32-bit registers, PINSRW and
-//! MASKMOVQ go through their handlers.
+//! forms, whose approximations the host's own instructions don't match,
+//! run as the handlers compute them, on doubles (`VOp::Rcp`,
+//! `VOp::Rsqrt`). PINSRW, MASKMOVQ, LDMXCSR and STMXCSR go through their
+//! handlers.
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 
 use super::translate::{ea, gpr, mem};
 use super::uop::*;
+use crate::cpu::alu::{AF, CF, OF, PF, SF, ZF};
 
 /// The `simd` bits of `translate::translate`: the CPU has MMX, or SSE.
 pub const MMX: u8 = 1;
@@ -441,6 +443,94 @@ fn sse(instr: &Instruction, u: &mut Vec<Uop>) -> Option<()> {
             set_mm(u, d, X0);
             return Some(());
         }
+        Rcpps => return xmm_binary(instr, VOp::Rcp { scalar: false }, 16, u),
+        Rcpss => return xmm_binary(instr, VOp::Rcp { scalar: true }, 4, u),
+        Rsqrtps => return xmm_binary(instr, VOp::Rsqrt { scalar: false }, 16, u),
+        Rsqrtss => return xmm_binary(instr, VOp::Rsqrt { scalar: true }, 4, u),
+        Comiss | Ucomiss => {
+            let d = xmm_op(instr, 0)?;
+            if instr.op1_kind() == OpKind::Register {
+                xmm_op(instr, 1)?;
+            }
+            guard(u, true, 0);
+            source(instr, X1, 4, false, u)?;
+            u.push(Uop::VLoad {
+                x: X0,
+                src: VSrc::R(Vr::Xmm(d)),
+            });
+            u.push(Uop::VFloat {
+                op: VFloatOp::Compare {
+                    signaling: instr.mnemonic() == Comiss,
+                },
+                scalar: true,
+                a: X0,
+                b: X1,
+            });
+            u.push(Uop::VToT {
+                t: T0,
+                x: X0,
+                op: VExtract::Low,
+            });
+            u.push(Uop::FlagsFrom {
+                t: T0,
+                mask: OF | SF | ZF | AF | PF | CF,
+            });
+            return Some(());
+        }
+        Cvtss2si | Cvttss2si => {
+            let r = gpr32_op(instr, 0)?;
+            if instr.op1_kind() == OpKind::Register {
+                xmm_op(instr, 1)?;
+            }
+            guard(u, true, 0);
+            source(instr, X1, 4, false, u)?;
+            u.push(Uop::VFloat {
+                op: VFloatOp::ToInt {
+                    truncate: instr.mnemonic() == Cvttss2si,
+                },
+                scalar: true,
+                a: X0,
+                b: X1,
+            });
+            u.push(Uop::VToT {
+                t: T0,
+                x: X0,
+                op: VExtract::Low,
+            });
+            u.push(Uop::Set { r, t: T0 });
+            return Some(());
+        }
+        Cvtsi2ss => {
+            let d = xmm_op(instr, 0)?;
+            guard(u, true, 0);
+            if instr.op1_kind() == OpKind::Register {
+                u.push(Uop::Get {
+                    t: T0,
+                    r: gpr32_op(instr, 1)?,
+                });
+                u.push(Uop::VLoad {
+                    x: X1,
+                    src: VSrc::T(T0),
+                });
+            } else {
+                load_mem(instr, X1, 4, false, u)?;
+            }
+            u.push(Uop::VLoad {
+                x: X0,
+                src: VSrc::R(Vr::Xmm(d)),
+            });
+            u.push(Uop::VFloat {
+                op: VFloatOp::FromInt,
+                scalar: true,
+                a: X0,
+                b: X1,
+            });
+            u.push(Uop::VSet {
+                dst: Vr::Xmm(d),
+                x: X0,
+            });
+            return Some(());
+        }
         Cvtpi2ps => {
             let d = xmm_op(instr, 0)?;
             let from_mm = mm_op(instr, 1).is_some();
@@ -494,12 +584,18 @@ fn sse(instr: &Instruction, u: &mut Vec<Uop>) -> Option<()> {
 /// instructions, UNPCKLPS, UNPCKHPS and SHUFPS, and (between registers
 /// only) MOVHLPS and MOVLHPS.
 fn bitwise(instr: &Instruction, op: VOp, u: &mut Vec<Uop>) -> Option<()> {
+    xmm_binary(instr, op, 16, u)
+}
+
+/// XMMn (operand 0) = XMMn OP operand 1, which in memory is `size` bytes:
+/// 16, aligned, or a single's 4.
+fn xmm_binary(instr: &Instruction, op: VOp, size: u8, u: &mut Vec<Uop>) -> Option<()> {
     let d = xmm_op(instr, 0)?;
     if instr.op1_kind() == OpKind::Register {
         xmm_op(instr, 1)?;
     }
     guard(u, true, 0);
-    source(instr, X1, 16, true, u)?;
+    source(instr, X1, size, size == 16, u)?;
     u.push(Uop::VLoad {
         x: X0,
         src: VSrc::R(Vr::Xmm(d)),
