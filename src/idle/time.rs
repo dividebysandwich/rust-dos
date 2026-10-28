@@ -44,11 +44,12 @@
 use std::collections::BTreeMap;
 
 use iced_x86::{
-    Decoder, DecoderOptions, Instruction, Mnemonic, OpAccess, OpKind, Register, UsedMemory,
+    CodeSize, Decoder, DecoderOptions, Instruction, Mnemonic, OpAccess, OpKind, Register,
+    UsedMemory,
 };
 
 use super::{CHUNK, FACTORY, Head, Phase, Visit, copy_blocks, rflags};
-use crate::cpu::alu::{AF, ARITH, CF, PF};
+use crate::cpu::alu::{AF, ARITH, CF, OF, PF, ZF, size_mask};
 use crate::cpu::{Cpu, CpuFlags, Seg};
 
 /// What the values are taken modulo: every register and operand is 32
@@ -95,18 +96,21 @@ impl Form {
         self.p * p + self.n * n + self.c
     }
 
+    // The factors are kept to 32 bits, signed, as the values are: a pass
+    // that adds a value to itself over and over would otherwise overflow
+    // them.
     fn plus(self, o: Form) -> Form {
         Form {
-            p: self.p + o.p,
-            n: self.n + o.n,
+            p: (self.p + o.p) as i32 as i64,
+            n: (self.n + o.n) as i32 as i64,
             c: (self.c + o.c).rem_euclid(MOD),
         }
     }
 
     fn minus(self, o: Form) -> Form {
         Form {
-            p: self.p - o.p,
-            n: self.n - o.n,
+            p: (self.p - o.p) as i32 as i64,
+            n: (self.n - o.n) as i32 as i64,
             c: (self.c - o.c).rem_euclid(MOD),
         }
     }
@@ -338,10 +342,12 @@ enum Stage {
 pub struct TimeProof {
     pub head: Head,
     pub until: u64,
+    /// Let a pass go by before the first: one that a timer event came
+    /// into, whose interrupt may have changed what it reads.
+    pub wait: bool,
     stage: Stage,
-    /// The visit of the head the running pass started at, with the I/O
-    /// stall count then.
-    start: Option<(Box<Visit>, u64)>,
+    /// The visit of the head the running pass started at.
+    start: Option<Box<Visit>>,
     shadow: Shadow,
     /// The second pass's start: the first's guess, of the count before.
     entry: Shadow,
@@ -362,6 +368,7 @@ impl TimeProof {
             head,
             until,
             stage: Stage::Armed,
+            wait: false,
             start: None,
             shadow: Shadow::default(),
             entry: Shadow::default(),
@@ -395,7 +402,6 @@ fn with_proof<T>(
     match result {
         Ok(v) => Some(v),
         Err(why) => {
-            cpu.bus.observe.on = true;
             cpu.bus.observe.fail(why);
             None
         }
@@ -467,8 +473,8 @@ pub(super) fn visit(cpu: &mut Cpu, here: Head, now: u64) {
         icount: now,
         executed: cpu.executed,
     };
-    let stalled = cpu.bus.clock.stalled;
     let skip = with_proof(cpu, |cpu, t| match t.stage {
+        Stage::Armed if std::mem::take(&mut t.wait) => Ok(false),
         Stage::Armed => {
             let o = &mut cpu.bus.observe;
             o.stats.starts += 1;
@@ -481,7 +487,7 @@ pub(super) fn visit(cpu: &mut Cpu, here: Head, now: u64) {
             t.until = now + super::PROOF_LIMIT;
             t.stage = Stage::First;
             t.shadow = Shadow::default();
-            t.start = Some((Box::new(visit.clone()), stalled));
+            t.start = Some(Box::new(visit.clone()));
             t.latch = None;
             t.reads = 0;
             Ok(false)
@@ -500,7 +506,7 @@ pub(super) fn visit(cpu: &mut Cpu, here: Head, now: u64) {
             t.shadow = t.entry.clone();
             t.checks.clear();
             t.stage = Stage::Second;
-            t.start = Some((Box::new(visit.clone()), stalled));
+            t.start = Some(Box::new(visit.clone()));
             t.latch = None;
             t.reads = 0;
             Ok(false)
@@ -529,7 +535,7 @@ pub(super) fn visit(cpu: &mut Cpu, here: Head, now: u64) {
         }
     });
     if skip == Some(true) {
-        finish(cpu, visit, stalled);
+        finish(cpu, visit);
     }
 }
 
@@ -566,7 +572,7 @@ fn end_pass(cpu: &mut Cpu, t: &mut TimeProof, visit: &Visit) -> Result<(), &'sta
     {
         return Err("time model");
     }
-    let Some((start, _)) = &t.start else {
+    let Some(start) = &t.start else {
         return Err("time start");
     };
     let mask = |key: &super::CpuKey| {
@@ -594,19 +600,18 @@ fn end_pass(cpu: &mut Cpu, t: &mut TimeProof, visit: &Visit) -> Result<(), &'sta
 /// The second pass came back to the head: skip the passes after it whose
 /// counts the checks hold for, up to the next timer event, and leave the
 /// machine as the last of them would.
-fn finish(cpu: &mut Cpu, visit: Visit, stalled: u64) {
+fn finish(cpu: &mut Cpu, visit: Visit) {
     let o = &mut cpu.bus.observe;
     let Phase::Time(t) = std::mem::take(&mut o.phase) else {
         return;
     };
     let head = Some(t.head);
     o.stop();
-    let (Some((start, start_stalled)), Some((latched, count))) = (&t.start, t.latch) else {
+    let (Some(start), Some((latched, count))) = (&t.start, t.latch) else {
         return;
     };
     let period = visit.icount - start.icount;
     let executed = visit.executed - start.executed;
-    let stall = stalled - start_stalled;
     let limit = cpu.bus.clock.deadline;
     if period == 0 || !cpu.bus.pit0.is_counting() {
         return;
@@ -624,12 +629,22 @@ fn finish(cpu: &mut Cpu, visit: Visit, stalled: u64) {
         }
         counts.push(next);
     }
+    // Where the pairs of counts of the first j passes fall, for each j: the
+    // counts run down, so the latest is the least and the first the most,
+    // and the differences between them are kept as they come.
+    let mut bounds = Vec::with_capacity(counts.len() - 1);
+    let (mut d0, mut d1) = (i64::MAX, i64::MIN);
+    for w in counts.windows(2) {
+        let d = w[0] - w[1];
+        (d0, d1) = (d0.min(d), d1.max(d));
+        bounds.push((w[1], counts[1], d0, d1));
+    }
     // The most passes the checks hold for: they hold for fewer if they do
     // for more.
     let (mut good, mut bad) = (0, counts.len());
     while bad - good > 1 {
         let mid = (good + bad) / 2;
-        if checks_hold(&t.checks, &counts[..=mid]) {
+        if checks_hold(&t.checks, bounds[mid - 1]) {
             good = mid;
         } else {
             bad = mid;
@@ -644,9 +659,10 @@ fn finish(cpu: &mut Cpu, visit: Visit, stalled: u64) {
     if skipped == 0 {
         return;
     }
+    // The skipped passes count as idle time, their port stalls with them.
     let passes = skipped / period;
-    cpu.bus.clock.stalled += passes * stall;
     cpu.bus.observe.proved(head);
+    cpu.bus.observe.proven_time = true;
     // The machine after the last pass: what follows the time, at its count.
     let (p, n) = (counts[passes as usize - 1], counts[passes as usize]);
     let s = &t.shadow;
@@ -670,14 +686,7 @@ fn finish(cpu: &mut Cpu, visit: Visit, stalled: u64) {
     }
     if let Some(arith) = s.flags {
         let flags = arith.flags(p, n);
-        for bit in [
-            CF,
-            PF,
-            AF,
-            crate::cpu::alu::ZF,
-            crate::cpu::alu::SF,
-            crate::cpu::alu::OF,
-        ] {
+        for bit in [CF, PF, AF, ZF, crate::cpu::alu::SF, OF] {
             if arith.bits & bit != 0 {
                 cpu.set_cpu_flag(CpuFlags::from_bits_retain(bit), flags & bit != 0);
             }
@@ -693,17 +702,9 @@ fn finish(cpu: &mut Cpu, visit: Visit, stalled: u64) {
     }
 }
 
-/// Whether every check comes out as in the second pass for each two
-/// successive counts of `counts` (the second pass's first).
-fn checks_hold(checks: &[Check], counts: &[i64]) -> bool {
-    if counts.len() < 2 {
-        return true;
-    }
-    let pairs = counts.windows(2).map(|w| (w[1], w[0] - w[1]));
-    let (mut n0, mut n1, mut d0, mut d1) = (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
-    for (n, d) in pairs {
-        (n0, n1, d0, d1) = (n0.min(n), n1.max(n), d0.min(d), d1.max(d));
-    }
+/// Whether every check comes out as in the second pass for each pair of
+/// counts (p, n) whose n is in `n0..=n1` and whose p - n is in `d0..=d1`.
+fn checks_hold(checks: &[Check], (n0, n1, d0, d1): (i64, i64, i64, i64)) -> bool {
     // The corners of the parallelogram that holds the pairs (p, n).
     let corners = [(n0 + d0, n0), (n0 + d1, n0), (n1 + d0, n1), (n1 + d1, n1)];
     checks.iter().all(|check| match *check {
@@ -723,9 +724,6 @@ fn checks_hold(checks: &[Check], counts: &[i64]) -> bool {
 /// follows the time.
 pub(super) fn analyze(cpu: &mut Cpu) {
     with_proof(cpu, |cpu, t| {
-        if t.stage == Stage::Armed {
-            return Ok(());
-        }
         t.exceptions = cpu.exceptions;
         let pending = look(cpu, t)?;
         t.pending = Some(pending);
@@ -821,6 +819,108 @@ fn mem_bytes(cpu: &Cpu, m: &UsedMemory) -> Option<Vec<usize>> {
                 .map(|a| a as usize)
         })
         .collect()
+}
+
+/// Whether the elements a REP string instruction reads through `m` reach
+/// RAM that follows the time (or holds flags that do); None where that
+/// can't be told simply: more than 64K of them, or an offset that wraps.
+fn rep_reaches(cpu: &Cpu, s: &Shadow, m: &UsedMemory) -> Option<bool> {
+    let size = m.memory_size().size().max(1) as u64;
+    let addr16 = m.address_size() == CodeSize::Code16;
+    let count = if addr16 {
+        cpu.cx() as u64
+    } else {
+        cpu.ecx() as u64
+    };
+    let total = count * size;
+    if total > 0x1_0000 {
+        return None;
+    }
+    let seg = Seg::from_register(m.segment()).map_or(0, |r| cpu.seg_cache(r).base as u64);
+    let offset = m.virtual_address(0, |r, _, _| {
+        Some(if Seg::from_register(r).is_some() {
+            0
+        } else {
+            cpu.reg(r) as u64
+        })
+    })?;
+    // The offsets the elements cover, down from the first one with DF set.
+    let (first, end) = if cpu.get_cpu_flag(CpuFlags::DF) {
+        ((offset + size).checked_sub(total)?, offset + size)
+    } else {
+        (offset, offset + total)
+    };
+    let limit = if addr16 { 0x1_0000 } else { 1 << 32 };
+    if end > limit {
+        return None;
+    }
+    // Page by page, through the page tables.
+    let mut at = first;
+    while at < end {
+        let lin = (seg + at) as u32;
+        let next = (at + 0x1000 - (lin & 0xFFF) as u64).min(end);
+        let phys = cpu.peek_translate(lin)? as usize;
+        let span = phys..phys + (next - at) as usize;
+        if s.mem.range(span.clone()).next().is_some() || s.flag_mem.range(span).next().is_some() {
+            return Some(true);
+        }
+        at = next;
+    }
+    Some(false)
+}
+
+/// The arithmetic flags `instr` leaves as they were, of those iced counts
+/// as written (some of them as undefined), as the interpreter runs it: all
+/// of them for a shift by a count of 0 and a REP of none, all but CF and
+/// OF for MUL, IMUL and the bit tests, all but ZF for BSF and BSR, and AF
+/// for SAR and the double shifts. Those that follow the time go on
+/// following it.
+fn kept_flags(cpu: &Cpu, instr: &Instruction) -> u32 {
+    let mnemonic = instr.mnemonic();
+    let shift = matches!(
+        mnemonic,
+        Mnemonic::Rol
+            | Mnemonic::Ror
+            | Mnemonic::Rcl
+            | Mnemonic::Rcr
+            | Mnemonic::Shl
+            | Mnemonic::Sal
+            | Mnemonic::Shr
+            | Mnemonic::Sar
+            | Mnemonic::Shld
+            | Mnemonic::Shrd
+    );
+    let count = match instr.op_kinds().last() {
+        Some(OpKind::Immediate8) => instr.immediate8() as u32,
+        Some(OpKind::Register) if instr.op_register(instr.op_count() - 1) == Register::CL => {
+            cpu.cx() as u32 & 0xFF
+        }
+        _ => 1,
+    };
+    // (The REP count is in CX or ECX by the address size.)
+    let addr32 = instr.op_kinds().any(|k| {
+        matches!(
+            k,
+            OpKind::MemorySegESI | OpKind::MemorySegEDI | OpKind::MemoryESEDI
+        )
+    });
+    let left = if addr32 { cpu.ecx() } else { cpu.cx() as u32 };
+    let repeated =
+        instr.is_string_instruction() && (instr.has_rep_prefix() || instr.has_repne_prefix());
+    if shift && count & 0x1F == 0 || repeated && left == 0 {
+        return ARITH;
+    }
+    match mnemonic {
+        Mnemonic::Mul
+        | Mnemonic::Imul
+        | Mnemonic::Bt
+        | Mnemonic::Bts
+        | Mnemonic::Btr
+        | Mnemonic::Btc => ARITH & !(CF | OF),
+        Mnemonic::Bsf | Mnemonic::Bsr => ARITH & !ZF,
+        Mnemonic::Sar | Mnemonic::Shld | Mnemonic::Shrd => AF,
+        _ => 0,
+    }
 }
 
 /// What the instruction about to run does with what follows the time, to
@@ -971,6 +1071,17 @@ fn look(cpu: &mut Cpu, t: &mut TimeProof) -> Result<Pending, &'static str> {
                 .as_ref()
                 .is_some_and(|b| b.iter().any(|a| s.mem.contains_key(a)))
     });
+    // A REP string instruction reads the elements after the one `addresses`
+    // holds as well.
+    let repeated =
+        instr.is_string_instruction() && (instr.has_rep_prefix() || instr.has_repne_prefix());
+    if repeated && (!s.mem.is_empty() || !s.flag_mem.is_empty()) {
+        for (m, _) in &addresses {
+            if reads(m.access()) && rep_reaches(cpu, s, m) != Some(false) {
+                return Err("time string");
+            }
+        }
+    }
     let interrupt = matches!(
         mnemonic,
         Mnemonic::Int
@@ -987,7 +1098,7 @@ fn look(cpu: &mut Cpu, t: &mut TimeProof) -> Result<Pending, &'static str> {
     };
     let live = s.flags.map_or(0, |a| a.bits) | s.opaque;
     let flag_follows = flags_read & live != 0;
-    let written = rflags(instr.rflags_modified()) & ARITH;
+    let written = rflags(instr.rflags_modified()) & ARITH & !kept_flags(cpu, &instr);
     if !reg_read && !mem_read && !flag_follows {
         // Nothing it reads follows the time: neither does what it writes.
         let mut pending = Pending {
@@ -1079,12 +1190,7 @@ fn look(cpu: &mut Cpu, t: &mut TimeProof) -> Result<Pending, &'static str> {
     };
     // The value of an operand as a function of the counts.
     let mut form = |o: &Operand| -> Result<Form, &'static str> {
-        let full = if o.size == 4 {
-            u32::MAX
-        } else {
-            (1u32 << (8 * o.size)) - 1
-        };
-        let value = o.value & full;
+        let value = o.value & size_mask(o.size as u8);
         if !o.follows() {
             return Ok(Form::constant(value));
         }
@@ -1289,11 +1395,7 @@ fn look(cpu: &mut Cpu, t: &mut TimeProof) -> Result<Pending, &'static str> {
             // and XOR with 0. The flags then follow the time some way this
             // doesn't.
             let (dst, src) = (operand(0)?, operand(1)?);
-            let full = if dst.size == 4 {
-                u32::MAX
-            } else {
-                (1u32 << (8 * dst.size)) - 1
-            };
+            let full = size_mask(dst.size as u8);
             let keeps = match mnemonic {
                 Mnemonic::And => src.value & full == full,
                 Mnemonic::Test => true,

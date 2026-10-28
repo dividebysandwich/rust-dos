@@ -286,6 +286,9 @@ pub struct Observe {
     last_event: Option<(Head, [u32; 8], u32)>,
     /// The head whose passes were skipped up to the next event.
     proven: Option<Head>,
+    /// Whether `proven` latches the PIT's count: a time proof starts
+    /// there again at once (`time`).
+    proven_time: bool,
     /// The last `KNOWN_HEADS` heads whose passes were skipped, oldest
     /// first.
     known: Vec<Head>,
@@ -347,6 +350,7 @@ impl Default for Observe {
             poll: (None, 0),
             last_event: None,
             proven: None,
+            proven_time: false,
             known: Vec::new(),
             port_ok: None,
             ports: Vec::new(),
@@ -647,6 +651,7 @@ impl Observe {
     fn proved(&mut self, head: Option<Head>) {
         self.tally(head, |h| h.proofs += 1);
         self.proven = head;
+        self.proven_time = false;
         if let Some(head) = head {
             self.known.retain(|&k| k != head);
             if self.known.len() == KNOWN_HEADS {
@@ -731,12 +736,12 @@ pub fn keyboard_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
 
 /// A timer event is due. A proof running ends, as the event may change what
 /// the loop sees (it is tried again after it). The head of passes skipped up
-/// to it is armed again. Else the CPU's instruction is armed when passes
-/// were skipped from it before (a game's frame limiter, which it comes back
-/// to every frame), or when the last event found the CPU there with the
-/// same flags and all its registers but one the same. That one may be what
-/// a loop reads of a time the event between moved on: `GetTickCount`'s
-/// count on Windows 98 (#160).
+/// to it is armed again, as a time proof when it latched the PIT's count.
+/// Else the CPU's instruction is armed when passes were skipped from it
+/// before (a game's frame limiter, which it comes back to every frame), or
+/// when the last event found the CPU there with the same flags and all its
+/// registers but one the same. That one may be what a loop reads of a time
+/// the event between moved on: `GetTickCount`'s count on Windows 98 (#160).
 #[cold]
 pub fn at_event(cpu: &mut Cpu) {
     if !cpu.bus.observe.enabled {
@@ -755,7 +760,14 @@ pub fn at_event(cpu: &mut Cpu) {
     });
     o.last_event = Some(here);
     if let Some(head) = o.proven.take() {
-        o.arm(head, now);
+        if std::mem::take(&mut o.proven_time) {
+            o.time_from(head, now);
+            if let Phase::Time(t) = &mut o.phase {
+                t.wait = true;
+            }
+        } else {
+            o.arm(head, now);
+        }
     } else if near || o.known.contains(&here.0) {
         o.arm(here.0, now);
     }
