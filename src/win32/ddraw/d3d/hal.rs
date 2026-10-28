@@ -1417,7 +1417,7 @@ impl Rasterizer for Raster<'_> {
 /// card isn't set up for the HAL's drawing (Glide closed or another
 /// process's, or no render target or depth buffer of the HAL's given to
 /// it yet) or the surface isn't in its memory.
-fn card_fill(cpu: &mut Cpu, s: &Surface, id: u32, rects: &[[i32; 4]], value: u16) -> bool {
+pub(in crate::win32::ddraw) fn card_fill(cpu: &mut Cpu, s: &Surface, id: u32, rects: &[[i32; 4]], value: u16) -> bool {
     use crate::voodoo::banshee::render3d::{
         AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
     };
