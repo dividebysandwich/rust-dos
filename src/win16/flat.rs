@@ -742,13 +742,20 @@ fn start_connect(cpu: &mut Cpu, c: usize, request: Request) {
     };
     let handle = cpu.bus.win32.win16.modules[index].handle;
     let client = &mut cpu.bus.win32.win16.clients[c];
-    client.modules.push(handle);
+    // One reference to it for each process that uses it.
+    let attached = client.modules.contains(&handle);
+    if !attached {
+        client.modules.push(handle);
+    }
     if let Some(current) = client.current.as_mut() {
         current.module = handle;
     }
-    let tid = cpu.bus.win32.win16.clients[c].tid;
+    let tid = client.tid;
+    if attached {
+        module::release(cpu, handle);
+    }
     let mut resume = Context::of(cpu);
-    let joined = if inits.contains(&index) {
+    let joined = if inits.contains(&index) || attached {
         let mut data = vec![tid];
         data.extend(
             inits
