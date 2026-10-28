@@ -21,6 +21,7 @@ mod dpmi;
 mod gdi;
 mod global;
 mod handles;
+mod hook;
 mod kernel;
 mod ldt;
 mod local;

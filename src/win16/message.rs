@@ -126,20 +126,20 @@ fn sx(v: u32) -> u32 {
 
 /// Space on the 16-bit stack, below where a call's frame goes, for the
 /// structures a 16-bit procedure is passed.
-struct Stack16 {
-    ss: u16,
+pub(super) struct Stack16 {
+    pub(super) ss: u16,
     base: u32,
-    sp: u16,
+    pub(super) sp: u16,
 }
 
 impl Stack16 {
-    fn new(cpu: &Cpu, (ss, sp): (u16, u16)) -> Stack16 {
+    pub(super) fn new(cpu: &Cpu, (ss, sp): (u16, u16)) -> Stack16 {
         let base = super::selector_base(cpu, ss).map_or(0, |(b, _, _)| b);
         Stack16 { ss, base, sp }
     }
 
     /// `len` bytes: their 16:16 address and their linear one.
-    fn alloc(&mut self, len: u32) -> (u32, u32) {
+    pub(super) fn alloc(&mut self, len: u32) -> (u32, u32) {
         self.sp = self.sp.wrapping_sub((len as u16 + 3) & !3);
         let lin = self.base.wrapping_add(self.sp as u32);
         ((self.ss as u32) << 16 | self.sp as u32, lin)
@@ -635,7 +635,7 @@ fn returned16(cpu: &mut Cpu, value: u32, data: &[u32]) -> u32 {
 /// A message 32-bit code sends a 16-bit window procedure, as that gets
 /// it: (msg, wParam, lParam), the structures copied to `stack`, what to
 /// write back after (`data` grows).
-fn to16(
+pub(super) fn to16(
     cpu: &mut Cpu,
     hwnd: u32,
     msg: u32,
@@ -647,42 +647,8 @@ fn to16(
     data.push(msg);
     match msg {
         WM_CREATE | WM_NCCREATE => {
-            let (seg, cs16) = stack.alloc(34);
-            if lp != 0 {
-                let name = r32(cpu, lp + 36);
-                let class = r32(cpu, lp + 40);
-                let name16 = if name == 0 {
-                    0
-                } else {
-                    string16(cpu, stack, name)
-                };
-                let class16 = if class < 0x1_0000 {
-                    class
-                } else {
-                    string16(cpu, stack, class)
-                };
-                let instance = super::handles::instance16(cpu, r32(cpu, lp + 4));
-                let mut params = r32(cpu, lp);
-                if r32(cpu, lp + 44) & WS_EX_MDICHILD != 0 && params != 0 {
-                    params = mdi_create16(cpu, stack, params);
-                }
-                w32(cpu, cs16, params);
-                w16(cpu, cs16 + 4, instance as u32);
-                let menu = menu16(r32(cpu, lp + 8)) as u32;
-                w16(cpu, cs16 + 6, menu);
-                for (i, at) in [12u32, 16, 20, 24, 28].into_iter().enumerate() {
-                    let v = r32(cpu, lp + at);
-                    w16(cpu, cs16 + 8 + 2 * i as u32, v);
-                }
-                let style = r32(cpu, lp + 32);
-                w32(cpu, cs16 + 18, style);
-                w32(cpu, cs16 + 22, name16);
-                w32(cpu, cs16 + 26, class16);
-                let ex = r32(cpu, lp + 44) & !super::user::WS_EX_WINDOWEDGE;
-                w32(cpu, cs16 + 30, ex);
-            }
             data.push(FIX_NONE);
-            (msg, wp, if lp == 0 { 0 } else { seg })
+            (msg, wp, create_struct16(cpu, lp, stack))
         }
         WM_GETMINMAXINFO => {
             let (seg, p16) = stack.alloc(20);
@@ -1091,6 +1057,47 @@ pub fn post_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     None
 }
 
+/// The CREATESTRUCT at `lp` as a CREATESTRUCT16 on `stack`, with its
+/// strings: its 16:16 address, or 0 for none.
+pub(super) fn create_struct16(cpu: &mut Cpu, lp: u32, stack: &mut Stack16) -> u32 {
+    if lp == 0 {
+        return 0;
+    }
+    let (seg, cs16) = stack.alloc(34);
+    let name = r32(cpu, lp + 36);
+    let class = r32(cpu, lp + 40);
+    let name16 = if name == 0 {
+        0
+    } else {
+        string16(cpu, stack, name)
+    };
+    let class16 = if class < 0x1_0000 {
+        class
+    } else {
+        string16(cpu, stack, class)
+    };
+    let instance = super::handles::instance16(cpu, r32(cpu, lp + 4));
+    let mut params = r32(cpu, lp);
+    if r32(cpu, lp + 44) & WS_EX_MDICHILD != 0 && params != 0 {
+        params = mdi_create16(cpu, stack, params);
+    }
+    w32(cpu, cs16, params);
+    w16(cpu, cs16 + 4, instance as u32);
+    let menu = menu16(r32(cpu, lp + 8)) as u32;
+    w16(cpu, cs16 + 6, menu);
+    for (i, at) in [12u32, 16, 20, 24, 28].into_iter().enumerate() {
+        let v = r32(cpu, lp + at);
+        w16(cpu, cs16 + 8 + 2 * i as u32, v);
+    }
+    let style = r32(cpu, lp + 32);
+    w32(cpu, cs16 + 18, style);
+    w32(cpu, cs16 + 22, name16);
+    w32(cpu, cs16 + 26, class16);
+    let ex = r32(cpu, lp + 44) & !super::user::WS_EX_WINDOWEDGE;
+    w32(cpu, cs16 + 30, ex);
+    seg
+}
+
 /// A MSG16 at `m16` as a MSG at `m`, the message translated as one
 /// posted. The structures a message takes go on the 32-bit stack below
 /// `m`: the stack's top below them.
@@ -1131,7 +1138,13 @@ pub fn msg16(cpu: &mut Cpu, m: u32, m16: u32) {
 }
 
 /// A posted message (no structures) as 16-bit code gets it.
-fn posted16(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32) -> (u32, u32, u32) {
+pub(super) fn posted16(
+    cpu: &mut Cpu,
+    hwnd: u32,
+    msg: u32,
+    wp: u32,
+    lp: u32,
+) -> (u32, u32, u32) {
     match msg {
         WM_COMMAND | WM_ACTIVATE | WM_CHARTOITEM | WM_VKEYTOITEM | WM_HSCROLL | WM_VSCROLL
         | WM_MENUSELECT | WM_MENUCHAR | WM_INITMENU | WM_INITMENUPOPUP | WM_PARENTNOTIFY => {

@@ -45,6 +45,9 @@ pub const KIND_PLAIN: u8 = 2;
 /// A font enumeration procedure (EnumFonts, EnumFontFamilies): its
 /// LOGFONT and TEXTMETRIC given as 16-bit copies.
 pub const KIND_FONTENUM: u8 = 3;
+/// A hook procedure (hook.rs): its lParam given as a 16-bit copy, as
+/// `extra` (the hook's kind and data segment) says.
+pub const KIND_HOOK: u8 = 4;
 
 /// Bytes of a slot.
 const SLOT: u32 = 8;
@@ -72,12 +75,14 @@ pub static POSTS: &[Post] = &[
     super::builtin::post_auto,
     super::user::post,
     super::message::post,
+    super::hook::post,
 ];
 
 pub const POST_PLAIN: u16 = 0;
 pub const POST_AUTO: u16 = 1;
 pub const POST_USER: u16 = 2;
 pub const POST_MESSAGE: u16 = 3;
+pub const POST_HOOK: u16 = 4;
 
 /// The thens, by their place. Append only.
 pub static THENS: &[Then] = &[
@@ -86,6 +91,7 @@ pub static THENS: &[Then] = &[
     super::task::then,
     super::message::then,
     super::kernel::then_libs,
+    super::hook::then,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -93,6 +99,7 @@ pub const THEN_PROC: u16 = 1;
 pub const THEN_TASK: u16 = 2;
 pub const THEN_MESSAGE: u16 = 3;
 pub const THEN_LIBS: u16 = 4;
+pub const THEN_HOOK: u16 = 5;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
@@ -538,6 +545,7 @@ pub fn thunk32_trap(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     match thunk.kind {
         KIND_WNDPROC | KIND_DLGPROC => super::message::call_wndproc16(cpu, &thunk),
         KIND_FONTENUM => super::gdi::call_font_enum16(cpu, &thunk),
+        KIND_HOOK => super::hook::call_hook16(cpu, &thunk),
         _ => call_plain16(cpu, &thunk),
     }
     None
