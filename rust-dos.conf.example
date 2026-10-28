@@ -271,6 +271,11 @@
 # over the picture and under the box above the first prompt: true (the
 # default) or false.
 #version_check=true
+# Ask almanac.rust-dos.com for the settings players found best for a
+# program as it starts from the prompt (by its file's name and checksum),
+# and play it with them; your own come back when it ends. The start waits
+# for the answer, a few seconds at most: true or false (the default).
+#almanac_auto=false
 # Rewind: holding Alt+F11 goes back in time, half a second a step. It keeps
 # the machine's states of the last minutes, which take memory and a little
 # of the host's time: true or false (the default).

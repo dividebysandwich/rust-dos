@@ -24,6 +24,7 @@ mod config_file;
 mod debug;
 mod display;
 mod input;
+mod main_almanac;
 mod main_host;
 mod monitor_power;
 mod sdl_audio;
@@ -255,6 +256,8 @@ fn main() -> Result<(), String> {
     let mut paused = false;
     // The game launched from its profile and not ended yet.
     let mut game: Option<ActiveGame> = None;
+    // Programs started with the almanac's settings (`almanac_auto`).
+    let mut almanac_auto = main_almanac::AutoApply::default();
     // A game whose ways to start are to be offered (launch.rs).
     let mut choose: Option<String> = None;
     // A game requested outside the settings window while DOS is busy.
@@ -1692,6 +1695,12 @@ fn main() -> Result<(), String> {
         if std::mem::take(&mut cpu.bus.mixer_changed) {
             settings.mixer = cpu.bus.mixer.settings();
             ui.sync_mixer(settings.mixer);
+        }
+        // A program from the prompt waiting for the almanac's settings, and
+        // one that played with them and has ended.
+        let window_open = ui.is_open();
+        if let Some(notice) = almanac_auto.step(&mut host!(), window_open) {
+            osd.show(notice);
         }
         // A launched game that has ended: the settings and drives before it
         // come back.

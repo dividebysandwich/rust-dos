@@ -509,3 +509,40 @@ is out. If there is one, a notification says so over the picture and a line
 under the box above the first DOS prompt names it. Only the version number
 is fetched; nothing about you or your games is sent. **Off** skips the
 check. The change takes effect at the next start.
+
+# Auto-apply Almanac settings {#almanac-auto}
+
+When **on**, a program started from the DOS prompt (typed, or a batch
+file's line) waits while Rust-DOS asks almanac.rust-dos.com for the
+settings players found best for it. The almanac knows the program by
+its file's name, size and checksums, the only things sent. Settings a
+moderator blessed win over those most reports chose. The program then
+starts with them, and once it has ended your own settings come back.
+Programs the almanac doesn't know start with your settings. The wait
+lasts ten seconds at most, and **Esc** ends it at once. A game launched
+from its profile on the Games page keeps the profile's settings.
+**Off** (the default) never asks.
+
+Only the emulated machine's settings come from the almanac: the CPU,
+memory, sound cards and the like, never drives, commands or paths.
+Some, such as the memory size, take effect the next time Rust-DOS
+starts.
+
+# The Almanac {#almanac}
+
+almanac.rust-dos.com collects players' reports on how games run in
+Rust-DOS and with which settings.
+
+*Fetch settings from Almanac* lists the games the almanac has for the
+program started last (a √ marks those whose version has this very
+file) and those named like it. Type another name and press **Enter** to
+search again. **Enter** on a game puts its settings in place: the ones a
+moderator blessed, or else the ones most reports chose. **F2** saves
+them, into the game's profile while one plays.
+
+*Report settings to Almanac* sends the settings as they are now, with
+how the game played: pick the rating with the arrow keys, then press
+**Enter** on the game. A game the almanac doesn't have yet is added by
+the name typed. The program's name and checksums go with the report, so
+others with the same version find it. Report as often as you like, with
+other settings or after a new version of Rust-DOS.

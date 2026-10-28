@@ -698,6 +698,7 @@ fn changed_settings() -> Settings {
         mouse_menu_hold: false,
         pause_in_settings: false,
         version_check: false,
+        almanac_auto: true,
         rewind: true,
         rewind_memory: 512,
         idle_skip: false,

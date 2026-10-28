@@ -579,6 +579,11 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
         return;
     }
 
+    // With `almanac_auto`, the program waits for its settings first.
+    let plain = redirect.input.is_none() && redirect.output.is_none();
+    if plain && crate::almanac::ask_first(cpu, &cmd, command) {
+        return;
+    }
     match start(cpu, command, args.trim(), false, false) {
         None => bad_command(cpu),
         Some(Started::Program) => redirect_program(cpu, &redirect),
@@ -865,6 +870,7 @@ fn load_program(cpu: &mut Cpu, filename: &str, args: &str, high: bool) -> bool {
     if !loaded {
         return false;
     }
+    cpu.almanac.last_program = Some(filename.to_string());
     cpu.set_command_tail(cpu.current_psp, args);
     let ax = crate::interrupts::fcb::set_psp_fcbs(&mut cpu.bus, cpu.current_psp, &crate::dosstr::to_bytes(args));
     cpu.set_ax(ax);

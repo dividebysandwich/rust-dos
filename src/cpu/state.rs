@@ -88,6 +88,8 @@ crate::state_fields!(Cpu {
     // The session's, as the launched game it is compared with, and the
     // debugger's.
     programs_loaded, programs,
+    // The frontend's, which asks the almanac again for a program waiting.
+    almanac,
 });
 
 impl Cpu {
