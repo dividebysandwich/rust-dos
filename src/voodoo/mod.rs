@@ -950,10 +950,14 @@ impl Voodoo {
         }
         self.pool.give_out();
         let busy = self.pool.busy();
-        if !busy && self.words.borrow().is_empty() && self.backlog.borrow().is_empty() {
-            self.outstanding.set(false);
-            self.tmu_in_use.set(0);
+        if !busy && self.words.borrow().is_empty() {
+            // The jobs given out are drawn; those held keep their own
+            // footprint.
             self.footprint.borrow_mut().clear();
+            if self.backlog.borrow().is_empty() {
+                self.outstanding.set(false);
+                self.tmu_in_use.set(0);
+            }
         }
         busy
     }

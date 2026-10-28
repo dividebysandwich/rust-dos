@@ -299,11 +299,7 @@ fn elsewhere(layout: &TileLayout, st: &RasterState) -> bool {
 /// was drawn there before it has to stay.
 fn textures_read(layout: &TileLayout, st: &RasterState) -> u8 {
     let mut slots = 0;
-    for t in st.tmu.iter().flatten() {
-        if t.lodmin >= 8 << 8 || !t.ram.same(&st.fb) {
-            continue;
-        }
-        let (start, end) = texture_bytes(t);
+    for (start, end) in frame_buffer_texels(st) {
         for (slot, base) in layout.bases.iter().enumerate() {
             let Some(base) = *base else { continue };
             let stride = if slot == AUX { layout.aux_stride } else { layout.stride };
@@ -315,6 +311,17 @@ fn textures_read(layout: &TileLayout, st: &RasterState) -> u8 {
         }
     }
     slots
+}
+
+/// The bytes of the frame buffer's memory the texture units of `st`
+/// take texels from, a range for each unit that reads there. A unit
+/// whose lodmin is 8 or more takes no texels (`raster`).
+fn frame_buffer_texels(st: &RasterState) -> impl Iterator<Item = (u64, u64)> + '_ {
+    st.tmu
+        .iter()
+        .flatten()
+        .filter(|t| t.lodmin < 8 << 8 && t.ram.same(&st.fb))
+        .map(texture_bytes)
 }
 
 /// The bytes the texture `t` may take texels from, first to past the
@@ -383,8 +390,8 @@ impl Footprint {
                     self.writes_from = self.writes_from.min(2 * base as u64);
                 }
                 if let Job::Triangle { .. } = job {
-                    for t in st.tmu.iter().flatten().filter(|t| t.ram.same(&st.fb)) {
-                        self.texture(texture_bytes(t));
+                    for range in frame_buffer_texels(st) {
+                        self.texture(range);
                     }
                 }
             }
@@ -599,6 +606,12 @@ impl Backlog {
         let older = self.jobs.len().div_ceil(2);
         let out: Vec<Job> = self.jobs.drain(..older).map(|(job, ..)| job).collect();
         self.count_words();
+        // The jobs going out reach memory through the footprint of the
+        // jobs given out; this one keeps what those still held reach.
+        self.footprint.clear();
+        for (job, ..) in &self.jobs {
+            self.footprint.add(job);
+        }
         out
     }
 
