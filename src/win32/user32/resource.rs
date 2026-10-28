@@ -342,6 +342,9 @@ fn icon_pixel(id: u32, x: i32, y: i32) -> Option<u32> {
     }
 }
 
+/// The standard arrow cursor's id.
+pub const IDC_ARROW: u32 = 32512;
+
 /// The system's cursor `id` (IDC_ARROW and the rest): made the first
 /// time it is asked for.
 pub fn system_cursor(cpu: &mut Cpu, id: u32) -> u32 {

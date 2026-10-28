@@ -2313,6 +2313,151 @@ fn the_cursor_shows_on_a_voodoo3_desktop() {
     the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
 }
 
+const USER32_FIRST_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursor",
+        "SetCursorPos",
+    ],
+);
+const FIRST_GET_CURSOR: usize = 1;
+const FIRST_LOAD_CURSOR: usize = 2;
+const FIRST_SET_CURSOR: usize = 3;
+const FIRST_SET_CURSOR_POS: usize = 4;
+
+/// CreateWindowExA of a visible 64 x 64 popup at the screen's corner.
+fn popup_window(c: &mut Calls, a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    c.api(
+        a,
+        l,
+        CREATE_WINDOW,
+        &[
+            Arg::I(0),
+            Arg::At(CLASS),
+            Arg::At(CLASS),
+            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(64),
+            Arg::I(64),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(BASE),
+            Arg::I(0),
+        ],
+    )
+}
+
+/// Windows starts with the arrow as the cursor: a program that never
+/// calls SetCursor gets the arrow's handle from GetCursor, its first
+/// call, and the arrow shows where the mouse is.
+#[test]
+fn the_arrow_is_the_cursor_from_the_start() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, FIRST_GET_CURSOR, &[])?;
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FIRST_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, FIRST_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "GetCursor");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(
+        r[0], r[2],
+        "GetCursor gives LoadCursorA(IDC_ARROW)'s cursor"
+    );
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(100, 100), (101, 102)]);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+}
+
+/// SetCursor(NULL) as a program's first call replaces the arrow USER
+/// starts with: it returns the arrow, and the windows made after it
+/// don't bring the arrow back.
+#[test]
+fn set_cursor_null_first_hides_the_arrow() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, FIRST_SET_CURSOR, &[Arg::I(0)])?;
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, FIRST_GET_CURSOR, &[])?;
+        c.api(a, l, FIRST_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, FIRST_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_null_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 5);
+    assert_eq!(r[0], r[3], "SetCursor(NULL) gives the arrow it replaced");
+    assert_ne!(r[0], 0, "SetCursor(NULL)");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(r[2], 0, "GetCursor after SetCursor(NULL)");
+    assert_eq!(r[4], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(101, 102)]);
+    assert_ne!(shown[0], [0xFF, 0xFF, 0xFF], "no arrow over the desktop");
+}
+
+const USER32_CLASS_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "SetCursorPos",
+        "PeekMessageA",
+    ],
+);
+const CLASS_GET_CURSOR: usize = 1;
+const CLASS_LOAD_CURSOR: usize = 2;
+const CLASS_SET_CURSOR_POS: usize = 3;
+const CLASS_PEEK_MESSAGE: usize = 4;
+const IDC_IBEAM: u32 = 32513;
+const WM_MOUSEMOVE: u32 = 0x200;
+const PM_REMOVE: u32 = 1;
+/// The MSG PeekMessageA fills.
+const CURSOR_MSG: u32 = 0xF00;
+
+/// As the thread takes a mouse message, Windows sends the window under
+/// the mouse WM_SETCURSOR, and DefWindowProc sets its class's cursor: an
+/// Edit control's I-beam, which replaces the arrow.
+#[test]
+fn a_mouse_message_sets_the_class_cursor() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_CLASS_CURSOR], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, CLASS_SET_CURSOR_POS, &[Arg::I(20), Arg::I(20)])?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        let mv = Arg::I(WM_MOUSEMOVE);
+        let peek = [Arg::At(CURSOR_MSG), Arg::I(0), mv, mv, Arg::I(PM_REMOVE)];
+        c.api(a, l, CLASS_PEEK_MESSAGE, &peek)?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_IBEAM)])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_class", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_eq!(r[1], 1, "SetCursorPos");
+    assert_eq!(r[2], r[6], "the arrow before the message");
+    assert_eq!(r[3], 1, "PeekMessageA finds the WM_MOUSEMOVE");
+    assert_eq!(r[4], r[5], "the I-beam after it");
+    assert_ne!(r[4], r[6]);
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
@@ -2336,11 +2481,9 @@ fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
     })
 }
 
-/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
-/// mode's pixels, as large as they show: the arrow's inside, one pixel
-/// right of the tip and two down, covers that pixel of the mode on the
-/// frame, however much larger the frame shows it.
-fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+/// `mode_cursor_program(w, h)` run to its step 1 on `board`, the mode
+/// set: a Voodoo3 shows it on the card, the others on the VGA.
+fn small_mode_machine(test: &str, board: Option<Board>, (w, h): (u32, u32)) -> (Cpu, u32) {
     let (program, data) = mode_cursor_program(w, h);
     let mut cpu = if board == Some(Board::Voodoo3) {
         machine(test, program)
@@ -2348,8 +2491,18 @@ fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u
         card_machine(test, board, program)
     };
     run_until(&mut cpu, data, 1);
-    let r = results(&cpu, data, 7);
+    let r = results(&cpu, data, 4);
     assert_eq!(r[2..4], [0, 0], "SetCooperativeLevel, SetDisplayMode");
+    (cpu, data)
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the cursor is in the
+/// mode's pixels, as large as they show: the arrow's inside, one pixel
+/// right of the tip and two down, covers that pixel of the mode on the
+/// frame, however much larger the frame shows it.
+fn the_cursor_shows_in_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (cpu, data) = small_mode_machine(test, board, (w, h));
+    let r = results(&cpu, data, 7);
     assert_ne!(r[4], 0, "LoadCursorA(IDC_ARROW)");
     assert_eq!(r[6], 1, "SetCursorPos");
     let (frame_w, frame_h) = video::frame_size(&cpu.bus);
@@ -2374,4 +2527,37 @@ fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
 #[test]
 fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
     the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
+}
+
+/// Over a DirectDraw mode of 320 pixels across, the host's pointer
+/// spans the mode's pixels, whatever size the frame shows them at: the
+/// middle of the picture is the middle of the screen, its bottom-right
+/// corner the screen's, and a captured mouse moves the cursor as far as
+/// the picture moves under it.
+fn the_pointer_spans_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (cpu, _) = small_mode_machine(test, board, (w, h));
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let frame = Frame::new(frame_w, frame_h);
+    let (fw, fh) = (frame_w as i32, frame_h as i32);
+    let (w, h) = (w as i32, h as i32);
+    let to_mouse = |at| video::overlay::frame_to_mouse(&cpu.bus, &frame, at);
+    assert_eq!(to_mouse((fw / 2, fh / 2)), (w / 2, h / 2), "the middle");
+    assert_eq!(
+        to_mouse((fw - 1, fh - 1)),
+        (w - 1, h - 1),
+        "the bottom-right corner"
+    );
+    let (sx, sy) = ((frame_w / w as u32) as f64, (frame_h / h as u32) as f64);
+    let motion = video::overlay::frame_motion_to_mouse(&cpu.bus, &frame, (sx * 10.0, sy * 10.0));
+    assert_eq!(motion, (10.0, 10.0), "ten of the mode's pixels");
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_240_vesa_mode() {
+    the_pointer_spans_a_small_mode("pointer_vesa_320", None, (320, 240));
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_200_voodoo3_mode() {
+    the_pointer_spans_a_small_mode("pointer_voodoo3_320", Some(Board::Voodoo3), (320, 200));
 }

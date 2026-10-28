@@ -3979,3 +3979,232 @@ fn a_polling_loop_gets_its_first_calls_and_a_count_in_the_log() {
     assert_eq!(all.len(), 10_000);
     assert!(poll_trace("trace_off", rust_dos::config::Win32Trace::Off).is_empty());
 }
+
+/// The checksum both sides of the flat thunk test have.
+const THUNK_CHECKSUM: u32 = 0x1234;
+
+/// A 16-bit DLL, TEST16.DLL, as the thunk compiler's 16-bit side would
+/// be: its 32-bit to 16-bit thunk data (exported as THK_THUNKDATA16), the
+/// table of its two targets, and a DllEntryPoint that calls
+/// ThunkConnect16 and keeps what it returned. Target 0 is READ(LPDWORD),
+/// which returns the value there in DX:AX and adds 1 to it there; target
+/// 1 is FLAG(), which returns what ThunkConnect16 returned.
+fn thunk_dll16() -> Vec<u8> {
+    use rust_dos_ne as ne;
+    let mut b = ne::Builder::new("TEST16", ne::LIBMODULE | ne::SINGLEDATA | ne::PROTMODE);
+    b.expected_version(0x0400);
+    let kernel = b.import_module("KERNEL");
+    let farptr = |offset: u16, target: ne::Target| ne::Relocation {
+        source: ne::ADDR_FARPTR,
+        additive: false,
+        offset,
+        target,
+    };
+    let mut code = vec![
+        0x55, // push bp
+        0x8B, 0xEC, // mov bp, sp
+        0x1E, // push ds
+        0x8B, 0x46, 0x0E, // mov ax, [bp+0Eh] (wDS)
+        0x8E, 0xD8, // mov ds, ax
+        0x1E, 0x6A, 0x30, // push ds:0030h, "TEST16.DLL"
+        0x1E, 0x6A, 0x3C, // push ds:003Ch, "T.EXE"
+        0xFF, 0x76, 0x10, // push word [bp+10h] (hInst)
+        0x66, 0xFF, 0x76, 0x12, // push dword [bp+12h] (dwReason)
+        0x1E, 0x6A, 0x00, // push ds:0000h, the thunk data
+        0x1E, 0x6A, 0x44, // push ds:0044h, the 32-bit side's name
+        0x0E, // push cs
+        0x9A, 0xFF, 0xFF, 0x00, 0x00, // call far ThunkConnect16
+        0xA3, 0x10, 0x00, // mov [0010h], ax
+        0xB8, 0x01, 0x00, // mov ax, 1
+        0x1F, // pop ds
+        0x5D, // pop bp
+        0xCA, 0x10, 0x00, // retf 10h
+    ];
+    code.resize(0x30, 0x90);
+    // READ at 30h.
+    code.extend_from_slice(&[
+        0x55, 0x8B, 0xEC, // push bp; mov bp, sp
+        0xC4, 0x5E, 0x06, // les bx, [bp+6]
+        0x26, 0x8B, 0x07, // mov ax, es:[bx]
+        0x26, 0x8B, 0x57, 0x02, // mov dx, es:[bx+2]
+        0x26, 0xFF, 0x07, // inc word es:[bx]
+        0x5D, // pop bp
+        0xCA, 0x04, 0x00, // retf 4
+    ]);
+    code.resize(0x50, 0x90);
+    // FLAG at 50h.
+    code.extend_from_slice(&[
+        0x1E, // push ds
+        0xB8, 0xFF, 0xFF, // mov ax, DGROUP
+        0x8E, 0xD8, // mov ds, ax
+        0xA1, 0x10, 0x00, // mov ax, [0010h]
+        0x31, 0xD2, // xor dx, dx
+        0x1F, // pop ds
+        0xCB, // retf
+    ]);
+    b.segment(ne::SegmentSpec {
+        data: code,
+        flags: 0,
+        alloc: 0,
+        relocations: vec![
+            farptr(
+                0x1E,
+                ne::Target::Ordinal {
+                    module: kernel,
+                    ordinal: 651,
+                },
+            ),
+            ne::Relocation {
+                source: ne::ADDR_SELECTOR,
+                additive: false,
+                offset: 0x52,
+                target: ne::Target::Internal {
+                    segment: 2,
+                    offset: 0,
+                },
+            },
+        ],
+    });
+    let mut data = vec![0u8; 0x60];
+    data[..4].copy_from_slice(b"LS01");
+    data[4..8].copy_from_slice(&THUNK_CHECKSUM.to_le_bytes());
+    // The table of targets' 16:16 address, and the table's two.
+    for at in [0x08, 0x20, 0x24] {
+        data[at..at + 2].copy_from_slice(&[0xFF, 0xFF]);
+    }
+    data[0x30..0x3B].copy_from_slice(b"TEST16.DLL\0");
+    data[0x3C..0x42].copy_from_slice(b"T.EXE\0");
+    data[0x44..0x54].copy_from_slice(b"THK_THUNKDATA32\0");
+    let internal = |segment: u8, offset: u16| ne::Target::Internal { segment, offset };
+    b.segment(ne::SegmentSpec {
+        data,
+        flags: ne::SEG_DATA,
+        alloc: 0x100,
+        relocations: vec![
+            farptr(0x08, internal(2, 0x20)),
+            farptr(0x20, internal(1, 0x30)),
+            farptr(0x24, internal(1, 0x50)),
+        ],
+    });
+    b.auto_data(2, 0, 0);
+    for (ordinal, name, segment) in [(1, "THK_THUNKDATA16", 2), (2, "DLLENTRYPOINT", 1)] {
+        b.entry(
+            ordinal,
+            ne::Entry::Code {
+                segment,
+                offset: 0,
+                flags: ne::ENTRY_EXPORTED,
+                moveable: false,
+            },
+        );
+        b.export(name, ordinal, true);
+    }
+    b.build()
+}
+
+#[test]
+fn a_flat_thunk_calls_a_16_bit_dll_with_a_mapped_pointer() {
+    // The 32-bit thunk data, the names ThunkConnect32 takes, and a value
+    // the 16-bit side reads and changes through a 16:16 pointer to it.
+    let mut data = vec![0u8; 0x100];
+    data[..4].copy_from_slice(b"LS01");
+    data[4..8].copy_from_slice(&THUNK_CHECKSUM.to_le_bytes());
+    data[0x0C..0x10].copy_from_slice(b"LB01");
+    data[0x1C..0x20].copy_from_slice(&0x24u32.to_le_bytes());
+    data[0x20..0x24].copy_from_slice(&0x44u32.to_le_bytes());
+    data[0x24..0x64].fill(0xCC);
+    data[0x80..0x90].copy_from_slice(b"THK_THUNKDATA16\0");
+    data[0xA0..0xAB].copy_from_slice(b"TEST16.DLL\0");
+    data[0xB0..0xB6].copy_from_slice(b"T.EXE\0");
+    data[0xC0..0xC4].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &[
+            "ThunkConnect32",
+            "SMapLS_IP_EBP_8",
+            "SUnMapLS_IP_EBP_8",
+            "ExitProcess",
+        ],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut read = a.create_label();
+        let mut flag = a.create_label();
+        let mut fail = a.create_label();
+        // The code ThunkConnect32 writes into the thunk data.
+        let qt = l.at(0x24);
+        // ThunkConnect32(data, "THK_THUNKDATA16", "TEST16.DLL", "T.EXE",
+        // module, DLL_PROCESS_ATTACH).
+        a.push(1)?;
+        a.push(0)?;
+        for at in [0xB0, 0xA0, 0x80, 0] {
+            a.push(l.at(at) as i32)?;
+        }
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(read)?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 0x1122_3344)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 0x1122_3345)?;
+        a.jne(fail)?;
+        a.call(flag)?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()?;
+        // The thunk compiler's thunks: the target's number in CL kept at
+        // EBP - 4, 40h bytes of frame, the arguments pushed below.
+        a.set_label(&mut read)?;
+        a.mov(cl, 0)?;
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.push(ecx)?;
+        a.sub(esp, 0x3C)?;
+        a.call(l.import(1))?;
+        a.push(eax)?;
+        a.mov(eax, qt as u32)?;
+        a.call(eax)?;
+        a.shl(eax, 16)?;
+        a.shrd(eax, edx, 16)?;
+        a.call(l.import(2))?;
+        a.leave()?;
+        a.ret_1(4)?;
+        a.set_label(&mut flag)?;
+        a.mov(cl, 1)?;
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.push(ecx)?;
+        a.sub(esp, 0x3C)?;
+        a.mov(eax, qt as u32)?;
+        a.call(eax)?;
+        a.shl(eax, 16)?;
+        a.shrd(eax, edx, 16)?;
+        a.leave()?;
+        a.ret()
+    });
+    let dir = scratch(
+        "flat_thunk",
+        &[("T.EXE", exe), ("TEST16.DLL", thunk_dll16())],
+    );
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    // The Win16 process the thunks made ended with the program.
+    assert!(!cpu.bus.win32.active());
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}

@@ -253,6 +253,7 @@ pub fn get_cursor_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_PARAMETER);
         return Some(FALSE);
     }
+    super::init(cpu);
     let input = &user(cpu).input;
     let showing = if input.cursor_count >= 0 {
         CURSOR_SHOWING

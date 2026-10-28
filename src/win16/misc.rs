@@ -372,6 +372,16 @@ pub static DISPLAY: Def = Def {
     library: true,
 };
 
+/// SETUPX: Windows 95's setup engine, which DirectX's setup DLL and
+/// other installers' 16-bit DLLs import. None of its functions is there
+/// yet: a call of one stops the program and names it.
+pub static SETUPX: Def = Def {
+    name: "SETUPX",
+    file: "SETUPX.DLL",
+    apis: &[],
+    library: true,
+};
+
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }

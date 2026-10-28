@@ -230,16 +230,44 @@ impl MouseState {
     /// cursor range when the program set a larger one (AX=0007h/0008h), as
     /// games that halve the coordinates do. Ranges of 2048 and up are left
     /// alone; they stand for relative movement rather than a screen.
+    ///
+    /// In a mode narrower than the driver's 640, an x range from 0 that
+    /// ends within 32 pixels of the mode's width counts the mode's pixels
+    /// instead (see `counts_pixels`).
     pub fn virtual_extent(&self, (w, h): (usize, usize)) -> (i32, i32) {
-        let (w, h) = driver_extent((w, h));
+        let (driver_w, driver_h) = driver_extent((w, h));
         let range = |max: i32, size: i32| if max < 2048 { size.max(max + 1) } else { size };
-        (range(self.max_x, w), range(self.max_y, h))
+        let x = if self.counts_pixels(w as i32, driver_w) {
+            w as i32
+        } else {
+            range(self.max_x, driver_w)
+        };
+        (x, range(self.max_y, driver_h))
+    }
+
+    /// Whether the x range says the program counts the pixels of a mode
+    /// `w` wide, which the driver counts as `driver_w` (640 for 320): it
+    /// starts at 0 and ends within 32 pixels of `w`. Dark Sun 2 sets x
+    /// 0-319 in mode 13h and draws its cursor at the driver's x. The host
+    /// pointer then spans the mode's width, so the right half of the
+    /// picture doesn't pin the cursor at the edge, and a captured mouse
+    /// moves it as far as the pointer moves over the picture. DOSBox-X
+    /// rounds a range this close to the mode's width to it as well
+    /// (Daggerfall sets 0-310 in a 320-wide mode).
+    fn counts_pixels(&self, w: i32, driver_w: i32) -> bool {
+        w < driver_w && self.min_x == 0 && (w - 32..=w).contains(&(self.max_x + 1))
     }
 
     /// The virtual screen of `bus`'s current video mode (see
-    /// `virtual_extent` and `screen_size`).
+    /// `virtual_extent` and `screen_size`). While the built-in Windows
+    /// has the mouse it is Windows' screen instead
+    /// (`cursor::pointer_screen`): the driver's 640 across a 320-wide
+    /// DirectDraw mode would pin the cursor at the right edge from the
+    /// middle of the picture on, and a Voodoo3's desktop leaves the VGA's
+    /// text mode set, whose screen isn't the one shown.
     pub fn virtual_screen(&self, bus: &crate::bus::Bus) -> (i32, i32) {
-        self.virtual_extent(screen_size(bus))
+        crate::win32::user32::cursor::pointer_screen(&bus.win32)
+            .unwrap_or_else(|| self.virtual_extent(screen_size(bus)))
     }
 
     /// Forget the program's event handler (AX=000Ch), whose code is gone

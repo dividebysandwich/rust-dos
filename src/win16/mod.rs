@@ -18,6 +18,7 @@
 mod builtin;
 pub mod dos;
 mod dpmi;
+pub(crate) mod flat;
 mod gdi;
 mod global;
 mod handles;
@@ -109,6 +110,15 @@ pub struct State {
     pub mmio_buffers: Vec<[u32; 4]>,
     /// The compressed files LZEXPAND's LZInit opened (lz.rs).
     pub lz_files: Vec<crate::win32::kernel32::lz::LzFile>,
+    /// The Win32 processes that call 16-bit code through flat thunks,
+    /// the aliases of memory between them and this process, and the
+    /// 16-bit to 32-bit thunks joined (flat.rs).
+    pub clients: Vec<flat::Client>,
+    pub aliases: Vec<flat::Alias>,
+    pub links: Vec<flat::Link>,
+    /// The exit code of the last task that ended other than a client's,
+    /// which the Win16 process ends with when a client outlived it.
+    pub exit_code: u16,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -569,7 +579,11 @@ crate::state_fields!(State {
     missing,
     class_menus,
     mmio_buffers,
-    lz_files
+    lz_files,
+    clients,
+    aliases,
+    links,
+    exit_code
 });
 crate::state_fields!(Module16 {
     name,

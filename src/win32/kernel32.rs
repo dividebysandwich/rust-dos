@@ -37,6 +37,7 @@ pub(super) use file::{
 
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
+use crate::win16::flat;
 
 /// Windows 95's KERNEL32 is at BFF70000h, which programs and their copy
 /// protection check to tell Windows 9x from NT.
@@ -571,6 +572,44 @@ static APIS: &[Api] = &[
     stdcall("GlobalFindAtomA", 918, 1, atom::global_find_atom),
     stdcall("GlobalDeleteAtom", 919, 1, atom::global_delete_atom),
     stdcall("GlobalGetAtomNameA", 920, 3, atom::global_get_atom_name),
+    // Flat thunks (src/win16/flat.rs): where a Win32 process's task in
+    // the Win16 process waits for its calls, and the functions the thunk
+    // compiler's code calls.
+    Api {
+        name: "Win16Serve",
+        ordinal: 0,
+        args: 0,
+        conv: Conv::Loop,
+        handler: flat::serve,
+    },
+    stdcall("ThunkConnect32", 921, 6, flat::thunk_connect32),
+    stdcall("QT_Thunk", 922, 0, flat::qt_thunk),
+    stdcall("FT_Prolog", 923, 0, flat::ft_prolog),
+    stdcall("MapLS", 924, 1, flat::map_ls_api),
+    stdcall("UnMapLS", 925, 1, flat::unmap_ls_api),
+    stdcall("MapSL", 926, 1, flat::map_sl_api),
+    stdcall("MapSLFix", 927, 1, flat::map_sl_api),
+    stdcall("UnMapSLFixArray", 928, 2, flat::unmap_sl_fix_array),
+    stdcall("SMapLS", 929, 0, flat::smap_ls),
+    stdcall("SUnMapLS", 930, 0, flat::sunmap_ls),
+    stdcall("SMapLS_IP_EBP_8", 931, 0, flat::smap_ls_ebp_8),
+    stdcall("SUnMapLS_IP_EBP_8", 932, 0, flat::sunmap_ls_ebp_8),
+    stdcall("SMapLS_IP_EBP_12", 933, 0, flat::smap_ls_ebp_12),
+    stdcall("SUnMapLS_IP_EBP_12", 934, 0, flat::sunmap_ls_ebp_12),
+    stdcall("SMapLS_IP_EBP_16", 935, 0, flat::smap_ls_ebp_16),
+    stdcall("SUnMapLS_IP_EBP_16", 936, 0, flat::sunmap_ls_ebp_16),
+    stdcall("SMapLS_IP_EBP_20", 937, 0, flat::smap_ls_ebp_20),
+    stdcall("SUnMapLS_IP_EBP_20", 938, 0, flat::sunmap_ls_ebp_20),
+    stdcall("SMapLS_IP_EBP_24", 939, 0, flat::smap_ls_ebp_24),
+    stdcall("SUnMapLS_IP_EBP_24", 940, 0, flat::sunmap_ls_ebp_24),
+    stdcall("SMapLS_IP_EBP_28", 941, 0, flat::smap_ls_ebp_28),
+    stdcall("SUnMapLS_IP_EBP_28", 942, 0, flat::sunmap_ls_ebp_28),
+    stdcall("SMapLS_IP_EBP_32", 943, 0, flat::smap_ls_ebp_32),
+    stdcall("SUnMapLS_IP_EBP_32", 944, 0, flat::sunmap_ls_ebp_32),
+    stdcall("SMapLS_IP_EBP_36", 945, 0, flat::smap_ls_ebp_36),
+    stdcall("SUnMapLS_IP_EBP_36", 946, 0, flat::sunmap_ls_ebp_36),
+    stdcall("SMapLS_IP_EBP_40", 947, 0, flat::smap_ls_ebp_40),
+    stdcall("SUnMapLS_IP_EBP_40", 948, 0, flat::sunmap_ls_ebp_40),
 ];
 
 /// The places in `APIS` of the system's own stubs.
