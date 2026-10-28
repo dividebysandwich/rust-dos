@@ -165,7 +165,7 @@ impl Format {
 /// The volume descriptors of a disc, from sector 16 to the terminator.
 struct Descriptors {
     format: Format,
-    sectors: Vec<Box<[u8; DATA_SECTOR]>>,
+    sectors: Vec<[u8; DATA_SECTOR]>,
 }
 
 impl Descriptors {
@@ -174,7 +174,7 @@ impl Descriptors {
         let mut format = None;
         let mut sectors = Vec::new();
         for lba in track.start + FIRST_DESCRIPTOR..track.end {
-            let mut sector = Box::new([0u8; DATA_SECTOR]);
+            let mut sector = [0u8; DATA_SECTOR];
             image
                 .read_data(lba, &mut sector)
                 .map_err(|e| e.to_string())?;
@@ -199,9 +199,7 @@ impl Descriptors {
     /// The Primary Volume Descriptor.
     fn primary(&self) -> Result<&[u8; DATA_SECTOR], String> {
         let found = self.sectors.iter().find(|d| self.format.kind(&d[..]) == 1);
-        found
-            .map(|d| &**d)
-            .ok_or_else(|| "no primary volume descriptor".to_string())
+        found.ok_or_else(|| "no primary volume descriptor".to_string())
     }
 
     /// The root directory of the primary tree.
@@ -269,10 +267,8 @@ fn record_name(id: &[u8], tree: Tree) -> String {
     let name = match tree {
         Tree::Primary | Tree::HighSierra => String::from_utf8_lossy(id).to_ascii_uppercase(),
         Tree::Joliet => {
-            let units: Vec<u16> = id
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
+            let (units, _) = id.as_chunks::<2>();
+            let units: Vec<u16> = units.iter().map(|&unit| u16::from_be_bytes(unit)).collect();
             String::from_utf16_lossy(&units)
         }
     };
