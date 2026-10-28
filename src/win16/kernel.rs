@@ -6,6 +6,7 @@ use super::builtin::{Api16, Def, register, rust, value, win32};
 use super::thunk::{self, EBP, EDI, ESI, ESP};
 use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
+use crate::disk::DriveKind;
 use crate::dpmi::Context;
 
 pub static MODULE: Def = Def {
@@ -1500,16 +1501,25 @@ fn get_temp_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-/// GetDriveType(drive): removable for A: and B:, fixed for the others
-/// DOS has, 0 for those it hasn't.
+/// GetDriveType(drive): removable, fixed, or remote for a CD-ROM drive,
+/// 0 for a drive there isn't. Windows 3.1 has no DRIVE_CDROM: MSCDEX's
+/// drives are redirector drives, and Windows 95 and 98 give 16-bit
+/// programs the same. Programs that look for their disc ask MSCDEX
+/// (INT 2Fh AX=150Bh) which of the remote drives is a CD-ROM.
 fn get_drive_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let drive = args[0] as u16;
-    let exists =
-        matches!(dos::call21(cpu, [0x3600, 0, 0, drive + 1], None), Ok((ax, _)) if ax != 0xFFFF);
-    Some(match (exists, drive) {
-        (false, _) => 0,
-        (true, 0 | 1) => 2,
-        _ => 3,
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    const DRIVE_REMOTE: u32 = 4;
+    let Ok(drive) = u8::try_from(args[0] as u16) else {
+        return Some(0);
+    };
+    Some(match cpu.bus.disk.drive_kind(drive) {
+        None => 0,
+        Some(DriveKind::Floppy) => DRIVE_REMOVABLE,
+        Some(DriveKind::CdRom) => DRIVE_REMOTE,
+        // Z: and the other drives held in memory are fixed, as a RAM
+        // drive is.
+        Some(DriveKind::HardDisk | DriveKind::Virtual) => DRIVE_FIXED,
     })
 }
 
