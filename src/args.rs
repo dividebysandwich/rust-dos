@@ -20,7 +20,8 @@ pub(crate) struct Args {
 
     /// Keep the window hidden, for runs driven through the debug server:
     /// the 3dfx card is still drawn with OpenGL (voodoo_renderer=opengl),
-    /// on the host's GPU, where SDL_VIDEODRIVER=dummy has no OpenGL
+    /// on the host's GPU, where SDL_VIDEODRIVER=dummy has no OpenGL. A
+    /// host without OpenGL 3 gets SDL's renderer and the software card
     #[arg(long)]
     pub(crate) hidden: bool,
 

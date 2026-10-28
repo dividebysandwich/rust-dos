@@ -393,11 +393,17 @@ pub fn load_desktop(cpu: &Cpu, top: u32, rows: u32) -> Vec<u8> {
 /// video memory, as 32-bit pixels (0x00RRGGBB), `width * 4` bytes a
 /// row, or at 8 bits a pixel as they are, `width` bytes a row.
 pub fn load_rows(cpu: &Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
-    let len = (mode.width * mode.bpp / 8) as usize;
-    let mut raw = vec![0u8; len];
-    let mut out = Vec::with_capacity(mode.width as usize * 4 * rows as usize);
+    load_area(cpu, mode, top, rows, 0, mode.width)
+}
+
+/// The pixels `left..left + cols` of the rows `top..top + rows` of the
+/// picture in `mode`, as `load_rows` gives them: `cols` pixels a row.
+pub fn load_area(cpu: &Cpu, mode: &Mode, top: u32, rows: u32, left: u32, cols: u32) -> Vec<u8> {
+    let bytes = mode.bpp / 8;
+    let mut raw = vec![0u8; (cols * bytes) as usize];
+    let mut out = Vec::with_capacity(cols as usize * 4 * rows as usize);
     for y in top..top + rows {
-        read(cpu, y * mode.pitch, &mut raw);
+        read(cpu, y * mode.pitch + left * bytes, &mut raw);
         match mode.bpp {
             32 | 8 => out.extend_from_slice(&raw),
             24 => out.extend(
@@ -417,13 +423,17 @@ pub fn load_rows(cpu: &Cpu, mode: &Mode, top: u32, rows: u32) -> Vec<u8> {
     out
 }
 
-/// Store rows as `load_rows` gives them as the rows from `top` on of
-/// the picture in `mode`.
-pub fn store_rows(cpu: &mut Cpu, mode: &Mode, top: u32, data: &[u8]) {
+/// Store pixels as `load_area` gives them, `cols` a row, as the pixels
+/// `left..left + cols` of the rows from `top` on of the picture in
+/// `mode`.
+pub fn store_area(cpu: &mut Cpu, mode: &Mode, top: u32, left: u32, cols: u32, data: &[u8]) {
     let bytes = if mode.bpp == 8 { 1 } else { 4 };
-    let row_len = (mode.width * bytes) as usize;
+    let row_len = (cols * bytes) as usize;
+    if row_len == 0 {
+        return;
+    }
     for (i, row) in data.chunks_exact(row_len).enumerate() {
-        let at = (top + i as u32) * mode.pitch;
+        let at = (top + i as u32) * mode.pitch + left * mode.bpp / 8;
         let pixels = row.as_chunks::<4>().0.iter();
         let raw: std::borrow::Cow<[u8]> = match mode.bpp {
             32 | 8 => row.into(),
@@ -556,7 +566,7 @@ fn card_set_mode(cpu: &mut Cpu, width: u32, height: u32, bpp: u32) -> Option<()>
     }
     let half = height < 300;
     let lines = if half { height * 2 } else { height };
-    let narrow = width < 400;
+    let narrow = width < card::NARROW_WIDTH;
     let t = if narrow {
         let t = card_timing(width * 2, lines);
         Timing {

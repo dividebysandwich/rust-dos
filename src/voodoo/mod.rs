@@ -950,10 +950,14 @@ impl Voodoo {
         }
         self.pool.give_out();
         let busy = self.pool.busy();
-        if !busy && self.words.borrow().is_empty() && self.backlog.borrow().is_empty() {
-            self.outstanding.set(false);
-            self.tmu_in_use.set(0);
+        if !busy && self.words.borrow().is_empty() {
+            // The jobs given out are drawn; those held keep their own
+            // footprint.
             self.footprint.borrow_mut().clear();
+            if self.backlog.borrow().is_empty() {
+                self.outstanding.set(false);
+                self.tmu_in_use.set(0);
+            }
         }
         busy
     }
@@ -1245,12 +1249,22 @@ impl Voodoo {
         (self.pci.clock_enabled || !self.chip.pci_video_clock) && self.reg[FBI_INIT0] & 1 != 0
     }
 
-    /// The size of the picture it shows.
+    /// The size of the picture it shows, in the mode's own pixels.
     pub fn size(&self) -> (u32, u32) {
         if let Some(b) = &self.banshee {
             return b.desktop_size();
         }
         (self.fbi.width.max(1), self.fbi.height.max(1))
+    }
+
+    /// The size of the picture as the monitor shows it, which `render`
+    /// draws: `size`, but a Banshee's or Voodoo3's narrow modes are
+    /// twice as wide (`Banshee::picture_size`).
+    pub fn picture_size(&self) -> (u32, u32) {
+        match &self.banshee {
+            Some(b) => b.picture_size(),
+            None => self.size(),
+        }
     }
 
     /// The refresh rate of its picture.
@@ -1334,8 +1348,9 @@ impl Voodoo {
         changed || switched
     }
 
-    /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row, the
-    /// card's size), through the gamma table (see `prepare_display`).
+    /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
+    /// `picture_size` big), through the gamma table (see
+    /// `prepare_display`).
     pub fn render(&self, rgba: &mut [u8], width: usize) {
         if let Some(b) = &self.banshee {
             b.render(&self.fbi.ram, rgba, width);

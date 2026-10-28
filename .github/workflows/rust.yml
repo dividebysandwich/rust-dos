@@ -2,10 +2,27 @@ name: Rust
 
 on:
   push:
+  # ready_for_review too, as drafts skip the release builds (see `scope`).
+  # A pull request that changes only the documentation outside `src`
+  # doesn't run this workflow: nothing reads it but the packages, which
+  # copy it as it is. `src/config_ui/help/*.md` is compiled into the
+  # program, so `*.md` stops at the top folder.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
   # Manual runs build every artifact (downloadable from the run page)
   # without creating a release.
   workflow_dispatch:
+
+# A push to a pull request cancels that pull request's run still going,
+# whose results nobody needs any more. Every other run has a group of its
+# own (its run ID), so pushes to main and tags neither wait for each
+# other nor get cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -119,48 +136,25 @@ jobs:
           CARGO_PROFILE_TEST_OPT_LEVEL: 0
         run: cargo test --locked --test debug_journal_tests
 
+  # The release builds and packages, the ones `scope` picks: every target
+  # on pushes, tags and manual runs, one on most pull requests and none on
+  # drafts.
   build:
     name: ${{ matrix.label }}
-    needs: test
+    needs: [test, scope]
+    if: needs.scope.outputs.builds != '[]'
     runs-on: ${{ matrix.os }}
-    # Empty for every non-compat entry, which means "no container".
-    container: ${{ matrix.container }}
+    # Empty for every non-compat entry, which means "no container". zizmor
+    # can't see the images in a matrix that comes from `scope`, so it
+    # reports this line; they are in the BUILDS list there.
+    container: ${{ matrix.container }} # zizmor: ignore[unpinned-images]
     # The Windows 7 build is on nightly, which may break now and then: the
     # release goes ahead without it.
     continue-on-error: ${{ matrix.win7 == true }}
     strategy:
       fail-fast: false
       matrix:
-        # The -compat builds are the two Linux builds compiled inside an
-        # Ubuntu 22.04 container, so the binaries link glibc 2.35 and SDL
-        # 2.0.20 and run on stable/LTS distributions (Ubuntu 22.04, Mint 21,
-        # Debian 12, Raspberry Pi OS bookworm) that refuse the regular builds
-        # with "version `GLIBC_2.39' not found". A container rather than
-        # `runs-on: ubuntu-22.04` because GitHub is retiring that runner
-        # image, while a container image keeps working on any runner.
-        include:
-          - label: linux-x86_64
-            os: ubuntu-latest
-          - label: linux-aarch64
-            os: ubuntu-24.04-arm
-          - label: linux-x86_64-compat
-            os: ubuntu-latest
-            container: ubuntu:22.04
-          - label: linux-aarch64-compat
-            os: ubuntu-24.04-arm
-            container: ubuntu:22.04
-          - label: windows-x86_64
-            os: windows-latest
-          # For Windows 7: Rust's standard library for Windows needs a newer
-          # one (ProcessPrng from bcryptprimitives.dll, WaitOnAddress), except
-          # its Windows 7 target's, which nightly builds from source.
-          - label: windows-x86_64-win7
-            os: windows-latest
-            win7: true
-          - label: macos-aarch64
-            os: macos-latest
-          - label: macos-x86_64
-            os: macos-15-intel
+        include: ${{ fromJSON(needs.scope.outputs.builds) }}
     steps:
       # The -compat jobs start from a bare Ubuntu 22.04 image rather than the
       # runner image, so everything the runner normally provides is installed
@@ -443,9 +437,11 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # Not on drafts, as `build` isn't.
   web:
     name: web
     needs: test
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -495,55 +491,117 @@ jobs:
           path: out/*
           if-no-files-found: error
 
-  # Whether this run builds the libretro core for every target (libretro
-  # and libretro-android) or tests it on Linux x86-64 alone (libretro-pr).
-  # Every target on pushes, tags and manual runs, and on pull requests that
-  # change the core, the manifests or this workflow. A pull request that
-  # changes the rest still needs the core tested: it builds the whole
-  # rust-dos crate with the core's features (no `sdl`, no `hostmidi`), so
-  # code that needs those breaks it.
-  libretro-scope:
-    name: libretro scope
+  # What this run builds, from the files a pull request changes:
+  #
+  # - `libretro`: whether the libretro core is built for every target
+  #   (libretro and libretro-android) or tested on Linux x86-64 alone
+  #   (libretro-pr). Every target on pushes, tags and manual runs, and on
+  #   pull requests that change the core, the manifests or this workflow.
+  #   A pull request that changes the rest still needs the core tested: it
+  #   builds the whole rust-dos crate with the core's features (no `sdl`,
+  #   no `hostmidi`), so code that needs those breaks it.
+  # - `builds`: the release builds `build` makes, as its matrix. All of
+  #   them on pushes, tags and manual runs, and on pull requests that change
+  #   the manifests, build.rs, the packaging or the workflows, or that have
+  #   the `full-build` label (read when the job runs, so after adding it,
+  #   re-run the workflow). Other pull requests get linux-x86_64-compat
+  #   alone: the test jobs have compiled and linked the program on every
+  #   system already, and this build is the one that finds code needing a
+  #   newer SDL than Ubuntu 22.04's 2.0.20. Drafts get none, and a
+  #   `ready_for_review` run makes them.
+  scope:
+    name: scope
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     outputs:
-      full: ${{ steps.scope.outputs.full }}
+      libretro: ${{ steps.scope.outputs.libretro }}
+      builds: ${{ steps.scope.outputs.builds }}
     steps:
       - name: Look at the files the pull request changes
         id: scope
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The -compat builds are the two Linux builds compiled inside an
+          # Ubuntu 22.04 container, so the binaries link glibc 2.35 and SDL
+          # 2.0.20 and run on stable/LTS distributions (Ubuntu 22.04, Mint
+          # 21, Debian 12, Raspberry Pi OS bookworm) that refuse the regular
+          # builds with "version `GLIBC_2.39' not found". A container rather
+          # than `runs-on: ubuntu-22.04` because GitHub is retiring that
+          # runner image, while a container image keeps working on any
+          # runner. For Windows 7: Rust's standard library for Windows needs
+          # a newer one (ProcessPrng from bcryptprimitives.dll,
+          # WaitOnAddress), except its Windows 7 target's, which nightly
+          # builds from source.
+          BUILDS: |
+            [
+              {"label": "linux-x86_64", "os": "ubuntu-latest"},
+              {"label": "linux-aarch64", "os": "ubuntu-24.04-arm"},
+              {"label": "linux-x86_64-compat", "os": "ubuntu-latest", "container": "ubuntu:22.04"},
+              {"label": "linux-aarch64-compat", "os": "ubuntu-24.04-arm", "container": "ubuntu:22.04"},
+              {"label": "windows-x86_64", "os": "windows-latest"},
+              {"label": "windows-x86_64-win7", "os": "windows-latest", "win7": true},
+              {"label": "macos-aarch64", "os": "macos-latest"},
+              {"label": "macos-x86_64", "os": "macos-15-intel"}
+            ]
         run: |
-          full=true
+          libretro=true
+          builds=all
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            full=false
+            libretro=false
+            builds=compat
             # The API lists at most 3000 files: a longer list counts as a
             # match.
             files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
             if [[ $(wc -l <<< "$files") -ge 3000 ]]; then
-              full=true
+              libretro=true
+              builds=all
             fi
             while IFS= read -r file; do
               case "$file" in
                 libretro/* | Cargo.toml | Cargo.lock | .github/workflows/rust.yml)
-                  echo "$file"
-                  full=true
+                  echo "libretro: $file"
+                  libretro=true
+                  ;;
+              esac
+              case "$file" in
+                Cargo.toml | Cargo.lock | build.rs | packaging/* | .github/*)
+                  echo "builds: $file"
+                  builds=all
                   ;;
               esac
             done <<< "$files"
+            # The labels and the draft state as they are now, so a re-run
+            # sees a label added since the run started.
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+            if jq -e '.labels | any(.name == "full-build")' <<< "$pr" > /dev/null; then
+              echo "builds: the full-build label"
+              builds=all
+            fi
+            if [[ $(jq -r .draft <<< "$pr") == true ]]; then
+              echo "builds: none for a draft"
+              builds=none
+            fi
           fi
-          echo "full=$full"
-          echo "full=$full" >> "$GITHUB_OUTPUT"
+          case "$builds" in
+            all) matrix=$(jq -c . <<< "$BUILDS") ;;
+            compat) matrix=$(jq -c 'map(select(.label == "linux-x86_64-compat"))' <<< "$BUILDS") ;;
+            none) matrix='[]' ;;
+          esac
+          echo "libretro=$libretro"
+          echo "builds=$matrix"
+          {
+            echo "libretro=$libretro"
+            echo "builds=$matrix"
+          } >> "$GITHUB_OUTPUT"
 
-  # The libretro core on Linux x86-64 alone, for the pull requests
-  # libretro-scope picks: its tests and clippy, without the release build
-  # or the package.
+  # The libretro core on Linux x86-64 alone, for the pull requests `scope`
+  # picks: its tests and clippy, without the release build or the package.
   libretro-pr:
     name: libretro (linux-x86_64, tests and clippy)
-    needs: [test, libretro-scope]
-    if: needs.libretro-scope.outputs.full != 'true'
+    needs: [test, scope]
+    if: needs.scope.outputs.libretro != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -574,8 +632,8 @@ jobs:
   # the library without SDL or ALSA, which the frontend has in their place.
   libretro:
     name: libretro (${{ matrix.label }})
-    needs: [test, libretro-scope]
-    if: needs.libretro-scope.outputs.full == 'true'
+    needs: [test, scope]
+    if: needs.scope.outputs.libretro == 'true'
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     strategy:
@@ -688,8 +746,8 @@ jobs:
   # Cross-built, so its tests run in the libretro job above instead.
   libretro-android:
     name: libretro (android-${{ matrix.abi }})
-    needs: [test, libretro-scope]
-    if: needs.libretro-scope.outputs.full == 'true'
+    needs: [test, scope]
+    if: needs.scope.outputs.libretro == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
