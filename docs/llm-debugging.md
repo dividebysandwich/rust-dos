@@ -23,6 +23,13 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   the OpenGL renderer on the host's GPU, leave `SDL_VIDEODRIVER` unset
   and pass `--hidden`: the window is made with its OpenGL context but
   never shown.
+- **A smaller OpenGL:** `RUST_DOS_GL_MAX_TEXTURE_SIZE=1024` makes the
+  3dfx renderer lay out a Banshee's or Voodoo3's memory as if OpenGL
+  allowed textures of no more than 1024 texels a side, and
+  `RUST_DOS_GL_NO_BLIT=1` leaves out its program for 2D operations, as
+  if it didn't compile: the card does them in software, the renderer
+  still composes the picture, and stderr says
+  `2D operations stay on the CPU`.
 - **C: drive:** `-d` sets it. `AUTOEXEC.BAT` in that directory runs at
   startup.
 - **`--no-config`:** without it, rust-dos reads `rust-dos.conf` from the

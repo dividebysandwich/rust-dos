@@ -395,7 +395,12 @@ impl GlScreen {
                 return Err(problem.clone());
             }
             match VoodooGl::new(&self.gl, self.glsl, scale, samples, anisotropy) {
-                Ok(voodoo) => *self.voodoo.borrow_mut() = Some(voodoo),
+                Ok(voodoo) => {
+                    if let Some(problem) = voodoo.gpu_2d_problem() {
+                        eprintln!("[DISPLAY] 2D operations stay on the CPU: {problem}");
+                    }
+                    *self.voodoo.borrow_mut() = Some(voodoo);
+                }
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);
                     self.voodoo_failed = Some(e.clone());
