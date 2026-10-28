@@ -240,21 +240,23 @@ impl CdImage {
     }
 
     /// The sector format of a bare image of `len` bytes, found from where
-    /// the ISO 9660 volume descriptor is, which `read` fills a buffer from.
+    /// the first volume descriptor is, which `read` fills a buffer from.
     fn bare_mode(len: u64, mut read: impl FnMut(u64, &mut [u8]) -> bool) -> Option<TrackMode> {
-        // The Primary Volume Descriptor is sector 16: "CD001" at byte 1 of
-        // its user data.
+        // The first volume descriptor is sector 16: "CD001" at byte 1 of
+        // its user data, or High Sierra's "CDROM" at byte 9.
         let layouts = [TrackMode::Mode1_2048, TrackMode::Mode1_2352, TrackMode::Mode2_2352, TrackMode::Mode2_2336];
-        let mut probe = [0u8; 5];
+        let mut probe = [0u8; 14];
         layouts.into_iter().find(|mode| {
-            let at = 16 * mode.sector_size() + mode.data_offset() + 1;
-            at < len && read(at, &mut probe) && &probe == b"CD001"
+            let at = 16 * mode.sector_size() + mode.data_offset();
+            at + probe.len() as u64 <= len
+                && read(at, &mut probe)
+                && super::iso9660::Format::of(&probe).is_some()
         })
     }
 
     fn bare(path: &Path, backing: Backing) -> Result<Self, String> {
         let mode = Self::bare_mode(backing.len, |at, buf| backing.read_at(at, buf).is_ok())
-            .ok_or_else(|| format!("{} is not an ISO 9660 CD image", path.display()))?;
+            .ok_or_else(|| format!("{} is not an ISO 9660 or High Sierra CD image", path.display()))?;
         let sectors = (backing.len / mode.sector_size()) as u32;
         let track = Track {
             number: 1,
@@ -827,6 +829,13 @@ mod tests {
         let image = CdImage::open(&dir.join("game.bin")).unwrap();
         assert_eq!(image.tracks()[0].mode, TrackMode::Mode1_2352);
         assert_eq!(image.leadout(), 17);
+
+        // High Sierra has "CDROM" at byte 9.
+        let mut old = vec![0u8; 17 * 2048];
+        old[16 * 2048 + 9..16 * 2048 + 14].copy_from_slice(b"CDROM");
+        fs::write(dir.join("old.iso"), &old).unwrap();
+        let image = CdImage::open(&dir.join("old.iso")).unwrap();
+        assert_eq!(image.tracks()[0].mode, TrackMode::Mode1_2048);
 
         fs::write(dir.join("junk.iso"), vec![0u8; 40 * 2048]).unwrap();
         assert!(CdImage::open(&dir.join("junk.iso")).is_err());
