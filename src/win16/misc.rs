@@ -451,6 +451,17 @@ const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
 
+/// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
+/// SMPTE time being hour, minute, second, frame, fps and a pad byte
+/// (Win32's has two, and a DWORD wType).
+const MMTIME16_SIZE: u32 = 8;
+/// MMTIME's kinds whose union is SMPTE time; the others are a DWORD.
+const TIME_SMPTE: u32 = 8;
+/// What a short structure gets from the wave functions, and from
+/// timeGetDevCaps.
+const MMSYSERR_INVALPARAM: u32 = 11;
+const TIMERR_NOCANDO: u32 = 97;
+
 /// A 32-bit function returned `value`: what 16-bit code gets.
 pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
     let d = |i: usize| data.get(i).copied().unwrap_or(0);
@@ -499,7 +510,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
         }
         P_MMTIME => {
             if value == 0 {
-                mmtime16(cpu, d(1), d(2), d(3));
+                mmtime16(cpu, d(1), d(2));
             }
             Some(value)
         }
@@ -883,6 +894,9 @@ fn wave_out_write(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[1] == 0 || args[2] < MMTIME16_SIZE {
+        return Some(MMSYSERR_INVALPARAM);
+    }
     let time = thunk::scratch32(cpu, 12);
     let kind = r16(cpu, args[1]);
     w32(cpu, time, kind);
@@ -892,11 +906,16 @@ fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MM,
         "waveOutGetPosition",
         &[args[0], time, 12],
-        vec![P_MMTIME, time, args[1], args[2]],
+        vec![P_MMTIME, time, args[1]],
     )
 }
 
+/// timeGetSystemTime: with a short MMTIME or none, nothing is written
+/// and the answer is still 0, as Windows has it.
 fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] == 0 || args[1] < MMTIME16_SIZE {
+        return Some(0);
+    }
     let time = thunk::scratch32(cpu, 12);
     go_at(
         cpu,
@@ -904,26 +923,27 @@ fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MM,
         "timeGetSystemTime",
         &[time, 12],
-        vec![P_MMTIME, time, args[0], args[1]],
+        vec![P_MMTIME, time, args[0]],
     )
 }
 
-/// The MMTIME at `time` as the MMTIME16 at `time16`, of `size` bytes as
-/// its caller gave. Windows 3.1's is 8 bytes, wType and a union of 6,
-/// its SMPTE time being hour, minute, second, frame, fps and a pad byte
-/// (Win32's has two); MMSYSTEM writes no more than the caller's size.
-fn mmtime16(cpu: &mut Cpu, time: u32, time16: u32, size: u32) {
-    let mut bytes = (r32(cpu, time) as u16).to_le_bytes().to_vec();
-    bytes.extend(super::peek(cpu, time + 4, 6).unwrap_or(vec![0; 6]));
-    bytes.truncate(size.min(MMTIME16) as usize);
+/// The MMTIME at `time` as Windows 3.1's at `time16`: wType, and the
+/// union as far as its kind fills it (6 bytes of SMPTE time, else a
+/// DWORD), as MMSYSTEM leaves the rest of the caller's MMTIME as it was.
+/// The caller's size was checked to hold it.
+fn mmtime16(cpu: &mut Cpu, time: u32, time16: u32) {
+    let kind = r32(cpu, time);
+    let len = if kind == TIME_SMPTE { 6 } else { 4 };
+    let mut bytes = (kind as u16).to_le_bytes().to_vec();
+    bytes.extend(super::peek(cpu, time + 4, len).unwrap_or(vec![0; len]));
     super::poke(cpu, time16, &bytes);
 }
 
-/// The size of Windows 3.1's MMTIME.
-const MMTIME16: u32 = 8;
-
 fn time_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    // TIMECAPS16: the shortest and the longest period.
+    // TIMECAPS16: the shortest and the longest period, 4 bytes.
+    if args[0] == 0 || args[1] < 4 {
+        return Some(TIMERR_NOCANDO);
+    }
     super::write_16(cpu, args[0], 1);
     super::write_16(cpu, args[0] + 2, 0xFFFF);
     Some(0)
