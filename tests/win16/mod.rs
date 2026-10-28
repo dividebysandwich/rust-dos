@@ -56,8 +56,9 @@ impl Code {
         self.emit(&[0x0E]).push(offset)
     }
 
-    /// `call far` the function `ordinal` of `module`.
-    pub fn call(&mut self, module: &str, ordinal: u16) -> &mut Code {
+    /// The module reference of `module` (from 1, in the order modules
+    /// are first named), for a call or a fixup of `Target::Ordinal`.
+    pub fn module(&mut self, module: &str) -> u16 {
         let index = match self.modules.iter().position(|m| m == module) {
             Some(i) => i,
             None => {
@@ -65,8 +66,14 @@ impl Code {
                 self.modules.len() - 1
             }
         };
+        index as u16 + 1
+    }
+
+    /// `call far` the function `ordinal` of `module`.
+    pub fn call(&mut self, module: &str, ordinal: u16) -> &mut Code {
+        let module = self.module(module);
         let at = self.here() + 1;
-        self.calls.push((index as u16 + 1, ordinal, at));
+        self.calls.push((module, ordinal, at));
         self.emit(&[0x9A, 0xFF, 0xFF, 0x00, 0x00])
     }
 
@@ -99,6 +106,10 @@ impl Code {
 /// code's first byte.
 pub fn program(code: &Code, flags: u16) -> Vec<u8> {
     let mut b = ne::Builder::new("T", ne::MULTIPLEDATA);
+    for (i, m) in code.modules.iter().enumerate() {
+        let number = b.import_module(m);
+        assert_eq!(number as usize, i + 1, "the module reference of {m}");
+    }
     let relocations = code
         .calls
         .iter()
@@ -122,9 +133,6 @@ pub fn program(code: &Code, flags: u16) -> Vec<u8> {
         alloc: 0x100,
         relocations: Vec::new(),
     });
-    for m in &code.modules {
-        b.import_module(m);
-    }
     b.auto_data(data, 0x400, 0x800);
     b.entry_point(text, 0);
     b.initial_stack(data, 0);
