@@ -67,6 +67,16 @@ pub fn start() {
 /// texture's mipmap.
 #[wasm_bindgen]
 pub fn shader_program(name: &str) -> Vec<String> {
+    let pass = match name {
+        "xbrz-corners" => Some(shader::XbrzPass::Corners),
+        "xbrz-resolve" => Some(shader::XbrzPass::Resolve),
+        "xbrz-display" => Some(shader::XbrzPass::Display),
+        _ => None,
+    };
+    if let Some(pass) = pass {
+        let (vertex, fragment) = shader::xbrz_sources(pass, Glsl::Es300);
+        return vec![vertex, fragment];
+    }
     match Shader::parse(name) {
         Some(look) => {
             let (vertex, fragment) = shader::sources(look, Glsl::Es300);
@@ -464,6 +474,16 @@ impl Machine {
     /// the current WASM memory buffer.
     pub fn shader_pixels(&self) -> *const u8 {
         self.xbrz_frame.source.rgba.as_ptr()
+    }
+
+    /// Revision of the native shader input, independent of overlays.
+    pub fn shader_revision(&self) -> u32 {
+        self.xbrz_frame.source_revision()
+    }
+
+    /// Revision of the composed overlay texture.
+    pub fn shader_overlay_revision(&self) -> u32 {
+        self.xbrz_frame.overlay_revision()
     }
 
     /// RGBA overlay pixels for `screen_width() * screen_height()`. Read
@@ -1644,15 +1664,20 @@ mod tests {
         assert_eq!(m.xbrz_frame.source, expected.source);
         assert_eq!(m.shader_pixels(), m.xbrz_frame.source.rgba.as_ptr());
         assert_eq!(m.shader_overlay_visible(), overlay);
+        let source_revision = m.shader_revision();
+        let overlay_revision = m.shader_overlay_revision();
         m.osd.show("Overlay regression");
         m.render();
         assert!(m.shader_overlay_visible());
+        assert_eq!(m.shader_revision(), source_revision);
+        assert_ne!(m.shader_overlay_revision(), overlay_revision);
         assert_eq!(m.shader_overlay_pixels(), m.xbrz_frame.overlay.rgba.as_ptr());
         assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
         m.osd = Osd::new();
         m.render();
         assert_eq!(m.xbrz_frame.source, expected.source);
         assert_eq!(m.shader_overlay_visible(), overlay);
+        assert_eq!(m.shader_revision(), source_revision);
         m.set_shaders_available(false);
         assert_eq!(m.shader(), "none");
         assert_eq!(m.screen_pixels(), m.screen.rgba.as_ptr());

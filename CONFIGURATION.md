@@ -3036,6 +3036,11 @@ modes before scaling. The `scale` setting still controls the window's
 size independently. Cursors and settings overlays stay sharp, and the
 same native input is used in the browser and in shader captures.
 
+For magnified output, xBRZ reuses a filtered 2x base picture until the
+native pixels or monochrome tint change. Resizing and overlays reuse
+that base. Smaller outputs resolve directly from the native picture.
+If the extra render targets are unavailable, the direct shader is used.
+
 Choose `xbrz` when you want to magnify pixel art, such as DOS games,
 while smoothing jagged diagonal edges. It works well with Ultima VI,
 Dungeon Master II and Blood and Magic.

@@ -1,11 +1,14 @@
-// GPU xBRZ at 2x. Each fragment computes its source pixel's 2x2 block
-// from the surrounding texels and selects the output texel. Channels
-// stay at whole numbers from 0 to 255 to preserve integer blend rounding.
+// GPU xBRZ at 2x. Channels stay at whole numbers from 0 to 255 to
+// preserve integer blend rounding across the separate passes.
 
 uniform sampler2D u_frame;
 uniform vec2 u_source;
 uniform sampler2D u_overlay;
 uniform bool u_overlay_enabled;
+uniform bool u_unflipped;
+#ifdef XBRZ_PRECOMPUTED
+uniform sampler2D u_corners;
+#endif
 
 in vec2 v_uv;
 out vec4 o_color;
@@ -97,6 +100,11 @@ vec4 gradient(vec4 front, vec4 back, float m, float n) {
 // Classify blends at the corner between q, q + (1, 0), q + (0, 1) and
 // q + (1, 1). Return (top_left, top_right, bottom_left, bottom_right)
 // in x, y, z, w.
+#ifdef XBRZ_PRECOMPUTED
+ivec4 corners(ivec2 q) {
+    return ivec4(floor(texelFetch(u_corners, q + ivec2(1), 0) * 255.0 + 0.5));
+}
+#else
 ivec4 corners(ivec2 q) {
     vec4 b = texel(q + ivec2(0, -1));
     vec4 c = texel(q + ivec2(1, -1));
@@ -143,6 +151,14 @@ ivec4 corners(ivec2 q) {
     }
     return r;
 }
+#endif
+
+#ifdef XBRZ_CORNERS
+void main() {
+    // The halo stores kernels outside the top and left source edges.
+    o_color = vec4(corners(ivec2(gl_FragCoord.xy) - ivec2(1))) / 255.0;
+}
+#else
 
 // The corner blends of source pixel p. At the left boundary, reuse the
 // left kernel's upper-right blend and leave the lower-left blend empty.
@@ -192,6 +208,9 @@ int block_index(int i, int j, int rot) {
 }
 
 // Blend `col` into logical cell (i, j) of rotation rot.
+#ifdef XBRZ_REFERENCE
+// The former full-block path remains a test and benchmark reference.
+#define BLOCK_ARGS blk
 void mix(inout vec4 blk[4], int rot, int i, int j, vec4 col, float m, float n) {
     int k = block_index(i, j, rot);
     blk[k] = gradient(col, blk[k], m, n);
@@ -199,6 +218,20 @@ void mix(inout vec4 blk[4], int rot, int i, int j, vec4 col, float m, float n) {
 
 // Blend one rotation of the pixel.
 void blend_rotation(vec4 n[9], ivec4 blend, int rot, inout vec4 blk[4]) {
+#else
+#define BLOCK_ARGS target, pixel
+void mix(int target, inout vec4 pixel, int rot, int i, int j, vec4 col, float m, float n) {
+    if (block_index(i, j, rot) == target) {
+        pixel = gradient(col, pixel, m, n);
+    }
+}
+
+void blend_rotation(vec4 n[9], ivec4 blend, int rot, int target, inout vec4 pixel) {
+    // This rotation never writes its upper-left block pixel.
+    if (block_index(0, 0, rot) == target) {
+        return;
+    }
+#endif
     ivec4 r = rotate_blend(blend, rot);
     if (r.w == BLEND_NONE) {
         return;
@@ -229,7 +262,7 @@ void blend_rotation(vec4 n[9], ivec4 blend, int rot, inout vec4 blk[4]) {
     vec4 col = dist(e, f) <= dist(e, h) ? f : h;
 
     if (!line) {
-        mix(blk, rot, 1, 1, col, 21.0, 100.0);
+        mix(BLOCK_ARGS, rot, 1, 1, col, 21.0, 100.0);
         return;
     }
 
@@ -240,17 +273,17 @@ void blend_rotation(vec4 n[9], ivec4 blend, int rot, inout vec4 blk[4]) {
     bool steep = STEEP_THRESHOLD * hc <= fg && any(notEqual(e, c)) && any(notEqual(b, c));
 
     if (shallow && steep) {
-        mix(blk, rot, 1, 0, col, 1.0, 4.0);
-        mix(blk, rot, 0, 1, col, 1.0, 4.0);
-        mix(blk, rot, 1, 1, col, 5.0, 6.0);
+        mix(BLOCK_ARGS, rot, 1, 0, col, 1.0, 4.0);
+        mix(BLOCK_ARGS, rot, 0, 1, col, 1.0, 4.0);
+        mix(BLOCK_ARGS, rot, 1, 1, col, 5.0, 6.0);
     } else if (shallow) {
-        mix(blk, rot, 1, 0, col, 1.0, 4.0);
-        mix(blk, rot, 1, 1, col, 3.0, 4.0);
+        mix(BLOCK_ARGS, rot, 1, 0, col, 1.0, 4.0);
+        mix(BLOCK_ARGS, rot, 1, 1, col, 3.0, 4.0);
     } else if (steep) {
-        mix(blk, rot, 0, 1, col, 1.0, 4.0);
-        mix(blk, rot, 1, 1, col, 3.0, 4.0);
+        mix(BLOCK_ARGS, rot, 0, 1, col, 1.0, 4.0);
+        mix(BLOCK_ARGS, rot, 1, 1, col, 3.0, 4.0);
     } else {
-        mix(blk, rot, 1, 1, col, 1.0, 2.0);
+        mix(BLOCK_ARGS, rot, 1, 1, col, 1.0, 2.0);
     }
 }
 
@@ -264,7 +297,8 @@ void main() {
             return;
         }
     }
-    ivec2 o = ivec2(floor(v_uv * u_source * 2.0));
+    // Cached rows retain source order; display rows follow the vertex UV.
+    ivec2 o = u_unflipped ? ivec2(gl_FragCoord.xy) : ivec2(floor(v_uv * u_source * 2.0));
     ivec2 p = o / 2;
 
     vec4 n[9];
@@ -278,12 +312,21 @@ void main() {
     n[7] = texel(p + ivec2(0, 1));
     n[8] = texel(p + ivec2(1, 1));
 
+#ifdef XBRZ_REFERENCE
     vec4 blk[4] = vec4[4](n[4], n[4], n[4], n[4]);
+#else
+    int target = (o.y - 2 * p.y) * 2 + (o.x - 2 * p.x);
+    vec4 pixel = n[4];
+#endif
     ivec4 blend = blend_of(p);
     for (int rot = 0; rot < 4; rot++) {
-        blend_rotation(n, blend, rot, blk);
+        blend_rotation(n, blend, rot, BLOCK_ARGS);
     }
+#ifdef XBRZ_REFERENCE
+    vec4 pixel = blk[(o.y - 2 * p.y) * 2 + (o.x - 2 * p.x)];
+#endif
     // A quarter of a level more than the whole number, so that the
     // conversion to 8 bits lands on it whether it rounds or truncates.
-    o_color = (blk[(o.y - 2 * p.y) * 2 + (o.x - 2 * p.x)] + 0.25) / 255.0;
+    o_color = (pixel + 0.25) / 255.0;
 }
+#endif

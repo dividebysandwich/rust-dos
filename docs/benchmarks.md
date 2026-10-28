@@ -61,7 +61,7 @@ and confirm a large one on a quiet machine before relying on it.
 |---|---|
 | `benches/dos.rs` | The built-in DOS's file calls on a host folder: DIR's listing, FindFirst/FindNext over a whole folder, a pattern search, and opening a file three folders deep |
 | `benches/audio.rs` | One video frame of sound: the AWE32 playing 32 voices with the filter open, fixed, swept by the modulation envelope and wobbled by LFO1 |
-| `benches/video.rs` | VGA planar sprites and scrolling, a DOS mode 12h row-stress pattern and box animation, CGA composite, and Voodoo triangles: identical generic/variant pipelines and 64-triangle frames with 0 or 4 workers in software or GL-backlog mode |
+| `benches/video.rs` | VGA planar sprites and scrolling, a DOS mode 12h row-stress pattern and box animation, CGA composite, xBRZ preparation, and Voodoo triangles: identical generic/variant pipelines and 64-triangle frames with 0 or 4 workers in software or GL-backlog mode |
 | `benches/memory.rs` | XMS block moves (function 0Bh) between extended and conventional memory and between blocks, and an EMS move (function 57h) into conventional memory |
 | `benches/cpu.rs` | A guest loop of arithmetic, memory accesses, calls and port writes on the interpreter and on the recompiler, each also with a profile running (`docs/profiling.md`) |
 | `benches/host.rs` | Host-side work on the emulation thread: capturing a frame of a GIF animation, a 256-colour 640x400 picture and a high-colour 640x480 one |
@@ -100,6 +100,82 @@ The final software catch-up and worker teardown are outside the timing.
 These cases measure the CPU cost accompanying GL replay, including
 recording and pruning; they need no GL context and do not measure host
 GPU rendering, upload or readback. They do not replace a game benchmark.
+
+## xBRZ preparation and rendering
+
+The CPU cases measure `XbrzFrame::prepare` with persistent buffers at
+320x200 (a doubled VGA picture) and 640x480. They cover an unchanged
+picture, one changed native row, a full change, and coverage changes in
+an overlay whose colour stays the same. Sparse and full-screen overlays
+also cover stable content, pixel changes and moving coverage. Input
+construction is outside the timing. These cases do not measure rendering
+or texture uploads. Coverage is cached separately from alpha, using one
+byte per screen pixel after an overlay first appears; buffers are reused
+until the screen dimensions change.
+
+```sh
+cargo bench --locked --bench video -- video/xbrz_prepare --save-baseline xbrz
+```
+
+The separate browser benchmark uses the real GLSL from
+`src/video/shader/`, with no emulator or game files. It needs Node 22 or
+later for its built-in WebSocket client, and Chrome on `PATH` (or set
+`CHROME_BIN`). From the repository root:
+
+```sh
+node web/bench/run-xbrz.mjs /tmp/xbrz-webgl.json
+```
+
+It runs Chrome headlessly through a temporary localhost server, checks
+experimental shaders against the current shader byte for byte, and
+measures persistent RGBA8 framebuffer targets. Cases include palette
+patterns and noise, minified, native, exact 2x and larger output, narrow
+images, transparency, near colours, and source changes between draws.
+Three rounds rotate the variant order; each has three warm-up draws and
+six measured draws per variant. Set `XBRZ_SAMPLES` and `XBRZ_ROUNDS` to
+change the sample counts.
+
+The experiments isolate a corner-classification pass, calculation of
+only the selected block pixel, a fixed 2x intermediate, their
+combinations, and reuse of unchanged intermediates. The former
+four-pixel calculation remains behind `XBRZ_REFERENCE` in the shared
+GLSL. `production_fresh` runs the real page renderer, including its
+source upload and cache invalidation; `production_reuse` retains the
+unchanged base. Both must match the reference and issue the expected
+number of passes. No texture storage may be allocated during timing.
+
+The production renderer caches corner flags until source pixels or tint
+change. Output at least 2x in both axes uses a reusable 2x base; smaller
+output resolves directly. Minification skips the source-sized prepass.
+Targets must fit both the texture and viewport limits; unsupported sizes
+retain the direct shader. The corner texture includes a top and left
+halo to preserve the boundary rules. Shader captures use the same
+pipeline. Renderer marker changes require updating the benchmark's
+extraction of `makeGlScreen`.
+
+When GPU timer queries are available, `gpuMs` contains their elapsed
+time. Disjoint samples are null and excluded from the printed medians.
+`wallMs` then measures CPU submission and is not rendering completion.
+Without timer queries, the wall measurement includes a synchronous
+one-pixel readback to wait for completion. These two metrics are not
+interchangeable. Queries follow the
+[Khronos timer extension](https://registry.khronos.org/webgl/extensions/EXT_disjoint_timer_query_webgl2/).
+
+Allocation, compilation, normal readback, overlays, the emulator,
+compositing and vsync are outside the steady-state draw timings.
+`upload_nearest` also includes a full source upload followed by a nearest
+draw, so its transfer is consumed before the query ends. Reuse cases
+assume the base has not changed. The JSON retains individual samples,
+source hashes, renderer, browser, command flags and logical intermediate
+storage. Shader selection time and the first production frame per
+workload are recorded separately; the latter can include target
+allocation and uses shaders already warmed by the edge checks.
+
+To measure the software fallback explicitly, add `--swiftshader`.
+`--no-sandbox` is available for isolated environments that require it.
+Software-renderer timings do not predict integrated-GPU frame times.
+Repeat on target hardware before making hardware frame-rate claims.
+These benchmarks set no wall-time CI gate.
 
 ## Adding benchmarks
 

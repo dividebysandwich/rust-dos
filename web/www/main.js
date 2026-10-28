@@ -418,8 +418,10 @@ function draw() {
       pixels: new Uint8Array(wasm.memory.buffer, machine.shader_overlay_pixels(), width * height * 4),
       width,
       height,
+      revision: machine.shader_overlay_revision(),
     } : null;
-    if (screenGl.upload(pixels, sourceWidth, sourceHeight, overlay)) {
+    const revision = xbrz ? machine.shader_revision() : undefined;
+    if (screenGl.upload(pixels, sourceWidth, sourceHeight, overlay, revision)) {
       layout();
     } else {
       screenGl.render();
@@ -452,6 +454,7 @@ function makeGlScreen() {
   /// The picture's size, once there is one.
   let frame;
   let overlayFrame;
+  let xbrzCache;
   let look = 'none';
   let smooth = false;
   /// A monochrome tube, whose phosphor is one colour: no colour mask.
@@ -479,6 +482,7 @@ function makeGlScreen() {
     vao = gl.createVertexArray();
     programs = new Map();
     frame = null;
+    xbrzCache = undefined;
   }
 
   function compile(name) {
@@ -507,6 +511,7 @@ function makeGlScreen() {
     gl.useProgram(program);
     gl.uniform1i(gl.getUniformLocation(program, 'u_frame'), 0);
     gl.uniform1i(gl.getUniformLocation(program, 'u_overlay'), 1);
+    gl.uniform1i(gl.getUniformLocation(program, 'u_corners'), 2);
     return {
       program,
       source: gl.getUniformLocation(program, 'u_source'),
@@ -516,13 +521,14 @@ function makeGlScreen() {
       glow: gl.getUniformLocation(program, 'u_glow'),
       line: gl.getUniformLocation(program, 'u_line'),
       overlay: gl.getUniformLocation(program, 'u_overlay_enabled'),
+      unflipped: gl.getUniformLocation(program, 'u_unflipped'),
     };
   }
 
   function program(name) {
     if (!programs.has(name)) {
       programs.set(name, compile(name));
-      if (!programs.get(name) && !gl.isContextLost()) {
+      if (!programs.get(name) && !gl.isContextLost() && !name.startsWith('xbrz-')) {
         toast(`The ${name} CRT shader doesn't work in this browser.`, 'warn');
       }
     }
@@ -539,6 +545,103 @@ function makeGlScreen() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magnify);
     if (mipmaps && frame) {
       gl.generateMipmap(gl.TEXTURE_2D);
+    }
+  }
+
+  function discardTarget(target) {
+    if (target) {
+      gl.deleteFramebuffer(target.framebuffer);
+      gl.deleteTexture(target.texture);
+    }
+  }
+
+  function makeTarget(width, height) {
+    const texture = gl.createTexture();
+    const framebuffer = gl.createFramebuffer();
+    try {
+      if (!texture || !framebuffer) throw new Error('Could not create an xBRZ target');
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      const complete = gl.checkFramebufferStatus(gl.DRAW_FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      const error = gl.getError();
+      if (!complete || error !== gl.NO_ERROR) throw new Error('Incomplete xBRZ framebuffer');
+      return { texture, framebuffer, width, height };
+    } catch (error) {
+      if (framebuffer) gl.deleteFramebuffer(framebuffer);
+      if (texture) gl.deleteTexture(texture);
+      throw error;
+    }
+  }
+
+  function drawPass(entry, target, unflipped) {
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.framebuffer);
+    gl.viewport(0, 0, target.width, target.height);
+    gl.useProgram(entry.program);
+    gl.uniform2f(entry.source, frame.width, frame.height);
+    gl.uniform1i(entry.overlay, 0);
+    gl.uniform1i(entry.unflipped, unflipped ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  function prepareXbrz() {
+    const cache = xbrzCache;
+    const { width, height } = frame;
+    if (width + 1 > cache.limit || height + 1 > cache.limit) {
+      throw new Error('xBRZ corner texture exceeds the context limit');
+    }
+    const magnified = canvas.width >= width * 2 && canvas.height >= height * 2;
+    const useCache = magnified && width * 2 <= cache.limit && height * 2 <= cache.limit;
+    if (cache.width === width && cache.height === height && cache.cornersValid
+        && (!useCache || cache.scaledValid)) {
+      if (!useCache) {
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, cache.corners.texture);
+      }
+      return useCache ? { entry: cache.display, texture: cache.scaled.texture }
+        : { entry: cache.resolve, texture };
+    }
+    const framebuffer = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+    const states = [gl.BLEND, gl.DITHER, gl.SCISSOR_TEST].map(state => [state, gl.isEnabled(state)]);
+    for (const [state] of states) gl.disable(state);
+    try {
+      if (cache.width !== width || cache.height !== height) {
+        discardTarget(cache.corners);
+        discardTarget(cache.scaled);
+        cache.corners = cache.scaled = null;
+        cache.width = width;
+        cache.height = height;
+        cache.cornersValid = cache.scaledValid = false;
+      }
+      // The extra row and column preserve kernels outside the top/left.
+      cache.corners ||= makeTarget(width + 1, height + 1);
+      if (!cache.cornersValid) {
+        drawPass(cache.classify, cache.corners, false);
+        cache.cornersValid = true;
+      }
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, cache.corners.texture);
+      if (useCache) {
+        cache.scaled ||= makeTarget(width * 2, height * 2);
+        if (!cache.scaledValid) {
+          drawPass(cache.resolve, cache.scaled, true);
+          cache.scaledValid = true;
+        }
+        return { entry: cache.display, texture: cache.scaled.texture };
+      }
+      return { entry: cache.resolve, texture };
+    } finally {
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, framebuffer);
+      for (const [state, enabled] of states) {
+        if (enabled) gl.enable(state);
+      }
+      gl.activeTexture(gl.TEXTURE0);
     }
   }
 
@@ -569,29 +672,46 @@ function makeGlScreen() {
       curvature = bend;
       glow = shine;
       program(look);
+      if (look === 'xbrz' && xbrzCache === undefined) {
+        const entries = ['xbrz-corners', 'xbrz-resolve', 'xbrz-display'].map(program);
+        xbrzCache = entries.every(Boolean) ? {
+          classify: entries[0], resolve: entries[1], display: entries[2],
+          limit: Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), ...gl.getParameter(gl.MAX_VIEWPORT_DIMS)),
+          cornersValid: false, scaledValid: false,
+        } : null;
+        if (!xbrzCache) console.warn('xBRZ cache unavailable; using the direct shader');
+      }
       filter();
     },
 
     /// Take the picture's pixels (RGBA). Returns whether its size changed.
-    upload(pixels, width, height, overlay = null) {
+    upload(pixels, width, height, overlay = null, revision) {
       overlayVisible = overlay !== null;
       if (overlayVisible) {
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
-        if (overlayFrame?.width !== overlay.width || overlayFrame?.height !== overlay.height) {
+        const resized = overlayFrame?.width !== overlay.width || overlayFrame?.height !== overlay.height;
+        if (resized) {
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, overlay.width, overlay.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-          overlayFrame = { width: overlay.width, height: overlay.height };
         }
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, overlay.width, overlay.height, gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels);
+        if (resized || overlay.revision === undefined || overlayFrame?.revision !== overlay.revision) {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, overlay.width, overlay.height, gl.RGBA, gl.UNSIGNED_BYTE, overlay.pixels);
+        }
+        if (resized) overlayFrame = { width: overlay.width, height: overlay.height };
+        overlayFrame.revision = overlay.revision;
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       const resized = frame?.width !== width || frame?.height !== height;
       if (resized) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        frame = { width, height };
       }
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      if (resized || revision === undefined || frame?.revision !== revision) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        if (xbrzCache) xbrzCache.cornersValid = xbrzCache.scaledValid = false;
+      }
+      if (resized) frame = { width, height };
+      frame.revision = revision;
       if (look !== 'none' && look !== 'xbrz') {
         gl.generateMipmap(gl.TEXTURE_2D);
       }
@@ -600,9 +720,25 @@ function makeGlScreen() {
 
     /// Draw the picture over the whole canvas.
     render() {
-      const entry = programs.get(look);
-      if (!frame || !entry || gl.isContextLost()) {
+      let entry = programs.get(look);
+      if (!frame || !frame.width || !frame.height || !entry || gl.isContextLost()) {
         return;
+      }
+      gl.bindVertexArray(vao);
+      let source = texture;
+      if (look === 'xbrz' && xbrzCache
+          && canvas.width >= frame.width && canvas.height >= frame.height
+          && frame.width < xbrzCache.limit && frame.height < xbrzCache.limit) {
+        try {
+          const prepared = prepareXbrz();
+          entry = prepared.entry;
+          source = prepared.texture;
+        } catch (error) {
+          console.warn('xBRZ cache unavailable; using the direct shader', error);
+          discardTarget(xbrzCache.corners);
+          discardTarget(xbrzCache.scaled);
+          xbrzCache = null;
+        }
       }
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(entry.program);
@@ -613,11 +749,12 @@ function makeGlScreen() {
       gl.uniform1f(entry.glow, glow);
       gl.uniform1f(entry.line, 1);
       gl.uniform1i(entry.overlay, look === 'xbrz' && overlayVisible ? 1 : 0);
+      gl.uniform1i(entry.unflipped, 0);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, overlayTexture);
       gl.bindVertexArray(vao);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.bindTexture(gl.TEXTURE_2D, source);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
   };

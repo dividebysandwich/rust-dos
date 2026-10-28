@@ -35,6 +35,8 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
         shader_pixels: () => 64,
         shader_overlay_pixels: () => 128,
         shader_overlay_visible: () => visible,
+        shader_revision: () => 7,
+        shader_overlay_revision: () => 9,
       },
       screenGl: {
         xbrz: () => xbrz,
@@ -44,7 +46,8 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
       layout: () => layouts++,
     });
     draw();
-    const [pixels, width, height, overlay] = upload;
+    const [pixels, width, height, overlay, revision] = upload;
+    assert.equal(revision, xbrz ? 7 : undefined);
     assert.equal(width, xbrz ? 2 : 4);
     assert.equal(height, width);
     assert.equal(pixels.length, width * height * 4);
@@ -54,6 +57,7 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
       assert.equal(overlay.height, 4);
       assert.equal(overlay.pixels.length, 64);
       assert.ok(overlay.pixels.every(value => value === 33));
+      assert.equal(overlay.revision, 9);
     } else {
       assert.equal(overlay, null);
     }
@@ -62,13 +66,29 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
   });
 }
 
-test('WebGL handles overlay removal, shader fallback and context restoration', () => {
+function rendererFixture() {
   const calls = [];
   const events = new Map();
   const warnings = [];
   let textures = 0;
+  let framebuffers = 0;
+  let boundFramebuffer = null;
+  const enabled = new Set(['DITHER']);
+  const logs = [];
   const gl = new Proxy({
     createTexture: () => ++textures,
+    createFramebuffer: () => ({ framebuffer: ++framebuffers }),
+    bindFramebuffer: (target, value) => {
+      calls.push(['bindFramebuffer', target, value]);
+      boundFramebuffer = value;
+    },
+    getParameter: name => name === 'MAX_TEXTURE_SIZE' ? 4096
+      : name === 'MAX_VIEWPORT_DIMS' ? [4096, 4096] : boundFramebuffer,
+    isEnabled: state => enabled.has(state),
+    enable: state => enabled.add(state),
+    disable: state => enabled.delete(state),
+    checkFramebufferStatus: () => 'FRAMEBUFFER_COMPLETE',
+    getError: () => 'NO_ERROR',
     createProgram: () => ({ shaders: [] }),
     createShader: () => ({}),
     shaderSource: (shader, text) => { shader.text = text; },
@@ -85,19 +105,25 @@ test('WebGL handles overlay removal, shader fallback and context restoration', (
       return (...args) => calls.push([key, ...args]);
     },
   });
+  const canvas = {
+    width: 4,
+    height: 4,
+    getContext: () => gl,
+    addEventListener: (name, callback) => events.set(name, callback),
+  };
   const renderer = load('makeGlScreen', {
     Uint8Array,
-    canvas: {
-      width: 4,
-      height: 4,
-      getContext: () => gl,
-      addEventListener: (name, callback) => events.set(name, callback),
-    },
+    canvas,
     shader_program: name => ['vertex', name],
     toast: message => warnings.push(message),
-    console: { warn() {} },
+    console: { warn: (...args) => logs.push(args) },
     machine: null,
   })();
+  return { renderer, calls, events, warnings, logs, gl, canvas, enabled };
+}
+
+test('WebGL handles overlay removal, shader fallback and context restoration', () => {
+  const { renderer, calls, events, warnings } = rendererFixture();
   const pixels = new Uint8Array(16);
   renderer.select('xbrz', false, false, [0, 0], 0);
   assert.equal(renderer.xbrz(), true);
@@ -146,6 +172,176 @@ test('WebGL handles overlay removal, shader fallback and context restoration', (
   renderer.upload(pixels, 2, 2, { pixels: new Uint8Array(64), width: 4, height: 4 });
   assert.ok(calls.some(call => call[0] === 'texImage2D' && call[4] === 4 && call[5] === 4));
   assert.ok(calls.some(([name]) => name === 'texSubImage2D'));
+});
+
+test('xBRZ reuses base passes across overlays and resizes, and restores GL state', () => {
+  const { renderer, calls, events, gl, canvas, enabled } = rendererFixture();
+  const pixels = new Uint8Array(16);
+  const overlay = { pixels: new Uint8Array(64), width: 4, height: 4, revision: 1 };
+  const draws = () => calls.filter(([name]) => name === 'drawArrays').length;
+  const uploads = () => calls.filter(([name]) => name === 'texSubImage2D');
+  const output = { external: true };
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, output);
+  gl.enable(gl.BLEND);
+  gl.enable(gl.SCISSOR_TEST);
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(pixels, 2, 2, overlay, 1);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(draws(), 3, 'classify, resolve 2x, display');
+  assert.equal(gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING), output);
+  assert.deepEqual([...enabled].sort(), ['BLEND', 'DITHER', 'SCISSOR_TEST']);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, overlay, 1);
+  renderer.render();
+  assert.equal(uploads().length, 0);
+  assert.equal(draws(), 1);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 2 }, 1);
+  renderer.render();
+  assert.equal(uploads().length, 1);
+  assert.equal(uploads()[0][9].length, 64, 'only the overlay uploads');
+  assert.equal(draws(), 1);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, { ...overlay, revision: 2 }, 2);
+  renderer.render();
+  assert.equal(uploads().length, 1);
+  assert.equal(uploads()[0][9].length, 16, 'only the source uploads');
+  assert.equal(draws(), 3);
+  canvas.width = canvas.height = 2;
+  calls.length = 0;
+  renderer.render();
+  assert.equal(draws(), 1, 'small output resolves directly with cached corners');
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, null, 3);
+  renderer.render();
+  assert.equal(draws(), 2, 'classify and direct resolve, without a 2x pass');
+  canvas.width = canvas.height = 8;
+  calls.length = 0;
+  renderer.render();
+  assert.equal(draws(), 2, 'reuse corners, build the 2x base and display');
+  canvas.width = canvas.height = 10;
+  calls.length = 0;
+  renderer.render();
+  assert.equal(draws(), 1, 'resizing keeps the filtered base');
+  calls.length = 0;
+  renderer.upload(new Uint8Array(12), 3, 1, null, 4);
+  renderer.render();
+  assert.equal(draws(), 3);
+  assert.equal(calls.filter(([name]) => name === 'deleteFramebuffer').length, 2);
+  events.get('webglcontextrestored')();
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  calls.length = 0;
+  renderer.upload(new Uint8Array(12), 3, 1, null, 4);
+  renderer.render();
+  assert.equal(uploads().length, 1, 'a restored context uploads even the same revision');
+  assert.equal(draws(), 3);
+});
+
+test('xBRZ target failure retains direct filtering without retrying the allocation', () => {
+  const { renderer, calls, logs, gl, enabled } = rendererFixture();
+  const output = { external: true };
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, output);
+  gl.enable(gl.BLEND);
+  gl.enable(gl.SCISSOR_TEST);
+  gl.checkFramebufferStatus = () => 'INCOMPLETE';
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(new Uint8Array(16), 2, 2, null, 1);
+  calls.length = 0;
+  renderer.render();
+  renderer.render();
+  assert.equal(renderer.xbrz(), true);
+  assert.equal(logs.length, 1);
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 2);
+  assert.equal(calls.filter(([name]) => name === 'framebufferTexture2D').length, 1);
+  assert.equal(gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING), output);
+  assert.deepEqual([...enabled].sort(), ['BLEND', 'DITHER', 'SCISSOR_TEST']);
+});
+
+test('xBRZ starts at small output without allocating a 2x target', () => {
+  const { renderer, calls, canvas } = rendererFixture();
+  canvas.width = canvas.height = 2;
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(new Uint8Array(16), 2, 2, null, 1);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 2);
+  assert.equal(calls.some(call => call[0] === 'texImage2D' && call[4] === 4), false);
+  assert.equal(calls.filter(([name]) => name === 'framebufferTexture2D').length, 1);
+});
+
+test('minification skips source-sized passes', () => {
+  const { renderer, calls, canvas } = rendererFixture();
+  canvas.width = canvas.height = 1;
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(new Uint8Array(16), 2, 2, null, 1);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'framebufferTexture2D').length, 0);
+  canvas.width = canvas.height = 4;
+  calls.length = 0;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 3);
+});
+
+test('viewport limits cannot leave a partially classified corner texture', () => {
+  const { renderer, calls, gl, logs } = rendererFixture();
+  const getParameter = gl.getParameter;
+  gl.getParameter = name => name === 'MAX_VIEWPORT_DIMS' ? [2, 2] : getParameter(name);
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(new Uint8Array(16), 2, 2, null, 1);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'framebufferTexture2D').length, 0);
+  assert.equal(logs.length, 0);
+  calls.length = 0;
+  renderer.upload(new Uint8Array(4), 1, 1, null, 2);
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 3);
+});
+
+test('xBRZ pass compilation failure keeps the direct shader available', () => {
+  const { renderer, calls, warnings, gl } = rendererFixture();
+  gl.getProgramParameter = program => !program.shaders.some(shader => shader.text === 'xbrz-corners');
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(new Uint8Array(16), 2, 2, null, 1);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(renderer.xbrz(), true);
+  assert.equal(warnings.length, 0, 'the working filter needs no failure toast');
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 1);
+});
+
+test('texture limits retain a direct resolve when the 2x target does not fit', () => {
+  const { renderer, calls, gl, canvas } = rendererFixture();
+  const getParameter = gl.getParameter;
+  gl.getParameter = name => name === 'MAX_TEXTURE_SIZE' ? 4 : getParameter(name);
+  canvas.width = canvas.height = 12;
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(new Uint8Array(36), 3, 3, null, 1);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 2);
+  assert.equal(calls.some(call => call[0] === 'texImage2D' && call[4] === 6), false);
+});
+
+test('shader switching cannot reuse composed pixels as the xBRZ base', () => {
+  const { renderer, calls } = rendererFixture();
+  const pixels = new Uint8Array(16);
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  renderer.upload(pixels, 2, 2, null, 1);
+  renderer.render();
+  renderer.select('crt', false, false, [0, 0], 0);
+  renderer.upload(pixels, 2, 2);
+  renderer.render();
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  calls.length = 0;
+  renderer.upload(pixels, 2, 2, null, 1);
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'texSubImage2D').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 3);
 });
 
 test('showPicture uploads the current frame when switching shaders', () => {

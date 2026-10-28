@@ -38,6 +38,193 @@ fn double(frame: &Frame) -> Frame {
     out
 }
 
+fn reference_capture(
+    screen: &mut GlScreen,
+    frame: &Frame,
+    base: &Frame,
+    mono: Monochrome,
+    display: (u32, u32),
+) -> Frame {
+    let (vertex, fragment) = shader::sources(Shader::Xbrz, screen.glsl);
+    let preamble = screen.glsl.preamble();
+    let fragment = fragment.replacen(preamble, &format!("{preamble}#define XBRZ_REFERENCE\n"), 1);
+    let reference =
+        compile_sources(&screen.gl, screen.glsl, "reference", (vertex, fragment)).unwrap();
+    let program = screen.programs.insert(Shader::Xbrz, Ok(reference)).unwrap();
+    let gpu = screen.xbrz_gpu.replace(Err("reference draw".into()));
+    let result = screen.capture(frame, base, mono, display).unwrap();
+    let reference = screen
+        .programs
+        .insert(Shader::Xbrz, program)
+        .unwrap()
+        .unwrap();
+    screen.xbrz_gpu = gpu;
+    // SAFETY: the reference program belongs to this test's current context.
+    unsafe { screen.gl.delete_program(reference.program) };
+    result
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "xBRZ cache regression", (32, 24))
+        .unwrap_or_else(|error| panic!("{}", error.reason));
+    for glsl in [Glsl::Gl130, Glsl::Gl150] {
+        for pass in [
+            shader::XbrzPass::Corners,
+            shader::XbrzPass::Resolve,
+            shader::XbrzPass::Display,
+        ] {
+            let sources = shader::xbrz_sources(pass, glsl);
+            let program = compile_sources(&screen.gl, glsl, "xBRZ dialect", sources).unwrap();
+            // SAFETY: this test owns the current context and program.
+            unsafe { screen.gl.delete_program(program.program) };
+        }
+    }
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    let native = Frame::from_rgb(5, 3, (0..45).map(|i| (i * 37) as u8).collect());
+    let mut base = double(&native);
+    let mut composed = base.clone();
+    composed.track_overlays(true);
+    let draws = |screen: &GlScreen| screen.xbrz_gpu.as_ref().unwrap().as_ref().unwrap().draws;
+    let compare = |screen: &mut GlScreen, frame: &Frame, base: &Frame, mono, size| {
+        let actual = screen.capture(frame, base, mono, size).unwrap();
+        let expected = reference_capture(screen, frame, base, mono, size);
+        assert_eq!(actual, expected);
+        // SAFETY: the test owns this context and checks all pass errors.
+        assert_eq!(unsafe { screen.gl.get_error() }, glow::NO_ERROR);
+    };
+    compare(&mut screen, &composed, &base, Monochrome::Off, (32, 24));
+    assert_eq!(draws(&screen), (1, 1));
+    // SAFETY: this test owns the context and restores its temporary state.
+    let read = unsafe {
+        let read = screen.gl.create_framebuffer().unwrap();
+        screen
+            .gl
+            .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+        screen.gl.enable(glow::SCISSOR_TEST);
+        screen.gl.scissor(0, 0, 32, 24);
+        screen.gl.enable(glow::BLEND);
+        read
+    };
+    // Force offscreen preparation while the caller's raster state is set.
+    screen
+        .xbrz_gpu
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .invalidate();
+    screen.draw_look(screen.texture, screen.texture_size, (0, 0, 32, 24), 1.0);
+    assert_eq!(draws(&screen), (2, 2));
+    // SAFETY: all queried objects belong to the test's current context.
+    unsafe {
+        assert!(screen.gl.is_enabled(glow::BLEND));
+        assert!(screen.gl.is_enabled(glow::DITHER));
+        assert!(screen.gl.is_enabled(glow::SCISSOR_TEST));
+        assert_eq!(
+            screen
+                .gl
+                .get_parameter_framebuffer(glow::READ_FRAMEBUFFER_BINDING),
+            Some(read)
+        );
+        screen.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        screen.gl.delete_framebuffer(read);
+        screen.gl.disable(glow::SCISSOR_TEST);
+        screen.gl.disable(glow::BLEND);
+    }
+    composed.mark_overlay_rect(0, 0, 2, 2);
+    compare(&mut screen, &composed, &base, Monochrome::Off, (32, 24));
+    assert_eq!(
+        draws(&screen),
+        (2, 2),
+        "overlay changes reuse both base passes"
+    );
+    for y in 0..2 {
+        for x in 0..2 {
+            base.rgba[(y * base.width as usize + x) * 4] ^= 127;
+        }
+    }
+    compare(&mut screen, &composed, &base, Monochrome::Off, (32, 24));
+    assert_eq!(
+        draws(&screen),
+        (3, 3),
+        "base changes under overlays invalidate both passes"
+    );
+    compare(&mut screen, &composed, &base, Monochrome::Amber, (32, 24));
+    assert_eq!(
+        draws(&screen),
+        (4, 4),
+        "tint changes invalidate both passes"
+    );
+    screen.window.set_size(5, 3).unwrap();
+    compare(&mut screen, &composed, &base, Monochrome::Amber, (5, 3));
+    assert_eq!(
+        draws(&screen),
+        (4, 4),
+        "small output reuses corners and resolves directly"
+    );
+    screen.window.set_size(2, 1).unwrap();
+    compare(&mut screen, &composed, &base, Monochrome::Amber, (2, 1));
+    assert_eq!(draws(&screen), (4, 4), "minification skips source-sized passes");
+    screen.window.set_size(40, 30).unwrap();
+    compare(&mut screen, &composed, &base, Monochrome::Amber, (40, 30));
+    assert_eq!(
+        draws(&screen),
+        (4, 4),
+        "larger output reuses the 2x texture"
+    );
+    for (width, height) in [(1, 7), (7, 1), (1, 1)] {
+        let base = Frame::from_rgba(
+            width,
+            height,
+            (0..width * height)
+                .flat_map(|i| [(i * 37) as u8, 40, 80, (i * 53) as u8])
+                .collect(),
+        );
+        compare(&mut screen, &base, &base, Monochrome::Off, (40, 30));
+    }
+    let texture = screen.texture;
+    let gl = &screen.gl;
+    let cache = screen.xbrz_gpu.as_mut().unwrap().as_mut().unwrap();
+    assert!(
+        cache
+            .draw(gl, texture, (u32::MAX, 1), (0, 0, 1, 1), None)
+            .is_err()
+    );
+    let before = draws(&screen);
+    // SAFETY: the test owns the context and this temporary 1x1 texture.
+    let external = unsafe {
+        let texture = screen.gl.create_texture().unwrap();
+        screen.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        screen.gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        screen.gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            1,
+            1,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&[33, 99, 170, 255])),
+        );
+        texture
+    };
+    screen.draw_look(external, (1, 1), (0, 0, 32, 24), 1.0);
+    screen.draw_look(external, (1, 1), (0, 0, 32, 24), 1.0);
+    screen.draw_look(screen.texture, (1, 1), (0, 0, 32, 24), 1.0);
+    assert_eq!(draws(&screen), (before.0 + 3, before.1 + 3));
+    // SAFETY: the external texture belongs to this test's context.
+    unsafe { screen.gl.delete_texture(external) };
+}
+
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
@@ -176,7 +363,14 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
             );
             assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
         }
-        let top_first: Vec<_> = pixels.chunks_exact(64).rev().flatten().copied().collect();
+        let top_first: Vec<_> = pixels
+            .as_chunks::<64>()
+            .0
+            .iter()
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
         let differences: Vec<_> = top_first
             .iter()
             .zip(&expected)

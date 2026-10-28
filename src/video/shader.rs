@@ -246,6 +246,25 @@ const PLAIN: &str = include_str!("shader/plain.glsl");
 const CRT: &str = include_str!("shader/crt.glsl");
 const XBRZ_2X: &str = include_str!("shader/xbrz_2x.glsl");
 
+/// Internal xBRZ passes, shared by OpenGL and WebGL.
+#[derive(Clone, Copy)]
+pub enum XbrzPass {
+    Corners,
+    Resolve,
+    Display,
+}
+
+/// A source-sized corner pass, a resolve, or display of the cached 2x base.
+pub fn xbrz_sources(pass: XbrzPass, glsl: Glsl) -> (String, String) {
+    let (defines, fragment) = match pass {
+        XbrzPass::Corners => ("#define XBRZ_CORNERS\n", XBRZ_2X),
+        XbrzPass::Resolve => ("#define XBRZ_PRECOMPUTED\n", XBRZ_2X),
+        XbrzPass::Display => ("", include_str!("shader/xbrz_display.glsl")),
+    };
+    let preamble = glsl.preamble();
+    (format!("{preamble}{VERTEX}"), format!("{preamble}{defines}{fragment}"))
+}
+
 /// The vertex and fragment shader of a look. They take the frame as the
 /// texture `u_frame`; the CRT looks also take the frame's size in pixels
 /// as `u_source`, the picture's on the screen as `u_output`, whether the
@@ -344,6 +363,11 @@ mod tests {
                 assert!(vertex.is_ascii() && fragment.is_ascii());
                 assert!(fragment.contains("out vec4 o_color;"));
             }
+            for pass in [XbrzPass::Corners, XbrzPass::Resolve, XbrzPass::Display] {
+                let (vertex, fragment) = xbrz_sources(pass, glsl);
+                assert!(vertex.starts_with(version) && fragment.starts_with(version));
+                assert!(vertex.is_ascii() && fragment.is_ascii());
+            }
         }
         let (_, curved) = sources(Shader::Crt, Glsl::Gl150);
         assert!(curved.contains("uniform vec2 u_curvature;") && curved.contains("u_curvature * c.yx * c.yx"));
@@ -388,8 +412,15 @@ mod tests {
             return;
         }
         for glsl in [Glsl::Gl130, Glsl::Gl150, Glsl::Es300] {
-            for shader in Shader::ALL {
-                let (vertex, fragment) = sources(shader, glsl);
+            let passes = [
+                ("xbrz corners", xbrz_sources(XbrzPass::Corners, glsl)),
+                ("xbrz resolve", xbrz_sources(XbrzPass::Resolve, glsl)),
+                ("xbrz display", xbrz_sources(XbrzPass::Display, glsl)),
+            ];
+            for (name, (vertex, fragment)) in Shader::ALL.into_iter()
+                .map(|shader| (shader.name(), sources(shader, glsl)))
+                .chain(passes)
+            {
                 for (stage, source) in [("vert", vertex), ("frag", fragment)] {
                     let mut child = Command::new("glslangValidator")
                         .args(["--stdin", "-S", stage])
@@ -402,7 +433,7 @@ mod tests {
                     assert!(
                         output.status.success(),
                         "{:?} {:?} {}: {}",
-                        shader,
+                        name,
                         glsl,
                         stage,
                         String::from_utf8_lossy(&output.stdout)
