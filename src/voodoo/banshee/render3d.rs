@@ -297,11 +297,12 @@ impl Voodoo {
     /// TMU 0's texture space from 600000h: texture memory from its
     /// texBaseAddr on, linear (86Box's `voodoo_tex_writel`). The
     /// triangles queued before are drawn first if they may read or draw
-    /// into the dword.
+    /// into the dword and can't be given a copy of what they read
+    /// (`spare`).
     pub(crate) fn banshee_texture_write(&mut self, offset: u32, data: u32) {
         let base = self.reg[0x100 + TEX_BASE_ADDR] & 0xFF_FFF0;
         let addr = base.wrapping_add(offset & 0x1F_FFFC) & self.fbi.mask;
-        if self.queued_reach(addr, addr + 4) {
+        if !self.spare(addr, addr + 4) {
             self.flush();
         }
         self.gpu_sync_bytes(addr, 4);
@@ -312,9 +313,10 @@ impl Voodoo {
     /// `data` downloaded into the card's memory from byte `addr` on, as
     /// writes of it through TMU 0's texture space would put it, all at
     /// once: Glide's texture downloads. The triangles queued before are
-    /// drawn first if they may read or draw into that memory, and the
-    /// recording hears of the bytes once. Past the end of the memory
-    /// they wrap round.
+    /// drawn first if they may read or draw into that memory and can't
+    /// be given a copy of what they read (`spare`), and the recording
+    /// hears of the bytes once. Past the end of the memory they wrap
+    /// round.
     pub(crate) fn banshee_texture_download(&mut self, addr: u32, data: &[u8]) {
         if data.is_empty() {
             return;

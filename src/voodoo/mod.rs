@@ -1014,12 +1014,12 @@ impl Voodoo {
         if self.backlog.borrow().is_empty() {
             return;
         }
-        let held = self.backlog.borrow_mut().take();
+        let (held, reach) = self.backlog.borrow_mut().take();
         let workers = self.pool.workers() > 0;
+        if workers {
+            self.footprint.borrow_mut().merge(&reach);
+        }
         for job in held {
-            if workers {
-                self.footprint.borrow_mut().add(&job);
-            }
             self.outstanding.set(workers);
             self.pool.submit(job);
         }
@@ -1036,26 +1036,20 @@ impl Voodoo {
         }
     }
 
-    /// Whether bytes `start..end` of the frame buffer's memory are memory
-    /// the jobs given out or held back may read or write, so that a
-    /// write there has to wait for them.
-    pub(crate) fn queued_reach(&self, start: u32, end: u32) -> bool {
-        let (start, end) = (start as u64, end as u64);
-        self.writes_queue()
-            && (self.footprint.borrow().touches(start, end)
-                || self.backlog.borrow().touches(start, end))
-    }
-
     /// Make bytes `start..end` of the frame buffer's memory free to be
     /// written before the jobs given out or held back are drawn, where
     /// that can be done: the jobs held back that take texels from there
     /// get a copy of them as they are (`Backlog::spare`). False if the
     /// jobs have to be drawn first.
     pub(crate) fn spare(&self, start: u32, end: u32) -> bool {
-        let (start, end) = (start as u64, end as u64);
-        !self.writes_queue()
-            || !self.footprint.borrow().touches(start, end)
-                && self.backlog.borrow_mut().spare(start, end)
+        if !self.writes_queue() {
+            return true;
+        }
+        let given_out = self.footprint.borrow();
+        let range = (start as u64, end as u64);
+        self.backlog
+            .borrow_mut()
+            .spare(range, &given_out, |a, b| self.gpu_sync(a as u32, b as u32))
     }
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
