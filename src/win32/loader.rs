@@ -125,9 +125,12 @@ pub fn load(
             name
         )
     })?;
+    // The path as Windows keeps it, full and with backslashes, whatever
+    // form the program was started with.
+    let path = cpu.bus.disk.qualify_path(path).unwrap_or_else(|| path.to_string());
     let mut process = Process {
         name: name.clone(),
-        path: path.to_string(),
+        path,
         environment,
         ..Process::default()
     };
@@ -1268,5 +1271,18 @@ pub(super) fn roll_back(
         if let Some(m) = process.modules.iter_mut().find(|m| m.base == base) {
             m.refs = m.refs.saturating_sub(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::directory_of;
+
+    #[test]
+    fn a_directory_ends_at_the_last_separator_of_either_kind() {
+        assert_eq!(directory_of(r"C:\WINDOWS\SYSTEM\X.DLL"), r"C:\WINDOWS\SYSTEM");
+        assert_eq!(directory_of("D:/METAL.EXE"), "D:");
+        assert_eq!(directory_of(r"C:/WINDOWS\SYSTEM/X.DLL"), r"C:\WINDOWS\SYSTEM");
+        assert_eq!(directory_of("X.DLL"), "");
     }
 }

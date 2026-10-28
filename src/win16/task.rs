@@ -921,12 +921,16 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
         Some(_) => path,
         None => {
             let windows = format!("{}\\{}", crate::win32::loader::WINDOWS_DIR, path);
-            if path.contains(['\\', ':']) || cpu.read_program_file(&windows).is_none() {
+            if path.contains(['\\', '/', ':']) || cpu.read_program_file(&windows).is_none() {
                 return Err(2);
             }
             windows
         }
     };
+    // The module's path as Windows keeps it, whatever form the caller
+    // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
+    // GetModuleFileName gives and the module's DLLs are looked for by.
+    let path = cpu.bus.disk.qualify_path(&path).unwrap_or(path);
     match spawn(cpu, &path, arguments, show, parent, environment) {
         Ok(spawned) => Ok(cpu
             .bus

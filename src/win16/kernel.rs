@@ -875,11 +875,7 @@ fn task_dir(cpu: &Cpu) -> String {
     };
     let handle = cpu.bus.win32.win16.tasks[t].module;
     super::module_index(cpu, handle)
-        .map(|i| {
-            let path = &cpu.bus.win32.win16.modules[i].path;
-            path.rfind('\\')
-                .map_or(String::new(), |n| path[..n].to_string())
-        })
+        .map(|i| crate::win32::loader::directory_of(&cpu.bus.win32.win16.modules[i].path))
         .unwrap_or_default()
 }
 
