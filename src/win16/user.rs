@@ -84,7 +84,7 @@ static APIS: &[Api16] = &[
     rust("RegisterClass", 57, "p", register_class),
     win32("GetClassName", 58, "wps", U, "GetClassNameA", b'w'),
     win32("SetActiveWindow", 59, "w", U, "SetActiveWindow", b'w'),
-    win32("GetActiveWindow", 60, "", U, "GetActiveWindow", b'w'),
+    rust("GetActiveWindow", 60, "", get_active_window),
     win32("ScrollWindow", 61, "wssRR", U, "ScrollWindow", b'b'),
     win32("SetScrollPos", 62, "wwsw", U, "SetScrollPos", b'w'),
     win32("GetScrollPos", 63, "ww", U, "GetScrollPos", b'w'),
@@ -463,6 +463,21 @@ fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(1)
+}
+
+/// GetActiveWindow: the system's active window, as Windows 3.1 has one
+/// for all its tasks, where USER32 gives only the calling thread's. With
+/// none, the shell's Program Manager window (made if it isn't there, as
+/// FindWindow makes it): on a Windows desktop the shell's window is
+/// active when no program's is, and 16-bit programs count on there being
+/// one (Metal Marines' setup asks whether it is the active program while
+/// it makes its first window). On Windows 98 the setup started from the
+/// Run dialog gets Explorer's window.
+fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    match cpu.bus.win32.user.input.active {
+        0 => Some(crate::win32::user32::progman::server(cpu)),
+        active => Some(active),
+    }
 }
 
 fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
