@@ -86,6 +86,9 @@ pub static THENS: &[Then] = &[
     super::task::then,
     super::message::then,
     super::kernel::then_libs,
+    super::task::then_dll_entry,
+    super::flat::then_call,
+    super::flat::then_inits,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -93,6 +96,9 @@ pub const THEN_PROC: u16 = 1;
 pub const THEN_TASK: u16 = 2;
 pub const THEN_MESSAGE: u16 = 3;
 pub const THEN_LIBS: u16 = 4;
+pub const THEN_DLL_ENTRY: u16 = 5;
+pub const THEN_FLAT_CALL: u16 = 6;
+pub const THEN_FLAT_INITS: u16 = 7;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)

@@ -277,6 +277,9 @@ static APIS: &[Api16] = &[
     rust("RegEnumKey", 216, "llpl", reg_fail),
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
+    // Flat thunks (flat.rs).
+    register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
+    rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -925,7 +928,7 @@ pub fn then_libs(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opti
     }
     let mut rest = vec![data[0]];
     rest.extend_from_slice(&data[2..]);
-    task::call_lib_main(cpu, data[1] as u16, *ctx, thunk::THEN_LIBS, rest);
+    task::call_lib_init(cpu, data[1] as u16, *ctx, thunk::THEN_LIBS, rest);
     None
 }
 
