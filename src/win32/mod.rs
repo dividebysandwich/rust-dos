@@ -934,8 +934,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     }
     // The Win16 process, if it was there only for the 16-bit calls of
     // the process that ended, goes with it.
-    if let Some(k) = crate::win16::flat::unneeded(cpu)
-        && remove_process(cpu, k, 0)
+    if let Some((k, code)) = crate::win16::flat::unneeded(cpu)
+        && remove_process(cpu, k, code)
     {
         let win32 = &mut cpu.bus.win32;
         if !ran && win32.running == k {
@@ -1034,6 +1034,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     shell32::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     if process.id == cpu.bus.win32.win16.pid {
+        crate::win16::dos::release(cpu);
         cpu.bus.win32.win16 = crate::win16::State::default();
     }
     true

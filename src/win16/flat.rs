@@ -3,7 +3,9 @@
 //! with the same magic and checksum. The 32-bit DLL's entry point calls
 //! KERNEL32's ThunkConnect32 with its block and the 16-bit DLL's name;
 //! that loads the 16-bit DLL, whose DllEntryPoint calls KERNEL's
-//! ThunkConnect16 with its own block, and joins the two.
+//! ThunkConnect16 with its own block, and joins the two. A 16-bit DLL
+//! another process loaded already only has its DllEntryPoint run again,
+//! as Windows 95 runs it for each process that attaches.
 //!
 //! A 32-bit to 16-bit thunk ("LS01") pushes the arguments as the 16-bit
 //! function takes them, its pointers mapped to 16:16 ones (SMapLS and
@@ -54,9 +56,11 @@ const QT_FRAME: u32 = 0x40;
 #[derive(Clone, Debug, Default)]
 pub struct Client {
     pub pid: u32,
-    /// The task's thread and handle.
+    /// The task's thread.
     pub tid: u32,
-    pub task: u16,
+    /// The 16-bit DLLs its ThunkConnect32s loaded, a reference to each,
+    /// which go when it ends.
+    pub modules: Vec<u16>,
     /// The requests waiting, and the one the task runs.
     pub queue: Vec<Request>,
     pub current: Option<Request>,
@@ -76,11 +80,10 @@ pub struct Request {
     pub regs: Context,
     pub args: Vec<u8>,
     pub sp: u32,
-    /// CONNECT: the 32-bit thunk data, the address of the 16-bit thunk
-    /// data's name, the names of the 16-bit DLL and its thunk data and
-    /// the directory to look for it in, and the module loaded.
+    /// CONNECT: the 32-bit thunk data, the names of the 16-bit DLL and
+    /// its thunk data and the directory to look for it in, and the
+    /// module loaded.
     pub data32: u32,
-    pub name_at: u32,
     pub names: Vec<String>,
     pub module: u16,
 }
@@ -99,11 +102,10 @@ pub struct Alias {
 }
 
 /// A 16-bit to 32-bit thunk's data ThunkConnect16 joined: the 16-bit
-/// block's address, and each Win32 process's table of 32-bit targets.
+/// block's address.
 #[derive(Clone, Debug, Default)]
 pub struct Link {
     pub data16: u32,
-    pub tables: Vec<(u32, u32)>,
 }
 
 /// Run `f` with the process `pid`'s memory and the bus.
@@ -371,7 +373,6 @@ pub fn thunk_connect32(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             kind: CONNECT,
             tid,
             data32,
-            name_at,
             names: vec![dll16, name16, dir],
             ..Request::default()
         },
@@ -574,11 +575,10 @@ fn ensure_client(cpu: &mut Cpu, pid: u32) -> Option<usize> {
         ..Context::default()
     };
     match super::task::client_task(cpu, &name, ctx) {
-        Ok((tid, task)) => {
+        Ok((tid, _)) => {
             cpu.bus.win32.win16.clients.push(Client {
                 pid,
                 tid,
-                task,
                 ..Client::default()
             });
             Some(cpu.bus.win32.win16.clients.len() - 1)
@@ -614,20 +614,26 @@ fn post(cpu: &mut Cpu, pid: u32, request: Request) {
     crate::win32::thread::block(cpu, Wait::default());
 }
 
+/// The place in `State::clients` of the client whose task's thread is
+/// `tid`. The 16-bit code a client runs can give up its turn, and a
+/// client that goes meanwhile moves the others down the list, so what
+/// runs after it keeps the thread, which stays the same.
+fn client_of(cpu: &Cpu, tid: u32) -> Option<usize> {
+    cpu.bus
+        .win32
+        .win16
+        .clients
+        .iter()
+        .position(|c| c.tid == tid)
+}
+
 /// KERNEL32's `Win16Serve`, where a client task's thread waits: it runs
 /// the next request, or waits for one.
 pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let tid = crate::win32::running(cpu)
         .and_then(|p| p.current_thread())
         .map_or(0, |t| t.id);
-    let Some(c) = cpu
-        .bus
-        .win32
-        .win16
-        .clients
-        .iter()
-        .position(|c| c.tid == tid)
-    else {
+    let Some(c) = client_of(cpu, tid) else {
         crate::win32::fatal(
             cpu,
             "a call of Win16Serve from a thread that isn't a client's",
@@ -687,6 +693,7 @@ fn start_call(cpu: &mut Cpu, c: usize, request: Request) {
     for r in [EAX, EBX, ECX, EDX, ESI, EDI] {
         regs.gpr[r] = request.regs.gpr[r];
     }
+    let tid = cpu.bus.win32.win16.clients[c].tid;
     thunk::call16_regs(
         cpu,
         request.target,
@@ -694,7 +701,7 @@ fn start_call(cpu: &mut Cpu, c: usize, request: Request) {
         regs,
         resume,
         thunk::THEN_FLAT_CALL,
-        vec![c as u32],
+        vec![tid],
         (ss, sp),
     );
 }
@@ -703,14 +710,8 @@ fn start_call(cpu: &mut Cpu, c: usize, request: Request) {
 /// Win32 thread goes on with its EAX, ECX and EDX, and its stack without
 /// the arguments the function took off.
 pub fn then_call(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
-    let c = data.first().copied().unwrap_or(0) as usize;
-    let request = cpu
-        .bus
-        .win32
-        .win16
-        .clients
-        .get_mut(c)
-        .and_then(|client| client.current.take());
+    let tid = data.first().copied().unwrap_or(0);
+    let request = client_of(cpu, tid).and_then(|c| cpu.bus.win32.win16.clients[c].current.take());
     if let Some(request) = request {
         let popped = (cpu.sp() as u32).wrapping_sub(request.sp) & 0xFFFF;
         let (eax, ecx, edx) = (cpu.eax(), cpu.ecx(), cpu.edx());
@@ -740,34 +741,47 @@ fn start_connect(cpu: &mut Cpu, c: usize, request: Request) {
         }
     };
     let handle = cpu.bus.win32.win16.modules[index].handle;
-    if let Some(current) = cpu.bus.win32.win16.clients[c].current.as_mut() {
+    let client = &mut cpu.bus.win32.win16.clients[c];
+    client.modules.push(handle);
+    if let Some(current) = client.current.as_mut() {
         current.module = handle;
     }
-    let mut data = vec![c as u32];
-    data.extend(
-        inits
-            .iter()
-            .map(|&i| cpu.bus.win32.win16.modules[i].handle as u32),
-    );
+    let tid = cpu.bus.win32.win16.clients[c].tid;
     let mut resume = Context::of(cpu);
-    if then_inits(cpu, 0, &data, &mut resume).is_some() {
+    let joined = if inits.contains(&index) {
+        let mut data = vec![tid];
+        data.extend(
+            inits
+                .iter()
+                .map(|&i| cpu.bus.win32.win16.modules[i].handle as u32),
+        );
+        then_inits(cpu, 0, &data, &mut resume)
+    } else {
+        // Loaded already, for another process: as in Windows 95, its
+        // DllEntryPoint runs for this one too.
+        let data = [thunk::THEN_FLAT_INITS as u32, handle as u32, tid];
+        super::task::then_dll_entry(cpu, 0, &data, &mut resume)
+    };
+    if joined.is_some() {
         crate::win32::system::load_context(cpu, &resume);
     }
 }
 
 /// The modules `data[1..]` are to have their entry points run, for the
-/// ThunkConnect32 of the client `data[0]`, which then joins the thunk
-/// data. None when an entry point runs first.
+/// ThunkConnect32 of the client whose thread is `data[0]`, which then
+/// joins the thunk data. None when an entry point runs first.
 pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
-    let c = data.first().copied().unwrap_or(0) as usize;
+    let tid = data.first().copied().unwrap_or(0);
     if data.len() > 1 {
-        let mut rest = vec![c as u32];
+        let mut rest = vec![tid];
         rest.extend_from_slice(&data[2..]);
         super::task::call_lib_init(cpu, data[1] as u16, *ctx, thunk::THEN_FLAT_INITS, rest);
         return None;
     }
-    let joined = connect(cpu, c);
-    done(cpu, c, joined as u32);
+    if let Some(c) = client_of(cpu, tid) {
+        let joined = connect(cpu, c);
+        done(cpu, c, joined as u32);
+    }
     Some(ctx.gpr[EAX])
 }
 
@@ -832,13 +846,6 @@ fn connect(cpu: &mut Cpu, c: usize) -> bool {
         let Some(l) = links.iter().position(|l| l.data16 == data16) else {
             return fail(cpu, "its DllEntryPoint didn't call ThunkConnect16");
         };
-        // The 32-bit targets: a table the 32-bit thunk data gives the
-        // place of, from the 16-bit thunk data's name.
-        let offset = word(&data32, 0x20);
-        let table = request.name_at.wrapping_add(offset);
-        let link = &mut cpu.bus.win32.win16.links[l];
-        link.tables.retain(|&(p, _)| p != pid);
-        link.tables.push((pid, table));
         if !write(
             cpu,
             pid,
@@ -896,10 +903,7 @@ pub fn thunk_connect16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let l = match links.iter().position(|l| l.data16 == data16) {
             Some(l) => l,
             None => {
-                links.push(Link {
-                    data16,
-                    tables: Vec::new(),
-                });
+                links.push(Link { data16 });
                 links.len() - 1
             }
         };
@@ -967,8 +971,40 @@ pub fn c16_thk_sl01(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 // Processes ending.
 
+/// The Win32 threads that wait for `client`'s requests go on, their
+/// calls failed: EAX 0, and a call's caller back at its return address.
+fn fail_requests(cpu: &mut Cpu, client: Client) {
+    for request in client.current.into_iter().chain(client.queue) {
+        finish(cpu, request.tid, 0, |t| {
+            if request.kind == CALL {
+                t.eip = request.regs.eip;
+                t.gpr[ESP] = request.regs.gpr[ESP];
+            }
+        });
+    }
+}
+
+/// The task whose thread is `tid` ends by itself (task::exit, after a
+/// fault in its code too): if it is a client, it serves no more, and the
+/// Win32 threads that wait for it go on, their calls failed.
+pub fn task_ending(cpu: &mut Cpu, tid: u32) {
+    if let Some(c) = client_of(cpu, tid) {
+        let client = cpu.bus.win32.win16.clients.remove(c);
+        release_modules(cpu, &client);
+        fail_requests(cpu, client);
+    }
+}
+
+/// The references to 16-bit DLLs `client`'s ThunkConnect32s took go.
+fn release_modules(cpu: &mut Cpu, client: &Client) {
+    for &handle in &client.modules {
+        module::release(cpu, handle);
+    }
+}
+
 /// The process `pid` ends: the aliases in it and of its memory go, and
-/// a Win32 process's client task ends.
+/// a Win32 process's client task ends, and its references to 16-bit
+/// DLLs with it.
 pub fn process_ending(cpu: &mut Cpu, pid: u32) {
     let win16 = cpu.bus.win32.win16.pid;
     if win16 == 0 {
@@ -985,34 +1021,24 @@ pub fn process_ending(cpu: &mut Cpu, pid: u32) {
         unalias(cpu, i);
     }
     if pid == win16 {
-        // The Win32 threads that wait for its tasks go on, their calls
-        // failed.
         for client in std::mem::take(&mut cpu.bus.win32.win16.clients) {
-            for request in client.current.into_iter().chain(client.queue) {
-                finish(cpu, request.tid, 0, |t| {
-                    if request.kind == CALL {
-                        t.eip = request.regs.eip;
-                        t.gpr[ESP] = request.regs.gpr[ESP];
-                    }
-                });
-            }
+            fail_requests(cpu, client);
         }
         return;
-    }
-    for link in &mut cpu.bus.win32.win16.links {
-        link.tables.retain(|&(p, _)| p != pid);
     }
     let clients = &mut cpu.bus.win32.win16.clients;
     if let Some(c) = clients.iter().position(|c| c.pid == pid) {
         let client = clients.remove(c);
         super::task::end_client_task(cpu, client.tid);
+        release_modules(cpu, &client);
     }
 }
 
 /// The Win16 process's place among the processes if it has nothing left
 /// to run: no task, its last one a Win32 process's client that ended
-/// with that process.
-pub fn unneeded(cpu: &Cpu) -> Option<usize> {
+/// with that process. Its place and the exit code it ends with, its
+/// last program's.
+pub fn unneeded(cpu: &Cpu) -> Option<(usize, u32)> {
     let win16 = &cpu.bus.win32.win16;
     if win16.pid == 0 || win16.tasks.iter().any(|t| t.exit_code.is_none()) {
         return None;
@@ -1022,12 +1048,13 @@ pub fn unneeded(cpu: &Cpu) -> Option<usize> {
         .processes
         .iter()
         .position(|p| p.id == win16.pid)
+        .map(|k| (k, win16.exit_code as u32))
 }
 
 crate::state_fields!(Client {
     pid,
     tid,
-    task,
+    modules,
     queue,
     current
 });
@@ -1039,7 +1066,6 @@ crate::state_fields!(Request {
     args,
     sp,
     data32,
-    name_at,
     names,
     module
 });
@@ -1051,4 +1077,4 @@ crate::state_fields!(Alias {
     address,
     selector
 });
-crate::state_fields!(Link { data16, tables });
+crate::state_fields!(Link { data16 });

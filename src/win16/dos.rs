@@ -100,6 +100,17 @@ pub fn init(cpu: &mut Cpu) -> Result<(), String> {
     Ok(())
 }
 
+/// Give the transfer buffer back to DOS when the Win16 process ends. A
+/// Win32 program's 16-bit calls make a Win16 process that ends with the
+/// program, so one run can make many, and each takes a transfer buffer.
+pub fn release(cpu: &mut Cpu) {
+    let seg = cpu.bus.win32.win16.tb;
+    if seg != 0 {
+        let _ = crate::win32::dos(cpu, |cpu| crate::mcb::free(&mut cpu.bus, seg));
+        cpu.bus.win32.win16.tb = 0;
+    }
+}
+
 /// The selector of the real-mode segment `seg`, a 64 KB data segment
 /// there, made the first time one is asked for.
 pub fn segment_selector(cpu: &mut Cpu, seg: u16) -> u16 {

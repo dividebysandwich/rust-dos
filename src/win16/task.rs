@@ -494,8 +494,9 @@ pub(super) fn client_task(
         new_thread(cpu, ctx)
     };
     let Some((tid, stack32)) = made else {
+        // Its stack and environment block are the TDB's.
+        global::free_owned(cpu, tdb);
         cpu.bus.win32.win16.ldt.free(psp, 1);
-        global::free(cpu, stack);
         global::free(cpu, tdb);
         return Err(memory());
     };
@@ -958,9 +959,14 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     ));
     cpu.bus.win32.win16.tasks[t].exit_code = Some(code);
     cpu.bus.win32.win16.tasks[t].frames.clear();
+    if task.module != 0 {
+        cpu.bus.win32.win16.exit_code = code;
+    }
     if cpu.bus.win32.win16.lock == task.tid {
         cpu.bus.win32.win16.lock = 0;
     }
+    // A Win32 process's client: the threads that wait for it go on.
+    super::flat::task_ending(cpu, task.tid);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)

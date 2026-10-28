@@ -115,6 +115,9 @@ pub struct State {
     pub clients: Vec<flat::Client>,
     pub aliases: Vec<flat::Alias>,
     pub links: Vec<flat::Link>,
+    /// The exit code of the last task that ended other than a client's,
+    /// which the Win16 process ends with when a client outlived it.
+    pub exit_code: u16,
 }
 
 /// A loaded NE module: a program or a DLL, or one of the system's.
@@ -578,7 +581,8 @@ crate::state_fields!(State {
     lz_files,
     clients,
     aliases,
-    links
+    links,
+    exit_code
 });
 crate::state_fields!(Module16 {
     name,
