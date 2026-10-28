@@ -1162,10 +1162,6 @@ pub(super) fn posted16(
             let mut data = Vec::new();
             to16(cpu, hwnd, msg, wp, lp, &mut stack, &mut data)
         }
-        // The wave header played: the program's own.
-        MM_WOM_DONE => (msg, lo(wp), super::misc::wave_header16(cpu, lp)),
         _ => (control_msg16(cpu, hwnd, msg), lo(wp), lp),
     }
 }
-
-const MM_WOM_DONE: u32 = 0x3BD;
