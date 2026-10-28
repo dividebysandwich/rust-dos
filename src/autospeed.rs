@@ -65,11 +65,10 @@ const FINE_STEP: f64 = 1.15;
 /// growth (in the logarithm) found the program still wanting more: frame
 /// rates grow in jumps where a game paces its frames by timer ticks. Steps
 /// down that kept this share of the frames the speed held at lost nothing.
-/// The share is of the held frame rate, not the last step's: a game whose
-/// frame rate falls a little with each step (Myth's 3Dfx renderer, whose
-/// frames also wait for the card) would otherwise be stepped down for as
-/// long as each step loses less than this: Myth went from 18.5 frames a
-/// second to 13.5.
+/// Each step is measured against the held frame rate: a game whose frame
+/// rate falls a little with each step (Myth's 3Dfx renderer, whose frames
+/// also wait for the card) passes every step measured against the one
+/// before it, and Myth went from 18.5 frames a second to 13.5 that way.
 const FOLLOWS: f64 = 0.5;
 const KEPT: f64 = 0.9;
 /// Kept above the speed the frame rate stopped following at.
@@ -353,10 +352,11 @@ pub struct AutoSpeed {
     /// didn't agree yet, and how many.
     unsettled: Option<(f64, u32)>,
     step: Step,
-    /// The highest frame rate the search held at since it started, which
-    /// steps down keep `KEPT` of, and the speed it held at there. A hold
-    /// at that speed or more that draws less than `KEPT` of it replaces
-    /// it: the scene got heavier, or the record was a lighter one's.
+    /// The frame rate steps down keep `KEPT` of, and the speed the search
+    /// held at there: the highest it held at, or what a later hold at that
+    /// speed or more draws (the scene got heavier, or the record was a
+    /// lighter one's), whichever came last. A frame rate falling by a
+    /// fifth while holding, and a new search, clear it.
     held: Option<(f64, u32)>,
     /// While a protected-mode program gets all the host has for its reads
     /// and writes, the speed it had before.
@@ -643,6 +643,11 @@ impl AutoSpeed {
                 let kept = self.held.map_or(before, |(held, _)| held.max(before));
                 if fps >= kept * KEPT {
                     down(self)
+                } else if fps >= before * KEPT {
+                    // Only the held frame rate stopped it: `from` kept
+                    // enough of that, and a knee reckoned from this step
+                    // would put the hold above it, a little more each time.
+                    hold(self, from as f64, HOLD_WINDOWS, true)
                 } else {
                     let knee = (c * before / fps).clamp(c, from as f64);
                     hold(self, (knee * HEADROOM).min(from as f64 * HEADROOM), HOLD_WINDOWS, true)
@@ -657,14 +662,15 @@ impl AutoSpeed {
                     self.held = None;
                     return up(self, FIRST_STEP, here);
                 }
-                self.held = match self.held {
-                    Some((most, at))
-                        if recent <= most && (current < at || recent >= most * KEPT) =>
-                    {
-                        Some((most, at))
-                    }
-                    _ => Some((recent, current)),
-                };
+                // At the record's speed or more (or as fast as the host
+                // goes, if that is less), what the program draws now is
+                // the frame rate to keep.
+                let keep = self
+                    .held
+                    .is_some_and(|(most, at)| recent <= most && current < at.min(top));
+                if !keep {
+                    self.held = Some((recent, current));
+                }
                 if left > 1 {
                     self.step = Step::Hold { fps: held, left: left - 1, more, recent };
                     current
@@ -769,12 +775,41 @@ mod tests {
         };
         let speeds = run(myth, true, 300);
         let fps = |speed| myth(speed).fps.unwrap();
-        // Steps down from 59000 (17.3 frames a second) stop above 15.6
+        // Steps down from 59000 (16.9 frames a second) stop above 15.2
         // and go back up; the one that went too far is a measurement.
         let later = &speeds[100..];
         assert!(later.iter().all(|&s| s >= 40_000), "{:?}", speeds);
         let fewer = later.iter().filter(|&&s| fps(s) < 15.5).count();
         assert!(fewer <= later.len() / 20, "{:?}", speeds);
+        // And it holds where the last step that kept enough went, without
+        // creeping up a little after each step that didn't.
+        let last = later[later.len() - 1];
+        let most = later.iter().filter(|&&s| s == last).count();
+        assert!(most >= later.len() * 4 / 5, "{:?}", speeds);
+    }
+
+    #[test]
+    fn a_frame_rate_held_faster_than_the_host_goes_now_does_not_stop_steps_down() {
+        // Myth again, with the host slowed to 40000 after a while: the
+        // record held at 59000 can't be reached again, and what the hold
+        // at 40000 draws is the frame rate to keep.
+        let myth = |speed: u32| Measurement {
+            fps: Some((1.0 / (1569.0 / speed as f64 + 0.0327)).min(18.5)),
+            polling: 0.0,
+            halted: 0.0,
+            output: 0.0,
+            refresh: 60.0,
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 3000;
+        let mut speeds = Vec::new();
+        for i in 0..400 {
+            let host = if i < 150 { HOST } else { 40_000 };
+            speed = auto.decide(speed, &myth(speed), true, host);
+            speeds.push(speed);
+        }
+        let below = speeds[300..].iter().filter(|&&s| s < 40_000).count();
+        assert!(below >= 100 / 3, "{:?}", speeds);
     }
 
     #[test]
@@ -793,6 +828,8 @@ mod tests {
             speed = auto.decide(speed, &m, true, HOST);
             speeds.push(speed);
         }
+        // The lighter scene comes while the speed holds, so it is held at.
+        assert!(speeds[14..20].iter().all(|&s| s == speeds[14]), "{:?}", speeds);
         // Back to 35 at the same speed, the 50 says nothing of what a step
         // down loses: a step down that keeps the 35 goes on to another.
         let twice = speeds[20..].windows(3).any(|w| w[2] < w[1] && w[1] < w[0]);
