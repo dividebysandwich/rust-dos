@@ -61,6 +61,8 @@ pub struct Display<'a> {
     frame: (u32, u32),
     scale: u32,
     fullscreen: bool,
+    /// The window is never shown (`--hidden`), so it stays a window.
+    hidden: bool,
     aspect: AspectRatio,
     filter: Filter,
     shader: Shader,
@@ -125,17 +127,18 @@ impl<'a> Display<'a> {
     }
 
     /// Open the window, drawn with OpenGL 3 or else SDL's renderer, whose
-    /// textures come from `textures`.
+    /// textures come from `textures`. A `hidden` window isn't shown.
     pub fn open(
         video: &VideoSubsystem,
         title: &str,
         settings: &Settings,
         textures: &'a OnceCell<TextureCreator<WindowContext>>,
+        hidden: bool,
     ) -> Result<Self, String> {
         let frame = (video::SCREEN_WIDTH, video::SCREEN_HEIGHT);
         let size = Self::window_size(settings);
         let mut warning = None;
-        let (out, renderer) = match GlScreen::open(video, title, size) {
+        let (out, renderer) = match GlScreen::open(video, title, size, hidden) {
             Ok(mut gl) => {
                 if let Err(problem) = gl.select(settings.shader, settings.filter) {
                     warning = Some(problem);
@@ -153,7 +156,12 @@ impl<'a> Display<'a> {
                 let window = match window {
                     Some(window) => window,
                     None => {
-                        video.window(title, size.0, size.1).position_centered().build().map_err(|e| e.to_string())?
+                        let mut builder = video.window(title, size.0, size.1);
+                        builder.position_centered();
+                        if hidden {
+                            builder.hidden();
+                        }
+                        builder.build().map_err(|e| e.to_string())?
                     }
                 };
                 let canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
@@ -176,6 +184,7 @@ impl<'a> Display<'a> {
             frame,
             scale: settings.scale,
             fullscreen: false,
+            hidden,
             aspect: settings.aspect,
             filter: settings.filter,
             shader: settings.shader,
@@ -297,6 +306,9 @@ impl<'a> Display<'a> {
     }
 
     fn set_fullscreen(&mut self, on: bool) -> Result<(), String> {
+        // SDL makes a hidden window fullscreen only once it is shown, and
+        // until then it would keep its first size, whatever the picture's.
+        let on = on && !self.hidden;
         let mode = if on { FullscreenType::Desktop } else { FullscreenType::Off };
         self.out.window_mut().set_fullscreen(mode)?;
         self.fullscreen = on;

@@ -43,7 +43,7 @@ fn double(frame: &Frame) -> Frame {
 fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
-    let mut screen = GlScreen::open(&video, "RGBA presentation regression", (8, 8))
+    let mut screen = GlScreen::open(&video, "RGBA presentation regression", (8, 8), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());
     screen.present(&frame, 0..4, (5, 4), None);
@@ -88,6 +88,7 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
         "Persistent composition regression",
         &Default::default(),
         &textures,
+        true,
     )
     .unwrap();
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());

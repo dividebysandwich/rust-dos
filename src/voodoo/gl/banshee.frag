@@ -1,9 +1,10 @@
 // A Banshee's or Voodoo3's picture as its video processor shows it, at
-// u_scale times its size: the desktop, the overlay window over it and
-// the hardware cursor on top, as src/voodoo/banshee/display.rs draws it
-// in software. A surface is the card's memory (bytes in rows of 4096,
-// from the surface's first byte on) or, where the OpenGL renderer draws
-// it, the texture of one of its colour buffers.
+// u_scale times its size and each pixel u_across times across: the
+// desktop, the overlay window over it and the hardware cursor on top, as
+// src/voodoo/banshee/display.rs draws it in software. A surface is the
+// card's memory (bytes in rows of 4096, from the surface's first byte
+// on) or, where the OpenGL renderer draws it, the texture of one of its
+// colour buffers.
 
 // OpenGL ES has no default precision for integer samplers.
 #ifdef GL_ES
@@ -11,6 +12,9 @@ precision highp usampler2D;
 #endif
 
 uniform int u_scale;
+// 2 when the monitor shows each of the desktop's pixels twice across
+// (a narrow mode at half the pixel clock), else 1.
+uniform int u_across;
 uniform usampler2D u_desk_mem;
 uniform sampler2D u_desk_buf;
 uniform usampler2D u_ovl_mem;
@@ -163,7 +167,9 @@ vec3 overlay(ivec2 p, vec2 f) {
 }
 
 void main() {
-    vec2 f = gl_FragCoord.xy;
+    // Where the fragment is on the picture before its pixels are widened,
+    // which the rest goes by.
+    vec2 f = gl_FragCoord.xy / vec2(float(u_across), 1.0);
     ivec2 p = ivec2(f) / u_scale;
     vec3 c = desktop(p, f);
     if (u_ovl.w >= 0 && all(greaterThanEqual(p, u_ovl_rect.xy)) && all(lessThanEqual(p, u_ovl_rect.zw))) {

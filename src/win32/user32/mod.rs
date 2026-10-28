@@ -11,6 +11,7 @@
 
 pub mod class;
 pub mod controls;
+pub mod cursor;
 pub mod ddeml;
 pub mod defwnd;
 pub mod dialog;

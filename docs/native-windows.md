@@ -640,6 +640,36 @@ vertex declaration, and vs.1.1 shaders run in an interpreter before
 the HAL draws what they give. On a Voodoo Graphics or Voodoo2 add-on
 card CreateDevice fails with D3DERR_NOTAVAILABLE.
 
+OPENGL32.DLL is OpenGL 1.1 on the same HAL, as 3dfx's ICD for the
+Banshee and Voodoo3 had it, for Quake III Arena's engine (American
+McGee's Alice). Its pixel formats are the ICD's two, 5-6-5 color with a
+16-bit depth buffer, single or double buffered; ChoosePixelFormat,
+DescribePixelFormat, SetPixelFormat, GetPixelFormat and SwapBuffers in
+GDI32 go to it, as Windows sends them to the ICD of the DC's device. A
+context is a DirectDraw object of its own with a Direct3D 7 device
+drawing into a 16-bit color buffer and depth buffer the size of the
+window's client area; SwapBuffers copies the color buffer to the
+window, which covers the screen when the game changed the mode. Each
+draw puts OpenGL's state on the device: the modelview matrix as the
+world transform, the projection with OpenGL's depth range turned into
+Direct3D's, the viewport, blending, the alpha and depth tests, culling,
+fog and the texture environments as texture stages, and the scissor
+box, polygon offset (as the card's depth bias) and color mask, which
+the HAL takes from the device. glBegin and glEnd, vertex arrays with
+glDrawArrays, glDrawElements and glArrayElement go through Direct3D's
+vertex pipeline; quads, quad strips, polygons and line loops become
+triangle lists, strips, fans and line strips. Textures are DirectDraw
+texture surfaces with their mipmaps, 5-6-5 or 4-4-4-4, in video memory
+while there is room past the HAL's texture heap and in system memory
+after. The extensions are GL_ARB_multitexture (two units, as the card's
+two TMUs), GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
+WGL_EXT_swap_control. The functions OpenGL 1.1 has and the ICD doesn't
+(display lists, lighting, evaluators, feedback, the accumulation and
+stencil buffers) are exported and do nothing, and their first call is
+logged. Without a Banshee or Voodoo3 the DLL loads but there is no
+pixel format, so a context can't be made. SetDeviceGammaRamp sets the
+card's lookup table for 16- and 32-bit modes until the next mode set.
+
 **Phase 5: breadth.**
 
 - 32-bit installers (InstallShield 5's 32-bit engine, Wise) and

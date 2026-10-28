@@ -1760,8 +1760,23 @@ fn win32_without_a_program_has_no_processes() {
     let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
     cpu.bus.win32.enabled = true;
     let v = reply(&mut cpu, &mut hub, Cmd::Win32).unwrap();
-    let expected = json!({"enabled": true, "active": false, "pending": null, "processes": []});
+    let expected = json!({
+        "enabled": true,
+        "active": false,
+        "pending": null,
+        "processes": [],
+        "trace": "collapsed",
+    });
     assert_eq!(v, expected);
+}
+
+#[test]
+fn win32_trace_level_changes_at_run_time() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    let all = Cmd::Win32Trace(rust_dos::config::Win32Trace::All);
+    assert_eq!(reply(&mut cpu, &mut hub, all).unwrap()["trace"], "all");
+    assert_eq!(rust_dos::win32::trace::level(&cpu), rust_dos::config::Win32Trace::All);
+    assert_eq!(reply(&mut cpu, &mut hub, Cmd::Win32).unwrap()["trace"], "all");
 }
 
 #[test]

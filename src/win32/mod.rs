@@ -43,6 +43,7 @@ mod ntdll;
 pub(crate) mod object;
 mod ole32;
 mod oleaut32;
+mod opengl32;
 mod advpack;
 mod registry;
 mod screen;
@@ -53,6 +54,7 @@ pub(crate) mod stubs;
 pub(crate) mod system;
 mod task;
 pub(crate) mod thread;
+pub mod trace;
 pub mod user32;
 pub mod version;
 mod verdll;
@@ -294,9 +296,15 @@ pub struct Win32 {
     /// of them started.
     pub depth: crate::config::DesktopDepth,
     desktop_depth: crate::config::DesktopDepth,
+    /// The desktop's size as ChangeDisplaySettings set it, and the
+    /// process that set it: None while it is its own (screen.rs).
+    desktop_size: Option<(u32, u32, u32)>,
     /// The built-in DLLs the system directory shows as files
     /// (dll_files.rs), as last shown.
     dll_files: Option<dll_files::Shown>,
+    /// The log's trace of the calls of the built-in functions (the
+    /// `win32_trace` setting), which outlives the programs.
+    pub(crate) trace: trace::Trace,
     /// The program DOS loaded, which starts at `START`, and whether it is
     /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
     pending: Option<String>,
@@ -331,6 +339,10 @@ pub struct Win32 {
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     slice_start: u64,
+    /// How many times programs have called functions of the system's
+    /// modules, built-in or missing (`service`), to tell whether a thread
+    /// called anything between two polls.
+    pub calls: u64,
     /// How many process and thread ids have been given out.
     ids: u32,
     /// The id of the process DOS started, whose exit code DOS gets.
@@ -365,6 +377,8 @@ pub struct Win32 {
     dinput: dinput::State,
     winmm: winmm::State,
     glide: glide::State,
+    /// OpenGL's contexts and pixel formats (opengl32/).
+    opengl32: opengl32::State,
     guids: u32,
     /// DirectMusic's objects (dmusic/).
     dmusic: dmusic::State,
@@ -390,6 +404,7 @@ impl Win32 {
             version: self.version,
             depth: self.depth,
             dll_files: self.dll_files.take(),
+            trace: trace::Trace::new(self.trace.level()),
             ..Win32::default()
         };
     }
@@ -397,6 +412,12 @@ impl Win32 {
     /// Whether a Win32 program is running.
     pub fn active(&self) -> bool {
         !self.processes.is_empty()
+    }
+
+    /// Whether a program has the 3dfx card open through Glide
+    /// (grSstWinOpen), whose picture the card then shows.
+    pub fn glide_open(&self) -> bool {
+        self.glide.owner != 0
     }
 
     /// Whether DOS loaded a Win32 program that hasn't started yet.
@@ -603,10 +624,19 @@ pub fn service(cpu: &mut Cpu, id: u16) {
         ID_START => start(cpu),
         ID_IRQ_RETURN => system::irq_return(cpu),
         _ if id & 0xFF00 == ID_IDT => system::idt(cpu, id as u8),
-        _ if id >= FIRST_MISSING => missing(cpu, id - FIRST_MISSING),
-        // A system module's stub, called by 16-bit code.
-        _ if crate::win16::in_16bit_code(cpu) => crate::win16::call(cpu, id),
-        _ => stubs::call(cpu, id),
+        // The rest are calls: of built-in functions, or of functions the
+        // built-in Windows doesn't have.
+        _ => {
+            cpu.bus.win32.calls = cpu.bus.win32.calls.wrapping_add(1);
+            if id >= FIRST_MISSING {
+                missing(cpu, id - FIRST_MISSING);
+            } else if crate::win16::in_16bit_code(cpu) {
+                // A system module's stub, called by 16-bit code.
+                crate::win16::call(cpu, id);
+            } else {
+                stubs::call(cpu, id);
+            }
+        }
     }
 }
 
@@ -913,6 +943,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         return;
     }
     let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
+    // The last program's loops get their summaries.
+    trace::flush(cpu);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
     if let Some(pool) = cpu.bus.win32.pool.take() {
         pool.release(&mut cpu.bus);
@@ -969,6 +1001,9 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     registry::process_ended(cpu, process.id);
     user32::process_ended(cpu, process.id, &tids);
     gdi32::process_ended(cpu, process.id);
+    // The desktop's own mode is set before DirectDraw gives the display
+    // back, so that the desktop is put on the screen once.
+    user32::sysparams::process_ended(cpu, process.id);
     ole32::process_ended(cpu, process.id, &tids);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
@@ -976,6 +1011,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     dinput::process_ended(cpu, process.id, &tids);
     winmm::process_ended(cpu, process.id, &tids);
     glide::process_ended(cpu, process.id, &tids);
+    opengl32::process_ended(cpu, process.id);
     dmusic::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
@@ -1149,6 +1185,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.dinput = dinput::State::default();
         cpu.bus.win32.winmm = winmm::State::default();
         cpu.bus.win32.glide = glide::State::default();
+        cpu.bus.win32.opengl32 = opengl32::State::default();
         cpu.bus.win32.shell = shell32::State::default();
         cpu.bus.win32.dde = user32::ddeml::State::default();
         cpu.bus.set_a20(a20);
@@ -1239,6 +1276,7 @@ crate::state_fields!(Win32 {
     interrupted,
     exit_code,
     slice_start,
+    calls,
     ids,
     root,
     registry,
@@ -1257,6 +1295,7 @@ crate::state_fields!(Win32 {
     dinput,
     winmm,
     glide,
+    opengl32,
     guids,
     os,
     dmusic,
@@ -1268,4 +1307,5 @@ crate::state_fields!(Win32 {
     win16,
     desktop_depth,
     atoms,
-} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files });
+    desktop_size,
+} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files, trace });

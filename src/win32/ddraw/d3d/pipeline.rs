@@ -470,7 +470,9 @@ pub struct Setup {
     /// They are always clipped to the guard band, past which the card
     /// can't take coordinates.
     pub clip: bool,
-    /// Left, top, right, bottom.
+    /// The band primitives are always clipped to: left, top, right,
+    /// bottom. The card's is `hal::VERTEX_BAND`, a pixel inside the
+    /// guard band the device reports.
     pub guard_band: [f32; 4],
     pub cull: u32,
     pub fill: u32,
@@ -490,7 +492,7 @@ impl Default for Setup {
             lighting: None,
             fog: None,
             clip: true,
-            guard_band: [-2048.0, -2048.0, 2048.0, 2048.0],
+            guard_band: super::hal::VERTEX_BAND,
             cull: CULL_CCW,
             fill: 3,
             shade: 2,
@@ -519,6 +521,20 @@ pub struct Processed {
 }
 
 impl Processed {
+    /// Take the colors of `provoking`, as flat shading does: its diffuse
+    /// color and the red, green and blue of its specular one. The fog
+    /// factor in the specular alpha stays this vertex's own, so fog is
+    /// still interpolated across the face. D3DSHADE_FLAT is documented
+    /// so ("the specular alpha is interpolated"), Wine has it so (the
+    /// fog coordinate, which OpenGL's flat shading leaves alone), and a
+    /// Voodoo iterates fog through W or Z, never flat.
+    fn take_flat_colors(&mut self, provoking: &Processed) {
+        let fog = self.specular[3];
+        self.diffuse = provoking.diffuse;
+        self.specular = provoking.specular;
+        self.specular[3] = fog;
+    }
+
     fn lerp(&self, o: &Processed, t: f32) -> Processed {
         let l = |a: f32, b: f32| a + (b - a) * t;
         let l4 =
@@ -1031,28 +1047,20 @@ pub fn draw(
                 };
                 let mut vb = *vb;
                 if flat {
-                    vb.diffuse = va.diffuse;
-                    vb.specular = va.specular;
+                    vb.take_flat_colors(va);
                 }
                 if line(setup, va, &vb, &planes, &tl_planes, raster) {
                     drawn.lines += 1;
                 }
             }
             Prim::Triangle(idx, provoking, edges) => {
-                let mut tri = [Processed::default(); 3];
-                for (t, &i) in tri.iter_mut().zip(idx.iter()) {
-                    match verts.get(i as usize) {
-                        Some(v) => *t = *v,
-                        None => continue,
-                    }
-                }
                 if idx.iter().any(|&i| i as usize >= verts.len()) {
                     continue;
                 }
+                let mut tri = idx.map(|i| verts[i as usize]);
                 if flat && let Some(p) = verts.get(provoking as usize) {
                     for t in tri.iter_mut() {
-                        t.diffuse = p.diffuse;
-                        t.specular = p.specular;
+                        t.take_flat_colors(p);
                     }
                 }
                 triangle(setup, tri, edges, &planes, &tl_planes, raster, &mut drawn);
@@ -1394,6 +1402,53 @@ mod tests {
                 Prim::Triangle([0, 1, 2], 0, 7),
                 Prim::Triangle([2, 1, 3], 1, 7)
             ]
+        );
+    }
+
+    #[test]
+    fn flat_shading_takes_the_colors_but_not_the_fog() {
+        let setup = Setup {
+            shade: SHADE_FLAT,
+            cull: CULL_NONE,
+            ..Setup::default()
+        };
+        // Transformed vertices, each its own colors and fog factor.
+        let at = |x: f32, y: f32, diffuse: u32, specular: u32| Processed {
+            clip: [x, y, 0.5, 1.0],
+            rhw: 1.0,
+            tl: true,
+            diffuse: rgba(diffuse),
+            specular: rgba(specular),
+            ..Processed::default()
+        };
+        let verts = [
+            at(0.0, 0.0, 0xFFFF_0000, 0x0010_2030),
+            at(10.0, 0.0, 0xFF00_FF00, 0x8040_5060),
+            at(0.0, 10.0, 0xFF00_00FF, 0xFF70_8090),
+        ];
+        let mut r = Recorder::default();
+        // A fan's triangle takes the colors of its second vertex.
+        draw(
+            &setup,
+            &verts,
+            &assemble(TRIANGLEFAN, &[0, 1, 2]).unwrap(),
+            &mut r,
+        );
+        draw(&setup, &verts, &[Prim::Line(0, 2)], &mut r);
+        let colors = |v: &[ScreenVertex]| -> Vec<(u32, u32)> {
+            v.iter().map(|v| (v.diffuse, v.specular)).collect()
+        };
+        assert_eq!(
+            colors(&r.triangles[0]),
+            [
+                (0xFF00_FF00, 0x0040_5060),
+                (0xFF00_FF00, 0x8040_5060),
+                (0xFF00_FF00, 0xFF40_5060),
+            ]
+        );
+        assert_eq!(
+            colors(&r.lines[0]),
+            [(0xFFFF_0000, 0x0010_2030), (0xFFFF_0000, 0xFF10_2030)]
         );
     }
 }

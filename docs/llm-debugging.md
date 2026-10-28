@@ -18,6 +18,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   which changes timing-sensitive behaviour.
 - **Dummy drivers:** they need no window or sound device. Audio is still
   mixed and streamed.
+- **OpenGL without a window:** the dummy video driver has no OpenGL, so
+  `voodoo_renderer=opengl` falls back to the software rasterizer. To run
+  the OpenGL renderer on the host's GPU, leave `SDL_VIDEODRIVER` unset
+  and pass `--hidden`: the window is made with its OpenGL context but
+  never shown.
 - **C: drive:** `-d` sets it. `AUTOEXEC.BAT` in that directory runs at
   startup.
 - **`--no-config`:** without it, rust-dos reads `rust-dos.conf` from the
@@ -1172,6 +1177,15 @@ With `win32` on, a Win32 console program runs on the built-in Windows
 Ids, addresses and exit codes are 8-digit hex strings; handles and
 `last_error` are numbers. Pause the machine first for a view that
 holds still: the threads take turns as the timer's interrupts come.
+
+`trace` is the `win32_trace` level: which calls of the built-in
+functions get a `[W32]` (or `[W16]`) line in the log. `collapsed`, the
+default, writes the first 3 calls from each call site in a second of
+emulated time and then a line with the count of the rest, such as
+`[W32] 004D72B6: WINMM.timeGetTime x49812 more in 1.0 s`; a loop that
+goes on gets one line and a count a second. To see every call while
+reproducing a problem, `POST /api/win32 {"trace":"all"}`, and set it
+back to `collapsed` after; `off` writes none.
 
 `GET /api/win32/ddraw` lists DirectDraw's surfaces, with the display
 `mode` DirectDraw set (null on the desktop's) and the ids of the

@@ -166,7 +166,13 @@ fn main() -> Result<(), String> {
     // it to the window. The textures are for SDL's renderer, which draws
     // where there is no OpenGL 3.
     let textures = std::cell::OnceCell::new();
-    let mut display = Display::open(&video_subsystem, "Rust DOS Emulator", &settings, &textures)?;
+    let mut display = Display::open(
+        &video_subsystem,
+        "Rust DOS Emulator",
+        &settings,
+        &textures,
+        args.hidden,
+    )?;
     // The picture on a screen in a 3D scene, in a headset or the window.
     let stage_notes = if settings.vr.mode == rust_dos::vr::VrMode::Off {
         Vec::new()
@@ -431,6 +437,9 @@ fn main() -> Result<(), String> {
     // The mouse held in SDL's relative mode while Ctrl+Shift fly the 3D
     // scene's camera, and the start of the last frame's flight.
     let mut steering_mouse = false;
+    // The host's pointer hidden over the window while the built-in
+    // Windows draws its own cursor in the picture.
+    let mut pointer_hidden = false;
     // A click the 3D scene took, whose release the machine doesn't see.
     let mut swallowed_click = false;
     let mut last_steer = std::time::Instant::now();
@@ -1214,6 +1223,17 @@ fn main() -> Result<(), String> {
 
         if host_keys || (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons) != mouse_before {
             dbg.host_input(&cpu);
+        }
+
+        // The built-in Windows' cursor is drawn in the picture where the
+        // host's pointer is, so that pointer would show twice. The settings
+        // window and the 3D scene keep the host's.
+        let hide_pointer = !ui.is_open()
+            && !display.every_frame()
+            && video::overlay::draws_windows_cursor(&cpu.bus);
+        if hide_pointer != pointer_hidden {
+            sdl_mouse.show_cursor(!hide_pointer);
+            pointer_hidden = hide_pointer;
         }
 
         // The mouse in relative mode while flying, so that it doesn't stop
@@ -2161,6 +2181,10 @@ fn shut_down(
     if settings.monitor_effects != video::power::MonitorEffects::Off {
         power_off(power, display, screen, &mut cpu.bus, settings.monitor_effects)?;
     }
+
+    // The loops of a program still running get their summaries.
+    rust_dos::win32::trace::flush(cpu);
+    cpu.bus.flush_log();
 
     // The journal ends, and the debug server's clients get what they
     // waited for.

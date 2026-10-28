@@ -26,7 +26,7 @@
 //! Christian Costa, Copyright (c) 2006 Stefan Dösinger, Copyright (c)
 //! 2008 Alexander Dorofeyev, and others.
 
-mod caps;
+pub mod caps;
 pub mod device;
 pub mod direct3d;
 pub mod draw;

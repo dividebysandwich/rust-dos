@@ -111,18 +111,18 @@ fn hal(cpu: &mut Cpu) -> &mut Hal {
 }
 
 // Render states the HAL reads.
-const RS_ALPHATESTENABLE: u32 = 15;
+pub const RS_ALPHATESTENABLE: u32 = 15;
 const RS_SRCBLEND: u32 = 19;
 const RS_DESTBLEND: u32 = 20;
-const RS_ALPHAREF: u32 = 24;
+pub const RS_ALPHAREF: u32 = 24;
 const RS_ALPHAFUNC: u32 = 25;
-const RS_DITHERENABLE: u32 = 26;
-const RS_ALPHABLENDENABLE: u32 = 27;
-const RS_FOGCOLOR: u32 = 34;
+pub const RS_DITHERENABLE: u32 = 26;
+pub const RS_ALPHABLENDENABLE: u32 = 27;
+pub const RS_FOGCOLOR: u32 = 34;
 const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
 const RS_FOGDENSITY: u32 = 38;
-const RS_COLORKEYENABLE: u32 = 41;
+pub const RS_COLORKEYENABLE: u32 = 41;
 
 /// The heap's size at the most, and the least worth having.
 const HEAP_MAX: u32 = 4 << 20;
@@ -203,9 +203,20 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let right = ((m.ox + m.bounds[1] * m.sx).max(0.0) as u32).min(width);
     let top = (m.oy - m.bounds[3] * m.sy).max(0.0) as u32;
     let bottom = ((m.oy - m.bounds[2] * m.sy).max(0.0) as u32).min(height);
+    // OpenGL's scissor box cuts it down further.
+    let [left, top, right, bottom] = match d.scissor {
+        Some(s) => [
+            left.max(s[0]),
+            top.max(s[1]),
+            right.min(s[2]),
+            bottom.min(s[3]),
+        ],
+        None => [left, top, right, bottom],
+    };
     api::clip_window(cpu, left, top, right.max(left), bottom.max(top));
     api::cull_mode(cpu, api::CULL_DISABLE);
-    api::color_mask(cpu, true, false);
+    api::color_mask(cpu, !d.color_off, false);
+    api::depth_bias_level(cpu, d.depth_bias);
     api::chromakey_mode(cpu, api::CHROMAKEY_DISABLE);
     let dither = d.state(RS_DITHERENABLE) != 0;
     api::dither_mode(
@@ -368,6 +379,11 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         }
     }
     let textured = loaded[0];
+    // Each unit's own texture coordinates when both draw: without the
+    // hint the upstream unit takes the downstream one's.
+    if loaded[0] && loaded[1] {
+        api::hints(cpu, api::HINT_STWHINT, hint | api::STWHINT_ST_DIFF_TMU1);
+    }
     // A keyed texture on the upstream unit alone isn't drawn.
     let keyed = keyed && textured;
     if textured {
@@ -1249,6 +1265,14 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 }
 
 // Drawing.
+
+/// The band on the screen the pipeline clips what the card draws to:
+/// left, top, right and bottom. The card's vertex registers hold 12.4
+/// fixed point, -2048 to 2047.9375, and a coordinate past either end
+/// wraps round to the other, so a triangle clipped at 2048 would have
+/// its vertices there drawn at -2048. A pixel in from those ends
+/// leaves room for the half pixel lines are drawn out by.
+pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2047.0, 2047.0];
 
 /// The card as the pipeline's rasterizer.
 pub struct Raster<'a> {

@@ -116,6 +116,7 @@ pub static DLLS: &[&Dll] = &[
     &super::imagehlp::DLL,
     &super::ws2_32::DLL,
     &super::msimg32::DLL,
+    &super::opengl32::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -342,7 +343,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     }
     // Where it was called from, for the log: read without a page fault,
     // as a function the entry point returns to has no caller there.
-    let caller = cpu.bus.logs().then(|| super::peek_32(cpu, esp));
+    let traced = super::trace::on(cpu);
+    let caller = traced.then(|| super::peek_32(cpu, esp));
     let caller = caller.flatten().unwrap_or(0);
     let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
@@ -357,13 +359,21 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     if let Some(value) = result {
         cpu.set_eax(value);
     }
-    if cpu.bus.logs() {
+    let module = &dll.name[..dll.name.len() - 4];
+    let call = super::trace::Call {
+        kind: super::trace::Kind::W32,
+        caller,
+        id,
+        module,
+        name: api.name,
+    };
+    if traced && super::trace::admit(cpu, call) {
         let args: Vec<String> = args.iter().map(|a| format!("{:08X}", a)).collect();
         let result = result.map_or("(no return)".to_string(), |r| format!("{:08X}", r));
         cpu.bus.log_string(&format!(
             "[W32] {:08X}: {}.{}({}) = {}",
             caller,
-            &dll.name[..dll.name.len() - 4],
+            module,
             api.name,
             args.join(", "),
             result

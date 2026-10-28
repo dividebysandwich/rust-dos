@@ -572,8 +572,8 @@ fn show_fetched(cpu: &mut Cpu, hwnd: u32, n: i32, track: bool) -> Vec<Op> {
     }
     r.right = r.left + cx;
     r.bottom = r.top + cy;
-    let screen_w = user32::sysparams::metric(SM_CXSCREEN);
-    let screen_h = user32::sysparams::metric(SM_CYSCREEN);
+    let screen_w = user32::sysparams::screen_metric(cpu, SM_CXSCREEN);
+    let screen_h = user32::sysparams::screen_metric(cpu, SM_CYSCREEN);
     if r.right > screen_w {
         r.left -= r.right - screen_w + 2;
         r.right = screen_w - 2;

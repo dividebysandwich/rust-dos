@@ -77,8 +77,14 @@ disk.
 
 - Give each worktree its own target directory outside the repository
   (`CARGO_TARGET_DIR`), on a drive with room. Builds that share a target
-  directory wait for each other ("Blocking waiting for file lock"), so
+  directory wait for each other ("Blocking waiting for file lock"), and
+  each one overwrites the binaries the one before it built, so
   concurrent builds need separate ones.
+- Reuse the target directory of a finished task instead of starting an
+  empty one. It keeps the compiled dependencies, so a build of another
+  worktree compiles only the rust-dos crates again. A compiler cache
+  such as sccache doesn't do this across directories: its cache keys
+  include the target directory's path, so a new directory gets no hits.
 - Cargo starts as many jobs as there are processors, and every agent's
   build does. With more than two or three builds at once, pass `-j 2`
   or so. Otherwise the machine thrashes, and on Windows rustc and the

@@ -1983,10 +1983,13 @@ pub fn draw_point(cpu: &mut Cpu, p: &Vertex) {
     if !active(cpu) {
         return;
     }
-    // 12.4 fixed point: the pixel, and half a pixel.
+    // 12.4 fixed point: the pixel, and half a pixel. The triangle's
+    // far corners are at the pixel's far edge, 2048 for pixel 2047,
+    // which the card's registers take as -2048: the pixel is at most
+    // 2046.
     let fixed = |v: f32| -> u32 {
         let v = if v.is_finite() {
-            v.clamp(-2048.0, 2047.0)
+            v.clamp(-2048.0, 2046.0)
         } else {
             0.0
         };

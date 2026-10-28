@@ -2639,7 +2639,7 @@ fn got(cpu: &mut Cpu, tr: &mut Track, value: u32, scratch: u32) -> Next {
 /// menu bar item or the system menu button, or beside its item in the
 /// menu it opens from; on the other side when there is no room.
 fn popup_pos(cpu: &mut Cpu, tr: &Track, lv: usize, (w, h): (i32, i32)) -> (i32, i32) {
-    let (sw, sh) = sysparams::screen_size();
+    let (sw, sh) = sysparams::screen_size(cpu);
     let state = user(cpu);
     let (mut x, mut y);
     let mut other_x = None;
