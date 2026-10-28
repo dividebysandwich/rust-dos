@@ -1013,8 +1013,13 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
 }
 
 /// A fault in a task's code: as Windows 3.1's "Application Error", the
-/// task ends, the others go on.
-pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
+/// task ends, the others go on. CLI and STI, which fault at level 3 with
+/// IOPL 0, are the exception (`interrupt_flag`).
+pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
+    if vector == 13 && error == Some(0) && interrupt_flag(cpu, &mut ctx) {
+        crate::win32::system::load_context(cpu, &ctx);
+        return;
+    }
     let name = super::current_task(cpu)
         .map(|t| cpu.bus.win32.win16.tasks[t].module)
         .and_then(|m| super::module_index(cpu, m))
@@ -1039,4 +1044,27 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
     cpu.bus.log_string(&format!("[W16] {}", message));
     crate::win32::system::load_context(cpu, &ctx);
     exit(cpu, 0xFF);
+}
+
+/// Whether the instruction `ctx` faulted on is CLI or STI, which then
+/// goes on after it. Windows' VMM keeps a virtual interrupt flag for
+/// the protected-mode code of the system VM: CLI and STI change that
+/// flag, and the code goes on, as Windows 3.1 programs expect around
+/// their changes to the vector table or the BIOS data area. Here the
+/// hardware interrupts go to the real-mode handlers whatever a task
+/// does, never to its code, so a virtual flag would hold nothing back:
+/// both instructions are skipped.
+fn interrupt_flag(cpu: &Cpu, ctx: &mut Context) -> bool {
+    let Some((base, _, attr)) = super::task_code(cpu, ctx) else {
+        return false;
+    };
+    let big = attr & crate::cpu::ATTR_DB != 0;
+    let eip = if big { ctx.eip } else { ctx.eip & 0xFFFF };
+    let is_cli_sti = super::peek(cpu, base.wrapping_add(eip), 1)
+        .is_some_and(|b| matches!(b[0], 0xFA | 0xFB));
+    if is_cli_sti {
+        let next = eip.wrapping_add(1);
+        ctx.eip = if big { next } else { next & 0xFFFF };
+    }
+    is_cli_sti
 }

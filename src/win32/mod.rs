@@ -119,12 +119,14 @@ pub const TRAP: u8 = 0x3E;
 
 /// The ROM's part (offsets in segment F000): the start of a process, the
 /// return of the real-mode handler of a hardware interrupt, the end of a
-/// process (INT 21h AH=4Ch), and the IDT's 256 traps.
+/// process (INT 21h AH=4Ch), the return of the real-mode handler of a
+/// Win16 task's software interrupt, and the IDT's 256 traps.
 pub(crate) const ROM_SEG: u16 = 0xF000;
 const ROM_BASE: usize = 0xF0000;
 const START: u16 = 0x3800;
 const IRQ_RETURN: u16 = 0x3804;
 const EXIT: u16 = 0x3808;
+const INT_RETURN: u16 = 0x380C;
 const IDT_TRAPS: u16 = 0x3C00;
 
 /// The traps' ids: the built-in DLLs' functions below `FIRST_MISSING`
@@ -136,6 +138,7 @@ const FIRST_SYSTEM: u16 = 0xF000;
 const ID_IDT: u16 = 0xF100;
 const ID_IRQ_RETURN: u16 = 0xF200;
 const ID_START: u16 = 0xF300;
+const ID_INT_RETURN: u16 = 0xF400;
 
 /// The index of ESP in `Context::gpr`.
 const ESP: usize = 4;
@@ -541,6 +544,7 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
     let at = |offset: u16| ROM_BASE + offset as usize;
     bus.write_rom(at(START), &trap(ID_START));
     bus.write_rom(at(IRQ_RETURN), &trap(ID_IRQ_RETURN));
+    bus.write_rom(at(INT_RETURN), &trap(ID_INT_RETURN));
     // INT 21h; and should DOS come back, again.
     bus.write_rom(at(EXIT), &[0xCD, 0x21, 0xEB, 0xFC]);
     let idt: Vec<u8> = (0..=255).flat_map(|v| trap(system::idt_id(v))).collect();
@@ -610,7 +614,7 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
         }
         return match id {
             ID_START => !cpu.pe() && win32.pending.is_some() && !win32.active(),
-            ID_IRQ_RETURN => !cpu.pe() && win32.interrupted.is_some(),
+            ID_IRQ_RETURN | ID_INT_RETURN => !cpu.pe() && win32.interrupted.is_some(),
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
     }
@@ -625,6 +629,7 @@ pub fn service(cpu: &mut Cpu, id: u16) {
     match id {
         ID_START => start(cpu),
         ID_IRQ_RETURN => system::irq_return(cpu),
+        ID_INT_RETURN => system::int_return(cpu),
         _ if id & 0xFF00 == ID_IDT => system::idt(cpu, id as u8),
         // The rest are calls: of built-in functions, or of functions the
         // built-in Windows doesn't have.
@@ -1227,6 +1232,7 @@ pub fn trap_name(id: u16) -> String {
     match id {
         ID_START => "Win32 start".to_string(),
         ID_IRQ_RETURN => "Win32 IRQ return".to_string(),
+        ID_INT_RETURN => "Win16 INT return".to_string(),
         _ if id & 0xFF00 == ID_IDT => format!("Win32 IDT {:02X}h", id as u8),
         _ if id >= FIRST_MISSING => format!("Win32 missing function {}", id - FIRST_MISSING),
         _ => format!(

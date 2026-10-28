@@ -9,7 +9,7 @@
 //! service traps in the ROM, run at level 0 on the TSS's stack.
 
 use super::memory::{Memory, PAGE, SYSTEM, WRITABLE};
-use super::{Context, ESP, ID_IDT, IDT_TRAPS, IRQ_RETURN, ROM_BASE, ROM_SEG};
+use super::{Context, ESP, ID_IDT, IDT_TRAPS, INT_RETURN, IRQ_RETURN, ROM_BASE, ROM_SEG};
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache};
 use crate::dpmi::descriptor;
 
@@ -362,6 +362,59 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
     cpu.push(0x0002);
     cpu.push(ROM_SEG);
     cpu.push(IRQ_RETURN);
+}
+
+/// The arithmetic flags: what a real-mode handler of a software
+/// interrupt gives back to the protected-mode program.
+const STATUS_FLAGS: u32 = 0x08D5;
+
+/// A Win16 task's software interrupt `vector` that goes down to real
+/// mode, as Windows reflects one its protected-mode code doesn't handle
+/// to the virtual machine's vector table: the handler there runs with
+/// the general registers of `ctx` and DS and ES `seg`, on the DOS
+/// program's stack, interrupts off, and returns to the trap at
+/// `INT_RETURN`, which gives the task what it returned (`int_return`).
+pub fn reflect_int(cpu: &mut Cpu, vector: u8, ctx: Context, seg: u16) {
+    let win32 = &mut cpu.bus.win32;
+    win32.interrupted = Some(ctx);
+    let (ss, sp) = win32.rm_stack;
+    let handler = cpu.bus.read_32(vector as usize * 4);
+    let flags = ctx.eflags & STATUS_FLAGS | 0x0002;
+    enter_real(
+        cpu,
+        ((handler >> 16) as u16, handler as u16),
+        (ss, sp),
+        flags,
+    );
+    let mut snapshot = cpu.snapshot();
+    snapshot.gpr = ctx.gpr;
+    snapshot.gpr[ESP] = sp as u32;
+    cpu.restore(&snapshot);
+    cpu.set_ds(seg);
+    cpu.set_es(seg);
+    // The frame the INT pushed: the handler's IRET comes back to the
+    // trap, with interrupts on, as the task had them.
+    cpu.push((flags | 0x0200) as u16);
+    cpu.push(ROM_SEG);
+    cpu.push(INT_RETURN);
+}
+
+/// The trap the real-mode handler of a Win16 task's software interrupt
+/// returned to: the task goes on after its INT with the general
+/// registers and the arithmetic flags the handler left, its own stack
+/// and segment registers.
+pub fn int_return(cpu: &mut Cpu) {
+    let mut ctx = cpu
+        .bus
+        .win32
+        .interrupted
+        .take()
+        .expect("an interrupted program");
+    let esp = ctx.gpr[ESP];
+    ctx.gpr = cpu.snapshot().gpr;
+    ctx.gpr[ESP] = esp;
+    ctx.eflags = ctx.eflags & !STATUS_FLAGS | cpu.eflags_image() & STATUS_FLAGS;
+    enter_user(cpu, &ctx);
 }
 
 /// The trap the real-mode handler of a hardware interrupt returned to.
