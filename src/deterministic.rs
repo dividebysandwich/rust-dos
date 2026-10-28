@@ -80,6 +80,12 @@ pub fn random_bytes(buf: &mut [u8]) -> bool {
     })
 }
 
+/// Whether this thread runs a machine in deterministic mode
+/// (`Deterministic::new` was called on it).
+pub fn active() -> bool {
+    RANDOM.with(|state| state.get().is_some())
+}
+
 /// What a step reached: a whole emulated millisecond, and whether it is
 /// one where input is delivered (every `TICK_MS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

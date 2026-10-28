@@ -944,6 +944,12 @@ impl Voodoo {
     /// bits, which a program polls until they clear. Jobs held back
     /// (`backlog`) stay held: as far as the program can tell they are
     /// drawn, since whatever reads what they draw catches up first.
+    ///
+    /// In deterministic mode the workers' progress would show the
+    /// program the host's speed, and a polling loop would run a different
+    /// number of times on another host. The card reads idle there, as if
+    /// it drew at once, the same way as held jobs: the workers go on, and
+    /// what reads what they draw still waits for them.
     pub(crate) fn drawing(&self) -> bool {
         if !self.writes_queue() {
             return false;
@@ -953,6 +959,9 @@ impl Voodoo {
             self.release_backlog();
         }
         self.pool.give_out();
+        if crate::deterministic::active() {
+            return false;
+        }
         let busy = self.pool.busy();
         if !busy && self.words.borrow().is_empty() {
             // The jobs given out are drawn; those held keep their own
