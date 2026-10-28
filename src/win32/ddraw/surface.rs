@@ -422,6 +422,15 @@ pub fn changed(cpu: &mut Cpu, id: u32) {
     }
 }
 
+/// Count a frame at the next retrace if the surface `id` is the primary
+/// surface: the program flipped it, blitted to it, or wrote to it
+/// through a lock or a device context.
+pub fn shown(cpu: &mut Cpu, id: u32) {
+    if state(cpu).surface(id).is_some_and(Surface::is_primary) {
+        cpu.bus.vga.presented = true;
+    }
+}
+
 // Pixel memory.
 
 /// Where the program sees a surface's pixels: None if they aren't
@@ -451,7 +460,7 @@ pub fn card_memory(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
 pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
     match s.memory {
         MEM_VIDEO => screen::read(cpu, s.bits + offset, data),
-        MEM_CARD => voodoo::read(cpu, s, offset, data),
+        MEM_CARD => voodoo::read(cpu, s, offset, data.len(), data),
         MEM_SYSTEM => cpu.bus.guest_read_bytes(s.bits + offset, data),
         _ => data.fill(0),
     }
@@ -461,9 +470,45 @@ pub fn read_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &mut [u8]) {
 pub fn write_bytes(cpu: &mut Cpu, s: &Surface, offset: u32, data: &[u8]) {
     match s.memory {
         MEM_VIDEO => screen::write(cpu, s.bits + offset, data),
-        MEM_CARD => voodoo::write(cpu, s, offset, data),
+        MEM_CARD => voodoo::write(cpu, s, offset, data.len(), data),
         MEM_SYSTEM => cpu.bus.guest_write_bytes(s.bits + offset, data),
         _ => {}
+    }
+}
+
+/// Read rows of `len` bytes of a surface's pixels into `data`, one after
+/// another: the first from byte `offset`, each of the others a pitch
+/// after the one before. Rows as long as the pitch are read at once,
+/// and a card surface's frame buffer is set up once for all of them.
+pub fn read_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &mut [u8]) {
+    if len == 0 {
+        return;
+    }
+    if len == s.pitch as usize {
+        return read_bytes(cpu, s, offset, data);
+    }
+    if s.memory == MEM_CARD {
+        return voodoo::read(cpu, s, offset, len, data);
+    }
+    for (row, y) in data.chunks_mut(len).zip(0u32..) {
+        read_bytes(cpu, s, offset + y * s.pitch, row);
+    }
+}
+
+/// Write rows of `len` bytes of `data` into a surface's pixels, as
+/// `read_rows` reads them.
+pub fn write_rows(cpu: &mut Cpu, s: &Surface, offset: u32, len: usize, data: &[u8]) {
+    if len == 0 {
+        return;
+    }
+    if len == s.pitch as usize {
+        return write_bytes(cpu, s, offset, data);
+    }
+    if s.memory == MEM_CARD {
+        return voodoo::write(cpu, s, offset, len, data);
+    }
+    for (row, y) in data.chunks(len).zip(0u32..) {
+        write_bytes(cpu, s, offset + y * s.pitch, row);
     }
 }
 
@@ -1236,6 +1281,7 @@ pub fn unlock(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if memory == MEM_CARD {
         voodoo::unlock(cpu, role);
     }
+    shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)
 }
@@ -1249,16 +1295,84 @@ pub fn get_blt_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-/// GetFlipStatus(this, flags).
+const DDGFS_CANFLIP: u32 = 0x1;
+const DDGFS_ISFLIPDONE: u32 = 0x2;
+
+/// GetFlipStatus(this, flags): DDERR_WASSTILLDRAWING while the last flip
+/// of the surface's chain is still to show, for DDGFS_CANFLIP and
+/// DDGFS_ISFLIPDONE alike. That is a flip of the primary surface's chain
+/// that waits for its frame, or a swap of the 3D-only card's that waits
+/// for its retrace; the flips of other chains show at once. (On the card,
+/// Flip with DDFLIP_WAIT still goes ahead then: its swap goes behind the
+/// pending one.) A thread that does nothing but call it again waits for
+/// the flip (`still_to_show`). DDGFS_CANFLIP also fails with
+/// DDERR_SURFACEBUSY while a surface of the chain is locked or has a DC,
+/// as Flip does, and a lost surface gives DDERR_SURFACELOST.
 pub fn get_flip_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (_, id) = hr!(surface_of(cpu, args[0]));
-    if args[1] != 1 && args[1] != 2 {
+    let (_, id) = hr!(usable(cpu, args[0]));
+    if args[1] != DDGFS_CANFLIP && args[1] != DDGFS_ISFLIPDONE {
         return Some(DDERR_INVALIDPARAMS);
     }
-    let flippable = state(cpu)
-        .surface(id)
-        .is_some_and(|s| s.caps[0] & DDSCAPS_FLIP != 0);
-    Some(if flippable { DD_OK } else { DDERR_NOTFLIPPABLE })
+    let Some((caps, memory)) = state(cpu).surface(id).map(|s| (s.caps[0], s.memory)) else {
+        return Some(DDERR_INVALIDOBJECT);
+    };
+    if caps & DDSCAPS_FLIP == 0 {
+        return Some(DDERR_NOTFLIPPABLE);
+    }
+    if args[1] == DDGFS_CANFLIP {
+        let busy = flip_chain(cpu, id)
+            .iter()
+            .any(|&m| state(cpu).surface(m).is_some_and(|s| s.locked || s.dc != 0));
+        if busy {
+            return Some(DDERR_SURFACEBUSY);
+        }
+    }
+    // The flip chains are looked for only with a flip still to show.
+    let pending = if memory == MEM_CARD {
+        voodoo::swaps_pending_until(cpu)
+    } else {
+        display::flip_pending(cpu).filter(|_| on_display(cpu, id))
+    };
+    match pending {
+        Some(until) => still_to_show(cpu, until, false),
+        None => Some(DD_OK),
+    }
+}
+
+/// The flip chain surface `id` is in, the front buffer first (`chain`);
+/// just `id` if it is in none.
+fn flip_chain(cpu: &mut Cpu, id: u32) -> Vec<u32> {
+    let fronts = state(cpu).ids(|o| {
+        o.surface
+            .as_ref()
+            .is_some_and(|s| s.caps[0] & DDSCAPS_FRONTBUFFER != 0)
+    });
+    fronts
+        .into_iter()
+        .map(|f| chain(cpu, f))
+        .find(|c| c.contains(&id))
+        .unwrap_or_else(|| vec![id])
+}
+
+/// Whether surface `id` is in the flip chain of a primary surface, whose
+/// flips show at a frame.
+fn on_display(cpu: &mut Cpu, id: u32) -> bool {
+    let front = flip_chain(cpu, id)[0];
+    state(cpu).surface(front).is_some_and(Surface::is_primary)
+}
+
+/// A call of Flip or GetFlipStatus that finds the last flip still to
+/// show until `until`, by the clock's nanoseconds. Without `wait` it
+/// fails with DDERR_WASSTILLDRAWING, unless the thread does nothing but
+/// call again (`display::Polls`); then, as with `wait`, the thread waits
+/// until `until` and the call runs again, standing for the polls until
+/// then.
+fn still_to_show(cpu: &mut Cpu, until: u64, wait: bool) -> Option<u32> {
+    if !wait && !display::flip_poll_failed(cpu) {
+        return Some(super::DDERR_WASSTILLDRAWING);
+    }
+    cpu.set_eip(cpu.eip().wrapping_sub(4));
+    super::directdraw::wait_until(cpu, until, DD_OK)
 }
 
 // Attached surfaces.
@@ -1454,7 +1568,10 @@ fn chain(cpu: &mut Cpu, front: u32) -> Vec<u32> {
 /// back buffer (or of `target`), the back buffers the next ones', and
 /// the last the front buffer's. A primary front buffer is shown from
 /// the next frame. With a flip still to show, it waits for that frame
-/// with DDFLIP_WAIT.
+/// with DDFLIP_WAIT, and fails without it; a thread that calls it again
+/// and again with nothing else in between waits too (`display::Polls`).
+/// On the 3D-only card the card swaps its buffers at a retrace, and
+/// without DDFLIP_WAIT a flip fails the same way while a swap waits.
 pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, target, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1488,10 +1605,21 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_SURFACEBUSY);
     }
     if s.memory == MEM_CARD {
-        // The card swaps its buffers; the surfaces keep theirs.
-        if !voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0, flags & DDFLIP_WAIT != 0) {
-            return Some(super::DDERR_WASSTILLDRAWING);
+        // With swaps still waiting for their retraces, it fails without
+        // DDFLIP_WAIT, or waits for them if the thread only polls. With
+        // DDFLIP_WAIT the swap goes behind them, and the card's FIFO
+        // holds the program up when it fills.
+        if flags & DDFLIP_WAIT == 0
+            && let Some(until) = voodoo::swaps_pending_until(cpu)
+        {
+            return still_to_show(cpu, until, false);
         }
+        // The card swaps its buffers; the surfaces keep theirs.
+        voodoo::swap(cpu, flags & DDFLIP_NOVSYNC == 0);
+        state(cpu).display.flip_polls = Default::default();
+        // The card counts its swap as a frame (`Voodoo::swapped`) when
+        // it makes it, which under a frame rate cap is a frame or more
+        // later: counting the flip here as well would count it twice.
         for &m in &list {
             changed(cpu, m);
         }
@@ -1500,18 +1628,18 @@ pub fn flip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // A flip shown at a frame waits for the frame of the last.
     let primary = s.is_primary();
     if primary && flags & DDFLIP_NOVSYNC == 0 {
-        let (timing, now) = display::timing(cpu);
-        let pending = state(cpu).display.flip_at;
-        if pending.div_ceil(1000) > cpu.bus.clock.now_micros() {
-            if flags & DDFLIP_WAIT == 0 {
-                return Some(super::DDERR_WASSTILLDRAWING);
-            }
-            // Flip runs again when that frame begins.
-            cpu.set_eip(cpu.eip().wrapping_sub(4));
-            return super::directdraw::wait_until(cpu, pending, DD_OK);
+        if let Some(pending) = display::flip_pending(cpu) {
+            // Flip runs again when that frame begins: the call that ends
+            // the wait stands for the polls until the frame, the last of
+            // which flips.
+            return still_to_show(cpu, pending, flags & DDFLIP_WAIT != 0);
         }
-        state(cpu).display.flip_at = timing.next_display(now);
+        let (timing, now) = display::timing(cpu);
+        let display = &mut state(cpu).display;
+        display.flip_at = timing.next_display(now);
+        display.flip_polls = Default::default();
     }
+    shown(cpu, id);
     // The pixels go round.
     let order: Vec<u32> = match target_id {
         Some(t) => vec![id, t],
@@ -1937,6 +2065,7 @@ pub fn release_dc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_NODC);
     }
     end_dc(cpu, id);
+    shown(cpu, id);
     changed(cpu, id);
     Some(DD_OK)
 }

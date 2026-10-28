@@ -80,22 +80,35 @@ fn tb(cpu: &Cpu) -> (u16, u32) {
 
 /// Take the transfer buffer from DOS when the Win16 process is made: a
 /// block of conventional memory the DOS process owns, which the program
-/// DOS loaded, whose block is mostly all of it, gives up the end of.
+/// DOS loaded, whose block is mostly all of it, gives up the end of. The
+/// blocks are DOS's own whichever process's page tables are on: a Win32
+/// process's, which has no first megabyte, when it makes the Win16
+/// process for its 16-bit calls (flat.rs).
 pub fn init(cpu: &mut Cpu) -> Result<(), String> {
-    let psp = cpu.bus.win32.psp;
-    let seg = match crate::mcb::alloc(&mut cpu.bus, psp, TB_PARAS) {
-        Ok(seg) => seg,
-        Err(_) => {
+    let seg = crate::win32::dos(cpu, |cpu| {
+        let psp = cpu.bus.win32.psp;
+        crate::mcb::alloc(&mut cpu.bus, psp, TB_PARAS).or_else(|_| {
             let (ss, sp) = cpu.bus.win32.rm_stack;
             let keep = (ss as u32 + (sp as u32 >> 4) + 1).saturating_sub(psp as u32) + 0x10;
             let keep = keep.max(0x20) as u16;
             let _ = crate::mcb::resize(&mut cpu.bus, psp, keep);
             crate::mcb::alloc(&mut cpu.bus, psp, TB_PARAS)
-                .map_err(|_| "There isn't enough conventional memory for Windows.".to_string())?
-        }
-    };
+        })
+    })
+    .map_err(|_| "There isn't enough conventional memory for Windows.".to_string())?;
     cpu.bus.win32.win16.tb = seg;
     Ok(())
+}
+
+/// Give the transfer buffer back to DOS when the Win16 process ends. A
+/// Win32 program's 16-bit calls make a Win16 process that ends with the
+/// program, so one run can make many, and each takes a transfer buffer.
+pub fn release(cpu: &mut Cpu) {
+    let seg = cpu.bus.win32.win16.tb;
+    if seg != 0 {
+        let _ = crate::win32::dos(cpu, |cpu| crate::mcb::free(&mut cpu.bus, seg));
+        cpu.bus.win32.win16.tb = 0;
+    }
 }
 
 /// The selector of the real-mode segment `seg`, a 64 KB data segment

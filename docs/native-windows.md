@@ -810,8 +810,21 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   loaded into it again, as Windows' host does.
 - Windows 3.1 programs see version 3.95, Windows 95's, and not the
   WS_EX_WINDOWEDGE style USER32 gives their windows.
+- KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a
+  CD-ROM drive as DRIVE_REMOTE: Windows 3.1 has no DRIVE_CDROM. A
+  program finds its disc among the remote drives with MSCDEX's INT 2Fh
+  AX=150Bh.
 - A call of a function the built-in modules don't have yet stops the
   program with a message that names it.
+- Flat thunks (`src/win16/flat.rs`): a Win32 DLL made with the thunk
+  compiler joins its 16-bit DLL with ThunkConnect32 and calls it through
+  QT_Thunk, as DirectX 5's DSETUP does. The Win32 process gets a task in
+  the Win16 process, which runs its 16-bit calls while the calling
+  thread waits, and MapLS and MapSL map pointers both ways by mapping
+  the same physical pages into the other process. 16-bit DLLs made for
+  Windows 4.0 get their DllEntryPoint called after LibMain. Calls the
+  other way, from 16-bit code to a Win32 DLL, fail with the error value
+  the thunk data gives.
 
 Games tried, all of which start and draw their windows: SkiFree,
 BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,

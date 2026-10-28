@@ -339,6 +339,10 @@ pub struct Win32 {
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     slice_start: u64,
+    /// How many times programs have called functions of the system's
+    /// modules, built-in or missing (`service`), to tell whether a thread
+    /// called anything between two polls.
+    pub calls: u64,
     /// How many process and thread ids have been given out.
     ids: u32,
     /// The id of the process DOS started, whose exit code DOS gets.
@@ -620,10 +624,19 @@ pub fn service(cpu: &mut Cpu, id: u16) {
         ID_START => start(cpu),
         ID_IRQ_RETURN => system::irq_return(cpu),
         _ if id & 0xFF00 == ID_IDT => system::idt(cpu, id as u8),
-        _ if id >= FIRST_MISSING => missing(cpu, id - FIRST_MISSING),
-        // A system module's stub, called by 16-bit code.
-        _ if crate::win16::in_16bit_code(cpu) => crate::win16::call(cpu, id),
-        _ => stubs::call(cpu, id),
+        // The rest are calls: of built-in functions, or of functions the
+        // built-in Windows doesn't have.
+        _ => {
+            cpu.bus.win32.calls = cpu.bus.win32.calls.wrapping_add(1);
+            if id >= FIRST_MISSING {
+                missing(cpu, id - FIRST_MISSING);
+            } else if crate::win16::in_16bit_code(cpu) {
+                // A system module's stub, called by 16-bit code.
+                crate::win16::call(cpu, id);
+            } else {
+                stubs::call(cpu, id);
+            }
+        }
     }
 }
 
@@ -915,11 +928,25 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         return;
     }
     let win32 = &mut cpu.bus.win32;
-    if win32.running != index {
-        // Another process's thread runs on.
-        if win32.running > index {
+    let mut ran = win32.running == index;
+    if win32.running > index {
+        win32.running -= 1;
+    }
+    // The Win16 process, if it was there only for the 16-bit calls of
+    // the process that ended, goes with it.
+    if let Some((k, code)) = crate::win16::flat::unneeded(cpu)
+        && remove_process(cpu, k, code)
+    {
+        let win32 = &mut cpu.bus.win32;
+        if !ran && win32.running == k {
+            ran = true;
+        } else if win32.running > k {
             win32.running -= 1;
         }
+    }
+    let win32 = &mut cpu.bus.win32;
+    if !ran {
+        // Another process's thread runs on.
         thread::wake(cpu);
         return;
     }
@@ -983,6 +1010,10 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
         "[W32] {} ended with exit code {:X}",
         name, code
     ));
+    // Its memory is no longer shared with the Win16 process's, and its
+    // task there ends (flat thunks).
+    let pid = cpu.bus.win32.processes[index].id;
+    crate::win16::flat::process_ending(cpu, pid);
     let process = cpu.bus.win32.processes.remove(index);
     process.memory.release(&mut cpu.bus);
     registry::process_ended(cpu, process.id);
@@ -1003,6 +1034,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     shell32::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     if process.id == cpu.bus.win32.win16.pid {
+        crate::win16::dos::release(cpu);
         cpu.bus.win32.win16 = crate::win16::State::default();
     }
     true
@@ -1263,6 +1295,7 @@ crate::state_fields!(Win32 {
     interrupted,
     exit_code,
     slice_start,
+    calls,
     ids,
     root,
     registry,

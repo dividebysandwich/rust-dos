@@ -57,6 +57,76 @@ pub struct Display {
     /// When the last flip of the primary surface shows, by the clock's
     /// nanoseconds.
     pub flip_at: u64,
+    /// The polls of that flip, or of the 3D-only card's pending swap,
+    /// that found it still to show: calls of Flip or GetFlipStatus.
+    pub flip_polls: Polls,
+}
+
+/// Failed polls in a row of something the display does at a frame, by
+/// one thread.
+#[derive(Clone, Debug, Default)]
+pub struct Polls {
+    /// The thread that polled, and when it last did: `Cpu::executed` and
+    /// `Win32::calls`.
+    thread: u32,
+    executed: u64,
+    calls: u64,
+    /// The polls in a row, each the next call of a built-in function by
+    /// any thread after the one before, and no more than `POLL_GAP`
+    /// instructions after it.
+    count: u32,
+}
+
+/// Polls in a row after which a thread is taken to be doing nothing but
+/// polling.
+const POLLS: u32 = 16;
+/// Instructions between two polls of one loop, at most.
+const POLL_GAP: u64 = 2_000;
+
+impl Polls {
+    /// The thread `thread` polled and found the display not done yet,
+    /// with `Cpu::executed` at `executed` and `Win32::calls` at `calls`:
+    /// whether it has done next to nothing else for `POLLS` polls, with
+    /// no other built-in function called in between by any thread. A
+    /// loop like that does the same until the frame the display waits
+    /// for, so the caller can make the thread wait for that frame instead
+    /// of running each poll (a game calling Flip without DDFLIP_WAIT until
+    /// it succeeds makes hundreds of calls a millisecond). A loop that
+    /// does more while it waits, such as filling its sound buffer or
+    /// reading its messages, keeps every poll.
+    pub fn failed(&mut self, thread: u32, executed: u64, calls: u64) -> bool {
+        let close = self.thread == thread
+            && calls == self.calls.wrapping_add(1)
+            && executed.saturating_sub(self.executed) <= POLL_GAP;
+        self.count = if close {
+            self.count.saturating_add(1)
+        } else {
+            1
+        };
+        self.thread = thread;
+        self.executed = executed;
+        self.calls = calls;
+        self.count >= POLLS
+    }
+}
+
+/// When the last flip of the primary surface shows, by the clock's
+/// nanoseconds, while it is still to show.
+pub fn flip_pending(cpu: &mut Cpu) -> Option<u64> {
+    let at = state(cpu).display.flip_at;
+    (at.div_ceil(1000) > cpu.bus.clock.now_micros()).then_some(at)
+}
+
+/// The running thread polled for the pending flip of the primary
+/// surface and found it still to show: whether it only polls
+/// (`Polls::failed`).
+pub fn flip_poll_failed(cpu: &mut Cpu) -> bool {
+    let thread = crate::win32::user32::current_tid(cpu);
+    let (executed, calls) = (cpu.executed, cpu.bus.win32.calls);
+    state(cpu)
+        .display
+        .flip_polls
+        .failed(thread, executed, calls)
 }
 
 /// Whether DirectDraw (or Glide) has the display: GDI draws on the
@@ -308,5 +378,13 @@ crate::state_fields!(Display {
     exclusive,
     blocks,
     views,
-    flip_at
+    flip_at,
+    flip_polls
+});
+
+crate::state_fields!(Polls {
+    thread,
+    executed,
+    calls,
+    count
 });

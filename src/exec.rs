@@ -1474,7 +1474,13 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         cpu.bus.guest_paging = Some(cpu.guest_paging(cpu.cpl == 3));
         (cpu.snapshot(), cpu.bus.port_accesses.len())
     });
+    // The built-in Windows doesn't hold a thread back for the time its
+    // file calls would take on the drive: what one charges sets only how
+    // long the drive's noise goes on, so it starts from none and is
+    // dropped when the call is done.
+    cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
+    cpu.bus.disk_io.clear();
     if let Some(before) = &before
         && guest_page_fault(cpu, before)
     {

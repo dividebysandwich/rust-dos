@@ -8,7 +8,6 @@
 //! what comes out of the pipeline is only counted (`pipeline::Counter`).
 
 use super::super::DDERR_INVALIDPARAMS;
-use super::caps::GUARD_BAND;
 use super::device::{
     Begin, Device, RS_AMBIENT, RS_AMBIENTMATERIALSOURCE, RS_CLIPPING, RS_CLIPPLANEENABLE,
     RS_COLORVERTEX, RS_CULLMODE, RS_DIFFUSEMATERIALSOURCE, RS_EMISSIVEMATERIALSOURCE, RS_FILLMODE,
@@ -231,7 +230,7 @@ pub fn setup_in(
         lighting,
         fog,
         clip: s(RS_CLIPPING) != 0 && flags & D3DDP_DONOTCLIP == 0,
-        guard_band: GUARD_BAND,
+        guard_band: super::hal::VERTEX_BAND,
         cull: s(RS_CULLMODE),
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
@@ -291,10 +290,6 @@ pub fn draw(
     flags: u32,
 ) -> Result<(), u32> {
     check_kind(kind)?;
-    let Some(setup) = setup(cpu, id, version, layout, flags) else {
-        return Err(DDERR_INVALIDPARAMS);
-    };
-    let processed = pipeline::process(&setup, vertices, layout);
     let all: Vec<u32>;
     let order = match order {
         Some(o) => o,
@@ -304,7 +299,27 @@ pub fn draw(
         }
     };
     let prims = pipeline::assemble(kind, order).ok_or(D3DERR_INVALIDPRIMITIVETYPE)?;
-    let drawn = rasterize(cpu, id, &setup, &processed, &prims);
+    draw_prims(cpu, id, version, layout, vertices, &prims, flags)
+}
+
+/// Draw the primitives `prims` of `vertices` with the device `id`: for
+/// a caller that assembles its primitives itself, such as OpenGL, whose
+/// primitives take their flat colors from other vertices than
+/// Direct3D's.
+pub fn draw_prims(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    vertices: &[Vertex],
+    prims: &[Prim],
+    flags: u32,
+) -> Result<(), u32> {
+    let Some(setup) = setup(cpu, id, version, layout, flags) else {
+        return Err(DDERR_INVALIDPARAMS);
+    };
+    let processed = pipeline::process(&setup, vertices, layout);
+    let drawn = rasterize(cpu, id, &setup, &processed, prims);
     account(cpu, id, &setup, &processed, drawn, flags);
     Ok(())
 }

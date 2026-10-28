@@ -521,7 +521,10 @@ impl Run {
                     let (n, first) = (self.u16_at(b), self.u16_at(b + 2));
                     prims.extend((first..first + n).map(Prim::Point));
                 }
-                D3DOP_LINE => prims.push(Prim::Line(self.u16_at(b), self.u16_at(b + 2))),
+                D3DOP_LINE => {
+                    let (a, z) = (self.u16_at(b), self.u16_at(b + 2));
+                    prims.push(Prim::Line(a, z, a));
+                }
                 _ => {
                     let v = [self.u16_at(b), self.u16_at(b + 2), self.u16_at(b + 4)];
                     // D3DTRIANGLE_EDGEENABLE1 to 3: the wireframe's edges.

@@ -7,7 +7,7 @@
 use super::builtin::{Api16, Def, cdecl, rust, win32};
 use super::handles::{accel32, icon16, icon32, instance16, instance32, menu32};
 use super::thunk::{self, KIND_DLGPROC, KIND_PLAIN, KIND_WNDPROC};
-use super::{kernel, message};
+use super::{hook, kernel, message};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 use crate::win32::user32::text::ansi_case;
@@ -84,7 +84,7 @@ static APIS: &[Api16] = &[
     rust("RegisterClass", 57, "p", register_class),
     win32("GetClassName", 58, "wps", U, "GetClassNameA", b'w'),
     win32("SetActiveWindow", 59, "w", U, "SetActiveWindow", b'w'),
-    win32("GetActiveWindow", 60, "", U, "GetActiveWindow", b'w'),
+    rust("GetActiveWindow", 60, "", get_active_window),
     win32("ScrollWindow", 61, "wssRR", U, "ScrollWindow", b'b'),
     win32("SetScrollPos", 62, "wwsw", U, "SetScrollPos", b'w'),
     win32("GetScrollPos", 63, "ww", U, "GetScrollPos", b'w'),
@@ -166,9 +166,9 @@ static APIS: &[Api16] = &[
     ),
     win32("GetMessagePos", 119, "", U, "GetMessagePos", b'w'),
     win32("GetMessageTime", 120, "", U, "GetMessageTime", b'w'),
-    rust("SetWindowsHook", 121, "sS", set_windows_hook),
+    rust("SetWindowsHook", 121, "sS", hook::set_windows_hook),
     rust("CallWindowProc", 122, "Swwwl", call_window_proc),
-    rust("CallMsgFilter", 123, "ps", zero),
+    rust("CallMsgFilter", 123, "ps", hook::call_msg_filter),
     win32("UpdateWindow", 124, "w", U, "UpdateWindow", b'b'),
     win32("InvalidateRect", 125, "wRw", U, "InvalidateRect", b'b'),
     win32("InvalidateRgn", 126, "www", U, "InvalidateRgn", b'b'),
@@ -330,8 +330,8 @@ static APIS: &[Api16] = &[
     win32("GetNextWindow", 230, "ww", U, "GetNextWindow", b'w'),
     win32("SetWindowPos", 232, "whssssw", U, "SetWindowPos", b'b'),
     win32("SetParent", 233, "ww", U, "SetParent", b'w'),
-    rust("UnhookWindowsHook", 234, "sS", one),
-    rust("DefHookProc", 235, "swlp", zero),
+    rust("UnhookWindowsHook", 234, "sS", hook::unhook_windows_hook),
+    rust("DefHookProc", 235, "swlp", hook::def_hook_proc),
     win32("GetCapture", 236, "", U, "GetCapture", b'w'),
     win32("GetUpdateRgn", 237, "www", U, "GetUpdateRgn", b'w'),
     win32("ExcludeUpdateRgn", 238, "ww", U, "ExcludeUpdateRgn", b'w'),
@@ -391,9 +391,9 @@ static APIS: &[Api16] = &[
         b'w',
     ),
     win32("RedrawWindow", 290, "wRww", U, "RedrawWindow", b'b'),
-    rust("SetWindowsHookEx", 291, "sSww", set_windows_hook),
-    rust("UnhookWindowsHookEx", 292, "S", one),
-    rust("CallNextHookEx", 293, "Sswl", zero),
+    rust("SetWindowsHookEx", 291, "sSww", hook::set_windows_hook_ex),
+    rust("UnhookWindowsHookEx", 292, "S", unhook_windows_hook_ex),
+    rust("CallNextHookEx", 293, "Sswl", hook::call_next_hook_ex),
     win32("LockWindowUpdate", 294, "w", U, "LockWindowUpdate", b'b'),
     rust("DefDlgProc", 308, "wwwl", def_dlg_proc),
     rust("GetWindowPlacement", 370, "wp", get_window_placement),
@@ -463,6 +463,21 @@ fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 fn one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(1)
+}
+
+/// GetActiveWindow: the system's active window, as Windows 3.1 has one
+/// for all its tasks, where USER32 gives only the calling thread's. With
+/// none, the shell's Program Manager window (made if it isn't there, as
+/// FindWindow makes it): on a Windows desktop the shell's window is
+/// active when no program's is, and 16-bit programs count on there being
+/// one (Metal Marines' setup asks whether it is the active program while
+/// it makes its first window). On Windows 98 the setup started from the
+/// Run dialog gets Explorer's window.
+fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    match cpu.bus.win32.user.input.active {
+        0 => Some(crate::win32::user32::progman::server(cpu)),
+        active => Some(active),
+    }
 }
 
 fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1127,14 +1142,8 @@ fn set_timer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     go(cpu, "SetTimer", &[args[0], args[1], args[2], proc])
 }
 
-/// SetWindowsHook and SetWindowsHookEx: 16-bit hooks aren't called; a
-/// handle that UnhookWindowsHookEx takes.
-fn set_windows_hook(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    cpu.bus.log_string(&format!(
-        "[W16] A hook of kind {} isn't kept",
-        args[0] as i32
-    ));
-    Some(0x0001_0001)
+fn unhook_windows_hook_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    go(cpu, "UnhookWindowsHookEx", args)
 }
 
 // Painting.

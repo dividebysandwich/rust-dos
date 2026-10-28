@@ -940,6 +940,15 @@ fn tl(x: f32, y: f32, z: f32, diffuse: u32) -> Tl {
     }
 }
 
+/// `v` with the vertex fog factor `factor` (255 no fog, 0 all fog) in
+/// its specular alpha.
+fn with_fog(v: Tl, factor: u32) -> Tl {
+    Tl {
+        specular: factor << 24,
+        ..v
+    }
+}
+
 /// Two triangles covering the rectangle from (x0, y0) to (x1, y1), its
 /// texture coordinates 0 to 1, all with depth `z` and `color`.
 fn quad(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: u32) -> Vec<Tl> {
@@ -1633,10 +1642,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     let fogged = |alpha: u32, x0: f32, x1: f32| {
         quad(x0, 0.0, x1, 32.0, 0.5, WHITE)
             .into_iter()
-            .map(|v| Tl {
-                specular: alpha << 24,
-                ..v
-            })
+            .map(|v| with_fog(v, alpha))
             .collect()
     };
     // Table fog by W, linear from 0 to 4: half at W 2.
@@ -1666,6 +1672,37 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
     assert_rgb(&p, 16, 16, [0, 255, 0], 8);
     assert_rgb(&p, 48, 16, [255, 255, 255], 8);
     assert_rgb(&p, 32, 48, [128, 255, 128], 20);
+}
+
+#[test]
+fn flat_shading_keeps_each_vertex_fog() {
+    // A red first vertex without fog, and fully fogged vertices of
+    // another color: the face is red, fogged as the vertices say.
+    let tri = vec![
+        with_fog(tl(4.0, 4.0, 0.5, RED), 0xFF),
+        with_fog(tl(60.0, 4.0, 0.5, BLUE), 0),
+        with_fog(tl(4.0, 60.0, 0.5, BLUE), 0),
+    ];
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: None,
+        steps: vec![
+            Step::State(RS_SHADEMODE, 1),
+            Step::State(RS_FOGENABLE, 1),
+            Step::State(RS_FOGCOLOR, 0x00_FF00),
+            Step::Draw(tri),
+        ],
+    };
+    let p = draw_scene("flat-fog", &scene);
+    // At the first corner red, at the others the fog color, and half
+    // of each between them.
+    assert_rgb(&p, 5, 5, [255, 0, 0], 24);
+    assert_rgb(&p, 56, 6, [0, 255, 0], 32);
+    assert_rgb(&p, 6, 56, [0, 255, 0], 32);
+    assert_rgb(&p, 18, 18, [128, 128, 0], 32);
 }
 
 /// A scene with the add-on card `board`: flat, gouraud, z-tested and
@@ -1779,6 +1816,107 @@ fn keyed_texels_blend_with_the_stages_alpha_on_a_voodoo2() {
 #[test]
 fn the_3dfx_device_draws_on_a_voodoo_graphics() {
     card_scene("card_v1", Board::Standard);
+}
+
+/// Where the card polling program counts its polls and keeps the first
+/// one's result and the last one's.
+const POLLS: u32 = 0x9A0;
+const FIRST_POLL: u32 = 0x9A4;
+const LAST_POLL: u32 = 0x9A8;
+const DDERR_WASSTILLDRAWING: u32 = 0x8876_021C;
+const SURF_GET_FLIP_STATUS: u32 = 18;
+const DDGFS_ISFLIPDONE: u32 = 2;
+
+/// A flip chain on the Voodoo2's 3dfx device and a flip, whose swap
+/// waits for the card's next retrace; then, again and again with
+/// nothing in between until it succeeds, Flip without DDFLIP_WAIT, or
+/// GetFlipStatus of the back buffer when `status`.
+fn card_polling_program(status: bool) -> (Vec<u8>, u32) {
+    let mut d = data();
+    guid(
+        &mut d,
+        CARD_GUID,
+        0x472B_EA00,
+        0x40DF,
+        0x11D1,
+        [0xA9, 0xDF, 0x00, 0x60, 0x97, 0xC2, 0xED, 0xB2],
+    );
+    put32(&mut d, DESC, 124);
+    put32(&mut d, DESC + 0x04, DDSD_CAPS | DDSD_BACKBUFFERCOUNT);
+    put32(&mut d, DESC + 0x14, 1);
+    let caps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_3DDEVICE;
+    put32(&mut d, DESC + 0x68, caps);
+    put32(&mut d, BACK_CAPS, DDSCAPS_BACKBUFFER);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, true, true)?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            SURF_GET_ATTACHED_SURFACE,
+            &[Arg::At(BACK_CAPS), Arg::At(TARGET)],
+        )?;
+        c.com(a, l, FRONT, SURF_FLIP, &[Arg::I(0), Arg::I(0)])?;
+        let mut again = a.create_label();
+        a.set_label(&mut again)?;
+        a.inc(dword_ptr(l.at(POLLS)))?;
+        let (object, method) = if status {
+            push(a, l, &[Arg::I(DDGFS_ISFLIPDONE)])?;
+            (TARGET, SURF_GET_FLIP_STATUS)
+        } else {
+            push(a, l, &[Arg::I(0), Arg::I(0)])?;
+            (FRONT, SURF_FLIP)
+        };
+        a.mov(eax, dword_ptr(l.at(object)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + 4 * method))?;
+        let mut kept = a.create_label();
+        a.cmp(dword_ptr(l.at(POLLS)), 1)?;
+        a.jne(kept)?;
+        a.mov(dword_ptr(l.at(FIRST_POLL)), eax)?;
+        a.set_label(&mut kept)?;
+        a.cmp(eax, DDERR_WASSTILLDRAWING as i32)?;
+        a.je(again)?;
+        a.mov(dword_ptr(l.at(LAST_POLL)), eax)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn flip_polled_on_a_voodoo2_waits_for_the_swap() {
+    // The swap is pending until the card's next retrace, and each call
+    // of Flip fails until then. A loop that only polls waits for that
+    // retrace at its 16th call, which flips, instead of making a call
+    // for each pass until then.
+    let (exe, data) = card_polling_program(false);
+    let mut cpu = machine_with("card_flip_polling", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of Flip");
+}
+
+#[test]
+fn flip_status_on_a_voodoo2_follows_the_swap() {
+    // GetFlipStatus says the flip is still to show while the card's swap
+    // waits for its retrace, and a loop that only asks waits for it.
+    let (exe, data) = card_polling_program(true);
+    let mut cpu = machine_with("card_flip_status", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&cpu, data, 7)[1..], [0; 6]);
+    assert_eq!(peek(&cpu, data + FIRST_POLL), DDERR_WASSTILLDRAWING);
+    assert_eq!(peek(&cpu, data + LAST_POLL), 0);
+    assert_eq!(peek(&cpu, data + POLLS), 16, "calls of GetFlipStatus");
 }
 
 #[test]

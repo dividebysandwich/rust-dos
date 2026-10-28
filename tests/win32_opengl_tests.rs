@@ -68,6 +68,7 @@ const OPENGL32: &[&str] = &[
     "glOrtho",
     "glFrustum",
     "glDepthRange",
+    "glShadeModel",
 ];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
@@ -106,6 +107,7 @@ const LOAD_IDENTITY: usize = GL + 27;
 const ORTHO: usize = GL + 28;
 const FRUSTUM: usize = GL + 29;
 const DEPTH_RANGE: usize = GL + 30;
+const SHADE_MODEL: usize = GL + 31;
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -250,6 +252,8 @@ const GL_EXTENSIONS: u32 = 0x1F03;
 const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 const GL_DEPTH_BUFFER_BIT: u32 = 0x100;
 const GL_TRIANGLES: u32 = 4;
+const GL_TRIANGLE_FAN: u32 = 6;
+const GL_FLAT: u32 = 0x1D00;
 const GL_QUADS: u32 = 7;
 const GL_RGBA: u32 = 0x1908;
 const GL_RGB: u32 = 0x1907;
@@ -465,6 +469,91 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
     assert_eq!(r[20], 0, "glGetError");
     assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
+}
+
+#[test]
+fn flat_shading_takes_the_color_of_the_vertex_opengl_gives() {
+    // Two flat triangles, each vertex its own color: OpenGL colors an
+    // independent triangle as its third vertex, and a fan's triangle
+    // as its third too (Direct3D: the first and the second).
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let black = [Arg::F(0.0), Arg::F(0.0), Arg::F(0.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &black)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        c.api(a, l, SHADE_MODEL, &[Arg::I(GL_FLAT)])?;
+        let vertex = |a: &mut CodeAssembler,
+                      c: &mut Calls,
+                      rgb: [f32; 3],
+                      xy: [f32; 2]|
+         -> Result<(), IcedError> {
+            let [r, g, b] = rgb.map(Arg::F);
+            c.api(a, l, COLOR3F, &[r, g, b])?;
+            c.api(a, l, VERTEX2F, &[Arg::F(xy[0]), Arg::F(xy[1])])
+        };
+        // Red, green, blue over the bottom left half.
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        vertex(a, &mut c, [1.0, 0.0, 0.0], [-1.0, -1.0])?;
+        vertex(a, &mut c, [0.0, 1.0, 0.0], [1.0, -1.0])?;
+        vertex(a, &mut c, [0.0, 0.0, 1.0], [-1.0, 1.0])?;
+        c.api(a, l, END, &[])?;
+        // Red, green, white over the top right half.
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLE_FAN)])?;
+        vertex(a, &mut c, [1.0, 0.0, 0.0], [1.0, -1.0])?;
+        vertex(a, &mut c, [0.0, 1.0, 0.0], [1.0, 1.0])?;
+        vertex(a, &mut c, [1.0, 1.0, 1.0], [-1.0, 1.0])?;
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("flat", true, exe);
+    run_until_done(&mut cpu, data);
+    // The last result is glGetError's.
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * 27), 0, "glGetError");
+    assert_eq!(pixel(&cpu, data, 4, 4), [0, 0, 255]);
+    assert_eq!(pixel(&cpu, data, 60, 60), [255, 255, 255]);
+}
+
+#[test]
+fn a_triangle_reaching_far_off_the_window_is_drawn_where_it_covers_it() {
+    // A red triangle whose bottom right corner is a hundred widths of
+    // the view to the right: thousands of pixels past the window, past
+    // the band the card's vertices are clipped to. OpenGL draws the
+    // part in the view. The card's vertex registers hold 12.4 fixed
+    // point, and a vertex clipped at their end wraps round to the far
+    // left, where nothing of the triangle shows.
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &blue)?;
+        c.api(
+            a,
+            l,
+            CLEAR,
+            &[Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)],
+        )?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(-1.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(200.0), Arg::F(-1.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(1.0)])?;
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("far_triangle", true, exe);
+    run_until_done(&mut cpu, data);
+    // SwapBuffers, and no error.
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * 15), 1, "SwapBuffers");
+    assert_eq!(peek(&cpu, data + RESULTS + 4 * 16), 0, "glGetError");
+    // Its top edge falls a hundredth of the view's height across the
+    // window: the triangle covers the window but for its top right
+    // corner.
+    for (x, y) in [(4, 4), (60, 4), (4, 60), (60, 60)] {
+        assert_eq!(pixel(&cpu, data, x, y), [255, 0, 0], "({x}, {y})");
+    }
 }
 
 #[test]
