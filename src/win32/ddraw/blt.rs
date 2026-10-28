@@ -214,6 +214,7 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
     if rects.is_empty() {
         return Ok(());
     }
+    surface::shown(cpu, dst_id);
     if d.memory == surface::MEM_CARD && op.src.is_none() && op.dst_key.is_none() {
         super::voodoo::fill(cpu, &d, &rects, op.fill);
         surface::changed(cpu, dst_id);

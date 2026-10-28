@@ -148,13 +148,16 @@ pub fn trampoline() -> Trampoline {
         thunks[thunk as usize] = ops.offset().0;
         dev_thunk(&mut ops, thunk.tlb(), memref);
     }
+    thunks[Thunk::SmcCheck as usize] = ops.offset().0;
+    smc_check_thunk(&mut ops);
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub, thunks }
 }
 
-/// The trampoline's routines for the slow paths of memory operands, which
-/// each operand would otherwise carry a copy of: translated code calls them
-/// through `JitCtx::thunks` with its arguments in RAX, RCX and RDX, and
-/// they keep every other register but those three.
+/// The trampoline's routines for the slow paths of memory operands and of
+/// stores into the block's later bytes, which each would otherwise carry a
+/// copy of: translated code calls them through `JitCtx::thunks` with its
+/// arguments in RAX, RCX and RDX, and they keep every other register but
+/// those three.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Thunk {
     /// `jit_memref` of the offset in EDX, ECX its `memref_desc`: RAX the
@@ -185,9 +188,13 @@ enum Thunk {
     DevTlbWrite,
     DevTlbUserRead,
     DevTlbUserWrite,
+    /// A store hit the block's later bytes (`JitCtx::smc`): clear that
+    /// note, and EAX = `jit_smc_check` of block RDX and its instruction
+    /// ECX, 0 for the block to go on.
+    SmcCheck,
 }
 
-const _: () = assert!(Thunk::DevTlbUserWrite as usize + 1 == THUNKS);
+const _: () = assert!(Thunk::SmcCheck as usize + 1 == THUNKS);
 
 impl Thunk {
     fn store(size: u8) -> Thunk {
@@ -399,6 +406,14 @@ fn code_store_thunk(ops: &mut Asm, size: u8) {
         ; done:
         ; ret
     );
+}
+
+fn smc_check_thunk(ops: &mut Asm) {
+    dynasm!(ops ; .arch x64 ; mov BYTE [r12 + CTX_SMC], 0);
+    thunk_save(ops);
+    dynasm!(ops ; .arch x64 ; call QWORD [r12 + CTX_SMC_CHECK]);
+    thunk_restore(ops);
+    dynasm!(ops ; .arch x64 ; ret);
 }
 
 fn dev_thunk(ops: &mut Asm, tlb: Option<(i32, i32)>, memref: DynamicLabel) {
@@ -755,10 +770,20 @@ enum Slow {
     },
     /// An instruction's fault with an exit code of its own (#GP(0), #DE).
     Fault { at: DynamicLabel, code: u32, fail: DynamicLabel },
-    /// A store hit the rest of the block: it leaves after the instruction,
-    /// at `next`, with the flags in EBP (`dirty`) or a recorded
-    /// operation's (`lazy`), through `join`.
-    Smc { at: DynamicLabel, next: u32, dirty: bool, lazy: bool, join: DynamicLabel },
+    /// A store of instruction `ix` hit the rest of the block: it goes on at
+    /// `back` where `jit_smc_check` finds the bytes still as translated
+    /// but for the watched ones, else it leaves after the instruction, at
+    /// `next`, with the flags in EBP (`dirty`) or a recorded operation's
+    /// (`lazy`), through `join`.
+    Smc {
+        at: DynamicLabel,
+        back: DynamicLabel,
+        ix: usize,
+        next: u32,
+        dirty: bool,
+        lazy: bool,
+        join: DynamicLabel,
+    },
     /// Link `slot`'s guard (at `g` in the block) didn't find its page in the
     /// TLB: if the link is made, `jit_fetch` looks the page up and the
     /// guard checks again from `back`, else the link's `stub`. RDX is the
@@ -1099,13 +1124,22 @@ pub fn block(data: &BlockData, items: &[Option<Vec<Uop>>], link: bool, env: supe
                     .any(|u| matches!(u, Uop::Store { .. } | Uop::VStore { .. }))
                 {
                     // A store hit the rest of the block: leave after this
-                    // instruction.
-                    let at = g.ops.new_dynamic_label();
+                    // instruction, unless it changed only watched bytes.
+                    let (at, back) = (g.ops.new_dynamic_label(), g.ops.new_dynamic_label());
                     let next = data.eips[ix].wrapping_add(data.instrs[ix].len() as u32);
                     g.fail();
                     let join = *g.join[ix].get_or_insert_with(|| g.ops.new_dynamic_label());
-                    dynasm!(g.ops ; .arch x64 ; cmp BYTE [r12 + CTX_SMC], 0 ; jne =>at);
-                    g.slow.push(Slow::Smc { at, next, dirty: g.dirty, lazy: g.lazy_end[ix], join });
+                    dynasm!(g.ops ; .arch x64 ; cmp BYTE [r12 + CTX_SMC], 0 ; jne =>at ; =>back);
+                    let (dirty, lazy) = (g.dirty, g.lazy_end[ix]);
+                    g.slow.push(Slow::Smc {
+                        at,
+                        back,
+                        ix,
+                        next,
+                        dirty,
+                        lazy,
+                        join,
+                    });
                 }
             }
         }
@@ -1459,11 +1493,23 @@ impl Gen<'_> {
                         ; jmp =>back
                     );
                 }
-                Slow::Smc { at, next, dirty, lazy, join } => {
+                Slow::Smc {
+                    at,
+                    back,
+                    ix,
+                    next,
+                    dirty,
+                    lazy,
+                    join,
+                } => {
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
-                        ; mov BYTE [r12 + CTX_SMC], 0
+                        ; mov rdx, QWORD data_ptr
+                        ; mov ecx, ix as i32
+                        ; call QWORD [BYTE r12 + Thunk::SmcCheck.slot()]
+                        ; test eax, eax
+                        ; jz =>back
                         ; mov DWORD [rbx + EIP], next as i32
                         ; mov eax, (EXIT_SMC | if dirty { EXIT_FLAGS } else { 0 }) as i32
                     );

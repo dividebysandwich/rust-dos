@@ -1553,20 +1553,22 @@ fn far_ret_pm(instr: &Instruction, stack32: bool, u: &mut Vec<Uop>) -> bool {
 /// immediate changes: Doom-engine games poke each column's and span's step
 /// into the `ADD r32, imm32` of their drawing loops. The translated code
 /// then needn't leave the block whenever the bytes differ from what was
-/// translated. False, with nothing changed, for forms other than MOV and
-/// the ALU operations with an immediate, and where the watched bytes take
-/// in more than the immediate.
+/// translated. False, with nothing changed, for forms other than MOV, the
+/// ALU operations and the three-operand IMUL with an immediate (Riverworld
+/// pokes the factors of its transforms into those), and where the watched
+/// bytes take in more than the immediate.
 pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut Vec<Uop>) -> bool {
     let last = match instr.op_count() {
         2 => 1,
+        3 if instr.mnemonic() == Mnemonic::Imul => 2,
         _ => return false,
     };
     let (size, signed) = match instr.op_kind(last) {
         OpKind::Immediate8 => (1, false),
         OpKind::Immediate16 => (2, false),
         OpKind::Immediate32 => (4, false),
-        // (Sign-extended to 32 bits, as the other operand's size is.)
-        OpKind::Immediate8to32 => (1, true),
+        // (Sign-extended to the other operand's size, 32 or 16 bits.)
+        OpKind::Immediate8to32 | OpKind::Immediate8to16 => (1, true),
         _ => return false,
     };
     // The immediate is the last bytes of these forms.
@@ -1574,35 +1576,72 @@ pub fn live_immediate(instr: &Instruction, phys: u32, watched: &[usize], u: &mut
     if watched.iter().any(|&w| w < start) {
         return false;
     }
-    let mut used = 0u8;
+    // The temporaries the operations from the site on use.
+    let mut later = 0u8;
     let mut site = None;
     for (k, uop) in u.iter().enumerate() {
         let (a, b) = match *uop {
             Uop::Get { t, .. } | Uop::Set { t, .. } | Uop::Ea { t, .. } | Uop::MemRef { t, .. } => (t, None),
             Uop::Load { dst, m, .. } => (dst, Some(m)),
             Uop::Store { m, src, .. } => (m, Some(src)),
-            Uop::Alu { a, b: Src::T(b), .. } => (a, Some(b)),
-            Uop::Const { t, .. } | Uop::Alu { a: t, b: Src::Imm(_), .. } => {
+            Uop::Alu {
+                a, b: Src::T(b), ..
+            }
+            | Uop::Imul {
+                a, b: Src::T(b), ..
+            } => (a, Some(b)),
+            Uop::Copy { dst, src } => (dst, Some(src)),
+            Uop::Const { t, .. }
+            | Uop::Alu {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            }
+            | Uop::Imul {
+                a: t,
+                b: Src::Imm(_),
+                ..
+            } => {
                 if site.replace(k).is_some() {
                     return false;
                 }
+                later = 0;
                 (t, None)
             }
             _ => return false,
         };
-        used |= 1 << a.0 | b.map_or(0, |b| 1 << b.0);
+        later |= 1 << a.0 | b.map_or(0, |b| 1 << b.0);
     }
     let Some(site) = site else { return false };
-    let load = |t| Uop::LoadCode { t, phys: phys + start as u32, size, signed };
-    match u[site] {
-        Uop::Const { t, .. } => u[site] = load(t),
-        Uop::Alu { op, size: alu_size, a, .. } => {
-            let Some(free) = [T0, T1, T2].into_iter().find(|t| used & 1 << t.0 == 0) else { return false };
-            u[site] = Uop::Alu { op, size: alu_size, a, b: Src::T(free) };
-            // The load neither faults nor changes anything, so it may go first.
-            u.insert(0, load(free));
+    let (t, at) = match &mut u[site] {
+        // The constant's temporary, in place of it.
+        Uop::Const { t, .. } => (*t, site..site + 1),
+        // A temporary that nothing from the site on uses, just before it:
+        // the three-operand IMUL of memory uses all three, but T2 and T1
+        // only before it. (The load neither faults nor changes anything.)
+        Uop::Alu { b, .. } | Uop::Imul { b, .. } => {
+            let Some(free) = [T0, T1, T2].into_iter().find(|t| later & 1 << t.0 == 0) else {
+                return false;
+            };
+            *b = Src::T(free);
+            (free, site..site)
         }
         _ => unreachable!(),
-    }
+    };
+    let load = Uop::LoadCode {
+        t,
+        phys: phys + start as u32,
+        size,
+        signed,
+    };
+    // A byte sign-extended to 16 bits is cut to them, as a 16-bit
+    // operation's constant and registers are.
+    let cut = instr.op_kind(last) == OpKind::Immediate8to16;
+    let cut = cut.then_some(Uop::Extend {
+        t,
+        from: 2,
+        signed: false,
+    });
+    u.splice(at, [load].into_iter().chain(cut));
     true
 }

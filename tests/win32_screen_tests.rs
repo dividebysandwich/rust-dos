@@ -629,6 +629,30 @@ fn a_full_screen_mode_flips_in_the_cards_memory_and_the_desktop_comes_back() {
     assert!(after[at(639, 479)] == before[at(319, 239)], "covered");
 }
 
+/// Let the next retrace come, as the frontend does before it draws.
+fn next_retrace(cpu: &mut Cpu) {
+    cpu.bus.clock.icount += cpu.bus.clock.cycles_per_ms() as u64 * 20;
+    cpu.bus.sync_display();
+}
+
+#[test]
+fn a_flip_on_the_card_counts_as_a_frame() {
+    let (program, data) = fullscreen_program();
+    let mut cpu = machine("flip_frames", program);
+    run_until(&mut cpu, data, 1);
+    go_on(&mut cpu, data);
+    // The program stops right after its flip.
+    run_until(&mut cpu, data, 2);
+    assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    // The flip is one frame, at the retrace after it, and nothing after
+    // it is another.
+    let before = cpu.bus.frames_drawn;
+    for _ in 0..3 {
+        next_retrace(&mut cpu);
+    }
+    assert_eq!(cpu.bus.frames_drawn - before, 1);
+}
+
 /// Other modes: 320x200 at 8 bits with a palette, then 800x600 at 32.
 fn modes_program() -> (Vec<u8>, u32) {
     let mut d = data();
@@ -708,8 +732,15 @@ fn eight_and_32_bit_modes_are_the_cards() {
     let clut = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap().clut;
     assert_eq!(clut[7], 0x07_40F8);
     assert_eq!(clut[200], 0xC8_4037);
-    assert_eq!(shown(&mut cpu, 5, 0), [7, 0x40, 0xF8]);
-    assert_eq!(shown(&mut cpu, 5, 1), [7, 0x40, 0xF8]);
+    // The card runs it at half the pixel clock, so the monitor shows each
+    // pixel twice as wide as well as twice as high: the picture spans
+    // the screen as a 640x400 one does, as mode 13h's does.
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+    for (x, y) in [(10, 0), (11, 0), (10, 1), (11, 1)] {
+        assert_eq!(shown(&mut cpu, x, y), [7, 0x40, 0xF8], "({x}, {y})");
+    }
+    assert_eq!(shown(&mut cpu, 9, 0), [0, 0x40, 0xFF]);
+    assert_eq!(shown(&mut cpu, 12, 0), [0, 0x40, 0xFF]);
     let timing = cpu.bus.vga.timing();
     assert_eq!(timing.display, 400);
     assert!((timing.hz() - 70.0).abs() < 1.0, "{}", timing.hz());
@@ -2338,7 +2369,8 @@ fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
     the_cursor_shows_in_a_small_mode("cursor_vesa_320", None, (320, 240));
 }
 
-/// A Voodoo3 shows 320x200 with its lines doubled.
+/// A Voodoo3 shows 320x200 at twice its size both ways: its lines
+/// doubled, and its pixels at half the pixel clock.
 #[test]
 fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
     the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));

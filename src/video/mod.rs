@@ -350,7 +350,7 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
     if let Some(v) = &bus.voodoo
         && v.output()
     {
-        return v.size();
+        return v.picture_size();
     }
     match bus.video_mode {
         VideoMode::Graphics320x200

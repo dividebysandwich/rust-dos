@@ -25,6 +25,8 @@ struct Frame {
     stride: u32,
     tiled: bool,
     half: bool,
+    /// Each pixel shown twice across (`Banshee::wide_pixels`).
+    wide: bool,
 }
 
 /// The byte address of byte `x` of row `y` of a surface at `start`.
@@ -96,6 +98,7 @@ impl Banshee {
             stride: if tiled { stride * TILE } else { stride },
             tiled,
             half: cfg & VIDPROC_HALF_MODE != 0,
+            wide: narrow(w),
         }
     }
 
@@ -130,10 +133,35 @@ impl Banshee {
     }
 
     /// Draw the desktop, the overlay and the cursor into `out` (RGBA8,
-    /// `pitch` pixels a row), as big as `desktop_size` says.
+    /// `pitch` pixels a row), as big as `picture_size` says: each pixel
+    /// twice across with `wide_pixels`.
     pub fn render(&self, ram: &Vram, out: &mut [u8], pitch: usize) {
-        let mask = (ram.bytes() - 1) as u32;
         let f = self.frame();
+        self.render_desktop(ram, out, pitch, &f);
+        if !f.wide {
+            return;
+        }
+        // Drawn at the desktop's size, each row is spread over twice the
+        // width from its right end, so that no pixel is overwritten
+        // before it is copied.
+        let width = f.width.min(pitch / 2);
+        for y in 0..f.height {
+            let Some(row) = out.get_mut(y * pitch * 4..(y * pitch + 2 * width) * 4) else {
+                break;
+            };
+            let pixels = row.as_chunks_mut::<4>().0;
+            for x in (0..width).rev() {
+                let px = pixels[x];
+                pixels[2 * x] = px;
+                pixels[2 * x + 1] = px;
+            }
+        }
+    }
+
+    /// Draw the desktop, the overlay and the cursor into `out` (RGBA8,
+    /// `pitch` pixels a row), as big as `desktop_size` says.
+    fn render_desktop(&self, ram: &Vram, out: &mut [u8], pitch: usize, f: &Frame) {
+        let mask = (ram.bytes() - 1) as u32;
         let desktop_clut = &self.clut[if f.cfg & VIDPROC_DESKTOP_CLUT_SEL != 0 {
             256
         } else {
@@ -204,10 +232,10 @@ impl Banshee {
             }
         }
         if f.cfg & VIDPROC_OVERLAY_ENABLE != 0 {
-            self.render_overlay(ram, out, pitch, &f);
+            self.render_overlay(ram, out, pitch, f);
         }
         if f.cfg & VIDPROC_CURSOR != 0 {
-            self.render_cursor(ram, out, pitch, &f);
+            self.render_cursor(ram, out, pitch, f);
         }
     }
 
@@ -480,6 +508,7 @@ impl Voodoo {
             width: w,
             height: h,
             half: f.half,
+            wide: f.wide,
             desktop,
             overlay,
             cursor,
