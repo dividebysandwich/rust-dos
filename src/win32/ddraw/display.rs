@@ -57,7 +57,8 @@ pub struct Display {
     /// When the last flip of the primary surface shows, by the clock's
     /// nanoseconds.
     pub flip_at: u64,
-    /// The polls of that flip that found it still to show.
+    /// The polls of that flip, or of the 3D-only card's pending swap,
+    /// that found it still to show: calls of Flip or GetFlipStatus.
     pub flip_polls: Polls,
 }
 
@@ -107,6 +108,13 @@ impl Polls {
         self.calls = calls;
         self.count >= POLLS
     }
+}
+
+/// When the last flip of the primary surface shows, by the clock's
+/// nanoseconds, while it is still to show.
+pub fn flip_pending(cpu: &mut Cpu) -> Option<u64> {
+    let at = state(cpu).display.flip_at;
+    (at.div_ceil(1000) > cpu.bus.clock.now_micros()).then_some(at)
 }
 
 /// The running thread polled for the pending flip of the primary
