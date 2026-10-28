@@ -2313,6 +2313,55 @@ fn the_cursor_shows_on_a_voodoo3_desktop() {
     the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
 }
 
+const USER32_FIRST_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "GetCursor", "LoadCursorA", "SetCursorPos"],
+);
+
+/// Windows starts with the arrow as the cursor: a program that never
+/// calls SetCursor gets the arrow's handle from GetCursor, its first
+/// call, and the arrow shows where the mouse is.
+#[test]
+fn the_arrow_is_the_cursor_from_the_start() {
+    let (program, data) = program(&[USER32_FIRST_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, 1, &[])?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, 2, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, 3, &[Arg::I(100), Arg::I(100)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_first", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_ne!(r[0], 0, "GetCursor");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(r[0], r[2], "GetCursor gives LoadCursorA(IDC_ARROW)'s cursor");
+    assert_eq!(r[3], 1, "SetCursorPos");
+    let shown = with_cursors(&cpu, &[(100, 100), (101, 102)]);
+    assert_eq!(shown[0], [0, 0, 0], "the arrow's tip");
+    assert_eq!(shown[1], [0xFF, 0xFF, 0xFF], "the arrow's inside");
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {

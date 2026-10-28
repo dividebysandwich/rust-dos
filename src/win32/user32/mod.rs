@@ -459,7 +459,9 @@ pub fn address_of(name: &str) -> u32 {
     super::stubs::stub_address(dll_index(), index)
 }
 
-/// The system starts: the desktop window and the system's classes.
+/// The system starts: the desktop window, the system's classes, and the
+/// arrow as the cursor, which Windows shows from the start until a
+/// program sets another.
 pub fn init(cpu: &mut Cpu) {
     if !user(cpu).windows.is_empty() {
         return;
@@ -467,6 +469,8 @@ pub fn init(cpu: &mut Cpu) {
     sysparams::init_colors(cpu);
     class::register_system(cpu);
     window::create_desktop(cpu);
+    let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
+    cursor::set(cpu, arrow);
 }
 
 /// The process `pid` ended: its windows, classes, hooks, timers, menus,

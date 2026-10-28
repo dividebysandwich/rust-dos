@@ -1781,11 +1781,13 @@ pub fn get_clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SetCursor(cursor): the cursor it had.
 pub fn set_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::init(cpu);
     Some(super::cursor::set(cpu, args[0]))
 }
 
-/// GetCursor.
+/// GetCursor: the arrow until a program sets another.
 pub fn get_cursor(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::init(cpu);
     Some(user(cpu).input.cursor_handle)
 }
 
