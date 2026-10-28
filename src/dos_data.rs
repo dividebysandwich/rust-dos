@@ -267,7 +267,7 @@ fn write_list_of_lists(bus: &mut Bus, with_dpb: &[u8]) {
 /// and that call began to say 0 (`int15`). Windows 98's Setup takes the
 /// machine's memory from here, and says it needs 16 MB when it is 0.
 fn extended_kb(bus: &Bus) -> u16 {
-    ((bus.ram().len() >> 10).saturating_sub(1024)).min(0xFFFF) as u16
+    crate::interrupts::int15::extended_kb(bus).min(0xFFFF) as u16
 }
 
 /// A device driver's header: the next driver, its attributes, its
@@ -334,6 +334,20 @@ pub fn write_cds(bus: &mut Bus, drive: u8) {
     bus.guest_write_16(at + 0x4B, 0xFFFF);
     bus.guest_write_16(at + 0x4D, 0xFFFF);
     bus.guest_write_16(at + 0x4F, 2); // 4F: the backslash of the root
+}
+
+/// Set or clear the physical drive bit of drive `drive`'s current
+/// directory structure, as INT 21h AX=5F07h and 5F08h do in DOS 5+.
+/// False for a drive without a DPB: one that isn't there, or a CD-ROM.
+pub fn set_drive_enabled(bus: &mut Bus, drive: u8, enabled: bool) -> bool {
+    let kind = bus.disk.drive_kind(drive);
+    if drive >= LASTDRIVE || kind.is_none_or(|k| k == DriveKind::CdRom) {
+        return false;
+    }
+    let at = address(CDS + drive as u16 * CDS_SIZE) as u32 + 0x43;
+    let attributes = bus.guest_read_16(at) & !0x4000;
+    bus.guest_write_16(at, if enabled { attributes | 0x4000 } else { attributes });
+    true
 }
 
 /// Say in the List of Lists whether upper memory is linked.

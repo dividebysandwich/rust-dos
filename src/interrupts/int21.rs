@@ -2211,14 +2211,23 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             set_result(cpu, result.map(|(_, handle)| handle));
         }
 
-        // AH = 5Fh: the network redirector's functions (redirection
+        // AX = 5F07h, 5F08h: enable and disable drive DL (DOS 5+), which
+        // DOS does itself, without a network: set or clear the physical
+        // drive bit of its CDS. 0Fh for a drive without a DPB.
+        0x5F if matches!(cpu.get_al(), 0x07 | 0x08) => {
+            let enable = cpu.get_al() == 0x07;
+            let drive = cpu.get_dl();
+            let done = dos_data::set_drive_enabled(&mut cpu.bus, drive, enable);
+            set_result(cpu, if done { Ok(cpu.ax()) } else { Err(0x0F) });
+        }
+        // AH = 5Fh: the rest go to the network redirector (redirection
         // mode, the redirection list, redirecting and cancelling
-        // devices), which go to a network that isn't there: CF set,
-        // AX=0001h, as MS-DOS answers without a network and DOSBox does.
-        // Left alone, CF stays clear, and Windows 98's DOS Setup, which
-        // compares the drive in its buffer with the entry it asked for
-        // and finds them the same, takes every drive for a network one
-        // and says it cannot create a temporary directory.
+        // devices), and there is none: CF set, AX=0001h, as MS-DOS
+        // answers without a network and DOSBox does. Left alone, CF
+        // stays clear, and Windows 98's DOS Setup, which compares the
+        // drive in its buffer with the entry it asked for and finds them
+        // the same, takes every drive for a network one and says it
+        // cannot create a temporary directory.
         0x5F => set_result(cpu, Err(0x01)),
 
         // AH = 60h: Canonical ("true") name of DS:SI into ES:DI.
@@ -2479,5 +2488,31 @@ mod tests {
             assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
             assert_eq!(cpu.ax(), 0x0001, "invalid function, AX={:04X}", ax);
         }
+    }
+
+    #[test]
+    fn enabling_and_disabling_a_drive_needs_no_network() {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        crate::dos_data::write(&mut cpu.bus);
+        let cds_flags = |cpu: &mut Cpu| {
+            cpu.set_ax(0x5200);
+            crate::interrupts::handle_hle(cpu, 0x21);
+            let lol = cpu.get_physical_addr(cpu.es(), cpu.bx());
+            let cds = cpu.bus.read_32(lol + 0x16);
+            let at = cpu.get_physical_addr((cds >> 16) as u16, cds as u16);
+            cpu.bus.read_16(at + 2 * 0x58 + 0x43)
+        };
+        for (ax, physical) in [(0x5F08, 0), (0x5F07, 0x4000)] {
+            cpu.set_ax(ax);
+            cpu.set_dx(2); // C:
+            crate::interrupts::handle_hle(&mut cpu, 0x21);
+            assert!(!cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+            assert_eq!(cds_flags(&mut cpu) & 0x4000, physical, "AX={:04X}", ax);
+        }
+        cpu.set_ax(0x5F07);
+        cpu.set_dx(26); // past Z:
+        crate::interrupts::handle_hle(&mut cpu, 0x21);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF));
+        assert_eq!(cpu.ax(), 0x000F, "invalid drive");
     }
 }
