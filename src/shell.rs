@@ -302,6 +302,10 @@ pub enum ShellWait {
     Rc(Box<crate::rc_command::RcWait>),
     /// DIR /P: any key, for the lines after a screenful.
     Dir(crate::command::DirPages),
+    /// A program from the prompt waiting for the almanac's settings
+    /// (almanac.rs): its command line, its file, and the tick it waits
+    /// until at most.
+    Almanac { line: String, program: String, until: u64 },
 }
 
 /// A CHOICE waiting for a key.
@@ -414,6 +418,10 @@ pub fn take_key(cpu: &mut Cpu, key: u16) -> bool {
             }
         }
         ShellWait::Edit(_) | ShellWait::Post(_) | ShellWait::Rc(_) => {}
+        ShellWait::Almanac { .. } => {
+            cpu.shell_wait = Some(wait);
+            return crate::almanac::key(cpu, key);
+        }
         ShellWait::Choice(choice) => match choice.index(key) {
             Some(i) => {
                 video::print_string(cpu, &format!("{}\r\n", choice.keys[i] as char));
@@ -516,6 +524,12 @@ pub fn tick(cpu: &mut Cpu) {
     }
     if matches!(cpu.shell_wait, Some(ShellWait::Rc(_))) {
         if !crate::rc_command::tick(cpu) {
+            cpu.set_ip(labels().prompt_start);
+        }
+        return;
+    }
+    if matches!(cpu.shell_wait, Some(ShellWait::Almanac { .. })) {
+        if !crate::almanac::tick(cpu) {
             cpu.set_ip(labels().prompt_start);
         }
         return;
@@ -650,6 +664,12 @@ impl crate::savestate::State for ShellWait {
                 10u8.save(w);
                 pages.save(w);
             }
+            ShellWait::Almanac { line, program, until } => {
+                11u8.save(w);
+                line.save(w);
+                program.save(w);
+                until.save(w);
+            }
         }
     }
     fn load(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
@@ -701,6 +721,13 @@ impl crate::savestate::State for ShellWait {
                 let mut pages = crate::command::DirPages::default();
                 pages.load(r)?;
                 ShellWait::Dir(pages)
+            }
+            11 => {
+                let (mut line, mut program, mut until) = (String::new(), String::new(), 0u64);
+                line.load(r)?;
+                program.load(r)?;
+                until.load(r)?;
+                ShellWait::Almanac { line, program, until }
             }
             _ => return Err(crate::savestate::StateError::Invalid("a wait of the shell it doesn't know".into())),
         };

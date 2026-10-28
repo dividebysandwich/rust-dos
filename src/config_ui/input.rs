@@ -49,6 +49,8 @@ impl ConfigUi {
             self.scenes_key(key, host);
         } else if self.phonebook.is_some() {
             self.phonebook_key(key, host);
+        } else if self.almanac.is_some() {
+            self.almanac_key(key, host);
         } else if self.cheats.edit.is_some() {
             self.cheats_edit_key(key, host);
         } else if self.achievements.edit.is_some() {
@@ -117,6 +119,7 @@ impl ConfigUi {
                     && self.rooms.is_none()
                     && self.scenes.is_none()
                     && self.phonebook.is_none()
+                    && self.almanac.is_none()
                 {
                     self.edit = None;
                     self.cheats.edit = None;
@@ -187,6 +190,7 @@ impl ConfigUi {
             }
             Target::SceneRow(_) => self.scene_clicked(target, host),
             Target::PhoneRow(_) => self.phone_clicked(target, host),
+            Target::AlmanacRow(_) => self.almanac_clicked(target, host),
             Target::PopupRow(i) => {
                 if let Some(popup) = &mut self.popup {
                     popup.selected = i;
@@ -309,6 +313,12 @@ impl ConfigUi {
             (UiKey::Enter, Input::File) => self.open_browser(Pick::SoundFont),
             (UiKey::Enter, Input::Link) if item == Item::Rooms => self.open_rooms(),
             (UiKey::Enter, Input::Link) if item == Item::Phonebook => self.open_phonebook(),
+            (UiKey::Enter, Input::Link) if item == Item::AlmanacFetch => {
+                self.open_almanac(false, host)
+            }
+            (UiKey::Enter, Input::Link) if item == Item::AlmanacReport => {
+                self.open_almanac(true, host)
+            }
             (UiKey::Enter, Input::Link) if item == Item::Awe32Download => self.download_awe32_rom(),
             (UiKey::Enter, Input::Link) if item == Item::Sc55Download => self.ask_sc55_download(),
             (UiKey::Enter, Input::Link) if item == Item::VoodooOverlay => self.ask_glide_download(),

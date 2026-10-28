@@ -509,6 +509,8 @@ pub struct Cpu {
     pub edit_clipboard: Vec<u8>,
     /// RC while a command line it left to run runs, to come back after.
     pub rc_resume: Option<crate::rc_command::RcWait>,
+    /// The prompt's side of asking the almanac for a program's settings.
+    pub almanac: crate::almanac::Shell,
     /// How the session started, for a reboot to start it again.
     pub startup: crate::boot::Startup,
     /// Set by a reset of the built-in DOS (`bios::post`) with the state
@@ -794,6 +796,7 @@ impl Cpu {
             shell_prompt_at: None,
             edit_clipboard: Vec::new(),
             rc_resume: None,
+            almanac: Default::default(),
             startup: crate::boot::Startup::default(),
             reboot: false,
             secondary_shells: Vec::new(),

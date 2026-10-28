@@ -953,6 +953,16 @@ pub fn drives_before(cpu: &Cpu) -> Vec<(u8, Option<MountSpec>)> {
     (0..crate::disk::DRIVE_SLOTS).map(|d| (d, cpu.bus.disk.drive_info(d).and_then(|i| i.mount))).collect()
 }
 
+/// Whether a program has started since `Cpu::programs_loaded` was
+/// `programs_before`, the batch files are done and the prompt is back.
+pub fn ended(cpu: &Cpu, programs_before: u64) -> bool {
+    cpu.programs_loaded > programs_before
+        && !cpu.batch.is_active()
+        && cpu.pending_command.is_none()
+        && cpu.shell_wait.is_none()
+        && cpu.shell_idle()
+}
+
 /// Say at the prompt that the game `name` has ended, its drives and
 /// settings as they were before it (`restore_drives`): otherwise a game
 /// whose program quit at once (a Windows that wouldn't start) looks as if
@@ -1009,11 +1019,7 @@ impl ActiveGame {
     /// (no program to start) stays with its drives until another is
     /// launched.
     pub fn done(&self, cpu: &Cpu) -> bool {
-        cpu.programs_loaded > self.programs_before
-            && !cpu.batch.is_active()
-            && cpu.pending_command.is_none()
-            && cpu.shell_wait.is_none()
-            && cpu.shell_idle()
+        ended(cpu, self.programs_before)
     }
 }
 

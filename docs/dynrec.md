@@ -253,6 +253,8 @@ Each instruction becomes one of two things:
   - MUL and IMUL in all their forms, DIV and IDIV;
   - LEA, MOVZX, MOVSX, XCHG, CBW, CWD, CWDE and CDQ;
   - the flag instructions, SAHF and SETcc;
+  - NOP, and on a P6 the hinting NOPs (0F 18 to 0F 1F, PREFETCHh among
+    them), as operations of nothing;
   - PUSH and POP of registers, memory (not addressed through ESP, for POP)
     and constants, PUSHA and POPA, ENTER with nesting level 0 (but a 32-bit
     frame pointer on a 16-bit stack) and LEAVE;
@@ -468,7 +470,8 @@ instructions on MMX registers, with SSE's additions to them (PSHUFW,
 PAVGB, PMOVMSKB and the rest but PINSRW and MASKMOVQ), the moves,
 logical instructions and shuffles on XMM registers, and the arithmetic
 on singles: ADD, SUB, MUL, DIV, MIN, MAX, SQRT and CMP, packed and
-scalar, CVTPS2PI, CVTTPS2PI and CVTPI2PS. The arithmetic runs with the
+scalar, COMISS and UCOMISS, and the conversions CVTPS2PI, CVTTPS2PI,
+CVTPI2PS, CVTSS2SI, CVTTSS2SI and CVTSI2SS. The arithmetic runs with the
 host's MXCSR set to the guest's rounding and flush to zero, every
 exception masked, and the exceptions it raised are added to the guest's
 MXCSR; where one of them is unmasked in the guest's MXCSR, the handler
@@ -480,10 +483,16 @@ the guest masks every exception and has the host's rounding, flush to
 zero and DAZ, and every flag set in the host's MXCSR is set in the
 guest's too, the operation runs under the host's MXCSR as it is, without
 either load: the flags it sets that the guest hasn't are those it
-raised. The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS,
-which the host's don't match, the compares into EFLAGS and the
-conversions to and from 32-bit registers go through their handlers, and
-so does everything on ARM64 hosts.
+raised.
+
+The approximations of RCPSS, RCPPS, RSQRTSS and RSQRTPS, which the
+host's own instructions don't match, are computed as the handlers
+compute them: the reciprocal (a division) or the reciprocal square root
+(on doubles) rounded to the nearest single, with a denormal operand
+counted as zero, a result below the normals flushed to zero and no
+exception flag set. The host's MXCSR is set to that for the operation
+and back to Rust's after it. PINSRW, MASKMOVQ, LDMXCSR and STMXCSR go
+through their handlers, and so does everything on ARM64 hosts.
 
 An MMX register is the significand of an FPU register, and a write gives
 the register its 80 bits and the double they come to, as `mmx::set_mm`

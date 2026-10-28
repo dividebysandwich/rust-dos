@@ -291,6 +291,7 @@ impl Item {
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
             VersionCheck => on_off(|s, on| s.version_check = on),
+            AlmanacAuto => on_off(|s, on| s.almanac_auto = on),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),
@@ -399,6 +400,7 @@ impl Item {
             | Rooms | Relay | Player | VrScene | VrScreenGlow | VrCenter | VrMarkKeyboard | VrSceneScale | VrSeat(_) | VrSeatTurn | VrResolution
             | VrLatitude | VrWeatherSound | Vfx1ViewSize
             | Lan | LanHost | Room | Password | ModemListen | Phonebook => Vec::new(),
+            AlmanacFetch | AlmanacReport => Vec::new(),
         }
     }
 

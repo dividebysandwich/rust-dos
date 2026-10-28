@@ -189,6 +189,12 @@ pub(super) enum Item {
     SaveShellHistory,
     /// Ask rust-dos.com at startup whether there is a newer version.
     VersionCheck,
+    /// Ask almanac.rust-dos.com for a program's settings as it starts.
+    AlmanacAuto,
+    /// The almanac's settings for the game, to pick from, and a report of
+    /// the settings it plays with (almanac.rs).
+    AlmanacFetch,
+    AlmanacReport,
     /// Rewind (held Alt+F11) and the memory it takes.
     Rewind,
     RewindMemory,
@@ -397,6 +403,9 @@ impl Item {
             ShellColors => "Shell colors",
             SaveShellHistory => "Save shell history",
             VersionCheck => "Check for new versions",
+            AlmanacAuto => "Auto-apply Almanac settings",
+            AlmanacFetch => "Fetch settings from Almanac...",
+            AlmanacReport => "Report settings to Almanac...",
             Rewind => "Rewind (Alt+F11)",
             RewindMemory => "  Rewind memory",
             SbType => "Sound Blaster",
@@ -541,6 +550,10 @@ impl Item {
             Item::Online | Item::Rooms | Item::Relay | Item::Player => frontend.window,
             Item::Lan | Item::LanHost | Item::Room | Item::Password => frontend.window,
             Item::ModemListen | Item::ModemTelnet | Item::Phonebook => frontend.window,
+            // Only the program asks the almanac.
+            Item::AlmanacAuto | Item::AlmanacFetch | Item::AlmanacReport => {
+                frontend.window && super::almanac::ASKS
+            }
             // The browser has nowhere for printouts to go.
             Item::PrinterOutput
             | Item::PrinterPaper
@@ -645,6 +658,7 @@ impl Item {
             Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             AudioBlocksize | AudioPrebuffer => Applies::Now,
             Rooms | Phonebook => Applies::Now,
+            AlmanacAuto | AlmanacFetch | AlmanacReport => Applies::Now,
             Memsize | Autoexec | Lan | LanHost | VersionCheck => Applies::NextStart,
             VrMode | VrQuality | VrAmbientOcclusion | VrMsaa | VrScene | VrControllers | VrSpatialAudio | VrScreenFit | VrScreenGlow
             | VrCenter | VrSceneScale | VrSeat(_) | VrSeatTurn | VrKeyboard | VrMarkKeyboard | VrResolution | VrRefresh => Applies::Now,
@@ -674,6 +688,7 @@ impl Item {
             Item::ModemListen => Input::Text,
             Item::SoundFont | Item::Mt32Roms | Item::Awe32Rom | Item::Sc55Roms | Item::VrScene => Input::File,
             Item::VeriteRom => Input::File,
+            Item::AlmanacFetch | Item::AlmanacReport => Input::Link,
             Item::Autoexec | Item::Rooms | Item::Phonebook | Item::Awe32Download | Item::Sc55Download | Item::VoodooOverlay | Item::VrCenter
             | Item::VrMarkKeyboard => {
                 Input::Link
@@ -859,6 +874,8 @@ impl Item {
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),
             VersionCheck => on_off(s.version_check),
+            AlmanacAuto => on_off(s.almanac_auto),
+            AlmanacFetch | AlmanacReport => String::new(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),
             SbType if !s.sound.sb_installed => "none".to_string(),
