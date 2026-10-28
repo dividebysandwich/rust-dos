@@ -9,9 +9,9 @@
 //! MMX blits write, which goes a dword at a time through `jit_dev_write`
 //! (`BailUnlessStorable`, `VStore`). RCPPS, RSQRTPS and their scalar
 //! forms, whose approximations the host's own instructions don't match,
-//! run as the handlers compute them, on doubles (`VOp::Rcp`,
-//! `VOp::Rsqrt`). PINSRW, MASKMOVQ, LDMXCSR and STMXCSR go through their
-//! handlers.
+//! run as the handlers compute them: a division, or a square root and a
+//! division on doubles (`VOp::Rcp`, `VOp::Rsqrt`). PINSRW, MASKMOVQ,
+//! LDMXCSR and STMXCSR go through their handlers.
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 

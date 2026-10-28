@@ -84,10 +84,12 @@ pub enum VSrc {
     Mem { m: T, size: u8 },
 }
 
-/// Operations on two host registers' bits that leave MXCSR alone
-/// (`Uop::VOp`): a = a OP b, as the SSE2 instruction of the name does it
-/// on 128 bits, but where said. An MMX instruction's operands are in the
-/// low quadwords, and only its result's low quadword counts.
+/// Operations on two host registers' bits that leave the guest's MXCSR
+/// alone (`Uop::VOp`): a = a OP b, as the SSE2 instruction of the name
+/// does it on 128 bits, but where said. An MMX instruction's operands are
+/// in the low quadwords, and only its result's low quadword counts.
+/// `Rcp` and `Rsqrt` load the host's MXCSR around them, and leave it
+/// with its exception flags clear.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VOp {
     Andps,

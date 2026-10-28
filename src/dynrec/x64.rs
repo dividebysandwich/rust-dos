@@ -3103,11 +3103,14 @@ impl Gen<'_> {
             }
             (VFloatOp::FromInt, true) => op!(movd eax, Rx(b) ; cvtsi2ss Rx(a), eax),
             // EFLAGS' ZF (0x40), PF (4) and CF (1).
-            (VFloatOp::Compare { signaling: true }, _) => {
-                op!(comiss Rx(a), Rx(b) ; pushfq ; pop rax ; and eax, 0x45 ; movd Rx(a), eax)
-            }
-            (VFloatOp::Compare { signaling: false }, _) => {
-                op!(ucomiss Rx(a), Rx(b) ; pushfq ; pop rax ; and eax, 0x45 ; movd Rx(a), eax)
+            (VFloatOp::Compare { signaling }, _) => {
+                if signaling {
+                    op!(comiss Rx(a), Rx(b));
+                } else {
+                    op!(ucomiss Rx(a), Rx(b));
+                }
+                self.host_flags();
+                op!(and eax, 0x45 ; movd Rx(a), eax);
             }
         }
     }
