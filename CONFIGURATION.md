@@ -1716,6 +1716,9 @@ read), or a bare image of an ISO 9660 data track in 2048, 2336 or
 be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
 many sheets call them), and WAVE files at other rates: they are decoded to
 CD audio as they play. Programs run from the image as from any other drive.
+DOS programs see the names of the disc's ISO 9660 tree, as MSCDEX shows
+them; Windows programs on the built-in Windows see its Joliet long names
+where the disc has them, as on Windows 95.
 
 An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
 sector's EDC, and a sector whose EDC doesn't match its data reads as a
