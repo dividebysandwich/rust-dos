@@ -2031,11 +2031,12 @@ fn main() -> Result<(), String> {
                 () => {
                     let paged = ui.with_layer(&screen, (1.0, 1.0));
                     let frame = paged.as_ref().unwrap_or(&screen);
-                    let shaded = dbg
-                        .wants_shader_frame()
-                        .then(|| display.shaded(frame, &cached_frame))
-                        .flatten();
-                    dbg.capture_frame(frame, shaded.as_ref());
+                    if dbg.wants_shader_frame() {
+                        let shaded = display.shaded(frame, &cached_frame);
+                        dbg.capture_frame_with_shader(frame, shaded.as_ref());
+                    } else {
+                        dbg.capture_frame(frame);
+                    }
                 };
             }
             // In deterministic mode the debug server's pictures leave out

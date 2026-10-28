@@ -450,7 +450,13 @@ impl DebugHub {
         }
     }
 
-    pub fn capture_frame(&mut self, screen: &video::Frame, shaded: Option<&video::Frame>) {
+    /// Capture plain output, including readbacks supplied by 3dfx callers.
+    pub fn capture_frame(&mut self, screen: &video::Frame) {
+        self.capture_frame_with_shader(screen, None);
+    }
+
+    /// Supply filtered output separately so plain captures stay unchanged.
+    pub fn capture_frame_with_shader(&mut self, screen: &video::Frame, shaded: Option<&video::Frame>) {
         self.count_frame();
         if !self.wants_frame() {
             return;
