@@ -141,7 +141,9 @@ fn bulk(cpu: &mut Cpu, op: StrOp, size: u8, a: &Addr, count: u32) -> CpuResult<B
                 cpu.bus.move_elements(src.phys as usize, dst.phys as usize, n as usize, size as usize, backward);
             } else if !(src_ram
                 && (cpu.bus.move_to_vga(range(src.phys), range(dst.phys), len)
-                    || cpu.bus.move_to_lfb(range(src.phys), range(dst.phys), len, size as usize)
+                    || cpu
+                        .bus
+                        .move_to_lfb(range(src.phys), range(dst.phys), len, size as usize)
                     || cpu.bus.move_to_voodoo(
                         range(src.phys),
                         range(dst.phys),

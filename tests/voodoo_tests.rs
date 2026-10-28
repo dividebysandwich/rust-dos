@@ -640,11 +640,20 @@ fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
     // 1-5-5-5 pixels, every fifth dword the chroma key, as Sub Culture
     // writes its overlay through the pixel pipeline.
     let data: Vec<u32> = (0..40u32)
-        .map(|i| if i % 5 == 0 { 0 } else { i.wrapping_mul(0x9E37_79B9) | 0x8000_8000 })
+        .map(|i| {
+            if i % 5 == 0 {
+                0
+            } else {
+                i.wrapping_mul(0x9E37_79B9) | 0x8000_8000
+            }
+        })
         .collect();
     let bytes: Vec<u8> = data.iter().flat_map(|d| d.to_le_bytes()).collect();
-    // Row 3 of a tiled colour buffer at 4 MB, through BAR1.
-    let row = BAR1 + 0x40_0000 + 3 * 128;
+    // A tiled colour buffer at 4 MB, through BAR1: its first two tiles,
+    // and row 3 of each. The pixels written are 6 to 85 of row 3, from
+    // 64 on in the second tile.
+    let tiles = BAR1 + 0x40_0000;
+    let (row, next_tile) = (tiles + 3 * 128, tiles + 4096 + 3 * 128);
     let lfb = BASE + 0x100_0000 + 3 * 4096 + 6 * 2;
     let (mut one, mut each) = (bus(Board::Voodoo3), bus(Board::Voodoo3));
     for bus in [&mut one, &mut each] {
@@ -655,30 +664,31 @@ fn a_string_move_into_a_banshee_writes_what_its_dwords_write() {
         bus.write_32(D3 + LFB_MODE as usize, 2 | 1 << 8);
         bus.write_32(D3 + FBZ_MODE as usize, CHROMA | RGB_WRITE);
         bus.write_32(D3 + CHROMA_KEY as usize, 0);
-        for i in (0..256).step_by(4) {
-            bus.write_32(row + i, 0x1234_1234);
+        for i in (0..8192).step_by(4) {
+            bus.write_32(tiles + i, 0x1234_1234);
         }
         bus.load_bytes(0x1000, &bytes);
     }
-    let words = |bus: &Bus, at: usize| -> Vec<u32> {
-        (0..bytes.len()).step_by(4).map(|i| bus.read_32(at + i)).collect()
+    let read = |bus: &Bus, at: usize, len: usize| -> Vec<u32> {
+        (0..len).step_by(4).map(|i| bus.read_32(at + i)).collect()
     };
     // Through the 3D engine's linear frame buffer.
     assert!(one.move_to_voodoo(0x1000, lfb, bytes.len(), 4, false));
     for i in (0..bytes.len()).step_by(4) {
         each.write_32(lfb + i, each.read_32(0x1000 + i));
     }
-    assert_eq!(words(&one, row), words(&each, row));
+    assert_eq!(read(&one, tiles, 8192), read(&each, tiles, 8192));
     assert_eq!(one.read_32(row + 12), 0x1234_1234, "keyed");
     assert_ne!(one.read_32(row + 16), 0x1234_1234);
+    assert_ne!(one.read_32(next_tile), 0x1234_1234, "pixel 64");
     // Into the memory through BAR1, below the tile base.
     let memory = BAR1 + 0x10_0000;
     assert!(one.move_to_voodoo(0x1000, memory, bytes.len(), 4, false));
     for i in (0..bytes.len()).step_by(4) {
         each.write_32(memory + i, each.read_32(0x1000 + i));
     }
-    assert_eq!(words(&one, memory), data);
-    assert_eq!(words(&each, memory), data);
+    assert_eq!(read(&one, memory, bytes.len()), data);
+    assert_eq!(read(&each, memory, bytes.len()), data);
     // Above the tile base, BAR1 is tiled: a dword at a time.
     one.write_32(BASE + 0x0C, 0);
     assert!(!one.move_to_voodoo(0x1000, memory, bytes.len(), 4, false));

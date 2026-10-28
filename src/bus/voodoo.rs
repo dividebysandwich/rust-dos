@@ -4,6 +4,7 @@
 //! the timer events, and putting it in or taking it out.
 
 use super::{Bus, Hold};
+use crate::voodoo::lfb::MemoryRun;
 use crate::voodoo::{Board, Effect, Now, Voodoo, WINDOW};
 
 impl Bus {
@@ -173,7 +174,7 @@ impl Bus {
         size: usize,
         backward: bool,
     ) -> bool {
-        if size != 4 || backward || dst & 3 != 0 || len == 0 {
+        if size != 4 || backward || dst & 3 != 0 || len == 0 || !len.is_multiple_of(4) {
             return false;
         }
         let Some(first) = self.voodoo_at(dst) else {
@@ -189,23 +190,25 @@ impl Bus {
                 || self.mach64_mmio(at).is_some()
         };
         let len32 = len as u32;
-        if self.voodoo_at(last) != Some(first + len32 - 4)
-            || !self.voodoo.as_ref().is_some_and(|v| v.memory_run(first, len32))
-            || other(dst)
-            || other(last)
-        {
+        if self.voodoo_at(last) != Some(first + len32 - 4) || other(dst) || other(last) {
             return false;
         }
-        let _profile = self.profile.as_deref().map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        let Some(run) = self
+            .voodoo
+            .as_ref()
+            .and_then(|v| v.memory_run(first, len32))
+        else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / 4) as u64));
         if self.observe.on {
             self.observe.mapped_write(dst, self.ram.len());
         }
-        let Some(v) = &self.voodoo else { return false };
-        let (lfb, linear) = (v.lfb_run(first, len32), v.linear_run(first, len32));
         let bytes = src..src + len;
-        if lfb.is_none() && linear.is_none() {
-            // A Voodoo Graphics' or Voodoo2's frame buffer, whose writes
-            // go through its FIFO one by one.
+        if run == MemoryRun::Fifo {
             for i in bytes.step_by(4) {
                 let value = u32::from_le_bytes(self.ram[i..i + 4].try_into().unwrap());
                 self.voodoo_write_32(first + (i - src) as u32, value);
@@ -214,12 +217,16 @@ impl Bus {
         }
         let _zone = crate::profile::zone(crate::profile::Zone::Voodoo);
         self.voodoo_swap_wait();
-        let Some(v) = &mut self.voodoo else { return true };
-        if let Some(index) = lfb {
-            let dwords = self.ram[bytes].as_chunks::<4>().0.iter();
-            v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
-        } else if let Some(addr) = linear {
-            v.banshee_memory_write(addr, &self.ram[bytes]);
+        let Some(v) = &mut self.voodoo else {
+            return true;
+        };
+        match run {
+            MemoryRun::Lfb(index) => {
+                let dwords = self.ram[bytes].as_chunks::<4>().0.iter();
+                v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
+            }
+            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, &self.ram[bytes]),
+            MemoryRun::Fifo => {}
         }
         true
     }

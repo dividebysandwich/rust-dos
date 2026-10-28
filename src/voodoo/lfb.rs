@@ -17,21 +17,33 @@ const DEPTH: u32 = 4;
 /// The depth in the upper half of a 32-bit write, for its one pixel.
 const DEPTH_MSW: u32 = 8;
 
+/// Where a run of dwords written to the card's window goes, when all of
+/// them go to the frame buffer or the card's memory (`memory_run`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryRun {
+    /// A Voodoo Graphics' or Voodoo2's linear frame buffer, whose writes
+    /// go through its FIFO one by one.
+    Fifo,
+    /// A Banshee's 3D linear frame buffer, from this dword of the window
+    /// (`lfb_run`).
+    Lfb(u32),
+    /// A Banshee's memory through BAR1, from this address (`linear_run`).
+    Linear(u32),
+}
+
 impl Voodoo {
-    /// Whether the dwords written to the `len` bytes of the window from
-    /// `offset` on all go to the frame buffer or the card's memory, where
-    /// they change no register or the window's layout: into the linear
-    /// frame buffer (`lfb_run`, and a Voodoo Graphics' or Voodoo2's), or a
-    /// Banshee's memory through BAR1 (`linear_run`). A string move's
-    /// writes there can go in one call, in order (`Bus::move_to_voodoo`).
-    pub fn memory_run(&self, offset: u32, len: u32) -> bool {
-        let Some(end) = offset.checked_add(len) else {
-            return false;
-        };
+    /// Where the dwords written to the `len` bytes of the window from
+    /// `offset` on go, if all of them go to the frame buffer or the card's
+    /// memory, where they change no register or the window's layout. A
+    /// string move's writes there can go in one call, in order
+    /// (`Bus::move_to_voodoo`).
+    pub fn memory_run(&self, offset: u32, len: u32) -> Option<MemoryRun> {
+        let end = offset.checked_add(len)?;
         if self.banshee.is_none() {
-            return offset >= 0x40_0000 && end <= 0x80_0000;
+            return (offset >= 0x40_0000 && end <= 0x80_0000).then_some(MemoryRun::Fifo);
         }
-        self.lfb_run(offset, len).is_some() || self.linear_run(offset, len).is_some()
+        let lfb = self.lfb_run(offset, len).map(MemoryRun::Lfb);
+        lfb.or_else(|| self.linear_run(offset, len).map(MemoryRun::Linear))
     }
 
     /// Where the `len` bytes of a Banshee's window from `offset` on are in
@@ -56,7 +68,10 @@ impl Voodoo {
             return None;
         }
         let addr = b.linear_run(offset - LINEAR, len)?;
-        let ring = b.fifo.iter().any(|f| f.enabled && f.base < addr + len && addr < f.end);
+        let ring = b
+            .fifo
+            .iter()
+            .any(|f| f.enabled && f.base < addr + len && addr < f.end);
         (!ring).then_some(addr)
     }
 

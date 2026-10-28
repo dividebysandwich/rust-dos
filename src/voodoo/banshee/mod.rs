@@ -403,7 +403,7 @@ impl Banshee {
     /// `banshee_write_linear`).
     pub fn linear_addr(&self, addr: u32) -> u32 {
         let config = self.reg(LFB_MEMORY_CONFIG);
-        let tile_base = (config & 0x1FFF) << 12;
+        let tile_base = self.tile_base();
         let addr = addr & (BAR_SIZE - 1);
         if addr < tile_base {
             return addr;
@@ -419,9 +419,14 @@ impl Banshee {
     /// from it on are all below the tile base, so in memory one after the
     /// other as they are in the BAR (`linear_addr`).
     pub fn linear_run(&self, addr: u32, len: u32) -> Option<u32> {
-        let tile_base = (self.reg(LFB_MEMORY_CONFIG) & 0x1FFF) << 12;
         let addr = addr & (BAR_SIZE - 1);
-        (addr.checked_add(len)? <= tile_base).then_some(addr)
+        (addr.checked_add(len)? <= self.tile_base()).then_some(addr)
+    }
+
+    /// Where BAR1's tiles begin (lfbMemoryConfig): below it, BAR1 is the
+    /// memory in order.
+    fn tile_base(&self) -> u32 {
+        (self.reg(LFB_MEMORY_CONFIG) & 0x1FFF) << 12
     }
 
     // --- Video ---
