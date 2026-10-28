@@ -48,15 +48,22 @@ impl XbrzFrame {
     }
 
     /// Recover native pixels, tint them like the composed screen, and
-    /// isolate overlays. Returns overlay visibility, any input change, and
-    /// whether the overlay texture itself changed.
+    /// isolate overlays. Without a base, treat the already tinted screen
+    /// as flattened input and ignore its overlay coverage. Returns overlay
+    /// visibility, any input change, and whether the overlay texture itself
+    /// changed.
     pub fn prepare(
         &mut self,
         screen: &Frame,
-        base: &Frame,
+        base: Option<&Frame>,
         mono: mono::Monochrome,
         screen_rows: std::ops::Range<usize>,
     ) -> (bool, bool, bool) {
+        let separate_overlays = base.is_some();
+        let (base, mono) = match base {
+            Some(base) => (base, mono),
+            None => (screen, mono::Monochrome::Off),
+        };
         assert_eq!((screen.width, screen.height), (base.width, base.height));
         let scale = if base.doubled { 2 } else { 1 };
         let width = base.width as usize / scale;
@@ -112,7 +119,8 @@ impl XbrzFrame {
         }
         mono::apply_rows(&mut self.source, mono, native_rows);
         self.mono = Some(mono);
-        let (visible, overlay_changed) = self.prepare_overlay(screen, screen_rows);
+        let (visible, overlay_changed) =
+            self.prepare_overlay(screen, screen_rows, separate_overlays);
         if overlay_changed {
             self.overlay_revision = self.overlay_revision.wrapping_add(1);
         }
@@ -123,6 +131,7 @@ impl XbrzFrame {
         &mut self,
         screen: &Frame,
         mut rows: std::ops::Range<usize>,
+        separate: bool,
     ) -> (bool, bool) {
         let mut changed = self.overlay.resize(screen.width, screen.height);
         if changed {
@@ -130,7 +139,9 @@ impl XbrzFrame {
             self.overlay_pixels = 0;
             self.coverage = Vec::new();
         }
-        let mask = screen.overlay_mask().filter(|mask| mask.contains(&1));
+        let mask = screen
+            .overlay_mask()
+            .filter(|mask| separate && mask.contains(&1));
         let Some(mask) = mask else {
             if !self.coverage.is_empty() {
                 changed |= self.overlay.rgba.iter().any(|&byte| byte != 0);
@@ -199,6 +210,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flattened_input_ignores_tint_and_coverage_after_clean_presentation() {
+        for doubled in [false, true] {
+            let mut base = Frame::from_rgb(4, 2, (0..24).map(|i| i * 9).collect());
+            base.doubled = doubled;
+            let mut composed = base.clone();
+            mono::apply(&mut composed, mono::Monochrome::Amber);
+            composed.track_overlays(true);
+            composed.mark_overlay(0, 0);
+            composed.rgba[..4].copy_from_slice(&[11, 222, 33, 255]);
+            let mut prepared = XbrzFrame::default();
+            assert!(
+                prepared
+                    .prepare(&composed, Some(&base), mono::Monochrome::Amber, 0..2)
+                    .0
+            );
+            let clean_source = prepared.source.clone();
+            let scale = if doubled { 2 } else { 1 };
+            let mut expected = Frame::new(base.width / scale, base.height / scale);
+            for y in 0..expected.height as usize {
+                for x in 0..expected.width as usize {
+                    let from = (y * scale as usize * base.width as usize + x * scale as usize) * 4;
+                    let to = (y * expected.width as usize + x) * 4;
+                    expected.rgba[to..to + 4].copy_from_slice(&composed.rgba[from..from + 4]);
+                }
+            }
+            assert_eq!(
+                prepared.prepare(&composed, None, mono::Monochrome::Green, 0..0),
+                (false, true, true)
+            );
+            assert_eq!(prepared.source, expected);
+            assert!(prepared.overlay.rgba.iter().all(|&byte| byte == 0));
+            assert!(
+                prepared
+                    .prepare(&composed, Some(&base), mono::Monochrome::Amber, 0..0)
+                    .0
+            );
+            assert_eq!(prepared.source, clean_source);
+            assert_eq!(&prepared.overlay.rgba[..4], &[11, 222, 33, 255]);
+        }
+    }
+
+    #[test]
     fn transparent_coverage_does_not_leak_visibility() {
         let base = Frame::from_rgb(3, 2, vec![80; 18]);
         let mut screen = base.clone();
@@ -209,13 +262,13 @@ mod tests {
         for _ in 0..3 {
             assert!(
                 !prepared
-                    .prepare(&screen, &base, mono::Monochrome::Off, 0..2)
+                    .prepare(&screen, Some(&base), mono::Monochrome::Off, 0..2)
                     .0
             );
             assert_eq!(&prepared.overlay.rgba[4..8], &screen.rgba[4..8]);
         }
         assert_eq!(
-            prepared.prepare(&base, &base, mono::Monochrome::Off, 0..0),
+            prepared.prepare(&base, Some(&base), mono::Monochrome::Off, 0..0),
             (false, true, true)
         );
         assert!(prepared.overlay.rgba.iter().all(|&byte| byte == 0));
@@ -256,8 +309,12 @@ mod tests {
                 let geometry = (prepared.overlay.width, prepared.overlay.height) != (width, height);
                 let revision = prepared.overlay_revision();
                 let changed = geometry || previous != expected;
-                let result =
-                    prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..height as usize);
+                let result = prepared.prepare(
+                    &screen,
+                    Some(&base),
+                    mono::Monochrome::Off,
+                    0..height as usize,
+                );
                 assert_eq!(prepared.overlay.rgba, expected);
                 assert_eq!(
                     result.0,
@@ -270,7 +327,7 @@ mod tests {
                 );
                 let capacity = prepared.coverage.capacity();
                 assert_eq!(
-                    prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0),
+                    prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0),
                     (result.0, false, false)
                 );
                 assert_eq!(prepared.coverage.capacity(), capacity);
@@ -280,11 +337,11 @@ mod tests {
                     .for_each(|byte| *byte ^= 127);
                 assert!(
                     !prepared
-                        .prepare(&screen, &base, mono::Monochrome::Amber, 0..0)
+                        .prepare(&screen, Some(&base), mono::Monochrome::Amber, 0..0)
                         .2
                 );
             }
-            prepared.prepare(&base, &base, mono::Monochrome::Off, 0..0);
+            prepared.prepare(&base, Some(&base), mono::Monochrome::Off, 0..0);
             assert!(prepared.coverage.is_empty());
             assert!(prepared.overlay.rgba.iter().all(|&byte| byte == 0));
         }
@@ -297,25 +354,25 @@ mod tests {
         let mut screen = base.clone();
         screen.track_overlays(true);
         let mut prepared = XbrzFrame::default();
-        prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..4);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..4);
         assert_eq!(prepared.coverage.capacity(), 0);
         screen.mark_overlay_rect(0, 0, 8, 4);
-        prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0);
         screen.rgba[32..64].fill(127);
         assert_eq!(
-            prepared.prepare(&screen, &base, mono::Monochrome::Off, 1..2),
+            prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 1..2),
             (true, true, true)
         );
         assert_eq!(prepared.overlay.rgba, screen.rgba);
         screen.track_overlays(false);
         assert_eq!(
-            prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0),
+            prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0),
             (false, true, true)
         );
         let capacity = prepared.coverage.capacity();
         screen.track_overlays(true);
         screen.mark_overlay(7, 3);
-        prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0);
         assert_eq!(prepared.coverage.capacity(), capacity);
         assert_eq!(&prepared.overlay.rgba[124..], &screen.rgba[124..]);
         assert!(prepared.overlay.rgba[..124].iter().all(|&byte| byte == 0));
@@ -326,14 +383,14 @@ mod tests {
         let mut base = Frame::from_rgb(3, 3, (0..27).map(|i| i * 7).collect());
         let mut prepared = XbrzFrame::default();
         for mono in mono::Monochrome::ALL {
-            prepared.prepare(&base, &base, mono, 0..3);
+            prepared.prepare(&base, Some(&base), mono, 0..3);
             base.rgba[16] ^= 127;
-            prepared.prepare(&base, &base, mono, 1..2);
+            prepared.prepare(&base, Some(&base), mono, 1..2);
             let mut expected = base.clone();
             mono::apply(&mut expected, mono);
             assert_eq!(prepared.source, expected);
             assert_eq!(prepared.source_rows(), 1..2);
-            prepared.prepare(&base, &base, mono, 0..0);
+            prepared.prepare(&base, Some(&base), mono, 0..0);
             assert_eq!(prepared.source_rows(), 0..0);
             assert_eq!(prepared.source, expected);
         }
@@ -345,25 +402,25 @@ mod tests {
         let mut screen = base.clone();
         screen.track_overlays(true);
         let mut prepared = XbrzFrame::default();
-        prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..1);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..1);
         let revision = prepared.source_revision();
         assert_eq!(prepared.source_rows(), 0..1);
         let overlay = prepared.overlay_revision();
         screen.mark_overlay(0, 0);
-        prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0);
         assert_eq!(prepared.source_revision(), revision);
         assert_eq!(prepared.source_rows(), 0..0);
         assert_ne!(prepared.overlay_revision(), overlay);
         let overlay = prepared.overlay_revision();
         base.rgba[0] ^= 127;
-        prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0);
         assert_ne!(prepared.source_revision(), revision);
         assert_eq!(prepared.overlay_revision(), overlay);
         let revision = prepared.source_revision();
-        prepared.prepare(&screen, &base, mono::Monochrome::Amber, 0..0);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Amber, 0..0);
         assert_ne!(prepared.source_revision(), revision);
         let revision = prepared.source_revision();
-        prepared.prepare(&screen, &base, mono::Monochrome::Amber, 0..0);
+        prepared.prepare(&screen, Some(&base), mono::Monochrome::Amber, 0..0);
         assert_eq!(prepared.source_revision(), revision);
     }
 
@@ -385,16 +442,26 @@ mod tests {
                 let mut expected = native.clone();
                 mono::apply(&mut expected, mono);
                 composed.track_overlays(true);
-                assert!(!prepared.prepare(&composed, base, mono, 0..composed.height as usize).0);
+                assert!(
+                    !prepared
+                        .prepare(&composed, Some(base), mono, 0..composed.height as usize)
+                        .0
+                );
                 assert_eq!(prepared.source, expected);
                 assert!(prepared.overlay.rgba.iter().all(|&byte| byte == 0));
                 composed.rgba[..4].copy_from_slice(&[11, 222, 33, 255]);
                 composed.mark_overlay(0, 0);
-                assert_eq!(prepared.prepare(&composed, base, mono, 0..composed.height as usize), (true, true, true));
+                assert_eq!(
+                    prepared.prepare(&composed, Some(base), mono, 0..composed.height as usize),
+                    (true, true, true)
+                );
                 assert_eq!(prepared.source, expected);
                 assert_eq!(&prepared.overlay.rgba[..4], &[11, 222, 33, 255]);
                 assert!(prepared.overlay.rgba[4..].iter().all(|&byte| byte == 0));
-                assert_eq!(prepared.prepare(&composed, base, mono, 0..composed.height as usize), (true, false, false));
+                assert_eq!(
+                    prepared.prepare(&composed, Some(base), mono, 0..composed.height as usize),
+                    (true, false, false)
+                );
             }
         }
     }
@@ -407,16 +474,25 @@ mod tests {
         let mut prepared = XbrzFrame::default();
         screen.track_overlays(true);
         screen.mark_overlay(0, 0);
-        assert_eq!(prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..1), (true, true, true));
+        assert_eq!(
+            prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..1),
+            (true, true, true)
+        );
         let empty = Frame::new(0, 0);
         let mut empty = empty;
         empty.track_overlays(true);
-        assert_eq!(prepared.prepare(&empty, &empty, mono::Monochrome::Amber, 0..0), (false, true, true));
+        assert_eq!(
+            prepared.prepare(&empty, Some(&empty), mono::Monochrome::Amber, 0..0),
+            (false, true, true)
+        );
         assert_eq!(prepared.source, empty);
         assert_eq!(prepared.overlay, empty);
         let mut base = base;
         base.track_overlays(true);
-        assert_eq!(prepared.prepare(&base, &base, mono::Monochrome::Off, 0..1), (false, true, true));
+        assert_eq!(
+            prepared.prepare(&base, Some(&base), mono::Monochrome::Off, 0..1),
+            (false, true, true)
+        );
         assert_eq!(prepared.source, base);
     }
 
@@ -427,11 +503,20 @@ mod tests {
         screen.track_overlays(true);
         screen.mark_overlay(0, 0);
         let mut prepared = XbrzFrame::default();
-        assert_eq!(prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..1), (true, true, true));
+        assert_eq!(
+            prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..1),
+            (true, true, true)
+        );
         assert_eq!(&prepared.overlay.rgba[..4], &base.rgba[..4]);
-        assert_eq!(prepared.prepare(&screen, &base, mono::Monochrome::Off, 0..0), (true, false, false));
+        assert_eq!(
+            prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0),
+            (true, false, false)
+        );
         let mut changed = base.clone();
         changed.rgba[4] = 9;
-        assert_eq!(prepared.prepare(&screen, &changed, mono::Monochrome::Off, 0..0), (true, true, false));
+        assert_eq!(
+            prepared.prepare(&screen, Some(&changed), mono::Monochrome::Off, 0..0),
+            (true, true, false)
+        );
     }
 }

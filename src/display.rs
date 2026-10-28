@@ -511,19 +511,23 @@ impl<'a> Display<'a> {
         let shown = match &mut self.out {
             Output::Gl(gl) => {
                 self.voodoo_shown = voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
-                if !self.voodoo_shown {
-                    if let Some(base) = base.filter(|_| gl.active() == Shader::Xbrz) {
-                        if let Err(error) = gl.present_xbrz(frame, base, rows.clone(), display, layer, self.monochrome) {
-                            let warning = format!("xBRZ couldn't prepare this frame: {error}");
-                            eprintln!("[DISPLAY] {warning}");
-                            self.warning = Some(warning);
-                            self.shader = Shader::None;
-                            gl.select(Shader::None, self.filter)?;
-                            gl.present(frame, rows, display, layer);
-                        }
-                    } else {
-                        gl.present(frame, rows, display, layer);
-                    }
+                if !self.voodoo_shown
+                    && let Err(error) =
+                        gl.present(frame, base, rows, display, layer, self.monochrome)
+                {
+                    let warning = format!("xBRZ couldn't prepare this frame: {error}");
+                    eprintln!("[DISPLAY] {warning}");
+                    self.warning = Some(warning);
+                    self.shader = Shader::None;
+                    gl.select(Shader::None, self.filter)?;
+                    gl.present(
+                        frame,
+                        None,
+                        0..frame.height as usize,
+                        display,
+                        layer,
+                        self.monochrome,
+                    )?;
                 }
                 Ok(())
             }

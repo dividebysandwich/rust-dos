@@ -325,13 +325,13 @@ impl GlScreen {
     fn prepare_xbrz(
         &mut self,
         screen: &Frame,
-        base: &Frame,
+        base: Option<&Frame>,
         rows: std::ops::Range<usize>,
         mono: Monochrome,
     ) -> Result<(), String> {
         let mut prepared = std::mem::take(&mut self.xbrz_frame);
         let (visible, _, overlay_changed) = prepared.prepare(screen, base, mono, rows.clone());
-        let scale = if base.doubled { 2 } else { 1 };
+        let scale = if base.unwrap_or(screen).doubled { 2 } else { 1 };
         if self.xbrz_uploaded_revision != Some(prepared.source_revision()) {
             let rows = if self.xbrz_uploaded_revision.is_some() {
                 prepared.source_rows()
@@ -389,40 +389,41 @@ impl GlScreen {
         Ok(())
     }
 
-    /// Filter the clean base and preserve composed overlay pixels above it.
-    pub fn present_xbrz(
+    /// Show the frame, using a clean base for xBRZ when one is available.
+    /// Without a base, xBRZ filters the already composed and tinted frame.
+    pub fn present(
         &mut self,
-        screen: &Frame,
-        base: &Frame,
+        frame: &Frame,
+        base: Option<&Frame>,
         rows: std::ops::Range<usize>,
         display: (u32, u32),
         layer: Option<&Layer>,
         mono: Monochrome,
     ) -> Result<(), String> {
-        self.prepare_xbrz(screen, base, rows, mono)?;
+        if self.active == Shader::Xbrz {
+            self.prepare_xbrz(frame, base, rows, mono)?;
+        } else {
+            self.texture_scale = self.upload(frame, rows, layer);
+        }
         self.draw(self.texture, self.texture_size, display, layer, 1.0);
         self.xbrz_overlay_visible = false;
         Ok(())
     }
 
-    /// Show `frame`, letterboxed at `display` proportions, of which `rows`
-    /// changed since the last.
-    pub fn present(&mut self, frame: &Frame, rows: std::ops::Range<usize>, display: (u32, u32), layer: Option<&Layer>) {
-        self.upload(frame, rows, layer);
-        self.draw(self.texture, self.texture_size, display, layer, 1.0);
-    }
-
-    fn upload(&mut self, frame: &Frame, rows: std::ops::Range<usize>, layer: Option<&Layer>) {
+    fn upload(
+        &mut self,
+        frame: &Frame,
+        rows: std::ops::Range<usize>,
+        layer: Option<&Layer>,
+    ) -> u32 {
         let gl = &self.gl;
-        // Recover native pixels for xBRZ's edge detection. Nearest scaling
-        // also preserves the picture with a quarter of the upload bytes.
+        // Nearest scaling preserves the picture with a quarter of the
+        // upload bytes. xBRZ recovers native pixels during preparation.
         let half = frame.doubled
-            && (self.active == Shader::Xbrz
-                || (layer.is_none()
-                    && self.active == Shader::None
-                    && self.filter == Filter::Nearest));
+            && layer.is_none()
+            && self.active == Shader::None
+            && self.filter == Filter::Nearest;
         let (scale, rows) = if half { (2, rows.start / 2..rows.end.div_ceil(2)) } else { (1, rows) };
-        self.texture_scale = scale;
         let size = (frame.width / scale, frame.height / scale);
         let (width, height) = (size.0 as i32, size.1 as i32);
         let rows = if size != self.texture_size { 0..size.1 as usize } else { rows };
@@ -472,6 +473,7 @@ impl GlScreen {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
+        scale
     }
 
     /// Whether the 3dfx card can be drawn with OpenGL here, or why not.
@@ -846,7 +848,8 @@ impl GlScreen {
         self.capture.as_ref()?;
         let native = self.active == Shader::Xbrz;
         if native {
-            self.prepare_xbrz(frame, base, 0..frame.height as usize, mono).ok()?;
+            self.prepare_xbrz(frame, Some(base), 0..frame.height as usize, mono)
+                .ok()?;
         }
         let mut capture = self.capture.take()?;
         let gl = &self.gl;

@@ -1145,7 +1145,7 @@ impl Machine {
         let shader_changed = if xbrz {
             let (visible, shader_changed, _) = self.xbrz_frame.prepare(
                 &self.next,
-                &self.picture,
+                Some(&self.picture),
                 self.settings.monochrome,
                 screen_rows,
             );
@@ -1663,12 +1663,14 @@ mod tests {
         assert_eq!((m.screen_width(), m.screen_height()), (640, 400));
         assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
         let mut expected = shader::XbrzFrame::default();
-        let overlay = expected.prepare(
-            &m.screen,
-            &m.picture,
-            m.settings.monochrome,
-            0..m.screen.height as usize,
-        ).0;
+        let overlay = expected
+            .prepare(
+                &m.screen,
+                Some(&m.picture),
+                m.settings.monochrome,
+                0..m.screen.height as usize,
+            )
+            .0;
         assert_eq!(m.xbrz_frame.source, expected.source);
         assert_eq!(m.shader_pixels(), m.xbrz_frame.source.rgba.as_ptr());
         assert_eq!(m.shader_overlay_visible(), overlay);

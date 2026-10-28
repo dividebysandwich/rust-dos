@@ -66,6 +66,109 @@ fn reference_capture(
 
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
+fn xbrz_clean_and_flattened_presentations_share_preparation() {
+    use crate::video::{mono, power};
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "xBRZ input regression", (16, 12), true)
+        .unwrap_or_else(|error| panic!("{}", error.reason));
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    let native = Frame::from_rgb(8, 6, (0..144).map(|i| (i * 37) as u8).collect());
+    let base = double(&native);
+    let mut composed = base.clone();
+    mono::apply(&mut composed, Monochrome::Amber);
+    composed.track_overlays(true);
+    composed.mark_overlay_rect(2, 2, 3, 3);
+    for y in 2..5 {
+        for x in 2..5 {
+            composed.rgba[(y * 16 + x) * 4..][..4].copy_from_slice(&[11, 222, 33, 255]);
+        }
+    }
+    for effect in [false, true, false] {
+        let clean = reference_capture(&mut screen, &composed, &base, Monochrome::Amber, (16, 12));
+        let mut flattened = composed.clone();
+        if effect {
+            power::apply(
+                &mut flattened,
+                &power::Look {
+                    brightness: 0.7,
+                    scale: (0.6, 0.4),
+                    offset_y: 0.0,
+                    wobble: 0.0,
+                    phase: 0.0,
+                },
+            );
+            assert!(!flattened.doubled);
+        }
+        // The effect's coverage predates its geometric transformation.
+        let mut expected_input = flattened.clone();
+        expected_input.track_overlays(false);
+        let expected = reference_capture(
+            &mut screen,
+            &expected_input,
+            &expected_input,
+            Monochrome::Off,
+            (16, 12),
+        );
+        assert_ne!(
+            clean, expected,
+            "flattened effects filter the whole picture"
+        );
+        screen
+            .present(
+                &composed,
+                Some(&base),
+                0..12,
+                (16, 12),
+                None,
+                Monochrome::Amber,
+            )
+            .unwrap();
+        assert_eq!(screen.texture_scale, 2);
+        assert_eq!(
+            screen.xbrz_frame.overlay.rgba[(2 * 16 + 2) * 4..][..4],
+            [11, 222, 33, 255]
+        );
+        screen
+            .present(&flattened, None, 0..12, (16, 12), None, Monochrome::Green)
+            .unwrap();
+        assert_eq!(screen.texture_size, if effect { (16, 12) } else { (8, 6) });
+        assert_eq!(screen.texture_scale, if effect { 1 } else { 2 });
+        assert!(screen.xbrz_frame.overlay.rgba.iter().all(|&byte| byte == 0));
+        let mut pixels = vec![0; 16 * 12 * 4];
+        // SAFETY: this test owns the current context and sized readback.
+        unsafe {
+            screen.gl.read_buffer(glow::BACK);
+            screen.gl.read_pixels(
+                0,
+                0,
+                16,
+                12,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
+        }
+        let top_first: Vec<_> = pixels
+            .as_chunks::<64>()
+            .0
+            .iter()
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(top_first, expected.rgba, "effect={effect}");
+        println!(
+            "flattened effect={effect}: {} bytes match reference; scale={}",
+            top_first.len(),
+            screen.texture_scale
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
 fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
     let sdl = sdl2::init().unwrap();
     let video = sdl.video().unwrap();
@@ -233,18 +336,24 @@ fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
     let mut screen = GlScreen::open(&video, "RGBA presentation regression", (8, 8), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
     let mut frame = Frame::from_rgb(5, 4, (0..60).collect());
-    screen.present(&frame, 0..4, (5, 4), None);
+    screen
+        .present(&frame, None, 0..4, (5, 4), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(texture(&screen), frame.rgba);
     frame.rgba[40..60]
         .as_chunks_mut::<4>()
         .0
         .fill([99, 50, 20, 255]);
-    screen.present(&frame, 2..3, (5, 4), None);
+    screen
+        .present(&frame, None, 2..3, (5, 4), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(texture(&screen), frame.rgba);
 
     let mut small = Frame::from_rgb(4, 3, (40..76).collect());
     let doubled = double(&small);
-    screen.present(&doubled, 0..6, (8, 6), None);
+    screen
+        .present(&doubled, None, 0..6, (8, 6), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(screen.texture_size, (4, 3));
     assert_eq!(texture(&screen), small.rgba);
     small.rgba[16..32]
@@ -252,19 +361,25 @@ fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
         .0
         .fill([11, 22, 33, 255]);
     let doubled = double(&small);
-    screen.present(&doubled, 2..4, (8, 6), None);
+    screen
+        .present(&doubled, None, 2..4, (8, 6), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(texture(&screen), small.rgba);
 
     // Filtering changes the upload from the native half-size picture to
     // the complete frame, even when no CPU rows need repainting.
     screen.select(Shader::None, Filter::Linear).unwrap();
-    screen.present(&doubled, 0..0, (8, 6), None);
+    screen
+        .present(&doubled, None, 0..0, (8, 6), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(screen.texture_size, (8, 6));
     assert_eq!(texture(&screen), doubled.rgba);
 
     // xBRZ needs native pixels even when the plain filter is linear.
     screen.select(Shader::Xbrz, Filter::Linear).unwrap();
-    screen.present(&doubled, 0..0, (8, 6), None);
+    screen
+        .present(&doubled, None, 0..0, (8, 6), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(screen.texture_size, (4, 3));
     assert_eq!(texture(&screen), small.rgba);
     small.rgba[16..32]
@@ -272,7 +387,9 @@ fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
         .0
         .fill([55, 66, 77, 255]);
     let doubled = double(&small);
-    screen.present(&doubled, 3..4, (8, 6), None);
+    screen
+        .present(&doubled, None, 3..4, (8, 6), None, Monochrome::Off)
+        .unwrap();
     assert_eq!(texture(&screen), small.rgba);
 }
 
@@ -337,9 +454,9 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
             composed.mark_overlay_rect(4, 4, 2, 2);
         }
         screen
-            .present_xbrz(
+            .present(
                 &composed,
-                &base,
+                Some(&base),
                 0..12,
                 (16, 12),
                 manual.then_some(&layer),
@@ -397,7 +514,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
     let undoubled = screen.capture(&native, &native, Monochrome::Off, (8, 6)).unwrap();
     assert_eq!(doubled.rgba, undoubled.rgba);
     screen
-        .present_xbrz(&native, &native, 0..6, (8, 6), None, Monochrome::Off)
+        .present(&native, Some(&native), 0..6, (8, 6), None, Monochrome::Off)
         .unwrap();
     assert_eq!(texture(&screen), native.rgba);
     screen.select(Shader::Scanlines, Filter::Nearest).unwrap();

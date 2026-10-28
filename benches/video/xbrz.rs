@@ -78,7 +78,12 @@ pub fn prepare(c: &mut Criterion) {
                 "dense_static" | "dense_pixels" => &dense,
                 _ => &screen,
             };
-            prepared.prepare(initial, &base, Monochrome::Off, 0..base.height as usize);
+            prepared.prepare(
+                initial,
+                Some(&base),
+                Monochrome::Off,
+                0..base.height as usize,
+            );
             let mut step = false;
             let update = match scenario {
                 "one_row" => &row,
@@ -93,7 +98,8 @@ pub fn prepare(c: &mut Criterion) {
                 "dense_pixels" => &dense_pixels,
                 _ => &screen,
             };
-            let result = prepared.prepare(changed_screen, update, Monochrome::Off, rows.clone());
+            let result =
+                prepared.prepare(changed_screen, Some(update), Monochrome::Off, rows.clone());
             assert_eq!(
                 result.1,
                 !matches!(scenario, "unchanged" | "overlay_static" | "dense_static")
@@ -105,7 +111,7 @@ pub fn prepare(c: &mut Criterion) {
                         step = !step;
                         black_box(prepared.prepare(
                             black_box(if step { changed_screen } else { initial }),
-                            black_box(if step { update } else { &base }),
+                            Some(black_box(if step { update } else { &base })),
                             Monochrome::Off,
                             rows.clone(),
                         ))
