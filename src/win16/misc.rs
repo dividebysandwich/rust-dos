@@ -499,11 +499,7 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
         }
         P_MMTIME => {
             if value == 0 {
-                // MMTIME16: wType, then the union as it is.
-                let kind = r32(cpu, d(1));
-                super::write_16(cpu, d(2), kind as u16);
-                let rest = super::peek(cpu, d(1) + 4, 8).unwrap_or(vec![0; 8]);
-                super::poke(cpu, d(2) + 2, &rest);
+                mmtime16(cpu, d(1), d(2), d(3));
             }
             Some(value)
         }
@@ -896,7 +892,7 @@ fn wave_out_get_position(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MM,
         "waveOutGetPosition",
         &[args[0], time, 12],
-        vec![P_MMTIME, time, args[1]],
+        vec![P_MMTIME, time, args[1], args[2]],
     )
 }
 
@@ -908,9 +904,23 @@ fn time_get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         MM,
         "timeGetSystemTime",
         &[time, 12],
-        vec![P_MMTIME, time, args[0]],
+        vec![P_MMTIME, time, args[0], args[1]],
     )
 }
+
+/// The MMTIME at `time` as the MMTIME16 at `time16`, of `size` bytes as
+/// its caller gave. Windows 3.1's is 8 bytes, wType and a union of 6,
+/// its SMPTE time being hour, minute, second, frame, fps and a pad byte
+/// (Win32's has two); MMSYSTEM writes no more than the caller's size.
+fn mmtime16(cpu: &mut Cpu, time: u32, time16: u32, size: u32) {
+    let mut bytes = (r32(cpu, time) as u16).to_le_bytes().to_vec();
+    bytes.extend(super::peek(cpu, time + 4, 6).unwrap_or(vec![0; 6]));
+    bytes.truncate(size.min(MMTIME16) as usize);
+    super::poke(cpu, time16, &bytes);
+}
+
+/// The size of Windows 3.1's MMTIME.
+const MMTIME16: u32 = 8;
 
 fn time_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // TIMECAPS16: the shortest and the longest period.
