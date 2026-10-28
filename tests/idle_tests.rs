@@ -23,8 +23,11 @@ const BATCHES: usize = 400;
 const KEY_AT: usize = 250;
 
 /// A machine that runs `T.COM`, the program `code` builds, from a
-/// directory of its own.
+/// directory of its own. The host's time is fixed first, so machines
+/// built a moment apart start with the same BIOS tick count.
 fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Cpu {
+    let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
+    rust_dos::hosttime::fix(Some(at));
     let dir = Path::new("target/idle_tests").join(test).join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -47,8 +50,6 @@ fn assemble(body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) -> Vec<u
 /// that doesn't (on the interpreter), pressing a key before batch
 /// `KEY_AT`. Returns what the skipping one skipped.
 fn compare(test: &str, body: impl Fn(&mut CodeAssembler) -> Result<(), IcedError>) -> IdleStats {
-    let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
-    rust_dos::hosttime::fix(Some(at));
     let code = assemble(body);
     let mut a = machine(test, "a", &code, CoreMode::Normal, false);
     let mut b = machine(test, "b", &code, CoreMode::Dynamic, true);
