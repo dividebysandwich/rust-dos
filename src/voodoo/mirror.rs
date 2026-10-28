@@ -185,9 +185,14 @@ impl LayoutKey {
     /// Whether bytes `start..end` of the frame buffer hold any of the
     /// buffers' memory.
     pub fn overlaps(&self, start: u32, end: u32) -> bool {
-        self.buffers().any(|(base, _, stride)| {
+        self.spans().any(|(base, last)| (start as u64) < last && base < end as u64)
+    }
+
+    /// The bytes of the frame buffer each buffer takes, first to last.
+    pub fn spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.buffers().map(|(base, _, stride)| {
             let (base, span) = (base as u64 * 2, span(stride, self.height) as u64 * 2);
-            (start as u64) < base + span && base < end as u64
+            (base, base + span)
         })
     }
 
@@ -279,6 +284,108 @@ pub enum Command {
     /// byte `at` on (whole pages, `pages::PAGE`), for the renderer's copy
     /// of it.
     Memory { size: u32, at: u32, bytes: Vec<u8> },
+    /// A 2D operation the renderer does in its copy of the memory, which
+    /// the card's memory doesn't get until something reads it there
+    /// (`gpu`).
+    Blit(Box<Blit>),
+}
+
+/// A surface in a Banshee's or Voodoo3's memory, for a 2D operation: its
+/// first byte, the bytes from one row to the next, and its bytes a pixel
+/// (1 to 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plane {
+    pub start: u32,
+    pub stride: u32,
+    pub bpp: u32,
+}
+
+impl Plane {
+    /// The bytes rows `top..bottom` of columns `left..right` span.
+    pub fn span(&self, [left, top, right, bottom]: [i32; 4]) -> (u32, u32) {
+        let (left, top) = (left.max(0) as u32, top.max(0) as u32);
+        let (right, bottom) = (right.max(0) as u32, bottom.max(0) as u32);
+        if left >= right || top >= bottom {
+            return (self.start, self.start);
+        }
+        let first = self.start + top * self.stride + left * self.bpp;
+        (first, self.start + (bottom - 1) * self.stride + right * self.bpp)
+    }
+}
+
+/// Where a 2D operation's pixels come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlitSource {
+    /// One value for every pixel, in the destination's format.
+    Fill(u32),
+    /// The rectangle (left, top, right, bottom) of a surface in the
+    /// card's memory, in the destination's format or the one `Convert`
+    /// says.
+    Memory { plane: Plane, rect: [i32; 4] },
+    /// The rectangle of a colour buffer the renderer draws (its word
+    /// offset, as `Draw`'s `dest`), in the buffer's pixels: the picture
+    /// it drew there, 5-6-5 as the card has it.
+    Buffer { buffer: u32, rect: [i32; 4] },
+}
+
+/// How a 2D operation turns the source's pixels into the destination's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Convert {
+    /// The bytes as they are, the two formats being the same.
+    None,
+    /// 5-6-5 into 8 bits a channel (each channel's bits repeated below
+    /// them), in 24 or 32 bits with the top byte 0.
+    Widen,
+    /// 8 bits a channel into 5-6-5, each channel's top bits.
+    Narrow,
+}
+
+/// A colour key: the lowest and highest values in it, and the format's
+/// channel masks (red, green, blue), all 0 for a palette's indices,
+/// which compare whole (`ddraw::blt::keyed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Key {
+    pub low: u32,
+    pub high: u32,
+    pub masks: [u32; 3],
+}
+
+/// A 2D operation in the card's memory: DirectDraw's Blt, or a window's
+/// Present. The source's rectangle is stretched onto `area` (left, top,
+/// right, bottom) of the destination, mirrored across or down if
+/// `mirror` says, and drawn where `rects` (parts of `area` within the
+/// destination) are, but for the source's pixels in `src_key` and the
+/// destination's not in `dst_key`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blit {
+    pub dst: Plane,
+    pub area: [i32; 4],
+    pub rects: Vec<[i32; 4]>,
+    pub src: BlitSource,
+    pub convert: Convert,
+    pub mirror: [bool; 2],
+    pub src_key: Option<Key>,
+    pub dst_key: Option<Key>,
+}
+
+impl Blit {
+    /// The bytes of the destination it may draw into, first to last.
+    pub fn dst_span(&self) -> (u32, u32) {
+        let spans = self.rects.iter().map(|&r| self.dst.span(r));
+        spans
+            .filter(|(a, b)| a < b)
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+            .unwrap_or((self.dst.start, self.dst.start))
+    }
+
+    /// The bytes of the card's memory it reads from the source, first to
+    /// last.
+    pub fn src_span(&self) -> Option<(u32, u32)> {
+        match &self.src {
+            BlitSource::Memory { plane, rect } => Some(plane.span(*rect)),
+            _ => None,
+        }
+    }
 }
 
 /// The drawing since the last frame, and what the card shows now.
@@ -494,7 +601,7 @@ impl Mirror {
 
     fn push(&mut self, command: Command) {
         // The frame buffer writes before a drawing come before it.
-        if matches!(command, Command::Draw(_) | Command::Fill(_)) {
+        if matches!(command, Command::Draw(_) | Command::Fill(_) | Command::Blit(_)) {
             self.close_rows();
         }
         self.push_command(command);
@@ -517,6 +624,19 @@ impl Mirror {
     /// the renderer's copy of it.
     pub(crate) fn memory(&mut self, size: u32, at: u32, bytes: Vec<u8>) {
         self.push_command(Command::Memory { size, at, bytes });
+    }
+
+    /// The commands recorded so far, for the renderer to do before the
+    /// frame ends (`gpu`): the frame and the textures' ages stay as they
+    /// are.
+    pub(crate) fn take_commands(&mut self) -> Vec<Command> {
+        self.close_rows();
+        std::mem::take(&mut self.commands)
+    }
+
+    /// A 2D operation for the renderer to do in its copy of the memory.
+    pub(crate) fn blit(&mut self, blit: Blit) {
+        self.push(Command::Blit(Box::new(blit)));
     }
 
     /// Whether commands were dropped since the last call, with the memory

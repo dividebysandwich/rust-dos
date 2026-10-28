@@ -484,7 +484,7 @@ impl Voodoo {
         if let Some(mirror) = &mut self.mirror
             && mirror.take_dropped()
         {
-            self.pages.mark_all();
+            self.gpu.get_mut().pages.mark_all();
         }
         let shared: Vec<(u32, u32)> = spans
             .iter()
@@ -497,19 +497,13 @@ impl Voodoo {
                 self.flush();
             }
             for &(start, end) in &shared {
-                self.pages.mark(start, end);
+                self.gpu_sync(start, end);
+                self.gpu.get_mut().pages.mark(start, end);
             }
         }
         // The pages shown that the renderer lacks.
-        let size = bytes as u32;
         for (start, end) in spans.into_iter().flatten() {
-            for (a, b) in self.pages.take_dirty(start, end) {
-                let mut bytes = vec![0; (b - a) as usize];
-                self.fbi.ram.read_bytes(a as usize, &mut bytes);
-                if let Some(mirror) = &mut self.mirror {
-                    mirror.memory(size, a, bytes);
-                }
-            }
+            self.send_pages(start, end);
         }
         let b = self.banshee.as_deref()?;
         Some(Box::new(Scanout {

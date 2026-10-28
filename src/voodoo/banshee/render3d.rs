@@ -301,6 +301,7 @@ impl Voodoo {
         }
         let base = self.reg[0x100 + TEX_BASE_ADDR] & 0xFF_FFF0;
         let addr = base.wrapping_add(offset & 0x1F_FFFC);
+        self.gpu_sync_bytes(addr & self.fbi.mask, 4);
         super::blit2d::write(&self.fbi.ram, addr, 4, data, self.fbi.mask);
         let addr = addr & self.fbi.mask;
         self.mirror_memory(addr, addr + 4);

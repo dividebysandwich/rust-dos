@@ -143,6 +143,22 @@ locations!(FillQuad {
     u_scale: f32,
     u_pattern: [u16; 16]
 });
+locations!(Blit2d {
+    u_rect: [f32; 4],
+    u_size: [f32; 2],
+    u_mem_mask: i32,
+    u_dst: [i32; 3],
+    u_clip: [i32; 4],
+    u_area: [i32; 4],
+    u_src: [i32; 4],
+    u_src_rect: [i32; 4],
+    u_fill: i32,
+    u_mode: [i32; 4],
+    u_src_key: [i32; 3],
+    u_src_masks: [i32; 3],
+    u_dst_key: [i32; 3],
+    u_dst_masks: [i32; 3]
+});
 locations!(Banshee {
     u_rect: [f32; 4],
     u_size: [f32; 2],

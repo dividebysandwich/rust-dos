@@ -748,6 +748,8 @@ impl Voodoo {
             if self.writes_queue() {
                 self.catch_up();
             }
+            let at = addr & self.fbi.mask;
+            self.gpu_sync(at, at + 4);
             return blit2d::read(&self.fbi.ram, addr, 4, self.fbi.mask);
         }
         match offset & 0x1F0_0000 {
@@ -823,6 +825,7 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = self.fbi.ram.byte((addr.wrapping_add(i as u32) & mask) as usize);
@@ -840,6 +843,7 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
         for (i, &byte) in data.iter().enumerate() {
             let at = addr.wrapping_add(i as u32) & mask;
@@ -856,6 +860,8 @@ impl Voodoo {
         if self.writes_queue() {
             self.catch_up();
         }
+        // The engine may read and draw anywhere in the memory.
+        self.gpu_sync_all();
         let Some(b) = &mut self.banshee else { return };
         b.engine.write(&self.fbi.ram, reg, data);
         if std::mem::take(&mut b.engine.drawn) {
@@ -894,6 +900,7 @@ impl Voodoo {
         if self.writes_queue() && !in_ring {
             self.catch_up();
         }
+        self.gpu_sync(addr & self.fbi.mask, (addr & self.fbi.mask) + 4);
         let ram = &self.fbi.ram;
         let fbmask = self.fbi.mask;
         if mask == 0xFFFF_FFFF {

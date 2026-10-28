@@ -364,6 +364,12 @@ impl<'a> Display<'a> {
                             // the card's picture, which the software
                             // renderer no longer draws into it.
                             self.redraw |= changed;
+                            // The card does its 2D operations with the
+                            // renderer from now on, until `set_mirror(false)`
+                            // takes the link away.
+                            if !card.gpu_linked() && gl.voodoo_scale().is_some() {
+                                card.set_gpu_link(Some(gl.voodoo_link()));
+                            }
                             return shown;
                         }
                         Err(e) => {

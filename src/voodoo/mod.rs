@@ -35,6 +35,7 @@ pub mod chip;
 pub mod cmdfifo;
 #[cfg(feature = "voodoo-gl")]
 pub mod gl;
+pub mod gpu;
 pub mod lfb;
 pub mod mem;
 pub mod mirror;
@@ -586,9 +587,9 @@ pub struct Voodoo {
     software_picture: bool,
     /// The drawing recorded for the OpenGL renderer, while it draws.
     mirror: Option<Box<mirror::Mirror>>,
-    /// Which pages of a Banshee's memory the renderer's copy of it lacks
-    /// (`banshee_scanout`).
-    pages: pages::Pages,
+    /// The renderer's copy of a Banshee's memory: which pages it lacks
+    /// (`banshee_scanout`) and which only it has (`gpu`).
+    gpu: RefCell<gpu::Gpu>,
     /// A Banshee's picture changed, which the software picture took
     /// first (`prepare_display`), so the renderer's scanout still has to
     /// hear of it.
@@ -668,7 +669,7 @@ impl Voodoo {
             catch_ups: Cell::new(0),
             software_picture: true,
             mirror: None,
-            pages: pages::Pages::new(board.frame_buffer()),
+            gpu: RefCell::new(gpu::Gpu::new(board.frame_buffer())),
             scanout_dirty: false,
             logged: 0,
             recorder: std::cell::RefCell::new(None),
@@ -1310,6 +1311,9 @@ impl Voodoo {
     /// `prepare_display`).
     pub fn render(&self, rgba: &mut [u8], width: usize) {
         if let Some(b) = &self.banshee {
+            // The picture is drawn from the memory, which needs the
+            // GPU's 2D operations.
+            self.gpu_sync_all();
             b.render(&self.fbi.ram, rgba, width);
             return;
         }
@@ -1580,7 +1584,8 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
-        self.pages.mark_all();
+        // The memory loaded is newer than anything on the GPU.
+        self.gpu.get_mut().pages.mark_all();
         if let Some(mirror) = &mut self.mirror {
             mirror.invalidate();
             mirror.forget_textures();
@@ -1592,11 +1597,18 @@ impl Voodoo {
     /// Record the drawing for the OpenGL renderer, or stop.
     pub fn set_mirror(&mut self, on: bool) {
         if on != self.mirror.is_some() {
+            // What only the renderer has comes back before it goes, and
+            // the card has no link to it from then on.
+            if on {
+                self.gpu_sync_all();
+            } else {
+                self.set_gpu_link(None);
+            }
             self.mirror = on.then(|| Box::new(mirror::Mirror::new()));
             self.release_backlog();
             self.update_tiles();
             // A renderer starting over has none of the picture.
-            self.pages.mark_all();
+            self.gpu.get_mut().pages.mark_all();
             self.display_dirty = true;
         }
     }
@@ -1629,6 +1641,12 @@ impl Voodoo {
             return;
         }
         self.flush();
+        // The software renderer draws the buffers into the memory from
+        // now on, where the GPU may have done a 2D operation.
+        for (start, end) in key.spans() {
+            let size = self.fbi.ram.bytes() as u64;
+            self.gpu_sync(start.min(size) as u32, end.min(size) as u32);
+        }
         let snapshot = self.snapshot(key.layout());
         if let Some(mirror) = &mut self.mirror {
             mirror.resync(snapshot, key);
@@ -1717,7 +1735,7 @@ impl Voodoo {
             return;
         }
         // The renderer's copy of the memory gets the pages again.
-        self.pages.mark(start, end);
+        self.gpu.get_mut().pages.mark(start, end);
         let Some(mirror) = &mut self.mirror else {
             return;
         };
@@ -1837,6 +1855,7 @@ impl Voodoo {
             "catch_ups": self.catch_ups.get(),
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),
+            "gpu_2d": self.banshee.is_some().then(|| self.gpu_describe()),
             "banshee": self.banshee.as_ref().map(|b| b.describe()),
             "banshee_3d": self.banshee.is_some().then(|| self.banshee_3d_describe()),
             "cmdfifo": self.cmdfifo_on().then(|| serde_json::json!({
@@ -1883,8 +1902,10 @@ fn default_clut() -> [u32; 33] {
 /// it stays in place for rewind's deltas.
 impl State for Voodoo {
     fn save(&self, w: &mut Writer) {
-        // Everything drawn before its memory is saved.
+        // Everything drawn before its memory is saved, the GPU's 2D
+        // operations too.
         self.catch_up();
+        self.gpu_sync_all();
         self.board.save(w);
         self.fbi.ram.save(w);
         for tmu in self.tmu.iter().filter(|t| !t.ram.same(&self.fbi.ram)) {
