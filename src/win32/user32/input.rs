@@ -12,8 +12,8 @@
 //! for the window under the cursor, or for the window that has the
 //! capture.
 //!
-//! The focus and the active window are the system's, not each thread's:
-//! GetFocus and GetActiveWindow give them to the thread they belong to.
+//! Each thread's input queue has its own active window and focus, and
+//! one queue is in the foreground: see "Focus and activation" below.
 
 use super::message::{
     self, Msg, QS_KEY, QS_MOUSEBUTTON, QS_MOUSEMOVE, WM_ACTIVATE, WM_ACTIVATEAPP, WM_CHAR,
@@ -88,10 +88,15 @@ const ERROR_CLIPBOARD_NOT_OPEN: u32 = 1418;
 /// The input's state.
 #[derive(Clone, Debug, Default)]
 pub struct Input {
-    pub focus: u32,
-    pub active: u32,
-    pub capture: u32,
+    /// The input queues' active windows and focus.
+    pub queues: Vec<Activation>,
+    /// The queue in the foreground, which gets the keyboard, or 0.
     pub foreground: u32,
+    /// The queue that last took a key or a mouse button's message.
+    pub last_input: u32,
+    /// The Win16 process, whose tasks share an input queue.
+    pub win16: u32,
+    pub capture: u32,
     /// BeginDeferWindowPos's lists, by the handle's place.
     pub defers: Vec<Option<Vec<Vec<u32>>>>,
     /// Where the cursor is on the screen.
@@ -472,7 +477,15 @@ fn key_message(
     repeat: bool,
 ) -> (u32, u32) {
     let was_down = input.async_down(vk);
-    let mut sys = input.focus == 0 || vk == VK_F10;
+    let focus = match input.foreground {
+        0 => 0,
+        queue => input
+            .queues
+            .iter()
+            .find(|a| a.queue == queue)
+            .map_or(0, |a| a.focus),
+    };
+    let mut sys = focus == 0 || vk == VK_F10;
     if down {
         input.set_async(vk, true);
         if input.async_down(VK_MENU) && !input.async_down(VK_CONTROL) {
@@ -518,9 +531,9 @@ fn key_event(cpu: &mut Cpu, scan: u8, extended: bool, down: bool, repeat: bool) 
     let state = user(cpu);
     let side = sided(vk, scan, extended);
     let (message, lparam) = key_message(&mut state.input, vk, side, scan, extended, down, repeat);
-    let input = &state.input;
-    let (focus, active, cursor) = (input.focus, input.active, input.cursor);
-    let target = if focus != 0 { focus } else { active };
+    let a = state.activation(state.input.foreground);
+    let target = if a.focus != 0 { a.focus } else { a.active };
+    let cursor = state.input.cursor;
     let Some(tid) = state.window(target).map(|w| w.tid) else {
         return;
     };
@@ -918,34 +931,244 @@ pub fn sets_cursor(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
     Some((msg.hwnd, super::make_long(hit as i32, mouse as i32)))
 }
 
-/// Whether the button message `msg`, which GetMessageA takes, activates
-/// a window first: the top-level window it is for, if that isn't active.
-pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<u32> {
-    let down = match msg.message {
-        m @ (WM_LBUTTONDOWN..=0x0209) => (m - WM_LBUTTONDOWN).is_multiple_of(3),
-        m @ (WM_NCLBUTTONDOWN..=0x00A9) => (m - WM_NCLBUTTONDOWN).is_multiple_of(3),
-        _ => false,
-    };
-    if !down {
-        return None;
-    }
-    let state = user(cpu);
-    let top = state.top_level(msg.hwnd);
-    let w = state.window(top)?;
-    if top == state.input.active || w.style & (WS_DISABLED | WS_VISIBLE) != WS_VISIBLE {
-        return None;
-    }
-    Some(top)
-}
-
 // Focus and activation.
+//
+// As on Windows 98, each thread has an input queue (the tasks of the
+// Win16 process share one), and each queue has its own active window
+// and its own focus, which GetActiveWindow and GetFocus give the
+// thread. One queue is in the foreground: the keyboard's messages go to
+// its focus, and its active window is drawn active and raised. A thread
+// whose queue isn't in the foreground changes its own active window and
+// focus behind the foreground one. The foreground moves to another
+// queue when SetForegroundWindow is allowed to move it, when a click
+// activates a window, and when the foreground thread's active window
+// goes and the next window is another thread's. The queue it leaves and
+// the one it comes to learn of it when their threads next look for
+// messages (`take_activation`), and send their windows the activation
+// messages then, in their own threads.
 
 const TASK_INPUT: u16 = 19;
 
 const K_FOCUS: u32 = 0;
 const K_ACTIVATE: u32 = 1;
 const K_CAPTURE: u32 = 2;
-const K_OTHER: u32 = 3;
+const K_SWITCH: u32 = 3;
+const K_DEACTIVATE: u32 = 4;
+
+/// An activation's flags: it brings the queue to the foreground; the
+/// foreground came to the queue from another one, which WM_ACTIVATEAPP
+/// tells; a click activates (WA_CLICKACTIVE).
+const F_FOREGROUND: u32 = 1;
+const F_SWITCHED: u32 = 2;
+const F_CLICK: u32 = 4;
+
+const WA_CLICKACTIVE: u32 = 2;
+
+/// What a queue has to do when its thread next looks for messages
+/// (`message::Queue::activation`): activate a window, as the foreground
+/// came to the queue (`EV_ACTIVATE`) or in the foreground queue
+/// (`EV_SELECT`); or deactivate, as the foreground went to another
+/// queue (`EV_DEACTIVATE`).
+const EV_ACTIVATE: u32 = 1;
+const EV_SELECT: u32 = 2;
+const EV_DEACTIVATE: u32 = 3;
+
+/// The input queue the tasks of the Win16 process share.
+const WIN16_QUEUE: u32 = u32::MAX;
+
+/// An input queue's active window and focus.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Activation {
+    pub queue: u32,
+    pub active: u32,
+    pub focus: u32,
+}
+
+impl State {
+    /// The input queue of the thread `tid` of the process `pid`: the
+    /// thread's own, or for a task of the Win16 process the one they
+    /// share.
+    pub fn queue_key(&self, pid: u32, tid: u32) -> u32 {
+        if pid != 0 && pid == self.input.win16 {
+            WIN16_QUEUE
+        } else {
+            tid
+        }
+    }
+
+    /// The input queue of `hwnd`'s thread, or 0.
+    pub fn window_queue(&self, hwnd: u32) -> u32 {
+        self.window(hwnd)
+            .map_or(0, |w| self.queue_key(w.pid, w.tid))
+    }
+
+    /// The active window and the focus of the queue `queue`.
+    pub fn activation(&self, queue: u32) -> Activation {
+        if queue == 0 {
+            return Activation::default();
+        }
+        let found = self.input.queues.iter().find(|a| a.queue == queue);
+        found.copied().unwrap_or_default()
+    }
+
+    fn activation_mut(&mut self, queue: u32) -> &mut Activation {
+        let queues = &mut self.input.queues;
+        let i = match queues.iter().position(|a| a.queue == queue) {
+            Some(i) => i,
+            None => {
+                queues.push(Activation {
+                    queue,
+                    ..Activation::default()
+                });
+                queues.len() - 1
+            }
+        };
+        &mut queues[i]
+    }
+
+    /// The active window of `hwnd`'s queue.
+    pub fn active_of(&self, hwnd: u32) -> u32 {
+        self.activation(self.window_queue(hwnd)).active
+    }
+
+    /// The focus of `hwnd`'s queue.
+    pub fn focus_of(&self, hwnd: u32) -> u32 {
+        self.activation(self.window_queue(hwnd)).focus
+    }
+
+    /// Whether `hwnd` is the active window of its queue.
+    pub fn is_active(&self, hwnd: u32) -> bool {
+        hwnd != 0 && self.active_of(hwnd) == hwnd
+    }
+
+    /// The foreground window (GetForegroundWindow): the foreground
+    /// queue's active window.
+    pub fn foreground_window(&self) -> u32 {
+        match self.input.foreground {
+            0 => 0,
+            queue => self.activation(queue).active,
+        }
+    }
+
+    /// The windows `gone` says went: no queue has them active or
+    /// focused.
+    pub fn forget_activation(&mut self, gone: impl Fn(u32) -> bool) {
+        for a in &mut self.input.queues {
+            if a.active != 0 && gone(a.active) {
+                a.active = 0;
+            }
+            if a.focus != 0 && gone(a.focus) {
+                a.focus = 0;
+            }
+        }
+    }
+}
+
+/// The running thread's input queue.
+pub fn current_queue(cpu: &Cpu) -> u32 {
+    let user = &cpu.bus.win32.user;
+    user.queue_key(super::current_pid(cpu), current_tid(cpu))
+}
+
+/// The running thread's active window.
+pub fn active(cpu: &Cpu) -> u32 {
+    cpu.bus.win32.user.activation(current_queue(cpu)).active
+}
+
+/// The running thread's focus.
+pub fn focus(cpu: &Cpu) -> u32 {
+    cpu.bus.win32.user.activation(current_queue(cpu)).focus
+}
+
+/// The process of the thread that reads the queue `queue`, or 0 when
+/// it has ended.
+fn queue_pid(cpu: &Cpu, queue: u32) -> u32 {
+    let win32 = &cpu.bus.win32;
+    if queue == WIN16_QUEUE {
+        return win32.user.input.win16;
+    }
+    let found = win32
+        .processes
+        .iter()
+        .find(|p| p.threads.iter().any(|t| t.id == queue));
+    found.map_or(0, |p| p.id)
+}
+
+/// Whether the running thread may bring a window to the foreground, by
+/// Windows 98's rules for SetForegroundWindow: no queue is in the
+/// foreground, or the thread's own is; the thread took the last input;
+/// or its process is the foreground one, or was started by it.
+fn may_take_foreground(cpu: &Cpu) -> bool {
+    let queue = current_queue(cpu);
+    let input = &cpu.bus.win32.user.input;
+    let foreground = input.foreground;
+    if foreground == 0 || foreground == queue || input.last_input == queue {
+        return true;
+    }
+    let owner = queue_pid(cpu, foreground);
+    let running = crate::win32::running(cpu);
+    owner == 0 || running.is_some_and(|p| p.id == owner || p.parent == owner)
+}
+
+/// The foreground moved to or from the queue `queue` while another
+/// thread runs. The thread of `hwnd` (`EV_ACTIVATE`, `EV_SELECT`), or
+/// of the queue's active window (`EV_DEACTIVATE`), does what `kind`
+/// says when it next looks for messages, instead of what the queue was
+/// still to do. `other` is the thread on the other side of the move,
+/// for WM_ACTIVATEAPP.
+fn post_activation(cpu: &mut Cpu, queue: u32, kind: u32, hwnd: u32, other: u32) {
+    let state = user(cpu);
+    cancel_activation(state, queue);
+    let a = state.activation(queue);
+    let target = match kind {
+        EV_DEACTIVATE => [a.active, a.focus]
+            .into_iter()
+            .find(|&h| state.is_window(h)),
+        _ => Some(hwnd),
+    };
+    let tid = match target.and_then(|h| state.window(h)) {
+        Some(w) => w.tid,
+        None if queue != WIN16_QUEUE => queue,
+        None => return,
+    };
+    if tid == 0 {
+        return;
+    }
+    state.queue_mut(tid).activation = [kind, hwnd, other, queue];
+    crate::win32::thread::wake(cpu);
+}
+
+/// What the queue `queue` was still to do about the foreground isn't
+/// done: its thread does it now, or it has gone stale.
+fn cancel_activation(state: &mut State, queue: u32) {
+    for q in &mut state.queues {
+        if q.activation[0] != 0 && q.activation[3] == queue {
+            q.activation = [0; 4];
+        }
+    }
+}
+
+/// What the running thread's queue has to do about the foreground,
+/// which GetMessageA and PeekMessageA do before they look for messages:
+/// the call that does it, which returns to `step`.
+pub fn take_activation(cpu: &mut Cpu, step: u16) -> Option<Next> {
+    let tid = current_tid(cpu);
+    let state = user(cpu);
+    let q = state.queues.iter_mut().find(|q| q.tid == tid)?;
+    let [kind, hwnd, other, queue] = std::mem::take(&mut q.activation);
+    let foreground = state.input.foreground == queue;
+    match kind {
+        EV_ACTIVATE | EV_SELECT if foreground && state.is_window(hwnd) => {
+            let flags = if kind == EV_ACTIVATE { F_SWITCHED } else { 0 };
+            let args = [hwnd, flags, other];
+            Some(Next::call(address_of("ActivateInQueue"), &args, step))
+        }
+        EV_DEACTIVATE if !foreground => {
+            Some(Next::call(address_of("DeactivateQueue"), &[other], step))
+        }
+        _ => None,
+    }
+}
 
 /// The window, if it belongs to the running thread.
 fn own(cpu: &mut Cpu, hwnd: u32) -> u32 {
@@ -956,21 +1179,25 @@ fn own(cpu: &mut Cpu, hwnd: u32) -> u32 {
     }
 }
 
-/// GetFocus.
+/// GetFocus: the running thread's queue's focus.
 pub fn get_focus(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let focus = user(cpu).input.focus;
-    Some(own(cpu, focus))
+    let focus = focus(cpu);
+    Some(if user(cpu).is_window(focus) { focus } else { 0 })
 }
 
-/// GetActiveWindow.
+/// GetActiveWindow: the running thread's queue's active window.
 pub fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    let active = user(cpu).input.active;
-    Some(own(cpu, active))
+    let active = active(cpu);
+    Some(if user(cpu).is_window(active) {
+        active
+    } else {
+        0
+    })
 }
 
 /// GetForegroundWindow.
 pub fn get_foreground_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(user(cpu).input.foreground)
+    Some(user(cpu).foreground_window())
 }
 
 /// GetCapture.
@@ -980,17 +1207,22 @@ pub fn get_capture(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// SetFocus(hwnd): the window that had the focus. Its top-level window
-/// is activated first.
+/// is activated first. Only a window of the running thread's queue can
+/// get it.
 pub fn set_focus(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = args[0];
+    let queue = current_queue(cpu);
     let state = user(cpu);
-    let previous = state.input.focus;
+    let previous = state.activation(queue).focus;
     if hwnd != 0 {
         if hwnd == previous {
             return Some(previous);
         }
         if !state.is_window(hwnd) {
             set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
+            return Some(0);
+        }
+        if state.window_queue(hwnd) != queue {
             return Some(0);
         }
         // Not a minimized or disabled window, or one in one.
@@ -1018,6 +1250,7 @@ pub fn set_focus(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let (hwnd, top) = (t.var(1), t.var(3));
+    let queue = current_queue(cpu);
     loop {
         match t.step {
             0 => {
@@ -1036,22 +1269,23 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.step = 10;
             }
             10 => {
-                if hwnd != 0 && top != user(cpu).input.active {
+                if hwnd != 0 && top != active(cpu) {
                     return Next::call(address_of("SetActiveWindow"), &[top], 1);
                 }
                 t.step = 1;
             }
             1 => {
                 let state = user(cpu);
-                if hwnd != 0 && (!state.is_window(hwnd) || top != state.input.active) {
+                let a = state.activation(queue);
+                if hwnd != 0 && (!state.is_window(hwnd) || top != a.active) {
                     return Next::Done(0);
                 }
-                let previous = state.input.focus;
+                let previous = a.focus;
                 t.set(2, previous);
                 if previous == hwnd {
                     return Next::Done(previous);
                 }
-                state.input.focus = hwnd;
+                state.activation_mut(queue).focus = hwnd;
                 if state.is_window(previous) {
                     return activate_send(cpu, previous, WM_KILLFOCUS, hwnd, 0, 2);
                 }
@@ -1060,7 +1294,7 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             2 => {
                 let state = user(cpu);
                 let previous = t.var(2);
-                if state.input.focus != hwnd || !state.is_window(hwnd) {
+                if state.activation(queue).focus != hwnd || !state.is_window(hwnd) {
                     return Next::Done(previous);
                 }
                 return activate_send(cpu, hwnd, WM_SETFOCUS, previous, 0, 3);
@@ -1070,11 +1304,16 @@ fn focus_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     }
 }
 
-/// SetActiveWindow(hwnd): the window that was active.
+/// SetActiveWindow(hwnd): the window that was active. Only a window of
+/// the running thread's queue can be activated, and a queue that isn't
+/// in the foreground stays behind: the window becomes its active one,
+/// drawn inactive and not raised. With no queue in the foreground, the
+/// thread's comes to it.
 pub fn set_active_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = args[0];
+    let queue = current_queue(cpu);
     let state = user(cpu);
-    let previous = state.input.active;
+    let previous = state.activation(queue).active;
     if hwnd != 0 {
         let Some(w) = state.window(hwnd) else {
             set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
@@ -1083,19 +1322,39 @@ pub fn set_active_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if w.style & (WS_POPUP | WS_CHILD) == WS_CHILD {
             return get_active_window(cpu, &[]);
         }
+        if state.window_queue(hwnd) != queue {
+            return Some(0);
+        }
     }
-    if hwnd == previous {
+    if hwnd == previous && (hwnd == 0 || state.input.foreground != 0) {
         return Some(previous);
     }
-    task::start(cpu, TASK_INPUT, vec![K_ACTIVATE, hwnd, previous, 0, 0], 0)
+    start_activation(cpu, hwnd, 0, 0)
 }
 
-/// The places of SetActiveWindow's variables: the WM_ACTIVATEAPP
-/// messages to send, three words each, start at `A_LIST`.
-const A_AT: usize = 4;
-const A_LIST: usize = 5;
-/// Whether WM_QUERYNEWPALETTE was sent.
+/// ActivateInQueue(hwnd, flags, thread), an internal function: `hwnd`
+/// becomes the active window of the running thread's queue, which
+/// F_FOREGROUND in `flags` brings to the foreground; with F_SWITCHED
+/// the foreground came to the queue from `thread`'s.
+pub fn activate_in_queue(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    start_activation(cpu, args[0], args[1], args[2])
+}
+
+fn start_activation(cpu: &mut Cpu, hwnd: u32, flags: u32, other: u32) -> Option<u32> {
+    let previous = active(cpu);
+    let vars = vec![K_ACTIVATE, hwnd, previous, 0, 0, flags, other];
+    task::start(cpu, TASK_INPUT, vars, 0)
+}
+
+/// The places of the activation's variables: whether WM_QUERYNEWPALETTE
+/// was sent, the place in the list of WM_ACTIVATEAPP messages to send,
+/// the flags, the thread the foreground came from, and the list, three
+/// words a message.
 const A_PALETTE: usize = 3;
+const A_AT: usize = 4;
+const A_FLAGS: usize = 5;
+const A_OTHER: usize = 6;
+const A_LIST: usize = 7;
 
 fn iconic(state: &State, hwnd: u32) -> u32 {
     state
@@ -1104,8 +1363,8 @@ fn iconic(state: &State, hwnd: u32) -> u32 {
 }
 
 /// An activation message for `hwnd`: sent, or to another thread's window
-/// queued without waiting for it, as that thread may be waiting for this
-/// one.
+/// (a Win16 task's, in the queue the tasks share) queued without waiting
+/// for it, as that thread may be waiting for this one.
 fn activate_send(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
     let tid = user(cpu).window(hwnd).map_or(0, |w| w.tid);
     if tid != current_tid(cpu) {
@@ -1115,12 +1374,48 @@ fn activate_send(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16
     window::send(hwnd, msg, wp, lp, step)
 }
 
+/// The top-level windows of the thread `tid`, each with WM_ACTIVATEAPP's
+/// wParam and lParam, for an activation's list.
+fn activate_app_list(state: &State, tid: u32, wp: u32, lp: u32, list: &mut Vec<u32>) {
+    if tid == 0 {
+        return;
+    }
+    for top in state.top_levels() {
+        if state.window(top).is_some_and(|w| w.tid == tid) {
+            list.extend([top, wp, lp]);
+        }
+    }
+}
+
 fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     let (hwnd, previous) = (t.var(1), t.var(2));
+    let queue = current_queue(cpu);
     loop {
         match t.step {
             0 => {
-                if user(cpu).is_window(previous) {
+                // The queue comes to the foreground: the one that was
+                // there learns it when its thread next looks for
+                // messages.
+                let state = user(cpu);
+                let mut flags = t.var(A_FLAGS);
+                let from = state.input.foreground;
+                let take = flags & F_FOREGROUND != 0 || from == 0;
+                if hwnd != 0 && take && from != queue {
+                    let other = state.window(state.foreground_window()).map_or(0, |w| w.tid);
+                    state.input.foreground = queue;
+                    cancel_activation(state, queue);
+                    flags |= F_SWITCHED;
+                    t.set(A_FLAGS, flags);
+                    t.set(A_OTHER, other);
+                    if from != 0 {
+                        let tid = current_tid(cpu);
+                        post_activation(cpu, from, EV_DEACTIVATE, 0, tid);
+                    }
+                }
+                if hwnd == previous && flags & F_SWITCHED == 0 {
+                    return Next::Done(previous);
+                }
+                if previous != hwnd && user(cpu).is_window(previous) {
                     return activate_send(cpu, previous, WM_NCACTIVATE, FALSE, hwnd, 1);
                 }
                 t.step = 2;
@@ -1138,20 +1433,16 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if hwnd != 0 && !state.is_window(hwnd) {
                     return Next::Done(previous);
                 }
-                state.input.active = hwnd;
-                if hwnd != 0 {
-                    state.input.foreground = hwnd;
-                } else if state.input.foreground == previous {
-                    state.input.foreground = 0;
-                }
-                // The window comes to the top.
+                state.activation_mut(queue).active = hwnd;
+                // In the foreground the window comes to the top.
                 let first = state.top_levels().into_iter().find(|&h| {
                     state
                         .window(h)
                         .is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0 || h == hwnd)
                 });
                 let is_top = state.window(hwnd).is_some_and(|w| w.style & WS_CHILD == 0);
-                if hwnd != 0 && is_top && first != Some(hwnd) {
+                let foreground = state.input.foreground == queue;
+                if hwnd != 0 && is_top && foreground && first != Some(hwnd) {
                     let args = [
                         hwnd,
                         HWND_TOP,
@@ -1172,26 +1463,23 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if t.var(A_PALETTE) == 0
                     && crate::win32::gdi32::palette::palette_device(cpu)
                     && user(cpu).is_window(hwnd)
+                    && user(cpu).input.foreground == queue
                 {
                     t.set(A_PALETTE, 1);
                     return activate_send(cpu, hwnd, WM_QUERYNEWPALETTE, 0, 0, 3);
                 }
-                // WM_ACTIVATEAPP when the active window's thread changes.
+                // WM_ACTIVATEAPP: to the thread the foreground came to,
+                // and between the Win16 tasks, when the active window's
+                // task changes in the queue they share.
                 let state = user(cpu);
                 let old_tid = state.window(previous).map_or(0, |w| w.tid);
                 let new_tid = state.window(hwnd).map_or(0, |w| w.tid);
                 let mut list = Vec::new();
-                if old_tid != new_tid {
-                    for (tid, wp, lp) in [(old_tid, FALSE, new_tid), (new_tid, TRUE, old_tid)] {
-                        if tid == 0 {
-                            continue;
-                        }
-                        for top in state.top_levels() {
-                            if state.window(top).is_some_and(|w| w.tid == tid) {
-                                list.extend([top, wp, lp]);
-                            }
-                        }
-                    }
+                if t.var(A_FLAGS) & F_SWITCHED != 0 {
+                    activate_app_list(state, new_tid, TRUE, t.var(A_OTHER), &mut list);
+                } else if old_tid != new_tid && old_tid != 0 {
+                    activate_app_list(state, old_tid, FALSE, new_tid, &mut list);
+                    activate_app_list(state, new_tid, TRUE, old_tid, &mut list);
                 }
                 for (i, v) in list.into_iter().enumerate() {
                     t.set(A_LIST + i, v);
@@ -1218,7 +1506,7 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
             5 => {
                 let state = user(cpu);
                 if state.is_window(hwnd) {
-                    let foreground = (state.input.foreground == hwnd) as u32;
+                    let foreground = (state.input.foreground == queue) as u32;
                     return activate_send(cpu, hwnd, WM_NCACTIVATE, foreground, previous, 6);
                 }
                 t.step = 7;
@@ -1226,7 +1514,12 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
             6 => {
                 let state = user(cpu);
                 if state.is_window(hwnd) {
-                    let wp = WA_ACTIVE | iconic(state, hwnd) << 16;
+                    let code = if t.var(A_FLAGS) & F_CLICK != 0 {
+                        WA_CLICKACTIVE
+                    } else {
+                        WA_ACTIVE
+                    };
+                    let wp = code | iconic(state, hwnd) << 16;
                     return activate_send(cpu, hwnd, WM_ACTIVATE, wp, previous, 7);
                 }
                 t.step = 7;
@@ -1234,8 +1527,9 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
             7 => {
                 // The focus goes into the active window.
                 let state = user(cpu);
-                let focus = state.input.focus;
-                if state.input.active == hwnd
+                let a = state.activation(queue);
+                let focus = a.focus;
+                if a.active == hwnd
                     && (focus == 0 || hwnd == 0 || state.top_level(focus) != hwnd)
                     && (hwnd != 0 || focus != 0)
                 {
@@ -1248,32 +1542,202 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
     }
 }
 
-/// SetForegroundWindow(hwnd): it is activated.
-pub fn set_foreground_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let hwnd = args[0];
-    if !user(cpu).is_window(hwnd) {
-        return Some(FALSE);
-    }
-    user(cpu).input.foreground = hwnd;
-    let top = user(cpu).top_level(hwnd);
-    if top == user(cpu).input.active {
-        return Some(TRUE);
-    }
-    task::start(cpu, TASK_INPUT, vec![K_OTHER, top, 1], 0)
+/// DeactivateQueue(thread), an internal function: the foreground went
+/// from the running thread's queue to `thread`'s. The active window is
+/// deactivated, the thread's top-level windows get WM_ACTIVATEAPP, and
+/// the queue is left with no active window and no focus, as Windows
+/// leaves a queue in the background.
+pub fn deactivate_queue(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    task::start(cpu, TASK_INPUT, vec![K_DEACTIVATE, args[0], 0, 0], 0)
 }
 
-/// ActivateOtherWindow(hwnd): `hwnd`, the active window, is going away:
-/// its owner, or the first other top-level window that can be, becomes
-/// active.
-pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// The places of DeactivateQueue's variables: the active window, the
+/// place in the list of WM_ACTIVATEAPP messages, and the list.
+const D_ACTIVE: usize = 2;
+const D_AT: usize = 3;
+const D_LIST: usize = 4;
+
+fn deactivate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
+    let other = t.var(1);
+    let queue = current_queue(cpu);
+    loop {
+        match t.step {
+            0 => {
+                let state = user(cpu);
+                if state.input.foreground == queue {
+                    // It came back before its thread looked.
+                    return Next::Done(0);
+                }
+                let active = state.activation(queue).active;
+                t.set(D_ACTIVE, active);
+                if state.is_window(active) {
+                    return activate_send(cpu, active, WM_NCACTIVATE, FALSE, 0, 1);
+                }
+                t.step = 2;
+            }
+            1 => {
+                let state = user(cpu);
+                let active = t.var(D_ACTIVE);
+                if state.is_window(active) {
+                    let wp = WA_INACTIVE | iconic(state, active) << 16;
+                    let to = state.foreground_window();
+                    return activate_send(cpu, active, WM_ACTIVATE, wp, to, 2);
+                }
+                t.step = 2;
+            }
+            2 => {
+                let running = current_tid(cpu);
+                let state = user(cpu);
+                let tid = state.window(t.var(D_ACTIVE)).map_or(running, |w| w.tid);
+                let mut list = Vec::new();
+                activate_app_list(user(cpu), tid, FALSE, other, &mut list);
+                for (i, v) in list.into_iter().enumerate() {
+                    t.set(D_LIST + i, v);
+                }
+                t.step = 3;
+            }
+            3 => {
+                let at = t.var(D_AT) as usize;
+                if D_LIST + 3 * at + 2 < t.vars.len() {
+                    t.set(D_AT, at as u32 + 1);
+                    let (h, wp, lp) = (
+                        t.var(D_LIST + 3 * at),
+                        t.var(D_LIST + 3 * at + 1),
+                        t.var(D_LIST + 3 * at + 2),
+                    );
+                    if user(cpu).is_window(h) {
+                        return activate_send(cpu, h, WM_ACTIVATEAPP, wp, lp, 3);
+                    }
+                    continue;
+                }
+                t.step = 4;
+            }
+            4 => {
+                let state = user(cpu);
+                if state.input.foreground == queue {
+                    return Next::Done(0);
+                }
+                let a = state.activation_mut(queue);
+                if a.active == t.var(D_ACTIVE) {
+                    a.active = 0;
+                }
+                let focus = std::mem::take(&mut a.focus);
+                if state.is_window(focus) {
+                    return activate_send(cpu, focus, WM_KILLFOCUS, 0, 0, 5);
+                }
+                return Next::Done(0);
+            }
+            _ => return Next::Done(0),
+        }
+    }
+}
+
+/// A task that deactivates the running thread's queue (`deactivate`,
+/// with the thread the foreground went to) and then activates a window
+/// in it (`activate`: the window, the flags and the thread, as
+/// ActivateInQueue has them), and returns `result`.
+fn start_switch(
+    cpu: &mut Cpu,
+    result: u32,
+    deactivate: Option<u32>,
+    activate: Option<[u32; 3]>,
+) -> Option<u32> {
+    let [d, other] = deactivate.map_or([0, 0], |tid| [1, tid]);
+    let [a, hwnd, flags, from] = activate.map_or([0; 4], |[h, f, o]| [1, h, f, o]);
+    let vars = vec![K_SWITCH, result, d, other, a, hwnd, flags, from];
+    task::start(cpu, TASK_INPUT, vars, 0)
+}
+
+fn switch_step(t: &mut Task) -> Next {
+    loop {
+        match t.step {
+            0 => {
+                t.step = 1;
+                if t.var(2) != 0 {
+                    return Next::call(address_of("DeactivateQueue"), &[t.var(3)], 1);
+                }
+            }
+            1 => {
+                t.step = 2;
+                if t.var(4) != 0 {
+                    let args = [t.var(5), t.var(6), t.var(7)];
+                    return Next::call(address_of("ActivateInQueue"), &args, 2);
+                }
+            }
+            _ => return Next::Done(t.var(1)),
+        }
+    }
+}
+
+/// SetForegroundWindow(hwnd): its top-level window becomes the active
+/// window of its queue, and the queue comes to the foreground, if the
+/// running thread may bring it there (`may_take_foreground`). When it
+/// may not, the call fails; a window of the thread's own queue is then
+/// activated in it, behind the foreground. Another thread's window is
+/// activated by its thread, when it next looks for messages.
+pub fn set_foreground_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = args[0];
     let state = user(cpu);
+    if !state.is_window(hwnd) {
+        return Some(FALSE);
+    }
+    let top = state.top_level(hwnd);
+    // The desktop's: no queue.
+    let target = state.window_queue(top);
+    let from = state.input.foreground;
+    let queue = current_queue(cpu);
+    let allowed = may_take_foreground(cpu);
+    if target == queue && target != 0 {
+        if allowed {
+            return start_switch(cpu, TRUE, None, Some([top, F_FOREGROUND, 0]));
+        }
+        return start_switch(cpu, FALSE, None, Some([top, 0, 0]));
+    }
+    if target == from && target != 0 {
+        post_activation(cpu, target, EV_SELECT, top, 0);
+        return Some(TRUE);
+    }
+    if !allowed {
+        return Some(FALSE);
+    }
+    let state = user(cpu);
+    let from_tid = state.window(state.foreground_window()).map_or(0, |w| w.tid);
+    let to_tid = state.window(top).map_or(0, |w| w.tid);
+    state.input.foreground = target;
+    if target != 0 {
+        post_activation(cpu, target, EV_ACTIVATE, top, from_tid);
+    }
+    if from == queue {
+        return start_switch(cpu, TRUE, Some(to_tid), None);
+    }
+    if from != 0 {
+        post_activation(cpu, from, EV_DEACTIVATE, 0, to_tid);
+    }
+    Some(TRUE)
+}
+
+/// Whether `h` is a top-level window that can become active when another
+/// goes: shown, enabled, not minimized and not a tool window.
+fn can_activate(state: &State, h: u32) -> bool {
+    state.window(h).is_some_and(|w| {
+        w.style & (WS_VISIBLE | WS_DISABLED | WS_MINIMIZE) == WS_VISIBLE
+            && w.ex_style & WS_EX_TOOLWINDOW == 0
+            && w.style & WS_CHILD == 0
+    })
+}
+
+/// ActivateOtherWindow(hwnd): `hwnd`, the running thread's active
+/// window, is going away. Its owner, or the first other top-level window
+/// that can be, becomes active. In the foreground that may be another
+/// thread's window, whose queue the foreground then goes to; a queue in
+/// the background keeps to its own windows.
+pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let hwnd = args[0];
+    let queue = current_queue(cpu);
+    let state = user(cpu);
+    let foreground = state.input.foreground == queue;
     let usable = |h: u32| {
-        h != hwnd
-            && state.window(h).is_some_and(|w| {
-                w.style & (WS_VISIBLE | WS_DISABLED | WS_MINIMIZE) == WS_VISIBLE
-                    && w.ex_style & WS_EX_TOOLWINDOW == 0
-            })
+        h != hwnd && can_activate(state, h) && (foreground || state.window_queue(h) == queue)
     };
     let owner = state.window(hwnd).map_or(0, |w| w.owner);
     let next = if owner != 0 && usable(owner) {
@@ -1285,14 +1749,79 @@ pub fn activate_other_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             .find(|&h| usable(h))
             .unwrap_or(0)
     };
-    task::start(cpu, TASK_INPUT, vec![K_OTHER, next, 0], 0)
+    let target = state.window_queue(next);
+    if next == 0 || target == queue {
+        return start_switch(cpu, 0, None, Some([next, 0, 0]));
+    }
+    let to_tid = state.window(next).map_or(0, |w| w.tid);
+    state.input.foreground = target;
+    let tid = current_tid(cpu);
+    post_activation(cpu, target, EV_ACTIVATE, next, tid);
+    start_switch(cpu, 0, Some(to_tid), None)
 }
 
-fn other_step(_cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
-    match t.step {
-        0 => Next::call(address_of("SetActiveWindow"), &[t.var(1)], 1),
-        _ => Next::Done(t.var(2)),
+/// The foreground window went without its thread activating another,
+/// as its thread or its process ended: the first top-level window that
+/// can be active is activated by its thread, and its queue comes to the
+/// foreground, as Windows activates the next window.
+pub fn foreground_gone(cpu: &mut Cpu) {
+    let state = user(cpu);
+    let next = state
+        .top_levels()
+        .into_iter()
+        .find(|&h| can_activate(state, h));
+    let Some(next) = next else {
+        return;
+    };
+    let target = state.window_queue(next);
+    let kind = if target == state.input.foreground {
+        EV_SELECT
+    } else {
+        EV_ACTIVATE
+    };
+    state.input.foreground = target;
+    post_activation(cpu, target, kind, next, 0);
+}
+
+/// Whether the button message `msg`, which GetMessageA takes, activates
+/// a window first: the top-level window it is for, if that isn't the
+/// active window of the foreground queue. With it the window under the
+/// cursor (`msg`'s), the hit-test code and the client mouse message,
+/// for WM_MOUSEACTIVATE.
+pub fn click_activates(cpu: &mut Cpu, msg: &Msg) -> Option<(u32, u32)> {
+    let (down, hit, mouse) = match msg.message {
+        m @ (WM_LBUTTONDOWN..=0x0209) => ((m - WM_LBUTTONDOWN).is_multiple_of(3), HTCLIENT, m),
+        m @ (WM_NCLBUTTONDOWN..=0x00A9) => (
+            (m - WM_NCLBUTTONDOWN).is_multiple_of(3),
+            msg.wparam & 0xFFFF,
+            m - WM_NCMOUSEMOVE + WM_MOUSEMOVE,
+        ),
+        _ => return None,
+    };
+    if !down {
+        return None;
     }
+    let queue = current_queue(cpu);
+    let state = user(cpu);
+    let top = state.top_level(msg.hwnd);
+    let w = state.window(top)?;
+    let front = state.input.foreground == queue && state.activation(queue).active == top;
+    if front || w.style & (WS_DISABLED | WS_VISIBLE) != WS_VISIBLE {
+        return None;
+    }
+    Some((top, super::make_long(hit as i32, mouse as i32)))
+}
+
+/// WM_MOUSEACTIVATE's answers.
+pub const MA_ACTIVATE: u32 = 1;
+pub const MA_ACTIVATEANDEAT: u32 = 2;
+pub const MA_NOACTIVATEANDEAT: u32 = 4;
+
+/// ActivateByClick(hwnd), an internal function: a click activates
+/// `hwnd`, a top-level window of the running thread, and brings its
+/// queue to the foreground.
+pub fn activate_by_click(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    start_activation(cpu, args[0], F_FOREGROUND | F_CLICK, 0)
 }
 
 /// SetCapture(hwnd): the window that had the capture.
@@ -1340,7 +1869,8 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         K_FOCUS => focus_step(cpu, t, value),
         K_ACTIVATE => activate_step(cpu, t, value),
         K_CAPTURE => capture_step(cpu, t, value),
-        _ => other_step(cpu, t, value),
+        K_DEACTIVATE => deactivate_step(cpu, t, value),
+        _ => switch_step(t),
     }
 }
 
@@ -1664,8 +2194,9 @@ fn synthetic_key(
     let time = message::now_ms(cpu);
     let state = user(cpu);
     let (message, lparam) = key_message(&mut state.input, vk, side, scan, extended, down, false);
-    let (focus, active, cursor) = (state.input.focus, state.input.active, state.input.cursor);
-    let target = if focus != 0 { focus } else { active };
+    let a = state.activation(state.input.foreground);
+    let target = if a.focus != 0 { a.focus } else { a.active };
+    let cursor = state.input.cursor;
     let Some(tid) = state.window(target).map(|w| w.tid) else {
         return;
     };
@@ -2118,10 +2649,11 @@ pub fn set_last_error_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 crate::state_fields!(Input {
-    focus,
-    active,
-    capture,
+    queues,
     foreground,
+    last_input,
+    win16,
+    capture,
     defers,
     cursor,
     keys,
@@ -2139,6 +2671,11 @@ crate::state_fields!(Input {
     menu_keys,
     sys_key,
     tracking
+});
+crate::state_fields!(Activation {
+    queue,
+    active,
+    focus
 });
 crate::state_fields!(Caret {
     hwnd,
@@ -2187,10 +2724,14 @@ mod tests {
     #[test]
     fn a_held_grey_arrow_stays_down() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
-        let hwnd = user(&mut cpu).new_window(window::Window::default());
-        let hwnd = hwnd.expect("a window");
+        let w = window::Window {
+            tid: 1,
+            ..window::Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
         user(&mut cpu).desktop = true;
-        user(&mut cpu).input.focus = hwnd;
+        user(&mut cpu).input.foreground = 1;
+        user(&mut cpu).activation_mut(1).focus = hwnd;
         crate::keyboard::key_event(&mut cpu.bus, 0x48, true, true, None);
         poll(&mut cpu);
         assert!(user(&mut cpu).input.async_down(0x26), "Up is down");

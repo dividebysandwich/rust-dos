@@ -100,7 +100,7 @@ pub fn refresh(cpu: &mut Cpu) {
 /// Whether `hwnd`'s top-level window is the foreground window.
 pub fn is_foreground(cpu: &Cpu, hwnd: u32) -> bool {
     let user = &cpu.bus.win32.user;
-    user.is_window(hwnd) && user.top_level(hwnd) == user.input.foreground
+    user.is_window(hwnd) && user.top_level(hwnd) == user.foreground_window()
 }
 
 /// Devices acquired in the foreground whose window isn't the foreground

@@ -857,7 +857,7 @@ fn nc_button_down(cpu: &mut Cpu, hwnd: u32, hit: u32, lp: u32) -> Option<u32> {
     match hit {
         HTCAPTION => {
             let top = state.top_level(hwnd);
-            if state.input.active == top || top == hwnd {
+            if state.is_active(top) || top == hwnd {
                 return script(cpu, R_FIXED, 0, &[command(SC_MOVE + HTCAPTION)]);
             }
             Some(0)

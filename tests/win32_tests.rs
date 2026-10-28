@@ -3738,6 +3738,277 @@ fn wait_for_input_idle_handles_messages_sent_to_the_waiting_thread() {
     assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
 }
 
+const WS_VISIBLE: i32 = 0x1000_0000;
+const PM_REMOVE: i32 = 1;
+
+/// A GUI program that shows a popup of class Static titled `title`, at
+/// (`x`, 0) and 50 pixels square, and then gets and dispatches messages
+/// until it is ended.
+fn shows_a_window(title: &str, x: i32) -> Vec<u8> {
+    let user32 = ["CreateWindowExA", "GetMessageA", "DispatchMessageA"];
+    // The title, the class at 0x10 and a MSG at 0x20.
+    let data = child_data(&[(0, title), (0x10, "Static")]);
+    win_program(pe::SUBSYSTEM_GUI, &[], &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, title, style, x, 0, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        let mut next = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0x20) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(l.at(0x20) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(next)
+    })
+}
+
+/// Take and dispatch the running thread's messages, with the MSG at
+/// `msg` of the data, until there are none.
+fn pump(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+    msg: u32,
+) -> Result<(), IcedError> {
+    let mut next = a.create_label();
+    let mut done = a.create_label();
+    a.set_label(&mut next)?;
+    push_args(a, &[l.at(msg) as i32, 0, 0, 0, PM_REMOVE])?;
+    a.call(f("PeekMessageA"))?;
+    a.test(eax, eax)?;
+    a.je(done)?;
+    a.push(l.at(msg) as i32)?;
+    a.call(f("DispatchMessageA"))?;
+    a.jmp(next)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+#[test]
+fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
+    // T.EXE shows a window and starts C.EXE, whose window comes to the
+    // foreground: on Windows 98 a program the foreground program starts
+    // may take it. Once T.EXE has looked at its messages, its queue has
+    // no active window. Its SetActiveWindow then makes its window its
+    // queue's active one behind C.EXE's, not raised over it, and its
+    // SetForegroundWindow fails. (MechCommander's setup hid DirectPlay's
+    // license dialog behind its full-screen window this way,
+    // kibertoad/rust-dos#352.)
+    let kernel32 = ["CreateProcessA", "TerminateProcess", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "CreateWindowExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "GetForegroundWindow",
+        "GetActiveWindow",
+        "SetActiveWindow",
+        "SetForegroundWindow",
+        "GetTopWindow",
+    ];
+    // A MSG at 0xC0.
+    let data = child_data(&[(0, "C.EXE"), (0x10, "Static"), (0x20, "Parent")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, title, style, 100, 0, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 0)?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, 5000)?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.mov(edi, eax)?;
+        a.cmp(edi, esi)?;
+        bit_if(a, ne, 1)?;
+        a.call(f("GetActiveWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 2)?;
+        a.push(esi)?;
+        a.call(f("SetActiveWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 3)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.push(0)?;
+        a.call(f("GetTopWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 5)?;
+        a.push(esi)?;
+        a.call(f("SetForegroundWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 6)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 7)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("TerminateProcess"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "foreground_from_parent",
+        &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
+    // T.EXE's window, with a button, is behind C.EXE's, which it started.
+    // A click on the button asks the window with WM_MOUSEACTIVATE, whose
+    // DefWindowProcA answer, MA_ACTIVATE, activates it (WA_CLICKACTIVE)
+    // and brings it to the foreground, and the button gets the click:
+    // the first click presses it, as on Windows (kibertoad/rust-dos#355).
+    const WM_ACTIVATE: i32 = 0x0006;
+    const WM_MOUSEACTIVATE: i32 = 0x0021;
+    const WM_TIMER: i32 = 0x0113;
+    const WM_COMMAND: i32 = 0x0111;
+    const WS_CHILD: i32 = 0x4000_0000;
+    const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
+    let kernel32 = ["CreateProcessA", "TerminateProcess", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "GetMessageA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "GetForegroundWindow",
+        "GetActiveWindow",
+        "GetFocus",
+        "SetCursorPos",
+        "mouse_event",
+        "SetTimer",
+    ];
+    // What the window procedure saw: WM_COMMAND's count at 0xA0,
+    // WM_MOUSEACTIVATE's lParam at 0xA4 and wParam at 0xA8, the last
+    // WM_ACTIVATE's wParam at 0xAC. A MSG at 0xC0 and a WNDCLASSA at
+    // 0xE0, its procedure put in by the code.
+    let mut data = child_data(&[
+        (0, "C.EXE"),
+        (0x10, "Frame"),
+        (0x20, "Button"),
+        (0x30, "OK"),
+    ]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        for (msg, at, arg) in [
+            (WM_MOUSEACTIVATE, 0xA4, 16),
+            (WM_MOUSEACTIVATE, 0xA8, 12),
+            (WM_ACTIVATE, 0xAC, 12),
+        ] {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), msg)?;
+            a.jne(other)?;
+            a.mov(eax, dword_ptr(esp + arg))?;
+            a.mov(dword_ptr(l.at(at)), eax)?;
+            a.set_label(&mut other)?;
+        }
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_COMMAND)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let (class, button) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 200, 100, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        // The button, id 1, in the window: its last four arguments
+        // first.
+        push_args(a, &[1, 0, 0])?;
+        a.push(esi)?;
+        let ok = l.at(0x30) as i32;
+        push_args(a, &[0, button, ok, WS_CHILD | WS_VISIBLE, 10, 10, 80, 30])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        a.xor(ebx, ebx)?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, 5000)?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, ne, 0)?;
+        a.mov(dword_ptr(l.at(0xAC)), 0)?;
+        push_args(a, &[50, 25])?;
+        a.call(f("SetCursorPos"))?;
+        for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
+            push_args(a, &[flags, 0, 0, 0, 0])?;
+            a.call(f("mouse_event"))?;
+        }
+        push_args(a, &[0, 0, 2000, 0])?;
+        a.call(f("SetTimer"))?;
+        let mut next = a.create_label();
+        let mut done = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.cmp(dword_ptr(l.at(0xC4)), WM_TIMER)?;
+        a.je(done)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.cmp(dword_ptr(l.at(0xA0)), 0)?;
+        a.je(next)?;
+        a.set_label(&mut done)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 1)?;
+        bit_if(a, eq, 1)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 2)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 3)?;
+        // HTCLIENT and WM_LBUTTONDOWN; the window to activate.
+        a.cmp(dword_ptr(l.at(0xA4)), 0x0201_0001)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xA8)), esi)?;
+        bit_if(a, eq, 5)?;
+        a.cmp(word_ptr(l.at(0xAC)), 2)?;
+        bit_if(a, eq, 6)?;
+        a.call(f("GetFocus"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 7)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("TerminateProcess"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "click_activates_behind",
+        &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 300))],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 #[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then

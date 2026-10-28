@@ -1020,16 +1020,8 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
     {
         c.windows = c.windows.saturating_sub(1);
     }
+    state.forget_activation(|h| h == hwnd);
     let input = &mut state.input;
-    if input.focus == hwnd {
-        input.focus = 0;
-    }
-    if input.active == hwnd {
-        input.active = 0;
-    }
-    if input.foreground == hwnd {
-        input.foreground = 0;
-    }
     if input.capture == hwnd {
         input.capture = 0;
     }
@@ -1255,8 +1247,10 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 /// Windows.
 fn destroy_focus(cpu: &mut Cpu, list: &[u32]) {
     let state = user(cpu);
-    if list.contains(&state.input.focus) {
-        state.input.focus = 0;
+    for a in &mut state.input.queues {
+        if list.contains(&a.focus) {
+            a.focus = 0;
+        }
     }
     if list.contains(&state.input.capture) {
         state.input.capture = 0;
@@ -1351,7 +1345,7 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 };
                 let (style, rect) = (w.style, w.rect);
                 let child = style & WS_CHILD != 0;
-                let active = state.input.active == hwnd;
+                let active = state.is_active(hwnd);
                 let mut swp = 0;
                 let mut new = rect;
                 let mut show = true;
@@ -1464,8 +1458,8 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             2 => {
                 if cmd == SW_HIDE {
+                    let focus = super::input::focus(cpu);
                     let state = user(cpu);
-                    let focus = state.input.focus;
                     if focus == hwnd || state.is_descendant(hwnd, focus) {
                         let mut parent = state.parent(hwnd);
                         if parent == DESKTOP {
@@ -1615,7 +1609,7 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         flags |= SWP_NOMOVE;
     }
     let child = style & WS_CHILD != 0;
-    if child || state.input.active == hwnd {
+    if child || state.is_active(hwnd) {
         flags |= SWP_NOACTIVATE;
     }
     let mut after = after;
@@ -1792,7 +1786,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let child = user(cpu)
                     .window(hwnd)
                     .is_some_and(|w| w.style & WS_CHILD != 0);
-                if flags & SWP_HIDEWINDOW != 0 && user(cpu).input.active == hwnd {
+                if flags & SWP_HIDEWINDOW != 0 && user(cpu).is_active(hwnd) {
                     t.step = 4;
                     return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 4);
                 }
@@ -1907,6 +1901,7 @@ pub fn enable_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if enable == !was_disabled {
         return Some(was_disabled as u32);
     }
+    let focus = super::input::focus(cpu);
     let state = user(cpu);
     if let Some(w) = state.window_mut(hwnd) {
         if enable {
@@ -1915,7 +1910,6 @@ pub fn enable_window(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             w.style |= WS_DISABLED;
         }
     }
-    let focus = state.input.focus;
     if !enable && (focus == hwnd || state.is_descendant(hwnd, focus)) {
         // The focus goes nowhere, without messages here; WM_ENABLE
         // follows.
@@ -3107,7 +3101,7 @@ pub fn get_window_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let state = user(cpu);
     let window = state.screen_rect(args[0]);
     let client = state.screen_client(args[0]);
-    let active = state.input.active == args[0];
+    let active = state.is_active(args[0]);
     let atom = state
         .classes
         .get(class as usize)

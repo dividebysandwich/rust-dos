@@ -268,6 +268,12 @@ pub(crate) fn spawn(
     })?;
     let (process_object, pid) = created.process;
     let (thread_object, tid) = created.thread;
+    // Who started it: a program the foreground one starts may bring its
+    // windows to the foreground (user32::input).
+    let parent = process(cpu).id;
+    if let Some(p) = cpu.bus.win32.processes.iter_mut().find(|p| p.id == pid) {
+        p.parent = parent;
+    }
     let objects = object::objects(cpu);
     objects.hold(process_object);
     objects.hold(thread_object);
