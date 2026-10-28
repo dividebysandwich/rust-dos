@@ -16,18 +16,23 @@
 //! a read back then only has to read.
 
 use super::Voodoo;
-use super::workers::Word;
 use super::mirror::{Blit, BlitSource, Command};
 use super::pages::{PAGE, Pages};
+use super::workers::Word;
 
 /// The OpenGL renderer, as the card reaches it between frames.
 pub trait GpuLink {
+    /// Whether the renderer is there and keeps a copy of the card's
+    /// memory to do 2D operations in.
+    fn ready(&self) -> bool;
+
     /// Do `commands`, the recording so far, now.
     fn run(&mut self, commands: Vec<Command>);
 
     /// Bytes of the renderer's copy of the card's memory from byte `at`
-    /// on, into `out`.
-    fn read(&mut self, at: u32, out: &mut [u8]);
+    /// on, into `out`. False, with `out` as it was, if the renderer has
+    /// no copy to read them from (it went).
+    fn read(&mut self, at: u32, out: &mut [u8]) -> bool;
 }
 
 /// The renderer's copy of the memory, as the card keeps track of it.
@@ -44,6 +49,8 @@ pub struct Gpu {
     hot: u64,
     /// Frames since the hot pages last cooled.
     frames: u32,
+    /// Pages only the GPU had were lost, which the log said.
+    lost: bool,
 }
 
 /// Frames a page read back from the GPU stays hot: about a second.
@@ -74,9 +81,15 @@ impl Voodoo {
     }
 
     /// Whether 2D operations may go to the GPU: the renderer draws the
-    /// picture and gave the card a link to it.
+    /// picture, gave the card a link to it and keeps the card's memory.
     pub fn gpu_ready(&self) -> bool {
-        self.mirror.is_some() && self.banshee.is_some() && self.gpu.borrow().link.is_some()
+        let linked = self
+            .gpu
+            .borrow()
+            .link
+            .as_ref()
+            .is_some_and(|link| link.ready());
+        self.mirror.is_some() && self.banshee.is_some() && linked
     }
 
     /// Do `blit` on the GPU, if it can be: the renderer has a link, and
@@ -117,14 +130,20 @@ impl Voodoo {
                 }
             }
             BlitSource::Buffer { buffer, .. } => {
-                if !key.is_some_and(|k| k.layout().color.contains(buffer)) {
+                if !key.is_some_and(|k| k.color.contains(&(buffer * 2))) {
                     return false;
                 }
             }
             BlitSource::Fill(_) => {}
         }
-        // The renderer gets the pages the blit reads and draws into that
-        // it lacks first, then the blit after everything recorded.
+        // What was recorded before goes first, which leaves the recording
+        // room for the pages and the blit; then the renderer gets the
+        // pages the blit reads and draws into that it lacks.
+        let Some(mirror) = self.mirror.as_mut() else {
+            return false;
+        };
+        let mut commands = mirror.take_commands();
+        self.gpu_resend_dropped();
         let mut spans = vec![(start, end)];
         spans.extend(blit.src_span());
         for (a, b) in spans {
@@ -134,14 +153,25 @@ impl Voodoo {
             return false;
         };
         mirror.blit(blit);
-        let commands = mirror.take_commands();
+        commands.extend(mirror.take_commands());
         let gpu = self.gpu.get_mut();
         if let Some(link) = gpu.link.as_mut() {
             link.run(commands);
         }
         gpu.pages.drawn_on_gpu(start, end);
         gpu.blits += 1;
+        // A software picture, where one is wanted, is drawn again.
+        self.display_dirty = true;
         true
+    }
+
+    /// The recording dropped what it had (nobody took it), and the pages
+    /// of memory with it: the renderer gets them all again, but for those
+    /// it has newer.
+    pub(crate) fn gpu_resend_dropped(&mut self) {
+        if self.mirror.as_mut().is_some_and(|m| m.take_dropped()) {
+            self.gpu.get_mut().pages.resend();
+        }
     }
 
     /// The colour buffer of the 3D engine's at byte `at` of the memory,
@@ -189,7 +219,11 @@ impl Voodoo {
                 return false;
             };
             let row = u16::try_from(y).unwrap_or(u16::MAX);
-            words.push(Word { row, at: at / 2, value });
+            words.push(Word {
+                row,
+                at: at / 2,
+                value,
+            });
             placed.push((dest, x, y, value));
             (low, high) = (low.min(at), high.max(at + 2));
         }
@@ -221,11 +255,12 @@ impl Voodoo {
     }
 
     /// Bytes `start..end` of the card's memory are about to be read or
-    /// written here: read back the pages there that only the GPU has.
+    /// written here for the program: read back the pages there that only
+    /// the GPU has, which turn hot.
     #[inline]
     pub(crate) fn gpu_sync(&self, start: u32, end: u32) {
         if self.gpu.borrow().pages.any_gpu() {
-            self.read_back(start, end);
+            self.read_back(start, end, true);
         }
     }
 
@@ -239,43 +274,44 @@ impl Voodoo {
         let start = addr & self.fbi.mask;
         let end = start as u64 + len as u64;
         if end > self.fbi.mask as u64 + 1 {
-            self.gpu_sync_all();
+            self.read_back(0, self.fbi.ram.bytes() as u32, true);
         } else {
-            self.read_back(start, end as u32);
+            self.read_back(start, end as u32, true);
         }
     }
 
-    /// All the pages only the GPU has, read back: before a save state,
-    /// or when the renderer goes.
+    /// All the pages only the GPU has, read back for the emulator itself:
+    /// a save state, the software picture, the renderer going. They don't
+    /// turn hot, as the program didn't ask for them.
     pub(crate) fn gpu_sync_all(&self) {
-        self.gpu_sync(0, self.fbi.ram.bytes() as u32);
+        if self.gpu.borrow().pages.any_gpu() {
+            self.read_back(0, self.fbi.ram.bytes() as u32, false);
+        }
     }
 
+    /// Read back the pages within bytes `start..end` that only the GPU
+    /// has, hot from now on if `hot`.
     #[cold]
-    fn read_back(&self, start: u32, end: u32) {
+    fn read_back(&self, start: u32, end: u32, hot: bool) {
         let mut gpu = self.gpu.borrow_mut();
-        let runs = gpu.pages.take_gpu(start, end);
-        if runs.is_empty() {
-            return;
-        }
-        let Some(link) = gpu.link.as_mut() else {
-            // Without the renderer, its pages are lost: the memory keeps
-            // what it had before they were drawn.
-            self.log_once_gpu_lost();
-            return;
-        };
+        let gpu = &mut *gpu;
+        let runs = gpu.pages.take_gpu(start, end, hot);
         let mut bytes = Vec::new();
-        for &(a, b) in &runs {
+        for (a, b) in runs {
             bytes.resize((b - a) as usize, 0);
-            link.read(a, &mut bytes);
-            self.fbi.ram.write_bytes(a as usize, &bytes);
+            let read = gpu
+                .link
+                .as_mut()
+                .is_some_and(|link| link.read(a, &mut bytes));
+            if read {
+                self.fbi.ram.write_bytes(a as usize, &bytes);
+                gpu.read_back += ((b - a) / PAGE) as u64;
+            } else if !std::mem::replace(&mut gpu.lost, true) {
+                // Without the renderer, its pages are lost: the memory
+                // keeps what it had before they were drawn.
+                eprintln!("[3DFX] the OpenGL renderer went with pages only it had");
+            }
         }
-        let pages: u32 = runs.iter().map(|&(a, b)| (b - a) / PAGE).sum();
-        gpu.read_back += pages as u64;
-    }
-
-    fn log_once_gpu_lost(&self) {
-        eprintln!("[3DFX] the OpenGL renderer went with pages only it had");
     }
 
     /// For `/api/status`: the 2D operations done on the GPU, and the

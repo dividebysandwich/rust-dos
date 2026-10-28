@@ -1649,7 +1649,10 @@ fn pixels_written_into_a_buffer_wait_behind_the_drawing() {
     init(&mut sw);
     let back = 150 * 0x1000;
     let pixels: Vec<(u32, u16)> = (0..400u32)
-        .map(|i| (back + ((i * 7 % 480) * 640 + i * 13 % 640) * 2, (i.wrapping_mul(2654435761) >> 16) as u16))
+        .map(|i| {
+            let at = back + ((i * 7 % 480) * 640 + i * 13 % 640) * 2;
+            (at, (i.wrapping_mul(2654435761) >> 16) as u16)
+        })
         .collect();
     for bus in [&mut gl, &mut sw] {
         frames(bus, 3);
@@ -1752,6 +1755,7 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
                     Convert::Narrow => {
                         (value >> 19 & 31) << 11 | (value >> 10 & 63) << 5 | (value >> 3 & 31)
                     }
+                    Convert::ClearTop => value & 0xFF_FFFF,
                 };
                 let at = (d.start + y as u32 * d.stride + x as u32 * d.bpp) as usize;
                 let bpp = d.bpp as usize;
@@ -1905,6 +1909,19 @@ fn gpu_blits_leave_the_memory_as_software_does() {
             },
             convert: Convert::Narrow,
             ..at([500, 300, 540, 340])
+        },
+        Blit {
+            dst: Plane {
+                start: 0x14_0000,
+                stride: 2560,
+                bpp: 4,
+            },
+            src: BlitSource::Memory {
+                plane: p32,
+                rect: [300, 0, 364, 32],
+            },
+            convert: Convert::ClearTop,
+            ..plain.clone()
         },
         Blit {
             dst: Plane {

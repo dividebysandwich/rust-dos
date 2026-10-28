@@ -1839,7 +1839,7 @@ fn main() -> Result<(), String> {
             Zone::FrameCompose
         });
         cpu.bus.sync_display();
-        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo);
+        let voodoo_gl = display.run_voodoo(&mut cpu.bus, &settings.voodoo, det.is_none());
         if !voodoo_gl
             && !voodoo_picture
             && let Some(v) = &mut cpu.bus.voodoo
