@@ -76,6 +76,7 @@ pub static POSTS: &[Post] = &[
     super::user::post,
     super::message::post,
     super::hook::post,
+    super::hook::post_msg_filter,
 ];
 
 pub const POST_PLAIN: u16 = 0;
@@ -83,6 +84,7 @@ pub const POST_AUTO: u16 = 1;
 pub const POST_USER: u16 = 2;
 pub const POST_MESSAGE: u16 = 3;
 pub const POST_HOOK: u16 = 4;
+pub const POST_MSG_FILTER: u16 = 5;
 
 /// The thens, by their place. Append only.
 pub static THENS: &[Then] = &[

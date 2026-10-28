@@ -120,7 +120,7 @@ fn make_long(low: u32, high: u32) -> u32 {
     (high & 0xFFFF) << 16 | low & 0xFFFF
 }
 
-fn sx(v: u32) -> u32 {
+pub(super) fn sx(v: u32) -> u32 {
     v as u16 as i16 as i32 as u32
 }
 
@@ -947,6 +947,12 @@ fn window_ds(cpu: &Cpu, hwnd: u32, thunk: &Thunk) -> u16 {
     } else {
         thunk.extra as u16
     };
+    instance_ds(cpu, instance)
+}
+
+/// The automatic data segment of the instance `instance`: its selector,
+/// or 0 for none or one that is gone.
+pub(super) fn instance_ds(cpu: &Cpu, instance: u16) -> u16 {
     if instance == 0 {
         return 0;
     }

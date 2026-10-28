@@ -9,26 +9,26 @@
 //! with CallNextHookEx or DefHookProc, which give the next hook the
 //! 32-bit structure again.
 
-use super::message::{self, Stack16};
+use super::message::{self, Stack16, sx};
 use super::thunk::{self, ESP, KIND_HOOK};
-use super::{Frame, Thunk, global, read_16, read_32, write_16, write_32};
+use super::{Frame, Thunk, read_16, read_32, write_16, write_32};
 use crate::cpu::Cpu;
 use crate::dpmi::Context;
+use crate::win32::user32::hook::{
+    Hook, WH_CALLWNDPROC, WH_CBT, WH_GETMESSAGE, WH_JOURNALRECORD, WH_MOUSE, WH_MSGFILTER,
+    WH_SHELL, WH_SYSMSGFILTER,
+};
+use crate::win32::user32::window::{HCBT_ACTIVATE, HCBT_CREATEWND, HCBT_MOVESIZE};
 
-const WH_MSGFILTER: i32 = -1;
-const WH_JOURNALRECORD: i32 = 0;
 const WH_JOURNALPLAYBACK: i32 = 1;
-const WH_GETMESSAGE: i32 = 3;
-const WH_CALLWNDPROC: i32 = 4;
-const WH_CBT: i32 = 5;
-const WH_SYSMSGFILTER: i32 = 6;
-const WH_MOUSE: i32 = 7;
-const WH_MAX: i32 = 12;
-
-const HCBT_MOVESIZE: u32 = 0;
-const HCBT_CREATEWND: u32 = 3;
-const HCBT_ACTIVATE: u32 = 5;
 const HCBT_CLICKSKIPPED: u32 = 6;
+
+/// The kinds of hook Windows 3.1 has: WH_SHELL is its last.
+const KINDS: std::ops::RangeInclusive<i32> = WH_MSGFILTER..=WH_SHELL;
+
+/// Windows 3.1's CW_USEDEFAULT, and the 32-bit one.
+const CW_USEDEFAULT16: u32 = 0x8000;
+const CW_USEDEFAULT: u32 = 0x8000_0000;
 
 /// A hook thunk's `extra`: the hook's kind in the low byte, the data
 /// segment its procedure gets in the high word.
@@ -44,12 +44,37 @@ fn hook_ds(cpu: &Cpu, instance: u16) -> u16 {
     } else {
         super::current_task(cpu).map_or(0, |t| cpu.bus.win32.win16.tasks[t].instance)
     };
-    let sel = global::handle_to_sel(instance);
-    if instance != 0 && super::selector_base(cpu, sel).is_some() {
-        sel
-    } else {
-        0
-    }
+    message::instance_ds(cpu, instance)
+}
+
+/// The 16-bit hook a USER32 hook stands for: its procedure's 16:16
+/// address and its data segment, if it is one.
+fn hook16(cpu: &Cpu, hook: &Hook) -> Option<(u32, u16)> {
+    let t = thunk::thunk32_of(cpu, hook.proc).filter(|t| t.kind == KIND_HOOK)?;
+    Some((t.target, (t.extra >> 16) as u16))
+}
+
+/// Take away the 16-bit hooks `gone` picks.
+fn remove(cpu: &mut Cpu, gone: impl Fn(&Hook, u32, u16) -> bool) {
+    let hooks = std::mem::take(&mut cpu.bus.win32.user.hooks);
+    let kept = hooks
+        .into_iter()
+        .filter(|h| hook16(cpu, h).is_none_or(|(proc, ds)| !gone(h, proc, ds)))
+        .collect();
+    cpu.bus.win32.user.hooks = kept;
+}
+
+/// A task ended: the hooks of its thread go, and those whose data
+/// segment was its instance's when that goes with it (`ds`, else 0), as
+/// Windows 3.1 takes a task's hooks away.
+pub fn task_ended(cpu: &mut Cpu, tid: u32, ds: u16) {
+    remove(cpu, |h, _, hook_ds| h.tid == tid || ds != 0 && hook_ds == ds);
+}
+
+/// A module was unloaded: the hooks whose procedures were in its code
+/// segments, the selectors `code`, go.
+pub fn module_unloaded(cpu: &mut Cpu, code: &[u16]) {
+    remove(cpu, |_, proc, _| code.contains(&((proc >> 16) as u16 | 3)));
 }
 
 /// The 32-bit slot for the 16-bit hook procedure `proc` of `kind`.
@@ -64,7 +89,7 @@ pub fn set_windows_hook_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let kind = args[0] as i16 as i32;
     let instance = args[2] as u16;
     let task = args[3] as u16;
-    if !(WH_MSGFILTER..=WH_MAX).contains(&kind) {
+    if !KINDS.contains(&kind) {
         return Some(0);
     }
     let tid = if task == 0 {
@@ -87,7 +112,7 @@ pub fn set_windows_hook_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// it gives for DefHookProc, where Windows 3.1 gives the hook before it.
 pub fn set_windows_hook(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let kind = args[0] as i16 as i32;
-    if !(WH_MSGFILTER..=WH_MAX).contains(&kind) {
+    if !KINDS.contains(&kind) {
         return Some(0);
     }
     let proc = proc32(cpu, args[1], kind, 0);
@@ -96,13 +121,22 @@ pub fn set_windows_hook(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     None
 }
 
-/// UnhookWindowsHook(kind, proc).
+/// UnhookWindowsHook(kind, proc): the latest hook of `kind` with the
+/// procedure `proc`, whichever task set it, since Windows 3.1's tasks
+/// share their hooks.
 pub fn unhook_windows_hook(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let kind = args[0] as i16 as i32;
-    let proc = proc32(cpu, args[1], kind, 0);
-    let unhook = crate::win32::user32::address_of("UnhookWindowsHook");
-    thunk::call32(cpu, unhook, &[kind as u32, proc], thunk::POST_PLAIN, Vec::new());
-    None
+    let (kind, proc) = (args[0] as i16 as i32, args[1]);
+    let hooks = &cpu.bus.win32.user.hooks;
+    let found = hooks
+        .iter()
+        .rposition(|h| h.kind == kind && hook16(cpu, h).is_some_and(|(p, _)| p == proc));
+    match found {
+        Some(i) => {
+            cpu.bus.win32.user.hooks.remove(i);
+            Some(1)
+        }
+        None => Some(0),
+    }
 }
 
 /// CallNextHookEx(hook, code, wParam, lParam).
@@ -134,14 +168,32 @@ fn call_next(cpu: &mut Cpu, hook: u32, code: u32, wp: u32, lp: u32) -> Option<u3
 }
 
 /// CallMsgFilter(msg, code): the WH_MSGFILTER hooks' answer, whether
-/// they took the message.
+/// they took the message. What the hooks change in it goes back to the
+/// caller's MSG16, which on Windows 3.1 is the one they get.
 pub fn call_msg_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let m = thunk::scratch32(cpu, 28);
     let top = message::msg32(cpu, args[0], m);
     let filter = crate::win32::user32::address_of("CallMsgFilterA");
     let ctx = Context::of(cpu);
-    thunk::enter32_at(cpu, ctx, top, filter, &[m, args[1]], thunk::POST_PLAIN, Vec::new());
+    let mut data = vec![args[0], m];
+    data.extend((0..7).map(|i| read_32(cpu, m + 4 * i)));
+    let post = thunk::POST_MSG_FILTER;
+    thunk::enter32_at(cpu, ctx, top, filter, &[m, args[1]], post, data);
     None
+}
+
+/// CallMsgFilterA returned: the MSG16 gets the message again if a hook
+/// changed it.
+pub fn post_msg_filter(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<u32> {
+    if let [m16, m, was @ ..] = data
+        && was
+            .iter()
+            .enumerate()
+            .any(|(i, &v)| read_32(cpu, m + 4 * i as u32) != v)
+    {
+        message::msg16(cpu, *m, *m16);
+    }
+    Some(value)
 }
 
 /// A hook's call as its thunk made it: the 32-bit arguments, and the
@@ -231,12 +283,19 @@ pub fn call_hook16(cpu: &mut Cpu, thunk: &Thunk) {
 }
 
 /// A 16-bit hook returned DX:AX: what it changed goes back to the 32-bit
-/// structure, and USER32 gets the whole of DX:AX.
+/// structure. USER32 gets AX, the BOOL hooks of Windows 3.1 answer with
+/// (they may leave anything in DX), or the whole of DX:AX for a journal
+/// playback hook, which gives a time to wait.
 pub fn then(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<u32> {
-    if let Some(call) = Call::of(data) {
-        to32(cpu, &call);
+    let Some(call) = Call::of(data) else {
+        return Some(value);
+    };
+    to32(cpu, &call);
+    if call.kind == WH_JOURNALPLAYBACK {
+        Some(value)
+    } else {
+        Some(value & 0xFFFF)
     }
-    Some(value)
 }
 
 /// CallNextHookEx of a 16-bit hook returned: what the next hooks changed
@@ -254,11 +313,6 @@ fn r16(cpu: &Cpu, at: u32) -> u32 {
 
 fn w16(cpu: &mut Cpu, at: u32, value: u32) {
     write_16(cpu, at, value as u16);
-}
-
-/// A signed word widened.
-fn sx(value: u32) -> u32 {
-    value as u16 as i16 as i32 as u32
 }
 
 /// The size of the 16-bit copy of what a hook's lParam points to, if it
@@ -325,6 +379,49 @@ fn to16(cpu: &mut Cpu, kind: i32, code: u32, lp: u32, stack: &mut Stack16) -> (u
     (seg, at)
 }
 
+/// What a CBT hook changed in the CREATESTRUCT16 at `cs16` (its place,
+/// size and styles) back to the CREATESTRUCT at `cs`. A field the hook
+/// left keeps its 32-bit value, which the word may not hold.
+fn create_struct32(cpu: &mut Cpu, cs16: u32, cs: u32) {
+    if cs16 == 0 || cs == 0 {
+        return;
+    }
+    // cy, cx, y, x.
+    for i in 0..4 {
+        let (at16, at) = (cs16 + 10 + 2 * i, cs + 16 + 4 * i);
+        let (v16, v) = (r16(cpu, at16), read_32(cpu, at));
+        if v16 != v & 0xFFFF {
+            let v16 = if v16 == CW_USEDEFAULT16 { CW_USEDEFAULT } else { sx(v16) };
+            write_32(cpu, at, v16);
+        }
+    }
+    let style = read_32(cpu, cs16 + 18);
+    write_32(cpu, cs + 32, style);
+    // The copy has no WS_EX_WINDOWEDGE, which Windows 3.1 doesn't have.
+    let edge = super::user::WS_EX_WINDOWEDGE;
+    let (ex16, ex) = (read_32(cpu, cs16 + 30), read_32(cpu, cs + 44));
+    if ex16 != ex & !edge {
+        write_32(cpu, cs + 44, ex16 | ex & edge);
+    }
+}
+
+/// The place, size and styles of the CREATESTRUCT at `cs` to the
+/// CREATESTRUCT16 at `cs16`, as a hook passing the call on gets them back
+/// from the next ones.
+fn create_struct16(cpu: &mut Cpu, cs: u32, cs16: u32) {
+    if cs16 == 0 || cs == 0 {
+        return;
+    }
+    for i in 0..4 {
+        let v = read_32(cpu, cs + 16 + 4 * i);
+        w16(cpu, cs16 + 10 + 2 * i, v);
+    }
+    let style = read_32(cpu, cs + 32);
+    write_32(cpu, cs16 + 18, style);
+    let ex = read_32(cpu, cs + 44) & !super::user::WS_EX_WINDOWEDGE;
+    write_32(cpu, cs16 + 30, ex);
+}
+
 /// Write the 32-bit structure of `call` to its 16-bit copy (all of it
 /// but CBT_CREATEWND16's CREATESTRUCT16, which is made once).
 fn fill16(cpu: &mut Cpu, call: &Call) {
@@ -343,6 +440,8 @@ fn fill16(cpu: &mut Cpu, call: &Call) {
         (WH_CBT, HCBT_CREATEWND) => {
             let after = read_32(cpu, lp + 4);
             w16(cpu, at + 4, after);
+            let cs16 = super::linear(cpu, read_32(cpu, at));
+            create_struct16(cpu, read_32(cpu, lp), cs16);
         }
         // CBTACTIVATESTRUCT: fMouse, hWndActive.
         (WH_CBT, HCBT_ACTIVATE) => {
@@ -377,9 +476,9 @@ fn fill16(cpu: &mut Cpu, call: &Call) {
 }
 
 /// Write what a 16-bit hook may change in its copy back to the 32-bit
-/// structure of `call`: the window to go after of a window being made,
-/// the message a filter or GetMessage hook gets, the event a journal
-/// gives back.
+/// structure of `call`: the window being made, and the window to go
+/// after; the message a filter or GetMessage hook gets; the event a
+/// journal gives back.
 fn to32(cpu: &mut Cpu, call: &Call) {
     let (lp, at) = (call.lp, call.at16);
     if at == 0 {
@@ -391,28 +490,22 @@ fn to32(cpu: &mut Cpu, call: &Call) {
             let after = r16(cpu, at + 4);
             let after = if after >= 0xFFFE { sx(after) } else { after };
             write_32(cpu, lp + 4, after);
+            let cs16 = super::linear(cpu, read_32(cpu, at));
+            create_struct32(cpu, cs16, read_32(cpu, lp));
         }
         (WH_MSGFILTER | WH_SYSMSGFILTER | WH_GETMESSAGE, _) => {
-            // Only the fields the hook changed, so that a message whose
-            // parameters a MSG16 packs differently keeps its own.
-            let hwnd = read_32(cpu, lp);
-            let msg = read_32(cpu, lp + 4);
-            let wp = read_32(cpu, lp + 8);
-            let lparam = read_32(cpu, lp + 12);
-            let was = message::posted16(cpu, hwnd, msg, wp, lparam);
-            let now = (r16(cpu, at + 2), r16(cpu, at + 4), read_32(cpu, at + 6));
-            let hwnd16 = r16(cpu, at);
-            if hwnd16 != hwnd & 0xFFFF {
-                write_32(cpu, lp, hwnd16);
-            }
-            if now.0 != was.0 & 0xFFFF {
-                write_32(cpu, lp + 4, now.0);
-            }
-            if now.1 != was.1 & 0xFFFF {
-                write_32(cpu, lp + 8, now.1);
-            }
-            if now.2 != was.2 {
-                write_32(cpu, lp + 12, now.2);
+            // The message again from the copy if the hook changed it, so
+            // that one whose parameters a MSG16 packs differently keeps
+            // its own when it didn't.
+            let m16 = thunk::scratch32(cpu, 18);
+            message::msg16(cpu, lp, m16);
+            if super::peek(cpu, m16, 18) != super::peek(cpu, at, 18) {
+                let m = thunk::scratch32(cpu, 28);
+                message::msg32(cpu, at, m);
+                for i in 0..7 {
+                    let v = read_32(cpu, m + 4 * i);
+                    write_32(cpu, lp + 4 * i, v);
+                }
             }
         }
         (WH_JOURNALPLAYBACK, _) => {

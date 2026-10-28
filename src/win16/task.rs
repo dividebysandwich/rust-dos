@@ -782,17 +782,18 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     }
     crate::win32::user32::destroy_thread_windows(cpu, task.tid);
     global::free_owned(cpu, task.handle);
-    if task.instance != 0 {
-        let shared = cpu
-            .bus
-            .win32
-            .win16
-            .modules
-            .iter()
-            .any(|m| m.dgroup == task.instance);
-        if !shared {
-            global::free(cpu, task.instance);
-        }
+    let shared = cpu
+        .bus
+        .win32
+        .win16
+        .modules
+        .iter()
+        .any(|m| m.dgroup == task.instance);
+    let freed = task.instance != 0 && !shared;
+    let ds = if freed { global::handle_to_sel(task.instance) } else { 0 };
+    super::hook::task_ended(cpu, task.tid, ds);
+    if freed {
+        global::free(cpu, task.instance);
     }
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);
