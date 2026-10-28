@@ -1008,17 +1008,12 @@ impl Voodoo {
         if self.backlog.borrow().is_empty() {
             return;
         }
-        // What they reach is the backlog's footprint, which they take
-        // along.
+        let held = self.backlog.borrow_mut().take();
         let workers = self.pool.workers() > 0;
-        let held = {
-            let mut backlog = self.backlog.borrow_mut();
-            if workers {
-                self.footprint.borrow_mut().merge(backlog.footprint());
-            }
-            backlog.take()
-        };
         for job in held {
+            if workers {
+                self.footprint.borrow_mut().add(&job);
+            }
             self.outstanding.set(workers);
             self.pool.submit(job);
         }
@@ -1042,7 +1037,19 @@ impl Voodoo {
         let (start, end) = (start as u64, end as u64);
         self.writes_queue()
             && (self.footprint.borrow().touches(start, end)
-                || self.backlog.borrow().footprint().touches(start, end))
+                || self.backlog.borrow().touches(start, end))
+    }
+
+    /// Make bytes `start..end` of the frame buffer's memory free to be
+    /// written before the jobs given out or held back are drawn, where
+    /// that can be done: the jobs held back that take texels from there
+    /// get a copy of them as they are (`Backlog::spare`). False if the
+    /// jobs have to be drawn first.
+    pub(crate) fn spare(&self, start: u32, end: u32) -> bool {
+        let (start, end) = (start as u64, end as u64);
+        !self.writes_queue()
+            || !self.footprint.borrow().touches(start, end)
+                && self.backlog.borrow_mut().spare(start, end)
     }
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
@@ -1448,6 +1455,7 @@ impl Voodoo {
     /// the last, and the program waits with it (`Effect::hold_to`), so
     /// frames come at an even pace when it could draw them faster.
     pub(crate) fn swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        self.backlog.borrow_mut().swapped();
         if let Some(cap) = self.cap_timing() {
             let frame = cap.frame_ns();
             let earliest = if self.capped_at == 0 { now.ns } else { now.ns.max(self.capped_at + frame) };
@@ -1850,6 +1858,7 @@ impl Voodoo {
             "held_jobs": self.backlog.borrow().len(),
             "pruned_jobs": self.backlog.borrow().pruned,
             "catch_ups": self.catch_ups.get(),
+            "released_jobs": self.backlog.borrow().released,
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),
             "banshee": self.banshee.as_ref().map(|b| b.describe()),

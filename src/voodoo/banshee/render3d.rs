@@ -240,6 +240,7 @@ impl Voodoo {
     /// `voodoo_reg_writel`). The address is taken now, so a program can
     /// set the next one while the swap waits.
     fn banshee_swap(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        self.backlog.borrow_mut().swapped();
         let addr = self.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF;
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
@@ -320,7 +321,7 @@ impl Voodoo {
         let size = self.fbi.mask as usize + 1;
         let start = addr as usize & (size - 1);
         let (here, wrapped) = data.split_at(data.len().min(size - start));
-        if self.queued_reach(start as u32, (start + here.len()) as u32) {
+        if !self.spare(start as u32, (start + here.len()) as u32) {
             self.flush();
         }
         self.fbi.ram.store_bytes(start, here);

@@ -1352,7 +1352,7 @@ pub fn fastfill_row(st: &RasterState, dither: &[u16; 16], y: i32, startx: i32, s
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1388,7 +1388,7 @@ mod tests {
     /// 1024-pixel-wide colour buffer with a depth buffer after it, and
     /// fbzMode, fbzColorPath, alphaMode, fogMode and the units' modes from
     /// `regs`.
-    pub(super) fn two_unit_state(regs: [u32; 6]) -> RasterState {
+    pub(crate) fn two_unit_state(regs: [u32; 6]) -> RasterState {
         let lookup: Arc<[u32]> = (0..0x10000u32).map(|i| i.wrapping_mul(0x9E37_79B9)).collect();
         let tmu = |mode: u32| {
             let ram = Vram::new(1 << 20);
