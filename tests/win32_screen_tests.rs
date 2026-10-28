@@ -2375,3 +2375,38 @@ fn the_cursor_shows_in_a_320_by_240_vesa_mode() {
 fn the_cursor_shows_in_a_320_by_200_voodoo3_mode() {
     the_cursor_shows_in_a_small_mode("cursor_voodoo3_320", Some(Board::Voodoo3), (320, 200));
 }
+
+/// Over a DirectDraw mode of 320 pixels across, the host's pointer
+/// spans the mode's pixels, whatever size the frame shows them at: the
+/// middle of the picture is the middle of the screen, its bottom-right
+/// corner the screen's, and a captured mouse moves the cursor as far as
+/// the picture moves under it.
+fn the_pointer_spans_a_small_mode(test: &str, board: Option<Board>, (w, h): (u32, u32)) {
+    let (program, data) = mode_cursor_program(w, h);
+    let mut cpu = if board == Some(Board::Voodoo3) {
+        machine(test, program)
+    } else {
+        card_machine(test, board, program)
+    };
+    run_until(&mut cpu, data, 1);
+    let (frame_w, frame_h) = video::frame_size(&cpu.bus);
+    let frame = Frame::new(frame_w, frame_h);
+    let (fw, fh) = (frame_w as i32, frame_h as i32);
+    let (w, h) = (w as i32, h as i32);
+    let to_mouse = |at| video::overlay::frame_to_mouse(&cpu.bus, &frame, at);
+    assert_eq!(to_mouse((fw / 2, fh / 2)), (w / 2, h / 2), "the middle");
+    assert_eq!(to_mouse((fw - 1, fh - 1)), (w - 1, h - 1), "the bottom-right corner");
+    let (sx, sy) = ((frame_w / w as u32) as f64, (frame_h / h as u32) as f64);
+    let motion = video::overlay::frame_motion_to_mouse(&cpu.bus, &frame, (sx * 10.0, sy * 10.0));
+    assert_eq!(motion, (10.0, 10.0), "ten of the mode's pixels");
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_240_vesa_mode() {
+    the_pointer_spans_a_small_mode("pointer_vesa_320", None, (320, 240));
+}
+
+#[test]
+fn the_pointer_spans_a_320_by_200_voodoo3_mode() {
+    the_pointer_spans_a_small_mode("pointer_voodoo3_320", Some(Board::Voodoo3), (320, 200));
+}
