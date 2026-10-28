@@ -956,10 +956,12 @@ impl Backlog {
 
     /// Drop the jobs whose pixels nothing can see any more: everything is
     /// visible after the last job, and going back, a job's writes are
-    /// visible where the tiles are and not killed by a later fill. A job
-    /// dropped still kills its tiles: the tiles of a colour buffer a
-    /// depth clear says are drawn over (`Cleared`) are drawn over by the
-    /// jobs after it, whether the clear stays or not.
+    /// visible where the tiles are and not killed by a later fill or
+    /// mark (`Cleared`: a depth clear, or a frame's first triangle after
+    /// a swap). A triangle is also dropped when the frames after it drew
+    /// over every pixel it covers. A job dropped still kills its tiles:
+    /// the tiles of a colour buffer a mark says are drawn over are drawn
+    /// over by the jobs after it, whether the mark stays or not.
     pub fn prune(&mut self) {
         self.since_prune = 0;
         let mut live = [Tiles::ALL; 4];
@@ -1081,11 +1083,11 @@ impl Backlog {
     /// from there take them from a copy of their texture's levels as they
     /// are now, in memory of their own. `given_out` is what the jobs the
     /// workers have, which draw before these, may read and write, and
-    /// `read_back` gets the bytes about to be copied (`Voodoo::gpu_sync`).
-    /// False if a job draws into those bytes or into a texture to copy,
-    /// a job given out reads them, or a texture is too large to copy
-    /// (more than 4 MB, or all of the memory where its levels wrap
-    /// round): the jobs have to be drawn first.
+    /// `read_back` gets the bytes about to be copied
+    /// (`Voodoo::gpu_sync_quiet`). False if a job draws into those bytes
+    /// or into a texture to copy, a job given out reads them, or a
+    /// texture is too large to copy (more than 4 MB, or all of the memory
+    /// where its levels wrap round): the jobs have to be drawn first.
     pub fn spare(
         &mut self,
         (start, end): (u64, u64),
@@ -1761,6 +1763,10 @@ mod tests {
             "between ranges kept apart"
         );
         assert!(f.touches(0x10_3D80, 0x10_3E00) && f.touches(0x10_3E80, 0x10_3F00));
+        let mut g = Footprint::default();
+        g.merge(&f);
+        assert!(g.touches(0x2FFF, 0x3001) && g.touches(0x80_0000, 0x80_0004));
+        assert!(!g.touches(0x3000, 0x8000));
         f.clear();
         assert!(!f.touches(0, u64::MAX));
     }

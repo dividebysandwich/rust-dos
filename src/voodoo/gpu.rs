@@ -282,6 +282,15 @@ impl Voodoo {
         }
     }
 
+    /// The pages within bytes `start..end` that only the GPU has, read
+    /// back for the emulator itself (`Backlog::spare` copying texels).
+    /// They don't turn hot, as the program didn't ask for them.
+    pub(crate) fn gpu_sync_quiet(&self, start: u32, end: u32) {
+        if self.gpu.borrow().pages.any_gpu() {
+            self.read_back(start, end, false);
+        }
+    }
+
     /// All the pages only the GPU has, read back for the emulator itself:
     /// a save state, the software picture, the renderer going. They don't
     /// turn hot, as the program didn't ask for them.

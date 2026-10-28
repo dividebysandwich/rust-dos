@@ -1051,7 +1051,7 @@ impl Voodoo {
         let range = (start as u64, end as u64);
         self.backlog
             .borrow_mut()
-            .spare(range, &given_out, |a, b| self.gpu_sync(a as u32, b as u32))
+            .spare(range, &given_out, |a, b| self.gpu_sync_quiet(a as u32, b as u32))
     }
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
