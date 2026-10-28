@@ -662,6 +662,13 @@ pub fn release(cpu: &mut Cpu, handle: u16) {
 /// Take the module at `index` away: its blocks, and its entry.
 fn unload(cpu: &mut Cpu, index: usize) {
     let m = cpu.bus.win32.win16.modules.remove(index);
+    let code: Vec<u16> = m
+        .segments
+        .iter()
+        .filter(|s| s.flags & ne::SEG_DATA == 0)
+        .map(|s| s.selector | 3)
+        .collect();
+    super::hook::module_unloaded(cpu, &code);
     for s in &m.segments {
         global::free(cpu, s.handle);
     }
