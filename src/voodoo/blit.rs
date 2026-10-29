@@ -8,7 +8,7 @@
 //! swizzling and transparent monochrome bits.
 
 use super::regs::*;
-use super::workers::Job;
+use super::workers::{Job, Word};
 use super::{NONE, Voodoo};
 
 /// A CPU-to-screen copy under way: where its next pixel goes, how many
@@ -159,6 +159,15 @@ impl Voodoo {
             self.display_dirty = true;
             return;
         }
+        if command & COMMAND == CPU_TO_SCREEN {
+            // Its pixels may wait behind the drawing (`blt_queue_dest`):
+            // blit_data waits for the drawing if they can't.
+            let xy = self.reg[BLT_DST_XY];
+            let (x, y) = ((xy & 0x7FF) as i32, ((xy >> 16) & 0x7FF) as i32);
+            let rows = s12(self.reg[BLT_SIZE] >> 16).max(0);
+            self.blt = super::blit::Blit { active: true, x, y, column: 0, rows };
+            return;
+        }
         // After what is drawn, which may read or write the same memory.
         self.flush();
         self.mirror_sync();
@@ -181,10 +190,6 @@ impl Voodoo {
                         self.blt_put(at(x, y, dst_base, dst_stride), src);
                     }
                 }
-            }
-            CPU_TO_SCREEN => {
-                self.blt = super::blit::Blit { active: true, x: dst_x, y: dst_y, column: 0, rows: size_y.max(0) };
-                return;
             }
             RECT_FILL => {
                 let color = self.reg[BLT_COLOR] as u16;
@@ -369,7 +374,10 @@ impl Voodoo {
         if command & COMMAND != CPU_TO_SCREEN || !self.blt.active {
             return;
         }
-        self.flush();
+        let queue = self.blt_queue_dest();
+        if queue.is_none() {
+            self.flush();
+        }
         self.mirror_sync();
         let mut data = data;
         if command & (1 << 8) != 0 {
@@ -390,6 +398,8 @@ impl Voodoo {
         }
         let lanes = (command >> 6) & 3;
         let mut bits = 32;
+        let mut words = [Word { row: 0, at: 0, value: 0 }; 32];
+        let mut queued = 0;
         while bits > 0 && self.blt.column <= size_x && self.blt.active {
             let x = self.blt.x + self.blt.column;
             let y = self.blt.y;
@@ -438,7 +448,12 @@ impl Voodoo {
                 && !self.blt_clipped(x, y)
             {
                 let addr = dst_base.wrapping_add((y as u32).wrapping_mul(dst_stride)).wrapping_add(2 * x as u32);
-                self.blt_put(addr, p);
+                if queue.is_some() {
+                    words[queued] = self.blt_word(addr, y, p);
+                    queued += 1;
+                } else {
+                    self.blt_put(addr, p);
+                }
             }
             self.blt.column += 1;
             if self.blt.column > size_x {
@@ -459,7 +474,65 @@ impl Voodoo {
                 bits -= skip;
             }
         }
+        if let Some(dest) = queue {
+            let words = &words[..queued];
+            if self.writes_queue() {
+                self.queue_words(words);
+            } else {
+                for w in words {
+                    self.fbi.ram.set(w.at as usize, w.value);
+                }
+            }
+            if !words.is_empty() {
+                self.mark_drawn(dest);
+            }
+        }
         self.display_dirty = true;
+    }
+
+    /// The colour buffer a CPU-to-screen copy writes into (its word
+    /// offset), when its pixels can wait behind the drawing queued before
+    /// them as frame buffer writes do (`lfb_write`): its raster operations
+    /// don't read the destination, and its rectangle lies in a colour
+    /// buffer, whose rows the triangles draw. Otherwise the drawing is
+    /// done first, for each word of data.
+    fn blt_queue_dest(&self) -> Option<usize> {
+        let command = self.blt_command();
+        if command & (DST_CHROMA | DST_TILED) != 0 {
+            return None;
+        }
+        // The ROPs the source chroma test picks from, which give the same
+        // pixel whatever the destination holds: 0, !s, s or 1s.
+        let rops: &[u32] = if command & SRC_CHROMA != 0 { &[0, 2] } else { &[0] };
+        let rop = |r: u32| (self.reg[BLT_ROP] >> (4 * r)) & 15;
+        if rops.iter().any(|&r| !matches!(rop(r), 0x0 | 0x3 | 0xC | 0xF)) {
+            return None;
+        }
+        let (base, stride) = self.blt_dst();
+        let f = &self.fbi;
+        if f.stride.tiled || stride as usize != 2 * f.stride.words {
+            return None;
+        }
+        // What is left of the copy, which runs right and down.
+        let right = self.blt.x as usize + s12(self.reg[BLT_SIZE]).max(0) as usize;
+        let bottom = self.blt.y as usize + self.blt.rows as usize;
+        let start = base as usize / 2;
+        if right >= f.stride.words || bottom >= f.height as usize || start + (bottom + 1) * f.stride.words > f.ram.len() {
+            return None;
+        }
+        f.rgboffs.iter().any(|&o| o != NONE && o == base).then_some(start)
+    }
+
+    /// The frame buffer word a queued CPU-to-screen copy writes `src` to
+    /// at byte `addr`, on row `y` of its colour buffer (`blt_queue_dest`
+    /// checked both are in it).
+    fn blt_word(&mut self, addr: u32, y: i32, src: u16) -> Word {
+        let at = (addr >> 1) as usize;
+        let command = self.blt_command();
+        let rop = if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) { 2 } else { 0 };
+        let value = mix(self.reg[BLT_ROP] >> (4 * rop), src, 0);
+        self.blt_mirror(at, value);
+        Word { row: y as u16, at: at as u32, value }
     }
 }
 
@@ -580,6 +653,69 @@ mod tests {
         let px = |x: usize, y: usize| v.fbi.ram.get(y * 1024 + x);
         assert_eq!([px(10, 1), px(11, 1), px(12, 1), px(13, 1)], [0x1111, 0x2222, 0x3333, 0]);
         assert_eq!([px(10, 2), px(11, 2), px(12, 2)], [0x4444, 0x5555, 0x6666]);
+    }
+
+    /// A copy from the CPU into the back buffer, 16-bit pixels with the
+    /// source copied: 4 pixels by 3 rows at (12, `y`), over what the
+    /// frames before drew there. `flags` go into bltCommand.
+    fn copy_into_back_buffer(v: &mut Voodoo, y: u32, flags: u32) {
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(v, BLT_ROP, 0xCCCC);
+        write(v, BLT_DST_BASE_ADDR, back);
+        write(v, BLT_XY_STRIDES, 1280 << 16);
+        write(v, BLT_DST_XY, y << 16 | 12);
+        write(v, BLT_SIZE, 2 << 16 | 3);
+        write(v, BLT_COMMAND, 1 << 31 | flags | 2 << 3 | CPU_TO_SCREEN);
+        for i in 1..=6 {
+            write(v, BLT_DATA, 0x0101_0101 * i);
+        }
+    }
+
+    #[test]
+    fn cpu_to_screen_copies_wait_behind_the_drawing() {
+        // Moto Racer copies its sky into the back buffer from the CPU at
+        // the start of each frame. A copy that doesn't read the
+        // destination waits behind the drawing queued before it, as frame
+        // buffer writes do, instead of waiting for it to be drawn: with
+        // the OpenGL renderer the jobs held back stay held. Either way
+        // the memory ends up as it would have.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut threads = glide_card(2);
+        let mut sw = glide_card(0);
+        for v in [&mut gl, &mut threads, &mut sw] {
+            glide_frames(v, 2);
+            copy_into_back_buffer(v, 30, 0);
+        }
+        let status = gl.describe(Now::default());
+        assert_eq!(status["catch_ups"], 0, "{}", status);
+        assert!(status["held_jobs"].as_u64().unwrap() > 0, "{}", status);
+        let memory = sw.frame_buffer().to_bytes();
+        let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+        let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
+        assert_eq!([px(12, 30), px(15, 30), px(12, 32), px(15, 32)], [0x0101, 0x0202, 0x0505, 0x0606]);
+        assert!(gl.frame_buffer().to_bytes() == memory);
+        assert!(threads.frame_buffer().to_bytes() == memory);
+    }
+
+    #[test]
+    fn other_cpu_to_screen_copies_wait_for_the_drawing() {
+        // Destination chroma keying reads what the drawing left there, and
+        // a copy past the buffer's last row writes memory the triangles
+        // don't draw by rows.
+        for (y, flags) in [(30, DST_CHROMA), (478, 0)] {
+            let mut gl = glide_card(2);
+            gl.set_mirror(true);
+            gl.set_software_picture(false);
+            let mut sw = glide_card(0);
+            for v in [&mut gl, &mut sw] {
+                glide_frames(v, 2);
+                copy_into_back_buffer(v, y, flags);
+            }
+            assert_eq!(gl.describe(Now::default())["held_jobs"], 0, "y {y}");
+            assert!(gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes(), "y {y}");
+        }
     }
 
     #[test]
