@@ -4,9 +4,13 @@
 //! (`block`) is switched out at once, and one that runs gives way to
 //! another that is ready after `SLICE`, switched when the timer's
 //! interrupt comes (`after_interrupt`), since programs spin on flags that
-//! another thread sets. When no thread can run, the processor runs the
-//! idle loop, a trap in KERNEL32 that lets time pass to the next
-//! interrupt.
+//! another thread sets. A wait that times out, such as a Sleep, ends when
+//! its time comes (`schedule_waits`), and its thread runs at once, as the
+//! boost Windows gives a thread whose wait ends lets it: a game that
+//! sleeps out the rest of its frame while another of its threads spins
+//! gets its next frame on time, not at the next interrupt. When no thread
+//! can run, the processor runs the idle loop, a trap in KERNEL32 that
+//! lets time pass to the next interrupt or timeout.
 //!
 //! Waits are kept with the threads (`Wait`). Whatever may end one (an
 //! object signaled, a thread ended, time passing) calls `wake`, which
@@ -306,12 +310,14 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
     }
 }
 
-/// Time a built-in device waited for came while the running thread ran
-/// (win32::timer): waits that ended end, and a thread that is ready and
-/// of a higher priority than the running one, as the multimedia thread
-/// is, runs at once instead of at the end of its turn.
+/// Time a built-in device or a thread's timeout waited for came while the
+/// running thread ran (win32::timer): waits that ended end, and a thread
+/// that is ready and of a higher priority than the running one, as the
+/// multimedia thread is, or one whose wait timed out and of the running
+/// one's priority or higher, runs at once instead of at the end of its
+/// turn.
 pub fn preempt(cpu: &mut Cpu) {
-    wake(cpu);
+    let timed_out = wake(cpu);
     let win32 = &cpu.bus.win32;
     let Some((p, t)) = current(win32) else {
         return;
@@ -323,7 +329,15 @@ pub fn preempt(cpu: &mut Cpu) {
         })?;
         Some((q, u))
     });
-    if let Some(next) = higher.filter(|&n| n != (p, t)) {
+    // A thread whose wait timed out is boosted over the others of its
+    // priority, as Windows boosts a thread whose wait ends.
+    let boosted = || {
+        timed_out.iter().copied().find(|&(q, u)| {
+            let th = &win32.processes[q].threads[u];
+            th.ready() && th.priority >= mine && crate::win16::task::may_run(win32, q, u)
+        })
+    };
+    if let Some(next) = higher.or_else(boosted).filter(|&n| n != (p, t)) {
         save(cpu, Context::of(cpu));
         enter(cpu, next);
     }
@@ -425,7 +439,30 @@ pub fn block(cpu: &mut Cpu, wait: Wait) {
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.wait = Some(wait);
     }
+    schedule_waits(cpu);
     reschedule(cpu);
+}
+
+/// When the first of the threads' timed waits that are still to come
+/// ends, by the clock's microseconds. A wait whose time has passed but
+/// that hasn't ended, while the system runs code of its own, ends at the
+/// next interrupt and gets no event of its own.
+pub(crate) fn wait_due(win32: &Win32, now: u64) -> Option<u64> {
+    win32
+        .processes
+        .iter()
+        .flat_map(|p| &p.threads)
+        .filter_map(|t| t.wait.as_ref()?.deadline)
+        .filter(|&d| d > now)
+        .min()
+}
+
+/// Make the end of the first timed wait a timer event
+/// (`Win32::next_event`).
+pub fn schedule_waits(cpu: &mut Cpu) {
+    let now = cpu.bus.clock.now_micros();
+    cpu.bus.win32.wait_due = wait_due(&cpu.bus.win32, now);
+    cpu.bus.reschedule_timers();
 }
 
 /// End the wait of the thread `at`, which returns `result`.
@@ -440,8 +477,8 @@ pub fn end_wait(win32: &mut Win32, (p, t): At, result: u32) {
     }
 }
 
-/// End the waits that can end now.
-pub fn wake(cpu: &mut Cpu) {
+/// End the waits that can end now. The threads whose waits timed out.
+pub fn wake(cpu: &mut Cpu) -> Vec<At> {
     super::user32::input::poll(cpu);
     super::dinput::poll(cpu);
     super::winmm::tick(cpu);
@@ -449,6 +486,7 @@ pub fn wake(cpu: &mut Cpu) {
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);
+    let mut timed_out = Vec::new();
     for p in 0..win32.processes.len() {
         for t in 0..win32.processes[p].threads.len() {
             let thread = &win32.processes[p].threads[t];
@@ -466,15 +504,16 @@ pub fn wake(cpu: &mut Cpu) {
                         .then_some(wait.objects.len() as u32)
                 })
                 .or_else(|| {
-                    wait.deadline
-                        .filter(|&d| now >= d)
-                        .map(|_| wait.timeout_result)
+                    wait.deadline.filter(|&d| now >= d)?;
+                    timed_out.push((p, t));
+                    Some(wait.timeout_result)
                 });
             if let Some(result) = result {
                 end_wait(win32, (p, t), result);
             }
         }
     }
+    timed_out
 }
 
 /// How many threads a process's list has room for: one TIB selector for

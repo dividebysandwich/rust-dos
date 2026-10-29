@@ -348,6 +348,11 @@ pub struct Win32 {
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     slice_start: u64,
+    /// When the first timed wait of a thread ends, by the clock's
+    /// microseconds (`thread::schedule_waits`), so that a Sleep ends on
+    /// time rather than at the next interrupt. Worked out again after a
+    /// load.
+    pub(crate) wait_due: Option<u64>,
     /// How many times programs have called functions of the system's
     /// modules, built-in or missing (`service`), to tell whether a thread
     /// called anything between two polls.
@@ -452,9 +457,10 @@ impl Win32 {
     }
 
     /// When WinMM next has work to do (its timers, MIDI streams and MCI
-    /// devices), in PIT ticks, for the bus's timer events.
+    /// devices) or a thread's wait times out, in PIT ticks, for the bus's
+    /// timer events.
     pub fn next_event(&self) -> Option<u64> {
-        let micros = self.winmm.due?;
+        let micros = [self.winmm.due, self.wait_due].into_iter().flatten().min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -490,13 +496,15 @@ impl Win32 {
     }
 }
 
-/// WinMM's or the sound device's time for work came (`Win32::due`),
-/// between two instructions: the work is done, and if the program's code
-/// was running, a thread of a higher priority that it readied (the
-/// multimedia thread, whose callbacks ran at interrupt time on Windows
-/// 95) runs at once.
+/// WinMM's or the sound device's time for work came, or a thread's wait
+/// timed out (`Win32::due`), between two instructions: the work is done,
+/// and if the program's code was running, a thread of a higher priority
+/// that it readied (the multimedia thread, whose callbacks ran at
+/// interrupt time on Windows 95) or one whose wait timed out runs at
+/// once (`thread::preempt`).
 pub fn timer(cpu: &mut Cpu) {
     cpu.bus.win32.winmm.due = None;
+    cpu.bus.win32.wait_due = None;
     if !cpu.bus.win32.active() {
         cpu.bus.win32.dsound.due = None;
         cpu.bus.win32.winmm.wave.due = None;
@@ -514,6 +522,7 @@ pub fn timer(cpu: &mut Cpu) {
         winmm::tick(cpu);
         dsound::tick(cpu);
     }
+    thread::schedule_waits(cpu);
     winmm::schedule(cpu);
 }
 
@@ -1346,4 +1355,14 @@ crate::state_fields!(Win32 {
     desktop_depth,
     atoms,
     desktop_size,
-} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files, trace });
+} skip {
+    enabled,
+    guest_dlls,
+    guest_replace,
+    version,
+    depth,
+    pending_arguments,
+    dll_files,
+    trace,
+    wait_due,
+});
