@@ -787,7 +787,7 @@ impl Bus {
     /// Invalidate cached decodes of the pages covering `start..end`.
     fn bump_page_gens(&mut self, start: usize, end: usize) {
         if self.observe.on {
-            self.observe.wrote(start >> GEN_SHIFT, (end - 1) >> GEN_SHIFT);
+            self.observe.wrote(start, end);
         }
         for page in (start >> GEN_SHIFT)..=((end - 1) >> GEN_SHIFT) {
             let g = &mut self.page_gen[page];
@@ -857,7 +857,7 @@ impl Bus {
             }
         }
         if self.observe.on {
-            self.observe.wrote(addr >> GEN_SHIFT, (addr + S as usize - 1) >> GEN_SHIFT);
+            self.observe.wrote(addr, addr + S as usize);
         }
     }
 
@@ -998,7 +998,7 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
             if self.observe.on {
-                self.observe.wrote(addr >> GEN_SHIFT, addr >> GEN_SHIFT);
+                self.observe.wrote(addr, addr + 1);
             }
             return false;
         }
@@ -1188,7 +1188,7 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
             if self.observe.on {
-                self.observe.wrote(addr >> GEN_SHIFT, (addr + 1) >> GEN_SHIFT);
+                self.observe.wrote(addr, addr + 2);
             }
             return false;
         }
@@ -1311,7 +1311,7 @@ impl Bus {
             let last = (addr + 3) >> GEN_SHIFT;
             self.page_gen[last] = self.page_gen[last].wrapping_add(1);
             if self.observe.on {
-                self.observe.wrote(addr >> GEN_SHIFT, last);
+                self.observe.wrote(addr, addr + 4);
             }
             return;
         }
@@ -2102,8 +2102,8 @@ impl Bus {
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
         let _profile = self.profile.as_mut().map(|p| p.port(port, true));
-        self.observe.port_write();
         self.clock.stall(crate::timer::IO_WRITE_NS);
+        self.observe.port_write(port, value, self.clock.icount);
         self.log_port(port, value as u32, 1, true);
         self.write_port(port, value);
         // The write may have programmed the PICs or made a device raise or

@@ -162,6 +162,7 @@ impl Clipboard {
         let (x0, x1) = ((c0 * g.cell_w()).min(w), ((c1 + 1) * g.cell_w()).min(w));
         let (y0, y1) = ((r0 * g.cell_h()).min(h), ((r1 + 1) * g.cell_h()).min(h));
         for y in y0..y1 {
+            frame.mark_overlay_rect(x0, y, x1 - x0, 1);
             for pixel in frame.rgba[(y * w + x0) * 4..(y * w + x1) * 4]
                 .as_chunks_mut::<4>().0
             {

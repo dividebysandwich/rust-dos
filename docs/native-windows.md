@@ -512,9 +512,6 @@ Some differences hold for every setup:
 
 - Names on a drive that is a host folder are in capitals, as DOS made
   them: the Start menu's folder is `START MENU`.
-- The CD's Joliet names aren't read, so files the setup copies by
-  their long names from the CD get 8.3 ones (Enemy Infestation's
-  `.url` shortcuts are `PLAYON~1.URL`).
 - Shortcuts are smaller: they have no relative path and no file
   times. Their targets, working folders and icons are the same.
 - Dialog text is laid out with other font metrics, so some lines wrap

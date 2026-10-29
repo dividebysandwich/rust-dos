@@ -177,6 +177,8 @@ pub struct Frame {
     /// the 256-color renderer draws 320x200: the picture is all there at
     /// half the size (which the window may show instead, `display`).
     pub doubled: bool,
+    /// Coverage distinguishes same-colour overlays from untouched pixels.
+    overlay: Option<Vec<u8>>,
     /// What the rows were drawn from, where the renderer keeps it (see
     /// `DrawnFrom`).
     drawn_from: DrawnFrom,
@@ -188,6 +190,7 @@ impl Clone for Frame {
     fn clone(&self) -> Self {
         Self {
             doubled: self.doubled,
+            overlay: self.overlay.clone(),
             ..Self::from_rgba(self.width, self.height, self.rgba.clone())
         }
     }
@@ -195,6 +198,14 @@ impl Clone for Frame {
     fn clone_from(&mut self, source: &Self) {
         (self.width, self.height, self.doubled) = (source.width, source.height, source.doubled);
         self.rgba.clone_from(&source.rgba);
+        if let Some(mask) = &mut self.overlay {
+            // Keep the tracking buffer for the next composition, but clear
+            // its coverage because these pixels are the restored base.
+            mask.resize(source.width as usize * source.height as usize, 0);
+            mask.fill(0);
+        } else {
+            self.overlay = source.overlay.clone();
+        }
         self.drawn_from = DrawnFrom::default();
     }
 }
@@ -275,6 +286,7 @@ impl Frame {
             height,
             rgba,
             doubled: false,
+            overlay: None,
             drawn_from: DrawnFrom::default(),
         }
     }
@@ -282,6 +294,9 @@ impl Frame {
     /// Paint the whole picture an opaque colour.
     pub fn clear(&mut self, [r, g, b]: [u8; 3]) {
         self.rgba.as_chunks_mut::<4>().0.fill([r, g, b, 255]);
+        if let Some(mask) = &mut self.overlay {
+            mask.fill(0);
+        }
         self.drawn_from = DrawnFrom::default();
     }
 
@@ -291,8 +306,52 @@ impl Frame {
         if (width, height) == (self.width, self.height) {
             return false;
         }
+        let track_overlays = self.overlay.is_some();
         *self = Self::new(width, height);
+        self.track_overlays(track_overlays);
         true
+    }
+
+    /// Track pixels drawn over this frame even when their colour is unchanged.
+    pub fn track_overlays(&mut self, enabled: bool) {
+        if enabled {
+            self.overlay
+                .get_or_insert_with(|| vec![0; self.width as usize * self.height as usize]);
+        } else {
+            self.overlay = None;
+        }
+    }
+
+    /// Mark one pixel as an overlay, even if it keeps its current colour.
+    pub fn mark_overlay(&mut self, x: usize, y: usize) {
+        if let Some(mask) = &mut self.overlay
+            && x < self.width as usize
+            && y < self.height as usize
+        {
+            mask[y * self.width as usize + x] = 1;
+        }
+    }
+
+    /// Mark a rectangle as overlay coverage, clipped to this frame.
+    pub fn mark_overlay_rect(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        for row in y..y.saturating_add(height).min(self.height as usize) {
+            let start = row * self.width as usize + x.min(self.width as usize);
+            let end = row * self.width as usize + x.saturating_add(width).min(self.width as usize);
+            if let Some(mask) = &mut self.overlay {
+                mask[start..end].fill(1);
+            }
+        }
+    }
+
+    /// Coverage bytes in row-major order when overlay tracking is enabled.
+    pub fn overlay_mask(&self) -> Option<&[u8]> {
+        self.overlay.as_deref()
     }
 
     /// Copy a band from a complete picture. A geometry change copies the
@@ -310,6 +369,9 @@ impl Frame {
         let bytes = source.width as usize * 4;
         let band = rows.start * bytes..rows.end * bytes;
         self.rgba[band.clone()].copy_from_slice(&source.rgba[band]);
+        if let Some(mask) = &mut self.overlay {
+            mask[rows.start * source.width as usize..rows.end * source.width as usize].fill(0);
+        }
         self.doubled = source.doubled;
         self.drawn_from = DrawnFrom::default();
         rows

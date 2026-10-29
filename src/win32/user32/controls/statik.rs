@@ -236,6 +236,12 @@ fn begin(cpu: &mut Cpu, hwnd: u32, kind: u32, own: &[u32]) -> Option<u32> {
     start(cpu, STATIC, kind, vars, PAINT_SCRATCH)
 }
 
+/// Whether a static control of the style `style` lets the mouse through
+/// (WM_NCHITTEST's HTTRANSPARENT): all but those with SS_NOTIFY.
+pub fn transparent(style: u32) -> bool {
+    style & SS_NOTIFY == 0
+}
+
 /// The Static class's window procedure.
 pub fn static_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hwnd, msg, wp, lp] = args else {
@@ -283,10 +289,10 @@ pub fn static_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             Some(0)
         }
         WM_GETFONT => Some(s.font),
-        WM_NCHITTEST => Some(if style & SS_NOTIFY != 0 {
-            HTCLIENT
-        } else {
+        WM_NCHITTEST => Some(if transparent(style) {
             HTTRANSPARENT
+        } else {
+            HTCLIENT
         }),
         WM_GETDLGCODE => Some(button::DLGC_STATIC),
         WM_LBUTTONDOWN | WM_NCLBUTTONDOWN => {

@@ -2716,7 +2716,10 @@ pub fn get_window_thread_process_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
 }
 
 /// The visible, enabled window at the screen point (`x`, `y`): the
-/// deepest child there.
+/// deepest child there. As WindowFromPoint and the mouse's messages do,
+/// a child that answers WM_NCHITTEST with HTTRANSPARENT (a group box, a
+/// static control) is passed over for the windows below it, so the
+/// check boxes inside a group box get their clicks.
 pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
     let mut hwnd = DESKTOP;
     'down: loop {
@@ -2734,6 +2737,9 @@ pub fn window_at(state: &State, x: i32, y: i32) -> u32 {
                 continue;
             }
             if c.ex_style & WS_EX_TRANSPARENT != 0 && c.style & WS_CHILD != 0 {
+                continue;
+            }
+            if c.style & WS_CHILD != 0 && super::controls::hit_transparent(state, child) {
                 continue;
             }
             hwnd = child;

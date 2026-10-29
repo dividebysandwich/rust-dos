@@ -1,5 +1,6 @@
-//! The job of InstallShield's 16-bit setup launcher, for the built-in
-//! Windows, which runs no Windows 3.1 programs.
+//! The job of InstallShield's 16-bit setup launcher, which the built-in
+//! Windows does in its place, whether DOS or a Win32 program starts it
+//! (CreateProcessA).
 //!
 //! The `SETUP.EXE` of an InstallShield 3 to 5 setup is a Windows 3.1
 //! program ("Setup Launcher") whose job, on Windows 95 and 98, is to start
@@ -66,6 +67,14 @@ pub fn is_ne(bytes: &[u8]) -> bool {
     };
     let at = u32::from_le_bytes([at[0], at[1], at[2], at[3]]) as usize;
     bytes.starts_with(b"MZ") && bytes.get(at..at.saturating_add(2)) == Some(b"NE")
+}
+
+/// Whether `bytes` are a Windows 3.1 program the Win16 layer runs: an NE
+/// file that parses and isn't for OS/2, as Borland's DPMI16 (RTM)
+/// programs are.
+pub fn is_win16(bytes: &[u8]) -> bool {
+    is_ne(bytes)
+        && rust_dos_ne::Module::parse(bytes).is_ok_and(|m| m.target_os != rust_dos_ne::OS_OS2)
 }
 
 /// What a later launcher (5.00.212 on) adds to the engine's arguments,
