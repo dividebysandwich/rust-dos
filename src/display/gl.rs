@@ -15,6 +15,7 @@ use crate::video::mono::Monochrome;
 use rust_dos::config_ui::Layer;
 use crate::video::shader::{self, CrtSettings, Glsl, Shader};
 use glow::HasContext;
+use super::PresentRows;
 use sdl2::VideoSubsystem;
 use sdl2::video::{GLContext, GLProfile, SwapInterval, Window};
 use std::collections::HashMap;
@@ -284,7 +285,7 @@ impl GlScreen {
         };
         let active = if result.is_ok() { shader } else { Shader::None };
         if active != self.active {
-            self.xbrz_frame.invalidate_overlay();
+            self.xbrz_frame.invalidate();
         }
         self.active = active;
         self.filter = filter;
@@ -336,20 +337,35 @@ impl GlScreen {
         &mut self,
         screen: &Frame,
         base: Option<&Frame>,
-        rows: std::ops::Range<usize>,
+        rows: PresentRows,
         mono: Monochrome,
     ) -> Result<bool, String> {
         let mut prepared = std::mem::take(&mut self.xbrz_frame);
-        let (visible, changed, _) = prepared.prepare(screen, base, mono, rows.clone());
+        let (visible, changed, _) = if let Some(candidates) = rows.candidates {
+            prepared.prepare_rows(screen, base, mono, candidates.clone(), candidates)
+        } else {
+            prepared.prepare(screen, base, mono, rows.changed)
+        };
         let scale = if base.unwrap_or(screen).doubled { 2 } else { 1 };
         let source_changed = self.xbrz_uploaded_revision != Some(prepared.source_revision());
         if source_changed {
-            let rows = if self.xbrz_uploaded_revision.is_some() {
+            let sequential = self
+                .xbrz_uploaded_revision
+                .is_some_and(|revision| revision.wrapping_add(1) == prepared.source_revision())
+                && self.texture_size == (prepared.source.width, prepared.source.height);
+            let rows = if sequential {
                 prepared.source_rows()
             } else {
                 0..prepared.source.height as usize
             };
-            self.upload(&prepared.source, rows, None);
+            let partial = sequential
+                && prepared.source_damage().rects()
+                    != [[0, 0, prepared.source.width, prepared.source.height]];
+            if partial {
+                self.upload_xbrz_regions(&prepared);
+            } else {
+                self.upload(&prepared.source, rows, None);
+            }
             self.xbrz_uploaded_revision = Some(prepared.source_revision());
         }
         self.texture_scale = scale as u32;
@@ -435,14 +451,15 @@ impl GlScreen {
         &mut self,
         frame: &Frame,
         base: Option<&Frame>,
-        rows: std::ops::Range<usize>,
+        rows: impl Into<PresentRows>,
         display: (u32, u32),
         layer: Option<&Layer>,
         mono: Monochrome,
     ) -> Result<(), String> {
+        let rows = rows.into();
         if self.active == Shader::Xbrz {
-            let damaged = !rows.is_empty();
-            let changed = self.prepare_xbrz(frame, base, rows, mono)?;
+            let damaged = !rows.changed.is_empty();
+            let changed = self.prepare_xbrz(frame, base, rows.clone(), mono)?;
             if !changed && !damaged {
                 self.xbrz_overlay_visible = false;
                 #[cfg(feature = "vr")]
@@ -450,12 +467,42 @@ impl GlScreen {
                 return Ok(());
             }
         } else {
-            self.xbrz_frame.invalidate_overlay();
-            self.texture_scale = self.upload(frame, rows, layer);
+            self.xbrz_frame.invalidate();
+            self.texture_scale = self.upload(frame, rows.changed, layer);
         }
         self.draw(self.texture, self.texture_size, display, layer, 1.0);
         self.xbrz_overlay_visible = false;
         Ok(())
+    }
+
+    fn upload_xbrz_regions(&mut self, prepared: &shader::XbrzFrame) {
+        let gl = &self.gl;
+        let source = &prepared.source;
+        // SAFETY: this screen owns the context and source texture. Each
+        // rectangle lies within the prepared source; reset unpack stride
+        // before another uploader uses this context.
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, source.width as i32);
+            for &[x, y, w, h] in prepared.source_damage().rects() {
+                let start = ((y * source.width + x) * 4) as usize;
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    x as i32,
+                    y as i32,
+                    w as i32,
+                    h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&source.rgba[start..])),
+                );
+            }
+            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+        }
+        if let Some(Ok(cache)) = &mut self.xbrz_gpu {
+            cache.invalidate_regions(prepared.source_damage(), (source.width, source.height));
+        }
     }
 
     fn upload(
@@ -622,7 +669,7 @@ impl GlScreen {
             Some((texture, size, voodoo.scale()))
         });
         let Some((texture, size, scale)) = composed else { return false };
-        self.xbrz_frame.invalidate_overlay();
+        self.xbrz_frame.invalidate();
         let line = shader::line_scale(self.scale_lines.then_some(scale));
         // SAFETY: see `GlScreen`.
         unsafe {
@@ -897,8 +944,11 @@ impl GlScreen {
         self.capture.as_ref()?;
         let native = self.active == Shader::Xbrz;
         if native {
-            self.prepare_xbrz(frame, Some(base), 0..frame.height as usize, mono)
-                .ok()?;
+            let prepared =
+                self.prepare_xbrz(frame, Some(base), (0..frame.height as usize).into(), mono);
+            // Captures may add overlays outside the producer's next band.
+            self.xbrz_frame.invalidate();
+            prepared.ok()?;
         }
         let mut capture = self.capture.take()?;
         let gl = &self.gl;
