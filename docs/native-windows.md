@@ -238,8 +238,8 @@ exceptions run as the program's own code on top of that.
 - The registry is a tree in Rust (`src/win32/registry.rs`), the
   system's, shared by the processes and kept in save states. It is seeded
   with the keys games read (`HKLM\Software\Microsoft\Windows\CurrentVersion`
-  with VersionNumber 4.00.950, DirectX's version, the display settings,
-  the user and computer names) and kept on drive C: as
+  with VersionNumber 4.00.950 and a ProductId, DirectX's version, the
+  display settings, the user and computer names) and kept on drive C: as
   `C:\REGISTRY.REG`, a REGEDIT4 file that can be read and edited by hand.
   A program's first registry call reads the seed with the file's keys
   and values over it; changes are written back when a key is closed or
