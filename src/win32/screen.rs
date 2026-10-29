@@ -97,12 +97,14 @@ pub fn linear_memory(cpu: &mut Cpu) {
 
 /// The desktop's mode: its size, 640x480 unless ChangeDisplaySettings
 /// set another (`set_desktop_size`), at 8 bits a pixel with
-/// `win32_depth=8`, else 16 on the card, 24 (packed) on an S3 ViRGE,
-/// whose VESA BIOS has that instead of 32, and 32 on the others.
+/// `win32_depth=8` and 16 with `win32_depth=16`, else 16 on the card, 24
+/// (packed) on an S3 ViRGE, whose VESA BIOS has that instead of 32, and
+/// 32 on the others.
 pub fn desktop(cpu: &Cpu) -> Mode {
+    let high_color = cpu.bus.win32.desktop_depth == crate::config::DesktopDepth::HighColor;
     let bpp = if super::version::palette_desktop(cpu) {
         8
-    } else if is_card(cpu) {
+    } else if is_card(cpu) || high_color {
         16
     } else if cpu.bus.vga.adapter.is_virge() {
         24

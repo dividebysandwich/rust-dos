@@ -51,6 +51,7 @@ pub fn is_98(cpu: &Cpu) -> bool {
 crate::state_enum!(crate::config::DesktopDepth {
     crate::config::DesktopDepth::Adapter,
     crate::config::DesktopDepth::Palette,
+    crate::config::DesktopDepth::HighColor,
 });
 
 /// The first program starts: the settings become the version the
