@@ -1159,6 +1159,47 @@ fn find_next_goes_on_from_the_listing_find_first_made() {
     assert_eq!(disk.find_directory_entry(r"C:\*.*", 1, 0x16).unwrap().filename, "AA.DAT");
 }
 
+/// A search whose attributes take the label besides other entries finds
+/// it in the root of a folder drive as on a disk, and FindNext goes on
+/// from the listing FindFirst made, as for any other search.
+#[test]
+fn a_search_that_takes_the_label_finds_it_in_the_root_only() {
+    let base = scratch("label_and_files");
+    let root = base.join("c");
+    fs::create_dir_all(root.join("SUB")).unwrap();
+    fs::write(root.join("A.DAT"), b"x").unwrap();
+    fs::write(root.join("SUB").join("B.DAT"), b"x").unwrap();
+    age(&root);
+    age(&root.join("SUB"));
+    let mut disk = DiskController::new(root.clone());
+    let find = |disk: &DiskController, spec: &str, attr: u16| -> Vec<String> {
+        (0..)
+            .map_while(|i| disk.find_directory_entry(spec, i, attr).ok())
+            .map(|e| e.filename)
+            .collect()
+    };
+
+    assert_eq!(find(&disk, r"C:\*.*", 0x0E), ["RUSTDOS", "A.DAT"]);
+    assert_eq!(
+        disk.host_dirs.searches.borrow().len(),
+        1,
+        "kept for FindNext"
+    );
+    assert_eq!(find(&disk, r"C:\RUSTDOS", 0x0E), ["RUSTDOS"]);
+    assert_eq!(find(&disk, r"C:\SUB\*.*", 0x0E), ["B.DAT"]);
+    assert_eq!(find(&disk, r"C:\SUB\*.*", 0x08), ["RUSTDOS"]);
+
+    // A label with a character above 7Fh across its 8th byte.
+    fs::create_dir_all(base.join("d")).unwrap();
+    let opts = MountOptions {
+        label: Some("ABCDEFG\u{e9}XY".to_string()),
+        ..Default::default()
+    };
+    disk.mount(3, &base.join("d"), opts, false).unwrap();
+    assert!(find(&disk, r"D:\*.*", 0).is_empty());
+    assert_eq!(find(&disk, r"D:\*.*", 0x08), ["ABCDEFG\u{e9}.XY"]);
+}
+
 #[test]
 fn find_next_sees_the_guest_s_changes_mid_search() {
     let root = scratch("find_next_guest");
