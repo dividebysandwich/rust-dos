@@ -825,7 +825,8 @@ fn fat32_images_from_mkfs_and_checked_by_fsck() {
 }
 
 /// A 3 GB FAT32 disk from MAKEIMG, mounted as D:, and what DOS tells of
-/// it: AH=36h no more than 2 GB, the FAT32 functions from DOS 7.
+/// it: AH=36h no more than 2 GB, the FAT32 functions the rest, at any
+/// DOS version.
 #[test]
 fn fat32_drives_through_dos() {
     use rust_dos::config::DosVersion;
@@ -836,6 +837,18 @@ fn fat32_drives_through_dos() {
     assert_eq!(plan.volume.as_ref().map(|v| v.bits), Some(32));
     rust_dos::makeimg::write(&image, &plan, true).unwrap();
     let mut cpu = cpu(&dir);
+    // DOS 5 without a FAT32 drive has no AX=73xxh.
+    name(&mut cpu, "C:\\");
+    cpu.set_es(0x5000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
+    int21(&mut cpu, 0x7303);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+    cpu.set_dx(3);
+    cpu.set_cx(0x3F);
+    int21(&mut cpu, 0x7302);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+
     mount(&mut cpu, DRIVE_D, &image);
     let handle = create(&mut cpu, "D:\\HELLO.TXT").unwrap();
     write(&mut cpu, handle, b"hello FAT32").unwrap();
@@ -850,9 +863,39 @@ fn fat32_drives_through_dos() {
     assert!(total * spc * bps < 2 << 30 && total > 60_000, "{} clusters", total);
     assert!(free <= total);
 
-    // DOS 5 has no AX=73xxh.
+    // With a FAT32 drive mounted, DOS 5 has AX=73xxh, for the other
+    // drives too; the FAT32 drive's DPB only AX=7302h completes.
+    name(&mut cpu, "C:\\");
+    cpu.set_es(0x5000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
     int21(&mut cpu, 0x7303);
-    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    name(&mut cpu, "D:\\");
+    cpu.set_cx(0x2C);
+    int21(&mut cpu, 0x7303);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    cpu.set_dx(4);
+    cpu.set_cx(0x3F);
+    int21(&mut cpu, 0x7302);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    cpu.bus.load_bytes(0x60000, &[0, 0, 0, 0, 1, 0, 0x00, 0x00, 0x00, 0x50]);
+    cpu.bus.load_bytes(BUFFER, &[0; SECTOR]);
+    cpu.set_ds(0x6000);
+    cpu.set_bx(0);
+    cpu.set_cx(0xFFFF);
+    cpu.set_dx(4);
+    cpu.set_si(0);
+    int21(&mut cpu, 0x7305);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
+    // A DOS 5 program that knows only INT 25h still reads the volume.
+    cpu.bus.load_bytes(BUFFER, &[0; SECTOR]);
+    cpu.set_cx(0xFFFF);
+    cpu.set_reg8(Register::AL, DRIVE_D);
+    rust_dos::interrupts::int25::handle(&mut cpu, false);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
 
     rust_dos::dos_data::set_version(&mut cpu.bus, DosVersion::new(7, 10));
     // AX=7303h: the whole of it, in 32 bits.
