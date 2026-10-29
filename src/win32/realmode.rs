@@ -88,11 +88,7 @@ pub fn host_stack(cpu: &Cpu) -> (u16, u16) {
 /// Whether real-mode code the system called runs, so that a return to
 /// `RETURN` is one.
 pub fn in_call(cpu: &Cpu) -> bool {
-    cpu.bus
-        .win32
-        .real_mode
-        .last()
-        .is_some_and(|f| f.kind != Kind::Callback)
+    live_context(cpu).is_some()
 }
 
 /// Whether the system waits for real-mode code: while it does, the
@@ -243,10 +239,10 @@ pub fn resume(cpu: &mut Cpu, rm: &Context) -> bool {
     true
 }
 
-/// A Win16 task ended in a callback's procedure: the real-mode code that
-/// waits for it, and what that was called for, can't go on. Windows ends
-/// the virtual machine's code the same way when a program faults in a
-/// callback.
+/// A Win16 task ended, maybe in a callback's procedure: the real-mode
+/// code that waits for it, and what that code was called for, can't go
+/// on, and their frames go. Only a procedure can end a task while frames
+/// are kept: the processor is in real mode for the others.
 pub fn abandon(cpu: &mut Cpu) {
     let frames = std::mem::take(&mut cpu.bus.win32.real_mode);
     if !frames.is_empty() {

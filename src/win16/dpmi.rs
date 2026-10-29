@@ -342,8 +342,12 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
         // A real-mode callback to DS:SI with the call structure at ES:DI,
         // its address in CX:DX; and freeing it.
         0x0303 => {
-            let procedure = (ctx.seg[Seg::DS as usize] as u32) << 16 | w(ctx, ESI) as u32;
-            let structure = (ctx.seg[Seg::ES as usize] as u32) << 16 | w(ctx, EDI) as u32;
+            let (ds, es) = (ctx.seg[Seg::DS as usize], ctx.seg[Seg::ES as usize]);
+            if super::selector_base(cpu, ds).is_none() || structure_at(cpu, es, 0).is_none() {
+                return Err(BAD_SELECTOR);
+            }
+            let procedure = (ds as u32) << 16 | w(ctx, ESI) as u32;
+            let structure = (es as u32) << 16 | w(ctx, EDI) as u32;
             let slot = alloc_callback(cpu, procedure, structure)?;
             set_w(ctx, ECX, ROM_SEG);
             set_w(ctx, EDX, CALLBACKS + 4 * slot as u16);
@@ -463,6 +467,14 @@ fn read_structure(cpu: &Cpu, at: u32) -> Option<[u8; realcall::SIZE]> {
     super::peek(cpu, at, realcall::SIZE)?.try_into().ok()
 }
 
+/// The linear address of a call structure at `sel`:`off`, or None when
+/// `sel` isn't a selector of the LDT. `lin` gives 0 for one, and the
+/// first megabyte is mapped there: the vector table would be taken for
+/// the structure, and the registers written over it.
+fn structure_at(cpu: &Cpu, sel: u16, off: u16) -> Option<u32> {
+    super::selector_base(cpu, sel).map(|(base, _, _)| base.wrapping_add(off as u32))
+}
+
 /// Functions 0300h (the real-mode interrupt BL), 0301h (a far call) and
 /// 0302h (a call with an IRET frame), as Windows' DPMI server runs them in
 /// the virtual machine: the code runs in real mode with the registers of
@@ -479,7 +491,7 @@ fn read_structure(cpu: &Cpu, at: u32) -> Option<[u8; realcall::SIZE]> {
 /// real-mode segments, which the handlers can use as they are, so there
 /// is nothing to translate and no vector is kept from its handler.
 fn call_real_mode(cpu: &mut Cpu, ctx: &Context, kind: Kind) -> Result<bool, u16> {
-    let at = super::lin(cpu, ctx.seg[Seg::ES as usize], w(ctx, EDI));
+    let at = structure_at(cpu, ctx.seg[Seg::ES as usize], w(ctx, EDI)).ok_or(BAD_VALUE)?;
     let bytes = read_structure(cpu, at).ok_or(BAD_VALUE)?;
     let mut rm = realcall::decode(&bytes);
     let target = match kind {
@@ -582,13 +594,22 @@ pub fn callback(cpu: &mut Cpu, slot: usize) {
     let rm = Context::of(cpu);
     let caller = crate::win32::realmode::caller(cpu);
     let callback = cpu.bus.win32.win16.callbacks[slot];
-    let (Some(caller), Some((procedure, structure)), Some(_)) =
-        (caller, callback, super::current_task(cpu))
+    let at = callback.and_then(|(_, s)| structure_at(cpu, (s >> 16) as u16, s as u16));
+    // A selector for the real-mode stack, which DS:SI points into.
+    let ready = caller.is_some() && at.is_some() && super::current_task(cpu).is_some();
+    let ss_sel = if ready {
+        super::dos::segment_selector(cpu, rm.seg[Seg::SS as usize])
+    } else {
+        0
+    };
+    let (Some(caller), Some((procedure, structure)), Some(at), true) =
+        (caller, callback, at, ss_sel != 0)
     else {
-        // Not from a task's real-mode code: back to the caller, as a
-        // RETF would go.
+        // Not from a task's real-mode code, or its structure is gone, or
+        // there is no selector left for the stack: back to the caller,
+        // as a RETF would go.
         cpu.bus.log_string(&format!(
-            "[W16] Real-mode callback {} called with no task to run it",
+            "[W16] Real-mode callback {} can't run its procedure",
             slot
         ));
         let ip = cpu.pop();
@@ -597,13 +618,11 @@ pub fn callback(cpu: &mut Cpu, slot: usize) {
         cpu.set_ip(ip);
         return;
     };
-    let at = super::linear(cpu, structure);
     if let Some(mut bytes) = read_structure(cpu, at) {
         realcall::encode(&rm, &mut bytes, true);
         super::poke(cpu, at, &bytes);
     }
     let stack = super::thunk::stack16_for(cpu, &caller);
-    let ss_sel = super::dos::segment_selector(cpu, rm.seg[Seg::SS as usize]);
     crate::win32::realmode::suspend(cpu, rm, slot);
     let mut regs = Context {
         gpr: rm.gpr,
@@ -635,8 +654,8 @@ pub fn callback(cpu: &mut Cpu, slot: usize) {
 /// to go on with at ES:DI: the real-mode code that called it goes on with
 /// the registers there, CS:IP and SS:SP among them.
 pub fn then_callback(cpu: &mut Cpu, _: u32, _: &[u32], _: &mut Context) -> Option<u32> {
-    let at = super::lin(cpu, cpu.es(), cpu.di());
-    let rm = match read_structure(cpu, at) {
+    let at = structure_at(cpu, cpu.es(), cpu.di());
+    let rm = match at.and_then(|at| read_structure(cpu, at)) {
         Some(bytes) => realcall::decode(&bytes),
         None => {
             crate::win32::fatal(cpu, "a real-mode callback's structure isn't there", None);
