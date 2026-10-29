@@ -10,6 +10,8 @@ use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
 
+mod win16;
+
 const BASE: u32 = 0x40_0000;
 const STD_OUTPUT_HANDLE: i32 = -11;
 
@@ -628,6 +630,13 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
             a.int3()
         })
     };
+    start_program(test, line, child, child_program, dirs)
+}
+
+/// `start_child`, with `program_bytes` for C.EXE: T.EXE's exit code is 1
+/// for CreateProcessA's TRUE, the wait's result shifted left by one, and
+/// the child's exit code shifted left by four.
+fn start_program(test: &str, line: &str, child: &str, program_bytes: Vec<u8>, dirs: &[&str]) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -680,7 +689,7 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
     }
     let child = base.join(child);
     fs::create_dir_all(child.parent().unwrap()).unwrap();
-    fs::write(child, child_program).unwrap();
+    fs::write(child, program_bytes).unwrap();
     let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
@@ -694,6 +703,27 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
 #[test]
 fn a_program_starts_another_and_waits_for_its_exit_code() {
     let code = start_child("child_process", "C.EXE an argument", "C.EXE", &[]);
+    assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a
+/// task of its 16-bit system: it succeeds, the process handle is
+/// signaled when the task ends, and GetExitCodeProcess gives the task's
+/// exit code. The child ends with 7 when its command tail is the line's
+/// arguments, " an argument", else 9; so 71h.
+#[test]
+fn a_program_starts_a_windows_3_1_program_and_waits_for_it() {
+    let mut code = win16::Code::new();
+    code.emit(&[
+        0x26, 0xA0, 0x80, 0x00, // mov al,es:[80h]: the tail's length
+        0x3C, 0x0C, // cmp al,12
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+    ])
+    .exit_al();
+    let child = win16::program(&code, win16::CODE);
+    let code = start_program("child_win16", "C.EXE an argument", "C.EXE", child, &[]);
     assert_eq!(code, 0x71);
 }
 
