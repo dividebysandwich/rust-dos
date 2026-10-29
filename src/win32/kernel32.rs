@@ -720,8 +720,9 @@ pub fn dos_path(name: &str) -> String {
     path::dos_path(name)
 }
 
-/// The full path of the file `name` where OpenFile looks for it: in the
-/// directory it names, or else in those SearchPathA looks in.
+/// The full path of the file `name` where SearchPathA looks for it: in
+/// the directory it names if it starts with a drive, a backslash, ".\"
+/// or "..\", or else in each of those SearchPathA looks in.
 pub fn search_file(cpu: &mut Cpu, name: &str) -> Option<String> {
     path::search(cpu, None, name)
 }

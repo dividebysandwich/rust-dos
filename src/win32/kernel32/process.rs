@@ -94,10 +94,11 @@ pub(super) fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<Progra
 }
 
 /// The DOS path of the program `name`, with ".EXE" added if it has no
-/// extension: there if it has a directory in it, else where SearchPathA
-/// looks (the running program's directory, the current one, the system
-/// and Windows directories, then PATH). A directory isn't a program, so
-/// a name that is one isn't found.
+/// extension: there if it starts with a drive, a backslash, ".\" or
+/// "..\", else where SearchPathA looks (the running program's directory,
+/// the current one, the system and Windows directories, then PATH), also
+/// for a relative path such as DISK1\SETUP.EXE. A directory isn't a
+/// program, so a name that is one isn't found.
 fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
     let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let name = if file.contains('.') {
