@@ -51,9 +51,13 @@ impl DiskController {
     }
 
     /// The path `rest` names on a drive held in memory, as `MemFs` keeps
-    /// paths.
+    /// paths: in DOS names, where `rest` may have long ones.
     pub(super) fn memory_path(drive: &Drive, rest: &str) -> String {
-        Self::logical_components(drive, rest).join("\\").to_ascii_uppercase()
+        let components = Self::logical_components(drive, rest);
+        match drive.tree() {
+            Some(files) => files.resolve(&components),
+            None => components.join("\\").to_ascii_uppercase(),
+        }
     }
 
     /// Resolves a DOS path (e.g., "GAMES\DOOM.EXE", "..\FILE.TXT" or
@@ -100,14 +104,19 @@ impl DiskController {
         }
     }
 
-    /// The names of the entries of the directory `dos_dir` on a host
-    /// drive, as (host name, DOS name): the host's are the long names
-    /// Windows has. None on other drives, where names are 8.3 alone, and
+    /// The names of the entries of the directory `dos_dir`, as (long
+    /// name, DOS name), on a host drive and on a drive held in memory: the
+    /// host's names are the long names Windows has, and so are a CD's
+    /// Joliet names. None on disk images, where names are 8.3 alone, and
     /// for a directory that isn't there.
     pub fn long_names(&self, dos_dir: &str) -> Option<Vec<(String, String)>> {
         let normalized = dos_dir.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
+        if let Some(files) = drive.tree() {
+            let dir = Self::memory_path(drive, rest);
+            return files.is_dir(&dir).then(|| files.long_names(&dir));
+        }
         drive.host_root()?;
         let rest = if rest.is_empty() { "." } else { rest };
         let dir = self.resolve_on(drive_num, rest)?;

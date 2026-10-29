@@ -88,6 +88,13 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   the mode's own size in graphics modes, doubled where it is small (mode 13h
   is 640x400, mode 12h and 320x240 "mode X" 640x480). `/api/status` →
   `video.frame` has it.
+- **Capture the display shader** with `/api/screenshot?shader=true`. This
+  explicitly renders and reads back one frame through the active shader,
+  independent of `record_shader`; the default endpoint stays unfiltered.
+  The response uses the filtered output size. It returns HTTP 409 when the
+  display has no shader output, such as with the SDL renderer or `shader=none`.
+  For example, `curl -fsS "$H/api/screenshot?shader=true" -o xbrz.png` saves
+  the filtered PNG; add `&format=raw` for RGB24 bytes and size headers.
 - **Find the highlighted item in a text-mode menu.** The text alone doesn't
   show which item is selected. The JSON reply of `/api/screen/text` (without
   `format=text`) has `attrs`: for each row, runs of cells with the same

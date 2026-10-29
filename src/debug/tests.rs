@@ -74,6 +74,45 @@ fn handle(cpu: &mut Cpu, hub: &mut DebugHub, cmd: Cmd) -> Reply {
     rx.try_recv().expect("an answer at once").reply
 }
 
+#[test]
+fn screenshot_returns_shader_output_only_when_requested() {
+    let mut cpu = Cpu::new(".".into());
+    let mut hub = DebugHub::for_tests(&cpu);
+    let plain = crate::video::Frame::from_rgb(1, 1, vec![1, 2, 3]);
+    let shaded = crate::video::Frame::from_rgb(2, 1, vec![4, 5, 6, 7, 8, 9]);
+
+    for (shader, output) in [(false, Some(&shaded)), (true, Some(&shaded)), (true, None)] {
+        let (request, mut rx) = hub.request(Cmd::Screenshot { shader });
+        hub.handle(&mut cpu, request);
+        assert!(hub.wants_frame());
+        assert_eq!(hub.wants_shader_frame(), shader);
+        hub.capture_frame_with_shader(&plain, output);
+        match (shader, rx.try_recv().unwrap().reply) {
+            (false, Reply::Frame(frame)) => assert_eq!(frame.rgba, plain.rgba),
+            (true, Reply::Frame(frame)) => assert_eq!(frame.rgba, shaded.rgba),
+            (true, Reply::Error(409, _)) => assert!(output.is_none()),
+            (_, _) => panic!("unexpected screenshot reply"),
+        }
+    }
+}
+
+#[test]
+fn plain_capture_callers_keep_the_original_api() {
+    let mut cpu = Cpu::new(".".into());
+    let mut hub = DebugHub::for_tests(&cpu);
+    let plain = crate::video::Frame::from_rgb(1, 1, vec![1, 2, 3]);
+    for shader in [false, true] {
+        let (request, mut rx) = hub.request(Cmd::Screenshot { shader });
+        hub.handle(&mut cpu, request);
+        hub.capture_frame(&plain);
+        match (shader, rx.try_recv().unwrap().reply) {
+            (false, Reply::Frame(frame)) => assert_eq!(frame.rgba, plain.rgba),
+            (true, Reply::Error(409, _)) => {}
+            (_, _) => panic!("unexpected plain capture reply"),
+        }
+    }
+}
+
 /// The journal's entries, as JSON.
 fn entries(hub: &DebugHub) -> Vec<Value> {
     hub.with_journal(|j| j.after(0).map(|it| it.map(|e| e.value()).collect()).unwrap_or_default()).unwrap_or_default()

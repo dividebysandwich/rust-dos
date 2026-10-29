@@ -29,7 +29,8 @@ pub(crate) mod virtual_memory;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
-pub(super) use process::{STARTUPINFO_SIZE, spawn, win_exec_step};
+pub(crate) use process::{spawn, startup_showing};
+pub(super) use process::{STARTUPINFO_SIZE, win_exec_step};
 pub(super) use file::{
     CREATE_ALWAYS, CREATE_NEW, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
     OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING, new_file, open_file, open_of,
@@ -866,10 +867,7 @@ pub mod files {
     /// CreateProcessA for the command line `line`, its first window
     /// shown as `show` says: a handle of the new process, or the error.
     pub fn run(cpu: &mut Cpu, line: &str, show: u32) -> Result<u32, u32> {
-        const STARTF_USESHOWWINDOW: u32 = 1;
-        let mut startup = vec![0u8; super::process::STARTUPINFO_SIZE as usize];
-        startup[44..48].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
-        startup[48..50].copy_from_slice(&(show as u16).to_le_bytes());
+        let startup = super::process::startup_showing(show as u16);
         let [process, thread, _, _] =
             super::process::spawn(cpu, None, Some(line), None, false, 0, startup)?;
         crate::win32::object::close(cpu, thread);
