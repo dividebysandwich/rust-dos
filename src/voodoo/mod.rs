@@ -1131,12 +1131,8 @@ impl Voodoo {
             self.log_once(LOG_DIRECT, "[3DFX] Direct texture writes are ignored");
             return;
         }
-        // Each TMU lays out 8-bit downloads by its own textureMode: Glide
-        // sets bit 31 in the unit it downloads to, which with two units
-        // need not be TMU 0's.
-        let seq8 = self.reg[self.tmu[unit].base + TEXTURE_MODE] & 0x8000_0000 != 0;
         let (reg, tmu) = (&self.reg[..], &mut self.tmu[unit]);
-        tmu.write(reg, index, data, seq8);
+        tmu.write(reg, index, data);
     }
 
     // --- Video memory layout and output ---

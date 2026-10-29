@@ -468,5 +468,14 @@ mod tests {
         v.write(0x80_0000 + 4, 0x4433_2211, !0, Now::default());
         let ram = &v.tmu[0].ram;
         assert_eq!([0, 1, 2, 3].map(|at| ram.byte(at)), [0x11, 0x22, 0x33, 0x44]);
+        // The other way round, TMU 0's bit doesn't reach TMU 1: dword 1
+        // of row 1 is that row's texels 0 to 3.
+        reg(&mut v, trex0 | TEXTURE_MODE, 1 << 31 | 5 << 8);
+        reg(&mut v, trex1 | TEXTURE_MODE, 5 << 8);
+        v.write(tmu1 + (1 << 9 | 4), 0x8877_6655, !0, Now::default());
+        let ram = &v.tmu[1].ram;
+        let row = 256;
+        let texels = [0, 1, 2, 3].map(|at| ram.byte(row + at));
+        assert_eq!(texels, [0x55, 0x66, 0x77, 0x88]);
     }
 }
