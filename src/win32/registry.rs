@@ -70,6 +70,7 @@ const SEED: &str = r#"REGEDIT4
 "Version"="Windows 95"
 "ProductName"="Microsoft Windows 95"
 "SubVersionNumber"=""
+"ProductId"="12345-OEM-0012345-12345"
 "RegisteredOwner"="User"
 "RegisteredOrganization"=""
 "SystemRoot"="C:\\WINDOWS"
@@ -769,6 +770,19 @@ mod tests {
         assert_eq!(value("WinDir"), b"C:\\WINDOWS\0");
         assert_eq!(value("SysDir"), b"C:\\WINDOWS\\SYSTEM\0");
         assert_eq!(value("BootDir"), b"C:\\\0");
+    }
+
+    /// Every installed Windows has a product id. Moto Racer's setup keeps
+    /// a checksum of it, and the game says it is "incorrectly installed"
+    /// when the checksum of the id it reads (or of "12345", without one)
+    /// differs. A different id breaks the games installed with this one.
+    #[test]
+    fn the_seed_has_a_product_id() {
+        let registry = Registry::seeded(None, Win98Se);
+        let path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
+        let key = registry.find(LOCAL_MACHINE, path).unwrap();
+        let id = &registry.value(key, "ProductId").unwrap().data;
+        assert_eq!(id, b"12345-OEM-0012345-12345\0");
     }
 
     #[test]
