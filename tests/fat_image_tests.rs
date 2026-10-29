@@ -877,6 +877,13 @@ fn fat32_drives_through_dos() {
     int21(&mut cpu, 0x7305);
     assert!(!cf(&cpu), "{:04X}", cpu.ax());
     assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
+    // A DOS 5 program that knows only INT 25h still reads the volume.
+    cpu.bus.load_bytes(BUFFER, &[0; SECTOR]);
+    cpu.set_cx(0xFFFF);
+    cpu.set_reg8(Register::AL, DRIVE_D);
+    rust_dos::interrupts::int25::handle(&mut cpu, false);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
 
     rust_dos::dos_data::set_version(&mut cpu.bus, DosVersion::new(7, 10));
     // AX=7303h: the whole of it, in 32 bits.

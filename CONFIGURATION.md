@@ -1805,18 +1805,18 @@ long and the short name open the file.
 
 ### Disk images
 
-A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system
-that programs read and write like any other drive's; what they write goes
-into the image file. A FAT32 drive mounts at any `dos_version`, as
-programs reach its files through DOS; the functions of before FAT32
-(INT 21h AH=36h, 1Ch) report no more than just under 2 GB of it, as
-MS-DOS 7.1 does, and the FAT32 functions tell the rest (see
-`dos_version`). An image whose size is a floppy disk's (160 KB to 2.88 MB,
-as in DOSBox's table), or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or
-`.1440`, is a floppy, anything else a hard disk: an image of a
-whole disk with a partition table, whose first FAT12 or FAT16 partition
-(else its first FAT32 one) is the drive, or of a single volume. The hard disk's geometry comes from its partition
-table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
+A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system that
+programs read and write like any other drive's; what they write goes into
+the image file. A FAT32 drive mounts at any `dos_version`, as programs
+reach its files through DOS; the functions of before FAT32 (INT 21h
+AH=36h, 1Ch) report no more than just under 2 GB of it, as MS-DOS 7.1
+does, and the FAT32 functions tell the rest (see `dos_version`). An image
+whose size is a floppy disk's (160 KB to 2.88 MB, as in DOSBox's table),
+or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or `.1440`, is a floppy,
+anything else a hard disk: an image of a whole disk with a partition
+table, whose first FAT12 or FAT16 partition (else its first FAT32 one) is
+the drive, or of a single volume. The hard disk's geometry comes from its
+partition table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
 `-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
 and an image file that can't be written, or `-ro`, makes a write-protected
 disk. `MOUNT C hdd.img` puts a hard disk image in place of C:'s directory.
