@@ -340,13 +340,12 @@ pub fn card_buffer(cpu: &mut Cpu, id: u32) -> Option<u32> {
     (s.memory == MEM_CARD && !s.lost).then_some(s.bits)
 }
 
-/// The buffer a surface of the device's is to have, by its caps: None
-/// for one in system memory.
-pub fn role(s: &Surface) -> Option<u32> {
-    let caps = s.caps[0];
+/// The buffer a surface of the device's is to have, by its first caps:
+/// None for one in system memory.
+pub fn role(caps: u32) -> Option<u32> {
     if caps & surface::DDSCAPS_ZBUFFER != 0 {
         Some(BUFFER_AUXBUFFER)
-    } else if s.is_primary() || caps & surface::DDSCAPS_FRONTBUFFER != 0 {
+    } else if caps & (surface::DDSCAPS_PRIMARYSURFACE | surface::DDSCAPS_FRONTBUFFER) != 0 {
         Some(api::BUFFER_FRONTBUFFER)
     } else if caps & (surface::DDSCAPS_BACKBUFFER | surface::DDSCAPS_FLIP) != 0 {
         Some(api::BUFFER_BACKBUFFER)

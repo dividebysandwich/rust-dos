@@ -1928,16 +1928,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             match cpu
                 .bus
                 .disk
-                .find_directory_entry(&search_pattern, index, search_attr)
+                .find_entry_from(&search_pattern, index, search_attr)
             {
-                Ok(entry) => {
+                Ok((entry, next)) => {
                     // Drive the search runs on (1 = A:)
                     let search_drive = parse_drive_prefix(&search_pattern)
                         .0
                         .unwrap_or(cpu.bus.disk.get_current_drive());
                     cpu.bus.guest_write_8(dta_phys as u32, search_drive + 1);
                     cpu.bus.guest_write_8((dta_phys + OFFSET_ATTR_SEARCH) as u32, search_attr as u8);
-                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, (index + 1) as u16);
+                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, next as u16);
 
                     // Only write Search Pattern to DTA on FindFirst (AH=4E)
                     // FindNext must NOT overwrite the pattern it uses for searching!

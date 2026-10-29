@@ -31,7 +31,10 @@ use web_time::Instant;
 /// (`missing`) and count as missing without another read: programs poll
 /// for files that aren't there (Sub Culture opens a missing sound file
 /// fifty times a second), and a read of a large folder takes far longer
-/// than the call should. A name the guest is about to create is looked
+/// than the call should. A missing name isn't statted or opened on the
+/// host either (`DiskController::locate_found`): Sub Culture's open asked
+/// the host five times about the missing file, and now asks once (whether
+/// its folder is a folder). A name the guest is about to create is looked
 /// for again (`creating`), so that a file another program made in the
 /// meantime is the one the guest gets.
 ///
