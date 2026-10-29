@@ -82,6 +82,7 @@ comdlg32/filedlg: skipped filedlg.c:353 (x6)
 d3d8/buffer: buffer: 1 tests executed (0 marked as todo, 0 failures), 1 skipped.
 d3d8/buffer: skipped buffer.c:65
 d3d8/d3d8_main: d3d8_main: 18 tests executed (0 marked as todo, 0 failures), 0 skipped.
+d3d8/device: device: 313 tests executed (0 marked as todo, 1 failure), 7 skipped.
 d3d8/device: skipped device.c:1869
 d3d8/device: skipped device.c:532
 d3d8/device: skipped device.c:541
@@ -89,11 +90,7 @@ d3d8/device: skipped device.c:1136
 d3d8/device: skipped device.c:1271
 d3d8/device: skipped device.c:1359
 d3d8/device: skipped device.c:1418
-d3d8/device: failed device.c:1612
 d3d8/device: failed device.c:1629
-d3d8/device: failed device.c:1749
-d3d8/device: failed device.c:1764
-d3d8/device: did not end
 d3d8/stateblock: stateblock: 8691 tests executed (0 marked as todo, 0 failures), 0 skipped.
 d3d8/surface: surface: 59 tests executed (0 marked as todo, 0 failures), 0 skipped.
 d3d8/texture: texture: 40 tests executed (0 marked as todo, 1 failure), 0 skipped.
@@ -381,7 +378,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11076 tests executed (0 marked as todo, 594 failures), 6 skipped.
+user32/msg: msg: 11075 tests executed (0 marked as todo, 594 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -636,7 +633,7 @@ user32/text: text: 197 tests executed (0 marked as todo, 0 failures), 2 skipped.
 user32/text: skipped text.c:119
 user32/text: skipped text.c:554
 user32/uitools: uitools: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/win: win: 10408 tests executed (0 marked as todo, 63 failures), 8 skipped.
+user32/win: win: 10390 tests executed (0 marked as todo, 60 failures), 8 skipped.
 user32/win: skipped win.c:5400
 user32/win: skipped win.c:2891
 user32/win: failed win.c:4616
@@ -685,9 +682,7 @@ user32/win: skipped win.c:5464
 user32/win: failed win.c:2555 (x2)
 user32/win: failed win.c:2558 (x2)
 user32/win: failed win.c:2561
-user32/win: failed win.c:832
 user32/win: failed win.c:2587 (x3)
-user32/win: failed win.c:2603 (x2)
 user32/win: skipped win.c:1057
 user32/win: skipped win.c:5990
 user32/wsprintf: wsprintf: 6 tests executed (0 marked as todo, 0 failures), 0 skipped.
