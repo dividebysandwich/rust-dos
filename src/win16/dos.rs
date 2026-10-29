@@ -156,11 +156,19 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
         }
         0x31 => super::dpmi::int31(cpu, &mut ctx),
         0x34..=0x3D => fpu_fixup(cpu, vector, &mut ctx),
-        0x10 | 0x11 | 0x12 | 0x15 | 0x16 | 0x1A => bios(cpu, vector, &mut ctx),
         0x20 => {
             super::task::exit(cpu, 0);
             return;
         }
+        // A handler a program put in the real-mode vector table, as
+        // Windows 98 Setup does for INT 12h to run code of its own in
+        // real mode.
+        _ if hooked_in_real_mode(cpu, vector) => {
+            let (tb_seg, _) = tb(cpu);
+            crate::win32::system::reflect_int(cpu, vector, ctx, tb_seg);
+            return;
+        }
+        0x10 | 0x11 | 0x12 | 0x15 | 0x16 | 0x1A => bios(cpu, vector, &mut ctx),
         _ => {
             cpu.bus.log_string(&format!(
                 "[W16] INT {:02X}h (AX {:04X}) isn't there, at {:04X}:{:04X}",
@@ -172,6 +180,30 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
         }
     }
     resume(cpu, &ctx);
+}
+
+/// Whether the real-mode vector table's handler of `vector` is in RAM,
+/// in conventional memory or an upper memory block: a DOS program's, a
+/// driver's or a task's own (through __0000H), which only runs in real
+/// mode. The built-in BIOS's and DOS's handlers are in the ROMs, and
+/// their services are called here directly. Windows reflects every
+/// software interrupt its protected-mode code doesn't handle to the
+/// vector table; only those of programs are reflected here.
+///
+/// Windows translates the services whose buffers are in segment
+/// registers (the video BIOS, the disk, INT 15h, the mouse, VDS) and
+/// copies the buffers below 1 MB. Those vectors are never reflected
+/// here, hooked or not: a disk cache, a VESA driver or a mouse driver
+/// would get the transfer buffer's segment in place of the task's
+/// selector, and read, write or keep a pointer to the wrong memory.
+fn hooked_in_real_mode(cpu: &Cpu, vector: u8) -> bool {
+    if matches!(vector, 0x10 | 0x13 | 0x15 | 0x25 | 0x26 | 0x33 | 0x4B) {
+        return false;
+    }
+    let handler = cpu.bus.read_32(vector as usize * 4);
+    let linear = ((handler >> 16) * 16 + (handler & 0xFFFF)) as usize;
+    let video = 0xA0000..0xC0000;
+    handler != 0 && !video.contains(&linear) && !crate::bus::Bus::is_rom(linear)
 }
 
 /// Go on with the task's context `ctx`, at level 3.

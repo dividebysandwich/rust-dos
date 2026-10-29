@@ -1,6 +1,7 @@
 //! The built-in Windows's Win16 loader and memory: Windows 3.1 programs
 //! with segments flagged 32-bit, and the selectors such programs make
-//! 32-bit. The programs are made byte by byte (tests/win16).
+//! 32-bit; and what Windows does for their CLI, STI and INT n. The
+//! programs are made byte by byte (tests/win16).
 
 mod win16;
 
@@ -11,6 +12,8 @@ use win16::{CODE, Code, program, run};
 const GLOBAL_ALLOC: u16 = 15;
 const GLOBAL_REALLOC: u16 = 16;
 const ALLOC_DS_TO_CS_ALIAS: u16 = 171;
+const ZERO_SELECTOR: u16 = 183;
+const GLOBAL_DOS_ALLOC: u16 = 184;
 
 /// `mov bx,cs` and `mov bx,si`.
 const BX_CS: [u8; 2] = [0x8C, 0xCB];
@@ -150,4 +153,59 @@ fn a_32_bit_offset_is_relocated_whole() {
     code.fixup(dword, ne::ADDR_OFFSET32, target);
     let (exit, log) = run("offset32", program(&code, CODE | ne::SEG_32BIT));
     assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn cli_and_sti_go_on_in_a_task() {
+    // Windows virtualizes the interrupt flag of its protected-mode
+    // programs: CLI and STI at level 3 go on. Exit code 7 if they did.
+    let mut code = Code::new();
+    code.emit(&[
+        0xFA, // cli
+        0xFB, // sti
+        0xB0, 0x07, // mov al,7
+    ])
+    .exit_al();
+    let (exit, log) = run("cli_sti", program(&code, CODE));
+    assert_eq!(exit, 7, "{log}");
+}
+
+#[test]
+fn a_real_mode_handler_a_task_set_runs_for_its_int() {
+    // Windows 98 Setup's way of running code in real mode: the code goes
+    // into a block of GlobalDOSAlloc, its address into the real-mode
+    // vector table through __0000H, and an INT of the task's runs it,
+    // with the task's registers in and out. The handler gives AL = BL +
+    // 1, so the exit code is 42h if it ran.
+    let mut code = Code::new();
+    code.push(0)
+        .push(0x10)
+        .call("KERNEL", GLOBAL_DOS_ALLOC)
+        .emit(&[
+            0x8E, 0xC0, // mov es,ax: the block's selector
+            0x26, 0xC7, 0x06, 0x00, 0x00, 0x88, 0xD8, // mov es:[0],"mov al,bl"
+            0x26, 0xC7, 0x06, 0x02, 0x00, 0xFE, 0xC0, // mov es:[2],"inc al"
+            0x26, 0xC6, 0x06, 0x04, 0x00, 0xCF, // mov es:[4],"iret"
+        ]);
+    let zero = code.here() + 1;
+    code.emit(&[
+        0xBB, 0xFF, 0xFF, // mov bx,__0000H
+        0x8E, 0xC3, // mov es,bx
+        0xFA, // cli
+        0x26, 0xC7, 0x06, 0x80, 0x01, 0x00, 0x00, // mov es:[180h],0: INT 60h
+        0x26, 0x89, 0x16, 0x82, 0x01, // mov es:[182h],dx: the segment
+        0xFB, // sti
+        0xB3, 0x41, // mov bl,41h
+        0xCD, 0x60, // int 60h
+        0x26, 0x66, 0xC7, 0x06, 0x80, 0x01, 0, 0, 0, 0, // mov es:[180h],0
+    ])
+    .exit_al();
+    let kernel = code.module("KERNEL");
+    let target = ne::Target::Ordinal {
+        module: kernel,
+        ordinal: ZERO_SELECTOR,
+    };
+    code.fixup(zero, ne::ADDR_OFFSET, target);
+    let (exit, log) = run("real_mode_handler", program(&code, CODE));
+    assert_eq!(exit, 0x42, "{log}");
 }

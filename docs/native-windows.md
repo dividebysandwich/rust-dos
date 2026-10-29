@@ -807,6 +807,16 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   descriptors, DOS memory, interrupt vectors, real-mode calls and
   linear memory. A descriptor that changes under a segment register is
   loaded into it again, as Windows' host does.
+- Another INT n of a Windows program whose real-mode vector a program
+  or driver set, in conventional or upper memory, runs that handler in
+  real mode with the program's general registers and gives back the
+  registers and arithmetic flags it returns, as Windows reflects such
+  an interrupt to the virtual machine. Windows 98 Setup runs code of
+  its own in real mode this way, through INT 12h. The BIOS's own
+  handlers are called directly, and so are those of INT 10h, 13h, 15h,
+  25h, 26h, 33h and 4Bh, whose buffers Windows translates and the
+  layer doesn't. CLI and STI, which Windows' VMM virtualizes, go on
+  without effect.
 - Windows 3.1 programs see version 3.95, Windows 95's, and not the
   WS_EX_WINDOWEDGE style USER32 gives their windows.
 - KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a

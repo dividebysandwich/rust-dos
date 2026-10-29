@@ -9,7 +9,7 @@
 //! service traps in the ROM, run at level 0 on the TSS's stack.
 
 use super::memory::{Memory, PAGE, SYSTEM, WRITABLE};
-use super::{Context, ESP, ID_IDT, IDT_TRAPS, IRQ_RETURN, ROM_BASE, ROM_SEG};
+use super::{Context, ESP, ID_IDT, IDT_TRAPS, INT_RETURN, IRQ_RETURN, ROM_BASE, ROM_SEG};
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache};
 use crate::dpmi::descriptor;
 
@@ -348,6 +348,15 @@ fn exception_entry(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) 
 /// handler runs, on the DOS program's stack, and returns to the trap at
 /// `IRQ_RETURN`, which goes on with the program.
 fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
+    // The handler's IRET comes back to the trap, interrupts still off.
+    enter_handler(cpu, vector, ctx, 0x0002, 0x0002, IRQ_RETURN);
+}
+
+/// Run the real-mode handler of `vector` for the program's context
+/// `ctx`, which `interrupted` keeps: on the DOS program's stack, with
+/// the flags `flags`, and an interrupt's frame on the stack whose IRET
+/// comes back to the trap at `ret` with the flags `frame`.
+fn enter_handler(cpu: &mut Cpu, vector: u8, ctx: Context, flags: u32, frame: u32, ret: u16) {
     let win32 = &mut cpu.bus.win32;
     win32.interrupted = Some(ctx);
     let (ss, sp) = win32.rm_stack;
@@ -356,12 +365,54 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
         cpu,
         ((handler >> 16) as u16, handler as u16),
         (ss, sp),
-        0x0002,
+        flags,
     );
-    // The handler's IRET comes back to the trap, interrupts still off.
-    cpu.push(0x0002);
+    cpu.push(frame as u16);
     cpu.push(ROM_SEG);
-    cpu.push(IRQ_RETURN);
+    cpu.push(ret);
+}
+
+/// The arithmetic flags: what a real-mode handler of a software
+/// interrupt gives back to the protected-mode program.
+const STATUS_FLAGS: u32 = 0x08D5;
+
+/// A Win16 task's software interrupt `vector` that goes down to real
+/// mode, as Windows reflects one its protected-mode code doesn't handle
+/// to the virtual machine's vector table: the handler there runs with
+/// the general registers of `ctx`, its arithmetic flags and direction
+/// flag, and DS and ES `seg`, on the DOS program's stack, interrupts
+/// off, and returns to the trap at `INT_RETURN`, which gives the task
+/// what it returned (`int_return`).
+pub fn reflect_int(cpu: &mut Cpu, vector: u8, ctx: Context, seg: u16) {
+    let flags = ctx.eflags & (STATUS_FLAGS | CpuFlags::DF.bits()) | 0x0002;
+    // The frame the INT pushed: the handler's IRET comes back to the
+    // trap, with interrupts on, as the task had them.
+    enter_handler(cpu, vector, ctx, flags, flags | 0x0200, INT_RETURN);
+    let mut snapshot = cpu.snapshot();
+    let esp = snapshot.gpr[ESP];
+    snapshot.gpr = ctx.gpr;
+    snapshot.gpr[ESP] = esp;
+    cpu.restore(&snapshot);
+    cpu.set_ds(seg);
+    cpu.set_es(seg);
+}
+
+/// The trap the real-mode handler of a Win16 task's software interrupt
+/// returned to: the task goes on after its INT with the general
+/// registers and the arithmetic flags the handler left, its own stack
+/// and segment registers.
+pub fn int_return(cpu: &mut Cpu) {
+    let mut ctx = cpu
+        .bus
+        .win32
+        .interrupted
+        .take()
+        .expect("an interrupted program");
+    let esp = ctx.gpr[ESP];
+    ctx.gpr = cpu.snapshot().gpr;
+    ctx.gpr[ESP] = esp;
+    ctx.eflags = ctx.eflags & !STATUS_FLAGS | cpu.eflags_image() & STATUS_FLAGS;
+    enter_user(cpu, &ctx);
 }
 
 /// The trap the real-mode handler of a hardware interrupt returned to.
