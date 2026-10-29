@@ -334,7 +334,7 @@ pub struct Win32 {
     a20: bool,
     cr4: u32,
     /// The program's context while the real-mode handler of a hardware
-    /// interrupt runs.
+    /// interrupt runs, or of a Win16 task's software interrupt.
     interrupted: Option<Context>,
     /// The exit code of the program DOS started, which DOS gets when the
     /// last program ends.

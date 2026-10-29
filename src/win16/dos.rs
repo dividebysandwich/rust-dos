@@ -182,19 +182,28 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
     resume(cpu, &ctx);
 }
 
-/// Whether the real-mode vector table's handler of `vector` is in
-/// conventional memory: a DOS program's, a driver's or a task's own
-/// (through __0000H), which only runs in real mode. The built-in BIOS's
-/// and DOS's handlers are in the ROM, and their services are called here
-/// directly. Windows reflects every software interrupt its
-/// protected-mode code doesn't handle to the vector table; only those of
-/// programs are reflected here, so that a vector such as INT 13h or 25h,
-/// whose buffer is a selector the real-mode handler can't use, isn't
-/// handed to the BIOS.
+/// Whether the real-mode vector table's handler of `vector` is in RAM,
+/// in conventional memory or an upper memory block: a DOS program's, a
+/// driver's or a task's own (through __0000H), which only runs in real
+/// mode. The built-in BIOS's and DOS's handlers are in the ROMs, and
+/// their services are called here directly. Windows reflects every
+/// software interrupt its protected-mode code doesn't handle to the
+/// vector table; only those of programs are reflected here.
+///
+/// Windows translates the services whose buffers are in segment
+/// registers (the video BIOS, the disk, INT 15h, the mouse, VDS) and
+/// copies the buffers below 1 MB. Those vectors are never reflected
+/// here, hooked or not: a disk cache, a VESA driver or a mouse driver
+/// would get the transfer buffer's segment in place of the task's
+/// selector, and read, write or keep a pointer to the wrong memory.
 fn hooked_in_real_mode(cpu: &Cpu, vector: u8) -> bool {
+    if matches!(vector, 0x10 | 0x13 | 0x15 | 0x25 | 0x26 | 0x33 | 0x4B) {
+        return false;
+    }
     let handler = cpu.bus.read_32(vector as usize * 4);
-    let linear = (handler >> 16) * 16 + (handler & 0xFFFF);
-    handler != 0 && linear < 0xA0000
+    let linear = ((handler >> 16) * 16 + (handler & 0xFFFF)) as usize;
+    let video = 0xA0000..0xC0000;
+    handler != 0 && !video.contains(&linear) && !crate::bus::Bus::is_rom(linear)
 }
 
 /// Go on with the task's context `ctx`, at level 3.
