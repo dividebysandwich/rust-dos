@@ -104,7 +104,7 @@ fn check_readable(lba: u32, raw: &[u8; RAW_SECTOR]) -> io::Result<()> {
 impl CdImage {
     /// Open a CD image: a CUE sheet, a CHD file, or a bare image of one
     /// data track (.iso, .bin, .img), whose sector format is found from
-    /// where the ISO 9660 volume descriptor is.
+    /// where the ISO 9660 or High Sierra volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(sheet) = sheet(path) {
             Self::open_cue(path, sheet?)
@@ -256,7 +256,12 @@ impl CdImage {
 
     fn bare(path: &Path, backing: Backing) -> Result<Self, String> {
         let mode = Self::bare_mode(backing.len, |at, buf| backing.read_at(at, buf).is_ok())
-            .ok_or_else(|| format!("{} is not an ISO 9660 or High Sierra CD image", path.display()))?;
+            .ok_or_else(|| {
+                format!(
+                    "{} is not an ISO 9660 or High Sierra CD image",
+                    path.display()
+                )
+            })?;
         let sectors = (backing.len / mode.sector_size()) as u32;
         let track = Track {
             number: 1,

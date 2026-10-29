@@ -129,7 +129,8 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
             Err(code) => set_error(cpu, code),
         },
         // Read volume descriptor DX (0 = the first, at sector 16). AX is
-        // its type: 1 primary, FFh terminator, 0 others.
+        // its type: 1 primary, FFh terminator, 0 others. High Sierra has
+        // the type at byte 8, after the descriptor's sector number.
         0x05 => match drive_image(cpu, cpu.cx()) {
             Ok(image) => {
                 let start = image.data_track().map_or(0, |t| t.start);
@@ -141,7 +142,11 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                 for (i, &b) in sector.iter().enumerate() {
                     cpu.bus.guest_write_8((es_bx + i) as u32, b);
                 }
-                cpu.set_ax(match sector[0] {
+                let kind = match cdrom::iso9660::Format::of(&sector) {
+                    Some(format) => format.kind(&sector),
+                    None => sector[0],
+                };
+                cpu.set_ax(match kind {
                     1 => 1,
                     0xFF => 0xFF,
                     _ => 0,
@@ -205,8 +210,8 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
             }
             clear_error(cpu);
         }
-        // Directory entry of the path at ES:BX, copied to SI:DI. AX = 1:
-        // the disc is ISO 9660.
+        // Directory entry of the path at ES:BX, copied to SI:DI. AX is
+        // the disc's format: 0 High Sierra, 1 ISO 9660.
         0x0F => get_directory_entry(cpu, es_bx),
         // Send device driver request: CX = drive, ES:BX -> request header
         0x10 => {

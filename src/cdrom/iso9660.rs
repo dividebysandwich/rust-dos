@@ -24,7 +24,8 @@ pub struct IsoVolume {
     /// The volume identifier, the drive's label.
     pub label: String,
     pub files: MemFs,
-    /// The Primary Volume Descriptor.
+    /// The Primary Volume Descriptor, in the disc's format: a High Sierra
+    /// one has its fields where `Format::HighSierra` says.
     pub descriptor: Box<[u8; DATA_SECTOR]>,
 }
 
@@ -118,7 +119,7 @@ impl Format {
     /// A volume descriptor's type: 1 for the primary (High Sierra's
     /// standard file structure descriptor), 2 supplementary, FFh the
     /// terminator.
-    fn kind(self, descriptor: &[u8]) -> u8 {
+    pub fn kind(self, descriptor: &[u8]) -> u8 {
         descriptor[self.shift()]
     }
 

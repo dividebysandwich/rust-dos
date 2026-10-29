@@ -249,6 +249,14 @@ fn high_sierra_discs_answer_the_volume_calls() {
     assert_eq!(&name[..15], b"COPYRIGHT.TXT;1");
     assert_eq!(name[32], 0);
 
+    // The volume descriptors' types are at byte 8.
+    cpu.set_dx(0);
+    int2f(&mut cpu, 0x1505, 0, 3);
+    assert_eq!(cpu.ax(), 1);
+    cpu.set_dx(1);
+    int2f(&mut cpu, 0x1505, 0, 3);
+    assert_eq!(cpu.ax(), 0xFF);
+
     // The directory entry is the disc's record, and AX says High Sierra.
     for (i, &b) in b"D:\\HELLO.COM\0".iter().enumerate() {
         cpu.bus.write_8(0x32000 + i, b);
