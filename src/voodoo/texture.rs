@@ -437,8 +437,10 @@ impl Tmu {
     /// The host wrote `data` to the texture RAM at dword `offset` of the
     /// card's texture space (`texture_w`): four 8-bit texels or two 16-bit
     /// ones of level `offset >> 15`, row `(offset >> 7) & FFh`.
-    /// `seq_8_download` is TMU 0's textureMode bit 31, which the original
-    /// always takes from TMU 0.
+    /// `seq_8_download` is the unit's textureMode bit 31. DOSBox-X and
+    /// MAME take TMU 0's for both units, but each TREX lays out what it is
+    /// sent by its own register, as 86Box has it, and Glide sets the bit
+    /// in the unit it downloads to.
     pub fn write(&mut self, reg: &[u32], offset: u32, mut data: u32, seq_8_download: bool) {
         if self.regdirty {
             self.recompute(reg);
