@@ -478,14 +478,7 @@ fn key_message(
     repeat: bool,
 ) -> (u32, u32) {
     let was_down = input.async_down(vk);
-    let focus = match input.foreground {
-        0 => 0,
-        queue => input
-            .queues
-            .iter()
-            .find(|a| a.queue == queue)
-            .map_or(0, |a| a.focus),
-    };
+    let focus = input.activation(input.foreground).focus;
     let mut sys = focus == 0 || vk == VK_F10;
     if down {
         input.set_async(vk, true);
@@ -985,6 +978,17 @@ pub struct Activation {
     pub focus: u32,
 }
 
+impl Input {
+    /// The active window and the focus of the queue `queue`.
+    pub fn activation(&self, queue: u32) -> Activation {
+        if queue == 0 {
+            return Activation::default();
+        }
+        let found = self.queues.iter().find(|a| a.queue == queue);
+        found.copied().unwrap_or_default()
+    }
+}
+
 impl State {
     /// The input queue of the thread `tid` of the process `pid`: the
     /// thread's own, or for a task of the Win16 process the one they
@@ -1005,11 +1009,7 @@ impl State {
 
     /// The active window and the focus of the queue `queue`.
     pub fn activation(&self, queue: u32) -> Activation {
-        if queue == 0 {
-            return Activation::default();
-        }
-        let found = self.input.queues.iter().find(|a| a.queue == queue);
-        found.copied().unwrap_or_default()
+        self.input.activation(queue)
     }
 
     fn activation_mut(&mut self, queue: u32) -> &mut Activation {
@@ -1085,27 +1085,44 @@ pub fn focus(cpu: &Cpu) -> u32 {
 /// it has ended.
 fn queue_pid(cpu: &Cpu, queue: u32) -> u32 {
     let win32 = &cpu.bus.win32;
-    if queue == WIN16_QUEUE {
-        return win32.user.input.win16;
-    }
-    let found = win32
-        .processes
-        .iter()
-        .find(|p| p.threads.iter().any(|t| t.id == queue));
+    let found = if queue == WIN16_QUEUE {
+        let win16 = win32.user.input.win16;
+        win32.processes.iter().find(|p| p.id == win16)
+    } else {
+        win32
+            .processes
+            .iter()
+            .find(|p| p.threads.iter().any(|t| t.id == queue))
+    };
     found.map_or(0, |p| p.id)
+}
+
+/// Whether a thread is still to activate a window of the queue `queue`
+/// as the foreground came to it (`EV_ACTIVATE`, `EV_SELECT`).
+fn activation_pending(state: &State, queue: u32) -> bool {
+    state
+        .queues
+        .iter()
+        .any(|q| matches!(q.activation[0], EV_ACTIVATE | EV_SELECT) && q.activation[3] == queue)
 }
 
 /// Whether the running thread may bring a window to the foreground, by
 /// Windows 98's rules for SetForegroundWindow: no queue is in the
-/// foreground, or the thread's own is; its process took the last input;
+/// foreground, or the thread's own is; the foreground queue has no
+/// active window and none on its way; its process took the last input;
 /// or its process is the foreground one, or was started by it.
 fn may_take_foreground(cpu: &Cpu) -> bool {
     let queue = current_queue(cpu);
     let pid = super::current_pid(cpu);
-    let input = &cpu.bus.win32.user.input;
+    let user = &cpu.bus.win32.user;
+    let input = &user.input;
     let foreground = input.foreground;
     let last_input = pid != 0 && input.last_input == pid;
     if foreground == 0 || foreground == queue || last_input {
+        return true;
+    }
+    // No foreground window, and thus no foreground process.
+    if user.foreground_window() == 0 && !activation_pending(user, foreground) {
         return true;
     }
     let owner = queue_pid(cpu, foreground);
