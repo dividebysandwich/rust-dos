@@ -217,7 +217,7 @@ impl DiskController {
         listed: Result<Vec<DosDirEntry>, u8>,
     ) -> Result<Vec<DosDirEntry>, u8> {
         let shown = &self.system_files;
-        if shown.files.is_empty() || search_attr & 0xFF == 0x08 {
+        if shown.files.is_empty() || Self::label_only(search_attr) {
             return listed;
         }
         let Some(dir) = self.qualify_directory(spec) else {

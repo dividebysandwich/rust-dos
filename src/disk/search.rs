@@ -402,13 +402,20 @@ impl DiskController {
         }
     }
 
+    /// Whether a search asks for the volume label alone (attributes
+    /// exactly 08h, in the one byte the DTA keeps of them).
+    pub(super) fn label_only(search_attr: u16) -> bool {
+        search_attr & 0xFF == 0x08
+    }
+
     /// A volume label as FindFirst reports it: labels longer than 8
-    /// characters get a dot after the 8th, like a filename.
+    /// characters get a dot after the 8th, like a filename. The split
+    /// counts characters, as a label read off a disk can hold bytes
+    /// above 7Fh, which are two bytes each here.
     fn label_entry(label: &str) -> DosDirEntry {
-        let filename = if label.len() > 8 {
-            format!("{}.{}", &label[..8], &label[8..])
-        } else {
-            label.to_string()
+        let filename = match label.char_indices().nth(8) {
+            Some((at, _)) => format!("{}.{}", &label[..at], &label[at..]),
+            None => label.to_string(),
         };
         DosDirEntry {
             filename,
@@ -469,7 +476,7 @@ impl DiskController {
     /// What a search of a folder on a host drive lists (see
     /// `list_directory`); None for other drives and volume label searches.
     fn search_key(&self, search_spec: &str, search_attr: u16) -> Option<SearchKey> {
-        if search_attr & 0x08 != 0 {
+        if Self::label_only(search_attr) {
             return None;
         }
         let normalized = search_spec.replace('/', "\\");
@@ -531,11 +538,13 @@ impl DiskController {
         // A search for the volume label alone (attribute 08h) finds the
         // label wherever it looks, as DOS 3 and later do; a disk without
         // a label has none to find.
-        let label = Some(drive.label.as_str())
-            .filter(|label| !label.is_empty())
-            .map(Self::label_entry);
-        if search_attr & 0xFF == 0x08 {
-            return Ok(label.into_iter().collect());
+        let label = || {
+            Some(drive.label.as_str())
+                .filter(|label| !label.is_empty())
+                .map(Self::label_entry)
+        };
+        if Self::label_only(search_attr) {
+            return Ok(label().into_iter().collect());
         }
 
         // Split Spec into Directory and Pattern
@@ -557,13 +566,8 @@ impl DiskController {
         // Windows 98 Setup's 0Eh for "is this name taken?") find it as
         // the entry of the root directory it is, by its name, and the
         // files besides. In a subdirectory there is no label to find.
-        if search_attr & 0x08 != 0 {
-            let in_root = self
-                .qualify_directory(&normalized)
-                .is_some_and(|dir| dir.len() == 3);
-            valid_entries.extend(
-                label.filter(|entry| in_root && Self::matches_pattern(&entry.filename, pattern)),
-            );
+        if search_attr & 0x08 != 0 && Self::logical_components(drive, search_dir_str).is_empty() {
+            valid_entries.extend(label().filter(|e| Self::matches_pattern(&e.filename, pattern)));
         }
 
         if let Some(volume) = drive.fat() {
