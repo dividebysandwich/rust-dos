@@ -188,6 +188,15 @@ fn single_bits(precise: Option<F80>, double: f64, control: u16) -> u32 {
     }
 }
 
+/// The single FST and FSTP store of ST(0), as `single_bits` has it, for
+/// the recompiler's code (`Uop::FToSingle`). (The register's value
+/// whatever its tag, as FSTP's.)
+pub fn st0_single_bits(cpu: &Cpu) -> u32 {
+    let top = cpu.fpu_top;
+    let precise = cpu.fpu_reg_beyond_double(top).then(|| cpu.fpu_reg(top));
+    single_bits(precise, cpu.fpu_reg_f64(top), cpu.fpu_control)
+}
+
 /// The double FST and FSTP store, as `single_bits` has it. The register's
 /// double is its 80 bits rounded to nearest: under another rounding they
 /// are rounded again, as the control word says.

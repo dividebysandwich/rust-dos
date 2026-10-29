@@ -4380,6 +4380,63 @@ fn fpu_stores_and_compares_of_80_bit_values_round_once_on_both_cores() {
 }
 
 #[test]
+fn fpu_single_stores_of_80_bit_sums_stay_in_translated_code() {
+    // Sums keep 80 bits a double hasn't, and a game that rounds down (Sub
+    // Culture's control word is 143Fh) stores them as singles in its
+    // inner loops. Under each rounding the single comes from the 80 bits
+    // on both cores, and the recompiler's code rounds them through the
+    // handlers' code without handing FST and FSTP to their handlers.
+    let mut values = EXTENDED.to_vec();
+    values.extend([
+        (0x3FFF, 0x8000_017F_FFFF_FFFF), // just under a single's tie
+        (0xBFFF, 0x8000_0100_0000_0001), // just past -(1 + 2^-23)
+    ]);
+    let (input, output) = (DATA, DATA + 0x8000);
+    let n = values.len() as u32 * values.len() as u32 * 4;
+    let (mut a, mut b) = twins(|rig| {
+        for k in 0..n {
+            let at = input + 32 * k;
+            let (x, y) = (k as usize % values.len(), k as usize / values.len() % values.len());
+            for (o, (se, man)) in [(0, values[x]), (16, values[y])] {
+                rig.write32(at + o, man as u32);
+                rig.write32(at + o + 4, (man >> 32) as u32);
+                rig.write32(at + o + 8, se as u32);
+            }
+            let rc = k / (values.len() * values.len()) as u32;
+            rig.write32(at + 12, 0x037F | rc << 10);
+        }
+        rig.load(CODE, &asm32(CODE, |a| {
+            let mut again = a.create_label();
+            a.fninit()?;
+            a.mov(esi, input)?;
+            a.mov(edi, output)?;
+            a.mov(ecx, n)?;
+            a.set_label(&mut again)?;
+            a.fldcw(word_ptr(esi + 12))?;
+            a.fld(tword_ptr(esi + 16))?;
+            a.fld(tword_ptr(esi))?;
+            a.fadd_2(st0, st1)?;
+            a.fst(dword_ptr(edi))?;
+            a.fstp(dword_ptr(edi + 4))?;
+            a.fld(tword_ptr(esi))?;
+            a.fsubr_2(st0, st1)?;
+            a.fstp(dword_ptr(edi + 8))?;
+            a.fstp(dword_ptr(edi + 12))?;
+            a.add(esi, 32)?;
+            a.add(edi, 16)?;
+            a.dec(ecx)?;
+            a.jnz(again)?;
+            a.hlt()
+        }));
+    });
+    run_both(&mut a, &mut b);
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Fst), 0);
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Fstp), 0);
+    }
+}
+
+#[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),
     // and the cores agree on them.
