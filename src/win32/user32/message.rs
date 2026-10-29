@@ -1105,6 +1105,7 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
     // SetCursorPos would otherwise undo before any poll saw it.
     super::input::poll(cpu);
     let now = cpu.bus.clock.now_micros();
+    let pid = super::current_pid(cpu);
     let state = user(cpu);
     // Posted messages.
     let q = state.queue(tid)?;
@@ -1142,6 +1143,12 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
         };
         if remove {
             super::input::message_taken(state, &m);
+            // A key or button the user pressed: its process may bring a
+            // window to the foreground. A message a program posts, even
+            // one of these, doesn't count.
+            if is_input(m.message) {
+                state.input.last_input = pid;
+            }
         }
         return Some(m);
     }
@@ -1232,9 +1239,6 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let (hwnd, lp) = cursor.unwrap_or((0, 0));
                     t.set(GET_CURSOR_HWND, hwnd);
                     t.set(GET_CURSOR_LP, lp);
-                    if remove && is_input(m.message) {
-                        user(cpu).input.last_input = super::current_pid(cpu);
-                    }
                     // A click on a window that isn't the active one in the
                     // foreground: WM_MOUSEACTIVATE asks the window under
                     // the cursor whether it activates its top-level
