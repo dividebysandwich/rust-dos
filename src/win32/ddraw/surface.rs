@@ -685,6 +685,12 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
 
 const PITCH_ALIGN: u32 = 4;
 
+/// The caps that make a surface of the 3dfx device one of the card's
+/// buffers (`voodoo::role`) rather than system memory: a back buffer
+/// made on its own and attached later as well as a Z buffer.
+const CARD_BUFFER_CAPS: u32 =
+    DDSCAPS_ZBUFFER | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER | DDSCAPS_FLIP;
+
 /// The pitch of `width` pixels of `bits` bits.
 /// The most bytes of pixels a surface can have in the program's memory
 /// (`SetSurfaceDesc`).
@@ -912,7 +918,9 @@ pub fn make(
                 16
             };
             width.div_ceil(4).max(1) * height.div_ceil(4).max(1) * block
-        } else if card && caps[0] & DDSCAPS_ZBUFFER != 0 {
+        } else if card && caps[0] & CARD_BUFFER_CAPS != 0 {
+            // One of the card's buffers (`voodoo::role`): its rows are
+            // the linear frame buffer's, whatever its width.
             voodoo::PITCH
         } else {
             pitch_of(width, f.bits)
