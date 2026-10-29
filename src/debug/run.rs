@@ -420,6 +420,10 @@ impl DebugHub {
             || self.shared.as_ref().is_some_and(|s| s.screen_subscribers.load(Ordering::Relaxed) > 0)
     }
 
+    pub fn wants_shader_frame(&self) -> bool {
+        self.frame_waiters.iter().any(|(shader, _, _)| *shader)
+    }
+
     /// Hand the composited frame (cached VGA render + cursor overlays) to
     /// screenshot requests and the screen stream.
     /// Watch the machine's writes while a heatmap stream is open, and
@@ -447,14 +451,25 @@ impl DebugHub {
         }
     }
 
+    /// Capture plain output, including readbacks supplied by 3dfx callers.
     pub fn capture_frame(&mut self, screen: &video::Frame) {
+        self.capture_frame_with_shader(screen, None);
+    }
+
+    /// Supply filtered output separately so plain captures stay unchanged.
+    pub fn capture_frame_with_shader(&mut self, screen: &video::Frame, shaded: Option<&video::Frame>) {
         self.count_frame();
         if !self.wants_frame() {
             return;
         }
-        for (ctx, w) in std::mem::take(&mut self.frame_waiters) {
+        for (shader, ctx, w) in std::mem::take(&mut self.frame_waiters) {
             let meta = self.meta(&ctx);
-            let _ = w.send(Answer { reply: Reply::Frame(screen.clone()), meta });
+            let reply = match (shader, shaded) {
+                (true, Some(frame)) => Reply::Frame(frame.clone()),
+                (true, None) => Reply::Error(409, "the OpenGL shader output is unavailable".into()),
+                (false, _) => Reply::Frame(screen.clone()),
+            };
+            let _ = w.send(Answer { reply, meta });
         }
         if let Some(shared) = &self.shared
             && shared.screen_subscribers.load(Ordering::Relaxed) > 0

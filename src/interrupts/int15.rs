@@ -2,8 +2,8 @@ use crate::cpu::{Cpu, CpuFlags};
 use iced_x86::Register;
 
 /// Extended memory above 1 MB, in KB.
-fn extended_kb(cpu: &Cpu) -> usize {
-    (cpu.bus.ram().len() >> 10).saturating_sub(1024)
+pub(crate) fn extended_kb(bus: &crate::bus::Bus) -> usize {
+    (bus.ram().len() >> 10).saturating_sub(1024)
 }
 
 /// Report success (CF clear, AH 0).
@@ -39,7 +39,11 @@ pub fn handle(cpu: &mut Cpu) {
         // the memory this way would overwrite XMS blocks.
         0x88 => {
             // A booted system's own HIMEM.SYS asks here what there is.
-            let kb = if cpu.bus.boot.is_some() { extended_kb(cpu).min(0xFFFF) as u16 } else { 0 };
+            let kb = if cpu.bus.boot.is_some() {
+                extended_kb(&cpu.bus).min(0xFFFF) as u16
+            } else {
+                0
+            };
             cpu.set_ax(kb);
             cpu.set_cpu_flag(CpuFlags::CF, false);
         }
@@ -70,7 +74,7 @@ pub fn handle(cpu: &mut Cpu) {
         // AX=E801h: memory between 1 and 16 MB in KB (AX, CX), and above
         // 16 MB in 64 KB blocks (BX, DX).
         0xE8 if al == 0x01 => {
-            let kb = extended_kb(cpu);
+            let kb = extended_kb(&cpu.bus);
             let below_16m = kb.min(15 * 1024) as u16;
             let above_16m = (kb.saturating_sub(15 * 1024) / 64) as u16;
             cpu.set_ax(below_16m);

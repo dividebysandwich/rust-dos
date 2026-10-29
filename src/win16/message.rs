@@ -64,6 +64,16 @@ const CB_GETEDITSEL: u32 = 0x0140;
 const BM_GETCHECK: u32 = 0x00F0;
 const STM_SETICON: u32 = 0x0170;
 const STM_GETICON: u32 = 0x0171;
+const SBM_SETPOS: u32 = 0x00E0;
+const SBM_ENABLE_ARROWS: u32 = 0x00E4;
+
+/// The scroll bar's messages that pack the range differently: Windows
+/// 3.1's SBM_SETRANGE takes it in lParam's two words and redraws when
+/// wParam isn't 0, and its SBM_GETRANGE returns it the same way. Win32's
+/// take and fill two integers.
+const SBM_SETRANGE: u32 = 0x00E2;
+const SBM_GETRANGE: u32 = 0x00E3;
+const SBM_SETRANGEREDRAW: u32 = 0x00E6;
 
 /// The controls' messages that take strings and other pointers.
 const EM_GETRECT: u32 = 0x00B2;
@@ -107,6 +117,9 @@ const FIX_TEXT: u32 = 6;
 const FIX_STRING: u32 = 7;
 /// An array of `len` integers the callee filled, 16-bit and 32-bit.
 const FIX_INTS: u32 = 8;
+/// A scroll bar's range: the 32-bit addresses of its two integers, and
+/// the value Windows 3.1's SBM_GETRANGE returns has both.
+const FIX_RANGE: u32 = 9;
 
 fn lo(v: u32) -> u32 {
     v & 0xFFFF
@@ -251,6 +264,7 @@ fn control_msg32(cpu: &Cpu, hwnd: u32, msg: u32) -> u32 {
         "combobox" if n <= 0x1C => CB_GETEDITSEL + n,
         "button" if n <= 4 => BM_GETCHECK + n,
         "static" if n <= 3 => STM_SETICON + n,
+        "scrollbar" if n <= 4 => SBM_SETPOS + n,
         _ => msg,
     }
 }
@@ -269,6 +283,10 @@ fn control_msg16(cpu: &Cpu, hwnd: u32, msg: u32) -> u32 {
         }
         "button" if (BM_GETCHECK..=BM_GETCHECK + 4).contains(&msg) => msg - BM_GETCHECK + WM_USER,
         "static" if (STM_SETICON..=STM_SETICON + 3).contains(&msg) => msg - STM_SETICON + WM_USER,
+        "scrollbar" if (SBM_SETPOS..=SBM_ENABLE_ARROWS).contains(&msg) => {
+            msg - SBM_SETPOS + WM_USER
+        }
+        "scrollbar" if msg == SBM_SETRANGEREDRAW => SBM_SETRANGE - SBM_SETPOS + WM_USER,
         _ => msg,
     }
 }
@@ -544,6 +562,22 @@ fn to32(
             data.push(FIX_NONE);
             (msg, wp, icon32(lp as u16))
         }
+        SBM_SETRANGE if msg16 != msg => {
+            let msg = if wp != 0 {
+                SBM_SETRANGEREDRAW
+            } else {
+                SBM_SETRANGE
+            };
+            let last = data.len() - 1;
+            data[last] = msg;
+            data.push(FIX_NONE);
+            (msg, sx(lo(lp)), sx(hi(lp)))
+        }
+        SBM_GETRANGE if msg16 != msg => {
+            let range = stack.alloc(8);
+            data.extend([FIX_RANGE, range, range + 4]);
+            (msg, range, range + 4)
+        }
         STM_SETICON => {
             data.push(FIX_NONE);
             (msg, icon32(wp as u16), lp)
@@ -560,7 +594,7 @@ fn sx_wparam(msg: u32, wp: u32) -> u32 {
     match msg {
         LB_GETTEXT | LB_INSERTSTRING | LB_FINDSTRING | LB_FINDSTRINGEXACT | LB_SELECTSTRING
         | CB_GETLBTEXT | CB_INSERTSTRING | CB_FINDSTRING | CB_FINDSTRINGEXACT | CB_SELECTSTRING
-        | LB_GETITEMRECT => sx(wp),
+        | LB_GETITEMRECT | SBM_SETPOS => sx(wp),
         _ => wp & 0xFFFF,
     }
 }
@@ -623,6 +657,7 @@ fn returned16(cpu: &mut Cpu, value: u32, data: &[u32]) -> u32 {
                 let n = (value as i32).max(0) as u32;
                 copy_ints(cpu, p, p16, n.min(0x1000), false);
             }
+            FIX_RANGE => return make_long(r32(cpu, p), r32(cpu, p16)),
             _ => {}
         }
     }
@@ -805,6 +840,15 @@ pub(super) fn to16(
             data.push(FIX_NONE);
             (control_msg16(cpu, hwnd, msg), icon16(wp) as u32, lp)
         }
+        SBM_SETRANGE | SBM_SETRANGEREDRAW if class_name(cpu, hwnd) == "scrollbar" => {
+            data.push(FIX_NONE);
+            let redraw = (msg == SBM_SETRANGEREDRAW) as u32;
+            (control_msg16(cpu, hwnd, msg), redraw, make_long(wp, lp))
+        }
+        SBM_GETRANGE if class_name(cpu, hwnd) == "scrollbar" => {
+            data.extend([FIX_RANGE, wp, lp]);
+            (control_msg16(cpu, hwnd, msg), 0, 0)
+        }
         _ => {
             data.push(FIX_NONE);
             let msg16 = control_msg16(cpu, hwnd, msg);
@@ -883,6 +927,14 @@ fn returned32(cpu: &mut Cpu, value: u32, data: &[u32], dialog: bool) -> u32 {
                 }
             }
             FIX_STRING => copy_string(cpu, p16, p),
+            FIX_RANGE => {
+                // Into the integers Win32's caller gave (p, then p16).
+                for (at, v) in [(p, lo(value)), (p16, hi(value))] {
+                    if at != 0 {
+                        w32(cpu, at, sx(v));
+                    }
+                }
+            }
             _ => {}
         }
     }

@@ -213,6 +213,12 @@ pub fn run_batch(cpu: &mut Cpu, hook: &mut dyn ExecHook, hot: bool) -> StopReaso
         (true, false, true) => run::<true, false, true>(cpu, &mut fetch, hook),
         (true, true, true) => run::<true, true, true>(cpu, &mut fetch, hook),
     };
+    // Watching ends with the batch: the host's time until the next one
+    // (drawing, presenting, waiting for the frame) isn't its own
+    // (`Observe::take_watched`).
+    if cpu.bus.observe.in_watch() {
+        cpu.bus.observe.watch_to(cpu.bus.clock.run_count());
+    }
     fetch.finish(cpu);
     reason
 }
@@ -280,7 +286,17 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
         // on the interpreter, which raises the single-step traps. (IRET,
         // which can set TF, ends translated blocks, and POPF stops one
         // where it sets TF.)
-        let stop = if !HOT && cpu.bus.observe.watching() {
+        let watching = !HOT && cpu.bus.observe.watching();
+        if !HOT && watching != cpu.bus.observe.in_watch() {
+            // The host time this takes is kept apart (`Observe::watch_from`).
+            let run = cpu.bus.clock.run_count();
+            if watching {
+                cpu.bus.observe.watch_from(run);
+            } else {
+                cpu.bus.observe.watch_to(run);
+            }
+        }
+        let stop = if watching {
             // A busy-wait loop is looked for or proven (`idle`): one
             // instruction at a time, on the interpreter.
             if PROF {
