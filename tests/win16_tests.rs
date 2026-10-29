@@ -205,7 +205,7 @@ fn a_real_mode_handler_a_task_set_runs_for_its_int() {
         module: kernel,
         ordinal: ZERO_SELECTOR,
     };
-    code.fixup(zero, ne::ADDR_SELECTOR, target);
+    code.fixup(zero, ne::ADDR_OFFSET, target);
     let (exit, log) = run("real_mode_handler", program(&code, CODE));
     assert_eq!(exit, 0x42, "{log}");
 }
