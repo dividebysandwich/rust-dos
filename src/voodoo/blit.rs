@@ -116,7 +116,14 @@ impl Voodoo {
         if at >= self.fbi.ram.len() {
             return;
         }
-        let dst = self.fbi.ram.get(at);
+        let value = self.blt_value(src, self.fbi.ram.get(at));
+        self.fbi.ram.set(at, value);
+        self.blt_mirror(at, value);
+    }
+
+    /// The pixel the raster operations make of `src` over `dst`: the ROP
+    /// the source and destination chroma range tests select.
+    fn blt_value(&self, src: u16, dst: u16) -> u16 {
         let command = self.blt_command();
         let mut rop = 0;
         if command & DST_CHROMA != 0 && in_range(self.reg[BLT_DST_CHROMA_RANGE], dst) {
@@ -125,9 +132,7 @@ impl Voodoo {
         if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) {
             rop |= 2;
         }
-        let value = mix(self.reg[BLT_ROP] >> (4 * rop), src, dst);
-        self.fbi.ram.set(at, value);
-        self.blt_mirror(at, value);
+        mix(self.reg[BLT_ROP] >> (4 * rop), src, dst)
     }
 
     /// Tell the OpenGL renderer's recording about a pixel the blitter
@@ -165,7 +170,7 @@ impl Voodoo {
             let xy = self.reg[BLT_DST_XY];
             let (x, y) = ((xy & 0x7FF) as i32, ((xy >> 16) & 0x7FF) as i32);
             let rows = s12(self.reg[BLT_SIZE] >> 16).max(0);
-            self.blt = super::blit::Blit {
+            self.blt = Blit {
                 active: true,
                 x,
                 y,
@@ -482,14 +487,13 @@ impl Voodoo {
         }
         if let Some(dest) = queue {
             let words = &words[..queued];
-            if self.writes_queue() {
-                self.queue_words(words);
-            } else {
+            if !self.writes_queue() {
                 for w in words {
                     self.fbi.ram.set(w.at as usize, w.value);
                 }
-            }
-            if !words.is_empty() {
+            } else if !words.is_empty() {
+                // The display waits for them if it shows the buffer.
+                self.queue_words(words);
                 self.mark_drawn(dest);
             }
         }
@@ -544,16 +548,11 @@ impl Voodoo {
 
     /// The frame buffer word a queued CPU-to-screen copy writes `src` to
     /// at byte `addr`, on row `y` of its colour buffer (`blt_queue_dest`
-    /// checked both are in it).
+    /// checked both are in it, and that the pixel doesn't depend on what
+    /// is there).
     fn blt_word(&mut self, addr: u32, y: i32, src: u16) -> Word {
         let at = (addr >> 1) as usize;
-        let command = self.blt_command();
-        let rop = if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) {
-            2
-        } else {
-            0
-        };
-        let value = mix(self.reg[BLT_ROP] >> (4 * rop), src, 0);
+        let value = self.blt_value(src, 0);
         self.blt_mirror(at, value);
         Word {
             row: y as u16,
