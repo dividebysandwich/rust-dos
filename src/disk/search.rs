@@ -466,6 +466,92 @@ impl DiskController {
         entries.get(search_index).cloned().ok_or(0x12)
     }
 
+    /// The entry FindFirst or FindNext finds for `search_spec` at or after
+    /// `from`, and where the search goes on from. On a FAT disk `from` is
+    /// a slot of the directory, as in DOS: a program that deletes each
+    /// file it finds (Windows 98 Setup's DELTEMP emptying its folder)
+    /// doesn't make the next file move up to a slot the search has
+    /// passed. Elsewhere it counts the entries found.
+    pub fn find_entry_from(
+        &self,
+        search_spec: &str,
+        from: usize,
+        search_attr: u16,
+    ) -> Result<(DosDirEntry, usize), u8> {
+        let Some(listing) = self.fat_slots(search_spec, search_attr) else {
+            return self
+                .find_directory_entry(search_spec, from, search_attr)
+                .map(|entry| (entry, from + 1));
+        };
+        listing
+            .into_iter()
+            .find(|(slot, _)| *slot >= from)
+            .map(|(slot, entry)| (entry, slot + 1))
+            .ok_or(0x12)
+    }
+
+    /// The entries of a FAT disk's directory that a search lists, each
+    /// with its slot, and the system entries after them
+    /// (`with_system_entries`). None for other drives, for searches that
+    /// take the volume label and for a directory that isn't there.
+    fn fat_slots(&self, search_spec: &str, search_attr: u16) -> Option<Vec<(usize, DosDirEntry)>> {
+        if search_attr & 0x08 != 0 {
+            return None;
+        }
+        let normalized = search_spec.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        let volume = drive.fat()?;
+        let (parent_dir, pattern) = match rest.rfind('\\') {
+            Some(idx) => rest.split_at(idx + 1),
+            None => ("", rest),
+        };
+        let dir = Self::logical_components(
+            drive,
+            if parent_dir.is_empty() {
+                "."
+            } else {
+                parent_dir
+            },
+        );
+        let mut slots: Vec<(usize, DosDirEntry)> = volume
+            .list_slots(&dir)
+            .ok()?
+            .into_iter()
+            .filter_map(|(slot, entry)| {
+                Some((slot, Self::fat_dir_entry(entry, pattern, search_attr)?))
+            })
+            .collect();
+        let own = slots.len();
+        let next = slots.last().map_or(0, |(slot, _)| slot + 1);
+        let entries = slots.iter().map(|(_, entry)| entry.clone()).collect();
+        let listed = self.with_system_entries(search_spec, search_attr, Ok(entries)).ok()?;
+        slots.extend(listed.into_iter().skip(own).enumerate().map(|(i, entry)| (next + i, entry)));
+        Some(slots)
+    }
+
+    /// A FAT disk's directory entry as a search lists it: None when its
+    /// name doesn't match `pattern` or it is hidden, system or a directory
+    /// and `search_attr` doesn't take that.
+    fn fat_dir_entry(entry: fat::Entry, pattern: &str, search_attr: u16) -> Option<DosDirEntry> {
+        let attr = entry.attr;
+        let restricted_bits = 0x02 | 0x04 | 0x10;
+        if (attr as u16 & restricted_bits) & !search_attr != 0
+            || !Self::matches_pattern(&entry.name, pattern)
+        {
+            return None;
+        }
+        Some(DosDirEntry {
+            is_dir: entry.is_dir(),
+            is_readonly: attr & fat::ATTR_READ_ONLY != 0,
+            filename: entry.name,
+            size: entry.size,
+            dos_time: entry.time,
+            dos_date: entry.date,
+            attr,
+        })
+    }
+
     /// What a search of a folder on a host drive lists (see
     /// `list_directory`); None for other drives and volume label searches.
     fn search_key(&self, search_spec: &str, search_attr: u16) -> Option<SearchKey> {
@@ -550,21 +636,12 @@ impl DiskController {
 
         if let Some(volume) = drive.fat() {
             let dir = Self::logical_components(drive, search_dir_str);
-            for entry in volume.list(&dir).map_err(|_| 0x03u8)? {
-                let attr = entry.attr;
-                if (attr as u16 & restricted_bits) & !search_attr != 0 || !Self::matches_pattern(&entry.name, pattern) {
-                    continue;
-                }
-                valid_entries.push(DosDirEntry {
-                    is_dir: entry.is_dir(),
-                    is_readonly: attr & fat::ATTR_READ_ONLY != 0,
-                    filename: entry.name,
-                    size: entry.size,
-                    dos_time: entry.time,
-                    dos_date: entry.date,
-                    attr,
-                });
-            }
+            let entries = volume.list(&dir).map_err(|_| 0x03u8)?;
+            valid_entries.extend(
+                entries
+                    .into_iter()
+                    .filter_map(|entry| Self::fat_dir_entry(entry, pattern, search_attr)),
+            );
             return Ok(valid_entries);
         }
 
