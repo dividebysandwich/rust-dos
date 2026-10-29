@@ -165,7 +165,13 @@ impl Voodoo {
             let xy = self.reg[BLT_DST_XY];
             let (x, y) = ((xy & 0x7FF) as i32, ((xy >> 16) & 0x7FF) as i32);
             let rows = s12(self.reg[BLT_SIZE] >> 16).max(0);
-            self.blt = super::blit::Blit { active: true, x, y, column: 0, rows };
+            self.blt = super::blit::Blit {
+                active: true,
+                x,
+                y,
+                column: 0,
+                rows,
+            };
             return;
         }
         // After what is drawn, which may read or write the same memory.
@@ -503,9 +509,16 @@ impl Voodoo {
         }
         // The ROPs the source chroma test picks from, which give the same
         // pixel whatever the destination holds: 0, !s, s or 1s.
-        let rops: &[u32] = if command & SRC_CHROMA != 0 { &[0, 2] } else { &[0] };
+        let rops: &[u32] = if command & SRC_CHROMA != 0 {
+            &[0, 2]
+        } else {
+            &[0]
+        };
         let rop = |r: u32| (self.reg[BLT_ROP] >> (4 * r)) & 15;
-        if rops.iter().any(|&r| !matches!(rop(r), 0x0 | 0x3 | 0xC | 0xF)) {
+        if rops
+            .iter()
+            .any(|&r| !matches!(rop(r), 0x0 | 0x3 | 0xC | 0xF))
+        {
             return None;
         }
         let (base, stride) = self.blt_dst();
@@ -517,10 +530,16 @@ impl Voodoo {
         let right = self.blt.x as usize + s12(self.reg[BLT_SIZE]).max(0) as usize;
         let bottom = self.blt.y as usize + self.blt.rows as usize;
         let start = base as usize / 2;
-        if right >= f.stride.words || bottom >= f.height as usize || start + (bottom + 1) * f.stride.words > f.ram.len() {
+        if right >= f.stride.words
+            || bottom >= f.height as usize
+            || start + (bottom + 1) * f.stride.words > f.ram.len()
+        {
             return None;
         }
-        f.rgboffs.iter().any(|&o| o != NONE && o == base).then_some(start)
+        f.rgboffs
+            .iter()
+            .any(|&o| o != NONE && o == base)
+            .then_some(start)
     }
 
     /// The frame buffer word a queued CPU-to-screen copy writes `src` to
@@ -529,10 +548,18 @@ impl Voodoo {
     fn blt_word(&mut self, addr: u32, y: i32, src: u16) -> Word {
         let at = (addr >> 1) as usize;
         let command = self.blt_command();
-        let rop = if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) { 2 } else { 0 };
+        let rop = if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) {
+            2
+        } else {
+            0
+        };
         let value = mix(self.reg[BLT_ROP] >> (4 * rop), src, 0);
         self.blt_mirror(at, value);
-        Word { row: y as u16, at: at as u32, value }
+        Word {
+            row: y as u16,
+            at: at as u32,
+            value,
+        }
     }
 }
 
@@ -694,7 +721,10 @@ mod tests {
         let memory = sw.frame_buffer().to_bytes();
         let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
         let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
-        assert_eq!([px(12, 30), px(15, 30), px(12, 32), px(15, 32)], [0x0101, 0x0202, 0x0505, 0x0606]);
+        assert_eq!(
+            [px(12, 30), px(15, 30), px(12, 32), px(15, 32)],
+            [0x0101, 0x0202, 0x0505, 0x0606]
+        );
         assert!(gl.frame_buffer().to_bytes() == memory);
         assert!(threads.frame_buffer().to_bytes() == memory);
     }
@@ -714,7 +744,10 @@ mod tests {
                 copy_into_back_buffer(v, y, flags);
             }
             assert_eq!(gl.describe(Now::default())["held_jobs"], 0, "y {y}");
-            assert!(gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes(), "y {y}");
+            assert!(
+                gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes(),
+                "y {y}"
+            );
         }
     }
 
