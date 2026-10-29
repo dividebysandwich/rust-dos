@@ -33,6 +33,7 @@
 
 mod dos;
 mod int31;
+pub(crate) mod realcall;
 mod video;
 
 use crate::bus::Bus;
