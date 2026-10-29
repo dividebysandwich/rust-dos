@@ -64,6 +64,21 @@ fn mix(rop: u32, s: u16, d: u16) -> u16 {
     }
 }
 
+/// Whether every 5-6-5 pixel is within a chroma range register's range
+/// (true) or none is (false), whatever the pixel: None if it depends on
+/// the pixel.
+fn chroma_constant(range: u32) -> Option<bool> {
+    let parts = |v: u32| [v >> 11 & 0x1F, v >> 5 & 0x3F, v & 0x1F];
+    let (low, high) = (parts(range & 0xFFFF), parts(range >> 16));
+    if low.iter().zip(&high).any(|(l, h)| l > h) {
+        Some(false)
+    } else if low == [0; 3] && high == [0x1F, 0x3F, 0x1F] {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// Whether a 5-6-5 pixel is within a chroma range register's minimum
 /// (bits 15:0) and maximum (bits 31:16).
 fn in_range(range: u32, pixel: u16) -> bool {
@@ -502,29 +517,40 @@ impl Voodoo {
 
     /// The colour buffer a CPU-to-screen copy writes into (its word
     /// offset), when its pixels can wait behind the drawing queued before
-    /// them as frame buffer writes do (`lfb_write`): its raster operations
-    /// don't read the destination, and its rectangle lies in a colour
+    /// them as frame buffer writes do (`lfb_write`): its pixels don't
+    /// depend on the destination's, and its rectangle lies in a colour
     /// buffer, whose rows the triangles draw. Otherwise the drawing is
     /// done first, for each word of data.
     fn blt_queue_dest(&self) -> Option<usize> {
         let command = self.blt_command();
-        if command & (DST_CHROMA | DST_TILED) != 0 {
-            return None;
-        }
-        // The ROPs the source chroma test picks from, which give the same
-        // pixel whatever the destination holds: 0, !s, s or 1s.
-        let rops: &[u32] = if command & SRC_CHROMA != 0 {
+        // The ROP bit the destination chroma test sets: never without the
+        // test, and the same for every pixel with a range that holds all
+        // colours or none (Moto Racer's Glide sets 0 to FFFFh).
+        let dst_bit = if command & DST_CHROMA == 0 {
+            0
+        } else {
+            match chroma_constant(self.reg[BLT_DST_CHROMA_RANGE]) {
+                Some(true) => 1,
+                Some(false) => 0,
+                None => return None,
+            }
+        };
+        let src_bits: &[u32] = if command & SRC_CHROMA != 0 {
             &[0, 2]
         } else {
             &[0]
         };
+        // The ROPs those tests can pick must give the same pixel whatever
+        // the destination holds: 0, !s, s or 1s.
         let rop = |r: u32| (self.reg[BLT_ROP] >> (4 * r)) & 15;
-        if rops
+        if src_bits
             .iter()
-            .any(|&r| !matches!(rop(r), 0x0 | 0x3 | 0xC | 0xF))
+            .any(|&s| !matches!(rop(dst_bit | s), 0x0 | 0x3 | 0xC | 0xF))
         {
             return None;
         }
+        // A tiled destination is addressed as rows of its tiles' width
+        // (`blt_layout`), which the checks below hold to a buffer's rows.
         let (base, stride) = self.blt_dst();
         let f = &self.fbi;
         if f.stride.tiled || stride as usize != 2 * f.stride.words {
@@ -689,6 +715,15 @@ mod tests {
         write(v, BLT_ROP, 0xCCCC);
         write(v, BLT_DST_BASE_ADDR, back);
         write(v, BLT_XY_STRIDES, 1280 << 16);
+        if flags & DST_TILED != 0 {
+            // As Moto Racer's Glide sets it up: 4 KB pages and rows of 20
+            // tiles, and a destination chroma range that holds every
+            // colour, so that ROP 1 (source) is the one used.
+            write(v, BLT_DST_BASE_ADDR, back >> 12);
+            write(v, BLT_XY_STRIDES, 20 << 16);
+            write(v, BLT_DST_CHROMA_RANGE, 0xFFFF_0000);
+            write(v, BLT_ROP, 0xAACA);
+        }
         write(v, BLT_DST_XY, y << 16 | 12);
         write(v, BLT_SIZE, 2 << 16 | 3);
         write(v, BLT_COMMAND, 1 << 31 | flags | 2 << 3 | CPU_TO_SCREEN);
@@ -700,32 +735,38 @@ mod tests {
     #[test]
     fn cpu_to_screen_copies_wait_behind_the_drawing() {
         // Moto Racer copies its sky into the back buffer from the CPU at
-        // the start of each frame. A copy that doesn't read the
-        // destination waits behind the drawing queued before it, as frame
-        // buffer writes do, instead of waiting for it to be drawn: with
-        // the OpenGL renderer the jobs held back stay held. Either way
-        // the memory ends up as it would have.
-        let mut gl = glide_card(2);
-        gl.set_mirror(true);
-        gl.set_software_picture(false);
-        let mut threads = glide_card(2);
-        let mut sw = glide_card(0);
-        for v in [&mut gl, &mut threads, &mut sw] {
-            glide_frames(v, 2);
-            copy_into_back_buffer(v, 30, 0);
+        // the start of each frame. A copy whose pixels don't depend on the
+        // destination's waits behind the drawing queued before it, as
+        // frame buffer writes do, instead of waiting for it to be drawn:
+        // with the OpenGL renderer the jobs held back stay held. Either
+        // way the memory ends up as it would have.
+        for flags in [0, DST_TILED | DST_CHROMA] {
+            let mut gl = glide_card(2);
+            gl.set_mirror(true);
+            gl.set_software_picture(false);
+            let mut threads = glide_card(2);
+            let mut sw = glide_card(0);
+            for v in [&mut gl, &mut threads, &mut sw] {
+                glide_frames(v, 2);
+                copy_into_back_buffer(v, 30, flags);
+            }
+            let status = gl.describe(Now::default());
+            assert_eq!(status["catch_ups"], 0, "{flags:X} {status}");
+            assert!(
+                status["held_jobs"].as_u64().unwrap() > 0,
+                "{flags:X} {status}"
+            );
+            let memory = sw.frame_buffer().to_bytes();
+            let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+            let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
+            assert_eq!(
+                [px(12, 30), px(15, 30), px(12, 32), px(15, 32)],
+                [0x0101, 0x0202, 0x0505, 0x0606],
+                "{flags:X}"
+            );
+            assert!(gl.frame_buffer().to_bytes() == memory, "{flags:X}");
+            assert!(threads.frame_buffer().to_bytes() == memory, "{flags:X}");
         }
-        let status = gl.describe(Now::default());
-        assert_eq!(status["catch_ups"], 0, "{}", status);
-        assert!(status["held_jobs"].as_u64().unwrap() > 0, "{}", status);
-        let memory = sw.frame_buffer().to_bytes();
-        let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
-        let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
-        assert_eq!(
-            [px(12, 30), px(15, 30), px(12, 32), px(15, 32)],
-            [0x0101, 0x0202, 0x0505, 0x0606]
-        );
-        assert!(gl.frame_buffer().to_bytes() == memory);
-        assert!(threads.frame_buffer().to_bytes() == memory);
     }
 
     #[test]
