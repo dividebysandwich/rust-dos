@@ -194,6 +194,14 @@ impl Voodoo {
             };
             return;
         }
+        if command & COMMAND == RECT_FILL {
+            // A fill whose every pixel keeps what it holds (Moto Racer
+            // fills with ROP AAAAh each frame) changes nothing.
+            let (rops, _) = self.blt_rops(Some(self.reg[BLT_COLOR] as u16));
+            if rops.iter().all(|&r| r == 0xA) {
+                return;
+            }
+        }
         // After what is drawn, which may read or write the same memory.
         self.flush();
         self.mirror_sync();
@@ -515,6 +523,36 @@ impl Voodoo {
         self.display_dirty = true;
     }
 
+    /// The ROPs the chroma range tests can pick for the blit's pixels,
+    /// from a source pixel `src` or any, and whether the destination's
+    /// test picks between them by the pixel there. Without a test its
+    /// bit of the ROP number is clear, and with a range that holds every
+    /// colour or none (Moto Racer's Glide sets 0 to FFFFh) it is the same
+    /// for every pixel.
+    fn blt_rops(&self, src: Option<u16>) -> (Vec<u32>, bool) {
+        let command = self.blt_command();
+        let (dst_bits, dst_tested): (&[u32], bool) = if command & DST_CHROMA == 0 {
+            (&[0], false)
+        } else {
+            match chroma_constant(self.reg[BLT_DST_CHROMA_RANGE]) {
+                Some(true) => (&[1], false),
+                Some(false) => (&[0], false),
+                None => (&[0, 1], true),
+            }
+        };
+        let src_bits: &[u32] = match src {
+            _ if command & SRC_CHROMA == 0 => &[0],
+            Some(p) if in_range(self.reg[BLT_SRC_CHROMA_RANGE], p) => &[2],
+            Some(_) => &[0],
+            None => &[0, 2],
+        };
+        let rop = |r: u32| (self.reg[BLT_ROP] >> (4 * r)) & 15;
+        let rops = dst_bits
+            .iter()
+            .flat_map(|&d| src_bits.iter().map(move |&s| rop(d | s)));
+        (rops.collect(), dst_tested)
+    }
+
     /// The colour buffer a CPU-to-screen copy writes into (its word
     /// offset), when its pixels can wait behind the drawing queued before
     /// them as frame buffer writes do (`lfb_write`): its pixels don't
@@ -522,31 +560,11 @@ impl Voodoo {
     /// buffer, whose rows the triangles draw. Otherwise the drawing is
     /// done first, for each word of data.
     fn blt_queue_dest(&self) -> Option<usize> {
-        let command = self.blt_command();
-        // The ROP bit the destination chroma test sets: never without the
-        // test, and the same for every pixel with a range that holds all
-        // colours or none (Moto Racer's Glide sets 0 to FFFFh).
-        let dst_bit = if command & DST_CHROMA == 0 {
-            0
-        } else {
-            match chroma_constant(self.reg[BLT_DST_CHROMA_RANGE]) {
-                Some(true) => 1,
-                Some(false) => 0,
-                None => return None,
-            }
-        };
-        let src_bits: &[u32] = if command & SRC_CHROMA != 0 {
-            &[0, 2]
-        } else {
-            &[0]
-        };
-        // The ROPs those tests can pick must give the same pixel whatever
-        // the destination holds: 0, !s, s or 1s.
-        let rop = |r: u32| (self.reg[BLT_ROP] >> (4 * r)) & 15;
-        if src_bits
-            .iter()
-            .any(|&s| !matches!(rop(dst_bit | s), 0x0 | 0x3 | 0xC | 0xF))
-        {
+        // The ROPs the chroma tests can pick must give the same pixel
+        // whatever the destination holds (0, !s, s or 1s), and the
+        // destination's test must pick the same for every pixel.
+        let (rops, dst_tested) = self.blt_rops(None);
+        if dst_tested || rops.iter().any(|&r| !matches!(r, 0x0 | 0x3 | 0xC | 0xF)) {
             return None;
         }
         // A tiled destination is addressed as rows of its tiles' width
@@ -767,6 +785,28 @@ mod tests {
             assert!(gl.frame_buffer().to_bytes() == memory, "{flags:X}");
             assert!(threads.frame_buffer().to_bytes() == memory, "{flags:X}");
         }
+    }
+
+    #[test]
+    fn fills_that_keep_every_pixel_dont_wait_for_the_drawing() {
+        // ROP AAAAh (destination) whatever the chroma tests say: the fill
+        // changes nothing, so the jobs held back stay held.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut sw = glide_card(0);
+        for v in [&mut gl, &mut sw] {
+            glide_frames(v, 2);
+            write(v, BLT_ROP, 0xAAAA);
+            write(v, BLT_XY_STRIDES, 1280 << 16);
+            write(v, BLT_COLOR, 0x1234);
+            write(v, BLT_DST_XY, 30 << 16 | 12);
+            write(v, BLT_SIZE, 9 << 16 | 9);
+            write(v, BLT_COMMAND, 1 << 31 | SRC_CHROMA | RECT_FILL);
+        }
+        let status = gl.describe(Now::default());
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert!(gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes());
     }
 
     #[test]
