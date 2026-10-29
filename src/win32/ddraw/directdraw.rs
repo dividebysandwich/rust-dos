@@ -288,7 +288,7 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if exclusive && flags & DDSCL_NOWINDOWCHANGES == 0 {
         let user = &cpu.bus.win32.user;
         let top = user.top_level(hwnd);
-        if user.input.active != top {
+        if !user.is_active(top) {
             return task::start(cpu, task::DD_ACTIVATE, vec![WINDOW_ACTIVATE, top], 0);
         }
     }

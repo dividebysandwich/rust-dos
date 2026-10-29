@@ -270,6 +270,10 @@ pub struct Queue {
     /// GetMessagePos.
     pub last_time: u32,
     pub last_pos: (i32, i32),
+    /// What the thread is to do about the foreground when it next looks
+    /// for messages (input::take_activation): what, the window, the
+    /// thread on the other side and the input queue; zeros for nothing.
+    pub activation: [u32; 4],
 }
 
 /// A timer of SetTimer.
@@ -358,6 +362,13 @@ pub fn wait_ready(win32: &crate::win32::Win32, tid: u32, wait: &QueueWait, now: 
     }
     let mask = wait.mask;
     if mask & QS_SENDMESSAGE != 0 && (!q.sent.is_empty() || !q.callbacks.is_empty()) {
+        return true;
+    }
+    // The foreground came or went: a thread that waits for posted
+    // messages looks for them, and does what it has to on the way. (One
+    // that waits only for sent ones, as WaitForInputIdle does, wouldn't
+    // look, and would wake again at once.)
+    if mask & QS_POSTMESSAGE != 0 && wait.reply == 0 && q.activation[0] != 0 {
         return true;
     }
     let f = &wait.filter;
@@ -1014,6 +1025,9 @@ const GET_REMOVE: usize = 6;
 /// The window to send WM_SETCURSOR to (0 for none), and its lParam.
 const GET_CURSOR_HWND: usize = 7;
 const GET_CURSOR_LP: usize = 8;
+/// The window a click activates, while WM_MOUSEACTIVATE is asked; then
+/// whether the click is eaten.
+const GET_ACTIVATE: usize = 9;
 const WAITS: u32 = 0x8000_0000;
 
 /// GetMessageA(msg, hwnd, min, max).
@@ -1091,6 +1105,7 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
     // SetCursorPos would otherwise undo before any poll saw it.
     super::input::poll(cpu);
     let now = cpu.bus.clock.now_micros();
+    let pid = super::current_pid(cpu);
     let state = user(cpu);
     // Posted messages.
     let q = state.queue(tid)?;
@@ -1128,6 +1143,12 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
         };
         if remove {
             super::input::message_taken(state, &m);
+            // A key or button the user pressed: its process may bring a
+            // window to the foreground. A message a program posts, even
+            // one of these, doesn't count.
+            if is_input(m.message) {
+                state.input.last_input = pid;
+            }
         }
         return Some(m);
     }
@@ -1166,6 +1187,15 @@ fn take_message(cpu: &mut Cpu, tid: u32, f: Filter, remove: bool) -> Option<Msg>
     })
 }
 
+/// Whether `message` is a key or a mouse button going down: the input
+/// that lets the thread that takes it bring a window to the foreground.
+fn is_input(message: u32) -> bool {
+    // The downs and double clicks of the three buttons.
+    let button = |first: u32| (first..first + 9).contains(&message) && (message - first) % 3 != 1;
+    let key = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+    key || button(WM_LBUTTONDOWN) || button(WM_NCLBUTTONDOWN)
+}
+
 /// GetMessageA's and PeekMessageA's steps.
 pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let tid = current_tid(cpu);
@@ -1174,6 +1204,11 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             0 => {
                 // Messages other threads sent come first.
                 if let Some(next) = handle_sent(cpu, 1) {
+                    return next;
+                }
+                // So does what the queue has to do as the foreground came
+                // or went.
+                if let Some(next) = super::input::take_activation(cpu, 4) {
                     return next;
                 }
                 let f = Filter {
@@ -1204,10 +1239,13 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let (hwnd, lp) = cursor.unwrap_or((0, 0));
                     t.set(GET_CURSOR_HWND, hwnd);
                     t.set(GET_CURSOR_LP, lp);
-                    // A click on a window that isn't active activates it
-                    // first.
-                    if remove && let Some(top) = super::input::click_activates(cpu, &m) {
-                        return Next::call(address_of("SetActiveWindow"), &[top], 3);
+                    // A click on a window that isn't the active one in the
+                    // foreground: WM_MOUSEACTIVATE asks the window under
+                    // the cursor whether it activates its top-level
+                    // window, and whether the click is still delivered.
+                    if remove && let Some((top, lp)) = super::input::click_activates(cpu, &m) {
+                        t.set(GET_ACTIVATE, top);
+                        return super::window::send(m.hwnd, WM_MOUSEACTIVATE, top, lp, 5);
                     }
                     t.step = 3;
                     continue;
@@ -1241,6 +1279,24 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     q.waiting.pop();
                 }
                 t.step = 0;
+            }
+            4 => t.step = 0,
+            5 => {
+                // The answer to WM_MOUSEACTIVATE: 0 activates as
+                // MA_ACTIVATE does. A click that is eaten isn't returned:
+                // the thread looks for the next message.
+                use super::input::{MA_ACTIVATE, MA_ACTIVATEANDEAT, MA_NOACTIVATEANDEAT};
+                let top = t.var(GET_ACTIVATE);
+                let eat = value == MA_ACTIVATEANDEAT || value == MA_NOACTIVATEANDEAT;
+                t.set(GET_ACTIVATE, eat as u32);
+                t.step = 6;
+                let activates = matches!(value, 0 | MA_ACTIVATE | MA_ACTIVATEANDEAT);
+                if activates && user(cpu).is_window(top) {
+                    return Next::call(address_of("ActivateByClick"), &[top], 6);
+                }
+            }
+            6 => {
+                t.step = if t.var(GET_ACTIVATE) != 0 { 0 } else { 3 };
             }
             3 => {
                 // Windows sends WM_SETCURSOR for the mouse message, and
@@ -1807,7 +1863,8 @@ crate::state_fields!(Queue {
     in_send,
     changed,
     last_time,
-    last_pos
+    last_pos,
+    activation
 });
 crate::state_fields!(Timer {
     hwnd,

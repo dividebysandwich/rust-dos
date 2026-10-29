@@ -1670,7 +1670,7 @@ fn returns_result(msg: u32) -> bool {
 
 /// DEFDLG_SaveFocus.
 fn save_focus(state: &mut State, hwnd: u32) {
-    let focus = state.input.focus;
+    let focus = state.focus_of(hwnd);
     if focus == 0 || !state.is_descendant(hwnd, focus) {
         return;
     }
@@ -1768,7 +1768,7 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 WM_NEXTDLGCTL => {
                     let dest = if lp == 0 {
-                        next_tab(state, hwnd, state.input.focus, wp != 0)
+                        next_tab(state, hwnd, state.focus_of(hwnd), wp != 0)
                     } else {
                         wp
                     };
@@ -1781,7 +1781,7 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 WM_ENTERMENULOOP | WM_LBUTTONDOWN | WM_NCLBUTTONDOWN => {
                     // A combo box hides its list.
-                    let focus = state.input.focus;
+                    let focus = state.focus_of(hwnd);
                     if focus != 0 {
                         t.set(D_TMP, focus);
                         return send(focus, CB_SHOWDROPDOWN, FALSE, 0, 341);
@@ -2021,7 +2021,7 @@ fn end_step(cpu: &mut Cpu, t: &mut Task) -> Next {
         // Windows gives the dialog itself the focus.
         401 => {
             let state = user(cpu);
-            if state.is_descendant(hwnd, state.input.focus) {
+            if state.is_descendant(hwnd, state.focus_of(hwnd)) {
                 return call_api("SetFocus", &[hwnd], 402);
             }
             goto(402)
@@ -2031,7 +2031,7 @@ fn end_step(cpu: &mut Cpu, t: &mut Task) -> Next {
             call_api("SetWindowPos", &[hwnd, 0, 0, 0, 0, 0, flags], 403)
         }
         403 => {
-            if user(cpu).input.active == hwnd {
+            if user(cpu).is_active(hwnd) {
                 return call_api("ActivateOtherWindow", &[hwnd], 404);
             }
             goto(404)
@@ -2085,7 +2085,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         return send(dlg, WM_NEXTDLGCTL, shift, 0, 599);
                     }
                     // Not a dialog: the focus moves here.
-                    let focus = state.input.focus;
+                    let focus = state.focus_of(dlg);
                     let from = if focus == dlg { 0 } else { focus };
                     let next = next_tab(state, dlg, from, shift != 0);
                     if next == 0 {
@@ -2100,7 +2100,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     }
                     let prev = wp == VK_LEFT || wp == VK_UP;
                     let state = user(cpu);
-                    let next = next_group_item(state, dlg, state.input.focus, prev);
+                    let next = next_group_item(state, dlg, state.focus_of(dlg), prev);
                     send(dlg, WM_NEXTDLGCTL, next, 1, 599)
                 }
                 VK_CANCEL | VK_ESCAPE => {
@@ -2108,7 +2108,7 @@ fn message_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     send(dlg, WM_COMMAND, IDCANCEL, cancel, 599)
                 }
                 VK_EXECUTE | VK_RETURN => {
-                    if user(cpu).input.focus == mhwnd {
+                    if user(cpu).focus_of(mhwnd) == mhwnd {
                         return send(mhwnd, WM_GETDLGCODE, 0, 0, 525);
                     }
                     goto(526)
