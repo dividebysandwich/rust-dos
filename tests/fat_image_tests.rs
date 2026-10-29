@@ -191,7 +191,10 @@ fn findfirst_finds_the_volume_label_only_in_the_root_by_its_name() {
     assert!(find_all(&mut cpu, "A:\\README~1.TXT", 0x0E).is_empty());
     assert_eq!(find_all(&mut cpu, "A:\\README.TXT", 0x0E), ["README.TXT"]);
     assert_eq!(find_all(&mut cpu, "A:\\GAMEDISK", 0x0E), ["GAMEDISK"]);
-    assert_eq!(find_all(&mut cpu, "A:\\*.*", 0x1E), ["GAMEDISK", "EMPTY", "README.TXT", "GAMES"]);
+    assert_eq!(
+        find_all(&mut cpu, "A:\\*.*", 0x1E),
+        ["GAMEDISK", "EMPTY", "README.TXT", "GAMES"]
+    );
     // A search for the label alone finds it, and nothing else.
     assert_eq!(find_all(&mut cpu, "A:\\GAMES\\*.*", 0x08), ["GAMEDISK"]);
 

@@ -531,7 +531,9 @@ impl DiskController {
         // A search for the volume label alone (attribute 08h) finds the
         // label wherever it looks, as DOS 3 and later do; a disk without
         // a label has none to find.
-        let label = Some(drive.label.as_str()).filter(|label| !label.is_empty()).map(Self::label_entry);
+        let label = Some(drive.label.as_str())
+            .filter(|label| !label.is_empty())
+            .map(Self::label_entry);
         if search_attr & 0xFF == 0x08 {
             return Ok(label.into_iter().collect());
         }
@@ -556,8 +558,12 @@ impl DiskController {
         // the entry of the root directory it is, by its name, and the
         // files besides. In a subdirectory there is no label to find.
         if search_attr & 0x08 != 0 {
-            let in_root = self.qualify_directory(&normalized).is_some_and(|dir| dir.len() == 3);
-            valid_entries.extend(label.filter(|entry| in_root && Self::matches_pattern(&entry.filename, pattern)));
+            let in_root = self
+                .qualify_directory(&normalized)
+                .is_some_and(|dir| dir.len() == 3);
+            valid_entries.extend(
+                label.filter(|entry| in_root && Self::matches_pattern(&entry.filename, pattern)),
+            );
         }
 
         if let Some(volume) = drive.fat() {
