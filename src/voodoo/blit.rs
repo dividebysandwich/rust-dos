@@ -588,6 +588,37 @@ mod tests {
     }
 
     #[test]
+    fn cpu_to_screen_copies_land_after_the_drawing() {
+        // The first data word waits for the drawing queued before the
+        // copy, the ones after find nothing queued: with worker threads,
+        // and with the OpenGL renderer holding jobs back, the memory ends
+        // up as without them.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut threads = glide_card(2);
+        let mut sw = glide_card(0);
+        for v in [&mut gl, &mut threads, &mut sw] {
+            glide_frames(v, 2);
+            let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+            write(v, BLT_ROP, 0xCCCC);
+            write(v, BLT_DST_BASE_ADDR, back);
+            write(v, BLT_XY_STRIDES, 1280 << 16);
+            write(v, BLT_DST_XY, 30 << 16 | 12);
+            write(v, BLT_SIZE, 2 << 16 | 3);
+            write(v, BLT_COMMAND, 1 << 31 | 2 << 3 | CPU_TO_SCREEN);
+            for i in 1..=6 {
+                write(v, BLT_DATA, 0x0101_0101 * i);
+            }
+        }
+        let memory = sw.frame_buffer().to_bytes();
+        let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+        assert_eq!(sw.fbi.ram.get(back + 32 * 640 + 15), 0x0606);
+        assert!(gl.frame_buffer().to_bytes() == memory);
+        assert!(threads.frame_buffer().to_bytes() == memory);
+    }
+
+    #[test]
     fn monochrome_rows_start_on_a_new_word_or_byte() {
         // The leftmost pixel is each byte's top bit.
         for (format, second_row) in [(0u32, 0x0000_0080), (1, 0x0000_8000)] {
