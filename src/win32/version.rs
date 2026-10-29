@@ -15,8 +15,8 @@
 //! one doesn't load, as on Windows 95.
 //!
 //! The desktop's depth, the `win32_depth` setting, is read at the same
-//! time and kept the same way: the adapter's own, or 8 bits a pixel with
-//! a system palette (`palette_desktop`).
+//! time and kept the same way: the adapter's own, 8 bits a pixel with a
+//! system palette (`palette_desktop`), or 16 bits a pixel.
 
 use crate::cpu::Cpu;
 

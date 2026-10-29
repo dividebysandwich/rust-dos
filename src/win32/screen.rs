@@ -20,7 +20,8 @@
 //! 16 (5-6-5) on the second, as Windows 95 with a Voodoo3 was usually
 //! set up; it is at the start of video memory. With `win32_depth=8` it
 //! is 640x480 at 8 bits a pixel on both, its colours GDI's system
-//! palette, which the DAC (or the card's lookup table) holds.
+//! palette, which the DAC (or the card's lookup table) holds, and with
+//! `win32_depth=16` at 16 bits a pixel (5-6-5) on both.
 //! ChangeDisplaySettings can make it one of the other `DESKTOP_SIZES`
 //! at the same depth, until it gives the desktop's own size back or the
 //! process that set it ends.
@@ -101,15 +102,13 @@ pub fn linear_memory(cpu: &mut Cpu) {
 /// (packed) on an S3 ViRGE, whose VESA BIOS has that instead of 32, and
 /// 32 on the others.
 pub fn desktop(cpu: &Cpu) -> Mode {
-    let high_color = cpu.bus.win32.desktop_depth == crate::config::DesktopDepth::HighColor;
-    let bpp = if super::version::palette_desktop(cpu) {
-        8
-    } else if is_card(cpu) || high_color {
-        16
-    } else if cpu.bus.vga.adapter.is_virge() {
-        24
-    } else {
-        32
+    use crate::config::DesktopDepth;
+    let bpp = match cpu.bus.win32.desktop_depth {
+        DesktopDepth::Palette => 8,
+        DesktopDepth::HighColor => 16,
+        DesktopDepth::Adapter if is_card(cpu) => 16,
+        DesktopDepth::Adapter if cpu.bus.vga.adapter.is_virge() => 24,
+        DesktopDepth::Adapter => 32,
     };
     let (width, height) = cpu
         .bus

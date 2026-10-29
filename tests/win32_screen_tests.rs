@@ -1707,16 +1707,15 @@ fn directdraw_draws_and_flips_on_a_voodoo2() {
     draws_on_the_card("card_v2", Board::Voodoo2);
 }
 
-#[test]
-fn the_desktop_is_packed_24_bits_on_a_virge() {
-    let (program, data) = desktop_program();
-    let base = PathBuf::from("target/test_win32_screen").join("desktop_virge");
+/// A machine with the VESA adapter `adapter`, the program loaded.
+fn vesa_machine(test: &str, adapter: Adapter, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
     let setup = VideoSetup {
-        adapter: Adapter::S3Virge,
+        adapter,
         ..Default::default()
     };
     bios::install(&mut cpu.bus, setup);
@@ -1724,6 +1723,13 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+#[test]
+fn the_desktop_is_packed_24_bits_on_a_virge() {
+    let (program, data) = desktop_program();
+    let mut cpu = vesa_machine("desktop_virge", Adapter::S3Virge, program);
     run_until(&mut cpu, data, 1);
     let r = results(&cpu, data, 8);
     assert_eq!(r[1], 0, "DirectDrawCreate");
@@ -1744,21 +1750,8 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
 #[test]
 fn a_high_color_desktop_on_an_s3_has_16_bits() {
     let (program, data) = desktop_program();
-    let base = PathBuf::from("target/test_win32_screen").join("desktop_16");
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
-    fs::write(base.join("T.EXE"), program).unwrap();
-    let mut cpu = Cpu::new(base);
-    let setup = VideoSetup {
-        adapter: Adapter::S3,
-        ..Default::default()
-    };
-    bios::install(&mut cpu.bus, setup);
-    cpu.bus.win32.enabled = true;
+    let mut cpu = vesa_machine("desktop_16", Adapter::S3, program);
     cpu.bus.win32.depth = rust_dos::config::DesktopDepth::HighColor;
-    cpu.host_console = Some(HostConsole::default());
-    cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
     run_until(&mut cpu, data, 1);
     let r = results(&cpu, data, 8);
     assert_eq!(r[1], 0, "DirectDrawCreate");
