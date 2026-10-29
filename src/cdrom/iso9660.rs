@@ -73,7 +73,15 @@ fn volume_descriptors(image: &CdImage) -> Result<Vec<[u8; DATA_SECTOR]>, String>
     let mut descriptors = Vec::new();
     for lba in track.start + FIRST_DESCRIPTOR..track.end {
         let mut sector = [0u8; DATA_SECTOR];
-        image.read_data(lba, &mut sector).map_err(|e| e.to_string())?;
+        // A sector that doesn't read after the primary descriptor ends
+        // the list, as it did when the primary descriptor was all that
+        // was read.
+        if let Err(e) = image.read_data(lba, &mut sector) {
+            if primary(&descriptors).is_ok() {
+                break;
+            }
+            return Err(e.to_string());
+        }
         if &sector[1..6] != b"CD001" {
             // A disc without a terminator ends its descriptors with
             // whatever follows them.
@@ -90,13 +98,17 @@ fn volume_descriptors(image: &CdImage) -> Result<Vec<[u8; DATA_SECTOR]>, String>
     Ok(descriptors)
 }
 
+/// The Primary Volume Descriptor among a disc's volume descriptors.
+fn primary(descriptors: &[[u8; DATA_SECTOR]]) -> Result<&[u8; DATA_SECTOR], String> {
+    descriptors
+        .iter()
+        .find(|d| d[0] == 1)
+        .ok_or_else(|| "no primary volume descriptor".to_string())
+}
+
 /// The Primary Volume Descriptor of the disc.
 pub fn primary_descriptor(image: &CdImage) -> Result<Box<[u8; DATA_SECTOR]>, String> {
-    volume_descriptors(image)?
-        .into_iter()
-        .find(|d| d[0] == 1)
-        .map(Box::new)
-        .ok_or_else(|| "no primary volume descriptor".to_string())
+    primary(&volume_descriptors(image)?).map(|d| Box::new(*d))
 }
 
 /// The root directory of the Joliet tree, if the disc has one: a
@@ -203,25 +215,59 @@ fn read_directory(image: &CdImage, dir: &Extent, tree: Tree) -> Vec<Record> {
     records
 }
 
-/// The files with data directly in a directory, by their extents.
+/// The files with data in a directory, by their extents: those directly
+/// in it, or for a directory that holds only directories, as "Program
+/// Files" often does, those of its directories, found the same way.
 fn data_extents(image: &CdImage, dir: &Extent, tree: Tree) -> HashSet<(u32, u32)> {
-    read_directory(image, dir, tree)
-        .into_iter()
-        .filter(|r| !r.is_dir && r.extent.size > 0)
-        .map(|r| (r.extent.lba, r.extent.size))
-        .collect()
+    let mut files = HashSet::new();
+    let mut level = vec![*dir];
+    let mut visited = HashSet::new();
+    for _ in 0..MAX_DEPTH {
+        let mut below = Vec::new();
+        for dir in level {
+            if !visited.insert(dir.lba) {
+                continue;
+            }
+            for record in read_directory(image, &dir, tree) {
+                if record.is_dir {
+                    below.push(record.extent);
+                } else if record.extent.size > 0 {
+                    files.insert((record.extent.lba, record.extent.size));
+                }
+            }
+        }
+        if !files.is_empty() || below.is_empty() {
+            break;
+        }
+        level = below;
+    }
+    files
+}
+
+/// The records of a directory in the primary tree with the DOS names
+/// programs see them by, as MSCDEX shows them.
+fn dos_entries(image: &CdImage, dir: &Extent) -> Vec<(String, Record)> {
+    let records = read_directory(image, dir, Tree::Primary);
+    let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
+    crate::disk::short_names(&names).into_iter().zip(records).collect()
 }
 
 /// For each record of a directory in the Joliet tree, the record of the
 /// same directory in the primary tree that is the same file or directory,
 /// if there is one. A file is the one with the same data, a directory the
-/// one of the same name or else the one with the same files in it. Names
-/// decide files only where the data doesn't, as for empty files: the
-/// trees often spell them differently ("NSENGL~1.DLL" and
-/// "nsenglishres.dll").
-fn pair(image: &CdImage, primary: &[Record], joliet: &[Record]) -> Vec<Option<usize>> {
-    let primary_names: Vec<&str> = primary.iter().map(|r| r.name.as_str()).collect();
-    let primary_short = crate::disk::short_names(&primary_names);
+/// one of the same name or else the one with the same files in it. Data
+/// goes before names, as the trees often spell names differently
+/// ("NSENGL~1.DLL" and "nsenglishres.dll"). A file whose data no primary
+/// record has goes by its name: an empty file, or one each tree has its
+/// own copy of under one name. That keeps one entry for one name, and
+/// Windows programs read the primary tree's copy of such a file.
+/// `primary_short` are the DOS names of the primary records.
+fn pair(
+    image: &CdImage,
+    primary: &[Record],
+    primary_short: &[String],
+    joliet: &[Record],
+) -> Vec<Option<usize>> {
     let joliet_names: Vec<&str> = joliet.iter().map(|r| r.name.as_str()).collect();
     let joliet_short = crate::disk::short_names(&joliet_names);
     // The primary records by their data, and by their names and DOS
@@ -288,11 +334,17 @@ fn pair(image: &CdImage, primary: &[Record], joliet: &[Record]) -> Vec<Option<us
         .iter()
         .map(|&p| Some(data_extents(image, &primary[p].extent, Tree::Primary)))
         .collect();
+    // The one that shares the most files with it, as a disc that keeps
+    // one copy of a file several directories have makes them share some.
     for j in joliet_dirs {
         let files = data_extents(image, &joliet[j].extent, Tree::Joliet);
         let found = primary_files
             .iter()
-            .position(|p| p.as_ref().is_some_and(|p| !p.is_disjoint(&files)));
+            .enumerate()
+            .filter_map(|(i, p)| Some((i, p.as_ref()?.intersection(&files).count())))
+            .filter(|&(_, shared)| shared > 0)
+            .max_by_key(|&(i, shared)| (shared, std::cmp::Reverse(i)))
+            .map(|(i, _)| i);
         if let Some(i) = found {
             primary_files[i] = None;
             pairs[j] = Some(primary_dirs[i]);
@@ -307,9 +359,12 @@ fn pair(image: &CdImage, primary: &[Record], joliet: &[Record]) -> Vec<Option<us
 /// Joliet has, then those only Joliet has, with DOS names made from
 /// theirs.
 fn entries(image: &CdImage, primary: Option<&Extent>, joliet: Option<&Extent>) -> Vec<Entry> {
-    let primary = primary.map_or_else(Vec::new, |dir| read_directory(image, dir, Tree::Primary));
+    let (primary_names, primary): (Vec<String>, Vec<Record>) = primary
+        .map_or_else(Vec::new, |dir| dos_entries(image, dir))
+        .into_iter()
+        .unzip();
     let joliet = joliet.map_or_else(Vec::new, |dir| read_directory(image, dir, Tree::Joliet));
-    let pairs = pair(image, &primary, &joliet);
+    let pairs = pair(image, &primary, &primary_names, &joliet);
     let mut joliet_of: Vec<Option<Record>> = (0..primary.len()).map(|_| None).collect();
     let mut only_joliet = Vec::new();
     for (record, paired) in joliet.into_iter().zip(pairs) {
@@ -318,12 +373,12 @@ fn entries(image: &CdImage, primary: Option<&Extent>, joliet: Option<&Extent>) -
             None => only_joliet.push(record),
         }
     }
-    // The names made for what only Joliet has come after the primary
-    // tree's own, and don't take them.
-    let names: Vec<&str> = primary
+    // The names made for what only Joliet has don't take the primary
+    // tree's, which are 8.3 names and so stay as they are.
+    let names: Vec<&str> = primary_names
         .iter()
-        .chain(&only_joliet)
-        .map(|r| r.name.as_str())
+        .map(String::as_str)
+        .chain(only_joliet.iter().map(|r| r.name.as_str()))
         .collect();
     let dos_names = crate::disk::short_names(&names);
     let in_primary = primary.into_iter().zip(joliet_of).map(|(record, joliet)| {
@@ -358,11 +413,7 @@ fn root(descriptor: &[u8; DATA_SECTOR]) -> Extent {
 /// Read the file system of a disc's data track.
 pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
     let descriptors = volume_descriptors(image)?;
-    let descriptor = descriptors
-        .iter()
-        .find(|d| d[0] == 1)
-        .map(|d| Box::new(*d))
-        .ok_or("no primary volume descriptor")?;
+    let descriptor = Box::new(*primary(&descriptors)?);
     // Padded with spaces, or on some discs with NULs.
     let label = String::from_utf8_lossy(&descriptor[40..72]).trim_matches([' ', '\0']).to_string();
     let mut files = MemFs::new();
@@ -407,31 +458,30 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
 /// ("SAMNMAX\\SAMNMAX.EXE"), for MSCDEX's Get Directory Entry. MSCDEX
 /// reads the primary tree alone, so what only Joliet has isn't found.
 pub fn find_record(image: &CdImage, path: &str) -> Option<Vec<u8>> {
-    let descriptors = volume_descriptors(image).ok()?;
-    let mut dir = root(descriptors.iter().find(|d| d[0] == 1)?);
-    let mut joliet = joliet_root(&descriptors);
+    let descriptor = primary_descriptor(image).ok()?;
+    let mut dir = root(&descriptor);
     let mut components = path.split('\\').filter(|c| !c.is_empty()).peekable();
     while let Some(component) = components.next() {
-        let entry = entries(image, Some(&dir), joliet.as_ref())
+        let (_, record) = dos_entries(image, &dir)
             .into_iter()
-            .find(|e| e.in_primary && e.name.eq_ignore_ascii_case(component))?;
+            .find(|(name, _)| name.eq_ignore_ascii_case(component))?;
         if components.peek().is_none() {
-            return Some(entry.record.raw);
+            return Some(record.raw);
         }
-        if !entry.record.is_dir {
+        if !record.is_dir {
             return None;
         }
-        dir = entry.record.extent;
-        joliet = entry.joliet_dir;
+        dir = record.extent;
     }
     None
 }
 
 /// A small Joliet disc in 2048-byte sectors, whose trees differ the ways
 /// real discs' do. The primary tree has DOSONLY.BAT, EMPTY.TXT,
-/// LONGNAME.DOC, NSENGLIS.DLL, README.TXT and PROGRAM_\SETUP.INI. Joliet
-/// (UCS-2 level 1) has the same files as "empty.txt", a 71-character name,
-/// "nsenglishres.dll", "ReadMe.txt" and "Program Files\setup.ini", has
+/// LONGNAME.DOC, NSENGLIS.DLL, README.TXT, PROGRAM_\SETUP.INI and
+/// GAMES_\MYGAME\GAME.EXE. Joliet (UCS-2 level 1) has the same files as
+/// "empty.txt", a 71-character name, "nsenglishres.dll", "ReadMe.txt",
+/// "Program Files\setup.ini" and "Games Folder\My Game\game.exe", has
 /// "Only In Joliet.txt" besides, and hasn't DOSONLY.BAT.
 #[cfg(test)]
 pub(crate) fn joliet_disc() -> Vec<u8> {
@@ -468,33 +518,40 @@ pub(crate) fn joliet_disc() -> Vec<u8> {
     // directory)).
     type Dir = (u32, u32, Vec<(Vec<u8>, u32, u32, bool)>);
     let file = |id: Vec<u8>, lba, size| (id, lba, size, false);
-    let dirs: [Dir; 4] = [
+    let dir = |id: Vec<u8>, lba| (id, lba, 2048, true);
+    let dirs: [Dir; 8] = [
         (
             20,
             20,
             vec![
                 file(b"DOSONLY.BAT;1".to_vec(), 34, 3),
                 file(b"EMPTY.TXT;1".to_vec(), 0, 0),
+                dir(b"GAMES_".to_vec(), 24),
                 file(b"LONGNAME.DOC;1".to_vec(), 35, 4),
                 file(b"NSENGLIS.DLL;1".to_vec(), 30, 5),
-                (b"PROGRAM_".to_vec(), 21, 2048, true),
+                dir(b"PROGRAM_".to_vec(), 21),
                 file(b"README.TXT;1".to_vec(), 31, 6),
             ],
         ),
         (21, 20, vec![file(b"SETUP.INI;1".to_vec(), 33, 7)]),
+        (24, 20, vec![dir(b"MYGAME".to_vec(), 25)]),
+        (25, 24, vec![file(b"GAME.EXE;1".to_vec(), 36, 9)]),
         (
             22,
             22,
             vec![
                 file(ucs2(&format!("{};1", long_doc)), 35, 4),
                 file(ucs2("empty.txt;1"), 0, 0),
+                dir(ucs2("Games Folder"), 26),
                 file(ucs2("nsenglishres.dll;1"), 30, 5),
                 file(ucs2("Only In Joliet.txt;1"), 32, 8),
-                (ucs2("Program Files"), 23, 2048, true),
+                dir(ucs2("Program Files"), 23),
                 file(ucs2("ReadMe.txt;1"), 31, 6),
             ],
         ),
         (23, 22, vec![file(ucs2("setup.ini;1"), 33, 7)]),
+        (26, 22, vec![dir(ucs2("My Game"), 27)]),
+        (27, 26, vec![file(ucs2("game.exe;1"), 36, 9)]),
     ];
     let mut disc = vec![0u8; 40 * DATA_SECTOR];
     for (lba, parent, records) in dirs {
@@ -506,7 +563,7 @@ pub(crate) fn joliet_disc() -> Vec<u8> {
         let at = lba as usize * DATA_SECTOR;
         disc[at..at + sector.len()].copy_from_slice(&sector);
     }
-    for lba in 30..36 {
+    for lba in 30..37 {
         let at = lba * DATA_SECTOR;
         disc[at..at + 8].fill(lba as u8);
     }
@@ -555,6 +612,10 @@ mod tests {
         // A directory, by its name or else by its files.
         assert_eq!(long("PROGRAM_"), Some("Program Files"));
         assert_eq!(long("PROGRAM_\\SETUP.INI"), Some("setup.ini"));
+        // One that holds only a directory, by the files below it.
+        assert_eq!(long("GAMES_"), Some("Games Folder"));
+        assert_eq!(long("GAMES_\\MYGAME"), Some("My Game"));
+        assert_eq!(long("GAMES_\\MYGAME\\GAME.EXE"), Some("game.exe"));
         // What only one tree has.
         assert_eq!(long("DOSONLY.BAT"), None);
         assert_eq!(long("ONLYIN~1.TXT"), Some("Only In Joliet.txt"));
@@ -566,6 +627,7 @@ mod tests {
             [
                 "DOSONLY.BAT",
                 "EMPTY.TXT",
+                "GAMES_",
                 "LONGNAME.DOC",
                 "NSENGLIS.DLL",
                 "ONLYIN~1.TXT",
