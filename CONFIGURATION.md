@@ -484,17 +484,19 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `win32_version`, a change takes effect for the next program that
   starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
-  AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
-  `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
-  has the FAT32 functions of MS-DOS 7 that disk utilities use: the
-  extended drive parameter block and free space (INT 21h AX=7302h and
-  7303h) and, from 7.10, absolute disk reads and writes (AX=7305h), and
-  INT 25h and 26h refuse FAT32 drives as MS-DOS 7.1 does. FAT32 drives
-  mount at any version, as programs reach their files through DOS, and
-  at any version the FAT32 functions answer for a FAT32 drive, as
-  MS-DOS 7.1 does under SETVER: its drive parameter block (AH=32h) is
-  MS-DOS 7.1's, which only AX=7302h completes. Windows 98 Setup checks
-  a FAT32 C: this way. A change takes effect at once.
+  AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
+  `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
+  functions of MS-DOS 7 that disk utilities use: the extended drive
+  parameter block and free space (INT 21h AX=7302h and 7303h) and, from
+  7.10, absolute disk reads and writes (AX=7305h), and INT 25h and 26h
+  refuse FAT32 drives as MS-DOS 7.1 does. FAT32 drives mount at any version,
+  as programs reach their files through DOS. While one is mounted, the FAT32
+  functions, AX=7305h too, answer at any version, as MS-DOS 7.1 does under
+  SETVER: a FAT32 drive's drive parameter block (AH=32h) is MS-DOS 7.1's,
+  which only AX=7302h completes, and Windows 98 Setup checks a FAT32 C: this
+  way. Below 7.10, INT 25h and 26h still read and write FAT32 drives, unlike
+  MS-DOS 7.1, so DOS 5 programs that know only them keep reaching the
+  volume. A change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and

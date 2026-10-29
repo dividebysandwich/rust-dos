@@ -89,7 +89,7 @@ impl Filter {
 
 /// The DOS version the built-in DOS reports (`dos_version`): INT 21h
 /// AH=30h, AX=3306h and the PSP's, and the version the FAT32 functions of
-/// MS-DOS 7 (AX=7302h to 7305h) need.
+/// MS-DOS 7 (AX=7302h to 7305h) need while no FAT32 drive is mounted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DosVersion {
     pub major: u8,

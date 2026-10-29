@@ -837,6 +837,18 @@ fn fat32_drives_through_dos() {
     assert_eq!(plan.volume.as_ref().map(|v| v.bits), Some(32));
     rust_dos::makeimg::write(&image, &plan, true).unwrap();
     let mut cpu = cpu(&dir);
+    // DOS 5 without a FAT32 drive has no AX=73xxh.
+    name(&mut cpu, "C:\\");
+    cpu.set_es(0x5000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
+    int21(&mut cpu, 0x7303);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+    cpu.set_dx(3);
+    cpu.set_cx(0x3F);
+    int21(&mut cpu, 0x7302);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+
     mount(&mut cpu, DRIVE_D, &image);
     let handle = create(&mut cpu, "D:\\HELLO.TXT").unwrap();
     write(&mut cpu, handle, b"hello FAT32").unwrap();
@@ -851,14 +863,14 @@ fn fat32_drives_through_dos() {
     assert!(total * spc * bps < 2 << 30 && total > 60_000, "{} clusters", total);
     assert!(free <= total);
 
-    // DOS 5 has no AX=73xxh for other drives, but answers them for a
-    // FAT32 one, whose DPB only AX=7302h completes.
+    // With a FAT32 drive mounted, DOS 5 has AX=73xxh, for the other
+    // drives too; the FAT32 drive's DPB only AX=7302h completes.
     name(&mut cpu, "C:\\");
     cpu.set_es(0x5000);
     cpu.set_di(0);
     cpu.set_cx(0x2C);
     int21(&mut cpu, 0x7303);
-    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
     name(&mut cpu, "D:\\");
     cpu.set_cx(0x2C);
     int21(&mut cpu, 0x7303);

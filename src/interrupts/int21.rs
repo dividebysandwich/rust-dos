@@ -2337,7 +2337,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_cpu_flag(CpuFlags::CF, true);
         }
 
-        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on.
+        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on, and at
+        // any version while a FAT32 drive is mounted.
         0x73 => fat32_function(cpu, cpu.get_al()),
 
         _ => {
@@ -2369,20 +2370,15 @@ crate::state_fields!(ConLine { buffer, text });
 /// its sectors as INT 25h/26h do. Below DOS 7, AX=7300h and CF set, as
 /// DOS 6 answers, and 0018h for what isn't there.
 ///
-/// A call about a FAT32 drive is answered whatever version programs are
-/// told, as MS-DOS 7.1 answers one under SETVER: only a DOS that has
-/// these functions can have the drive, and its DPB (AH=32h) is MS-DOS
-/// 7.1's, with 0 sectors per FAT, which only AX=7302h completes. Windows
-/// 98 Setup's disk check reads a FAT32 C: this way.
+/// With a FAT32 drive mounted they are there whatever version programs
+/// are told, as MS-DOS 7.1 has them under SETVER: only a DOS with these
+/// functions can have such a drive, and its DPB (AH=32h) is MS-DOS 7.1's,
+/// with 0 sectors per FAT, which only AX=7302h completes. Windows 98
+/// Setup's disk check reads a FAT32 C: this way.
 fn fat32_function(cpu: &mut Cpu, al: u8) {
     let version = cpu.bus.dos_version;
     let drive = |cpu: &Cpu, dl: u8| if dl == 0 { cpu.bus.disk.get_current_drive() } else { dl - 1 };
-    let target = match al {
-        0x00 | 0x02 | 0x05 => Some(drive(cpu, cpu.get_reg8(Register::DL))),
-        0x03 => free_space_drive(cpu).ok().map(|dl| drive(cpu, dl)),
-        _ => None,
-    };
-    let fat32 = target.and_then(|d| cpu.bus.disk.layout(d)).is_some_and(|l| l.fat32.is_some());
+    let fat32 = (0..26).any(|d| cpu.bus.disk.layout(d).is_some_and(|l| l.fat32.is_some()));
     let result: Result<(), u16> = match al {
         _ if !version.at_least(7, 0) && !fat32 => Err(0x7300),
         0x00 if cpu.get_reg8(Register::CL) < 2 => {
@@ -2457,20 +2453,6 @@ fn extended_dpb(cpu: &mut Cpu, drive: u8) -> Result<(), u16> {
     Ok(())
 }
 
-/// The drive (0 the current one, 1 A:) of the path at DS:DX that AX=7303h
-/// takes ("C:\\", or "\\" for the current drive).
-fn free_space_drive(cpu: &mut Cpu) -> Result<u8, u16> {
-    let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-    let path = read_asciiz_string(&mut cpu.bus, addr);
-    match path.as_bytes() {
-        [letter, b':', ..] if letter.is_ascii_alphabetic() => {
-            Ok(letter.to_ascii_uppercase() - b'A' + 1)
-        }
-        [b'\\', ..] | [] => Ok(0),
-        _ => Err(0x000F),
-    }
-}
-
 /// AX=7303h: the free space of the drive DS:DX names ("C:\\") into the
 /// structure at ES:DI, CX bytes of room, in 32-bit numbers.
 fn extended_free_space(cpu: &mut Cpu) -> Result<(), u16> {
@@ -2478,7 +2460,13 @@ fn extended_free_space(cpu: &mut Cpu) -> Result<(), u16> {
     if (cpu.cx() as usize) < SIZE {
         return Err(0x0018);
     }
-    let drive = free_space_drive(cpu)?;
+    let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
+    let path = read_asciiz_string(&mut cpu.bus, addr);
+    let drive = match path.as_bytes() {
+        [letter, b':', ..] if letter.is_ascii_alphabetic() => letter.to_ascii_uppercase() - b'A' + 1,
+        [b'\\', ..] | [] => 0,
+        _ => return Err(0x000F),
+    };
     let (spc, free, bps, total) = cpu.bus.disk.get_disk_free_space32(drive)?;
     let mut info = [0u8; SIZE];
     let fields = [spc, bps, free, total, free.saturating_mul(spc), total.saturating_mul(spc), free, total];
