@@ -991,6 +991,56 @@ fn cd_directories_show_their_records() {
 }
 
 #[test]
+fn a_joliet_cd_has_long_names() {
+    let mut disk = DiskController::new(scratch("joliet"));
+    let disc = crate::cdrom::iso9660::joliet_disc();
+    disk.mount_memory_image(3, "JOLIET.ISO", disc.into(), cdrom())
+        .unwrap();
+
+    // DOS lists the primary tree's names.
+    let listed: Vec<String> = disk
+        .list_directory("D:\\*.*", 0x10)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.filename)
+        .collect();
+    assert!(listed.contains(&"NSENGLIS.DLL".to_string()), "{:?}", listed);
+    assert!(
+        !listed.iter().any(|name| name.contains("nsenglish")),
+        "{:?}",
+        listed
+    );
+    // Windows programs get the Joliet names for them, and open them by
+    // those.
+    let long = disk.long_names("D:\\").unwrap();
+    let pair = |long: &str, short: &str| (long.to_string(), short.to_string());
+    assert!(
+        long.contains(&pair("nsenglishres.dll", "NSENGLIS.DLL")),
+        "{:?}",
+        long
+    );
+    assert!(
+        long.contains(&pair("DOSONLY.BAT", "DOSONLY.BAT")),
+        "{:?}",
+        long
+    );
+    let inside = disk.long_names("D:\\Program Files").unwrap();
+    assert_eq!(inside, [pair("setup.ini", "SETUP.INI")]);
+    assert!(disk.is_file("D:\\nsenglishres.dll"));
+    assert!(disk.is_file("d:\\program files\\Setup.ini"));
+    assert!(disk.is_directory("D:\\Program Files"));
+    assert!(!disk.is_file("D:\\nsenglish.dll"));
+    let h = disk.open_file("D:\\NSEnglishRes.dll", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 8).unwrap(), [30; 5]);
+    assert!(disk.set_current_directory("D:\\Program Files"));
+    assert_eq!(
+        disk.get_current_directory_of(3).as_deref(),
+        Some("PROGRAM_")
+    );
+    assert!(disk.is_file("D:setup.ini"));
+}
+
+#[test]
 fn z_drive_is_only_used_when_named() {
     let base = scratch("zdrive");
     fs::write(base.join("HOST.TXT"), b"x").unwrap();
