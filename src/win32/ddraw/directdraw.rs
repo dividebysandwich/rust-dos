@@ -255,6 +255,11 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             state(cpu).card.exclusive = id;
         } else {
             state(cpu).display.exclusive = id;
+            // Back in exclusive mode in a mode that stayed, the primary
+            // surface's palette is the DAC's again in place of GDI's.
+            if exclusive != id {
+                show_primary_palette(cpu, id);
+            }
         }
     } else {
         if hwnd != 0 && !window(cpu, hwnd) {
@@ -268,9 +273,7 @@ pub fn set_cooperative_level(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // ends with exclusive mode, unless it ever set a level
             // through IDirectDraw.
             let restore = !v1 && ddraw(cpu, id).is_some_and(|d| !d.level_v1);
-            if display::leave_exclusive(cpu, id, restore) {
-                modes_restored(cpu);
-            }
+            display::leave_exclusive(cpu, id, restore);
         }
     }
     let exclusive = flags & DDSCL_EXCLUSIVE != 0;
@@ -483,20 +486,38 @@ pub fn restore_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // is.
     let changed = display::owns_display(cpu);
     display::restore(cpu);
-    modes_restored(cpu);
     if !changed {
         return Some(DD_OK);
     }
     cover_screen(cpu, id)
 }
 
-/// The desktop's mode is back: no object's mode was changed by another
-/// one's any more (TestCooperativeLevel).
-fn modes_restored(cpu: &mut Cpu) {
+/// The desktop's mode is back (`display::restore`): no object's mode
+/// was changed by another one's any more (TestCooperativeLevel).
+pub(super) fn modes_restored(cpu: &mut Cpu) {
     for other in state(cpu).ids(|o| o.ddraw.is_some()) {
         if let Some(d) = ddraw(cpu, other) {
             d.mode_changed = false;
         }
+    }
+}
+
+/// Put the palette of the primary surface the object `id` made in the
+/// DAC, if it has one and DirectDraw has the display.
+fn show_primary_palette(cpu: &mut Cpu, id: u32) {
+    let s = state(cpu);
+    let pal = s
+        .ids(|o| {
+            o.owner == id
+                && o.surface
+                    .as_ref()
+                    .is_some_and(|t| t.is_primary() && t.palette != 0)
+        })
+        .first()
+        .and_then(|&p| s.surface(p))
+        .map_or(0, |t| t.palette);
+    if pal != 0 {
+        super::palette::show(cpu, pal);
     }
 }
 

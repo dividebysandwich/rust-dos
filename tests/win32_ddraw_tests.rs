@@ -1571,8 +1571,9 @@ const IID_IDIRECTDRAW2: [u8; 16] = [
 /// Full screen at 640x480 in 8 bits, a palette of its own on the primary
 /// surface, and back to DDSCL_NORMAL with the object kept, as The Tone
 /// Rebellion's windowed mode and MechCommander's assert dialog do: all
-/// through IDirectDraw2 with `v2`, else through IDirectDraw.
-fn leave_exclusive_program(v2: bool) -> (Vec<u8>, u32) {
+/// through IDirectDraw2 with `v2`, else through IDirectDraw. With
+/// `again`, back to exclusive mode after it.
+fn leave_exclusive_program(v2: bool, again: bool) -> (Vec<u8>, u32) {
     let mut d = data();
     desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
     for i in 0..256u32 {
@@ -1604,6 +1605,9 @@ fn leave_exclusive_program(v2: bool) -> (Vec<u8>, u32) {
         c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
         let normal = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
         c.com(a, l, dd, DD_SET_COOPERATIVE_LEVEL, &normal)?;
+        if again {
+            c.com(a, l, dd, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+        }
         finish(a, l)
     })
 }
@@ -1617,7 +1621,7 @@ fn dac_entry(cpu: &Cpu, i: usize, color: [u8; 3]) -> ([u8; 3], [u8; 3]) {
 
 #[test]
 fn leaving_exclusive_mode_through_idirectdraw2_gives_the_desktop_back() {
-    let (program, data) = leave_exclusive_program(true);
+    let (program, data) = leave_exclusive_program(true, false);
     let mut cpu = machine("leave_exclusive_v2", program);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&mut cpu, data, 9)[1..], [0; 8]);
@@ -1628,7 +1632,7 @@ fn leaving_exclusive_mode_through_idirectdraw2_gives_the_desktop_back() {
 
 #[test]
 fn leaving_exclusive_mode_through_idirectdraw_keeps_the_mode_with_gdis_palette() {
-    let (program, data) = leave_exclusive_program(false);
+    let (program, data) = leave_exclusive_program(false, false);
     let mut cpu = machine("leave_exclusive_v1", program);
     run_until_done(&mut cpu, data);
     assert_eq!(results(&mut cpu, data, 8)[1..], [0; 7]);
@@ -1643,4 +1647,18 @@ fn leaving_exclusive_mode_through_idirectdraw_keeps_the_mode_with_gdis_palette()
     }
     let (dac, expected) = dac_entry(&cpu, 255, [0xFF; 3]);
     assert_eq!(dac, expected, "entry 255");
+}
+
+#[test]
+fn back_in_exclusive_mode_the_primary_surfaces_palette_is_the_dacs_again() {
+    let (program, data) = leave_exclusive_program(false, true);
+    let mut cpu = machine("leave_exclusive_again", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 9)[1..], [0; 8]);
+    // GDI's static colors went in the DAC when exclusive mode ended, and
+    // the program's palette is back in their place.
+    for i in [0, 1, 255] {
+        let (dac, expected) = dac_entry(&cpu, i, [i as u8, 0x40, 255 - i as u8]);
+        assert_eq!(dac, expected, "entry {i}");
+    }
 }

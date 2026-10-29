@@ -243,7 +243,9 @@ pub fn give_back(cpu: &mut Cpu) {
     }
 }
 
-/// Give the screen back to the desktop, if DirectDraw has it.
+/// Give the screen back to the desktop, if DirectDraw has it. No
+/// object's mode was changed by another one's any more then
+/// (TestCooperativeLevel).
 pub fn restore(cpu: &mut Cpu) {
     if !owns_display(cpu) {
         return;
@@ -254,6 +256,7 @@ pub fn restore(cpu: &mut Cpu) {
     display.blocks.clear();
     display.mode = (0, 0, 0);
     display.mode_owner = 0;
+    super::directdraw::modes_restored(cpu);
     // The desktop window takes the screen's size before it is painted.
     display_changed(cpu, old);
     restore_screen(cpu);
@@ -344,20 +347,18 @@ pub fn view(cpu: &mut Cpu) -> Option<u32> {
 /// device, its system palette goes back in the DAC in place of the
 /// program's, as DirectDraw on Windows 95 and 98 has GDI put it there
 /// (with SetSystemPaletteUse), and every window is painted again.
-/// Whether the mode was given back.
-pub fn leave_exclusive(cpu: &mut Cpu, id: u32, restore_mode: bool) -> bool {
+pub fn leave_exclusive(cpu: &mut Cpu, id: u32, restore_mode: bool) {
     let display = &mut state(cpu).display;
     if id == 0 || display.exclusive != id {
-        return false;
+        return;
     }
     display.exclusive = 0;
     if restore_mode && display.mode_owner == id {
         restore(cpu);
-        return true;
+        return;
     }
     crate::win32::gdi32::palette::show_system_palette(cpu);
     crate::win32::user32::paint::redraw_screen(cpu);
-    false
 }
 
 /// The DirectDraw object `id` goes: what it had of the display goes
