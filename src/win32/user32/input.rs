@@ -1468,16 +1468,18 @@ fn activate_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     t.set(A_PALETTE, 1);
                     return activate_send(cpu, hwnd, WM_QUERYNEWPALETTE, 0, 0, 3);
                 }
-                // WM_ACTIVATEAPP: to the thread the foreground came to,
-                // and between the Win16 tasks, when the active window's
-                // task changes in the queue they share.
+                // WM_ACTIVATEAPP: to the thread the foreground came to;
+                // in the foreground queue when the active window's thread
+                // changes, as when a window is activated where none was,
+                // or between the Win16 tasks in the queue they share.
                 let state = user(cpu);
                 let old_tid = state.window(previous).map_or(0, |w| w.tid);
                 let new_tid = state.window(hwnd).map_or(0, |w| w.tid);
+                let in_front = state.input.foreground == queue;
                 let mut list = Vec::new();
                 if t.var(A_FLAGS) & F_SWITCHED != 0 {
                     activate_app_list(state, new_tid, TRUE, t.var(A_OTHER), &mut list);
-                } else if old_tid != new_tid && old_tid != 0 {
+                } else if old_tid != new_tid && (old_tid != 0 || in_front) {
                     activate_app_list(state, old_tid, FALSE, new_tid, &mut list);
                     activate_app_list(state, new_tid, TRUE, old_tid, &mut list);
                 }
