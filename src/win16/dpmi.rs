@@ -1,14 +1,18 @@
 //! DPMI (INT 31h) for the tasks, as Windows' DPMI server gives it to
 //! Windows programs: selectors of the Win16 process's LDT, DOS memory,
-//! memory blocks, the vectors, real-mode interrupts the BIOS and DOS
-//! run, and the functions Windows has no need of (locking pages, the
-//! virtual interrupt flag) succeeding.
+//! memory blocks, the vectors, calls of real-mode code (interrupts and
+//! procedures, and callbacks from real mode, through win32/realmode.rs),
+//! and the functions Windows has no need of (locking pages, the virtual
+//! interrupt flag) succeeding.
 
 use super::ldt;
-use super::thunk::{EAX, EBX, ECX, EDI, EDX, ESI};
-use crate::cpu::{ATTR_DB, Cpu, CpuFlags, Seg};
+use super::thunk::{EAX, EBX, ECX, EDI, EDX, ESI, ESP};
+use crate::cpu::{ATTR_DB, Cpu, Seg};
 use crate::dpmi::Context;
+use crate::dpmi::realcall::{self, Kind};
 use crate::win32::memory::{PAGE, PRIVATE, SHARED, USER, WRITABLE};
+use crate::win32::realmode::Frame;
+use crate::win32::{CALLBACK_SLOTS, CALLBACKS, ROM_SEG};
 
 const CF: u32 = 0x0001;
 
@@ -16,9 +20,11 @@ const CF: u32 = 0x0001;
 const UNSUPPORTED: u16 = 0x8001;
 const NO_DESCRIPTORS: u16 = 0x8011;
 const NO_MEMORY: u16 = 0x8013;
+const NO_CALLBACKS: u16 = 0x8015;
 const BAD_SELECTOR: u16 = 0x8022;
 const BAD_VALUE: u16 = 0x8021;
 const BAD_HANDLE: u16 = 0x8023;
+const BAD_CALLBACK: u16 = 0x8024;
 /// DOS's errors, which the DOS memory functions give: not enough memory,
 /// a block that isn't one.
 const DOS_NO_MEMORY: u16 = 8;
@@ -173,9 +179,17 @@ pub fn presto_chango(cpu: &mut Cpu, source: u16, dest: u16) -> u16 {
     dest
 }
 
-/// INT 31h.
-pub fn int31(cpu: &mut Cpu, ctx: &mut Context) {
-    let result = function(cpu, ctx);
+/// INT 31h. False when the task doesn't go on yet: it called real-mode
+/// code, and goes on when that returns (`call_returned`).
+pub fn int31(cpu: &mut Cpu, ctx: &mut Context) -> bool {
+    let result = match Kind::of(w(ctx, EAX)) {
+        Some(kind) => match call_real_mode(cpu, ctx, kind) {
+            Ok(true) => return false,
+            Ok(false) => Ok(()),
+            Err(code) => Err(code),
+        },
+        None => function(cpu, ctx),
+    };
     match result {
         Ok(()) => ctx.eflags &= !CF,
         Err(code) => {
@@ -183,6 +197,7 @@ pub fn int31(cpu: &mut Cpu, ctx: &mut Context) {
             ctx.eflags |= CF;
         }
     }
+    true
 }
 
 fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
@@ -296,12 +311,14 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
                 }
             }
         }
-        // The real-mode vectors: the IVT's.
+        // The real-mode vectors: the IVT's, the virtual machine's. A
+        // handler set there runs for 0300h and for the tasks' own INT n
+        // (dos.rs), as under Windows.
         0x0200 => {
             let v = cpu.bus.read_32(bx as u8 as usize * 4);
             set_pair(ctx, ECX, EDX, v);
         }
-        0x0201 => {}
+        0x0201 => cpu.bus.write_32(bx as u8 as usize * 4, pair(ctx, ECX, EDX)),
         // The protected-mode vectors: the task's.
         0x0204 => {
             let v = bx as u8;
@@ -322,8 +339,16 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
         // Exception handlers: faults end the task, as they do without.
         0x0202 => set_pair(ctx, ECX, EDX, 0),
         0x0203 => {}
-        0x0300 => real_mode_int(cpu, ctx)?,
-        0x0301 | 0x0302 => return Err(UNSUPPORTED),
+        // A real-mode callback to DS:SI with the call structure at ES:DI,
+        // its address in CX:DX; and freeing it.
+        0x0303 => {
+            let procedure = (ctx.seg[Seg::DS as usize] as u32) << 16 | w(ctx, ESI) as u32;
+            let structure = (ctx.seg[Seg::ES as usize] as u32) << 16 | w(ctx, EDI) as u32;
+            let slot = alloc_callback(cpu, procedure, structure)?;
+            set_w(ctx, ECX, ROM_SEG);
+            set_w(ctx, EDX, CALLBACKS + 4 * slot as u16);
+        }
+        0x0304 => free_callback(cpu, w(ctx, ECX), w(ctx, EDX))?,
         0x0400 => {
             set_w(ctx, EAX, 0x005A);
             // 32-bit hosts, real mode in virtual 8086 mode, virtual memory.
@@ -433,52 +458,197 @@ pub fn dos_free(cpu: &mut Cpu, sel: u16) -> bool {
     ok
 }
 
-/// Function 0300h: the real-mode interrupt BL with the registers of the
-/// structure at ES:(E)DI, which gets the registers it returns.
-fn real_mode_int(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
+/// The call structure at the linear address `at` of the Win16 process.
+fn read_structure(cpu: &Cpu, at: u32) -> Option<[u8; realcall::SIZE]> {
+    super::peek(cpu, at, realcall::SIZE)?.try_into().ok()
+}
+
+/// Functions 0300h (the real-mode interrupt BL), 0301h (a far call) and
+/// 0302h (a call with an IRET frame), as Windows' DPMI server runs them in
+/// the virtual machine: the code runs in real mode with the registers of
+/// the call structure at ES:DI, and CX words of the task's stack on top
+/// of its own (realcall.rs), and the task goes on once it returns, with
+/// the registers it left in the structure (`call_returned`). True when
+/// it went down to real mode; false when there was nothing to call, a
+/// vector of 0:0, which does nothing, as a real-mode INT of it would.
+///
+/// 0300h runs whatever the vector table has for BL: a handler in RAM a
+/// program or driver put there, or the BIOS's or DOS's own in the ROM,
+/// which runs the built-in service. Unlike a task's own INT n
+/// (`dos::interrupt`), every vector goes there: the structure holds
+/// real-mode segments, which the handlers can use as they are, so there
+/// is nothing to translate and no vector is kept from its handler.
+fn call_real_mode(cpu: &mut Cpu, ctx: &Context, kind: Kind) -> Result<bool, u16> {
     let at = super::lin(cpu, ctx.seg[Seg::ES as usize], w(ctx, EDI));
-    let regs = super::peek(cpu, at, 0x32).ok_or(BAD_VALUE)?;
-    let d = |i: usize| u32::from_le_bytes([regs[i], regs[i + 1], regs[i + 2], regs[i + 3]]);
-    let h = |i: usize| u16::from_le_bytes([regs[i], regs[i + 1]]);
-    let vector = w(ctx, EBX) as u8;
-    let mut snapshot = cpu.snapshot();
-    // EDI ESI EBP (reserved) EBX EDX ECX EAX.
-    snapshot.gpr = [
-        d(0x1C),
-        d(0x18),
-        d(0x14),
-        d(0x10),
-        0,
-        d(0x08),
-        d(0x04),
-        d(0x00),
-    ];
-    cpu.restore(&snapshot);
-    let (ss, sp) = cpu.bus.win32.rm_stack;
-    cpu.set_ss(ss);
-    cpu.set_sp(sp.wrapping_sub(0x40));
-    cpu.set_es(h(0x22));
-    cpu.set_ds(h(0x24));
-    cpu.set_cpu_flag(CpuFlags::CF, h(0x20) & 1 != 0);
-    crate::win32::dos(cpu, |cpu| crate::interrupts::handle_hle(cpu, vector));
-    let out = cpu.snapshot().gpr;
-    let flags = cpu.eflags_image() as u16;
-    let (es, ds) = (cpu.es(), cpu.ds());
-    let mut bytes = regs.clone();
-    for (i, value) in [
-        (0x00, out[7]),
-        (0x04, out[6]),
-        (0x08, out[5]),
-        (0x10, out[3]),
-        (0x14, out[2]),
-        (0x18, out[1]),
-        (0x1C, out[0]),
-    ] {
-        bytes[i..i + 4].copy_from_slice(&value.to_le_bytes());
+    let bytes = read_structure(cpu, at).ok_or(BAD_VALUE)?;
+    let mut rm = realcall::decode(&bytes);
+    let target = match kind {
+        Kind::Interrupt => cpu.bus.read_32(w(ctx, EBX) as u8 as usize * 4),
+        Kind::FarCall | Kind::IretCall => (rm.seg[Seg::CS as usize] as u32) << 16 | rm.eip & 0xFFFF,
+    };
+    if target == 0 {
+        return Ok(false);
     }
-    bytes[0x20..0x22].copy_from_slice(&flags.to_le_bytes());
-    bytes[0x22..0x24].copy_from_slice(&es.to_le_bytes());
-    bytes[0x24..0x26].copy_from_slice(&ds.to_le_bytes());
-    super::poke(cpu, at, &bytes);
+    let params = stack_words(cpu, ctx, w(ctx, ECX));
+    let (ss, sp) = crate::win32::realmode::host_stack(cpu);
+    let (ss, sp) = realcall::stack(&rm, (ss, sp as u32));
+    let words = kind.frame(rm.eflags, &params, crate::win32::realmode::RETURN);
+    rm.seg[Seg::CS as usize] = (target >> 16) as u16;
+    rm.eip = target & 0xFFFF;
+    rm.seg[Seg::SS as usize] = ss;
+    rm.gpr[ESP] = sp;
+    rm.eflags = kind.entry_flags(rm.eflags);
+    // The task goes on after its INT 31h with CF clear.
+    let mut after = *ctx;
+    after.eflags &= !CF;
+    let frame = Frame {
+        kind: crate::win32::realmode::Kind::Call,
+        ctx: after,
+        at,
+    };
+    crate::win32::realmode::call(cpu, frame, &rm, &words);
+    Ok(true)
+}
+
+/// The first `count` words on the stack of the task's context `ctx`.
+fn stack_words(cpu: &Cpu, ctx: &Context, count: u16) -> Vec<u16> {
+    let ss = ctx.seg[Seg::SS as usize];
+    let Some((base, _, attr)) = super::selector_base(cpu, ss) else {
+        return vec![0; count as usize];
+    };
+    let mask = if attr & ATTR_DB != 0 { !0 } else { 0xFFFF };
+    (0..count as u32)
+        .map(|i| {
+            let offset = ctx.gpr[ESP].wrapping_add(2 * i) & mask;
+            super::read_16(cpu, base.wrapping_add(offset))
+        })
+        .collect()
+}
+
+/// Real-mode code a task called through function 0300h, 0301h or 0302h
+/// returned, in the real-mode context `rm`: the call structure gets the
+/// registers, flags and segments it left, and the task goes on.
+pub fn call_returned(cpu: &mut Cpu, frame: Frame, rm: &Context) {
+    if let Some(mut bytes) = read_structure(cpu, frame.at) {
+        realcall::encode(rm, &mut bytes, false);
+        super::poke(cpu, frame.at, &bytes);
+    }
+    crate::win32::system::enter_user(cpu, &frame.ctx);
+}
+
+/// Function 0303h: a real-mode callback that calls the task's procedure
+/// `procedure` with the call structure `structure` (16:16 pointers).
+/// Its slot.
+fn alloc_callback(cpu: &mut Cpu, procedure: u32, structure: u32) -> Result<usize, u16> {
+    let callbacks = &mut cpu.bus.win32.win16.callbacks;
+    callbacks.resize(CALLBACK_SLOTS, None);
+    let slot = callbacks
+        .iter()
+        .position(Option::is_none)
+        .ok_or(NO_CALLBACKS)?;
+    callbacks[slot] = Some((procedure, structure));
+    Ok(slot)
+}
+
+/// Function 0304h: free the callback at `seg`:`off`.
+fn free_callback(cpu: &mut Cpu, seg: u16, off: u16) -> Result<(), u16> {
+    let slot = off.wrapping_sub(CALLBACKS) / 4;
+    let valid = seg == ROM_SEG && off >= CALLBACKS && (off - CALLBACKS).is_multiple_of(4);
+    if !valid || !has_callback(cpu, slot as usize) {
+        return Err(BAD_CALLBACK);
+    }
+    cpu.bus.win32.win16.callbacks[slot as usize] = None;
     Ok(())
+}
+
+/// Whether the callback `slot` is given out.
+pub fn has_callback(cpu: &Cpu, slot: usize) -> bool {
+    cpu.bus
+        .win32
+        .win16
+        .callbacks
+        .get(slot)
+        .is_some_and(Option::is_some)
+}
+
+/// Real-mode code called the callback `slot`: its procedure runs in
+/// protected mode while the real-mode code waits, as DPMI 0.9 has it,
+/// with the real-mode registers in its call structure at ES:DI, DS:SI
+/// the real-mode stack, and an IRET frame to return with. It runs on the
+/// stack of the task whose call or interrupt went down to real mode,
+/// below where that was, as Wine's krnl386 runs it on the task's stack.
+/// The procedure's IRET comes back to `then_callback`.
+pub fn callback(cpu: &mut Cpu, slot: usize) {
+    let rm = Context::of(cpu);
+    let caller = crate::win32::realmode::caller(cpu);
+    let callback = cpu.bus.win32.win16.callbacks[slot];
+    let (Some(caller), Some((procedure, structure)), Some(_)) =
+        (caller, callback, super::current_task(cpu))
+    else {
+        // Not from a task's real-mode code: back to the caller, as a
+        // RETF would go.
+        cpu.bus.log_string(&format!(
+            "[W16] Real-mode callback {} called with no task to run it",
+            slot
+        ));
+        let ip = cpu.pop();
+        let cs = cpu.pop();
+        cpu.set_cs(cs);
+        cpu.set_ip(ip);
+        return;
+    };
+    let at = super::linear(cpu, structure);
+    if let Some(mut bytes) = read_structure(cpu, at) {
+        realcall::encode(&rm, &mut bytes, true);
+        super::poke(cpu, at, &bytes);
+    }
+    let stack = super::thunk::stack16_for(cpu, &caller);
+    let ss_sel = super::dos::segment_selector(cpu, rm.seg[Seg::SS as usize]);
+    crate::win32::realmode::suspend(cpu, rm, slot);
+    let mut regs = Context {
+        gpr: rm.gpr,
+        ..Context::default()
+    };
+    regs.gpr[ESI] = rm.gpr[ESP] & 0xFFFF;
+    regs.gpr[EDI] = structure & 0xFFFF;
+    regs.seg[Seg::DS as usize] = ss_sel;
+    regs.seg[Seg::ES as usize] = (structure >> 16) as u16;
+    // Back in the task's protected mode, where call16 reaches its stack
+    // through the page tables, as this trap from real mode doesn't.
+    crate::win32::system::enter_user(cpu, &caller);
+    let paging = cpu.bus.guest_paging.replace(cpu.guest_paging(true));
+    // The IRET frame's flags, under the return address call16 pushes.
+    super::thunk::call16_regs(
+        cpu,
+        procedure,
+        &[0x0202],
+        regs,
+        Context::default(),
+        super::thunk::THEN_CALLBACK,
+        Vec::new(),
+        stack,
+    );
+    cpu.bus.guest_paging = paging;
+}
+
+/// A callback's procedure returned (`callback`), with the call structure
+/// to go on with at ES:DI: the real-mode code that called it goes on with
+/// the registers there, CS:IP and SS:SP among them.
+pub fn then_callback(cpu: &mut Cpu, _: u32, _: &[u32], _: &mut Context) -> Option<u32> {
+    let at = super::lin(cpu, cpu.es(), cpu.di());
+    let rm = match read_structure(cpu, at) {
+        Some(bytes) => realcall::decode(&bytes),
+        None => {
+            crate::win32::fatal(cpu, "a real-mode callback's structure isn't there", None);
+            return None;
+        }
+    };
+    if !crate::win32::realmode::resume(cpu, &rm) {
+        crate::win32::fatal(
+            cpu,
+            "a real-mode callback returned that wasn't called",
+            None,
+        );
+    }
+    None
 }

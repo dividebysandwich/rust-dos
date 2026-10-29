@@ -17,7 +17,7 @@
 
 mod builtin;
 pub mod dos;
-mod dpmi;
+pub(crate) mod dpmi;
 pub(crate) mod flat;
 mod gdi;
 mod global;
@@ -99,6 +99,10 @@ pub struct State {
     /// The blocks of linear memory DPMI function 0501h gave, by their
     /// addresses (their handles).
     pub dpmi_blocks: Vec<u32>,
+    /// The real-mode callbacks DPMI function 0303h gave, by their slot
+    /// (win16/dpmi.rs): each one's procedure and call structure, as
+    /// 16:16 pointers.
+    pub callbacks: Vec<Option<(u32, u32)>>,
     /// The imports that no module has (`builtin::missing_address`), by
     /// the place of the stub that stands for each.
     pub missing: Vec<String>,
@@ -587,6 +591,7 @@ crate::state_fields!(State {
     wing_bitmaps,
     wave_headers,
     dpmi_blocks,
+    callbacks,
     missing,
     class_menus,
     mmio_buffers,

@@ -87,8 +87,9 @@ impl ThreadState {
 pub enum Registers {
     /// The processor's: the thread runs.
     Cpu,
-    /// The context a hardware interrupt left: the thread runs, and the
-    /// interrupt's real-mode handler is in the processor.
+    /// The context the thread left for real-mode code the system called
+    /// (a hardware interrupt's handler, a Win16 task's INT n or DPMI
+    /// call): the thread runs, and that code is in the processor.
     Interrupted,
     /// The context saved in its entry while another thread runs.
     #[default]
@@ -177,8 +178,8 @@ pub enum Field {
 /// registers taken from the processor.
 pub fn snapshot(cpu: &Cpu) -> Snapshot {
     let win32 = &cpu.bus.win32;
-    let live = match &win32.interrupted {
-        Some(ctx) => (Registers::Interrupted, *ctx),
+    let live = match super::realmode::live_context(cpu) {
+        Some(ctx) => (Registers::Interrupted, ctx),
         None => (Registers::Cpu, Context::of(cpu)),
     };
     let now = cpu.bus.clock.now_micros();
