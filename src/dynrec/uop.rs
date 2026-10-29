@@ -52,11 +52,6 @@ pub enum Precise {
     /// To an integer, where the double in x is one or halfway between two
     /// (or is 2^52 or more, or not finite).
     Int(X),
-    /// To a single, where the double in x has 25 significant bits or fewer
-    /// (each single, and each value halfway between two), or the control
-    /// word rounds other than to nearest (a single from the double rounds
-    /// to nearest, as `data::single_bits` has it).
-    Single(X),
     /// Compared, where the doubles in the two are equal.
     Equal(X, X),
 }
@@ -516,7 +511,12 @@ pub enum Uop {
     FLoadInt64 { x: X, m: T },
     /// t = the low dword of x's bits, or the high one with `high`.
     FToHalf { t: T, x: X, high: bool },
-    /// t = x as a single's bits.
+    /// t = the single FST stores of ST(0), whose double x holds
+    /// (`data::st0_single_bits`): x rounded to nearest, or where ST(0)'s
+    /// 80 bits hold more than x and rounding x could come out different
+    /// (the control word rounds other than to nearest, or x has 25
+    /// significant bits or fewer), the 80 bits rounded through the
+    /// handlers' code. The block goes on after it either way.
     FToSingle { t: T, x: X },
     /// t = dword `part` (0 or 1) of ST(0)'s 80 bits, or (2) its sign and
     /// exponent, as `FpuRegs::get` makes them.

@@ -689,7 +689,7 @@ impl FpuRegs {
     /// is rounded to nearest, so FIST, FST to a single (or to a double under
     /// another rounding), FRNDINT and the compares then work from the 80
     /// bits; the recompiler's code leaves those cases to the handlers
-    /// (`Uop::FBailPrecise`).
+    /// (`Uop::FBailPrecise`, and `Uop::FToSingle` for the single).
     #[inline]
     pub fn beyond_double(&self, i: usize) -> bool {
         self.stale[i] == 0 && self.x80[i].st & 0x7FF != 0

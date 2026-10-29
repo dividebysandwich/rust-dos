@@ -2394,7 +2394,34 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch x64 ; mov Rd(r(t)), eax ; x80_done:);
             }
             Uop::FToSingle { t, x } => {
-                dynasm!(self.ops ; .arch x64 ; cvtsd2ss xmm2, Rx(x.0) ; movd Rd(r(t)), xmm2);
+                // Rounding to nearest, a double with bits set among its
+                // low 28 rounds as the 80 bits it was rounded from would:
+                // neither is a single or halfway between two.
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; test WORD [rbx + FPU_CONTROL], 0xC00
+                    ; jnz >single_regs
+                    ; movq rax, Rx(x.0)
+                    ; test eax, 0x0FFF_FFFF
+                    ; jnz >single_inline
+                    ; single_regs:
+                    ; mov eax, DWORD [rbx + FPU_TOP]
+                    ; cmp BYTE [rbx + rax + FPU_STALE], 0
+                    ; jne >single_inline
+                    ; shl eax, 4
+                    ; test WORD [rbx + rax + FPU_X80], 0x7FF
+                    ; jz >single_inline
+                );
+                self.fpu_op(5 << 13, None);
+                dynasm!(self.ops
+                    ; .arch x64
+                    ; mov Rd(r(t)), eax
+                    ; jmp >single_done
+                    ; single_inline:
+                    ; cvtsd2ss xmm2, Rx(x.0)
+                    ; movd Rd(r(t)), xmm2
+                    ; single_done:
+                );
             }
             Uop::FLoad64 { x, m, canon } => {
                 dynasm!(self.ops ; .arch x64 ; movsd Rx(x.0), QWORD [r13 + Rq(r(m))]);
@@ -3144,16 +3171,6 @@ impl Gen<'_> {
                     ; shl rdx, cl
                     ; dec rdx
                     ; test rax, rdx
-                    ; jnz >precise_done
-                );
-            }
-            Precise::Single(x) => {
-                dynasm!(self.ops
-                    ; .arch x64
-                    ; test WORD [rbx + FPU_CONTROL], 0xC00
-                    ; jnz >precise_regs
-                    ; movq rax, Rx(x.0)
-                    ; test eax, 0x0FFF_FFFF
                     ; jnz >precise_done
                 );
             }
