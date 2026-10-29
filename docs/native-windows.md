@@ -238,8 +238,8 @@ exceptions run as the program's own code on top of that.
 - The registry is a tree in Rust (`src/win32/registry.rs`), the
   system's, shared by the processes and kept in save states. It is seeded
   with the keys games read (`HKLM\Software\Microsoft\Windows\CurrentVersion`
-  with VersionNumber 4.00.950, DirectX's version, the display settings,
-  the user and computer names) and kept on drive C: as
+  with VersionNumber 4.00.950 and a ProductId, DirectX's version, the
+  display settings, the user and computer names) and kept on drive C: as
   `C:\REGISTRY.REG`, a REGEDIT4 file that can be read and edited by hand.
   A program's first registry call reads the seed with the file's keys
   and values over it; changes are written back when a key is closed or
@@ -817,6 +817,19 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   25h, 26h, 33h and 4Bh, whose buffers Windows translates and the
   layer doesn't. CLI and STI, which Windows' VMM virtualizes, go on
   without effect.
+- DPMI's calls of real-mode code (INT 31h AX=0300h, 0301h and 0302h)
+  run it in real mode, as Windows' DPMI server runs it in the virtual
+  machine, through the same entry and return as the reflected
+  interrupts (`src/win32/realmode.rs`): the call structure's registers,
+  its SS:SP or the host's stack when that is 0:0, CX words of the
+  task's stack on top, and the registers and flags the code returns
+  written back. 0300h runs whatever the vector table has, a program's
+  handler or the BIOS's, with no vector kept back: the structure holds
+  real-mode segments, so there is nothing to translate. What both DPMI
+  hosts do for these calls is in `src/dpmi/realcall.rs`. Real-mode
+  callbacks (0303h, 0304h) call a task's procedure from real mode, on
+  the task's stack, and the calls nest. 0201h sets the real-mode
+  vector.
 - Windows 3.1 programs see version 3.95, Windows 95's, and not the
   WS_EX_WINDOWEDGE style USER32 gives their windows.
 - KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a

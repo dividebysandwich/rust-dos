@@ -99,6 +99,7 @@ pub const CB_GETCURSEL: u32 = 0x0147;
 pub const CB_RESETCONTENT: u32 = 0x014B;
 pub const CB_SETCURSEL: u32 = 0x014E;
 pub const LB_ADDSTRING: u32 = 0x0180;
+pub const LB_INSERTSTRING: u32 = 0x0181;
 pub const LB_RESETCONTENT: u32 = 0x0184;
 pub const LB_GETCURSEL: u32 = 0x0188;
 pub const LB_SETCOLUMNWIDTH: u32 = 0x0195;

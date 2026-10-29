@@ -12,6 +12,7 @@ use super::{
     SAVE_RM, allocate, client, descriptor, enter_rm, free_entry, keep_lpms, push_real, read_desc, real_mode_handler,
     resume, selector_base, set_vector, write_desc,
 };
+use super::realcall::{self, Kind};
 use crate::cpu::{Cpu, CpuFlags, CpuResult, Descriptor, Seg};
 
 /// DPMI 1.0 error codes.
@@ -40,8 +41,8 @@ type Result = std::result::Result<(), u16>;
 /// the others (DS, ES) as the processor has them.
 pub(super) fn call(cpu: &mut Cpu, mut ctx: Context) {
     let function = ctx.reg16(EAX);
-    if (0x0300..=0x0302).contains(&function) {
-        return call_real_mode(cpu, ctx, function);
+    if let Some(kind) = Kind::of(function) {
+        return call_real_mode(cpu, ctx, kind);
     }
     match service(cpu, &mut ctx, function) {
         Ok(()) => ctx.set_cf(false),
@@ -612,22 +613,11 @@ pub(super) fn retile(cpu: &mut Cpu, first: usize, count: usize, base: u32, bytes
 /// `seg`:`at` through the processor's segment register: the real-mode
 /// registers it holds.
 pub(super) fn read_call_structure(cpu: &mut Cpu, seg: Seg, at: u32) -> CpuResult<Context> {
-    let mut bytes = [0u8; 0x32];
+    let mut bytes = [0u8; realcall::SIZE];
     for (i, byte) in bytes.iter_mut().enumerate() {
         *byte = cpu.read_u8(seg, at.wrapping_add(i as u32))?;
     }
-    let dword = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
-    let word = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
-    let mut ctx = Context::default();
-    // EDI, ESI, EBP, (ESP), EBX, EDX, ECX, EAX, in that order.
-    for (i, reg) in [7, 6, 5, 4, 3, 2, 1, 0].into_iter().enumerate() {
-        ctx.gpr[reg] = dword(4 * i);
-    }
-    ctx.gpr[ESP] = word(0x2E) as u32;
-    ctx.eflags = word(0x20) as u32;
-    ctx.eip = word(0x2A) as u32;
-    ctx.seg = [word(0x22), word(0x2C), word(0x30), word(0x24), word(0x26), word(0x28)];
-    Ok(ctx)
+    Ok(realcall::decode(&bytes))
 }
 
 /// Write the real-mode registers `rm` into the call structure at
@@ -636,20 +626,13 @@ pub(super) fn read_call_structure(cpu: &mut Cpu, seg: Seg, at: u32) -> CpuResult
 pub(super) fn write_call_structure(cpu: &mut Cpu, selector: u16, at: u32, rm: &Context, all: bool) {
     let Some(base) = selector_base(cpu, selector) else { return };
     let at = base.wrapping_add(at) as usize;
-    for (i, reg) in [7, 6, 5, 4, 3, 2, 1, 0].into_iter().enumerate() {
-        if reg != ESP {
-            cpu.bus.write_32(at + 4 * i, rm.gpr[reg]);
-        }
+    let mut bytes = [0u8; realcall::SIZE];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = cpu.bus.read_8(at + i);
     }
-    cpu.bus.write_16(at + 0x20, rm.eflags as u16);
-    for (offset, seg) in [(0x22, Seg::ES), (0x24, Seg::DS), (0x26, Seg::FS), (0x28, Seg::GS)] {
-        cpu.bus.write_16(at + offset, rm.sel(seg));
-    }
-    if all {
-        cpu.bus.write_16(at + 0x2A, rm.eip as u16);
-        cpu.bus.write_16(at + 0x2C, rm.sel(Seg::CS));
-        cpu.bus.write_16(at + 0x2E, rm.gpr[ESP] as u16);
-        cpu.bus.write_16(at + 0x30, rm.sel(Seg::SS));
+    realcall::encode(rm, &mut bytes, all);
+    for (i, &byte) in bytes.iter().enumerate() {
+        cpu.bus.write_8(at + i, byte);
     }
 }
 
@@ -663,7 +646,7 @@ pub(super) fn store_call_structure(cpu: &mut Cpu, selector: u16, at: u32, rm: &C
 /// at ES:(E)DI, CX words from the client's stack on the real-mode stack
 /// (the structure's, or the host's when that is 0:0), and back to the
 /// client with the registers in the structure once the code returns.
-fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, function: u16) {
+fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, kind: Kind) {
     let bits32 = client(cpu).bits32;
     let at = offset(&ctx, EDI, bits32);
     let selector = ctx.sel(Seg::ES);
@@ -675,9 +658,9 @@ fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, function: u16) {
             return resume(cpu, &ctx);
         }
     };
-    let target = match function {
-        0x0300 => real_mode_handler(cpu, ctx.gpr[EBX] as u8),
-        _ => (rm.sel(Seg::CS) as u32) << 16 | rm.eip & 0xFFFF,
+    let target = match kind {
+        Kind::Interrupt => real_mode_handler(cpu, ctx.gpr[EBX] as u8),
+        Kind::FarCall | Kind::IretCall => (rm.sel(Seg::CS) as u32) << 16 | rm.eip & 0xFFFF,
     };
     if target == 0 {
         // No handler: nothing happens, as for a real-mode INT.
@@ -685,10 +668,7 @@ fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, function: u16) {
         return resume(cpu, &ctx);
     }
     let c = client(cpu);
-    let (ss, mut sp) = match (rm.sel(Seg::SS), rm.gpr[ESP] & 0xFFFF) {
-        (0, 0) => (c.rm_stack, c.rm_sp),
-        (ss, sp) => (ss, sp),
-    };
+    let (ss, sp) = realcall::stack(&rm, (c.rm_stack, c.rm_sp));
     let frame = Frame {
         kind: F_TRANSLATE,
         client: c.id,
@@ -701,26 +681,18 @@ fn call_real_mode(cpu: &mut Cpu, mut ctx: Context, function: u16) {
     };
     keep_lpms(c, &ctx);
     // The parameters, from the client's stack.
-    let words = ctx.reg16(ECX) as u32;
-    if words > 0 {
-        let stack = client_stack(cpu, &ctx);
-        let params: Vec<u16> = (0..words).map(|i| cpu.bus.read_16(stack.wrapping_add(2 * i) as usize)).collect();
-        sp = push_real(cpu, ss, sp, &params.iter().rev().copied().collect::<Vec<u16>>());
-    }
-    let flags = rm.eflags & 0xFFFF;
-    // The IRET frame's flags are the structure's, but for TF: set there
-    // (Descent's serial driver passes FFFFh), the handler's IRET would trap
-    // on the host's return, which DOS/4GW takes for a debug exception.
-    let frame_flags = (flags & !CpuFlags::TF.bits()) as u16;
-    let pushed: &[u16] = if function == 0x0301 { &[ROM_SEG, RM_RETURN] } else { &[frame_flags, ROM_SEG, RM_RETURN] };
-    sp = push_real(cpu, ss, sp, pushed);
+    let stack = client_stack(cpu, &ctx);
+    let params: Vec<u16> = (0..ctx.reg16(ECX) as u32)
+        .map(|i| cpu.bus.read_16(stack.wrapping_add(2 * i) as usize))
+        .collect();
+    let words = kind.frame(rm.eflags, &params, (ROM_SEG, RM_RETURN));
+    let sp = push_real(cpu, ss, sp, &words);
     cpu.bus.dpmi.frames.push(frame);
     rm.gpr[ESP] = sp;
     rm.set_sel(Seg::SS, ss);
     rm.set_sel(Seg::CS, (target >> 16) as u16);
     rm.eip = target & 0xFFFF;
-    let cleared = if function == 0x0301 { CpuFlags::TF } else { CpuFlags::IF | CpuFlags::TF };
-    rm.eflags = flags & !cleared.bits();
+    rm.eflags = kind.entry_flags(rm.eflags);
     enter_rm(cpu, &rm);
 }
 

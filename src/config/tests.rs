@@ -1097,6 +1097,24 @@ fn unwritable_default_is_only_a_warning() {
 }
 
 #[test]
+fn the_desktop_depth_is_read() {
+    for (value, depth) in [
+        ("auto", DesktopDepth::Adapter),
+        ("8", DesktopDepth::Palette),
+        ("16", DesktopDepth::HighColor),
+    ] {
+        let text = format!("[emulator]\nwin32_depth={value}\n");
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_depth, depth);
+        assert_eq!(depth.name(), value);
+    }
+    let config = parse("[emulator]\nwin32_depth=24\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
+}
+
+#[test]
 fn the_win32_dll_folder_and_the_dlls_it_replaces_are_read() {
     let text = "[emulator]\nwin32_dlls=~/wine/i386-windows\n\
                 win32_dlls_replace=COMCTL32.DLL, comdlg32\n";

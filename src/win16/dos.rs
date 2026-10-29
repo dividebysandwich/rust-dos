@@ -154,7 +154,11 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
                 return;
             }
         }
-        0x31 => super::dpmi::int31(cpu, &mut ctx),
+        0x31 => {
+            if !super::dpmi::int31(cpu, &mut ctx) {
+                return;
+            }
+        }
         0x34..=0x3D => fpu_fixup(cpu, vector, &mut ctx),
         0x20 => {
             super::task::exit(cpu, 0);
@@ -165,7 +169,7 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
         // real mode.
         _ if hooked_in_real_mode(cpu, vector) => {
             let (tb_seg, _) = tb(cpu);
-            crate::win32::system::reflect_int(cpu, vector, ctx, tb_seg);
+            crate::win32::realmode::reflect_int(cpu, vector, ctx, tb_seg);
             return;
         }
         0x10 | 0x11 | 0x12 | 0x15 | 0x16 | 0x1A => bios(cpu, vector, &mut ctx),
@@ -256,12 +260,12 @@ pub fn default_vector(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// Call the built-in DOS (or the BIOS's `vector`) with the registers of
-/// `ctx` and the real-mode segments `ds` and `es`, on the DOS process's
-/// stack. The registers it returns, the segments too, in a context whose
-/// stack and segments are otherwise `ctx`'s.
+/// `ctx` and the real-mode segments `ds` and `es`, on the host's real-mode
+/// stack (realmode.rs). The registers it returns, the segments too, in a
+/// context whose stack and segments are otherwise `ctx`'s.
 fn call_real(cpu: &mut Cpu, vector: u8, ctx: &Context, ds: u16, es: u16) -> (Context, u16, u16) {
     let saved = Context::of(cpu);
-    let (ss, sp) = cpu.bus.win32.rm_stack;
+    let (ss, sp) = crate::win32::realmode::host_stack(cpu);
     let mut snapshot = cpu.snapshot();
     snapshot.gpr = ctx.gpr;
     cpu.restore(&snapshot);

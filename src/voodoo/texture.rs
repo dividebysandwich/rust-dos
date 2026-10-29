@@ -437,9 +437,12 @@ impl Tmu {
     /// The host wrote `data` to the texture RAM at dword `offset` of the
     /// card's texture space (`texture_w`): four 8-bit texels or two 16-bit
     /// ones of level `offset >> 15`, row `(offset >> 7) & FFh`.
-    /// `seq_8_download` is TMU 0's textureMode bit 31, which the original
-    /// always takes from TMU 0.
-    pub fn write(&mut self, reg: &[u32], offset: u32, mut data: u32, seq_8_download: bool) {
+    /// 8-bit texels go four to every dword if the unit's textureMode bit
+    /// 31 (seq_8_downld) is set, else only to even dwords. DOSBox-X and
+    /// MAME take TMU 0's bit for both units, but each TREX lays out what
+    /// it is sent by its own register, as 86Box has it, and Glide sets
+    /// the bit in the unit it downloads to.
+    pub fn write(&mut self, reg: &[u32], offset: u32, mut data: u32) {
         if self.regdirty {
             self.recompute(reg);
         }
@@ -456,7 +459,9 @@ impl Tmu {
         }
         let tt = (offset >> 7) & 0xFF;
         let width = (self.wmask >> lod) + 1;
-        if (reg[self.base + TEXTURE_MODE] >> 8) & 0xF < 8 {
+        let mode = reg[self.base + TEXTURE_MODE];
+        if (mode >> 8) & 0xF < 8 {
+            let seq_8_download = mode & 0x8000_0000 != 0;
             let ts = if seq_8_download { (offset << 2) & 0xFC } else { (offset << 1) & 0xFC };
             let at = self.lodoffset[lod].wrapping_add(tt * width + ts) & self.mask;
             for i in 0..4 {
@@ -538,14 +543,14 @@ mod tests {
         let mut tmu = Tmu::new(2 << 20, 0x100);
         reg[0x100 + TEXTURE_MODE] = 10 << 8;
         // Level 0, row 1, texels 2 and 3: dword offset row << 7 | s / 2.
-        tmu.write(&reg, 1 << 7 | 1, 0xBBBB_AAAA, false);
+        tmu.write(&reg, 1 << 7 | 1, 0xBBBB_AAAA);
         let row = 256 * 2;
         assert_eq!(tmu.ram.get((row + 4) / 2), 0xAAAA);
         assert_eq!(tmu.ram.get((row + 6) / 2), 0xBBBB);
         // 8-bit: four texels a dword.
         reg[0x100 + TEXTURE_MODE] = 3 << 8;
         tmu.mark_dirty();
-        tmu.write(&reg, 2 << 7 | 2, 0x4433_2211, false);
+        tmu.write(&reg, 2 << 7 | 2, 0x4433_2211);
         let at = 2 * 256 + 4;
         assert_eq!([tmu.ram.byte(at), tmu.ram.byte(at + 3)], [0x11, 0x44]);
     }
@@ -555,17 +560,17 @@ mod tests {
         let mut reg = regs();
         let mut tmu = Tmu::new(2 << 20, 0x100);
         reg[0x100 + TEXTURE_MODE] = 10 << 8;
-        tmu.write(&reg, 0, 0x1111_1111, false);
+        tmu.write(&reg, 0, 0x1111_1111);
         let job = tmu.ram.clone();
         // SAFETY: only this thread writes the RAM.
         assert!(unsafe { tmu.detach() });
-        tmu.write(&reg, 0, 0x2222_2222, false);
+        tmu.write(&reg, 0, 0x2222_2222);
         assert_eq!((job.get(0), tmu.ram.get(0)), (0x1111, 0x2222));
         // The job is done: the next detach takes its memory back, with
         // the pages written since, one of them far from the first.
         drop(job);
-        tmu.write(&reg, 1 << 7, 0x3333_3333, false);
-        tmu.write(&reg, 100 << 7, 0x4444_4444, false);
+        tmu.write(&reg, 1 << 7, 0x3333_3333);
+        tmu.write(&reg, 100 << 7, 0x4444_4444);
         let job = tmu.ram.clone();
         // SAFETY: as above.
         assert!(unsafe { tmu.detach() });

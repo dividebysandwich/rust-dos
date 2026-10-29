@@ -1016,6 +1016,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     ));
     cpu.bus.win32.win16.tasks[t].exit_code = Some(code);
     cpu.bus.win32.win16.tasks[t].frames.clear();
+    crate::win32::realmode::abandon(cpu);
     if task.module != 0 {
         cpu.bus.win32.win16.exit_code = code;
     }
