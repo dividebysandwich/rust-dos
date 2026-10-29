@@ -124,6 +124,7 @@ fn high_sierra_images_mount_as_cd_drives() {
     fs::write(dir.join("old.iso"), high_sierra("TESTDISC", &files(&big))).unwrap();
     mount(&mut cpu, &dir.join("old.iso"));
     check_files(&mut cpu, &big);
+    let (mut cpu, dir) = machine("high-sierra-cue");
     let cue = mixed_disc(&dir, &high_sierra("TESTDISC", &files(&big)), 10);
     mount(&mut cpu, &cue);
     check_files(&mut cpu, &big);
