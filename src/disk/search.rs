@@ -455,11 +455,12 @@ impl DiskController {
 
     // INT 21h, AH=4E/4F: Find First / Find Next
     // search_spec contains the path AND the pattern e.g. "C:\GAMES\*.EXE" or "*.EXE"
-    /// Entry `search_index` of the listing of `search_spec`. FindNext
-    /// passes the same spec with the next index each call; on a host drive
-    /// the listing FindFirst (index 0) made is kept for it, as long as the
-    /// folder doesn't change (`HostDirCache`), rather than listing the
-    /// folder again for each entry.
+    /// Entry `search_index` of the listing of `search_spec`. Off a FAT
+    /// disk FindNext passes the same spec with the next index each call
+    /// (`find_entry_from`); on a host drive the listing FindFirst (index
+    /// 0) made is kept for it, as long as the folder doesn't change
+    /// (`HostDirCache`), rather than listing the folder again for each
+    /// entry.
     pub fn find_directory_entry(
         &self,
         search_spec: &str,
@@ -471,6 +472,94 @@ impl DiskController {
         };
         let entries = self.host_dirs.search(key, search_index == 0, || self.list_directory(search_spec, search_attr))?;
         entries.get(search_index).cloned().ok_or(0x12)
+    }
+
+    /// The entry FindFirst or FindNext finds for `search_spec` at or after
+    /// `from`, and where the search goes on from. On a FAT disk `from` is
+    /// a slot of the directory, as in DOS: a program that deletes each
+    /// file it finds (Windows 98 Setup's DELTEMP emptying its folder)
+    /// doesn't make the next file move up to a slot the search has
+    /// passed. Elsewhere it counts the entries found.
+    pub fn find_entry_from(
+        &self,
+        search_spec: &str,
+        from: usize,
+        search_attr: u16,
+    ) -> Result<(DosDirEntry, usize), u8> {
+        let Some(listing) = self.fat_slots(search_spec, search_attr) else {
+            return self
+                .find_directory_entry(search_spec, from, search_attr)
+                .map(|entry| (entry, from + 1));
+        };
+        listing
+            .into_iter()
+            .find(|(slot, _)| *slot >= from)
+            .map(|(slot, entry)| (entry, slot + 1))
+            .ok_or(0x12)
+    }
+
+    /// The entries of a FAT disk's directory that a search lists, each
+    /// with its slot, and the system entries after them
+    /// (`with_system_entries`). None for other drives, for searches that
+    /// take the volume label and for a directory that isn't there.
+    ///
+    /// The system entries take slots from `SYSTEM_SLOTS` on, not from
+    /// the last file listed: deleting that file, or adding one after it,
+    /// would move them under a search that is going through them.
+    fn fat_slots(&self, search_spec: &str, search_attr: u16) -> Option<Vec<(usize, DosDirEntry)>> {
+        if search_attr & 0x08 != 0 {
+            return None;
+        }
+        let normalized = search_spec.replace('/', "\\");
+        let (drive_num, rest) = self.split_drive(&normalized)?;
+        let drive = self.drive(drive_num)?;
+        let volume = drive.fat()?;
+        let (dir, pattern) = Self::dir_and_pattern(rest);
+        let dir = Self::logical_components(drive, dir);
+        let (slots, entries): (Vec<usize>, Vec<DosDirEntry>) = volume
+            .list_slots(&dir)
+            .ok()?
+            .into_iter()
+            .filter_map(|(slot, entry)| {
+                Some((slot, Self::fat_dir_entry(entry, pattern, search_attr)?))
+            })
+            .unzip();
+        let listed = self
+            .with_system_entries(search_spec, search_attr, Ok(entries))
+            .ok()?;
+        let system = slots.last().map_or(0, |slot| slot + 1).max(SYSTEM_SLOTS);
+        Some(slots.into_iter().chain(system..).zip(listed).collect())
+    }
+
+    /// The directory part of what follows a search spec's drive (".",
+    /// the current one, when there is none) and the pattern after it.
+    fn dir_and_pattern(rest: &str) -> (&str, &str) {
+        match rest.rfind('\\') {
+            Some(idx) => rest.split_at(idx + 1),
+            None => (".", rest),
+        }
+    }
+
+    /// A FAT disk's directory entry as a search lists it: None when its
+    /// name doesn't match `pattern` or it is hidden, system or a directory
+    /// and `search_attr` doesn't take that.
+    fn fat_dir_entry(entry: fat::Entry, pattern: &str, search_attr: u16) -> Option<DosDirEntry> {
+        let attr = entry.attr;
+        let restricted_bits = 0x02 | 0x04 | 0x10;
+        if (attr as u16 & restricted_bits) & !search_attr != 0
+            || !Self::matches_pattern(&entry.name, pattern)
+        {
+            return None;
+        }
+        Some(DosDirEntry {
+            is_dir: entry.is_dir(),
+            is_readonly: attr & fat::ATTR_READ_ONLY != 0,
+            filename: entry.name,
+            size: entry.size,
+            dos_time: entry.time,
+            dos_date: entry.date,
+            attr,
+        })
     }
 
     /// What a search of a folder on a host drive lists (see
@@ -485,11 +574,8 @@ impl DiskController {
         if drive.fat().is_some() || drive.tree().is_some() {
             return None;
         }
-        let (parent_dir, pattern) = match rest.rfind('\\') {
-            Some(idx) => rest.split_at(idx + 1),
-            None => ("", rest),
-        };
-        let dir = self.resolve_on(drive_num, if parent_dir.is_empty() { "." } else { parent_dir })?;
+        let (dir, pattern) = Self::dir_and_pattern(rest);
+        let dir = self.resolve_on(drive_num, dir)?;
         // FindNext gets the pattern back from the DTA ("RGN*.GFF" comes
         // back as "RGN?????.GFF"), so both are keyed in that form.
         let pattern = crate::interrupts::utils::pattern_to_fcb(pattern);
@@ -548,15 +634,7 @@ impl DiskController {
         }
 
         // Split Spec into Directory and Pattern
-        let (parent_dir, pattern) = match rest.rfind('\\') {
-            Some(idx) => rest.split_at(idx + 1),
-            None => ("", rest),
-        };
-        let search_dir_str = if parent_dir.is_empty() {
-            "."
-        } else {
-            parent_dir
-        };
+        let (search_dir_str, pattern) = Self::dir_and_pattern(rest);
 
         // Search attribute bits an entry needs to be listed.
         let restricted_bits = 0x02 | 0x04 | 0x10;
@@ -572,21 +650,12 @@ impl DiskController {
 
         if let Some(volume) = drive.fat() {
             let dir = Self::logical_components(drive, search_dir_str);
-            for entry in volume.list(&dir).map_err(|_| 0x03u8)? {
-                let attr = entry.attr;
-                if (attr as u16 & restricted_bits) & !search_attr != 0 || !Self::matches_pattern(&entry.name, pattern) {
-                    continue;
-                }
-                valid_entries.push(DosDirEntry {
-                    is_dir: entry.is_dir(),
-                    is_readonly: attr & fat::ATTR_READ_ONLY != 0,
-                    filename: entry.name,
-                    size: entry.size,
-                    dos_time: entry.time,
-                    dos_date: entry.date,
-                    attr,
-                });
-            }
+            let entries = volume.list(&dir).map_err(|_| 0x03u8)?;
+            valid_entries.extend(
+                entries
+                    .into_iter()
+                    .filter_map(|entry| Self::fat_dir_entry(entry, pattern, search_attr)),
+            );
             return Ok(valid_entries);
         }
 
@@ -719,3 +788,9 @@ fn hard_disk_free(step: u32, used: u64) -> u32 {
 /// stays between 512 MB and 1.5 GB, below the 2 GB that programs of the
 /// time multiply out in signed 32-bit numbers.
 const WINDOWS_HARD_DISK_STEP: u32 = 1 << 18;
+
+/// The first slot a FAT disk's search gives the system entries listed
+/// after its own (`DiskController::fat_slots`): past any directory short
+/// of 65280 entries, and with room below 65536 for them all, as the DTA
+/// and the FCB keep the slot in a word.
+const SYSTEM_SLOTS: usize = 0xFF00;

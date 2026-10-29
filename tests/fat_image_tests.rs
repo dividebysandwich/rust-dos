@@ -175,6 +175,46 @@ fn floppy_images_are_dos_drives() {
     assert_eq!(cpu.bus.read_8(dpb + 0x17), 0xF0);
 }
 
+/// DOS's FindNext goes on from the directory slot after the file it
+/// found. Windows 98 Setup's DELTEMP empties its folder by deleting each
+/// file FindFirst and FindNext give it; counting the files left instead
+/// skipped every other one and left half the folder behind.
+#[test]
+fn findnext_goes_on_after_a_deleted_file() {
+    let dir = fatimage::scratch("delete_found");
+    let names: Vec<String> = (0..40).map(|i| format!("TEMP\\FILE{:02}.TMP", i)).collect();
+    let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+    let bytes = fatimage::image(FLOPPY_1440, None, &[], &files);
+    let image = fatimage::write(&dir, "temp.img", &bytes);
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+
+    cpu.set_ds(0x4000);
+    cpu.set_dx(0);
+    int21(&mut cpu, 0x1A00);
+    name(&mut cpu, "A:\\TEMP\\*.*");
+    cpu.set_cx(0x17);
+    int21(&mut cpu, 0x4E00);
+    let mut deleted = Vec::new();
+    while !cf(&cpu) {
+        let found: String = (0..13)
+            .map(|i| cpu.bus.read_8(DTA + 0x1E + i))
+            .take_while(|&b| b != 0)
+            .map(|b| b as char)
+            .collect();
+        if !found.starts_with('.') {
+            // Deleting writes over the name at 2000:0000, not the DTA.
+            name(&mut cpu, &format!("A:\\TEMP\\{}", found));
+            int21(&mut cpu, 0x4100);
+            assert!(!cf(&cpu), "deleting {}", found);
+            deleted.push(found);
+        }
+        int21(&mut cpu, 0x4F00);
+    }
+    assert_eq!(deleted.len(), 40, "{:?}", deleted);
+    assert_eq!(find_all(&mut cpu, "A:\\TEMP\\*.*", 0x07), Vec::<String>::new());
+}
+
 /// The volume label is an entry of the root directory. Windows 98 Setup
 /// asks whether a short name it made up is taken with FindFirst and the
 /// attributes 0Eh, which take the label too; finding the label there for
