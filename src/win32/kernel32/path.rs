@@ -433,11 +433,24 @@ fn search_directories(cpu: &mut Cpu) -> Vec<String> {
     dirs
 }
 
+/// Whether the name `name` says where the file is, so that SearchPathA
+/// looks there alone: a drive, the root, or the current directory or its
+/// parent ("." or "..", alone or before a backslash) first. A name such
+/// as DISK1\SETUP.EXE is looked for in each directory in turn, as a file
+/// name is (Wine's contains_path).
+fn names_directory(name: &str) -> bool {
+    let dots = name.strip_prefix("..").or_else(|| name.strip_prefix('.'));
+    name.as_bytes().get(1) == Some(&b':')
+        || name.starts_with(['\\', '/'])
+        || dots.is_some_and(|rest| rest.is_empty() || rest.starts_with(['\\', '/']))
+}
+
 /// The full path of the file `name` in the first of `dirs` (separated by
 /// semicolons) that has it, or of those `search_directories` gives. A
-/// name with a directory in it is looked for there alone.
+/// name that says where the file is (`names_directory`) is looked for
+/// there alone.
 pub(super) fn search(cpu: &mut Cpu, dirs: Option<&str>, name: &str) -> Option<String> {
-    if name.contains(['\\', '/', ':']) {
+    if names_directory(name) {
         let full = full_path(cpu, name);
         return cpu.bus.disk.is_file(&dos_path(&full)).then_some(full);
     }

@@ -637,6 +637,19 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
 /// for CreateProcessA's TRUE, the wait's result shifted left by one, and
 /// the child's exit code shifted left by four.
 fn start_program(test: &str, line: &str, child: &str, program_bytes: Vec<u8>, dirs: &[&str]) -> u8 {
+    start_program_from(test, "T.EXE", line, child, program_bytes, dirs)
+}
+
+/// `start_program`, with T.EXE at `parent_at` and run from the shell by
+/// that path, so that its folder needn't be the current one.
+fn start_program_from(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    child: &str,
+    program_bytes: Vec<u8>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -683,18 +696,20 @@ fn start_program(test: &str, line: &str, child: &str, program_bytes: Vec<u8>, di
         a.call(f("ExitProcess"))?;
         a.int3()
     });
-    let base = scratch(test, &[("T.EXE", parent)]);
+    let base = scratch(test, &[]);
     for dir in dirs {
         fs::create_dir_all(base.join(dir)).unwrap();
     }
-    let child = base.join(child);
-    fs::create_dir_all(child.parent().unwrap()).unwrap();
-    fs::write(child, program_bytes).unwrap();
+    for (at, bytes) in [(parent_at, parent), (child, program_bytes)] {
+        let file = base.join(at.replace('\\', "/"));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    }
     let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    assert!(cpu.load_executable(parent_at, None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
     assert!(!cpu.bus.win32.active());
     cpu.errorlevel
@@ -789,6 +804,54 @@ fn an_unquoted_program_path_with_spaces_is_found() {
     let line = " \tV1.0 GAME\\C.EXE an argument";
     let code = start_child("unquoted_path_blanks", line, "V1.0 GAME/C.EXE", &["V1.0"]);
     assert_eq!(code, 0x81);
+}
+
+/// A command line naming its program by a relative path, DISK1\C.EXE, as
+/// a CD's menu does: Windows looks for it where it looks for a name
+/// alone, the starting program's folder first, so a menu on E: starts
+/// its setup whatever the current directory is. A path that starts with
+/// ".\" is the current directory's alone.
+#[test]
+fn a_relative_program_path_is_found_beside_the_starting_program() {
+    let child = |code| {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.push(code)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    // T.EXE in C:\CD, started from C:\, the current directory.
+    let start =
+        |test, line, at, code| start_program_from(test, "CD\\T.EXE", line, at, child(code), &[]);
+    assert_eq!(
+        start("relative_path", "DISK1\\C.EXE", "CD\\DISK1\\C.EXE", 7),
+        0x71
+    );
+    // Then the current directory.
+    assert_eq!(
+        start("relative_path_current", "DISK1\\C.EXE", "DISK1\\C.EXE", 5),
+        0x51
+    );
+    // With both, the program's folder wins: the first run's folder, with
+    // C:\DISK1\C.EXE, which ends with 5, added.
+    let base = PathBuf::from("target/test_win32").join("relative_path");
+    fs::create_dir_all(base.join("DISK1")).unwrap();
+    fs::write(base.join("DISK1/C.EXE"), child(5)).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("CD\\T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x71, "C:\\CD\\DISK1\\C.EXE");
+    let code = start(
+        "relative_path_dot",
+        ".\\DISK1\\C.EXE",
+        "CD\\DISK1\\C.EXE",
+        7,
+    );
+    assert_eq!(code & 1, 0, "not looked for beside the program");
 }
 
 #[test]
