@@ -1602,8 +1602,8 @@ fn leave_exclusive_program(v2: bool) -> (Vec<u8>, u32) {
         let palette = [caps, Arg::At(ENTRIES), Arg::At(PALETTE), Arg::I(0)];
         c.com(a, l, dd, DD_CREATE_PALETTE, &palette)?;
         c.com(a, l, FRONT, S_SET_PALETTE, &[Arg::Val(PALETTE)])?;
-        let normal = Arg::I(DDSCL_NORMAL);
-        c.com(a, l, dd, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), normal])?;
+        let normal = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, dd, DD_SET_COOPERATIVE_LEVEL, &normal)?;
         finish(a, l)
     })
 }
