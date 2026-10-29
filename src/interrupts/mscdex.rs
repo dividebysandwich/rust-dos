@@ -112,15 +112,16 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
             }
         }
         // Copyright, abstract and bibliographic file names from the
-        // Primary Volume Descriptor.
+        // Primary Volume Descriptor: 37 characters in ISO 9660, 32 in
+        // High Sierra, which has no bibliographic file.
         0x02..=0x04 => match drive_image(cpu, cpu.cx()) {
-            Ok(image) => match cdrom::iso9660::primary_descriptor(&image) {
-                Ok(pvd) => {
-                    let at = 702 + (function as usize - 2) * 37;
-                    for (i, &b) in pvd[at..at + 37].iter().enumerate() {
+            Ok(image) => match cdrom::iso9660::file_identifiers(&image) {
+                Ok(ids) => {
+                    let id = &ids[function as usize - 2];
+                    for (i, &b) in id.iter().enumerate() {
                         cpu.bus.guest_write_8((es_bx + i) as u32, b);
                     }
-                    cpu.bus.guest_write_8((es_bx + 37) as u32, 0);
+                    cpu.bus.guest_write_8((es_bx + id.len()) as u32, 0);
                     clear_error(cpu);
                 }
                 Err(_) => set_error(cpu, NOT_READY),
@@ -128,7 +129,8 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
             Err(code) => set_error(cpu, code),
         },
         // Read volume descriptor DX (0 = the first, at sector 16). AX is
-        // its type: 1 primary, FFh terminator, 0 others.
+        // its type: 1 primary, FFh terminator, 0 others. High Sierra has
+        // the type at byte 8, after the descriptor's sector number.
         0x05 => match drive_image(cpu, cpu.cx()) {
             Ok(image) => {
                 let start = image.data_track().map_or(0, |t| t.start);
@@ -140,7 +142,11 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
                 for (i, &b) in sector.iter().enumerate() {
                     cpu.bus.guest_write_8((es_bx + i) as u32, b);
                 }
-                cpu.set_ax(match sector[0] {
+                let kind = match cdrom::iso9660::Format::of(&sector) {
+                    Some(format) => format.kind(&sector),
+                    None => sector[0],
+                };
+                cpu.set_ax(match kind {
                     1 => 1,
                     0xFF => 0xFF,
                     _ => 0,
@@ -204,8 +210,8 @@ pub fn handle(cpu: &mut Cpu, function: u8) {
             }
             clear_error(cpu);
         }
-        // Directory entry of the path at ES:BX, copied to SI:DI. AX = 1:
-        // the disc is ISO 9660.
+        // Directory entry of the path at ES:BX, copied to SI:DI. AX is
+        // the disc's format: 0 High Sierra, 1 ISO 9660.
         0x0F => get_directory_entry(cpu, es_bx),
         // Send device driver request: CX = drive, ES:BX -> request header
         0x10 => {
@@ -239,12 +245,13 @@ fn get_directory_entry(cpu: &mut Cpu, path_addr: usize) {
         _ => &path[..],
     };
     match cdrom::iso9660::find_record(&image, path) {
-        Some(record) => {
+        Some((format, record)) => {
             let buffer = cpu.get_physical_addr(cpu.si(), cpu.di());
             for (i, &b) in record.iter().take(255).enumerate() {
                 cpu.bus.guest_write_8((buffer + i) as u32, b);
             }
-            cpu.set_ax(1);
+            // The disc's format: 0 High Sierra, 1 ISO 9660.
+            cpu.set_ax((format == cdrom::iso9660::Format::Iso9660) as u16);
             clear_error(cpu);
         }
         None => set_error(cpu, FILE_NOT_FOUND),
