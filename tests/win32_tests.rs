@@ -833,6 +833,18 @@ fn a_relative_program_path_is_found_beside_the_starting_program() {
         start("relative_path_current", "DISK1\\C.EXE", "DISK1\\C.EXE", 5),
         0x51
     );
+    // With both, the program's folder wins: the first run's folder, with
+    // C:\DISK1\C.EXE, which ends with 5, added.
+    let base = PathBuf::from("target/test_win32").join("relative_path");
+    fs::create_dir_all(base.join("DISK1")).unwrap();
+    fs::write(base.join("DISK1/C.EXE"), child(5)).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("CD\\T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x71, "C:\\CD\\DISK1\\C.EXE");
     let code = start(
         "relative_path_dot",
         ".\\DISK1\\C.EXE",
