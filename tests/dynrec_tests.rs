@@ -4396,13 +4396,14 @@ fn fpu_single_stores_of_80_bit_sums_stay_in_translated_code() {
     let (mut a, mut b) = twins(|rig| {
         for k in 0..n {
             let at = input + 32 * k;
-            let (x, y) = (k as usize % values.len(), k as usize / values.len() % values.len());
+            let m = values.len();
+            let (x, y) = (k as usize % m, k as usize / m % m);
             for (o, (se, man)) in [(0, values[x]), (16, values[y])] {
                 rig.write32(at + o, man as u32);
                 rig.write32(at + o + 4, (man >> 32) as u32);
                 rig.write32(at + o + 8, se as u32);
             }
-            let rc = k / (values.len() * values.len()) as u32;
+            let rc = k / (m * m) as u32;
             rig.write32(at + 12, 0x037F | rc << 10);
         }
         rig.load(CODE, &asm32(CODE, |a| {
