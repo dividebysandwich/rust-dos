@@ -7,6 +7,7 @@
 //! (`TASKS` 13): its first variable says which module's steps it runs,
 //! the module in its high byte (`start`).
 
+use super::{State, class};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 
@@ -54,6 +55,22 @@ pub fn start(cpu: &mut Cpu, module: u32, kind: u32, vars: Vec<u32>, scratch: u32
     let mut all = vec![module << 8 | kind];
     all.extend(vars);
     task::start(cpu, TASK_CONTROLS, all, scratch)
+}
+
+/// Whether the system class's window procedure answers WM_NCHITTEST on
+/// the window `hwnd` with HTTRANSPARENT, so the mouse goes to the window
+/// below it: a group box, or a static control without SS_NOTIFY.
+pub fn hit_transparent(state: &State, hwnd: u32) -> bool {
+    let Some(w) = state.window(hwnd) else {
+        return false;
+    };
+    if class::is_class(state, hwnd, "Button") {
+        button::transparent(w.style)
+    } else if class::is_class(state, hwnd, "Static") {
+        statik::transparent(w.style)
+    } else {
+        false
+    }
 }
 
 /// The kind `start` was given, for the module's steps.

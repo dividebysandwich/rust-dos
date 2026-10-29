@@ -85,8 +85,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   it. `--vrr` turns it on.
 * `filter` is how the picture is scaled up: `nearest` (the default, sharp
   pixels) or `linear` (smooth). It applies without a CRT shader.
-* `shader` gives the picture a CRT look: `none` (the default),
-  `scanlines`, `aperture` or `crt`. See [CRT shaders](#crt-shaders).
+* `shader` gives the picture a look: `none` (the default), one of the
+  CRT looks `scanlines`, `aperture` or `crt`, or `xbrz`, which scales the
+  picture 2x with xBRZ, a pixel-art upscaler, without a CRT look. See
+  [CRT shaders](#crt-shaders).
 * `monochrome` shows the picture on a monochrome monitor: `off` (the
   default, a colour monitor), `white`, `amber` or `green`. Each colour
   shows as bright as it is, in the phosphor's colour, and the CRT
@@ -556,13 +558,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `idle_skip=true` (the default) lets the emulator skip the passes of a
   program's busy-wait loops up to the next timer event, and sleep
   instead of running them: a program polling the keyboard through the
-  BIOS, waiting for the vertical retrace, or for the timer's tick count
-  to change. A loop is skipped only after the emulator has seen one of
-  its passes come back with the registers and the memory it wrote as
-  they were, and with nothing else to tell the passes apart (it reads no
-  device but the video card's status, whose bits it looks at only
-  through a mask), so programs see the same as without it. `false` runs
-  every pass.
+  BIOS, waiting for the vertical retrace, for the timer's tick count to
+  change, or for a time it reads from the PIT's count, as Windows 98's
+  QueryPerformanceCounter does. A loop is skipped only after the
+  emulator has seen one of its passes come back with the registers and
+  the memory it wrote as they were, or as the same function of the PIT's
+  count it read, and with nothing else to tell the passes apart (it
+  reads no device but the video card's status, whose bits it looks at
+  only through a mask, and the PIT's count), so programs see the same as
+  without it. `false` runs every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
@@ -1719,6 +1723,9 @@ read), or a bare image of an ISO 9660 data track in 2048, 2336 or
 be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
 many sheets call them), and WAVE files at other rates: they are decoded to
 CD audio as they play. Programs run from the image as from any other drive.
+DOS programs see the names of the disc's ISO 9660 tree, as MSCDEX shows
+them; Windows programs on the built-in Windows see its Joliet long names
+where the disc has them, as on Windows 95.
 
 An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
 sector's EDC, and a sector whose EDC doesn't match its data reads as a
@@ -3133,6 +3140,21 @@ picture as a monitor of the time would have:
   `crt_glow` how much light glows around its bright parts: `0` none,
   `100` the most, `20` the default. The Display page has both below the
   shader while the CRT look is chosen.
+
+For pixel art, `xbrz` scales the native picture 2x with xBRZ instead of
+giving it a CRT look. It recovers the original pixels of doubled VGA
+modes before scaling. The `scale` setting still controls the window's
+size independently. Cursors and settings overlays stay sharp, and the
+same native input is used in the browser and in shader captures.
+
+For magnified output, xBRZ reuses a filtered 2x base picture until the
+native pixels or monochrome tint change. Resizing and overlays reuse
+that base. Smaller outputs resolve directly from the native picture.
+If the extra render targets are unavailable, the direct shader is used.
+
+Choose `xbrz` when you want to magnify pixel art, such as DOS games,
+while smoothing jagged diagonal edges. It works well with Ultima VI,
+Dungeon Master II and Blood and Magic.
 
 With `monochrome`, the aperture grille and the shadow mask are left out, as
 a monochrome tube has a single phosphor; the scanlines, glow and curve stay.

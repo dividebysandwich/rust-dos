@@ -20,8 +20,16 @@ pub struct NoGl {
 pub enum GlScreen {}
 
 impl GlScreen {
-    pub fn open(_video: &VideoSubsystem, _title: &str, _size: (u32, u32)) -> Result<Self, NoGl> {
-        Err(NoGl { window: None, reason: "built without OpenGL".to_string() })
+    pub fn open(
+        _video: &VideoSubsystem,
+        _title: &str,
+        _size: (u32, u32),
+        _hidden: bool,
+    ) -> Result<Self, NoGl> {
+        Err(NoGl {
+            window: None,
+            reason: "built without OpenGL".to_string(),
+        })
     }
 
     pub fn renderer(&self) -> &str {
@@ -56,7 +64,15 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn present(&mut self, _frame: &Frame, _rows: std::ops::Range<usize>, _display: (u32, u32), _layer: Option<&Layer>) {
+    pub fn present(
+        &mut self,
+        _screen: &Frame,
+        _base: Option<&Frame>,
+        _rows: std::ops::Range<usize>,
+        _display: (u32, u32),
+        _layer: Option<&Layer>,
+        _mono: crate::video::mono::Monochrome,
+    ) -> Result<(), String> {
         match *self {}
     }
 
@@ -69,6 +85,10 @@ impl GlScreen {
     }
 
     pub fn drop_voodoo(&mut self) {
+        match *self {}
+    }
+
+    pub fn voodoo_link(&self) -> Box<dyn rust_dos::voodoo::gpu::GpuLink> {
         match *self {}
     }
 
@@ -95,7 +115,13 @@ impl GlScreen {
         match *self {}
     }
 
-    pub fn capture(&mut self, _frame: &Frame, _display: (u32, u32)) -> Option<Frame> {
+    pub fn capture(
+        &mut self,
+        _frame: &Frame,
+        _base: &Frame,
+        _mono: crate::video::mono::Monochrome,
+        _display: (u32, u32),
+    ) -> Option<Frame> {
         match *self {}
     }
 }

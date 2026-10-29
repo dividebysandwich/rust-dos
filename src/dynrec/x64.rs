@@ -2934,7 +2934,75 @@ impl Gen<'_> {
             VOp::Punpckhwd => op!(punpcklwd Rx(a), Rx(b) ; psrldq Rx(a), 8),
             VOp::Punpckhdq => op!(punpckldq Rx(a), Rx(b) ; psrldq Rx(a), 8),
             VOp::Pshufw(n) => op!(pshuflw Rx(a), Rx(b), n as i8),
+            VOp::Rcp { .. } | VOp::Rsqrt { .. } => self.approximation(op, a, b),
         }
+    }
+
+    /// `VOp::Rcp` and `VOp::Rsqrt`, as `sse::float` approximates them: the
+    /// exact result rounded to the nearest single, a denormal operand
+    /// counted as zero and a result below the normals flushed to zero,
+    /// with no exception flag set, whatever the guest's MXCSR says. The
+    /// host's MXCSR is set to that (nearest, DAZ, FTZ, all masked) around
+    /// the operation, and comes back without its flags, as `Slow::VFloat`
+    /// puts it back.
+    ///
+    /// The reciprocal is a single division: rounding the double quotient
+    /// to a single, as the handler does, gives the same single, since a
+    /// double has more than twice a single's bits. The reciprocal square
+    /// root is the handler's own sequence on doubles: the square root,
+    /// one divided by it, then rounded to a single.
+    fn approximation(&mut self, op: VOp, a: u8, b: u8) {
+        macro_rules! op {
+            ($($t:tt)*) => { dynasm!(self.ops ; .arch x64 ; $($t)*) };
+        }
+        op!(
+            mov DWORD [r12 + CTX_MXCSR], 0x9FC0
+            ; ldmxcsr [r12 + CTX_MXCSR]
+        );
+        match op {
+            VOp::Rcp { scalar: true } => op!(
+                mov eax, 0x3F80_0000
+                ; movd xmm2, eax
+                ; divss xmm2, Rx(b)
+                ; movss Rx(a), xmm2
+            ),
+            VOp::Rcp { scalar: false } => op!(
+                mov eax, 0x3F80_0000
+                ; movd xmm2, eax
+                ; shufps xmm2, xmm2, 0
+                ; divps xmm2, Rx(b)
+                ; movaps Rx(a), xmm2
+            ),
+            VOp::Rsqrt { scalar: true } => op!(
+                cvtss2sd xmm2, Rx(b)
+                ; sqrtsd xmm2, xmm2
+                ; mov rax, QWORD 1f64.to_bits() as i64
+                ; movq xmm3, rax
+                ; divsd xmm3, xmm2
+                ; cvtsd2ss xmm3, xmm3
+                ; movss Rx(a), xmm3
+            ),
+            VOp::Rsqrt { scalar: false } => op!(
+                // Singles 0 and 1 in XMM2, 2 and 3 in XMM3, as doubles.
+                cvtps2pd xmm2, Rx(b)
+                ; movhlps xmm3, Rx(b)
+                ; cvtps2pd xmm3, xmm3
+                ; sqrtpd xmm2, xmm2
+                ; sqrtpd xmm3, xmm3
+                ; mov rax, QWORD 1f64.to_bits() as i64
+                ; movq xmm4, rax
+                ; punpcklqdq xmm4, xmm4
+                ; movapd xmm5, xmm4
+                ; divpd xmm4, xmm2
+                ; divpd xmm5, xmm3
+                ; cvtpd2ps xmm4, xmm4
+                ; cvtpd2ps xmm5, xmm5
+                ; movlhps xmm4, xmm5
+                ; movaps Rx(a), xmm4
+            ),
+            _ => unreachable!(),
+        }
+        op!(ldmxcsr [r12 + CTX_MXCSR + 4]);
     }
 
     /// `Uop::VFloat`: the operation under the guest's rounding and flush to
@@ -3018,14 +3086,31 @@ impl Gen<'_> {
             (VFloatOp::Cmp(p), true) => op!(cmpss Rx(a), Rx(b), p as i8),
             // Of the low two singles only: the high ones 0, which convert
             // without an exception.
-            (VFloatOp::ToInt { truncate: false }, _) => {
+            (VFloatOp::ToInt { truncate: false }, false) => {
                 op!(movq xmm2, Rx(b) ; cvtps2dq Rx(a), xmm2)
             }
-            (VFloatOp::ToInt { truncate: true }, _) => {
+            (VFloatOp::ToInt { truncate: true }, false) => {
                 op!(movq xmm2, Rx(b) ; cvttps2dq Rx(a), xmm2)
             }
-            (VFloatOp::FromInt, _) => {
+            (VFloatOp::FromInt, false) => {
                 op!(movq xmm2, Rx(b) ; cvtdq2ps xmm2, xmm2 ; movsd Rx(a), xmm2)
+            }
+            (VFloatOp::ToInt { truncate: false }, true) => {
+                op!(cvtss2si eax, Rx(b) ; movd Rx(a), eax)
+            }
+            (VFloatOp::ToInt { truncate: true }, true) => {
+                op!(cvttss2si eax, Rx(b) ; movd Rx(a), eax)
+            }
+            (VFloatOp::FromInt, true) => op!(movd eax, Rx(b) ; cvtsi2ss Rx(a), eax),
+            // EFLAGS' ZF (0x40), PF (4) and CF (1).
+            (VFloatOp::Compare { signaling }, _) => {
+                if signaling {
+                    op!(comiss Rx(a), Rx(b));
+                } else {
+                    op!(ucomiss Rx(a), Rx(b));
+                }
+                self.host_flags();
+                op!(and eax, 0x45 ; movd Rx(a), eax);
             }
         }
     }

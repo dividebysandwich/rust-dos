@@ -917,20 +917,24 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     } else {
         format!("{}.EXE", path)
     };
-    let path = match cpu.read_program_file(&path) {
-        Some(_) => path,
+    let (path, file) = match cpu.read_program_file(&path) {
+        Some(file) => (path, file),
         None => {
             let windows = format!("{}\\{}", crate::win32::loader::WINDOWS_DIR, path);
-            if path.contains(['\\', '/', ':']) || cpu.read_program_file(&windows).is_none() {
+            if path.contains(['\\', '/', ':']) {
                 return Err(2);
             }
-            windows
+            let file = cpu.read_program_file(&windows).ok_or(2u16)?;
+            (windows, file)
         }
     };
     // The module's path as Windows keeps it, whatever form the caller
     // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
     // GetModuleFileName gives and the module's DLLs are looked for by.
     let path = cpu.bus.disk.qualify_path(&path).unwrap_or(path);
+    if pe::is_pe(&file) {
+        return exec_win32(cpu, &path, arguments, show, environment);
+    }
     match spawn(cpu, &path, arguments, show, parent, environment) {
         Ok(spawned) => Ok(cpu
             .bus
@@ -944,6 +948,54 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));
             Err(if message.contains("memory") { 8 } else { 11 })
+        }
+    }
+}
+
+/// `exec` of the Win32 program at `path`: as on Windows 98, a process of
+/// its own, which runs beside the Win16 tasks, as the Win32 WinExec
+/// starts it. 33 once it started, as Wine's WinExec16 gives for one, or
+/// the error.
+fn exec_win32(
+    cpu: &mut Cpu,
+    path: &str,
+    arguments: &str,
+    show: u16,
+    environment: Vec<String>,
+) -> Result<u16, u16> {
+    let name = if path.contains([' ', '\t']) {
+        format!("\"{}\"", path)
+    } else {
+        path.to_string()
+    };
+    let line = if arguments.is_empty() {
+        name
+    } else {
+        format!("{} {}", name, arguments)
+    };
+    let startup = crate::win32::kernel32::startup_showing(show);
+    let started = crate::win32::kernel32::spawn(
+        cpu,
+        Some(path),
+        Some(&line),
+        Some(environment),
+        false,
+        0,
+        startup,
+    );
+    match started {
+        Ok([process, thread, _, _]) => {
+            crate::win32::object::close(cpu, process);
+            crate::win32::object::close(cpu, thread);
+            Ok(33)
+        }
+        Err(code) => {
+            cpu.bus
+                .log_string(&format!("[W16] {} can't start: error {}", path, code));
+            Err(match code {
+                2 | 8 => code as u16,
+                _ => 11,
+            })
         }
     }
 }

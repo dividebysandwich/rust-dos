@@ -388,6 +388,8 @@ pub struct Win32 {
     comdlg32: comdlg32::State,
     /// SHELL32's: its shell links.
     shell: shell32::State,
+    /// DPLAYX's DirectPlay objects.
+    dplay: dplayx::State,
     /// DDEML's instances, string and data handles and conversations.
     dde: user32::ddeml::State,
     /// The global atom table (GlobalAddAtomA).
@@ -564,11 +566,7 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
             Some((engine, arguments)) => (engine, Some(arguments), false),
             // OS/2 programs, Borland's DPMI16 (RTM) ones among them, and
             // files that don't parse run their DOS stub as before.
-            None if rust_dos_ne::Module::parse(bytes)
-                .is_ok_and(|m| m.target_os != rust_dos_ne::OS_OS2) =>
-            {
-                (launcher, None, true)
-            }
+            None if launcher::is_win16(bytes) => (launcher, None, true),
             None => return false,
         }
     } else {
@@ -1032,6 +1030,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     opengl32::process_ended(cpu, process.id);
     dmusic::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
+    dplayx::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
     if process.id == cpu.bus.win32.win16.pid {
         crate::win16::dos::release(cpu);
@@ -1321,6 +1320,7 @@ crate::state_fields!(Win32 {
     comctl32,
     comdlg32,
     shell,
+    dplay,
     dde,
     pending_win16,
     win16,

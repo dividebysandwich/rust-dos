@@ -5,6 +5,7 @@
 mod win16;
 
 use rust_dos_ne as ne;
+use rust_dos_pe as pe;
 use std::fs;
 use win16::{CODE, Code, program, run_with};
 
@@ -103,4 +104,48 @@ fn a_program_started_with_a_slash_path_finds_its_dlls_beside_it() {
         fs::write(sub.join("HELPER.DLL"), library("HELPER")).unwrap();
     });
     assert_eq!(exit, 1, "{log}");
+}
+
+/// A Win32 program whose entry point returns `code`, its exit code.
+fn win32_program(code: u8) -> Vec<u8> {
+    let mut b = pe::Builder::exe(0x40_0000);
+    b.subsystem(pe::SUBSYSTEM_GUI);
+    let text = [0xB8, code, 0x00, 0x00, 0x00, 0xC3]; // mov eax,code; ret
+    let rva = b.section(
+        ".text",
+        &text,
+        pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+    );
+    b.entry(rva);
+    b.build()
+}
+
+#[test]
+fn a_program_starts_a_win32_program() {
+    // WinExec("C:\WIN32.EXE"): on Windows 98 a Windows 3.1 program
+    // starts a Win32 one as a process of its own, as InstallShield's
+    // setup launcher starts its engine, and WinExec gives 33. The program
+    // ends at once with 10h if WinExec gave anything else, else with 1,
+    // which DOS gets: it is the process DOS started. The Win32 program
+    // runs on and ends with 9.
+    let mut code = Code::new();
+    let path_at = code.here() + 2;
+    code.push_far(0)
+        .push(1) // SW_SHOWNORMAL
+        .call("KERNEL", WIN_EXEC)
+        .emit(&[
+            0x3D, 0x21, 0x00, // cmp ax,33
+            0xB0, 0x01, // mov al,1
+            0x74, 0x02, // je over the next
+            0xB0, 0x10, // mov al,10h
+        ])
+        .exit_al();
+    let path = code.here();
+    code.emit(b"C:\\WIN32.EXE\0");
+    code.patch(path_at, path);
+    let (exit, log) = run_with("win32_child", program(&code, CODE), |_, base| {
+        fs::write(base.join("WIN32.EXE"), win32_program(9)).unwrap();
+    });
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("WIN32.EXE ended with exit code 9"), "{log}");
 }

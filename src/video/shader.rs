@@ -2,6 +2,9 @@
 //! window's OpenGL and the browser's WebGL 2 draw them with, and the tube's
 //! curvature, which mouse positions have to go through too.
 
+mod xbrz;
+pub use xbrz::XbrzFrame;
+
 /// The CRT look's own settings, in percent: `crt_curvature` and
 /// `crt_glow` in `[emulator]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,10 +50,14 @@ pub enum Shader {
     Aperture,
     /// A curved tube with a shadow mask, rounded corners and darker edges.
     Crt,
+    /// The picture scaled 2x by xBRZ, a pixel-art upscaler, without a CRT
+    /// look.
+    Xbrz,
 }
 
 impl Shader {
-    pub const ALL: [Shader; 4] = [Shader::None, Shader::Scanlines, Shader::Aperture, Shader::Crt];
+    pub const ALL: [Shader; 5] =
+        [Shader::None, Shader::Scanlines, Shader::Aperture, Shader::Crt, Shader::Xbrz];
 
     /// A look by its name, or the CRT by its old one, `curved`.
     pub fn parse(s: &str) -> Option<Self> {
@@ -65,6 +72,7 @@ impl Shader {
             Shader::Scanlines => "scanlines",
             Shader::Aperture => "aperture",
             Shader::Crt => "crt",
+            Shader::Xbrz => "xbrz",
         }
     }
 
@@ -75,6 +83,7 @@ impl Shader {
             Shader::Scanlines => "scanlines",
             Shader::Aperture => "aperture grille",
             Shader::Crt => "CRT",
+            Shader::Xbrz => "xBRZ 2x",
         }
     }
 
@@ -108,7 +117,7 @@ impl Shader {
     /// the CRT's as its setting says, the flat looks' a little.
     pub fn glow(self, crt: CrtSettings) -> f32 {
         match self {
-            Shader::None => 0.0,
+            Shader::None | Shader::Xbrz => 0.0,
             Shader::Scanlines => 0.04,
             Shader::Aperture => 0.06,
             Shader::Crt => MAX_GLOW * crt.glow.min(MAX_AMOUNT) as f32 / MAX_AMOUNT as f32,
@@ -128,7 +137,7 @@ impl Shader {
             vignette: 0.0,
         };
         match self {
-            Shader::None => None,
+            Shader::None | Shader::Xbrz => None,
             Shader::Scanlines => Some(flat),
             Shader::Aperture => Some(Look {
                 mask: Mask::Grille,
@@ -235,6 +244,26 @@ impl Glsl {
 const VERTEX: &str = include_str!("shader/vertex.glsl");
 const PLAIN: &str = include_str!("shader/plain.glsl");
 const CRT: &str = include_str!("shader/crt.glsl");
+const XBRZ_2X: &str = include_str!("shader/xbrz_2x.glsl");
+
+/// Internal xBRZ passes, shared by OpenGL and WebGL.
+#[derive(Clone, Copy)]
+pub enum XbrzPass {
+    Corners,
+    Resolve,
+    Display,
+}
+
+/// A source-sized corner pass, a resolve, or display of the cached 2x base.
+pub fn xbrz_sources(pass: XbrzPass, glsl: Glsl) -> (String, String) {
+    let (defines, fragment) = match pass {
+        XbrzPass::Corners => ("#define XBRZ_CORNERS\n", XBRZ_2X),
+        XbrzPass::Resolve => ("#define XBRZ_PRECOMPUTED\n", XBRZ_2X),
+        XbrzPass::Display => ("", include_str!("shader/xbrz_display.glsl")),
+    };
+    let preamble = glsl.preamble();
+    (format!("{preamble}{VERTEX}"), format!("{preamble}{defines}{fragment}"))
+}
 
 /// The vertex and fragment shader of a look. They take the frame as the
 /// texture `u_frame`; the CRT looks also take the frame's size in pixels
@@ -247,7 +276,7 @@ const CRT: &str = include_str!("shader/crt.glsl");
 pub fn sources(shader: Shader, glsl: Glsl) -> (String, String) {
     let preamble = glsl.preamble();
     let fragment = match shader.look() {
-        None => format!("{}{}", preamble, PLAIN),
+        None => format!("{}{}", preamble, if shader == Shader::Xbrz { XBRZ_2X } else { PLAIN }),
         Some(look) => format!("{}{}{}", preamble, look.defines(), CRT),
     };
     (format!("{}{}", preamble, VERTEX), fragment)
@@ -261,7 +290,7 @@ pub fn line_scale(voodoo_scale: Option<u32>) -> f32 {
 /// Whether a look reads the frame's mipmap, which has to be made after
 /// each new frame.
 pub fn needs_mipmaps(shader: Shader) -> bool {
-    shader != Shader::None
+    !matches!(shader, Shader::None | Shader::Xbrz)
 }
 
 #[cfg(test)]
@@ -280,7 +309,7 @@ mod tests {
 
     #[test]
     fn flat_looks_bend_nothing() {
-        for shader in [Shader::None, Shader::Scanlines, Shader::Aperture] {
+        for shader in [Shader::None, Shader::Scanlines, Shader::Aperture, Shader::Xbrz] {
             for (u, v) in [(0.0, 0.0), (0.3, 0.7), (1.0, 1.0), (-0.2, 1.5)] {
                 assert_eq!(shader.warp(CrtSettings::default(), u, v), (u, v));
             }
@@ -334,6 +363,11 @@ mod tests {
                 assert!(vertex.is_ascii() && fragment.is_ascii());
                 assert!(fragment.contains("out vec4 o_color;"));
             }
+            for pass in [XbrzPass::Corners, XbrzPass::Resolve, XbrzPass::Display] {
+                let (vertex, fragment) = xbrz_sources(pass, glsl);
+                assert!(vertex.starts_with(version) && fragment.starts_with(version));
+                assert!(vertex.is_ascii() && fragment.is_ascii());
+            }
         }
         let (_, curved) = sources(Shader::Crt, Glsl::Gl150);
         assert!(curved.contains("uniform vec2 u_curvature;") && curved.contains("u_curvature * c.yx * c.yx"));
@@ -343,6 +377,12 @@ mod tests {
         assert!(curved.contains("uniform float u_mask;") && curved.contains("MASK_STRENGTH * u_mask"));
         let (_, flat) = sources(Shader::Scanlines, Glsl::Gl150);
         assert!(flat.contains("#define CURVED 0\n") && flat.contains("#define MASK 0\n"));
+        let (_, scaled) = sources(Shader::Xbrz, Glsl::Gl150);
+        assert!(scaled.contains("uniform vec2 u_source;"));
+        assert!(scaled.contains("uniform sampler2D u_overlay;"));
+        assert!(!needs_mipmaps(Shader::Xbrz));
+        assert_eq!(Shader::Xbrz.curvature(CrtSettings::default()), [0.0, 0.0]);
+        assert_eq!(Shader::Xbrz.glow(CrtSettings::default()), 0.0);
     }
 
     #[test]
@@ -372,8 +412,15 @@ mod tests {
             return;
         }
         for glsl in [Glsl::Gl130, Glsl::Gl150, Glsl::Es300] {
-            for shader in Shader::ALL {
-                let (vertex, fragment) = sources(shader, glsl);
+            let passes = [
+                ("xbrz corners", xbrz_sources(XbrzPass::Corners, glsl)),
+                ("xbrz resolve", xbrz_sources(XbrzPass::Resolve, glsl)),
+                ("xbrz display", xbrz_sources(XbrzPass::Display, glsl)),
+            ];
+            for (name, (vertex, fragment)) in Shader::ALL.into_iter()
+                .map(|shader| (shader.name(), sources(shader, glsl)))
+                .chain(passes)
+            {
                 for (stage, source) in [("vert", vertex), ("frag", fragment)] {
                     let mut child = Command::new("glslangValidator")
                         .args(["--stdin", "-S", stage])
@@ -386,7 +433,7 @@ mod tests {
                     assert!(
                         output.status.success(),
                         "{:?} {:?} {}: {}",
-                        shader,
+                        name,
                         glsl,
                         stage,
                         String::from_utf8_lossy(&output.stdout)

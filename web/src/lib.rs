@@ -67,6 +67,16 @@ pub fn start() {
 /// texture's mipmap.
 #[wasm_bindgen]
 pub fn shader_program(name: &str) -> Vec<String> {
+    let pass = match name {
+        "xbrz-corners" => Some(shader::XbrzPass::Corners),
+        "xbrz-resolve" => Some(shader::XbrzPass::Resolve),
+        "xbrz-display" => Some(shader::XbrzPass::Display),
+        _ => None,
+    };
+    if let Some(pass) = pass {
+        let (vertex, fragment) = shader::xbrz_sources(pass, Glsl::Es300);
+        return vec![vertex, fragment];
+    }
     match Shader::parse(name) {
         Some(look) => {
             let (vertex, fragment) = shader::sources(look, Glsl::Es300);
@@ -156,6 +166,8 @@ pub struct Machine {
     /// being put together.
     screen: Frame,
     next: Frame,
+    xbrz_frame: shader::XbrzFrame,
+    xbrz_overlay: bool,
     /// Whether `screen` has been composed once, so the page has a
     /// picture to keep.
     composed: bool,
@@ -229,6 +241,8 @@ impl Machine {
             picture: blank.clone(),
             screen: blank.clone(),
             next: blank,
+            xbrz_frame: shader::XbrzFrame::default(),
+            xbrz_overlay: false,
             composed: false,
             osd: Osd::new(),
             paused: false,
@@ -444,6 +458,59 @@ impl Machine {
     /// canvas's `ImageData` takes them.
     pub fn screen_pixels(&self) -> *const u8 {
         self.screen.rgba.as_ptr()
+    }
+
+    /// Compose the current picture for an immediate settings redraw without
+    /// advancing the emulated machine.
+    pub fn refresh_picture(&mut self) {
+        self.render();
+    }
+
+    /// Native input for xBRZ; the canvas keeps the composed screen's size.
+    pub fn shader_width(&self) -> u32 {
+        self.xbrz_frame.source.width
+    }
+
+    /// Height of the native input; the composed screen uses `screen_height`.
+    pub fn shader_height(&self) -> u32 {
+        self.xbrz_frame.source.height
+    }
+
+    /// RGBA pixels for `shader_width() * shader_height()`. Read them from
+    /// the current WASM memory buffer.
+    pub fn shader_pixels(&self) -> *const u8 {
+        self.xbrz_frame.source.rgba.as_ptr()
+    }
+
+    /// Revision of the native shader input, independent of overlays.
+    pub fn shader_revision(&self) -> u32 {
+        self.xbrz_frame.source_revision()
+    }
+
+    /// Revision of the composed overlay texture.
+    pub fn shader_overlay_revision(&self) -> u32 {
+        self.xbrz_frame.overlay_revision()
+    }
+
+    /// First changed row at the current overlay revision.
+    pub fn shader_overlay_top(&self) -> u32 {
+        self.xbrz_frame.overlay_rows().start as u32
+    }
+
+    /// End of the changed band at the current overlay revision.
+    pub fn shader_overlay_bottom(&self) -> u32 {
+        self.xbrz_frame.overlay_rows().end as u32
+    }
+
+    /// RGBA overlay pixels for `screen_width() * screen_height()`. Read
+    /// them from the current WASM memory buffer when the overlay is visible.
+    pub fn shader_overlay_pixels(&self) -> *const u8 {
+        self.xbrz_frame.overlay.rgba.as_ptr()
+    }
+
+    /// Whether `shader_overlay_pixels()` contains visible overlay pixels.
+    pub fn shader_overlay_visible(&self) -> bool {
+        self.xbrz_overlay
     }
 
     /// Emulated instructions per millisecond, as the speed setting or the
@@ -1057,6 +1124,7 @@ impl Machine {
             // Blinking characters keep the cursor's time.
             self.cpu.bus.vga.set_blink(self.cursor_visible);
         }
+        let xbrz = self.shown_shader() == Shader::Xbrz;
         let bus = &mut self.cpu.bus;
         // The CRTC picks up the Start Address the program flipped to at the
         // vertical retraces that passed.
@@ -1069,6 +1137,7 @@ impl Machine {
             video::render_screen(&mut self.picture, bus);
             bus.vga.clear_dirty();
         }
+        self.next.track_overlays(xbrz);
         self.next.clone_from(&self.picture);
         video::overlay::draw_cursors(&mut self.next, bus, self.cursor_visible);
         video::mono::apply(&mut self.next, self.settings.monochrome);
@@ -1081,10 +1150,40 @@ impl Machine {
         self.ui.draw(&mut self.next);
         self.ui.draw_overlay(&mut self.next);
         self.osd.draw(&mut self.next);
-        let same = (self.next.width, self.next.height) == (self.screen.width, self.screen.height)
-            && self.next.rgba == self.screen.rgba;
+        let same_size =
+            (self.next.width, self.next.height) == (self.screen.width, self.screen.height);
+        let screen_rows = if !xbrz {
+            0..0
+        } else if !same_size {
+            0..self.next.height as usize
+        } else if self.next.width == 0 {
+            0..0
+        } else {
+            video::changed_rows(&self.screen.rgba, &self.next.rgba, self.next.width as usize * 4)
+                .unwrap_or(0..0)
+        };
+        let same = same_size
+            && if xbrz {
+                screen_rows.is_empty()
+            } else {
+                self.next.rgba == self.screen.rgba
+            };
+        let shader_changed = if xbrz {
+            let (visible, shader_changed, _) = self.xbrz_frame.prepare(
+                &self.next,
+                Some(&self.picture),
+                self.settings.monochrome,
+                screen_rows,
+            );
+            self.xbrz_overlay = visible;
+            shader_changed
+        } else {
+            self.xbrz_frame.invalidate_overlay();
+            self.xbrz_overlay = false;
+            false
+        };
         if same && self.composed {
-            return false;
+            return shader_changed;
         }
         std::mem::swap(&mut self.next, &mut self.screen);
         self.composed = true;
@@ -1580,6 +1679,97 @@ fn cp437(c: char) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immediate_shader_refresh_prepares_a_new_video_mode() {
+        let mut m = Machine::new("[emulator]\nshader=xbrz\n", "");
+        m.set_shaders_available(true);
+        rust_dos::interrupts::int10::set_mode(&mut m.cpu, 0x13);
+        m.refresh_picture();
+        assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
+        m.settings.shader = Shader::None;
+        rust_dos::interrupts::int10::set_mode(&mut m.cpu, 0x12);
+        m.refresh_picture();
+        m.settings.shader = Shader::Xbrz;
+        m.refresh_picture();
+        assert_eq!((m.shader_width(), m.shader_height()), (640, 480));
+        assert!(m.xbrz_frame.source.rgba == m.picture.rgba);
+    }
+
+    #[test]
+    fn xbrz_resumes_with_changed_overlay_at_identical_coverage() {
+        let mut m = Machine::new("[emulator]\nshader=xbrz\n", "");
+        m.set_shaders_available(true);
+        rust_dos::interrupts::int10::set_mode(&mut m.cpu, 0x13);
+        m.osd.show("OLD");
+        m.render();
+        let revision = m.shader_revision();
+        let previous = m.xbrz_frame.overlay.rgba.clone();
+        m.settings.shader = Shader::None;
+        m.osd.show("NEW");
+        m.render();
+        m.settings.shader = Shader::Xbrz;
+        m.render();
+        let mut expected = shader::XbrzFrame::default();
+        // RGBA is unchanged on resume, so render keeps the screen buffer;
+        // next carries the freshly drawn coverage for the same pixels.
+        assert!(m.screen.rgba == m.next.rgba);
+        expected.prepare(
+            &m.next,
+            Some(&m.picture),
+            m.settings.monochrome,
+            0..m.next.height as usize,
+        );
+        assert_ne!(expected.overlay.rgba, previous);
+        let first_difference = m
+            .xbrz_frame
+            .overlay
+            .rgba
+            .iter()
+            .zip(&expected.overlay.rgba)
+            .position(|(a, b)| a != b);
+        assert_eq!(first_difference, None);
+        assert_eq!(m.shader_revision(), revision);
+    }
+
+    #[test]
+    fn xbrz_exposes_native_monochrome_input_and_separate_overlays() {
+        let mut m = Machine::new("[emulator]\nshader=xbrz\nmonochrome=amber\n", "");
+        m.set_shaders_available(true);
+        rust_dos::interrupts::int10::set_mode(&mut m.cpu, 0x13);
+        m.render();
+        assert_eq!((m.screen_width(), m.screen_height()), (640, 400));
+        assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
+        let mut expected = shader::XbrzFrame::default();
+        let overlay = expected
+            .prepare(
+                &m.screen,
+                Some(&m.picture),
+                m.settings.monochrome,
+                0..m.screen.height as usize,
+            )
+            .0;
+        assert_eq!(m.xbrz_frame.source, expected.source);
+        assert_eq!(m.shader_pixels(), m.xbrz_frame.source.rgba.as_ptr());
+        assert_eq!(m.shader_overlay_visible(), overlay);
+        let source_revision = m.shader_revision();
+        let overlay_revision = m.shader_overlay_revision();
+        m.osd.show("Overlay regression");
+        m.render();
+        assert!(m.shader_overlay_visible());
+        assert_eq!(m.shader_revision(), source_revision);
+        assert_ne!(m.shader_overlay_revision(), overlay_revision);
+        assert_eq!(m.shader_overlay_pixels(), m.xbrz_frame.overlay.rgba.as_ptr());
+        assert_eq!((m.shader_width(), m.shader_height()), (320, 200));
+        m.osd = Osd::new();
+        m.render();
+        assert_eq!(m.xbrz_frame.source, expected.source);
+        assert_eq!(m.shader_overlay_visible(), overlay);
+        assert_eq!(m.shader_revision(), source_revision);
+        m.set_shaders_available(false);
+        assert_eq!(m.shader(), "none");
+        assert_eq!(m.screen_pixels(), m.screen.rgba.as_ptr());
+    }
 
     #[test]
     fn keys_by_code() {
