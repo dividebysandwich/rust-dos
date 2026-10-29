@@ -294,7 +294,17 @@ pub(crate) fn spawn(
         cpu.bus.log_string(&format!("[W32] {}", message));
         ERROR_BAD_EXE_FORMAT
     })?;
+    let parent = process(cpu).id;
+    set_parent(cpu, created.process.1, parent);
     Ok(handles(cpu, created.process, created.thread))
+}
+
+/// Who started the process `pid`: a program the foreground one starts may
+/// bring its windows to the foreground (user32::input).
+fn set_parent(cpu: &mut Cpu, pid: u32, parent: u32) {
+    if let Some(p) = cpu.bus.win32.processes.iter_mut().find(|p| p.id == pid) {
+        p.parent = parent;
+    }
 }
 
 /// The caller's handles of the process and the thread whose objects and
@@ -347,6 +357,7 @@ fn spawn_win16(
         SW_SHOWNORMAL
     };
     let arguments = arguments.trim_start();
+    let parent = process(cpu).id;
     let spawned = match crate::win16::task::spawn(cpu, path, arguments, show, 0, environment) {
         Ok(spawned) => spawned,
         Err(message) => {
@@ -359,6 +370,10 @@ fn spawn_win16(
             });
         }
     };
+    // The task runs in the Win16 process, whose windows the foreground
+    // program may then bring to the foreground, as it started the task.
+    let win16 = cpu.bus.win32.win16.pid;
+    set_parent(cpu, win16, parent);
     Ok(handles(cpu, spawned.process, spawned.thread))
 }
 

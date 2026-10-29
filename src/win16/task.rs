@@ -98,6 +98,7 @@ fn make_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<(), String> {
     )?;
     let pid = created.process.1;
     cpu.bus.win32.win16.pid = pid;
+    cpu.bus.win32.user.input.win16 = pid;
     let made = super::with_win16(cpu, pid, |p, bus| {
         let mut memory = std::mem::take(&mut p.memory);
         let result = (|| {

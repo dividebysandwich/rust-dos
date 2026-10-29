@@ -935,7 +935,7 @@ fn audible(bus: &crate::bus::Bus, sound: &Sound, flags: u32) -> bool {
         return true;
     }
     let user = &bus.win32.user;
-    let foreground = user.input.foreground;
+    let foreground = user.foreground_window();
     let Some(front) = user.window(foreground).map(|w| w.pid) else {
         return true;
     };
