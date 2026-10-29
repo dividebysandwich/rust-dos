@@ -341,9 +341,12 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     }
     dirs.sort();
     let list = folder_list(&d.dir, &dirs);
+    // Each at the end, in this order, as Windows does: the list has
+    // LBS_SORT, and LB_ADDSTRING would put a folder "1997" above c:\
+    // and sort the open folders in among the others.
     o.send(lst2, LB_RESETCONTENT, 0, 0);
     for (name, _, _) in &list {
-        o.send_text(lst2, LB_ADDSTRING, 0, name);
+        o.send_text(lst2, LB_INSERTSTRING, u32::MAX, name);
     }
     d.look_in = list.into_iter().map(|(_, path, depth)| (path, depth)).collect();
     o.set_item_text(dlg, STC1, &d.dir.to_ascii_lowercase());

@@ -36,6 +36,14 @@ const DONE: u32 = RESULTS + 4 * MAX_CALLS;
 /// Where the strings and structures the tests put start.
 const FREE: u32 = 0x400;
 const DATA_SIZE: usize = 0x2000;
+/// Where the timer procedure keeps the file dialog's folder list
+/// (`Arg::Press`): its first items, FOLDER_SIZE bytes each.
+const FOLDERS: u32 = 0x1C00;
+const FOLDER_ITEMS: u32 = 4;
+const FOLDER_SIZE: u32 = 0x40;
+/// The folder list's id, and the message that gives an item's text.
+const LST2: u32 = 0x0461;
+const LB_GETTEXT: u32 = 0x0189;
 
 /// The imports every program has: the functions `Call::api` names.
 const IMPORTS: &[(&str, &[&str])] = &[
@@ -89,7 +97,12 @@ const IMPORTS: &[(&str, &[&str])] = &[
     ),
     (
         "USER32.DLL",
-        &["SetTimer", "GetActiveWindow", "PostMessageA"],
+        &[
+            "SetTimer",
+            "GetActiveWindow",
+            "PostMessageA",
+            "SendDlgItemMessageA",
+        ],
     ),
     ("KERNEL32.DLL", &["GetModuleHandleA"]),
     (
@@ -134,7 +147,9 @@ enum Arg {
     /// What the call of this index returned.
     Res(usize),
     /// The program's timer procedure, which presses OK in the active
-    /// window: what ends a modal dialog.
+    /// window: what ends a modal dialog. Before that it keeps the first
+    /// items of the file dialog's folder list, if the window has one, at
+    /// FOLDERS.
     Press,
 }
 
@@ -184,6 +199,18 @@ fn program_with(
     let ok = BASE + code_rva;
     let mut a = CodeAssembler::new(32).unwrap();
     a.call(import(&l, "GetActiveWindow")).unwrap();
+    a.push(ebx).unwrap();
+    a.mov(ebx, eax).unwrap();
+    for i in 0..FOLDER_ITEMS {
+        a.push(l.at(FOLDERS + FOLDER_SIZE * i) as i32).unwrap();
+        a.push(i as i32).unwrap();
+        a.push(LB_GETTEXT as i32).unwrap();
+        a.push(LST2 as i32).unwrap();
+        a.push(ebx).unwrap();
+        a.call(import(&l, "SendDlgItemMessageA")).unwrap();
+    }
+    a.mov(eax, ebx).unwrap();
+    a.pop(ebx).unwrap();
     a.push(0).unwrap();
     a.push(1).unwrap();
     a.push(0x111).unwrap();
@@ -276,7 +303,12 @@ fn run(test: &str, data: &[u8], calls: &[Call]) -> (Cpu, u32) {
 
 /// Run the program `exe`, whose data is at `at`, as `run` does.
 fn run_program(test: &str, (exe, at): (Vec<u8>, u32)) -> (Cpu, u32) {
-    let mut cpu = machine(test, exe);
+    run_machine(machine(test, exe), at)
+}
+
+/// Run the program `machine` has loaded, whose data is at `at`, as `run`
+/// does.
+fn run_machine(mut cpu: Cpu, at: u32) -> (Cpu, u32) {
     for _ in 0..2000 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
         run_batch(&mut cpu, &mut NoHook, false);
@@ -439,6 +471,7 @@ fn a_program_without_comctl32_makes_a_progress_bar() {
                 "SendMessageA",
                 "GetActiveWindow",
                 "PostMessageA",
+                "SendDlgItemMessageA",
             ],
         ),
         ("KERNEL32.DLL", &["GetModuleHandleA"]),
@@ -639,6 +672,42 @@ fn the_old_style_open_dialog_gives_the_file_chosen() {
     let (ok, path, _) = open_dialog("open_old", OFN_ALLOWMULTISELECT);
     assert_eq!(ok, 1);
     assert_eq!(path.to_ascii_uppercase(), r"C:\T.EXE");
+}
+
+/// The old-style dialog's folder list shows the folders from the drive's
+/// root down to the current one, then the current one's folders, in that
+/// order, although the list is sorted: a folder named 1997 stays under
+/// c:\, and DATA under the folder it is in.
+#[test]
+fn the_old_style_folder_list_keeps_the_path_in_order() {
+    use Arg::*;
+    let ofn = FREE;
+    let file = FREE + 0x100;
+    let dir = FREE + 0x200;
+    let mut d = data();
+    put32(&mut d, ofn, 76);
+    put(&mut d, file, b"T.EXE\0");
+    put(&mut d, dir, b"C:\\1997\\MOTO\0");
+    put32(&mut d, ofn + 32, 260);
+    put32(&mut d, ofn + 52, OFN_ALLOWMULTISELECT);
+    let calls = [
+        call("SetTimer", &[I(0), I(0), I(100), Press]),
+        call("GetOpenFileNameA", &[At(ofn)]),
+    ];
+    // lpstrFile and lpstrInitialDir: the data is where it is in every
+    // program.
+    let (_, at) = program(&d, &calls);
+    put32(&mut d, ofn + 28, at + file);
+    put32(&mut d, ofn + 44, at + dir);
+    let (exe, at) = program(&d, &calls);
+    let cpu = machine("folder_list", exe);
+    let base = PathBuf::from("target/test_win32_comctl32/folder_list");
+    fs::create_dir_all(base.join("1997/MOTO/DATA")).unwrap();
+    let (cpu, at) = run_machine(cpu, at);
+    let folders: Vec<String> = (0..FOLDER_ITEMS)
+        .map(|i| peek_str(&cpu, at + FOLDERS + FOLDER_SIZE * i))
+        .collect();
+    assert_eq!(folders, ["c:\\", "1997", "moto", "data"]);
 }
 
 #[test]
