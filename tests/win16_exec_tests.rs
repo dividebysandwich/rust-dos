@@ -121,9 +121,9 @@ fn a_program_starts_a_win32_program() {
     // WinExec("C:\WIN32.EXE"): on Windows 98 a Windows 3.1 program
     // starts a Win32 one as a process of its own, as InstallShield's
     // setup launcher starts its engine, and WinExec gives 33. The program
-    // ends at once with 10h if WinExec gave anything else, else with 1;
-    // the Win32 program ends after it with 9, so its exit code is 9 when
-    // it started.
+    // ends at once with 10h if WinExec gave anything else, else with 1,
+    // which DOS gets: it is the process DOS started. The Win32 program
+    // runs on and ends with 9.
     let mut code = Code::new();
     let path_at = code.here() + 2;
     code.push_far(0)
@@ -137,10 +137,11 @@ fn a_program_starts_a_win32_program() {
         ])
         .exit_al();
     let path = code.here();
-    code.emit(b"C:\WIN32.EXE\0");
+    code.emit(b"C:\\WIN32.EXE\0");
     code.patch(path_at, path);
     let (exit, log) = run_with("win32_child", program(&code, CODE), |_, base| {
         fs::write(base.join("WIN32.EXE"), win32_program(9)).unwrap();
     });
-    assert_eq!(exit, 9, "{log}");
+    assert_eq!(exit, 1, "{log}");
+    assert!(log.contains("WIN32.EXE ended with exit code 9"), "{log}");
 }
