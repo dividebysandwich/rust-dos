@@ -1233,7 +1233,7 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     t.set(GET_CURSOR_HWND, hwnd);
                     t.set(GET_CURSOR_LP, lp);
                     if remove && is_input(m.message) {
-                        user(cpu).input.last_input = super::input::current_queue(cpu);
+                        user(cpu).input.last_input = super::current_pid(cpu);
                     }
                     // A click on a window that isn't the active one in the
                     // foreground: WM_MOUSEACTIVATE asks the window under

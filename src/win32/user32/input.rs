@@ -92,7 +92,8 @@ pub struct Input {
     pub queues: Vec<Activation>,
     /// The queue in the foreground, which gets the keyboard, or 0.
     pub foreground: u32,
-    /// The queue that last took a key or a mouse button's message.
+    /// The process whose thread last took a key or a mouse button's
+    /// message, or 0.
     pub last_input: u32,
     /// The Win16 process, whose tasks share an input queue.
     pub win16: u32,
@@ -1096,13 +1097,15 @@ fn queue_pid(cpu: &Cpu, queue: u32) -> u32 {
 
 /// Whether the running thread may bring a window to the foreground, by
 /// Windows 98's rules for SetForegroundWindow: no queue is in the
-/// foreground, or the thread's own is; the thread took the last input;
+/// foreground, or the thread's own is; its process took the last input;
 /// or its process is the foreground one, or was started by it.
 fn may_take_foreground(cpu: &Cpu) -> bool {
     let queue = current_queue(cpu);
+    let pid = super::current_pid(cpu);
     let input = &cpu.bus.win32.user.input;
     let foreground = input.foreground;
-    if foreground == 0 || foreground == queue || input.last_input == queue {
+    let last_input = pid != 0 && input.last_input == pid;
+    if foreground == 0 || foreground == queue || last_input {
         return true;
     }
     let owner = queue_pid(cpu, foreground);
