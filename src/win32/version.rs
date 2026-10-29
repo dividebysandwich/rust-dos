@@ -15,8 +15,8 @@
 //! one doesn't load, as on Windows 95.
 //!
 //! The desktop's depth, the `win32_depth` setting, is read at the same
-//! time and kept the same way: the adapter's own, or 8 bits a pixel with
-//! a system palette (`palette_desktop`).
+//! time and kept the same way: the adapter's own, 8 bits a pixel with a
+//! system palette (`palette_desktop`), or 16 bits a pixel.
 
 use crate::cpu::Cpu;
 
@@ -51,6 +51,7 @@ pub fn is_98(cpu: &Cpu) -> bool {
 crate::state_enum!(crate::config::DesktopDepth {
     crate::config::DesktopDepth::Adapter,
     crate::config::DesktopDepth::Palette,
+    crate::config::DesktopDepth::HighColor,
 });
 
 /// The first program starts: the settings become the version the
