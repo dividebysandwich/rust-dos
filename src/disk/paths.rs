@@ -81,6 +81,16 @@ impl DiskController {
     /// The host path of `rest` on a host drive, and its DOS path from the
     /// root in short names (e.g. "GAMES\DAYOFT~1").
     pub(super) fn resolve_names_on(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String)> {
+        self.walk_host(drive_num, rest).map(|(path, dos, _)| (path, dos))
+    }
+
+    /// `resolve_names_on`, and the place of the first component of the
+    /// path that isn't among its folder's entries (`find_host_entry`): the
+    /// path names nothing on the host then, which needs no stat to tell.
+    /// Each component is the entry's long name, or, where it matches
+    /// nothing, the name uppercased, for creating it. A name starting with
+    /// a dot is never missing, as the entries leave such names out.
+    fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, Option<usize>)> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
         // first (`locate_in_memory`).
@@ -90,18 +100,46 @@ impl DiskController {
         // logical_components can't climb above the root.
         let mut full_path = root.to_path_buf();
         let mut dos_path: Vec<String> = Vec::new();
-        for part in Self::logical_components(drive, rest) {
-            let (host_name, dos_name) = self.find_host_child(&full_path, part);
+        let mut missing = None;
+        for (i, part) in Self::logical_components(drive, rest).into_iter().enumerate() {
+            let found = self.find_host_entry(&full_path, part).1;
+            if found.is_none() && !part.starts_with('.') && missing.is_none() {
+                missing = Some(i);
+            }
+            let (host_name, dos_name) = found.unwrap_or_else(|| {
+                let upper = part.to_ascii_uppercase();
+                (upper.clone(), upper)
+            });
             full_path.push(host_name);
             dos_path.push(dos_name);
         }
 
         // Final Security Check
         if full_path.starts_with(root) {
-            Some((full_path, dos_path.join("\\")))
+            Some((full_path, dos_path.join("\\"), missing))
         } else {
             None
         }
+    }
+
+    /// `locate`, and which component of the path isn't among its folder's
+    /// entries (`walk_host`): None where each is (a stat tells whether the
+    /// path names a file or a folder), `Some(true)` where the last one
+    /// isn't and `Some(false)` where one before it isn't.
+    pub(super) fn locate_found(&self, dos_path: &str) -> Option<(u8, PathBuf, Option<bool>)> {
+        let path_str = dos_path.replace('/', "\\");
+        let (drive, rest) = self.split_drive(&path_str)?;
+        let count = self.drive(drive).map(|d| Self::logical_components(d, rest).len())?;
+        let (path, _, missing) = self.walk_host(drive, rest)?;
+        Some((drive, path, missing.map(|i| i + 1 == count)))
+    }
+
+    /// The host path of a DOS path, None where it names nothing on the
+    /// host (`locate_found`).
+    fn resolve_found(&self, dos_path: &str) -> Option<PathBuf> {
+        self.locate_found(dos_path)
+            .filter(|(_, _, missing)| missing.is_none())
+            .map(|(_, path, _)| path)
     }
 
     /// The names of the entries of the directory `dos_dir`, as (long
@@ -220,7 +258,8 @@ impl DiskController {
         if let Some(found) = self.find_fat(dos_path) {
             return found.is_ok_and(|e| !e.is_dir());
         }
-        self.is_virtual_file(dos_path) || self.resolve_path(dos_path).is_some_and(|p| hostfs::is_file(&p))
+        self.is_virtual_file(dos_path)
+            || self.resolve_found(dos_path).is_some_and(|p| hostfs::is_file(&p))
     }
 
     /// Whether a DOS path names a directory the drive has.
@@ -230,7 +269,7 @@ impl DiskController {
         }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => drive.tree().is_some_and(|files| files.is_dir(&path)),
-            None => self.resolve_path(dos_path).is_some_and(|p| hostfs::is_dir(&p)),
+            None => self.resolve_found(dos_path).is_some_and(|p| hostfs::is_dir(&p)),
         }
     }
 
@@ -251,7 +290,7 @@ impl DiskController {
         }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => FileData::of(drive.tree()?.file(&path)?, drive.image()),
-            None => self.resolve_path(dos_path).filter(|p| hostfs::is_file(p)).map(FileData::Host),
+            None => self.resolve_found(dos_path).filter(|p| hostfs::is_file(p)).map(FileData::Host),
         }
     }
 
@@ -276,15 +315,6 @@ impl DiskController {
         names.into_iter().zip(short).collect()
     }
 
-    /// The host name and the DOS name of the entry of `dir` that a DOS path
-    /// component names: its long name in any case, or its short name. A
-    /// name that matches nothing comes back uppercased, for creating it.
-    fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
-        self.find_host_entry(dir, target).1.unwrap_or_else(|| {
-            let upper = target.to_ascii_uppercase();
-            (upper.clone(), upper)
-        })
-    }
 
     /// The entries of the host folder `dir`, and the one named `name`: by
     /// its long name in any case, or by its short name. A name the kept

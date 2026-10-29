@@ -1223,7 +1223,7 @@ fn a_kept_folder_is_checked_again_after_a_while() {
 fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     let root = scratch("host_dir_cache_unmoved");
     age(&root);
-    let disk = DiskController::new(root.clone());
+    let mut disk = DiskController::new(root.clone());
     assert!(!disk.is_file(r"C:\PATCH.DAT"));
     let host_root = disk.resolve_path(r"C:\").unwrap();
     assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
@@ -1232,8 +1232,9 @@ fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     // was, as on FAT under Windows or after an unpacker restores it. A
     // name looked for in vain less than `TRUST` ago is still missing,
     // without the folder being read again: it comes back uppercased, as a
-    // name to create. Then it is looked for again. (A Windows host finds
-    // the file by the uppercased name too, so `is_file` can't tell.)
+    // name to create, and is neither a file nor a folder nor opened,
+    // without asking the host (which would find it by the uppercased name
+    // on Windows). Then it is looked for again.
     fs::write(root.join("Patch.dat"), b"x").unwrap();
     age(&root);
     let name = |disk: &DiskController| {
@@ -1241,9 +1242,13 @@ fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
         path.file_name().unwrap().to_owned()
     };
     assert_eq!(name(&disk), "PATCH.DAT");
+    assert!(!disk.is_file(r"C:\PATCH.DAT") && !disk.is_directory(r"C:\PATCH.DAT"));
+    assert_eq!(disk.open_file(r"C:\PATCH.DAT", 0, PSP), Err(0x02));
     disk.host_dirs.expire();
     assert_eq!(name(&disk), "Patch.dat");
     assert!(disk.is_file(r"C:\PATCH.DAT"));
+    let handle = disk.open_file(r"C:\PATCH.DAT", 0, PSP).unwrap();
+    disk.close_file(handle);
     // A name not looked for before is looked for in a fresh read at once.
     fs::write(root.join("Other.dat"), b"x").unwrap();
     age(&root);
