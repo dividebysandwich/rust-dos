@@ -529,7 +529,7 @@ fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let size = s.size();
     let card = on_card(cpu, id);
     let (memory, bits) = if card {
-        match voodoo::role(&s) {
+        match voodoo::role(s.caps[0]) {
             Some(role) => {
                 if !voodoo::has_buffer(cpu, role, s.width, s.height) {
                     return Err(if role == crate::win32::glide::api::BUFFER_AUXBUFFER {
@@ -685,17 +685,11 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
 
 const PITCH_ALIGN: u32 = 4;
 
-/// The caps that make a surface of the 3dfx device one of the card's
-/// buffers (`voodoo::role`) rather than system memory: a back buffer
-/// made on its own and attached later as well as a Z buffer.
-const CARD_BUFFER_CAPS: u32 =
-    DDSCAPS_ZBUFFER | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER | DDSCAPS_FLIP;
-
-/// The pitch of `width` pixels of `bits` bits.
 /// The most bytes of pixels a surface can have in the program's memory
 /// (`SetSurfaceDesc`).
 const MAX_GIVEN_BITS: u64 = 0x1000_0000;
 
+/// The pitch of `width` pixels of `bits` bits.
 fn pitch_of(width: u32, bits: u32) -> u32 {
     (width * bits).div_ceil(8).next_multiple_of(PITCH_ALIGN)
 }
@@ -918,9 +912,10 @@ pub fn make(
                 16
             };
             width.div_ceil(4).max(1) * height.div_ceil(4).max(1) * block
-        } else if card && caps[0] & CARD_BUFFER_CAPS != 0 {
-            // One of the card's buffers (`voodoo::role`): its rows are
-            // the linear frame buffer's, whatever its width.
+        } else if card && voodoo::role(caps[0]).is_some() {
+            // One of the card's buffers (a back buffer made on its own
+            // and attached later, too): its rows are the linear frame
+            // buffer's, whatever its width.
             voodoo::PITCH
         } else {
             pitch_of(width, f.bits)
