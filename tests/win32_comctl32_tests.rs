@@ -249,10 +249,15 @@ fn program_with(
     (b.build(), l.data)
 }
 
+/// The host folder that the machine of the test `test` has as C:.
+fn drive_c(test: &str) -> PathBuf {
+    PathBuf::from("target/test_win32_comctl32").join(test)
+}
+
 /// A machine with the built-in Windows on and `program` loaded from the
 /// shell as T.EXE.
 fn machine(test: &str, program: Vec<u8>) -> Cpu {
-    let base = PathBuf::from("target/test_win32_comctl32").join(test);
+    let base = drive_c(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
@@ -701,8 +706,7 @@ fn the_old_style_folder_list_keeps_the_path_in_order() {
     put32(&mut d, ofn + 44, at + dir);
     let (exe, at) = program(&d, &calls);
     let cpu = machine("folder_list", exe);
-    let base = PathBuf::from("target/test_win32_comctl32/folder_list");
-    fs::create_dir_all(base.join("1997/MOTO/DATA")).unwrap();
+    fs::create_dir_all(drive_c("folder_list").join("1997/MOTO/DATA")).unwrap();
     let (cpu, at) = run_machine(cpu, at);
     let folders: Vec<String> = (0..FOLDER_ITEMS)
         .map(|i| peek_str(&cpu, at + FOLDERS + FOLDER_SIZE * i))

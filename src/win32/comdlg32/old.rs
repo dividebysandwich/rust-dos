@@ -339,7 +339,11 @@ fn scan(cpu: &mut Cpu, d: &mut FileDlg, dir: &str, o: &mut Ops) -> bool {
     for f in &files {
         o.send_text(lst1, LB_ADDSTRING, 0, f);
     }
-    dirs.sort();
+    // The folder's own folders in the order LBS_SORT would give them,
+    // since they go in unsorted (below): "a~1" above "ab".
+    dirs.sort_by(|a, b| {
+        kernel32::compare_nocase(&crate::dosstr::to_bytes(a), &crate::dosstr::to_bytes(b))
+    });
     let list = folder_list(&d.dir, &dirs);
     // Each at the end, in this order, as Windows does: the list has
     // LBS_SORT, and LB_ADDSTRING would put a folder "1997" above c:\
