@@ -1678,6 +1678,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let result = crate::ems::ioctl_read(&mut cpu.bus, buffer, size);
                     set_result(cpu, result);
                 }
+                // MS-DOS 7 has subfunctions 00h to 11h and fails any other
+                // with error 1, invalid function. Network clients add their
+                // own above that, and programs probe for them: Windows 98
+                // Setup takes a successful 44E0h for Sun PC-NFS, and a
+                // successful 4452h is how DR-DOS is recognised.
+                0x12..=0xFF => set_result(cpu, Err(0x01)),
                 _ => {
                     // Stub other subfunctions as success
                     cpu.set_ax(0);
