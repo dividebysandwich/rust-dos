@@ -101,11 +101,14 @@ impl DiskController {
         let mut missing = false;
         // Below a name the entries can't rule out, the folders read may
         // not be the ones the host has there, so they rule out nothing.
+        // Nor does a folder that reads as empty: one the host can't list
+        // reads so too (`read_host_entries`), though it may open names in
+        // it.
         let mut sure = true;
         for part in Self::logical_components(drive, rest) {
-            let found = self.find_host_entry(&full_path, part).1;
+            let (entries, found) = self.find_host_entry(&full_path, part);
             if found.is_none() && sure {
-                if Self::entries_settle(part) {
+                if Self::entries_settle(part) && !entries.is_empty() {
                     missing = true;
                 } else {
                     sure = false;
