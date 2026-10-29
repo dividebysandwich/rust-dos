@@ -447,4 +447,35 @@ mod tests {
         assert_eq!(v.reg[CHROMA_RANGE], 0);
         assert_eq!(red_triangle(&mut v), 0xF800);
     }
+
+    #[test]
+    fn eight_bit_downloads_follow_the_units_own_texture_mode() {
+        // Moto Racer's Glide sets textureMode bit 31 (sequential 8-bit
+        // downloads) in TMU 1 alone before it downloads a P8 texture
+        // there, while TMU 0 keeps the mode it draws with.
+        let mut v = Voodoo::with_workers(Board::Voodoo2Max, 0);
+        v.config_write(0x40, 1);
+        let (trex0, trex1) = (2 << 8, 4 << 8);
+        reg(&mut v, trex0 | TEXTURE_MODE, 5 << 8);
+        reg(&mut v, trex1 | TEXTURE_MODE, 1 << 31 | 5 << 8);
+        // Dword 1 of row 0 of level 0: texels 4 to 7, one after another.
+        let tmu1 = 0xA0_0000;
+        v.write(tmu1 + 4, 0x4433_2211, !0, Now::default());
+        let ram = &v.tmu[1].ram;
+        assert_eq!([4, 5, 6, 7].map(|at| ram.byte(at)), [0x11, 0x22, 0x33, 0x44]);
+        // Without the bit, TMU 0 takes 8-bit texels at even dwords only:
+        // dword 1 is texels 0 to 3, as dword 0 is.
+        v.write(0x80_0000 + 4, 0x4433_2211, !0, Now::default());
+        let ram = &v.tmu[0].ram;
+        assert_eq!([0, 1, 2, 3].map(|at| ram.byte(at)), [0x11, 0x22, 0x33, 0x44]);
+        // The other way round, TMU 0's bit doesn't reach TMU 1: dword 1
+        // of row 1 is that row's texels 0 to 3.
+        reg(&mut v, trex0 | TEXTURE_MODE, 1 << 31 | 5 << 8);
+        reg(&mut v, trex1 | TEXTURE_MODE, 5 << 8);
+        v.write(tmu1 + (1 << 9 | 4), 0x8877_6655, !0, Now::default());
+        let ram = &v.tmu[1].ram;
+        let row = 256;
+        let texels = [0, 1, 2, 3].map(|at| ram.byte(row + at));
+        assert_eq!(texels, [0x55, 0x66, 0x77, 0x88]);
+    }
 }
