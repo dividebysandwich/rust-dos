@@ -369,7 +369,12 @@ impl Voodoo {
         if command & COMMAND != CPU_TO_SCREEN || !self.blt.active {
             return;
         }
-        self.flush();
+        // After what is drawn: the first word of a copy waits for it, and
+        // the words after find nothing queued (Moto Racer sends 40,000 a
+        // frame for its sky).
+        if self.writes_queue() {
+            self.flush();
+        }
         self.mirror_sync();
         let mut data = data;
         if command & (1 << 8) != 0 {
