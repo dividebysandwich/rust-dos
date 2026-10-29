@@ -1222,6 +1222,9 @@ fn a_kept_folder_is_checked_again_after_a_while() {
 #[test]
 fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     let root = scratch("host_dir_cache_unmoved");
+    // A folder that reads as empty rules no name out (one the host can't
+    // list reads so too), so this one has a file.
+    fs::write(root.join("GAME.EXE"), b"x").unwrap();
     age(&root);
     let mut disk = DiskController::new(root.clone());
     assert!(!disk.is_file(r"C:\PATCH.DAT"));
