@@ -175,6 +175,34 @@ fn floppy_images_are_dos_drives() {
     assert_eq!(cpu.bus.read_8(dpb + 0x17), 0xF0);
 }
 
+/// The volume label is an entry of the root directory. Windows 98 Setup
+/// asks whether a short name it made up is taken with FindFirst and the
+/// attributes 0Eh, which take the label too; finding the label there for
+/// every name made it count past what its tables hold (issue #309).
+#[test]
+fn findfirst_finds_the_volume_label_only_in_the_root_by_its_name() {
+    let dir = fatimage::scratch("label_search");
+    let image = floppy_with_files(&dir);
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+
+    assert!(find_all(&mut cpu, "A:\\GAMES\\DANGER~2.CUR", 0x0E).is_empty());
+    assert_eq!(find_all(&mut cpu, "A:\\GAMES\\*.*", 0x0E), ["DOOM.EXE"]);
+    assert!(find_all(&mut cpu, "A:\\README~1.TXT", 0x0E).is_empty());
+    assert_eq!(find_all(&mut cpu, "A:\\README.TXT", 0x0E), ["README.TXT"]);
+    assert_eq!(find_all(&mut cpu, "A:\\GAMEDISK", 0x0E), ["GAMEDISK"]);
+    assert_eq!(find_all(&mut cpu, "A:\\*.*", 0x1E), ["GAMEDISK", "EMPTY", "README.TXT", "GAMES"]);
+    // A search for the label alone finds it, and nothing else.
+    assert_eq!(find_all(&mut cpu, "A:\\GAMES\\*.*", 0x08), ["GAMEDISK"]);
+
+    // A disk without a label has none to find.
+    let bytes = fatimage::image(FLOPPY_1440, None, &[], &[("README.TXT", b"hi")]);
+    let unlabelled = fatimage::write(&dir, "nolabel.img", &bytes);
+    mount(&mut cpu, DRIVE_A, &unlabelled);
+    assert!(find_all(&mut cpu, "A:\\*.*", 0x08).is_empty());
+    assert_eq!(find_all(&mut cpu, "A:\\*.*", 0x0E), ["README.TXT"]);
+}
+
 #[test]
 fn writes_land_on_the_image() {
     let dir = fatimage::scratch("write");
