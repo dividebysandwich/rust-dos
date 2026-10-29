@@ -44,12 +44,30 @@ fn both32(v: u32) -> [u8; 8] {
     [le[0], le[1], le[2], le[3], be[0], be[1], be[2], be[3]]
 }
 
-fn record(name: &[u8], lba: u32, size: u32, flags: u8) -> Vec<u8> {
+/// The standard of a disc's structures.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Iso9660,
+    /// High Sierra: the volume descriptor's fields 8 bytes later, the
+    /// root's record at 180, and directory records with a 6-byte date and
+    /// their flags at byte 24.
+    HighSierra,
+}
+
+fn record(format: Format, name: &[u8], lba: u32, size: u32, flags: u8) -> Vec<u8> {
     let mut r = vec![0u8; 33];
     r[2..10].copy_from_slice(&both32(lba));
     r[10..18].copy_from_slice(&both32(size));
-    r[18..25].copy_from_slice(&DATE);
-    r[25] = flags;
+    match format {
+        Format::Iso9660 => {
+            r[18..25].copy_from_slice(&DATE);
+            r[25] = flags;
+        }
+        Format::HighSierra => {
+            r[18..24].copy_from_slice(&DATE[..6]);
+            r[24] = flags;
+        }
+    }
     r[28..32].copy_from_slice(&both16(1));
     r[32] = name.len() as u8;
     r.extend_from_slice(name);
@@ -71,6 +89,16 @@ fn leaf(path: &str) -> &str {
 /// An ISO 9660 image in 2048-byte sectors: the volume descriptors at 16
 /// and 17, one sector per directory from 18 on, then the files.
 pub fn iso(label: &str, files: &[IsoFile]) -> Vec<u8> {
+    disc(Format::Iso9660, label, files)
+}
+
+/// The image `iso` makes, in High Sierra's format.
+pub fn high_sierra(label: &str, files: &[IsoFile]) -> Vec<u8> {
+    disc(Format::HighSierra, label, files)
+}
+
+fn disc(format: Format, label: &str, files: &[IsoFile]) -> Vec<u8> {
+    let record = |name: &[u8], lba, size, flags| record(format, name, lba, size, flags);
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     dirs.insert(String::new());
     for f in files {
@@ -118,24 +146,47 @@ pub fn iso(label: &str, files: &[IsoFile]) -> Vec<u8> {
         image[at..at + f.data.len()].copy_from_slice(f.data);
     }
 
+    // The fields from the label to the path tables are 8 bytes later in
+    // High Sierra, after the descriptor's sector number.
+    let shift = match format {
+        Format::Iso9660 => 0,
+        Format::HighSierra => 8,
+    };
     let pvd = &mut image[16 * SECTOR..17 * SECTOR];
-    pvd[0] = 1;
-    pvd[1..6].copy_from_slice(b"CD001");
-    pvd[6] = 1;
-    pvd[40..72].fill(b' ');
-    pvd[40..40 + label.len()].copy_from_slice(label.as_bytes());
-    pvd[80..88].copy_from_slice(&both32(total as u32));
-    pvd[120..124].copy_from_slice(&both16(1));
-    pvd[124..128].copy_from_slice(&both16(1));
-    pvd[128..132].copy_from_slice(&both16(SECTOR as u16));
+    pvd[shift] = 1;
+    match format {
+        Format::Iso9660 => pvd[1..7].copy_from_slice(b"CD001\x01"),
+        Format::HighSierra => {
+            pvd[..8].copy_from_slice(&both32(16));
+            pvd[9..15].copy_from_slice(b"CDROM\x01");
+        }
+    }
+    pvd[40 + shift..72 + shift].fill(b' ');
+    pvd[40 + shift..40 + shift + label.len()].copy_from_slice(label.as_bytes());
+    pvd[80 + shift..88 + shift].copy_from_slice(&both32(total as u32));
+    pvd[120 + shift..124 + shift].copy_from_slice(&both16(1));
+    pvd[124 + shift..128 + shift].copy_from_slice(&both16(1));
+    pvd[128 + shift..132 + shift].copy_from_slice(&both16(SECTOR as u16));
     let root = record(&[0], 18, SECTOR as u32, 0x02);
-    pvd[156..156 + 34].copy_from_slice(&root[..34]);
-    pvd[702..739].fill(b' ');
-    pvd[702..717].copy_from_slice(b"COPYRIGHT.TXT;1");
+    let (root_at, copyright_at, copyright_len) = match format {
+        Format::Iso9660 => (156, 702, 37),
+        Format::HighSierra => (180, 726, 32),
+    };
+    pvd[root_at..root_at + 34].copy_from_slice(&root[..34]);
+    pvd[copyright_at..copyright_at + copyright_len].fill(b' ');
+    pvd[copyright_at..copyright_at + 15].copy_from_slice(b"COPYRIGHT.TXT;1");
     let end = &mut image[17 * SECTOR..18 * SECTOR];
-    end[0] = 0xFF;
-    end[1..6].copy_from_slice(b"CD001");
-    end[6] = 1;
+    match format {
+        Format::Iso9660 => {
+            end[0] = 0xFF;
+            end[1..7].copy_from_slice(b"CD001\x01");
+        }
+        Format::HighSierra => {
+            end[..8].copy_from_slice(&both32(17));
+            end[8] = 0xFF;
+            end[9..15].copy_from_slice(b"CDROM\x01");
+        }
+    }
     image
 }
 

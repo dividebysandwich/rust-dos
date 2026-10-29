@@ -1719,15 +1719,16 @@ GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
 is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
 files, any number of tracks and gaps), a CD image in MAME's compressed CHD
 format (`.chd`, as `chdman createcd` makes them; its data and audio
-tracks, decompressed as they are
-read), or a bare image of an ISO 9660 data track in 2048, 2336 or
-2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
-be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
-many sheets call them), and WAVE files at other rates: they are decoded to
-CD audio as they play. Programs run from the image as from any other drive.
-DOS programs see the names of the disc's ISO 9660 tree, as MSCDEX shows
-them; Windows programs on the built-in Windows see its Joliet long names
-where the disc has them, as on Windows 95.
+tracks, decompressed as they are read), or a bare image of a data track
+in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
+`.gog`). The data track can be ISO 9660 or High Sierra, the format of
+discs mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or
+MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them),
+and WAVE files at other rates: they are decoded to CD audio as they play.
+Programs run from the image as from any other drive. DOS programs see the
+names of the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs
+on the built-in Windows see its Joliet long names where the disc has
+them, as on Windows 95.
 
 An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
 sector's EDC, and a sector whose EDC doesn't match its data reads as a

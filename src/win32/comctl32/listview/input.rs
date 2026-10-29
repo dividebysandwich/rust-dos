@@ -585,7 +585,7 @@ fn edit_begin(cpu: &mut Cpu, c: &mut Ctx) -> Vec<Op> {
         return Vec::new();
     }
     // Without the focus there is no edit.
-    let focus = user32::user(cpu).input.focus;
+    let focus = user32::user(cpu).focus_of(c.hwnd);
     if focus != c.hwnd && (focus == 0 || super::super::parent(cpu, focus) != c.hwnd) {
         return Vec::new();
     }

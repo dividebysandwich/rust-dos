@@ -241,6 +241,9 @@ pub struct Process {
     idle_event: Option<u32>,
     /// Its IMAGEHLP options.
     imagehlp: imagehlp::State,
+    /// The process that started it with CreateProcessA or WinExec, or 0
+    /// for the one DOS started.
+    pub(crate) parent: u32,
 }
 
 impl Process {
@@ -1280,6 +1283,7 @@ crate::state_fields!(Process {
     lz_files,
     idle_event,
     imagehlp,
+    parent,
 });
 crate::state_fields!(Win32 {
     pending,

@@ -687,7 +687,7 @@ fn child_activate(cpu: &mut Cpu, t: &mut Task, client: u32, child: u32) -> Ops {
         return ops;
     }
     let frame = parent(cpu, client);
-    let active_frame = user(cpu).input.active == frame;
+    let active_frame = user(cpu).is_active(frame);
     let prev = ci.active;
     if prev != 0 {
         ops.send(prev, WM_NCACTIVATE, 0, 0);

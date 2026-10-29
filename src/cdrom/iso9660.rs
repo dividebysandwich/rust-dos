@@ -9,6 +9,10 @@
 //! Each of its entries that Joliet has too gets the Joliet name as its
 //! long name, for Windows programs, and what only Joliet has is added with
 //! a DOS name made from the long one.
+//!
+//! Discs mastered before ISO 9660 are High Sierra, which MSCDEX and
+//! Windows 95 read too: the same structures with some fields in other
+//! places, and no Joliet tree.
 
 use super::image::CdImage;
 use super::{Extent, DATA_SECTOR};
@@ -20,7 +24,8 @@ pub struct IsoVolume {
     /// The volume identifier, the drive's label.
     pub label: String,
     pub files: MemFs,
-    /// The Primary Volume Descriptor.
+    /// The Primary Volume Descriptor, in the disc's format: a High Sierra
+    /// one has its fields where `Format::HighSierra` says.
     pub descriptor: Box<[u8; DATA_SECTOR]>,
 }
 
@@ -35,6 +40,18 @@ const MAX_DEPTH: usize = 8;
 enum Tree {
     Primary,
     Joliet,
+    /// The tree of a High Sierra disc, its only one, named as the
+    /// primary tree is, in records of High Sierra's layout.
+    HighSierra,
+}
+
+impl Tree {
+    fn format(self) -> Format {
+        match self {
+            Tree::Primary | Tree::Joliet => Format::Iso9660,
+            Tree::HighSierra => Format::HighSierra,
+        }
+    }
 }
 
 /// A directory record.
@@ -67,64 +84,176 @@ fn le32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-/// The volume descriptors of the disc, from sector 16 to the terminator.
-fn volume_descriptors(image: &CdImage) -> Result<Vec<[u8; DATA_SECTOR]>, String> {
-    let track = image.data_track().ok_or("no data track")?;
-    let mut descriptors = Vec::new();
-    for lba in track.start + FIRST_DESCRIPTOR..track.end {
-        let mut sector = [0u8; DATA_SECTOR];
-        // A sector that doesn't read after the primary descriptor ends
-        // the list, as it did when the primary descriptor was all that
-        // was read.
-        if let Err(e) = image.read_data(lba, &mut sector) {
-            if primary(&descriptors).is_ok() {
+/// The standard a disc's volume descriptors and directory records follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Iso9660,
+    /// High Sierra, ISO 9660's forerunner, which discs of about 1986 to
+    /// 1990 have: the same structures with some fields in other places.
+    HighSierra,
+}
+
+impl Format {
+    /// The format of a volume descriptor, by its standard identifier:
+    /// "CD001" at byte 1, or High Sierra's "CDROM" at byte 9, after the
+    /// sector number its descriptors start with.
+    pub fn of(descriptor: &[u8]) -> Option<Format> {
+        if descriptor.get(1..6) == Some(b"CD001") {
+            Some(Format::Iso9660)
+        } else if descriptor.get(9..14) == Some(b"CDROM") {
+            Some(Format::HighSierra)
+        } else {
+            None
+        }
+    }
+
+    /// How much later than in ISO 9660 a High Sierra descriptor has the
+    /// fields up to its path tables.
+    fn shift(self) -> usize {
+        match self {
+            Format::Iso9660 => 0,
+            Format::HighSierra => 8,
+        }
+    }
+
+    /// A volume descriptor's type: 1 for the primary (High Sierra's
+    /// standard file structure descriptor), 2 supplementary, FFh the
+    /// terminator.
+    pub fn kind(self, descriptor: &[u8]) -> u8 {
+        descriptor[self.shift()]
+    }
+
+    /// The record of the root directory in a volume descriptor. High
+    /// Sierra has four path table locations of each byte order where ISO
+    /// 9660 has two.
+    fn root_record(self, descriptor: &[u8]) -> &[u8] {
+        let at = match self {
+            Format::Iso9660 => 156,
+            Format::HighSierra => 180,
+        };
+        &descriptor[at..at + 34]
+    }
+
+    /// The volume identifier in a primary descriptor.
+    fn label(self, descriptor: &[u8]) -> &[u8] {
+        &descriptor[40 + self.shift()..72 + self.shift()]
+    }
+
+    /// The copyright, abstract and bibliographic file identifiers in a
+    /// primary descriptor: 37 bytes each in ISO 9660, 32 in High Sierra,
+    /// which has no bibliographic file.
+    fn file_identifiers(self, descriptor: &[u8]) -> [&[u8]; 3] {
+        match self {
+            Format::Iso9660 => [
+                &descriptor[702..739],
+                &descriptor[739..776],
+                &descriptor[776..813],
+            ],
+            Format::HighSierra => [&descriptor[726..758], &descriptor[758..790], &[]],
+        }
+    }
+
+    /// Where a directory record has its file flags: High Sierra's date
+    /// before them has no GMT offset.
+    fn flags_at(self) -> usize {
+        match self {
+            Format::Iso9660 => 25,
+            Format::HighSierra => 24,
+        }
+    }
+}
+
+/// The volume descriptors of a disc, from sector 16 to the terminator.
+struct Descriptors {
+    format: Format,
+    sectors: Vec<[u8; DATA_SECTOR]>,
+}
+
+impl Descriptors {
+    fn read(image: &CdImage) -> Result<Self, String> {
+        let track = image.data_track().ok_or("no data track")?;
+        let mut format = None;
+        let mut sectors = Vec::new();
+        for lba in track.start + FIRST_DESCRIPTOR..track.end {
+            let mut sector = [0u8; DATA_SECTOR];
+            // A sector that doesn't read after the primary descriptor ends
+            // the list, as it did when the primary descriptor was all that
+            // was read.
+            if let Err(e) = image.read_data(lba, &mut sector) {
+                let primary = |f: Format| {
+                    sectors
+                        .iter()
+                        .any(|d: &[u8; DATA_SECTOR]| f.kind(&d[..]) == 1)
+                };
+                if format.is_some_and(primary) {
+                    break;
+                }
+                return Err(e.to_string());
+            }
+            let this = Format::of(&sector[..]);
+            let format = match (format, this) {
+                (None, None) => return Err("not an ISO 9660 or High Sierra disc".to_string()),
+                (None, Some(this)) => *format.insert(this),
+                // A disc without a terminator ends its descriptors with
+                // whatever follows them.
+                (Some(format), this) if this != Some(format) => break,
+                (Some(format), _) => format,
+            };
+            if format.kind(&sector[..]) == 0xFF {
                 break;
             }
-            return Err(e.to_string());
+            sectors.push(sector);
         }
-        if &sector[1..6] != b"CD001" {
-            // A disc without a terminator ends its descriptors with
-            // whatever follows them.
-            if descriptors.is_empty() {
-                return Err("not an ISO 9660 disc".to_string());
-            }
-            break;
-        }
-        if sector[0] == 0xFF {
-            break;
-        }
-        descriptors.push(sector);
+        let format = format.ok_or("no volume descriptors")?;
+        Ok(Descriptors { format, sectors })
     }
-    Ok(descriptors)
+
+    /// The Primary Volume Descriptor.
+    fn primary(&self) -> Result<&[u8; DATA_SECTOR], String> {
+        let found = self.sectors.iter().find(|d| self.format.kind(&d[..]) == 1);
+        found.ok_or_else(|| "no primary volume descriptor".to_string())
+    }
+
+    /// The root directory of the primary tree.
+    fn root(&self) -> Result<Extent, String> {
+        Ok(root(self.format.root_record(self.primary()?)))
+    }
+
+    /// The root directory of the Joliet tree, if the disc has one: a
+    /// Supplementary Volume Descriptor whose escape sequences select
+    /// UCS-2 level 1, 2 or 3 (%/@, %/C or %/E). High Sierra has none.
+    fn joliet_root(&self) -> Option<Extent> {
+        if self.format != Format::Iso9660 {
+            return None;
+        }
+        self.sectors
+            .iter()
+            .find(|d| d[0] == 2 && &d[88..90] == b"%/" && matches!(d[90], b'@' | b'C' | b'E'))
+            .map(|d| root(Format::Iso9660.root_record(&d[..])))
+    }
+
+    /// The tree a directory record of the primary tree is in.
+    fn primary_tree(&self) -> Tree {
+        match self.format {
+            Format::Iso9660 => Tree::Primary,
+            Format::HighSierra => Tree::HighSierra,
+        }
+    }
 }
 
-/// The Primary Volume Descriptor among a disc's volume descriptors.
-fn primary(descriptors: &[[u8; DATA_SECTOR]]) -> Result<&[u8; DATA_SECTOR], String> {
-    descriptors
-        .iter()
-        .find(|d| d[0] == 1)
-        .ok_or_else(|| "no primary volume descriptor".to_string())
+/// The copyright, abstract and bibliographic file identifiers of the
+/// disc's primary volume descriptor, for MSCDEX's calls 02h to 04h.
+pub fn file_identifiers(image: &CdImage) -> Result<[Vec<u8>; 3], String> {
+    let descriptors = Descriptors::read(image)?;
+    let ids = descriptors.format.file_identifiers(descriptors.primary()?);
+    Ok(ids.map(<[u8]>::to_vec))
 }
 
-/// The Primary Volume Descriptor of the disc.
-pub fn primary_descriptor(image: &CdImage) -> Result<Box<[u8; DATA_SECTOR]>, String> {
-    primary(&volume_descriptors(image)?).map(|d| Box::new(*d))
-}
-
-/// The root directory of the Joliet tree, if the disc has one: a
-/// Supplementary Volume Descriptor whose escape sequences select UCS-2
-/// level 1, 2 or 3 (%/@, %/C or %/E).
-fn joliet_root(descriptors: &[[u8; DATA_SECTOR]]) -> Option<Extent> {
-    descriptors
-        .iter()
-        .find(|d| d[0] == 2 && &d[88..90] == b"%/" && matches!(d[90], b'@' | b'C' | b'E'))
-        .map(root)
-}
-
-/// The DOS time and date of a directory record's 7-byte date (years since
-/// 1900, month, day, hour, minute, second; the GMT offset is left out).
-/// Dates before 1980 show as 1 January 1980 00:00 and dates after 2107 as
-/// 31 December 2107 23:59:58, the ends of the range DOS can hold.
+/// The DOS time and date of a directory record's date (years since 1900,
+/// month, day, hour, minute, second; ISO 9660's seventh byte, the GMT
+/// offset, which High Sierra hasn't, is left out). Dates before 1980 show
+/// as 1 January 1980 00:00 and dates after 2107 as 31 December 2107
+/// 23:59:58, the ends of the range DOS can hold.
 fn dos_time(date: &[u8]) -> (u16, u16) {
     let year = 1900 + date[0] as u16;
     let (year, month, day, hour, minute, second) = match year {
@@ -148,7 +277,7 @@ fn dos_time(date: &[u8]) -> (u16, u16) {
 /// and the "." of a name without an extension.
 fn record_name(id: &[u8], tree: Tree) -> String {
     let name = match tree {
-        Tree::Primary => String::from_utf8_lossy(id).to_ascii_uppercase(),
+        Tree::Primary | Tree::HighSierra => String::from_utf8_lossy(id).to_ascii_uppercase(),
         Tree::Joliet => {
             let (units, _) = id.as_chunks::<2>();
             let units: Vec<u16> = units.iter().map(|&unit| u16::from_be_bytes(unit)).collect();
@@ -167,6 +296,7 @@ fn read_directory(image: &CdImage, dir: &Extent, tree: Tree) -> Vec<Record> {
     let mut records = Vec::new();
     let mut sector = [0u8; DATA_SECTOR];
     let sectors = dir.size.div_ceil(DATA_SECTOR as u32);
+    let flags_at = tree.format().flags_at();
     for i in 0..sectors {
         if image.read_data(dir.lba + i, &mut sector).is_err() {
             break;
@@ -183,7 +313,8 @@ fn read_directory(image: &CdImage, dir: &Extent, tree: Tree) -> Vec<Record> {
             let id = &raw[33..33 + raw[32] as usize];
             // 00h is ".", 01h "..". Associated files (bit 2) hold Apple
             // resource forks and the like.
-            if id == [0] || id == [1] || raw[25] & 0x04 != 0 {
+            let flags = raw[flags_at];
+            if id == [0] || id == [1] || flags & 0x04 != 0 {
                 continue;
             }
             let name = record_name(id, tree);
@@ -192,7 +323,7 @@ fn read_directory(image: &CdImage, dir: &Extent, tree: Tree) -> Vec<Record> {
             if tree == Tree::Joliet && (name.is_empty() || name.contains(['\\', '/'])) {
                 continue;
             }
-            let (time, date) = dos_time(&raw[18..25]);
+            let (time, date) = dos_time(&raw[18..24]);
             records.push(Record {
                 name,
                 extent: Extent {
@@ -201,9 +332,9 @@ fn read_directory(image: &CdImage, dir: &Extent, tree: Tree) -> Vec<Record> {
                     size: le32(raw, 10),
                     time,
                     date,
-                    hidden: raw[25] & 0x01 != 0,
+                    hidden: flags & 0x01 != 0,
                 },
-                is_dir: raw[25] & 0x02 != 0,
+                is_dir: flags & 0x02 != 0,
                 raw: raw.to_vec(),
             });
         }
@@ -244,26 +375,27 @@ fn data_extents(image: &CdImage, dir: &Extent, tree: Tree) -> HashSet<(u32, u32)
     files
 }
 
-/// The records of a directory in the primary tree with the DOS names
-/// programs see them by, as MSCDEX shows them.
-fn dos_entries(image: &CdImage, dir: &Extent) -> Vec<(String, Record)> {
-    let records = read_directory(image, dir, Tree::Primary);
+/// The records of a directory in the primary tree (`tree`) with the DOS
+/// names programs see them by, as MSCDEX shows them.
+fn dos_entries(image: &CdImage, tree: Tree, dir: &Extent) -> Vec<(String, Record)> {
+    let records = read_directory(image, dir, tree);
     let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
     crate::disk::short_names(&names).into_iter().zip(records).collect()
 }
 
 /// For each record of a directory in the Joliet tree, the record of the
-/// same directory in the primary tree that is the same file or directory,
-/// if there is one. A file is the one with the same data, a directory the
-/// one of the same name or else the one with the same files in it. Data
-/// goes before names, as the trees often spell names differently
-/// ("NSENGL~1.DLL" and "nsenglishres.dll"). A file whose data no primary
-/// record has goes by its name: an empty file, or one each tree has its
-/// own copy of under one name. That keeps one entry for one name, and
-/// Windows programs read the primary tree's copy of such a file.
+/// same directory in the primary tree (`tree`) that is the same file or
+/// directory, if there is one. A file is the one with the same data, a
+/// directory the one of the same name or else the one with the same files
+/// in it. Data goes before names, as the trees often spell names
+/// differently ("NSENGL~1.DLL" and "nsenglishres.dll"). A file whose data
+/// no primary record has goes by its name: an empty file, or one each tree
+/// has its own copy of under one name. That keeps one entry for one name,
+/// and Windows programs read the primary tree's copy of such a file.
 /// `primary_short` are the DOS names of the primary records.
 fn pair(
     image: &CdImage,
+    tree: Tree,
     primary: &[Record],
     primary_short: &[String],
     joliet: &[Record],
@@ -332,7 +464,7 @@ fn pair(
     }
     let mut primary_files: Vec<Option<HashSet<(u32, u32)>>> = primary_dirs
         .iter()
-        .map(|&p| Some(data_extents(image, &primary[p].extent, Tree::Primary)))
+        .map(|&p| Some(data_extents(image, &primary[p].extent, tree)))
         .collect();
     // The one that shares the most files with it, as a disc that keeps
     // one copy of a file several directories have makes them share some.
@@ -353,18 +485,23 @@ fn pair(
     pairs
 }
 
-/// The entries of a directory, from its records in the primary tree and
-/// in Joliet's, either of which may be missing: the primary tree's with
-/// the DOS names programs see them by and the Joliet names of those
-/// Joliet has, then those only Joliet has, with DOS names made from
+/// The entries of a directory, from its records in the primary tree
+/// (`tree`) and in Joliet's, either of which may be missing: the primary
+/// tree's with the DOS names programs see them by and the Joliet names of
+/// those Joliet has, then those only Joliet has, with DOS names made from
 /// theirs.
-fn entries(image: &CdImage, primary: Option<&Extent>, joliet: Option<&Extent>) -> Vec<Entry> {
+fn entries(
+    image: &CdImage,
+    tree: Tree,
+    primary: Option<&Extent>,
+    joliet: Option<&Extent>,
+) -> Vec<Entry> {
     let (primary_names, primary): (Vec<String>, Vec<Record>) = primary
-        .map_or_else(Vec::new, |dir| dos_entries(image, dir))
+        .map_or_else(Vec::new, |dir| dos_entries(image, tree, dir))
         .into_iter()
         .unzip();
     let joliet = joliet.map_or_else(Vec::new, |dir| read_directory(image, dir, Tree::Joliet));
-    let pairs = pair(image, &primary, &primary_names, &joliet);
+    let pairs = pair(image, tree, &primary, &primary_names, &joliet);
     let mut joliet_of: Vec<Option<Record>> = (0..primary.len()).map(|_| None).collect();
     let mut only_joliet = Vec::new();
     for (record, paired) in joliet.into_iter().zip(pairs) {
@@ -403,34 +540,33 @@ fn entries(image: &CdImage, primary: Option<&Extent>, joliet: Option<&Extent>) -
         .collect()
 }
 
-/// The root directory's extent, from a volume descriptor.
-fn root(descriptor: &[u8; DATA_SECTOR]) -> Extent {
-    let record = &descriptor[156..190];
-    let (time, date) = dos_time(&record[18..25]);
+/// The extent of a root directory, from its record in a volume
+/// descriptor.
+fn root(record: &[u8]) -> Extent {
+    let (time, date) = dos_time(&record[18..24]);
     Extent { lba: le32(record, 2) + record[1] as u32, size: le32(record, 10), time, date, hidden: false }
 }
 
 /// Read the file system of a disc's data track.
 pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
-    let descriptors = volume_descriptors(image)?;
-    let descriptor = Box::new(*primary(&descriptors)?);
+    let descriptors = Descriptors::read(image)?;
+    let descriptor = Box::new(*descriptors.primary()?);
     // Padded with spaces, or on some discs with NULs.
-    let label = String::from_utf8_lossy(&descriptor[40..72]).trim_matches([' ', '\0']).to_string();
+    let label = String::from_utf8_lossy(descriptors.format.label(&descriptor[..]))
+        .trim_matches([' ', '\0'])
+        .to_string();
+    let tree = descriptors.primary_tree();
     let mut files = MemFs::new();
-    files.insert_dir_record("", root(&descriptor));
+    let root = descriptors.root()?;
+    files.insert_dir_record("", root);
     let mut visited = HashSet::new();
-    let mut pending = vec![(
-        String::new(),
-        Some(root(&descriptor)),
-        joliet_root(&descriptors),
-        0,
-    )];
+    let mut pending = vec![(String::new(), Some(root), descriptors.joliet_root(), 0)];
     while let Some((path, primary, joliet, depth)) = pending.pop() {
         // A directory loop on a broken disc.
         if !visited.insert((primary.map(|d| d.lba), joliet.map(|d| d.lba))) {
             continue;
         }
-        for entry in entries(image, primary.as_ref(), joliet.as_ref()) {
+        for entry in entries(image, tree, primary.as_ref(), joliet.as_ref()) {
             let child = if path.is_empty() {
                 entry.name
             } else {
@@ -455,18 +591,20 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
 }
 
 /// The directory record of the file or directory at a DOS path on the disc
-/// ("SAMNMAX\\SAMNMAX.EXE"), for MSCDEX's Get Directory Entry. MSCDEX
-/// reads the primary tree alone, so what only Joliet has isn't found.
-pub fn find_record(image: &CdImage, path: &str) -> Option<Vec<u8>> {
-    let descriptor = primary_descriptor(image).ok()?;
-    let mut dir = root(&descriptor);
+/// ("SAMNMAX\\SAMNMAX.EXE"), for MSCDEX's Get Directory Entry, as the disc
+/// has it, with the disc's format. MSCDEX reads the primary tree alone, so
+/// what only Joliet has isn't found.
+pub fn find_record(image: &CdImage, path: &str) -> Option<(Format, Vec<u8>)> {
+    let descriptors = Descriptors::read(image).ok()?;
+    let tree = descriptors.primary_tree();
+    let mut dir = descriptors.root().ok()?;
     let mut components = path.split('\\').filter(|c| !c.is_empty()).peekable();
     while let Some(component) = components.next() {
-        let (_, record) = dos_entries(image, &dir)
+        let (_, record) = dos_entries(image, tree, &dir)
             .into_iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(component))?;
         if components.peek().is_none() {
-            return Some(record.raw);
+            return Some((descriptors.format, record.raw));
         }
         if !record.is_dir {
             return None;
@@ -651,7 +789,8 @@ mod tests {
     #[test]
     fn mscdex_finds_the_primary_records() {
         let (image, _) = joliet_volume();
-        let record = find_record(&image, "PROGRAM_\\SETUP.INI").unwrap();
+        let (format, record) = find_record(&image, "PROGRAM_\\SETUP.INI").unwrap();
+        assert_eq!(format, Format::Iso9660);
         assert_eq!(&record[33..33 + record[32] as usize], b"SETUP.INI;1");
         assert!(find_record(&image, "NSENGLIS.DLL").is_some());
         // MSCDEX reads no Joliet names.
