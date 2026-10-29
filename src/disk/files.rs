@@ -153,9 +153,12 @@ impl DiskController {
             return Ok(handle);
         }
 
-        let (drive, path) = self.locate(filename).ok_or(0x03)?; // Path not found
-        // A directory (or a bare "D:") isn't a file: access denied.
-        let existing = hostfs::metadata(&path).ok();
+        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?; // Path not found
+        // A directory (or a bare "D:") isn't a file: access denied. A name
+        // its folder's entries lack names nothing there (`locate_found`):
+        // programs poll for files that aren't there, and a stat or an
+        // open of a missing name costs the host more than the lookup.
+        let existing = if missing { None } else { hostfs::metadata(&path).ok() };
         if existing.as_ref().is_some_and(|m| m.is_dir) {
             return Err(0x05);
         }
@@ -186,7 +189,11 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        let opened = options.open(&path);
+        let opened = if missing && !create {
+            Err(std::io::ErrorKind::NotFound.into())
+        } else {
+            options.open(&path)
+        };
         // Opening a file that is there already adds no name to its folder.
         if create && existing.is_none() {
             self.host_dirs.changed();
@@ -388,8 +395,8 @@ impl DiskController {
             }
             return volume.remove(&parts);
         }
-        let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !hostfs::is_file(&path) {
+        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
+        if missing || !hostfs::is_file(&path) {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;
