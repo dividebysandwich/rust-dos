@@ -174,8 +174,10 @@ impl DiskController {
         if let Some(found) = self.find_fat(filename) {
             return found.map(|e| e.attr as u16);
         }
-        let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !hostfs::exists(&path) {
+        // A name its folder's entries lack is no file (`locate_found`), as
+        // to `is_file` and opens.
+        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
+        if missing || !hostfs::exists(&path) {
             return Err(0x02); // File Not Found
         }
 
@@ -214,8 +216,10 @@ impl DiskController {
             self.check_writable(drive)?;
             return volume.set_attr(&parts, attr as u8);
         }
-        let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !hostfs::exists(&path) {
+        // A name its folder's entries lack is no file (`locate_found`), as
+        // to `is_file` and opens.
+        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
+        if missing || !hostfs::exists(&path) {
             return Err(0x02);
         }
         self.check_writable(drive)?;

@@ -158,7 +158,7 @@ impl DiskController {
         // its folder's entries lack names nothing there (`locate_found`):
         // programs poll for files that aren't there, and a stat or an
         // open of a missing name costs the host more than the lookup.
-        let existing = missing.is_none().then(|| hostfs::metadata(&path).ok()).flatten();
+        let existing = if missing { None } else { hostfs::metadata(&path).ok() };
         if existing.as_ref().is_some_and(|m| m.is_dir) {
             return Err(0x05);
         }
@@ -189,9 +189,10 @@ impl DiskController {
         }
 
         let handle = self.free_handle()?;
-        let opened = match missing {
-            Some(_) if !create => Err(std::io::ErrorKind::NotFound.into()),
-            _ => options.open(&path),
+        let opened = if missing && !create {
+            Err(std::io::ErrorKind::NotFound.into())
+        } else {
+            options.open(&path)
         };
         // Opening a file that is there already adds no name to its folder.
         if create && existing.is_none() {
@@ -394,8 +395,8 @@ impl DiskController {
             }
             return volume.remove(&parts);
         }
-        let (drive, path) = self.locate(filename).ok_or(0x03)?;
-        if !hostfs::is_file(&path) {
+        let (drive, path, missing) = self.locate_found(filename).ok_or(0x03)?;
+        if missing || !hostfs::is_file(&path) {
             return Err(0x02); // File not found
         }
         self.check_writable(drive)?;

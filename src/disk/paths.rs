@@ -69,9 +69,7 @@ impl DiskController {
 
     /// Like `resolve_path`, but also returns the drive the path is on.
     pub(crate) fn locate(&self, dos_path: &str) -> Option<(u8, PathBuf)> {
-        let path_str = dos_path.replace('/', "\\");
-        let (drive, rest) = self.split_drive(&path_str)?;
-        self.resolve_on(drive, rest).map(|p| (drive, p))
+        self.locate_found(dos_path).map(|(drive, path, _)| (drive, path))
     }
 
     pub(super) fn resolve_on(&self, drive_num: u8, rest: &str) -> Option<PathBuf> {
@@ -84,13 +82,13 @@ impl DiskController {
         self.walk_host(drive_num, rest).map(|(path, dos, _)| (path, dos))
     }
 
-    /// `resolve_names_on`, and the place of the first component of the
-    /// path that isn't among its folder's entries (`find_host_entry`): the
-    /// path names nothing on the host then, which needs no stat to tell.
-    /// Each component is the entry's long name, or, where it matches
-    /// nothing, the name uppercased, for creating it. A name starting with
-    /// a dot is never missing, as the entries leave such names out.
-    fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, Option<usize>)> {
+    /// `resolve_names_on`, and whether a component of the path isn't
+    /// among its folder's entries (`find_host_entry`): the path names
+    /// nothing on the host then, which needs no stat to tell. Each
+    /// component is the entry's long name, or, where it matches nothing,
+    /// the name uppercased, for creating it. A name the entries can't rule
+    /// out (`entries_settle`) is never missing.
+    fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
         // first (`locate_in_memory`).
@@ -100,11 +98,18 @@ impl DiskController {
         // logical_components can't climb above the root.
         let mut full_path = root.to_path_buf();
         let mut dos_path: Vec<String> = Vec::new();
-        let mut missing = None;
-        for (i, part) in Self::logical_components(drive, rest).into_iter().enumerate() {
+        let mut missing = false;
+        // Below a name the entries can't rule out, the folders read may
+        // not be the ones the host has there, so they rule out nothing.
+        let mut sure = true;
+        for part in Self::logical_components(drive, rest) {
             let found = self.find_host_entry(&full_path, part).1;
-            if found.is_none() && !part.starts_with('.') && missing.is_none() {
-                missing = Some(i);
+            if found.is_none() && sure {
+                if Self::entries_settle(part) {
+                    missing = true;
+                } else {
+                    sure = false;
+                }
             }
             let (host_name, dos_name) = found.unwrap_or_else(|| {
                 let upper = part.to_ascii_uppercase();
@@ -122,24 +127,31 @@ impl DiskController {
         }
     }
 
-    /// `locate`, and which component of the path isn't among its folder's
-    /// entries (`walk_host`): None where each is (a stat tells whether the
-    /// path names a file or a folder), `Some(true)` where the last one
-    /// isn't and `Some(false)` where one before it isn't.
-    pub(super) fn locate_found(&self, dos_path: &str) -> Option<(u8, PathBuf, Option<bool>)> {
+    /// Whether a folder's entries settle that the path component `part`
+    /// isn't in it when none matches it. They leave out names starting
+    /// with a dot, and the host may know a name by a spelling they don't
+    /// match: Windows drops a dot that ends it ("README." is "README"),
+    /// has short names of its own (with a "~"), and Windows and macOS fold
+    /// the case of letters beyond ASCII. Such names go to the host.
+    fn entries_settle(part: &str) -> bool {
+        !part.starts_with('.') && !part.ends_with('.') && !part.contains('~') && part.is_ascii()
+    }
+
+    /// `locate`, and whether a component of the path isn't among its
+    /// folder's entries (`walk_host`), so that the path names nothing on
+    /// the host. Where each is, a stat tells whether the path names a file
+    /// or a folder.
+    pub(super) fn locate_found(&self, dos_path: &str) -> Option<(u8, PathBuf, bool)> {
         let path_str = dos_path.replace('/', "\\");
         let (drive, rest) = self.split_drive(&path_str)?;
-        let count = self.drive(drive).map(|d| Self::logical_components(d, rest).len())?;
         let (path, _, missing) = self.walk_host(drive, rest)?;
-        Some((drive, path, missing.map(|i| i + 1 == count)))
+        Some((drive, path, missing))
     }
 
     /// The host path of a DOS path, None where it names nothing on the
     /// host (`locate_found`).
     fn resolve_found(&self, dos_path: &str) -> Option<PathBuf> {
-        self.locate_found(dos_path)
-            .filter(|(_, _, missing)| missing.is_none())
-            .map(|(_, path, _)| path)
+        self.locate_found(dos_path).filter(|(_, _, missing)| !missing).map(|(_, path, _)| path)
     }
 
     /// The names of the entries of the directory `dos_dir`, as (long
@@ -314,7 +326,6 @@ impl DiskController {
         let short = short_names(&names);
         names.into_iter().zip(short).collect()
     }
-
 
     /// The entries of the host folder `dir`, and the one named `name`: by
     /// its long name in any case, or by its short name. A name the kept
