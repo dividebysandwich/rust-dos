@@ -636,13 +636,7 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
 /// `start_child`, with `program_bytes` for C.EXE: T.EXE's exit code is 1
 /// for CreateProcessA's TRUE, the wait's result shifted left by one, and
 /// the child's exit code shifted left by four.
-fn start_program(
-    test: &str,
-    line: &str,
-    child: &str,
-    program_bytes: Vec<u8>,
-    dirs: &[&str],
-) -> u8 {
+fn start_program(test: &str, line: &str, child: &str, program_bytes: Vec<u8>, dirs: &[&str]) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",

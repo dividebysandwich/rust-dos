@@ -222,9 +222,7 @@ pub(crate) fn spawn(
         (None, None) => return Err(ERROR_INVALID_PARAMETER),
     };
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
-    let file = cpu
-        .read_program_file(&path)
-        .ok_or(ERROR_FILE_NOT_FOUND)?;
+    let file = cpu.read_program_file(&path).ok_or(ERROR_FILE_NOT_FOUND)?;
     if launcher::is_ne(&file) {
         // InstallShield's setup launcher starts its 32-bit engine in its
         // place, as from the DOS prompt (`launcher`). Windows 98's waits
@@ -233,7 +231,15 @@ pub(crate) fn spawn(
         if let Some((engine, engine_arguments)) = launcher::engine(cpu, &path, &file) {
             let line = format!("{} {}", engine, engine_arguments);
             let environment = Some(environment);
-            return spawn(cpu, Some(&engine), Some(&line), environment, inherit, flags, startup);
+            return spawn(
+                cpu,
+                Some(&engine),
+                Some(&line),
+                environment,
+                inherit,
+                flags,
+                startup,
+            );
         }
         return spawn_win16(cpu, &path, &file, arguments, environment, &startup);
     }
@@ -341,16 +347,18 @@ fn spawn_win16(
         SW_SHOWNORMAL
     };
     let arguments = arguments.trim_start();
-    let spawned = crate::win16::task::spawn(cpu, path, arguments, show, 0, environment)
-        .map_err(|message| {
-            cpu.bus
-                .log_string(&format!("[W16] {} can't start: {}", path, message));
-            if message.contains("memory") {
+    let spawned = match crate::win16::task::spawn(cpu, path, arguments, show, 0, environment) {
+        Ok(spawned) => spawned,
+        Err(message) => {
+            let line = format!("[W16] {} can't start: {}", path, message);
+            cpu.bus.log_string(&line);
+            return Err(if message.contains("memory") {
                 ERROR_NOT_ENOUGH_MEMORY
             } else {
                 ERROR_BAD_EXE_FORMAT
-            }
-        })?;
+            });
+        }
+    };
     Ok(handles(cpu, spawned.process, spawned.thread))
 }
 
@@ -393,6 +401,8 @@ pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             Some(33)
         }
         Err(ERROR_FILE_NOT_FOUND | ERROR_INVALID_PARAMETER) => Some(ERROR_FILE_NOT_FOUND),
+        // WinExec's 0: the system is out of memory or resources.
+        Err(ERROR_NOT_ENOUGH_MEMORY) => Some(0),
         Err(_) => Some(ERROR_BAD_FORMAT),
     }
 }

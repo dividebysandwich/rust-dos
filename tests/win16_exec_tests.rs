@@ -111,7 +111,11 @@ fn win32_program(code: u8) -> Vec<u8> {
     let mut b = pe::Builder::exe(0x40_0000);
     b.subsystem(pe::SUBSYSTEM_GUI);
     let text = [0xB8, code, 0x00, 0x00, 0x00, 0xC3]; // mov eax,code; ret
-    let rva = b.section(".text", &text, pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ);
+    let rva = b.section(
+        ".text",
+        &text,
+        pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
+    );
     b.entry(rva);
     b.build()
 }

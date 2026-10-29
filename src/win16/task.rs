@@ -992,7 +992,10 @@ fn exec_win32(
         Err(code) => {
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: error {}", path, code));
-            Err(if code == 8 { 8 } else { 11 })
+            Err(match code {
+                2 | 8 => code as u16,
+                _ => 11,
+            })
         }
     }
 }
