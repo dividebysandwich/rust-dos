@@ -4010,6 +4010,91 @@ fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
 }
 
 #[test]
+fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
+    // T.EXE shows a window, starts C.EXE and waits for it. C.EXE's first
+    // window comes to the foreground; when C.EXE destroys it, the
+    // foreground goes back to T.EXE's window. C.EXE then makes a hidden
+    // window its queue's active one, behind the foreground, and shows
+    // it: the activation that showing it asks for brings it to the
+    // foreground, as T.EXE, which started C.EXE, is there. (This is how
+    // MechCommander's setup shows DirectX setup's message box, whose
+    // SetFocus on its button comes before its ShowWindow.)
+    const SW_SHOWNORMAL: i32 = 1;
+    let child = {
+        let user32 = [
+            "CreateWindowExA",
+            "DestroyWindow",
+            "SetActiveWindow",
+            "ShowWindow",
+            "GetForegroundWindow",
+        ];
+        let data = child_data(&[(0, "One"), (0x10, "Static")]);
+        let kernel32 = ["ExitProcess"];
+        win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+            let (class, title) = (l.at(0x10) as i32, l.at(0) as i32);
+            a.xor(ebx, ebx)?;
+            let style = WS_POPUP | WS_VISIBLE;
+            push_args(a, &[0, class, title, style, 0, 0, 50, 50, 0, 0, 0, 0])?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(esi, eax)?;
+            a.call(f("GetForegroundWindow"))?;
+            a.cmp(eax, esi)?;
+            bit_if(a, eq, 0)?;
+            push_args(a, &[0, 0, 0, 0])?;
+            push_args(a, &[0, class, title, WS_POPUP, 60, 0, 50, 50])?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(edi, eax)?;
+            a.push(esi)?;
+            a.call(f("DestroyWindow"))?;
+            a.call(f("GetForegroundWindow"))?;
+            a.cmp(eax, edi)?;
+            bit_if(a, ne, 1)?;
+            a.push(edi)?;
+            a.call(f("SetActiveWindow"))?;
+            a.push(SW_SHOWNORMAL)?;
+            a.push(edi)?;
+            a.call(f("ShowWindow"))?;
+            a.call(f("GetForegroundWindow"))?;
+            a.cmp(eax, edi)?;
+            bit_if(a, eq, 2)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        })
+    };
+    let kernel32 = [
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    // The exit code at 0xC0.
+    let data = child_data(&[(0, "C.EXE"), (0x10, "Static"), (0x20, "Parent")]);
+    let user32 = ["CreateWindowExA"];
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, title, style, 100, 0, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        create_child(a, l, f, 0)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xC0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.push(dword_ptr(l.at(0xC0)))?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "shown_after_activated_behind",
+        &[("T.EXE", parent), ("C.EXE", child)],
+    );
+    assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
+}
+
+#[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then
     // gets messages. The state is saved once C0.DAT is there, while the

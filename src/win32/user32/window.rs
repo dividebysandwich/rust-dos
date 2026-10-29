@@ -1609,7 +1609,12 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         flags |= SWP_NOMOVE;
     }
     let child = style & WS_CHILD != 0;
-    if child || state.is_active(hwnd) {
+    // A window already active in the foreground isn't activated again.
+    // The active window of a queue in the background is: the activation
+    // brings it to the foreground if SetForegroundWindow may, as when a
+    // program's message box made active behind the foreground (its
+    // SetFocus came first) is then shown.
+    if child || state.foreground_window() == hwnd {
         flags |= SWP_NOACTIVATE;
     }
     let mut after = after;
