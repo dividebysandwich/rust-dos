@@ -346,6 +346,56 @@ fn paused_at_the_prompt(addr: SocketAddr) {
     assert_eq!(http(addr, "POST", "/api/control/pause", &[], Some(json!({}))).0, 200);
 }
 
+/// The lines logged at start-up before the debug server starts (which
+/// renderer draws the window, the configuration's warnings) are in its log
+/// as in the log file, ahead of the shell's, numbered from 1.
+#[test]
+fn the_log_has_the_lines_logged_before_the_debug_server_started() {
+    let dir = std::env::temp_dir().join(format!("rust-dos-early-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("c")).unwrap();
+    let _cleanup = RemoveTestDir(dir.clone());
+    let (mut emulator, addr) = start_with_config(&dir, None, true, &[]);
+    paused_at_the_prompt(addr);
+    let (status, display) = http(addr, "GET", "/api/log?grep=DISPLAY", &[], None);
+    assert_eq!(status, 200, "{}", display);
+    let lines = display["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1, "{}", display);
+    assert!(
+        lines[0]["line"].as_str().unwrap().starts_with("[DISPLAY] "),
+        "{}",
+        display
+    );
+    // The oldest lines: without `after_n` the log gives the newest.
+    let (_, log) = http(addr, "GET", "/api/log?after_n=0&limit=1000", &[], None);
+    assert_eq!(log["lines"][0]["n"], 1, "{}", log);
+    let served: Vec<String> = log["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["line"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        http(addr, "POST", "/api/control/quit", &[], Some(json!({}))).0,
+        200
+    );
+    let _ = emulator.0.wait();
+
+    // Up to the shell's line, the same lines in the same order as the log
+    // file, after its own first line, which says which rust-dos started.
+    let file = std::fs::read_to_string(dir.join("emulator.log")).unwrap();
+    let shell = |lines: &[&str]| {
+        lines
+            .iter()
+            .position(|l| l.starts_with("[SYSTEM] Shell Loaded"))
+    };
+    let logged: Vec<&str> = file.lines().skip(1).collect();
+    let served: Vec<&str> = served.iter().map(String::as_str).collect();
+    let (in_file, in_log) = (shell(&logged).unwrap(), shell(&served).unwrap());
+    assert!(in_log > 0, "{:?}", served);
+    assert_eq!(served[..in_log], logged[..in_file]);
+}
+
 /// A load keeps the speed the emulator runs at, whatever speed the state
 /// was saved at: `--cycles`, or the last one `/api/speed` set.
 #[test]
