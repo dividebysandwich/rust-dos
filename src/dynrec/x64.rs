@@ -2396,7 +2396,11 @@ impl Gen<'_> {
             Uop::FToSingle { t, x } => {
                 // Rounding to nearest, a double with bits set among its
                 // low 28 rounds as the 80 bits it was rounded from would:
-                // neither is a single or halfway between two.
+                // neither is a single or halfway between two. Under
+                // another rounding, a register that is its double rounds
+                // as the handlers' `double_to_single_bits` does: cvtsd2ss
+                // rounds to nearest, and where that went the other way
+                // than the rounding, the next single toward it.
                 dynasm!(self.ops
                     ; .arch x64
                     ; test WORD [rbx + FPU_CONTROL], 0xC00
@@ -2420,6 +2424,37 @@ impl Gen<'_> {
                     ; single_inline:
                     ; cvtsd2ss xmm2, Rx(x.0)
                     ; movd Rd(r(t)), xmm2
+                    ; movzx ecx, WORD [rbx + FPU_CONTROL]
+                    ; and ecx, 0xC00
+                    ; jz >single_done
+                    ; cvtss2sd xmm3, xmm2
+                    ; cmp ecx, 0x800
+                    ; je >single_up
+                    ; cmp ecx, 0x400
+                    ; je >single_down
+                    // Toward zero: down from a positive single, up from a
+                    // negative one.
+                    ; test Rd(r(t)), Rd(r(t))
+                    ; js >single_up
+                    ; single_down:
+                    // The nearest single above the value (not a NaN): the
+                    // next one down.
+                    ; ucomisd xmm3, Rx(x.0)
+                    ; jbe >single_done
+                    ; test Rd(r(t)), Rd(r(t))
+                    ; js >single_inc
+                    ; jmp >single_dec
+                    ; single_up:
+                    ; ucomisd Rx(x.0), xmm3
+                    ; jbe >single_done
+                    ; test Rd(r(t)), Rd(r(t))
+                    ; js >single_dec
+                    // A negative single's bits count away from zero.
+                    ; single_inc:
+                    ; add Rd(r(t)), 1
+                    ; jmp >single_done
+                    ; single_dec:
+                    ; sub Rd(r(t)), 1
                     ; single_done:
                 );
             }
