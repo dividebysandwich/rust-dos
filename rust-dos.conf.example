@@ -393,6 +393,11 @@
 # Xiao San Guo Zhi, whose random numbers come out the same every time
 # without it. A change takes effect at the DOS prompt.
 #pit2_gate_at_start=false
+# Correct the Sound Blaster driver of a game that plays badly on every
+# card, real ones too, when rust-dos recognises its code: on (the default)
+# or off, which plays it as a real card does. It knows Prehistorik 2 and
+# Blues Brothers: Jukebox Adventure, whose sound clicks at every note.
+#sb_game_fix=on
 # The noises the hard disks and floppy drives make: off (the default),
 # seek-only (the heads moving), or on (the disk spinning as well). They
 # sound best with the disk speeds above set lower than maximum.

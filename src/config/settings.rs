@@ -370,6 +370,7 @@ impl Settings {
 pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static str, Option<String>)> {
     use Section::{Emulator, Sound};
     let yes_no = |on: bool| Some(if on { "true" } else { "false" }.to_string());
+    let on_off = |on: bool| Some(if on { "on" } else { "off" }.to_string());
     let sound = &settings.sound;
     let (sb, gus) = (&sound.sb, &sound.gus);
     let mixer = Channel::ALL
@@ -507,12 +508,11 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
         (Sound, "pit2_gate_at_start", yes_no(sound.pit2_gate_at_start)),
-        (Sound, "sb_game_fix", Some(if sound.sb_game_fix { "on" } else { "off" }.to_string())),
+        (Sound, "sb_game_fix", on_off(sound.sb_game_fix)),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
     entries.extend(mixer);
-    let on_off = |on: bool| Some(if on { "on" } else { "off" }.to_string());
     entries.extend([
         (Section::Mixer, "speaker_filter", on_off(settings.mixer.speaker_filter)),
         (Section::Mixer, "sb_filter", Some(settings.mixer.sb_filter.name().to_string())),

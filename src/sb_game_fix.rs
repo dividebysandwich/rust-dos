@@ -4,10 +4,15 @@
 //! memory before it runs, so the game sounds as it was meant to. Nothing
 //! changes for a program whose code doesn't match.
 //!
-//! The check runs when a program resets the DSP (a write to base + 6),
-//! which a driver does before it sets anything up. It looks through
-//! conventional memory for each known driver's first piece of code, and
-//! patches only a copy where every piece is there as the game shipped it.
+//! The check runs when a program starts a reset of the DSP (a write of 1
+//! to base + 6), which a driver does before it sets anything up. It looks
+//! through conventional memory for each known driver's first piece of
+//! code, and patches only a copy where every piece is there as the game
+//! shipped it and whose IRQ handler isn't in the interrupt table yet. A
+//! driver that is already set up, as in a save state from a run without
+//! the fix, has built its volume table and converted its effects the old
+//! way, and patching the rest would make the mix wrap around; it stays
+//! as it is until the game starts again.
 //!
 //! The drivers known are those of two Titus games of 1993 with the same
 //! sound engine: Prehistorik 2 and Blues Brothers: Jukebox Adventure. The
@@ -49,6 +54,8 @@ pub struct Driver {
     pub game: &'static str,
     /// Code that has to be there, unchanged, besides the patches' own.
     pub checks: &'static [Bytes],
+    /// Where its IRQ handler starts.
+    pub irq_handler: usize,
     /// What to change: the bytes there now, and what replaces them (of
     /// the same length). The first is what the search looks for.
     pub patches: &'static [(Bytes, &'static [u8])],
@@ -90,6 +97,7 @@ const PREHISTORIK_2: Driver = Driver {
             bytes: &[0x50, 0x53, 0x51, 0x52],
         },
     ],
+    irq_handler: 0x204D,
     patches: &[
         // The volume table: from
         //   xor ch,ch / mov al,cl / mul ch / shr ax,1 (6 times) / stosb /
@@ -175,6 +183,7 @@ const JUKEBOX_ADVENTURE: Driver = Driver {
             bytes: &[0x50, 0x53, 0x51, 0x52],
         },
     ],
+    irq_handler: 0x444B,
     patches: &[
         // The volume table: from
         //   xor ch,ch / mov al,cl / mul ch / shr ax,6 / stosb / inc ch /
@@ -256,15 +265,31 @@ fn has(ram: &[u8], base: usize, b: &Bytes) -> bool {
 pub fn find(ram: &[u8]) -> Option<(&'static Driver, usize)> {
     DRIVERS.iter().find_map(|driver| {
         let (first, _) = &driver.patches[0];
-        ram.windows(first.bytes.len())
+        // A window's index in what follows `first.at` is the base it
+        // would be at.
+        ram.get(first.at..)?
+            .windows(first.bytes.len())
             .enumerate()
-            .filter(|(at, window)| *window == first.bytes && *at >= first.at)
-            .map(|(at, _)| at - first.at)
+            .filter(|(_, window)| *window == first.bytes)
+            .map(|(base, _)| base)
             .find(|&base| {
                 driver.checks.iter().all(|b| has(ram, base, b))
                     && driver.patches.iter().all(|(old, _)| has(ram, base, old))
+                    && !set_up(ram, base + driver.irq_handler)
             })
             .map(|base| (driver, base))
+    })
+}
+
+/// Whether a vector in the interrupt table of `ram` points at the linear
+/// address `handler`.
+fn set_up(ram: &[u8], handler: usize) -> bool {
+    ram.get(..0x400).is_some_and(|table| {
+        table.chunks_exact(4).any(|v| {
+            let offset = u16::from_le_bytes([v[0], v[1]]) as usize;
+            let segment = u16::from_le_bytes([v[2], v[3]]) as usize;
+            (segment << 4) + offset == handler
+        })
     })
 }
 
@@ -326,6 +351,20 @@ mod tests {
             }
         }
         assert!(find(&vec![0u8; 0xA0000]).is_none());
+    }
+
+    #[test]
+    fn leaves_a_driver_that_is_already_set_up() {
+        let base = 0x5_DA00;
+        for driver in DRIVERS {
+            let mut ram = memory(driver, base);
+            // IRQ 7's vector (int 0Fh) at the handler, as 5DA0:offset.
+            let vector = 0x0F * 4;
+            let offset = driver.irq_handler as u16;
+            ram[vector..vector + 2].copy_from_slice(&offset.to_le_bytes());
+            ram[vector + 2..vector + 4].copy_from_slice(&0x5DA0u16.to_le_bytes());
+            assert!(find(&ram).is_none(), "{} found once set up", driver.game);
+        }
     }
 
     #[test]

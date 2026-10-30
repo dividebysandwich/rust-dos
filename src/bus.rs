@@ -1872,7 +1872,9 @@ impl Bus {
             0x1 | 0x9 => self.opl_data(0, value),
             0x3 if fm_ports => self.opl_data(1, value),
             _ => {
-                if offset == 0x6 && self.sb_game_fix {
+                // Once, as the reset starts (bit 0 set), not again as it
+                // ends.
+                if offset == 0x6 && value & 1 != 0 && self.sb_game_fix {
                     self.apply_sb_game_fix();
                 }
                 self.audio_catch_up();
