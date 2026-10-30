@@ -207,6 +207,11 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                                 value
                             )),
                         },
+                        "voodoo_readback" => match value.to_ascii_lowercase().as_str() {
+                            "exact" => config.voodoo_readback_gpu = Some(false),
+                            "gpu" => config.voodoo_readback_gpu = Some(true),
+                            _ => warn(format!("invalid voodoo_readback '{}' (exact or gpu)", value)),
+                        },
                         "voodoo_msaa" => match value.to_ascii_lowercase().as_str() {
                             "off" | "1" => config.voodoo_msaa = Some(1),
                             "2" | "4" | "8" => config.voodoo_msaa = value.parse().ok(),

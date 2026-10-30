@@ -656,6 +656,11 @@ impl GpuLink for SharedGl {
         let renderer = self.renderer.borrow();
         renderer.as_ref().is_some_and(|r| r.read_memory(&self.gl, at, out))
     }
+
+    fn read_buffer(&mut self, dest: Option<u32>, out: &mut [u16]) -> bool {
+        let renderer = self.renderer.borrow();
+        renderer.as_ref().is_some_and(|r| r.read_buffer(&self.gl, dest, out))
+    }
 }
 
 impl VoodooGl {
@@ -870,6 +875,97 @@ impl VoodooGl {
     /// too small.
     pub fn read_memory(&self, gl: &glow::Context, at: u32, out: &mut [u8]) -> bool {
         self.banshee.as_ref().is_ok_and(|b| b.memory.read(gl, at, out))
+    }
+
+    /// A buffer's pixels as drawn, at the card's resolution, row by row
+    /// from the top (`GpuLink::read_buffer`): colour buffer `key` in
+    /// 5-6-5, or with None the depth buffer's 16-bit values. Each of the
+    /// card's pixels is the sample nearest the middle of its block of
+    /// `scale` by `scale`, which holds the pixel the card would draw
+    /// there: an average would mix the edges of what was drawn. False if
+    /// there is no such buffer of `out`'s size.
+    pub fn read_buffer(&self, gl: &glow::Context, key: Option<u32>, out: &mut [u16]) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let target = match key {
+            Some(offs) => self.targets.get(&offs),
+            None => self.depth.and(self.targets.values().next()),
+        };
+        let Some(target) = target.filter(|_| out.len() == w * h) else {
+            return false;
+        };
+        let scale = self.scale.max(1) as usize;
+        let (sw, sh) = self.scaled();
+        let middle = |x: usize, y: usize| (y * scale + scale / 2) * sw as usize + x * scale + scale / 2;
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            if key.is_some() {
+                target.resolve(gl, (sw, sh));
+                let mut rgba = vec![0u8; sw as usize * sh as usize * 4];
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+                let pixels = glow::PixelPackData::Slice(Some(&mut rgba));
+                gl.read_pixels(0, 0, sw, sh, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                // The colours are 5-6-5 values widened by repeating their
+                // top bits, which the top bits give back.
+                for (i, value) in out.iter_mut().enumerate() {
+                    let at = middle(i % w, i / w) * 4;
+                    let [r, g, b] = [rgba[at], rgba[at + 1], rgba[at + 2]].map(u16::from);
+                    *value = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
+                }
+            } else {
+                let Some(depth) = self.read_depth(gl, target, (sw, sh)) else {
+                    return false;
+                };
+                // Depth is the card's value over 65535 (`triangle.frag`).
+                for (i, value) in out.iter_mut().enumerate() {
+                    *value = (depth[middle(i % w, i / w)] * 65535.0).round().clamp(0.0, 65535.0) as u16;
+                }
+            }
+            restore(gl);
+        }
+        true
+    }
+
+    /// The depth buffer's values, `size` of them: with multisampling
+    /// through a framebuffer of one sample a pixel made for the purpose.
+    ///
+    /// # Safety
+    /// See `VoodooGl`.
+    unsafe fn read_depth(&self, gl: &glow::Context, target: &Target, (w, h): (i32, i32)) -> Option<Vec<f32>> {
+        let mut depth = vec![0f32; w as usize * h as usize];
+        // SAFETY: the caller's.
+        unsafe {
+            let resolved = match target.samples {
+                None => None,
+                Some((samples, _)) => {
+                    let texture = texture(gl, glow::NEAREST).ok()?;
+                    let none = glow::PixelUnpackData::Slice(None);
+                    let format = glow::DEPTH24_STENCIL8 as i32;
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, format, w, h, 0, glow::DEPTH_STENCIL, glow::UNSIGNED_INT_24_8, none);
+                    let Ok(fbo) = gl.create_framebuffer() else {
+                        gl.delete_texture(texture);
+                        return None;
+                    };
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+                    let attach = glow::DEPTH_STENCIL_ATTACHMENT;
+                    gl.framebuffer_texture_2d(glow::DRAW_FRAMEBUFFER, attach, glow::TEXTURE_2D, Some(texture), 0);
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(samples));
+                    gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::DEPTH_BUFFER_BIT, glow::NEAREST);
+                    Some((fbo, texture))
+                }
+            };
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(resolved.map_or(target.fbo, |(fbo, _)| fbo)));
+            let pixels = glow::PixelPackData::Slice(Some(bytemuck_f32(&mut depth)));
+            gl.read_pixels(0, 0, w, h, glow::DEPTH_COMPONENT, glow::FLOAT, pixels);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if let Some((fbo, texture)) = resolved {
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(texture);
+            }
+        }
+        Some(depth)
     }
 
     fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
@@ -1821,6 +1917,13 @@ fn rgba(key: Option<u32>, value: u16) -> [u8; 4] {
 /// The gamma table as 256 RGBA entries a component takes its value from.
 fn lut(clut: &[u32; 33]) -> Vec<u8> {
     super::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
+}
+
+/// `values` as the bytes they are, for OpenGL to read into.
+fn bytemuck_f32(values: &mut [f32]) -> &mut [u8] {
+    // SAFETY: any bytes are a valid f32, and the slice covers exactly
+    // the values' memory.
+    unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(values)) }
 }
 
 fn vertex_bytes(vertices: &[Vertex]) -> &[u8] {

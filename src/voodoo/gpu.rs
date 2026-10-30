@@ -18,7 +18,8 @@
 use super::Voodoo;
 use super::mirror::{Blit, BlitSource, Command};
 use super::pages::{PAGE, Pages};
-use super::workers::Word;
+use super::backlog::Access;
+use super::workers::{Job, Word};
 
 /// The OpenGL renderer, as the card reaches it between frames.
 pub trait GpuLink {
@@ -33,6 +34,14 @@ pub trait GpuLink {
     /// on, into `out`. False, with `out` as it was, if the renderer has
     /// no copy to read them from (it went).
     fn read(&mut self, at: u32, out: &mut [u8]) -> bool;
+
+    /// A buffer's pixels as the renderer drew them, at the card's
+    /// resolution, row by row from the top: colour buffer `dest` (its
+    /// word offset) in 5-6-5, or with None the depth buffer. False, with
+    /// `out` as it was, if it has no such buffer of `out`'s size.
+    fn read_buffer(&mut self, _dest: Option<u32>, _out: &mut [u16]) -> bool {
+        false
+    }
 }
 
 /// The renderer's copy of the memory, as the card keeps track of it.
@@ -70,6 +79,7 @@ impl Voodoo {
     /// it away (the renderer stops): what only the GPU had is read back
     /// first.
     pub fn set_gpu_link(&mut self, link: Option<Box<dyn GpuLink>>) {
+        self.gpu_catch_up();
         self.gpu_sync_all();
         let gpu = self.gpu.get_mut();
         gpu.link = link;
@@ -78,6 +88,81 @@ impl Voodoo {
     /// Whether the card has a link to the renderer (`set_gpu_link`).
     pub fn gpu_linked(&self) -> bool {
         self.gpu.borrow().link.is_some()
+    }
+
+    /// Whether reads of the buffers get the renderer's pictures of them
+    /// (`voodoo_readback=gpu`) rather than what the software renderer
+    /// draws from the same commands. Off, what only the renderer had is
+    /// read back first.
+    pub fn set_gpu_reads(&mut self, on: bool) {
+        if !on && self.gpu_reads {
+            self.gpu_catch_up();
+        }
+        self.gpu_reads = on;
+    }
+
+    /// Whether `job`, which the backlog would hold with `access`, is the
+    /// renderer's alone: reads of the buffers get the renderer's pictures
+    /// of them, and the job draws nothing outside them, nor into alpha
+    /// planes, which the renderer keeps in its colour buffers. The
+    /// Banshee's 3D engine draws into memory its 2D side and its texture
+    /// units read, and stays exact.
+    pub(crate) fn gpu_takes(&self, job: &Job, access: &Access) -> bool {
+        if let Job::Triangle { st, .. } | Job::Fastfill { st, .. } = job
+            && st.fbz_mode & (1 << 18) != 0
+        {
+            self.gpu_alpha.set(true);
+        }
+        self.gpu_reads
+            && self.banshee.is_none()
+            && !self.gpu_alpha.get()
+            && !access.pinned
+            && !access.kept
+            && self.gpu.borrow().link.is_some()
+    }
+
+    /// Bring the buffers in memory up to the renderer's pictures of them,
+    /// if jobs were left to it: what it has recorded goes to it first,
+    /// and it reads the buffers back.
+    pub(crate) fn gpu_catch_up(&self) {
+        if !self.gpu_behind.replace(false) {
+            return;
+        }
+        self.gpu_read_backs.set(self.gpu_read_backs.get() + 1);
+        let (commands, layout) = {
+            let mut mirror = self.mirror.borrow_mut();
+            let Some(mirror) = mirror.as_mut() else { return };
+            let layout = mirror.layout().map(|key| key.layout());
+            (mirror.take_commands(), layout)
+        };
+        let Some(layout) = layout else { return };
+        let mut gpu = self.gpu.borrow_mut();
+        let Some(link) = gpu.link.as_mut() else {
+            if !std::mem::replace(&mut gpu.lost, true) {
+                eprintln!("[3DFX] the OpenGL renderer went with the buffers only it had");
+            }
+            return;
+        };
+        link.run(commands);
+        let (width, height) = (layout.width as usize, layout.height as usize);
+        let mut pixels = vec![0u16; width * height];
+        let buffers = layout.color.iter().map(|&offs| (Some(offs), offs, layout.stride));
+        let aux = layout.aux.map(|offs| (None, offs, layout.aux_stride));
+        let ram = &self.fbi.ram;
+        for (dest, base, stride) in buffers.chain(aux) {
+            if !link.read_buffer(dest, &mut pixels) {
+                continue;
+            }
+            for (y, row) in pixels.chunks_exact(width).enumerate() {
+                let start = base as usize + stride.row(y);
+                for (x, &value) in row.iter().enumerate() {
+                    let at = start + stride.col(x);
+                    if at < ram.len() {
+                        ram.set(at, value);
+                    }
+                }
+            }
+        }
     }
 
     /// Whether 2D operations may go to the GPU: the renderer draws the
@@ -89,7 +174,7 @@ impl Voodoo {
             .link
             .as_ref()
             .is_some_and(|link| link.ready());
-        self.mirror.is_some() && self.banshee.is_some() && linked
+        self.recording() && self.banshee.is_some() && linked
     }
 
     /// Do `blit` on the GPU, if it can be: the renderer has a link, and
@@ -106,7 +191,7 @@ impl Voodoo {
         if start >= end || end as usize > self.fbi.ram.bytes() {
             return false;
         }
-        let key = self.mirror.as_ref().and_then(|m| m.layout().copied());
+        let key = self.mirror_layout();
         // The 3D engine's buffers are on the GPU as pictures of their
         // own, and the software renderer draws them into the memory
         // without a word to `pages`: a page the blit draws into or reads
@@ -141,7 +226,7 @@ impl Voodoo {
         // What was recorded before goes first, which leaves the recording
         // room for the pages and the blit; then the renderer gets the
         // pages the blit reads and draws into that it lacks.
-        let Some(mirror) = self.mirror.as_mut() else {
+        let Some(mirror) = self.mirror.get_mut().as_mut() else {
             return false;
         };
         let mut commands = mirror.take_commands();
@@ -151,7 +236,7 @@ impl Voodoo {
         for (a, b) in spans {
             self.send_pages(a, b);
         }
-        let Some(mirror) = self.mirror.as_mut() else {
+        let Some(mirror) = self.mirror.get_mut().as_mut() else {
             return false;
         };
         mirror.blit(blit);
@@ -171,7 +256,7 @@ impl Voodoo {
     /// of memory with it: the renderer gets them all again, but for those
     /// it has newer.
     pub(crate) fn gpu_resend_dropped(&mut self) {
-        if self.mirror.as_mut().is_some_and(|m| m.take_dropped()) {
+        if self.mirror.get_mut().as_mut().is_some_and(|m| m.take_dropped()) {
             self.gpu.get_mut().pages.resend();
         }
     }
@@ -180,7 +265,7 @@ impl Voodoo {
     /// `stride` bytes a row, for `BlitSource::Buffer`: its word offset,
     /// if the renderer draws one there.
     pub fn gpu_color_buffer(&self, at: u32, stride: u32) -> Option<u32> {
-        let key = self.mirror.as_ref()?.layout()?;
+        let key = self.mirror_layout()?;
         let linear = !key.stride.tiled && key.stride.words as u32 * 2 == stride;
         (linear && key.color.contains(&at)).then_some(at / 2)
     }
@@ -210,7 +295,7 @@ impl Voodoo {
             return false;
         }
         self.mirror_sync();
-        let Some(key) = self.mirror.as_ref().and_then(|m| m.layout().copied()) else {
+        let Some(key) = self.mirror_layout() else {
             return false;
         };
         let mut words = Vec::with_capacity(pixels.len());
@@ -234,7 +319,7 @@ impl Voodoo {
         for tmu in &mut self.tmu {
             tmu.note_written(low, high);
         }
-        if let Some(mirror) = &mut self.mirror {
+        if let Some(mirror) = self.mirror.get_mut() {
             for (dest, x, y, value) in placed {
                 mirror.pixel(dest, x, y, value, key.width);
             }
@@ -250,7 +335,7 @@ impl Voodoo {
         for (a, b) in runs {
             let mut bytes = vec![0; (b - a) as usize];
             self.fbi.ram.read_bytes(a as usize, &mut bytes);
-            if let Some(mirror) = &mut self.mirror {
+            if let Some(mirror) = self.mirror.get_mut() {
                 mirror.memory(size, a, bytes);
             }
         }

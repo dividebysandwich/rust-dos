@@ -152,7 +152,7 @@ impl Voodoo {
     /// Tell the OpenGL renderer's recording about a pixel the blitter
     /// wrote, if it is in a buffer's picture.
     fn blt_mirror(&mut self, at: usize, value: u16) {
-        if self.mirror.is_none() {
+        if !self.recording() {
             return;
         }
         let fbi = &self.fbi;
@@ -164,7 +164,7 @@ impl Voodoo {
         let (x, y) = (((at - base) % row) as u32, ((at - base) / row) as u32);
         if x < fbi.width && y < fbi.height {
             let width = fbi.width;
-            if let Some(mirror) = &mut self.mirror {
+            if let Some(mirror) = self.mirror.get_mut() {
                 mirror.pixel(dest.map(|d| d as u32), x, y, value, width);
             }
         }
@@ -340,7 +340,7 @@ impl Voodoo {
         }
         if let Some((first, end)) = self.sgram_run() {
             self.mirror_fill(first, end, color);
-        } else if let Some(mirror) = &mut self.mirror {
+        } else if let Some(mirror) = self.mirror.get_mut() {
             // The same columns of several pages: a snapshot takes them.
             mirror.invalidate();
         }
@@ -350,7 +350,7 @@ impl Voodoo {
     /// words `first..end`: the rows of each buffer it covers, as fills, or
     /// a snapshot where it covers part of a row.
     fn mirror_fill(&mut self, first: u32, end: u32, color: u16) {
-        if self.mirror.is_none() {
+        if !self.recording() {
             return;
         }
         let fbi = &self.fbi;
@@ -369,7 +369,7 @@ impl Voodoo {
             }
             if (start - base) % row != 0 || (stop - base) % row != 0 {
                 // A row partly covered: a snapshot takes the fill.
-                if let Some(mirror) = &mut self.mirror {
+                if let Some(mirror) = self.mirror.get_mut() {
                     mirror.invalidate();
                 }
                 return;
@@ -381,7 +381,7 @@ impl Voodoo {
         }
         let (r, g, b) = ((color >> 11) as u32, ((color >> 5) & 0x3F) as u32, (color & 0x1F) as u32);
         let rgb = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
-        if let Some(mirror) = &mut self.mirror {
+        if let Some(mirror) = self.mirror.get_mut() {
             for (base, colour, top, bottom) in fills {
                 mirror.fill(super::mirror::Fill {
                     dest: base,

@@ -668,6 +668,7 @@ fn changed_settings() -> Settings {
             fps_cap: Some(30),
             gamma: Some(1.5),
             dither: false,
+            gpu_reads: true,
         },
         powervr: Some(crate::powervr::Chip::Pcx2),
         powervr_filter: crate::powervr::tsp::Filter::Point,

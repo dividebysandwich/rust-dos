@@ -383,6 +383,10 @@ impl<'a> Display<'a> {
                             if gpu_2d && !card.gpu_linked() && gl.voodoo_scale().is_some() {
                                 card.set_gpu_link(Some(gl.voodoo_link()));
                             }
+                            // Reads of the buffers get the renderer's
+                            // pictures of them, if asked for, where the
+                            // card has a link to it.
+                            card.set_gpu_reads(settings.gpu_reads && card.gpu_linked());
                             return shown;
                         }
                         Err(e) => {
