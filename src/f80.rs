@@ -549,9 +549,19 @@ impl F80 {
     /// says. Below a single's normal range it rounds to a denormal or zero,
     /// and above it to infinity, or to the largest single where the
     /// rounding goes toward zero (chop, down for a positive value, up for
-    /// a negative one). None for anything but a normal number.
+    /// a negative one). A denormal is far below a single's least denormal,
+    /// and rounds to it or to zero. None for anything but a normal number,
+    /// a denormal or a pseudo-denormal.
     pub fn single_bits(&self, rc: u16) -> Option<u32> {
-        let (sign, mut exp, mantissa) = self.normal_parts()?;
+        let (sign, mut exp, mantissa) = match self.normal_parts() {
+            Some(parts) => parts,
+            // (Its exponent as the least normal's: any is far enough
+            // under a single's range.)
+            None if self.get_exponent() == 0 && self.st as u64 != 0 => {
+                (self.get_sign(), 1 - F80_EXP_BIAS, self.st as u64)
+            }
+            None => return None,
+        };
         let sign_bit = (sign as u32) << 31;
         // The significand's bits below the single's last place: 40 in the
         // normal range, more below it, where a denormal has fewer.
