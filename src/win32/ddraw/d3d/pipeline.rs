@@ -685,6 +685,21 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
         .collect()
 }
 
+/// The transformed vertex `p` at the clip coordinates `clip` it was
+/// transformed from, so that it is clipped as a vertex the pipeline
+/// transforms is: one of a vertex buffer that ProcessVertices clipped.
+/// Its colors and texture coordinates stay the buffer's.
+pub fn at_clip_coordinates(setup: &Setup, p: &Processed, clip: [f32; 4]) -> Processed {
+    let mut out = Processed {
+        clip,
+        rhw: 0.0,
+        tl: false,
+        ..*p
+    };
+    out.code = codes(setup, &out);
+    out
+}
+
 /// A transformed vertex, as it is.
 fn transformed(v: &Vertex, _layout: &Layout) -> Processed {
     Processed {
@@ -1320,6 +1335,51 @@ mod tests {
         // A quadrilateral: two triangles, none of their z below 0.
         assert_eq!(r.triangles.len(), 2);
         assert!(r.triangles.iter().flatten().all(|v| v.z >= -1e-6));
+    }
+
+    #[test]
+    fn processed_vertices_are_clipped_at_their_clip_coordinates() {
+        // A perspective projection, near plane 1 and far plane 10, and a
+        // triangle with a corner behind the eye.
+        let q = 10.0 / 9.0;
+        let setup = Setup {
+            view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
+            projection: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, q, 1.0, 0.0, 0.0, -q, 0.0,
+            ],
+            cull: CULL_NONE,
+            ..Setup::default()
+        };
+        let input = [
+            vertex(-1.0, -1.0, 2.0),
+            vertex(1.0, -1.0, 2.0),
+            vertex(0.0, 1.0, -2.0),
+        ];
+        let direct = process(&setup, &input, &Layout::of(FVF_XYZ).unwrap());
+        // What ProcessVertices writes: screen vertices, the last one's
+        // from a negative w.
+        let written: Vec<Vertex> = direct
+            .iter()
+            .map(|p| Vertex {
+                position: setup.view_map.screen(p.clip),
+                ..Vertex::default()
+            })
+            .collect();
+        let tl = process(&setup, &written, &Layout::of(FVF_XYZRHW).unwrap());
+        let kept: Vec<Processed> = tl
+            .iter()
+            .zip(&direct)
+            .map(|(p, d)| at_clip_coordinates(&setup, p, d.clip))
+            .collect();
+        let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        draw(&setup, &direct, &prims, &mut a);
+        draw(&setup, &kept, &prims, &mut b);
+        // Clipped at the near plane: the part in front of the eye, as
+        // the untransformed vertices draw it.
+        assert!(!a.triangles.is_empty());
+        assert_eq!(a.triangles, b.triangles);
+        assert!(b.triangles.iter().flatten().all(|v| v.z >= -1e-6 && v.rhw > 0.0));
     }
 
     #[test]
