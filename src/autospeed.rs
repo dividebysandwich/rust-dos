@@ -431,6 +431,12 @@ pub struct AutoSpeed {
     /// While a protected-mode program gets all the host has for its reads
     /// and writes, the speed it had before.
     working: Option<u32>,
+    /// The program gets all the host has. The host estimate is its speed
+    /// then, so a frame takes it down with the estimate: a measurement at
+    /// an estimate that ran high would leave it behind for half a second
+    /// (Expendable's sound runs dry). A speed found by the frame rate has
+    /// the pace to go by, and waits for that.
+    flat_out: bool,
     /// The bytes it had read and written, and when that last changed.
     output: (u64, u64),
     /// The least speed of a protected-mode program for the CPU model
@@ -460,6 +466,7 @@ impl AutoSpeed {
             pace: 1.0,
             behind: false,
             working: None,
+            flat_out: false,
             output: (0, 0),
             protected_least: PROTECTED_LEAST,
             idles: false,
@@ -533,6 +540,7 @@ impl AutoSpeed {
         self.unsettled = None;
         self.restart_search();
         self.working = None;
+        self.flat_out = false;
     }
 
     /// The search starts again from the next measurement, forgetting the
@@ -569,11 +577,15 @@ impl AutoSpeed {
             self.settle_until = now.ns + SETTLE_NS;
             return (before != bus.clock.cycles_per_ms()).then_some(before);
         }
+        let current = bus.clock.cycles_per_ms();
+        let cut = (self.flat_out && current > host_max)
+            .then(|| host_max.max(self.least(protected, host_max)))
+            .filter(|&speed| speed < current);
         let Some(mark) = self.mark else {
             if now.ns >= self.settle_until {
                 self.mark = Some(now);
             }
-            return None;
+            return cut;
         };
         let ns = now.ns.saturating_sub(mark.ns);
         let (bursts, flips) = (now.bursts - mark.bursts, now.flips - mark.flips);
@@ -589,7 +601,7 @@ impl AutoSpeed {
             (flips, _) => flips,
         };
         if ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS) {
-            return None;
+            return cut;
         }
         self.mark = Some(now);
         let seconds = ns as f64 / 1e9;
@@ -608,7 +620,7 @@ impl AutoSpeed {
                 self.unsettled = Some((rate, tries + 1));
                 // What this measurement dropped counts in the next.
                 self.mark = Some(Mark { lost_ns: mark.lost_ns, ..now });
-                return None;
+                return cut;
             }
             fps = Some((rate + before) / 2.0);
         }
@@ -621,7 +633,6 @@ impl AutoSpeed {
             refresh,
             pace: ns as f64 / (ns + now.lost_ns.saturating_sub(mark.lost_ns)) as f64,
         };
-        let current = bus.clock.cycles_per_ms();
         let working = self.working.take();
         let next = self.decide(current, &measured, protected, host_max);
         if self.working.is_some() {
@@ -643,6 +654,16 @@ impl AutoSpeed {
         Some(next)
     }
 
+    /// The least speed there is: a faster model's only up to what the host
+    /// has.
+    fn least(&self, protected: bool, host_max: u32) -> u32 {
+        if protected {
+            self.base.max(PROTECTED_LEAST).max(self.protected_least.min(host_max))
+        } else {
+            self.base
+        }
+    }
+
     /// The speed to go on at from `current`, after a measurement there.
     ///
     /// Below the speed where it stops, a program's frame rate follows the
@@ -650,15 +671,11 @@ impl AutoSpeed {
     /// is at the speed the lower one would have grown to the higher frame
     /// rate at.
     pub fn decide(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
-        // A faster model's least speed only up to what the host has.
-        let base = if protected {
-            self.base.max(PROTECTED_LEAST).max(self.protected_least.min(host_max))
-        } else {
-            self.base
-        };
+        let base = self.least(protected, host_max);
         let top = host_max.max(base);
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         let c = current as f64;
+        self.flat_out = false;
         if protected && m.halted >= IDLES {
             self.idles = true;
         }
@@ -712,8 +729,10 @@ impl AutoSpeed {
                 clamp(c)
             } else if m.output >= WORKING {
                 self.working = Some(clamp(c));
+                self.flat_out = true;
                 top
             } else if self.busy_os && self.idles && m.halted < BUSY {
+                self.flat_out = true;
                 top
             } else {
                 clamp(c * WAITING_STEP)
@@ -1404,6 +1423,27 @@ mod tests {
         auto.working = None;
         auto.decide(HOST, &spinning, true, HOST);
         assert_eq!(auto.working, None);
+    }
+
+    #[test]
+    fn a_program_given_all_the_host_has_follows_it_down_at_once() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        let loading = Measurement {
+            output: 1e6,
+            ..STILL
+        };
+        assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
+        // The next frame, no measurement yet.
+        assert_eq!(auto.update(bus, true, HOST / 2, 0), Some(HOST / 2));
+        assert_eq!(auto.update(bus, true, HOST, 0), None, "up takes a measurement");
+        // Never below the least speed.
+        assert_eq!(auto.update(bus, true, 1000, 0), Some(PROTECTED_LEAST));
+        // A speed that isn't all the host has stays until a measurement.
+        auto.reset();
+        assert_eq!(auto.update(bus, true, HOST / 2, 0), None);
     }
 
     #[test]
