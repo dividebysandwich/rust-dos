@@ -19,8 +19,10 @@
 //!   at the card's resolution, rather than by pages.
 //!
 //! Whatever reads or writes the card's memory where it is behind the GPU
-//! reads those bytes back first. A byte is never both dirty and newer on
-//! the GPU: the GPU only draws into memory it has.
+//! reads those bytes back first. A byte is never both dirty and newer in
+//! the renderer's copy of the memory: the GPU only draws into memory it
+//! has. The 3D buffers are apart from that copy, and a Voodoo Graphics'
+//! or Voodoo2's renderer keeps no copy, so its pages stay dirty.
 //!
 //! Memory read back for the program is hot for a while (`cool`): the
 //! program reads or writes it, and a 2D operation there is cheaper on the
@@ -155,8 +157,11 @@ impl Tracker {
     }
 
     /// The whole pages bytes `start..end` touch, as bytes, within the
-    /// memory.
+    /// memory: none if there are no bytes.
     fn pages(&self, start: u32, end: u32) -> (u32, u32) {
+        if start >= end {
+            return (0, 0);
+        }
         let end = (end as u64).div_ceil(PAGE as u64) * PAGE as u64;
         (start & !(PAGE - 1), end.min(self.size as u64) as u32)
     }
@@ -165,7 +170,10 @@ impl Tracker {
     /// gets them again. The caller read back the pages there that were
     /// newer on the GPU before it wrote (`take_gpu`).
     pub fn mark(&mut self, start: u32, end: u32) {
-        debug_assert!(!self.gpu_in(start, end), "{start:#x}..{end:#x} is the GPU's");
+        debug_assert!(
+            !self.gpu_in(start, end),
+            "{start:#x}..{end:#x} is the GPU's"
+        );
         for page in self.span(start, end) {
             set(&mut self.dirty, page, true);
         }
@@ -369,7 +377,8 @@ mod tests {
         p.drawn_on_gpu(PAGE + 100, 2 * PAGE + 1);
         p.drawn_on_gpu(3 * PAGE, 3 * PAGE + 1);
         assert!(p.gpu_in(PAGE, PAGE + 1) && p.gpu_in(3 * PAGE - 1, 3 * PAGE));
-        // A read of one byte reads back its page.
+        // A read of no bytes reads back nothing, one of one byte its page.
+        assert!(p.take_gpu(PAGE + 5, PAGE + 5, false).is_empty());
         assert_eq!(p.take_gpu(PAGE + 5, PAGE + 6, false), [(PAGE, 2 * PAGE)]);
         assert_eq!(p.take_gpu(0, 8 * PAGE, false), [(2 * PAGE, 4 * PAGE)]);
         // Past the memory's end, nothing is drawn or read.
@@ -414,7 +423,10 @@ mod tests {
         p.drawn_in_buffer(0, 480 * row);
         p.drawn_in_buffer(480 * row, 960 * row);
         assert!(p.any_in_buffers() && !p.any_gpu());
-        assert_eq!(p.take_buffers(100 * row, 106 * row), [(100 * row, 106 * row)]);
+        assert_eq!(
+            p.take_buffers(100 * row, 106 * row),
+            [(100 * row, 106 * row)]
+        );
         assert!(p.take_buffers(100 * row, 106 * row).is_empty());
         assert_eq!(
             p.take_buffers(0, 480 * row),
