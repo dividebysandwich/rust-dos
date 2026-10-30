@@ -531,7 +531,7 @@ impl Voodoo {
             // recording gets the pixels where they are, without working
             // out which buffer each is in.
             let width = self.fbi.width;
-            if let Some(mirror) = self.mirror.as_mut() {
+            if let Some(mirror) = self.mirror.get_mut() {
                 for (w, &x) in words.iter().zip(&columns) {
                     if x < width {
                         mirror.pixel(Some(dest as u32), x, w.row as u32, w.value, width);
