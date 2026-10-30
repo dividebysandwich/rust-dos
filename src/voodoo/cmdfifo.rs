@@ -314,7 +314,7 @@ impl Voodoo {
                     target += 1;
                 }
                 self.display_dirty = true;
-                if let Some(mirror) = &mut self.mirror {
+                if let Some(mirror) = self.mirror.get_mut() {
                     mirror.invalidate();
                 }
             }

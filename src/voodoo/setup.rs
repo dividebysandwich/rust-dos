@@ -170,9 +170,9 @@ impl Voodoo {
         let st = self.raster_state(dest, texcount);
         #[cfg(all(test, feature = "sdl"))]
         super::raster::scene_profile::record(&st, texcount, verts);
-        if self.mirror.is_some() {
+        if self.recording() {
             self.mirror_sync();
-            if let Some(mirror) = &mut self.mirror {
+            if let Some(mirror) = self.mirror.get_mut() {
                 mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
             }
         }
@@ -250,9 +250,9 @@ impl Voodoo {
                 }
             }
         }
-        if self.mirror.is_some() {
+        if self.recording() {
             self.mirror_sync();
-            if let Some(mirror) = &mut self.mirror {
+            if let Some(mirror) = self.mirror.get_mut() {
                 let pattern = (fbz & (1 << 8) != 0).then_some(&dither);
                 mirror.fastfill(&st, (sx, ex, sy, ey), rgb, aux, pattern);
             }
