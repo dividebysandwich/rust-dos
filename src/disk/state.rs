@@ -230,6 +230,30 @@ impl DiskController {
             let spec = MountSpec { path: folder.clone(), ..spec_of(text)? };
             mount = Some(state_value(&spec));
         }
+        // A booted system's disk image comes back from the copy beside the
+        // state file, into the image this machine has in the drive. The
+        // image the state names may be one this machine doesn't mount (the
+        // original that the saving run's disk was a copy of), and taking
+        // it would write the copy over it. (A folder's disk is made from
+        // the folder the state names, or the one `folders` gives.)
+        let copy = self.copies_from.as_ref().map(|state| crate::savestate::disks::copy_path(state, drive));
+        let of_image = match &mount {
+            Some(text) => !crate::hostfs::is_dir(&spec_of(text)?.path),
+            None => false,
+        };
+        if of_image && copy.is_some_and(|copy| copy.is_file()) {
+            if self.bios_image(drive).is_none() {
+                return Err(StateError::Media(format!(
+                    "drive {} has no disk image here for the state's copy of its disk to go into: \
+                     mount one of the same size (a scratch copy) as {} and load again",
+                    name, name
+                )));
+            }
+            let d = self.drives[drive as usize].as_mut().expect("a drive with a disk image");
+            d.current_dir = dir;
+            d.media_changed = changed;
+            return Ok(());
+        }
         let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(state_value);
         if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
             let mut spec = spec_of(text)?;

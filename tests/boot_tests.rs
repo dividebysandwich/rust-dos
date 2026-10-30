@@ -229,6 +229,66 @@ fn a_booted_systems_state_takes_its_disk_back() {
     disks::delete_copies(&file);
 }
 
+/// The copy of a booted system's disk beside a state file goes into the
+/// image the loading machine has in the drive (a scratch disk), not into
+/// the image the state was saved with, which that machine doesn't mount.
+#[test]
+fn a_booted_systems_state_writes_only_the_image_this_machine_mounts() {
+    use rust_dos::disk::DriveKind;
+    use rust_dos::savestate::{disks, machine as states};
+    let hard_disk = || MountOptions { kind: DriveKind::HardDisk, ..Default::default() };
+    let sector_of = |path: &PathBuf, lba: usize| std::fs::read(path).unwrap()[lba * SECTOR_SIZE..][..SECTOR_SIZE].to_vec();
+
+    // The saving run boots from original.img.
+    let mut cpu = machine("state_original");
+    let dir = std::fs::canonicalize("target/test_boot/state_original").unwrap();
+    let disk = cpu.bus.disk.bios_image(2).unwrap();
+    let mut bytes = vec![0u8; disk.sectors() as usize * SECTOR_SIZE];
+    disk.read(0, &mut bytes).unwrap();
+    let (original, scratch) = (dir.join("original.img"), dir.join("scratch.img"));
+    std::fs::write(&original, &bytes).unwrap();
+    std::fs::write(&scratch, &bytes).unwrap();
+    cpu.bus.mount_drive(2, &original, hard_disk(), true).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    let state = states::save(&cpu);
+    let file = dir.join("booted.state");
+    disks::save_copies(&cpu, &file).unwrap();
+    let pattern = sector_of(&disks::copy_path(&file, 2), 1);
+    drop(cpu);
+    // The original goes on after the save (its own run of the system).
+    let mut changed = std::fs::read(&original).unwrap();
+    changed[SECTOR_SIZE..2 * SECTOR_SIZE].fill(0x77);
+    std::fs::write(&original, &changed).unwrap();
+
+    // Another run with the scratch disk as C:, written since: the load
+    // puts the copy into it, keeps it as C: and leaves the original alone.
+    let mut cpu = machine("state_scratch");
+    cpu.bus.mount_drive(2, &scratch, hard_disk(), true).unwrap();
+    cpu.bus.disk.bios_image(2).unwrap().write(1, &[0xEE; SECTOR_SIZE]).unwrap();
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert!(cpu.bus.boot.is_some());
+    assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), scratch.as_path());
+    assert_eq!(sector_of(&scratch, 1), pattern, "the scratch disk has the state's");
+    assert_eq!(std::fs::read(&original).unwrap(), changed, "the original as it was");
+    drop(cpu);
+
+    // A run with no disk image in C: (a folder) refuses the load, and
+    // the original stays as it is.
+    let mut cpu = Cpu::new(dir.join("folder"));
+    cpu.load_shell();
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    let error = loaded.unwrap_err().to_string();
+    assert!(error.contains("drive C: has no disk image here"), "{}", error);
+    assert_eq!(std::fs::read(&original).unwrap(), changed, "the original as it was");
+    disks::delete_copies(&file);
+}
+
 #[test]
 fn windows_hands_its_machines_their_keys_through_their_bios() {
     use rust_dos::interrupts::int2f;
