@@ -435,7 +435,9 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   page and the streams) is a 400 too.
 - **Log lines** in `/api/log` have `n` (their number; `after_n=N&wait=MS`
   pages and long-polls from there), `at` (the journal's last entry then)
-  and `cause`.
+  and `cause`. The log starts with the lines written at start-up before
+  the server started (the renderer's `[DISPLAY]` line, the
+  configuration's warnings), with `at` 0 and the times they were written.
 - **Instance:** `/api/version` has `instance`, which is new at every
   start. A journal from another instance numbers its entries anew.
 - **Build:** `/api/version` and the journal's `started` entry have
