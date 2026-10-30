@@ -1652,6 +1652,7 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
     let requests: Vec<(&str, String, Option<Value>)> = vec![
         ("GET", "/api/status".into(), None),
         ("GET", "/api/stats".into(), None),
+        ("GET", "/api/underruns".into(), None),
         ("GET", "/api/screen/text".into(), None),
         ("GET", "/api/trace".into(), None),
         ("POST", "/api/trace".into(), Some(json!({"clear": true}))),
@@ -1850,9 +1851,15 @@ fn stats_tell_the_stats_page_s_numbers() {
 fn stats_tell_the_host_s_frames() {
     let rig = Rig::new("frame-times");
     let underruns = rig.get("/api/underruns").json();
-    assert_eq!((&underruns["events"], &underruns["dry_checks"]), (&json!(0), &json!(0)));
+    assert_eq!(
+        (&underruns["events"], &underruns["dry_checks"]),
+        (&json!(0), &json!(0))
+    );
     assert_eq!(underruns["log"], json!([]));
-    assert!(rig.get("/api/stats").json()["frame_times"].is_null(), "no frames yet");
+    assert!(
+        rig.get("/api/stats").json()["frame_times"].is_null(),
+        "no frames yet"
+    );
 }
 
 // ----- the debugger page -------------------------------------------------------

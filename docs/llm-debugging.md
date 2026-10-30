@@ -161,10 +161,13 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 - **Find what ran the sound device dry with `/api/underruns`.** The queue
   is looked at once a video frame. `dry_checks` counts the looks that found
   it empty (`audio.underruns` of `/api/status`), and `events` the stretches
-  of them in a row, so one long gap across three frames is three checks and
-  one event. A check while the machine is paused or in the settings window
-  counts as neither and ends a stretch. The first check after the start
-  finds the queue empty, so `events` starts at 1.
+  of them in a row. A dry check fills the queue up to its target, with
+  silence if it has to, so each check after the first in a stretch means
+  the device played all of that and ran out again: three in a row are
+  three gaps with the target's length of sound or silence between them,
+  and one event. A check while the machine is paused or in the settings
+  window counts as neither and ends a stretch. The first check after the
+  start finds the queue empty, so `events` starts at 1.
 
   `log` has the last 32 events, oldest first, each described at the check
   that started it: `event` (its number), `at_ms` (host time since the frame
@@ -186,9 +189,8 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   to `gap_ms`. The check comes after the machine's run and before the
   picture, so a split holds the picture of one frame and the machine's run
   of the next. `other` also holds time the debug server took, such as a
-  state load. The log and the split come from the rust-dos program; the
-  libretro and browser frontends have the counts alone. None of these
-  numbers are in save states.
+  state load, and a load moves emulated time, so the `gap_speed` of the
+  gap it fell in says nothing. None of these numbers are in save states.
 - **Gravis Ultrasound:** the built-in Gravis patch set is on the
   read-only drive X: in `X:\ULTRASND`, where `ULTRADIR` points, so a game
   needs no copy of the Ultrasound software on C:. `/api/gus` shows the IRQ
@@ -1314,9 +1316,9 @@ address mapped to when it was set.
   the machine runs (about 17 s at 60 frames a second), from one start of
   the main loop to the next, waiting included: `frames` and `seconds`
   (how many so far, and how long they took), `longest_ms`, and the
-  nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a
-  release build and a CPU-bound scene, such as the Stunts intro, when
-  comparing emulator changes.
+  nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
+  build and a CPU-bound scene, such as the Stunts intro, when comparing
+  emulator changes.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by

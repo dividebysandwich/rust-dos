@@ -57,8 +57,6 @@ impl Split {
 /// What `pump_audio` found.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pump {
-    /// The machine waits, and the device running dry isn't an underrun.
-    pub idle: bool,
     /// The stereo frames in the device's queue when the pump came, and when
     /// it had finished.
     pub queued: usize,
@@ -70,7 +68,9 @@ pub struct Pump {
 }
 
 /// An underrun: a stretch of pumps in a row that found the queue empty.
-/// Everything but `dry_checks` and `stretch` is of the first.
+/// Everything but `dry_checks` and `stretch` is of the first. A dry pump
+/// fills the queue up to its target, so each pump after the first in a
+/// stretch found that the device had played all of that as well.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Underrun {
     /// Its number, from 1, as `HostFrames::underrun_events` counts.
@@ -109,19 +109,12 @@ pub struct FrameSummary {
     pub p99: Duration,
 }
 
-/// What the previous pump found.
-#[derive(Clone, Copy, Debug)]
-struct Level {
-    queued: usize,
-    after: usize,
-    emulated_ns: u64,
-}
-
 #[derive(Clone, Debug)]
 pub struct HostFrames {
-    /// The frames' wall time in microseconds, in a ring, and how many came
-    /// since the start.
+    /// The frames' wall time in microseconds and the emulated time at their
+    /// ends, in rings, and how many came since the start.
     frames: Box<[u32]>,
+    ends: Box<[u64]>,
     count: u64,
     /// The frame loop's start and its latest lap. Frontends without laps
     /// have neither, and only count underruns.
@@ -129,8 +122,9 @@ pub struct HostFrames {
     last: Option<Instant>,
     /// The time since the last pump.
     split: Split,
-    previous: Option<Level>,
-    /// The last pump was idle, so its frame doesn't count.
+    previous: Option<Pump>,
+    /// The machine waits: its frames don't count, and the device running
+    /// dry isn't an underrun.
     idle: bool,
     /// The last pump found the queue empty.
     dry: bool,
@@ -150,6 +144,7 @@ impl HostFrames {
     pub fn new() -> Self {
         Self {
             frames: vec![0; FRAME_WINDOW].into_boxed_slice(),
+            ends: vec![0; FRAME_WINDOW].into_boxed_slice(),
             count: 0,
             start: None,
             last: None,
@@ -193,29 +188,33 @@ impl HostFrames {
         self.cycles_per_ms = cycles_per_ms;
     }
 
-    /// A frame ended, from one start of the frame loop to the next.
-    /// Frames of a machine that waits don't count.
+    /// A frame ended, from one start of the frame loop to the next, at
+    /// the emulated time `emulated_ns`. Frames of a machine that waits
+    /// don't count.
     #[inline]
-    pub fn frame(&mut self, wall: Duration) {
+    pub fn frame(&mut self, wall: Duration, emulated_ns: u64) {
         if self.idle {
             return;
         }
         let micros = wall.as_micros().min(u32::MAX as u128) as u32;
-        self.frames[(self.count % FRAME_WINDOW as u64) as usize] = micros;
+        let at = (self.count % FRAME_WINDOW as u64) as usize;
+        self.frames[at] = micros;
+        self.ends[at] = emulated_ns;
         self.count += 1;
+    }
+
+    /// Whether the machine waits, which `pump_audio` says each frame, with
+    /// a sound device or without one.
+    #[inline]
+    pub fn set_idle(&mut self, idle: bool) {
+        self.idle = idle;
     }
 
     /// `pump_audio` looked at the queue.
     pub fn pump(&mut self, pump: Pump) {
         let split = std::mem::take(&mut self.split);
-        let level = Level {
-            queued: pump.queued,
-            after: pump.after,
-            emulated_ns: pump.emulated_ns,
-        };
-        let previous = self.previous.replace(level);
-        self.idle = pump.idle;
-        if pump.queued != 0 || pump.idle {
+        let previous = self.previous.replace(pump);
+        if pump.queued != 0 || self.idle {
             self.dry = false;
             return;
         }
@@ -265,19 +264,27 @@ impl HostFrames {
         self.log.iter()
     }
 
-    /// The frames counted so far, for `longest_since`.
+    /// The frames counted so far.
     pub fn frame_count(&self) -> u64 {
         self.count
     }
 
-    /// The longest frame since `frame_count` gave `count`, of the last
-    /// `FRAME_WINDOW`.
-    pub fn longest_since(&self, count: u64) -> Option<Duration> {
-        let frames = self.count.saturating_sub(count).min(FRAME_WINDOW as u64);
-        (self.count - frames..self.count)
-            .map(|n| self.frames[(n % FRAME_WINDOW as u64) as usize])
-            .max()
-            .map(|micros| Duration::from_micros(micros as u64))
+    /// The longest frame that ended after the emulated time `ns`, of the
+    /// last `FRAME_WINDOW`. It looks back as far as emulated time ran
+    /// forward: a loaded save state can take the clock back, and the frames
+    /// before that are of another time.
+    pub fn longest_since(&self, ns: u64) -> Option<Duration> {
+        let mut longest = None;
+        let mut later = u64::MAX;
+        for n in (self.count.saturating_sub(FRAME_WINDOW as u64)..self.count).rev() {
+            let at = (n % FRAME_WINDOW as u64) as usize;
+            if self.ends[at] <= ns || self.ends[at] > later {
+                break;
+            }
+            later = self.ends[at];
+            longest = longest.max(Some(self.frames[at]));
+        }
+        longest.map(|micros| Duration::from_micros(micros as u64))
     }
 
     /// The last `FRAME_WINDOW` frames; none before the first. The
@@ -405,13 +412,11 @@ mod tests {
     fn a_machine_that_waits_has_no_underruns_and_ends_a_stretch() {
         let mut rig = Rig::new();
         rig.pump(0);
-        let pump = Pump {
-            idle: true,
-            ..Pump::default()
-        };
-        rig.frames.pump(pump);
-        rig.frames.pump(pump);
+        rig.frames.set_idle(true);
+        rig.frames.pump(Pump::default());
+        rig.frames.pump(Pump::default());
         assert_eq!(rig.frames.underrun_events(), 1);
+        rig.frames.set_idle(false);
         rig.pump(0);
         assert_eq!(rig.frames.underrun_events(), 2);
     }
@@ -456,7 +461,7 @@ mod tests {
     fn the_summary_is_of_the_last_window_of_frames() {
         let mut frames = HostFrames::new();
         assert_eq!(frames.summary(), None);
-        frames.frame(MS * 7);
+        frames.frame(MS * 7, 0);
         let one = frames.summary().unwrap();
         assert_eq!(
             (one.frames, one.longest, one.p50, one.p99),
@@ -465,10 +470,10 @@ mod tests {
 
         // 1 to 100 ms in equal shares, the only ones left after the ring
         // went round.
-        frames.frame(MS * 500);
+        frames.frame(MS * 500, 0);
         let window = FRAME_WINDOW as u32;
         for n in 0..window * 2 {
-            frames.frame(MS * ((n % window) * 100 / window + 1));
+            frames.frame(MS * ((n % window) * 100 / window + 1), 0);
         }
         let summary = frames.summary().unwrap();
         assert_eq!(summary.frames, FRAME_WINDOW);
@@ -481,34 +486,37 @@ mod tests {
     #[test]
     fn longest_since_is_of_the_frames_after_the_mark() {
         let mut frames = HostFrames::new();
-        frames.frame(MS * 90);
-        let mark = frames.frame_count();
-        assert_eq!(frames.longest_since(mark), None);
-        frames.frame(MS * 5);
-        frames.frame(MS * 30);
-        frames.frame(MS * 7);
-        assert_eq!(frames.longest_since(mark), Some(MS * 30));
+        frames.frame(MS * 90, 100);
+        assert_eq!(frames.longest_since(100), None);
+        frames.frame(MS * 5, 110);
+        frames.frame(MS * 30, 120);
+        frames.frame(MS * 7, 130);
+        assert_eq!(frames.longest_since(100), Some(MS * 30));
+        assert_eq!(frames.longest_since(120), Some(MS * 7));
         // Further back than the ring goes, it says what is left.
-        for _ in 0..FRAME_WINDOW {
-            frames.frame(MS * 3);
+        for n in 0..FRAME_WINDOW as u64 {
+            frames.frame(MS * 3, 200 + n);
         }
-        assert_eq!(frames.longest_since(mark), Some(MS * 3));
+        assert_eq!(frames.longest_since(100), Some(MS * 3));
+    }
+
+    #[test]
+    fn longest_since_stops_where_a_loaded_state_took_the_clock_back() {
+        let mut frames = HostFrames::new();
+        frames.frame(MS * 90, 5000);
+        frames.frame(MS * 5, 110);
+        frames.frame(MS * 6, 120);
+        assert_eq!(frames.longest_since(100), Some(MS * 6));
     }
 
     #[test]
     fn the_frames_of_a_machine_that_waits_do_not_count() {
         let mut frames = HostFrames::new();
-        frames.pump(Pump {
-            idle: true,
-            ..Pump::default()
-        });
-        frames.frame(MS * 900);
+        frames.set_idle(true);
+        frames.frame(MS * 900, 0);
         assert_eq!(frames.frame_count(), 0);
-        frames.pump(Pump {
-            queued: 10,
-            ..Pump::default()
-        });
-        frames.frame(MS * 9);
+        frames.set_idle(false);
+        frames.frame(MS * 9, 0);
         assert_eq!(frames.frame_count(), 1);
     }
 
@@ -518,7 +526,7 @@ mod tests {
         let before = crate::savestate::machine::save(&cpu);
         cpu.bus.host_frames.lap(Phase::Cpu);
         cpu.bus.host_frames.lap(Phase::Video);
-        cpu.bus.host_frames.frame(MS * 9);
+        cpu.bus.host_frames.frame(MS * 9, 0);
         cpu.bus.host_frames.pump(Pump::default());
         assert_eq!(crate::savestate::machine::save(&cpu), before);
     }

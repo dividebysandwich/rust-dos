@@ -13,6 +13,11 @@ use super::{Answer, BreakpointHit, DebugHub, PauseReason, Reply, Watch, heat, jo
 use crate::cpu::Cpu;
 use crate::video;
 
+/// `x` as a JSON number, to one `places`th.
+fn round(x: f32, places: f64) -> f64 {
+    (x as f64 * places).round() / places
+}
+
 /// A time in ms, to the hundredth.
 fn millis(time: Duration) -> f64 {
     (time.as_secs_f64() * 1e5).round() / 100.0
@@ -20,8 +25,8 @@ fn millis(time: Duration) -> f64 {
 
 /// `/api/underruns`: `hostframes` says what the numbers are.
 pub(super) fn underruns_json(cpu: &Cpu) -> Value {
-    let queue_ms = |frames: usize| (frames as f64 * 1e5 / rust_dos::opl::RATE as f64).round() / 100.0;
-    let hundredths = |x: f32| (x as f64 * 100.0).round() / 100.0;
+    let queue_ms =
+        |frames: usize| (frames as f64 * 1e5 / rust_dos::opl::RATE as f64).round() / 100.0;
     let host = &cpu.bus.host_frames;
     let log: Vec<Value> = host
         .underruns()
@@ -40,8 +45,8 @@ pub(super) fn underruns_json(cpu: &Cpu) -> Value {
                 "queued_before_ms": u.queued_before.map(queue_ms),
                 "queued_after_ms": u.queued_after.map(queue_ms),
                 "target_ms": queue_ms(u.target),
-                "speed": hundredths(u.speed),
-                "gap_speed": u.gap_speed.map(hundredths),
+                "speed": round(u.speed, 100.0),
+                "gap_speed": u.gap_speed.map(|speed| round(speed, 100.0)),
                 "cycles_per_ms": u.cycles_per_ms,
                 "dry_checks": u.dry_checks,
                 "stretch_ms": millis(u.stretch),
@@ -423,18 +428,15 @@ impl DebugHub {
             // time the CPU sat halted and the instructions the
             // recompiler's code ran; and ms a frame drawing the picture.
             // Null before the first frame.
-            "frame": self.frame_stats.as_ref().map(|v| {
-                let round = |x: f32, places: f64| (x as f64 * places).round() / places;
-                json!({
-                    "fps": round(v.fps, 10.0),
-                    "refresh_hz": round(v.refresh_hz, 10.0),
-                    "emulated_speed": round(v.emulated_speed, 100.0),
-                    "cpu_use": round(v.cpu_use, 10.0),
-                    "halted": round(v.halted, 10.0),
-                    "recompiled": round(v.recompiled, 10.0),
-                    "render_ms": round(v.render_ms, 100.0),
-                })
-            }),
+            "frame": self.frame_stats.as_ref().map(|v| json!({
+                "fps": round(v.fps, 10.0),
+                "refresh_hz": round(v.refresh_hz, 10.0),
+                "emulated_speed": round(v.emulated_speed, 100.0),
+                "cpu_use": round(v.cpu_use, 10.0),
+                "halted": round(v.halted, 10.0),
+                "recompiled": round(v.recompiled, 10.0),
+                "render_ms": round(v.render_ms, 100.0),
+            })),
             // The host's frames, from one start of the frame loop to the
             // next, while the machine runs: the last `FRAME_WINDOW` of
             // them, how long they took together in seconds, and in ms the

@@ -280,8 +280,6 @@ struct Mark {
     polls: u64,
     status_reads: u64,
     output: u64,
-    /// The host's frames so far, for the trace.
-    host_frames: u64,
 }
 
 impl Mark {
@@ -297,7 +295,6 @@ impl Mark {
             polls: a.polls,
             status_reads: a.status_reads,
             output: a.video_bytes + a.io_bytes,
-            host_frames: bus.host_frames.frame_count(),
         }
     }
 }
@@ -521,7 +518,7 @@ impl AutoSpeed {
             self.working = working.or(self.working);
         }
         if trace() {
-            let longest = bus.host_frames.longest_since(mark.host_frames).unwrap_or_default();
+            let longest = bus.host_frames.longest_since(mark.ns).unwrap_or_default();
             eprintln!(
                 "[auto] {} -> {} (host {}): {:?} {:?} idles={} longest_frame={:.1}ms",
                 current,

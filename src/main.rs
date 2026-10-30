@@ -505,8 +505,11 @@ fn main() -> Result<(), String> {
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
             dbg.set_frame_stats(stats.latest());
-            cpu.bus.host_frames.frame(frame_start - start);
-            cpu.bus.host_frames.note_speed(stats.latest().emulated_speed, cpu.bus.clock.cycles_per_ms());
+            let emulated_ns = cpu.bus.clock.now_ns();
+            cpu.bus.host_frames.frame(frame_start - start, emulated_ns);
+            let speed = stats.latest().emulated_speed;
+            let cycles_per_ms = cpu.bus.clock.cycles_per_ms();
+            cpu.bus.host_frames.note_speed(speed, cycles_per_ms);
         }
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
