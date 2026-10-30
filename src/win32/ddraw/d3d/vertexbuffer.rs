@@ -18,8 +18,8 @@ use super::draw::{device_setup, read_vertices};
 use super::pipeline::{self, Layout, Vertex};
 use super::{D3D_OK, D3DERR_VERTEXBUFFEROPTIMIZED, probe, write_dwords};
 use crate::cpu::Cpu;
-use std::sync::Arc;
 use crate::win32::{com, kernel32};
+use std::sync::Arc;
 
 /// A vertex buffer.
 #[derive(Clone, Debug, Default)]
@@ -41,9 +41,16 @@ pub struct VertexBuffer {
     pub clipped: Arc<Vec<Option<Clipped>>>,
 }
 
-/// A vertex's clip coordinates, and the bits of the x, y, z and rhw
-/// ProcessVertices wrote for it.
-pub type Clipped = ([f32; 4], [u32; 4]);
+/// What ProcessVertices keeps of a vertex it clipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clipped {
+    /// Its clip coordinates.
+    pub clip: [f32; 4],
+    /// The bits of the x, y, z and rhw it wrote for it.
+    pub screen: [u32; 4],
+    /// Its distances from the user's clip planes.
+    pub planes: [f32; 6],
+}
 
 crate::state_fields!(VertexBuffer {
     caps,
@@ -65,23 +72,24 @@ const OPTIMIZED: u32 = 0x8000_0000;
 /// D3DVBCAPS_DONOTCLIP: a buffer without room for clip coordinates.
 const DONOTCLIP: u32 = 0x1;
 
-/// The clip coordinates of the vertices `start` to `start + count` of
-/// `b`, if ProcessVertices clipped every one of them and the program
-/// hasn't written over them since (`vertices` are what the buffer has
-/// now).
+/// What ProcessVertices kept of the vertices `start` to `start + count`
+/// of `b`, for each that it clipped and the program hasn't written over
+/// since (`vertices` are what the buffer has now); None if it kept
+/// nothing of the buffer.
 pub fn clip_coordinates(
     b: &VertexBuffer,
     start: u32,
     vertices: &[Vertex],
-) -> Option<Vec<[f32; 4]>> {
-    let kept = b.clipped.get(start as usize..start as usize + vertices.len())?;
-    kept.iter()
+) -> Option<Vec<Option<Clipped>>> {
+    let range = start as usize..start as usize + vertices.len();
+    let kept = b
+        .clipped
+        .get(range)?
+        .iter()
         .zip(vertices)
-        .map(|(k, v)| {
-            let (clip, bits) = (*k)?;
-            (v.position.map(f32::to_bits) == bits).then_some(clip)
-        })
-        .collect()
+        .map(|(k, v)| k.filter(|k| v.position.map(f32::to_bits) == k.screen))
+        .collect();
+    Some(kept)
 }
 
 /// A new vertex buffer of `count` vertices of the FVF code `fvf`.
@@ -271,7 +279,11 @@ fn process(
         let room = (end - base).min(16) / 4;
         write_dwords(cpu, base, &screen.map(f32::to_bits)[..room as usize]);
         if clip {
-            clipped.push((!p.tl).then_some((p.clip, screen.map(f32::to_bits))));
+            clipped.push((!p.tl).then_some(Clipped {
+                clip: p.clip,
+                screen: screen.map(f32::to_bits),
+                planes: p.planes,
+            }));
         }
         let lit = op & D3DVOP_LIGHT != 0 && setup.lighting.is_some();
         let copy = flags & D3DPV_DONOTCOPYDATA == 0;

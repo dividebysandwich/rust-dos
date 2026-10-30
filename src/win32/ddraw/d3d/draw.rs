@@ -18,6 +18,7 @@ use super::device::{
 use super::pipeline::{
     self, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
 };
+use super::vertexbuffer::Clipped;
 use super::{
     D3D_OK, D3DERR_INBEGIN, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDVERTEXTYPE,
     D3DERR_NOTINBEGIN, D3DERR_VERTEXBUFFERLOCKED, probe, read_bytes, read_dwords,
@@ -324,9 +325,12 @@ pub fn draw_prims(
     draw_clipped(cpu, id, version, layout, vertices, None, prims, flags)
 }
 
-/// Draw the primitives `prims` of `vertices`, and with `clip` the clip
-/// coordinates of each, where ProcessVertices transformed them from
-/// (`vertexbuffer::clip_coordinates`).
+/// Draw the primitives `prims` of `vertices`, and with `clip` what
+/// ProcessVertices kept of each it clipped (`vertexbuffer::
+/// clip_coordinates`). A vertex is drawn from its clip coordinates only
+/// while the viewport puts them where ProcessVertices wrote it; after a
+/// change of viewport it is drawn where the buffer says, as before. A
+/// triangle with any vertex drawn so is clipped on the screen.
 #[allow(clippy::too_many_arguments)]
 fn draw_clipped(
     cpu: &mut Cpu,
@@ -334,7 +338,7 @@ fn draw_clipped(
     version: u32,
     layout: &Layout,
     vertices: &[Vertex],
-    clip: Option<&[[f32; 4]]>,
+    clip: Option<&[Option<Clipped>]>,
     prims: &[Prim],
     flags: u32,
 ) -> Result<(), u32> {
@@ -343,8 +347,12 @@ fn draw_clipped(
     };
     let mut processed = pipeline::process(&setup, vertices, layout);
     if let Some(clip) = clip {
-        for (p, &c) in processed.iter_mut().zip(clip) {
-            *p = pipeline::at_clip_coordinates(&setup, p, c);
+        for (p, c) in processed.iter_mut().zip(clip) {
+            if let Some(c) = c
+                && setup.view_map.screen(c.clip).map(f32::to_bits) == c.screen
+            {
+                *p = pipeline::at_clip_coordinates(&setup, p, c.clip, c.planes);
+            }
         }
     }
     let drawn = rasterize(cpu, id, &setup, &processed, prims);
@@ -556,14 +564,8 @@ pub fn draw_indexed_primitive_strided(cpu: &mut Cpu, args: &[u32]) -> Option<u32
 }
 
 /// The vertices `start` to `start + count` of the vertex buffer `vb`,
-/// its layout, and the vertices' clip coordinates if ProcessVertices
-/// clipped them.
-fn buffer_vertices(
-    cpu: &mut Cpu,
-    vb: u32,
-    start: u32,
-    count: u32,
-) -> Result<BufferVertices, u32> {
+/// its layout, and what ProcessVertices kept of them.
+fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<BufferVertices, u32> {
     let (_, bid) = super::vertexbuffer::buffer_of(cpu, vb)?;
     let b = super::object(cpu, bid)
         .and_then(|o| o.buffer.clone())
@@ -578,27 +580,35 @@ fn buffer_vertices(
     let at = b.memory + start * layout.size;
     let vertices = read_vertices(cpu, at, &layout, count)?;
     let clip = super::vertexbuffer::clip_coordinates(&b, start, &vertices);
-    Ok((layout, vertices, clip))
+    Ok(BufferVertices {
+        layout,
+        vertices,
+        clip,
+    })
 }
 
-/// A vertex buffer's layout, vertices and their clip coordinates.
-type BufferVertices = (Layout, Vec<Vertex>, Option<Vec<[f32; 4]>>);
+/// A vertex buffer's layout, vertices, and what ProcessVertices kept of
+/// them.
+struct BufferVertices {
+    layout: Layout,
+    vertices: Vec<Vertex>,
+    clip: Option<Vec<Option<Clipped>>>,
+}
 
 /// Draw `kind` primitives of a vertex buffer's `vertices` (in the order
 /// `order`, or as they are), clipped at their clip coordinates if
 /// ProcessVertices kept them.
-#[allow(clippy::too_many_arguments)]
 fn draw_buffer(
     cpu: &mut Cpu,
     id: u32,
     version: u32,
-    (layout, vertices, clip): &BufferVertices,
+    b: &BufferVertices,
     kind: u32,
     order: Option<&[u32]>,
     flags: u32,
 ) -> Result<(), u32> {
-    let prims = primitives(kind, order, vertices.len())?;
-    let clip = clip.as_deref();
+    let prims = primitives(kind, order, b.vertices.len())?;
+    let (layout, vertices, clip) = (&b.layout, &b.vertices, b.clip.as_deref());
     draw_clipped(cpu, id, version, layout, vertices, clip, &prims, flags)
 }
 

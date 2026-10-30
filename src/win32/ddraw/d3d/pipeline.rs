@@ -686,12 +686,19 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
 }
 
 /// The transformed vertex `p` at the clip coordinates `clip` it was
-/// transformed from, so that it is clipped as a vertex the pipeline
-/// transforms is: one of a vertex buffer that ProcessVertices clipped.
-/// Its colors and texture coordinates stay the buffer's.
-pub fn at_clip_coordinates(setup: &Setup, p: &Processed, clip: [f32; 4]) -> Processed {
+/// transformed from, `planes` its distances from the user's clip planes,
+/// so that it is clipped as a vertex the pipeline transforms is: one of
+/// a vertex buffer that ProcessVertices clipped. Its colors and texture
+/// coordinates stay the buffer's.
+pub fn at_clip_coordinates(
+    setup: &Setup,
+    p: &Processed,
+    clip: [f32; 4],
+    planes: [f32; 6],
+) -> Processed {
     let mut out = Processed {
         clip,
+        planes,
         rhw: 0.0,
         tl: false,
         ..*p
@@ -1369,7 +1376,7 @@ mod tests {
         let kept: Vec<Processed> = tl
             .iter()
             .zip(&direct)
-            .map(|(p, d)| at_clip_coordinates(&setup, p, d.clip))
+            .map(|(p, d)| at_clip_coordinates(&setup, p, d.clip, d.planes))
             .collect();
         let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
         let (mut a, mut b) = (Recorder::default(), Recorder::default());
@@ -1379,7 +1386,8 @@ mod tests {
         // the untransformed vertices draw it.
         assert!(!a.triangles.is_empty());
         assert_eq!(a.triangles, b.triangles);
-        assert!(b.triangles.iter().flatten().all(|v| v.z >= -1e-6 && v.rhw > 0.0));
+        let in_front = |v: &ScreenVertex| v.z >= -1e-6 && v.rhw > 0.0;
+        assert!(b.triangles.iter().flatten().all(in_front));
     }
 
     #[test]
