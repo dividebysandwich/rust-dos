@@ -73,7 +73,7 @@ pub struct Gpu {
     /// 2D operations done on the GPU.
     blits: u64,
     /// 2D operations left to the CPU as the program reads or writes
-    /// where they draw (`Pages`' hot pages).
+    /// where they draw (the tracker's hot pages).
     hot: u64,
     /// Frames since the hot pages last cooled.
     frames: u32,
