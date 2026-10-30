@@ -402,6 +402,10 @@ impl Voodoo {
         if command & COMMAND != CPU_TO_SCREEN || !self.blt.active {
             return;
         }
+        // After what is drawn since the copy started (`blit_start` waited
+        // for what came before it), unless the copy goes into the queue
+        // behind the held jobs. Mostly nothing is queued, and the words
+        // skip the wait: Moto Racer sends 40,000 a frame for its sky.
         let queue = self.blt_queue_dest();
         if queue.is_none() && self.writes_queue() {
             self.flush();
@@ -864,6 +868,44 @@ mod tests {
         // again.
         v.frame_buffer();
         assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+    }
+
+    #[test]
+    fn cpu_to_screen_copies_land_after_the_drawing() {
+        // A fastfill in the middle of a copy, over the rows it wrote: the
+        // data word after it waits for it, the others find nothing queued.
+        // With worker threads, and with the OpenGL renderer holding jobs
+        // back, the memory ends up as without them.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut threads = glide_card(2);
+        let mut sw = glide_card(0);
+        for v in [&mut gl, &mut threads, &mut sw] {
+            glide_frames(v, 2);
+            let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+            write(v, BLT_ROP, 0xCCCC);
+            write(v, BLT_DST_BASE_ADDR, back);
+            write(v, BLT_XY_STRIDES, 1280 << 16);
+            write(v, BLT_DST_XY, 30 << 16 | 12);
+            write(v, BLT_SIZE, 2 << 16 | 3);
+            write(v, BLT_COMMAND, 1 << 31 | 2 << 3 | CPU_TO_SCREEN);
+            for i in 1..=6 {
+                if i == 4 {
+                    write(v, FASTFILL_CMD, 0);
+                }
+                write(v, BLT_DATA, 0x0101_0101 * i);
+            }
+        }
+        let memory = sw.frame_buffer().to_bytes();
+        let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+        let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
+        // The fill covers the first rows, the rest of the copy lands on it.
+        assert_eq!([px(12, 30), px(13, 31)], [px(20, 30), px(20, 31)]);
+        assert_ne!(px(12, 30), 0x0101);
+        assert_eq!([px(14, 31), px(15, 32)], [0x0404, 0x0606]);
+        assert!(gl.frame_buffer().to_bytes() == memory);
+        assert!(threads.frame_buffer().to_bytes() == memory);
     }
 
     #[test]

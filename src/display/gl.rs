@@ -212,7 +212,8 @@ impl GlScreen {
                 gl.get_parameter_string(glow::VENDOR),
             )
         };
-        let renderer = format!("OpenGL {} on {} ({}), {:?}", version_name, device_name, vendor, glsl);
+        let renderer =
+            format!("OpenGL {} on {} ({}), {:?}", version_name, device_name, vendor, glsl);
         Ok(Self {
             gl: Rc::new(gl),
             _context: context,

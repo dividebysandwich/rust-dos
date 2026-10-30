@@ -1,7 +1,8 @@
 //! rust-dos.exe's exports: NVIDIA's and AMD's drivers put a program on a
 //! laptop's discrete graphics chip when its .exe exports
 //! `NvOptimusEnablement` or `AmdPowerXpressRequestHighPerformance` as 1.
-#![cfg(all(windows, target_env = "msvc"))]
+//! The program needs the `sdl` feature.
+#![cfg(all(windows, target_env = "msvc", feature = "sdl"))]
 
 fn u16_at(b: &[u8], at: usize) -> usize {
     u16::from_le_bytes([b[at], b[at + 1]]) as usize
