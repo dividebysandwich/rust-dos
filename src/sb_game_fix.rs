@@ -9,24 +9,34 @@
 //! conventional memory for each known driver's first piece of code, and
 //! patches only a copy where every piece is there as the game shipped it.
 //!
-//! Prehistorik 2 (Titus, 1993) mixes four channels of MOD music and its
-//! sound effects into 8-bit unsigned blocks for DSP command 14h. It turns
-//! each signed sample into an unsigned 0-63, with its centre at 32, scales
-//! that by the note's volume through a table of `volume * sample / 64`,
-//! and adds the channels to a block that starts at 0. So a channel's
-//! centre moves with its volume, and a silent channel adds 0 where a
-//! playing one adds about 16 or 32: every note that starts, stops or
-//! changes volume moves the output's centre line, which is the click at
-//! the start of every note, and the output sits far below 128. The patch
-//! scales around the centre instead (`(sample - 32) * volume / 64`), starts
-//! every block at 128, and stores the sound effects (which are copied into
-//! the block as they are) around 128 too. The driver's ramp at the end of
-//! a sample, which made up for the jump to 0, goes: a channel that ends
-//! now just stops adding to the centre.
+//! The drivers known are those of two Titus games of 1993 with the same
+//! sound engine: Prehistorik 2 and Blues Brothers: Jukebox Adventure. The
+//! engine mixes four channels of MOD music and the sound effects into
+//! 8-bit unsigned blocks for DSP command 14h. It turns each signed sample
+//! into an unsigned 0-63, with its centre at 32, scales that by the
+//! note's volume through a table of `volume * sample / 64`, and adds the
+//! channels to a block that starts at 0. So a channel's centre moves with
+//! its volume, and a silent channel adds 0 where a playing one adds up to
+//! 32: every note that starts, stops or changes volume moves the output's
+//! centre line, which is the click at the start of every note, and the
+//! output sits far below 128. The patches:
 //!
-//! Blues Brothers: Jukebox Adventure (Titus, 1993) has the same sound
-//! engine and the same fault. Its driver isn't here yet: it needs its own
-//! entry in `DRIVERS`, with its own offsets, made from the game's code.
+//! - The volume table's loop runs the sample from -32 to 31 instead of
+//!   0 to 63 and multiplies signed, so the table holds
+//!   `(sample - 32) * volume / 64` in the same places.
+//! - Every block starts at 128 instead of 0.
+//! - The sound effects, which the driver copies into the block as they
+//!   are, are stored around 128 instead of 32 when they are loaded.
+//! - What the driver did when a sample ends, to make up for the jump to
+//!   0 (Prehistorik 2 ramps the block down, Jukebox Adventure holds a
+//!   value derived from the mix so far), goes: an ended channel now just
+//!   adds nothing to the centre.
+//!
+//! Jukebox Adventure's MOD player also stops on effect Bxx (position
+//! jump): before it calls its handler for the effect, a leftover
+//! `cmp bx,0Bh / je $` jumps to itself, in the IRQ handler with
+//! interrupts off, so the machine hangs the first time a song loops that
+//! way. The patch takes the jump out, and the game's own handler runs.
 
 /// Bytes at an offset in the driver's code segment.
 pub struct Bytes {
@@ -40,30 +50,39 @@ pub struct Driver {
     /// Code that has to be there, unchanged, besides the patches' own.
     pub checks: &'static [Bytes],
     /// What to change: the bytes there now, and what replaces them (of
-    /// the same length).
+    /// the same length). The first is what the search looks for.
     pub patches: &'static [(Bytes, &'static [u8])],
 }
 
-/// Prehistorik 2's driver, by offset in its code segment (the game's
-/// `CS`, the segment of its IRQ handler at 204Dh).
+/// The IRQ handler's loop that mixes a channel into the block: lodsb es:,
+/// xlat, add [di],al, and the step through the sample. Both games have it.
+const MIX_LOOP: &[u8] = &[
+    0x26, 0xAC, 0xD7, 0x00, 0x05, 0x47, 0x03, 0xD5, 0x8A, 0xC6, 0x32, 0xF6, 0x98, 0x03, 0xF0, 0x3B,
+    0xF4, 0x77, 0x04, 0xE2, 0xEB,
+];
+
+/// A block without a sound effect: from xor ax,ax / mov cx,54h / rep
+/// stosw to mov ax,8080h / mov cl,54h / rep stosw. CX is 0 there: a JCXZ
+/// leads to it.
+const SILENCE: (&[u8], &[u8]) = (
+    &[0x33, 0xC0, 0xB9, 0x54, 0x00, 0xF3, 0xAB],
+    &[0xB8, 0x80, 0x80, 0xB1, 0x54, 0xF3, 0xAB],
+);
+
+/// Prehistorik 2's driver (PRE2.SQZ as CDRUN.COM unpacks it), by offset
+/// in its code segment: the game's `CS`, whose IRQ handler is at 204Dh.
 const PREHISTORIK_2: Driver = Driver {
     game: "Prehistorik 2",
     checks: &[
-        // The rest of the loop that builds the volume table.
+        // The end of the volume table's loops: jne / inc cl / cmp cl,41h /
+        // jne.
         Bytes {
-            at: 0x1EA3,
-            bytes: &[
-                0xFE, 0xC5, 0x80, 0xFD, 0x40, 0x75, 0xE8, 0xFE, 0xC1, 0x80, 0xF9, 0x41, 0x75, 0xDF,
-            ],
+            at: 0x1EA8,
+            bytes: &[0x75, 0xE8, 0xFE, 0xC1, 0x80, 0xF9, 0x41, 0x75, 0xDF],
         },
-        // The IRQ handler's loop that mixes a channel into the block:
-        // lodsb es:, xlat, add [di],al, and the step through the sample.
         Bytes {
             at: 0x21E6,
-            bytes: &[
-                0x26, 0xAC, 0xD7, 0x00, 0x05, 0x47, 0x03, 0xD5, 0x8A, 0xC6, 0x32, 0xF6, 0x98, 0x03,
-                0xF0, 0x3B, 0xF4, 0x77, 0x04, 0xE2, 0xEB,
-            ],
+            bytes: MIX_LOOP,
         },
         // The IRQ handler's start: push ax, bx, cx, dx.
         Bytes {
@@ -72,23 +91,23 @@ const PREHISTORIK_2: Driver = Driver {
         },
     ],
     patches: &[
-        // The volume table, 65 volumes by 64 samples: from
-        //   mov al,cl / mul ch / shr ax,1 (six times) / stosb
-        // (volume * sample / 64) to
-        //   mov al,ch / sub al,20h / imul cl / shl ax,1 (twice) /
-        //   mov al,ah / stosb
-        // ((sample - 32) * volume / 64, signed).
+        // The volume table: from
+        //   xor ch,ch / mov al,cl / mul ch / shr ax,1 (6 times) / stosb /
+        //   inc ch / cmp ch,40h
+        // to
+        //   mov ch,-20h / mov al,cl / imul ch / sar ax,1 (6 times) /
+        //   stosb / inc ch / cmp ch,20h
         (
             Bytes {
-                at: 0x1E92,
+                at: 0x1E90,
                 bytes: &[
-                    0x8A, 0xC1, 0xF6, 0xE5, 0xD1, 0xE8, 0xD1, 0xE8, 0xD1, 0xE8, 0xD1, 0xE8, 0xD1,
-                    0xE8, 0xD1, 0xE8, 0xAA,
+                    0x32, 0xED, 0x8A, 0xC1, 0xF6, 0xE5, 0xD1, 0xE8, 0xD1, 0xE8, 0xD1, 0xE8, 0xD1,
+                    0xE8, 0xD1, 0xE8, 0xD1, 0xE8, 0xAA, 0xFE, 0xC5, 0x80, 0xFD, 0x40,
                 ],
             },
             &[
-                0x8A, 0xC5, 0x2C, 0x20, 0xF6, 0xE9, 0xD1, 0xE0, 0xD1, 0xE0, 0x8A, 0xC4, 0xAA, 0x90,
-                0x90, 0x90, 0x90,
+                0xB5, 0xE0, 0x8A, 0xC1, 0xF6, 0xED, 0xD1, 0xF8, 0xD1, 0xF8, 0xD1, 0xF8, 0xD1, 0xF8,
+                0xD1, 0xF8, 0xD1, 0xF8, 0xAA, 0xFE, 0xC5, 0x80, 0xFD, 0x20,
             ],
         ),
         // The sound effects, converted once as they are loaded: from
@@ -102,9 +121,11 @@ const PREHISTORIK_2: Driver = Driver {
             &[0xD0, 0xF8, 0xD0, 0xF8, 0x04, 0x80],
         ),
         // The rest of a block after an effect ends: from
-        //   sub ax,0A8h / neg ax / mov cx,ax / xor ax,ax / shr cx,1 / rep stosw
+        //   sub ax,0A8h / neg ax / mov cx,ax / xor ax,ax / shr cx,1 /
+        //   rep stosw
         // to
-        //   mov cx,0A8h / sub cx,ax / shr cx,1 / mov ax,8080h / rep stosw / nop
+        //   mov cx,0A8h / sub cx,ax / shr cx,1 / mov ax,8080h /
+        //   rep stosw / nop
         (
             Bytes {
                 at: 0x20FB,
@@ -116,16 +137,15 @@ const PREHISTORIK_2: Driver = Driver {
                 0xB9, 0xA8, 0x00, 0x2B, 0xC8, 0xD1, 0xE9, 0xB8, 0x80, 0x80, 0xF3, 0xAB, 0x90,
             ],
         ),
-        // A block without an effect: from xor ax,ax / mov cx,54h to
-        // mov ax,8080h / mov cl,54h (CX is 0 here: JCXZ led to it).
         (
             Bytes {
                 at: 0x2112,
-                bytes: &[0x33, 0xC0, 0xB9, 0x54, 0x00, 0xF3, 0xAB],
+                bytes: SILENCE.0,
             },
-            &[0xB8, 0x80, 0x80, 0xB1, 0x54, 0xF3, 0xAB],
+            SILENCE.1,
         ),
-        // The ramp down after a sample that doesn't loop: jump past it.
+        // The ramp down after a sample that doesn't loop: from
+        // mov al,[di-1] / or al,al / je to a jump past it (jmp +0Dh).
         (
             Bytes {
                 at: 0x222A,
@@ -136,8 +156,94 @@ const PREHISTORIK_2: Driver = Driver {
     ],
 };
 
+/// Blues Brothers: Jukebox Adventure's driver (BLUES.EXE as PKLITE
+/// unpacks it), by offset in its code segment, whose IRQ handler is at
+/// 444Bh. The same engine assembled for the 286.
+const JUKEBOX_ADVENTURE: Driver = Driver {
+    game: "Blues Brothers: Jukebox Adventure",
+    checks: &[
+        Bytes {
+            at: 0x4289,
+            bytes: &[0x75, 0xF1, 0xFE, 0xC1, 0x80, 0xF9, 0x41, 0x75, 0xE8],
+        },
+        Bytes {
+            at: 0x461E,
+            bytes: MIX_LOOP,
+        },
+        Bytes {
+            at: 0x444B,
+            bytes: &[0x50, 0x53, 0x51, 0x52],
+        },
+    ],
+    patches: &[
+        // The volume table: from
+        //   xor ch,ch / mov al,cl / mul ch / shr ax,6 / stosb / inc ch /
+        //   cmp ch,40h
+        // to
+        //   mov ch,-20h / mov al,cl / imul ch / sar ax,6 / stosb / inc ch /
+        //   cmp ch,20h
+        (
+            Bytes {
+                at: 0x427A,
+                bytes: &[
+                    0x32, 0xED, 0x8A, 0xC1, 0xF6, 0xE5, 0xC1, 0xE8, 0x06, 0xAA, 0xFE, 0xC5, 0x80,
+                    0xFD, 0x40,
+                ],
+            },
+            &[
+                0xB5, 0xE0, 0x8A, 0xC1, 0xF6, 0xED, 0xC1, 0xF8, 0x06, 0xAA, 0xFE, 0xC5, 0x80, 0xFD,
+                0x20,
+            ],
+        ),
+        // The sound effects: from add al,80h / shr al,2 to
+        // sar al,2 / add al,80h.
+        (
+            Bytes {
+                at: 0x4335,
+                bytes: &[0x04, 0x80, 0xC0, 0xE8, 0x02],
+            },
+            &[0xC0, 0xF8, 0x02, 0x04, 0x80],
+        ),
+        // The rest of a block after an effect ends, which ramped down from
+        // the effect's last byte to 0: from mov al,es:[di-1] / or al,al /
+        // je to mov al,80h and a jump to its rep stosb (jmp +0Dh).
+        (
+            Bytes {
+                at: 0x4501,
+                bytes: &[0x26, 0x8A, 0x45, 0xFF, 0x0A, 0xC0, 0x74, 0x09],
+            },
+            &[0xB0, 0x80, 0xEB, 0x0D, 0x90, 0x90, 0x90, 0x90],
+        ),
+        (
+            Bytes {
+                at: 0x4552,
+                bytes: SILENCE.0,
+            },
+            SILENCE.1,
+        ),
+        // A sample that doesn't loop ends: the value the channel adds for
+        // the rest of the block, and holds until its next note, from
+        // mov al,[di-1] / xlat / shr al,1 to xor al,al.
+        (
+            Bytes {
+                at: 0x4669,
+                bytes: &[0x8A, 0x45, 0xFF, 0xD7, 0xD0, 0xE8],
+            },
+            &[0x32, 0xC0, 0x90, 0x90, 0x90, 0x90],
+        ),
+        // Effect Bxx: cmp bx,0Bh / je $ loses the je.
+        (
+            Bytes {
+                at: 0x47B7,
+                bytes: &[0x83, 0xFB, 0x0B, 0x74, 0xFB],
+            },
+            &[0x83, 0xFB, 0x0B, 0x90, 0x90],
+        ),
+    ],
+};
+
 /// The drivers rust-dos knows.
-pub const DRIVERS: &[Driver] = &[PREHISTORIK_2];
+pub const DRIVERS: &[Driver] = &[PREHISTORIK_2, JUKEBOX_ADVENTURE];
 
 /// Whether `ram` holds `b` at `base`.
 fn has(ram: &[u8], base: usize, b: &Bytes) -> bool {
@@ -190,25 +296,34 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_driver_wherever_it_is_loaded() {
-        for base in [0x1_2340, 0x8_FF00] {
-            let ram = memory(&PREHISTORIK_2, base);
-            let (driver, at) = find(&ram).unwrap();
-            assert_eq!((driver.game, at), ("Prehistorik 2", base));
+    fn finds_each_driver_wherever_it_is_loaded() {
+        for driver in DRIVERS {
+            for base in [0x1_2340, 0x8_0000] {
+                let ram = memory(driver, base);
+                let (found, at) = find(&ram).unwrap();
+                assert_eq!((found.game, at), (driver.game, base));
+            }
         }
     }
 
     #[test]
     fn leaves_code_that_differs_in_any_piece() {
         let base = 0x2_0000;
-        for b in PREHISTORIK_2
-            .checks
-            .iter()
-            .chain(PREHISTORIK_2.patches.iter().map(|(old, _)| old))
-        {
-            let mut ram = memory(&PREHISTORIK_2, base);
-            ram[base + b.at + b.bytes.len() - 1] ^= 1;
-            assert!(find(&ram).is_none(), "found with {:04X} changed", b.at);
+        for driver in DRIVERS {
+            for b in driver
+                .checks
+                .iter()
+                .chain(driver.patches.iter().map(|(old, _)| old))
+            {
+                let mut ram = memory(driver, base);
+                ram[base + b.at + b.bytes.len() - 1] ^= 1;
+                assert!(
+                    find(&ram).is_none(),
+                    "{} found with {:04X} changed",
+                    driver.game,
+                    b.at
+                );
+            }
         }
         assert!(find(&vec![0u8; 0xA0000]).is_none());
     }
@@ -216,20 +331,40 @@ mod tests {
     #[test]
     fn patches_once() {
         let base = 0x3_0000;
-        let mut ram = memory(&PREHISTORIK_2, base);
-        let (driver, at) = find(&ram).unwrap();
-        for (addr, byte) in writes(driver, at).collect::<Vec<_>>() {
-            ram[addr] = byte;
+        for driver in DRIVERS {
+            let mut ram = memory(driver, base);
+            let (found, at) = find(&ram).unwrap();
+            for (addr, byte) in writes(found, at).collect::<Vec<_>>() {
+                ram[addr] = byte;
+            }
+            for (old, new) in driver.patches {
+                assert_eq!(&ram[base + old.at..base + old.at + new.len()], *new);
+            }
+            assert!(
+                find(&ram).is_none(),
+                "{} is found again once patched",
+                driver.game
+            );
         }
-        for (old, new) in driver.patches {
-            assert_eq!(&ram[base + old.at..base + old.at + new.len()], *new);
-        }
-        assert!(find(&ram).is_none(), "a patched driver is found again");
     }
 
     #[test]
-    fn patches_keep_their_lengths() {
+    fn patches_keep_their_lengths_and_stay_apart() {
         for driver in DRIVERS {
+            let mut pieces: Vec<_> = driver
+                .checks
+                .iter()
+                .chain(driver.patches.iter().map(|(old, _)| old))
+                .collect();
+            pieces.sort_by_key(|b| b.at);
+            for pair in pieces.windows(2) {
+                assert!(
+                    pair[0].at + pair[0].bytes.len() <= pair[1].at,
+                    "{} overlaps at {:04X}",
+                    driver.game,
+                    pair[1].at
+                );
+            }
             for (old, new) in driver.patches {
                 assert_eq!(
                     old.bytes.len(),
