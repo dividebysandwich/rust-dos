@@ -544,6 +544,47 @@ impl F80 {
         Some(if sign { -magnitude } else { magnitude })
     }
 
+    /// The value as a single's bits, as an x87 stores it (FST m32): its 64
+    /// bits of significand rounded once, as control word rounding `rc`
+    /// says. Below a single's normal range it rounds to a denormal or zero,
+    /// and above it to infinity, or to the largest single where the
+    /// rounding goes toward zero (chop, down for a positive value, up for
+    /// a negative one). None for anything but a normal number.
+    pub fn single_bits(&self, rc: u16) -> Option<u32> {
+        let (sign, mut exp, mantissa) = self.normal_parts()?;
+        let sign_bit = (sign as u32) << 31;
+        // The significand's bits below the single's last place: 40 in the
+        // normal range, more below it, where a denormal has fewer.
+        let shift = 40 + (-126 - exp).max(0) as u32;
+        let (mut kept, rest, half) = if shift >= 128 {
+            // Far under the least denormal: below a half, and not 0.
+            (0u128, 1u128, 2u128)
+        } else {
+            let m = mantissa as u128;
+            (m >> shift, m & ((1u128 << shift) - 1), 1u128 << (shift - 1))
+        };
+        kept += rounds_away(rc, sign, kept & 1 != 0, rest, half) as u128;
+        if shift == 40 && kept >> 24 != 0 {
+            kept >>= 1;
+            exp += 1;
+        }
+        if exp > 127 {
+            let largest = match rc {
+                0 => false,
+                1 => !sign,
+                2 => sign,
+                _ => true,
+            };
+            return Some(sign_bit | if largest { 0x7F7F_FFFF } else { 0x7F80_0000 });
+        }
+        if shift > 40 {
+            // A denormal's bits are its significand, and a carry out of
+            // it makes the least normal, whose bits are the same number.
+            return Some(sign_bit | kept as u32);
+        }
+        Some(sign_bit | ((exp + 127) as u32) << 23 | (kept as u32 & 0x7F_FFFF))
+    }
+
     /// Compare with `other` by their 80 bits, where both are normal numbers
     /// or zeros; None otherwise.
     pub fn compare(&self, other: &F80) -> Option<std::cmp::Ordering> {

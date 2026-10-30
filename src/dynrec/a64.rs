@@ -2341,6 +2341,37 @@ impl Gen<'_> {
                     ; single_inline:
                     ; fcvt s16, D(d(x))
                     ; fmov W(r(t)), s16
+                );
+                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; and w0, w0, 0xC00
+                    ; cbz w0, >single_done
+                    ; fcvt d17, s16
+                    ; cmp w0, 0x800
+                    ; b.eq >single_up
+                    ; cmp w0, 0x400
+                    ; b.eq >single_down
+                    // Toward zero: down from a positive single, up from a
+                    // negative one.
+                    ; tbnz W(r(t)), 31, >single_up
+                    ; single_down:
+                    // The nearest single above the value (not a NaN): the
+                    // next one down.
+                    ; fcmp d17, D(d(x))
+                    ; b.le >single_done
+                    ; tbnz W(r(t)), 31, >single_inc
+                    ; b >single_dec
+                    ; single_up:
+                    ; fcmp D(d(x)), d17
+                    ; b.le >single_done
+                    ; tbnz W(r(t)), 31, >single_dec
+                    // A negative single's bits count away from zero.
+                    ; single_inc:
+                    ; add W(r(t)), W(r(t)), 1
+                    ; b >single_done
+                    ; single_dec:
+                    ; sub W(r(t)), W(r(t)), 1
                     ; single_done:
                 );
             }
