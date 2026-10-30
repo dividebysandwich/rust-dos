@@ -576,6 +576,9 @@ pub struct Voodoo {
     footprint: RefCell<Footprint>,
     /// Frame buffer writes behind queued jobs, not yet a job themselves.
     words: RefCell<Vec<Word>>,
+    /// Some of `words` came while jobs were held back: they aren't in the
+    /// footprint, and the backlog hasn't seen them (`spare`).
+    words_unseen: Cell<bool>,
     /// While the OpenGL renderer draws the picture: the jobs held back
     /// until something reads the memory (`backlog`), whether they may be
     /// (`RUST_DOS_VOODOO_PRUNE=0` says no), whether a program read the
@@ -611,6 +614,10 @@ pub struct Voodoo {
     pub(crate) svert: [tsu::Vertex; 3],
     pub(crate) sverts: u32,
     pub(crate) blt: blit::Blit,
+    /// `blt_queue_dest`'s answer for the copy under way, and what it was
+    /// worked out from (`blt_queue_key`): a copy sends its data a word at
+    /// a time, tens of thousands a frame.
+    blt_queue: Cell<Option<([u32; 15], Option<usize>)>>,
     /// The Banshee's or Voodoo3's own state when the card is one: the
     /// display adapter around the 3D engine, whose memory it shares.
     pub banshee: Option<Box<banshee::Banshee>>,
@@ -667,6 +674,7 @@ impl Voodoo {
             tmu_in_use: Cell::new(0),
             footprint: RefCell::new(Footprint::default()),
             words: RefCell::new(Vec::new()),
+            words_unseen: Cell::new(false),
             backlog: RefCell::new(Backlog::default()),
             prune: std::env::var("RUST_DOS_VOODOO_PRUNE").map_or(true, |v| v != "0"),
             counters_read: Cell::new(false),
@@ -682,6 +690,7 @@ impl Voodoo {
             svert: Default::default(),
             sverts: 0,
             blt: Default::default(),
+            blt_queue: Cell::new(None),
             banshee: board.banshee().map(|kind| Box::new(banshee::Banshee::new(kind))),
         };
         v.tmu = (0..units)
@@ -1036,14 +1045,21 @@ impl Voodoo {
         }
     }
 
-    /// The frame buffer writes queued behind jobs, as a job of their own,
-    /// after the jobs held back.
+    /// The frame buffer writes queued behind jobs, as a job of their own:
+    /// held back after the jobs held, or after them to the workers. Those
+    /// queued while jobs were held back aren't in the footprint yet
+    /// (`queue_words`): handed over, they go into it.
     fn submit_words(&self) {
         let words = std::mem::take(&mut *self.words.borrow_mut());
-        if !words.is_empty() {
-            self.release_backlog();
-            self.outstanding.set(self.pool.workers() > 0);
-            self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
+        self.words_unseen.set(false);
+        if words.is_empty() {
+            return;
+        }
+        if self.deferring() {
+            let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, &words);
+            self.hand_over(out);
+        } else {
+            self.hand_over([Job::Pixels { fb: self.fbi.ram.clone(), words }]);
         }
     }
 
@@ -1055,6 +1071,13 @@ impl Voodoo {
     pub(crate) fn spare(&self, start: u32, end: u32) -> bool {
         if !self.writes_queue() {
             return true;
+        }
+        // Writes waiting from while jobs were held back may land in that
+        // range: the backlog has to see them, as the write comes after
+        // them. The others are in the footprint already, and stay in a
+        // batch.
+        if self.words_unseen.get() {
+            self.submit_words();
         }
         let given_out = self.footprint.borrow();
         let range = (start as u64, end as u64);
@@ -1070,11 +1093,20 @@ impl Voodoo {
 
     /// Frame buffer writes for the queue (`writes_queue`): held back with
     /// the jobs, or every so many out as a job, or straight into memory
-    /// when the workers are done by then.
+    /// when the workers are done by then. Held back, they wait here until
+    /// there are enough of them or something else comes: the backlog
+    /// works out what a batch of them touches at once, which per write
+    /// would cost more than drawing the jobs held (a Voodoo2 CPU-to-screen
+    /// copy is tens of thousands of writes a frame).
     pub(crate) fn queue_words(&self, new: &[Word]) {
-        if self.deferring() && self.words.borrow().is_empty() {
-            let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, new);
-            self.hand_over(out);
+        if self.deferring() {
+            let mut words = self.words.borrow_mut();
+            words.extend_from_slice(new);
+            self.words_unseen.set(true);
+            if words.len() >= WORDS_A_JOB {
+                drop(words);
+                self.submit_words();
+            }
             return;
         }
         self.footprint.borrow_mut().words(new);
@@ -1094,6 +1126,7 @@ impl Voodoo {
                     ram.set(w.at as usize, w.value);
                 }
             }
+            self.words_unseen.set(false);
             self.outstanding.set(false);
             self.tmu_in_use.set(0);
             self.footprint.borrow_mut().clear();
