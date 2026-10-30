@@ -138,6 +138,11 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   1 pages, 2 lines), the page select register, how often it was written
   and how often the game read the head tracker (`polls`), and whether the
   shutter glasses' 3D BIOS has its glasses on.
+- **Check which host GPU draws with `/api/status` → `display`.** It is
+  the log's `[DISPLAY]` line: with OpenGL, its version, the graphics chip
+  (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two
+  chips says which one the driver gave the program; otherwise SDL's
+  renderer and why OpenGL 3 wasn't there.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the

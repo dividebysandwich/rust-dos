@@ -1,6 +1,7 @@
 //! Sets the configuration flags of the target: the dynamic recompiler's
 //! hosts and OpenXR's, records the git commit the build is made from, and
-//! links in the Windows program's icon, manifest and version.
+//! links in the Windows program's icon, manifest and version and the
+//! exports that put it on a laptop's discrete graphics chip.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,6 +37,13 @@ fn main() {
         embed_resource::compile_for("packaging/windows/rust-dos.rc", ["rust-dos"], embed_resource::ParamsIncludeDirs([&out_dir]))
             .manifest_required()
             .unwrap();
+        // The discrete graphics chip on a laptop with two: the drivers
+        // look for these exports in the .exe (see src/main.rs).
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            for name in ["NvOptimusEnablement", "AmdPowerXpressRequestHighPerformance"] {
+                println!("cargo::rustc-link-arg-bin=rust-dos=/EXPORT:{name},DATA");
+            }
+        }
     }
 }
 
