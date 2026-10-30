@@ -2436,12 +2436,16 @@ the GPU, so a game that reads back every frame gains less. The pixels it
 reads differ in small ways from the card's: OpenGL draws a triangle's
 edges by its own rules, blends after the dither (see below) and keeps
 more depth precision. What a game writes itself, its frame buffer
-writes and the blitter's copies, reads back as it wrote it. A game that
-needs the card's exact pixels can have `voodoo_readback=exact`. Programs
-that use alpha planes, the Banshee and Voodoo3, and deterministic runs
-always get the exact pixels, as do the pixel counters: drawing left to
-OpenGL isn't counted, and once a game reads the counters everything
-after is drawn in software and counted.
+writes and the blitter's copies, reads back as it wrote it. A save state
+keeps OpenGL's pixels too, so states of the same scene saved on two
+GPUs differ slightly in the card's memory, and in what the game did with
+pixels it read back. Such a state loads on any machine. A game that
+needs the card's exact pixels, or states that match byte for byte, can
+have `voodoo_readback=exact`. Programs that use alpha planes, the
+Banshee and Voodoo3, and deterministic runs always get the exact pixels,
+as do the pixel counters: drawing left to OpenGL isn't counted, and once
+a game reads the counters everything after is drawn in software and
+counted.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws
