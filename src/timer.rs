@@ -577,7 +577,7 @@ pub struct Pacer {
     /// on from the one before: the backlog after frames of a paused
     /// machine, which the frontend goes on drawing, is the pause's.
     lost_ns: u64,
-    last_ns: Option<u64>,
+    last_ns: u64,
     ran: bool,
     /// Wall-clock instant that corresponds to emulated time `anchor_ticks`.
     anchor_wall: Instant,
@@ -604,7 +604,7 @@ impl Pacer {
             host_max: None,
             sample: HostSample::default(),
             lost_ns: 0,
-            last_ns: None,
+            last_ns: 0,
             ran: false,
             anchor_wall: now,
             anchor_ticks: 0,
@@ -812,8 +812,8 @@ impl Pacer {
     ) -> Option<u32> {
         let current = bus.clock.cycles_per_ms();
         let ns = bus.clock.now_ns();
-        self.ran = self.last_ns.is_some_and(|before| ns > before);
-        self.last_ns = Some(ns);
+        self.ran = ns > self.last_ns;
+        self.last_ns = ns;
         let ideal = self.sample.add(executed, exec, overhead).map(|(ns_per_instr, overhead_ns)| {
             let frame_ns = self.period.as_nanos() as f64;
             let budget_ns = (frame_ns * MAX_BUSY_SHARE - overhead_ns).max(frame_ns * 0.1);
@@ -870,15 +870,10 @@ impl Pacer {
                 }
                 // Fast forwarding, the host's time says nothing of the
                 // program's needs.
-                let next = if self.fast_forward {
+                if self.fast_forward {
                     None
                 } else {
                     self.auto.update(bus, protected, host_max, self.lost_ns)
-                };
-                // A heavier scene than the host keeps up with at this speed.
-                match next.unwrap_or(current) {
-                    speed if speed > host_max && current > host_max => Some(host_max),
-                    speed => (speed != current).then_some(speed),
                 }
             }
         }

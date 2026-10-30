@@ -579,13 +579,37 @@ fn auto_speed_is_never_capped_below_a_speed_that_can_be_timed() {
     // run 3,333 instructions, too few for the host to be measured again,
     // and the cap would stay. It stops at a speed whose frames are timed.
     let start = Instant::now();
-    let bus = bus_at(2000);
+    let mut bus = bus_at(2000);
     let mut pacer = Pacer::new(CpuSpeed::Auto(300), None, start);
-    let executed = 2000 * 50 / 3;
-    // 4.2 us an instruction: 85% of a frame fits about 3,400 of them.
-    let exec = Duration::from_nanos(executed * 4200);
-    let next = pacer.end_frame(&bus, false, executed, exec, Duration::ZERO);
-    assert_eq!(next, Some(1200));
+    for frame in 0..600 {
+        let executed = bus.clock.cycles_per_ms() as u64 * 50 / 3;
+        bus.clock.icount += executed;
+        // A game short of its frame rate: the search wants more.
+        bus.activity.swapped((frame % 4 == 0) as u64);
+        // 4.2 us an instruction: 85% of a frame fits about 3,400 of them.
+        let exec = Duration::from_nanos(executed * 4200);
+        if let Some(speed) = pacer.end_frame(&bus, false, executed, exec, Duration::ZERO) {
+            bus.set_cycles_per_ms(speed);
+        }
+    }
+    assert_eq!(bus.clock.cycles_per_ms(), 1200);
+}
+
+#[test]
+fn auto_speed_is_not_taken_down_by_the_host_estimate_alone() {
+    // The estimate is noisy, and a stall sinks it for a moment. Only a
+    // measurement changes the speed, and it knows if the host fell behind.
+    let start = Instant::now();
+    let mut bus = bus_at(60_000);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
+    for _ in 0..20 {
+        let executed = 1_000_000;
+        bus.clock.icount += executed;
+        // About 30,000 instructions per ms fit into a frame.
+        let exec = Duration::from_nanos(executed * 28);
+        let next = pacer.end_frame(&bus, true, executed, exec, Duration::ZERO);
+        assert_eq!(next, None);
+    }
 }
 
 #[test]
