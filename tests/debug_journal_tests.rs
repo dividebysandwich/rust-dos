@@ -56,13 +56,14 @@ impl Drop for RemoveTestDir {
 /// The emulator with `dir`'s `c` folder as C:, and where its debug server
 /// listens.
 fn start(dir: &std::path::Path) -> (Emulator, SocketAddr) {
-    start_with_config(dir, None, false)
+    start_with_config(dir, None, false, &[])
 }
 
 fn start_with_config(
     dir: &std::path::Path,
     config: Option<&std::path::Path>,
     capture_log: bool,
+    args: &[&str],
 ) -> (Emulator, SocketAddr) {
     let exe = env!("CARGO_BIN_EXE_rust-dos");
     // What the emulator says on stderr, shown if it doesn't come up.
@@ -80,6 +81,7 @@ fn start_with_config(
         .arg("-d")
         .arg(dir.join("c"))
         .args(["--debug-server", "127.0.0.1:0"])
+        .args(args)
         .env("SDL_AUDIODRIVER", "dummy")
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr_path).unwrap())
@@ -137,7 +139,7 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         ),
     )
     .unwrap();
-    let (mut emulator, addr) = start_with_config(&dir, Some(&config), true);
+    let (mut emulator, addr) = start_with_config(&dir, Some(&config), true, &[]);
     let deadline = Instant::now() + Duration::from_secs(30);
     let window = loop {
         let found = Command::new("xdotool")
@@ -353,7 +355,7 @@ fn the_log_has_the_lines_logged_before_the_debug_server_started() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("c")).unwrap();
     let _cleanup = RemoveTestDir(dir.clone());
-    let (mut emulator, addr) = start_with_config(&dir, None, true);
+    let (mut emulator, addr) = start_with_config(&dir, None, true, &[]);
     paused_at_the_prompt(addr);
     let (status, display) = http(addr, "GET", "/api/log?grep=DISPLAY", &[], None);
     assert_eq!(status, 200, "{}", display);
@@ -392,6 +394,57 @@ fn the_log_has_the_lines_logged_before_the_debug_server_started() {
     let (in_file, in_log) = (shell(&logged).unwrap(), shell(&served).unwrap());
     assert!(in_log > 0, "{:?}", served);
     assert_eq!(served[..in_log], logged[..in_file]);
+}
+
+/// A load keeps the speed the emulator runs at, whatever speed the state
+/// was saved at: `--cycles`, or the last one `/api/speed` set.
+#[test]
+fn a_load_keeps_the_speed_the_emulator_runs_at() {
+    let dir = std::env::temp_dir().join(format!("rust-dos-load-speed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("c")).unwrap();
+    let (_emulator, addr) = start_with_config(&dir, None, false, &["--cycles", "7000"]);
+    paused_at_the_prompt(addr);
+    let get = |path: &str| http(addr, "GET", path, &[], None);
+    let post = |path: &str, body: Value| http(addr, "POST", path, &[], Some(body));
+    let rate = || get("/api/status").1["cycles_per_ms"].as_u64();
+    let state = dir.join("a.state").display().to_string();
+    assert_eq!(rate(), Some(7000));
+    let (status, saved) = post("/api/state/save", json!({"path": state}));
+    assert_eq!(status, 200, "{}", saved);
+    let load = |strict: bool| {
+        let body = json!({"path": state, "strict_match": strict});
+        let (status, loaded) = post("/api/state/load", body);
+        assert_eq!(status, 200, "{}", loaded);
+        // The speed isn't a difference: the load doesn't bring it.
+        assert!(loaded.get("differences").is_none(), "{}", loaded);
+    };
+
+    // --cycles 7000 when saved, 20000 when loaded.
+    assert_eq!(post("/api/speed", json!({"cycles": "20000"})).0, 200);
+    load(true);
+    assert_eq!(rate(), Some(20000));
+    // At max, the load goes on at the rate max had (paused, it has had
+    // no frames to tune it from 20000).
+    assert_eq!(post("/api/speed", json!({"cycles": "max"})).0, 200);
+    load(false);
+    assert_eq!(rate(), Some(20000));
+    // At auto, the search starts from the state's rate.
+    assert_eq!(post("/api/speed", json!({"cycles": "auto"})).0, 200);
+    load(false);
+    assert_eq!(rate(), Some(7000));
+    // No load changed the speed setting: the journal's speed changes are
+    // the three /api/speed calls.
+    let changes = get("/api/journal?after=0&type=speed_changed").1;
+    let sources: Vec<&str> = changes["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["source"].as_str())
+        .collect();
+    assert_eq!(sources, ["debugger", "debugger", "debugger"], "{}", changes);
+    assert_eq!(post("/api/control/quit", json!({})).0, 200);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

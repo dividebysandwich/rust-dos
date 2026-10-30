@@ -2354,7 +2354,11 @@ SAVE STATES
   POST   /api/state/save {"path":"/tmp/keen.state"}  save the machine to a file
   POST   /api/state/load {"path":"/tmp/keen.state"}  load one: its hardware
                    settings (memsize too), then the machine and its
-                   drives. Breakpoints and watchpoints stay.
+                   drives. Breakpoints and watchpoints stay. The speed
+                   stays this machine's (--cycles, or the last
+                   /api/speed), except with --deterministic. A booted
+                   system's disk copy goes into the image this machine
+                   has in the drive, not the one the state names.
                    "differences" lists the hardware settings, drives,
                    folders, images, files and deterministic start time
                    that differed from this machine's, if any. A failed load

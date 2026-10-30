@@ -331,7 +331,9 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
 
 * Loading a state puts its hardware settings back first, the memory size
   (`memsize`) and network card among them. (The libretro core loads only
-  states with its own memory size.)
+  states with its own memory size.) The speed (`cycles`) isn't one of
+  them: the machine goes on at the speed it runs at, except in
+  deterministic mode.
 * Files on the host and in disk images aren't part of a state: what a
   program wrote since stays written, as in DOSBox. A system [booted from a
   disk image](CONFIGURATION.md#booting-a-disk-image) is the exception: its

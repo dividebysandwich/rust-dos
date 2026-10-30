@@ -317,7 +317,7 @@ pub extern "C" fn retro_deinit() {
 }
 
 /// The extensions of the content the core takes.
-const EXTENSIONS: &CStr = c"exe|com|bat|zip|dosz|7z|conf|img|ima|vfd|flp|dsk|86f|vhd|hdd|iso|cue|ins|chd|m3u|m3u8";
+const EXTENSIONS: &CStr = c"exe|com|bat|zip|dosz|dosc|7z|conf|img|ima|vfd|flp|dsk|86f|vhd|hdd|iso|cue|ins|chd|m3u|m3u8";
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
