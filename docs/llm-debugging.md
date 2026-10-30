@@ -1011,6 +1011,15 @@ OpenGL, they are the software rasterizer's. A game that detects no card
 usually left `fbiInit` at their power-on values (`00000410 00201102
 80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
 
+- **Read-backs:** with `voodoo_readback=gpu`, `gpu_read_backs` counts the
+  times the card's memory was brought up to OpenGL's pictures, and
+  `gpu_only_jobs` the triangles and fills left to OpenGL alone. What the
+  reads covered: `gpu_read_rows` (rows read, summed over the buffers),
+  `gpu_partial_reads` (reads of part of a buffer rather than all its
+  rows), and of the rows read, `gpu_read_rows_drawn` (drawn since the
+  last read of that buffer) and `gpu_read_rows_undrawn` (not drawn
+  since, which a cache of the rows read would have had). A game with many
+  undrawn rows would gain from such a cache; one with few wouldn't.
 - **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
   registers at +0, the frame buffer at +400000h (2048 bytes a row of
   16-bit pixels), texture memory at +800000h (write-only; reads give FFh).

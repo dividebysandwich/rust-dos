@@ -512,11 +512,12 @@ pub enum Uop {
     /// t = the low dword of x's bits, or the high one with `high`.
     FToHalf { t: T, x: X, high: bool },
     /// t = the single FST stores of ST(0), whose double x holds
-    /// (`data::st0_single_bits`): x rounded to nearest, or where ST(0)'s
-    /// 80 bits hold more than x and rounding x could come out different
-    /// (the control word rounds other than to nearest, or x has 25
-    /// significant bits or fewer), the 80 bits rounded through the
-    /// handlers' code. The block goes on after it either way.
+    /// (`data::st0_single_bits`): x rounded as the control word says
+    /// (`data::double_to_single_bits`), or where ST(0)'s 80 bits hold
+    /// more than x and rounding x could come out different (the control
+    /// word rounds other than to nearest, or x has 25 significant bits or
+    /// fewer), the 80 bits rounded through the handlers' code. The block
+    /// goes on after it either way.
     FToSingle { t: T, x: X },
     /// t = dword `part` (0 or 1) of ST(0)'s 80 bits, or (2) its sign and
     /// exponent, as `FpuRegs::get` makes them.
