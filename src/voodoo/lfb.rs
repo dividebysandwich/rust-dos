@@ -31,6 +31,14 @@ pub enum MemoryRun {
     Linear(u32),
 }
 
+/// The rows of a buffer `height` rows high that a read of row `row`
+/// brings up to date: the band of 32 the row is in and the next, 32
+/// being the height of a row of tiles.
+fn lfb_band(row: u32, height: u32) -> (u32, u32) {
+    let top = (row / 32 * 32).min(height);
+    (top, (top + 64).min(height))
+}
+
 impl Voodoo {
     /// Where the dwords written to the `len` bytes of the window from
     /// `offset` on go, if all of them go to the frame buffer or the card's
@@ -372,11 +380,6 @@ impl Voodoo {
         if offs == NONE {
             return 0xFFFF_FFFF;
         }
-        // The buffer read, whole: a program reading one pixel reads
-        // others after it, and each read back from the OpenGL renderer
-        // waits for the GPU.
-        let span = super::mirror::span(stride, self.fbi.height) as u32 * 2;
-        self.catch_up_in(Some((offs, offs.saturating_add(span))));
         let scry = if lfb_mode & (1 << 13) != 0 {
             (self.fbi.yorigin as i32 - y) & self.fbi.ymask
         } else {
@@ -385,6 +388,21 @@ impl Voodoo {
         if scry < 0 {
             return 0xFFFF_FFFF;
         }
+        // The rows around the pixel read: a program reading one pixel
+        // mostly reads its neighbours after it, and each read back from
+        // the OpenGL renderer waits for the GPU. A game that tests a few
+        // depths a frame (3DMark 2000's lens flares) then doesn't wait
+        // for the whole buffer, and one that reads all of it reads it in
+        // a few bands, the GPU idle after the first.
+        let (top, bottom) = lfb_band(scry as u32, self.fbi.height);
+        let (top, bottom) = (
+            super::mirror::span(stride, top) as u32 * 2,
+            super::mirror::span(stride, bottom) as u32 * 2,
+        );
+        self.catch_up_in(Some((
+            offs.saturating_add(top),
+            offs.saturating_add(bottom),
+        )));
         let row = offs as usize / 2 + stride.row(scry as usize);
         let ram = &self.fbi.ram;
         let word = |x: usize| {

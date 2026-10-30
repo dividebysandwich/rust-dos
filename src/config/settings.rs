@@ -298,7 +298,9 @@ impl Settings {
                 fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
                 gamma: config.voodoo_gamma.unwrap_or(default.voodoo.gamma),
                 dither: config.voodoo_dither.unwrap_or(default.voodoo.dither),
-                gpu_reads: config.voodoo_readback_gpu.unwrap_or(default.voodoo.gpu_reads),
+                gpu_reads: config
+                    .voodoo_readback_gpu
+                    .unwrap_or(default.voodoo.gpu_reads),
             },
             powervr: config.powervr.unwrap_or(default.powervr),
             powervr_filter: config.powervr_filter.unwrap_or(default.powervr_filter),

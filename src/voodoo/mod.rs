@@ -607,7 +607,7 @@ pub struct Voodoo {
     /// the recording (a colour buffer's word offset, None for the
     /// auxiliary buffer), and rows of each that are, apart from one
     /// another.
-    gpu_stale: RefCell<Vec<(Option<u32>, (u32, u32))>>,
+    gpu_stale: RefCell<Vec<gpu::Stale>>,
     gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
     gpu_only: Cell<u64>,
@@ -1034,7 +1034,10 @@ impl Voodoo {
     /// draws, unless a program reads the pixel counters or the buffers'
     /// layout gives the tiles no meaning.
     fn deferring(&self) -> bool {
-        self.recording() && self.prune && !self.counters_read.get() && self.backlog.borrow().layout.prunable
+        self.recording()
+            && self.prune
+            && !self.counters_read.get()
+            && self.backlog.borrow().layout.prunable
     }
 
     /// What a job does to the tiles, when jobs are held back.
@@ -1110,7 +1113,10 @@ impl Voodoo {
             let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, &words);
             self.hand_over(out);
         } else {
-            self.hand_over([Job::Pixels { fb: self.fbi.ram.clone(), words }]);
+            self.hand_over([Job::Pixels {
+                fb: self.fbi.ram.clone(),
+                words,
+            }]);
         }
     }
 
@@ -1152,7 +1158,10 @@ impl Voodoo {
         // Behind the renderer, with nothing else waiting: the renderer
         // gets them from the recording, and the memory has them at once,
         // which a read back of the buffers writes over with the same.
-        if self.gpu_behind.get() && !self.outstanding.get() && self.words.borrow().is_empty() && self.backlog.borrow().is_empty()
+        if self.gpu_behind.get()
+            && !self.outstanding.get()
+            && self.words.borrow().is_empty()
+            && self.backlog.borrow().is_empty()
         {
             let ram = &self.fbi.ram;
             for w in new {
@@ -1318,7 +1327,11 @@ impl Voodoo {
     pub(crate) fn update_tiles(&mut self) {
         let fbi = &self.fbi;
         let word = |offs: u32| (offs != NONE).then_some(offs as usize / 2);
-        let recorded = self.banshee.is_some().then(|| self.mirror_layout()).flatten();
+        let recorded = self
+            .banshee
+            .is_some()
+            .then(|| self.mirror_layout())
+            .flatten();
         let words = fbi.ram.len();
         let layout = match recorded {
             Some(key) => {
@@ -1796,7 +1809,12 @@ impl Voodoo {
             return;
         };
         let key = self.mirror_key(old.as_ref());
-        if !self.mirror.get_mut().as_ref().is_some_and(|m| m.needs_snapshot(&key)) {
+        if !self
+            .mirror
+            .get_mut()
+            .as_ref()
+            .is_some_and(|m| m.needs_snapshot(&key))
+        {
             return;
         }
         self.flush();

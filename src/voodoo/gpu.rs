@@ -16,10 +16,15 @@
 //! a read back then only has to read.
 
 use super::Voodoo;
+use super::backlog::Access;
 use super::mirror::{Blit, BlitSource, Command};
 use super::pages::{PAGE, Pages};
-use super::backlog::Access;
 use super::workers::{Job, Word};
+
+/// Rows `top..bottom` of a buffer the renderer drew and the memory
+/// doesn't have yet: the buffer by its key in the recording (a colour
+/// buffer's word offset, None for the auxiliary buffer), and the rows.
+pub(crate) type Stale = (Option<u32>, (u32, u32));
 
 /// The OpenGL renderer, as the card reaches it between frames.
 pub trait GpuLink {
@@ -201,7 +206,10 @@ impl Voodoo {
         // The rows asked for that are behind, buffer by buffer.
         let mut stale = self.gpu_stale.borrow_mut();
         let asked = match range {
-            None => stale.iter().map(|&(k, (top, bottom))| (k, top, bottom)).collect(),
+            None => stale
+                .iter()
+                .map(|&(k, (top, bottom))| (k, top, bottom))
+                .collect(),
             Some((start, end)) => key.rows_in(start, end),
         };
         let layout = key.layout();
@@ -237,7 +245,11 @@ impl Voodoo {
                         }
                     }
                 }
-                left.extend([(k, (s0, top)), (k, (bottom, s1))].into_iter().filter(|(_, (a, b))| a < b));
+                left.extend(
+                    [(k, (s0, top)), (k, (bottom, s1))]
+                        .into_iter()
+                        .filter(|(_, (a, b))| a < b),
+                );
                 false
             });
             stale.extend(left);
@@ -339,7 +351,12 @@ impl Voodoo {
     /// of memory with it: the renderer gets them all again, but for those
     /// it has newer.
     pub(crate) fn gpu_resend_dropped(&mut self) {
-        if self.mirror.get_mut().as_mut().is_some_and(|m| m.take_dropped()) {
+        if self
+            .mirror
+            .get_mut()
+            .as_mut()
+            .is_some_and(|m| m.take_dropped())
+        {
             self.gpu.get_mut().pages.resend();
         }
     }
