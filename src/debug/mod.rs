@@ -696,6 +696,9 @@ pub struct DebugHub {
     /// Input is then delivered by `feed_input` at emulated times, and its
     /// waits end in emulated time (`input_wait_ns`).
     pub deterministic: Option<chrono::NaiveDateTime>,
+    /// What draws the window, as the `[DISPLAY]` log line says: OpenGL's
+    /// version, graphics chip and vendor, or SDL's renderer.
+    pub display: String,
     input_wait_ns: Option<u64>,
     /// Pause once emulated time reaches this (`until_ms`).
     stop_at_ns: Option<u64>,
@@ -843,6 +846,7 @@ impl DebugHub {
             frame_stats: None,
             heat: None,
             profile: None,
+            display: String::new(),
         }
     }
 

@@ -211,6 +211,9 @@ impl DebugHub {
         // to end did.
         status["program"] = cpu.program.clone().into();
         status["last_exit"] = exit_json(cpu);
+        // What draws the window on the host (the `[DISPLAY]` line). Set
+        // apart from the rest, which is at json!'s recursion limit.
+        status["display"] = self.display.clone().into();
         // The journal: its last and oldest entries, the last that changed
         // the machine, the stop it is in, the control operation under way,
         // and whether a strict-match save could be done now.
