@@ -751,6 +751,7 @@ impl Voodoo {
         self.flush();
         self.pool.reset_stats();
         self.counters_read.set(false);
+        self.gpu_alpha.set(false);
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];

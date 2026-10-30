@@ -92,13 +92,18 @@ impl Target {
 
     /// Resolve the samples into the texture.
     fn resolve(&self, gl: &glow::Context, (w, h): (i32, i32)) {
+        self.resolve_rows(gl, w, (0, h));
+    }
+
+    /// Resolve rows `y0..y1` of the samples, `w` wide, into the texture.
+    fn resolve_rows(&self, gl: &glow::Context, w: i32, (y0, y1): (i32, i32)) {
         let Some((samples, _)) = self.samples else { return };
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(samples));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
-            gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.blit_framebuffer(0, y0, w, y1, 0, y0, w, y1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
@@ -913,7 +918,10 @@ impl VoodooGl {
             gl.disable(glow::SCISSOR_TEST);
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
             if key.is_some() {
-                target.resolve(gl, (sw, sh));
+                // Only the rows asked for: a game reading the buffer
+                // reads it a band at a time (`lfb_band`).
+                let band = (top as i32 * scale as i32, bottom as i32 * scale as i32);
+                target.resolve_rows(gl, sw, band);
                 let mut rgba = vec![0u8; w * rows * 4];
                 let (width, height) = (w as i32, rows as i32);
                 // A blit without filtering to the card's size takes the

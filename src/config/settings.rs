@@ -397,7 +397,11 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "voodoo_scale_shader", yes_no(settings.voodoo.scale_shader)),
         (Emulator, "voodoo_dither", yes_no(settings.voodoo.dither)),
-        (Emulator, "voodoo_readback", Some(if settings.voodoo.gpu_reads { "gpu" } else { "exact" }.to_string())),
+        (
+            Emulator,
+            "voodoo_readback",
+            Some(if settings.voodoo.gpu_reads { "gpu" } else { "exact" }.to_string()),
+        ),
         (Emulator, "voodoo_msaa", Some(match settings.voodoo.msaa {
             1 => "off".to_string(),
             n => n.to_string(),

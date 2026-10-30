@@ -393,16 +393,21 @@ impl Voodoo {
         // the OpenGL renderer waits for the GPU. A game that tests a few
         // depths a frame (3DMark 2000's lens flares) then doesn't wait
         // for the whole buffer, and one that reads all of it reads it in
-        // a few bands, the GPU idle after the first.
-        let (top, bottom) = lfb_band(scry as u32, self.fbi.height);
-        let (top, bottom) = (
-            super::mirror::span(stride, top) as u32 * 2,
-            super::mirror::span(stride, bottom) as u32 * 2,
-        );
-        self.catch_up_in(Some((
-            offs.saturating_add(top),
-            offs.saturating_add(bottom),
-        )));
+        // a few bands, the GPU idle after the first. A row below the
+        // buffer is in another buffer's memory, or none: all of it.
+        if scry as u32 >= self.fbi.height {
+            self.catch_up();
+        } else {
+            let (top, bottom) = lfb_band(scry as u32, self.fbi.height);
+            let (top, bottom) = (
+                super::mirror::span(stride, top) as u32 * 2,
+                super::mirror::span(stride, bottom) as u32 * 2,
+            );
+            self.catch_up_in(Some((
+                offs.saturating_add(top),
+                offs.saturating_add(bottom),
+            )));
+        }
         let row = offs as usize / 2 + stride.row(scry as usize);
         let ram = &self.fbi.ram;
         let word = |x: usize| {

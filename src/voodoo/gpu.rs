@@ -175,22 +175,30 @@ impl Voodoo {
     /// The same for the rows of the buffers that bytes `start..end` of
     /// the memory hold (with None all of them): only the rows behind
     /// that are asked for are read back, at the card's resolution.
+    ///
+    /// The software jobs and frame buffer writes still queued came before
+    /// the jobs left to the renderer, which drew them too: they go into
+    /// the memory first, and the rows read back go over them, not the
+    /// other way round.
     pub(crate) fn gpu_catch_up_in(&self, range: Option<(u32, u32)>) {
         if !self.gpu_behind.get() {
             return;
         }
+        self.catch_up_workers();
+        let forget = || {
+            self.gpu_behind.set(false);
+            self.gpu_stale.borrow_mut().clear();
+        };
         let (commands, key) = {
             let mut mirror = self.mirror.borrow_mut();
             let Some(mirror) = mirror.as_mut() else {
-                self.gpu_behind.set(false);
-                self.gpu_stale.borrow_mut().clear();
+                forget();
                 return;
             };
             (mirror.take_commands(), mirror.layout().copied())
         };
         let Some(key) = key else {
-            self.gpu_behind.set(false);
-            self.gpu_stale.borrow_mut().clear();
+            forget();
             return;
         };
         let mut gpu = self.gpu.borrow_mut();
@@ -198,8 +206,7 @@ impl Voodoo {
             if !std::mem::replace(&mut gpu.lost, true) {
                 eprintln!("[3DFX] the OpenGL renderer went with the buffers only it had");
             }
-            self.gpu_behind.set(false);
-            self.gpu_stale.borrow_mut().clear();
+            forget();
             return;
         };
         link.run(commands);
@@ -233,8 +240,8 @@ impl Voodoo {
                     return true;
                 }
                 let mut pixels = vec![0u16; width * (bottom - top) as usize];
-                read = true;
                 if link.read_buffer(buffer, (top, bottom), &mut pixels) {
+                    read = true;
                     for (y, row) in (top as usize..).zip(pixels.chunks_exact(width)) {
                         let start = base as usize + stride.row(y);
                         for (x, &value) in row.iter().enumerate() {

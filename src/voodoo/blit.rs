@@ -1043,6 +1043,26 @@ mod tests {
     }
 
     #[test]
+    fn gpu_reads_go_over_the_jobs_held_from_before() {
+        // Jobs held back before reads went to the renderer came before
+        // those left to it, which drew them too: a read draws them first
+        // and the renderer's pictures go over them, not the other way.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        glide_frames(&mut v, 1);
+        let held = v.describe(Now::default())["held_jobs"].as_u64().unwrap();
+        assert!(held > 0, "{held}");
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 1);
+        let aux = v.fbi.auxoffs as usize / 2;
+        let memory = v.frame_buffer();
+        assert_eq!(memory.get(aux + 5), 0x7777);
+    }
+
+    #[test]
     fn gpu_reads_read_back_only_the_rows_asked_for() {
         // A screen-to-screen copy reads back the rows of the buffer it
         // reads and writes, and nothing else; a read of the whole memory
