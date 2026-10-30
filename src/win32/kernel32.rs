@@ -1157,7 +1157,7 @@ fn set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Milliseconds since the machine started, by its clock.
 fn get_tick_count(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some((cpu.bus.clock.now_micros() / 1000) as u32)
+    Some(crate::idle::tick_count(cpu))
 }
 
 /// The environment variable `name`'s place in the environment: names are

@@ -1476,8 +1476,11 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if !crate::win32::accepts(cpu, phys_ip, id) {
         return false;
     }
-    if cpu.bus.observe.on {
-        cpu.bus.observe.opaque();
+    // A proof goes through a service only if it says it changed nothing
+    // but RAM and registers (`idle::pure_call`).
+    let observed = cpu.bus.observe.on;
+    if observed {
+        crate::idle::before_service(cpu);
     }
     let _profile = profile::zone(profile::Zone::Win32);
     if let Some(p) = &mut cpu.bus.profile {
@@ -1496,6 +1499,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
+    if observed {
+        crate::idle::after_service(cpu);
+    }
     cpu.bus.disk_io.clear();
     if let Some(before) = &before
         && guest_page_fault(cpu, before)

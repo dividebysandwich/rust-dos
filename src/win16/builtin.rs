@@ -366,6 +366,17 @@ fn arg_bytes_of(c: u8) -> u32 {
 
 /// Run the function the trap with id `id` is the stub of, called by 16-bit
 /// code: its far return address on the stack, its arguments above.
+/// The functions whose stubs change nothing but RAM and registers
+/// themselves: they go on to a 32-bit function on the 32-bit stack, which
+/// an idle proof follows if it is pure too (`idle::pure_call`). A
+/// Windows 3.1 program's PeekMessage loop calls them in every pass.
+const PURE: &[(&str, &str)] = &[
+    ("USER", "GetCurrentTime"),
+    ("USER", "GetTickCount"),
+    ("USER", "PeekMessage"),
+    ("KERNEL", "GetSystemMSecCount"),
+];
+
 pub fn call(cpu: &mut Cpu, id: u16) {
     let kernel = MODULES[0].apis.len();
     if id >> 10 == 0 && (id & 0x3FF) as usize >= kernel {
@@ -431,6 +442,9 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     crate::win32::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
         return;
+    }
+    if cpu.bus.observe.on && PURE.contains(&(def.name, api.name)) {
+        crate::idle::pure_call(cpu, None);
     }
     if let Some(value) = result {
         cpu.set_ax(value as u16);

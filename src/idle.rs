@@ -326,6 +326,15 @@ pub struct Observe {
     /// The bytes written since the last look, `start..end`, during a time
     /// proof.
     writes: Vec<(usize, usize)>,
+    /// The built-in Windows' service running said it changed nothing but
+    /// RAM and registers (`pure_service`).
+    pure: Cell<bool>,
+    /// Since the base: the first instruction count at which what the
+    /// services read would read otherwise, how many were called, and
+    /// when the last one started the thread's turn over.
+    holds_until: Option<u64>,
+    services: u64,
+    turn_at: Option<u64>,
     pub stats: IdleStats,
     /// Since when the execution loop has been watching (one instruction
     /// at a time on the interpreter), with the clock's run count then
@@ -373,6 +382,10 @@ impl Default for Observe {
             latch_head: None,
             latch_at: None,
             writes: Vec::new(),
+            pure: Cell::new(false),
+            holds_until: None,
+            services: 0,
+            turn_at: None,
             stats: IdleStats::default(),
             watch_since: None,
             watched: (std::time::Duration::ZERO, 0),
@@ -583,6 +596,9 @@ impl Observe {
         self.port_ok = None;
         self.ports.clear();
         self.first_read = None;
+        self.holds_until = None;
+        self.services = 0;
+        self.turn_at = None;
     }
 
     /// From a new base on, the ports read count from there, but for the
@@ -749,6 +765,73 @@ pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
             0x33 => ax == 0x0003,
             _ => false,
         }
+}
+
+/// Before a service of the built-in Windows runs during a proof: one the
+/// proof can't follow, unless it says otherwise (`pure_call`).
+#[inline(always)]
+pub fn before_service(cpu: &mut Cpu) {
+    cpu.bus.observe.pure.set(false);
+}
+
+/// After it, during a proof: a service that said it changed nothing but
+/// RAM and registers is followed, but not in a time proof, which doesn't
+/// look at `holds_until`. Any other ends the proof.
+pub fn after_service(cpu: &mut Cpu) {
+    let o = &mut cpu.bus.observe;
+    if o.pure.get() && !matches!(o.phase, Phase::Time(_)) {
+        o.services += 1;
+    } else {
+        o.opaque();
+    }
+}
+
+/// The built-in Windows' service running changed nothing but RAM and
+/// registers, and what it read of the machine stays as it was until the
+/// instruction count `until` (None: as long as nothing else changes it).
+/// These are the services a Windows 3.1 program's PeekMessage loop calls
+/// in every pass: GetCurrentTime, a PeekMessage that finds nothing, and
+/// the thunks between them (Johnny Castaway's animation loop, #358).
+/// What they keep outside RAM is as it was after every pass, but for the
+/// count of calls and when the thread's turn started (`turn_started`),
+/// which a skip moves on as the passes would have. With the calls traced,
+/// none is followed, so that the log has them all.
+pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
+    if !cpu.bus.observe.on || crate::win32::trace::on(cpu) {
+        return;
+    }
+    let o = &mut cpu.bus.observe;
+    o.pure.set(true);
+    if let Some(until) = until {
+        o.holds_until = Some(o.holds_until.map_or(until, |h| h.min(until)));
+    }
+}
+
+/// The service running changed more after all: what it called it
+/// `pure_call` for did, but not what came after.
+pub fn not_pure(cpu: &mut Cpu) {
+    cpu.bus.observe.pure.set(false);
+}
+
+/// The service `pure_call` follows started the running thread's turn
+/// over, now.
+pub fn turn_started(cpu: &mut Cpu) {
+    let now = cpu.bus.clock.icount;
+    if cpu.bus.observe.on {
+        cpu.bus.observe.turn_at = Some(now);
+    }
+}
+
+/// The milliseconds since the machine started, by its clock, as
+/// GetTickCount reads them. The service changes nothing, and what it read
+/// stays the same until the next millisecond.
+pub fn tick_count(cpu: &mut Cpu) -> u32 {
+    let micros = cpu.bus.clock.now_micros();
+    if cpu.bus.observe.on {
+        let next = cpu.bus.clock.icount_at_micros((micros / 1000 + 1) * 1000);
+        pure_call(cpu, Some(next));
+    }
+    (micros / 1000) as u32
 }
 
 fn head_of(cpu: &Cpu) -> Head {
@@ -1018,7 +1101,15 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
     // AL may hold a port's value whose bits the loop doesn't look at, but
     // what comes after it may: it is made what the last pass skipped read.
     let held = cpu.bus.observe.tainted.then_some((cpu.bus.observe.al_port, cpu.bus.observe.al_read));
+    // What the built-in Windows' services read holds until a time, as a
+    // port's bits do: the next millisecond of GetTickCount, the next timer
+    // of a PeekMessage. The loop is likely to be proven again from there.
     let o = &mut cpu.bus.observe;
+    let (services, turn_at) = (o.services, o.turn_at);
+    let by_service = o.holds_until.filter(|&until| until < limit);
+    if let Some(until) = by_service {
+        limit = until;
+    }
     let head = o.head();
     o.stop();
     o.succeed(head);
@@ -1035,6 +1126,17 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
         let skipped = skip(cpu, period, executed, limit, passes);
         if skipped > 0 {
             cpu.bus.observe.proved(head);
+            // The calls the passes skipped would have made, and the turn
+            // the last of them would have started.
+            let win32 = &mut cpu.bus.win32;
+            win32.calls = win32.calls.wrapping_add(skipped / period * services);
+            if let Some(at) = turn_at {
+                win32.slice_start = cpu.bus.clock.micros_at(at + skipped);
+            }
+            if let (Some(_), Some(head)) = (by_service, head) {
+                let now = cpu.bus.clock.icount;
+                cpu.bus.observe.arm(head, now);
+            }
         }
         if let Some((port, read)) = held
             && skipped > 0

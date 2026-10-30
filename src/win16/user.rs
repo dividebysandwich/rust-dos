@@ -554,6 +554,11 @@ fn go_at(cpu: &mut Cpu, top: u32, name: &str, args: &[u32], data: Vec<u32>) -> O
     None
 }
 
+/// The thread that runs, if any.
+fn running_thread(cpu: &mut Cpu) -> Option<u32> {
+    crate::win32::process(cpu).current_thread().map(|t| t.id)
+}
+
 /// What `post` does with what a USER32 function returned: `data[0]`.
 const P_MSG: u32 = 1;
 const P_PAINT: u32 = 2;
@@ -607,8 +612,18 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 let mut resume = *ctx;
                 thunk::set_ax(&mut resume, 0);
                 resume.gpr[thunk::EDX] &= 0xFFFF_0000;
+                let running = running_thread(cpu);
                 super::task::yield_now(cpu, resume);
+                // With no other task ready, the same one goes on, its
+                // turn started over: an idle proof follows that.
+                if cpu.bus.observe.on && running.is_some() && running_thread(cpu) == running {
+                    crate::idle::pure_call(cpu, None);
+                    crate::idle::turn_started(cpu);
+                }
                 return None;
+            }
+            if cpu.bus.observe.on {
+                crate::idle::pure_call(cpu, None);
             }
         }
         P_PAINT => {
