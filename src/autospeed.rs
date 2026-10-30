@@ -517,6 +517,15 @@ impl AutoSpeed {
     /// Start over, as for another program, or from a machine that jumped
     /// (a save state loaded).
     pub fn reset(&mut self) {
+        self.start_over();
+        self.lagged = None;
+        self.pace = 1.0;
+        self.behind = false;
+    }
+
+    /// Measure afresh. How the host kept up stays: it says the same of
+    /// what the same program does next.
+    fn start_over(&mut self) {
         self.mark = None;
         self.settle_until = 0;
         self.unsettled = None;
@@ -525,13 +534,10 @@ impl AutoSpeed {
     }
 
     /// The search starts again from the next measurement, forgetting the
-    /// frame rate it held and how the host kept up.
+    /// frame rate it held.
     fn restart_search(&mut self) {
         self.step = Step::Start;
         self.held = None;
-        self.lagged = None;
-        self.pace = 1.0;
-        self.behind = false;
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
@@ -557,7 +563,7 @@ impl AutoSpeed {
             if trace() {
                 eprintln!("[auto] work done: back to {}", before);
             }
-            self.reset();
+            self.start_over();
             self.settle_until = now.ns + SETTLE_NS;
             return (before != bus.clock.cycles_per_ms()).then_some(before);
         }
@@ -654,31 +660,6 @@ impl AutoSpeed {
         if protected && m.halted >= IDLES {
             self.idles = true;
         }
-        if m.polling >= WAITING {
-            self.restart_search();
-            return clamp(c * WAITING_STEP);
-        }
-        let Some(fps) = m.fps else {
-            self.restart_search();
-            // A protected-mode program at work without frames loads, or
-            // compiles, or is Windows: it reads and writes. Under a system
-            // that idles, one that keeps the processor from halting works
-            // too (3DMark 2000 builds a scene for seconds, with disk reads
-            // the emulator's own services don't see). Otherwise one that
-            // does neither spins in a loop, as a game's menu does.
-            return if !protected {
-                base
-            } else if m.halted >= IDLES {
-                clamp(c)
-            } else if m.output >= WORKING {
-                self.working = Some(clamp(c));
-                top
-            } else if self.busy_os && self.idles && m.halted < BUSY {
-                top
-            } else {
-                clamp(c * WAITING_STEP)
-            };
-        };
         // The host fell behind at this speed: a step less, and no more than
         // that until it has kept up for a while. Behind again right after,
         // down to what it ran (no less than half): a step a measurement
@@ -705,6 +686,31 @@ impl AutoSpeed {
         let host_top = top;
         let top = self.lagged.map_or(top, |(most, _)| most.clamp(base, top));
         let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
+        if m.polling >= WAITING {
+            self.restart_search();
+            return clamp(c * WAITING_STEP);
+        }
+        let Some(fps) = m.fps else {
+            self.restart_search();
+            // A protected-mode program at work without frames loads, or
+            // compiles, or is Windows: it reads and writes. Under a system
+            // that idles, one that keeps the processor from halting works
+            // too (3DMark 2000 builds a scene for seconds, with disk reads
+            // the emulator's own services don't see). Otherwise one that
+            // does neither spins in a loop, as a game's menu does.
+            return if !protected {
+                base
+            } else if m.halted >= IDLES {
+                clamp(c)
+            } else if m.output >= WORKING {
+                self.working = Some(clamp(c));
+                top
+            } else if self.busy_os && self.idles && m.halted < BUSY {
+                top
+            } else {
+                clamp(c * WAITING_STEP)
+            };
+        };
         // Frames nobody sees: as many less as the frame rate is too high
         // (it follows the speed there).
         if fps > m.refresh / AT_REFRESH {
@@ -1141,6 +1147,30 @@ mod tests {
             let mean = later.iter().map(|&s| s as f64).sum::<f64>() / later.len() as f64;
             assert!(mean >= 70_000.0, "{}: {}", every, mean);
         }
+    }
+
+    #[test]
+    fn a_program_without_frames_stays_near_what_the_host_keeps_up_with() {
+        // Magic & Mayhem's battles: the host runs 140,000, and light frames
+        // now and then make its estimate several times that.
+        let mut auto = AutoSpeed::new(3000, None);
+        let (mut speed, mut seed) = (200_000, 0x1234_5678);
+        let mut paces = Vec::new();
+        for i in 0..400 {
+            let pace = (140_000.0 / speed as f64).min(1.0);
+            let m = Measurement {
+                pace,
+                output: 50_000.0,
+                ..STILL
+            };
+            let estimate = 200_000.0 * if i % 7 == 0 { 2.5 } else { noise(&mut seed, 0.2) };
+            speed = auto.decide(speed, &m, true, estimate as u32);
+            paces.push(pace);
+        }
+        let later = &paces[100..];
+        let mean = later.iter().sum::<f64>() / later.len() as f64;
+        assert!(mean >= 0.9, "{}: {:?}", mean, paces);
+        assert!(later.iter().all(|&pace| pace >= 0.5), "{:?}", paces);
     }
 
     #[test]
