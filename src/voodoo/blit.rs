@@ -138,6 +138,12 @@ impl Voodoo {
     /// The pixel the raster operations make of `src` over `dst`: the ROP
     /// the source and destination chroma range tests select.
     fn blt_value(&self, src: u16, dst: u16) -> u16 {
+        mix(self.blt_rop(src, dst), src, dst)
+    }
+
+    /// The ROP the source and destination chroma range tests select for
+    /// `src` over `dst`.
+    fn blt_rop(&self, src: u16, dst: u16) -> u32 {
         let command = self.blt_command();
         let mut rop = 0;
         if command & DST_CHROMA != 0 && in_range(self.reg[BLT_DST_CHROMA_RANGE], dst) {
@@ -146,7 +152,7 @@ impl Voodoo {
         if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) {
             rop |= 2;
         }
-        mix(self.reg[BLT_ROP] >> (4 * rop), src, dst)
+        (self.reg[BLT_ROP] >> (4 * rop)) & 15
     }
 
     /// Tell the OpenGL renderer's recording about a pixel the blitter
@@ -481,11 +487,18 @@ impl Voodoo {
             {
                 let addr = dst_base.wrapping_add((y as u32).wrapping_mul(dst_stride)).wrapping_add(2 * x as u32);
                 if queue.is_some() {
-                    let at = addr >> 1;
-                    let value = self.blt_value(p, 0);
-                    self.blt_mirror(at as usize, value);
-                    words[queued] = Word { row: y as u16, at, value };
-                    queued += 1;
+                    // The destination's test picks the same ROP for every
+                    // pixel there (`blt_queue_dest`), so any value will
+                    // do for it. ROP AAAAh keeps the pixel as it is: a
+                    // source colour key's transparent pixels.
+                    let rop = self.blt_rop(p, 0);
+                    if rop != 0xA {
+                        let at = addr >> 1;
+                        let value = mix(rop, p, 0);
+                        self.blt_mirror(at as usize, value);
+                        words[queued] = Word { row: y as u16, at, value };
+                        queued += 1;
+                    }
                 } else {
                     self.blt_put(addr, p);
                 }
@@ -562,10 +575,12 @@ impl Voodoo {
     /// is done first.
     fn blt_queue_dest(&self) -> Option<usize> {
         // The ROPs the chroma tests can pick must give the same pixel
-        // whatever the destination holds (0, !s, s or 1s), and the
-        // destination's test must pick the same for every pixel.
+        // whatever the destination holds (0, !s, s or 1s) or keep the
+        // destination's (d, which leaves the pixel out: Moto Racer's
+        // sprites with a source colour key), and the destination's test
+        // must pick the same for every pixel.
         let (rops, dst_tested) = self.blt_rops(None);
-        if dst_tested || rops.iter().flatten().any(|&r| !matches!(r, 0x0 | 0x3 | 0xC | 0xF)) {
+        if dst_tested || rops.iter().flatten().any(|&r| !matches!(r, 0x0 | 0x3 | 0xA | 0xC | 0xF)) {
             return None;
         }
         // A tiled destination is addressed as rows of its tiles' width
@@ -721,6 +736,12 @@ mod tests {
             write(v, BLT_DST_CHROMA_RANGE, 0xFFFF_0000);
             write(v, BLT_ROP, 0xAACA);
         }
+        if flags & SRC_CHROMA != 0 {
+            // Its sprites' colour key: the source's pixels in the range
+            // (the third data word's) pick ROP 2 or 3, which keep the
+            // destination's.
+            write(v, BLT_SRC_CHROMA_RANGE, 0x0303_0303);
+        }
         write(v, BLT_DST_XY, y << 16 | 12);
         write(v, BLT_SIZE, 2 << 16 | 3);
         write(v, BLT_COMMAND, 1 << 31 | flags | 2 << 3 | CPU_TO_SCREEN);
@@ -737,7 +758,7 @@ mod tests {
         // frame buffer writes do, instead of waiting for it to be drawn:
         // with the OpenGL renderer the jobs held back stay held. Either
         // way the memory ends up as it would have.
-        for flags in [0, DST_TILED | DST_CHROMA] {
+        for flags in [0, DST_TILED | DST_CHROMA, DST_TILED | DST_CHROMA | SRC_CHROMA] {
             let mut gl = glide_card(2);
             gl.set_mirror(true);
             gl.set_software_picture(false);
