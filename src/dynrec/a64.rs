@@ -2368,10 +2368,10 @@ impl Gen<'_> {
                     ; tbnz W(r(t)), 31, >single_dec
                     // A negative single's bits count away from zero.
                     ; single_inc:
-                    ; add W(r(t)), W(r(t)), 1
+                    ; add WSP(r(t)), WSP(r(t)), 1
                     ; b >single_done
                     ; single_dec:
-                    ; sub W(r(t)), W(r(t)), 1
+                    ; sub WSP(r(t)), WSP(r(t)), 1
                     ; single_done:
                 );
             }
