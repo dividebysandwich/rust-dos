@@ -1739,6 +1739,10 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 };
                 w.rect = new;
                 w.client = client;
+                // The update region stays inside the window, or what a
+                // shrinking window left outside would ask for WM_PAINT
+                // that nothing can validate.
+                w.update = w.update.and_rect(&Rect::sized(0, 0, new.width(), new.height()));
                 if w.style & (WS_MINIMIZE | WS_MAXIMIZE) == 0 {
                     w.normal = new;
                 }
