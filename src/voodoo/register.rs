@@ -245,6 +245,20 @@ impl Voodoo {
                         // every texel a Direct3D game draws with its
                         // colour key on.
                         self.reg[CHROMA_RANGE] = 0;
+                        // Show buffer 0 and draw into buffer 1, as 86Box
+                        // does (MAME doesn't; no datasheet says either
+                        // way). Glide counts on it: grSstWinOpen takes
+                        // buffer 0 for the front and aims its blits at the
+                        // buffer after it, and its open and shutdown pulse
+                        // this reset, but only a swap left pending makes
+                        // it read the displayed buffer and swap to 0
+                        // (sst1InitClearSwapPending). Kept, the buffers of
+                        // a program that quit on an odd frame stay the
+                        // other way round, and the next one blits into the
+                        // buffer on the screen.
+                        self.fbi.frontbuf = 0;
+                        self.fbi.backbuf = 1;
+                        self.display_dirty = true;
                     }
                     self.recompute_video_memory();
                 }
@@ -446,5 +460,77 @@ mod tests {
         }
         assert_eq!(v.reg[CHROMA_RANGE], 0);
         assert_eq!(red_triangle(&mut v), 0xF800);
+    }
+
+    #[test]
+    fn a_graphics_reset_shows_buffer_0_and_draws_into_buffer_1() {
+        // Moto Racer quit on an odd frame, so the buffers were the
+        // other way round, and run again: Glide's shutdown and open
+        // pulse the graphics reset, take buffer 0 for the front, and
+        // blit the sky into the buffer after it. The sky has to land in
+        // the buffer the frame's triangles go to.
+        let mut v = Voodoo::with_workers(Board::Voodoo2Max, 0);
+        v.config_write(0x40, 1);
+        reg(&mut v, FBI_INIT1, 10 << 4);
+        reg(&mut v, FBI_INIT2, 150 << 11);
+        reg(&mut v, SWAPBUFFER_CMD, 0);
+        assert_eq!((v.fbi.frontbuf, v.fbi.backbuf), (1, 0));
+        // grGlideShutdown, then the next program's grSstWinOpen.
+        for _ in 0..2 {
+            for data in [0x5E, 0x5A, 0x58] {
+                reg(&mut v, FBI_INIT0, data);
+            }
+        }
+        assert_eq!((v.fbi.frontbuf, v.fbi.backbuf), (0, 1));
+        // A frame: a fill of the back buffer, then a rectangle fill of
+        // the blitter at the page Glide counts as the back buffer's.
+        reg(&mut v, CLIP_LEFT_RIGHT, 640);
+        reg(&mut v, CLIP_LOW_Y_HIGH_Y, 480);
+        reg(&mut v, FBZ_MODE, 1 << 9 | 1 << 14);
+        reg(&mut v, COLOR1, 0x0000_00FF);
+        reg(&mut v, FASTFILL_CMD, 0);
+        reg(&mut v, BLT_DST_BASE_ADDR, 150 << 12);
+        reg(&mut v, BLT_XY_STRIDES, 1280 << 16);
+        reg(&mut v, BLT_ROP, 0xCCCC);
+        reg(&mut v, BLT_COLOR, 0xF800);
+        reg(&mut v, BLT_DST_XY, 99 << 16);
+        reg(&mut v, BLT_SIZE, 0);
+        reg(&mut v, BLT_COMMAND, 1 << 31 | 2);
+        let back = 150 * 0x1000 / 2;
+        let row = 99 * 640;
+        assert_eq!(v.frame_buffer().get(back), 0x001F, "the fill drew the back buffer");
+        assert_eq!(v.frame_buffer().get(back + row), 0xF800, "the blit drew there too");
+        assert_eq!(v.frame_buffer().get(row), 0, "nothing reached the front buffer");
+    }
+
+    #[test]
+    fn eight_bit_downloads_follow_the_units_own_texture_mode() {
+        // Moto Racer's Glide sets textureMode bit 31 (sequential 8-bit
+        // downloads) in TMU 1 alone before it downloads a P8 texture
+        // there, while TMU 0 keeps the mode it draws with.
+        let mut v = Voodoo::with_workers(Board::Voodoo2Max, 0);
+        v.config_write(0x40, 1);
+        let (trex0, trex1) = (2 << 8, 4 << 8);
+        reg(&mut v, trex0 | TEXTURE_MODE, 5 << 8);
+        reg(&mut v, trex1 | TEXTURE_MODE, 1 << 31 | 5 << 8);
+        // Dword 1 of row 0 of level 0: texels 4 to 7, one after another.
+        let tmu1 = 0xA0_0000;
+        v.write(tmu1 + 4, 0x4433_2211, !0, Now::default());
+        let ram = &v.tmu[1].ram;
+        assert_eq!([4, 5, 6, 7].map(|at| ram.byte(at)), [0x11, 0x22, 0x33, 0x44]);
+        // Without the bit, TMU 0 takes 8-bit texels at even dwords only:
+        // dword 1 is texels 0 to 3, as dword 0 is.
+        v.write(0x80_0000 + 4, 0x4433_2211, !0, Now::default());
+        let ram = &v.tmu[0].ram;
+        assert_eq!([0, 1, 2, 3].map(|at| ram.byte(at)), [0x11, 0x22, 0x33, 0x44]);
+        // The other way round, TMU 0's bit doesn't reach TMU 1: dword 1
+        // of row 1 is that row's texels 0 to 3.
+        reg(&mut v, trex0 | TEXTURE_MODE, 1 << 31 | 5 << 8);
+        reg(&mut v, trex1 | TEXTURE_MODE, 5 << 8);
+        v.write(tmu1 + (1 << 9 | 4), 0x8877_6655, !0, Now::default());
+        let ram = &v.tmu[1].ram;
+        let row = 256;
+        let texels = [0, 1, 2, 3].map(|at| ram.byte(row + at));
+        assert_eq!(texels, [0x55, 0x66, 0x77, 0x88]);
     }
 }

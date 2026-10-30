@@ -9,7 +9,7 @@
 //! service traps in the ROM, run at level 0 on the TSS's stack.
 
 use super::memory::{Memory, PAGE, SYSTEM, WRITABLE};
-use super::{Context, ESP, ID_IDT, IDT_TRAPS, IRQ_RETURN, ROM_BASE, ROM_SEG};
+use super::{Context, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache};
 use crate::dpmi::descriptor;
 
@@ -250,11 +250,11 @@ fn load_registers(cpu: &mut Cpu, ctx: &Context) {
 /// Put the processor in real mode at `cs:ip`, on the stack `ss:sp`, with
 /// DS and ES the process's PSP and the flags `flags`.
 pub fn enter_real(cpu: &mut Cpu, (cs, ip): (u16, u16), (ss, sp): (u16, u16), flags: u32) {
-    let win32 = &cpu.bus.win32;
-    let (psp, cr4) = if win32.psp != 0 {
-        (win32.psp, win32.cr4)
+    let psp = dos_psp(cpu);
+    let cr4 = if cpu.bus.win32.psp != 0 {
+        cpu.bus.win32.cr4
     } else {
-        (cpu.current_psp, cpu.cr4)
+        cpu.cr4
     };
     if cpu.pe() {
         cpu.note_mode_switch(false);
@@ -279,6 +279,14 @@ pub fn enter_real(cpu: &mut Cpu, (cs, ip): (u16, u16), (ss, sp): (u16, u16), fla
     cpu.set_esp(sp as u32);
     cpu.set_eip(ip as u32);
     cpu.load_eflags(flags & !(CpuFlags::VM | CpuFlags::NT | CpuFlags::IOPL).bits());
+}
+
+/// The DOS process the programs run in: its PSP.
+fn dos_psp(cpu: &Cpu) -> u16 {
+    match cpu.bus.win32.psp {
+        0 => cpu.current_psp,
+        psp => psp,
+    }
 }
 
 /// The program's context where it entered the IDT's gate, from the frame
@@ -345,34 +353,16 @@ fn exception_entry(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) 
 }
 
 /// A hardware interrupt that came while the program ran: its real-mode
-/// handler runs, on the DOS program's stack, and returns to the trap at
-/// `IRQ_RETURN`, which goes on with the program.
+/// handler runs, on the host's real-mode stack, with DS and ES the DOS
+/// process's PSP, and returns to the trap at `realmode::RETURN`, which
+/// goes on with the program.
 fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
-    let win32 = &mut cpu.bus.win32;
-    win32.interrupted = Some(ctx);
-    let (ss, sp) = win32.rm_stack;
-    let handler = cpu.bus.read_32(vector as usize * 4);
-    enter_real(
-        cpu,
-        ((handler >> 16) as u16, handler as u16),
-        (ss, sp),
-        0x0002,
-    );
+    let psp = dos_psp(cpu);
+    let rm = realmode::handler_context(cpu, vector, ctx.gpr, psp, 0x0002);
     // The handler's IRET comes back to the trap, interrupts still off.
-    cpu.push(0x0002);
-    cpu.push(ROM_SEG);
-    cpu.push(IRQ_RETURN);
-}
-
-/// The trap the real-mode handler of a hardware interrupt returned to.
-pub fn irq_return(cpu: &mut Cpu) {
-    let ctx = cpu
-        .bus
-        .win32
-        .interrupted
-        .take()
-        .expect("an interrupted program");
-    super::thread::after_interrupt(cpu, ctx);
+    let (seg, off) = realmode::RETURN;
+    let frame = realmode::Frame::new(realmode::Kind::Irq, ctx);
+    realmode::call(cpu, frame, &rm, &[0x0002, seg, off]);
 }
 
 /// The trap ids of the IDT's vectors.

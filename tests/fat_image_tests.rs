@@ -175,6 +175,77 @@ fn floppy_images_are_dos_drives() {
     assert_eq!(cpu.bus.read_8(dpb + 0x17), 0xF0);
 }
 
+/// DOS's FindNext goes on from the directory slot after the file it
+/// found. Windows 98 Setup's DELTEMP empties its folder by deleting each
+/// file FindFirst and FindNext give it; counting the files left instead
+/// skipped every other one and left half the folder behind.
+#[test]
+fn findnext_goes_on_after_a_deleted_file() {
+    let dir = fatimage::scratch("delete_found");
+    let names: Vec<String> = (0..40).map(|i| format!("TEMP\\FILE{:02}.TMP", i)).collect();
+    let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+    let bytes = fatimage::image(FLOPPY_1440, None, &[], &files);
+    let image = fatimage::write(&dir, "temp.img", &bytes);
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+
+    cpu.set_ds(0x4000);
+    cpu.set_dx(0);
+    int21(&mut cpu, 0x1A00);
+    name(&mut cpu, "A:\\TEMP\\*.*");
+    cpu.set_cx(0x17);
+    int21(&mut cpu, 0x4E00);
+    let mut deleted = Vec::new();
+    while !cf(&cpu) {
+        let found: String = (0..13)
+            .map(|i| cpu.bus.read_8(DTA + 0x1E + i))
+            .take_while(|&b| b != 0)
+            .map(|b| b as char)
+            .collect();
+        if !found.starts_with('.') {
+            // Deleting writes over the name at 2000:0000, not the DTA.
+            name(&mut cpu, &format!("A:\\TEMP\\{}", found));
+            int21(&mut cpu, 0x4100);
+            assert!(!cf(&cpu), "deleting {}", found);
+            deleted.push(found);
+        }
+        int21(&mut cpu, 0x4F00);
+    }
+    assert_eq!(deleted.len(), 40, "{:?}", deleted);
+    assert_eq!(find_all(&mut cpu, "A:\\TEMP\\*.*", 0x07), Vec::<String>::new());
+}
+
+/// The volume label is an entry of the root directory. Windows 98 Setup
+/// asks whether a short name it made up is taken with FindFirst and the
+/// attributes 0Eh, which take the label too; finding the label there for
+/// every name made it count past what its tables hold (issue #309).
+#[test]
+fn findfirst_finds_the_volume_label_only_in_the_root_by_its_name() {
+    let dir = fatimage::scratch("label_search");
+    let image = floppy_with_files(&dir);
+    let mut cpu = cpu(&dir);
+    mount(&mut cpu, DRIVE_A, &image);
+
+    assert!(find_all(&mut cpu, "A:\\GAMES\\DANGER~2.CUR", 0x0E).is_empty());
+    assert_eq!(find_all(&mut cpu, "A:\\GAMES\\*.*", 0x0E), ["DOOM.EXE"]);
+    assert!(find_all(&mut cpu, "A:\\README~1.TXT", 0x0E).is_empty());
+    assert_eq!(find_all(&mut cpu, "A:\\README.TXT", 0x0E), ["README.TXT"]);
+    assert_eq!(find_all(&mut cpu, "A:\\GAMEDISK", 0x0E), ["GAMEDISK"]);
+    assert_eq!(
+        find_all(&mut cpu, "A:\\*.*", 0x1E),
+        ["GAMEDISK", "EMPTY", "README.TXT", "GAMES"]
+    );
+    // A search for the label alone finds it, and nothing else.
+    assert_eq!(find_all(&mut cpu, "A:\\GAMES\\*.*", 0x08), ["GAMEDISK"]);
+
+    // A disk without a label has none to find.
+    let bytes = fatimage::image(FLOPPY_1440, None, &[], &[("README.TXT", b"hi")]);
+    let unlabelled = fatimage::write(&dir, "nolabel.img", &bytes);
+    mount(&mut cpu, DRIVE_A, &unlabelled);
+    assert!(find_all(&mut cpu, "A:\\*.*", 0x08).is_empty());
+    assert_eq!(find_all(&mut cpu, "A:\\*.*", 0x0E), ["README.TXT"]);
+}
+
 #[test]
 fn writes_land_on_the_image() {
     let dir = fatimage::scratch("write");
@@ -825,7 +896,8 @@ fn fat32_images_from_mkfs_and_checked_by_fsck() {
 }
 
 /// A 3 GB FAT32 disk from MAKEIMG, mounted as D:, and what DOS tells of
-/// it: AH=36h no more than 2 GB, the FAT32 functions from DOS 7.
+/// it: AH=36h no more than 2 GB, the FAT32 functions the rest, at any
+/// DOS version.
 #[test]
 fn fat32_drives_through_dos() {
     use rust_dos::config::DosVersion;
@@ -836,6 +908,18 @@ fn fat32_drives_through_dos() {
     assert_eq!(plan.volume.as_ref().map(|v| v.bits), Some(32));
     rust_dos::makeimg::write(&image, &plan, true).unwrap();
     let mut cpu = cpu(&dir);
+    // DOS 5 without a FAT32 drive has no AX=73xxh.
+    name(&mut cpu, "C:\\");
+    cpu.set_es(0x5000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
+    int21(&mut cpu, 0x7303);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+    cpu.set_dx(3);
+    cpu.set_cx(0x3F);
+    int21(&mut cpu, 0x7302);
+    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+
     mount(&mut cpu, DRIVE_D, &image);
     let handle = create(&mut cpu, "D:\\HELLO.TXT").unwrap();
     write(&mut cpu, handle, b"hello FAT32").unwrap();
@@ -850,9 +934,39 @@ fn fat32_drives_through_dos() {
     assert!(total * spc * bps < 2 << 30 && total > 60_000, "{} clusters", total);
     assert!(free <= total);
 
-    // DOS 5 has no AX=73xxh.
+    // With a FAT32 drive mounted, DOS 5 has AX=73xxh, for the other
+    // drives too; the FAT32 drive's DPB only AX=7302h completes.
+    name(&mut cpu, "C:\\");
+    cpu.set_es(0x5000);
+    cpu.set_di(0);
+    cpu.set_cx(0x2C);
     int21(&mut cpu, 0x7303);
-    assert_eq!((cf(&cpu), cpu.ax()), (true, 0x7300));
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    name(&mut cpu, "D:\\");
+    cpu.set_cx(0x2C);
+    int21(&mut cpu, 0x7303);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    cpu.set_dx(4);
+    cpu.set_cx(0x3F);
+    int21(&mut cpu, 0x7302);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    cpu.bus.load_bytes(0x60000, &[0, 0, 0, 0, 1, 0, 0x00, 0x00, 0x00, 0x50]);
+    cpu.bus.load_bytes(BUFFER, &[0; SECTOR]);
+    cpu.set_ds(0x6000);
+    cpu.set_bx(0);
+    cpu.set_cx(0xFFFF);
+    cpu.set_dx(4);
+    cpu.set_si(0);
+    int21(&mut cpu, 0x7305);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
+    // A DOS 5 program that knows only INT 25h still reads the volume.
+    cpu.bus.load_bytes(BUFFER, &[0; SECTOR]);
+    cpu.set_cx(0xFFFF);
+    cpu.set_reg8(Register::AL, DRIVE_D);
+    rust_dos::interrupts::int25::handle(&mut cpu, false);
+    assert!(!cf(&cpu), "{:04X}", cpu.ax());
+    assert_eq!(&buffer(&cpu, SECTOR)[0x52..0x5A], b"FAT32   ");
 
     rust_dos::dos_data::set_version(&mut cpu.bus, DosVersion::new(7, 10));
     // AX=7303h: the whole of it, in 32 bits.

@@ -1678,6 +1678,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let result = crate::ems::ioctl_read(&mut cpu.bus, buffer, size);
                     set_result(cpu, result);
                 }
+                // MS-DOS 7 has subfunctions 00h to 11h and fails any other
+                // with error 1, invalid function. Network clients add their
+                // own above that, and programs probe for them: Windows 98
+                // Setup takes a successful 44E0h for Sun PC-NFS, and a
+                // successful 4452h is how DR-DOS is recognised.
+                0x12..=0xFF => set_result(cpu, Err(0x01)),
                 _ => {
                     // Stub other subfunctions as success
                     cpu.set_ax(0);
@@ -1928,16 +1934,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             match cpu
                 .bus
                 .disk
-                .find_directory_entry(&search_pattern, index, search_attr)
+                .find_entry_from(&search_pattern, index, search_attr)
             {
-                Ok(entry) => {
+                Ok((entry, next)) => {
                     // Drive the search runs on (1 = A:)
                     let search_drive = parse_drive_prefix(&search_pattern)
                         .0
                         .unwrap_or(cpu.bus.disk.get_current_drive());
                     cpu.bus.guest_write_8(dta_phys as u32, search_drive + 1);
                     cpu.bus.guest_write_8((dta_phys + OFFSET_ATTR_SEARCH) as u32, search_attr as u8);
-                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, (index + 1) as u16);
+                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, next as u16);
 
                     // Only write Search Pattern to DTA on FindFirst (AH=4E)
                     // FindNext must NOT overwrite the pattern it uses for searching!
@@ -2211,6 +2217,25 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             set_result(cpu, result.map(|(_, handle)| handle));
         }
 
+        // AX = 5F07h, 5F08h: enable and disable drive DL (DOS 5+), which
+        // DOS does itself, without a network: set or clear the physical
+        // drive bit of its CDS. 0Fh for a drive without a DPB.
+        0x5F if matches!(cpu.get_al(), 0x07 | 0x08) => {
+            let enable = cpu.get_al() == 0x07;
+            let drive = cpu.get_dl();
+            let done = dos_data::set_drive_enabled(&mut cpu.bus, drive, enable);
+            set_result(cpu, if done { Ok(cpu.ax()) } else { Err(0x0F) });
+        }
+        // AH = 5Fh: the rest go to the network redirector (redirection
+        // mode, the redirection list, redirecting and cancelling
+        // devices), and there is none: CF set, AX=0001h, as MS-DOS
+        // answers without a network and DOSBox does. Left alone, CF
+        // stays clear, and Windows 98's DOS Setup, which compares the
+        // drive in its buffer with the entry it asked for and finds them
+        // the same, takes every drive for a network one and says it
+        // cannot create a temporary directory.
+        0x5F => set_result(cpu, Err(0x01)),
+
         // AH = 60h: Canonical ("true") name of DS:SI into ES:DI.
         0x60 => {
             let addr = cpu.get_physical_addr(cpu.ds(), cpu.si());
@@ -2318,7 +2343,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_cpu_flag(CpuFlags::CF, true);
         }
 
-        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on.
+        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on, and at
+        // any version while a FAT32 drive is mounted.
         0x73 => fat32_function(cpu, cpu.get_al()),
 
         _ => {
@@ -2349,11 +2375,18 @@ crate::state_fields!(ConLine { buffer, text });
 /// its free space in 32-bit numbers, and (from 7.10) 05h reads or writes
 /// its sectors as INT 25h/26h do. Below DOS 7, AX=7300h and CF set, as
 /// DOS 6 answers, and 0018h for what isn't there.
+///
+/// With a FAT32 drive mounted they are there whatever version programs
+/// are told, as MS-DOS 7.1 has them under SETVER: only a DOS with these
+/// functions can have such a drive, and its DPB (AH=32h) is MS-DOS 7.1's,
+/// with 0 sectors per FAT, which only AX=7302h completes. Windows 98
+/// Setup's disk check reads a FAT32 C: this way.
 fn fat32_function(cpu: &mut Cpu, al: u8) {
     let version = cpu.bus.dos_version;
     let drive = |cpu: &Cpu, dl: u8| if dl == 0 { cpu.bus.disk.get_current_drive() } else { dl - 1 };
+    let fat32 = (0..26).any(|d| cpu.bus.disk.layout(d).is_some_and(|l| l.fat32.is_some()));
     let result: Result<(), u16> = match al {
-        _ if !version.at_least(7, 0) => Err(0x7300),
+        _ if !version.at_least(7, 0) && !fat32 => Err(0x7300),
         0x00 if cpu.get_reg8(Register::CL) < 2 => {
             let cl = cpu.get_reg8(Register::CL);
             cpu.set_ax(cl as u16);
@@ -2364,7 +2397,7 @@ fn fat32_function(cpu: &mut Cpu, al: u8) {
             extended_dpb(cpu, drive)
         }
         0x03 => extended_free_space(cpu),
-        0x05 if cpu.cx() == 0xFFFF && version.at_least(7, 10) => {
+        0x05 if cpu.cx() == 0xFFFF && (version.at_least(7, 10) || fat32) => {
             let drive = drive(cpu, cpu.get_reg8(Register::DL));
             super::int25::sector_access(cpu, drive, cpu.si() & 1 != 0, true)
         }
@@ -2451,4 +2484,49 @@ fn extended_free_space(cpu: &mut Cpu) -> Result<(), u16> {
     cpu.bus.guest_write_bytes(at, &info);
     cpu.set_ax(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::{Cpu, CpuFlags};
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_redirector_functions_fail_without_a_network() {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        for ax in [0x5F00, 0x5F02, 0x5F03] {
+            cpu.set_ax(ax);
+            cpu.set_bx(0);
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+            crate::interrupts::handle_hle(&mut cpu, 0x21);
+            assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+            assert_eq!(cpu.ax(), 0x0001, "invalid function, AX={:04X}", ax);
+        }
+    }
+
+    #[test]
+    fn enabling_and_disabling_a_drive_needs_no_network() {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        crate::dos_data::write(&mut cpu.bus);
+        let cds_flags = |cpu: &mut Cpu| {
+            cpu.set_ax(0x5200);
+            crate::interrupts::handle_hle(cpu, 0x21);
+            let lol = cpu.get_physical_addr(cpu.es(), cpu.bx());
+            let cds = cpu.bus.read_32(lol + 0x16);
+            let at = cpu.get_physical_addr((cds >> 16) as u16, cds as u16);
+            cpu.bus.read_16(at + 2 * 0x58 + 0x43)
+        };
+        for (ax, physical) in [(0x5F08, 0), (0x5F07, 0x4000)] {
+            cpu.set_ax(ax);
+            cpu.set_dx(2); // C:
+            crate::interrupts::handle_hle(&mut cpu, 0x21);
+            assert!(!cpu.get_cpu_flag(CpuFlags::CF), "AX={:04X}", ax);
+            assert_eq!(cds_flags(&mut cpu) & 0x4000, physical, "AX={:04X}", ax);
+        }
+        cpu.set_ax(0x5F07);
+        cpu.set_dx(26); // past Z:
+        crate::interrupts::handle_hle(&mut cpu, 0x21);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF));
+        assert_eq!(cpu.ax(), 0x000F, "invalid drive");
+    }
 }

@@ -88,6 +88,13 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   the mode's own size in graphics modes, doubled where it is small (mode 13h
   is 640x400, mode 12h and 320x240 "mode X" 640x480). `/api/status` →
   `video.frame` has it.
+- **Capture the display shader** with `/api/screenshot?shader=true`. This
+  explicitly renders and reads back one frame through the active shader,
+  independent of `record_shader`; the default endpoint stays unfiltered.
+  The response uses the filtered output size. It returns HTTP 409 when the
+  display has no shader output, such as with the SDL renderer or `shader=none`.
+  For example, `curl -fsS "$H/api/screenshot?shader=true" -o xbrz.png` saves
+  the filtered PNG; add `&format=raw` for RGB24 bytes and size headers.
 - **Find the highlighted item in a text-mode menu.** The text alone doesn't
   show which item is selected. The JSON reply of `/api/screen/text` (without
   `format=text`) has `attrs`: for each row, runs of cells with the same
@@ -131,6 +138,11 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   1 pages, 2 lines), the page select register, how often it was written
   and how often the game read the head tracker (`polls`), and whether the
   shutter glasses' 3D BIOS has its glasses on.
+- **Check which host GPU draws with `/api/status` → `display`.** It is
+  the log's `[DISPLAY]` line: with OpenGL, its version, the graphics chip
+  (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two
+  chips says which one the driver gave the program; otherwise SDL's
+  renderer and why OpenGL 3 wasn't there.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the

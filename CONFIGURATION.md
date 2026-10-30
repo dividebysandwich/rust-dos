@@ -85,8 +85,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   it. `--vrr` turns it on.
 * `filter` is how the picture is scaled up: `nearest` (the default, sharp
   pixels) or `linear` (smooth). It applies without a CRT shader.
-* `shader` gives the picture a CRT look: `none` (the default),
-  `scanlines`, `aperture` or `crt`. See [CRT shaders](#crt-shaders).
+* `shader` gives the picture a look: `none` (the default), one of the
+  CRT looks `scanlines`, `aperture` or `crt`, or `xbrz`, which scales the
+  picture 2x with xBRZ, a pixel-art upscaler, without a CRT look. See
+  [CRT shaders](#crt-shaders).
 * `monochrome` shows the picture on a monochrome monitor: `off` (the
   default, a colour monitor), `white`, `amber` or `green`. Each colour
   shows as bright as it is, in the phosphor's colour, and the CRT
@@ -478,18 +480,25 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   Iron Helix, need `8`. GetDeviceCaps then reports a palette device
   (RC_PALETTE, 256 palette entries, 20 of them static), logical palettes
   take entries of the system palette when they are realized, and
-  AnimatePalette changes the colors on the screen at once. Like
-  `win32_version`, a change takes effect for the next program that
-  starts when none runs.
+  AnimatePalette changes the colors on the screen at once. `16` is High
+  Color, 16 bits a pixel (5-6-5), which programs that say they need a 16
+  bit screen mode, such as Moto Racer, need when the adapter's own is
+  deeper. Like `win32_version`, a change takes effect for the next
+  program that starts when none runs.
 * `dos_version` is the DOS version programs are told (INT 21h AH=30h,
-  AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or
-  `7.10`; `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS
-  has the FAT32 functions of MS-DOS 7 that disk utilities use: the
-  extended drive parameter block and free space (INT 21h AX=7302h and
-  7303h) and, from 7.10, absolute disk reads and writes (AX=7305h), and
-  INT 25h and 26h refuse FAT32 drives as MS-DOS 7.1 does. FAT32 drives
-  mount at any version, as programs reach their files through DOS. A
-  change takes effect at once.
+  AX=3306h and the PSP's), such as `5.00` (the default), `6.22` or `7.10`;
+  `7.1` is 7.10, as DOSBox's `ver` has it. From 7.00 on, DOS has the FAT32
+  functions of MS-DOS 7 that disk utilities use: the extended drive
+  parameter block and free space (INT 21h AX=7302h and 7303h) and, from
+  7.10, absolute disk reads and writes (AX=7305h), and INT 25h and 26h
+  refuse FAT32 drives as MS-DOS 7.1 does. FAT32 drives mount at any version,
+  as programs reach their files through DOS. While one is mounted, the FAT32
+  functions, AX=7305h too, answer at any version, as MS-DOS 7.1 does under
+  SETVER: a FAT32 drive's drive parameter block (AH=32h) is MS-DOS 7.1's,
+  which only AX=7302h completes, and Windows 98 Setup checks a FAT32 C: this
+  way. Below 7.10, INT 25h and 26h still read and write FAT32 drives, unlike
+  MS-DOS 7.1, so DOS 5 programs that know only them keep reaching the
+  volume. A change takes effect at once.
 * `keyboard_layout` is the layout the keyboard types in, as DOS's KEYB
   has them: `auto` (the default) takes the host keyboard's, or one of
   `us`, `uk`, `gr` (German, also `de`), `sg` and `sf` (Swiss German and
@@ -553,13 +562,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
 * `idle_skip=true` (the default) lets the emulator skip the passes of a
   program's busy-wait loops up to the next timer event, and sleep
   instead of running them: a program polling the keyboard through the
-  BIOS, waiting for the vertical retrace, or for the timer's tick count
-  to change. A loop is skipped only after the emulator has seen one of
-  its passes come back with the registers and the memory it wrote as
-  they were, and with nothing else to tell the passes apart (it reads no
-  device but the video card's status, whose bits it looks at only
-  through a mask), so programs see the same as without it. `false` runs
-  every pass.
+  BIOS, waiting for the vertical retrace, for the timer's tick count to
+  change, or for a time it reads from the PIT's count, as Windows 98's
+  QueryPerformanceCounter does. A loop is skipped only after the
+  emulator has seen one of its passes come back with the registers and
+  the memory it wrote as they were, or as the same function of the PIT's
+  count it read, and with nothing else to tell the passes apart (it
+  reads no device but the video card's status, whose bits it looks at
+  only through a mask, and the PIT's count), so programs see the same as
+  without it. `false` runs every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
@@ -1336,7 +1347,7 @@ profile:
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
 | `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
-| `win32_depth` | `8` only for a game that says it needs 256 colours | The default desktop has the card's own depth (16 bits on a Voodoo3). A GDI game that draws with a palette needs `8`. DirectDraw games set their own mode and don't need it |
+| `win32_depth` | `8` only for a game that says it needs 256 colours, `16` for one that says it needs 16 bits | The default desktop has the card's own depth (16 bits on a Voodoo3, 32 on an S3 Trio, 24 on a ViRGE). A GDI game that draws with a palette needs `8`. A game that checks the desktop's depth before it sets its own mode, such as Moto Racer, needs `16` on a card whose desktop is deeper. Other DirectDraw games set their own mode and don't need it |
 | `cycles` | leave it at `auto` | The game's timers follow the emulated clock, and `auto` finds the speed its frames need |
 
 The `[autoexec]` lines run in the built-in DOS, so they use 8.3 names
@@ -1514,7 +1525,8 @@ last. Go through these in order:
 
 1. **It stops at once with an invalid opcode:** set `cpu=pentium_ii`.
 2. **Its message names `win32_version`:** set `win32_version=98se`.
-3. **It says it needs 256 colours:** set `win32_depth=8`.
+3. **It says it needs 256 colours or a 16 bit screen mode:** set
+   `win32_depth=8` for 256 colours, `win32_depth=16` for 16 bits.
 4. **It says there isn't enough memory:** raise `memsize`.
 5. **It can't find its CD or its files:** check its
    [registry keys](#registry-keys) and
@@ -1710,12 +1722,16 @@ GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
 is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
 files, any number of tracks and gaps), a CD image in MAME's compressed CHD
 format (`.chd`, as `chdman createcd` makes them; its data and audio
-tracks, decompressed as they are
-read), or a bare image of an ISO 9660 data track in 2048, 2336 or
-2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's `.gog`). Audio tracks can
-be Ogg Vorbis, FLAC or MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as
-many sheets call them), and WAVE files at other rates: they are decoded to
-CD audio as they play. Programs run from the image as from any other drive.
+tracks, decompressed as they are read), or a bare image of a data track
+in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
+`.gog`). The data track can be ISO 9660 or High Sierra, the format of
+discs mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or
+MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them),
+and WAVE files at other rates: they are decoded to CD audio as they play.
+Programs run from the image as from any other drive. DOS programs see the
+names of the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs
+on the built-in Windows see its Joliet long names where the disc has
+them, as on Windows 95.
 
 An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
 sector's EDC, and a sector whose EDC doesn't match its data reads as a
@@ -1795,18 +1811,18 @@ long and the short name open the file.
 
 ### Disk images
 
-A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system
-that programs read and write like any other drive's; what they write goes
-into the image file. A FAT32 drive mounts at any `dos_version`, as
-programs reach its files through DOS; the functions of before FAT32
-(INT 21h AH=36h, 1Ch) report no more than just under 2 GB of it, as
-MS-DOS 7.1 does, and from DOS 7.00 on the FAT32 functions tell the rest
-(see `dos_version`). An image whose size is a floppy disk's (160 KB to 2.88 MB,
-as in DOSBox's table), or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or
-`.1440`, is a floppy, anything else a hard disk: an image of a
-whole disk with a partition table, whose first FAT12 or FAT16 partition
-(else its first FAT32 one) is the drive, or of a single volume. The hard disk's geometry comes from its partition
-table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
+A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system that
+programs read and write like any other drive's; what they write goes into
+the image file. A FAT32 drive mounts at any `dos_version`, as programs
+reach its files through DOS; the functions of before FAT32 (INT 21h
+AH=36h, 1Ch) report no more than just under 2 GB of it, as MS-DOS 7.1
+does, and the FAT32 functions tell the rest (see `dos_version`). An image
+whose size is a floppy disk's (160 KB to 2.88 MB, as in DOSBox's table),
+or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or `.1440`, is a floppy,
+anything else a hard disk: an image of a whole disk with a partition
+table, whose first FAT12 or FAT16 partition (else its first FAT32 one) is
+the drive, or of a single volume. The hard disk's geometry comes from its
+partition table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
 `-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
 and an image file that can't be written, or `-ro`, makes a write-protected
 disk. `MOUNT C hdd.img` puts a hard disk image in place of C:'s directory.
@@ -3130,6 +3146,21 @@ picture as a monitor of the time would have:
   `crt_glow` how much light glows around its bright parts: `0` none,
   `100` the most, `20` the default. The Display page has both below the
   shader while the CRT look is chosen.
+
+For pixel art, `xbrz` scales the native picture 2x with xBRZ instead of
+giving it a CRT look. It recovers the original pixels of doubled VGA
+modes before scaling. The `scale` setting still controls the window's
+size independently. Cursors and settings overlays stay sharp, and the
+same native input is used in the browser and in shader captures.
+
+For magnified output, xBRZ reuses a filtered 2x base picture until the
+native pixels or monochrome tint change. Resizing and overlays reuse
+that base. Smaller outputs resolve directly from the native picture.
+If the extra render targets are unavailable, the direct shader is used.
+
+Choose `xbrz` when you want to magnify pixel art, such as DOS games,
+while smoothing jagged diagonal edges. It works well with Ultima VI,
+Dungeon Master II and Blood and Magic.
 
 With `monochrome`, the aperture grille and the shadow mask are left out, as
 a monochrome tube has a single phosphor; the scanlines, glow and curve stay.

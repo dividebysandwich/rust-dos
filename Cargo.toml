@@ -9,6 +9,9 @@ edition.workspace = true
 # `cargo run` runs the emulator, not the relay (src/bin).
 default-run = "rust-dos"
 
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 # `bench = false` on the library and the programs: `cargo bench` and
 # `cargo test --benches` run the benchmarks in benches/ only, without
 # building and running the unit tests a second time.

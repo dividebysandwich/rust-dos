@@ -61,6 +61,21 @@ use crate::startup::leave_explorer_console;
 #[cfg(test)]
 use crate::startup::open_log_file;
 
+// On a laptop with two graphics chips, NVIDIA's (Optimus) and AMD's
+// (PowerXpress) drivers put a program on the discrete one when its .exe
+// exports these as 1; otherwise OpenGL runs on the integrated chip. The
+// exports are made by the linker (build.rs passes /EXPORT for them).
+#[cfg(all(windows, target_env = "msvc"))]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static NvOptimusEnablement: u32 = 1;
+#[cfg(all(windows, target_env = "msvc"))]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 fn main() -> Result<(), String> {
     let mut args = Args::parse();
     match args.command.take() {
@@ -220,6 +235,7 @@ fn main() -> Result<(), String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = start_debug_hub(&mut cpu, &args, &det, &settings)?;
+    dbg.display = display.renderer().to_string();
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.
     let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
@@ -1921,6 +1937,7 @@ fn main() -> Result<(), String> {
         ui.set_display(display.output_scale(), true);
         let mut composed_rows = 0..0;
         if !still {
+            screen.track_overlays(settings.shader == video::shader::Shader::Xbrz);
             // Restore the affected base and overlay rows. A monochrome
             // monitor shows the cursors in its phosphor's colour, but not
             // the settings window.
@@ -1963,6 +1980,7 @@ fn main() -> Result<(), String> {
             video::mono::apply_rows(&mut screen, settings.monochrome, composed_rows.clone());
             if let Some(look) = &power_look {
                 video::power::apply(&mut screen, look);
+                screen.mark_overlay_rect(0, 0, width as usize, height as usize);
             }
             clipboard.draw(&mut screen, &cpu.bus);
             let frame_w = width as usize;
@@ -1986,7 +2004,7 @@ fn main() -> Result<(), String> {
                     let paged = if record_ui { ui.with_layer(&screen, (1.0, 1.0)) } else { None };
                     let base = paged.as_ref().unwrap_or(&screen);
                     let shaded = (settings.record_shader && (screenshot || video_recording.is_some()))
-                        .then(|| display.shaded(base))
+                        .then(|| display.shaded(base, &cached_frame))
                         .flatten();
                     let picture = shaded.as_ref().unwrap_or(base);
                     recorder.capture(base);
@@ -2058,9 +2076,13 @@ fn main() -> Result<(), String> {
             }
             macro_rules! debug_frame {
                 () => {
-                    match ui.with_layer(&screen, (1.0, 1.0)) {
-                        Some(paged) => dbg.capture_frame(&paged),
-                        None => dbg.capture_frame(&screen),
+                    let paged = ui.with_layer(&screen, (1.0, 1.0));
+                    let frame = paged.as_ref().unwrap_or(&screen);
+                    if dbg.wants_shader_frame() {
+                        let shaded = display.shaded(frame, &cached_frame);
+                        dbg.capture_frame_with_shader(frame, shaded.as_ref());
+                    } else {
+                        dbg.capture_frame(frame);
                     }
                 };
             }
@@ -2100,6 +2122,7 @@ fn main() -> Result<(), String> {
                 voodoo_gl.then_some(&cached_frame),
                 ui.layer(),
                 composed_rows,
+                (settings.shader == video::shader::Shader::Xbrz).then_some(&cached_frame),
             )?;
             last_screen_key = Some(screen_key);
             if det.is_none() && voodoo_gl {
@@ -2254,6 +2277,7 @@ fn draw_recording_indicator(screen: &mut video::Frame, frame_w: usize) {
             if dx * dx + dy * dy <= (radius * radius) as isize {
                 let idx = (y * frame_w + x) * 4;
                 if idx + 2 < screen.rgba.len() {
+                    screen.mark_overlay(x, y);
                     screen.rgba[idx] = 0xFF; // R
                     screen.rgba[idx + 1] = 0x00; // G
                     screen.rgba[idx + 2] = 0x00; // B

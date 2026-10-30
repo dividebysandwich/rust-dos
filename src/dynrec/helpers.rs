@@ -961,7 +961,8 @@ jit_fn! {
     /// The register operations `desc >> 13` says: `Uop::FAddSt` (0, `desc`
     /// is dst, a << 4, b << 8 and sub << 12), `Uop::FChs` (1),
     /// `Uop::FLoad80` (2, from RAM at `arg`), `Uop::FToX80` (3, `desc`'s
-    /// low bits the part, which it returns) and `Uop::FSqrt` (4).
+    /// low bits the part, which it returns), `Uop::FSqrt` (4) and
+    /// `Uop::FToSingle` (5, which returns the single).
     fn jit_fpu_reg_op(cpu: *mut Cpu, ctx: *mut JitCtx, desc: u32, arg: u32) -> u32 {
         use crate::instructions::fpu::arithmetic;
         let (dst, a, b) = ((desc & 7) as usize, (desc >> 4 & 7) as usize, (desc >> 8 & 7) as usize);
@@ -986,6 +987,7 @@ jit_fn! {
                 arithmetic::fsqrt(cpu);
                 0
             }
+            5 => crate::instructions::fpu::data::st0_single_bits(cpu),
             _ => {
                 let bytes = cpu.fpu_get(0).get_bytes();
                 let (at, mut part) = (dst * 4, [0; 4]);

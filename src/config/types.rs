@@ -89,7 +89,7 @@ impl Filter {
 
 /// The DOS version the built-in DOS reports (`dos_version`): INT 21h
 /// AH=30h, AX=3306h and the PSP's, and the version the FAT32 functions of
-/// MS-DOS 7 (AX=7302h to 7305h) need.
+/// MS-DOS 7 (AX=7302h to 7305h) need while no FAT32 drive is mounted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DosVersion {
     pub major: u8,
@@ -171,20 +171,23 @@ impl WindowsVersion {
 
 /// The depth of the built-in Windows' desktop (`win32_depth`): the
 /// display adapter's own (32 bits a pixel, 24 on an S3 ViRGE, 16 on a
-/// Banshee or Voodoo3), or 8 bits a pixel, 256 colours from a palette.
+/// Banshee or Voodoo3), 8 bits a pixel, 256 colours from a palette, or
+/// 16 bits a pixel, High Color.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum DesktopDepth {
     #[default]
     Adapter,
     Palette,
+    HighColor,
 }
 
 impl DesktopDepth {
-    /// "auto" or "8".
+    /// "auto", "8" or "16".
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Adapter),
             "8" => Some(Self::Palette),
+            "16" => Some(Self::HighColor),
             _ => None,
         }
     }
@@ -193,6 +196,7 @@ impl DesktopDepth {
         match self {
             Self::Adapter => "auto",
             Self::Palette => "8",
+            Self::HighColor => "16",
         }
     }
 }

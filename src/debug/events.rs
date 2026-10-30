@@ -291,7 +291,7 @@ impl DebugHub {
         self.finish();
         shared.closed.store(true, Ordering::Release);
         let gone = || Reply::Error(503, "the emulator is shutting down".into());
-        for (ctx, tx) in std::mem::take(&mut self.frame_waiters) {
+        for (_, ctx, tx) in std::mem::take(&mut self.frame_waiters) {
             self.answer(&ctx, tx, gone());
         }
         // Requests still queued get 503, and the channel closes: one sent

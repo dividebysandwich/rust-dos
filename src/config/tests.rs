@@ -17,6 +17,16 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
+fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
+    let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
+    assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));
+    assert!(config.warnings.is_empty());
+    let invalid = parse("[emulator]\nshader=unknown\n", Path::new("/cfg"), None);
+    assert_eq!(invalid.shader, None);
+    assert!(invalid.warnings.iter().any(|w| w.contains("invalid shader") && w.contains("xbrz")));
+}
+
+#[test]
 fn vr_settings_saved_before_auto_are_auto() {
     let old = parse("[vr]\nquality=high\nresolution=100\n", Path::new("/cfg"), None);
     assert_eq!((old.vr.quality, old.vr.resolution), (crate::vr::VrQuality::Auto, None));
@@ -1084,6 +1094,24 @@ fn unwritable_default_is_only_a_warning() {
     assert!(!config.created);
     assert_eq!(config.warnings.len(), 1);
     assert!(config.drives.is_empty());
+}
+
+#[test]
+fn the_desktop_depth_is_read() {
+    for (value, depth) in [
+        ("auto", DesktopDepth::Adapter),
+        ("8", DesktopDepth::Palette),
+        ("16", DesktopDepth::HighColor),
+    ] {
+        let text = format!("[emulator]\nwin32_depth={value}\n");
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_depth, depth);
+        assert_eq!(depth.name(), value);
+    }
+    let config = parse("[emulator]\nwin32_depth=24\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
 }
 
 #[test]

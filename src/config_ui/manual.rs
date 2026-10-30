@@ -187,6 +187,7 @@ impl ConfigUi {
             let to = ((y0 as usize + r) * size.0 as usize + x0 as usize) * 4;
             out.rgba[to..to + row].copy_from_slice(&scaled.rgba[r * row..(r + 1) * row]);
         }
+        out.mark_overlay_rect(x0 as usize, y0 as usize, page.0 as usize, page.1 as usize);
         Some(out)
     }
 
@@ -336,6 +337,7 @@ impl ConfigUi {
                 pixel.copy_from_slice(&[0x18, 0x1C, 0x24, 255]);
             }
         }
+        frame.mark_overlay_rect(area.0, area.1, area.2, area.3);
 
         // The page's size and place in the frontend's pixels, from the
         // top left of the area.

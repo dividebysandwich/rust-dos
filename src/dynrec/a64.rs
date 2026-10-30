@@ -1074,17 +1074,6 @@ impl Gen<'_> {
                     ; b.ne >precise_done
                 );
             }
-            Precise::Single(x) => {
-                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
-                dynasm!(self.ops
-                    ; .arch aarch64
-                    ; tst w0, 0xC00
-                    ; b.ne >precise_regs
-                    ; fmov x0, D(d(x))
-                    ; tst w0, 0x0FFF_FFFF
-                    ; b.ne >precise_done
-                );
-            }
             Precise::Equal(a, b) => {
                 // Not equal where unordered either.
                 dynasm!(self.ops
@@ -2322,7 +2311,38 @@ impl Gen<'_> {
                 dynasm!(self.ops ; .arch aarch64 ; mov W(r(t)), w0 ; x80_done:);
             }
             Uop::FToSingle { t, x } => {
-                dynasm!(self.ops ; .arch aarch64 ; fcvt s16, D(d(x)) ; fmov W(r(t)), s16);
+                // As x86-64's.
+                self.field(Access::Ldr16, 0, layout::fpu::CONTROL);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; tst w0, 0xC00
+                    ; b.ne >single_regs
+                    ; fmov x0, D(d(x))
+                    ; tst w0, 0x0FFF_FFFF
+                    ; b.ne >single_inline
+                    ; single_regs:
+                );
+                self.fpu_phys(1, 0);
+                self.cpu_addr(2, layout::fpu::STALE);
+                dynasm!(self.ops ; .arch aarch64 ; ldrb w3, [x2, x1] ; cbnz w3, >single_inline);
+                self.cpu_addr(2, layout::fpu::X80);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; add x2, x2, x1, lsl 4
+                    ; ldr x0, [x2]
+                    ; tst x0, 0x7FF
+                    ; b.eq >single_inline
+                );
+                self.fpu_op(5 << 13, None);
+                dynasm!(self.ops
+                    ; .arch aarch64
+                    ; mov W(r(t)), w0
+                    ; b >single_done
+                    ; single_inline:
+                    ; fcvt s16, D(d(x))
+                    ; fmov W(r(t)), s16
+                    ; single_done:
+                );
             }
             Uop::FLoad64 { x, m, canon } => {
                 dynasm!(self.ops ; .arch aarch64 ; ldr D(d(x)), [x21, X(r(m))]);

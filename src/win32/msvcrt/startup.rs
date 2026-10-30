@@ -1638,7 +1638,12 @@ fn spawn(cpu: &mut Cpu, mode: u32, path: u32, argv: u32, envp: u32) -> Option<u3
         Ok(info) => info,
         Err(code) => {
             set_doserrno(cpu, code);
-            set_errno(cpu, if code == 193 { ENOEXEC } else { ENOENT });
+            let errno = match code {
+                193 => ENOEXEC,
+                8 => ENOMEM,
+                _ => ENOENT,
+            };
+            set_errno(cpu, errno);
             return Some(EOF);
         }
     };

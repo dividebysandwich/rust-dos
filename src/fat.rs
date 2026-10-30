@@ -848,6 +848,16 @@ impl FatVolume {
         self.list_in(&state, &dir)
     }
 
+    /// `list`, each entry with its slot: its place among the directory's
+    /// entries, deleted ones and long names counted. DOS's FindNext goes
+    /// on from the slot after the file it found, so deleting that file
+    /// or adding others doesn't move the files still to come.
+    pub fn list_slots(&self, path: &[&str]) -> Result<Vec<(usize, Entry)>, u8> {
+        let state = self.state();
+        let dir = self.dir_in(&state, path)?;
+        self.list_slots_in(&state, &dir)
+    }
+
     /// Create the empty file `long` in the directory at `dir` (a path of
     /// DOS names), with a long file name entry as Windows 95 writes it
     /// where `long` isn't a DOS name already. Returns the entry, whose
@@ -944,9 +954,18 @@ impl FatVolume {
 
     /// `list` for a directory entry already found.
     fn list_in(&self, state: &State, dir: &Entry) -> Result<Vec<Entry>, u8> {
+        Ok(self
+            .list_slots_in(state, dir)?
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect())
+    }
+
+    /// `list_slots` for a directory entry already found.
+    fn list_slots_in(&self, state: &State, dir: &Entry) -> Result<Vec<(usize, Entry)>, u8> {
         let mut entries = Vec::new();
         let mut long: Vec<[u8; ENTRY_SIZE]> = Vec::new();
-        for (at, raw) in self.slots(state, dir)? {
+        for (slot, (at, raw)) in self.slots(state, dir)?.into_iter().enumerate() {
             if raw[0] != DELETED && raw[11] == ATTR_LONG_NAME {
                 long.push(raw);
                 continue;
@@ -957,7 +976,7 @@ impl FatVolume {
             }
             let mut entry = state.params.entry(&raw, at);
             entry.long_name = long_name(&chain, raw[..11].try_into().unwrap());
-            entries.push(entry);
+            entries.push((slot, entry));
         }
         Ok(entries)
     }

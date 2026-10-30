@@ -296,7 +296,7 @@ pub struct TraceQuery {
 pub enum Cmd {
     Status,
     Stats,
-    Screenshot,
+    Screenshot { shader: bool },
     ScreenText,
     TraceQuery(TraceQuery),
     /// `count`: record that many more instructions, then stop.
@@ -696,6 +696,9 @@ pub struct DebugHub {
     /// Input is then delivered by `feed_input` at emulated times, and its
     /// waits end in emulated time (`input_wait_ns`).
     pub deterministic: Option<chrono::NaiveDateTime>,
+    /// What draws the window, as the `[DISPLAY]` log line says: OpenGL's
+    /// version, graphics chip and vendor, or SDL's renderer.
+    pub display: String,
     input_wait_ns: Option<u64>,
     /// Pause once emulated time reaches this (`until_ms`).
     stop_at_ns: Option<u64>,
@@ -724,7 +727,7 @@ pub struct DebugHub {
     /// Keys the remote client holds down on the machine.
     remote_held: Vec<PcKey>,
 
-    frame_waiters: Vec<(Ctx, oneshot::Sender<Answer>)>,
+    frame_waiters: Vec<(bool, Ctx, oneshot::Sender<Answer>)>,
     /// The video mode and picture size last reported as an event.
     last_mode: Option<(VideoMode, (u32, u32))>,
     frames: u64,
@@ -843,6 +846,7 @@ impl DebugHub {
             frame_stats: None,
             heat: None,
             profile: None,
+            display: String::new(),
         }
     }
 

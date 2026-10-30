@@ -4,9 +4,12 @@
 //! which the handlers compute on the 80 bits, call the handlers' own code,
 //! except in fast mode (`Cpu::fpu_fast`), where they are the doubles' too.
 //! Every instruction starts with a `FpuGuard`, which leaves the rare cases
-//! (no coprocessor, an empty register) to the handler. Stores, integer
-//! conversions and compares also leave a register whose 80 bits hold more
-//! than its double to the handler (`FBailPrecise`).
+//! (no coprocessor, an empty register) to the handler. Double stores,
+//! integer conversions and compares also leave a register whose 80 bits
+//! hold more than its double to the handler (`FBailPrecise`); a single
+//! store rounds those 80 bits through the handlers' code and goes on
+//! (`Uop::FToSingle`), as games that round down store singles all the
+//! time.
 
 use iced_x86::{Code, Instruction, OpKind, Register};
 
@@ -277,7 +280,6 @@ pub fn translate(instr: &Instruction, fast: bool, u: &mut Vec<Uop>) -> bool {
                 return false;
             }
             u.push(Uop::FGet { x: X0, i: 0 });
-            precise(u, 1, Precise::Single(X0));
             u.push(Uop::FToSingle { t: T0, x: X0 });
             if instr.code() == Fstp_m32fp {
                 u.push(Uop::FPop { n: 1 });

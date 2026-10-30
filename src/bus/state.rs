@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 15;
+const WIN32_VERSION: u16 = 17;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -739,5 +739,14 @@ impl Bus {
         // The built-in DLLs' files are of the version of Windows the
         // state's programs run under, which may not be the settings'.
         crate::win32::dll_files::sync(self);
+        // When the first of the state's threads' timeouts ends, which
+        // isn't in the state either. The clock's deadline is in the state,
+        // so it is worked out again only when a thread has such a wait:
+        // a machine without one saves the same bytes it was loaded from.
+        let now = self.clock.now_micros();
+        self.win32.wait_due = crate::win32::thread::wait_due(&self.win32, now);
+        if self.win32.wait_due.is_some() {
+            self.reschedule_timers();
+        }
     }
 }

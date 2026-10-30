@@ -533,22 +533,32 @@ fn forget_windows(cpu: &mut Cpu, gone: impl Fn(&Window) -> bool, tids: &[u32]) {
     state.queues.retain(|q| !tids.contains(&q.tid));
     let windows = &state.windows;
     let alive = |hwnd: u32| slot(hwnd).is_some_and(|i| windows.get(i).is_some_and(|w| w.is_some()));
+    let had_foreground = state.foreground_window() != 0;
     let input = &mut state.input;
-    for hwnd in [
-        &mut input.focus,
-        &mut input.active,
-        &mut input.capture,
-        &mut input.foreground,
-    ] {
-        if !alive(*hwnd) {
-            *hwnd = 0;
+    for a in &mut input.queues {
+        if !alive(a.active) {
+            a.active = 0;
         }
+        if !alive(a.focus) {
+            a.focus = 0;
+        }
+    }
+    input.queues.retain(|a| !tids.contains(&a.queue));
+    if tids.contains(&input.foreground) {
+        input.foreground = 0;
+    }
+    if !alive(input.capture) {
+        input.capture = 0;
     }
     if !alive(state.caret.hwnd) {
         state.caret = input::Caret::default();
     }
     if state.clipboard.owner != 0 && !alive(state.clipboard.owner) {
         state.clipboard.owner = 0;
+    }
+    // The foreground window went with them: the next one comes there.
+    if had_foreground && state.foreground_window() == 0 {
+        input::foreground_gone(cpu);
     }
 }
 
@@ -1318,6 +1328,10 @@ static APIS: &[Api] = &[
     stdcall("WinHelpTopicWndProc", 0, 4, winhelp::topic_proc),
     // Program Manager's window, the raw DDE messages' server.
     stdcall("ProgmanWndProc", 0, 4, progman::wnd_proc),
+    // The activation of an input queue's windows in its own thread.
+    stdcall("ActivateInQueue", 0, 3, input::activate_in_queue),
+    stdcall("DeactivateQueue", 0, 1, input::deactivate_queue),
+    stdcall("ActivateByClick", 0, 1, input::activate_by_click),
 ];
 
 crate::state_fields!(State {

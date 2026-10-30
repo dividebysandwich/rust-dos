@@ -431,6 +431,12 @@ fn in_client(cpu: &mut Cpu, hwnd: u32, lp: u32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
+/// Whether a button of the style `style` lets the mouse through
+/// (WM_NCHITTEST's HTTRANSPARENT): a group box does.
+pub fn transparent(style: u32) -> bool {
+    style & 0x0F == BS_GROUPBOX
+}
+
 /// The Button class's window procedure.
 pub fn button_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hwnd, msg, wp, lp] = args else {
@@ -566,7 +572,7 @@ pub fn button_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             set_state(cpu, hwnd, state);
             repaint(cpu, hwnd, ODA_SELECT, 0)
         }
-        WM_NCHITTEST if kind == BS_GROUPBOX => Some(HTTRANSPARENT),
+        WM_NCHITTEST if transparent(style) => Some(HTTRANSPARENT),
         _ => defwnd::def_window_proc(cpu, args),
     }
 }
