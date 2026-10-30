@@ -262,6 +262,7 @@ const DD_GET_SCAN_LINE: u32 = 16;
 const DD_SET_COOPERATIVE_LEVEL: u32 = 20;
 const DD_SET_DISPLAY_MODE: u32 = 21;
 const DD_WAIT_FOR_VERTICAL_BLANK: u32 = 22;
+const S_QUERY_INTERFACE: u32 = 0;
 const S_ADD_ATTACHED_SURFACE: u32 = 3;
 const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
@@ -430,6 +431,75 @@ fn fullscreen_program() -> (Vec<u8>, u32) {
         c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
         finish(a, l)
     })
+}
+
+const IID_DIRECTDRAWSURFACE4: [u8; 16] = [
+    0x30, 0x86, 0x2B, 0x0B, 0x35, 0xAD, 0xD0, 0x11, 0x8E, 0xA6, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B,
+];
+
+/// A flip chain whose primary surface is asked for its back buffer
+/// through IDirectDrawSurface4, with a DDSCAPS2 whose dwCaps alone is
+/// filled in: the rest is what Omikron's stack holds there, which
+/// DirectDraw doesn't look at.
+#[test]
+fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
+    let mut d = data();
+    desc(
+        &mut d,
+        DESC,
+        DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        0,
+        0,
+        1,
+    );
+    put(&mut d, KEY, &IID_DIRECTDRAWSURFACE4);
+    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
+    put32(&mut d, CAPS + 4, 0x1E0);
+    put32(&mut d, CAPS + 8, 0x0090_E18C);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_QUERY_INTERFACE,
+            &[Arg::At(KEY), Arg::At(OFFSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            OFFSCREEN,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        finish(a, l)
+    });
+    let mut cpu = machine("attached_caps4", program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(results(&mut cpu, data, 6)[1..], [0; 5]);
 }
 
 #[test]
