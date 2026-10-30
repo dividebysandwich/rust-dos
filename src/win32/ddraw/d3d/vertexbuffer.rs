@@ -18,6 +18,7 @@ use super::draw::{device_setup, read_vertices};
 use super::pipeline::{self, Layout, Vertex};
 use super::{D3D_OK, D3DERR_VERTEXBUFFEROPTIMIZED, probe, write_dwords};
 use crate::cpu::Cpu;
+use std::sync::Arc;
 use crate::win32::{com, kernel32};
 
 /// A vertex buffer.
@@ -35,7 +36,9 @@ pub struct VertexBuffer {
     /// clip coordinates, and the bits of the screen position it wrote,
     /// so a vertex the program wrote over since isn't taken for it.
     /// Not in save states: the next ProcessVertices makes them again.
-    pub clipped: Vec<Option<Clipped>>,
+    /// Shared, so the copies of the buffer that Lock and the draws make
+    /// don't copy them.
+    pub clipped: Arc<Vec<Option<Clipped>>>,
 }
 
 /// A vertex's clip coordinates, and the bits of the x, y, z and rhw
@@ -303,13 +306,18 @@ fn process(
             }
         }
     }
+    // The copy `d` goes first, so the buffer's clip coordinates aren't
+    // shared and change in place.
+    drop(d);
     if let Some(b) = get(cpu, id) {
         let at = index as usize;
+        let count = b.count as usize;
         if clip {
-            b.clipped.resize(b.count as usize, None);
-            b.clipped[at..at + clipped.len()].copy_from_slice(&clipped);
-        } else if let Some(kept) = b.clipped.get_mut(at..at + processed.len()) {
-            kept.fill(None);
+            let kept = Arc::make_mut(&mut b.clipped);
+            kept.resize(count, None);
+            kept[at..at + clipped.len()].copy_from_slice(&clipped);
+        } else if b.clipped.len() >= at + processed.len() {
+            Arc::make_mut(&mut b.clipped)[at..at + processed.len()].fill(None);
         }
     }
     let flags = if op & D3DVOP_EXTENTS != 0 {
