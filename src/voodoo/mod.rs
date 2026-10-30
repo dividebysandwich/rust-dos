@@ -978,7 +978,10 @@ impl Voodoo {
     /// memory (with None any of it): of the buffers behind the OpenGL
     /// renderer (`gpu_behind`), only the rows there are read back.
     pub(crate) fn catch_up_in(&self, range: Option<(u32, u32)>) {
-        self.gpu_catch_up_in(range);
+        match range {
+            Some((start, end)) => self.gpu_catch_up_hot(start, end),
+            None => self.gpu_catch_up(),
+        }
         self.catch_up_workers();
     }
 
@@ -1756,6 +1759,8 @@ impl Voodoo {
         self.display_dirty = true;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().pages.mark_all();
+        self.gpu.get_mut().pages.forget_buffers();
+        self.gpu_behind.set(false);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();
             mirror.forget_textures();

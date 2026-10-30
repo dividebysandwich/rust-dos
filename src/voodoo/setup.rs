@@ -172,6 +172,9 @@ impl Voodoo {
         super::raster::scene_profile::record(&st, texcount, verts);
         if self.recording() {
             self.mirror_sync();
+            if self.banshee.is_some() && texcount > 0 {
+                self.gpu_texels(&st, texcount);
+            }
             if let Some(mirror) = self.mirror.get_mut() {
                 mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
             }

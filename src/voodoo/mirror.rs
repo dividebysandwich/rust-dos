@@ -865,8 +865,7 @@ impl Mirror {
                     self.next_id = self.next_id.wrapping_add(1).max(1);
                     self.next_id
                 });
-                let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
-                let (start, end) = if end > start && end <= t.mask + 1 { (start, end - 1) } else { (0, t.mask) };
+                let (start, end) = texel_span(t);
                 self.textures.insert(key, Cached { id, start, end, good_at: tmu.writes, used: frame });
                 self.push(Command::Texture(Box::new(Texture { id, levels: decode(t, first, last) })));
                 id
@@ -951,6 +950,18 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
         }),
         send_config: st.send_config,
         tmu,
+    }
+}
+
+/// The bytes of the memory the texture `t` draws with may read, first to
+/// last: from its first level's to past its last's, or all of the unit's
+/// memory where they don't make sense.
+pub fn texel_span(t: &TmuRaster) -> (u32, u32) {
+    let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
+    if end > start && end <= t.mask + 1 {
+        (start, end - 1)
+    } else {
+        (0, t.mask)
     }
 }
 

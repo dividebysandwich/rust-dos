@@ -15,10 +15,10 @@
 //! that its copy of the memory is never behind the operations recorded:
 //! a read back then only has to read.
 
-use super::Voodoo;
 use super::backlog::Access;
 use super::mirror::{Blit, BlitSource, Command};
-use super::raster::Stride;
+use super::raster::{RasterState, Stride};
+use super::{NONE, Voodoo};
 use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
 
@@ -123,9 +123,12 @@ impl Voodoo {
     /// Whether `job`, which the backlog would hold with `access`, is the
     /// renderer's alone: reads of the buffers get the renderer's pictures
     /// of them, and the job draws nothing outside them, nor into alpha
-    /// planes, which the renderer keeps in its colour buffers. The
-    /// Banshee's 3D engine draws into memory its 2D side and its texture
-    /// units read, and stays exact.
+    /// planes, which the renderer keeps in its colour buffers. On a
+    /// Banshee or Voodoo3 the job draws into the recording's buffers, the
+    /// software picture isn't wanted (it would read them back every
+    /// frame), and the program didn't read back memory there lately (it
+    /// is hot): a program that reads what the 3D draws every frame waits
+    /// less for the software rasterizer than for the GPU.
     pub(crate) fn gpu_takes(&self, job: &Job, access: &Access) -> bool {
         if let Job::Triangle { st, .. } | Job::Fastfill { st, .. } = job
             && st.fbz_mode & (1 << 18) != 0
@@ -133,11 +136,82 @@ impl Voodoo {
             self.gpu_alpha.set(true);
         }
         self.gpu_reads
-            && self.banshee.is_none()
             && !self.gpu_alpha.get()
             && !access.pinned
             && !access.kept
             && self.gpu.borrow().link.is_some()
+            && (self.banshee.is_none() || self.gpu_takes_3d(job))
+    }
+
+    /// The rest of `gpu_takes` for a Banshee's or Voodoo3's 3D.
+    fn gpu_takes_3d(&self, job: &Job) -> bool {
+        if self.software_picture {
+            return false;
+        }
+        let Some(bytes) = self.gpu_job_bytes(job) else {
+            return false;
+        };
+        let gpu = self.gpu.borrow();
+        !bytes.iter().flatten().any(|&(a, b)| gpu.pages.hot_in(a, b))
+    }
+
+    /// The bytes of the memory a job left to the renderer draws into, as
+    /// all the rows of its buffers: its colour buffer and the auxiliary
+    /// buffer, or every colour buffer for a job of another kind. On a
+    /// Banshee they are the recording's buffers, None if the job draws
+    /// colours into one the recording doesn't have.
+    fn gpu_job_bytes(&self, job: &Job) -> Option<[Option<(u32, u32)>; 4]> {
+        let mut bytes = [None; 4];
+        let mut n = 0;
+        let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
+            if base != NONE && n < bytes.len() {
+                bytes[n] = Some(row_bytes(base / 2, stride, rows));
+                n += 1;
+            }
+        };
+        if self.banshee.is_some() {
+            let key = self.mirror_layout()?;
+            let all = (0, key.height);
+            match job {
+                Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
+                    let dest = st.dest as u32 * 2;
+                    if st.fbz_mode & (1 << 9) != 0 {
+                        if !key.color.contains(&dest) {
+                            return None;
+                        }
+                        mark(dest, key.stride, all);
+                    }
+                }
+                _ => {
+                    for offs in key.color {
+                        mark(offs, key.stride, all);
+                    }
+                }
+            }
+            mark(key.aux, key.aux_stride, all);
+            return Some(bytes);
+        }
+        let fbi = &self.fbi;
+        let all = (0, fbi.height);
+        match job {
+            Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
+                mark(st.dest as u32 * 2, fbi.stride, all);
+                mark(fbi.auxoffs, fbi.aux_stride, all);
+            }
+            // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
+            Job::Rows { base, rows, .. } => {
+                let aux = fbi.auxoffs != NONE && *base == fbi.auxoffs as usize / 2;
+                let stride = if aux { fbi.aux_stride } else { fbi.stride };
+                mark(*base as u32 * 2, stride, *rows);
+            }
+            _ => {
+                for offs in fbi.rgboffs {
+                    mark(offs, fbi.stride, all);
+                }
+                mark(fbi.auxoffs, fbi.aux_stride, all);
+            }
+        }
+        Some(bytes)
     }
 
     /// The buffers a job left to the renderer draws into are behind it
@@ -146,32 +220,40 @@ impl Voodoo {
     pub(crate) fn gpu_left(&self, job: &Job) {
         self.gpu_behind.set(true);
         self.gpu_only.set(self.gpu_only.get() + 1);
-        let fbi = &self.fbi;
-        let all = (0, fbi.height);
+        let bytes = self.gpu_job_bytes(job).unwrap_or_default();
         let mut gpu = self.gpu.borrow_mut();
-        let pages = &mut gpu.pages;
-        let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
-            if base != super::NONE {
-                let (start, end) = row_bytes(base / 2, stride, rows);
-                pages.drawn_in_buffer(start, end);
-            }
+        for (start, end) in bytes.into_iter().flatten() {
+            gpu.pages.drawn_in_buffer(start, end);
+        }
+    }
+
+    /// A Banshee's triangle draws with texels from the memory its 3D
+    /// buffers are in (a buffer drawn and then drawn with as a texture):
+    /// the memory there gets what was drawn before, read back from the
+    /// renderer's 3D buffers where they are newer, and the recording
+    /// decodes the texture again from it. The renderer then draws with
+    /// its own picture at the card's resolution, never with memory that
+    /// is behind it, and so does the software rasterizer.
+    pub(crate) fn gpu_texels(&mut self, st: &RasterState, texcount: usize) {
+        let Some(key) = self.mirror_layout() else {
+            return;
         };
-        match job {
-            Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                mark(st.dest as u32 * 2, fbi.stride, all);
-                mark(fbi.auxoffs, fbi.aux_stride, all);
+        for unit in 0..texcount.min(self.tmu.len()) {
+            let Some(t) = &st.tmu[unit] else {
+                continue;
+            };
+            let (start, last) = super::mirror::texel_span(t);
+            let end = last.saturating_add(1);
+            if !key.overlaps(start, end) {
+                continue;
             }
-            // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
-            Job::Rows { base, rows, .. } => {
-                let aux = fbi.auxoffs != super::NONE && *base == fbi.auxoffs as usize / 2;
-                let stride = if aux { fbi.aux_stride } else { fbi.stride };
-                mark(*base as u32 * 2, stride, *rows);
-            }
-            _ => {
-                for &offs in &fbi.rgboffs {
-                    mark(offs, fbi.stride, all);
-                }
-                mark(fbi.auxoffs, fbi.aux_stride, all);
+            let behind = self.gpu.get_mut().pages.buffers_in(start, end);
+            let queued = self.outstanding.get()
+                || !self.words.get_mut().is_empty()
+                || !self.backlog.get_mut().is_empty();
+            if behind || queued {
+                self.catch_up_in(Some((start, end)));
+                self.tmu[unit].note_written(start, end);
             }
         }
     }
@@ -183,6 +265,13 @@ impl Voodoo {
         self.gpu_catch_up_in(None);
     }
 
+    /// The same for the rows of the buffers bytes `start..end` of the
+    /// memory hold, which the program reads or writes: on a Banshee they
+    /// are hot from then on (`gpu_takes`).
+    pub(crate) fn gpu_catch_up_hot(&self, start: u32, end: u32) {
+        self.gpu_catch_up_rows(Some((start, end)), self.banshee.is_some());
+    }
+
     /// The same for the rows of the buffers that bytes `start..end` of
     /// the memory hold (with None all of them): only the rows behind
     /// that are asked for are read back, at the card's resolution.
@@ -192,6 +281,11 @@ impl Voodoo {
     /// the memory first, and the rows read back go over them, not the
     /// other way round.
     pub(crate) fn gpu_catch_up_in(&self, range: Option<(u32, u32)>) {
+        self.gpu_catch_up_rows(range, false);
+    }
+
+    /// `gpu_catch_up_in`, the rows read back hot if `hot`.
+    fn gpu_catch_up_rows(&self, range: Option<(u32, u32)>, hot: bool) {
         if !self.gpu_behind.get() {
             return;
         }
@@ -248,7 +342,7 @@ impl Voodoo {
             };
             // The bytes of those rows that are behind, read back by rows.
             let (start, end) = row_bytes(base, stride, (top, bottom));
-            for bytes in gpu.pages.take_buffers(start, end) {
+            for bytes in gpu.pages.take_buffers(start, end, hot) {
                 let (top, bottom) = rows_of(base, stride, bytes);
                 let bottom = bottom.min(layout.height);
                 if top >= bottom {
@@ -466,8 +560,18 @@ impl Voodoo {
     /// the GPU has, which turn hot.
     #[inline]
     pub(crate) fn gpu_sync(&self, start: u32, end: u32) {
+        self.gpu_sync_buffers(start, end);
         if self.gpu.borrow().pages.any_gpu() {
             self.read_back(start, end, true);
+        }
+    }
+
+    /// The rows of the 3D buffers within bytes `start..end` that are
+    /// behind the renderer, read back for the program (`gpu_sync`).
+    #[inline]
+    fn gpu_sync_buffers(&self, start: u32, end: u32) {
+        if self.gpu_behind.get() && self.gpu.borrow().pages.buffers_in(start, end) {
+            self.gpu_catch_up_hot(start, end);
         }
     }
 
@@ -475,15 +579,15 @@ impl Voodoo {
     /// are about to be read or written here (`gpu_sync`).
     #[inline]
     pub(crate) fn gpu_sync_bytes(&self, addr: u32, len: usize) {
-        if !self.gpu.borrow().pages.any_gpu() {
+        if !self.gpu.borrow().pages.any_gpu() && !self.gpu_behind.get() {
             return;
         }
         let start = addr & self.fbi.mask;
         let end = start as u64 + len as u64;
         if end > self.fbi.mask as u64 + 1 {
-            self.read_back(0, self.fbi.ram.bytes() as u32, true);
+            self.gpu_sync(0, self.fbi.ram.bytes() as u32);
         } else {
-            self.read_back(start, end as u32, true);
+            self.gpu_sync(start, end as u32);
         }
     }
 
@@ -496,10 +600,11 @@ impl Voodoo {
         }
     }
 
-    /// All the pages only the GPU has, read back for the emulator itself:
-    /// a save state, the software picture, the renderer going. They don't
-    /// turn hot, as the program didn't ask for them.
+    /// All the memory only the GPU has, read back for the emulator itself:
+    /// a save state, the software picture, the renderer going. It doesn't
+    /// turn hot, as the program didn't ask for it.
     pub(crate) fn gpu_sync_all(&self) {
+        self.gpu_catch_up();
         if self.gpu.borrow().pages.any_gpu() {
             self.read_back(0, self.fbi.ram.bytes() as u32, false);
         }

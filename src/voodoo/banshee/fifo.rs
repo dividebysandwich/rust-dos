@@ -399,7 +399,7 @@ impl Voodoo {
                 match header >> 30 {
                     0 | 1 => {
                         if self.writes_queue() {
-                            self.catch_up();
+                            self.catch_up_workers();
                         }
                         let start = addr & self.fbi.mask;
                         self.gpu_sync_bytes(start, 4 * count as usize);
