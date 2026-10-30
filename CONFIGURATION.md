@@ -701,6 +701,19 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   imports as this one. Put it in the game's
   [profile](#game-profiles) to have it for that game only. A change takes
   effect at the DOS prompt.
+* `sb_game_fix` corrects the Sound Blaster driver of a game that sounds
+  bad on every card, real ones included, so it plays as it was meant to:
+  `on` (the default) or `off`, which plays it as a real card does. This
+  goes beyond the real hardware. rust-dos recognises the driver by its
+  code when the game resets the DSP, and patches that code in memory;
+  nothing changes for other programs. Prehistorik 2 (Titus, 1993) is the
+  game it knows. Its driver scales its unsigned samples by the notes'
+  volumes without taking off their centre first, and starts each block
+  of the mix at 0, so every note that starts or stops moves the centre
+  line, which clicks, and the output sits far below the middle. The fix
+  scales the samples around their centre and starts the mix at the
+  middle. The log has an `[SB] ... patched` line when it applies. The
+  patch is part of the game's memory, so a save state keeps it.
 * `hard_disk_noise` and `floppy_disk_noise` add the drives' noises; see
   [Disk speed and noises](#disk-speed-and-noises).
 

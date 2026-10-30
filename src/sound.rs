@@ -69,6 +69,7 @@ pub fn apply_config(cpu: &mut Cpu, sound: &SoundConfig, old: Option<&SoundConfig
     if changed(&|s| s.pit2_gate_at_start.to_string()) {
         cpu.bus.set_pit2_gate_at_start(sound.pit2_gate_at_start);
     }
+    cpu.bus.sb_game_fix = sound.sb_game_fix;
 
     let midi = |s: &SoundConfig| {
         format!(

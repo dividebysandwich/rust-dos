@@ -201,7 +201,7 @@ impl Page {
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 Sc55Roms, Sc55Model, Sc55Download, SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound,
-                Pit2GateAtStart, HardDiskNoise, FloppyDiskNoise,
+                Pit2GateAtStart, SbGameFix, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),

@@ -222,6 +222,14 @@ pit2_gate_at_start=maybe
 }
 
 #[test]
+fn sb_game_fixes_are_on_unless_turned_off() {
+    assert!(parse("[sound]\n", Path::new("/cfg"), None).sound.sb_game_fix);
+    let config = parse("[sound]\nsb_game_fix=off\n", Path::new("/cfg"), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    assert!(!config.sound.sb_game_fix);
+}
+
+#[test]
 fn a_dac_on_the_parallel_port() {
     let config = parse("[sound]\nlpt_dac=Disney\n", Path::new("/cfg"), None);
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
@@ -642,6 +650,7 @@ fn changed_settings() -> Settings {
         lpt_dac: LptDacType::Disney,
         tandy: crate::sn76489::TandySound::On,
         pit2_gate_at_start: true,
+        sb_game_fix: false,
     };
     Settings {
         scale: 3,

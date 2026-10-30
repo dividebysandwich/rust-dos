@@ -264,6 +264,8 @@ pub(super) enum Item {
     TandySound,
     /// PIT channel 2's gate at startup (`pit2_gate_at_start`).
     Pit2GateAtStart,
+    /// The fixes for games' broken Sound Blaster drivers (`sb_game_fix`).
+    SbGameFix,
     /// The configuration file's `[autoexec]` commands (autoexec.rs).
     Autoexec,
     /// The IPX driver, its IRQ and its frame type.
@@ -451,6 +453,7 @@ impl Item {
             LptDac => "Parallel port DAC",
             TandySound => "Tandy/PCjr sound",
             Pit2GateAtStart => "Timer 2 gate at startup",
+            SbGameFix => "Sound Blaster game fixes",
             Autoexec => "Edit the [autoexec] commands...",
             Ipx => "IPX driver",
             IpxIrq => "  IRQ",
@@ -971,6 +974,7 @@ impl Item {
             LptDac => s.sound.lpt_dac.describe().to_string(),
             TandySound => s.sound.tandy.describe().to_string(),
             Pit2GateAtStart => on_off(s.sound.pit2_gate_at_start),
+            SbGameFix => on_off(s.sound.sb_game_fix),
             Autoexec | Rooms | Phonebook => String::new(),
             Ipx => match s.network.ipx {
                 crate::net::IpxMode::Auto => "auto (with LAN HOST or JOIN)",

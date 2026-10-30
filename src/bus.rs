@@ -321,6 +321,9 @@ pub struct Bus {
     pub opl: crate::opl::Opl,
     /// The Sound Blaster, if one is installed.
     pub sb: Option<crate::sb::SoundBlaster>,
+    /// The `sb_game_fix` setting: patch the broken Sound Blaster drivers
+    /// `sb_game_fix` knows when a program resets the DSP.
+    pub sb_game_fix: bool,
     /// The ISA Plug and Play cards: the Sound Blaster when it is a
     /// ViBRA16C (`sbtype=sb16vibra`), None for the others.
     pub isapnp: Option<crate::isapnp::IsaPnp>,
@@ -1869,6 +1872,9 @@ impl Bus {
             0x1 | 0x9 => self.opl_data(0, value),
             0x3 if fm_ports => self.opl_data(1, value),
             _ => {
+                if offset == 0x6 && self.sb_game_fix {
+                    self.apply_sb_game_fix();
+                }
                 self.audio_catch_up();
                 // The DSP's time up to the command, so what it starts counts
                 // from now.

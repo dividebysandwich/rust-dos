@@ -114,6 +114,22 @@ impl Bus {
     /// mixer (80h and 81h) moved it to, with a line it has none of left
     /// out. None without a card, or while a ViBRA16C's audio device is
     /// inactive.
+    /// Patch a known broken Sound Blaster driver in conventional memory
+    /// (`sb_game_fix`), as a program resets the DSP.
+    pub(super) fn apply_sb_game_fix(&mut self) {
+        let end = self.ram.len().min(0xA0000);
+        let Some((driver, base)) = crate::sb_game_fix::find(&self.ram[..end]) else {
+            return;
+        };
+        for (addr, byte) in crate::sb_game_fix::writes(driver, base) {
+            self.write_8(addr, byte);
+        }
+        self.log_string(&format!(
+            "[SB] {}'s Sound Blaster driver at {:05X}: patched to mix around the centre line (sb_game_fix)",
+            driver.game, base
+        ));
+    }
+
     pub fn sb_blaster(&self) -> Option<String> {
         let sb = self.sb.as_ref()?;
         let config = sb.config;

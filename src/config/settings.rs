@@ -507,6 +507,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
         (Sound, "pit2_gate_at_start", yes_no(sound.pit2_gate_at_start)),
+        (Sound, "sb_game_fix", Some(if sound.sb_game_fix { "on" } else { "off" }.to_string())),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];

@@ -160,6 +160,14 @@ speaker silent, for games that read it without setting it up. Bao Xiao
 San Guo Zhi needs it for its random numbers: with it **off**, every roll
 comes out the same. Real PCs start with it **off**.
 
+# Sound Blaster game fixes {#sb-game-fix}
+
+**on** corrects the Sound Blaster drivers of games that sound bad on
+every card, real ones too, when rust-dos recognises the driver's code:
+Prehistorik 2, whose music and effects click at every note and sit far
+below the centre line. Other games don't change. **off** plays them as a
+real card does.
+
 # Hard disk noise {#hard-disk-noise}
 
 Plays the sounds of a hard disk: **seek-only** the heads moving on each
