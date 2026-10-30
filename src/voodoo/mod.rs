@@ -581,6 +581,9 @@ pub struct Voodoo {
     footprint: RefCell<Footprint>,
     /// Frame buffer writes behind queued jobs, not yet a job themselves.
     words: RefCell<Vec<Word>>,
+    /// Some of `words` came while jobs were held back: they aren't in the
+    /// footprint, and the backlog hasn't seen them (`spare`).
+    words_unseen: Cell<bool>,
     /// While the OpenGL renderer draws the picture: the jobs held back
     /// until something reads the memory (`backlog`), whether they may be
     /// (`RUST_DOS_VOODOO_PRUNE=0` says no), whether a program read the
@@ -692,6 +695,7 @@ impl Voodoo {
             tmu_in_use: Cell::new(0),
             footprint: RefCell::new(Footprint::default()),
             words: RefCell::new(Vec::new()),
+            words_unseen: Cell::new(false),
             backlog: RefCell::new(Backlog::default()),
             prune: std::env::var("RUST_DOS_VOODOO_PRUNE").map_or(true, |v| v != "0"),
             counters_read: Cell::new(false),
@@ -1106,6 +1110,7 @@ impl Voodoo {
     /// (`queue_words`): handed over, they go into it.
     fn submit_words(&self) {
         let words = std::mem::take(&mut *self.words.borrow_mut());
+        self.words_unseen.set(false);
         if words.is_empty() {
             return;
         }
@@ -1129,9 +1134,13 @@ impl Voodoo {
         if !self.writes_queue() {
             return true;
         }
-        // Writes waiting may land in that range: the backlog has to see
-        // them, as the write comes after them.
-        self.submit_words();
+        // Writes waiting from while jobs were held back may land in that
+        // range: the backlog has to see them, as the write comes after
+        // them. The others are in the footprint already, and stay in a
+        // batch.
+        if self.words_unseen.get() {
+            self.submit_words();
+        }
         let given_out = self.footprint.borrow();
         let range = (start as u64, end as u64);
         self.backlog
@@ -1174,6 +1183,7 @@ impl Voodoo {
         if self.deferring() {
             let mut words = self.words.borrow_mut();
             words.extend_from_slice(new);
+            self.words_unseen.set(true);
             if words.len() >= WORDS_A_JOB {
                 drop(words);
                 self.submit_words();
@@ -1197,6 +1207,7 @@ impl Voodoo {
                     ram.set(w.at as usize, w.value);
                 }
             }
+            self.words_unseen.set(false);
             self.outstanding.set(false);
             self.tmu_in_use.set(0);
             self.footprint.borrow_mut().clear();
