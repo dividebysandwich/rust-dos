@@ -117,6 +117,7 @@ pub static DLLS: &[&Dll] = &[
     &super::ws2_32::DLL,
     &super::msimg32::DLL,
     &super::opengl32::DLL,
+    &super::dinput::DLL8,
 ];
 
 /// Bytes each function's stub takes.

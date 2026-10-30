@@ -129,21 +129,29 @@ struct Setup {
     format: u32,
     state_size: u32,
     properties: Vec<(u32, u32)>,
+    /// DirectInput 8 through DINPUT8's DirectInput8Create, with the
+    /// IID_IDirectInput8A at this place in the data; DINPUT's
+    /// DirectInputCreateA, version 500h, without.
+    eight: Option<u32>,
 }
 
-/// The program: DirectInputCreateA, CreateDevice, SetDataFormat,
+/// The program: DirectInputCreateA (or DirectInput8Create), CreateDevice,
+/// SetDataFormat,
 /// SetCooperativeLevel (background, nonexclusive, without a window),
 /// the properties, Acquire, then the waits and the reads described at
 /// the top. Each call's result goes to `RESULTS` in turn. The image,
 /// and its data's address.
 fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
     let kernel32: &[&str] = &["GetModuleHandleA", "Sleep", "ExitProcess"];
-    let dinput: &[&str] = &["DirectInputCreateA"];
+    let (dll, create): (&str, &str) = match setup.eight {
+        Some(_) => ("DINPUT8.dll", "DirectInput8Create"),
+        None => ("DINPUT.dll", "DirectInputCreateA"),
+    };
     let mut b = Builder::exe(BASE);
     let lists: Vec<Imp> = kernel32.iter().map(|n| Imp::Name(n)).collect();
-    let dlists: Vec<Imp> = dinput.iter().map(|n| Imp::Name(n)).collect();
+    let dlists = [Imp::Name(create)];
     let iat = b
-        .imports(&[("KERNEL32.dll", &lists), ("DINPUT.dll", &dlists)])
+        .imports(&[("KERNEL32.dll", &lists), (dll, &dlists)])
         .concat();
     let data_rva = b.section(
         ".data",
@@ -168,7 +176,13 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
         a.call(dword_ptr(iat[0] as u64))?;
         a.push(0)?;
         a.push(at(DI) as i32)?;
-        a.push(0x500)?;
+        match setup.eight {
+            Some(iid) => {
+                a.push(at(iid) as i32)?;
+                a.push(0x800)?;
+            }
+            None => a.push(0x500)?,
+        }
         a.push(eax)?;
         a.call(dword_ptr(iat[3] as u64))?;
         result(&mut a)?;
@@ -392,6 +406,7 @@ fn the_keyboard_gives_its_keys_as_state_and_buffered_data() {
         format,
         state_size: 256,
         properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("keyboard", image);
@@ -413,6 +428,44 @@ fn the_keyboard_gives_its_keys_as_state_and_buffered_data() {
 }
 
 #[test]
+fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
+    let mut d = Data::new();
+    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
+    // IID_IDirectInput8A, {BF798030-483A-4DA2-AA99-5D64ED369700}.
+    let mut iid = 0xBF79_8030u32.to_le_bytes().to_vec();
+    iid.extend(0x483Au16.to_le_bytes());
+    iid.extend(0x4DA2u16.to_le_bytes());
+    iid.extend([0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00]);
+    let iid = d.add(&iid);
+    let keys: Vec<(Option<u32>, u32, u32)> = (0..256)
+        .map(|i| (None, i, DIDFT_OPTIONAL | DIDFT_BUTTON | i << 8))
+        .collect();
+    let format = d.format(0, 256, &keys);
+    let buffer = d.add(&words(&[20, 16, 0, 0, EVENT_ROOM]));
+    let setup = Setup {
+        guid,
+        format,
+        state_size: 256,
+        properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        eight: Some(iid),
+    };
+    let (image, data) = program(&d, &setup);
+    let mut cpu = machine("keyboard-8", image);
+    let data = started(&mut cpu, data);
+    until_ready(&mut cpu, data, 1);
+    keyboard(&mut cpu, 0x1E, false, true);
+    keyboard(&mut cpu, 0x1E, false, false);
+    keyboard(&mut cpu, 0x4B, true, true);
+    let r = read(&mut cpu, data, 8, 256);
+    assert_eq!(r.results, [0; 8], "{:x?}", r.results);
+    assert_eq!(r.state[0xCB], 0x80);
+    assert_eq!(r.state.iter().filter(|&&b| b != 0).count(), 1);
+    let got: Vec<(u32, u32)> = r.events.iter().map(|e| (e.0, e.1)).collect();
+    assert_eq!(got, [(0x1E, 0x80), (0x1E, 0), (0xCB, 0x80)]);
+    in_order(&r.events);
+}
+
+#[test]
 fn a_key_that_goes_down_and_up_between_two_reads_is_in_the_buffer() {
     let mut d = Data::new();
     let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
@@ -426,6 +479,7 @@ fn a_key_that_goes_down_and_up_between_two_reads_is_in_the_buffer() {
         format,
         state_size: 256,
         properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("keyboard-tap", image);
@@ -467,6 +521,7 @@ fn the_mouse_gives_its_motion_as_relative_axes() {
         format,
         state_size: 16,
         properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("mouse", image);
@@ -512,6 +567,7 @@ fn a_joystick_on_the_game_port_gives_its_axes_in_their_range() {
         format,
         state_size: 12,
         properties: vec![(DIPROP_BUFFERSIZE, buffer), (DIPROP_RANGE, range)],
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("joystick", image);

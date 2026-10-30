@@ -230,13 +230,42 @@ pub fn instance_guid(kind: u32) -> Guid {
 }
 
 /// DIDEVTYPE_ with its subtype: an enhanced keyboard, a traditional
-/// mouse and joystick.
-pub fn device_type(kind: u32) -> u32 {
+/// mouse and joystick. DirectInput 8 numbers the types anew
+/// (DI8DEVTYPE_): the same devices are 13h, 12h and 14h there, with the
+/// same subtypes.
+pub fn device_type(kind: u32, version: u32) -> u32 {
+    let (keyboard, mouse, joystick) = if version >= 0x800 {
+        (0x13, 0x12, 0x14)
+    } else {
+        (3, 2, 4)
+    };
     match kind {
-        KEYBOARD => 3 | 4 << 8,
-        MOUSE => 2 | 2 << 8,
-        _ => 4 | 2 << 8,
+        KEYBOARD => keyboard | 4 << 8,
+        MOUSE => mouse | 2 << 8,
+        _ => joystick | 2 << 8,
     }
+}
+
+/// Whether EnumDevices of DirectInput 8 takes a device of DI8DEVTYPE_
+/// `ty` for its `filter`: a class of devices (DI8DEVCLASS_, 0 to 4) or
+/// one type (11h to 1Ch). None for a filter that is neither.
+pub fn in_class_8(ty: u32, filter: u32) -> Option<bool> {
+    let ty = ty & 0xFF;
+    Some(match filter {
+        // DI8DEVCLASS_ALL.
+        0 => true,
+        // DI8DEVCLASS_DEVICE: devices of none of the classes below.
+        1 => matches!(ty, 0x11 | 0x19 | 0x1B | 0x1C),
+        // DI8DEVCLASS_POINTER: mice and screen pointers.
+        2 => ty == 0x12 || ty == 0x1A,
+        // DI8DEVCLASS_KEYBOARD.
+        3 => ty == 0x13,
+        // DI8DEVCLASS_GAMECTRL: joysticks, gamepads, wheels, flight
+        // controls and first-person controls.
+        4 => (0x14..=0x18).contains(&ty),
+        0x11..=0x1C => ty == filter,
+        _ => return None,
+    })
 }
 
 /// The size of DIDEVICEINSTANCEA, DirectX 5's and 3's.
@@ -244,8 +273,8 @@ pub const INSTANCE_SIZE: u32 = 580;
 pub const INSTANCE_SIZE_DX3: u32 = 560;
 
 /// The DIDEVICEINSTANCEA of a device of `kind` with `shape`, `size`
-/// bytes of it.
-pub fn instance(kind: u32, shape: (u32, u32), size: u32) -> Vec<u8> {
+/// bytes of it, as DirectInput `version` describes it.
+pub fn instance(kind: u32, shape: (u32, u32), size: u32, version: u32) -> Vec<u8> {
     let mut b = vec![0u8; size as usize];
     b[0..4].copy_from_slice(&size.to_le_bytes());
     b[4..20].copy_from_slice(&instance_guid(kind).0);
@@ -254,7 +283,7 @@ pub fn instance(kind: u32, shape: (u32, u32), size: u32) -> Vec<u8> {
         _ => GUID_JOYSTICK,
     };
     b[20..36].copy_from_slice(&product.0);
-    b[36..40].copy_from_slice(&device_type(kind).to_le_bytes());
+    b[36..40].copy_from_slice(&device_type(kind, version).to_le_bytes());
     let (name, product_name) = match kind {
         KEYBOARD => ("Keyboard".to_string(), "Keyboard".to_string()),
         MOUSE => ("Mouse".to_string(), "Mouse".to_string()),
@@ -413,5 +442,34 @@ mod tests {
         assert!(names(None, DIDFT_AXIS | DIDFT_ANYINSTANCE_3, &x));
         assert!(names(None, DIDFT_AXIS | 1 << 8, &x));
         assert!(!names(None, DIDFT_AXIS | 2 << 8, &x));
+    }
+
+    #[test]
+    fn directinput_8_numbers_the_device_types_anew() {
+        assert_eq!(device_type(KEYBOARD, 0x700), 0x403);
+        assert_eq!(device_type(MOUSE, 0x700), 0x202);
+        assert_eq!(device_type(JOYSTICK, 0x500), 0x204);
+        assert_eq!(device_type(KEYBOARD, 0x800), 0x413);
+        assert_eq!(device_type(MOUSE, 0x800), 0x212);
+        assert_eq!(device_type(JOYSTICK, 0x800), 0x214);
+    }
+
+    #[test]
+    fn directinput_8_enumerates_by_class_or_type() {
+        let (keyboard, mouse, joystick) = (0x413, 0x212, 0x214);
+        for ty in [keyboard, mouse, joystick] {
+            assert_eq!(in_class_8(ty, 0), Some(true));
+            assert_eq!(in_class_8(ty, 1), Some(false));
+        }
+        assert_eq!(in_class_8(mouse, 2), Some(true));
+        assert_eq!(in_class_8(keyboard, 2), Some(false));
+        assert_eq!(in_class_8(keyboard, 3), Some(true));
+        assert_eq!(in_class_8(joystick, 4), Some(true));
+        assert_eq!(in_class_8(mouse, 4), Some(false));
+        assert_eq!(in_class_8(keyboard, 0x13), Some(true));
+        assert_eq!(in_class_8(keyboard, 0x12), Some(false));
+        // DirectInput 7's DIDEVTYPE_ numbers are neither.
+        assert_eq!(in_class_8(keyboard, 5), None);
+        assert_eq!(in_class_8(keyboard, 0x1D), None);
     }
 }

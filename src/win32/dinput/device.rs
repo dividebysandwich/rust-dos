@@ -23,8 +23,8 @@ use super::poll;
 use super::{
     DEVICE, DI_NOEFFECT, DI_OK, DIERR_ACQUIRED, DIERR_DEVICENOTREG, DIERR_INPUTLOST,
     DIERR_INVALIDPARAM, DIERR_NOTACQUIRED, DIERR_NOTBUFFERED, DIERR_NOTFOUND, DIERR_NOTINITIALIZED,
-    DIERR_OTHERAPPHASPRIO, DIERR_READONLY, DIERR_UNSUPPORTED, E_HANDLE, check_version, new_object,
-    object_of, release_object, result, state,
+    DIERR_OTHERAPPHASPRIO, DIERR_READONLY, DIERR_UNSUPPORTED, E_HANDLE, check_version, is_eight,
+    new_object, object_of, release_object, result, state, version_of,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::{self, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid};
@@ -47,9 +47,20 @@ const IID_IDIRECT_INPUT_DEVICE_7A: Guid = Guid::new(
     0x11D3,
     [0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE],
 );
+pub const IID_IDIRECT_INPUT_DEVICE_8A: Guid = Guid::new(
+    0x54D4_1080,
+    0xDC15,
+    0x4833,
+    [0xA4, 0x1B, 0x74, 0x8F, 0x73, 0xA3, 0x81, 0x79],
+);
 
-/// Whether `iid` is one of a device's interfaces.
-pub fn is_device_iid(iid: &Guid) -> bool {
+/// Whether `iid` is one of a device's interfaces: DirectInput 8's
+/// devices (`eight`) have IDirectInputDevice8A alone, DINPUT's the
+/// interfaces before it.
+pub fn is_device_iid(iid: &Guid, eight: bool) -> bool {
+    if eight {
+        return [com::IID_IUNKNOWN, IID_IDIRECT_INPUT_DEVICE_8A].contains(iid);
+    }
     [
         com::IID_IUNKNOWN,
         IID_IDIRECT_INPUT_DEVICE_A,
@@ -306,10 +317,10 @@ fn ready(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
 
 /// CoCreateInstance's device, which needs its Initialize.
 pub fn create_uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
-    if !is_device_iid(iid) {
+    if !is_device_iid(iid, false) {
         return E_NOINTERFACE;
     }
-    let Some(this) = new_object(cpu, DEVICE, 0, Some(Device::default())) else {
+    let Some(this) = new_object(cpu, DEVICE, false, 0, Some(Device::default())) else {
         return E_OUTOFMEMORY;
     };
     if !com::write_out(cpu, out, this) {
@@ -341,7 +352,7 @@ pub fn query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !com::write_out(cpu, out, 0) {
             return Err(E_POINTER);
         }
-        if !is_device_iid(&iid) {
+        if !is_device_iid(&iid, is_eight(cpu, id)) {
             return Err(E_NOINTERFACE);
         }
         if let Some(o) = state(cpu).object_mut(id) {
@@ -383,6 +394,7 @@ pub fn get_capabilities(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         {
             return Err(DIERR_INVALIDPARAM);
         }
+        let version = version_of(cpu, id);
         let d = dev(cpu, id);
         let objs = d.objects();
         let axes = objs.iter().filter(|o| o.is_axis()).count() as u32;
@@ -391,7 +403,8 @@ pub fn get_capabilities(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if d.kind >= JOYSTICK {
             flags |= DIDC_POLLEDDEVICE;
         }
-        let mut words = vec![size, flags, objects::device_type(d.kind), axes, buttons, 0];
+        let dev_type = objects::device_type(d.kind, version);
+        let mut words = vec![size, flags, dev_type, axes, buttons, 0];
         words.resize(size as usize / 4, 0);
         for (i, w) in words.iter().enumerate() {
             cpu.bus.guest_write_32(at + 4 * i as u32, *w);
@@ -508,7 +521,8 @@ pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             DIPROP_CALIBRATIONMODE if d.kind >= JOYSTICK => value(d.calibration),
             DIPROP_JOYSTICKID if d.kind >= JOYSTICK => value(d.kind - JOYSTICK),
             DIPROP_INSTANCENAME | DIPROP_PRODUCTNAME => {
-                let info = objects::instance(d.kind, d.shape, objects::INSTANCE_SIZE);
+                // The names, which are the same for every version.
+                let info = objects::instance(d.kind, d.shape, objects::INSTANCE_SIZE, 0x700);
                 let from = if prop == DIPROP_INSTANCENAME { 40 } else { 300 };
                 let name: Vec<u8> = info[from..from + 260]
                     .iter()
@@ -993,8 +1007,9 @@ pub fn get_device_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !cpu.bus.guest_probe(at, size as usize, true) {
             return Err(E_POINTER);
         }
+        let version = version_of(cpu, id);
         let d = dev(cpu, id);
-        let bytes = objects::instance(d.kind, d.shape, size);
+        let bytes = objects::instance(d.kind, d.shape, size, version);
         cpu.bus.guest_write_bytes(at, &bytes);
         Ok(DI_OK)
     })();
@@ -1019,7 +1034,7 @@ pub fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, hinst, ver, guid) = (args[0], args[1], args[2], args[3]);
     let r = (|| {
         let id = device_of(cpu, this)?;
-        check_version(hinst, ver)?;
+        check_version(hinst, ver, is_eight(cpu, id))?;
         let guid = Guid::read(cpu, guid).ok_or(E_POINTER)?;
         let kind = objects::kind_of(cpu, &guid, ver).ok_or(DIERR_DEVICENOTREG)?;
         let d = dev(cpu, id);
@@ -1090,6 +1105,20 @@ pub fn no_force_feedback(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// EnumEffectsInFile and WriteEffectToFile.
 pub fn effects_in_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     no_force_feedback(cpu, args)
+}
+
+/// IDirectInputDevice8's BuildActionMap(format, user, flags),
+/// SetActionMap(format, user, flags) and GetImageInfo(header): action
+/// maps and device images aren't there, and the methods say so with
+/// DIERR_UNSUPPORTED (E_NOTIMPL). Programs of DirectX 8 that read their
+/// devices through data formats, as those of DirectX 7 do, don't call
+/// them.
+pub fn action_map(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let r = (|| {
+        ready(cpu, args[0])?;
+        Err(DIERR_UNSUPPORTED)
+    })();
+    result(r)
 }
 
 /// Poll: the devices are read; DI_NOEFFECT for those that don't need
