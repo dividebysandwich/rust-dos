@@ -174,10 +174,9 @@ pub struct Context {
     pub target_iface: u32,
     pub depth: u32,
     pub depth_iface: u32,
-    /// On the Voodoo2, the primary surface (the card's front buffer,
-    /// with the back buffer the color buffer is when the format is
-    /// double buffered) and the interface of it that it holds.
-    pub primary: u32,
+    /// On the Voodoo2, the interface it holds of the primary surface
+    /// (the card's front buffer, with the back buffer the color buffer
+    /// is when the format is double buffered).
     pub primary_iface: u32,
     /// The size of the window's client area: the color and depth
     /// buffers', or on the Voodoo2 the part of the card's screen at
@@ -490,7 +489,6 @@ crate::state_fields!(Context {
     target_iface,
     depth,
     depth_iface,
-    primary,
     primary_iface,
     width,
     height,

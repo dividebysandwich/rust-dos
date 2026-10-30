@@ -182,10 +182,10 @@ fn choose(cpu: &mut Cpu, at: u32) -> u32 {
     } else {
         color
     };
+    if color > 0 && color != 16 && icd == Icd::Windowed {
+        return 0;
+    }
     for (i, &have) in formats(cpu).iter().enumerate() {
-        if color > 0 && color != 16 && icd == Icd::Windowed {
-            continue;
-        }
         let needs = [
             PFD_DRAW_TO_WINDOW,
             PFD_DRAW_TO_BITMAP,
@@ -409,7 +409,6 @@ fn client_size(cpu: &mut Cpu, hwnd: u32) -> (u32, u32) {
 struct Buffers {
     window: u32,
     dd: u32,
-    inner: u32,
     target: u32,
     depth: u32,
     size: (u32, u32),
@@ -425,7 +424,6 @@ pub fn fit_buffers(cpu: &mut Cpu, index: usize) -> bool {
     let Some(c) = state(cpu).contexts[index].as_ref().map(|c| Buffers {
         window: c.window,
         dd: c.dd,
-        inner: c.inner,
         target: c.target,
         depth: c.depth,
         size: (c.width, c.height),
@@ -450,21 +448,32 @@ pub fn fit_buffers(cpu: &mut Cpu, index: usize) -> bool {
         return false;
     };
     ddraw::add_ref(cpu, target_iface);
-    if let Some(i) = inner_device::get(cpu, c.inner) {
-        i.target = target;
-        i.target_iface = target_iface;
-        i.depth = depth;
+    install_buffers(cpu, index, (target, target_iface), (depth, depth_iface), size);
+    true
+}
+
+/// Give the context at `index` and its inner device the color buffer
+/// `target` and the depth buffer `depth` (ids and held interfaces, the
+/// color buffer's held twice, for the context and the device), the
+/// window's client area being `size`, and clear them.
+fn install_buffers(
+    cpu: &mut Cpu,
+    index: usize,
+    target: (u32, u32),
+    depth: (u32, u32),
+    size: (u32, u32),
+) {
+    let inner = state(cpu).contexts[index].as_ref().map_or(0, |c| c.inner);
+    if let Some(i) = inner_device::get(cpu, inner) {
+        (i.target, i.target_iface) = target;
+        i.depth = depth.0;
     }
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
-        c.target = target;
-        c.target_iface = target_iface;
-        c.depth = depth;
-        c.depth_iface = depth_iface;
-        c.width = size.0;
-        c.height = size.1;
+        (c.target, c.target_iface) = target;
+        (c.depth, c.depth_iface) = depth;
+        (c.width, c.height) = size;
     }
     super::draw::clear_buffers(cpu, index, true, true);
-    true
 }
 
 /// Whether the context at `index` draws full screen on the Voodoo2:
@@ -478,13 +487,13 @@ fn full_screen(cpu: &mut Cpu, index: usize) -> bool {
 /// the smallest of its modes that holds the window's client area and a
 /// depth buffer, with its front buffer, back buffer and depth buffer
 /// as surfaces, unless it is open in one already. False if no mode
-/// holds the window, or the card can't be opened.
+/// holds the window, or the card can't be opened: the card then gives
+/// the VGA its picture back.
 fn fit_card(cpu: &mut Cpu, index: usize) -> bool {
     let Some(c) = state(cpu).contexts[index].as_ref() else {
         return false;
     };
-    let (window, dd, dd_iface, inner) = (c.window, c.dd, c.dd_iface, c.inner);
-    let (target, depth, format) = (c.target, c.depth, c.format);
+    let (window, dd_iface, target, depth) = (c.window, c.dd_iface, c.target, c.depth);
     let size = client_size(cpu, window);
     let lost = |cpu: &mut Cpu, id: u32| voodoo::card_buffer(cpu, id).is_none();
     let (mode_w, mode_h, _, _) = voodoo::current(cpu);
@@ -496,16 +505,30 @@ fn fit_card(cpu: &mut Cpu, index: usize) -> bool {
         return true;
     }
     drop_buffers(cpu, index);
-    let Some((w, h)) = voodoo::depth_modes(cpu)
+    if open_card(cpu, index, size).is_some() {
+        return true;
+    }
+    // Out of exclusive mode, which closes the card if it is open.
+    directdraw::set_cooperative_level(cpu, &[dd_iface, 0, DDSCL_NORMAL]);
+    false
+}
+
+/// Open the card for the context at `index`, whose window's client
+/// area is `size`, and give the context its buffers: None if no mode
+/// holds the window, or the card can't be opened.
+fn open_card(cpu: &mut Cpu, index: usize, size: (u32, u32)) -> Option<()> {
+    let c = state(cpu).contexts[index].as_ref()?;
+    let (window, dd, dd_iface, format) = (c.window, c.dd, c.dd_iface, c.format);
+    let (w, h) = voodoo::depth_modes(cpu)
         .into_iter()
-        .find(|&(w, h)| size.0 <= w && size.1 <= h)
-    else {
-        return false;
-    };
+        .find(|&(w, h)| size.0 <= w && size.1 <= h)?;
     let level = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
-    directdraw::set_cooperative_level(cpu, &[dd_iface, window, level]);
-    if voodoo::set_mode(cpu, dd, w, h, 16, 0) != super::super::ddraw::DD_OK {
-        return false;
+    let ok = Some(super::super::ddraw::DD_OK);
+    if directdraw::set_cooperative_level(cpu, &[dd_iface, window, level]) != ok {
+        return None;
+    }
+    if Some(voodoo::set_mode(cpu, dd, w, h, 16, 0)) != ok {
+        return None;
     }
     // The primary surface, with a back buffer when the format is
     // double buffered.
@@ -524,38 +547,29 @@ fn fit_card(cpu: &mut Cpu, index: usize) -> bool {
         caps: [caps, 0, 0, 0],
         ..Desc::default()
     };
-    let Ok(ids) = dd_surface::make(cpu, dd, 7, level, &desc) else {
-        return false;
-    };
+    let ids = dd_surface::make(cpu, dd, 7, level, &desc).ok()?;
     let primary_iface = ddraw::iface(cpu, ids[0], V_SURFACE7);
-    ddraw::add_ref(cpu, primary_iface);
     let target = ids[ids.len() - 1];
     let target_iface = ddraw::iface(cpu, target, V_SURFACE7);
+    if primary_iface == 0 || target_iface == 0 {
+        ddraw::destroy(cpu, ids[0]);
+        return None;
+    }
+    ddraw::add_ref(cpu, primary_iface);
     // One for the context, one for the device.
     ddraw::add_ref(cpu, target_iface);
     ddraw::add_ref(cpu, target_iface);
-    let Some((depth, depth_iface)) = make_buffer(cpu, dd, (w, h), true) else {
+    let Some(depth) = make_buffer(cpu, dd, (w, h), true) else {
         ddraw::release(cpu, target_iface);
         ddraw::release(cpu, target_iface);
         ddraw::release(cpu, primary_iface);
-        return false;
+        return None;
     };
-    if let Some(i) = inner_device::get(cpu, inner) {
-        i.target = target;
-        i.target_iface = target_iface;
-        i.depth = depth;
-    }
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
-        c.primary = ids[0];
         c.primary_iface = primary_iface;
-        c.target = target;
-        c.target_iface = target_iface;
-        c.depth = depth;
-        c.depth_iface = depth_iface;
-        (c.width, c.height) = size;
     }
-    super::draw::clear_buffers(cpu, index, true, true);
-    true
+    install_buffers(cpu, index, (target, target_iface), depth, size);
+    Some(())
 }
 
 /// Let go of the context's color and depth buffers.
@@ -568,7 +582,6 @@ fn drop_buffers(cpu: &mut Cpu, index: usize) {
     let primary_iface = std::mem::take(&mut c.primary_iface);
     c.target = 0;
     c.depth = 0;
-    c.primary = 0;
     let inner = c.inner;
     let held = inner_device::get(cpu, inner).map(|i| {
         i.target = 0;
@@ -832,7 +845,8 @@ pub fn present(cpu: &mut Cpu, index: usize) {
     else {
         return;
     };
-    if full_screen(cpu, index) {
+    let card = full_screen(cpu, index);
+    if card {
         swap_card(cpu, index);
     } else if target != 0 {
         shadow::expose(cpu, target);
@@ -846,8 +860,12 @@ pub fn present(cpu: &mut Cpu, index: usize) {
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
         c.drawn = false;
     }
-    // A window whose size changed has buffers of its new size next.
-    fit_buffers(cpu, index);
+    // A window whose size changed has buffers of its new size next. The
+    // Voodoo2's card opens only for a context made current.
+    let h = hglrc(index);
+    if !card || state(cpu).current.iter().any(|c| c.1 == h) {
+        fit_buffers(cpu, index);
+    }
 }
 
 /// The full-screen context at `index` on the Voodoo2: the card swaps
@@ -858,7 +876,15 @@ fn swap_card(cpu: &mut Cpu, index: usize) {
         return;
     };
     let (primary_iface, interval, format) = (c.primary_iface, c.swap_interval, c.format);
-    if primary_iface == 0 || !double_buffered(format) {
+    if primary_iface == 0 {
+        return;
+    }
+    if !double_buffered(format) {
+        // Nothing swaps, but it is a frame, as a window's is, for
+        // `cycles=auto`.
+        if let Some(v) = cpu.bus.voodoo.as_mut() {
+            v.swapped += 1;
+        }
         return;
     }
     let flags = DDFLIP_WAIT | if interval == 0 { DDFLIP_NOVSYNC } else { 0 };
