@@ -938,7 +938,7 @@ impl Voodoo {
         if in_ring {
             // The renderer gets the page again: a read back of a GPU 2D
             // operation there would otherwise undo the packet.
-            if self.mirror.is_some() {
+            if self.recording() {
                 let at = addr & fbmask;
                 self.gpu.get_mut().pages.mark(at, at + 4);
             }

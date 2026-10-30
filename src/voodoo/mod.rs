@@ -298,6 +298,10 @@ pub struct VoodooSettings {
     /// Whether OpenGL dithers to 5-6-5 as the card does where a game
     /// turns dithering on (`voodoo_dither`), or keeps 8 bits a colour.
     pub dither: bool,
+    /// Whether reads of the buffers get OpenGL's pictures of them
+    /// (`voodoo_readback=gpu`), or what the software renderer draws from
+    /// the same commands (`exact`).
+    pub gpu_reads: bool,
 }
 
 impl Default for VoodooSettings {
@@ -314,6 +318,7 @@ impl Default for VoodooSettings {
             fps_cap: None,
             gamma: None,
             dither: true,
+            gpu_reads: true,
         }
     }
 }
@@ -592,7 +597,23 @@ pub struct Voodoo {
     /// which it doesn't while the OpenGL renderer draws it.
     software_picture: bool,
     /// The drawing recorded for the OpenGL renderer, while it draws.
-    mirror: Option<Box<mirror::Mirror>>,
+    mirror: RefCell<Option<Box<mirror::Mirror>>>,
+    /// With `voodoo_readback=gpu`: whether the renderer's pictures of the
+    /// buffers are what reads of them get (`gpu_reads`), whether the
+    /// memory is behind them (jobs since were left to the renderer
+    /// alone), whether the program used alpha planes, which the renderer
+    /// keeps where they can't be read back, and the read backs and the
+    /// jobs left to the renderer, for the debugger.
+    gpu_reads: bool,
+    gpu_behind: Cell<bool>,
+    /// The buffers behind the renderer (`gpu_behind`), by their key in
+    /// the recording (a colour buffer's word offset, None for the
+    /// auxiliary buffer), and rows of each that are, apart from one
+    /// another.
+    gpu_stale: RefCell<Vec<gpu::Stale>>,
+    gpu_alpha: Cell<bool>,
+    gpu_read_backs: Cell<u64>,
+    gpu_only: Cell<u64>,
     /// The renderer's copy of a Banshee's memory: which pages it lacks
     /// (`banshee_scanout`) and which only it has (`gpu`).
     gpu: RefCell<gpu::Gpu>,
@@ -688,7 +709,13 @@ impl Voodoo {
             counters_read: Cell::new(false),
             catch_ups: Cell::new(0),
             software_picture: true,
-            mirror: None,
+            mirror: RefCell::new(None),
+            gpu_reads: false,
+            gpu_behind: Cell::new(false),
+            gpu_stale: RefCell::new(Vec::new()),
+            gpu_alpha: Cell::new(false),
+            gpu_read_backs: Cell::new(0),
+            gpu_only: Cell::new(0),
             gpu: RefCell::new(gpu::Gpu::new(board.frame_buffer())),
             scanout_dirty: false,
             logged: 0,
@@ -733,6 +760,7 @@ impl Voodoo {
         self.blt_queue_stale();
         self.pool.reset_stats();
         self.counters_read.set(false);
+        self.gpu_alpha.set(false);
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];
@@ -770,7 +798,7 @@ impl Voodoo {
         self.timing = CrtTiming::VESA_480;
         self.palette_dirty = true;
         self.display_dirty = true;
-        if let Some(mirror) = &mut self.mirror {
+        if let Some(mirror) = self.mirror.get_mut() {
             mirror.forget_textures();
         }
         if let Some(b) = &mut self.banshee {
@@ -944,8 +972,31 @@ impl Voodoo {
         self.drawn_to.clear();
     }
 
+    /// The same where what comes reads only `ranges` of the memory's
+    /// bytes (`catch_up_in`).
+    pub(crate) fn flush_in(&mut self, ranges: &[(u32, u32)]) {
+        for &range in ranges {
+            self.gpu_catch_up_in(Some(range));
+        }
+        self.catch_up_workers();
+        self.drawn_to.clear();
+    }
+
     /// Draw everything queued, and wait for it.
     pub(crate) fn catch_up(&self) {
+        self.catch_up_in(None);
+    }
+
+    /// The same where what comes reads only bytes `start..end` of the
+    /// memory (with None any of it): of the buffers behind the OpenGL
+    /// renderer (`gpu_behind`), only the rows there are read back.
+    pub(crate) fn catch_up_in(&self, range: Option<(u32, u32)>) {
+        self.gpu_catch_up_in(range);
+        self.catch_up_workers();
+    }
+
+    /// Draw the jobs held back and queued in software, and wait for them.
+    fn catch_up_workers(&self) {
         if !self.backlog.borrow().is_empty() {
             self.catch_ups.set(self.catch_ups.get() + 1);
         }
@@ -997,7 +1048,10 @@ impl Voodoo {
     /// draws, unless a program reads the pixel counters or the buffers'
     /// layout gives the tiles no meaning.
     fn deferring(&self) -> bool {
-        self.mirror.is_some() && self.prune && !self.counters_read.get() && self.backlog.borrow().layout.prunable
+        self.recording()
+            && self.prune
+            && !self.counters_read.get()
+            && self.backlog.borrow().layout.prunable
     }
 
     /// What a job does to the tiles, when jobs are held back.
@@ -1008,6 +1062,12 @@ impl Voodoo {
     /// Queue `job` after the frame buffer writes before it: held back
     /// with its `access`, or given to the workers.
     pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
+        if access.as_ref().is_some_and(|a| self.gpu_takes(&job, a)) {
+            self.gpu_left(&job);
+            return;
+        }
+        // Drawn here, over the memory as the renderer has it.
+        self.gpu_catch_up();
         self.submit_words();
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
@@ -1073,7 +1133,10 @@ impl Voodoo {
             self.hand_over(out);
         } else {
             let words = std::mem::take(&mut *self.words.borrow_mut());
-            self.hand_over([Job::Pixels { fb: self.fbi.ram.clone(), words }]);
+            self.hand_over([Job::Pixels {
+                fb: self.fbi.ram.clone(),
+                words,
+            }]);
         }
     }
 
@@ -1102,7 +1165,10 @@ impl Voodoo {
 
     /// Whether frame buffer writes have to wait their turn behind jobs.
     pub(crate) fn writes_queue(&self) -> bool {
-        self.outstanding.get() || !self.words.borrow().is_empty() || !self.backlog.borrow().is_empty()
+        self.outstanding.get()
+            || !self.words.borrow().is_empty()
+            || !self.backlog.borrow().is_empty()
+            || self.gpu_behind.get()
     }
 
     /// Frame buffer writes for the queue (`writes_queue`): held back with
@@ -1113,6 +1179,22 @@ impl Voodoo {
     /// would cost more than drawing the jobs held (a Voodoo2 CPU-to-screen
     /// copy is tens of thousands of writes a frame).
     pub(crate) fn queue_words(&self, new: &[Word]) {
+        // Behind the renderer, with nothing else waiting: the renderer
+        // gets them from the recording, and the memory has them at once,
+        // which a read back of the buffers writes over with the same.
+        if self.gpu_behind.get()
+            && !self.outstanding.get()
+            && self.words.borrow().is_empty()
+            && self.backlog.borrow().is_empty()
+        {
+            let ram = &self.fbi.ram;
+            for w in new {
+                if (w.at as usize) < ram.len() {
+                    ram.set(w.at as usize, w.value);
+                }
+            }
+            return;
+        }
         if self.deferring() {
             let mut words = self.words.borrow_mut();
             words.extend_from_slice(new);
@@ -1272,7 +1354,11 @@ impl Voodoo {
     pub(crate) fn update_tiles(&mut self) {
         let fbi = &self.fbi;
         let word = |offs: u32| (offs != NONE).then_some(offs as usize / 2);
-        let recorded = self.banshee.is_some().then(|| self.mirror.as_ref()?.layout()).flatten();
+        let recorded = self
+            .banshee
+            .is_some()
+            .then(|| self.mirror_layout())
+            .flatten();
         let words = fbi.ram.len();
         let layout = match recorded {
             Some(key) => {
@@ -1381,7 +1467,7 @@ impl Voodoo {
             // The OpenGL renderer may show the picture all the same (a
             // recording or a screenshot wants it from memory too): its
             // scanout needs the change as well.
-            if self.mirror.is_some() {
+            if self.recording() {
                 self.scanout_dirty |= draw;
             }
             // Jobs may still be drawing into what it shows. Those that draw
@@ -1689,7 +1775,7 @@ impl Voodoo {
         self.display_dirty = true;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().pages.mark_all();
-        if let Some(mirror) = &mut self.mirror {
+        if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();
             mirror.forget_textures();
         }
@@ -1699,13 +1785,13 @@ impl Voodoo {
 
     /// Record the drawing for the OpenGL renderer, or stop.
     pub fn set_mirror(&mut self, on: bool) {
-        if on != self.mirror.is_some() {
+        if on != self.recording() {
             // What only the renderer has comes back before it goes, and
             // the card has no link to it from then on.
             if !on {
                 self.set_gpu_link(None);
             }
-            self.mirror = on.then(|| Box::new(mirror::Mirror::new()));
+            *self.mirror.get_mut() = on.then(|| Box::new(mirror::Mirror::new()));
             self.release_backlog();
             self.update_tiles();
             // A renderer starting over has none of the picture.
@@ -1726,20 +1812,36 @@ impl Voodoo {
 
     /// Whether the display draws the card's picture from its memory.
     pub fn picture_wanted(&self) -> bool {
-        self.mirror.is_none() || self.software_picture
+        !self.recording() || self.software_picture
     }
 
     pub fn mirror_attached(&self) -> bool {
-        self.mirror.is_some()
+        self.recording()
+    }
+
+    /// Whether the card records its drawing for the OpenGL renderer.
+    pub(crate) fn recording(&self) -> bool {
+        self.mirror.borrow().is_some()
+    }
+
+    /// The buffers' layout the recording has.
+    pub(crate) fn mirror_layout(&self) -> Option<mirror::LayoutKey> {
+        self.mirror.borrow().as_ref()?.layout().copied()
     }
 
     /// Take the buffers' pixels for the recording if their layout changed
     /// since it last did, or it wants them.
     pub(crate) fn mirror_sync(&mut self) {
-        let Some(mirror) = &self.mirror else { return };
-        let old = mirror.layout().copied();
+        let Some(old) = self.mirror.get_mut().as_ref().map(|m| m.layout().copied()) else {
+            return;
+        };
         let key = self.mirror_key(old.as_ref());
-        if !mirror.needs_snapshot(&key) {
+        if !self
+            .mirror
+            .get_mut()
+            .as_ref()
+            .is_some_and(|m| m.needs_snapshot(&key))
+        {
             return;
         }
         self.flush();
@@ -1757,7 +1859,7 @@ impl Voodoo {
             self.gpu_sync(start, end);
         }
         let snapshot = self.snapshot(key.layout());
-        if let Some(mirror) = &mut self.mirror {
+        if let Some(mirror) = self.mirror.get_mut() {
             mirror.resync(snapshot, key);
         }
         // A Banshee's tiles follow the recording's buffers.
@@ -1808,7 +1910,7 @@ impl Voodoo {
     /// The drawing recorded since the last frame, and what the card shows.
     pub fn take_mirror(&mut self) -> Option<mirror::Frame> {
         self.mirror_sync();
-        let key = *self.mirror.as_ref()?.layout()?;
+        let key = self.mirror_layout()?;
         let front = match &self.banshee {
             Some(_) => self.banshee_mirror_front(&key),
             None => {
@@ -1822,7 +1924,7 @@ impl Voodoo {
         } else {
             None
         };
-        let commands = self.mirror.as_mut()?.take();
+        let commands = self.mirror.get_mut().as_mut()?.take();
         Some(mirror::Frame {
             commands,
             front,
@@ -1840,7 +1942,7 @@ impl Voodoo {
     /// pixels of its buffers there, from memory, which has what the 3D
     /// engine drew before (the writers catch up first).
     pub(crate) fn mirror_memory(&mut self, start: u32, end: u32) {
-        let Some(mirror) = &mut self.mirror else {
+        let Some(mirror) = self.mirror.get_mut() else {
             return;
         };
         // The renderer's copy of the memory gets the pages again.
@@ -1898,7 +2000,7 @@ impl Voodoo {
     /// the recording its colour in buffer `dest` (a word offset) and its
     /// auxiliary buffer's value, those written.
     pub(crate) fn mirror_pixel(&mut self, dest: usize, x: i32, y: i32, color: Option<u16>, aux: Option<u16>) {
-        let Some(mirror) = &mut self.mirror else { return };
+        let Some(mirror) = self.mirror.get_mut() else { return };
         let fbi = &self.fbi;
         // The recorded buffers' size: on a Banshee the 3D engine reaches
         // further down than they go (`banshee_buffers`).
@@ -1918,7 +2020,7 @@ impl Voodoo {
     /// The same for a write through the pixel pipeline, whose results are
     /// in memory: the colour, and with `aux` the auxiliary buffer's value.
     pub(crate) fn mirror_written(&mut self, dest: usize, x: i32, y: i32, aux: bool) {
-        if self.mirror.is_none() || x < 0 || y < 0 {
+        if !self.recording() || x < 0 || y < 0 {
             return;
         }
         let fbi = &self.fbi;
@@ -1955,10 +2057,13 @@ impl Voodoo {
             "triangles": self.reg[FBI_TRIANGLES_OUT],
             "fbiInit": init,
             "init_enable": format!("{:08X}", self.pci.init_enable),
-            "opengl": self.mirror.is_some(),
+            "opengl": self.recording(),
             "held_jobs": self.backlog.borrow().len(),
             "pruned_jobs": self.backlog.borrow().pruned,
             "catch_ups": self.catch_ups.get(),
+            "gpu_reads": self.gpu_reads,
+            "gpu_read_backs": self.gpu_read_backs.get(),
+            "gpu_only_jobs": self.gpu_only.get(),
             "released_jobs": self.backlog.borrow().released,
             "counters_read": self.counters_read.get(),
             "software_picture": self.picture_wanted(),

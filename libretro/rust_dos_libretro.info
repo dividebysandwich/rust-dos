@@ -29,6 +29,7 @@ hw_render = "false"
 needs_fullpath = "true"
 disk_control = "true"
 is_experimental = "true"
+needs_kbd_mouse_focus = "true"
 
 firmware_count = 0
 notes = "Settings, SoundFonts and MT-32 ROMs go in system/rust-dos/rust-dos.conf. Ctrl+F12 opens the settings window (L3+R3 on a gamepad). Turn on Game Focus (Scroll Lock) for the whole keyboard."
