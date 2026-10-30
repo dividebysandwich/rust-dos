@@ -503,6 +503,22 @@ impl Win32 {
 /// interrupt time on Windows 95) or one whose wait timed out runs at
 /// once (`thread::preempt`).
 pub fn timer(cpu: &mut Cpu) {
+    // A wait that ended before its time out (its object was signaled)
+    // leaves its event behind: with nothing else due it does nothing, as
+    // in a machine loaded from a state, which has no such event.
+    let now = cpu.bus.clock.now_micros();
+    let ticks = cpu.bus.clock.now_ticks();
+    let w = &cpu.bus.win32;
+    let others = w.winmm.due.is_some_and(|d| d <= now)
+        || [w.dsound.due, w.winmm.wave.due]
+            .into_iter()
+            .flatten()
+            .any(|t| t <= ticks);
+    if !others && thread::wait_due(w, 0).is_none_or(|d| d > now) {
+        cpu.bus.win32.wait_due = thread::wait_due(&cpu.bus.win32, now);
+        cpu.bus.reschedule_timers();
+        return;
+    }
     cpu.bus.win32.winmm.due = None;
     cpu.bus.win32.wait_due = None;
     if !cpu.bus.win32.active() {
@@ -522,7 +538,10 @@ pub fn timer(cpu: &mut Cpu) {
         winmm::tick(cpu);
         dsound::tick(cpu);
     }
-    thread::schedule_waits(cpu);
+    // The first timed wait's end; winmm::schedule reschedules the bus's
+    // timer events for it and WinMM's own.
+    let now = cpu.bus.clock.now_micros();
+    cpu.bus.win32.wait_due = thread::wait_due(&cpu.bus.win32, now);
     winmm::schedule(cpu);
 }
 

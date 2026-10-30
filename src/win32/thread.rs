@@ -439,7 +439,7 @@ pub fn block(cpu: &mut Cpu, wait: Wait) {
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.wait = Some(wait);
     }
-    schedule_waits(cpu);
+    schedule_waits(&mut cpu.bus);
     reschedule(cpu);
 }
 
@@ -459,10 +459,9 @@ pub(crate) fn wait_due(win32: &Win32, now: u64) -> Option<u64> {
 
 /// Make the end of the first timed wait a timer event
 /// (`Win32::next_event`).
-pub fn schedule_waits(cpu: &mut Cpu) {
-    let now = cpu.bus.clock.now_micros();
-    cpu.bus.win32.wait_due = wait_due(&cpu.bus.win32, now);
-    cpu.bus.reschedule_timers();
+pub(crate) fn schedule_waits(bus: &mut Bus) {
+    bus.win32.wait_due = wait_due(&bus.win32, bus.clock.now_micros());
+    bus.reschedule_timers();
 }
 
 /// End the wait of the thread `at`, which returns `result`.
