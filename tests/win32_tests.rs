@@ -3376,6 +3376,61 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
+/// A visible window made smaller, with its client area then validated,
+/// has nothing left to paint: no WM_PAINT waits for it, as for Omikron's
+/// 641x481 window made 640x480.
+#[test]
+fn a_window_that_shrinks_leaves_no_update_region_outside_it() {
+    const WS_POPUP_VISIBLE: u32 = 0x9000_0000;
+    const WM_PAINT: i32 = 0x000F;
+    const SWP_NOMOVE_NOZORDER: i32 = 0x0006;
+    let names: &[&str] = &[
+        "CreateWindowExA",
+        "SetWindowPos",
+        "ValidateRect",
+        "PeekMessageA",
+    ];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
+    let mut d = Data::default();
+    let class = d.text("STATIC");
+    let msg = d.add(&[0; 28]);
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        for value in [0, 0, 0, 0, 100, 100, 0, 0] {
+            a.push(value)?;
+        }
+        a.push(WS_POPUP_VISIBLE as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(ebx, eax)?;
+        a.push(SWP_NOMOVE_NOZORDER)?;
+        a.push(50)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(ebx)?;
+        a.call(f("SetWindowPos"))?;
+        a.push(0)?;
+        a.push(ebx)?;
+        a.call(f("ValidateRect"))?;
+        a.push(0)?;
+        a.push(WM_PAINT)?;
+        a.push(WM_PAINT)?;
+        a.push(ebx)?;
+        a.push(l.at(msg) as i32)?;
+        a.call(f("PeekMessageA"))?;
+        a.push(eax)?;
+        a.call(l.import(names.len()))?;
+        Ok(())
+    });
+    let (code, _) = run("shrunk_window_paint", exe);
+    assert_eq!(code, 0);
+}
+
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
 /// whose name starts with "=", set and read back; a name with "=" further
 /// on is refused with ERROR_INVALID_PARAMETER. A bit each in the exit
