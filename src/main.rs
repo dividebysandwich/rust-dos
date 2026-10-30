@@ -61,6 +61,21 @@ use crate::startup::leave_explorer_console;
 #[cfg(test)]
 use crate::startup::open_log_file;
 
+// On a laptop with two graphics chips, NVIDIA's (Optimus) and AMD's
+// (PowerXpress) drivers put a program on the discrete one when its .exe
+// exports these as 1; otherwise OpenGL runs on the integrated chip. The
+// exports are made by the linker (build.rs passes /EXPORT for them).
+#[cfg(all(windows, target_env = "msvc"))]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static NvOptimusEnablement: u32 = 1;
+#[cfg(all(windows, target_env = "msvc"))]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 fn main() -> Result<(), String> {
     let mut args = Args::parse();
     match args.command.take() {
@@ -220,6 +235,7 @@ fn main() -> Result<(), String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = start_debug_hub(&mut cpu, &args, &det, &settings)?;
+    dbg.display = display.renderer().to_string();
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.
     let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
