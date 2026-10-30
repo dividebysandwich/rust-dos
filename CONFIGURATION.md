@@ -149,7 +149,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   has. `auto 10000` makes that real-mode speed, and the least `auto`
   goes down to, 10000. `max` runs everything as fast as the host keeps
   up with in real time. Use a number such as `3000` for a fixed speed.
-  `--cycles` overrides it.
+  `--cycles` overrides it. Loading a [save state](README.md#save-states)
+  keeps the speed the machine runs at (this setting, `--cycles`, or the
+  last one the window, the speed keys or `/api/speed` set): a fixed
+  speed and `max` go on at the rate they had, and `auto` starts its
+  search from the rate the state was saved at. Only `--deterministic`
+  runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
@@ -2113,10 +2118,14 @@ states](README.md#save-states) and rewind keep the disks in step with the
 system's memory: in a run, the disks go back with a state through a journal
 of what the system wrote over (the last 256 MB of it), and a state file has
 a copy of each disk beside it (`slot1.C.img` for `slot1.state`, or
-`slot1.2.img` for the disk mounted as 2, which takes
-no room where the filesystem shares data between files) that loading it puts
-back. The browser's slots can't hold disks and refuse a booted system's
-state.
+`slot1.2.img` for the disk mounted as 2, which takes no room where the
+filesystem shares data between files) that loading it puts back. The copy
+goes into the image the loading machine has in that drive, not the one
+the state was saved with, so a configuration that mounts a scratch copy
+of the image as C: can load states of the system without touching the
+original. The image must be the size of the copy, and a machine with no
+image in the drive (a folder as C:, or nothing) refuses the load. The
+browser's slots can't hold disks and refuse a booted system's state.
 
 ### Windows 95
 

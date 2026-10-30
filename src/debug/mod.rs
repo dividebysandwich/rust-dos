@@ -168,7 +168,11 @@ impl Shared {
     /// Add a line to the log, numbered, with the journal position and the
     /// request being carried out.
     pub fn log_line(&self, line: &str) {
-        let t_ms = self.start_time.elapsed().as_millis() as u64;
+        self.log_line_at(self.start_time.elapsed().as_millis() as u64, line);
+    }
+
+    /// `log_line` of a line logged `t_ms` ms after the start.
+    pub fn log_line_at(&self, t_ms: u64, line: &str) {
         let at = *self.journal_seq.borrow();
         let (cause, request_id) = self.current.lock().ok().and_then(|c| c.clone()).map_or((None, None), |(r, t)| (Some(r), t));
         let entry = {
@@ -860,6 +864,13 @@ impl DebugHub {
         deterministic: Option<chrono::NaiveDateTime>,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared::new(cpu.bus.start_time));
+        // The lines logged before the server started (the renderer, the
+        // configuration's warnings), first and at the times they came. They
+        // go in before the server takes requests, so that no client sees
+        // the log without them.
+        for (t_ms, line) in cpu.bus.take_log_backlog() {
+            shared.log_line_at(t_ms, &line);
+        }
         let (tx, rx) = mpsc::channel();
         // With port 0 in `addr`, this is the free port the system picked.
         let addr = server::spawn(addr, tx, shared.clone())?;

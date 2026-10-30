@@ -55,6 +55,8 @@ pub fn load(cpu: &mut Cpu, data: &[u8]) -> Result<()> {
         // the machine's from before: a load that failed ahead of the DOS
         // section didn't take them.
         cpu.bus.disk.folders_from_state.clear();
+        // Nor are the copies of disks beside its file (`disks::offer_copies`).
+        cpu.bus.disk.copies_from = None;
         load_sections(cpu, &before).expect("the state the machine was in loads back");
     }
     if loaded.is_ok() {
