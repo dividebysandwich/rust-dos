@@ -168,7 +168,11 @@ impl Shared {
     /// Add a line to the log, numbered, with the journal position and the
     /// request being carried out.
     pub fn log_line(&self, line: &str) {
-        let t_ms = self.start_time.elapsed().as_millis() as u64;
+        self.log_line_at(self.start_time.elapsed().as_millis() as u64, line);
+    }
+
+    /// `log_line` of a line logged `t_ms` ms after the start.
+    pub fn log_line_at(&self, t_ms: u64, line: &str) {
         let at = *self.journal_seq.borrow();
         let (cause, request_id) = self.current.lock().ok().and_then(|c| c.clone()).map_or((None, None), |(r, t)| (Some(r), t));
         let entry = {
@@ -870,6 +874,11 @@ impl DebugHub {
             );
         }
 
+        // The lines logged before the server started (the renderer, the
+        // configuration's warnings), first and at the times they came.
+        for (t_ms, line) in cpu.bus.take_log_backlog() {
+            shared.log_line_at(t_ms, &line);
+        }
         let log_shared = shared.clone();
         cpu.bus.log_hook = Some(Box::new(move |line: &str| log_shared.log_line(line)));
         let audio_tx = shared.audio.clone();
