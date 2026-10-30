@@ -245,16 +245,17 @@ impl Voodoo {
                         // every texel a Direct3D game draws with its
                         // colour key on.
                         self.reg[CHROMA_RANGE] = 0;
-                        // It also shows buffer 0 and draws into buffer 1
-                        // (86Box does the same). Glide counts on that:
-                        // grSstWinOpen takes buffer 0 for the front and
-                        // aims its blits at the buffer after it, and its
-                        // open and shutdown pulse this reset, but only a
-                        // swap left pending makes it read the displayed
-                        // buffer and swap to 0 (sst1InitClearSwapPending).
-                        // Kept, the buffers of a program that quit on an
-                        // odd frame stay the other way round, and the next
-                        // one blits into the buffer on the screen.
+                        // Show buffer 0 and draw into buffer 1, as 86Box
+                        // does (MAME doesn't; no datasheet says either
+                        // way). Glide counts on it: grSstWinOpen takes
+                        // buffer 0 for the front and aims its blits at the
+                        // buffer after it, and its open and shutdown pulse
+                        // this reset, but only a swap left pending makes
+                        // it read the displayed buffer and swap to 0
+                        // (sst1InitClearSwapPending). Kept, the buffers of
+                        // a program that quit on an odd frame stay the
+                        // other way round, and the next one blits into the
+                        // buffer on the screen.
                         self.fbi.frontbuf = 0;
                         self.fbi.backbuf = 1;
                         self.display_dirty = true;
