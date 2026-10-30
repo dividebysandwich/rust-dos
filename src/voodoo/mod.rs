@@ -627,6 +627,10 @@ pub struct Voodoo {
     pub(crate) svert: [tsu::Vertex; 3],
     pub(crate) sverts: u32,
     pub(crate) blt: blit::Blit,
+    /// `blt_queue_dest`'s answer for the copy under way, and what it was
+    /// worked out from (`blt_queue_key`): a copy sends its data a word at
+    /// a time, tens of thousands a frame.
+    blt_queue: Cell<Option<([u32; 16], Option<usize>)>>,
     /// The Banshee's or Voodoo3's own state when the card is one: the
     /// display adapter around the 3D engine, whose memory it shares.
     pub banshee: Option<Box<banshee::Banshee>>,
@@ -703,6 +707,7 @@ impl Voodoo {
             svert: Default::default(),
             sverts: 0,
             blt: Default::default(),
+            blt_queue: Cell::new(None),
             banshee: board.banshee().map(|kind| Box::new(banshee::Banshee::new(kind))),
         };
         v.tmu = (0..units)

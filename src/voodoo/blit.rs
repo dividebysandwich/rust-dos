@@ -412,7 +412,7 @@ impl Voodoo {
         // for what came before it), unless the copy goes into the queue
         // behind the held jobs. Mostly nothing is queued, and the words
         // skip the wait: Moto Racer sends 40,000 a frame for its sky.
-        let queue = self.blt_queue_dest();
+        let queue = self.blt_queue_cached();
         if queue.is_none() && self.writes_queue() {
             self.flush();
         }
@@ -437,6 +437,7 @@ impl Voodoo {
         let lanes = (command >> 6) & 3;
         let mut bits = 32;
         let mut words = [Word { row: 0, at: 0, value: 0 }; 32];
+        let mut columns = [0u32; 32];
         let mut queued = 0;
         while bits > 0 && self.blt.column <= size_x && self.blt.active {
             let x = self.blt.x + self.blt.column;
@@ -495,8 +496,8 @@ impl Voodoo {
                     if rop != 0xA {
                         let at = addr >> 1;
                         let value = mix(rop, p, 0);
-                        self.blt_mirror(at as usize, value);
                         words[queued] = Word { row: y as u16, at, value };
+                        columns[queued] = x as u32;
                         queued += 1;
                     }
                 } else {
@@ -526,6 +527,17 @@ impl Voodoo {
             && queued > 0
         {
             let words = &words[..queued];
+            // The copy's rows are the buffer's (`blt_queue_dest`), so the
+            // recording gets the pixels where they are, without working
+            // out which buffer each is in.
+            let width = self.fbi.width;
+            if let Some(mirror) = self.mirror.as_mut() {
+                for (w, &x) in words.iter().zip(&columns) {
+                    if x < width {
+                        mirror.pixel(Some(dest as u32), x, w.row as u32, w.value, width);
+                    }
+                }
+            }
             if self.writes_queue() {
                 self.queue_words(words);
                 // The display waits for them if it shows the buffer.
@@ -573,6 +585,42 @@ impl Voodoo {
     /// the destination's, and what is left of its rectangle lies in a
     /// colour buffer, whose rows the triangles draw. Otherwise the drawing
     /// is done first.
+    fn blt_queue_cached(&self) -> Option<usize> {
+        let key = self.blt_queue_key();
+        match self.blt_queue.get() {
+            Some((k, dest)) if k == key => dest,
+            _ => {
+                let dest = self.blt_queue_dest();
+                self.blt_queue.set(Some((key, dest)));
+                dest
+            }
+        }
+    }
+
+    /// What `blt_queue_dest` works its answer out from.
+    fn blt_queue_key(&self) -> [u32; 16] {
+        let (r, f) = (&self.reg, &self.fbi);
+        [
+            r[BLT_DST_BASE_ADDR],
+            r[BLT_XY_STRIDES],
+            r[BLT_SRC_CHROMA_RANGE],
+            r[BLT_DST_CHROMA_RANGE],
+            r[BLT_ROP],
+            r[BLT_COMMAND],
+            r[BLT_SIZE],
+            f.rgboffs[0],
+            f.rgboffs[1],
+            f.rgboffs[2],
+            f.stride.words as u32,
+            f.stride.tiled as u32,
+            f.height,
+            f.ram.len() as u32,
+            self.blt.x as u32,
+            (self.blt.y + self.blt.rows) as u32,
+        ]
+    }
+
+    /// `blt_queue_cached`'s answer, worked out.
     fn blt_queue_dest(&self) -> Option<usize> {
         // The ROPs the chroma tests can pick must give the same pixel
         // whatever the destination holds (0, !s, s or 1s) or keep the
@@ -784,6 +832,31 @@ mod tests {
             );
             assert!(gl.frame_buffer().to_bytes() == memory, "{flags:X}");
             assert!(threads.frame_buffer().to_bytes() == memory, "{flags:X}");
+            // The recording has the copy's pixels where they are in the
+            // back buffer, but for those the colour key leaves out.
+            let commands = gl.take_mirror().unwrap().commands;
+            let rows: Vec<_> = commands
+                .iter()
+                .filter_map(|c| match c {
+                    super::super::mirror::Command::Pixels(p) if p.dest == Some(back as u32) && (30..33).contains(&p.y) => {
+                        Some((p.x, p.y, p.values.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let middle = match flags & SRC_CHROMA {
+                0 => (12, 31, vec![0x0303, 0x0303, 0x0404, 0x0404]),
+                _ => (14, 31, vec![0x0404, 0x0404]),
+            };
+            assert_eq!(
+                rows,
+                [
+                    (12, 30, vec![0x0101, 0x0101, 0x0202, 0x0202]),
+                    middle,
+                    (12, 32, vec![0x0505, 0x0505, 0x0606, 0x0606])
+                ],
+                "{flags:X}"
+            );
         }
     }
 

@@ -687,7 +687,7 @@ pub fn words(layout: &TileLayout, words: &[Word]) -> Access {
     // Words side by side in a row go in as one run: finding a run's tiles
     // costs as much as a word's.
     let mut run: Option<(usize, u32, u32, u32)> = None;
-    let mut add = |access: &mut Access, (slot, x0, x1, y): (usize, u32, u32, u32)| {
+    let add = |access: &mut Access, (slot, x0, x1, y): (usize, u32, u32, u32)| {
         let tiles = layout.tiles((x0, x1, y, y + 1), false);
         access.writes[slot] = access.writes[slot].union(tiles);
     };
