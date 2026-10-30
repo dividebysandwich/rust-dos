@@ -1059,10 +1059,17 @@ impl Voodoo {
         }
         // Drawn here, over the memory as the renderer has it.
         self.gpu_catch_up();
-        self.submit_words();
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
         }
+        self.submit_outside(job, access);
+    }
+
+    /// Queue `job`, which writes only memory the renderer's pictures of
+    /// the buffers don't hold, as `submit` does, without reading back
+    /// what is behind them first.
+    pub(crate) fn submit_outside(&self, job: Job, access: Option<Access>) {
+        self.submit_words();
         match access {
             Some(access) if self.deferring() => {
                 let out = self.backlog.borrow_mut().push(job, access);
