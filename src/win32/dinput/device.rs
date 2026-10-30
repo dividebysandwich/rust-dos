@@ -317,10 +317,19 @@ fn ready(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
 
 /// CoCreateInstance's device, which needs its Initialize.
 pub fn create_uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
-    if !is_device_iid(iid, false) {
+    uninitialized(cpu, iid, out, false)
+}
+
+/// The same of DINPUT8's.
+pub fn create_uninitialized_8(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
+    uninitialized(cpu, iid, out, true)
+}
+
+fn uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32, eight: bool) -> u32 {
+    if !is_device_iid(iid, eight) {
         return E_NOINTERFACE;
     }
-    let Some(this) = new_object(cpu, DEVICE, false, 0, Some(Device::default())) else {
+    let Some(this) = new_object(cpu, DEVICE, eight, 0, Some(Device::default())) else {
         return E_OUTOFMEMORY;
     };
     if !com::write_out(cpu, out, this) {

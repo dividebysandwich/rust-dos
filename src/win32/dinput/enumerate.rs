@@ -142,7 +142,11 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         };
         t.set(V_AT, at + 1);
         // Any version before 8 gives the same DIDEVTYPE_ types.
-        let version = if t.var(0) == K_DEVICES_8 { 0x800 } else { 0x700 };
+        let version = if t.var(0) == K_DEVICES_8 {
+            0x800
+        } else {
+            0x700
+        };
         objects::instance(kind, objects::shape(cpu, kind), size, version)
     } else {
         let (id, flags) = (t.var(V_DEVICE), t.var(V_FLAGS));

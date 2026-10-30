@@ -181,6 +181,7 @@ pub static CLASSES: &[&[Class]] = &[
     super::dplayx::CLASSES,
     super::dmusic::CLASSES,
     super::shell32::CLASSES,
+    super::dinput::CLASSES8,
 ];
 
 /// The class with CLSID `clsid`, and its place in the list of all.

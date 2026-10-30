@@ -136,11 +136,10 @@ struct Setup {
 }
 
 /// The program: DirectInputCreateA (or DirectInput8Create), CreateDevice,
-/// SetDataFormat,
-/// SetCooperativeLevel (background, nonexclusive, without a window),
-/// the properties, Acquire, then the waits and the reads described at
-/// the top. Each call's result goes to `RESULTS` in turn. The image,
-/// and its data's address.
+/// SetDataFormat, SetCooperativeLevel (background, nonexclusive, without
+/// a window), the properties, Acquire, then the waits and the reads
+/// described at the top. Each call's result goes to `RESULTS` in turn.
+/// The image, and its data's address.
 fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
     let kernel32: &[&str] = &["GetModuleHandleA", "Sleep", "ExitProcess"];
     let (dll, create): (&str, &str) = match setup.eight {

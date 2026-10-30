@@ -180,7 +180,11 @@ static APIS8: &[Api] = &[
     method("DID8_EnumEffects", 4, device::enum_effects),
     method("DID8_GetEffectInfo", 3, device::get_effect_info),
     method("DID8_GetForceFeedbackState", 2, device::no_force_feedback),
-    method("DID8_SendForceFeedbackCommand", 2, device::no_force_feedback),
+    method(
+        "DID8_SendForceFeedbackCommand",
+        2,
+        device::no_force_feedback,
+    ),
     method("DID8_EnumCreatedEffectObjects", 4, device::enum_effects),
     method("DID8_Escape", 2, device::no_force_feedback),
     method("DID8_Poll", 1, device::poll_device),
@@ -386,6 +390,37 @@ pub static CLASSES: &[com::Class] = &[
         dll: "DINPUT.DLL",
         name: "DirectInputDevice",
         create: device::create_uninitialized,
+    },
+];
+
+const CLSID_DIRECT_INPUT_8: Guid = Guid::new(
+    0x25E6_09E4,
+    0xB259,
+    0x11CF,
+    [0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0],
+);
+const CLSID_DIRECT_INPUT_DEVICE_8: Guid = Guid::new(
+    0x25E6_09E5,
+    0xB259,
+    0x11CF,
+    [0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0],
+);
+
+/// DINPUT8's classes, the same as DINPUT's with DirectInput 8's
+/// interfaces. A list of their own at the end of `com::CLASSES`, so the
+/// places of the classes before them stay as they were.
+pub static CLASSES8: &[com::Class] = &[
+    com::Class {
+        clsid: CLSID_DIRECT_INPUT_8,
+        dll: "DINPUT8.DLL",
+        name: "DirectInput8",
+        create: create_direct_input_8,
+    },
+    com::Class {
+        clsid: CLSID_DIRECT_INPUT_DEVICE_8,
+        dll: "DINPUT8.DLL",
+        name: "DirectInputDevice8",
+        create: device::create_uninitialized_8,
     },
 ];
 
@@ -647,10 +682,19 @@ fn dll_register_server(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// CoCreateInstance's DirectInput object, which needs its Initialize.
 fn create_direct_input(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
-    if !is_direct_input_iid(iid, false) {
+    create_uninitialized(cpu, iid, out, false)
+}
+
+/// The same of DINPUT8's.
+fn create_direct_input_8(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
+    create_uninitialized(cpu, iid, out, true)
+}
+
+fn create_uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32, eight: bool) -> u32 {
+    if !is_direct_input_iid(iid, eight) {
         return E_NOINTERFACE;
     }
-    let Some(this) = new_object(cpu, DIRECT_INPUT, false, 0, None) else {
+    let Some(this) = new_object(cpu, DIRECT_INPUT, eight, 0, None) else {
         return E_OUTOFMEMORY;
     };
     if !com::write_out(cpu, out, this) {
@@ -778,11 +822,7 @@ fn di_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// IDirectInput::CreateDevice(guid, out, outer).
 fn di_create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, out, outer) = (args[0], args[1], args[2], args[3]);
-    let iid = match object_of(cpu, this, DIRECT_INPUT) {
-        Some(id) if is_eight(cpu, id) => device::IID_IDIRECT_INPUT_DEVICE_8A,
-        _ => device::IID_IDIRECT_INPUT_DEVICE_A,
-    };
-    result(create_device(cpu, this, guid, &iid, out, outer))
+    result(create_device(cpu, this, guid, None, out, outer))
 }
 
 /// IDirectInput7::CreateDeviceEx(guid, iid, out, outer).
@@ -791,14 +831,16 @@ fn di_create_device_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, iid) else {
         return Some(E_POINTER);
     };
-    result(create_device(cpu, this, guid, &iid, out, outer))
+    result(create_device(cpu, this, guid, Some(&iid), out, outer))
 }
 
+/// A device of the DirectInput object `this`, with the interface `iid`,
+/// or with the one its CreateDevice gives for None.
 fn create_device(
     cpu: &mut Cpu,
     this: u32,
     guid: u32,
-    iid: &Guid,
+    iid: Option<&Guid>,
     out: u32,
     outer: u32,
 ) -> Result<u32, u32> {
@@ -815,7 +857,12 @@ fn create_device(
         return Err(CLASS_E_NOAGGREGATION);
     }
     let eight = is_eight(cpu, id);
-    if !device::is_device_iid(iid, eight) {
+    let iid = iid.copied().unwrap_or(if eight {
+        device::IID_IDIRECT_INPUT_DEVICE_8A
+    } else {
+        device::IID_IDIRECT_INPUT_DEVICE_A
+    });
+    if !device::is_device_iid(&iid, eight) {
         return Err(E_NOINTERFACE);
     }
     let kind = objects::kind_of(cpu, &guid, version).ok_or(DIERR_DEVICENOTREG)?;
