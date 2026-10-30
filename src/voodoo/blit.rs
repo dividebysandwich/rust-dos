@@ -1472,6 +1472,49 @@ mod tests {
     }
 
     #[test]
+    fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
+        // After a read of everything, a fastfill draws rows 20..40. A read
+        // of depth rows 96..160 then reads only rows nothing drew since:
+        // a cache would have had them. One of rows 0..64 reads the 20
+        // drawn among them.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        v.frame_buffer();
+        let count = |v: &Voodoo| {
+            let status = v.describe(Now::default());
+            [
+                "gpu_read_rows",
+                "gpu_partial_reads",
+                "gpu_read_rows_drawn",
+                "gpu_read_rows_undrawn",
+            ]
+            .map(|k| status[k].as_u64().unwrap())
+        };
+        let [rows, partial, drawn, undrawn] = count(&v);
+        assert!(rows >= 3 * 480 && rows == drawn + undrawn, "{rows} {drawn}");
+        assert_eq!((partial, undrawn), (0, 0), "the first reads read what was drawn");
+        write(&mut v, CLIP_LEFT_RIGHT, 10 << 16 | 300);
+        write(&mut v, CLIP_LOW_Y_HIGH_Y, 20 << 16 | 40);
+        write(&mut v, FASTFILL_CMD, 0);
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let now = count(&v);
+        assert_eq!(
+            [now[0] - rows, now[1] - partial, now[2] - drawn, now[3] - undrawn],
+            [64, 1, 0, 64]
+        );
+        v.lfb_read(30 << 9 | 5);
+        let last = count(&v);
+        assert_eq!([last[1] - now[1], last[2] - now[2]], [1, 20]);
+        assert_eq!(last[0] - now[0], last[2] - now[2] + last[3] - now[3]);
+    }
+
+    #[test]
     fn cpu_to_screen_copies_land_after_the_drawing() {
         // A fastfill in the middle of a copy, over the rows it wrote: the
         // data word after it waits for it, the others find nothing queued.

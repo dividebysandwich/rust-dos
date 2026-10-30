@@ -613,6 +613,8 @@ pub struct Voodoo {
     gpu_stale: RefCell<Vec<gpu::Stale>>,
     gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
+    /// What the reads back covered (`gpu::ReadRows`).
+    gpu_rows: RefCell<gpu::ReadRows>,
     gpu_only: Cell<u64>,
     /// The renderer's copy of a Banshee's memory: which pages it lacks
     /// (`banshee_scanout`) and which only it has (`gpu`).
@@ -707,6 +709,7 @@ impl Voodoo {
             gpu_stale: RefCell::new(Vec::new()),
             gpu_alpha: Cell::new(false),
             gpu_read_backs: Cell::new(0),
+            gpu_rows: RefCell::default(),
             gpu_only: Cell::new(0),
             gpu: RefCell::new(gpu::Gpu::new(board.frame_buffer())),
             scanout_dirty: false,
@@ -2055,6 +2058,10 @@ impl Voodoo {
             "catch_ups": self.catch_ups.get(),
             "gpu_reads": self.gpu_reads,
             "gpu_read_backs": self.gpu_read_backs.get(),
+            "gpu_read_rows": self.gpu_rows.borrow().rows,
+            "gpu_partial_reads": self.gpu_rows.borrow().partial,
+            "gpu_read_rows_drawn": self.gpu_rows.borrow().drawn_rows,
+            "gpu_read_rows_undrawn": self.gpu_rows.borrow().undrawn_rows,
             "gpu_only_jobs": self.gpu_only.get(),
             "released_jobs": self.backlog.borrow().released,
             "counters_read": self.counters_read.get(),
