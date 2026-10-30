@@ -235,6 +235,7 @@ fn main() -> Result<(), String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = start_debug_hub(&mut cpu, &args, &det, &settings)?;
+    dbg.display = display.renderer().to_string();
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.
     let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
