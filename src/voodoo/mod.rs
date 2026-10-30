@@ -603,6 +603,11 @@ pub struct Voodoo {
     /// jobs left to the renderer, for the debugger.
     gpu_reads: bool,
     gpu_behind: Cell<bool>,
+    /// The buffers behind the renderer (`gpu_behind`), by their key in
+    /// the recording (a colour buffer's word offset, None for the
+    /// auxiliary buffer), and rows of each that are, apart from one
+    /// another.
+    gpu_stale: RefCell<Vec<(Option<u32>, (u32, u32))>>,
     gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
     gpu_only: Cell<u64>,
@@ -691,6 +696,7 @@ impl Voodoo {
             mirror: RefCell::new(None),
             gpu_reads: false,
             gpu_behind: Cell::new(false),
+            gpu_stale: RefCell::new(Vec::new()),
             gpu_alpha: Cell::new(false),
             gpu_read_backs: Cell::new(0),
             gpu_only: Cell::new(0),
@@ -947,9 +953,31 @@ impl Voodoo {
         self.drawn_to.clear();
     }
 
+    /// The same where what comes reads only `ranges` of the memory's
+    /// bytes (`catch_up_in`).
+    pub(crate) fn flush_in(&mut self, ranges: &[(u32, u32)]) {
+        for &range in ranges {
+            self.gpu_catch_up_in(Some(range));
+        }
+        self.catch_up_workers();
+        self.drawn_to.clear();
+    }
+
     /// Draw everything queued, and wait for it.
     pub(crate) fn catch_up(&self) {
-        self.gpu_catch_up();
+        self.catch_up_in(None);
+    }
+
+    /// The same where what comes reads only bytes `start..end` of the
+    /// memory (with None any of it): of the buffers behind the OpenGL
+    /// renderer (`gpu_behind`), only the rows there are read back.
+    pub(crate) fn catch_up_in(&self, range: Option<(u32, u32)>) {
+        self.gpu_catch_up_in(range);
+        self.catch_up_workers();
+    }
+
+    /// Draw the jobs held back and queued in software, and wait for them.
+    fn catch_up_workers(&self) {
         if !self.backlog.borrow().is_empty() {
             self.catch_ups.set(self.catch_ups.get() + 1);
         }
@@ -1013,8 +1041,7 @@ impl Voodoo {
     /// with its `access`, or given to the workers.
     pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
         if access.as_ref().is_some_and(|a| self.gpu_takes(&job, a)) {
-            self.gpu_behind.set(true);
-            self.gpu_only.set(self.gpu_only.get() + 1);
+            self.gpu_left(&job);
             return;
         }
         // Drawn here, over the memory as the renderer has it.

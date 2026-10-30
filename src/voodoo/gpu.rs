@@ -35,11 +35,12 @@ pub trait GpuLink {
     /// no copy to read them from (it went).
     fn read(&mut self, at: u32, out: &mut [u8]) -> bool;
 
-    /// A buffer's pixels as the renderer drew them, at the card's
-    /// resolution, row by row from the top: colour buffer `dest` (its
-    /// word offset) in 5-6-5, or with None the depth buffer. False, with
-    /// `out` as it was, if it has no such buffer of `out`'s size.
-    fn read_buffer(&mut self, _dest: Option<u32>, _out: &mut [u16]) -> bool {
+    /// Rows `top..bottom` of a buffer's pixels as the renderer drew them,
+    /// at the card's resolution, row by row from the top: colour buffer
+    /// `dest` (its word offset) in 5-6-5, or with None the depth buffer.
+    /// False, with `out` as it was, if it has no such buffer or `out`
+    /// isn't the rows' size.
+    fn read_buffer(&mut self, _dest: Option<u32>, _rows: (u32, u32), _out: &mut [u16]) -> bool {
         false
     }
 }
@@ -121,48 +122,130 @@ impl Voodoo {
             && self.gpu.borrow().link.is_some()
     }
 
+    /// The buffers a job left to the renderer draws into are behind it
+    /// in memory: its colour buffer and the auxiliary buffer, all their
+    /// rows.
+    pub(crate) fn gpu_left(&self, job: &Job) {
+        self.gpu_behind.set(true);
+        self.gpu_only.set(self.gpu_only.get() + 1);
+        let height = self.fbi.height;
+        let mut stale = self.gpu_stale.borrow_mut();
+        // The rows join those of the buffer behind that they meet.
+        let mut mark = |key: Option<u32>, (mut top, mut bottom): (u32, u32)| {
+            stale.retain(|&(k, (a, b))| {
+                let meets = k == key && a <= bottom && top <= b;
+                if meets {
+                    (top, bottom) = (top.min(a), bottom.max(b));
+                }
+                !meets
+            });
+            stale.push((key, (top, bottom)));
+        };
+        match job {
+            Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
+                mark(Some(st.dest as u32), (0, height));
+                mark(None, (0, height));
+            }
+            // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
+            Job::Rows { base, rows, .. } => {
+                let aux = self.fbi.auxoffs != super::NONE && *base == self.fbi.auxoffs as usize / 2;
+                mark((!aux).then_some(*base as u32), *rows);
+            }
+            _ => {
+                for offs in self.fbi.rgboffs.iter().filter(|&&o| o != super::NONE) {
+                    mark(Some(offs / 2), (0, height));
+                }
+                mark(None, (0, height));
+            }
+        }
+    }
+
     /// Bring the buffers in memory up to the renderer's pictures of them,
     /// if jobs were left to it: what it has recorded goes to it first,
     /// and it reads the buffers back.
     pub(crate) fn gpu_catch_up(&self) {
-        if !self.gpu_behind.replace(false) {
+        self.gpu_catch_up_in(None);
+    }
+
+    /// The same for the rows of the buffers that bytes `start..end` of
+    /// the memory hold (with None all of them): only the rows behind
+    /// that are asked for are read back, at the card's resolution.
+    pub(crate) fn gpu_catch_up_in(&self, range: Option<(u32, u32)>) {
+        if !self.gpu_behind.get() {
             return;
         }
-        self.gpu_read_backs.set(self.gpu_read_backs.get() + 1);
-        let (commands, layout) = {
+        let (commands, key) = {
             let mut mirror = self.mirror.borrow_mut();
-            let Some(mirror) = mirror.as_mut() else { return };
-            let layout = mirror.layout().map(|key| key.layout());
-            (mirror.take_commands(), layout)
+            let Some(mirror) = mirror.as_mut() else {
+                self.gpu_behind.set(false);
+                self.gpu_stale.borrow_mut().clear();
+                return;
+            };
+            (mirror.take_commands(), mirror.layout().copied())
         };
-        let Some(layout) = layout else { return };
+        let Some(key) = key else {
+            self.gpu_behind.set(false);
+            self.gpu_stale.borrow_mut().clear();
+            return;
+        };
         let mut gpu = self.gpu.borrow_mut();
         let Some(link) = gpu.link.as_mut() else {
             if !std::mem::replace(&mut gpu.lost, true) {
                 eprintln!("[3DFX] the OpenGL renderer went with the buffers only it had");
             }
+            self.gpu_behind.set(false);
+            self.gpu_stale.borrow_mut().clear();
             return;
         };
         link.run(commands);
-        let (width, height) = (layout.width as usize, layout.height as usize);
-        let mut pixels = vec![0u16; width * height];
-        let buffers = layout.color.iter().map(|&offs| (Some(offs), offs, layout.stride));
-        let aux = layout.aux.map(|offs| (None, offs, layout.aux_stride));
+        // The rows asked for that are behind, buffer by buffer.
+        let mut stale = self.gpu_stale.borrow_mut();
+        let asked = match range {
+            None => stale.iter().map(|&(k, (top, bottom))| (k, top, bottom)).collect(),
+            Some((start, end)) => key.rows_in(start, end),
+        };
+        let layout = key.layout();
+        let width = layout.width as usize;
         let ram = &self.fbi.ram;
-        for (dest, base, stride) in buffers.chain(aux) {
-            if !link.read_buffer(dest, &mut pixels) {
-                continue;
-            }
-            for (y, row) in pixels.chunks_exact(width).enumerate() {
-                let start = base as usize + stride.row(y);
-                for (x, &value) in row.iter().enumerate() {
-                    let at = start + stride.col(x);
-                    if at < ram.len() {
-                        ram.set(at, value);
+        let mut read = false;
+        for (buffer, top, bottom) in asked {
+            let (base, stride) = match (buffer, layout.aux) {
+                (Some(offs), _) => (offs, layout.stride),
+                (None, Some(offs)) => (offs, layout.aux_stride),
+                (None, None) => {
+                    stale.retain(|&(k, _)| k.is_some());
+                    continue;
+                }
+            };
+            // The rows of it that are behind, and what is left of them.
+            let mut left = Vec::new();
+            stale.retain(|&(k, (s0, s1))| {
+                let (top, bottom) = (top.max(s0), bottom.min(s1).min(layout.height));
+                if k != buffer || top >= bottom {
+                    return true;
+                }
+                let mut pixels = vec![0u16; width * (bottom - top) as usize];
+                read = true;
+                if link.read_buffer(buffer, (top, bottom), &mut pixels) {
+                    for (y, row) in (top as usize..).zip(pixels.chunks_exact(width)) {
+                        let start = base as usize + stride.row(y);
+                        for (x, &value) in row.iter().enumerate() {
+                            let at = start + stride.col(x);
+                            if at < ram.len() {
+                                ram.set(at, value);
+                            }
+                        }
                     }
                 }
-            }
+                left.extend([(k, (s0, top)), (k, (bottom, s1))].into_iter().filter(|(_, (a, b))| a < b));
+                false
+            });
+            stale.extend(left);
         }
+        if read {
+            self.gpu_read_backs.set(self.gpu_read_backs.get() + 1);
+        }
+        self.gpu_behind.set(!stale.is_empty());
     }
 
     /// Whether 2D operations may go to the GPU: the renderer draws the

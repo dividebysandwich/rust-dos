@@ -78,6 +78,15 @@ fn chroma_constant(range: u32) -> Option<bool> {
     }
 }
 
+/// The bytes of rows `y0` to `y1` (either way round) of a blit's side at
+/// byte `base` with `stride` bytes a row, to the last column the blitter
+/// reaches in the last, whatever the stride.
+fn blt_rows(base: u32, stride: u32, y0: i32, y1: i32) -> (u32, u32) {
+    let (top, last) = (y0.min(y1).max(0) as u32, y0.max(y1).max(0) as u32);
+    let end = base.saturating_add(last.saturating_mul(stride)).saturating_add(2 * 2048);
+    (base.saturating_add(top.saturating_mul(stride)), end)
+}
+
 /// Whether a 5-6-5 pixel is within a chroma range register's minimum
 /// (bits 15:0) and maximum (bits 31:16).
 fn in_range(range: u32, pixel: u16) -> bool {
@@ -202,13 +211,24 @@ impl Voodoo {
             }
             _ => {}
         }
-        // After what is drawn, which may read or write the same memory.
-        self.flush();
-        self.mirror_sync();
         let (size_x, size_y) = (s12(self.reg[BLT_SIZE]), s12(self.reg[BLT_SIZE] >> 16));
         let (dx, dy) = (size_x.signum().max(0) * 2 - 1, size_y.signum().max(0) * 2 - 1);
         let (dst_x, dst_y) = ((self.reg[BLT_DST_XY] & 0x7FF) as i32, ((self.reg[BLT_DST_XY] >> 16) & 0x7FF) as i32);
         let (dst_base, dst_stride) = self.blt_dst();
+        // After what is drawn, which may read or write the same memory:
+        // the rows the blit reads and writes. An SGRAM fill's are pages.
+        let src_y = ((self.reg[BLT_SRC_XY] >> 16) & 0x7FF) as i32;
+        let (src_base, src_stride) = self.blt_src();
+        let rows = [
+            blt_rows(dst_base, dst_stride, dst_y, dst_y + size_y),
+            blt_rows(src_base, src_stride, src_y, src_y + size_y),
+        ];
+        match command & COMMAND {
+            SCREEN_TO_SCREEN => self.flush_in(&rows),
+            RECT_FILL => self.flush_in(&rows[..1]),
+            _ => self.flush(),
+        }
+        self.mirror_sync();
         let at = |x: i32, y: i32, base: u32, stride: u32| base.wrapping_add((y as u32).wrapping_mul(stride)).wrapping_add(2 * x as u32);
         match command & COMMAND {
             SCREEN_TO_SCREEN => {
@@ -414,7 +434,9 @@ impl Voodoo {
         // skip the wait: Moto Racer sends 40,000 a frame for its sky.
         let queue = self.blt_queue_dest();
         if queue.is_none() && self.writes_queue() {
-            self.flush();
+            // The rows it has left to write, whose pixels it may read.
+            let (base, stride) = self.blt_dst();
+            self.flush_in(&[blt_rows(base, stride, self.blt.y, self.blt.y + self.blt.rows)]);
         }
         self.mirror_sync();
         let mut data = data;
@@ -848,9 +870,10 @@ mod tests {
             false
         }
 
-        fn read_buffer(&mut self, dest: Option<u32>, out: &mut [u16]) -> bool {
+        fn read_buffer(&mut self, dest: Option<u32>, (top, bottom): (u32, u32), out: &mut [u16]) -> bool {
+            assert_eq!(out.len(), 640 * (bottom - top) as usize);
             out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
-            self.0.borrow_mut().push(format!("read {dest:?}"));
+            self.0.borrow_mut().push(format!("read {dest:?} {top}..{bottom}"));
             true
         }
     }
@@ -883,12 +906,46 @@ mod tests {
         assert_eq!(memory.get(aux + 5), 0x7777);
         let log = log.borrow();
         assert!(log[0].starts_with("run "), "{log:?}");
-        assert!(log.iter().any(|l| l == "read None"), "{log:?}");
+        assert!(log.iter().any(|l| l == "read None 0..480"), "{log:?}");
         assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
         // Read once, the memory stays as it is until the renderer draws
         // again.
         v.frame_buffer();
         assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+    }
+
+    #[test]
+    fn gpu_reads_read_back_only_the_rows_asked_for() {
+        // A screen-to-screen copy reads back the rows of the buffer it
+        // reads and writes, and nothing else; a read of the whole memory
+        // afterwards reads the rest.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_SRC_BASE_ADDR, back);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_SRC_XY, 100 << 16 | 12);
+        write(&mut v, BLT_DST_XY, 300 << 16 | 12);
+        write(&mut v, BLT_SIZE, 2 << 16 | 3);
+        write(&mut v, BLT_COMMAND, 1 << 31 | SCREEN_TO_SCREEN);
+        let reads: Vec<String> = log.borrow().iter().filter(|l| l.starts_with("read")).cloned().collect();
+        let key = Some(back / 2);
+        assert_eq!(reads, [format!("read {key:?} 300..306"), format!("read {key:?} 100..106")]);
+        assert_eq!(v.fbi.ram.get(back as usize / 2 + 301 * 640 + 13), 0x1234 ^ (back / 2) as u16);
+        log.borrow_mut().clear();
+        v.frame_buffer();
+        let log = log.borrow();
+        for rows in ["0..100", "106..300", "306..480"] {
+            assert!(log.contains(&format!("read {key:?} {rows}")), "{log:?}");
+        }
+        assert!(log.contains(&"read None 0..480".to_string()), "{log:?}");
     }
 
     #[test]

@@ -357,7 +357,6 @@ impl Voodoo {
     /// A read of the frame buffer at dword `offset` of the window: two
     /// 16-bit pixels of the buffer lfbMode selects (`lfb_r`).
     pub(crate) fn lfb_read(&self, offset: u32) -> u32 {
-        self.catch_up();
         let lfb_mode = self.reg[LFB_MODE];
         let (x, y) = if self.banshee.is_some() {
             (((offset << 1) & 0x7FE) as usize, ((offset >> 10) & 0x7FF) as i32)
@@ -373,6 +372,11 @@ impl Voodoo {
         if offs == NONE {
             return 0xFFFF_FFFF;
         }
+        // The buffer read, whole: a program reading one pixel reads
+        // others after it, and each read back from the OpenGL renderer
+        // waits for the GPU.
+        let span = super::mirror::span(stride, self.fbi.height) as u32 * 2;
+        self.catch_up_in(Some((offs, offs.saturating_add(span))));
         let scry = if lfb_mode & (1 << 13) != 0 {
             (self.fbi.yorigin as i32 - y) & self.fbi.ymask
         } else {
