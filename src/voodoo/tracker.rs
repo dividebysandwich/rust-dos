@@ -13,10 +13,10 @@
 //! - newer on the GPU, in the renderer's copy of the memory, where a
 //!   Banshee's or Voodoo3's 2D operations drew (`gpu`), page by page;
 //! - newer on the GPU, in a 3D buffer the renderer draws at its own
-//!   resolution: rows of a Voodoo Graphics' or Voodoo2's colour and
-//!   auxiliary buffers, which jobs left to the renderer drew
-//!   (`voodoo_readback=gpu`). These are read back by rows of the buffer,
-//!   at the card's resolution, rather than by pages.
+//!   resolution: rows of any card's colour and auxiliary buffers, which
+//!   jobs left to the renderer drew (`voodoo_readback=gpu`). These are
+//!   read back by rows of the buffer, at the card's resolution, rather
+//!   than by pages.
 //!
 //! Whatever reads or writes the card's memory where it is behind the GPU
 //! reads those bytes back first. A byte is never both dirty and newer in
@@ -105,6 +105,9 @@ pub struct Tracker {
     gpu: Ranges,
     /// Bytes newer in the renderer's 3D buffers.
     buffers: Ranges,
+    /// Bytes of the 3D buffers read back since a Banshee's texture units
+    /// last looked (`take_read_back`).
+    read: Ranges,
     /// Bytes read back for the program since the last `cool`.
     hot: Ranges,
 }
@@ -281,12 +284,20 @@ impl Tracker {
     /// `hot` (the program reads or writes them).
     pub fn take_buffers(&mut self, start: u32, end: u32, hot: bool) -> Vec<(u32, u32)> {
         let taken = self.buffers.take(start, end);
-        if hot {
-            for &(a, b) in &taken {
+        for &(a, b) in &taken {
+            self.read.add(a, b);
+            if hot {
                 self.hot.add(a, b);
             }
         }
         taken
+    }
+
+    /// Whether any of bytes `start..end` was read back from the 3D
+    /// buffers since the last call for them: the memory there changed
+    /// under the textures decoded from it.
+    pub fn take_read_back(&mut self, start: u32, end: u32) -> bool {
+        !self.read.is_empty() && !self.read.take(start, end).is_empty()
     }
 
     /// The bytes newer in the renderer's 3D buffers are lost, or can't be
@@ -451,6 +462,10 @@ mod tests {
             [(0, 100 * row), (106 * row, 480 * row)]
         );
         assert!(!p.hot_in(0, 100 * row) && !p.hot_in(106 * row, 480 * row));
+        // Either way the texture units hear of them once.
+        assert!(p.take_read_back(105 * row, 106 * row));
+        assert!(!p.take_read_back(105 * row, 106 * row));
+        assert!(!p.take_read_back(480 * row, 481 * row));
         // They are kept apart from the pages of the renderer's copy of the
         // memory: neither reads back the other's.
         p.drawn_on_gpu(0, PAGE);

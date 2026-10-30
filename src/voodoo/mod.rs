@@ -1052,12 +1052,12 @@ impl Voodoo {
     /// Queue `job` after the frame buffer writes before it: held back
     /// with its `access`, or given to the workers.
     pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
-        if access.as_ref().is_some_and(|a| self.gpu_takes(&job, a)) {
-            self.gpu_left(&job);
+        if let Some(bytes) = access.as_ref().and_then(|a| self.gpu_takes(&job, a)) {
+            self.gpu_left(bytes);
             return;
         }
         // Drawn here, over the memory as the renderer has it.
-        self.gpu_catch_up();
+        self.gpu_catch_up_for(&job);
         self.submit_words();
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));

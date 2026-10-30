@@ -1001,16 +1001,22 @@ mod tests {
         // The second band of rows is still the renderer's alone.
         let band = 10 * 2048;
         assert_eq!(v.fbi.ram.get(A as usize / 2 + band), 0);
-        // Hot, A is drawn in software; its depth clear, B and the rows
-        // read back stay as they were.
+        // Hot, A is drawn in software with its depth clear, and only
+        // the rows of A and the depth buffer come back for it; B goes on
+        // on the GPU.
+        log.borrow_mut().clear();
         draw_frame(&mut v, A);
-        assert_eq!(gpu_only(&v), 4, "only the depth clear");
+        assert_eq!(gpu_only(&v), 3, "A's frame is drawn in software");
+        assert_eq!(
+            reads(&log),
+            ["read None 0..64".to_string(), format!("read {:x?} 32..64", Some(A / 2))]
+        );
         let mut sw = gpu_card(None);
         draw_frame(&mut sw, A);
         let memory = v.frame_buffer();
         assert_eq!(memory.get(A as usize / 2), sw.frame_buffer().get(A as usize / 2));
         draw_frame(&mut v, B);
-        assert_eq!(gpu_only(&v), 7);
+        assert_eq!(gpu_only(&v), 6);
     }
 
     #[test]
@@ -1039,6 +1045,36 @@ mod tests {
             Command::Texture(t) => t.levels.first()?.argb.first().copied(),
             _ => None,
         });
+        assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
+    }
+
+    #[test]
+    fn gpu_reads_decode_a_texture_again_after_its_buffer_was_read_back() {
+        // A texture decoded from A, then A drawn by the renderer alone and
+        // read back by the 2D engine: the memory under the texture
+        // changed, and the next triangle decodes it again from there.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        let textured = |v: &mut Voodoo| {
+            reg3d(v, COL_BUFFER_ADDR, B);
+            reg3d(v, TEX_BASE_ADDR, A);
+            reg3d(v, T_LOD, 0);
+            reg3d(v, TEXTURE_MODE, 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27);
+            reg3d(v, FBZ_COLOR_PATH, 1 | 1 << 27);
+            reg3d(v, FBZ_MODE, 1 | 1 << 9);
+            rectangle(v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+            reg3d(v, FBZ_COLOR_PATH, 0);
+            let frame = v.take_mirror().unwrap();
+            frame.commands.iter().rev().find_map(|c| match c {
+                Command::Texture(t) => t.levels.first()?.argb.first().copied(),
+                _ => None,
+            })
+        };
+        assert!(textured(&mut v).is_some());
+        draw_frame(&mut v, A);
+        v.banshee_2d_write(0x08, 0);
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
+        let texel = textured(&mut v);
         assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
     }
 

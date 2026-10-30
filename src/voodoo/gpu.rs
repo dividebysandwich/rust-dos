@@ -22,6 +22,10 @@ use super::{NONE, Voodoo};
 use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
 
+/// The bytes of the memory a job left to the renderer draws into, a range
+/// for each buffer (`gpu_job_bytes`).
+pub(crate) type JobBytes = [Option<(u32, u32)>; 4];
+
 /// The bytes of the memory rows `top..bottom` of a buffer take, the
 /// buffer at word offset `base` with rows `stride` apart: whole rows, or
 /// in tiles whole bands of 32 rows.
@@ -98,7 +102,6 @@ impl Voodoo {
     /// it away (the renderer stops): what only the GPU had is read back
     /// first.
     pub fn set_gpu_link(&mut self, link: Option<Box<dyn GpuLink>>) {
-        self.gpu_catch_up();
         self.gpu_sync_all();
         let gpu = self.gpu.get_mut();
         gpu.link = link;
@@ -129,30 +132,63 @@ impl Voodoo {
     /// frame), and the program didn't read back memory there lately (it
     /// is hot): a program that reads what the 3D draws every frame waits
     /// less for the software rasterizer than for the GPU.
-    pub(crate) fn gpu_takes(&self, job: &Job, access: &Access) -> bool {
+    ///
+    /// The bytes the job draws into (`gpu_job_bytes`) if it is, for
+    /// `gpu_left`.
+    pub(crate) fn gpu_takes(&self, job: &Job, access: &Access) -> Option<JobBytes> {
         if let Job::Triangle { st, .. } | Job::Fastfill { st, .. } = job
             && st.fbz_mode & (1 << 18) != 0
         {
             self.gpu_alpha.set(true);
         }
-        self.gpu_reads
+        let takes = self.gpu_reads
             && !self.gpu_alpha.get()
             && !access.pinned
             && !access.kept
             && self.gpu.borrow().link.is_some()
-            && (self.banshee.is_none() || self.gpu_takes_3d(job))
+            && !(self.banshee.is_some() && self.software_picture);
+        if !takes {
+            return None;
+        }
+        let bytes = self.gpu_job_bytes(job)?;
+        if self.banshee.is_some() {
+            // A depth clear goes with the colour buffer it clears for: one
+            // drawn in software has its depth in the memory too, rather than
+            // read back before its first triangle every frame.
+            let key = self.mirror_layout()?;
+            let col = self.fbi.rgboffs[0];
+            let colour = key
+                .color
+                .contains(&col)
+                .then(|| row_bytes(col / 2, key.stride, (0, key.height)));
+            let gpu = self.gpu.borrow();
+            let hot = |&(a, b): &(u32, u32)| gpu.pages.hot_in(a, b);
+            if bytes.iter().flatten().any(hot) || colour.as_ref().is_some_and(hot) {
+                return None;
+            }
+        }
+        Some(bytes)
     }
 
-    /// The rest of `gpu_takes` for a Banshee's or Voodoo3's 3D.
-    fn gpu_takes_3d(&self, job: &Job) -> bool {
-        if self.software_picture {
-            return false;
+    /// Bring the memory up to the renderer for `job`, which is drawn in
+    /// software: on a Banshee only the rows of the buffers it draws into
+    /// (its textures came back before it was recorded, `gpu_texels`),
+    /// which leaves the others on the GPU; on the other cards all of it.
+    pub(crate) fn gpu_catch_up_for(&self, job: &Job) {
+        if !self.gpu_behind.get() {
+            return;
         }
-        let Some(bytes) = self.gpu_job_bytes(job) else {
-            return false;
-        };
-        let gpu = self.gpu.borrow();
-        !bytes.iter().flatten().any(|&(a, b)| gpu.pages.hot_in(a, b))
+        if self.banshee.is_some()
+            && let Some(bytes) = self.gpu_job_bytes(job)
+        {
+            for (start, end) in bytes.into_iter().flatten() {
+                if self.gpu.borrow().pages.buffers_in(start, end) {
+                    self.gpu_catch_up_in(Some((start, end)));
+                }
+            }
+            return;
+        }
+        self.gpu_catch_up();
     }
 
     /// The bytes of the memory a job left to the renderer draws into, as
@@ -160,7 +196,7 @@ impl Voodoo {
     /// buffer, or every colour buffer for a job of another kind. On a
     /// Banshee they are the recording's buffers, None if the job draws
     /// colours into one the recording doesn't have.
-    fn gpu_job_bytes(&self, job: &Job) -> Option<[Option<(u32, u32)>; 4]> {
+    fn gpu_job_bytes(&self, job: &Job) -> Option<JobBytes> {
         let mut bytes = [None; 4];
         let mut n = 0;
         let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
@@ -181,14 +217,19 @@ impl Voodoo {
                         }
                         mark(dest, key.stride, all);
                     }
+                    // The depth buffer, if the job tests or writes depth: a
+                    // job that doesn't leaves it to whatever reads it.
+                    if st.fbz_mode & (1 << 4 | 1 << 10) != 0 {
+                        mark(key.aux, key.aux_stride, all);
+                    }
                 }
                 _ => {
                     for offs in key.color {
                         mark(offs, key.stride, all);
                     }
+                    mark(key.aux, key.aux_stride, all);
                 }
             }
-            mark(key.aux, key.aux_stride, all);
             return Some(bytes);
         }
         let fbi = &self.fbi;
@@ -215,12 +256,11 @@ impl Voodoo {
     }
 
     /// The buffers a job left to the renderer draws into are behind it
-    /// in memory: its colour buffer and the auxiliary buffer, all their
-    /// rows, as bytes of the memory in the tracker.
-    pub(crate) fn gpu_left(&self, job: &Job) {
+    /// in memory: `bytes`, the rows of its colour buffer and the
+    /// auxiliary buffer that `gpu_takes` gave, in the tracker.
+    pub(crate) fn gpu_left(&self, bytes: JobBytes) {
         self.gpu_behind.set(true);
         self.gpu_only.set(self.gpu_only.get() + 1);
-        let bytes = self.gpu_job_bytes(job).unwrap_or_default();
         let mut gpu = self.gpu.borrow_mut();
         for (start, end) in bytes.into_iter().flatten() {
             gpu.pages.drawn_in_buffer(start, end);
@@ -251,9 +291,19 @@ impl Voodoo {
             let queued = self.outstanding.get()
                 || !self.words.get_mut().is_empty()
                 || !self.backlog.get_mut().is_empty();
+            // Read back for the card itself, the rows don't turn hot: the
+            // program didn't ask for them.
             if behind || queued {
-                self.catch_up_in(Some((start, end)));
-                self.tmu[unit].note_written(start, end);
+                self.gpu_catch_up_in(Some((start, end)));
+                self.catch_up_workers();
+            }
+            // Rows read back since, for the program or the 2D engine,
+            // changed the memory under a texture decoded before as well.
+            let read = self.gpu.get_mut().pages.take_read_back(start, end);
+            if behind || queued || read {
+                for tmu in &mut self.tmu {
+                    tmu.note_written(start, end);
+                }
             }
         }
     }
