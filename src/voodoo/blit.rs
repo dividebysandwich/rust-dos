@@ -37,6 +37,62 @@ const DST_TILED: u32 = 1 << 15;
 const CLIPPING: u32 = 1 << 16;
 const TRANSPARENT: u32 = 1 << 17;
 
+/// Where a Voodoo2's SGRAM fill writes. The card keeps its memory in
+/// tiles of 32 by 32 pixels, two side by side in each 4 KB page, so that
+/// a page holds 32 rows of 64 pixels, each row 16 of the fill's 64-bit
+/// columns (Glide's `_grBufferClear` for the CVG; 3dfx's Direct3D driver
+/// clears the last 24 rows of 3DMark 2000's 800x600 depth buffer with
+/// columns 0 to 383 of each page in a row of tiles). Each buffer starts
+/// on a page and its pages go along its rows of tiles. The memory here
+/// keeps each buffer in rows of `rowpixels`, which hold the same pixels
+/// as the card's rows of tiles, in another order.
+struct SgramTiles {
+    /// Pages to a row of tiles: `rowpixels` / 64.
+    page_row: u32,
+    rowpixels: u32,
+    /// Pages to a buffer (fbiInit2 bits 19:11).
+    pages: u32,
+    /// The buffers' pictures' height.
+    height: u32,
+    /// The colour buffers' and the auxiliary buffer's first pages.
+    buffers: [Option<u32>; 4],
+}
+
+impl SgramTiles {
+    /// The buffer that page `p` is in, as its first page, and which of
+    /// its pages `p` is.
+    fn find(&self, p: u32) -> Option<(u32, u32)> {
+        let mut buffers = self.buffers.iter().flatten();
+        let base = *buffers.find(|&&b| b <= p && p < b + self.pages)?;
+        Some((base, p - base))
+    }
+
+    /// The first of the four words of column `c` of page `p`. Pages
+    /// outside the buffers are taken as rows of 2,048 words.
+    fn word(&self, p: u32, c: u32) -> usize {
+        let Some((base, rel)) = self.find(p) else {
+            return p as usize * 2048 + 4 * c as usize;
+        };
+        let y = rel / self.page_row * 32 + c / 16;
+        let x = rel % self.page_row * 64 + c % 16 * 4;
+        base as usize * 2048 + (y * self.rowpixels + x) as usize
+    }
+}
+
+/// Rows `top..bottom` of the buffer at word offset `base`: (base, top,
+/// bottom).
+type BufferRows = (usize, u32, u32);
+
+/// A 5-6-5 colour as 8-8-8.
+fn rgb888(color: u16) -> u32 {
+    let (r, g, b) = (
+        (color >> 11) as u32,
+        ((color >> 5) & 0x3F) as u32,
+        (color & 0x1F) as u32,
+    );
+    ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2)
+}
+
 /// A 12-bit signed field.
 fn s12(v: u32) -> i32 {
     ((v << 20) as i32) >> 20
@@ -298,27 +354,56 @@ impl Voodoo {
         if self.banshee.is_some() || !self.backlog.borrow().layout.prunable {
             return false;
         }
-        let Some((first, end)) = self.sgram_run() else {
-            return false;
-        };
-        let Some(rows) = self.whole_rows(first, end) else {
-            return false;
+        let rows = match self.sgram_tiles() {
+            Some(tiles) => match self.sgram_rows(&tiles) {
+                Some((rows, false)) => rows,
+                _ => return false,
+            },
+            None => {
+                let Some((first, end)) = self.sgram_run() else {
+                    return false;
+                };
+                let Some(rows) = self.whole_rows(first, end) else {
+                    return false;
+                };
+                rows
+            }
         };
         let color = self.reg[BLT_COLOR] as u16;
         self.mirror_sync();
-        self.mirror_fill(first, end, color);
-        let rowpixels = self.fbi.rowpixels as usize;
+        self.mirror_fill_rows(&rows, color);
+        let (width, rowpixels) = (self.fbi.width as usize, self.fbi.rowpixels as usize);
         for (base, top, bottom) in rows {
             let access = self.access(|layout| super::backlog::rows(layout, base, (top, bottom)));
-            let fb = self.fbi.ram.clone();
-            let job = Job::Rows {
-                fb,
+            let job = |columns| Job::Rows {
+                fb: self.fbi.ram.clone(),
                 base,
                 rowpixels,
                 rows: (top, bottom),
+                columns,
                 value: color,
             };
-            self.submit(job, access);
+            // Rows wider than the picture (800 pixels in 832) are kept
+            // for the words right of it, which the renderer doesn't have:
+            // it takes the picture, and those words are filled here.
+            let picture = access
+                .clone()
+                .map(|a| super::backlog::Access { kept: false, ..a });
+            let split = width < rowpixels
+                && access.as_ref().is_some_and(|a| a.kept && !a.pinned)
+                && picture
+                    .as_ref()
+                    .is_some_and(|a| self.gpu_takes(&job((0, width)), a));
+            if split {
+                self.gpu_left(&job((0, width)));
+                let outside = super::backlog::Access {
+                    kept: true,
+                    ..Default::default()
+                };
+                self.submit_outside(job((width, rowpixels)), Some(outside));
+            } else {
+                self.submit(job((0, rowpixels)), access);
+            }
             self.mark_drawn(base);
         }
         true
@@ -355,10 +440,86 @@ impl Voodoo {
         Some(rows)
     }
 
+    /// How the SGRAM's pages lie in the buffers, if they lie in tiles
+    /// (`SgramTiles`): rows of whole pages, each buffer on a page.
+    fn sgram_tiles(&self) -> Option<SgramTiles> {
+        let fbi = &self.fbi;
+        let rowpixels = fbi.rowpixels;
+        let pages = (self.reg[FBI_INIT2] >> 11) & 0x1FF;
+        if self.banshee.is_some() || rowpixels == 0 || !rowpixels.is_multiple_of(64) || pages == 0 {
+            return None;
+        }
+        let mut buffers = [None; 4];
+        let offsets = fbi.rgboffs.iter().chain([&fbi.auxoffs]);
+        for (slot, &offs) in buffers.iter_mut().zip(offsets) {
+            if offs == NONE {
+                continue;
+            }
+            if !offs.is_multiple_of(0x1000) {
+                return None;
+            }
+            *slot = Some(offs / 0x1000);
+        }
+        Some(SgramTiles {
+            page_row: rowpixels / 64,
+            rowpixels,
+            pages,
+            height: fbi.height,
+            buffers,
+        })
+    }
+
+    /// The rows of the buffers an SGRAM fill covers in `tiles`: each
+    /// buffer's word offset and its rows, in the order the fill reaches
+    /// them, and whether it also fills memory outside the buffers'
+    /// pictures. None if it covers part of a row of a picture.
+    fn sgram_rows(&self, tiles: &SgramTiles) -> Option<(Vec<BufferRows>, bool)> {
+        let (dst, size) = (self.reg[BLT_DST_XY], self.reg[BLT_SIZE]);
+        let (page, column) = ((dst >> 16) & 0x3FF, dst & 0x1FF);
+        let (pages, columns) = ((size >> 16) & 0x3FF, size & 0x1FF);
+        let last = (column + columns).min(511);
+        // The rows of a page each column range covers, and whether it
+        // covers them whole.
+        let (top, bottom) = (column / 16, last / 16 + 1);
+        let whole = column % 16 == 0 && last % 16 == 15;
+        let mut rows: Vec<BufferRows> = Vec::new();
+        let mut outside = false;
+        let mut p = page;
+        while p <= page + pages {
+            let Some((base, rel)) = tiles.find(p) else {
+                outside = true;
+                p += 1;
+                continue;
+            };
+            // The fill's pages in this row of tiles.
+            let row = rel / tiles.page_row;
+            let end = (p + tiles.page_row - rel % tiles.page_row)
+                .min(page + pages + 1)
+                .min(base + tiles.pages);
+            let first = row * 32;
+            let (y0, y1) = (first + top, (first + bottom).min(tiles.height));
+            if y0 < y1 {
+                if !whole || rel % tiles.page_row != 0 || end - p != tiles.page_row {
+                    return None;
+                }
+                let base = base as usize * 2048;
+                match rows.last_mut() {
+                    Some((b, _, last)) if *b == base && *last == y0 => *last = y1,
+                    _ => rows.push((base, y0, y1)),
+                }
+            }
+            outside |= first + bottom > tiles.height;
+            p = end;
+        }
+        Some((rows, outside))
+    }
+
     /// An SGRAM fill: whole 4 KB pages from bltDstXY's row (bits 24:16),
     /// columns of 64 bits (four pixels) from its column (bits 8:0), as
     /// many pages as bltSize bits 24:16 say and columns as bits 8:0, with
-    /// bltColor and no clipping or raster operations.
+    /// bltColor and no clipping or raster operations. The pages are the
+    /// memory's own, in tiles (`SgramTiles`), where the memory here is in
+    /// rows.
     fn sgram_fill(&mut self) {
         let (dst, size) = (self.reg[BLT_DST_XY], self.reg[BLT_SIZE]);
         let (page, column) = ((dst >> 16) & 0x3FF, dst & 0x1FF);
@@ -366,6 +527,28 @@ impl Voodoo {
         let color = self.reg[BLT_COLOR] as u16;
         let ram = &self.fbi.ram;
         let last = (column + columns).min(511);
+        if let Some(tiles) = self.sgram_tiles() {
+            for p in page..=page + pages {
+                for c in column..=last {
+                    let at = tiles.word(p, c);
+                    for at in at..at + 4 {
+                        if at < ram.len() {
+                            ram.set(at, color);
+                        }
+                    }
+                }
+            }
+            match self.sgram_rows(&tiles) {
+                Some((rows, _)) => self.mirror_fill_rows(&rows, color),
+                None => {
+                    // Part of some rows: a snapshot takes the fill.
+                    if let Some(mirror) = self.mirror.get_mut() {
+                        mirror.invalidate();
+                    }
+                }
+            }
+            return;
+        }
         for p in page..=page + pages {
             let base = p as usize * 2048;
             for at in base + 4 * column as usize..base + 4 * (last as usize + 1) {
@@ -379,6 +562,30 @@ impl Voodoo {
         } else if let Some(mirror) = self.mirror.get_mut() {
             // The same columns of several pages: a snapshot takes them.
             mirror.invalidate();
+        }
+    }
+
+    /// Tell the OpenGL renderer's recording about an SGRAM fill of whole
+    /// `rows` of the buffers (`sgram_rows`): each buffer's word offset and
+    /// its rows.
+    fn mirror_fill_rows(&mut self, rows: &[(usize, u32, u32)], color: u16) {
+        if !self.recording() {
+            return;
+        }
+        let (width, aux) = (self.fbi.width, self.fbi.auxoffs);
+        let rgb = rgb888(color);
+        if let Some(mirror) = self.mirror.get_mut() {
+            for &(base, top, bottom) in rows {
+                let colour = aux == NONE || base != aux as usize / 2;
+                mirror.fill(super::mirror::Fill {
+                    dest: base as u32,
+                    rect: [0, width, top, bottom],
+                    color: colour.then_some(rgb),
+                    aux: (!colour).then_some(color),
+                    alpha_planes: false,
+                    pattern: None,
+                });
+            }
         }
     }
 
@@ -415,8 +622,7 @@ impl Voodoo {
                 fills.push((base, colour, top, bottom));
             }
         }
-        let (r, g, b) = ((color >> 11) as u32, ((color >> 5) & 0x3F) as u32, (color & 0x1F) as u32);
-        let rgb = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+        let rgb = rgb888(color);
         if let Some(mirror) = self.mirror.get_mut() {
             for (base, colour, top, bottom) in fills {
                 mirror.fill(super::mirror::Fill {
@@ -810,6 +1016,137 @@ mod tests {
         assert_eq!(gl.describe(Now::default())["held_jobs"], 0);
     }
 
+    /// A Voodoo2 with `workers` threads set up as 3DMark 2000 sets it for
+    /// 800x600: three colour buffers and the auxiliary buffer 247 pages
+    /// apart (19 rows of 13 pages), 832-pixel rows.
+    fn card_800(workers: usize) -> Voodoo {
+        let mut v = Voodoo::with_workers(Board::Voodoo2, workers);
+        v.reg[FBI_INIT1] = 13 << 4;
+        v.reg[FBI_INIT2] = 247 << 11;
+        v.reg[FBI_INIT5] = v.reg[FBI_INIT5] & !(3 << 9) | 2 << 9;
+        v.reg[FBI_INIT6] &= !(1 << 30);
+        (v.fbi.width, v.fbi.height) = (800, 600);
+        v.recompute_video_memory();
+        v
+    }
+
+    /// Frames as 3dfx's Direct3D driver clears 3DMark 2000's depth
+    /// buffer: an SGRAM fill of its first 18 rows of tiles (576 rows),
+    /// and one of the first 384 columns of the 13 pages of the next,
+    /// which are its last 24 rows. Then a fastfill of part of the back
+    /// buffer and a swap.
+    fn depth_clears_800(v: &mut Voodoo, count: u32) {
+        for frame in 0..count {
+            depth_fills_800(v);
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+            write(v, CLIP_LEFT_RIGHT, (10 + frame) << 16 | 700);
+            write(v, CLIP_LOW_Y_HIGH_Y, 20 << 16 | (590 + frame));
+            write(v, COLOR1, 0x0040_80C0 + frame);
+            write(v, FASTFILL_CMD, 0);
+            write(v, SWAPBUFFER_CMD, 0);
+        }
+    }
+
+    /// The two SGRAM fills of `depth_clears_800`.
+    fn depth_fills_800(v: &mut Voodoo) {
+        let aux = v.fbi.auxoffs / 0x1000;
+        write(v, BLT_COLOR, 0xFFFF);
+        write(v, BLT_DST_XY, aux << 16);
+        write(v, BLT_SIZE, 233 << 16 | 511);
+        write(v, BLT_COMMAND, 1 << 31 | SGRAM_FILL);
+        write(v, BLT_DST_XY, (aux + 234) << 16);
+        write(v, BLT_SIZE, 12 << 16 | 383);
+        write(v, BLT_COMMAND, 1 << 31 | SGRAM_FILL);
+    }
+
+    #[test]
+    fn sgram_fills_write_pages_of_tiles() {
+        // A page is 32 rows of 64 pixels, its columns four pixels of one
+        // row, and a buffer's pages go along its rows of tiles.
+        let mut v = card_800(0);
+        write(&mut v, BLT_COLOR, 0xBEEF);
+        write(&mut v, BLT_DST_XY, 14 << 16 | 16);
+        write(&mut v, BLT_SIZE, 1);
+        write(&mut v, BLT_COMMAND, 1 << 31 | SGRAM_FILL);
+        // Page 14 is the second of the second row of tiles; columns 16
+        // and 17 are the first eight pixels of its second row.
+        let px = |v: &Voodoo, x: usize, y: usize| v.fbi.ram.get(y * 832 + x);
+        assert_eq!([px(&v, 64, 33), px(&v, 71, 33)], [0xBEEF; 2]);
+        assert_eq!(
+            [
+                px(&v, 63, 33),
+                px(&v, 72, 33),
+                px(&v, 64, 32),
+                px(&v, 64, 34)
+            ],
+            [0; 4]
+        );
+        // The depth buffer's last 24 rows, as 3DMark 2000 clears them.
+        depth_fills_800(&mut v);
+        let aux = v.fbi.auxoffs as usize / 2;
+        let depth = |y: usize, x: usize| v.fbi.ram.get(aux + y * 832 + x);
+        for y in [0, 300, 575, 576, 590, 599] {
+            for x in [0, 63, 64, 400, 799, 831] {
+                assert_eq!(depth(y, x), 0xFFFF, "{x}, {y}");
+            }
+        }
+        // Not the rows of the last row of tiles past the picture.
+        assert_eq!([depth(600, 0), depth(607, 831)], [0; 2]);
+    }
+
+    #[test]
+    fn sgram_fills_of_the_last_rows_of_tiles_stay_on_the_gpu() {
+        // 3DMark 2000's clear of its depth buffer's last 24 rows goes to
+        // the renderer as a fill of those rows, the same as the rows
+        // before it: nothing is read back, nothing waits for the
+        // workers, and the recording needs no snapshot.
+        let mut v = card_800(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        depth_clears_800(&mut v, 3);
+        let status = v.describe(Now::default());
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert_eq!(status["gpu_read_backs"], 0, "{status}");
+        assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+        assert!(v.mirror_layout().is_some(), "the recording was invalidated");
+        let aux = v.fbi.auxoffs / 2;
+        // The words right of the picture, which the renderer doesn't
+        // have, are filled in memory.
+        v.catch_up_workers();
+        let depth = |y: u32, x: u32| v.fbi.ram.get((aux + y * 832 + x) as usize);
+        assert_eq!([depth(10, 800), depth(599, 831)], [0xFFFF; 2]);
+        let fills: Vec<_> = v
+            .take_mirror()
+            .unwrap()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                super::super::mirror::Command::Fill(f) if f.dest == aux => Some(f.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 6, "{fills:?}");
+        assert!(fills.contains(&[0, 800, 576, 600]), "{fills:?}");
+        // Held back in software instead, the memory is as the software
+        // renderer draws it.
+        let mut gl = card_800(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut sw = card_800(0);
+        depth_clears_800(&mut gl, 3);
+        depth_clears_800(&mut sw, 3);
+        let status = gl.describe(Now::default());
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert!(
+            gl.mirror_layout().is_some(),
+            "the recording was invalidated"
+        );
+        assert!(gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes());
+    }
+
     #[test]
     fn cpu_to_screen_with_16_bit_pixels() {
         let mut v = card();
@@ -1132,6 +1469,49 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(reads, ["read None 96..160"]);
+    }
+
+    #[test]
+    fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
+        // After a read of everything, a fastfill draws rows 20..40. A read
+        // of depth rows 96..160 then reads only rows nothing drew since:
+        // a cache would have had them. One of rows 0..64 reads the 20
+        // drawn among them.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        v.frame_buffer();
+        let count = |v: &Voodoo| {
+            let status = v.describe(Now::default());
+            [
+                "gpu_read_rows",
+                "gpu_partial_reads",
+                "gpu_read_rows_drawn",
+                "gpu_read_rows_undrawn",
+            ]
+            .map(|k| status[k].as_u64().unwrap())
+        };
+        let [rows, partial, drawn, undrawn] = count(&v);
+        assert!(rows >= 3 * 480 && rows == drawn + undrawn, "{rows} {drawn}");
+        assert_eq!((partial, undrawn), (0, 0), "the first reads read what was drawn");
+        write(&mut v, CLIP_LEFT_RIGHT, 10 << 16 | 300);
+        write(&mut v, CLIP_LOW_Y_HIGH_Y, 20 << 16 | 40);
+        write(&mut v, FASTFILL_CMD, 0);
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let now = count(&v);
+        assert_eq!(
+            [now[0] - rows, now[1] - partial, now[2] - drawn, now[3] - undrawn],
+            [64, 1, 0, 64]
+        );
+        v.lfb_read(30 << 9 | 5);
+        let last = count(&v);
+        assert_eq!([last[1] - now[1], last[2] - now[2]], [1, 20]);
+        assert_eq!(last[0] - now[0], last[2] - now[2] + last[3] - now[3]);
     }
 
     #[test]
