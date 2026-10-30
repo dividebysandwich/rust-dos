@@ -245,6 +245,19 @@ impl Voodoo {
                         // every texel a Direct3D game draws with its
                         // colour key on.
                         self.reg[CHROMA_RANGE] = 0;
+                        // It also shows buffer 0 and draws into buffer 1
+                        // (86Box does the same). Glide counts on that:
+                        // grSstWinOpen takes buffer 0 for the front and
+                        // aims its blits at the buffer after it, and its
+                        // open and shutdown pulse this reset, but only a
+                        // swap left pending makes it read the displayed
+                        // buffer and swap to 0 (sst1InitClearSwapPending).
+                        // Kept, the buffers of a program that quit on an
+                        // odd frame stay the other way round, and the next
+                        // one blits into the buffer on the screen.
+                        self.fbi.frontbuf = 0;
+                        self.fbi.backbuf = 1;
+                        self.display_dirty = true;
                     }
                     self.recompute_video_memory();
                 }
@@ -446,6 +459,47 @@ mod tests {
         }
         assert_eq!(v.reg[CHROMA_RANGE], 0);
         assert_eq!(red_triangle(&mut v), 0xF800);
+    }
+
+    #[test]
+    fn a_graphics_reset_shows_buffer_0_and_draws_into_buffer_1() {
+        // Moto Racer quit on an odd frame, so the buffers were the
+        // other way round, and run again: Glide's shutdown and open
+        // pulse the graphics reset, take buffer 0 for the front, and
+        // blit the sky into the buffer after it. The sky has to land in
+        // the buffer the frame's triangles go to.
+        let mut v = Voodoo::with_workers(Board::Voodoo2Max, 0);
+        v.config_write(0x40, 1);
+        reg(&mut v, FBI_INIT1, 10 << 4);
+        reg(&mut v, FBI_INIT2, 150 << 11);
+        reg(&mut v, SWAPBUFFER_CMD, 0);
+        assert_eq!((v.fbi.frontbuf, v.fbi.backbuf), (1, 0));
+        // grGlideShutdown, then the next program's grSstWinOpen.
+        for _ in 0..2 {
+            for data in [0x5E, 0x5A, 0x58] {
+                reg(&mut v, FBI_INIT0, data);
+            }
+        }
+        assert_eq!((v.fbi.frontbuf, v.fbi.backbuf), (0, 1));
+        // A frame: a fill of the back buffer, then a rectangle fill of
+        // the blitter at the page Glide counts as the back buffer's.
+        reg(&mut v, CLIP_LEFT_RIGHT, 640);
+        reg(&mut v, CLIP_LOW_Y_HIGH_Y, 480);
+        reg(&mut v, FBZ_MODE, 1 << 9 | 1 << 14);
+        reg(&mut v, COLOR1, 0x0000_00FF);
+        reg(&mut v, FASTFILL_CMD, 0);
+        reg(&mut v, BLT_DST_BASE_ADDR, 150 << 12);
+        reg(&mut v, BLT_XY_STRIDES, 1280 << 16);
+        reg(&mut v, BLT_ROP, 0xCCCC);
+        reg(&mut v, BLT_COLOR, 0xF800);
+        reg(&mut v, BLT_DST_XY, 99 << 16);
+        reg(&mut v, BLT_SIZE, 0);
+        reg(&mut v, BLT_COMMAND, 1 << 31 | 2);
+        let back = 150 * 0x1000 / 2;
+        let row = 99 * 640;
+        assert_eq!(v.frame_buffer().get(back), 0x001F, "the fill drew the back buffer");
+        assert_eq!(v.frame_buffer().get(back + row), 0xF800, "the blit drew there too");
+        assert_eq!(v.frame_buffer().get(row), 0, "nothing reached the front buffer");
     }
 
     #[test]
