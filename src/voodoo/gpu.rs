@@ -39,6 +39,91 @@ fn rows_of(base: u32, stride: Stride, (start, end): (u32, u32)) -> (u32, u32) {
     ((a / unit * per) as u32, (b.div_ceil(unit) * per) as u32)
 }
 
+/// Rows a bit each in `ReadRows`: up to 2,048 rows a buffer.
+const ROW_WORDS: usize = 32;
+
+/// What the reads back of the buffers (`gpu_catch_up_in`) covered, for
+/// the debugger: whether a cache of the rows read, kept until something
+/// draws over them, would have saved reads. Each buffer (the three colour
+/// buffers, then the auxiliary one) has a bit for each of its rows that
+/// was drawn since it was last read. Until the first read every bit is
+/// set and nothing marks them, so a program that reads nothing back pays
+/// nothing.
+pub(crate) struct ReadRows {
+    drawn: [[u64; ROW_WORDS]; 4],
+    armed: bool,
+    /// Rows read back, summed over the reads.
+    pub rows: u64,
+    /// Reads of part of a buffer rather than all its rows.
+    pub partial: u64,
+    /// Rows read that were drawn since the last read of their buffer,
+    /// and those that weren't, which a cache would have had.
+    pub drawn_rows: u64,
+    pub undrawn_rows: u64,
+}
+
+impl Default for ReadRows {
+    fn default() -> Self {
+        Self {
+            drawn: [[!0; ROW_WORDS]; 4],
+            armed: false,
+            rows: 0,
+            partial: 0,
+            drawn_rows: 0,
+            undrawn_rows: 0,
+        }
+    }
+}
+
+impl ReadRows {
+    /// The words of a buffer's bits that rows `top..bottom` are in, with
+    /// the mask of each.
+    fn words(top: u32, bottom: u32) -> impl Iterator<Item = (usize, u64)> {
+        let end = 64 * ROW_WORDS as u32;
+        let (top, bottom) = (top.min(end), bottom.min(end));
+        (top / 64..bottom.div_ceil(64)).map(move |w| {
+            let lo = (w * 64).max(top) - w * 64;
+            let hi = (w * 64 + 64).min(bottom) - w * 64;
+            let mask = if hi - lo == 64 {
+                !0
+            } else {
+                ((1u64 << (hi - lo)) - 1) << lo
+            };
+            (w as usize, mask)
+        })
+    }
+
+    /// Whether drawing has to be marked: something was read back.
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Rows `top..bottom` of buffer `slot` were drawn.
+    pub fn mark(&mut self, slot: usize, (top, bottom): (u32, u32)) {
+        for (w, mask) in Self::words(top, bottom) {
+            self.drawn[slot][w] |= mask;
+        }
+    }
+
+    /// Rows `top..bottom` of buffer `slot`, of `height`, were read back.
+    pub fn read(&mut self, slot: usize, (top, bottom): (u32, u32), height: u32) {
+        self.armed = true;
+        let rows = bottom.saturating_sub(top) as u64;
+        self.rows += rows;
+        if top > 0 || bottom < height {
+            self.partial += 1;
+        }
+        let mut drawn = 0;
+        for (w, mask) in Self::words(top, bottom) {
+            drawn += (self.drawn[slot][w] & mask).count_ones() as u64;
+            self.drawn[slot][w] &= !mask;
+        }
+        let drawn = drawn.min(rows);
+        self.drawn_rows += drawn;
+        self.undrawn_rows += rows - drawn;
+    }
+}
+
 /// The OpenGL renderer, as the card reaches it between frames.
 pub trait GpuLink {
     /// Whether the renderer is there and keeps a copy of the card's
@@ -146,6 +231,9 @@ impl Voodoo {
     pub(crate) fn gpu_left(&self, job: &Job) {
         self.gpu_behind.set(true);
         self.gpu_only.set(self.gpu_only.get() + 1);
+        if self.gpu_rows.borrow().armed() {
+            self.gpu_mark_drawn(job);
+        }
         let fbi = &self.fbi;
         let all = (0, fbi.height);
         let mut gpu = self.gpu.borrow_mut();
@@ -172,6 +260,65 @@ impl Voodoo {
                     mark(offs, fbi.stride, all);
                 }
                 mark(fbi.auxoffs, fbi.aux_stride, all);
+            }
+        }
+    }
+
+    /// The buffer slot of `ReadRows` for a buffer's key in the recording
+    /// (a colour buffer's word offset, None for the auxiliary buffer).
+    fn gpu_rows_slot(&self, key: Option<u32>) -> usize {
+        key.and_then(|k| {
+            let mut colour = self.fbi.rgboffs.iter();
+            colour.position(|&o| o != super::NONE && o / 2 == k)
+        })
+        .unwrap_or(3)
+    }
+
+    /// Mark the rows `job` draws into in `ReadRows`, generously.
+    fn gpu_mark_drawn(&self, job: &Job) {
+        let height = self.fbi.height;
+        let mut reads = self.gpu_rows.borrow_mut();
+        // Rows y0..y1 as the card counts them, as rows of the buffer.
+        let rows = |st: &super::raster::RasterState, y0: i32, y1: i32| {
+            let (y0, y1) = if st.fbz_mode & (1 << 17) != 0 {
+                (st.yorigin as i32 - y1 + 1, st.yorigin as i32 - y0 + 1)
+            } else {
+                (y0, y1)
+            };
+            let clamp = |y: i32| y.clamp(0, height as i32) as u32;
+            (clamp(y0), clamp(y1))
+        };
+        match job {
+            Job::Triangle { st, verts, .. } => {
+                let ys = verts.iter().map(|v| v.1);
+                let low = ys.clone().fold(f32::INFINITY, f32::min);
+                let high = ys.fold(f32::NEG_INFINITY, f32::max);
+                let r = if low.is_finite() && high.is_finite() {
+                    rows(st, low.floor() as i32, high.ceil() as i32 + 1)
+                } else {
+                    (0, height)
+                };
+                reads.mark(self.gpu_rows_slot(Some(st.dest as u32)), r);
+                reads.mark(3, r);
+            }
+            Job::Fastfill { st, y0, y1, .. } => {
+                let r = rows(st, *y0, *y1);
+                reads.mark(self.gpu_rows_slot(Some(st.dest as u32)), r);
+                reads.mark(3, r);
+            }
+            Job::Rows { base, rows, .. } => {
+                let aux = self.fbi.auxoffs != super::NONE && *base == self.fbi.auxoffs as usize / 2;
+                let slot = if aux {
+                    3
+                } else {
+                    self.gpu_rows_slot(Some(*base as u32))
+                };
+                reads.mark(slot, *rows);
+            }
+            _ => {
+                for slot in 0..4 {
+                    reads.mark(slot, (0, height));
+                }
             }
         }
     }
@@ -257,6 +404,9 @@ impl Voodoo {
                 let mut pixels = vec![0u16; width * (bottom - top) as usize];
                 if link.read_buffer(buffer, (top, bottom), &mut pixels) {
                     read = true;
+                    let slot = self.gpu_rows_slot(buffer);
+                    let mut reads = self.gpu_rows.borrow_mut();
+                    reads.read(slot, (top, bottom), layout.height);
                     for (y, row) in (top as usize..).zip(pixels.chunks_exact(width)) {
                         let start = base as usize + stride.row(y);
                         for (x, &value) in row.iter().enumerate() {

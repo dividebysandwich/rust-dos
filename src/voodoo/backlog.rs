@@ -691,6 +691,9 @@ pub fn words(layout: &TileLayout, words: &[Word]) -> Access {
         let tiles = layout.tiles((x0, x1, y, y + 1), false);
         access.writes[slot] = access.writes[slot].union(tiles);
     };
+    // Each buffer's last word worked out, and its pixel: the word after
+    // it in a linear buffer is the next pixel, without a division.
+    let mut last: [Option<(usize, u32, u32)>; 4] = [None; 4];
     'word: for word in words {
         for (slot, base) in layout.bases.iter().enumerate() {
             let Some(at) = base.and_then(|b| (word.at as usize).checked_sub(b)) else {
@@ -700,9 +703,20 @@ pub fn words(layout: &TileLayout, words: &[Word]) -> Access {
                 AUX => layout.aux_stride,
                 _ => layout.stride,
             };
-            let Some((x, y)) = pixel_at(stride, at) else {
-                continue;
+            let (x, y) = match last[slot] {
+                Some((prev, x, y)) if !stride.tiled && at == prev + 1 => {
+                    if x as usize + 1 < stride.words {
+                        (x + 1, y)
+                    } else {
+                        (0, y + 1)
+                    }
+                }
+                _ => match pixel_at(stride, at) {
+                    Some(p) => p,
+                    None => continue,
+                },
             };
+            last[slot] = Some((at, x, y));
             if x < layout.width && y < layout.height {
                 match &mut run {
                     Some((s, _, x1, ry)) if *s == slot && *ry == y && *x1 == x => *x1 = x + 1,
@@ -1713,6 +1727,49 @@ mod tests {
             value: 0,
         };
         assert!(words(&l, &[word(700)]).pinned);
+    }
+
+    #[test]
+    fn words_one_after_another_find_the_tiles_each_one_does() {
+        // `words` works out a word's pixel from the word before it: across
+        // the end of a row, and from one buffer's last row into the next
+        // buffer, the run touches the tiles the words alone do.
+        let check = |l: &TileLayout, ats: std::ops::Range<u32>| {
+            let run: Vec<Word> = ats
+                .map(|at| Word {
+                    row: 0,
+                    at,
+                    value: 0,
+                })
+                .collect();
+            let alone: Vec<Access> = run
+                .iter()
+                .map(|w| words(l, std::slice::from_ref(w)))
+                .collect();
+            let together = words(l, &run);
+            if alone.iter().any(|a| a.pinned) {
+                assert!(together.pinned);
+                return;
+            }
+            let mut writes = [Rect::default(); 4];
+            for a in &alone {
+                for (w, &r) in writes.iter_mut().zip(&a.writes) {
+                    *w = w.union(r);
+                }
+            }
+            assert_eq!(together.writes, writes);
+        };
+        let size = 640 * 480;
+        let l = layout();
+        check(&l, 600..1400);
+        check(&l, size - 700..size + 700);
+        check(&l, 3 * size - 10..3 * size + 10);
+        let wide = Stride::linear(1024);
+        let one = [Some(0), None, None, None];
+        let l = TileLayout::new(one, (640, 480), wide, wide, 1024 * 480);
+        check(&l, 0..640);
+        check(&l, 1024..1664);
+        check(&l, 600..700);
     }
 
     #[test]

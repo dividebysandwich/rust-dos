@@ -1535,8 +1535,8 @@ pub fn get_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Flip.
 
-const DDFLIP_WAIT: u32 = 0x1;
-const DDFLIP_NOVSYNC: u32 = 0x8;
+pub const DDFLIP_WAIT: u32 = 0x1;
+pub const DDFLIP_NOVSYNC: u32 = 0x8;
 
 /// The surfaces of the flip chain whose front buffer is `front`, the
 /// front first.
