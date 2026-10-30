@@ -614,9 +614,10 @@ pub struct Voodoo {
     pub(crate) svert: [tsu::Vertex; 3],
     pub(crate) sverts: u32,
     pub(crate) blt: blit::Blit,
-    /// `blt_queue_dest`'s answer for the copy under way, and what it was
-    /// worked out from (`blt_queue_key`): a copy sends its data a word at
-    /// a time, tens of thousands a frame.
+    /// `blt_queue_dest`'s answer for the copy under way, until a register
+    /// write or a new layout drops it (`blt_queue_stale`), and what it was
+    /// worked out from (`blt_queue_key`), for debug builds to check: a
+    /// copy sends its data a word at a time, tens of thousands a frame.
     blt_queue: Cell<Option<([u32; 15], Option<usize>)>>,
     /// The Banshee's or Voodoo3's own state when the card is one: the
     /// display adapter around the 3D engine, whose memory it shares.
@@ -625,6 +626,13 @@ pub struct Voodoo {
 
 /// Frame buffer writes that go out to the workers together.
 const WORDS_A_JOB: usize = 4096;
+/// Frame buffer writes that wait together while jobs are held back
+/// (`queue_words`). Nothing draws them before the jobs held are, so a
+/// batch can be larger: Moto Racer's sky, 40,000 data words or 80,000
+/// pixels a frame, goes to the backlog in two batches instead of 20. A
+/// batch of all of them would save the job's growth, but costs a copy of
+/// 640 KB a frame instead, and measured no faster.
+const WORDS_HELD: usize = 1 << 16;
 
 /// One-time log messages.
 const LOG_BYTE: u32 = 1;
@@ -722,6 +730,7 @@ impl Voodoo {
     /// VGA, nothing pending. The memory keeps what it had.
     pub fn reset(&mut self) {
         self.flush();
+        self.blt_queue_stale();
         self.pool.reset_stats();
         self.counters_read.set(false);
         self.reg.fill(0);
@@ -1050,15 +1059,20 @@ impl Voodoo {
     /// queued while jobs were held back aren't in the footprint yet
     /// (`queue_words`): handed over, they go into it.
     fn submit_words(&self) {
-        let words = std::mem::take(&mut *self.words.borrow_mut());
         self.words_unseen.set(false);
-        if words.is_empty() {
+        if self.words.borrow().is_empty() {
             return;
         }
         if self.deferring() {
+            // The backlog copies them, and `words` keeps its room for the
+            // next ones, which a copy adds a few at a time.
+            let words = self.words.borrow();
             let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, &words);
+            drop(words);
+            self.words.borrow_mut().clear();
             self.hand_over(out);
         } else {
+            let words = std::mem::take(&mut *self.words.borrow_mut());
             self.hand_over([Job::Pixels { fb: self.fbi.ram.clone(), words }]);
         }
     }
@@ -1103,7 +1117,7 @@ impl Voodoo {
             let mut words = self.words.borrow_mut();
             words.extend_from_slice(new);
             self.words_unseen.set(true);
-            if words.len() >= WORDS_A_JOB {
+            if words.len() >= WORDS_HELD {
                 drop(words);
                 self.submit_words();
             }
@@ -1190,6 +1204,7 @@ impl Voodoo {
 
     /// Where the buffers are, from the fbiInit registers (`recompute_video_memory`).
     pub(crate) fn recompute_video_memory(&mut self) {
+        self.blt_queue_stale();
         if self.banshee.is_some() {
             self.banshee_buffers();
             return;
@@ -2036,6 +2051,7 @@ impl State for Voodoo {
 
     fn load(&mut self, r: &mut Reader) -> Result<()> {
         self.flush();
+        self.blt_queue_stale();
         let mut board = Board::default();
         board.load(r)?;
         if board != self.board {
