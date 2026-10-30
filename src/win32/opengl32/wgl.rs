@@ -7,17 +7,33 @@
 //! Voodoo3, which draw only in 16 bits: 5-6-5 color, single or double
 //! buffered, with a 16-bit depth buffer and no stencil, alpha or
 //! accumulation buffer. A window's pixel format is set once.
+//!
+//! On a Voodoo2 the ICD is the one of 3dfx's Voodoo2 driver
+//! (3DFXVGL.DLL), which draws full screen on the card: its two pixel
+//! formats are 5-6-5 with a 16-bit depth buffer, single or double
+//! buffered, as the Banshee's are, but they also say they support GDI
+//! and have an 8-bit stencil and a 64-bit accumulation buffer, which
+//! that driver kept in software. wglMakeCurrent opens the card at the
+//! smallest of its modes that holds the window's client area and a
+//! depth buffer, and fails when none does, as that driver did with a
+//! window of 1024x768 on a card with 4 MB of frame buffer. OpenGL's
+//! window is the top left corner of the card's screen, and SwapBuffers
+//! swaps the card's buffers.
 
 use super::super::ddraw::d3d::device::{self as inner_device, Device as Inner, Viewport7};
 use super::super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::super::ddraw::d3d::{D3dObject, hal, shadow};
-use super::super::ddraw::directdraw::{self, DDSCL_NORMAL};
-use super::super::ddraw::surface::{
-    self as dd_surface, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN,
-    DDSCAPS_VIDEOMEMORY, DDSCAPS_ZBUFFER, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH,
-    Desc,
+use super::super::ddraw::directdraw::{
+    self, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSCL_NORMAL, DDSCL_NOWINDOWCHANGES,
 };
-use super::super::ddraw::{self, Format, V_DD7, V_DEVICE7, V_SURFACE7};
+use super::super::ddraw::surface::{
+    self as dd_surface, DDFLIP_NOVSYNC, DDFLIP_WAIT, DDPF_RGB, DDPF_ZBUFFER, DDSCAPS_3DDEVICE,
+    DDSCAPS_COMPLEX, DDSCAPS_FLIP, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_PRIMARYSURFACE,
+    DDSCAPS_VIDEOMEMORY, DDSCAPS_ZBUFFER, DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT,
+    DDSD_PIXELFORMAT, DDSD_WIDTH, Desc,
+};
+use super::super::ddraw::{self, Format, V_DD7, V_DEVICE7, V_SURFACE7, voodoo};
+use super::super::glide::hw::Card;
 use super::{Context, DLL, context_index, current, hglrc, new_context, state};
 use crate::cpu::Cpu;
 
@@ -51,22 +67,55 @@ const FORMATS: [u32; 2] = [
     PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_SWAP_COPY,
 ];
 
-/// Whether the ICD is there: the display adapter is a Banshee or
-/// Voodoo3.
-pub fn has_icd(cpu: &Cpu) -> bool {
-    cpu.bus.vga.adapter.voodoo_board().is_some()
+/// The pixel formats of 3dfx's Voodoo2 ICD, from 1: their flags. Both
+/// are 5-6-5 with a 16-bit depth buffer, an 8-bit stencil buffer and a
+/// 64-bit accumulation buffer, as its DescribePixelFormat gives them.
+const VOODOO2_FORMATS: [u32; 2] = [
+    PFD_DRAW_TO_WINDOW | PFD_SUPPORT_GDI | PFD_SUPPORT_OPENGL,
+    PFD_DRAW_TO_WINDOW | PFD_SUPPORT_GDI | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+];
+
+/// Which ICD the machine has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icd {
+    /// None: no pixel formats.
+    None,
+    /// 3dfx's for the Banshee and Voodoo3, the display adapter: a
+    /// context draws in a window.
+    Windowed,
+    /// 3dfx's for the Voodoo2, an add-on card: a context draws full
+    /// screen on the card.
+    FullScreen,
+}
+
+/// The ICD the machine has: the Banshee's or Voodoo3's when it is the
+/// display adapter, the Voodoo2's when the machine has one.
+pub fn icd(cpu: &Cpu) -> Icd {
+    if cpu.bus.vga.adapter.voodoo_board().is_some() {
+        Icd::Windowed
+    } else if super::super::glide::hw::board(cpu).is_some_and(|b| b.card == Card::Voodoo2) {
+        Icd::FullScreen
+    } else {
+        Icd::None
+    }
+}
+
+/// The flags of the pixel formats there are, from 1.
+fn formats(cpu: &Cpu) -> &'static [u32] {
+    match icd(cpu) {
+        Icd::Windowed => &FORMATS,
+        Icd::FullScreen => &VOODOO2_FORMATS,
+        Icd::None => &[],
+    }
 }
 
 /// The formats there are.
 pub fn describe_formats(cpu: &Cpu) -> u32 {
-    if has_icd(cpu) {
-        FORMATS.len() as u32
-    } else {
-        0
-    }
+    formats(cpu).len() as u32
 }
 
-/// Whether the pixel format `format` is double buffered.
+/// Whether the pixel format `format` is double buffered: the second of
+/// either ICD's.
 pub fn double_buffered(format: u32) -> bool {
     FORMATS
         .get((format as usize).wrapping_sub(1))
@@ -89,7 +138,7 @@ fn format_of(cpu: &mut Cpu, hwnd: u32) -> u32 {
 
 /// Write the descriptor of the pixel format `format` (from 1) at `at`.
 fn write_descriptor(cpu: &mut Cpu, at: u32, format: u32) {
-    let flags = FORMATS[format as usize - 1];
+    let flags = formats(cpu)[format as usize - 1];
     let mut b = [0u8; PFD_SIZE as usize];
     b[0..2].copy_from_slice(&(PFD_SIZE as u16).to_le_bytes());
     b[2..4].copy_from_slice(&1u16.to_le_bytes());
@@ -100,15 +149,22 @@ fn write_descriptor(cpu: &mut Cpu, at: u32, format: u32) {
     b[9] = 16;
     b[10..18].copy_from_slice(&[5, 11, 6, 5, 5, 0, 0, 0]);
     // No accumulation buffer, depth 16, no stencil or aux buffers, the
-    // main plane.
+    // main plane. The Voodoo2's ICD has a 64-bit accumulation buffer,
+    // 16 bits each, and an 8-bit stencil buffer.
     b[23] = 16;
+    if icd(cpu) == Icd::FullScreen {
+        b[18..23].copy_from_slice(&[64, 16, 16, 16, 16]);
+        b[24] = 8;
+    }
     cpu.bus.guest_write_bytes(at, &b);
 }
 
 /// The pixel format that best matches the descriptor at `at`, as
-/// Mesa's wglChoosePixelFormat picks it: 0 for none.
+/// Mesa's wglChoosePixelFormat picks it: 0 for none. The Voodoo2's ICD
+/// takes any number of color bits for its 16.
 fn choose(cpu: &mut Cpu, at: u32) -> u32 {
-    if !has_icd(cpu) || at == 0 || !cpu.bus.guest_probe(at, PFD_SIZE as usize, false) {
+    let icd = icd(cpu);
+    if icd == Icd::None || at == 0 || !cpu.bus.guest_probe(at, PFD_SIZE as usize, false) {
         return 0;
     }
     let mut b = [0u8; PFD_SIZE as usize];
@@ -126,10 +182,10 @@ fn choose(cpu: &mut Cpu, at: u32) -> u32 {
     } else {
         color
     };
-    for (i, &have) in FORMATS.iter().enumerate() {
-        if color > 0 && color != 16 {
-            continue;
-        }
+    if color > 0 && color != 16 && icd == Icd::Windowed {
+        return 0;
+    }
+    for (i, &have) in formats(cpu).iter().enumerate() {
         let needs = [
             PFD_DRAW_TO_WINDOW,
             PFD_DRAW_TO_BITMAP,
@@ -237,32 +293,53 @@ pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_compiled_vertex_array \
 /// The WGL extensions, as wglGetExtensionsStringEXT gives them.
 pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control";
 
+/// The extensions of the Voodoo2's ICD that are here: its own list
+/// has more (paletted textures, point parameters and others), which
+/// aren't.
+pub const VOODOO2_EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
+    GL_EXT_compiled_vertex_array WGL_EXT_swap_control";
+
 /// Write the strings into a new page of the process: its address.
 fn write_strings(cpu: &mut Cpu) -> Option<u32> {
     let board = super::super::glide::hw::board(cpu)?;
     let at = super::super::kernel32::alloc_pages(cpu, 0x1000)?;
-    let name = if board.voodoo3 {
-        "Voodoo3"
+    let (renderer, version, extensions) = if board.card == Card::Voodoo2 {
+        // As 3DFXVGL.DLL gives them, which a program loads itself or
+        // finds as the OPENGL32.DLL of its own folder ("stand-alone").
+        (
+            format!(
+                "3Dfx/Voodoo2/{} TMUs/{} MB",
+                board.tmus,
+                board.fb_bytes >> 20
+            ),
+            "1.1.0 3Dfx stand-alone (May 26 1999)",
+            VOODOO2_EXTENSIONS,
+        )
     } else {
-        "Voodoo Banshee"
-    };
-    let renderer = format!(
-        "3Dfx/{} (tm)/{} TMUs/{} MB SDRAM/ICD (Jun  5 2000)",
-        name,
-        board.tmus,
-        board.fb_bytes >> 20
-    );
-    // A Banshee's one texture unit has no multitexture, as Mesa's
-    // driver leaves it out with one.
-    let extensions = if board.tmus > 1 {
-        EXTENSIONS
-    } else {
-        EXTENSIONS.trim_start_matches("GL_ARB_multitexture ")
+        let name = if board.voodoo3 {
+            "Voodoo3"
+        } else {
+            "Voodoo Banshee"
+        };
+        let renderer = format!(
+            "3Dfx/{} (tm)/{} TMUs/{} MB SDRAM/ICD (Jun  5 2000)",
+            name,
+            board.tmus,
+            board.fb_bytes >> 20
+        );
+        // A Banshee's one texture unit has no multitexture, as Mesa's
+        // driver leaves it out with one.
+        let extensions = if board.tmus > 1 {
+            EXTENSIONS
+        } else {
+            EXTENSIONS.trim_start_matches("GL_ARB_multitexture ")
+        };
+        (renderer, "1.1.0", extensions)
     };
     let strings = [
         (VENDOR_AT, "3Dfx Interactive Inc."),
         (RENDERER_AT, renderer.as_str()),
-        (VERSION_AT, "1.1.0"),
+        (VERSION_AT, version),
         (EXTENSIONS_AT, extensions),
         (WGL_EXTENSIONS_AT, WGL_EXTENSIONS),
     ];
@@ -332,7 +409,6 @@ fn client_size(cpu: &mut Cpu, hwnd: u32) -> (u32, u32) {
 struct Buffers {
     window: u32,
     dd: u32,
-    inner: u32,
     target: u32,
     depth: u32,
     size: (u32, u32),
@@ -342,10 +418,12 @@ struct Buffers {
 /// client area isn't their size, or they were lost: false if they
 /// can't be made.
 pub fn fit_buffers(cpu: &mut Cpu, index: usize) -> bool {
+    if full_screen(cpu, index) {
+        return fit_card(cpu, index);
+    }
     let Some(c) = state(cpu).contexts[index].as_ref().map(|c| Buffers {
         window: c.window,
         dd: c.dd,
-        inner: c.inner,
         target: c.target,
         depth: c.depth,
         size: (c.width, c.height),
@@ -370,21 +448,128 @@ pub fn fit_buffers(cpu: &mut Cpu, index: usize) -> bool {
         return false;
     };
     ddraw::add_ref(cpu, target_iface);
-    if let Some(i) = inner_device::get(cpu, c.inner) {
-        i.target = target;
-        i.target_iface = target_iface;
-        i.depth = depth;
+    install_buffers(cpu, index, (target, target_iface), (depth, depth_iface), size);
+    true
+}
+
+/// Give the context at `index` and its inner device the color buffer
+/// `target` and the depth buffer `depth` (ids and held interfaces, the
+/// color buffer's held twice, for the context and the device), the
+/// window's client area being `size`, and clear them.
+fn install_buffers(
+    cpu: &mut Cpu,
+    index: usize,
+    target: (u32, u32),
+    depth: (u32, u32),
+    size: (u32, u32),
+) {
+    let inner = state(cpu).contexts[index].as_ref().map_or(0, |c| c.inner);
+    if let Some(i) = inner_device::get(cpu, inner) {
+        (i.target, i.target_iface) = target;
+        i.depth = depth.0;
     }
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
-        c.target = target;
-        c.target_iface = target_iface;
-        c.depth = depth;
-        c.depth_iface = depth_iface;
-        c.width = size.0;
-        c.height = size.1;
+        (c.target, c.target_iface) = target;
+        (c.depth, c.depth_iface) = depth;
+        (c.width, c.height) = size;
     }
     super::draw::clear_buffers(cpu, index, true, true);
-    true
+}
+
+/// Whether the context at `index` draws full screen on the Voodoo2:
+/// its DirectDraw object is the card's.
+fn full_screen(cpu: &mut Cpu, index: usize) -> bool {
+    let dd = state(cpu).contexts[index].as_ref().map_or(0, |c| c.dd);
+    dd != 0 && directdraw::is_card(cpu, dd)
+}
+
+/// The full-screen context at `index` on the Voodoo2: open the card at
+/// the smallest of its modes that holds the window's client area and a
+/// depth buffer, with its front buffer, back buffer and depth buffer
+/// as surfaces, unless it is open in one already. False if no mode
+/// holds the window, or the card can't be opened: the card then gives
+/// the VGA its picture back.
+fn fit_card(cpu: &mut Cpu, index: usize) -> bool {
+    let Some(c) = state(cpu).contexts[index].as_ref() else {
+        return false;
+    };
+    let (window, dd_iface, target, depth) = (c.window, c.dd_iface, c.target, c.depth);
+    let size = client_size(cpu, window);
+    let lost = |cpu: &mut Cpu, id: u32| voodoo::card_buffer(cpu, id).is_none();
+    let (mode_w, mode_h, _, _) = voodoo::current(cpu);
+    let fits = size.0 <= mode_w && size.1 <= mode_h;
+    if target != 0 && fits && !lost(cpu, target) && !lost(cpu, depth) {
+        if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
+            (c.width, c.height) = size;
+        }
+        return true;
+    }
+    drop_buffers(cpu, index);
+    if open_card(cpu, index, size).is_some() {
+        return true;
+    }
+    // Out of exclusive mode, which closes the card if it is open.
+    directdraw::set_cooperative_level(cpu, &[dd_iface, 0, DDSCL_NORMAL]);
+    false
+}
+
+/// Open the card for the context at `index`, whose window's client
+/// area is `size`, and give the context its buffers: None if no mode
+/// holds the window, or the card can't be opened.
+fn open_card(cpu: &mut Cpu, index: usize, size: (u32, u32)) -> Option<()> {
+    let c = state(cpu).contexts[index].as_ref()?;
+    let (window, dd, dd_iface, format) = (c.window, c.dd, c.dd_iface, c.format);
+    let (w, h) = voodoo::depth_modes(cpu)
+        .into_iter()
+        .find(|&(w, h)| size.0 <= w && size.1 <= h)?;
+    let level = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
+    let ok = Some(super::super::ddraw::DD_OK);
+    if directdraw::set_cooperative_level(cpu, &[dd_iface, window, level]) != ok {
+        return None;
+    }
+    if Some(voodoo::set_mode(cpu, dd, w, h, 16, 0)) != ok {
+        return None;
+    }
+    // The primary surface, with a back buffer when the format is
+    // double buffered.
+    let double = double_buffered(format);
+    let (flags, caps) = if double {
+        (
+            DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+            DDSCAPS_PRIMARYSURFACE | DDSCAPS_3DDEVICE | DDSCAPS_FLIP | DDSCAPS_COMPLEX,
+        )
+    } else {
+        (DDSD_CAPS, DDSCAPS_PRIMARYSURFACE | DDSCAPS_3DDEVICE)
+    };
+    let desc = Desc {
+        flags,
+        backbuffers: double as u32,
+        caps: [caps, 0, 0, 0],
+        ..Desc::default()
+    };
+    let ids = dd_surface::make(cpu, dd, 7, level, &desc).ok()?;
+    let primary_iface = ddraw::iface(cpu, ids[0], V_SURFACE7);
+    let target = ids[ids.len() - 1];
+    let target_iface = ddraw::iface(cpu, target, V_SURFACE7);
+    if primary_iface == 0 || target_iface == 0 {
+        ddraw::destroy(cpu, ids[0]);
+        return None;
+    }
+    ddraw::add_ref(cpu, primary_iface);
+    // One for the context, one for the device.
+    ddraw::add_ref(cpu, target_iface);
+    ddraw::add_ref(cpu, target_iface);
+    let Some(depth) = make_buffer(cpu, dd, (w, h), true) else {
+        ddraw::release(cpu, target_iface);
+        ddraw::release(cpu, target_iface);
+        ddraw::release(cpu, primary_iface);
+        return None;
+    };
+    if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
+        c.primary_iface = primary_iface;
+    }
+    install_buffers(cpu, index, (target, target_iface), depth, size);
+    Some(())
 }
 
 /// Let go of the context's color and depth buffers.
@@ -394,6 +579,7 @@ fn drop_buffers(cpu: &mut Cpu, index: usize) {
     };
     let target_iface = std::mem::take(&mut c.target_iface);
     let depth_iface = std::mem::take(&mut c.depth_iface);
+    let primary_iface = std::mem::take(&mut c.primary_iface);
     c.target = 0;
     c.depth = 0;
     let inner = c.inner;
@@ -402,7 +588,7 @@ fn drop_buffers(cpu: &mut Cpu, index: usize) {
         i.depth = 0;
         std::mem::take(&mut i.target_iface)
     });
-    for iface in [held.unwrap_or(0), target_iface, depth_iface] {
+    for iface in [held.unwrap_or(0), target_iface, depth_iface, primary_iface] {
         if iface != 0 {
             ddraw::release(cpu, iface);
         }
@@ -419,7 +605,8 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let format = format_of(cpu, hwnd);
-    if !has_icd(cpu) || hwnd == 0 || format == 0 {
+    let icd = icd(cpu);
+    if icd == Icd::None || hwnd == 0 || format == 0 {
         super::super::gdi32::set_error(cpu, ERROR_INVALID_PIXEL_FORMAT);
         return Some(0);
     }
@@ -428,8 +615,10 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     };
 
-    // The DirectDraw object, in a window.
-    let dd = directdraw::new_ddraw(cpu, true, false);
+    // The DirectDraw object: in a window, or the Voodoo2's, which takes
+    // the card full screen when the context is first made current.
+    let card = icd == Icd::FullScreen;
+    let dd = directdraw::new_ddraw(cpu, true, card);
     let dd_iface = ddraw::iface(cpu, dd, V_DD7);
     if dd_iface == 0 {
         ddraw::destroy(cpu, dd);
@@ -437,7 +626,9 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0);
     }
     ddraw::add_ref(cpu, dd_iface);
-    directdraw::set_cooperative_level(cpu, &[dd_iface, hwnd, DDSCL_NORMAL]);
+    if !card {
+        directdraw::set_cooperative_level(cpu, &[dd_iface, hwnd, DDSCL_NORMAL]);
+    }
 
     // The Direct3D device that draws.
     let tmus = super::super::ddraw::d3d::hal(cpu, dd).unwrap_or(1);
@@ -475,7 +666,7 @@ pub fn create_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             s.contexts.len() - 1
         }
     };
-    if !fit_buffers(cpu, index) {
+    if !card && !fit_buffers(cpu, index) {
         destroy(cpu, index);
         super::super::gdi32::set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
@@ -654,7 +845,10 @@ pub fn present(cpu: &mut Cpu, index: usize) {
     else {
         return;
     };
-    if target != 0 {
+    let card = full_screen(cpu, index);
+    if card {
+        swap_card(cpu, index);
+    } else if target != 0 {
         shadow::expose(cpu, target);
         super::super::d3d8::copy::present_window(cpu, target, None, None, window);
         // A frame, as the card's buffer swaps are while it shows its
@@ -666,8 +860,35 @@ pub fn present(cpu: &mut Cpu, index: usize) {
     if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
         c.drawn = false;
     }
-    // A window whose size changed has buffers of its new size next.
-    fit_buffers(cpu, index);
+    // A window whose size changed has buffers of its new size next. The
+    // Voodoo2's card opens only for a context made current.
+    let h = hglrc(index);
+    if !card || state(cpu).current.iter().any(|c| c.1 == h) {
+        fit_buffers(cpu, index);
+    }
+}
+
+/// The full-screen context at `index` on the Voodoo2: the card swaps
+/// its buffers at a retrace, or at once with a swap interval of 0. A
+/// single-buffered context draws into the front buffer, which shows.
+fn swap_card(cpu: &mut Cpu, index: usize) {
+    let Some(c) = state(cpu).contexts[index].as_ref() else {
+        return;
+    };
+    let (primary_iface, interval, format) = (c.primary_iface, c.swap_interval, c.format);
+    if primary_iface == 0 {
+        return;
+    }
+    if !double_buffered(format) {
+        // Nothing swaps, but it is a frame, as a window's is, for
+        // `cycles=auto`.
+        if let Some(v) = cpu.bus.voodoo.as_mut() {
+            v.swapped += 1;
+        }
+        return;
+    }
+    let flags = DDFLIP_WAIT | if interval == 0 { DDFLIP_NOVSYNC } else { 0 };
+    dd_surface::flip(cpu, &[primary_iface, 0, flags]);
 }
 
 /// wglSwapBuffers(hdc).

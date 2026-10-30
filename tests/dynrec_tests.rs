@@ -4438,6 +4438,131 @@ fn fpu_single_stores_of_80_bit_sums_stay_in_translated_code() {
 }
 
 #[test]
+fn fpu_single_stores_round_as_the_control_word_says_on_both_cores() {
+    // A value stored as a single under each rounding (nearest, down, up,
+    // toward zero), as an x87 rounds it: once, from the value, past a
+    // single's range to its largest value or infinity, and below it to a
+    // denormal or zero, as the rounding goes. Sub Culture stores singles
+    // with control word 143Fh (rounding down). First registers whose 80
+    // bits are their doubles (loaded from qwords), then four whose 80 bits
+    // hold more (loaded from tbytes).
+    let doubles: [(u64, [u32; 4]); 7] = [
+        // 0.1 and -0.1.
+        (
+            0x3FB9_9999_9999_999A,
+            [0x3DCC_CCCD, 0x3DCC_CCCC, 0x3DCC_CCCD, 0x3DCC_CCCC],
+        ),
+        (
+            0xBFB9_9999_9999_999A,
+            [0xBDCC_CCCD, 0xBDCC_CCCD, 0xBDCC_CCCC, 0xBDCC_CCCC],
+        ),
+        // 1.0, a single already.
+        (0x3FF0_0000_0000_0000, [0x3F80_0000; 4]),
+        // 4e38 and -4e38, past the largest single.
+        (
+            0x47F2_CED3_2A16_A1B1,
+            [0x7F80_0000, 0x7F7F_FFFF, 0x7F80_0000, 0x7F7F_FFFF],
+        ),
+        (
+            0xC7F2_CED3_2A16_A1B1,
+            [0xFF80_0000, 0xFF80_0000, 0xFF7F_FFFF, 0xFF7F_FFFF],
+        ),
+        // 1e-46, under the least denormal (2^-149, about 1.4e-45).
+        (
+            0x3662_44CE_242C_5561,
+            [0x0000_0000, 0x0000_0000, 0x0000_0001, 0x0000_0000],
+        ),
+        // -1e-40, between two denormals (71362.38 times the least).
+        (
+            0xB7A1_6C26_2777_579C,
+            [0x8001_16C2, 0x8001_16C3, 0x8001_16C2, 0x8001_16C2],
+        ),
+    ];
+    let extended: [((u16, u64), [u32; 4]); 4] = [
+        // The largest single and a bit 2^-63 of it, and their negatives.
+        (
+            (0x407E, 0xFFFF_FF00_0000_0001),
+            [0x7F7F_FFFF, 0x7F7F_FFFF, 0x7F80_0000, 0x7F7F_FFFF],
+        ),
+        (
+            (0xC07E, 0xFFFF_FF00_0000_0001),
+            [0xFF7F_FFFF, 0xFF80_0000, 0xFF7F_FFFF, 0xFF7F_FFFF],
+        ),
+        // 2^-140, a denormal single, and a bit 2^-59 of it.
+        (
+            (0x3F73, 0x8000_0000_0000_0010),
+            [0x0000_0200, 0x0000_0200, 0x0000_0201, 0x0000_0200],
+        ),
+        // The least 80-bit denormal.
+        (
+            (0x0000, 0x0000_0000_0000_0001),
+            [0x0000_0000, 0x0000_0000, 0x0000_0001, 0x0000_0000],
+        ),
+    ];
+    let (input, output) = (DATA, DATA + 0x1000);
+    let count = doubles.len() + extended.len();
+    let (mut a, mut b) = twins(|rig| {
+        for (k, (double, _)) in doubles.iter().enumerate() {
+            rig.write32(input + 16 * k as u32, *double as u32);
+            rig.write32(input + 16 * k as u32 + 4, (double >> 32) as u32);
+        }
+        for (k, ((se, man), _)) in extended.iter().enumerate() {
+            let at = input + 16 * (doubles.len() + k) as u32;
+            rig.write32(at, *man as u32);
+            rig.write32(at + 4, (man >> 32) as u32);
+            rig.write32(at + 8, *se as u32);
+        }
+        for rc in 0..4u32 {
+            rig.write32(input + 0x200 + 4 * rc, 0x037F | rc << 10);
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                a.fninit()?;
+                a.mov(edi, output)?;
+                for rc in 0..4u32 {
+                    a.fldcw(word_ptr(input + 0x200 + 4 * rc))?;
+                    for k in 0..count as u32 {
+                        if (k as usize) < doubles.len() {
+                            a.fld(qword_ptr(input + 16 * k))?;
+                        } else {
+                            a.fld(tword_ptr(input + 16 * k))?;
+                        }
+                        a.fst(dword_ptr(edi))?;
+                        a.fstp(dword_ptr(edi + 4))?;
+                        a.add(edi, 8)?;
+                    }
+                }
+                a.hlt()
+            }),
+        );
+    });
+    run_both(&mut a, &mut b);
+    if AVAILABLE {
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Fst), 0);
+        assert_eq!(handled(&b, iced_x86::Mnemonic::Fstp), 0);
+    }
+    let wanted: Vec<[u32; 4]> = doubles
+        .iter()
+        .map(|c| c.1)
+        .chain(extended.iter().map(|c| c.1))
+        .collect();
+    for (core, rig) in [("interpreter", &a), ("recompiler", &b)] {
+        for rc in 0..4 {
+            for (k, wanted) in wanted.iter().enumerate() {
+                let at = output + 8 * (rc * count + k) as u32;
+                let got = [rig.read32(at), rig.read32(at + 4)];
+                assert_eq!(
+                    got, [wanted[rc]; 2],
+                    "{} value {} under rounding {}",
+                    core, k, rc
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn fpu_sums_in_fast_mode_are_the_doubles_on_both_cores() {
     // The same sums come out otherwise (1 and a bit a double hasn't, ...),
     // and the cores agree on them.
