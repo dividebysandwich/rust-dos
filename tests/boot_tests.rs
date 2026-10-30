@@ -237,7 +237,9 @@ fn a_booted_systems_state_writes_only_the_image_this_machine_mounts() {
     use rust_dos::disk::DriveKind;
     use rust_dos::savestate::{disks, machine as states};
     let hard_disk = || MountOptions { kind: DriveKind::HardDisk, ..Default::default() };
-    let sector_of = |path: &PathBuf, lba: usize| std::fs::read(path).unwrap()[lba * SECTOR_SIZE..][..SECTOR_SIZE].to_vec();
+    let sector_of = |path: &PathBuf, lba: usize| {
+        std::fs::read(path).unwrap()[lba * SECTOR_SIZE..][..SECTOR_SIZE].to_vec()
+    };
 
     // The saving run boots from original.img.
     let mut cpu = machine("state_original");
@@ -274,6 +276,20 @@ fn a_booted_systems_state_writes_only_the_image_this_machine_mounts() {
     assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), scratch.as_path());
     assert_eq!(sector_of(&scratch, 1), pattern, "the scratch disk has the state's");
     assert_eq!(std::fs::read(&original).unwrap(), changed, "the original as it was");
+    drop(cpu);
+
+    // A scratch disk of another size refuses the load before any of the
+    // state goes in, rather than running the state over the wrong disk.
+    let small = dir.join("small.img");
+    std::fs::write(&small, &bytes[..bytes.len() / 2]).unwrap();
+    let mut cpu = machine("state_small");
+    cpu.bus.mount_drive(2, &small, hard_disk(), true).unwrap();
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    let error = loaded.unwrap_err().to_string();
+    assert!(error.contains("isn't the size of the state's copy"), "{}", error);
+    assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), small.as_path());
     drop(cpu);
 
     // A run with no disk image in C: (a folder) refuses the load, and

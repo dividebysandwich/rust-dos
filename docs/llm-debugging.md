@@ -632,8 +632,8 @@ A strict-match save or load guarantees:
   saved by a rust-dos from before media were recorded). The hardware
   settings compared are those a state brings: `machine`, `cpu`,
   `memsize`, `ems`, `umb`, `dos_high`, `monochrome`, the sound cards, and
-  the Voodoo and PowerVR cards (not `cycles`, which a load doesn't
-  bring). The deterministic mode counts as well: a
+  the Voodoo and PowerVR cards, and `cycles` in deterministic mode, the
+  one mode a load brings it in. The deterministic mode counts as well: a
   state saved with `--deterministic` differs from a machine without it,
   and the other way round, and two `--start-time`s differ. The reply
   lists every difference in the words a plain load uses:

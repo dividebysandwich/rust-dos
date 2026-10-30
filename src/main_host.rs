@@ -290,11 +290,15 @@ impl MainHost<'_, '_> {
             })?;
             savestate::media::relocate(media, folders).map_err(failed)?;
         }
-        // A load keeps the speed this machine runs at (see `load_state`),
-        // so the state's isn't compared.
-        let state_speed = slots::machine_settings(&header.machine, self.settings).cycles;
-        let compared = Settings { cycles: state_speed, ..self.settings.clone() };
-        let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(&compared));
+        // Outside deterministic mode a load keeps the speed this machine
+        // runs at (see `load_state`), so the state's isn't compared. In
+        // the mode the load brings it, and it is.
+        let mut compared = self.settings.clone();
+        if self.deterministic.is_none() {
+            compared.cycles = slots::machine_settings(&header.machine, self.settings).cycles;
+        }
+        let this_machine = self.machine.settings(&compared);
+        let mut differences = slots::machine_differences(&header.machine, &this_machine);
         // The machine's clock is the mode's start plus emulated time.
         let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
         differences.extend(slots::mode_difference(header.deterministic.as_deref(), start.as_deref()));

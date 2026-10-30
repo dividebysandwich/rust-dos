@@ -363,7 +363,8 @@ fn a_load_keeps_the_speed_the_emulator_runs_at() {
     let (status, saved) = post("/api/state/save", json!({"path": state}));
     assert_eq!(status, 200, "{}", saved);
     let load = |strict: bool| {
-        let (status, loaded) = post("/api/state/load", json!({"path": state, "strict_match": strict}));
+        let body = json!({"path": state, "strict_match": strict});
+        let (status, loaded) = post("/api/state/load", body);
         assert_eq!(status, 200, "{}", loaded);
         // The speed isn't a difference: the load doesn't bring it.
         assert!(loaded.get("differences").is_none(), "{}", loaded);
@@ -385,8 +386,12 @@ fn a_load_keeps_the_speed_the_emulator_runs_at() {
     // No load changed the speed setting: the journal's speed changes are
     // the three /api/speed calls.
     let changes = get("/api/journal?after=0&type=speed_changed").1;
-    let sources: Vec<&str> =
-        changes["entries"].as_array().unwrap().iter().filter_map(|e| e["source"].as_str()).collect();
+    let sources: Vec<&str> = changes["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["source"].as_str())
+        .collect();
     assert_eq!(sources, ["debugger", "debugger", "debugger"], "{}", changes);
     assert_eq!(post("/api/control/quit", json!({})).0, 200);
     let _ = std::fs::remove_dir_all(&dir);
