@@ -261,8 +261,8 @@ pub struct Queue {
     /// last, with when they time out; 0 marks where it got a message
     /// sent to it meanwhile.
     pub waiting: Vec<(u32, u64)>,
-    /// How deep it is in messages other threads sent it, and the sender
-    /// of the innermost.
+    /// The ids of the messages other threads sent it that it handles, the
+    /// innermost last; 0 for a callback of SendMessageCallbackA.
     pub in_send: Vec<u32>,
     /// The queue status bits that came since GetQueueStatus last looked.
     pub changed: u32,
@@ -765,6 +765,7 @@ fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
     if let Some(cb) = q.callbacks.pop_front() {
         q.in_send.push(0);
         q.waiting.push((0, 0));
+        took_sent(q);
         return Some(Next::call(
             cb.proc,
             &[cb.hwnd, cb.message, cb.data, cb.result],
@@ -774,11 +775,24 @@ fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
     let sent = q.next_sent().cloned()?;
     q.in_send.push(sent.id);
     q.waiting.push((0, 0));
+    took_sent(q);
     Some(Next::call(
         address_of("SendMessageA"),
         &[sent.hwnd, sent.message, sent.wparam, sent.lparam],
         step,
     ))
+}
+
+/// The thread took a sent message or a callback off its queue. With none
+/// left to handle, QS_SENDMESSAGE no longer counts as new, as in Windows
+/// (and Wine's receive_message), which clears it when the receiver gets
+/// the last one, not when it replies: else MsgWaitForMultipleObjects
+/// would return at once while the window procedure handles it, and for
+/// ever after a message another thread sent.
+fn took_sent(q: &mut Queue) {
+    if q.next_sent().is_none() && q.callbacks.is_empty() {
+        q.changed &= !QS_SENDMESSAGE;
+    }
 }
 
 /// The message `handle_sent` started handling returned `result`: the
@@ -790,12 +804,6 @@ fn finish_sent(cpu: &mut Cpu, result: u32) {
     let id = q.in_send.pop().unwrap_or(0);
     let i = q.sent.iter().position(|s| s.id == id).filter(|_| id != 0);
     let sent = i.and_then(|i| q.sent.remove(i));
-    // With none left to handle, QS_SENDMESSAGE no longer counts as new,
-    // as in Windows: else MsgWaitForMultipleObjects would return at once
-    // for ever after a message another thread sent.
-    if q.next_sent().is_none() && q.callbacks.is_empty() {
-        q.changed &= !QS_SENDMESSAGE;
-    }
     // A callback ran when `id` is 0.
     let Some(sent) = sent else {
         return;
@@ -1969,11 +1977,13 @@ mod tests {
             filter: Filter::default(),
             reply: 2,
         };
+        user(&mut cpu).queue_mut(me).changed |= QS_SENDMESSAGE;
         assert!(wait_ready(&cpu.bus.win32, me, &send_wait, 0));
         assert!(handle_sent(&mut cpu, 1).is_some());
         // Its window procedure sends to thread 7 and waits for the reply:
-        // nothing else was sent to it.
+        // nothing else was sent to it, and nothing counts as new.
         assert!(!wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert_eq!(user(&mut cpu).queue_mut(me).changed & QS_SENDMESSAGE, 0);
         assert!(handle_sent(&mut cpu, 1).is_none());
         // A message sent meanwhile is handled within the wait.
         user(&mut cpu).queue_mut(me).sent.push_back(sent(3));
