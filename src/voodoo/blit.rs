@@ -438,7 +438,6 @@ impl Voodoo {
         let lanes = (command >> 6) & 3;
         let mut bits = 32;
         let mut words = [Word { row: 0, at: 0, value: 0 }; 32];
-        let mut columns = [0u32; 32];
         let mut queued = 0;
         while bits > 0 && self.blt.column <= size_x && self.blt.active {
             let x = self.blt.x + self.blt.column;
@@ -498,7 +497,6 @@ impl Voodoo {
                         let at = addr >> 1;
                         let value = mix(rop, p, 0);
                         words[queued] = Word { row: y as u16, at, value };
-                        columns[queued] = x as u32;
                         queued += 1;
                     }
                 } else {
@@ -531,9 +529,10 @@ impl Voodoo {
             // The copy's rows are the buffer's (`blt_queue_dest`), so the
             // recording gets the pixels where they are, without working
             // out which buffer each is in.
-            let width = self.fbi.width;
+            let (width, row) = (self.fbi.width, self.fbi.stride.words);
             if let Some(mirror) = self.mirror.as_mut() {
-                for (w, &x) in words.iter().zip(&columns) {
+                for w in words {
+                    let x = (w.at as usize - dest - w.row as usize * row) as u32;
                     if x < width {
                         mirror.pixel(Some(dest as u32), x, w.row as u32, w.value, width);
                     }
