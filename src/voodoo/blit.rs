@@ -647,6 +647,12 @@ impl Voodoo {
         // After what is drawn, unless the copy goes into the queue behind
         // it (`blt_queue_dest`). Mostly nothing is queued, and the words
         // skip the wait: Moto Racer sends 40,000 a frame for its sky.
+        // The recording's layout is checked once a copy, like the queue's
+        // answer: what it is worked out from changes with the same writes,
+        // which drop that answer. A recording that lost its layout since
+        // (too many commands) gets it back.
+        let synced = self.blt_queue.get().is_some()
+            && (self.mirror.get_mut().as_ref()).is_none_or(|m| m.layout().is_some());
         let queue = self.blt_queue_cached();
         if queue.is_none() && self.writes_queue() {
             // The rows it has left to write, whose pixels it may read.
@@ -658,7 +664,15 @@ impl Voodoo {
                 self.blt.y + self.blt.rows,
             )]);
         }
-        self.mirror_sync();
+        if synced {
+            debug_assert!(
+                (self.mirror.borrow().as_ref())
+                    .is_none_or(|m| !m.needs_snapshot(&self.mirror_key(m.layout()))),
+                "a layout change blt_queue_stale missed"
+            );
+        } else {
+            self.mirror_sync();
+        }
         let mut data = data;
         if command & (1 << 8) != 0 {
             data = data.swap_bytes();
@@ -840,20 +854,30 @@ impl Voodoo {
     /// the destination's, and what is left of its rectangle lies in a
     /// colour buffer, whose rows the triangles draw. Otherwise the drawing
     /// is done first.
+    ///
+    /// It is worked out once a copy. What it depends on changes only with
+    /// a register write other than bltData or a new layout of the
+    /// buffers, and those drop it (`blt_queue_stale`). Debug builds check
+    /// that nothing else changed it.
     fn blt_queue_cached(&self) -> Option<usize> {
-        let key = self.blt_queue_key();
-        match self.blt_queue.get() {
-            Some((k, dest)) if k == key => dest,
-            _ => {
-                let dest = self.blt_queue_dest();
-                self.blt_queue.set(Some((key, dest)));
-                dest
-            }
+        if let Some((key, dest)) = self.blt_queue.get() {
+            debug_assert_eq!(key, self.blt_queue_key(), "a change blt_queue_stale missed");
+            return dest;
         }
+        let dest = self.blt_queue_dest();
+        self.blt_queue.set(Some((self.blt_queue_key(), dest)));
+        dest
     }
 
-    /// What `blt_queue_dest` works its answer out from. The source's
-    /// chroma range isn't: it counts every ROP the source's test can pick.
+    /// Drop `blt_queue_cached`'s answer: something it was worked out from
+    /// may have changed.
+    pub(crate) fn blt_queue_stale(&self) {
+        self.blt_queue.set(None);
+    }
+
+    /// What `blt_queue_dest` works its answer out from, which debug builds
+    /// check the cached answer against. The source's chroma range isn't:
+    /// it counts every ROP the source's test can pick.
     fn blt_queue_key(&self) -> [u32; 15] {
         let (r, f) = (&self.reg, &self.fbi);
         [
@@ -1548,6 +1572,102 @@ mod tests {
         assert_eq!([px(12, 30), px(13, 31)], [px(20, 30), px(20, 31)]);
         assert_ne!(px(12, 30), 0x0101);
         assert_eq!([px(14, 31), px(15, 32)], [0x0404, 0x0606]);
+        assert!(gl.frame_buffer().to_bytes() == memory);
+        assert!(threads.frame_buffer().to_bytes() == memory);
+    }
+
+    #[test]
+    fn a_register_written_during_a_copy_is_seen_by_its_next_word() {
+        // The copy's first row may wait behind the drawing. Then bltRop
+        // changes to one that reads the destination (XOR): the rows after
+        // need what the drawing left there, so they wait for it, as
+        // without the OpenGL renderer.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut sw = glide_card(0);
+        for v in [&mut gl, &mut sw] {
+            glide_frames(v, 2);
+            let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+            write(v, BLT_ROP, 0xCCCC);
+            write(v, BLT_DST_BASE_ADDR, back);
+            write(v, BLT_XY_STRIDES, 1280 << 16);
+            write(v, BLT_DST_XY, 30 << 16 | 12);
+            write(v, BLT_SIZE, 2 << 16 | 3);
+            write(v, BLT_COMMAND, 1 << 31 | 2 << 3 | CPU_TO_SCREEN);
+            for i in 1..=6 {
+                if i == 3 {
+                    write(v, BLT_ROP, 0x6666);
+                }
+                write(v, BLT_DATA, 0x0101_0101 * i);
+            }
+        }
+        assert!(gl.describe(Now::default())["catch_ups"].as_u64().unwrap() > 0);
+        let memory = sw.frame_buffer().to_bytes();
+        let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+        let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
+        // The fastfill's colour, XORed with the copy's from the second row.
+        let fill = px(20, 31);
+        assert_eq!(
+            [px(12, 30), px(12, 31), px(15, 32)],
+            [0x0101, fill ^ 0x0303, fill ^ 0x0606]
+        );
+        assert!(gl.frame_buffer().to_bytes() == memory);
+    }
+
+    #[test]
+    fn copies_keep_their_place_among_the_jobs_held_back() {
+        // Copies into the back buffer with fastfills between them that
+        // cover part of their rows, and the last copy longer than a batch
+        // of the words held back (`WORDS_HELD`): the words and the jobs
+        // land in the order they came, as without the OpenGL renderer and
+        // without worker threads.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut threads = glide_card(2);
+        let mut sw = glide_card(0);
+        let copies = [(0, 110), (20, 110), (150, 210)];
+        for v in [&mut gl, &mut threads, &mut sw] {
+            glide_frames(v, 2);
+            let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+            for (k, &(y, rows)) in copies.iter().enumerate() {
+                write(v, BLT_ROP, 0xCCCC);
+                write(v, BLT_DST_BASE_ADDR, back);
+                write(v, BLT_XY_STRIDES, 1280 << 16);
+                write(v, BLT_DST_XY, y << 16);
+                write(v, BLT_SIZE, (rows - 1) << 16 | 639);
+                write(v, BLT_COMMAND, 1 << 31 | 2 << 3 | CPU_TO_SCREEN);
+                for i in 0..320 * rows {
+                    let value = (2 * i + 7919 * k as u32) & 0xFFFF;
+                    write(v, BLT_DATA, value * 0x0001_0001);
+                }
+                if k + 1 < copies.len() {
+                    let top = y + 50;
+                    write(v, CLIP_LEFT_RIGHT, 100 << 16 | 400);
+                    write(v, CLIP_LOW_Y_HIGH_Y, top << 16 | (top + 100));
+                    write(v, COLOR1, 0x0010_2030 * (k as u32 + 1));
+                    write(v, FASTFILL_CMD, 0);
+                }
+            }
+        }
+        let status = gl.describe(Now::default());
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert!(status["held_jobs"].as_u64().unwrap() > 0, "{status}");
+        assert!(640 * copies[2].1 as usize > super::super::WORDS_HELD);
+        let memory = sw.frame_buffer().to_bytes();
+        let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+        let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
+        // Columns 100 to 399: the second copy (rows 20 to 129) over the
+        // first fill (rows 50 to 149), the second fill (rows 70 to 169)
+        // over that copy, and the last copy (from row 150) over the fill.
+        let value = |k: usize, x: usize, row: usize| (2 * (row * 320 + x / 2) + 7919 * k) as u16;
+        assert_eq!(px(500, 10), value(0, 500, 10));
+        assert_eq!(px(200, 60), value(1, 200, 40));
+        let fill = px(200, 100);
+        assert_ne!(fill, value(1, 200, 80));
+        assert_eq!([px(100, 140), px(398, 70)], [fill, fill]);
+        assert_eq!(px(200, 160), value(2, 200, 10));
         assert!(gl.frame_buffer().to_bytes() == memory);
         assert!(threads.frame_buffer().to_bytes() == memory);
     }
