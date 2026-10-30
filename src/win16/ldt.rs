@@ -127,12 +127,27 @@ pub fn read(cpu: &Cpu, system: u32, selector: u16) -> u64 {
 /// Write the descriptor of `selector`. A data or stack segment register
 /// that holds it takes the new descriptor, as the DPMI host of Windows
 /// reloads them: VBRUN300 grows its DGROUP with GlobalReAlloc and moves
-/// SP past the old limit without loading SS again.
+/// SP past the old limit without loading SS again. A descriptor of 0
+/// frees the selector, and the data segment registers that hold it are
+/// zeroed, as DPMI's function 0001h does and Windows does when it frees
+/// a block: Johnny Castaway's GlobalFree leaves the block's selector in
+/// ES, which its next function pushes and pops.
 pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
     let at = entry_phys(system, selector);
     cpu.bus.write_32(at, desc as u32);
     cpu.bus.write_32(at + 4, (desc >> 32) as u32);
-    if desc & PRESENT == 0 || !cpu.pe() || cpu.v86() {
+    if !cpu.pe() || cpu.v86() {
+        return;
+    }
+    if desc == 0 {
+        for seg in [Seg::ES, Seg::DS, Seg::FS, Seg::GS] {
+            if cpu.seg_cache(seg).selector | 3 == selector | 3 {
+                let _ = cpu.load_segment(seg, 0);
+            }
+        }
+        return;
+    }
+    if desc & PRESENT == 0 {
         return;
     }
     for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {

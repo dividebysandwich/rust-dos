@@ -12,7 +12,8 @@
  * and moveable blocks, lock counts in GlobalFlags and LocalFlags,
  * discardable blocks, blocks of more than 64 KB reached through
  * __AHINCR, LocalInit on a heap in a segment of its own, the selector
- * functions, GlobalDosAlloc and GetFreeSpace.
+ * functions, ES zeroed when the selector it holds is freed,
+ * GlobalDosAlloc and GetFreeSpace.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -471,6 +472,46 @@ static void test_selectors(void)
     ok(GlobalFree(h) == NULL, "GlobalFree failed\n");
 }
 
+/* What ES holds after `free` (GlobalFree or FreeSelector) is called
+ * with `arg` while ES holds `sel`. */
+static WORD es_after(FARPROC free, WORD arg, WORD sel)
+{
+    WORD es_;
+    _asm {
+        push es
+        mov es, sel
+        push arg
+        call dword ptr free
+        mov es_, es
+        pop es
+    }
+    return es_;
+}
+
+/* Freeing a block or a selector zeroes ES when it holds the block's
+ * selector, as DPMI's function 0001h does: Johnny Castaway frees a
+ * block with its selector in ES and then pushes and pops ES. */
+static void test_free_clears_es(void)
+{
+    HGLOBAL h;
+    WORD sel, es_;
+
+    h = GlobalAlloc(GMEM_MOVEABLE, 256);
+    ok(h != NULL, "GlobalAlloc failed\n");
+    if (!h) return;
+    sel = SELECTOROF(GlobalLock(h));
+    GlobalUnlock(h);
+    es_ = es_after((FARPROC)GlobalFree, (WORD)h, sel);
+    ok(es_ == 0, "ES is %x after GlobalFree freed %x\n", es_, sel);
+
+    sel = AllocSelector(0);
+    ok(sel != 0, "AllocSelector(0) failed\n");
+    if (!sel) return;
+    SetSelectorLimit(sel, 15);
+    es_ = es_after((FARPROC)FreeSelector, sel, sel);
+    ok(es_ == 0, "ES is %x after FreeSelector freed %x\n", es_, sel);
+}
+
 /* Conventional memory, for real-mode code. */
 static void test_dos_alloc(void)
 {
@@ -795,6 +836,7 @@ START_TEST(alloc)
     test_global_discard();
     test_global_huge();
     test_selectors();
+    test_free_clears_es();
     test_dos_alloc();
     test_free_space();
     test_Local();

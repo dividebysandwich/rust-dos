@@ -215,6 +215,12 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
             if !free_selector(cpu, bx) {
                 return Err(BAD_SELECTOR);
             }
+            // The segment registers that hold it are zeroed (DPMI 0.9).
+            for seg in [Seg::ES, Seg::DS, Seg::FS, Seg::GS] {
+                if ctx.seg[seg as usize] | 3 == bx | 3 {
+                    ctx.seg[seg as usize] = 0;
+                }
+            }
         }
         0x0002 => {
             let sel = super::dos::segment_selector(cpu, bx);
