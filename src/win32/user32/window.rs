@@ -1728,6 +1728,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                let under = super::input::under_cursor(state);
                 // What siblings above it cover, which a raise shows.
                 let was_covered = if was_visible && flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0 {
                     super::paint::covered(state, hwnd)
@@ -1765,6 +1766,8 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 }
                 let _ = old;
                 super::paint::tree_changed(cpu);
+                let moved = flags & (SWP_NOMOVE | SWP_NOSIZE) != SWP_NOMOVE | SWP_NOSIZE;
+                super::input::window_moved(cpu, hwnd, under, moved);
                 // What it uncovered and what it shows now need painting.
                 let now_visible = user(cpu).is_visible(hwnd);
                 if flags & SWP_NOREDRAW == 0 || flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW) != 0 {
