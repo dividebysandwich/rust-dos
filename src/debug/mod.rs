@@ -864,6 +864,13 @@ impl DebugHub {
         deterministic: Option<chrono::NaiveDateTime>,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared::new(cpu.bus.start_time));
+        // The lines logged before the server started (the renderer, the
+        // configuration's warnings), first and at the times they came. They
+        // go in before the server takes requests, so that no client sees
+        // the log without them.
+        for (t_ms, line) in cpu.bus.take_log_backlog() {
+            shared.log_line_at(t_ms, &line);
+        }
         let (tx, rx) = mpsc::channel();
         // With port 0 in `addr`, this is the free port the system picked.
         let addr = server::spawn(addr, tx, shared.clone())?;
@@ -874,11 +881,6 @@ impl DebugHub {
             );
         }
 
-        // The lines logged before the server started (the renderer, the
-        // configuration's warnings), first and at the times they came.
-        for (t_ms, line) in cpu.bus.take_log_backlog() {
-            shared.log_line_at(t_ms, &line);
-        }
         let log_shared = shared.clone();
         cpu.bus.log_hook = Some(Box::new(move |line: &str| log_shared.log_line(line)));
         let audio_tx = shared.audio.clone();

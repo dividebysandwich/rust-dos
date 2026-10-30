@@ -86,6 +86,9 @@ pub struct Hold {
 
 /// The most lines `Bus::log_backlog` keeps: far more than start-up logs.
 const LOG_BACKLOG_LINES: usize = 1000;
+/// The backlog's last line when it fills up.
+const LOG_BACKLOG_FULL: &str =
+    "[DEBUG] Later lines from before the debug server started are only in the log file";
 /// An observer of the log's lines (`Bus::log_hook`).
 pub type LogHook = Box<dyn FnMut(&str)>;
 /// An observer of the mixed audio (`Bus::audio_hook`).
@@ -3032,7 +3035,13 @@ impl Bus {
         } else if let Some(backlog) =
             self.log_backlog.as_mut().filter(|b| b.len() < LOG_BACKLOG_LINES)
         {
-            backlog.push((self.start_time.elapsed().as_millis() as u64, s.to_string()));
+            // The last line it keeps says that later ones are missing.
+            let line = if backlog.len() + 1 < LOG_BACKLOG_LINES {
+                s.to_string()
+            } else {
+                LOG_BACKLOG_FULL.to_string()
+            };
+            backlog.push((self.start_time.elapsed().as_millis() as u64, line));
         }
     }
 
