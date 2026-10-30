@@ -276,6 +276,17 @@ pub struct Queue {
     pub activation: [u32; 4],
 }
 
+impl Queue {
+    /// The first message another thread sent that the thread hasn't
+    /// started to handle. One it handles stays in `sent` until it
+    /// replies, but a send of its own made meanwhile must not take it
+    /// again: Windows takes a message off the queue when the receiver
+    /// gets it, so the wait for a reply sees only messages sent later.
+    pub fn next_sent(&self) -> Option<&Sent> {
+        self.sent.iter().find(|s| !self.in_send.contains(&s.id))
+    }
+}
+
 /// A timer of SetTimer.
 #[derive(Clone, Debug, Default)]
 pub struct Timer {
@@ -361,7 +372,7 @@ pub fn wait_ready(win32: &crate::win32::Win32, tid: u32, wait: &QueueWait, now: 
         return true;
     }
     let mask = wait.mask;
-    if mask & QS_SENDMESSAGE != 0 && (!q.sent.is_empty() || !q.callbacks.is_empty()) {
+    if mask & QS_SENDMESSAGE != 0 && (q.next_sent().is_some() || !q.callbacks.is_empty()) {
         return true;
     }
     // The foreground came or went: a thread that waits for posted
@@ -760,7 +771,7 @@ fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
             step,
         ));
     }
-    let sent = q.sent.front().cloned()?;
+    let sent = q.next_sent().cloned()?;
     q.in_send.push(sent.id);
     q.waiting.push((0, 0));
     Some(Next::call(
@@ -779,10 +790,10 @@ fn finish_sent(cpu: &mut Cpu, result: u32) {
     let id = q.in_send.pop().unwrap_or(0);
     let i = q.sent.iter().position(|s| s.id == id).filter(|_| id != 0);
     let sent = i.and_then(|i| q.sent.remove(i));
-    // With none left, QS_SENDMESSAGE no longer counts as new, as in
-    // Windows: else MsgWaitForMultipleObjects would return at once for
-    // ever after a message another thread sent.
-    if q.sent.is_empty() && q.callbacks.is_empty() {
+    // With none left to handle, QS_SENDMESSAGE no longer counts as new,
+    // as in Windows: else MsgWaitForMultipleObjects would return at once
+    // for ever after a message another thread sent.
+    if q.next_sent().is_none() && q.callbacks.is_empty() {
         q.changed &= !QS_SENDMESSAGE;
     }
     // A callback ran when `id` is 0.
@@ -1933,6 +1944,47 @@ mod tests {
         assert_eq!(take(&mut cpu, tid), Some((WM_LBUTTONDOWN, 100 << 16 | 150)));
         assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
         assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// A thread that handles a message another thread sent, and sends
+    /// one back to that thread from its window procedure, waits for the
+    /// reply without taking the message it handles again: Windows took
+    /// it off the queue when the thread got it. Sierra's ISDEL.EXE does
+    /// this when INSTALL.EXE broadcasts that it ends; taken again, the
+    /// message called the window procedure until the stack ran out.
+    #[test]
+    fn a_message_being_handled_is_not_taken_again() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let me = current_tid(&cpu);
+        let sent = |id| Sent {
+            id,
+            from: 7,
+            hwnd: 0x418,
+            message: 0x1D96,
+            ..Sent::default()
+        };
+        user(&mut cpu).queue_mut(me).sent.push_back(sent(1));
+        let send_wait = QueueWait {
+            mask: QS_SENDMESSAGE,
+            filter: Filter::default(),
+            reply: 2,
+        };
+        assert!(wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        // Its window procedure sends to thread 7 and waits for the reply:
+        // nothing else was sent to it.
+        assert!(!wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert!(handle_sent(&mut cpu, 1).is_none());
+        // A message sent meanwhile is handled within the wait.
+        user(&mut cpu).queue_mut(me).sent.push_back(sent(3));
+        assert!(wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        finish_sent(&mut cpu, 0);
+        finish_sent(&mut cpu, 5);
+        let q = user(&mut cpu).queue_mut(me);
+        assert!(q.sent.is_empty() && q.in_send.is_empty());
+        let replies = &user(&mut cpu).queue_mut(7).replies;
+        assert_eq!(replies, &vec![(3, 0), (1, 5)]);
     }
 
     /// GetQueueStatus and GetInputState see a move the mouse made since
