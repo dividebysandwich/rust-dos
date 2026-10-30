@@ -1036,11 +1036,17 @@ impl Voodoo {
         }
     }
 
-    /// The frame buffer writes queued behind jobs, as a job of their own,
-    /// after the jobs held back.
+    /// The frame buffer writes queued behind jobs, as a job of their own:
+    /// held back after the jobs held, or after them to the workers.
     fn submit_words(&self) {
         let words = std::mem::take(&mut *self.words.borrow_mut());
-        if !words.is_empty() {
+        if words.is_empty() {
+            return;
+        }
+        if self.deferring() {
+            let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, &words);
+            self.hand_over(out);
+        } else {
             self.release_backlog();
             self.outstanding.set(self.pool.workers() > 0);
             self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
@@ -1056,6 +1062,9 @@ impl Voodoo {
         if !self.writes_queue() {
             return true;
         }
+        // Writes waiting may land in that range: the backlog has to see
+        // them, as the write comes after them.
+        self.submit_words();
         let given_out = self.footprint.borrow();
         let range = (start as u64, end as u64);
         self.backlog
@@ -1070,11 +1079,19 @@ impl Voodoo {
 
     /// Frame buffer writes for the queue (`writes_queue`): held back with
     /// the jobs, or every so many out as a job, or straight into memory
-    /// when the workers are done by then.
+    /// when the workers are done by then. Held back, they wait here until
+    /// there are enough of them or something else comes: the backlog
+    /// works out what a batch of them touches at once, which per write
+    /// would cost more than drawing the jobs held (a Voodoo2 CPU-to-screen
+    /// copy is tens of thousands of writes a frame).
     pub(crate) fn queue_words(&self, new: &[Word]) {
-        if self.deferring() && self.words.borrow().is_empty() {
-            let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, new);
-            self.hand_over(out);
+        if self.deferring() {
+            let mut words = self.words.borrow_mut();
+            words.extend_from_slice(new);
+            if words.len() >= WORDS_A_JOB {
+                drop(words);
+                self.submit_words();
+            }
             return;
         }
         self.footprint.borrow_mut().words(new);
