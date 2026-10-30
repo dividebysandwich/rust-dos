@@ -684,6 +684,13 @@ pub fn words(layout: &TileLayout, words: &[Word]) -> Access {
         return Access::PINNED;
     }
     let mut access = Access::default();
+    // Words side by side in a row go in as one run: finding a run's tiles
+    // costs as much as a word's.
+    let mut run: Option<(usize, u32, u32, u32)> = None;
+    let mut add = |access: &mut Access, (slot, x0, x1, y): (usize, u32, u32, u32)| {
+        let tiles = layout.tiles((x0, x1, y, y + 1), false);
+        access.writes[slot] = access.writes[slot].union(tiles);
+    };
     'word: for word in words {
         for (slot, base) in layout.bases.iter().enumerate() {
             let Some(at) = base.and_then(|b| (word.at as usize).checked_sub(b)) else {
@@ -697,12 +704,21 @@ pub fn words(layout: &TileLayout, words: &[Word]) -> Access {
                 continue;
             };
             if x < layout.width && y < layout.height {
-                let tile = layout.tiles((x, x + 1, y, y + 1), false);
-                access.writes[slot] = access.writes[slot].union(tile);
+                match &mut run {
+                    Some((s, _, x1, ry)) if *s == slot && *ry == y && *x1 == x => *x1 = x + 1,
+                    _ => {
+                        if let Some(done) = run.replace((slot, x, x + 1, y)) {
+                            add(&mut access, done);
+                        }
+                    }
+                }
                 continue 'word;
             }
         }
         return Access::PINNED;
+    }
+    if let Some(done) = run {
+        add(&mut access, done);
     }
     access
 }
