@@ -806,6 +806,66 @@ mod tests {
         }
     }
 
+    /// An OpenGL renderer that drew each colour buffer in one colour and
+    /// the depth buffer at one value, and notes what it is asked.
+    struct Renderer(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl crate::voodoo::gpu::GpuLink for Renderer {
+        fn ready(&self) -> bool {
+            false
+        }
+
+        fn run(&mut self, commands: Vec<crate::voodoo::mirror::Command>) {
+            self.0.borrow_mut().push(format!("run {}", commands.len()));
+        }
+
+        fn read(&mut self, _at: u32, _out: &mut [u8]) -> bool {
+            false
+        }
+
+        fn read_buffer(&mut self, dest: Option<u32>, out: &mut [u16]) -> bool {
+            out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
+            self.0.borrow_mut().push(format!("read {dest:?}"));
+            true
+        }
+    }
+
+    #[test]
+    fn gpu_reads_leave_the_drawing_to_the_renderer() {
+        // With voodoo_readback=gpu nothing is drawn in software or held
+        // back: the first read of the memory gets the renderer's pictures
+        // of the buffers, after it was given what was recorded. A copy
+        // from the CPU goes into the memory as well, and the renderer's
+        // pictures have it too.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        copy_into_back_buffer(&mut v, 30, DST_TILED | DST_CHROMA);
+        let status = v.describe(Now::default());
+        assert!(status["gpu_only_jobs"].as_u64().unwrap() >= 4, "{status}");
+        assert_eq!(status["held_jobs"], 0, "{status}");
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize] as usize / 2;
+        assert_eq!(v.fbi.ram.get(back + 30 * 640 + 12), 0x0101, "the copy is in memory");
+        let aux = v.fbi.auxoffs as usize / 2;
+        let memory = v.frame_buffer();
+        assert_eq!(memory.get(back + 30 * 640 + 12), 0x1234 ^ back as u16);
+        assert_eq!(memory.get(aux + 5), 0x7777);
+        let log = log.borrow();
+        assert!(log[0].starts_with("run "), "{log:?}");
+        assert!(log.iter().any(|l| l == "read None"), "{log:?}");
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+        // Read once, the memory stays as it is until the renderer draws
+        // again.
+        v.frame_buffer();
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+    }
+
     #[test]
     fn monochrome_rows_start_on_a_new_word_or_byte() {
         // The leftmost pixel is each byte's top bit.
