@@ -635,7 +635,7 @@ pub struct Voodoo {
     /// `blt_queue_dest`'s answer for the copy under way, and what it was
     /// worked out from (`blt_queue_key`): a copy sends its data a word at
     /// a time, tens of thousands a frame.
-    blt_queue: Cell<Option<([u32; 16], Option<usize>)>>,
+    blt_queue: Cell<Option<([u32; 15], Option<usize>)>>,
     /// The Banshee's or Voodoo3's own state when the card is one: the
     /// display adapter around the 3D engine, whose memory it shares.
     pub banshee: Option<Box<banshee::Banshee>>,
@@ -1098,7 +1098,9 @@ impl Voodoo {
     }
 
     /// The frame buffer writes queued behind jobs, as a job of their own:
-    /// held back after the jobs held, or after them to the workers.
+    /// held back after the jobs held, or after them to the workers. Those
+    /// queued while jobs were held back aren't in the footprint yet
+    /// (`queue_words`): handed over, they go into it.
     fn submit_words(&self) {
         let words = std::mem::take(&mut *self.words.borrow_mut());
         if words.is_empty() {
@@ -1108,9 +1110,7 @@ impl Voodoo {
             let out = self.backlog.borrow_mut().push_words(&self.fbi.ram, &words);
             self.hand_over(out);
         } else {
-            self.release_backlog();
-            self.outstanding.set(self.pool.workers() > 0);
-            self.pool.submit(Job::Pixels { fb: self.fbi.ram.clone(), words });
+            self.hand_over([Job::Pixels { fb: self.fbi.ram.clone(), words }]);
         }
     }
 
