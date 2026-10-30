@@ -3376,6 +3376,150 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
+/// _set_se_translator: an access violation in a try reaches the thread's
+/// translator with its code and record, and the C++ exception that
+/// throws reaches the catch (char *). The exit code has a bit each.
+#[test]
+fn a_translator_turns_a_fault_into_a_cxx_exception() {
+    const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
+    let names: &[&str] = &[
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        SET_TRANSLATOR,
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    let info = d.add(&[0; 28]);
+    let unwind = d.add(&[0; 16]);
+    let entry = d.add(&[0; 20]);
+    let handler = d.add(&[0; 16]);
+    let bits = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 4]| -> Result<[CodeLabel; 4], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut thunk = a.create_label();
+            let mut catch = a.create_label();
+            let mut after = a.create_label();
+            let mut translator = a.create_label();
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            put(a, throw_info + 12, data(list))?;
+            put(a, info, 0x1993_0520)?;
+            put(a, info + 4, 2)?;
+            put(a, info + 8, data(unwind))?;
+            put(a, info + 12, 1)?;
+            put(a, info + 16, data(entry))?;
+            put(a, unwind, u32::MAX)?;
+            put(a, unwind + 8, u32::MAX)?;
+            put(a, entry + 8, 1)?;
+            put(a, entry + 12, 1)?;
+            put(a, entry + 16, data(handler))?;
+            put(a, handler + 4, data(char_pointer))?;
+            put(a, handler + 8, -0x14i32 as u32)?;
+            put(a, handler + 12, at[1])?;
+
+            // The second call gets the translator the first set.
+            a.push(0x1234)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            a.mov(ecx, at[2])?;
+            a.push(ecx)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, 0x1234)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 1)?;
+            a.set_label(&mut skip)?;
+
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.push(-1)?;
+            a.mov(eax, at[0])?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.xor(eax, eax)?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.int3()?;
+
+            // catch (char *p): p is what the translator threw.
+            a.set_label(&mut catch)?;
+            let mut skip = a.create_label();
+            a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 4)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, at[3])?;
+            a.ret()?;
+
+            a.set_label(&mut after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // translator(code, pointers): throw (char *)0x55;
+            a.set_label(&mut translator)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.cmp(eax, dword_ptr(esp + 4))?;
+            a.jne(skip)?;
+            a.cmp(eax, 0xC000_0005u32 as i32)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 2)?;
+            a.set_label(&mut skip)?;
+            put(a, thrown, 0x55)?;
+            a.push(data(throw_info) as i32)?;
+            a.push(data(thrown) as i32)?;
+            a.call(f("_CxxThrowException"))?;
+            a.int3()?;
+
+            a.set_label(&mut thunk)?;
+            a.mov(eax, data(info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([thunk, catch, translator, after])
+        };
+        let labels = code(a, [0; 4])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 4];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    });
+    let (code, _) = run("msvcrt_se_translator", exe);
+    assert_eq!(code, 7);
+}
+
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
 /// whose name starts with "=", set and read back; a name with "=" further
 /// on is refused with ERROR_INVALID_PARAMETER. A bit each in the exit

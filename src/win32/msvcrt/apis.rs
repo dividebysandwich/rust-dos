@@ -521,4 +521,10 @@ pub static APIS: &[Api] = &[
     cdecl("__stdio_common_vsprintf", 488, 7, stdio::stdio_common_vsprintf),
     cdecl("__stdio_common_vswprintf", 489, 7, stdio::stdio_common_vswprintf),
     cdecl("_assert", 490, 3, startup::assert),
+    cdecl(
+        "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z",
+        491,
+        1,
+        startup::set_se_translator,
+    ),
 ];

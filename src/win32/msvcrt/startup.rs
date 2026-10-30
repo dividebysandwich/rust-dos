@@ -1084,6 +1084,8 @@ const X_LOCAL: u32 = 3;
 const X_CAUGHT: u32 = 4;
 /// The object destroyed: on after the try.
 const X_DESTROYED: u32 = 5;
+/// The thread's translator returned: look for a catch (...).
+const X_TRANSLATED: u32 = 6;
 
 /// The places in `cxx_returned`'s data: the step, the frame, its
 /// FuncInfo, the state to unwind to, the try block and the handler that
@@ -1110,9 +1112,11 @@ const D_LEN: usize = 18;
 /// exception runs, after the frames above are unwound, and the function
 /// goes on after it; otherwise ContinueSearch. Unwinding, the frame's
 /// objects are destroyed. A catch (...) takes exceptions other than C++
-/// ones too, as with MSVC 6.
+/// ones too, as with MSVC 6. For one of those, in a function with a try
+/// block, the thread's translator runs first: it can throw a C++
+/// exception in place of it.
 pub fn cxx_frame_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[record, frame, _, _] = args else {
+    let &[record, frame, context, _] = args else {
         unreachable!()
     };
     let info = cpu.eax();
@@ -1138,17 +1142,52 @@ pub fn cxx_frame_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         cxx_unwind(cpu, resume, d);
         return None;
     }
-    let Some((entry, handler, catchable)) = find_catch(cpu, frame, info, thrown)? else {
-        return Some(CONTINUE_SEARCH);
+    if thrown.is_none() && read32(cpu, info + 12)? != 0 {
+        let at = thread_field(cpu, T_SE_TRANSLATOR)?;
+        let translator = read32(cpu, at)?;
+        if translator != 0 {
+            let pointers = thread_field(cpu, T_POINTERS)?;
+            write32(cpu, pointers, record)?;
+            write32(cpu, pointers + 4, context)?;
+            d[0] = X_TRANSLATED;
+            if call_program(cpu, translator, &[code, pointers], C_CXX, resume, &d) {
+                return None;
+            }
+        }
+    }
+    if take_exception(cpu, resume, d, thrown)? {
+        return None;
+    }
+    Some(CONTINUE_SEARCH)
+}
+
+/// Find the frame's catch that takes the exception and go on towards it.
+/// False if it has none.
+fn take_exception(
+    cpu: &mut Cpu,
+    resume: (u32, u32),
+    mut d: Vec<u32>,
+    thrown: Option<(u32, u32)>,
+) -> Option<bool> {
+    let Some((entry, handler, catchable)) = find_catch(cpu, d[D_FRAME], d[D_INFO], thrown)? else {
+        return Some(false);
     };
     d[D_TRY] = entry;
     d[D_HANDLER] = handler;
     d[D_TARGET] = read32(cpu, entry)?;
-    if catch_object(cpu, resume, &mut d, catchable)? {
-        return None;
+    if !catch_object(cpu, resume, &mut d, catchable)? {
+        unwind_above(cpu, resume, d);
     }
-    unwind_above(cpu, resume, d);
-    None
+    Some(true)
+}
+
+/// _set_se_translator(function): the thread's translator of exceptions
+/// other than C++ ones; returns the one before it.
+pub fn set_se_translator(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = thread_field(cpu, T_SE_TRANSLATOR)?;
+    let old = read32(cpu, at)?;
+    write32(cpu, at, args[0])?;
+    Some(old)
 }
 
 /// The object and ThrowInfo of a C++ exception, None for another.
@@ -1461,6 +1500,13 @@ pub fn cxx_returned(cpu: &mut Cpu, value: u32, call: Call) {
             destroy_object(cpu, call.resume, d);
         }
         X_DESTROYED => go_on(cpu, &d),
+        X_TRANSLATED => {
+            let regs: [u32; 4] = [d[D_REGS], d[D_REGS + 1], d[D_REGS + 2], d[D_REGS + 3]];
+            if take_exception(cpu, call.resume, d, None) != Some(true) {
+                restore_registers(cpu, &regs);
+                call::finish(cpu, call.resume, CONTINUE_SEARCH);
+            }
+        }
         _ => cxx_unwind(cpu, call.resume, d),
     }
 }

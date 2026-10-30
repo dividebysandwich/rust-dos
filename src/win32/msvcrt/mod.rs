@@ -181,12 +181,14 @@ const S_SIGNALS: u32 = 0x80;
 /// place (_mbstok's too) and wcstok's, the floating-point error signal's
 /// code, and the buffers of gmtime, asctime, tmpnam, the ecvt family,
 /// _wasctime, the exception the running catch block took (its code,
-/// object and ThrowInfo, for `throw;`), and room for what a function
-/// writes for a KERNEL32 one it calls. 10h is free.
+/// object and ThrowInfo, for `throw;`), room for what a function writes
+/// for a KERNEL32 one it calls, the translator _set_se_translator set,
+/// and the EXCEPTION_POINTERS it is called with.
 const T_ERRNO: u32 = 0x00;
 const T_DOSERRNO: u32 = 0x04;
 const T_RAND: u32 = 0x08;
 const T_STRTOK: u32 = 0x0C;
+const T_SE_TRANSLATOR: u32 = 0x10;
 const T_FPECODE: u32 = 0x14;
 const T_WCSTOK: u32 = 0x18;
 const T_TM: u32 = 0x20;
@@ -196,7 +198,8 @@ const T_CVT: u32 = 0x190;
 const T_WASCTIME: u32 = 0x300;
 const T_CXX: u32 = 0x334;
 const T_SCRATCH: u32 = 0x340;
-const THREAD_BLOCK: u32 = 0x400;
+const T_POINTERS: u32 = 0x400;
+const THREAD_BLOCK: u32 = 0x408;
 
 /// errno's values.
 const ENOENT: u32 = 2;
