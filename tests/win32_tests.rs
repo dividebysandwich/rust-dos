@@ -944,6 +944,80 @@ fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
     assert_eq!(code, 5, "{}", out);
 }
 
+/// How many milliseconds a Sleep(10) took by QueryPerformanceCounter,
+/// rounded, with a second thread that spins all the while when `spin`.
+fn slept_ms(test: &str, spin: bool) -> u8 {
+    let names: &[&str] = &[
+        "CreateThread",
+        "QueryPerformanceCounter",
+        "QueryPerformanceFrequency",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The counter before at 0, after at 8, the frequency at 0x10, the
+    // spinning thread's count at 0x18.
+    let data = vec![0; 0x20];
+    let (code, out) = run(
+        test,
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            if spin {
+                a.push(0)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.call(over)?;
+                // The thread: count for ever.
+                let mut again = a.create_label();
+                a.set_label(&mut again)?;
+                a.add(dword_ptr(l.at(0x18)), 1)?;
+                a.jmp(again)?;
+                a.set_label(&mut over)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("CreateThread"))?;
+            }
+            a.push(l.at(0x10) as i32)?;
+            a.call(f("QueryPerformanceFrequency"))?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("QueryPerformanceCounter"))?;
+            a.push(10)?;
+            a.call(f("Sleep"))?;
+            a.push(l.at(8) as i32)?;
+            a.call(f("QueryPerformanceCounter"))?;
+            // (after - before) * 1000000 / frequency microseconds, to
+            // the nearest millisecond.
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            a.sub(eax, dword_ptr(l.at(0)))?;
+            a.mov(ecx, 1_000_000)?;
+            a.mul(ecx)?;
+            a.div(dword_ptr(l.at(0x10)))?;
+            a.add(eax, 500)?;
+            a.xor(edx, edx)?;
+            a.mov(ecx, 1000)?;
+            a.div(ecx)?;
+            a.push(eax)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert!(out.is_empty(), "{out}");
+    code
+}
+
+/// A Sleep ends when its time is up, to the millisecond, as on Windows
+/// 98: with no other thread to run, and with another of the program's
+/// threads spinning, which the sleeping thread takes the processor from
+/// when it wakes (the boost Windows gives a thread whose wait ends). It
+/// used to end at the timer's next interrupt, up to 55 ms later, and the
+/// spinning thread kept the processor until its turn was over.
+#[test]
+fn a_sleep_ends_on_time_also_while_another_thread_spins() {
+    let slept = [slept_ms("sleep_alone", false), slept_ms("sleep_spinning", true)];
+    assert_eq!(slept, [10, 10], "alone, spinning");
+}
+
 /// Threads started and ended one after another, more than the LDT has
 /// selectors for and more stacks than memory holds at once: each takes
 /// the place of one that ended. The exit code is the last one's.

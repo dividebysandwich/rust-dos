@@ -1795,6 +1795,14 @@ fn a_linear_address_disassembles_as_the_running_code() {
 }
 
 #[test]
+fn status_says_what_draws_the_window() {
+    let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
+    hub.display = "OpenGL 3.3 on a chip (a vendor), Gl330".to_string();
+    let status = reply(&mut cpu, &mut hub, Cmd::Status).unwrap();
+    assert_eq!(status["display"], "OpenGL 3.3 on a chip (a vendor), Gl330");
+}
+
+#[test]
 fn win32_without_a_program_has_no_processes() {
     let (mut cpu, mut hub) = (Cpu::new(".".into()), DebugHub::disabled());
     cpu.bus.win32.enabled = true;
