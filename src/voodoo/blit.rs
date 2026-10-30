@@ -130,15 +130,10 @@ impl Voodoo {
         if at >= self.fbi.ram.len() {
             return;
         }
-        let value = self.blt_value(src, self.fbi.ram.get(at));
+        let dst = self.fbi.ram.get(at);
+        let value = mix(self.blt_rop(src, dst), src, dst);
         self.fbi.ram.set(at, value);
         self.blt_mirror(at, value);
-    }
-
-    /// The pixel the raster operations make of `src` over `dst`: the ROP
-    /// the source and destination chroma range tests select.
-    fn blt_value(&self, src: u16, dst: u16) -> u16 {
-        mix(self.blt_rop(src, dst), src, dst)
     }
 
     /// The ROP the source and destination chroma range tests select for
@@ -197,7 +192,14 @@ impl Voodoo {
             }
             // A fill that keeps every pixel as it is (Moto Racer fills
             // with ROP AAAAh each frame) changes nothing.
-            RECT_FILL if self.blt_rops(Some(self.reg[BLT_COLOR] as u16)).0.iter().flatten().all(|&r| r == 0xA) => {
+            RECT_FILL
+                if self
+                    .blt_rops(Some(self.reg[BLT_COLOR] as u16))
+                    .0
+                    .iter()
+                    .flatten()
+                    .all(|&r| r == 0xA) =>
+            {
                 return;
             }
             _ => {}
@@ -408,9 +410,8 @@ impl Voodoo {
         if command & COMMAND != CPU_TO_SCREEN || !self.blt.active {
             return;
         }
-        // After what is drawn since the copy started (`blit_start` waited
-        // for what came before it), unless the copy goes into the queue
-        // behind the held jobs. Mostly nothing is queued, and the words
+        // After what is drawn, unless the copy goes into the queue behind
+        // it (`blt_queue_dest`). Mostly nothing is queued, and the words
         // skip the wait: Moto Racer sends 40,000 a frame for its sky.
         let queue = self.blt_queue_cached();
         if queue.is_none() && self.writes_queue() {
@@ -574,8 +575,14 @@ impl Voodoo {
             Some(_) => [Some(0), None],
             None => [Some(0), Some(2)],
         };
-        let rop = |d: Option<u32>, s: Option<u32>| Some((self.reg[BLT_ROP] >> (4 * (d? | s?))) & 15);
-        let rops = [rop(dst[0], source[0]), rop(dst[0], source[1]), rop(dst[1], source[0]), rop(dst[1], source[1])];
+        let rop =
+            |d: Option<u32>, s: Option<u32>| Some((self.reg[BLT_ROP] >> (4 * (d? | s?))) & 15);
+        let rops = [
+            rop(dst[0], source[0]),
+            rop(dst[0], source[1]),
+            rop(dst[1], source[0]),
+            rop(dst[1], source[1]),
+        ];
         (rops, dst_tested)
     }
 
@@ -597,13 +604,13 @@ impl Voodoo {
         }
     }
 
-    /// What `blt_queue_dest` works its answer out from.
-    fn blt_queue_key(&self) -> [u32; 16] {
+    /// What `blt_queue_dest` works its answer out from. The source's
+    /// chroma range isn't: it counts every ROP the source's test can pick.
+    fn blt_queue_key(&self) -> [u32; 15] {
         let (r, f) = (&self.reg, &self.fbi);
         [
             r[BLT_DST_BASE_ADDR],
             r[BLT_XY_STRIDES],
-            r[BLT_SRC_CHROMA_RANGE],
             r[BLT_DST_CHROMA_RANGE],
             r[BLT_ROP],
             r[BLT_COMMAND],
@@ -641,7 +648,10 @@ impl Voodoo {
         let right = self.blt.x as usize + s12(self.reg[BLT_SIZE]).max(0) as usize;
         let bottom = self.blt.y as usize + self.blt.rows as usize;
         let start = base as usize / 2;
-        if right >= f.stride.words || bottom >= f.height as usize || start + (bottom + 1) * f.stride.words > f.ram.len() {
+        if right >= f.stride.words
+            || bottom >= f.height as usize
+            || start + (bottom + 1) * f.stride.words > f.ram.len()
+        {
             return None;
         }
         f.rgboffs.iter().any(|&o| o != NONE && o == base).then_some(start)
@@ -838,7 +848,9 @@ mod tests {
             let rows: Vec<_> = commands
                 .iter()
                 .filter_map(|c| match c {
-                    super::super::mirror::Command::Pixels(p) if p.dest == Some(back as u32) && (30..33).contains(&p.y) => {
+                    super::super::mirror::Command::Pixels(p)
+                        if p.dest == Some(back as u32) && (30..33).contains(&p.y) =>
+                    {
                         Some((p.x, p.y, p.values.clone()))
                     }
                     _ => None,
