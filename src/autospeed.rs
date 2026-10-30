@@ -101,6 +101,8 @@ const DROPPED: f64 = 0.8;
 /// loses a step for a while and no more, and one that can't run a speed
 /// meets it again only that often.
 const KEPT_UP: f64 = 0.95;
+/// Falling behind once at less than the host estimate over this is a stall.
+const STALLED: f64 = 2.0;
 /// How many steps of `FINE_STEP` above the record's speed are tried for its
 /// frame rate (see `Record`).
 const CLIMBS: u32 = 2;
@@ -668,14 +670,20 @@ impl AutoSpeed {
         self.pace = self.pace * 0.75 + m.pace * 0.25;
         let lagged = m.pace < KEPT_UP && self.pace < KEPT_UP;
         let again = std::mem::replace(&mut self.behind, lagged);
-        if lagged {
+        // Behind once at well under what the host runs, it stalled: that
+        // says nothing of its limit, and a cap from it would hold back the
+        // work of a program that hit one while starting. A cap at the least
+        // speed holds nothing but such work back either.
+        let stalled = !again && self.lagged.is_none() && c * STALLED < top as f64;
+        if lagged && !stalled {
             let cut = if again {
                 (m.pace * KEPT_UP).clamp(0.5, 1.0 / FINE_STEP)
             } else {
                 1.0 / FINE_STEP
             };
-            self.lagged = Some((clamp(c * cut), LAGGED_WINDOWS));
-        } else if let Some((most, left)) = self.lagged {
+            let most = clamp(c * cut);
+            self.lagged = (most > base).then_some((most, LAGGED_WINDOWS));
+        } else if let (false, Some((most, left))) = (lagged, self.lagged) {
             let most = if left > 1 { most } else { (most as f64 * FINE_STEP) as u32 };
             let left = if left > 1 { left - 1 } else { LAGGED_WINDOWS };
             self.lagged = (most < top).then_some((most, left));
@@ -1075,13 +1083,15 @@ mod tests {
         );
         assert!(speeds[battle.start - 1] >= 45_000, "{:?}", speeds);
         // Measured behind (`speeds[i]` is the speed of measurement i + 1):
-        // the first, and a few when a step up tries more again.
+        // the first, and a few when a step up tries more again. The host
+        // estimate here stays far above the host, so each takes a second
+        // measurement to tell it from a stall.
         let behind = |s: &&u32| **s as f64 * 0.95 > 40_000.0;
         let lost = speeds[battle.start - 1..battle.end - 1]
             .iter()
             .filter(behind)
             .count();
-        assert!(lost <= battle.len() / 10, "{} behind: {:?}", lost, speeds);
+        assert!(lost <= battle.len() / 7, "{} behind: {:?}", lost, speeds);
         // Without sliding to the floor, and back up after the battle.
         assert!(
             speeds[battle.start..].iter().all(|&s| s >= 25_000),
@@ -1146,6 +1156,27 @@ mod tests {
             assert!(later.iter().all(|&s| s >= 44_000), "{}: {:?}", every, later);
             let mean = later.iter().map(|&s| s as f64).sum::<f64>() / later.len() as f64;
             assert!(mean >= 70_000.0, "{}: {}", every, mean);
+        }
+    }
+
+    #[test]
+    fn a_stall_while_starting_does_not_hold_back_the_work_after_it() {
+        // Unreal Gold's first measurement, at the real-mode speed with a
+        // host estimate not settled yet, and a stall at the speed of a
+        // menu: neither says what the host runs when the loading starts.
+        for (speed, host) in [(3000, 4000), (40_000, 450_000)] {
+            let mut auto = AutoSpeed::new(3000, None);
+            let stalled = Measurement {
+                pace: 0.5,
+                output: 1_000_000.0,
+                ..STILL
+            };
+            auto.decide(speed, &stalled, true, host);
+            let work = Measurement {
+                output: 1_000_000.0,
+                ..STILL
+            };
+            assert_eq!(auto.decide(20_000, &work, true, 450_000), 450_000);
         }
     }
 
