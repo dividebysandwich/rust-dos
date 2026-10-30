@@ -1844,6 +1844,17 @@ fn stats_tell_the_stats_page_s_numbers() {
     assert!((frame["refresh_hz"].as_f64().unwrap() - 70.0).abs() < 1.0, "text mode at 70 Hz: {}", frame);
 }
 
+/// `/api/stats` sums up the host's frames, and `/api/underruns` answers
+/// before anything ran dry. (The rig has no sound device and no laps.)
+#[test]
+fn stats_tell_the_host_s_frames() {
+    let rig = Rig::new("frame-times");
+    let underruns = rig.get("/api/underruns").json();
+    assert_eq!((&underruns["events"], &underruns["dry_checks"]), (&json!(0), &json!(0)));
+    assert_eq!(underruns["log"], json!([]));
+    assert!(rig.get("/api/stats").json()["frame_times"].is_null(), "no frames yet");
+}
+
 // ----- the debugger page -------------------------------------------------------
 
 /// What the page (ui.html) reads, as it reads it: its requests, and the

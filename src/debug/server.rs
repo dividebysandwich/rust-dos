@@ -82,6 +82,7 @@ fn router(state: AppState) -> Router {
         .route("/api/ops/{req}", get(op_get))
         .route("/api/status", get(status))
         .route("/api/stats", get(stats))
+        .route("/api/underruns", get(underruns))
         .route("/api/profile", get(profile_get).post(profile_post))
         .route("/api/screenshot", get(screenshot))
         .route("/api/screen/text", get(screen_text))
@@ -788,6 +789,10 @@ async fn status(State(s): State<AppState>) -> ApiResult {
 
 async fn stats(State(s): State<AppState>) -> ApiResult {
     s.call_json(Cmd::Stats, DEFAULT_TIMEOUT).await
+}
+
+async fn underruns(State(s): State<AppState>) -> ApiResult {
+    s.call_json(Cmd::Underruns, DEFAULT_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -2164,7 +2169,12 @@ STATUS / SCREEN
                                            frame, per 1/4 s: the Stats page's numbers and emulated_speed
                                            (emulated s per wall s, full speed while near 1); fps the
                                            program draws; cpu_use is the percent of one host core the
-                                           main thread is busy
+                                           main thread is busy; frame_times: longest frame and
+                                           percentiles over the last 1024 frames, in ms
+  GET  /api/underruns                      the sound device's underruns: events (stretches of dry checks),
+                                           dry_checks, and the last 32 with the time since the last pump,
+                                           the queue then, the speed, and that time by cpu, video, present,
+                                           wait and other
   POST /api/profile                        {"enabled":true,"hz":2000,"timer":"sleep"|"spin","duration_ms":N}
                                            starts a profile (again, if one runs): a thread samples where
                                            the emulation thread's host time goes, by zone and guest

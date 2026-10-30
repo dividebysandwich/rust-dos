@@ -389,6 +389,9 @@ pub struct Bus {
     /// it was last read, and how often the output device ran dry.
     pub audio_peak: u16,
     pub audio_underruns: u64,
+    /// How long the host's frames took, and the underruns with what went
+    /// before them. The host's, and left out of save states.
+    pub host_frames: crate::hostframes::HostFrames,
     /// Writes logged so far to each port nothing emulates: a program
     /// polling for hardware that isn't there would flood the log.
     unhandled_writes: Vec<u8>,

@@ -13,6 +13,48 @@ use super::{Answer, BreakpointHit, DebugHub, PauseReason, Reply, Watch, heat, jo
 use crate::cpu::Cpu;
 use crate::video;
 
+/// A time in ms, to the hundredth.
+fn millis(time: Duration) -> f64 {
+    (time.as_secs_f64() * 1e5).round() / 100.0
+}
+
+/// `/api/underruns`: `hostframes` says what the numbers are.
+pub(super) fn underruns_json(cpu: &Cpu) -> Value {
+    let queue_ms = |frames: usize| (frames as f64 * 1e5 / rust_dos::opl::RATE as f64).round() / 100.0;
+    let hundredths = |x: f32| (x as f64 * 100.0).round() / 100.0;
+    let host = &cpu.bus.host_frames;
+    let log: Vec<Value> = host
+        .underruns()
+        .map(|u| {
+            json!({
+                "event": u.event,
+                "at_ms": millis(u.at),
+                "gap_ms": millis(u.gap),
+                "split_ms": {
+                    "cpu": millis(u.split.cpu),
+                    "video": millis(u.split.video),
+                    "present": millis(u.split.present),
+                    "wait": millis(u.split.wait),
+                    "other": millis(u.split.other),
+                },
+                "queued_before_ms": u.queued_before.map(queue_ms),
+                "queued_after_ms": u.queued_after.map(queue_ms),
+                "target_ms": queue_ms(u.target),
+                "speed": hundredths(u.speed),
+                "gap_speed": u.gap_speed.map(hundredths),
+                "cycles_per_ms": u.cycles_per_ms,
+                "dry_checks": u.dry_checks,
+                "stretch_ms": millis(u.stretch),
+            })
+        })
+        .collect();
+    json!({
+        "events": host.underrun_events(),
+        "dry_checks": cpu.bus.audio_underruns,
+        "log": log,
+    })
+}
+
 impl DebugHub {
     // ----- per-frame hooks ------------------------------------------------
 
@@ -393,6 +435,19 @@ impl DebugHub {
                     "render_ms": round(v.render_ms, 100.0),
                 })
             }),
+            // The host's frames, from one start of the frame loop to the
+            // next, while the machine runs: the last `FRAME_WINDOW` of
+            // them, how long they took together in seconds, and in ms the
+            // longest and the nearest-rank percentiles. Null before the
+            // first.
+            "frame_times": cpu.bus.host_frames.summary().map(|f| json!({
+                "frames": f.frames,
+                "seconds": millis(f.span) / 1000.0,
+                "longest_ms": millis(f.longest),
+                "p50_ms": millis(f.p50),
+                "p90_ms": millis(f.p90),
+                "p99_ms": millis(f.p99),
+            })),
         })
     }
 

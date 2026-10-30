@@ -171,7 +171,8 @@ impl Feed {
 /// server's audio stream. Called once per video frame; `idle` while the
 /// machine waits (paused, or in the settings window), when the device
 /// running dry isn't an underrun. Returns the samples, for recordings,
-/// which the mute leaves alone.
+/// which the mute leaves alone. `Bus::audio_underruns` counts the calls that
+/// find the queue empty, and `Bus::host_frames` what happened around them.
 pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
     bus.audio_catch_up();
     let samples: Vec<i16> = bus.audio_out.drain(..).collect();
@@ -214,11 +215,14 @@ pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
         if bus.mixer.muted || bus.mixer.fast_forward {
             out.fill(0);
         }
+        let after = queued + out.len() / 2;
         if !out.is_empty()
             && let Err(e) = device.queue(&out)
         {
             eprintln!("[AUDIO] Queue error: {}", e);
         }
+        let emulated_ns = bus.clock.now_ns();
+        bus.host_frames.pump(crate::hostframes::Pump { idle, queued, after, target, emulated_ns });
     }
     if let Some(hook) = &mut bus.audio_hook {
         hook(&samples);
@@ -320,6 +324,7 @@ mod tests {
         let queued = device.borrow().queued;
         assert!(queued <= 1400 + 735 + 1, "{queued}");
         assert_eq!(bus.audio_underruns, 2);
+        assert_eq!(bus.host_frames.underrun_events(), 2, "two with sound between them");
 
         // The device's clock 0.14% slower than emulated time: the queue
         // stays within 6 ms of its target, 5 and the average's lag.

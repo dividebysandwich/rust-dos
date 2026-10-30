@@ -43,6 +43,7 @@ use rust_dos::{
 use rust_dos::achievements::{Achievements, http::HttpTransport};
 use rust_dos::games::ActiveGame;
 use rust_dos::hardware::Hardware;
+use rust_dos::hostframes::Phase;
 use rust_dos::profile::{self, Zone};
 use rust_dos::savestate::{self, slots};
 
@@ -504,6 +505,8 @@ fn main() -> Result<(), String> {
         if let Some((start, times)) = last_frame {
             stats.record(&cpu.bus, rust_dos::stats::FrameTimes { wall: frame_start - start, ..times });
             dbg.set_frame_stats(stats.latest());
+            cpu.bus.host_frames.frame(frame_start - start);
+            cpu.bus.host_frames.note_speed(stats.latest().emulated_speed, cpu.bus.clock.cycles_per_ms());
         }
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
@@ -1546,6 +1549,7 @@ fn main() -> Result<(), String> {
         // Per-instruction debug hook (breakpoints / stepping / tracing) is
         // only consulted when something actually needs it.
         let dbg_hot = dbg.begin_batch(&cpu);
+        cpu.bus.host_frames.lap(Phase::Other);
         if let Some(mode) = &mut det {
             // A millisecond of emulated time at a time, with the input, the
             // frozen values and the profile's keys at its ticks.
@@ -1588,6 +1592,7 @@ fn main() -> Result<(), String> {
         } else {
             exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
         }
+        cpu.bus.host_frames.lap(Phase::Cpu);
         profile::set_host(Zone::Debug);
         dbg.end_batch(&cpu);
         profile::set_host(Zone::Frontend);
@@ -1805,6 +1810,7 @@ fn main() -> Result<(), String> {
         }
 
         // Update Audio
+        cpu.bus.host_frames.lap(Phase::Other);
         profile::set_host(Zone::AudioPump);
         let samples = pump_audio(&mut cpu.bus, waiting);
         profile::set_host(Zone::Frontend);
@@ -1836,6 +1842,7 @@ fn main() -> Result<(), String> {
             cpu.bus.vga.set_blink(cursor_visible);
         }
 
+        cpu.bus.host_frames.lap(Phase::Other);
         // Render Frame. The expensive part (the pixel fill driven by
         // palette/planar lookups inside `render_screen`) only happens when the
         // VGA state changed since last frame. On "clean" frames we reuse
@@ -2107,10 +2114,12 @@ fn main() -> Result<(), String> {
                 draw_recording_indicator(&mut screen, frame_w);
             }
         }
+        cpu.bus.host_frames.lap(Phase::Video);
         // Waiting for the deadline of a frame paced to the retrace is
         // neither the frame's work nor time the CPU could have had.
         profile::set_host(Zone::FrameWait);
         let waited = pacer.wait_to_present(&cpu.bus.clock);
+        cpu.bus.host_frames.lap(Phase::Wait);
         profile::set_host(Zone::FramePresent);
         if still {
             dbg.count_frame();
@@ -2139,6 +2148,7 @@ fn main() -> Result<(), String> {
             }
         }
 
+        cpu.bus.host_frames.lap(Phase::Present);
         profile::set_host(Zone::Frontend);
         let overhead = frame_start.elapsed().saturating_sub(exec_time + waited);
         if let Some(cycles) = pacer.end_cpu_frame(&mut cpu, executed, exec_time, overhead) {
@@ -2161,6 +2171,7 @@ fn main() -> Result<(), String> {
         ));
         profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
+        cpu.bus.host_frames.lap(Phase::Wait);
     }
     shut_down(
         &args,
