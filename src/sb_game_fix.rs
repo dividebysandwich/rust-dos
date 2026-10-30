@@ -285,9 +285,9 @@ pub fn find(ram: &[u8]) -> Option<(&'static Driver, usize)> {
 /// address `handler`.
 fn set_up(ram: &[u8], handler: usize) -> bool {
     ram.get(..0x400).is_some_and(|table| {
-        table.chunks_exact(4).any(|v| {
-            let offset = u16::from_le_bytes([v[0], v[1]]) as usize;
-            let segment = u16::from_le_bytes([v[2], v[3]]) as usize;
+        table.as_chunks::<4>().0.iter().any(|&[o0, o1, s0, s1]| {
+            let offset = u16::from_le_bytes([o0, o1]) as usize;
+            let segment = u16::from_le_bytes([s0, s1]) as usize;
             (segment << 4) + offset == handler
         })
     })
