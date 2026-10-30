@@ -318,7 +318,7 @@ impl Default for VoodooSettings {
             fps_cap: None,
             gamma: None,
             dither: true,
-            gpu_reads: false,
+            gpu_reads: true,
         }
     }
 }
