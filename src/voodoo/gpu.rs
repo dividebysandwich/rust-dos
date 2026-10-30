@@ -1,5 +1,5 @@
 //! 2D operations a Banshee's or Voodoo3's OpenGL renderer does in its
-//! copy of the card's memory (`pages`), for the built-in Windows'
+//! copy of the card's memory (`tracker`), for the built-in Windows'
 //! DirectDraw and Direct3D: a blit, a fill, a window's Present. The card
 //! records the operation for the renderer and leaves its own memory as it
 //! was; the pages the operation drew into are then the GPU's, and
@@ -18,13 +18,26 @@
 use super::Voodoo;
 use super::backlog::Access;
 use super::mirror::{Blit, BlitSource, Command};
-use super::pages::{PAGE, Pages};
+use super::raster::Stride;
+use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
 
-/// Rows `top..bottom` of a buffer the renderer drew and the memory
-/// doesn't have yet: the buffer by its key in the recording (a colour
-/// buffer's word offset, None for the auxiliary buffer), and the rows.
-pub(crate) type Stale = (Option<u32>, (u32, u32));
+/// The bytes of the memory rows `top..bottom` of a buffer take, the
+/// buffer at word offset `base` with rows `stride` apart: whole rows, or
+/// in tiles whole bands of 32 rows.
+fn row_bytes(base: u32, stride: Stride, (top, bottom): (u32, u32)) -> (u32, u32) {
+    let (unit, per) = (stride.words as u64 * 2, if stride.tiled { 32 } else { 1 });
+    let at = |rows: u64| (base as u64 * 2 + rows * unit).min(u32::MAX as u64) as u32;
+    (at(top as u64 / per), at((bottom as u64).div_ceil(per)))
+}
+
+/// The rows of such a buffer whose bytes are `start..end`, which are
+/// whole rows of it (`row_bytes`).
+fn rows_of(base: u32, stride: Stride, (start, end): (u32, u32)) -> (u32, u32) {
+    let (unit, per) = (stride.words.max(1) as u64 * 2, if stride.tiled { 32 } else { 1 });
+    let (a, b) = (start as u64 - base as u64 * 2, end as u64 - base as u64 * 2);
+    ((a / unit * per) as u32, (b.div_ceil(unit) * per) as u32)
+}
 
 /// The OpenGL renderer, as the card reaches it between frames.
 pub trait GpuLink {
@@ -53,7 +66,7 @@ pub trait GpuLink {
 /// The renderer's copy of the memory, as the card keeps track of it.
 #[derive(Default)]
 pub struct Gpu {
-    pub(super) pages: Pages,
+    pub(super) pages: Tracker,
     link: Option<Box<dyn GpuLink>>,
     /// Pages read back from the GPU, for `/api/status`.
     read_back: u64,
@@ -74,7 +87,7 @@ const HOT_FRAMES: u32 = 60;
 impl Gpu {
     pub fn new(bytes: usize) -> Self {
         Self {
-            pages: Pages::new(bytes),
+            pages: Tracker::new(bytes),
             ..Self::default()
         }
     }
@@ -129,38 +142,36 @@ impl Voodoo {
 
     /// The buffers a job left to the renderer draws into are behind it
     /// in memory: its colour buffer and the auxiliary buffer, all their
-    /// rows.
+    /// rows, as bytes of the memory in the tracker.
     pub(crate) fn gpu_left(&self, job: &Job) {
         self.gpu_behind.set(true);
         self.gpu_only.set(self.gpu_only.get() + 1);
-        let height = self.fbi.height;
-        let mut stale = self.gpu_stale.borrow_mut();
-        // The rows join those of the buffer behind that they meet.
-        let mut mark = |key: Option<u32>, (mut top, mut bottom): (u32, u32)| {
-            stale.retain(|&(k, (a, b))| {
-                let meets = k == key && a <= bottom && top <= b;
-                if meets {
-                    (top, bottom) = (top.min(a), bottom.max(b));
-                }
-                !meets
-            });
-            stale.push((key, (top, bottom)));
+        let fbi = &self.fbi;
+        let all = (0, fbi.height);
+        let mut gpu = self.gpu.borrow_mut();
+        let pages = &mut gpu.pages;
+        let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
+            if base != super::NONE {
+                let (start, end) = row_bytes(base / 2, stride, rows);
+                pages.drawn_in_buffer(start, end);
+            }
         };
         match job {
             Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                mark(Some(st.dest as u32), (0, height));
-                mark(None, (0, height));
+                mark(st.dest as u32 * 2, fbi.stride, all);
+                mark(fbi.auxoffs, fbi.aux_stride, all);
             }
             // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
             Job::Rows { base, rows, .. } => {
-                let aux = self.fbi.auxoffs != super::NONE && *base == self.fbi.auxoffs as usize / 2;
-                mark((!aux).then_some(*base as u32), *rows);
+                let aux = fbi.auxoffs != super::NONE && *base == fbi.auxoffs as usize / 2;
+                let stride = if aux { fbi.aux_stride } else { fbi.stride };
+                mark(*base as u32 * 2, stride, *rows);
             }
             _ => {
-                for offs in self.fbi.rgboffs.iter().filter(|&&o| o != super::NONE) {
-                    mark(Some(offs / 2), (0, height));
+                for &offs in &fbi.rgboffs {
+                    mark(offs, fbi.stride, all);
                 }
-                mark(None, (0, height));
+                mark(fbi.auxoffs, fbi.aux_stride, all);
             }
         }
     }
@@ -187,7 +198,7 @@ impl Voodoo {
         self.catch_up_workers();
         let forget = || {
             self.gpu_behind.set(false);
-            self.gpu_stale.borrow_mut().clear();
+            self.gpu.borrow_mut().pages.forget_buffers();
         };
         let (commands, key) = {
             let mut mirror = self.mirror.borrow_mut();
@@ -202,24 +213,30 @@ impl Voodoo {
             return;
         };
         let mut gpu = self.gpu.borrow_mut();
+        let gpu = &mut *gpu;
         let Some(link) = gpu.link.as_mut() else {
             if !std::mem::replace(&mut gpu.lost, true) {
                 eprintln!("[3DFX] the OpenGL renderer went with the buffers only it had");
             }
-            forget();
+            gpu.pages.forget_buffers();
+            self.gpu_behind.set(false);
             return;
         };
         link.run(commands);
-        // The rows asked for that are behind, buffer by buffer.
-        let mut stale = self.gpu_stale.borrow_mut();
+        let layout = key.layout();
+        // The rows asked for, buffer by buffer: the buffer's key in the
+        // recording (a colour buffer's word offset, None for the auxiliary
+        // buffer) and the rows.
         let asked = match range {
-            None => stale
+            None => layout
+                .color
                 .iter()
-                .map(|&(k, (top, bottom))| (k, top, bottom))
+                .map(|&offs| Some(offs))
+                .chain(layout.aux.map(|_| None))
+                .map(|k| (k, 0, layout.height))
                 .collect(),
             Some((start, end)) => key.rows_in(start, end),
         };
-        let layout = key.layout();
         let width = layout.width as usize;
         let ram = &self.fbi.ram;
         let mut read = false;
@@ -227,17 +244,15 @@ impl Voodoo {
             let (base, stride) = match (buffer, layout.aux) {
                 (Some(offs), _) => (offs, layout.stride),
                 (None, Some(offs)) => (offs, layout.aux_stride),
-                (None, None) => {
-                    stale.retain(|&(k, _)| k.is_some());
-                    continue;
-                }
+                (None, None) => continue,
             };
-            // The rows of it that are behind, and what is left of them.
-            let mut left = Vec::new();
-            stale.retain(|&(k, (s0, s1))| {
-                let (top, bottom) = (top.max(s0), bottom.min(s1).min(layout.height));
-                if k != buffer || top >= bottom {
-                    return true;
+            // The bytes of those rows that are behind, read back by rows.
+            let (start, end) = row_bytes(base, stride, (top, bottom));
+            for bytes in gpu.pages.take_buffers(start, end) {
+                let (top, bottom) = rows_of(base, stride, bytes);
+                let bottom = bottom.min(layout.height);
+                if top >= bottom {
+                    continue;
                 }
                 let mut pixels = vec![0u16; width * (bottom - top) as usize];
                 if link.read_buffer(buffer, (top, bottom), &mut pixels) {
@@ -252,19 +267,17 @@ impl Voodoo {
                         }
                     }
                 }
-                left.extend(
-                    [(k, (s0, top)), (k, (bottom, s1))]
-                        .into_iter()
-                        .filter(|(_, (a, b))| a < b),
-                );
-                false
-            });
-            stale.extend(left);
+            }
+        }
+        // Read back whole, the memory has what the renderer can give: the
+        // rest is in no buffer it has.
+        if range.is_none() {
+            gpu.pages.forget_buffers();
         }
         if read {
             self.gpu_read_backs.set(self.gpu_read_backs.get() + 1);
         }
-        self.gpu_behind.set(!stale.is_empty());
+        self.gpu_behind.set(gpu.pages.any_in_buffers());
     }
 
     /// Whether 2D operations may go to the GPU: the renderer draws the

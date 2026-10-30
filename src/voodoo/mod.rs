@@ -40,12 +40,12 @@ pub mod lfb;
 pub mod mem;
 pub mod mirror;
 pub mod overlay;
-pub mod pages;
 pub mod raster;
 pub mod register;
 pub mod regs;
 pub mod setup;
 pub mod tables;
+pub mod tracker;
 pub mod texture;
 pub mod tsu;
 pub mod workers;
@@ -601,21 +601,18 @@ pub struct Voodoo {
     /// With `voodoo_readback=gpu`: whether the renderer's pictures of the
     /// buffers are what reads of them get (`gpu_reads`), whether the
     /// memory is behind them (jobs since were left to the renderer
-    /// alone), whether the program used alpha planes, which the renderer
-    /// keeps where they can't be read back, and the read backs and the
-    /// jobs left to the renderer, for the debugger.
+    /// alone; which bytes are, the tracker in `gpu` keeps), whether the
+    /// program used alpha planes, which the renderer keeps where they
+    /// can't be read back, and the read backs and the jobs left to the
+    /// renderer, for the debugger.
     gpu_reads: bool,
     gpu_behind: Cell<bool>,
-    /// The buffers behind the renderer (`gpu_behind`), by their key in
-    /// the recording (a colour buffer's word offset, None for the
-    /// auxiliary buffer), and rows of each that are, apart from one
-    /// another.
-    gpu_stale: RefCell<Vec<gpu::Stale>>,
     gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
     gpu_only: Cell<u64>,
-    /// The renderer's copy of a Banshee's memory: which pages it lacks
-    /// (`banshee_scanout`) and which only it has (`gpu`).
+    /// What the renderer has of the card's memory (`tracker`): which
+    /// pages of a Banshee's memory it lacks (`banshee_scanout`), and which
+    /// bytes only it has, in its copy of the memory or in its 3D buffers.
     gpu: RefCell<gpu::Gpu>,
     /// A Banshee's picture changed, which the software picture took
     /// first (`prepare_display`), so the renderer's scanout still has to
@@ -704,7 +701,6 @@ impl Voodoo {
             mirror: RefCell::new(None),
             gpu_reads: false,
             gpu_behind: Cell::new(false),
-            gpu_stale: RefCell::new(Vec::new()),
             gpu_alpha: Cell::new(false),
             gpu_read_backs: Cell::new(0),
             gpu_only: Cell::new(0),

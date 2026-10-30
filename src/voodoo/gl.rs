@@ -39,7 +39,7 @@ mod uniforms;
 use uniforms::{Banshee, Blit2d, FillQuad, Locations, Quad, Triangle};
 
 /// Bytes a row of the textures of the card's memory (`CardMemory`) at
-/// most: a page (`pages::PAGE`).
+/// most: a page (`tracker::PAGE`).
 const MEMORY_ROW: u32 = 4096;
 
 /// Limits below what the host's OpenGL allows, to try the renderer as a

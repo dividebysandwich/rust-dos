@@ -281,7 +281,7 @@ pub enum Command {
     Texture(Box<Texture>),
     FreeTexture(u32),
     /// Bytes of a Banshee's or Voodoo3's memory of `size` bytes, from
-    /// byte `at` on (whole pages, `pages::PAGE`), for the renderer's copy
+    /// byte `at` on (whole pages, `tracker::PAGE`), for the renderer's copy
     /// of it.
     Memory { size: u32, at: u32, bytes: Vec<u8> },
     /// A 2D operation the renderer does in its copy of the memory, which
