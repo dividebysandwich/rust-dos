@@ -796,9 +796,6 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
                     s = "0".repeat(p - s.len()) + &s;
                 }
                 if hex_prefix && matches!(t as u8, b'x' | b'X') {
-                    if zero && !left && width > s.len() {
-                        s = "0".repeat(width - s.len()) + &s;
-                    }
                     s.insert_str(0, if t == b'x' as u16 { "0x" } else { "0X" });
                     prefix = 2;
                 }
@@ -817,7 +814,8 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
             if left {
                 text.extend(std::iter::repeat_n(b' ' as u16, pad));
             } else if zero && number {
-                let at = (text.first() == Some(&(b'-' as u16))) as usize;
+                // The zeros go after a minus sign or the 0x.
+                let at = prefix + (text.first() == Some(&(b'-' as u16))) as usize;
                 text.splice(at..at, std::iter::repeat_n(b'0' as u16, pad));
             } else {
                 text.splice(0..0, std::iter::repeat_n(b' ' as u16, pad));
