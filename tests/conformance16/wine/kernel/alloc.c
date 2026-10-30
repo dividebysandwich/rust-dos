@@ -472,16 +472,16 @@ static void test_selectors(void)
     ok(GlobalFree(h) == NULL, "GlobalFree failed\n");
 }
 
-/* What ES holds after `free` (GlobalFree or FreeSelector) is called
- * with `arg` while ES holds `sel`. */
-static WORD es_after(FARPROC free, WORD arg, WORD sel)
+/* What ES holds after `release` (GlobalFree or FreeSelector) is
+ * called with `arg` while ES holds `sel`. */
+static WORD es_after(FARPROC release, WORD arg, WORD sel)
 {
     WORD es_;
     _asm {
         push es
         mov es, sel
         push arg
-        call dword ptr free
+        call dword ptr release
         mov es_, es
         pop es
     }

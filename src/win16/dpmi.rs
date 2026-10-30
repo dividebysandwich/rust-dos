@@ -212,14 +212,10 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
             set_w(ctx, EAX, sel);
         }
         0x0001 => {
+            // The segment registers that hold it are zeroed (DPMI 0.9),
+            // in `dos::interrupt` once the call is done.
             if !free_selector(cpu, bx) {
                 return Err(BAD_SELECTOR);
-            }
-            // The segment registers that hold it are zeroed (DPMI 0.9).
-            for seg in [Seg::ES, Seg::DS, Seg::FS, Seg::GS] {
-                if ctx.seg[seg as usize] | 3 == bx | 3 {
-                    ctx.seg[seg as usize] = 0;
-                }
             }
         }
         0x0002 => {

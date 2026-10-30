@@ -212,15 +212,12 @@ fn unalias(cpu: &mut Cpu, i: usize) {
     }
 }
 
-/// Free the Win16 selector `sel`, its descriptor no longer present.
+/// Free the Win16 selector `sel`: its descriptor is 0, and the segment
+/// registers that hold it are zeroed (`ldt::write`), as FreeSelector
+/// does.
 fn free_selector(cpu: &mut Cpu, sel: u16) {
     if let Some(system) = super::win16_ref(cpu).map(|p| p.system) {
-        ldt::write(
-            cpu,
-            system,
-            sel,
-            ldt::segment(0, 0, ldt::ACCESS_DATA & !0x80),
-        );
+        ldt::write(cpu, system, sel, 0);
     }
     cpu.bus.win32.win16.ldt.free(sel, 1);
 }
