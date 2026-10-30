@@ -158,6 +158,11 @@
 # smoother picture without the dither pattern. Changes take effect
 # immediately.
 #voodoo_dither=true
+# What a game reads back from the 3dfx card's memory with the OpenGL
+# renderer: gpu (the default), the picture OpenGL drew, read back where it
+# is read, or exact, the card's own pixels, which the software rasterizer
+# draws as well. exact costs the host's CPU more.
+#voodoo_readback=gpu
 # Texture anisotropy for the OpenGL Voodoo renderer: off, 2, 4, 8 or 16.
 #voodoo_anisotropy=off
 # The gamma Glide applies to the 3dfx picture, as the environment variables

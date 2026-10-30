@@ -230,8 +230,29 @@ impl DiskController {
             let spec = MountSpec { path: folder.clone(), ..spec_of(text)? };
             mount = Some(state_value(&spec));
         }
+        // A booted system's disk image comes back from the copy beside the
+        // state file, into the image this machine has in the drive. The
+        // image the state names may be one this machine doesn't mount (the
+        // original that the saving run's disk was a copy of), and taking
+        // it would write the copy over it. (A folder's disk is made from
+        // the folder the state names, or the one `folders` gives. An image
+        // that `folders` names, a scratch disk, is mounted as it says.)
+        let copy = self
+            .copies_from
+            .as_ref()
+            .map(|state| crate::savestate::disks::copy_path(state, drive))
+            .filter(|copy| copy.is_file());
+        let into_mounted = match (&mount, &copy) {
+            (Some(text), Some(_)) if !folders.iter().any(|(d, _)| *d == drive) => {
+                !crate::hostfs::is_dir(&spec_of(text)?.path)
+            }
+            _ => false,
+        };
         let now = self.drive(drive).and_then(|d| d.mount.as_ref()).map(state_value);
-        if let Some(text) = mount.as_ref().filter(|&text| now.as_ref() != Some(text)) {
+        if let Some(text) = mount
+            .as_ref()
+            .filter(|&text| !into_mounted && now.as_ref() != Some(text))
+        {
             let mut spec = spec_of(text)?;
             spec.opts.boot = self.boot_drive() == Some(drive);
             // A mount that fails with an image or folder of the state gone
@@ -255,8 +276,16 @@ impl DiskController {
                 StateError::Media(format!("drive {} can't be mounted: {}{}", name, e, hint))
             })?;
         }
+        let no_image = || {
+            StateError::Media(format!(
+                "drive {} has no disk image here for the state's copy of its disk to go into: \
+                 mount one of the same size (a scratch copy) as {} and load again",
+                name, name
+            ))
+        };
         let images = match self.drive(drive) {
             Some(d) => d.images.len(),
+            None if into_mounted => return Err(no_image()),
             None => return Err(StateError::Mismatch(format!("it has a drive {} and this machine hasn't", name))),
         };
         for _ in 0..images {
@@ -264,6 +293,23 @@ impl DiskController {
                 break;
             }
             self.swap_image(drive).map_err(StateError::Mismatch)?;
+        }
+        // The copy goes into the disk now in the drive once the state is
+        // in (`revert_disks`), where a disk of another size could only be
+        // logged: the load is refused here instead.
+        if let Some(copy) = copy.filter(|_| into_mounted) {
+            let disk = self.bios_image(drive).ok_or_else(no_image)?;
+            let len = std::fs::metadata(&copy)
+                .map_err(|e| StateError::Media(format!("{}: {}", copy.display(), e)))?
+                .len();
+            if len.div_ceil(crate::diskimage::SECTOR_SIZE as u64) != disk.sectors() {
+                return Err(StateError::Media(format!(
+                    "the disk image in drive {} ({}) isn't the size of the state's copy of it ({})",
+                    name,
+                    disk.path().display(),
+                    copy.display()
+                )));
+            }
         }
         let d = self.drives[drive as usize].as_mut().expect("the drive is there");
         d.current_dir = dir;

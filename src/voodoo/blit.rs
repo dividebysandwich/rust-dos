@@ -8,7 +8,7 @@
 //! swizzling and transparent monochrome bits.
 
 use super::regs::*;
-use super::workers::Job;
+use super::workers::{Job, Word};
 use super::{NONE, Voodoo};
 
 /// A CPU-to-screen copy under way: where its next pixel goes, how many
@@ -64,6 +64,31 @@ fn mix(rop: u32, s: u16, d: u16) -> u16 {
     }
 }
 
+/// Whether every 5-6-5 pixel is in a chroma range register's range
+/// (true) or none is (false): None if it depends on the pixel.
+fn chroma_constant(range: u32) -> Option<bool> {
+    let parts = |v: u32| [v >> 11 & 0x1F, v >> 5 & 0x3F, v & 0x1F];
+    let (low, high) = (parts(range & 0xFFFF), parts(range >> 16));
+    if low.iter().zip(&high).any(|(l, h)| l > h) {
+        Some(false)
+    } else if low == [0; 3] && high == [0x1F, 0x3F, 0x1F] {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// The bytes of rows `y0` to `y1` (either way round) of a blit's side at
+/// byte `base` with `stride` bytes a row, to the last column the blitter
+/// reaches in the last, whatever the stride.
+fn blt_rows(base: u32, stride: u32, y0: i32, y1: i32) -> (u32, u32) {
+    let (top, last) = (y0.min(y1).max(0) as u32, y0.max(y1).max(0) as u32);
+    let end = base
+        .saturating_add(last.saturating_mul(stride))
+        .saturating_add(2 * 2048);
+    (base.saturating_add(top.saturating_mul(stride)), end)
+}
+
 /// Whether a 5-6-5 pixel is within a chroma range register's minimum
 /// (bits 15:0) and maximum (bits 31:16).
 fn in_range(range: u32, pixel: u16) -> bool {
@@ -117,6 +142,14 @@ impl Voodoo {
             return;
         }
         let dst = self.fbi.ram.get(at);
+        let value = mix(self.blt_rop(src, dst), src, dst);
+        self.fbi.ram.set(at, value);
+        self.blt_mirror(at, value);
+    }
+
+    /// The ROP the source and destination chroma range tests select for
+    /// `src` over `dst`.
+    fn blt_rop(&self, src: u16, dst: u16) -> u32 {
         let command = self.blt_command();
         let mut rop = 0;
         if command & DST_CHROMA != 0 && in_range(self.reg[BLT_DST_CHROMA_RANGE], dst) {
@@ -125,15 +158,13 @@ impl Voodoo {
         if command & SRC_CHROMA != 0 && in_range(self.reg[BLT_SRC_CHROMA_RANGE], src) {
             rop |= 2;
         }
-        let value = mix(self.reg[BLT_ROP] >> (4 * rop), src, dst);
-        self.fbi.ram.set(at, value);
-        self.blt_mirror(at, value);
+        (self.reg[BLT_ROP] >> (4 * rop)) & 15
     }
 
     /// Tell the OpenGL renderer's recording about a pixel the blitter
     /// wrote, if it is in a buffer's picture.
     fn blt_mirror(&mut self, at: usize, value: u16) {
-        if self.mirror.is_none() {
+        if !self.recording() {
             return;
         }
         let fbi = &self.fbi;
@@ -145,7 +176,7 @@ impl Voodoo {
         let (x, y) = (((at - base) % row) as u32, ((at - base) / row) as u32);
         if x < fbi.width && y < fbi.height {
             let width = fbi.width;
-            if let Some(mirror) = &mut self.mirror {
+            if let Some(mirror) = self.mirror.get_mut() {
                 mirror.pixel(dest.map(|d| d as u32), x, y, value, width);
             }
         }
@@ -159,13 +190,55 @@ impl Voodoo {
             self.display_dirty = true;
             return;
         }
-        // After what is drawn, which may read or write the same memory.
-        self.flush();
-        self.mirror_sync();
+        match command & COMMAND {
+            CPU_TO_SCREEN => {
+                // Its pixels may wait behind what is drawn
+                // (`blt_queue_dest`); blit_data waits for the drawing
+                // where they can't.
+                let xy = self.reg[BLT_DST_XY];
+                let (x, y) = ((xy & 0x7FF) as i32, ((xy >> 16) & 0x7FF) as i32);
+                let rows = s12(self.reg[BLT_SIZE] >> 16).max(0);
+                self.blt = super::blit::Blit {
+                    active: true,
+                    x,
+                    y,
+                    column: 0,
+                    rows,
+                };
+                return;
+            }
+            // A fill that keeps every pixel as it is (Moto Racer fills
+            // with ROP AAAAh each frame) changes nothing.
+            RECT_FILL
+                if self
+                    .blt_rops(Some(self.reg[BLT_COLOR] as u16))
+                    .0
+                    .iter()
+                    .flatten()
+                    .all(|&r| r == 0xA) =>
+            {
+                return;
+            }
+            _ => {}
+        }
         let (size_x, size_y) = (s12(self.reg[BLT_SIZE]), s12(self.reg[BLT_SIZE] >> 16));
         let (dx, dy) = (size_x.signum().max(0) * 2 - 1, size_y.signum().max(0) * 2 - 1);
         let (dst_x, dst_y) = ((self.reg[BLT_DST_XY] & 0x7FF) as i32, ((self.reg[BLT_DST_XY] >> 16) & 0x7FF) as i32);
         let (dst_base, dst_stride) = self.blt_dst();
+        // After what is drawn, which may read or write the same memory:
+        // the rows the blit reads and writes. An SGRAM fill's are pages.
+        let src_y = ((self.reg[BLT_SRC_XY] >> 16) & 0x7FF) as i32;
+        let (src_base, src_stride) = self.blt_src();
+        let rows = [
+            blt_rows(dst_base, dst_stride, dst_y, dst_y + size_y),
+            blt_rows(src_base, src_stride, src_y, src_y + size_y),
+        ];
+        match command & COMMAND {
+            SCREEN_TO_SCREEN => self.flush_in(&rows),
+            RECT_FILL => self.flush_in(&rows[..1]),
+            _ => self.flush(),
+        }
+        self.mirror_sync();
         let at = |x: i32, y: i32, base: u32, stride: u32| base.wrapping_add((y as u32).wrapping_mul(stride)).wrapping_add(2 * x as u32);
         match command & COMMAND {
             SCREEN_TO_SCREEN => {
@@ -181,10 +254,6 @@ impl Voodoo {
                         self.blt_put(at(x, y, dst_base, dst_stride), src);
                     }
                 }
-            }
-            CPU_TO_SCREEN => {
-                self.blt = super::blit::Blit { active: true, x: dst_x, y: dst_y, column: 0, rows: size_y.max(0) };
-                return;
             }
             RECT_FILL => {
                 let color = self.reg[BLT_COLOR] as u16;
@@ -307,7 +376,7 @@ impl Voodoo {
         }
         if let Some((first, end)) = self.sgram_run() {
             self.mirror_fill(first, end, color);
-        } else if let Some(mirror) = &mut self.mirror {
+        } else if let Some(mirror) = self.mirror.get_mut() {
             // The same columns of several pages: a snapshot takes them.
             mirror.invalidate();
         }
@@ -317,7 +386,7 @@ impl Voodoo {
     /// words `first..end`: the rows of each buffer it covers, as fills, or
     /// a snapshot where it covers part of a row.
     fn mirror_fill(&mut self, first: u32, end: u32, color: u16) {
-        if self.mirror.is_none() {
+        if !self.recording() {
             return;
         }
         let fbi = &self.fbi;
@@ -336,7 +405,7 @@ impl Voodoo {
             }
             if (start - base) % row != 0 || (stop - base) % row != 0 {
                 // A row partly covered: a snapshot takes the fill.
-                if let Some(mirror) = &mut self.mirror {
+                if let Some(mirror) = self.mirror.get_mut() {
                     mirror.invalidate();
                 }
                 return;
@@ -348,7 +417,7 @@ impl Voodoo {
         }
         let (r, g, b) = ((color >> 11) as u32, ((color >> 5) & 0x3F) as u32, (color & 0x1F) as u32);
         let rgb = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
-        if let Some(mirror) = &mut self.mirror {
+        if let Some(mirror) = self.mirror.get_mut() {
             for (base, colour, top, bottom) in fills {
                 mirror.fill(super::mirror::Fill {
                     dest: base,
@@ -369,12 +438,19 @@ impl Voodoo {
         if command & COMMAND != CPU_TO_SCREEN || !self.blt.active {
             return;
         }
-        // After what is drawn since the copy started (`blit_start` waited
-        // for what came before it). Mostly nothing is queued, and the
-        // words skip the wait: Moto Racer sends 40,000 a frame for its
-        // sky.
-        if self.writes_queue() {
-            self.flush();
+        // After what is drawn, unless the copy goes into the queue behind
+        // it (`blt_queue_dest`). Mostly nothing is queued, and the words
+        // skip the wait: Moto Racer sends 40,000 a frame for its sky.
+        let queue = self.blt_queue_cached();
+        if queue.is_none() && self.writes_queue() {
+            // The rows it has left to write, whose pixels it may read.
+            let (base, stride) = self.blt_dst();
+            self.flush_in(&[blt_rows(
+                base,
+                stride,
+                self.blt.y,
+                self.blt.y + self.blt.rows,
+            )]);
         }
         self.mirror_sync();
         let mut data = data;
@@ -396,6 +472,12 @@ impl Voodoo {
         }
         let lanes = (command >> 6) & 3;
         let mut bits = 32;
+        let mut words = [Word {
+            row: 0,
+            at: 0,
+            value: 0,
+        }; 32];
+        let mut queued = 0;
         while bits > 0 && self.blt.column <= size_x && self.blt.active {
             let x = self.blt.x + self.blt.column;
             let y = self.blt.y;
@@ -444,7 +526,25 @@ impl Voodoo {
                 && !self.blt_clipped(x, y)
             {
                 let addr = dst_base.wrapping_add((y as u32).wrapping_mul(dst_stride)).wrapping_add(2 * x as u32);
-                self.blt_put(addr, p);
+                if queue.is_some() {
+                    // The destination's test picks the same ROP for every
+                    // pixel there (`blt_queue_dest`), so any value will
+                    // do for it. ROP AAAAh keeps the pixel as it is: a
+                    // source colour key's transparent pixels.
+                    let rop = self.blt_rop(p, 0);
+                    if rop != 0xA {
+                        let at = addr >> 1;
+                        let value = mix(rop, p, 0);
+                        words[queued] = Word {
+                            row: y as u16,
+                            at,
+                            value,
+                        };
+                        queued += 1;
+                    }
+                } else {
+                    self.blt_put(addr, p);
+                }
             }
             self.blt.column += 1;
             if self.blt.column > size_x {
@@ -465,7 +565,146 @@ impl Voodoo {
                 bits -= skip;
             }
         }
+        if let Some(dest) = queue
+            && queued > 0
+        {
+            let words = &words[..queued];
+            // The copy's rows are the buffer's (`blt_queue_dest`), so the
+            // recording gets the pixels where they are, without working
+            // out which buffer each is in.
+            let (width, row) = (self.fbi.width, self.fbi.stride.words);
+            if let Some(mirror) = self.mirror.get_mut() {
+                for w in words {
+                    let x = (w.at as usize - dest - w.row as usize * row) as u32;
+                    if x < width {
+                        mirror.pixel(Some(dest as u32), x, w.row as u32, w.value, width);
+                    }
+                }
+            }
+            if self.writes_queue() {
+                self.queue_words(words);
+                // The display waits for them if it shows the buffer.
+                self.mark_drawn(dest);
+            } else {
+                for w in words {
+                    self.fbi.ram.set(w.at as usize, w.value);
+                }
+            }
+        }
         self.display_dirty = true;
+    }
+
+    /// The ROPs the chroma range tests can pick for the blit's pixels,
+    /// from a source pixel `src` or any (None where they pick fewer), and
+    /// whether the destination's test picks between them by the pixel
+    /// there. Without a test its bit of the ROP number is clear, and with
+    /// a range that holds every colour or none (Moto Racer's Glide sets
+    /// 0 to FFFFh) it is the same for every pixel.
+    fn blt_rops(&self, src: Option<u16>) -> ([Option<u32>; 4], bool) {
+        let command = self.blt_command();
+        let (dst, dst_tested) = if command & DST_CHROMA == 0 {
+            ([Some(0), None], false)
+        } else {
+            match chroma_constant(self.reg[BLT_DST_CHROMA_RANGE]) {
+                Some(true) => ([Some(1), None], false),
+                Some(false) => ([Some(0), None], false),
+                None => ([Some(0), Some(1)], true),
+            }
+        };
+        let source = match src {
+            _ if command & SRC_CHROMA == 0 => [Some(0), None],
+            Some(p) if in_range(self.reg[BLT_SRC_CHROMA_RANGE], p) => [Some(2), None],
+            Some(_) => [Some(0), None],
+            None => [Some(0), Some(2)],
+        };
+        let rop =
+            |d: Option<u32>, s: Option<u32>| Some((self.reg[BLT_ROP] >> (4 * (d? | s?))) & 15);
+        let rops = [
+            rop(dst[0], source[0]),
+            rop(dst[0], source[1]),
+            rop(dst[1], source[0]),
+            rop(dst[1], source[1]),
+        ];
+        (rops, dst_tested)
+    }
+
+    /// The colour buffer a CPU-to-screen copy writes into (its word
+    /// offset), when its pixels can wait behind the drawing queued before
+    /// them as frame buffer writes do (`lfb_write`): they don't depend on
+    /// the destination's, and what is left of its rectangle lies in a
+    /// colour buffer, whose rows the triangles draw. Otherwise the drawing
+    /// is done first.
+    fn blt_queue_cached(&self) -> Option<usize> {
+        let key = self.blt_queue_key();
+        match self.blt_queue.get() {
+            Some((k, dest)) if k == key => dest,
+            _ => {
+                let dest = self.blt_queue_dest();
+                self.blt_queue.set(Some((key, dest)));
+                dest
+            }
+        }
+    }
+
+    /// What `blt_queue_dest` works its answer out from. The source's
+    /// chroma range isn't: it counts every ROP the source's test can pick.
+    fn blt_queue_key(&self) -> [u32; 15] {
+        let (r, f) = (&self.reg, &self.fbi);
+        [
+            r[BLT_DST_BASE_ADDR],
+            r[BLT_XY_STRIDES],
+            r[BLT_DST_CHROMA_RANGE],
+            r[BLT_ROP],
+            r[BLT_COMMAND],
+            r[BLT_SIZE],
+            f.rgboffs[0],
+            f.rgboffs[1],
+            f.rgboffs[2],
+            f.stride.words as u32,
+            f.stride.tiled as u32,
+            f.height,
+            f.ram.len() as u32,
+            self.blt.x as u32,
+            (self.blt.y + self.blt.rows) as u32,
+        ]
+    }
+
+    /// `blt_queue_cached`'s answer, worked out.
+    fn blt_queue_dest(&self) -> Option<usize> {
+        // The ROPs the chroma tests can pick must give the same pixel
+        // whatever the destination holds (0, !s, s or 1s) or keep the
+        // destination's (d, which leaves the pixel out: Moto Racer's
+        // sprites with a source colour key), and the destination's test
+        // must pick the same for every pixel.
+        let (rops, dst_tested) = self.blt_rops(None);
+        if dst_tested
+            || rops
+                .iter()
+                .flatten()
+                .any(|&r| !matches!(r, 0x0 | 0x3 | 0xA | 0xC | 0xF))
+        {
+            return None;
+        }
+        // A tiled destination is addressed as rows of its tiles' width
+        // (`blt_layout`), which the checks below hold to a buffer's rows.
+        let (base, stride) = self.blt_dst();
+        let f = &self.fbi;
+        if f.stride.tiled || stride as usize != 2 * f.stride.words {
+            return None;
+        }
+        let right = self.blt.x as usize + s12(self.reg[BLT_SIZE]).max(0) as usize;
+        let bottom = self.blt.y as usize + self.blt.rows as usize;
+        let start = base as usize / 2;
+        if right >= f.stride.words
+            || bottom >= f.height as usize
+            || start + (bottom + 1) * f.stride.words > f.ram.len()
+        {
+            return None;
+        }
+        f.rgboffs
+            .iter()
+            .any(|&o| o != NONE && o == base)
+            .then_some(start)
     }
 }
 
@@ -586,6 +825,313 @@ mod tests {
         let px = |x: usize, y: usize| v.fbi.ram.get(y * 1024 + x);
         assert_eq!([px(10, 1), px(11, 1), px(12, 1), px(13, 1)], [0x1111, 0x2222, 0x3333, 0]);
         assert_eq!([px(10, 2), px(11, 2), px(12, 2)], [0x4444, 0x5555, 0x6666]);
+    }
+
+    /// A copy from the CPU into the back buffer, 16-bit pixels with the
+    /// source copied: 4 pixels by 3 rows at (12, `y`), over what the
+    /// frames before drew there. `flags` go into bltCommand.
+    fn copy_into_back_buffer(v: &mut Voodoo, y: u32, flags: u32) {
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(v, BLT_ROP, 0xCCCC);
+        write(v, BLT_DST_BASE_ADDR, back);
+        write(v, BLT_XY_STRIDES, 1280 << 16);
+        if flags & DST_TILED != 0 {
+            // As Moto Racer's Glide sets it up: 4 KB pages and rows of 20
+            // tiles, and a destination chroma range that holds every
+            // colour, so that ROP 1 (source) is the one used.
+            write(v, BLT_DST_BASE_ADDR, back >> 12);
+            write(v, BLT_XY_STRIDES, 20 << 16);
+            write(v, BLT_DST_CHROMA_RANGE, 0xFFFF_0000);
+            write(v, BLT_ROP, 0xAACA);
+        }
+        if flags & SRC_CHROMA != 0 {
+            // Its sprites' colour key: the source's pixels in the range
+            // (the third data word's) pick ROP 2 or 3, which keep the
+            // destination's.
+            write(v, BLT_SRC_CHROMA_RANGE, 0x0303_0303);
+        }
+        write(v, BLT_DST_XY, y << 16 | 12);
+        write(v, BLT_SIZE, 2 << 16 | 3);
+        write(v, BLT_COMMAND, 1 << 31 | flags | 2 << 3 | CPU_TO_SCREEN);
+        for i in 1..=6 {
+            write(v, BLT_DATA, 0x0101_0101 * i);
+        }
+    }
+
+    #[test]
+    fn cpu_to_screen_copies_wait_behind_the_drawing() {
+        // Moto Racer copies its sky into the back buffer from the CPU at
+        // the start of each frame. A copy whose pixels don't depend on the
+        // destination's waits behind the drawing queued before it, as
+        // frame buffer writes do, instead of waiting for it to be drawn:
+        // with the OpenGL renderer the jobs held back stay held. Either
+        // way the memory ends up as it would have.
+        for flags in [
+            0,
+            DST_TILED | DST_CHROMA,
+            DST_TILED | DST_CHROMA | SRC_CHROMA,
+        ] {
+            let mut gl = glide_card(2);
+            gl.set_mirror(true);
+            gl.set_software_picture(false);
+            let mut threads = glide_card(2);
+            let mut sw = glide_card(0);
+            for v in [&mut gl, &mut threads, &mut sw] {
+                glide_frames(v, 2);
+                copy_into_back_buffer(v, 30, flags);
+            }
+            let status = gl.describe(Now::default());
+            assert_eq!(status["catch_ups"], 0, "{flags:X} {status}");
+            assert!(
+                status["held_jobs"].as_u64().unwrap() > 0,
+                "{flags:X} {status}"
+            );
+            let memory = sw.frame_buffer().to_bytes();
+            let back = sw.fbi.rgboffs[sw.fbi.backbuf as usize] as usize / 2;
+            let px = |x: usize, y: usize| sw.fbi.ram.get(back + y * 640 + x);
+            assert_eq!(
+                [px(12, 30), px(15, 30), px(12, 32), px(15, 32)],
+                [0x0101, 0x0202, 0x0505, 0x0606],
+                "{flags:X}"
+            );
+            assert!(gl.frame_buffer().to_bytes() == memory, "{flags:X}");
+            assert!(threads.frame_buffer().to_bytes() == memory, "{flags:X}");
+            // The recording has the copy's pixels where they are in the
+            // back buffer, but for those the colour key leaves out.
+            let commands = gl.take_mirror().unwrap().commands;
+            let rows: Vec<_> = commands
+                .iter()
+                .filter_map(|c| match c {
+                    super::super::mirror::Command::Pixels(p)
+                        if p.dest == Some(back as u32) && (30..33).contains(&p.y) =>
+                    {
+                        Some((p.x, p.y, p.values.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let middle = match flags & SRC_CHROMA {
+                0 => (12, 31, vec![0x0303, 0x0303, 0x0404, 0x0404]),
+                _ => (14, 31, vec![0x0404, 0x0404]),
+            };
+            assert_eq!(
+                rows,
+                [
+                    (12, 30, vec![0x0101, 0x0101, 0x0202, 0x0202]),
+                    middle,
+                    (12, 32, vec![0x0505, 0x0505, 0x0606, 0x0606])
+                ],
+                "{flags:X}"
+            );
+        }
+    }
+
+    #[test]
+    fn fills_that_keep_every_pixel_dont_wait_for_the_drawing() {
+        // ROP AAAAh (destination) whatever the chroma tests say: the fill
+        // changes nothing, so the jobs held back stay held.
+        let mut gl = glide_card(2);
+        gl.set_mirror(true);
+        gl.set_software_picture(false);
+        let mut sw = glide_card(0);
+        for v in [&mut gl, &mut sw] {
+            glide_frames(v, 2);
+            write(v, BLT_ROP, 0xAAAA);
+            write(v, BLT_XY_STRIDES, 1280 << 16);
+            write(v, BLT_COLOR, 0x1234);
+            write(v, BLT_DST_XY, 30 << 16 | 12);
+            write(v, BLT_SIZE, 9 << 16 | 9);
+            write(v, BLT_COMMAND, 1 << 31 | SRC_CHROMA | RECT_FILL);
+        }
+        let status = gl.describe(Now::default());
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert!(gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes());
+    }
+
+    #[test]
+    fn other_cpu_to_screen_copies_wait_for_the_drawing() {
+        // Destination chroma keying reads what the drawing left there, and
+        // a copy past the buffer's last row writes memory the triangles
+        // don't draw by rows.
+        for (y, flags) in [(30, DST_CHROMA), (478, 0)] {
+            let mut gl = glide_card(2);
+            gl.set_mirror(true);
+            gl.set_software_picture(false);
+            let mut sw = glide_card(0);
+            for v in [&mut gl, &mut sw] {
+                glide_frames(v, 2);
+                copy_into_back_buffer(v, y, flags);
+            }
+            assert_eq!(gl.describe(Now::default())["held_jobs"], 0, "y {y}");
+            assert!(
+                gl.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes(),
+                "y {y}"
+            );
+        }
+    }
+
+    /// An OpenGL renderer that drew each colour buffer in one colour and
+    /// the depth buffer at one value, and notes what it is asked.
+    struct Renderer(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl crate::voodoo::gpu::GpuLink for Renderer {
+        fn ready(&self) -> bool {
+            false
+        }
+
+        fn run(&mut self, commands: Vec<crate::voodoo::mirror::Command>) {
+            self.0.borrow_mut().push(format!("run {}", commands.len()));
+        }
+
+        fn read(&mut self, _at: u32, _out: &mut [u8]) -> bool {
+            false
+        }
+
+        fn read_buffer(
+            &mut self,
+            dest: Option<u32>,
+            (top, bottom): (u32, u32),
+            out: &mut [u16],
+        ) -> bool {
+            assert_eq!(out.len(), 640 * (bottom - top) as usize);
+            out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
+            self.0
+                .borrow_mut()
+                .push(format!("read {dest:?} {top}..{bottom}"));
+            true
+        }
+    }
+
+    #[test]
+    fn gpu_reads_leave_the_drawing_to_the_renderer() {
+        // With voodoo_readback=gpu nothing is drawn in software or held
+        // back: the first read of the memory gets the renderer's pictures
+        // of the buffers, after it was given what was recorded. A copy
+        // from the CPU goes into the memory as well, and the renderer's
+        // pictures have it too.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        copy_into_back_buffer(&mut v, 30, DST_TILED | DST_CHROMA);
+        let status = v.describe(Now::default());
+        assert!(status["gpu_only_jobs"].as_u64().unwrap() >= 4, "{status}");
+        assert_eq!(status["held_jobs"], 0, "{status}");
+        assert_eq!(status["catch_ups"], 0, "{status}");
+        assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize] as usize / 2;
+        assert_eq!(
+            v.fbi.ram.get(back + 30 * 640 + 12),
+            0x0101,
+            "the copy is in memory"
+        );
+        let aux = v.fbi.auxoffs as usize / 2;
+        let memory = v.frame_buffer();
+        assert_eq!(memory.get(back + 30 * 640 + 12), 0x1234 ^ back as u16);
+        assert_eq!(memory.get(aux + 5), 0x7777);
+        let log = log.borrow();
+        assert!(log[0].starts_with("run "), "{log:?}");
+        assert!(log.iter().any(|l| l == "read None 0..480"), "{log:?}");
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+        // Read once, the memory stays as it is until the renderer draws
+        // again.
+        v.frame_buffer();
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+    }
+
+    #[test]
+    fn gpu_reads_go_over_the_jobs_held_from_before() {
+        // Jobs held back before reads went to the renderer came before
+        // those left to it, which drew them too: a read draws them first
+        // and the renderer's pictures go over them, not the other way.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        glide_frames(&mut v, 1);
+        let held = v.describe(Now::default())["held_jobs"].as_u64().unwrap();
+        assert!(held > 0, "{held}");
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 1);
+        let aux = v.fbi.auxoffs as usize / 2;
+        let memory = v.frame_buffer();
+        assert_eq!(memory.get(aux + 5), 0x7777);
+    }
+
+    #[test]
+    fn gpu_reads_read_back_only_the_rows_asked_for() {
+        // A screen-to-screen copy reads back the rows of the buffer it
+        // reads and writes, and nothing else; a read of the whole memory
+        // afterwards reads the rest.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        write(&mut v, BLT_ROP, 0xCCCC);
+        write(&mut v, BLT_SRC_BASE_ADDR, back);
+        write(&mut v, BLT_DST_BASE_ADDR, back);
+        write(&mut v, BLT_XY_STRIDES, 1280 << 16 | 1280);
+        write(&mut v, BLT_SRC_XY, 100 << 16 | 12);
+        write(&mut v, BLT_DST_XY, 300 << 16 | 12);
+        write(&mut v, BLT_SIZE, 2 << 16 | 3);
+        write(&mut v, BLT_COMMAND, 1 << 31 | SCREEN_TO_SCREEN);
+        let reads: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .cloned()
+            .collect();
+        let key = Some(back / 2);
+        assert_eq!(
+            reads,
+            [
+                format!("read {key:?} 300..306"),
+                format!("read {key:?} 100..106")
+            ]
+        );
+        assert_eq!(
+            v.fbi.ram.get(back as usize / 2 + 301 * 640 + 13),
+            0x1234 ^ (back / 2) as u16
+        );
+        log.borrow_mut().clear();
+        v.frame_buffer();
+        let log = log.borrow();
+        for rows in ["0..100", "106..300", "306..480"] {
+            assert!(log.contains(&format!("read {key:?} {rows}")), "{log:?}");
+        }
+        assert!(log.contains(&"read None 0..480".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn gpu_reads_of_the_lfb_read_back_the_rows_around_the_pixel() {
+        // A game testing the depth of one pixel (3DMark 2000's lens
+        // flares) gets two bands of 32 rows, not the whole buffer, and a
+        // second read in them reads nothing back.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        assert_eq!(v.lfb_read(100 << 9 | 5) & 0xFFFF, 0x7777);
+        assert_eq!(v.lfb_read(120 << 9 | 5) & 0xFFFF, 0x7777);
+        let reads: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .cloned()
+            .collect();
+        assert_eq!(reads, ["read None 96..160"]);
     }
 
     #[test]

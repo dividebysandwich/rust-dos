@@ -92,13 +92,18 @@ impl Target {
 
     /// Resolve the samples into the texture.
     fn resolve(&self, gl: &glow::Context, (w, h): (i32, i32)) {
+        self.resolve_rows(gl, w, (0, h));
+    }
+
+    /// Resolve rows `y0..y1` of the samples, `w` wide, into the texture.
+    fn resolve_rows(&self, gl: &glow::Context, w: i32, (y0, y1): (i32, i32)) {
         let Some((samples, _)) = self.samples else { return };
         // SAFETY: see `VoodooGl`.
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(samples));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
-            gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.blit_framebuffer(0, y0, w, y1, 0, y0, w, y1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
@@ -656,6 +661,13 @@ impl GpuLink for SharedGl {
         let renderer = self.renderer.borrow();
         renderer.as_ref().is_some_and(|r| r.read_memory(&self.gl, at, out))
     }
+
+    fn read_buffer(&mut self, dest: Option<u32>, rows: (u32, u32), out: &mut [u16]) -> bool {
+        let renderer = self.renderer.borrow();
+        renderer
+            .as_ref()
+            .is_some_and(|r| r.read_buffer(&self.gl, dest, rows, out))
+    }
 }
 
 impl VoodooGl {
@@ -870,6 +882,180 @@ impl VoodooGl {
     /// too small.
     pub fn read_memory(&self, gl: &glow::Context, at: u32, out: &mut [u8]) -> bool {
         self.banshee.as_ref().is_ok_and(|b| b.memory.read(gl, at, out))
+    }
+
+    /// Rows `top..bottom` of a buffer's pixels as drawn, at the card's
+    /// resolution, row by row from the top (`GpuLink::read_buffer`):
+    /// colour buffer `key` in 5-6-5, or with None the depth buffer's
+    /// 16-bit values. Each of the card's pixels is the sample nearest the
+    /// middle of its block of `scale` by `scale`, which holds the pixel
+    /// the card would draw there: an average would mix the edges of what
+    /// was drawn. The colours are picked out on the GPU, so only the
+    /// card's pixels come back. False if there is no such buffer, or
+    /// `out` isn't the rows' size.
+    pub fn read_buffer(
+        &self,
+        gl: &glow::Context,
+        key: Option<u32>,
+        (top, bottom): (u32, u32),
+        out: &mut [u16],
+    ) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let target = match key {
+            Some(offs) => self.targets.get(&offs),
+            None => self.depth.and(self.targets.values().next()),
+        };
+        let rows = (bottom as usize).saturating_sub(top as usize);
+        let Some(target) =
+            target.filter(|_| bottom as usize <= h && rows > 0 && out.len() == w * rows)
+        else {
+            return false;
+        };
+        let scale = self.scale.max(1) as usize;
+        let (sw, sh) = self.scaled();
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            if key.is_some() {
+                // Only the rows asked for: a game reading the buffer
+                // reads it a band at a time (`lfb_band`).
+                let band = (top as i32 * scale as i32, bottom as i32 * scale as i32);
+                target.resolve_rows(gl, sw, band);
+                let mut rgba = vec![0u8; w * rows * 4];
+                let (width, height) = (w as i32, rows as i32);
+                // A blit without filtering to the card's size takes the
+                // sample at the middle of each block.
+                let picked = if scale > 1 {
+                    let Some(picked) = pick(
+                        gl,
+                        target.fbo,
+                        (sw, top as i32 * scale as i32),
+                        scale as i32,
+                        (width, height),
+                    ) else {
+                        restore(gl);
+                        return false;
+                    };
+                    Some(picked)
+                } else {
+                    None
+                };
+                gl.bind_framebuffer(
+                    glow::READ_FRAMEBUFFER,
+                    Some(picked.map_or(target.fbo, |(fbo, _)| fbo)),
+                );
+                let y = if picked.is_some() { 0 } else { top as i32 };
+                let pixels = glow::PixelPackData::Slice(Some(&mut rgba));
+                gl.read_pixels(0, y, width, height, glow::RGBA, glow::UNSIGNED_BYTE, pixels);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                if let Some((fbo, texture)) = picked {
+                    gl.delete_framebuffer(fbo);
+                    gl.delete_texture(texture);
+                }
+                // The colours are 5-6-5 values widened by repeating their
+                // top bits, which the top bits give back.
+                for (value, rgba) in out.iter_mut().zip(rgba.as_chunks::<4>().0) {
+                    let [r, g, b] = [rgba[0], rgba[1], rgba[2]].map(u16::from);
+                    *value = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
+                }
+            } else {
+                let band = ((top as usize * scale) as i32, (rows * scale) as i32);
+                let Some(depth) = self.read_depth(gl, target, (sw, sh), band) else {
+                    restore(gl);
+                    return false;
+                };
+                let middle = |x: usize, y: usize| {
+                    (y * scale + scale / 2) * sw as usize + x * scale + scale / 2
+                };
+                // Depth is the card's value over 65535 (`triangle.frag`).
+                for (i, value) in out.iter_mut().enumerate() {
+                    *value = (depth[middle(i % w, i / w)] * 65535.0)
+                        .round()
+                        .clamp(0.0, 65535.0) as u16;
+                }
+            }
+            restore(gl);
+        }
+        true
+    }
+
+    /// The depth buffer's values in the band of `height` rows from row
+    /// `y` up of a buffer of size `(w, h)`: with multisampling through a
+    /// framebuffer of one sample a pixel made for the purpose.
+    ///
+    /// # Safety
+    /// See `VoodooGl`.
+    unsafe fn read_depth(
+        &self,
+        gl: &glow::Context,
+        target: &Target,
+        (w, h): (i32, i32),
+        (y, height): (i32, i32),
+    ) -> Option<Vec<f32>> {
+        let mut depth = vec![0f32; w as usize * height as usize];
+        // SAFETY: the caller's.
+        unsafe {
+            let resolved = match target.samples {
+                None => None,
+                Some((samples, _)) => {
+                    let texture = texture(gl, glow::NEAREST).ok()?;
+                    let none = glow::PixelUnpackData::Slice(None);
+                    let format = glow::DEPTH24_STENCIL8 as i32;
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        format,
+                        w,
+                        h,
+                        0,
+                        glow::DEPTH_STENCIL,
+                        glow::UNSIGNED_INT_24_8,
+                        none,
+                    );
+                    let Ok(fbo) = gl.create_framebuffer() else {
+                        gl.delete_texture(texture);
+                        return None;
+                    };
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+                    let attach = glow::DEPTH_STENCIL_ATTACHMENT;
+                    gl.framebuffer_texture_2d(
+                        glow::DRAW_FRAMEBUFFER,
+                        attach,
+                        glow::TEXTURE_2D,
+                        Some(texture),
+                        0,
+                    );
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(samples));
+                    let (top, bottom) = (y, y + height);
+                    gl.blit_framebuffer(
+                        0,
+                        top,
+                        w,
+                        bottom,
+                        0,
+                        top,
+                        w,
+                        bottom,
+                        glow::DEPTH_BUFFER_BIT,
+                        glow::NEAREST,
+                    );
+                    Some((fbo, texture))
+                }
+            };
+            gl.bind_framebuffer(
+                glow::READ_FRAMEBUFFER,
+                Some(resolved.map_or(target.fbo, |(fbo, _)| fbo)),
+            );
+            let pixels = glow::PixelPackData::Slice(Some(bytemuck_f32(&mut depth)));
+            gl.read_pixels(0, y, w, height, glow::DEPTH_COMPONENT, glow::FLOAT, pixels);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if let Some((fbo, texture)) = resolved {
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(texture);
+            }
+        }
+        Some(depth)
     }
 
     fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
@@ -1821,6 +2007,76 @@ fn rgba(key: Option<u32>, value: u16) -> [u8; 4] {
 /// The gamma table as 256 RGBA entries a component takes its value from.
 fn lut(clut: &[u32; 33]) -> Vec<u8> {
     super::gamma_table(clut).iter().flat_map(|&[r, g, b]| [r, g, b, 0xFF]).collect()
+}
+
+/// A framebuffer with a colour texture of `size`, which gets the band of
+/// `fbo` (a buffer `width` wide, at `scale` times the card's size) from
+/// row `y` up, one sample of each block of `scale` by `scale`: the one
+/// at its middle, as a blit without filtering takes it.
+///
+/// # Safety
+/// See `VoodooGl`.
+unsafe fn pick(
+    gl: &glow::Context,
+    fbo: glow::Framebuffer,
+    (width, y): (i32, i32),
+    scale: i32,
+    (w, h): (i32, i32),
+) -> Option<(glow::Framebuffer, glow::Texture)> {
+    // SAFETY: the caller's.
+    unsafe {
+        let texture = texture(gl, glow::NEAREST).ok()?;
+        let none = glow::PixelUnpackData::Slice(None);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            w,
+            h,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            none,
+        );
+        let Ok(picked) = gl.create_framebuffer() else {
+            gl.delete_texture(texture);
+            return None;
+        };
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(picked));
+        gl.framebuffer_texture_2d(
+            glow::DRAW_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+        gl.blit_framebuffer(
+            0,
+            y,
+            width,
+            y + h * scale,
+            0,
+            0,
+            w,
+            h,
+            glow::COLOR_BUFFER_BIT,
+            glow::NEAREST,
+        );
+        Some((picked, texture))
+    }
+}
+
+/// `values` as the bytes they are, for OpenGL to read into.
+fn bytemuck_f32(values: &mut [f32]) -> &mut [u8] {
+    // SAFETY: any bytes are a valid f32, and the slice covers exactly
+    // the values' memory.
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            values.as_mut_ptr().cast::<u8>(),
+            std::mem::size_of_val(values),
+        )
+    }
 }
 
 fn vertex_bytes(vertices: &[Vertex]) -> &[u8] {

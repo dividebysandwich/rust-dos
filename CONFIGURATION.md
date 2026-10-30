@@ -152,7 +152,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   has. `auto 10000` makes that real-mode speed, and the least `auto`
   goes down to, 10000. `max` runs everything as fast as the host keeps
   up with in real time. Use a number such as `3000` for a fixed speed.
-  `--cycles` overrides it.
+  `--cycles` overrides it. Loading a [save state](README.md#save-states)
+  keeps the speed the machine runs at (this setting, `--cycles`, or the
+  last one the window, the speed keys or `/api/speed` set): a fixed
+  speed and `max` go on at the rate they had, and `auto` starts its
+  search from the rate the state was saved at. Only `--deterministic`
+  runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
@@ -326,6 +331,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   dithers to 16 bits a pixel as the card does where the game dithers
   (`false` gives a smoother picture; see
   [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
+  with `voodoo_readback` (`gpu`, the default, or `exact`) whether what a
+  game reads back from the card's memory is OpenGL's picture or the
+  card's own pixels, which the software rasterizer then draws as well
+  (see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)),
   with `voodoo_msaa` (`off`, the default, `2`, `4` or `8`) samples a
   pixel of multisampled antialiasing and `voodoo_anisotropy` (`off`, the
   default, `2`, `4`, `8` or `16`) filters textures at oblique angles;
@@ -2112,10 +2121,14 @@ states](README.md#save-states) and rewind keep the disks in step with the
 system's memory: in a run, the disks go back with a state through a journal
 of what the system wrote over (the last 256 MB of it), and a state file has
 a copy of each disk beside it (`slot1.C.img` for `slot1.state`, or
-`slot1.2.img` for the disk mounted as 2, which takes
-no room where the filesystem shares data between files) that loading it puts
-back. The browser's slots can't hold disks and refuse a booted system's
-state.
+`slot1.2.img` for the disk mounted as 2, which takes no room where the
+filesystem shares data between files) that loading it puts back. The copy
+goes into the image the loading machine has in that drive, not the one
+the state was saved with, so a configuration that mounts a scratch copy
+of the image as C: can load states of the system without touching the
+original. The image must be the size of the copy, and a machine with no
+image in the drive (a folder as C:, or nothing) refuses the load. The
+browser's slots can't hold disks and refuse a booted system's state.
 
 ### Windows 95
 
@@ -2425,8 +2438,30 @@ draws into. What games write into the frame buffer themselves (menus,
 movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
 textures viewed at an angle, where the OpenGL driver supports
 anisotropic filtering.
-The software rasterizer keeps the card's memory, which games read back
-and save states keep, but it only draws what can still be seen there:
+With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's
+on a Voodoo Graphics or Voodoo2: the software rasterizer draws none of
+the triangles, and where something reads the card's memory (a game
+reading the frame buffer or blitting from it, a save state, a
+screenshot, the debugger) the rows it reads are read back from OpenGL,
+at the card's resolution and in its 16 bits a pixel. A read waits for
+the GPU, so a game that reads back every frame gains less. The pixels it
+reads differ in small ways from the card's: OpenGL draws a triangle's
+edges by its own rules, blends after the dither (see below) and keeps
+more depth precision. What a game writes itself, its frame buffer
+writes and the blitter's copies, reads back as it wrote it. A save state
+keeps OpenGL's pixels too, so states of the same scene saved on two
+GPUs differ slightly in the card's memory, and in what the game did with
+pixels it read back. Such a state loads on any machine. A game that
+needs the card's exact pixels, or states that match byte for byte, can
+have `voodoo_readback=exact`. Programs that use alpha planes, the
+Banshee and Voodoo3, and deterministic runs always get the exact pixels,
+as do the pixel counters: drawing left to OpenGL isn't counted, and once
+a game reads the counters everything after is drawn in software and
+counted.
+
+With `voodoo_readback=exact` the software rasterizer keeps the card's
+memory, which games read back and save states keep, but it only draws
+what can still be seen there:
 until something reads the memory, the drawing waits, and what a later
 fastfill covers before anything read it is never drawn, so the host's CPU
 only draws the frames something looks at. Frame buffer reads, save

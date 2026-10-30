@@ -194,6 +194,7 @@ impl Bus {
             unhandled_writes: _,
             attribute_reset: _,
             log_hook: _,
+            log_backlog: _,
             audio_hook: _,
         } = self;
         w.section(b"RAM ", RAM_VERSION, |w| ram.save(w));
@@ -483,6 +484,7 @@ impl Bus {
             unhandled_writes: _,
             attribute_reset: _,
             log_hook: _,
+            log_backlog: _,
             audio_hook: _,
         } = self;
         let mut section = r.section(b"RAM ", RAM_VERSION)?;

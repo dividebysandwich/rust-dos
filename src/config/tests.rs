@@ -668,6 +668,7 @@ fn changed_settings() -> Settings {
             fps_cap: Some(30),
             gamma: Some(1.5),
             dither: false,
+            gpu_reads: false,
         },
         powervr: Some(crate::powervr::Chip::Pcx2),
         powervr_filter: crate::powervr::tsp::Filter::Point,
@@ -893,6 +894,7 @@ fn saved_settings_parse_back() {
     assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
     assert!(text.contains("#voodoo_texture_sampling=default\nvoodoo_texture_sampling=unfiltered\n"), "{}", text);
     assert!(text.contains("#voodoo_dither=true\nvoodoo_dither=false\n"), "{}", text);
+    assert!(text.contains("#voodoo_readback=gpu\nvoodoo_readback=exact\n"), "{}", text);
     assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
     assert!(text.contains("#record_ui=false\nrecord_ui=true\n"), "{}", text);
     assert!(text.contains("#record_shader=false\nrecord_shader=true\n"), "{}", text);
