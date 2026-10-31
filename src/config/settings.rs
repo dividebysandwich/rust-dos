@@ -378,7 +378,6 @@ impl Settings {
 pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section, &'static str, Option<String>)> {
     use Section::{Emulator, Sound};
     let yes_no = |on: bool| Some(if on { "true" } else { "false" }.to_string());
-    let on_off = |on: bool| Some(if on { "on" } else { "off" }.to_string());
     let sound = &settings.sound;
     let (sb, gus) = (&sound.sb, &sound.gus);
     let mixer = Channel::ALL
@@ -526,6 +525,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
     entries.extend(mixer);
+    let on_off = |on: bool| Some(if on { "on" } else { "off" }.to_string());
     entries.extend([
         (Section::Mixer, "speaker_filter", on_off(settings.mixer.speaker_filter)),
         (Section::Mixer, "sb_filter", Some(settings.mixer.sb_filter.name().to_string())),
@@ -551,8 +551,8 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries
 }
 
-/// The DLL names of a `win32_dlls_replace` list: separated by commas or
-/// spaces, lowercase, without ".dll".
+/// The fix names of a `game_fixes_off` list: separated by commas or
+/// spaces, lowercase.
 pub fn fix_names(value: &str) -> Vec<String> {
     value
         .split([',', ' ', '\t'])
@@ -561,8 +561,8 @@ pub fn fix_names(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// The names in a list of DLLs (`win32_dlls_replace`): lowercase, without
-/// `.dll`.
+/// The DLL names of a `win32_dlls_replace` list: separated by commas or
+/// spaces, lowercase, without ".dll".
 pub fn dll_names(value: &str) -> Vec<String> {
     value
         .split([',', ' ', '\t'])
