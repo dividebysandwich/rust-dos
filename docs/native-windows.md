@@ -332,6 +332,32 @@ All output goes through the emulated video hardware:
   games that want 32-bit color or larger textures get the 16-bit modes
   and downscaled textures they got on a Voodoo3.
 
+### Painting: known differences from Windows 98
+
+Probes compared line by line with Windows 98 SE match on shrinking,
+window regions, validating, frames, BeginPaint and DefWindowProc. These
+differences remain, and a program that counts paint messages can see
+them:
+
+- A child shown in a visible parent also invalidates the parent over
+  the child on Windows, even with WS_CLIPCHILDREN. The built-in Windows
+  doesn't, so the parent gets one WM_PAINT fewer, and PeekMessage
+  filtered on the child finds the child's WM_PAINT, where on Windows
+  the parent's comes first.
+- SetWindowPos with a redraw sends WM_NCPAINT and WM_ERASEBKGND at once
+  on Windows and leaves a shrunk window nothing to paint. The built-in
+  Windows invalidates the whole window and paints it later.
+- A CS_PARENTDC child of a parent with a pending invalidate reports the
+  parent's WM_PAINT through a filtered PeekMessage, and gets its
+  WM_NCPAINT and WM_ERASEBKGND at another time than on Windows.
+- A child with a border gets its frame later, with one more WM_PAINT
+  and WM_NCPAINT after UpdateWindow.
+
+What a change on the screen uncovers (`invalidate_screen` in
+`src/win32/user32/paint.rs`) stays cropped to the window's shape, so a
+window gets no WM_PAINT or WM_NCPAINT for what its region cuts off. No
+probe has compared that crop with Windows.
+
 ### Sound and input
 
 - **DirectSound and `waveOut`**: buffers stay in guest memory; a mixer
