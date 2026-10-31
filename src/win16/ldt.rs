@@ -131,7 +131,8 @@ pub fn read(cpu: &Cpu, system: u32, selector: u16) -> u64 {
 /// frees the selector, and the data segment registers that hold it are
 /// zeroed, as DPMI's function 0001h does and Windows does when it frees
 /// a block: Johnny Castaway's GlobalFree leaves the block's selector in
-/// ES, which its next function pushes and pops.
+/// ES, which its next function pushes and pops. A context saved before
+/// the free gets 0 for it when it is loaded (`system::load_context`).
 pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
     let at = entry_phys(system, selector);
     cpu.bus.write_32(at, desc as u32);

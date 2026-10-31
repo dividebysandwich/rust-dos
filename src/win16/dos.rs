@@ -143,7 +143,6 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
         call_handler(cpu, ctx, handler);
         return;
     }
-    let held = held_selectors(cpu, &ctx);
     match vector {
         0x21 => {
             if !int21(cpu, &mut ctx) {
@@ -184,34 +183,7 @@ pub fn interrupt(cpu: &mut Cpu, vector: u8, mut ctx: Context) {
             ));
         }
     }
-    zero_freed(cpu, &mut ctx, held);
     resume(cpu, &ctx);
-}
-
-/// The data segment registers.
-const DATA_SEGS: [Seg; 4] = [Seg::ES, Seg::DS, Seg::FS, Seg::GS];
-
-/// The selectors given out that `ctx`'s data segment registers hold.
-fn held_selectors(cpu: &Cpu, ctx: &Context) -> [Option<u16>; 4] {
-    DATA_SEGS.map(|seg| {
-        let sel = ctx.seg[seg as usize];
-        cpu.bus.win32.win16.ldt.is_allocated(sel).then_some(sel)
-    })
-}
-
-/// Zero the data segment registers of `ctx` that still hold a selector
-/// of `held` the call freed, as `ldt::write` zeroes the processor's:
-/// DPMI's functions 0001h and 0101h and DOS's function 49h free one,
-/// often the selector in ES, and the task's registers are loaded from
-/// `ctx` afterwards.
-fn zero_freed(cpu: &Cpu, ctx: &mut Context, held: [Option<u16>; 4]) {
-    let ldt = &cpu.bus.win32.win16.ldt;
-    for (seg, sel) in DATA_SEGS.into_iter().zip(held) {
-        let reg = &mut ctx.seg[seg as usize];
-        if sel.is_some_and(|s| *reg == s && !ldt.is_allocated(s)) {
-            *reg = 0;
-        }
-    }
 }
 
 /// Whether the real-mode vector table's handler of `vector` is in RAM,
