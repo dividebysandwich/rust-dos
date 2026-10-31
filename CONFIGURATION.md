@@ -1304,7 +1304,7 @@ Windows. `windows=` in the profile's `[game]` picks which:
 |---|---|---|
 | What runs the game | rust-dos's own Windows: the system DLLs are written into the emulator, and the game starts from the DOS prompt | A real Windows 95 or 98, installed on a disk image that the profile's `[autoexec]` boots |
 | What you need besides the game | Nothing | A Windows CD, and the time to install Windows and its drivers on an image ([docs/win9x-howto.md](docs/win9x-howto.md)) |
-| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
+| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput and DirectMusic of DirectX 3 to 6, DirectInput 8, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
 | State | Experimental: not every game runs yet | Depends on how well the emulated display, sound and 3D cards run their Windows drivers |
 
 Start with `windows=builtin`. If the game doesn't run there, see

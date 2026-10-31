@@ -91,6 +91,13 @@ const DIPROP_CALIBRATIONMODE: u32 = 10;
 const DIPROP_INSTANCENAME: u32 = 13;
 const DIPROP_PRODUCTNAME: u32 = 14;
 const DIPROP_JOYSTICKID: u32 = 15;
+/// DirectInput 8's, which DirectInput 7 doesn't know.
+const DIPROP_KEYNAME: u32 = 20;
+const DIPROP_APPDATA: u32 = 22;
+const DIPROP_SCANCODE: u32 = 23;
+const DIPROP_VIDPID: u32 = 24;
+const DIPROP_USERNAME: u32 = 25;
+const DIPROP_TYPENAME: u32 = 26;
 
 const DIPH_DEVICE: u32 = 0;
 const DIPH_BYOFFSET: u32 = 1;
@@ -99,11 +106,16 @@ const DIPH_BYID: u32 = 2;
 const DIPROPRANGE_NOMIN: u32 = 0x8000_0000;
 const DIPROPRANGE_NOMAX: u32 = 0x7FFF_FFFF;
 
-/// The sizes of the property structures: DIPROPDWORD, DIPROPRANGE and
-/// DIPROPSTRING.
+/// The sizes of the property structures: DIPROPDWORD, DIPROPRANGE,
+/// DIPROPSTRING and DIPROPPOINTER.
 const PROP_DWORD: u32 = 20;
 const PROP_RANGE: u32 = 24;
 const PROP_STRING: u32 = 16 + 2 * 260;
+const PROP_POINTER: u32 = 20;
+
+/// An object's DIPROP_APPDATA until the program sets one, which its
+/// buffered data has as uAppData.
+const NO_APP_DATA: u32 = u32::MAX;
 
 /// The sizes of DIDEVCAPS, DirectX 5's and 3's.
 const CAPS_SIZE: u32 = 44;
@@ -133,13 +145,15 @@ pub struct Axis {
     pub base: i32,
 }
 
-/// A buffered event: DIDEVICEOBJECTDATA.
+/// A buffered event: DIDEVICEOBJECTDATA, with the object's
+/// DIPROP_APPDATA when the event happened.
 #[derive(Clone, Debug, Default)]
 pub struct Event {
     pub ofs: u32,
     pub data: u32,
     pub time: u32,
     pub sequence: u32,
+    pub app_data: u32,
 }
 
 /// A device's state.
@@ -177,6 +191,9 @@ pub struct Device {
     pub buttons: u32,
     pub autocenter: bool,
     pub calibration: u32,
+    /// The objects' DIPROP_APPDATA, by their places, that the program
+    /// set since its last SetDataFormat; those past the end have none.
+    pub app_data: Vec<u32>,
 }
 
 impl Device {
@@ -216,6 +233,18 @@ impl Device {
         (o != NONE).then_some(o)
     }
 
+    /// The DIPROP_APPDATA of the object `obj`, by its place.
+    fn app_data(&self, obj: usize) -> u32 {
+        self.app_data.get(obj).copied().unwrap_or(NO_APP_DATA)
+    }
+
+    fn set_app_data(&mut self, obj: usize, value: u32) {
+        if self.app_data.len() <= obj {
+            self.app_data.resize(obj + 1, NO_APP_DATA);
+        }
+        self.app_data[obj] = value;
+    }
+
     /// The object `obj` (by its place) changed to `data`: buffered data
     /// for it, if the data format has it and the device has a buffer.
     pub fn report(&mut self, obj: usize, data: u32, time: u32, sequence: u32) {
@@ -230,11 +259,13 @@ impl Device {
             self.overflow = true;
             return;
         }
+        let app_data = self.app_data(obj);
         self.queue.push(Event {
             ofs,
             data,
             time,
             sequence,
+            app_data,
         });
     }
 
@@ -490,6 +521,30 @@ fn wide(text: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Put `text` in the DIPROPSTRING at `at`.
+fn put_string(cpu: &mut Cpu, at: u32, text: &str) {
+    cpu.bus.guest_fill(at + 16, 520, 0);
+    cpu.bus.guest_write_bytes(at + 16, &wide(text));
+}
+
+/// The size of the structure of the property `prop` if it is one that
+/// DirectInput 8 added. Earlier versions don't know them, and say so
+/// with DIERR_UNSUPPORTED, as DirectInput 7 does.
+fn size_8(prop: u32) -> Option<u32> {
+    match prop {
+        DIPROP_KEYNAME | DIPROP_USERNAME | DIPROP_TYPENAME => Some(PROP_STRING),
+        DIPROP_SCANCODE | DIPROP_VIDPID => Some(PROP_DWORD),
+        DIPROP_APPDATA => Some(PROP_POINTER),
+        _ => None,
+    }
+}
+
+/// Whether the device `id` was made for DirectInput 8, whose properties
+/// it then takes.
+fn takes_8(cpu: &mut Cpu, id: u32) -> bool {
+    version_of(cpu, id) >= 0x800
+}
+
 /// GetProperty(guid, header).
 pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, at) = (args[0], args[1], args[2]);
@@ -500,6 +555,7 @@ pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             DIPROP_RANGE => PROP_RANGE,
             DIPROP_INSTANCENAME | DIPROP_PRODUCTNAME => PROP_STRING,
             DIPROP_BUFFERSIZE..=DIPROP_CALIBRATIONMODE | DIPROP_JOYSTICKID => PROP_DWORD,
+            _ if takes_8(cpu, id) => size_8(prop).ok_or(DIERR_UNSUPPORTED)?,
             _ => return Err(DIERR_UNSUPPORTED),
         };
         let target = header(cpu, id, at, size)?;
@@ -538,10 +594,44 @@ pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                     .take_while(|&&b| b != 0)
                     .copied()
                     .collect();
-                let text = wide(&String::from_utf8_lossy(&name));
-                cpu.bus.guest_fill(at + 16, 520, 0);
-                cpu.bus.guest_write_bytes(at + 16, &text);
+                put_string(cpu, at, &String::from_utf8_lossy(&name));
                 return Ok(DI_OK);
+            }
+            // A key's name, as GetObjectInfo gives it, and its scan code:
+            // the 8042's, with E0 in the low byte before an extended
+            // key's. The mouse's and joystick's objects have neither.
+            DIPROP_KEYNAME | DIPROP_SCANCODE => {
+                let Target::Object(k) = target else {
+                    return Err(DIERR_INVALIDPARAM);
+                };
+                if d.kind != KEYBOARD {
+                    return Err(DIERR_UNSUPPORTED);
+                }
+                let obj = d.objects()[k];
+                if prop == DIPROP_SCANCODE {
+                    value(objects::scan_code(obj.instance() as u8))
+                } else {
+                    put_string(cpu, at, &objects::object_name(KEYBOARD, &obj));
+                    return Ok(DI_OK);
+                }
+            }
+            DIPROP_APPDATA => {
+                let Target::Object(k) = target else {
+                    return Err(DIERR_UNSUPPORTED);
+                };
+                value(d.app_data(k))
+            }
+            // The user an action map gave the device to, and no action
+            // map is there: none, with an empty name.
+            DIPROP_USERNAME if target == Target::Device => {
+                put_string(cpu, at, "");
+                return Ok(DI_NOEFFECT);
+            }
+            // A HID device's vendor and product, which the keyboard, the
+            // mouse and a joystick of the game port don't have, and the
+            // joystick's type (#378).
+            DIPROP_USERNAME | DIPROP_VIDPID | DIPROP_TYPENAME => {
+                return Err(DIERR_UNSUPPORTED);
             }
             _ => return Err(DIERR_UNSUPPORTED),
         };
@@ -562,6 +652,7 @@ pub fn set_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let size = match prop {
             DIPROP_RANGE => PROP_RANGE,
             DIPROP_BUFFERSIZE..=DIPROP_CALIBRATIONMODE => PROP_DWORD,
+            _ if takes_8(cpu, id) => size_8(prop).ok_or(DIERR_UNSUPPORTED)?,
             _ => return Err(DIERR_UNSUPPORTED),
         };
         let target = header(cpu, id, at, size)?;
@@ -631,6 +722,23 @@ pub fn set_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 } else {
                     d.calibration = data;
                 }
+            }
+            // An object's value for the program's own use, which its
+            // buffered data carries, until the next SetDataFormat.
+            DIPROP_APPDATA => {
+                let Target::Object(k) = target else {
+                    return Err(DIERR_UNSUPPORTED);
+                };
+                d.set_app_data(k, data);
+            }
+            DIPROP_KEYNAME | DIPROP_SCANCODE if target == Target::Device => {
+                return Err(DIERR_INVALIDPARAM);
+            }
+            DIPROP_USERNAME | DIPROP_VIDPID | DIPROP_TYPENAME => {
+                if target != Target::Device {
+                    return Err(DIERR_UNSUPPORTED);
+                }
+                return Err(DIERR_READONLY);
             }
             DIPROP_GRANULARITY => return Err(DIERR_READONLY),
             DIPROP_FFGAIN | DIPROP_FFLOAD => return Err(DIERR_UNSUPPORTED),
@@ -809,7 +917,8 @@ pub fn get_device_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, object_size, at, count_at, flags) = (args[0], args[1], args[2], args[3], args[4]);
     let r = (|| {
         let id = ready(cpu, this)?;
-        // DIDEVICEOBJECTDATA, with DirectX 8's uAppData or without.
+        // DIDEVICEOBJECTDATA, with DirectX 8's uAppData (the object's
+        // DIPROP_APPDATA) or without.
         if object_size != 16 && object_size != 20 {
             return Err(DIERR_INVALIDPARAM);
         }
@@ -839,7 +948,7 @@ pub fn get_device_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 let base = at + i as u32 * object_size;
                 let mut words = vec![e.ofs, e.data, e.time, e.sequence];
                 if object_size == 20 {
-                    words.push(0);
+                    words.push(e.app_data);
                 }
                 for (k, w) in words.iter().enumerate() {
                     cpu.bus.guest_write_32(base + 4 * k as u32, *w);
@@ -878,6 +987,7 @@ pub fn set_data_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         d.format = Some(format);
         d.queue.clear();
+        d.app_data.clear();
         Ok(DI_OK)
     })();
     result(r)
@@ -1174,7 +1284,8 @@ crate::state_fields!(Event {
     ofs,
     data,
     time,
-    sequence
+    sequence,
+    app_data
 });
 crate::state_fields!(Device {
     parent,
@@ -1195,7 +1306,8 @@ crate::state_fields!(Device {
     position,
     buttons,
     autocenter,
-    calibration
+    calibration,
+    app_data
 });
 crate::state_fields!(Format {
     size,

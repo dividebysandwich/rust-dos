@@ -188,6 +188,19 @@ pub fn object_name(kind: u32, obj: &Obj) -> String {
     }
 }
 
+/// DIPROP_SCANCODE of the key `dik`: its scan code, with E0 in the low
+/// byte and the code after it for an extended key. Windows swaps
+/// NumLock's and Pause's: NumLock gets Pause's E1 1D 45 and Pause gets
+/// 45.
+pub fn scan_code(dik: u8) -> u32 {
+    match dik {
+        0x45 => 0x45_1DE1,
+        0xC5 => 0x45,
+        k if k < 0x80 => k as u32,
+        k => ((k & 0x7F) as u32) << 8 | 0xE0,
+    }
+}
+
 /// The devices there are, in the order EnumDevices gives them; for
 /// DirectInput 3, which has no joysticks, the keyboard and mouse alone.
 pub fn present(cpu: &Cpu, version: u32) -> Vec<u32> {
@@ -471,5 +484,17 @@ mod tests {
         // DirectInput 7's DIDEVTYPE_ numbers are neither.
         assert_eq!(in_class_8(keyboard, 5), None);
         assert_eq!(in_class_8(keyboard, 0x1D), None);
+    }
+
+    #[test]
+    fn scan_codes_put_e0_before_an_extended_key() {
+        // A, the keypad's Enter, the left arrow and Print Screen.
+        assert_eq!(scan_code(0x1E), 0x1E);
+        assert_eq!(scan_code(0x9C), 0x1CE0);
+        assert_eq!(scan_code(0xCB), 0x4BE0);
+        assert_eq!(scan_code(0xB7), 0x37E0);
+        // NumLock and Pause, swapped as on Windows.
+        assert_eq!(scan_code(0x45), 0x45_1DE1);
+        assert_eq!(scan_code(0xC5), 0x45);
     }
 }

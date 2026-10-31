@@ -17,16 +17,18 @@
 //! passes. Buffered data has the emulated clock's milliseconds and a
 //! sequence number of DirectInput's own, so runs are deterministic.
 //!
-//! DINPUT8.DLL is DirectX 8's DirectInput, a DLL of its own as on
-//! Windows: DirectInput8Create makes a DirectInput object with
-//! IDirectInput8A, whose CreateDevice makes devices with
-//! IDirectInputDevice8A. Its objects are DINPUT's, in the same list, and
-//! its methods are DINPUT's functions, with the vtables in DINPUT8's
-//! image, which is how a method knows a DirectInput 8 object. DirectInput
-//! 8 gives the devices its own DI8DEVTYPE_ types and enumerates them by
-//! class. Action maps (BuildActionMap, SetActionMap,
-//! EnumDevicesBySemantics, ConfigureDevices) and device images aren't
-//! there.
+//! DINPUT8.DLL is DirectX 8's DirectInput, a DLL of its own as on Windows:
+//! DirectInput8Create makes a DirectInput object with IDirectInput8A, whose
+//! CreateDevice makes devices with IDirectInputDevice8A. Its objects are
+//! DINPUT's, in the same list, and its methods are DINPUT's functions, with
+//! the vtables in DINPUT8's image, which is how a method knows a
+//! DirectInput 8 object. DirectInput 8 gives the devices its own
+//! DI8DEVTYPE_ types, enumerates them by class, and has properties of its
+//! own: a key's name and scan code (DIPROP_KEYNAME, DIPROP_SCANCODE), and
+//! each object's DIPROP_APPDATA, which its buffered data carries as
+//! uAppData. Action maps (BuildActionMap, SetActionMap,
+//! EnumDevicesBySemantics, ConfigureDevices) and device images aren't there
+//! (#378).
 //!
 //! (Phase 3 of docs/native-windows.md.)
 
@@ -770,8 +772,7 @@ fn create(
 /// Initialize); or the error a method of it gives.
 fn direct_input(cpu: &mut Cpu, this: u32) -> Result<(u32, u32), u32> {
     let id = object_of(cpu, this, DIRECT_INPUT).ok_or(E_POINTER)?;
-    let version = state(cpu).object(id).map_or(0, |o| o.version);
-    Ok((id, version))
+    Ok((id, version_of(cpu, id)))
 }
 
 /// The same, once initialized.

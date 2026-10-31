@@ -102,8 +102,7 @@ pub fn enum_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if callback == 0 {
             return Err(DIERR_INVALIDPARAM);
         }
-        let version = state(cpu).object(id).map_or(0, |o| o.version);
-        let size = if version >= 0x500 {
+        let size = if super::version_of(cpu, id) >= 0x500 {
             objects::OBJECT_SIZE
         } else {
             objects::OBJECT_SIZE_DX3
