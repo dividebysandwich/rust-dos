@@ -869,10 +869,13 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
   SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]`
   `SCRNSAVE.EXE` with /s, as Windows 3.1 and 95 do. USER reads the two
-  settings when the desktop comes, as Windows reads them when it starts.
-  The prompt also starts a saver by its .SCR name (`SCRANTIC.SCR /s`, or
-  /c for its settings dialog), as a Windows program under another
-  extension; without the built-in Windows, COMMAND.COM runs no .SCR.
+  settings when it starts, as Windows does, and SystemParametersInfo's
+  SPI_SETSCREENSAVEACTIVE and SPI_SETSCREENSAVETIMEOUT change them, as
+  games do that keep the saver off while they run. The timer runs while
+  the desktop is on the screen. The prompt also starts a saver by its
+  .SCR name (`SCRANTIC.SCR /s`, or /c for its settings dialog), as a
+  Windows program under another extension; without the built-in
+  Windows, COMMAND.COM runs no .SCR.
 
 Games tried, all of which start and draw their windows: SkiFree,
 BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,

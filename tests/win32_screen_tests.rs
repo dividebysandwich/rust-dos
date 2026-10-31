@@ -1192,15 +1192,30 @@ fn card_machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Cpu {
 
 const USER32_SAVER: (&str, &[&str]) = (
     "USER32.DLL",
-    &["CreateWindowExA", "GetMessageA", "DispatchMessageA"],
+    &[
+        "CreateWindowExA",
+        "GetMessageA",
+        "DispatchMessageA",
+        "SystemParametersInfoA",
+        "SetTimer",
+    ],
 );
-const SAVER_CREATE_WINDOW: usize = 0;
 const SAVER_GET_MESSAGE: usize = 1;
 const SAVER_DISPATCH_MESSAGE: usize = 2;
+const SAVER_SYSTEM_PARAMETERS_INFO: usize = 3;
+const SAVER_SET_TIMER: usize = 4;
 /// The MSG GetMessageA fills.
 const SAVER_MSG: u32 = 0x340;
+/// What SystemParametersInfoA's GET actions write.
+const SAVER_TIMEOUT: u32 = 0x360;
+const SAVER_ACTIVE: u32 = 0x364;
+const SAVER_ACTIVE_AFTER: u32 = 0x368;
 const WM_SYSCOMMAND: u32 = 0x112;
+const WM_TIMER: u32 = 0x113;
 const SC_SCREENSAVE: u32 = 0xF140;
+const SPI_GETSCREENSAVETIMEOUT: u32 = 14;
+const SPI_GETSCREENSAVEACTIVE: u32 = 16;
+const SPI_SETSCREENSAVEACTIVE: u32 = 17;
 
 /// A Win32 program whose entry point returns `code`, its exit code.
 fn exit_program(code: u8) -> Vec<u8> {
@@ -1212,6 +1227,29 @@ fn exit_program(code: u8) -> Vec<u8> {
     b.build()
 }
 
+/// The lines the machine logs, as they come.
+type Log = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// `card_machine` for `program`, with WIN.INI's ScreenSaveActive=1 and
+/// ScreenSaveTimeOut=1, and SYSTEM.INI's SCRNSAVE.EXE a saver that ends
+/// with exit code 9.
+fn saver_machine(test: &str, program: Vec<u8>) -> (Cpu, Log) {
+    let mut cpu = card_machine(test, None, program);
+    let base = PathBuf::from("target/test_win32_screen").join(test);
+    fs::create_dir_all(base.join("WINDOWS")).unwrap();
+    let win_ini = "[windows]\r\nScreenSaveActive=1\r\nScreenSaveTimeOut=1\r\n";
+    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
+    let system_ini = "[boot]\r\nSCRNSAVE.EXE=C:\\SAVER.SCR\r\n";
+    fs::write(base.join("WINDOWS").join("SYSTEM.INI"), system_ini).unwrap();
+    fs::write(base.join("SAVER.SCR"), exit_program(9)).unwrap();
+    let lines = Log::default();
+    let sink = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        sink.lock().unwrap().push(line.to_string())
+    }));
+    (cpu, lines)
+}
+
 /// With WIN.INI's ScreenSaveActive=1 and ScreenSaveTimeOut=1, a second
 /// without input sends the active window WM_SYSCOMMAND SC_SCREENSAVE,
 /// and DefWindowProc starts SYSTEM.INI's SCRNSAVE.EXE with /s, as
@@ -1221,25 +1259,7 @@ fn exit_program(code: u8) -> Vec<u8> {
 fn a_second_without_input_starts_the_screen_saver() {
     let (program, data) = program(&[USER32_SAVER], &data(), |a, l| {
         let mut c = Calls { next: 0 };
-        c.api(
-            a,
-            l,
-            SAVER_CREATE_WINDOW,
-            &[
-                Arg::I(0),
-                Arg::At(CLASS),
-                Arg::At(CLASS),
-                Arg::I(WS_POPUP | WS_VISIBLE),
-                Arg::I(0),
-                Arg::I(0),
-                Arg::I(640),
-                Arg::I(480),
-                Arg::I(0),
-                Arg::I(0),
-                Arg::I(BASE),
-                Arg::I(0),
-            ],
-        )?;
+        popup_window(&mut c, a, l)?;
         let mut again = a.create_label();
         a.set_label(&mut again)?;
         push(a, l, &[Arg::At(SAVER_MSG), Arg::I(0), Arg::I(0), Arg::I(0)])?;
@@ -1252,22 +1272,14 @@ fn a_second_without_input_starts_the_screen_saver() {
         a.jne(again)?;
         finish(a, l, 1)
     });
-    let mut cpu = card_machine("screen_saver_timer", None, program);
-    let base = PathBuf::from("target/test_win32_screen/screen_saver_timer");
-    fs::create_dir_all(base.join("WINDOWS")).unwrap();
-    let win_ini = "[windows]\r\nScreenSaveActive=1\r\nScreenSaveTimeOut=1\r\n";
-    fs::write(base.join("WINDOWS").join("WIN.INI"), win_ini).unwrap();
-    let system_ini = "[boot]\r\nSCRNSAVE.EXE=C:\\SAVER.SCR\r\n";
-    fs::write(base.join("WINDOWS").join("SYSTEM.INI"), system_ini).unwrap();
-    fs::write(base.join("SAVER.SCR"), exit_program(9)).unwrap();
-    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sink = lines.clone();
-    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
-        sink.lock().unwrap().push(line.to_string())
-    }));
+    let (mut cpu, lines) = saver_machine("screen_saver_timer", program);
     run_until(&mut cpu, data, 1);
     assert!(cpu.bus.clock.now_micros() >= 1_000_000, "the message came before a second");
-    let ended = |lines: &[String]| lines.iter().any(|l| l.contains("SAVER.SCR ended with exit code 9"));
+    let ended = |lines: &[String]| {
+        lines
+            .iter()
+            .any(|l| l.contains("SAVER.SCR ended with exit code 9"))
+    };
     for _ in 0..100 {
         if ended(&lines.lock().unwrap()) {
             break;
@@ -1277,6 +1289,64 @@ fn a_second_without_input_starts_the_screen_saver() {
     }
     let log = lines.lock().unwrap().join("\n");
     assert!(ended(&lines.lock().unwrap()), "{log}");
+}
+
+/// SystemParametersInfoA reads the saver's settings USER took from
+/// WIN.INI, and SPI_SETSCREENSAVEACTIVE turns it off, as games do while
+/// they run: the program waits in GetMessageA for longer than the
+/// timeout, and gets its own WM_TIMER, never SC_SCREENSAVE.
+#[test]
+fn system_parameters_info_turns_the_screen_saver_off() {
+    let (program, data) = program(&[USER32_SAVER], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        let spi = SAVER_SYSTEM_PARAMETERS_INFO;
+        let get = |action: u32, at: u32| [Arg::I(action), Arg::I(0), Arg::At(at), Arg::I(0)];
+        c.api(a, l, spi, &get(SPI_GETSCREENSAVETIMEOUT, SAVER_TIMEOUT))?;
+        c.api(a, l, spi, &get(SPI_GETSCREENSAVEACTIVE, SAVER_ACTIVE))?;
+        let off = [Arg::I(SPI_SETSCREENSAVEACTIVE), Arg::I(0), Arg::I(0), Arg::I(0)];
+        c.api(a, l, spi, &off)?;
+        c.api(a, l, spi, &get(SPI_GETSCREENSAVEACTIVE, SAVER_ACTIVE_AFTER))?;
+        let timer = [Arg::Val(RESULTS), Arg::I(1), Arg::I(2500), Arg::I(0)];
+        c.api(a, l, SAVER_SET_TIMER, &timer)?;
+        let mut again = a.create_label();
+        let mut saver = a.create_label();
+        let mut timed = a.create_label();
+        a.set_label(&mut again)?;
+        push(a, l, &[Arg::At(SAVER_MSG), Arg::I(0), Arg::I(0), Arg::I(0)])?;
+        a.call(l.import(SAVER_GET_MESSAGE))?;
+        a.cmp(dword_ptr(l.at(SAVER_MSG + 4)), WM_TIMER as i32)?;
+        a.je(timed)?;
+        a.cmp(dword_ptr(l.at(SAVER_MSG + 4)), WM_SYSCOMMAND as i32)?;
+        a.je(saver)?;
+        push(a, l, &[Arg::At(SAVER_MSG)])?;
+        a.call(l.import(SAVER_DISPATCH_MESSAGE))?;
+        a.jmp(again)?;
+        a.set_label(&mut saver)?;
+        finish(a, l, 2)?;
+        a.set_label(&mut timed)?;
+        finish(a, l, 1)
+    });
+    let (mut cpu, lines) = saver_machine("screen_saver_off", program);
+    // Step 1 is the program's own timer, step 2 the saver's message.
+    for _ in 0..2000 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(&cpu, data + DONE) != 0 {
+            break;
+        }
+    }
+    let log = lines.lock().unwrap().join("\n");
+    let when = cpu.bus.clock.now_micros();
+    let results = results(&cpu, data, 6);
+    assert_eq!(peek(&cpu, data + DONE), 1, "at {when} us, {results:x?}: {log}");
+    assert!(cpu.bus.clock.now_micros() >= 2_500_000, "{log}");
+    assert_eq!(results[1..5], [1, 1, 1, 1], "{log}");
+    assert_eq!(peek(&cpu, data + SAVER_TIMEOUT), 1, "{log}");
+    assert_eq!(peek(&cpu, data + SAVER_ACTIVE), 1, "{log}");
+    assert_eq!(peek(&cpu, data + SAVER_ACTIVE_AFTER), 0, "{log}");
+    assert!(!log.contains("Screen saver due"), "{log}");
 }
 
 const DDRAW_CARD: (&str, &[&str]) = ("DDRAW.DLL", &["DirectDrawCreate", "DirectDrawEnumerateA"]);

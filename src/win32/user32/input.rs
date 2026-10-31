@@ -134,11 +134,12 @@ pub struct Input {
     /// TrackMouseEvent's window, its TME_HOVER and TME_LEAVE flags and
     /// its hover time (monitor.rs).
     pub tracking: [u32; 3],
-    /// The screen saver's timer (saver.rs), in microseconds of the
-    /// emulated clock: WIN.INI's timeout (0 when the saver is off), when
-    /// the last key or mouse input came, and when the timer ends (0 when
-    /// it isn't set).
-    pub saver_timeout: u64,
+    /// The screen saver (saver.rs): whether it is on and its timeout in
+    /// seconds, from WIN.INI or SystemParametersInfo; and in microseconds
+    /// of the emulated clock, when the last key or mouse input came and
+    /// when the timer ends (0 when it isn't set).
+    pub saver_active: bool,
+    pub saver_timeout: u32,
     pub idle_since: u64,
     pub saver_due: u64,
 }
@@ -2710,6 +2711,7 @@ crate::state_fields!(Input {
     menu_keys,
     sys_key,
     tracking,
+    saver_active,
     saver_timeout,
     idle_since,
     saver_due

@@ -3,14 +3,17 @@
 //! `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
 //! SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]
 //! SCRNSAVE.EXE` with /s. Windows 3.1 does this, and Windows 95 and 98
-//! do it with the same entries. USER reads them when Windows starts:
-//! here, when the desktop comes.
+//! do it with the same entries. USER reads them when Windows starts
+//! (`user32::init`), and SystemParametersInfo's SPI_SETSCREENSAVEACTIVE
+//! and SPI_SETSCREENSAVETIMEOUT change them, as games do that turn the
+//! saver off while they run.
 //!
 //! The timer is a time on the emulated clock, `Input::saver_due`, which
-//! the built-in Windows's timer event (`win32::timer`) waits for. Input
-//! only notes its time; when the timer's time comes and input came
-//! since it was set, it is set again from that input. Once the saver
-//! was asked for, the timer waits for input before it starts again.
+//! the built-in Windows's timer event (`win32::timer`) waits for, while
+//! the desktop is on the screen. Input only notes its time; when the
+//! timer's time comes and input came since it was set, it is set again
+//! from that input. Once the saver was asked for, the timer waits for
+//! input before it starts again.
 
 use super::{message, user};
 use crate::cpu::Cpu;
@@ -20,30 +23,39 @@ pub const SC_SCREENSAVE: u32 = 0xF140;
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SW_SHOWNORMAL: u16 = 1;
 
-/// The number at the start of a profile value, as GetProfileInt reads
-/// it: 0 if there is none.
-fn number(value: &[u8]) -> u64 {
-    value
-        .iter()
-        .skip_while(|b| b.is_ascii_whitespace())
-        .take_while(|b| b.is_ascii_digit())
-        .fold(0u64, |n, &d| n.saturating_mul(10).saturating_add((d - b'0') as u64))
-}
-
-/// The desktop came: the timeout from WIN.INI, and the timer from now.
-pub fn desktop_started(cpu: &mut Cpu) {
-    let mut setting = |key: &[u8]| {
-        crate::win32::kernel32::profile_value(cpu, b"WIN.INI", b"windows", key)
-            .map_or(0, |v| number(&v))
-    };
+/// The system starts: whether the saver is on and its timeout, from
+/// WIN.INI as GetProfileInt reads them.
+pub fn init(cpu: &mut Cpu) {
+    let mut setting =
+        |key: &[u8]| crate::win32::kernel32::profile_int(cpu, b"WIN.INI", b"windows", key, 0);
     let active = setting(b"ScreenSaveActive") != 0;
     let seconds = setting(b"ScreenSaveTimeOut");
+    let input = &mut user(cpu).input;
+    input.saver_active = active;
+    input.saver_timeout = seconds;
+}
+
+/// The desktop came: the timer from now.
+pub fn desktop_started(cpu: &mut Cpu) {
     let now = cpu.bus.clock.now_micros();
     let input = &mut user(cpu).input;
-    input.saver_timeout = if active { seconds.saturating_mul(1_000_000) } else { 0 };
     input.idle_since = now;
     input.saver_due = 0;
     arm(cpu);
+}
+
+/// The desktop left the screen: no window is there to send
+/// SC_SCREENSAVE, and the timer stops until it comes back.
+pub fn desktop_ended(cpu: &mut Cpu) {
+    user(cpu).input.saver_due = 0;
+}
+
+/// SystemParametersInfo turned the saver on or off or changed its
+/// timeout: the timer counts again from the last input.
+pub fn settings_changed(cpu: &mut Cpu) {
+    user(cpu).input.saver_due = 0;
+    arm(cpu);
+    cpu.bus.reschedule_timers();
 }
 
 /// Key or mouse input came.
@@ -56,13 +68,26 @@ pub fn input(cpu: &mut Cpu) {
     }
 }
 
-/// Set the timer for the timeout after the last input.
+/// When the timeout ends after the last input, if the saver is on.
+fn end_of_timeout(input: &super::input::Input) -> Option<u64> {
+    if !input.saver_active || input.saver_timeout == 0 {
+        return None;
+    }
+    let timeout = input.saver_timeout as u64 * 1_000_000;
+    Some(input.idle_since.saturating_add(timeout))
+}
+
+/// Set the timer for the timeout after the last input, if the saver is
+/// on and the desktop is on the screen.
 fn arm(cpu: &mut Cpu) {
-    let input = &mut user(cpu).input;
-    if input.saver_timeout == 0 {
+    let state = user(cpu);
+    if !state.desktop {
         return;
     }
-    input.saver_due = input.idle_since.saturating_add(input.saver_timeout);
+    let Some(due) = end_of_timeout(&state.input) else {
+        return;
+    };
+    state.input.saver_due = due;
     cpu.bus.reschedule_timers();
 }
 
@@ -81,30 +106,32 @@ pub fn tick(cpu: &mut Cpu) {
     if !due(&cpu.bus.win32, now) {
         return;
     }
-    let state = user(cpu);
-    let input = &mut state.input;
-    let due = input.idle_since.saturating_add(input.saver_timeout);
-    if due > now {
+    // Input the devices have that USER hasn't read yet counts: Windows
+    // reads it as it comes, and the program may not have asked lately.
+    super::input::poll(cpu);
+    let input = &mut user(cpu).input;
+    if let Some(due) = end_of_timeout(input)
+        && due > now
+    {
         input.saver_due = due;
         return;
     }
     input.saver_due = 0;
-    let active = state.activation(state.input.foreground).active;
+    let state = user(cpu);
+    let active = state.foreground_window();
     if active != 0 && state.is_window(active) {
-        cpu.bus.log_string(&format!("[USER] Screen saver due: SC_SCREENSAVE to {:#x}", active));
+        let line = format!("[USER] Screen saver due: SC_SCREENSAVE to {:#x}", active);
+        cpu.bus.log_string(&line);
         message::post_message(cpu, &[active, WM_SYSCOMMAND, SC_SCREENSAVE, 0]);
-        crate::win32::thread::wake(cpu);
     }
 }
 
 /// DefWindowProc's SC_SCREENSAVE: SYSTEM.INI's `[boot] SCRNSAVE.EXE`
 /// started with /s, if it names one.
 pub fn start(cpu: &mut Cpu) {
-    let Some(path) = crate::win32::kernel32::profile_value(cpu, b"SYSTEM.INI", b"boot", b"SCRNSAVE.EXE")
-    else {
-        return;
-    };
-    let path = crate::dosstr::from_bytes(&path).trim().to_string();
+    let path = crate::win32::kernel32::profile_value(cpu, b"SYSTEM.INI", b"boot", b"SCRNSAVE.EXE")
+        .map(|path| crate::dosstr::from_bytes(&path))
+        .unwrap_or_default();
     if path.is_empty() {
         return;
     }
@@ -116,8 +143,8 @@ pub fn start(cpu: &mut Cpu) {
             crate::win32::object::close(cpu, thread);
         }
         Err(code) => {
-            cpu.bus
-                .log_string(&format!("[USER] Screen saver {} can't start: error {}", path, code));
+            let line = format!("[USER] Screen saver {} can't start: error {}", path, code);
+            cpu.bus.log_string(&line);
         }
     }
 }

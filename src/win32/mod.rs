@@ -526,6 +526,7 @@ pub fn timer(cpu: &mut Cpu) {
     if !cpu.bus.win32.active() {
         cpu.bus.win32.dsound.due = None;
         cpu.bus.win32.winmm.wave.due = None;
+        cpu.bus.win32.user.input.saver_due = 0;
         cpu.bus.reschedule_timers();
         return;
     }

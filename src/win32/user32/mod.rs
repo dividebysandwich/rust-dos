@@ -460,13 +460,14 @@ pub fn address_of(name: &str) -> u32 {
     super::stubs::stub_address(dll_index(), index)
 }
 
-/// The system starts: the desktop window, the system's classes, and the
+/// The system starts: the desktop window, the system's classes, the
 /// arrow as the cursor, which Windows shows from the start until a
-/// program sets another.
+/// program sets another, and the screen saver's settings.
 pub fn init(cpu: &mut Cpu) {
     if !user(cpu).windows.is_empty() {
         return;
     }
+    saver::init(cpu);
     sysparams::init_colors(cpu);
     class::register_system(cpu);
     window::create_desktop(cpu);

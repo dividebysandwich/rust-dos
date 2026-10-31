@@ -459,6 +459,21 @@ pub(in crate::win32) fn profile_value(
         .map(<[u8]>::to_vec)
 }
 
+/// `profile_value` as a number, as GetPrivateProfileIntA reads it:
+/// `default` when the file doesn't have the key or its value is empty.
+pub(in crate::win32) fn profile_int(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    key: &[u8],
+    default: u32,
+) -> u32 {
+    match profile_value(cpu, file, section, key) {
+        Some(value) if !value.is_empty() => parse_int(&value),
+        _ => default,
+    }
+}
+
 /// GetPrivateProfileSectionNamesA(buffer, size, file).
 pub(super) fn get_private_profile_section_names_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[to, size, file] = args else {
