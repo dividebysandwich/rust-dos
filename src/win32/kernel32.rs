@@ -26,6 +26,7 @@ mod time;
 mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;
+mod vxd;
 
 pub(super) use locale::enum_returned;
 pub(crate) use path::{change_directory, current_directory, find_entries, full_path, matches};
@@ -611,6 +612,21 @@ static APIS: &[Api] = &[
     stdcall("SUnMapLS_IP_EBP_36", 946, 0, flat::sunmap_ls_ebp_36),
     stdcall("SMapLS_IP_EBP_40", 947, 0, flat::smap_ls_ebp_40),
     stdcall("SUnMapLS_IP_EBP_40", 948, 0, flat::sunmap_ls_ebp_40),
+    // Windows 98's functions it exports by ordinal only, under those
+    // ordinals (ordinals.rs): VxDCall0 to VxDCall8 (vxd.rs), and the
+    // Win16 loader's LoadLibrary16, FreeLibrary16 and GetProcAddress16.
+    stdcall("VxDCall0", 1, 1, vxd::vxd_call),
+    stdcall("VxDCall1", 2, 2, vxd::vxd_call),
+    stdcall("VxDCall2", 3, 3, vxd::vxd_call),
+    stdcall("VxDCall3", 4, 4, vxd::vxd_call),
+    stdcall("VxDCall4", 5, 5, vxd::vxd_call),
+    stdcall("VxDCall5", 6, 6, vxd::vxd_call),
+    stdcall("VxDCall6", 7, 7, vxd::vxd_call),
+    stdcall("VxDCall7", 8, 8, vxd::vxd_call),
+    stdcall("VxDCall8", 9, 9, vxd::vxd_call),
+    stdcall("LoadLibrary16", 35, 1, flat::load_library16),
+    stdcall("FreeLibrary16", 36, 1, flat::free_library16),
+    stdcall("GetProcAddress16", 37, 2, flat::get_proc_address16),
 ];
 
 /// The places in `APIS` of the system's own stubs.

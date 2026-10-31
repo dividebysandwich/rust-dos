@@ -195,7 +195,8 @@ impl Page {
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
-                ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck, AlmanacAuto,
+                ShellSuggestions, ShellColors, SaveShellHistory, GameFixes,
+                VersionCheck, AlmanacAuto,
                 AlmanacFetch, AlmanacReport,
             ],
             Page::Sound => &[

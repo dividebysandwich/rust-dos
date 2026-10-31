@@ -434,6 +434,12 @@ impl DiskController {
         })
     }
 
+    /// The access mode of the open file `sft`: 0 to read, 1 to write, 2
+    /// for both.
+    pub fn access_mode(&self, sft: u16) -> Option<u8> {
+        self.open_files.get(&sft).map(|f| f.mode & 3)
+    }
+
     /// Whether the device open at `sft` is in raw (binary) mode.
     pub fn device_raw(&self, sft: u16) -> bool {
         self.open_files.get(&sft).is_some_and(|f| f.raw)

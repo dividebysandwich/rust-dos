@@ -1482,9 +1482,14 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if !crate::win32::accepts(cpu, phys_ip, id) {
         return false;
     }
-    if cpu.bus.observe.on {
+    // A clock read is the one call a loop being proven may make (`idle`).
+    // 16-bit modules number their functions apart: the id is another
+    // function's there.
+    let reads_clock = crate::win32::stubs::reads_clock(id) && !crate::win16::in_16bit_code(cpu);
+    if cpu.bus.observe.on && (!reads_clock || cpu.bus.observe.timing()) {
         cpu.bus.observe.opaque();
     }
+    let trap = (cpu.cs(), cpu.eip());
     let _profile = profile::zone(profile::Zone::Win32);
     if let Some(p) = &mut cpu.bus.profile {
         p.win32[id as usize] += 1;
@@ -1509,6 +1514,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         return true;
     }
     cpu.bus.guest_paging = None;
+    if reads_clock {
+        crate::idle::clock_read(cpu, trap.0, trap.1);
+    }
     if cpu.idle {
         // No thread can run: time passes to the next timer event.
         cpu.idle = false;

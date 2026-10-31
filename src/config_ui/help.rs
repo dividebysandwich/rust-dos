@@ -366,6 +366,7 @@ impl Item {
             SaveShellHistory => "save-shell-history",
             VersionCheck => "version-check",
             AlmanacAuto => "almanac-auto",
+            GameFixes => "game-fixes",
             AlmanacFetch | AlmanacReport => "almanac",
             Rewind => "rewind",
             RewindMemory => "rewind-memory",
