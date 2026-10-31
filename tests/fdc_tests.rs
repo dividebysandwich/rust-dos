@@ -231,7 +231,7 @@ fn the_built_in_dos_takes_digital_output_writes_quietly() {
     cpu.bus.io_write(DOR, 0x1C);
     let lines = cpu.bus.take_log_backlog();
     assert!(
-        lines.iter().all(|(_, line)| !line.contains("Unhandled")),
+        lines.iter().all(|(_, line)| !line.contains("Port: 03F2")),
         "{lines:?}"
     );
 }
