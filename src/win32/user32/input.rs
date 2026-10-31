@@ -371,6 +371,37 @@ pub fn poll(cpu: &mut Cpu) {
     poll_keyboard(cpu, desktop);
 }
 
+/// What reading the devices (`poll`) may change, compared before and
+/// after a look at the queue that is to have changed nothing, as an idle
+/// proof's PeekMessage (message.rs). None when a key went down or the
+/// program steers with the mouse, which a read changes whatever comes of
+/// it.
+#[derive(PartialEq)]
+pub struct Seen {
+    cursor: (i32, i32),
+    device_pos: (i32, i32),
+    held: [u64; 8],
+    buttons: u8,
+    presses: [u16; 3],
+    releases: [u16; 3],
+}
+
+pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
+    let taken = crate::win32::dinput::mouse_taken(cpu);
+    if cpu.bus.kbd.has_pressed() || steers_with_mouse(cpu, taken) {
+        return None;
+    }
+    let input = &user(cpu).input;
+    Some(Seen {
+        cursor: input.cursor,
+        device_pos: input.device_pos,
+        held: input.held,
+        buttons: input.buttons,
+        presses: input.presses,
+        releases: input.releases,
+    })
+}
+
 /// Whether the program steers with the mouse's motion: DirectInput has
 /// the mouse exclusively (`taken`), or it hid the cursor and has the
 /// capture, as games do that put the cursor back in the middle after
