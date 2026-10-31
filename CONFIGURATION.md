@@ -2508,26 +2508,29 @@ draws into. What games write into the frame buffer themselves (menus,
 movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
 textures viewed at an angle, where the OpenGL driver supports
 anisotropic filtering.
-With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's
-on a Voodoo Graphics or Voodoo2: the software rasterizer draws none of
-the triangles, and where something reads the card's memory (a game
-reading the frame buffer or blitting from it, a save state, a
+With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's:
+the software rasterizer draws none of the triangles, and where something
+reads the card's memory (a game reading the frame buffer or blitting
+from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
 screenshot, the debugger) the rows it reads are read back from OpenGL,
 at the card's resolution and in its 16 bits a pixel. A read waits for
-the GPU, so a game that reads back every frame gains less. The pixels it
-reads differ in small ways from the card's: OpenGL draws a triangle's
-edges by its own rules, blends after the dither (see below) and keeps
-more depth precision. What a game writes itself, its frame buffer
-writes and the blitter's copies, reads back as it wrote it. A save state
-keeps OpenGL's pixels too, so states of the same scene saved on two
-GPUs differ slightly in the card's memory, and in what the game did with
-pixels it read back. Such a state loads on any machine. A game that
-needs the card's exact pixels, or states that match byte for byte, can
-have `voodoo_readback=exact`. Programs that use alpha planes, the
-Banshee and Voodoo3, and deterministic runs always get the exact pixels,
-as do the pixel counters: drawing left to OpenGL isn't counted, and once
-a game reads the counters everything after is drawn in software and
-counted.
+the GPU, so a game that reads back every frame gains less; on a Banshee
+or Voodoo3 the triangles into memory a game read back in the last
+second or so are drawn in software instead, and a triangle that takes
+its texture from a buffer the 3D drew reads that buffer back first, so
+that it draws with OpenGL's picture at the card's resolution. The pixels
+a game reads differ in small ways from the card's: OpenGL draws a
+triangle's edges by its own rules, blends after the dither (see below)
+and keeps more depth precision. What a game writes itself, its frame
+buffer writes and the blitter's copies, reads back as it wrote it. A
+save state keeps OpenGL's pixels too, so states of the same scene saved
+on two GPUs differ slightly in the card's memory, and in what the game
+did with pixels it read back. Such a state loads on any machine. A game
+that needs the card's exact pixels, or states that match byte for byte,
+can have `voodoo_readback=exact`. Programs that use alpha planes and
+deterministic runs always get the exact pixels, as do the pixel
+counters: drawing left to OpenGL isn't counted, and once a game reads
+the counters everything after is drawn in software and counted.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws
@@ -2656,18 +2659,21 @@ the program's window stays white and the card draws nothing. Install
 DirectX 7.0 (`dx70eng.exe`) or later first.
 
 With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
-again at `voodoo_scale` times its resolution, as for the Voodoo Graphics
-(see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
+at `voodoo_scale` times its resolution, as for the Voodoo Graphics (see
+[3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
 together as the card's video processor does: the desktop, the overlay
 (the window or screen a game shows its 3D through, scaled and in YUV
 too) and the cursor. A desktop or overlay that is a 16-bit buffer the 3D
 draws into, laid out as the 3D draws it, comes from the bigger picture;
 anything else (the Windows desktop, 8, 24 and 32-bit modes, YUV video)
 comes from the card's memory at its own resolution, with the drawing
-still queued for it done first. The software rasterizer keeps the
-memory, so programs read back what they would on the card, and
-screenshots and recordings show the software picture. The libretro core
-draws a Banshee or Voodoo3 in software whatever `voodoo_renderer` says.
+still queued for it done first. With `voodoo_readback=gpu`, the default,
+OpenGL alone draws the 3D, and what reads the card's memory reads back
+OpenGL's picture, as on the Voodoo2; with `voodoo_readback=exact` the
+software rasterizer keeps the memory as well, so programs read back what
+they would on the card. Screenshots and recordings show the software
+picture, which reads everything back. The libretro core draws a Banshee
+or Voodoo3 in software whatever `voodoo_renderer` says.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and

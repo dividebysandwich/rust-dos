@@ -389,13 +389,13 @@ impl Voodoo {
             let picture = access
                 .clone()
                 .map(|a| super::backlog::Access { kept: false, ..a });
-            let split = width < rowpixels
-                && access.as_ref().is_some_and(|a| a.kept && !a.pinned)
-                && picture
-                    .as_ref()
-                    .is_some_and(|a| self.gpu_takes(&job((0, width)), a));
-            if split {
-                self.gpu_left(&job((0, width)));
+            let split = width < rowpixels && access.as_ref().is_some_and(|a| a.kept && !a.pinned);
+            let taken = picture
+                .as_ref()
+                .filter(|_| split)
+                .and_then(|a| self.gpu_takes(&job((0, width)), a));
+            if let Some(bytes) = taken {
+                self.gpu_left(&job((0, width)), bytes);
                 let outside = super::backlog::Access {
                     kept: true,
                     ..Default::default()

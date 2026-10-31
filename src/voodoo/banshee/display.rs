@@ -365,7 +365,7 @@ impl Voodoo {
     /// one of them, in 5-6-5 and with its stride, comes from its drawing.
     /// The other surfaces come from the renderer's copy of the card's
     /// memory, which gets the pages shown that were written since it last
-    /// had them (`pages`), first in the recording.
+    /// had them (`tracker`), first in the recording.
     pub(crate) fn banshee_scanout(&mut self, key: &LayoutKey) -> Option<Box<Scanout>> {
         self.gpu_frame();
         let b = self.banshee.as_deref_mut()?;
@@ -491,11 +491,11 @@ impl Voodoo {
             .collect();
         if dirty && !shared.is_empty() {
             if self.writes_queue() {
-                self.flush();
+                self.flush_in(&shared);
             }
             for &(start, end) in &shared {
                 self.gpu_sync(start, end);
-                self.gpu.get_mut().pages.mark(start, end);
+                self.gpu.get_mut().tracker.mark(start, end);
             }
         }
         // The pages shown that the renderer lacks.
