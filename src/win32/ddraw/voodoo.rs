@@ -160,6 +160,19 @@ pub fn modes(cpu: &Cpu) -> Vec<(u32, u32, u32)> {
         .collect()
 }
 
+/// The modes whose two colour buffers and auxiliary (depth) buffer the
+/// card's frame buffer holds, smallest first: width and height.
+pub fn depth_modes(cpu: &Cpu) -> Vec<(u32, u32)> {
+    let Some(b) = board(cpu) else {
+        return Vec::new();
+    };
+    modes(cpu)
+        .into_iter()
+        .filter(|&(w, h, _)| buffer_bytes(b.card, w, h).is_some_and(|n| 3 * n <= b.fb_bytes))
+        .map(|(w, h, _)| (w, h))
+        .collect()
+}
+
 /// The card's frame buffer, and how much of it the mode's buffers
 /// leave.
 pub fn video_memory(cpu: &mut Cpu) -> (u32, u32) {
