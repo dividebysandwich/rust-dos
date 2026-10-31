@@ -864,13 +864,24 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   Windows 4.0 get their DllEntryPoint called after LibMain. Calls the
   other way, from 16-bit code to a Win32 DLL, fail with the error value
   the thunk data gives.
+- Screen savers, Win16 or Win32: after WIN.INI's `[windows]`
+  `ScreenSaveTimeOut` seconds with no key or mouse input, with
+  `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
+  SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]`
+  `SCRNSAVE.EXE` with /s, as Windows 3.1 and 95 do. USER reads the two
+  settings when the desktop comes, as Windows reads them when it starts.
+  The prompt also starts a saver by its .SCR name (`SCRANTIC.SCR /s`, or
+  /c for its settings dialog), as a Windows program under another
+  extension; without the built-in Windows, COMMAND.COM runs no .SCR.
 
 Games tried, all of which start and draw their windows: SkiFree,
 BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
 Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
 Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
 two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
-and Prairie Dog Hunt (VB2).
+and Prairie Dog Hunt (VB2). Sierra's screen saver Johnny Castaway
+(Screen Antics) installs with its own setup and runs from the prompt
+and from the screen saver's timer.
 
 Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
 the SimTower demo, and the InstallShield of the Lemmings demo. All three

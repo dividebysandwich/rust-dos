@@ -134,6 +134,13 @@ pub struct Input {
     /// TrackMouseEvent's window, its TME_HOVER and TME_LEAVE flags and
     /// its hover time (monitor.rs).
     pub tracking: [u32; 3],
+    /// The screen saver's timer (saver.rs), in microseconds of the
+    /// emulated clock: WIN.INI's timeout (0 when the saver is off), when
+    /// the last key or mouse input came, and when the timer ends (0 when
+    /// it isn't set).
+    pub saver_timeout: u64,
+    pub idle_since: u64,
+    pub saver_due: u64,
 }
 
 impl Input {
@@ -212,6 +219,7 @@ pub fn desktop_started(cpu: &mut Cpu) {
     input.presses = presses;
     input.releases = releases;
     input.held = held;
+    super::saver::desktop_started(cpu);
 }
 
 // The devices.
@@ -365,10 +373,16 @@ pub fn poll(cpu: &mut Cpu) {
         let now = cpu.bus.clock.now_ns();
         cpu.bus.mouse.note_steering(now);
     }
+    let devices = |input: &Input| (input.held, input.device_pos, input.presses, input.releases);
+    let before = devices(&user(cpu).input);
     if desktop {
         poll_mouse(cpu, taken);
     }
-    poll_keyboard(cpu, desktop);
+    let pressed = poll_keyboard(cpu, desktop);
+    // Any input puts the screen saver off.
+    if pressed || devices(&user(cpu).input) != before {
+        super::saver::input(cpu);
+    }
 }
 
 /// Whether the program steers with the mouse's motion: DirectInput has
@@ -386,9 +400,11 @@ fn steers_with_mouse(cpu: &mut Cpu, taken: bool) -> bool {
     input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture)
 }
 
-fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
+/// Read the keyboard: whether a key went down since the last read.
+fn poll_keyboard(cpu: &mut Cpu, desktop: bool) -> bool {
     let held = cpu.bus.kbd.held_keys();
     let pressed = cpu.bus.kbd.take_pressed();
+    let any_pressed = pressed.iter().any(|&p| p != 0);
     let before = user(cpu).input.held;
     let mut events = Vec::new();
     // It runs at each wake of the threads and each message the program
@@ -419,7 +435,7 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
                 crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, false);
             }
         }
-        return;
+        return any_pressed;
     }
     // The keystrokes the BIOS got: each is taken, so the buffer doesn't
     // fill.
@@ -461,6 +477,7 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
             key_event(cpu, scan, id >= 256, false, false);
         }
     }
+    any_pressed
 }
 
 /// The key `vk` (and `side`, its left or right one) goes down or up:
@@ -2692,7 +2709,10 @@ crate::state_fields!(Input {
     last_click,
     menu_keys,
     sys_key,
-    tracking
+    tracking,
+    saver_timeout,
+    idle_since,
+    saver_due
 });
 crate::state_fields!(Activation {
     queue,

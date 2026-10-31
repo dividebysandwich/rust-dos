@@ -24,6 +24,7 @@ pub mod paint;
 pub mod progman;
 pub mod rect;
 pub mod resource;
+pub mod saver;
 pub mod sysparams;
 pub mod text;
 pub mod window;

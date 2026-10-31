@@ -460,7 +460,8 @@ impl Win32 {
     /// devices) or a thread's wait times out, in PIT ticks, for the bus's
     /// timer events.
     pub fn next_event(&self) -> Option<u64> {
-        let micros = [self.winmm.due, self.wait_due].into_iter().flatten().min()?;
+        let saver = Some(self.user.input.saver_due).filter(|&due| due != 0);
+        let micros = [self.winmm.due, self.wait_due, saver].into_iter().flatten().min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -510,6 +511,7 @@ pub fn timer(cpu: &mut Cpu) {
     let ticks = cpu.bus.clock.now_ticks();
     let w = &cpu.bus.win32;
     let others = w.winmm.due.is_some_and(|d| d <= now)
+        || user32::saver::due(w, now)
         || [w.dsound.due, w.winmm.wave.due]
             .into_iter()
             .flatten()
@@ -527,6 +529,7 @@ pub fn timer(cpu: &mut Cpu) {
         cpu.bus.reschedule_timers();
         return;
     }
+    user32::saver::tick(cpu);
     let in_program = cpu.pe()
         && !cpu.v86()
         && cpu.cpl == 3
