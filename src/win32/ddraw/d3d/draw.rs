@@ -24,6 +24,7 @@ use super::{
     D3DERR_NOTINBEGIN, D3DERR_VERTEXBUFFERLOCKED, probe, read_bytes, read_dwords,
 };
 use crate::cpu::Cpu;
+use std::sync::Arc;
 
 // DrawPrimitive's flags.
 pub const D3DDP_DONOTCLIP: u32 = 0x4;
@@ -326,11 +327,12 @@ pub fn draw_prims(
 }
 
 /// Draw the primitives `prims` of `vertices`, and with `clip` what
-/// ProcessVertices kept of each it clipped (`vertexbuffer::
-/// clip_coordinates`). A vertex is drawn from its clip coordinates only
-/// while the viewport puts them where ProcessVertices wrote it; after a
-/// change of viewport it is drawn where the buffer says, as before. A
-/// triangle with any vertex drawn so is clipped on the screen.
+/// ProcessVertices kept of each it clipped (`VertexBuffer::clipped`). A
+/// vertex is drawn from its clip coordinates only while the viewport
+/// puts them where the buffer has it; after a change of viewport, or
+/// once the program wrote over it, it is drawn where the buffer says,
+/// as before. A triangle with any vertex drawn so is clipped on the
+/// screen.
 #[allow(clippy::too_many_arguments)]
 fn draw_clipped(
     cpu: &mut Cpu,
@@ -347,9 +349,9 @@ fn draw_clipped(
     };
     let mut processed = pipeline::process(&setup, vertices, layout);
     if let Some(clip) = clip {
-        for (p, c) in processed.iter_mut().zip(clip) {
+        for ((p, v), c) in processed.iter_mut().zip(vertices).zip(clip) {
             if let Some(c) = c
-                && setup.view_map.screen(c.clip).map(f32::to_bits) == c.screen
+                && setup.view_map.screen(c.clip).map(f32::to_bits) == v.position.map(f32::to_bits)
             {
                 *p = pipeline::at_clip_coordinates(&setup, p, c.clip, c.planes);
             }
@@ -579,20 +581,21 @@ fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<Buf
     }
     let at = b.memory + start * layout.size;
     let vertices = read_vertices(cpu, at, &layout, count)?;
-    let clip = super::vertexbuffer::clip_coordinates(&b, start, &vertices);
     Ok(BufferVertices {
         layout,
         vertices,
-        clip,
+        clipped: b.clipped,
+        start: start as usize,
     })
 }
 
-/// A vertex buffer's layout, vertices, and what ProcessVertices kept of
-/// them.
+/// A vertex buffer's layout, its vertices from `start` on, and what
+/// ProcessVertices kept of the buffer.
 struct BufferVertices {
     layout: Layout,
     vertices: Vec<Vertex>,
-    clip: Option<Vec<Option<Clipped>>>,
+    clipped: Arc<Vec<Option<Clipped>>>,
+    start: usize,
 }
 
 /// Draw `kind` primitives of a vertex buffer's `vertices` (in the order
@@ -608,7 +611,8 @@ fn draw_buffer(
     flags: u32,
 ) -> Result<(), u32> {
     let prims = primitives(kind, order, b.vertices.len())?;
-    let (layout, vertices, clip) = (&b.layout, &b.vertices, b.clip.as_deref());
+    let (layout, vertices) = (&b.layout, &b.vertices);
+    let clip = b.clipped.get(b.start..b.start + vertices.len());
     draw_clipped(cpu, id, version, layout, vertices, clip, &prims, flags)
 }
 

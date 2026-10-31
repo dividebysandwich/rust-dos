@@ -32,12 +32,12 @@ pub struct VertexBuffer {
     pub memory: u32,
     pub locked: bool,
     pub optimized: bool,
-    /// For each vertex ProcessVertices put here with D3DVOP_CLIP: its
-    /// clip coordinates, and the bits of the screen position it wrote,
-    /// so a vertex the program wrote over since isn't taken for it.
-    /// Not in save states: the next ProcessVertices makes them again.
-    /// Shared, so the copies of the buffer that Lock and the draws make
-    /// don't copy them.
+    /// For each vertex ProcessVertices put here with D3DVOP_CLIP: what it
+    /// kept of it. A draw takes them only for a vertex still at the
+    /// screen position they map to, so a vertex the program wrote over
+    /// since isn't taken for them. Not in save states: the next
+    /// ProcessVertices makes them again. Shared, so the copies of the
+    /// buffer that Lock and the draws make don't copy them.
     pub clipped: Arc<Vec<Option<Clipped>>>,
 }
 
@@ -46,8 +46,6 @@ pub struct VertexBuffer {
 pub struct Clipped {
     /// Its clip coordinates.
     pub clip: [f32; 4],
-    /// The bits of the x, y, z and rhw it wrote for it.
-    pub screen: [u32; 4],
     /// Its distances from the user's clip planes.
     pub planes: [f32; 6],
 }
@@ -71,26 +69,6 @@ const OPTIMIZED: u32 = 0x8000_0000;
 
 /// D3DVBCAPS_DONOTCLIP: a buffer without room for clip coordinates.
 const DONOTCLIP: u32 = 0x1;
-
-/// What ProcessVertices kept of the vertices `start` to `start + count`
-/// of `b`, for each that it clipped and the program hasn't written over
-/// since (`vertices` are what the buffer has now); None if it kept
-/// nothing of the buffer.
-pub fn clip_coordinates(
-    b: &VertexBuffer,
-    start: u32,
-    vertices: &[Vertex],
-) -> Option<Vec<Option<Clipped>>> {
-    let range = start as usize..start as usize + vertices.len();
-    let kept = b
-        .clipped
-        .get(range)?
-        .iter()
-        .zip(vertices)
-        .map(|(k, v)| k.filter(|k| v.position.map(f32::to_bits) == k.screen))
-        .collect();
-    Some(kept)
-}
 
 /// A new vertex buffer of `count` vertices of the FVF code `fvf`.
 pub fn make(cpu: &mut Cpu, caps: u32, fvf: u32, count: u32) -> Result<VertexBuffer, u32> {
@@ -281,7 +259,6 @@ fn process(
         if clip {
             clipped.push((!p.tl).then_some(Clipped {
                 clip: p.clip,
-                screen: screen.map(f32::to_bits),
                 planes: p.planes,
             }));
         }
