@@ -16,6 +16,7 @@ const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
+const DOR_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
 const WIN32_VERSION: u16 = 17;
 const NET_VERSION: u16 = 2;
@@ -195,6 +196,7 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            floppy_dor,
             attribute_reset: _,
             log_hook: _,
             log_backlog: _,
@@ -306,6 +308,8 @@ impl Bus {
         // A booted system's floppy disk controller, likewise.
         if let Some(fdc) = fdc {
             w.section(b"FDC ", FDC_VERSION, |w| fdc.save(w));
+        } else {
+            w.section(b"DOR ", DOR_VERSION, |w| floppy_dor.save(w));
         }
         // The DPMI host, while it has clients.
         if dpmi.active() {
@@ -488,6 +492,7 @@ impl Bus {
             host_frames: _,
             key_waits: _,
             unhandled_writes: _,
+            floppy_dor,
             attribute_reset: _,
             log_hook: _,
             log_backlog: _,
@@ -622,6 +627,12 @@ impl Bus {
             let mut controller = crate::fdc::Fdc::new();
             controller.load(&mut r.section(b"FDC ", FDC_VERSION)?)?;
             *fdc = Some(controller);
+        }
+        // The latch of a machine without one; a state from before it
+        // has none, so the latch starts at 0.
+        *floppy_dor = 0;
+        if fdc.is_none() && r.next_is(b"DOR ") {
+            floppy_dor.load(&mut r.section(b"DOR ", DOR_VERSION)?)?;
         }
         dpmi.reset();
         if r.next_is(b"DPMI") {

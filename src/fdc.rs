@@ -34,7 +34,7 @@ use std::rc::Rc;
 /// registers, the data port (FIFO), and the digital input (read) and
 /// configuration control (write) registers.
 pub const BASE: u16 = 0x3F0;
-const DOR: u16 = 0x3F2;
+pub const DOR: u16 = 0x3F2;
 const TDR: u16 = 0x3F3;
 const MSR: u16 = 0x3F4;
 pub const DATA: u16 = 0x3F5;

@@ -216,3 +216,29 @@ fn only_a_booted_system_has_the_controller() {
     rust_dos::boot::reboot_dos(&mut cpu);
     assert!(cpu.bus.fdc.is_none());
 }
+
+#[test]
+fn the_built_in_dos_latches_the_digital_output_register_quietly() {
+    // The BIOS timer writes 3F2h on every tick, drive or not. With no
+    // controller the write is kept and nothing is logged as unhandled.
+    let base = PathBuf::from("target/test_fdc/dor");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.log_backlog = Some(Vec::new());
+    assert!(cpu.bus.fdc.is_none());
+    cpu.bus.io_write(DOR, 0x0C);
+    cpu.bus.io_write(DOR, 0x1C);
+    assert_eq!(cpu.bus.floppy_dor, 0x1C);
+    let lines = cpu.bus.take_log_backlog();
+    assert!(
+        lines.iter().all(|(_, line)| !line.contains("Unhandled")),
+        "{lines:?}"
+    );
+    // The latch is part of a save state.
+    cpu.bus.floppy_dor = 0x2C;
+    let state = rust_dos::savestate::machine::save(&cpu);
+    cpu.bus.floppy_dor = 0;
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert_eq!(cpu.bus.floppy_dor, 0x2C);
+}

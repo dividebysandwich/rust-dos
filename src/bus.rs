@@ -400,6 +400,13 @@ pub struct Bus {
     /// polling for hardware that isn't there would flood the log.
     unhandled_writes: Vec<u8>,
 
+    /// The last value written to 3F2h while no floppy controller is
+    /// attached. On a PC the register belongs to the controller, and the
+    /// BIOS's timer writes it on every tick whether or not a drive is
+    /// fitted, so the write is taken without a log line. Kept in save
+    /// states (the `DOR ` section).
+    pub floppy_dor: u8,
+
     /// Generation counter for every block of RAM (`GEN_SHIFT`). Bumped on
     /// every write inside the Bus write helpers. The decoded-instruction
     /// cache stores the gen at decode time and invalidates a cached entry
@@ -2168,6 +2175,8 @@ impl Bus {
             // A booted system's floppy disk controller, ahead of the IDE
             // channel that would have 3F7h.
             p if self.fdc_claims(p) => self.fdc_write(p, value),
+            // No controller: the register takes the write and keeps it.
+            crate::fdc::DOR if self.fdc.is_none() => self.floppy_dor = value,
             // A booted system's IDE channels.
             p if self.ide_claims(p) => self.ide_write(p, value),
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
