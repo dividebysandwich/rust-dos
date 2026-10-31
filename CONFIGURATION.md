@@ -1656,10 +1656,12 @@ each time one applies.
 Some fixes patch the game's code in memory. They look for it each time
 a program resets the Sound Blaster's DSP, which a game's sound driver
 does before it sets anything up, and patch only code that is there as
-the game shipped it and hasn't set itself up yet. The patch is part of
-the game's memory, so a save state keeps it, and a state saved without
-it stays unpatched until the game starts again. Others skip a program
-the game starts, with the exit code it would have given.
+the game shipped it. A fix that changes what the driver builds as it
+sets up, such as the mixing fixes, also waits for a driver that hasn't
+set itself up yet. The patch is part of the game's memory, so a save
+state keeps it, and a state saved without it stays unpatched until the
+game starts again. Others skip a program the game starts, with the exit
+code it would have given.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
@@ -1680,12 +1682,16 @@ don't change.
 
 Jukebox Adventure's music player has a `cmp bx,0Bh` in front of its
 handler for effect Bxx (position jump), and a `je` back to that `cmp`:
-with interrupts off, the game stops for good on the first Bxx. The title song has one at its
-end, about 75 seconds in, and the title screen doesn't leave on its
-own, so a player who waits on it hangs the game on a real PC too. The
-fix was made for BLUES.EXE of 25096 bytes, MD5
-`4e4e60dbc63bdd867f7ff65725b7e8b4` (TOSEC's [h1] release). Prehistorik
-2's player, the same engine, has no such check.
+with interrupts off, the game stops for good on the first Bxx. The
+title song has one at its end, about 75 seconds in, and the title
+screen doesn't leave on its own, so a player who waits on it hangs the
+game on a real PC too. The fix was made for BLUES.EXE of 25096 bytes,
+MD5 `4e4e60dbc63bdd867f7ff65725b7e8b4` (TOSEC's [h1] release), which is
+Razor 1911's crack. The loop is in the code as the unpacker leaves it,
+and whether the original release has it is unknown. Prehistorik 2's
+player, the same engine, has no such check. The fix doesn't depend on
+anything the driver sets up, so it also goes into a driver that is
+already running, as in a save state, at the next DSP reset.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed

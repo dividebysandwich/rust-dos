@@ -551,22 +551,24 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries
 }
 
+/// The names in a list setting: separated by commas or spaces, without
+/// quotes, lowercase.
+fn names(value: &str) -> impl Iterator<Item = String> + '_ {
+    value
+        .split([',', ' ', '\t'])
+        .map(|name| name.trim().trim_matches('"').to_ascii_lowercase())
+}
+
 /// The fix names of a `game_fixes_off` list: separated by commas or
 /// spaces, lowercase.
 pub fn fix_names(value: &str) -> Vec<String> {
-    value
-        .split([',', ' ', '\t'])
-        .map(|name| name.trim().to_ascii_lowercase())
-        .filter(|name| !name.is_empty())
-        .collect()
+    names(value).filter(|name| !name.is_empty()).collect()
 }
 
 /// The DLL names of a `win32_dlls_replace` list: separated by commas or
 /// spaces, lowercase, without ".dll".
 pub fn dll_names(value: &str) -> Vec<String> {
-    value
-        .split([',', ' ', '\t'])
-        .map(|name| name.trim().trim_matches('"').to_ascii_lowercase())
+    names(value)
         .map(|name| name.strip_suffix(".dll").map(str::to_string).unwrap_or(name))
         .filter(|name| !name.is_empty())
         .collect()

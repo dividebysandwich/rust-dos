@@ -186,6 +186,22 @@ fn jukebox_adventure_fills_the_rest_of_an_effects_block_with_128() {
 }
 
 #[test]
+fn prehistorik_2_fills_the_rest_of_an_effects_block_with_128() {
+    let layout = &LAYOUTS[0];
+    let mut cpu = machine(layout);
+    reset_dsp(&mut cpu);
+    // The effect filled the block's first 40 bytes, AX of them; the driver
+    // filled the rest with 0.
+    cpu.set_ax(0x28);
+    cpu.set_es(0x5000);
+    cpu.set_di(0x28);
+    run(&mut cpu, (0x20FB, 0x2108));
+    let block = read(&mut cpu, 0x5_0028, 0x81);
+    assert!(block[..0x80].iter().all(|&b| b == 0x80));
+    assert_eq!(block[0x80], 0);
+}
+
+#[test]
 fn nothing_changes_with_the_fix_off() {
     for layout in &LAYOUTS {
         let mut cpu = machine(layout);

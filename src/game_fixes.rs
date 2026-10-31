@@ -10,11 +10,13 @@
 //!   The check runs when a program starts a reset of the Sound Blaster's
 //!   DSP (a write of 1 to base + 6), which a sound driver does before it
 //!   sets anything up. It looks for each fix's first piece of code, and
-//!   patches only a copy where every piece is there as the game shipped
-//!   it and whose IRQ handler isn't in the interrupt table yet. A driver
-//!   that is already set up, as in a save state from a run without the
-//!   fix, has built its tables the old way, and patching the rest could
-//!   make things worse; it stays as it is until the game starts again.
+//!   patches every copy where every piece is there as the game shipped
+//!   it. A fix that changes what the driver builds as it sets up also
+//!   needs the driver's IRQ handler to be out of the interrupt table. A
+//!   driver that is already set up, as in a save state from a run without
+//!   the fix, has built its tables the old way, and patching the rest
+//!   could make things worse; it stays as it is until the game starts
+//!   again.
 //! - [`Kind::SkipAtExec`]: a program by name, which DOS's EXEC doesn't run
 //!   but answers as if it had, with an exit code.
 //!
@@ -60,8 +62,10 @@ pub struct CodePatch {
     /// Code that has to be there, unchanged, besides the patches' own.
     pub checks: &'static [Bytes],
     /// Where the driver's IRQ handler starts: once an interrupt vector
-    /// points there, the driver is set up and isn't patched.
-    pub irq_handler: usize,
+    /// points there, the driver is set up and isn't patched. None for
+    /// patches that don't depend on what the driver set up, which can go
+    /// in at any time.
+    pub irq_handler: Option<usize>,
     /// What to change: the bytes there now, and what replaces them (of
     /// the same length). The first is what the search looks for.
     pub patches: &'static [(Bytes, &'static [u8])],
@@ -126,7 +130,7 @@ const PREHISTORIK_2_SB_MIX: CodePatch = CodePatch {
             bytes: &[0x50, 0x53, 0x51, 0x52],
         },
     ],
-    irq_handler: 0x204D,
+    irq_handler: Some(0x204D),
     patches: &[
         // The volume table: from
         //   xor ch,ch / mov al,cl / mul ch / shr ax,1 (6 times) / stosb /
@@ -211,7 +215,7 @@ const JUKEBOX_SB_MIX: CodePatch = CodePatch {
             bytes: &[0x50, 0x53, 0x51, 0x52],
         },
     ],
-    irq_handler: 0x444B,
+    irq_handler: Some(0x444B),
     patches: &[
         // The volume table: from
         //   xor ch,ch / mov al,cl / mul ch / shr ax,6 / stosb / inc ch /
@@ -278,8 +282,13 @@ const JUKEBOX_SB_MIX: CodePatch = CodePatch {
 /// game hangs about 75 s after the title screen comes up. Prehistorik 2's
 /// player, the same engine, has no such check. Found in BLUES.EXE of
 /// 25096 bytes, MD5 4e4e60dbc63bdd867f7ff65725b7e8b4 (TOSEC's [h1]
-/// release, the only one to hand); a fix of its own, so it can go if a
-/// release without the loop turns up.
+/// release, the only one to hand), which is Razor 1911's crack: the
+/// loop comes out of the PKLITE unpacker as it is, and whether the
+/// original release has it is unknown. A fix of its own, so it can go if
+/// it turns out to be the crack's.
+///
+/// Taking out the `je` doesn't depend on anything the driver set up, so
+/// it goes in whenever the code is found, a set-up driver too.
 const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
     checks: &[
         // mov ax,[di+393h] / mov bl,ah / xor bh,bh: the effect's number.
@@ -297,7 +306,7 @@ const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
             bytes: &[0x50, 0x53, 0x51, 0x52],
         },
     ],
-    irq_handler: 0x444B,
+    irq_handler: None,
     // cmp bx,0Bh / je -5 (to the cmp) loses the je.
     patches: &[(
         Bytes {
@@ -381,8 +390,9 @@ fn has(ram: &[u8], base: usize, b: &Bytes) -> bool {
 }
 
 /// The code fixes that `enabled` lets through whose code is in `ram`
-/// (conventional memory), unpatched and not yet set up: each with its
-/// code and the linear address of its code segment.
+/// (conventional memory), unpatched and, where it matters, not yet set
+/// up: each with its code and the linear address of its code segment,
+/// once for every copy.
 pub fn find_code(
     ram: &[u8],
     enabled: impl Fn(&Fix) -> bool,
@@ -411,15 +421,14 @@ pub fn find_code(
             continue;
         };
         // A match's index in what follows `first.at` is the base it would
-        // be at.
-        let base = finder.find_iter(after).find(|&base| {
+        // be at. Every copy, so that one left in a buffer below the code
+        // that runs doesn't take its place.
+        let bases = finder.find_iter(after).filter(|&base| {
             code.checks.iter().all(|b| has(ram, base, b))
                 && code.patches.iter().all(|(old, _)| has(ram, base, old))
-                && !set_up(ram, base + code.irq_handler)
+                && !code.irq_handler.is_some_and(|at| set_up(ram, base + at))
         });
-        if let Some(base) = base {
-            found.push((fix, *code, base));
-        }
+        found.extend(bases.map(|base| (fix, *code, base)));
     }
     found
 }
@@ -554,13 +563,28 @@ mod tests {
             let mut ram = memory(code, base);
             // IRQ 7's vector (int 0Fh) at the handler, as 5DA0:offset.
             let vector = 0x0F * 4;
-            let offset = code.irq_handler as u16;
+            let offset = code.irq_handler.unwrap_or(0x444B) as u16;
             ram[vector..vector + 2].copy_from_slice(&offset.to_le_bytes());
             ram[vector + 2..vector + 4].copy_from_slice(&0x5DA0u16.to_le_bytes());
-            assert!(
-                find_code(&ram, |_| true).is_empty(),
-                "{} found once set up",
-                fix.name
+            // A patch that doesn't depend on the set-up still goes in.
+            let want = if code.irq_handler.is_some() {
+                vec![]
+            } else {
+                vec![(fix.name, base)]
+            };
+            assert_eq!(names(&find_code(&ram, |_| true)), want, "{}", fix.name);
+        }
+    }
+
+    #[test]
+    fn finds_every_copy() {
+        for (fix, code) in codes() {
+            let mut ram = memory(code, 0x1_0000);
+            let other = memory(code, 0x4_0000);
+            ram[0x4_0000..].copy_from_slice(&other[0x4_0000..]);
+            assert_eq!(
+                names(&find_code(&ram, |_| true)),
+                [(fix.name, 0x1_0000), (fix.name, 0x4_0000)]
             );
         }
     }

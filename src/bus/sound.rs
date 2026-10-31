@@ -113,7 +113,8 @@ impl Bus {
     /// memory, as a program resets the DSP.
     pub(super) fn apply_code_fixes(&mut self) {
         let end = self.ram.len().min(0xA0000);
-        let found = crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
+        let found =
+            crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
         for (fix, code, base) in found {
             for (addr, byte) in crate::game_fixes::writes(code, base) {
                 self.write_8(addr, byte);

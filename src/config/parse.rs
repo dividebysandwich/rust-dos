@@ -388,7 +388,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             let names = super::settings::fix_names(value);
                             for name in &names {
                                 if crate::game_fixes::by_name(name).is_none() {
-                                    warn(format!("game_fixes_off: no game fix is called '{}'", name));
+                                    warn(format!("game_fixes_off: no game fix is called '{name}'"));
                                 }
                             }
                             config.game_fixes_off = Some(names);
