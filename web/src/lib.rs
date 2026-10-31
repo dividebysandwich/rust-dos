@@ -162,10 +162,11 @@ pub struct Machine {
     sound: Rc<RefCell<Sound>>,
     /// The video card's picture, rendered where it changed.
     picture: Frame,
-    /// The picture with the cursors on top, as last shown and as it is
-    /// being put together.
+    /// Persistent composition, including current overlay coverage.
     screen: Frame,
+    /// RGBA snapshot last published to the page.
     next: Frame,
+    composition: video::compose::Composition,
     xbrz_frame: shader::XbrzFrame,
     xbrz_overlay: bool,
     /// Whether `screen` has been composed once, so the page has a
@@ -241,6 +242,7 @@ impl Machine {
             picture: blank.clone(),
             screen: blank.clone(),
             next: blank,
+            composition: video::compose::Composition::default(),
             xbrz_frame: shader::XbrzFrame::default(),
             xbrz_overlay: false,
             composed: false,
@@ -485,6 +487,16 @@ impl Machine {
     /// Revision of the native shader input, independent of overlays.
     pub fn shader_revision(&self) -> u32 {
         self.xbrz_frame.source_revision()
+    }
+
+    /// Pointer to x/y/width/height source rectangles at `shader_revision`.
+    pub fn shader_damage(&self) -> *const u32 {
+        self.xbrz_frame.source_damage().rects().as_ptr().cast()
+    }
+
+    /// Number of source rectangles, with four u32 values each.
+    pub fn shader_damage_count(&self) -> u32 {
+        self.xbrz_frame.source_damage().rects().len() as u32
     }
 
     /// Revision of the composed overlay texture.
@@ -1133,59 +1145,76 @@ impl Machine {
         if self.picture.resize(width, height) {
             bus.vga.mark_dirty_full();
         }
-        if bus.vga.dirty {
-            video::render_screen(&mut self.picture, bus);
+        let base_rows = if bus.vga.dirty {
+            let rows = video::render_screen_rows(&mut self.picture, bus);
             bus.vga.clear_dirty();
-        }
-        self.next.track_overlays(xbrz);
-        self.next.clone_from(&self.picture);
-        video::overlay::draw_cursors(&mut self.next, bus, self.cursor_visible);
-        video::mono::apply(&mut self.next, self.settings.monochrome);
+            rows
+        } else {
+            0..0
+        };
+        self.screen.track_overlays(xbrz);
+        let overlay_rows = if self.ui.is_open() || self.ui.overlay_shown() || !self.osd.is_empty() {
+            0..height as usize
+        } else {
+            video::overlay::cursor_rows(&self.picture, bus, self.cursor_visible)
+        };
+        let candidates = self.composition.restore(
+            &mut self.screen,
+            &self.picture,
+            base_rows.clone(),
+            overlay_rows,
+            self.settings.monochrome,
+        );
+        video::overlay::draw_cursors(&mut self.screen, bus, self.cursor_visible);
+        video::mono::apply_rows(
+            &mut self.screen,
+            self.settings.monochrome,
+            candidates.clone(),
+        );
         if self.ui.is_open() {
             self.ui.set_mixer_status(bus.mixer.muted, bus.mixer.take_peaks());
         }
         if self.ui.is_open() || self.ui.overlay_shown() {
             self.ui.set_stats(self.stats.view());
         }
-        self.ui.draw(&mut self.next);
-        self.ui.draw_overlay(&mut self.next);
-        self.osd.draw(&mut self.next);
+        self.ui.draw(&mut self.screen);
+        self.ui.draw_overlay(&mut self.screen);
+        self.osd.draw(&mut self.screen);
         let same_size =
             (self.next.width, self.next.height) == (self.screen.width, self.screen.height);
-        let screen_rows = if !xbrz {
-            0..0
-        } else if !same_size {
-            0..self.next.height as usize
-        } else if self.next.width == 0 {
-            0..0
+        let screen_rows = if !same_size {
+            0..height as usize
         } else {
-            video::changed_rows(&self.screen.rgba, &self.next.rgba, self.next.width as usize * 4)
-                .unwrap_or(0..0)
+            video::changed_rows_in(
+                &self.next.rgba,
+                &self.screen.rgba,
+                width as usize * 4,
+                candidates.clone(),
+            )
+            .unwrap_or(0..0)
         };
-        let same = same_size
-            && if xbrz {
-                screen_rows.is_empty()
-            } else {
-                self.next.rgba == self.screen.rgba
-            };
         let shader_changed = if xbrz {
-            let (visible, shader_changed, _) = self.xbrz_frame.prepare(
-                &self.next,
+            let (visible, shader_changed, _) = self.xbrz_frame.prepare_rows(
+                &self.screen,
                 Some(&self.picture),
                 self.settings.monochrome,
-                screen_rows,
+                base_rows,
+                candidates,
             );
             self.xbrz_overlay = visible;
             shader_changed
         } else {
-            self.xbrz_frame.invalidate_overlay();
+            self.xbrz_frame.invalidate();
             self.xbrz_overlay = false;
             false
         };
-        if same && self.composed {
+        if same_size && screen_rows.is_empty() && self.composed {
             return shader_changed;
         }
-        std::mem::swap(&mut self.next, &mut self.screen);
+        // The persistent composition keeps coverage; this snapshot is
+        // only the bytes last published to the page.
+        self.next.resize(width, height);
+        self.next.copy_rows_from(&self.screen, screen_rows);
         self.composed = true;
         true
     }
@@ -1681,6 +1710,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn persistent_composition_matches_full_after_dirty_rows_and_mode_changes() {
+        let mut m = Machine::new("[emulator]\nshader=xbrz\n", "");
+        m.set_shaders_available(true);
+        for step in 0..40 {
+            if step % 10 == 0 {
+                rust_dos::interrupts::int10::set_mode(
+                    &mut m.cpu,
+                    if step % 20 == 0 { 3 } else { 0x13 },
+                );
+            }
+            if step % 2 == 0 {
+                let address = if step / 10 % 2 == 0 { 0xb8000 } else { 0xa0000 };
+                m.cpu.bus.write_8(address + step * 13, (step * 17) as u8);
+            }
+            m.cursor_visible = step % 2 == 0;
+            m.last_blink = Instant::now();
+            m.settings.monochrome = Monochrome::ALL[step / 4 % 4];
+            m.settings.shader = if step % 7 == 0 {
+                Shader::None
+            } else {
+                Shader::Xbrz
+            };
+            if step % 3 == 0 {
+                m.osd.show("Composition test");
+            } else {
+                m.osd = Osd::new();
+            }
+            m.render();
+            let mut expected = m.picture.clone();
+            video::overlay::draw_cursors(&mut expected, &m.cpu.bus, m.cursor_visible);
+            video::mono::apply(&mut expected, m.settings.monochrome);
+            m.ui.draw(&mut expected);
+            m.ui.draw_overlay(&mut expected);
+            m.osd.draw(&mut expected);
+            assert_eq!(
+                m.screen
+                    .rgba
+                    .iter()
+                    .zip(&expected.rgba)
+                    .position(|(a, b)| a != b),
+                None,
+                "step {step}"
+            );
+            if m.shown_shader() == Shader::Xbrz {
+                let mut reference = shader::XbrzFrame::default();
+                reference.prepare(
+                    &m.screen,
+                    Some(&m.picture),
+                    m.settings.monochrome,
+                    0..m.screen.height as usize,
+                );
+                for (actual, expected) in [
+                    (&m.xbrz_frame.source.rgba, &reference.source.rgba),
+                    (&m.xbrz_frame.overlay.rgba, &reference.overlay.rgba),
+                ] {
+                    assert_eq!(actual.iter().zip(expected).position(|(a, b)| a != b), None);
+                }
+                assert_eq!(
+                    m.shader_damage_count() as usize,
+                    m.xbrz_frame.source_damage().rects().len()
+                );
+                assert_eq!(
+                    m.shader_damage(),
+                    m.xbrz_frame.source_damage().rects().as_ptr().cast()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn immediate_shader_refresh_prepares_a_new_video_mode() {
         let mut m = Machine::new("[emulator]\nshader=xbrz\n", "");
         m.set_shaders_available(true);
@@ -1711,14 +1810,13 @@ mod tests {
         m.settings.shader = Shader::Xbrz;
         m.render();
         let mut expected = shader::XbrzFrame::default();
-        // RGBA is unchanged on resume, so render keeps the screen buffer;
-        // next carries the freshly drawn coverage for the same pixels.
+        // Resuming must recover coverage even when RGBA is unchanged.
         assert!(m.screen.rgba == m.next.rgba);
         expected.prepare(
-            &m.next,
+            &m.screen,
             Some(&m.picture),
             m.settings.monochrome,
-            0..m.next.height as usize,
+            0..m.screen.height as usize,
         );
         assert_ne!(expected.overlay.rgba, previous);
         let first_difference = m
