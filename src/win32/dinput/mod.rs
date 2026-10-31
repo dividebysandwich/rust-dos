@@ -40,6 +40,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: VTABLES,
 };
 
