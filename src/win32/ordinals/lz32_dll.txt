@@ -1,0 +1,12 @@
+1 LZCopy
+2 LZOpenFileA
+3 LZInit
+4 LZSeek
+5 LZRead
+6 LZClose
+7 LZStart
+8 CopyLZFile
+9 LZDone
+10 GetExpandedNameA
+11 LZOpenFileW
+12 GetExpandedNameW

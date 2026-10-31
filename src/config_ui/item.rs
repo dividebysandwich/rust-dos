@@ -191,6 +191,8 @@ pub(super) enum Item {
     VersionCheck,
     /// Ask almanac.rust-dos.com for a program's settings as it starts.
     AlmanacAuto,
+    /// The fixes for particular games (`game_fixes`, game_fixes.rs).
+    GameFixes,
     /// The almanac's settings for the game, to pick from, and a report of
     /// the settings it plays with (almanac.rs).
     AlmanacFetch,
@@ -404,6 +406,7 @@ impl Item {
             SaveShellHistory => "Save shell history",
             VersionCheck => "Check for new versions",
             AlmanacAuto => "Auto-apply Almanac settings",
+            GameFixes => "Game fixes",
             AlmanacFetch => "Fetch settings from Almanac...",
             AlmanacReport => "Report settings to Almanac...",
             Rewind => "Rewind (Alt+F11)",
@@ -875,6 +878,7 @@ impl Item {
             SaveShellHistory => on_off(s.shell.save_history),
             VersionCheck => on_off(s.version_check),
             AlmanacAuto => on_off(s.almanac_auto),
+            GameFixes => on_off(s.game_fixes),
             AlmanacFetch | AlmanacReport => String::new(),
             Rewind => on_off(s.rewind),
             RewindMemory => format!("{} MB", s.rewind_memory),

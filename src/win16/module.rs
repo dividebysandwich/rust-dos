@@ -18,12 +18,42 @@ use rust_dos_ne as ne;
 /// constant's selector.
 const CONSTANT_SEL: u16 = 0xFFFF;
 
+/// The loader's errors LoadLibrary returns, below 32: the file (or one
+/// it imports from) wasn't found, or isn't a Windows module it can load.
+pub const ERROR_FILE_NOT_FOUND: u32 = 2;
+pub const ERROR_BAD_FORMAT: u32 = 11;
+
+/// Why a module didn't load: the error LoadLibrary returns for it, and
+/// the message to log or show.
+#[derive(Clone, Debug)]
+pub struct LoadError {
+    pub code: u32,
+    pub message: String,
+}
+
+impl LoadError {
+    fn new(code: u32, message: String) -> LoadError {
+        LoadError { code, message }
+    }
+}
+
+impl From<LoadError> for String {
+    fn from(e: LoadError) -> String {
+        e.message
+    }
+}
+
 /// Load the module `name` (a module name, or a file's name or path) for
 /// the module in the directory `dir`: one loaded already, its count
 /// raised, a system module, or the file found where Windows 3.1 looks.
 /// Its place in `State::modules`, and the libraries loaded with it whose
 /// entry points are yet to run, in the order they are to run in.
-pub fn load(cpu: &mut Cpu, name: &str, dir: &str, inits: &mut Vec<usize>) -> Result<usize, String> {
+pub fn load(
+    cpu: &mut Cpu,
+    name: &str,
+    dir: &str,
+    inits: &mut Vec<usize>,
+) -> Result<usize, LoadError> {
     let file_name = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
     let module_name = file_name
         .split('.')
@@ -31,6 +61,19 @@ pub fn load(cpu: &mut Cpu, name: &str, dir: &str, inits: &mut Vec<usize>) -> Res
         .unwrap_or(file_name)
         .to_ascii_uppercase();
     let has_path = name.contains(['\\', '/', ':']);
+    // A system module is found by its file's name too, which may differ
+    // from its module's (KRNL386.EXE is KERNEL), as Windows finds it.
+    let builtin = builtin::find(file_name).filter(|_| !has_path);
+    let module_name = builtin.map_or(module_name, |i| {
+        builtin::MODULES[i].name.to_ascii_uppercase()
+    });
+    let by_file = |m: &Module16| {
+        file_name.contains('.')
+            && m.path
+                .rsplit(['\\', '/', ':'])
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case(file_name))
+    };
     if !has_path
         && let Some(i) = cpu
             .bus
@@ -38,12 +81,12 @@ pub fn load(cpu: &mut Cpu, name: &str, dir: &str, inits: &mut Vec<usize>) -> Res
             .win16
             .modules
             .iter()
-            .position(|m| m.name == module_name)
+            .position(|m| m.name == module_name || by_file(m))
     {
         cpu.bus.win32.win16.modules[i].refs += 1;
         return Ok(i);
     }
-    if let Some(index) = builtin::find(&module_name).filter(|_| !has_path) {
+    if let Some(index) = builtin {
         let image = builtin::image(cpu, index);
         let path = format!(
             "{}\\{}",
@@ -53,7 +96,10 @@ pub fn load(cpu: &mut Cpu, name: &str, dir: &str, inits: &mut Vec<usize>) -> Res
         return load_file(cpu, image, &path, Some(index as u16), inits);
     }
     let Some((path, file)) = find_file(cpu, name, dir) else {
-        return Err(format!("{} can't be found.", file_name));
+        return Err(LoadError::new(
+            ERROR_FILE_NOT_FOUND,
+            format!("{} can't be found.", file_name),
+        ));
     };
     // A module of that name may be loaded already from another path.
     if let Ok(parsed) = ne::Module::parse(&file) {
@@ -133,25 +179,26 @@ pub fn load_file(
     path: &str,
     builtin: Option<u16>,
     inits: &mut Vec<usize>,
-) -> Result<usize, String> {
+) -> Result<usize, LoadError> {
     let file_name = path
         .rsplit(['\\', '/', ':'])
         .next()
         .unwrap_or(path)
         .to_string();
-    let parsed =
-        ne::Module::parse(&file).map_err(|e| format!("{} can't be loaded: {}.", file_name, e))?;
+    let bad = |message: String| LoadError::new(ERROR_BAD_FORMAT, message);
+    let parsed = ne::Module::parse(&file)
+        .map_err(|e| bad(format!("{} can't be loaded: {}.", file_name, e)))?;
     if parsed.flags & ne::LINKERROR != 0 {
-        return Err(format!("{} has errors the linker found.", file_name));
+        return Err(bad(format!("{} has errors the linker found.", file_name)));
     }
     if parsed.target_os == ne::OS_OS2 {
-        return Err(format!("{} is an OS/2 program.", file_name));
+        return Err(bad(format!("{} is an OS/2 program.", file_name)));
     }
     if parsed.flags & ne::SELFLOAD != 0 {
-        return Err(format!(
+        return Err(bad(format!(
             "{} loads its own segments, which the built-in Windows doesn't support yet.",
             file_name
-        ));
+        )));
     }
     // A segment flagged 32-bit (`ne::SEG_32BIT`) loads as a 16-bit one,
     // as Windows 3.1 and 95 load it. The programs that have one, such as
@@ -241,12 +288,13 @@ pub fn load_file(
     for dep in &parsed.module_refs {
         match load(cpu, dep, &dir, inits) {
             Ok(i) => deps.push(cpu.bus.win32.win16.modules[i].handle),
-            Err(message) => {
+            Err(e) => {
                 for h in deps {
                     release(cpu, h);
                 }
                 unload(cpu, index);
-                return Err(format!("{} needs {}: {}", file_name, dep, message));
+                let message = format!("{} needs {}: {}", file_name, dep, e.message);
+                return Err(LoadError::new(e.code, message));
             }
         }
     }
@@ -290,8 +338,16 @@ pub fn load_file(
     Ok(index)
 }
 
-fn out_of_memory(name: &str) -> String {
-    format!("There isn't enough memory to load {}.", name)
+fn out_of_memory(name: &str) -> LoadError {
+    let message = format!("There isn't enough memory to load {}.", name);
+    LoadError::new(ERROR_BAD_FORMAT, message)
+}
+
+/// The handle 16-bit code gets for the module at `index`, which
+/// LoadLibrary returns: a library's instance, or the module's handle.
+pub fn instance_of(cpu: &Cpu, index: usize) -> u16 {
+    let m = &cpu.bus.win32.win16.modules[index];
+    if m.dgroup != 0 { m.dgroup } else { m.handle }
 }
 
 /// The block of a system module's code segment: whole pages of their
