@@ -1515,15 +1515,20 @@ pub fn get_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(surface_of(cpu, this));
-    let words = if super::version(vtable) >= 4 { 4 } else { 1 };
-    if caps_at == 0 || !cpu.bus.guest_probe(caps_at, 4 * words, false) {
+    // IDirectDrawSurface4 takes a DDSCAPS2 as 7 does, but only 7 looks past
+    // its first word: DirectX 6 programs that fill in dwCaps alone, like
+    // Omikron with a DDSCAPS2 on its stack, leave garbage in the others.
+    let version = super::version(vtable);
+    let readable = if version >= 4 { 4 } else { 1 };
+    let compared = if version >= 7 { 4 } else { 1 };
+    if caps_at == 0 || !cpu.bus.guest_probe(caps_at, 4 * readable, false) {
         return Some(DDERR_INVALIDPARAMS);
     }
     if out == 0 || !cpu.bus.guest_probe(out, 4, true) {
         return Some(DDERR_INVALIDPARAMS);
     }
     let mut caps = [0; 4];
-    for (i, c) in caps.iter_mut().take(words).enumerate() {
+    for (i, c) in caps.iter_mut().take(compared).enumerate() {
         *c = cpu.bus.guest_read_32(caps_at + 4 * i as u32);
     }
     cpu.bus.guest_write_32(out, 0);
@@ -1535,8 +1540,8 @@ pub fn get_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Flip.
 
-const DDFLIP_WAIT: u32 = 0x1;
-const DDFLIP_NOVSYNC: u32 = 0x8;
+pub const DDFLIP_WAIT: u32 = 0x1;
+pub const DDFLIP_NOVSYNC: u32 = 0x8;
 
 /// The surfaces of the flip chain whose front buffer is `front`, the
 /// front first.

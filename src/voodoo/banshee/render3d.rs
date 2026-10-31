@@ -137,6 +137,7 @@ impl Voodoo {
     /// their strides: the colour buffer is the same whichever fbzMode
     /// and lfbMode pick.
     pub(crate) fn banshee_buffers(&mut self) {
+        self.blt_queue_stale();
         let col = self.reg[COL_BUFFER_ADDR] & 0xFF_FFF0;
         let aux = self.reg[AUX_BUFFER_ADDR] & 0xFF_FFF0;
         let (col_stride, aux_stride) = (

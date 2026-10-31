@@ -109,6 +109,28 @@ impl Bus {
         }
     }
 
+    /// Apply the code fixes (`game_fixes`) whose code is in conventional
+    /// memory, as a program resets the DSP.
+    pub(super) fn apply_code_fixes(&mut self) {
+        let end = self.ram.len().min(0xA0000);
+        let found =
+            crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
+        for (fix, code, base) in found {
+            for (addr, byte) in crate::game_fixes::writes(code, base) {
+                self.write_8(addr, byte);
+            }
+            self.log_string(&format!(
+                "[game fix] {}: {} ({}): code at {:05X} patched",
+                fix.name, fix.game, fix.reason, base
+            ));
+        }
+    }
+
+    /// Whether the `game_fixes` settings let `fix` apply.
+    pub fn game_fix_enabled(&self, fix: &crate::game_fixes::Fix) -> bool {
+        crate::game_fixes::enabled(fix, self.game_fixes, &self.game_fixes_off)
+    }
+
     /// The Sound Blaster's resources now, as a BLASTER string: the base,
     /// IRQ and DMA channels a Plug and Play configuration or the SB16's
     /// mixer (80h and 81h) moved it to, with a line it has none of left
