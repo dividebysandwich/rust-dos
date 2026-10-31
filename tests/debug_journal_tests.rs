@@ -162,14 +162,20 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         assert!(Instant::now() < deadline, "the shader test window opens");
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert!(
-        Command::new("xdotool")
-            .args(["key", "--window", &window, "ctrl+F5"])
-            .status()
-            .unwrap()
-            .success()
-    );
+    // A window that is visible may not be taking keys yet, and xdotool's
+    // key is lost then, so it goes again until a screenshot appears.
+    let mut next_key = Instant::now();
     let capture = loop {
+        if Instant::now() >= next_key {
+            assert!(
+                Command::new("xdotool")
+                    .args(["key", "--window", &window, "ctrl+F5"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            next_key = Instant::now() + Duration::from_secs(1);
+        }
         if let Ok(entries) = std::fs::read_dir(dir.join("captures"))
             && let Some(path) = entries
                 .filter_map(Result::ok)
