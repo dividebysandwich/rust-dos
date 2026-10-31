@@ -139,6 +139,8 @@ const PALETTE: u32 = 0x10;
 const CLIPPER: u32 = 0x14;
 const OFFSCREEN: u32 = 0x18;
 const SOURCE: u32 = 0x1C;
+/// FRONT's other interface, from QueryInterface.
+const QUERIED: u32 = 0x20;
 /// The HRESULTs of the calls, in order.
 const RESULTS: u32 = 0x40;
 const DONE: u32 = 0xC0;
@@ -262,6 +264,7 @@ const DD_GET_SCAN_LINE: u32 = 16;
 const DD_SET_COOPERATIVE_LEVEL: u32 = 20;
 const DD_SET_DISPLAY_MODE: u32 = 21;
 const DD_WAIT_FOR_VERTICAL_BLANK: u32 = 22;
+const S_QUERY_INTERFACE: u32 = 0;
 const S_ADD_ATTACHED_SURFACE: u32 = 3;
 const S_BLT: u32 = 5;
 const S_FLIP: u32 = 11;
@@ -368,9 +371,9 @@ fn start(
     )
 }
 
-/// Full screen: a 320x200 8-bit mode, a flip chain, a pixel written to
-/// the back buffer through Lock and a flip that shows it.
-fn fullscreen_program() -> (Vec<u8>, u32) {
+/// The data of a program that makes a flip chain: its description at
+/// DESC.
+fn flip_chain_data() -> Vec<u8> {
     let mut d = data();
     desc(
         &mut d,
@@ -381,32 +384,45 @@ fn fullscreen_program() -> (Vec<u8>, u32) {
         0,
         1,
     );
+    d
+}
+
+/// A window, a DirectDraw object, a 320x200 8-bit mode and the flip
+/// chain of flip_chain_data, its front buffer at FRONT.
+fn start_flip_chain(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    start(a, l, c, (0, 0, 320, 200))?;
+    c.com(
+        a,
+        l,
+        DD,
+        DD_SET_COOPERATIVE_LEVEL,
+        &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+    )?;
+    c.com(
+        a,
+        l,
+        DD,
+        DD_SET_DISPLAY_MODE,
+        &[Arg::I(320), Arg::I(200), Arg::I(8)],
+    )?;
+    c.com(
+        a,
+        l,
+        DD,
+        DD_CREATE_SURFACE,
+        &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
+    )
+}
+
+/// Full screen: a 320x200 8-bit mode, a flip chain, a pixel written to
+/// the back buffer through Lock and a flip that shows it.
+fn fullscreen_program() -> (Vec<u8>, u32) {
+    let mut d = flip_chain_data();
     put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
     put32(&mut d, LOCKED, 108);
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        start(a, l, &mut c, (0, 0, 320, 200))?;
-        c.com(
-            a,
-            l,
-            DD,
-            DD_SET_COOPERATIVE_LEVEL,
-            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
-        )?;
-        c.com(
-            a,
-            l,
-            DD,
-            DD_SET_DISPLAY_MODE,
-            &[Arg::I(320), Arg::I(200), Arg::I(8)],
-        )?;
-        c.com(
-            a,
-            l,
-            DD,
-            DD_CREATE_SURFACE,
-            &[Arg::At(DESC), Arg::At(FRONT), Arg::I(0)],
-        )?;
+        start_flip_chain(a, l, &mut c)?;
         c.com(
             a,
             l,
@@ -430,6 +446,101 @@ fn fullscreen_program() -> (Vec<u8>, u32) {
         c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(1)])?;
         finish(a, l)
     })
+}
+
+const IID_IDIRECTDRAWSURFACE4: [u8; 16] = [
+    0x30, 0x86, 0x2B, 0x0B, 0x35, 0xAD, 0xD0, 0x11, 0x8E, 0xA6, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B,
+];
+
+const IID_IDIRECTDRAWSURFACE7: [u8; 16] = [
+    0x80, 0x5A, 0x67, 0x06, 0x9B, 0x3B, 0xD2, 0x11, 0xB9, 0x2F, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B,
+];
+
+/// DDSCAPS2's last three words as a program that fills in dwCaps alone
+/// leaves them: the first two are what Omikron's stack holds there.
+const CAPS_GARBAGE: [u32; 3] = [0x1E0, 0x0090_E18C, 0x0012_FF80];
+/// A second DDSCAPS2, after the one at CAPS.
+const ZBUFFER_CAPS: u32 = CAPS + 0x10;
+const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
+const DDERR_NOTFOUND: u32 = 0x8876_00FF;
+
+/// A flip chain whose primary surface is asked through the interface
+/// `iid` for its back buffer and then for a Z-buffer it doesn't have,
+/// each with `after_caps` as the DDSCAPS2's last three words.
+fn attached_caps_program(iid: &[u8; 16], after_caps: [u32; 3]) -> (Vec<u8>, u32) {
+    let mut d = flip_chain_data();
+    put(&mut d, IID, iid);
+    for (at, caps) in [(CAPS, DDSCAPS_BACKBUFFER), (ZBUFFER_CAPS, DDSCAPS_ZBUFFER)] {
+        put32(&mut d, at, caps);
+        for (i, word) in after_caps.iter().enumerate() {
+            put32(&mut d, at + 4 + 4 * i as u32, *word);
+        }
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start_flip_chain(a, l, &mut c)?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            S_QUERY_INTERFACE,
+            &[Arg::At(IID), Arg::At(QUERIED)],
+        )?;
+        c.com(
+            a,
+            l,
+            QUERIED,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(CAPS), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            QUERIED,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(ZBUFFER_CAPS), Arg::At(OFFSCREEN)],
+        )?;
+        finish(a, l)
+    })
+}
+
+/// The results of attached_caps_program's calls after the window's, and
+/// the pointer to the back buffer that it got.
+fn attached_caps_results(test: &str, iid: &[u8; 16], after_caps: [u32; 3]) -> (Vec<u32>, u32) {
+    let (program, data) = attached_caps_program(iid, after_caps);
+    let mut cpu = machine(test, program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 8)[1..].to_vec();
+    (results, peek(&cpu, data + BACK))
+}
+
+/// IDirectDrawSurface4 compares dwCaps and doesn't look at the rest.
+#[test]
+fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
+    let (results, back) =
+        attached_caps_results("attached_caps4", &IID_IDIRECTDRAWSURFACE4, CAPS_GARBAGE);
+    assert_eq!(results, [0, 0, 0, 0, 0, 0, DDERR_NOTFOUND]);
+    assert_ne!(back, 0);
+}
+
+/// IDirectDrawSurface7 compares all four words: with the last three
+/// clear it finds the back buffer, and garbage in any one of them finds
+/// nothing.
+#[test]
+fn surface7_looks_at_all_the_words_of_the_caps_for_an_attached_surface() {
+    let (results, back) =
+        attached_caps_results("attached_caps7_clear", &IID_IDIRECTDRAWSURFACE7, [0; 3]);
+    assert_eq!(results, [0, 0, 0, 0, 0, 0, DDERR_NOTFOUND]);
+    assert_ne!(back, 0);
+    for (i, word) in CAPS_GARBAGE.into_iter().enumerate() {
+        let mut after_caps = [0; 3];
+        after_caps[i] = word;
+        let test = format!("attached_caps7_word{i}");
+        let (results, back) = attached_caps_results(&test, &IID_IDIRECTDRAWSURFACE7, after_caps);
+        let expected = [0, 0, 0, 0, 0, DDERR_NOTFOUND, DDERR_NOTFOUND];
+        assert_eq!(results, expected, "garbage in word {i} after dwCaps");
+        assert_eq!(back, 0);
+    }
 }
 
 #[test]
