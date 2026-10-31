@@ -124,6 +124,15 @@ pub fn read(cpu: &Cpu, system: u32, selector: u16) -> u64 {
     cpu.bus.read_32(at) as u64 | (cpu.bus.read_32(at + 4) as u64) << 32
 }
 
+/// Write the descriptor bits of `selector` and nothing else: no segment
+/// register changes. Used where Windows drops a selector without the
+/// DPMI free path (GlobalReAlloc shrinking its block).
+pub fn write_desc(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
+    let at = entry_phys(system, selector);
+    cpu.bus.write_32(at, desc as u32);
+    cpu.bus.write_32(at + 4, (desc >> 32) as u32);
+}
+
 /// Write the descriptor of `selector`. A data or stack segment register
 /// that holds it takes the new descriptor, as the DPMI host of Windows
 /// reloads them: VBRUN300 grows its DGROUP with GlobalReAlloc and moves
@@ -134,9 +143,7 @@ pub fn read(cpu: &Cpu, system: u32, selector: u16) -> u64 {
 /// ES, which its next function pushes and pops. A context saved before
 /// the free gets 0 for it when it is loaded (`system::load_context`).
 pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
-    let at = entry_phys(system, selector);
-    cpu.bus.write_32(at, desc as u32);
-    cpu.bus.write_32(at + 4, (desc >> 32) as u32);
+    write_desc(cpu, system, selector, desc);
     if !cpu.pe() || cpu.v86() {
         return;
     }
