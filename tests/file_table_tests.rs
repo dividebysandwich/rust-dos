@@ -196,6 +196,18 @@ fn force_duplicate_points_standard_output_at_a_file() {
 }
 
 #[test]
+fn a_console_write_clears_a_carry_the_caller_had_set() {
+    let mut cpu = machine("console_write_carry");
+    let con = open(&mut cpu, "CON", 2).unwrap();
+    for handle in [1, 2, con] {
+        for count in [2, 0] {
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+            assert_eq!(dos(&mut cpu, 0x4000, handle, count, 0x200), Ok(count));
+        }
+    }
+}
+
+#[test]
 fn a_child_psp_inherits_handles_but_not_those_opened_not_to_be() {
     let mut cpu = machine("child_psp");
     let parent = cpu.current_psp;

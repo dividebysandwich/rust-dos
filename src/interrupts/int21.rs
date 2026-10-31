@@ -1481,11 +1481,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if cpu.bus.guest_faulted() {
                 return;
             }
-            match write_open_file(cpu, handle, sft, &data) {
-                // The screen's writes leave CF as it was.
-                Ok(written) if console => cpu.set_ax(written),
-                result => set_result(cpu, result),
-            }
+            let result = write_open_file(cpu, handle, sft, &data);
+            set_result(cpu, result);
         }
 
         // AH = 42h: Move File Pointer
