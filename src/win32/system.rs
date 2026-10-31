@@ -5,10 +5,23 @@
 //! under Windows 95, and exceptions.
 //!
 //! The tables are in a block of the process's memory mapped at the start
-//! of the system arena (`SYSTEM_BLOCK`), and the IDT's gates lead to
-//! service traps in the ROM, run at level 0 on the TSS's stack.
+//! of the system arena (`SYSTEM_BLOCK`). Each of the IDT's gates leads to
+//! a handler in the block that jumps to the vector's service trap in the
+//! ROM, run at level 0 on the TSS's stack.
+//!
+//! As on Windows 95 and 98, the program can read and write the block:
+//! there the system arena's pages are open to level 3, and programs use
+//! that. Copy protections such as SafeDisc's find the IDT with SIDT,
+//! write a few instructions over the handler of an exception's gate and
+//! raise the exception to run their own code at level 0, then put the
+//! handler back. So each gate leads to a handler of its own in the block,
+//! a jump to the vector's trap, which a program can change and put back
+//! as it could the system's handler. The handlers are 32 bytes apart,
+//! room for code like SafeDisc's (which clears five debug registers), so
+//! that it doesn't run into the next vectors' handlers while it is
+//! there: the timer's (vector 8) is a few after the exceptions'.
 
-use super::memory::{Memory, PAGE, SYSTEM, WRITABLE};
+use super::memory::{Memory, PAGE, SYSTEM, USER, WRITABLE};
 use super::{Context, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
 use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache};
 use crate::dpmi::descriptor;
@@ -27,7 +40,12 @@ pub const LDT_OFFSET: u32 = LDT;
 pub const LDT_ENTRIES: u32 = 0x2000;
 const RING0_STACK: u32 = LDT + 8 * LDT_ENTRIES;
 const RING0_STACK_TOP: u32 = RING0_STACK + 2 * PAGE;
-pub const SYSTEM_BLOCK_PAGES: u32 = RING0_STACK_TOP / PAGE;
+/// The handlers the IDT's gates lead to, `HANDLER_SIZE` bytes each: a
+/// jump to the vector's trap in the ROM, and room for a program's own
+/// code in its place.
+const HANDLERS: u32 = RING0_STACK_TOP;
+const HANDLER_SIZE: u32 = 32;
+pub const SYSTEM_BLOCK_PAGES: u32 = (HANDLERS + 256 * HANDLER_SIZE) / PAGE;
 
 /// The GDT's selectors: level 0 code and data covering everything, the
 /// TSS and the LDT.
@@ -59,16 +77,17 @@ fn write_descriptor(cpu: &mut Cpu, at: u32, desc: u64) {
     cpu.bus.write_32(at as usize + 4, (desc >> 32) as u32);
 }
 
-/// Make the system block (`pages` in a row at `phys`) and map it: the GDT,
-/// the IDT, the TSS with the level 0 stack and the LDT with the program's
-/// selectors, the TIB's at `tib`.
+/// Make the system block (`pages` in a row at `phys`) and map it, open to
+/// level 3 as Windows 95's system arena is: the GDT, the IDT and the
+/// handlers its gates lead to, the TSS with the level 0 stack and the LDT
+/// with the program's selectors, the TIB's at `tib`.
 pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> Option<()> {
     for page in 0..SYSTEM_BLOCK_PAGES {
         memory.map(
             &mut cpu.bus,
             SYSTEM + page * PAGE,
             phys + page * PAGE,
-            WRITABLE,
+            WRITABLE | USER,
         )?;
     }
     let gdt = [
@@ -83,10 +102,17 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
     for (selector, desc) in gdt {
         write_descriptor(cpu, phys + GDT + selector as u32, desc);
     }
-    // Every vector a 32-bit interrupt gate to its trap in the ROM, at
-    // level 0. INT 3 and INTO may be used at level 3.
+    // Every vector a 32-bit interrupt gate to its handler, at level 0,
+    // which jumps to its trap in the ROM. INT 3 and INTO may be used at
+    // level 3.
     for vector in 0..256u32 {
-        let offset = ROM_BASE as u32 + IDT_TRAPS as u32 + 4 * vector;
+        let offset = SYSTEM + HANDLERS + HANDLER_SIZE * vector;
+        let trap = ROM_BASE as u32 + IDT_TRAPS as u32 + 4 * vector;
+        let mut handler = [0x90u8; HANDLER_SIZE as usize];
+        handler[0] = 0xE9;
+        handler[1..5].copy_from_slice(&trap.wrapping_sub(offset + 5).to_le_bytes());
+        let at = phys + HANDLERS + HANDLER_SIZE * vector;
+        cpu.bus.load_bytes(at as usize, &handler);
         let dpl3 = matches!(vector, 3 | 4);
         let access: u64 = if dpl3 { 0xEE } else { 0x8E };
         let gate = (offset as u64 & 0xFFFF)

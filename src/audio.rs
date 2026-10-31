@@ -46,7 +46,7 @@ pub const PREBUFFERS: [u16; 8] = [5, 10, 15, 20, 25, 30, 40, 50];
 
 impl AudioBuffer {
     /// The milliseconds `frames` play for at the mixer's rate.
-    pub fn millis(frames: u16) -> f64 {
+    pub fn millis(frames: usize) -> f64 {
         frames as f64 * 1000.0 / crate::opl::RATE as f64
     }
 }
@@ -171,8 +171,10 @@ impl Feed {
 /// server's audio stream. Called once per video frame; `idle` while the
 /// machine waits (paused, or in the settings window), when the device
 /// running dry isn't an underrun. Returns the samples, for recordings,
-/// which the mute leaves alone.
+/// which the mute leaves alone. `Bus::audio_underruns` counts the calls that
+/// find the queue empty, and `Bus::host_frames` what happened around them.
 pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
+    bus.host_frames.set_idle(idle);
     bus.audio_catch_up();
     let samples: Vec<i16> = bus.audio_out.drain(..).collect();
     let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
@@ -219,6 +221,12 @@ pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
         {
             eprintln!("[AUDIO] Queue error: {}", e);
         }
+        bus.host_frames.pump(crate::hostframes::Pump {
+            queued,
+            after: device.queued_frames(),
+            target,
+            emulated_ns: bus.clock.now_ns(),
+        });
     }
     if let Some(hook) = &mut bus.audio_hook {
         hook(&samples);
@@ -291,6 +299,17 @@ mod tests {
     }
 
     #[test]
+    fn the_frames_of_a_machine_that_waits_do_not_count_without_a_device() {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        pump_audio(&mut bus, true);
+        bus.host_frames.frame(std::time::Duration::from_millis(900), 0);
+        assert_eq!(bus.host_frames.frame_count(), 0);
+        pump_audio(&mut bus, false);
+        bus.host_frames.frame(std::time::Duration::from_millis(9), 0);
+        assert_eq!(bus.host_frames.frame_count(), 1);
+    }
+
+    #[test]
     fn the_queue_holds_its_target_through_a_slow_frame_and_drift() {
         let mut bus = Bus::new(std::path::PathBuf::from("."));
         let device = std::rc::Rc::new(std::cell::RefCell::new(Device { queued: 0, target: 1400, played: Vec::new() }));
@@ -320,6 +339,11 @@ mod tests {
         let queued = device.borrow().queued;
         assert!(queued <= 1400 + 735 + 1, "{queued}");
         assert_eq!(bus.audio_underruns, 2);
+        assert_eq!(
+            bus.host_frames.underrun_events(),
+            2,
+            "two with sound between them"
+        );
 
         // The device's clock 0.14% slower than emulated time: the queue
         // stays within 6 ms of its target, 5 and the average's lag.
