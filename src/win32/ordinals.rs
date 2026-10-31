@@ -60,6 +60,7 @@ static LISTS: &[(&str, &str)] = &[
     ("WINMM.DLL", include_str!("ordinals/winmm_dll.txt")),
     ("WINSPOOL.DRV", include_str!("ordinals/winspool_drv.txt")),
     ("WNASPI32.DLL", include_str!("ordinals/wnaspi32_dll.txt")),
+    ("WOW32.DLL", include_str!("ordinals/wow32_dll.txt")),
     ("WS2_32.DLL", include_str!("ordinals/ws2_32_dll.txt")),
     ("WSOCK32.DLL", include_str!("ordinals/wsock32_dll.txt")),
 ];

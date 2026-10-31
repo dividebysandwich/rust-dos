@@ -1123,6 +1123,86 @@ fn a_handler_on_the_exception_chain_resumes_after_a_divide_error() {
     assert_eq!(code, 42, "{}", out);
 }
 
+/// As on Windows 98, where SafeDisc's loader does this: the program finds
+/// the IDT with SIDT, writes its own code over the handler the divide
+/// error's gate leads to, divides by zero to run it at level 0, and puts
+/// the handler back, after which a divide error reaches the program's
+/// handlers as before.
+#[test]
+fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    // The level 0 code, at 30h: it puts CR0 in EBX and goes on after the
+    // 2-byte DIV.
+    let mut data = vec![0u8; 0x40];
+    data[0x30..0x3B].copy_from_slice(&[
+        0x0F, 0x20, 0xC3, // mov ebx, cr0
+        0x83, 0x04, 0x24, 0x02, // add dword [esp], 2
+        0xCF, // iretd
+        0x90, 0x90, 0x90,
+    ]);
+    let (code, out) = run(
+        "idt_ring0",
+        program(BASE, false, imports, &data, |a, l| {
+            let mut over = a.create_label();
+            let mut fail = a.create_label();
+            // The IDT's base, from SIDT's 6 bytes at 0.
+            a.sidt(ptr(l.at(0)))?;
+            a.mov(esi, dword_ptr(l.at(2)))?;
+            // The divide error's handler, from its gate.
+            a.movzx(edi, word_ptr(esi + 6))?;
+            a.shl(edi, 16)?;
+            a.mov(di, word_ptr(esi))?;
+            // Keep its first 16 bytes at 10h and write ours there.
+            a.push(edi)?;
+            a.mov(esi, edi)?;
+            a.mov(edi, l.at(0x10) as u32)?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            a.mov(esi, l.at(0x30) as u32)?;
+            a.mov(edi, dword_ptr(esp))?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            a.pop(edi)?;
+            // Run it.
+            a.xor(ebx, ebx)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.test(ebx, 1)?;
+            a.mov(ebx, 2)?;
+            a.je(fail)?;
+            // Put the handler back.
+            a.lea(esi, ptr(l.at(0x10)))?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            // A divide error now goes to the program's own handler, which
+            // goes on after the DIV with EAX 42.
+            a.call(over)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 42)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut over)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            a.mov(ebx, eax)?;
+            a.set_label(&mut fail)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 42, "{}", out);
+}
+
 /// What a debugger sees of a program whose main thread spins while a
 /// second thread waits for an event and a third was made suspended.
 #[test]
@@ -4926,6 +5006,108 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
         a.int3()
     });
     let (code, text) = run("kernel32_ordinals", exe);
+    assert_eq!(code, 0, "{}", text);
+}
+
+#[test]
+fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
+    // KRNL386's GetVersion, called with WOWCallback16 and
+    // WOWCallback16Ex, as SafeDisc's loader calls into KRNL386, and its
+    // lstrcmp, whose two arguments WOWCallback16Ex passes in order; and a
+    // pointer MapLS made, which WOWGetVDMPointer takes back to memory of
+    // the program's.
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["#35", "#37", "MapLS", "ExitProcess"]),
+        (
+            "WOW32.DLL",
+            &["WOWCallback16", "WOWCallback16Ex", "WOWGetVDMPointer"],
+        ),
+    ];
+    let mut data = vec![0u8; 0x100];
+    data[..12].copy_from_slice(b"KRNL386.EXE\0");
+    data[0x10..0x1B].copy_from_slice(b"GETVERSION\0");
+    data[0x40..0x44].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    data[0x60..0x64].copy_from_slice(b"a\0b\0");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 32)?;
+        a.jb(fail)?;
+        a.mov(edi, eax)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 2)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.mov(esi, eax)?;
+        // WOWCallback16(GetVersion, 0): 3.95 in AX.
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 3)?;
+        a.cmp(ax, 0x5F03)?;
+        a.jne(fail)?;
+        // WOWCallback16Ex(GetVersion, WCB16_PASCAL, 0, NULL, &result).
+        a.push(l.at(0x30) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(5))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(word_ptr(l.at(0x30)), 0x5F03)?;
+        a.jne(fail)?;
+        // WOWCallback16Ex(lstrcmp, WCB16_PASCAL, 8, arguments, &result)
+        // with the arguments as they are on the 16-bit stack, the last
+        // first: lstrcmp("a", "b") is -1, and 1 with them the other way.
+        a.push(l.at(0x60) as i32)?;
+        a.call(l.import(2))?;
+        a.mov(dword_ptr(l.at(0x74)), eax)?;
+        a.push(l.at(0x62) as i32)?;
+        a.call(l.import(2))?;
+        a.mov(dword_ptr(l.at(0x70)), eax)?;
+        a.push(87)?;
+        a.push(edi)?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 7)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.push(l.at(0x30) as i32)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(8)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(l.import(5))?;
+        a.mov(ebx, 8)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(l.at(0x30)), 0xFFFF)?;
+        a.jne(fail)?;
+        // WOWGetVDMPointer(MapLS(&value), 4, TRUE) sees the value.
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(2))?;
+        a.push(1)?;
+        a.push(4)?;
+        a.push(eax)?;
+        a.call(l.import(6))?;
+        a.mov(ebx, 6)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.cmp(dword_ptr(eax), 0x1234_5678)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()
+    });
+    let (code, text) = run("wow32", exe);
     assert_eq!(code, 0, "{}", text);
 }
 

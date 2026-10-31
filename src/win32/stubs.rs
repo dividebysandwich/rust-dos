@@ -119,6 +119,7 @@ pub static DLLS: &[&Dll] = &[
     &super::ws2_32::DLL,
     &super::msimg32::DLL,
     &super::opengl32::DLL,
+    &super::wow32::DLL,
     &super::wnaspi32::DLL,
 ];
 
