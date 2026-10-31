@@ -31,12 +31,14 @@ pub enum Job {
     /// Words frame buffer writes left, in order.
     Pixels { fb: Vram, words: Vec<Word> },
     /// Rows `rows` of the buffer at word `base`, `rowpixels` words each,
-    /// filled whole with `value` (a Voodoo2's SGRAM fill).
+    /// filled with `value` from word `columns.0` to `columns.1` of each
+    /// (a Voodoo2's SGRAM fill).
     Rows {
         fb: Vram,
         base: usize,
         rowpixels: usize,
         rows: (u32, u32),
+        columns: (usize, usize),
         value: u16,
     },
     /// A job that fails, for the tests.
@@ -95,12 +97,14 @@ impl Job {
                 base,
                 rowpixels,
                 rows,
+                columns,
                 value,
             } => {
                 for row in rows.0..rows.1 {
                     if owns(row as i32) {
-                        let start = (base + row as usize * rowpixels).min(fb.len());
-                        fb.fill(start..(start + rowpixels).min(fb.len()), *value);
+                        let start = base + row as usize * rowpixels;
+                        let end = (start + columns.1).min(fb.len());
+                        fb.fill((start + columns.0).min(end)..end, *value);
                     }
                 }
             }

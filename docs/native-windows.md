@@ -665,9 +665,26 @@ two TMUs), GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
 WGL_EXT_swap_control. The functions OpenGL 1.1 has and the ICD doesn't
 (display lists, lighting, evaluators, feedback, the accumulation and
 stencil buffers) are exported and do nothing, and their first call is
-logged. Without a Banshee or Voodoo3 the DLL loads but there is no
-pixel format, so a context can't be made. SetDeviceGammaRamp sets the
-card's lookup table for 16- and 32-bit modes until the next mode set.
+logged. SetDeviceGammaRamp sets the card's lookup table for 16- and
+32-bit modes until the next mode set.
+
+On a Voodoo2 the DLL is 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL),
+which games of the time loaded by name or kept in their folder as
+OPENGL32.DLL, and which drew full screen only. Its two pixel formats
+are those that driver's DescribePixelFormat gives on Windows 98 SE:
+5-6-5 color with a 16-bit depth buffer, single or double buffered,
+which also say they support GDI and have an 8-bit stencil and a 64-bit
+accumulation buffer, which the real driver kept in software and which
+do nothing here. A context's DirectDraw object is the card's 3dfx
+device. wglMakeCurrent opens the card at the smallest of its modes
+that holds the window's client area and a depth buffer, as the real
+driver did (a 400x300 window gets 512x384), and fails when none does
+(1024x768 on a card with 4 MB of frame buffer). OpenGL draws into the
+top left of the card's back buffer through the same HAL as Direct3D,
+and SwapBuffers swaps the card's buffers. glGetString gives the real
+driver's vendor, renderer and version, and of its extensions those
+that are here. Without a Banshee, Voodoo3 or Voodoo2 the DLL loads
+but there is no pixel format, so a context can't be made.
 
 **Phase 5: breadth.**
 
