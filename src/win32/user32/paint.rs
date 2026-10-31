@@ -680,12 +680,18 @@ pub fn ensure_desktop(cpu: &mut Cpu) {
     // (`restore_desktop`).
     if !crate::win32::ddraw::owns_display(cpu) {
         enter_desktop_mode(cpu);
-        // The mouse moves over the whole desktop, from its middle.
+        // The mouse moves over the whole desktop.
         let (w, h) = sysparams::screen_size(cpu);
         let mouse = &mut cpu.bus.mouse;
         (mouse.min_x, mouse.max_x, mouse.min_y, mouse.max_y) = (0, w - 1, 0, h - 1);
-        mouse.warp(w / 2, h / 2);
     }
+    // From where USER has had the cursor: the middle of the screen as the
+    // system started (`init`), or where SetCursorPos or the last program
+    // left it. GetCursorPos gives the same place before and after, and a
+    // screen saver that kept it doesn't take the move its window gets as
+    // it shows (`input::window_moved`) for the mouse moving.
+    let (x, y) = user(cpu).input.cursor;
+    cpu.bus.mouse.warp(x, y);
     super::input::desktop_started(cpu);
     redraw_screen(cpu);
 }
