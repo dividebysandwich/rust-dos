@@ -403,21 +403,33 @@ mod tests {
     }
 
     /// Every shader in every dialect compiles, where glslang's validator is
-    /// installed.
+    /// installed. CI sets `RUST_DOS_REQUIRE_GLSLANG`, so that there a
+    /// missing validator fails the test instead of skipping it.
     #[test]
     fn sources_compile() {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
         if Command::new("glslangValidator").arg("--version").output().is_err() {
+            assert!(
+                std::env::var_os("RUST_DOS_REQUIRE_GLSLANG").is_none(),
+                "RUST_DOS_REQUIRE_GLSLANG is set, but glslangValidator isn't installed"
+            );
             eprintln!("glslangValidator isn't installed, not compiling the shaders");
             return;
         }
         for glsl in [Glsl::Gl130, Glsl::Gl150, Glsl::Es300] {
+            // The tests and the browser benchmark compare against the
+            // former full-block kernel, which XBRZ_REFERENCE selects.
+            let (vertex, fragment) = sources(Shader::Xbrz, glsl);
+            let preamble = glsl.preamble();
+            let reference =
+                fragment.replacen(preamble, &format!("{preamble}#define XBRZ_REFERENCE\n"), 1);
             let passes = [
                 ("xbrz corners", xbrz_sources(XbrzPass::Corners, glsl)),
                 ("xbrz resolve", xbrz_sources(XbrzPass::Resolve, glsl)),
                 ("xbrz display", xbrz_sources(XbrzPass::Display, glsl)),
+                ("xbrz reference", (vertex, reference)),
             ];
             for (name, (vertex, fragment)) in Shader::ALL.into_iter()
                 .map(|shader| (shader.name(), sources(shader, glsl)))

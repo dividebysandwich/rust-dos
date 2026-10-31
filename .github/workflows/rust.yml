@@ -108,7 +108,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xdotool libgl1-mesa-dri
+            xvfb xdotool libgl1-mesa-dri glslang-tools
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -151,6 +151,10 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
+          # GLSL ES 3.00's rules for WebGL 2, which desktop Mesa doesn't
+          # apply, through Khronos's reference compiler.
+          RUST_DOS_REQUIRE_GLSLANG=1 cargo test --locked --lib \
+            video::shader::tests::sources_compile
           xvfb-run -a cargo test --locked --bin rust-dos \
             display::gl:: -- --ignored --test-threads=1
           xvfb-run -a cargo test --locked --test debug_journal_tests \
