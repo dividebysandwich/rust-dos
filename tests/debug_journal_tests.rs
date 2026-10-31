@@ -183,10 +183,30 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         {
             break path;
         }
-        assert!(
-            Instant::now() < deadline,
-            "Ctrl+F5 saves a shader screenshot"
-        );
+        if Instant::now() >= deadline {
+            let xdotool = |args: &[&str]| {
+                let output = Command::new("xdotool").args(args).output().unwrap();
+                String::from_utf8_lossy(&output.stdout).trim().replace('
+', " ")
+            };
+            let pid = emulator.0.id().to_string();
+            panic!(
+                "Ctrl+F5 saves a shader screenshot
+window {window}, of {}, focus {}
+                 status: {:?}
+captures: {:?}
+log:
+{}
+stderr:
+{}",
+                xdotool(&["search", "--pid", &pid]),
+                xdotool(&["getwindowfocus"]),
+                http(addr, "GET", "/api/status", &[], None).0,
+                std::fs::read_dir(dir.join("captures")).map(|e| e.count()),
+                std::fs::read_to_string(dir.join("emulator.log")).unwrap_or_default(),
+                std::fs::read_to_string(dir.join("stderr.txt")).unwrap_or_default(),
+            );
+        }
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(
