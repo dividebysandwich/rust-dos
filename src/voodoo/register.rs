@@ -75,6 +75,10 @@ impl Voodoo {
     pub(crate) fn register_to(&mut self, regnum: usize, chips: u32, data: u32, now: Now, effect: &mut Effect) {
         let (fbi, tmu0, tmu1) = (chips & 1 != 0, chips & 2 != 0, chips & 4 != 0);
         let fixed = |bits: i32| float_to_int32(data, bits) as u32;
+        if regnum != BLT_DATA {
+            // It may change what a CPU-to-screen copy's data does.
+            self.blt_queue_stale();
+        }
         match regnum {
             VERTEX_AX | FVERTEX_AX | VERTEX_AY | FVERTEX_AY | VERTEX_BX | FVERTEX_BX | VERTEX_BY | FVERTEX_BY
             | VERTEX_CX | FVERTEX_CX | VERTEX_CY | FVERTEX_CY => {
