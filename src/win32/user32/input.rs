@@ -2779,16 +2779,27 @@ mod tests {
     fn a_window_shown_under_the_cursor_gets_a_mouse_move() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         let screen = Rect::new(0, 0, 640, 480);
+        // The desktop first, then a hidden window on it covering the
+        // screen.
+        let desktop = window::Window {
+            rect: screen,
+            client: screen,
+            style: WS_VISIBLE,
+            ..window::Window::default()
+        };
+        let desktop = user(&mut cpu).new_window(desktop).expect("the desktop");
+        assert_eq!(desktop, DESKTOP);
         let w = window::Window {
             tid: 1,
             rect: screen,
             client: screen,
+            parent: DESKTOP,
             ..window::Window::default()
         };
         let hwnd = user(&mut cpu).new_window(w).expect("a window");
         let state = user(&mut cpu);
-        if let Some(w) = state.window_mut(hwnd) {
-            w.style &= !WS_VISIBLE;
+        if let Some(d) = state.window_mut(DESKTOP) {
+            d.children.push(hwnd);
         }
         state.desktop = true;
         state.input.cursor = (100, 120);
