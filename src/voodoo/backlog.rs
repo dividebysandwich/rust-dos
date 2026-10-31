@@ -562,10 +562,17 @@ impl Footprint {
     /// What `job` may read and write.
     pub fn add(&mut self, job: &Job) {
         self.add_writes(job);
-        if let Job::Triangle { st, .. } = job {
-            for range in frame_buffer_texels(st) {
-                self.texture(range);
+        match job {
+            Job::Triangle { st, .. } => {
+                for range in frame_buffer_texels(st) {
+                    self.texture(range);
+                }
             }
+            // Later data over these bytes has to come after them.
+            Job::Bytes { at, bytes, .. } => {
+                self.texture((*at as u64, (*at + bytes.len()) as u64));
+            }
+            _ => {}
         }
     }
 
@@ -579,6 +586,7 @@ impl Footprint {
             }
             Job::Pixels { words, .. } => self.words(words),
             Job::Rows { base, .. } => self.writes_from = self.writes_from.min(2 * *base as u64),
+            Job::Bytes { .. } => {}
             #[cfg(test)]
             Job::Panic => {}
         }
