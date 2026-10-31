@@ -3376,13 +3376,15 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
+const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
+const SET_TERMINATE: &str = "?set_terminate@@YAP6AXXZP6AXXZ@Z";
+
 /// A program with a translator and a try with one catch, in which an
 /// access violation happens: the translator gets its code and record, and
 /// with `throws` throws (char *)0x55 for the catch (char *) to take;
 /// otherwise it returns, and the catch is a catch (...). `ehs` marks the
 /// function as built with /EHs. The exit code has a bit each.
 fn translator_program(throws: bool, ehs: bool) -> Vec<u8> {
-    const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
     let names: &[&str] = &[
         "__CxxFrameHandler",
         "_CxxThrowException",
@@ -3559,11 +3561,13 @@ fn a_function_built_with_ehs_does_not_translate() {
 }
 
 /// What a translator of `nested_frames_program` does: throws (char *)0x55,
-/// the same with a destructor in the throw's ThrowInfo, returns or faults.
+/// the same with a destructor in the throw's ThrowInfo, that on its first
+/// call and returns after it, returns or faults.
 #[derive(Clone, Copy, PartialEq)]
 enum Translator {
     Throws,
     ThrowsWithDestructor,
+    ThrowsOnce,
     Returns,
     Faults,
 }
@@ -3580,6 +3584,14 @@ enum Inner {
     CatchFaults,
     CatchFaultsInTry,
     BadMagic,
+    /// A catch (...) whose block does `throw;`.
+    CatchRethrows,
+    /// A catch (char *) whose block faults.
+    CaughtFaults,
+    /// The frame in state 9, past its table.
+    BadState,
+    /// A throw with no frame on the chain.
+    Uncaught,
 }
 
 /// The outer function: none, a catch (char *) or a catch (...).
@@ -3603,12 +3615,12 @@ fn nested_frames_program(
     outer: Outer,
     int3: bool,
 ) -> Vec<u8> {
-    const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
     const STATES: u32 = 2;
     let names: &[&str] = &[
         "__CxxFrameHandler",
         "_CxxThrowException",
         SET_TRANSLATOR,
+        SET_TERMINATE,
         "exit",
     ];
     let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
@@ -3631,7 +3643,7 @@ fn nested_frames_program(
     let bits = d.add(&[0; 4]);
     let data_len = d.0.len() as u32;
     program(BASE, false, imports, &d.0, |a, l| {
-        let code = |a: &mut CodeAssembler, at: [u32; 10]| -> Result<[CodeLabel; 10], IcedError> {
+        let code = |a: &mut CodeAssembler, at: [u32; 11]| -> Result<[CodeLabel; 11], IcedError> {
             let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
             let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
                 a.mov(dword_ptr(l.at(offset)), value as i32)
@@ -3649,6 +3661,7 @@ fn nested_frames_program(
             let mut faulting_catch = a.create_label();
             let mut around_catch = a.create_label();
             let mut inner_after = a.create_label();
+            let mut on_terminate = a.create_label();
             let [
                 inner_at,
                 outer_at,
@@ -3660,6 +3673,7 @@ fn nested_frames_program(
                 faulting_at,
                 around_at,
                 inner_after_at,
+                terminate_at,
             ] = at;
 
             put(a, catchable, 1)?;
@@ -3668,7 +3682,10 @@ fn nested_frames_program(
             put(a, catchable + 20, 4)?;
             put(a, list, 1)?;
             put(a, list + 4, data(catchable))?;
-            if translator == Translator::ThrowsWithDestructor {
+            if matches!(
+                translator,
+                Translator::ThrowsWithDestructor | Translator::ThrowsOnce
+            ) {
                 put(a, throw_info + 4, destructor_at)?;
             }
             put(a, throw_info + 12, data(list))?;
@@ -3688,17 +3705,30 @@ fn nested_frames_program(
             }
             put(a, unwind, u32::MAX)?;
             // In the inner catch block, state 1, the try around it holds.
-            let before = if inner == Inner::CatchFaultsInTry { 0 } else { u32::MAX };
+            let before = if inner == Inner::CatchFaultsInTry {
+                0
+            } else {
+                u32::MAX
+            };
             put(a, unwind + 8, before)?;
             for entry in [inner_try, outer_try] {
                 put(a, entry + 8, 1)?;
             }
             // The inner catches aren't taken: a return from one is an int3.
-            put(a, inner_try + 12, 1 + (inner == Inner::CatchAllFirst) as u32)?;
+            put(
+                a,
+                inner_try + 12,
+                1 + (inner == Inner::CatchAllFirst) as u32,
+            )?;
             put(a, inner_try + 16, data(inner_handlers))?;
             match inner {
                 Inner::CatchChar => put(a, inner_handlers + 4, data(char_type))?,
-                Inner::CatchFaults | Inner::CatchFaultsInTry => {
+                Inner::CatchFaults | Inner::CatchFaultsInTry | Inner::CatchRethrows => {
+                    put(a, inner_handlers + 12, faulting_at)?;
+                }
+                Inner::CaughtFaults => {
+                    put(a, inner_handlers + 4, data(char_pointer))?;
+                    put(a, inner_handlers + 8, -0x14i32 as u32)?;
                     put(a, inner_handlers + 12, faulting_at)?;
                 }
                 _ => put(a, inner_handlers + 16 + 4, data(char_type))?,
@@ -3723,6 +3753,12 @@ fn nested_frames_program(
             a.push(ecx)?;
             a.call(f(SET_TRANSLATOR))?;
             a.add(esp, 4)?;
+            if matches!(inner, Inner::BadState | Inner::Uncaught) {
+                a.mov(ecx, terminate_at)?;
+                a.push(ecx)?;
+                a.call(f(SET_TERMINATE))?;
+                a.add(esp, 4)?;
+            }
             a.mov(eax, seh_at)?;
             a.push(eax)?;
             a.push(dword_ptr(0u64).fs())?;
@@ -3753,7 +3789,15 @@ fn nested_frames_program(
             };
             a.set_label(&mut inner_code)?;
             frame(a, inner_at)?;
-            if int3 {
+            if inner == Inner::BadState {
+                a.mov(dword_ptr(ebp - 4), 9)?;
+            }
+            if inner == Inner::Uncaught {
+                a.mov(dword_ptr(0u64).fs(), -1)?;
+                a.push(data(throw_info) as i32)?;
+                a.push(data(thrown) as i32)?;
+                a.call(f("_CxxThrowException"))?;
+            } else if int3 {
                 a.int3()?;
             } else {
                 a.xor(eax, eax)?;
@@ -3763,8 +3807,14 @@ fn nested_frames_program(
 
             // The inner catches.
             a.set_label(&mut faulting_catch)?;
-            a.xor(eax, eax)?;
-            a.mov(eax, dword_ptr(eax))?;
+            if inner == Inner::CatchRethrows {
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("_CxxThrowException"))?;
+            } else {
+                a.xor(eax, eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+            }
             a.int3()?;
             a.set_label(&mut around_catch)?;
             a.or(dword_ptr(l.at(bits)), 0x10)?;
@@ -3812,6 +3862,18 @@ fn nested_frames_program(
                     a.int3()?;
                 }
                 Translator::Returns => a.ret()?,
+                Translator::ThrowsOnce => {
+                    let mut once = a.create_label();
+                    a.cmp(dword_ptr(l.at(bits)), 1)?;
+                    a.je(once)?;
+                    a.ret()?;
+                    a.set_label(&mut once)?;
+                    put(a, thrown, 0x55)?;
+                    a.push(data(throw_info) as i32)?;
+                    a.push(data(thrown) as i32)?;
+                    a.call(f("_CxxThrowException"))?;
+                    a.int3()?;
+                }
                 Translator::Faults => {
                     let mut go_on = a.create_label();
                     a.cmp(dword_ptr(l.at(bits)), 4)?;
@@ -3832,7 +3894,7 @@ fn nested_frames_program(
             let raised = if int3 { 0x8000_0003u32 } else { 0xC000_0005 };
             a.cmp(dword_ptr(eax), raised as i32)?;
             a.jne(skip)?;
-            // NumberParameters: 2 for an access violation, 1 for a breakpoint.
+            // NumberParameters: 2 for a fault, 1 for a breakpoint.
             a.cmp(dword_ptr(eax + 16), if int3 { 1 } else { 2 })?;
             a.jne(skip)?;
             a.or(dword_ptr(l.at(bits)), 0x40)?;
@@ -3844,6 +3906,13 @@ fn nested_frames_program(
             a.set_label(&mut destructor)?;
             a.or(dword_ptr(l.at(bits)), 0x80)?;
             a.ret()?;
+
+            // The terminate handler.
+            a.set_label(&mut on_terminate)?;
+            a.or(dword_ptr(l.at(bits)), 0x70)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
 
             a.set_label(&mut inner_thunk)?;
             a.mov(eax, data(inner_info))?;
@@ -3862,13 +3931,14 @@ fn nested_frames_program(
                 faulting_catch,
                 around_catch,
                 inner_after,
+                on_terminate,
             ])
         };
-        let labels = code(a, [0; 10])?;
+        let labels = code(a, [0; 11])?;
         let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
         let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
         let result = a.assemble_options(ip, options)?;
-        let mut at = [0; 10];
+        let mut at = [0; 11];
         for (i, label) in labels.iter().enumerate() {
             at[i] = result.label_ip(label)? as u32;
         }
@@ -3881,6 +3951,73 @@ fn nested_frames_program(
 /// `nested_frames_program` run: its exit code.
 fn run_nested(test: &str, translator: Translator, inner: Inner, outer: Outer) -> u8 {
     run(test, nested_frames_program(translator, inner, outer, false)).0
+}
+
+/// `throw;` in a catch (...) of a fault: the block's guard runs the
+/// translator, the block ends and the search that found the catch goes on,
+/// so that the SEH frame gets the fault's own record.
+#[test]
+fn a_rethrown_fault_keeps_its_record() {
+    let code = run_nested(
+        "msvcrt_rethrow_fault",
+        Translator::Returns,
+        Inner::CatchRethrows,
+        Outer::None,
+    );
+    assert_eq!(code, 0x42);
+}
+
+/// The same with a catch (...) outside: one more call, and it takes the
+/// fault.
+#[test]
+fn a_rethrown_fault_reaches_the_outer_catch() {
+    let code = run_nested(
+        "msvcrt_rethrow_fault_outer",
+        Translator::Returns,
+        Inner::CatchRethrows,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A catch block an exception leaves ends as if it returned: the catch
+/// (char *) faults, three more calls of the translator follow, and the
+/// unwind for the outer catch (...) destroys the object of the first.
+#[test]
+fn an_abandoned_catch_destroys_its_object() {
+    let code = run_nested(
+        "msvcrt_abandoned_catch",
+        Translator::ThrowsOnce,
+        Inner::CaughtFaults,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x94);
+}
+
+/// A state past the table is terminate(), before the translator, and the
+/// thread's terminate handler runs.
+#[test]
+fn a_bad_state_calls_the_terminate_handler() {
+    let code = run_nested(
+        "msvcrt_bad_state",
+        Translator::Returns,
+        Inner::BadState,
+        Outer::None,
+    );
+    assert_eq!(code, 0x70);
+}
+
+/// A C++ exception nothing takes reaches MSVCRT's unhandled exception
+/// filter, which is terminate().
+#[test]
+fn an_uncaught_exception_calls_the_terminate_handler() {
+    let code = run_nested(
+        "msvcrt_uncaught",
+        Translator::Returns,
+        Inner::Uncaught,
+        Outer::None,
+    );
+    assert_eq!(code, 0x70);
 }
 
 /// MSVCRT.DLL 6.00.8397 looks for the exception a translator throws in the

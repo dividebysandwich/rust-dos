@@ -515,7 +515,7 @@ pub static APIS: &[Api] = &[
     cdecl("_wstat", 483, 2, io::wstat),
     cdecl("_kbhit", 484, 0, io::kbhit),
     cdecl("_getch", 485, 0, stdio::getchar),
-    cdecl("?terminate@@YAXXZ", 486, 0, startup::abort),
+    cdecl("?terminate@@YAXXZ", 486, 0, startup::terminate),
     // UCRT's, for ucrtbase.dll's imports (the win32_dlls setting).
     cdecl("__acrt_iob_func", 487, 1, stdio::acrt_iob_func),
     cdecl("__stdio_common_vsprintf", 488, 7, stdio::stdio_common_vsprintf),
@@ -527,7 +527,21 @@ pub static APIS: &[Api] = &[
         1,
         startup::set_se_translator,
     ),
-    // The handler of a translator's guard frame: called through that
-    // frame, by no program, as with KERNEL32's CallReturn.
-    cdecl("__TranslatorGuardHandler", 492, 4, startup::translator_guard),
+    cdecl("?set_terminate@@YAP6AXXZP6AXXZ@Z", 492, 1, startup::set_terminate),
+    cdecl("?set_unexpected@@YAP6AXXZP6AXXZ@Z", 493, 1, startup::set_unexpected),
+    cdecl("?unexpected@@YAXXZ", 494, 0, startup::unexpected),
+    // The handlers of the frames around a translator, a catch block and a
+    // terminate handler: called through those frames, by no program, and
+    // not exported, as with KERNEL32's CallReturn.
+    cdecl("__TranslatorGuardHandler", 0, 4, startup::translator_guard),
+    cdecl("__CatchGuardHandler", 0, 4, startup::catch_guard),
+    cdecl("__TerminateGuardHandler", 0, 4, startup::terminate_guard),
+    // The unhandled exception filter the DLL sets when it loads.
+    Api {
+        name: "__CxxUnhandledExceptionFilter",
+        ordinal: 0,
+        args: 1,
+        conv: Conv::Stdcall,
+        handler: startup::cxx_unhandled_filter,
+    },
 ];

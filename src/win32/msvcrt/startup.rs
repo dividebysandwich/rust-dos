@@ -1093,21 +1093,15 @@ const X_TRANSLATED: u32 = 6;
 const X_DROPPED: u32 = 7;
 /// The translator's frames unwound: on with the search for the fault.
 const X_LEFT_TRANSLATOR: u32 = 8;
-
-/// The guard frame around a call of the translator, on the stack: the
-/// next frame and the handler, then the frame and FuncInfo of the function
-/// the translator runs for, whether RtlUnwind passed the guard, where the
-/// handler that called it goes back to, its registers, and the catch depth.
-const G_NEXT: u32 = 0;
-const G_FRAME: u32 = 8;
-const G_INFO: u32 = 12;
-const G_UNWOUND: u32 = 16;
-const G_RESUME: u32 = 20;
-const G_REGS: u32 = 28;
-const G_DEPTH: u32 = 44;
-const GUARD_SIZE: u32 = 48;
-/// EXCEPTION_POINTERS, which go below the guard.
-const POINTERS_SIZE: u32 = 8;
+/// A `throw;` left the catch block of the frame `d[D_CATCH_GUARD]`: the
+/// search that found that catch goes on.
+const X_RETHROWN: u32 = 9;
+/// The object of a catch block an exception left is destroyed.
+const X_ABANDONED: u32 = 10;
+/// The terminate handler returned: abort().
+const X_TERMINATED: u32 = 11;
+/// The unexpected handler returned: terminate().
+const X_UNEXPECTED: u32 = 12;
 
 /// The places in `cxx_returned`'s data: the step, the frame, its
 /// FuncInfo, the state to unwind to, the try block and the handler that
@@ -1126,14 +1120,62 @@ const D_CODE: usize = 8;
 const D_GO_ON: usize = 9;
 const D_REGS: usize = 10;
 const D_OUTER: usize = 14;
-const D_ESP: usize = 17;
-const D_LEN: usize = 18;
-/// In place of the try block, which an exception with no catch here
-/// doesn't have: the guard frame of the translator that threw it.
-const D_GUARD: usize = D_TRY;
-/// Before a catch is called, where it sets D_GO_ON: how many of the
-/// function's catch blocks the search has yet to come out of.
-const D_DEPTH: usize = D_GO_ON;
+const D_ESP: usize = 16;
+/// The search: the record the handler was called with, the record and
+/// context it is for, which differ after a `throw;`, the catch depth and
+/// the frame's state, and the try blocks left, as MSVCRT's FindHandler
+/// has them.
+const D_RAW: usize = 17;
+const D_RECORD: usize = 18;
+const D_CONTEXT: usize = 19;
+const D_DEPTH: usize = 20;
+const D_STATE: usize = 21;
+const D_NEXT: usize = 22;
+const D_END: usize = 23;
+/// The frame RtlUnwind stops at if not the function's: the guard of the
+/// catch block the search started in.
+const D_MARKER: usize = 24;
+/// The guard frame of the translator whose exception this is, if any.
+const D_TRANSLATOR: usize = 25;
+/// The guard frame of the catch block this search runs for, if any.
+const D_CATCH_GUARD: usize = 26;
+/// Where the handler returns to, for a search that survives its stub.
+const D_RESUME: usize = 27;
+const D_LEN: usize = 29;
+
+/// The guard frame around a call of the translator, on the stack: the
+/// next frame and the handler, whether RtlUnwind passed the guard, then
+/// the search that called the translator.
+const G_NEXT: u32 = 0;
+const G_UNWOUND: u32 = 8;
+const G_SEARCH: u32 = 12;
+const GUARD_SIZE: u32 = G_SEARCH + 4 * D_LEN as u32;
+/// EXCEPTION_POINTERS, which go below the guard.
+const POINTERS_SIZE: u32 = 8;
+/// What a call of RtlUnwind pushes: four arguments and the return address.
+const RTL_UNWIND_CALL: u32 = 20;
+
+/// The guard frame around a catch block, on the stack: the next frame and
+/// the handler, then the search that found the catch. MSVCRT has two
+/// frames here, `_CallCatchBlock`'s __try and its guard, and this one does
+/// the work of both, the guard's first.
+const K_SEARCH: u32 = 8;
+const CATCH_GUARD_SIZE: u32 = K_SEARCH + 4 * D_LEN as u32;
+
+/// Write the search `d` at `at`.
+fn store_search(cpu: &mut Cpu, at: u32, d: &[u32]) -> Option<()> {
+    for (i, &word) in d.iter().enumerate() {
+        write32(cpu, at + 4 * i as u32, word)?;
+    }
+    Some(())
+}
+
+/// The search written at `at`.
+fn load_search(cpu: &mut Cpu, at: u32) -> Vec<u32> {
+    (0..D_LEN as u32)
+        .map(|i| cpu.bus.guest_read_32(at + 4 * i))
+        .collect()
+}
 
 /// __CxxFrameHandler(record, frame, context, dispatcher), with the
 /// function's FuncInfo in EAX: a catch of the function's that takes the
@@ -1141,31 +1183,38 @@ const D_DEPTH: usize = D_GO_ON;
 /// goes on after it; otherwise ContinueSearch. Unwinding, the frame's
 /// objects are destroyed. A catch (...) takes exceptions other than C++
 /// ones too, as with MSVC 6. For one of those, in a function with a try
-/// block, the thread's translator runs first (`search_foreign`), whatever
-/// state the function is in: once for each such function the search
-/// passes, and once more for each of its catch blocks the exception is
-/// in.
+/// block, the thread's translator runs first, whatever state the function
+/// is in: once for this frame, and once for the guard of each of its
+/// catch blocks the exception is in.
 pub fn cxx_frame_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[record, frame, context, _] = args else {
         unreachable!()
     };
-    let info = cpu.eax();
-    let code = read32(cpu, record)?;
-    let flags = read32(cpu, record + 4)?;
-    // A table that isn't one is terminate(), in an unwind too.
-    if !CXX_MAGICS.contains(&read32(cpu, info)?) {
-        return abort(cpu, &[]);
-    }
-    let thrown = thrown(cpu, record, code)?;
-    let resume = call::here(cpu);
     let mut d = vec![0; D_LEN];
     d[D_FRAME] = frame;
-    d[D_INFO] = info;
-    d[D_CODE] = code;
-    if let Some((object, throw)) = thrown {
-        d[D_OBJECT] = object;
-        d[D_THROW] = throw;
+    d[D_INFO] = cpu.eax();
+    d[D_RAW] = record;
+    d[D_RECORD] = record;
+    d[D_CONTEXT] = context;
+    frame_handler(cpu, d)
+}
+
+/// MSVCRT's __InternalCxxFrameHandler, for the frame, FuncInfo, record
+/// and catch depth in `d`.
+fn frame_handler(cpu: &mut Cpu, mut d: Vec<u32>) -> Option<u32> {
+    let info = d[D_INFO];
+    let record = d[D_RECORD];
+    // A table that isn't one is terminate(), in an unwind too.
+    let magic = read32(cpu, info)?;
+    if !CXX_MAGICS.contains(&magic) {
+        return terminate(cpu, &[]);
     }
+    let code = read32(cpu, record)?;
+    let flags = read32(cpu, record + 4)?;
+    let resume = call::here(cpu);
+    d[D_CODE] = code;
+    d[D_RESUME] = resume.0;
+    d[D_RESUME + 1] = resume.1;
     d[D_REGS..D_OUTER].copy_from_slice(&saved_registers(cpu));
     if flags & UNWINDING != 0 {
         d[0] = X_RETURN;
@@ -1173,119 +1222,134 @@ pub fn cxx_frame_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         cxx_unwind(cpu, resume, d);
         return None;
     }
+    // With no try block, nothing happens in this function.
+    if read32(cpu, info + 12)? == 0 {
+        return Some(CONTINUE_SEARCH);
+    }
     // Built with /EHs, the function handles C++ exceptions only (FuncInfo's
     // EHFlags, in MSVC 8's and later): neither the translator nor its
     // catch (...) sees another.
-    if thrown.is_none() && read32(cpu, info)? >= 0x1993_0522 && read32(cpu, info + 32)? & 1 != 0 {
+    let foreign = thrown(cpu, record)?.is_none() && !rethrow(cpu, record)?;
+    if foreign && magic >= 0x1993_0522 && read32(cpu, info + 32)? & 1 != 0 {
         return Some(CONTINUE_SEARCH);
     }
-    let under_way = match thrown {
-        Some(_) => take_exception(cpu, resume, d, thrown, None)?,
-        // With no try block, nothing happens in this function.
-        None if read32(cpu, info + 12)? == 0 => false,
-        None => {
-            let state = read32(cpu, frame + 8)? as i32;
-            d[D_DEPTH] = catch_ends(cpu, info, state)?.len() as u32 - 1;
-            search_foreign(cpu, resume, d, [record, context])?
-        }
-    };
-    if under_way {
-        return None;
-    }
-    Some(CONTINUE_SEARCH)
+    find_handler(cpu, resume, d)
 }
 
-/// The search of a function for an exception other than C++, whose record
-/// and context are `pointers`, from the catch depth `d[D_DEPTH]` out: at
-/// each the translator runs, if the thread has one, then a catch (...)
-/// takes the exception. False if it is left with no catch taking it, and
-/// nothing more to do. MSVCRT calls this from the guard of each catch block
-/// around the exception and from the function's frame: the depth stands
-/// for that here, where a catch block has no frame of its own.
-fn search_foreign(
-    cpu: &mut Cpu,
-    resume: (u32, u32),
-    mut d: Vec<u32>,
-    pointers: [u32; 2],
-) -> Option<bool> {
-    loop {
-        let at = thread_field(cpu, T_SE_TRANSLATOR);
-        let translator = at.map_or(Some(0), |at| read32(cpu, at))?;
-        if translator != 0 {
+/// MSVCRT's FindHandler: on towards the catch that takes the exception,
+/// or `end_search`. For a `throw;` the search is for the exception the
+/// running catch block took, with its record and context.
+fn find_handler(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) -> Option<u32> {
+    let state = read32(cpu, d[D_FRAME] + 8)? as i32;
+    let states = read32(cpu, d[D_INFO] + 4)? as i32;
+    if state < -1 || state >= states {
+        return terminate(cpu, &[]);
+    }
+    d[D_STATE] = state as u32;
+    if rethrow(cpu, d[D_RECORD])? {
+        let at = thread_field(cpu, T_CXX)?;
+        let current = read32(cpu, at)?;
+        if current == 0 {
+            end_search(cpu, resume, d);
+            return None;
+        }
+        d[D_RECORD] = current;
+        d[D_CONTEXT] = read32(cpu, at + 4)?;
+        if !cpu.bus.guest_probe(current, 1, false) || rethrow(cpu, current)? {
+            return terminate(cpu, &[]);
+        }
+        d[D_CODE] = read32(cpu, current)?;
+    }
+    let found = thrown(cpu, d[D_RECORD])?;
+    let Some(range) = try_range(cpu, d[D_INFO], d[D_DEPTH], state)? else {
+        return terminate(cpu, &[]);
+    };
+    (d[D_NEXT], d[D_END]) = range;
+    match found {
+        Some((object, throw)) => {
+            d[D_OBJECT] = object;
+            d[D_THROW] = throw;
+        }
+        // In a translator's guard, an exception that isn't C++.
+        None if d[D_TRANSLATOR] != 0 => return terminate(cpu, &[]),
+        None => {
+            let at = thread_field(cpu, T_SE_TRANSLATOR);
+            let translator = at.map_or(Some(0), |at| read32(cpu, at))?;
             d[0] = X_TRANSLATED;
-            if translate(cpu, translator, pointers, resume, &d)? {
-                return Some(true);
+            if translator != 0 && translate(cpu, translator, resume, &d)? {
+                return None;
             }
         }
-        let depth = d[D_DEPTH];
-        if take_exception(cpu, resume, d.clone(), None, Some(depth))? {
-            return Some(true);
-        }
-        if depth == 0 {
-            return Some(false);
-        }
-        d[D_DEPTH] = depth - 1;
     }
+    if !search_tries(cpu, resume, d.clone())? {
+        end_search(cpu, resume, d);
+    }
+    None
 }
 
-/// Go on with `search_foreign` one depth further out, or return
-/// ContinueSearch for the exception if this was the last.
-fn search_on(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>, pointers: [u32; 2]) {
-    let regs = d[D_REGS..D_OUTER].to_vec();
-    let going_on = d[D_DEPTH] != 0;
-    d[D_DEPTH] = d[D_DEPTH].wrapping_sub(1);
-    if !going_on || search_foreign(cpu, resume, d, pointers) != Some(true) {
-        restore_registers(cpu, &regs);
-        call::finish(cpu, resume, CONTINUE_SEARCH);
+/// The search of the frame found no catch, or none that kept the
+/// exception. In a translator's guard its exception is destroyed and the
+/// translator is left. In a catch block's guard a `throw;` leaves the
+/// block. Otherwise the handler returns ContinueSearch.
+fn end_search(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
+    if d[D_TRANSLATOR] != 0 {
+        d[0] = X_DROPPED;
+        let destructor = match d[D_THROW] {
+            0 => 0,
+            throw => cpu.bus.guest_read_32(throw + 4),
+        };
+        cpu.set_ecx(d[D_OBJECT]);
+        if destructor == 0 || !call_program(cpu, destructor, &[], C_CXX, resume, &d) {
+            unwind_translator(cpu, resume, d);
+        }
+        return;
     }
+    if d[D_CATCH_GUARD] != 0 && rethrow(cpu, d[D_RAW]) == Some(true) {
+        d[0] = X_RETHROWN;
+        let args = [d[D_CATCH_GUARD], 0, 0, 0];
+        if !call_program(cpu, rtl_unwind_address(), &args, C_CXX, resume, &d) {
+            super::super::fatal(cpu, "a C++ exception, and its stack is gone", None);
+        }
+        return;
+    }
+    restore_registers(cpu, &d[D_REGS..D_OUTER]);
+    call::finish(cpu, resume, CONTINUE_SEARCH);
 }
 
-/// Call the translator for the exception at `pointers` (its record and
-/// context), which reach it on the stack, inside a guard frame as
-/// MSVCRT's _CallSETranslator makes: `translator_guard` deals with what
-/// the translator raises. False, with nothing changed, if the stack isn't
-/// there.
-fn translate(
-    cpu: &mut Cpu,
-    translator: u32,
-    pointers: [u32; 2],
-    resume: (u32, u32),
-    d: &[u32],
-) -> Option<bool> {
+/// Call the translator for the exception of the search `d`, which reach
+/// it on the stack, inside a guard frame as MSVCRT's _CallSETranslator
+/// makes: `translator_guard` deals with what the translator raises.
+/// False, with nothing changed, if the stack isn't there.
+fn translate(cpu: &mut Cpu, translator: u32, resume: (u32, u32), d: &[u32]) -> Option<bool> {
     let at = cpu.esp().wrapping_sub(POINTERS_SIZE + GUARD_SIZE);
     // Room for the call's arguments and return address too.
+    let bottom = at.wrapping_sub(12);
     let size = POINTERS_SIZE + GUARD_SIZE + 12;
-    if !cpu.bus.guest_probe(at.wrapping_sub(12), size as usize, true) {
+    if !cpu.bus.guest_probe(bottom, size as usize, true) {
         return Some(false);
     }
-    let code = read32(cpu, pointers[0])?;
     let guard = at + POINTERS_SIZE;
+    write32(cpu, at, d[D_RECORD])?;
+    write32(cpu, at + 4, d[D_CONTEXT])?;
     let next = seh::handlers(cpu);
-    let handler = stub_address(dll_index(), guard_index());
-    let words = [next, handler, d[D_FRAME], d[D_INFO], 0, resume.0, resume.1];
-    let saved = &d[D_REGS..D_OUTER];
-    let depth = [d[D_DEPTH]];
-    let all = pointers.iter().chain(&words).chain(saved).chain(&depth);
-    for (i, &word) in all.enumerate() {
-        write32(cpu, at + 4 * i as u32, word)?;
-    }
+    write32(cpu, guard + G_NEXT, next)?;
+    write32(cpu, guard + 4, own_handler("__TranslatorGuardHandler"))?;
+    write32(cpu, guard + G_UNWOUND, 0)?;
+    store_search(cpu, guard + G_SEARCH, d)?;
     cpu.set_esp(at);
     seh::set_handlers(cpu, guard);
-    if call_program(cpu, translator, &[code, at], C_CXX, resume, d) {
-        return Some(true);
-    }
-    seh::set_handlers(cpu, next);
-    cpu.set_esp(resume.1);
-    Some(false)
+    let args = [d[D_CODE], at];
+    Some(call_program(cpu, translator, &args, C_CXX, resume, d))
 }
 
-/// Where the handler of a translator's guard frame is.
-fn guard_index() -> usize {
-    super::DLL
+/// Where the function of this DLL called `name` is.
+fn own_handler(name: &str) -> u32 {
+    let index = super::DLL
         .apis
         .iter()
-        .position(|api| api.name == "__TranslatorGuardHandler")
-        .expect("MSVCRT has its guard handler")
+        .position(|api| api.name == name)
+        .expect("MSVCRT has its guard handlers");
+    stub_address(dll_index(), index)
 }
 
 /// The handler of the frame around a translator, which the search for an
@@ -1293,97 +1357,62 @@ fn guard_index() -> usize {
 /// looked for in the function the translator runs for, at its catch
 /// depth, and no further: a catch there takes it, and with none it is
 /// destroyed, the translator's frames unwind and the search for the fault
-/// goes on, with no catch (...) of that depth taking the fault. Anything
-/// else ends the program: terminate().
+/// ends in this frame, with no catch (...) of that depth taking the
+/// fault. Anything else ends the program: terminate().
 pub fn translator_guard(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[record, guard, _, _] = args else {
+    let &[record, guard, context, _] = args else {
         unreachable!()
     };
-    let code = read32(cpu, record)?;
     if read32(cpu, record + 4)? & UNWINDING != 0 {
         write32(cpu, guard + G_UNWOUND, 1)?;
         return Some(CONTINUE_SEARCH);
     }
-    let Some((object, throw)) = thrown(cpu, record, code)? else {
-        return abort(cpu, &[]);
-    };
-    let resume = call::here(cpu);
-    let mut d = vec![0; D_LEN];
-    d[D_FRAME] = read32(cpu, guard + G_FRAME)?;
-    d[D_INFO] = read32(cpu, guard + G_INFO)?;
-    d[D_CODE] = code;
-    d[D_OBJECT] = object;
-    d[D_THROW] = throw;
-    d[D_REGS..D_OUTER].copy_from_slice(&saved_registers(cpu));
-    let depth = read32(cpu, guard + G_DEPTH)?;
-    if take_exception(cpu, resume, d.clone(), Some((object, throw)), Some(depth))? {
+    // RtlUnwind's call needs this stack, and the destructor's smaller one
+    // part of it. A missing page runs this stub again from here; after the
+    // search there is no stub left to run again.
+    let bottom = cpu.esp().wrapping_sub(RTL_UNWIND_CALL);
+    if !cpu.bus.guest_probe(bottom, RTL_UNWIND_CALL as usize, true) {
         return None;
     }
-    d[D_GUARD] = guard;
-    d[0] = X_DROPPED;
-    let destructor = read32(cpu, throw + 4)?;
-    cpu.set_ecx(object);
-    if destructor == 0 || !call_program(cpu, destructor, &[], C_CXX, resume, &d) {
-        unwind_translator(cpu, resume, d);
-    }
-    None
+    let outer = load_search(cpu, guard + G_SEARCH);
+    let mut d = vec![0; D_LEN];
+    d[D_FRAME] = outer[D_FRAME];
+    d[D_INFO] = outer[D_INFO];
+    d[D_DEPTH] = outer[D_DEPTH];
+    d[D_MARKER] = outer[D_MARKER];
+    d[D_RAW] = record;
+    d[D_RECORD] = record;
+    d[D_CONTEXT] = context;
+    d[D_TRANSLATOR] = guard;
+    frame_handler(cpu, d)
 }
 
-/// RtlUnwind to the guard frame `d[D_GUARD]`, unless it was done, then back
-/// to the handler that called the translator.
+/// RtlUnwind to the guard frame `d[D_TRANSLATOR]`, unless that was done,
+/// then back to the search that called the translator. `translator_guard`
+/// made sure of the stack.
 fn unwind_translator(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
-    let guard = d[D_GUARD];
+    let guard = d[D_TRANSLATOR];
+    if cpu.bus.guest_read_32(guard + G_UNWOUND) != 0 {
+        leave_translator(cpu, guard);
+        return;
+    }
     d[0] = X_LEFT_TRANSLATOR;
     let args = [guard, 0, 0, 0];
-    if cpu.bus.guest_read_32(guard + G_UNWOUND) != 0
-        || !call_program(cpu, rtl_unwind_address(), &args, C_CXX, resume, &d)
-    {
-        leave_translator(cpu, guard);
+    if !call_program(cpu, rtl_unwind_address(), &args, C_CXX, resume, &d) {
+        super::super::fatal(cpu, "a C++ exception, and its stack is gone", None);
     }
 }
 
-/// The translator's frames are gone: the handler that called it goes on
-/// where it left off, for the exception it was called for.
+/// The translator's frames are gone: the frame it ran for has no catch
+/// left for the exception it was called for.
 fn leave_translator(cpu: &mut Cpu, guard: u32) {
-    let read = |cpu: &mut Cpu, offset: u32| cpu.bus.guest_read_32(guard + offset);
-    let at = guard.wrapping_sub(POINTERS_SIZE);
-    let pointers = [cpu.bus.guest_read_32(at), cpu.bus.guest_read_32(at + 4)];
-    let next = read(cpu, G_NEXT);
-    let resume = (read(cpu, G_RESUME), read(cpu, G_RESUME + 4));
-    let mut d = vec![0; D_LEN];
-    d[D_FRAME] = read(cpu, G_FRAME);
-    d[D_INFO] = read(cpu, G_INFO);
-    d[D_CODE] = cpu.bus.guest_read_32(pointers[0]);
-    d[D_DEPTH] = read(cpu, G_DEPTH);
-    for i in 0..4 {
-        d[D_REGS + i] = read(cpu, G_REGS + 4 * i as u32);
-    }
+    let next = cpu.bus.guest_read_32(guard + G_NEXT);
+    let d = load_search(cpu, guard + G_SEARCH);
+    let resume = (d[D_RESUME], d[D_RESUME + 1]);
     seh::set_handlers(cpu, next);
     call::unwound_to(cpu, resume.1);
     cpu.set_esp(resume.1);
-    search_on(cpu, resume, d, pointers);
-}
-
-/// Find the frame's catch that takes the exception and go on towards it.
-/// False if it has none.
-fn take_exception(
-    cpu: &mut Cpu,
-    resume: (u32, u32),
-    mut d: Vec<u32>,
-    thrown: Option<(u32, u32)>,
-    depth: Option<u32>,
-) -> Option<bool> {
-    let found = find_catch(cpu, d[D_FRAME], d[D_INFO], thrown, depth)?;
-    let Some((entry, handler, catchable)) = found else {
-        return Some(false);
-    };
-    d[D_TRY] = entry;
-    d[D_HANDLER] = handler;
-    d[D_TARGET] = read32(cpu, entry)?;
-    if !catch_object(cpu, resume, &mut d, catchable)? {
-        unwind_above(cpu, resume, d);
-    }
-    Some(true)
+    end_search(cpu, resume, d);
 }
 
 /// _set_se_translator(function): the thread's translator of exceptions
@@ -1395,76 +1424,160 @@ pub fn set_se_translator(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(old)
 }
 
-/// The object and ThrowInfo of a C++ exception, None for another.
-fn thrown(cpu: &mut Cpu, record: u32, code: u32) -> Option<Option<(u32, u32)>> {
-    if code != CXX_EXCEPTION || read32(cpu, record + 16)? < 3 {
+/// set_terminate(function): the thread's terminate handler; returns the
+/// one before it.
+pub fn set_terminate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = thread_field(cpu, T_TERMINATE)?;
+    let old = read32(cpu, at)?;
+    write32(cpu, at, args[0])?;
+    Some(old)
+}
+
+/// set_unexpected(function): the thread's unexpected handler; returns the
+/// one before it.
+pub fn set_unexpected(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let at = thread_field(cpu, T_UNEXPECTED)?;
+    let old = read32(cpu, at)?;
+    write32(cpu, at, args[0])?;
+    Some(old)
+}
+
+/// terminate(): the thread's terminate handler, inside a frame that makes
+/// anything it raises the end of the program, then abort().
+pub fn terminate(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let at = thread_field(cpu, T_TERMINATE)?;
+    let handler = read32(cpu, at)?;
+    if handler == 0 {
+        return abort(cpu, &[]);
+    }
+    let at = cpu.esp().wrapping_sub(8);
+    let next = seh::handlers(cpu);
+    write32(cpu, at, next)?;
+    write32(cpu, at + 4, own_handler("__TerminateGuardHandler"))?;
+    cpu.set_esp(at);
+    seh::set_handlers(cpu, at);
+    let resume = call::here(cpu);
+    let mut d = vec![0; D_LEN];
+    d[0] = X_TERMINATED;
+    if call_program(cpu, handler, &[], C_CXX, resume, &d) {
+        return None;
+    }
+    abort(cpu, &[])
+}
+
+/// The handler of the frame `terminate` puts around its handler.
+pub fn terminate_guard(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if read32(cpu, args[0] + 4)? & UNWINDING != 0 {
+        return Some(CONTINUE_SEARCH);
+    }
+    abort(cpu, &[])
+}
+
+/// unexpected(): the thread's unexpected handler, if it has one, then
+/// terminate().
+pub fn unexpected(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let at = thread_field(cpu, T_UNEXPECTED)?;
+    let handler = read32(cpu, at)?;
+    let resume = call::here(cpu);
+    let mut d = vec![0; D_LEN];
+    d[0] = X_UNEXPECTED;
+    if handler != 0 && call_program(cpu, handler, &[], C_CXX, resume, &d) {
+        return None;
+    }
+    terminate(cpu, &[])
+}
+
+/// Where `cxx_unhandled_filter` is.
+pub fn cxx_unhandled_filter_address() -> u32 {
+    own_handler("__CxxUnhandledExceptionFilter")
+}
+
+/// The filter MSVCRT.DLL sets when it loads: terminate() for a C++
+/// exception nothing took. For another it returns 0, and the process ends
+/// as it does with no filter. (MSVCRT.DLL calls a filter set before it
+/// loaded; here one set before stays in place of this one.)
+pub fn cxx_unhandled_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let record = read32(cpu, args[0])?;
+    if read32(cpu, record)? == CXX_EXCEPTION
+        && read32(cpu, record + 16)? == 3
+        && read32(cpu, record + 20)? == CXX_MAGIC
+    {
+        return terminate(cpu, &[]);
+    }
+    Some(0)
+}
+
+/// Whether the record at `record` is a `throw;`: a C++ exception with no
+/// ThrowInfo.
+fn rethrow(cpu: &mut Cpu, record: u32) -> Option<bool> {
+    Some(
+        read32(cpu, record)? == CXX_EXCEPTION
+            && read32(cpu, record + 16)? == 3
+            && read32(cpu, record + 20)? == CXX_MAGIC
+            && read32(cpu, record + 28)? == 0,
+    )
+}
+
+/// The object and ThrowInfo of a C++ exception, None for another and for
+/// a `throw;`. A record with code E06D7363h and another shape counts as
+/// another.
+fn thrown(cpu: &mut Cpu, record: u32) -> Option<Option<(u32, u32)>> {
+    if read32(cpu, record)? != CXX_EXCEPTION || read32(cpu, record + 16)? != 3 {
         return Some(None);
     }
-    if !CXX_MAGICS.contains(&read32(cpu, record + 20)?) {
+    if read32(cpu, record + 20)? != CXX_MAGIC {
         return Some(None);
     }
     let throw = read32(cpu, record + 28)?;
     Some((throw != 0).then_some((read32(cpu, record + 24)?, throw)))
 }
 
-/// The ends of the function's ranges of try blocks by catch depth, as
-/// MSVCRT's GetRangeOfTrysToCheck counts them. The map has inner try
-/// blocks first, so each try whose catch block `state` is in divides it:
-/// the tries after the first of those are the ones around all those
-/// catches (depth 0), those between it and the next are in its catch
-/// block (depth 1), and so on. The list has the end of depth 0 first; its
-/// length less one is the deepest depth.
-fn catch_ends(cpu: &mut Cpu, info: u32, state: i32) -> Option<Vec<u32>> {
-    let tries = read32(cpu, info + 12)?.min(MAX_ENTRIES);
+/// The try blocks of the function, first and past the last, at catch
+/// depth `depth` in `state`, as MSVCRT's GetRangeOfTrysToCheck counts
+/// them. The map has inner try blocks first, so each try whose catch block
+/// `state` is in divides it: the tries after the last of those are the
+/// ones around all those catches (depth 0), those before it and after the
+/// one before are in its catch block (depth 1), and so on. None if the
+/// table has no such range, which is terminate().
+fn try_range(cpu: &mut Cpu, info: u32, depth: u32, state: i32) -> Option<Option<(u32, u32)>> {
+    let tries = read32(cpu, info + 12)?;
     let map = read32(cpu, info + 16)?;
-    let mut ends = vec![tries];
-    for i in (0..tries).rev() {
-        let entry = map.wrapping_add(20 * i);
-        let high = read32(cpu, entry + 4)? as i32;
-        let catch_high = read32(cpu, entry + 8)? as i32;
-        if high < state && state <= catch_high {
-            ends.push(i);
+    let (mut at, mut end, mut last) = (tries, tries, tries);
+    let mut left = depth as i32;
+    while left >= 0 {
+        if at == u32::MAX {
+            return Some(None);
+        }
+        at = at.wrapping_sub(1);
+        let entry = map.wrapping_add(20u32.wrapping_mul(at));
+        let divides = at == u32::MAX
+            || (read32(cpu, entry + 4)? as i32) < state && state <= read32(cpu, entry + 8)? as i32;
+        if divides {
+            left -= 1;
+            end = last;
+            last = at;
         }
     }
-    Some(ends)
+    let start = at.wrapping_add(1);
+    Some((end <= tries && start <= end).then_some((start, end)))
 }
 
-/// The try block, handler and catchable type (none for an exception
-/// other than C++) of the first catch of the function in the state the
-/// frame is in that takes the exception: of all its try blocks, or with
-/// `depth` of those at that catch depth.
-fn find_catch(
-    cpu: &mut Cpu,
-    frame: u32,
-    info: u32,
-    thrown: Option<(u32, u32)>,
-    depth: Option<u32>,
-) -> Option<Option<(u32, u32, Option<u32>)>> {
-    let state = read32(cpu, frame + 8)? as i32;
-    let tries = read32(cpu, info + 12)?.min(MAX_ENTRIES);
-    let map = read32(cpu, info + 16)?;
-    let range = match depth {
-        None => 0..tries,
-        Some(depth) => {
-            let ends = catch_ends(cpu, info, state)?;
-            let depth = depth as usize;
-            let start = ends.get(depth + 1).map_or(0, |at| at + 1);
-            start..ends.get(depth).copied().unwrap_or(0)
+/// Go through the try blocks left in the search for one the frame's state
+/// is in with a catch that takes the exception, and on towards it. False
+/// if there is none.
+fn search_tries(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) -> Option<bool> {
+    let map = read32(cpu, d[D_INFO] + 16)?;
+    let state = d[D_STATE] as i32;
+    let throw = d[D_THROW];
+    let mut types = Vec::new();
+    if throw != 0 {
+        let list = read32(cpu, throw + 12)?;
+        let n = read32(cpu, list)?.min(MAX_ENTRIES);
+        for i in 0..n {
+            types.push(read32(cpu, list + 4 + 4 * i)?);
         }
-    };
-    let types = match thrown {
-        Some((_, throw)) => {
-            let list = read32(cpu, throw + 12)?;
-            let n = read32(cpu, list)?.min(MAX_ENTRIES);
-            let mut types = Vec::new();
-            for i in 0..n {
-                types.push(read32(cpu, list + 4 + 4 * i)?);
-            }
-            types
-        }
-        None => Vec::new(),
-    };
-    for i in range {
+    }
+    for i in d[D_NEXT]..d[D_END].min(MAX_ENTRIES) {
         let entry = map.wrapping_add(20 * i);
         let low = read32(cpu, entry)? as i32;
         let high = read32(cpu, entry + 4)? as i32;
@@ -1477,20 +1590,41 @@ fn find_catch(
             let handler = handlers.wrapping_add(16 * c);
             // For an exception other than C++ only the try's last handler
             // counts, which is a catch (...) if the try has one.
-            let Some((_, throw)) = thrown else {
+            if throw == 0 {
                 if c + 1 == catches && catches_all(cpu, handler)? {
-                    return Some(Some((entry, handler, None)));
+                    d[D_NEXT] = i + 1;
+                    return take_exception(cpu, resume, d, entry, handler, None);
                 }
                 continue;
-            };
+            }
             for &catchable in &types {
                 if type_matches(cpu, handler, catchable, throw)? {
-                    return Some(Some((entry, handler, Some(catchable))));
+                    d[D_NEXT] = i + 1;
+                    let catchable = Some(catchable);
+                    return take_exception(cpu, resume, d, entry, handler, catchable);
                 }
             }
         }
     }
-    Some(None)
+    Some(false)
+}
+
+/// Go on towards the catch at `handler` of the try at `entry`.
+fn take_exception(
+    cpu: &mut Cpu,
+    resume: (u32, u32),
+    mut d: Vec<u32>,
+    entry: u32,
+    handler: u32,
+    catchable: Option<u32>,
+) -> Option<bool> {
+    d[D_TRY] = entry;
+    d[D_HANDLER] = handler;
+    d[D_TARGET] = read32(cpu, entry)?;
+    if !catch_object(cpu, resume, &mut d, catchable)? {
+        unwind_above(cpu, resume, d);
+    }
+    Some(true)
 }
 
 /// The name of the type whose descriptor is at `at`.
@@ -1601,14 +1735,19 @@ fn catch_object(
     Some(false)
 }
 
-/// RtlUnwind to the frame that catches, then its objects in the try.
+/// RtlUnwind to the frame that catches or the guard the search started
+/// in, then the function's objects in the try.
 fn unwind_above(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     d[0] = X_GLOBAL;
-    let frame = d[D_FRAME];
+    let target = if d[D_MARKER] != 0 {
+        d[D_MARKER]
+    } else {
+        d[D_FRAME]
+    };
     if !call_program(
         cpu,
         rtl_unwind_address(),
-        &[frame, 0, 0, 0],
+        &[target, 0, 0, 0],
         C_CXX,
         resume,
         &d,
@@ -1619,7 +1758,8 @@ fn unwind_above(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
 
 /// Destroy the frame's objects from its state down to d[D_TARGET], each
 /// with the code its state's entry of the unwind map has, then return
-/// ContinueSearch (X_RETURN) or call the catch block.
+/// ContinueSearch (X_RETURN) or call the catch block. A state outside the
+/// map is terminate().
 fn cxx_unwind(cpu: &mut Cpu, resume: (u32, u32), d: Vec<u32>) {
     let (frame, info) = (d[D_FRAME], d[D_INFO]);
     let target = d[D_TARGET] as i32;
@@ -1627,8 +1767,12 @@ fn cxx_unwind(cpu: &mut Cpu, resume: (u32, u32), d: Vec<u32>) {
     let map = cpu.bus.guest_read_32(info + 8);
     for _ in 0..MAX_ENTRIES {
         let state = cpu.bus.guest_read_32(frame + 8) as i32;
-        if cpu.bus.guest_faulted() || state <= target || state >= states {
+        if cpu.bus.guest_faulted() || state == target || states == 0 {
             break;
+        }
+        if state < 0 || state >= states {
+            terminate(cpu, &[]);
+            return;
         }
         let entry = map.wrapping_add((state as u32).wrapping_mul(8));
         let before = cpu.bus.guest_read_32(entry);
@@ -1653,8 +1797,8 @@ fn cxx_unwind(cpu: &mut Cpu, resume: (u32, u32), d: Vec<u32>) {
     }
 }
 
-/// Call the catch block, in the state after its try, with the thread's
-/// exception this one for a `throw;` in it.
+/// Call the catch block, in the state after its try, inside a guard
+/// frame, with the thread's exception this one for a `throw;` in it.
 fn call_catch(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     let frame = d[D_FRAME];
     let high = cpu.bus.guest_read_32(d[D_TRY] + 4);
@@ -1662,27 +1806,84 @@ fn call_catch(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     cpu.bus.guest_write_32(frame + 8, high.wrapping_add(1));
     d[D_ESP] = cpu.bus.guest_read_32(frame.wrapping_sub(4));
     if let Some(at) = thread_field(cpu, T_CXX) {
-        for i in 0..3 {
-            d[D_OUTER + i] = cpu.bus.guest_read_32(at + 4 * i as u32);
-        }
-        for (i, value) in [d[D_CODE], d[D_OBJECT], d[D_THROW]].into_iter().enumerate() {
-            cpu.bus.guest_write_32(at + 4 * i as u32, value);
-        }
+        d[D_OUTER] = cpu.bus.guest_read_32(at);
+        d[D_OUTER + 1] = cpu.bus.guest_read_32(at + 4);
+        cpu.bus.guest_write_32(at, d[D_RECORD]);
+        cpu.bus.guest_write_32(at + 4, d[D_CONTEXT]);
     }
     d[0] = X_CAUGHT;
     cpu.set_ebp(frame + 12);
-    if cpu.bus.guest_faulted() || !call_program(cpu, block, &[], C_CXX, resume, &d) {
+    let guard = cpu.esp().wrapping_sub(CATCH_GUARD_SIZE);
+    let there = cpu.bus.guest_probe(guard, CATCH_GUARD_SIZE as usize, true);
+    let next = seh::handlers(cpu);
+    let handler = own_handler("__CatchGuardHandler");
+    if there {
+        cpu.bus.guest_write_32(guard, next);
+        cpu.bus.guest_write_32(guard + 4, handler);
+        store_search(cpu, guard + K_SEARCH, &d);
+        cpu.set_esp(guard);
+        seh::set_handlers(cpu, guard);
+    }
+    if !there || cpu.bus.guest_faulted() || !call_program(cpu, block, &[], C_CXX, resume, &d) {
         super::super::fatal(cpu, "a C++ exception, and its catch block is gone", None);
     }
 }
 
+/// The handler of the frame around a catch block. For an exception raised
+/// in the block it looks at the try blocks in the catch block, one catch
+/// depth in, with the translator's call that belongs to them, then a
+/// `throw;` leaves the block and the search that found its catch goes on.
+/// An unwind ends the block as its return does.
+pub fn catch_guard(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[record, guard, context, _] = args else {
+        unreachable!()
+    };
+    let outer = load_search(cpu, guard + K_SEARCH);
+    if read32(cpu, record + 4)? & UNWINDING != 0 {
+        leave_catch(cpu, &outer);
+        let resume = call::here(cpu);
+        let mut d = vec![0; D_LEN];
+        d[0] = X_ABANDONED;
+        d[D_REGS..D_OUTER].copy_from_slice(&saved_registers(cpu));
+        let destructor = match outer[D_THROW] {
+            0 => 0,
+            throw => read32(cpu, throw + 4)?,
+        };
+        cpu.set_ecx(outer[D_OBJECT]);
+        if destructor != 0 && call_program(cpu, destructor, &[], C_CXX, resume, &d) {
+            return None;
+        }
+        restore_registers(cpu, &d[D_REGS..D_OUTER]);
+        return Some(CONTINUE_SEARCH);
+    }
+    let mut d = vec![0; D_LEN];
+    d[D_FRAME] = outer[D_FRAME];
+    d[D_INFO] = outer[D_INFO];
+    d[D_DEPTH] = outer[D_DEPTH] + 1;
+    d[D_MARKER] = guard;
+    d[D_CATCH_GUARD] = guard;
+    d[D_RAW] = record;
+    d[D_RECORD] = record;
+    d[D_CONTEXT] = context;
+    frame_handler(cpu, d)
+}
+
+/// What the end of a catch block restores: the function's saved ESP and
+/// the thread's exception from before the catch.
+fn leave_catch(cpu: &mut Cpu, d: &[u32]) {
+    cpu.bus.guest_write_32(d[D_FRAME].wrapping_sub(4), d[D_ESP]);
+    if let Some(at) = thread_field(cpu, T_CXX) {
+        cpu.bus.guest_write_32(at, d[D_OUTER]);
+        cpu.bus.guest_write_32(at + 4, d[D_OUTER + 1]);
+    }
+}
+
 /// The catch block returned where the function goes on: the exception's
-/// object destroyed, by its destructor where it has one, unless a catch
-/// around this one (which rethrew it with `throw;`) still has it.
+/// object destroyed, by its destructor where it has one.
 fn destroy_object(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
+    leave_catch(cpu, &d);
     d[0] = X_DESTROYED;
-    let outer_has_it = d[D_OUTER + 1] == d[D_OBJECT];
-    if d[D_THROW] != 0 && d[D_OBJECT] != 0 && !outer_has_it {
+    if d[D_THROW] != 0 {
         let destructor = cpu.bus.guest_read_32(d[D_THROW] + 4);
         if !cpu.bus.guest_faulted() && destructor != 0 {
             cpu.set_ecx(d[D_OBJECT]);
@@ -1694,21 +1895,15 @@ fn destroy_object(cpu: &mut Cpu, resume: (u32, u32), mut d: Vec<u32>) {
     go_on(cpu, &d);
 }
 
-/// On in the function after its try, with its stack and frame, and the
-/// thread's exception the one before the catch.
+/// On in the function after its try, with its stack and frame.
 fn go_on(cpu: &mut Cpu, d: &[u32]) {
-    if let Some(at) = thread_field(cpu, T_CXX) {
-        for i in 0..3 {
-            cpu.bus.guest_write_32(at + 4 * i as u32, d[D_OUTER + i]);
-        }
-    }
     let frame = d[D_FRAME];
     let esp = d[D_ESP];
-    cpu.bus.guest_write_32(frame.wrapping_sub(4), esp);
+    let head = if d[D_MARKER] != 0 { d[D_MARKER] } else { frame };
     let tib = super::super::process(cpu)
         .current_thread()
         .map_or(0, |t| t.tib);
-    cpu.bus.guest_write_32(tib, frame);
+    cpu.bus.guest_write_32(tib, head);
     if let Some(thread) = super::super::process(cpu).current_thread_mut() {
         thread.fault.clear();
     }
@@ -1716,6 +1911,23 @@ fn go_on(cpu: &mut Cpu, d: &[u32]) {
     cpu.set_esp(esp);
     call::unwound_to(cpu, esp);
     cpu.set_eip(d[D_GO_ON]);
+}
+
+/// A `throw;` left the catch block of the guard `guard`, whose search goes
+/// on where the catch was found, for the exception it was for: with the
+/// next try block, then ContinueSearch for it, so that outer frames see
+/// that exception's record. The block's object lives on with it.
+fn left_by_rethrow(cpu: &mut Cpu, guard: u32) {
+    let next = cpu.bus.guest_read_32(guard);
+    let d = load_search(cpu, guard + K_SEARCH);
+    leave_catch(cpu, &d);
+    let resume = (d[D_RESUME], d[D_RESUME + 1]);
+    seh::set_handlers(cpu, next);
+    call::unwound_to(cpu, resume.1);
+    cpu.set_esp(resume.1);
+    if search_tries(cpu, resume, d.clone()) != Some(true) {
+        end_search(cpu, resume, d);
+    }
 }
 
 /// A call `cxx_frame_handler` made returned: its next step.
@@ -1738,44 +1950,33 @@ pub fn cxx_returned(cpu: &mut Cpu, value: u32, call: Call) {
         X_TRANSLATED => {
             let next = cpu.bus.guest_read_32(call.esp + POINTERS_SIZE + G_NEXT);
             seh::set_handlers(cpu, next);
-            let pointers = [
-                cpu.bus.guest_read_32(call.esp),
-                cpu.bus.guest_read_32(call.esp + 4),
-            ];
             cpu.set_esp(call.resume.1);
-            let depth = Some(d[D_DEPTH]);
-            if take_exception(cpu, call.resume, d.clone(), None, depth) != Some(true) {
-                search_on(cpu, call.resume, d, pointers);
+            if search_tries(cpu, call.resume, d.clone()) != Some(true) {
+                end_search(cpu, call.resume, d);
             }
         }
         X_DROPPED => unwind_translator(cpu, call.resume, d),
-        X_LEFT_TRANSLATOR => leave_translator(cpu, d[D_GUARD]),
+        X_LEFT_TRANSLATOR => leave_translator(cpu, d[D_TRANSLATOR]),
+        X_RETHROWN => left_by_rethrow(cpu, d[D_CATCH_GUARD]),
+        X_ABANDONED => {
+            restore_registers(cpu, &d[D_REGS..D_OUTER]);
+            call::finish(cpu, call.resume, CONTINUE_SEARCH);
+        }
+        X_TERMINATED => {
+            abort(cpu, &[]);
+        }
+        X_UNEXPECTED => {
+            terminate(cpu, &[]);
+        }
         _ => cxx_unwind(cpu, call.resume, d),
     }
 }
 
 /// _CxxThrowException(object, type): the C++ exception, E06D7363h. With
-/// no type (`throw;`), the exception the running catch block took again.
+/// no type it is a `throw;`, which `find_handler` looks up.
 pub fn cxx_throw_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (mut object, mut throw) = (args[0], args[1]);
-    if throw == 0 {
-        let at = thread_field(cpu, T_CXX)?;
-        let code = read32(cpu, at)?;
-        // `throw;` with no exception being caught: terminate().
-        if code == 0 {
-            return abort(cpu, &[]);
-        }
-        if code != CXX_EXCEPTION {
-            return kernel32(cpu, "RaiseException", &[code, 0, 0, 0]);
-        }
-        object = read32(cpu, at + 4)?;
-        throw = read32(cpu, at + 8)?;
-    }
-    let params = thread_field(cpu, T_SCRATCH)?;
-    write32(cpu, params, CXX_MAGIC)?;
-    write32(cpu, params + 4, object)?;
-    write32(cpu, params + 8, throw)?;
-    kernel32(cpu, "RaiseException", &[CXX_EXCEPTION, 1, 3, params])
+    let params = [CXX_MAGIC, args[0], args[1]];
+    seh::raise_from_call(cpu, 2, CXX_EXCEPTION, 1, &params)
 }
 
 /// Functions with nothing to do: type_info's destructor, _lock, _unlock.

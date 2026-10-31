@@ -181,9 +181,9 @@ const S_SIGNALS: u32 = 0x80;
 /// place (_mbstok's too) and wcstok's, the translator _set_se_translator
 /// set, the floating-point error signal's code, and the buffers of
 /// gmtime, asctime, tmpnam, the ecvt family, _wasctime, the exception
-/// the running catch block took (its code, object and ThrowInfo, for
-/// `throw;`), and room for what a function writes for a KERNEL32 one it
-/// calls.
+/// the running catch block took (its record and context, for `throw;`),
+/// the terminate and unexpected handlers, and room for what a function
+/// writes for a KERNEL32 one it calls.
 const T_ERRNO: u32 = 0x00;
 const T_DOSERRNO: u32 = 0x04;
 const T_RAND: u32 = 0x08;
@@ -191,12 +191,14 @@ const T_STRTOK: u32 = 0x0C;
 const T_SE_TRANSLATOR: u32 = 0x10;
 const T_FPECODE: u32 = 0x14;
 const T_WCSTOK: u32 = 0x18;
+const T_UNEXPECTED: u32 = 0x1C;
 const T_TM: u32 = 0x20;
 const T_ASCTIME: u32 = 0x50;
 const T_TMPNAM: u32 = 0x80;
 const T_CVT: u32 = 0x190;
 const T_WASCTIME: u32 = 0x300;
 const T_CXX: u32 = 0x334;
+const T_TERMINATE: u32 = 0x33C;
 const T_SCRATCH: u32 = 0x340;
 const THREAD_BLOCK: u32 = 0x400;
 
@@ -660,6 +662,9 @@ fn error_text(errno: u32) -> &'static str {
 /// standard streams and descriptors, the character tables, the version,
 /// the command line split into arguments and the environment.
 fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
+    if process.exception_filter == 0 {
+        process.exception_filter = startup::cxx_unhandled_filter_address();
+    }
     let mut w = Writer { bus, process };
     // The standard streams: stdin reads, stdout and stderr write.
     for (i, flag) in [stdio::IOREAD, stdio::IOWRT, stdio::IOWRT]

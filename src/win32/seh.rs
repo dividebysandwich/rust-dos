@@ -594,13 +594,27 @@ pub fn raise_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let params: Vec<u32> = (0..count)
         .map(|i| cpu.bus.guest_read_32(at.wrapping_add(4 * i)))
         .collect();
+    raise_from_call(cpu, 4, code, flags, &params)
+}
+
+/// Raise the exception from the function the running stub is of, which
+/// takes `args` arguments: at the caller's context after the call. The
+/// context goes below those arguments, whatever their number, so that it
+/// leaves the caller's stack alone.
+pub fn raise_from_call(
+    cpu: &mut Cpu,
+    args: u32,
+    code: u32,
+    flags: u32,
+    params: &[u32],
+) -> Option<u32> {
     let mut ctx = Context::of(cpu);
     let esp = cpu.esp();
     ctx.eip = cpu.bus.guest_read_32(esp);
     if cpu.bus.guest_faulted() {
         return None;
     }
-    ctx.gpr[ESP] = esp + 4 + 16;
+    ctx.gpr[ESP] = esp + 4 + 4 * args;
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.fault.clear();
     }
@@ -612,7 +626,7 @@ pub fn raise_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         code,
         flags & NONCONTINUABLE,
         ctx.eip,
-        &params,
+        params,
     );
     None
 }
