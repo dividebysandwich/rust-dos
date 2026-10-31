@@ -145,11 +145,12 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   renderer and why OpenGL 3 wasn't there.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
-  counts how often the output device ran dry, and `sound_blaster` is the
-  card's BLASTER string for where it answers now, after a driver or a Plug
-  and Play configuration moved it (null without a card, or while a
-  ViBRA16C's audio device is inactive). To listen or analyse, record
-  `/ws/audio`: a JSON format header, then s16le stereo PCM at 44.1 kHz
+  counts the video frames that found the output device's queue empty (see
+  `/api/underruns` below), and `sound_blaster` is the card's BLASTER string
+  for where it answers now, after a driver or a Plug and Play configuration
+  moved it (null without a card, or while a ViBRA16C's audio device is
+  inactive). To listen or analyse, record `/ws/audio`: a JSON format
+  header, then s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
   MPU-401 (`soundfont`, `gus` or `none`), with its active voices and any
@@ -157,6 +158,52 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   through MSCDEX: the drive, `playing`, `paused` or `stopped`, the track
   and the position (MM:SS:FF), or null when nothing was played; the log
   has a `[MSCDEX] Play audio` line for each Play request.
+- **Find what ran the sound device dry with `/api/underruns`.** The queue
+  is looked at once a video frame. `dry_checks` counts the looks that found
+  it empty (`audio.underruns` of `/api/status`), and `events` the stretches
+  of them in a row. A dry check fills the queue up to its target, with
+  silence if it has to, so each check after the first in a stretch means
+  the device played all of that and ran out again: three in a row are
+  three gaps with the target's length of sound or silence between them,
+  and one event. A check while the machine is paused or in the settings
+  window counts as neither and ends a stretch. The first check after the
+  start finds the queue empty, so `events` starts at 1.
+
+  Measure underruns on a real sound device (on Windows,
+  `SDL_AUDIODRIVER=wasapi`). SDL's `dummy` driver, which headless runs
+  often use, plays nothing and runs faster than real time: on Windows 11
+  it took 512 frames about every 11.4 ms, 44,940 frames a second where
+  WASAPI took 44,120. The resampling that holds the queue at its target
+  makes up 0.5% at most, so the queue runs out every few seconds however
+  well the host keeps up. Myth: The Fallen Lords gave 10 to 13 dry checks
+  a minute on `dummy` with no frame over 18 ms, and under 1 a minute on
+  WASAPI. Such events have a `gap_ms` shorter than `queued_after_ms`. On
+  `dummy`, compare counts only for what a slow frame adds to that steady
+  rate, and don't read a few a minute as a problem.
+
+  `log` has the last 32 events, oldest first, each described at the check
+  that started it: `event` (its number), `at_ms` (host time since the frame
+  loop started), `gap_ms` (the time since the previous check),
+  `queued_before_ms` and `queued_after_ms` (the queue when the previous
+  check came and when it had added its sound; null at the first check),
+  `target_ms` (the queue it aims for), `speed` (emulated seconds a wall
+  second over the last quarter second), `gap_speed` (the same over
+  `gap_ms`), `cycles_per_ms`, `dry_checks` and `stretch_ms` (the checks of
+  this stretch and the time from the first to the last). A gap longer than
+  `queued_after_ms` is what runs the device dry.
+
+  `split_ms` divides `gap_ms` by what the main thread did: `cpu` (running
+  the machine, with whatever devices do as it runs, such as a 3dfx card's
+  triangles drawn on the main thread), `video` (bringing the picture up to
+  date and composing it), `present` (handing it to the window), `wait`
+  (waiting for the frame's time, which is sleep) and `other` (the host's
+  events, the debug server's requests, rewind's states, the sound itself).
+  Its parts add up to `gap_ms`. The check comes after the machine's run and
+  before the picture, so a split holds the picture of one frame and the
+  machine's run of the next. `other` also holds time the debug server
+  took, such as a state load, and a load moves emulated time, so the
+  `gap_speed` of the gap it fell in says nothing. None of these numbers
+  are in save states.
 - **Gravis Ultrasound:** the built-in Gravis patch set is on the
   read-only drive X: in `X:\ULTRASND`, where `ULTRADIR` points, so a game
   needs no copy of the Ultrasound software on C:. `/api/gus` shows the IRQ
@@ -1096,7 +1143,9 @@ for protected-mode programs only), `flips` (display start changes),
 and divide: a game's frame rate at a few fixed speeds shows where it
 stops growing.
 Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
-and the speed it chose printed to stderr.
+and the speed it chose printed to stderr, with `longest_frame`, the longest
+host frame during the measurement (`none` in a frontend that doesn't time
+its frames).
 
 ### Where the emulator's time goes (profiling)
 
@@ -1286,9 +1335,13 @@ address mapped to when it was set.
   counts the window's frames), and `cpu_use` is the percent of the wall
   time the emulator's main thread works (running the machine and drawing
   the picture), so 100 minus it is that thread's time to spare, on one host
-  core. Use a
-  release build and a CPU-bound scene, such as the Stunts intro, when
-  comparing emulator changes.
+  core. Its `frame_times` object covers the host's last 1024 frames while
+  the machine runs (about 17 s at 60 frames a second), from one start of
+  the main loop to the next, waiting included: `frames` and `seconds`
+  (how many so far, and how long they took), `longest_ms`, and the
+  nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
+  build and a CPU-bound scene, such as the Stunts intro, when comparing
+  emulator changes.
 - **Coarse timestamps.** Trace times are sampled once per frame (about
   16 ms). Use `icount` for exact ordering.
 - **Ring buffer size.** The trace ring holds 1,000,000 instructions by
