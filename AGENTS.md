@@ -93,18 +93,30 @@ disk.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
-- Don't take timings while other builds run. Measure on a quiet machine,
-  or compare CI's step times instead.
+- A timing measurement is one whose number is quoted as evidence: a
+  speed ratio, a CPU or halted share, a frame time, or a benchmark score.
+  It runs alone. No build, test or other emulator may run during it, and
+  the run is retaken if one starts. Check the running processes by command
+  line at the start and at the end of each run.
+- Everything else runs alongside builds: a cursor position, a window's
+  behaviour, a screenshot, an audio capture checked for correctness, a log
+  count, a trace, or a reproduction boot. Its result doesn't depend on the
+  host's speed, so it can run during a build. Only a number you will quote
+  as evidence needs the quiet machine.
 - Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
-  Bash on Windows). Builds, tests and emulator runs may run together:
-  `bash tools/run-lock.sh heavy NAME -- cargo test ...`. Only
-  measurements are exclusive:
-  `bash tools/run-lock.sh measure NAME -- CMD...` blocks new heavy jobs,
+  Bash on Windows). Builds, tests and every emulator run that isn't a
+  timing measurement take the heavy form, so they run together:
+  `bash tools/run-lock.sh heavy NAME 0 -- cargo test ...`. Only timing
+  measurements take the exclusive form:
+  `bash tools/run-lock.sh measure NAME 0 -- CMD...` blocks new heavy jobs,
   waits for the running ones to end, and then runs alone, in the order
   measurements asked. Either form releases when the command ends and
-  passes on its exit code. If the script says it timed out, the command
-  did not run; run the script again within 2 minutes to keep your place
-  in line. Never call one form inside the other: that deadlocks.
+  passes on its exit code. The third argument is the longest wait in
+  seconds; `0` waits without limit, which is the right value for queued
+  work. If the script exits with code 3, the command did not run: check
+  `status`, and if the job is still wanted, run the same command again at
+  once under the same NAME. Never call one form inside the other: that
+  deadlocks.
   `status` shows what runs and waits, and `clear NAME` cleans up after a
   stopped worker. NAME is yours alone. The lock lives in
   `RUST_DOS_RUN_LOCK_DIR` (by default `~/.rust-dos-run-lock`), so all
