@@ -2787,6 +2787,9 @@ mod tests {
         };
         let hwnd = user(&mut cpu).new_window(w).expect("a window");
         let state = user(&mut cpu);
+        if let Some(w) = state.window_mut(hwnd) {
+            w.style &= !WS_VISIBLE;
+        }
         state.desktop = true;
         state.input.cursor = (100, 120);
         let before = under_cursor(state);
