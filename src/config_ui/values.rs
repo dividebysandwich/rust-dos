@@ -292,6 +292,7 @@ impl Item {
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
             VersionCheck => on_off(|s, on| s.version_check = on),
             AlmanacAuto => on_off(|s, on| s.almanac_auto = on),
+            GameFixes => on_off(|s, on| s.game_fixes = on),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),

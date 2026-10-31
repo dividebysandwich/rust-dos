@@ -48,6 +48,8 @@ pub fn configure(cpu: &mut Cpu, settings: &Settings, host_layout: &'static crate
     cpu.set_fpu_fast(settings.fpu_fast);
     cpu.bus.observe.enabled = settings.idle_skip;
     cpu.bus.idle_hint = settings.idle_hint;
+    cpu.bus.game_fixes = settings.game_fixes;
+    cpu.bus.game_fixes_off = settings.game_fixes_off.clone();
     crate::video::bios::install(&mut cpu.bus, settings.video_setup());
     cpu.bus.configure_voodoo(settings.voodoo_board());
     cpu.bus.set_voodoo_texture_sampling(settings.voodoo.texture_sampling);

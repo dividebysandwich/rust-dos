@@ -37,6 +37,8 @@ pub type Handler = fn(&mut Cpu, &[u32]) -> Option<u32>;
 pub struct Api {
     pub name: &'static str,
     /// Its ordinal, or 0 for the DLL's own code, which it doesn't export.
+    /// A DLL Windows 98 has exports it under Windows 98's ordinal for its
+    /// name instead (ordinals.rs).
     pub ordinal: u16,
     /// How many 32-bit arguments it takes.
     pub args: u8,
@@ -117,6 +119,7 @@ pub static DLLS: &[&Dll] = &[
     &super::ws2_32::DLL,
     &super::msimg32::DLL,
     &super::opengl32::DLL,
+    &super::wow32::DLL,
     &super::dinput::DLL8,
 ];
 
@@ -288,9 +291,13 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
         pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
     );
     debug_assert_eq!(rva, CODE_RVA);
+    // Exported under Windows 98's ordinals (ordinals.rs).
+    let win98 = super::ordinals::win98(dll.name);
+    let ordinal = |name: &str, own: u16| win98.map_or(own, |w| w.ordinal(name, own));
     for (i, api) in dll.apis.iter().enumerate() {
         if api.ordinal != 0 && super::version::exports(version, dll.name, api.name) {
-            b.export(Some(api.name), api.ordinal, rva + i as u32 * STUB);
+            let ordinal = ordinal(api.name, api.ordinal);
+            b.export(Some(api.name), ordinal, rva + i as u32 * STUB);
         }
     }
     if !dll.vars.is_empty() {
@@ -304,7 +311,8 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
         debug_assert_eq!(data, data_rva(dll));
         for (var, offset) in dll.vars.iter().zip(offsets) {
             if var.ordinal != 0 {
-                b.export(Some(var.name), var.ordinal, data + offset);
+                let ordinal = ordinal(var.name, var.ordinal);
+                b.export(Some(var.name), ordinal, data + offset);
             }
         }
     }
