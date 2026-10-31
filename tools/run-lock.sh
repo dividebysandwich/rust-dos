@@ -32,8 +32,8 @@
 # outside the checkout, so every checkout on the machine shares it. Give
 # every caller the same directory.
 #
-# Waits last MAX_WAIT_S seconds (default 540, under a 10-minute tool
-# timeout; 0 waits forever), polling every RUST_DOS_RUN_LOCK_POLL seconds
+# Waits last MAX_WAIT_S seconds (default 7200, two hours; 0 waits
+# without limit), polling every RUST_DOS_RUN_LOCK_POLL seconds
 # (default 2). Exit codes of the script itself:
 #
 #   2  bad usage
@@ -468,7 +468,7 @@ heavy | measure)
     owner=$1
     shift
     valid_owner "$owner"
-    max_wait=540
+    max_wait=7200
     if [ "$1" != -- ]; then
         max_wait=$1
         shift
