@@ -1122,10 +1122,18 @@ fn a_handler_on_the_exception_chain_resumes_after_a_divide_error() {
 #[test]
 fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    // The level 0 code, at 30h: it puts CR0 in EBX and goes on after the
+    // 2-byte DIV.
+    let mut data = vec![0u8; 0x40];
+    data[0x30..0x3B].copy_from_slice(&[
+        0x0F, 0x20, 0xC3, // mov ebx, cr0
+        0x83, 0x04, 0x24, 0x02, // add dword [esp], 2
+        0xCF, // iretd
+        0x90, 0x90, 0x90,
+    ]);
     let (code, out) = run(
         "idt_ring0",
-        program(BASE, false, imports, &[0; 0x40], |a, l| {
-            let mut ring0 = a.create_label();
+        program(BASE, false, imports, &data, |a, l| {
             let mut over = a.create_label();
             let mut fail = a.create_label();
             // The IDT's base, from SIDT's 6 bytes at 0.
@@ -1145,12 +1153,12 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
             a.mov(dword_ptr(l.at(0x18)), eax)?;
             a.mov(eax, dword_ptr(edi + 12))?;
             a.mov(dword_ptr(l.at(0x1C)), eax)?;
-            a.lea(esi, ptr(ring0))?;
+            a.mov(esi, l.at(0x30) as u32)?;
             a.mov(ecx, 16)?;
             a.push(edi)?;
             a.rep().movsb()?;
             a.pop(edi)?;
-            // Run it: it puts CR0 in EBX and skips the 2-byte DIV.
+            // Run it.
             a.xor(ebx, ebx)?;
             a.xor(edx, edx)?;
             a.xor(ecx, ecx)?;
@@ -1184,12 +1192,7 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
             a.set_label(&mut fail)?;
             a.push(ebx)?;
             a.call(l.import(0))?;
-            a.int3()?;
-            // The level 0 code, 16 bytes at most.
-            a.set_label(&mut ring0)?;
-            a.mov(ebx, cr0)?;
-            a.add(dword_ptr(esp), 2)?;
-            a.iretd()
+            a.int3()
         }),
     );
     assert_eq!(code, 42, "{}", out);
