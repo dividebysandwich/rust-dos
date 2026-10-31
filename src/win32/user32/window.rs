@@ -1785,20 +1785,24 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         state.input.capture = 0;
                     }
                 }
-                // The window under the cursor gets a move if it changed.
-                // After paint::moved, which puts the desktop on the screen
-                // as a program's first window shows (`under` is 0 then, as
-                // nothing was under the cursor), and after a hidden window
-                // lost the capture, so the move goes to the window under
-                // the cursor and not to the one hidden.
-                // It moved if its place on the screen or its client
-                // area's did, not because the flags asked for a move: a
-                // WM_WINDOWPOSCHANGING that keeps the window where it is
-                // gives no move, which a program answering the move by
-                // moving the window again would otherwise get forever.
-                let moved =
-                    user(cpu).screen_rect(hwnd) != old_screen || flags & SWP_NOCLIENTMOVE == 0;
-                super::input::window_moved(cpu, hwnd, under, moved);
+                // The window under the cursor gets a move if the window
+                // moved, resized, showed or hid (`input::window_moved`
+                // says which changes count). After paint::moved, which
+                // puts the desktop on the screen as a program's first
+                // window shows (`under` is 0 then, as nothing was under
+                // the cursor), and after a hidden window lost the
+                // capture, so the move goes to the window under the
+                // cursor and not to the one hidden.
+                // Its place counts as changed if its place on the screen
+                // or its client area's did, not because the flags asked
+                // for a move: a WM_WINDOWPOSCHANGING that keeps the window
+                // where it is gives no move, which a program answering
+                // the move by moving the window again would otherwise get
+                // forever.
+                let changed = user(cpu).screen_rect(hwnd) != old_screen
+                    || flags & SWP_NOCLIENTMOVE == 0
+                    || was_visible != now_visible;
+                super::input::window_moved(cpu, hwnd, under, changed);
                 cpu.bus.guest_write_32(winpos + 24, flags);
                 // Activate it.
                 let child = user(cpu)

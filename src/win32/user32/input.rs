@@ -198,8 +198,8 @@ pub struct Clipboard {
     pub formats: Vec<(u32, u32)>,
 }
 
-/// The desktop came on the screen: the cursor starts in its middle,
-/// where the mouse is.
+/// The desktop came on the screen: the cursor is where the mouse is now,
+/// which `ensure_desktop` has warped it to.
 pub fn desktop_started(cpu: &mut Cpu) {
     let (x, y) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
     let mouse = &cpu.bus.mouse;
@@ -678,25 +678,29 @@ pub fn under_cursor(state: &State) -> u32 {
     window::window_at(state, x, y)
 }
 
-/// SetWindowPos showed, hid or moved `hwnd`, and `before` was the window
-/// under the cursor until then, 0 if the desktop wasn't on the screen
-/// before `hwnd` showed. When another window is under it now, or the one
-/// under it moved (`moved`), the window under the cursor gets a
-/// WM_MOUSEMOVE where the cursor is, as Windows NT's SetWindowPos marks
-/// the mouse moved and ReactOS's co_WinPosSetWindowPos inserts a move:
-/// its answer to WM_SETCURSOR sets the cursor. A screen saver hides the
-/// cursor on that move, which otherwise stays an arrow until the mouse
-/// moves, and since the cursor stays put, the saver's next move is at
-/// the place it saw first and doesn't close it. The message goes out as
-/// any mouse message does (`mouse_event_at`), so a window holding the
-/// capture gets it in place of the window under the cursor.
-pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, moved: bool) {
-    let state = user(cpu);
-    if !state.desktop {
+/// SetWindowPos showed, hid, moved or resized `hwnd` (`changed`), and
+/// `before` was the window under the cursor until then, 0 if the desktop
+/// wasn't on the screen before `hwnd` showed. The window under the cursor
+/// then gets a WM_MOUSEMOVE where the cursor is, when another window is
+/// under it now, or when `hwnd` or a child of it is. Windows marks the
+/// mouse moved for these changes (NT's SetWindowPos does, through
+/// zzzSetFMouseMoved), and ReactOS's co_WinPosSetWindowPos inserts a move
+/// when the cursor's window changed. A raise alone gives none, so two
+/// windows that raise each other from their WM_MOUSEMOVE don't get moves
+/// forever. A screen saver hides the cursor on the move, which otherwise
+/// stays an arrow until the mouse moves, and since the cursor stays put,
+/// the saver's next move is at the place it saw first and doesn't close
+/// it. The message goes out as any mouse message does (`mouse_event_at`),
+/// so a window holding the capture gets it in place of the window under
+/// the cursor. A program that holds the mouse exclusively through
+/// DirectInput gets no mouse messages (`poll_mouse`), so none here either.
+pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, changed: bool) {
+    if !changed || !user(cpu).desktop || crate::win32::dinput::mouse_taken(cpu) {
         return;
     }
+    let state = user(cpu);
     let now = under_cursor(state);
-    if now != before || moved && (now == hwnd || state.is_descendant(hwnd, now)) {
+    if now != before || now == hwnd || state.is_descendant(hwnd, now) {
         mouse_event_at(cpu, WM_MOUSEMOVE, 0);
         // The window under the cursor can be another thread's, waiting
         // for a message: the wake paint::moved gave came before the move.
@@ -2783,8 +2787,9 @@ mod tests {
 
     /// A window shown under the cursor gets a WM_MOUSEMOVE where the
     /// cursor is, as a screen saver that hides the cursor on it expects.
-    /// A move that leaves it under the cursor gives another, and a change
-    /// that leaves the same window under the cursor, unmoved, none.
+    /// A move that leaves it under the cursor gives another. A raise that
+    /// puts it under the cursor, or a change that leaves the same window
+    /// under the cursor unmoved, gives none.
     #[test]
     fn a_window_shown_under_the_cursor_gets_a_mouse_move() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -2828,13 +2833,70 @@ mod tests {
         if let Some(w) = user(&mut cpu).window_mut(hwnd) {
             w.style |= WS_VISIBLE;
         }
-        window_moved(&mut cpu, hwnd, before, false);
+        window_moved(&mut cpu, hwnd, before, true);
         assert_eq!(moves(&mut cpu), [(hwnd, WM_MOUSEMOVE, 120 << 16 | 100)]);
         window_moved(&mut cpu, hwnd, hwnd, false);
         assert_eq!(moves(&mut cpu), [], "nothing changed under the cursor");
+        window_moved(&mut cpu, hwnd, DESKTOP, false);
+        assert_eq!(moves(&mut cpu), [], "a raise alone gives none");
         window_moved(&mut cpu, hwnd, hwnd, true);
         assert_eq!(moves(&mut cpu), [(hwnd, WM_MOUSEMOVE, 120 << 16 | 100)]);
         assert_eq!(user(&mut cpu).input.cursor, (100, 120), "the cursor stays");
+    }
+
+    /// A window moved with its child under the cursor leaves the child
+    /// under it, and the child gets the move, as the window it is in did.
+    #[test]
+    fn a_parent_moved_over_its_child_under_the_cursor_gives_the_child_a_move() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let screen = Rect::new(0, 0, 640, 480);
+        let desktop = window::Window {
+            rect: screen,
+            client: screen,
+            style: WS_VISIBLE,
+            ..window::Window::default()
+        };
+        assert_eq!(
+            user(&mut cpu).new_window(desktop).expect("the desktop"),
+            DESKTOP
+        );
+        let parent = window::Window {
+            tid: 1,
+            rect: screen,
+            client: screen,
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            ..window::Window::default()
+        };
+        let parent = user(&mut cpu).new_window(parent).expect("a window");
+        let child = window::Window {
+            tid: 1,
+            rect: screen,
+            client: screen,
+            style: WS_CHILD | WS_VISIBLE,
+            parent,
+            ..window::Window::default()
+        };
+        let child = user(&mut cpu).new_window(child).expect("a child");
+        if let Some(d) = user(&mut cpu).window_mut(DESKTOP) {
+            d.children.push(parent);
+        }
+        if let Some(p) = user(&mut cpu).window_mut(parent) {
+            p.children.push(child);
+        }
+        let state = user(&mut cpu);
+        state.desktop = true;
+        state.input.cursor = (100, 120);
+        let before = under_cursor(state);
+        assert_eq!(before, child, "the child is under the cursor");
+        window_moved(&mut cpu, parent, before, true);
+        let q = user(&mut cpu).queue_mut(1);
+        let got: Vec<(u32, u32, u32)> = q
+            .input
+            .iter()
+            .map(|m| (m.hwnd, m.message, m.lparam))
+            .collect();
+        assert_eq!(got, [(child, WM_MOUSEMOVE, 120 << 16 | 100)]);
     }
 
     /// A grey arrow held down is one WM_KEYDOWN, extended, and stays
