@@ -16,6 +16,8 @@ const TASK: u16 = task::DI_ENUM;
 /// What the task enumerates, its first variable.
 const K_DEVICES: u32 = 0;
 const K_OBJECTS: u32 = 1;
+/// DirectInput 8's EnumDevices, whose devices have DI8DEVTYPE_ types.
+const K_DEVICES_8: u32 = 2;
 
 /// The task's variables: the kind, the callback and its reference, the
 /// structure's size, the place reached; then the device (EnumObjects)
@@ -35,33 +37,49 @@ const DIEDFL_ATTACHEDONLY: u32 = 0x1;
 const DIEDFL_FORCEFEEDBACK: u32 = 0x100;
 const DIEDFL_INCLUDEALIASES: u32 = 0x1_0000;
 const DIEDFL_INCLUDEPHANTOMS: u32 = 0x2_0000;
+/// DirectInput 8's.
+const DIEDFL_INCLUDEHIDDEN: u32 = 0x4_0000;
 
 /// IDirectInput::EnumDevices(type, callback, ref, flags): the devices of
-/// DIDEVTYPE_ `type`, or all for 0, that are there. None has force
-/// feedback.
+/// DIDEVTYPE_ `type`, or all for 0, that are there. DirectInput 8 takes
+/// a class of devices (DI8DEVCLASS_) or a DI8DEVTYPE_ instead. None has
+/// force feedback.
 pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, ty, callback, reference, flags) = (args[0], args[1], args[2], args[3], args[4]);
     let r = (|| {
         let (_, version) = initialized(cpu, this)?;
-        let known = DIEDFL_ATTACHEDONLY
+        let eight = version >= 0x800;
+        let mut known = DIEDFL_ATTACHEDONLY
             | DIEDFL_FORCEFEEDBACK
             | DIEDFL_INCLUDEALIASES
             | DIEDFL_INCLUDEPHANTOMS;
-        if callback == 0 || ty > 4 || flags & !known != 0 {
+        if eight {
+            known |= DIEDFL_INCLUDEHIDDEN;
+        }
+        let bad_type = if eight {
+            objects::in_class_8(0, ty).is_none()
+        } else {
+            ty > 4
+        };
+        if callback == 0 || bad_type || flags & !known != 0 {
             return Err(DIERR_INVALIDPARAM);
         }
-        let mut vars = vec![K_DEVICES, callback, reference, 0, 0];
+        let what = if eight { K_DEVICES_8 } else { K_DEVICES };
+        let mut vars = vec![what, callback, reference, 0, 0];
         vars[V_SIZE] = if version >= 0x500 {
             objects::INSTANCE_SIZE
         } else {
             objects::INSTANCE_SIZE_DX3
         };
         if flags & DIEDFL_FORCEFEEDBACK == 0 {
-            vars.extend(
-                objects::present(cpu, version)
-                    .into_iter()
-                    .filter(|&k| ty == 0 || objects::device_type(k) & 0xFF == ty),
-            );
+            vars.extend(objects::present(cpu, version).into_iter().filter(|&k| {
+                let dev_type = objects::device_type(k, version);
+                if eight {
+                    objects::in_class_8(dev_type, ty) == Some(true)
+                } else {
+                    ty == 0 || dev_type & 0xFF == ty
+                }
+            }));
         }
         let size = vars[V_SIZE];
         Ok((vars, size))
@@ -84,8 +102,7 @@ pub fn enum_objects(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if callback == 0 {
             return Err(DIERR_INVALIDPARAM);
         }
-        let version = state(cpu).object(id).map_or(0, |o| o.version);
-        let size = if version >= 0x500 {
+        let size = if super::version_of(cpu, id) >= 0x500 {
             objects::OBJECT_SIZE
         } else {
             objects::OBJECT_SIZE_DX3
@@ -118,12 +135,18 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     }
     let (callback, reference, size, at) =
         (t.var(V_CALLBACK), t.var(V_REF), t.var(V_SIZE), t.var(V_AT));
-    let bytes = if t.var(0) == K_DEVICES {
+    let bytes = if t.var(0) != K_OBJECTS {
         let Some(&kind) = t.vars.get(V_LIST + at as usize) else {
             return Next::Done(DI_OK);
         };
         t.set(V_AT, at + 1);
-        objects::instance(kind, objects::shape(cpu, kind), size)
+        // Any version before 8 gives the same DIDEVTYPE_ types.
+        let version = if t.var(0) == K_DEVICES_8 {
+            0x800
+        } else {
+            0x700
+        };
+        objects::instance(kind, objects::shape(cpu, kind), size, version)
     } else {
         let (id, flags) = (t.var(V_DEVICE), t.var(V_FLAGS));
         let Some(d) = state(cpu).object(id).and_then(|o| o.device.as_ref()) else {

@@ -31,10 +31,18 @@ const DIDF_RELAXIS: u32 = 2;
 const DIDF_ABSAXIS: u32 = 1;
 const DIPROP_BUFFERSIZE: u32 = 1;
 const DIPROP_RANGE: u32 = 4;
+/// DirectInput 8's.
+const DIPROP_KEYNAME: u32 = 20;
+const DIPROP_APPDATA: u32 = 22;
+const DIPROP_SCANCODE: u32 = 23;
+const DIPROP_USERNAME: u32 = 25;
+const DIPH_DEVICE: u32 = 0;
+const DIPH_BYOFFSET: u32 = 1;
 
 /// IDirectInputA's and IDirectInputDeviceA's methods, by their place in
 /// the vtables.
 const CREATE_DEVICE: u32 = 3;
+const GET_PROPERTY: u32 = 5;
 const SET_PROPERTY: u32 = 6;
 const ACQUIRE: u32 = 7;
 const GET_DEVICE_STATE: u32 = 9;
@@ -129,21 +137,33 @@ struct Setup {
     format: u32,
     state_size: u32,
     properties: Vec<(u32, u32)>,
+    /// The properties it reads after setting those, into the structures
+    /// at these places in the data.
+    queries: Vec<(u32, u32)>,
+    /// DirectInput 8 through DINPUT8's DirectInput8Create, with the
+    /// IID_IDirectInput8A at this place in the data; DINPUT's
+    /// DirectInputCreateA, version 500h, without.
+    eight: Option<u32>,
 }
 
-/// The program: DirectInputCreateA, CreateDevice, SetDataFormat,
-/// SetCooperativeLevel (background, nonexclusive, without a window),
-/// the properties, Acquire, then the waits and the reads described at
-/// the top. Each call's result goes to `RESULTS` in turn. The image,
-/// and its data's address.
+/// The program: DirectInputCreateA (or DirectInput8Create), CreateDevice,
+/// SetDataFormat, SetCooperativeLevel (background, nonexclusive, without
+/// a window), the properties to set and to read, Acquire, then the waits
+/// and the reads described at the top. Each call's result goes to
+/// `RESULTS` in turn. DirectInput 8 reads its buffered data with
+/// DirectX 8's DIDEVICEOBJECTDATA, which has uAppData. The image, and
+/// its data's address.
 fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
     let kernel32: &[&str] = &["GetModuleHandleA", "Sleep", "ExitProcess"];
-    let dinput: &[&str] = &["DirectInputCreateA"];
+    let (dll, create): (&str, &str) = match setup.eight {
+        Some(_) => ("DINPUT8.dll", "DirectInput8Create"),
+        None => ("DINPUT.dll", "DirectInputCreateA"),
+    };
     let mut b = Builder::exe(BASE);
     let lists: Vec<Imp> = kernel32.iter().map(|n| Imp::Name(n)).collect();
-    let dlists: Vec<Imp> = dinput.iter().map(|n| Imp::Name(n)).collect();
+    let dlists = [Imp::Name(create)];
     let iat = b
-        .imports(&[("KERNEL32.dll", &lists), ("DINPUT.dll", &dlists)])
+        .imports(&[("KERNEL32.dll", &lists), (dll, &dlists)])
         .concat();
     let data_rva = b.section(
         ".data",
@@ -168,7 +188,13 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
         a.call(dword_ptr(iat[0] as u64))?;
         a.push(0)?;
         a.push(at(DI) as i32)?;
-        a.push(0x500)?;
+        match setup.eight {
+            Some(iid) => {
+                a.push(at(iid) as i32)?;
+                a.push(0x800)?;
+            }
+            None => a.push(0x500)?,
+        }
         a.push(eax)?;
         a.call(dword_ptr(iat[3] as u64))?;
         result(&mut a)?;
@@ -206,6 +232,15 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
             )?;
             result(&mut a)?;
         }
+        for &(property, value) in &setup.queries {
+            method(
+                &mut a,
+                DEVICE,
+                GET_PROPERTY,
+                &[Arg::I(property), Arg::At(value)],
+            )?;
+            result(&mut a)?;
+        }
         method(&mut a, DEVICE, ACQUIRE, &[])?;
         result(&mut a)?;
         let wait = |a: &mut CodeAssembler, ready: u32, go: u32| {
@@ -222,7 +257,8 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
         method(&mut a, DEVICE, GET_DEVICE_STATE, &args)?;
         result(&mut a)?;
         a.mov(dword_ptr(at(COUNT)), EVENT_ROOM)?;
-        let args = [Arg::I(16), Arg::At(EVENTS), Arg::At(COUNT), Arg::I(0)];
+        let size = object_size(setup);
+        let args = [Arg::I(size), Arg::At(EVENTS), Arg::At(COUNT), Arg::I(0)];
         method(&mut a, DEVICE, GET_DEVICE_DATA, &args)?;
         result(&mut a)?;
         wait(&mut a, 2, 2)?;
@@ -236,6 +272,11 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
     assert_eq!(b.section(".text", &code, flags), code_rva);
     b.entry(code_rva);
     (b.build(), base)
+}
+
+/// The size of the DIDEVICEOBJECTDATA the program reads.
+fn object_size(setup: &Setup) -> u32 {
+    if setup.eight.is_some() { 20 } else { 16 }
 }
 
 /// A machine with the built-in Windows on and `program` loaded from the
@@ -321,16 +362,23 @@ fn settle(cpu: &mut Cpu) {
 }
 
 /// What the program read, after it has: the results of its calls, the
-/// first `state` bytes of the device state, and the buffered data
-/// (offset, data, time, sequence).
+/// first `state` bytes of the device state, the buffered data (offset,
+/// data, time, sequence) and DirectX 8's uAppData of each event.
 struct Read {
     results: Vec<u32>,
     state: Vec<u8>,
     events: Vec<(u32, u32, u32, u32)>,
+    app_data: Vec<u32>,
 }
 
 /// Say go, wait for the program's reads, let it end and give them.
 fn read(cpu: &mut Cpu, data: usize, calls: u32, state: usize) -> Read {
+    read_sized(cpu, data, calls, state, 16)
+}
+
+/// The same, with the buffered data in DIDEVICEOBJECTDATA of `size`
+/// bytes.
+fn read_sized(cpu: &mut Cpu, data: usize, calls: u32, state: usize, size: u32) -> Read {
     cpu.bus.write_32(data + GO as usize, 1);
     until_ready(cpu, data, 2);
     let results = (0..calls)
@@ -342,14 +390,21 @@ fn read(cpu: &mut Cpu, data: usize, calls: u32, state: usize) -> Read {
     let count = word(cpu, data, COUNT).min(EVENT_ROOM);
     let events = (0..count)
         .map(|i| {
-            let field = |k: u32| word(cpu, data, EVENTS + 16 * i + 4 * k);
+            let field = |k: u32| word(cpu, data, EVENTS + size * i + 4 * k);
             (field(0), field(1), field(2), field(3))
         })
         .collect();
+    let app_data = match size {
+        20 => (0..count)
+            .map(|i| word(cpu, data, EVENTS + size * i + 16))
+            .collect(),
+        _ => Vec::new(),
+    };
     let read = Read {
         results,
         state: bytes,
         events,
+        app_data,
     };
     cpu.bus.write_32(data + GO as usize, 2);
     let mut ended = false;
@@ -392,6 +447,8 @@ fn the_keyboard_gives_its_keys_as_state_and_buffered_data() {
         format,
         state_size: 256,
         properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        queries: Vec::new(),
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("keyboard", image);
@@ -413,6 +470,77 @@ fn the_keyboard_gives_its_keys_as_state_and_buffered_data() {
 }
 
 #[test]
+fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
+    let mut d = Data::new();
+    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
+    // IID_IDirectInput8A, {BF798030-483A-4DA2-AA99-5D64ED369700}.
+    let mut iid = 0xBF79_8030u32.to_le_bytes().to_vec();
+    iid.extend(0x483Au16.to_le_bytes());
+    iid.extend(0x4DA2u16.to_le_bytes());
+    iid.extend([0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00]);
+    let iid = d.add(&iid);
+    // DIPROPSTRING and DIPROPDWORD of the left arrow (DIK_LEFT, CBh),
+    // DIPROPSTRING of the device, and DIPROPPOINTER of A (DIK_A, 1Eh).
+    // They go before the data format, in the data's first page.
+    let mut string = words(&[16 + 520, 16, 0xCB, DIPH_BYOFFSET]);
+    string.resize(16 + 520, 0);
+    let key_name = d.add(&string);
+    let scan_code = d.add(&words(&[20, 16, 0xCB, DIPH_BYOFFSET, 0]));
+    string[8..16].copy_from_slice(&words(&[0, DIPH_DEVICE]));
+    string[16..18].copy_from_slice(b"x\0");
+    let user_name = d.add(&string);
+    let app_data = d.add(&words(&[20, 16, 0x1E, DIPH_BYOFFSET, 7]));
+    let keys: Vec<(Option<u32>, u32, u32)> = (0..256)
+        .map(|i| (None, i, DIDFT_OPTIONAL | DIDFT_BUTTON | i << 8))
+        .collect();
+    let format = d.format(0, 256, &keys);
+    let buffer = d.add(&words(&[20, 16, 0, 0, EVENT_ROOM]));
+    let setup = Setup {
+        guid,
+        format,
+        state_size: 256,
+        properties: vec![(DIPROP_BUFFERSIZE, buffer), (DIPROP_APPDATA, app_data)],
+        queries: vec![
+            (DIPROP_KEYNAME, key_name),
+            (DIPROP_SCANCODE, scan_code),
+            (DIPROP_USERNAME, user_name),
+        ],
+        eight: Some(iid),
+    };
+    let (image, data) = program(&d, &setup);
+    let mut cpu = machine("keyboard-8", image);
+    let data = started(&mut cpu, data);
+    until_ready(&mut cpu, data, 1);
+    keyboard(&mut cpu, 0x1E, false, true);
+    keyboard(&mut cpu, 0x1E, false, false);
+    keyboard(&mut cpu, 0x4B, true, true);
+    let r = read_sized(&mut cpu, data, 12, 256, 20);
+    // DI_NOEFFECT for DIPROP_USERNAME: no user has the device.
+    let mut results = [0; 12];
+    results[8] = 1;
+    assert_eq!(r.results, results, "{:x?}", r.results);
+    assert_eq!(r.state[0xCB], 0x80);
+    assert_eq!(r.state.iter().filter(|&&b| b != 0).count(), 1);
+    let got: Vec<(u32, u32)> = r.events.iter().map(|e| (e.0, e.1)).collect();
+    assert_eq!(got, [(0x1E, 0x80), (0x1E, 0), (0xCB, 0x80)]);
+    in_order(&r.events);
+    // A's events carry its DIPROP_APPDATA; the arrow has none, -1.
+    assert_eq!(r.app_data, [7, 7, u32::MAX]);
+    // The arrow's name, as GetKeyNameText gives it, and its scan code
+    // with E0 before it; the user's name is left empty.
+    let text = |at: u32| -> String {
+        let units: Vec<u16> = (0..260)
+            .map(|i| cpu.bus.read_16(data + (at + 16 + 2 * i) as usize))
+            .take_while(|&c| c != 0)
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    assert_eq!(text(key_name), "Left");
+    assert_eq!(text(user_name), "");
+    assert_eq!(word(&cpu, data, scan_code + 16), 0x4BE0);
+}
+
+#[test]
 fn a_key_that_goes_down_and_up_between_two_reads_is_in_the_buffer() {
     let mut d = Data::new();
     let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
@@ -426,6 +554,8 @@ fn a_key_that_goes_down_and_up_between_two_reads_is_in_the_buffer() {
         format,
         state_size: 256,
         properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        queries: Vec::new(),
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("keyboard-tap", image);
@@ -467,6 +597,8 @@ fn the_mouse_gives_its_motion_as_relative_axes() {
         format,
         state_size: 16,
         properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        queries: Vec::new(),
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("mouse", image);
@@ -512,6 +644,8 @@ fn a_joystick_on_the_game_port_gives_its_axes_in_their_range() {
         format,
         state_size: 12,
         properties: vec![(DIPROP_BUFFERSIZE, buffer), (DIPROP_RANGE, range)],
+        queries: Vec::new(),
+        eight: None,
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("joystick", image);
