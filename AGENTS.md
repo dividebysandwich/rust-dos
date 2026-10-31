@@ -95,6 +95,18 @@ disk.
   processor.
 - Don't take timings while other builds run. Measure on a quiet machine,
   or compare CI's step times instead.
+- On Windows, take turns with `tools/runlock-windows.sh` (Git Bash).
+  It lets one cargo build, test or clippy, or one emulator run, go at a
+  time across every checkout and worktree on the machine, in the order
+  they asked. Chain each job to it and release right after, even when
+  the job fails:
+  `sh tools/runlock-windows.sh acquire NAME && cargo test ...`, then
+  `sh tools/runlock-windows.sh release NAME`. Never chain with `;`,
+  which runs the job when acquire timed out. NAME is yours alone. The
+  lock lives in `RUST_DOS_RUNLOCK_DIR` (by default `~/.rust-dos-runlock`),
+  so all callers on the machine need the same one. Read the script's
+  header before using it: its rules come from clashes that spoiled
+  measurements.
 
 ## Behaviour: closer to the real machine beats unchanged results
 
