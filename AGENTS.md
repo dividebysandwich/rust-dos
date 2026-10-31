@@ -137,19 +137,27 @@ disk.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
-- A timing measurement is one whose number is quoted as evidence: a
-  speed ratio, a CPU or halted share, a frame time, or a benchmark score.
-  It runs alone. No build, test or other emulator may run during it, and
-  the run is retaken if one starts. Check the running processes by command
-  line at the start and at the end of each run.
-- Everything else runs alongside builds: a cursor position, a window's
-  behaviour, a screenshot, an audio capture checked for correctness, a log
-  count, a trace, or a reproduction boot. Its result doesn't depend on the
-  host's speed, so it can run during a build. Only a number you will quote
-  as evidence needs the quiet machine.
+- Every emulator run is heavy unless it is a timing measurement. The
+  test is what the claim quotes: if it contains a number that comes from
+  how fast the host ran the emulator, the run is a timing measurement,
+  and only then does it need the quiet machine.
+- Timing measurements, which run alone: a speed ratio or speed factor, a
+  frame rate or frame time, a CPU busy or halted share, a benchmark score
+  (3DMark, a bench loop, the Unreal or Giants matrix), or a time taken
+  between two points in the emulated run. Check the running processes by
+  command line at the start and at the end, and retake the run if another
+  one started.
+- Heavy runs, which run alongside builds: a cursor position, a window's
+  or a saver's behaviour, a screenshot, an audio capture checked for
+  correctness (levels, rail counts, clicks), a log or port-write count, a
+  trace, a breakpoint, a reproduction boot, and a data unpack. Their
+  results don't depend on the host's speed.
+- A run that does both takes the timing measurement form only when the
+  timing is part of the claim. A reproduction boot that also logs how
+  long something took is still heavy, unless that time is quoted.
 - Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
-  Bash on Windows). Builds, tests and every emulator run that isn't a
-  timing measurement take the heavy form, so they run together:
+  Bash on Windows). Builds, tests and every heavy emulator run take the
+  heavy form, so they run together:
   `bash tools/run-lock.sh heavy NAME 0 -- cargo test ...`. Only timing
   measurements take the exclusive form:
   `bash tools/run-lock.sh measure NAME 0 -- CMD...` blocks new heavy jobs,
