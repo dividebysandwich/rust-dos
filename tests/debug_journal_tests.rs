@@ -162,19 +162,14 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         assert!(Instant::now() < deadline, "the shader test window opens");
         std::thread::sleep(Duration::from_millis(50));
     };
-    // The key goes through XTEST, as a keyboard's would, to the window with
-    // the focus: Xvfb has no window manager to give it, and a key sent to
-    // the window itself (`key --window`) is a synthetic event, which SDL
-    // may not take. A window may not take the focus at once, so both go
-    // again until a screenshot appears.
-    let mut next_key = Instant::now();
+    assert!(
+        Command::new("xdotool")
+            .args(["key", "--window", &window, "ctrl+F5"])
+            .status()
+            .unwrap()
+            .success()
+    );
     let capture = loop {
-        if Instant::now() >= next_key {
-            for args in [&["windowfocus", window.as_str()][..], &["key", "ctrl+F5"]] {
-                assert!(Command::new("xdotool").args(args).status().unwrap().success());
-            }
-            next_key = Instant::now() + Duration::from_secs(1);
-        }
         if let Ok(entries) = std::fs::read_dir(dir.join("captures"))
             && let Some(path) = entries
                 .filter_map(Result::ok)
@@ -183,23 +178,10 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         {
             break path;
         }
-        if Instant::now() >= deadline {
-            let xdotool = |args: &[&str]| {
-                let output = Command::new("xdotool").args(args).output().unwrap();
-                String::from_utf8_lossy(&output.stdout).trim().replace('\n', " ")
-            };
-            let pid = emulator.0.id().to_string();
-            panic!(
-                "Ctrl+F5 saves a shader screenshot\nwindow {window}, of {}, focus {}\n\
-                 status: {:?}\ncaptures: {:?}\nlog:\n{}\nstderr:\n{}",
-                xdotool(&["search", "--pid", &pid]),
-                xdotool(&["getwindowfocus"]),
-                http(addr, "GET", "/api/status", &[], None).0,
-                std::fs::read_dir(dir.join("captures")).map(|e| e.count()),
-                std::fs::read_to_string(dir.join("emulator.log")).unwrap_or_default(),
-                std::fs::read_to_string(dir.join("stderr.txt")).unwrap_or_default(),
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "Ctrl+F5 saves a shader screenshot"
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(
