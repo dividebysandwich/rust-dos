@@ -1486,7 +1486,6 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // 16-bit modules number their functions apart: the id is another
     // function's there.
     let reads_clock = crate::win32::stubs::reads_clock(id) && !crate::win16::in_16bit_code(cpu);
-    }
     let trap = (cpu.cs(), cpu.eip());
     let _profile = profile::zone(profile::Zone::Win32);
     if let Some(p) = &mut cpu.bus.profile {
