@@ -99,8 +99,13 @@ const DROPPED: f64 = 0.8;
 /// again. That limit rises by `FINE_STEP` for each `LAGGED_WINDOWS`
 /// measurements the host keeps up, so a host that stalls now and then
 /// loses a step for a while and no more, and one that can't run a speed
-/// meets it again only that often.
+/// meets it again only that often. A scene that takes more work says
+/// nothing of a limit a lighter one found (Unreal's 60 frame a second
+/// fly-through at 100,000 and the 10 frame a second one after it, which the
+/// host runs at 250,000), so a frame rate that falls by `DROPPED` at the
+/// limit multiplies it by `HEAVIER`. Too much meets the limit again at once.
 const KEPT_UP: f64 = 0.95;
+const HEAVIER: f64 = 2.0;
 const LAGGED_WINDOWS: u32 = HOLD_WINDOWS;
 /// Falling behind once at less than the host estimate over this is a stall.
 const STALLED: f64 = 2.0;
@@ -688,7 +693,6 @@ impl AutoSpeed {
     pub fn decide(&mut self, current: u32, m: &Measurement, protected: bool, host_max: u32) -> u32 {
         let base = self.least(protected, host_max);
         let top = host_max.max(base);
-        let clamp = |speed: f64| (speed.round() as u32).clamp(base, top);
         let c = current as f64;
         self.flat_out = false;
         if protected && m.halted >= IDLES {
@@ -716,7 +720,9 @@ impl AutoSpeed {
             } else {
                 1.0 / FINE_STEP
             };
-            let most = clamp(c * cut);
+            // Of the speed that fell behind: an estimate that dipped for the
+            // frames it was measured on would hold the limit down after it.
+            let most = (c * cut).round() as u32;
             self.lagged = (most > base).then_some((most, LAGGED_WINDOWS));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
             // The estimate dipping to the limit doesn't end it: only rising
@@ -898,6 +904,13 @@ impl AutoSpeed {
                     // A heavier scene: what the last one held at says
                     // nothing of it.
                     self.held = None;
+                    if !lagged && self.lagged.is_some() && current >= top && top < host_top {
+                        let most = (top as f64 * HEAVIER) as u32;
+                        self.lagged = (most < host_top).then_some((most, LAGGED_WINDOWS));
+                        self.step = Step::Raised { from: current, fps, below: here };
+                        let more = c * (m.refresh / fps).clamp(FINE_STEP, FIRST_STEP);
+                        return (more.round() as u32).clamp(base, most.min(host_top));
+                    }
                     return up(self, FIRST_STEP, here);
                 }
                 let record = Record {
@@ -1592,6 +1605,41 @@ mod tests {
         };
         assert_eq!(auto.decide(140_000, &work, true, 130_000), 130_000);
         assert_eq!(auto.decide(130_000, &work, true, 500_000), 140_000);
+    }
+
+    #[test]
+    fn a_limit_comes_from_the_speed_not_an_estimate_that_dipped() {
+        // Unreal's 60 frame a second scene takes the estimate down with it.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.pace = 0.9;
+        let behind = Measurement {
+            pace: 0.8,
+            ..game(0.0005, 60.0)(114_817)
+        };
+        assert_eq!(auto.decide(114_817, &behind, true, 78_135), 78_135);
+        assert_eq!(auto.lagged, Some((99_841, LAGGED_WINDOWS)));
+    }
+
+    #[test]
+    fn a_heavier_scene_lifts_a_limit_a_lighter_one_found() {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.lagged = Some((80_000, LAGGED_WINDOWS));
+        auto.step = Step::Hold {
+            fps: 45.0,
+            left: HOLD_WINDOWS,
+            more: false,
+            recent: 45.0,
+            seen: JUDGED,
+        };
+        let scene = |fps| Measurement {
+            fps: Some(fps),
+            refresh: 60.0,
+            ..STILL
+        };
+        assert_eq!(auto.decide(80_000, &scene(45.0), true, HOST), 80_000);
+        // Doubled, and no further until the host shows it can run that.
+        assert_eq!(auto.decide(80_000, &scene(10.0), true, HOST), 160_000);
+        assert_eq!(auto.lagged, Some((160_000, LAGGED_WINDOWS)));
     }
 
     #[test]
