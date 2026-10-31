@@ -711,5 +711,8 @@ fn a_windows_3_1_peek_message_loop_is_skipped() {
     let stats = b.bus.observe.stats;
     println!("{}: {:?}", test, stats);
     assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
-    assert!(stats.skipped > LIMITER_SKIPS, "{:?}", stats);
+    // A skip ends at the next millisecond, where GetCurrentTime gives
+    // another value, and at the default speed a millisecond holds only a
+    // few passes, so less is skipped than in the frame limiters.
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
