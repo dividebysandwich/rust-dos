@@ -1114,6 +1114,87 @@ fn a_handler_on_the_exception_chain_resumes_after_a_divide_error() {
     assert_eq!(code, 42, "{}", out);
 }
 
+/// As on Windows 98, where SafeDisc's loader does this: the program finds
+/// the IDT with SIDT, writes its own code over the handler the divide
+/// error's gate leads to, divides by zero to run it at level 0, and puts
+/// the handler back, after which a divide error reaches the program's
+/// handlers as before.
+#[test]
+fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, out) = run(
+        "idt_ring0",
+        program(BASE, false, imports, &[0; 0x40], |a, l| {
+            let mut ring0 = a.create_label();
+            let mut over = a.create_label();
+            let mut fail = a.create_label();
+            // The IDT's base, from SIDT's 6 bytes at 0.
+            a.sidt(ptr(l.at(0)))?;
+            a.mov(esi, dword_ptr(l.at(2)))?;
+            // The divide error's handler, from its gate.
+            a.movzx(edi, word_ptr(esi + 6))?;
+            a.shl(edi, 16)?;
+            a.mov(di, word_ptr(esi))?;
+            // Keep its first 16 bytes at 10h and write ours there.
+            a.mov(ebx, 1)?;
+            a.mov(eax, dword_ptr(edi))?;
+            a.mov(dword_ptr(l.at(0x10)), eax)?;
+            a.mov(eax, dword_ptr(edi + 4))?;
+            a.mov(dword_ptr(l.at(0x14)), eax)?;
+            a.mov(eax, dword_ptr(edi + 8))?;
+            a.mov(dword_ptr(l.at(0x18)), eax)?;
+            a.mov(eax, dword_ptr(edi + 12))?;
+            a.mov(dword_ptr(l.at(0x1C)), eax)?;
+            a.lea(esi, ptr(ring0))?;
+            a.mov(ecx, 16)?;
+            a.push(edi)?;
+            a.rep().movsb()?;
+            a.pop(edi)?;
+            // Run it: it puts CR0 in EBX and skips the 2-byte DIV.
+            a.xor(ebx, ebx)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.test(ebx, 1)?;
+            a.mov(ebx, 2)?;
+            a.je(fail)?;
+            // Put the handler back.
+            a.lea(esi, ptr(l.at(0x10)))?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            // A divide error now goes to the program's own handler, which
+            // goes on after the DIV with EAX 42.
+            a.call(over)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 42)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut over)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            a.mov(ebx, eax)?;
+            a.set_label(&mut fail)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            // The level 0 code, 16 bytes at most.
+            a.set_label(&mut ring0)?;
+            a.mov(ebx, cr0)?;
+            a.add(dword_ptr(esp), 2)?;
+            a.iretd()
+        }),
+    );
+    assert_eq!(code, 42, "{}", out);
+}
+
 /// What a debugger sees of a program whose main thread spins while a
 /// second thread waits for an event and a third was made suspended.
 #[test]
