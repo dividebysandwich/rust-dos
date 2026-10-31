@@ -265,13 +265,9 @@ fn has(ram: &[u8], base: usize, b: &Bytes) -> bool {
 pub fn find(ram: &[u8]) -> Option<(&'static Driver, usize)> {
     DRIVERS.iter().find_map(|driver| {
         let (first, _) = &driver.patches[0];
-        // A window's index in what follows `first.at` is the base it
-        // would be at.
-        ram.get(first.at..)?
-            .windows(first.bytes.len())
-            .enumerate()
-            .filter(|(_, window)| *window == first.bytes)
-            .map(|(base, _)| base)
+        // A match's index in what follows `first.at` is the base it would
+        // be at.
+        memchr::memmem::find_iter(ram.get(first.at..)?, first.bytes)
             .find(|&base| {
                 driver.checks.iter().all(|b| has(ram, base, b))
                     && driver.patches.iter().all(|(old, _)| has(ram, base, old))
