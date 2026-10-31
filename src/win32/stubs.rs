@@ -144,9 +144,10 @@ pub fn id(dll: usize, api: usize) -> u16 {
     (dll << 10 | api) as u16
 }
 
-/// Whether the function of the id `id` only reads the emulated clock in
-/// milliseconds: GetTickCount or timeGetTime, which programs call in a
-/// loop to wait (`idle::clock_read`).
+/// Whether the function of the id `id`, of a built-in DLL (16-bit modules
+/// have ids of their own), only reads the emulated clock in milliseconds:
+/// GetTickCount or timeGetTime, which programs call in a loop to wait
+/// (`idle::clock_read`).
 pub fn reads_clock(id: u16) -> bool {
     static IDS: std::sync::OnceLock<[Option<u16>; 2]> = std::sync::OnceLock::new();
     let find = |dll: &str, name: &str| {

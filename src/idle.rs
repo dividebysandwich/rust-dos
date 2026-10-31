@@ -71,7 +71,8 @@ const ARM_LIMIT: u64 = 20_000;
 const VISITS: usize = 64;
 /// Blocks of RAM a loop may write.
 const CHUNKS: usize = 256;
-/// Keyboard status calls finding no key at one place before it is armed.
+/// Keyboard status calls finding no key, or reads of the built-in Windows's
+/// clock, at one place in a row before it is armed.
 const POLLS: u32 = 8;
 /// Heads whose failed proofs are remembered, to arm them less often.
 const BACKOFF_HEADS: usize = 8;
@@ -119,6 +120,8 @@ struct Visit {
     key: CpuKey,
     icount: u64,
     executed: u64,
+    /// `Win32::calls`.
+    calls: u64,
 }
 
 #[derive(Default)]
@@ -286,11 +289,13 @@ pub struct Observe {
     /// The blocks written since the last look.
     chunks: Vec<u32>,
     phase: Phase,
-    /// The millisecond a proof first read from the built-in Windows's clock
-    /// (`clock_read`), up to which its passes read the same.
+    /// The millisecond the first read of the built-in Windows's clock since
+    /// the base found (`clock_read`), up to which its passes read the same.
     clock_read: Option<u64>,
-    /// Where the keyboard status call found no key last, and how many times
-    /// in a row.
+    /// `Clock::run_count` at the last read of that clock.
+    clock_read_at: u64,
+    /// Where the keyboard status call found no key or the clock was read
+    /// last, and how many times in a row.
     poll: (Option<Head>, u32),
     /// Where the CPU was at the last timer event, with its general
     /// registers and flags.
@@ -366,6 +371,7 @@ impl Default for Observe {
             chunks: Vec::new(),
             phase: Phase::Off,
             clock_read: None,
+            clock_read_at: 0,
             poll: (None, 0),
             last_event: None,
             proven: None,
@@ -598,10 +604,12 @@ impl Observe {
         self.first_read = None;
     }
 
-    /// From a new base on, the ports read count from there, but for the
-    /// value of one AL still holds, which the passes after it may test.
+    /// From a new base on, the ports and the clock read count from there,
+    /// but for the value of one AL still holds, which the passes after it
+    /// may test.
     fn restart_ports(&mut self) {
         self.forget_ports();
+        self.clock_read = None;
         if self.tainted {
             self.ports.push((self.al_port, 0));
             self.first_read = Some(self.al_read);
@@ -778,12 +786,20 @@ pub fn keyboard_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
 /// The built-in Windows's clock was read, at the service trap at `cs:eip`.
 /// What it returns moves on once a millisecond, so a proof's passes hold
 /// up to the next one (`finish`), and the loop is proven again from there,
-/// as a game's frame limiter that reads it in every pass goes on.
+/// as a game's frame limiter that reads it in every pass goes on. Reads
+/// further apart than a head stays armed are no such loop, and arm nothing:
+/// a program that reads the clock now and then doesn't go through the
+/// interpreter for it.
 pub fn clock_read(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
-    if cpu.bus.observe.on {
+    let run = cpu.bus.clock.run_count();
+    let o = &mut cpu.bus.observe;
+    if o.on {
         let ms = cpu.bus.clock.now_micros() / 1000;
-        cpu.bus.observe.clock_read.get_or_insert(ms);
+        o.clock_read.get_or_insert(ms);
+    }
+    if run.saturating_sub(std::mem::replace(&mut o.clock_read_at, run)) > ARM_LIMIT {
+        o.poll = (None, 0);
     }
     poll_at(cpu, head);
 }
@@ -925,7 +941,12 @@ fn visit(cpu: &mut Cpu, now: u64) {
         key.regs.gpr[0] &= !0xFF;
         key.tainted = true;
     }
-    let visit = Visit { key, icount: now, executed: cpu.executed };
+    let visit = Visit {
+        key,
+        icount: now,
+        executed: cpu.executed,
+        calls: cpu.bus.win32.calls,
+    };
     let o = &mut cpu.bus.observe;
     let step = match &o.phase {
         Phase::Off | Phase::ArmHere | Phase::Time(_) => return,
@@ -971,7 +992,7 @@ fn visit(cpu: &mut Cpu, now: u64) {
 fn compare(cpu: &mut Cpu, visit: Visit) {
     let chunks = cpu.bus.observe.take_chunks();
     let Phase::Verify { base, copies, .. } = &cpu.bus.observe.phase else { return };
-    let (base_icount, base_executed) = (base.icount, base.executed);
+    let (base_icount, base_executed, base_calls) = (base.icount, base.executed, base.calls);
     let ram = cpu.bus.ram();
     let mut same = true;
     let mut known = true;
@@ -1026,16 +1047,25 @@ fn compare(cpu: &mut Cpu, visit: Visit) {
         cpu.bus.observe.chunks.extend(chunks);
         return;
     }
-    finish(cpu, &visit, base_icount, base_executed, None);
+    finish(cpu, &visit, base_icount, base_executed, base_calls, None);
 }
 
 /// A loop is proven from the visit before `visit` at `base` instructions
-/// (`executed` executed): skip passes up to the next event, or the time a
-/// port it read changes, and with `counted` as long as the passes' counters
-/// let them run the same (see `count`).
-fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Option<Box<Pass>>) {
+/// (`executed` executed, `calls` the `Win32::calls` there): skip passes up
+/// to the next event, the time a port it read changes or the millisecond
+/// after the clock it read, and with `counted` as long as the passes'
+/// counters let them run the same (see `count`).
+fn finish(
+    cpu: &mut Cpu,
+    visit: &Visit,
+    base: u64,
+    executed: u64,
+    calls: u64,
+    counted: Option<Box<Pass>>,
+) {
     let period = visit.icount - base;
     let executed = visit.executed - executed;
+    let calls = visit.calls.wrapping_sub(calls);
     // The passes read the ports' bits as they were since the first read
     // after the base, until the time they change.
     let mut limit = cpu.bus.clock.deadline;
@@ -1070,6 +1100,9 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
         let skipped = skip(cpu, period, executed, limit, passes);
         if skipped > 0 {
             cpu.bus.observe.proved(head);
+            // The clock reads of the passes skipped count as made.
+            let win32 = &mut cpu.bus.win32;
+            win32.calls = win32.calls.wrapping_add((skipped / period).wrapping_mul(calls));
         }
         if let Some((port, read)) = held
             && skipped > 0
@@ -1311,7 +1344,7 @@ fn count(cpu: &mut Cpu, visit: Visit) {
         .collect();
     let pass = Box::new(Pass { flags: live.iter().zip(&seen).map(|(&l, &f)| (l, f & l)).collect(), ..*pass });
     cpu.bus.observe.on = true;
-    finish(cpu, &visit, base.icount, base.executed, Some(pass));
+    finish(cpu, &visit, base.icount, base.executed, base.calls, Some(pass));
 }
 
 /// Run counting instruction `op` on the counters' bytes `values`: the
@@ -1455,8 +1488,9 @@ fn copy_blocks(ram: &[u8], mut blocks: Vec<usize>) -> Vec<(usize, [u8; CHUNK])> 
 }
 
 /// Move the clock on by whole passes of `period` instructions (`executed`
-/// of them executed), up to `limit`: the next timer event, or when a port
-/// the loop reads changes; `most` passes at most.
+/// of them executed), up to `limit`: the next timer event, when a port the
+/// loop reads changes, or the clock's next millisecond; `most` passes at
+/// most.
 /// Returns the instruction count skipped.
 fn skip(cpu: &mut Cpu, period: u64, executed: u64, limit: u64, most: u64) -> u64 {
     let clock = &mut cpu.bus.clock;

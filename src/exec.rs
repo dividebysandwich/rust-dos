@@ -1477,7 +1477,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         return false;
     }
     // A clock read is the one call a loop being proven may make (`idle`).
-    let reads_clock = crate::win32::stubs::reads_clock(id);
+    // 16-bit modules number their functions apart: the id is another
+    // function's there.
+    let reads_clock = crate::win32::stubs::reads_clock(id) && !crate::win16::in_16bit_code(cpu);
     if cpu.bus.observe.on && (!reads_clock || cpu.bus.observe.timing()) {
         cpu.bus.observe.opaque();
     }

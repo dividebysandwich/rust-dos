@@ -655,3 +655,20 @@ fn a_loop_that_adds_up_the_pit_count_is_not_skipped() {
     });
     assert_eq!(stats.proofs, 0, "{:?}", stats);
 }
+
+/// Reads of the built-in Windows's clock in a row arm their place, but not
+/// when so much runs between them that the head armed would give up.
+#[test]
+fn only_reads_of_the_clock_close_together_arm_their_place() {
+    let arms = |gap: u64| {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.observe.enabled = true;
+        for _ in 0..32 {
+            cpu.bus.clock.icount += gap;
+            rust_dos::idle::clock_read(&mut cpu, 0x1B, 0x1000);
+        }
+        cpu.bus.observe.watching()
+    };
+    assert!(arms(20));
+    assert!(!arms(30_000));
+}
