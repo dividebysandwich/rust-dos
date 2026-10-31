@@ -162,18 +162,17 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         assert!(Instant::now() < deadline, "the shader test window opens");
         std::thread::sleep(Duration::from_millis(50));
     };
-    // A window that is visible may not be taking keys yet, and xdotool's
-    // key is lost then, so it goes again until a screenshot appears.
+    // The key goes through XTEST, as a keyboard's would, to the window with
+    // the focus: Xvfb has no window manager to give it, and a key sent to
+    // the window itself (`key --window`) is a synthetic event, which SDL
+    // may not take. A window may not take the focus at once, so both go
+    // again until a screenshot appears.
     let mut next_key = Instant::now();
     let capture = loop {
         if Instant::now() >= next_key {
-            assert!(
-                Command::new("xdotool")
-                    .args(["key", "--window", &window, "ctrl+F5"])
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            for args in [&["windowfocus", window.as_str()][..], &["key", "ctrl+F5"]] {
+                assert!(Command::new("xdotool").args(args).status().unwrap().success());
+            }
             next_key = Instant::now() + Duration::from_secs(1);
         }
         if let Ok(entries) = std::fs::read_dir(dir.join("captures"))
