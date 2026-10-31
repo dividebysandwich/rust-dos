@@ -832,14 +832,17 @@ pub fn not_pure(cpu: &mut Cpu) {
 }
 
 /// Run `f`, a built-in function the service running calls from Rust (as
-/// a tree view calls GetTickCount): whether the service changed nothing
-/// but RAM and registers is for the service to say, not for the
-/// functions it calls. What they read still holds only as long as they
-/// say (`holds_until`).
+/// a tree view calls GetTickCount). The service stays pure only if what
+/// it said before the call holds and `f` says it changed nothing but RAM
+/// and registers too (`pure_call` in `f`, not left to the service's
+/// claim alone). A function that changes more ends the service's purity
+/// even when the service had said it changed nothing. What the calls
+/// read still holds only as long as they say (`holds_until`).
 pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
-    let pure = cpu.bus.observe.pure;
+    let claimed = cpu.bus.observe.pure;
+    cpu.bus.observe.pure = false;
     let value = f(cpu);
-    cpu.bus.observe.pure = pure;
+    cpu.bus.observe.pure &= claimed;
     value
 }
 

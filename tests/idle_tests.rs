@@ -727,6 +727,35 @@ fn a_windows_3_1_peek_message_loop_is_skipped() {
     assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
 
+#[test]
+fn a_windows_3_1_timegettime_loop_is_skipped() {
+    // A loop that waits 300 ms with timeGetTime, which reads the same
+    // clock as GetTickCount and changes nothing else: its passes are
+    // skipped as the GetCurrentTime loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_timegettime";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
 /// Reads of the built-in Windows's clock in a row arm their place, but not
 /// when so much runs between them that the head armed would give up.
 #[test]
