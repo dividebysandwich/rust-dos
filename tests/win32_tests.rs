@@ -3548,7 +3548,10 @@ fn a_catch_all_takes_a_fault_the_translator_returned_from() {
 
 /// A function built with /EHs handles C++ exceptions only: its translator
 /// isn't called for the fault, which nothing else handles, so the
-/// program ends with FFh.
+/// program ends with FFh. That is what MSVCRT.DLL of Windows 11 does.
+/// Windows 98's DLL knows only magic 19930520h and ends the program with
+/// terminate() for this table; the built-in one takes the later magic
+/// numbers for the programs that use them.
 #[test]
 fn a_function_built_with_ehs_does_not_translate() {
     let (code, _) = run("msvcrt_se_translator_ehs", translator_program(true, true));
@@ -3592,8 +3595,8 @@ enum Outer {
 /// access violation or, with `int3`, a breakpoint. The exit code says what
 /// happened: the low four bits how many times the translator ran, 10h that
 /// the outer catch ran, 20h that it got 55h, 40h that the SEH frame saw
-/// the exception the inner function raised, 80h that the thrown object's
-/// destructor ran.
+/// the exception the inner function raised with its parameters, 80h that
+/// the thrown object's destructor ran.
 fn nested_frames_program(
     translator: Translator,
     inner: Inner,
@@ -3829,6 +3832,9 @@ fn nested_frames_program(
             let raised = if int3 { 0x8000_0003u32 } else { 0xC000_0005 };
             a.cmp(dword_ptr(eax), raised as i32)?;
             a.jne(skip)?;
+            // NumberParameters: 2 for an access violation, 1 for a breakpoint.
+            a.cmp(dword_ptr(eax + 16), if int3 { 1 } else { 2 })?;
+            a.jne(skip)?;
             a.or(dword_ptr(l.at(bits)), 0x40)?;
             a.set_label(&mut skip)?;
             a.push(dword_ptr(l.at(bits)))?;
@@ -4036,7 +4042,7 @@ fn a_bad_func_info_terminates() {
 }
 
 /// The 1999 DLL translates a breakpoint as any other exception; later ones
-/// skip it.
+/// skip it. Its record has one parameter on Windows 98 and later.
 #[test]
 fn a_breakpoint_is_translated() {
     let program = nested_frames_program(Translator::Returns, Inner::CatchChar, Outer::None, true);

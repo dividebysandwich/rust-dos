@@ -234,7 +234,8 @@ fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>,
     let (code, params) = match vector {
         0 => (INT_DIVIDE_BY_ZERO, vec![]),
         1 => (SINGLE_STEP, vec![]),
-        3 => (BREAKPOINT, vec![]),
+        // One parameter, as Windows 98 and NT give it.
+        3 => (BREAKPOINT, vec![0]),
         4 => (INT_OVERFLOW, vec![]),
         5 => (ARRAY_BOUNDS_EXCEEDED, vec![]),
         6 => (ILLEGAL_INSTRUCTION, vec![]),

@@ -1055,7 +1055,8 @@ fn long_jump(cpu: &mut Cpu, buffer: u32, value: u32) {
 const CXX_EXCEPTION: u32 = 0xE06D_7363;
 const CXX_MAGIC: u32 = 0x1993_0520;
 /// FuncInfo's magic numbers: MSVC 6's and the two later ones, which add
-/// fields after those read here.
+/// fields after those read here. MSVCRT.DLL of Windows 98 knows only the
+/// first and calls terminate() for the others.
 const CXX_MAGICS: std::ops::RangeInclusive<u32> = CXX_MAGIC..=0x1993_0522;
 
 /// A handler's adjectives, a catchable type's properties and a throw's
