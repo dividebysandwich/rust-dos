@@ -282,10 +282,11 @@ const JUKEBOX_SB_MIX: CodePatch = CodePatch {
 /// game hangs about 75 s after the title screen comes up. Prehistorik 2's
 /// player, the same engine, has no such check. Found in BLUES.EXE of
 /// 25096 bytes, MD5 4e4e60dbc63bdd867f7ff65725b7e8b4 (TOSEC's [h1]
-/// release, the only one to hand), which is Razor 1911's crack: the
-/// loop comes out of the PKLITE unpacker as it is, and whether the
-/// original release has it is unknown. A fix of its own, so it can go if
-/// it turns out to be the crack's.
+/// release, the only one to hand), which is Razor 1911's crack. The loop
+/// comes out of the PKLITE unpacker as it is, in the middle of a
+/// function, where a crack couldn't have put five bytes in, so it is
+/// most likely the game's own. A fix of its own, so it can go if an
+/// uncracked copy turns out not to have it.
 ///
 /// Taking out the `je` doesn't depend on anything the driver set up, so
 /// it goes in whenever the code is found, a set-up driver too.

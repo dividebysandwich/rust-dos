@@ -1688,8 +1688,9 @@ screen doesn't leave on its own, so a player who waits on it hangs the
 game on a real PC too. The fix was made for BLUES.EXE of 25096 bytes,
 MD5 `4e4e60dbc63bdd867f7ff65725b7e8b4` (TOSEC's [h1] release), which is
 Razor 1911's crack. The loop is in the code as the unpacker leaves it,
-and whether the original release has it is unknown. Prehistorik 2's
-player, the same engine, has no such check. The fix doesn't depend on
+in the middle of a function, where a crack couldn't have put five bytes
+in, so it is most likely the game's own; no uncracked copy was at hand
+to compare. Prehistorik 2's player, the same engine, has no such check. The fix doesn't depend on
 anything the driver sets up, so it also goes into a driver that is
 already running, as in a save state, at the next DSP reset.
 
