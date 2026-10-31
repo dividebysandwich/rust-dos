@@ -137,8 +137,18 @@ disk.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
-- Don't take timings while other builds run. Measure on a quiet machine,
-  or compare CI's step times instead.
+- A timing measurement is one whose number is quoted as evidence: a
+  speed ratio, a CPU or halted share, a frame time, or a benchmark score.
+  It runs alone. No build, test or other emulator may run during it, and
+  the run is retaken if one starts. Check the running processes by command
+  line at the start and at the end of each run.
+- Everything else runs alongside builds: a cursor position, a window's
+  behaviour, a screenshot, an audio capture checked for correctness, a log
+  count, a trace, or a reproduction boot. Its result doesn't depend on the
+  host's speed, so it can run during a build. Only a number you will quote
+  as evidence needs the quiet machine.
+- If CI's step times are enough for the claim, use them instead of a local
+  timing.
 
 ## Behaviour: closer to the real machine beats unchanged results
 
