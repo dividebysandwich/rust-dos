@@ -169,6 +169,18 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   window counts as neither and ends a stretch. The first check after the
   start finds the queue empty, so `events` starts at 1.
 
+  Measure underruns on a real sound device (on Windows,
+  `SDL_AUDIODRIVER=wasapi`). SDL's `dummy` driver, which headless runs
+  often use, plays nothing and runs faster than real time: on Windows 11
+  it took 512 frames about every 11.3 ms, 44,940 frames a second where
+  WASAPI took 44,120. The resampling that holds the queue at its target
+  makes up 0.5% at most, so the queue runs out every few seconds however
+  well the host keeps up. Myth: The Fallen Lords gave 10 to 13 dry checks
+  a minute on `dummy` with no frame over 18 ms, and under 1 a minute on
+  WASAPI. Such events have a `gap_ms` shorter than `queued_after_ms`. On
+  `dummy`, compare counts only for what a slow frame adds to that steady
+  rate, and don't read a few a minute as a problem.
+
   `log` has the last 32 events, oldest first, each described at the check
   that started it: `event` (its number), `at_ms` (host time since the frame
   loop started), `gap_ms` (the time since the previous check),
