@@ -69,6 +69,50 @@ push, on Linux, Windows and macOS, so you don't need to before you push.
 - Push, and fix the branch if CI fails. Run the whole suite locally only
   when you can't use CI.
 
+## A pull request's lifecycle: draft until it is proven better than main
+
+A pull request opens as a draft and stays one until there is evidence
+that it improves on main. Steps, in this order:
+
+1. Open the pull request as a draft and implement the change.
+2. Review it, with the fixes applied, by running this against it:
+
+   ```
+   /code-review high --fix Make judgement calls based on long-term quality and robust architecture rather than small scope or simplicity, do not postpone decisions to later unless there is no clearly better option (in which case create a GitHub issue to address this later), explain judgement calls made in comments to the reviewed PR. Commit and push review fixes to the PR branch. Treat claims in the PR description as unverified: check each one against the code, and report any the code doesn't support.
+   ```
+
+   Then check each finding against the code before keeping its fix: a
+   review at this effort doesn't verify its own findings, and `--fix`
+   applies them all. Confirm a finding with a test, a trace or a read of
+   the code path. Revert the fix of one the code doesn't bear out, but
+   only with evidence: the code path that rules it out, a test that
+   would fail if the bug were real, or the specification or real
+   Windows behaviour it contradicts. Disagreeing isn't evidence. List
+   each rejected finding and its evidence in the comment that explains
+   the review's judgement calls, so a later reader can disagree.
+
+   A confirmed finding the pull request doesn't fix ends one of two
+   ways. Either the comment explains why the code is right as it is,
+   matching the real hardware or Windows, or the finding gets an issue
+   that says what the real system does, what the emulator does, and why
+   it waits, and the comment links it. "Left as is" or "out of scope"
+   with neither is a decision put off with no record of it.
+3. Validate it, after the review and with its fixes: run the real game
+   or program the change is for, where there is one, on the build of the
+   branch, and compare with main.
+4. Mark it ready for review only when that shows a clear improvement on
+   main: a speed-up you measured, against main on the same machine and
+   scene; a bug that main has and the branch fixes, seen in the game; or
+   behaviour closer to the real hardware or the real Windows, shown by a
+   test or a comparison with it. Put the evidence in the description.
+
+If the evidence isn't there yet, improve the change and go through the
+steps again. A pull request stays a draft only when the next step needs
+a decision with no clearly better option, or is far beyond the change's
+scope; say which in a comment on it. When several agents work together,
+the one coordinating them marks pull requests ready, not the agents
+doing the work.
+
 ## Several agents on one machine
 
 Agents often work on several branches at once, each in its own git
@@ -123,6 +167,8 @@ disk.
   callers on the machine need the same one. Read the script's header
   before using it: its rules come from clashes that spoiled
   measurements.
+- If CI's step times are enough for the claim, use them instead of a local
+  timing.
 
 ## Behaviour: closer to the real machine beats unchanged results
 
