@@ -6000,6 +6000,7 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
 const CTX_EIP: i32 = 0xB8;
 const CTX_EFLAGS: i32 = 0xC0;
 const TF: u32 = 0x100;
+const DF: u32 = 0x400;
 const SINGLE_STEP: u32 = 0x8000_0004;
 const BREAKPOINT: u32 = 0x8000_0003;
 const ACCESS_VIOLATION: u32 = 0xC000_0005;
@@ -6314,6 +6315,99 @@ fn raise_exception_with_tf_set_does_not_trap_in_the_handler() {
     assert_eq!(hits[1].eflags & TF, TF, "{:X?}", hits[1]);
     assert_eq!(hits[1].live & TF, 0, "{:X?}", hits[1]);
     assert_step(&hits[2], at + x + 3);
+}
+
+/// `pushfd; pop eax; cld; ret`: the flags the code goes on with, in EAX.
+const FLAGS_IN_EAX: &[u8] = &[0x9C, 0x58, 0xFC, 0xC3];
+/// `std; mov eax, [0]`, five bytes to go past from the MOV.
+const STD_FAULT: &[u8] = &[0xFD, 0xA1, 0, 0, 0, 0];
+const FAULT: &[u8] = &[0xA1, 0, 0, 0, 0];
+
+/// In a handler: go past the MOV of `FAULT`.
+fn skip_fault(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+    a.jne(done)?;
+    a.add(dword_ptr(edx + CTX_EIP), 5)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+/// As Windows 98: DF in a handler and in a filter is clear whatever the
+/// program had, the context keeps it, and continuing puts it back.
+#[test]
+fn an_exception_clears_df_for_the_handler_and_continuing_restores_it() {
+    // PUSHFD; OR DWORD [ESP], TF | DF; POPFD; NOP.
+    let step: &[u8] = &[0x9C, 0x81, 0x0C, 0x24, 0, 5, 0, 0, 0x9D, 0x90];
+    let cases: [(&[&[u8]], bool, i32, u32); 5] = [
+        (&[STD_FAULT], false, 0, ACCESS_VIOLATION),
+        (&[&[0xFD, 0xCC]], false, 0, BREAKPOINT),
+        (&[step], false, 0, SINGLE_STEP),
+        (&[RAISE_ARGS, &[0xFD], CALL_EBX], false, 0, RAISED),
+        (&[STD_FAULT], true, -1, ACCESS_VIOLATION),
+    ];
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        for (parts, filter, answer, exception) in cases {
+            let code = [parts.concat().as_slice(), FLAGS_IN_EAX].concat();
+            let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+            let (value, hits) = traced("df_clear", exe, core);
+            assert_eq!(hits.len(), 1, "{:X?}", hits);
+            assert_eq!(hits[0].code, exception, "{:X?}", hits);
+            assert_eq!(hits[0].live & DF, 0, "{:X?}", hits);
+            assert_eq!(hits[0].eflags & DF, DF, "{:X?}", hits);
+            assert_eq!(value & DF, DF, "{:X}", value);
+        }
+    }
+}
+
+/// Continuing takes DF from the context: what a handler changes there,
+/// and not what it left in its own flags.
+#[test]
+fn continuing_takes_df_from_the_context() {
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.or(dword_ptr(edx + CTX_EFLAGS), DF as i32)
+    });
+    let (value, _) = traced("df_set", exe, CoreMode::Normal);
+    assert_eq!(value & DF, DF, "{:X}", value);
+    let code = [STD_FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.and(dword_ptr(edx + CTX_EFLAGS), !(DF as i32))
+    });
+    let (value, _) = traced("df_cleared", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.std()
+    });
+    let (value, _) = traced("df_left", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+}
+
+/// A handler that sets DF and searches on: the next handler starts with
+/// DF set and the unhandled exception filter with it clear, as on
+/// Windows 98, and the context stays as the fault left it.
+#[test]
+fn df_a_handler_leaves_reaches_the_next_handler_and_not_the_filter() {
+    // A frame of its own, whose handler is `std; mov eax, 1; ret`, around
+    // the fault, and its removal.
+    let frame_on: &[u8] = &[
+        0xE8, 7, 0, 0, 0, 0xFD, 0xB8, 1, 0, 0, 0, 0xC3, 0x64, 0xFF, 0x35, 0, 0, 0, 0, 0x64, 0x89,
+        0x25, 0, 0, 0, 0,
+    ];
+    let frame_off: &[u8] = &[0x64, 0x8F, 0x05, 0, 0, 0, 0, 0x83, 0xC4, 0x04];
+    let code = [frame_on, FAULT, frame_off, FLAGS_IN_EAX].concat();
+    for (filter, answer, live) in [(false, 0, DF), (true, -1, 0)] {
+        let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+        let (value, hits) = traced("df_search", exe, CoreMode::Normal);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_eq!(hits[0].live & DF, live, "{:X?}", hits);
+        assert_eq!(hits[0].eflags & DF, 0, "{:X?}", hits);
+        assert_eq!(value & DF, 0, "{:X}", value);
+    }
 }
 
 /// Windows 98's exit code for a process an unhandled exception ends,

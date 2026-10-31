@@ -345,10 +345,11 @@ pub fn raise(
         return;
     }
     // The handlers run with TF clear, whatever the context says: else
-    // each of their instructions would raise another exception.
+    // each of their instructions would raise another exception. DF is
+    // clear too, as Windows 98 has it, and the context keeps both.
     let mut here = ctx;
     here.gpr[ESP] = esp;
-    here.eflags &= !CpuFlags::TF.bits();
+    here.eflags &= !(CpuFlags::TF | CpuFlags::DF).bits();
     super::system::enter_user(cpu, &here);
     let context_flags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
     write_context(cpu, ctx_at, &ctx, fpu, context_flags);
@@ -475,6 +476,9 @@ fn unhandled(cpu: &mut Cpu, record: u32, ctx_at: u32) {
     if filter != 0 {
         cpu.bus.guest_write_32(pointers, record);
         cpu.bus.guest_write_32(pointers + 4, ctx_at);
+        // The next handler gets DF as the last one left it, the filter
+        // doesn't: on Windows 98 it starts with DF clear either way.
+        cpu.set_cpu_flag(CpuFlags::DF, false);
         let resume = call::here(cpu);
         if call::call(
             cpu,
