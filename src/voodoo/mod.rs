@@ -1069,7 +1069,7 @@ impl Voodoo {
             return;
         }
         // Drawn here, over the memory as the renderer has it.
-        self.gpu_catch_up_for(&job);
+        self.gpu_draws_here(&job);
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
         }

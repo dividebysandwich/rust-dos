@@ -188,6 +188,7 @@ impl Voodoo {
             // the triangle, and pixels right of the rows land in the next
             // row, which another worker draws: drawn here, whole.
             self.flush();
+            self.gpu_draws_here(&job);
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             job.run_all(&mut stipple, &mut stats);
@@ -266,6 +267,7 @@ impl Voodoo {
         if spills {
             // Into the next rows' memory, which other workers draw.
             self.flush();
+            self.gpu_draws_here(&job);
             let mut stats = self.stats;
             job.run_all(&mut 0, &mut stats);
             self.stats = stats;

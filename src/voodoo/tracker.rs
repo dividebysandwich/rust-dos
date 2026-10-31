@@ -105,9 +105,10 @@ pub struct Tracker {
     gpu: Ranges,
     /// Bytes newer in the renderer's 3D buffers.
     buffers: Ranges,
-    /// Bytes of the 3D buffers read back since a Banshee's texture units
-    /// last looked (`take_read_back`).
-    read: Ranges,
+    /// Bytes of the 3D buffers that changed in the card's memory since a
+    /// Banshee's texture units last looked (`take_changed`): read back
+    /// from the renderer, or drawn into in software.
+    changed: Ranges,
     /// Bytes read back for the program since the last `cool`.
     hot: Ranges,
 }
@@ -285,7 +286,7 @@ impl Tracker {
     pub fn take_buffers(&mut self, start: u32, end: u32, hot: bool) -> Vec<(u32, u32)> {
         let taken = self.buffers.take(start, end);
         for &(a, b) in &taken {
-            self.read.add(a, b);
+            self.changed.add(a, b);
             if hot {
                 self.hot.add(a, b);
             }
@@ -293,11 +294,17 @@ impl Tracker {
         taken
     }
 
-    /// Whether any of bytes `start..end` was read back from the 3D
-    /// buffers since the last call for them: the memory there changed
-    /// under the textures decoded from it.
-    pub fn take_read_back(&mut self, start: u32, end: u32) -> bool {
-        !self.read.is_empty() && !self.read.take(start, end).is_empty()
+    /// Bytes `start..end` of a 3D buffer are drawn into in the card's
+    /// memory, by the software rasterizer.
+    pub fn drawn_in_memory(&mut self, start: u32, end: u32) {
+        self.changed.add(start, end.min(self.size));
+    }
+
+    /// Whether any of bytes `start..end` of the 3D buffers changed in the
+    /// card's memory (`changed`) since the last call for them: the
+    /// textures decoded from there are out of date.
+    pub fn take_changed(&mut self, start: u32, end: u32) -> bool {
+        !self.changed.is_empty() && !self.changed.take(start, end).is_empty()
     }
 
     /// The bytes newer in the renderer's 3D buffers are lost, or can't be
@@ -462,10 +469,13 @@ mod tests {
             [(0, 100 * row), (106 * row, 480 * row)]
         );
         assert!(!p.hot_in(0, 100 * row) && !p.hot_in(106 * row, 480 * row));
-        // Either way the texture units hear of them once.
-        assert!(p.take_read_back(105 * row, 106 * row));
-        assert!(!p.take_read_back(105 * row, 106 * row));
-        assert!(!p.take_read_back(480 * row, 481 * row));
+        // Either way the texture units hear of them once, as they do of
+        // rows drawn into in software.
+        assert!(p.take_changed(105 * row, 106 * row));
+        assert!(!p.take_changed(105 * row, 106 * row));
+        assert!(!p.take_changed(480 * row, 481 * row));
+        p.drawn_in_memory(480 * row, 482 * row);
+        assert!(p.take_changed(481 * row, 490 * row));
         // They are kept apart from the pages of the renderer's copy of the
         // memory: neither reads back the other's.
         p.drawn_on_gpu(0, PAGE);

@@ -1080,6 +1080,38 @@ mod tests {
     }
 
     #[test]
+    fn a_texture_from_a_buffer_drawn_in_software_is_decoded_again() {
+        // A texture decoded from A, then A drawn by the software
+        // rasterizer, and those jobs done before the next triangle that
+        // takes its texture from A: that triangle decodes it again, as a
+        // card that decodes it for the first time then does.
+        let textured = |v: &mut Voodoo| {
+            reg3d(v, COL_BUFFER_ADDR, B);
+            reg3d(v, TEX_BASE_ADDR, A);
+            reg3d(v, T_LOD, 0);
+            reg3d(v, TEXTURE_MODE, 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27);
+            reg3d(v, FBZ_COLOR_PATH, 1 | 1 << 27);
+            reg3d(v, FBZ_MODE, 1 | 1 << 9);
+            rectangle(v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+            reg3d(v, FBZ_COLOR_PATH, 0);
+            let frame = v.take_mirror().unwrap();
+            frame.commands.iter().rev().find_map(|c| match c {
+                Command::Texture(t) => t.levels.first()?.argb.first().copied(),
+                _ => None,
+            })
+        };
+        let mut v = gpu_card(None);
+        assert!(textured(&mut v).is_some());
+        draw_frame(&mut v, A);
+        v.flush();
+        let mut fresh = gpu_card(None);
+        draw_frame(&mut fresh, A);
+        let texel = textured(&mut fresh);
+        assert!(texel.is_some());
+        assert_eq!(textured(&mut v), texel, "{texel:x?}");
+    }
+
+    #[test]
     fn gpu_reads_leave_alpha_planes_to_the_software_rasterizer() {
         let log = Rc::default();
         let mut v = gpu_card(Some(&log));
