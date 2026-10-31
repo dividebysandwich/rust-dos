@@ -10,6 +10,7 @@ use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
 
+mod dyndiff;
 mod win16;
 
 const BASE: u32 = 0x40_0000;
@@ -466,6 +467,46 @@ fn a_program_reads_its_static_tls() {
     b.directory(pe::DIR_TLS, data_rva, 24).entry(code_rva);
     let (code, _) = run("tls", b.build());
     assert_eq!(code, 0x2A);
+}
+
+/// A frame limiter that calls GetTickCount or timeGetTime until the time
+/// comes: one machine skips the passes and the other runs them all, and
+/// they must come out the same after every batch, each of the milliseconds
+/// that end the skips included.
+#[test]
+fn a_wait_on_the_clock_is_skipped_exactly() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["GetTickCount"]), ("WINMM.DLL", &["timeGetTime"])];
+    let image = program(BASE, false, imports, &[0], |a, l| {
+        for clock in 0..2 {
+            let mut wait = a.create_label();
+            a.call(l.import(clock))?;
+            a.lea(ebx, dword_ptr(eax + 20))?;
+            a.set_label(&mut wait)?;
+            a.call(l.import(clock))?;
+            a.cmp(eax, ebx)?;
+            a.jb(wait)?;
+        }
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    let mut plain = start("clock_wait_plain", CoreMode::Normal, false);
+    let mut skipping = start("clock_wait_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}
+  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(skipping.errorlevel, 0x2A, "{:?}", skipping.bus.observe.stats);
+    let stats = &skipping.bus.observe.stats;
+    assert!(stats.proofs >= 30, "a proof for most milliseconds: {stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
 }
 
 /// Waits for the BIOS's tick count, which the timer interrupt advances

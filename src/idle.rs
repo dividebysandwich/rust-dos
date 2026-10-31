@@ -21,7 +21,8 @@
 //!
 //! - no device runs between timer events, and none is reached: port I/O,
 //!   memory that isn't RAM or ROM, RDTSC, and every emulator service but the
-//!   BIOS keyboard's status calls end the proof;
+//!   BIOS keyboard's status calls and the built-in Windows's clock ends the
+//!   proof;
 //! - no interrupt comes before the next event, which ends it too.
 //!
 //! The passes skipped all end by the next timer event, as they would have
@@ -35,16 +36,23 @@
 //! to `time`, which proves that and skips such passes from the instruction
 //! that latches.
 //!
+//! **Loops that read the clock.** The built-in Windows's GetTickCount and
+//! timeGetTime read the emulated clock in milliseconds, with no device or
+//! state of their own, so a pass that calls them is the same pass again
+//! until the next millisecond. The passes skipped end before it, and the
+//! loop is proven again from there (`clock_read`).
+//!
 //! **Where loops come from.** A head is armed at the service trap where the
-//! BIOS keyboard's status call found no key many times in a row, after
-//! many reads of the VGA's status or latches of the PIT's count with no
-//! other port between them, and where two timer events in a row found the
-//! CPU at the same instruction with the same flags and registers but for
-//! one (a loop, whose register may be a time read that the event between
-//! moved on). A head whose passes were skipped is armed again at the next
-//! event, as its loop usually goes on after it, and whenever an event finds
-//! the CPU there later, as a game comes back to its frame limiter every
-//! frame. Failed proofs at a head make the next tries at it rarer.
+//! BIOS keyboard's status call found no key or the built-in Windows's clock
+//! was read many times in a row, after many reads of the VGA's status or
+//! latches of the PIT's count with no other port between them, and where
+//! two timer events in a row found the CPU at the same instruction with the
+//! same flags and registers but for one (a loop, whose register may be a
+//! time read that the event between moved on). A head whose passes were
+//! skipped is armed again at the next event, as its loop usually goes on
+//! after it, and whenever an event finds the CPU there later, as a game
+//! comes back to its frame limiter every frame. Failed proofs at a head
+//! make the next tries at it rarer.
 
 mod time;
 
@@ -278,6 +286,9 @@ pub struct Observe {
     /// The blocks written since the last look.
     chunks: Vec<u32>,
     phase: Phase,
+    /// The millisecond a proof first read from the built-in Windows's clock
+    /// (`clock_read`), up to which its passes read the same.
+    clock_read: Option<u64>,
     /// Where the keyboard status call found no key last, and how many times
     /// in a row.
     poll: (Option<Head>, u32),
@@ -354,6 +365,7 @@ impl Default for Observe {
             failed: Cell::new(None),
             chunks: Vec::new(),
             phase: Phase::Off,
+            clock_read: None,
             poll: (None, 0),
             last_event: None,
             proven: None,
@@ -523,7 +535,7 @@ impl Observe {
 
     /// A time proof's pass runs: the bytes written are noted one by one.
     #[inline(always)]
-    fn timing(&self) -> bool {
+    pub fn timing(&self) -> bool {
         self.on && matches!(self.phase, Phase::Time(_))
     }
 
@@ -576,6 +588,7 @@ impl Observe {
         self.latch_head = None;
         self.latch_at = None;
         self.pit_read = false;
+        self.clock_read = None;
         self.writes.clear();
     }
 
@@ -759,6 +772,25 @@ fn head_of(cpu: &Cpu) -> Head {
 /// `cs:eip`. Arms it once that happened enough times in a row.
 pub fn keyboard_poll(cpu: &mut Cpu, cs: u16, eip: u32) {
     let head = Head { cs, eip, pe: cpu.pe() };
+    poll_at(cpu, head);
+}
+
+/// The built-in Windows's clock was read, at the service trap at `cs:eip`.
+/// What it returns moves on once a millisecond, so a proof's passes hold
+/// up to the next one (`finish`), and the loop is proven again from there,
+/// as a game's frame limiter that reads it in every pass goes on.
+pub fn clock_read(cpu: &mut Cpu, cs: u16, eip: u32) {
+    let head = Head { cs, eip, pe: cpu.pe() };
+    if cpu.bus.observe.on {
+        let ms = cpu.bus.clock.now_micros() / 1000;
+        cpu.bus.observe.clock_read.get_or_insert(ms);
+    }
+    poll_at(cpu, head);
+}
+
+/// A service was polled at `head`: armed once that happened enough times
+/// in a row.
+fn poll_at(cpu: &mut Cpu, head: Head) {
     let now = cpu.bus.clock.icount;
     let o = &mut cpu.bus.observe;
     if !o.enabled {
@@ -1014,6 +1046,9 @@ fn finish(cpu: &mut Cpu, visit: &Visit, base: u64, executed: u64, counted: Optio
             Some(until) => limit = limit.min(until),
             None => return cpu.bus.observe.fail("port"),
         }
+    }
+    if let Some(ms) = cpu.bus.observe.clock_read {
+        limit = limit.min(cpu.bus.clock.icount_at_ms(ms + 1));
     }
     // AL may hold a port's value whose bits the loop doesn't look at, but
     // what comes after it may: it is made what the last pass skipped read.
