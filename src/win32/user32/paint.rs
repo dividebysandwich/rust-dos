@@ -711,6 +711,7 @@ pub fn leave_desktop(cpu: &mut Cpu) {
         return;
     }
     user(cpu).desktop = false;
+    super::saver::desktop_ended(cpu);
     crate::win32::screen::set_text_mode(cpu);
 }
 

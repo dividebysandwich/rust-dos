@@ -158,6 +158,18 @@ pub fn run(test: &str, program: Vec<u8>) -> (u8, String) {
 /// `run`, with `setup` given the machine and the test's folder first, to
 /// mount drives or add files.
 pub fn run_with(test: &str, program: Vec<u8>, setup: impl FnOnce(&mut Cpu, &Path)) -> (u8, String) {
+    run_command(test, program, "T.EXE", "", setup)
+}
+
+/// `run_with`, with the program started as the prompt starts the
+/// command `command` with the arguments `args` (exec::run_program).
+pub fn run_command(
+    test: &str,
+    program: Vec<u8>,
+    command: &str,
+    args: &str,
+    setup: impl FnOnce(&mut Cpu, &Path),
+) -> (u8, String) {
     let base = scratch(test, &[("T.EXE", program)]);
     let mut cpu = Cpu::new(base.clone());
     setup(&mut cpu, &base);
@@ -169,7 +181,7 @@ pub fn run_with(test: &str, program: Vec<u8>, setup: impl FnOnce(&mut Cpu, &Path
         sink.lock().unwrap().push(line.to_string())
     }));
     cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    assert!(rust_dos::exec::run_program(&mut cpu, command, args, false), "{command} didn't start");
     let mut ended = false;
     for _ in 0..400 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);

@@ -858,12 +858,18 @@ fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> Op
 /// it: where it says when it names a directory or drive, else in the
 /// current directory and then in those of PATH, in order. Without an
 /// extension it is a .COM, .EXE or .BAT file, the first of them in the
-/// first directory that has one; other extensions don't run.
+/// first directory that has one; other extensions don't run. With the
+/// built-in Windows on, a screen saver named with its .SCR extension runs
+/// too, as Windows starts one (`SCRANTIC.SCR /s`): it is a Windows
+/// program under another extension.
 pub fn find_program(cpu: &Cpu, command: &str) -> Option<String> {
     const RUNNABLE: [&str; 3] = [".COM", ".EXE", ".BAT"];
     let name = command.rsplit(['\\', '/', ':']).next().unwrap_or(command);
     let names: Vec<String> = match name.rfind('.') {
         Some(dot) if RUNNABLE.iter().any(|ext| name[dot..].eq_ignore_ascii_case(ext)) => vec![command.to_string()],
+        Some(dot) if cpu.bus.win32.enabled && name[dot..].eq_ignore_ascii_case(".SCR") => {
+            vec![command.to_string()]
+        }
         Some(_) => return None,
         None => RUNNABLE.iter().map(|ext| format!("{}{}", command, ext)).collect(),
     };
