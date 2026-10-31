@@ -329,7 +329,8 @@ fn ioctl_reports_drive_types() {
     assert_eq!(remote(&mut cpu, 4), (false, 0x1000));
     assert!(remote(&mut cpu, 7).0);
 
-    // Device info for a file handle carries its drive number
+    // Device info for a file handle carries its drive number, and bit 6
+    // set until the file is written, as on MS-DOS 7.10
     set_dsdx_string(&mut cpu, "D:\\DATA.DAT");
     cpu.set_reg8(Register::AL, 0);
     int21(&mut cpu, 0x3D);
@@ -337,7 +338,7 @@ fn ioctl_reports_drive_types() {
     cpu.set_bx(cpu.ax());
     cpu.set_reg8(Register::AL, 0x00);
     int21(&mut cpu, 0x44);
-    assert_eq!(cpu.dx(), DRIVE_D as u16);
+    assert_eq!(cpu.dx(), 0x40 | DRIVE_D as u16);
 }
 
 #[test]
