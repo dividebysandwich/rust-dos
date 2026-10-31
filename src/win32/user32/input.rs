@@ -697,6 +697,9 @@ pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, moved: bool) {
     let under_it = now == hwnd || state.is_descendant(hwnd, now);
     if now != before || moved && under_it {
         mouse_event_at(cpu, WM_MOUSEMOVE, 0);
+        // The window under the cursor can be another thread's, waiting
+        // for a message: the wake paint::moved gave came before the move.
+        crate::win32::thread::wake(cpu);
     }
 }
 
@@ -2335,6 +2338,9 @@ pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// before is read first: a button that went down while it was elsewhere
 /// went down there, not where the cursor is put.
 pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The system starts first, so the place it starts the cursor at
+    // doesn't replace this one.
+    super::init(cpu);
     poll(cpu);
     let screen = screen_size(cpu);
     let input = &mut user(cpu).input;
@@ -2351,6 +2357,7 @@ pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ClipCursor(rect): 0 frees it.
 pub fn clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::init(cpu);
     let screen = screen_size(cpu);
     let clip = if args[0] == 0 {
         None

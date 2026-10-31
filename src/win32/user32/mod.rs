@@ -471,11 +471,8 @@ pub fn init(cpu: &mut Cpu) {
     window::create_desktop(cpu);
     let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
     cursor::set(cpu, arrow);
-    // Until the desktop comes on the screen, the cursor is where it will
-    // put it, in the middle (`paint::ensure_desktop`). GetCursorPos gives
-    // the same place before and after, and a screen saver that keeps the
-    // place as its window is made doesn't take the move its window gets
-    // as it shows (`input::window_moved`) for the mouse moving.
+    // The cursor starts in the middle of the screen, and the desktop
+    // keeps it there as it comes on the screen (`paint::ensure_desktop`).
     if !user(cpu).desktop {
         let (w, h) = sysparams::screen_size(cpu);
         user(cpu).input.cursor = (w / 2, h / 2);

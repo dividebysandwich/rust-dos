@@ -3233,6 +3233,62 @@ fn the_first_window_shown_under_the_cursor_gets_a_mouse_move() {
     assert_ne!(r[4], r[6]);
 }
 
+const USER32_EARLY_SET_CURSOR_POS: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "SetCursorPos", "GetCursorPos"],
+);
+const EARLY_SET_CURSOR_POS: usize = 1;
+const EARLY_GET_CURSOR_POS: usize = 2;
+/// The POINT GetCursorPos fills after the window shows.
+const CURSOR_POINT_AFTER: u32 = 0xF48;
+
+/// SetCursorPos before the program's first window puts the cursor where
+/// the desktop then has it: the desktop doesn't take it back to the
+/// middle of the screen as it comes, so GetCursorPos gives the place the
+/// program set.
+#[test]
+fn the_desktop_keeps_the_cursor_set_before_it() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_EARLY_SET_CURSOR_POS], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, EARLY_SET_CURSOR_POS, &[Arg::I(100), Arg::I(120)])?;
+        c.api(a, l, EARLY_GET_CURSOR_POS, &[Arg::At(CURSOR_POINT)])?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, EARLY_GET_CURSOR_POS, &[Arg::At(CURSOR_POINT_AFTER)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_set_before_desktop", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_eq!(r[0], 1, "SetCursorPos");
+    assert_eq!(r[1], 1, "GetCursorPos");
+    assert_ne!(r[2], 0, "CreateWindowExA");
+    assert_eq!(r[3], 1, "GetCursorPos");
+    let point = |at: u32| (peek(&cpu, data + at), peek(&cpu, data + at + 4));
+    assert_eq!(point(CURSOR_POINT), (100, 120), "before the desktop");
+    assert_eq!(point(CURSOR_POINT_AFTER), (100, 120), "after it");
+    assert_eq!((cpu.bus.mouse.x, cpu.bus.mouse.y), (100, 120), "the mouse");
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
