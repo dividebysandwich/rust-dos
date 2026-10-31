@@ -237,6 +237,10 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # One benchmark file per subsystem, sharing benches/common. Criterion runs
 # them, in place of the built-in harness.
 [[bench]]
+name = "xbrz"
+harness = false
+
+[[bench]]
 name = "dos"
 harness = false
 

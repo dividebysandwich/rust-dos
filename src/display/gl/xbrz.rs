@@ -1,7 +1,7 @@
 //! Source-sized xBRZ work, reused across overlays, captures and resizes.
 
 use super::{Program, compile_sources};
-use crate::video::shader::{self, Glsl, XbrzPass};
+use crate::video::shader::{self, Glsl, XbrzDamage, XbrzPass};
 use glow::HasContext;
 
 struct Target {
@@ -93,6 +93,8 @@ pub(super) struct XbrzGpu {
     source: Option<glow::Texture>,
     corners_valid: bool,
     scaled_valid: bool,
+    corner_damage: XbrzDamage,
+    scaled_damage: XbrzDamage,
     limit: u32,
     #[cfg(test)]
     pub draws: (usize, usize),
@@ -132,6 +134,8 @@ impl XbrzGpu {
             source: None,
             corners_valid: false,
             scaled_valid: false,
+            corner_damage: XbrzDamage::default(),
+            scaled_damage: XbrzDamage::default(),
             limit,
             #[cfg(test)]
             draws: (0, 0),
@@ -141,6 +145,19 @@ impl XbrzGpu {
     pub fn invalidate(&mut self) {
         self.corners_valid = false;
         self.scaled_valid = false;
+        self.corner_damage.clear();
+        self.scaled_damage.clear();
+    }
+
+    pub fn invalidate_regions(&mut self, damage: &XbrzDamage, size: (u32, u32)) {
+        for rect in damage.expanded(size) {
+            if self.corners_valid {
+                self.corner_damage.add(rect);
+            }
+            if self.scaled_valid {
+                self.scaled_damage.add(rect);
+            }
+        }
     }
 
     pub fn supports(&self, size: (u32, u32)) -> bool {
@@ -181,12 +198,15 @@ impl XbrzGpu {
         let needs_prepare = self.source != Some(source)
             || self.source_size != size
             || !self.corners_valid
-            || cached.is_some() && !self.scaled_valid;
+            || !self.corner_damage.rects().is_empty()
+            || cached.is_some() && (!self.scaled_valid || !self.scaled_damage.rects().is_empty());
         if needs_prepare {
             // SAFETY: all objects belong to GlScreen's current context. The
             // caller bound its empty VAO; each target fits MAX_TEXTURE_SIZE.
             unsafe {
                 let framebuffer = gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING);
+                let mut scissor = [0; 4];
+                gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut scissor);
                 let states = [glow::BLEND, glow::DITHER, glow::SCISSOR_TEST]
                     .map(|state| (state, gl.is_enabled(state)));
                 for &(state, _) in &states {
@@ -209,8 +229,10 @@ impl XbrzGpu {
                     }
                     let corners = self.corners.as_mut().unwrap();
                     corners.resize(gl, halo)?;
-                    if !self.corners_valid {
-                        draw(gl, &self.classify, source, size, corners, false);
+                    if !self.corners_valid || !self.corner_damage.rects().is_empty() {
+                        let damage = self.corners_valid.then_some(&self.corner_damage);
+                        draw_regions(gl, &self.classify, source, size, corners, damage, false);
+                        self.corner_damage.clear();
                         self.corners_valid = true;
                         #[cfg(test)]
                         {
@@ -225,8 +247,10 @@ impl XbrzGpu {
                         }
                         let scaled = self.scaled.as_mut().unwrap();
                         scaled.resize(gl, scaled_size)?;
-                        if !self.scaled_valid {
-                            draw(gl, &self.resolve, source, size, scaled, true);
+                        if !self.scaled_valid || !self.scaled_damage.rects().is_empty() {
+                            let damage = self.scaled_valid.then_some(&self.scaled_damage);
+                            draw_regions(gl, &self.resolve, source, size, scaled, damage, true);
+                            self.scaled_damage.clear();
                             self.scaled_valid = true;
                             #[cfg(test)]
                             {
@@ -237,6 +261,7 @@ impl XbrzGpu {
                     Ok::<_, String>(())
                 })();
                 gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, framebuffer);
+                gl.scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
                 for (state, enabled) in states {
                     if enabled {
                         gl.enable(state);
@@ -275,6 +300,43 @@ impl XbrzGpu {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
         }
         Ok(())
+    }
+}
+
+fn draw_regions(
+    gl: &glow::Context,
+    program: &Program,
+    source: glow::Texture,
+    size: (u32, u32),
+    target: &Target,
+    damage: Option<&XbrzDamage>,
+    unflipped: bool,
+) {
+    // SAFETY: draw owns the current context and restores the scissor box
+    // and enable state after both cached passes, including on failure.
+    unsafe {
+        if let Some(damage) = damage {
+            gl.enable(glow::SCISSOR_TEST);
+            for &[x, y, w, h] in damage.rects() {
+                // Corner storage has an extra top/left kernel; the 2x
+                // target stores four output pixels per source pixel.
+                let rect = if unflipped {
+                    [x * 2, y * 2, w * 2, h * 2]
+                } else {
+                    [x, y, w + 1, h + 1]
+                };
+                gl.scissor(
+                    rect[0] as i32,
+                    rect[1] as i32,
+                    rect[2] as i32,
+                    rect[3] as i32,
+                );
+                draw(gl, program, source, size, target, unflipped);
+            }
+            gl.disable(glow::SCISSOR_TEST);
+        } else {
+            draw(gl, program, source, size, target, unflipped);
+        }
     }
 }
 
