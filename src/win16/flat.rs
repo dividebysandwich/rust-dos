@@ -42,6 +42,8 @@ use crate::win32::thread::Wait;
 /// What a request of a Win32 thread to its client is.
 pub const CALL: u8 = 0;
 pub const CONNECT: u8 = 1;
+/// LoadLibrary16's: load a 16-bit DLL for the process.
+pub const LOAD: u8 = 2;
 
 /// The bytes of a thunk block's header: magic and checksum.
 const HEADER: usize = 8;
@@ -58,16 +60,17 @@ pub struct Client {
     pub pid: u32,
     /// The task's thread.
     pub tid: u32,
-    /// The 16-bit DLLs its ThunkConnect32s loaded, a reference to each,
-    /// which go when it ends.
+    /// The 16-bit DLLs its ThunkConnect32s and LoadLibrary16s loaded, a
+    /// reference to each, which go when it ends.
     pub modules: Vec<u16>,
     /// The requests waiting, and the one the task runs.
     pub queue: Vec<Request>,
     pub current: Option<Request>,
 }
 
-/// A Win32 thread's request: a call of a 16-bit function (`CALL`), or a
-/// ThunkConnect32 (`CONNECT`). The thread waits until it is done.
+/// A Win32 thread's request: a call of a 16-bit function (`CALL`), a
+/// ThunkConnect32 (`CONNECT`) or a LoadLibrary16 (`LOAD`). The thread
+/// waits until it is done.
 #[derive(Clone, Debug, Default)]
 pub struct Request {
     pub kind: u8,
@@ -82,7 +85,8 @@ pub struct Request {
     pub sp: u32,
     /// CONNECT: the 32-bit thunk data, the names of the 16-bit DLL and
     /// its thunk data and the directory to look for it in, and the
-    /// module loaded.
+    /// module loaded. LOAD: the DLL's name, an empty one and the
+    /// directory, and the instance loaded.
     pub data32: u32,
     pub names: Vec<String>,
     pub module: u16,
@@ -430,6 +434,78 @@ pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
+/// The Win16 loader's errors LoadLibrary16 passes on.
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_BAD_FORMAT: u32 = 11;
+
+/// LoadLibrary16(name), KERNEL32's ordinal 35 on Windows 95 and 98: the
+/// Win16 LoadLibrary, for a Win32 program. The process's task in the
+/// Win16 process loads the DLL, where its thunks' calls run, and keeps
+/// a reference to it until the process ends or frees it. The calling
+/// thread waits, and gets the DLL's instance or an error below 32.
+pub fn load_library16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let name = guest_string(cpu, args[0]);
+    let pid = running_pid(cpu);
+    let dir = crate::win32::running(cpu)
+        .and_then(|p| p.modules.first())
+        .map(|m| crate::win32::loader::directory_of(&m.path))
+        .unwrap_or_default();
+    let Some(tid) = crate::win32::running(cpu)
+        .and_then(|p| p.current_thread())
+        .map(|t| t.id)
+    else {
+        return Some(ERROR_FILE_NOT_FOUND);
+    };
+    if ensure_client(cpu, pid).is_none() {
+        return Some(ERROR_FILE_NOT_FOUND);
+    }
+    post(
+        cpu,
+        pid,
+        Request {
+            kind: LOAD,
+            tid,
+            names: vec![name, String::new(), dir],
+            ..Request::default()
+        },
+    );
+    None
+}
+
+/// FreeLibrary16(instance), ordinal 36: a reference LoadLibrary16 took
+/// goes, and the DLL with the last.
+pub fn free_library16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let pid = running_pid(cpu);
+    let handle =
+        super::module_index(cpu, args[0] as u16).map(|i| cpu.bus.win32.win16.modules[i].handle);
+    let clients = &mut cpu.bus.win32.win16.clients;
+    let held = clients.iter_mut().find(|c| c.pid == pid).and_then(|c| {
+        let i = c.modules.iter().position(|&m| Some(m) == handle)?;
+        Some(c.modules.remove(i))
+    });
+    if let Some(handle) = held {
+        module::release(cpu, handle);
+    }
+    Some(0)
+}
+
+/// GetProcAddress16(module, name), ordinal 37: the 16:16 address of the
+/// 16-bit DLL's function, named by a string or, below 10000h, by its
+/// ordinal; 0 if it has none.
+pub fn get_proc_address16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let module = args[0] as u16;
+    if super::module_index(cpu, module).is_none() {
+        return Some(0);
+    }
+    let ordinal = if args[1] < 0x1_0000 {
+        Some(args[1] as u16)
+    } else {
+        let name = guest_string(cpu, args[1]);
+        module::ordinal_of(cpu, module, &name)
+    };
+    Some(ordinal.map_or(0, |o| module::entry_point(cpu, module, o)))
+}
+
 pub fn map_ls_api(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(map_ls(cpu, args[0]))
 }
@@ -647,6 +723,7 @@ pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         client.current = Some(request.clone());
         match request.kind {
             CALL => start_call(cpu, c, request),
+            LOAD => start_load(cpu, c, request),
             _ => start_connect(cpu, c, request),
         }
         return None;
@@ -786,10 +863,56 @@ pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opt
         return None;
     }
     if let Some(c) = client_of(cpu, tid) {
-        let joined = connect(cpu, c);
-        done(cpu, c, joined as u32);
+        let load = cpu.bus.win32.win16.clients[c].current.as_ref();
+        if let Some(r) = load.filter(|r| r.kind == LOAD) {
+            let instance = r.module as u32;
+            done(cpu, c, instance);
+        } else {
+            let joined = connect(cpu, c);
+            done(cpu, c, joined as u32);
+        }
     }
     Some(ctx.gpr[EAX])
+}
+
+/// Load the 16-bit DLL of the LoadLibrary16 `request` on the client
+/// `c`'s task, from Win16Serve, and run the entry points of the modules
+/// that came with it, as the Win16 LoadLibrary does. The Win32 thread
+/// gets the DLL's instance, or the Win16 loader's error below 32.
+fn start_load(cpu: &mut Cpu, c: usize, request: Request) {
+    let mut inits = Vec::new();
+    let (dll, dir) = (&request.names[0], &request.names[2]);
+    let index = match module::load(cpu, dll, dir, &mut inits) {
+        Ok(index) => index,
+        Err(message) => {
+            cpu.bus
+                .log_string(&format!("[W16] LoadLibrary16({}): {}", dll, message));
+            let error = if message.contains("found") {
+                ERROR_FILE_NOT_FOUND
+            } else {
+                ERROR_BAD_FORMAT
+            };
+            done(cpu, c, error);
+            return;
+        }
+    };
+    let m = &cpu.bus.win32.win16.modules[index];
+    let (handle, instance) = (m.handle, if m.dgroup != 0 { m.dgroup } else { m.handle });
+    let client = &mut cpu.bus.win32.win16.clients[c];
+    client.modules.push(handle);
+    if let Some(current) = client.current.as_mut() {
+        current.module = instance;
+    }
+    let mut data = vec![client.tid];
+    data.extend(
+        inits
+            .iter()
+            .map(|&i| cpu.bus.win32.win16.modules[i].handle as u32),
+    );
+    let mut resume = Context::of(cpu);
+    if then_inits(cpu, 0, &data, &mut resume).is_some() {
+        crate::win32::system::load_context(cpu, &resume);
+    }
 }
 
 /// Join the thunk data of the client `c`'s ThunkConnect32, whose 16-bit

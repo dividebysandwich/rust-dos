@@ -74,7 +74,7 @@ fn program_with(
     let base = b.image_base();
     let lists: Vec<Vec<Imp>> = imports
         .iter()
-        .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
+        .map(|(_, names)| names.iter().map(|n| import(n)).collect())
         .collect();
     let dlls: Vec<(&str, &[Imp])> = imports
         .iter()
@@ -122,6 +122,14 @@ fn program_with(
     }
     b.entry(code_rva);
     b.build()
+}
+
+/// The import `name` says: "#35" is ordinal 35, any other a name.
+fn import(name: &str) -> Imp<'_> {
+    match name.strip_prefix('#').and_then(|n| n.parse().ok()) {
+        Some(ordinal) => Imp::Ordinal(ordinal),
+        None => Imp::Name(name),
+    }
 }
 
 fn scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
@@ -2057,7 +2065,7 @@ fn module_image(
     };
     let lists: Vec<Vec<Imp>> = imports
         .iter()
-        .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
+        .map(|(_, names)| names.iter().map(|n| import(n)).collect())
         .collect();
     let dlls: Vec<(&str, &[Imp])> = imports
         .iter()
@@ -4832,4 +4840,90 @@ fn a_flat_thunk_calls_a_16_bit_dll_with_a_mapped_pointer() {
     // The Win16 process the thunks made ended with the program.
     assert!(!cpu.bus.win32.active());
     assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
+    // KERNEL32's functions by Windows 98's ordinals: #35 LoadLibrary16,
+    // #36 FreeLibrary16, #37 GetProcAddress16 and #1 VxDCall0, which have
+    // no names there.
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &[
+            "#35",
+            "#36",
+            "#37",
+            "#1",
+            "GetModuleHandleA",
+            "GetProcAddress",
+            "QT_Thunk",
+            "ExitProcess",
+        ],
+    )];
+    let mut data = vec![0u8; 0x100];
+    data[..12].copy_from_slice(b"KRNL386.EXE ");
+    data[0x10..0x1B].copy_from_slice(b"GETVERSION ");
+    data[0x20..0x29].copy_from_slice(b"KERNEL32 ");
+    data[0x30..0x39].copy_from_slice(b"AddAtomA ");
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // GetProcAddress(KERNEL32, ordinal) is the function the program
+        // imported by that ordinal, and ordinal 50 is AddAtomA.
+        a.push(l.at(0x20) as i32)?;
+        a.call(l.import(4))?;
+        a.mov(esi, eax)?;
+        for (step, ordinal, slot) in [(1, 1, 3), (2, 35, 0), (3, 37, 2)] {
+            a.push(ordinal)?;
+            a.push(esi)?;
+            a.call(l.import(5))?;
+            a.mov(ebx, step)?;
+            a.cmp(eax, l.import(slot))?;
+            a.jne(fail)?;
+        }
+        a.push(l.at(0x30) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(5))?;
+        a.mov(edi, eax)?;
+        a.push(50)?;
+        a.push(esi)?;
+        a.call(l.import(5))?;
+        a.mov(ebx, 4)?;
+        a.test(edi, edi)?;
+        a.je(fail)?;
+        a.cmp(eax, edi)?;
+        a.jne(fail)?;
+        // LoadLibrary16("KRNL386.EXE"), an instance (32 or more).
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, 32)?;
+        a.jb(fail)?;
+        a.mov(esi, eax)?;
+        // GetProcAddress16(it, "GETVERSION"), a 16:16 address.
+        a.push(l.at(0x10) as i32)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, 6)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        // Called through QT_Thunk: Windows 95's version, 3.95, in AX.
+        a.push(ebp)?;
+        a.mov(ebp, esp)?;
+        a.sub(esp, 0x40)?;
+        a.mov(edx, eax)?;
+        a.call(l.import(6))?;
+        a.leave()?;
+        a.mov(ebx, 7)?;
+        a.cmp(ax, 0x5F03)?;
+        a.jne(fail)?;
+        a.push(esi)?;
+        a.call(l.import(1))?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(7))?;
+        a.int3()
+    });
+    let (code, text) = run("kernel32_ordinals", exe);
+    assert_eq!(code, 0, "{}", text);
 }

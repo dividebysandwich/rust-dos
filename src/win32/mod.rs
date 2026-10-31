@@ -41,6 +41,7 @@ mod msimg32;
 mod msvcrt;
 mod ntdll;
 pub(crate) mod object;
+mod ordinals;
 mod ole32;
 mod oleaut32;
 mod opengl32;

@@ -178,6 +178,17 @@ Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
 debugger all work on them like on any DLL. DirectX objects are COM
 objects whose vtables are data in the stub images, pointing at stubs.
 
+The export directories number the functions as Windows 98 SE's DLLs do
+(`src/win32/ordinals.rs`, from lists `tools/win98_ordinals.py` made from
+the real DLLs), so a program that imports a function by its ordinal
+gets the one it would on Windows 98. KERNEL32 also has, under their
+ordinals, functions Windows 98 exports by ordinal only: VxDCall0 to
+VxDCall8 (1 to 9) and LoadLibrary16, FreeLibrary16 and GetProcAddress16
+(35 to 37), which SafeDisc's loader imports that way. A function the
+built-in DLL doesn't have keeps no ordinal of Windows': an import of it
+by ordinal binds to the missing-function stub below, as an import by
+name does.
+
 Functions are declared in Rust tables, one line each: DLL, name, ordinal,
 calling convention, argument count, handler. A missing function is bound
 to a stub that logs `dll!name` with its arguments and ends the program
