@@ -250,7 +250,7 @@ pub struct Queue {
     pub posted: VecDeque<Msg>,
     /// Keyboard and mouse messages for the thread's windows.
     pub input: VecDeque<Msg>,
-    /// Messages other threads sent.
+    /// Messages other threads sent that the thread hasn't taken yet.
     pub sent: VecDeque<Sent>,
     pub callbacks: VecDeque<Callback>,
     /// PostQuitMessage's exit code.
@@ -261,9 +261,12 @@ pub struct Queue {
     /// last, with when they time out; 0 marks where it got a message
     /// sent to it meanwhile.
     pub waiting: Vec<(u32, u64)>,
-    /// How deep it is in messages other threads sent it, and the sender
-    /// of the innermost.
-    pub in_send: Vec<u32>,
+    /// The messages other threads sent it that it handles, the innermost
+    /// last; None for a callback of SendMessageCallbackA. Windows takes a
+    /// sent message off the queue when the receiver gets it, so one being
+    /// handled is here and no longer in `sent`, where a wait of the
+    /// thread's own (for a reply, or a modal loop) would take it again.
+    pub in_send: Vec<Option<Sent>>,
     /// The queue status bits that came since GetQueueStatus last looked.
     pub changed: u32,
     /// The last message's time and place, for GetMessageTime and
@@ -618,15 +621,16 @@ fn resume_wait(
 }
 
 /// The thread `tid` ended: the messages other threads sent it and wait
-/// for the reply of get 0, so that they don't wait for ever.
+/// for the reply of get 0, so that they don't wait for ever, those it
+/// was handling as well as those it hadn't taken.
 pub fn thread_ended(win32: &mut crate::win32::Win32, tid: u32) {
     let state = &mut win32.user;
     let Some(q) = state.queues.iter_mut().find(|q| q.tid == tid) else {
         return;
     };
-    let pending: Vec<(u32, u32)> = q
-        .sent
-        .drain(..)
+    let handled = q.in_send.drain(..).flatten();
+    let pending: Vec<(u32, u32)> = handled
+        .chain(q.sent.drain(..))
         .filter(|s| s.kind == 0)
         .map(|s| (s.from, s.id))
         .collect();
@@ -701,9 +705,11 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     .map_or(0, |&(_, d)| d);
                 if deadline != 0 && now >= deadline {
                     q.waiting.retain(|&(w, _)| w != id);
-                    // The reply, if it comes, goes nowhere.
+                    // The reply, if it comes, goes nowhere, whether the
+                    // other thread has taken the message or not.
                     for q in state.queues.iter_mut() {
-                        for s in q.sent.iter_mut() {
+                        let handled = q.in_send.iter_mut().flatten();
+                        for s in q.sent.iter_mut().chain(handled) {
                             if s.id == id {
                                 s.kind = 1;
                             }
@@ -745,29 +751,33 @@ fn reply_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 /// Start handling the first message another thread sent to this one, or
-/// the first callback of SendMessageCallbackA due: a call, going on at
-/// `step` with its result. None when there is none.
+/// the first callback of SendMessageCallbackA due, taking it off the
+/// queue: a call, going on at `step` with its result. None when there is
+/// none.
 fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
     let me = current_tid(cpu);
     let state = user(cpu);
     let q = state.queue_mut(me);
-    if let Some(cb) = q.callbacks.pop_front() {
-        q.in_send.push(0);
-        q.waiting.push((0, 0));
-        return Some(Next::call(
-            cb.proc,
-            &[cb.hwnd, cb.message, cb.data, cb.result],
-            step,
-        ));
-    }
-    let sent = q.sent.front().cloned()?;
-    q.in_send.push(sent.id);
+    let (call, args) = if let Some(cb) = q.callbacks.pop_front() {
+        q.in_send.push(None);
+        (cb.proc, [cb.hwnd, cb.message, cb.data, cb.result])
+    } else {
+        let sent = q.sent.pop_front()?;
+        let args = [sent.hwnd, sent.message, sent.wparam, sent.lparam];
+        q.in_send.push(Some(sent));
+        (address_of("SendMessageA"), args)
+    };
     q.waiting.push((0, 0));
-    Some(Next::call(
-        address_of("SendMessageA"),
-        &[sent.hwnd, sent.message, sent.wparam, sent.lparam],
-        step,
-    ))
+    // With none left to handle, QS_SENDMESSAGE no longer counts as new.
+    // Windows (and Wine's receive_message) clears it when the receiver
+    // gets the last one, not when it replies: else
+    // MsgWaitForMultipleObjects would return at once while the window
+    // procedure handles it, and for ever after a message another thread
+    // sent.
+    if q.sent.is_empty() && q.callbacks.is_empty() {
+        q.changed &= !QS_SENDMESSAGE;
+    }
+    Some(Next::call(call, &args, step))
 }
 
 /// The message `handle_sent` started handling returned `result`: the
@@ -775,32 +785,27 @@ fn handle_sent(cpu: &mut Cpu, step: u16) -> Option<Next> {
 fn finish_sent(cpu: &mut Cpu, result: u32) {
     let me = current_tid(cpu);
     let state = user(cpu);
-    let q = state.queue_mut(me);
-    let id = q.in_send.pop().unwrap_or(0);
-    let i = q.sent.iter().position(|s| s.id == id).filter(|_| id != 0);
-    let sent = i.and_then(|i| q.sent.remove(i));
-    // With none left, QS_SENDMESSAGE no longer counts as new, as in
-    // Windows: else MsgWaitForMultipleObjects would return at once for
-    // ever after a message another thread sent.
-    if q.sent.is_empty() && q.callbacks.is_empty() {
-        q.changed &= !QS_SENDMESSAGE;
-    }
-    // A callback ran when `id` is 0.
-    let Some(sent) = sent else {
+    // A callback ran when it is None.
+    let Some(Some(sent)) = state.queue_mut(me).in_send.pop() else {
         return;
     };
     match sent.kind {
         0 => {
-            state.queue_mut(sent.from).replies.push((id, result));
+            state.queue_mut(sent.from).replies.push((sent.id, result));
         }
         2 => {
-            state.queue_mut(sent.from).callbacks.push_back(Callback {
+            // As in Wine, the result comes to the sender as a sent
+            // message does, and wakes a MsgWaitForMultipleObjects that
+            // waits for one.
+            let q = state.queue_mut(sent.from);
+            q.callbacks.push_back(Callback {
                 proc: sent.callback.0,
                 hwnd: sent.hwnd,
                 message: sent.message,
                 data: sent.callback.1,
                 result,
             });
+            q.changed |= QS_SENDMESSAGE;
         }
         _ => {}
     }
@@ -862,7 +867,12 @@ pub fn send_notify_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SendMessageCallbackA(hwnd, message, wParam, lParam, callback, data):
 /// the callback gets the result in the sender's thread, when it next
-/// gets messages.
+/// gets messages. To a window of the sender's own thread (or one that
+/// SendMessageA handles in place, as the desktop) the message is sent at
+/// once and the callback called as soon as the window procedure returns,
+/// as Windows documents and Wine does. The message is never queued, so
+/// InSendMessage is FALSE while it is handled, and a callback due from
+/// an earlier send doesn't run in its place.
 pub fn send_message_callback(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[hwnd, msg, wp, lp, callback, data] = args else {
         unreachable!()
@@ -873,23 +883,13 @@ pub fn send_message_callback(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let tid = w.tid;
     let me = current_tid(cpu);
+    if tid == me || hwnd == DESKTOP || tid == 0 {
+        let vars = vec![DISPATCH_CALLBACK_NOW, hwnd, msg, wp, lp, callback, data];
+        return task::start(cpu, TASK_DISPATCH, vars, 0);
+    }
     let state = user(cpu);
     state.last_sent += 1;
     let id = state.last_sent;
-    if tid == me {
-        // The message is handled now; the callback comes later.
-        state.queue_mut(tid).sent.push_front(Sent {
-            id,
-            from: me,
-            hwnd,
-            message: msg,
-            wparam: wp,
-            lparam: lp,
-            kind: 2,
-            callback: (callback, data),
-        });
-        return task::start(cpu, TASK_DISPATCH, vec![DISPATCH_SENT_NOW, 0], 0);
-    }
     state.queue_mut(tid).sent.push_back(Sent {
         id,
         from: me,
@@ -1324,9 +1324,10 @@ pub fn get_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 const DISPATCH_KIND: usize = 0;
 const DISPATCH_MSG: usize = 1;
 const DISPATCH_NORMAL: u32 = 0;
-/// Handle the sent messages now (SendMessageCallbackA within the
-/// thread).
-const DISPATCH_SENT_NOW: u32 = 1;
+/// SendMessageCallbackA within the thread: send the message, then call
+/// the callback with its result. Its variables after the kind: the
+/// window, the message, its parameters, the callback and its data.
+const DISPATCH_CALLBACK_NOW: u32 = 1;
 
 /// DispatchMessageA(msg): the window procedure's result.
 pub fn dispatch_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1378,21 +1379,12 @@ pub fn dispatch_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// DispatchMessageA's steps.
 pub fn dispatch_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    if t.var(DISPATCH_KIND) == DISPATCH_SENT_NOW {
+    if t.var(DISPATCH_KIND) == DISPATCH_CALLBACK_NOW {
+        let [hwnd, msg, wp, lp, callback, data] = [1, 2, 3, 4, 5, 6].map(|i| t.var(i));
         return match t.step {
-            0 => match handle_sent(cpu, 1) {
-                Some(next) => next,
-                None => Next::Done(TRUE),
-            },
-            _ => {
-                finish_sent(cpu, value);
-                let tid = current_tid(cpu);
-                let q = user(cpu).queue_mut(tid);
-                if q.waiting.last() == Some(&(0, 0)) {
-                    q.waiting.pop();
-                }
-                Next::Done(TRUE)
-            }
+            0 => Next::call(address_of("SendMessageA"), &[hwnd, msg, wp, lp], 1),
+            1 if callable(callback) => Next::call(callback, &[hwnd, msg, data, value], 2),
+            _ => Next::Done(TRUE),
         };
     }
     let args: Vec<u32> = t.vars[DISPATCH_MSG + 1..DISPATCH_MSG + 5].to_vec();
@@ -1487,7 +1479,7 @@ pub fn in_send_message(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     let in_send = user(cpu)
         .queue(tid)
-        .is_some_and(|q| q.in_send.last().is_some_and(|&id| id != 0));
+        .is_some_and(|q| q.in_send.last().is_some_and(Option::is_some));
     Some(in_send as u32)
 }
 
@@ -1497,17 +1489,14 @@ pub fn reply_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tid = current_tid(cpu);
     let state = user(cpu);
     let q = state.queue_mut(tid);
-    let Some(&id) = q.in_send.last().filter(|&&id| id != 0) else {
-        return Some(FALSE);
-    };
-    let Some(sent) = q.sent.iter_mut().find(|s| s.id == id) else {
+    let Some(Some(sent)) = q.in_send.last_mut() else {
         return Some(FALSE);
     };
     if sent.kind != 0 {
         return Some(FALSE);
     }
     sent.kind = 1;
-    let from = sent.from;
+    let (from, id) = (sent.from, sent.id);
     state.queue_mut(from).replies.push((id, args[0]));
     thread::wake(cpu);
     Some(TRUE)
@@ -1933,6 +1922,80 @@ mod tests {
         assert_eq!(take(&mut cpu, tid), Some((WM_LBUTTONDOWN, 100 << 16 | 150)));
         assert_eq!(take(&mut cpu, tid), Some((WM_MOUSEMOVE, 100 << 16 | 100)));
         assert_eq!(take(&mut cpu, tid), None);
+    }
+
+    /// A thread that handles a message another thread sent, and sends
+    /// one back to that thread from its window procedure, waits for the
+    /// reply without taking the message it handles again: Windows took
+    /// it off the queue when the thread got it. Sierra's ISDEL.EXE does
+    /// this when INSTALL.EXE broadcasts that it ends; taken again, the
+    /// message called the window procedure until the stack ran out.
+    #[test]
+    fn a_message_being_handled_is_not_taken_again() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let me = current_tid(&cpu);
+        let sent = |id| Sent {
+            id,
+            from: 7,
+            hwnd: 0x418,
+            message: 0x1D96,
+            ..Sent::default()
+        };
+        user(&mut cpu).queue_mut(me).sent.push_back(sent(1));
+        let send_wait = QueueWait {
+            mask: QS_SENDMESSAGE,
+            filter: Filter::default(),
+            reply: 2,
+        };
+        user(&mut cpu).queue_mut(me).changed |= QS_SENDMESSAGE;
+        assert!(wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        // Its window procedure sends to thread 7 and waits for the reply:
+        // nothing else was sent to it, and nothing counts as new.
+        assert!(!wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert_eq!(user(&mut cpu).queue_mut(me).changed & QS_SENDMESSAGE, 0);
+        assert!(handle_sent(&mut cpu, 1).is_none());
+        // A message sent meanwhile is handled within the wait.
+        user(&mut cpu).queue_mut(me).sent.push_back(sent(3));
+        assert!(wait_ready(&cpu.bus.win32, me, &send_wait, 0));
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        finish_sent(&mut cpu, 0);
+        finish_sent(&mut cpu, 5);
+        let q = user(&mut cpu).queue_mut(me);
+        assert!(q.sent.is_empty() && q.in_send.is_empty());
+        let replies = &user(&mut cpu).queue_mut(7).replies;
+        assert_eq!(replies, &vec![(3, 0), (1, 5)]);
+    }
+
+    /// A message the thread took off its queue is still the one
+    /// InSendMessage and ReplyMessage see, and its sender still gets a
+    /// reply when the thread ends while it handles it.
+    #[test]
+    fn a_message_being_handled_is_still_replied_to() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let me = current_tid(&cpu);
+        let sent = |id| Sent {
+            id,
+            from: 7,
+            hwnd: 0x418,
+            ..Sent::default()
+        };
+        user(&mut cpu).queue_mut(me).sent.push_back(sent(1));
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        assert_eq!(in_send_message(&mut cpu, &[]), Some(TRUE));
+        assert_eq!(reply_message(&mut cpu, &[9]), Some(TRUE));
+        // A second ReplyMessage, and the window procedure's own result,
+        // go nowhere.
+        assert_eq!(reply_message(&mut cpu, &[10]), Some(FALSE));
+        finish_sent(&mut cpu, 11);
+        assert_eq!(in_send_message(&mut cpu, &[]), Some(FALSE));
+        // The thread ends while it handles the next one.
+        user(&mut cpu).queue_mut(me).sent.push_back(sent(2));
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        thread_ended(&mut cpu.bus.win32, me);
+        assert!(user(&mut cpu).queue_mut(me).in_send.is_empty());
+        let replies = &user(&mut cpu).queue_mut(7).replies;
+        assert_eq!(replies, &vec![(1, 9), (2, 0)]);
     }
 
     /// GetQueueStatus and GetInputState see a move the mouse made since
