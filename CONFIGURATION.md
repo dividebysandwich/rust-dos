@@ -713,14 +713,11 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   taking off their centre first, and starts each block of the mix at 0,
   so every note that starts or stops moves the centre line, which
   clicks, and the output sits far below the middle. The fix scales the
-  samples around their centre and starts the mix at the middle. In
-  Jukebox Adventure it also takes out a jump to itself that the music
-  player makes on a position jump (MOD effect Bxx), which hangs the game
-  after about a minute and a half on the title screen. The log has an
-  `[SB] ... patched` line when it applies. The patch is part of the
-  game's memory, so a save state keeps it, and a state saved without it
-  stays unpatched until the game starts again: the fix leaves a driver
-  that has already set itself up.
+  samples around their centre and starts the mix at the middle. The log
+  has an `[SB] ... patched` line when it applies. The patch is part of
+  the game's memory, so a save state keeps it, and a state saved without
+  it stays unpatched until the game starts again: the fix leaves a
+  driver that has already set itself up.
 * `hard_disk_noise` and `floppy_disk_noise` add the drives' noises; see
   [Disk speed and noises](#disk-speed-and-noises).
 

@@ -36,12 +36,9 @@
 //!   0 (Prehistorik 2 ramps the block down, Jukebox Adventure holds a
 //!   value derived from the mix so far), goes: an ended channel now just
 //!   adds nothing to the centre.
-//!
-//! Jukebox Adventure's MOD player also stops on effect Bxx (position
-//! jump): before it calls its handler for the effect, a leftover
-//! `cmp bx,0Bh / je $` jumps to itself, in the IRQ handler with
-//! interrupts off, so the machine hangs the first time a song loops that
-//! way. The patch takes the jump out, and the game's own handler runs.
+
+use memchr::memmem::Finder;
+use std::sync::OnceLock;
 
 /// Bytes at an offset in the driver's code segment.
 pub struct Bytes {
@@ -240,14 +237,6 @@ const JUKEBOX_ADVENTURE: Driver = Driver {
             },
             &[0x32, 0xC0, 0x90, 0x90, 0x90, 0x90],
         ),
-        // Effect Bxx: cmp bx,0Bh / je $ loses the je.
-        (
-            Bytes {
-                at: 0x47B7,
-                bytes: &[0x83, 0xFB, 0x0B, 0x74, 0xFB],
-            },
-            &[0x83, 0xFB, 0x0B, 0x90, 0x90],
-        ),
     ],
 };
 
@@ -263,11 +252,20 @@ fn has(ram: &[u8], base: usize, b: &Bytes) -> bool {
 /// `ram` (conventional memory): the driver and the linear address of its
 /// code segment.
 pub fn find(ram: &[u8]) -> Option<(&'static Driver, usize)> {
-    DRIVERS.iter().find_map(|driver| {
-        let (first, _) = &driver.patches[0];
+    // A searcher for each driver's first piece, built once.
+    static FINDERS: OnceLock<Vec<Finder<'static>>> = OnceLock::new();
+    let finders = FINDERS.get_or_init(|| {
+        DRIVERS
+            .iter()
+            .map(|driver| Finder::new(driver.patches[0].0.bytes))
+            .collect()
+    });
+    DRIVERS.iter().zip(finders).find_map(|(driver, finder)| {
+        let first = &driver.patches[0].0;
         // A match's index in what follows `first.at` is the base it would
         // be at.
-        memchr::memmem::find_iter(ram.get(first.at..)?, first.bytes)
+        finder
+            .find_iter(ram.get(first.at..)?)
             .find(|&base| {
                 driver.checks.iter().all(|b| has(ram, base, b))
                     && driver.patches.iter().all(|(old, _)| has(ram, base, old))

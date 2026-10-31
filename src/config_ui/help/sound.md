@@ -165,9 +165,8 @@ comes out the same. Real PCs start with it **off**.
 **on** corrects the Sound Blaster drivers of games that play badly on
 every card, real ones too, when rust-dos recognises the driver's code:
 Prehistorik 2 and Blues Brothers: Jukebox Adventure, whose music and
-effects click at every note and sit far below the centre line, and
-whose title music hangs Jukebox Adventure when it loops. Other games
-don't change. **off** plays them as a real card does.
+effects click at every note and sit far below the centre line. Other
+games don't change. **off** plays them as a real card does.
 
 # Hard disk noise {#hard-disk-noise}
 
