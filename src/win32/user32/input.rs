@@ -687,15 +687,16 @@ pub fn under_cursor(state: &State) -> u32 {
 /// its answer to WM_SETCURSOR sets the cursor. A screen saver hides the
 /// cursor on that move, which otherwise stays an arrow until the mouse
 /// moves, and since the cursor stays put, the saver's next move is at
-/// the place it saw first and doesn't close it.
+/// the place it saw first and doesn't close it. The message goes out as
+/// any mouse message does (`mouse_event_at`), so a window holding the
+/// capture gets it in place of the window under the cursor.
 pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, moved: bool) {
     let state = user(cpu);
     if !state.desktop {
         return;
     }
     let now = under_cursor(state);
-    let under_it = now == hwnd || state.is_descendant(hwnd, now);
-    if now != before || moved && under_it {
+    if now != before || moved && (now == hwnd || state.is_descendant(hwnd, now)) {
         mouse_event_at(cpu, WM_MOUSEMOVE, 0);
         // The window under the cursor can be another thread's, waiting
         // for a message: the wake paint::moved gave came before the move.
@@ -2816,7 +2817,11 @@ mod tests {
         assert_ne!(before, hwnd, "hidden, it isn't under the cursor");
         let moves = |cpu: &mut Cpu| -> Vec<(u32, u32, u32)> {
             let q = user(cpu).queue_mut(1);
-            let moves = q.input.iter().map(|m| (m.hwnd, m.message, m.lparam)).collect();
+            let moves = q
+                .input
+                .iter()
+                .map(|m| (m.hwnd, m.message, m.lparam))
+                .collect();
             q.input.clear();
             moves
         };
