@@ -62,9 +62,9 @@ pub mod version;
 mod verdll;
 pub(crate) mod winmm;
 mod winspool;
+mod wow32;
 mod ws2_32;
 mod wsock32;
-mod wow32;
 
 pub use snapshot::snapshot;
 pub use stubs::function_name;

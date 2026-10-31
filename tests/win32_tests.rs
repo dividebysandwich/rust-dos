@@ -4931,7 +4931,8 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
 #[test]
 fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     // KRNL386's GetVersion, called with WOWCallback16 and
-    // WOWCallback16Ex, as SafeDisc's loader calls into KRNL386; and a
+    // WOWCallback16Ex, as SafeDisc's loader calls into KRNL386, and its
+    // lstrcmp, whose two arguments WOWCallback16Ex passes in order; and a
     // pointer MapLS made, which WOWGetVDMPointer takes back to memory of
     // the program's.
     let imports: &[(&str, &[&str])] = &[
@@ -4945,6 +4946,7 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     data[..12].copy_from_slice(b"KRNL386.EXE\0");
     data[0x10..0x1B].copy_from_slice(b"GETVERSION\0");
     data[0x40..0x44].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    data[0x60..0x64].copy_from_slice(b"a\0b\0");
     let exe = program(BASE, false, imports, &data, |a, l| {
         let mut fail = a.create_label();
         a.push(l.at(0) as i32)?;
@@ -4952,6 +4954,7 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
         a.mov(ebx, 1)?;
         a.cmp(eax, 32)?;
         a.jb(fail)?;
+        a.mov(edi, eax)?;
         a.push(l.at(0x10) as i32)?;
         a.push(eax)?;
         a.call(l.import(1))?;
@@ -4978,6 +4981,32 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
         a.jne(fail)?;
         a.mov(ebx, 5)?;
         a.cmp(word_ptr(l.at(0x30)), 0x5F03)?;
+        a.jne(fail)?;
+        // WOWCallback16Ex(lstrcmp, WCB16_PASCAL, 8, arguments, &result)
+        // with the arguments as they are on the 16-bit stack, the last
+        // first: lstrcmp("a", "b") is -1, and 1 with them the other way.
+        a.push(l.at(0x60) as i32)?;
+        a.call(l.import(2))?;
+        a.mov(dword_ptr(l.at(0x74)), eax)?;
+        a.push(l.at(0x62) as i32)?;
+        a.call(l.import(2))?;
+        a.mov(dword_ptr(l.at(0x70)), eax)?;
+        a.push(87)?;
+        a.push(edi)?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 7)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.push(l.at(0x30) as i32)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(8)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(l.import(5))?;
+        a.mov(ebx, 8)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(word_ptr(l.at(0x30)), 0xFFFF)?;
         a.jne(fail)?;
         // WOWGetVDMPointer(MapLS(&value), 4, TRUE) sees the value.
         a.push(l.at(0x40) as i32)?;

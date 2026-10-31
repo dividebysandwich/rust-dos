@@ -43,11 +43,11 @@ const fn stdcall(
 static APIS: &[Api] = &[
     stdcall("WOWCallback16", 2, 2, flat::wow_callback16),
     stdcall("WOWCallback16Ex", 3, 5, flat::wow_callback16_ex),
-    stdcall("WOWDirectedYield16", 4, 1, yield16),
+    stdcall("WOWDirectedYield16", 4, 1, nothing),
     stdcall("WOWGetVDMPointer", 5, 3, get_vdm_pointer),
     stdcall("WOWGetVDMPointerFix", 6, 3, get_vdm_pointer),
     stdcall("WOWGetVDMPointerUnfix", 7, 1, nothing),
-    stdcall("WOWYield16", 17, 0, yield16),
+    stdcall("WOWYield16", 17, 0, nothing),
 ];
 
 /// WOWGetVDMPointer(address, bytes, protected mode): the flat address of
@@ -65,13 +65,10 @@ fn get_vdm_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(flat::map_sl(cpu, args[0]))
 }
 
-/// WOWYield16, WOWDirectedYield16: let other 16-bit tasks run. The
-/// process's task runs only when it is called, so there is nothing to
-/// give up.
-fn yield16(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0)
-}
-
+/// WOWYield16 and WOWDirectedYield16, which let other 16-bit tasks run:
+/// the process's task runs only when it is called, so there is nothing
+/// to give up. WOWGetVDMPointerUnfix: the segments WOWGetVDMPointerFix
+/// maps always stay where they are.
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
