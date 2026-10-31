@@ -343,13 +343,15 @@ jobs:
         if: ${{ !matrix.win7 }}
         with:
           toolchain: stable
-      # A dated nightly: nightly-2026-10-15's std doesn't build for the
-      # Windows 7 target (is_console is missing). Move it on when a later one
-      # does.
+      # A dated nightly, so a nightly whose std breaks for the Windows 7
+      # target can't stop the build: nightly-2026-10-15's didn't build
+      # (is_console was missing), nightly-2026-10-31's does. Move it on now
+      # and then, after checking with `cargo +nightly-<date> check
+      # -Zbuild-std --target x86_64-win7-windows-msvc`.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         if: matrix.win7
         with:
-          toolchain: nightly-2026-10-14
+          toolchain: nightly-2026-10-31
           components: rust-src
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
