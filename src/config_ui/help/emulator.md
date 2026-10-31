@@ -431,6 +431,18 @@ program still sees the press, and a release as the window opens. Moving
 the mouse while holding the button keeps it an ordinary press. Turn it
 **off** for a game that has you hold the right button still.
 
+# Game fixes {#game-fixes}
+
+When **on** (the default), Rust-DOS fixes a few games that go wrong on
+real PCs too, or that can't work without their original disks, once it
+recognises them: the Sound Blaster music and effects of Prehistorik 2
+and Blues Brothers: Jukebox Adventure, which click at every note and sit
+far below the centre line, the hang of Jukebox Adventure's title music
+after about 75 seconds, and the disk checks of MicroProse's games. Other
+programs don't change. **off** runs them all as a real PC would. To
+leave out one fix, name it in `game_fixes_off` in the configuration
+file; CONFIGURATION.md lists them.
+
 # Pause in settings window {#pause-in-settings}
 
 When **on** (the default), the program pauses while this settings

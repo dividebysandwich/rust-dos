@@ -1120,6 +1120,53 @@ fn a_strict_match_load_drops_a_pending_until_ms_and_input_waiting_on_emulated_ti
     assert!(!hub.paused, "the dropped until_ms didn't stop it");
 }
 
+/// The host's frames as `/api/underruns` and `/api/stats` tell them, in ms.
+#[test]
+fn underruns_and_frame_times_are_told_in_ms() {
+    use rust_dos::hostframes::{Phase, Pump};
+    use std::time::Duration;
+
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let mut hub = DebugHub::new(None, None, 1000);
+    cpu.bus.audio_underruns = 1;
+    let host = &mut cpu.bus.host_frames;
+    host.lap(Phase::Other);
+    host.pump(Pump {
+        queued: 441,
+        after: 1323,
+        target: 882,
+        emulated_ns: 0,
+    });
+    host.lap(Phase::Cpu);
+    host.pump(Pump {
+        target: 882,
+        emulated_ns: 5_000_000,
+        ..Pump::default()
+    });
+    host.frame(Duration::from_millis(16), 0);
+    host.frame(Duration::from_millis(32), 0);
+
+    let underruns = reply(&mut cpu, &mut hub, Cmd::Underruns).unwrap();
+    assert_eq!(underruns["events"], 1);
+    assert_eq!(underruns["dry_checks"], 1);
+    let record = &underruns["log"][0];
+    assert_eq!(record["event"], 1);
+    assert_eq!(record["queued_before_ms"], 10.0);
+    assert_eq!(record["queued_after_ms"], 30.0);
+    assert_eq!(record["target_ms"], 20.0);
+    assert_eq!(record["dry_checks"], 1);
+    assert!(record["gap_ms"].is_number(), "{record}");
+    assert!(record["split_ms"]["cpu"].is_number(), "{record}");
+
+    let stats = reply(&mut cpu, &mut hub, Cmd::Stats).unwrap();
+    let times = &stats["frame_times"];
+    assert_eq!(times["frames"], 2);
+    assert_eq!(times["seconds"], 0.048);
+    assert_eq!(times["longest_ms"], 32.0);
+    assert_eq!(times["p50_ms"], 16.0);
+    assert_eq!(times["p99_ms"], 32.0);
+}
+
 // ----- the journal --------------------------------------------------------
 
 /// The answer to `cmd` sent with `If-State-Seq: if_state`: the reply's

@@ -294,6 +294,11 @@ impl Bus {
         Some((lsr, msr))
     }
 
+    /// The next character port `n` received, left there to be read.
+    pub fn serial_next(&self, n: usize) -> Option<u8> {
+        self.serial.ports.get(n)?.as_ref()?.uart.next_received()
+    }
+
     /// Set port `n` up the way INT 14h AH=00h does: `params` has the baud
     /// rate in bits 5-7, the parity in 3-4, the stop bits in 2 and the
     /// word length in 0-1.
