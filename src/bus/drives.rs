@@ -204,6 +204,10 @@ impl Bus {
     fn booted_media_changed(&mut self, drive: u8) {
         self.ide_media_changed(drive);
         self.fdc_media_changed(drive);
+        // And the built-in Windows's ASPI drive.
+        let has_disc = self.disk.boot_cd_image(drive).is_some();
+        let now = self.clock.now_ticks();
+        self.win32.cd_changed(drive, has_disc, now);
     }
 
     /// Copy what the booted system changed on the disks made of shared
