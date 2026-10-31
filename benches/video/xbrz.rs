@@ -6,6 +6,16 @@ use rust_dos::video::mono::Monochrome;
 use rust_dos::video::shader::XbrzFrame;
 use std::hint::black_box;
 
+fn prepare_frame(
+    prepared: &mut XbrzFrame,
+    screen: &Frame,
+    base: &Frame,
+    base_rows: std::ops::Range<usize>,
+    screen_rows: std::ops::Range<usize>,
+) -> (bool, bool, bool) {
+    prepared.prepare_rows(screen, Some(base), Monochrome::Off, base_rows, screen_rows)
+}
+
 pub fn prepare(c: &mut Criterion) {
     let mut group = c.benchmark_group("video/xbrz_prepare");
     for (width, height, scale) in [(320, 200, 2), (640, 480, 1)] {
@@ -53,8 +63,33 @@ pub fn prepare(c: &mut Criterion) {
         for pixel in dense_pixels.rgba.as_chunks_mut::<4>().0 {
             pixel[0] ^= 127;
         }
+        let mut single = base.clone();
+        let mut sprite = base.clone();
+        let mut distant = base.clone();
+        for (frame, rects) in [
+            (&mut single, vec![(20, height / 2, 1, 1)]),
+            (&mut sprite, vec![(20, height / 2, 32, 16)]),
+            (
+                &mut distant,
+                vec![(20, 8, 16, 8), (width - 40, height - 24, 16, 8)],
+            ),
+        ] {
+            for (x, y, w, h) in rects {
+                for row in y * scale..(y + h) * scale {
+                    for col in x * scale..(x + w) * scale {
+                        frame.rgba[(row * frame.width + col) as usize * 4] ^= 127;
+                    }
+                }
+            }
+        }
+        for frame in [&mut row, &mut full, &mut single, &mut sprite, &mut distant] {
+            frame.track_overlays(true);
+        }
         group.throughput(Throughput::Elements((width * height) as u64));
         for scenario in [
+            "single",
+            "sprite",
+            "distant",
             "unchanged",
             "one_row",
             "full",
@@ -67,8 +102,11 @@ pub fn prepare(c: &mut Criterion) {
         ] {
             let mut prepared = XbrzFrame::default();
             let rows = match scenario {
-                "unchanged" | "overlay_only" | "overlay_static" | "overlay_move"
-                | "dense_static" => 0..0,
+                "unchanged" | "overlay_static" | "dense_static" => 0..0,
+                "overlay_only" | "overlay_move" => top..top + 16,
+                "single" => top..top + scale as usize,
+                "sprite" => top..top + 16 * scale as usize,
+                "distant" => 8 * scale as usize..(height as usize - 16) * scale as usize,
                 "overlay_pixels" => top..top + 16,
                 "one_row" => top..top + scale as usize,
                 _ => 0..base.height as usize,
@@ -86,11 +124,19 @@ pub fn prepare(c: &mut Criterion) {
             );
             let mut step = false;
             let update = match scenario {
+                "single" => &single,
+                "sprite" => &sprite,
+                "distant" => &distant,
                 "one_row" => &row,
                 "full" => &full,
                 _ => &base,
             };
+            let base_rows = match scenario {
+                "one_row" | "single" | "sprite" | "distant" | "full" => rows.clone(),
+                _ => 0..0,
+            };
             let changed_screen = match scenario {
+                "single" | "sprite" | "distant" | "one_row" | "full" => update,
                 "overlay_only" | "overlay_static" => &overlay,
                 "overlay_pixels" => &pixels,
                 "overlay_move" => &moved,
@@ -98,8 +144,13 @@ pub fn prepare(c: &mut Criterion) {
                 "dense_pixels" => &dense_pixels,
                 _ => &screen,
             };
-            let result =
-                prepared.prepare(changed_screen, Some(update), Monochrome::Off, rows.clone());
+            let result = prepare_frame(
+                &mut prepared,
+                changed_screen,
+                update,
+                base_rows.clone(),
+                rows.clone(),
+            );
             assert_eq!(
                 result.1,
                 !matches!(scenario, "unchanged" | "overlay_static" | "dense_static")
@@ -109,10 +160,11 @@ pub fn prepare(c: &mut Criterion) {
                 |b| {
                     b.iter(|| {
                         step = !step;
-                        black_box(prepared.prepare(
+                        black_box(prepare_frame(
+                            &mut prepared,
                             black_box(if step { changed_screen } else { initial }),
-                            Some(black_box(if step { update } else { &base })),
-                            Monochrome::Off,
+                            black_box(if step { update } else { &base }),
+                            base_rows.clone(),
                             rows.clone(),
                         ))
                     });

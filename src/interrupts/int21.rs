@@ -294,12 +294,18 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
         return Some(scan);
     }
     let key = crate::keyboard::take_keystroke(&mut cpu.bus)?;
-    let (scan, ascii) = ((key >> 8) as u8, key as u8);
-    if ascii == 0 || (ascii == 0xE0 && scan != 0) {
-        cpu.con_pending_scan = Some(scan);
+    if extended_key(key) {
+        cpu.con_pending_scan = Some((key >> 8) as u8);
         return Some(0);
     }
-    Some(ascii)
+    Some(key as u8)
+}
+
+/// Whether the keystroke `key` is an extended key, which the console reads
+/// as 00h and then its scan code.
+fn extended_key(key: u16) -> bool {
+    let (scan, ascii) = ((key >> 8) as u8, key as u8);
+    ascii == 0 || (ascii == 0xE0 && scan != 0)
 }
 
 /// Write a character to standard output (handle 1) raw, as AH=06h does:
@@ -477,6 +483,90 @@ fn writes_console(cpu: &mut Cpu, ah: u8) -> bool {
             file_of(cpu, handle).is_some_and(|sft| cpu.bus.disk.handle_device(sft) == Some(CharDevice::Con))
         }
         _ => false,
+    }
+}
+
+/// The device information word of AX=4400h for the device `device` open
+/// at `sft`, with bit 5 set in raw (binary) mode.
+fn device_word(cpu: &Cpu, sft: u16, device: CharDevice) -> u16 {
+    let raw = if cpu.bus.disk.device_raw(sft) {
+        0x20
+    } else {
+        0
+    };
+    dos_files::device_info(device, sft) | raw
+}
+
+/// The drive number (0=A) of the open file `sft`.
+fn file_drive(cpu: &Cpu, sft: u16) -> u16 {
+    let disk = &cpu.bus.disk;
+    disk.handle_drive(sft).unwrap_or(disk.get_current_drive()) as u16
+}
+
+/// The word AX=4400h gives for what is open at `sft`: a device's
+/// (`device_word`), or a file's drive with bit 6, not written, which
+/// nothing tracks yet.
+fn handle_info(cpu: &Cpu, sft: u16, device: Option<CharDevice>) -> u16 {
+    match device {
+        Some(device) => device_word(cpu, sft, device),
+        None => 0x0040 | file_drive(cpu, sft),
+    }
+}
+
+/// Whether the open file `sft` is ready for output or input, and for input
+/// the next character (AX=4406h and 4407h).
+///
+/// MS-DOS reads a byte of a file and puts the position back, so a file is
+/// ready until its end, and a handle open for writing only has nothing to
+/// read. The console's status is the keyboard's: the rest of a line a
+/// cooked read took isn't in it, and an extended key shows as the 00h a
+/// read gets first. Once the host's input has ended (`rust-dos run`) the
+/// console is ready, so that a program that polls it goes on to read the
+/// end of the file. NUL's driver is never busy, and a serial port answers
+/// from its status registers as the AUX driver does from INT 14h, needing
+/// DSR, with the character that came. AUX, which goes nowhere here, is
+/// what a port with nothing on it is, not ready.
+fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) -> (bool, u8) {
+    match device {
+        None if output => (true, 0),
+        None if cpu.bus.disk.access_mode(sft) == Some(1) => (false, 0x1A),
+        None => {
+            let at = cpu.bus.disk.position(sft).unwrap_or(0);
+            let next = read_open_file(cpu, sft, 1).ok();
+            let _ = cpu.bus.disk.seek_file(sft, at as i64, 0);
+            match next.and_then(|bytes| bytes.first().copied()) {
+                Some(byte) => (true, byte),
+                None => (false, 0x1A),
+            }
+        }
+        Some(CharDevice::Con) if output => (true, 0),
+        Some(CharDevice::Con) => {
+            let key = crate::keyboard::peek_keystroke(&mut cpu.bus);
+            let key = key.map(|key| if extended_key(key) { 0 } else { key as u8 });
+            match cpu.con_pending_scan.or(key) {
+                Some(next) => (true, next),
+                None if cpu.host_console.as_ref().is_some_and(|c| c.input_ended) => (true, 0x1A),
+                None => (false, 0),
+            }
+        }
+        Some(CharDevice::Nul)
+            if cpu
+                .bus
+                .disk
+                .sft_entry(sft)
+                .is_some_and(|entry| entry.name.starts_with(b"NUL ")) =>
+        {
+            (true, 0)
+        }
+        Some(device) => {
+            let port = device.com_port();
+            let status = port.and_then(|n| cpu.bus.serial_status(n));
+            let (lsr, msr) = status.unwrap_or((0, 0));
+            let line = if output { 0x20 } else { 0x01 };
+            let ready = lsr & line != 0 && msr & 0x20 != 0;
+            let next = port.filter(|_| ready && !output).and_then(|n| cpu.bus.serial_next(n));
+            (ready, next.unwrap_or(0))
+        }
     }
 }
 
@@ -726,55 +816,24 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             let name_addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
             let filename = read_asciiz_string(&mut cpu.bus, name_addr);
 
-            // --- Stub out copy-protection / disk-swap helpers ---
-            // MicroProse games (F-117, F-19, Gunship, Covert Action) ship two
-            // runtime helpers that we can't satisfy without the original
-            // install disks:
-            //
-            //   DSWAP.EXE  — verifies the install disk via INT 13h sector
-            //                reads. Without a real disk image the check
-            //                always fails and hangs on "insert disk".
-            //
-            //   PLAYER.EXE — animates title / cutscene screens. Its stream
-            //                decoder does a runtime integrity check on a
-            //                buffer that's supposed to be filled by the
-            //                copy-protection path; when the data is zero
-            //                (our case) it loops forever looking for its
-            //                terminator word.
-            //
-            // Both are non-essential for gameplay. Short-circuit them with
-            // the exit code the parent expects. F117.COM tests `AL != 0` after
-            // DSWAP, so we return 1 there; it doesn't inspect PLAYER's exit
-            // code at all so 0 is fine.
-            //
-            // PLAYER.EXE is a common name: Millennia's intro player has it
-            // too. Only the one with DSWAP.EXE beside it is MicroProse's.
-            let upper = filename.to_ascii_uppercase();
-            let short = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
-            let dir = &filename[..filename.len() - short.len()];
-            if mode == 0x00 {
-                match short {
-                    "DSWAP.EXE" => {
-                        cpu.bus.log_string(&format!(
-                            "[DOS] EXEC: short-circuiting DSWAP.EXE ({}), exit=01",
-                            filename
-                        ));
-                        cpu.last_child_exit = 0x0001;
-                        cpu.set_cpu_flag(CpuFlags::CF, false);
-                        cpu.set_reg16(Register::AX, 0x0000);
-                        return;
-                    }
-                    "PLAYER.EXE" if cpu.bus.disk.is_file(&format!("{dir}DSWAP.EXE")) => {
-                        cpu.bus.log_string(&format!(
-                            "[DOS] EXEC: short-circuiting PLAYER.EXE ({}), exit=00",
-                            filename
-                        ));
-                        cpu.last_child_exit = 0x0000;
-                        cpu.set_cpu_flag(CpuFlags::CF, false);
-                        cpu.set_reg16(Register::AX, 0x0000);
-                        return;
-                    }
-                    _ => {}
+            // Helpers that a game fix answers without running them
+            // (`game_fixes`: MicroProse's DSWAP.EXE and PLAYER.EXE).
+            if mode == 0x00 && cpu.bus.game_fixes {
+                let bus = &cpu.bus;
+                let skip = crate::game_fixes::skip_at_exec(
+                    &filename,
+                    |path| bus.disk.is_file(path),
+                    |fix| bus.game_fix_enabled(fix),
+                );
+                if let Some((fix, exit_code)) = skip {
+                    cpu.bus.log_string(&format!(
+                        "[game fix] {}: {} ({}): EXEC of {} skipped, exit={:02X}",
+                        fix.name, fix.game, fix.reason, filename, exit_code
+                    ));
+                    cpu.last_child_exit = exit_code as u16;
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    cpu.set_reg16(Register::AX, 0x0000);
+                    return;
                 }
             }
 
@@ -1481,11 +1540,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             if cpu.bus.guest_faulted() {
                 return;
             }
-            match write_open_file(cpu, handle, sft, &data) {
-                // The screen's writes leave CF as it was.
-                Ok(written) if console => cpu.set_ax(written),
-                result => set_result(cpu, result),
-            }
+            let result = write_open_file(cpu, handle, sft, &data);
+            set_result(cpu, result);
         }
 
         // AH = 42h: Move File Pointer
@@ -1573,43 +1629,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let Some(sft) = sft else {
                         return set_result(cpu, Err(0x06));
                     };
-                    if sft == crate::disk::SFT_AUX
-                        || sft == crate::disk::SFT_PRN
-                        || device.is_some_and(|d| d.com_port().is_some() || d == CharDevice::Prn)
-                    {
-                        // AUX and PRN: character devices, not EOF.
-                        cpu.set_dx(0x80C0);
-                    } else if device == Some(CharDevice::Nul) {
-                        // Character device, NUL.
-                        cpu.set_dx(0x8084);
-                    } else if device == Some(CharDevice::Emm) {
-                        // The expanded memory manager: a character device
-                        // taking IOCTL.
-                        cpu.set_dx(0xC080);
-                    } else if device == Some(CharDevice::Con) {
-                        // 1000 0000 1101 0011 = 80D3
-                        // Bit 7: Char device
-                        // Bit 6: EOF (0) - meaningful for files?
-                        // Bit 5: Raw (Binary) mode? (0=Cooked, 1=Raw)
-                        // Bit 4: Special?
-                        // Bit 3: Clock?
-                        // Bit 2: NUL?
-                        // Bit 1: Stdout
-                        // Bit 0: Stdin
-                        cpu.set_dx(0x80D3);
-                    } else {
-                        // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive # (0=A)
-                        let drive = cpu
-                            .bus
-                            .disk
-                            .handle_drive(sft)
-                            .unwrap_or(cpu.bus.disk.get_current_drive());
-                        cpu.set_dx(drive as u16);
-                    }
-                    // Bit 5: a device in raw (binary) mode.
-                    if device.is_some() && cpu.bus.disk.device_raw(sft) {
-                        cpu.set_dx(cpu.dx() | 0x20);
-                    }
+                    cpu.set_dx(handle_info(cpu, sft, device));
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx()));
                 }
@@ -1669,14 +1689,41 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
                 // The printer is ready for output while there is one.
                 0x07 if device == Some(CharDevice::Prn) => {
-                    cpu.set_reg8(Register::AL, if cpu.bus.printer.is_some() { 0xFF } else { 0x00 });
-                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    let ready = if cpu.bus.printer.is_some() { 0xFF } else { 0x00 };
+                    set_result(cpu, Ok(0x0100 | ready));
                 }
                 // What Windows takes expanded memory over with.
                 0x02 if device == Some(CharDevice::Emm) => {
                     let (buffer, size) = (cpu.get_physical_addr(cpu.ds(), cpu.dx()), cpu.cx());
                     let result = crate::ems::ioctl_read(&mut cpu.bus, buffer, size);
                     set_result(cpu, result);
+                }
+                // Input and output status. As in MS-DOS, AL is FFh or 00h
+                // and AH what the status call left: the next character for
+                // input (1Ah with none in a file), 01h for output.
+                0x06 | 0x07 => {
+                    let Some(sft) = sft else {
+                        return set_result(cpu, Err(0x06));
+                    };
+                    let output = al == 0x07;
+                    let (ready, next) = io_status(cpu, sft, device, output);
+                    let high = if output { 0x01 } else { next as u16 };
+                    set_result(cpu, Ok(high << 8 | if ready { 0xFF } else { 0x00 }));
+                }
+                // Is the handle remote: DX is the flags word of the SFT,
+                // whose bit 15 marks a file on a redirector, as a CD-ROM
+                // drive's are under MSCDEX (see AX=4409h). Unlike AX=4400h
+                // it has no driver attribute byte in the high byte, and AX
+                // stays as it was.
+                0x0A => {
+                    let Some(sft) = sft else {
+                        return set_result(cpu, Err(0x06));
+                    };
+                    let drive = file_drive(cpu, sft) as u8;
+                    let cd = cpu.bus.disk.drive_kind(drive) == Some(DriveKind::CdRom);
+                    let remote = if device.is_none() && cd { 0x8000 } else { 0 };
+                    cpu.set_dx(handle_info(cpu, sft, device) & 0x00FF | remote);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 // MS-DOS 7 has subfunctions 00h to 11h and fails any other
                 // with error 1, invalid function. Network clients add their
