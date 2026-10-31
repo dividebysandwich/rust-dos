@@ -472,6 +472,7 @@ pub(super) fn visit(cpu: &mut Cpu, here: Head, now: u64) {
         key: cpu.idle_key(),
         icount: now,
         executed: cpu.executed,
+        calls: cpu.bus.win32.calls,
     };
     let skip = with_proof(cpu, |cpu, t| match t.stage {
         Stage::Armed if std::mem::take(&mut t.wait) => Ok(false),

@@ -149,6 +149,7 @@ impl Bus {
             irq_ready: false,
             audio_peak: 0,
             audio_underruns: 0,
+            host_frames: crate::hostframes::HostFrames::new(),
             unhandled_writes: vec![0; 0x10000],
             page_gen: vec![0; ram_len >> GEN_SHIFT],
             observe: crate::idle::Observe::default(),
