@@ -1652,6 +1652,7 @@ fn if_state_seq_guards_every_request_the_emulator_carries_out() {
     let requests: Vec<(&str, String, Option<Value>)> = vec![
         ("GET", "/api/status".into(), None),
         ("GET", "/api/stats".into(), None),
+        ("GET", "/api/underruns".into(), None),
         ("GET", "/api/screen/text".into(), None),
         ("GET", "/api/trace".into(), None),
         ("POST", "/api/trace".into(), Some(json!({"clear": true}))),
@@ -1842,6 +1843,23 @@ fn stats_tell_the_stats_page_s_numbers() {
     let cpu_use = frame["cpu_use"].as_f64().unwrap();
     assert!(cpu_use > 0.0 && cpu_use <= 100.0, "{}", frame);
     assert!((frame["refresh_hz"].as_f64().unwrap() - 70.0).abs() < 1.0, "text mode at 70 Hz: {}", frame);
+}
+
+/// `/api/stats` sums up the host's frames, and `/api/underruns` answers
+/// before anything ran dry. (The rig has no sound device and no laps.)
+#[test]
+fn stats_tell_the_host_s_frames() {
+    let rig = Rig::new("frame-times");
+    let underruns = rig.get("/api/underruns").json();
+    assert_eq!(
+        (&underruns["events"], &underruns["dry_checks"]),
+        (&json!(0), &json!(0))
+    );
+    assert_eq!(underruns["log"], json!([]));
+    assert!(
+        rig.get("/api/stats").json()["frame_times"].is_null(),
+        "no frames yet"
+    );
 }
 
 // ----- the debugger page -------------------------------------------------------
