@@ -116,6 +116,8 @@ impl Bus {
             mouse: crate::mouse::MouseState::new(),
             opl: crate::opl::Opl::new(true),
             sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),
+            game_fixes: true,
+            game_fixes_off: Vec::new(),
             isapnp: None,
             dma: crate::dma::Dma::new(),
             mpu: crate::mpu401::Mpu401::new(),

@@ -107,6 +107,7 @@ pub mod rc_command;
 pub mod recorder;
 pub mod savestate;
 pub use rust_dos_soundblaster::sb;
+pub mod game_fixes;
 pub use rust_dos_sc55 as sc55;
 pub mod serial;
 pub mod shell;

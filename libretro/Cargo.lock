@@ -1334,6 +1334,7 @@ dependencies = [
  "libc",
  "libloading",
  "md-5",
+ "memchr",
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",
