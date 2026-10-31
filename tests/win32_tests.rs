@@ -2641,10 +2641,8 @@ fn a_built_in_dll_stays_while_something_holds_it() {
         "Sleep",
         "ExitProcess",
     ];
-    let imports: &[(&str, &[&str])] = &[
-        ("KERNEL32.DLL", names),
-        ("ADVAPI32.DLL", &["RegCloseKey"]),
-    ];
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", names), ("ADVAPI32.DLL", &["RegCloseKey"])];
     let mut data = b"MSVCRT.DLL\0X.DLL\0OLE32.DLL\0ADVAPI32.DLL\0KERNEL32.DLL\0".to_vec();
     data.resize(0x200, 0);
     const MSVCRT: u32 = 0;
@@ -2711,7 +2709,188 @@ fn a_built_in_dll_stays_while_something_holds_it() {
     };
     let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
     let (code, text) = run_files("builtin_held", &[("T.EXE", exe), ("X.DLL", dll)]);
-    assert_eq!(code, 0x3F, "the checks that failed: {:06b}, {}", !code & 0x3F, text);
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// A DLL's DLL_PROCESS_DETACH loads the built-in DLL that is going with
+/// it: the load holds it, so it stays, under the handle the load gave.
+#[test]
+fn a_built_in_dll_loaded_as_it_goes_stays() {
+    const SEEN: u32 = PROGRAM_DATA + 0x100;
+    let dll_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["LoadLibraryA"]),
+        ("MSVCRT.DLL", &["strlen"]),
+    ];
+    let entry = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(SEEN as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        dll_imports,
+        b"MSVCRT.DLL\0",
+        &[("", &entry)],
+        &[],
+    );
+
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"X.DLL\0MSVCRT.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    const X: u32 = 0;
+    const MSVCRT: u32 = 6;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, dword_ptr(SEEN as u64))?;
+        check(a, false, 1)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_revived", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b}, {}",
+        !code & 7,
+        text
+    );
+}
+
+/// A state saved after the last free of a built-in DLL has its mapping and
+/// stub pages: after a load the DLL isn't there, and it loads again where
+/// it was, with a new runtime.
+#[test]
+fn a_freed_built_in_dll_comes_back_after_a_saved_state() {
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetProcAddress", "Sleep"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0rand\0";
+    const NAME: u32 = 0;
+    const RAND: u32 = 11;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(l.at(RAND) as i32)?;
+        a.push(eax)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.ret()
+    };
+    let image = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let mut cpu = machine("builtin_saved", image);
+    let has_crt = |cpu: &Cpu| {
+        let modules = cpu.bus.win32.modules();
+        modules.iter().any(|(name, ..)| name == "MSVCRT.DLL")
+    };
+    let run_until = |cpu: &mut Cpu, wanted: bool| {
+        for _ in 0..400_000 {
+            if has_crt(cpu) == wanted {
+                return;
+            }
+            cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+            run_batch(cpu, &mut NoHook, false);
+        }
+        panic!("MSVCRT.DLL never went to {}", wanted);
+    };
+    run_until(&mut cpu, true);
+    run_until(&mut cpu, false);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 41, "before the load");
+
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(!has_crt(&cpu));
+    cpu.errorlevel = 0;
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 41, "after the load");
+}
+
+/// A DLL file over the place of a built-in DLL keeps it: that built-in
+/// DLL doesn't load, and nothing is written over the file's image.
+#[test]
+fn a_built_in_dll_does_not_load_over_a_dll_file() {
+    // Up to past BF740000h, where OPENGL32.DLL goes.
+    const X_BASE: u32 = 0xBF73_0000;
+    const OPENGL32_RVA: u32 = 0x1_0000;
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll_data = vec![0x5A; 0x1_2000];
+    let dll = module_image(X_BASE, Some("X.DLL"), &[], &dll_data, &[("", &entry)], &[]);
+
+    let names: &[&str] = &["LoadLibraryA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"X.DLL\0OPENGL32.DLL\0";
+    const X: u32 = 0;
+    const OPENGL32: u32 = 6;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.push(l.at(X) as i32)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, X_BASE as i32)?;
+        check(a, false, 0)?;
+        a.push(l.at(OPENGL32) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.cmp(
+            dword_ptr((X_BASE + OPENGL32_RVA) as u64),
+            0x5A5A_5A5Au32 as i32,
+        )?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_over_file", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b}, {}",
+        !code & 7,
+        text
+    );
 }
 
 #[test]

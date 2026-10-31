@@ -585,12 +585,16 @@ fn attach_builtin(
     }
     let built = stubs::image(index, bus.win32.os);
     let size = built.headers.size_of_image;
-    if memory.region(dll.base).is_some() {
-        memory.write(bus, dll.base, &built.data)?;
-    } else {
+    // Its own region, of an earlier load, starts at its base and has stub
+    // pages. Anything else of the process's at this address keeps it, and
+    // the load fails.
+    let mapped = memory.region(dll.base).is_some_and(|r| r.start == dll.base)
+        && memory
+            .translate(bus, dll.base)
+            .is_some_and(|phys| process.stub_pages.contains(&(phys >> 12)));
+    if !mapped {
         memory.reserve_image(Some(dll.base), size, SHARED, SYSTEM)?;
         memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
-        memory.write(bus, dll.base, &built.data)?;
         // Read only but for its variables.
         for section in built.headers.sections.iter().filter(|s| s.writable()) {
             let end = section.rva + section.mapped_size();
@@ -604,6 +608,7 @@ fn attach_builtin(
             process.stub_pages.push(memory.translate(bus, page)? >> 12);
         }
     }
+    memory.write(bus, dll.base, &built.data)?;
     process.modules.push(Module {
         name: dll.name.to_string(),
         path: join(SYSTEM_DIR, dll.name),
@@ -625,7 +630,10 @@ fn attach_builtin(
         std::mem::swap(memory, &mut process.memory);
         let filled = init(bus, process);
         std::mem::swap(memory, &mut process.memory);
-        filled?;
+        if filled.is_none() {
+            process.modules.pop();
+            return None;
+        }
     }
     Some(dll.base)
 }
@@ -1262,8 +1270,8 @@ fn export_target(bus: &Bus, memory: &Memory, base: u32, wanted: &Wanted) -> Opti
 
 /// Take a reference on the module at `base` away (FreeLibrary): the
 /// modules whose last reference went, it first and then those it imported
-/// from, are added to `freed`. The built-in DLLs and those that came with
-/// the program stay.
+/// from, are added to `freed`. The modules that stay while the program
+/// runs (`STATIC`) lose nothing.
 pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
     let Some(module) = process.modules.iter_mut().find(|m| m.base == base) else {
         return;
