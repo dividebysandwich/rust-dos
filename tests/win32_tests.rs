@@ -11,6 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 mod cdimage;
+mod dyndiff;
 mod win16;
 
 const BASE: u32 = 0x40_0000;
@@ -475,6 +476,80 @@ fn a_program_reads_its_static_tls() {
     b.directory(pe::DIR_TLS, data_rva, 24).entry(code_rva);
     let (code, _) = run("tls", b.build());
     assert_eq!(code, 0x2A);
+}
+
+/// A frame limiter that calls GetTickCount or timeGetTime until the time
+/// comes: one machine skips the passes and the other runs them all, and
+/// they must come out the same after every batch, each of the milliseconds
+/// that end the skips included.
+#[test]
+fn a_wait_on_the_clock_is_skipped_exactly() {
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", &["GetTickCount"]), ("WINMM.DLL", &["timeGetTime"])];
+    let image = program(BASE, false, imports, &[0], |a, l| {
+        for clock in 0..2 {
+            let mut wait = a.create_label();
+            a.call(l.import(clock))?;
+            a.lea(ebx, dword_ptr(eax + 20))?;
+            a.set_label(&mut wait)?;
+            a.call(l.import(clock))?;
+            a.cmp(eax, ebx)?;
+            a.jb(wait)?;
+        }
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    let mut plain = start("clock_wait_plain", CoreMode::Normal, false);
+    let mut skipping = start("clock_wait_skipping", CoreMode::Dynamic, true);
+    // The machines' call counts before each batch, by turns: the program's
+    // end takes them away, so they are looked at as it runs.
+    let mut calls = Vec::new();
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, cpu| {
+        calls.push(cpu.bus.win32.calls);
+    });
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(skipping.errorlevel, 0x2A, "{:?}", skipping.bus.observe.stats);
+    let stats = &skipping.bus.observe.stats;
+    assert!(stats.proofs >= 30, "a proof for most milliseconds: {stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+    assert!(calls.iter().any(|&n| n > 0), "the program made calls");
+    for (batch, pair) in calls.chunks(2).enumerate() {
+        assert_eq!(pair[0], pair[1], "the reads skipped count too, batch {batch}");
+    }
+}
+
+/// KERNEL's LocalLock has the trap id KERNEL32's GetTickCount has, in the
+/// numbering of the 16-bit modules, and reads no clock: calls of it in a
+/// row don't arm their stub.
+#[test]
+fn a_16_bit_function_with_the_clock_s_trap_id_arms_nothing() {
+    let mut code = win16::Code::new();
+    code.emit(&[0xB9, 0x40, 0x00]); // mov cx, 64
+    let top = code.here();
+    code.emit(&[0x51]); // push cx
+    code.push(0).call("KERNEL", 8); // LocalLock(0)
+    code.emit(&[0x59]); // pop cx
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0xE2, back as u8]); // loop top
+    code.emit(&[0xB0, 0x2A]); // mov al, 2Ah
+    code.exit_al();
+    let mut cpu = machine("clock_id_16_bit", win16::program(&code, win16::CODE));
+    assert!(run_to_exit(&mut cpu, 400));
+    assert_eq!(cpu.errorlevel, 0x2A);
+    const LOCAL_LOCK_STUB: u32 = 10 * 8;
+    let stats = &cpu.bus.observe.stats;
+    assert!(
+        !stats.heads.iter().any(|h| h.arms > 0 && h.eip == LOCAL_LOCK_STUB),
+        "{stats:?}"
+    );
 }
 
 /// Waits for the BIOS's tick count, which the timer interrupt advances
