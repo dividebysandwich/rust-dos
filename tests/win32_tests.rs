@@ -3397,6 +3397,8 @@ enum Upd {
     Update([i32; 4]),
     /// GetUpdateRect says FALSE.
     NoUpdate,
+    /// GetUpdateRgn says NULLREGION.
+    EmptyUpdateRgn,
     /// The last `Pump` saw this many WM_PAINTs and WM_NCPAINTs.
     Sent(i32, i32),
     /// The last `Pump` saw no endless WM_PAINT.
@@ -3407,8 +3409,8 @@ const RDW_INVALIDATE: i32 = 0x0001;
 const RDW_VALIDATE: i32 = 0x0008;
 const RDW_FRAME: i32 = 0x0400;
 const RDW_NOFRAME: i32 = 0x0800;
-const POPUP: i32 = 0x9000_0000u32 as i32;
-const POPUP_BORDER: i32 = 0x9080_0000u32 as i32;
+const POPUP: i32 = WS_POPUP | WS_VISIBLE;
+const POPUP_BORDER: i32 = POPUP | 0x0080_0000;
 
 /// Where a script for `update_script` runs: a window of `style` at `at`
 /// of `size`, or a child of it at (x, y) and this size, which the script
@@ -3439,6 +3441,7 @@ fn update_script(test: &str, window: UpdWindow, script: &[Upd]) -> u8 {
     const SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001E;
     const SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001D;
     const LOOP_CAP: i32 = 20;
+    const NULLREGION: i32 = 1;
     let names: &[&str] = &[
         "RegisterClassA",
         "CreateWindowExA",
@@ -3448,6 +3451,7 @@ fn update_script(test: &str, window: UpdWindow, script: &[Upd]) -> u8 {
         "ValidateRect",
         "RedrawWindow",
         "GetUpdateRect",
+        "GetUpdateRgn",
         "PeekMessageA",
         "DispatchMessageA",
     ];
@@ -3619,6 +3623,19 @@ fn update_script(test: &str, window: UpdWindow, script: &[Upd]) -> u8 {
                     a.mov(eax, number)?;
                     a.jne(done)?;
                 }
+                Upd::EmptyUpdateRgn => {
+                    for value in [0, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.call(l.import(names.len()))?;
+                    a.push(0)?;
+                    a.push(eax)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRgn"))?;
+                    a.cmp(eax, NULLREGION)?;
+                    a.mov(eax, number)?;
+                    a.jne(done)?;
+                }
                 Upd::Sent(p, nc) => {
                     a.mov(eax, number)?;
                     a.cmp(dword_ptr(l.at(paints)), p)?;
@@ -3696,6 +3713,20 @@ fn the_screen_limits_what_is_reported_not_the_update_region() {
     };
     let script = [Update([0, 0, 40, 100]), MoveHome, Update([0, 0, 100, 100])];
     assert_eq!(update_script("upd_screen", window, &script), 0);
+}
+
+/// A child hanging out of its parent reports only the part inside the
+/// parent, on Windows 98 and 11, and keeps the rest: moved back into the
+/// parent it reports all of it.
+#[test]
+fn a_parent_limits_what_is_reported_of_a_child_and_not_its_update_region() {
+    use Upd::*;
+    let window = UpdWindow {
+        child: Some((80, 0, 60)),
+        ..WINDOW_100
+    };
+    let script = [Update([0, 0, 20, 60]), MoveHome, Update([0, 0, 60, 60])];
+    assert_eq!(update_script("upd_child_out", window, &script), 0);
 }
 
 /// Any ValidateRect clips what is left to the client area, as on
@@ -3820,6 +3851,7 @@ fn an_invalidated_frame_survives_validate_rect() {
         Update([0, 0, 98, 98]),
         Validate(None),
         Update([0, 0, 98, 98]),
+        EmptyUpdateRgn,
         Pump,
         Sent(1, 1),
         NoUpdate,
