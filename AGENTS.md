@@ -147,6 +147,26 @@ disk.
   count, a trace, or a reproduction boot. Its result doesn't depend on the
   host's speed, so it can run during a build. Only a number you will quote
   as evidence needs the quiet machine.
+- Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
+  Bash on Windows). Builds, tests and every emulator run that isn't a
+  timing measurement take the heavy form, so they run together:
+  `bash tools/run-lock.sh heavy NAME 0 -- cargo test ...`. Only timing
+  measurements take the exclusive form:
+  `bash tools/run-lock.sh measure NAME 0 -- CMD...` blocks new heavy jobs,
+  waits for the running ones to end, and then runs alone, in the order
+  measurements asked. Either form releases when the command ends and
+  passes on its exit code. The third argument is the longest wait in
+  seconds; `0` waits without limit, which is the right value for queued
+  work. If the script exits with code 3, the command did not run: check
+  `status`, and if the job is still wanted, run the same command again at
+  once under the same NAME. Never call one form inside the other: that
+  deadlocks.
+  `status` shows what runs and waits, and `clear NAME` cleans up after a
+  stopped worker. NAME is yours alone. The lock lives in
+  `RUST_DOS_RUN_LOCK_DIR` (by default `~/.rust-dos-run-lock`), so all
+  callers on the machine need the same one. Read the script's header
+  before using it: its rules come from clashes that spoiled
+  measurements.
 - If CI's step times are enough for the claim, use them instead of a local
   timing.
 
