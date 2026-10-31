@@ -186,19 +186,12 @@ fn xbrz_window_screenshots_use_the_selected_shader() {
         if Instant::now() >= deadline {
             let xdotool = |args: &[&str]| {
                 let output = Command::new("xdotool").args(args).output().unwrap();
-                String::from_utf8_lossy(&output.stdout).trim().replace('
-', " ")
+                String::from_utf8_lossy(&output.stdout).trim().replace('\n', " ")
             };
             let pid = emulator.0.id().to_string();
             panic!(
-                "Ctrl+F5 saves a shader screenshot
-window {window}, of {}, focus {}
-                 status: {:?}
-captures: {:?}
-log:
-{}
-stderr:
-{}",
+                "Ctrl+F5 saves a shader screenshot\nwindow {window}, of {}, focus {}\n\
+                 status: {:?}\ncaptures: {:?}\nlog:\n{}\nstderr:\n{}",
                 xdotool(&["search", "--pid", &pid]),
                 xdotool(&["getwindowfocus"]),
                 http(addr, "GET", "/api/status", &[], None).0,
