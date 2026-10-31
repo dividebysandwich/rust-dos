@@ -140,7 +140,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   frame rate) or reaches the display's refresh rate (frames nobody sees,
   and some games, such as Descent, play badly at such rates), and goes
   down while the program waits for a key or calls DOS's idle interrupt.
-  A real-mode program with no frames to go by (most games of the 1980s,
+  It then tries lower speeds, down to where they cost more than 3% of
+  the frame rate. A speed the host falls behind at is left for a lower
+  one, and the limit that sets rises again while the host keeps up. A
+  real-mode program with no frames to go by (most games of the 1980s,
   which update the screen piecemeal) runs at 3000, about a 286, as in
   DOSBox's `cycles=auto`. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to
@@ -429,7 +432,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
   synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3, and
   OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's pixel
-  formats, SwapBuffers and gamma ramp. A program that calls a function they
+  formats, SwapBuffers and gamma ramp, and on a Voodoo2 full screen as
+  3dfx's Voodoo2 OpenGL driver had it. A program that calls a function they
   don't have ends with a message naming it, and one that needs a DLL that is
   neither among them nor beside it is refused. The registry is kept in
   `C:\REGISTRY.REG`, which is made the first time a program uses it, so a

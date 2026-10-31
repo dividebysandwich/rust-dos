@@ -390,6 +390,36 @@ fn pacer_drops_a_large_backlog() {
 }
 
 #[test]
+fn pacer_counts_the_backlog_it_drops_but_not_a_pause() {
+    let start = Instant::now();
+    let mut bus = bus_at(1000);
+    let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
+    // A frame that runs its batch, at `ms` on the wall clock.
+    let frame = |bus: &mut Bus, pacer: &mut Pacer, ms: u64| {
+        bus.clock.icount = pacer.batch_end(&bus.clock, start + Duration::from_millis(ms));
+        pacer.end_frame(bus, false, 0, Duration::ZERO, Duration::ZERO);
+    };
+    frame(&mut bus, &mut pacer, 0);
+    frame(&mut bus, &mut pacer, 16);
+    // The host took a second over the next frame: the backlog past the
+    // frame it runs is lost.
+    frame(&mut bus, &mut pacer, 1016);
+    let lost = pacer.lost();
+    assert!((950..1000).contains(&lost.as_millis()), "{:?}", lost);
+    // Paused for five seconds, the frontend drawing frames that run
+    // nothing: the backlog is the pause's.
+    for _ in 0..3 {
+        pacer.end_frame(&bus, false, 0, Duration::ZERO, Duration::ZERO);
+    }
+    frame(&mut bus, &mut pacer, 6016);
+    assert_eq!(pacer.lost(), lost);
+    // Three seconds with no frames at all (a page in the background): the
+    // frontend stopped, and that is no measure of the host.
+    frame(&mut bus, &mut pacer, 9016);
+    assert_eq!(pacer.lost(), lost);
+}
+
+#[test]
 fn auto_speed_follows_the_program() {
     let start = Instant::now();
     let fast = Duration::from_millis(2);
@@ -553,13 +583,52 @@ fn auto_speed_is_never_capped_below_a_speed_that_can_be_timed() {
     // run 3,333 instructions, too few for the host to be measured again,
     // and the cap would stay. It stops at a speed whose frames are timed.
     let start = Instant::now();
-    let bus = bus_at(2000);
+    let mut bus = bus_at(2000);
     let mut pacer = Pacer::new(CpuSpeed::Auto(300), None, start);
-    let executed = 2000 * 50 / 3;
-    // 4.2 us an instruction: 85% of a frame fits about 3,400 of them.
-    let exec = Duration::from_nanos(executed * 4200);
-    let next = pacer.end_frame(&bus, false, executed, exec, Duration::ZERO);
-    assert_eq!(next, Some(1200));
+    for frame in 0..600 {
+        let executed = bus.clock.cycles_per_ms() as u64 * 50 / 3;
+        bus.clock.icount += executed;
+        // A game short of its frame rate: the search wants more.
+        bus.activity.swapped((frame % 4 == 0) as u64);
+        // 4.2 us an instruction: 85% of a frame fits about 3,400 of them.
+        let exec = Duration::from_nanos(executed * 4200);
+        if let Some(speed) = pacer.end_frame(&bus, false, executed, exec, Duration::ZERO) {
+            bus.set_cycles_per_ms(speed);
+        }
+    }
+    assert_eq!(bus.clock.cycles_per_ms(), 1200);
+}
+
+#[test]
+fn auto_speed_is_not_taken_down_by_the_host_estimate_alone() {
+    // The estimate is noisy, and a stall sinks it for a moment. Only a
+    // measurement changes the speed, and it knows if the host fell behind.
+    let start = Instant::now();
+    let mut bus = bus_at(60_000);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
+    for _ in 0..20 {
+        pacer.batch_end(&bus.clock, start);
+        let executed = 1_000_000;
+        bus.clock.icount += executed;
+        // About 30,000 instructions per ms fit into a frame.
+        let exec = Duration::from_nanos(executed * 28);
+        let next = pacer.end_frame(&bus, true, executed, exec, Duration::ZERO);
+        assert_eq!(next, None);
+    }
+}
+
+#[test]
+fn auto_speed_goes_by_the_host_estimate_where_frames_do_not_run_by_the_wall_clock() {
+    // Libretro's frontend runs the frames, and no backlog is ever dropped:
+    // the estimate is all that tells a scene is too heavy for the host.
+    let start = Instant::now();
+    let mut bus = bus_at(60_000);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
+    let executed = 1_000_000;
+    bus.clock.icount += executed;
+    let exec = Duration::from_nanos(executed * 28);
+    let next = pacer.end_frame(&bus, true, executed, exec, Duration::ZERO);
+    assert!(next.is_some_and(|speed| speed < 35_000), "{:?}", next);
 }
 
 #[test]

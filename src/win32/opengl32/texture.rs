@@ -405,7 +405,9 @@ fn make_surface(
     let size: u32 = (0..levels)
         .map(|l| (width >> l).max(1) * (height >> l).max(1) * 2)
         .sum();
-    let memory = if video_room(cpu, size) {
+    // On the Voodoo2 they are in system memory, and the HAL copies them
+    // into the texture units' memory as it draws with them.
+    let memory = if !directdraw::is_card(cpu, dd) && video_room(cpu, size) {
         DDSCAPS_VIDEOMEMORY
     } else {
         DDSCAPS_SYSTEMMEMORY
