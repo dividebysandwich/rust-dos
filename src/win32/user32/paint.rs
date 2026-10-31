@@ -505,6 +505,38 @@ fn clear_updates(state: &mut State, hwnd: u32) {
     }
 }
 
+/// `hwnd` took a new size, frame or shape: its update region loses what
+/// now lies outside it, or that part would ask for WM_PAINT that nothing
+/// can validate. A CS_PARENTDC child keeps what it has over its parent's
+/// client area. What is now in the frame needs WM_NCPAINT, which crops it
+/// (`erase_step`), as ValidateRect only covers the client area.
+pub fn crop_update(state: &mut State, hwnd: u32) {
+    let Some(w) = state.window(hwnd) else {
+        return;
+    };
+    if w.update.is_empty() {
+        return;
+    }
+    let wr = state.screen_rect(hwnd);
+    let update = w.update.offset_by(wr.left, wr.top);
+    let own = update.and(&shape(state, hwnd));
+    let frame = !own.diff_rect(&state.screen_client(hwnd)).is_empty();
+    let kept = if parent_dc(state, hwnd) {
+        update.and_rect(&state.screen_client(w.parent))
+    } else {
+        own
+    };
+    let Some(w) = state.window_mut(hwnd) else {
+        return;
+    };
+    w.update = kept.offset_by(-wr.left, -wr.top);
+    if w.update.is_empty() {
+        w.paint &= !(PAINT_ERASE | PAINT_FRAME | PAINT_DELAYED_ERASE);
+    } else if frame {
+        w.paint |= PAINT_FRAME;
+    }
+}
+
 /// Paint the desktop's background over `area` of the screen, where no
 /// window covers it.
 fn paint_background(cpu: &mut Cpu, area: &Region) {

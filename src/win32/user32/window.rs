@@ -1739,10 +1739,6 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 };
                 w.rect = new;
                 w.client = client;
-                // The update region stays inside the window, or what a
-                // shrinking window left outside would ask for WM_PAINT
-                // that nothing can validate.
-                w.update = w.update.and_rect(&Rect::sized(0, 0, new.width(), new.height()));
                 if w.style & (WS_MINIMIZE | WS_MAXIMIZE) == 0 {
                     w.normal = new;
                 }
@@ -1760,6 +1756,9 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     }
                     link(state, hwnd, after);
                     raise_owned(state, hwnd);
+                }
+                if flags & SWP_NOSIZE == 0 || flags & SWP_FRAMECHANGED != 0 {
+                    super::paint::crop_update(state, hwnd);
                 }
                 if client.width() == old_client.width() && client.height() == old_client.height() {
                     flags |= SWP_NOCLIENTSIZE;
@@ -3074,6 +3073,7 @@ pub fn set_window_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if let Some(w) = user(cpu).window_mut(args[0]) {
         w.region = region;
     }
+    super::paint::crop_update(user(cpu), args[0]);
     super::paint::tree_changed(cpu);
     Some(TRUE)
 }

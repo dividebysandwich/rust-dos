@@ -3431,6 +3431,130 @@ fn a_window_that_shrinks_leaves_no_update_region_outside_it() {
     assert_eq!(code, 0);
 }
 
+/// A 100x100 window of `style`, its whole client area to paint, made
+/// 50x50 without a redraw, or with `region` given a 50x50 region. Its
+/// procedure answers WM_PAINT with ValidateRect and three of them are
+/// dispatched. The exit code: 1 if another WM_PAINT waits, 2 without a
+/// window, or 0.
+fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
+    const WM_PAINT: i32 = 0x000F;
+    const PM_REMOVE: i32 = 1;
+    const SWP_NOMOVE_NOZORDER_NOREDRAW: i32 = 0x000E;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+        "SetWindowRgn",
+        "ValidateRect",
+        "PeekMessageA",
+        "DispatchMessageA",
+    ];
+    let gdi: &[&str] = &["CreateRectRgn"];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[
+        ("USER32.dll", names),
+        ("GDI32.dll", gdi),
+        ("KERNEL32.dll", kernel),
+    ];
+    let mut d = Data::default();
+    let name = d.text("Cropped");
+    let msg = d.add(&[0; 28]);
+    let mut wndclass = [0; 40];
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_PAINT)?;
+        a.jne(other)?;
+        a.push(0)?;
+        a.push(dword_ptr(esp + 8))?;
+        a.call(f("ValidateRect"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        for value in [0, BASE as i32, 0, 0, 100, 100, 0, 0, style] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(ebx, eax)?;
+        if region {
+            for value in [50, 50, 0, 0] {
+                a.push(value)?;
+            }
+            a.call(l.import(names.len()))?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.push(ebx)?;
+            a.call(f("SetWindowRgn"))?;
+        } else {
+            for value in [SWP_NOMOVE_NOZORDER_NOREDRAW, 50, 50, 0, 0, 0] {
+                a.push(value)?;
+            }
+            a.push(ebx)?;
+            a.call(f("SetWindowPos"))?;
+        }
+        for remove in [PM_REMOVE, PM_REMOVE, PM_REMOVE, 0] {
+            let mut none = a.create_label();
+            a.push(remove)?;
+            a.push(WM_PAINT)?;
+            a.push(WM_PAINT)?;
+            a.push(ebx)?;
+            a.push(l.at(msg) as i32)?;
+            a.call(f("PeekMessageA"))?;
+            if remove != 0 {
+                a.test(eax, eax)?;
+                a.je(none)?;
+                a.push(l.at(msg) as i32)?;
+                a.call(f("DispatchMessageA"))?;
+            }
+            a.set_label(&mut none)?;
+        }
+        let mut window = a.create_label();
+        a.test(ebx, ebx)?;
+        a.jne(window)?;
+        a.mov(eax, 2)?;
+        a.set_label(&mut window)?;
+        a.push(eax)?;
+        a.call(l.import(names.len() + 1))?;
+        Ok(())
+    });
+    run(test, exe).0
+}
+
+/// Client area that a smaller window's frame now covers is more than
+/// ValidateRect reaches: WM_NCPAINT takes it after the WM_PAINT, which
+/// doesn't come back.
+#[test]
+fn a_window_that_shrinks_into_its_frame_stops_asking_for_wm_paint() {
+    const WS_POPUP_VISIBLE_BORDER: i32 = 0x9080_0000u32 as i32;
+    let code = wm_paint_waits_after_cropping("shrunk_frame_paint", WS_POPUP_VISIBLE_BORDER, false);
+    assert_eq!(code, 0);
+}
+
+/// SetWindowRgn takes away what the window had to paint outside the
+/// region, which ValidateRect couldn't reach.
+#[test]
+fn a_window_given_a_smaller_region_stops_asking_for_wm_paint() {
+    const WS_POPUP_VISIBLE: i32 = 0x9000_0000u32 as i32;
+    let code = wm_paint_waits_after_cropping("region_paint", WS_POPUP_VISIBLE, true);
+    assert_eq!(code, 0);
+}
+
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
 /// whose name starts with "=", set and read back; a name with "=" further
 /// on is refused with ERROR_INVALID_PARAMETER. A bit each in the exit
