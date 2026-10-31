@@ -41,6 +41,7 @@ mod msimg32;
 mod msvcrt;
 mod ntdll;
 pub(crate) mod object;
+mod ordinals;
 mod ole32;
 mod oleaut32;
 mod opengl32;
@@ -61,6 +62,7 @@ pub mod version;
 mod verdll;
 pub(crate) mod winmm;
 mod winspool;
+mod wow32;
 mod ws2_32;
 mod wsock32;
 

@@ -1477,11 +1477,17 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         return false;
     }
     // A proof goes through a service only if it says it changed nothing
-    // but RAM and registers (`idle::pure_call`).
+    // but RAM and registers (`idle::pure_call`), or it reads the clock,
+    // which `idle::clock_read` takes after the call.
     let observed = cpu.bus.observe.on;
     if observed {
         crate::idle::before_service(cpu);
     }
+    // 16-bit modules number their functions apart: the id is another
+    // function's there.
+    let reads_clock = crate::win32::stubs::reads_clock(id) && !crate::win16::in_16bit_code(cpu);
+    }
+    let trap = (cpu.cs(), cpu.eip());
     let _profile = profile::zone(profile::Zone::Win32);
     if let Some(p) = &mut cpu.bus.profile {
         p.win32[id as usize] += 1;
@@ -1509,6 +1515,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
         return true;
     }
     cpu.bus.guest_paging = None;
+    if reads_clock {
+        crate::idle::clock_read(cpu, trap.0, trap.1);
+    }
     if cpu.idle {
         // No thread can run: time passes to the next timer event.
         cpu.idle = false;

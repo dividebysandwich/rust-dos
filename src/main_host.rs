@@ -538,6 +538,8 @@ impl Host for MainHost<'_, '_> {
         self.cpu.set_fpu_fast(new.fpu_fast);
         self.cpu.bus.observe.enabled = new.idle_skip;
         self.cpu.bus.idle_hint = new.idle_hint;
+        self.cpu.bus.game_fixes = new.game_fixes;
+        self.cpu.bus.game_fixes_off = new.game_fixes_off.clone();
         // Programs look for the host as they start.
         self.cpu.bus.dpmi.enabled = new.dpmi;
         self.cpu.bus.win32.enabled = new.win32;

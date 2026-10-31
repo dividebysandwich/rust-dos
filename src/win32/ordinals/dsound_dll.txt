@@ -1,0 +1,8 @@
+1 DirectSoundCreate
+2 DirectSoundEnumerateA
+3 DirectSoundEnumerateW
+4 DllCanUnloadNow
+5 DllGetClassObject
+6 DirectSoundCaptureCreate
+7 DirectSoundCaptureEnumerateA
+8 DirectSoundCaptureEnumerateW

@@ -243,6 +243,12 @@ impl Clock {
         self.base_icount.saturating_add(mul_div_ceil(delta, self.instructions_per_second(), PIT_HZ))
     }
 
+    /// The first instruction count at which `now_micros() / 1000` is `ms`
+    /// or more.
+    pub fn icount_at_ms(&self, ms: u64) -> u64 {
+        self.icount_at(mul_div_ceil(ms * 1000, PIT_HZ, 1_000_000))
+    }
+
     /// Change the speed from the current instruction onwards. Callers on the
     /// bus must recompute the deadline afterwards (`Bus::set_cycles_per_ms`).
     pub fn set_cycles_per_ms(&mut self, cycles_per_ms: u32) {
