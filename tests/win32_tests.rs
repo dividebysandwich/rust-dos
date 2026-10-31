@@ -2496,6 +2496,224 @@ fn a_dll_whose_entry_point_fails_is_not_loaded() {
     );
 }
 
+/// MSVCRT.DLL loaded by a program that doesn't import it, as Windows 98
+/// SE does it: LoadLibrary counts, the last FreeLibrary takes it out of the
+/// process, so that GetModuleHandle, GetProcAddress and FreeLibrary fail
+/// for it, and the next load starts the C runtime again (rand's seed).
+#[test]
+fn a_program_loads_and_frees_msvcrt_without_importing_it() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0strlen\0srand\0rand\0";
+    const NAME: u32 = 0;
+    const STRLEN: u32 = 11;
+    const SRAND: u32 = 18;
+    const RAND: u32 = 24;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        // Loaded, and known by its name.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        // A function of it works.
+        a.push(l.at(STRLEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.push(l.at(STRLEN) as i32)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.cmp(eax, 6)?;
+        check(a, false, 2)?;
+        // Two references, the same module.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 3)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        // A seed for the state that the last free ends.
+        a.push(l.at(SRAND) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.push(5)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        // The handle is no longer one: ERROR_INVALID_HANDLE.
+        let mut wrong = a.create_label();
+        a.push(l.at(STRLEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.mov(edi, eax)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 6)?;
+        a.jne(wrong)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.or(edi, eax)?;
+        a.set_label(&mut wrong)?;
+        check(a, false, 6)?;
+        // Loaded again, seeded with 1 as a new runtime is.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(l.at(RAND) as i32)?;
+        a.push(eax)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.cmp(eax, 41)?;
+        check(a, false, 7)?;
+        // All bits set is also the exit code of a program that faults, as
+        // this one does on a NULL from GetProcAddress.
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("load_msvcrt", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
+/// Built-in DLLs loaded while a second thread runs. MSVCRT.DLL comes
+/// with a DLL file that calls it from its entry point and goes with it;
+/// OLE32.DLL goes at its FreeLibrary. A DLL the program imports stays, as
+/// does KERNEL32.DLL, whatever FreeLibrary it gets.
+#[test]
+fn a_built_in_dll_stays_while_something_holds_it() {
+    const SEEN: u32 = PROGRAM_DATA + 0x100;
+    let dll_data = b"hello\0";
+    let dll_imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", &["strlen"])];
+    let entry = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 1)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.add(esp, 4)?;
+        a.mov(dword_ptr(SEEN as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        dll_imports,
+        dll_data,
+        &[("", &entry)],
+        &[],
+    );
+
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "CreateThread",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", names),
+        ("ADVAPI32.DLL", &["RegCloseKey"]),
+    ];
+    let mut data = b"MSVCRT.DLL\0X.DLL\0OLE32.DLL\0ADVAPI32.DLL\0KERNEL32.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    const MSVCRT: u32 = 0;
+    const X: u32 = 11;
+    const OLE32: u32 = 17;
+    const ADVAPI32: u32 = 27;
+    const KERNEL32: u32 = 40;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut after = a.create_label();
+        a.xor(ebx, ebx)?;
+        // A thread that sleeps, whose function's address the call leaves.
+        a.call(after)?;
+        a.push(-1)?;
+        a.call(f("Sleep"))?;
+        a.set_label(&mut after)?;
+        a.pop(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        // Its entry point called strlen.
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(SEEN as u64))?;
+        a.cmp(eax, 5)?;
+        check(a, false, 0)?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        // A built-in DLL with no variables goes as well.
+        a.push(l.at(OLE32) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(OLE32) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        for (name, bit) in [(ADVAPI32, 4), (KERNEL32, 5)] {
+            a.push(l.at(name) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.push(eax)?;
+            a.call(f("FreeLibrary"))?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.test(eax, eax)?;
+            check(a, true, bit)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_held", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}, {}", !code & 0x3F, text);
+}
+
 #[test]
 fn a_program_missing_a_dll_function_is_refused() {
     let imports: &[(&str, &[&str])] = &[("C.DLL", &["G"])];

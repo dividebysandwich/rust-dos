@@ -56,9 +56,10 @@ const PROCESS_HEAP: u32 = 0x18;
 pub(crate) const WINDOWS_DIR: &str = "C:\\WINDOWS";
 pub(crate) const SYSTEM_DIR: &str = "C:\\WINDOWS\\SYSTEM";
 
-/// What a module is (`Module::flags`): a built-in DLL, a DLL that came
-/// with the program (neither is ever unloaded), one mapped as data, one
-/// whose imports weren't loaded, one whose entry point returned TRUE to
+/// What a module is (`Module::flags`): a built-in DLL, a DLL that stays
+/// while the program runs (it came with the program, or for a built-in
+/// one the system mapped it), one mapped as data, one whose imports
+/// weren't loaded, one whose entry point returned TRUE to
 /// DLL_PROCESS_ATTACH, and one that DisableThreadLibraryCalls was called
 /// for.
 pub(crate) const BUILTIN: u32 = 0x01;
@@ -553,9 +554,26 @@ fn bad_image_error(file: &[u8]) -> u32 {
     }
 }
 
-/// Map the built-in DLL `index` where Windows 95 has it, read only.
-/// Its base.
+/// Map the built-in DLL `index` where Windows 95 has it, read only, to
+/// stay while the program runs: for the program's imports and the system's
+/// own needs, whose objects' methods are in the image. Its base.
 pub(crate) fn map_builtin(
+    bus: &mut Bus,
+    memory: &mut Memory,
+    process: &mut Process,
+    index: usize,
+) -> Option<u32> {
+    let base = attach_builtin(bus, memory, process, index)?;
+    if let Some(m) = process.modules.iter_mut().find(|m| m.base == base) {
+        m.flags |= STATIC;
+    }
+    Some(base)
+}
+
+/// Put the built-in DLL `index` in the process if it isn't there, as a
+/// module nothing holds yet. One whose last reference went is still mapped
+/// (`unmap`), and starts again: its image as it was, its variables filled.
+fn attach_builtin(
     bus: &mut Bus,
     memory: &mut Memory,
     process: &mut Process,
@@ -567,20 +585,24 @@ pub(crate) fn map_builtin(
     }
     let built = stubs::image(index, bus.win32.os);
     let size = built.headers.size_of_image;
-    memory.reserve_image(Some(dll.base), size, SHARED, SYSTEM)?;
-    memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
-    memory.write(bus, dll.base, &built.data)?;
-    // Read only but for its variables.
-    for section in built.headers.sections.iter().filter(|s| s.writable()) {
-        let end = section.rva + section.mapped_size();
-        for page in (section.rva..end).step_by(PAGE as usize) {
-            if !memory.set_protection(bus, dll.base + page, PAGE_READWRITE) {
-                return None;
+    if memory.region(dll.base).is_some() {
+        memory.write(bus, dll.base, &built.data)?;
+    } else {
+        memory.reserve_image(Some(dll.base), size, SHARED, SYSTEM)?;
+        memory.commit(bus, dll.base, size.next_multiple_of(PAGE), USER)?;
+        memory.write(bus, dll.base, &built.data)?;
+        // Read only but for its variables.
+        for section in built.headers.sections.iter().filter(|s| s.writable()) {
+            let end = section.rva + section.mapped_size();
+            for page in (section.rva..end).step_by(PAGE as usize) {
+                if !memory.set_protection(bus, dll.base + page, PAGE_READWRITE) {
+                    return None;
+                }
             }
         }
-    }
-    for page in (dll.base..dll.base + size).step_by(PAGE as usize) {
-        process.stub_pages.push(memory.translate(bus, page)? >> 12);
+        for page in (dll.base..dll.base + size).step_by(PAGE as usize) {
+            process.stub_pages.push(memory.translate(bus, page)? >> 12);
+        }
     }
     process.modules.push(Module {
         name: dll.name.to_string(),
@@ -594,10 +616,16 @@ pub(crate) fn map_builtin(
     });
     // Its variables: for a process that runs already (LoadLibrary);
     // `create_process` fills those of the DLLs a program starts with.
+    // Every caller holds the process's memory apart from it, as `memory`,
+    // and an init writes through `process.memory`, so it goes back for
+    // the call.
     if !process.threads.is_empty()
         && let Some(init) = dll.init
     {
-        init(bus, process)?;
+        std::mem::swap(memory, &mut process.memory);
+        let filled = init(bus, process);
+        std::mem::swap(memory, &mut process.memory);
+        filled?;
     }
     Some(dll.base)
 }
@@ -654,8 +682,7 @@ pub(super) fn load_module(
     if let Some(index) = builtin_for(l.bus, &file)
         && (!has_path || in_system())
     {
-        return map_builtin(l.bus, l.memory, l.process, index)
-            .ok_or_else(|| out_of_memory(importer));
+        return load_builtin(l, index).ok_or_else(|| out_of_memory(importer));
     }
 
     // One loaded already, known by its file name as on Windows 95. A
@@ -675,7 +702,7 @@ pub(super) fn load_module(
         (same_file || by_name) && (datafile || m.flags & DATAFILE == 0)
     });
     if let Some(m) = loaded {
-        if m.flags & (BUILTIN | STATIC) == 0 {
+        if m.flags & STATIC == 0 {
             m.refs += 1;
             if !l.mapped.contains(&m.base) {
                 l.raised.push(m.base);
@@ -809,6 +836,25 @@ pub(super) fn load_module(
     }
     l.mapped.push(base);
     Ok(base)
+}
+
+/// Load the built-in DLL `index` for `l`: with the program it stays, and
+/// for LoadLibrary it holds a reference more, as a DLL file does. Its base.
+fn load_builtin(l: &mut Loader, index: usize) -> Option<u32> {
+    if l.static_load {
+        return map_builtin(l.bus, l.memory, l.process, index);
+    }
+    let dll_base = stubs::DLLS[index].base;
+    let there = l.process.modules.iter().any(|m| m.base == dll_base);
+    let base = attach_builtin(l.bus, l.memory, l.process, index)?;
+    let module = l.process.modules.iter_mut().find(|m| m.base == base)?;
+    if module.flags & STATIC == 0 {
+        module.refs += 1;
+        if there {
+            l.raised.push(base);
+        }
+    }
+    Some(base)
 }
 
 /// The static TLS of the DLL `image`, which `load_module` mapped: with the
@@ -1222,7 +1268,7 @@ pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
     let Some(module) = process.modules.iter_mut().find(|m| m.base == base) else {
         return;
     };
-    if module.flags & (BUILTIN | STATIC) != 0 || module.refs == 0 {
+    if module.flags & STATIC != 0 || module.refs == 0 {
         return;
     }
     module.refs -= 1;
@@ -1237,12 +1283,17 @@ pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
 }
 
 /// Take the module at `base` out of the process: its pages and address
-/// space are given back.
+/// space are given back. A built-in DLL's stay mapped, as a system DLL's
+/// do in Windows 95's shared arena: its objects and the addresses of its
+/// functions go on working, and `attach_builtin` finds it there.
 pub(super) fn unmap(bus: &mut Bus, memory: &mut Memory, process: &mut Process, base: u32) {
     let Some(i) = process.modules.iter().position(|m| m.base == base) else {
         return;
     };
     let module = process.modules.remove(i);
+    if module.flags & BUILTIN != 0 {
+        return;
+    }
     for page in (base..base + module.size.next_multiple_of(PAGE)).step_by(PAGE as usize) {
         memory.unmap(bus, page);
     }

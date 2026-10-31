@@ -165,8 +165,8 @@ pub struct Module {
     pub entry: u32,
     /// Its file's DOS path, as GetModuleFileNameA gives it.
     pub path: String,
-    /// How many LoadLibrary calls hold it (not counted for the modules
-    /// that stay while the program runs).
+    /// How many LoadLibrary calls and DLLs that import from it hold it
+    /// (not counted for the modules that stay while the program runs).
     pub refs: u32,
     /// What it is (loader.rs: `BUILTIN`, `STATIC` and the others).
     pub flags: u32,
