@@ -128,17 +128,51 @@ pub const RS_COLORKEYENABLE: u32 = 41;
 const HEAP_MAX: u32 = 4 << 20;
 const HEAP_MIN: u32 = 256 << 10;
 
-/// How a batch of primitives is drawn: for each of the card's texture
-/// units, the factors that turn a texture coordinate into Glide's (its
-/// texture's size in Glide's 256 units) and the stage whose coordinates
-/// it takes; whether Z or W carries the vertex fog; and how the
+/// How a batch of primitives is drawn: what each of the card's texture
+/// units draws; whether Z or W carries the vertex fog; and how the
 /// specular color is added.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Card {
-    tmus: [Option<(usize, [f32; 2])>; 2],
+    tmus: [Option<Unit>; 2],
     fog_z: bool,
     fog_w: bool,
     specular: Specular,
+}
+
+/// A texture unit's part in a batch: the stage whose coordinates it
+/// takes, the factors that turn them into Glide's (its texture's size in
+/// Glide's 256 units), and whether it wraps in U and in V rather than
+/// clamps.
+#[derive(Clone, Copy, Debug)]
+struct Unit {
+    stage: usize,
+    scale: [f32; 2],
+    wrap: [bool; 2],
+}
+
+/// How far a primitive's texture coordinates `coords` (Direct3D's, a
+/// texture to 1.0) on `unit` are taken back, in U and in V: by whole
+/// textures, where the unit wraps, so that the smallest is between 0
+/// and 1. The picture is the same.
+///
+/// A driver for the card has to: the card holds S/W and T/W as 14.18
+/// fixed point, which an S/W past 8192 overflows (at a W of 1, 32 times
+/// a texture of 256 texels). And the card works out a pixel's level of
+/// detail from how fast S/W and T/W change across the screen and from
+/// W, leaving out how fast 1/W does, which counts the more the farther
+/// the coordinates are from 0. Giants' terrain, whose coordinates run
+/// into the hundreds of textures, would otherwise be drawn with mipmap
+/// levels far smaller than the ones its texels on the screen call for:
+/// smooth and flat.
+fn rebase<const N: usize>(unit: &Unit, coords: [[f32; 2]; N]) -> [f32; 2] {
+    let mut shift = [0.0; 2];
+    for (axis, out) in shift.iter_mut().enumerate() {
+        let least = coords.iter().map(|c| c[axis]).fold(f32::INFINITY, f32::min);
+        if unit.wrap[axis] && least.is_finite() {
+            *out = least.floor();
+        }
+    }
+    shift
 }
 
 /// How the specular color is added (D3DRENDERSTATE_SPECULARENABLE).
@@ -353,20 +387,20 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let mut loaded = [false; 2];
     match (first, second) {
         (Some(t0), Some(t1)) => {
-            if let Some((scale, k)) = load(cpu, d, 0, t0, 1, key) {
-                card.tmus[1] = Some((0, scale));
+            if let Some((unit, k)) = load(cpu, d, 0, t0, 1, key) {
+                card.tmus[1] = Some(unit);
                 keyed |= k;
                 loaded[1] = true;
             }
-            if let Some((scale, k)) = load(cpu, d, 1, t1, 0, key) {
-                card.tmus[0] = Some((1, scale));
+            if let Some((unit, k)) = load(cpu, d, 1, t1, 0, key) {
+                card.tmus[0] = Some(unit);
                 keyed |= k;
                 loaded[0] = true;
             }
         }
         (Some(t0), None) => {
-            if let Some((scale, k)) = load(cpu, d, 0, t0, 0, key) {
-                card.tmus[0] = Some((0, scale));
+            if let Some((unit, k)) = load(cpu, d, 0, t0, 0, key) {
+                card.tmus[0] = Some(unit);
                 keyed |= k;
                 loaded[0] = true;
             }
@@ -683,7 +717,7 @@ fn fog_table_index_to_w(i: i32) -> f32 {
 
 /// Load stage `stage`'s texture, the surface `id`, into the heap and
 /// map it on texture unit `tmu`, with the stage's filtering and
-/// addressing: the factors of its coordinates, and whether it is keyed.
+/// addressing: what the unit draws, and whether the texture is keyed.
 fn load(
     cpu: &mut Cpu,
     d: &Device,
@@ -691,7 +725,7 @@ fn load(
     id: u32,
     tmu: u32,
     key: bool,
-) -> Option<([f32; 2], bool)> {
+) -> Option<(Unit, bool)> {
     // A texture the device drew into is read from its surface.
     super::shadow::expose(cpu, id);
     let (start, info, keyed) = match in_place(cpu, id, key) {
@@ -753,12 +787,8 @@ fn load(
             api::TEXTURECLAMP_WRAP
         }
     };
-    api::tex_clamp_mode(
-        cpu,
-        tmu,
-        clamp(d.stage(stage, TSS_ADDRESSU)),
-        clamp(d.stage(stage, TSS_ADDRESSV)),
-    );
+    let modes = [TSS_ADDRESSU, TSS_ADDRESSV].map(|m| clamp(d.stage(stage, m)));
+    api::tex_clamp_mode(cpu, tmu, modes[0], modes[1]);
     if info.format == api::TEXFMT_P_8 {
         let pal = palette(cpu, id);
         let hash = hash_words(&pal);
@@ -768,7 +798,12 @@ fn load(
         }
     }
     let (w, h) = api::level_size(info.aspect, 0);
-    Some(([w as f32, h as f32], keyed))
+    let unit = Unit {
+        stage: stage as usize,
+        scale: [w as f32, h as f32],
+        wrap: modes.map(|m| m == api::TEXTURECLAMP_WRAP),
+    };
+    Some((unit, keyed))
 }
 
 /// A texture surface in the card's memory, sampled where it is: the
@@ -1284,7 +1319,17 @@ pub struct Raster<'a> {
 }
 
 impl Raster<'_> {
-    fn vertex(&self, v: &ScreenVertex) -> Vertex {
+    /// The card's vertices of a primitive, each unit's coordinates taken
+    /// back by whole textures where it wraps (`rebase`).
+    fn vertices<const N: usize>(&self, v: &[ScreenVertex; N]) -> [Vertex; N] {
+        let shifts = self
+            .card
+            .tmus
+            .map(|slot| slot.map_or([0.0; 2], |unit| rebase(&unit, v.map(|v| v.tex[unit.stage]))));
+        v.map(|v| self.vertex(&v, &shifts))
+    }
+
+    fn vertex(&self, v: &ScreenVertex, shifts: &[[f32; 2]; 2]) -> Vertex {
         let rhw = if v.rhw.is_finite() && v.rhw > 0.0 {
             v.rhw
         } else {
@@ -1309,12 +1354,17 @@ impl Raster<'_> {
         };
         let oow = if self.card.fog_w { fog * 255.0 } else { rhw };
         let mut tmu = [TmuVertex::default(); 2];
-        for (t, slot) in tmu.iter_mut().zip(self.card.tmus) {
-            if let Some((stage, [sw, sh])) = slot {
+        for ((t, slot), [su, sv]) in tmu.iter_mut().zip(self.card.tmus).zip(*shifts) {
+            if let Some(Unit {
+                stage,
+                scale: [sw, sh],
+                ..
+            }) = slot
+            {
                 let [u, vv] = v.tex[stage];
                 *t = TmuVertex {
-                    sow: u * sw * rhw,
-                    tow: vv * sh * rhw,
+                    sow: (u - su) * sw * rhw,
+                    tow: (vv - sv) * sh * rhw,
                     oow: rhw,
                 };
             } else {
@@ -1378,7 +1428,7 @@ impl Raster<'_> {
 
 impl Rasterizer for Raster<'_> {
     fn triangle(&mut self, v: &[ScreenVertex; 3]) {
-        let [a, b, c] = v.map(|v| self.vertex(&v));
+        let [a, b, c] = self.vertices(v);
         api::draw_triangle(self.cpu, &a, &b, &c);
         if matches!(self.card.specular, Specular::Pass { .. })
             && v.iter().any(|v| v.specular & 0xFF_FFFF != 0)
@@ -1394,12 +1444,12 @@ impl Rasterizer for Raster<'_> {
     }
 
     fn line(&mut self, v: &[ScreenVertex; 2]) {
-        let [a, b] = v.map(|v| self.vertex(&v));
+        let [a, b] = self.vertices(v);
         api::draw_line(self.cpu, &a, &b);
     }
 
     fn point(&mut self, v: &ScreenVertex) {
-        let p = self.vertex(v);
+        let [p] = self.vertices(&[*v]);
         api::draw_point(self.cpu, &p);
     }
 }
@@ -1559,5 +1609,78 @@ pub fn clear(
         if !shadow(cpu, zid, rects, exact, v) {
             fill(cpu, zid, v);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A primitive's coordinates far from 0 are taken back by whole
+    /// textures where the unit wraps, and stay where they are where it
+    /// clamps.
+    #[test]
+    fn coordinates_are_taken_back_by_whole_textures_where_they_wrap() {
+        let unit = Unit {
+            stage: 0,
+            scale: [256.0, 256.0],
+            wrap: [true, true],
+        };
+        let coords = [[300.25, -40.5], [301.75, -39.0], [300.5, -41.25]];
+        assert_eq!(rebase(&unit, coords), [300.0, -42.0]);
+        let clamped = Unit {
+            wrap: [false, true],
+            ..unit
+        };
+        assert_eq!(rebase(&clamped, coords), [0.0, -42.0]);
+        // Coordinates already between 0 and 1 stay.
+        assert_eq!(rebase(&unit, [[0.0, 0.5], [0.75, 0.0]]), [0.0, 0.0]);
+    }
+
+    /// The card's vertices take each unit's shift from the coordinates
+    /// of the unit's own stage, before the texture's size and 1/W scale
+    /// them: with both units drawing, stage 0 is on TMU1 and stage 1 on
+    /// TMU0.
+    #[test]
+    fn each_unit_takes_back_its_own_stage() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let card = Card {
+            tmus: [
+                Some(Unit {
+                    stage: 1,
+                    scale: [64.0, 32.0],
+                    wrap: [false, true],
+                }),
+                Some(Unit {
+                    stage: 0,
+                    scale: [256.0, 128.0],
+                    wrap: [true, true],
+                }),
+            ],
+            ..Card::default()
+        };
+        let raster = Raster::new(&mut cpu, card);
+        let vertex = |tex: [[f32; 2]; 2]| ScreenVertex {
+            x: 0.0,
+            y: 0.0,
+            z: 0.5,
+            rhw: 0.5,
+            diffuse: 0,
+            specular: 0,
+            tex,
+        };
+        let [a, b] = raster.vertices(&[
+            vertex([[100.5, 7.25], [3.5, -2.5]]),
+            vertex([[101.0, 8.0], [4.0, -1.0]]),
+        ]);
+        // S and T, out of S/W and T/W at a 1/W of 0.5: the coordinates
+        // taken back, times the texture's size.
+        let st = |v: &Vertex, t: usize| [v.tmu[t].sow, v.tmu[t].tow].map(|c| c * 2.0);
+        // TMU1, stage 0: back 100 in U and 7 in V.
+        assert_eq!(st(&a, 1), [0.5 * 256.0, 0.25 * 128.0]);
+        assert_eq!(st(&b, 1), [1.0 * 256.0, 1.0 * 128.0]);
+        // TMU0, stage 1: U clamps and stays, V goes back -3.
+        assert_eq!(st(&a, 0), [3.5 * 64.0, 0.5 * 32.0]);
+        assert_eq!(st(&b, 0), [4.0 * 64.0, 2.0 * 32.0]);
     }
 }
