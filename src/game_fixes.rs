@@ -271,6 +271,43 @@ const JUKEBOX_SB_MIX: CodePatch = CodePatch {
     ],
 };
 
+/// Jukebox Adventure's MOD player, in the same code segment: before its
+/// handler for effect Bxx (position jump) it has `cmp bx,0Bh` and a `je`
+/// back to that `cmp`, a loop that never ends, in the IRQ handler with
+/// interrupts off. The title song has a B06 at its last position, so the
+/// game hangs about 75 s after the title screen comes up. Prehistorik 2's
+/// player, the same engine, has no such check. Found in BLUES.EXE of
+/// 25096 bytes, MD5 4e4e60dbc63bdd867f7ff65725b7e8b4 (TOSEC's [h1]
+/// release, the only one to hand); a fix of its own, so it can go if a
+/// release without the loop turns up.
+const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
+    checks: &[
+        // mov ax,[di+393h] / mov bl,ah / xor bh,bh: the effect's number.
+        Bytes {
+            at: 0x47AF,
+            bytes: &[0x8B, 0x85, 0x93, 0x03, 0x8A, 0xDC, 0x32, 0xFF],
+        },
+        // shl bx,1 / jmp [bx+355h]: the handlers' table.
+        Bytes {
+            at: 0x47BC,
+            bytes: &[0xD1, 0xE3, 0xFF, 0xA7, 0x55, 0x03],
+        },
+        Bytes {
+            at: 0x444B,
+            bytes: &[0x50, 0x53, 0x51, 0x52],
+        },
+    ],
+    irq_handler: 0x444B,
+    // cmp bx,0Bh / je -5 (to the cmp) loses the je.
+    patches: &[(
+        Bytes {
+            at: 0x47B7,
+            bytes: &[0x83, 0xFB, 0x0B, 0x74, 0xFB],
+        },
+        &[0x83, 0xFB, 0x0B, 0x90, 0x90],
+    )],
+};
+
 /// The fixes rust-dos knows.
 pub const FIXES: &[Fix] = &[
     Fix {
@@ -284,6 +321,12 @@ pub const FIXES: &[Fix] = &[
         game: "Blues Brothers: Jukebox Adventure",
         reason: "its Sound Blaster mix clicks and sits off centre",
         kind: Kind::Code(&JUKEBOX_SB_MIX),
+    },
+    Fix {
+        name: "jukebox-mod-hang",
+        game: "Blues Brothers: Jukebox Adventure",
+        reason: "its music player hangs on effect Bxx",
+        kind: Kind::Code(&JUKEBOX_MOD_HANG),
     },
     // MicroProse's games (F-117, F-19, Gunship, Covert Action) ship two
     // helpers that can't work without the original install disks:

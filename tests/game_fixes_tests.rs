@@ -1,6 +1,7 @@
 //! `game_fixes`: the code fixes are applied when a program resets the
-//! DSP, and the patched Sound Blaster drivers mix around the centre line.
-//! The fixes that skip a program at EXEC are tested in exec_tests.rs.
+//! DSP, the patched Sound Blaster drivers mix around the centre line, and
+//! Jukebox Adventure's music player gets past effect Bxx. The fixes that
+//! skip a program at EXEC are tested in exec_tests.rs.
 
 use rust_dos::cpu::Cpu;
 use rust_dos::game_fixes::{CodePatch, Kind, by_name};
@@ -200,4 +201,57 @@ fn nothing_changes_with_the_fix_off() {
         reset_dsp(&mut cpu);
         assert_ne!(read(&mut cpu, BASE, 0x4800), before, "{}", layout.name);
     }
+}
+
+/// Jukebox Adventure with both its fixes' code at CS:0000, and DS:0355h's
+/// table pointing effect B at its handler, 47D7h.
+fn jukebox() -> Cpu {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    load(&mut cpu, code("jukebox-sb-mix"));
+    load(&mut cpu, code("jukebox-mod-hang"));
+    cpu.bus.write_16(BASE + 0x355 + 2 * 0x0B, 0x47D7);
+    cpu.set_ds(CS);
+    cpu
+}
+
+/// Run the music player's effect dispatch for effect `effect` from
+/// `cmp bx,0Bh`, for at most `steps` instructions: where IP ends up.
+fn dispatch(cpu: &mut Cpu, effect: u16, steps: usize) -> u16 {
+    cpu.set_cs(CS);
+    cpu.set_ip(0x47B7);
+    cpu.set_bx(effect);
+    for _ in 0..steps {
+        if cpu.ip() == 0x47D7 {
+            break;
+        }
+        cpu.step();
+    }
+    cpu.ip()
+}
+
+#[test]
+fn jukebox_adventures_music_player_gets_past_effect_b() {
+    let mut cpu = jukebox();
+    // As the game shipped: cmp / je round and round.
+    assert_ne!(dispatch(&mut cpu, 0x0B, 100), 0x47D7);
+    reset_dsp(&mut cpu);
+    assert_eq!(dispatch(&mut cpu, 0x0B, 100), 0x47D7);
+}
+
+#[test]
+fn a_fix_left_out_by_name_stays_out() {
+    let mut cpu = jukebox();
+    cpu.bus.game_fixes_off = vec!["jukebox-mod-hang".to_string()];
+    let volume_table = BASE + 0x427A;
+    let before = cpu.bus.read_8(volume_table);
+    reset_dsp(&mut cpu);
+    // The mix is fixed, the hang isn't.
+    assert_ne!(cpu.bus.read_8(volume_table), before);
+    assert_ne!(dispatch(&mut cpu, 0x0B, 100), 0x47D7);
+    // With game_fixes off, neither is.
+    let mut cpu = jukebox();
+    cpu.bus.game_fixes = false;
+    reset_dsp(&mut cpu);
+    assert_eq!(cpu.bus.read_8(volume_table), before);
+    assert_ne!(dispatch(&mut cpu, 0x0B, 100), 0x47D7);
 }

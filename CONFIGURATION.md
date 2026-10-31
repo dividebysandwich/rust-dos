@@ -593,7 +593,7 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   can't work without their original disks, once Rust-DOS recognises
   them: `true` (the default) or `false`, which runs them as a real PC
   would. `game_fixes_off` leaves out the fixes it names, separated by
-  commas (`game_fixes_off=jukebox-sb-mix`). [Game fixes](#game-fixes)
+  commas (`game_fixes_off=jukebox-mod-hang`). [Game fixes](#game-fixes)
   lists them. A change takes effect at the DOS prompt.
 * `hard_disk_speed` and `floppy_disk_speed` slow the disks down to those
   of the time; see [Disk speed and noises](#disk-speed-and-noises).
@@ -1665,6 +1665,7 @@ the game starts, with the exit code it would have given.
 |------|------|-----------------|-------------------|
 | `prehistorik2-sb-mix` | Prehistorik 2 | Music and effects click at every note and sit far below the centre line, on a real Sound Blaster too | Patches the driver to mix around the centre |
 | `jukebox-sb-mix` | Blues Brothers: Jukebox Adventure | The same driver, with the same clicks | The same, for its build of the driver |
+| `jukebox-mod-hang` | Blues Brothers: Jukebox Adventure | The game hangs about 75 seconds into the title screen's music | Takes out the jump to itself in front of the music player's position jump |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 
@@ -1676,6 +1677,15 @@ which clicks, and the output sits far below the middle. A real card
 plays it the same way. The fix scales the samples around their centre
 and starts each block at the middle; the music and effects themselves
 don't change.
+
+Jukebox Adventure's music player has a `cmp bx,0Bh` in front of its
+handler for effect Bxx (position jump), and a `je` back to that `cmp`:
+with interrupts off, the game stops for good on the first Bxx. The title song has one at its
+end, about 75 seconds in, and the title screen doesn't leave on its
+own, so a player who waits on it hangs the game on a real PC too. The
+fix was made for BLUES.EXE of 25096 bytes, MD5
+`4e4e60dbc63bdd867f7ff65725b7e8b4` (TOSEC's [h1] release). Prehistorik
+2's player, the same engine, has no such check.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
