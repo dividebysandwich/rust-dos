@@ -875,6 +875,12 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   Windows 4.0 get their DllEntryPoint called after LibMain. Calls the
   other way, from 16-bit code to a Win32 DLL, fail with the error value
   the thunk data gives.
+- Generic thunks (`src/win32/wow32.rs`): WOW32.DLL's WOWCallback16 and
+  WOWCallback16Ex call a 16-bit function on the process's task the same
+  way, and WOWGetVDMPointer maps a 16:16 address as MapSL does, for a
+  program that gets 16-bit functions with LoadLibrary16 and
+  GetProcAddress16, as SafeDisc 2's loader does. WOW32's 16-bit global
+  memory and handle functions aren't there yet.
 
 Games tried, all of which start and draw their windows: SkiFree,
 BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,

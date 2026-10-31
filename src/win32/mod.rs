@@ -62,6 +62,7 @@ pub mod version;
 mod verdll;
 pub(crate) mod winmm;
 mod winspool;
+mod wow32;
 mod ws2_32;
 mod wsock32;
 
