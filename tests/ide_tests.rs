@@ -453,10 +453,10 @@ fn a_packet_run_at_once_gives_what_the_channel_gives() {
                 assert_eq!(outcome.sense, None, "{:02X?}", cdb);
                 assert_eq!(outcome.data, data, "{:02X?}", cdb);
             }
-            Err(error) => {
-                let sense = outcome.sense.expect("an error");
-                assert_eq!(error >> 4, sense[2] & 0xF, "{:02X?}", cdb);
-            }
+            // The error register doesn't always carry the sense key (an
+            // unknown command's is F4h): the REQUEST SENSE after it
+            // compares the sense data.
+            Err(_) => assert!(outcome.sense.is_some(), "an error: {:02X?}", cdb),
         }
     }
 }
