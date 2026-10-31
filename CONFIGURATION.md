@@ -581,13 +581,18 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   instead of running them: a program polling the keyboard through the
   BIOS, waiting for the vertical retrace, for the timer's tick count to
   change, or for a time it reads from the PIT's count, as Windows 98's
-  QueryPerformanceCounter does. A loop is skipped only after the
-  emulator has seen one of its passes come back with the registers and
-  the memory it wrote as they were, or as the same function of the PIT's
-  count it read, and with nothing else to tell the passes apart (it
-  reads no device but the video card's status, whose bits it looks at
-  only through a mask, and the PIT's count), so programs see the same as
-  without it. `false` runs every pass.
+  QueryPerformanceCounter does. On the built-in Windows it also skips a
+  program's message loop that calls PeekMessage while nothing is queued
+  and reads the time through GetTickCount or Windows 3.1's
+  GetCurrentTime, as Johnny Castaway's animation does, up to the next
+  millisecond or the thread's next timer. A loop is skipped only after
+  the emulator has seen one of its passes come back with the registers
+  and the memory it wrote as they were, or as the same function of the
+  PIT's count it read, and with nothing else to tell the passes apart
+  (it reads no device but the video card's status, whose bits it looks
+  at only through a mask, and the PIT's count, and calls no service of
+  the built-in Windows but those that change nothing else), so programs
+  see the same as without it. `false` runs every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
