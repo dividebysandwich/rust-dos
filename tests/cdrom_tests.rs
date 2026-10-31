@@ -6,8 +6,9 @@ mod cdimage;
 use cdimage::{IsoFile, file, high_sierra, iso, mixed_disc, mode1_2352, scratch};
 use rust_dos::cdrom::image::{CdImage, cue_files};
 use rust_dos::command::CommandDispatcher;
-use rust_dos::cpu::Cpu;
+use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::disk::{DriveKind, MountOptions};
+use rust_dos::interrupts::handle_hle;
 use std::fs;
 use std::path::Path;
 
@@ -101,6 +102,29 @@ fn iso_images_mount_as_cd_drives() {
     let info = cpu.bus.disk.drive_info(D).unwrap();
     assert_eq!(info.root, None);
     assert_eq!(info.image.as_deref(), Some(dir.join("game.iso").as_path()));
+}
+
+/// A CD-ROM drive is on MSCDEX's redirector, so bit 15 of the file's flags
+/// in AX=440Ah is set, as bit 12 is for the drive in AX=4409h.
+#[test]
+fn ioctl_440a_tells_a_file_on_a_cd_is_remote() {
+    let (mut cpu, dir) = machine("ioctl_440a");
+    fs::write(dir.join("c").join("P.COM"), [0xC3]).unwrap();
+    fs::write(dir.join("game.iso"), iso("TESTDISC", &files(&[]))).unwrap();
+    mount(&mut cpu, &dir.join("game.iso"));
+    assert!(cpu.load_executable("P.COM", None));
+    let psp = cpu.current_psp;
+    cpu.bus.load_bytes(psp as usize * 16 + 0x200, b"D:\\HELLO.COM\0");
+    cpu.set_ds(psp);
+    cpu.set_ax(0x3D00);
+    cpu.set_dx(0x200);
+    handle_hle(&mut cpu, 0x21);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    cpu.set_bx(cpu.ax());
+    cpu.set_ax(0x440A);
+    handle_hle(&mut cpu, 0x21);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.dx(), 0x8040 | D as u16);
 }
 
 #[test]
