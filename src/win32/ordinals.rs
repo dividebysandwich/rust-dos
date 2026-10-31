@@ -143,6 +143,17 @@ mod tests {
     }
 
     #[test]
+    fn every_built_in_dll_windows_98_has_has_its_list() {
+        // GLIDE2X is 3dfx's and D3D8 DirectX 8's, neither Windows 98
+        // SE's. A DLL added to the built-in ones needs a list made by
+        // tools/win98_ordinals.py, or it keeps numbers of its own.
+        for dll in super::super::stubs::DLLS {
+            let other = ["GLIDE2X.DLL", "D3D8.DLL"].contains(&dll.name);
+            assert_eq!(win98(dll.name).is_some(), !other, "{}", dll.name);
+        }
+    }
+
+    #[test]
     fn kernel32s_unnamed_functions_have_windows_98s_ordinals() {
         let kernel32 = win98("KERNEL32.DLL").unwrap();
         assert_eq!(kernel32.ordinal("VxDCall0", 1), 1);

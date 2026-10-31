@@ -61,7 +61,8 @@ pub struct Client {
     /// The task's thread.
     pub tid: u32,
     /// The 16-bit DLLs its ThunkConnect32s and LoadLibrary16s loaded, a
-    /// reference to each, which go when it ends.
+    /// reference for each call, which go at a FreeLibrary16 or when it
+    /// ends.
     pub modules: Vec<u16>,
     /// The requests waiting, and the one the task runs.
     pub queue: Vec<Request>,
@@ -434,10 +435,6 @@ pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
-/// The Win16 loader's errors LoadLibrary16 passes on.
-const ERROR_FILE_NOT_FOUND: u32 = 2;
-const ERROR_BAD_FORMAT: u32 = 11;
-
 /// LoadLibrary16(name), KERNEL32's ordinal 35 on Windows 95 and 98: the
 /// Win16 LoadLibrary, for a Win32 program. The process's task in the
 /// Win16 process loads the DLL, where its thunks' calls run, and keeps
@@ -454,10 +451,10 @@ pub fn load_library16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         .and_then(|p| p.current_thread())
         .map(|t| t.id)
     else {
-        return Some(ERROR_FILE_NOT_FOUND);
+        return Some(module::ERROR_FILE_NOT_FOUND);
     };
     if ensure_client(cpu, pid).is_none() {
-        return Some(ERROR_FILE_NOT_FOUND);
+        return Some(module::ERROR_FILE_NOT_FOUND);
     }
     post(
         cpu,
@@ -810,27 +807,25 @@ fn start_connect(cpu: &mut Cpu, c: usize, request: Request) {
     let (dll, dir) = (&request.names[0], &request.names[2]);
     let index = match module::load(cpu, dll, dir, &mut inits) {
         Ok(index) => index,
-        Err(message) => {
+        Err(e) => {
             cpu.bus
-                .log_string(&format!("[W16] ThunkConnect32: {}", message));
+                .log_string(&format!("[W16] ThunkConnect32: {}", e.message));
             done(cpu, c, 0);
             return;
         }
     };
     let handle = cpu.bus.win32.win16.modules[index].handle;
     let client = &mut cpu.bus.win32.win16.clients[c];
-    // One reference to it for each process that uses it.
+    // Each ThunkConnect32 keeps the reference it took, as on Windows 95,
+    // where it holds a LoadLibrary16 of the DLL. A LoadLibrary16 of the
+    // process holds one of its own in the same list, so a FreeLibrary16
+    // can't take this one's away. They all go when the process ends.
     let attached = client.modules.contains(&handle);
-    if !attached {
-        client.modules.push(handle);
-    }
+    client.modules.push(handle);
     if let Some(current) = client.current.as_mut() {
         current.module = handle;
     }
     let tid = client.tid;
-    if attached {
-        module::release(cpu, handle);
-    }
     let mut resume = Context::of(cpu);
     let joined = if inits.contains(&index) || attached {
         let mut data = vec![tid];
@@ -852,8 +847,10 @@ fn start_connect(cpu: &mut Cpu, c: usize, request: Request) {
 }
 
 /// The modules `data[1..]` are to have their entry points run, for the
-/// ThunkConnect32 of the client whose thread is `data[0]`, which then
-/// joins the thunk data. None when an entry point runs first.
+/// ThunkConnect32 or LoadLibrary16 of the client whose thread is
+/// `data[0]`: a ThunkConnect32 then joins the thunk data, a
+/// LoadLibrary16 returns the instance. None when an entry point runs
+/// first.
 pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let tid = data.first().copied().unwrap_or(0);
     if data.len() > 1 {
@@ -884,20 +881,15 @@ fn start_load(cpu: &mut Cpu, c: usize, request: Request) {
     let (dll, dir) = (&request.names[0], &request.names[2]);
     let index = match module::load(cpu, dll, dir, &mut inits) {
         Ok(index) => index,
-        Err(message) => {
+        Err(e) => {
             cpu.bus
-                .log_string(&format!("[W16] LoadLibrary16({}): {}", dll, message));
-            let error = if message.contains("found") {
-                ERROR_FILE_NOT_FOUND
-            } else {
-                ERROR_BAD_FORMAT
-            };
-            done(cpu, c, error);
+                .log_string(&format!("[W16] LoadLibrary16({}): {}", dll, e.message));
+            done(cpu, c, e.code);
             return;
         }
     };
-    let m = &cpu.bus.win32.win16.modules[index];
-    let (handle, instance) = (m.handle, if m.dgroup != 0 { m.dgroup } else { m.handle });
+    let handle = cpu.bus.win32.win16.modules[index].handle;
+    let instance = module::instance_of(cpu, index);
     let client = &mut cpu.bus.win32.win16.clients[c];
     client.modules.push(handle);
     if let Some(current) = client.current.as_mut() {
@@ -1125,7 +1117,8 @@ pub fn task_ending(cpu: &mut Cpu, tid: u32) {
     }
 }
 
-/// The references to 16-bit DLLs `client`'s ThunkConnect32s took go.
+/// The references to 16-bit DLLs `client`'s ThunkConnect32s and
+/// LoadLibrary16s took go.
 fn release_modules(cpu: &mut Cpu, client: &Client) {
     for &handle in &client.modules {
         module::release(cpu, handle);

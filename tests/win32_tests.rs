@@ -4861,14 +4861,14 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
         ],
     )];
     let mut data = vec![0u8; 0x100];
-    data[..12].copy_from_slice(b"KRNL386.EXE ");
-    data[0x10..0x1B].copy_from_slice(b"GETVERSION ");
-    data[0x20..0x29].copy_from_slice(b"KERNEL32 ");
-    data[0x30..0x39].copy_from_slice(b"AddAtomA ");
+    data[..12].copy_from_slice(b"KRNL386.EXE\0");
+    data[0x10..0x1B].copy_from_slice(b"GETVERSION\0");
+    data[0x20..0x29].copy_from_slice(b"KERNEL32\0");
+    data[0x30..0x3B].copy_from_slice(b"GetVersion\0");
     let exe = program(BASE, false, imports, &data, |a, l| {
         let mut fail = a.create_label();
         // GetProcAddress(KERNEL32, ordinal) is the function the program
-        // imported by that ordinal, and ordinal 50 is AddAtomA.
+        // imported by that ordinal, and ordinal 476 is GetVersion.
         a.push(l.at(0x20) as i32)?;
         a.call(l.import(4))?;
         a.mov(esi, eax)?;
@@ -4884,7 +4884,7 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
         a.push(esi)?;
         a.call(l.import(5))?;
         a.mov(edi, eax)?;
-        a.push(50)?;
+        a.push(476)?;
         a.push(esi)?;
         a.call(l.import(5))?;
         a.mov(ebx, 4)?;
