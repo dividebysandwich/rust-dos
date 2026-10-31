@@ -438,12 +438,21 @@ const IID_DIRECTDRAWSURFACE4: [u8; 16] = [
     0x30, 0x86, 0x2B, 0x0B, 0x35, 0xAD, 0xD0, 0x11, 0x8E, 0xA6, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B,
 ];
 
-/// A flip chain whose primary surface is asked for its back buffer
-/// through IDirectDrawSurface4, with a DDSCAPS2 whose dwCaps alone is
-/// filled in: the rest is what Omikron's stack holds there, which
-/// DirectDraw doesn't look at.
-#[test]
-fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
+const IID_DIRECTDRAWSURFACE7: [u8; 16] = [
+    0x80, 0x5A, 0x67, 0x06, 0x9B, 0x3B, 0xD2, 0x11, 0xB9, 0x2F, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B,
+];
+/// DDSCAPS2's last three words as a program that fills in dwCaps alone
+/// leaves them: the first two are what Omikron's stack holds there.
+const CAPS_GARBAGE: [u32; 3] = [0x1E0, 0x0090_E18C, 0x0012_FF80];
+/// A second DDSCAPS2, after the one at CAPS.
+const ZBUFFER_CAPS: u32 = CAPS + 0x10;
+const DDSCAPS_ZBUFFER: u32 = 0x2_0000;
+const DDERR_NOTFOUND: u32 = 0x8876_00FF;
+
+/// A flip chain whose primary surface is asked through the interface
+/// `iid` for its back buffer and then for a Z-buffer it doesn't have,
+/// each with CAPS_GARBAGE after dwCaps.
+fn attached_caps_program(iid: &[u8; 16]) -> (Vec<u8>, u32) {
     let mut d = data();
     desc(
         &mut d,
@@ -454,11 +463,14 @@ fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
         0,
         1,
     );
-    put(&mut d, KEY, &IID_DIRECTDRAWSURFACE4);
-    put32(&mut d, CAPS, DDSCAPS_BACKBUFFER);
-    put32(&mut d, CAPS + 4, 0x1E0);
-    put32(&mut d, CAPS + 8, 0x0090_E18C);
-    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+    put(&mut d, IID, iid);
+    for (at, caps) in [(CAPS, DDSCAPS_BACKBUFFER), (ZBUFFER_CAPS, DDSCAPS_ZBUFFER)] {
+        put32(&mut d, at, caps);
+        for (i, word) in CAPS_GARBAGE.iter().enumerate() {
+            put32(&mut d, at + 4 + 4 * i as u32, *word);
+        }
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c, (0, 0, 320, 200))?;
         c.com(
@@ -487,7 +499,7 @@ fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
             l,
             FRONT,
             S_QUERY_INTERFACE,
-            &[Arg::At(KEY), Arg::At(FRONT4)],
+            &[Arg::At(IID), Arg::At(FRONT4)],
         )?;
         c.com(
             a,
@@ -496,12 +508,38 @@ fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
             S_GET_ATTACHED_SURFACE,
             &[Arg::At(CAPS), Arg::At(BACK)],
         )?;
+        c.com(
+            a,
+            l,
+            FRONT4,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(ZBUFFER_CAPS), Arg::At(OFFSCREEN)],
+        )?;
         finish(a, l)
-    });
+    })
+}
+
+/// IDirectDrawSurface4 compares dwCaps and doesn't look at the rest.
+#[test]
+fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
+    let (program, data) = attached_caps_program(&IID_DIRECTDRAWSURFACE4);
     let mut cpu = machine("attached_caps4", program);
     run_until_done(&mut cpu, data);
-    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    let expected = [0, 0, 0, 0, 0, 0, DDERR_NOTFOUND];
+    assert_eq!(results(&mut cpu, data, 8)[1..], expected);
     assert_ne!(peek(&cpu, data + BACK), 0);
+}
+
+/// IDirectDrawSurface7 compares all four words, so the same DDSCAPS2
+/// finds nothing there.
+#[test]
+fn surface7_looks_at_all_the_words_of_the_caps_for_an_attached_surface() {
+    let (program, data) = attached_caps_program(&IID_DIRECTDRAWSURFACE7);
+    let mut cpu = machine("attached_caps7", program);
+    run_until_done(&mut cpu, data);
+    let expected = [0, 0, 0, 0, 0, DDERR_NOTFOUND, DDERR_NOTFOUND];
+    assert_eq!(results(&mut cpu, data, 8)[1..], expected);
+    assert_eq!(peek(&cpu, data + BACK), 0);
 }
 
 #[test]
