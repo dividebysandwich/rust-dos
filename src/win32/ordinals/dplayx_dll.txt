@@ -1,0 +1,9 @@
+1 DirectPlayCreate
+2 DirectPlayEnumerateA
+3 DirectPlayEnumerateW
+4 DirectPlayLobbyCreateA
+5 DirectPlayLobbyCreateW
+6 gdwDPlaySPRefCount
+9 DirectPlayEnumerate
+10 DllCanUnloadNow
+11 DllGetClassObject

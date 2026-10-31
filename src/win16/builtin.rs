@@ -164,16 +164,19 @@ pub static MODULES: &[&Def] = &[
 ];
 
 /// The place in `MODULES` of the module named `name` ("USER",
-/// "USER.EXE", "user").
+/// "USER.EXE", "user"), or whose file it is ("KRNL386.EXE").
 pub fn find(name: &str) -> Option<usize> {
     let name = name.trim();
-    let base = name
-        .rsplit(['\\', '/', ':'])
-        .next()
-        .unwrap_or(name)
-        .split('.')
-        .next()
-        .unwrap_or(name);
+    let file = name.rsplit(['\\', '/', ':']).next().unwrap_or(name);
+    // A file's name names its module even where the two differ, as
+    // KRNL386.EXE names KERNEL.
+    if let Some(i) = MODULES
+        .iter()
+        .position(|m| m.file.eq_ignore_ascii_case(file))
+    {
+        return Some(i);
+    }
+    let base = file.split('.').next().unwrap_or(file);
     MODULES
         .iter()
         .position(|m| m.name.eq_ignore_ascii_case(base))

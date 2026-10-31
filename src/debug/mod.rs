@@ -300,6 +300,7 @@ pub struct TraceQuery {
 pub enum Cmd {
     Status,
     Stats,
+    Underruns,
     Screenshot { shader: bool },
     ScreenText,
     TraceQuery(TraceQuery),
