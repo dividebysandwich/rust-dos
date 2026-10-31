@@ -90,6 +90,8 @@ rust-dos-mt32 = { path = "crates/mt32" }
 rust-dos-sc55 = { path = "crates/sc55" }
 rust-dos-mpu401 = { path = "crates/mpu401" }
 iced-x86 = "1.21.0"
+# Searching memory for known code (src/game_fixes.rs).
+memchr = "2.8"
 font8x8 = "0.3.1"
 chrono = "0.4.45"
 gif = "0.14.2"

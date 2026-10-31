@@ -2201,6 +2201,7 @@ dependencies = [
  "libc",
  "libloading 0.9.0",
  "md-5",
+ "memchr",
  "openxr",
  "png",
  "rust-dos-audio-core",

@@ -287,11 +287,6 @@ static APIS: &[Api16] = &[
 /// coprocessor.
 const WIN_FLAGS: u32 = 0x0001 | 0x0008 | 0x0020 | 0x0400;
 
-/// LoadLibrary's errors: the file wasn't found, isn't a Windows
-/// library.
-const ERROR_FILE_NOT_FOUND: u32 = 2;
-const ERROR_BAD_FORMAT: u32 = 11;
-
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
@@ -880,13 +875,6 @@ fn task_dir(cpu: &Cpu) -> String {
         .unwrap_or_default()
 }
 
-/// The handle 16-bit code gets for the module at `index`: a library's
-/// instance, or the module's handle.
-fn instance_of(cpu: &Cpu, index: usize) -> u16 {
-    let m = &cpu.bus.win32.win16.modules[index];
-    if m.dgroup != 0 { m.dgroup } else { m.handle }
-}
-
 /// LoadLibrary: the library and those it imports from loaded, their
 /// entry points run; its instance, or an error below 32.
 fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -895,17 +883,13 @@ fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut inits = Vec::new();
     let index = match module::load(cpu, &name, &dir, &mut inits) {
         Ok(index) => index,
-        Err(message) => {
+        Err(e) => {
             cpu.bus
-                .log_string(&format!("[W16] LoadLibrary({}): {}", name, message));
-            return Some(if message.contains("found") {
-                ERROR_FILE_NOT_FOUND
-            } else {
-                ERROR_BAD_FORMAT
-            });
+                .log_string(&format!("[W16] LoadLibrary({}): {}", name, e.message));
+            return Some(e.code);
         }
     };
-    let instance = instance_of(cpu, index) as u32;
+    let instance = module::instance_of(cpu, index) as u32;
     let mut data = vec![instance];
     data.extend(
         inits
