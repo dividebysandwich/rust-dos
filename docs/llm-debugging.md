@@ -1268,7 +1268,8 @@ functions get a `[W32]` (or `[W16]`) line in the log. `collapsed`, the
 default, writes the first 3 calls from each call site in a second of
 emulated time and then a line with the count of the rest, such as
 `[W32] 004D72B6: WINMM.timeGetTime x49812 more in 1.0 s`; a loop that
-goes on gets one line and a count a second. To see every call while
+goes on gets one line and a count a second. The calls of passes
+`idle_skip` skips aren't logged or counted. To see every call while
 reproducing a problem, `POST /api/win32 {"trace":"all"}`, and set it
 back to `collapsed` after; `off` writes none.
 

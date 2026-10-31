@@ -487,9 +487,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `[W32] 004D72B6: WINMM.timeGetTime x49812 more in 1.0 s`; a loop that
   goes on gets one line and a count a second. A game that polls tens of
   thousands of times a second thus leaves room in the log for what
-  comes later. `all` writes every call, and `off` none. The debug
-  server's `POST /api/win32 {"trace":"all"}` changes it while a program
-  runs.
+  comes later. The calls of passes `idle_skip` skips aren't logged or
+  counted. `all` writes every call, and `off` none. The debug server's
+  `POST /api/win32 {"trace":"all"}` changes it while a program runs.
 * `win32_depth` is the depth of the built-in Windows' desktop: `auto`
   (the default) is the display adapter's own, 32 bits a pixel (24 on an
   S3 ViRGE, 16 on a 3dfx Banshee or Voodoo3); `8` is 640x480 with 256
@@ -581,14 +581,16 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   program's busy-wait loops up to the next timer event, and sleep
   instead of running them: a program polling the keyboard through the
   BIOS, waiting for the vertical retrace, for the timer's tick count to
-  change, or for a time it reads from the PIT's count, as Windows 98's
-  QueryPerformanceCounter does. A loop is skipped only after the
-  emulator has seen one of its passes come back with the registers and
-  the memory it wrote as they were, or as the same function of the PIT's
-  count it read, and with nothing else to tell the passes apart (it
-  reads no device but the video card's status, whose bits it looks at
-  only through a mask, and the PIT's count), so programs see the same as
-  without it. `false` runs every pass.
+  change, for a time it reads from the PIT's count, as Windows 98's
+  QueryPerformanceCounter does, or for the next millisecond of the
+  built-in Windows's GetTickCount or timeGetTime. A loop is skipped only
+  after the emulator has seen one of its passes come back with the
+  registers and the memory it wrote as they were, or as the same
+  function of the PIT's count it read, and with nothing else to tell the
+  passes apart (it reads no device but the video card's status, whose
+  bits it looks at only through a mask, and the PIT's count, and calls
+  no service but those clocks), so programs see the same as without it.
+  `false` runs every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
