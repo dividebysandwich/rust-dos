@@ -7,14 +7,17 @@
 //! rewind and tests stay deterministic.
 //!
 //! Frame buffer writes that come while jobs are queued are jobs too, so
-//! they land in their turn without waiting. The emulator waits for the
-//! workers (`flush`) before anything that reads what they draw: frame
-//! buffer reads, texture writes the queued triangles may read, the pixel
-//! counters, and a save state. With no workers (the browser, a single
-//! core) jobs run at once.
+//! they land in their turn without waiting, and so does texture data
+//! Glide downloads over a texture queued triangles read: its bytes are a
+//! batch of their own, which one worker writes once every worker has
+//! finished what came before and before any draws what comes after. The
+//! emulator waits for the workers (`flush`) before anything that reads
+//! what they draw: frame buffer reads, the pixel counters, and a save
+//! state. With no workers (the browser, a single core) jobs run at once.
 
 use super::mem::Vram;
 use super::raster::{self, RasterState, Stats, TriParams};
+use super::Voodoo;
 use super::setup::render_triangle;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -40,6 +43,14 @@ pub enum Job {
         rows: (u32, u32),
         columns: (usize, usize),
         value: u16,
+    },
+    /// Bytes put into the memory from byte `at`, between the jobs before
+    /// them and those after: rows are no use here, as every worker's
+    /// triangles read the textures (see `worker`).
+    Bytes {
+        fb: Vram,
+        at: usize,
+        bytes: Vec<u8>,
     },
     /// A job that fails, for the tests.
     #[cfg(test)]
@@ -108,6 +119,7 @@ impl Job {
                     }
                 }
             }
+            Job::Bytes { fb, at, bytes } => fb.write_bytes(*at, bytes),
             #[cfg(test)]
             Job::Panic => panic!("a worker failed"),
         }
@@ -211,9 +223,16 @@ impl Pool {
             self.shared.queue.lock().unwrap().stats.add(&stats);
             return;
         }
+        let mut pending = self.pending.lock().unwrap();
+        if matches!(job, Job::Bytes { .. }) {
+            let batch = std::mem::take(&mut *pending);
+            drop(pending);
+            self.publish(batch);
+            self.publish(vec![job]);
+            return;
+        }
         // Frame buffer writes go out at once: they come in big jobs.
         let now = matches!(job, Job::Pixels { .. });
-        let mut pending = self.pending.lock().unwrap();
         pending.push(job);
         if now || pending.len() >= BATCH {
             let batch = std::mem::take(&mut *pending);
@@ -288,6 +307,7 @@ impl Drop for Pool {
             let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
             queue.shutdown = true;
             self.shared.work.notify_all();
+            self.shared.idle.notify_all();
         }
         #[cfg(not(target_arch = "wasm32"))]
         for thread in self.threads.drain(..) {
@@ -296,7 +316,40 @@ impl Drop for Pool {
     }
 }
 
-/// Worker `k` of `n`: draw its rows of every batch, in order.
+impl Voodoo {
+    /// Put texture data into a Banshee's or Voodoo3's memory from byte
+    /// `addr` on in its turn among the jobs, if queued triangles read the
+    /// texture it replaces: they draw with the old one, those after them
+    /// with the new one, and the emulator goes on. False if it has to go
+    /// the other way (`banshee_texture_download`): the memory is free to
+    /// write now, there are no workers, or the OpenGL renderer is recording
+    /// the memory.
+    pub(crate) fn banshee_texture_queue(&self, addr: u32, data: &[u8]) -> bool {
+        let start = addr & self.fbi.mask;
+        let end = start as usize + data.len();
+        if self.pool.workers() == 0
+            || self.recording()
+            || self.gpu_behind.get()
+            || data.is_empty()
+            || end > self.fbi.ram.bytes()
+            || self.spare(start, end as u32)
+        {
+            return false;
+        }
+        let job = Job::Bytes {
+            fb: self.fbi.ram.clone(),
+            at: start as usize,
+            bytes: data.to_vec(),
+        };
+        self.submit_outside(job, None);
+        true
+    }
+}
+
+/// Worker `k` of `n`: draw its rows of every batch, in order. Bytes
+/// (`Job::Bytes`) are read by every worker's triangles, so the workers meet
+/// around them: worker 0 waits for the others to finish the batch before,
+/// writes the bytes, and the others wait for that.
 #[cfg(not(target_arch = "wasm32"))]
 fn worker(shared: Arc<Shared>, k: usize, n: usize) {
     let mut queue = shared.queue.lock().unwrap();
@@ -309,11 +362,26 @@ fn worker(shared: Arc<Shared>, k: usize, n: usize) {
             queue = shared.work.wait(queue).unwrap();
             continue;
         };
+        let bytes = matches!(batch.first(), Some(Job::Bytes { .. }));
+        while bytes
+            && !queue.shutdown
+            && if k == 0 {
+                queue.done.iter().any(|&d| d + 1 < number)
+            } else {
+                queue.done[0] < number
+            }
+        {
+            queue = shared.idle.wait(queue).unwrap();
+        }
+        if queue.shutdown {
+            return;
+        }
+        let draws = !bytes || k == 0;
         drop(queue);
         let mut stats = Stats::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut stipple = 0;
-            for job in batch.iter() {
+            for job in batch.iter().filter(|_| draws) {
                 job.run(|row| row >= 0 && row as usize % n == k, &mut stipple, &mut stats);
             }
         }));
@@ -335,6 +403,95 @@ fn worker(shared: Arc<Shared>, k: usize, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_land_between_the_jobs_around_them() {
+        let pool = Pool::new(4);
+        let fb = Vram::new(0x1000);
+        let word = |row, value| Job::Pixels {
+            fb: fb.clone(),
+            words: vec![Word {
+                row,
+                at: row as u32,
+                value,
+            }],
+        };
+        for i in 0..2000u16 {
+            for row in 0..16 {
+                pool.submit(word(row, i));
+            }
+            let bytes = [i as u8 ^ 0x5A, (i >> 8) as u8].repeat(16);
+            pool.submit(Job::Bytes {
+                fb: fb.clone(),
+                at: 0,
+                bytes,
+            });
+            for row in 8..16 {
+                pool.submit(word(row, !i));
+            }
+            pool.flush();
+            for row in 0..8 {
+                assert_eq!(fb.get(row), i ^ 0x5A, "row {} of pass {}", row, i);
+            }
+            for row in 8..16 {
+                assert_eq!(fb.get(row), !i, "row {} of pass {}", row, i);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pool_with_bytes_queued_shuts_down() {
+        let pool = Pool::new(3);
+        let fb = Vram::new(16);
+        for _ in 0..100 {
+            pool.submit(Job::Bytes {
+                fb: fb.clone(),
+                at: 0,
+                bytes: vec![1; 16],
+            });
+        }
+        drop(pool);
+    }
+
+    #[test]
+    fn a_panic_before_bytes_leaves_the_workers_meeting() {
+        let pool = Pool::new(3);
+        let fb = Vram::new(16);
+        pool.submit(Job::Panic);
+        pool.submit(Job::Bytes {
+            fb: fb.clone(),
+            at: 0,
+            bytes: vec![7; 16],
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.flush()));
+        assert!(result.is_err(), "the panic reaches flush");
+        assert_eq!(fb.get(0), 0x0707);
+    }
+
+    #[test]
+    fn texture_data_over_queued_data_comes_after_it() {
+        let v = Voodoo::with_workers(crate::voodoo::Board::Voodoo3, 2);
+        // Nothing queued: the memory is free to write.
+        assert!(!v.banshee_texture_queue(0x1000, &[1; 64]));
+        let first = Job::Bytes {
+            fb: v.fbi.ram.clone(),
+            at: 0x1000,
+            bytes: vec![2; 64],
+        };
+        v.submit_outside(first, None);
+        // Over those bytes it queues, elsewhere it doesn't have to.
+        assert!(v.banshee_texture_queue(0x1020, &[3; 64]));
+        assert!(!v.banshee_texture_queue(0x2000, &[4; 64]));
+        // Past the end of the memory it goes the other way.
+        let end = v.fbi.ram.bytes() as u32;
+        assert!(!v.banshee_texture_queue(end - 2, &[5; 4]));
+        v.catch_up();
+        assert_eq!(v.fbi.ram.byte(0x1000), 2);
+        assert_eq!(v.fbi.ram.byte(0x1020), 3);
+        assert_eq!(v.fbi.ram.byte(0x105F), 3);
+        // The workers are done: the bytes are free again.
+        assert!(!v.banshee_texture_queue(0x1020, &[6; 64]));
+    }
 
     #[test]
     fn a_workers_panic_comes_back_to_the_emulator() {

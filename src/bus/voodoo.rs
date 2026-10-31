@@ -260,6 +260,7 @@ impl Bus {
         self.voodoo_swap_wait();
         if let Some(v) = &mut self.voodoo
             && v.banshee.is_some()
+            && !v.banshee_texture_queue(addr, data)
         {
             v.banshee_texture_download(addr, data);
         }
