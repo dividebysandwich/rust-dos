@@ -95,17 +95,21 @@ disk.
   processor.
 - Don't take timings while other builds run. Measure on a quiet machine,
   or compare CI's step times instead.
-- On Windows, take turns with `tools/runlock-windows.sh` (Git Bash).
-  It lets one cargo build, test or clippy, or one emulator run, go at a
-  time across every checkout and worktree on the machine, in the order
-  they asked. Chain each job to it and release right after, even when
-  the job fails:
-  `sh tools/runlock-windows.sh acquire NAME && cargo test ...`, then
-  `sh tools/runlock-windows.sh release NAME`. Never chain with `;`,
-  which runs the job when acquire timed out. NAME is yours alone. The
-  lock lives in `RUST_DOS_RUNLOCK_DIR` (by default `~/.rust-dos-runlock`),
-  so all callers on the machine need the same one. Read the script's
-  header before using it: its rules come from clashes that spoiled
+- Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
+  Bash on Windows). Builds, tests and emulator runs may run together:
+  `bash tools/run-lock.sh heavy NAME -- cargo test ...`. Only
+  measurements are exclusive:
+  `bash tools/run-lock.sh measure NAME -- CMD...` blocks new heavy jobs,
+  waits for the running ones to end, and then runs alone, in the order
+  measurements asked. Either form releases when the command ends and
+  passes on its exit code. If the script says it timed out, the command
+  did not run; run the script again within 2 minutes to keep your place
+  in line. Never call one form inside the other: that deadlocks.
+  `status` shows what runs and waits, and `clear NAME` cleans up after a
+  stopped worker. NAME is yours alone. The lock lives in
+  `RUST_DOS_RUN_LOCK_DIR` (by default `~/.rust-dos-run-lock`), so all
+  callers on the machine need the same one. Read the script's header
+  before using it: its rules come from clashes that spoiled
   measurements.
 
 ## Behaviour: closer to the real machine beats unchanged results
