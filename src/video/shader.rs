@@ -2,6 +2,8 @@
 //! window's OpenGL and the browser's WebGL 2 draw them with, and the tube's
 //! curvature, which mouse positions have to go through too.
 
+mod damage;
+pub use damage::XbrzDamage;
 mod xbrz;
 pub use xbrz::XbrzFrame;
 
