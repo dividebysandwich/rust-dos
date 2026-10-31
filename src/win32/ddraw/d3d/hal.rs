@@ -155,14 +155,15 @@ struct Unit {
 /// textures, where the unit wraps, so that the smallest is between 0
 /// and 1. The picture is the same.
 ///
-/// 3dfx's driver has to: the card holds S/W and T/W as 14.18 fixed
-/// point, which a coordinate past 8192 (32 times a texture of 256)
-/// overflows. And the card works out a pixel's level of detail from how
-/// fast S/W and T/W change across the screen and from W, leaving out
-/// how fast 1/W does, which counts the more the farther the coordinates
-/// are from 0. Giants' terrain, whose coordinates run into the hundreds
-/// of textures, would otherwise be drawn with mipmap levels far smaller
-/// than the ones its texels on the screen call for: smooth and flat.
+/// A driver for the card has to: the card holds S/W and T/W as 14.18
+/// fixed point, which an S/W past 8192 overflows (at a W of 1, 32 times
+/// a texture of 256 texels). And the card works out a pixel's level of
+/// detail from how fast S/W and T/W change across the screen and from
+/// W, leaving out how fast 1/W does, which counts the more the farther
+/// the coordinates are from 0. Giants' terrain, whose coordinates run
+/// into the hundreds of textures, would otherwise be drawn with mipmap
+/// levels far smaller than the ones its texels on the screen call for:
+/// smooth and flat.
 fn rebase<const N: usize>(unit: &Unit, coords: [[f32; 2]; N]) -> [f32; 2] {
     let mut shift = [0.0; 2];
     for (axis, out) in shift.iter_mut().enumerate() {
@@ -1634,5 +1635,52 @@ mod tests {
         assert_eq!(rebase(&clamped, coords), [0.0, -42.0]);
         // Coordinates already between 0 and 1 stay.
         assert_eq!(rebase(&unit, [[0.0, 0.5], [0.75, 0.0]]), [0.0, 0.0]);
+    }
+
+    /// The card's vertices take each unit's shift from the coordinates
+    /// of the unit's own stage, before the texture's size and 1/W scale
+    /// them: with both units drawing, stage 0 is on TMU1 and stage 1 on
+    /// TMU0.
+    #[test]
+    fn each_unit_takes_back_its_own_stage() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let card = Card {
+            tmus: [
+                Some(Unit {
+                    stage: 1,
+                    scale: [64.0, 32.0],
+                    wrap: [false, true],
+                }),
+                Some(Unit {
+                    stage: 0,
+                    scale: [256.0, 128.0],
+                    wrap: [true, true],
+                }),
+            ],
+            ..Card::default()
+        };
+        let raster = Raster::new(&mut cpu, card);
+        let vertex = |tex: [[f32; 2]; 2]| ScreenVertex {
+            x: 0.0,
+            y: 0.0,
+            z: 0.5,
+            rhw: 0.5,
+            diffuse: 0,
+            specular: 0,
+            tex,
+        };
+        let [a, b] = raster.vertices(&[
+            vertex([[100.5, 7.25], [3.5, -2.5]]),
+            vertex([[101.0, 8.0], [4.0, -1.0]]),
+        ]);
+        // S and T, out of S/W and T/W at a 1/W of 0.5: the coordinates
+        // taken back, times the texture's size.
+        let st = |v: &Vertex, t: usize| [v.tmu[t].sow, v.tmu[t].tow].map(|c| c * 2.0);
+        // TMU1, stage 0: back 100 in U and 7 in V.
+        assert_eq!(st(&a, 1), [0.5 * 256.0, 0.25 * 128.0]);
+        assert_eq!(st(&b, 1), [1.0 * 256.0, 1.0 * 128.0]);
+        // TMU0, stage 1: U clamps and stays, V goes back -3.
+        assert_eq!(st(&a, 0), [3.5 * 64.0, 0.5 * 32.0]);
+        assert_eq!(st(&b, 0), [4.0 * 64.0, 2.0 * 32.0]);
     }
 }
