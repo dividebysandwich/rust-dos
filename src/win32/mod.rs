@@ -1104,6 +1104,11 @@ pub(crate) fn discard_process(cpu: &mut Cpu, pid: u32) {
 /// End the program because of `what` (where `ctx` says, if it was in the
 /// program), saying so on standard error.
 pub(crate) fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
+    fatal_with(cpu, what, ctx, FAILED);
+}
+
+/// `fatal`, with the exit code `code`.
+pub(crate) fn fatal_with(cpu: &mut Cpu, what: &str, ctx: Option<&Context>, code: u32) {
     let name = running(cpu).map_or(String::new(), |p| p.name.clone());
     let place = match ctx {
         Some(ctx) => format!(" at {:04X}:{:08X}", ctx.seg[Seg::CS as usize], ctx.eip),
@@ -1112,7 +1117,7 @@ pub(crate) fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
     let message = format!("{} ended: {}{}.", name, what, place);
     cpu.bus.log_string(&format!("[W32] {}", message));
     say(cpu, &message);
-    exit(cpu, FAILED);
+    exit(cpu, code);
 }
 
 /// The 32-bit value at `lin` in the running process's memory, read

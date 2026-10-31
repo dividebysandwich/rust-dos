@@ -5995,3 +5995,472 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     let (code, text) = run("wow32", exe);
     assert_eq!(code, 0, "{}", text);
 }
+
+/// CONTEXT's Eip and EFlags, and TF.
+const CTX_EIP: i32 = 0xB8;
+const CTX_EFLAGS: i32 = 0xC0;
+const TF: u32 = 0x100;
+const DF: u32 = 0x400;
+const SINGLE_STEP: u32 = 0x8000_0004;
+const BREAKPOINT: u32 = 0x8000_0003;
+const ACCESS_VIOLATION: u32 = 0xC000_0005;
+
+/// `xor eax, eax`, then TF set with POPFD. What follows it is X.
+const SET_TF: &[u8] = &[0x31, 0xC0, 0x9C, 0x81, 0x0C, 0x24, 0, 1, 0, 0, 0x9D];
+/// Four `inc eax` and a RET.
+const INCS: &[u8] = &[0x40, 0x40, 0x40, 0x40, 0xC3];
+/// The arguments of RaiseException(RAISED, 0, 0, 0), and the call, with
+/// the function's address in EBX.
+const RAISE_ARGS: &[u8] = &[0x6A, 0, 0x6A, 0, 0x6A, 0, 0x68, 0x34, 0x12, 0, 0xE0];
+const CALL_EBX: &[u8] = &[0xFF, 0xD3];
+const RAISED: u32 = 0xE000_1234;
+/// What a handler's context says it has: the control, integer, segment,
+/// floating-point and debug register parts.
+const CONTEXT_FLAGS: u32 = 0x1_001F;
+/// The size of what `trace_program` notes of an exception, in words, and
+/// how many it has room for.
+const HIT_WORDS: usize = 6;
+const MAX_HITS: usize = 8;
+
+/// What one exception gave a handler.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct Hit {
+    code: u32,
+    address: u32,
+    eip: u32,
+    eflags: u32,
+    /// The flags the handler itself ran with.
+    live: u32,
+    context_flags: u32,
+}
+
+/// A program that runs `code`, with an exception handler that notes each
+/// exception and returns `answer`, or as the unhandled exception filter
+/// with `filter`. `then` runs in the handler for each exception, with the
+/// record at ECX, the context at EDX and the number of exceptions before
+/// this one in ESI. `code` starts with RaiseException's address in EBX.
+/// The program prints what it noted and EAX as `code` left it.
+fn trace_program(
+    code: &[u8],
+    filter: bool,
+    answer: i32,
+    then: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
+    const HITS: u32 = 0;
+    const EAX: u32 = 4;
+    const TABLE: u32 = 8;
+    const WRITTEN: u32 = 0xF0;
+    const CODE: u32 = 0x100;
+    let hit_size = 4 * HIT_WORDS as i32;
+    let mut data = vec![0u8; CODE as usize];
+    data.extend_from_slice(code);
+    let names: &[&str] = &[
+        "SetUnhandledExceptionFilter",
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "RaiseException",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut at = 0;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        at = l.at(CODE) as u32;
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut note = a.create_label();
+        let mut start = a.create_label();
+        let mut over = a.create_label();
+        a.jmp(start)?;
+        a.set_label(&mut note)?;
+        a.pushfd()?;
+        a.pop(eax)?;
+        a.mov(esi, dword_ptr(l.at(HITS)))?;
+        a.imul_3(edi, esi, hit_size)?;
+        a.add(edi, l.at(TABLE) as i32)?;
+        a.mov(dword_ptr(edi + 16), eax)?;
+        a.mov(eax, dword_ptr(ecx))?;
+        a.mov(dword_ptr(edi), eax)?;
+        a.mov(eax, dword_ptr(ecx + 12))?;
+        a.mov(dword_ptr(edi + 4), eax)?;
+        a.mov(eax, dword_ptr(edx + CTX_EIP))?;
+        a.mov(dword_ptr(edi + 8), eax)?;
+        a.mov(eax, dword_ptr(edx + CTX_EFLAGS))?;
+        a.mov(dword_ptr(edi + 12), eax)?;
+        a.mov(eax, dword_ptr(edx))?;
+        a.mov(dword_ptr(edi + 20), eax)?;
+        a.inc(dword_ptr(l.at(HITS)))?;
+        then(a)?;
+        a.ret()?;
+        a.set_label(&mut start)?;
+        // The handler's address, which the CALL over it pushes.
+        a.call(over)?;
+        a.pushad()?;
+        if filter {
+            a.mov(eax, dword_ptr(esp + 32 + 4))?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.mov(edx, dword_ptr(eax + 4))?;
+        } else {
+            a.mov(ecx, dword_ptr(esp + 32 + 4))?;
+            a.mov(edx, dword_ptr(esp + 32 + 12))?;
+        }
+        a.call(note)?;
+        a.popad()?;
+        a.mov(eax, answer)?;
+        if filter {
+            a.ret_1(4)?;
+        } else {
+            a.ret()?;
+        }
+        a.set_label(&mut over)?;
+        if filter {
+            a.call(f("SetUnhandledExceptionFilter"))?;
+        } else {
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+        }
+        a.mov(ebx, f("RaiseException"))?;
+        a.mov(eax, l.at(CODE) as i32)?;
+        a.call(eax)?;
+        a.mov(dword_ptr(l.at(EAX)), eax)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(l.at(WRITTEN) as i32)?;
+        a.push(TABLE as i32 + MAX_HITS as i32 * hit_size)?;
+        a.push(l.at(0) as i32)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    (exe, at)
+}
+
+/// Run `exe` to its end on the core `core`: EAX as the code left it and
+/// the exceptions noted.
+fn traced(test: &str, exe: Vec<u8>, core: CoreMode) -> (u32, Vec<Hit>) {
+    let mut cpu = machine(test, exe);
+    cpu.core = core;
+    assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+    let out = &cpu.host_console.as_ref().unwrap().stdout;
+    assert_eq!(out.len(), 8 + 4 * MAX_HITS * HIT_WORDS, "{:?}", printed(&cpu));
+    let word = |i: usize| u32::from_le_bytes(out[4 * i..4 * i + 4].try_into().unwrap());
+    let hits = (0..word(0) as usize)
+        .map(|i| {
+            let at = 2 + HIT_WORDS * i;
+            Hit {
+                code: word(at),
+                address: word(at + 1),
+                eip: word(at + 2),
+                eflags: word(at + 3),
+                live: word(at + 4),
+                context_flags: word(at + 5),
+            }
+        })
+        .collect();
+    (word(1), hits)
+}
+
+/// `SET_TF`, `next` at X, and `INCS`; and X's address.
+fn after_tf(next: &[u8]) -> (Vec<u8>, u32) {
+    ([SET_TF, next, INCS].concat(), SET_TF.len() as u32)
+}
+
+/// Check a single-step exception with the handler's flags.
+fn assert_step(hit: &Hit, at: u32) {
+    assert_eq!(hit.code, SINGLE_STEP, "{:X?}", hit);
+    assert_eq!(hit.address, at, "{:X?}", hit);
+    assert_eq!(hit.eip, at, "{:X?}", hit);
+    assert_eq!(hit.eflags & TF, 0, "{:X?}", hit);
+    assert_eq!(hit.live & TF, 0, "{:X?}", hit);
+    assert_eq!(hit.context_flags, CONTEXT_FLAGS, "{:X?}", hit);
+}
+
+/// As Windows 98: the trap comes after the instruction after POPFD, with
+/// TF clear in the handler and in the context, and the handler continuing
+/// at the context runs on untraced.
+#[test]
+fn a_program_that_sets_tf_gets_one_single_step_exception() {
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let (code, x) = after_tf(&[]);
+        let (exe, at) = trace_program(&code, false, 0, |_| Ok(()));
+        let (value, hits) = traced("single_step", exe, core);
+        assert_eq!(value, 4);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_step(&hits[0], at + x + 1);
+    }
+}
+
+/// Sets TF in the context until there have been `count` exceptions.
+fn keep_tf(a: &mut CodeAssembler, count: i32) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(esi, count - 1)?;
+    a.jge(done)?;
+    a.or(dword_ptr(edx + CTX_EFLAGS), TF as i32)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+#[test]
+fn a_handler_that_keeps_tf_in_the_context_steps_on() {
+    let (code, x) = after_tf(&[]);
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 5));
+    let (value, hits) = traced("step_on", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 5, "{:X?}", hits);
+    for (i, hit) in hits[..4].iter().enumerate() {
+        assert_step(hit, at + x + 1 + i as u32);
+    }
+    // The RET's trap is past the RET, in the code that called it.
+    assert_eq!(hits[4].code, SINGLE_STEP);
+    assert_eq!(hits[4].eip, hits[4].address);
+    let outside = !(at..at + code.len() as u32).contains(&hits[4].eip);
+    assert!(outside, "{:X?}", hits[4]);
+}
+
+#[test]
+fn the_unhandled_exception_filter_gets_the_single_step_exception() {
+    let (code, x) = after_tf(&[]);
+    let (exe, at) = trace_program(&code, true, -1, |a| keep_tf(a, 3));
+    let (value, hits) = traced("step_filter", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 3, "{:X?}", hits);
+    for (i, hit) in hits.iter().enumerate() {
+        assert_step(hit, at + x + 1 + i as u32);
+    }
+}
+
+/// A single-step exception no handler takes ends the program as any
+/// exception does.
+#[test]
+fn a_single_step_exception_nobody_takes_ends_the_program() {
+    let (code, _) = after_tf(&[]);
+    let (exe, _) = trace_program(&code, false, 1, |_| Ok(()));
+    let (exit, text) = run("step_unhandled", exe);
+    assert_eq!(exit, 0xFF);
+    assert!(text.contains("debug exception"), "{}", text);
+    assert!(!text.contains("its stack is gone"), "{}", text);
+}
+
+/// Another exception with TF set leaves TF in its context, though not in
+/// the handler, so going on at the context raises the trap after the
+/// next instruction, whose context has TF clear.
+#[test]
+fn a_fault_with_tf_set_keeps_it_in_the_context() {
+    // MOV EAX, [0]; the handler goes past it.
+    let (code, x) = after_tf(&[0xA1, 0, 0, 0, 0]);
+    let (exe, at) = trace_program(&code, false, 0, |a| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+        a.jne(done)?;
+        a.add(dword_ptr(edx + CTX_EIP), 5)?;
+        a.set_label(&mut done)?;
+        a.nop()
+    });
+    let (value, hits) = traced("step_fault", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, ACCESS_VIOLATION);
+    assert_eq!(hits[0].eip, at + x);
+    assert_eq!(hits[0].eflags & TF, TF, "{:X?}", hits[0]);
+    assert_eq!(hits[0].live & TF, 0, "{:X?}", hits[0]);
+    assert_step(&hits[1], at + x + 6);
+}
+
+#[test]
+fn an_int3_with_tf_set_keeps_it_in_the_context() {
+    let (code, x) = after_tf(&[0xCC]);
+    let (exe, at) = trace_program(&code, false, 0, |_| Ok(()));
+    let (value, hits) = traced("step_int3", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, BREAKPOINT);
+    assert_eq!(hits[0].eip, at + x + 1);
+    assert_eq!(hits[0].eflags & TF, TF, "{:X?}", hits[0]);
+    assert_eq!(hits[0].live & TF, 0, "{:X?}", hits[0]);
+    assert_step(&hits[1], at + x + 2);
+}
+
+/// A handler can start the stepping: TF set in the context of a
+/// breakpoint, the trap follows the next instruction.
+#[test]
+fn a_handler_sets_tf_in_a_breakpoints_context() {
+    let code = [&[0x31, 0xC0, 0xCC], INCS].concat();
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 2));
+    let (value, hits) = traced("step_from_int3", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, BREAKPOINT);
+    assert_eq!(hits[0].eflags & TF, 0);
+    assert_step(&hits[1], at + 4);
+}
+
+/// RaiseException called with TF set. Its entry traps, and the exception
+/// comes next, with TF in its context: the handler it enters runs with TF
+/// clear, so no trap comes from the first instruction of the handler.
+#[test]
+fn raise_exception_with_tf_set_does_not_trap_in_the_handler() {
+    let code = [RAISE_ARGS, SET_TF, CALL_EBX, INCS].concat();
+    let x = (RAISE_ARGS.len() + SET_TF.len()) as u32;
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 2));
+    let (value, hits) = traced("step_raise", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 3, "{:X?}", hits);
+    assert_eq!(hits[0].code, SINGLE_STEP, "{:X?}", hits[0]);
+    assert_eq!(hits[0].eip, hits[0].address);
+    let outside = !(at..at + code.len() as u32).contains(&hits[0].eip);
+    assert!(outside, "{:X?}", hits[0]);
+    assert_eq!(hits[1].code, RAISED, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eip, at + x + 2, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eflags & TF, TF, "{:X?}", hits[1]);
+    assert_eq!(hits[1].live & TF, 0, "{:X?}", hits[1]);
+    assert_step(&hits[2], at + x + 3);
+}
+
+/// `pushfd; pop eax; cld; ret`: the flags the code goes on with, in EAX.
+const FLAGS_IN_EAX: &[u8] = &[0x9C, 0x58, 0xFC, 0xC3];
+/// `std; mov eax, [0]`, five bytes to go past from the MOV.
+const STD_FAULT: &[u8] = &[0xFD, 0xA1, 0, 0, 0, 0];
+const FAULT: &[u8] = &[0xA1, 0, 0, 0, 0];
+
+/// In a handler: go past the MOV of `FAULT`.
+fn skip_fault(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+    a.jne(done)?;
+    a.add(dword_ptr(edx + CTX_EIP), 5)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+/// As Windows 98: DF in a handler and in a filter is clear whatever the
+/// program had, the context keeps it, and continuing puts it back.
+#[test]
+fn an_exception_clears_df_for_the_handler_and_continuing_restores_it() {
+    // PUSHFD; OR DWORD [ESP], TF | DF; POPFD; NOP.
+    let step: &[u8] = &[0x9C, 0x81, 0x0C, 0x24, 0, 5, 0, 0, 0x9D, 0x90];
+    let cases: [(&[&[u8]], bool, i32, u32); 5] = [
+        (&[STD_FAULT], false, 0, ACCESS_VIOLATION),
+        (&[&[0xFD, 0xCC]], false, 0, BREAKPOINT),
+        (&[step], false, 0, SINGLE_STEP),
+        (&[RAISE_ARGS, &[0xFD], CALL_EBX], false, 0, RAISED),
+        (&[STD_FAULT], true, -1, ACCESS_VIOLATION),
+    ];
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        for (parts, filter, answer, exception) in cases {
+            let code = [parts.concat().as_slice(), FLAGS_IN_EAX].concat();
+            let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+            let (value, hits) = traced("df_clear", exe, core);
+            assert_eq!(hits.len(), 1, "{:X?}", hits);
+            assert_eq!(hits[0].code, exception, "{:X?}", hits);
+            assert_eq!(hits[0].live & DF, 0, "{:X?}", hits);
+            assert_eq!(hits[0].eflags & DF, DF, "{:X?}", hits);
+            assert_eq!(value & DF, DF, "{:X}", value);
+        }
+    }
+}
+
+/// Continuing takes DF from the context: what a handler changes there,
+/// and not what it left in its own flags.
+#[test]
+fn continuing_takes_df_from_the_context() {
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.or(dword_ptr(edx + CTX_EFLAGS), DF as i32)
+    });
+    let (value, _) = traced("df_set", exe, CoreMode::Normal);
+    assert_eq!(value & DF, DF, "{:X}", value);
+    let code = [STD_FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.and(dword_ptr(edx + CTX_EFLAGS), !(DF as i32))
+    });
+    let (value, _) = traced("df_cleared", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.std()
+    });
+    let (value, _) = traced("df_left", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+}
+
+/// A handler that sets DF and searches on: the next handler starts with
+/// DF set and the unhandled exception filter with it clear, as on
+/// Windows 98, and the context stays as the fault left it.
+#[test]
+fn df_a_handler_leaves_reaches_the_next_handler_and_not_the_filter() {
+    // A frame of its own, whose handler is `std; mov eax, 1; ret`, around
+    // the fault, and its removal.
+    let frame_on: &[u8] = &[
+        0xE8, 7, 0, 0, 0, 0xFD, 0xB8, 1, 0, 0, 0, 0xC3, 0x64, 0xFF, 0x35, 0, 0, 0, 0, 0x64, 0x89,
+        0x25, 0, 0, 0, 0,
+    ];
+    let frame_off: &[u8] = &[0x64, 0x8F, 0x05, 0, 0, 0, 0, 0x83, 0xC4, 0x04];
+    let code = [frame_on, FAULT, frame_off, FLAGS_IN_EAX].concat();
+    for (filter, answer, live) in [(false, 0, DF), (true, -1, 0)] {
+        let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+        let (value, hits) = traced("df_search", exe, CoreMode::Normal);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_eq!(hits[0].live & DF, live, "{:X?}", hits);
+        assert_eq!(hits[0].eflags & DF, 0, "{:X?}", hits);
+        assert_eq!(value & DF, 0, "{:X}", value);
+    }
+}
+
+/// Windows 98's exit code for a process an unhandled exception ends,
+/// whatever the exception, with a filter that says so or with none.
+#[test]
+fn an_unhandled_exception_gives_the_exit_code_ffffffff() {
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(l.at(0xA0)), -1)?;
+        a.sete(al)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (step, _) = after_tf(&[]);
+    let fault = [&[0xA1, 0, 0, 0, 0], INCS].concat();
+    let raised = [RAISE_ARGS, CALL_EBX, INCS].concat();
+    // ESP on a page that isn't there: no handler can run.
+    let no_stack = [&[0xBC, 0x10, 0, 0, 0, 0xA1, 0, 0, 0, 0], INCS].concat();
+    for code in [&step, &fault, &raised, &no_stack] {
+        for filter in [false, true] {
+            let (child, _) = trace_program(code, filter, 1, |_| Ok(()));
+            let files = [("T.EXE", parent.clone()), ("C.EXE", child)];
+            let mut cpu = machine_with("unhandled_exit_code", &files);
+            assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+            assert_eq!(cpu.errorlevel, 1, "{}", printed(&cpu));
+        }
+    }
+}
