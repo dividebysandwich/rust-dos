@@ -140,7 +140,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   frame rate) or reaches the display's refresh rate (frames nobody sees,
   and some games, such as Descent, play badly at such rates), and goes
   down while the program waits for a key or calls DOS's idle interrupt.
-  A real-mode program with no frames to go by (most games of the 1980s,
+  It then tries lower speeds, down to where they cost more than 3% of
+  the frame rate. A speed the host falls behind at is left for a lower
+  one, and the limit that sets rises again while the host keeps up. A
+  real-mode program with no frames to go by (most games of the 1980s,
   which update the screen piecemeal) runs at 3000, about a 286, as in
   DOSBox's `cycles=auto`. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to
@@ -467,9 +470,13 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   one of those doesn't start, as on Windows 95, and its message names
   the setting. These include USER32's GetAncestor, SendInput,
   TrackMouseEvent and GetWindowInfo, which earlier releases of rust-dos
-  had under Windows 95 too, so a program that imports them needs `98`.
-  A change takes effect for the next program that starts when none
-  runs.
+  had under Windows 95 too, so a program that imports them needs `98`. Of
+  DirectX, the setting changes only the version the registry gives. The
+  built-in DirectX stays that of a machine with a later DirectX installed
+  (DirectDraw 7, D3D8), so it answers QueryInterface for IDirectDrawSurface7
+  and IDirectDraw7 even under `98se`, where a Windows 98 SE with only its
+  own DirectX 6.1 refuses them. A change takes effect for the next program
+  that starts when none runs.
 * `win32_trace` picks which calls of the built-in Windows' functions
   get a `[W32]` line in the [log file](README.md#log-file) (and `[W16]`
   for the 16-bit modules), with the caller's address, the arguments and

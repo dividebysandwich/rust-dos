@@ -1,6 +1,6 @@
 // Experimental passes stay here until correctness and timings justify them.
 // No emulator, requestAnimationFrame, compositor, or vsync is in this timing.
-window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
+window.runBenchmark = async function ({ samples = 6, rounds = 3, incremental = false } = {}) {
   const canvas = document.createElement('canvas');
   const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false });
   if (!gl) throw new Error('WebGL 2 is unavailable');
@@ -165,13 +165,24 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
     [7, 1, 21, 3, 'alpha'], [5, 5, 10, 10, 'near-grey'],
     [7, 5, 23, 17, 'alpha'], [7, 5, 23, 17, 'near-grey'],
   ];
-  const scenarios = [[320, 200, 160, 100], [320, 200, 320, 200], [320, 200, 640, 400],
+  const regular = [[320, 200, 160, 100], [320, 200, 320, 200], [320, 200, 640, 400],
     [320, 200, 1920, 1440], [640, 480, 1920, 1440]]
     .flatMap(size => ['pixel-art', 'noise'].map(pattern => [...size, pattern]));
-  for (const [width, height, outWidth, outHeight, pattern] of [...checks, ...scenarios]) {
+  const sparse = [[320, 200, 320, 200], [320, 200, 640, 400],
+    [320, 200, 1920, 1440], [640, 480, 1920, 1440]]
+    .flatMap(size => ['pixel-art', 'noise'].flatMap(pattern =>
+      ['pixel', 'sprite', 'distant', 'full'].map(change => [...size, pattern, change])));
+  const scenarios = incremental ? sparse : regular;
+  for (const [width, height, outWidth, outHeight, pattern, change = 'full'] of [...checks, ...scenarios]) {
     liveCanvas.width = outWidth;
     liveCanvas.height = outHeight;
     const pixels = fixture(width, height, pattern);
+    const damage = new Uint32Array(change === 'pixel' ? [Math.floor(width / 2), Math.floor(height / 2), 1, 1]
+      : change === 'sprite' ? [20, Math.floor(height / 2), 32, 16]
+      : change === 'distant' ? [20, 8, 16, 8, width - 40, height - 24, 16, 8]
+      : [0, 0, width, height]);
+    // A new fixture is a new source, even when its geometry is unchanged.
+    production.upload(pixels, width, height, null, ++revision);
     const source = texture(width, height, pixels);
     // One extra top/left corner preserves blend_of's boundary rules.
     const corners = target(width + 1, height + 1);
@@ -182,10 +193,17 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
       gl.bindTexture(gl.TEXTURE_2D, corners.texture);
     };
     let productionDraws = 0;
-    const variants = {
+    let variants = {
       direct: () => draw(direct, source, output, width, height),
       production_fresh: () => {
         production.upload(pixels, width, height, null, ++revision);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, output.framebuffer);
+        const before = drawCount;
+        production.render();
+        productionDraws = drawCount - before;
+      },
+      production_partial: () => {
+        production.upload(pixels, width, height, null, ++revision, damage);
         gl.bindFramebuffer(gl.FRAMEBUFFER, output.framebuffer);
         const before = drawCount;
         production.render();
@@ -236,6 +254,8 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
         draw(plain, source, output, width, height);
       },
     };
+    if (incremental) variants = { production_partial: variants.production_partial,
+      production_reuse: variants.production_reuse, production_fresh: variants.production_fresh };
     const read = () => {
       gl.bindFramebuffer(gl.FRAMEBUFFER, output.framebuffer);
       const data = new Uint8Array(outWidth * outHeight * 4);
@@ -243,14 +263,19 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
       return data;
     };
     let productionFirstFrame;
-    for (let update = 0; update < (width < 10 ? 2 : 1); update++) {
+    for (let update = 0; update < (incremental || width < 10 ? 3 : 1); update++) {
       if (update) {
-        pixels[0] ^= 127;
+        for (let at = 0; at < damage.length; at += 4) {
+          const [x, y, w, h] = damage.subarray(at, at + 4);
+          for (let row = y; row < y + h; row++) {
+            for (let col = x; col < x + w; col++) pixels[(row * width + col) * 4] ^= 127;
+          }
+        }
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, source);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
       }
-      variants.direct();
+      draw(direct, source, output, width, height);
       const expected = read();
       // Force every render pass once before validating the reuse cases.
       for (const [name, render] of Object.entries(variants)) {
@@ -259,7 +284,7 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
         } else {
           render();
         }
-        if (name.startsWith('production_')) {
+        if (name.startsWith('production_') && name !== 'production_partial') {
           const magnified = outWidth >= width * 2 && outHeight >= height * 2;
           const minified = outWidth < width || outHeight < height;
           const expectedDraws = name === 'production_reuse' || minified ? 1 : magnified ? 3 : 2;
@@ -286,7 +311,7 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
     }
     if (textureAllocations !== allocationsBeforeTiming) throw new Error('Per-frame texture allocation');
     if (width >= 10) results.push({
-      width, height, outWidth, outHeight, pattern, outputEqual: true,
+      width, height, outWidth, outHeight, pattern, change, outputEqual: true,
       intermediateBytes: { corners: (width + 1) * (height + 1) * 4, fixed2x: width * height * 16 },
       productionFirstFrame,
       textureAllocationsDuringTiming: textureAllocations - allocationsBeforeTiming, times,
@@ -306,8 +331,8 @@ window.runBenchmark = async function ({ samples = 6, rounds = 3 } = {}) {
     renderer: gl.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : gl.RENDERER),
     vendor: gl.getParameter(debug ? debug.UNMASKED_VENDOR_WEBGL : gl.VENDOR),
     gpuTimer: !!timer,
-    samples, rounds, workloadVersion: 2, edgeChecks: checks.length, productionSelectMs,
-    boundary: 'Persistent RGBA8 targets, dithering and overlays disabled. Draw passes only, except production_fresh and upload_nearest include a full source upload. Steady-state timings exclude allocations, emulator, compositor and vsync. productionFirstFrame includes initial target allocation with warmed shaders. GPU queries are asynchronous; disjoint samples are null. Wall time is CPU submission with timers, or completed rendering plus one-pixel synchronous readback without timers.',
+    samples, rounds, incremental, workloadVersion: 3, edgeChecks: checks.length, productionSelectMs,
+    boundary: 'Persistent RGBA8 targets, dithering and overlays disabled. Incremental mode forces pixel/sprite/distant/full candidate updates; partial includes source upload, with full-upload production_fresh as a control. Draw passes only, except production_fresh and upload_nearest include a full source upload. Steady-state timings exclude allocations, emulator, compositor and vsync. productionFirstFrame is the first forced full refresh; incremental validation may already have allocated its targets. GPU queries are asynchronous; disjoint samples are null. Wall time is CPU submission with timers, or completed rendering plus one-pixel synchronous readback without timers.',
     results,
   };
 };

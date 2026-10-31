@@ -422,7 +422,9 @@ function draw() {
       rows: [machine.shader_overlay_top(), machine.shader_overlay_bottom()],
     } : null;
     const revision = xbrz ? machine.shader_revision() : undefined;
-    if (screenGl.upload(pixels, sourceWidth, sourceHeight, overlay, revision)) {
+    const damage = xbrz ? new Uint32Array(wasm.memory.buffer,
+      machine.shader_damage(), machine.shader_damage_count() * 4) : null;
+    if (screenGl.upload(pixels, sourceWidth, sourceHeight, overlay, revision, damage)) {
       layout();
     } else {
       screenGl.render();
@@ -579,7 +581,43 @@ function makeGlScreen() {
     }
   }
 
-  function drawPass(entry, target, unflipped) {
+  function addDamage(rects, rect) {
+    let [x, y, w, h] = rect;
+    for (let i = 0; i < rects.length;) {
+      const [a, b, c, d] = rects[i];
+      if ((x <= a + c && a <= x + w && y <= b + d && b <= y + h) || rects.length === 16) {
+        const right = Math.max(x + w, a + c);
+        const bottom = Math.max(y + h, b + d);
+        x = Math.min(x, a);
+        y = Math.min(y, b);
+        w = right - x;
+        h = bottom - y;
+        rects.splice(i, 1);
+        i = 0;
+      } else {
+        i++;
+      }
+    }
+    rects.push([x, y, w, h]);
+  }
+
+  function sourceDamage(damage, width, height) {
+    if (!damage?.length || damage.length % 4 || damage.length > 64) return null;
+    // Full changes retain the ordinary upload and cache rebuild fast path.
+    if (damage.length === 4 && damage[0] === 0 && damage[1] === 0
+        && damage[2] === width && damage[3] === height) return null;
+    const rects = [];
+    for (let i = 0; i < damage.length; i += 4) {
+      const rect = Array.from(damage.slice(i, i + 4));
+      const [x, y, w, h] = rect;
+      if (!rect.every(Number.isInteger) || x < 0 || y < 0 || w <= 0 || h <= 0
+          || x + w > width || y + h > height) return null;
+      addDamage(rects, rect);
+    }
+    return rects;
+  }
+
+  function drawPass(entry, target, unflipped, damage) {
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.framebuffer);
     gl.viewport(0, 0, target.width, target.height);
     gl.useProgram(entry.program);
@@ -588,7 +626,17 @@ function makeGlScreen() {
     gl.uniform1i(entry.unflipped, unflipped ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (damage) {
+      gl.enable(gl.SCISSOR_TEST);
+      for (const [x, y, w, h] of damage) {
+        // Corner storage includes the kernels outside the top/left edge.
+        gl.scissor(...(unflipped ? [x * 2, y * 2, w * 2, h * 2] : [x, y, w + 1, h + 1]));
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+      gl.disable(gl.SCISSOR_TEST);
+    } else {
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
   }
 
   function prepareXbrz() {
@@ -600,7 +648,7 @@ function makeGlScreen() {
     const magnified = canvas.width >= width * 2 && canvas.height >= height * 2;
     const useCache = magnified && width * 2 <= cache.limit && height * 2 <= cache.limit;
     if (cache.width === width && cache.height === height && cache.cornersValid
-        && (!useCache || cache.scaledValid)) {
+        && !cache.cornerDamage.length && (!useCache || cache.scaledValid && !cache.scaledDamage.length)) {
       if (!useCache) {
         gl.activeTexture(gl.TEXTURE2);
         gl.bindTexture(gl.TEXTURE_2D, cache.corners.texture);
@@ -609,6 +657,7 @@ function makeGlScreen() {
         : { entry: cache.resolve, texture };
     }
     const framebuffer = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+    const scissor = gl.getParameter(gl.SCISSOR_BOX);
     const states = [gl.BLEND, gl.DITHER, gl.SCISSOR_TEST].map(state => [state, gl.isEnabled(state)]);
     for (const [state] of states) gl.disable(state);
     try {
@@ -619,26 +668,30 @@ function makeGlScreen() {
         cache.width = width;
         cache.height = height;
         cache.cornersValid = cache.scaledValid = false;
+        cache.cornerDamage.length = cache.scaledDamage.length = 0;
       }
       // The extra row and column preserve kernels outside the top/left.
       cache.corners ||= makeTarget(width + 1, height + 1);
-      if (!cache.cornersValid) {
-        drawPass(cache.classify, cache.corners, false);
+      if (!cache.cornersValid || cache.cornerDamage.length) {
+        drawPass(cache.classify, cache.corners, false, cache.cornersValid ? cache.cornerDamage : null);
         cache.cornersValid = true;
+        cache.cornerDamage.length = 0;
       }
       gl.activeTexture(gl.TEXTURE2);
       gl.bindTexture(gl.TEXTURE_2D, cache.corners.texture);
       if (useCache) {
         cache.scaled ||= makeTarget(width * 2, height * 2);
-        if (!cache.scaledValid) {
-          drawPass(cache.resolve, cache.scaled, true);
+        if (!cache.scaledValid || cache.scaledDamage.length) {
+          drawPass(cache.resolve, cache.scaled, true, cache.scaledValid ? cache.scaledDamage : null);
           cache.scaledValid = true;
+          cache.scaledDamage.length = 0;
         }
         return { entry: cache.display, texture: cache.scaled.texture };
       }
       return { entry: cache.resolve, texture };
     } finally {
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, framebuffer);
+      gl.scissor(...scissor);
       for (const [state, enabled] of states) {
         if (enabled) gl.enable(state);
       }
@@ -679,6 +732,7 @@ function makeGlScreen() {
           classify: entries[0], resolve: entries[1], display: entries[2],
           limit: Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), ...gl.getParameter(gl.MAX_VIEWPORT_DIMS)),
           cornersValid: false, scaledValid: false,
+          cornerDamage: [], scaledDamage: [],
         } : null;
         if (!xbrzCache) console.warn('xBRZ cache unavailable; using the direct shader');
       }
@@ -686,7 +740,7 @@ function makeGlScreen() {
     },
 
     /// Take the picture's pixels (RGBA). Returns whether its size changed.
-    upload(pixels, width, height, overlay = null, revision) {
+    upload(pixels, width, height, overlay = null, revision, damage) {
       overlayVisible = overlay !== null;
       if (overlayVisible) {
         gl.activeTexture(gl.TEXTURE1);
@@ -714,8 +768,37 @@ function makeGlScreen() {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       }
       if (resized || revision === undefined || frame?.revision !== revision) {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        if (xbrzCache) xbrzCache.cornersValid = xbrzCache.scaledValid = false;
+        const sequential = !resized && revision !== undefined && frame?.revision !== undefined
+          && revision === ((frame.revision + 1) >>> 0);
+        const rects = sequential ? sourceDamage(damage, width, height) : null;
+        if (rects) {
+          gl.pixelStorei(gl.UNPACK_ROW_LENGTH, width);
+          try {
+            for (const [x, y, w, h] of rects) {
+              gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE,
+                pixels.subarray((y * width + x) * 4));
+            }
+          } finally {
+            gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+          }
+        } else {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        }
+        if (xbrzCache) {
+          if (rects) {
+            for (const [x, y, w, h] of rects) {
+              // Resolve reads a five-pixel neighborhood around its source.
+              const left = Math.max(0, x - 2), top = Math.max(0, y - 2);
+              const right = Math.min(width, x + w + 2), bottom = Math.min(height, y + h + 2);
+              const expanded = [left, top, right - left, bottom - top];
+              if (xbrzCache.cornersValid) addDamage(xbrzCache.cornerDamage, expanded);
+              if (xbrzCache.scaledValid) addDamage(xbrzCache.scaledDamage, expanded);
+            }
+          } else {
+            xbrzCache.cornersValid = xbrzCache.scaledValid = false;
+            xbrzCache.cornerDamage.length = xbrzCache.scaledDamage.length = 0;
+          }
+        }
       }
       if (resized) frame = { width, height };
       frame.revision = revision;
