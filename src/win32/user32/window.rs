@@ -156,8 +156,9 @@ pub struct Window {
     pub pid: u32,
     pub props: Vec<(String, u32)>,
     /// What needs painting, relative to the window's top left corner:
-    /// the frame and client area, and for a CS_PARENTDC child what of
-    /// its parent's client area it was given. `paint`'s flags say how.
+    /// the frame and client area, what lay in them before the window
+    /// got smaller, and for a CS_PARENTDC child what of its parent's
+    /// client area it was given. `paint`'s flags say how.
     pub update: Region,
     pub paint: u32,
     pub flags: u32,
@@ -1757,9 +1758,6 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     link(state, hwnd, after);
                     raise_owned(state, hwnd);
                 }
-                if flags & SWP_NOSIZE == 0 || flags & SWP_FRAMECHANGED != 0 {
-                    super::paint::crop_update(state, hwnd);
-                }
                 if client.width() == old_client.width() && client.height() == old_client.height() {
                     flags |= SWP_NOCLIENTSIZE;
                 }
@@ -3073,7 +3071,6 @@ pub fn set_window_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if let Some(w) = user(cpu).window_mut(args[0]) {
         w.region = region;
     }
-    super::paint::crop_update(user(cpu), args[0]);
     super::paint::tree_changed(cpu);
     Some(TRUE)
 }

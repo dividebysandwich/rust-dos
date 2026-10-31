@@ -8,6 +8,12 @@
 //! DC draws, from the tree as it is then, so moving a window changes
 //! nothing here but what it uncovers and what it shows.
 //!
+//! As on real Windows 98 and Windows 11, sizing a window or giving it a
+//! region leaves the update region alone, even where it no longer lies
+//! inside the window: grown back, the window still has it to paint.
+//! Validating clips it instead (`validated_area`), and GetUpdateRect and
+//! GetUpdateRgn only report the part that can show (`shown_client`).
+//!
 //! The desktop is on the screen once a window shows or a program draws
 //! there: the display goes to the VBE mode of the screen's size at 32
 //! bits a pixel, and back to text when the last window goes.
@@ -415,7 +421,9 @@ fn redraw_in(state: &mut State, hwnd: u32, area: &Region, flags: u32, from_paren
     let children = w.children.clone();
     let wr = state.screen_rect(hwnd);
     let client = state.screen_client(hwnd);
-    let own = area.and(&shape(state, hwnd));
+    // A window region doesn't limit this: an invalidated window with a
+    // 50x50 region reports all of its 100x100 client area.
+    let own = area.and_rect(&wr);
     let mut part = own.clone();
     if flags & RDW_FRAME == 0 || hwnd == DESKTOP {
         part = part.and_rect(&client);
@@ -425,6 +433,11 @@ fn redraw_in(state: &mut State, hwnd: u32, area: &Region, flags: u32, from_paren
         part = area.clone();
     }
     let local = part.offset_by(-wr.left, -wr.top);
+    let kept = if flags & RDW_VALIDATE != 0 {
+        validated_area(state, hwnd, flags)
+    } else {
+        Region::new()
+    };
     if let Some(w) = state.window_mut(hwnd) {
         if flags & RDW_INVALIDATE != 0 {
             if !local.is_empty() {
@@ -440,10 +453,15 @@ fn redraw_in(state: &mut State, hwnd: u32, area: &Region, flags: u32, from_paren
                 w.paint |= PAINT_INTERNAL;
             }
         } else if flags & RDW_VALIDATE != 0 {
-            if !local.is_empty() {
-                w.update = w.update.diff(&local);
+            if flags & RDW_NOFRAME != 0 {
+                w.paint &= !PAINT_FRAME;
             }
-            if flags & RDW_NOFRAME != 0 || w.update.is_empty() {
+            // With RDW_FRAME real Windows validates nothing: the region
+            // and the pending WM_NCPAINT stay.
+            if flags & RDW_FRAME == 0 {
+                w.update = w.update.diff(&local).and(&kept);
+            }
+            if w.update.is_empty() {
                 w.paint &= !PAINT_FRAME;
             }
             if flags & RDW_NOERASE != 0 || w.update.is_empty() {
@@ -468,6 +486,25 @@ fn redraw_in(state: &mut State, hwnd: u32, area: &Region, flags: u32, from_paren
             redraw_in(state, child, &inside, flags & !RDW_NOCHILDREN, true);
         }
     }
+}
+
+/// What of `hwnd`'s update region a validate with `flags` keeps, relative
+/// to its top left corner: what lies in the window's shape and client
+/// area, or with a WM_NCPAINT pending in its shape, frame included. This
+/// holds whatever the validate names, even an empty rectangle, and is how
+/// a window that shrank or took a smaller region loses what it had
+/// outside them. Without that WM_NCPAINT, a region that now lies under
+/// the frame goes too, and no WM_PAINT or WM_NCPAINT follows.
+fn validated_area(state: &State, hwnd: u32, flags: u32) -> Region {
+    let Some(w) = state.window(hwnd) else {
+        return Region::new();
+    };
+    let wr = state.screen_rect(hwnd);
+    let mut area = shape(state, hwnd);
+    if w.paint & PAINT_FRAME == 0 || flags & RDW_NOFRAME != 0 {
+        area = area.and_rect(&state.screen_client(hwnd));
+    }
+    area.offset_by(-wr.left, -wr.top)
 }
 
 /// Whether the child window `hwnd`'s class has CS_PARENTDC.
@@ -502,38 +539,6 @@ fn clear_updates(state: &mut State, hwnd: u32) {
             w.update = Region::new();
             w.paint = 0;
         }
-    }
-}
-
-/// `hwnd` took a new size, frame or shape: its update region loses what
-/// now lies outside it, or that part would ask for WM_PAINT that nothing
-/// can validate. A CS_PARENTDC child keeps what it has over its parent's
-/// client area. What is now in the frame needs WM_NCPAINT, which crops it
-/// (`erase_step`), as ValidateRect only covers the client area.
-pub fn crop_update(state: &mut State, hwnd: u32) {
-    let Some(w) = state.window(hwnd) else {
-        return;
-    };
-    if w.update.is_empty() {
-        return;
-    }
-    let wr = state.screen_rect(hwnd);
-    let update = w.update.offset_by(wr.left, wr.top);
-    let own = update.and(&shape(state, hwnd));
-    let frame = !own.diff_rect(&state.screen_client(hwnd)).is_empty();
-    let kept = if parent_dc(state, hwnd) {
-        update.and_rect(&state.screen_client(w.parent))
-    } else {
-        own
-    };
-    let Some(w) = state.window_mut(hwnd) else {
-        return;
-    };
-    w.update = kept.offset_by(-wr.left, -wr.top);
-    if w.update.is_empty() {
-        w.paint &= !(PAINT_ERASE | PAINT_FRAME | PAINT_DELAYED_ERASE);
-    } else if frame {
-        w.paint |= PAINT_FRAME;
     }
 }
 
@@ -757,6 +762,22 @@ fn client_update(state: &State, hwnd: u32) -> Region {
         state.screen_client(hwnd)
     };
     w.update.offset_by(wr.left, wr.top).and_rect(&area)
+}
+
+/// The rectangle of the screen where the client area of `hwnd` can show:
+/// within its parents' client areas and the screen. GetUpdateRect and
+/// GetUpdateRgn report no more than this, also of a CS_PARENTDC child,
+/// though the region itself may reach further: real Windows 98 reports
+/// 40 columns of a window hanging 60 past the screen's edge, and all 100
+/// once it moved back.
+fn shown_client(state: &State, hwnd: u32) -> Rect {
+    let mut rect = state.screen_client(hwnd);
+    let mut h = hwnd;
+    while h != DESKTOP && h != 0 {
+        h = state.parent(h);
+        rect = rect.intersect(&state.screen_client(if h == 0 { DESKTOP } else { h }));
+    }
+    rect
 }
 
 /// Start erasing the window in V_CUR: its frame, then its background.
@@ -1055,14 +1076,23 @@ pub fn get_update_rect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn update_rect_result(cpu: &mut Cpu, hwnd: u32, rect: u32) -> u32 {
     let state = user(cpu);
-    let region = client_update(state, hwnd);
     let client = state.screen_client(hwnd);
-    let any = state.window(hwnd).is_some_and(|w| !w.update.is_empty());
+    let wr = state.screen_rect(hwnd);
+    let update = state.window(hwnd).map(|w| w.update.clone());
+    let any = update.as_ref().is_some_and(|u| !u.is_empty());
     if rect != 0 {
-        let b = if region.is_empty() {
+        // The box of the whole region, clipped: only a frame left to
+        // paint gives the whole client area here, and an empty
+        // GetUpdateRgn.
+        let b = match update {
+            Some(u) if any => u.bounds().offset(wr.left, wr.top),
+            _ => Rect::default(),
+        };
+        let b = b.intersect(&shown_client(state, hwnd));
+        let b = if b.is_empty() {
             Rect::default()
         } else {
-            region.bounds().offset(-client.left, -client.top)
+            b.offset(-client.left, -client.top)
         };
         b.write(cpu, rect);
     }
@@ -1087,7 +1117,13 @@ pub fn get_update_rgn(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn update_rgn_result(cpu: &mut Cpu, hwnd: u32, rgn: u32) -> u32 {
     let state = user(cpu);
     let client = state.screen_client(hwnd);
-    let region = client_update(state, hwnd).offset_by(-client.left, -client.top);
+    let wr = state.screen_rect(hwnd);
+    let region = state.window(hwnd).map_or(Region::new(), |w| {
+        w.update
+            .offset_by(wr.left, wr.top)
+            .and_rect(&shown_client(state, hwnd))
+            .offset_by(-client.left, -client.top)
+    });
     let kind = region.kind();
     if !gdi32::set_region(cpu, rgn, region) {
         return 0;
