@@ -380,6 +380,19 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.idle_skip = Some(on),
                             None => warn(format!("invalid idle_skip '{}' (true or false)", value)),
                         },
+                        "game_fixes" => match parse_bool(value) {
+                            Some(on) => config.game_fixes = Some(on),
+                            None => warn(format!("invalid game_fixes '{}' (true or false)", value)),
+                        },
+                        "game_fixes_off" => {
+                            let names = super::settings::fix_names(value);
+                            for name in &names {
+                                if crate::game_fixes::by_name(name).is_none() {
+                                    warn(format!("game_fixes_off: no game fix is called '{name}'"));
+                                }
+                            }
+                            config.game_fixes_off = Some(names);
+                        }
                         "idle_hint" => match parse_bool(value) {
                             Some(on) => config.idle_hint = Some(on),
                             None => warn(format!("invalid idle_hint '{}' (true or false)", value)),

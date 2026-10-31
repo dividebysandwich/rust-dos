@@ -1,0 +1,17 @@
+1 -
+2 WOWCallback16
+3 WOWCallback16Ex
+4 WOWDirectedYield16
+5 WOWGetVDMPointer
+6 WOWGetVDMPointerFix
+7 WOWGetVDMPointerUnfix
+8 WOWGlobalAlloc16
+9 WOWGlobalAllocLock16
+10 WOWGlobalFree16
+11 WOWGlobalLock16
+12 WOWGlobalLockSize16
+13 WOWGlobalUnlock16
+14 WOWGlobalUnlockFree16
+15 WOWHandle16
+16 WOWHandle32
+17 WOWYield16
