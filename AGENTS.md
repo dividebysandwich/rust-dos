@@ -90,6 +90,13 @@ that it improves on main. Steps, in this order:
    Windows behaviour it contradicts. Disagreeing isn't evidence. List
    each rejected finding and its evidence in the comment that explains
    the review's judgement calls, so a later reader can disagree.
+
+   A confirmed finding the pull request doesn't fix ends one of two
+   ways. Either the comment explains why the code is right as it is,
+   matching the real hardware or Windows, or the finding gets an issue
+   that says what the real system does, what the emulator does, and why
+   it waits, and the comment links it. "Left as is" or "out of scope"
+   with neither is a decision put off with no record of it.
 3. Validate it, after the review and with its fixes: run the real game
    or program the change is for, where there is one, on the build of the
    branch, and compare with main.
