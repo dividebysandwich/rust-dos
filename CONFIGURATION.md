@@ -10,7 +10,8 @@ of their own. See the [README](README.md) for everything else.
   [`[achievements]`](#achievements), [`[drives]`](#drives) and
   [`[autoexec]`](#autoexec)
 * [Settings window](#settings-window)
-* [Game profiles](#game-profiles) and [RetroAchievements](#retroachievements)
+* [Game profiles](#game-profiles), [game fixes](#game-fixes) and
+  [RetroAchievements](#retroachievements)
 * [Mounting drives](#mounting-drives), [disk images](#disk-images) and
   [disk speed and noises](#disk-speed-and-noises)
 * [Networking at a glance](#networking-at-a-glance): what the IPX driver,
@@ -588,6 +589,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   `idle_skip` this isn't exact: the loop runs fewer passes than on a real
   machine, which Windows doesn't notice, but timing-sensitive programs
   might. Off by default.
+* `game_fixes` fixes a few games that go wrong on real PCs too, or that
+  can't work without their original disks, once Rust-DOS recognises
+  them: `true` (the default) or `false`, which runs them as a real PC
+  would. `game_fixes_off` leaves out the fixes it names, separated by
+  commas (`game_fixes_off=jukebox-sb-mix`). [Game fixes](#game-fixes)
+  lists them. A change takes effect at the DOS prompt.
 * `hard_disk_speed` and `floppy_disk_speed` slow the disks down to those
   of the time; see [Disk speed and noises](#disk-speed-and-noises).
 
@@ -702,22 +709,6 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   imports as this one. Put it in the game's
   [profile](#game-profiles) to have it for that game only. A change takes
   effect at the DOS prompt.
-* `sb_game_fix` corrects the Sound Blaster driver of a game that plays
-  badly on every card, real ones included, so it plays as it was meant
-  to: `on` (the default) or `off`, which plays it as a real card does.
-  This goes beyond the real hardware. rust-dos recognises the driver by
-  its code when the game resets the DSP, and patches that code in
-  memory; nothing changes for other programs. It knows the driver of two
-  Titus games of 1993, Prehistorik 2 and Blues Brothers: Jukebox
-  Adventure. It scales its unsigned samples by the notes' volumes without
-  taking off their centre first, and starts each block of the mix at 0,
-  so every note that starts or stops moves the centre line, which
-  clicks, and the output sits far below the middle. The fix scales the
-  samples around their centre and starts the mix at the middle. The log
-  has an `[SB] ... patched` line when it applies. The patch is part of
-  the game's memory, so a save state keeps it, and a state saved without
-  it stays unpatched until the game starts again: the fix leaves a
-  driver that has already set itself up.
 * `hard_disk_noise` and `floppy_disk_noise` add the drives' noises; see
   [Disk speed and noises](#disk-speed-and-noises).
 
@@ -1651,6 +1642,50 @@ or 7z archive (`pool.zip/EXTRAS/Rules.pdf`). **Ins** in the list adds a
 file to the profile. A game played from a [package](GAME-PACKAGES.md) has
 the files in the package's `EXTRAS` folder too.
 [GAME-PACKAGES.md](GAME-PACKAGES.md) is a guide to manuals and packages.
+
+## Game fixes
+
+A few games go wrong in a way the emulator shouldn't copy: on every
+real PC too, or without the original disks they check for. Rust-DOS
+recognises them and fixes them, which goes beyond the real hardware.
+Nothing changes for a program it doesn't recognise. `game_fixes=false`
+in `[emulator]` turns them all off, and `game_fixes_off` leaves out the
+ones it names. The log has a `[game fix]` line, with the fix's name,
+each time one applies.
+
+Some fixes patch the game's code in memory. They look for it each time
+a program resets the Sound Blaster's DSP, which a game's sound driver
+does before it sets anything up, and patch only code that is there as
+the game shipped it and hasn't set itself up yet. The patch is part of
+the game's memory, so a save state keeps it, and a state saved without
+it stays unpatched until the game starts again. Others skip a program
+the game starts, with the exit code it would have given.
+
+| Name | Game | What goes wrong | What the fix does |
+|------|------|-----------------|-------------------|
+| `prehistorik2-sb-mix` | Prehistorik 2 | Music and effects click at every note and sit far below the centre line, on a real Sound Blaster too | Patches the driver to mix around the centre |
+| `jukebox-sb-mix` | Blues Brothers: Jukebox Adventure | The same driver, with the same clicks | The same, for its build of the driver |
+| `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
+| `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
+
+The two Titus games share a sound engine that turns each signed sample
+into an unsigned 0 to 63 and scales it by the note's volume without
+taking off its centre first, and starts each block of the mix at 0. So
+every note that starts, stops or changes volume moves the centre line,
+which clicks, and the output sits far below the middle. A real card
+plays it the same way. The fix scales the samples around their centre
+and starts each block at the middle; the music and effects themselves
+don't change.
+
+MicroProse's DSWAP.EXE checks the install disk with sector reads, and
+PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
+for play. PLAYER.EXE is a common name (Millennia's intro player has it
+too), so only the one with DSWAP.EXE beside it is skipped.
+
+To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of
+its own, the game, the reason, and how to recognise it; a test that
+runs it (`tests/game_fixes_tests.rs`, or `tests/exec_tests.rs` for a
+program skipped as it starts); and a row in the table above.
 
 ## RetroAchievements
 

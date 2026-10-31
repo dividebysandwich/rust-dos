@@ -992,10 +992,12 @@ fn long_pages_have_a_scroll_bar() {
             .collect()
     };
 
-    // The Display page fits.
-    ui.show_page(Page::Display);
-    ui.draw(&mut frame);
-    assert!(bar(&ui).is_empty());
+    // The Display and Sound pages fit.
+    for page in [Page::Display, Page::Sound] {
+        ui.show_page(page);
+        ui.draw(&mut frame);
+        assert!(bar(&ui).is_empty(), "{:?}", page);
+    }
 
     // The Emulator page doesn't: the thumb is at the top, and below it the
     // bar pages down.

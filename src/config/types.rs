@@ -299,9 +299,6 @@ pub struct SoundConfig {
     /// Whether PIT channel 2 starts with its gate (port 61h bit 0) high and
     /// its count running (`pit2_gate_at_start`).
     pub pit2_gate_at_start: bool,
-    /// Whether the Sound Blaster drivers of games that play badly on every
-    /// card are patched when rust-dos recognises them (`sb_game_fix`).
-    pub sb_game_fix: bool,
 }
 
 impl MidiSynth {
@@ -338,7 +335,6 @@ impl Default for SoundConfig {
             lpt_dac: LptDacType::None,
             tandy: crate::sn76489::TandySound::Auto,
             pit2_gate_at_start: false,
-            sb_game_fix: true,
         }
     }
 }
@@ -519,10 +515,6 @@ impl SoundConfig {
             "pit2_gate_at_start" => {
                 self.pit2_gate_at_start = parse_bool(value)
                     .ok_or_else(|| format!("invalid pit2_gate_at_start '{}' (true or false)", value))?;
-            }
-            "sb_game_fix" => {
-                self.sb_game_fix =
-                    parse_bool(value).ok_or_else(|| format!("invalid sb_game_fix '{}' (on or off)", value))?;
             }
             _ => return Err(format!("unknown setting '{}'", key)),
         }

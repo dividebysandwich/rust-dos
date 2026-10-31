@@ -124,6 +124,10 @@ pub struct Settings {
     pub idle_skip: bool,
     /// Let Windows' idle calls wait for the next event (not exact).
     pub idle_hint: bool,
+    /// Apply the fixes for particular games (`game_fixes`), but for the
+    /// ones named in `game_fixes_off`.
+    pub game_fixes: bool,
+    pub game_fixes_off: Vec<String>,
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
@@ -202,6 +206,8 @@ impl Default for Settings {
             rewind_memory: 256,
             idle_skip: true,
             idle_hint: false,
+            game_fixes: true,
+            game_fixes_off: Vec::new(),
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
@@ -348,6 +354,8 @@ impl Settings {
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),
             idle_skip: config.idle_skip.unwrap_or(default.idle_skip),
             idle_hint: config.idle_hint.unwrap_or(default.idle_hint),
+            game_fixes: config.game_fixes.unwrap_or(default.game_fixes),
+            game_fixes_off: config.game_fixes_off.clone().unwrap_or(default.game_fixes_off),
             keyboard_layout: config.keyboard_layout.unwrap_or(default.keyboard_layout),
             sound: config.sound.clone(),
             disk: config.disk,
@@ -477,6 +485,12 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
         (Emulator, "idle_skip", yes_no(settings.idle_skip)),
         (Emulator, "idle_hint", yes_no(settings.idle_hint)),
+        (Emulator, "game_fixes", yes_no(settings.game_fixes)),
+        (
+            Emulator,
+            "game_fixes_off",
+            Some(settings.game_fixes_off.join(",")).filter(|names| !names.is_empty()),
+        ),
         (Emulator, "hard_disk_speed", Some(settings.disk.hard_disk_speed.name().to_string())),
         (Emulator, "floppy_disk_speed", Some(settings.disk.floppy_disk_speed.name().to_string())),
         (Sound, "sbtype", Some(if sound.sb_installed { sb.model.name() } else { "none" }.to_string())),
@@ -508,7 +522,6 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Sound, "lpt_dac", Some(sound.lpt_dac.name().to_string())),
         (Sound, "tandy", Some(sound.tandy.name().to_string())),
         (Sound, "pit2_gate_at_start", yes_no(sound.pit2_gate_at_start)),
-        (Sound, "sb_game_fix", on_off(sound.sb_game_fix)),
         (Sound, "hard_disk_noise", Some(settings.disk.hard_disk_noise.name().to_string())),
         (Sound, "floppy_disk_noise", Some(settings.disk.floppy_disk_noise.name().to_string())),
     ];
@@ -540,6 +553,16 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
 
 /// The DLL names of a `win32_dlls_replace` list: separated by commas or
 /// spaces, lowercase, without ".dll".
+pub fn fix_names(value: &str) -> Vec<String> {
+    value
+        .split([',', ' ', '\t'])
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The names in a list of DLLs (`win32_dlls_replace`): lowercase, without
+/// `.dll`.
 pub fn dll_names(value: &str) -> Vec<String> {
     value
         .split([',', ' ', '\t'])

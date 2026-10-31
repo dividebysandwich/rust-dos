@@ -1,8 +1,9 @@
-//! `sb_game_fix`: a known broken Sound Blaster driver is patched when it
-//! resets the DSP, and the patched code mixes around the centre line.
+//! `game_fixes`: the code fixes are applied when a program resets the
+//! DSP, and the patched Sound Blaster drivers mix around the centre line.
+//! The fixes that skip a program at EXEC are tested in exec_tests.rs.
 
 use rust_dos::cpu::Cpu;
-use rust_dos::sb_game_fix::{DRIVERS, Driver};
+use rust_dos::game_fixes::{CodePatch, Kind, by_name};
 use std::path::PathBuf;
 
 /// The driver's code segment in these tests.
@@ -11,7 +12,8 @@ const BASE: usize = (CS as usize) << 4;
 
 /// Where the tests run each driver's code, by offset in its segment.
 struct Layout {
-    game: &'static str,
+    /// The fix's name.
+    name: &'static str,
     /// Code around the patches that the tests run: xor cl,cl before the
     /// volume table's loop, mov al,es:[di] before and stosb / loop after
     /// the effect conversion, and what follows a patch the tests run on.
@@ -26,7 +28,7 @@ struct Layout {
 
 const LAYOUTS: [Layout; 2] = [
     Layout {
-        game: "Prehistorik 2",
+        name: "prehistorik2-sb-mix",
         around: &[
             (0x1E8E, &[0x32, 0xC9]),
             (0x1F3F, &[0x26, 0x8A, 0x05]),
@@ -37,7 +39,7 @@ const LAYOUTS: [Layout; 2] = [
         silence: (0x2112, 0x2119),
     },
     Layout {
-        game: "Blues Brothers: Jukebox Adventure",
+        name: "jukebox-sb-mix",
         around: &[
             (0x4278, &[0x32, 0xC9]),
             (0x4332, &[0x26, 0x8A, 0x05]),
@@ -56,22 +58,34 @@ const LAYOUTS: [Layout; 2] = [
     },
 ];
 
-fn driver(game: &str) -> &'static Driver {
-    DRIVERS.iter().find(|d| d.game == game).unwrap()
+/// The code of the fix called `name`.
+fn code(name: &str) -> &'static CodePatch {
+    match by_name(name).unwrap().kind {
+        Kind::Code(code) => code,
+        Kind::SkipAtExec { .. } => panic!("{name} isn't a code fix"),
+    }
+}
+
+/// Write the pieces of `code` at CS:0000.
+fn load(cpu: &mut Cpu, code: &CodePatch) {
+    let pieces = code
+        .checks
+        .iter()
+        .map(|b| (b.at, b.bytes))
+        .chain(code.patches.iter().map(|(old, _)| (old.at, old.bytes)));
+    for (at, bytes) in pieces {
+        for (i, &byte) in bytes.iter().enumerate() {
+            cpu.bus.write_8(BASE + at + i, byte);
+        }
+    }
 }
 
 /// A machine with the driver's pieces at CS:0000, and the code around the
 /// patches that the tests run.
 fn machine(layout: &Layout) -> Cpu {
     let mut cpu = Cpu::new(PathBuf::from("."));
-    let driver = driver(layout.game);
-    let pieces = driver
-        .checks
-        .iter()
-        .map(|b| (b.at, b.bytes))
-        .chain(driver.patches.iter().map(|(old, _)| (old.at, old.bytes)))
-        .chain(layout.around.iter().copied());
-    for (at, bytes) in pieces {
+    load(&mut cpu, code(layout.name));
+    for &(at, bytes) in layout.around {
         for (i, &byte) in bytes.iter().enumerate() {
             cpu.bus.write_8(BASE + at + i, byte);
         }
@@ -116,13 +130,13 @@ fn the_patched_volume_table_scales_around_the_centre() {
                     table[(volume * 64 + sample) as usize] as i8,
                     want,
                     "{}: volume {} sample {}",
-                    layout.game,
+                    layout.name,
                     volume,
                     sample
                 );
             }
         }
-        assert_eq!(cpu.bus.read_8(0x3_12C1 + 65 * 64), 0, "{}", layout.game);
+        assert_eq!(cpu.bus.read_8(0x3_12C1 + 65 * 64), 0, "{}", layout.name);
     }
 }
 
@@ -140,7 +154,7 @@ fn the_patched_effects_and_empty_blocks_sit_at_128() {
         cpu.set_cx(samples.len() as u16);
         run(&mut cpu, layout.effects);
         let converted = read(&mut cpu, 0x4_0000, 4);
-        assert_eq!(converted, [96, 127, 128, 159], "{}", layout.game);
+        assert_eq!(converted, [96, 127, 128, 159], "{}", layout.name);
 
         // A block without an effect: 168 bytes of 80h.
         cpu.set_es(0x5000);
@@ -148,8 +162,8 @@ fn the_patched_effects_and_empty_blocks_sit_at_128() {
         cpu.set_cx(0);
         run(&mut cpu, layout.silence);
         let block = read(&mut cpu, 0x5_0000, 0xA9);
-        assert!(block[..0xA8].iter().all(|&b| b == 0x80), "{}", layout.game);
-        assert_eq!(block[0xA8], 0, "{}", layout.game);
+        assert!(block[..0xA8].iter().all(|&b| b == 0x80), "{}", layout.name);
+        assert_eq!(block[0xA8], 0, "{}", layout.name);
     }
 }
 
@@ -175,11 +189,15 @@ fn nothing_changes_with_the_fix_off() {
     for layout in &LAYOUTS {
         let mut cpu = machine(layout);
         let before = read(&mut cpu, BASE, 0x4800);
-        cpu.bus.sb_game_fix = false;
+        cpu.bus.game_fixes = false;
         reset_dsp(&mut cpu);
-        assert_eq!(read(&mut cpu, BASE, 0x4800), before, "{}", layout.game);
-        cpu.bus.sb_game_fix = true;
+        assert_eq!(read(&mut cpu, BASE, 0x4800), before, "{}", layout.name);
+        cpu.bus.game_fixes = true;
+        cpu.bus.game_fixes_off = vec![layout.name.to_string()];
         reset_dsp(&mut cpu);
-        assert_ne!(read(&mut cpu, BASE, 0x4800), before, "{}", layout.game);
+        assert_eq!(read(&mut cpu, BASE, 0x4800), before, "{}", layout.name);
+        cpu.bus.game_fixes_off.clear();
+        reset_dsp(&mut cpu);
+        assert_ne!(read(&mut cpu, BASE, 0x4800), before, "{}", layout.name);
     }
 }

@@ -222,11 +222,21 @@ pit2_gate_at_start=maybe
 }
 
 #[test]
-fn sb_game_fixes_are_on_unless_turned_off() {
-    assert!(parse("[sound]\n", Path::new("/cfg"), None).sound.sb_game_fix);
-    let config = parse("[sound]\nsb_game_fix=off\n", Path::new("/cfg"), None);
+fn game_fixes_are_on_unless_turned_off() {
+    let settings = Settings::from_config(&parse("[emulator]\n", Path::new("/cfg"), None));
+    assert!(settings.game_fixes);
+    assert!(settings.game_fixes_off.is_empty());
+    let config = parse(
+        "[emulator]\ngame_fixes=false\ngame_fixes_off=Jukebox-SB-Mix, microprose-player\n",
+        Path::new("/cfg"),
+        None,
+    );
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
-    assert!(!config.sound.sb_game_fix);
+    let settings = Settings::from_config(&config);
+    assert!(!settings.game_fixes);
+    assert_eq!(settings.game_fixes_off, ["jukebox-sb-mix", "microprose-player"]);
+    let config = parse("[emulator]\ngame_fixes_off=no-such-fix\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
 }
 
 #[test]
@@ -650,7 +660,6 @@ fn changed_settings() -> Settings {
         lpt_dac: LptDacType::Disney,
         tandy: crate::sn76489::TandySound::On,
         pit2_gate_at_start: true,
-        sb_game_fix: false,
     };
     Settings {
         scale: 3,
@@ -723,6 +732,8 @@ fn changed_settings() -> Settings {
         rewind_memory: 512,
         idle_skip: false,
         idle_hint: true,
+        game_fixes: false,
+        game_fixes_off: vec!["jukebox-sb-mix".to_string(), "microprose-dswap".to_string()],
         sound,
         disk: DiskSettings {
             hard_disk_speed: DiskSpeed::Medium,
@@ -1036,13 +1047,15 @@ fn saving_all_fills_in_every_setting() {
     for (section, key, _) in entries(&settings, Some(home)) {
         // (The file's SoundFont; no Ultrasound directory, MT-32 or
         // Sound Canvas, LAN password, RetroAchievements account,
-        // printer paths and programs or Win32 DLL folder of its own.)
+        // printer paths and programs, Win32 DLL folder or game fixes left
+        // out of its own.)
         let wanted = !matches!(
             key,
             "ultradir" | "awe32rom" | "mt32roms" | "mt32lib" | "sc55roms" | "midiport" | "password" | "username" | "token"
                 | "verite_rom"
                 | "win32_dlls"
                 | "win32_dlls_replace"
+                | "game_fixes_off"
                 | "docpath" | "fontpath" | "device" | "print_command" | "open_with" | "scene"
         );
         assert_eq!(has_key(&saved.lines().map(str::to_string).collect::<Vec<_>>(), section, key), wanted, "{}\n{}", key, saved);

@@ -109,20 +109,25 @@ impl Bus {
         }
     }
 
-    /// Patch a known broken Sound Blaster driver in conventional memory
-    /// (`sb_game_fix`), as a program resets the DSP.
-    pub(super) fn apply_sb_game_fix(&mut self) {
+    /// Apply the code fixes (`game_fixes`) whose code is in conventional
+    /// memory, as a program resets the DSP.
+    pub(super) fn apply_code_fixes(&mut self) {
         let end = self.ram.len().min(0xA0000);
-        let Some((driver, base)) = crate::sb_game_fix::find(&self.ram[..end]) else {
-            return;
-        };
-        for (addr, byte) in crate::sb_game_fix::writes(driver, base) {
-            self.write_8(addr, byte);
+        let found = crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
+        for (fix, code, base) in found {
+            for (addr, byte) in crate::game_fixes::writes(code, base) {
+                self.write_8(addr, byte);
+            }
+            self.log_string(&format!(
+                "[game fix] {}: {} ({}): code at {:05X} patched",
+                fix.name, fix.game, fix.reason, base
+            ));
         }
-        self.log_string(&format!(
-            "[SB] {}'s Sound Blaster driver at {:05X}: patched (sb_game_fix)",
-            driver.game, base
-        ));
+    }
+
+    /// Whether the `game_fixes` settings let `fix` apply.
+    pub fn game_fix_enabled(&self, fix: &crate::game_fixes::Fix) -> bool {
+        crate::game_fixes::enabled(fix, self.game_fixes, &self.game_fixes_off)
     }
 
     /// The Sound Blaster's resources now, as a BLASTER string: the base,

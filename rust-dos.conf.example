@@ -296,6 +296,12 @@
 # event, as HLT does. Saves host CPU on an idle Windows desktop, but isn't
 # exact: the idle loop runs fewer passes than it would.
 #idle_hint=false
+# Fix a few games that go wrong on real PCs too, or that can't work
+# without their original disks, once Rust-DOS recognises them: true (the
+# default) or false. game_fixes_off leaves out the fixes it names,
+# separated by commas. CONFIGURATION.md's "Game fixes" lists them.
+#game_fixes=true
+#game_fixes_off=
 # How fast hard disks are, as DOSBox Staging has it:
 #   maximum  as fast as possible, no slowdown (the default)
 #   fast     a mid-1990s hard disk (~15 MB/s)
@@ -393,11 +399,6 @@
 # Xiao San Guo Zhi, whose random numbers come out the same every time
 # without it. A change takes effect at the DOS prompt.
 #pit2_gate_at_start=false
-# Correct the Sound Blaster driver of a game that plays badly on every
-# card, real ones too, when rust-dos recognises its code: on (the default)
-# or off, which plays it as a real card does. It knows Prehistorik 2 and
-# Blues Brothers: Jukebox Adventure, whose sound clicks at every note.
-#sb_game_fix=on
 # The noises the hard disks and floppy drives make: off (the default),
 # seek-only (the heads moving), or on (the disk spinning as well). They
 # sound best with the disk speeds above set lower than maximum.

@@ -195,13 +195,13 @@ impl Page {
                 Memsize, Ems, Umb, DosHigh, Dpmi,
                 DosVersion, IdeHardDisks, BootCdrom, FloppyController, HardDiskSpeed, FloppyDiskSpeed, Joystick,
                 Deadzone, MouseSensitivity, MouseAutocapture, MouseCaptureMessages, MouseMenuHold, PauseInSettings, KeyboardLayout, Rewind, RewindMemory, CaptureDir, RecordUi, RecordShader, Autoexec,
-                ShellSuggestions, ShellColors, SaveShellHistory, VersionCheck, AlmanacAuto,
+                ShellSuggestions, ShellColors, SaveShellHistory, GameFixes, VersionCheck, AlmanacAuto,
                 AlmanacFetch, AlmanacReport,
             ],
             Page::Sound => &[
                 SbType, SbPorts, Awe32Rom, Awe32Download, Awe32Ram, Opl, Gus, GusPorts, GusDrive, UltraDir, Midi,
                 Sc55Roms, Sc55Model, Sc55Download, SoundFont, Mt32Roms, Mt32Model, MidiPort, LptDac, TandySound,
-                Pit2GateAtStart, SbGameFix, HardDiskNoise, FloppyDiskNoise,
+                Pit2GateAtStart, HardDiskNoise, FloppyDiskNoise,
             ],
             Page::Mixer => &[
                 Volume(Channel::Master),

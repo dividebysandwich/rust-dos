@@ -292,6 +292,7 @@ impl Item {
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
             VersionCheck => on_off(|s, on| s.version_check = on),
             AlmanacAuto => on_off(|s, on| s.almanac_auto = on),
+            GameFixes => on_off(|s, on| s.game_fixes = on),
             Rewind => on_off(|s, on| s.rewind = on),
             RecordUi => on_off(|s, on| s.record_ui = on),
             RecordShader => on_off(|s, on| s.record_shader = on),
@@ -366,7 +367,6 @@ impl Item {
             LptDac => each(s, crate::lpt_dac::LptDacType::ALL, |s, dac| s.sound.lpt_dac = dac),
             TandySound => each(s, crate::sn76489::TandySound::ALL, |s, tandy| s.sound.tandy = tandy),
             Pit2GateAtStart => on_off(|s, on| s.sound.pit2_gate_at_start = on),
-            SbGameFix => on_off(|s, on| s.sound.sb_game_fix = on),
             Ipx => each(s, crate::net::IpxMode::ALL, |s, mode| s.network.ipx = mode),
             IpxIrq => each(s, [None, Some(3), Some(4), Some(5), Some(7), Some(9), Some(10), Some(11), Some(15)], |s, irq| {
                 s.network.ipx_irq = irq
