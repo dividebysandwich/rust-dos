@@ -413,6 +413,10 @@ fn pacer_counts_the_backlog_it_drops_but_not_a_pause() {
     }
     frame(&mut bus, &mut pacer, 6016);
     assert_eq!(pacer.lost(), lost);
+    // Three seconds with no frames at all (a page in the background): the
+    // frontend stopped, and that is no measure of the host.
+    frame(&mut bus, &mut pacer, 9016);
+    assert_eq!(pacer.lost(), lost);
 }
 
 #[test]
@@ -603,6 +607,7 @@ fn auto_speed_is_not_taken_down_by_the_host_estimate_alone() {
     let mut bus = bus_at(60_000);
     let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
     for _ in 0..20 {
+        pacer.batch_end(&bus.clock, start);
         let executed = 1_000_000;
         bus.clock.icount += executed;
         // About 30,000 instructions per ms fit into a frame.
@@ -610,6 +615,20 @@ fn auto_speed_is_not_taken_down_by_the_host_estimate_alone() {
         let next = pacer.end_frame(&bus, true, executed, exec, Duration::ZERO);
         assert_eq!(next, None);
     }
+}
+
+#[test]
+fn auto_speed_goes_by_the_host_estimate_where_frames_do_not_run_by_the_wall_clock() {
+    // Libretro's frontend runs the frames, and no backlog is ever dropped:
+    // the estimate is all that tells a scene is too heavy for the host.
+    let start = Instant::now();
+    let mut bus = bus_at(60_000);
+    let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, start);
+    let executed = 1_000_000;
+    bus.clock.icount += executed;
+    let exec = Duration::from_nanos(executed * 28);
+    let next = pacer.end_frame(&bus, true, executed, exec, Duration::ZERO);
+    assert!(next.is_some_and(|speed| speed < 35_000), "{:?}", next);
 }
 
 #[test]

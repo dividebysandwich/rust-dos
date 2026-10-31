@@ -23,6 +23,11 @@ const FRAME: Duration = Duration::from_micros(16_667);
 /// How far emulated time may fall behind the wall clock before the backlog
 /// is dropped rather than caught up.
 const MAX_LAG: Duration = Duration::from_millis(50);
+/// A backlog of this much is one gap: running frames, it is dropped at
+/// `MAX_LAG`. The frontend stopped (a page in the background, a window
+/// being dragged, the host asleep), which says nothing of whether the host
+/// keeps up with the speed.
+const GAP: Duration = Duration::from_secs(2);
 
 /// How many frames of emulated time a frame runs while fast forwarding,
 /// as far as the host keeps up.
@@ -579,6 +584,10 @@ pub struct Pacer {
     lost_ns: u64,
     last_ns: u64,
     ran: bool,
+    /// Whether the frames run by the wall clock (`batch_end`). A frontend
+    /// that runs them at its own pace (libretro) drops nothing, so that
+    /// `lost_ns` says nothing and the host estimate is all there is.
+    wall_paced: bool,
     /// Wall-clock instant that corresponds to emulated time `anchor_ticks`.
     anchor_wall: Instant,
     anchor_ticks: u64,
@@ -606,6 +615,7 @@ impl Pacer {
             lost_ns: 0,
             last_ns: 0,
             ran: false,
+            wall_paced: false,
             anchor_wall: now,
             anchor_ticks: 0,
             next_frame: now,
@@ -618,20 +628,27 @@ impl Pacer {
 
     /// Start or stop fast forwarding. When it stops, emulated time goes on
     /// from where it got to, rather than waiting for the wall clock to catch
-    /// up with it.
+    /// up with it. `Auto` measures afresh: the program and the host are the
+    /// same, so how the host kept up stays.
     pub fn set_fast_forward(&mut self, on: bool, clock: &Clock, now: Instant) {
         if self.fast_forward && !on {
-            self.rebase(clock, now);
+            self.auto.start_over();
+            self.anchor_to(clock, now);
         }
         self.fast_forward = on;
     }
 
     /// Go on from the clock's time as it is now, after it jumped (a save
-    /// state loaded, fast forward let go): without this, emulated time
-    /// ahead of the wall clock would stand still until the wall clock
-    /// caught up, and time behind it would race to catch up.
+    /// state loaded): without this, emulated time ahead of the wall clock
+    /// would stand still until the wall clock caught up, and time behind it
+    /// would race to catch up.
     pub fn rebase(&mut self, clock: &Clock, now: Instant) {
         self.auto.reset();
+        self.anchor_to(clock, now);
+    }
+
+    /// Make `now` the wall-clock time of the clock's emulated time.
+    fn anchor_to(&mut self, clock: &Clock, now: Instant) {
         self.anchor_wall = now;
         self.anchor_ticks = clock.now_ticks();
         self.next_frame = now;
@@ -709,6 +726,7 @@ impl Pacer {
     /// behind (slow host, debugger pause), the backlog is dropped and only
     /// one frame's worth is scheduled.
     pub fn batch_end(&mut self, clock: &Clock, now: Instant) -> u64 {
+        self.wall_paced = true;
         self.deadline = None;
         self.period = FRAME;
         let emulated = clock.now_ticks();
@@ -740,6 +758,7 @@ impl Pacer {
     /// with the Start Address it set before. A host that falls behind skips
     /// retraces rather than slowing the machine down.
     pub fn retrace_batch_end(&mut self, clock: &Clock, refresh: &CrtTiming, now: Instant) -> u64 {
+        self.wall_paced = true;
         if self.fast_forward {
             return self.batch_end(clock, now);
         }
@@ -764,10 +783,12 @@ impl Pacer {
     }
 
     /// Emulated time fell `ticks` behind the wall clock, and the backlog is
-    /// dropped: lost, unless the machine was paused until now.
+    /// dropped: lost, unless the machine was paused until now or the
+    /// frontend stopped (`GAP`).
     fn lose(&mut self, ticks: u64) {
-        if self.ran {
-            self.lost_ns += ticks_to_duration(ticks).as_nanos() as u64;
+        let backlog = ticks_to_duration(ticks);
+        if self.ran && backlog < GAP {
+            self.lost_ns += backlog.as_nanos() as u64;
         }
     }
 
@@ -796,11 +817,12 @@ impl Pacer {
     /// retune the speed so that executing one frame's worth of
     /// instructions plus the rest of the frame's work (`overhead`) fits
     /// into `MAX_BUSY_SHARE` of a frame. At auto, the speed the running
-    /// program needs (`AutoSpeed`), no more than that; `protected` says
-    /// whether it switched to protected mode (`Cpu::pm_latched`), and a
-    /// program starting or ending starts the search over. `executed`
-    /// counts only instructions that actually ran, not ones skipped while
-    /// waiting for an interrupt.
+    /// program needs (`AutoSpeed`), which each measurement keeps to what
+    /// the host's estimate and the emulated time it dropped allow;
+    /// `protected` says whether it switched to protected mode
+    /// (`Cpu::pm_latched`), and a program starting or ending starts the
+    /// search over. `executed` counts only instructions that actually ran,
+    /// not ones skipped while waiting for an interrupt.
     /// Returns the new speed if it changed.
     pub fn end_frame(
         &mut self,
@@ -871,9 +893,18 @@ impl Pacer {
                 // Fast forwarding, the host's time says nothing of the
                 // program's needs.
                 if self.fast_forward {
-                    None
-                } else {
-                    self.auto.update(bus, protected, host_max, self.lost_ns)
+                    return None;
+                }
+                let next = self.auto.update(bus, protected, host_max, self.lost_ns);
+                if self.wall_paced {
+                    return next;
+                }
+                // Nothing tells that the host fell behind, but for its
+                // estimate: a heavier scene than it keeps up with at this
+                // speed.
+                match next.unwrap_or(current) {
+                    speed if speed > host_max && current > host_max => Some(host_max),
+                    speed => (speed != current).then_some(speed),
                 }
             }
         }

@@ -101,12 +101,12 @@ const DROPPED: f64 = 0.8;
 /// loses a step for a while and no more, and one that can't run a speed
 /// meets it again only that often.
 const KEPT_UP: f64 = 0.95;
+const LAGGED_WINDOWS: u32 = HOLD_WINDOWS;
 /// Falling behind once at less than the host estimate over this is a stall.
 const STALLED: f64 = 2.0;
 /// How many steps of `FINE_STEP` above the record's speed are tried for its
 /// frame rate (see `Record`).
 const CLIMBS: u32 = 2;
-const LAGGED_WINDOWS: u32 = HOLD_WINDOWS;
 /// A program that spends this share of its time polling is waiting, and
 /// its speed goes down by `WAITING_STEP` a measurement.
 const WAITING: f64 = 0.3;
@@ -310,16 +310,21 @@ struct Mark {
     polls: u64,
     status_reads: u64,
     output: u64,
-    /// The emulated time dropped behind the wall clock.
+    /// The emulated time dropped behind the wall clock, and the emulated
+    /// time that was at. A measurement that isn't settled leaves these for
+    /// the next, whose pace covers both.
     lost_ns: u64,
+    lost_at: u64,
 }
 
 impl Mark {
     fn of(bus: &Bus, lost_ns: u64) -> Self {
         let a = &bus.activity;
+        let ns = bus.clock.now_ns();
         Mark {
             lost_ns,
-            ns: bus.clock.now_ns(),
+            lost_at: ns,
+            ns,
             icount: bus.clock.icount,
             idle: bus.clock.idle,
             bursts: a.bursts,
@@ -534,7 +539,7 @@ impl AutoSpeed {
 
     /// Measure afresh. How the host kept up stays: it says the same of
     /// what the same program does next.
-    fn start_over(&mut self) {
+    pub fn start_over(&mut self) {
         self.mark = None;
         self.settle_until = 0;
         self.unsettled = None;
@@ -573,6 +578,8 @@ impl AutoSpeed {
             if trace() {
                 eprintln!("[auto] work done: back to {}", before);
             }
+            // The work may have found the host short of that speed.
+            let before = self.lagged.map_or(before, |(most, _)| before.min(most));
             self.start_over();
             self.settle_until = now.ns + SETTLE_NS;
             return (before != bus.clock.cycles_per_ms()).then_some(before);
@@ -618,20 +625,26 @@ impl AutoSpeed {
             let settled = (rate / before - 1.0).abs() <= AGREE || tries + 1 >= TRIES;
             if !settled {
                 self.unsettled = Some((rate, tries + 1));
-                // What this measurement dropped counts in the next.
-                self.mark = Some(Mark { lost_ns: mark.lost_ns, ..now });
+                // What this measurement dropped counts in the next, over
+                // the time of both.
+                self.mark = Some(Mark {
+                    lost_ns: mark.lost_ns,
+                    lost_at: mark.lost_at,
+                    ..now
+                });
                 return cut;
             }
             fps = Some((rate + before) / 2.0);
         }
         self.unsettled = None;
+        let paced = now.ns.saturating_sub(mark.lost_at);
         let measured = Measurement {
             fps,
             polling: if polls > POLLS_PER_SECOND { status.max(0.5) } else { status },
             halted: now.idle.saturating_sub(mark.idle) as f64 / ran,
             output: (now.output - mark.output) as f64 / seconds,
             refresh,
-            pace: ns as f64 / (ns + now.lost_ns.saturating_sub(mark.lost_ns)) as f64,
+            pace: paced as f64 / (paced + now.lost_ns.saturating_sub(mark.lost_ns)) as f64,
         };
         let working = self.working.take();
         let next = self.decide(current, &measured, protected, host_max);
@@ -658,7 +671,9 @@ impl AutoSpeed {
     /// has.
     fn least(&self, protected: bool, host_max: u32) -> u32 {
         if protected {
-            self.base.max(PROTECTED_LEAST).max(self.protected_least.min(host_max))
+            self.base
+                .max(PROTECTED_LEAST)
+                .max(self.protected_least.min(host_max))
         } else {
             self.base
         }
@@ -684,14 +699,17 @@ impl AutoSpeed {
         // down to what it ran (no less than half): a step a measurement
         // from where a step up went too far would leave it behind for
         // many.
+        let kept_up = self.pace >= KEPT_UP;
         self.pace = self.pace * 0.75 + m.pace * 0.25;
         let lagged = m.pace < KEPT_UP && self.pace < KEPT_UP;
         let again = std::mem::replace(&mut self.behind, lagged);
-        // Behind once at well under what the host runs, it stalled: that
-        // says nothing of its limit, and a cap from it would hold back the
-        // work of a program that hit one while starting. A cap at the least
-        // speed holds nothing but such work back either.
-        let stalled = !again && self.lagged.is_none() && c * STALLED < top as f64;
+        // Behind once at well under what the host runs, after keeping up,
+        // it stalled: that says nothing of its limit, and a cap from it
+        // would hold back the work of a program that hit one while
+        // starting. Behind every other measurement, the smoothed pace stays
+        // low, and that is no stall. A cap at the least speed holds nothing
+        // but such work back either.
+        let stalled = kept_up && self.lagged.is_none() && c * STALLED < top as f64;
         if lagged && !stalled {
             let cut = if again {
                 (m.pace * KEPT_UP).clamp(0.5, 1.0 / FINE_STEP)
@@ -701,9 +719,14 @@ impl AutoSpeed {
             let most = clamp(c * cut);
             self.lagged = (most > base).then_some((most, LAGGED_WINDOWS));
         } else if let (false, Some((most, left))) = (lagged, self.lagged) {
-            let most = if left > 1 { most } else { (most as f64 * FINE_STEP) as u32 };
-            let left = if left > 1 { left - 1 } else { LAGGED_WINDOWS };
-            self.lagged = (most < top).then_some((most, left));
+            // The estimate dipping to the limit doesn't end it: only rising
+            // past what the host has does.
+            self.lagged = if left > 1 {
+                Some((most, left - 1))
+            } else {
+                let most = (most as f64 * FINE_STEP) as u32;
+                (most < top).then_some((most, LAGGED_WINDOWS))
+            };
         }
         // The cap was clamped to the least speed of its own measurement; a
         // host estimate that has risen since raises the least speed of a
@@ -810,7 +833,11 @@ impl AutoSpeed {
                     // reckoning stays below it when more speed still gains
                     // a little (Myth, whose frames also wait for the card).
                     if !lagged && self.held.is_none_or(|r| fps >= r.fps) {
-                        self.held = Some(Record { fps, at: current, climbed: 0 });
+                        self.held = Some(Record {
+                            fps,
+                            at: current,
+                            climbed: 0,
+                        });
                     }
                     let knee = (low * fps / low_fps).clamp(low, c);
                     hold(self, knee * HEADROOM, JUDGED, true)
@@ -837,7 +864,11 @@ impl AutoSpeed {
                 let fps = sum / seen as f64;
                 let kept = self.held.map_or(before, |r| r.fps.max(before));
                 if fps >= kept * KEPT {
-                    self.held = self.held.map(|r| Record { at: current, climbed: 0, ..r });
+                    self.held = self.held.map(|r| Record {
+                        at: current,
+                        climbed: 0,
+                        ..r
+                    });
                     down(self, fps)
                 } else if fps >= before * KEPT {
                     // Only the held frame rate stopped it: `from` kept
@@ -869,7 +900,11 @@ impl AutoSpeed {
                     self.held = None;
                     return up(self, FIRST_STEP, here);
                 }
-                let record = Record { fps: recent, at: current, climbed: 0 };
+                let record = Record {
+                    fps: recent,
+                    at: current,
+                    climbed: 0,
+                };
                 let fewer = |r: Record| recent < r.fps * KEPT && seen >= JUDGED;
                 match self.held {
                     // Fewer frames than the record's speed drew: back to
@@ -879,8 +914,12 @@ impl AutoSpeed {
                         return hold(self, r.at as f64, JUDGED, false);
                     }
                     Some(r) if fewer(r) && r.climbed < CLIMBS && current < top => {
-                        let at = clamp(c * FINE_STEP).max(current);
-                        self.held = Some(Record { at, climbed: r.climbed + 1, ..r });
+                        let at = clamp(c * FINE_STEP);
+                        self.held = Some(Record {
+                            at,
+                            climbed: r.climbed + 1,
+                            ..r
+                        });
                         return hold(self, at as f64, JUDGED, false);
                     }
                     _ if lagged => {}
@@ -1167,7 +1206,10 @@ mod tests {
             let mut speeds = Vec::new();
             for i in 0..2000 {
                 let pace = if i > 200 && i % every == 0 { 0.5 } else { 1.0 };
-                let m = Measurement { pace, ..myth(speed) };
+                let m = Measurement {
+                    pace,
+                    ..myth(speed)
+                };
                 speed = auto.decide(speed, &m, true, HOST);
                 speeds.push(speed);
             }
@@ -1213,7 +1255,12 @@ mod tests {
                 output: 50_000.0,
                 ..STILL
             };
-            let estimate = 200_000.0 * if i % 7 == 0 { 2.5 } else { noise(&mut seed, 0.2) };
+            let estimate = 200_000.0
+                * if i % 7 == 0 {
+                    2.5
+                } else {
+                    noise(&mut seed, 0.2)
+                };
             speed = auto.decide(speed, &m, true, estimate as u32);
             paces.push(pace);
         }
@@ -1300,7 +1347,11 @@ mod tests {
             speed = auto.decide(speed, &myth(speed), true, HOST);
         }
         let held = speed * 2;
-        auto.held = Some(Record { fps: 30.0, at: held, climbed: 0 });
+        auto.held = Some(Record {
+            fps: 30.0,
+            at: held,
+            climbed: 0,
+        });
         let mut most = 0;
         for _ in 0..12 {
             let m = myth(speed);
@@ -1321,7 +1372,11 @@ mod tests {
         // to find out, and the record stays until it has.
         let mut auto = AutoSpeed::new(3000, None);
         let (mut speed, mut speeds) = (60_000, Vec::new());
-        auto.held = Some(Record { fps: 30.0, at: speed, climbed: 0 });
+        auto.held = Some(Record {
+            fps: 30.0,
+            at: speed,
+            climbed: 0,
+        });
         auto.step = Step::Hold {
             fps: 26.0,
             left: HOLD_WINDOWS,
@@ -1332,7 +1387,10 @@ mod tests {
         for _ in 0..JUDGED * 2 + 1 {
             // More speed gains the scene its frames back from 75,000 on.
             let fps = if speed >= 75_000 { 30.0 } else { 26.0 };
-            let m = Measurement { fps: Some(fps), ..STILL };
+            let m = Measurement {
+                fps: Some(fps),
+                ..STILL
+            };
             speed = auto.decide(speed, &m, true, HOST);
             speeds.push(speed);
             assert_eq!(auto.held.map(|r| r.fps), Some(30.0), "{:?}", speeds);
@@ -1342,7 +1400,11 @@ mod tests {
         // it was missed.
         let mut auto = AutoSpeed::new(3000, None);
         let mut speed = 60_000;
-        auto.held = Some(Record { fps: 30.0, at: speed, climbed: 0 });
+        auto.held = Some(Record {
+            fps: 30.0,
+            at: speed,
+            climbed: 0,
+        });
         auto.step = Step::Hold {
             fps: 26.0,
             left: HOLD_WINDOWS,
@@ -1351,10 +1413,17 @@ mod tests {
             seen: 0,
         };
         while auto.held.is_some_and(|r| r.fps == 30.0) {
-            let m = Measurement { fps: Some(26.0), ..STILL };
+            let m = Measurement {
+                fps: Some(26.0),
+                ..STILL
+            };
             speed = auto.decide(speed, &m, true, HOST);
         }
-        assert!(auto.held.is_some_and(|r| r.fps == 26.0 && r.at > 70_000), "{:?}", auto.held);
+        assert!(
+            auto.held.is_some_and(|r| r.fps == 26.0 && r.at > 70_000),
+            "{:?}",
+            auto.held
+        );
     }
 
     #[test]
@@ -1438,12 +1507,91 @@ mod tests {
         assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
         // The next frame, no measurement yet.
         assert_eq!(auto.update(bus, true, HOST / 2, 0), Some(HOST / 2));
-        assert_eq!(auto.update(bus, true, HOST, 0), None, "up takes a measurement");
+        assert_eq!(
+            auto.update(bus, true, HOST, 0),
+            None,
+            "up takes a measurement"
+        );
         // Never below the least speed.
         assert_eq!(auto.update(bus, true, 1000, 0), Some(PROTECTED_LEAST));
         // A speed that isn't all the host has stays until a measurement.
         auto.reset();
         assert_eq!(auto.update(bus, true, HOST / 2, 0), None);
+    }
+
+    #[test]
+    fn work_done_goes_back_no_higher_than_the_host_keeps_up_with() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.working = Some(200_000);
+        // Behind while it worked.
+        auto.lagged = Some((150_000, LAGGED_WINDOWS));
+        bus.clock.icount += HOST as u64 * 200;
+        assert_eq!(auto.update(bus, true, HOST, 0), Some(150_000));
+        assert_eq!(auto.lagged, Some((150_000, LAGGED_WINDOWS)));
+    }
+
+    #[test]
+    fn the_pace_of_measurements_taken_together_covers_their_time() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(100_000);
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Hold {
+            fps: 60.0,
+            left: HOLD_WINDOWS,
+            more: true,
+            recent: 60.0,
+            seen: 0,
+        };
+        auto.unsettled = Some((f64::NAN, 0));
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        // Half a second each, dropping 25 ms each: the first is the one
+        // after a change of speed, which doesn't count yet.
+        for (i, lost_ns) in [25_000_000, 50_000_000].into_iter().enumerate() {
+            bus.clock.icount += 50_000_000;
+            bus.activity.swapped(30);
+            assert_eq!(auto.update(bus, true, HOST, lost_ns), None, "{}", i);
+        }
+        assert_eq!(auto.unsettled, None);
+        let pace = 1.0 / 1.05;
+        assert!(
+            (auto.pace - (0.75 + 0.25 * pace)).abs() < 1e-3,
+            "{}",
+            auto.pace
+        );
+    }
+
+    #[test]
+    fn a_host_behind_every_other_measurement_is_not_stalling() {
+        // Well under the host's estimate, and behind half the time: each
+        // one comes right after a measurement that kept up.
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 40_000;
+        for i in 0..8 {
+            let m = Measurement {
+                pace: if i % 2 == 0 { 0.5 } else { 1.0 },
+                ..myth(speed)
+            };
+            speed = auto.decide(speed, &m, true, HOST);
+        }
+        assert!(auto.lagged.is_some(), "{:?}", auto.lagged);
+    }
+
+    #[test]
+    fn a_host_estimate_dipping_to_the_cap_does_not_end_it() {
+        // Magic & Mayhem's light frames push the estimate far above the
+        // host, and a stall sinks it for a moment.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.lagged = Some((140_000, LAGGED_WINDOWS));
+        let work = Measurement {
+            output: 1e6,
+            ..STILL
+        };
+        assert_eq!(auto.decide(140_000, &work, true, 130_000), 130_000);
+        assert_eq!(auto.decide(130_000, &work, true, 500_000), 140_000);
     }
 
     #[test]
