@@ -178,6 +178,17 @@ Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
 debugger all work on them like on any DLL. DirectX objects are COM
 objects whose vtables are data in the stub images, pointing at stubs.
 
+The export directories number the functions as Windows 98 SE's DLLs do
+(`src/win32/ordinals.rs`, from lists `tools/win98_ordinals.py` made from
+the real DLLs), so a program that imports a function by its ordinal
+gets the one it would on Windows 98. KERNEL32 also has, under their
+ordinals, functions Windows 98 exports by ordinal only: VxDCall0 to
+VxDCall8 (1 to 9) and LoadLibrary16, FreeLibrary16 and GetProcAddress16
+(35 to 37), which SafeDisc's loader imports that way. A function the
+built-in DLL doesn't have keeps no ordinal of Windows': an import of it
+by ordinal binds to the missing-function stub below, as an import by
+name does.
+
 Functions are declared in Rust tables, one line each: DLL, name, ordinal,
 calling convention, argument count, handler. A missing function is bound
 to a stub that logs `dll!name` with its arguments and ends the program
@@ -890,6 +901,12 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   Windows 4.0 get their DllEntryPoint called after LibMain. Calls the
   other way, from 16-bit code to a Win32 DLL, fail with the error value
   the thunk data gives.
+- Generic thunks (`src/win32/wow32.rs`): WOW32.DLL's WOWCallback16 and
+  WOWCallback16Ex call a 16-bit function on the process's task the same
+  way, and WOWGetVDMPointer maps a 16:16 address as MapSL does, for a
+  program that gets 16-bit functions with LoadLibrary16 and
+  GetProcAddress16, as SafeDisc 2's loader does. WOW32's 16-bit global
+  memory and handle functions aren't there yet.
 
 Games tried, all of which start and draw their windows: SkiFree,
 BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,

@@ -1,6 +1,6 @@
 //! Native xBRZ input and the composed pixels drawn over its output.
 
-use crate::video::{Frame, mono};
+use crate::video::{Frame, mono, shader::XbrzDamage};
 
 pub struct XbrzFrame {
     pub source: Frame,
@@ -13,8 +13,10 @@ pub struct XbrzFrame {
     source_revision: u32,
     overlay_revision: u32,
     source_rows: std::ops::Range<usize>,
+    source_damage: XbrzDamage,
+    scratch_damage: XbrzDamage,
     overlay_rows: std::ops::Range<usize>,
-    overlay_valid: bool,
+    inputs_valid: bool,
 }
 
 impl Default for XbrzFrame {
@@ -29,8 +31,10 @@ impl Default for XbrzFrame {
             source_revision: 0,
             overlay_revision: 0,
             source_rows: 0..0,
+            source_damage: XbrzDamage::default(),
+            scratch_damage: XbrzDamage::default(),
             overlay_rows: 0..0,
-            overlay_valid: false,
+            inputs_valid: false,
         }
     }
 }
@@ -46,7 +50,7 @@ impl XbrzFrame {
         self.overlay_revision
     }
 
-    /// Native rows changed by the last preparation, for partial uploads.
+    /// Native rows changed at the current source revision.
     pub fn source_rows(&self) -> std::ops::Range<usize> {
         self.source_rows.clone()
     }
@@ -57,9 +61,14 @@ impl XbrzFrame {
         self.overlay_rows.clone()
     }
 
-    /// A bypassed composition may change pixels without changing coverage.
-    pub fn invalidate_overlay(&mut self) {
-        self.overlay_valid = false;
+    /// Source rectangles retained until the next source revision.
+    pub fn source_damage(&self) -> &XbrzDamage {
+        &self.source_damage
+    }
+
+    /// A bypassed composition invalidates producer hints and coverage.
+    pub fn invalidate(&mut self) {
+        self.inputs_valid = false;
     }
 
     /// Recover native pixels, tint them like the composed screen, and
@@ -74,6 +83,32 @@ impl XbrzFrame {
         mono: mono::Monochrome,
         screen_rows: std::ops::Range<usize>,
     ) -> (bool, bool, bool) {
+        self.prepare_inner(screen, base, mono, None, screen_rows)
+    }
+
+    /// Prepare producer-tracked inputs. Both bands use composed row
+    /// coordinates and must cover all pixel and coverage changes since the
+    /// previous call. Invalidation and geometry/tint changes scan fully.
+    pub fn prepare_rows(
+        &mut self,
+        screen: &Frame,
+        base: Option<&Frame>,
+        mono: mono::Monochrome,
+        base_rows: std::ops::Range<usize>,
+        screen_rows: std::ops::Range<usize>,
+    ) -> (bool, bool, bool) {
+        self.prepare_inner(screen, base, mono, Some(base_rows), screen_rows)
+    }
+
+    fn prepare_inner(
+        &mut self,
+        screen: &Frame,
+        base: Option<&Frame>,
+        mono: mono::Monochrome,
+        base_rows: Option<std::ops::Range<usize>>,
+        screen_rows: std::ops::Range<usize>,
+    ) -> (bool, bool, bool) {
+        let bounded = base_rows.is_some() && self.inputs_valid;
         let separate_overlays = base.is_some();
         let (base, mono) = match base {
             Some(base) => (base, mono),
@@ -87,56 +122,69 @@ impl XbrzFrame {
         let resized = (self.source.width, self.source.height) != (width as u32, height as u32)
             || overlay_resized
             || self.mono != Some(mono);
+        let rows = if bounded && !resized {
+            let rows = base_rows.unwrap();
+            (rows.start / scale).min(height)..rows.end.div_ceil(scale).min(height)
+        } else {
+            0..height
+        };
+        self.scratch_damage.clear();
         let mut native_rows = if resized { 0..height } else { 0..0 };
-        if !resized {
-            for y in 0..height {
-                if scale == 1 {
-                    let row = y * width * 4..(y + 1) * width * 4;
-                    if self.native[row.clone()] != base.rgba[row] {
-                        native_rows = crate::video::compose::union(native_rows, y..y + 1);
-                    }
+        if resized {
+            self.scratch_damage.add([0, 0, width as u32, height as u32]);
+        } else {
+            for y in rows.clone() {
+                let row = y * width * 4..(y + 1) * width * 4;
+                if scale == 1 && self.native[row.clone()] == base.rgba[row] {
                     continue;
                 }
-                for x in 0..width {
+                let differs = |x: usize| {
                     let at = (y * width + x) * 4;
-                    let from = ((y * scale) * base.width as usize + x * scale) * 4;
-                    if self.native[at..at + 4] != base.rgba[from..from + 4] {
-                        native_rows = crate::video::compose::union(native_rows, y..y + 1);
-                        break;
-                    }
+                    let from = (y * scale * base.width as usize + x * scale) * 4;
+                    self.native[at..at + 4] != base.rgba[from..from + 4]
+                };
+                if let Some(left) = (0..width).find(|&x| differs(x)) {
+                    let right = (left..width).rfind(|&x| differs(x)).unwrap() + 1;
+                    self.scratch_damage
+                        .add([left as u32, y as u32, (right - left) as u32, 1]);
+                    native_rows = crate::video::compose::union(native_rows, y..y + 1);
                 }
             }
         }
         let changed = resized || !native_rows.is_empty();
-        self.source_rows = native_rows.clone();
-        if changed {
-            self.source_revision = self.source_revision.wrapping_add(1);
-        }
         self.source.resize(width as u32, height as u32);
         self.native.resize(width * height * 4, 0);
-        if scale == 1 {
-            let band = native_rows.start * width * 4..native_rows.end * width * 4;
-            self.native[band.clone()].copy_from_slice(&base.rgba[band.clone()]);
-            self.source.rgba[band.clone()].copy_from_slice(&base.rgba[band]);
-        } else {
-            for y in native_rows.clone() {
-                for x in 0..width {
-                    let i = y * width + x;
-                    let pixel = &mut self.source.rgba[i * 4..i * 4 + 4];
-                    // A doubled frame repeats each native pixel in a 2x2
-                    // block; its top-left pixel recovers the native colour.
-                    let from = ((y * scale) * base.width as usize + x * scale) * 4;
-                    let native = &base.rgba[from..from + 4];
-                    self.native[i * 4..i * 4 + 4].copy_from_slice(native);
-                    pixel.copy_from_slice(native);
+        if changed {
+            self.source_rows = native_rows;
+            self.source_revision = self.source_revision.wrapping_add(1);
+            std::mem::swap(&mut self.source_damage, &mut self.scratch_damage);
+            // Copy whole affected rows before tinting: untouched pixels
+            // in those rows must not receive monochrome a second time.
+            for &[_, top, _, height] in self.source_damage.rects() {
+                let rows = top as usize..(top + height) as usize;
+                if scale == 1 {
+                    let band = rows.start * width * 4..rows.end * width * 4;
+                    self.native[band.clone()].copy_from_slice(&base.rgba[band.clone()]);
+                    self.source.rgba[band.clone()].copy_from_slice(&base.rgba[band]);
+                } else {
+                    for y in rows.clone() {
+                        for x in 0..width {
+                            let at = (y * width + x) * 4;
+                            // Doubled frames repeat each native 2x2 block.
+                            let from = (y * scale * base.width as usize + x * scale) * 4;
+                            let pixel = &base.rgba[from..from + 4];
+                            self.native[at..at + 4].copy_from_slice(pixel);
+                            self.source.rgba[at..at + 4].copy_from_slice(pixel);
+                        }
+                    }
                 }
+                mono::apply_rows(&mut self.source, mono, rows);
             }
         }
-        mono::apply_rows(&mut self.source, mono, native_rows);
         self.mono = Some(mono);
         let previous_rows = std::mem::replace(&mut self.overlay_rows, 0..0);
         let (visible, overlay_changed) =
-            self.prepare_overlay(screen, screen_rows, separate_overlays);
+            self.prepare_overlay(screen, screen_rows, separate_overlays, bounded);
         if overlay_changed {
             self.overlay_revision = self.overlay_revision.wrapping_add(1);
         } else {
@@ -150,10 +198,11 @@ impl XbrzFrame {
         screen: &Frame,
         mut rows: std::ops::Range<usize>,
         separate: bool,
+        bounded: bool,
     ) -> (bool, bool) {
-        if !self.overlay_valid {
+        if !self.inputs_valid {
             rows = 0..screen.height as usize;
-            self.overlay_valid = true;
+            self.inputs_valid = true;
         }
         let mut changed = self.overlay.resize(screen.width, screen.height);
         if changed {
@@ -162,9 +211,17 @@ impl XbrzFrame {
             self.overlay_pixels = 0;
             self.coverage = Vec::new();
         }
-        let mask = screen
-            .overlay_mask()
-            .filter(|mask| separate && mask.contains(&1));
+        let width = screen.width as usize;
+        rows = rows.start.min(screen.height as usize)..rows.end.min(screen.height as usize);
+        let mask = screen.overlay_mask().filter(|mask| {
+            separate
+                && if bounded {
+                    !self.coverage.is_empty()
+                        || mask[rows.start * width..rows.end * width].contains(&1)
+                } else {
+                    mask.contains(&1)
+                }
+        });
         let Some(mask) = mask else {
             if !self.coverage.is_empty() {
                 if self.overlay.rgba.iter().any(|&byte| byte != 0) {
@@ -178,8 +235,7 @@ impl XbrzFrame {
             return (false, changed);
         };
         self.coverage.resize(mask.len(), 0);
-        let width = screen.width as usize;
-        if let Some(damage) = crate::video::changed_rows(&self.coverage, mask, width) {
+        if !bounded && let Some(damage) = crate::video::changed_rows(&self.coverage, mask, width) {
             rows = crate::video::compose::union(rows, damage);
         }
         for y in rows.start.min(screen.height as usize)..rows.end.min(screen.height as usize) {
@@ -242,6 +298,120 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_coverage_tracks_equal_colour_moves_and_transparency() {
+        let base = Frame::from_rgb(8, 4, vec![80; 8 * 4 * 3]);
+        let mut prepared = XbrzFrame::default();
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 0..0, 0..0);
+        let source = prepared.source_revision();
+        let mut screen = base.clone();
+        screen.track_overlays(true);
+        screen.mark_overlay(2, 1);
+        assert_eq!(
+            prepared.prepare_rows(&screen, Some(&base), mono::Monochrome::Off, 0..0, 1..2),
+            (true, true, true)
+        );
+        assert_eq!(screen.rgba, base.rgba);
+        let mut moved = base.clone();
+        moved.track_overlays(true);
+        moved.mark_overlay(6, 2);
+        prepared.prepare_rows(&moved, Some(&base), mono::Monochrome::Off, 0..0, 1..3);
+        assert!(prepared.overlay.rgba[32..64].iter().all(|&byte| byte == 0));
+        moved.rgba[(2 * 8 + 6) * 4 + 3] = 0;
+        assert_eq!(
+            prepared.prepare_rows(&moved, Some(&base), mono::Monochrome::Off, 0..0, 2..3),
+            (false, true, true)
+        );
+        let revision = prepared.overlay_revision();
+        assert_eq!(
+            prepared.prepare_rows(&moved, Some(&base), mono::Monochrome::Off, 0..0, 0..0),
+            (false, false, false)
+        );
+        assert_eq!(prepared.overlay_revision(), revision);
+        assert_eq!(prepared.source_revision(), source);
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 0..0, 2..3);
+        assert!(prepared.overlay.rgba.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn producer_bands_match_full_preparation_across_input_changes() {
+        let mut bounded = XbrzFrame::default();
+        let mut full = XbrzFrame::default();
+        for (width, height, doubled) in [(24, 16, false), (48, 32, true), (0, 0, false)] {
+            let mut base = Frame::from_rgb(width, height, vec![80; (width * height * 3) as usize]);
+            base.doubled = doubled;
+            let mut previous_overlay = 0..0;
+            for step in 0..80 {
+                let rows = if height == 0 || step % 4 == 0 {
+                    0..0
+                } else {
+                    let top = step * 7 % height as usize;
+                    base.rgba[(top * width as usize + step % width as usize) * 4] ^= 127;
+                    top..top + 1
+                };
+                let mut screen = base.clone();
+                screen.track_overlays(true);
+                let overlay = if height == 0 || step % 5 == 0 {
+                    0..0
+                } else {
+                    let y = step * 3 % height as usize;
+                    screen.mark_overlay_rect(0, y, width as usize, 1);
+                    screen.rgba[y * width as usize * 4..(y + 1) * width as usize * 4]
+                        .fill(step as u8);
+                    y..y + 1
+                };
+                let candidates = crate::video::compose::union(
+                    rows.clone(),
+                    crate::video::compose::union(previous_overlay.clone(), overlay.clone()),
+                );
+                let mono = mono::Monochrome::ALL[step / 11 % 4];
+                let result =
+                    bounded.prepare_rows(&screen, Some(&base), mono, rows, candidates.clone());
+                let expected = full.prepare(&screen, Some(&base), mono, candidates);
+                assert_eq!(result, expected, "step {step}, doubled={doubled}");
+                for (actual, expected) in [
+                    (&bounded.source.rgba, &full.source.rgba),
+                    (&bounded.overlay.rgba, &full.overlay.rgba),
+                ] {
+                    assert_eq!(actual.iter().zip(expected).position(|(a, b)| a != b), None);
+                }
+                assert_eq!(bounded.source_revision(), full.source_revision());
+                assert_eq!(bounded.overlay_revision(), full.overlay_revision());
+                previous_overlay = overlay;
+            }
+        }
+    }
+
+    #[test]
+    fn source_damage_is_disjoint_retained_and_invalidation_rechecks_hints() {
+        let mut base = Frame::from_rgb(32, 24, vec![80; 32 * 24 * 3]);
+        let mut prepared = XbrzFrame::default();
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 0..0, 0..0);
+        base.rgba[(2 * 32 + 3) * 4] ^= 127;
+        base.rgba[(20 * 32 + 27) * 4] ^= 127;
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 2..21, 2..21);
+        assert_eq!(
+            prepared.source_damage().rects(),
+            &[[3, 2, 1, 1], [27, 20, 1, 1]]
+        );
+        let revision = prepared.source_revision();
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 0..0, 0..0);
+        assert_eq!(
+            prepared.source_damage().rects(),
+            &[[3, 2, 1, 1], [27, 20, 1, 1]]
+        );
+        assert_eq!(prepared.source_revision(), revision);
+        prepared.invalidate();
+        base.rgba[0] ^= 127;
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 0..0, 0..0);
+        assert_eq!(prepared.source, base);
+        assert_eq!(prepared.source_damage().rects(), &[[0, 0, 1, 1]]);
+        prepared.source_revision = u32::MAX;
+        base.rgba[4] ^= 127;
+        prepared.prepare_rows(&base, Some(&base), mono::Monochrome::Off, 0..1, 0..1);
+        assert_eq!(prepared.source_revision(), 0);
+    }
+
+    #[test]
     fn overlay_damage_tracks_pixels_movement_and_delayed_uploads() {
         let base = Frame::from_rgb(8, 6, vec![80; 8 * 6 * 3]);
         let mut screen = base.clone();
@@ -267,7 +437,7 @@ mod tests {
                 .iter()
                 .all(|&byte| byte == 0)
         );
-        prepared.invalidate_overlay();
+        prepared.invalidate();
         moved.rgba[(4 * 8 + 3) * 4] ^= 127;
         prepared.overlay_revision = u32::MAX;
         prepared.prepare(&moved, Some(&base), mono::Monochrome::Off, 0..0);
@@ -465,7 +635,7 @@ mod tests {
             assert_eq!(prepared.source, expected);
             assert_eq!(prepared.source_rows(), 1..2);
             prepared.prepare(&base, Some(&base), mono, 0..0);
-            assert_eq!(prepared.source_rows(), 0..0);
+            assert_eq!(prepared.source_rows(), 1..2);
             assert_eq!(prepared.source, expected);
         }
     }
@@ -483,7 +653,7 @@ mod tests {
         screen.mark_overlay(0, 0);
         prepared.prepare(&screen, Some(&base), mono::Monochrome::Off, 0..0);
         assert_eq!(prepared.source_revision(), revision);
-        assert_eq!(prepared.source_rows(), 0..0);
+        assert_eq!(prepared.source_rows(), 0..1);
         assert_ne!(prepared.overlay_revision(), overlay);
         let overlay = prepared.overlay_revision();
         base.rgba[0] ^= 127;
