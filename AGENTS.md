@@ -69,6 +69,34 @@ push, on Linux, Windows and macOS, so you don't need to before you push.
 - Push, and fix the branch if CI fails. Run the whole suite locally only
   when you can't use CI.
 
+## A pull request's lifecycle: draft until it is proven better than main
+
+A pull request opens as a draft and stays one until there is evidence
+that it improves on main. Steps, in this order:
+
+1. Open the pull request as a draft and implement the change.
+2. Review it, with the fixes applied, by running this against it:
+
+   ```
+   /code-review high --fix Make judgement calls based on long-term quality and robust architecture rather than small scope or simplicity, do not postpone decisions to later unless there is no clearly better option (in which case create a GitHub issue to address this later), explain judgement calls made in comments to the reviewed PR. Commit and push review fixes to the PR branch
+   ```
+
+3. Validate it, after the review and with its fixes: run the real game
+   or program the change is for, where there is one, on the build of the
+   branch, and compare with main.
+4. Mark it ready for review only when that shows a clear improvement on
+   main: a speed-up you measured, against main on the same machine and
+   scene; a bug that main has and the branch fixes, seen in the game; or
+   behaviour closer to the real hardware or the real Windows, shown by a
+   test or a comparison with it. Put the evidence in the description.
+
+If the evidence isn't there yet, improve the change and go through the
+steps again. A pull request stays a draft only when the next step needs
+a decision with no clearly better option, or is far beyond the change's
+scope; say which in a comment on it. When several agents work together,
+the one coordinating them marks pull requests ready, not the agents
+doing the work.
+
 ## Several agents on one machine
 
 Agents often work on several branches at once, each in its own git
