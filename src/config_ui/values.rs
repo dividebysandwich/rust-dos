@@ -39,7 +39,8 @@ fn gammas() -> impl Iterator<Item = Option<f32>> {
 /// A `blocksize` with the time it plays for, and whether it is the default.
 pub(super) fn describe_blocksize(frames: u16) -> String {
     let default = if frames == crate::audio::AudioBuffer::default().blocksize { ", default" } else { "" };
-    format!("{} frames ({:.1} ms{})", frames, crate::audio::AudioBuffer::millis(frames), default)
+    let ms = crate::audio::AudioBuffer::millis(frames as usize);
+    format!("{} frames ({:.1} ms{})", frames, ms, default)
 }
 
 fn each<T>(s: &Settings, values: impl IntoIterator<Item = T>, set: impl Fn(&mut Settings, T)) -> Vec<Settings> {

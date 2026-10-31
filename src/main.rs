@@ -507,10 +507,10 @@ fn main() -> Result<(), String> {
             dbg.set_frame_stats(stats.latest());
             let emulated_ns = cpu.bus.clock.now_ns();
             cpu.bus.host_frames.frame(frame_start - start, emulated_ns);
-            let speed = stats.latest().emulated_speed;
-            let cycles_per_ms = cpu.bus.clock.cycles_per_ms();
-            cpu.bus.host_frames.note_speed(speed, cycles_per_ms);
         }
+        let speed = stats.latest().emulated_speed;
+        let cycles_per_ms = cpu.bus.clock.cycles_per_ms();
+        cpu.bus.host_frames.note_speed(speed, cycles_per_ms);
         // Whether the window's keyboard or mouse reached the machine this
         // frame, which the debug server's journal tells while it holds it.
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
@@ -2172,6 +2172,7 @@ fn main() -> Result<(), String> {
                 code_bytes: code.code_bytes,
             },
         ));
+        cpu.bus.host_frames.lap(Phase::Other);
         profile::set_host(Zone::FrameWait);
         pacer.wait_for_next_frame();
         cpu.bus.host_frames.lap(Phase::Wait);
