@@ -294,12 +294,18 @@ fn con_read(cpu: &mut Cpu) -> Option<u8> {
         return Some(scan);
     }
     let key = crate::keyboard::take_keystroke(&mut cpu.bus)?;
-    let (scan, ascii) = ((key >> 8) as u8, key as u8);
-    if ascii == 0 || (ascii == 0xE0 && scan != 0) {
-        cpu.con_pending_scan = Some(scan);
+    if extended_key(key) {
+        cpu.con_pending_scan = Some((key >> 8) as u8);
         return Some(0);
     }
-    Some(ascii)
+    Some(key as u8)
+}
+
+/// Whether the keystroke `key` is an extended key, which the console reads
+/// as 00h and then its scan code.
+fn extended_key(key: u16) -> bool {
+    let (scan, ascii) = ((key >> 8) as u8, key as u8);
+    ascii == 0 || (ascii == 0xE0 && scan != 0)
 }
 
 /// Write a character to standard output (handle 1) raw, as AH=06h does:
@@ -497,29 +503,37 @@ fn file_drive(cpu: &Cpu, sft: u16) -> u16 {
     disk.handle_drive(sft).unwrap_or(disk.get_current_drive()) as u16
 }
 
+/// The word AX=4400h gives for what is open at `sft`: a device's
+/// (`device_word`), or a file's drive with bit 6, not written, which
+/// nothing tracks yet.
+fn handle_info(cpu: &Cpu, sft: u16, device: Option<CharDevice>) -> u16 {
+    match device {
+        Some(device) => device_word(cpu, sft, device),
+        None => 0x0040 | file_drive(cpu, sft),
+    }
+}
+
 /// Whether the open file `sft` is ready for output or input, and for input
 /// the next character (AX=4406h and 4407h).
 ///
 /// MS-DOS reads a byte of a file and puts the position back, so a file is
 /// ready until its end, and a handle open for writing only has nothing to
 /// read. The console's status is the keyboard's: the rest of a line a
-/// cooked read took isn't in it. NUL's driver is never busy, and a serial
-/// port answers from its status registers as the AUX driver does from
-/// INT 14h, needing DSR. AUX, which goes nowhere here, is what a port with
-/// nothing on it is, not ready.
+/// cooked read took isn't in it, and an extended key shows as the 00h a
+/// read gets first. Once the host's input has ended (`rust-dos run`) the
+/// console is ready, so that a program that polls it goes on to read the
+/// end of the file. NUL's driver is never busy, and a serial port answers
+/// from its status registers as the AUX driver does from INT 14h, needing
+/// DSR, with the character that came. AUX, which goes nowhere here, is
+/// what a port with nothing on it is, not ready.
 fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) -> (bool, u8) {
     match device {
         None if output => (true, 0),
+        None if cpu.bus.disk.access_mode(sft) == Some(1) => (false, 0x1A),
         None => {
-            let disk = &mut cpu.bus.disk;
-            let write_only = disk.sft_entry(sft).is_some_and(|entry| entry.mode & 3 == 1);
-            let at = disk.position(sft).unwrap_or(0);
-            let next = if write_only {
-                None
-            } else {
-                disk.read_file(sft, 1).ok()
-            };
-            let _ = disk.seek_file(sft, at as i64, 0);
+            let at = cpu.bus.disk.position(sft).unwrap_or(0);
+            let next = read_open_file(cpu, sft, 1).ok();
+            let _ = cpu.bus.disk.seek_file(sft, at as i64, 0);
             match next.and_then(|bytes| bytes.first().copied()) {
                 Some(byte) => (true, byte),
                 None => (false, 0x1A),
@@ -527,9 +541,11 @@ fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) 
         }
         Some(CharDevice::Con) if output => (true, 0),
         Some(CharDevice::Con) => {
-            let key = crate::keyboard::peek_keystroke(&mut cpu.bus).map(|key| key as u8);
+            let key = crate::keyboard::peek_keystroke(&mut cpu.bus);
+            let key = key.map(|key| if extended_key(key) { 0 } else { key as u8 });
             match cpu.con_pending_scan.or(key) {
                 Some(next) => (true, next),
+                None if cpu.host_console.as_ref().is_some_and(|c| c.input_ended) => (true, 0x1A),
                 None => (false, 0),
             }
         }
@@ -543,10 +559,13 @@ fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) 
             (true, 0)
         }
         Some(device) => {
-            let status = device.com_port().and_then(|n| cpu.bus.serial_status(n));
+            let port = device.com_port();
+            let status = port.and_then(|n| cpu.bus.serial_status(n));
             let (lsr, msr) = status.unwrap_or((0, 0));
             let line = if output { 0x20 } else { 0x01 };
-            (lsr & line != 0 && msr & 0x20 != 0, 0)
+            let ready = lsr & line != 0 && msr & 0x20 != 0;
+            let next = port.filter(|_| ready && !output).and_then(|n| cpu.bus.serial_next(n));
+            (ready, next.unwrap_or(0))
         }
     }
 }
@@ -1641,12 +1660,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let Some(sft) = sft else {
                         return set_result(cpu, Err(0x06));
                     };
-                    let info = match device {
-                        Some(device) => device_word(cpu, sft, device),
-                        // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive # (0=A)
-                        None => file_drive(cpu, sft),
-                    };
-                    cpu.set_dx(info);
+                    cpu.set_dx(handle_info(cpu, sft, device));
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx()));
                 }
@@ -1706,8 +1720,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 }
                 // The printer is ready for output while there is one.
                 0x07 if device == Some(CharDevice::Prn) => {
-                    cpu.set_reg8(Register::AL, if cpu.bus.printer.is_some() { 0xFF } else { 0x00 });
-                    cpu.set_cpu_flag(CpuFlags::CF, false);
+                    let ready = if cpu.bus.printer.is_some() { 0xFF } else { 0x00 };
+                    set_result(cpu, Ok(0x0100 | ready));
                 }
                 // What Windows takes expanded memory over with.
                 0x02 if device == Some(CharDevice::Emm) => {
@@ -1727,20 +1741,19 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let high = if output { 0x01 } else { next as u16 };
                     set_result(cpu, Ok(high << 8 | if ready { 0xFF } else { 0x00 }));
                 }
-                // Is the handle remote: DX is the flags word of the SFT, whose
-                // bit 15 is clear, as no handle here is on a network
-                // redirector. Unlike AX=4400h it has no driver attribute
-                // byte in the high byte, and AX stays as it was.
+                // Is the handle remote: DX is the flags word of the SFT,
+                // whose bit 15 marks a file on a redirector, as a CD-ROM
+                // drive's are under MSCDEX (see AX=4409h). Unlike AX=4400h
+                // it has no driver attribute byte in the high byte, and AX
+                // stays as it was.
                 0x0A => {
                     let Some(sft) = sft else {
                         return set_result(cpu, Err(0x06));
                     };
-                    let flags = match device {
-                        Some(device) => device_word(cpu, sft, device) & 0x00FF,
-                        // Bit 6: not written, which nothing tracks yet.
-                        None => 0x0040 | file_drive(cpu, sft),
-                    };
-                    cpu.set_dx(flags);
+                    let drive = file_drive(cpu, sft) as u8;
+                    let cd = cpu.bus.disk.drive_kind(drive) == Some(DriveKind::CdRom);
+                    let remote = if device.is_none() && cd { 0x8000 } else { 0 };
+                    cpu.set_dx(handle_info(cpu, sft, device) & 0x00FF | remote);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 // MS-DOS 7 has subfunctions 00h to 11h and fails any other

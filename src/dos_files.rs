@@ -335,9 +335,11 @@ pub fn device_info(device: CharDevice, sft: u16) -> u16 {
     match device {
         CharDevice::Con => 0x80D3,
         CharDevice::Emm => 0xC080,
-        // AUX and PRN: character devices, not EOF.
-        CharDevice::Nul if sft == SFT_AUX || sft == SFT_PRN => 0x80C0,
-        CharDevice::Prn => 0x80C0,
+        // AUX: a character device, not EOF.
+        CharDevice::Nul if sft == SFT_AUX => 0x80C0,
+        // PRN's driver also takes output until busy (bit 13).
+        CharDevice::Nul if sft == SFT_PRN => 0xA0C0,
+        CharDevice::Prn => 0xA0C0,
         CharDevice::Nul => 0x80C4,
         CharDevice::Com1 | CharDevice::Com2 | CharDevice::Com3 | CharDevice::Com4 => 0x80C0,
     }

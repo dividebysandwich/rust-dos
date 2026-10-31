@@ -236,6 +236,25 @@ fn ioctl_status_of_the_console_is_the_keyboards() {
     // The rest of a line a cooked read took doesn't count.
     cpu.con_pending.extend(b"cde\r\n");
     assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+    // An extended key is the 00h a read gets, on the grey keys too.
+    for key in [0x4800, 0x48E0] {
+        rust_dos::keyboard::queue_keystroke(&mut cpu.bus, key);
+        assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x00FF));
+        assert_eq!(dos(&mut cpu, 0x0700, 0, 0, 0).map(|ax| ax & 0xFF), Ok(0x00));
+        assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x48FF));
+        assert_eq!(dos(&mut cpu, 0x0700, 0, 0, 0).map(|ax| ax & 0xFF), Ok(0x48));
+    }
+}
+
+#[test]
+fn ioctl_status_of_the_console_after_the_hosts_input_ended() {
+    let mut cpu = machine("ioctl_status_console_end");
+    cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+    // Ready, so that a program polling it reads the end of the file.
+    cpu.host_console.as_mut().unwrap().input_ended = true;
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x1AFF));
+    assert_eq!(read(&mut cpu, 0, 8).unwrap(), b"");
 }
 
 #[test]
@@ -275,6 +294,45 @@ fn ioctl_status_of_nul_aux_and_a_serial_port() {
     let com2 = open(&mut cpu, "COM2", 2).unwrap();
     assert_eq!(dos(&mut cpu, 0x4407, com2, 0, 0), Ok(0x0100));
     assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
+    // No printer.
+    let prn = open(&mut cpu, "PRN", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4407, prn, 0, 0), Ok(0x0100));
+}
+
+#[test]
+fn ioctl_input_status_of_a_serial_port_shows_what_came() {
+    use rust_dos::serial::{PortType, SerialSettings};
+    let mut cpu = machine("ioctl_status_serial");
+    cpu.bus.set_cycles_per_ms(1000);
+    let ports = [
+        PortType::Empty,
+        PortType::Empty,
+        PortType::Off,
+        PortType::Off,
+    ];
+    cpu.bus.configure_serial(&SerialSettings {
+        ports,
+        ..Default::default()
+    });
+    // COM2 looped back on itself, with DTR for DSR.
+    cpu.bus.io_write(0x2FB, 0x80);
+    cpu.bus.io_write(0x2F8, 1);
+    cpu.bus.io_write(0x2F9, 0);
+    cpu.bus.io_write(0x2FB, 0x03);
+    cpu.bus.io_write(0x2FC, 0x11);
+    let com2 = open(&mut cpu, "COM2", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
+    cpu.bus.io_write(0x2F8, b'x');
+    for _ in 0..10 {
+        cpu.bus.clock.icount += 1000;
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1000);
+        cpu.bus.service_timers();
+    }
+    // The character stays there to be read.
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x78FF));
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x78FF));
+    assert_eq!(cpu.bus.io_read(0x2F8), b'x');
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
 }
 
 #[test]
@@ -284,6 +342,9 @@ fn ioctl_440a_gives_the_sft_flags_and_keeps_ax() {
     let drive = cpu.bus.disk.get_current_drive() as u16;
     // Bit 15, remote, clear; bit 6, not written, set.
     assert_eq!(dos(&mut cpu, 0x440A, h, 0, 0xFFFF), Ok(0x440A));
+    assert_eq!(cpu.dx(), 0x0040 | drive);
+    // AX=4400h gives a file the same word.
+    dos(&mut cpu, 0x4400, h, 0, 0).unwrap();
     assert_eq!(cpu.dx(), 0x0040 | drive);
     // A device has no driver attributes in the high byte, unlike AX=4400h.
     dos(&mut cpu, 0x4400, 1, 0, 0).unwrap();
@@ -295,6 +356,15 @@ fn ioctl_440a_gives_the_sft_flags_and_keeps_ax() {
     assert_eq!(cpu.dx(), 0x80C4);
     dos(&mut cpu, 0x440A, nul, 0, 0xFFFF).unwrap();
     assert_eq!(cpu.dx(), 0x00C4);
+    // The printer, by its handle and by its names.
+    let prn = open(&mut cpu, "PRN", 2).unwrap();
+    let lpt1 = open(&mut cpu, "LPT1", 2).unwrap();
+    for handle in [4, prn, lpt1] {
+        dos(&mut cpu, 0x4400, handle, 0, 0).unwrap();
+        assert_eq!(cpu.dx(), 0xA0C0);
+        dos(&mut cpu, 0x440A, handle, 0, 0xFFFF).unwrap();
+        assert_eq!(cpu.dx(), 0x00C0);
+    }
     // Raw mode shows, as in AX=4400h.
     dos(&mut cpu, 0x4401, 1, 0, 0xF3).unwrap();
     dos(&mut cpu, 0x440A, 1, 0, 0xFFFF).unwrap();
