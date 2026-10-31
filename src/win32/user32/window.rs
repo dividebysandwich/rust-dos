@@ -1766,8 +1766,6 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 }
                 let _ = old;
                 super::paint::tree_changed(cpu);
-                let moved = flags & (SWP_NOMOVE | SWP_NOSIZE) != SWP_NOMOVE | SWP_NOSIZE;
-                super::input::window_moved(cpu, hwnd, under, moved);
                 // What it uncovered and what it shows now need painting.
                 let now_visible = user(cpu).is_visible(hwnd);
                 if flags & SWP_NOREDRAW == 0 || flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW) != 0 {
@@ -1789,6 +1787,14 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         state.input.capture = 0;
                     }
                 }
+                // The window under the cursor gets a move if it changed.
+                // After paint::moved, which puts the desktop on the screen
+                // as a program's first window shows (`under` is 0 then, as
+                // nothing was under the cursor), and after a hidden window
+                // lost the capture, so the move goes to the window under
+                // the cursor and not to the one hidden.
+                let moved = flags & (SWP_NOMOVE | SWP_NOSIZE) != SWP_NOMOVE | SWP_NOSIZE;
+                super::input::window_moved(cpu, hwnd, under, moved);
                 cpu.bus.guest_write_32(winpos + 24, flags);
                 // Activate it.
                 let child = user(cpu)

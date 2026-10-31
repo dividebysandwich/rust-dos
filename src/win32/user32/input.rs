@@ -679,8 +679,9 @@ pub fn under_cursor(state: &State) -> u32 {
 }
 
 /// SetWindowPos showed, hid or moved `hwnd`, and `before` was the window
-/// under the cursor until then. When another window is under it now, or
-/// the one under it moved (`moved`), the window under the cursor gets a
+/// under the cursor until then, 0 if the desktop wasn't on the screen
+/// before `hwnd` showed. When another window is under it now, or the one
+/// under it moved (`moved`), the window under the cursor gets a
 /// WM_MOUSEMOVE where the cursor is, as Windows NT's SetWindowPos marks
 /// the mouse moved and ReactOS's co_WinPosSetWindowPos inserts a move:
 /// its answer to WM_SETCURSOR sets the cursor. A screen saver hides the
@@ -2320,6 +2321,7 @@ pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetCursorPos(point): where the mouse is now.
 pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::init(cpu);
     poll(cpu);
     let (x, y) = user(cpu).input.cursor;
     write_words(cpu, args[0], &[x as u32, y as u32]);
