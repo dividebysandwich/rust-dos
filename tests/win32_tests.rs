@@ -3376,70 +3376,69 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
-/// A visible window made smaller, with its client area then validated,
-/// has nothing left to paint: no WM_PAINT waits for it, as for Omikron's
-/// 641x481 window made 640x480.
-#[test]
-fn a_window_that_shrinks_leaves_no_update_region_outside_it() {
-    const WS_POPUP_VISIBLE: u32 = 0x9000_0000;
-    const WM_PAINT: i32 = 0x000F;
-    const SWP_NOMOVE_NOZORDER: i32 = 0x0006;
-    let names: &[&str] = &[
-        "CreateWindowExA",
-        "SetWindowPos",
-        "ValidateRect",
-        "PeekMessageA",
-    ];
-    let kernel: &[&str] = &["ExitProcess"];
-    let imports: &[(&str, &[&str])] = &[("USER32.dll", names), ("KERNEL32.dll", kernel)];
-    let mut d = Data::default();
-    let class = d.text("STATIC");
-    let msg = d.add(&[0; 28]);
-    let exe = program(BASE, false, imports, &d.0, |a, l| {
-        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
-        for value in [0, 0, 0, 0, 100, 100, 0, 0] {
-            a.push(value)?;
-        }
-        a.push(WS_POPUP_VISIBLE as i32)?;
-        a.push(l.at(class) as i32)?;
-        a.push(l.at(class) as i32)?;
-        a.push(0)?;
-        a.call(f("CreateWindowExA"))?;
-        a.mov(ebx, eax)?;
-        a.push(SWP_NOMOVE_NOZORDER)?;
-        a.push(50)?;
-        a.push(50)?;
-        a.push(0)?;
-        a.push(0)?;
-        a.push(0)?;
-        a.push(ebx)?;
-        a.call(f("SetWindowPos"))?;
-        a.push(0)?;
-        a.push(ebx)?;
-        a.call(f("ValidateRect"))?;
-        a.push(0)?;
-        a.push(WM_PAINT)?;
-        a.push(WM_PAINT)?;
-        a.push(ebx)?;
-        a.push(l.at(msg) as i32)?;
-        a.call(f("PeekMessageA"))?;
-        a.push(eax)?;
-        a.call(l.import(names.len()))?;
-        Ok(())
-    });
-    let (code, _) = run("shrunk_window_paint", exe);
-    assert_eq!(code, 0);
+/// What a script for `update_script` does to the window, or checks.
+#[derive(Clone, Copy)]
+enum Upd {
+    /// SetWindowPos to this size, with SWP_NOREDRAW.
+    Size(i32, i32),
+    /// SetWindowPos to the corner of the screen or parent, SWP_NOREDRAW.
+    MoveHome,
+    /// SetWindowRgn with a 50x50 region, or with none.
+    Region,
+    NoRegion,
+    /// ValidateRect, of this rectangle or the client area.
+    Validate(Option<[i32; 4]>),
+    /// RedrawWindow of the whole window with these flags.
+    Redraw(i32),
+    /// Dispatch what is queued, up to 20 WM_PAINTs, with the counts of
+    /// `Sent` from zero. The procedure answers WM_PAINT with ValidateRect.
+    Pump,
+    /// GetUpdateRect says TRUE and gives this rectangle.
+    Update([i32; 4]),
+    /// GetUpdateRect says FALSE.
+    NoUpdate,
+    /// The last `Pump` saw this many WM_PAINTs and WM_NCPAINTs.
+    Sent(i32, i32),
+    /// The last `Pump` saw no endless WM_PAINT.
+    NoLoop,
 }
 
-/// A 100x100 window of `style`, its whole client area to paint, made
-/// 50x50 without a redraw, or with `region` given a 50x50 region. Its
-/// procedure answers WM_PAINT with ValidateRect and three of them are
-/// dispatched. The exit code: 1 if another WM_PAINT waits, 2 without a
-/// window, or 0.
-fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
+const RDW_INVALIDATE: i32 = 0x0001;
+const RDW_VALIDATE: i32 = 0x0008;
+const RDW_FRAME: i32 = 0x0400;
+const RDW_NOFRAME: i32 = 0x0800;
+const POPUP: i32 = 0x9000_0000u32 as i32;
+const POPUP_BORDER: i32 = 0x9080_0000u32 as i32;
+
+/// Where a script for `update_script` runs: a window of `style` at `at`
+/// of `size`, or a child of it at (x, y) and this size, which the script
+/// then works on.
+#[derive(Clone, Copy)]
+struct UpdWindow {
+    class_style: i32,
+    style: i32,
+    at: (i32, i32),
+    size: (i32, i32),
+    child: Option<(i32, i32, i32)>,
+}
+
+const WINDOW_100: UpdWindow = UpdWindow {
+    class_style: 0,
+    style: POPUP,
+    at: (0, 0),
+    size: (100, 100),
+    child: None,
+};
+
+/// Run `script` on `window`. The exit code: the number of the first
+/// step that went differently, from 1, or 0.
+fn update_script(test: &str, window: UpdWindow, script: &[Upd]) -> u8 {
     const WM_PAINT: i32 = 0x000F;
+    const WM_NCPAINT: i32 = 0x0085;
     const PM_REMOVE: i32 = 1;
-    const SWP_NOMOVE_NOZORDER_NOREDRAW: i32 = 0x000E;
+    const SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001E;
+    const SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001D;
+    const LOOP_CAP: i32 = 20;
     let names: &[&str] = &[
         "RegisterClassA",
         "CreateWindowExA",
@@ -3447,6 +3446,8 @@ fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
         "SetWindowPos",
         "SetWindowRgn",
         "ValidateRect",
+        "RedrawWindow",
+        "GetUpdateRect",
         "PeekMessageA",
         "DispatchMessageA",
     ];
@@ -3458,24 +3459,36 @@ fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
         ("KERNEL32.dll", kernel),
     ];
     let mut d = Data::default();
-    let name = d.text("Cropped");
+    let name = d.text("UpdateScript");
     let msg = d.add(&[0; 28]);
+    let paints = d.add(&[0; 4]);
+    let ncpaints = d.add(&[0; 4]);
+    let rect = d.add(&[0; 16]);
+    let named = d.add(&[0; 16]);
     let mut wndclass = [0; 40];
+    wndclass[0..4].copy_from_slice(&window.class_style.to_le_bytes());
     wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
     let class = d.add(&wndclass);
     let exe = program(BASE, false, imports, &d.0, |a, l| {
         let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
         let mut start = a.create_label();
+        let mut done = a.create_label();
         a.call(start)?;
         // The window procedure.
+        let mut not_paint = a.create_label();
         let mut other = a.create_label();
         a.cmp(dword_ptr(esp + 8), WM_PAINT)?;
-        a.jne(other)?;
+        a.jne(not_paint)?;
+        a.inc(dword_ptr(l.at(paints)))?;
         a.push(0)?;
         a.push(dword_ptr(esp + 8))?;
         a.call(f("ValidateRect"))?;
         a.xor(eax, eax)?;
         a.ret_1(16)?;
+        a.set_label(&mut not_paint)?;
+        a.cmp(dword_ptr(esp + 8), WM_NCPAINT)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(ncpaints)))?;
         a.set_label(&mut other)?;
         a.jmp(f("DefWindowProcA"))?;
         a.set_label(&mut start)?;
@@ -3484,7 +3497,9 @@ fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
         a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
         a.push(l.at(class) as i32)?;
         a.call(f("RegisterClassA"))?;
-        for value in [0, BASE as i32, 0, 0, 100, 100, 0, 0, style] {
+        let (x, y) = window.at;
+        let (w, h) = window.size;
+        for value in [0, BASE as i32, 0, 0, h, w, y, x, window.style] {
             a.push(value)?;
         }
         a.push(l.at(name) as i32)?;
@@ -3492,43 +3507,134 @@ fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
         a.push(0)?;
         a.call(f("CreateWindowExA"))?;
         a.mov(ebx, eax)?;
-        if region {
-            for value in [50, 50, 0, 0] {
-                a.push(value)?;
-            }
-            a.call(l.import(names.len()))?;
+        if let Some((x, y, size)) = window.child {
+            const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
             a.push(0)?;
-            a.push(eax)?;
+            a.push(BASE as i32)?;
+            a.push(0)?;
             a.push(ebx)?;
-            a.call(f("SetWindowRgn"))?;
-        } else {
-            for value in [SWP_NOMOVE_NOZORDER_NOREDRAW, 50, 50, 0, 0, 0] {
+            for value in [size, size, y, x, WS_CHILD_VISIBLE] {
                 a.push(value)?;
             }
-            a.push(ebx)?;
-            a.call(f("SetWindowPos"))?;
+            a.push(l.at(name) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.push(0)?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(ebx, eax)?;
         }
-        for remove in [PM_REMOVE, PM_REMOVE, PM_REMOVE, 0] {
-            let mut none = a.create_label();
-            a.push(remove)?;
-            a.push(WM_PAINT)?;
-            a.push(WM_PAINT)?;
-            a.push(ebx)?;
-            a.push(l.at(msg) as i32)?;
-            a.call(f("PeekMessageA"))?;
-            if remove != 0 {
-                a.test(eax, eax)?;
-                a.je(none)?;
-                a.push(l.at(msg) as i32)?;
-                a.call(f("DispatchMessageA"))?;
+        for (i, step) in script.iter().enumerate() {
+            let number = i as i32 + 1;
+            match *step {
+                Upd::Size(w, h) => {
+                    let flags = SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW;
+                    for value in [flags, h, w, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("SetWindowPos"))?;
+                }
+                Upd::MoveHome => {
+                    let flags = SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW;
+                    for value in [flags, 0, 0, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("SetWindowPos"))?;
+                }
+                Upd::Region => {
+                    for value in [50, 50, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.call(l.import(names.len()))?;
+                    a.push(0)?;
+                    a.push(eax)?;
+                    a.push(ebx)?;
+                    a.call(f("SetWindowRgn"))?;
+                }
+                Upd::NoRegion => {
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("SetWindowRgn"))?;
+                }
+                Upd::Validate(None) => {
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("ValidateRect"))?;
+                }
+                Upd::Validate(Some(r)) => {
+                    for (j, value) in r.into_iter().enumerate() {
+                        a.mov(dword_ptr(l.at(named + 4 * j as u32)), value)?;
+                    }
+                    a.push(l.at(named) as i32)?;
+                    a.push(ebx)?;
+                    a.call(f("ValidateRect"))?;
+                }
+                Upd::Redraw(flags) => {
+                    for value in [flags, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("RedrawWindow"))?;
+                }
+                Upd::Pump => {
+                    let mut again = a.create_label();
+                    let mut empty = a.create_label();
+                    a.mov(dword_ptr(l.at(paints)), 0)?;
+                    a.mov(dword_ptr(l.at(ncpaints)), 0)?;
+                    a.set_label(&mut again)?;
+                    a.cmp(dword_ptr(l.at(paints)), LOOP_CAP)?;
+                    a.jge(empty)?;
+                    for value in [PM_REMOVE, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(l.at(msg) as i32)?;
+                    a.call(f("PeekMessageA"))?;
+                    a.test(eax, eax)?;
+                    a.je(empty)?;
+                    a.push(l.at(msg) as i32)?;
+                    a.call(f("DispatchMessageA"))?;
+                    a.jmp(again)?;
+                    a.set_label(&mut empty)?;
+                }
+                Upd::Update(r) => {
+                    a.push(0)?;
+                    a.push(l.at(rect) as i32)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRect"))?;
+                    a.test(eax, eax)?;
+                    a.mov(eax, number)?;
+                    a.je(done)?;
+                    for (j, value) in r.into_iter().enumerate() {
+                        a.cmp(dword_ptr(l.at(rect + 4 * j as u32)), value)?;
+                        a.jne(done)?;
+                    }
+                }
+                Upd::NoUpdate => {
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRect"))?;
+                    a.test(eax, eax)?;
+                    a.mov(eax, number)?;
+                    a.jne(done)?;
+                }
+                Upd::Sent(p, nc) => {
+                    a.mov(eax, number)?;
+                    a.cmp(dword_ptr(l.at(paints)), p)?;
+                    a.jne(done)?;
+                    a.cmp(dword_ptr(l.at(ncpaints)), nc)?;
+                    a.jne(done)?;
+                }
+                Upd::NoLoop => {
+                    a.mov(eax, number)?;
+                    a.cmp(dword_ptr(l.at(paints)), LOOP_CAP)?;
+                    a.jge(done)?;
+                }
             }
-            a.set_label(&mut none)?;
         }
-        let mut window = a.create_label();
-        a.test(ebx, ebx)?;
-        a.jne(window)?;
-        a.mov(eax, 2)?;
-        a.set_label(&mut window)?;
+        a.xor(eax, eax)?;
+        a.set_label(&mut done)?;
         a.push(eax)?;
         a.call(l.import(names.len() + 1))?;
         Ok(())
@@ -3536,23 +3642,224 @@ fn wm_paint_waits_after_cropping(test: &str, style: i32, region: bool) -> u8 {
     run(test, exe).0
 }
 
-/// Client area that a smaller window's frame now covers is more than
-/// ValidateRect reaches: WM_NCPAINT takes it after the WM_PAINT, which
-/// doesn't come back.
+/// The update region survives a shrink, as on Windows 98 and 11: a
+/// 100x100 window made 50x50 reports 50x50, but grown back without being
+/// validated it has all 100x100 still to paint. Validating is what ends
+/// it: this time nothing comes back.
 #[test]
-fn a_window_that_shrinks_into_its_frame_stops_asking_for_wm_paint() {
-    const WS_POPUP_VISIBLE_BORDER: i32 = 0x9080_0000u32 as i32;
-    let code = wm_paint_waits_after_cropping("shrunk_frame_paint", WS_POPUP_VISIBLE_BORDER, false);
-    assert_eq!(code, 0);
+fn the_update_region_survives_a_shrink_until_it_is_validated() {
+    use Upd::*;
+    let script = [
+        Size(50, 50),
+        Update([0, 0, 50, 50]),
+        Size(100, 100),
+        Update([0, 0, 100, 100]),
+        Size(50, 50),
+        Validate(None),
+        NoUpdate,
+        Size(100, 100),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_regrow", WINDOW_100, &script), 0);
 }
 
-/// SetWindowRgn takes away what the window had to paint outside the
-/// region, which ValidateRect couldn't reach.
+/// Omikron's window: Windows 98 reports 640x480 of a 641x481 window on
+/// its 640x480 screen, and ValidateRect leaves nothing when it then
+/// shrinks to 640x480. Omikron's frames ran only with no WM_PAINT waiting.
 #[test]
-fn a_window_given_a_smaller_region_stops_asking_for_wm_paint() {
-    const WS_POPUP_VISIBLE: i32 = 0x9000_0000u32 as i32;
-    let code = wm_paint_waits_after_cropping("region_paint", WS_POPUP_VISIBLE, true);
-    assert_eq!(code, 0);
+fn a_window_larger_than_the_screen_stops_asking_for_wm_paint() {
+    use Upd::*;
+    let window = UpdWindow {
+        size: (641, 481),
+        ..WINDOW_100
+    };
+    let script = [
+        Update([0, 0, 640, 480]),
+        Size(640, 480),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+    ];
+    assert_eq!(update_script("upd_omikron", window, &script), 0);
+}
+
+/// Windows 98 reports what of the client area is on the screen, 40
+/// columns here, but the region keeps the rest: the window moved back
+/// reports all of it.
+#[test]
+fn the_screen_limits_what_is_reported_not_the_update_region() {
+    use Upd::*;
+    let window = UpdWindow {
+        at: (600, 0),
+        ..WINDOW_100
+    };
+    let script = [Update([0, 0, 40, 100]), MoveHome, Update([0, 0, 100, 100])];
+    assert_eq!(update_script("upd_screen", window, &script), 0);
+}
+
+/// Any ValidateRect clips what is left to the client area, as on
+/// Windows 98 and 11: of a rectangle in it, of one elsewhere, of an
+/// empty one. Grown back, the window has 50x50 to paint, not 100x100.
+#[test]
+fn any_validate_clips_the_rest_to_the_client_area() {
+    use Upd::*;
+    for (test, rect) in [
+        ("upd_valid_inside", [0, 0, 10, 10]),
+        ("upd_valid_outside", [60, 60, 70, 70]),
+        ("upd_valid_empty", [5, 5, 5, 5]),
+    ] {
+        let script = [
+            Size(50, 50),
+            Validate(Some(rect)),
+            Size(100, 100),
+            Update([0, 0, 50, 50]),
+        ];
+        assert_eq!(update_script(test, WINDOW_100, &script), 0, "{test}");
+    }
+}
+
+/// Validating with RDW_FRAME validates nothing on Windows 98 and 11, and
+/// clips nothing: the whole region comes back.
+#[test]
+fn rdw_validate_with_rdw_frame_leaves_the_update_region() {
+    use Upd::*;
+    let script = [
+        Size(50, 50),
+        Redraw(RDW_VALIDATE | RDW_FRAME),
+        Update([0, 0, 50, 50]),
+        Size(100, 100),
+        Update([0, 0, 100, 100]),
+    ];
+    assert_eq!(update_script("upd_rdw_frame", WINDOW_100, &script), 0);
+}
+
+/// SetWindowRgn doesn't crop the update region, as on Windows 98 and
+/// 11, and neither does invalidating: GetUpdateRect gives the whole
+/// client area of a 100x100 window with a 50x50 region. Validating 50x50
+/// of it leaves nothing, and taking the region off shows none was kept.
+#[test]
+fn a_window_region_limits_what_validating_keeps_and_nothing_else() {
+    use Upd::*;
+    let script = [
+        Region,
+        Update([0, 0, 100, 100]),
+        Validate(Some([0, 0, 50, 50])),
+        NoUpdate,
+        NoRegion,
+        NoUpdate,
+        Region,
+        Redraw(RDW_INVALIDATE),
+        Update([0, 0, 100, 100]),
+    ];
+    assert_eq!(update_script("upd_region", WINDOW_100, &script), 0);
+}
+
+/// A window that shrinks so that its update region lies under its new
+/// frame: on Windows 98 validating leaves nothing, and neither WM_PAINT
+/// nor WM_NCPAINT comes, as that frame was never invalidated.
+#[test]
+fn a_shrink_into_the_frame_gives_no_wm_ncpaint() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Size(50, 50),
+        Update([0, 0, 48, 48]),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+        Size(100, 100),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_frame_shrink", window, &script), 0);
+}
+
+/// A CS_PARENTDC child shrunk from 60 to 30 reports 30x30 on Windows 98,
+/// and validated it has nothing left. A plain child does the same. The
+/// WM_PAINT Windows sends after that goes to the parent.
+#[test]
+fn a_shrunk_child_has_nothing_left_after_validating() {
+    use Upd::*;
+    const CS_PARENTDC: i32 = 0x0080;
+    let script = [
+        Size(30, 30),
+        Update([0, 0, 30, 30]),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        NoLoop,
+        NoUpdate,
+    ];
+    for (test, class_style) in [("upd_child", 0), ("upd_parentdc", CS_PARENTDC)] {
+        let window = UpdWindow {
+            class_style,
+            child: Some((0, 0, 60)),
+            ..WINDOW_100
+        };
+        assert_eq!(update_script(test, window, &script), 0, "{test}");
+    }
+}
+
+/// A frame invalidated on purpose is out of ValidateRect's reach on
+/// Windows 98: GetUpdateRgn is then empty, GetUpdateRect still gives the
+/// client area, and one WM_PAINT and one WM_NCPAINT follow.
+#[test]
+fn an_invalidated_frame_survives_validate_rect() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Update([0, 0, 98, 98]),
+        Validate(None),
+        Update([0, 0, 98, 98]),
+        Pump,
+        Sent(1, 1),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_frame", window, &script), 0);
+}
+
+/// With a frame still to paint validating keeps it, by the window as it
+/// is now: on Windows 98 the 50x50 ring of a shrunk window is left, which
+/// grown back reports as 49x49 of the client area. RDW_NOFRAME drops the
+/// frame first, and with it all of the rest.
+#[test]
+fn a_pending_frame_is_clipped_to_the_window_when_validating() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Size(50, 50),
+        Validate(None),
+        Size(100, 100),
+        Update([0, 0, 49, 49]),
+        Pump,
+        Sent(1, 1),
+    ];
+    assert_eq!(update_script("upd_frame_clip", window, &script), 0);
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Size(50, 50),
+        Redraw(RDW_VALIDATE | RDW_NOFRAME),
+        Size(100, 100),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+    ];
+    assert_eq!(update_script("upd_noframe", window, &script), 0);
 }
 
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
