@@ -139,6 +139,7 @@ const PALETTE: u32 = 0x10;
 const CLIPPER: u32 = 0x14;
 const OFFSCREEN: u32 = 0x18;
 const SOURCE: u32 = 0x1C;
+const FRONT4: u32 = 0x20;
 /// The HRESULTs of the calls, in order.
 const RESULTS: u32 = 0x40;
 const DONE: u32 = 0xC0;
@@ -486,12 +487,12 @@ fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
             l,
             FRONT,
             S_QUERY_INTERFACE,
-            &[Arg::At(KEY), Arg::At(OFFSCREEN)],
+            &[Arg::At(KEY), Arg::At(FRONT4)],
         )?;
         c.com(
             a,
             l,
-            OFFSCREEN,
+            FRONT4,
             S_GET_ATTACHED_SURFACE,
             &[Arg::At(CAPS), Arg::At(BACK)],
         )?;
@@ -499,7 +500,8 @@ fn surface4_looks_at_the_first_word_of_the_caps_for_an_attached_surface() {
     });
     let mut cpu = machine("attached_caps4", program);
     run_until_done(&mut cpu, data);
-    assert_eq!(results(&mut cpu, data, 6)[1..], [0; 5]);
+    assert_eq!(results(&mut cpu, data, 7)[1..], [0; 6]);
+    assert_ne!(peek(&cpu, data + BACK), 0);
 }
 
 #[test]
