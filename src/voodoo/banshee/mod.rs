@@ -940,7 +940,7 @@ impl Voodoo {
             // operation there would otherwise undo the packet.
             if self.recording() {
                 let at = addr & fbmask;
-                self.gpu.get_mut().pages.mark(at, at + 4);
+                self.gpu.get_mut().tracker.mark(at, at + 4);
             }
             self.banshee_fifo_written(addr, now, effect);
         } else {

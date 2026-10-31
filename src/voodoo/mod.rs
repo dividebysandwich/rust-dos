@@ -45,8 +45,8 @@ pub mod register;
 pub mod regs;
 pub mod setup;
 pub mod tables;
-pub mod tracker;
 pub mod texture;
+pub mod tracker;
 pub mod tsu;
 pub mod workers;
 
@@ -1783,8 +1783,8 @@ impl Voodoo {
         self.palette_dirty = true;
         self.display_dirty = true;
         // The memory loaded is newer than anything on the GPU.
-        self.gpu.get_mut().pages.mark_all();
-        self.gpu.get_mut().pages.forget_buffers();
+        self.gpu.get_mut().tracker.mark_all();
+        self.gpu.get_mut().tracker.forget_buffers();
         self.gpu_behind.set(false);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();
@@ -1806,7 +1806,7 @@ impl Voodoo {
             self.release_backlog();
             self.update_tiles();
             // A renderer starting over has none of the picture.
-            self.gpu.get_mut().pages.mark_all();
+            self.gpu.get_mut().tracker.mark_all();
             self.display_dirty = true;
         }
     }
@@ -1862,7 +1862,7 @@ impl Voodoo {
         // pages it changed, which the renderer's copy of the memory may
         // now be read or drawn into at: it gets them again.
         for (start, end) in old.iter().flat_map(|old| old.spans()).map(clamp) {
-            self.gpu.get_mut().pages.mark(start, end);
+            self.gpu.get_mut().tracker.mark(start, end);
         }
         // The software renderer draws the buffers into the memory from
         // now on, where the GPU may have done a 2D operation.
@@ -1957,7 +1957,7 @@ impl Voodoo {
             return;
         };
         // The renderer's copy of the memory gets the pages again.
-        self.gpu.get_mut().pages.mark(start, end);
+        self.gpu.get_mut().tracker.mark(start, end);
         // The texture units read the same memory: what the recording
         // decoded from there is out of date.
         for tmu in &mut self.tmu {
