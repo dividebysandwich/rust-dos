@@ -195,6 +195,107 @@ fn force_duplicate_points_standard_output_at_a_file() {
     assert_eq!(fs::read(dir.join("OUT.TXT")).unwrap(), b"hi");
 }
 
+/// The tests below hold what MS-DOS 7.10 answers, from a test program run
+/// on Windows 98's DOS booted from a floppy.
+#[test]
+fn ioctl_status_of_a_file_reads_ahead_and_keeps_the_position() {
+    let mut cpu = machine("ioctl_status");
+    let h = open(&mut cpu, "DATA.TXT", 2).unwrap();
+    // AL=FFh with the next byte in AH, until the end, and at or past it
+    // AL=00h and AH=1Ah.
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x30FF));
+    assert_eq!(dos(&mut cpu, 0x4201, h, 0, 0), Ok(0), "the position stays");
+    dos(&mut cpu, 0x4200, h, 0, 5).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x35FF));
+    assert_eq!(read(&mut cpu, h, 5).unwrap(), b"56789");
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x1A00));
+    dos(&mut cpu, 0x4200, h, 0, 20).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x1A00));
+    assert_eq!(dos(&mut cpu, 0x4201, h, 0, 0), Ok(20), "the position stays");
+    // A file is always ready for output.
+    assert_eq!(dos(&mut cpu, 0x4407, h, 0, 0), Ok(0x01FF));
+    // A handle open for writing only has nothing to read.
+    let w = open(&mut cpu, "DATA.TXT", 1).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, w, 0, 0), Ok(0x1A00));
+    assert_eq!(dos(&mut cpu, 0x4407, w, 0, 0), Ok(0x01FF));
+    // No such handle.
+    assert_eq!(dos(&mut cpu, 0x4406, 0x77, 0, 0), Err(6));
+    assert_eq!(dos(&mut cpu, 0x4407, 0x77, 0, 0), Err(6));
+}
+
+#[test]
+fn ioctl_status_of_the_console_is_the_keyboards() {
+    let mut cpu = machine("ioctl_status_console");
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+    assert_eq!(dos(&mut cpu, 0x4407, 1, 0, 0), Ok(0x01FF));
+    rust_dos::keyboard::queue_keystroke(&mut cpu.bus, 0x1071);
+    // Any handle on the console: the key stays where it was.
+    assert_eq!(dos(&mut cpu, 0x4406, 1, 0, 0), Ok(0x71FF));
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x71FF));
+    assert_eq!(dos(&mut cpu, 0x0700, 0, 0, 0).map(|ax| ax & 0xFF), Ok(0x71));
+    // The rest of a line a cooked read took doesn't count.
+    cpu.con_pending.extend(b"cde\r\n");
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+}
+
+#[test]
+fn ioctl_status_of_nul_aux_and_a_serial_port() {
+    use rust_dos::serial::{PortType, SerialSettings};
+    let mut cpu = machine("ioctl_status_devices");
+    let nul = open(&mut cpu, "NUL", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, nul, 0, 0), Ok(0x00FF));
+    assert_eq!(dos(&mut cpu, 0x4407, nul, 0, 0), Ok(0x01FF));
+    // AUX, the standard one or by name, with nothing on it.
+    let aux = open(&mut cpu, "AUX", 2).unwrap();
+    for handle in [3, aux] {
+        assert_eq!(dos(&mut cpu, 0x4406, handle, 0, 0), Ok(0x0000));
+        assert_eq!(dos(&mut cpu, 0x4407, handle, 0, 0), Ok(0x0100));
+    }
+    // A COM port with no hardware.
+    let com3 = open(&mut cpu, "COM3", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, com3, 0, 0), Ok(0x0000));
+    assert_eq!(dos(&mut cpu, 0x4407, com3, 0, 0), Ok(0x0100));
+    // A modem on COM1, which raises DSR once the program raises DTR:
+    // ready for output, nothing to read yet.
+    let modem = [PortType::Modem, PortType::Empty, PortType::Off, PortType::Off];
+    cpu.bus.configure_serial(&SerialSettings { ports: modem, ..Default::default() });
+    cpu.bus.io_write(0x3FC, 0x03);
+    let com1 = open(&mut cpu, "COM1", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4407, com1, 0, 0), Ok(0x01FF));
+    assert_eq!(dos(&mut cpu, 0x4406, com1, 0, 0), Ok(0x0000));
+    // Nothing on COM2, so no DSR: busy both ways.
+    let com2 = open(&mut cpu, "COM2", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4407, com2, 0, 0), Ok(0x0100));
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
+}
+
+#[test]
+fn ioctl_440a_gives_the_sft_flags_and_keeps_ax() {
+    let mut cpu = machine("ioctl_remote");
+    let h = open(&mut cpu, "DATA.TXT", 2).unwrap();
+    let drive = cpu.bus.disk.get_current_drive() as u16;
+    // Bit 15, remote, clear; bit 6, not written, set.
+    assert_eq!(dos(&mut cpu, 0x440A, h, 0, 0xFFFF), Ok(0x440A));
+    assert_eq!(cpu.dx(), 0x0040 | drive);
+    // A device has no driver attributes in the high byte, unlike AX=4400h.
+    dos(&mut cpu, 0x4400, 1, 0, 0).unwrap();
+    assert_eq!(cpu.dx(), 0x80D3);
+    assert_eq!(dos(&mut cpu, 0x440A, 1, 0, 0xFFFF), Ok(0x440A));
+    assert_eq!(cpu.dx(), 0x00D3);
+    let nul = open(&mut cpu, "NUL", 2).unwrap();
+    dos(&mut cpu, 0x4400, nul, 0, 0).unwrap();
+    assert_eq!(cpu.dx(), 0x80C4);
+    dos(&mut cpu, 0x440A, nul, 0, 0xFFFF).unwrap();
+    assert_eq!(cpu.dx(), 0x00C4);
+    // Raw mode shows, as in AX=4400h.
+    dos(&mut cpu, 0x4401, 1, 0, 0xF3).unwrap();
+    dos(&mut cpu, 0x440A, 1, 0, 0xFFFF).unwrap();
+    assert_eq!(cpu.dx(), 0x00F3);
+    // No such handle: error 6, DX as it was.
+    assert_eq!(dos(&mut cpu, 0x440A, 0x77, 0, 0x1234), Err(6));
+    assert_eq!(cpu.dx(), 0x1234);
+}
+
 #[test]
 fn a_console_write_clears_a_carry_the_caller_had_set() {
     let mut cpu = machine("console_write_carry");

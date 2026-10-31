@@ -480,6 +480,65 @@ fn writes_console(cpu: &mut Cpu, ah: u8) -> bool {
     }
 }
 
+/// The device information word of AX=4400h for the device `device` open
+/// at `sft`, with bit 5 set in raw (binary) mode.
+fn device_word(cpu: &Cpu, sft: u16, device: CharDevice) -> u16 {
+    let raw = if cpu.bus.disk.device_raw(sft) { 0x20 } else { 0 };
+    dos_files::device_info(device, sft) | raw
+}
+
+/// The drive number (0=A) of the open file `sft`.
+fn file_drive(cpu: &Cpu, sft: u16) -> u16 {
+    let disk = &cpu.bus.disk;
+    disk.handle_drive(sft).unwrap_or(disk.get_current_drive()) as u16
+}
+
+/// Whether the open file `sft` is ready for output or input, and for input
+/// the next character (AX=4406h and 4407h).
+///
+/// MS-DOS reads a byte of a file and puts the position back, so a file is
+/// ready until its end, and a handle open for writing only has nothing to
+/// read. The console's status is the keyboard's: the rest of a line a
+/// cooked read took isn't in it. NUL's driver is never busy, and a serial
+/// port answers from its status registers as the AUX driver does from
+/// INT 14h, needing DSR. AUX, which goes nowhere here, is what a port with
+/// nothing on it is, not ready.
+fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) -> (bool, u8) {
+    match device {
+        None if output => (true, 0),
+        None => {
+            let disk = &mut cpu.bus.disk;
+            let write_only = disk.sft_entry(sft).is_some_and(|entry| entry.mode & 3 == 1);
+            let at = disk.position(sft).unwrap_or(0);
+            let next = if write_only { None } else { disk.read_file(sft, 1).ok() };
+            let _ = disk.seek_file(sft, at as i64, 0);
+            match next.and_then(|bytes| bytes.first().copied()) {
+                Some(byte) => (true, byte),
+                None => (false, 0x1A),
+            }
+        }
+        Some(CharDevice::Con) if output => (true, 0),
+        Some(CharDevice::Con) => {
+            let key = crate::keyboard::peek_keystroke(&mut cpu.bus).map(|key| key as u8);
+            match cpu.con_pending_scan.or(key) {
+                Some(next) => (true, next),
+                None => (false, 0),
+            }
+        }
+        Some(CharDevice::Nul)
+            if cpu.bus.disk.sft_entry(sft).is_some_and(|entry| entry.name.starts_with(b"NUL ")) =>
+        {
+            (true, 0)
+        }
+        Some(device) => {
+            let status = device.com_port().and_then(|n| cpu.bus.serial_status(n));
+            let (lsr, msr) = status.unwrap_or((0, 0));
+            let line = if output { 0x20 } else { 0x01 };
+            (lsr & line != 0 && msr & 0x20 != 0, 0)
+        }
+    }
+}
+
 fn dispatch(cpu: &mut Cpu, ah: u8) {
     match ah {
         // AH = 0Eh: Select Default Drive
@@ -1570,43 +1629,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let Some(sft) = sft else {
                         return set_result(cpu, Err(0x06));
                     };
-                    if sft == crate::disk::SFT_AUX
-                        || sft == crate::disk::SFT_PRN
-                        || device.is_some_and(|d| d.com_port().is_some() || d == CharDevice::Prn)
-                    {
-                        // AUX and PRN: character devices, not EOF.
-                        cpu.set_dx(0x80C0);
-                    } else if device == Some(CharDevice::Nul) {
-                        // Character device, NUL.
-                        cpu.set_dx(0x8084);
-                    } else if device == Some(CharDevice::Emm) {
-                        // The expanded memory manager: a character device
-                        // taking IOCTL.
-                        cpu.set_dx(0xC080);
-                    } else if device == Some(CharDevice::Con) {
-                        // 1000 0000 1101 0011 = 80D3
-                        // Bit 7: Char device
-                        // Bit 6: EOF (0) - meaningful for files?
-                        // Bit 5: Raw (Binary) mode? (0=Cooked, 1=Raw)
-                        // Bit 4: Special?
-                        // Bit 3: Clock?
-                        // Bit 2: NUL?
-                        // Bit 1: Stdout
-                        // Bit 0: Stdin
-                        cpu.set_dx(0x80D3);
-                    } else {
+                    let info = match device {
+                        Some(device) => device_word(cpu, sft, device),
                         // File: Bit 7=0 (Block Dev), Bits 0-5 = Drive # (0=A)
-                        let drive = cpu
-                            .bus
-                            .disk
-                            .handle_drive(sft)
-                            .unwrap_or(cpu.bus.disk.get_current_drive());
-                        cpu.set_dx(drive as u16);
-                    }
-                    // Bit 5: a device in raw (binary) mode.
-                    if device.is_some() && cpu.bus.disk.device_raw(sft) {
-                        cpu.set_dx(cpu.dx() | 0x20);
-                    }
+                        None => file_drive(cpu, sft),
+                    };
+                    cpu.set_dx(info);
                     cpu.set_cpu_flag(CpuFlags::CF, false);
                     // cpu.bus.log_string(&format!("[DOS] IOCTL Get Device Info -> {:04X}", cpu.dx()));
                 }
@@ -1674,6 +1702,34 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let (buffer, size) = (cpu.get_physical_addr(cpu.ds(), cpu.dx()), cpu.cx());
                     let result = crate::ems::ioctl_read(&mut cpu.bus, buffer, size);
                     set_result(cpu, result);
+                }
+                // Input and output status. As in MS-DOS, AL is FFh or 00h
+                // and AH what the status call left: the next character for
+                // input (1Ah with none in a file), 01h for output.
+                0x06 | 0x07 => {
+                    let Some(sft) = sft else {
+                        return set_result(cpu, Err(0x06));
+                    };
+                    let output = al == 0x07;
+                    let (ready, next) = io_status(cpu, sft, device, output);
+                    let high = if output { 0x01 } else { next as u16 };
+                    set_result(cpu, Ok(high << 8 | if ready { 0xFF } else { 0x00 }));
+                }
+                // Is the handle remote: DX is the flags word of the SFT, whose
+                // bit 15 is clear, as no handle here is on a network
+                // redirector. Unlike AX=4400h it has no driver attribute
+                // byte in the high byte, and AX stays as it was.
+                0x0A => {
+                    let Some(sft) = sft else {
+                        return set_result(cpu, Err(0x06));
+                    };
+                    let flags = match device {
+                        Some(device) => device_word(cpu, sft, device) & 0x00FF,
+                        // Bit 6: not written, which nothing tracks yet.
+                        None => 0x0040 | file_drive(cpu, sft),
+                    };
+                    cpu.set_dx(flags);
+                    cpu.set_cpu_flag(CpuFlags::CF, false);
                 }
                 // MS-DOS 7 has subfunctions 00h to 11h and fails any other
                 // with error 1, invalid function. Network clients add their
