@@ -354,12 +354,12 @@ fn write_record(cpu: &mut Cpu, at: u32, code: u32, flags: u32, address: u32, par
 }
 
 /// The running thread's first exception handler frame (`fs:[0]`).
-fn handlers(cpu: &mut Cpu) -> u32 {
+pub fn handlers(cpu: &mut Cpu) -> u32 {
     let tib = process(cpu).tib;
     cpu.bus.guest_read_32(tib + TIB_EXCEPTION_LIST)
 }
 
-fn set_handlers(cpu: &mut Cpu, frame: u32) {
+pub fn set_handlers(cpu: &mut Cpu, frame: u32) {
     let tib = process(cpu).tib;
     cpu.bus.guest_write_32(tib + TIB_EXCEPTION_LIST, frame);
 }

@@ -527,4 +527,7 @@ pub static APIS: &[Api] = &[
         1,
         startup::set_se_translator,
     ),
+    // The handler of a translator's guard frame: called through that
+    // frame, by no program, as with KERNEL32's CallReturn.
+    cdecl("__TranslatorGuardHandler", 492, 4, startup::translator_guard),
 ];
