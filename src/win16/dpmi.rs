@@ -212,6 +212,9 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
             set_w(ctx, EAX, sel);
         }
         0x0001 => {
+            // The segment registers that hold it are zeroed (DPMI 0.9)
+            // when the task's context is loaded again after the call
+            // (`win32::system::load_context`).
             if !free_selector(cpu, bx) {
                 return Err(BAD_SELECTOR);
             }
