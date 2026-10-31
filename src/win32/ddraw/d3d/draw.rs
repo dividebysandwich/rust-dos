@@ -331,8 +331,8 @@ pub fn draw_prims(
 /// vertex is drawn from its clip coordinates only while the viewport
 /// puts them where the buffer has it; after a change of viewport, or
 /// once the program wrote over it, it is drawn where the buffer says,
-/// as before. A triangle with any vertex drawn so is clipped on the
-/// screen.
+/// as before, and a primitive that mixes the two is clipped as
+/// `pipeline::one_kind` says.
 #[allow(clippy::too_many_arguments)]
 fn draw_clipped(
     cpu: &mut Cpu,
@@ -358,6 +358,15 @@ fn draw_clipped(
         }
     }
     let drawn = rasterize(cpu, id, &setup, &processed, prims);
+    if clip.is_some() {
+        // ProcessVertices put their clip codes in the clip status
+        // already. Drawn, they are screen vertices, which add none:
+        // counted again, a draw of some of them would add the codes
+        // that only those share.
+        for p in &mut processed {
+            p.code = 0;
+        }
+    }
     account(cpu, id, &setup, &processed, drawn, flags);
     Ok(())
 }

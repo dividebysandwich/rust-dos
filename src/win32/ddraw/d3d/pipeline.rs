@@ -1107,12 +1107,7 @@ fn line(
     if !finite(a) || !finite(b) {
         return false;
     }
-    let tl = a.tl || b.tl;
-    let (a, b) = if tl {
-        (as_tl(setup, a), as_tl(setup, b))
-    } else {
-        (*a, *b)
-    };
+    let ([a, b], tl) = one_kind(setup, [*a, *b]);
     let planes = if tl { tl_planes } else { planes };
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
     for plane in planes {
@@ -1134,7 +1129,58 @@ fn line(
     true
 }
 
-/// A vertex as a transformed one, for a primitive that mixes them.
+/// The vertices of a primitive as all of one kind, and whether they are
+/// transformed ones. A primitive that mixes transformed vertices with
+/// vertices at clip coordinates (an execute buffer's, or a vertex
+/// buffer's that ProcessVertices kept) is clipped at the view volume,
+/// its transformed vertices taken back to the clip coordinates the
+/// viewport puts where they are: a vertex behind the eye has no screen
+/// position it could be clipped on the screen from. Only when a
+/// transformed vertex has no such coordinates (its rhw not above 0) is
+/// the primitive clipped on the screen.
+fn one_kind<const N: usize>(setup: &Setup, verts: [Processed; N]) -> ([Processed; N], bool) {
+    let tl = verts.iter().filter(|v| v.tl).count();
+    if tl == 0 || tl == N {
+        return (verts, tl != 0);
+    }
+    let clip = verts.map(|v| as_clip(setup, &v));
+    if clip.iter().all(Option::is_some) {
+        return (clip.map(Option::unwrap_or_default), false);
+    }
+    (verts.map(|v| as_tl(setup, &v)), true)
+}
+
+/// A transformed vertex at the clip coordinates that the viewport puts
+/// where it is, if it has them. It is on the user's clip planes, not
+/// outside them: transformed vertices aren't clipped at them.
+fn as_clip(setup: &Setup, p: &Processed) -> Option<Processed> {
+    if !p.tl {
+        return Some(*p);
+    }
+    let m = &setup.view_map;
+    let w = 1.0 / p.rhw;
+    if !w.is_finite() || w <= 0.0 || m.sx == 0.0 || m.sy == 0.0 || m.sz == 0.0 {
+        return None;
+    }
+    let clip = [
+        (p.clip[0] - m.ox) / m.sx * w,
+        (m.oy - p.clip[1]) / m.sy * w,
+        (p.clip[2] - m.oz) / m.sz * w,
+        w,
+    ];
+    let mut out = Processed {
+        clip,
+        planes: [0.0; 6],
+        rhw: 0.0,
+        tl: false,
+        ..*p
+    };
+    out.code = codes(setup, &out);
+    finite(&out).then_some(out)
+}
+
+/// A vertex as a transformed one, for a primitive that mixes them and
+/// can't be clipped at the view volume.
 fn as_tl(setup: &Setup, p: &Processed) -> Processed {
     if p.tl {
         return *p;
@@ -1160,12 +1206,7 @@ fn triangle(
     if !tri.iter().all(finite) {
         return;
     }
-    let tl = tri.iter().any(|v| v.tl);
-    let tri = if tl {
-        tri.map(|v| as_tl(setup, &v))
-    } else {
-        tri
-    };
+    let (tri, tl) = one_kind(setup, tri);
     // All outside one plane of the view volume: nothing to draw. With
     // no clipping, depth past the near and far planes is clamped, and
     // only the sides count.
@@ -1344,10 +1385,11 @@ mod tests {
         assert!(r.triangles.iter().flatten().all(|v| v.z >= -1e-6));
     }
 
-    #[test]
-    fn processed_vertices_are_clipped_at_their_clip_coordinates() {
-        // A perspective projection, near plane 1 and far plane 10, and a
-        // triangle with a corner behind the eye.
+    /// A perspective projection, near plane 1 and far plane 10, and a
+    /// triangle with a corner behind the eye: its vertices through the
+    /// pipeline, and the screen vertices ProcessVertices writes of them,
+    /// the last one's from a negative w.
+    fn behind_the_eye() -> (Setup, Vec<Processed>, Vec<Processed>) {
         let q = 10.0 / 9.0;
         let setup = Setup {
             view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
@@ -1363,8 +1405,6 @@ mod tests {
             vertex(0.0, 1.0, -2.0),
         ];
         let direct = process(&setup, &input, &Layout::of(FVF_XYZ).unwrap());
-        // What ProcessVertices writes: screen vertices, the last one's
-        // from a negative w.
         let written: Vec<Vertex> = direct
             .iter()
             .map(|p| Vertex {
@@ -1373,6 +1413,16 @@ mod tests {
             })
             .collect();
         let tl = process(&setup, &written, &Layout::of(FVF_XYZRHW).unwrap());
+        (setup, direct, tl)
+    }
+
+    fn in_front(v: &ScreenVertex) -> bool {
+        v.z >= -1e-6 && v.rhw > 0.0
+    }
+
+    #[test]
+    fn processed_vertices_are_clipped_at_their_clip_coordinates() {
+        let (setup, direct, tl) = behind_the_eye();
         let kept: Vec<Processed> = tl
             .iter()
             .zip(&direct)
@@ -1386,7 +1436,31 @@ mod tests {
         // the untransformed vertices draw it.
         assert!(!a.triangles.is_empty());
         assert_eq!(a.triangles, b.triangles);
-        let in_front = |v: &ScreenVertex| v.z >= -1e-6 && v.rhw > 0.0;
+        assert!(b.triangles.iter().flatten().all(in_front));
+    }
+
+    #[test]
+    fn a_triangle_mixing_screen_and_clip_vertices_is_clipped_at_the_near_plane() {
+        // The first corner drawn from its screen position alone, as one
+        // the program wrote over: the triangle is still clipped at the
+        // near plane, as the untransformed vertices draw it.
+        let (setup, direct, tl) = behind_the_eye();
+        let mut mixed = vec![tl[0]];
+        for (p, d) in tl.iter().zip(&direct).skip(1) {
+            mixed.push(at_clip_coordinates(&setup, p, d.clip, d.planes));
+        }
+        let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        draw(&setup, &direct, &prims, &mut a);
+        draw(&setup, &mixed, &prims, &mut b);
+        assert!(!a.triangles.is_empty());
+        assert_eq!(a.triangles.len(), b.triangles.len());
+        let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * (1.0 + a.abs());
+        let (va, vb) = (a.triangles.iter().flatten(), b.triangles.iter().flatten());
+        for (va, vb) in va.zip(vb) {
+            assert!(close(va.x, vb.x) && close(va.y, vb.y), "{va:?} {vb:?}");
+            assert!(close(va.z, vb.z) && close(va.rhw, vb.rhw), "{va:?} {vb:?}");
+        }
         assert!(b.triangles.iter().flatten().all(in_front));
     }
 
