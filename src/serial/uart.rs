@@ -402,6 +402,11 @@ impl Uart {
         (!self.rx.is_empty()).then(|| self.read_rbr(now))
     }
 
+    /// The next received character, left in the FIFO.
+    pub fn next_received(&self) -> Option<u8> {
+        self.rx.front().copied()
+    }
+
     fn lsr(&self) -> u8 {
         let mut lsr = self.lsr_errors;
         if !self.rx.is_empty() {
