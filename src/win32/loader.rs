@@ -632,6 +632,7 @@ fn attach_builtin(
         std::mem::swap(memory, &mut process.memory);
         if filled.is_none() {
             process.modules.pop();
+            term_builtin(bus, memory, process, dll.base);
             return None;
         }
     }
@@ -1290,16 +1291,34 @@ pub(super) fn release(process: &mut Process, base: u32, freed: &mut Vec<u32>) {
     }
 }
 
+/// End what the built-in DLL at `base` has in the process, and write its
+/// image again, so that nothing in it points at what `term` gave back.
+fn term_builtin(bus: &mut Bus, memory: &mut Memory, process: &mut Process, base: u32) {
+    let Some(index) = stubs::DLLS.iter().position(|d| d.base == base) else {
+        return;
+    };
+    let Some(term) = stubs::DLLS[index].term else {
+        return;
+    };
+    std::mem::swap(memory, &mut process.memory);
+    term(bus, process);
+    std::mem::swap(memory, &mut process.memory);
+    let built = stubs::image(index, bus.win32.os);
+    memory.write(bus, base, &built.data);
+}
+
 /// Take the module at `base` out of the process: its pages and address
 /// space are given back. A built-in DLL's stay mapped, as a system DLL's
 /// do in Windows 95's shared arena: its objects and the addresses of its
-/// functions go on working, and `attach_builtin` finds it there.
+/// functions go on working, and `attach_builtin` finds it there. What its
+/// `init` took goes.
 pub(super) fn unmap(bus: &mut Bus, memory: &mut Memory, process: &mut Process, base: u32) {
     let Some(i) = process.modules.iter().position(|m| m.base == base) else {
         return;
     };
     let module = process.modules.remove(i);
     if module.flags & BUILTIN != 0 {
+        term_builtin(bus, memory, process, base);
         return;
     }
     for page in (base..base + module.size.next_multiple_of(PAGE)).step_by(PAGE as usize) {

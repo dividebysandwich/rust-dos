@@ -58,6 +58,8 @@ pub struct Dll {
     /// What fills the variables of a process the DLL is loaded in, once
     /// the process has its memory, heap and environment.
     pub init: Option<Init>,
+    /// What gives back what `init` took, at the last FreeLibrary.
+    pub term: Option<Term>,
     /// The tables of methods of its COM interfaces (com.rs), after the
     /// stubs in its code section.
     pub vtables: &'static [Vtable],
@@ -82,6 +84,9 @@ pub struct Var {
 
 /// A DLL's `init`: the process, which isn't the running one yet.
 pub type Init = fn(&mut crate::bus::Bus, &mut super::Process) -> Option<()>;
+
+/// A DLL's `term`: the process it is going from.
+pub type Term = fn(&mut crate::bus::Bus, &mut super::Process);
 
 /// The built-in DLLs. Append only (see the module's notes).
 pub static DLLS: &[&Dll] = &[

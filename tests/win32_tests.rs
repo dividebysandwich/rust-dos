@@ -2678,6 +2678,182 @@ fn a_program_loads_and_frees_msvcrt_without_importing_it() {
     );
 }
 
+/// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
+/// 98 SE. A stream left open isn't flushed and its file stays open, so
+/// its handle still works and a load of a file with no sharing fails.
+/// The runtime's heap goes: a block malloc gave is free address space
+/// after it, and a program that loads, mallocs 256 KB and frees the DLL
+/// 600 times neither runs out nor changes the process heap.
+#[test]
+fn the_last_free_of_msvcrt_takes_its_heap_and_leaves_its_streams() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "CreateFileA",
+        "CloseHandle",
+        "GetFileSize",
+        "GetLastError",
+        "VirtualQuery",
+        "GetProcessHeap",
+        "HeapAlloc",
+        "HeapFree",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0fopen\0fprintf\0_fileno\0_get_osfhandle\0malloc\0T.TMP\0w\0buffered\0";
+    const NAME: u32 = 0;
+    const FOPEN: u32 = 11;
+    const FPRINTF: u32 = 17;
+    const FILENO: u32 = 25;
+    const OSFHANDLE: u32 = 33;
+    const MALLOC: u32 = 48;
+    const FILE: u32 = 55;
+    const MODE: u32 = 61;
+    const TEXT: u32 = 63;
+    /// MEMORY_BASIC_INFORMATION, and its State.
+    const QUERY: u32 = PROGRAM_DATA + 0x100;
+    const STATE: u32 = QUERY + 16;
+    const MEM_COMMIT: i32 = 0x1000;
+    const MEM_FREE: i32 = 0x10000;
+    const GENERIC_READ_WRITE: u32 = 0xC000_0000;
+    const OPEN_EXISTING: i32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const CYCLES: i32 = 600;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let crt = |a: &mut CodeAssembler, name: u32| -> Result<(), IcedError> {
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetProcAddress"))
+        };
+        let open_alone = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(0)?;
+            a.push(0)?;
+            a.push(OPEN_EXISTING)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(GENERIC_READ_WRITE as i32)?;
+            a.push(l.at(FILE) as i32)?;
+            a.call(f("CreateFileA"))
+        };
+        let query = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(28)?;
+            a.push(QUERY as i32)?;
+            a.push(edi)?;
+            a.call(f("VirtualQuery"))
+        };
+        let new_block = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.call(f("GetProcessHeap"))?;
+            a.push(32)?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("HeapAlloc"))?;
+            a.mov(edi, eax)?;
+            a.call(f("GetProcessHeap"))?;
+            a.push(edi)?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("HeapFree"))
+        };
+        a.xor(ebx, ebx)?;
+        // A stream with text in its buffer, and its handle.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, FOPEN)?;
+        a.push(l.at(MODE) as i32)?;
+        a.push(l.at(FILE) as i32)?;
+        a.call(eax)?;
+        a.add(esp, 8)?;
+        a.mov(edi, eax)?;
+        crt(a, FPRINTF)?;
+        a.push(l.at(TEXT) as i32)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 8)?;
+        crt(a, FILENO)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(edi, eax)?;
+        crt(a, OSFHANDLE)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(ebp, eax)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        // The file is open still, and has none of the text.
+        open_alone(a)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+        check(a, false, 0)?;
+        a.push(0)?;
+        a.push(ebp)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        // Closing the handle ends that.
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        open_alone(a)?;
+        a.mov(edi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        // A block is there until the runtime goes.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, MALLOC)?;
+        a.push(100)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(edi, eax)?;
+        query(a)?;
+        a.cmp(dword_ptr(STATE as u64), MEM_COMMIT)?;
+        check(a, false, 3)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        query(a)?;
+        a.cmp(dword_ptr(STATE as u64), MEM_FREE)?;
+        check(a, false, 4)?;
+        // Blocks left behind again and again.
+        new_block(a)?;
+        a.mov(ebp, edi)?;
+        a.mov(edi, CYCLES)?;
+        let mut again = a.create_label();
+        let mut out = a.create_label();
+        a.set_label(&mut again)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, MALLOC)?;
+        a.push(0x40000)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        a.je(out)?;
+        a.mov(byte_ptr(eax + 0x3FFFF), 1)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.dec(edi)?;
+        a.jne(again)?;
+        a.set_label(&mut out)?;
+        a.test(edi, edi)?;
+        check(a, false, 5)?;
+        new_block(a)?;
+        a.cmp(edi, ebp)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("msvcrt_last_free", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x7F, "the checks that passed: {code:07b}, {text}");
+}
+
 /// Built-in DLLs loaded while a second thread runs. MSVCRT.DLL comes
 /// with a DLL file that calls it from its entry point and goes with it;
 /// OLE32.DLL goes at its FreeLibrary. A DLL the program imports stays, as
