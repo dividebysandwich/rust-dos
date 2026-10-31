@@ -11,6 +11,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const hash = data => createHash('sha256').update(data).digest('hex');
 const benchmarkSha256 = hash(await readFile(join(root, 'web/bench/xbrz.mjs')));
 const runnerSha256 = hash(await readFile(fileURLToPath(import.meta.url)));
+const rendererPath = resolve(process.env.XBRZ_RENDERER || join(root, 'web/www/main.js'));
 const swiftshader = process.argv.includes('--swiftshader');
 const output = process.argv.slice(2).find(arg => !arg.startsWith('--')) || '/tmp/xbrz-webgl.json';
 const server = createServer(async (request, response) => {
@@ -18,7 +19,7 @@ const server = createServer(async (request, response) => {
     const path = resolve(root, '.' + new URL(request.url, 'http://localhost').pathname);
     if (!path.startsWith(root + sep)) throw new Error('Path outside repository');
     response.setHeader('Content-Type', path.endsWith('.mjs') ? 'text/javascript' : path.endsWith('.html') ? 'text/html' : 'text/plain');
-    response.end(await readFile(path));
+    response.end(await readFile(path === join(root, 'web/www/main.js') ? rendererPath : path));
   } catch {
     response.writeHead(404).end();
   }
@@ -85,7 +86,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   if (!ready) throw new Error('Benchmark module did not load');
-  const config = { samples: Number(process.env.XBRZ_SAMPLES || 6), rounds: Number(process.env.XBRZ_ROUNDS || 3) };
+  const config = { samples: Number(process.env.XBRZ_SAMPLES || 6), rounds: Number(process.env.XBRZ_ROUNDS || 3), incremental: process.env.XBRZ_INCREMENTAL === "1" };
   if (!Number.isInteger(config.samples) || config.samples < 1 || !Number.isInteger(config.rounds) || config.rounds < 1) {
     throw new Error('Samples and rounds must be positive integers');
   }
@@ -100,7 +101,7 @@ try {
     shaderSha256: hash(await readFile(join(root, 'src/video/shader/xbrz_2x.glsl'))),
     vertexShaderSha256: hash(await readFile(join(root, 'src/video/shader/vertex.glsl'))),
     displayShaderSha256: hash(await readFile(join(root, 'src/video/shader/xbrz_display.glsl'))),
-    rendererSha256: hash(await readFile(join(root, 'web/www/main.js'))),
+    rendererSha256: hash(await readFile(rendererPath)), rendererPath,
     chromeVersion: execFileSync(process.env.CHROME_BIN || 'google-chrome', ['--version'], { encoding: 'utf8' }).trim(),
     benchmarkSha256, runnerSha256,
     cpu: cpus().map(cpu => cpu.model).filter((value, i, values) => values.indexOf(value) === i),
@@ -118,7 +119,7 @@ try {
       const median = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
       return `${name}=${median.toFixed(3)}ms`;
     });
-    console.log(`${row.width}x${row.height}->${row.outWidth}x${row.outHeight} ${row.pattern}: ${medians.join(' ')}`);
+    console.log(`${row.width}x${row.height}->${row.outWidth}x${row.outHeight} ${row.pattern} ${row.change}: ${medians.join(' ')}`);
   }
 } finally {
   socket?.close();

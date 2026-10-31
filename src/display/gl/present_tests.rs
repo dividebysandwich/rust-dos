@@ -361,6 +361,11 @@ fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
         assert!(screen.gl.is_enabled(glow::BLEND));
         assert!(screen.gl.is_enabled(glow::DITHER));
         assert!(screen.gl.is_enabled(glow::SCISSOR_TEST));
+        let mut scissor = [0; 4];
+        screen
+            .gl
+            .get_parameter_i32_slice(glow::SCISSOR_BOX, &mut scissor);
+        assert_eq!(scissor, [0, 0, 32, 24]);
         assert_eq!(
             screen
                 .gl
@@ -775,4 +780,96 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
     display.set_frame_size(frame.width, frame.height).unwrap();
     display.present(&mut frame, None, None).unwrap();
     check(&display, &frame);
+}
+
+#[test]
+#[ignore = "requires a desktop OpenGL context"]
+fn xbrz_incremental_regions_match_full_kernels_after_deferred_updates() {
+    let sdl = sdl2::init().unwrap();
+    let video = sdl.video().unwrap();
+    let mut screen = GlScreen::open(&video, "xBRZ damage regression", (96, 64), true)
+        .unwrap_or_else(|error| panic!("{}", error.reason));
+    screen.select(Shader::Xbrz, Filter::Nearest).unwrap();
+    let mut native = Frame::from_rgba(
+        24,
+        16,
+        (0..24 * 16)
+            .flat_map(|i| {
+                [
+                    (i * 37) as u8,
+                    (i * 71) as u8,
+                    (i * 113) as u8,
+                    (i * 53) as u8,
+                ]
+            })
+            .collect(),
+    );
+    for step in 0..72 {
+        if step % 13 == 1 {
+            // Prepare one source revision without uploading it. The next
+            // upload must include this pixel outside its latest row band.
+            native.rgba[0] ^= 127;
+            let skipped = if step % 24 < 12 {
+                native.clone()
+            } else {
+                double(&native)
+            };
+            screen.xbrz_frame.prepare(
+                &skipped,
+                Some(&skipped),
+                Monochrome::ALL[(step - 1) / 9 % 4],
+                0..skipped.height as usize,
+            );
+        }
+        for (x, y) in [
+            (step % 24, step * 7 % 16),
+            (23 - step % 24, 15 - step * 7 % 16),
+        ] {
+            native.rgba[(y * 24 + x) * 4] ^= 127;
+        }
+        let base = if step % 24 < 12 {
+            native.clone()
+        } else {
+            double(&native)
+        };
+        let mono = Monochrome::ALL[step / 9 % 4];
+        let mut frame = base.clone();
+        crate::video::mono::apply(&mut frame, mono);
+        frame.track_overlays(true);
+        frame.mark_overlay_rect(0, 0, 3, 2);
+        frame.rgba[..12].fill(step as u8);
+        let size = match step % 6 {
+            0 => (24, 16),
+            1 | 2 => (8, 8),
+            3 => (73, 49),
+            _ => (96, 64),
+        };
+        if step % 13 == 0 {
+            screen.xbrz_uploaded_revision = Some(u32::MAX);
+        }
+        let actual = screen.capture(&frame, &base, mono, size).unwrap();
+        assert_eq!(
+            texture(&screen)
+                .iter()
+                .zip(&screen.xbrz_frame.source.rgba)
+                .position(|(a, b)| a != b),
+            None,
+            "source at step {step}"
+        );
+        let expected = reference_capture(&mut screen, &frame, &base, mono, size);
+        assert_eq!(
+            actual
+                .rgba
+                .iter()
+                .zip(&expected.rgba)
+                .position(|(a, b)| a != b),
+            None,
+            "step {step}, size {size:?}",
+        );
+        // SAFETY: the test owns this current context and its source texture.
+        unsafe {
+            assert_eq!(screen.gl.get_parameter_i32(glow::UNPACK_ROW_LENGTH), 0);
+            assert_eq!(screen.gl.get_error(), glow::NO_ERROR);
+        }
+    }
 }
