@@ -1144,18 +1144,14 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
             a.shl(edi, 16)?;
             a.mov(di, word_ptr(esi))?;
             // Keep its first 16 bytes at 10h and write ours there.
-            a.mov(ebx, 1)?;
-            a.mov(eax, dword_ptr(edi))?;
-            a.mov(dword_ptr(l.at(0x10)), eax)?;
-            a.mov(eax, dword_ptr(edi + 4))?;
-            a.mov(dword_ptr(l.at(0x14)), eax)?;
-            a.mov(eax, dword_ptr(edi + 8))?;
-            a.mov(dword_ptr(l.at(0x18)), eax)?;
-            a.mov(eax, dword_ptr(edi + 12))?;
-            a.mov(dword_ptr(l.at(0x1C)), eax)?;
-            a.mov(esi, l.at(0x30) as u32)?;
-            a.mov(ecx, 16)?;
             a.push(edi)?;
+            a.mov(esi, edi)?;
+            a.mov(edi, l.at(0x10) as u32)?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            a.mov(esi, l.at(0x30) as u32)?;
+            a.mov(edi, dword_ptr(esp))?;
+            a.mov(ecx, 16)?;
             a.rep().movsb()?;
             a.pop(edi)?;
             // Run it.
