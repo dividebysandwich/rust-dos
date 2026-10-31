@@ -46,7 +46,7 @@ pub const PREBUFFERS: [u16; 8] = [5, 10, 15, 20, 25, 30, 40, 50];
 
 impl AudioBuffer {
     /// The milliseconds `frames` play for at the mixer's rate.
-    pub fn millis(frames: u16) -> f64 {
+    pub fn millis(frames: usize) -> f64 {
         frames as f64 * 1000.0 / crate::opl::RATE as f64
     }
 }

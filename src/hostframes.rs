@@ -33,8 +33,8 @@ pub enum Phase {
     Present,
     /// Waiting for the time of the next frame or the present.
     Wait,
-    /// The rest: the host's events, the debug server's requests, pumping
-    /// the sound.
+    /// The rest: the host's events, the debug server's requests, rewind's
+    /// states, pumping the sound.
     Other,
 }
 
@@ -269,16 +269,19 @@ impl HostFrames {
         self.count
     }
 
-    /// The longest frame that ended after the emulated time `ns`, of the
-    /// last `FRAME_WINDOW`. It looks back as far as emulated time ran
-    /// forward: a loaded save state can take the clock back, and the frames
-    /// before that are of another time.
+    /// The longest frame that ended at the emulated time `ns` or later, of
+    /// the last `FRAME_WINDOW`. A frame gets here when the next one starts,
+    /// after AutoSpeed took its mark at the same emulated time, so the
+    /// frame that ended at a mark counts for the measurement the mark
+    /// starts. It looks back as far as emulated time ran forward: a loaded
+    /// save state can take the clock back, and the frames before that are
+    /// of another time.
     pub fn longest_since(&self, ns: u64) -> Option<Duration> {
         let mut longest = None;
         let mut later = u64::MAX;
         for n in (self.count.saturating_sub(FRAME_WINDOW as u64)..self.count).rev() {
             let at = (n % FRAME_WINDOW as u64) as usize;
-            if self.ends[at] <= ns || self.ends[at] > later {
+            if self.ends[at] < ns || self.ends[at] > later {
                 break;
             }
             later = self.ends[at];
@@ -346,7 +349,6 @@ mod tests {
                 after: queued + 700,
                 target: 1400,
                 emulated_ns,
-                ..Pump::default()
             });
         }
     }
@@ -484,20 +486,34 @@ mod tests {
     }
 
     #[test]
-    fn longest_since_is_of_the_frames_after_the_mark() {
+    fn longest_since_is_of_the_frames_from_the_mark_on() {
         let mut frames = HostFrames::new();
         frames.frame(MS * 90, 100);
-        assert_eq!(frames.longest_since(100), None);
+        assert_eq!(frames.longest_since(101), None);
         frames.frame(MS * 5, 110);
         frames.frame(MS * 30, 120);
         frames.frame(MS * 7, 130);
-        assert_eq!(frames.longest_since(100), Some(MS * 30));
-        assert_eq!(frames.longest_since(120), Some(MS * 7));
+        assert_eq!(frames.longest_since(101), Some(MS * 30));
+        assert_eq!(frames.longest_since(121), Some(MS * 7));
         // Further back than the ring goes, it says what is left.
         for n in 0..FRAME_WINDOW as u64 {
             frames.frame(MS * 3, 200 + n);
         }
         assert_eq!(frames.longest_since(100), Some(MS * 3));
+    }
+
+    /// `AutoSpeed` marks the end of a frame before that frame gets here. A
+    /// measurement that ended on the longest frame can't see it, so the
+    /// next has to.
+    #[test]
+    fn the_frame_that_ended_at_a_mark_counts_after_it() {
+        let mut frames = HostFrames::new();
+        frames.frame(MS * 5, 110);
+        // The mark at 120, the frame ending there still to come.
+        assert_eq!(frames.longest_since(100), Some(MS * 5));
+        frames.frame(MS * 90, 120);
+        frames.frame(MS * 6, 130);
+        assert_eq!(frames.longest_since(120), Some(MS * 90));
     }
 
     #[test]

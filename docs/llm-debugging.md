@@ -172,7 +172,7 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   Measure underruns on a real sound device (on Windows,
   `SDL_AUDIODRIVER=wasapi`). SDL's `dummy` driver, which headless runs
   often use, plays nothing and runs faster than real time: on Windows 11
-  it took 512 frames about every 11.3 ms, 44,940 frames a second where
+  it took 512 frames about every 11.4 ms, 44,940 frames a second where
   WASAPI took 44,120. The resampling that holds the queue at its target
   makes up 0.5% at most, so the queue runs out every few seconds however
   well the host keeps up. Myth: The Fallen Lords gave 10 to 13 dry checks
@@ -197,12 +197,13 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   triangles drawn on the main thread), `video` (bringing the picture up to
   date and composing it), `present` (handing it to the window), `wait`
   (waiting for the frame's time, which is sleep) and `other` (the host's
-  events, the debug server's requests, the sound itself). Its parts add up
-  to `gap_ms`. The check comes after the machine's run and before the
-  picture, so a split holds the picture of one frame and the machine's run
-  of the next. `other` also holds time the debug server took, such as a
-  state load, and a load moves emulated time, so the `gap_speed` of the
-  gap it fell in says nothing. None of these numbers are in save states.
+  events, the debug server's requests, rewind's states, the sound itself).
+  Its parts add up to `gap_ms`. The check comes after the machine's run and
+  before the picture, so a split holds the picture of one frame and the
+  machine's run of the next. `other` also holds time the debug server
+  took, such as a state load, and a load moves emulated time, so the
+  `gap_speed` of the gap it fell in says nothing. None of these numbers
+  are in save states.
 - **Gravis Ultrasound:** the built-in Gravis patch set is on the
   read-only drive X: in `X:\ULTRASND`, where `ULTRADIR` points, so a game
   needs no copy of the Ultrasound software on C:. `/api/gus` shows the IRQ
@@ -1143,7 +1144,8 @@ and divide: a game's frame rate at a few fixed speeds shows where it
 stops growing.
 Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
 and the speed it chose printed to stderr, with `longest_frame`, the longest
-host frame during the measurement.
+host frame during the measurement (`none` in a frontend that doesn't time
+its frames).
 
 ### Where the emulator's time goes (profiling)
 

@@ -657,16 +657,13 @@ impl AutoSpeed {
             self.working = working.or(self.working);
         }
         if trace() {
-            let longest = bus.host_frames.longest_since(mark.ns).unwrap_or_default();
+            let longest = bus.host_frames.longest_since(mark.ns);
+            let longest = longest.map_or("none".to_string(), |time| {
+                format!("{:.1}ms", time.as_secs_f64() * 1e3)
+            });
             eprintln!(
-                "[auto] {} -> {} (host {}): {:?} {:?} idles={} longest_frame={:.1}ms",
-                current,
-                next,
-                host_max,
-                measured,
-                self.step,
-                self.idles,
-                longest.as_secs_f64() * 1e3
+                "[auto] {} -> {} (host {}): {:?} {:?} idles={} longest_frame={}",
+                current, next, host_max, measured, self.step, self.idles, longest
             );
         }
         if next == current {

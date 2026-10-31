@@ -25,8 +25,7 @@ fn millis(time: Duration) -> f64 {
 
 /// `/api/underruns`: `hostframes` says what the numbers are.
 pub(super) fn underruns_json(cpu: &Cpu) -> Value {
-    let queue_ms =
-        |frames: usize| (frames as f64 * 1e5 / rust_dos::opl::RATE as f64).round() / 100.0;
+    let queue_ms = |frames| (rust_dos::audio::AudioBuffer::millis(frames) * 100.0).round() / 100.0;
     let host = &cpu.bus.host_frames;
     let log: Vec<Value> = host
         .underruns()
