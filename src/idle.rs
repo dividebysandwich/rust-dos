@@ -327,8 +327,8 @@ pub struct Observe {
     /// proof.
     writes: Vec<(usize, usize)>,
     /// The built-in Windows' service running said it changed nothing but
-    /// RAM and registers (`pure_service`).
-    pure: Cell<bool>,
+    /// RAM and registers (`pure_call`).
+    pure: bool,
     /// Since the base: the first instruction count at which what the
     /// services read would read otherwise, how many were called, and
     /// when the last one started the thread's turn over.
@@ -382,7 +382,7 @@ impl Default for Observe {
             latch_head: None,
             latch_at: None,
             writes: Vec::new(),
-            pure: Cell::new(false),
+            pure: false,
             holds_until: None,
             services: 0,
             turn_at: None,
@@ -771,15 +771,17 @@ pub fn pure_service(kind: u8, vector: u8, ax: u16) -> bool {
 /// proof can't follow, unless it says otherwise (`pure_call`).
 #[inline(always)]
 pub fn before_service(cpu: &mut Cpu) {
-    cpu.bus.observe.pure.set(false);
+    cpu.bus.observe.pure = false;
 }
 
 /// After it, during a proof: a service that said it changed nothing but
 /// RAM and registers is followed, but not in a time proof, which doesn't
-/// look at `holds_until`. Any other ends the proof.
+/// look at `holds_until`, nor one that found a page missing, which runs
+/// again after the system's handler. Any other ends the proof.
 pub fn after_service(cpu: &mut Cpu) {
+    let faulted = cpu.bus.guest_faulted();
     let o = &mut cpu.bus.observe;
-    if o.pure.get() && !matches!(o.phase, Phase::Time(_)) {
+    if o.pure && !faulted && !matches!(o.phase, Phase::Time(_)) {
         o.services += 1;
     } else {
         o.opaque();
@@ -801,7 +803,7 @@ pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
         return;
     }
     let o = &mut cpu.bus.observe;
-    o.pure.set(true);
+    o.pure = true;
     if let Some(until) = until {
         o.holds_until = Some(o.holds_until.map_or(until, |h| h.min(until)));
     }
@@ -810,7 +812,19 @@ pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
 /// The service running changed more after all: what it called it
 /// `pure_call` for did, but not what came after.
 pub fn not_pure(cpu: &mut Cpu) {
-    cpu.bus.observe.pure.set(false);
+    cpu.bus.observe.pure = false;
+}
+
+/// Run `f`, a built-in function the service running calls from Rust (as
+/// a tree view calls GetTickCount): whether the service changed nothing
+/// but RAM and registers is for the service to say, not for the
+/// functions it calls. What they read still holds only as long as they
+/// say (`holds_until`).
+pub fn nested<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> T) -> T {
+    let pure = cpu.bus.observe.pure;
+    let value = f(cpu);
+    cpu.bus.observe.pure = pure;
+    value
 }
 
 /// The service `pure_call` follows started the running thread's turn

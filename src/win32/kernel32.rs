@@ -629,9 +629,10 @@ pub fn has_environment_variable(cpu: &mut Cpu, name: &str) -> bool {
     variable(super::process(cpu), name).is_some()
 }
 
-/// Let go of the file mappings no handle or view holds any more.
-pub fn sweep_mappings(cpu: &mut Cpu) {
-    mapping::sweep(cpu);
+/// Let go of the file mappings no handle or view holds any more. Whether
+/// that changed anything.
+pub fn sweep_mappings(cpu: &mut Cpu) -> bool {
+    mapping::sweep(cpu)
 }
 
 /// Committed pages for a built-in DLL's own use, readable and writable

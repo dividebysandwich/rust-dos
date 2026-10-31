@@ -24,20 +24,28 @@ const BATCHES: usize = 400;
 const KEY_AT: usize = 250;
 
 /// A machine that runs `T.COM`, the program `code` builds, from a
-/// directory of its own. The host's time is fixed first, so machines
-/// built a moment apart start with the same BIOS tick count.
+/// directory of its own.
 fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Cpu {
+    let mut cpu = machine_with(test, name, ("T.COM", code), core, skip);
+    cpu.load_shell();
+    cpu.pending_command = Some("T".to_string());
+    cpu
+}
+
+/// A machine with the file `file` (its name and bytes) alone in a
+/// directory of its own, its shell not loaded yet. The host's time is
+/// fixed first, so machines built a moment apart start with the same
+/// BIOS tick count.
+fn machine_with(test: &str, name: &str, file: (&str, &[u8]), core: CoreMode, skip: bool) -> Cpu {
     let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
     rust_dos::hosttime::fix(Some(at));
     let dir = Path::new("target/idle_tests").join(test).join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("T.COM"), code).unwrap();
+    fs::write(dir.join(file.0), file.1).unwrap();
     let mut cpu = Cpu::new(dir);
     cpu.core = core;
     cpu.bus.observe.enabled = skip;
-    cpu.load_shell();
-    cpu.pending_command = Some("T".to_string());
     cpu
 }
 
@@ -660,15 +668,7 @@ fn a_loop_that_adds_up_the_pit_count_is_not_skipped() {
 /// A machine that runs the Windows 3.1 program `program` as T.EXE on the
 /// built-in Windows, as `machine` runs a DOS one.
 fn win16_machine(test: &str, name: &str, program: &[u8], core: CoreMode, skip: bool) -> Cpu {
-    let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
-    rust_dos::hosttime::fix(Some(at));
-    let dir = Path::new("target/idle_tests").join(test).join(name);
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("T.EXE"), program).unwrap();
-    let mut cpu = Cpu::new(dir);
-    cpu.core = core;
-    cpu.bus.observe.enabled = skip;
+    let mut cpu = machine_with(test, name, ("T.EXE", program), core, skip);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
     cpu.load_shell();
@@ -705,9 +705,19 @@ fn a_windows_3_1_peek_message_loop_is_skipped() {
     let test = "win16_peek";
     let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
     let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
-    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+    // What the skip moves on outside RAM and the registers, as the passes
+    // would have, compared before every batch (`a` comes first): the count
+    // of calls and when the task's turn started.
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
         panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
     }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
     let stats = b.bus.observe.stats;
     println!("{}: {:?}", test, stats);
     assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");

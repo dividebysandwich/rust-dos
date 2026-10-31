@@ -364,19 +364,16 @@ fn arg_bytes_of(c: u8) -> u32 {
     arg_bytes(std::str::from_utf8(&[c]).unwrap_or("w")) as u32
 }
 
+/// Whether a `Run::Win32` argument or return of the kind `c` (`arg_bytes`
+/// letters, `ret` ones) is a handle converted between 16 and 32 bits,
+/// which may make a new one. The other conversions change nothing but
+/// RAM and registers.
+pub fn converts_handle(c: u8) -> bool {
+    matches!(c, b'i' | b'm' | b'a' | b'n')
+}
+
 /// Run the function the trap with id `id` is the stub of, called by 16-bit
 /// code: its far return address on the stack, its arguments above.
-/// The functions whose stubs change nothing but RAM and registers
-/// themselves: they go on to a 32-bit function on the 32-bit stack, which
-/// an idle proof follows if it is pure too (`idle::pure_call`). A
-/// Windows 3.1 program's PeekMessage loop calls them in every pass.
-const PURE: &[(&str, &str)] = &[
-    ("USER", "GetCurrentTime"),
-    ("USER", "GetTickCount"),
-    ("USER", "PeekMessage"),
-    ("KERNEL", "GetSystemMSecCount"),
-];
-
 pub fn call(cpu: &mut Cpu, id: u16) {
     let kernel = MODULES[0].apis.len();
     if id >> 10 == 0 && (id & 0x3FF) as usize >= kernel {
@@ -423,7 +420,18 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         }
         Run::Win32(dll, function, ret) => {
             match win32_address(dll, function) {
-                Some(target) => auto_thunk(cpu, target, api.args, &raw, ret),
+                Some(target) => {
+                    auto_thunk(cpu, target, api.args, &raw, ret);
+                    // Converting no handle, the stub changes nothing but
+                    // RAM, registers and the frame the function's return
+                    // takes off again (`thunk::win16_return`): an idle
+                    // proof follows it, and the function says for itself
+                    // whether it can go on (`idle::pure_call`), as
+                    // GetTickCount does for GetCurrentTime.
+                    if !api.args.bytes().any(converts_handle) {
+                        crate::idle::pure_call(cpu, None);
+                    }
+                }
                 None => {
                     crate::win32::fatal(
                         cpu,
@@ -442,9 +450,6 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     crate::win32::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
         return;
-    }
-    if cpu.bus.observe.on && PURE.contains(&(def.name, api.name)) {
-        crate::idle::pure_call(cpu, None);
     }
     if let Some(value) = result {
         cpu.set_ax(value as u16);
