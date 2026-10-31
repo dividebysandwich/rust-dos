@@ -250,6 +250,10 @@ pub struct Config {
     /// waiting for the next event (`idle_hint`).
     pub idle_skip: Option<bool>,
     pub idle_hint: Option<bool>,
+    /// Fixes for particular games (`game_fixes`), and the ones left out
+    /// by name (`game_fixes_off`).
+    pub game_fixes: Option<bool>,
+    pub game_fixes_off: Option<Vec<String>>,
     /// `[sound]`: the Sound Blaster (None: `sbtype=none`), the FM chip,
     /// the Gravis Ultrasound, and the MPU-401's synthesizer.
     pub sound: SoundConfig,

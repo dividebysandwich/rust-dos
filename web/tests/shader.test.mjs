@@ -24,7 +24,7 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
     let layouts = 0;
     let renders = 0;
     const draw = load('draw', {
-      Uint8Array,
+      Uint8Array, Uint32Array,
       wasm: { memory: { buffer } },
       machine: {
         screen_width: () => 4,
@@ -36,6 +36,7 @@ for (const [xbrz, visible] of [[false, false], [true, false], [true, true]]) {
         shader_overlay_pixels: () => 128,
         shader_overlay_visible: () => visible,
         shader_revision: () => 7,
+        shader_damage: () => 192, shader_damage_count: () => 1,
         shader_overlay_revision: () => 9,
         shader_overlay_top: () => 1, shader_overlay_bottom: () => 3,
       },
@@ -74,6 +75,7 @@ function rendererFixture() {
   let textures = 0;
   let framebuffers = 0;
   let boundFramebuffer = null;
+  let scissor = [0, 0, 4, 4];
   const enabled = new Set(['DITHER']);
   const logs = [];
   const gl = new Proxy({
@@ -84,7 +86,9 @@ function rendererFixture() {
       boundFramebuffer = value;
     },
     getParameter: name => name === 'MAX_TEXTURE_SIZE' ? 4096
-      : name === 'MAX_VIEWPORT_DIMS' ? [4096, 4096] : boundFramebuffer,
+      : name === 'MAX_VIEWPORT_DIMS' ? [4096, 4096]
+      : name === 'SCISSOR_BOX' ? scissor.slice() : boundFramebuffer,
+    scissor: (...box) => { scissor = box; calls.push(['scissor', ...box]); },
     isEnabled: state => enabled.has(state),
     enable: state => enabled.add(state),
     disable: state => enabled.delete(state),
@@ -423,4 +427,55 @@ test('overlay uploads use row bands and fall back fully after skipped revisions 
   renderer.upload(pixels, 2, 2, { ...overlay, revision: 0, rows: [3, 4] }, 1);
   assert.equal(uploads()[0][4], 0);
   assert.equal(uploads()[0][6], 6);
+});
+
+test('source damage uploads rectangles and defers scaled work across native output', () => {
+  const { renderer, gl, calls, canvas, enabled } = rendererFixture();
+  const pixels = new Uint8Array(32 * 24 * 4).map((_, i) => i % 251);
+  renderer.select('xbrz', false, false, [0, 0], 0);
+  canvas.width = 64; canvas.height = 48;
+  renderer.upload(pixels, 32, 24, null, 0xffffffff);
+  renderer.render();
+  gl.scissor(7, 8, 9, 10);
+  gl.enable(gl.SCISSOR_TEST);
+  calls.length = 0;
+  const damage = new Uint32Array([3, 4, 1, 1, 27, 20, 1, 1]);
+  renderer.upload(pixels, 32, 24, null, 0, damage);
+  const uploads = calls.filter(([name]) => name === 'texSubImage2D');
+  assert.deepEqual(uploads.map(call => call.slice(3, 7)), [[3, 4, 1, 1], [27, 20, 1, 1]]);
+  assert.equal(uploads[0][9][0], pixels[(4 * 32 + 3) * 4]);
+  assert.equal(uploads[1][9][0], pixels[(20 * 32 + 27) * 4]);
+  assert.deepEqual(calls.filter(([name]) => name === 'pixelStorei').map(call => call[2]), [32, 0]);
+  // Pending damage must own its values rather than retaining WASM views.
+  damage.fill(0);
+  canvas.width = 32; canvas.height = 24;
+  renderer.render();
+  assert.deepEqual([...gl.getParameter(gl.SCISSOR_BOX)], [7, 8, 9, 10]);
+  assert.ok(enabled.has(gl.SCISSOR_TEST));
+  assert.ok(calls.some(call => call[0] === 'scissor' && call.slice(1).join() === '1,2,6,6'));
+  renderer.upload(pixels, 32, 24, null, 1, [8, 10, 1, 1]);
+  renderer.render();
+  calls.length = 0;
+  canvas.width = 64; canvas.height = 48;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 4,
+    'three deferred scaled regions and the final display');
+  assert.deepEqual([...gl.getParameter(gl.SCISSOR_BOX)], [7, 8, 9, 10]);
+  calls.length = 0;
+  renderer.render();
+  assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 1);
+  for (const [revision, hint] of [[3, [1, 1, 1, 1]], [4, [33, 0, 1, 1]], [5, []], [6, [1.5, 1, 1, 1]]]) {
+    calls.length = 0;
+    renderer.upload(pixels, 32, 24, null, revision, hint);
+    assert.deepEqual(calls.find(([name]) => name === 'texSubImage2D').slice(3, 7), [0, 0, 32, 24]);
+    renderer.render();
+    assert.equal(calls.filter(([name]) => name === 'drawArrays').length, 3);
+  }
+  calls.length = 0;
+  renderer.upload(pixels, 32, 24, null, 7, [0, 0, 1, 1]);
+  renderer.render();
+  assert.ok(calls.some(call => call[0] === 'scissor' && call.slice(1).join() === '0,0,4,4'));
+  assert.ok(calls.some(call => call[0] === 'scissor' && call.slice(1).join() === '0,0,6,6'));
+  assert.deepEqual([...gl.getParameter(gl.SCISSOR_BOX)], [7, 8, 9, 10]);
+
 });
