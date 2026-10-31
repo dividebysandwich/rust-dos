@@ -140,7 +140,10 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   frame rate) or reaches the display's refresh rate (frames nobody sees,
   and some games, such as Descent, play badly at such rates), and goes
   down while the program waits for a key or calls DOS's idle interrupt.
-  A real-mode program with no frames to go by (most games of the 1980s,
+  It then tries lower speeds, down to where they cost more than 3% of
+  the frame rate. A speed the host falls behind at is left for a lower
+  one, and the limit that sets rises again while the host keeps up. A
+  real-mode program with no frames to go by (most games of the 1980s,
   which update the screen piecemeal) runs at 3000, about a 286, as in
   DOSBox's `cycles=auto`. A protected-mode one runs at max while it
   reads and writes (loading, computing), and otherwise goes down to
