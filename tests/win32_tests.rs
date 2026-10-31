@@ -4927,3 +4927,76 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
     let (code, text) = run("kernel32_ordinals", exe);
     assert_eq!(code, 0, "{}", text);
 }
+
+#[test]
+fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
+    // KRNL386's GetVersion, called with WOWCallback16 and
+    // WOWCallback16Ex, as SafeDisc's loader calls into KRNL386; and a
+    // pointer MapLS made, which WOWGetVDMPointer takes back to memory of
+    // the program's.
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["#35", "#37", "MapLS", "ExitProcess"]),
+        (
+            "WOW32.DLL",
+            &["WOWCallback16", "WOWCallback16Ex", "WOWGetVDMPointer"],
+        ),
+    ];
+    let mut data = vec![0u8; 0x100];
+    data[..12].copy_from_slice(b"KRNL386.EXE\0");
+    data[0x10..0x1B].copy_from_slice(b"GETVERSION\0");
+    data[0x40..0x44].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 32)?;
+        a.jb(fail)?;
+        a.push(l.at(0x10) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(ebx, 2)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.mov(esi, eax)?;
+        // WOWCallback16(GetVersion, 0): 3.95 in AX.
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 3)?;
+        a.cmp(ax, 0x5F03)?;
+        a.jne(fail)?;
+        // WOWCallback16Ex(GetVersion, WCB16_PASCAL, 0, NULL, &result).
+        a.push(l.at(0x30) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(5))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(word_ptr(l.at(0x30)), 0x5F03)?;
+        a.jne(fail)?;
+        // WOWGetVDMPointer(MapLS(&value), 4, TRUE) sees the value.
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(2))?;
+        a.push(1)?;
+        a.push(4)?;
+        a.push(eax)?;
+        a.call(l.import(6))?;
+        a.mov(ebx, 6)?;
+        a.test(eax, eax)?;
+        a.je(fail)?;
+        a.cmp(dword_ptr(eax), 0x1234_5678)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()
+    });
+    let (code, text) = run("wow32", exe);
+    assert_eq!(code, 0, "{}", text);
+}

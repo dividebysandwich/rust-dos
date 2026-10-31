@@ -44,6 +44,10 @@ pub const CALL: u8 = 0;
 pub const CONNECT: u8 = 1;
 /// LoadLibrary16's: load a 16-bit DLL for the process.
 pub const LOAD: u8 = 2;
+/// WOW32's WOWCallback16 and WOWCallback16Ex: a call of a 16-bit
+/// function with arguments from a buffer, which gives back DX:AX.
+pub const CALLBACK: u8 = 3;
+pub const CALLBACK_EX: u8 = 4;
 
 /// The bytes of a thunk block's header: magic and checksum.
 const HEADER: usize = 8;
@@ -435,6 +439,66 @@ pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     None
 }
 
+/// WOWCallback16(function, argument), WOW32's: call the 16-bit function
+/// at the 16:16 address with the one DWORD argument, PASCAL. The calling
+/// thread waits, and gets DX:AX.
+pub fn wow_callback16(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let bytes = args[1].to_le_bytes().to_vec();
+    callback16(cpu, CALLBACK, args[0], bytes, 0, 2)
+}
+
+/// WOWCallback16Ex(function, flags, argument bytes, arguments, result):
+/// call the 16-bit function with the arguments in the buffer, as they are
+/// to be on its stack (the flags say who takes them off, which doesn't
+/// matter for a copy). The function's DX:AX goes to `result`; the thread
+/// gets TRUE.
+pub fn wow_callback16_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let len = (args[2].min(0x1000) & !1) as usize;
+    let bytes = guest_bytes(cpu, args[3], len);
+    callback16(cpu, CALLBACK_EX, args[0], bytes, args[4], 5)
+}
+
+/// Post a WOWCallback16 (`kind`) of `target` with the argument bytes
+/// `args`, for the stdcall function of `nargs` arguments that the running
+/// thread is in, which goes on after it with DX:AX (written at `result`
+/// for WOWCallback16Ex).
+fn callback16(
+    cpu: &mut Cpu,
+    kind: u8,
+    target: u32,
+    args: Vec<u8>,
+    result: u32,
+    nargs: u32,
+) -> Option<u32> {
+    let esp = cpu.esp();
+    let ret = cpu.bus.guest_read_32(esp);
+    let pid = running_pid(cpu);
+    let tid = crate::win32::running(cpu)
+        .and_then(|p| p.current_thread())
+        .map(|t| t.id)?;
+    if ensure_client(cpu, pid).is_none() {
+        crate::win32::fatal(cpu, "a 16-bit call with no Win16 side", None);
+        return None;
+    }
+    let mut regs = Context::of(cpu);
+    regs.eip = ret;
+    regs.gpr[ESP] = esp.wrapping_add(4 + 4 * nargs);
+    post(
+        cpu,
+        pid,
+        Request {
+            kind,
+            tid,
+            target,
+            regs,
+            args,
+            data32: result,
+            ..Request::default()
+        },
+    );
+    None
+}
+
 /// LoadLibrary16(name), KERNEL32's ordinal 35 on Windows 95 and 98: the
 /// Win16 LoadLibrary, for a Win32 program. The process's task in the
 /// Win16 process loads the DLL, where its thunks' calls run, and keeps
@@ -719,7 +783,7 @@ pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         let request = client.queue.remove(0);
         client.current = Some(request.clone());
         match request.kind {
-            CALL => start_call(cpu, c, request),
+            CALL | CALLBACK | CALLBACK_EX => start_call(cpu, c, request),
             LOAD => start_load(cpu, c, request),
             _ => start_connect(cpu, c, request),
         }
@@ -785,8 +849,27 @@ fn start_call(cpu: &mut Cpu, c: usize, request: Request) {
 /// the arguments the function took off.
 pub fn then_call(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let tid = data.first().copied().unwrap_or(0);
-    let request = client_of(cpu, tid).and_then(|c| cpu.bus.win32.win16.clients[c].current.take());
-    if let Some(request) = request {
+    let c = client_of(cpu, tid);
+    let request = c.and_then(|c| cpu.bus.win32.win16.clients[c].current.take());
+    if let Some(request) = request.as_ref().filter(|r| r.kind != CALL) {
+        // WOWCallback16 returns DX:AX; WOWCallback16Ex TRUE, with DX:AX
+        // written where the program asked. The arguments were a copy, so
+        // the Win32 stack is as the function left it.
+        let value = (cpu.edx() & 0xFFFF) << 16 | (cpu.eax() & 0xFFFF);
+        let eax = if request.kind == CALLBACK_EX {
+            let pid = c.map_or(0, |c| cpu.bus.win32.win16.clients[c].pid);
+            if request.data32 != 0 {
+                write(cpu, pid, request.data32, &value.to_le_bytes());
+            }
+            1
+        } else {
+            value
+        };
+        finish(cpu, request.tid, eax, |t| {
+            t.eip = request.regs.eip;
+            t.gpr[ESP] = request.regs.gpr[ESP];
+        });
+    } else if let Some(request) = request {
         let popped = (cpu.sp() as u32).wrapping_sub(request.sp) & 0xFFFF;
         let (eax, ecx, edx) = (cpu.eax(), cpu.ecx(), cpu.edx());
         finish(cpu, request.tid, eax, |t| {
