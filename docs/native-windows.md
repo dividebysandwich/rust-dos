@@ -868,11 +868,13 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   `ScreenSaveTimeOut` seconds with no key or mouse input, with
   `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
   SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]`
-  `SCRNSAVE.EXE` with /s, as Windows 3.1 and 95 do. USER reads the two
-  settings when it starts, as Windows does, and SystemParametersInfo's
-  SPI_SETSCREENSAVEACTIVE and SPI_SETSCREENSAVETIMEOUT change them, as
-  games do that keep the saver off while they run. The timer runs while
-  the desktop is on the screen. The prompt also starts a saver by its
+  `SCRNSAVE.EXE` with /s, as Windows 3.1 does. (Windows 98 keeps the
+  two settings in the registry's `Control Panel\Desktop` instead, which
+  its Display settings write; WIN.INI is where Windows 3.1 setups put
+  them.) USER reads the two settings when it starts, as Windows does,
+  and SystemParametersInfo's SPI_SETSCREENSAVEACTIVE and
+  SPI_SETSCREENSAVETIMEOUT change them, as games do that keep the saver
+  off while they run. The timer runs while the desktop is on the screen. The prompt also starts a saver by its
   .SCR name (`SCRANTIC.SCR /s`, or /c for its settings dialog), as a
   Windows program under another extension; without the built-in
   Windows, COMMAND.COM runs no .SCR.

@@ -2,11 +2,15 @@
 //! WIN.INI's `[windows] ScreenSaveTimeOut` seconds, with
 //! `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
 //! SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]
-//! SCRNSAVE.EXE` with /s. Windows 3.1 does this, and Windows 95 and 98
-//! do it with the same entries. USER reads them when Windows starts
-//! (`user32::init`), and SystemParametersInfo's SPI_SETSCREENSAVEACTIVE
-//! and SPI_SETSCREENSAVETIMEOUT change them, as games do that turn the
-//! saver off while they run.
+//! SCRNSAVE.EXE` with /s, as Windows 3.1 does. Windows 98 keeps the
+//! saver in SYSTEM.INI too, but the two settings in the registry
+//! (`HKEY_CURRENT_USER\Control Panel\Desktop`), which its Display
+//! settings write; here nothing writes that key, and the settings come
+//! from WIN.INI, where Windows 3.1 setups such as Johnny Castaway's put
+//! them. USER reads them when Windows starts (`user32::init`), and
+//! SystemParametersInfo's SPI_SETSCREENSAVEACTIVE and
+//! SPI_SETSCREENSAVETIMEOUT change them, as games do that turn the saver
+//! off while they run.
 //!
 //! The timer is a time on the emulated clock, `Input::saver_due`, which
 //! the built-in Windows's timer event (`win32::timer`) waits for, while
@@ -110,13 +114,19 @@ pub fn tick(cpu: &mut Cpu) {
     // reads it as it comes, and the program may not have asked lately.
     super::input::poll(cpu);
     let input = &mut user(cpu).input;
-    if let Some(due) = end_of_timeout(input)
-        && due > now
-    {
-        input.saver_due = due;
-        return;
+    match end_of_timeout(input) {
+        // Input came since the timer was set: count again from it.
+        Some(due) if due > now => {
+            input.saver_due = due;
+            return;
+        }
+        Some(_) => input.saver_due = 0,
+        // The saver was turned off: nothing to start.
+        None => {
+            input.saver_due = 0;
+            return;
+        }
     }
-    input.saver_due = 0;
     let state = user(cpu);
     let active = state.foreground_window();
     if active != 0 && state.is_window(active) {
