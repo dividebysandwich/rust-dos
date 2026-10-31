@@ -55,6 +55,24 @@ fn logical_to_frame(pos: i32, logical: u32, frame: u32) -> i32 {
     (pos as i64 * frame as i64).div_euclid(logical.max(1) as i64) as i32
 }
 
+/// Actual presentation damage and the producer's broader input candidates.
+#[cfg(feature = "gl")]
+#[derive(Clone)]
+pub struct PresentRows {
+    changed: std::ops::Range<usize>,
+    candidates: Option<std::ops::Range<usize>>,
+}
+
+#[cfg(feature = "gl")]
+impl From<std::ops::Range<usize>> for PresentRows {
+    fn from(changed: std::ops::Range<usize>) -> Self {
+        Self {
+            changed,
+            candidates: None,
+        }
+    }
+}
+
 pub struct Display<'a> {
     video: VideoSubsystem,
     out: Output<'a>,
@@ -448,7 +466,7 @@ impl<'a> Display<'a> {
         {
             0..frame.height as usize
         } else {
-            match video::changed_rows_in(&self.shown, &frame.rgba, row_bytes, candidates) {
+            match video::changed_rows_in(&self.shown, &frame.rgba, row_bytes, candidates.clone()) {
                 Some(rows) => rows,
                 None if xbrz => 0..0,
                 None => {
@@ -466,7 +484,13 @@ impl<'a> Display<'a> {
         let display = display_size(frame.width, frame.height, self.aspect);
         let shown = match &mut self.out {
             Output::Gl(gl) => {
-                self.voodoo_shown = voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
+                #[cfg(feature = "gl")]
+                let rows = PresentRows {
+                    changed: rows,
+                    candidates: Some(candidates),
+                };
+                self.voodoo_shown =
+                    voodoo.is_some_and(|base| gl.present_voodoo(frame, base, display));
                 if !self.voodoo_shown
                     && let Err(error) =
                         gl.present(frame, base, rows, display, layer, self.monochrome)
