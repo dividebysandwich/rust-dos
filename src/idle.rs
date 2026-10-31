@@ -794,10 +794,10 @@ pub fn after_service(cpu: &mut Cpu) {
 /// the thunks between them (Johnny Castaway's animation loop, #358).
 /// What they keep outside RAM is as it was after every pass, but for the
 /// count of calls and when the thread's turn started (`turn_started`),
-/// which a skip moves on as the passes would have. With the calls traced,
-/// none is followed, so that the log has them all.
+/// which a skip moves on as the passes would have. The call trace in the
+/// log counts only the calls that ran.
 pub fn pure_call(cpu: &mut Cpu, until: Option<u64>) {
-    if !cpu.bus.observe.on || crate::win32::trace::on(cpu) {
+    if !cpu.bus.observe.on {
         return;
     }
     let o = &mut cpu.bus.observe;
