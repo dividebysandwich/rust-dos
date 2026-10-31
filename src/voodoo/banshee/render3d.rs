@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn the_scanout_sends_the_pages_written_since_the_renderer_had_them() {
-        use super::super::super::pages::PAGE;
+        use super::super::super::tracker::PAGE;
         use super::super::{LINEAR, VID_DESKTOP_OVERLAY_STRIDE};
         let mut v = mirrored();
         v.set_software_picture(false);

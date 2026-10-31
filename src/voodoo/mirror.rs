@@ -201,22 +201,14 @@ impl LayoutKey {
     pub fn rows_in(&self, start: u32, end: u32) -> Vec<(Option<u32>, u32, u32)> {
         self.buffers()
             .filter_map(|(base, key, stride)| {
-                let (base, words) = (base as u64 * 2, stride.words.max(1) as u64);
-                let span = span(stride, self.height) as u64 * 2;
-                let (start, end) = ((start as u64).max(base), (end as u64).min(base + span));
+                let (first, last) = row_bytes(base, stride, (0, self.height));
+                let (start, end) = (start.max(first), end.min(last));
                 if start >= end {
                     return None;
                 }
-                let (w0, w1) = ((start - base) / 2, (end - base).div_ceil(2));
-                // Rows, or with tiles bands of 32 rows.
-                let (r0, r1) = (w0 / words, (w1 - 1) / words + 1);
-                let (r0, r1) = if stride.tiled {
-                    (r0 * 32, r1 * 32)
-                } else {
-                    (r0, r1)
-                };
-                let r1 = r1.min(self.height as u64);
-                (r0 < r1).then_some((key, r0 as u32, r1 as u32))
+                let (r0, r1) = rows_of(base, stride, (start, end));
+                let r1 = r1.min(self.height);
+                (r0 < r1).then_some((key, r0, r1))
             })
             .collect()
     }
@@ -229,6 +221,26 @@ pub fn span(stride: Stride, height: u32) -> usize {
     } else {
         height as usize * stride.words
     }
+}
+
+/// The bytes of the memory rows `top..bottom` of a buffer take, the
+/// buffer at word offset `base` with rows `stride` apart: whole rows, or
+/// in tiles whole bands of 32 rows.
+pub fn row_bytes(base: u32, stride: Stride, (top, bottom): (u32, u32)) -> (u32, u32) {
+    let (unit, per) = (stride.words as u64 * 2, if stride.tiled { 32 } else { 1 });
+    let at = |rows: u64| (base as u64 * 2 + rows * unit).min(u32::MAX as u64) as u32;
+    (at(top as u64 / per), at((bottom as u64).div_ceil(per)))
+}
+
+/// The rows of such a buffer that bytes `start..end` of the memory hold
+/// pixels of, rounded out to whole rows (or bands of 32 rows in tiles).
+/// The bytes are within the buffer: `start` is at or after its first.
+pub fn rows_of(base: u32, stride: Stride, (start, end): (u32, u32)) -> (u32, u32) {
+    let unit = stride.words.max(1) as u64 * 2;
+    let per = if stride.tiled { 32 } else { 1 };
+    let (a, b) = (start as u64 - base as u64 * 2, end as u64 - base as u64 * 2);
+    let rows = |n: u64| (n * per).min(u32::MAX as u64) as u32;
+    (rows(a / unit), rows(b.div_ceil(unit)))
 }
 
 /// The column and row of the pixel `at` words from a buffer's first.
@@ -281,7 +293,7 @@ pub enum Command {
     Texture(Box<Texture>),
     FreeTexture(u32),
     /// Bytes of a Banshee's or Voodoo3's memory of `size` bytes, from
-    /// byte `at` on (whole pages, `pages::PAGE`), for the renderer's copy
+    /// byte `at` on (whole pages, `tracker::PAGE`), for the renderer's copy
     /// of it.
     Memory { size: u32, at: u32, bytes: Vec<u8> },
     /// A 2D operation the renderer does in its copy of the memory, which
