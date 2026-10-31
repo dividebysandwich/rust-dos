@@ -3376,11 +3376,12 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
-/// _set_se_translator: an access violation in a try reaches the thread's
-/// translator with its code and record, and the C++ exception that
-/// throws reaches the catch (char *). The exit code has a bit each.
-#[test]
-fn a_translator_turns_a_fault_into_a_cxx_exception() {
+/// A program with a translator and a try with one catch, in which an
+/// access violation happens: the translator gets its code and record, and
+/// with `throws` throws (char *)0x55 for the catch (char *) to take;
+/// otherwise it returns, and the catch is a catch (...). `ehs` marks the
+/// function as built with /EHs. The exit code has a bit each.
+fn translator_program(throws: bool, ehs: bool) -> Vec<u8> {
     const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
     let names: &[&str] = &[
         "__CxxFrameHandler",
@@ -3396,13 +3397,13 @@ fn a_translator_turns_a_fault_into_a_cxx_exception() {
     let list = d.add(&[0; 8]);
     let throw_info = d.add(&[0; 16]);
     let thrown = d.add(&[0; 4]);
-    let info = d.add(&[0; 28]);
+    let info = d.add(&[0; 36]);
     let unwind = d.add(&[0; 16]);
     let entry = d.add(&[0; 20]);
     let handler = d.add(&[0; 16]);
     let bits = d.add(&[0; 4]);
     let data_len = d.0.len() as u32;
-    let exe = program(BASE, false, imports, &d.0, |a, l| {
+    program(BASE, false, imports, &d.0, |a, l| {
         let code = |a: &mut CodeAssembler, at: [u32; 4]| -> Result<[CodeLabel; 4], IcedError> {
             let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
             let mut thunk = a.create_label();
@@ -3420,17 +3421,20 @@ fn a_translator_turns_a_fault_into_a_cxx_exception() {
             put(a, list, 1)?;
             put(a, list + 4, data(catchable))?;
             put(a, throw_info + 12, data(list))?;
-            put(a, info, 0x1993_0520)?;
+            put(a, info, if ehs { 0x1993_0522 } else { 0x1993_0520 })?;
             put(a, info + 4, 2)?;
             put(a, info + 8, data(unwind))?;
             put(a, info + 12, 1)?;
             put(a, info + 16, data(entry))?;
+            put(a, info + 32, ehs as u32)?;
             put(a, unwind, u32::MAX)?;
             put(a, unwind + 8, u32::MAX)?;
             put(a, entry + 8, 1)?;
             put(a, entry + 12, 1)?;
             put(a, entry + 16, data(handler))?;
-            put(a, handler + 4, data(char_pointer))?;
+            if throws {
+                put(a, handler + 4, data(char_pointer))?;
+            }
             put(a, handler + 8, -0x14i32 as u32)?;
             put(a, handler + 12, at[1])?;
 
@@ -3465,8 +3469,10 @@ fn a_translator_turns_a_fault_into_a_cxx_exception() {
             // catch (char *p): p is what the translator threw.
             a.set_label(&mut catch)?;
             let mut skip = a.create_label();
-            a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
-            a.jne(skip)?;
+            if throws {
+                a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
+                a.jne(skip)?;
+            }
             a.or(dword_ptr(l.at(bits)), 4)?;
             a.set_label(&mut skip)?;
             a.mov(eax, at[3])?;
@@ -3481,7 +3487,7 @@ fn a_translator_turns_a_fault_into_a_cxx_exception() {
             a.call(f("exit"))?;
             a.int3()?;
 
-            // translator(code, pointers): throw (char *)0x55;
+            // translator(code, pointers): throw (char *)0x55; or return.
             a.set_label(&mut translator)?;
             let mut skip = a.create_label();
             a.mov(eax, dword_ptr(esp + 8))?;
@@ -3493,11 +3499,15 @@ fn a_translator_turns_a_fault_into_a_cxx_exception() {
             a.jne(skip)?;
             a.or(dword_ptr(l.at(bits)), 2)?;
             a.set_label(&mut skip)?;
-            put(a, thrown, 0x55)?;
-            a.push(data(throw_info) as i32)?;
-            a.push(data(thrown) as i32)?;
-            a.call(f("_CxxThrowException"))?;
-            a.int3()?;
+            if throws {
+                put(a, thrown, 0x55)?;
+                a.push(data(throw_info) as i32)?;
+                a.push(data(thrown) as i32)?;
+                a.call(f("_CxxThrowException"))?;
+                a.int3()?;
+            } else {
+                a.ret()?;
+            }
 
             a.set_label(&mut thunk)?;
             a.mov(eax, data(info))?;
@@ -3515,9 +3525,34 @@ fn a_translator_turns_a_fault_into_a_cxx_exception() {
         a.reset();
         code(a, at)?;
         Ok(())
-    });
-    let (code, _) = run("msvcrt_se_translator", exe);
+    })
+}
+
+/// _set_se_translator: the C++ exception the translator throws reaches
+/// the catch.
+#[test]
+fn a_translator_turns_a_fault_into_a_cxx_exception() {
+    let (code, _) = run("msvcrt_se_translator", translator_program(true, false));
     assert_eq!(code, 7);
+}
+
+/// A translator that returns leaves the exception to the catch (...).
+#[test]
+fn a_catch_all_takes_a_fault_the_translator_returned_from() {
+    let (code, _) = run(
+        "msvcrt_se_translator_returns",
+        translator_program(false, false),
+    );
+    assert_eq!(code, 7);
+}
+
+/// A function built with /EHs handles C++ exceptions only: its translator
+/// isn't called for the fault, which nothing else handles, so the
+/// program ends with FFh.
+#[test]
+fn a_function_built_with_ehs_does_not_translate() {
+    let (code, _) = run("msvcrt_se_translator_ehs", translator_program(true, true));
+    assert_eq!(code, 0xFF);
 }
 
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable

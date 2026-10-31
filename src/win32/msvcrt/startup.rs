@@ -1142,17 +1142,30 @@ pub fn cxx_frame_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         cxx_unwind(cpu, resume, d);
         return None;
     }
+    // Built with /EHs, the function handles C++ exceptions only (FuncInfo's
+    // EHFlags, in MSVC 8's and later): neither the translator nor its
+    // catch (...) sees another.
+    if thrown.is_none() && read32(cpu, info)? >= 0x1993_0522 && read32(cpu, info + 32)? & 1 != 0 {
+        return Some(CONTINUE_SEARCH);
+    }
     if thrown.is_none() && read32(cpu, info + 12)? != 0 {
-        let at = thread_field(cpu, T_SE_TRANSLATOR)?;
-        let translator = read32(cpu, at)?;
+        let at = thread_field(cpu, T_SE_TRANSLATOR);
+        let translator = at.map_or(Some(0), |at| read32(cpu, at))?;
         if translator != 0 {
-            let pointers = thread_field(cpu, T_POINTERS)?;
+            // The EXCEPTION_POINTERS go on the stack: an exception in the
+            // translator can come back here before it has read them.
+            let pointers = cpu.esp().wrapping_sub(8);
+            if !cpu.bus.guest_probe(pointers.wrapping_sub(12), 20, true) {
+                return None;
+            }
             write32(cpu, pointers, record)?;
             write32(cpu, pointers + 4, context)?;
+            cpu.set_esp(pointers);
             d[0] = X_TRANSLATED;
             if call_program(cpu, translator, &[code, pointers], C_CXX, resume, &d) {
                 return None;
             }
+            cpu.set_esp(resume.1);
         }
     }
     if take_exception(cpu, resume, d, thrown)? {
@@ -1212,11 +1225,6 @@ fn find_catch(
     thrown: Option<(u32, u32)>,
 ) -> Option<Option<(u32, u32, Option<u32>)>> {
     let state = read32(cpu, frame + 8)? as i32;
-    // Built with /EHs, the function's catch (...) takes C++ exceptions
-    // only (FuncInfo's EHFlags, in MSVC 8's and later).
-    if thrown.is_none() && read32(cpu, info)? >= 0x1993_0522 && read32(cpu, info + 32)? & 1 != 0 {
-        return Some(None);
-    }
     let tries = read32(cpu, info + 12)?.min(MAX_ENTRIES);
     let map = read32(cpu, info + 16)?;
     let types = match thrown {
@@ -1501,7 +1509,7 @@ pub fn cxx_returned(cpu: &mut Cpu, value: u32, call: Call) {
         }
         X_DESTROYED => go_on(cpu, &d),
         X_TRANSLATED => {
-            let regs: [u32; 4] = [d[D_REGS], d[D_REGS + 1], d[D_REGS + 2], d[D_REGS + 3]];
+            let regs = d[D_REGS..D_OUTER].to_vec();
             if take_exception(cpu, call.resume, d, None) != Some(true) {
                 restore_registers(cpu, &regs);
                 call::finish(cpu, call.resume, CONTINUE_SEARCH);
