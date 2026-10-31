@@ -300,6 +300,23 @@ exceptions run as the program's own code on top of that.
   with just the DLLs in them, and are made on C: when a program makes a
   file or directory in them; neither can be removed while it holds
   them.
+- The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
+  Win32, as Windows 98 SE's does (`src/win32/wnaspi32.rs`). Copy
+  protections read their discs that way: SafeDisc 2 loads it to check
+  the CD. On Windows 98 the DLL hands each request block to APIX.VXD,
+  and the IOS and the IDE port driver send it to the drive as an ATAPI
+  packet. Here the drive is the ATAPI drive a booted Windows finds on
+  the IDE channel (`ide::Atapi`), of its own, since the built-in
+  Windows has no IDE channel: `Atapi::run_packet` runs each packet
+  through its task file and data port at once, and its delays pass at
+  once. So the disc answers as it does to a booted Windows 98, with the
+  same data and the same sense data, MEDIUM ERROR for a sector whose
+  EDC doesn't match. ASPI shows one host adapter, its target 0 the
+  first CD-ROM drive with a disc (1 when MOUNT's `-ide` puts it on a
+  slave), and completes commands as Windows 98's does when APIX's
+  thread runs them at once: SS_PENDING for SC_EXEC_SCSI_CMD without an
+  event, the final status already in the block, the event set or the
+  posting routine called.
 
 ### Video
 
@@ -1046,9 +1063,15 @@ rust-dos is GPL-2.0-or-later.
 
 - **Scope.** The Win32 API is large. Trace-driven work and early
   milestones with real games keep it to what games call.
-- **Copy protection.** SafeDisc and SecuROM use VxDs and ring 0 tricks.
-  They are out of scope; games' no-CD releases or GOG versions are the
-  way around.
+- **Copy protection.** SafeDisc and SecuROM use VxDs, ring 0 tricks
+  and raw reads of the disc. The built-in Windows provides what Windows
+  98 and the machine provide, so a protection runs unchanged and reads
+  the disc image as Windows 98 would, through KERNEL32's ordinal-only
+  exports and SCSI commands through WNASPI32 among others. A
+  protection is never patched, skipped or detected by name. An image
+  that can't pass the check because of how it was made (its unreadable
+  sectors read back as good ones) fails it, as on Windows 98. Oni's
+  SafeDisc 2 is the case being worked through (#346).
 - **Direct hardware access.** Games that talk to VxDs (`DeviceIoControl`
   on `\\.\VWIN32` for DOS calls is common and can go to the built-in
   DOS; others are not) or need a vendor's driver.

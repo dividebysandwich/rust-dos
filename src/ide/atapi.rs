@@ -78,6 +78,20 @@ crate::state_enum!(Loading {
     Loading::Ready,
 });
 
+/// The byte count limit `Atapi::run_packet` gives the PACKET command:
+/// the largest even count, as hosts ask for.
+const PACKET_BYTE_COUNT: u16 = 0xFFFE;
+
+/// What a packet command `Atapi::run_packet` ran gave.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PacketOutcome {
+    /// The data the drive sent.
+    pub data: Vec<u8>,
+    /// The drive's sense data, when the command ended with an error
+    /// (CHECK CONDITION).
+    pub sense: Option<[u8; 18]>,
+}
+
 /// The CD-ROM drive.
 #[derive(Clone, Debug)]
 pub struct Atapi {
@@ -126,6 +140,13 @@ crate::state_fields!(Atapi {
     lba_next, remaining, xfer, sector_size, sense, loading, has_changed,
     delayed, delayed_at, loading_at,
 } skip { log });
+
+impl Default for Atapi {
+    /// A drive of drive A: with no disc, for a saved state to fill in.
+    fn default() -> Self {
+        Self::new(0, false)
+    }
+}
 
 fn be16(b: &[u8]) -> u32 {
     (b[0] as u32) << 8 | b[1] as u32
@@ -1051,6 +1072,99 @@ impl Atapi {
         pad(&mut b[8..16], "RUST-DOS");
         pad(&mut b[16..32], "CD-ROM");
         pad(&mut b[32..36], "1.0");
+    }
+
+    // --- A host without a channel ---
+
+    /// Run the packet command `cdb` to its end at once, the way a host's
+    /// driver does on an IDE channel: the PACKET command with a byte
+    /// count limit of `PACKET_BYTE_COUNT`, the packet, then each data
+    /// block through the data port, `out` the data of a command that
+    /// takes some (MODE SELECT). For a system with no IDE channel, whose
+    /// drive this is (the built-in Windows's ASPI, `win32::wnaspi32`).
+    ///
+    /// The drive's delays pass at once: `env.now` moves on to each of
+    /// them, and is where the command ended when it returns.
+    pub fn run_packet(&mut self, cdb: &[u8], out: &[u8], env: &mut Env) -> PacketOutcome {
+        let mut data = Vec::new();
+        let mut sent = 0;
+        let mut issued = false;
+        // Each round moves a block or a delay along; a command that
+        // stalls ends as aborted.
+        for _ in 0..1_000_000 {
+            if self.status & BSY != 0 {
+                match self.next_event() {
+                    Some(at) => {
+                        env.now = env.now.max(at);
+                        self.service(env);
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            match self.state {
+                // What a command before left half done is given up.
+                _ if !issued && self.state != State::Ready => self.abort_error(),
+                State::Ready if !issued => {
+                    issued = true;
+                    self.select(0xA0 | self.drivehead & 0x10);
+                    self.write_register(1, 0, env);
+                    let [low, high] = PACKET_BYTE_COUNT.to_le_bytes();
+                    self.write_register(4, low, env);
+                    self.write_register(5, high, env);
+                    self.write_register(7, 0xA0, env);
+                }
+                State::Ready => {
+                    // Reading the status ends the command's interrupt.
+                    let status = self.read_register(7, env);
+                    let sense = (status & ERR != 0).then_some(self.sense);
+                    return PacketOutcome { data, sense };
+                }
+                State::Packet if self.status & DRQ != 0 => {
+                    let mut packet = [0u8; 12];
+                    let len = cdb.len().min(12);
+                    packet[..len].copy_from_slice(&cdb[..len]);
+                    for pair in packet.chunks(2) {
+                        self.write_data(u16::from_le_bytes([pair[0], pair[1]]) as u32, env);
+                    }
+                }
+                State::DataRead if self.status & DRQ != 0 => {
+                    // The interrupt of the block, then the block, as long
+                    // as the byte count says.
+                    self.read_register(7, env);
+                    let len = self.byte_count(env);
+                    for _ in 0..len.div_ceil(2) {
+                        let word = self.read_data(env) as u16;
+                        data.extend_from_slice(&word.to_le_bytes());
+                    }
+                    data.truncate(data.len() - len % 2);
+                }
+                State::DataWrite if self.status & DRQ != 0 => {
+                    self.read_register(7, env);
+                    let len = self.byte_count(env);
+                    for i in 0..len.div_ceil(2) {
+                        let byte = |n: usize| out.get(sent + 2 * i + n).copied().unwrap_or(0);
+                        self.write_data(u16::from_le_bytes([byte(0), byte(1)]) as u32, env);
+                    }
+                    sent += len;
+                }
+                _ => break,
+            }
+        }
+        // It went nowhere: the drive gives the command up.
+        self.log.push(format!("[IDE] Packet command {:02X?} stalled", cdb));
+        self.abort_error();
+        self.set_sense(0x0B, 0x00, 0x00);
+        self.delayed = Delayed::None;
+        PacketOutcome {
+            data,
+            sense: Some(self.sense),
+        }
+    }
+
+    /// The byte count registers, which say how long a data block is.
+    fn byte_count(&mut self, env: &mut Env) -> usize {
+        self.read_register(4, env) as usize | (self.read_register(5, env) as usize) << 8
     }
 
     /// IDENTIFY PACKET DEVICE's 512 bytes.

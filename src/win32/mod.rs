@@ -38,6 +38,7 @@ mod mapping;
 pub(crate) mod memory;
 mod mpr;
 mod msimg32;
+mod wnaspi32;
 mod msvcrt;
 mod ntdll;
 pub(crate) mod object;
@@ -410,6 +411,8 @@ pub struct Win32 {
     dde: user32::ddeml::State,
     /// The global atom table (GlobalAddAtomA).
     atoms: kernel32::atom::Table,
+    /// WNASPI32's CD-ROM drive.
+    wnaspi32: wnaspi32::State,
 }
 
 impl Win32 {
@@ -425,6 +428,12 @@ impl Win32 {
             trace: trace::Trace::new(self.trace.level()),
             ..Win32::default()
         };
+    }
+
+    /// The disc in CD-ROM drive `drive` changed (`has_disc`: one went
+    /// in), at `now` (PIT ticks): WNASPI32's drive reports it.
+    pub fn cd_changed(&mut self, drive: u8, has_disc: bool, now: u64) {
+        wnaspi32::media_changed(&mut self.wnaspi32, drive, has_disc, now);
     }
 
     /// Whether a Win32 program is running.
@@ -1376,6 +1385,7 @@ crate::state_fields!(Win32 {
     desktop_depth,
     atoms,
     desktop_size,
+    wnaspi32,
 } skip {
     enabled,
     guest_dlls,
