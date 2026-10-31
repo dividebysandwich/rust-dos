@@ -991,6 +991,56 @@ fn cd_directories_show_their_records() {
 }
 
 #[test]
+fn a_joliet_cd_has_long_names() {
+    let mut disk = DiskController::new(scratch("joliet"));
+    let disc = crate::cdrom::iso9660::joliet_disc();
+    disk.mount_memory_image(3, "JOLIET.ISO", disc.into(), cdrom())
+        .unwrap();
+
+    // DOS lists the primary tree's names.
+    let listed: Vec<String> = disk
+        .list_directory("D:\\*.*", 0x10)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.filename)
+        .collect();
+    assert!(listed.contains(&"NSENGLIS.DLL".to_string()), "{:?}", listed);
+    assert!(
+        !listed.iter().any(|name| name.contains("nsenglish")),
+        "{:?}",
+        listed
+    );
+    // Windows programs get the Joliet names for them, and open them by
+    // those.
+    let long = disk.long_names("D:\\").unwrap();
+    let pair = |long: &str, short: &str| (long.to_string(), short.to_string());
+    assert!(
+        long.contains(&pair("nsenglishres.dll", "NSENGLIS.DLL")),
+        "{:?}",
+        long
+    );
+    assert!(
+        long.contains(&pair("DOSONLY.BAT", "DOSONLY.BAT")),
+        "{:?}",
+        long
+    );
+    let inside = disk.long_names("D:\\Program Files").unwrap();
+    assert_eq!(inside, [pair("setup.ini", "SETUP.INI")]);
+    assert!(disk.is_file("D:\\nsenglishres.dll"));
+    assert!(disk.is_file("d:\\program files\\Setup.ini"));
+    assert!(disk.is_directory("D:\\Program Files"));
+    assert!(!disk.is_file("D:\\nsenglish.dll"));
+    let h = disk.open_file("D:\\NSEnglishRes.dll", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 8).unwrap(), [30; 5]);
+    assert!(disk.set_current_directory("D:\\Program Files"));
+    assert_eq!(
+        disk.get_current_directory_of(3).as_deref(),
+        Some("PROGRAM_")
+    );
+    assert!(disk.is_file("D:setup.ini"));
+}
+
+#[test]
 fn z_drive_is_only_used_when_named() {
     let base = scratch("zdrive");
     fs::write(base.join("HOST.TXT"), b"x").unwrap();
@@ -1109,6 +1159,47 @@ fn find_next_goes_on_from_the_listing_find_first_made() {
     assert_eq!(disk.find_directory_entry(r"C:\*.*", 1, 0x16).unwrap().filename, "AA.DAT");
 }
 
+/// A search whose attributes take the label besides other entries finds
+/// it in the root of a folder drive as on a disk, and FindNext goes on
+/// from the listing FindFirst made, as for any other search.
+#[test]
+fn a_search_that_takes_the_label_finds_it_in_the_root_only() {
+    let base = scratch("label_and_files");
+    let root = base.join("c");
+    fs::create_dir_all(root.join("SUB")).unwrap();
+    fs::write(root.join("A.DAT"), b"x").unwrap();
+    fs::write(root.join("SUB").join("B.DAT"), b"x").unwrap();
+    age(&root);
+    age(&root.join("SUB"));
+    let mut disk = DiskController::new(root.clone());
+    let find = |disk: &DiskController, spec: &str, attr: u16| -> Vec<String> {
+        (0..)
+            .map_while(|i| disk.find_directory_entry(spec, i, attr).ok())
+            .map(|e| e.filename)
+            .collect()
+    };
+
+    assert_eq!(find(&disk, r"C:\*.*", 0x0E), ["RUSTDOS", "A.DAT"]);
+    assert_eq!(
+        disk.host_dirs.searches.borrow().len(),
+        1,
+        "kept for FindNext"
+    );
+    assert_eq!(find(&disk, r"C:\RUSTDOS", 0x0E), ["RUSTDOS"]);
+    assert_eq!(find(&disk, r"C:\SUB\*.*", 0x0E), ["B.DAT"]);
+    assert_eq!(find(&disk, r"C:\SUB\*.*", 0x08), ["RUSTDOS"]);
+
+    // A label with a character above 7Fh across its 8th byte.
+    fs::create_dir_all(base.join("d")).unwrap();
+    let opts = MountOptions {
+        label: Some("ABCDEFG\u{e9}XY".to_string()),
+        ..Default::default()
+    };
+    disk.mount(3, &base.join("d"), opts, false).unwrap();
+    assert!(find(&disk, r"D:\*.*", 0).is_empty());
+    assert_eq!(find(&disk, r"D:\*.*", 0x08), ["ABCDEFG\u{e9}.XY"]);
+}
+
 #[test]
 fn find_next_sees_the_guest_s_changes_mid_search() {
     let root = scratch("find_next_guest");
@@ -1172,8 +1263,11 @@ fn a_kept_folder_is_checked_again_after_a_while() {
 #[test]
 fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     let root = scratch("host_dir_cache_unmoved");
+    // A folder that reads as empty rules no name out (one the host can't
+    // list reads so too), so this one has a file.
+    fs::write(root.join("GAME.EXE"), b"x").unwrap();
     age(&root);
-    let disk = DiskController::new(root.clone());
+    let mut disk = DiskController::new(root.clone());
     assert!(!disk.is_file(r"C:\PATCH.DAT"));
     let host_root = disk.resolve_path(r"C:\").unwrap();
     assert!(disk.host_dirs.dirs.borrow().contains_key(&host_root));
@@ -1182,8 +1276,9 @@ fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
     // was, as on FAT under Windows or after an unpacker restores it. A
     // name looked for in vain less than `TRUST` ago is still missing,
     // without the folder being read again: it comes back uppercased, as a
-    // name to create. Then it is looked for again. (A Windows host finds
-    // the file by the uppercased name too, so `is_file` can't tell.)
+    // name to create, and is neither a file nor a folder nor opened,
+    // without asking the host (which would find it by the uppercased name
+    // on Windows). Then it is looked for again.
     fs::write(root.join("Patch.dat"), b"x").unwrap();
     age(&root);
     let name = |disk: &DiskController| {
@@ -1191,9 +1286,13 @@ fn a_name_missing_from_a_kept_folder_is_looked_for_again() {
         path.file_name().unwrap().to_owned()
     };
     assert_eq!(name(&disk), "PATCH.DAT");
+    assert!(!disk.is_file(r"C:\PATCH.DAT") && !disk.is_directory(r"C:\PATCH.DAT"));
+    assert_eq!(disk.open_file(r"C:\PATCH.DAT", 0, PSP), Err(0x02));
     disk.host_dirs.expire();
     assert_eq!(name(&disk), "Patch.dat");
     assert!(disk.is_file(r"C:\PATCH.DAT"));
+    let handle = disk.open_file(r"C:\PATCH.DAT", 0, PSP).unwrap();
+    disk.close_file(handle);
     // A name not looked for before is looked for in a fresh read at once.
     fs::write(root.join("Other.dat"), b"x").unwrap();
     age(&root);

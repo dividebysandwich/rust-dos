@@ -160,6 +160,19 @@ pub fn modes(cpu: &Cpu) -> Vec<(u32, u32, u32)> {
         .collect()
 }
 
+/// The modes whose two colour buffers and auxiliary (depth) buffer the
+/// card's frame buffer holds, smallest first: width and height.
+pub fn depth_modes(cpu: &Cpu) -> Vec<(u32, u32)> {
+    let Some(b) = board(cpu) else {
+        return Vec::new();
+    };
+    modes(cpu)
+        .into_iter()
+        .filter(|&(w, h, _)| buffer_bytes(b.card, w, h).is_some_and(|n| 3 * n <= b.fb_bytes))
+        .map(|(w, h, _)| (w, h))
+        .collect()
+}
+
 /// The card's frame buffer, and how much of it the mode's buffers
 /// leave.
 pub fn video_memory(cpu: &mut Cpu) -> (u32, u32) {
@@ -340,13 +353,12 @@ pub fn card_buffer(cpu: &mut Cpu, id: u32) -> Option<u32> {
     (s.memory == MEM_CARD && !s.lost).then_some(s.bits)
 }
 
-/// The buffer a surface of the device's is to have, by its caps: None
-/// for one in system memory.
-pub fn role(s: &Surface) -> Option<u32> {
-    let caps = s.caps[0];
+/// The buffer a surface of the device's is to have, by its first caps:
+/// None for one in system memory.
+pub fn role(caps: u32) -> Option<u32> {
     if caps & surface::DDSCAPS_ZBUFFER != 0 {
         Some(BUFFER_AUXBUFFER)
-    } else if s.is_primary() || caps & surface::DDSCAPS_FRONTBUFFER != 0 {
+    } else if caps & (surface::DDSCAPS_PRIMARYSURFACE | surface::DDSCAPS_FRONTBUFFER) != 0 {
         Some(api::BUFFER_FRONTBUFFER)
     } else if caps & (surface::DDSCAPS_BACKBUFFER | surface::DDSCAPS_FLIP) != 0 {
         Some(api::BUFFER_BACKBUFFER)

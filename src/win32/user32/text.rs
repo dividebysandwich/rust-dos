@@ -768,6 +768,10 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
         };
         i += 1;
         let mut number = false;
+        // The 0x of %#x, which the width doesn't count: Windows pads the
+        // digits to it, and puts the 0x before them ("%#04x" of 0x409
+        // is "0x0409", as InstallShield's LANG.DAT names its sections).
+        let mut prefix = 0;
         let mut text: Vec<u16> = match t as u8 {
             b'c' => vec![char_arg(next_arg(cpu), wide_arg)],
             b'C' => vec![char_arg(next_arg(cpu), !wide_arg)],
@@ -793,6 +797,7 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
                 }
                 if hex_prefix && matches!(t as u8, b'x' | b'X') {
                     s.insert_str(0, if t == b'x' as u16 { "0x" } else { "0X" });
+                    prefix = 2;
                 }
                 if matches!(t as u8, b'd' | b'i') && (v as i32) < 0 {
                     s.insert(0, '-');
@@ -804,12 +809,13 @@ fn wsprintf_core(cpu: &mut Cpu, format: &[u16], mut args: u32, wide: bool) -> Op
         if !number && let Some(p) = precision {
             text.truncate(p);
         }
-        if text.len() < width {
-            let pad = width - text.len();
+        if text.len() - prefix < width {
+            let pad = width - (text.len() - prefix);
             if left {
                 text.extend(std::iter::repeat_n(b' ' as u16, pad));
             } else if zero && number {
-                let at = (text.first() == Some(&(b'-' as u16))) as usize;
+                // The zeros go after a minus sign or the 0x.
+                let at = prefix + (text.first() == Some(&(b'-' as u16))) as usize;
                 text.splice(at..at, std::iter::repeat_n(b'0' as u16, pad));
             } else {
                 text.splice(0..0, std::iter::repeat_n(b' ' as u16, pad));
@@ -1223,6 +1229,28 @@ mod tests {
         assert_eq!(word_break(b"aaaaaa bb", 3, 0), (6, 7));
         // An edit control breaks it.
         assert_eq!(word_break(b"aaaaaa bb", 3, DT_EDITCONTROL), (3, 3));
+    }
+
+    /// wsprintfA's output for `format` with the one argument `arg`.
+    fn format_one(format: &str, arg: u32) -> String {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.guest_write_bytes(0x1000, &arg.to_le_bytes());
+        let format: Vec<u16> = format.encode_utf16().collect();
+        let out = wsprintf_core(&mut cpu, &format, 0x1000, false).unwrap();
+        String::from_utf16(&out).unwrap()
+    }
+
+    #[test]
+    fn the_hex_prefix_is_left_out_of_the_width() {
+        // As InstallShield 5's setup names LANG.DAT's sections.
+        assert_eq!(format_one("%#04x", 0x409), "0x0409");
+        assert_eq!(format_one("%#04x", 9), "0x0009");
+        assert_eq!(format_one("%#06X", 0xAB), "0X0000AB");
+        assert_eq!(format_one("%#6x", 0x409), "   0x409");
+        assert_eq!(format_one("%-#6x|", 0x409), "0x409   |");
+        assert_eq!(format_one("%#x", 0x409), "0x409");
+        assert_eq!(format_one("%04x", 0x9), "0009");
+        assert_eq!(format_one("%05d", -42i32 as u32), "-0042");
     }
 
     #[test]

@@ -10,6 +10,8 @@ use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
 
+mod win16;
+
 const BASE: u32 = 0x40_0000;
 const STD_OUTPUT_HANDLE: i32 = -11;
 
@@ -628,6 +630,26 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
             a.int3()
         })
     };
+    start_program(test, line, child, child_program, dirs)
+}
+
+/// `start_child`, with `program_bytes` for C.EXE: T.EXE's exit code is 1
+/// for CreateProcessA's TRUE, the wait's result shifted left by one, and
+/// the child's exit code shifted left by four.
+fn start_program(test: &str, line: &str, child: &str, program_bytes: Vec<u8>, dirs: &[&str]) -> u8 {
+    start_program_from(test, "T.EXE", line, child, program_bytes, dirs)
+}
+
+/// `start_program`, with T.EXE at `parent_at` and run from the shell by
+/// that path, so that its folder needn't be the current one.
+fn start_program_from(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    child: &str,
+    program_bytes: Vec<u8>,
+    dirs: &[&str],
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -674,18 +696,20 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
         a.call(f("ExitProcess"))?;
         a.int3()
     });
-    let base = scratch(test, &[("T.EXE", parent)]);
+    let base = scratch(test, &[]);
     for dir in dirs {
         fs::create_dir_all(base.join(dir)).unwrap();
     }
-    let child = base.join(child);
-    fs::create_dir_all(child.parent().unwrap()).unwrap();
-    fs::write(child, child_program).unwrap();
+    for (at, bytes) in [(parent_at, parent), (child, program_bytes)] {
+        let file = base.join(at.replace('\\', "/"));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    }
     let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
-    assert!(cpu.load_executable("T.EXE", None));
+    assert!(cpu.load_executable(parent_at, None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
     assert!(!cpu.bus.win32.active());
     cpu.errorlevel
@@ -694,6 +718,27 @@ fn start_child(test: &str, line: &str, child: &str, dirs: &[&str]) -> u8 {
 #[test]
 fn a_program_starts_another_and_waits_for_its_exit_code() {
     let code = start_child("child_process", "C.EXE an argument", "C.EXE", &[]);
+    assert_eq!(code, 0x71);
+}
+
+/// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a
+/// task of its 16-bit system: it succeeds, the process handle is
+/// signaled when the task ends, and GetExitCodeProcess gives the task's
+/// exit code. The child ends with 7 when its command tail is the line's
+/// arguments, " an argument", else 9; so 71h.
+#[test]
+fn a_program_starts_a_windows_3_1_program_and_waits_for_it() {
+    let mut code = win16::Code::new();
+    code.emit(&[
+        0x26, 0xA0, 0x80, 0x00, // mov al,es:[80h]: the tail's length
+        0x3C, 0x0C, // cmp al,12
+        0xB0, 0x07, // mov al,7
+        0x74, 0x02, // je end
+        0xB0, 0x09, // mov al,9
+    ])
+    .exit_al();
+    let child = win16::program(&code, win16::CODE);
+    let code = start_program("child_win16", "C.EXE an argument", "C.EXE", child, &[]);
     assert_eq!(code, 0x71);
 }
 
@@ -759,6 +804,54 @@ fn an_unquoted_program_path_with_spaces_is_found() {
     let line = " \tV1.0 GAME\\C.EXE an argument";
     let code = start_child("unquoted_path_blanks", line, "V1.0 GAME/C.EXE", &["V1.0"]);
     assert_eq!(code, 0x81);
+}
+
+/// A command line naming its program by a relative path, DISK1\C.EXE, as
+/// a CD's menu does: Windows looks for it where it looks for a name
+/// alone, the starting program's folder first, so a menu on E: starts
+/// its setup whatever the current directory is. A path that starts with
+/// ".\" is the current directory's alone.
+#[test]
+fn a_relative_program_path_is_found_beside_the_starting_program() {
+    let child = |code| {
+        let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            a.push(code)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    // T.EXE in C:\CD, started from C:\, the current directory.
+    let start =
+        |test, line, at, code| start_program_from(test, "CD\\T.EXE", line, at, child(code), &[]);
+    assert_eq!(
+        start("relative_path", "DISK1\\C.EXE", "CD\\DISK1\\C.EXE", 7),
+        0x71
+    );
+    // Then the current directory.
+    assert_eq!(
+        start("relative_path_current", "DISK1\\C.EXE", "DISK1\\C.EXE", 5),
+        0x51
+    );
+    // With both, the program's folder wins: the first run's folder, with
+    // C:\DISK1\C.EXE, which ends with 5, added.
+    let base = PathBuf::from("target/test_win32").join("relative_path");
+    fs::create_dir_all(base.join("DISK1")).unwrap();
+    fs::write(base.join("DISK1/C.EXE"), child(5)).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("CD\\T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 0x71, "C:\\CD\\DISK1\\C.EXE");
+    let code = start(
+        "relative_path_dot",
+        ".\\DISK1\\C.EXE",
+        "CD\\DISK1\\C.EXE",
+        7,
+    );
+    assert_eq!(code & 1, 0, "not looked for beside the program");
 }
 
 #[test]
@@ -849,6 +942,80 @@ fn threads_take_turns_wait_for_each_other_and_share_a_critical_section() {
         }),
     );
     assert_eq!(code, 5, "{}", out);
+}
+
+/// How many milliseconds a Sleep(10) took by QueryPerformanceCounter,
+/// rounded, with a second thread that spins all the while when `spin`.
+fn slept_ms(test: &str, spin: bool) -> u8 {
+    let names: &[&str] = &[
+        "CreateThread",
+        "QueryPerformanceCounter",
+        "QueryPerformanceFrequency",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The counter before at 0, after at 8, the frequency at 0x10, the
+    // spinning thread's count at 0x18.
+    let data = vec![0; 0x20];
+    let (code, out) = run(
+        test,
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut over = a.create_label();
+            if spin {
+                a.push(0)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.call(over)?;
+                // The thread: count for ever.
+                let mut again = a.create_label();
+                a.set_label(&mut again)?;
+                a.add(dword_ptr(l.at(0x18)), 1)?;
+                a.jmp(again)?;
+                a.set_label(&mut over)?;
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("CreateThread"))?;
+            }
+            a.push(l.at(0x10) as i32)?;
+            a.call(f("QueryPerformanceFrequency"))?;
+            a.push(l.at(0) as i32)?;
+            a.call(f("QueryPerformanceCounter"))?;
+            a.push(10)?;
+            a.call(f("Sleep"))?;
+            a.push(l.at(8) as i32)?;
+            a.call(f("QueryPerformanceCounter"))?;
+            // (after - before) * 1000000 / frequency microseconds, to
+            // the nearest millisecond.
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            a.sub(eax, dword_ptr(l.at(0)))?;
+            a.mov(ecx, 1_000_000)?;
+            a.mul(ecx)?;
+            a.div(dword_ptr(l.at(0x10)))?;
+            a.add(eax, 500)?;
+            a.xor(edx, edx)?;
+            a.mov(ecx, 1000)?;
+            a.div(ecx)?;
+            a.push(eax)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        }),
+    );
+    assert!(out.is_empty(), "{out}");
+    code
+}
+
+/// A Sleep ends when its time is up, to the millisecond, as on Windows
+/// 98: with no other thread to run, and with another of the program's
+/// threads spinning, which the sleeping thread takes the processor from
+/// when it wakes (the boost Windows gives a thread whose wait ends). It
+/// used to end at the timer's next interrupt, up to 55 ms later, and the
+/// spinning thread kept the processor until its turn was over.
+#[test]
+fn a_sleep_ends_on_time_also_while_another_thread_spins() {
+    let slept = [slept_ms("sleep_alone", false), slept_ms("sleep_spinning", true)];
+    assert_eq!(slept, [10, 10], "alone, spinning");
 }
 
 /// Threads started and ended one after another, more than the LDT has
@@ -3734,6 +3901,362 @@ fn wait_for_input_idle_handles_messages_sent_to_the_waiting_thread() {
     let code = run_family(
         "wait_for_input_idle_sent",
         &[("T.EXE", parent), ("S.EXE", child)],
+    );
+    assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
+}
+
+const WS_VISIBLE: i32 = 0x1000_0000;
+const PM_REMOVE: i32 = 1;
+
+/// A GUI program that shows a popup of class Static titled `title`, at
+/// (`x`, 0) and 50 pixels square, and then gets and dispatches messages
+/// until it is ended.
+fn shows_a_window(title: &str, x: i32) -> Vec<u8> {
+    let user32 = ["CreateWindowExA", "GetMessageA", "DispatchMessageA"];
+    // The title, the class at 0x10 and a MSG at 0x20.
+    let data = child_data(&[(0, title), (0x10, "Static")]);
+    win_program(pe::SUBSYSTEM_GUI, &[], &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, title, style, x, 0, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        let mut next = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0x20) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(l.at(0x20) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(next)
+    })
+}
+
+/// Take and dispatch the running thread's messages, with the MSG at
+/// `msg` of the data, until there are none.
+fn pump(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+    msg: u32,
+) -> Result<(), IcedError> {
+    let mut next = a.create_label();
+    let mut done = a.create_label();
+    a.set_label(&mut next)?;
+    push_args(a, &[l.at(msg) as i32, 0, 0, 0, PM_REMOVE])?;
+    a.call(f("PeekMessageA"))?;
+    a.test(eax, eax)?;
+    a.je(done)?;
+    a.push(l.at(msg) as i32)?;
+    a.call(f("DispatchMessageA"))?;
+    a.jmp(next)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+#[test]
+fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
+    // T.EXE shows a window and starts C.EXE, whose window comes to the
+    // foreground: on Windows 98 a program the foreground program starts
+    // may take it. Once T.EXE has looked at its messages, its queue has
+    // no active window. Its SetActiveWindow then makes its window its
+    // queue's active one behind C.EXE's, not raised over it, and its
+    // SetForegroundWindow fails. (MechCommander's setup hid DirectPlay's
+    // license dialog behind its full-screen window this way,
+    // kibertoad/rust-dos#352.)
+    let kernel32 = ["CreateProcessA", "TerminateProcess", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "CreateWindowExA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "GetForegroundWindow",
+        "GetActiveWindow",
+        "SetActiveWindow",
+        "SetForegroundWindow",
+        "GetTopWindow",
+    ];
+    // A MSG at 0xC0.
+    let data = child_data(&[(0, "C.EXE"), (0x10, "Static"), (0x20, "Parent")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, title, style, 100, 0, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 0)?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, 5000)?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.mov(edi, eax)?;
+        a.cmp(edi, esi)?;
+        bit_if(a, ne, 1)?;
+        a.call(f("GetActiveWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 2)?;
+        a.push(esi)?;
+        a.call(f("SetActiveWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 3)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.push(0)?;
+        a.call(f("GetTopWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 5)?;
+        a.push(esi)?;
+        a.call(f("SetForegroundWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 6)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 7)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("TerminateProcess"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "foreground_from_parent",
+        &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_click_on_a_window_behind_activates_it_and_is_delivered() {
+    // T.EXE's window, with a button, is behind C.EXE's, which it started.
+    // A click on the button asks the window with WM_MOUSEACTIVATE, whose
+    // DefWindowProcA answer, MA_ACTIVATE, activates it (WA_CLICKACTIVE)
+    // and brings it to the foreground, and the button gets the click:
+    // the first click presses it, as on Windows (kibertoad/rust-dos#355).
+    const WM_ACTIVATE: i32 = 0x0006;
+    const WM_MOUSEACTIVATE: i32 = 0x0021;
+    const WM_TIMER: i32 = 0x0113;
+    const WM_COMMAND: i32 = 0x0111;
+    const WS_CHILD: i32 = 0x4000_0000;
+    const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
+    let kernel32 = ["CreateProcessA", "TerminateProcess", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "GetMessageA",
+        "PeekMessageA",
+        "DispatchMessageA",
+        "GetForegroundWindow",
+        "GetActiveWindow",
+        "GetFocus",
+        "SetCursorPos",
+        "mouse_event",
+        "SetTimer",
+    ];
+    // What the window procedure saw: WM_COMMAND's count at 0xA0,
+    // WM_MOUSEACTIVATE's lParam at 0xA4 and wParam at 0xA8, the last
+    // WM_ACTIVATE's wParam at 0xAC. A MSG at 0xC0 and a WNDCLASSA at
+    // 0xE0, its procedure put in by the code.
+    let mut data = child_data(&[
+        (0, "C.EXE"),
+        (0x10, "Frame"),
+        (0x20, "Button"),
+        (0x30, "OK"),
+    ]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        for (msg, at, arg) in [
+            (WM_MOUSEACTIVATE, 0xA4, 16),
+            (WM_MOUSEACTIVATE, 0xA8, 12),
+            (WM_ACTIVATE, 0xAC, 12),
+        ] {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), msg)?;
+            a.jne(other)?;
+            a.mov(eax, dword_ptr(esp + arg))?;
+            a.mov(dword_ptr(l.at(at)), eax)?;
+            a.set_label(&mut other)?;
+        }
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_COMMAND)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let (class, button) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 200, 100, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        // The button, id 1, in the window: its last four arguments
+        // first.
+        push_args(a, &[1, 0, 0])?;
+        a.push(esi)?;
+        let ok = l.at(0x30) as i32;
+        push_args(a, &[0, button, ok, WS_CHILD | WS_VISIBLE, 10, 10, 80, 30])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        a.xor(ebx, ebx)?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, 5000)?;
+        pump(a, l, f, 0xC0)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, ne, 0)?;
+        a.mov(dword_ptr(l.at(0xAC)), 0)?;
+        push_args(a, &[50, 25])?;
+        a.call(f("SetCursorPos"))?;
+        for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
+            push_args(a, &[flags, 0, 0, 0, 0])?;
+            a.call(f("mouse_event"))?;
+        }
+        push_args(a, &[0, 0, 2000, 0])?;
+        a.call(f("SetTimer"))?;
+        let mut next = a.create_label();
+        let mut done = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.cmp(dword_ptr(l.at(0xC4)), WM_TIMER)?;
+        a.je(done)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.cmp(dword_ptr(l.at(0xA0)), 0)?;
+        a.je(next)?;
+        a.set_label(&mut done)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 1)?;
+        bit_if(a, eq, 1)?;
+        a.call(f("GetForegroundWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 2)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 3)?;
+        // HTCLIENT and WM_LBUTTONDOWN; the window to activate.
+        a.cmp(dword_ptr(l.at(0xA4)), 0x0201_0001)?;
+        bit_if(a, eq, 4)?;
+        a.cmp(dword_ptr(l.at(0xA8)), esi)?;
+        bit_if(a, eq, 5)?;
+        a.cmp(word_ptr(l.at(0xAC)), 2)?;
+        bit_if(a, eq, 6)?;
+        a.call(f("GetFocus"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 7)?;
+        a.push(0)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("TerminateProcess"))?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "click_activates_behind",
+        &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 300))],
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
+    // T.EXE shows a window, starts C.EXE and waits for it. C.EXE's first
+    // window comes to the foreground; when C.EXE destroys it, the
+    // foreground goes back to T.EXE's window. C.EXE then makes a hidden
+    // window its queue's active one, behind the foreground, and shows
+    // it: the activation that showing it asks for brings it to the
+    // foreground, as T.EXE, which started C.EXE, is there. (This is how
+    // MechCommander's setup shows DirectX setup's message box, whose
+    // SetFocus on its button comes before its ShowWindow.)
+    const SW_SHOWNORMAL: i32 = 1;
+    let child = {
+        let user32 = [
+            "CreateWindowExA",
+            "DestroyWindow",
+            "SetActiveWindow",
+            "ShowWindow",
+            "GetForegroundWindow",
+        ];
+        let data = child_data(&[(0, "One"), (0x10, "Static")]);
+        let kernel32 = ["ExitProcess"];
+        win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+            let (class, title) = (l.at(0x10) as i32, l.at(0) as i32);
+            a.xor(ebx, ebx)?;
+            let style = WS_POPUP | WS_VISIBLE;
+            push_args(a, &[0, class, title, style, 0, 0, 50, 50, 0, 0, 0, 0])?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(esi, eax)?;
+            a.call(f("GetForegroundWindow"))?;
+            a.cmp(eax, esi)?;
+            bit_if(a, eq, 0)?;
+            push_args(a, &[0, 0, 0, 0])?;
+            push_args(a, &[0, class, title, WS_POPUP, 60, 0, 50, 50])?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(edi, eax)?;
+            a.push(esi)?;
+            a.call(f("DestroyWindow"))?;
+            a.call(f("GetForegroundWindow"))?;
+            a.cmp(eax, edi)?;
+            bit_if(a, ne, 1)?;
+            a.push(edi)?;
+            a.call(f("SetActiveWindow"))?;
+            a.push(SW_SHOWNORMAL)?;
+            a.push(edi)?;
+            a.call(f("ShowWindow"))?;
+            a.call(f("GetForegroundWindow"))?;
+            a.cmp(eax, edi)?;
+            bit_if(a, eq, 2)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.int3()
+        })
+    };
+    let kernel32 = [
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    // The exit code at 0xC0.
+    let data = child_data(&[(0, "C.EXE"), (0x10, "Static"), (0x20, "Parent")]);
+    let user32 = ["CreateWindowExA"];
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (class, title) = (l.at(0x10) as i32, l.at(0x20) as i32);
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, title, style, 100, 0, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        create_child(a, l, f, 0)?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xC0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.push(dword_ptr(l.at(0xC0)))?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "shown_after_activated_behind",
+        &[("T.EXE", parent), ("C.EXE", child)],
     );
     assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
 }

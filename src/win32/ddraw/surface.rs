@@ -529,7 +529,7 @@ fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     let size = s.size();
     let card = on_card(cpu, id);
     let (memory, bits) = if card {
-        match voodoo::role(&s) {
+        match voodoo::role(s.caps[0]) {
             Some(role) => {
                 if !voodoo::has_buffer(cpu, role, s.width, s.height) {
                     return Err(if role == crate::win32::glide::api::BUFFER_AUXBUFFER {
@@ -685,11 +685,11 @@ pub fn destroyed(cpu: &mut Cpu, id: u32) {
 
 const PITCH_ALIGN: u32 = 4;
 
-/// The pitch of `width` pixels of `bits` bits.
 /// The most bytes of pixels a surface can have in the program's memory
 /// (`SetSurfaceDesc`).
 const MAX_GIVEN_BITS: u64 = 0x1000_0000;
 
+/// The pitch of `width` pixels of `bits` bits.
 fn pitch_of(width: u32, bits: u32) -> u32 {
     (width * bits).div_ceil(8).next_multiple_of(PITCH_ALIGN)
 }
@@ -912,7 +912,10 @@ pub fn make(
                 16
             };
             width.div_ceil(4).max(1) * height.div_ceil(4).max(1) * block
-        } else if card && caps[0] & DDSCAPS_ZBUFFER != 0 {
+        } else if card && voodoo::role(caps[0]).is_some() {
+            // One of the card's buffers (a back buffer made on its own
+            // and attached later, too): its rows are the linear frame
+            // buffer's, whatever its width.
             voodoo::PITCH
         } else {
             pitch_of(width, f.bits)
@@ -1532,8 +1535,8 @@ pub fn get_attached_surface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 // Flip.
 
-const DDFLIP_WAIT: u32 = 0x1;
-const DDFLIP_NOVSYNC: u32 = 0x8;
+pub const DDFLIP_WAIT: u32 = 0x1;
+pub const DDFLIP_NOVSYNC: u32 = 0x8;
 
 /// The surfaces of the flip chain whose front buffer is `front`, the
 /// front first.

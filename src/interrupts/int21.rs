@@ -1678,6 +1678,12 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                     let result = crate::ems::ioctl_read(&mut cpu.bus, buffer, size);
                     set_result(cpu, result);
                 }
+                // MS-DOS 7 has subfunctions 00h to 11h and fails any other
+                // with error 1, invalid function. Network clients add their
+                // own above that, and programs probe for them: Windows 98
+                // Setup takes a successful 44E0h for Sun PC-NFS, and a
+                // successful 4452h is how DR-DOS is recognised.
+                0x12..=0xFF => set_result(cpu, Err(0x01)),
                 _ => {
                     // Stub other subfunctions as success
                     cpu.set_ax(0);
@@ -1928,16 +1934,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             match cpu
                 .bus
                 .disk
-                .find_directory_entry(&search_pattern, index, search_attr)
+                .find_entry_from(&search_pattern, index, search_attr)
             {
-                Ok(entry) => {
+                Ok((entry, next)) => {
                     // Drive the search runs on (1 = A:)
                     let search_drive = parse_drive_prefix(&search_pattern)
                         .0
                         .unwrap_or(cpu.bus.disk.get_current_drive());
                     cpu.bus.guest_write_8(dta_phys as u32, search_drive + 1);
                     cpu.bus.guest_write_8((dta_phys + OFFSET_ATTR_SEARCH) as u32, search_attr as u8);
-                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, (index + 1) as u16);
+                    cpu.bus.guest_write_16((dta_phys + OFFSET_INDEX) as u32, next as u16);
 
                     // Only write Search Pattern to DTA on FindFirst (AH=4E)
                     // FindNext must NOT overwrite the pattern it uses for searching!
@@ -2337,7 +2343,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             cpu.set_cpu_flag(CpuFlags::CF, true);
         }
 
-        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on.
+        // AX = 73xxh: MS-DOS 7's FAT32 functions, from DOS 7.00 on, and at
+        // any version while a FAT32 drive is mounted.
         0x73 => fat32_function(cpu, cpu.get_al()),
 
         _ => {
@@ -2368,11 +2375,18 @@ crate::state_fields!(ConLine { buffer, text });
 /// its free space in 32-bit numbers, and (from 7.10) 05h reads or writes
 /// its sectors as INT 25h/26h do. Below DOS 7, AX=7300h and CF set, as
 /// DOS 6 answers, and 0018h for what isn't there.
+///
+/// With a FAT32 drive mounted they are there whatever version programs
+/// are told, as MS-DOS 7.1 has them under SETVER: only a DOS with these
+/// functions can have such a drive, and its DPB (AH=32h) is MS-DOS 7.1's,
+/// with 0 sectors per FAT, which only AX=7302h completes. Windows 98
+/// Setup's disk check reads a FAT32 C: this way.
 fn fat32_function(cpu: &mut Cpu, al: u8) {
     let version = cpu.bus.dos_version;
     let drive = |cpu: &Cpu, dl: u8| if dl == 0 { cpu.bus.disk.get_current_drive() } else { dl - 1 };
+    let fat32 = (0..26).any(|d| cpu.bus.disk.layout(d).is_some_and(|l| l.fat32.is_some()));
     let result: Result<(), u16> = match al {
-        _ if !version.at_least(7, 0) => Err(0x7300),
+        _ if !version.at_least(7, 0) && !fat32 => Err(0x7300),
         0x00 if cpu.get_reg8(Register::CL) < 2 => {
             let cl = cpu.get_reg8(Register::CL);
             cpu.set_ax(cl as u16);
@@ -2383,7 +2397,7 @@ fn fat32_function(cpu: &mut Cpu, al: u8) {
             extended_dpb(cpu, drive)
         }
         0x03 => extended_free_space(cpu),
-        0x05 if cpu.cx() == 0xFFFF && version.at_least(7, 10) => {
+        0x05 if cpu.cx() == 0xFFFF && (version.at_least(7, 10) || fat32) => {
             let drive = drive(cpu, cpu.get_reg8(Register::DL));
             super::int25::sector_access(cpu, drive, cpu.si() & 1 != 0, true)
         }

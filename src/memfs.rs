@@ -39,6 +39,9 @@ pub struct MemFs {
     dirs: BTreeMap<String, Option<crate::cdrom::Extent>>,
     /// The root directory's record on the CD.
     root: Option<crate::cdrom::Extent>,
+    /// The long names of the entries that have one, by their paths: a
+    /// CD's Joliet names, which Windows shows.
+    long: BTreeMap<String, String>,
 }
 
 impl MemFs {
@@ -87,6 +90,72 @@ impl MemFs {
             self.root
         } else {
             self.dirs.get(path).copied().flatten()
+        }
+    }
+
+    /// Give the file or directory at `path` the long name `name`, which
+    /// Windows programs see it by besides its DOS name.
+    pub fn set_long_name(&mut self, path: &str, name: &str) {
+        let path = path.trim_start_matches('\\').to_ascii_uppercase();
+        self.long.insert(path, name.to_string());
+    }
+
+    /// The long name of the file or directory at `path`, if it has one.
+    pub fn long_name(&self, path: &str) -> Option<&str> {
+        self.long.get(path).map(String::as_str)
+    }
+
+    /// What directory `dir` holds, as (long name, DOS name): an entry
+    /// without a long name has its DOS name for both.
+    pub fn long_names(&self, dir: &str) -> Vec<(String, String)> {
+        self.list(dir)
+            .into_iter()
+            .map(|(name, _)| {
+                let long = self.long_name(&Self::join(dir, name)).unwrap_or(name);
+                (long.to_string(), name.to_string())
+            })
+            .collect()
+    }
+
+    /// The path in DOS names, as the tree keeps it, of the path whose
+    /// components are `components`: each one the DOS name of an entry in
+    /// any case, or its long name in any case. A component that names
+    /// nothing is kept uppercased, so that a path that isn't there stays
+    /// one.
+    pub fn resolve(&self, components: &[&str]) -> String {
+        let mut path = String::new();
+        for component in components {
+            let upper = Self::join(&path, &component.to_ascii_uppercase());
+            let known = self.files.contains_key(&upper) || self.is_dir(&upper);
+            path = if known || self.long.is_empty() {
+                upper
+            } else {
+                self.find_long(&path, component).unwrap_or(upper)
+            };
+        }
+        path
+    }
+
+    /// The path of the entry of the directory `dir` whose long name is
+    /// `name` in any case.
+    fn find_long(&self, dir: &str, name: &str) -> Option<String> {
+        let lower = name.to_lowercase();
+        let same = |path: &String| {
+            self.long_name(path)
+                .is_some_and(|l| l.to_lowercase() == lower)
+        };
+        self.list(dir)
+            .into_iter()
+            .map(|(child, _)| Self::join(dir, child))
+            .find(same)
+    }
+
+    /// The path of the entry `name` of the directory `dir`.
+    fn join(dir: &str, name: &str) -> String {
+        if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}\\{}", dir, name)
         }
     }
 

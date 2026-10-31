@@ -178,14 +178,48 @@ pub fn fistp(cpu: &mut Cpu, instr: &Instruction) {
 
 /// The single FST and FSTP store of a register with double `double`, and
 /// with `precise` its 80 bits where they hold more than the double
-/// (`FpuRegs::beyond_double`): those rounded once, to 24 bits, as the
-/// control word says. (Rounding the double, itself rounded to nearest,
-/// could round twice.)
+/// (`FpuRegs::beyond_double`): the value rounded once, as the control
+/// word says, as an x87 rounds it. (Rounding the double, itself rounded to
+/// nearest from the 80 bits, could round twice.)
 fn single_bits(precise: Option<F80>, double: f64, control: u16) -> u32 {
-    match precise.and_then(|f| f.round_to(24, (control >> 10) & 0x03)) {
-        Some(value) => (value as f32).to_bits(),
-        None => (double as f32).to_bits(),
+    let rc = (control >> 10) & 0x03;
+    match precise.and_then(|f| f.single_bits(rc)) {
+        Some(bits) => bits,
+        None => double_to_single_bits(double, rc),
     }
+}
+
+/// `value` as a single's bits, rounded once as control word rounding `rc`
+/// says (0 nearest even, 1 down, 2 up, 3 toward zero). The nearest single
+/// is one of the two around the value, so where it went the other way than
+/// the rounding, the result is the single next to it in the rounding's
+/// direction: past the largest single that is infinity's bits, and below
+/// the least denormal zero's or the least denormal's.
+pub fn double_to_single_bits(value: f64, rc: u16) -> u32 {
+    let nearest = value as f32;
+    let bits = nearest.to_bits();
+    let back = nearest as f64;
+    // The step in the bits to the next single up: a negative single's
+    // bits count away from zero.
+    let up: i32 = if bits >> 31 != 0 { -1 } else { 1 };
+    // Down from a nearest single above the value, up from one below it,
+    // toward zero from one larger. A NaN compares as neither.
+    let step = match rc {
+        1 if back > value => -up,
+        2 if back < value => up,
+        3 if back.abs() > value.abs() => -1,
+        _ => 0,
+    };
+    bits.wrapping_add_signed(step)
+}
+
+/// The single FST and FSTP store of ST(0), as `single_bits` has it, for
+/// the recompiler's code (`Uop::FToSingle`). (The register's value
+/// whatever its tag, as FSTP's.)
+pub fn st0_single_bits(cpu: &Cpu) -> u32 {
+    let top = cpu.fpu_top;
+    let precise = cpu.fpu_reg_beyond_double(top).then(|| cpu.fpu_reg(top));
+    single_bits(precise, cpu.fpu_reg_f64(top), cpu.fpu_control)
 }
 
 /// The double FST and FSTP store, as `single_bits` has it. The register's
@@ -203,14 +237,15 @@ fn double_bits(precise: Option<F80>, double: f64, control: u16) -> u64 {
 pub fn fstp(cpu: &mut Cpu, instr: &Instruction) {
     if instr.op0_kind() == OpKind::Memory {
         let addr = calculate_addr(cpu, instr);
+        if instr.memory_size() == MemorySize::Float32 {
+            let bits = st0_single_bits(cpu);
+            cpu.fpu_drop();
+            cpu.lin_write_32(addr, bits);
+            return;
+        }
         // (The register's value whatever its tag.)
         let double = cpu.fpu_reg_f64(cpu.fpu_top);
         let precise = cpu.fpu_reg_beyond_double(cpu.fpu_top).then(|| cpu.fpu_reg(cpu.fpu_top));
-        if instr.memory_size() == MemorySize::Float32 {
-            cpu.fpu_drop();
-            cpu.lin_write_32(addr, single_bits(precise, double, cpu.fpu_control));
-            return;
-        }
         if instr.memory_size() == MemorySize::Float64 {
             cpu.fpu_drop();
             cpu.lin_write_64(addr, double_bits(precise, double, cpu.fpu_control));

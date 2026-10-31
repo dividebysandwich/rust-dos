@@ -1,6 +1,6 @@
 mod cdimage;
 
-use cdimage::{audio_sample, file, iso, mixed_disc};
+use cdimage::{audio_sample, file, high_sierra, iso, mixed_disc};
 use rust_dos::cdrom::redbook;
 use rust_dos::cpu::{Cpu, CpuFlags};
 use rust_dos::disk::{DriveKind, MountOptions};
@@ -226,6 +226,47 @@ fn images_answer_the_volume_calls() {
     cpu.set_di(0);
     int2f(&mut cpu, 0x150F, 0, 3);
     assert_eq!(cpu.ax(), 1);
+    assert_eq!(cpu.bus.read_32(0x33000 + 10), 4, "file size");
+}
+
+#[test]
+fn high_sierra_discs_answer_the_volume_calls() {
+    let dir = cdimage::scratch("mscdex_high_sierra");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let mut cpu = Cpu::new(dir.join("c"));
+    let image = high_sierra("OLDDISC", &[file("HELLO.COM", &[0xB4, 0x4C, 0xCD, 0x21])]);
+    fs::write(dir.join("old.iso"), image).unwrap();
+    let opts = MountOptions::default();
+    cpu.bus
+        .mount_drive(3, &dir.join("old.iso"), opts, false)
+        .unwrap();
+    cpu.set_es(0x3100);
+
+    // High Sierra's copyright file name is 32 characters.
+    int2f(&mut cpu, 0x1502, 0, 3);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    let name: Vec<u8> = (0..33).map(|i| cpu.bus.read_8(BUFFER + i)).collect();
+    assert_eq!(&name[..15], b"COPYRIGHT.TXT;1");
+    assert_eq!(name[32], 0);
+
+    // The volume descriptors' types are at byte 8.
+    cpu.set_dx(0);
+    int2f(&mut cpu, 0x1505, 0, 3);
+    assert_eq!(cpu.ax(), 1);
+    cpu.set_dx(1);
+    int2f(&mut cpu, 0x1505, 0, 3);
+    assert_eq!(cpu.ax(), 0xFF);
+
+    // The directory entry is the disc's record, and AX says High Sierra.
+    for (i, &b) in b"D:\\HELLO.COM\0".iter().enumerate() {
+        cpu.bus.write_8(0x32000 + i, b);
+    }
+    cpu.set_es(0x3200);
+    cpu.set_si(0x3300);
+    cpu.set_di(0);
+    int2f(&mut cpu, 0x150F, 0, 3);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.ax(), 0);
     assert_eq!(cpu.bus.read_32(0x33000 + 10), 4, "file size");
 }
 

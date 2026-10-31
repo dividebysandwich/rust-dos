@@ -152,6 +152,7 @@ impl Bus {
             observe: crate::idle::Observe::default(),
             code_blocks: vec![0; ram_len >> GEN_SHIFT],
             log_hook: None,
+            log_backlog: None,
             audio_hook: None,
         };
         bus.init_dos_machine(video::adapter::VideoSetup::default());

@@ -98,6 +98,10 @@ pub(crate) fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize)
 
     let mut cpu = Box::new(Cpu::with_memory(root_path.clone(), memory_mb));
     cpu.bus.log_file = open_log_file(args.log.as_deref())?;
+    // The debug server's log takes the lines logged before it starts.
+    if args.debug_server.is_some() {
+        cpu.bus.log_backlog = Some(Vec::new());
+    }
     cpu.shell_history.set_home(rust_dos::cmdline::default_history_file());
     rust_dos::cmdline::configure(&mut cpu, &config.shell);
     if let Some(spec) = c_spec {

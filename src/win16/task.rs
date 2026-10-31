@@ -98,6 +98,7 @@ fn make_process(cpu: &mut Cpu, environment: Vec<String>) -> Result<(), String> {
     )?;
     let pid = created.process.1;
     cpu.bus.win32.win16.pid = pid;
+    cpu.bus.win32.user.input.win16 = pid;
     let made = super::with_win16(cpu, pid, |p, bus| {
         let mut memory = std::mem::take(&mut p.memory);
         let result = (|| {
@@ -917,20 +918,24 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
     } else {
         format!("{}.EXE", path)
     };
-    let path = match cpu.read_program_file(&path) {
-        Some(_) => path,
+    let (path, file) = match cpu.read_program_file(&path) {
+        Some(file) => (path, file),
         None => {
             let windows = format!("{}\\{}", crate::win32::loader::WINDOWS_DIR, path);
-            if path.contains(['\\', '/', ':']) || cpu.read_program_file(&windows).is_none() {
+            if path.contains(['\\', '/', ':']) {
                 return Err(2);
             }
-            windows
+            let file = cpu.read_program_file(&windows).ok_or(2u16)?;
+            (windows, file)
         }
     };
     // The module's path as Windows keeps it, whatever form the caller
     // gave: full, with backslashes (D:/METAL.EXE is D:\METAL.EXE), which
     // GetModuleFileName gives and the module's DLLs are looked for by.
     let path = cpu.bus.disk.qualify_path(&path).unwrap_or(path);
+    if pe::is_pe(&file) {
+        return exec_win32(cpu, &path, arguments, show, environment);
+    }
     match spawn(cpu, &path, arguments, show, parent, environment) {
         Ok(spawned) => Ok(cpu
             .bus
@@ -944,6 +949,54 @@ pub fn exec(cpu: &mut Cpu, path: &str, arguments: &str, show: u16) -> Result<u16
             cpu.bus
                 .log_string(&format!("[W16] {} can't start: {}", path, message));
             Err(if message.contains("memory") { 8 } else { 11 })
+        }
+    }
+}
+
+/// `exec` of the Win32 program at `path`: as on Windows 98, a process of
+/// its own, which runs beside the Win16 tasks, as the Win32 WinExec
+/// starts it. 33 once it started, as Wine's WinExec16 gives for one, or
+/// the error.
+fn exec_win32(
+    cpu: &mut Cpu,
+    path: &str,
+    arguments: &str,
+    show: u16,
+    environment: Vec<String>,
+) -> Result<u16, u16> {
+    let name = if path.contains([' ', '\t']) {
+        format!("\"{}\"", path)
+    } else {
+        path.to_string()
+    };
+    let line = if arguments.is_empty() {
+        name
+    } else {
+        format!("{} {}", name, arguments)
+    };
+    let startup = crate::win32::kernel32::startup_showing(show);
+    let started = crate::win32::kernel32::spawn(
+        cpu,
+        Some(path),
+        Some(&line),
+        Some(environment),
+        false,
+        0,
+        startup,
+    );
+    match started {
+        Ok([process, thread, _, _]) => {
+            crate::win32::object::close(cpu, process);
+            crate::win32::object::close(cpu, thread);
+            Ok(33)
+        }
+        Err(code) => {
+            cpu.bus
+                .log_string(&format!("[W16] {} can't start: error {}", path, code));
+            Err(match code {
+                2 | 8 => code as u16,
+                _ => 11,
+            })
         }
     }
 }
@@ -963,6 +1016,7 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     ));
     cpu.bus.win32.win16.tasks[t].exit_code = Some(code);
     cpu.bus.win32.win16.tasks[t].frames.clear();
+    crate::win32::realmode::abandon(cpu);
     if task.module != 0 {
         cpu.bus.win32.win16.exit_code = code;
     }
@@ -1013,8 +1067,13 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
 }
 
 /// A fault in a task's code: as Windows 3.1's "Application Error", the
-/// task ends, the others go on.
-pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
+/// task ends, the others go on. CLI and STI, which fault at level 3 with
+/// IOPL 0, are the exception (`interrupt_flag`).
+pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
+    if vector == 13 && error == Some(0) && interrupt_flag(cpu, &mut ctx) {
+        crate::win32::system::load_context(cpu, &ctx);
+        return;
+    }
     let name = super::current_task(cpu)
         .map(|t| cpu.bus.win32.win16.tasks[t].module)
         .and_then(|m| super::module_index(cpu, m))
@@ -1039,4 +1098,27 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
     cpu.bus.log_string(&format!("[W16] {}", message));
     crate::win32::system::load_context(cpu, &ctx);
     exit(cpu, 0xFF);
+}
+
+/// Whether the instruction `ctx` faulted on is CLI or STI, which then
+/// goes on after it. Windows' VMM keeps a virtual interrupt flag for
+/// the protected-mode code of the system VM: CLI and STI change that
+/// flag, and the code goes on, as Windows 3.1 programs expect around
+/// their changes to the vector table or the BIOS data area. Both
+/// instructions are skipped here, with no virtual flag: the hardware
+/// interrupts go on to the real-mode handlers between a task's CLI and
+/// STI, where Windows would hold them back.
+fn interrupt_flag(cpu: &Cpu, ctx: &mut Context) -> bool {
+    let Some((base, _, attr)) = super::task_code(cpu, ctx) else {
+        return false;
+    };
+    let big = attr & crate::cpu::ATTR_DB != 0;
+    let eip = if big { ctx.eip } else { ctx.eip & 0xFFFF };
+    let is_cli_sti =
+        super::peek(cpu, base.wrapping_add(eip), 1).is_some_and(|b| matches!(b[0], 0xFA | 0xFB));
+    if is_cli_sti {
+        let next = eip.wrapping_add(1);
+        ctx.eip = if big { next } else { next & 0xFFFF };
+    }
+    is_cli_sti
 }

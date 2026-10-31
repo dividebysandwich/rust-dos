@@ -3,7 +3,7 @@
 
 mod cdimage;
 
-use cdimage::{IsoFile, file, iso, mixed_disc, mode1_2352, scratch};
+use cdimage::{IsoFile, file, high_sierra, iso, mixed_disc, mode1_2352, scratch};
 use rust_dos::cdrom::image::{CdImage, cue_files};
 use rust_dos::command::CommandDispatcher;
 use rust_dos::cpu::Cpu;
@@ -113,6 +113,21 @@ fn bin_cue_images_with_audio_tracks_mount() {
     let image = cpu.bus.disk.cd_image(D).unwrap();
     assert_eq!(image.tracks().len(), 2);
     assert!(image.tracks()[1].is_audio());
+}
+
+#[test]
+fn high_sierra_images_mount_as_cd_drives() {
+    // High Sierra, the format before ISO 9660, which MSCDEX and Windows
+    // 95 read too: as a bare image and as a BIN/CUE.
+    let (mut cpu, dir) = machine("high-sierra");
+    let big = pattern(5000);
+    fs::write(dir.join("old.iso"), high_sierra("TESTDISC", &files(&big))).unwrap();
+    mount(&mut cpu, &dir.join("old.iso"));
+    check_files(&mut cpu, &big);
+    let (mut cpu, dir) = machine("high-sierra-cue");
+    let cue = mixed_disc(&dir, &high_sierra("TESTDISC", &files(&big)), 10);
+    mount(&mut cpu, &cue);
+    check_files(&mut cpu, &big);
 }
 
 #[test]

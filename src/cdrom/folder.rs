@@ -692,7 +692,7 @@ mod tests {
         assert!(names.contains(&"Saved Games".to_string()));
         let cut = format!("{}~1.document", "x".repeat(64 - 2 - 9));
         assert!(names.contains(&cut), "{:?}", names);
-        assert!(iso9660::primary_descriptor(&image).is_ok());
+        assert!(iso9660::file_identifiers(&image).is_ok());
     }
 
     #[test]

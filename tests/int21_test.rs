@@ -419,3 +419,33 @@ fn raw_console_output_keeps_tabs() {
     assert_eq!(cell(&cpu, 8), b'B');
     assert_eq!(cpu.bus.cursor_x, 9);
 }
+
+/// MS-DOS 7 fails IOCTL subfunctions past 11h with error 1. Windows 98
+/// Setup's network detection takes a successful 44E0h for Sun PC-NFS and
+/// then asks for a PC-NFS network client (#318).
+#[test]
+fn ioctl_subfunctions_past_11h_are_invalid() {
+    let root_path = PathBuf::from("target/test_int21_ioctl_invalid");
+    let _ = fs::remove_dir_all(&root_path);
+    fs::create_dir_all(&root_path).unwrap();
+    let mut cpu = Cpu::new(root_path);
+    cpu.load_shell();
+
+    for ax in [0x44E0, 0x4452, 0x4412] {
+        cpu.set_ds(0x2000);
+        cpu.set_reg16(Register::DX, 0);
+        cpu.set_reg16(Register::BX, 0);
+        cpu.set_reg16(Register::AX, ax);
+        cpu.set_cpu_flag(CpuFlags::CF, false);
+        rust_dos::interrupts::int21::handle(&mut cpu);
+        assert!(cpu.get_cpu_flag(CpuFlags::CF), "AX={ax:04X} should fail");
+        assert_eq!(cpu.get_reg16(Register::AX), 0x0001, "AX={ax:04X}");
+    }
+
+    // 4400h on standard output still answers.
+    cpu.set_reg16(Register::AX, 0x4400);
+    cpu.set_reg16(Register::BX, 1);
+    rust_dos::interrupts::int21::handle(&mut cpu);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.get_reg16(Register::DX), 0x80D3);
+}

@@ -2,12 +2,13 @@
 //! a pixel format on a window's DC, make a context on the Voodoo3, draw
 //! with glBegin and glEnd and with vertex arrays (shaded, textured,
 //! depth tested), read the pixels back with glReadPixels and swap the
-//! buffers with GDI's SwapBuffers; and one on a machine without a
-//! Banshee or Voodoo3, which loads the DLL but has no pixel format. The
-//! programs are PE files made with rust-dos-pe's builder, their code
-//! assembled with iced, as in win32_d3d_tests.rs. Each leaves its
-//! results in its data and spins, and the test looks at them while the
-//! program is still there.
+//! buffers with GDI's SwapBuffers; one that draws full screen on a
+//! Voodoo2 beside the VGA; and one on a machine without a 3dfx card,
+//! which loads the DLL but has no pixel format. The programs are PE
+//! files made with rust-dos-pe's builder, their code assembled with
+//! iced, as in win32_d3d_tests.rs. Each leaves its results in its data
+//! and spins, and the test looks at them while the program is still
+//! there.
 
 use iced_x86::code_asm::*;
 use rust_dos::cpu::{Cpu, HostConsole};
@@ -154,18 +155,27 @@ fn program(
 /// A machine with the built-in Windows on, `program` loaded from the
 /// shell as T.EXE, and a Voodoo3 as its display adapter when `voodoo3`.
 fn machine(test: &str, voodoo3: bool, program: Vec<u8>) -> Cpu {
+    machine_with(test, voodoo3.then_some(Board::Voodoo3), program)
+}
+
+/// A machine with the built-in Windows on, `program` loaded from the
+/// shell as T.EXE, and the 3dfx card `card`: a Voodoo3 is the display
+/// adapter, a Voodoo2 a card beside the VGA.
+fn machine_with(test: &str, card: Option<Board>, program: Vec<u8>) -> Cpu {
     let base = PathBuf::from("target/test_win32_opengl").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
-    if voodoo3 {
+    if card == Some(Board::Voodoo3) {
         let setup = VideoSetup {
             adapter: Adapter::Voodoo3,
             mono_monitor: false,
         };
         rust_dos::video::bios::install(&mut cpu.bus, setup);
-        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+    }
+    if card.is_some() {
+        cpu.bus.configure_voodoo(card);
     }
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
@@ -684,7 +694,7 @@ fn vertex_arrays_draw_a_textured_depth_tested_quad() {
 }
 
 #[test]
-fn without_a_banshee_or_voodoo3_there_is_no_pixel_format() {
+fn without_a_3dfx_card_there_is_no_pixel_format() {
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
         start(a, l, &mut c)?;
@@ -696,6 +706,53 @@ fn without_a_banshee_or_voodoo3_there_is_no_pixel_format() {
     assert_ne!(r[1], 0, "DC");
     // No format to choose or set, no context.
     assert_eq!(r[2..5], [0, 0, 0]);
+}
+
+#[test]
+fn on_a_voodoo2_a_context_draws_full_screen_on_the_card() {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, GET_STRING, &[Arg::I(GL_RENDERER)])?;
+        let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &blue)?;
+        c.api(
+            a,
+            l,
+            CLEAR,
+            &[Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)],
+        )?;
+        // A red triangle over the bottom left half of the window.
+        c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(-1.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(1.0), Arg::F(-1.0)])?;
+        c.api(a, l, VERTEX2F, &[Arg::F(-1.0), Arg::F(1.0)])?;
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine_with("voodoo2", Some(Board::Voodoo2), exe);
+    run_until_done(&mut cpu, data);
+    let r: Vec<u32> = (0..18)
+        .map(|i| peek(&cpu, data + RESULTS + 4 * i))
+        .collect();
+    // 3dfx's Voodoo2 ICD: its double-buffered format for 32-bit color,
+    // a context, made current.
+    assert_eq!(r[2], 2, "the double-buffered pixel format");
+    assert_eq!(r[3], 1, "SetPixelFormat");
+    assert_ne!(r[4], 0, "wglCreateContext");
+    assert_eq!(r[5], 1, "wglMakeCurrent");
+    assert_eq!(peek_string(&cpu, r[6]), "3Dfx/Voodoo2/2 TMUs/4 MB");
+    assert_eq!(r[16], 1, "SwapBuffers");
+    assert_eq!(r[17], 0, "glGetError");
+    // The window is the top left of the card's screen, which is in its
+    // smallest mode, 512x384, and shows instead of the VGA's.
+    let v = cpu.bus.voodoo.as_ref().unwrap();
+    assert!(v.output(), "the card shows its picture");
+    assert_eq!((v.fbi.width, v.fbi.height), (512, 384));
+    assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
 }
 
 /// Upload a 2x2 texture of the RGBA texel `texel` as texture `name` (a

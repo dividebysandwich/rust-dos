@@ -45,6 +45,7 @@ mod ole32;
 mod oleaut32;
 mod opengl32;
 mod advpack;
+pub(crate) mod realmode;
 mod registry;
 mod screen;
 mod seh;
@@ -118,13 +119,16 @@ use memory::Memory;
 pub const TRAP: u8 = 0x3E;
 
 /// The ROM's part (offsets in segment F000): the start of a process, the
-/// return of the real-mode handler of a hardware interrupt, the end of a
-/// process (INT 21h AH=4Ch), and the IDT's 256 traps.
+/// return of real-mode code the system called (realmode.rs), the end of
+/// a process (INT 21h AH=4Ch), the Win16 tasks' real-mode callbacks
+/// (win16/dpmi.rs) and the IDT's 256 traps.
 pub(crate) const ROM_SEG: u16 = 0xF000;
 const ROM_BASE: usize = 0xF0000;
 const START: u16 = 0x3800;
-const IRQ_RETURN: u16 = 0x3804;
+const REAL_RETURN: u16 = 0x3804;
 const EXIT: u16 = 0x3808;
+pub(crate) const CALLBACKS: u16 = 0x380C;
+pub(crate) const CALLBACK_SLOTS: usize = 32;
 const IDT_TRAPS: u16 = 0x3C00;
 
 /// The traps' ids: the built-in DLLs' functions below `FIRST_MISSING`
@@ -134,8 +138,10 @@ const FIRST_MISSING: u16 = 0xE000;
 const MAX_MISSING: u32 = 0x1000;
 const FIRST_SYSTEM: u16 = 0xF000;
 const ID_IDT: u16 = 0xF100;
-const ID_IRQ_RETURN: u16 = 0xF200;
+const ID_REAL_RETURN: u16 = 0xF200;
 const ID_START: u16 = 0xF300;
+/// The callbacks' traps, the slot in the low byte.
+const ID_CALLBACK: u16 = 0xF400;
 
 /// The index of ESP in `Context::gpr`.
 const ESP: usize = 4;
@@ -241,6 +247,9 @@ pub struct Process {
     idle_event: Option<u32>,
     /// Its IMAGEHLP options.
     imagehlp: imagehlp::State,
+    /// The process that started it with CreateProcessA or WinExec, or 0
+    /// for the one DOS started.
+    pub(crate) parent: u32,
 }
 
 impl Process {
@@ -330,15 +339,20 @@ pub struct Win32 {
     /// The A20 gate and CR4 before the first program started.
     a20: bool,
     cr4: u32,
-    /// The program's context while the real-mode handler of a hardware
-    /// interrupt runs.
-    interrupted: Option<Context>,
+    /// The real-mode code the system called for the program and waits
+    /// for, the innermost last (realmode.rs).
+    real_mode: Vec<realmode::Frame>,
     /// The exit code of the program DOS started, which DOS gets when the
     /// last program ends.
     exit_code: u32,
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     slice_start: u64,
+    /// When the first timed wait of a thread ends, by the clock's
+    /// microseconds (`thread::schedule_waits`), so that a Sleep ends on
+    /// time rather than at the next interrupt. Worked out again after a
+    /// load.
+    pub(crate) wait_due: Option<u64>,
     /// How many times programs have called functions of the system's
     /// modules, built-in or missing (`service`), to tell whether a thread
     /// called anything between two polls.
@@ -443,9 +457,10 @@ impl Win32 {
     }
 
     /// When WinMM next has work to do (its timers, MIDI streams and MCI
-    /// devices), in PIT ticks, for the bus's timer events.
+    /// devices) or a thread's wait times out, in PIT ticks, for the bus's
+    /// timer events.
     pub fn next_event(&self) -> Option<u64> {
-        let micros = self.winmm.due?;
+        let micros = [self.winmm.due, self.wait_due].into_iter().flatten().min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -481,13 +496,31 @@ impl Win32 {
     }
 }
 
-/// WinMM's or the sound device's time for work came (`Win32::due`),
-/// between two instructions: the work is done, and if the program's code
-/// was running, a thread of a higher priority that it readied (the
-/// multimedia thread, whose callbacks ran at interrupt time on Windows
-/// 95) runs at once.
+/// WinMM's or the sound device's time for work came, or a thread's wait
+/// timed out (`Win32::due`), between two instructions: the work is done,
+/// and if the program's code was running, a thread of a higher priority
+/// that it readied (the multimedia thread, whose callbacks ran at
+/// interrupt time on Windows 95) or one whose wait timed out runs at
+/// once (`thread::preempt`).
 pub fn timer(cpu: &mut Cpu) {
+    // A wait that ended before its time out (its object was signaled)
+    // leaves its event behind: with nothing else due it does nothing, as
+    // in a machine loaded from a state, which has no such event.
+    let now = cpu.bus.clock.now_micros();
+    let ticks = cpu.bus.clock.now_ticks();
+    let w = &cpu.bus.win32;
+    let others = w.winmm.due.is_some_and(|d| d <= now)
+        || [w.dsound.due, w.winmm.wave.due]
+            .into_iter()
+            .flatten()
+            .any(|t| t <= ticks);
+    if !others && thread::wait_due(w, 0).is_none_or(|d| d > now) {
+        cpu.bus.win32.wait_due = thread::wait_due(&cpu.bus.win32, now);
+        cpu.bus.reschedule_timers();
+        return;
+    }
     cpu.bus.win32.winmm.due = None;
+    cpu.bus.win32.wait_due = None;
     if !cpu.bus.win32.active() {
         cpu.bus.win32.dsound.due = None;
         cpu.bus.win32.winmm.wave.due = None;
@@ -497,7 +530,7 @@ pub fn timer(cpu: &mut Cpu) {
     let in_program = cpu.pe()
         && !cpu.v86()
         && cpu.cpl == 3
-        && cpu.bus.win32.interrupted.is_none()
+        && !realmode::waiting(cpu)
         && running(cpu).is_some_and(|p| p.current.is_some());
     if in_program {
         thread::preempt(cpu);
@@ -505,6 +538,10 @@ pub fn timer(cpu: &mut Cpu) {
         winmm::tick(cpu);
         dsound::tick(cpu);
     }
+    // The first timed wait's end; winmm::schedule reschedules the bus's
+    // timer events for it and WinMM's own.
+    let now = cpu.bus.clock.now_micros();
+    cpu.bus.win32.wait_due = thread::wait_due(&cpu.bus.win32, now);
     winmm::schedule(cpu);
 }
 
@@ -540,7 +577,11 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
     };
     let at = |offset: u16| ROM_BASE + offset as usize;
     bus.write_rom(at(START), &trap(ID_START));
-    bus.write_rom(at(IRQ_RETURN), &trap(ID_IRQ_RETURN));
+    bus.write_rom(at(REAL_RETURN), &trap(ID_REAL_RETURN));
+    let callbacks: Vec<u8> = (0..CALLBACK_SLOTS as u16)
+        .flat_map(|slot| trap(ID_CALLBACK | slot))
+        .collect();
+    bus.write_rom(at(CALLBACKS), &callbacks);
     // INT 21h; and should DOS come back, again.
     bus.write_rom(at(EXIT), &[0xCD, 0x21, 0xEB, 0xFC]);
     let idt: Vec<u8> = (0..=255).flat_map(|v| trap(system::idt_id(v))).collect();
@@ -566,11 +607,7 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
             Some((engine, arguments)) => (engine, Some(arguments), false),
             // OS/2 programs, Borland's DPMI16 (RTM) ones among them, and
             // files that don't parse run their DOS stub as before.
-            None if rust_dos_ne::Module::parse(bytes)
-                .is_ok_and(|m| m.target_os != rust_dos_ne::OS_OS2) =>
-            {
-                (launcher, None, true)
-            }
+            None if launcher::is_win16(bytes) => (launcher, None, true),
             None => return false,
         }
     } else {
@@ -610,7 +647,10 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
         }
         return match id {
             ID_START => !cpu.pe() && win32.pending.is_some() && !win32.active(),
-            ID_IRQ_RETURN => !cpu.pe() && win32.interrupted.is_some(),
+            ID_REAL_RETURN => !cpu.pe() && realmode::in_call(cpu),
+            _ if id & 0xFF00 == ID_CALLBACK => {
+                !cpu.pe() && crate::win16::dpmi::has_callback(cpu, id as u8 as usize)
+            }
             _ => id & 0xFF00 == ID_IDT && cpu.pm() && cpu.cpl == 0 && win32.active(),
         };
     }
@@ -624,7 +664,8 @@ pub fn accepts(cpu: &Cpu, phys_ip: usize, id: u16) -> bool {
 pub fn service(cpu: &mut Cpu, id: u16) {
     match id {
         ID_START => start(cpu),
-        ID_IRQ_RETURN => system::irq_return(cpu),
+        ID_REAL_RETURN => realmode::returned(cpu),
+        _ if id & 0xFF00 == ID_CALLBACK => crate::win16::dpmi::callback(cpu, id as u8 as usize),
         _ if id & 0xFF00 == ID_IDT => system::idt(cpu, id as u8),
         // The rest are calls: of built-in functions, or of functions the
         // built-in Windows doesn't have.
@@ -1226,7 +1267,8 @@ pub fn import_registry(cpu: &mut Cpu, text: &str) -> Result<(), String> {
 pub fn trap_name(id: u16) -> String {
     match id {
         ID_START => "Win32 start".to_string(),
-        ID_IRQ_RETURN => "Win32 IRQ return".to_string(),
+        ID_REAL_RETURN => "Win32 real-mode return".to_string(),
+        _ if id & 0xFF00 == ID_CALLBACK => format!("Win16 real-mode callback {}", id as u8),
         _ if id & 0xFF00 == ID_IDT => format!("Win32 IDT {:02X}h", id as u8),
         _ if id >= FIRST_MISSING => format!("Win32 missing function {}", id - FIRST_MISSING),
         _ => format!(
@@ -1284,6 +1326,7 @@ crate::state_fields!(Process {
     lz_files,
     idle_event,
     imagehlp,
+    parent,
 });
 crate::state_fields!(Win32 {
     pending,
@@ -1295,7 +1338,7 @@ crate::state_fields!(Win32 {
     rm_stack,
     a20,
     cr4,
-    interrupted,
+    real_mode,
     exit_code,
     slice_start,
     calls,
@@ -1331,4 +1374,14 @@ crate::state_fields!(Win32 {
     desktop_depth,
     atoms,
     desktop_size,
-} skip { enabled, guest_dlls, guest_replace, version, depth, pending_arguments, dll_files, trace });
+} skip {
+    enabled,
+    guest_dlls,
+    guest_replace,
+    version,
+    depth,
+    pending_arguments,
+    dll_files,
+    trace,
+    wait_due,
+});

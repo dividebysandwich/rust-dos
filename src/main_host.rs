@@ -290,7 +290,15 @@ impl MainHost<'_, '_> {
             })?;
             savestate::media::relocate(media, folders).map_err(failed)?;
         }
-        let mut differences = slots::machine_differences(&header.machine, &self.machine.settings(self.settings));
+        // Outside deterministic mode a load keeps the speed this machine
+        // runs at (see `load_state`), so the state's isn't compared. In
+        // the mode the load brings it, and it is.
+        let mut compared = self.settings.clone();
+        if self.deterministic.is_none() {
+            compared.cycles = slots::machine_settings(&header.machine, self.settings).cycles;
+        }
+        let this_machine = self.machine.settings(&compared);
+        let mut differences = slots::machine_differences(&header.machine, &this_machine);
         // The machine's clock is the mode's start plus emulated time.
         let start = self.deterministic.map(|start| start.format("%Y-%m-%d %H:%M:%S").to_string());
         differences.extend(slots::mode_difference(header.deterministic.as_deref(), start.as_deref()));
@@ -355,6 +363,14 @@ impl MainHost<'_, '_> {
         let mut hardware = slots::machine_settings(&header.machine, self.settings);
         // The memory the state has, which it brings (bus/state.rs).
         hardware.memsize = header.memsize;
+        // The speed isn't the machine's hardware: outside deterministic
+        // mode the machine goes on at the speed it runs at (`--cycles`,
+        // the configuration's, the last one the window or /api/speed set).
+        if self.deterministic.is_none() {
+            hardware.cycles = self.settings.cycles;
+        }
+        // What `max` had tuned the speed to on this host.
+        let rate = self.cpu.bus.clock.cycles_per_ms();
         // A failed `machine::load` puts the machine back by itself; the
         // machine from before is needed only when the hardware changes.
         let changes = hardware != old_settings || self.machine.differs(&hardware);
@@ -390,6 +406,16 @@ impl MainHost<'_, '_> {
             if self.settings.cycles != speed {
                 self.settings.cycles = speed;
                 self.pacer.set_speed(speed);
+            }
+        } else {
+            // The clock came back with the state's rate. A fixed speed
+            // and `max` go on at the rate they had; `auto` starts its
+            // search over from the state's, the rate it had found for the
+            // program at that point (or the one the state was saved at).
+            match self.settings.cycles {
+                CpuSpeed::Fixed(n) => self.cpu.bus.set_cycles_per_ms(n),
+                CpuSpeed::Max => self.cpu.bus.set_cycles_per_ms(rate),
+                CpuSpeed::Auto(_) => {}
             }
         }
         // The state's time stamp counter goes on at this machine's speed.

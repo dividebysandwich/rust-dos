@@ -1707,16 +1707,169 @@ fn directdraw_draws_and_flips_on_a_voodoo2() {
     draws_on_the_card("card_v2", Board::Voodoo2);
 }
 
+const S_ADD_ATTACHED_SURFACE: u32 = 3;
+
+/// The program that sets a mode on the card, makes a plain primary
+/// surface and a back buffer on its own (as Glover does), attaches the
+/// back buffer to the primary, fills a square of it with the card,
+/// reads the square back and writes a pixel through Lock, and flips.
+fn card_attached_back_buffer_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    desc(
+        &mut d,
+        ZDESC,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        DDSCAPS_BACKBUFFER | DDSCAPS_3DDEVICE,
+        640,
+        480,
+        0,
+    );
+    put32(&mut d, LOCKED, 108);
+    put32(&mut d, LOCK2, 108);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, 0x001F);
+    for (i, v) in [10, 10, 20, 20].iter().enumerate() {
+        put32(&mut d, RECT_FILL + 4 * i as u32, *v);
+    }
+    program(&[USER32, GDI32, DDRAW_CARD], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        device_callback(a, l)?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(64),
+                Arg::I(64),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_ENUMERATE,
+            &[Arg::Val(CALLBACKS), Arg::I(0)],
+        )?;
+        c.api(
+            a,
+            l,
+            DIRECT_DRAW_CREATE,
+            &[Arg::At(DEVICE_GUID), Arg::At(DD), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(640), Arg::I(480), Arg::I(16)],
+        )?;
+        for (desc_at, out) in [(DESC, FRONT), (ZDESC, BACK)] {
+            c.com(
+                a,
+                l,
+                DD,
+                DD_CREATE_SURFACE,
+                &[Arg::At(desc_at), Arg::At(out), Arg::I(0)],
+            )?;
+        }
+        c.com(a, l, FRONT, S_ADD_ATTACHED_SURFACE, &[Arg::Val(BACK)])?;
+        c.com(
+            a,
+            l,
+            BACK,
+            S_BLT,
+            &[
+                Arg::At(RECT_FILL),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+                Arg::At(FX),
+            ],
+        )?;
+        let lock = |a: &mut CodeAssembler, c: &mut Calls, surface, desc_at| {
+            c.com(
+                a,
+                l,
+                surface,
+                S_LOCK,
+                &[Arg::I(0), Arg::At(desc_at), Arg::I(1), Arg::I(0)],
+            )?;
+            a.mov(edi, dword_ptr(l.at(desc_at + 0x24)))?;
+            a.mov(esi, dword_ptr(l.at(desc_at + 0x10)))
+        };
+        // The square at (15, 15) through the pitch Lock gave, then red
+        // at the start of the second row.
+        lock(a, &mut c, BACK, LOCKED)?;
+        see(a, l, LOCKED + 0x10, 1)?;
+        a.imul_3(eax, esi, 15)?;
+        a.mov(eax, dword_ptr(edi + eax + 30))?;
+        a.mov(dword_ptr(l.at(SEEN + 8)), eax)?;
+        a.mov(word_ptr(edi + esi), 0xF800)?;
+        c.com(a, l, BACK, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, FRONT, S_FLIP, &[Arg::I(0), Arg::I(DDFLIP_WAIT)])?;
+        // The front buffer now, and what GetSurfaceDesc says of the
+        // back buffer.
+        lock(a, &mut c, FRONT, LOCKED)?;
+        a.mov(eax, dword_ptr(edi + esi))?;
+        a.mov(dword_ptr(l.at(SEEN + 12)), eax)?;
+        a.imul_3(eax, esi, 15)?;
+        a.mov(eax, dword_ptr(edi + eax + 30))?;
+        a.mov(dword_ptr(l.at(SEEN + 16)), eax)?;
+        c.com(a, l, FRONT, S_UNLOCK, &[Arg::I(0)])?;
+        c.com(a, l, BACK, S_GET_SURFACE_DESC, &[Arg::At(LOCK2)])?;
+        see(a, l, LOCK2 + 0x10, 5)?;
+        finish(a, l, 1)
+    })
+}
+
+/// Glover's loading screen on a Voodoo2: a back buffer made on its own
+/// and attached to the primary surface is the card's back buffer, so
+/// its rows are the linear frame buffer's, 2048 bytes apart, as the
+/// primary's and the Z buffer's are. With the 1280 bytes of a 640-pixel
+/// surface in memory, the picture Glover wrote row by row came out
+/// squeezed into the top 300 lines.
 #[test]
-fn the_desktop_is_packed_24_bits_on_a_virge() {
-    let (program, data) = desktop_program();
-    let base = PathBuf::from("target/test_win32_screen").join("desktop_virge");
+fn a_back_buffer_attached_on_a_voodoo2_has_the_cards_pitch() {
+    let (program, data) = card_attached_back_buffer_program();
+    let mut cpu = card_machine("card_attached_back", Some(Board::Voodoo2), program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 15);
+    assert_eq!(r[1..15], [0; 14], "{r:X?}");
+    let s = |slot| seen(&cpu, data, slot);
+    assert_eq!(s(1), 2048, "the pitch Lock gives");
+    assert_eq!(s(2), 0x001F_001F, "the card's fill read back");
+    assert_eq!(s(3) & 0xFFFF, 0xF800, "the second row shown");
+    assert_eq!(s(4), 0x001F_001F, "the fill shown");
+    assert_eq!(s(5), 2048, "the pitch GetSurfaceDesc gives");
+}
+
+/// A machine with the VESA adapter `adapter`, the program loaded.
+fn vesa_machine(test: &str, adapter: Adapter, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_screen").join(test);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     fs::write(base.join("T.EXE"), program).unwrap();
     let mut cpu = Cpu::new(base);
     let setup = VideoSetup {
-        adapter: Adapter::S3Virge,
+        adapter,
         ..Default::default()
     };
     bios::install(&mut cpu.bus, setup);
@@ -1724,6 +1877,13 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+#[test]
+fn the_desktop_is_packed_24_bits_on_a_virge() {
+    let (program, data) = desktop_program();
+    let mut cpu = vesa_machine("desktop_virge", Adapter::S3Virge, program);
     run_until(&mut cpu, data, 1);
     let r = results(&cpu, data, 8);
     assert_eq!(r[1], 0, "DirectDrawCreate");
@@ -1737,6 +1897,31 @@ fn the_desktop_is_packed_24_bits_on_a_virge() {
     let mode = |o: u32| peek(&cpu, data + MODE + o);
     assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 1920));
     assert_eq!(mode(0x48 + 12), 24);
+}
+
+/// With win32_depth=16 the desktop on an S3 Trio is High Color, 5-6-5,
+/// as a program that asks for 16 bits, such as Moto Racer, needs.
+#[test]
+fn a_high_color_desktop_on_an_s3_has_16_bits() {
+    let (program, data) = desktop_program();
+    let mut cpu = vesa_machine("desktop_16", Adapter::S3, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::HighColor;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 8);
+    assert_eq!(r[1], 0, "DirectDrawCreate");
+    assert_eq!(r[3], 16, "GetDeviceCaps(BITSPIXEL)");
+    assert_eq!(r[6], 0x0010_3452, "GetPixel, 5-6-5 widened");
+    assert_eq!(r[7], 0, "GetDisplayMode");
+    let at = 200 * 1280 + 301 * 2;
+    assert_eq!(cpu.bus.vbe.vram[at..at + 2], [0xA2, 0x51]);
+    assert_eq!(shown(&mut cpu, 300, 200), [0xFF, 0, 0]);
+    let mode = |o: u32| peek(&cpu, data + MODE + o);
+    assert_eq!((mode(0x0C), mode(0x08), mode(0x10)), (640, 480, 1280));
+    assert_eq!(mode(0x48 + 12), 16);
+    assert_eq!(
+        (mode(0x48 + 16), mode(0x48 + 20), mode(0x48 + 24)),
+        (0xF800, 0x07E0, 0x001F)
+    );
 }
 
 // DirectPlay, with no service provider it can use: objects are made,

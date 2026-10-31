@@ -152,6 +152,9 @@ pub struct Config {
     pub voodoo_scale_shader: Option<bool>,
     /// Whether OpenGL dithers as the card does (`voodoo_dither`).
     pub voodoo_dither: Option<bool>,
+    /// Whether reads of the buffers get OpenGL's pictures of them
+    /// (`voodoo_readback`).
+    pub voodoo_readback_gpu: Option<bool>,
     pub voodoo_msaa: Option<u32>,
     pub voodoo_anisotropy: Option<u32>,
     pub voodoo_fps_cap: Option<u32>,

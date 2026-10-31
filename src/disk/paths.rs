@@ -51,9 +51,13 @@ impl DiskController {
     }
 
     /// The path `rest` names on a drive held in memory, as `MemFs` keeps
-    /// paths.
+    /// paths: in DOS names, where `rest` may have long ones.
     pub(super) fn memory_path(drive: &Drive, rest: &str) -> String {
-        Self::logical_components(drive, rest).join("\\").to_ascii_uppercase()
+        let components = Self::logical_components(drive, rest);
+        match drive.tree() {
+            Some(files) => files.resolve(&components),
+            None => components.join("\\").to_ascii_uppercase(),
+        }
     }
 
     /// Resolves a DOS path (e.g., "GAMES\DOOM.EXE", "..\FILE.TXT" or
@@ -65,9 +69,7 @@ impl DiskController {
 
     /// Like `resolve_path`, but also returns the drive the path is on.
     pub(crate) fn locate(&self, dos_path: &str) -> Option<(u8, PathBuf)> {
-        let path_str = dos_path.replace('/', "\\");
-        let (drive, rest) = self.split_drive(&path_str)?;
-        self.resolve_on(drive, rest).map(|p| (drive, p))
+        self.locate_found(dos_path).map(|(drive, path, _)| (drive, path))
     }
 
     pub(super) fn resolve_on(&self, drive_num: u8, rest: &str) -> Option<PathBuf> {
@@ -77,6 +79,16 @@ impl DiskController {
     /// The host path of `rest` on a host drive, and its DOS path from the
     /// root in short names (e.g. "GAMES\DAYOFT~1").
     pub(super) fn resolve_names_on(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String)> {
+        self.walk_host(drive_num, rest).map(|(path, dos, _)| (path, dos))
+    }
+
+    /// `resolve_names_on`, and whether a component of the path isn't
+    /// among its folder's entries (`find_host_entry`): the path names
+    /// nothing on the host then, which needs no stat to tell. Each
+    /// component is the entry's long name, or, where it matches nothing,
+    /// the name uppercased, for creating it. A name the entries can't rule
+    /// out (`entries_settle`) is never missing.
+    fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
         // first (`locate_in_memory`).
@@ -86,28 +98,78 @@ impl DiskController {
         // logical_components can't climb above the root.
         let mut full_path = root.to_path_buf();
         let mut dos_path: Vec<String> = Vec::new();
+        let mut missing = false;
+        // Below a name the entries can't rule out, the folders read may
+        // not be the ones the host has there, so they rule out nothing.
+        // Nor does a folder that reads as empty: one the host can't list
+        // reads so too (`read_host_entries`), though it may open names in
+        // it.
+        let mut sure = true;
         for part in Self::logical_components(drive, rest) {
-            let (host_name, dos_name) = self.find_host_child(&full_path, part);
+            let (entries, found) = self.find_host_entry(&full_path, part);
+            if found.is_none() && sure {
+                if Self::entries_settle(part) && !entries.is_empty() {
+                    missing = true;
+                } else {
+                    sure = false;
+                }
+            }
+            let (host_name, dos_name) = found.unwrap_or_else(|| {
+                let upper = part.to_ascii_uppercase();
+                (upper.clone(), upper)
+            });
             full_path.push(host_name);
             dos_path.push(dos_name);
         }
 
         // Final Security Check
         if full_path.starts_with(root) {
-            Some((full_path, dos_path.join("\\")))
+            Some((full_path, dos_path.join("\\"), missing))
         } else {
             None
         }
     }
 
-    /// The names of the entries of the directory `dos_dir` on a host
-    /// drive, as (host name, DOS name): the host's are the long names
-    /// Windows has. None on other drives, where names are 8.3 alone, and
+    /// Whether a folder's entries settle that the path component `part`
+    /// isn't in it when none matches it. They leave out names starting
+    /// with a dot, and the host may know a name by a spelling they don't
+    /// match: Windows drops a dot that ends it ("README." is "README"),
+    /// has short names of its own (with a "~"), and Windows and macOS fold
+    /// the case of letters beyond ASCII. Such names go to the host.
+    fn entries_settle(part: &str) -> bool {
+        !part.starts_with('.') && !part.ends_with('.') && !part.contains('~') && part.is_ascii()
+    }
+
+    /// `locate`, and whether a component of the path isn't among its
+    /// folder's entries (`walk_host`), so that the path names nothing on
+    /// the host. Where each is, a stat tells whether the path names a file
+    /// or a folder.
+    pub(super) fn locate_found(&self, dos_path: &str) -> Option<(u8, PathBuf, bool)> {
+        let path_str = dos_path.replace('/', "\\");
+        let (drive, rest) = self.split_drive(&path_str)?;
+        let (path, _, missing) = self.walk_host(drive, rest)?;
+        Some((drive, path, missing))
+    }
+
+    /// The host path of a DOS path, None where it names nothing on the
+    /// host (`locate_found`).
+    fn resolve_found(&self, dos_path: &str) -> Option<PathBuf> {
+        self.locate_found(dos_path).filter(|(_, _, missing)| !missing).map(|(_, path, _)| path)
+    }
+
+    /// The names of the entries of the directory `dos_dir`, as (long
+    /// name, DOS name), on a host drive and on a drive held in memory: the
+    /// host's names are the long names Windows has, and so are a CD's
+    /// Joliet names. None on disk images, where names are 8.3 alone, and
     /// for a directory that isn't there.
     pub fn long_names(&self, dos_dir: &str) -> Option<Vec<(String, String)>> {
         let normalized = dos_dir.replace('/', "\\");
         let (drive_num, rest) = self.split_drive(&normalized)?;
         let drive = self.drive(drive_num)?;
+        if let Some(files) = drive.tree() {
+            let dir = Self::memory_path(drive, rest);
+            return files.is_dir(&dir).then(|| files.long_names(&dir));
+        }
         drive.host_root()?;
         let rest = if rest.is_empty() { "." } else { rest };
         let dir = self.resolve_on(drive_num, rest)?;
@@ -211,7 +273,8 @@ impl DiskController {
         if let Some(found) = self.find_fat(dos_path) {
             return found.is_ok_and(|e| !e.is_dir());
         }
-        self.is_virtual_file(dos_path) || self.resolve_path(dos_path).is_some_and(|p| hostfs::is_file(&p))
+        self.is_virtual_file(dos_path)
+            || self.resolve_found(dos_path).is_some_and(|p| hostfs::is_file(&p))
     }
 
     /// Whether a DOS path names a directory the drive has.
@@ -221,7 +284,7 @@ impl DiskController {
         }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => drive.tree().is_some_and(|files| files.is_dir(&path)),
-            None => self.resolve_path(dos_path).is_some_and(|p| hostfs::is_dir(&p)),
+            None => self.resolve_found(dos_path).is_some_and(|p| hostfs::is_dir(&p)),
         }
     }
 
@@ -242,7 +305,7 @@ impl DiskController {
         }
         match self.locate_in_memory(dos_path) {
             Some((_, drive, path)) => FileData::of(drive.tree()?.file(&path)?, drive.image()),
-            None => self.resolve_path(dos_path).filter(|p| hostfs::is_file(p)).map(FileData::Host),
+            None => self.resolve_found(dos_path).filter(|p| hostfs::is_file(p)).map(FileData::Host),
         }
     }
 
@@ -265,16 +328,6 @@ impl DiskController {
         names.sort_by_key(|name| name.to_ascii_uppercase());
         let short = short_names(&names);
         names.into_iter().zip(short).collect()
-    }
-
-    /// The host name and the DOS name of the entry of `dir` that a DOS path
-    /// component names: its long name in any case, or its short name. A
-    /// name that matches nothing comes back uppercased, for creating it.
-    fn find_host_child(&self, dir: &Path, target: &str) -> (String, String) {
-        self.find_host_entry(dir, target).1.unwrap_or_else(|| {
-            let upper = target.to_ascii_uppercase();
-            (upper.clone(), upper)
-        })
     }
 
     /// The entries of the host folder `dir`, and the one named `name`: by

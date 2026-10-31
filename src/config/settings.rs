@@ -298,6 +298,9 @@ impl Settings {
                 fps_cap: config.voodoo_fps_cap.map_or(default.voodoo.fps_cap, |n| (n > 0).then_some(n)),
                 gamma: config.voodoo_gamma.unwrap_or(default.voodoo.gamma),
                 dither: config.voodoo_dither.unwrap_or(default.voodoo.dither),
+                gpu_reads: config
+                    .voodoo_readback_gpu
+                    .unwrap_or(default.voodoo.gpu_reads),
             },
             powervr: config.powervr.unwrap_or(default.powervr),
             powervr_filter: config.powervr_filter.unwrap_or(default.powervr_filter),
@@ -394,6 +397,11 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "voodoo_scale", Some(settings.voodoo.scale.to_string())),
         (Emulator, "voodoo_scale_shader", yes_no(settings.voodoo.scale_shader)),
         (Emulator, "voodoo_dither", yes_no(settings.voodoo.dither)),
+        (
+            Emulator,
+            "voodoo_readback",
+            Some(if settings.voodoo.gpu_reads { "gpu" } else { "exact" }.to_string()),
+        ),
         (Emulator, "voodoo_msaa", Some(match settings.voodoo.msaa {
             1 => "off".to_string(),
             n => n.to_string(),

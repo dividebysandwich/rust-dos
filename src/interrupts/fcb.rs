@@ -207,11 +207,11 @@ pub fn find(cpu: &mut Cpu, first: bool) {
     let drive = fcb_drive(cpu, fcb);
     let result = if cpu.bus.disk.is_mounted(drive) {
         let pattern = format!("{}:{}", drive_letter(drive), name);
-        cpu.bus.disk.find_directory_entry(&pattern, index, attr)
+        cpu.bus.disk.find_entry_from(&pattern, index, attr)
     } else {
         Err(0x0F)
     };
-    let Ok(entry) = result else {
+    let Ok((entry, next)) = result else {
         cpu.set_reg8(Register::AL, 0xFF);
         return;
     };
@@ -230,7 +230,7 @@ pub fn find(cpu: &mut Cpu, first: bool) {
     dir_entry[0x18..0x1A].copy_from_slice(&entry.dos_date.to_le_bytes());
     dir_entry[0x1C..0x20].copy_from_slice(&entry.size.to_le_bytes());
     cpu.bus.guest_write_bytes(out + 1, &dir_entry);
-    cpu.bus.guest_write_16(fcb + 0x0C, (index + 1) as u16);
+    cpu.bus.guest_write_16(fcb + 0x0C, next as u16);
 }
 
 /// Where the file functions keep the DOS handle of an FCB's open file:

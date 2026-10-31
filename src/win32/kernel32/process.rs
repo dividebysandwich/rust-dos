@@ -7,14 +7,17 @@ use crate::cpu::Cpu;
 use crate::win32::memory::{PAGE, PRIVATE, SYSTEM};
 use crate::win32::object;
 use crate::win32::task::{self, Next, Task};
-use crate::win32::{create_process, process};
+use crate::win32::{create_process_from, launcher, process};
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_BAD_EXE_FORMAT: u32 = 193;
 const ERROR_NOACCESS: u32 = 998;
 
 const CREATE_SUSPENDED: u32 = 4;
+const STARTF_USESHOWWINDOW: u32 = 1;
 const STARTF_USESTDHANDLES: u32 = 0x100;
+const SW_SHOWNORMAL: u16 = 1;
 
 /// STARTUPINFOA's size and fields.
 pub(crate) const STARTUPINFO_SIZE: u32 = 68;
@@ -22,6 +25,7 @@ const SI_RESERVED: u32 = 4;
 const SI_DESKTOP: u32 = 8;
 const SI_TITLE: u32 = 12;
 const SI_FLAGS: u32 = 44;
+const SI_SHOW_WINDOW: u32 = 48;
 const SI_CB_RESERVED2: u32 = 50;
 const SI_RESERVED2: u32 = 52;
 const SI_STD_INPUT: u32 = 56;
@@ -90,10 +94,11 @@ pub(super) fn program_in_line<'a>(cpu: &mut Cpu, line: &'a str) -> Option<Progra
 }
 
 /// The DOS path of the program `name`, with ".EXE" added if it has no
-/// extension: there if it has a directory in it, else where SearchPathA
-/// looks (the running program's directory, the current one, the system
-/// and Windows directories, then PATH). A directory isn't a program, so
-/// a name that is one isn't found.
+/// extension: there if it starts with a drive, a backslash, ".\" or
+/// "..\", else where SearchPathA looks (the running program's directory,
+/// the current one, the system and Windows directories, then PATH), also
+/// for a relative path such as DISK1\SETUP.EXE. A directory isn't a
+/// program, so a name that is one isn't found.
 fn find_program(cpu: &mut Cpu, name: &str) -> Option<String> {
     let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let name = if file.contains('.') {
@@ -201,21 +206,44 @@ pub(crate) fn spawn(
     flags: u32,
     mut startup: Vec<u8>,
 ) -> Result<[u32; 4], u32> {
-    let (path, line) = match (app, line) {
+    // The program, its command line and the arguments in that.
+    let (path, line, arguments) = match (app, line) {
         // Given the program, Windows passes the line on as it is.
         (Some(app), line) => {
             let path = find_program(cpu, app).ok_or(ERROR_FILE_NOT_FOUND)?;
+            let arguments = line.map_or("", arguments_in);
             let line = line.map_or_else(|| path.clone(), str::to_string);
-            (path, line)
+            (path, line, arguments)
         }
         (None, Some(line)) => {
             let found = program_in_line(cpu, line).ok_or(ERROR_FILE_NOT_FOUND)?;
-            let line = found.command_line(line);
-            (found.path, line)
+            let command_line = found.command_line(line);
+            (found.path, command_line, found.args)
         }
         (None, None) => return Err(ERROR_INVALID_PARAMETER),
     };
     let environment = environment.unwrap_or_else(|| process(cpu).environment.clone());
+    let file = cpu.read_program_file(&path).ok_or(ERROR_FILE_NOT_FOUND)?;
+    if launcher::is_ne(&file) {
+        // InstallShield's setup launcher starts its 32-bit engine in its
+        // place, as from the DOS prompt (`launcher`). Windows 98's waits
+        // for the engine before it ends, so what waits for the launcher
+        // waits for the engine here.
+        if let Some((engine, engine_arguments)) = launcher::engine(cpu, &path, &file) {
+            let line = format!("{} {}", engine, engine_arguments);
+            let environment = Some(environment);
+            return spawn(
+                cpu,
+                Some(&engine),
+                Some(&line),
+                environment,
+                inherit,
+                flags,
+                startup,
+            );
+        }
+        return spawn_win16(cpu, &path, &file, arguments, environment, &startup);
+    }
     let fields = startup.clone();
     let field = |i: u32| u32::from_le_bytes(fields[i as usize..][..4].try_into().unwrap());
     // The child's own copy: no strings or data of the parent's, and the
@@ -252,10 +280,11 @@ pub(crate) fn spawn(
     };
     let std = std.filter(|ids| ids.iter().all(|&id| object::objects(cpu).get(id).is_some()));
     let suspended = flags & CREATE_SUSPENDED != 0;
-    let created = create_process(
+    let created = create_process_from(
         cpu,
         &path,
         &line,
+        &file,
         environment,
         inherited,
         std,
@@ -266,14 +295,96 @@ pub(crate) fn spawn(
         cpu.bus.log_string(&format!("[W32] {}", message));
         ERROR_BAD_EXE_FORMAT
     })?;
-    let (process_object, pid) = created.process;
-    let (thread_object, tid) = created.thread;
+    let parent = process(cpu).id;
+    set_parent(cpu, created.process.1, parent);
+    Ok(handles(cpu, created.process, created.thread))
+}
+
+/// Who started the process `pid`: a program the foreground one starts may
+/// bring its windows to the foreground (user32::input).
+fn set_parent(cpu: &mut Cpu, pid: u32, parent: u32) {
+    if let Some(p) = cpu.bus.win32.processes.iter_mut().find(|p| p.id == pid) {
+        p.parent = parent;
+    }
+}
+
+/// The caller's handles of the process and the thread whose objects and
+/// ids `process` and `thread` are, and the ids: what CreateProcessA
+/// gives.
+fn handles(cpu: &mut Cpu, process: (u32, u32), thread: (u32, u32)) -> [u32; 4] {
     let objects = object::objects(cpu);
-    objects.hold(process_object);
-    objects.hold(thread_object);
-    let process_handle = object::new_handle(cpu, process_object);
-    let thread_handle = object::new_handle(cpu, thread_object);
-    Ok([process_handle, thread_handle, pid, tid])
+    objects.hold(process.0);
+    objects.hold(thread.0);
+    let process_handle = object::new_handle(cpu, process.0);
+    let thread_handle = object::new_handle(cpu, thread.0);
+    [process_handle, thread_handle, process.1, thread.1]
+}
+
+/// The arguments in the command line `line`: what follows the program's
+/// name, which comes first, in quotes or up to a space or tab.
+fn arguments_in(line: &str) -> &str {
+    let line = line.trim_start();
+    match line.strip_prefix('"') {
+        Some(rest) => rest.split_once('"').map_or("", |(_, args)| args),
+        None => line.find([' ', '\t']).map_or("", |at| &line[at..]),
+    }
+}
+
+/// `spawn` for the Windows 3.1 program at `path`, its file `file`, with
+/// the command line's `arguments`. Windows 98 runs it as a task of the
+/// shared 16-bit system, and CreateProcessA gives handles of the task's
+/// own process and thread: the process is signaled when the task ends,
+/// and GetExitCodeProcess gives the task's exit code. The task's window
+/// is shown as `startup` says, or SW_SHOWNORMAL. An OS/2 program, which
+/// isn't one for Windows, can't start.
+fn spawn_win16(
+    cpu: &mut Cpu,
+    path: &str,
+    file: &[u8],
+    arguments: &str,
+    environment: Vec<String>,
+    startup: &[u8],
+) -> Result<[u32; 4], u32> {
+    if !launcher::is_win16(file) {
+        cpu.bus
+            .log_string(&format!("[W32] {} isn't a Windows program", path));
+        return Err(ERROR_BAD_EXE_FORMAT);
+    }
+    let field = |i: u32| &startup[i as usize..];
+    let flags = u32::from_le_bytes(field(SI_FLAGS)[..4].try_into().unwrap());
+    let show = if flags & STARTF_USESHOWWINDOW != 0 {
+        u16::from_le_bytes(field(SI_SHOW_WINDOW)[..2].try_into().unwrap())
+    } else {
+        SW_SHOWNORMAL
+    };
+    let arguments = arguments.trim_start();
+    let parent = process(cpu).id;
+    let spawned = match crate::win16::task::spawn(cpu, path, arguments, show, 0, environment) {
+        Ok(spawned) => spawned,
+        Err(message) => {
+            let line = format!("[W16] {} can't start: {}", path, message);
+            cpu.bus.log_string(&line);
+            return Err(if message.contains("memory") {
+                ERROR_NOT_ENOUGH_MEMORY
+            } else {
+                ERROR_BAD_EXE_FORMAT
+            });
+        }
+    };
+    // The task runs in the Win16 process, whose windows the foreground
+    // program may then bring to the foreground, as it started the task.
+    let win16 = cpu.bus.win32.win16.pid;
+    set_parent(cpu, win16, parent);
+    Ok(handles(cpu, spawned.process, spawned.thread))
+}
+
+/// A STARTUPINFOA that says how the program's first window is shown
+/// (STARTF_USESHOWWINDOW), as WinExec gives one.
+pub(crate) fn startup_showing(show: u16) -> Vec<u8> {
+    let mut startup = vec![0u8; STARTUPINFO_SIZE as usize];
+    startup[SI_FLAGS as usize..][..4].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
+    startup[SI_SHOW_WINDOW as usize..][..2].copy_from_slice(&show.to_le_bytes());
+    startup
 }
 
 /// How long WinExec waits for the program it started to be idle, in
@@ -290,16 +401,12 @@ const WIN_EXEC_IDLE_MS: u32 = 30_000;
 /// may read the file it writes. As in Wine, it waits with USER32's
 /// WaitForInputIdle, and only when the caller has USER32.
 pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    const STARTF_USESHOWWINDOW: u32 = 1;
-    const SI_SHOW_WINDOW: usize = 48;
     const ERROR_BAD_FORMAT: u32 = 11;
     let [line_at, show] = args[..] else {
         unreachable!()
     };
     let line = string_at(cpu, line_at)?;
-    let mut startup = vec![0u8; STARTUPINFO_SIZE as usize];
-    startup[SI_FLAGS as usize..][..4].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
-    startup[SI_SHOW_WINDOW..][..2].copy_from_slice(&(show as u16).to_le_bytes());
+    let startup = startup_showing(show as u16);
     match spawn(cpu, None, Some(&line), None, false, 0, startup) {
         Ok([process, thread, _, _]) => {
             if self::process(cpu).module("USER32.DLL").is_some() {
@@ -310,6 +417,8 @@ pub(super) fn win_exec(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             Some(33)
         }
         Err(ERROR_FILE_NOT_FOUND | ERROR_INVALID_PARAMETER) => Some(ERROR_FILE_NOT_FOUND),
+        // WinExec's 0: the system is out of memory or resources.
+        Err(ERROR_NOT_ENOUGH_MEMORY) => Some(0),
         Err(_) => Some(ERROR_BAD_FORMAT),
     }
 }

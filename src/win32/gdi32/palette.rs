@@ -467,7 +467,7 @@ pub fn select_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let hwnd = gdi(cpu).dc(hdc).map_or(0, |d| d.hwnd);
     if !background && handle != gdi(cpu).stock(DEFAULT_PALETTE) && hwnd != 0 {
         let user = &cpu.bus.win32.user;
-        let foreground = user.input.foreground;
+        let foreground = user.foreground_window();
         if foreground != 0
             && (foreground == hwnd || user.is_descendant(foreground, hwnd))
             && gdi(cpu).primary_palette != handle

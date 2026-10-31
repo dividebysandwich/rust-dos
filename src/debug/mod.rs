@@ -168,7 +168,11 @@ impl Shared {
     /// Add a line to the log, numbered, with the journal position and the
     /// request being carried out.
     pub fn log_line(&self, line: &str) {
-        let t_ms = self.start_time.elapsed().as_millis() as u64;
+        self.log_line_at(self.start_time.elapsed().as_millis() as u64, line);
+    }
+
+    /// `log_line` of a line logged `t_ms` ms after the start.
+    pub fn log_line_at(&self, t_ms: u64, line: &str) {
         let at = *self.journal_seq.borrow();
         let (cause, request_id) = self.current.lock().ok().and_then(|c| c.clone()).map_or((None, None), |(r, t)| (Some(r), t));
         let entry = {
@@ -696,6 +700,9 @@ pub struct DebugHub {
     /// Input is then delivered by `feed_input` at emulated times, and its
     /// waits end in emulated time (`input_wait_ns`).
     pub deterministic: Option<chrono::NaiveDateTime>,
+    /// What draws the window, as the `[DISPLAY]` log line says: OpenGL's
+    /// version, graphics chip and vendor, or SDL's renderer.
+    pub display: String,
     input_wait_ns: Option<u64>,
     /// Pause once emulated time reaches this (`until_ms`).
     stop_at_ns: Option<u64>,
@@ -843,6 +850,7 @@ impl DebugHub {
             frame_stats: None,
             heat: None,
             profile: None,
+            display: String::new(),
         }
     }
 
@@ -856,6 +864,13 @@ impl DebugHub {
         deterministic: Option<chrono::NaiveDateTime>,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared::new(cpu.bus.start_time));
+        // The lines logged before the server started (the renderer, the
+        // configuration's warnings), first and at the times they came. They
+        // go in before the server takes requests, so that no client sees
+        // the log without them.
+        for (t_ms, line) in cpu.bus.take_log_backlog() {
+            shared.log_line_at(t_ms, &line);
+        }
         let (tx, rx) = mpsc::channel();
         // With port 0 in `addr`, this is the free port the system picked.
         let addr = server::spawn(addr, tx, shared.clone())?;

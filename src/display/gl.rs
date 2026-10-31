@@ -202,14 +202,18 @@ impl GlScreen {
             Ok(plain) => plain,
             Err(e) => return Err(no_gl(Some(window), e)),
         };
+        // The vendor too: on a laptop with two graphics chips it says
+        // which one the driver gave the program.
         // SAFETY: see `GlScreen`.
-        let (version_name, device_name) = unsafe {
+        let (version_name, device_name, vendor) = unsafe {
             (
                 gl.get_parameter_string(glow::VERSION),
                 gl.get_parameter_string(glow::RENDERER),
+                gl.get_parameter_string(glow::VENDOR),
             )
         };
-        let renderer = format!("OpenGL {} on {}, {:?}", version_name, device_name, glsl);
+        let renderer =
+            format!("OpenGL {} on {} ({}), {:?}", version_name, device_name, vendor, glsl);
         Ok(Self {
             gl: Rc::new(gl),
             _context: context,

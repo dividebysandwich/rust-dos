@@ -138,6 +138,11 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   1 pages, 2 lines), the page select register, how often it was written
   and how often the game read the head tracker (`polls`), and whether the
   shutter glasses' 3D BIOS has its glasses on.
+- **Check which host GPU draws with `/api/status` → `display`.** It is
+  the log's `[DISPLAY]` line: with OpenGL, its version, the graphics chip
+  (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two
+  chips says which one the driver gave the program; otherwise SDL's
+  renderer and why OpenGL 3 wasn't there.
 - **Check sound with `/api/status` → `audio`.** `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts how often the output device ran dry, and `sound_blaster` is the
@@ -430,7 +435,9 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   page and the streams) is a 400 too.
 - **Log lines** in `/api/log` have `n` (their number; `after_n=N&wait=MS`
   pages and long-polls from there), `at` (the journal's last entry then)
-  and `cause`.
+  and `cause`. The log starts with the lines written at start-up before
+  the server started (the renderer's `[DISPLAY]` line, the
+  configuration's warnings), with `at` 0 and the times they were written.
 - **Instance:** `/api/version` has `instance`, which is new at every
   start. A journal from another instance numbers its entries anew.
 - **Build:** `/api/version` and the journal's `started` entry have
@@ -556,14 +563,23 @@ machine runs or is paused (in deterministic mode a load waits for a pause,
 see "Deterministic runs"). A load puts in the hardware settings the state
 was saved with, then the machine, which mounts the drives as the state had
 them and unmounts the others; a state of another `memsize` brings its
-memory size as well.
+memory size as well. A booted system's disk image comes back from the
+copy beside the state file into the image the running machine has in
+that drive, which keeps it: a load never writes the image the state was
+saved with when this machine mounts another (see CONFIGURATION.md's
+"Booting a disk image"). The speed isn't one of the hardware settings: the
+machine goes on at the speed it runs at (`--cycles`, the configuration's,
+or the last `/api/speed`), whatever the state was saved at. A fixed speed
+and `max` keep their rate, and `auto` starts its search from the state's.
+In deterministic mode the machine takes the state's speed instead (see
+"Deterministic runs").
 Breakpoints, watchpoints and `break_on` stops stay, and keys held down
 through `/api/input` or the window go up.
 
 When the state's hardware settings, media or deterministic start time
 differ from the running machine's, the state is loaded all the same and
 the reply lists what was different in `differences`. Here D: was mounted
-and the speed set to 20000 after the save (paths shortened):
+after the save (paths shortened):
 
 ```sh
 curl -s $J -XPOST -d '{"path":"/work/a.state"}' $H/api/state/load
@@ -588,14 +604,12 @@ curl -s $J -XPOST -d '{"path":"/work/a.state"}' $H/api/state/load
     ]
   },
   "differences": [
-    "emulator.cycles: the state has the default, this machine has 20000",
     "drive D: is mounted here (hdd /work/d); the state hasn't it"
   ]
 }
 ```
 
-After the load the machine runs at the state's speed (`auto`, the
-default) and D: is unmounted, as the state had it.
+After the load D: is unmounted, as the state had it.
 
 #### Strict match
 
@@ -618,9 +632,10 @@ A strict-match save or load guarantees:
   is loaded, when the state's hardware settings or media differ from the
   running machine's, or the state has no record of its media (a state
   saved by a rust-dos from before media were recorded). The hardware
-  settings compared are those a state brings: `machine`, `cpu`, `cycles`,
+  settings compared are those a state brings: `machine`, `cpu`,
   `memsize`, `ems`, `umb`, `dos_high`, `monochrome`, the sound cards, and
-  the Voodoo and PowerVR cards. The deterministic mode counts as well: a
+  the Voodoo and PowerVR cards, and `cycles` in deterministic mode, the
+  one mode a load brings it in. The deterministic mode counts as well: a
   state saved with `--deterministic` differs from a machine without it,
   and the other way round, and two `--start-time`s differ. The reply
   lists every difference in the words a plain load uses:
@@ -631,14 +646,12 @@ A strict-match save or load guarantees:
     "loaded": false,
     "unchanged": true,
     "differences": [
-      "emulator.cycles: the state has the default, this machine has 20000",
       "drive D: is mounted here (hdd /work/d); the state hasn't it"
     ]
   }
   ```
 
-  Set the speed with `/api/speed`, mount or unmount the drives, then load
-  again.
+  Mount or unmount the drives, then load again.
 
 - **A fresh debugger.** A load that goes through clears the breakpoints,
   watchpoints and `break_on` stops, the target of a step-over or of
@@ -998,6 +1011,15 @@ OpenGL, they are the software rasterizer's. A game that detects no card
 usually left `fbiInit` at their power-on values (`00000410 00201102
 80000040 001E4000 00000001`); one that drew nothing has `triangles` 0.
 
+- **Read-backs:** with `voodoo_readback=gpu`, `gpu_read_backs` counts the
+  times the card's memory was brought up to OpenGL's pictures, and
+  `gpu_only_jobs` the triangles and fills left to OpenGL alone. What the
+  reads covered: `gpu_read_rows` (rows read, summed over the buffers),
+  `gpu_partial_reads` (reads of part of a buffer rather than all its
+  rows), and of the rows read, `gpu_read_rows_drawn` (drawn since the
+  last read of that buffer) and `gpu_read_rows_undrawn` (not drawn
+  since, which a cache of the rows read would have had). A game with many
+  undrawn rows would gain from such a cache; one with few wouldn't.
 - **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
   registers at +0, the frame buffer at +400000h (2048 bytes a row of
   16-bit pixels), texture memory at +800000h (write-only; reads give FFh).

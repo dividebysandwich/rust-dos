@@ -84,6 +84,11 @@ pub struct Hold {
     pub at: Option<(u16, u32)>,
 }
 
+/// The most lines `Bus::log_backlog` keeps: far more than start-up logs.
+const LOG_BACKLOG_LINES: usize = 1000;
+/// The backlog's last line when it fills up.
+const LOG_BACKLOG_FULL: &str =
+    "[DEBUG] Later lines from before the debug server started are only in the log file";
 /// An observer of the log's lines (`Bus::log_hook`).
 pub type LogHook = Box<dyn FnMut(&str)>;
 /// An observer of the mixed audio (`Bus::audio_hook`).
@@ -412,6 +417,11 @@ pub struct Bus {
     /// Optional observer for every `log_string` line. Installed by the debug
     /// server so log output can be streamed to remote clients.
     pub log_hook: Option<LogHook>,
+    /// The lines logged before there is a `log_hook`, with when they were
+    /// logged (ms since `start_time`), for the debug server to take as it
+    /// starts (`take_log_backlog`): kept only while it is Some, which the
+    /// front end makes it when a debug server is to start.
+    pub log_backlog: Option<Vec<(u64, String)>>,
     /// Optional observer for every block of mixed audio samples produced by
     /// `pump_audio` (44.1 kHz mono i16). Used by the debug audio stream.
     pub audio_hook: Option<AudioHook>,
@@ -787,7 +797,7 @@ impl Bus {
     /// Invalidate cached decodes of the pages covering `start..end`.
     fn bump_page_gens(&mut self, start: usize, end: usize) {
         if self.observe.on {
-            self.observe.wrote(start >> GEN_SHIFT, (end - 1) >> GEN_SHIFT);
+            self.observe.wrote(start, end);
         }
         for page in (start >> GEN_SHIFT)..=((end - 1) >> GEN_SHIFT) {
             let g = &mut self.page_gen[page];
@@ -857,7 +867,7 @@ impl Bus {
             }
         }
         if self.observe.on {
-            self.observe.wrote(addr >> GEN_SHIFT, (addr + S as usize - 1) >> GEN_SHIFT);
+            self.observe.wrote(addr, addr + S as usize);
         }
     }
 
@@ -998,7 +1008,7 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
             if self.observe.on {
-                self.observe.wrote(addr >> GEN_SHIFT, addr >> GEN_SHIFT);
+                self.observe.wrote(addr, addr + 1);
             }
             return false;
         }
@@ -1188,7 +1198,7 @@ impl Bus {
                 *g = g.wrapping_add(1);
             }
             if self.observe.on {
-                self.observe.wrote(addr >> GEN_SHIFT, (addr + 1) >> GEN_SHIFT);
+                self.observe.wrote(addr, addr + 2);
             }
             return false;
         }
@@ -1311,7 +1321,7 @@ impl Bus {
             let last = (addr + 3) >> GEN_SHIFT;
             self.page_gen[last] = self.page_gen[last].wrapping_add(1);
             if self.observe.on {
-                self.observe.wrote(addr >> GEN_SHIFT, last);
+                self.observe.wrote(addr, addr + 4);
             }
             return;
         }
@@ -2102,8 +2112,8 @@ impl Bus {
     /// Write to an I/O port.
     pub fn io_write(&mut self, port: u16, value: u8) {
         let _profile = self.profile.as_mut().map(|p| p.port(port, true));
-        self.observe.port_write();
         self.clock.stall(crate::timer::IO_WRITE_NS);
+        self.observe.port_write(port, value, self.clock.icount);
         self.log_port(port, value as u32, 1, true);
         self.write_port(port, value);
         // The write may have programmed the PICs or made a device raise or
@@ -3012,7 +3022,7 @@ impl Bus {
     /// Whether log lines go anywhere, for callers whose lines take work
     /// to make.
     pub fn logs(&self) -> bool {
-        self.log_file.is_some() || self.log_hook.is_some()
+        self.log_file.is_some() || self.log_hook.is_some() || self.log_backlog.is_some()
     }
 
     /// Write a line to the log file and the debug server's log.
@@ -3022,7 +3032,23 @@ impl Bus {
         }
         if let Some(hook) = &mut self.log_hook {
             hook(s);
+        } else if let Some(backlog) =
+            self.log_backlog.as_mut().filter(|b| b.len() < LOG_BACKLOG_LINES)
+        {
+            // The last line it keeps says that later ones are missing.
+            let line = if backlog.len() + 1 < LOG_BACKLOG_LINES {
+                s.to_string()
+            } else {
+                LOG_BACKLOG_FULL.to_string()
+            };
+            backlog.push((self.start_time.elapsed().as_millis() as u64, line));
         }
+    }
+
+    /// The lines logged before the log hook was installed, with their
+    /// times, and no more of them kept.
+    pub fn take_log_backlog(&mut self) -> Vec<(u64, String)> {
+        self.log_backlog.take().unwrap_or_default()
     }
 
     /// Write buffered log lines to the log file now, so they survive an

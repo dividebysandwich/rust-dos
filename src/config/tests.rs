@@ -668,6 +668,7 @@ fn changed_settings() -> Settings {
             fps_cap: Some(30),
             gamma: Some(1.5),
             dither: false,
+            gpu_reads: false,
         },
         powervr: Some(crate::powervr::Chip::Pcx2),
         powervr_filter: crate::powervr::tsp::Filter::Point,
@@ -893,6 +894,7 @@ fn saved_settings_parse_back() {
     assert!(text.contains("#machine=svga\nmachine=vga\n"), "{}", text);
     assert!(text.contains("#voodoo_texture_sampling=default\nvoodoo_texture_sampling=unfiltered\n"), "{}", text);
     assert!(text.contains("#voodoo_dither=true\nvoodoo_dither=false\n"), "{}", text);
+    assert!(text.contains("#voodoo_readback=gpu\nvoodoo_readback=exact\n"), "{}", text);
     assert!(text.contains("#capture_dir=capture\ncapture_dir=~/dos captures\n"), "{}", text);
     assert!(text.contains("#record_ui=false\nrecord_ui=true\n"), "{}", text);
     assert!(text.contains("#record_shader=false\nrecord_shader=true\n"), "{}", text);
@@ -1094,6 +1096,24 @@ fn unwritable_default_is_only_a_warning() {
     assert!(!config.created);
     assert_eq!(config.warnings.len(), 1);
     assert!(config.drives.is_empty());
+}
+
+#[test]
+fn the_desktop_depth_is_read() {
+    for (value, depth) in [
+        ("auto", DesktopDepth::Adapter),
+        ("8", DesktopDepth::Palette),
+        ("16", DesktopDepth::HighColor),
+    ] {
+        let text = format!("[emulator]\nwin32_depth={value}\n");
+        let config = parse(&text, Path::new("/cfg"), None);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.win32_depth, depth);
+        assert_eq!(depth.name(), value);
+    }
+    let config = parse("[emulator]\nwin32_depth=24\n", Path::new("/cfg"), None);
+    assert_eq!(config.warnings.len(), 1);
 }
 
 #[test]

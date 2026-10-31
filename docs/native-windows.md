@@ -238,8 +238,8 @@ exceptions run as the program's own code on top of that.
 - The registry is a tree in Rust (`src/win32/registry.rs`), the
   system's, shared by the processes and kept in save states. It is seeded
   with the keys games read (`HKLM\Software\Microsoft\Windows\CurrentVersion`
-  with VersionNumber 4.00.950, DirectX's version, the display settings,
-  the user and computer names) and kept on drive C: as
+  with VersionNumber 4.00.950 and a ProductId, DirectX's version, the
+  display settings, the user and computer names) and kept on drive C: as
   `C:\REGISTRY.REG`, a REGEDIT4 file that can be read and edited by hand.
   A program's first registry call reads the seed with the file's keys
   and values over it; changes are written back when a key is closed or
@@ -512,9 +512,6 @@ Some differences hold for every setup:
 
 - Names on a drive that is a host folder are in capitals, as DOS made
   them: the Start menu's folder is `START MENU`.
-- The CD's Joliet names aren't read, so files the setup copies by
-  their long names from the CD get 8.3 ones (Enemy Infestation's
-  `.url` shortcuts are `PLAYON~1.URL`).
 - Shortcuts are smaller: they have no relative path and no file
   times. Their targets, working folders and icons are the same.
 - Dialog text is laid out with other font metrics, so some lines wrap
@@ -668,9 +665,26 @@ two TMUs), GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
 WGL_EXT_swap_control. The functions OpenGL 1.1 has and the ICD doesn't
 (display lists, lighting, evaluators, feedback, the accumulation and
 stencil buffers) are exported and do nothing, and their first call is
-logged. Without a Banshee or Voodoo3 the DLL loads but there is no
-pixel format, so a context can't be made. SetDeviceGammaRamp sets the
-card's lookup table for 16- and 32-bit modes until the next mode set.
+logged. SetDeviceGammaRamp sets the card's lookup table for 16- and
+32-bit modes until the next mode set.
+
+On a Voodoo2 the DLL is 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL),
+which games of the time loaded by name or kept in their folder as
+OPENGL32.DLL, and which drew full screen only. Its two pixel formats
+are those that driver's DescribePixelFormat gives on Windows 98 SE:
+5-6-5 color with a 16-bit depth buffer, single or double buffered,
+which also say they support GDI and have an 8-bit stencil and a 64-bit
+accumulation buffer, which the real driver kept in software and which
+do nothing here. A context's DirectDraw object is the card's 3dfx
+device. wglMakeCurrent opens the card at the smallest of its modes
+that holds the window's client area and a depth buffer, as the real
+driver did (a 400x300 window gets 512x384), and fails when none does
+(1024x768 on a card with 4 MB of frame buffer). OpenGL draws into the
+top left of the card's back buffer through the same HAL as Direct3D,
+and SwapBuffers swaps the card's buffers. glGetString gives the real
+driver's vendor, renderer and version, and of its extensions those
+that are here. Without a Banshee, Voodoo3 or Voodoo2 the DLL loads
+but there is no pixel format, so a context can't be made.
 
 **Phase 5: breadth.**
 
@@ -810,6 +824,29 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   descriptors, DOS memory, interrupt vectors, real-mode calls and
   linear memory. A descriptor that changes under a segment register is
   loaded into it again, as Windows' host does.
+- Another INT n of a Windows program whose real-mode vector a program
+  or driver set, in conventional or upper memory, runs that handler in
+  real mode with the program's general registers and gives back the
+  registers and arithmetic flags it returns, as Windows reflects such
+  an interrupt to the virtual machine. Windows 98 Setup runs code of
+  its own in real mode this way, through INT 12h. The BIOS's own
+  handlers are called directly, and so are those of INT 10h, 13h, 15h,
+  25h, 26h, 33h and 4Bh, whose buffers Windows translates and the
+  layer doesn't. CLI and STI, which Windows' VMM virtualizes, go on
+  without effect.
+- DPMI's calls of real-mode code (INT 31h AX=0300h, 0301h and 0302h)
+  run it in real mode, as Windows' DPMI server runs it in the virtual
+  machine, through the same entry and return as the reflected
+  interrupts (`src/win32/realmode.rs`): the call structure's registers,
+  its SS:SP or the host's stack when that is 0:0, CX words of the
+  task's stack on top, and the registers and flags the code returns
+  written back. 0300h runs whatever the vector table has, a program's
+  handler or the BIOS's, with no vector kept back: the structure holds
+  real-mode segments, so there is nothing to translate. What both DPMI
+  hosts do for these calls is in `src/dpmi/realcall.rs`. Real-mode
+  callbacks (0303h, 0304h) call a task's procedure from real mode, on
+  the task's stack, and the calls nest. 0201h sets the real-mode
+  vector.
 - Windows 3.1 programs see version 3.95, Windows 95's, and not the
   WS_EX_WINDOWEDGE style USER32 gives their windows.
 - KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a
