@@ -5547,7 +5547,9 @@ fn an_unhandled_exception_gives_the_exit_code_ffffffff() {
     let (step, _) = after_tf(&[]);
     let fault = [&[0xA1, 0, 0, 0, 0], INCS].concat();
     let raised = [RAISE_ARGS, CALL_EBX, INCS].concat();
-    for code in [&step, &fault, &raised] {
+    // ESP on a page that isn't there: no handler can run.
+    let no_stack = [&[0xBC, 0x10, 0, 0, 0, 0xA1, 0, 0, 0, 0], INCS].concat();
+    for code in [&step, &fault, &raised, &no_stack] {
         for filter in [false, true] {
             let (child, _) = trace_program(code, filter, 1, |_| Ok(()));
             let files = [("T.EXE", parent.clone()), ("C.EXE", child)];

@@ -52,7 +52,7 @@ const CONTINUE_EXECUTION: u32 = 0;
 const FILTER_EXECUTE_HANDLER: u32 = 1;
 const FILTER_CONTINUE_EXECUTION: u32 = 0xFFFF_FFFF;
 /// The exit code of a process an unhandled exception ends, on Windows 98
-/// whatever the exception was.
+/// whatever the exception was, and with no stack to raise it on too.
 const UNHANDLED_EXIT_CODE: u32 = 0xFFFF_FFFF;
 
 /// CONTEXT's size, its flags (CONTEXT_i386 with the control, integer,
@@ -301,7 +301,7 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
         code
     };
     let Some(thread) = process(cpu).current_thread_mut() else {
-        super::fatal(cpu, &what, Some(&ctx));
+        super::fatal_with(cpu, &what, Some(&ctx), UNHANDLED_EXIT_CODE);
         return;
     };
     thread.fault = what;
@@ -335,10 +335,11 @@ pub fn raise(
     let esp = record.wrapping_sub(BELOW_RECORD);
     if !present(cpu, esp, ctx.gpr[ESP].wrapping_sub(esp)) {
         let what = std::mem::take(&mut process(cpu).current_thread_mut().unwrap().fault);
-        super::fatal(
+        super::fatal_with(
             cpu,
             &format!("{}, and its stack is gone", describe(code, &what)),
             Some(&ctx),
+            UNHANDLED_EXIT_CODE,
         );
         return;
     }
@@ -397,7 +398,8 @@ fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32) {
         resume,
         vec![record, ctx_at, frame],
     ) {
-        super::fatal(cpu, "an exception, and its stack is gone", None);
+        let what = "an exception, and its stack is gone";
+        super::fatal_with(cpu, what, None, UNHANDLED_EXIT_CODE);
     }
 }
 
