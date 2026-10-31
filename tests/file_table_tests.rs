@@ -257,8 +257,16 @@ fn ioctl_status_of_nul_aux_and_a_serial_port() {
     assert_eq!(dos(&mut cpu, 0x4407, com3, 0, 0), Ok(0x0100));
     // A modem on COM1, which raises DSR once the program raises DTR:
     // ready for output, nothing to read yet.
-    let modem = [PortType::Modem, PortType::Empty, PortType::Off, PortType::Off];
-    cpu.bus.configure_serial(&SerialSettings { ports: modem, ..Default::default() });
+    let modem = [
+        PortType::Modem,
+        PortType::Empty,
+        PortType::Off,
+        PortType::Off,
+    ];
+    cpu.bus.configure_serial(&SerialSettings {
+        ports: modem,
+        ..Default::default()
+    });
     cpu.bus.io_write(0x3FC, 0x03);
     let com1 = open(&mut cpu, "COM1", 2).unwrap();
     assert_eq!(dos(&mut cpu, 0x4407, com1, 0, 0), Ok(0x01FF));

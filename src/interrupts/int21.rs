@@ -483,7 +483,11 @@ fn writes_console(cpu: &mut Cpu, ah: u8) -> bool {
 /// The device information word of AX=4400h for the device `device` open
 /// at `sft`, with bit 5 set in raw (binary) mode.
 fn device_word(cpu: &Cpu, sft: u16, device: CharDevice) -> u16 {
-    let raw = if cpu.bus.disk.device_raw(sft) { 0x20 } else { 0 };
+    let raw = if cpu.bus.disk.device_raw(sft) {
+        0x20
+    } else {
+        0
+    };
     dos_files::device_info(device, sft) | raw
 }
 
@@ -510,7 +514,11 @@ fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) 
             let disk = &mut cpu.bus.disk;
             let write_only = disk.sft_entry(sft).is_some_and(|entry| entry.mode & 3 == 1);
             let at = disk.position(sft).unwrap_or(0);
-            let next = if write_only { None } else { disk.read_file(sft, 1).ok() };
+            let next = if write_only {
+                None
+            } else {
+                disk.read_file(sft, 1).ok()
+            };
             let _ = disk.seek_file(sft, at as i64, 0);
             match next.and_then(|bytes| bytes.first().copied()) {
                 Some(byte) => (true, byte),
@@ -526,7 +534,11 @@ fn io_status(cpu: &mut Cpu, sft: u16, device: Option<CharDevice>, output: bool) 
             }
         }
         Some(CharDevice::Nul)
-            if cpu.bus.disk.sft_entry(sft).is_some_and(|entry| entry.name.starts_with(b"NUL ")) =>
+            if cpu
+                .bus
+                .disk
+                .sft_entry(sft)
+                .is_some_and(|entry| entry.name.starts_with(b"NUL ")) =>
         {
             (true, 0)
         }
