@@ -485,6 +485,8 @@ mod tests {
         "MSIMG32.DLL",
         "OPENGL32.DLL",
         "WOW32.DLL",
+        "MSVFW32.DLL",
+        "AVIFIL32.DLL",
         "DINPUT8.DLL",
     ];
 
