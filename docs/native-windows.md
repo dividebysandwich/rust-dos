@@ -905,17 +905,14 @@ What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
   `ScreenSaveTimeOut` seconds with no key or mouse input, with
   `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
   SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]`
-  `SCRNSAVE.EXE` with /s, as Windows 3.1 does. (Windows 98 keeps the
-  two settings in the registry's `Control Panel\Desktop` instead, which
-  its Display settings write; WIN.INI is where Windows 3.1 setups put
-  them.) USER reads the two settings when it starts, as Windows does,
-  and SystemParametersInfo's SPI_SETSCREENSAVEACTIVE and
-  SPI_SETSCREENSAVETIMEOUT change them, as games do that keep the saver
-  off while they run. The timer runs while the desktop is on the
-  screen. The prompt also starts a saver by its .SCR name
-  (`SCRANTIC.SCR /s`, or /c for its settings dialog), as a Windows
-  program under another extension; without the built-in Windows,
-  COMMAND.COM runs no .SCR.
+  `SCRNSAVE.EXE` with /s, as Windows 3.1 does. USER reads the two settings
+  when it starts, as Windows does, and SystemParametersInfo's
+  SPI_SETSCREENSAVEACTIVE and SPI_SETSCREENSAVETIMEOUT change them, as games
+  do that keep the saver off while they run. The timer runs while the
+  desktop is on the screen. The prompt also starts a saver by its .SCR name
+  (`SCRANTIC.SCR /s`, or /c for its settings dialog), as a Windows program
+  under another extension; without the built-in Windows, COMMAND.COM runs no
+  .SCR.
 - Generic thunks (`src/win32/wow32.rs`): WOW32.DLL's WOWCallback16 and
   WOWCallback16Ex call a 16-bit function on the process's task the same
   way, and WOWGetVDMPointer maps a 16:16 address as MapSL does, for a
@@ -932,12 +929,7 @@ and Prairie Dog Hunt (VB2).
 
 Sierra's screen saver Johnny Castaway (Screen Antics) installs with its
 own setup. With `win32=true`, its `.SCR` runs from the prompt as
-`scrantic.scr /s`, and the saver draws the island and runs past 90
-seconds with no general protection fault (checked with the freed-selector
-fix from #357 in the build). The screen saver timer posts SC_SCREENSAVE
-after `ScreenSaveTimeOut`, which was seen in the log, but not that the
-saver then starts from the timer. Not checked: a second saver started
-while one runs.
+`scrantic.scr /s`.
 
 Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
 the SimTower demo, and the InstallShield of the Lemmings demo. All three
