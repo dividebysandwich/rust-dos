@@ -756,6 +756,20 @@ programs set.
   dry, without the effect, `100` the effect alone, and at `50` (the
   default) both play in full; below 50 the effect fades out, above it
   the dry music does.
+* `audio_output` (`--audio-output`) is what plays the sound. It is read
+  at startup.
+  * `auto` (the default) plays on SDL's sound device. A run with no window
+    (`--hidden`, or `SDL_VIDEODRIVER=dummy`) takes the null output
+    instead, unless `SDL_AUDIODRIVER` names a driver, so nothing that
+    runs unseen comes out of the speakers.
+  * `sdl` plays on SDL's sound device, with a window or without.
+  * `null` opens no SDL sound device at all. Nothing plays, and the queue
+    empties at exactly 44,100 frames a second by the host's clock.
+
+  With no sound device to open, `auto` and `sdl` run silent on the null
+  output too. `SDL_AUDIODRIVER=dummy` picks SDL's own dummy driver, which
+  runs faster than real time: the log warns about it, and no measurement
+  may use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
 * `blocksize` and `prebuffer` set how much sound waits for the host's
   sound device, and so how late it is heard: `blocksize` is the device's
   buffer in frames, `128`, `256`, `512` (the default, about 12 ms),
@@ -3534,6 +3548,8 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
 | `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
+| `--audio-output OUTPUT` | What plays the sound: `auto`, `sdl` or `null` (`audio_output` in [`[mixer]`](#mixer)) |
+| `--mute` | Start with the sound off, as Ctrl+F8 does: the sound device plays silence, and the debug server's stream and recordings keep the sound |
 | `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
 | `--vr-desktop` | Show the picture in a 3D scene in the window (`mode=desktop`) |
 | `--vr-scene FILE` | The 3D scene, a glTF file from Blender (`scene`); on its own it means `--vr-desktop` |

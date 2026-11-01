@@ -99,6 +99,10 @@ struct Sound {
 struct PageAudio(Rc<RefCell<Sound>>);
 
 impl AudioOutput for PageAudio {
+    fn name(&self) -> &str {
+        "browser"
+    }
+
     fn queued_frames(&self) -> usize {
         let sound = self.0.borrow();
         sound.queued + sound.out.len() / 2

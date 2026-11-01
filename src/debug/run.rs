@@ -23,6 +23,11 @@ fn millis(time: Duration) -> f64 {
     (time.as_secs_f64() * 1e5).round() / 100.0
 }
 
+/// What plays the sound: the name to read before trusting a measurement.
+pub(super) fn audio_driver(cpu: &Cpu) -> Option<String> {
+    cpu.bus.audio_device.as_ref().map(|device| device.name().to_string())
+}
+
 /// `/api/underruns`: `hostframes` says what the numbers are.
 pub(super) fn underruns_json(cpu: &Cpu) -> Value {
     let queue_ms = |frames| (rust_dos::audio::AudioBuffer::millis(frames) * 100.0).round() / 100.0;
@@ -53,6 +58,7 @@ pub(super) fn underruns_json(cpu: &Cpu) -> Value {
         })
         .collect();
     json!({
+        "audio_driver": audio_driver(cpu),
         "events": host.underrun_events(),
         "dry_checks": cpu.bus.audio_underruns,
         "log": log,
@@ -441,6 +447,7 @@ impl DebugHub {
             // them, how long they took together in seconds, and in ms the
             // longest and the nearest-rank percentiles. Null before the
             // first.
+            "audio_driver": audio_driver(cpu),
             "frame_times": cpu.bus.host_frames.summary().map(|f| json!({
                 "frames": f.frames,
                 "seconds": millis(f.span) / 1000.0,

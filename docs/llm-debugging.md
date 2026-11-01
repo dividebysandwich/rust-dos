@@ -9,15 +9,33 @@ This file covers how to use the endpoints well.
 
 ```sh
 cargo build --release
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+SDL_VIDEODRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/dos/files --debug-server &
 until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 ```
 
+- **Never use SDL's dummy audio driver (`SDL_AUDIODRIVER=dummy`) for a
+  measurement of any kind.** It runs faster than real time, so underrun
+  counts and everything else read from the sound queue are wrong however
+  well the host keeps up (see `/api/underruns` below). The emulator warns
+  on stderr and in the log when it is active. Use one of these:
+
+  | The run | What to use |
+  |---|---|
+  | A timing measurement, or underrun counts | A real device, muted: `SDL_AUDIODRIVER=wasapi` (on Windows; `pipewire`, `pulseaudio` or `alsa` on Linux, `coreaudio` on macOS) and `--mute` |
+  | The same on a machine with no sound device | The null output: `--audio-output null` |
+  | Anything else with no window | Nothing to set: `SDL_VIDEODRIVER=dummy` or `--hidden` takes the null output |
+
+  Before quoting a result, check that `audio_driver` in `/api/underruns`
+  or `/api/stats` says what you meant to run on.
 - **Build mode:** use a release build. A debug build runs about 5x slower,
   which changes timing-sensitive behaviour.
-- **Dummy drivers:** they need no window or sound device. Audio is still
-  mixed and streamed.
+- **No window:** `SDL_VIDEODRIVER=dummy` needs no window, and without a
+  window `audio_output=auto` plays on the null output unless
+  `SDL_AUDIODRIVER` names a driver. Nothing reaches the speakers, the
+  output's queue empties at exactly 44,100 frames a second, and audio is
+  still mixed and streamed. A run on a machine with no sound device
+  plays on the null output too, with a window or without.
 - **OpenGL without a window:** the dummy video driver has no OpenGL, so
   `voodoo_renderer=opengl` falls back to the software rasterizer. To run
   the OpenGL renderer on the host's GPU, leave `SDL_VIDEODRIVER` unset
@@ -47,7 +65,7 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 
   ```sh
   : > rust-dos.out
-  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  SDL_VIDEODRIVER=dummy \
     ./target/release/rust-dos --no-config -d /path/to/dos/files \
     --debug-server 127.0.0.1:0 > rust-dos.out &
   until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' rust-dos.out) &&
@@ -143,7 +161,9 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two
   chips says which one the driver gave the program; otherwise SDL's
   renderer and why OpenGL 3 wasn't there.
-- **Check sound with `/api/status` → `audio`.** `peak` is the loudest
+- **Check sound with `/api/status` → `audio`.** `driver` says what plays
+  the sound (`wasapi`, `null`, `dummy`...), `muted` whether the mixer's
+  mute (`--mute`, Ctrl+F8) is on, `peak` is the loudest
   sample since the previous status request (0 means silence), `underruns`
   counts the video frames that found the output device's queue empty (see
   `/api/underruns` below), and `sound_blaster` is the card's BLASTER string
@@ -169,17 +189,26 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   window counts as neither and ends a stretch. The first check after the
   start finds the queue empty, so `events` starts at 1.
 
-  Measure underruns on a real sound device (on Windows,
-  `SDL_AUDIODRIVER=wasapi`). SDL's `dummy` driver, which headless runs
-  often use, plays nothing and runs faster than real time: on Windows 11
-  it took 512 frames about every 11.4 ms, 44,940 frames a second where
-  WASAPI took 44,120. The resampling that holds the queue at its target
-  makes up 0.5% at most, so the queue runs out every few seconds however
-  well the host keeps up. Myth: The Fallen Lords gave 10 to 13 dry checks
-  a minute on `dummy` with no frame over 18 ms, and under 1 a minute on
-  WASAPI. Such events have a `gap_ms` shorter than `queued_after_ms`. On
-  `dummy`, compare counts only for what a slow frame adds to that steady
-  rate, and don't read a few a minute as a problem.
+  `audio_driver` says what the counts ran on. Measure underruns on a real
+  sound device, muted (on Windows, `SDL_AUDIODRIVER=wasapi` and `--mute`),
+  or on the null output (`--audio-output null`) on a machine without one.
+  Never on SDL's `dummy` driver: it plays nothing and runs faster than
+  real time. On Windows 11 it took 512 frames about every 11.4 ms, 44,940
+  frames a second where WASAPI took 44,120. The resampling that holds the
+  queue at its target makes up 0.5% at most, so the queue runs out every
+  few seconds however well the host keeps up. Myth: The Fallen Lords gave
+  10 to 13 dry checks a minute on `dummy` with no frame over 18 ms, and
+  under 1 a minute on WASAPI. Such events have a `gap_ms` shorter than
+  `queued_after_ms`. A count from `dummy` means nothing and can't be
+  corrected afterwards: run it again.
+
+  `--mute` is Ctrl+F8 from the start: `pump_audio` hands the device
+  silence and it plays on at its own rate, so the queue behaves as with
+  the sound on, while `/ws/audio`, recordings and `peak` keep the sound.
+  `master=0` in `[mixer]` would silence those too. The null output takes
+  blocks at the device's `blocksize`, as SDL's device does, but its clock
+  is exact and it has no host driver to run late, so it shows what the
+  emulator's own frames add and nothing from a sound driver.
 
   `log` has the last 32 events, oldest first, each described at the check
   that started it: `event` (its number), `at_ms` (host time since the frame
@@ -919,7 +948,7 @@ come out the same: the same instructions, memory and pictures at the same
 emulated time, however fast the host is.
 
 ```sh
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+SDL_VIDEODRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
   --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
 OP=$(curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume | jq .op)
@@ -1326,6 +1355,14 @@ address mapped to when it was set.
   while paused. Pausing, stepping and tracing don't change when a program
   sees its timer interrupts (`HLE service 08h` or its own handler) in
   instruction terms, but a timer interrupt can arrive between any two steps.
+- **Sound in a timing run.** The audio output is part of the setup: run
+  every side of a comparison on the same one, and quote `audio_driver`
+  from `/api/stats` with the result. Use a real device with `--mute`
+  (`SDL_AUDIODRIVER=wasapi` on Windows), or `--audio-output null` where
+  there is no device, and never `SDL_AUDIODRIVER=dummy` (see
+  [Start the emulator](#1-start-the-emulator)). `SDL_VIDEODRIVER=dummy`
+  and `--hidden` alone take the null output, so a timing run on a real
+  device has to set `SDL_AUDIODRIVER` as well.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its
@@ -1336,7 +1373,8 @@ address mapped to when it was set.
   counts the window's frames), and `cpu_use` is the percent of the wall
   time the emulator's main thread works (running the machine and drawing
   the picture), so 100 minus it is that thread's time to spare, on one host
-  core. Its `frame_times` object covers the host's last 1024 frames while
+  core. `audio_driver` is what played the sound during the run. Its
+  `frame_times` object covers the host's last 1024 frames while
   the machine runs (about 17 s at 60 frames a second), from one start of
   the main loop to the next, waiting included: `frames` and `seconds`
   (how many so far, and how long they took), `longest_ms`, and the

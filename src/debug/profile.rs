@@ -236,6 +236,7 @@ impl DebugHub {
         let mut out = json!({
             "running": session.running(),
             "build": rust_dos::build_info::json(),
+            "audio_driver": super::run::audio_driver(cpu),
             "sampler": {
                 "hz": session.options.hz,
                 "timer": session.options.timer.name(),

@@ -55,7 +55,6 @@ use crate::input::{
 };
 use crate::main_host::MainHost;
 use crate::monitor_power::{power_off, power_on, resync};
-use crate::sdl_audio::open_audio;
 use crate::startup::{apply_args, create_cpu, game_to_launch, start_debug_hub, start_dos};
 #[cfg(windows)]
 use crate::startup::leave_explorer_console;
@@ -163,11 +162,8 @@ fn main() -> Result<(), String> {
             return Ok(());
         }
     }
-    // Without a sound device (as in a virtual machine without a sound
-    // card) the emulator runs silent.
-    let audio_device = sdl_context
-        .audio()
-        .and_then(|subsystem| Ok((open_audio(&subsystem, settings.audio_buffer.blocksize)?, subsystem)));
+    let headless = args.hidden || video_subsystem.current_video_driver().eq_ignore_ascii_case("dummy");
+    let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
     let controller_subsystem = match sdl_context.game_controller() {
         Ok(subsystem) => Some(subsystem),
@@ -216,10 +212,11 @@ fn main() -> Result<(), String> {
     }
     // How the sound's channels mix for the viewer in the 3D scene.
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
-    sdl_audio::attach(&mut cpu, audio_device, &settings, &audio_mix);
-    // The 3D scene's own sounds, on a device of their own.
+    // The 3D scene's own sounds, on a device of their own, where SDL has one.
+    let room_audio = matches!(audio_output, sdl_audio::Output::Sdl(..)).then(|| sdl_context.audio().ok()).flatten();
+    sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix);
+    cpu.bus.mixer.muted = args.mute;
     let mut room_sound = sdl_audio::RoomDevice::new();
-    let room_audio = sdl_context.audio().ok();
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);

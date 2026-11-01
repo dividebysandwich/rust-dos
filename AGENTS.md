@@ -155,6 +155,15 @@ disk.
 - A run that does both takes the timing measurement form only when the
   timing is part of the claim. A reproduction boot that also logs how
   long something took is still heavy, unless that time is quoted.
+- Never use SDL's dummy audio driver (`SDL_AUDIODRIVER=dummy`) for a
+  measurement of any kind. It runs faster than real time, so the sound
+  queue runs dry however well the host keeps up, and underrun counts from
+  it mean nothing. A timing run or an underrun count uses a real device,
+  muted (`SDL_AUDIODRIVER=wasapi` and `--mute` on Windows), or
+  `--audio-output null` on a machine without one. Other runs with no
+  window need nothing: `SDL_VIDEODRIVER=dummy` or `--hidden` takes the
+  null output. Check `audio_driver` in `/api/underruns` or `/api/stats`
+  before quoting a result.
 - Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
   Bash on Windows). Builds, tests and every heavy emulator run take the
   heavy form, so they run together:

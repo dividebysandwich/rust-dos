@@ -25,6 +25,17 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) hidden: bool,
 
+    /// What plays the sound: auto, sdl (SDL's sound device) or null (the
+    /// null output: nothing plays, and its queue empties at exactly the
+    /// output's rate) [default: the config file's audio_output]
+    #[arg(long, value_name = "OUTPUT", value_parser = parse_audio_output)]
+    pub(crate) audio_output: Option<rust_dos::audio::OutputChoice>,
+
+    /// Start with the sound off, as Ctrl+F8 does: the sound device gets
+    /// silence, and the debug server's stream and recordings keep the sound
+    #[arg(long)]
+    pub(crate) mute: bool,
+
     /// Show the picture on a screen in a 3D scene in a VR headset, through
     /// OpenXR (SteamVR, Monado) [default: the config file's [vr] mode]
     #[arg(long, conflicts_with = "vr_desktop")]
@@ -218,6 +229,10 @@ pub(crate) struct RunArgs {
 }
 
 /// `--vr-graphics`'s value.
+fn parse_audio_output(value: &str) -> Result<rust_dos::audio::OutputChoice, String> {
+    rust_dos::audio::OutputChoice::parse(value).ok_or_else(|| "auto, sdl or null".to_string())
+}
+
 fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
     rust_dos::vr::VrGraphics::parse(value).ok_or_else(|| "auto, gl, egl or vulkan".to_string())
 }

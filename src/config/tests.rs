@@ -581,6 +581,22 @@ fn joystick_settings() {
 }
 
 #[test]
+fn audio_output_parses_and_saves() {
+    use crate::audio::OutputChoice;
+    assert_eq!(Settings::from_config(&parse("", Path::new("."), None)).audio_output, OutputChoice::Auto);
+    let config = parse("[mixer]\naudio_output=null\n", Path::new("."), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    let settings = Settings::from_config(&config);
+    assert_eq!(settings.audio_output, OutputChoice::Null);
+    let saved = update_text("", &Settings::default(), &settings, &[], None);
+    assert!(saved.contains("audio_output=null"), "{}", saved);
+    assert_eq!(Settings::from_config(&parse(&saved, Path::new("."), None)).audio_output, OutputChoice::Null);
+    let config = parse("[mixer]\naudio_output=dummy\n", Path::new("."), None);
+    assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+    assert_eq!(Settings::from_config(&config).audio_output, OutputChoice::Auto);
+}
+
+#[test]
 fn audio_buffer_parses_and_saves() {
     use crate::audio::AudioBuffer;
     assert_eq!(Settings::from_config(&parse("", Path::new("."), None)).audio_buffer, AudioBuffer::default());
@@ -754,6 +770,7 @@ fn changed_settings() -> Settings {
             mixer.chorus_mix = 20;
             mixer
         },
+        audio_output: crate::audio::OutputChoice::Null,
         audio_buffer: crate::audio::AudioBuffer { blocksize: 256, prebuffer: 10 },
         joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },
         network: crate::net::NetSettings {

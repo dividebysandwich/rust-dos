@@ -50,13 +50,21 @@ skill covers what to do on top of that.
 
    ```sh
    : > $W/rust-dos.out
-   SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+   SDL_VIDEODRIVER=dummy \
      ./target/release/rust-dos --no-config -d $W/c \
      --debug-server 127.0.0.1:0 > $W/rust-dos.out 2> $W/rust-dos.err &
    echo $! > $W/emu.pid
    until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' $W/rust-dos.out); do
      sleep 0.2; done
    ```
+
+   With no window the sound goes to the null output. Never add
+   `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver runs faster than
+   real time and must not be used for any measurement. To file a timing
+   or underrun finding, rerun it on a real device with `--mute`
+   (`SDL_AUDIODRIVER=wasapi` on Windows), or with `--audio-output null`
+   on a machine without one, and quote `audio_driver` from `/api/stats`
+   or `/api/underruns`.
 
    Use `--deterministic --cycles N` only if you need exact repeats; a
    player's session normally runs at `cycles=auto`, which is part of what

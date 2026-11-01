@@ -7,6 +7,7 @@ use crate::audio;
 use crate::config::Settings;
 use crate::cpu::Cpu;
 use crate::display;
+use rust_dos::null_audio::NullAudio;
 
 /// The SDL sound device, where the mixed output goes, through the 3D
 /// scene's mix of the channels for where the viewer is (`mix`, which the
@@ -38,6 +39,10 @@ fn prebuffer_frames(queue: &sdl2::audio::AudioQueue<i16>, ms: u16) -> usize {
 }
 
 impl audio::AudioOutput for SdlAudio {
+    fn name(&self) -> &str {
+        self.subsystem.current_audio_driver()
+    }
+
     fn queued_frames(&self) -> usize {
         self.queue.size() as usize / 4
     }
@@ -71,16 +76,46 @@ impl audio::AudioOutput for SdlAudio {
     }
 }
 
-/// Give the machine the sound device, or say there is none: without one
-/// (as in a virtual machine without a sound card) the emulator runs silent.
+/// What `open_output` chose.
+pub(crate) enum Output {
+    Sdl(sdl2::audio::AudioQueue<i16>, sdl2::AudioSubsystem),
+    /// The null output; the error is why SDL's device couldn't be opened,
+    /// if it was tried.
+    Null(Option<String>),
+}
+
+/// Open the sound output `settings` choose. `headless` is a run with no
+/// window to go with the sound.
+pub(crate) fn open_output(sdl: &sdl2::Sdl, settings: &Settings, headless: bool) -> Output {
+    let driver_named = std::env::var_os("SDL_AUDIODRIVER").is_some();
+    if !settings.audio_output.wants_sdl(headless, driver_named) {
+        return Output::Null(None);
+    }
+    let device = sdl
+        .audio()
+        .and_then(|subsystem| Ok((open_audio(&subsystem, settings.audio_buffer.blocksize)?, subsystem)));
+    match device {
+        Ok((queue, subsystem)) => Output::Sdl(queue, subsystem),
+        Err(e) => Output::Null(Some(e)),
+    }
+}
+
+/// Give the machine its sound output. Without a sound device (as in a
+/// virtual machine without a sound card) the emulator runs silent on the
+/// null output, so the queue and its underruns still count.
 pub(crate) fn attach(
     cpu: &mut Cpu,
-    audio_device: Result<(sdl2::audio::AudioQueue<i16>, sdl2::AudioSubsystem), String>,
+    output: Output,
     settings: &Settings,
     audio_mix: &Rc<Cell<display::audio_mix::Mix>>,
 ) {
-    match audio_device {
-        Ok((queue, subsystem)) => {
+    match output {
+        Output::Sdl(queue, subsystem) => {
+            let driver = subsystem.current_audio_driver();
+            if driver.eq_ignore_ascii_case("dummy") {
+                warn_dummy(cpu);
+            }
+            cpu.bus.log_string(&format!("[AUDIO] Sound output: SDL's {} driver", driver));
             let mix = audio_mix.clone();
             let prebuffer = prebuffer_frames(&queue, settings.audio_buffer.prebuffer);
             let output = SdlAudio {
@@ -93,11 +128,27 @@ pub(crate) fn attach(
             };
             cpu.bus.audio_device = Some(Box::new(output));
         }
-        Err(e) => {
-            eprintln!("[AUDIO] No sound device, so no sound: {}", e);
-            cpu.bus.log_string(&format!("[AUDIO] No sound device, so no sound: {}", e));
+        Output::Null(error) => {
+            if let Some(e) = error {
+                eprintln!("[AUDIO] No sound device, so no sound: {}", e);
+                cpu.bus.log_string(&format!("[AUDIO] No sound device, so no sound: {}", e));
+            }
+            cpu.bus.log_string("[AUDIO] Sound output: the null output");
+            cpu.bus.audio_device = Some(Box::new(NullAudio::new(settings.audio_buffer)));
         }
     }
+}
+
+/// SDL's dummy driver runs faster than real time, so the queue runs dry
+/// however well the host keeps up. Said on stderr too, where a measuring
+/// script sees it.
+fn warn_dummy(cpu: &mut Cpu) {
+    let warning = "[AUDIO] WARNING: SDL's dummy audio driver is active. It runs faster than \
+                   real time, so underrun counts are wrong, and no measurement may use it. \
+                   Use a real driver (SDL_AUDIODRIVER=wasapi on Windows) with --mute, or \
+                   --audio-output null without a sound device.";
+    eprintln!("{}", warning);
+    cpu.bus.log_string(warning);
 }
 
 /// The 3D scene's own sounds (the rain, thunder, switches) on a sound

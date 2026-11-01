@@ -4,6 +4,7 @@ pub mod apm;
 pub mod archive;
 pub mod asm16;
 pub mod audio;
+pub mod null_audio;
 pub mod autoinput;
 pub mod automount;
 pub mod autospeed;
