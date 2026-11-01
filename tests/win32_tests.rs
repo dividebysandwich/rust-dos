@@ -2571,6 +2571,584 @@ fn a_dll_whose_entry_point_fails_is_not_loaded() {
     );
 }
 
+/// MSVCRT.DLL loaded by a program that doesn't import it, as Windows 98
+/// SE does it: LoadLibrary counts, the last FreeLibrary takes it out of the
+/// process, so that GetModuleHandle, GetProcAddress and FreeLibrary fail
+/// for it, and the next load starts the C runtime again (rand's seed).
+#[test]
+fn a_program_loads_and_frees_msvcrt_without_importing_it() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetLastError",
+        "SetUnhandledExceptionFilter",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0strlen\0srand\0rand\0";
+    const NAME: u32 = 0;
+    const STRLEN: u32 = 11;
+    const SRAND: u32 = 18;
+    const RAND: u32 = 24;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        // Loaded, and known by its name.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        // A function of it works.
+        a.push(l.at(STRLEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.push(l.at(STRLEN) as i32)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.cmp(eax, 6)?;
+        check(a, false, 2)?;
+        // Two references, the same module.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 3)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        // A seed for the state that the last free ends.
+        a.push(l.at(SRAND) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.push(5)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.mov(edi, eax)?;
+        // The C++ filter it set went with it.
+        a.push(0)?;
+        a.call(f("SetUnhandledExceptionFilter"))?;
+        a.or(eax, edi)?;
+        check(a, false, 5)?;
+        // The handle is no longer one: ERROR_INVALID_HANDLE.
+        let mut wrong = a.create_label();
+        a.push(l.at(STRLEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.mov(edi, eax)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 6)?;
+        a.jne(wrong)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.or(edi, eax)?;
+        a.set_label(&mut wrong)?;
+        check(a, false, 6)?;
+        // Loaded again, seeded with 1 as a new runtime is.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(l.at(RAND) as i32)?;
+        a.push(eax)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.cmp(eax, 41)?;
+        check(a, false, 7)?;
+        // All bits set is also the exit code of a program that faults, as
+        // this one does on a NULL from GetProcAddress.
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("load_msvcrt", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
+/// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
+/// 98 SE. A stream left open isn't flushed and its file stays open, so
+/// its handle still works and a load of a file with no sharing fails.
+/// The runtime's heap goes: a block malloc gave is free address space
+/// after it, and a program that loads, mallocs 256 KB and frees the DLL
+/// 600 times neither runs out nor changes the process heap.
+#[test]
+fn the_last_free_of_msvcrt_takes_its_heap_and_leaves_its_streams() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "CreateFileA",
+        "CloseHandle",
+        "GetFileSize",
+        "GetLastError",
+        "VirtualQuery",
+        "GetProcessHeap",
+        "HeapAlloc",
+        "HeapFree",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0fopen\0fprintf\0_fileno\0_get_osfhandle\0malloc\0T.TMP\0w\0buffered\0";
+    const NAME: u32 = 0;
+    const FOPEN: u32 = 11;
+    const FPRINTF: u32 = 17;
+    const FILENO: u32 = 25;
+    const OSFHANDLE: u32 = 33;
+    const MALLOC: u32 = 48;
+    const FILE: u32 = 55;
+    const MODE: u32 = 61;
+    const TEXT: u32 = 63;
+    /// MEMORY_BASIC_INFORMATION, and its State.
+    const QUERY: u32 = PROGRAM_DATA + 0x100;
+    const STATE: u32 = QUERY + 16;
+    const MEM_COMMIT: i32 = 0x1000;
+    const MEM_FREE: i32 = 0x10000;
+    const GENERIC_READ_WRITE: u32 = 0xC000_0000;
+    const OPEN_EXISTING: i32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const CYCLES: i32 = 600;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let crt = |a: &mut CodeAssembler, name: u32| -> Result<(), IcedError> {
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetProcAddress"))
+        };
+        let open_alone = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(0)?;
+            a.push(0)?;
+            a.push(OPEN_EXISTING)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(GENERIC_READ_WRITE as i32)?;
+            a.push(l.at(FILE) as i32)?;
+            a.call(f("CreateFileA"))
+        };
+        let query = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(28)?;
+            a.push(QUERY as i32)?;
+            a.push(edi)?;
+            a.call(f("VirtualQuery"))
+        };
+        let new_block = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.call(f("GetProcessHeap"))?;
+            a.push(32)?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("HeapAlloc"))?;
+            a.mov(edi, eax)?;
+            a.call(f("GetProcessHeap"))?;
+            a.push(edi)?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("HeapFree"))
+        };
+        a.xor(ebx, ebx)?;
+        // A stream with text in its buffer, and its handle.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, FOPEN)?;
+        a.push(l.at(MODE) as i32)?;
+        a.push(l.at(FILE) as i32)?;
+        a.call(eax)?;
+        a.add(esp, 8)?;
+        a.mov(edi, eax)?;
+        crt(a, FPRINTF)?;
+        a.push(l.at(TEXT) as i32)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 8)?;
+        crt(a, FILENO)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(edi, eax)?;
+        crt(a, OSFHANDLE)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(ebp, eax)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        // The file is open still, and has none of the text.
+        open_alone(a)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+        check(a, false, 0)?;
+        a.push(0)?;
+        a.push(ebp)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        // Closing the handle ends that.
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        open_alone(a)?;
+        a.mov(edi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        // A block is there until the runtime goes.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, MALLOC)?;
+        a.push(100)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(edi, eax)?;
+        query(a)?;
+        a.cmp(dword_ptr(STATE as u64), MEM_COMMIT)?;
+        check(a, false, 3)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        query(a)?;
+        a.cmp(dword_ptr(STATE as u64), MEM_FREE)?;
+        check(a, false, 4)?;
+        // Blocks left behind again and again.
+        new_block(a)?;
+        a.mov(ebp, edi)?;
+        a.mov(edi, CYCLES)?;
+        let mut again = a.create_label();
+        let mut out = a.create_label();
+        a.set_label(&mut again)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, MALLOC)?;
+        a.push(0x40000)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        a.je(out)?;
+        a.mov(byte_ptr(eax + 0x3FFFF), 1)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.dec(edi)?;
+        a.jne(again)?;
+        a.set_label(&mut out)?;
+        a.test(edi, edi)?;
+        check(a, false, 5)?;
+        new_block(a)?;
+        a.cmp(edi, ebp)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("msvcrt_last_free", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x7F, "the checks that passed: {code:07b}, {text}");
+}
+
+/// Built-in DLLs loaded while a second thread runs. MSVCRT.DLL comes
+/// with a DLL file that calls it from its entry point and goes with it;
+/// OLE32.DLL goes at its FreeLibrary. A DLL the program imports stays, as
+/// does KERNEL32.DLL, whatever FreeLibrary it gets.
+#[test]
+fn a_built_in_dll_stays_while_something_holds_it() {
+    const SEEN: u32 = PROGRAM_DATA + 0x100;
+    let dll_data = b"hello\0";
+    let dll_imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", &["strlen"])];
+    let entry = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 1)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.add(esp, 4)?;
+        a.mov(dword_ptr(SEEN as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        dll_imports,
+        dll_data,
+        &[("", &entry)],
+        &[],
+    );
+
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "CreateThread",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", names), ("ADVAPI32.DLL", &["RegCloseKey"])];
+    let mut data = b"MSVCRT.DLL\0X.DLL\0OLE32.DLL\0ADVAPI32.DLL\0KERNEL32.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    const MSVCRT: u32 = 0;
+    const X: u32 = 11;
+    const OLE32: u32 = 17;
+    const ADVAPI32: u32 = 27;
+    const KERNEL32: u32 = 40;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut after = a.create_label();
+        a.xor(ebx, ebx)?;
+        // A thread that sleeps, whose function's address the call leaves.
+        a.call(after)?;
+        a.push(-1)?;
+        a.call(f("Sleep"))?;
+        a.set_label(&mut after)?;
+        a.pop(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        // Its entry point called strlen.
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(SEEN as u64))?;
+        a.cmp(eax, 5)?;
+        check(a, false, 0)?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        // A built-in DLL with no variables goes as well.
+        a.push(l.at(OLE32) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(OLE32) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        for (name, bit) in [(ADVAPI32, 4), (KERNEL32, 5)] {
+            a.push(l.at(name) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.push(eax)?;
+            a.call(f("FreeLibrary"))?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.test(eax, eax)?;
+            check(a, true, bit)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_held", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// A DLL's DLL_PROCESS_DETACH loads the built-in DLL that is going with
+/// it: the load holds it, so it stays, under the handle the load gave.
+#[test]
+fn a_built_in_dll_loaded_as_it_goes_stays() {
+    const SEEN: u32 = PROGRAM_DATA + 0x100;
+    let dll_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["LoadLibraryA"]),
+        ("MSVCRT.DLL", &["strlen"]),
+    ];
+    let entry = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(SEEN as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        dll_imports,
+        b"MSVCRT.DLL\0",
+        &[("", &entry)],
+        &[],
+    );
+
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"X.DLL\0MSVCRT.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    const X: u32 = 0;
+    const MSVCRT: u32 = 6;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, dword_ptr(SEEN as u64))?;
+        check(a, false, 1)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_revived", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b}, {}",
+        !code & 7,
+        text
+    );
+}
+
+/// A state saved after the last free of a built-in DLL has its mapping and
+/// stub pages: after a load the DLL isn't there, and it loads again where
+/// it was, with a new runtime.
+#[test]
+fn a_freed_built_in_dll_comes_back_after_a_saved_state() {
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetProcAddress", "Sleep"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0rand\0";
+    const NAME: u32 = 0;
+    const RAND: u32 = 11;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(l.at(RAND) as i32)?;
+        a.push(eax)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.ret()
+    };
+    let image = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let mut cpu = machine("builtin_saved", image);
+    let has_crt = |cpu: &Cpu| {
+        let modules = cpu.bus.win32.modules();
+        modules.iter().any(|(name, ..)| name == "MSVCRT.DLL")
+    };
+    let run_until = |cpu: &mut Cpu, wanted: bool| {
+        for _ in 0..400_000 {
+            if has_crt(cpu) == wanted {
+                return;
+            }
+            cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+            run_batch(cpu, &mut NoHook, false);
+        }
+        panic!("MSVCRT.DLL never went to {}", wanted);
+    };
+    run_until(&mut cpu, true);
+    run_until(&mut cpu, false);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 41, "before the load");
+
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(!has_crt(&cpu));
+    cpu.errorlevel = 0;
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 41, "after the load");
+}
+
+/// A DLL file over the place of a built-in DLL keeps it: that built-in
+/// DLL doesn't load, and nothing is written over the file's image.
+#[test]
+fn a_built_in_dll_does_not_load_over_a_dll_file() {
+    // Up to past BF740000h, where OPENGL32.DLL goes.
+    const X_BASE: u32 = 0xBF73_0000;
+    const OPENGL32_RVA: u32 = 0x1_0000;
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll_data = vec![0x5A; 0x1_2000];
+    let dll = module_image(X_BASE, Some("X.DLL"), &[], &dll_data, &[("", &entry)], &[]);
+
+    let names: &[&str] = &["LoadLibraryA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"X.DLL\0OPENGL32.DLL\0";
+    const X: u32 = 0;
+    const OPENGL32: u32 = 6;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.push(l.at(X) as i32)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, X_BASE as i32)?;
+        check(a, false, 0)?;
+        a.push(l.at(OPENGL32) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.cmp(
+            dword_ptr((X_BASE + OPENGL32_RVA) as u64),
+            0x5A5A_5A5Au32 as i32,
+        )?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_over_file", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b}, {}",
+        !code & 7,
+        text
+    );
+}
+
 #[test]
 fn a_program_missing_a_dll_function_is_refused() {
     let imports: &[(&str, &[&str])] = &[("C.DLL", &["G"])];
@@ -3537,6 +4115,1335 @@ fn a_program_catches_its_cxx_exceptions() {
     let (code, text) = run("msvcrt_cxx", exe);
     assert_eq!(text, "f\r\n");
     assert_eq!(code, 0);
+}
+
+/// What a script for `update_script` does to the window, or checks.
+#[derive(Clone, Copy)]
+enum Upd {
+    /// SetWindowPos to this size, with SWP_NOREDRAW.
+    Size(i32, i32),
+    /// SetWindowPos to the corner of the screen or parent, SWP_NOREDRAW.
+    MoveHome,
+    /// SetWindowRgn with a 50x50 region, or with none.
+    Region,
+    NoRegion,
+    /// ValidateRect, of this rectangle or the client area.
+    Validate(Option<[i32; 4]>),
+    /// RedrawWindow of the whole window with these flags.
+    Redraw(i32),
+    /// Dispatch what is queued, up to 20 WM_PAINTs, with the counts of
+    /// `Sent` from zero. The procedure answers WM_PAINT with ValidateRect.
+    Pump,
+    /// GetUpdateRect says TRUE and gives this rectangle.
+    Update([i32; 4]),
+    /// GetUpdateRect says FALSE.
+    NoUpdate,
+    /// GetUpdateRgn says NULLREGION.
+    EmptyUpdateRgn,
+    /// The last `Pump` saw this many WM_PAINTs and WM_NCPAINTs.
+    Sent(i32, i32),
+    /// The last `Pump` saw no endless WM_PAINT.
+    NoLoop,
+}
+
+const RDW_INVALIDATE: i32 = 0x0001;
+const RDW_VALIDATE: i32 = 0x0008;
+const RDW_FRAME: i32 = 0x0400;
+const RDW_NOFRAME: i32 = 0x0800;
+const POPUP: i32 = WS_POPUP | WS_VISIBLE;
+const POPUP_BORDER: i32 = POPUP | 0x0080_0000;
+
+/// Where a script for `update_script` runs: a window of `style` at `at`
+/// of `size`, or a child of it at (x, y) and this size, which the script
+/// then works on.
+#[derive(Clone, Copy)]
+struct UpdWindow {
+    class_style: i32,
+    style: i32,
+    at: (i32, i32),
+    size: (i32, i32),
+    child: Option<(i32, i32, i32)>,
+}
+
+const WINDOW_100: UpdWindow = UpdWindow {
+    class_style: 0,
+    style: POPUP,
+    at: (0, 0),
+    size: (100, 100),
+    child: None,
+};
+
+/// Run `script` on `window`. The exit code: the number of the first
+/// step that went differently, from 1, or 0.
+fn update_script(test: &str, window: UpdWindow, script: &[Upd]) -> u8 {
+    const WM_PAINT: i32 = 0x000F;
+    const WM_NCPAINT: i32 = 0x0085;
+    const PM_REMOVE: i32 = 1;
+    const SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001E;
+    const SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001D;
+    const LOOP_CAP: i32 = 20;
+    const NULLREGION: i32 = 1;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+        "SetWindowRgn",
+        "ValidateRect",
+        "RedrawWindow",
+        "GetUpdateRect",
+        "GetUpdateRgn",
+        "PeekMessageA",
+        "DispatchMessageA",
+    ];
+    let gdi: &[&str] = &["CreateRectRgn"];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[
+        ("USER32.dll", names),
+        ("GDI32.dll", gdi),
+        ("KERNEL32.dll", kernel),
+    ];
+    let mut d = Data::default();
+    let name = d.text("UpdateScript");
+    let msg = d.add(&[0; 28]);
+    let paints = d.add(&[0; 4]);
+    let ncpaints = d.add(&[0; 4]);
+    let rect = d.add(&[0; 16]);
+    let named = d.add(&[0; 16]);
+    let mut wndclass = [0; 40];
+    wndclass[0..4].copy_from_slice(&window.class_style.to_le_bytes());
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        let mut done = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut not_paint = a.create_label();
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_PAINT)?;
+        a.jne(not_paint)?;
+        a.inc(dword_ptr(l.at(paints)))?;
+        a.push(0)?;
+        a.push(dword_ptr(esp + 8))?;
+        a.call(f("ValidateRect"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut not_paint)?;
+        a.cmp(dword_ptr(esp + 8), WM_NCPAINT)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(ncpaints)))?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let (x, y) = window.at;
+        let (w, h) = window.size;
+        for value in [0, BASE as i32, 0, 0, h, w, y, x, window.style] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(ebx, eax)?;
+        if let Some((x, y, size)) = window.child {
+            const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+            a.push(0)?;
+            a.push(BASE as i32)?;
+            a.push(0)?;
+            a.push(ebx)?;
+            for value in [size, size, y, x, WS_CHILD_VISIBLE] {
+                a.push(value)?;
+            }
+            a.push(l.at(name) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.push(0)?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(ebx, eax)?;
+        }
+        for (i, step) in script.iter().enumerate() {
+            let number = i as i32 + 1;
+            match *step {
+                Upd::Size(w, h) => {
+                    let flags = SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW;
+                    for value in [flags, h, w, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("SetWindowPos"))?;
+                }
+                Upd::MoveHome => {
+                    let flags = SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW;
+                    for value in [flags, 0, 0, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("SetWindowPos"))?;
+                }
+                Upd::Region => {
+                    for value in [50, 50, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.call(l.import(names.len()))?;
+                    a.push(0)?;
+                    a.push(eax)?;
+                    a.push(ebx)?;
+                    a.call(f("SetWindowRgn"))?;
+                }
+                Upd::NoRegion => {
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("SetWindowRgn"))?;
+                }
+                Upd::Validate(None) => {
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("ValidateRect"))?;
+                }
+                Upd::Validate(Some(r)) => {
+                    for (j, value) in r.into_iter().enumerate() {
+                        a.mov(dword_ptr(l.at(named + 4 * j as u32)), value)?;
+                    }
+                    a.push(l.at(named) as i32)?;
+                    a.push(ebx)?;
+                    a.call(f("ValidateRect"))?;
+                }
+                Upd::Redraw(flags) => {
+                    for value in [flags, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("RedrawWindow"))?;
+                }
+                Upd::Pump => {
+                    let mut again = a.create_label();
+                    let mut empty = a.create_label();
+                    a.mov(dword_ptr(l.at(paints)), 0)?;
+                    a.mov(dword_ptr(l.at(ncpaints)), 0)?;
+                    a.set_label(&mut again)?;
+                    a.cmp(dword_ptr(l.at(paints)), LOOP_CAP)?;
+                    a.jge(empty)?;
+                    for value in [PM_REMOVE, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(l.at(msg) as i32)?;
+                    a.call(f("PeekMessageA"))?;
+                    a.test(eax, eax)?;
+                    a.je(empty)?;
+                    a.push(l.at(msg) as i32)?;
+                    a.call(f("DispatchMessageA"))?;
+                    a.jmp(again)?;
+                    a.set_label(&mut empty)?;
+                }
+                Upd::Update(r) => {
+                    a.push(0)?;
+                    a.push(l.at(rect) as i32)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRect"))?;
+                    a.test(eax, eax)?;
+                    a.mov(eax, number)?;
+                    a.je(done)?;
+                    for (j, value) in r.into_iter().enumerate() {
+                        a.cmp(dword_ptr(l.at(rect + 4 * j as u32)), value)?;
+                        a.jne(done)?;
+                    }
+                }
+                Upd::NoUpdate => {
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRect"))?;
+                    a.test(eax, eax)?;
+                    a.mov(eax, number)?;
+                    a.jne(done)?;
+                }
+                Upd::EmptyUpdateRgn => {
+                    for value in [0, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.call(l.import(names.len()))?;
+                    a.push(0)?;
+                    a.push(eax)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRgn"))?;
+                    a.cmp(eax, NULLREGION)?;
+                    a.mov(eax, number)?;
+                    a.jne(done)?;
+                }
+                Upd::Sent(p, nc) => {
+                    a.mov(eax, number)?;
+                    a.cmp(dword_ptr(l.at(paints)), p)?;
+                    a.jne(done)?;
+                    a.cmp(dword_ptr(l.at(ncpaints)), nc)?;
+                    a.jne(done)?;
+                }
+                Upd::NoLoop => {
+                    a.mov(eax, number)?;
+                    a.cmp(dword_ptr(l.at(paints)), LOOP_CAP)?;
+                    a.jge(done)?;
+                }
+            }
+        }
+        a.xor(eax, eax)?;
+        a.set_label(&mut done)?;
+        a.push(eax)?;
+        a.call(l.import(names.len() + 1))?;
+        Ok(())
+    });
+    run(test, exe).0
+}
+
+/// The update region survives a shrink, as on Windows 98 and 11: a
+/// 100x100 window made 50x50 reports 50x50, but grown back without being
+/// validated it has all 100x100 still to paint. Validating is what ends
+/// it: this time nothing comes back.
+#[test]
+fn the_update_region_survives_a_shrink_until_it_is_validated() {
+    use Upd::*;
+    let script = [
+        Size(50, 50),
+        Update([0, 0, 50, 50]),
+        Size(100, 100),
+        Update([0, 0, 100, 100]),
+        Size(50, 50),
+        Validate(None),
+        NoUpdate,
+        Size(100, 100),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_regrow", WINDOW_100, &script), 0);
+}
+
+/// Omikron's window: Windows 98 reports 640x480 of a 641x481 window on
+/// its 640x480 screen, and ValidateRect leaves nothing when it then
+/// shrinks to 640x480. Omikron's frames ran only with no WM_PAINT waiting.
+#[test]
+fn a_window_larger_than_the_screen_stops_asking_for_wm_paint() {
+    use Upd::*;
+    let window = UpdWindow {
+        size: (641, 481),
+        ..WINDOW_100
+    };
+    let script = [
+        Update([0, 0, 640, 480]),
+        Size(640, 480),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+    ];
+    assert_eq!(update_script("upd_omikron", window, &script), 0);
+}
+
+/// Windows 98 reports what of the client area is on the screen, 40
+/// columns here, but the region keeps the rest: the window moved back
+/// reports all of it.
+#[test]
+fn the_screen_limits_what_is_reported_not_the_update_region() {
+    use Upd::*;
+    let window = UpdWindow {
+        at: (600, 0),
+        ..WINDOW_100
+    };
+    let script = [Update([0, 0, 40, 100]), MoveHome, Update([0, 0, 100, 100])];
+    assert_eq!(update_script("upd_screen", window, &script), 0);
+}
+
+/// A child hanging out of its parent reports only the part inside the
+/// parent, on Windows 98 and 11, and keeps the rest: moved back into the
+/// parent it reports all of it.
+#[test]
+fn a_parent_limits_what_is_reported_of_a_child_and_not_its_update_region() {
+    use Upd::*;
+    let window = UpdWindow {
+        child: Some((80, 0, 60)),
+        ..WINDOW_100
+    };
+    let script = [Update([0, 0, 20, 60]), MoveHome, Update([0, 0, 60, 60])];
+    assert_eq!(update_script("upd_child_out", window, &script), 0);
+}
+
+/// Any ValidateRect clips what is left to the client area, as on
+/// Windows 98 and 11: of a rectangle in it, of one elsewhere, of an
+/// empty one. Grown back, the window has 50x50 to paint, not 100x100.
+#[test]
+fn any_validate_clips_the_rest_to_the_client_area() {
+    use Upd::*;
+    for (test, rect) in [
+        ("upd_valid_inside", [0, 0, 10, 10]),
+        ("upd_valid_outside", [60, 60, 70, 70]),
+        ("upd_valid_empty", [5, 5, 5, 5]),
+    ] {
+        let script = [
+            Size(50, 50),
+            Validate(Some(rect)),
+            Size(100, 100),
+            Update([0, 0, 50, 50]),
+        ];
+        assert_eq!(update_script(test, WINDOW_100, &script), 0, "{test}");
+    }
+}
+
+/// Validating with RDW_FRAME validates nothing on Windows 98 and 11, and
+/// clips nothing: the whole region comes back.
+#[test]
+fn rdw_validate_with_rdw_frame_leaves_the_update_region() {
+    use Upd::*;
+    let script = [
+        Size(50, 50),
+        Redraw(RDW_VALIDATE | RDW_FRAME),
+        Update([0, 0, 50, 50]),
+        Size(100, 100),
+        Update([0, 0, 100, 100]),
+    ];
+    assert_eq!(update_script("upd_rdw_frame", WINDOW_100, &script), 0);
+}
+
+/// SetWindowRgn doesn't crop the update region, as on Windows 98 and
+/// 11, and neither does invalidating: GetUpdateRect gives the whole
+/// client area of a 100x100 window with a 50x50 region. Validating 50x50
+/// of it leaves nothing, and taking the region off shows none was kept.
+#[test]
+fn a_window_region_limits_what_validating_keeps_and_nothing_else() {
+    use Upd::*;
+    let script = [
+        Region,
+        Update([0, 0, 100, 100]),
+        Validate(Some([0, 0, 50, 50])),
+        NoUpdate,
+        NoRegion,
+        NoUpdate,
+        Region,
+        Redraw(RDW_INVALIDATE),
+        Update([0, 0, 100, 100]),
+    ];
+    assert_eq!(update_script("upd_region", WINDOW_100, &script), 0);
+}
+
+/// A window that shrinks so that its update region lies under its new
+/// frame: on Windows 98 validating leaves nothing, and neither WM_PAINT
+/// nor WM_NCPAINT comes, as that frame was never invalidated.
+#[test]
+fn a_shrink_into_the_frame_gives_no_wm_ncpaint() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Size(50, 50),
+        Update([0, 0, 48, 48]),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+        Size(100, 100),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_frame_shrink", window, &script), 0);
+}
+
+/// A CS_PARENTDC child shrunk from 60 to 30 reports 30x30 on Windows 98,
+/// and validated it has nothing left. A plain child does the same. The
+/// WM_PAINT Windows sends after that goes to the parent.
+#[test]
+fn a_shrunk_child_has_nothing_left_after_validating() {
+    use Upd::*;
+    const CS_PARENTDC: i32 = 0x0080;
+    let script = [
+        Size(30, 30),
+        Update([0, 0, 30, 30]),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        NoLoop,
+        NoUpdate,
+    ];
+    for (test, class_style) in [("upd_child", 0), ("upd_parentdc", CS_PARENTDC)] {
+        let window = UpdWindow {
+            class_style,
+            child: Some((0, 0, 60)),
+            ..WINDOW_100
+        };
+        assert_eq!(update_script(test, window, &script), 0, "{test}");
+    }
+}
+
+/// A frame invalidated on purpose is out of ValidateRect's reach on
+/// Windows 98: GetUpdateRgn is then empty, GetUpdateRect still gives the
+/// client area, and one WM_PAINT and one WM_NCPAINT follow.
+#[test]
+fn an_invalidated_frame_survives_validate_rect() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Update([0, 0, 98, 98]),
+        Validate(None),
+        Update([0, 0, 98, 98]),
+        EmptyUpdateRgn,
+        Pump,
+        Sent(1, 1),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_frame", window, &script), 0);
+}
+
+/// With a frame still to paint validating keeps it, by the window as it
+/// is now: on Windows 98 the 50x50 ring of a shrunk window is left, which
+/// grown back reports as 49x49 of the client area. RDW_NOFRAME drops the
+/// frame first, and with it all of the rest.
+#[test]
+fn a_pending_frame_is_clipped_to_the_window_when_validating() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Size(50, 50),
+        Validate(None),
+        Size(100, 100),
+        Update([0, 0, 49, 49]),
+        Pump,
+        Sent(1, 1),
+    ];
+    assert_eq!(update_script("upd_frame_clip", window, &script), 0);
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Size(50, 50),
+        Redraw(RDW_VALIDATE | RDW_NOFRAME),
+        Size(100, 100),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+    ];
+    assert_eq!(update_script("upd_noframe", window, &script), 0);
+}
+
+const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
+const SET_TERMINATE: &str = "?set_terminate@@YAP6AXXZP6AXXZ@Z";
+
+/// A program with a translator and a try with one catch, in which an
+/// access violation happens: the translator gets its code and record, and
+/// with `throws` throws (char *)0x55 for the catch (char *) to take;
+/// otherwise it returns, and the catch is a catch (...). `ehs` marks the
+/// function as built with /EHs. The exit code has a bit each.
+fn translator_program(throws: bool, ehs: bool) -> Vec<u8> {
+    let names: &[&str] = &[
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        SET_TRANSLATOR,
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    let info = d.add(&[0; 36]);
+    let unwind = d.add(&[0; 16]);
+    let entry = d.add(&[0; 20]);
+    let handler = d.add(&[0; 16]);
+    let bits = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 4]| -> Result<[CodeLabel; 4], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut thunk = a.create_label();
+            let mut catch = a.create_label();
+            let mut after = a.create_label();
+            let mut translator = a.create_label();
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            put(a, throw_info + 12, data(list))?;
+            put(a, info, if ehs { 0x1993_0522 } else { 0x1993_0520 })?;
+            put(a, info + 4, 2)?;
+            put(a, info + 8, data(unwind))?;
+            put(a, info + 12, 1)?;
+            put(a, info + 16, data(entry))?;
+            put(a, info + 32, ehs as u32)?;
+            put(a, unwind, u32::MAX)?;
+            put(a, unwind + 8, u32::MAX)?;
+            put(a, entry + 8, 1)?;
+            put(a, entry + 12, 1)?;
+            put(a, entry + 16, data(handler))?;
+            if throws {
+                put(a, handler + 4, data(char_pointer))?;
+            }
+            put(a, handler + 8, -0x14i32 as u32)?;
+            put(a, handler + 12, at[1])?;
+
+            // The second call gets the translator the first set.
+            a.push(0x1234)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            a.mov(ecx, at[2])?;
+            a.push(ecx)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, 0x1234)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 1)?;
+            a.set_label(&mut skip)?;
+
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.push(-1)?;
+            a.mov(eax, at[0])?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.xor(eax, eax)?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.int3()?;
+
+            // catch (char *p): p is what the translator threw.
+            a.set_label(&mut catch)?;
+            let mut skip = a.create_label();
+            if throws {
+                a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
+                a.jne(skip)?;
+            }
+            a.or(dword_ptr(l.at(bits)), 4)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, at[3])?;
+            a.ret()?;
+
+            a.set_label(&mut after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // translator(code, pointers): throw (char *)0x55; or return.
+            a.set_label(&mut translator)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.cmp(eax, dword_ptr(esp + 4))?;
+            a.jne(skip)?;
+            a.cmp(eax, 0xC000_0005u32 as i32)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 2)?;
+            a.set_label(&mut skip)?;
+            if throws {
+                put(a, thrown, 0x55)?;
+                a.push(data(throw_info) as i32)?;
+                a.push(data(thrown) as i32)?;
+                a.call(f("_CxxThrowException"))?;
+                a.int3()?;
+            } else {
+                a.ret()?;
+            }
+
+            a.set_label(&mut thunk)?;
+            a.mov(eax, data(info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([thunk, catch, translator, after])
+        };
+        let labels = code(a, [0; 4])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 4];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    })
+}
+
+/// _set_se_translator: the C++ exception the translator throws reaches
+/// the catch.
+#[test]
+fn a_translator_turns_a_fault_into_a_cxx_exception() {
+    let (code, _) = run("msvcrt_se_translator", translator_program(true, false));
+    assert_eq!(code, 7);
+}
+
+/// A translator that returns leaves the exception to the catch (...).
+#[test]
+fn a_catch_all_takes_a_fault_the_translator_returned_from() {
+    let (code, _) = run(
+        "msvcrt_se_translator_returns",
+        translator_program(false, false),
+    );
+    assert_eq!(code, 7);
+}
+
+/// A function built with /EHs handles C++ exceptions only: its translator
+/// isn't called for the fault, which nothing else handles, so the
+/// program ends with FFh. That is what MSVCRT.DLL of Windows 11 does.
+/// Windows 98's DLL knows only magic 19930520h and ends the program with
+/// terminate() for this table; the built-in one takes the later magic
+/// numbers for the programs that use them.
+#[test]
+fn a_function_built_with_ehs_does_not_translate() {
+    let (code, _) = run("msvcrt_se_translator_ehs", translator_program(true, true));
+    assert_eq!(code, 0xFF);
+}
+
+/// What a translator of `nested_frames_program` does: throws (char *)0x55,
+/// the same with a destructor in the throw's ThrowInfo, that on its first
+/// call and returns after it, returns or faults.
+#[derive(Clone, Copy, PartialEq)]
+enum Translator {
+    Throws,
+    ThrowsWithDestructor,
+    ThrowsOnce,
+    Returns,
+    Faults,
+}
+
+/// The inner function's try: a catch (char), which takes neither the fault
+/// nor the (char *) thrown; a catch (...) before a catch (char); no try
+/// block at all; a catch (...) whose block faults; that with a try around
+/// it whose catch (...) sets the 10h bit; or a FuncInfo with a bad magic.
+#[derive(Clone, Copy, PartialEq)]
+enum Inner {
+    CatchChar,
+    CatchAllFirst,
+    NoTry,
+    CatchFaults,
+    CatchFaultsInTry,
+    BadMagic,
+    /// A catch (...) whose block does `throw;`.
+    CatchRethrows,
+    /// A catch (char *) whose block faults.
+    CaughtFaults,
+    /// The frame in state 9, past its table.
+    BadState,
+    /// A throw with no frame on the chain.
+    Uncaught,
+}
+
+/// The outer function: none, a catch (char *) or a catch (...).
+#[derive(Clone, Copy, PartialEq)]
+enum Outer {
+    None,
+    CatchPointer,
+    CatchAll,
+}
+
+/// A program with a translator, a __except-like SEH frame of its own and,
+/// inside it, the outer function and the inner one, which runs into an
+/// access violation or, with `int3`, a breakpoint. The exit code says what
+/// happened: the low four bits how many times the translator ran, 10h that
+/// the outer catch ran, 20h that it got 55h, 40h that the SEH frame saw
+/// the exception the inner function raised with its parameters, 80h that
+/// the thrown object's destructor ran.
+fn nested_frames_program(
+    translator: Translator,
+    inner: Inner,
+    outer: Outer,
+    int3: bool,
+) -> Vec<u8> {
+    const STATES: u32 = 2;
+    let names: &[&str] = &[
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        SET_TRANSLATOR,
+        SET_TERMINATE,
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let char_type = d.add(&[0; 8]);
+    d.text(".D");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    let inner_info = d.add(&[0; 36]);
+    let outer_info = d.add(&[0; 36]);
+    let unwind = d.add(&[0; 16]);
+    let inner_try = d.add(&[0; 40]);
+    let outer_try = d.add(&[0; 20]);
+    let inner_handlers = d.add(&[0; 32]);
+    let outer_handler = d.add(&[0; 16]);
+    let bits = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 11]| -> Result<[CodeLabel; 11], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            let mut inner_thunk = a.create_label();
+            let mut outer_thunk = a.create_label();
+            let mut inner_code = a.create_label();
+            let mut outer_code = a.create_label();
+            let mut outer_catch = a.create_label();
+            let mut outer_after = a.create_label();
+            let mut translate = a.create_label();
+            let mut seh = a.create_label();
+            let mut destructor = a.create_label();
+            let mut faulting_catch = a.create_label();
+            let mut around_catch = a.create_label();
+            let mut inner_after = a.create_label();
+            let mut on_terminate = a.create_label();
+            let [
+                inner_at,
+                outer_at,
+                catch_at,
+                after_at,
+                translate_at,
+                seh_at,
+                destructor_at,
+                faulting_at,
+                around_at,
+                inner_after_at,
+                terminate_at,
+            ] = at;
+
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            if matches!(
+                translator,
+                Translator::ThrowsWithDestructor | Translator::ThrowsOnce
+            ) {
+                put(a, throw_info + 4, destructor_at)?;
+            }
+            put(a, throw_info + 12, data(list))?;
+            let tries = match inner {
+                Inner::NoTry => 0,
+                Inner::CatchFaultsInTry => 2,
+                _ => 1,
+            };
+            for (info, tries, entry) in [(inner_info, tries, inner_try), (outer_info, 1, outer_try)]
+            {
+                let bad = info == inner_info && inner == Inner::BadMagic;
+                put(a, info, if bad { 0x1234_5678 } else { 0x1993_0520 })?;
+                put(a, info + 4, STATES)?;
+                put(a, info + 8, data(unwind))?;
+                put(a, info + 12, tries)?;
+                put(a, info + 16, data(entry))?;
+            }
+            put(a, unwind, u32::MAX)?;
+            // In the inner catch block, state 1, the try around it holds.
+            let before = if inner == Inner::CatchFaultsInTry {
+                0
+            } else {
+                u32::MAX
+            };
+            put(a, unwind + 8, before)?;
+            for entry in [inner_try, outer_try] {
+                put(a, entry + 8, 1)?;
+            }
+            // The inner catches aren't taken: a return from one is an int3.
+            put(
+                a,
+                inner_try + 12,
+                1 + (inner == Inner::CatchAllFirst) as u32,
+            )?;
+            put(a, inner_try + 16, data(inner_handlers))?;
+            match inner {
+                Inner::CatchChar => put(a, inner_handlers + 4, data(char_type))?,
+                Inner::CatchFaults | Inner::CatchFaultsInTry | Inner::CatchRethrows => {
+                    put(a, inner_handlers + 12, faulting_at)?;
+                }
+                Inner::CaughtFaults => {
+                    put(a, inner_handlers + 4, data(char_pointer))?;
+                    put(a, inner_handlers + 8, -0x14i32 as u32)?;
+                    put(a, inner_handlers + 12, faulting_at)?;
+                }
+                _ => put(a, inner_handlers + 16 + 4, data(char_type))?,
+            }
+            // The try around it: its first state to 2, its catch to 3.
+            put(a, inner_try + 20 + 4, 2)?;
+            put(a, inner_try + 20 + 8, 3)?;
+            put(a, inner_try + 20 + 12, 1)?;
+            put(a, inner_try + 20 + 16, data(inner_handlers + 16))?;
+            if inner == Inner::CatchFaultsInTry {
+                put(a, inner_handlers + 16 + 12, around_at)?;
+            }
+            put(a, outer_try + 12, 1)?;
+            put(a, outer_try + 16, data(outer_handler))?;
+            if outer == Outer::CatchPointer {
+                put(a, outer_handler + 4, data(char_pointer))?;
+            }
+            put(a, outer_handler + 8, -0x14i32 as u32)?;
+            put(a, outer_handler + 12, catch_at)?;
+
+            a.mov(ecx, translate_at)?;
+            a.push(ecx)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            if matches!(inner, Inner::BadState | Inner::Uncaught) {
+                a.mov(ecx, terminate_at)?;
+                a.push(ecx)?;
+                a.call(f(SET_TERMINATE))?;
+                a.add(esp, 4)?;
+            }
+            a.mov(eax, seh_at)?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            if outer == Outer::None {
+                a.call(inner_code)?;
+            } else {
+                a.call(outer_code)?;
+            }
+            a.pop(dword_ptr(0u64).fs())?;
+            a.add(esp, 4)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // A function with a try around what it does.
+            let frame = |a: &mut CodeAssembler, thunk: u32| -> Result<(), IcedError> {
+                a.push(ebp)?;
+                a.mov(ebp, esp)?;
+                a.push(-1)?;
+                a.mov(eax, thunk)?;
+                a.push(eax)?;
+                a.push(dword_ptr(0u64).fs())?;
+                a.mov(dword_ptr(0u64).fs(), esp)?;
+                a.sub(esp, 0x10)?;
+                a.mov(dword_ptr(ebp - 0x10), esp)?;
+                a.mov(dword_ptr(ebp - 4), 0)
+            };
+            a.set_label(&mut inner_code)?;
+            frame(a, inner_at)?;
+            if inner == Inner::BadState {
+                a.mov(dword_ptr(ebp - 4), 9)?;
+            }
+            if inner == Inner::Uncaught {
+                a.mov(dword_ptr(0u64).fs(), -1)?;
+                a.push(data(throw_info) as i32)?;
+                a.push(data(thrown) as i32)?;
+                a.call(f("_CxxThrowException"))?;
+            } else if int3 {
+                a.int3()?;
+            } else {
+                a.xor(eax, eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+            }
+            a.int3()?;
+
+            // The inner catches.
+            a.set_label(&mut faulting_catch)?;
+            if inner == Inner::CatchRethrows {
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("_CxxThrowException"))?;
+            } else {
+                a.xor(eax, eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+            }
+            a.int3()?;
+            a.set_label(&mut around_catch)?;
+            a.or(dword_ptr(l.at(bits)), 0x10)?;
+            a.mov(eax, inner_after_at)?;
+            a.ret()?;
+            a.set_label(&mut inner_after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            a.set_label(&mut outer_code)?;
+            frame(a, outer_at)?;
+            a.call(inner_code)?;
+            a.int3()?;
+
+            // The outer catch.
+            a.set_label(&mut outer_catch)?;
+            let mut skip = a.create_label();
+            a.or(dword_ptr(l.at(bits)), 0x10)?;
+            a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 0x20)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, after_at)?;
+            a.ret()?;
+
+            a.set_label(&mut outer_after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            // translator(code, pointers): count, then do what it does.
+            a.set_label(&mut translate)?;
+            a.add(dword_ptr(l.at(bits)), 1)?;
+            match translator {
+                Translator::Throws | Translator::ThrowsWithDestructor => {
+                    put(a, thrown, 0x55)?;
+                    a.push(data(throw_info) as i32)?;
+                    a.push(data(thrown) as i32)?;
+                    a.call(f("_CxxThrowException"))?;
+                    a.int3()?;
+                }
+                Translator::Returns => a.ret()?,
+                Translator::ThrowsOnce => {
+                    let mut once = a.create_label();
+                    a.cmp(dword_ptr(l.at(bits)), 1)?;
+                    a.je(once)?;
+                    a.ret()?;
+                    a.set_label(&mut once)?;
+                    put(a, thrown, 0x55)?;
+                    a.push(data(throw_info) as i32)?;
+                    a.push(data(thrown) as i32)?;
+                    a.call(f("_CxxThrowException"))?;
+                    a.int3()?;
+                }
+                Translator::Faults => {
+                    let mut go_on = a.create_label();
+                    a.cmp(dword_ptr(l.at(bits)), 4)?;
+                    a.jb(go_on)?;
+                    a.push(dword_ptr(l.at(bits)))?;
+                    a.call(f("exit"))?;
+                    a.set_label(&mut go_on)?;
+                    a.xor(eax, eax)?;
+                    a.mov(eax, dword_ptr(eax))?;
+                    a.ret()?;
+                }
+            }
+
+            // The SEH frame's handler: ends the program.
+            a.set_label(&mut seh)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(esp + 4))?;
+            let raised = if int3 { 0x8000_0003u32 } else { 0xC000_0005 };
+            a.cmp(dword_ptr(eax), raised as i32)?;
+            a.jne(skip)?;
+            // NumberParameters: 2 for a fault, 1 for a breakpoint.
+            a.cmp(dword_ptr(eax + 16), if int3 { 1 } else { 2 })?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 0x40)?;
+            a.set_label(&mut skip)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            a.set_label(&mut destructor)?;
+            a.or(dword_ptr(l.at(bits)), 0x80)?;
+            a.ret()?;
+
+            // The terminate handler.
+            a.set_label(&mut on_terminate)?;
+            a.or(dword_ptr(l.at(bits)), 0x70)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            a.set_label(&mut inner_thunk)?;
+            a.mov(eax, data(inner_info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            a.set_label(&mut outer_thunk)?;
+            a.mov(eax, data(outer_info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([
+                inner_thunk,
+                outer_thunk,
+                outer_catch,
+                outer_after,
+                translate,
+                seh,
+                destructor,
+                faulting_catch,
+                around_catch,
+                inner_after,
+                on_terminate,
+            ])
+        };
+        let labels = code(a, [0; 11])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 11];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    })
+}
+
+/// `nested_frames_program` run: its exit code.
+fn run_nested(test: &str, translator: Translator, inner: Inner, outer: Outer) -> u8 {
+    run(test, nested_frames_program(translator, inner, outer, false)).0
+}
+
+/// `throw;` in a catch (...) of a fault: the block's guard runs the
+/// translator, the block ends and the search that found the catch goes on,
+/// so that the SEH frame gets the fault's own record.
+#[test]
+fn a_rethrown_fault_keeps_its_record() {
+    let code = run_nested(
+        "msvcrt_rethrow_fault",
+        Translator::Returns,
+        Inner::CatchRethrows,
+        Outer::None,
+    );
+    assert_eq!(code, 0x42);
+}
+
+/// The same with a catch (...) outside: one more call, and it takes the
+/// fault.
+#[test]
+fn a_rethrown_fault_reaches_the_outer_catch() {
+    let code = run_nested(
+        "msvcrt_rethrow_fault_outer",
+        Translator::Returns,
+        Inner::CatchRethrows,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A catch block an exception leaves ends as if it returned: the catch
+/// (char *) faults, three more calls of the translator follow, and the
+/// unwind for the outer catch (...) destroys the object of the first.
+#[test]
+fn an_abandoned_catch_destroys_its_object() {
+    let code = run_nested(
+        "msvcrt_abandoned_catch",
+        Translator::ThrowsOnce,
+        Inner::CaughtFaults,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x94);
+}
+
+/// A state past the table is terminate(), before the translator, and the
+/// thread's terminate handler runs.
+#[test]
+fn a_bad_state_calls_the_terminate_handler() {
+    let code = run_nested(
+        "msvcrt_bad_state",
+        Translator::Returns,
+        Inner::BadState,
+        Outer::None,
+    );
+    assert_eq!(code, 0x70);
+}
+
+/// A C++ exception nothing takes reaches MSVCRT's unhandled exception
+/// filter, which is terminate().
+#[test]
+fn an_uncaught_exception_calls_the_terminate_handler() {
+    let code = run_nested(
+        "msvcrt_uncaught",
+        Translator::Returns,
+        Inner::Uncaught,
+        Outer::None,
+    );
+    assert_eq!(code, 0x70);
+}
+
+/// MSVCRT.DLL 6.00.8397 looks for the exception a translator throws in the
+/// function it ran for and no further: with no catch there the exception
+/// is destroyed and the fault goes on to the outer function, whose handler
+/// runs the translator again, so that one's throw is what the outer
+/// catch (char *) gets.
+#[test]
+fn a_translated_exception_stays_in_its_function() {
+    let code = run_nested(
+        "msvcrt_se_translator_outer",
+        Translator::Throws,
+        Inner::CatchChar,
+        Outer::CatchPointer,
+    );
+    assert_eq!(code, 0x32);
+}
+
+/// The same with a catch (...) outside: two calls, and the outer one's
+/// throw is what it takes.
+#[test]
+fn a_catch_all_outside_gets_the_second_translation() {
+    let code = run_nested(
+        "msvcrt_se_translator_outer_all",
+        Translator::Throws,
+        Inner::CatchChar,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x12);
+}
+
+/// Past the last function with a try, a frame of another kind sees the
+/// access violation, never the C++ exception.
+#[test]
+fn an_seh_frame_sees_the_fault_and_not_the_translation() {
+    let code = run_nested(
+        "msvcrt_se_translator_seh",
+        Translator::Throws,
+        Inner::CatchChar,
+        Outer::None,
+    );
+    assert_eq!(code, 0x41);
+}
+
+/// The exception nothing took is destroyed on the way.
+#[test]
+fn a_dropped_translation_is_destroyed() {
+    let code = run_nested(
+        "msvcrt_se_translator_destroyed",
+        Translator::ThrowsWithDestructor,
+        Inner::CatchChar,
+        Outer::None,
+    );
+    assert_eq!(code, 0xC1);
+}
+
+/// A fault in the translator is terminate(): abort()'s exit code 3, after
+/// one call and with the catch (...) never reached.
+#[test]
+fn a_fault_in_the_translator_terminates() {
+    let code = run_nested(
+        "msvcrt_se_translator_faults",
+        Translator::Faults,
+        Inner::CatchChar,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 3);
+}
+
+/// For an exception other than C++ the DLL looks at the last handler of a
+/// try only, so a catch (...) ahead of another handler doesn't take it.
+#[test]
+fn only_the_last_handler_takes_a_fault() {
+    let code = run_nested(
+        "msvcrt_se_translator_not_last",
+        Translator::Returns,
+        Inner::CatchAllFirst,
+        Outer::None,
+    );
+    assert_eq!(code, 0x41);
+}
+
+/// A translator that returns is called once for each function with a try,
+/// innermost first, up to the one that takes the fault.
+#[test]
+fn a_translator_runs_for_each_function_with_a_try() {
+    let code = run_nested(
+        "msvcrt_se_translator_each",
+        Translator::Returns,
+        Inner::CatchChar,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x12);
+}
+
+/// A function with no try block doesn't call it.
+#[test]
+fn a_function_without_try_blocks_does_not_translate() {
+    let code = run_nested(
+        "msvcrt_se_translator_no_try",
+        Translator::Returns,
+        Inner::NoTry,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x11);
+}
+
+/// In a catch block the DLL has a guard frame on top of the function's, and
+/// both call the translator: the fault there runs it twice more, three
+/// calls with the one for the fault the catch took.
+#[test]
+fn a_fault_in_a_catch_block_translates_twice() {
+    let code = run_nested(
+        "msvcrt_se_translator_in_catch",
+        Translator::Returns,
+        Inner::CatchFaults,
+        Outer::None,
+    );
+    assert_eq!(code, 0x43);
+}
+
+/// With a try around the catch block, the catch (...) of that try is only
+/// looked at from the function's frame, after both calls.
+#[test]
+fn a_try_around_a_catch_block_comes_after_both_calls() {
+    let code = run_nested(
+        "msvcrt_se_translator_around_catch",
+        Translator::Returns,
+        Inner::CatchFaultsInTry,
+        Outer::None,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A translator that throws there: the guard's call finds nothing at its
+/// depth and the exception is dropped, the frame's call throws again, and
+/// the try around the catch block takes that.
+#[test]
+fn a_throw_in_a_catch_block_goes_to_the_try_around_it() {
+    let code = run_nested(
+        "msvcrt_se_translator_throw_in_catch",
+        Translator::Throws,
+        Inner::CatchFaultsInTry,
+        Outer::None,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A FuncInfo with a bad magic number is terminate(), before anything else.
+#[test]
+fn a_bad_func_info_terminates() {
+    let code = run_nested(
+        "msvcrt_bad_func_info",
+        Translator::Returns,
+        Inner::BadMagic,
+        Outer::None,
+    );
+    assert_eq!(code, 3);
+}
+
+/// The 1999 DLL translates a breakpoint as any other exception; later ones
+/// skip it. Its record has one parameter on Windows 98 and later.
+#[test]
+fn a_breakpoint_is_translated() {
+    let program = nested_frames_program(Translator::Returns, Inner::CatchChar, Outer::None, true);
+    let (code, _) = run("msvcrt_se_translator_int3", program);
+    assert_eq!(code, 0x41);
 }
 
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
@@ -5183,4 +7090,473 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     });
     let (code, text) = run("wow32", exe);
     assert_eq!(code, 0, "{}", text);
+}
+
+/// CONTEXT's Eip and EFlags, and TF.
+const CTX_EIP: i32 = 0xB8;
+const CTX_EFLAGS: i32 = 0xC0;
+const TF: u32 = 0x100;
+const DF: u32 = 0x400;
+const SINGLE_STEP: u32 = 0x8000_0004;
+const BREAKPOINT: u32 = 0x8000_0003;
+const ACCESS_VIOLATION: u32 = 0xC000_0005;
+
+/// `xor eax, eax`, then TF set with POPFD. What follows it is X.
+const SET_TF: &[u8] = &[0x31, 0xC0, 0x9C, 0x81, 0x0C, 0x24, 0, 1, 0, 0, 0x9D];
+/// Four `inc eax` and a RET.
+const INCS: &[u8] = &[0x40, 0x40, 0x40, 0x40, 0xC3];
+/// The arguments of RaiseException(RAISED, 0, 0, 0), and the call, with
+/// the function's address in EBX.
+const RAISE_ARGS: &[u8] = &[0x6A, 0, 0x6A, 0, 0x6A, 0, 0x68, 0x34, 0x12, 0, 0xE0];
+const CALL_EBX: &[u8] = &[0xFF, 0xD3];
+const RAISED: u32 = 0xE000_1234;
+/// What a handler's context says it has: the control, integer, segment,
+/// floating-point and debug register parts.
+const CONTEXT_FLAGS: u32 = 0x1_001F;
+/// The size of what `trace_program` notes of an exception, in words, and
+/// how many it has room for.
+const HIT_WORDS: usize = 6;
+const MAX_HITS: usize = 8;
+
+/// What one exception gave a handler.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct Hit {
+    code: u32,
+    address: u32,
+    eip: u32,
+    eflags: u32,
+    /// The flags the handler itself ran with.
+    live: u32,
+    context_flags: u32,
+}
+
+/// A program that runs `code`, with an exception handler that notes each
+/// exception and returns `answer`, or as the unhandled exception filter
+/// with `filter`. `then` runs in the handler for each exception, with the
+/// record at ECX, the context at EDX and the number of exceptions before
+/// this one in ESI. `code` starts with RaiseException's address in EBX.
+/// The program prints what it noted and EAX as `code` left it.
+fn trace_program(
+    code: &[u8],
+    filter: bool,
+    answer: i32,
+    then: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
+    const HITS: u32 = 0;
+    const EAX: u32 = 4;
+    const TABLE: u32 = 8;
+    const WRITTEN: u32 = 0xF0;
+    const CODE: u32 = 0x100;
+    let hit_size = 4 * HIT_WORDS as i32;
+    let mut data = vec![0u8; CODE as usize];
+    data.extend_from_slice(code);
+    let names: &[&str] = &[
+        "SetUnhandledExceptionFilter",
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "RaiseException",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut at = 0;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        at = l.at(CODE) as u32;
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut note = a.create_label();
+        let mut start = a.create_label();
+        let mut over = a.create_label();
+        a.jmp(start)?;
+        a.set_label(&mut note)?;
+        a.pushfd()?;
+        a.pop(eax)?;
+        a.mov(esi, dword_ptr(l.at(HITS)))?;
+        a.imul_3(edi, esi, hit_size)?;
+        a.add(edi, l.at(TABLE) as i32)?;
+        a.mov(dword_ptr(edi + 16), eax)?;
+        a.mov(eax, dword_ptr(ecx))?;
+        a.mov(dword_ptr(edi), eax)?;
+        a.mov(eax, dword_ptr(ecx + 12))?;
+        a.mov(dword_ptr(edi + 4), eax)?;
+        a.mov(eax, dword_ptr(edx + CTX_EIP))?;
+        a.mov(dword_ptr(edi + 8), eax)?;
+        a.mov(eax, dword_ptr(edx + CTX_EFLAGS))?;
+        a.mov(dword_ptr(edi + 12), eax)?;
+        a.mov(eax, dword_ptr(edx))?;
+        a.mov(dword_ptr(edi + 20), eax)?;
+        a.inc(dword_ptr(l.at(HITS)))?;
+        then(a)?;
+        a.ret()?;
+        a.set_label(&mut start)?;
+        // The handler's address, which the CALL over it pushes.
+        a.call(over)?;
+        a.pushad()?;
+        if filter {
+            a.mov(eax, dword_ptr(esp + 32 + 4))?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.mov(edx, dword_ptr(eax + 4))?;
+        } else {
+            a.mov(ecx, dword_ptr(esp + 32 + 4))?;
+            a.mov(edx, dword_ptr(esp + 32 + 12))?;
+        }
+        a.call(note)?;
+        a.popad()?;
+        a.mov(eax, answer)?;
+        if filter {
+            a.ret_1(4)?;
+        } else {
+            a.ret()?;
+        }
+        a.set_label(&mut over)?;
+        if filter {
+            a.call(f("SetUnhandledExceptionFilter"))?;
+        } else {
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+        }
+        a.mov(ebx, f("RaiseException"))?;
+        a.mov(eax, l.at(CODE) as i32)?;
+        a.call(eax)?;
+        a.mov(dword_ptr(l.at(EAX)), eax)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(l.at(WRITTEN) as i32)?;
+        a.push(TABLE as i32 + MAX_HITS as i32 * hit_size)?;
+        a.push(l.at(0) as i32)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    (exe, at)
+}
+
+/// Run `exe` to its end on the core `core`: EAX as the code left it and
+/// the exceptions noted.
+fn traced(test: &str, exe: Vec<u8>, core: CoreMode) -> (u32, Vec<Hit>) {
+    let mut cpu = machine(test, exe);
+    cpu.core = core;
+    assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+    let out = &cpu.host_console.as_ref().unwrap().stdout;
+    assert_eq!(out.len(), 8 + 4 * MAX_HITS * HIT_WORDS, "{:?}", printed(&cpu));
+    let word = |i: usize| u32::from_le_bytes(out[4 * i..4 * i + 4].try_into().unwrap());
+    let hits = (0..word(0) as usize)
+        .map(|i| {
+            let at = 2 + HIT_WORDS * i;
+            Hit {
+                code: word(at),
+                address: word(at + 1),
+                eip: word(at + 2),
+                eflags: word(at + 3),
+                live: word(at + 4),
+                context_flags: word(at + 5),
+            }
+        })
+        .collect();
+    (word(1), hits)
+}
+
+/// `SET_TF`, `next` at X, and `INCS`; and X's address.
+fn after_tf(next: &[u8]) -> (Vec<u8>, u32) {
+    ([SET_TF, next, INCS].concat(), SET_TF.len() as u32)
+}
+
+/// Check a single-step exception with the handler's flags.
+fn assert_step(hit: &Hit, at: u32) {
+    assert_eq!(hit.code, SINGLE_STEP, "{:X?}", hit);
+    assert_eq!(hit.address, at, "{:X?}", hit);
+    assert_eq!(hit.eip, at, "{:X?}", hit);
+    assert_eq!(hit.eflags & TF, 0, "{:X?}", hit);
+    assert_eq!(hit.live & TF, 0, "{:X?}", hit);
+    assert_eq!(hit.context_flags, CONTEXT_FLAGS, "{:X?}", hit);
+}
+
+/// As Windows 98: the trap comes after the instruction after POPFD, with
+/// TF clear in the handler and in the context, and the handler continuing
+/// at the context runs on untraced.
+#[test]
+fn a_program_that_sets_tf_gets_one_single_step_exception() {
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let (code, x) = after_tf(&[]);
+        let (exe, at) = trace_program(&code, false, 0, |_| Ok(()));
+        let (value, hits) = traced("single_step", exe, core);
+        assert_eq!(value, 4);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_step(&hits[0], at + x + 1);
+    }
+}
+
+/// Sets TF in the context until there have been `count` exceptions.
+fn keep_tf(a: &mut CodeAssembler, count: i32) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(esi, count - 1)?;
+    a.jge(done)?;
+    a.or(dword_ptr(edx + CTX_EFLAGS), TF as i32)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+#[test]
+fn a_handler_that_keeps_tf_in_the_context_steps_on() {
+    let (code, x) = after_tf(&[]);
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 5));
+    let (value, hits) = traced("step_on", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 5, "{:X?}", hits);
+    for (i, hit) in hits[..4].iter().enumerate() {
+        assert_step(hit, at + x + 1 + i as u32);
+    }
+    // The RET's trap is past the RET, in the code that called it.
+    assert_eq!(hits[4].code, SINGLE_STEP);
+    assert_eq!(hits[4].eip, hits[4].address);
+    let outside = !(at..at + code.len() as u32).contains(&hits[4].eip);
+    assert!(outside, "{:X?}", hits[4]);
+}
+
+#[test]
+fn the_unhandled_exception_filter_gets_the_single_step_exception() {
+    let (code, x) = after_tf(&[]);
+    let (exe, at) = trace_program(&code, true, -1, |a| keep_tf(a, 3));
+    let (value, hits) = traced("step_filter", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 3, "{:X?}", hits);
+    for (i, hit) in hits.iter().enumerate() {
+        assert_step(hit, at + x + 1 + i as u32);
+    }
+}
+
+/// A single-step exception no handler takes ends the program as any
+/// exception does.
+#[test]
+fn a_single_step_exception_nobody_takes_ends_the_program() {
+    let (code, _) = after_tf(&[]);
+    let (exe, _) = trace_program(&code, false, 1, |_| Ok(()));
+    let (exit, text) = run("step_unhandled", exe);
+    assert_eq!(exit, 0xFF);
+    assert!(text.contains("debug exception"), "{}", text);
+    assert!(!text.contains("its stack is gone"), "{}", text);
+}
+
+/// Another exception with TF set leaves TF in its context, though not in
+/// the handler, so going on at the context raises the trap after the
+/// next instruction, whose context has TF clear.
+#[test]
+fn a_fault_with_tf_set_keeps_it_in_the_context() {
+    // MOV EAX, [0]; the handler goes past it.
+    let (code, x) = after_tf(&[0xA1, 0, 0, 0, 0]);
+    let (exe, at) = trace_program(&code, false, 0, |a| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+        a.jne(done)?;
+        a.add(dword_ptr(edx + CTX_EIP), 5)?;
+        a.set_label(&mut done)?;
+        a.nop()
+    });
+    let (value, hits) = traced("step_fault", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, ACCESS_VIOLATION);
+    assert_eq!(hits[0].eip, at + x);
+    assert_eq!(hits[0].eflags & TF, TF, "{:X?}", hits[0]);
+    assert_eq!(hits[0].live & TF, 0, "{:X?}", hits[0]);
+    assert_step(&hits[1], at + x + 6);
+}
+
+#[test]
+fn an_int3_with_tf_set_keeps_it_in_the_context() {
+    let (code, x) = after_tf(&[0xCC]);
+    let (exe, at) = trace_program(&code, false, 0, |_| Ok(()));
+    let (value, hits) = traced("step_int3", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, BREAKPOINT);
+    assert_eq!(hits[0].eip, at + x + 1);
+    assert_eq!(hits[0].eflags & TF, TF, "{:X?}", hits[0]);
+    assert_eq!(hits[0].live & TF, 0, "{:X?}", hits[0]);
+    assert_step(&hits[1], at + x + 2);
+}
+
+/// A handler can start the stepping: TF set in the context of a
+/// breakpoint, the trap follows the next instruction.
+#[test]
+fn a_handler_sets_tf_in_a_breakpoints_context() {
+    let code = [&[0x31, 0xC0, 0xCC], INCS].concat();
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 2));
+    let (value, hits) = traced("step_from_int3", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, BREAKPOINT);
+    assert_eq!(hits[0].eflags & TF, 0);
+    assert_step(&hits[1], at + 4);
+}
+
+/// RaiseException called with TF set. Its entry traps, and the exception
+/// comes next, with TF in its context: the handler it enters runs with TF
+/// clear, so no trap comes from the first instruction of the handler.
+#[test]
+fn raise_exception_with_tf_set_does_not_trap_in_the_handler() {
+    let code = [RAISE_ARGS, SET_TF, CALL_EBX, INCS].concat();
+    let x = (RAISE_ARGS.len() + SET_TF.len()) as u32;
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 2));
+    let (value, hits) = traced("step_raise", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 3, "{:X?}", hits);
+    assert_eq!(hits[0].code, SINGLE_STEP, "{:X?}", hits[0]);
+    assert_eq!(hits[0].eip, hits[0].address);
+    let outside = !(at..at + code.len() as u32).contains(&hits[0].eip);
+    assert!(outside, "{:X?}", hits[0]);
+    assert_eq!(hits[1].code, RAISED, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eip, at + x + 2, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eflags & TF, TF, "{:X?}", hits[1]);
+    assert_eq!(hits[1].live & TF, 0, "{:X?}", hits[1]);
+    assert_step(&hits[2], at + x + 3);
+}
+
+/// `pushfd; pop eax; cld; ret`: the flags the code goes on with, in EAX.
+const FLAGS_IN_EAX: &[u8] = &[0x9C, 0x58, 0xFC, 0xC3];
+/// `std; mov eax, [0]`, five bytes to go past from the MOV.
+const STD_FAULT: &[u8] = &[0xFD, 0xA1, 0, 0, 0, 0];
+const FAULT: &[u8] = &[0xA1, 0, 0, 0, 0];
+
+/// In a handler: go past the MOV of `FAULT`.
+fn skip_fault(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+    a.jne(done)?;
+    a.add(dword_ptr(edx + CTX_EIP), 5)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+/// As Windows 98: DF in a handler and in a filter is clear whatever the
+/// program had, the context keeps it, and continuing puts it back.
+#[test]
+fn an_exception_clears_df_for_the_handler_and_continuing_restores_it() {
+    // PUSHFD; OR DWORD [ESP], TF | DF; POPFD; NOP.
+    let step: &[u8] = &[0x9C, 0x81, 0x0C, 0x24, 0, 5, 0, 0, 0x9D, 0x90];
+    let cases: [(&[&[u8]], bool, i32, u32); 5] = [
+        (&[STD_FAULT], false, 0, ACCESS_VIOLATION),
+        (&[&[0xFD, 0xCC]], false, 0, BREAKPOINT),
+        (&[step], false, 0, SINGLE_STEP),
+        (&[RAISE_ARGS, &[0xFD], CALL_EBX], false, 0, RAISED),
+        (&[STD_FAULT], true, -1, ACCESS_VIOLATION),
+    ];
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        for (parts, filter, answer, exception) in cases {
+            let code = [parts.concat().as_slice(), FLAGS_IN_EAX].concat();
+            let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+            let (value, hits) = traced("df_clear", exe, core);
+            assert_eq!(hits.len(), 1, "{:X?}", hits);
+            assert_eq!(hits[0].code, exception, "{:X?}", hits);
+            assert_eq!(hits[0].live & DF, 0, "{:X?}", hits);
+            assert_eq!(hits[0].eflags & DF, DF, "{:X?}", hits);
+            assert_eq!(value & DF, DF, "{:X}", value);
+        }
+    }
+}
+
+/// Continuing takes DF from the context: what a handler changes there,
+/// and not what it left in its own flags.
+#[test]
+fn continuing_takes_df_from_the_context() {
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.or(dword_ptr(edx + CTX_EFLAGS), DF as i32)
+    });
+    let (value, _) = traced("df_set", exe, CoreMode::Normal);
+    assert_eq!(value & DF, DF, "{:X}", value);
+    let code = [STD_FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.and(dword_ptr(edx + CTX_EFLAGS), !(DF as i32))
+    });
+    let (value, _) = traced("df_cleared", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.std()
+    });
+    let (value, _) = traced("df_left", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+}
+
+/// A handler that sets DF and searches on: the next handler starts with
+/// DF set and the unhandled exception filter with it clear, as on
+/// Windows 98, and the context stays as the fault left it.
+#[test]
+fn df_a_handler_leaves_reaches_the_next_handler_and_not_the_filter() {
+    // A frame of its own, whose handler is `std; mov eax, 1; ret`, around
+    // the fault, and its removal.
+    let frame_on: &[u8] = &[
+        0xE8, 7, 0, 0, 0, 0xFD, 0xB8, 1, 0, 0, 0, 0xC3, 0x64, 0xFF, 0x35, 0, 0, 0, 0, 0x64, 0x89,
+        0x25, 0, 0, 0, 0,
+    ];
+    let frame_off: &[u8] = &[0x64, 0x8F, 0x05, 0, 0, 0, 0, 0x83, 0xC4, 0x04];
+    let code = [frame_on, FAULT, frame_off, FLAGS_IN_EAX].concat();
+    for (filter, answer, live) in [(false, 0, DF), (true, -1, 0)] {
+        let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+        let (value, hits) = traced("df_search", exe, CoreMode::Normal);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_eq!(hits[0].live & DF, live, "{:X?}", hits);
+        assert_eq!(hits[0].eflags & DF, 0, "{:X?}", hits);
+        assert_eq!(value & DF, 0, "{:X}", value);
+    }
+}
+
+/// Windows 98's exit code for a process an unhandled exception ends,
+/// whatever the exception, with a filter that says so or with none.
+#[test]
+fn an_unhandled_exception_gives_the_exit_code_ffffffff() {
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(l.at(0xA0)), -1)?;
+        a.sete(al)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (step, _) = after_tf(&[]);
+    let fault = [&[0xA1, 0, 0, 0, 0], INCS].concat();
+    let raised = [RAISE_ARGS, CALL_EBX, INCS].concat();
+    // ESP on a page that isn't there: no handler can run.
+    let no_stack = [&[0xBC, 0x10, 0, 0, 0, 0xA1, 0, 0, 0, 0], INCS].concat();
+    for code in [&step, &fault, &raised, &no_stack] {
+        for filter in [false, true] {
+            let (child, _) = trace_program(code, filter, 1, |_| Ok(()));
+            let files = [("T.EXE", parent.clone()), ("C.EXE", child)];
+            let mut cpu = machine_with("unhandled_exit_code", &files);
+            assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+            assert_eq!(cpu.errorlevel, 1, "{}", printed(&cpu));
+        }
+    }
 }

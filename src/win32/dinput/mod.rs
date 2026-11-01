@@ -53,6 +53,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: VTABLES,
 };
 
@@ -135,6 +136,7 @@ pub static DLL8: Dll = Dll {
     apis: APIS8,
     vars: &[],
     init: None,
+    term: None,
     vtables: VTABLES8,
 };
 

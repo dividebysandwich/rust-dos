@@ -76,6 +76,7 @@ pub static DLL: Dll = Dll {
     apis: exports::APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
