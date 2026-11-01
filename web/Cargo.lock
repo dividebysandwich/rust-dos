@@ -836,6 +836,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "oxideav-core"
+version = "0.1.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16003ef2cd554e10f0c451d7a74b4c56b32473d50c174aefb3bdbe4139b9c14d"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "oxideav-indeo"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a96c125fe6d4d71ea2795ebcbcf229b484e3260fde20af83013ea2c40063abee"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -945,12 +965,12 @@ dependencies = [
  "libloading",
  "md-5",
  "memchr",
+ "oxideav-indeo",
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",
  "rust-dos-gus",
  "rust-dos-hostdirs",
- "rust-dos-indeo3",
  "rust-dos-installshield",
  "rust-dos-lpt-dac",
  "rust-dos-mpu401",
@@ -1005,10 +1025,6 @@ version = "1.8.0"
 dependencies = [
  "dirs",
 ]
-
-[[package]]
-name = "rust-dos-indeo3"
-version = "1.7.5"
 
 [[package]]
 name = "rust-dos-installshield"
