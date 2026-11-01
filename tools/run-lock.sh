@@ -7,6 +7,7 @@
 #   bash tools/run-lock.sh heavy OWNER [MAX_WAIT_S] -- CMD...
 #   bash tools/run-lock.sh measure OWNER [MAX_WAIT_S] -- CMD...
 #   bash tools/run-lock.sh status
+#   bash tools/run-lock.sh reap
 #   bash tools/run-lock.sh clear OWNER
 #
 # heavy waits while a measurement runs or waits, then runs CMD. Any number
@@ -22,10 +23,21 @@
 # hold lasts as long as CMD: a script that starts an emulator in the
 # background must wait for it before it returns.
 #
+# When the job ends, by either route, the script also stops every process
+# CMD started that is still running, including children whose parent has
+# already exited. On Windows, TERM to CMD alone leaves its emulator running.
+# CMD runs in its own process group, and MSYS ps keeps that group on a child
+# after the parent exits, so the group finds them. Processes that CMD
+# started through a native program (cmd.exe, for one) are found by their
+# Windows parent ID and start time, which needs powershell.exe.
+#
 # status lists the measurement holder, the running heavy jobs with their
-# command and age, and the measurements in line. clear removes OWNER's
-# hold, heavy tokens and place in line; use it only after OWNER's worker
-# has stopped.
+# command and age, the measurements in line, and the emulator processes
+# (RUST_DOS_RUN_LOCK_REAP_PATTERN, default rust-dos*.exe) with their start
+# time, parent and owning job. reap stops the emulators that no job holds
+# a token for: those left by a job that was killed without cleaning up,
+# or started outside the lock. clear removes OWNER's hold, heavy tokens
+# and place in line; use it only after OWNER's worker has stopped.
 #
 # OWNER is a short tag such as issue-123 (letters, digits, `.`, `_`, `-`).
 # The lock lives in RUST_DOS_RUN_LOCK_DIR (default ~/.rust-dos-run-lock),
@@ -110,6 +122,7 @@ token=
 ticket=
 keep_ticket=
 job=
+job_since=0
 waited=
 owner=
 cmd=
@@ -121,6 +134,7 @@ log() { echo "run-lock: $*" >&2; }
 usage() {
     echo "usage: run-lock.sh heavy|measure OWNER [MAX_WAIT_S] -- CMD..." >&2
     echo "       run-lock.sh status" >&2
+    echo "       run-lock.sh reap" >&2
     echo "       run-lock.sh clear OWNER" >&2
     exit 2
 }
@@ -142,6 +156,91 @@ alive() {
     [ "${2:-0}" != 0 ] || return 1
     tasklist //FI "PID eq $2" //FO CSV //NH 2>/dev/null |
         grep -Eqi "^\"(ba)?sh\.exe\",\"$2\""
+}
+
+# The Windows side of a job. Every process the script starts is a Windows
+# child of the script's own process, MSYS forks included, and a child that
+# outlives its parent keeps the parent's ID. So the processes of a job are
+# found from the script's Windows PID by parent ID, and by start time: one
+# that started at or after SINCE, so a reused ID doesn't match. The root
+# is not listed; it is the script. The PowerShell that does the search is
+# left out.
+win_tree_ps() {
+    cat << 'PS'
+$ErrorActionPreference = 'SilentlyContinue'
+$root = [int]$env:RL_ROOT
+$since = [int64]$env:RL_SINCE - 2
+$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate | ForEach-Object {
+  [pscustomobject]@{ Id = [int]$_.ProcessId; Parent = [int]$_.ParentProcessId; Name = $_.Name; Start = [int64]([DateTimeOffset]$_.CreationDate).ToUnixTimeSeconds() }
+})
+$anc = @{}
+$anc[$root] = $true
+$grow = $true
+while ($grow) {
+  $grow = $false
+  foreach ($p in $all) {
+    if ($p.Start -ge $since -and -not $anc.ContainsKey($p.Id) -and $anc.ContainsKey($p.Parent)) {
+      $anc[$p.Id] = $true
+      $grow = $true
+      if ($p.Name -ne 'powershell.exe') { Write-Output $p.Id }
+    }
+  }
+}
+PS
+}
+
+# Prints the Windows PIDs of the processes that ROOT_WIN started since SINCE.
+win_tree() { # ROOT_WIN SINCE
+    [ "${1:-0}" != 0 ] || return 0
+    command -v powershell.exe > /dev/null 2>&1 || return 0
+    RL_ROOT=$1 RL_SINCE=$2 powershell.exe -NoProfile -NonInteractive \
+        -Command "$(win_tree_ps)" < /dev/null 2> /dev/null | tr -d '\r'
+}
+
+# Force-stops the Windows PIDs read from stdin.
+kill_win() {
+    local p
+    while read -r p; do
+        [ -n "$p" ] && [ "$p" != 0 ] &&
+            taskkill //F //PID "$p" < /dev/null > /dev/null 2>&1
+    done
+    return 0
+}
+
+# Stops everything a job started, alive or not: the processes in its
+# process group (MSYS PID of CMD, see run_job) and the Windows children of
+# the script since the job began.
+stop_job() { # JOB_PID SINCE
+    {
+        [ "$1" = 0 ] || ps -W 2> /dev/null | awk -v g="$1" 'NR > 1 && $3 == g { print $4 }'
+        win_tree "$winpid" "$2"
+    } | kill_win
+}
+
+emulator_ps() {
+    cat << 'PS'
+$ErrorActionPreference = 'SilentlyContinue'
+$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate)
+$names = @{}
+foreach ($p in $all) { $names[[int]$p.ProcessId] = $p.Name }
+foreach ($p in $all) {
+  if ($p.Name -like $env:RL_PATTERN) {
+    $pp = [int]$p.ParentProcessId
+    $pn = 'gone'
+    if ($names.ContainsKey($pp)) { $pn = $names[$pp] }
+    $start = [int64]([DateTimeOffset]$p.CreationDate).ToUnixTimeSeconds()
+    Write-Output ("{0} {1} {2} {3} {4}" -f [int]$p.ProcessId, $start, $pp, $pn, $p.Name)
+  }
+}
+PS
+}
+
+# One line per emulator process: PID START PARENT PARENT_NAME NAME.
+emulator_list() {
+    command -v powershell.exe > /dev/null 2>&1 || return 0
+    RL_PATTERN=${RUST_DOS_RUN_LOCK_REAP_PATTERN:-rust-dos*.exe} \
+        powershell.exe -NoProfile -NonInteractive -Command "$(emulator_ps)" \
+        < /dev/null 2> /dev/null | tr -d '\r'
 }
 
 # Each record is written whole and renamed into place, so nobody reads a
@@ -267,6 +366,48 @@ heavy_running() {
     [ "$running" -gt 0 ]
 }
 
+# Writes "WINPID OWNER" to FILE for each Windows process of a job that holds
+# a token: those in the job's process group, and those under its script.
+owners() { # FILE
+    local f now psw
+    now=$(date +%s)
+    psw=$(ps -W 2> /dev/null)
+    : > "$1"
+    for f in "$HEAVY"/* "$LOCK"/hold.*; do
+        [ -e "$f" ] || continue
+        read_record "$f" || continue
+        record_stale "$now" && continue
+        if [ "$r_job" != 0 ]; then
+            printf '%s\n' "$psw" |
+                awk -v g="$r_job" -v o="$r_owner" 'NR > 1 && $3 == g { print $4, o }' >> "$1"
+        fi
+        win_tree "$r_win" "$r_since" | sed "s/\$/ $r_owner/" >> "$1"
+    done
+}
+
+clock() { # UNIX_TIME
+    date -d "@$1" +%H:%M:%S 2> /dev/null || date -r "$1" +%H:%M:%S
+}
+
+# Lists the emulator processes with their parent and owning job. With
+# reap, stops the ones no job holds a token for.
+emulators() { # status|reap
+    local owners=$DIR/owners.$me pid start ppid pname name who
+    owners "$owners"
+    emulator_list | while read -r pid start ppid pname name; do
+        who=$(sed -n "s/^$pid //p" "$owners")
+        if [ -n "$who" ]; then
+            echo "emulator: $name pid $pid, parent $ppid ($pname), started $(clock "$start"), job $who"
+        elif [ "$1" = reap ]; then
+            log "stopping $name pid $pid, parent $ppid ($pname), started $(clock "$start"): no job holds a token"
+            echo "$pid" | kill_win
+        else
+            echo "emulator: $name pid $pid, parent $ppid ($pname), started $(clock "$start"), no job holds a token (reap stops it)"
+        fi
+    done
+    rm -f "$owners"
+}
+
 # One failed pass of a wait: leaves if the caller died or time ran out,
 # otherwise sleeps.
 wait_turn() { # REASON
@@ -295,7 +436,12 @@ run_job() { # FILE CMD...
     shift
     { : <&0; } 2>/dev/null || exec 0< /dev/null
     since=$(date +%s)
+    job_since=$since
     export RUST_DOS_RUN_LOCK_INSIDE=$mode
+    # Job control gives CMD a process group of its own, whose ID is CMD's
+    # PID. MSYS keeps a process's group when its parent exits, so the
+    # group names every process CMD started, reparented or not.
+    set -m 2> /dev/null
     "$@" <&0 &
     job=$!
     write_record "$file" "$job"
@@ -432,6 +578,8 @@ clear_owner() {
 
 cleanup() {
     rm -f "$DIR/tmp.$me"
+    # Before the hold goes, so the next job never starts beside CMD's leftovers.
+    [ "$job_since" = 0 ] || stop_job "$job" "$job_since"
     [ -z "$token" ] || rm -f "$token"
     if [ -n "$hold" ]; then
         local try
@@ -501,6 +649,12 @@ status)
     [ $# -eq 0 ] || usage
     mkdir -p "$HEAVY" "$QUEUE" || exit 2
     status
+    emulators status
+    ;;
+reap)
+    [ $# -eq 0 ] || usage
+    mkdir -p "$HEAVY" "$QUEUE" || exit 2
+    emulators reap
     ;;
 clear)
     [ $# -eq 1 ] || usage
