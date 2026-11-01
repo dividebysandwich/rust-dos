@@ -858,16 +858,43 @@ fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> Op
 /// it: where it says when it names a directory or drive, else in the
 /// current directory and then in those of PATH, in order. Without an
 /// extension it is a .COM, .EXE or .BAT file, the first of them in the
-/// first directory that has one; other extensions don't run.
+/// first directory that has one; other extensions don't run. With the
+/// built-in Windows on, a screen saver named with its .SCR extension runs
+/// too, as Windows starts one (`SCRANTIC.SCR /s`): it is a Windows
+/// program under another extension.
 pub fn find_program(cpu: &Cpu, command: &str) -> Option<String> {
     const RUNNABLE: [&str; 3] = [".COM", ".EXE", ".BAT"];
     let name = command.rsplit(['\\', '/', ':']).next().unwrap_or(command);
-    let names: Vec<String> = match name.rfind('.') {
-        Some(dot) if RUNNABLE.iter().any(|ext| name[dot..].eq_ignore_ascii_case(ext)) => vec![command.to_string()],
+    // The extension from its dot on. Names are byte strings turned into
+    // chars, so a fixed-length slice from the end can split a char.
+    let ext = name.rfind('.').map(|dot| &name[dot..]);
+    let is_scr = ext.is_some_and(|ext| ext.eq_ignore_ascii_case(".SCR"));
+    let names: Vec<String> = match ext {
+        Some(ext) if RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r)) => {
+            vec![command.to_string()]
+        }
+        Some(_) if is_scr && cpu.bus.win32.enabled => vec![command.to_string()],
         Some(_) => return None,
-        None => RUNNABLE.iter().map(|ext| format!("{}{}", command, ext)).collect(),
+        None => RUNNABLE
+            .iter()
+            .map(|r| format!("{}{}", command, r))
+            .collect(),
     };
-    let find = |dir: &str| names.iter().map(|n| format!("{}{}", dir, n)).find(|p| cpu.bus.disk.is_file(p));
+    // A saver is a Windows program, so a .SCR file has to be an MZ image;
+    // without the check its bytes would run as a .COM.
+    let is_mz = |p: &str| {
+        cpu.bus
+            .disk
+            .file_data(p)
+            .and_then(|file| file.read().ok())
+            .is_some_and(|b| b.starts_with(b"MZ"))
+    };
+    let find = |dir: &str| {
+        names
+            .iter()
+            .map(|n| format!("{}{}", dir, n))
+            .find(|p| cpu.bus.disk.is_file(p) && (!is_scr || is_mz(p)))
+    };
     if let Some(path) = find("") {
         return Some(path);
     }
@@ -1105,8 +1132,13 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
             // as it was (the handlers commit everything else last).
             cpu.set_eip(eip);
             cpu.set_esp(start_esp);
-            if after_fault(cpu, fault, fetch.ram, phys_ip) && traced {
-                // An emulator service counts as one instruction.
+            // An emulator service counts as one instruction. One that left
+            // TF clear entered a handler, which drops the trap as INT n does
+            // (`trap_after`).
+            if after_fault(cpu, fault, fetch.ram, phys_ip)
+                && traced
+                && cpu.get_cpu_flag(CpuFlags::TF)
+            {
                 cpu.single_step_trap();
             }
         }
