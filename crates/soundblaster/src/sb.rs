@@ -540,7 +540,6 @@ impl SoundBlaster {
         self.frac = (total % PIT_HZ as u128) as u64;
         let ch = self.channel(t.bits16);
         let unit_bytes = if t.bits16 { 2 } else { 1 };
-        let mut buf = [0u8; 4096];
         while units > 0 {
             let Some(mut t) = self.transfer else { break };
             // The DSP waits while its DMA channel is masked, as a real one
@@ -551,6 +550,9 @@ impl SoundBlaster {
                 self.frac = 0;
                 break;
             };
+            // Made here, where a unit is read: `advance` runs this once a
+            // frame, and most frames at a low rate have no unit due.
+            let mut buf = [0u8; 4096];
             let mut k = (units.min(t.remaining as u64) as usize).min(buf.len() / unit_bytes);
             if t.input {
                 dma.transfer_skip(ch, k);
@@ -1001,8 +1003,8 @@ impl SoundBlaster {
 rust_dos_savestate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block } skip { high_speed, ignored_logged });
 rust_dos_savestate::state_fields!(SoundBlaster {
     reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
-    block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, frames, out_rate, pending_left,
-    mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
+    block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, frames, out_rate,
+    pending_left, mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
 } skip {
     // E2h's state isn't kept, so states saved before it load: the bus
     // starts its sequence over after a load (restart_dma_identification).
@@ -1015,7 +1017,8 @@ mod tests {
 
     #[test]
     fn high_speed_mode_logs_one_ignored_byte_per_transfer() {
-        let mut sb = SoundBlaster::new(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() }, 0);
+        let config = SbConfig { model: SbModel::SbPro2, ..SbConfig::default() };
+        let mut sb = SoundBlaster::new(config, 0);
         let mut log = Vec::new();
         sb.write(0xC, 0x90, &mut log);
         for byte in [0xD0, 0xD3, 0xE1, 0xDA] {

@@ -12,9 +12,10 @@ pub const PIT_HZ: u64 = 1_193_182;
 
 /// `a * b / c`, as with 128-bit numbers (the quotient cut to 64 bits), but
 /// in 64 where the product fits: a 128-bit division is a call of a
-/// library function on 64-bit hosts, and the cards work these out for
-/// every frame they render. The same as the clock's `mul_div`, so a frame
-/// a card counts from a tick is the frame the mixer counts from it.
+/// library function on 64-bit hosts, and the clock works these out at
+/// every port access, the cards for every frame they render. The clock
+/// (`timer.rs`) and the cards share this one, so a frame a card counts
+/// from a tick is the frame the mixer counts from it.
 #[inline]
 pub fn mul_div(a: u64, b: u64, c: u64) -> u64 {
     match a.checked_mul(b) {

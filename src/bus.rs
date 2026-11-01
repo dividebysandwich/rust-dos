@@ -1619,8 +1619,7 @@ impl Bus {
         }
         self.audio_frames = target;
         // The Sound Blaster made its frames up to `target` too: those
-        // before the span mixed now (skipped above, or made before the card
-        // was put in) go.
+        // before the span mixed now (skipped above) go.
         if let Some(sb) = &mut self.sb {
             let extra = sb.out.len().saturating_sub(frames);
             sb.out.drain(..extra);
@@ -1654,7 +1653,8 @@ impl Bus {
             let (wl, wr) = self.win32.cd_gain();
             (cl * wl, cr * wr)
         };
-        let sb_on = self.sb.as_ref().is_some_and(|sb| sb.speaker_on || sb.config.model.is_sb16());
+        let sb_on =
+            self.sb.as_ref().is_some_and(|sb| sb.speaker_on || sb.config.model.is_sb16());
         const SPEAKER: f32 = 3000.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its

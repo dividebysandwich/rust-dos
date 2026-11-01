@@ -824,7 +824,12 @@ fn the_dac_holds_its_sample_between_blocks_and_frames() {
         .filter(|&(_, &s)| s != level)
         .map(|(i, &s)| (first + i, s))
         .collect();
-    assert!(off.is_empty(), "{} frames off the level, the first at {:?}", off.len(), off.first());
+    assert!(
+        off.is_empty(),
+        "{} frames off the level, the first at {:?}",
+        off.len(),
+        off.first()
+    );
 }
 
 /// Each sample of a stream at 8403 Hz lasts 5 or 6 frames at 44.1 kHz. A
@@ -844,9 +849,53 @@ fn every_sample_gets_its_frames() {
     assert_eq!(runs.len(), 168 * blocks - 1, "every sample is heard once");
     let short: Vec<&(i16, usize)> = runs.iter().filter(|(_, n)| *n < 5).collect();
     let shown = short.len().min(8);
-    assert!(short.is_empty(), "{} samples shown for under 5 frames: {:?}", short.len(), &short[..shown]);
+    assert!(
+        short.is_empty(),
+        "{} samples shown for under 5 frames: {:?}",
+        short.len(),
+        &short[..shown]
+    );
     let long: Vec<&(i16, usize)> = runs.iter().filter(|(_, n)| *n > 6).collect();
     let shown = long.len().min(8);
-    assert!(long.len() <= blocks, "{} samples held over 6 frames: {:?}", long.len(), &long[..shown]);
+    assert!(
+        long.len() <= blocks,
+        "{} samples held over 6 frames: {:?}",
+        long.len(),
+        &long[..shown]
+    );
     assert!(long.iter().all(|(_, n)| *n <= 12), "{:?}", long);
+}
+
+/// A program's end puts the sound hardware in its power-on state at any
+/// moment, between two renders. What the card played up to then is mixed
+/// before it goes: the frames up to the reset carry its level, those after
+/// it the new card's silence, and none of them comes early or late.
+#[test]
+fn a_reset_between_renders_keeps_the_sound_played_before_it() {
+    let mut bus = sb16();
+    let mut settings = MixerSettings::default();
+    settings.sb_filter = SbFilter::Off;
+    bus.set_mixer(settings);
+    reset_dsp(&mut bus);
+    // Direct DAC output: a level the card holds.
+    dsp_write(&mut bus, 0x10);
+    dsp_write(&mut bus, 0xC0);
+    bus.audio_catch_up();
+    bus.audio_out.clear();
+    let start = bus.audio_frames();
+    wait_ms(&mut bus, 10.0);
+    let frame_at = |bus: &Bus| {
+        rust_dos::timer::mul_div(bus.clock.now_ticks(), 44_100, rust_dos::timer::PIT_HZ)
+    };
+    let played = (frame_at(&bus) - start) as usize;
+    bus.reset_sound();
+    wait_ms(&mut bus, 10.0);
+    bus.audio_catch_up();
+    let samples: Vec<i16> = bus.audio_out.drain(..).step_by(2).collect();
+    let level = samples[0];
+    assert!(level > 5000, "{}", level);
+    let off = samples[..played].iter().position(|&s| s != level);
+    assert_eq!(off, None, "a frame before the reset is off the level");
+    let on = samples[played..].iter().position(|&s| s != 0);
+    assert_eq!(on, None, "a frame after the reset carries the old card's level");
 }
