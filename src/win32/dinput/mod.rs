@@ -17,6 +17,19 @@
 //! passes. Buffered data has the emulated clock's milliseconds and a
 //! sequence number of DirectInput's own, so runs are deterministic.
 //!
+//! DINPUT8.DLL is DirectX 8's DirectInput, a DLL of its own as on Windows:
+//! DirectInput8Create makes a DirectInput object with IDirectInput8A, whose
+//! CreateDevice makes devices with IDirectInputDevice8A. Its objects are
+//! DINPUT's, in the same list, and its methods are DINPUT's functions, with
+//! the vtables in DINPUT8's image, which is how a method knows a
+//! DirectInput 8 object. DirectInput 8 gives the devices its own
+//! DI8DEVTYPE_ types, enumerates them by class, and has properties of its
+//! own: a key's name and scan code (DIPROP_KEYNAME, DIPROP_SCANCODE), and
+//! each object's DIPROP_APPDATA, which its buffered data carries as
+//! uAppData. Action maps (BuildActionMap, SetActionMap,
+//! EnumDevicesBySemantics, ConfigureDevices) and device images aren't there
+//! (#378).
+//!
 //! (Phase 3 of docs/native-windows.md.)
 
 mod device;
@@ -116,6 +129,135 @@ static APIS: &[Api] = &[
     method("DID_WriteEffectToFile", 5, device::effects_in_file),
 ];
 
+/// DINPUT8.DLL, DirectX 8.1's, with its exports' ordinals.
+pub static DLL8: Dll = Dll {
+    name: "DINPUT8.DLL",
+    base: 0xBFB8_0000,
+    apis: APIS8,
+    vars: &[],
+    init: None,
+    term: None,
+    vtables: VTABLES8,
+};
+
+/// DINPUT8's functions. Append only (see `stubs`).
+static APIS8: &[Api] = &[
+    stdcall("DirectInput8Create", 1, 5, direct_input8_create),
+    stdcall("DllCanUnloadNow", 2, 0, dll_can_unload_now),
+    stdcall("DllGetClassObject", 3, 3, dll_get_class_object_8),
+    stdcall("DllRegisterServer", 4, 0, dll_register_server),
+    stdcall("DllUnregisterServer", 5, 0, dll_register_server),
+    method("DI8_QueryInterface", 3, di_query_interface),
+    method("DI8_AddRef", 1, di_add_ref),
+    method("DI8_Release", 1, di_release),
+    method("DI8_CreateDevice", 4, di_create_device),
+    method("DI8_EnumDevices", 5, enumerate::enum_devices),
+    method("DI8_GetDeviceStatus", 2, di_get_device_status),
+    method("DI8_RunControlPanel", 3, di_run_control_panel),
+    method("DI8_Initialize", 3, di_initialize),
+    method("DI8_FindDevice", 4, di_find_device),
+    method("DI8_EnumDevicesBySemantics", 6, di_action_maps),
+    method("DI8_ConfigureDevices", 5, di_action_maps),
+    method("DID8_QueryInterface", 3, device::query_interface),
+    method("DID8_AddRef", 1, device::add_ref),
+    method("DID8_Release", 1, device::release),
+    method("DID8_GetCapabilities", 2, device::get_capabilities),
+    method("DID8_EnumObjects", 4, enumerate::enum_objects),
+    method("DID8_GetProperty", 3, device::get_property),
+    method("DID8_SetProperty", 3, device::set_property),
+    method("DID8_Acquire", 1, device::acquire),
+    method("DID8_Unacquire", 1, device::unacquire),
+    method("DID8_GetDeviceState", 3, device::get_device_state),
+    method("DID8_GetDeviceData", 5, device::get_device_data),
+    method("DID8_SetDataFormat", 2, device::set_data_format),
+    method(
+        "DID8_SetEventNotification",
+        2,
+        device::set_event_notification,
+    ),
+    method("DID8_SetCooperativeLevel", 3, device::set_cooperative_level),
+    method("DID8_GetObjectInfo", 4, device::get_object_info),
+    method("DID8_GetDeviceInfo", 2, device::get_device_info),
+    method("DID8_RunControlPanel", 3, device::run_control_panel),
+    method("DID8_Initialize", 4, device::initialize),
+    method("DID8_CreateEffect", 5, device::create_effect),
+    method("DID8_EnumEffects", 4, device::enum_effects),
+    method("DID8_GetEffectInfo", 3, device::get_effect_info),
+    method("DID8_GetForceFeedbackState", 2, device::no_force_feedback),
+    method(
+        "DID8_SendForceFeedbackCommand",
+        2,
+        device::no_force_feedback,
+    ),
+    method("DID8_EnumCreatedEffectObjects", 4, device::enum_effects),
+    method("DID8_Escape", 2, device::no_force_feedback),
+    method("DID8_Poll", 1, device::poll_device),
+    method("DID8_SendDeviceData", 5, device::send_device_data),
+    method("DID8_EnumEffectsInFile", 5, device::effects_in_file),
+    method("DID8_WriteEffectToFile", 5, device::effects_in_file),
+    method("DID8_BuildActionMap", 4, device::action_map),
+    method("DID8_SetActionMap", 4, device::action_map),
+    method("DID8_GetImageInfo", 2, device::action_map),
+];
+
+/// DINPUT8's vtables, in the places DINPUT's have: IDirectInput8A and
+/// IDirectInputDevice8A.
+static VTABLES8: &[Vtable] = &[
+    Vtable {
+        name: "IDirectInput8A",
+        methods: &[
+            "DI8_QueryInterface",
+            "DI8_AddRef",
+            "DI8_Release",
+            "DI8_CreateDevice",
+            "DI8_EnumDevices",
+            "DI8_GetDeviceStatus",
+            "DI8_RunControlPanel",
+            "DI8_Initialize",
+            "DI8_FindDevice",
+            "DI8_EnumDevicesBySemantics",
+            "DI8_ConfigureDevices",
+        ],
+    },
+    Vtable {
+        name: "IDirectInputDevice8A",
+        methods: &[
+            "DID8_QueryInterface",
+            "DID8_AddRef",
+            "DID8_Release",
+            "DID8_GetCapabilities",
+            "DID8_EnumObjects",
+            "DID8_GetProperty",
+            "DID8_SetProperty",
+            "DID8_Acquire",
+            "DID8_Unacquire",
+            "DID8_GetDeviceState",
+            "DID8_GetDeviceData",
+            "DID8_SetDataFormat",
+            "DID8_SetEventNotification",
+            "DID8_SetCooperativeLevel",
+            "DID8_GetObjectInfo",
+            "DID8_GetDeviceInfo",
+            "DID8_RunControlPanel",
+            "DID8_Initialize",
+            "DID8_CreateEffect",
+            "DID8_EnumEffects",
+            "DID8_GetEffectInfo",
+            "DID8_GetForceFeedbackState",
+            "DID8_SendForceFeedbackCommand",
+            "DID8_EnumCreatedEffectObjects",
+            "DID8_Escape",
+            "DID8_Poll",
+            "DID8_SendDeviceData",
+            "DID8_EnumEffectsInFile",
+            "DID8_WriteEffectToFile",
+            "DID8_BuildActionMap",
+            "DID8_SetActionMap",
+            "DID8_GetImageInfo",
+        ],
+    },
+];
+
 /// The tables of methods: IDirectInput7A's, which IDirectInputA's and
 /// IDirectInput2A's are the start of, and IDirectInputDevice7A's, which
 /// IDirectInputDeviceA's and IDirectInputDevice2A's are.
@@ -171,7 +313,8 @@ static VTABLES: &[Vtable] = &[
     },
 ];
 
-/// The places of the vtables in `VTABLES`.
+/// The places of the vtables in `VTABLES`, and of DirectInput 8's in
+/// `VTABLES8`.
 const DIRECT_INPUT: usize = 0;
 const DEVICE: usize = 1;
 
@@ -227,6 +370,15 @@ const IID_IDIRECT_INPUT_7A: Guid = Guid::new(
     0x11D3,
     [0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE],
 );
+const IID_IDIRECT_INPUT_8A: Guid = Guid::new(
+    0xBF79_8030,
+    0x483A,
+    0x4DA2,
+    [0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00],
+);
+
+/// The one version of DirectInput DirectInput8Create takes.
+const VERSION_8: u32 = 0x800;
 
 /// The classes of DINPUT's that CoCreateInstance makes: objects that
 /// need their Initialize before anything else.
@@ -242,6 +394,37 @@ pub static CLASSES: &[com::Class] = &[
         dll: "DINPUT.DLL",
         name: "DirectInputDevice",
         create: device::create_uninitialized,
+    },
+];
+
+const CLSID_DIRECT_INPUT_8: Guid = Guid::new(
+    0x25E6_09E4,
+    0xB259,
+    0x11CF,
+    [0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0],
+);
+const CLSID_DIRECT_INPUT_DEVICE_8: Guid = Guid::new(
+    0x25E6_09E5,
+    0xB259,
+    0x11CF,
+    [0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0],
+);
+
+/// DINPUT8's classes, the same as DINPUT's with DirectInput 8's
+/// interfaces. A list of their own at the end of `com::CLASSES`, so the
+/// places of the classes before them stay as they were.
+pub static CLASSES8: &[com::Class] = &[
+    com::Class {
+        clsid: CLSID_DIRECT_INPUT_8,
+        dll: "DINPUT8.DLL",
+        name: "DirectInput8",
+        create: create_direct_input_8,
+    },
+    com::Class {
+        clsid: CLSID_DIRECT_INPUT_DEVICE_8,
+        dll: "DINPUT8.DLL",
+        name: "DirectInputDevice8",
+        create: device::create_uninitialized_8,
     },
 ];
 
@@ -330,10 +513,38 @@ fn dll_index() -> usize {
         .expect("DINPUT is a built-in DLL")
 }
 
-/// The object whose interface `this` is, if it is one of DINPUT's with
-/// the vtable `vtable`: its id.
+fn dll8_index() -> usize {
+    super::stubs::DLLS
+        .iter()
+        .position(|d| d.name == DLL8.name)
+        .expect("DINPUT8 is a built-in DLL")
+}
+
+/// The interface `this` is, if it is DINPUT's or DINPUT8's: its vtable's
+/// place, which is the same in both, and the object's id.
+fn interface_of(cpu: &mut Cpu, this: u32) -> Option<(usize, u32)> {
+    com::interface_of(cpu, dll_index(), this).or_else(|| com::interface_of(cpu, dll8_index(), this))
+}
+
+/// Whether the object `id` is DirectInput 8's: its interface is in
+/// DINPUT8's image.
+fn is_eight(cpu: &mut Cpu, id: u32) -> bool {
+    let Some(this) = state(cpu).object(id).map(|o| o.this) else {
+        return false;
+    };
+    com::interface_of(cpu, dll8_index(), this).is_some()
+}
+
+/// The DirectInput version the object `id` was made for (0 before
+/// Initialize).
+fn version_of(cpu: &mut Cpu, id: u32) -> u32 {
+    state(cpu).object(id).map_or(0, |o| o.version)
+}
+
+/// The object whose interface `this` is, if it is one of DINPUT's or
+/// DINPUT8's with the vtable `vtable`: its id.
 fn object_of(cpu: &mut Cpu, this: u32, vtable: usize) -> Option<u32> {
-    match com::interface_of(cpu, dll_index(), this)? {
+    match interface_of(cpu, this)? {
         // A device's interface needs a device: the id in a forged one may
         // be that of the DirectInput object.
         (v, id)
@@ -348,11 +559,12 @@ fn object_of(cpu: &mut Cpu, this: u32, vtable: usize) -> Option<u32> {
     }
 }
 
-/// A new object of the running process, with one reference: its
-/// interface, or None when the heap is full.
+/// A new object of the running process, with one reference, DINPUT8's
+/// if `eight`: its interface, or None when the heap is full.
 fn new_object(
     cpu: &mut Cpu,
     vtable: usize,
+    eight: bool,
     version: u32,
     device: Option<device::Device>,
 ) -> Option<u32> {
@@ -364,7 +576,8 @@ fn new_object(
         version,
         device,
     });
-    let Some(this) = com::new_interface(cpu, dll_index(), vtable, id, 0) else {
+    let dll = if eight { dll8_index() } else { dll_index() };
+    let Some(this) = com::new_interface(cpu, dll, vtable, id, 0) else {
         state(cpu).objects[id as usize - 1] = None;
         return None;
     };
@@ -412,12 +625,19 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32, _tids: &[u32]) {
 }
 
 /// Whether DirectInput takes `version` from the instance `hinst`, or
-/// the error it gives.
-fn check_version(hinst: u32, version: u32) -> Result<(), u32> {
+/// the error it gives; DirectInput 8 (`eight`) takes 800h alone, and
+/// earlier versions are too old for it.
+fn check_version(hinst: u32, version: u32, eight: bool) -> Result<(), u32> {
     if hinst == 0 {
         Err(DIERR_INVALIDPARAM)
     } else if version == 0 {
         Err(DIERR_NOTINITIALIZED)
+    } else if eight {
+        match version {
+            VERSION_8 => Ok(()),
+            v if v > VERSION_8 => Err(DIERR_OLDDIRECTINPUTVERSION),
+            _ => Err(DIERR_BETADIRECTINPUTVERSION),
+        }
     } else if version > 0x700 {
         Err(DIERR_OLDDIRECTINPUTVERSION)
     } else if !VERSIONS.contains(&version) {
@@ -427,8 +647,12 @@ fn check_version(hinst: u32, version: u32) -> Result<(), u32> {
     }
 }
 
-/// Whether `iid` is one of the DirectInput object's interfaces.
-fn is_direct_input_iid(iid: &Guid) -> bool {
+/// Whether `iid` is one of the DirectInput object's interfaces:
+/// IDirectInput8A alone for DirectInput 8's (`eight`).
+fn is_direct_input_iid(iid: &Guid, eight: bool) -> bool {
+    if eight {
+        return [IID_IUNKNOWN, IID_IDIRECT_INPUT_8A].contains(iid);
+    }
     [
         IID_IUNKNOWN,
         IID_IDIRECT_INPUT_A,
@@ -450,12 +674,31 @@ fn dll_get_class_object(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(super::ole32::dll_get_class_object(cpu, DLL.name, args))
 }
 
+fn dll_get_class_object_8(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(super::ole32::dll_get_class_object(cpu, DLL8.name, args))
+}
+
+/// DllRegisterServer and DllUnregisterServer: DINPUT8 is written into
+/// the emulator, with nothing to register.
+fn dll_register_server(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(S_OK)
+}
+
 /// CoCreateInstance's DirectInput object, which needs its Initialize.
 fn create_direct_input(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
-    if !is_direct_input_iid(iid) {
+    create_uninitialized(cpu, iid, out, false)
+}
+
+/// The same of DINPUT8's.
+fn create_direct_input_8(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
+    create_uninitialized(cpu, iid, out, true)
+}
+
+fn create_uninitialized(cpu: &mut Cpu, iid: &Guid, out: u32, eight: bool) -> u32 {
+    if !is_direct_input_iid(iid, eight) {
         return E_NOINTERFACE;
     }
-    let Some(this) = new_object(cpu, DIRECT_INPUT, 0, None) else {
+    let Some(this) = new_object(cpu, DIRECT_INPUT, eight, 0, None) else {
         return E_OUTOFMEMORY;
     };
     if !com::write_out(cpu, out, this) {
@@ -475,6 +718,7 @@ fn direct_input_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         &IID_IDIRECT_INPUT_A,
         out,
         outer,
+        false,
     ))
 }
 
@@ -484,23 +728,40 @@ fn direct_input_create_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, iid) else {
         return Some(E_POINTER);
     };
-    Some(create(cpu, hinst, version, &iid, out, outer))
+    Some(create(cpu, hinst, version, &iid, out, outer, false))
 }
 
-fn create(cpu: &mut Cpu, hinst: u32, version: u32, iid: &Guid, out: u32, outer: u32) -> u32 {
+/// DirectInput8Create(hinst, version, iid, out, outer), DINPUT8's.
+fn direct_input8_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (hinst, version, iid, out, outer) = (args[0], args[1], args[2], args[3], args[4]);
+    let Some(iid) = Guid::read(cpu, iid) else {
+        return Some(E_POINTER);
+    };
+    Some(create(cpu, hinst, version, &iid, out, outer, true))
+}
+
+fn create(
+    cpu: &mut Cpu,
+    hinst: u32,
+    version: u32,
+    iid: &Guid,
+    out: u32,
+    outer: u32,
+    eight: bool,
+) -> u32 {
     if !com::write_out(cpu, out, 0) {
         return E_POINTER;
     }
     if outer != 0 {
         return CLASS_E_NOAGGREGATION;
     }
-    if !is_direct_input_iid(iid) {
+    if !is_direct_input_iid(iid, eight) {
         return E_NOINTERFACE;
     }
-    if let Err(e) = check_version(hinst, version) {
+    if let Err(e) = check_version(hinst, version, eight) {
         return e;
     }
-    match new_object(cpu, DIRECT_INPUT, version, None) {
+    match new_object(cpu, DIRECT_INPUT, eight, version, None) {
         Some(this) => {
             com::write_out(cpu, out, this);
             DI_OK
@@ -513,8 +774,7 @@ fn create(cpu: &mut Cpu, hinst: u32, version: u32, iid: &Guid, out: u32, outer: 
 /// Initialize); or the error a method of it gives.
 fn direct_input(cpu: &mut Cpu, this: u32) -> Result<(u32, u32), u32> {
     let id = object_of(cpu, this, DIRECT_INPUT).ok_or(E_POINTER)?;
-    let version = state(cpu).object(id).map_or(0, |o| o.version);
-    Ok((id, version))
+    Ok((id, version_of(cpu, id)))
 }
 
 /// The same, once initialized.
@@ -534,7 +794,7 @@ fn di_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if !com::write_out(cpu, out, 0) {
             return Err(E_POINTER);
         }
-        if !is_direct_input_iid(&iid) {
+        if !is_direct_input_iid(&iid, is_eight(cpu, id)) {
             return Err(E_NOINTERFACE);
         }
         if let Some(o) = state(cpu).object_mut(id) {
@@ -565,8 +825,7 @@ fn di_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// IDirectInput::CreateDevice(guid, out, outer).
 fn di_create_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, out, outer) = (args[0], args[1], args[2], args[3]);
-    let iid = device::IID_IDIRECT_INPUT_DEVICE_A;
-    result(create_device(cpu, this, guid, &iid, out, outer))
+    result(create_device(cpu, this, guid, None, out, outer))
 }
 
 /// IDirectInput7::CreateDeviceEx(guid, iid, out, outer).
@@ -575,14 +834,16 @@ fn di_create_device_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iid) = Guid::read(cpu, iid) else {
         return Some(E_POINTER);
     };
-    result(create_device(cpu, this, guid, &iid, out, outer))
+    result(create_device(cpu, this, guid, Some(&iid), out, outer))
 }
 
+/// A device of the DirectInput object `this`, with the interface `iid`,
+/// or with the one its CreateDevice gives for None.
 fn create_device(
     cpu: &mut Cpu,
     this: u32,
     guid: u32,
-    iid: &Guid,
+    iid: Option<&Guid>,
     out: u32,
     outer: u32,
 ) -> Result<u32, u32> {
@@ -598,12 +859,18 @@ fn create_device(
     if outer != 0 {
         return Err(CLASS_E_NOAGGREGATION);
     }
-    if !device::is_device_iid(iid) {
+    let eight = is_eight(cpu, id);
+    let iid = iid.copied().unwrap_or(if eight {
+        device::IID_IDIRECT_INPUT_DEVICE_8A
+    } else {
+        device::IID_IDIRECT_INPUT_DEVICE_A
+    });
+    if !device::is_device_iid(&iid, eight) {
         return Err(E_NOINTERFACE);
     }
     let kind = objects::kind_of(cpu, &guid, version).ok_or(DIERR_DEVICENOTREG)?;
     let device = device::Device::new(id, kind, objects::shape(cpu, kind));
-    let this = new_object(cpu, DEVICE, version, Some(device)).ok_or(E_OUTOFMEMORY)?;
+    let this = new_object(cpu, DEVICE, eight, version, Some(device)).ok_or(E_OUTOFMEMORY)?;
     if let Some(o) = state(cpu).object_mut(id) {
         o.refs += 1;
     }
@@ -640,7 +907,7 @@ fn di_run_control_panel(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn di_initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let r = (|| {
         let (id, _) = direct_input(cpu, args[0])?;
-        check_version(args[1], args[2])?;
+        check_version(args[1], args[2], is_eight(cpu, id))?;
         if let Some(o) = state(cpu).object_mut(id) {
             o.version = args[2];
         }
@@ -659,6 +926,17 @@ fn di_find_device(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Err(E_POINTER);
         }
         Err(DIERR_DEVICENOTREG)
+    })();
+    result(r)
+}
+
+/// IDirectInput8::EnumDevicesBySemantics(user, format, callback, ref,
+/// flags) and ConfigureDevices(callback, params, flags, ref): action
+/// maps aren't there (DIERR_UNSUPPORTED, which is E_NOTIMPL).
+fn di_action_maps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let r = (|| {
+        initialized(cpu, args[0])?;
+        Err(DIERR_UNSUPPORTED)
     })();
     result(r)
 }
