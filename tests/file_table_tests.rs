@@ -2,7 +2,7 @@
 //! table of its PSP, and the System File Table they refer to, which the List
 //! of Lists points to and Windows reads.
 
-use rust_dos::cpu::{Cpu, CpuFlags};
+use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
 use rust_dos::interrupts::handle_hle;
 use std::fs;
 use std::path::PathBuf;
@@ -461,4 +461,84 @@ fn a_psp_a_program_made_ends_back_in_its_parent_at_its_terminate_address() {
     assert_eq!(cpu.bus.read_32(0x22 * 4), 0x5000_0300, "INT 22h as the child had it");
     assert_eq!(refs(&mut cpu, sft), 1, "the child's handle closed, the parent's open");
     assert_eq!(read(&mut cpu, h, 2).unwrap(), b"01");
+}
+
+#[test]
+fn a_psp_a_program_made_stays_resident_and_its_maker_goes_on() {
+    // As Drakkhen's loader runs its driver: a block of free memory, a PSP
+    // in it with AH=26h and the terminate address set by hand, then the
+    // driver current. It resizes its block with BX left 0 and stays
+    // resident with AH=31h.
+    let mut cpu = machine("made_psp_tsr");
+    let parent = cpu.current_psp;
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    let sft = slot(&cpu, parent, h);
+    cpu.set_sp(0xF000);
+    let (ss, sp) = (cpu.ss(), cpu.sp());
+    let driver = rust_dos::mcb::alloc(&mut cpu.bus, parent, 0x1000).unwrap();
+    let ended = cpu.programs.ended;
+    cpu.set_bp(0x1234);
+    dos(&mut cpu, 0x2600, 0xABCD, 0, driver).unwrap();
+    let base = driver as usize * 16;
+    cpu.bus.write_16(base + 0x0A, 0x0300);
+    cpu.bus.write_16(base + 0x0C, 0x5000);
+    // AH=50h saves nothing: DOS runs it on the caller's stack.
+    dos(&mut cpu, 0x5000, driver, 0, 0).unwrap();
+    assert_eq!(cpu.current_psp, driver);
+
+    cpu.set_sp(sp - 0x40);
+    cpu.set_bp(0);
+    cpu.set_es(driver);
+    dos(&mut cpu, 0x4A00, 0, 0, 0x107).unwrap();
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let _ = dos(&mut cpu, 0x3100, 0, 0, 0xF9);
+
+    assert_eq!(cpu.current_psp, parent);
+    assert_eq!(
+        (cpu.ax(), cpu.bx(), cpu.dx(), cpu.bp()),
+        (0x2600, 0xABCD, driver, 0x1234),
+        "the parent's registers"
+    );
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ss(), cpu.sp()), (ss, sp), "on the parent's stack");
+    let frame = ss as usize * 16 + sp as usize;
+    assert_eq!(
+        (cpu.bus.read_16(frame), cpu.bus.read_16(frame + 2)),
+        (0x0300, 0x5000),
+        "returning to the terminate address"
+    );
+    assert_eq!(cpu.bus.read_16(frame + 4) & 0x0FFF, 0x0202, "flags as DOS leaves them");
+    assert_eq!(cpu.bus.read_32(0x22 * 4), 0x5000_0300, "INT 22h as the driver had it");
+
+    let block = rust_dos::mcb::read_mcb(&mut cpu.bus, driver - 1);
+    assert_eq!(block.size, 0xF9, "the paragraphs it keeps");
+    assert_eq!(block.owner, driver, "resizing it made it the driver's");
+    assert_eq!(cpu.bus.read_16(base + 2), driver + 0xF9, "PSP 02h: where it ends");
+    assert!(rust_dos::mcb::read_mcb(&mut cpu.bus, driver + 0xF9).is_free(), "the rest is free");
+    // AH=26h's copy of the table takes no reference; closing it would drop
+    // the parent's.
+    assert_eq!(refs(&mut cpu, sft), 1, "a resident process keeps its files");
+    assert_eq!(dos(&mut cpu, 0x4D00, 0, 0, 0).unwrap(), 0x0300, "AH=4Dh: stayed resident");
+    assert_eq!(cpu.programs.ended, ended, "the program that runs didn't end");
+
+    // Its memory outlives the process that made it.
+    rust_dos::mcb::free_owned_by(&mut cpu.bus, parent);
+    assert_eq!(rust_dos::mcb::read_mcb(&mut cpu.bus, driver - 1).owner, driver);
+}
+
+#[test]
+fn a_made_psp_without_a_terminate_address_stays_resident_under_the_shell() {
+    // A program that moves itself: a PSP elsewhere, made current, and
+    // AH=31h. INT 22h holds no way back here, so it ends as the shell's
+    // programs do, and stays resident under the next ones.
+    let mut cpu = machine("made_psp_shell_tsr");
+    let parent = cpu.current_psp;
+    let block = rust_dos::mcb::alloc(&mut cpu.bus, parent, 0x1000).unwrap();
+    dos(&mut cpu, 0x2600, 0, 0, block).unwrap();
+    dos(&mut cpu, 0x5000, block, 0, 0).unwrap();
+    let _ = dos(&mut cpu, 0x3107, 0, 0, 0xF9);
+
+    assert_eq!(cpu.state, CpuState::RebootShell);
+    assert_eq!(cpu.errorlevel, 7);
+    assert_eq!(rust_dos::mcb::read_mcb(&mut cpu.bus, block - 1).size, 0xF9);
 }

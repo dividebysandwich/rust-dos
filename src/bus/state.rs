@@ -8,16 +8,16 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 8;
+const CORE_VERSION: u16 = 9;
 const VIDEO_VERSION: u16 = 2;
-const SOUND_VERSION: u16 = 3;
+const SOUND_VERSION: u16 = 4;
 const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 20;
+const WIN32_VERSION: u16 = 21;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -97,7 +97,6 @@ impl Bus {
             speaker_on,
             audio_phase,
             audio_frames,
-            sb_phase,
             sb_frame,
             beep_frames,
             video_mode,
@@ -208,7 +207,7 @@ impl Bus {
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-                post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
+                post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
                 boot, pci,
             );
         });
@@ -401,7 +400,6 @@ impl Bus {
             speaker_on,
             audio_phase,
             audio_frames,
-            sb_phase,
             sb_frame,
             beep_frames,
             video_mode,
@@ -513,7 +511,7 @@ impl Bus {
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-            post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
+            post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
                 boot, pci,
         );
         if r.next_is(b"PIT2") {

@@ -666,6 +666,203 @@ fn process_vertices_transforms_and_lights_into_screen_vertices() {
     }
 }
 
+/// D3DVBCAPS_DONOTCLIP.
+const D3DVBCAPS_DONOTCLIP: u32 = 0x1;
+const D3DVOP_CLIP: u32 = 0x4;
+const D3DTRANSFORMSTATE_PROJECTION: u32 = 3;
+const D3DRENDERSTATE_CULLMODE: u32 = 22;
+const D3DCULL_NONE: u32 = 1;
+const DEV7_SET_TRANSFORM: u32 = 11;
+const PROJECTION: u32 = LIGHT;
+
+/// Direct3D 7: a red triangle with a corner behind the eye, drawn with
+/// DrawPrimitiveVB after the ProcessVertices calls `steps` (operations,
+/// index and count) into a buffer with the caps `caps`. Its near edge is
+/// across the screen at y 32, and its bottom edge at y 48; below that is
+/// where the corner behind the eye goes on the screen. The render target's
+/// pixels, row after row, 5-6-5.
+fn draw_processed_triangle(test: &str, caps: u32, steps: &[(u32, u32, u32)]) -> Vec<u16> {
+    let mut d = data();
+    target_desc(&mut d, DESC, 124, 64, 64);
+    put32(&mut d, LOCK_DESC, 124);
+    put32(&mut d, VB_DESC, 16);
+    put32(&mut d, VB_DESC + 8, D3DFVF_XYZ | D3DFVF_DIFFUSE);
+    put32(&mut d, VB_DESC + 12, 3);
+    put32(&mut d, VB_DESC + 16, 16);
+    put32(&mut d, VB_DESC + 20, caps);
+    put32(&mut d, VB_DESC + 24, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    put32(&mut d, VB_DESC + 28, 3);
+    put32(&mut d, VIEW + 8, 64);
+    put32(&mut d, VIEW + 12, 64);
+    put_f32s(&mut d, VIEW + 16, &[0.0, 1.0]);
+    // A perspective projection, near plane 1 and far plane 10.
+    let q = 10.0 / 9.0;
+    put_f32s(
+        &mut d,
+        PROJECTION,
+        &[
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, q, 1.0, //
+            0.0, 0.0, -q, 0.0,
+        ],
+    );
+    let corners = [[-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 3.0, -2.0]];
+    for (i, corner) in corners.iter().enumerate() {
+        let at = VERTICES + 16 * i as u32;
+        put_f32s(&mut d, at, corner);
+        put32(&mut d, at + 12, 0xFFFF_0000);
+    }
+    let (exe, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, true, false)?;
+        c.com(
+            a,
+            l,
+            DD,
+            QUERY_INTERFACE,
+            &[Arg::At(IID_D3D7), Arg::At(D3D)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(DESC), Arg::At(TARGET), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            D3D,
+            D3D7_CREATE_DEVICE,
+            &[Arg::At(IID_HAL), Arg::Val(TARGET), Arg::At(DEVICE)],
+        )?;
+        c.com(
+            a,
+            l,
+            D3D,
+            D3D7_CREATE_VERTEX_BUFFER,
+            &[Arg::At(VB_DESC), Arg::At(SOURCE), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            D3D,
+            D3D7_CREATE_VERTEX_BUFFER,
+            &[Arg::At(VB_DESC + 16), Arg::At(DEST), Arg::I(0)],
+        )?;
+        c.com(
+            a,
+            l,
+            SOURCE,
+            VB_LOCK,
+            &[Arg::I(0), Arg::At(LOCKED), Arg::I(0)],
+        )?;
+        copy(a, l, VERTICES, LOCKED, 48)?;
+        c.com(a, l, SOURCE, VB_UNLOCK, &[])?;
+        c.com(a, l, DEVICE, DEV7_SET_VIEWPORT, &[Arg::At(VIEW)])?;
+        c.com(
+            a,
+            l,
+            DEVICE,
+            DEV7_SET_TRANSFORM,
+            &[Arg::I(D3DTRANSFORMSTATE_PROJECTION), Arg::At(PROJECTION)],
+        )?;
+        c.com(
+            a,
+            l,
+            DEVICE,
+            DEV7_SET_RENDER_STATE,
+            &[Arg::I(D3DRENDERSTATE_CULLMODE), Arg::I(D3DCULL_NONE)],
+        )?;
+        for &(op, index, count) in steps {
+            c.com(
+                a,
+                l,
+                DEST,
+                VB_PROCESS_VERTICES,
+                &[
+                    Arg::I(op),
+                    Arg::I(index),
+                    Arg::I(count),
+                    Arg::Val(SOURCE),
+                    Arg::I(index),
+                    Arg::Val(DEVICE),
+                    Arg::I(0),
+                ],
+            )?;
+        }
+        c.com(a, l, DEVICE, DEV7_BEGIN_SCENE, &[])?;
+        c.com(
+            a,
+            l,
+            DEVICE,
+            DEV7_DRAW_PRIMITIVE_VB,
+            &[
+                Arg::I(D3DPT_TRIANGLELIST),
+                Arg::Val(DEST),
+                Arg::I(0),
+                Arg::I(3),
+                Arg::I(0),
+            ],
+        )?;
+        c.com(a, l, DEVICE, DEV7_END_SCENE, &[])?;
+        read_target(a, l, &mut c, 16)?;
+        finish(a, l)
+    });
+    let mut cpu = machine(test, exe);
+    run_until_done(&mut cpu, data);
+    let n = peek(&cpu, data + CALLS);
+    let r = results(&cpu, data, n);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    (0..64 * 64)
+        .map(|i| {
+            let at = data + PIXELS + 2 * i;
+            (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
+        })
+        .collect()
+}
+
+/// Whether the triangle of `draw_processed_triangle` came out clipped at
+/// the near plane, and whether it came out as the wedge of a corner
+/// behind the eye drawn at its screen position.
+fn clipped_and_wedge(pixels: &[u16]) -> (bool, bool) {
+    let red = |y: usize| rgb(pixels, 32, y)[0] > 0x80;
+    (red(40), red(56))
+}
+
+#[test]
+fn process_vertices_with_clip_keeps_what_the_draw_clips_with() {
+    let op = D3DVOP_TRANSFORM | D3DVOP_CLIP;
+    let pixels = draw_processed_triangle("vb_clip", 0, &[(op, 0, 3)]);
+    assert_eq!(clipped_and_wedge(&pixels), (true, false));
+}
+
+#[test]
+fn a_buffer_that_can_not_clip_is_drawn_from_its_screen_vertices() {
+    let op = D3DVOP_TRANSFORM | D3DVOP_CLIP;
+    let pixels = draw_processed_triangle("vb_donotclip", D3DVBCAPS_DONOTCLIP, &[(op, 0, 3)]);
+    assert_eq!(clipped_and_wedge(&pixels), (false, true));
+}
+
+#[test]
+fn process_vertices_without_clip_drops_what_was_kept() {
+    let op = D3DVOP_TRANSFORM | D3DVOP_CLIP;
+    let steps = [(op, 0, 3), (D3DVOP_TRANSFORM, 0, 3)];
+    let pixels = draw_processed_triangle("vb_clip_dropped", 0, &steps);
+    assert_eq!(clipped_and_wedge(&pixels), (false, true));
+}
+
+#[test]
+fn a_corner_behind_the_eye_without_clip_data_is_still_clipped_by_the_others() {
+    // Only the corner behind the eye has no clip coordinates kept: it
+    // has them back from its screen position, rhw below 0.
+    let op = D3DVOP_TRANSFORM | D3DVOP_CLIP;
+    let steps = [(op, 0, 2), (D3DVOP_TRANSFORM, 2, 1)];
+    let pixels = draw_processed_triangle("vb_clip_mixed", 0, &steps);
+    assert_eq!(clipped_and_wedge(&pixels), (true, false));
+}
+
 // D3DOP_ instructions and D3DPROCESSVERTICES_COPY.
 const D3DOP_TRIANGLE: u8 = 3;
 const D3DOP_PROCESSVERTICES: u8 = 9;
@@ -1308,35 +1505,46 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
         }
         let end = if ex { DEV7_END_SCENE } else { DEV3_END_SCENE };
         c.com(a, l, DEVICE, end, &[])?;
-        c.com(
-            a,
-            l,
-            TARGET,
-            SURF_LOCK,
-            &[
-                Arg::I(0),
-                Arg::At(LOCK_DESC),
-                Arg::I(DDLOCK_WAIT),
-                Arg::I(0),
-            ],
-        )?;
-        a.mov(dword_ptr(l.at(CALLS)), c.next)?;
-        // The top left 64x64 pixels into PIXELS, a row at a time.
-        let row_bytes = 64 * bpp / 8;
-        a.mov(esi, dword_ptr(l.at(LOCK_DESC + 0x24)))?;
-        a.mov(edi, l.at(PIXELS) as u32)?;
-        a.mov(edx, 64)?;
-        a.cld()?;
-        let mut row = a.create_label();
-        a.set_label(&mut row)?;
-        a.mov(ecx, row_bytes / 4)?;
-        a.rep().movsd()?;
-        a.add(esi, dword_ptr(l.at(LOCK_DESC + 0x10)))?;
-        a.sub(esi, row_bytes)?;
-        a.dec(edx)?;
-        a.jnz(row)?;
+        read_target(a, l, &mut c, bpp)?;
         finish(a, l)
     })
+}
+
+/// Lock the render target, note how many calls there were in CALLS, and
+/// copy the target's top left 64x64 pixels into PIXELS, a row at a time.
+fn read_target(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    bpp: u32,
+) -> Result<(), IcedError> {
+    c.com(
+        a,
+        l,
+        TARGET,
+        SURF_LOCK,
+        &[
+            Arg::I(0),
+            Arg::At(LOCK_DESC),
+            Arg::I(DDLOCK_WAIT),
+            Arg::I(0),
+        ],
+    )?;
+    a.mov(dword_ptr(l.at(CALLS)), c.next)?;
+    let row_bytes = 64 * bpp / 8;
+    a.mov(esi, dword_ptr(l.at(LOCK_DESC + 0x24)))?;
+    a.mov(edi, l.at(PIXELS) as u32)?;
+    a.mov(edx, 64)?;
+    a.cld()?;
+    let mut row = a.create_label();
+    a.set_label(&mut row)?;
+    a.mov(ecx, row_bytes / 4)?;
+    a.rep().movsd()?;
+    a.add(esi, dword_ptr(l.at(LOCK_DESC + 0x10)))?;
+    a.sub(esi, row_bytes)?;
+    a.dec(edx)?;
+    a.jnz(row)?;
+    Ok(())
 }
 
 /// The render target's pixels after `scene`, row after row, 5-6-5,
