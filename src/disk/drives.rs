@@ -363,6 +363,14 @@ impl DiskController {
             .collect()
     }
 
+    /// The CD-ROM drive a booted system shows, given the one it showed
+    /// before (`current`). See `pick_cd`.
+    pub fn cd_to_show(&self, current: Option<u8>) -> Option<u8> {
+        pick_cd(&self.drives_of_kind(DriveKind::CdRom), current, |d| {
+            self.boot_cd_image(d).is_some()
+        })
+    }
+
     /// Drive a file handle was opened on (Z: for virtual handles).
     pub fn handle_drive(&self, handle: u16) -> Option<u8> {
         self.open_files.get(&handle).map(|f| f.drive)
@@ -493,5 +501,56 @@ impl DiskController {
         } else {
             self.drives.iter().position(Option::is_some).unwrap_or(DRIVE_C as usize) as u8
         };
+    }
+}
+
+/// Which CD-ROM drive a booted system shows, out of `cds` (in drive-letter
+/// order), given the one it showed before (`current`). It stays on that
+/// drive while the drive has a disc. Otherwise it moves to the first drive
+/// with a disc, as the IDE channel does when a disc goes into another CD-ROM
+/// drive. With no disc anywhere it keeps `current`, or the first drive when
+/// `current` is gone.
+fn pick_cd(cds: &[u8], current: Option<u8>, has_disc: impl Fn(u8) -> bool) -> Option<u8> {
+    let current = current.filter(|c| cds.contains(c));
+    if let Some(c) = current.filter(|&c| has_disc(c)) {
+        return Some(c);
+    }
+    cds.iter()
+        .copied()
+        .find(|&d| has_disc(d))
+        .or(current)
+        .or(cds.first().copied())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_cd;
+
+    #[test]
+    fn the_shown_cd_stays_while_it_has_a_disc() {
+        // E: has a disc; a disc going into D: (the first letter) doesn't move it.
+        assert_eq!(pick_cd(&[3, 4], Some(4), |d| d == 3 || d == 4), Some(4));
+    }
+
+    #[test]
+    fn an_empty_shown_cd_moves_to_a_disc_elsewhere() {
+        assert_eq!(pick_cd(&[3, 4], Some(3), |d| d == 4), Some(4));
+    }
+
+    #[test]
+    fn an_empty_shown_cd_stays_when_no_drive_has_a_disc() {
+        assert_eq!(pick_cd(&[3, 4], Some(4), |_| false), Some(4));
+    }
+
+    #[test]
+    fn at_first_the_drive_with_a_disc_or_the_first_one_is_shown() {
+        assert_eq!(pick_cd(&[3, 4], None, |d| d == 4), Some(4));
+        assert_eq!(pick_cd(&[3, 4], None, |_| false), Some(3));
+        assert_eq!(pick_cd(&[], None, |_| true), None);
+    }
+
+    #[test]
+    fn a_shown_cd_that_is_gone_is_replaced_by_the_first_one() {
+        assert_eq!(pick_cd(&[3], Some(4), |_| false), Some(3));
     }
 }

@@ -646,6 +646,12 @@ pub fn has_environment_variable(cpu: &mut Cpu, name: &str) -> bool {
     variable(super::process(cpu), name).is_some()
 }
 
+/// SetEvent on the event `handle` of the running process, for a
+/// built-in DLL that signals one of the program's events.
+pub fn set_event_handle(cpu: &mut Cpu, handle: u32) {
+    sync::set_event(cpu, &[handle]);
+}
+
 /// Let go of the file mappings no handle or view holds any more. Whether
 /// that changed anything.
 pub fn sweep_mappings(cpu: &mut Cpu) -> bool {

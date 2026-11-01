@@ -408,3 +408,82 @@ fn a_sound_card_on_irq_15_keeps_the_channel_out() {
     bus.attach_ide();
     assert!(bus.ide[1].is_some());
 }
+
+#[test]
+fn a_packet_run_at_once_gives_what_the_channel_gives() {
+    // The same commands through the channel's ports, and run at once on a
+    // drive of its own (`Atapi::run_packet`, the built-in Windows's
+    // ASPI): the same data, and the same errors.
+    let (mut bus, _) = drive("run_packet");
+    let mut cd = rust_dos::ide::Atapi::new(3, true);
+    let mut now = bus.clock.now_ticks();
+    let read_cd = |lba: u32| {
+        let l = lba.to_be_bytes();
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 2, 0xF8, 0, 0]
+    };
+    let commands = [
+        read10(16, 40),
+        [0x12, 0, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0],
+        [0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0x43, 0, 0, 0, 0, 0, 0, 0x03, 0x24, 0, 0, 0],
+        read_cd(17),
+        [0x5A, 0, 0x2A, 0, 0, 0, 0, 0, 0x40, 0, 0, 0],
+        // Past the disc's end, then what the drive says of it.
+        read10(100_000, 1),
+        [0x03, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0],
+        // A command the drive doesn't know.
+        [0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0x03, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0],
+    ];
+    for cdb in commands {
+        let through_ports = packet(&mut bus, cdb, 0xFFFE);
+        let mut env = rust_dos::ide::Env {
+            disks: &bus.disk,
+            player: &mut bus.cdaudio,
+            now,
+            hard_disk_ns_per_sector: 0,
+            faked: false,
+            moved: 0,
+        };
+        let outcome = cd.run_packet(&cdb, &[], &mut env);
+        assert!(env.now >= now, "time doesn't go back");
+        now = env.now;
+        match through_ports {
+            Ok(data) => {
+                assert_eq!(outcome.sense, None, "{:02X?}", cdb);
+                assert_eq!(outcome.data, data, "{:02X?}", cdb);
+            }
+            // The error register doesn't always carry the sense key (an
+            // unknown command's is F4h): the REQUEST SENSE after it
+            // compares the sense data.
+            Err(_) => assert!(outcome.sense.is_some(), "an error: {:02X?}", cdb),
+        }
+    }
+}
+
+#[test]
+fn a_packet_run_at_once_sees_a_disc_change_once_its_timers_have_run() {
+    // A disc goes in while the drive has no channel. Its timers run between
+    // commands, so the drive is ready for a read a minute later.
+    let (mut bus, _) = drive("run_packet_change");
+    let mut cd = rust_dos::ide::Atapi::new(3, true);
+    cd.media_changed(true, 0);
+    let mut env = rust_dos::ide::Env {
+        disks: &bus.disk,
+        player: &mut bus.cdaudio,
+        now: 0,
+        hard_disk_ns_per_sector: 0,
+        faked: false,
+        moved: 0,
+    };
+    let early = cd.run_packet(&read10(16, 1), &[], &mut env);
+    assert!(early.sense.is_some(), "the disc is still going in");
+    env.now = 60 * rust_dos::timer::PIT_HZ;
+    // The first command after the change reports it (MEDIUM MAY HAVE
+    // CHANGED, 28h), and the next one reads.
+    let changed = cd.run_packet(&read10(16, 1), &[], &mut env);
+    assert_eq!(changed.sense.map(|s| (s[2] & 0xF, s[12])), Some((2, 0x28)));
+    let later = cd.run_packet(&read10(16, 1), &[], &mut env);
+    assert_eq!(later.sense, None);
+    assert_eq!(later.data.len(), 2048);
+}
