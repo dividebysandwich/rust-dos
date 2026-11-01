@@ -1535,36 +1535,30 @@ pub fn lstrcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// returns the length needed, NUL included.
 fn get_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let drive = cpu.bus.disk.get_current_drive();
-    let dir = cpu
-        .bus
-        .disk
-        .get_current_directory_of(drive)
-        .unwrap_or_default();
-    let path = format!("{}:\\{}", crate::disk::drive_letter(drive), dir);
+    // The path Win32's GetCurrentDirectoryA gives, in DOS's bytes.
+    let path =
+        crate::dosstr::to_bytes(&crate::win32::kernel32::path::current_directory(cpu, drive));
     let needed = path.len() as u32 + 1;
     if args[0] < needed {
         return Some(needed);
     }
-    copy_string(cpu, args[1], args[0], path.as_bytes());
+    copy_string(cpu, args[1], args[0], &path);
     Some(path.len() as u32)
 }
 
-/// SetCurrentDirectory(path), ordinal 412: makes `path` the current
-/// directory of its drive (of the current drive when it has none), and
-/// returns TRUE, or FALSE when the directory isn't there.
+/// SetCurrentDirectory(path), ordinal 412: makes `path`'s directory the
+/// current one of its drive and that drive the current drive, as Win32's
+/// SetCurrentDirectory does (Wine's KERNEL.412 calls it). Returns TRUE, or
+/// FALSE when there is no path or the directory isn't there.
 fn set_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let path = crate::dosstr::from_bytes(&name_of(cpu, args[0]));
-    if !cpu.bus.disk.set_current_directory(&path) {
+    let name = name_of(cpu, args[0]);
+    if name.is_empty() {
         return Some(0);
     }
-    let bytes = path.as_bytes();
-    let drive = if bytes.len() >= 2 && bytes[1] == b':' {
-        bytes[0].to_ascii_uppercase().wrapping_sub(b'A')
-    } else {
-        cpu.bus.disk.get_current_drive()
-    };
-    crate::dos_data::write_cds(&mut cpu.bus, drive);
-    Some(1)
+    let name = crate::dosstr::from_bytes(&name);
+    Some(u32::from(
+        crate::win32::kernel32::path::change_directory(cpu, &name).is_ok(),
+    ))
 }
 
 fn lstrcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
