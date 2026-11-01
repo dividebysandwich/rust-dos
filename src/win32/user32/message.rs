@@ -1056,12 +1056,71 @@ pub fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_WINDOW_HANDLE);
         return Some(FALSE);
     }
-    task::start(
+    let before = cpu.bus.observe.on.then(|| quiet(cpu)).flatten();
+    let result = task::start(
         cpu,
         TASK_GET,
         vec![msg, hwnd, min, max, flags & !WAITS, 0],
         0,
-    )
+    );
+    // Found nothing and changed nothing: an idle proof goes through it,
+    // up to when the thread's next timer is due.
+    if let Some(before) = before
+        && result == Some(FALSE)
+        && quiet(cpu).is_some_and(|after| after == before)
+    {
+        let tid = current_tid(cpu);
+        let now = cpu.bus.clock.now_micros();
+        let due = user(cpu)
+            .timers
+            .iter()
+            .filter(|t| t.tid == tid && t.due > now)
+            .map(|t| t.due)
+            .min();
+        let until = due.map(|due| cpu.bus.clock.icount_at_micros(due));
+        crate::idle::pure_call(cpu, until);
+    }
+    result
+}
+
+/// What a PeekMessage that finds nothing may change, compared before and
+/// after it during an idle proof: the queue's own state, what reading
+/// the devices changes (`input::seen`) and the idle event that
+/// WaitForInputIdle waits for. None when a read of the devices changes
+/// something whatever it finds.
+#[derive(PartialEq)]
+struct Quiet {
+    activation: [u32; 4],
+    changed: u32,
+    lengths: [usize; 7],
+    seen: super::input::Seen,
+    idle: Option<bool>,
+}
+
+fn quiet(cpu: &mut Cpu) -> Option<Quiet> {
+    let seen = super::input::seen(cpu)?;
+    let idle = crate::win32::running(cpu).and_then(|p| p.idle_event);
+    let idle = idle.and_then(|id| match cpu.bus.win32.objects.get(id).map(|o| &o.kind) {
+        Some(Kind::Event { signaled, .. }) => Some(*signaled),
+        _ => None,
+    });
+    let tid = current_tid(cpu);
+    let q = user(cpu).queue(tid)?;
+    Some(Quiet {
+        activation: q.activation,
+        changed: q.changed,
+        lengths: [
+            q.posted.len(),
+            q.input.len(),
+            q.sent.len(),
+            q.callbacks.len(),
+            q.in_send.len(),
+            q.waiting.len(),
+            q.replies.len(),
+        ],
+        seen,
+        idle,
+    })
 }
 
 /// WaitMessage: the thread waits for a message to come.

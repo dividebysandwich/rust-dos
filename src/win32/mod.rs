@@ -349,7 +349,7 @@ pub struct Win32 {
     exit_code: u32,
     /// When the running thread's turn started, by the clock's
     /// microseconds.
-    slice_start: u64,
+    pub slice_start: u64,
     /// When the first timed wait of a thread ends, by the clock's
     /// microseconds (`thread::schedule_waits`), so that a Sleep ends on
     /// time rather than at the next interrupt. Worked out again after a
