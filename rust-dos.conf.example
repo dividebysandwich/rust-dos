@@ -452,9 +452,9 @@
 #chorus_mix=50
 # How much sound waits for the sound device, and so how late it is heard:
 # the device's buffer in frames, 128, 256, 512 (the default, about 12 ms),
-# 1024 or 2048, and the queue on top of it in milliseconds, 5, 10, 15, 20
-# (the default), 25, 30, 40 or 50. Smaller is sooner; if the sound
-# crackles, make them larger.
+# 1024 or 2048, and the queue on top of it in milliseconds, 0 to 100 as in
+# DOSBox (the default is 20). Smaller is sooner; if the sound crackles, make
+# them larger.
 #blocksize=512
 #prebuffer=20
 

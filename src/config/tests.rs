@@ -591,7 +591,7 @@ fn audio_buffer_parses_and_saves() {
     let saved = update_text("", &Settings::default(), &settings, &[], None);
     assert!(saved.contains("blocksize=1024") && saved.contains("prebuffer=10"), "{}", saved);
     assert_eq!(Settings::from_config(&parse(&saved, Path::new("."), None)).audio_buffer, settings.audio_buffer);
-    for line in ["blocksize=500", "blocksize=4096", "blocksize=", "prebuffer=0", "prebuffer=12", "prebuffer=lots"] {
+    for line in ["blocksize=500", "blocksize=4096", "blocksize=", "prebuffer=101", "prebuffer=-1", "prebuffer=lots"] {
         let config = parse(&format!("[mixer]\n{}\n", line), Path::new("."), None);
         assert_eq!(config.warnings.len(), 1, "{}: {:?}", line, config.warnings);
         assert_eq!(Settings::from_config(&config).audio_buffer, AudioBuffer::default());
