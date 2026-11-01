@@ -175,3 +175,59 @@ fn get_current_directory_at_the_root_and_a_small_buffer() {
     );
     assert_eq!(exit, 0x34, "{log}");
 }
+
+/// KERNEL's SetCurrentDirectory, the next export Windows 3.1's PROGMAN.EXE
+/// calls after GetCurrentDirectory.
+const SET_CURRENT_DIRECTORY: u16 = 412;
+
+/// A program that calls SetCurrentDirectory(path) with the path's bytes
+/// in its code segment, past a jump over them. Its exit code is the
+/// function's return value, in AL.
+fn set_current_directory_call(path: &str) -> Code {
+    let mut bytes = path.as_bytes().to_vec();
+    bytes.push(0);
+    let mut code = Code::new();
+    code.emit(&[0xEB, bytes.len() as u8]); // jmp over the path
+    let at = code.here();
+    code.emit(&bytes)
+        .push_far(at) // the path, as a far pointer into this segment
+        .call("KERNEL", SET_CURRENT_DIRECTORY);
+    code
+}
+
+#[test]
+fn set_current_directory_changes_the_drive_path() {
+    // SetCurrentDirectory("GAMES\DOS") returns TRUE (kept in SI), and then
+    // GetCurrentDirectory returns 12, the length of C:\GAMES\DOS. Exit
+    // code 12 if SI was TRUE, 0EEh if the call failed.
+    let mut code = set_current_directory_call("GAMES\\DOS");
+    code.emit(&[0x8B, 0xF0]) // mov si,ax
+        .emit(&[0x83, 0xEC, 0x40, 0x8B, 0xDC]) // sub sp,40h; mov bx,sp
+        .push(0) // length, high word
+        .push(64) // length, low word
+        .emit(&[0x16, 0x53]) // push ss; push bx
+        .call("KERNEL", GET_CURRENT_DIRECTORY)
+        .emit(&[
+            0x0B, 0xF6, // or si,si
+            0x75, 0x02, // jnz exit: the path was set
+            0xB0, 0xEE, // mov al,0EEh
+        ])
+        .exit_al();
+    let (exit, log) = run_with("set_current_directory", program(&code, CODE), |_, base| {
+        fs::create_dir_all(base.join("GAMES").join("DOS")).unwrap();
+    });
+    assert_eq!(exit, 12, "{log}");
+}
+
+#[test]
+fn set_current_directory_of_a_missing_directory_is_false() {
+    // There is no NOPE directory, so SetCurrentDirectory returns FALSE.
+    let mut code = set_current_directory_call("NOPE");
+    code.exit_al();
+    let (exit, log) = run_with(
+        "set_current_directory_missing",
+        program(&code, CODE),
+        |_, _| {},
+    );
+    assert_eq!(exit, 0, "{log}");
+}

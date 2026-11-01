@@ -279,6 +279,7 @@ static APIS: &[Api16] = &[
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
     rust("GetCurrentDirectory", 411, "lp", get_current_directory),
+    rust("SetCurrentDirectory", 412, "p", set_current_directory),
     // Flat thunks (flat.rs).
     register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
     rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
@@ -1546,6 +1547,24 @@ fn get_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     copy_string(cpu, args[1], args[0], path.as_bytes());
     Some(path.len() as u32)
+}
+
+/// SetCurrentDirectory(path), ordinal 412: makes `path` the current
+/// directory of its drive (of the current drive when it has none), and
+/// returns TRUE, or FALSE when the directory isn't there.
+fn set_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let path = crate::dosstr::from_bytes(&name_of(cpu, args[0]));
+    if !cpu.bus.disk.set_current_directory(&path) {
+        return Some(0);
+    }
+    let bytes = path.as_bytes();
+    let drive = if bytes.len() >= 2 && bytes[1] == b':' {
+        bytes[0].to_ascii_uppercase().wrapping_sub(b'A')
+    } else {
+        cpu.bus.disk.get_current_drive()
+    };
+    crate::dos_data::write_cds(&mut cpu.bus, drive);
+    Some(1)
 }
 
 fn lstrcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
