@@ -2168,11 +2168,14 @@ impl Bus {
             // A booted system's floppy disk controller, ahead of the IDE
             // channel that would have 3F7h.
             p if self.fdc_claims(p) => self.fdc_write(p, value),
-            // No controller: the digital output register is the
-            // controller's, so the write goes nowhere. Nothing reads it.
-            crate::fdc::DOR if self.fdc.is_none() => {}
-            // A booted system's IDE channels.
+            // A booted system's IDE channels. Their drive address port is
+            // 3F7h, so this comes before the no-controller arm below.
             p if self.ide_claims(p) => self.ide_write(p, value),
+            // No controller: its ports belong to no device on a PC, so the
+            // write goes nowhere. Fdc::claims leaves out 3F6h, the IDE
+            // channel's control port, which still logs when no channel is
+            // attached.
+            p if self.fdc.is_none() && crate::fdc::Fdc::claims(p) => {}
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
             p if self.serial_claims(p) => self.serial_write(p, value),
             // The ET4000's KEY, segment select, extended sequencer
