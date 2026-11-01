@@ -60,6 +60,7 @@ pub mod trace;
 pub mod user32;
 pub mod version;
 mod verdll;
+mod vfw;
 pub(crate) mod winmm;
 mod winspool;
 mod wow32;
@@ -247,8 +248,9 @@ pub struct Process {
     /// time one of its threads looks for input with none there, which
     /// WaitForInputIdle and WinExec wait for, as in Wine.
     idle_event: Option<u32>,
-    /// Its IMAGEHLP options.
+    /// Its IMAGEHLP options, and its AVI files and DrawDib handles.
     imagehlp: imagehlp::State,
+    vfw: vfw::State,
     /// The process that started it with CreateProcessA or WinExec, or 0
     /// for the one DOS started.
     pub(crate) parent: u32,
@@ -1338,6 +1340,7 @@ crate::state_fields!(Process {
     idle_event,
     imagehlp,
     parent,
+    vfw,
 });
 crate::state_fields!(Win32 {
     pending,

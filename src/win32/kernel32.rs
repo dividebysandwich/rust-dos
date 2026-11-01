@@ -628,6 +628,7 @@ static APIS: &[Api] = &[
     stdcall("LoadLibrary16", 35, 1, flat::load_library16),
     stdcall("FreeLibrary16", 36, 1, flat::free_library16),
     stdcall("GetProcAddress16", 37, 2, flat::get_proc_address16),
+    stdcall("SetProcessShutdownParameters", 734, 2, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.

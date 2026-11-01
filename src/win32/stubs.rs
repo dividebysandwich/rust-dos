@@ -125,6 +125,8 @@ pub static DLLS: &[&Dll] = &[
     &super::msimg32::DLL,
     &super::opengl32::DLL,
     &super::wow32::DLL,
+    &super::vfw::msvfw32::DLL,
+    &super::vfw::avifil32::DLL,
     &super::dinput::DLL8,
 ];
 

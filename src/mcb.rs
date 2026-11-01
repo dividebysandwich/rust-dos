@@ -140,18 +140,17 @@ pub fn read_mcb(bus: &mut Bus, seg: u16) -> Mcb {
     }
 }
 
-/// Write the MCB at `seg`. Its name stays while the block keeps its owner,
-/// as DOS keeps a program's over the program's resizes; for another owner
-/// the reserved bytes and the name are zeroed, so the chain looks clean in
-/// memory-dump utilities.
+/// Write the MCB at `seg`: its signature, owner and size, the only bytes
+/// DOS writes when it splits, frees or joins blocks. The other 11 stay as
+/// they are, also where a split puts a new header in memory that was in
+/// use. Drakkhen's driver resizes its PSP's block to 0 paragraphs, which
+/// puts the free block's header on its PSP, and returns through the
+/// terminate address at PSP 0Ah, under the 5 bytes.
 pub fn write_mcb(bus: &mut Bus, seg: u16, mcb: &Mcb) {
     let base = header_addr(seg);
-    let old = read_mcb(bus, seg);
-    let keep_name = old.is_valid() && old.owner == mcb.owner && !mcb.is_free();
     bus.guest_write_8(base, mcb.signature);
     bus.guest_write_16(base + 1, mcb.owner);
     bus.guest_write_16(base + 3, mcb.size);
-    bus.guest_fill(base + 5, if keep_name { 3 } else { 11 }, 0);
 }
 
 /// The name in the MCB at `seg` (DOS 4+): up to 8 characters, ending at
@@ -669,6 +668,23 @@ pub fn resize(bus: &mut Bus, block_seg: u16, new_paras: u16) -> Result<(), Resiz
         );
     }
 
+    Ok(())
+}
+
+/// AH=4Ah from the process `owner`: `resize`, after which the block is
+/// that process's, even if another process allocated it or the size stays.
+/// MS-DOS's `$SETBLOCK` goes on into `$ALLOC`'s `alloc_set_owner`. A block
+/// that can't take the size keeps its owner.
+pub fn set_block(
+    bus: &mut Bus,
+    owner: u16,
+    block_seg: u16,
+    new_paras: u16,
+) -> Result<(), ResizeError> {
+    resize(bus, block_seg, new_paras)?;
+    let mcb_seg = block_seg.wrapping_sub(1);
+    let m = read_mcb(bus, mcb_seg);
+    write_mcb(bus, mcb_seg, &Mcb { owner, ..m });
     Ok(())
 }
 
