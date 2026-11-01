@@ -721,24 +721,59 @@ impl Pacer {
     /// behind (slow host, debugger pause), the backlog is dropped and only
     /// one frame's worth is scheduled.
     pub fn batch_end(&mut self, clock: &Clock, now: Instant) -> u64 {
+        clock.icount_at(self.batch_target(clock, now))
+    }
+
+    /// Like `batch_end`, but a batch that would end in the blanking after a
+    /// vertical retrace of the display (`refresh`'s) runs on to the
+    /// picture's first line. The frame is composed from the machine as the
+    /// batch left it, all at once, and a program that moves the Start
+    /// Address and redraws to match in the blanking has only done half of
+    /// that there: Prehistorik 2's difficulty screen showed its text out of
+    /// place in such frames, about one in twenty. A monitor shows no
+    /// blanking. At most a quarter of a frame is added (`blanking_end`), and
+    /// the next batch gives it back, as it runs to the wall clock.
+    pub fn batch_end_past_blanking(
+        &mut self,
+        clock: &Clock,
+        refresh: &CrtTiming,
+        now: Instant,
+    ) -> u64 {
+        let target = self.batch_target(clock, now);
+        if self.fast_forward {
+            return clock.icount_at(target);
+        }
+        let emulated = clock.now_ticks();
+        let now_ns = clock.now_ns();
+        let end_ns = now_ns + ticks_to_duration(target.saturating_sub(emulated)).as_nanos() as u64;
+        match refresh.blanking_end(end_ns) {
+            Some(display_ns) => {
+                let ahead = display_ns + RETRACE_MARGIN_NS - now_ns;
+                clock.icount_at(emulated + (ahead as u128 * PIT_HZ as u128).div_ceil(1_000_000_000) as u64)
+            }
+            None => clock.icount_at(target),
+        }
+    }
+
+    /// The tick the next batch should run to (`batch_end`).
+    fn batch_target(&mut self, clock: &Clock, now: Instant) -> u64 {
         self.wall_paced = true;
         self.deadline = None;
         self.period = FRAME;
         let emulated = clock.now_ticks();
         if self.fast_forward {
-            return clock.icount_at(emulated + duration_to_ticks(FRAME) * FAST_FORWARD_FRAMES as u64);
+            return emulated + duration_to_ticks(FRAME) * FAST_FORWARD_FRAMES as u64;
         }
         let wall =
             self.anchor_ticks + duration_to_ticks(now.saturating_duration_since(self.anchor_wall));
-        let target = if wall > emulated + duration_to_ticks(MAX_LAG) {
+        if wall > emulated + duration_to_ticks(MAX_LAG) {
             self.anchor_wall = now;
             self.anchor_ticks = emulated + duration_to_ticks(FRAME);
             self.lose(wall - self.anchor_ticks);
             self.anchor_ticks
         } else {
             wall.max(emulated)
-        };
-        clock.icount_at(target)
+        }
     }
 
     /// Like `batch_end`, but on to where the display (`refresh`'s) next
@@ -1303,6 +1338,30 @@ mod tests {
             // The frame is shown at its deadline; the next starts then.
             now = at + Duration::from_micros(300);
         }
+    }
+
+    #[test]
+    fn a_batch_never_ends_in_the_blanking_after_a_retrace() {
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
+        let refresh = CrtTiming::VGA_400;
+        let frame = refresh.frame_ns();
+        let mut moved = 0;
+        // 60 Hz host frames against a 70 Hz display, through every phase.
+        for n in 1..2000u64 {
+            let now = start + Duration::from_nanos(n * 16_666_667);
+            let plain = pacer.batch_end(&clock, now);
+            let end = pacer.batch_end_past_blanking(&clock, &refresh, now);
+            assert!(end >= plain);
+            moved += (end > plain) as u32;
+            clock.icount = end;
+            assert_eq!(refresh.blanking_end(clock.now_ns()), None);
+            // Emulated time stays within the blanking of the wall clock.
+            let behind = (now - start).as_nanos() as i64 - clock.now_ns() as i64;
+            assert!(behind.abs() < (frame / 8) as i64, "{} ns", behind);
+        }
+        assert!(moved > 0);
     }
 
     #[test]

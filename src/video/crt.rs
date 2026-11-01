@@ -321,6 +321,18 @@ impl CrtTiming {
     pub fn next_display(&self, t_ns: u64) -> u64 {
         (t_ns / self.frame_ns() + 1) * self.frame_ns()
     }
+
+    /// When the picture's first line begins, if `t_ns` lies between a
+    /// vertical retrace and that line. Programs that flip or scroll at the
+    /// retrace change the screen's memory there, where a monitor shows
+    /// nothing. None more than a quarter of a frame before the line: a
+    /// program can put the retrace early in its frame, and a frame held
+    /// that long would be late for nothing.
+    pub fn blanking_end(&self, t_ns: u64) -> Option<u64> {
+        let phase = t_ns % self.frame_ns();
+        (phase >= self.retrace_ns() && self.frame_ns() - phase <= self.frame_ns() / 4)
+            .then(|| self.next_display(t_ns))
+    }
 }
 
 crate::state_fields!(CrtTiming { line_ns, hdisplay_ns, total, display, retrace_start, retrace_end });
@@ -351,6 +363,19 @@ mod tests {
         crtc[0x06] = 0;
         crtc[0x07] = 0;
         assert_eq!(CrtTiming::from_registers(0x67, 0x00, &crtc), None);
+    }
+
+    #[test]
+    fn blanking_ends_at_the_picture_and_stays_short() {
+        let vga = CrtTiming::VGA_400;
+        let frame = vga.frame_ns();
+        assert_eq!(vga.blanking_end(frame - 1), Some(frame));
+        assert_eq!(vga.blanking_end(vga.retrace_ns()), Some(frame));
+        assert_eq!(vga.blanking_end(vga.retrace_ns() - 1), None);
+        assert_eq!(vga.blanking_end(frame), None);
+        let early = CrtTiming { retrace_start: 10, ..vga };
+        assert_eq!(early.blanking_end(early.retrace_ns()), None);
+        assert_eq!(early.blanking_end(frame - 1), Some(frame));
     }
 
     #[test]

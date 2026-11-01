@@ -1532,6 +1532,9 @@ fn main() -> Result<(), String> {
             cpu.bus.clock.icount
         } else if let Some(refresh) = &refresh {
             pacer.retrace_batch_end(&cpu.bus.clock, refresh, batch_start)
+        } else if det.is_none() {
+            let timing = cpu.bus.refresh_timing();
+            pacer.batch_end_past_blanking(&cpu.bus.clock, &timing, batch_start)
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
         };
