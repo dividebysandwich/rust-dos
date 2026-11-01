@@ -931,8 +931,13 @@ two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
 and Prairie Dog Hunt (VB2).
 
 Sierra's screen saver Johnny Castaway (Screen Antics) installs with its
-own setup. Running it from the prompt and from the screen saver's timer
-is not checked on a build with this change yet.
+own setup. With `win32=true`, its `.SCR` runs from the prompt as
+`scrantic.scr /s`, and the saver draws the island and runs past 90
+seconds with no general protection fault (checked with the freed-selector
+fix from #357 in the build). The screen saver timer posts SC_SCREENSAVE
+after `ScreenSaveTimeOut`, which was seen in the log, but not that the
+saver then starts from the timer. Not checked: a second saver started
+while one runs.
 
 Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
 the SimTower demo, and the InstallShield of the Lemmings demo. All three
