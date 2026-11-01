@@ -24,10 +24,11 @@ pub const VOLUME_SERIAL: u32 = 0x1234_0000;
 /// million, which a call costing nothing reaches at 50000 cycles.
 const GET_TIME_NS: u64 = 10_000;
 
-/// What DOS does on entry to INT 21h: save the caller's registers on its
-/// stack (AX, BX, CX, DX, SI, DI, BP, DS, ES, below the interrupt's return
-/// frame) and SS:SP in the running process's PSP (2Eh), where they are
-/// when the process a program makes from it ends (`Cpu::terminate`).
+/// What DOS does on entry to INT 21h, but for the calls `handle` leaves
+/// out: save the caller's registers on its stack (AX, BX, CX, DX, SI, DI,
+/// BP, DS, ES, below the interrupt's return frame) and SS:SP in the running
+/// process's PSP (2Eh), where they are when the process a program makes
+/// from it ends (`Cpu::terminate`).
 fn save_caller(cpu: &mut Cpu) {
     let psp = cpu.current_psp;
     if psp == 0 || cpu.pm() {
@@ -42,6 +43,13 @@ fn save_caller(cpu: &mut Cpu) {
     let base = psp as u32 * 16;
     cpu.bus.guest_write_16(base + 0x2E, sp);
     cpu.bus.guest_write_16(base + 0x30, ss);
+}
+
+/// The owner of a block AH=48h or 4Ah gives the running process. Before
+/// any program is running (shell), DOS owns it, so that it isn't confused
+/// with a free block.
+fn block_owner(cpu: &Cpu) -> u16 {
+    if cpu.current_psp != 0 { cpu.current_psp } else { crate::mcb::DOS_OWNER }
 }
 
 /// The open file (its System File Table entry) handle `handle` of the
@@ -460,7 +468,10 @@ pub fn handle(cpu: &mut Cpu) {
     if writes_console(cpu, ah) && !crate::video::console_ready(cpu) {
         return;
     }
-    save_caller(cpu);
+    // These DOS runs on the caller's stack, without saving anything.
+    if !matches!(ah, 0x33 | 0x50 | 0x51 | 0x62 | 0x64) {
+        save_caller(cpu);
+    }
     dispatch(cpu, ah);
     // Remember the error of a failed handle or file call for AH=59h. The
     // calls in this range that don't report through CF leave it as the
@@ -1254,9 +1265,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             // A PSP a program made (AH=26h, 55h) is no program EXEC
             // started: the one that made it goes on from the terminate
             // address, as Drakkhen's loader does after its driver.
-            if !cpu.started_by_exec(tsr_psp) {
-                let _ = crate::mcb::resize(&mut cpu.bus, tsr_psp, paras_to_keep.max(6));
-                cpu.end_made_process(tsr_psp, true);
+            if cpu.ends_in_its_maker(tsr_psp) {
+                cpu.shrink_resident(tsr_psp, paras_to_keep);
+                cpu.end_made_process(tsr_psp);
                 cpu.last_child_exit = 0x0300 | return_code as u16;
                 return;
             }
@@ -1269,7 +1280,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // The program keeps DX paragraphs (at least its PSP); the
                 // rest of its block goes back to the parent, which loaded
                 // it (a game loading its sound driver, for one).
-                let _ = crate::mcb::resize(&mut cpu.bus, tsr_psp, paras_to_keep.max(6));
+                cpu.shrink_resident(tsr_psp, paras_to_keep);
             }
             if cpu.return_to_parent() {
                 cpu.bus.log_string(&format!(
@@ -1778,14 +1789,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         //     largest available block, CF = 1.
         0x48 => {
             let requested = cpu.bx();
-            let owner = if cpu.current_psp != 0 {
-                cpu.current_psp
-            } else {
-                // Before any program is running (shell), give blocks an
-                // "owner" equal to the allocating segment so they aren't
-                // confused with free blocks.
-                0x0008
-            };
+            let owner = block_owner(cpu);
             match crate::mcb::alloc_strategy(&mut cpu.bus, owner, requested, cpu.alloc_strategy) {
                 Ok(segment) => {
                     cpu.set_ax(segment);
@@ -1830,7 +1834,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x4A => {
             let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
-            match crate::mcb::resize(&mut cpu.bus, segment, requested_size) {
+            let owner = block_owner(cpu);
+            match crate::mcb::set_block(&mut cpu.bus, owner, segment, requested_size) {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(err) => {
                     if let crate::mcb::ResizeError::Insufficient(max) = err {

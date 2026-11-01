@@ -671,6 +671,23 @@ pub fn resize(bus: &mut Bus, block_seg: u16, new_paras: u16) -> Result<(), Resiz
     Ok(())
 }
 
+/// AH=4Ah from the process `owner`: `resize`, after which the block is
+/// that process's, even if another process allocated it or the size stays.
+/// MS-DOS's `$SETBLOCK` goes on into `$ALLOC`'s `alloc_set_owner`. A block
+/// that can't take the size keeps its owner.
+pub fn set_block(
+    bus: &mut Bus,
+    owner: u16,
+    block_seg: u16,
+    new_paras: u16,
+) -> Result<(), ResizeError> {
+    resize(bus, block_seg, new_paras)?;
+    let mcb_seg = block_seg.wrapping_sub(1);
+    let m = read_mcb(bus, mcb_seg);
+    write_mcb(bus, mcb_seg, &Mcb { owner, ..m });
+    Ok(())
+}
+
 /// Free every block owned by `psp`. Called when a process terminates so its
 /// memory doesn't leak to the parent. No-op if the chain is corrupt.
 pub fn free_owned_by(bus: &mut Bus, psp: u16) {
