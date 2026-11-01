@@ -2744,6 +2744,12 @@ impl Bus {
         }
     }
 
+    /// `Clock::past_blanking` for the picture the monitor shows.
+    pub fn past_blanking(&mut self, end: u64) -> u64 {
+        let refresh = self.refresh_timing();
+        self.clock.past_blanking(end, &refresh)
+    }
+
     /// Latch the display Start Address if emulated time has passed the
     /// start of a vertical retrace since it was last latched, as the CRTC
     /// does at every retrace.
