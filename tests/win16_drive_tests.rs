@@ -231,3 +231,43 @@ fn set_current_directory_of_a_missing_directory_is_false() {
     );
     assert_eq!(exit, 0, "{log}");
 }
+
+#[test]
+fn set_current_directory_of_an_empty_path_is_false() {
+    // An empty path names no directory, so the call returns FALSE, as
+    // Win32's does, and the current directory stays C:\.
+    let mut code = set_current_directory_call("");
+    code.exit_al();
+    let (exit, log) = run_with(
+        "set_current_directory_empty",
+        program(&code, CODE),
+        |_, _| {},
+    );
+    assert_eq!(exit, 0, "{log}");
+}
+
+#[test]
+fn set_current_directory_on_another_drive_makes_it_current() {
+    // SetCurrentDirectory("D:\DATA") makes D: the current drive, so
+    // GetCurrentDirectory returns "D:\DATA", 7 bytes. While C: were
+    // current it would return "C:\", 3. Exit code 7.
+    let mut code = set_current_directory_call("D:\\DATA");
+    code.emit(&[0x83, 0xEC, 0x40, 0x8B, 0xDC]) // sub sp,40h; mov bx,sp
+        .push(0) // length, high word
+        .push(64) // length, low word
+        .emit(&[0x16, 0x53]) // push ss; push bx
+        .call("KERNEL", GET_CURRENT_DIRECTORY)
+        .exit_al();
+    let (exit, log) = run_with(
+        "set_current_directory_drive",
+        program(&code, CODE),
+        |cpu, base| {
+            let data = base.join("d");
+            fs::create_dir_all(data.join("DATA")).unwrap();
+            cpu.bus
+                .mount_drive(3, &data, MountOptions::default(), false)
+                .unwrap();
+        },
+    );
+    assert_eq!(exit, 7, "{log}");
+}

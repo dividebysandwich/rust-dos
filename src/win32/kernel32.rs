@@ -13,7 +13,7 @@ mod mapping;
 mod memory;
 mod message;
 pub(super) mod module;
-mod path;
+pub(crate) mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
