@@ -429,24 +429,24 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   games: DirectDraw in full screen on the card's VESA modes or in a window,
   DirectSound and wave audio in the `windows` mixer channel, MIDI to the
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
-  keyboard, mouse and joystick through DirectInput; AVIFIL32 and MSVFW32
-  read AVI files and decompress and draw their frames, with Indeo Video 3
-  and 5 as codecs; DMUSIC, DMIME, DMLOADER, DMSTYLE, DMBAND and DMCOMPOS
-  play DirectX 6.1's DirectMusic on the same synthesizer; D3D8 is DirectX
-  8.1's Direct3D on a Banshee or Voodoo3, and OPENGL32 is OpenGL 1.1 there
-  as 3dfx's ICD had it, with GDI32's pixel formats, SwapBuffers and gamma
-  ramp, and on a Voodoo2 full screen as 3dfx's Voodoo2 OpenGL driver had
-  it. A program that calls a function they don't have ends with a message
-  naming it, and one that needs a DLL that is neither among them nor beside
-  it is refused. The registry is kept in `C:\REGISTRY.REG`, which is made
-  the first time a program uses it, so a host folder mounted as C: gets
-  that file. The built-in DLLs show as read-only files in
-  `C:\WINDOWS\SYSTEM`, to DOS programs too, and `GLIDE2X.DLL` is among them
-  only with a 3dfx card. A Windows 3.1 program (an NE .EXE) runs too, as
-  Windows 95 runs it: its KERNEL, USER, GDI and other 16-bit modules are
-  written into the emulator as well and go on to the 32-bit ones, and its
-  own DLLs, such as Visual Basic's runtimes, load from beside it. Off, such
-  a program runs its DOS stub, which says it needs Windows. The plan is in
+  keyboard, mouse and joystick through DirectInput, which DINPUT8 is for
+  DirectX 8 games; AVIFIL32 and MSVFW32 read AVI files and decompress and draw
+  their frames, with Indeo Video 3 and 5 as codecs; DMUSIC, DMIME, DMLOADER,
+  DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
+  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3, and
+  OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's pixel
+  formats, SwapBuffers and gamma ramp, and on a Voodoo2 full screen as 3dfx's
+  Voodoo2 OpenGL driver had it. A program that calls a function they don't
+  have ends with a message naming it, and one that needs a DLL that is neither
+  among them nor beside it is refused. The registry is kept in
+  `C:\REGISTRY.REG`, which is made the first time a program uses it, so a host
+  folder mounted as C: gets that file. The built-in DLLs show as read-only
+  files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and `GLIDE2X.DLL` is
+  among them only with a 3dfx card. A Windows 3.1 program (an NE .EXE) runs
+  too, as Windows 95 runs it: its KERNEL, USER, GDI and other 16-bit modules
+  are written into the emulator as well and go on to the 32-bit ones, and its
+  own DLLs, such as Visual Basic's runtimes, load from beside it. Off, such a
+  program runs its DOS stub, which says it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
