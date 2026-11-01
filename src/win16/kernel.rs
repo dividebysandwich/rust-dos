@@ -278,6 +278,7 @@ static APIS: &[Api16] = &[
     rust("RegEnumKey", 216, "llpl", reg_fail),
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
+    rust("GetCurrentDirectory", 411, "lp", get_current_directory),
     // Flat thunks (flat.rs).
     register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
     rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
@@ -1524,6 +1525,27 @@ pub fn lstrcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
     })
+}
+
+/// GetCurrentDirectory(length, buffer), ordinal 411: the current drive's
+/// directory as "C:\DIR", or "C:\" at the root, with no trailing
+/// backslash. Like Win32's, it returns the length without the NUL when
+/// the buffer holds the path. When it doesn't, it writes nothing and
+/// returns the length needed, NUL included.
+fn get_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let drive = cpu.bus.disk.get_current_drive();
+    let dir = cpu
+        .bus
+        .disk
+        .get_current_directory_of(drive)
+        .unwrap_or_default();
+    let path = format!("{}:\\{}", crate::disk::drive_letter(drive), dir);
+    let needed = path.len() as u32 + 1;
+    if args[0] < needed {
+        return Some(needed);
+    }
+    copy_string(cpu, args[1], args[0], path.as_bytes());
+    Some(path.len() as u32)
 }
 
 fn lstrcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

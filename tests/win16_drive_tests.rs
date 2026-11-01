@@ -94,3 +94,84 @@ fn a_floppy_is_removable_and_z_is_fixed() {
     });
     assert_eq!(exit, 0x23, "{log}");
 }
+
+/// KERNEL's GetCurrentDirectory: Windows 3.1's PROGMAN.EXE calls it.
+const GET_CURRENT_DIRECTORY: u16 = 411;
+
+/// A program that calls GetCurrentDirectory(size, buffer) with a 64-byte
+/// buffer on its stack, then leaves the buffer's address in BX. Its exit
+/// code is the function's return value, and the buffer's bytes are left
+/// for the caller's checks.
+fn get_current_directory_call(size: u16) -> Code {
+    let mut code = Code::new();
+    code.emit(&[0x83, 0xEC, 0x40]) // sub sp,40h
+        .emit(&[0x8B, 0xDC]) // mov bx,sp: the buffer
+        .push(0) // length, high word
+        .push(size) // length, low word
+        .emit(&[0x16]) // push ss
+        .emit(&[0x53]) // push bx
+        .call("KERNEL", GET_CURRENT_DIRECTORY)
+        .emit(&[0x8B, 0xDC]); // mov bx,sp: the arguments are popped
+    code
+}
+
+#[test]
+fn get_current_directory_copies_the_drive_path() {
+    // The current directory is C:\GAMES\DOS. The buffer holds it with
+    // its NUL, and the return value is its length, 12. Exit code 12 if
+    // the buffer's bytes are as expected (C, the backslash after C:, S
+    // and NUL), 0xEE if not.
+    let mut code = get_current_directory_call(64);
+    let checks: [&[u8]; 4] = [
+        &[0x36, 0x80, 0x3F, 0x43],       // cmp ss:[bx],'C'
+        &[0x36, 0x80, 0x7F, 0x02, 0x5C], // cmp ss:[bx+2],'\'
+        &[0x36, 0x80, 0x7F, 0x0B, 0x53], // cmp ss:[bx+11],'S'
+        &[0x36, 0x80, 0x7F, 0x0C, 0x00], // cmp ss:[bx+12],0
+    ];
+    for (i, check) in checks.iter().enumerate() {
+        // Past this jump: the checks after it, and the 4-byte exit.
+        let rest: usize = checks[i + 1..].iter().map(|c| c.len() + 2).sum::<usize>() + 4;
+        code.emit(check).emit(&[0x75, rest as u8]); // jne fail
+    }
+    code.exit_al() // AL = 12
+        .emit(&[0xB0, 0xEE]) // fail: mov al,0EEh
+        .exit_al();
+    let (exit, log) = run_with(
+        "get_current_directory",
+        program(&code, CODE),
+        |cpu, base| {
+            fs::create_dir_all(base.join("GAMES").join("DOS")).unwrap();
+            assert!(cpu.bus.disk.set_current_directory("GAMES\\DOS"));
+        },
+    );
+    assert_eq!(exit, 12, "{log}");
+}
+
+#[test]
+fn get_current_directory_at_the_root_and_a_small_buffer() {
+    // At the root the path is "C:\", 3 bytes, and a 4-byte buffer holds
+    // it: the first return value is 3. A 2-byte buffer is too small, so
+    // the second call returns the 4 needed with the NUL. Exit code: the
+    // first value in the high nibble, the second in the low one: 34h.
+    let mut code = get_current_directory_call(4);
+    code.emit(&[0x8B, 0xF0]) // mov si,ax
+        .emit(&[0x83, 0xEC, 0x40]) // sub sp,40h
+        .push(0) // length, high word
+        .push(2) // length, low word
+        .emit(&[0x16, 0x54]) // push ss; push sp: the buffer is not written
+        .call("KERNEL", GET_CURRENT_DIRECTORY)
+        .emit(&[
+            0xB1, 0x04, // mov cl,4
+            0xD3, 0xE6, // shl si,cl
+            0x0B, 0xC6, // or ax,si
+        ])
+        .exit_al();
+    let (exit, log) = run_with(
+        "get_current_directory_root",
+        program(&code, CODE),
+        |cpu, _| {
+            assert!(cpu.bus.disk.set_current_directory("\\"));
+        },
+    );
+    assert_eq!(exit, 0x34, "{log}");
+}
