@@ -213,6 +213,20 @@ fn send_aspi32_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 finish(cpu, &done);
                 done.status
             }
+            // APIX completes an event request for a target with no device
+            // later too, with that target's status.
+            Err(status) if flags & SRB_EVENT_NOTIFY != 0 && status != SS_INVALID_SRB => {
+                cpu.bus.win32.wnaspi32.finishing.push(Finished {
+                    srb,
+                    status,
+                    targ: 0,
+                    buf: 0,
+                    data: Vec::new(),
+                    residual: None,
+                    sense: None,
+                });
+                SS_PENDING
+            }
             Err(status) => status,
         },
         SC_ABORT_SRB => SS_ABORT_FAIL,
