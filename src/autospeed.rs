@@ -869,18 +869,22 @@ impl AutoSpeed {
                     // the program draws here is the frame rate to keep, or
                     // the reckoning below stays under it when more speed
                     // still gains a little (Myth, whose frames also wait
-                    // for the card).
+                    // for the card). This measurement is the first after a
+                    // change of speed, so it is the mean of two.
                     self.step = Step::Overshot {
                         below,
-                        sum: fps,
-                        seen: 1,
+                        sum: fps * 2.0,
+                        seen: 2,
                     };
                     current
                 }
             }
             Step::Overshot { below, sum, seen } => {
                 let (sum, seen) = (sum + fps, seen + 1);
-                if seen < JUDGED {
+                // Not at a speed the host doesn't keep up with: the sound
+                // runs dry there (Myth at 142,000), and what it measured
+                // so far has to do.
+                if seen < JUDGED && m.pace >= KEPT_UP {
                     self.step = Step::Overshot { below, sum, seen };
                     return current;
                 }
@@ -1588,7 +1592,7 @@ mod tests {
             speeds.push(speed);
         }
         let record = auto.held.map_or(0.0, |r| r.fps);
-        assert!(record < 35.6, "{}: {:?}", record, speeds);
+        assert!(record * KEPT < 34.9, "{}: {:?}", record, speeds);
         assert!(speeds.iter().all(|&s| s <= top), "{:?}", speeds);
         assert!(speeds[100..].iter().all(|&s| s <= 95_000), "{:?}", speeds);
     }
@@ -1637,7 +1641,7 @@ mod tests {
             speed = auto.decide(speed, &Measurement { fps, ..m }, true, HOST);
         }
         let overshoot = speed;
-        for reading in [31.0, 28.0, 30.0] {
+        for reading in [31.0, 28.0] {
             let m = Measurement {
                 fps: Some(reading),
                 refresh: 60.0,
@@ -1647,9 +1651,27 @@ mod tests {
             speed = auto.decide(speed, &m, true, HOST);
         }
         let record = auto.held.unwrap();
-        assert!((29.0..30.5).contains(&record.fps), "{:?}", record);
+        assert!((29.0..31.0).contains(&record.fps), "{:?}", record);
         assert_eq!(record.at, overshoot);
         assert!(speed < overshoot);
+    }
+
+    #[test]
+    fn an_overshoot_the_host_does_not_keep_up_with_is_left_at_once() {
+        // Myth: the record is still what was measured up there, and the
+        // speed doesn't stay for the rest of the measurements.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Overshot {
+            below: (68_000, 28.7),
+            sum: 60.0,
+            seen: 2,
+        };
+        let m = Measurement {
+            pace: 0.93,
+            ..myth(142_000)
+        };
+        assert!(auto.decide(142_000, &m, true, HOST) < 100_000);
+        assert_eq!(auto.held.map(|r| r.at), Some(142_000));
     }
 
     #[test]
