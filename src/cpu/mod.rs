@@ -1052,7 +1052,7 @@ impl Cpu {
             ipx.program_ended(psp);
         }
         if !self.started_by_exec(psp) {
-            self.end_made_process(psp);
+            self.end_made_process(psp, false);
             return true;
         }
         crate::dos_files::close_all(&mut self.bus, psp);
@@ -1139,16 +1139,19 @@ impl Cpu {
     }
 
     /// End the process `psp`, a PSP a program made, as DOS ends any: its
-    /// files closed and its memory freed, the INT 22h, 23h and 24h vectors
-    /// it keeps put back, and its parent (PSP 16h) the current process
-    /// again, back on the stack of the parent's last INT 21h call (PSP 2Eh)
-    /// with the registers it saved there, returning to the ended process's
-    /// terminate address (PSP 0Ah) with them. Windows' tasks end so, into
-    /// its DOS extender.
-    fn end_made_process(&mut self, psp: u16) {
+    /// files closed and its memory freed, unless it stays `resident`
+    /// (AH=31h), the INT 22h, 23h and 24h vectors it keeps put back, and
+    /// its parent (PSP 16h) the current process again, back on the stack
+    /// of the parent's last INT 21h call (PSP 2Eh) with the registers it
+    /// saved there, returning to the ended process's terminate address
+    /// (PSP 0Ah) with them. Windows' tasks end so, into its DOS extender,
+    /// and Drakkhen's loader gets its driver back so.
+    pub fn end_made_process(&mut self, psp: u16, resident: bool) {
         let base = psp as u32 * 16;
-        crate::dos_files::close_all(&mut self.bus, psp);
-        crate::mcb::free_owned_by(&mut self.bus, psp);
+        if !resident {
+            crate::dos_files::close_all(&mut self.bus, psp);
+            crate::mcb::free_owned_by(&mut self.bus, psp);
+        }
         for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
             let handler = self.bus.guest_read_32(base + 0x0A + 4 * i as u32);
             self.bus.guest_write_32(vector * 4, handler);

@@ -1251,6 +1251,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return_code, paras_to_keep, tsr_psp
             ));
 
+            // A PSP a program made (AH=26h, 55h) is no program EXEC
+            // started: the one that made it goes on from the terminate
+            // address, as Drakkhen's loader does after its driver.
+            if !cpu.started_by_exec(tsr_psp) {
+                let _ = crate::mcb::resize(&mut cpu.bus, tsr_psp, paras_to_keep.max(6));
+                cpu.end_made_process(tsr_psp, true);
+                cpu.last_child_exit = 0x0300 | return_code as u16;
+                return;
+            }
+
             cpu.note_exit(return_code, true);
             // Calculate where the resident block ends
             let resident_end = tsr_psp.wrapping_add(paras_to_keep);
