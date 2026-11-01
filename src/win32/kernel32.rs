@@ -17,7 +17,7 @@ mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
-pub(in crate::win32) use profile::profile_value;
+pub(in crate::win32) use profile::{profile_int, profile_value};
 mod sort;
 mod sync;
 mod text;
