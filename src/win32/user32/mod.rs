@@ -372,6 +372,16 @@ fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
+/// ExitWindowsEx(flags, reserved): logging off, a shutdown and a restart
+/// all end the built-in Windows' session, so every process ends and the
+/// DOS prompt comes back. Setup programs ask for this when they are done
+/// and wait for it. The processes get no WM_QUERYENDSESSION, so none can
+/// refuse.
+fn exit_windows_ex(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    super::end_session(cpu);
+    None
+}
+
 /// The string at `at`, one char per byte. None if a page isn't there.
 pub fn string_at(cpu: &mut Cpu, at: u32) -> Option<String> {
     let bytes = cpu.bus.guest_read_asciiz(at, 0x1_0000);
@@ -1224,7 +1234,7 @@ static APIS: &[Api] = &[
         2,
         sysparams::change_display_settings,
     ),
-    stdcall("ExitWindowsEx", 422, 2, nothing),
+    stdcall("ExitWindowsEx", 422, 2, exit_windows_ex),
     stdcall("GetGuiResources", 423, 2, nothing),
     stdcall(
         "GetProcessWindowStation",

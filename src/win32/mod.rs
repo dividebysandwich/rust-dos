@@ -966,6 +966,18 @@ pub(crate) fn exit(cpu: &mut Cpu, code: u32) {
     end_process(cpu, index, code);
 }
 
+/// End every process, the running one last, each with exit code 0.
+pub(crate) fn end_session(cpu: &mut Cpu) {
+    loop {
+        let win32 = &cpu.bus.win32;
+        let Some(other) = (0..win32.processes.len()).find(|&i| i != win32.running) else {
+            break;
+        };
+        end_process(cpu, other, 0);
+    }
+    exit(cpu, 0);
+}
+
 /// End the process at `index` with exit code `code`, as `exit`. Whether
 /// the running thread goes on: false when it was one of the process's.
 fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
