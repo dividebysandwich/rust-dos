@@ -2350,6 +2350,10 @@ pub fn send_input(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// mouse_event(flags, dx, dy, data, extra).
 pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // A relative move starts from the place the system starts the cursor
+    // at. `init` overwrites the cursor, so it runs before the move, as
+    // the cursor calls do.
+    super::init(cpu);
     let (flags, dx, dy) = (args[0], args[1] as i32, args[2] as i32);
     const MOVE: u32 = 0x0001;
     const ABSOLUTE: u32 = 0x8000;
@@ -2963,6 +2967,18 @@ mod tests {
         cpu.bus.win32.ddraw.display.mode = (320, 200, 8);
         super::super::init(&mut cpu);
         assert_eq!(user(&mut cpu).input.cursor, (160, 100));
+    }
+
+    /// A relative mouse_event before any window moves from the middle of
+    /// the screen, where the system starts the cursor. The system's start
+    /// doesn't put the cursor back in the middle after the move.
+    #[test]
+    fn a_relative_mouse_event_before_user32_starts_moves_from_the_middle() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let (w, h) = screen_size(&cpu);
+        // MOUSEEVENTF_MOVE, 10 right and 5 down.
+        mouse_event(&mut cpu, &[0x0001, 10, 5, 0, 0]);
+        assert_eq!(user(&mut cpu).input.cursor, (w / 2 + 10, h / 2 + 5));
     }
 
     /// A grey arrow held down is one WM_KEYDOWN, extended, and stays

@@ -1761,7 +1761,8 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if client.width() == old_client.width() && client.height() == old_client.height() {
                     flags |= SWP_NOCLIENTSIZE;
                 }
-                if client.left == old_client.left && client.top == old_client.top {
+                let client_moved = client.left != old_client.left || client.top != old_client.top;
+                if !client_moved {
                     flags |= SWP_NOCLIENTMOVE;
                 }
                 super::paint::tree_changed(cpu);
@@ -1801,7 +1802,7 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 // the move by moving the window again would otherwise get
                 // forever.
                 let changed = user(cpu).screen_rect(hwnd) != old_screen
-                    || flags & SWP_NOCLIENTMOVE == 0
+                    || client_moved
                     || was_visible != now_visible;
                 super::input::window_moved(cpu, hwnd, under, changed);
                 cpu.bus.guest_write_32(winpos + 24, flags);

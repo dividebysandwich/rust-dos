@@ -3448,6 +3448,80 @@ fn the_desktop_keeps_the_cursor_set_before_it() {
     assert_eq!((cpu.bus.mouse.x, cpu.bus.mouse.y), (100, 120), "the mouse");
 }
 
+const USER32_SET_POS_MOVE: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "SetWindowPos", "PeekMessageA"],
+);
+const SET_POS_SET_WINDOW_POS: usize = 1;
+const SET_POS_PEEK_MESSAGE: usize = 2;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+const PM_NOREMOVE: u32 = 0;
+
+/// SetWindowPos gives the window under the cursor a WM_MOUSEMOVE when the
+/// window's place changes, and none when it keeps its place. A program
+/// that answers a move by setting its window where it is would otherwise
+/// get moves forever.
+#[test]
+fn set_window_pos_gives_a_mouse_move_only_when_the_window_moves() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_SET_POS_MOVE], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let mv = Arg::I(WM_MOUSEMOVE);
+        let peek_moves = |flags: u32| [Arg::At(CURSOR_MSG), Arg::I(0), mv, mv, Arg::I(flags)];
+        let set_at = |x: u32, y: u32| {
+            [
+                Arg::Val(RESULTS),
+                Arg::I(0),
+                Arg::I(x),
+                Arg::I(y),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(SWP_NOZORDER | SWP_NOACTIVATE),
+            ]
+        };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        // The move that showing the window queued.
+        c.api(a, l, SET_POS_PEEK_MESSAGE, &peek_moves(PM_REMOVE))?;
+        // In place: no move.
+        c.api(a, l, SET_POS_SET_WINDOW_POS, &set_at(0, 0))?;
+        c.api(a, l, SET_POS_PEEK_MESSAGE, &peek_moves(PM_NOREMOVE))?;
+        // Moved, and still under the cursor: a move.
+        c.api(a, l, SET_POS_SET_WINDOW_POS, &set_at(50, 60))?;
+        c.api(a, l, SET_POS_PEEK_MESSAGE, &peek_moves(PM_REMOVE))?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("set_window_pos_mouse_move", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 6);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_eq!(r[1], 1, "the move the showing queued");
+    assert_eq!(r[2], 1, "SetWindowPos in place");
+    assert_eq!(r[3], 0, "no move for a window that keeps its place");
+    assert_eq!(r[4], 1, "SetWindowPos moved");
+    assert_eq!(r[5], 1, "a move for the window that moved");
+    assert_eq!(peek(&cpu, data + CURSOR_MSG), r[0], "for the window");
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
