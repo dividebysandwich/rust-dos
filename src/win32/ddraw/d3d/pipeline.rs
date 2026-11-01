@@ -1136,8 +1136,8 @@ fn line(
 /// its transformed vertices taken back to the clip coordinates the
 /// viewport puts where they are: a vertex behind the eye has no screen
 /// position it could be clipped on the screen from. Only when a
-/// transformed vertex has no such coordinates (its rhw not above 0) is
-/// the primitive clipped on the screen.
+/// transformed vertex has no such coordinates (its rhw is zero or not
+/// finite) is the primitive clipped on the screen.
 fn one_kind<const N: usize>(setup: &Setup, verts: [Processed; N]) -> ([Processed; N], bool) {
     let tl = verts.iter().filter(|v| v.tl).count();
     if tl == 0 || tl == N {
@@ -1151,15 +1151,18 @@ fn one_kind<const N: usize>(setup: &Setup, verts: [Processed; N]) -> ([Processed
 }
 
 /// A transformed vertex at the clip coordinates that the viewport puts
-/// where it is, if it has them. It is on the user's clip planes, not
-/// outside them: transformed vertices aren't clipped at them.
+/// where it is, if it has them. Its rhw is 1/w, so the screen position
+/// gives w back with its sign: a vertex behind the eye has a negative w,
+/// and its clip coordinates clip like any other. It is on the user's
+/// clip planes, not outside them: transformed vertices aren't clipped at
+/// them.
 fn as_clip(setup: &Setup, p: &Processed) -> Option<Processed> {
     if !p.tl {
         return Some(*p);
     }
     let m = &setup.view_map;
     let w = 1.0 / p.rhw;
-    if !w.is_finite() || w <= 0.0 || m.sx == 0.0 || m.sy == 0.0 || m.sz == 0.0 {
+    if !w.is_finite() || m.sx == 0.0 || m.sy == 0.0 || m.sz == 0.0 {
         return None;
     }
     let clip = [
@@ -1168,14 +1171,7 @@ fn as_clip(setup: &Setup, p: &Processed) -> Option<Processed> {
         (p.clip[2] - m.oz) / m.sz * w,
         w,
     ];
-    let mut out = Processed {
-        clip,
-        planes: [0.0; 6],
-        rhw: 0.0,
-        tl: false,
-        ..*p
-    };
-    out.code = codes(setup, &out);
+    let out = at_clip_coordinates(setup, p, clip, [0.0; 6]);
     finite(&out).then_some(out)
 }
 
@@ -1439,6 +1435,24 @@ mod tests {
         assert!(b.triangles.iter().flatten().all(in_front));
     }
 
+    /// The triangles of `b` are those of `a`, with their vertices close,
+    /// and all in front of the eye.
+    fn same_triangles(a: &Recorder, b: &Recorder) {
+        assert!(!a.triangles.is_empty());
+        assert_eq!(a.triangles.len(), b.triangles.len());
+        let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * (1.0 + a.abs());
+        for (va, vb) in a
+            .triangles
+            .iter()
+            .flatten()
+            .zip(b.triangles.iter().flatten())
+        {
+            assert!(close(va.x, vb.x) && close(va.y, vb.y), "{va:?} {vb:?}");
+            assert!(close(va.z, vb.z) && close(va.rhw, vb.rhw), "{va:?} {vb:?}");
+        }
+        assert!(b.triangles.iter().flatten().all(in_front));
+    }
+
     #[test]
     fn a_triangle_mixing_screen_and_clip_vertices_is_clipped_at_the_near_plane() {
         // The first corner drawn from its screen position alone, as one
@@ -1453,15 +1467,27 @@ mod tests {
         let (mut a, mut b) = (Recorder::default(), Recorder::default());
         draw(&setup, &direct, &prims, &mut a);
         draw(&setup, &mixed, &prims, &mut b);
-        assert!(!a.triangles.is_empty());
-        assert_eq!(a.triangles.len(), b.triangles.len());
-        let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * (1.0 + a.abs());
-        let (va, vb) = (a.triangles.iter().flatten(), b.triangles.iter().flatten());
-        for (va, vb) in va.zip(vb) {
-            assert!(close(va.x, vb.x) && close(va.y, vb.y), "{va:?} {vb:?}");
-            assert!(close(va.z, vb.z) && close(va.rhw, vb.rhw), "{va:?} {vb:?}");
-        }
-        assert!(b.triangles.iter().flatten().all(in_front));
+        same_triangles(&a, &b);
+    }
+
+    #[test]
+    fn a_corner_behind_the_eye_from_its_screen_position_is_clipped_at_the_near_plane() {
+        // The corner behind the eye, drawn from its screen position alone
+        // (its rhw is negative), beside two kept at clip coordinates. Its
+        // clip coordinates are the ones the viewport maps it from, so the
+        // triangle is clipped at the near plane as well.
+        let (setup, direct, tl) = behind_the_eye();
+        assert!(tl[2].rhw < 0.0);
+        let mixed = [
+            at_clip_coordinates(&setup, &tl[0], direct[0].clip, direct[0].planes),
+            at_clip_coordinates(&setup, &tl[1], direct[1].clip, direct[1].planes),
+            tl[2],
+        ];
+        let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        draw(&setup, &direct, &prims, &mut a);
+        draw(&setup, &mixed, &prims, &mut b);
+        same_triangles(&a, &b);
     }
 
     #[test]
