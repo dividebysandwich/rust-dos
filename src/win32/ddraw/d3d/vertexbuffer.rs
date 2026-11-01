@@ -35,14 +35,15 @@ pub struct VertexBuffer {
     /// For each vertex ProcessVertices put here with D3DVOP_CLIP: what it
     /// kept of it. A draw takes them only for a vertex still at the
     /// screen position they map to, so a vertex the program wrote over
-    /// since isn't taken for them. Not in save states: the next
-    /// ProcessVertices makes them again. Shared, so the copies of the
-    /// buffer that Lock and the draws make don't copy them.
+    /// since isn't taken for them. Shared, so the copies of the buffer
+    /// that Lock and the draws make don't copy them. In save states: a
+    /// program may process a buffer once and draw it for as long as its
+    /// view stays, or be saved between the two.
     pub clipped: Arc<Vec<Option<Clipped>>>,
 }
 
 /// What ProcessVertices keeps of a vertex it clipped.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clipped {
     /// Its clip coordinates.
     pub clip: [f32; 4],
@@ -56,10 +57,11 @@ crate::state_fields!(VertexBuffer {
     count,
     memory,
     locked,
-    optimized
-} skip {
+    optimized,
     clipped
 });
+
+crate::state_fields!(Clipped { clip, planes });
 
 /// The most vertices a buffer has.
 const MAX_VERTICES: u32 = 0x1_0000;
@@ -241,7 +243,6 @@ fn process(
     let clip = op & (D3DVOP_CLIP | D3DVOP_TRANSFORM) == D3DVOP_CLIP | D3DVOP_TRANSFORM
         && d.caps & DONOTCLIP == 0
         && dl.rhw;
-    let mut clipped = Vec::with_capacity(if clip { processed.len() } else { 0 });
     for (i, (p, v)) in processed.iter().zip(vertices).enumerate() {
         let base = d.memory + (index + i as u32) * dl.size;
         let screen = if p.tl || op & D3DVOP_TRANSFORM == 0 {
@@ -256,12 +257,6 @@ fn process(
         };
         let room = (end - base).min(16) / 4;
         write_dwords(cpu, base, &screen.map(f32::to_bits)[..room as usize]);
-        if clip {
-            clipped.push((!p.tl).then_some(Clipped {
-                clip: p.clip,
-                planes: p.planes,
-            }));
-        }
         let lit = op & D3DVOP_LIGHT != 0 && setup.lighting.is_some();
         let copy = flags & D3DPV_DONOTCOPYDATA == 0;
         if let Some(at) = dl.diffuse
@@ -300,11 +295,15 @@ fn process(
     drop(d);
     if let Some(b) = get(cpu, id) {
         let at = index as usize;
-        let count = b.count as usize;
         if clip {
             let kept = Arc::make_mut(&mut b.clipped);
-            kept.resize(count, None);
-            kept[at..at + clipped.len()].copy_from_slice(&clipped);
+            kept.resize(b.count as usize, None);
+            for (k, p) in kept[at..].iter_mut().zip(&processed) {
+                *k = (!p.tl).then_some(Clipped {
+                    clip: p.clip,
+                    planes: p.planes,
+                });
+            }
         } else if b.clipped.len() >= at + processed.len() {
             Arc::make_mut(&mut b.clipped)[at..at + processed.len()].fill(None);
         }
@@ -323,4 +322,28 @@ fn process(
         flags,
     );
     Some(D3D_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::savestate::{Reader, State, Writer};
+
+    #[test]
+    fn a_save_state_keeps_the_clip_coordinates() {
+        let kept = Clipped {
+            clip: [1.0, 2.0, 3.0, -4.0],
+            planes: [0.5; 6],
+        };
+        let buffer = VertexBuffer {
+            count: 2,
+            clipped: Arc::new(vec![Some(kept), None]),
+            ..VertexBuffer::default()
+        };
+        let mut w = Writer::new();
+        buffer.save(&mut w);
+        let mut loaded = VertexBuffer::default();
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert_eq!(*loaded.clipped, *buffer.clipped);
+    }
 }

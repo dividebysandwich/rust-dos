@@ -333,6 +333,22 @@ impl ViewMap {
         ]
     }
 
+    /// The clip coordinates `screen` puts at `s` (x, y, z and rhw), if
+    /// any do: an rhw of 0, infinite or not a number has none, and nor
+    /// does a viewport with no width, height or depth.
+    fn clip(&self, s: [f32; 4]) -> Option<[f32; 4]> {
+        let w = 1.0 / s[3];
+        if !w.is_finite() || w == 0.0 || self.sx == 0.0 || self.sy == 0.0 || self.sz == 0.0 {
+            return None;
+        }
+        Some([
+            (s[0] - self.ox) / self.sx * w,
+            (self.oy - s[1]) / self.sy * w,
+            (s[2] - self.oz) / self.sz * w,
+            w,
+        ])
+    }
+
     /// The guard band (left, top, right, bottom on the screen) as bounds
     /// of x/w and y/w: from, to for each.
     fn guard(&self, band: [f32; 4]) -> [f32; 4] {
@@ -1136,8 +1152,8 @@ fn line(
 /// its transformed vertices taken back to the clip coordinates the
 /// viewport puts where they are: a vertex behind the eye has no screen
 /// position it could be clipped on the screen from. Only when a
-/// transformed vertex has no such coordinates (its rhw is zero or not
-/// finite) is the primitive clipped on the screen.
+/// transformed vertex has no such coordinates (`ViewMap::clip`) is the
+/// primitive clipped on the screen.
 fn one_kind<const N: usize>(setup: &Setup, verts: [Processed; N]) -> ([Processed; N], bool) {
     let tl = verts.iter().filter(|v| v.tl).count();
     if tl == 0 || tl == N {
@@ -1160,17 +1176,8 @@ fn as_clip(setup: &Setup, p: &Processed) -> Option<Processed> {
     if !p.tl {
         return Some(*p);
     }
-    let m = &setup.view_map;
-    let w = 1.0 / p.rhw;
-    if !w.is_finite() || m.sx == 0.0 || m.sy == 0.0 || m.sz == 0.0 {
-        return None;
-    }
-    let clip = [
-        (p.clip[0] - m.ox) / m.sx * w,
-        (m.oy - p.clip[1]) / m.sy * w,
-        (p.clip[2] - m.oz) / m.sz * w,
-        w,
-    ];
+    let [x, y, z, _] = p.clip;
+    let clip = setup.view_map.clip([x, y, z, p.rhw])?;
     let out = at_clip_coordinates(setup, p, clip, [0.0; 6]);
     finite(&out).then_some(out)
 }
@@ -1353,6 +1360,18 @@ mod tests {
         assert!(near(s[0], 256.0) && near(s[1], 5.0) && near(s[2], 4.0) && near(s[3], 1.0));
         let s = setup.view_map.screen(out[1].clip);
         assert!(near(s[0], 133.0) && near(s[1], 70.0) && near(s[2], -2.0));
+    }
+
+    #[test]
+    fn a_screen_position_gives_its_clip_coordinates_back() {
+        let m = ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0);
+        for c in [[0.5, -0.25, 1.0, 2.0], [0.5, -0.25, -1.0, -2.0]] {
+            let back = m.clip(m.screen(c)).unwrap();
+            assert!((0..4).all(|i| near(back[i], c[i])), "{c:?} {back:?}");
+        }
+        for rhw in [0.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(m.clip([1.0, 2.0, 0.5, rhw]), None, "rhw {rhw}");
+        }
     }
 
     #[test]
