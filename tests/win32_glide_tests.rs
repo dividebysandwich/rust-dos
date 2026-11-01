@@ -161,6 +161,7 @@ const GLIDE: &[&str] = &[
     "_grSstScreenWidth@0",
     "_grTexFilterMode@12",
     "_grDitherMode@4",
+    "_grSstControl@4",
 ];
 
 fn import(name: &str) -> usize {
@@ -816,6 +817,83 @@ fn leaving_program() -> (Vec<u8>, u32) {
         a.call(dword_ptr(l.iat[GLIDE.len()] as u64))?;
         a.int3()
     })
+}
+
+/// A program that opens the card, calls grSstControl with each of
+/// `codes` and stays, with the card open, until the test is done with it.
+fn control_program(codes: &'static [u32]) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+        c.call(
+            a,
+            l,
+            "_grSstWinOpen@28",
+            &[
+                Arg::I(0),
+                Arg::I(GR_RESOLUTION_640X480),
+                Arg::I(GR_REFRESH_60HZ),
+                Arg::I(GR_COLORFORMAT_ARGB),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(2),
+                Arg::I(1),
+            ],
+        )?;
+        for &code in codes {
+            c.call(a, l, "_grSstControl@4", &[Arg::I(code)])?;
+        }
+        a.mov(dword_ptr(l.at(DONE)), 1)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.jmp(spin)
+    })
+}
+
+const GR_CONTROL_ACTIVATE: u32 = 1;
+const GR_CONTROL_DEACTIVATE: u32 = 2;
+
+/// The bit of a Banshee's vidProcCfg that shows the overlay, Glide's
+/// picture.
+const OVERLAY_ENABLE: u32 = 1 << 8;
+
+fn overlay_shown(cpu: &Cpu) -> bool {
+    let card = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    let cfg = card.reg(rust_dos::voodoo::banshee::VID_PROC_CFG);
+    cfg & OVERLAY_ENABLE != 0
+}
+
+#[test]
+fn gr_sst_control_turns_a_voodoo2s_pass_through() {
+    let (program, data) = control_program(&[GR_CONTROL_DEACTIVATE]);
+    let mut cpu = machine("control_off", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor");
+
+    let codes = &[GR_CONTROL_DEACTIVATE, GR_CONTROL_ACTIVATE];
+    let (program, data) = control_program(codes);
+    let mut cpu = machine("control_on", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor again");
+}
+
+#[test]
+fn gr_sst_control_gives_a_voodoo3s_display_away_and_takes_it_back() {
+    let (program, data) = control_program(&[GR_CONTROL_DEACTIVATE]);
+    let mut cpu = machine("control_off_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert!(!overlay_shown(&cpu), "Glide's picture is gone");
+    assert_eq!(cpu.bus.vga.crtc_regs, before, "the mode the screen was in");
+
+    let codes = &[GR_CONTROL_DEACTIVATE, GR_CONTROL_ACTIVATE];
+    let (program, data) = control_program(codes);
+    let mut cpu = machine("control_on_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert!(overlay_shown(&cpu), "Glide's picture is back");
+    assert_ne!(cpu.bus.vga.crtc_regs, before, "Glide's mode");
 }
 
 /// The card's fbiInit0 (Voodoo Graphics and Voodoo2): bit 0 takes the

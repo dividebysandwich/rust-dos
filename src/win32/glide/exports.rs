@@ -265,8 +265,18 @@ fn gr_sst_screen_height(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::screen_size(cpu).1)
 }
 
-fn gr_sst_control(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(TRUE)
+/// grSstControl(code): GR_CONTROL_ACTIVATE gives the monitor to the
+/// card and GR_CONTROL_DEACTIVATE takes it away. The codes for a window
+/// that resizes or moves have nothing to do on a full screen.
+fn gr_sst_control(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+    const ACTIVATE: u32 = 1;
+    const DEACTIVATE: u32 = 2;
+    let done = match a[0] {
+        ACTIVATE => hw::set_active(cpu, true),
+        DEACTIVATE => hw::set_active(cpu, false),
+        _ => true,
+    };
+    Some(if done { TRUE } else { FALSE })
 }
 
 fn gr_sst_idle(_: &mut Cpu, _: &[u32]) -> Option<u32> {
