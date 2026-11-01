@@ -494,10 +494,13 @@ static void test_errors(void)
     if (!CARRY(&r))
     {
         WORD sel = r.ax;
+        /* A segment register that holds the selector is zeroed. */
         dpmi_call(&r, 0x0001);
         r.bx = sel;
+        r.es = sel;
         dpmi(&r);
         ok(!CARRY(&r), "0001h failed\n");
+        ok(r.es == 0, "ES is %x after 0001h freed it\n", r.es);
         dpmi_call(&r, 0x0001);
         r.bx = sel;
         dpmi(&r);

@@ -317,7 +317,7 @@ pub fn realloc(cpu: &mut Cpu, handle: u16, size: u32, flags: u16) -> u16 {
     } else if count < old_count {
         state.ldt.free(sel + count * ldt::AHINCR, old_count - count);
         for i in count..old_count {
-            ldt::write(cpu, system, sel + i * ldt::AHINCR, 0);
+            ldt::write_desc(cpu, system, sel + i * ldt::AHINCR, 0);
         }
     }
     if new_sel != sel {

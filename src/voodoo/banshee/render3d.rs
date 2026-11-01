@@ -313,11 +313,11 @@ impl Voodoo {
 
     /// `data` downloaded into the card's memory from byte `addr` on, as
     /// writes of it through TMU 0's texture space would put it, all at
-    /// once: Glide's texture downloads. The triangles queued before are
-    /// drawn first if they may read or draw into that memory and can't
-    /// be given a copy of what they read (`spare`), and the recording
-    /// hears of the bytes once. Past the end of the memory they wrap
-    /// round.
+    /// once: Glide's texture downloads. The triangles queued before
+    /// keep what they read: they are given a copy of it (`spare`), the
+    /// bytes take their turn behind them (`banshee_texture_queue`), or
+    /// they are drawn first. The recording hears of the bytes once.
+    /// Past the end of the memory they wrap round.
     pub(crate) fn banshee_texture_download(&mut self, addr: u32, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -325,12 +325,15 @@ impl Voodoo {
         let size = self.fbi.mask as usize + 1;
         let start = addr as usize & (size - 1);
         let (here, wrapped) = data.split_at(data.len().min(size - start));
-        if !self.spare(start as u32, (start + here.len()) as u32) {
-            self.flush();
+        let spared = self.spare(start as u32, (start + here.len()) as u32);
+        if spared || !self.banshee_texture_queue(start, here) {
+            if !spared {
+                self.flush();
+            }
+            self.gpu_sync_bytes(start as u32, here.len());
+            self.fbi.ram.write_bytes(start, here);
+            self.mirror_memory(start as u32, (start + here.len()) as u32);
         }
-        self.gpu_sync_bytes(start as u32, here.len());
-        self.fbi.ram.write_bytes(start, here);
-        self.mirror_memory(start as u32, (start + here.len()) as u32);
         if !wrapped.is_empty() {
             self.banshee_texture_download(0, wrapped);
         }

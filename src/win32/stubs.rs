@@ -58,6 +58,8 @@ pub struct Dll {
     /// What fills the variables of a process the DLL is loaded in, once
     /// the process has its memory, heap and environment.
     pub init: Option<Init>,
+    /// What gives back what `init` took, at the last FreeLibrary.
+    pub term: Option<Term>,
     /// The tables of methods of its COM interfaces (com.rs), after the
     /// stubs in its code section.
     pub vtables: &'static [Vtable],
@@ -82,6 +84,9 @@ pub struct Var {
 
 /// A DLL's `init`: the process, which isn't the running one yet.
 pub type Init = fn(&mut crate::bus::Bus, &mut super::Process) -> Option<()>;
+
+/// A DLL's `term`: the process it is going from.
+pub type Term = fn(&mut crate::bus::Bus, &mut super::Process);
 
 /// The built-in DLLs. Append only (see the module's notes).
 pub static DLLS: &[&Dll] = &[
@@ -372,8 +377,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
-    if !cpu.bus.win32.sections.is_empty() {
-        super::kernel32::sweep_mappings(cpu);
+    if !cpu.bus.win32.sections.is_empty() && super::kernel32::sweep_mappings(cpu) {
+        crate::idle::not_pure(cpu);
     }
     super::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
