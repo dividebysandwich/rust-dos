@@ -109,20 +109,24 @@ const MOST_BACKOFFS: u32 = 2;
 /// judged over seconds, and what a speed loses depends on the scene. Doom
 /// draws all its 35 at 50,000 and 32 at 30,000, losing them in heavy scenes
 /// only: a light one passes any step down, and the next heavy one pays for
-/// it. So the speed stays a `FINE_STEP` above one that lost frames, the speed
-/// it came from: more would hold above what kept them, and each loss would
-/// add to it. It takes evidence that the speed did it: a step down that
-/// drew fewer frames than the speed it came from, or a hold short of the
-/// record that more speed brought back to it. More speed that doesn't bring
-/// them back says the record was a lucky one, and raising the floor on that
-/// would walk noise up. So would a loss the size of the noise, so it takes
-/// `LOST`, and two of those within a step of each other: a program at its
-/// knee loses frames at the same speed each time, and noise anywhere. The
-/// floor comes down by `FINE_STEP` each `FLOOR_WINDOWS` measurements, about
-/// a minute, which finds a program that got lighter, and a new search clears
-/// it.
+/// it. So steps down stop two `FINE_STEP`s above a speed that lost frames,
+/// as the loss shows up at a speed already below what the heavy scenes want.
+/// It takes evidence that the speed did it: a step down that drew fewer
+/// frames than the speed it came from, or a hold short of the record that
+/// more speed brought back to it. More speed that doesn't bring them back
+/// says the record was a lucky one, and raising the floor on that would walk
+/// noise up. So would a loss the size of the noise, so it takes `LOST`, and
+/// two of those within a step of each other: a program at its knee loses
+/// frames at the same speed each time, and noise anywhere. The loss also has
+/// to come within `FLOOR_REACH` of the least speed that drew the record: far
+/// above what the program runs at, no speed is too low, and a floor there
+/// would pin a run that noise sent up (one at 700,000 in a program that
+/// holds at 85,000). The floor comes down by `FINE_STEP` each
+/// `FLOOR_WINDOWS` measurements, about a minute, which finds a program that
+/// got lighter, and a new search clears it.
 const FLOOR_WINDOWS: u32 = 4 * HOLD_WINDOWS;
 const LOST: f64 = 0.95;
+const FLOOR_REACH: f64 = 1.3;
 /// Emulated time running slower than this share of the host's didn't keep
 /// up: the host can't run that speed now, whatever its estimate says (a
 /// battle in Myth at 40,000 instructions per ms ran at 0.25 to 0.6 of real
@@ -497,6 +501,8 @@ pub struct AutoSpeed {
     suspect: Option<u32>,
     /// The last speed shown to lose frames, for the next to agree with.
     lost_once: Option<u32>,
+    /// The least speed that drew the record in this scene.
+    least_held: Option<u32>,
     /// Since the host last fell behind (`KEPT_UP`): the most the speed
     /// goes to, and the measurements left before that rises; the pace,
     /// smoothed; and whether the last measurement fell behind.
@@ -541,6 +547,7 @@ impl AutoSpeed {
             floor: None,
             suspect: None,
             lost_once: None,
+            least_held: None,
             lagged: None,
             pace: 1.0,
             behind: false,
@@ -631,12 +638,16 @@ impl AutoSpeed {
         self.floor = None;
         self.suspect = None;
         self.lost_once = None;
+        self.least_held = None;
     }
 
     /// `speed` lost frames. The second time near it, raises the floor above
     /// it, no higher than `top`. Returns the floor, the least speed to hold
     /// at now.
     fn lost_frames(&mut self, speed: u32, top: u32) -> f64 {
+        if self.least_held.is_some_and(|least| speed as f64 > least as f64 * FLOOR_REACH) {
+            return self.floor.map_or(0.0, |(floor, _)| floor as f64);
+        }
         let reach = FINE_STEP * 1.01;
         let near = |s: u32| {
             let (a, b) = (speed as f64, s as f64);
@@ -647,7 +658,7 @@ impl AutoSpeed {
             return self.floor.map_or(0.0, |(floor, _)| floor as f64);
         };
         self.lost_once = None;
-        let floor = ((speed.min(before) as f64 * FINE_STEP) as u32).min(top);
+        let floor = ((speed.min(before) as f64 * FINE_STEP * FINE_STEP) as u32).min(top);
         let floor = self.floor.map_or(floor, |(was, _)| was.max(floor));
         self.floor = Some((floor, FLOOR_WINDOWS));
         floor as f64
@@ -1064,6 +1075,7 @@ impl AutoSpeed {
                     // nothing of it.
                     self.held = None;
                     self.backoffs = 0;
+                    self.least_held = None;
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
                         self.lagged = (most < host_top).then_some((most, LAGGED_WINDOWS));
@@ -1122,6 +1134,12 @@ impl AutoSpeed {
                         });
                     }
                     Some(_) => {}
+                }
+                if seen >= JUDGED
+                    && let Some(r) = self.held
+                {
+                    let least = self.least_held.map_or(r.at, |least| least.min(r.at));
+                    self.least_held = Some(least);
                 }
                 if !lagged
                     && seen >= JUDGED
@@ -1857,7 +1875,7 @@ mod tests {
             dipped: 0,
         };
         auto.decide(46_000, &drawing(35.0), false, HOST);
-        assert_eq!(auto.floor.map(|f| f.0), Some(46_000));
+        assert_eq!(auto.floor.map(|f| f.0), Some(52_899));
         assert_eq!(auto.suspect, None);
     }
 
@@ -1884,6 +1902,18 @@ mod tests {
     }
 
     #[test]
+    fn a_loss_far_above_the_held_speed_sets_no_floor() {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.least_held = Some(85_000);
+        auto.lost_frames(500_000, HOST);
+        auto.lost_frames(500_000, HOST);
+        assert_eq!(auto.floor, None);
+        auto.lost_frames(100_000, HOST);
+        auto.lost_frames(100_000, HOST);
+        assert_eq!(auto.floor.map(|f| f.0), Some(132_249));
+    }
+
+    #[test]
     fn losses_far_apart_set_no_floor() {
         let mut auto = AutoSpeed::new(3000, None);
         auto.lost_frames(40_000, HOST);
@@ -1897,10 +1927,10 @@ mod tests {
         auto.lost_frames(40_000, HOST);
         assert_eq!(auto.floor, None);
         auto.lost_frames(40_000, HOST);
-        assert_eq!(auto.floor, Some((46_000, FLOOR_WINDOWS)));
+        assert_eq!(auto.floor, Some((52_899, FLOOR_WINDOWS)));
         auto.lost_frames(20_000, HOST);
         auto.lost_frames(20_000, HOST);
-        assert_eq!(auto.floor.map(|f| f.0), Some(46_000));
+        assert_eq!(auto.floor.map(|f| f.0), Some(52_899));
         auto.lost_frames(1_000_000, HOST);
         auto.lost_frames(1_000_000, HOST);
         assert_eq!(auto.floor.map(|f| f.0), Some(HOST));
