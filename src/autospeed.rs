@@ -96,6 +96,11 @@ const AT_REFRESH: f64 = 0.95;
 /// back, one `SETTLE_DOWN_NS` a step.
 const HOLD_WINDOWS: u32 = 30;
 const DROPPED: f64 = 0.8;
+/// A step down that lost frames costs them for all of `SETTLE_DOWN_NS` and
+/// the measurements after it, so each one doubles the hold before the next
+/// try, up to this many times, until the scene changes. A game at its knee
+/// would pay that every half a minute: Doom lost a frame a second to it.
+const MOST_BACKOFFS: u32 = 2;
 /// Emulated time running slower than this share of the host's didn't keep
 /// up: the host can't run that speed now, whatever its estimate says (a
 /// battle in Myth at 40,000 instructions per ms ran at 0.25 to 0.6 of real
@@ -452,6 +457,9 @@ pub struct AutoSpeed {
     /// up in set it; falling behind leaves it, for when the host can run
     /// that speed again.
     held: Option<Record>,
+    /// Steps down that lost frames since the search started, up to
+    /// `MOST_BACKOFFS`.
+    backoffs: u32,
     /// Since the host last fell behind (`KEPT_UP`): the most the speed
     /// goes to, and the measurements left before that rises; the pace,
     /// smoothed; and whether the last measurement fell behind.
@@ -492,6 +500,7 @@ impl AutoSpeed {
             unsettled: None,
             step: Step::Start,
             held: None,
+            backoffs: 0,
             lagged: None,
             pace: 1.0,
             behind: false,
@@ -578,6 +587,7 @@ impl AutoSpeed {
     fn restart_search(&mut self) {
         self.step = Step::Start;
         self.held = None;
+        self.backoffs = 0;
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
@@ -916,14 +926,19 @@ impl AutoSpeed {
                         ..r
                     });
                     down(self, fps)
-                } else if fps >= before * KEPT {
-                    // Only the held frame rate stopped it: `from` kept
-                    // enough of that, and a knee reckoned from this step
-                    // would put the hold above it, a little more each time.
-                    hold(self, from as f64, HOLD_WINDOWS, true)
                 } else {
-                    let knee = (c * before / fps).clamp(c, from as f64);
-                    hold(self, (knee * HEADROOM).min(from as f64 * HEADROOM), HOLD_WINDOWS, true)
+                    let left = HOLD_WINDOWS << self.backoffs;
+                    self.backoffs = (self.backoffs + 1).min(MOST_BACKOFFS);
+                    if fps >= before * KEPT {
+                        // Only the held frame rate stopped it: `from` kept
+                        // enough of that, and a knee reckoned from this step
+                        // would put the hold above it, a little more each
+                        // time.
+                        hold(self, from as f64, left, true)
+                    } else {
+                        let knee = (c * before / fps).clamp(c, from as f64);
+                        hold(self, (knee * HEADROOM).min(from as f64 * HEADROOM), left, true)
+                    }
                 }
             }
             Step::Hold {
@@ -957,6 +972,7 @@ impl AutoSpeed {
                     // A heavier scene: what the last one held at says
                     // nothing of it.
                     self.held = None;
+                    self.backoffs = 0;
                     if !lagged && self.lagged.is_some() && current >= top && top < host_top {
                         let most = (top as f64 * HEAVIER) as u32;
                         self.lagged = (most < host_top).then_some((most, LAGGED_WINDOWS));
@@ -1634,6 +1650,39 @@ mod tests {
         assert!((29.0..30.5).contains(&record.fps), "{:?}", record);
         assert_eq!(record.at, overshoot);
         assert!(speed < overshoot);
+    }
+
+    #[test]
+    fn steps_down_that_lose_frames_are_tried_less_and_less_often() {
+        // Doom in a scene whose knee is at 40,000: where it comes from is
+        // right, and a step below that loses frames each time.
+        let scene = |speed: u32| Measurement {
+            fps: Some((speed as f64 * 35.0 / 40_000.0).min(35.0)),
+            ..STILL
+        };
+        let mut auto = AutoSpeed::new(3000, None);
+        let mut speed = 3000;
+        let mut tries = Vec::new();
+        for i in 0..1000 {
+            speed = auto.decide(speed, &scene(speed), false, HOST);
+            if matches!(auto.step, Step::Lowered { seen: 0, .. }) && speed < 40_000 {
+                tries.push(i);
+            }
+        }
+        assert!(tries.len() >= 4, "{:?}", tries);
+        let gaps: Vec<usize> = tries.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps[0] >= HOLD_WINDOWS as usize, "{:?}", gaps);
+        assert!(*gaps.last().unwrap() >= 4 * HOLD_WINDOWS as usize, "{:?}", gaps);
+        // A heavier scene starts over.
+        assert_eq!(auto.backoffs, MOST_BACKOFFS);
+        for _ in 0..2 {
+            let m = Measurement {
+                fps: Some(10.0),
+                ..STILL
+            };
+            speed = auto.decide(40_000, &m, false, HOST);
+        }
+        assert_eq!(auto.backoffs, 0, "{}", speed);
     }
 
     #[test]
