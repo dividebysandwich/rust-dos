@@ -182,3 +182,18 @@ fn the_prompt_runs_no_scr_without_the_builtin_windows() {
     let cpu = rust_dos::cpu::Cpu::new(base);
     assert_eq!(rust_dos::exec::find_program(&cpu, "SAVER.SCR"), None);
 }
+
+#[test]
+fn a_command_with_non_ascii_bytes_is_looked_up() {
+    // DOS bytes above 127 reach the shell as chars of two bytes, so a
+    // name's last four bytes don't always start a char. Such a name has
+    // no program, with the built-in Windows on or off.
+    let base = std::path::PathBuf::from("target/test_win16/non_ascii_command");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let mut cpu = rust_dos::cpu::Cpu::new(base);
+    for enabled in [false, true] {
+        cpu.bus.win32.enabled = enabled;
+        assert_eq!(rust_dos::exec::find_program(&cpu, "\u{e9}a12"), None);
+    }
+}

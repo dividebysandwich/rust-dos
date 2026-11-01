@@ -55,7 +55,9 @@ pub fn desktop_ended(cpu: &mut Cpu) {
 }
 
 /// SystemParametersInfo turned the saver on or off or changed its
-/// timeout: the timer counts again from the last input.
+/// timeout: the timer counts again from the last input. If that timeout
+/// is over already, the timer stays off until input comes, as it does
+/// after the saver was asked for.
 pub fn settings_changed(cpu: &mut Cpu) {
     user(cpu).input.saver_due = 0;
     arm(cpu);
@@ -82,13 +84,16 @@ fn end_of_timeout(input: &super::input::Input) -> Option<u64> {
 }
 
 /// Set the timer for the timeout after the last input, if the saver is
-/// on and the desktop is on the screen.
+/// on, the desktop is on the screen and the timeout isn't over yet. A
+/// timer set for a time already past would start the saver again with
+/// no input, so it isn't set.
 fn arm(cpu: &mut Cpu) {
+    let now = cpu.bus.clock.now_micros();
     let state = user(cpu);
     if !state.desktop {
         return;
     }
-    let Some(due) = end_of_timeout(&state.input) else {
+    let Some(due) = end_of_timeout(&state.input).filter(|&due| due > now) else {
         return;
     };
     state.input.saver_due = due;
@@ -157,5 +162,40 @@ pub fn start(cpu: &mut Cpu) {
             let line = format!("[USER] Screen saver {} can't start: error {}", path, code);
             cpu.bus.log_string(&line);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A desktop with a saver that waits one second after the last input,
+    /// and the clock `idle` microseconds after that input.
+    fn idle_machine(idle: u64) -> Cpu {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.clock.icount = 1 << 40;
+        let now = cpu.bus.clock.now_micros();
+        let state = user(&mut cpu);
+        state.desktop = true;
+        state.input.saver_active = true;
+        state.input.saver_timeout = 1;
+        state.input.idle_since = now - idle;
+        cpu
+    }
+
+    /// A settings change before the timeout ends arms the timer from the
+    /// last input; one after the timeout ends arms nothing, so the saver
+    /// isn't asked again while it runs or before input comes.
+    #[test]
+    fn a_settings_change_arms_the_timer_only_before_the_timeout_ends() {
+        let mut cpu = idle_machine(0);
+        settings_changed(&mut cpu);
+        let idle = user(&mut cpu).input.idle_since;
+        assert_eq!(user(&mut cpu).input.saver_due, idle + 1_000_000);
+
+        let mut cpu = idle_machine(2_000_000);
+        settings_changed(&mut cpu);
+        assert_eq!(user(&mut cpu).input.saver_due, 0);
     }
 }

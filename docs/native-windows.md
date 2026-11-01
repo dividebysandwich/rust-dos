@@ -928,9 +928,11 @@ BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
 Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
 Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
 two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
-and Prairie Dog Hunt (VB2). Sierra's screen saver Johnny Castaway
-(Screen Antics) installs with its own setup and runs from the prompt
-and from the screen saver's timer.
+and Prairie Dog Hunt (VB2).
+
+Sierra's screen saver Johnny Castaway (Screen Antics) installs with its
+own setup. Running it from the prompt and from the screen saver's timer
+is not checked on a build with this change yet.
 
 Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
 the SimTower demo, and the InstallShield of the Lemmings demo. All three

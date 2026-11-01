@@ -181,7 +181,10 @@ pub fn run_command(
         sink.lock().unwrap().push(line.to_string())
     }));
     cpu.load_shell();
-    assert!(rust_dos::exec::run_program(&mut cpu, command, args, false), "{command} didn't start");
+    assert!(
+        rust_dos::exec::run_program(&mut cpu, command, args, false),
+        "{command} didn't start"
+    );
     let mut ended = false;
     for _ in 0..400 {
         cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);

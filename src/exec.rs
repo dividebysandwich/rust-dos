@@ -865,25 +865,35 @@ fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> Op
 pub fn find_program(cpu: &Cpu, command: &str) -> Option<String> {
     const RUNNABLE: [&str; 3] = [".COM", ".EXE", ".BAT"];
     let name = command.rsplit(['\\', '/', ':']).next().unwrap_or(command);
-    let names: Vec<String> = match name.rfind('.') {
-        Some(dot) if RUNNABLE.iter().any(|ext| name[dot..].eq_ignore_ascii_case(ext)) => vec![command.to_string()],
-        Some(dot) if cpu.bus.win32.enabled && name[dot..].eq_ignore_ascii_case(".SCR") => {
+    // The extension from its dot on. Names are byte strings turned into
+    // chars, so a fixed-length slice from the end can split a char.
+    let ext = name.rfind('.').map(|dot| &name[dot..]);
+    let is_scr = ext.is_some_and(|ext| ext.eq_ignore_ascii_case(".SCR"));
+    let names: Vec<String> = match ext {
+        Some(ext) if RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r)) => {
             vec![command.to_string()]
         }
+        Some(_) if is_scr && cpu.bus.win32.enabled => vec![command.to_string()],
         Some(_) => return None,
-        None => RUNNABLE.iter().map(|ext| format!("{}{}", command, ext)).collect(),
+        None => RUNNABLE
+            .iter()
+            .map(|r| format!("{}{}", command, r))
+            .collect(),
     };
     // A saver is a Windows program, so a .SCR file has to be an MZ image;
     // without the check its bytes would run as a .COM.
-    let scr = name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".SCR");
     let is_mz = |p: &str| {
-        cpu.bus.disk.file_data(p).and_then(|file| file.read().ok()).is_some_and(|b| b.starts_with(b"MZ"))
+        cpu.bus
+            .disk
+            .file_data(p)
+            .and_then(|file| file.read().ok())
+            .is_some_and(|b| b.starts_with(b"MZ"))
     };
     let find = |dir: &str| {
         names
             .iter()
             .map(|n| format!("{}{}", dir, n))
-            .find(|p| cpu.bus.disk.is_file(p) && (!scr || is_mz(p)))
+            .find(|p| cpu.bus.disk.is_file(p) && (!is_scr || is_mz(p)))
     };
     if let Some(path) = find("") {
         return Some(path);
