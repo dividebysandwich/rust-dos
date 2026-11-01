@@ -12,8 +12,8 @@ change which drives exist or what runs at startup.
 
 Launch headless with `SDL_VIDEODRIVER=dummy` alone, or `--hidden` for
 OpenGL: the sound goes to the null output, which needs no sound device.
-Never set `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver runs faster
-than real time and must not be used for any measurement. For a timing run
+Never set `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver doesn't keep
+real time and must not be used for any measurement. For a timing run
 or an underrun count, use a real device with `--mute`
 (`SDL_AUDIODRIVER=wasapi` on Windows), or `--audio-output null` on a
 machine without one, and check `audio_driver` in `/api/stats` or

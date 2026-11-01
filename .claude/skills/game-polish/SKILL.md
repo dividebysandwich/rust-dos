@@ -59,8 +59,8 @@ skill covers what to do on top of that.
    ```
 
    With no window the sound goes to the null output. Never add
-   `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver runs faster than
-   real time and must not be used for any measurement. To file a timing
+   `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver doesn't keep real
+   time and must not be used for any measurement. To file a timing
    or underrun finding, rerun it on a real device with `--mute`
    (`SDL_AUDIODRIVER=wasapi` on Windows), or with `--audio-output null`
    on a machine without one, and quote `audio_driver` from `/api/stats`

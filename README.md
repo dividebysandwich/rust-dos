@@ -437,8 +437,8 @@ curl 'localhost:8086/api/memory?addr=DS:SI&len=64'
 Set `SDL_VIDEODRIVER=dummy` to run without a window, which also needs no
 sound device: the sound goes to the null output
 ([`audio_output`](CONFIGURATION.md#mixer)). Don't set
-`SDL_AUDIODRIVER=dummy`: SDL's dummy driver runs faster than real time and
-makes any measurement wrong.
+`SDL_AUDIODRIVER=dummy`: SDL's dummy driver doesn't keep real time, at a
+rate that changes from run to run, and makes any measurement wrong.
 [docs/llm-debugging.md](docs/llm-debugging.md) is a guide to using the
 server, and says what to use for timing runs.
 

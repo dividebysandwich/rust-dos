@@ -465,7 +465,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "audio_output" => match crate::audio::OutputChoice::parse(value) {
                             Some(output) => config.audio_output = output,
-                            None => warn(format!("invalid audio_output '{}' (auto, sdl or null)", value)),
+                            None => warn(format!(
+                                "invalid audio_output '{}' (auto, sdl or null)",
+                                value
+                            )),
                         },
                         "blocksize" => match crate::audio::parse_blocksize(value) {
                             Ok(frames) => config.audio_buffer.blocksize = frames,

@@ -97,6 +97,11 @@ impl AudioBuffer {
     pub fn millis(frames: usize) -> f64 {
         frames as f64 * 1000.0 / crate::opl::RATE as f64
     }
+
+    /// `prebuffer` in frames of a device playing `rate` frames a second.
+    pub fn prebuffer_frames(self, rate: usize) -> usize {
+        rate * self.prebuffer as usize / 1000
+    }
 }
 
 /// A `blocksize` setting: one of `BLOCKSIZES`.
@@ -319,7 +324,10 @@ mod tests {
     fn the_output_choice_decides_who_opens_sdl() {
         use OutputChoice::{Auto, Null, Sdl};
         assert!(Auto.wants_sdl(false, false), "a window plays on the device");
-        assert!(!Auto.wants_sdl(true, false), "headless runs take the null output");
+        assert!(
+            !Auto.wants_sdl(true, false),
+            "headless runs take the null output"
+        );
         assert!(Auto.wants_sdl(true, true), "SDL_AUDIODRIVER names a driver");
         assert!(Sdl.wants_sdl(true, false));
         assert!(!Null.wants_sdl(false, true));

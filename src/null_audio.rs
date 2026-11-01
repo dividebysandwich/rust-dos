@@ -1,13 +1,15 @@
 //! The sound output of a run with no sound device. Nothing is played: the
 //! queue empties on a monotonic clock, at exactly the output's 44,100
 //! frames a second, so `pump_audio` and its underrun counts work as they
-//! do on a real device. SDL's `dummy` audio driver runs fast (see
-//! `docs/llm-debugging.md`), so it can't stand in for one.
+//! do on a real device. SDL's `dummy` audio driver doesn't keep real time
+//! (see `docs/llm-debugging.md`), so it can't stand in for one.
 //!
 //! There is no thread and no timer: the queue's level is worked out from
 //! the clock each time it is read.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::audio::{AudioBuffer, AudioOutput};
 
@@ -43,7 +45,7 @@ impl NullAudio {
             clock,
             opened,
             blocksize: buffer.blocksize as usize,
-            prebuffer: prebuffer_frames(buffer),
+            prebuffer: buffer.prebuffer_frames(crate::opl::RATE as usize),
             queued: 0,
             taken: 0,
         }
@@ -61,12 +63,8 @@ impl NullAudio {
     /// device played silence, as a real one does, and its clock went on.
     fn left(&self, due: u64) -> usize {
         let taken = (due - self.taken).saturating_mul(self.blocksize as u64);
-        self.queued.saturating_sub(usize::try_from(taken).unwrap_or(usize::MAX))
+        (self.queued as u64).saturating_sub(taken) as usize
     }
-}
-
-fn prebuffer_frames(buffer: AudioBuffer) -> usize {
-    crate::opl::RATE as usize * buffer.prebuffer as usize / 1000
 }
 
 impl AudioOutput for NullAudio {
@@ -98,7 +96,7 @@ impl AudioOutput for NullAudio {
             self.queued = 0;
             self.taken = 0;
         }
-        self.prebuffer = prebuffer_frames(buffer);
+        self.prebuffer = buffer.prebuffer_frames(crate::opl::RATE as usize);
         Ok(())
     }
 }
@@ -115,13 +113,19 @@ mod tests {
     const TARGET: usize = 512 + 882;
 
     fn buffer() -> AudioBuffer {
-        AudioBuffer { blocksize: BLOCK, prebuffer: 20 }
+        AudioBuffer {
+            blocksize: BLOCK,
+            prebuffer: 20,
+        }
     }
 
     fn device() -> (NullAudio, Rc<Cell<Duration>>) {
         let time = Rc::new(Cell::new(Duration::ZERO));
         let clock = time.clone();
-        (NullAudio::with_clock(buffer(), Box::new(move || clock.get())), time)
+        (
+            NullAudio::with_clock(buffer(), Box::new(move || clock.get())),
+            time,
+        )
     }
 
     /// The time `frames` take at `rate` frames a second.
@@ -134,7 +138,12 @@ mod tests {
         let (mut output, _) = device();
         assert_eq!(output.name(), "null");
         assert_eq!(output.target_frames(), TARGET);
-        output.set_buffer(AudioBuffer { blocksize: BLOCK, prebuffer: 10 }).unwrap();
+        output
+            .set_buffer(AudioBuffer {
+                blocksize: BLOCK,
+                prebuffer: 10,
+            })
+            .unwrap();
         assert_eq!(output.target_frames(), 512 + 441);
     }
 
@@ -184,7 +193,12 @@ mod tests {
         let (mut output, time) = device();
         time.set(Duration::from_secs(1));
         output.queue(&[0; 4096]).unwrap();
-        output.set_buffer(AudioBuffer { blocksize: 1024, prebuffer: 20 }).unwrap();
+        output
+            .set_buffer(AudioBuffer {
+                blocksize: 1024,
+                prebuffer: 20,
+            })
+            .unwrap();
         assert_eq!(output.queued_frames(), 0);
         output.queue(&[0; 4096]).unwrap();
         time.set(Duration::from_secs(1) + frames_at(1025, 44_100));

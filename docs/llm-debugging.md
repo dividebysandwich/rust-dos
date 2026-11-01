@@ -15,10 +15,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 ```
 
 - **Never use SDL's dummy audio driver (`SDL_AUDIODRIVER=dummy`) for a
-  measurement of any kind.** It runs faster than real time, so underrun
-  counts and everything else read from the sound queue are wrong however
-  well the host keeps up (see `/api/underruns` below). The emulator warns
-  on stderr and in the log when it is active. Use one of these:
+  measurement of any kind.** It doesn't keep real time and its rate
+  changes from run to run, so underrun counts and everything else read
+  from the sound queue say nothing about the emulator, high or low (see
+  `/api/underruns` below). The emulator warns on stderr and in the log
+  when it is active. Use one of these:
 
   | The run | What to use |
   |---|---|
@@ -163,14 +164,14 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   renderer and why OpenGL 3 wasn't there.
 - **Check sound with `/api/status` → `audio`.** `driver` says what plays
   the sound (`wasapi`, `null`, `dummy`...), `muted` whether the mixer's
-  mute (`--mute`, Ctrl+F8) is on, `peak` is the loudest
-  sample since the previous status request (0 means silence), `underruns`
-  counts the video frames that found the output device's queue empty (see
-  `/api/underruns` below), and `sound_blaster` is the card's BLASTER string
-  for where it answers now, after a driver or a Plug and Play configuration
-  moved it (null without a card, or while a ViBRA16C's audio device is
-  inactive). To listen or analyse, record `/ws/audio`: a JSON format
-  header, then s16le stereo PCM at 44.1 kHz
+  mute (`--mute`, Ctrl+F8) is on, `peak` is the loudest sample since the
+  previous status request (0 means silence), `underruns` counts the video
+  frames that found the output device's queue empty (see `/api/underruns`
+  below), and `sound_blaster` is the card's BLASTER string for where it
+  answers now, after a driver or a Plug and Play configuration moved it
+  (null without a card, or while a ViBRA16C's audio device is inactive).
+  To listen or analyse, record `/ws/audio`: a JSON format header, then
+  s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
   MPU-401 (`soundfont`, `gus` or `none`), with its active voices and any
@@ -1374,10 +1375,10 @@ address mapped to when it was set.
   time the emulator's main thread works (running the machine and drawing
   the picture), so 100 minus it is that thread's time to spare, on one host
   core. `audio_driver` is what played the sound during the run. Its
-  `frame_times` object covers the host's last 1024 frames while
-  the machine runs (about 17 s at 60 frames a second), from one start of
-  the main loop to the next, waiting included: `frames` and `seconds`
-  (how many so far, and how long they took), `longest_ms`, and the
+  `frame_times` object covers the host's last 1024 frames while the
+  machine runs (about 17 s at 60 frames a second), from one start of the
+  main loop to the next, waiting included: `frames` and `seconds` (how
+  many so far, and how long they took), `longest_ms`, and the
   nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
   build and a CPU-bound scene, such as the Stunts intro, when comparing
   emulator changes.

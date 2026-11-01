@@ -768,8 +768,8 @@ programs set.
 
   With no sound device to open, `auto` and `sdl` run silent on the null
   output too. `SDL_AUDIODRIVER=dummy` picks SDL's own dummy driver, which
-  runs faster than real time: the log warns about it, and no measurement
-  may use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
+  doesn't keep real time: the log warns about it, and no measurement may
+  use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
 * `blocksize` and `prebuffer` set how much sound waits for the host's
   sound device, and so how late it is heard: `blocksize` is the device's
   buffer in frames, `128`, `256`, `512` (the default, about 12 ms),

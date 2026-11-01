@@ -228,11 +228,12 @@ pub(crate) struct RunArgs {
     pub(crate) command: Vec<String>,
 }
 
-/// `--vr-graphics`'s value.
+/// `--audio-output`'s value.
 fn parse_audio_output(value: &str) -> Result<rust_dos::audio::OutputChoice, String> {
     rust_dos::audio::OutputChoice::parse(value).ok_or_else(|| "auto, sdl or null".to_string())
 }
 
+/// `--vr-graphics`'s value.
 fn parse_vr_graphics(value: &str) -> Result<rust_dos::vr::VrGraphics, String> {
     rust_dos::vr::VrGraphics::parse(value).ok_or_else(|| "auto, gl, egl or vulkan".to_string())
 }

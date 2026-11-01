@@ -162,7 +162,10 @@ fn main() -> Result<(), String> {
             return Ok(());
         }
     }
-    let headless = args.hidden || video_subsystem.current_video_driver().eq_ignore_ascii_case("dummy");
+    let headless = args.hidden
+        || video_subsystem
+            .current_video_driver()
+            .eq_ignore_ascii_case("dummy");
     let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
     let controller_subsystem = match sdl_context.game_controller() {
@@ -213,7 +216,7 @@ fn main() -> Result<(), String> {
     // How the sound's channels mix for the viewer in the 3D scene.
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
     // The 3D scene's own sounds, on a device of their own, where SDL has one.
-    let room_audio = matches!(audio_output, sdl_audio::Output::Sdl(..)).then(|| sdl_context.audio().ok()).flatten();
+    let room_audio = audio_output.subsystem();
     sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix);
     cpu.bus.mixer.muted = args.mute;
     let mut room_sound = sdl_audio::RoomDevice::new();
