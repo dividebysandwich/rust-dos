@@ -5975,6 +5975,175 @@ fn wait_for_input_idle_handles_messages_sent_to_the_waiting_thread() {
     assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
 }
 
+/// GetWindowTextA of another thread's window waits for that thread's
+/// reply and then runs again, and the text stays in the buffer. ACM 1918
+/// counts its windows by title this way when it starts.
+#[test]
+fn get_window_text_of_another_threads_window_keeps_the_text() {
+    let kernel32 = ["CreateThread", "Sleep", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "GetMessageA",
+        "DispatchMessageA",
+        "GetWindowTextA",
+    ];
+    // The window's handle at 0x20, the thread's id at 0x24, the text
+    // read at 0x50 and a MSG at 0x80.
+    let data = child_data(&[(0, "Title"), (0x10, "Static")]);
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (hwnd, text) = (l.at(0x20), l.at(0x50));
+        let mut over = a.create_label();
+        let mut pump = a.create_label();
+        let mut look = a.create_label();
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, 0, l.at(0x24) as i32])?;
+        a.call(over)?;
+        // The thread: its window, and its messages.
+        let class = l.at(0x10) as i32;
+        let title = l.at(0) as i32;
+        push_args(a, &[0, class, title, WS_POPUP, 0, 0, 10, 10, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(hwnd), eax)?;
+        a.set_label(&mut pump)?;
+        push_args(a, &[l.at(0x80) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(l.at(0x80) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(pump)?;
+        a.set_label(&mut over)?;
+        push_args(a, &[0, 0])?;
+        a.call(f("CreateThread"))?;
+        a.set_label(&mut look)?;
+        a.push(1)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(hwnd), 0)?;
+        a.je(look)?;
+        a.push(32)?;
+        a.push(text as i32)?;
+        a.push(dword_ptr(hwnd))?;
+        a.call(f("GetWindowTextA"))?;
+        a.cmp(eax, 5)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(byte_ptr(text), b'T' as i32)?;
+        bit_if(a, eq, 1)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("get_window_text_other_thread", &[("T.EXE", program)]);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
+/// An AVI file of two frames, 2 by 1 pixels of 24 bits, uncompressed.
+fn small_avi() -> Vec<u8> {
+    fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        out.resize(out.len().next_multiple_of(2), 0);
+        out
+    }
+    fn list(id: &[u8; 4], kind: &[u8; 4], parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut data = kind.to_vec();
+        for p in parts {
+            data.extend_from_slice(p);
+        }
+        chunk(id, &data)
+    }
+    let le = |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    // Period, rates, flags, frames, initial, streams, buffer, size.
+    let avih = le(&[100_000, 0, 0, 0, 2, 0, 1, 8, 2, 1, 0, 0, 0, 0]);
+    // Type, handler, flags, priority, initial, scale, rate, start,
+    // length, buffer, quality, sample size, rectangle.
+    let mut strh = b"vidsDIB ".to_vec();
+    strh.extend(le(&[0, 0, 0, 1, 10, 0, 2, 8, 0, 0, 0, 0]));
+    let mut strf = le(&[40, 2, 1]);
+    strf.extend_from_slice(&1u16.to_le_bytes());
+    strf.extend_from_slice(&24u16.to_le_bytes());
+    strf.extend(le(&[0, 8, 0, 0, 0, 0]));
+    let strl = list(b"LIST", b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)]);
+    let hdrl = list(b"LIST", b"hdrl", &[chunk(b"avih", &avih), strl]);
+    let frames = [
+        chunk(b"00db", &[1, 2, 3, 4, 5, 6, 0, 0]),
+        chunk(b"00db", &[9, 8, 7, 6, 5, 4, 0, 0]),
+    ];
+    let movi = list(b"LIST", b"movi", &frames);
+    list(b"RIFF", b"AVI ", &[hdrl, movi])
+}
+
+/// AVIStreamGetFrame gives a frame's DIB, its header first, by its
+/// position: forward, back again, and nothing past the end.
+#[test]
+fn get_frame_gives_a_streams_frames_as_dibs() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let avifil32: &[&str] = &[
+        "AVIFileInit",
+        "AVIFileOpenA",
+        "AVIFileGetStream",
+        "AVIStreamGetFrameOpen",
+        "AVIStreamGetFrame",
+        "AVIStreamGetFrameClose",
+        "AVIStreamRelease",
+        "AVIFileRelease",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("AVIFIL32.DLL", avifil32)];
+    let mut data = vec![0; 0x100];
+    data[..7].copy_from_slice(b"T.AVI\0\0");
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = avifil32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let (file, stream) = (l.at(0x20), l.at(0x24));
+        let frame = |a: &mut CodeAssembler, position: i32| {
+            a.push(position)?;
+            a.push(esi)?;
+            a.call(f("AVIStreamGetFrame"))
+        };
+        a.xor(ebx, ebx)?;
+        a.call(f("AVIFileInit"))?;
+        push_args(a, &[file as i32, l.at(0) as i32, 0x20, 0])?;
+        a.call(f("AVIFileOpenA"))?;
+        a.push(0)?;
+        a.push(0x7364_6976)?;
+        a.push(stream as i32)?;
+        a.push(dword_ptr(file))?;
+        a.call(f("AVIFileGetStream"))?;
+        a.push(0)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamGetFrameOpen"))?;
+        a.mov(esi, eax)?;
+        frame(a, 1)?;
+        a.mov(edi, eax)?;
+        a.cmp(byte_ptr(edi + 40), 9)?;
+        bit_if_equal(a, 0)?;
+        a.cmp(word_ptr(edi + 14), 24)?;
+        bit_if_equal(a, 1)?;
+        frame(a, 0)?;
+        a.cmp(byte_ptr(eax + 40), 1)?;
+        bit_if_equal(a, 2)?;
+        frame(a, 2)?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 3)?;
+        a.push(esi)?;
+        a.call(f("AVIStreamGetFrameClose"))?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamRelease"))?;
+        a.push(dword_ptr(file))?;
+        a.call(f("AVIFileRelease"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 4)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family(
+        "get_frame",
+        &[("T.EXE", program), ("T.AVI", small_avi())],
+    );
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
 const WS_VISIBLE: i32 = 0x1000_0000;
 const PM_REMOVE: i32 = 1;
 

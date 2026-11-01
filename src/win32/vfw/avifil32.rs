@@ -11,8 +11,13 @@
 //! closed when the last of its interfaces is released. Writing, editing
 //! and the clipboard functions aren't there; a file opened for writing
 //! fails with AVIERR_UNSUPPORTED.
+//!
+//! AVIStreamGetFrameOpen gives an IGetFrame, which decompresses a video
+//! stream's frames to a DIB of its own, as Wine's getframe.c does. It
+//! takes 16, 24 or 32 bits a pixel; the default is 24.
 
 use super::avi::{self, Avi};
+use super::codec::{self, Codec, dib_stride};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, Guid};
 use crate::win32::kernel32;
@@ -24,6 +29,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: VTABLES,
 };
 
@@ -91,6 +97,16 @@ static APIS: &[Api] = &[
     stdcall("IAVIStream_ReadData", 0, 4, no_data),
     stdcall("IAVIStream_WriteData", 0, 4, read_only),
     stdcall("IAVIStream_SetInfo", 0, 3, read_only),
+    stdcall("AVIStreamGetFrameOpen", 23, 2, avi_stream_get_frame_open),
+    stdcall("AVIStreamGetFrame", 24, 2, get_frame_get),
+    stdcall("AVIStreamGetFrameClose", 25, 1, get_frame_release),
+    stdcall("IGetFrame_QueryInterface", 0, 3, get_frame_query_interface),
+    stdcall("IGetFrame_AddRef", 0, 1, get_frame_add_ref),
+    stdcall("IGetFrame_Release", 0, 1, get_frame_release),
+    stdcall("IGetFrame_GetFrame", 0, 2, get_frame_get),
+    stdcall("IGetFrame_Begin", 0, 4, get_frame_nothing),
+    stdcall("IGetFrame_End", 0, 1, get_frame_nothing),
+    stdcall("IGetFrame_SetFormat", 0, 7, get_frame_set_format),
 ];
 
 static VTABLES: &[Vtable] = &[
@@ -128,16 +144,30 @@ static VTABLES: &[Vtable] = &[
             "IAVIStream_SetInfo",
         ],
     },
+    Vtable {
+        name: "IGetFrame",
+        methods: &[
+            "IGetFrame_QueryInterface",
+            "IGetFrame_AddRef",
+            "IGetFrame_Release",
+            "IGetFrame_GetFrame",
+            "IGetFrame_Begin",
+            "IGetFrame_End",
+            "IGetFrame_SetFormat",
+        ],
+    },
 ];
 
 const IAVIFILE: usize = 0;
 const IAVISTREAM: usize = 1;
+const IGETFRAME: usize = 2;
 
 const fn guid_0002(d1: u32) -> Guid {
     Guid::new(d1, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46])
 }
 const IID_IAVIFILE: Guid = guid_0002(0x0002_0020);
 const IID_IAVISTREAM: Guid = guid_0002(0x0002_0021);
+const IID_IGETFRAME: Guid = guid_0002(0x0002_0023);
 
 /// AVIERR_*: MAKE_SCODE(SEVERITY_ERROR, FACILITY_ITF, 0x4000 + n).
 const fn avierr(n: u32) -> u32 {
@@ -188,6 +218,14 @@ const FIND_ANY: u32 = 0x20;
 const FIND_RET: u32 = 0xF000;
 const FIND_POS: u32 = 0x0000;
 
+/// BITMAPINFOHEADER's size, and BI_RGB.
+const BITMAPINFOHEADER: usize = 40;
+const BI_RGB: u32 = 0;
+
+/// AVIStreamGetFrameOpen's AVIGETFRAMEF_BESTDISPLAYFMT, which comes as
+/// the pointer to the wanted format.
+const BESTDISPLAYFMT: u32 = 1;
+
 /// An open AVI file.
 #[derive(Clone, Debug, Default)]
 pub struct AviFile {
@@ -223,6 +261,9 @@ fn files(cpu: &mut Cpu) -> &mut Vec<Option<AviFile>> {
 /// the file's own interface).
 fn object(cpu: &mut Cpu, this: u32) -> Option<(usize, Option<usize>)> {
     let (vtable, id) = com::interface_of(cpu, dll_index(), this)?;
+    if vtable == IGETFRAME {
+        return None;
+    }
     let slot = (id as usize).checked_sub(1)?;
     files(cpu).get(slot)?.as_ref()?;
     let stream = (vtable == IAVISTREAM).then(|| cpu.bus.guest_read_32(this + com::HEADER) as usize);
@@ -256,6 +297,44 @@ fn no_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     write_32(cpu, args[3], 0);
     Some(AVIERR_NODATA)
 }
+
+/// An IGetFrame: a video stream's frames as DIBs.
+#[derive(Clone, Debug, Default)]
+pub struct GetFrame {
+    /// The file and stream, of which it holds a reference.
+    file: usize,
+    stream: usize,
+    iface: u32,
+    refs: u32,
+    /// The source's compression (BI_RGB for none) and size.
+    compression: u32,
+    width: u32,
+    height: u32,
+    /// The bits a pixel of the DIB given out, its header's bytes (with
+    /// the palette of an uncompressed source) and where it is.
+    bits: u16,
+    header: u32,
+    buffer: u32,
+    /// The last sample decoded, or -1.
+    last: i64,
+    codec: Codec,
+}
+
+crate::state_fields!(GetFrame {
+    file,
+    stream,
+    iface,
+    refs,
+    compression,
+    width,
+    height,
+    bits,
+    header,
+    buffer,
+    last
+} skip {
+    codec
+});
 
 /// `count` bytes of the file `handle` at `offset`, or None when they
 /// can't be read.
@@ -840,4 +919,332 @@ fn avi_stream_time_to_sample(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } as i64;
     let sample = sample.clamp(start as i64, start as i64 + length as i64);
     Some(sample as u32)
+}
+
+fn frames(cpu: &mut Cpu) -> &mut Vec<Option<GetFrame>> {
+    &mut crate::win32::process(cpu).vfw.frames
+}
+
+/// The slot of the IGetFrame `this`.
+fn frame_slot(cpu: &mut Cpu, this: u32) -> Option<usize> {
+    let (vtable, id) = com::interface_of(cpu, dll_index(), this)?;
+    let slot = (id as usize).checked_sub(1)?;
+    (vtable == IGETFRAME && frames(cpu).get(slot)?.is_some()).then_some(slot)
+}
+
+fn frame(cpu: &mut Cpu, slot: usize) -> &mut GetFrame {
+    frames(cpu)[slot].as_mut().expect("an open IGetFrame")
+}
+
+/// The size of a DIB's rows.
+fn dib_size(bits: u16, width: u32, height: u32) -> u32 {
+    (width * bits as u32).div_ceil(32) * 4 * height
+}
+
+/// Sets `slot`'s frame up for the format `wanted`, as IGetFrame::SetFormat
+/// does: a BITMAPINFOHEADER, or 0 or AVIGETFRAMEF_BESTDISPLAYFMT for the
+/// default. False for one it can't give, which it logs.
+fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
+    let (file_slot, stream) = (frame(cpu, slot).file, frame(cpu, slot).stream);
+    let format = file(cpu, file_slot).avi.streams[stream].format.clone();
+    if format.len() < BITMAPINFOHEADER {
+        return false;
+    }
+    let read = |at: usize| u32::from_le_bytes([format[at], format[at + 1], format[at + 2], format[at + 3]]);
+    let (width, height, compression) = (read(4) as i32, read(8) as i32, read(16));
+    let (width, height) = (width.unsigned_abs(), height.unsigned_abs());
+    let source_bits = u16::from_le_bytes([format[14], format[15]]);
+    let bits = if wanted == 0 || wanted == BESTDISPLAYFMT {
+        if compression == BI_RGB { source_bits } else { 24 }
+    } else {
+        if !cpu.bus.guest_probe(wanted, BITMAPINFOHEADER, false) {
+            return false;
+        }
+        let top_down = (cpu.bus.guest_read_32(wanted + 8) as i32) < 0;
+        let kind = cpu.bus.guest_read_32(wanted + 16);
+        let bits = cpu.bus.guest_read_16(wanted + 14);
+        let decoded = compression != BI_RGB && matches!(bits, 16 | 24 | 32);
+        if top_down || kind != BI_RGB || !(decoded || bits == source_bits) {
+            cpu.bus.log_string(&format!(
+                "[W32] AVIStreamGetFrameOpen: no {bits}-bit format {kind:#X}"
+            ));
+            return false;
+        }
+        bits
+    };
+    if compression != BI_RGB && !codec::supported(compression, width, height) {
+        let fourcc = String::from_utf8_lossy(&compression.to_le_bytes()).into_owned();
+        cpu.bus
+            .log_string(&format!("[W32] AVIStreamGetFrameOpen: no codec for {fourcc:?}"));
+        return false;
+    }
+    // An uncompressed source's header goes out with its palette.
+    let mut header = if compression == BI_RGB {
+        format
+    } else {
+        format[..BITMAPINFOHEADER].to_vec()
+    };
+    let image = dib_size(bits, width, height);
+    header[0..4].copy_from_slice(&(BITMAPINFOHEADER as u32).to_le_bytes());
+    header[8..12].copy_from_slice(&height.to_le_bytes());
+    header[14..16].copy_from_slice(&bits.to_le_bytes());
+    header[16..20].copy_from_slice(&BI_RGB.to_le_bytes());
+    header[20..24].copy_from_slice(&image.to_le_bytes());
+    let size = header.len() as u32 + image;
+    let Some(buffer) =
+        crate::win32::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size))
+    else {
+        return false;
+    };
+    cpu.bus.guest_fill(buffer, size as usize, 0);
+    cpu.bus.guest_write_bytes(buffer, &header);
+    let f = frame(cpu, slot);
+    let old = std::mem::replace(&mut f.buffer, buffer);
+    f.compression = compression;
+    f.width = width;
+    f.height = height;
+    f.bits = bits;
+    f.header = header.len() as u32;
+    f.last = -1;
+    f.codec = Codec::new(compression);
+    if old != 0 {
+        crate::win32::with_process(cpu, |p, _| p.heap.free(old));
+    }
+    true
+}
+
+/// AVIStreamGetFrameOpen(stream, wanted): an IGetFrame of a video
+/// stream, or 0.
+fn avi_stream_get_frame_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, wanted] = args else { unreachable!() };
+    let Some((file_slot, stream_index)) = stream(cpu, this) else {
+        return Some(0);
+    };
+    if file(cpu, file_slot).avi.streams[stream_index].kind() != STREAMTYPE_VIDEO {
+        return Some(0);
+    }
+    let list = frames(cpu);
+    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
+    if slot == list.len() {
+        list.push(None);
+    }
+    let Some(iface) = com::new_interface(cpu, dll_index(), IGETFRAME, slot as u32 + 1, 0) else {
+        return Some(0);
+    };
+    frames(cpu)[slot] = Some(GetFrame {
+        file: file_slot,
+        stream: stream_index,
+        iface,
+        refs: 1,
+        ..GetFrame::default()
+    });
+    file(cpu, file_slot).refs += 1;
+    if !set_format(cpu, slot, wanted) {
+        release_frame(cpu, iface);
+        return Some(0);
+    }
+    Some(iface)
+}
+
+fn release_frame(cpu: &mut Cpu, this: u32) -> u32 {
+    let Some(slot) = frame_slot(cpu, this) else {
+        return 0;
+    };
+    let f = frame(cpu, slot);
+    f.refs -= 1;
+    if f.refs > 0 {
+        return f.refs;
+    }
+    let f = frames(cpu)[slot].take().expect("an open IGetFrame");
+    if f.buffer != 0 {
+        crate::win32::with_process(cpu, |p, _| p.heap.free(f.buffer));
+    }
+    com::free_interface(cpu, f.iface);
+    // Its reference to the file, through the file's own interface.
+    let iface = file(cpu, f.file).iface;
+    release(cpu, iface);
+    0
+}
+
+fn get_frame_add_ref(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(slot) = frame_slot(cpu, args[0]) else {
+        return Some(0);
+    };
+    let f = frame(cpu, slot);
+    f.refs += 1;
+    Some(f.refs)
+}
+
+fn get_frame_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(release_frame(cpu, args[0]))
+}
+
+/// QueryInterface of an IGetFrame: IUnknown and IGetFrame are it.
+fn get_frame_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, iid, out] = args else {
+        unreachable!()
+    };
+    let Some(iid) = Guid::read(cpu, iid) else {
+        return Some(com::E_POINTER);
+    };
+    if out == 0 {
+        return Some(com::E_POINTER);
+    }
+    if iid == com::IID_IUNKNOWN || iid == IID_IGETFRAME {
+        get_frame_add_ref(cpu, &[this]);
+        write_32(cpu, out, this);
+        return Some(com::S_OK);
+    }
+    write_32(cpu, out, 0);
+    Some(com::E_NOINTERFACE)
+}
+
+/// IGetFrame::Begin and End: streaming needs no preparing.
+fn get_frame_nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(AVIERR_OK)
+}
+
+/// IGetFrame::SetFormat(this, wanted, bits, x, y, dx, dy). The DIB is
+/// always the frame's whole picture in a buffer of its own.
+fn get_frame_set_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(slot) = frame_slot(cpu, args[0]) else {
+        return Some(AVIERR_BADHANDLE);
+    };
+    if args[2] != 0 {
+        return Some(AVIERR_UNSUPPORTED);
+    }
+    Some(if set_format(cpu, slot, args[1]) {
+        AVIERR_OK
+    } else {
+        AVIERR_BADFORMAT
+    })
+}
+
+/// AVIStreamGetFrame and IGetFrame::GetFrame(this, position): the DIB of
+/// the frame at `position`, its header first, or 0. Frames are decoded
+/// from the last key frame, or from the last one decoded when that is
+/// nearer.
+fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[this, position] = args else {
+        unreachable!()
+    };
+    let Some(slot) = frame_slot(cpu, this) else {
+        return Some(0);
+    };
+    let (file_slot, stream_index) = (frame(cpu, slot).file, frame(cpu, slot).stream);
+    let f = file(cpu, file_slot);
+    let handle = f.handle;
+    let s = &f.avi.streams[stream_index];
+    let first = s.start() as i64;
+    let wanted = position as i32 as i64 - first;
+    if wanted < 0 || wanted >= s.chunks.len() as i64 {
+        return Some(0);
+    }
+    let key = (0..=wanted)
+        .rev()
+        .find(|&i| s.chunks[i as usize].flags & avi::AVIIF_KEYFRAME != 0)
+        .unwrap_or(0);
+    let f = frame(cpu, slot);
+    // A copy's codec (after a restore) starts again.
+    if f.compression != BI_RGB && f.codec.is_empty() {
+        f.codec = Codec::new(f.compression);
+        f.last = -1;
+    }
+    let (compression, width, height, bits, header, buffer, last) = (
+        f.compression,
+        f.width,
+        f.height,
+        f.bits,
+        f.header,
+        f.buffer,
+        f.last,
+    );
+    if last == wanted {
+        return Some(buffer);
+    }
+    let from = if compression == BI_RGB {
+        wanted
+    } else if key <= last && last < wanted {
+        last + 1
+    } else {
+        key
+    };
+    let mut raw = None;
+    for i in from..=wanted {
+        let c = file(cpu, file_slot).avi.streams[stream_index].chunks[i as usize];
+        // An empty chunk repeats the frame before.
+        if c.size == 0 {
+            continue;
+        }
+        let data = read_at(cpu, handle, c.offset, c.size)?;
+        if compression == BI_RGB {
+            raw = Some(data);
+        } else if let Err(e) = frame(cpu, slot).codec.decode(&data) {
+            cpu.bus
+                .log_string(&format!("[W32] AVIStreamGetFrame: frame {i}: {e}"));
+        }
+    }
+    frame(cpu, slot).last = wanted;
+    let picture = if compression == BI_RGB {
+        raw
+    } else {
+        frame(cpu, slot)
+            .codec
+            .picture(width, height)
+            .map(|p| convert(&p, bits, width, height))
+    };
+    if let Some(picture) = picture {
+        let n = picture.len().min(dib_size(bits, width, height) as usize);
+        cpu.bus.guest_write_bytes(buffer + header, &picture[..n]);
+    }
+    Some(buffer)
+}
+
+/// A 24-bit DIB in `bits` bits a pixel.
+fn convert(dib: &[u8], bits: u16, width: u32, height: u32) -> Vec<u8> {
+    if bits == 24 {
+        return dib.to_vec();
+    }
+    let (w, stride) = (width as usize, dib_stride(width));
+    let out_stride = dib_size(bits, width, 1) as usize;
+    let mut out = vec![0; out_stride * height as usize];
+    for (from, to) in dib.chunks_exact(stride).zip(out.chunks_exact_mut(out_stride)) {
+        let pixels = from[..w * 3].as_chunks::<3>().0.iter();
+        if bits == 16 {
+            for (p, d) in pixels.zip(to.as_chunks_mut::<2>().0) {
+                let [b, g, r] = p.map(|c| c as u16 >> 3);
+                *d = ((r << 10) | (g << 5) | b).to_le_bytes();
+            }
+        } else {
+            for (p, d) in pixels.zip(to.as_chunks_mut::<4>().0) {
+                d[..3].copy_from_slice(p);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One blue pixel (0xFF, 0, 0 in DIB order), one white, 2 by 1.
+    const DIB: [u8; 8] = [0xFF, 0, 0, 0xFF, 0xFF, 0xFF, 0, 0];
+
+    #[test]
+    fn a_dib_converts_to_16_and_32_bits() {
+        assert_eq!(convert(&DIB, 24, 2, 1), DIB);
+        assert_eq!(convert(&DIB, 16, 2, 1), [0x1F, 0, 0xFF, 0x7F]);
+        assert_eq!(
+            convert(&DIB, 32, 2, 1),
+            [0xFF, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0]
+        );
+    }
+
+    #[test]
+    fn dib_rows_are_padded_to_4_bytes() {
+        assert_eq!(dib_size(24, 2, 3), 24);
+        assert_eq!(dib_size(16, 3, 2), 16);
+        assert_eq!(dib_size(32, 640, 480), 640 * 480 * 4);
+    }
 }

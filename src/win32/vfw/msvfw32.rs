@@ -7,24 +7,23 @@
 //! A DrawDib keeps the picture it decompressed last in a 24-bit DIB in
 //! the process heap, which DrawDibDraw then draws with StretchDIBits;
 //! DDF_UPDATE draws it again and DDF_DONTDRAW decompresses without
-//! drawing. Indeo Video 3 (IV31, IV32) is the one codec; DrawDibBegin
-//! fails for a DIB of another. An uncompressed DIB goes to StretchDIBits
-//! as it is. The `oxideav-indeo` crate decodes Indeo 3 to YUV 4:1:0,
-//! which is converted to RGB here. A save state doesn't keep the
-//! decoder's picture: the frames after a restore that change it start
-//! from black.
+//! drawing. DrawDibBegin fails for a DIB no codec of codec.rs takes. An
+//! uncompressed DIB goes to StretchDIBits as it is. A save state doesn't
+//! keep the decoder's picture: the frames after a restore that change it
+//! start from black.
 
+use super::codec::{self, Codec, dib_stride};
 use crate::cpu::Cpu;
 use crate::win32::gdi32::bitmap;
 use crate::win32::stubs::{self, Api, Conv, Dll};
-use oxideav_indeo::indeo3::{DecodedPicture, Indeo3PictureDecoder};
 
 pub static DLL: Dll = Dll {
     name: "MSVFW32.DLL",
-    base: 0xBF74_0000,
+    base: 0xBF6C_0000,
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -67,10 +66,7 @@ const DDF_SAME_HDC: u32 = 0x0004;
 const DDF_SAME_DRAW: u32 = 0x0008;
 const DDF_DONTDRAW: u32 = 0x0010;
 
-/// BI_RGB, and the codecs' FourCCs.
 const BI_RGB: u32 = 0;
-const IV31: u32 = u32::from_le_bytes(*b"IV31");
-const IV32: u32 = u32::from_le_bytes(*b"IV32");
 
 /// BITMAPINFOHEADER's size.
 const HEADER: u32 = 40;
@@ -80,27 +76,6 @@ const DIB_RGB_COLORS: u32 = 0;
 /// DrawDibProfileDisplay's PD_CAN_DRAW_DIB and PD_CAN_STRETCHDIB.
 const PD_CAN_DRAW_DIB: u32 = 0x0001;
 const PD_CAN_STRETCHDIB: u32 = 0x0002;
-
-/// The decompressor of a DrawDib, which a save state doesn't keep: a
-/// copy starts a new one, as a restore does.
-#[derive(Default)]
-pub struct Codec(Option<Box<Indeo3PictureDecoder>>);
-
-impl Clone for Codec {
-    fn clone(&self) -> Codec {
-        Codec(None)
-    }
-}
-
-impl std::fmt::Debug for Codec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.is_some() {
-            "Codec(Indeo 3)"
-        } else {
-            "Codec(None)"
-        })
-    }
-}
 
 /// A DrawDib handle's state.
 #[derive(Clone, Debug, Default)]
@@ -258,13 +233,10 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
     if info.compression == BI_RGB {
         return true;
     }
-    if !is_indeo3(info.compression) {
+    if !codec::supported(info.compression, width, height) {
         let fourcc = String::from_utf8_lossy(&info.compression.to_le_bytes()).into_owned();
         cpu.bus
             .log_string(&format!("[W32] DrawDibBegin: no codec for {fourcc:?}"));
-        return false;
-    }
-    if !(1..=640).contains(&width) || !(1..=480).contains(&height) {
         return false;
     }
     let stride = dib_stride(width) as u32;
@@ -287,14 +259,8 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
         .guest_fill(buffer + HEADER, (stride * height) as usize, 0);
     let d = dd(cpu, slot);
     d.buffer = buffer;
-    d.codec = Codec(Some(Box::default()));
+    d.codec = Codec::new(info.compression);
     true
-}
-
-/// Whether the FourCC `compression` is Indeo Video 3's, in either case.
-fn is_indeo3(compression: u32) -> bool {
-    let upper = u32::from_le_bytes(compression.to_le_bytes().map(|b| b.to_ascii_uppercase()));
-    upper == IV31 || upper == IV32
 }
 
 /// DrawDibDraw(hdd, hdc, xdst, ydst, dxdst, dydst, info, bits, xsrc,
@@ -378,14 +344,16 @@ fn decode(cpu: &mut Cpu, slot: usize, info: u32, bits: u32) {
     cpu.bus.guest_read_bytes(bits, &mut frame);
     let d = dd(cpu, slot);
     // A copy's (after a restore) starts again.
-    let decoder = d.codec.0.get_or_insert_default();
+    if d.codec.is_empty() {
+        d.codec = Codec::new(d.compression);
+    }
     // An empty frame repeats the one before.
     if frame.is_empty() {
         return;
     }
-    match decoder.decode(&frame) {
-        Ok(_) => d.dirty = true,
-        Err(e) => cpu.bus.log_string(&format!("[W32] DrawDibDraw: {e:?}")),
+    match d.codec.decode(&frame) {
+        Ok(()) => d.dirty = true,
+        Err(e) => cpu.bus.log_string(&format!("[W32] DrawDibDraw: {e}")),
     }
 }
 
@@ -394,49 +362,8 @@ fn write_picture(cpu: &mut Cpu, slot: usize) {
     let d = dd(cpu, slot);
     d.dirty = false;
     let (buffer, width, height) = (d.buffer, d.width, d.height);
-    let Some(picture) = d.codec.0.as_ref().and_then(|c| c.previous()) else {
+    let Some(out) = d.codec.picture(width, height) else {
         return;
     };
-    if picture.width != width || picture.height != height {
-        return;
-    }
-    let out = bgr24_dib(picture);
     cpu.bus.guest_write_bytes(buffer + HEADER, &out);
-}
-
-/// The distance between rows of a 24-bit DIB `width` pixels wide: rows
-/// are padded to 4 bytes.
-fn dib_stride(width: u32) -> usize {
-    (width as usize * 3).next_multiple_of(4)
-}
-
-/// BT.601 limited range to RGB, in 16.16 fixed point.
-const CY: i32 = 76309; // 255 / 219
-const CRV: i32 = 104597; // 1.402 * 255 / 224
-const CGU: i32 = 25675; // 0.344136 * 255 / 224
-const CGV: i32 = 53279; // 0.714136 * 255 / 224
-const CBU: i32 = 132201; // 1.772 * 255 / 224
-
-/// `picture` as a bottom-up 24-bit DIB, what ICDecompress gives for a
-/// BI_RGB output of 24 bits: each chroma sample colours its 4x4 block.
-fn bgr24_dib(picture: &DecodedPicture) -> Vec<u8> {
-    let (w, h) = (picture.width as usize, picture.height as usize);
-    let cw = picture.chroma_width as usize;
-    let stride = dib_stride(picture.width);
-    let mut out = vec![0; stride * h];
-    for y in 0..h {
-        let crow = y / 4 * cw;
-        let ys = &picture.luma[y * w..y * w + w];
-        let row = &mut out[(h - 1 - y) * stride..][..w * 3];
-        for (x, (&yv, d)) in ys.iter().zip(row.as_chunks_mut::<3>().0).enumerate() {
-            let u = picture.chroma_u[crow + x / 4] as i32 - 128;
-            let v = picture.chroma_v[crow + x / 4] as i32 - 128;
-            let l = CY * (yv as i32 - 16) + (1 << 15);
-            let r = (l + CRV * v) >> 16;
-            let g = (l - CGU * u - CGV * v) >> 16;
-            let b = (l + CBU * u) >> 16;
-            *d = [b, g, r].map(|c| c.clamp(0, 255) as u8);
-        }
-    }
-    out
 }

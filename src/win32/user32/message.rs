@@ -590,6 +590,14 @@ fn send_other(
     task::start(cpu, TASK_SEND, vec![hwnd, msg, wp, lp, 0, 1, id, out], 0)
 }
 
+/// Whether the current thread's function runs again after a send to
+/// another thread: `send` then takes up its wait for the reply.
+pub fn waiting_for_reply(cpu: &mut Cpu) -> bool {
+    let me = current_tid(cpu);
+    let waiting = user(cpu).queues.iter().find(|q| q.tid == me);
+    waiting.is_some_and(|q| q.waiting.last().is_some_and(|&(id, _)| id != 0))
+}
+
 /// Whether the thread `tid` is there and hasn't ended.
 fn thread_alive(win32: &crate::win32::Win32, tid: u32) -> bool {
     thread::find(win32, tid).is_some_and(|(p, t)| win32.processes[p].threads[t].exit_code.is_none())

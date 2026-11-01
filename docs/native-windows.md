@@ -369,6 +369,18 @@ What a change on the screen uncovers (`invalidate_screen` in
 window gets no WM_PAINT or WM_NCPAINT for what its region cuts off. No
 probe has compared that crop with Windows.
 
+### Movies
+
+AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions
+decompress and draw their frames (`src/win32/vfw/`). AVIStreamGetFrame
+decompresses a video stream's frames to a DIB of the program's choice, 24
+bits a pixel by default, from the last key frame on. The codecs are Indeo
+Video 3 and 5, which Windows 98 installs, decoded by the `oxideav-indeo`
+crate. ACM 1918 plays its Indeo 5 intro this way. Its frames match
+FFmpeg's, but for two that both decoders refuse as damaged, where the
+picture before stays. Indeo 5's frames that depend on earlier ones have
+not been compared with a reference: ACM 1918's are all key frames.
+
 ### Sound and input
 
 - **DirectSound and `waveOut`**: buffers stay in guest memory; a mixer
@@ -541,7 +553,7 @@ shortcut:
   through, as on Windows 98. It warned that the disk was too small
   while the built-in Windows reported DOS's 80 MB free on a drive that
   is a host folder (Ignore went on); it now reports about 1 GB. The
-  game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which aren't there.
+  game itself needs IMAGEHLP, AVIFIL32 and MSVFW32.
 
 Some differences hold for every setup:
 
