@@ -185,23 +185,27 @@ const S_HEAP: u32 = 0x34;
 const S_SIGNALS: u32 = 0x80;
 
 /// A thread's block: its errno and _doserrno, rand's seed, strtok's
-/// place (_mbstok's too) and wcstok's, the floating-point error signal's
-/// code, and the buffers of gmtime, asctime, tmpnam, the ecvt family,
-/// _wasctime, the exception the running catch block took (its code,
-/// object and ThrowInfo, for `throw;`), and room for what a function
-/// writes for a KERNEL32 one it calls. 10h is free.
+/// place (_mbstok's too) and wcstok's, the translator _set_se_translator
+/// set, the floating-point error signal's code, and the buffers of
+/// gmtime, asctime, tmpnam, the ecvt family, _wasctime, the exception
+/// the running catch block took (its record and context, for `throw;`),
+/// the terminate and unexpected handlers, and room for what a function
+/// writes for a KERNEL32 one it calls.
 const T_ERRNO: u32 = 0x00;
 const T_DOSERRNO: u32 = 0x04;
 const T_RAND: u32 = 0x08;
 const T_STRTOK: u32 = 0x0C;
+const T_SE_TRANSLATOR: u32 = 0x10;
 const T_FPECODE: u32 = 0x14;
 const T_WCSTOK: u32 = 0x18;
+const T_UNEXPECTED: u32 = 0x1C;
 const T_TM: u32 = 0x20;
 const T_ASCTIME: u32 = 0x50;
 const T_TMPNAM: u32 = 0x80;
 const T_CVT: u32 = 0x190;
 const T_WASCTIME: u32 = 0x300;
 const T_CXX: u32 = 0x334;
+const T_TERMINATE: u32 = 0x33C;
 const T_SCRATCH: u32 = 0x340;
 const THREAD_BLOCK: u32 = 0x400;
 
@@ -687,6 +691,9 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     let created = Heap::create(&mut process.memory, bus, PAGE, 0)?;
     let heap = created.base;
     process.heaps.push(created);
+    if process.exception_filter == 0 {
+        process.exception_filter = startup::cxx_unhandled_filter_address();
+    }
     let mut w = Writer { bus, process, heap };
     w.u32(state_at(S_HEAP), heap)?;
     // The standard streams: stdin reads, stdout and stderr write.

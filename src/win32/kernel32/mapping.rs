@@ -72,15 +72,19 @@ fn write_back(cpu: &mut Cpu, index: usize) {
 
 /// Let go of the mappings whose objects are gone and that no running
 /// process has a view of: their pages go back to the pool, their files
-/// written back.
-pub(super) fn sweep(cpu: &mut Cpu) {
+/// written back. Whether it changed anything, which an idle proof can't
+/// follow; it runs after every call, and most often finds nothing.
+pub(super) fn sweep(cpu: &mut Cpu) -> bool {
     let running: Vec<u32> = cpu.bus.win32.processes.iter().map(|p| p.id).collect();
+    let mut changed = false;
     for index in 0..cpu.bus.win32.sections.len() {
         let win32 = &mut cpu.bus.win32;
         let Some(section) = win32.sections[index].as_mut() else {
             continue;
         };
+        let views = section.views.len();
         section.views.retain(|(id, _)| running.contains(id));
+        changed |= section.views.len() != views;
         let alive = matches!(
             win32.objects.get(section.object).map(|o| &o.kind),
             Some(Kind::Mapping { section }) if *section as usize == index
@@ -88,6 +92,7 @@ pub(super) fn sweep(cpu: &mut Cpu) {
         if alive || !section.views.is_empty() {
             continue;
         }
+        changed = true;
         write_back(cpu, index);
         let section = cpu.bus.win32.sections[index].take().expect("checked");
         for phys in section.pages.into_iter().filter(|&p| p != 0) {
@@ -97,6 +102,7 @@ pub(super) fn sweep(cpu: &mut Cpu) {
             cpu.bus.win32.objects.release(file);
         }
     }
+    changed
 }
 
 /// Where a mapping of `len` bytes can go: a place in the mappings' part of

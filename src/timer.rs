@@ -227,6 +227,16 @@ impl Clock {
         mul_div(self.now_ticks(), 1_000_000, PIT_HZ)
     }
 
+    /// The emulated time in microseconds at instruction count `icount`.
+    pub fn micros_at(&self, icount: u64) -> u64 {
+        mul_div(self.ticks_at(icount), 1_000_000, PIT_HZ)
+    }
+
+    /// The first instruction count at which `now_micros() >= micros`.
+    pub fn icount_at_micros(&self, micros: u64) -> u64 {
+        self.icount_at(mul_div_ceil(micros, PIT_HZ, 1_000_000))
+    }
+
     /// The first instruction count at which `now_ticks() >= ticks`.
     pub fn icount_at(&self, ticks: u64) -> u64 {
         let delta = ticks.saturating_sub(self.base_ticks);

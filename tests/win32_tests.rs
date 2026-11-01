@@ -4112,6 +4112,1335 @@ fn a_program_catches_its_cxx_exceptions() {
     assert_eq!(code, 0);
 }
 
+/// What a script for `update_script` does to the window, or checks.
+#[derive(Clone, Copy)]
+enum Upd {
+    /// SetWindowPos to this size, with SWP_NOREDRAW.
+    Size(i32, i32),
+    /// SetWindowPos to the corner of the screen or parent, SWP_NOREDRAW.
+    MoveHome,
+    /// SetWindowRgn with a 50x50 region, or with none.
+    Region,
+    NoRegion,
+    /// ValidateRect, of this rectangle or the client area.
+    Validate(Option<[i32; 4]>),
+    /// RedrawWindow of the whole window with these flags.
+    Redraw(i32),
+    /// Dispatch what is queued, up to 20 WM_PAINTs, with the counts of
+    /// `Sent` from zero. The procedure answers WM_PAINT with ValidateRect.
+    Pump,
+    /// GetUpdateRect says TRUE and gives this rectangle.
+    Update([i32; 4]),
+    /// GetUpdateRect says FALSE.
+    NoUpdate,
+    /// GetUpdateRgn says NULLREGION.
+    EmptyUpdateRgn,
+    /// The last `Pump` saw this many WM_PAINTs and WM_NCPAINTs.
+    Sent(i32, i32),
+    /// The last `Pump` saw no endless WM_PAINT.
+    NoLoop,
+}
+
+const RDW_INVALIDATE: i32 = 0x0001;
+const RDW_VALIDATE: i32 = 0x0008;
+const RDW_FRAME: i32 = 0x0400;
+const RDW_NOFRAME: i32 = 0x0800;
+const POPUP: i32 = WS_POPUP | WS_VISIBLE;
+const POPUP_BORDER: i32 = POPUP | 0x0080_0000;
+
+/// Where a script for `update_script` runs: a window of `style` at `at`
+/// of `size`, or a child of it at (x, y) and this size, which the script
+/// then works on.
+#[derive(Clone, Copy)]
+struct UpdWindow {
+    class_style: i32,
+    style: i32,
+    at: (i32, i32),
+    size: (i32, i32),
+    child: Option<(i32, i32, i32)>,
+}
+
+const WINDOW_100: UpdWindow = UpdWindow {
+    class_style: 0,
+    style: POPUP,
+    at: (0, 0),
+    size: (100, 100),
+    child: None,
+};
+
+/// Run `script` on `window`. The exit code: the number of the first
+/// step that went differently, from 1, or 0.
+fn update_script(test: &str, window: UpdWindow, script: &[Upd]) -> u8 {
+    const WM_PAINT: i32 = 0x000F;
+    const WM_NCPAINT: i32 = 0x0085;
+    const PM_REMOVE: i32 = 1;
+    const SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001E;
+    const SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW: i32 = 0x001D;
+    const LOOP_CAP: i32 = 20;
+    const NULLREGION: i32 = 1;
+    let names: &[&str] = &[
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+        "SetWindowRgn",
+        "ValidateRect",
+        "RedrawWindow",
+        "GetUpdateRect",
+        "GetUpdateRgn",
+        "PeekMessageA",
+        "DispatchMessageA",
+    ];
+    let gdi: &[&str] = &["CreateRectRgn"];
+    let kernel: &[&str] = &["ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[
+        ("USER32.dll", names),
+        ("GDI32.dll", gdi),
+        ("KERNEL32.dll", kernel),
+    ];
+    let mut d = Data::default();
+    let name = d.text("UpdateScript");
+    let msg = d.add(&[0; 28]);
+    let paints = d.add(&[0; 4]);
+    let ncpaints = d.add(&[0; 4]);
+    let rect = d.add(&[0; 16]);
+    let named = d.add(&[0; 16]);
+    let mut wndclass = [0; 40];
+    wndclass[0..4].copy_from_slice(&window.class_style.to_le_bytes());
+    wndclass[16..20].copy_from_slice(&BASE.to_le_bytes());
+    let class = d.add(&wndclass);
+    let exe = program(BASE, false, imports, &d.0, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut start = a.create_label();
+        let mut done = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut not_paint = a.create_label();
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_PAINT)?;
+        a.jne(not_paint)?;
+        a.inc(dword_ptr(l.at(paints)))?;
+        a.push(0)?;
+        a.push(dword_ptr(esp + 8))?;
+        a.call(f("ValidateRect"))?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut not_paint)?;
+        a.cmp(dword_ptr(esp + 8), WM_NCPAINT)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(ncpaints)))?;
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(class + 4)), eax)?;
+        a.mov(dword_ptr(l.at(class + 36)), l.at(name) as i32)?;
+        a.push(l.at(class) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let (x, y) = window.at;
+        let (w, h) = window.size;
+        for value in [0, BASE as i32, 0, 0, h, w, y, x, window.style] {
+            a.push(value)?;
+        }
+        a.push(l.at(name) as i32)?;
+        a.push(l.at(name) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(ebx, eax)?;
+        if let Some((x, y, size)) = window.child {
+            const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+            a.push(0)?;
+            a.push(BASE as i32)?;
+            a.push(0)?;
+            a.push(ebx)?;
+            for value in [size, size, y, x, WS_CHILD_VISIBLE] {
+                a.push(value)?;
+            }
+            a.push(l.at(name) as i32)?;
+            a.push(l.at(name) as i32)?;
+            a.push(0)?;
+            a.call(f("CreateWindowExA"))?;
+            a.mov(ebx, eax)?;
+        }
+        for (i, step) in script.iter().enumerate() {
+            let number = i as i32 + 1;
+            match *step {
+                Upd::Size(w, h) => {
+                    let flags = SWP_NOMOVE_NOZORDER_NOACTIVATE_NOREDRAW;
+                    for value in [flags, h, w, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("SetWindowPos"))?;
+                }
+                Upd::MoveHome => {
+                    let flags = SWP_NOSIZE_NOZORDER_NOACTIVATE_NOREDRAW;
+                    for value in [flags, 0, 0, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("SetWindowPos"))?;
+                }
+                Upd::Region => {
+                    for value in [50, 50, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.call(l.import(names.len()))?;
+                    a.push(0)?;
+                    a.push(eax)?;
+                    a.push(ebx)?;
+                    a.call(f("SetWindowRgn"))?;
+                }
+                Upd::NoRegion => {
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("SetWindowRgn"))?;
+                }
+                Upd::Validate(None) => {
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("ValidateRect"))?;
+                }
+                Upd::Validate(Some(r)) => {
+                    for (j, value) in r.into_iter().enumerate() {
+                        a.mov(dword_ptr(l.at(named + 4 * j as u32)), value)?;
+                    }
+                    a.push(l.at(named) as i32)?;
+                    a.push(ebx)?;
+                    a.call(f("ValidateRect"))?;
+                }
+                Upd::Redraw(flags) => {
+                    for value in [flags, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(ebx)?;
+                    a.call(f("RedrawWindow"))?;
+                }
+                Upd::Pump => {
+                    let mut again = a.create_label();
+                    let mut empty = a.create_label();
+                    a.mov(dword_ptr(l.at(paints)), 0)?;
+                    a.mov(dword_ptr(l.at(ncpaints)), 0)?;
+                    a.set_label(&mut again)?;
+                    a.cmp(dword_ptr(l.at(paints)), LOOP_CAP)?;
+                    a.jge(empty)?;
+                    for value in [PM_REMOVE, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.push(l.at(msg) as i32)?;
+                    a.call(f("PeekMessageA"))?;
+                    a.test(eax, eax)?;
+                    a.je(empty)?;
+                    a.push(l.at(msg) as i32)?;
+                    a.call(f("DispatchMessageA"))?;
+                    a.jmp(again)?;
+                    a.set_label(&mut empty)?;
+                }
+                Upd::Update(r) => {
+                    a.push(0)?;
+                    a.push(l.at(rect) as i32)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRect"))?;
+                    a.test(eax, eax)?;
+                    a.mov(eax, number)?;
+                    a.je(done)?;
+                    for (j, value) in r.into_iter().enumerate() {
+                        a.cmp(dword_ptr(l.at(rect + 4 * j as u32)), value)?;
+                        a.jne(done)?;
+                    }
+                }
+                Upd::NoUpdate => {
+                    a.push(0)?;
+                    a.push(0)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRect"))?;
+                    a.test(eax, eax)?;
+                    a.mov(eax, number)?;
+                    a.jne(done)?;
+                }
+                Upd::EmptyUpdateRgn => {
+                    for value in [0, 0, 0, 0] {
+                        a.push(value)?;
+                    }
+                    a.call(l.import(names.len()))?;
+                    a.push(0)?;
+                    a.push(eax)?;
+                    a.push(ebx)?;
+                    a.call(f("GetUpdateRgn"))?;
+                    a.cmp(eax, NULLREGION)?;
+                    a.mov(eax, number)?;
+                    a.jne(done)?;
+                }
+                Upd::Sent(p, nc) => {
+                    a.mov(eax, number)?;
+                    a.cmp(dword_ptr(l.at(paints)), p)?;
+                    a.jne(done)?;
+                    a.cmp(dword_ptr(l.at(ncpaints)), nc)?;
+                    a.jne(done)?;
+                }
+                Upd::NoLoop => {
+                    a.mov(eax, number)?;
+                    a.cmp(dword_ptr(l.at(paints)), LOOP_CAP)?;
+                    a.jge(done)?;
+                }
+            }
+        }
+        a.xor(eax, eax)?;
+        a.set_label(&mut done)?;
+        a.push(eax)?;
+        a.call(l.import(names.len() + 1))?;
+        Ok(())
+    });
+    run(test, exe).0
+}
+
+/// The update region survives a shrink, as on Windows 98 and 11: a
+/// 100x100 window made 50x50 reports 50x50, but grown back without being
+/// validated it has all 100x100 still to paint. Validating is what ends
+/// it: this time nothing comes back.
+#[test]
+fn the_update_region_survives_a_shrink_until_it_is_validated() {
+    use Upd::*;
+    let script = [
+        Size(50, 50),
+        Update([0, 0, 50, 50]),
+        Size(100, 100),
+        Update([0, 0, 100, 100]),
+        Size(50, 50),
+        Validate(None),
+        NoUpdate,
+        Size(100, 100),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_regrow", WINDOW_100, &script), 0);
+}
+
+/// Omikron's window: Windows 98 reports 640x480 of a 641x481 window on
+/// its 640x480 screen, and ValidateRect leaves nothing when it then
+/// shrinks to 640x480. Omikron's frames ran only with no WM_PAINT waiting.
+#[test]
+fn a_window_larger_than_the_screen_stops_asking_for_wm_paint() {
+    use Upd::*;
+    let window = UpdWindow {
+        size: (641, 481),
+        ..WINDOW_100
+    };
+    let script = [
+        Update([0, 0, 640, 480]),
+        Size(640, 480),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+    ];
+    assert_eq!(update_script("upd_omikron", window, &script), 0);
+}
+
+/// Windows 98 reports what of the client area is on the screen, 40
+/// columns here, but the region keeps the rest: the window moved back
+/// reports all of it.
+#[test]
+fn the_screen_limits_what_is_reported_not_the_update_region() {
+    use Upd::*;
+    let window = UpdWindow {
+        at: (600, 0),
+        ..WINDOW_100
+    };
+    let script = [Update([0, 0, 40, 100]), MoveHome, Update([0, 0, 100, 100])];
+    assert_eq!(update_script("upd_screen", window, &script), 0);
+}
+
+/// A child hanging out of its parent reports only the part inside the
+/// parent, on Windows 98 and 11, and keeps the rest: moved back into the
+/// parent it reports all of it.
+#[test]
+fn a_parent_limits_what_is_reported_of_a_child_and_not_its_update_region() {
+    use Upd::*;
+    let window = UpdWindow {
+        child: Some((80, 0, 60)),
+        ..WINDOW_100
+    };
+    let script = [Update([0, 0, 20, 60]), MoveHome, Update([0, 0, 60, 60])];
+    assert_eq!(update_script("upd_child_out", window, &script), 0);
+}
+
+/// Any ValidateRect clips what is left to the client area, as on
+/// Windows 98 and 11: of a rectangle in it, of one elsewhere, of an
+/// empty one. Grown back, the window has 50x50 to paint, not 100x100.
+#[test]
+fn any_validate_clips_the_rest_to_the_client_area() {
+    use Upd::*;
+    for (test, rect) in [
+        ("upd_valid_inside", [0, 0, 10, 10]),
+        ("upd_valid_outside", [60, 60, 70, 70]),
+        ("upd_valid_empty", [5, 5, 5, 5]),
+    ] {
+        let script = [
+            Size(50, 50),
+            Validate(Some(rect)),
+            Size(100, 100),
+            Update([0, 0, 50, 50]),
+        ];
+        assert_eq!(update_script(test, WINDOW_100, &script), 0, "{test}");
+    }
+}
+
+/// Validating with RDW_FRAME validates nothing on Windows 98 and 11, and
+/// clips nothing: the whole region comes back.
+#[test]
+fn rdw_validate_with_rdw_frame_leaves_the_update_region() {
+    use Upd::*;
+    let script = [
+        Size(50, 50),
+        Redraw(RDW_VALIDATE | RDW_FRAME),
+        Update([0, 0, 50, 50]),
+        Size(100, 100),
+        Update([0, 0, 100, 100]),
+    ];
+    assert_eq!(update_script("upd_rdw_frame", WINDOW_100, &script), 0);
+}
+
+/// SetWindowRgn doesn't crop the update region, as on Windows 98 and
+/// 11, and neither does invalidating: GetUpdateRect gives the whole
+/// client area of a 100x100 window with a 50x50 region. Validating 50x50
+/// of it leaves nothing, and taking the region off shows none was kept.
+#[test]
+fn a_window_region_limits_what_validating_keeps_and_nothing_else() {
+    use Upd::*;
+    let script = [
+        Region,
+        Update([0, 0, 100, 100]),
+        Validate(Some([0, 0, 50, 50])),
+        NoUpdate,
+        NoRegion,
+        NoUpdate,
+        Region,
+        Redraw(RDW_INVALIDATE),
+        Update([0, 0, 100, 100]),
+    ];
+    assert_eq!(update_script("upd_region", WINDOW_100, &script), 0);
+}
+
+/// A window that shrinks so that its update region lies under its new
+/// frame: on Windows 98 validating leaves nothing, and neither WM_PAINT
+/// nor WM_NCPAINT comes, as that frame was never invalidated.
+#[test]
+fn a_shrink_into_the_frame_gives_no_wm_ncpaint() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Size(50, 50),
+        Update([0, 0, 48, 48]),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+        Size(100, 100),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_frame_shrink", window, &script), 0);
+}
+
+/// A CS_PARENTDC child shrunk from 60 to 30 reports 30x30 on Windows 98,
+/// and validated it has nothing left. A plain child does the same. The
+/// WM_PAINT Windows sends after that goes to the parent.
+#[test]
+fn a_shrunk_child_has_nothing_left_after_validating() {
+    use Upd::*;
+    const CS_PARENTDC: i32 = 0x0080;
+    let script = [
+        Size(30, 30),
+        Update([0, 0, 30, 30]),
+        Validate(None),
+        NoUpdate,
+        Pump,
+        NoLoop,
+        NoUpdate,
+    ];
+    for (test, class_style) in [("upd_child", 0), ("upd_parentdc", CS_PARENTDC)] {
+        let window = UpdWindow {
+            class_style,
+            child: Some((0, 0, 60)),
+            ..WINDOW_100
+        };
+        assert_eq!(update_script(test, window, &script), 0, "{test}");
+    }
+}
+
+/// A frame invalidated on purpose is out of ValidateRect's reach on
+/// Windows 98: GetUpdateRgn is then empty, GetUpdateRect still gives the
+/// client area, and one WM_PAINT and one WM_NCPAINT follow.
+#[test]
+fn an_invalidated_frame_survives_validate_rect() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Update([0, 0, 98, 98]),
+        Validate(None),
+        Update([0, 0, 98, 98]),
+        EmptyUpdateRgn,
+        Pump,
+        Sent(1, 1),
+        NoUpdate,
+    ];
+    assert_eq!(update_script("upd_frame", window, &script), 0);
+}
+
+/// With a frame still to paint validating keeps it, by the window as it
+/// is now: on Windows 98 the 50x50 ring of a shrunk window is left, which
+/// grown back reports as 49x49 of the client area. RDW_NOFRAME drops the
+/// frame first, and with it all of the rest.
+#[test]
+fn a_pending_frame_is_clipped_to_the_window_when_validating() {
+    use Upd::*;
+    let window = UpdWindow {
+        style: POPUP_BORDER,
+        ..WINDOW_100
+    };
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Size(50, 50),
+        Validate(None),
+        Size(100, 100),
+        Update([0, 0, 49, 49]),
+        Pump,
+        Sent(1, 1),
+    ];
+    assert_eq!(update_script("upd_frame_clip", window, &script), 0);
+    let script = [
+        Pump,
+        Redraw(RDW_INVALIDATE | RDW_FRAME),
+        Size(50, 50),
+        Redraw(RDW_VALIDATE | RDW_NOFRAME),
+        Size(100, 100),
+        NoUpdate,
+        Pump,
+        Sent(0, 0),
+    ];
+    assert_eq!(update_script("upd_noframe", window, &script), 0);
+}
+
+const SET_TRANSLATOR: &str = "?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z";
+const SET_TERMINATE: &str = "?set_terminate@@YAP6AXXZP6AXXZ@Z";
+
+/// A program with a translator and a try with one catch, in which an
+/// access violation happens: the translator gets its code and record, and
+/// with `throws` throws (char *)0x55 for the catch (char *) to take;
+/// otherwise it returns, and the catch is a catch (...). `ehs` marks the
+/// function as built with /EHs. The exit code has a bit each.
+fn translator_program(throws: bool, ehs: bool) -> Vec<u8> {
+    let names: &[&str] = &[
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        SET_TRANSLATOR,
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    let info = d.add(&[0; 36]);
+    let unwind = d.add(&[0; 16]);
+    let entry = d.add(&[0; 20]);
+    let handler = d.add(&[0; 16]);
+    let bits = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 4]| -> Result<[CodeLabel; 4], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let mut thunk = a.create_label();
+            let mut catch = a.create_label();
+            let mut after = a.create_label();
+            let mut translator = a.create_label();
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            put(a, throw_info + 12, data(list))?;
+            put(a, info, if ehs { 0x1993_0522 } else { 0x1993_0520 })?;
+            put(a, info + 4, 2)?;
+            put(a, info + 8, data(unwind))?;
+            put(a, info + 12, 1)?;
+            put(a, info + 16, data(entry))?;
+            put(a, info + 32, ehs as u32)?;
+            put(a, unwind, u32::MAX)?;
+            put(a, unwind + 8, u32::MAX)?;
+            put(a, entry + 8, 1)?;
+            put(a, entry + 12, 1)?;
+            put(a, entry + 16, data(handler))?;
+            if throws {
+                put(a, handler + 4, data(char_pointer))?;
+            }
+            put(a, handler + 8, -0x14i32 as u32)?;
+            put(a, handler + 12, at[1])?;
+
+            // The second call gets the translator the first set.
+            a.push(0x1234)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            a.mov(ecx, at[2])?;
+            a.push(ecx)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            let mut skip = a.create_label();
+            a.cmp(eax, 0x1234)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 1)?;
+            a.set_label(&mut skip)?;
+
+            a.push(ebp)?;
+            a.mov(ebp, esp)?;
+            a.push(-1)?;
+            a.mov(eax, at[0])?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.sub(esp, 0x10)?;
+            a.mov(dword_ptr(ebp - 0x10), esp)?;
+            a.mov(dword_ptr(ebp - 4), 0)?;
+            a.xor(eax, eax)?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.int3()?;
+
+            // catch (char *p): p is what the translator threw.
+            a.set_label(&mut catch)?;
+            let mut skip = a.create_label();
+            if throws {
+                a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
+                a.jne(skip)?;
+            }
+            a.or(dword_ptr(l.at(bits)), 4)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, at[3])?;
+            a.ret()?;
+
+            a.set_label(&mut after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // translator(code, pointers): throw (char *)0x55; or return.
+            a.set_label(&mut translator)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(esp + 8))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.cmp(eax, dword_ptr(esp + 4))?;
+            a.jne(skip)?;
+            a.cmp(eax, 0xC000_0005u32 as i32)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 2)?;
+            a.set_label(&mut skip)?;
+            if throws {
+                put(a, thrown, 0x55)?;
+                a.push(data(throw_info) as i32)?;
+                a.push(data(thrown) as i32)?;
+                a.call(f("_CxxThrowException"))?;
+                a.int3()?;
+            } else {
+                a.ret()?;
+            }
+
+            a.set_label(&mut thunk)?;
+            a.mov(eax, data(info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([thunk, catch, translator, after])
+        };
+        let labels = code(a, [0; 4])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 4];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    })
+}
+
+/// _set_se_translator: the C++ exception the translator throws reaches
+/// the catch.
+#[test]
+fn a_translator_turns_a_fault_into_a_cxx_exception() {
+    let (code, _) = run("msvcrt_se_translator", translator_program(true, false));
+    assert_eq!(code, 7);
+}
+
+/// A translator that returns leaves the exception to the catch (...).
+#[test]
+fn a_catch_all_takes_a_fault_the_translator_returned_from() {
+    let (code, _) = run(
+        "msvcrt_se_translator_returns",
+        translator_program(false, false),
+    );
+    assert_eq!(code, 7);
+}
+
+/// A function built with /EHs handles C++ exceptions only: its translator
+/// isn't called for the fault, which nothing else handles, so the
+/// program ends with FFh. That is what MSVCRT.DLL of Windows 11 does.
+/// Windows 98's DLL knows only magic 19930520h and ends the program with
+/// terminate() for this table; the built-in one takes the later magic
+/// numbers for the programs that use them.
+#[test]
+fn a_function_built_with_ehs_does_not_translate() {
+    let (code, _) = run("msvcrt_se_translator_ehs", translator_program(true, true));
+    assert_eq!(code, 0xFF);
+}
+
+/// What a translator of `nested_frames_program` does: throws (char *)0x55,
+/// the same with a destructor in the throw's ThrowInfo, that on its first
+/// call and returns after it, returns or faults.
+#[derive(Clone, Copy, PartialEq)]
+enum Translator {
+    Throws,
+    ThrowsWithDestructor,
+    ThrowsOnce,
+    Returns,
+    Faults,
+}
+
+/// The inner function's try: a catch (char), which takes neither the fault
+/// nor the (char *) thrown; a catch (...) before a catch (char); no try
+/// block at all; a catch (...) whose block faults; that with a try around
+/// it whose catch (...) sets the 10h bit; or a FuncInfo with a bad magic.
+#[derive(Clone, Copy, PartialEq)]
+enum Inner {
+    CatchChar,
+    CatchAllFirst,
+    NoTry,
+    CatchFaults,
+    CatchFaultsInTry,
+    BadMagic,
+    /// A catch (...) whose block does `throw;`.
+    CatchRethrows,
+    /// A catch (char *) whose block faults.
+    CaughtFaults,
+    /// The frame in state 9, past its table.
+    BadState,
+    /// A throw with no frame on the chain.
+    Uncaught,
+}
+
+/// The outer function: none, a catch (char *) or a catch (...).
+#[derive(Clone, Copy, PartialEq)]
+enum Outer {
+    None,
+    CatchPointer,
+    CatchAll,
+}
+
+/// A program with a translator, a __except-like SEH frame of its own and,
+/// inside it, the outer function and the inner one, which runs into an
+/// access violation or, with `int3`, a breakpoint. The exit code says what
+/// happened: the low four bits how many times the translator ran, 10h that
+/// the outer catch ran, 20h that it got 55h, 40h that the SEH frame saw
+/// the exception the inner function raised with its parameters, 80h that
+/// the thrown object's destructor ran.
+fn nested_frames_program(
+    translator: Translator,
+    inner: Inner,
+    outer: Outer,
+    int3: bool,
+) -> Vec<u8> {
+    const STATES: u32 = 2;
+    let names: &[&str] = &[
+        "__CxxFrameHandler",
+        "_CxxThrowException",
+        SET_TRANSLATOR,
+        SET_TERMINATE,
+        "exit",
+    ];
+    let imports: &[(&str, &[&str])] = &[("MSVCRT.dll", names)];
+    let mut d = Data::default();
+    let char_pointer = d.add(&[0; 8]);
+    d.text(".PAD");
+    let char_type = d.add(&[0; 8]);
+    d.text(".D");
+    let catchable = d.add(&[0; 28]);
+    let list = d.add(&[0; 8]);
+    let throw_info = d.add(&[0; 16]);
+    let thrown = d.add(&[0; 4]);
+    let inner_info = d.add(&[0; 36]);
+    let outer_info = d.add(&[0; 36]);
+    let unwind = d.add(&[0; 16]);
+    let inner_try = d.add(&[0; 40]);
+    let outer_try = d.add(&[0; 20]);
+    let inner_handlers = d.add(&[0; 32]);
+    let outer_handler = d.add(&[0; 16]);
+    let bits = d.add(&[0; 4]);
+    let data_len = d.0.len() as u32;
+    program(BASE, false, imports, &d.0, |a, l| {
+        let code = |a: &mut CodeAssembler, at: [u32; 11]| -> Result<[CodeLabel; 11], IcedError> {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let put = |a: &mut CodeAssembler, offset: u32, value: u32| {
+                a.mov(dword_ptr(l.at(offset)), value as i32)
+            };
+            let data = |offset: u32| l.at(offset) as u32;
+            let mut inner_thunk = a.create_label();
+            let mut outer_thunk = a.create_label();
+            let mut inner_code = a.create_label();
+            let mut outer_code = a.create_label();
+            let mut outer_catch = a.create_label();
+            let mut outer_after = a.create_label();
+            let mut translate = a.create_label();
+            let mut seh = a.create_label();
+            let mut destructor = a.create_label();
+            let mut faulting_catch = a.create_label();
+            let mut around_catch = a.create_label();
+            let mut inner_after = a.create_label();
+            let mut on_terminate = a.create_label();
+            let [
+                inner_at,
+                outer_at,
+                catch_at,
+                after_at,
+                translate_at,
+                seh_at,
+                destructor_at,
+                faulting_at,
+                around_at,
+                inner_after_at,
+                terminate_at,
+            ] = at;
+
+            put(a, catchable, 1)?;
+            put(a, catchable + 4, data(char_pointer))?;
+            put(a, catchable + 12, u32::MAX)?;
+            put(a, catchable + 20, 4)?;
+            put(a, list, 1)?;
+            put(a, list + 4, data(catchable))?;
+            if matches!(
+                translator,
+                Translator::ThrowsWithDestructor | Translator::ThrowsOnce
+            ) {
+                put(a, throw_info + 4, destructor_at)?;
+            }
+            put(a, throw_info + 12, data(list))?;
+            let tries = match inner {
+                Inner::NoTry => 0,
+                Inner::CatchFaultsInTry => 2,
+                _ => 1,
+            };
+            for (info, tries, entry) in [(inner_info, tries, inner_try), (outer_info, 1, outer_try)]
+            {
+                let bad = info == inner_info && inner == Inner::BadMagic;
+                put(a, info, if bad { 0x1234_5678 } else { 0x1993_0520 })?;
+                put(a, info + 4, STATES)?;
+                put(a, info + 8, data(unwind))?;
+                put(a, info + 12, tries)?;
+                put(a, info + 16, data(entry))?;
+            }
+            put(a, unwind, u32::MAX)?;
+            // In the inner catch block, state 1, the try around it holds.
+            let before = if inner == Inner::CatchFaultsInTry {
+                0
+            } else {
+                u32::MAX
+            };
+            put(a, unwind + 8, before)?;
+            for entry in [inner_try, outer_try] {
+                put(a, entry + 8, 1)?;
+            }
+            // The inner catches aren't taken: a return from one is an int3.
+            put(
+                a,
+                inner_try + 12,
+                1 + (inner == Inner::CatchAllFirst) as u32,
+            )?;
+            put(a, inner_try + 16, data(inner_handlers))?;
+            match inner {
+                Inner::CatchChar => put(a, inner_handlers + 4, data(char_type))?,
+                Inner::CatchFaults | Inner::CatchFaultsInTry | Inner::CatchRethrows => {
+                    put(a, inner_handlers + 12, faulting_at)?;
+                }
+                Inner::CaughtFaults => {
+                    put(a, inner_handlers + 4, data(char_pointer))?;
+                    put(a, inner_handlers + 8, -0x14i32 as u32)?;
+                    put(a, inner_handlers + 12, faulting_at)?;
+                }
+                _ => put(a, inner_handlers + 16 + 4, data(char_type))?,
+            }
+            // The try around it: its first state to 2, its catch to 3.
+            put(a, inner_try + 20 + 4, 2)?;
+            put(a, inner_try + 20 + 8, 3)?;
+            put(a, inner_try + 20 + 12, 1)?;
+            put(a, inner_try + 20 + 16, data(inner_handlers + 16))?;
+            if inner == Inner::CatchFaultsInTry {
+                put(a, inner_handlers + 16 + 12, around_at)?;
+            }
+            put(a, outer_try + 12, 1)?;
+            put(a, outer_try + 16, data(outer_handler))?;
+            if outer == Outer::CatchPointer {
+                put(a, outer_handler + 4, data(char_pointer))?;
+            }
+            put(a, outer_handler + 8, -0x14i32 as u32)?;
+            put(a, outer_handler + 12, catch_at)?;
+
+            a.mov(ecx, translate_at)?;
+            a.push(ecx)?;
+            a.call(f(SET_TRANSLATOR))?;
+            a.add(esp, 4)?;
+            if matches!(inner, Inner::BadState | Inner::Uncaught) {
+                a.mov(ecx, terminate_at)?;
+                a.push(ecx)?;
+                a.call(f(SET_TERMINATE))?;
+                a.add(esp, 4)?;
+            }
+            a.mov(eax, seh_at)?;
+            a.push(eax)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            if outer == Outer::None {
+                a.call(inner_code)?;
+            } else {
+                a.call(outer_code)?;
+            }
+            a.pop(dword_ptr(0u64).fs())?;
+            a.add(esp, 4)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            // A function with a try around what it does.
+            let frame = |a: &mut CodeAssembler, thunk: u32| -> Result<(), IcedError> {
+                a.push(ebp)?;
+                a.mov(ebp, esp)?;
+                a.push(-1)?;
+                a.mov(eax, thunk)?;
+                a.push(eax)?;
+                a.push(dword_ptr(0u64).fs())?;
+                a.mov(dword_ptr(0u64).fs(), esp)?;
+                a.sub(esp, 0x10)?;
+                a.mov(dword_ptr(ebp - 0x10), esp)?;
+                a.mov(dword_ptr(ebp - 4), 0)
+            };
+            a.set_label(&mut inner_code)?;
+            frame(a, inner_at)?;
+            if inner == Inner::BadState {
+                a.mov(dword_ptr(ebp - 4), 9)?;
+            }
+            if inner == Inner::Uncaught {
+                a.mov(dword_ptr(0u64).fs(), -1)?;
+                a.push(data(throw_info) as i32)?;
+                a.push(data(thrown) as i32)?;
+                a.call(f("_CxxThrowException"))?;
+            } else if int3 {
+                a.int3()?;
+            } else {
+                a.xor(eax, eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+            }
+            a.int3()?;
+
+            // The inner catches.
+            a.set_label(&mut faulting_catch)?;
+            if inner == Inner::CatchRethrows {
+                a.push(0)?;
+                a.push(0)?;
+                a.call(f("_CxxThrowException"))?;
+            } else {
+                a.xor(eax, eax)?;
+                a.mov(eax, dword_ptr(eax))?;
+            }
+            a.int3()?;
+            a.set_label(&mut around_catch)?;
+            a.or(dword_ptr(l.at(bits)), 0x10)?;
+            a.mov(eax, inner_after_at)?;
+            a.ret()?;
+            a.set_label(&mut inner_after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            a.set_label(&mut outer_code)?;
+            frame(a, outer_at)?;
+            a.call(inner_code)?;
+            a.int3()?;
+
+            // The outer catch.
+            a.set_label(&mut outer_catch)?;
+            let mut skip = a.create_label();
+            a.or(dword_ptr(l.at(bits)), 0x10)?;
+            a.cmp(dword_ptr(ebp - 0x14), 0x55)?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 0x20)?;
+            a.set_label(&mut skip)?;
+            a.mov(eax, after_at)?;
+            a.ret()?;
+
+            a.set_label(&mut outer_after)?;
+            a.mov(ecx, dword_ptr(ebp - 0x0C))?;
+            a.mov(dword_ptr(0u64).fs(), ecx)?;
+            a.mov(esp, ebp)?;
+            a.pop(ebp)?;
+            a.ret()?;
+
+            // translator(code, pointers): count, then do what it does.
+            a.set_label(&mut translate)?;
+            a.add(dword_ptr(l.at(bits)), 1)?;
+            match translator {
+                Translator::Throws | Translator::ThrowsWithDestructor => {
+                    put(a, thrown, 0x55)?;
+                    a.push(data(throw_info) as i32)?;
+                    a.push(data(thrown) as i32)?;
+                    a.call(f("_CxxThrowException"))?;
+                    a.int3()?;
+                }
+                Translator::Returns => a.ret()?,
+                Translator::ThrowsOnce => {
+                    let mut once = a.create_label();
+                    a.cmp(dword_ptr(l.at(bits)), 1)?;
+                    a.je(once)?;
+                    a.ret()?;
+                    a.set_label(&mut once)?;
+                    put(a, thrown, 0x55)?;
+                    a.push(data(throw_info) as i32)?;
+                    a.push(data(thrown) as i32)?;
+                    a.call(f("_CxxThrowException"))?;
+                    a.int3()?;
+                }
+                Translator::Faults => {
+                    let mut go_on = a.create_label();
+                    a.cmp(dword_ptr(l.at(bits)), 4)?;
+                    a.jb(go_on)?;
+                    a.push(dword_ptr(l.at(bits)))?;
+                    a.call(f("exit"))?;
+                    a.set_label(&mut go_on)?;
+                    a.xor(eax, eax)?;
+                    a.mov(eax, dword_ptr(eax))?;
+                    a.ret()?;
+                }
+            }
+
+            // The SEH frame's handler: ends the program.
+            a.set_label(&mut seh)?;
+            let mut skip = a.create_label();
+            a.mov(eax, dword_ptr(esp + 4))?;
+            let raised = if int3 { 0x8000_0003u32 } else { 0xC000_0005 };
+            a.cmp(dword_ptr(eax), raised as i32)?;
+            a.jne(skip)?;
+            // NumberParameters: 2 for a fault, 1 for a breakpoint.
+            a.cmp(dword_ptr(eax + 16), if int3 { 1 } else { 2 })?;
+            a.jne(skip)?;
+            a.or(dword_ptr(l.at(bits)), 0x40)?;
+            a.set_label(&mut skip)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            a.set_label(&mut destructor)?;
+            a.or(dword_ptr(l.at(bits)), 0x80)?;
+            a.ret()?;
+
+            // The terminate handler.
+            a.set_label(&mut on_terminate)?;
+            a.or(dword_ptr(l.at(bits)), 0x70)?;
+            a.push(dword_ptr(l.at(bits)))?;
+            a.call(f("exit"))?;
+            a.int3()?;
+
+            a.set_label(&mut inner_thunk)?;
+            a.mov(eax, data(inner_info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            a.set_label(&mut outer_thunk)?;
+            a.mov(eax, data(outer_info))?;
+            a.jmp(f("__CxxFrameHandler"))?;
+            Ok([
+                inner_thunk,
+                outer_thunk,
+                outer_catch,
+                outer_after,
+                translate,
+                seh,
+                destructor,
+                faulting_catch,
+                around_catch,
+                inner_after,
+                on_terminate,
+            ])
+        };
+        let labels = code(a, [0; 11])?;
+        let ip = (l.data + data_len).next_multiple_of(0x1000) as u64;
+        let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+        let result = a.assemble_options(ip, options)?;
+        let mut at = [0; 11];
+        for (i, label) in labels.iter().enumerate() {
+            at[i] = result.label_ip(label)? as u32;
+        }
+        a.reset();
+        code(a, at)?;
+        Ok(())
+    })
+}
+
+/// `nested_frames_program` run: its exit code.
+fn run_nested(test: &str, translator: Translator, inner: Inner, outer: Outer) -> u8 {
+    run(test, nested_frames_program(translator, inner, outer, false)).0
+}
+
+/// `throw;` in a catch (...) of a fault: the block's guard runs the
+/// translator, the block ends and the search that found the catch goes on,
+/// so that the SEH frame gets the fault's own record.
+#[test]
+fn a_rethrown_fault_keeps_its_record() {
+    let code = run_nested(
+        "msvcrt_rethrow_fault",
+        Translator::Returns,
+        Inner::CatchRethrows,
+        Outer::None,
+    );
+    assert_eq!(code, 0x42);
+}
+
+/// The same with a catch (...) outside: one more call, and it takes the
+/// fault.
+#[test]
+fn a_rethrown_fault_reaches_the_outer_catch() {
+    let code = run_nested(
+        "msvcrt_rethrow_fault_outer",
+        Translator::Returns,
+        Inner::CatchRethrows,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A catch block an exception leaves ends as if it returned: the catch
+/// (char *) faults, three more calls of the translator follow, and the
+/// unwind for the outer catch (...) destroys the object of the first.
+#[test]
+fn an_abandoned_catch_destroys_its_object() {
+    let code = run_nested(
+        "msvcrt_abandoned_catch",
+        Translator::ThrowsOnce,
+        Inner::CaughtFaults,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x94);
+}
+
+/// A state past the table is terminate(), before the translator, and the
+/// thread's terminate handler runs.
+#[test]
+fn a_bad_state_calls_the_terminate_handler() {
+    let code = run_nested(
+        "msvcrt_bad_state",
+        Translator::Returns,
+        Inner::BadState,
+        Outer::None,
+    );
+    assert_eq!(code, 0x70);
+}
+
+/// A C++ exception nothing takes reaches MSVCRT's unhandled exception
+/// filter, which is terminate().
+#[test]
+fn an_uncaught_exception_calls_the_terminate_handler() {
+    let code = run_nested(
+        "msvcrt_uncaught",
+        Translator::Returns,
+        Inner::Uncaught,
+        Outer::None,
+    );
+    assert_eq!(code, 0x70);
+}
+
+/// MSVCRT.DLL 6.00.8397 looks for the exception a translator throws in the
+/// function it ran for and no further: with no catch there the exception
+/// is destroyed and the fault goes on to the outer function, whose handler
+/// runs the translator again, so that one's throw is what the outer
+/// catch (char *) gets.
+#[test]
+fn a_translated_exception_stays_in_its_function() {
+    let code = run_nested(
+        "msvcrt_se_translator_outer",
+        Translator::Throws,
+        Inner::CatchChar,
+        Outer::CatchPointer,
+    );
+    assert_eq!(code, 0x32);
+}
+
+/// The same with a catch (...) outside: two calls, and the outer one's
+/// throw is what it takes.
+#[test]
+fn a_catch_all_outside_gets_the_second_translation() {
+    let code = run_nested(
+        "msvcrt_se_translator_outer_all",
+        Translator::Throws,
+        Inner::CatchChar,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x12);
+}
+
+/// Past the last function with a try, a frame of another kind sees the
+/// access violation, never the C++ exception.
+#[test]
+fn an_seh_frame_sees_the_fault_and_not_the_translation() {
+    let code = run_nested(
+        "msvcrt_se_translator_seh",
+        Translator::Throws,
+        Inner::CatchChar,
+        Outer::None,
+    );
+    assert_eq!(code, 0x41);
+}
+
+/// The exception nothing took is destroyed on the way.
+#[test]
+fn a_dropped_translation_is_destroyed() {
+    let code = run_nested(
+        "msvcrt_se_translator_destroyed",
+        Translator::ThrowsWithDestructor,
+        Inner::CatchChar,
+        Outer::None,
+    );
+    assert_eq!(code, 0xC1);
+}
+
+/// A fault in the translator is terminate(): abort()'s exit code 3, after
+/// one call and with the catch (...) never reached.
+#[test]
+fn a_fault_in_the_translator_terminates() {
+    let code = run_nested(
+        "msvcrt_se_translator_faults",
+        Translator::Faults,
+        Inner::CatchChar,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 3);
+}
+
+/// For an exception other than C++ the DLL looks at the last handler of a
+/// try only, so a catch (...) ahead of another handler doesn't take it.
+#[test]
+fn only_the_last_handler_takes_a_fault() {
+    let code = run_nested(
+        "msvcrt_se_translator_not_last",
+        Translator::Returns,
+        Inner::CatchAllFirst,
+        Outer::None,
+    );
+    assert_eq!(code, 0x41);
+}
+
+/// A translator that returns is called once for each function with a try,
+/// innermost first, up to the one that takes the fault.
+#[test]
+fn a_translator_runs_for_each_function_with_a_try() {
+    let code = run_nested(
+        "msvcrt_se_translator_each",
+        Translator::Returns,
+        Inner::CatchChar,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x12);
+}
+
+/// A function with no try block doesn't call it.
+#[test]
+fn a_function_without_try_blocks_does_not_translate() {
+    let code = run_nested(
+        "msvcrt_se_translator_no_try",
+        Translator::Returns,
+        Inner::NoTry,
+        Outer::CatchAll,
+    );
+    assert_eq!(code, 0x11);
+}
+
+/// In a catch block the DLL has a guard frame on top of the function's, and
+/// both call the translator: the fault there runs it twice more, three
+/// calls with the one for the fault the catch took.
+#[test]
+fn a_fault_in_a_catch_block_translates_twice() {
+    let code = run_nested(
+        "msvcrt_se_translator_in_catch",
+        Translator::Returns,
+        Inner::CatchFaults,
+        Outer::None,
+    );
+    assert_eq!(code, 0x43);
+}
+
+/// With a try around the catch block, the catch (...) of that try is only
+/// looked at from the function's frame, after both calls.
+#[test]
+fn a_try_around_a_catch_block_comes_after_both_calls() {
+    let code = run_nested(
+        "msvcrt_se_translator_around_catch",
+        Translator::Returns,
+        Inner::CatchFaultsInTry,
+        Outer::None,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A translator that throws there: the guard's call finds nothing at its
+/// depth and the exception is dropped, the frame's call throws again, and
+/// the try around the catch block takes that.
+#[test]
+fn a_throw_in_a_catch_block_goes_to_the_try_around_it() {
+    let code = run_nested(
+        "msvcrt_se_translator_throw_in_catch",
+        Translator::Throws,
+        Inner::CatchFaultsInTry,
+        Outer::None,
+    );
+    assert_eq!(code, 0x13);
+}
+
+/// A FuncInfo with a bad magic number is terminate(), before anything else.
+#[test]
+fn a_bad_func_info_terminates() {
+    let code = run_nested(
+        "msvcrt_bad_func_info",
+        Translator::Returns,
+        Inner::BadMagic,
+        Outer::None,
+    );
+    assert_eq!(code, 3);
+}
+
+/// The 1999 DLL translates a breakpoint as any other exception; later ones
+/// skip it. Its record has one parameter on Windows 98 and later.
+#[test]
+fn a_breakpoint_is_translated() {
+    let program = nested_frames_program(Translator::Returns, Inner::CatchChar, Outer::None, true);
+    let (code, _) = run("msvcrt_se_translator_int3", program);
+    assert_eq!(code, 0x41);
+}
+
 /// A drive's current directory as MSVCRT's _chdir keeps it, in a variable
 /// whose name starts with "=", set and read back; a name with "=" further
 /// on is refused with ERROR_INVALID_PARAMETER. A bit each in the exit
