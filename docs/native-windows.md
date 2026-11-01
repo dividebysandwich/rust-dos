@@ -92,8 +92,8 @@ registry functions, 2 from OLE32, 2 from DDRAW and `PropertySheetA`; its
 DLLs add WinMM and some of GDI32. Implementing against trace logs of real
 games keeps the work bounded.
 
-Option 2 stays open for the DLLs at the edges, as an experiment after
-phase 3 (see "Wine's DLLs as guest code").
+Option 2 stays open for the DLLs at the edges (see "Wine's DLLs as
+guest code").
 
 ## Architecture
 
@@ -408,19 +408,19 @@ start with a 16-bit stub, from the Windows 3.1 era: InstallShield 3 is
 that starts a 32-bit engine. Running them as they are needs a Win16
 layer: an NE loader, 16-bit segments as LDT selectors, and KERNEL, USER
 and GDI's 16-bit APIs thunked to the 32-bit ones, as winevdm does. That is
-a second project about the size of phases 1 and 2 together.
+a second project of its own.
 
 Most installs can do without it:
 
 1. **Installed folders.** GOG and other digital releases, and folders
    copied from a real Windows installation, need no setup. The game's
    profile carries the registry keys it reads (a `.reg` file next to it),
-   so it starts as if setup had run. This works from phase 1 on.
+   so it starts as if setup had run.
 2. **32-bit setup engines.** For a known 16-bit stub, run its 32-bit
    engine directly, as 64-bit Windows does for InstallShield 5. Wise and
    later InstallShield setups are 32-bit already. This needs the layer to
    be broad enough for setup programs (dialogs, common controls, shell
-   links), so it comes in phase 5.
+   links).
 3. **Unpacking in Rust.** Read the installer's archives to copy files
    without running setup at all, with the registry keys from the profile
    as in 1. The readers follow those of the refurbished-dinosaurs
@@ -456,9 +456,7 @@ Most installs can do without it:
    and `games/<id>.reg` doing the rest of what setup would. A GOG folder
    whose launcher starts a Windows program imports as such a profile.
 
-With these, a Win16 layer isn't needed to start, and it comes last, in
-phase 6, for the Windows 3.1 games and the 16-bit setup programs that 1
-to 3 don't reach.
+With these, a Win16 layer isn't needed to start. It is for the Windows 3.1 games and the 16-bit setup programs that these don't reach.
 
 ### Setup programs that ran
 
@@ -561,400 +559,16 @@ Some differences hold for every setup:
 1.193182 MHz, as Windows 95 reported) and RDTSC all come from the emulated
 clock, so a game's frame pacing follows `cycles` and is deterministic.
 
-## Phases
+## Screen savers
 
-Each phase ends with programs that run, checked by tests.
+Windows starts a screen saver after WIN.INI's `[windows]`
+`ScreenSaveTimeOut` seconds with no key or mouse input, when
+`ScreenSaveActive=1`. The saver is SYSTEM.INI's `[boot] SCRNSAVE.EXE`,
+run with `/s`. Programs can read and change both settings through
+SystemParametersInfo.
 
-**Phase 0: plumbing.**
-
-- A PE parser (headers, sections, relocations, imports by name and by
-  ordinal, forwarded exports, resources, TLS directory) with tests.
-- The new service trap in the interpreter, the dynrec, the debugger and
-  the profiler.
-- Starting a process: page tables, selectors, TIB, stub images, the
-  entry point, and `ExitProcess` back to DOS.
-- Console output (`GetStdHandle`, `WriteFile`, `WriteConsoleA`) to the
-  DOS console, so `rust-dos run --win32 hello.exe` prints in the
-  terminal.
-- `win32=true` under `[emulator]` turns it on.
-- The save state section (`W32 `), and a `[W32]` log line for each call
-  of a built-in function.
-- Test programs are built in the tests with a small PE writer and
-  `code_asm`, so no binaries are checked in.
-- Wine's conformance tests (see Testing) with the kernel32 functions
-  their framework and first files need: the environment, TLS, the
-  process heap, GetProcAddress, GetVersionExA, drives, times and code
-  page conversions.
-
-**Phase 1: the runtime.**
-
-- kernel32's core: heaps, virtual memory, files, directories, the
-  environment and command line, modules, TLS, critical sections, events,
-  mutexes, threads, time.
-- Structured exceptions.
-- advapi32's registry.
-- Enough of `msvcrt.dll` for programs that link the CRT dynamically.
-- A debug server endpoint for processes, modules, threads and handles
-  (`GET /api/win32`, described in `docs/llm-debugging.md`).
-
-Milestone: console programs built with MSVC 4 to 6, Watcom and Borland
-run, as do HX's sample programs.
-
-**Phase 2: windows and GDI.**
-
-- user32: classes, windows, message queues, input messages from the
-  emulated devices, timers, `MessageBox`, dialogs from resources with the
-  basic controls.
-- gdi32: device contexts, DIB sections, `BitBlt`, `StretchBlt`,
-  `TextOut`, palettes, on the VBE desktop.
-
-Milestone: simple windowed games and a game's own launcher dialog.
-
-**Phase 3: 2D DirectX and sound.**
-
-- DirectDraw 1 to 6 interfaces, full screen and windowed.
-- DirectSound, WinMM audio, MIDI and CD audio.
-- DirectInput.
-- `CoCreateInstance` for the DirectX classes.
-
-Milestone candidates: the freeware Win95 releases of Command & Conquer and
-Red Alert, the Diablo demo, Quake 2's software renderer.
-
-Fallout (1997, DirectX 3) runs on it from GOG's folder: its movies with
-their sound in 640x480 at 8 bits a pixel, its menus, and the mouse
-through DirectInput. Overlays, gamma ramps, sound capture and force
-feedback answer as a machine without that hardware does.
-
-**Phase 4: 3D.**
-
-- Glide 2.x on the emulated Voodoo.
-- Direct3D 5 and 6 on the same.
-
-Milestone candidates: Quake 2 with 3dfx's MiniGL, the Unreal demo with
-Glide, Expendable with Direct3D.
-
-GLIDE2X.DLL drives the card's registers as 3dfx's library did, on a
-Voodoo Graphics, a Voodoo2, a Banshee and a Voodoo3, and Direct3D's HAL
-(Direct3D 1 to 7's interfaces in DDRAW.DLL) draws through the same code.
-On a Banshee or Voodoo3 the desktop is 640x480 at 16 bits a pixel in the
-card's own memory and modes, so DirectDraw's surfaces there are what the
-3D engine renders into, in a window too. A Voodoo Graphics or Voodoo2
-add-on card is a second DirectDraw device, as 3dfx's driver made it,
-with the card's full-screen modes and buffers. Without a 3dfx card there
-is no GLIDE2X.DLL, as on Windows without 3dfx's driver: `LoadLibrary`
-doesn't find it (or finds the game's own copy), and a program that
-imports it doesn't start. There is no software rasterizer, so the RGB
-and Ramp devices aren't there. The 3D engine draws 16-bit color and
-depth only, so on a Banshee or Voodoo3 a 24- or 32-bit render target or
-depth buffer is drawn into a 16-bit shadow of it in the card's memory,
-which the HAL loads from the surface before drawing and widens into it
-when the program can see it (Lock, GetDC, Blt, Flip, EndScene): the
-surface stays 32-bit, what is drawn has 16-bit precision, and a Clear
-writes its exact color. On a Voodoo Graphics or Voodoo2 such targets
-fail, as they did with 3dfx's driver.
-
-Unreal Gold runs from GOG's folder on a Voodoo2 and a Voodoo3: its levels
-with Glide, its intro and menus with Direct3D. Quake 2's 3.14 demo runs its
-demos through 3dfx's MiniGL on both, with the MiniGL it came with on the
-Voodoo2 and MiniGL 1.49 on the Voodoo3, as on the real cards. Incoming and
-Expendable run with Direct3D. SHELL32, COMCTL32, COMDLG32, WSOCK32 and
-DPLAYX came in for them, answering as a machine without a network does, with
-each common dialog cancelled. DPLAYX makes DirectPlay and lobby objects as
-Windows does on a machine without a network card, and only the connections
-are missing, as there is no service provider yet to make one.
-
-D3D8.DLL (DirectX 8.1's interfaces) came after phase 5, on the same
-HAL: IDirect3D8 with one adapter, the display's 16- and 32-bit modes,
-and a HAL device that processes vertices in software, as 3dfx's DirectX
-8 driver for the Voodoo3 did. Hardware or mixed vertex processing, the
-REF device, stencil, cube and volume textures and pixel shaders aren't
-there, and the caps say so. Its surfaces, textures and buffers are
-DirectDraw surfaces underneath, so a 32-bit target or texture is drawn
-with 16-bit precision as Direct3D 7's are. Vertices go through the
-fixed-function pipeline of Direct3D 7's device, from an FVF or a
-vertex declaration, and vs.1.1 shaders run in an interpreter before
-the HAL draws what they give. On a Voodoo Graphics or Voodoo2 add-on
-card CreateDevice fails with D3DERR_NOTAVAILABLE.
-
-OPENGL32.DLL is OpenGL 1.1 on the same HAL, as 3dfx's ICD for the
-Banshee and Voodoo3 had it, for Quake III Arena's engine (American
-McGee's Alice). Its pixel formats are the ICD's two, 5-6-5 color with a
-16-bit depth buffer, single or double buffered; ChoosePixelFormat,
-DescribePixelFormat, SetPixelFormat, GetPixelFormat and SwapBuffers in
-GDI32 go to it, as Windows sends them to the ICD of the DC's device. A
-context is a DirectDraw object of its own with a Direct3D 7 device
-drawing into a 16-bit color buffer and depth buffer the size of the
-window's client area; SwapBuffers copies the color buffer to the
-window, which covers the screen when the game changed the mode. Each
-draw puts OpenGL's state on the device: the modelview matrix as the
-world transform, the projection with OpenGL's depth range turned into
-Direct3D's, the viewport, blending, the alpha and depth tests, culling,
-fog and the texture environments as texture stages, and the scissor
-box, polygon offset (as the card's depth bias) and color mask, which
-the HAL takes from the device. glBegin and glEnd, vertex arrays with
-glDrawArrays, glDrawElements and glArrayElement go through Direct3D's
-vertex pipeline; quads, quad strips, polygons and line loops become
-triangle lists, strips, fans and line strips. Textures are DirectDraw
-texture surfaces with their mipmaps, 5-6-5 or 4-4-4-4, in video memory
-while there is room past the HAL's texture heap and in system memory
-after. The extensions are GL_ARB_multitexture (two units, as the card's
-two TMUs), GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
-WGL_EXT_swap_control. The functions OpenGL 1.1 has and the ICD doesn't
-(display lists, lighting, evaluators, feedback, the accumulation and
-stencil buffers) are exported and do nothing, and their first call is
-logged. SetDeviceGammaRamp sets the card's lookup table for 16- and
-32-bit modes until the next mode set.
-
-On a Voodoo2 the DLL is 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL),
-which games of the time loaded by name or kept in their folder as
-OPENGL32.DLL, and which drew full screen only. Its two pixel formats
-are those that driver's DescribePixelFormat gives on Windows 98 SE:
-5-6-5 color with a 16-bit depth buffer, single or double buffered,
-which also say they support GDI and have an 8-bit stencil and a 64-bit
-accumulation buffer, which the real driver kept in software and which
-do nothing here. A context's DirectDraw object is the card's 3dfx
-device. wglMakeCurrent opens the card at the smallest of its modes
-that holds the window's client area and a depth buffer, as the real
-driver did (a 400x300 window gets 512x384), and fails when none does
-(1024x768 on a card with 4 MB of frame buffer). OpenGL draws into the
-top left of the card's back buffer through the same HAL as Direct3D,
-and SwapBuffers swaps the card's buffers. glGetString gives the real
-driver's vendor, renderer and version, and of its extensions those
-that are here. Without a Banshee, Voodoo3 or Voodoo2 the DLL loads
-but there is no pixel format, so a context can't be made.
-
-**Phase 5: breadth.**
-
-- 32-bit installers (InstallShield 5's 32-bit engine, Wise) and
-  unpacking installer archives (see "Installing games").
-- Windows 98 as a version setting, and DirectX 6.1's additions
-  (DirectMusic).
-- Game profiles that pick the layer.
-- The Wine leaf DLL experiment from above.
-
-The archive readers, `rust-dos unpack` and the profiles' `windows=`,
-`[install]` and `.reg` are in "Installing games"; the setup programs
-that ran to a finished install, and what differed from the same
-install on Windows 98 SE, in "Setup programs that ran"; the Wine DLLs
-that ran as guest code in "Wine's DLLs as guest code".
-
-COMCTL32 is Windows 95's version 4.70, its functions exported at their
-ordinals, for launchers and setup programs: image lists, DPAs and DSAs,
-MRU lists, and the progress bar, up-down control, trackbar, status bar,
-tooltips, toolbar, header, list view, tree view, tab control and
-property sheets with wizards, ported from Wine 1.2.3. The animation,
-hot key and ComboBoxEx classes draw their background and nothing else,
-and the date and time picker, month calendar, rebar and IP address
-controls aren't there. Functions of later versions (SetWindowSubclass,
-the DPA stream functions) are left out, and the controls take their A
-messages, the list view and toolbar some W ones too.
-
-COMDLG32 has GetOpenFileNameA and GetSaveFileNameA, which list the
-folders and files of the emulated drives: in the Explorer style, or in
-the old style when a program asks for multiple selection, a hook or a
-template without OFN_EXPLORER. The Explorer-style dialog's view is an
-owner-drawn list box. A hook that asks the dialog for its IShellBrowser
-gets one that gives the dialog's windows and fails the rest with
-E_NOTIMPL, and the dialogs don't take OFN_ENABLESIZING. GetFileTitleA
-and CommDlgExtendedError are there too. ChooseColorA, ChooseFontA,
-PrintDlgA and PageSetupDlgA return FALSE with no error, which is what
-they return when the user presses Cancel, so the colour, font and print
-dialogs never show. The W functions fail with
-ERROR_CALL_NOT_IMPLEMENTED, and FindTextA and ReplaceTextA make no
-window.
-
-WinHelpA (and Win16 WinHelp, which goes to it) opens a help viewer in
-place of WINHELP.EXE. It reads Windows 3.0 and 3.1 .HLP files with a
-parser ported from Wine's winhlp32 (user32/winhelp/hlpfile.rs), shows
-the contents topic or the one HELP_CONTEXT names, draws the text in its
-fonts with its pictures, and follows jumps and popups, with Contents,
-Back and the browse buttons. HELP_CONTEXTPOPUP, and HELP_WM_HELP for a
-control the program's list names, show their topic in a popup, at the
-point HELP_SETPOPUP_POS gave or at the mouse. It has no Search, History
-window or bookmarks, runs no help macros (HELP_COMMAND does nothing),
-shows the contents for HELP_CONTEXTMENU instead of its What's This?
-menu, doesn't follow jumps into other help files, and lays tables out
-one cell after another. Save states leave the viewer out: one open when
-a state is saved is an empty window after loading.
-
-For setup programs, SHELL32 has shell links (CLSID_ShellLink with
-IShellLinkA and IPersistFile, reading and writing `.lnk` files as
-Windows does), SHFileOperationA, the special folders laid out as
-Windows 95 has them and made when first asked for, item id lists,
-ShellExecuteA and ShellExecuteExA (programs, documents by the types
-the registry gives their extensions, folders, URLs by their scheme's
-key) and SHBrowseForFolderA as a dialog with a list of folders.
-Program Manager's DDE server, which setup programs make their program
-groups through, is built in, as Explorer answered for it: a group is a
-folder under the Start menu's Programs, an item a shell link in it.
-DDEML in USER32 talks to that server alone, as no program can be a
-DDE server or client of another yet. Setup programs that send raw DDE
-messages instead (the Microsoft Setup Toolkit, 16-bit InstallShield)
-reach it through a hidden window of class Progman, made at the first
-WM_DDE_INITIATE broadcast or the first FindWindow for its class or its
-title, which answers INITIATE for PROGMAN, EXECUTE, REQUEST for the
-groups and TERMINATE, with Windows 3.1's lParam for 16-bit programs
-and PackDDElParam's for 32-bit ones. VERSION.DLL reads version
-resources and installs files with VerFindFileA and VerInstallFileA,
-and LZ32 and KERNEL32 expand files that COMPRESS.EXE packed. OLE32
-creates objects from the class objects programs register, from the
-in-process servers the registry names and from the built-in classes;
-it keeps CoInitialize's rules for apartments, maps ProgIDs to CLSIDs
-and back, and marshals an interface between threads of one process as
-its pointer. OLEAUT32 has BSTRs, and ADVPACK the three functions setup
-programs ask before they install (IsNTAdmin, NeedReboot and
-NeedRebootInit). Structured storage (compound files) is left for a
-program that needs it.
-
-`win32_version` picks Windows 95, 98 or 98 SE, and DirectMusic is
-there under each (see "Sound and input"). Its classes are
-apartment-threaded, as on Windows 98 SE, where a thread of the
-multithreaded apartment gets them only as IUnknown: Wine's DirectMusic
-tests ask for them that way or for DirectX 8's interfaces, so on the
-built-in Windows they skip, as they do on Windows 98 SE.
-
-Wine's tests cover the DLLs this phase adds, but not the installers, the
-archive readers or what Windows 98 does differently from 95, so those
-are tested in other ways (see "Testing").
-
-**Phase 6: Win16.**
-
-Windows 3.1 games, and Windows 95 games' 16-bit setup programs, without
-any Windows files. Today `os=win311` runs Windows 3.1 on the built-in
-DOS, but needs Windows 3.1's own files.
-
-- An NE loader: segments as LDT selectors, segment relocations, imports
-  by ordinal, resources (the parser shared with PE's), self-loading
-  applications.
-- KERNEL, USER, GDI, MMSYSTEM, KEYBOARD, SOUND, SHELL, COMMDLG, TOOLHELP
-  and WING as 16-bit stub modules, whose functions thunk to the 32-bit
-  implementations, as Windows 95's own 16-bit modules did.
-- Win16 tasks scheduled cooperatively under one lock (Win16Mutex), next
-  to the preemptive Win32 threads.
-- 16-bit DPMI calls (INT 31h) and DOS calls from Windows programs, which
-  the existing DPMI host and DOS already have.
-
-winevdm's scope (GPL-2.0, Wine's 16-bit DLLs) is the reference for what a
-complete layer needs.
-
-What the layer has (`src/win16/`, with the NE parser in `crates/ne`):
-
-- A Windows 3.1 program starts as a task of KRNL386.EXE, a Win32
-  process whose threads are the tasks. They share its LDT and global
-  heap, and run one at a time under the Win16 lock, giving it up when
-  they wait for messages.
-- KERNEL, USER, GDI, KEYBOARD, SOUND, SYSTEM, DISPLAY, WIN87EM,
-  TOOLHELP, SHELL, COMMDLG, MMSYSTEM, LZEXPAND, VER, WING and DDEML are
-  NE images made at start-up, of stubs that trap into Rust. Most
-  functions go on to the 32-bit function of the same name through a
-  thunk that converts handles, structures and 16:16 pointers. Window,
-  dialog, enumeration and font enumeration procedures are called back
-  through thunks the other way. A program's own DLLs, such as
-  VBRUN300.DLL, load from its folder.
-- KERNEL's global and local heaps are Windows 3.1's: selectors tiled
-  for huge blocks, moveable and discardable blocks, lock counts, local
-  heaps in any segment (LocalInit). Resources come from the NE file,
-  names from RT_NAMETABLE included, and AccessResource opens the file at
-  them.
-- INT 21h from a Windows program goes to DOS with its 16:16 pointers
-  translated, and INT 31h to a DPMI 0.9 host of the task's LDT: its
-  descriptors, DOS memory, interrupt vectors, real-mode calls and
-  linear memory. A descriptor that changes under a segment register is
-  loaded into it again, as Windows' host does.
-- Another INT n of a Windows program whose real-mode vector a program
-  or driver set, in conventional or upper memory, runs that handler in
-  real mode with the program's general registers and gives back the
-  registers and arithmetic flags it returns, as Windows reflects such
-  an interrupt to the virtual machine. Windows 98 Setup runs code of
-  its own in real mode this way, through INT 12h. The BIOS's own
-  handlers are called directly, and so are those of INT 10h, 13h, 15h,
-  25h, 26h, 33h and 4Bh, whose buffers Windows translates and the
-  layer doesn't. CLI and STI, which Windows' VMM virtualizes, go on
-  without effect.
-- DPMI's calls of real-mode code (INT 31h AX=0300h, 0301h and 0302h)
-  run it in real mode, as Windows' DPMI server runs it in the virtual
-  machine, through the same entry and return as the reflected
-  interrupts (`src/win32/realmode.rs`): the call structure's registers,
-  its SS:SP or the host's stack when that is 0:0, CX words of the
-  task's stack on top, and the registers and flags the code returns
-  written back. 0300h runs whatever the vector table has, a program's
-  handler or the BIOS's, with no vector kept back: the structure holds
-  real-mode segments, so there is nothing to translate. What both DPMI
-  hosts do for these calls is in `src/dpmi/realcall.rs`. Real-mode
-  callbacks (0303h, 0304h) call a task's procedure from real mode, on
-  the task's stack, and the calls nest. 0201h sets the real-mode
-  vector.
-- Windows 3.1 programs see version 3.95, Windows 95's, and not the
-  WS_EX_WINDOWEDGE style USER32 gives their windows.
-- KERNEL's GetDriveType asks DOS, as Windows 3.1's does, and so gives a
-  CD-ROM drive as DRIVE_REMOTE: Windows 3.1 has no DRIVE_CDROM. A
-  program finds its disc among the remote drives with MSCDEX's INT 2Fh
-  AX=150Bh.
-- A call of a function the built-in modules don't have yet stops the
-  program with a message that names it.
-- Flat thunks (`src/win16/flat.rs`): a Win32 DLL made with the thunk
-  compiler joins its 16-bit DLL with ThunkConnect32 and calls it through
-  QT_Thunk, as DirectX 5's DSETUP does. The Win32 process gets a task in
-  the Win16 process, which runs its 16-bit calls while the calling
-  thread waits, and MapLS and MapSL map pointers both ways by mapping
-  the same physical pages into the other process. 16-bit DLLs made for
-  Windows 4.0 get their DllEntryPoint called after LibMain. Calls the
-  other way, from 16-bit code to a Win32 DLL, fail with the error value
-  the thunk data gives.
-- Screen savers, Win16 or Win32: after WIN.INI's `[windows]`
-  `ScreenSaveTimeOut` seconds with no key or mouse input, with
-  `ScreenSaveActive=1`, USER sends the active window WM_SYSCOMMAND
-  SC_SCREENSAVE, and DefWindowProc starts SYSTEM.INI's `[boot]`
-  `SCRNSAVE.EXE` with /s, as Windows 3.1 does. USER reads the two settings
-  when it starts, as Windows does, and SystemParametersInfo's
-  SPI_SETSCREENSAVEACTIVE and SPI_SETSCREENSAVETIMEOUT change them, as games
-  do that keep the saver off while they run. The timer runs while the
-  desktop is on the screen. The prompt also starts a saver by its .SCR name
-  (`SCRANTIC.SCR /s`, or /c for its settings dialog), as a Windows program
-  under another extension; without the built-in Windows, COMMAND.COM runs no
-  .SCR.
-- Generic thunks (`src/win32/wow32.rs`): WOW32.DLL's WOWCallback16 and
-  WOWCallback16Ex call a 16-bit function on the process's task the same
-  way, and WOWGetVDMPointer maps a 16:16 address as MapSL does, for a
-  program that gets 16-bit functions with LoadLibrary16 and
-  GetProcAddress16, as SafeDisc 2's loader does. WOW32's 16-bit global
-  memory and handle functions aren't there yet.
-
-Games tried, all of which start and draw their windows: SkiFree,
-BrickBreaker II, Jewels, Klotz, Gems, Kloks, Hyperoid, Button Madness,
-Castle of the Winds, Kye, Mah Jongg, Missile Attack, Mother of All
-Battles, Runner, Squirmer, WinFire, WinRoids, WinG's STATIC sample, and
-two Visual Basic games with their runtimes, 3 Shuffles & A Draw (VB3)
-and Prairie Dog Hunt (VB2).
-
-Sierra's screen saver Johnny Castaway (Screen Antics) installs with its
-own setup. With `win32=true`, its `.SCR` runs from the prompt as
-`scrantic.scr /s`.
-
-Setup programs tried: the Microsoft Setup Toolkit's of the WinG SDK and
-the SimTower demo, and the InstallShield of the Lemmings demo. All three
-copy and expand their files. The WinG SDK's and the Lemmings demo's make
-their Program Manager groups through raw DDE messages, and the WinG
-SDK's setup finishes. The Lemmings demo's SETUP.EXE, which starts
-InstallShield, then waits for TOOLHELP's NotifyRegister to tell it the
-installer ended, which the built-in TOOLHELP doesn't do, so it stays
-running with no window.
-
-Some choices in the earlier phases keep this phase from having to rework
-them:
-
-- Window, GDI object and module handles are 16-bit values, as they were
-  on Windows 95, so 16- and 32-bit code share the same windows and
-  objects.
-- Selectors come from an LDT the process owns from phase 0, with room
-  for 16-bit segments.
-- The service trap is accepted in 16-bit code segments too.
-- Message queues and window procedures carry a flag for 16-bit
-  procedures, so messages can be translated between the two sizes.
-
-Phase 3 is where the layer starts running games people know, so phases 0
-to 2 should stay as small as the phase 3 games allow: implement what their
-traces call, not whole DLLs.
+A `.SCR` can also be run from the prompt by its name, for example
+`scrantic.scr /s`, with `win32=true`.
 
 ## Testing
 
@@ -964,7 +578,7 @@ traces call, not whole DLLs.
   releases and demos, with golden screen hashes. Determinism makes the
   hashes stable.
 - Comparisons with the same game on a booted Windows 95 image
-  (`C:\sources\win98` has the setup for that), using the debug server to
+  (a booted Windows 98 SE image has the setup for that), using the debug server to
   compare screens and the API trace to find where they part.
 - Wine's conformance tests (`dlls/*/tests/*.c`), in
   `tests/conformance/`. They are Win32 programs that check the API's
@@ -983,18 +597,15 @@ traces call, not whole DLLs.
   - A test file is copied once the built-in DLL has the functions it
     calls directly, so the set grows with the DLLs: twenty of
     kernel32's files, advapi32's `registry`, ten of msvcrt's, eleven of
-    user32's (`msg` and `win` among them), eight of gdi32's, and from
-    phase 3 four of ddraw's, six of dsound's, four of dinput's and seven
-    of winmm's (the folder's README lists them). Phase 4 adds ddraw's
-    `d3d` and `visual`, which test Direct3D. Phase 5 adds the DLLs that
-    setup programs use, all from the 1.2.3 tree: sixteen of comctl32's,
+    user32's (`msg` and `win` among them), eight of gdi32's, four of ddraw's, six of dsound's, four of dinput's and seven
+    of winmm's (the folder's README lists them). Ddraw's `d3d` and `visual` test Direct3D. The DLLs that setup programs use are all from the 1.2.3 tree: sixteen of comctl32's,
     comdlg32's `filedlg`, six of shell32's (`progman_dde` among them,
     for the program groups InstallShield 5 makes through DDE),
     version's `info` and `install`, lz32's `lzexpand_main`, and ole32's
     `compobj`, `hglobalstream` and `propvariant`; and DirectMusic's
     three, from the releases named above. D3D8.DLL brings all eight of
     d3d8's.
-  - Since phase 5 they run as Windows 98 SE (`win32_version=98se`), so
+  - They run as Windows 98 SE (`win32_version=98se`), so
     that the functions Windows 98 added are there for the tests that
     use them.
   - `tests/conformance_tests.rs` builds them with MinGW and runs each
@@ -1038,8 +649,7 @@ traces call, not whole DLLs.
   and a coded-literal stream pwexplode expanded to the same text. A
   game's own archive, compared entry by entry with what Unshield (or
   idecomp, for InstallShield 3) extracts, is the acceptance check. It
-  runs outside the repository, as the game suite does. In phase 5 it
-  covered, all files equal by SHA-1:
+  runs outside the repository, as the game suite does. It covered, all files equal by SHA-1:
   - Oni (Europe): three version 5 sets with `.hdr` files (data1, _sys1,
     _user1), 122 files, among them paths that hold one file per language
     and are read by group.
@@ -1254,7 +864,6 @@ The counts after this work, with the aliases and the functions above:
    (see "Video").
 2. **Installers and Win16**: installed folders with registry keys from
    the profile first, then 32-bit setup engines and unpacking in Rust
-   (see "Installing games"). Full Win16 is phase 6, with the earlier
-   phases keeping 16-bit handles and selectors ready for it.
-3. **Wine's DLLs**: an experiment after phase 3, limited to the DLLs at
+   (see "Installing games").
+3. **Wine's DLLs**: an experiment, limited to the DLLs at
    the edges, on a pinned version chosen by measuring its imports.
