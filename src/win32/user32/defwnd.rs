@@ -978,6 +978,10 @@ fn sys_command(cpu: &mut Cpu, hwnd: u32, wp: u32, lp: u32) -> Option<u32> {
         SC_MAXIMIZE => script(cpu, R_FIXED, 0, &[call("ShowWindow", &[hwnd, SW_MAXIMIZE])]),
         SC_RESTORE => script(cpu, R_FIXED, 0, &[call("ShowWindow", &[hwnd, SW_RESTORE])]),
         SC_CLOSE => script(cpu, R_FIXED, 0, &[send_call(hwnd, WM_CLOSE, 0, 0)]),
+        super::saver::SC_SCREENSAVE => {
+            super::saver::start(cpu);
+            Some(0)
+        }
         SC_VSCROLL | SC_HSCROLL => {
             let bar = (wp & 0xFFF0 == SC_VSCROLL) as u32;
             super::controls::scrollbar::track(cpu, &[hwnd, bar, lp])

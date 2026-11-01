@@ -462,7 +462,8 @@ impl Win32 {
     /// devices) or a thread's wait times out, in PIT ticks, for the bus's
     /// timer events.
     pub fn next_event(&self) -> Option<u64> {
-        let micros = [self.winmm.due, self.wait_due].into_iter().flatten().min()?;
+        let saver = Some(self.user.input.saver_due).filter(|&due| due != 0);
+        let micros = [self.winmm.due, self.wait_due, saver].into_iter().flatten().min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -512,6 +513,7 @@ pub fn timer(cpu: &mut Cpu) {
     let ticks = cpu.bus.clock.now_ticks();
     let w = &cpu.bus.win32;
     let others = w.winmm.due.is_some_and(|d| d <= now)
+        || user32::saver::due(w, now)
         || [w.dsound.due, w.winmm.wave.due]
             .into_iter()
             .flatten()
@@ -526,9 +528,11 @@ pub fn timer(cpu: &mut Cpu) {
     if !cpu.bus.win32.active() {
         cpu.bus.win32.dsound.due = None;
         cpu.bus.win32.winmm.wave.due = None;
+        cpu.bus.win32.user.input.saver_due = 0;
         cpu.bus.reschedule_timers();
         return;
     }
+    user32::saver::tick(cpu);
     let in_program = cpu.pe()
         && !cpu.v86()
         && cpu.cpl == 3
@@ -1104,6 +1108,11 @@ pub(crate) fn discard_process(cpu: &mut Cpu, pid: u32) {
 /// End the program because of `what` (where `ctx` says, if it was in the
 /// program), saying so on standard error.
 pub(crate) fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
+    fatal_with(cpu, what, ctx, FAILED);
+}
+
+/// `fatal`, with the exit code `code`.
+pub(crate) fn fatal_with(cpu: &mut Cpu, what: &str, ctx: Option<&Context>, code: u32) {
     let name = running(cpu).map_or(String::new(), |p| p.name.clone());
     let place = match ctx {
         Some(ctx) => format!(" at {:04X}:{:08X}", ctx.seg[Seg::CS as usize], ctx.eip),
@@ -1112,7 +1121,7 @@ pub(crate) fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
     let message = format!("{} ended: {}{}.", name, what, place);
     cpu.bus.log_string(&format!("[W32] {}", message));
     say(cpu, &message);
-    exit(cpu, FAILED);
+    exit(cpu, code);
 }
 
 /// The 32-bit value at `lin` in the running process's memory, read
