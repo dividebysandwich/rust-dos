@@ -124,15 +124,38 @@ pub fn read(cpu: &Cpu, system: u32, selector: u16) -> u64 {
     cpu.bus.read_32(at) as u64 | (cpu.bus.read_32(at + 4) as u64) << 32
 }
 
-/// Write the descriptor of `selector`. A data or stack segment register
-/// that holds it takes the new descriptor, as the DPMI host of Windows
-/// reloads them: VBRUN300 grows its DGROUP with GlobalReAlloc and moves
-/// SP past the old limit without loading SS again.
-pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
+/// Write the descriptor bits of `selector` and nothing else: no segment
+/// register changes. Used where Windows drops a selector without the
+/// DPMI free path (GlobalReAlloc shrinking its block).
+pub fn write_desc(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
     let at = entry_phys(system, selector);
     cpu.bus.write_32(at, desc as u32);
     cpu.bus.write_32(at + 4, (desc >> 32) as u32);
-    if desc & PRESENT == 0 || !cpu.pe() || cpu.v86() {
+}
+
+/// Write the descriptor of `selector`. A data or stack segment register
+/// that holds it takes the new descriptor, as the DPMI host of Windows
+/// reloads them: VBRUN300 grows its DGROUP with GlobalReAlloc and moves
+/// SP past the old limit without loading SS again. A descriptor of 0
+/// frees the selector, and the data segment registers that hold it are
+/// zeroed, as DPMI's function 0001h does and Windows does when it frees
+/// a block: Johnny Castaway's GlobalFree leaves the block's selector in
+/// ES, which its next function pushes and pops. A context saved before
+/// the free gets 0 for it when it is loaded (`system::load_context`).
+pub fn write(cpu: &mut Cpu, system: u32, selector: u16, desc: u64) {
+    write_desc(cpu, system, selector, desc);
+    if !cpu.pe() || cpu.v86() {
+        return;
+    }
+    if desc == 0 {
+        for seg in [Seg::ES, Seg::DS, Seg::FS, Seg::GS] {
+            if cpu.seg_cache(seg).selector | 3 == selector | 3 {
+                let _ = cpu.load_segment(seg, 0);
+            }
+        }
+        return;
+    }
+    if desc & PRESENT == 0 {
         return;
     }
     for seg in [Seg::ES, Seg::SS, Seg::DS, Seg::FS, Seg::GS] {
