@@ -1086,6 +1086,13 @@ impl Atapi {
     /// The drive's delays pass at once: `env.now` moves on to each of
     /// them, and is where the command ended when it returns.
     pub fn run_packet(&mut self, cdb: &[u8], out: &[u8], env: &mut Env) -> PacketOutcome {
+        // The timers that fell due between commands (a disc going in, the
+        // drive spinning up) run now. Nothing else runs them on a drive
+        // with no channel, and otherwise the drive would never get ready
+        // after a disc change.
+        while self.next_event().is_some_and(|at| at <= env.now) {
+            self.service(env);
+        }
         let mut data = Vec::new();
         let mut sent = 0;
         let mut issued = false;

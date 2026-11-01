@@ -117,17 +117,15 @@ const TARGETS: u8 = 2;
 /// The most a command transfers, a data block of the drive's.
 const MAX_TRANSFER: u32 = 0x1_0000;
 
-/// The state: the CD-ROM drive the commands go to, made on the first
-/// one, and the time of its last command (PIT ticks), which its delays
-/// moved on from the machine's.
+/// The state: the drive the commands go to, and the time of the last
+/// command (PIT ticks), which its delays moved on from the machine's.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     drive: Option<Atapi>,
-    target: u8,
     clock: u64,
 }
 
-crate::state_fields!(State { drive, target, clock });
+crate::state_fields!(State { drive, clock });
 
 /// GetASPI32SupportInfo(): the host adapters (bits 0-7) and SS_COMP
 /// (bits 8-15). With no CD-ROM drive there is no adapter, and ASPI
@@ -160,17 +158,17 @@ fn cd_drive(cpu: &mut Cpu) -> Option<(u8, u8)> {
     Some((drive, target))
 }
 
-/// The drive ASPI sends commands to, made on the first command with the
-/// disc standing still, as after the BIOS. None without a CD-ROM drive.
+/// The drive ASPI sends commands to. It is made on the first command, and
+/// again when `cd_drive` picks another CD-ROM drive (a disc moved), with
+/// the disc standing still, as after the BIOS. None without a CD-ROM drive.
 fn drive_state(cpu: &mut Cpu) -> Option<&mut State> {
-    if cpu.bus.win32.wnaspi32.drive.is_none() {
-        let (drive, target) = cd_drive(cpu)?;
-        let has_disc = cpu.bus.disk.boot_cd_image(drive).is_some();
-        let state = &mut cpu.bus.win32.wnaspi32;
+    let (drive, _) = cd_drive(cpu)?;
+    let has_disc = cpu.bus.disk.boot_cd_image(drive).is_some();
+    let state = &mut cpu.bus.win32.wnaspi32;
+    if state.drive.as_ref().is_none_or(|cd| cd.drive != drive) {
         state.drive = Some(Atapi::new(drive, has_disc));
-        state.target = target;
     }
-    Some(&mut cpu.bus.win32.wnaspi32)
+    Some(state)
 }
 
 /// The disc in `drive` changed: ASPI's drive reports it, as the one on a
@@ -213,7 +211,12 @@ fn send_aspi32_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         _ => SS_INVALID_CMD,
     };
     cpu.bus.guest_write_8(srb + 1, status);
-    if !matches!(cmd, SC_EXEC_SCSI_CMD | SC_RESET_DEV) {
+    // Only a command that reached the drive completes later on. A rejected
+    // one (no such target, a bad block) returns its error status and posts
+    // nothing.
+    let ran = matches!(cmd, SC_EXEC_SCSI_CMD | SC_RESET_DEV)
+        && matches!(status, SS_COMP | SS_ERR);
+    if !ran {
         return Some(status as u32);
     }
     // A command that runs on the drive completes as APIX does: the

@@ -460,3 +460,30 @@ fn a_packet_run_at_once_gives_what_the_channel_gives() {
         }
     }
 }
+
+#[test]
+fn a_packet_run_at_once_sees_a_disc_change_once_its_timers_have_run() {
+    // A disc goes in while the drive has no channel. Its timers run between
+    // commands, so the drive is ready for a read a minute later.
+    let (mut bus, _) = drive("run_packet_change");
+    let mut cd = rust_dos::ide::Atapi::new(3, true);
+    cd.media_changed(true, 0);
+    let mut env = rust_dos::ide::Env {
+        disks: &bus.disk,
+        player: &mut bus.cdaudio,
+        now: 0,
+        hard_disk_ns_per_sector: 0,
+        faked: false,
+        moved: 0,
+    };
+    let early = cd.run_packet(&read10(16, 1), &[], &mut env);
+    assert!(early.sense.is_some(), "the disc is still going in");
+    env.now = 60 * rust_dos::timer::PIT_HZ;
+    // The first command after the change reports it (MEDIUM MAY HAVE
+    // CHANGED, 28h), and the next one reads.
+    let changed = cd.run_packet(&read10(16, 1), &[], &mut env);
+    assert_eq!(changed.sense.map(|s| (s[2] & 0xF, s[12])), Some((2, 0x28)));
+    let later = cd.run_packet(&read10(16, 1), &[], &mut env);
+    assert_eq!(later.sense, None);
+    assert_eq!(later.data.len(), 2048);
+}
