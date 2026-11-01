@@ -1534,15 +1534,18 @@ pub fn lstrcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// the buffer holds the path. When it doesn't, it writes nothing and
 /// returns the length needed, NUL included.
 fn get_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The length is 16 bits: Wine's GetCurrentDirectory16 takes a UINT16
+    // and ignores the high word.
+    let size = args[0] & 0xFFFF;
     let drive = cpu.bus.disk.get_current_drive();
     // The path Win32's GetCurrentDirectoryA gives, in DOS's bytes.
     let path =
         crate::dosstr::to_bytes(&crate::win32::kernel32::path::current_directory(cpu, drive));
     let needed = path.len() as u32 + 1;
-    if args[0] < needed {
+    if size < needed {
         return Some(needed);
     }
-    copy_string(cpu, args[1], args[0], &path);
+    copy_string(cpu, args[1], size, &path);
     Some(path.len() as u32)
 }
 
