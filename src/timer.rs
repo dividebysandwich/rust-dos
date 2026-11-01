@@ -16,7 +16,7 @@ use crate::video::crt::CrtTiming;
 use std::time::Duration;
 use web_time::Instant;
 
-pub use rust_dos_audio_core::PIT_HZ;
+pub use rust_dos_audio_core::{PIT_HZ, mul_div, mul_div_ceil};
 
 /// Emulated milliseconds per host video frame.
 const FRAME: Duration = Duration::from_micros(16_667);
@@ -68,27 +68,6 @@ pub const IO_WRITE_NS: u64 = 750;
 
 fn duration_to_ticks(d: Duration) -> u64 {
     (d.as_nanos() * PIT_HZ as u128 / 1_000_000_000) as u64
-}
-
-/// `a * b / c`, as with 128-bit numbers (the quotient cut to 64 bits), but
-/// in 64 where the product fits: a 128-bit division is a call of a
-/// library function on 64-bit hosts, and the clock works these out at
-/// every port access.
-#[inline]
-pub fn mul_div(a: u64, b: u64, c: u64) -> u64 {
-    match a.checked_mul(b) {
-        Some(p) => p / c,
-        None => (a as u128 * b as u128 / c as u128) as u64,
-    }
-}
-
-/// `a * b / c` rounded up, as `mul_div`, saturating at `u64::MAX`.
-#[inline]
-pub fn mul_div_ceil(a: u64, b: u64, c: u64) -> u64 {
-    match a.checked_mul(b) {
-        Some(p) => p.div_ceil(c),
-        None => (a as u128 * b as u128).div_ceil(c as u128).min(u64::MAX as u128) as u64,
-    }
 }
 
 fn ticks_to_duration(ticks: u64) -> Duration {
