@@ -2057,6 +2057,29 @@ mod tests {
         assert_eq!(replies, &vec![(1, 9), (2, 0)]);
     }
 
+    /// A callback that another thread sent (SendMessageCallbackA) is a sent
+    /// message, so InSendMessage is TRUE while its window procedure runs,
+    /// as MSDN describes InSendMessage. The callback itself runs after it,
+    /// when the reply is finished, and InSendMessage is FALSE again.
+    #[test]
+    fn a_cross_thread_callback_message_is_in_send() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let me = current_tid(&cpu);
+        let sent = Sent {
+            id: 1,
+            from: 7,
+            hwnd: 0x418,
+            kind: 2,
+            callback: (0x1000, 0x2000),
+            ..Sent::default()
+        };
+        user(&mut cpu).queue_mut(me).sent.push_back(sent);
+        assert!(handle_sent(&mut cpu, 1).is_some());
+        assert_eq!(in_send_message(&mut cpu, &[]), Some(TRUE));
+        finish_sent(&mut cpu, 2);
+        assert_eq!(in_send_message(&mut cpu, &[]), Some(FALSE));
+    }
+
     /// GetQueueStatus and GetInputState see a move the mouse made since
     /// the devices were last read, as a program asks before it peeks.
     #[test]
