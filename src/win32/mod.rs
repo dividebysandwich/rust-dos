@@ -37,6 +37,7 @@ mod lz32;
 mod mapping;
 pub(crate) mod memory;
 mod mpr;
+mod msacm32;
 mod msimg32;
 mod msvcrt;
 mod ntdll;

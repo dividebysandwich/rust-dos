@@ -642,6 +642,41 @@ fn finds_msimg32() -> Vec<u8> {
     })
 }
 
+/// A program that ends with what acmMetrics says the largest wave
+/// format is, as Test Drive 4 asks it, plus 100 if acmStreamOpen fails
+/// with ACMERR_NOTPOSSIBLE, as no codec can convert anything.
+fn asks_msacm32() -> Vec<u8> {
+    const ACM_METRIC_MAX_SIZE_FORMAT: i32 = 50;
+    const ACMERR_NOTPOSSIBLE: i32 = 512;
+    let imports: &[(&str, &[&str])] = &[("MSACM32.DLL", &["acmMetrics", "acmStreamOpen"])];
+    program(imports, &[0u8; 0x10], |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.push(ACM_METRIC_MAX_SIZE_FORMAT)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, dword_ptr(l.at(0)))?;
+        a.test(eax, eax)?;
+        let mut done = a.create_label();
+        a.jnz(done)?;
+        for _ in 0..8 {
+            a.push(0)?;
+        }
+        a.call(l.import(1))?;
+        a.cmp(eax, ACMERR_NOTPOSSIBLE)?;
+        a.jne(done)?;
+        a.add(ebx, 100)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn msacm32_answers_without_codecs() {
+    assert_eq!(run(Win98Se, "msacm32", asks_msacm32()).0, 150);
+    assert_eq!(run(Win95, "msacm32", asks_msacm32()).0, 150);
+}
+
 #[test]
 fn msimg32_dll_comes_with_windows_98() {
     assert_eq!(run(Win95, "msimg32", finds_msimg32()).0, 0);

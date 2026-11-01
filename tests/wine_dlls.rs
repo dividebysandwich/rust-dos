@@ -39,6 +39,8 @@ fn run(dir: &Path, name: &str, dlls: &Path) -> (String, Option<u8>) {
     cpu.model = CpuModel::PentiumII;
     cpu.bus.win32.enabled = true;
     cpu.bus.win32.guest_dlls = Some(dlls.to_path_buf());
+    // The built-in MSACM32.DLL has no codecs.
+    cpu.bus.win32.guest_replace = vec!["msacm32".to_string()];
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable(name, None), "{} didn't load", name);
