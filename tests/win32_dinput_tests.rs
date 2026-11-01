@@ -38,6 +38,9 @@ const DIPROP_SCANCODE: u32 = 23;
 const DIPROP_USERNAME: u32 = 25;
 const DIPH_DEVICE: u32 = 0;
 const DIPH_BYOFFSET: u32 = 1;
+const DIPH_BYUSAGE: u32 = 3;
+const DIERR_UNSUPPORTED: u32 = 0x8000_4001;
+const CLSCTX_INPROC_SERVER: i32 = 1;
 
 /// IDirectInputA's and IDirectInputDeviceA's methods, by their place in
 /// the vtables.
@@ -45,6 +48,7 @@ const CREATE_DEVICE: u32 = 3;
 const GET_PROPERTY: u32 = 5;
 const SET_PROPERTY: u32 = 6;
 const ACQUIRE: u32 = 7;
+const DI_INITIALIZE: u32 = 7;
 const GET_DEVICE_STATE: u32 = 9;
 const GET_DEVICE_DATA: u32 = 10;
 const SET_DATA_FORMAT: u32 = 11;
@@ -57,7 +61,7 @@ const GO: u32 = 4;
 const DI: u32 = 8;
 const DEVICE: u32 = 12;
 const RESULTS: u32 = 16;
-const COUNT: u32 = 64;
+const COUNT: u32 = 0x80;
 const STATE: u32 = 0x100;
 const EVENTS: u32 = 0x200;
 /// Room for this many DIDEVICEOBJECTDATA.
@@ -140,28 +144,36 @@ struct Setup {
     /// The properties it reads after setting those, into the structures
     /// at these places in the data.
     queries: Vec<(u32, u32)>,
-    /// DirectInput 8 through DINPUT8's DirectInput8Create, with the
-    /// IID_IDirectInput8A at this place in the data; DINPUT's
-    /// DirectInputCreateA, version 500h, without.
-    eight: Option<u32>,
+    /// DirectInput 8 instead of DINPUT's DirectInputCreateA, version 500h.
+    eight: Option<Eight>,
 }
 
-/// The program: DirectInputCreateA (or DirectInput8Create), CreateDevice,
-/// SetDataFormat, SetCooperativeLevel (background, nonexclusive, without
-/// a window), the properties to set and to read, Acquire, then the waits
-/// and the reads described at the top. Each call's result goes to
-/// `RESULTS` in turn. DirectInput 8 reads its buffered data with
-/// DirectX 8's DIDEVICEOBJECTDATA, which has uAppData. The image, and
-/// its data's address.
+/// How a program makes DirectInput 8's object: the places in the data of
+/// IID_IDirectInput8A and, for CoCreateInstance and Initialize instead of
+/// DirectInput8Create, of CLSID_DirectInput8.
+struct Eight {
+    iid: u32,
+    class: Option<u32>,
+}
+
+/// The program: DirectInputCreateA, DirectInput8Create, or
+/// CoCreateInstance and Initialize; CreateDevice, SetDataFormat,
+/// SetCooperativeLevel (background, nonexclusive, without a window), the
+/// properties to set and to read, Acquire, then the waits and the reads
+/// described at the top. Each call's result goes to `RESULTS` in turn.
+/// DirectInput 8 reads its buffered data with DirectX 8's
+/// DIDEVICEOBJECTDATA, which has uAppData. The image, and its data's
+/// address.
 fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
     let kernel32: &[&str] = &["GetModuleHandleA", "Sleep", "ExitProcess"];
-    let (dll, create): (&str, &str) = match setup.eight {
-        Some(_) => ("DINPUT8.dll", "DirectInput8Create"),
-        None => ("DINPUT.dll", "DirectInputCreateA"),
+    let (dll, creates): (&str, &[&str]) = match &setup.eight {
+        Some(Eight { class: Some(_), .. }) => ("OLE32.dll", &["CoCreateInstance", "CoInitialize"]),
+        Some(_) => ("DINPUT8.dll", &["DirectInput8Create"]),
+        None => ("DINPUT.dll", &["DirectInputCreateA"]),
     };
     let mut b = Builder::exe(BASE);
     let lists: Vec<Imp> = kernel32.iter().map(|n| Imp::Name(n)).collect();
-    let dlists = [Imp::Name(create)];
+    let dlists: Vec<Imp> = creates.iter().map(|n| Imp::Name(n)).collect();
     let iat = b
         .imports(&[("KERNEL32.dll", &lists), (dll, &dlists)])
         .concat();
@@ -184,20 +196,6 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
             results += 1;
             a.mov(dword_ptr(at(slot)), eax)
         };
-        a.push(0)?;
-        a.call(dword_ptr(iat[0] as u64))?;
-        a.push(0)?;
-        a.push(at(DI) as i32)?;
-        match setup.eight {
-            Some(iid) => {
-                a.push(at(iid) as i32)?;
-                a.push(0x800)?;
-            }
-            None => a.push(0x500)?,
-        }
-        a.push(eax)?;
-        a.call(dword_ptr(iat[3] as u64))?;
-        result(&mut a)?;
         let method = |a: &mut CodeAssembler, object: u32, index: u32, args: &[Arg]| {
             for arg in args.iter().rev() {
                 match *arg {
@@ -210,6 +208,40 @@ fn program(data: &Data, setup: &Setup) -> (Vec<u8>, u32) {
             a.mov(ecx, dword_ptr(eax))?;
             a.call(dword_ptr(ecx + 4 * index))
         };
+        a.push(0)?;
+        a.call(dword_ptr(iat[0] as u64))?;
+        match &setup.eight {
+            Some(Eight {
+                iid,
+                class: Some(clsid),
+            }) => {
+                a.push(0)?;
+                a.call(dword_ptr(iat[4] as u64))?;
+                a.push(at(DI) as i32)?;
+                a.push(at(*iid) as i32)?;
+                a.push(CLSCTX_INPROC_SERVER)?;
+                a.push(0)?;
+                a.push(at(*clsid) as i32)?;
+                a.call(dword_ptr(iat[3] as u64))?;
+                result(&mut a)?;
+                let args = [Arg::I(BASE), Arg::I(0x800)];
+                method(&mut a, DI, DI_INITIALIZE, &args)?;
+            }
+            eight => {
+                a.push(0)?;
+                a.push(at(DI) as i32)?;
+                match eight {
+                    Some(e) => {
+                        a.push(at(e.iid) as i32)?;
+                        a.push(0x800)?;
+                    }
+                    None => a.push(0x500)?,
+                }
+                a.push(eax)?;
+                a.call(dword_ptr(iat[3] as u64))?;
+            }
+        }
+        result(&mut a)?;
         let args = [Arg::At(setup.guid), Arg::At(DEVICE), Arg::I(0)];
         method(&mut a, DI, CREATE_DEVICE, &args)?;
         result(&mut a)?;
@@ -469,18 +501,31 @@ fn the_keyboard_gives_its_keys_as_state_and_buffered_data() {
     assert!(r.events[0].3 < r.events[1].3 && r.events[1].3 < r.events[2].3);
 }
 
-#[test]
-fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
-    let mut d = Data::new();
-    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
-    // IID_IDirectInput8A, {BF798030-483A-4DA2-AA99-5D64ED369700}.
+/// Add IID_IDirectInput8A, {BF798030-483A-4DA2-AA99-5D64ED369700}.
+fn iid_8(d: &mut Data) -> u32 {
     let mut iid = 0xBF79_8030u32.to_le_bytes().to_vec();
     iid.extend(0x483Au16.to_le_bytes());
     iid.extend(0x4DA2u16.to_le_bytes());
     iid.extend([0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00]);
-    let iid = d.add(&iid);
+    d.add(&iid)
+}
+
+/// Add a data format with all 256 keys.
+fn key_format(d: &mut Data) -> u32 {
+    let keys: Vec<(Option<u32>, u32, u32)> = (0..256)
+        .map(|i| (None, i, DIDFT_OPTIONAL | DIDFT_BUTTON | i << 8))
+        .collect();
+    d.format(0, 256, &keys)
+}
+
+#[test]
+fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
+    let mut d = Data::new();
+    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
+    let iid = iid_8(&mut d);
     // DIPROPSTRING and DIPROPDWORD of the left arrow (DIK_LEFT, CBh),
-    // DIPROPSTRING of the device, and DIPROPPOINTER of A (DIK_A, 1Eh).
+    // DIPROPSTRING of the device, DIPROPPOINTER of A (DIK_A, 1Eh), and
+    // the same by HID usage, which a device that isn't HID doesn't take.
     // They go before the data format, in the data's first page.
     let mut string = words(&[16 + 520, 16, 0xCB, DIPH_BYOFFSET]);
     string.resize(16 + 520, 0);
@@ -490,10 +535,8 @@ fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
     string[16..18].copy_from_slice(b"x\0");
     let user_name = d.add(&string);
     let app_data = d.add(&words(&[20, 16, 0x1E, DIPH_BYOFFSET, 7]));
-    let keys: Vec<(Option<u32>, u32, u32)> = (0..256)
-        .map(|i| (None, i, DIDFT_OPTIONAL | DIDFT_BUTTON | i << 8))
-        .collect();
-    let format = d.format(0, 256, &keys);
+    let by_usage = d.add(&words(&[20, 16, 0x1E, DIPH_BYUSAGE, 0]));
+    let format = key_format(&mut d);
     let buffer = d.add(&words(&[20, 16, 0, 0, EVENT_ROOM]));
     let setup = Setup {
         guid,
@@ -504,8 +547,9 @@ fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
             (DIPROP_KEYNAME, key_name),
             (DIPROP_SCANCODE, scan_code),
             (DIPROP_USERNAME, user_name),
+            (DIPROP_APPDATA, by_usage),
         ],
-        eight: Some(iid),
+        eight: Some(Eight { iid, class: None }),
     };
     let (image, data) = program(&d, &setup);
     let mut cpu = machine("keyboard-8", image);
@@ -514,10 +558,11 @@ fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
     keyboard(&mut cpu, 0x1E, false, true);
     keyboard(&mut cpu, 0x1E, false, false);
     keyboard(&mut cpu, 0x4B, true, true);
-    let r = read_sized(&mut cpu, data, 12, 256, 20);
+    let r = read_sized(&mut cpu, data, 13, 256, 20);
     // DI_NOEFFECT for DIPROP_USERNAME: no user has the device.
-    let mut results = [0; 12];
+    let mut results = [0; 13];
     results[8] = 1;
+    results[9] = DIERR_UNSUPPORTED;
     assert_eq!(r.results, results, "{:x?}", r.results);
     assert_eq!(r.state[0xCB], 0x80);
     assert_eq!(r.state.iter().filter(|&&b| b != 0).count(), 1);
@@ -538,6 +583,71 @@ fn directinput_8_reads_the_keyboard_as_earlier_versions_do() {
     assert_eq!(text(key_name), "Left");
     assert_eq!(text(user_name), "");
     assert_eq!(word(&cpu, data, scan_code + 16), 0x4BE0);
+}
+
+#[test]
+fn directinput_8_is_made_by_its_class_as_well() {
+    let mut d = Data::new();
+    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
+    let iid = iid_8(&mut d);
+    let clsid = d.guid(0x25E6_09E4, 0xB259, 0x11CF);
+    let format = key_format(&mut d);
+    let buffer = d.add(&words(&[20, 16, 0, 0, EVENT_ROOM]));
+    let setup = Setup {
+        guid,
+        format,
+        state_size: 256,
+        properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        queries: Vec::new(),
+        eight: Some(Eight {
+            iid,
+            class: Some(clsid),
+        }),
+    };
+    let (image, data) = program(&d, &setup);
+    let mut cpu = machine("keyboard-class", image);
+    let data = started(&mut cpu, data);
+    until_ready(&mut cpu, data, 1);
+    keyboard(&mut cpu, 0x1E, false, true);
+    let r = read_sized(&mut cpu, data, 9, 256, 20);
+    assert_eq!(r.results, [0; 9], "{:x?}", r.results);
+    assert_eq!(r.state[0x1E], 0x80);
+    let got: Vec<(u32, u32)> = r.events.iter().map(|e| (e.0, e.1)).collect();
+    assert_eq!(got, [(0x1E, 0x80)]);
+    assert_eq!(r.app_data, [u32::MAX]);
+}
+
+#[test]
+fn earlier_versions_do_not_take_the_properties_of_directinput_8() {
+    let mut d = Data::new();
+    let guid = d.guid(0x6F1D_2B61, 0xD5A0, 0x11CF);
+    let mut string = words(&[16 + 520, 16, 0x1E, DIPH_BYOFFSET]);
+    string.resize(16 + 520, 0);
+    let key_name = d.add(&string);
+    let scan_code = d.add(&words(&[20, 16, 0x1E, DIPH_BYOFFSET, 0]));
+    let app_data = d.add(&words(&[20, 16, 0x1E, DIPH_BYOFFSET, 0]));
+    let format = key_format(&mut d);
+    let buffer = d.add(&words(&[20, 16, 0, 0, EVENT_ROOM]));
+    let setup = Setup {
+        guid,
+        format,
+        state_size: 256,
+        properties: vec![(DIPROP_BUFFERSIZE, buffer)],
+        queries: vec![
+            (DIPROP_KEYNAME, key_name),
+            (DIPROP_SCANCODE, scan_code),
+            (DIPROP_APPDATA, app_data),
+        ],
+        eight: None,
+    };
+    let (image, data) = program(&d, &setup);
+    let mut cpu = machine("keyboard-no-8", image);
+    let data = started(&mut cpu, data);
+    until_ready(&mut cpu, data, 1);
+    let r = read(&mut cpu, data, 11, 256);
+    let mut results = [0; 11];
+    results[5..8].fill(DIERR_UNSUPPORTED);
+    assert_eq!(r.results, results, "{:x?}", r.results);
 }
 
 #[test]

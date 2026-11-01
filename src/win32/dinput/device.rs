@@ -102,6 +102,7 @@ const DIPROP_TYPENAME: u32 = 26;
 const DIPH_DEVICE: u32 = 0;
 const DIPH_BYOFFSET: u32 = 1;
 const DIPH_BYID: u32 = 2;
+const DIPH_BYUSAGE: u32 = 3;
 
 const DIPROPRANGE_NOMIN: u32 = 0x8000_0000;
 const DIPROPRANGE_NOMAX: u32 = 0x7FFF_FFFF;
@@ -485,6 +486,8 @@ fn header(cpu: &mut Cpu, id: u32, at: u32, size: u32) -> Result<Target, u32> {
         DIPH_BYID => find_by_id(&d.objects(), obj)
             .map(Target::Object)
             .ok_or(DIERR_NOTFOUND),
+        // Usages are HID's, and the emulated devices aren't HID devices.
+        DIPH_BYUSAGE => Err(DIERR_UNSUPPORTED),
         _ => Err(DIERR_INVALIDPARAM),
     }
 }
@@ -539,12 +542,6 @@ fn size_8(prop: u32) -> Option<u32> {
     }
 }
 
-/// Whether the device `id` was made for DirectInput 8, whose properties
-/// it then takes.
-fn takes_8(cpu: &mut Cpu, id: u32) -> bool {
-    version_of(cpu, id) >= 0x800
-}
-
 /// GetProperty(guid, header).
 pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, guid, at) = (args[0], args[1], args[2]);
@@ -555,7 +552,7 @@ pub fn get_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             DIPROP_RANGE => PROP_RANGE,
             DIPROP_INSTANCENAME | DIPROP_PRODUCTNAME => PROP_STRING,
             DIPROP_BUFFERSIZE..=DIPROP_CALIBRATIONMODE | DIPROP_JOYSTICKID => PROP_DWORD,
-            _ if takes_8(cpu, id) => size_8(prop).ok_or(DIERR_UNSUPPORTED)?,
+            _ if is_eight(cpu, id) => size_8(prop).ok_or(DIERR_UNSUPPORTED)?,
             _ => return Err(DIERR_UNSUPPORTED),
         };
         let target = header(cpu, id, at, size)?;
@@ -652,7 +649,7 @@ pub fn set_property(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let size = match prop {
             DIPROP_RANGE => PROP_RANGE,
             DIPROP_BUFFERSIZE..=DIPROP_CALIBRATIONMODE => PROP_DWORD,
-            _ if takes_8(cpu, id) => size_8(prop).ok_or(DIERR_UNSUPPORTED)?,
+            _ if is_eight(cpu, id) => size_8(prop).ok_or(DIERR_UNSUPPORTED)?,
             _ => return Err(DIERR_UNSUPPORTED),
         };
         let target = header(cpu, id, at, size)?;
@@ -1097,6 +1094,7 @@ pub fn get_object_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let k = match how {
             DIPH_BYOFFSET => d.format.as_ref().and_then(|f| f.object_at(obj)),
             DIPH_BYID => find_by_id(&objs, obj),
+            DIPH_BYUSAGE => return Err(DIERR_UNSUPPORTED),
             _ => return Err(DIERR_INVALIDPARAM),
         }
         .ok_or(DIERR_NOTFOUND)?;

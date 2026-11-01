@@ -6,7 +6,9 @@
 
 use super::device::dev;
 use super::objects::{self, Obj};
-use super::{DI_OK, DIERR_INVALIDPARAM, DIERR_NOTINITIALIZED, initialized, result, state};
+use super::{
+    DI_OK, DIERR_INVALIDPARAM, DIERR_NOTINITIALIZED, initialized, is_eight, result, state,
+};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 
@@ -47,8 +49,8 @@ const DIEDFL_INCLUDEHIDDEN: u32 = 0x4_0000;
 pub fn enum_devices(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, ty, callback, reference, flags) = (args[0], args[1], args[2], args[3], args[4]);
     let r = (|| {
-        let (_, version) = initialized(cpu, this)?;
-        let eight = version >= 0x800;
+        let (id, version) = initialized(cpu, this)?;
+        let eight = is_eight(cpu, id);
         let mut known = DIEDFL_ATTACHEDONLY
             | DIEDFL_FORCEFEEDBACK
             | DIEDFL_INCLUDEALIASES
