@@ -369,7 +369,8 @@ impl Mark {
 struct Record {
     fps: f64,
     /// The least speed known to draw it: a step down that keeps it takes
-    /// this along.
+    /// this along. From a step past the host's estimate, that estimate: the
+    /// speed itself is one the host can't go back to (see `Step::Overshot`).
     at: u32,
     /// The steps taken above the speed it was missed at.
     climbed: u32,
@@ -407,7 +408,9 @@ enum Step {
     /// The last step up gained nothing: the speed stays while it measures
     /// what the frame rate is with all it could want, for the record.
     /// `below` is as in `Raised`. The frame rates measured here so far add
-    /// up to `sum`, `seen` of them.
+    /// up to `sum`, `seen` of them. A step that ended above the host's
+    /// estimate doesn't stay: Myth's 142,000 reads a host of 129,000 at once
+    /// and 90,000 after that, at 0.9 of real time with the sound running dry.
     Overshot {
         below: (u32, f64),
         sum: f64,
@@ -854,6 +857,25 @@ impl AutoSpeed {
             };
             clamp(c / FINE_STEP)
         };
+        // The step up gained nothing, and `fps` is what the program draws
+        // with all it could want: the frame rate to keep, or the reckoning
+        // stays under it when more speed still gains a little (Myth, whose
+        // frames also wait for the card). Reckon from the speed before the
+        // step, and check the reckoning with a small step up once `JUDGED`
+        // measurements are in (frame rates that grow in jumps make it too
+        // low).
+        let overshot = |this: &mut Self, below: (u32, f64), fps: f64| {
+            if !lagged && this.held.is_none_or(|r| fps >= r.fps) {
+                this.held = Some(Record {
+                    fps,
+                    at: current.min(top),
+                    climbed: 0,
+                });
+            }
+            let (low, low_fps) = (below.0 as f64, below.1);
+            let knee = (low * fps / low_fps).clamp(low, c);
+            hold(this, knee * HEADROOM, JUDGED, true)
+        };
         let here = (current, fps);
         match self.step {
             Step::Start => up(self, FIRST_STEP, here),
@@ -864,13 +886,12 @@ impl AutoSpeed {
                     // A small step that gained nothing: where it came
                     // from was enough.
                     hold(self, from as f64, HOLD_WINDOWS, false)
+                } else if current > top {
+                    overshot(self, below, fps)
                 } else {
-                    // A big step may have gone past the point already. What
-                    // the program draws here is the frame rate to keep, or
-                    // the reckoning below stays under it when more speed
-                    // still gains a little (Myth, whose frames also wait
-                    // for the card). This measurement is the first after a
-                    // change of speed, so it is the mean of two.
+                    // A big step may have gone past the point already. This
+                    // measurement is the first after a change of speed, so
+                    // it is the mean of two.
                     self.step = Step::Overshot {
                         below,
                         sum: fps * 2.0,
@@ -879,29 +900,15 @@ impl AutoSpeed {
                     current
                 }
             }
-            Step::Overshot { below, sum, seen } => {
+            Step::Overshot { below, sum, seen } if current > below.0 => {
                 let (sum, seen) = (sum + fps, seen + 1);
-                // Not at a speed the host doesn't keep up with: the sound
-                // runs dry there (Myth at 142,000), and what it measured
-                // so far has to do.
-                if seen < JUDGED && m.pace >= KEPT_UP {
+                // Not at a speed the host stopped keeping up with, or says
+                // it won't: what it measured so far has to do.
+                if seen < JUDGED && m.pace >= KEPT_UP && current <= top {
                     self.step = Step::Overshot { below, sum, seen };
                     return current;
                 }
-                let fps = sum / seen as f64;
-                if !lagged && self.held.is_none_or(|r| fps >= r.fps) {
-                    self.held = Some(Record {
-                        fps,
-                        at: current,
-                        climbed: 0,
-                    });
-                }
-                // Reckon from the speed before the step, and check the
-                // reckoning with a small step up once `JUDGED` measurements
-                // are in (frame rates that grow in jumps make it too low).
-                let (low, low_fps) = (below.0 as f64, below.1);
-                let knee = (low * fps / low_fps).clamp(low, c);
-                hold(self, knee * HEADROOM, JUDGED, true)
+                overshot(self, below, sum / seen as f64)
             }
             Step::Lowered {
                 from,
@@ -1034,7 +1041,9 @@ impl AutoSpeed {
                 }
             }
             // The speed changed from elsewhere: measure from here.
-            Step::Raised { .. } | Step::Lowered { .. } => up(self, FIRST_STEP, here),
+            Step::Raised { .. } | Step::Overshot { .. } | Step::Lowered { .. } => {
+                up(self, FIRST_STEP, here)
+            }
         }
     }
 }
@@ -1595,6 +1604,81 @@ mod tests {
         assert!(record * KEPT < 34.9, "{}: {:?}", record, speeds);
         assert!(speeds.iter().all(|&s| s <= top), "{:?}", speeds);
         assert!(speeds[100..].iter().all(|&s| s <= 95_000), "{:?}", speeds);
+    }
+
+    /// Past the host's estimate, as Myth's step to 142,000 is: 28.7 frames
+    /// a second at 68,000, and 30 at the step.
+    fn past_the_estimate(host: u32) -> (AutoSpeed, u32) {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 68_000,
+            fps: 28.7,
+            below: (34_000, 28.7),
+        };
+        let speed = auto.decide(142_000, &myth_at(30.0), true, host);
+        (auto, speed)
+    }
+
+    fn myth_at(fps: f64) -> Measurement {
+        Measurement {
+            fps: Some(fps),
+            ..STILL
+        }
+    }
+
+    #[test]
+    fn a_step_past_the_host_estimate_does_not_stay() {
+        let (auto, speed) = past_the_estimate(100_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert!(speed <= 100_000, "{}", speed);
+    }
+
+    #[test]
+    fn the_host_estimate_falling_ends_a_stay() {
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Overshot {
+            below: (34_000, 28.7),
+            sum: 60.0,
+            seen: 2,
+        };
+        let speed = auto.decide(142_000, &myth_at(30.0), true, 100_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert!(speed <= 100_000, "{}", speed);
+    }
+
+    #[test]
+    fn a_record_past_the_host_estimate_comes_back_to_the_estimate() {
+        // Going back to 142,000 for the record's frames would run the sound
+        // dry again, each time the frame rate dips under it.
+        let (auto, _) = past_the_estimate(120_000);
+        let record = auto.held.expect("a record");
+        assert_eq!(record.at, 120_000);
+        assert_eq!(record.fps, 30.0);
+    }
+
+    #[test]
+    fn a_step_within_the_host_estimate_stays_until_judged() {
+        let (mut auto, speed) = past_the_estimate(800_000);
+        assert_eq!(speed, 142_000);
+        assert!(matches!(auto.step, Step::Overshot { seen: 2, .. }));
+        assert_eq!(auto.decide(speed, &myth_at(30.0), true, 800_000), speed);
+        assert!(auto.decide(speed, &myth_at(30.0), true, 800_000) < speed);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(auto.held.expect("a record").at, speed);
+    }
+
+    #[test]
+    fn a_speed_cut_below_the_step_during_a_stay_starts_from_there() {
+        // The reckoning takes its range from the step: a host that took the
+        // speed under where the step began leaves it none.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Overshot {
+            below: (68_000, 28.7),
+            sum: 60.0,
+            seen: 2,
+        };
+        auto.decide(30_000, &myth_at(28.0), true, 30_000);
+        assert!(!matches!(auto.step, Step::Overshot { .. }), "{:?}", auto.step);
     }
 
     #[test]
