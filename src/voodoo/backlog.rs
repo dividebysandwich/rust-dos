@@ -526,10 +526,11 @@ fn texture_bytes(t: &TmuRaster) -> (u64, u64) {
 /// The card's memory the jobs given out or held back may read or write,
 /// for a write by the CPU that needn't wait for them when it is
 /// elsewhere (`Voodoo::banshee_texture_download`): the bytes their
-/// texture units take texels from in the frame buffer's memory, and the
-/// lowest byte of a buffer they draw into or of a word they write. A
-/// buffer is taken to reach from there to the end of the memory, which
-/// Glide's buffers on a Banshee do, above its textures.
+/// texture units take texels from in the frame buffer's memory, the
+/// words texture data queued goes into (`Job::Bytes`), and the lowest
+/// byte of a buffer they draw into or of a word they write. A buffer is
+/// taken to reach from there to the end of the memory, which Glide's
+/// buffers on a Banshee do, above its textures.
 #[derive(Clone, Debug)]
 pub struct Footprint {
     textures: Vec<(u64, u64)>,
@@ -562,10 +563,20 @@ impl Footprint {
     /// What `job` may read and write.
     pub fn add(&mut self, job: &Job) {
         self.add_writes(job);
-        if let Job::Triangle { st, .. } = job {
-            for range in frame_buffer_texels(st) {
-                self.texture(range);
+        match job {
+            Job::Triangle { st, .. } => {
+                for range in frame_buffer_texels(st) {
+                    self.texture(range);
+                }
             }
+            // Later data over these bytes has to come after them, and so
+            // does data in the same words: a worker writes half a word by
+            // reading it first.
+            Job::Bytes { at, bytes, .. } => {
+                let (start, end) = (*at as u64, (*at + bytes.len()) as u64);
+                self.texture((start & !1, end.next_multiple_of(2)));
+            }
+            _ => {}
         }
     }
 
@@ -579,8 +590,10 @@ impl Footprint {
             }
             Job::Pixels { words, .. } => self.words(words),
             Job::Rows { base, .. } => self.writes_from = self.writes_from.min(2 * *base as u64),
+            // They don't reach to the end of the memory: see `add`.
+            Job::Bytes { .. } => {}
             #[cfg(test)]
-            Job::Panic => {}
+            Job::Panic | Job::Hold(_) => {}
         }
     }
 
