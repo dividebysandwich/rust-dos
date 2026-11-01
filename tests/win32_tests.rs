@@ -2583,6 +2583,7 @@ fn a_program_loads_and_frees_msvcrt_without_importing_it() {
         "FreeLibrary",
         "GetModuleHandleA",
         "GetLastError",
+        "SetUnhandledExceptionFilter",
     ];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
     let data = b"MSVCRT.DLL\0strlen\0srand\0rand\0";
@@ -2636,7 +2637,11 @@ fn a_program_loads_and_frees_msvcrt_without_importing_it() {
         a.call(f("FreeLibrary"))?;
         a.push(l.at(NAME) as i32)?;
         a.call(f("GetModuleHandleA"))?;
-        a.test(eax, eax)?;
+        a.mov(edi, eax)?;
+        // The C++ filter it set went with it.
+        a.push(0)?;
+        a.call(f("SetUnhandledExceptionFilter"))?;
+        a.or(eax, edi)?;
         check(a, false, 5)?;
         // The handle is no longer one: ERROR_INVALID_HANDLE.
         let mut wrong = a.create_label();

@@ -855,8 +855,12 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
 
 /// The last FreeLibrary: the runtime's heap goes, with what it held. The
 /// blocks `init` took and those the program left go with it. Streams
-/// aren't flushed and their files stay open, as on Windows 98.
+/// aren't flushed and their files stay open, as on Windows 98. The filter
+/// `init` set goes too, as MSVCRT.DLL's detach restores the one before it.
 fn term(bus: &mut Bus, process: &mut super::Process) {
+    if process.exception_filter == startup::cxx_unhandled_filter_address() {
+        process.exception_filter = 0;
+    }
     let handle = process.memory.read_32(bus, state_at(S_HEAP));
     if let Some(i) = process.heaps.iter().position(|h| Some(h.base) == handle) {
         let mut heap = process.heaps.remove(i);
