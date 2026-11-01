@@ -69,6 +69,50 @@ push, on Linux, Windows and macOS, so you don't need to before you push.
 - Push, and fix the branch if CI fails. Run the whole suite locally only
   when you can't use CI.
 
+## A pull request's lifecycle: draft until it is proven better than main
+
+A pull request opens as a draft and stays one until there is evidence
+that it improves on main. Steps, in this order:
+
+1. Open the pull request as a draft and implement the change.
+2. Review it, with the fixes applied, by running this against it:
+
+   ```
+   /code-review high --fix Make judgement calls based on long-term quality and robust architecture rather than small scope or simplicity, do not postpone decisions to later unless there is no clearly better option (in which case create a GitHub issue to address this later), explain judgement calls made in comments to the reviewed PR. Commit and push review fixes to the PR branch. Treat claims in the PR description as unverified: check each one against the code, and report any the code doesn't support.
+   ```
+
+   Then check each finding against the code before keeping its fix: a
+   review at this effort doesn't verify its own findings, and `--fix`
+   applies them all. Confirm a finding with a test, a trace or a read of
+   the code path. Revert the fix of one the code doesn't bear out, but
+   only with evidence: the code path that rules it out, a test that
+   would fail if the bug were real, or the specification or real
+   Windows behaviour it contradicts. Disagreeing isn't evidence. List
+   each rejected finding and its evidence in the comment that explains
+   the review's judgement calls, so a later reader can disagree.
+
+   A confirmed finding the pull request doesn't fix ends one of two
+   ways. Either the comment explains why the code is right as it is,
+   matching the real hardware or Windows, or the finding gets an issue
+   that says what the real system does, what the emulator does, and why
+   it waits, and the comment links it. "Left as is" or "out of scope"
+   with neither is a decision put off with no record of it.
+3. Validate it, after the review and with its fixes: run the real game
+   or program the change is for, where there is one, on the build of the
+   branch, and compare with main.
+4. Mark it ready for review only when that shows a clear improvement on
+   main: a speed-up you measured, against main on the same machine and
+   scene; a bug that main has and the branch fixes, seen in the game; or
+   behaviour closer to the real hardware or the real Windows, shown by a
+   test or a comparison with it. Put the evidence in the description.
+
+If the evidence isn't there yet, improve the change and go through the
+steps again. A pull request stays a draft only when the next step needs
+a decision with no clearly better option, or is far beyond the change's
+scope; say which in a comment on it. When several agents work together,
+the one coordinating them marks pull requests ready, not the agents
+doing the work.
+
 ## Several agents on one machine
 
 Agents often work on several branches at once, each in its own git
@@ -93,8 +137,46 @@ disk.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
-- Don't take timings while other builds run. Measure on a quiet machine,
-  or compare CI's step times instead.
+- Every emulator run is heavy unless it is a timing measurement. The
+  test is what the claim quotes: if it contains a number that comes from
+  how fast the host ran the emulator, the run is a timing measurement,
+  and only then does it need the quiet machine.
+- Timing measurements, which run alone: a speed ratio or speed factor, a
+  frame rate or frame time, a CPU busy or halted share, a benchmark score
+  (3DMark, a bench loop, the Unreal or Giants matrix), or a time taken
+  between two points in the emulated run. Check the running processes by
+  command line at the start and at the end, and retake the run if another
+  one started.
+- Heavy runs, which run alongside builds: a cursor position, a window's
+  or a saver's behaviour, a screenshot, an audio capture checked for
+  correctness (levels, rail counts, clicks), a log or port-write count, a
+  trace, a breakpoint, a reproduction boot, and a data unpack. Their
+  results don't depend on the host's speed.
+- A run that does both takes the timing measurement form only when the
+  timing is part of the claim. A reproduction boot that also logs how
+  long something took is still heavy, unless that time is quoted.
+- Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
+  Bash on Windows). Builds, tests and every heavy emulator run take the
+  heavy form, so they run together:
+  `bash tools/run-lock.sh heavy NAME 0 -- cargo test ...`. Only timing
+  measurements take the exclusive form:
+  `bash tools/run-lock.sh measure NAME 0 -- CMD...` blocks new heavy jobs,
+  waits for the running ones to end, and then runs alone, in the order
+  measurements asked. Either form releases when the command ends and
+  passes on its exit code. The third argument is the longest wait in
+  seconds; `0` waits without limit, which is the right value for queued
+  work. If the script exits with code 3, the command did not run: check
+  `status`, and if the job is still wanted, run the same command again at
+  once under the same NAME. Never call one form inside the other: that
+  deadlocks.
+  `status` shows what runs and waits, and `clear NAME` cleans up after a
+  stopped worker. NAME is yours alone. The lock lives in
+  `RUST_DOS_RUN_LOCK_DIR` (by default `~/.rust-dos-run-lock`), so all
+  callers on the machine need the same one. Read the script's header
+  before using it: its rules come from clashes that spoiled
+  measurements.
+- If CI's step times are enough for the claim, use them instead of a local
+  timing.
 
 ## Behaviour: closer to the real machine beats unchanged results
 
