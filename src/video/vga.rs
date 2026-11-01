@@ -857,6 +857,26 @@ impl VgaCard {
         }
     }
 
+    /// The bits of a display address that CRTC Mode Control leaves alone.
+    /// With its bit 0 clear, address bit 13 comes from bit 0 of the row scan
+    /// counter (the two banks of CGA graphics), and with its bit 1 clear,
+    /// address bit 14 comes from bit 1 (Hercules' four). The picture draws
+    /// each row once, from its first scanline, where the counter is 0, so
+    /// those bits are 0. With a row of one scanline, as in mode 0Dh, the
+    /// display then wraps at 8 KB: Prehistorik 2 clears bit 0 to scroll its
+    /// mode screen around 8 KB of memory.
+    pub fn display_address_mask(&self) -> usize {
+        let control = self.crtc_regs[0x17];
+        let mut mask = !0;
+        if control & 0x01 == 0 {
+            mask &= !0x2000;
+        }
+        if control & 0x02 == 0 {
+            mask &= !0x4000;
+        }
+        mask
+    }
+
     /// The first of the `rows` a mode displays that the split screen shows:
     /// past the scanline in the CRTC Line Compare register, the display
     /// starts again from address 0, as games do for a status bar below a

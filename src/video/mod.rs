@@ -904,7 +904,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
         *out = (value as u32).to_le_bytes();
     }
     let known = drawn_from.reuse(&key, 4 * span * rows);
-    let mask = plane_size - 1;
+    let mask = (plane_size - 1) & bus.vga.display_address_mask();
     let mut source = vec![0u8; 4 * span];
 
     // A known cache only needs the VGA's dirty rows checked. Other planar
@@ -940,8 +940,8 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
             .zip(source.chunks_exact_mut(span))
         {
             // The row's bytes in this plane, gathered where they wrap
-            // around its end.
-            let bytes: &[u8] = if at + span <= plane_size {
+            // around the end of the memory the display can reach.
+            let bytes: &[u8] = if (at + span - 1) & mask == at + span - 1 {
                 &plane[at..at + span]
             } else {
                 for (k, byte) in wrapped.iter_mut().enumerate() {
@@ -959,7 +959,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
             continue;
         }
         drawn_from.changed(ty..ty + 1);
-        planar_row(vram, plane_size, start, pan, width, &mut line);
+        planar_row(vram, plane_size, mask, start, pan, width, &mut line);
         let out = &mut canvas[dst..dst + row_bytes];
         if canvas_w == 2 * width {
             for (px, &v) in out.as_chunks_mut::<8>().0.iter_mut().zip(&line[..width]) {
@@ -994,11 +994,19 @@ const PLANAR_EXPAND: [u64; 256] = {
 /// The 4-bit values of pixels `pan..pan + width` of the row whose bytes
 /// start at `start` in each plane (`planar_pixel`'s), into `line`, which
 /// has room for 16 more: 8 pixels from each byte of the four planes.
-fn planar_row(vram: &[u8], plane_size: usize, start: usize, pan: usize, width: usize, line: &mut [u8]) {
-    // Plane space wraps at the plane's size (64 KiB on a VGA); games with
-    // smaller back buffers rely on that so page flips near the top of VRAM
-    // don't walk into garbage.
-    let mask = plane_size - 1;
+/// `mask` keeps the address bits the display uses: plane space wraps at the
+/// plane's size (64 KiB on a VGA), and earlier when the CRTC takes bits
+/// away. Games with smaller back buffers rely on that so page flips near
+/// the top of VRAM don't walk into garbage.
+fn planar_row(
+    vram: &[u8],
+    plane_size: usize,
+    mask: usize,
+    start: usize,
+    pan: usize,
+    width: usize,
+    line: &mut [u8],
+) {
     let (first, skip) = (pan / 8, pan % 8);
     let bytes = (skip + width).div_ceil(8);
     // The bytes' pixels one after the other, then moved back by the
@@ -1662,6 +1670,73 @@ mod planar_tests {
         assert_eq!(&frame.rgba[101 * 640 * 4..], &previous[101 * 640 * 4..]);
     }
 
+    /// Mode 0Dh with CRTC 17h's bits 0 and 1 as `mode_control` has them:
+    /// byte 0 of plane 0 set, all else clear, and the display starting
+    /// `start` bytes on. Returns the rows of the picture with a lit pixel
+    /// at its left edge.
+    fn lit_rows(mode_control: u8, start: u16) -> Vec<usize> {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Ega320x200;
+        bus.vga.set_video_mode(bus.video_mode);
+        bus.vga.io_write(0x3C4, 0x02);
+        bus.vga.io_write(0x3C5, 0x01);
+        bus.vga.write_graphics(0, 0xFF);
+        bus.vga.io_write(0x3D4, 0x17);
+        bus.vga.io_write(0x3D5, mode_control);
+        bus.vga.io_write(0x3D4, 0x0C);
+        bus.vga.io_write(0x3D5, (start >> 8) as u8);
+        bus.vga.io_write(0x3D4, 0x0D);
+        bus.vga.io_write(0x3D5, start as u8);
+        bus.vga.latch_start_address();
+        let mut frame = Frame::new(320, 200);
+        render_screen_rows(&mut frame, &bus);
+        (0..200)
+            .filter(|y| frame.rgba[y * 320 * 4..y * 320 * 4 + 3] != [0, 0, 0])
+            .collect()
+    }
+
+    #[test]
+    fn map13_clear_wraps_the_display_at_8k() {
+        // Row 100 of the picture is address 0x2000, which shows byte 0 only
+        // if the display wraps there. Prehistorik 2's mode screen scrolls
+        // through 8 KB this way.
+        let start = 0x2000 - 40 * 100;
+        assert_eq!(lit_rows(0xE2, start), [100]);
+        assert_eq!(lit_rows(0xE3, start), [0usize; 0]);
+    }
+
+    #[test]
+    fn map14_clear_wraps_the_display_at_16k() {
+        let start = 0x4000 - 40 * 100;
+        assert_eq!(lit_rows(0xE1, start), [100]);
+        assert_eq!(lit_rows(0xE3, start), [0usize; 0]);
+    }
+
+    #[test]
+    fn a_row_across_the_map13_wrap_goes_on_from_address_0() {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Ega320x200;
+        bus.vga.set_video_mode(bus.video_mode);
+        bus.vga.io_write(0x3C4, 0x02);
+        bus.vga.io_write(0x3C5, 0x01);
+        bus.vga.write_graphics(0, 0xFF);
+        bus.vga.io_write(0x3D4, 0x17);
+        bus.vga.io_write(0x3D5, 0xE2);
+        // 4 bytes of the first row lie before the wrap.
+        let start = 0x2000 - 4;
+        bus.vga.io_write(0x3D4, 0x0C);
+        bus.vga.io_write(0x3D5, (start >> 8) as u8);
+        bus.vga.io_write(0x3D4, 0x0D);
+        bus.vga.io_write(0x3D5, start as u8);
+        bus.vga.latch_start_address();
+        let mut frame = Frame::new(320, 200);
+        render_screen_rows(&mut frame, &bus);
+        let lit = |x: usize| frame.rgba[x * 4..x * 4 + 3] != [0, 0, 0];
+        assert!(!lit(31));
+        assert!((32..40).all(lit));
+        assert!(!lit(40));
+    }
+
     /// Modes 4 and 6 drawn as they were, pixel by pixel.
     fn cga_reference(canvas: &mut [u8], vram: &[u8], start: usize, colors: &[(u8, u8, u8)], bits: usize) {
         let per_byte = 8 / bits;
@@ -1742,7 +1817,8 @@ mod planar_tests {
                 for &base in &[0usize, 7, 0xFFF0, 0x8001] {
                     for row in [0usize, 1, 199, 479] {
                         let mut line = vec![0u8; width + 16];
-                        planar_row(&vram, plane_size, base + row * bpr, pan, width, &mut line);
+                        let start = base + row * bpr;
+                        planar_row(&vram, plane_size, plane_size - 1, start, pan, width, &mut line);
                         for (x, &pixel) in line.iter().enumerate().take(width) {
                             assert_eq!(
                                 pixel,
