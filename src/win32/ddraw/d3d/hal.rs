@@ -141,8 +141,9 @@ pub struct Card {
 
 /// A texture unit's part in a batch: the stage whose coordinates it
 /// takes, the factors that turn them into Glide's (its texture's size in
-/// Glide's 256 units), and whether it wraps in U and in V rather than
-/// clamps.
+/// Glide's 256 units), and whether it wraps (D3DTADDRESS_WRAP) in U and
+/// in V. A mirrored axis does not count: a shift by an odd number of
+/// textures flips a mirrored texture.
 #[derive(Clone, Copy, Debug)]
 struct Unit {
     stage: usize,
@@ -150,10 +151,14 @@ struct Unit {
     wrap: [bool; 2],
 }
 
+/// The D3DTADDRESS_WRAP address mode, the one a unit takes back by whole
+/// textures (`rebase`).
+const ADDRESS_WRAP: u32 = 1;
+
 /// How far a primitive's texture coordinates `coords` (Direct3D's, a
 /// texture to 1.0) on `unit` are taken back, in U and in V: by whole
-/// textures, where the unit wraps, so that the smallest is between 0
-/// and 1. The picture is the same.
+/// textures, where the unit wraps, so that they are centred on 0 (the
+/// middle of their range, to a whole texture). The picture is the same.
 ///
 /// A driver for the card has to: the card holds S/W and T/W as 14.18
 /// fixed point, which an S/W past 8192 overflows (at a W of 1, 32 times
@@ -167,9 +172,15 @@ struct Unit {
 fn rebase<const N: usize>(unit: &Unit, coords: [[f32; 2]; N]) -> [f32; 2] {
     let mut shift = [0.0; 2];
     for (axis, out) in shift.iter_mut().enumerate() {
+        if !unit.wrap[axis] {
+            continue;
+        }
         let least = coords.iter().map(|c| c[axis]).fold(f32::INFINITY, f32::min);
-        if unit.wrap[axis] && least.is_finite() {
-            *out = least.floor();
+        let most = coords.iter().map(|c| c[axis]).fold(f32::NEG_INFINITY, f32::max);
+        // Each half first, so a range near f32::MAX cannot overflow.
+        let middle = least * 0.5 + most * 0.5;
+        if middle.is_finite() {
+            *out = middle.floor();
         }
     }
     shift
@@ -787,7 +798,8 @@ fn load(
             api::TEXTURECLAMP_WRAP
         }
     };
-    let modes = [TSS_ADDRESSU, TSS_ADDRESSV].map(|m| clamp(d.stage(stage, m)));
+    let address = [TSS_ADDRESSU, TSS_ADDRESSV].map(|m| d.stage(stage, m));
+    let modes = address.map(clamp);
     api::tex_clamp_mode(cpu, tmu, modes[0], modes[1]);
     if info.format == api::TEXFMT_P_8 {
         let pal = palette(cpu, id);
@@ -801,7 +813,7 @@ fn load(
     let unit = Unit {
         stage: stage as usize,
         scale: [w as f32, h as f32],
-        wrap: modes.map(|m| m == api::TEXTURECLAMP_WRAP),
+        wrap: address.map(|a| a == ADDRESS_WRAP),
     };
     Some((unit, keyed))
 }
@@ -1616,7 +1628,7 @@ pub fn clear(
 mod tests {
     use super::*;
 
-    /// A primitive's coordinates far from 0 are taken back by whole
+    /// A primitive's coordinates far from 0 are centred on 0 by whole
     /// textures where the unit wraps, and stay where they are where it
     /// clamps.
     #[test]
@@ -1627,12 +1639,14 @@ mod tests {
             wrap: [true, true],
         };
         let coords = [[300.25, -40.5], [301.75, -39.0], [300.5, -41.25]];
-        assert_eq!(rebase(&unit, coords), [300.0, -42.0]);
+        // U runs from 300.25 to 301.75, its middle 301. V runs from
+        // -41.25 to -39, its middle -40.125, floored to -41.
+        assert_eq!(rebase(&unit, coords), [301.0, -41.0]);
         let clamped = Unit {
             wrap: [false, true],
             ..unit
         };
-        assert_eq!(rebase(&clamped, coords), [0.0, -42.0]);
+        assert_eq!(rebase(&clamped, coords), [0.0, -41.0]);
         // Coordinates already between 0 and 1 stay.
         assert_eq!(rebase(&unit, [[0.0, 0.5], [0.75, 0.0]]), [0.0, 0.0]);
     }
@@ -1679,8 +1693,9 @@ mod tests {
         // TMU1, stage 0: back 100 in U and 7 in V.
         assert_eq!(st(&a, 1), [0.5 * 256.0, 0.25 * 128.0]);
         assert_eq!(st(&b, 1), [1.0 * 256.0, 1.0 * 128.0]);
-        // TMU0, stage 1: U clamps and stays, V goes back -3.
-        assert_eq!(st(&a, 0), [3.5 * 64.0, 0.5 * 32.0]);
-        assert_eq!(st(&b, 0), [4.0 * 64.0, 2.0 * 32.0]);
+        // TMU0, stage 1: U clamps and stays. V runs from -2.5 to -1, its
+        // middle -1.75, floored to -2: a goes to -0.5, b to 1.
+        assert_eq!(st(&a, 0), [3.5 * 64.0, -0.5 * 32.0]);
+        assert_eq!(st(&b, 0), [4.0 * 64.0, 1.0 * 32.0]);
     }
 }
