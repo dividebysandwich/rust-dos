@@ -1,8 +1,11 @@
 use crate::bus::Bus;
 
-/// Where the mixed output goes: the SDL window's sound device, or the
-/// browser's. Samples are 44.1 kHz stereo, interleaved.
+/// Where the mixed output goes: the SDL window's sound device, the null
+/// output, or the browser's. Samples are 44.1 kHz stereo, interleaved.
 pub trait AudioOutput {
+    /// What plays it, for whoever reads a measurement: the SDL driver's
+    /// name (`wasapi`, `alsa`, `dummy`...), `null` or `browser`.
+    fn name(&self) -> &str;
     /// Stereo frames queued and not played yet.
     fn queued_frames(&self) -> usize;
     /// Queue samples behind those waiting.
@@ -16,6 +19,51 @@ pub trait AudioOutput {
     /// frontend and the browser buffer the sound themselves.
     fn set_buffer(&mut self, _buffer: AudioBuffer) -> Result<(), String> {
         Ok(())
+    }
+}
+
+/// What the rust-dos program plays its sound on (`[mixer]`'s
+/// `audio_output`, `--audio-output`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputChoice {
+    /// SDL's sound device, or the null output in a headless run where
+    /// `SDL_AUDIODRIVER` doesn't name a driver.
+    #[default]
+    Auto,
+    /// SDL's sound device, headless or not.
+    Sdl,
+    /// The null output: no SDL audio at all.
+    Null,
+}
+
+impl OutputChoice {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(OutputChoice::Auto),
+            "sdl" => Some(OutputChoice::Sdl),
+            "null" => Some(OutputChoice::Null),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            OutputChoice::Auto => "auto",
+            OutputChoice::Sdl => "sdl",
+            OutputChoice::Null => "null",
+        }
+    }
+
+    /// Whether to try SDL's sound device at all. A run with no window
+    /// has nobody listening, so it stays off the host's speakers, unless
+    /// `SDL_AUDIODRIVER` asks for a driver by name: that is how a timing
+    /// run asks for a real device, and how SDL's own drivers are tested.
+    pub fn wants_sdl(self, headless: bool, driver_named: bool) -> bool {
+        match self {
+            OutputChoice::Auto => !headless || driver_named,
+            OutputChoice::Sdl => true,
+            OutputChoice::Null => false,
+        }
     }
 }
 
@@ -48,6 +96,11 @@ impl AudioBuffer {
     /// The milliseconds `frames` play for at the mixer's rate.
     pub fn millis(frames: usize) -> f64 {
         frames as f64 * 1000.0 / crate::opl::RATE as f64
+    }
+
+    /// `prebuffer` in frames of a device playing `rate` frames a second.
+    pub fn prebuffer_frames(self, rate: usize) -> usize {
+        rate * self.prebuffer as usize / 1000
     }
 }
 
@@ -247,6 +300,10 @@ mod tests {
     }
 
     impl AudioOutput for std::rc::Rc<std::cell::RefCell<Device>> {
+        fn name(&self) -> &str {
+            "test"
+        }
+
         fn queued_frames(&self) -> usize {
             self.borrow().queued
         }
@@ -261,6 +318,24 @@ mod tests {
         fn target_frames(&self) -> usize {
             self.borrow().target
         }
+    }
+
+    #[test]
+    fn the_output_choice_decides_who_opens_sdl() {
+        use OutputChoice::{Auto, Null, Sdl};
+        assert!(Auto.wants_sdl(false, false), "a window plays on the device");
+        assert!(
+            !Auto.wants_sdl(true, false),
+            "headless runs take the null output"
+        );
+        assert!(Auto.wants_sdl(true, true), "SDL_AUDIODRIVER names a driver");
+        assert!(Sdl.wants_sdl(true, false));
+        assert!(!Null.wants_sdl(false, true));
+        for choice in [Auto, Sdl, Null] {
+            assert_eq!(OutputChoice::parse(choice.name()), Some(choice));
+        }
+        assert_eq!(OutputChoice::parse(" NULL "), Some(Null));
+        assert_eq!(OutputChoice::parse("dummy"), None);
     }
 
     #[test]
