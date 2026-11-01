@@ -373,8 +373,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
-    if !cpu.bus.win32.sections.is_empty() {
-        super::kernel32::sweep_mappings(cpu);
+    if !cpu.bus.win32.sections.is_empty() && super::kernel32::sweep_mappings(cpu) {
+        crate::idle::not_pure(cpu);
     }
     super::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
