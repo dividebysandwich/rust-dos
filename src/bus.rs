@@ -741,6 +741,7 @@ impl Bus {
             && vga.latched_start_addr == 0
             && vga.split_row() >= 200
             && vga.pixel_panning() == 0
+            && vga.display_address_mask() == vga.plane_size() - 1
     }
 
     fn mode13_dirty_rows(&self, offset: usize) -> Option<(u32, u32)> {
