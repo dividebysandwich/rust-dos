@@ -1105,8 +1105,13 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
             // as it was (the handlers commit everything else last).
             cpu.set_eip(eip);
             cpu.set_esp(start_esp);
-            if after_fault(cpu, fault, fetch.ram, phys_ip) && traced {
-                // An emulator service counts as one instruction.
+            // An emulator service counts as one instruction. One that left
+            // TF clear entered a handler, which drops the trap as INT n does
+            // (`trap_after`).
+            if after_fault(cpu, fault, fetch.ram, phys_ip)
+                && traced
+                && cpu.get_cpu_flag(CpuFlags::TF)
+            {
                 cpu.single_step_trap();
             }
         }
