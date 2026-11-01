@@ -3393,18 +3393,18 @@ fn the_pointer_spans_a_320_by_200_voodoo3_mode() {
     the_pointer_spans_a_small_mode("pointer_voodoo3_320", Some(Board::Voodoo3), (320, 200));
 }
 
-const CURSOR_USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetCursorPos"]);
-const CURSOR_DDRAW: (&str, &[&str]) = ("DDRAW.DLL", &["DirectDrawCreate"]);
-const CURSOR_POINTS: u32 = 0x800;
+const DESKTOP_CURSOR_USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetCursorPos"]);
+const DESKTOP_CURSOR_DDRAW: (&str, &[&str]) = ("DDRAW.DLL", &["DirectDrawCreate"]);
+const DESKTOP_CURSOR_POINTS: u32 = 0x800;
 
 /// GetCursorPos before any window, optionally a full-screen DirectDraw
 /// mode set first, then the first window (which starts the desktop),
-/// then GetCursorPos again. The points are at CURSOR_POINTS.
-fn cursor_program(directdraw: bool) -> (Vec<u8>, u32) {
+/// then GetCursorPos again. The points are at DESKTOP_CURSOR_POINTS.
+fn desktop_cursor_program(directdraw: bool) -> (Vec<u8>, u32) {
     let d = data();
-    program(&[CURSOR_USER32, CURSOR_DDRAW], &d, |a, l| {
+    program(&[DESKTOP_CURSOR_USER32, DESKTOP_CURSOR_DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        let point = |k: u32| Arg::At(CURSOR_POINTS + 8 * k);
+        let point = |k: u32| Arg::At(DESKTOP_CURSOR_POINTS + 8 * k);
         c.api(a, l, 1, &[point(0)])?;
         if directdraw {
             c.api(a, l, 2, &[Arg::I(0), Arg::At(DD), Arg::I(0)])?;
@@ -3442,15 +3442,15 @@ fn cursor_program(directdraw: bool) -> (Vec<u8>, u32) {
 
 /// The cursor GetCursorPos gave before the desktop and after it started,
 /// with the host's pointer at (50, 40) when the program starts.
-fn cursor_before_and_after(test: &str, directdraw: bool) -> ((i32, i32), (i32, i32)) {
-    let (program, data) = cursor_program(directdraw);
+fn desktop_cursor_before_and_after(test: &str, directdraw: bool) -> ((i32, i32), (i32, i32)) {
+    let (program, data) = desktop_cursor_program(directdraw);
     let mut cpu = machine(test, program);
     cpu.bus.mouse.warp(50, 40);
     run_until(&mut cpu, data, 1);
     let at = |k: u32| {
         (
-            peek(&cpu, data + CURSOR_POINTS + 8 * k) as i32,
-            peek(&cpu, data + CURSOR_POINTS + 8 * k + 4) as i32,
+            peek(&cpu, data + DESKTOP_CURSOR_POINTS + 8 * k) as i32,
+            peek(&cpu, data + DESKTOP_CURSOR_POINTS + 8 * k + 4) as i32,
         )
     };
     (at(0), at(1))
@@ -3458,12 +3458,12 @@ fn cursor_before_and_after(test: &str, directdraw: bool) -> ((i32, i32), (i32, i
 
 #[test]
 fn the_desktop_starts_the_cursor_where_user_had_it() {
-    let (_, after) = cursor_before_and_after("cursor-desktop", false);
+    let (_, after) = desktop_cursor_before_and_after("cursor-desktop", false);
     assert_eq!(after, (320, 240));
 }
 
 #[test]
 fn under_directdraw_the_desktop_keeps_the_host_pointer() {
-    let (_, after) = cursor_before_and_after("cursor-directdraw", true);
+    let (_, after) = desktop_cursor_before_and_after("cursor-directdraw", true);
     assert_eq!(after, (50, 40));
 }

@@ -156,8 +156,9 @@ pub struct Window {
     pub pid: u32,
     pub props: Vec<(String, u32)>,
     /// What needs painting, relative to the window's top left corner:
-    /// the frame and client area, and for a CS_PARENTDC child what of
-    /// its parent's client area it was given. `paint`'s flags say how.
+    /// the frame and client area, what lay in them before the window
+    /// got smaller, and for a CS_PARENTDC child what of its parent's
+    /// client area it was given. `paint`'s flags say how.
     pub update: Region,
     pub paint: u32,
     pub flags: u32,

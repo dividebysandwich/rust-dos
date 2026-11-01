@@ -255,10 +255,19 @@ pub fn win16_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         crate::win32::fatal(cpu, "a return to 16-bit code that didn't call", None);
         return None;
     };
+    // A plain value, or one of the automatic thunks that converts no
+    // handle (`builtin::post_auto`, whose structures' copies are in RAM),
+    // changes nothing but RAM and registers.
+    let ret = data.first().map(|&ret| ret as u8);
+    let plain = post == POST_PLAIN
+        || post == POST_AUTO && ret.is_some_and(|c| !super::builtin::converts_handle(c));
     let result = match POSTS.get(post as usize) {
         Some(f) => f(cpu, value, &data, &mut ctx),
         None => Some(value),
     };
+    if plain && cpu.bus.observe.on {
+        crate::idle::pure_call(cpu, None);
+    }
     if let Some(value) = result {
         resume16(cpu, ctx, value);
     }
