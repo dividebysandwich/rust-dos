@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 21;
+const WIN32_VERSION: u16 = 22;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -754,5 +754,114 @@ impl Bus {
         if self.win32.wait_due.is_some() {
             self.reschedule_timers();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WIN32_VERSION;
+    use std::path::Path;
+
+    /// The layouts the W32 section has had, oldest first: its version and
+    /// `win32_layout()` of that version's code. Changing what a W32
+    /// `state_fields!` list saves means raising WIN32_VERSION and adding
+    /// a line here. Keep the old lines: two branches that each take the
+    /// same next version then add different lines at the same place, and
+    /// git stops the second merge, where the two equal changes to
+    /// WIN32_VERSION alone merge without a word.
+    const WIN32_LAYOUTS: &[(u16, u64)] = &[
+        (21, 0xB953_0430_1756_5883),
+        (22, 0x4CE6_08C9_A4C8_9EFD),
+    ];
+
+    /// The text between the parentheses of `macro_name!(...)` at `from`.
+    fn macro_body(source: &str, from: usize) -> Option<&str> {
+        let start = from + source[from..].find('(')? + 1;
+        let mut depth = 1;
+        for (i, c) in source[start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                return Some(&source[start..start + i]);
+            }
+        }
+        None
+    }
+
+    /// The lists of saved fields in the Rust source `source`: what each
+    /// `state_fields!` saves and each `state_enum!` numbers, without
+    /// comments, spaces or the fields it skips.
+    fn saved_lists(source: &str) -> Vec<String> {
+        let code: String = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut lists = Vec::new();
+        for name in ["state_fields!", "state_enum!"] {
+            for (at, _) in code.match_indices(name) {
+                let Some(body) = macro_body(&code, at) else {
+                    continue;
+                };
+                let body = body.split(" skip ").next().unwrap_or(body);
+                let body: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+                lists.push(body.trim_end_matches("skip").to_string());
+            }
+        }
+        lists
+    }
+
+    fn collect(dir: &Path, lists: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, lists);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                lists.extend(saved_lists(&std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+
+    /// FNV-1a of the saved lists of all of `src/win32`, in sorted order,
+    /// so moving a type to another file doesn't change it. A field that
+    /// changes its type doesn't change it either.
+    fn win32_layout() -> u64 {
+        let mut lists = Vec::new();
+        collect(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/win32"), &mut lists);
+        lists.sort();
+        lists.join("\n").bytes().fold(0xCBF2_9CE4_8422_2325, |hash: u64, byte| {
+            (hash ^ byte as u64).wrapping_mul(0x100_0000_01B3)
+        })
+    }
+
+    #[test]
+    fn a_changed_win32_layout_has_its_own_version() {
+        for pair in WIN32_LAYOUTS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "two layouts of the W32 section can't share version {}: take the next one",
+                pair[1].0
+            );
+            assert_ne!(pair[0].1, pair[1].1, "version {} changed no layout", pair[1].0);
+        }
+        let &(version, layout) = WIN32_LAYOUTS.last().unwrap();
+        let now = win32_layout();
+        assert_eq!(
+            (version, layout),
+            (WIN32_VERSION, now),
+            "the W32 section's fields changed: raise WIN32_VERSION past {version} and add \
+             that version with {now:#X} to WIN32_LAYOUTS, leaving the lines above it",
+        );
+    }
+
+    #[test]
+    fn saved_lists_leave_out_comments_and_skipped_fields() {
+        let source = "// state_fields!(Old { a });\n\
+                      crate::state_fields!(Thing {\n    a, // first\n    b,\n} \
+                      skip {\n    c,\n});\n";
+        assert_eq!(saved_lists(source), ["Thing{a,b,}"]);
     }
 }
