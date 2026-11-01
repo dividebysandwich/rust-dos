@@ -198,8 +198,10 @@ pub struct Clipboard {
     pub formats: Vec<(u32, u32)>,
 }
 
-/// The desktop came on the screen: the cursor is where the mouse is now,
-/// which `ensure_desktop` has warped it to.
+/// The desktop came on the screen: the cursor is where the mouse is now.
+/// `ensure_desktop` has warped the mouse to USER's cursor, unless a
+/// DirectDraw mode owns the display, which keeps the host's pointer where
+/// it is.
 pub fn desktop_started(cpu: &mut Cpu) {
     let (x, y) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
     let mouse = &cpu.bus.mouse;
@@ -2928,6 +2930,17 @@ mod tests {
             .map(|m| (m.hwnd, m.message, m.lparam))
             .collect();
         assert_eq!(got, [(child, WM_MOUSEMOVE, 120 << 16 | 100)]);
+    }
+
+    /// USER32 starts under a DirectDraw mode set before it: the cursor
+    /// starts in the middle of that mode's screen. The desktop's middle
+    /// would be off a mode smaller than the desktop.
+    #[test]
+    fn the_cursor_starts_in_the_middle_of_a_directdraw_mode_set_before_user32() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.ddraw.display.mode = (320, 200, 8);
+        super::super::init(&mut cpu);
+        assert_eq!(user(&mut cpu).input.cursor, (160, 100));
     }
 
     /// A grey arrow held down is one WM_KEYDOWN, extended, and stays

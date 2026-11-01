@@ -471,14 +471,13 @@ pub fn init(cpu: &mut Cpu) {
     window::create_desktop(cpu);
     let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
     cursor::set(cpu, arrow);
-    // The cursor starts in the middle of the desktop, where the desktop
-    // puts it as it comes on the screen (`paint::ensure_desktop`). It is
-    // the desktop's size that counts: a DirectDraw mode may already be
-    // set when USER32 starts, and that mode is not the desktop.
-    if !user(cpu).desktop {
-        let d = crate::win32::screen::desktop(cpu);
-        user(cpu).input.cursor = (d.width as i32 / 2, d.height as i32 / 2);
-    }
+    // The cursor starts in the middle of the screen, where the desktop puts
+    // it as it comes on the screen (`paint::ensure_desktop`). A DirectDraw
+    // mode may already be set when USER32 starts. Then the screen is that
+    // mode's, so the middle is the mode's too: the desktop's middle can lie
+    // off a smaller mode, where the cursor can't be.
+    let (w, h) = sysparams::screen_size(cpu);
+    user(cpu).input.cursor = (w / 2, h / 2);
 }
 
 /// The process `pid` ended: its windows, classes, hooks, timers, menus,
