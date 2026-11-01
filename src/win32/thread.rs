@@ -482,6 +482,7 @@ pub fn wake(cpu: &mut Cpu) -> Vec<At> {
     super::dinput::poll(cpu);
     super::winmm::tick(cpu);
     super::dsound::tick(cpu);
+    super::wnaspi32::tick(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);

@@ -6633,9 +6633,10 @@ fn wnaspi32_runs_scsi_commands_on_the_cd_rom_drive() {
 
 #[test]
 fn wnaspi32_signals_an_event_request_and_posts_nothing_for_a_rejected_one() {
-    // A READ(10) with SRB_EVENT_NOTIFY on the CD-ROM drive: the block's
-    // status is final when the call returns, and the event (in the
-    // PostProc field) is set. A request to a target that isn't the drive
+    // A READ(10) with SRB_EVENT_NOTIFY on the CD-ROM drive returns SS_PENDING
+    // with its block still empty, as APIX does. The scheduler finishes it
+    // later: the block is written, then its status, then the event (in the
+    // PostProc field) is set, and a wait on that event ends. A request to a target that isn't the drive
     // is rejected: its status comes back, and its event stays unset.
     let dir = cdimage::scratch("wnaspi32_event");
     let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
@@ -6684,16 +6685,19 @@ fn wnaspi32_signals_an_event_request_and_posts_nothing_for_a_rejected_one() {
         a.call(l.import(1))?;
         a.add(esp, 4)?;
         a.mov(ebx, 1)?;
-        a.cmp(eax, 1)?;
+        a.test(eax, eax)?;
         a.jne(fail)?;
-        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.cmp(byte_ptr(l.at(0x41)), 0)?;
         a.jne(fail)?;
         a.mov(eax, dword_ptr(l.at(0x180)))?;
-        a.push(0i32)?;
+        a.push(-1i32)?;
         a.push(eax)?;
         a.call(l.import(4))?;
         a.mov(ebx, 2)?;
         a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
         a.jne(fail)?;
         // SendASPI32Command(rejected): target 1 has no device, so the
         // status comes back, and the event is left alone.
