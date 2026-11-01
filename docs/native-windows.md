@@ -300,23 +300,24 @@ exceptions run as the program's own code on top of that.
   with just the DLLs in them, and are made on C: when a program makes a
   file or directory in them; neither can be removed while it holds
   them.
-- The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
-  Win32, as Windows 98 SE's does (`src/win32/wnaspi32.rs`). Copy
-  protections read their discs that way: SafeDisc 2 loads it to check
-  the CD. On Windows 98 the DLL hands each request block to APIX.VXD,
-  and the IOS and the IDE port driver send it to the drive as an ATAPI
-  packet. Here the drive is the ATAPI drive a booted Windows finds on
-  the IDE channel (`ide::Atapi`), of its own, since the built-in
-  Windows has no IDE channel: `Atapi::run_packet` runs each packet
-  through its task file and data port at once, and its delays pass at
-  once. So the disc answers as it does to a booted Windows 98, with the
-  same data and the same sense data, MEDIUM ERROR for a sector whose
-  EDC doesn't match. ASPI shows one host adapter, its target 0 the
-  first CD-ROM drive with a disc (1 when MOUNT's `-ide` puts it on a
-  slave), and completes commands as Windows 98's does when APIX's
+- The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for Win32,
+  as Windows 98 SE's does (`src/win32/wnaspi32.rs`). Copy protections read
+  their discs that way: SafeDisc 2 loads it to check the CD. On Windows 98
+  the DLL hands each request block to APIX.VXD, and the IOS and the IDE port
+  driver send it to the drive as an ATAPI packet. Here the drive is the
+  ATAPI drive a booted Windows finds on the IDE channel (`ide::Atapi`), of
+  its own, since the built-in Windows has no IDE channel:
+  `Atapi::run_packet` runs each packet through its task file and data port
+  at once, and its delays pass at once. So the disc answers as it does to a
+  booted Windows 98, with the same data and the same sense data, MEDIUM
+  ERROR for a sector whose EDC doesn't match. ASPI shows one host adapter.
+  Its target 0 is the CD-ROM drive a booted system's IDE channel would show:
+  the one it shows stays while it has a disc, and it moves to a disc in
+  another CD-ROM drive only when its own is empty (1 when MOUNT's `-ide`
+  puts it on a slave). Commands complete as Windows 98's do when APIX's
   thread runs them at once: SS_PENDING for SC_EXEC_SCSI_CMD without an
-  event, the final status already in the block, the event set or the
-  posting routine called.
+  event, the final status already in the block, the event set or the posting
+  routine called.
 
 ### Video
 

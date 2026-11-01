@@ -6631,6 +6631,103 @@ fn wnaspi32_runs_scsi_commands_on_the_cd_rom_drive() {
     assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
 }
 
+#[test]
+fn wnaspi32_signals_an_event_request_and_posts_nothing_for_a_rejected_one() {
+    // A READ(10) with SRB_EVENT_NOTIFY on the CD-ROM drive: the block's
+    // status is final when the call returns, and the event (in the
+    // PostProc field) is set. A request to a target that isn't the drive
+    // is rejected: its status comes back, and its event stays unset.
+    let dir = cdimage::scratch("wnaspi32_event");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &["ExitProcess", "CreateEventA", "WaitForSingleObject"],
+        ),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    // The event request: READ(10) of sector 16 with SRB_EVENT_NOTIFY.
+    let mut accepted = read10_srb(16);
+    accepted[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&accepted);
+    // The rejected one: target 1, with its own event.
+    let mut rejected = read10_srb(16);
+    rejected[3] |= 0x40;
+    rejected[8] = 1;
+    data[0x100..0x150].copy_from_slice(&rejected);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Two manual-reset events, not signaled.
+        for (srb, keep) in [(0x40, 0x180), (0x100, 0x184)] {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(srb + 24)), eax)?;
+            a.mov(dword_ptr(l.at(keep)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        // SendASPI32Command(accepted): the status comes back, the block
+        // says SS_COMP, and the event is set.
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(l.at(0x180)))?;
+        a.push(0i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 2)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        // SendASPI32Command(rejected): target 1 has no device, so the
+        // status comes back, and the event is left alone.
+        a.push(l.at(0x100) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 3)?;
+        a.cmp(eax, 0x82)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(l.at(0x184)))?;
+        a.push(0i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 4)?;
+        a.cmp(eax, 0x102)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_event", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
 /// CONTEXT's Eip and EFlags, and TF.
 const CTX_EIP: i32 = 0xB8;
 const CTX_EFLAGS: i32 = 0xC0;

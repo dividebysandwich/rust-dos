@@ -15,7 +15,8 @@
 //!
 //! - One host adapter, number 0, whose target 0 is the CD-ROM drive (1
 //!   when MOUNT's `-ide` puts it on a slave slot), LUN 0. The drive is
-//!   the first CD-ROM drive with a disc, as on a booted system.
+//!   the one a booted system's IDE channel shows (`cd_to_show`): it stays
+//!   the same while it has a disc.
 //! - SendASPI32Command does what Windows 98's does with each command,
 //!   and returns as it does: SS_PENDING for SC_EXEC_SCSI_CMD and
 //!   SC_RESET_DEV unless the block asks for an event, the block's status
@@ -27,7 +28,6 @@
 use super::call;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
-use crate::disk::DriveKind;
 use crate::ide::{Atapi, Env};
 
 pub static DLL: Dll = Dll {
@@ -39,12 +39,7 @@ pub static DLL: Dll = Dll {
     vtables: &[],
 };
 
-const fn cdecl(
-    name: &'static str,
-    ordinal: u16,
-    args: u8,
-    handler: super::stubs::Handler,
-) -> Api {
+const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: super::stubs::Handler) -> Api {
     Api {
         name,
         ordinal,
@@ -104,6 +99,8 @@ const EXEC_POST_PROC: u32 = 24;
 const EXEC_CDB: u32 = 48;
 const EXEC_SENSE: u32 = 64;
 const EXEC_SIZE: usize = 80;
+/// The sense area of the block: SENSE_LEN + 2 bytes.
+const SENSE_AREA: usize = 16;
 
 /// The host adapter's identification in SC_HA_INQUIRY: the ASPI manager,
 /// as APIX.VXD names itself to Win32 programs, and the adapter, by its
@@ -127,15 +124,16 @@ pub struct State {
 
 crate::state_fields!(State { drive, clock });
 
-/// GetASPI32SupportInfo(): the host adapters (bits 0-7) and SS_COMP
-/// (bits 8-15). With no CD-ROM drive there is no adapter, and ASPI
-/// says so with SS_NO_ADAPTERS, as Windows 98's does on a machine
-/// without one.
+/// GetASPI32SupportInfo(): SS_COMP (bits 8-15) and the host adapters
+/// (bits 0-7). Windows 98 SE's DLL returns its start status and its
+/// adapter count from two variables (ordinal 1 at WNASPI32+1160h). With
+/// no CD-ROM drive the count is 0 and SS_COMP stays, which is the answer
+/// SendASPI32Command's count check turns into SS_FAILED_INIT. The DLL
+/// never stores SS_NO_ADAPTERS (E8h) itself.
 fn get_aspi32_support_info(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    const SS_NO_ADAPTERS: u32 = 0xE8;
     Some(match cd_drive(cpu) {
         Some(_) => (SS_COMP as u32) << 8 | 1,
-        None => SS_NO_ADAPTERS << 8,
+        None => (SS_COMP as u32) << 8,
     })
 }
 
@@ -145,28 +143,31 @@ fn get_aspi32_dll_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 /// The DOS drive of the CD-ROM drive ASPI shows, and its target: the
-/// first CD-ROM drive with a disc, or the first one.
+/// drive `cd_to_show` picks, given the one shown before.
 fn cd_drive(cpu: &mut Cpu) -> Option<(u8, u8)> {
     let disk = &cpu.bus.disk;
-    let cds = disk.drives_of_kind(DriveKind::CdRom);
-    let drive = cds
-        .iter()
-        .copied()
-        .find(|&d| disk.boot_cd_image(d).is_some())
-        .or(cds.first().copied())?;
+    let current = cpu.bus.win32.wnaspi32.drive.as_ref().map(|cd| cd.drive);
+    let drive = disk.cd_to_show(current)?;
     let target = disk.ide_slot(drive).is_some_and(|s| s.slave) as u8;
     Some((drive, target))
 }
 
-/// The drive ASPI sends commands to. It is made on the first command, and
-/// again when `cd_drive` picks another CD-ROM drive (a disc moved), with
-/// the disc standing still, as after the BIOS. None without a CD-ROM drive.
+/// The drive ASPI sends commands to. It is made on the first command. When
+/// `cd_drive` shows another CD-ROM drive, the new one is made and, if it
+/// has a disc, that disc is reported as going in, as the IDE channel does
+/// when a disc goes into the drive it shows. None without a CD-ROM drive.
 fn drive_state(cpu: &mut Cpu) -> Option<&mut State> {
     let (drive, _) = cd_drive(cpu)?;
+    let now = cpu.bus.clock.now_ticks();
     let has_disc = cpu.bus.disk.boot_cd_image(drive).is_some();
     let state = &mut cpu.bus.win32.wnaspi32;
     if state.drive.as_ref().is_none_or(|cd| cd.drive != drive) {
-        state.drive = Some(Atapi::new(drive, has_disc));
+        let shown_before = state.drive.is_some();
+        let mut cd = Atapi::new(drive, has_disc && !shown_before);
+        if shown_before && has_disc {
+            cd.media_changed(true, now.max(state.clock));
+        }
+        state.drive = Some(cd);
     }
     Some(state)
 }
@@ -184,23 +185,24 @@ pub(crate) fn media_changed(state: &mut State, drive: u8, has_disc: bool, now: u
 /// SendASPI32Command(srb): carry out the request block `srb`.
 fn send_aspi32_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let srb = args[0];
-    // Without an adapter Windows 98's does nothing: ASPI didn't start.
-    if cd_drive(cpu).is_none() {
+    // Without a CD-ROM drive Windows 98's does nothing: ASPI didn't start.
+    let Some((_, target)) = cd_drive(cpu) else {
         return Some(SS_FAILED_INIT as u32);
-    }
-    // It reads the command and flags first, and faults on a bad pointer.
-    if srb == 0 {
-        return Some(SS_INVALID_SRB as u32);
-    }
+    };
+    // The block's command and flags are read first. A null or unmapped
+    // block faults the program here, as it does in WNASPI32.
     let cmd = cpu.bus.guest_read_8(srb);
     let flags = cpu.bus.guest_read_8(srb + 3);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
     let status = match cmd {
         SC_HA_INQUIRY => ha_inquiry(cpu, srb),
-        SC_GET_DEV_TYPE => get_dev_type(cpu, srb),
-        SC_EXEC_SCSI_CMD => exec_scsi_cmd(cpu, srb, flags),
+        SC_GET_DEV_TYPE => get_dev_type(cpu, srb, target),
+        SC_EXEC_SCSI_CMD => exec_scsi_cmd(cpu, srb, flags, target),
         SC_ABORT_SRB => SS_ABORT_FAIL,
-        SC_RESET_DEV => reset_dev(cpu, srb),
-        SC_GET_DISK_INFO => match device(cpu, srb) {
+        SC_RESET_DEV => reset_dev(cpu, srb, target),
+        SC_GET_DISK_INFO => match device(cpu, srb, target) {
             // Not a disk of INT 13h's: no flags, no geometry.
             Ok(()) => {
                 cpu.bus.guest_fill(srb + 10, 4, 0);
@@ -214,8 +216,7 @@ fn send_aspi32_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // Only a command that reached the drive completes later on. A rejected
     // one (no such target, a bad block) returns its error status and posts
     // nothing.
-    let ran = matches!(cmd, SC_EXEC_SCSI_CMD | SC_RESET_DEV)
-        && matches!(status, SS_COMP | SS_ERR);
+    let ran = matches!(cmd, SC_EXEC_SCSI_CMD | SC_RESET_DEV) && matches!(status, SS_COMP | SS_ERR);
     if !ran {
         return Some(status as u32);
     }
@@ -251,14 +252,12 @@ pub(super) fn posted(cpu: &mut Cpu, _: u32, c: call::Call) {
     call::finish(cpu, c.resume, c.data[0]);
 }
 
-/// The block's adapter and target, if they are the CD-ROM drive's.
-fn device(cpu: &mut Cpu, srb: u32) -> Result<(), u8> {
+/// The block's adapter and target, if they are the CD-ROM drive's (`cd`,
+/// its target).
+fn device(cpu: &mut Cpu, srb: u32, cd: u8) -> Result<(), u8> {
     let ha = cpu.bus.guest_read_8(srb + 2);
     let target = cpu.bus.guest_read_8(srb + 8);
     let lun = cpu.bus.guest_read_8(srb + 9);
-    let Some((_, cd)) = cd_drive(cpu) else {
-        return Err(SS_INVALID_HA);
-    };
     if ha != 0 {
         return Err(SS_INVALID_HA);
     }
@@ -268,15 +267,14 @@ fn device(cpu: &mut Cpu, srb: u32) -> Result<(), u8> {
     Ok(())
 }
 
-/// SC_HA_INQUIRY: the adapter count, and adapter 0's identification.
+/// SC_HA_INQUIRY: the adapter count (one), and adapter 0's identification.
 fn ha_inquiry(cpu: &mut Cpu, srb: u32) -> u8 {
     let ha = cpu.bus.guest_read_8(srb + 2);
-    let count = cd_drive(cpu).is_some() as u8;
-    if ha >= count.max(1) {
+    if ha != 0 {
         return SS_INVALID_HA;
     }
     let mut info = [0u8; 52];
-    info[0] = count;
+    info[0] = 1;
     info[1] = ADAPTER_SCSI_ID;
     info[2..18].copy_from_slice(MANAGER_ID);
     info[18..34].copy_from_slice(ADAPTER_ID);
@@ -290,8 +288,8 @@ fn ha_inquiry(cpu: &mut Cpu, srb: u32) -> u8 {
 }
 
 /// SC_GET_DEV_TYPE: the SCSI device type of the target.
-fn get_dev_type(cpu: &mut Cpu, srb: u32) -> u8 {
-    match device(cpu, srb) {
+fn get_dev_type(cpu: &mut Cpu, srb: u32, cd: u8) -> u8 {
+    match device(cpu, srb, cd) {
         Ok(()) => {
             cpu.bus.guest_write_8(srb + 10, DTYPE_CDROM);
             SS_COMP
@@ -301,8 +299,8 @@ fn get_dev_type(cpu: &mut Cpu, srb: u32) -> u8 {
 }
 
 /// SC_RESET_DEV: the drive's DEVICE RESET. The disc stays as it is.
-fn reset_dev(cpu: &mut Cpu, srb: u32) -> u8 {
-    if let Err(status) = device(cpu, srb) {
+fn reset_dev(cpu: &mut Cpu, srb: u32, cd: u8) -> u8 {
+    if let Err(status) = device(cpu, srb, cd) {
         return status;
     }
     cpu.bus.guest_write_8(srb + EXEC_HA_STAT, 0);
@@ -313,11 +311,11 @@ fn reset_dev(cpu: &mut Cpu, srb: u32) -> u8 {
 /// SC_EXEC_SCSI_CMD: the block's command run on the drive, its data
 /// moved to or from the program's buffer, and the drive's sense data
 /// in the block when the drive reports an error (CHECK CONDITION).
-fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8) -> u8 {
+fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> u8 {
     if !cpu.bus.guest_probe(srb, EXEC_SIZE, true) {
         return SS_INVALID_SRB;
     }
-    if let Err(status) = device(cpu, srb) {
+    if let Err(status) = device(cpu, srb, cd) {
         return status;
     }
     let len = cpu.bus.guest_read_32(srb + EXEC_BUF_LEN);
@@ -325,16 +323,21 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8) -> u8 {
     let sense_len = cpu.bus.guest_read_8(srb + EXEC_SENSE_LEN) as usize;
     let cdb_len = (cpu.bus.guest_read_8(srb + EXEC_CDB_LEN) as usize).min(16);
     let mut cdb = [0u8; 16];
-    cpu.bus.guest_read_bytes(srb + EXEC_CDB, &mut cdb[..cdb_len]);
-    if len > MAX_TRANSFER || len != 0 && !cpu.bus.guest_probe(buf, len as usize, true) {
+    cpu.bus
+        .guest_read_bytes(srb + EXEC_CDB, &mut cdb[..cdb_len]);
+    if len > MAX_TRANSFER || (len != 0 && !cpu.bus.guest_probe(buf, len as usize, true)) {
         return SS_INVALID_SRB;
     }
-    let mut out = vec![0u8; if flags & SRB_DIR_OUT != 0 { len as usize } else { 0 }];
+    let out_len = if flags & SRB_DIR_OUT != 0 {
+        len as usize
+    } else {
+        0
+    };
+    let mut out = vec![0u8; out_len];
     cpu.bus.guest_read_bytes(buf, &mut out);
 
-    if drive_state(cpu).is_none() {
-        return SS_NO_DEVICE;
-    }
+    // Makes the drive if `cd_drive` shows another CD-ROM drive now.
+    drive_state(cpu);
     let now = cpu.bus.clock.now_ticks();
     let bus = &mut cpu.bus;
     let state = &mut bus.win32.wnaspi32;
@@ -374,7 +377,8 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8) -> u8 {
         }
         Some(sense) => {
             cpu.bus.guest_write_8(srb + EXEC_TARG_STAT, STATUS_CHKCOND);
-            let n = sense_len.min(sense.len());
+            // The block's sense area is 16 bytes, whatever SenseLen says.
+            let n = sense_len.min(SENSE_AREA);
             cpu.bus.guest_write_bytes(srb + EXEC_SENSE, &sense[..n]);
             SS_ERR
         }
