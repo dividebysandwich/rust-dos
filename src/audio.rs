@@ -28,7 +28,7 @@ pub trait AudioOutput {
 pub struct AudioBuffer {
     /// The sound device's buffer, in frames (`BLOCKSIZES`).
     pub blocksize: u16,
-    /// The queue on top of it, in milliseconds (`PREBUFFERS`).
+    /// The queue on top of it, in milliseconds, 0 to 100 (`parse_prebuffer`).
     pub prebuffer: u16,
 }
 
@@ -41,8 +41,13 @@ impl Default for AudioBuffer {
 /// The device buffers to choose from, in frames: SDL's take powers of two.
 pub const BLOCKSIZES: [u16; 5] = [128, 256, 512, 1024, 2048];
 
-/// The queues to choose from, in milliseconds.
-pub const PREBUFFERS: [u16; 8] = [5, 10, 15, 20, 25, 30, 40, 50];
+/// The queues the settings menu steps through, in milliseconds. A
+/// `prebuffer` in the config file may be any whole number from 0 to 100,
+/// as DOSBox's is, and need not be one of these.
+pub const PREBUFFERS: [u16; 10] = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80];
+
+/// The largest `prebuffer` the config file accepts, in milliseconds.
+pub const MAX_PREBUFFER: u16 = 100;
 
 impl AudioBuffer {
     /// The milliseconds `frames` play for at the mixer's rate.
@@ -61,15 +66,15 @@ pub fn parse_blocksize(value: &str) -> Result<u16, String> {
         .ok_or_else(|| format!("invalid blocksize '{}' (128, 256, 512, 1024 or 2048)", value.trim()))
 }
 
-/// A `prebuffer` setting, in milliseconds: one of `PREBUFFERS`, with or
-/// without "ms".
+/// A `prebuffer` setting, in milliseconds: a whole number from 0 to
+/// `MAX_PREBUFFER`, with or without "ms".
 pub fn parse_prebuffer(value: &str) -> Result<u16, String> {
     let number = value.trim().trim_end_matches("ms").trim_end();
     number
         .parse::<u16>()
         .ok()
-        .filter(|n| PREBUFFERS.contains(n))
-        .ok_or_else(|| format!("invalid prebuffer '{}' (5, 10, 15, 20, 25, 30, 40 or 50 ms)", value.trim()))
+        .filter(|n| *n <= MAX_PREBUFFER)
+        .ok_or_else(|| format!("invalid prebuffer '{}' (a whole number of ms from 0 to 100)", value.trim()))
 }
 
 /// The BEL character's beep: 200 ms of 880 Hz, mixed into the output.
@@ -352,5 +357,13 @@ mod tests {
             let queued = device.borrow().queued - 735;
             assert!((1400 - 44..1400 + 265).contains(&queued), "{queued}");
         }
+    }
+
+    #[test]
+    fn prebuffer_takes_0_to_100_ms_as_dosbox_does() {
+        assert_eq!(parse_prebuffer("0"), Ok(0));
+        assert_eq!(parse_prebuffer("70"), Ok(70));
+        assert_eq!(parse_prebuffer("100 ms"), Ok(100));
+        assert!(parse_prebuffer("101").is_err());
     }
 }

@@ -758,11 +758,15 @@ programs set.
   sound device, and so how late it is heard: `blocksize` is the device's
   buffer in frames, `128`, `256`, `512` (the default, about 12 ms),
   `1024` or `2048`, and `prebuffer` the queue kept on top of it for a
-  video frame that comes late, in milliseconds: `5`, `10`, `15`, `20`
-  (the default), `25`, `30`, `40` or `50`. Smaller values bring the
-  sound sooner; if it crackles, the host can't keep up with them. Only
-  the rust-dos program has them: the libretro core and the browser leave
-  the buffering to the frontend.
+  video frame that comes late, in milliseconds, a whole number from `0`
+  to `100` as in DOSBox (the default is `20`). Smaller values bring the
+  sound sooner; if it crackles, the host can't keep up with them.
+  `prebuffer` is a target depth, not a minimum: the queue aims at the
+  blocksize plus the prebuffer, and a queue up to about 33 ms above that
+  is kept before sound is dropped, whatever the prebuffer. At `0` any
+  frame that runs about a blocksize late leaves the device dry. Only the
+  rust-dos program has them: the libretro core and the browser leave the
+  buffering to the frontend.
 * The `MIXER` command shows the mixer and changes it at the prompt, or
   from `[autoexec]`, in DOSBox Staging's syntax:
   `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,
