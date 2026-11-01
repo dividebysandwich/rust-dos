@@ -904,7 +904,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
         *out = (value as u32).to_le_bytes();
     }
     let known = drawn_from.reuse(&key, 4 * span * rows);
-    let mask = (plane_size - 1) & bus.vga.display_address_mask();
+    let mask = bus.vga.display_address_mask();
     let mut source = vec![0u8; 4 * span];
 
     // A known cache only needs the VGA's dirty rows checked. Other planar
@@ -932,6 +932,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
         let start = row_base.wrapping_add(row.wrapping_mul(bytes_per_row));
         let first = start.wrapping_add(pan / 8);
         let at = first & mask;
+        let in_one_piece = first.wrapping_add(span - 1) & mask == at + span - 1;
         let drawn = &mut drawn_from.rows[y * 4 * span..(y + 1) * 4 * span];
         let mut same = known;
         for ((plane, kept), wrapped) in vram
@@ -940,12 +941,13 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
             .zip(source.chunks_exact_mut(span))
         {
             // The row's bytes in this plane, gathered where they wrap
-            // around the end of the memory the display can reach.
-            let bytes: &[u8] = if (at + span - 1) & mask == at + span - 1 {
+            // around the end of the memory the display can reach, at the
+            // addresses `planar_row` draws them from.
+            let bytes: &[u8] = if in_one_piece {
                 &plane[at..at + span]
             } else {
                 for (k, byte) in wrapped.iter_mut().enumerate() {
-                    *byte = plane[(at + k) & mask];
+                    *byte = plane[first.wrapping_add(k) & mask];
                 }
                 wrapped
             };
@@ -1028,8 +1030,9 @@ fn planar_row(
 fn render_hicolor(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, bpp: u8) {
     let (width, rows) = bus.vga.graphics_size();
     let plane_size = vram.len() / 4;
+    let mask = bus.vga.display_address_mask();
     // Byte `at` of the chip's linear memory.
-    let byte = |at: usize| vram[(at & 3) * plane_size + ((at >> 2) & (plane_size - 1))] as u16;
+    let byte = |at: usize| vram[(at & 3) * plane_size + ((at >> 2) & mask)] as u16;
     let start = bus.vga.latched_start_addr * 4;
     let pitch = bus.vga.offset_words() * 8;
     let five = |v: u16| ((v << 3) | (v >> 2)) as u8;
@@ -1140,6 +1143,7 @@ fn render_graphics_mode(
     // Keep the scanline for the next frame. This renderer's canvas is
     // either the source width or twice it, so a column map isn't needed.
     let plane_size = vram.len() / 4;
+    let mask = bus.vga.display_address_mask();
     drawn_from.line.resize(width, 0);
     let DrawnFrom { rows: cached_rows, line, changed, .. } = drawn_from;
     let mut changed_rows = 0..0;
@@ -1152,7 +1156,7 @@ fn render_graphics_mode(
         let (row, pan) = if y >= split { ((y - split) * stride, split_pan) } else { (start + y * stride, pan) };
         for (x, index) in line.iter_mut().enumerate() {
             let px = x + pan;
-            *index = vram[(px & 3) * plane_size + ((row + (px >> 2)) & (plane_size - 1))];
+            *index = vram[(px & 3) * plane_size + ((row + (px >> 2)) & mask)];
         }
         let drawn = &mut cached_rows[y * width..(y + 1) * width];
         if known && *drawn == line[..] {
@@ -1735,6 +1739,96 @@ mod planar_tests {
         assert!(!lit(31));
         assert!((32..40).all(lit));
         assert!(!lit(40));
+    }
+
+    #[test]
+    fn a_row_carrying_past_the_map13_bit_notices_a_write_above_it() {
+        // The address counter goes on from 3FFFh to 4000h, which bit 13
+        // doesn't touch: the row's fifth byte is at 4000h, and a frame that
+        // compared it at 0000h would keep the old picture.
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Ega320x200;
+        bus.vga.set_video_mode(bus.video_mode);
+        bus.vga.io_write(0x3C4, 0x02);
+        bus.vga.io_write(0x3C5, 0x01);
+        bus.vga.io_write(0x3D4, 0x17);
+        bus.vga.io_write(0x3D5, 0xE2);
+        let start = 0x4000u16 - 4;
+        bus.vga.io_write(0x3D4, 0x0C);
+        bus.vga.io_write(0x3D5, (start >> 8) as u8);
+        bus.vga.io_write(0x3D4, 0x0D);
+        bus.vga.io_write(0x3D5, start as u8);
+        bus.vga.latch_start_address();
+        let mut frame = Frame::new(320, 200);
+        render_screen_rows(&mut frame, &bus);
+        bus.vga.clear_dirty();
+
+        bus.vga.write_graphics(0x4000, 0xFF);
+        render_screen_rows(&mut frame, &bus);
+        let lit = |x: usize| frame.rgba[x * 4..x * 4 + 3] != [0, 0, 0];
+        assert!(!lit(31));
+        assert!((32..40).all(lit));
+        assert!(!lit(40));
+    }
+
+    #[test]
+    fn mode_12_marks_every_row_a_write_shows_in_once_the_display_wraps() {
+        // Offset 30h is row 0, and also row 103, at 2030h, once bit 13 is
+        // gone. The row of the write alone wouldn't mark that one.
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Vga640x480;
+        bus.vga.set_video_mode(bus.video_mode);
+        bus.vga.io_write(0x3C4, 0x02);
+        bus.vga.io_write(0x3C5, 0x01);
+        bus.vga.io_write(0x3D4, 0x17);
+        bus.vga.io_write(0x3D5, 0xE2);
+        let mut frame = Frame::new(640, 480);
+        render_screen_rows(&mut frame, &bus);
+        bus.vga.clear_dirty();
+
+        bus.vga.write_graphics(0x30, 0xFF);
+        render_screen_rows(&mut frame, &bus);
+        assert_ne!(frame.rgba[103 * 640 * 4..103 * 640 * 4 + 3], [0, 0, 0]);
+    }
+
+    /// Mode 13h with CRTC 17h as `mode_control` has it, byte 0 of the plane
+    /// holding pixel 0 set, and the display starting `start` bytes on in
+    /// the planes. Returns the rows with a lit pixel at the left edge.
+    fn lit_rows_256(mode_control: u8, start: u16) -> Vec<usize> {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Graphics320x200;
+        bus.vga.set_video_mode(bus.video_mode);
+        bus.vga.write_graphics(0, 1);
+        bus.vga.io_write(0x3D4, 0x17);
+        bus.vga.io_write(0x3D5, mode_control);
+        bus.vga.io_write(0x3D4, 0x0C);
+        bus.vga.io_write(0x3D5, (start >> 8) as u8);
+        bus.vga.io_write(0x3D4, 0x0D);
+        bus.vga.io_write(0x3D5, start as u8);
+        bus.vga.latch_start_address();
+        let mut frame = Frame::new(320, 200);
+        render_screen_rows(&mut frame, &bus);
+        (0..200)
+            .filter(|y| frame.rgba[y * 320 * 4..y * 320 * 4 + 3] != [0, 0, 0])
+            .collect()
+    }
+
+    #[test]
+    fn map13_and_map14_wrap_the_256_colour_display() {
+        assert_eq!(lit_rows_256(0xA2, 0x2000 - 80 * 100), [100]);
+        assert_eq!(lit_rows_256(0xA1, 0x4000 - 80 * 100), [100]);
+        assert_eq!(lit_rows_256(0xA3, 0x2000 - 80 * 100), [0usize; 0]);
+    }
+
+    #[test]
+    fn mode_13_is_not_linear_once_the_display_wraps() {
+        let mut bus = Bus::new(std::path::PathBuf::from("."));
+        bus.video_mode = VideoMode::Graphics320x200;
+        bus.vga.set_video_mode(bus.video_mode);
+        assert!(bus.mode13_scanout_is_linear());
+        bus.vga.io_write(0x3D4, 0x17);
+        bus.vga.io_write(0x3D5, 0xA2);
+        assert!(!bus.mode13_scanout_is_linear());
     }
 
     /// Modes 4 and 6 drawn as they were, pixel by pixel.
