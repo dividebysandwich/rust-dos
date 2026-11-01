@@ -193,15 +193,18 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   `audio_driver` says what the counts ran on. Measure underruns on a real
   sound device, muted (on Windows, `SDL_AUDIODRIVER=wasapi` and `--mute`),
   or on the null output (`--audio-output null`) on a machine without one.
-  Never on SDL's `dummy` driver: it plays nothing and runs faster than
-  real time. On Windows 11 it took 512 frames about every 11.4 ms, 44,940
-  frames a second where WASAPI took 44,120. The resampling that holds the
-  queue at its target makes up 0.5% at most, so the queue runs out every
-  few seconds however well the host keeps up. Myth: The Fallen Lords gave
-  10 to 13 dry checks a minute on `dummy` with no frame over 18 ms, and
-  under 1 a minute on WASAPI. Such events have a `gap_ms` shorter than
-  `queued_after_ms`. A count from `dummy` means nothing and can't be
-  corrected afterwards: run it again.
+  Never on SDL's `dummy` driver: it plays nothing, doesn't keep real time,
+  and its dry checks can't be predicted. The resampling that holds the
+  queue at its target makes up 0.5% at most, and one series on Windows 11
+  saw it take 512 frames about every 11.4 ms, 44,940 frames a second
+  where WASAPI took 44,120, so Myth: The Fallen Lords gave 10 to 13 dry
+  checks a minute with no frame over 18 ms. Later, on a quiet machine, the
+  same game gave 0 to 2.3 a minute over six 3-minute runs, on one scene
+  where the null output gave 0 in all six and muted WASAPI 0 to 0.33.
+  Why the rate moves that much isn't known. So a low count from `dummy`
+  doesn't show the host kept up, and a high one doesn't show it fell
+  behind. Its events have a `gap_ms` shorter than `queued_after_ms`. A
+  count from `dummy` can't be corrected afterwards: run it again.
 
   `--mute` is Ctrl+F8 from the start: `pump_audio` hands the device
   silence and it plays on at its own rate, so the queue behaves as with
