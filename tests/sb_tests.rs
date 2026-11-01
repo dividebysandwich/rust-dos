@@ -4,6 +4,7 @@
 
 use rust_dos::bus::Bus;
 use rust_dos::cpu::Cpu;
+use rust_dos::mixer::{MixerSettings, SbFilter};
 use rust_dos::savestate::machine;
 use rust_dos::sb::{SbConfig, SbModel};
 use std::path::PathBuf;
@@ -752,4 +753,100 @@ fn reset_dsp_at(bus: &mut Bus, base: u16) {
     bus.io_write(base + 6, 1);
     bus.io_write(base + 6, 0);
     assert_eq!(bus.io_read(base + 0xA), 0xAA, "the DSP at {:03X}h", base);
+}
+
+/// Play `data` as Prehistorik 2's driver plays its music: a single-cycle
+/// transfer (14h) of the block every 20.017 ms from its timer, at 8403 Hz
+/// (time constant 137), `blocks` times, while the mixer renders every
+/// 1/60 s as the window does and at every DSP write. The card plays a
+/// block in 19.99 ms, so between blocks its DAC holds the last sample.
+/// Returns the left samples rendered, without the output filter.
+fn play_blocks(data: &[u8], blocks: usize) -> Vec<i16> {
+    let mut bus = sb16();
+    let mut settings = MixerSettings::default();
+    settings.sb_filter = SbFilter::Off;
+    bus.set_mixer(settings);
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 137);
+    let len = data.len() as u16;
+    let mut next_pump = bus.clock.icount + 16_667;
+    for block in 0..blocks {
+        let addr = 0x20000 + block % 2 * 0x1000;
+        bus.load_bytes(addr, data);
+        program_dma1(&mut bus, addr as u32, len, false);
+        dsp_write(&mut bus, 0x14);
+        dsp_write(&mut bus, ((len - 1) & 0xFF) as u8);
+        dsp_write(&mut bus, ((len - 1) >> 8) as u8);
+        let end = bus.clock.icount + 20_017;
+        while bus.clock.icount < end {
+            let ms = (end.min(next_pump) - bus.clock.icount) as f64 / 1000.0;
+            wait_ms(&mut bus, ms);
+            if bus.clock.icount >= next_pump {
+                bus.audio_catch_up();
+                next_pump += 16_667;
+            }
+        }
+    }
+    bus.audio_catch_up();
+    bus.audio_out.drain(..).step_by(2).collect()
+}
+
+/// The runs of equal samples in `samples`, as (value, length).
+fn runs(samples: &[i16]) -> Vec<(i16, usize)> {
+    let mut runs: Vec<(i16, usize)> = Vec::new();
+    for &s in samples {
+        match runs.last_mut() {
+            Some((v, n)) if *v == s => *n += 1,
+            _ => runs.push((s, 1)),
+        }
+    }
+    runs
+}
+
+/// Between two single-cycle blocks, and whenever the mixer has rendered up
+/// to a moment the card has no sample for yet, the DAC holds its last
+/// sample: the output never falls back to silence. The mixer used to show
+/// the DSP's idle level for the frames it had got ahead of the card's
+/// queue at the end of each stretch it rendered: 4 or 5 frames of silence,
+/// tens of times a second, heard as a hiss on everything the card played
+/// (Prehistorik 2, issue 415).
+#[test]
+fn the_dac_holds_its_sample_between_blocks_and_frames() {
+    let level: Vec<u8> = vec![0xC0; 168];
+    let samples = play_blocks(&level, 12);
+    let first = samples.iter().position(|&s| s != 0).expect("the level is heard");
+    assert!(samples[first] > 5000, "{}", samples[first]);
+    let level = samples[first];
+    let off: Vec<(usize, i16)> = samples[first..]
+        .iter()
+        .enumerate()
+        .filter(|&(_, &s)| s != level)
+        .map(|(i, &s)| (first + i, s))
+        .collect();
+    assert!(off.is_empty(), "{} frames off the level, the first at {:?}", off.len(), off.first());
+}
+
+/// Each sample of a stream at 8403 Hz lasts 5 or 6 frames at 44.1 kHz. A
+/// sample shown for fewer frames, or one dropped, is the mixer and the card
+/// disagreeing about the time; the card's clock decides, and the only
+/// longer hold is the last sample of a block, kept through the 25 us
+/// before the next one.
+#[test]
+fn every_sample_gets_its_frames() {
+    let ramp: Vec<u8> = (0..168u8).map(|i| 0x40 + i).collect();
+    let blocks = 12;
+    let samples = play_blocks(&ramp, blocks);
+    let first = samples.iter().position(|&s| s != 0).unwrap();
+    let mut runs = runs(&samples[first..]);
+    // The last sample is held for good; the hold's length says nothing.
+    runs.pop();
+    assert_eq!(runs.len(), 168 * blocks - 1, "every sample is heard once");
+    let short: Vec<&(i16, usize)> = runs.iter().filter(|(_, n)| *n < 5).collect();
+    let shown = short.len().min(8);
+    assert!(short.is_empty(), "{} samples shown for under 5 frames: {:?}", short.len(), &short[..shown]);
+    let long: Vec<&(i16, usize)> = runs.iter().filter(|(_, n)| *n > 6).collect();
+    let shown = long.len().min(8);
+    assert!(long.len() <= blocks, "{} samples held over 6 frames: {:?}", long.len(), &long[..shown]);
+    assert!(long.iter().all(|(_, n)| *n <= 12), "{:?}", long);
 }

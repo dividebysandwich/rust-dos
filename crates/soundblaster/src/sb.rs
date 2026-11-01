@@ -6,13 +6,22 @@
 //! samples from the DMA controller at its sample rate, and raises its IRQ
 //! at the end of each block at the emulated time a real card would. The
 //! bus advances it (`advance`) before every port access and when its next
-//! event (`next_event`) is due. The samples go to `out`, which the audio
-//! mixer drains.
+//! event (`next_event`) is due.
+//!
+//! Each sample sets the DAC's level (`dac`), which the card holds until the
+//! next one: through the gap between two single-cycle blocks, and after a
+//! transfer ends, as a real card's DAC does. The output is that level
+//! sampled at the mixer's rate: `advance` makes one frame of `out` for
+//! every frame of emulated time, numbered as the mixer numbers them, and
+//! the mixer takes one for each frame it mixes. Card and mixer count
+//! frames from the same clock, so neither can get ahead of the other, and
+//! a sample's time decides which frames carry it: no frame is guessed
+//! while a sample is late, and none is dropped or doubled to catch up.
 
 use std::collections::VecDeque;
 
 use rust_dos_dma::Dma;
-use rust_dos_audio_core::PIT_HZ;
+use rust_dos_audio_core::{PIT_HZ, RATE, mul_div, mul_div_ceil};
 
 /// Which card is emulated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,10 +232,18 @@ pub struct SoundBlaster {
     /// of units not yet due (in units * PIT ticks).
     last_ticks: u64,
     frac: u64,
-    /// The level held by direct DAC output (command 10h), signed.
-    pub dac: i16,
-    /// Stereo frames produced and the rate they were produced at.
+    /// The DAC's level, left and right, signed: the last sample it was
+    /// given, by a transfer or by command 10h. The DAC holds it until the
+    /// next sample, however long that takes.
+    pub dac: (i16, i16),
+    /// Frames of output at `RATE`, each the DAC's level at the frame's
+    /// time, up to `last_ticks`; the mixer takes one per frame it mixes.
     pub out: VecDeque<(i16, i16)>,
+    /// Frames of output made since power-on, in the mixer's numbering:
+    /// frame n is the level at the first tick t with t * RATE >= n * PIT_HZ.
+    frames: u64,
+    /// Sample frames per second of the last transfer: the rate `dac`
+    /// changes at, for the output filter.
     pub out_rate: u32,
     /// A left sample waiting for its right one.
     pending_left: Option<i16>,
@@ -287,7 +304,9 @@ fn busy_slot(slot: u64) -> bool {
 const OUT_MAX: usize = 48_000;
 
 impl SoundBlaster {
-    pub fn new(config: SbConfig) -> Self {
+    /// A card at emulated time `now` (PIT ticks), from which its output
+    /// frames count.
+    pub fn new(config: SbConfig, now: u64) -> Self {
         let mut sb = Self {
             config,
             reset_stage: 0,
@@ -304,10 +323,11 @@ impl SoundBlaster {
             silence: None,
             irq8: false,
             irq16: false,
-            last_ticks: 0,
+            last_ticks: now,
             frac: 0,
-            dac: 0,
+            dac: (0, 0),
             out: VecDeque::new(),
+            frames: mul_div(now, RATE as u64, PIT_HZ),
             out_rate: 11025,
             pending_left: None,
             mixer_index: 0,
@@ -366,7 +386,7 @@ impl SoundBlaster {
         self.irq16 = false;
         self.sb16_rate = None;
         self.pending_left = None;
-        self.dac = 0;
+        self.dac = (0, 0);
         self.e2_pending = None;
     }
 
@@ -464,8 +484,35 @@ impl SoundBlaster {
     }
 
     /// Run the DSP up to emulated time `now` (PIT ticks): play the DMA
-    /// data that has come due, and raise the block-end IRQs.
+    /// data that has come due, raise the block-end IRQs, and make the
+    /// frames of output due by then, each the DAC's level at its time.
     pub fn advance(&mut self, now: u64, dma: &mut Dma, ram: &[u8]) {
+        let end = mul_div(now, RATE as u64, PIT_HZ);
+        while self.frames < end {
+            self.frames += 1;
+            let at = mul_div_ceil(self.frames, PIT_HZ, RATE as u64);
+            self.run_to(at, dma, ram);
+            self.out.push_back(self.dac);
+        }
+        if self.out.len() > OUT_MAX {
+            let extra = self.out.len() - OUT_MAX;
+            self.out.drain(..extra);
+        }
+        self.run_to(now, dma, ram);
+    }
+
+    /// Whether the card makes no sound: no transfer or silence period runs,
+    /// and the DAC sits at the centre, as do the frames not yet taken.
+    pub fn is_idle(&self) -> bool {
+        self.transfer.is_none()
+            && self.silence.is_none()
+            && self.dac == (0, 0)
+            && self.out.iter().all(|&f| f == (0, 0))
+    }
+
+    /// Run the DSP up to `now`: the DMA units due by then, and the IRQ of a
+    /// block that ends.
+    fn run_to(&mut self, now: u64, dma: &mut Dma, ram: &[u8]) {
         let elapsed = now.saturating_sub(self.last_ticks);
         self.last_ticks = now;
         let Some(t) = self.transfer.filter(|t| !t.paused) else {
@@ -528,7 +575,9 @@ impl SoundBlaster {
         }
     }
 
-    /// Queue samples of a transfer for output.
+    /// Give the DAC the samples of a transfer. Several due in one frame
+    /// leave it at the last: the card changes level faster than the mixer
+    /// samples it.
     fn play(&mut self, t: &Transfer, data: &[u8]) {
         let sample = |i: usize| -> i16 {
             if t.bits16 {
@@ -548,16 +597,13 @@ impl SoundBlaster {
             if t.stereo {
                 match self.pending_left.take() {
                     None => self.pending_left = Some(s),
-                    Some(left) => self.out.push_back((left, s)),
+                    Some(left) => self.dac = (left, s),
                 }
             } else {
-                self.out.push_back((s, s));
+                self.dac = (s, s);
             }
         }
         self.out_rate = if t.stereo { t.rate / 2 } else { t.rate };
-        while self.out.len() > OUT_MAX {
-            self.out.pop_front();
-        }
     }
 
     /// When the DSP next needs attention: the end of the current block
@@ -807,7 +853,10 @@ impl SoundBlaster {
         let sb16 = self.config.model.is_sb16();
         match cmd {
             // Direct DAC: one unsigned 8-bit sample.
-            0x10 => self.dac = (self.params[0] as i16 - 128) << 8,
+            0x10 => {
+                let level = (self.params[0] as i16 - 128) << 8;
+                self.dac = (level, level);
+            }
             // 8-bit single-cycle output; 16h/17h are 2-bit ADPCM, played
             // as plain 8-bit data.
             0x14 | 0x16 | 0x17 => {
@@ -952,7 +1001,7 @@ impl SoundBlaster {
 rust_dos_savestate::state_fields!(Transfer { bits16, stereo, signed, auto_init, input, block, remaining, rate, paused, last_block } skip { high_speed, ignored_logged });
 rust_dos_savestate::state_fields!(SoundBlaster {
     reset_stage, in_command, params, params_needed, read_buf, test_reg, speaker_on, tc_rate, sb16_rate,
-    block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, out_rate, pending_left,
+    block_size, transfer, silence, irq8, irq16, last_ticks, frac, dac, out, frames, out_rate, pending_left,
     mixer_index, mixer, asp_mode, asp_regs, mem8051, irq, dma8, dma16,
 } skip {
     // E2h's state isn't kept, so states saved before it load: the bus
@@ -966,7 +1015,7 @@ mod tests {
 
     #[test]
     fn high_speed_mode_logs_one_ignored_byte_per_transfer() {
-        let mut sb = SoundBlaster::new(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() });
+        let mut sb = SoundBlaster::new(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() }, 0);
         let mut log = Vec::new();
         sb.write(0xC, 0x90, &mut log);
         for byte in [0xD0, 0xD3, 0xE1, 0xDA] {
@@ -985,7 +1034,7 @@ mod tests {
 
     #[test]
     fn sb16_answers_windows_98s_probes_as_a_card_without_an_asp() {
-        let mut sb = SoundBlaster::new(SbConfig::default());
+        let mut sb = SoundBlaster::new(SbConfig::default(), 0);
         let mut log = Vec::new();
         let mut asp_reg = |sb: &mut SoundBlaster, reg: u8| {
             for byte in [0x0F, reg] {
