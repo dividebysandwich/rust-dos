@@ -6,7 +6,8 @@
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
 
-use oxideav_indeo::indeo3::{DecodedPicture, Indeo3PictureDecoder};
+use crate::win32::gdi32::surface::dib_stride;
+use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
 use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
 
 const IV31: u32 = u32::from_le_bytes(*b"IV31");
@@ -75,7 +76,17 @@ impl Codec {
     /// before.
     pub fn decode(&mut self, frame: &[u8]) -> Result<(), String> {
         match &mut self.0 {
-            Some(Decoder::Indeo3(d)) => d.decode(frame).map(|_| ()).map_err(|e| format!("{e:?}")),
+            Some(Decoder::Indeo3(d)) => {
+                // The crate takes a NULL frame as a repeat once a frame
+                // has passed its header checks, and panics when that
+                // frame then failed and there is no picture to repeat.
+                if d.previous().is_none()
+                    && FrameHeader::parse(frame).is_ok_and(|h| h.bitstream.is_null_frame())
+                {
+                    return Err("a NULL frame with no picture before it".to_string());
+                }
+                d.decode(frame).map(|_| ()).map_err(|e| format!("{e:?}"))
+            }
             Some(Decoder::Indeo5(d, last)) => {
                 let out = d.decode(frame).map_err(|e| e.to_string())?;
                 *last = Some((out.output, out.dimensions));
@@ -105,10 +116,11 @@ impl Codec {
     }
 }
 
-/// The distance between rows of a 24-bit DIB `width` pixels wide: rows
-/// are padded to 4 bytes.
-pub fn dib_stride(width: u32) -> usize {
-    (width as usize * 3).next_multiple_of(4)
+/// The bytes of the rows of a DIB, which a file or a program can size so
+/// that they don't fit 32 bits: None then.
+pub fn dib_size(bits: u16, width: u32, height: u32) -> Option<u32> {
+    let stride = dib_stride(width.try_into().ok()?, bits as u32) as u64;
+    stride.checked_mul(height as u64)?.try_into().ok()
 }
 
 /// BT.601 limited range to RGB, in 16.16 fixed point.
@@ -134,7 +146,7 @@ fn bgr(y: u8, u: u8, v: u8) -> [u8; 3] {
 fn indeo3_dib(picture: &DecodedPicture) -> Vec<u8> {
     let (w, h) = (picture.width as usize, picture.height as usize);
     let cw = picture.chroma_width as usize;
-    let stride = dib_stride(picture.width);
+    let stride = dib_stride(picture.width as i32, 24);
     let mut out = vec![0; stride * h];
     for y in 0..h {
         let crow = y / 4 * cw;
@@ -154,7 +166,7 @@ fn indeo3_dib(picture: &DecodedPicture) -> Vec<u8> {
 /// A picture in YUY2, whose chroma is what Indeo 5's codec gives that
 /// format, as a DIB. `width` is even, as YUY2's are.
 fn yuy2_dib(yuy2: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let stride = dib_stride(width as u32);
+    let stride = dib_stride(width as i32, 24);
     let mut out = vec![0; stride * height];
     for (y, line) in yuy2.chunks_exact(width * 2).enumerate() {
         let row = &mut out[(height - 1 - y) * stride..][..width * 3];
@@ -180,11 +192,52 @@ mod tests {
         // Two rows of 2 pixels: white, then black. Black chroma is 128.
         let yuy2 = [235, 128, 235, 128, 16, 128, 16, 128];
         let dib = yuy2_dib(&yuy2, 2, 2);
-        assert_eq!(dib_stride(2), 8);
         assert_eq!(
             dib,
             [0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0]
         );
+    }
+
+    #[test]
+    fn dib_sizes_pad_rows_and_stop_at_32_bits() {
+        assert_eq!(dib_size(24, 2, 3), Some(24));
+        assert_eq!(dib_size(16, 3, 2), Some(16));
+        assert_eq!(dib_size(32, 640, 480), Some(640 * 480 * 4));
+        assert_eq!(dib_size(24, 0x10000, 0x10000), None);
+        assert_eq!(dib_size(24, u32::MAX, 1), None);
+    }
+
+    /// The headers of an Indeo 3 frame of 64 by 64 with no plane data.
+    fn indeo3_frame(flags: u16, data_bits: u32) -> Vec<u8> {
+        use oxideav_indeo::indeo3::{
+            COMBINED_HEADER_LEN, FRAME_HEADER_LEN, MAGIC_FRMH, REQUIRED_DEC_VERSION,
+        };
+        let mut frame = vec![0; COMBINED_HEADER_LEN];
+        let size = COMBINED_HEADER_LEN as u32;
+        frame[8..12].copy_from_slice(&(size ^ MAGIC_FRMH).to_le_bytes());
+        frame[12..16].copy_from_slice(&size.to_le_bytes());
+        let b = &mut frame[FRAME_HEADER_LEN..];
+        b[0..2].copy_from_slice(&REQUIRED_DEC_VERSION.to_le_bytes());
+        b[2..4].copy_from_slice(&flags.to_le_bytes());
+        b[4..8].copy_from_slice(&data_bits.to_le_bytes());
+        b[0x0C..0x0E].copy_from_slice(&64u16.to_le_bytes());
+        b[0x0E..0x10].copy_from_slice(&64u16.to_le_bytes());
+        // Each plane within the bits the header says there are, and past
+        // the end of the frame's bytes.
+        for plane in 0..3 {
+            b[0x10 + 4 * plane..0x14 + 4 * plane].copy_from_slice(&0x200u32.to_le_bytes());
+        }
+        frame
+    }
+
+    #[test]
+    fn a_null_frame_after_a_failed_first_frame_is_refused() {
+        const INTRA: u16 = 4;
+        let mut codec = Codec::new(IV32);
+        assert!(codec.decode(&indeo3_frame(INTRA, 4096)).is_err());
+        let null = oxideav_indeo::indeo3::NULL_FRAME_DATA_SIZE_BITS;
+        assert!(codec.decode(&indeo3_frame(0, null)).is_err());
+        assert!(codec.picture(64, 64).is_none());
     }
 
     #[test]

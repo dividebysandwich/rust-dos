@@ -172,8 +172,14 @@ pub fn parse(len: u32, read: &mut dyn FnMut(u32, u32) -> Option<Vec<u8>>) -> Res
     Ok(avi)
 }
 
-/// The stream a chunk id ("00dc", "01wb") names, if it names one.
+/// The stream whose sample a chunk id ("00dc", "01wb") names, if it names
+/// one. A palette change ("00pc") isn't a sample: counted as one, it
+/// would move every frame after it. Changes aren't applied, so a stream
+/// keeps the palette of its format.
 fn stream_of(id: &[u8]) -> Option<usize> {
+    if &id[2..4] == b"pc" {
+        return None;
+    }
     let tens = (id[0] as char).to_digit(16)?;
     let ones = (id[1] as char).to_digit(16)?;
     Some((tens * 16 + ones) as usize)
@@ -375,7 +381,11 @@ mod tests {
                 chunk(b"avih", &[0; 56]),
                 list(
                     b"strl",
-                    &[strh(b"vids", 0, 2), chunk(b"strf", &[1, 2, 3]), chunk(b"strn", b"v\0")],
+                    &[
+                        strh(b"vids", 0, 2),
+                        chunk(b"strf", &[1, 2, 3]),
+                        chunk(b"strn", b"v\0"),
+                    ],
                 ),
                 list(b"strl", &[strh(b"auds", 2, 6), chunk(b"strf", &[4; 16])]),
             ],
@@ -383,7 +393,13 @@ mod tests {
         let frames = [
             chunk(b"00dc", b"frame"),
             chunk(b"01wb", &[1, 1, 2, 2]),
-            list(b"rec ", &[chunk(b"00dc", b"second"), chunk(b"01wb", &[3, 3, 4, 4, 5, 5, 6, 6])]),
+            list(
+                b"rec ",
+                &[
+                    chunk(b"00dc", b"second"),
+                    chunk(b"01wb", &[3, 3, 4, 4, 5, 5, 6, 6]),
+                ],
+            ),
         ];
         let movi = list(b"movi", &frames);
         let mut body = b"AVI ".to_vec();
@@ -449,6 +465,39 @@ mod tests {
             assert_eq!(a.locate(6), None);
             assert_eq!(v.locate(1), Some((1, 0)));
             assert_eq!(v.locate(2), None);
+        }
+    }
+
+    #[test]
+    fn palette_changes_are_no_samples() {
+        let frames = [
+            chunk(b"00db", b"one"),
+            chunk(b"00pc", &[0, 1, 0, 0, 9, 9, 9, 0]),
+            chunk(b"00db", b"two"),
+        ];
+        let strl = list(b"strl", &[strh(b"vids", 0, 2), chunk(b"strf", &[0; 40])]);
+        let hdrl = list(b"hdrl", &[chunk(b"avih", &[0; 56]), strl]);
+        for index in [false, true] {
+            let mut body = b"AVI ".to_vec();
+            body.extend(&hdrl);
+            body.extend(list(b"movi", &frames));
+            if index {
+                let mut idx = Vec::new();
+                let mut at = 4u32;
+                for f in &frames {
+                    idx.extend(&f[..4]);
+                    idx.extend(AVIIF_KEYFRAME.to_le_bytes());
+                    idx.extend(at.to_le_bytes());
+                    idx.extend(&f[4..8]);
+                    at += f.len() as u32;
+                }
+                body.extend(chunk(b"idx1", &idx));
+            }
+            let bytes = chunk(b"RIFF", &body);
+            let avi = open(&bytes).unwrap();
+            let v = &avi.streams[0];
+            assert_eq!(v.chunks.len(), 2, "index {index}");
+            assert_eq!(data(&bytes, &v.chunks[1]), b"two");
         }
     }
 

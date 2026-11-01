@@ -17,9 +17,10 @@
 //! takes 16, 24 or 32 bits a pixel; the default is 24.
 
 use super::avi::{self, Avi};
-use super::codec::{self, Codec, dib_stride};
+use super::codec::{self, Codec, dib_size};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, Guid};
+use crate::win32::gdi32::surface::dib_stride;
 use crate::win32::kernel32;
 use crate::win32::stubs::{self, Api, Conv, Dll, Vtable};
 
@@ -33,12 +34,7 @@ pub static DLL: Dll = Dll {
     vtables: VTABLES,
 };
 
-const fn stdcall(
-    name: &'static str,
-    ordinal: u16,
-    args: u8,
-    handler: stubs::Handler,
-) -> Api {
+const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: stubs::Handler) -> Api {
     Api {
         name,
         ordinal,
@@ -68,8 +64,8 @@ static APIS: &[Api] = &[
     stdcall("AVIStreamRead", 15, 7, stream_read),
     stdcall("AVIStreamStart", 16, 1, avi_stream_start),
     stdcall("AVIStreamLength", 17, 1, avi_stream_length),
-    stdcall("AVIStreamBeginStreaming", 18, 4, avi_stream_streaming),
-    stdcall("AVIStreamEndStreaming", 19, 1, avi_stream_streaming),
+    stdcall("AVIStreamBeginStreaming", 18, 4, nothing),
+    stdcall("AVIStreamEndStreaming", 19, 1, nothing),
     stdcall("AVIStreamSampleToTime", 20, 2, avi_stream_sample_to_time),
     stdcall("AVIStreamTimeToSample", 21, 2, avi_stream_time_to_sample),
     stdcall("AVIStreamFindSample", 22, 3, stream_find_sample),
@@ -104,8 +100,8 @@ static APIS: &[Api] = &[
     stdcall("IGetFrame_AddRef", 0, 1, get_frame_add_ref),
     stdcall("IGetFrame_Release", 0, 1, get_frame_release),
     stdcall("IGetFrame_GetFrame", 0, 2, get_frame_get),
-    stdcall("IGetFrame_Begin", 0, 4, get_frame_nothing),
-    stdcall("IGetFrame_End", 0, 1, get_frame_nothing),
+    stdcall("IGetFrame_Begin", 0, 4, nothing),
+    stdcall("IGetFrame_End", 0, 1, nothing),
     stdcall("IGetFrame_SetFormat", 0, 7, get_frame_set_format),
 ];
 
@@ -199,18 +195,16 @@ const STREAMTYPE_AUDIO: u32 = u32::from_le_bytes(*b"auds");
 /// AVISTREAMINFOA's and AVISTREAMINFOW's sizes; their names start at 76.
 const AVISTREAMINFOA: usize = 140;
 const AVISTREAMINFOW: usize = 204;
-/// AVIFILEINFOA's and AVIFILEINFOW's; their file types start at 40.
-const AVIFILEINFOA: usize = 104;
-const AVIFILEINFOW: usize = 168;
+/// AVIFILEINFOA's and AVIFILEINFOW's; their file types start at 44.
+const AVIFILEINFOA: usize = 108;
+const AVIFILEINFOW: usize = 172;
 
 /// AVIStreamRead's AVISTREAMREAD_CONVENIENT: as many samples as fit.
 const AVISTREAMREAD_CONVENIENT: i32 = -1;
 
-/// FindSample's flags: FIND_PREV, FIND_NEXT, FIND_FROM_START, and what
-/// to find: FIND_KEY, FIND_ANY.
-const FIND_DIR: u32 = 0x0F;
+/// FindSample's flags: which way (backward without one of these), what
+/// to find, and what to give for it.
 const FIND_NEXT: u32 = 0x01;
-const FIND_PREV: u32 = 0x04;
 const FIND_FROM_START: u32 = 0x08;
 const FIND_TYPE: u32 = 0xF0;
 const FIND_KEY: u32 = 0x10;
@@ -280,8 +274,11 @@ fn write_32(cpu: &mut Cpu, at: u32, value: u32) {
     }
 }
 
+/// What needs no doing here: AVIFileInit and AVIFileExit, and streaming,
+/// which the file handler has no IAVIStreaming for, so that neither
+/// AVIStreamBeginStreaming nor IGetFrame::Begin prepares anything.
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0)
+    Some(AVIERR_OK)
 }
 
 fn unsupported(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -301,8 +298,11 @@ fn no_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// An IGetFrame: a video stream's frames as DIBs.
 #[derive(Clone, Debug, Default)]
 pub struct GetFrame {
-    /// The file and stream, of which it holds a reference.
+    /// The file and stream, of which it holds a reference, and the
+    /// file's IAVIFile, which tells the file from a later one in its
+    /// slot (`frame_file`).
     file: usize,
+    file_iface: u32,
     stream: usize,
     iface: u32,
     refs: u32,
@@ -311,9 +311,11 @@ pub struct GetFrame {
     width: u32,
     height: u32,
     /// The bits a pixel of the DIB given out, its header's bytes (with
-    /// the palette of an uncompressed source) and where it is.
+    /// the palette of an uncompressed source), its rows' bytes and where
+    /// it is.
     bits: u16,
     header: u32,
+    image: u32,
     buffer: u32,
     /// The last sample decoded, or -1.
     last: i64,
@@ -322,6 +324,7 @@ pub struct GetFrame {
 
 crate::state_fields!(GetFrame {
     file,
+    file_iface,
     stream,
     iface,
     refs,
@@ -330,6 +333,7 @@ crate::state_fields!(GetFrame {
     height,
     bits,
     header,
+    image,
     buffer,
     last
 } skip {
@@ -458,15 +462,22 @@ fn stream_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// QueryInterface of a file: IUnknown and IAVIFile are it.
 fn file_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    query_interface(cpu, args, IID_IAVIFILE)
+    query_interface(cpu, args, IID_IAVIFILE, add_ref)
 }
 
 /// QueryInterface of a stream: IUnknown and IAVIStream are it.
 fn stream_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    query_interface(cpu, args, IID_IAVISTREAM)
+    query_interface(cpu, args, IID_IAVISTREAM, add_ref)
 }
 
-fn query_interface(cpu: &mut Cpu, args: &[u32], own: Guid) -> Option<u32> {
+/// QueryInterface(this, iid, out) of an interface whose only other name
+/// is `own`, which `add_ref` counts a reference of.
+fn query_interface(
+    cpu: &mut Cpu,
+    args: &[u32],
+    own: Guid,
+    add_ref: fn(&mut Cpu, u32) -> u32,
+) -> Option<u32> {
     let &[this, iid, out] = args else {
         unreachable!()
     };
@@ -511,8 +522,7 @@ fn file_get_stream(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let mut iface = file(cpu, slot).streams[stream];
     if iface == 0 {
-        let Some(new) = com::new_interface(cpu, dll_index(), IAVISTREAM, slot as u32 + 1, 4)
-        else {
+        let Some(new) = com::new_interface(cpu, dll_index(), IAVISTREAM, slot as u32 + 1, 4) else {
             return Some(AVIERR_MEMORY);
         };
         cpu.bus.guest_write_32(new + com::HEADER, stream as u32);
@@ -574,7 +584,10 @@ fn stream_info(cpu: &mut Cpu, slot: usize, n: usize, wide: bool) -> Vec<u8> {
     // The name: the file's strn, or "file Video #1" as Wine makes it.
     let name = if s.name.is_empty() {
         let kind = s.kind();
-        let count = f.avi.streams[..=n].iter().filter(|o| o.kind() == kind).count();
+        let count = f.avi.streams[..=n]
+            .iter()
+            .filter(|o| o.kind() == kind)
+            .count();
         let what = match kind {
             STREAMTYPE_VIDEO => "Video".to_string(),
             STREAMTYPE_AUDIO => "Audio".to_string(),
@@ -752,7 +765,7 @@ fn stream_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let handle = file(cpu, slot).handle;
     if sample_size != 0 {
         if buffer == 0 {
-            write_32(cpu, bytes_out, samples * sample_size);
+            write_32(cpu, bytes_out, samples.saturating_mul(sample_size));
             write_32(cpu, samples_out, samples);
             return Some(AVIERR_OK);
         }
@@ -768,7 +781,9 @@ fn stream_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 break;
             };
             let take = want.min(room).min((c.size - offset) as u64) as u32;
-            let data = read_at(cpu, handle, c.offset + offset, take)?;
+            let Some(data) = read_at(cpu, handle, c.offset + offset, take) else {
+                return Some(AVIERR_FILEREAD);
+            };
             if data.len() as u32 != take {
                 return Some(AVIERR_FILEREAD);
             }
@@ -792,14 +807,20 @@ fn stream_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         });
     }
     // One sample of its own size.
-    let Some(c) = file(cpu, slot).avi.streams[n].chunks.get(from as usize).copied() else {
+    let Some(c) = file(cpu, slot).avi.streams[n]
+        .chunks
+        .get(from as usize)
+        .copied()
+    else {
         return Some(AVIERR_NODATA);
     };
     if buffer != 0 {
         if size < c.size {
             return Some(AVIERR_BUFFERTOOSMALL);
         }
-        let data = read_at(cpu, handle, c.offset, c.size)?;
+        let Some(data) = read_at(cpu, handle, c.offset, c.size) else {
+            return Some(AVIERR_FILEREAD);
+        };
         if data.len() as u32 != c.size {
             return Some(AVIERR_FILEREAD);
         }
@@ -814,8 +835,7 @@ fn stream_read(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// IAVIStream::FindSample and AVIStreamFindSample(stream, position,
-/// flags): the nearest key (or any, or non-empty) sample from
-/// `position` the way the flags say, or -1.
+/// flags).
 fn stream_find_sample(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[this, position, flags] = args else {
         unreachable!()
@@ -823,40 +843,49 @@ fn stream_find_sample(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((slot, n)) = stream(cpu, this) else {
         return Some(u32::MAX);
     };
-    if flags & FIND_RET != FIND_POS {
-        return Some(u32::MAX);
-    }
     let s = &file(cpu, slot).avi.streams[n];
-    let first = s.start() as i64;
-    let len = s.chunks.len() as i64;
-    let fits = |i: i64| {
-        let c = &s.chunks[i as usize];
-        match flags & FIND_TYPE {
-            FIND_KEY => c.flags & avi::AVIIF_KEYFRAME != 0,
-            FIND_ANY => true,
-            _ => c.size != 0,
-        }
-    };
-    if s.sample_size() != 0 {
-        // Every sample of fixed size is a key one.
-        let p = position as i32 as i64;
-        let end = first + s.length() as i64;
-        return Some(if p >= first && p < end { p as u32 } else { u32::MAX });
+    Some(find_sample(s, position as i32 as i64, flags))
+}
+
+/// The nearest sample `flags` asks for from `position`, or -1, as Wine
+/// finds it: a key frame with FIND_KEY, a sample that isn't empty with
+/// FIND_ANY, and with neither (nor FIND_FORMAT) `position` itself.
+/// FIND_FROM_START searches forward from the stream's first sample. A
+/// stream's format never changes here (avi.rs leaves palette changes
+/// out), so FIND_FORMAT finds nothing.
+fn find_sample(s: &avi::Stream, position: i64, flags: u32) -> u32 {
+    if flags & FIND_RET != FIND_POS {
+        return u32::MAX;
     }
-    // FIND_FROM_START searches forward from the stream's first sample,
-    // as in Wine.
-    let p = if flags & FIND_FROM_START != 0 {
-        0
+    let first = s.start() as i64;
+    let from_start = flags & FIND_FROM_START != 0;
+    let position = if from_start { first } else { position };
+    let forward = from_start || flags & FIND_NEXT != 0;
+    let found = if flags & FIND_TYPE == 0 {
+        Some(position)
+    } else if flags & (FIND_KEY | FIND_ANY) == 0 {
+        None
+    } else if s.sample_size() != 0 {
+        // Every sample of fixed size is a key one.
+        (position < first + s.length() as i64).then_some(position)
     } else {
-        position as i32 as i64 - first
+        let (at, len) = (position - first, s.chunks.len() as i64);
+        let fits = |&i: &i64| {
+            let c = &s.chunks[i as usize];
+            if flags & FIND_KEY != 0 {
+                c.flags & avi::AVIIF_KEYFRAME != 0
+            } else {
+                c.size != 0
+            }
+        };
+        let found = match (at >= 0 && at < len, forward) {
+            (false, _) => None,
+            (true, true) => (at..len).find(fits),
+            (true, false) => (0..=at).rev().find(fits),
+        };
+        found.map(|i| i + first)
     };
-    let found = match flags & FIND_DIR {
-        d if d & FIND_FROM_START != 0 => (0..len).find(|&i| fits(i)),
-        d if d & FIND_PREV != 0 => (0..len.min(p + 1)).rev().find(|&i| fits(i)),
-        d if d & FIND_NEXT != 0 => (p.max(0)..len).find(|&i| fits(i)),
-        _ => (p >= 0 && p < len && fits(p)).then_some(p),
-    };
-    Some(found.map_or(u32::MAX, |i| (i + first) as u32))
+    found.filter(|&p| p >= first).map_or(u32::MAX, |p| p as u32)
 }
 
 /// The stream's header fields for the functions that read them.
@@ -874,12 +903,6 @@ fn avi_stream_start(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// AVIStreamLength(stream): its samples, or -1.
 fn avi_stream_length(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(header(cpu, args[0]).map_or(u32::MAX, |h| h.1))
-}
-
-/// AVIStreamBeginStreaming and AVIStreamEndStreaming: the file handler
-/// has no IAVIStreaming, so streaming needs no preparing.
-fn avi_stream_streaming(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(AVIERR_OK)
 }
 
 /// AVIStreamSampleToTime(stream, sample): its time in milliseconds,
@@ -936,26 +959,40 @@ fn frame(cpu: &mut Cpu, slot: usize) -> &mut GetFrame {
     frames(cpu)[slot].as_mut().expect("an open IGetFrame")
 }
 
-/// The size of a DIB's rows.
-fn dib_size(bits: u16, width: u32, height: u32) -> u32 {
-    (width * bits as u32).div_ceil(32) * 4 * height
+/// The open file the IGetFrame in `slot` reads. None once the program
+/// has released the file more times than it took references, which
+/// closes it under the IGetFrame's own reference.
+fn frame_file(cpu: &mut Cpu, slot: usize) -> Option<usize> {
+    let f = frame(cpu, slot);
+    let (file_slot, iface) = (f.file, f.file_iface);
+    let open = files(cpu).get(file_slot)?.as_ref()?;
+    (open.iface == iface).then_some(file_slot)
 }
 
 /// Sets `slot`'s frame up for the format `wanted`, as IGetFrame::SetFormat
 /// does: a BITMAPINFOHEADER, or 0 or AVIGETFRAMEF_BESTDISPLAYFMT for the
 /// default. False for one it can't give, which it logs.
 fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
-    let (file_slot, stream) = (frame(cpu, slot).file, frame(cpu, slot).stream);
+    let Some(file_slot) = frame_file(cpu, slot) else {
+        return false;
+    };
+    let stream = frame(cpu, slot).stream;
     let format = file(cpu, file_slot).avi.streams[stream].format.clone();
     if format.len() < BITMAPINFOHEADER {
         return false;
     }
-    let read = |at: usize| u32::from_le_bytes([format[at], format[at + 1], format[at + 2], format[at + 3]]);
+    let read = |at: usize| {
+        u32::from_le_bytes([format[at], format[at + 1], format[at + 2], format[at + 3]])
+    };
     let (width, height, compression) = (read(4) as i32, read(8) as i32, read(16));
     let (width, height) = (width.unsigned_abs(), height.unsigned_abs());
     let source_bits = u16::from_le_bytes([format[14], format[15]]);
     let bits = if wanted == 0 || wanted == BESTDISPLAYFMT {
-        if compression == BI_RGB { source_bits } else { 24 }
+        if compression == BI_RGB {
+            source_bits
+        } else {
+            24
+        }
     } else {
         if !cpu.bus.guest_probe(wanted, BITMAPINFOHEADER, false) {
             return false;
@@ -974,23 +1011,32 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
     };
     if compression != BI_RGB && !codec::supported(compression, width, height) {
         let fourcc = String::from_utf8_lossy(&compression.to_le_bytes()).into_owned();
-        cpu.bus
-            .log_string(&format!("[W32] AVIStreamGetFrameOpen: no codec for {fourcc:?}"));
+        cpu.bus.log_string(&format!(
+            "[W32] AVIStreamGetFrameOpen: no codec for {fourcc:?}"
+        ));
         return false;
     }
-    // An uncompressed source's header goes out with its palette.
+    let Some(image) = dib_size(bits, width, height) else {
+        return false;
+    };
+    // An uncompressed source's header goes out with its palette, and
+    // its rows go out as they are, top-down ones too. A decompressed
+    // DIB is bottom-up, without the colour counts of the source.
     let mut header = if compression == BI_RGB {
         format
     } else {
-        format[..BITMAPINFOHEADER].to_vec()
+        let mut out = format[..BITMAPINFOHEADER].to_vec();
+        out[8..12].copy_from_slice(&height.to_le_bytes());
+        out[32..40].fill(0);
+        out
     };
-    let image = dib_size(bits, width, height);
     header[0..4].copy_from_slice(&(BITMAPINFOHEADER as u32).to_le_bytes());
-    header[8..12].copy_from_slice(&height.to_le_bytes());
     header[14..16].copy_from_slice(&bits.to_le_bytes());
     header[16..20].copy_from_slice(&BI_RGB.to_le_bytes());
     header[20..24].copy_from_slice(&image.to_le_bytes());
-    let size = header.len() as u32 + image;
+    let Some(size) = (header.len() as u32).checked_add(image) else {
+        return false;
+    };
     let Some(buffer) =
         crate::win32::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size))
     else {
@@ -1005,6 +1051,7 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
     f.height = height;
     f.bits = bits;
     f.header = header.len() as u32;
+    f.image = image;
     f.last = -1;
     f.codec = Codec::new(compression);
     if old != 0 {
@@ -1016,7 +1063,9 @@ fn set_format(cpu: &mut Cpu, slot: usize, wanted: u32) -> bool {
 /// AVIStreamGetFrameOpen(stream, wanted): an IGetFrame of a video
 /// stream, or 0.
 fn avi_stream_get_frame_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[this, wanted] = args else { unreachable!() };
+    let &[this, wanted] = args else {
+        unreachable!()
+    };
     let Some((file_slot, stream_index)) = stream(cpu, this) else {
         return Some(0);
     };
@@ -1031,8 +1080,10 @@ fn avi_stream_get_frame_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(iface) = com::new_interface(cpu, dll_index(), IGETFRAME, slot as u32 + 1, 0) else {
         return Some(0);
     };
+    let file_iface = file(cpu, file_slot).iface;
     frames(cpu)[slot] = Some(GetFrame {
         file: file_slot,
+        file_iface,
         stream: stream_index,
         iface,
         refs: 1,
@@ -1055,24 +1106,30 @@ fn release_frame(cpu: &mut Cpu, this: u32) -> u32 {
     if f.refs > 0 {
         return f.refs;
     }
+    let file_open = frame_file(cpu, slot).is_some();
     let f = frames(cpu)[slot].take().expect("an open IGetFrame");
     if f.buffer != 0 {
         crate::win32::with_process(cpu, |p, _| p.heap.free(f.buffer));
     }
     com::free_interface(cpu, f.iface);
     // Its reference to the file, through the file's own interface.
-    let iface = file(cpu, f.file).iface;
-    release(cpu, iface);
+    if file_open {
+        release(cpu, f.file_iface);
+    }
     0
 }
 
-fn get_frame_add_ref(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let Some(slot) = frame_slot(cpu, args[0]) else {
-        return Some(0);
+fn add_ref_frame(cpu: &mut Cpu, this: u32) -> u32 {
+    let Some(slot) = frame_slot(cpu, this) else {
+        return 0;
     };
     let f = frame(cpu, slot);
     f.refs += 1;
-    Some(f.refs)
+    f.refs
+}
+
+fn get_frame_add_ref(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(add_ref_frame(cpu, args[0]))
 }
 
 fn get_frame_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -1081,27 +1138,7 @@ fn get_frame_release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// QueryInterface of an IGetFrame: IUnknown and IGetFrame are it.
 fn get_frame_query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[this, iid, out] = args else {
-        unreachable!()
-    };
-    let Some(iid) = Guid::read(cpu, iid) else {
-        return Some(com::E_POINTER);
-    };
-    if out == 0 {
-        return Some(com::E_POINTER);
-    }
-    if iid == com::IID_IUNKNOWN || iid == IID_IGETFRAME {
-        get_frame_add_ref(cpu, &[this]);
-        write_32(cpu, out, this);
-        return Some(com::S_OK);
-    }
-    write_32(cpu, out, 0);
-    Some(com::E_NOINTERFACE)
-}
-
-/// IGetFrame::Begin and End: streaming needs no preparing.
-fn get_frame_nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(AVIERR_OK)
+    query_interface(cpu, args, IID_IGETFRAME, add_ref_frame)
 }
 
 /// IGetFrame::SetFormat(this, wanted, bits, x, y, dx, dy). The DIB is
@@ -1131,7 +1168,10 @@ fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(slot) = frame_slot(cpu, this) else {
         return Some(0);
     };
-    let (file_slot, stream_index) = (frame(cpu, slot).file, frame(cpu, slot).stream);
+    let Some(file_slot) = frame_file(cpu, slot) else {
+        return Some(0);
+    };
+    let stream_index = frame(cpu, slot).stream;
     let f = file(cpu, file_slot);
     let handle = f.handle;
     let s = &f.avi.streams[stream_index];
@@ -1150,12 +1190,13 @@ fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         f.codec = Codec::new(f.compression);
         f.last = -1;
     }
-    let (compression, width, height, bits, header, buffer, last) = (
+    let (compression, width, height, bits, header, image, buffer, last) = (
         f.compression,
         f.width,
         f.height,
         f.bits,
         f.header,
+        f.image,
         f.buffer,
         f.last,
     );
@@ -1176,7 +1217,9 @@ fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if c.size == 0 {
             continue;
         }
-        let data = read_at(cpu, handle, c.offset, c.size)?;
+        let Some(data) = read_at(cpu, handle, c.offset, c.size) else {
+            return Some(0);
+        };
         if compression == BI_RGB {
             raw = Some(data);
         } else if let Err(e) = frame(cpu, slot).codec.decode(&data) {
@@ -1194,7 +1237,7 @@ fn get_frame_get(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             .map(|p| convert(&p, bits, width, height))
     };
     if let Some(picture) = picture {
-        let n = picture.len().min(dib_size(bits, width, height) as usize);
+        let n = picture.len().min(image as usize);
         cpu.bus.guest_write_bytes(buffer + header, &picture[..n]);
     }
     Some(buffer)
@@ -1205,10 +1248,13 @@ fn convert(dib: &[u8], bits: u16, width: u32, height: u32) -> Vec<u8> {
     if bits == 24 {
         return dib.to_vec();
     }
-    let (w, stride) = (width as usize, dib_stride(width));
-    let out_stride = dib_size(bits, width, 1) as usize;
+    let (w, stride) = (width as usize, dib_stride(width as i32, 24));
+    let out_stride = dib_stride(width as i32, bits as u32);
     let mut out = vec![0; out_stride * height as usize];
-    for (from, to) in dib.chunks_exact(stride).zip(out.chunks_exact_mut(out_stride)) {
+    for (from, to) in dib
+        .chunks_exact(stride)
+        .zip(out.chunks_exact_mut(out_stride))
+    {
         let pixels = from[..w * 3].as_chunks::<3>().0.iter();
         if bits == 16 {
             for (p, d) in pixels.zip(to.as_chunks_mut::<2>().0) {
@@ -1241,10 +1287,65 @@ mod tests {
         );
     }
 
+    /// A stream that starts at sample 2, with `chunks` as (size, flags).
+    fn stream(sample_size: u32, chunks: &[(u32, u32)]) -> avi::Stream {
+        let mut header = vec![0; 56];
+        header[28..32].copy_from_slice(&2u32.to_le_bytes());
+        header[32..36].copy_from_slice(&(chunks.len() as u32).to_le_bytes());
+        header[44..48].copy_from_slice(&sample_size.to_le_bytes());
+        let chunks = chunks.iter().map(|&(size, flags)| avi::Chunk {
+            offset: 0,
+            size,
+            flags,
+        });
+        avi::Stream {
+            header,
+            chunks: chunks.collect(),
+            ..avi::Stream::default()
+        }
+    }
+
+    const KEY: u32 = avi::AVIIF_KEYFRAME;
+    const NONE: u32 = u32::MAX;
+
     #[test]
-    fn dib_rows_are_padded_to_4_bytes() {
-        assert_eq!(dib_size(24, 2, 3), 24);
-        assert_eq!(dib_size(16, 3, 2), 16);
-        assert_eq!(dib_size(32, 640, 480), 640 * 480 * 4);
+    fn find_sample_finds_key_frames_either_way() {
+        let s = stream(0, &[(4, KEY), (4, 0), (4, 0), (4, KEY)]);
+        assert_eq!(find_sample(&s, 4, FIND_KEY), 2);
+        assert_eq!(find_sample(&s, 4, FIND_KEY | 4), 2);
+        assert_eq!(find_sample(&s, 3, FIND_KEY | FIND_NEXT), 5);
+        assert_eq!(find_sample(&s, 5, FIND_KEY | FIND_FROM_START), 2);
+        // Nothing before the stream's first sample or past its last.
+        assert_eq!(find_sample(&s, 1, FIND_KEY | FIND_NEXT), NONE);
+        assert_eq!(find_sample(&s, 6, FIND_KEY), NONE);
+    }
+
+    #[test]
+    fn find_any_skips_empty_samples() {
+        let s = stream(0, &[(4, KEY), (0, 0), (0, 0), (4, 0)]);
+        assert_eq!(find_sample(&s, 3, FIND_ANY | FIND_NEXT), 5);
+        assert_eq!(find_sample(&s, 4, FIND_ANY), 2);
+    }
+
+    #[test]
+    fn find_sample_with_no_type_gives_the_position() {
+        let s = stream(0, &[(4, KEY), (0, 0)]);
+        assert_eq!(find_sample(&s, 3, 0), 3);
+        assert_eq!(find_sample(&s, 1, 0), NONE);
+    }
+
+    #[test]
+    fn find_format_finds_nothing() {
+        let s = stream(0, &[(4, KEY)]);
+        assert_eq!(find_sample(&s, 2, 0x40 | FIND_FROM_START), NONE);
+    }
+
+    #[test]
+    fn samples_of_fixed_size_are_all_key_samples() {
+        let s = stream(2, &[(8, KEY), (8, KEY)]);
+        assert_eq!(find_sample(&s, 3, FIND_KEY), 3);
+        assert_eq!(find_sample(&s, 3, FIND_ANY | FIND_FROM_START), 2);
+        assert_eq!(find_sample(&s, 4, FIND_KEY), NONE);
+        assert_eq!(find_sample(&s, 1, FIND_KEY), NONE);
     }
 }

@@ -80,8 +80,9 @@ rust-dos-ne = { path = "crates/ne" }
 # InstallShield's installer archives, unpacked by `rust-dos unpack` and
 # game profiles' installs (crates/installshield).
 rust-dos-installshield = { path = "crates/installshield" }
-# Indeo Video 3, the codec of Video for Windows files (MSVFW32's
-# DrawDib). Pinned: its API changes between 0.0.x versions.
+# Indeo Video 3 and 5, the codecs of Video for Windows files (MSVFW32's
+# DrawDib and AVIFIL32's AVIStreamGetFrame). Pinned: its API changes
+# between 0.0.x versions.
 oxideav-indeo = "=0.0.2"
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }

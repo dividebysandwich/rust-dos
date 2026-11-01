@@ -6144,6 +6144,134 @@ fn get_frame_gives_a_streams_frames_as_dibs() {
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
 }
 
+/// A BITMAPINFOHEADER of `bits` bits a pixel, its image size unset.
+fn bitmap_info(width: u32, height: u32, bits: u16, compression: &[u8; 4]) -> Vec<u8> {
+    let mut info = [40, width, height].map(u32::to_le_bytes).concat();
+    info.extend_from_slice(&1u16.to_le_bytes());
+    info.extend_from_slice(&bits.to_le_bytes());
+    info.extend_from_slice(compression);
+    info.resize(40, 0);
+    info
+}
+
+/// DrawDibDraw reads a compressed frame's bytes only as far as the
+/// program has memory there: a frame's biSizeImage may be 0, or say more
+/// than its buffer holds. Here the buffer is the last 16 bytes of a page
+/// with none after it.
+#[test]
+fn draw_dib_reads_no_further_than_a_frames_memory() {
+    let kernel32: &[&str] = &["ExitProcess", "VirtualAlloc"];
+    let msvfw32: &[&str] = &["DrawDibOpen", "DrawDibDraw", "DrawDibClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    let data = bitmap_info(64, 64, 24, b"IV32");
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, 0x1000, 0x3000, 4])?;
+        a.call(l.import(1))?;
+        a.lea(edi, dword_ptr(eax + 0xFF0))?;
+        a.call(f("DrawDibOpen"))?;
+        a.mov(esi, eax)?;
+        const DDF_DONTDRAW: i32 = 0x10;
+        for arg in [DDF_DONTDRAW, -1, -1, 0, 0] {
+            a.push(arg)?;
+        }
+        a.push(edi)?;
+        a.push(l.at(0) as i32)?;
+        push_args(a, &[0, 0, -1, -1])?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("DrawDibDraw"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 0)?;
+        a.push(esi)?;
+        a.call(f("DrawDibClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("draw_dib_memory", &[("T.EXE", program)]);
+    assert_eq!(code, 1);
+}
+
+/// DrawDibDraw without bits takes the DIB as a packed one, which is what
+/// AVIStreamGetFrame gives.
+#[test]
+fn draw_dib_draws_what_get_frame_gives_with_no_bits() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let avifil32: &[&str] = &[
+        "AVIFileOpenA",
+        "AVIFileGetStream",
+        "AVIStreamGetFrameOpen",
+        "AVIStreamGetFrame",
+    ];
+    let msvfw32: &[&str] = &["DrawDibOpen", "DrawDibDraw"];
+    let gdi32: &[&str] = &["CreateCompatibleDC", "CreateDIBSection", "SelectObject"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", kernel32),
+        ("AVIFIL32.DLL", avifil32),
+        ("MSVFW32.DLL", msvfw32),
+        ("GDI32.DLL", gdi32),
+    ];
+    let names: Vec<&str> = imports.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+    let mut data = bitmap_info(2, 1, 24, &[0; 4]);
+    data.resize(0x100, 0);
+    data[0x40..0x46].copy_from_slice(b"T.AVI\0");
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (file, stream, pixels) = (l.at(0x50), l.at(0x54), l.at(0x58));
+        a.xor(ebx, ebx)?;
+        push_args(a, &[file as i32, l.at(0x40) as i32, 0x20, 0])?;
+        a.call(f("AVIFileOpenA"))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(stream as i32)?;
+        a.push(dword_ptr(file))?;
+        a.call(f("AVIFileGetStream"))?;
+        a.push(0)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamGetFrameOpen"))?;
+        a.push(1)?;
+        a.push(eax)?;
+        a.call(f("AVIStreamGetFrame"))?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        push_args(a, &[l.at(0) as i32, 0, pixels as i32, 0, 0])?;
+        a.push(esi)?;
+        a.call(f("CreateDIBSection"))?;
+        a.push(eax)?;
+        a.push(esi)?;
+        a.call(f("SelectObject"))?;
+        a.call(f("DrawDibOpen"))?;
+        for arg in [0, -1, -1, 0, 0, 0] {
+            a.push(arg)?;
+        }
+        a.push(edi)?;
+        push_args(a, &[0, 0, -1, -1])?;
+        a.push(esi)?;
+        a.push(eax)?;
+        a.call(f("DrawDibDraw"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 0)?;
+        a.mov(eax, dword_ptr(pixels))?;
+        a.cmp(byte_ptr(eax), 9)?;
+        bit_if_equal(a, 1)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family(
+        "draw_dib_packed",
+        &[("T.EXE", program), ("T.AVI", small_avi())],
+    );
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
 const WS_VISIBLE: i32 = 0x1000_0000;
 const PM_REMOVE: i32 = 1;
 

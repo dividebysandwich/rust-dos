@@ -8,13 +8,14 @@
 //! the process heap, which DrawDibDraw then draws with StretchDIBits;
 //! DDF_UPDATE draws it again and DDF_DONTDRAW decompresses without
 //! drawing. DrawDibBegin fails for a DIB no codec of codec.rs takes. An
-//! uncompressed DIB goes to StretchDIBits as it is. A save state doesn't
-//! keep the decoder's picture: the frames after a restore that change it
-//! start from black.
+//! uncompressed DIB goes to StretchDIBits as it is. A save state keeps the
+//! DIB but not the decoder: after a restore the decoder refuses the
+//! frames up to the next key frame, and the picture stays until then.
 
-use super::codec::{self, Codec, dib_stride};
+use super::codec::{self, Codec};
 use crate::cpu::Cpu;
 use crate::win32::gdi32::bitmap;
+use crate::win32::kernel32::virtual_memory::allows;
 use crate::win32::stubs::{self, Api, Conv, Dll};
 
 pub static DLL: Dll = Dll {
@@ -27,12 +28,7 @@ pub static DLL: Dll = Dll {
     vtables: &[],
 };
 
-const fn stdcall(
-    name: &'static str,
-    ordinal: u16,
-    args: u8,
-    handler: stubs::Handler,
-) -> Api {
+const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: stubs::Handler) -> Api {
     Api {
         name,
         ordinal,
@@ -70,6 +66,7 @@ const BI_RGB: u32 = 0;
 
 /// BITMAPINFOHEADER's size.
 const HEADER: u32 = 40;
+const PAGE: u32 = 0x1000;
 const SRCCOPY: u32 = 0x00CC_0020;
 const DIB_RGB_COLORS: u32 = 0;
 
@@ -80,10 +77,9 @@ const PD_CAN_STRETCHDIB: u32 = 0x0002;
 /// A DrawDib handle's state.
 #[derive(Clone, Debug, Default)]
 pub struct DrawDib {
-    /// What DrawDibBegin set up for: the DC, the size drawn to, and the
-    /// source's compression and size.
+    /// What DrawDibBegin set up for: the DC, and the source's compression
+    /// and size.
     hdc: u32,
-    dst: (u32, u32),
     compression: u32,
     width: u32,
     height: u32,
@@ -100,7 +96,6 @@ pub struct DrawDib {
 
 crate::state_fields!(DrawDib {
     hdc,
-    dst,
     compression,
     width,
     height,
@@ -113,10 +108,13 @@ crate::state_fields!(DrawDib {
 
 /// A BITMAPINFOHEADER's fields this needs.
 struct Info {
+    size: u32,
     width: i32,
     height: i32,
+    bit_count: u16,
     compression: u32,
     size_image: u32,
+    clr_used: u32,
 }
 
 fn read_info(cpu: &mut Cpu, at: u32) -> Option<Info> {
@@ -124,11 +122,27 @@ fn read_info(cpu: &mut Cpu, at: u32) -> Option<Info> {
         return None;
     }
     Some(Info {
+        size: cpu.bus.guest_read_32(at),
         width: cpu.bus.guest_read_32(at + 4) as i32,
         height: cpu.bus.guest_read_32(at + 8) as i32,
+        bit_count: cpu.bus.guest_read_16(at + 14),
         compression: cpu.bus.guest_read_32(at + 16),
         size_image: cpu.bus.guest_read_32(at + 20),
+        clr_used: cpu.bus.guest_read_32(at + 32),
     })
+}
+
+/// Where a packed DIB's bits are, after its header and colours.
+fn packed_bits(cpu: &mut Cpu, at: u32) -> Option<u32> {
+    let info = read_info(cpu, at)?;
+    let colours: u32 = match (info.clr_used, info.bit_count) {
+        (0, bits @ 0..=8) => 1 << bits,
+        (used, _) => used,
+    };
+    Some(
+        at.wrapping_add(info.size)
+            .wrapping_add(colours.wrapping_mul(4)),
+    )
 }
 
 fn drawdibs(cpu: &mut Cpu) -> &mut Vec<Option<DrawDib>> {
@@ -202,16 +216,16 @@ fn end(cpu: &mut Cpu, slot: usize) {
 /// DrawDibBegin(hdd, hdc, dxdst, dydst, info, dxsrc, dysrc, flags):
 /// sets up for drawing DIBs like `info`.
 fn draw_dib_begin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[hdd, hdc, dxd, dyd, info, ..] = args else {
+    let &[hdd, hdc, _, _, info, ..] = args else {
         unreachable!()
     };
     let Some(slot) = slot(cpu, hdd) else {
         return Some(0);
     };
-    Some(begin(cpu, slot, hdc, (dxd, dyd), info) as u32)
+    Some(begin(cpu, slot, hdc, info) as u32)
 }
 
-fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool {
+fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, at: u32) -> bool {
     let Some(info) = read_info(cpu, at) else {
         return false;
     };
@@ -219,14 +233,12 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
     let d = dd(cpu, slot);
     let same = d.compression == info.compression && d.width == width && d.height == height;
     d.hdc = hdc;
-    d.dst = dst;
     if same && (d.buffer != 0 || info.compression == BI_RGB) {
         return true;
     }
     end(cpu, slot);
     let d = dd(cpu, slot);
     d.hdc = hdc;
-    d.dst = dst;
     d.compression = info.compression;
     d.width = width;
     d.height = height;
@@ -239,8 +251,12 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
             .log_string(&format!("[W32] DrawDibBegin: no codec for {fourcc:?}"));
         return false;
     }
-    let stride = dib_stride(width) as u32;
-    let size = HEADER + stride * height;
+    let Some(image) = codec::dib_size(24, width, height) else {
+        return false;
+    };
+    let Some(size) = HEADER.checked_add(image) else {
+        return false;
+    };
     let Some(buffer) =
         crate::win32::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size))
     else {
@@ -253,10 +269,9 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
     header[8..12].copy_from_slice(&height.to_le_bytes());
     header[12..14].copy_from_slice(&1u16.to_le_bytes());
     header[14..16].copy_from_slice(&24u16.to_le_bytes());
-    header[20..24].copy_from_slice(&(stride * height).to_le_bytes());
+    header[20..24].copy_from_slice(&image.to_le_bytes());
     cpu.bus.guest_write_bytes(buffer, &header);
-    cpu.bus
-        .guest_fill(buffer + HEADER, (stride * height) as usize, 0);
+    cpu.bus.guest_fill(buffer + HEADER, image as usize, 0);
     let d = dd(cpu, slot);
     d.buffer = buffer;
     d.codec = Codec::new(info.compression);
@@ -264,20 +279,37 @@ fn begin(cpu: &mut Cpu, slot: usize, hdc: u32, dst: (u32, u32), at: u32) -> bool
 }
 
 /// DrawDibDraw(hdd, hdc, xdst, ydst, dxdst, dydst, info, bits, xsrc,
-/// ysrc, dxsrc, dysrc, flags).
+/// ysrc, dxsrc, dysrc, flags). With no `bits` the DIB is a packed one, as
+/// in Wine: what AVIStreamGetFrame gives can be drawn so.
 fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [hdd, hdc, xd, yd, dxd, dyd, info, bits, xs, ys, dxs, dys, flags] =
-        args.try_into().unwrap();
+    let [
+        hdd,
+        hdc,
+        xd,
+        yd,
+        dxd,
+        dyd,
+        info,
+        bits,
+        xs,
+        ys,
+        dxs,
+        dys,
+        flags,
+    ] = args.try_into().unwrap();
     let Some(slot) = slot(cpu, hdd) else {
         return Some(0);
     };
     let d = dd(cpu, slot);
     let same = flags & (DDF_SAME_HDC | DDF_SAME_DRAW) != 0 && d.hdc == hdc;
     let set_up = d.buffer != 0 || (d.compression == BI_RGB && d.width != 0);
-    if (!same || !set_up) && flags & DDF_UPDATE == 0 && !begin(cpu, slot, hdc, (dxd, dyd), info)
-    {
+    if (!same || !set_up) && flags & DDF_UPDATE == 0 && !begin(cpu, slot, hdc, info) {
         return Some(0);
     }
+    let bits = match bits {
+        0 if flags & DDF_UPDATE == 0 => packed_bits(cpu, info).unwrap_or(0),
+        bits => bits,
+    };
     let d = dd(cpu, slot);
     let (width, height) = (d.width, d.height);
     // -1 for a size is the source's own.
@@ -286,7 +318,11 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         (dxs, dys)
     };
-    let (dxd, dyd) = if dxd == u32::MAX { (dxs, dys) } else { (dxd, dyd) };
+    let (dxd, dyd) = if dxd == u32::MAX {
+        (dxs, dys)
+    } else {
+        (dxd, dyd)
+    };
     let (src_info, src_bits) = if d.buffer != 0 {
         if flags & DDF_UPDATE == 0 && bits != 0 {
             decode(cpu, slot, info, bits);
@@ -327,27 +363,47 @@ fn draw_dib_draw(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some((drawn != 0) as u32)
 }
 
+/// How many of the `len` bytes at `at` the program can read, up to the
+/// first page it can't.
+fn readable(cpu: &Cpu, at: u32, len: u32) -> u32 {
+    let mut n = 0;
+    while n < len {
+        let here = at.wrapping_add(n);
+        let run = (PAGE - (here & (PAGE - 1))).min(len - n);
+        if !allows(cpu, here, run, false) {
+            break;
+        }
+        n += run;
+    }
+    n
+}
+
 /// Decompresses the frame `bits` that `info` describes.
 fn decode(cpu: &mut Cpu, slot: usize, info: u32, bits: u32) {
     let Some(info) = read_info(cpu, info) else {
         return;
     };
     let d = dd(cpu, slot);
-    // A frame's own header has its size: the most it can be is what
-    // biSizeImage says, or an uncompressed picture's when that is 0.
-    let size = if info.size_image != 0 {
+    // A frame's own header has its size, and a codec reads no further.
+    // biSizeImage (or an uncompressed picture's size when that is 0) is
+    // only the most it can be: a format's biSizeImage may say more than
+    // the buffer of a frame holds, so what follows the buffer in memory
+    // may not be there.
+    let most = if info.size_image != 0 {
         info.size_image
     } else {
         d.width * d.height * 3
     };
-    let mut frame = vec![0; size as usize];
+    let mut frame = vec![0; readable(cpu, bits, most) as usize];
     cpu.bus.guest_read_bytes(bits, &mut frame);
+    if cpu.bus.guest_faulted() {
+        return;
+    }
     let d = dd(cpu, slot);
     // A copy's (after a restore) starts again.
     if d.codec.is_empty() {
         d.codec = Codec::new(d.compression);
     }
-    // An empty frame repeats the one before.
     if frame.is_empty() {
         return;
     }
