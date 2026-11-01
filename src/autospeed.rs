@@ -80,8 +80,8 @@ const KEPT: f64 = 0.97;
 /// measures anything from 26 to 30 frames a second. A frame more or less in
 /// a measurement is a twentieth, so Doom's 35 reads anything from 34.3 to
 /// 36.4. A record of 36.4 from one measurement would fail steps down that
-/// lost nothing; over `JUDGED` the frames at the ends weigh a quarter of
-/// that, less than `KEPT` allows.
+/// lost nothing; over `JUDGED` one reading weighs a quarter in a mean and
+/// at most 0.42 in a hold's smoothed frame rate, less than `KEPT` allows.
 const JUDGED: u32 = 4;
 /// Kept above the speed the frame rate stopped following at.
 const HEADROOM: f64 = 1.1;
@@ -89,17 +89,21 @@ const HEADROOM: f64 = 1.1;
 const AT_REFRESH: f64 = 0.95;
 /// Measurements the speed holds before trying a little more or less, in
 /// turn, and the frame rate falling below this share of what it held at,
-/// which tries more (a scene that takes more work). It takes two such
-/// measurements in a row: one can be a moment's dip, and Doom's screen wipe
-/// fills one measurement at 22 frames a second between two at 35. The dip
-/// counts for nothing: the speed it would send up takes minutes to come
-/// back, one `SETTLE_DOWN_NS` a step.
+/// which tries more (a scene that takes more work). It takes a second such
+/// measurement within `JUDGED` of the first: one can be a moment's dip, and
+/// Doom's screen wipe fills one measurement at 22 frames a second between
+/// two at 35. The dip counts for nothing: the speed it would send up takes
+/// minutes to come back, one `SETTLE_DOWN_NS` a step. Falls that keep coming
+/// aren't dips, and the good measurements between them don't make up for
+/// what those lose, while none of it shows in the smoothed frame rate.
 const HOLD_WINDOWS: u32 = 30;
 const DROPPED: f64 = 0.8;
 /// A step down that lost frames costs them for all of `SETTLE_DOWN_NS` and
-/// the measurements after it, so each one doubles the hold before the next
-/// try, up to this many times, until the scene changes. A game at its knee
-/// would pay that every half a minute: Doom lost a frame a second to it.
+/// the measurements after it, so each one doubles the hold after it, up to
+/// this many times, until the scene changes. That hold tries more when it
+/// ends and the next, of `HOLD_WINDOWS`, tries less, so a try comes every 65
+/// measurements, then 95, then 155. A game at its knee would pay for one
+/// every half a minute: Doom lost a frame a second to it.
 const MOST_BACKOFFS: u32 = 2;
 /// Emulated time running slower than this share of the host's didn't keep
 /// up: the host can't run that speed now, whatever its estimate says (a
@@ -368,9 +372,11 @@ impl Mark {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Record {
     fps: f64,
-    /// The least speed known to draw it: a step down that keeps it takes
-    /// this along. From a step past the host's estimate, that estimate: the
-    /// speed itself is one the host can't go back to (see `Step::Overshot`).
+    /// The least speed known to draw it: a step down that keeps it, or a
+    /// hold that draws it, takes this along. From a step past the host's
+    /// estimate, that estimate, and from one the host fell behind at, what
+    /// it ran: the speed itself is one it can't go back to (see
+    /// `Step::Overshot`).
     at: u32,
     /// The steps taken above the speed it was missed at.
     climbed: u32,
@@ -409,8 +415,9 @@ enum Step {
     /// what the frame rate is with all it could want, for the record.
     /// `below` is as in `Raised`. The frame rates measured here so far add
     /// up to `sum`, `seen` of them. A step that ended above the host's
-    /// estimate doesn't stay: Myth's 142,000 reads a host of 129,000 at once
-    /// and 90,000 after that, at 0.9 of real time with the sound running dry.
+    /// estimate, or that the host falls behind at, doesn't stay: Myth's
+    /// 142,000 reads a host of 129,000 at once and 90,000 after that, at
+    /// 0.9 of real time with the sound running dry.
     Overshot {
         below: (u32, f64),
         sum: f64,
@@ -427,15 +434,16 @@ enum Step {
     /// The speed is found, at which the program drew `fps`; `left`
     /// measurements before trying a little more (`more`) or less. `recent`
     /// is the frame rate since, smoothed (games' frame rates jitter), over
-    /// `seen` measurements. `dipped` says the last measurement fell by
-    /// `DROPPED`, which is in neither.
+    /// `seen` measurements. A measurement that fell by `DROPPED` is in
+    /// neither, and sets `dipped`: the measurements left in which another
+    /// one is a heavier scene.
     Hold {
         fps: f64,
         left: u32,
         more: bool,
         recent: f64,
         seen: u32,
-        dipped: bool,
+        dipped: u32,
     },
 }
 
@@ -455,10 +463,10 @@ pub struct AutoSpeed {
     /// didn't agree yet, and how many.
     unsettled: Option<(f64, u32)>,
     step: Step,
-    /// What steps down keep to. A frame rate falling by a fifth while
-    /// holding, and a new search, clear it. Only measurements the host kept
-    /// up in set it; falling behind leaves it, for when the host can run
-    /// that speed again.
+    /// What steps down keep to. A heavier scene while holding (`DROPPED`)
+    /// and a new search clear it. Only measurements the host kept up in set
+    /// it; falling behind leaves it, for when the host can run that speed
+    /// again.
     held: Option<Record>,
     /// Steps down that lost frames since the search started, up to
     /// `MOST_BACKOFFS`.
@@ -813,7 +821,7 @@ impl AutoSpeed {
                 more: false,
                 recent: m.refresh,
                 seen: 0,
-                dipped: false,
+                dipped: 0,
             };
             return clamp(c * m.refresh / fps);
         }
@@ -828,7 +836,7 @@ impl AutoSpeed {
                 more,
                 recent: fps,
                 seen: 0,
-                dipped: false,
+                dipped: 0,
             };
             speed
         };
@@ -866,9 +874,10 @@ impl AutoSpeed {
         // low).
         let overshot = |this: &mut Self, below: (u32, f64), fps: f64| {
             if !lagged && this.held.is_none_or(|r| fps >= r.fps) {
+                let ran = if m.pace < KEPT_UP { c * m.pace } else { c };
                 this.held = Some(Record {
                     fps,
-                    at: current.min(top),
+                    at: clamp(ran),
                     climbed: 0,
                 });
             }
@@ -886,7 +895,7 @@ impl AutoSpeed {
                     // A small step that gained nothing: where it came
                     // from was enough.
                     hold(self, from as f64, HOLD_WINDOWS, false)
-                } else if current > top {
+                } else if current > top || m.pace < KEPT_UP {
                     overshot(self, below, fps)
                 } else {
                     // A big step may have gone past the point already. This
@@ -940,15 +949,16 @@ impl AutoSpeed {
                 } else {
                     let left = HOLD_WINDOWS << self.backoffs;
                     self.backoffs = (self.backoffs + 1).min(MOST_BACKOFFS);
-                    if fps >= before * KEPT {
-                        // Only the held frame rate stopped it: `from` kept
-                        // enough of that, and a knee reckoned from this step
-                        // would put the hold above it, a little more each
-                        // time.
+                    if fps >= before * KEPT || seen < JUDGED {
+                        // Only the held frame rate stopped it, or a fall by
+                        // a fifth, more than a step takes (Doom's screen
+                        // wipe): `from` kept enough of that, and a knee
+                        // reckoned from this step would put the hold above
+                        // it, a little more each time.
                         hold(self, from as f64, left, true)
                     } else {
                         let knee = (c * before / fps).clamp(c, from as f64);
-                        hold(self, (knee * HEADROOM).min(from as f64 * HEADROOM), left, true)
+                        hold(self, knee * HEADROOM, left, true)
                     }
                 }
             }
@@ -968,14 +978,14 @@ impl AutoSpeed {
                 };
                 let seen = seen_before + 1;
                 let low = (recent + fps) / 2.0 < held * DROPPED;
-                if low && !dipped {
+                if low && dipped == 0 {
                     self.step = Step::Hold {
                         fps: held,
                         left,
                         more,
                         recent: before,
                         seen: seen_before,
-                        dipped: true,
+                        dipped: JUDGED,
                     };
                     return current;
                 }
@@ -1022,6 +1032,18 @@ impl AutoSpeed {
                         self.held = Some(record);
                     }
                     Some(r) if recent * KEPT > r.fps => self.held = Some(record),
+                    // It draws the record's frames here, where the reckoning
+                    // put it, as a step down would have shown. Left at the
+                    // step that went too far, a frame rate that falls short
+                    // later goes back up there, and takes minutes to come
+                    // down.
+                    Some(r) if !fewer(r) && current < r.at => {
+                        self.held = Some(Record {
+                            at: current,
+                            climbed: 0,
+                            ..r
+                        });
+                    }
                     Some(_) => {}
                 }
                 if left > 1 {
@@ -1031,7 +1053,7 @@ impl AutoSpeed {
                         more,
                         recent,
                         seen,
-                        dipped: false,
+                        dipped: dipped.saturating_sub(1),
                     };
                     current
                 } else if more {
@@ -1487,7 +1509,7 @@ mod tests {
             more: false,
             recent: 26.0,
             seen: 0,
-            dipped: false,
+            dipped: 0,
         };
         for _ in 0..JUDGED * 2 + 1 {
             // More speed gains the scene its frames back from 75,000 on.
@@ -1516,7 +1538,7 @@ mod tests {
             more: false,
             recent: 26.0,
             seen: 0,
-            dipped: false,
+            dipped: 0,
         };
         while auto.held.is_some_and(|r| r.fps == 30.0) {
             let m = Measurement {
@@ -1615,11 +1637,11 @@ mod tests {
             fps: 28.7,
             below: (34_000, 28.7),
         };
-        let speed = auto.decide(142_000, &myth_at(30.0), true, host);
+        let speed = auto.decide(142_000, &drawing(30.0), true, host);
         (auto, speed)
     }
 
-    fn myth_at(fps: f64) -> Measurement {
+    fn drawing(fps: f64) -> Measurement {
         Measurement {
             fps: Some(fps),
             ..STILL
@@ -1641,7 +1663,7 @@ mod tests {
             sum: 60.0,
             seen: 2,
         };
-        let speed = auto.decide(142_000, &myth_at(30.0), true, 100_000);
+        let speed = auto.decide(142_000, &drawing(30.0), true, 100_000);
         assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
         assert!(speed <= 100_000, "{}", speed);
     }
@@ -1661,8 +1683,8 @@ mod tests {
         let (mut auto, speed) = past_the_estimate(800_000);
         assert_eq!(speed, 142_000);
         assert!(matches!(auto.step, Step::Overshot { seen: 2, .. }));
-        assert_eq!(auto.decide(speed, &myth_at(30.0), true, 800_000), speed);
-        assert!(auto.decide(speed, &myth_at(30.0), true, 800_000) < speed);
+        assert_eq!(auto.decide(speed, &drawing(30.0), true, 800_000), speed);
+        assert!(auto.decide(speed, &drawing(30.0), true, 800_000) < speed);
         assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
         assert_eq!(auto.held.expect("a record").at, speed);
     }
@@ -1677,8 +1699,12 @@ mod tests {
             sum: 60.0,
             seen: 2,
         };
-        auto.decide(30_000, &myth_at(28.0), true, 30_000);
-        assert!(!matches!(auto.step, Step::Overshot { .. }), "{:?}", auto.step);
+        auto.decide(30_000, &drawing(28.0), true, 30_000);
+        assert!(
+            !matches!(auto.step, Step::Overshot { .. }),
+            "{:?}",
+            auto.step
+        );
     }
 
     #[test]
@@ -1696,7 +1722,7 @@ mod tests {
                 more: false,
                 recent: f64::NAN,
                 seen: 0,
-                dipped: false,
+                dipped: 0,
             };
             let lucky = Measurement {
                 fps: Some(36.36),
@@ -1755,7 +1781,80 @@ mod tests {
             ..myth(142_000)
         };
         assert!(auto.decide(142_000, &m, true, HOST) < 100_000);
-        assert_eq!(auto.held.map(|r| r.at), Some(142_000));
+        // Its speed is what the host ran, so that a frame rate under the
+        // record doesn't go back to where the sound ran dry.
+        assert_eq!(auto.held.map(|r| r.at), Some(132_060));
+    }
+
+    #[test]
+    fn a_step_the_host_does_not_keep_up_with_does_not_stay() {
+        // The measurement that finds the overshoot is the first to fall
+        // behind, too little yet for `lagged` to limit the speed.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Raised {
+            from: 68_000,
+            fps: 28.7,
+            below: (34_000, 28.7),
+        };
+        let m = Measurement {
+            pace: 0.93,
+            ..drawing(30.0)
+        };
+        assert!(auto.decide(142_000, &m, true, HOST) < 142_000);
+        assert!(matches!(auto.step, Step::Hold { .. }), "{:?}", auto.step);
+        assert_eq!(auto.held.map(|r| r.at), Some(132_060));
+    }
+
+    #[test]
+    fn a_hold_that_draws_the_record_takes_its_speed_along() {
+        // The overshoot sets the record, and the reckoning holds far below
+        // it. A frame rate that falls a little short later goes up a step
+        // from there, and not back to the overshoot.
+        let (mut auto, mut speed) = doom_settled(300);
+        let record = auto.held.expect("a record");
+        assert_eq!(record.at, speed, "{:?}", auto.step);
+        let short = drawing(29.0);
+        speed = auto.decide(speed, &short, false, HOST);
+        assert!(speed <= record.at * 6 / 5, "{} {:?}", speed, record);
+    }
+
+    #[test]
+    fn falls_that_keep_coming_are_a_heavier_scene() {
+        // Every other measurement needs more than twice the speed, and
+        // none of those fall into the smoothed frame rate. With what the
+        // scene wants it draws 35 throughout.
+        let (mut auto, mut speed) = doom_settled(300);
+        let mut frames = Vec::new();
+        for i in 0..200 {
+            let needs = if i % 2 == 0 { 60_000.0 } else { 160_000.0 };
+            let fps = (speed as f64 * 35.0 / needs).min(35.0);
+            frames.push(fps);
+            speed = auto.decide(speed, &drawing(fps), false, HOST);
+        }
+        let later = &frames[100..];
+        let mean = later.iter().sum::<f64>() / later.len() as f64;
+        assert!(mean >= 33.0, "{}: {}", mean, speed);
+    }
+
+    #[test]
+    fn dips_seconds_apart_are_left_alone() {
+        // Some land on steps down, which go back to where they came from
+        // and no higher, or each would add `HEADROOM`.
+        for every in [6, 7, 20, 23] {
+            let (mut auto, mut speed) = doom_settled(300);
+            for i in 0..3000 {
+                let m = if i % every == 0 {
+                    drawing(21.8)
+                } else {
+                    Measurement {
+                        fps: doom(speed, i).fps,
+                        ..STILL
+                    }
+                };
+                speed = auto.decide(speed, &m, false, HOST);
+                assert!(speed <= 110_000, "{}: {} at {}", every, speed, i);
+            }
+        }
     }
 
     #[test]
@@ -1778,7 +1877,11 @@ mod tests {
         assert!(tries.len() >= 4, "{:?}", tries);
         let gaps: Vec<usize> = tries.windows(2).map(|w| w[1] - w[0]).collect();
         assert!(gaps[0] >= HOLD_WINDOWS as usize, "{:?}", gaps);
-        assert!(*gaps.last().unwrap() >= 4 * HOLD_WINDOWS as usize, "{:?}", gaps);
+        assert!(
+            *gaps.last().unwrap() >= 4 * HOLD_WINDOWS as usize,
+            "{:?}",
+            gaps
+        );
         // A heavier scene starts over.
         assert_eq!(auto.backoffs, MOST_BACKOFFS);
         for _ in 0..2 {
@@ -1805,11 +1908,11 @@ mod tests {
             refresh: 60.0,
             ..STILL
         };
-        assert!(auto.decide(87_000, &m, true, HOST) > 87_000);
+        assert_eq!(auto.decide(87_000, &m, true, HOST), 100_000);
     }
 
     #[test]
-    fn a_heavier_scene_gets_more_at_once() {
+    fn a_heavier_scene_gets_more() {
         let mut auto = AutoSpeed::new(3000, None);
         let light = game(35.0 / 30_000.0, 35.0);
         let heavy = game(35.0 / 60_000.0, 35.0);
@@ -1910,7 +2013,7 @@ mod tests {
             more: true,
             recent: 60.0,
             seen: 0,
-            dipped: false,
+            dipped: 0,
         };
         auto.unsettled = Some((f64::NAN, 0));
         assert_eq!(auto.update(bus, true, HOST, 0), None);
@@ -1983,7 +2086,7 @@ mod tests {
             more: false,
             recent: 45.0,
             seen: JUDGED,
-            dipped: false,
+            dipped: 0,
         };
         let scene = |fps| Measurement {
             fps: Some(fps),
