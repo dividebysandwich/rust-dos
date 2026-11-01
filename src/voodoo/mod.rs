@@ -40,13 +40,13 @@ pub mod lfb;
 pub mod mem;
 pub mod mirror;
 pub mod overlay;
-pub mod pages;
 pub mod raster;
 pub mod register;
 pub mod regs;
 pub mod setup;
 pub mod tables;
 pub mod texture;
+pub mod tracker;
 pub mod tsu;
 pub mod workers;
 
@@ -601,23 +601,20 @@ pub struct Voodoo {
     /// With `voodoo_readback=gpu`: whether the renderer's pictures of the
     /// buffers are what reads of them get (`gpu_reads`), whether the
     /// memory is behind them (jobs since were left to the renderer
-    /// alone), whether the program used alpha planes, which the renderer
-    /// keeps where they can't be read back, and the read backs and the
-    /// jobs left to the renderer, for the debugger.
+    /// alone; which bytes are, the tracker in `gpu` keeps), whether the
+    /// program used alpha planes, which the renderer keeps where they
+    /// can't be read back, and the read backs and the jobs left to the
+    /// renderer, for the debugger.
     gpu_reads: bool,
     gpu_behind: Cell<bool>,
-    /// The buffers behind the renderer (`gpu_behind`), by their key in
-    /// the recording (a colour buffer's word offset, None for the
-    /// auxiliary buffer), and rows of each that are, apart from one
-    /// another.
-    gpu_stale: RefCell<Vec<gpu::Stale>>,
     gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
     /// What the reads back covered (`gpu::ReadRows`).
     gpu_rows: RefCell<gpu::ReadRows>,
     gpu_only: Cell<u64>,
-    /// The renderer's copy of a Banshee's memory: which pages it lacks
-    /// (`banshee_scanout`) and which only it has (`gpu`).
+    /// What the renderer has of the card's memory (`tracker`): which
+    /// pages of a Banshee's memory it lacks (`banshee_scanout`), and which
+    /// bytes only it has, in its copy of the memory or in its 3D buffers.
     gpu: RefCell<gpu::Gpu>,
     /// A Banshee's picture changed, which the software picture took
     /// first (`prepare_display`), so the renderer's scanout still has to
@@ -714,7 +711,6 @@ impl Voodoo {
             mirror: RefCell::new(None),
             gpu_reads: false,
             gpu_behind: Cell::new(false),
-            gpu_stale: RefCell::new(Vec::new()),
             gpu_alpha: Cell::new(false),
             gpu_read_backs: Cell::new(0),
             gpu_rows: RefCell::default(),
@@ -1784,7 +1780,7 @@ impl Voodoo {
         self.palette_dirty = true;
         self.display_dirty = true;
         // The memory loaded is newer than anything on the GPU.
-        self.gpu.get_mut().pages.mark_all();
+        self.gpu.get_mut().tracker.mark_all();
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();
             mirror.forget_textures();
@@ -1805,7 +1801,7 @@ impl Voodoo {
             self.release_backlog();
             self.update_tiles();
             // A renderer starting over has none of the picture.
-            self.gpu.get_mut().pages.mark_all();
+            self.gpu.get_mut().tracker.mark_all();
             self.display_dirty = true;
         }
     }
@@ -1861,7 +1857,7 @@ impl Voodoo {
         // pages it changed, which the renderer's copy of the memory may
         // now be read or drawn into at: it gets them again.
         for (start, end) in old.iter().flat_map(|old| old.spans()).map(clamp) {
-            self.gpu.get_mut().pages.mark(start, end);
+            self.gpu.get_mut().tracker.mark(start, end);
         }
         // The software renderer draws the buffers into the memory from
         // now on, where the GPU may have done a 2D operation.
@@ -1956,7 +1952,7 @@ impl Voodoo {
             return;
         };
         // The renderer's copy of the memory gets the pages again.
-        self.gpu.get_mut().pages.mark(start, end);
+        self.gpu.get_mut().tracker.mark(start, end);
         // The texture units read the same memory: what the recording
         // decoded from there is out of date.
         for tmu in &mut self.tmu {
