@@ -873,7 +873,18 @@ pub fn find_program(cpu: &Cpu, command: &str) -> Option<String> {
         Some(_) => return None,
         None => RUNNABLE.iter().map(|ext| format!("{}{}", command, ext)).collect(),
     };
-    let find = |dir: &str| names.iter().map(|n| format!("{}{}", dir, n)).find(|p| cpu.bus.disk.is_file(p));
+    // A saver is a Windows program, so a .SCR file has to be an MZ image;
+    // without the check its bytes would run as a .COM.
+    let scr = name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".SCR");
+    let is_mz = |p: &str| {
+        cpu.bus.disk.file_data(p).and_then(|file| file.read().ok()).is_some_and(|b| b.starts_with(b"MZ"))
+    };
+    let find = |dir: &str| {
+        names
+            .iter()
+            .map(|n| format!("{}{}", dir, n))
+            .find(|p| cpu.bus.disk.is_file(p) && (!scr || is_mz(p)))
+    };
     if let Some(path) = find("") {
         return Some(path);
     }

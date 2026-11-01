@@ -145,7 +145,8 @@ pub fn start(cpu: &mut Cpu) {
     if path.is_empty() {
         return;
     }
-    let line = format!("{} /s", path);
+    // Quoted, so a path with spaces stays one program name.
+    let line = format!("\"{}\" /s", path);
     let startup = crate::win32::kernel32::startup_showing(SW_SHOWNORMAL);
     match crate::win32::kernel32::spawn(cpu, Some(&path), Some(&line), None, false, 0, startup) {
         Ok([process, thread, _, _]) => {
