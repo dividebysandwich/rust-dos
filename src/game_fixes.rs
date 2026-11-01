@@ -446,6 +446,62 @@ fn set_up(ram: &[u8], handler: usize) -> bool {
     })
 }
 
+/// Diagnostics for a scan that finds nothing: where the fix's longest
+/// check (its anchor) occurs in `ram`, and the first check or patch byte
+/// that differs at each such place (at most four). Expected and actual
+/// values are given as the byte at the linear address.
+pub fn scan_report(ram: &[u8], fix: &Fix) -> Option<String> {
+    let Kind::Code(code) = &fix.kind else {
+        return None;
+    };
+    let anchor = code.checks.iter().max_by_key(|b| b.bytes.len())?;
+    let hits: Vec<usize> = Finder::new(anchor.bytes).find_iter(ram).take(4).collect();
+    if hits.is_empty() {
+        return Some(format!(
+            "anchor ({} bytes at +{:#x}) not in {} bytes of RAM",
+            anchor.bytes.len(),
+            anchor.at,
+            ram.len()
+        ));
+    }
+    let mut out = String::new();
+    for p in hits {
+        if p < anchor.at {
+            continue;
+        }
+        let base = p - anchor.at;
+        let pieces = code
+            .checks
+            .iter()
+            .chain(code.patches.iter().map(|(old, _)| old));
+        let mut line = format!("base {base:05X}: ");
+        match pieces.into_iter().find(|b| !has(ram, base, b)) {
+            None => line.push_str("all checks and patch bytes match"),
+            Some(b) => {
+                let k = b
+                    .bytes
+                    .iter()
+                    .enumerate()
+                    .find(|&(i, &v)| ram.get(base + b.at + i) != Some(&v))
+                    .map_or(0, |(i, _)| i);
+                let addr = base + b.at + k;
+                let expected = b.bytes[k];
+                let actual = ram
+                    .get(addr)
+                    .map_or("beyond RAM".to_string(), |v| format!("{v:02X}"));
+                line.push_str(&format!(
+                    "first failing piece at +{:#x} ({} bytes), byte {addr:05X}: expected {expected:02X}, actual {actual}",
+                    b.at,
+                    b.bytes.len()
+                ));
+            }
+        }
+        out.push_str(&line);
+        out.push_str("; ");
+    }
+    Some(out)
+}
+
 /// The bytes to write for `code` at `base`: (linear address, byte).
 pub fn writes(code: &CodePatch, base: usize) -> impl Iterator<Item = (usize, u8)> + '_ {
     code.patches.iter().flat_map(move |(old, new)| {

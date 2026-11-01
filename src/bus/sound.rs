@@ -115,6 +115,21 @@ impl Bus {
         let end = self.ram.len().min(0xA0000);
         let found =
             crate::game_fixes::find_code(&self.ram[..end], |fix| self.game_fix_enabled(fix));
+        for fix in crate::game_fixes::FIXES {
+            if !self.game_fix_enabled(fix) {
+                continue;
+            }
+            if let Some(report) = crate::game_fixes::scan_report(&self.ram[..end], fix) {
+                let matched = found.iter().any(|(f, _, _)| std::ptr::eq(*f, fix));
+                self.log_string(&format!(
+                    "[game fix scan] {}: {} at DSP reset, ram {:05X}: {}",
+                    fix.name,
+                    if matched { "matched" } else { "no match" },
+                    end,
+                    report
+                ));
+            }
+        }
         for (fix, code, base) in found {
             for (addr, byte) in crate::game_fixes::writes(code, base) {
                 self.write_8(addr, byte);
