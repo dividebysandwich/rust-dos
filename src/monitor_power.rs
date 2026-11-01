@@ -51,7 +51,10 @@ pub(crate) fn power_off(
         let frames = bus.monitor_noise.take(rust_dos::opl::RATE as usize / 3);
         let samples: Vec<i16> =
             frames.iter().flat_map(|&s| [(s * gain).clamp(-32768.0, 32767.0) as i16; 2]).collect();
-        if let Some(device) = &mut bus.audio_device {
+        // Past `pump_audio`, which is where the mute silences the device.
+        if let Some(device) = &mut bus.audio_device
+            && !bus.mixer.muted
+        {
             let _ = device.queue(&samples);
         }
     }

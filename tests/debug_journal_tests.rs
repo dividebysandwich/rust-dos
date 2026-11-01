@@ -80,9 +80,8 @@ fn start_with_config(
     let mut child = command
         .arg("-d")
         .arg(dir.join("c"))
-        .args(["--debug-server", "127.0.0.1:0"])
+        .args(["--debug-server", "127.0.0.1:0", "--audio-output", "null"])
         .args(args)
-        .env("SDL_AUDIODRIVER", "dummy")
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr_path).unwrap())
         .spawn()

@@ -141,6 +141,13 @@ impl RoomSound {
         self.playing.push(playing);
     }
 
+    /// Forget what is playing. Sounds only end in `mix_into`, so without a
+    /// device to pull them they would pile up for as long as the run lasts.
+    pub fn clear(&mut self) {
+        self.playing.clear();
+        self.drops.clear();
+    }
+
     /// Whether there is anything to hear.
     pub fn active(&self) -> bool {
         self.ambience.rain > 0.0 || self.rain > 1e-4 || !self.playing.is_empty() || !self.drops.is_empty()
@@ -288,5 +295,14 @@ mod tests {
             assert!(loudness(&samples[..20000]) > 10.0, "{:?}", effect);
             assert!(!room.active(), "{:?} is over", effect);
         }
+    }
+
+    #[test]
+    fn clearing_leaves_nothing_waiting_for_a_device() {
+        let mut room = RoomSound::default();
+        room.play(Effect::Thunder(1.0));
+        assert!(room.active());
+        room.clear();
+        assert!(!room.active());
     }
 }
