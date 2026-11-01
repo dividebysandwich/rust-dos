@@ -2280,10 +2280,7 @@ pub fn msize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn expand(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     heap_size(cpu, args[0])?;
     let (at, size) = (args[0], args[1]);
-    let ok = super::super::with_process(cpu, |p, bus| {
-        p.heap.resize_in_place(&mut p.memory, bus, at, size)
-    });
-    Some(if ok { at } else { 0 })
+    Some(if heap_resize(cpu, at, size) { at } else { 0 })
 }
 
 /// _heapchk() and _heapset(): _HEAPOK. _heapmin(): 0.
