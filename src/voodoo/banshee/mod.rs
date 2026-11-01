@@ -760,7 +760,7 @@ impl Voodoo {
             };
             let addr = b.linear_addr(offset - LINEAR);
             if self.writes_queue() {
-                self.catch_up();
+                self.catch_up_workers();
             }
             let at = addr & self.fbi.mask;
             self.gpu_sync(at, at + 4);
@@ -837,7 +837,7 @@ impl Voodoo {
     /// give, many at once. For a driver in Rust that reads the screen.
     pub fn banshee_memory_read(&self, addr: u32, data: &mut [u8]) {
         if self.writes_queue() {
-            self.catch_up();
+            self.catch_up_workers();
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
@@ -860,7 +860,7 @@ impl Voodoo {
             return;
         }
         if self.writes_queue() {
-            self.catch_up();
+            self.catch_up_workers();
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
@@ -921,7 +921,7 @@ impl Voodoo {
         // program builds the next ones.
         let in_ring = mask == 0xFFFF_FFFF && b.fifo.iter().any(|f| f.holds(addr));
         if self.writes_queue() && !in_ring {
-            self.catch_up();
+            self.catch_up_workers();
         }
         self.gpu_sync(addr & self.fbi.mask, (addr & self.fbi.mask) + 4);
         let ram = &self.fbi.ram;
@@ -940,7 +940,7 @@ impl Voodoo {
             // operation there would otherwise undo the packet.
             if self.recording() {
                 let at = addr & fbmask;
-                self.gpu.get_mut().pages.mark(at, at + 4);
+                self.gpu.get_mut().tracker.mark(at, at + 4);
             }
             self.banshee_fifo_written(addr, now, effect);
         } else {
