@@ -590,6 +590,20 @@ fn send_other(
     task::start(cpu, TASK_SEND, vec![hwnd, msg, wp, lp, 0, 1, id, out], 0)
 }
 
+/// Whether the current thread's function runs again after a send to
+/// another thread: `send` then takes up its wait for the reply.
+pub fn waiting_for_reply(cpu: &mut Cpu) -> bool {
+    awaited_reply(cpu).is_some()
+}
+
+/// The message the current thread waits for the reply of, if that is
+/// where it is: not while it handles one sent to it meanwhile.
+fn awaited_reply(cpu: &mut Cpu) -> Option<u32> {
+    let me = current_tid(cpu);
+    let q = user(cpu).queues.iter().find(|q| q.tid == me)?;
+    q.waiting.last().map(|&(id, _)| id).filter(|&id| id != 0)
+}
+
 /// Whether the thread `tid` is there and hasn't ended.
 fn thread_alive(win32: &crate::win32::Win32, tid: u32) -> bool {
     thread::find(win32, tid).is_some_and(|(p, t)| win32.processes[p].threads[t].exit_code.is_none())
@@ -608,9 +622,7 @@ fn resume_wait(
     lp: u32,
     timeout: Option<(u32, u32)>,
 ) -> Option<Option<u32>> {
-    let me = current_tid(cpu);
-    let q = user(cpu).queues.iter().find(|q| q.tid == me)?;
-    let &(id, _) = q.waiting.last().filter(|&&(id, _)| id != 0)?;
+    let id = awaited_reply(cpu)?;
     let out = timeout.map_or(0, |(_, out)| out);
     Some(task::start(
         cpu,

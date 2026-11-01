@@ -2464,6 +2464,11 @@ pub fn map_window_points(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// through WM_GETTEXT, another's from where USER keeps it.
 pub fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, buffer, size) = (args[0], args[1], args[2]);
+    // Sent to another thread's window, the function runs again when the
+    // reply comes, with the text in the buffer. It only takes the reply.
+    if super::message::waiting_for_reply(cpu) {
+        return send_message_now(cpu, hwnd, WM_GETTEXT, size, buffer);
+    }
     let Some(w) = get(cpu, hwnd).cloned() else {
         if size > 0 && buffer != 0 {
             cpu.bus.guest_write_8(buffer, 0);
