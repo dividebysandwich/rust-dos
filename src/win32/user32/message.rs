@@ -43,6 +43,7 @@ pub const WM_QUIT: u32 = 0x0012;
 pub const WM_QUERYOPEN: u32 = 0x0013;
 pub const WM_ERASEBKGND: u32 = 0x0014;
 pub const WM_SYSCOLORCHANGE: u32 = 0x0015;
+pub const WM_ENDSESSION: u32 = 0x0016;
 pub const WM_SHOWWINDOW: u32 = 0x0018;
 pub const WM_CTLCOLOR: u32 = 0x0019;
 pub const WM_SETTINGCHANGE: u32 = 0x001A;
@@ -605,7 +606,7 @@ fn awaited_reply(cpu: &mut Cpu) -> Option<u32> {
 }
 
 /// Whether the thread `tid` is there and hasn't ended.
-fn thread_alive(win32: &crate::win32::Win32, tid: u32) -> bool {
+pub fn thread_alive(win32: &crate::win32::Win32, tid: u32) -> bool {
     thread::find(win32, tid).is_some_and(|(p, t)| win32.processes[p].threads[t].exit_code.is_none())
 }
 

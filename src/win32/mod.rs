@@ -966,8 +966,9 @@ pub(crate) fn exit(cpu: &mut Cpu, code: u32) {
     end_process(cpu, index, code);
 }
 
-/// End every process, the running one last, each with exit code 0.
-pub(crate) fn end_session(cpu: &mut Cpu) {
+/// End every process but the running one, with exit code 0: the session
+/// ends (user32/session.rs).
+pub(crate) fn end_others(cpu: &mut Cpu) {
     loop {
         let win32 = &cpu.bus.win32;
         let Some(other) = (0..win32.processes.len()).find(|&i| i != win32.running) else {
@@ -975,7 +976,6 @@ pub(crate) fn end_session(cpu: &mut Cpu) {
         };
         end_process(cpu, other, 0);
     }
-    exit(cpu, 0);
 }
 
 /// End the process at `index` with exit code `code`, as `exit`. Whether

@@ -25,6 +25,7 @@ pub mod progman;
 pub mod rect;
 pub mod resource;
 pub mod saver;
+pub mod session;
 pub mod sysparams;
 pub mod text;
 pub mod window;
@@ -370,16 +371,6 @@ fn succeed(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// A function that does nothing and returns 0.
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
-}
-
-/// ExitWindowsEx(flags, reserved): logging off, a shutdown and a restart
-/// all end the built-in Windows' session, so every process ends and the
-/// DOS prompt comes back. Setup programs ask for this when they are done
-/// and wait for it. The processes get no WM_QUERYENDSESSION, so none can
-/// refuse.
-fn exit_windows_ex(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    super::end_session(cpu);
-    None
 }
 
 /// The string at `at`, one char per byte. None if a page isn't there.
@@ -1234,7 +1225,7 @@ static APIS: &[Api] = &[
         2,
         sysparams::change_display_settings,
     ),
-    stdcall("ExitWindowsEx", 422, 2, exit_windows_ex),
+    stdcall("ExitWindowsEx", 422, 2, session::exit_windows_ex),
     stdcall("GetGuiResources", 423, 2, nothing),
     stdcall(
         "GetProcessWindowStation",
