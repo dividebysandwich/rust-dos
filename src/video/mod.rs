@@ -406,7 +406,9 @@ pub fn changed_rows_in(
 /// The size of the picture of the current video mode: 640x400 for the
 /// text and CGA modes, and for the others their size, doubled in each
 /// direction where it is small (mode 13h's 320x200 is 640x400, mode 12h
-/// 640x480, a 320x240 "mode X" 640x480).
+/// 640x480, a 320x240 "mode X" 640x480). A graphics picture narrower than
+/// its raster has the overscan colour beside it (`Vga::graphics_border`),
+/// and the frame keeps the raster's size.
 pub fn frame_size(bus: &Bus) -> (u32, u32) {
     // A 3dfx card showing its picture instead of the VGA's.
     if let Some(v) = &bus.voodoo
@@ -423,6 +425,7 @@ pub fn frame_size(bus: &Bus) -> (u32, u32) {
         | VideoMode::Vga640x480
         | VideoMode::Vga640x480Mono => {
             let (width, rows) = bus.vga.graphics_size();
+            let width = width + bus.vga.graphics_border();
             let width = if width < 400 { width * 2 } else { width };
             let rows = if rows < 300 { rows * 2 } else { rows };
             (width as u32, rows as u32)
@@ -503,6 +506,7 @@ pub fn render_screen_rows(frame: &mut Frame, bus: &Bus) -> std::ops::Range<usize
             candidates,
             &mut frame.drawn_from,
         );
+        let w = w + bus.vga.graphics_border();
         frame.doubled = (frame.width as usize, frame.height as usize) == (2 * w, 2 * rows);
         return frame.drawn_from.changed.clone();
     }
@@ -510,6 +514,7 @@ pub fn render_screen_rows(frame: &mut Frame, bus: &Bus) -> std::ops::Range<usize
     if bus.video_mode.is_planar() && !bus.vga.adapter.gate_array() {
         let (w, rows) = bus.vga.graphics_size();
         render_planar(&mut frame.rgba, width, &bus.vga.vram_graphics, bus, &mut frame.drawn_from);
+        let w = w + bus.vga.graphics_border();
         frame.doubled = (frame.width as usize, frame.height as usize) == (2 * w, 2 * rows);
         return frame.drawn_from.changed.clone();
     }
@@ -851,10 +856,11 @@ fn vbe_row<const B: usize>(src: &[u8], out: &mut [u8], scale: usize, rgb: impl F
 ///
 /// Reads pixels out of the 4-plane memory layout and runs each 4-bit pixel
 /// through the Attribute Controller palette, then the DAC, scaling the
-/// picture to the canvas. Covers every pixel of the canvas, and leaves the
-/// rows whose plane bytes are those it drew them from last time as they
-/// are: a program drawing a sprite marks the whole screen dirty, and only
-/// the sprite's rows are converted again.
+/// picture to the canvas, with the overscan colour right of it
+/// (`Vga::graphics_border`). Covers every pixel of the canvas, and leaves
+/// the rows whose plane bytes are those it drew them from last time as
+/// they are: a program drawing a sprite marks the whole screen dirty, and
+/// only the sprite's rows are converted again.
 fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, drawn_from: &mut DrawnFrom) {
     let (width, rows) = bus.vga.graphics_size();
     // The planes the Color Plane Enable register lets through, and the
@@ -876,8 +882,12 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
     let plane_size = vram.len() / 4;
     // The source pixel of each canvas column, and a row's pixels as
     // values.
-    let columns: Vec<usize> = (0..canvas_w).map(|tx| tx * width / canvas_w).collect();
+    let border = bus.vga.graphics_border();
+    let shown = canvas_w * width / (width + border);
+    let columns: Vec<usize> = (0..shown).map(|tx| tx * width / shown).collect();
     let mut line = vec![0u8; width + 16];
+    let (r, g, b) = bus.vga.overscan_rgb();
+    let overscan = [r, g, b, 255];
 
     // The rows drawn before are still there if the colors, the shape, the
     // panning and the split screen's first row are the same. Each row is
@@ -886,7 +896,7 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
     // it changes its panning, and its bytes may be the same on both sides.)
     let spans = |pan: usize| (pan % 8 + width).div_ceil(8);
     let span = spans(pan).max(spans(split_pan));
-    let mut key = [0u8; 1 + 16 * 3 + 7 * 4];
+    let mut key = [0u8; 1 + 16 * 3 + 8 * 4 + 3];
     key[0] = b'P';
     key[1..49].copy_from_slice(colors.map(|(r, g, b)| [r, g, b]).as_flattened());
     for (value, out) in [
@@ -897,12 +907,14 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
         pan,
         split_pan,
         split.min(rows),
+        border,
     ]
     .into_iter()
     .zip(key[49..].as_chunks_mut::<4>().0)
     {
         *out = (value as u32).to_le_bytes();
     }
+    key[81..].copy_from_slice(&overscan[..3]);
     let known = drawn_from.reuse(&key, 4 * span * rows);
     let mask = bus.vga.display_address_mask();
     let mut source = vec![0u8; 4 * span];
@@ -962,8 +974,9 @@ fn render_planar(canvas: &mut [u8], canvas_w: usize, vram: &[u8], bus: &Bus, dra
         }
         drawn_from.changed(ty..ty + 1);
         planar_row(vram, plane_size, mask, start, pan, width, &mut line);
-        let out = &mut canvas[dst..dst + row_bytes];
-        if canvas_w == 2 * width {
+        let (out, right) = canvas[dst..dst + row_bytes].split_at_mut(shown * 4);
+        right.as_chunks_mut::<4>().0.fill(overscan);
+        if shown == 2 * width {
             for (px, &v) in out.as_chunks_mut::<8>().0.iter_mut().zip(&line[..width]) {
                 let (r, g, b) = colors[v as usize];
                 *px = [r, g, b, 255, r, g, b, 255];
@@ -1092,7 +1105,8 @@ fn planar_pixel(vram: &[u8], bytes_per_row: usize, x: usize, y: usize, base: usi
 
 /// 256-color modes: mode 13h and the unchained "mode X" family (320x240,
 /// 360x480, ...), whatever size the CRTC registers give them, scaled to
-/// the canvas, `canvas_w` pixels wide.
+/// the canvas, `canvas_w` pixels wide, with the overscan colour right of
+/// the picture (`Vga::graphics_border`).
 fn render_graphics_mode(
     canvas: &mut [u8],
     canvas_w: usize,
@@ -1124,24 +1138,30 @@ fn render_graphics_mode(
     });
     let canvas_h = canvas.len() / (canvas_w * 4);
     let row_bytes = canvas_w * 4;
+    let border = bus.vga.graphics_border();
+    let shown = canvas_w * width / (width + border);
+    let (r, g, b) = bus.vga.overscan_rgb();
+    let overscan = [r, g, b, 255];
 
     // The rows drawn before are still there if the colors and the shape
     // are the same.
-    let mut key = [0u8; 256 * 3 + 4 * 4];
+    let mut key = [0u8; 256 * 3 + 5 * 4 + 3];
     key[..768].copy_from_slice(colors.as_flattened());
-    for (value, out) in [width, rows, canvas_w, canvas_h]
+    for (value, out) in [width, rows, canvas_w, canvas_h, border]
         .into_iter()
         .zip(key[768..].as_chunks_mut::<4>().0)
     {
         *out = (value as u32).to_le_bytes();
     }
+    key[788..].copy_from_slice(&overscan[..3]);
     let known = drawn_from.reuse(&key, width * rows);
     let first_row = candidates.start * rows / canvas_h;
     let end_row = (candidates.end * rows).div_ceil(canvas_h).min(rows);
     let source_rows = if known { first_row..end_row } else { 0..rows };
 
-    // Keep the scanline for the next frame. This renderer's canvas is
-    // either the source width or twice it, so a column map isn't needed.
+    // Keep the scanline for the next frame. The picture on this renderer's
+    // canvas is either the source width or twice it, so a column map isn't
+    // needed.
     let plane_size = vram.len() / 4;
     let mask = bus.vga.display_address_mask();
     drawn_from.line.resize(width, 0);
@@ -1169,8 +1189,10 @@ fn render_graphics_mode(
             changed_rows.start = changed_rows.start.min(first);
             changed_rows.end = changed_rows.end.max(end);
         }
-        let dst = &mut canvas[first * row_bytes..(first + 1) * row_bytes];
-        if canvas_w == 2 * width {
+        let row = &mut canvas[first * row_bytes..(first + 1) * row_bytes];
+        let (dst, right) = row.split_at_mut(shown * 4);
+        right.as_chunks_mut::<4>().0.fill(overscan);
+        if shown == 2 * width {
             // Each pixel twice: its color looked up once.
             for (pair, &index) in dst.as_chunks_mut::<8>().0.iter_mut().zip(line.iter()) {
                 let [r, g, b] = colors[index as usize];

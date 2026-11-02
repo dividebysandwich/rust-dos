@@ -908,10 +908,8 @@ impl VgaCard {
     pub fn graphics_size(&self) -> (usize, usize) {
         let pixels_per_char = if self.adapter.is_et4000() {
             self.et4000.pixels_per_char(self)
-        } else if self.graphics_regs[0x05] & 0x40 != 0 {
-            4
         } else {
-            8
+            self.vga_pixels_per_char()
         };
         let width = (self.crtc_regs[0x01] as usize + 1) * pixels_per_char;
         let mut scanlines = (self.crtc_regs[0x09] as usize & 0x1F) + 1;
@@ -920,6 +918,42 @@ impl VgaCard {
         }
         let rows = self.peek_timing().display as usize / scanlines;
         (width.clamp(16, 1024), rows.clamp(1, 1024))
+    }
+
+    /// Pixels a character clock shows in a VGA's graphics modes.
+    fn vga_pixels_per_char(&self) -> usize {
+        if self.graphics_regs[0x05] & 0x40 != 0 { 4 } else { 8 }
+    }
+
+    /// The pixels of overscan colour right of a graphics picture. The
+    /// picture ends at Horizontal Display End and the beam goes on in the
+    /// overscan colour until Start Horizontal Blanking, so a program that
+    /// lowers only Display End narrows the picture inside a raster of the
+    /// same width. Prehistorik 2 does that to hide the column it draws
+    /// scenery into as the map scrolls. The VGA's mode tables start the
+    /// blanking right after the picture, and so do programs that move both
+    /// registers for a mode of their own.
+    ///
+    /// None on an EGA, whose tables leave a border in every mode, nor on
+    /// an ET4000, whose modes have registers of their own: their frames
+    /// stay the size of the picture.
+    pub fn graphics_border(&self) -> usize {
+        if !self.adapter.vga_bios() || self.adapter.is_et4000() {
+            return 0;
+        }
+        let display = self.crtc_regs[0x01] as usize + 1;
+        let blank = self.crtc_regs[0x02] as usize;
+        let total = self.crtc_regs[0x00] as usize + 5;
+        if blank <= display || blank > total {
+            return 0;
+        }
+        (blank - display) * self.vga_pixels_per_char()
+    }
+
+    /// The colour of the overscan: the DAC entry the Overscan Color
+    /// register names directly, past the palette registers.
+    pub fn overscan_rgb(&self) -> (u8, u8, u8) {
+        self.get_rgb(self.attribute_regs[0x11] & self.dac_mask)
     }
 
     /// The CRTC Offset register: the words (in a plane) from one row of
