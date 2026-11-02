@@ -450,6 +450,11 @@
 # How the music and the chorus are mixed, as reverb_mix: 0 dry, 100 the
 # chorus alone, 50 (the default) both in full.
 #chorus_mix=50
+# What plays the sound: auto (the default: SDL's sound device, or the null
+# output in a run with no window where SDL_AUDIODRIVER names no driver, and
+# when there is no sound device), sdl (SDL's sound device) or null (nothing
+# plays, and the queue empties at exactly 44,100 frames a second).
+#audio_output=auto
 # How much sound waits for the sound device, and so how late it is heard:
 # the device's buffer in frames, 128, 256, 512 (the default, about 12 ms),
 # 1024 or 2048, and the queue on top of it in milliseconds, 5, 10, 15, 20

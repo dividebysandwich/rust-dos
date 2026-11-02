@@ -84,9 +84,10 @@ fn timers(cpu: &mut Cpu) -> &mut Timers {
 }
 
 /// timeGetTime: the milliseconds since the machine started, by the
-/// emulated clock.
+/// emulated clock. It reads the clock as GetTickCount does, so an idle
+/// proof follows it (`idle::tick_count`).
 pub fn time_get_time(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(now_ms(cpu))
+    Some(crate::idle::tick_count(cpu))
 }
 
 pub fn now_ms(cpu: &Cpu) -> u32 {

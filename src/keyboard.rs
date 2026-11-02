@@ -317,6 +317,11 @@ impl KeyboardState {
         std::mem::take(&mut self.pressed)
     }
 
+    /// Whether a key went down since `take_pressed` was last called.
+    pub fn has_pressed(&self) -> bool {
+        self.pressed.iter().any(|&w| w != 0)
+    }
+
     fn is_held(&self, id: usize) -> bool {
         self.held[id / 64] & 1 << (id % 64) != 0
     }

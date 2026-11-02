@@ -278,6 +278,8 @@ static APIS: &[Api16] = &[
     rust("RegEnumKey", 216, "llpl", reg_fail),
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
+    rust("GetCurrentDirectory", 411, "lp", get_current_directory),
+    rust("SetCurrentDirectory", 412, "p", set_current_directory),
     // Flat thunks (flat.rs).
     register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
     rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
@@ -1524,6 +1526,42 @@ pub fn lstrcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
     })
+}
+
+/// GetCurrentDirectory(length, buffer), ordinal 411: the current drive's
+/// directory as "C:\DIR", or "C:\" at the root, with no trailing
+/// backslash. Like Win32's, it returns the length without the NUL when
+/// the buffer holds the path. When it doesn't, it writes nothing and
+/// returns the length needed, NUL included.
+fn get_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The length is 16 bits: Wine's GetCurrentDirectory16 takes a UINT16
+    // and ignores the high word.
+    let size = args[0] & 0xFFFF;
+    let drive = cpu.bus.disk.get_current_drive();
+    // The path Win32's GetCurrentDirectoryA gives, in DOS's bytes.
+    let path =
+        crate::dosstr::to_bytes(&crate::win32::kernel32::path::current_directory(cpu, drive));
+    let needed = path.len() as u32 + 1;
+    if size < needed {
+        return Some(needed);
+    }
+    copy_string(cpu, args[1], size, &path);
+    Some(path.len() as u32)
+}
+
+/// SetCurrentDirectory(path), ordinal 412: makes `path`'s directory the
+/// current one of its drive and that drive the current drive, as Win32's
+/// SetCurrentDirectory does (Wine's KERNEL.412 calls it). Returns TRUE, or
+/// FALSE when there is no path or the directory isn't there.
+fn set_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let name = name_of(cpu, args[0]);
+    if name.is_empty() {
+        return Some(0);
+    }
+    let name = crate::dosstr::from_bytes(&name);
+    Some(u32::from(
+        crate::win32::kernel32::path::change_directory(cpu, &name).is_ok(),
+    ))
 }
 
 fn lstrcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

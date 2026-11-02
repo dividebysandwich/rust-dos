@@ -328,8 +328,7 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (w, h) = screen_size(cpu);
     let result = match action {
         // The GET actions whose value a SET action keeps: SPI_GETBEEP,
-        // SPI_GETKEYBOARDSPEED, SPI_GETSCREENSAVETIMEOUT,
-        // SPI_GETSCREENSAVEACTIVE, SPI_GETKEYBOARDDELAY,
+        // SPI_GETKEYBOARDSPEED, SPI_GETKEYBOARDDELAY,
         // SPI_GETDRAGFULLWINDOWS, SPI_GETSHOWSOUNDS, SPI_GETMENUSHOWDELAY.
         1 => {
             let v = param(cpu, 2, TRUE);
@@ -339,13 +338,30 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let v = param(cpu, 11, 31);
             put(cpu, pv, v)
         }
-        14 => {
-            let v = param(cpu, 15, 0);
+        // SPI_GETSCREENSAVETIMEOUT, SPI_SETSCREENSAVETIMEOUT,
+        // SPI_GETSCREENSAVEACTIVE and SPI_SETSCREENSAVEACTIVE: the screen
+        // saver's settings, which USER read from WIN.INI when it started
+        // and its timer uses (saver.rs).
+        14 | 16 => {
+            super::init(cpu);
+            let input = &user(cpu).input;
+            let v = if action == 14 {
+                input.saver_timeout
+            } else {
+                input.saver_active as u32
+            };
             put(cpu, pv, v)
         }
-        16 => {
-            let v = param(cpu, 17, FALSE);
-            put(cpu, pv, v)
+        15 | 17 => {
+            super::init(cpu);
+            let input = &mut user(cpu).input;
+            if action == 15 {
+                input.saver_timeout = ui;
+            } else {
+                input.saver_active = ui != 0;
+            }
+            super::saver::settings_changed(cpu);
+            TRUE
         }
         22 => {
             let v = param(cpu, 23, 1);
@@ -363,7 +379,7 @@ pub fn system_parameters_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             let v = param(cpu, 107, 400);
             put(cpu, pv, v)
         }
-        2 | 11 | 15 | 17 | 23 | 37 | 57 | 107 => {
+        2 | 11 | 23 | 37 | 57 | 107 => {
             set_param(cpu, action, ui);
             TRUE
         }

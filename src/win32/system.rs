@@ -237,7 +237,7 @@ fn load_segments(cpu: &mut Cpu, ctx: &Context, tibs: &[(u16, u32)], system: u32)
                 Some(&(_, tib)) => {
                     SegCache::from_descriptor(selector, tib, PAGE - 1, attr(ACCESS_DATA3, BIG))
                 }
-                None => ldt_segment(cpu, system, selector),
+                None => ldt_segment(cpu, system, seg, selector),
             },
         };
         cpu.set_seg_cache(seg, cache);
@@ -246,15 +246,25 @@ fn load_segments(cpu: &mut Cpu, ctx: &Context, tibs: &[(u16, u32)], system: u32)
 
 /// The segment `selector` selects in the LDT of the system block at
 /// `system`, if it is a present segment at level 3; else a null one.
-fn ldt_segment(cpu: &Cpu, system: u32, selector: u16) -> SegCache {
+///
+/// A selector freed since the context was saved (its descriptor 0)
+/// comes back as 0 in a data segment register `seg`, as the DPMI host
+/// of Windows zeroes the registers that hold a selector it frees
+/// (`win16::ldt::write` does it for the processor's). The context of an
+/// INT, of a call into 32-bit code or back to 16-bit code, or of
+/// another task was saved before the free, and the selector in it
+/// would fault when the program loads it again (`push es` ... `pop es`).
+fn ldt_segment(cpu: &Cpu, system: u32, seg: Seg, selector: u16) -> SegCache {
     let index = selector as u32 >> 3;
     if selector & 4 == 0 || index >= LDT_ENTRIES || system == 0 {
         return SegCache::null(selector);
     }
     let at = (system + LDT + 8 * index) as usize;
-    let desc = crate::cpu::Descriptor(
-        cpu.bus.read_32(at) as u64 | (cpu.bus.read_32(at + 4) as u64) << 32,
-    );
+    let raw = cpu.bus.read_32(at) as u64 | (cpu.bus.read_32(at + 4) as u64) << 32;
+    if raw == 0 && matches!(seg, Seg::ES | Seg::DS | Seg::FS | Seg::GS) {
+        return SegCache::null(0);
+    }
+    let desc = crate::cpu::Descriptor(raw);
     let access = desc.attr() as u8;
     if access & 0x80 == 0 || access & 0x60 != 0x60 || !desc.is_segment() {
         return SegCache::null(selector);

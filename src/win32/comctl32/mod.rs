@@ -48,6 +48,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -272,7 +273,8 @@ pub fn address_of(name: &str) -> u32 {
 
 /// Call the built-in DLL `dll`'s function `name` from Rust, as the
 /// program would call it: for functions that don't call into the
-/// program themselves.
+/// program themselves. It is part of the service that calls it, which
+/// says for itself whether an idle proof can follow it (`idle::nested`).
 pub fn call_builtin(cpu: &mut Cpu, dll: &str, name: &str, args: &[u32]) -> Option<u32> {
     let d = super::stubs::DLLS
         .iter()
@@ -283,7 +285,7 @@ pub fn call_builtin(cpu: &mut Cpu, dll: &str, name: &str, args: &[u32]) -> Optio
         .iter()
         .find(|a| a.name == name)
         .unwrap_or_else(|| panic!("{} has no {}", dll, name));
-    (api.handler)(cpu, args)
+    crate::idle::nested(cpu, |cpu| (api.handler)(cpu, args))
 }
 
 /// KERNEL32's function `name`, called from Rust.

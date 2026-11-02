@@ -28,7 +28,8 @@ static APIS: &[Api16] = &[
     win32("MessageBox", 1, "wppw", U, "MessageBoxA", b'w'),
     rust("InitApp", 5, "w", one),
     win32("PostQuitMessage", 6, "s", U, "PostQuitMessage", b'w'),
-    rust("ExitWindows", 7, "lw", zero),
+    // EW_RESTARTWINDOWS and EW_REBOOTSYSTEM are EWX_REBOOT's bit and more.
+    win32("ExitWindows", 7, "lw", U, "ExitWindowsEx", b'b'),
     rust("SetTimer", 10, "wwwS", set_timer),
     rust("SetSystemTimer", 11, "wwwS", set_timer),
     win32("KillTimer", 12, "ww", U, "KillTimer", b'b'),
@@ -554,6 +555,11 @@ fn go_at(cpu: &mut Cpu, top: u32, name: &str, args: &[u32], data: Vec<u32>) -> O
     None
 }
 
+/// The thread that runs, if any.
+fn running_thread(cpu: &mut Cpu) -> Option<u32> {
+    crate::win32::process(cpu).current_thread().map(|t| t.id)
+}
+
 /// What `post` does with what a USER32 function returned: `data[0]`.
 const P_MSG: u32 = 1;
 const P_PAINT: u32 = 2;
@@ -607,8 +613,20 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
                 let mut resume = *ctx;
                 thunk::set_ax(&mut resume, 0);
                 resume.gpr[thunk::EDX] &= 0xFFFF_0000;
+                let running = cpu.bus.observe.on.then(|| running_thread(cpu)).flatten();
                 super::task::yield_now(cpu, resume);
+                // With no other task ready, the same one goes on, its
+                // turn started over: an idle proof follows that.
+                if running.is_some() && running_thread(cpu) == running {
+                    crate::idle::pure_call(cpu, None);
+                    crate::idle::turn_started(cpu);
+                }
                 return None;
+            } else {
+                // Nothing found, and no yield: only DX:AX changes. (A
+                // message found was converted, and the 32-bit function
+                // that found it already ended the proof.)
+                crate::idle::pure_call(cpu, None);
             }
         }
         P_PAINT => {
@@ -1548,7 +1566,11 @@ fn peek_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         "PeekMessageA",
         &[m, args[1], args[2], args[3], args[4]],
         vec![P_PEEK, m, args[0], args[4]],
-    )
+    );
+    // Only the 32-bit stack and the frame `post` takes off again changed:
+    // an idle proof follows PeekMessageA from here (`idle::pure_call`).
+    crate::idle::pure_call(cpu, None);
+    None
 }
 
 /// A MSG16 at `m16` as a MSG on the 32-bit stack: its address, and the

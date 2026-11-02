@@ -939,12 +939,23 @@ impl Cpu {
         self.resident_end + 1
     }
 
+    /// What AH=31h does to the memory of the process `psp`, as MS-DOS's
+    /// `$KEEP_PROCESS`: its block shrinks to `paras` paragraphs, at least
+    /// the 6 of the PSP itself, and is its own from then on, and PSP 02h
+    /// says where the block ends. If the block can't take that size, both
+    /// stay as they are and the process ends all the same.
+    pub fn shrink_resident(&mut self, psp: u16, paras: u16) {
+        let paras = paras.max(6);
+        if crate::mcb::set_block(&mut self.bus, psp, psp, paras).is_ok() {
+            self.bus.guest_write_16(psp as u32 * 16 + 2, psp.wrapping_add(paras));
+        }
+    }
+
     /// INT 21h AH=31h from a program started by the shell: shrink its PSP
     /// block to `paras` and keep it, plus any other block it owns, resident
     /// under the programs started afterwards.
     pub fn keep_resident(&mut self, psp: u16, paras: u16) {
-        // DOS keeps at least the 6 paragraphs of the PSP itself.
-        let _ = crate::mcb::resize(&mut self.bus, psp, paras.max(6));
+        self.shrink_resident(psp, paras);
         // Loaded high: it stays in its upper memory block.
         let cover = crate::mcb::umb_cover_seg(&self.bus);
         if psp > cover {
@@ -1051,12 +1062,13 @@ impl Cpu {
         if let Some(ipx) = &mut self.bus.net.ipx {
             ipx.program_ended(psp);
         }
-        if !self.started_by_exec(psp) {
+        let made = self.ends_in_its_maker(psp);
+        crate::dos_files::close_all(&mut self.bus, psp);
+        crate::mcb::free_owned_by(&mut self.bus, psp);
+        if made {
             self.end_made_process(psp);
             return true;
         }
-        crate::dos_files::close_all(&mut self.bus, psp);
-        crate::mcb::free_owned_by(&mut self.bus, psp);
         if self.return_to_parent() {
             return true;
         }
@@ -1138,17 +1150,26 @@ impl Cpu {
         psp == 0 || parent == 0 || parent == psp
     }
 
-    /// End the process `psp`, a PSP a program made, as DOS ends any: its
-    /// files closed and its memory freed, the INT 22h, 23h and 24h vectors
-    /// it keeps put back, and its parent (PSP 16h) the current process
-    /// again, back on the stack of the parent's last INT 21h call (PSP 2Eh)
-    /// with the registers it saved there, returning to the ended process's
-    /// terminate address (PSP 0Ah) with them. Windows' tasks end so, into
-    /// its DOS extender.
-    fn end_made_process(&mut self, psp: u16) {
+    /// Whether the process `psp` is a PSP a program made that has a
+    /// terminate address to end at. EXEC here leaves INT 22h alone, so a
+    /// PSP made from the vector and never given an address of its own
+    /// holds the BIOS's IRET, which leads nowhere: such a process ends as
+    /// one with no context kept, back at the shell.
+    pub fn ends_in_its_maker(&mut self, psp: u16) -> bool {
+        let terminate = self.bus.guest_read_32(psp as u32 * 16 + 0x0A);
+        !self.started_by_exec(psp) && terminate != crate::bios::default_ivt()[0x22]
+    }
+
+    /// Hand the process `psp`, a PSP a program made and whose files and
+    /// memory are dealt with, back to its parent as DOS does for any
+    /// process: the INT 22h, 23h and 24h vectors it keeps put back, and its
+    /// parent (PSP 16h) the current process again, back on the stack of the
+    /// parent's last INT 21h call (PSP 2Eh) with the registers it saved
+    /// there, returning to the ended process's terminate address (PSP 0Ah)
+    /// with them and the status flags clear. Windows' tasks end so, into
+    /// its DOS extender, and Drakkhen's driver into its loader.
+    pub fn end_made_process(&mut self, psp: u16) {
         let base = psp as u32 * 16;
-        crate::dos_files::close_all(&mut self.bus, psp);
-        crate::mcb::free_owned_by(&mut self.bus, psp);
         for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
             let handler = self.bus.guest_read_32(base + 0x0A + 4 * i as u32);
             self.bus.guest_write_32(vector * 4, handler);
@@ -1174,6 +1195,12 @@ impl Cpu {
         // The INT 21h returns to the terminate address.
         self.bus.guest_write_16(at(9), terminate_ip);
         self.bus.guest_write_16(at(10), terminate_cs);
+        // With flags 0F202h (`reset_environment`): interrupts on, DF and
+        // the status flags clear.
+        let flags = self.bus.guest_read_16(at(11));
+        self.bus.guest_write_16(at(11), flags & 0xF000 | 0x0202);
+        self.set_cpu_flag(CpuFlags::CF, false);
+        self.set_cpu_flag(CpuFlags::ZF, false);
         self.bus.log_string(&format!(
             "[DOS] Process {:04X} ended: back to {:04X} at {:04X}:{:04X}",
             psp, parent, terminate_cs, terminate_ip

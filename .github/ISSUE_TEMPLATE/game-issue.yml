@@ -1,0 +1,102 @@
+name: Game or program issue
+description: Something goes wrong in a DOS or Windows game or program running in rust-dos.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. The details below let us run the program the way you did. Please don't attach game files or disc images; tell us which version of the game you have instead.
+
+  - type: input
+    id: game
+    attributes:
+      label: Game or program
+      description: Its name, version or release (floppy, CD, GOG, demo), and the year if you know it.
+      placeholder: "Moto Racer (1997), CD version"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: DOS or Windows
+      options:
+        - DOS
+        - Windows
+    validations:
+      required: true
+
+  - type: dropdown
+    id: windows
+    attributes:
+      label: For a Windows game, how did it run?
+      description: Leave this empty for a DOS game.
+      options:
+        - rust-dos's built-in Windows (win32=true), no Windows image
+        - A Windows image booted in rust-dos
+    validations:
+      required: false
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: For a Windows image, which Windows
+      description: The version and edition installed on the image, and anything relevant you installed on it (DirectX version, video drivers). For the built-in Windows, the `win32_version` setting is in your config below.
+      placeholder: "Windows 98 SE, DirectX 7.0a, 3dfx Voodoo2 reference driver"
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: rust-dos version
+      description: What `rust-dos --version` prints. It includes the commit, so for your own or an interim build it's enough on its own; otherwise give the commit hash you built from.
+      placeholder: "1.6.0 (commit 1a2b3c4)"
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Your system
+      description: The operating system, and for 3D games the graphics card or chip.
+      placeholder: "Windows 11, NVIDIA RTX 4060"
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The whole rust-dos.conf (or the game profile) you ran with, and any command-line options. Replace personal paths if you like.
+      render: ini
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected
+      description: What goes wrong, and what you expected to see. If you know how the game behaves on a real machine or in another emulator, say so.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: The steps from starting rust-dos to the problem. If it happens at a particular place in the game, say how to get there. A save state helps if you have one.
+      placeholder: |
+        1. Start rust-dos with the configuration above
+        2. Run MOTO.EXE, choose Speed Bay
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or recordings
+      description: If you can, show the problem. Drag images or a short video into this box. For a sound problem, a short recording helps.
+    validations:
+      required: false
