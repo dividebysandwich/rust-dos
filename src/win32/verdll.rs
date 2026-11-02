@@ -416,11 +416,13 @@ fn builtin_resource(name: &str) -> Resource {
         "D3D8" | "DINPUT8" => [4, 8, 1, 881],
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
+        "MSACM32" => [4, 3, 0, 1998],
         _ => [4, 0, 0, 950],
     };
     let text = match version {
         [4, 0, 0, 950] => "4.00.950".to_string(),
         [5, 0, 1693, 1] => "5.00.1693.1".to_string(),
+        [4, 3, 0, 1998] => "4.03.1998".to_string(),
         [a, b, c, d] => format!("{}.{:02}.{:02}.{:04}", a, b, c, d),
     };
     let ms = (version[0] as u32) << 16 | version[1] as u32;

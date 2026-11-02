@@ -27,8 +27,9 @@ const MMSYSERR_NOTSUPPORTED: u32 = 8;
 const MMSYSERR_INVALPARAM: u32 = 11;
 const ACMERR_NOTPOSSIBLE: u32 = 512;
 
-/// The version acmGetVersion gives: 4.00, retail.
-const VERSION: u32 = 0x0400_0000;
+/// The version acmGetVersion gives: 4.03, retail, the constant in
+/// Windows 98 SE's MSACM32 4.03.1998.
+const VERSION: u32 = 0x0403_0000;
 
 /// acmMetrics's metrics.
 const ACM_METRIC_COUNT_DRIVERS: u32 = 1;
