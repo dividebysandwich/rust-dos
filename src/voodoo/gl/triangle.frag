@@ -263,6 +263,16 @@ ivec4 texel(sampler2D tex, ivec2 at, int stored, int spread) {
     return ivec4(round(texelFetch(tex, at << spread, stored) * 255.0));
 }
 
+// Whether a texture unit's combine reads its texel, the unit's local
+// colour (`uses_local`): where it doesn't, the texel isn't read.
+bool usesLocal(int mode) {
+    int c = (mode >> 14) & 7;
+    int add = (mode >> 18) & 3;
+    int ca = (mode >> 23) & 7;
+    return bit(mode, 13) || c == 1 || c == 3 || add == 1 || add == 2 || bit(mode, 22)
+        || ca == 1 || ca == 3 || ((mode >> 27) & 3) != 0;
+}
+
 // a to b by `f` 256ths, as the card blends (`tables::bilinear`).
 ivec4 blend(ivec4 a, ivec4 b, int f) {
     return a + (((b - a) * f) >> 8);
@@ -279,8 +289,14 @@ ivec4 fetch(sampler2D tex, vec3 stw, float lodbase, int mode, vec2 size, ivec3 l
     // the card would take at u_scale times its resolution, where S/W and
     // T/W change u_scale times slower a pixel: the same at 1x, sharper
     // above.
-    level = clamp(l, lod.x, lod.y);
-    int sampled = clamp(l - int(round(log2(u_scale) * 256.0)), lod.x, lod.y);
+    // Raised to lodmin, then lowered to lodmax: lodmax where lodmin is
+    // above it, as the card has it (GLSL's clamp leaves that undefined).
+    level = min(max(l, lod.x), lod.y);
+    int sampled = min(max(l - int(round(log2(u_scale) * 256.0)), lod.x), lod.y);
+    if (!usesLocal(mode)) {
+        // The combine reads only the level.
+        return ivec4(0);
+    }
     if (u_gl_sampling != 0) {
         // OpenGL's level from the gradients is log2 of the level 0 texels
         // a pixel spans, less the levels before the texture's first:

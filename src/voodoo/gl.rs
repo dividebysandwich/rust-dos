@@ -696,7 +696,14 @@ impl VoodooGl {
         if glsl == Glsl::Es300 {
             return Err("OpenGL ES has no noperspective interpolation".to_string());
         }
-        let attributes = [(0, "a_pos"), (1, "a_color"), (2, "a_zw"), (3, "a_tex0"), (4, "a_tex1"), (5, "a_lod")];
+        let attributes = [
+            (0, "a_pos"),
+            (1, "a_color"),
+            (2, "a_zw"),
+            (3, "a_tex0"),
+            (4, "a_tex1"),
+            (5, "a_lod"),
+        ];
         let triangle: Program<Triangle> =
             compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes)?;
         let fill_program: Program<FillQuad> = compile(gl, glsl, QUAD_VERT, FILL_FRAG, &[])?;
@@ -724,7 +731,17 @@ impl VoodooGl {
             gl.bind_vertex_array(Some(vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             let stride = std::mem::size_of::<Vertex>() as i32;
-            for (index, size, offset) in [(0, 2, 0), (1, 4, 8), (2, 2, 24), (3, 3, 32), (4, 3, 44), (5, 2, 56)] {
+            // Each attribute where its field of `Vertex` is.
+            let tex = std::mem::offset_of!(Vertex, tex);
+            for (index, size, offset) in [
+                (0, 2, std::mem::offset_of!(Vertex, pos)),
+                (1, 4, std::mem::offset_of!(Vertex, color)),
+                (2, 2, std::mem::offset_of!(Vertex, zw)),
+                (3, 3, tex),
+                (4, 3, tex + std::mem::size_of::<[f32; 3]>()),
+                (5, 2, std::mem::offset_of!(Vertex, lod)),
+            ] {
+                let offset = offset as i32;
                 gl.enable_vertex_attrib_array(index);
                 gl.vertex_attrib_pointer_f32(index, size, glow::FLOAT, false, stride, offset);
             }
@@ -1502,7 +1519,9 @@ impl VoodooGl {
                     texture.params = Some(params);
                 }
                 let first = t.first_level as f32;
-                let lod = [t.lodmin as f32 / 256.0 - first, t.lodmax as f32 / 256.0 - first];
+                // lodmax where lodmin is above it, as the card clamps.
+                let low = t.lodmin.min(t.lodmax);
+                let lod = [low as f32 / 256.0 - first, t.lodmax as f32 / 256.0 - first];
                 if texture.lod != Some(lod) {
                     gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MIN_LOD, lod[0]);
                     gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LOD, lod[1]);
@@ -2986,23 +3005,27 @@ mod tests {
             "8 bits, not 5-6-5"
         );
         // With voodoo_dither off, so does a game that dithers.
-        let (dithered, undithered) = both_pictures(gl, |bus| draw_scene(bus, dither, true), false, 1);
+        let (dithered, undithered) =
+            both_pictures(gl, |bus| draw_scene(bus, dither, true), false, 1);
         assert!(undithered == opengl);
         assert_ne!(dithered, plain);
     }
 
+    /// tLOD's lodmin 3 and lodmax 8, in quarters of a level: the levels
+    /// `mipmapped_texture` has.
+    const LEVELS: u32 = 12 | (32 << 6);
+
     /// Texture unit 0 with a texture of 32 by 32 texels in 5-6-5, the
     /// card's levels 3 to 8, each level a colour of its own in a
     /// checkerboard of it and its half; textureMode `mode` bits besides
-    /// the format and the combine that passes the texel on. Unit 1 draws
-    /// nothing.
-    fn mipmapped_texture(bus: &mut crate::bus::Bus, mode: u32) {
+    /// the format and the combine that passes the texel on, and tLOD
+    /// `lod` (`LEVELS` for all of them). Unit 1 draws nothing.
+    fn mipmapped_texture(bus: &mut crate::bus::Bus, mode: u32, lod: u32) {
         let (tmu0, tmu1) = (0x800, 0x1000);
         w(bus, tmu1 | 0x304, 32);
         let combine = (1 << 12) | (1 << 18) | (1 << 21) | (1 << 27);
         w(bus, tmu0 | 0x300, (10 << 8) | combine | mode);
-        // lodmin 3, lodmax 8, in quarters of a level.
-        w(bus, tmu0 | 0x304, 12 | (32 << 6));
+        w(bus, tmu0 | 0x304, lod);
         w(bus, tmu0 | 0x30C, 0);
         let colors = [0xF800u32, 0x07E0, 0x001F, 0xFFE0, 0xF81F, 0x07FF];
         for (level, color) in (3..=8u32).zip(colors) {
@@ -3077,20 +3100,31 @@ mod tests {
         let t = test_context("Mipmap levels");
         let gl = &t.gl;
         let dither = 1 << 8;
+        // Bilinear in perspective, point sampled, clamped; all the levels,
+        // with a bias, the LOD split's even or odd levels, and lodmin
+        // (level 6) above lodmax (4), where the card reads lodmax.
+        let (bilinear, point, clamped) = (1 | 2 | 4, 1, 1 | 2 | 4 | 0x40 | 0x80);
+        let (bias, even, odd) = (LEVELS | (4 << 12), LEVELS | (1 << 19), LEVELS | (3 << 18));
+        let crossed = 24 | (16 << 6);
         // Near 0 and with coordinates thousands of texels away, where the
         // card's level comes out higher than the texels on the screen ask
         // for; and with the dithered level of detail (textureMode bit 4).
-        let mut far = Vec::new();
-        for (shift, mode, what) in [
-            (0.0, 0, "near 0"),
-            (3072.0, 0, "3072 texels away"),
-            (3072.0, 1 << 4, "3072 texels away, LOD dither"),
+        let mut results = Vec::new();
+        for (shift, mode, lod, what) in [
+            (0.0, bilinear, LEVELS, "near 0"),
+            (3072.0, bilinear, LEVELS, "3072 texels away"),
+            (3072.0, bilinear | (1 << 4), LEVELS, "3072 texels away, LOD dither"),
+            (3072.0, point, LEVELS, "point sampled"),
+            (0.0, clamped, LEVELS, "clamped"),
+            (3072.0, bilinear, bias, "biased a level"),
+            (3072.0, bilinear, even, "even levels"),
+            (3072.0, bilinear, odd, "odd levels"),
+            (3072.0, bilinear, crossed, "lodmin above lodmax"),
         ] {
-            let filtered = 1 | 2 | 4 | mode;
             let (software, opengl) = both_pictures(
                 gl,
                 |bus| {
-                    mipmapped_texture(bus, filtered);
+                    mipmapped_texture(bus, mode, lod);
                     draw_floor(bus, dither, shift);
                 },
                 true,
@@ -3099,9 +3133,9 @@ mod tests {
             let (exact, examples) = differences(&software, &opengl, 1);
             let apart = far_apart(&software, &opengl);
             println!("{what}: {exact} pixels not the card's, {apart} far from it, {examples:?}");
-            far.push((what, apart));
+            results.push((what, exact, apart));
         }
-        assert!(far.iter().all(|&(_, n)| n == 0), "pixels far from the card's: {far:?}");
+        assert!(results.iter().all(|&(_, _, n)| n == 0), "far from the card's: {results:?}");
     }
 
     /// Time OpenGL drawing `draw_floor` 400 times a frame at 2x, from the
@@ -3116,7 +3150,7 @@ mod tests {
         let gl = &t.gl;
         let mut bus = dither_card();
         let resync = bus.voodoo.as_mut().unwrap().take_mirror().unwrap();
-        mipmapped_texture(&mut bus, 1 | 2 | 4);
+        mipmapped_texture(&mut bus, 1 | 2 | 4, LEVELS);
         for _ in 0..400 {
             draw_floor(&mut bus, 1 << 8, 3072.0);
         }

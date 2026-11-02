@@ -806,7 +806,10 @@ impl Mirror {
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {
-        let first = (t.lodmin >> 8).clamp(0, 8);
+        // The card clamps the level to lodmin and then to lodmax, so with
+        // lodmin above lodmax it reads lodmax (as `backlog::texture_bytes`
+        // has it).
+        let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8);
         let last = (t.lodmax >> 8).clamp(first, 8);
         let key = TexKey {
             unit: unit as u8,
