@@ -107,6 +107,14 @@ fn profile_saved_voodoo_scene() {
         .disk
         .folders_from_state
         .push((crate::disk::DRIVE_C, scratch.clone()));
+    // A second disk (a game's, as D:) takes a scratch copy too.
+    let scratch_d = dir.join("run.D.img");
+    if scratch_d.exists() {
+        cpu.bus
+            .disk
+            .folders_from_state
+            .push((crate::disk::DRIVE_C + 1, scratch_d));
+    }
     crate::savestate::disks::offer_copies(&mut cpu, &path);
     machine::load(&mut cpu, &state).unwrap();
     let disk = cpu

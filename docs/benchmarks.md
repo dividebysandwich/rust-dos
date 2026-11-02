@@ -87,11 +87,13 @@ cargo bench --no-default-features --bench video -- video/voodoo
 
 `video/voodoo/pipeline` draws the same bilinear, two-unit textured
 triangle with Oni's colour path through the generic pipeline and its
-matching specialised variant. Setup verifies that both write pixels,
-produce the same counters and leave the same frame buffer. Each timed
-iteration draws one triangle as 240 scanlines; texture and buffer
-construction are outside the measurement. The frame cases below also
-include edge walking and register setup.
+matching specialised variant. The `menu-*` groups do the same with the
+states of Oni's main menu, and the `d3d-*` groups with the states 3dfx's
+Voodoo2 Direct3D driver draws most of Omikron's pixels with. Setup
+verifies that both write pixels, produce the same counters and leave the
+same frame buffer. Each timed iteration draws one triangle as 240
+scanlines; texture and buffer construction are outside the measurement.
+The frame cases below also include edge walking and register setup.
 
 `video/voodoo/frame` submits a full-screen clear and 64 untextured
 triangles through the card's register interface. The software cases wait
