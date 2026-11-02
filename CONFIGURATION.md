@@ -2572,8 +2572,13 @@ The textures' mipmap levels are the ones the card would take at
 `voodoo_scale` times its resolution: a pixel's level comes from how fast
 the triangle's S/W and T/W change and from its W, as the software
 rasterizer works it out, so at 1x they are the card's and at 2x one
-level sharper. The shader reads and filters the card's texels as the
-card does. With `voodoo_anisotropy` OpenGL filters them itself, from the
+level sharper. A Banshee or Voodoo3 game whose screen shows none of the
+3D buffers (Giants copies its 3D into a desktop of another format) sees
+them only through the card's memory, at the card's resolution, and gets
+the card's levels at any scale: a game whose smaller levels are other
+pictures than its larger ones would otherwise change its look whenever
+what OpenGL drew is read back. The shader reads and filters the card's
+texels as the card does. With `voodoo_anisotropy` OpenGL filters them itself, from the
 card's level.
 
 The card stores 16 bits a pixel (5-6-5), and where a game turns

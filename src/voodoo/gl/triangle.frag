@@ -50,6 +50,11 @@ uniform int u_fogdelta[64];
 uniform int u_constant_depth;
 // Buffer pixels a card pixel is across.
 uniform float u_scale;
+// The scale the texels' levels are picked for: u_scale where the screen
+// shows the buffer at that scale, 1 where the buffers reach it only
+// through the card's memory, at the card's resolution
+// (`VoodooGl::level_scale`).
+uniform float u_level_scale;
 // Whether to dither as the card does where fbzMode says so
 // (`voodoo_dither`).
 uniform int u_dither;
@@ -286,13 +291,14 @@ ivec4 fetch(sampler2D tex, vec3 stw, float lodbase, int mode, vec2 size, ivec3 l
     }
     int l = levelOfDetail(stw.z, lodbase, mode, lod);
     // The combine takes the card's level; the texels come from the level
-    // the card would take at u_scale times its resolution, where S/W and
-    // T/W change u_scale times slower a pixel: the same at 1x, sharper
-    // above.
+    // the card would take at u_level_scale times its resolution, where
+    // S/W and T/W change that many times slower a pixel: the same at 1x,
+    // sharper above.
     // Raised to lodmin, then lowered to lodmax: lodmax where lodmin is
     // above it, as the card has it (GLSL's clamp leaves that undefined).
     level = min(max(l, lod.x), lod.y);
-    int sampled = min(max(l - int(round(log2(u_scale) * 256.0)), lod.x), lod.y);
+    int sharper = int(round(log2(u_level_scale) * 256.0));
+    int sampled = min(max(l - sharper, lod.x), lod.y);
     if (!usesLocal(mode)) {
         // The combine reads only the level.
         return ivec4(0);

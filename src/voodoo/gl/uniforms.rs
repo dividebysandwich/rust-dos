@@ -119,6 +119,7 @@ locations!(Triangle {
     u_fogblend: [u8; 64],
     u_fogdelta: [i16; 64],
     u_scale: f32,
+    u_level_scale: f32,
     u_units: i32,
     u_config: i32,
     u_tmode0: i32,
