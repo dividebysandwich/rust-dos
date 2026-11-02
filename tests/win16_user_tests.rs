@@ -5,7 +5,11 @@ mod win16;
 
 use win16::{CODE, Code, program, run};
 
+/// ExitWindows's code for restarting Windows.
+const EW_RESTARTWINDOWS: u16 = 0x42;
+
 /// USER's ordinals.
+const EXIT_WINDOWS: u16 = 7;
 const WINDOW_FROM_POINT: u16 = 30;
 const CREATE_WINDOW: u16 = 41;
 const FIND_WINDOW: u16 = 50;
@@ -276,4 +280,19 @@ fn get_scroll_range_reads_a_scroll_bar_with_a_16_bit_window_procedure() {
     p.code.patch(proc_at, proc);
     let (exit, log) = run("scroll_range_16", p.build());
     assert_eq!(exit, 1, "{log}");
+}
+
+#[test]
+fn exit_windows_ends_the_program() {
+    // ExitWindows(EW_RESTARTWINDOWS, 0) comes back only when a window
+    // refuses, and then the exit code is 9.
+    let mut code = Code::new();
+    code.push(0)
+        .push(EW_RESTARTWINDOWS)
+        .push(0)
+        .call("USER", EXIT_WINDOWS)
+        .emit(&[0xB0, 0x09]) // mov al,9
+        .exit_al();
+    let (exit, log) = run("exit_windows", program(&code, CODE));
+    assert_eq!(exit, 0, "{log}");
 }

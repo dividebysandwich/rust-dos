@@ -2071,6 +2071,7 @@ impl Voodoo {
             "held_jobs": self.backlog.borrow().len(),
             "pruned_jobs": self.backlog.borrow().pruned,
             "catch_ups": self.catch_ups.get(),
+            "queue_full": self.pool.full_waits(),
             "gpu_reads": self.gpu_reads,
             "gpu_read_backs": self.gpu_read_backs.get(),
             "gpu_read_rows": self.gpu_rows.borrow().rows,

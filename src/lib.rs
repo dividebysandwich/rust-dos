@@ -91,6 +91,7 @@ pub mod mouse_capture;
 pub use rust_dos_mpu401::midi_shadow;
 pub use rust_dos_mpu401 as mpu401;
 pub mod net;
+pub mod null_audio;
 #[cfg(not(target_arch = "wasm32"))]
 pub use rust_dos_mt32 as mt32;
 pub use rust_dos_opl as opl;

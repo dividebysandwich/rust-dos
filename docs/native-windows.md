@@ -343,7 +343,12 @@ All output goes through the emulated video hardware:
 - **Glide 2.x** (`glide2x.dll`) is written in Rust against the emulated
   Voodoo's registers, as 3dfx's library was against the card. The Voodoo
   emulation (`src/voodoo/`) does the rendering, and 3dfx's MiniGL drivers,
-  which games of the time shipped, run on top of it.
+  which games of the time shipped, run on top of it. `grSstControl` moves
+  the monitor between the card and the 2D picture while the display stays
+  open, as Test Drive 4 does between its DirectDraw menus and its races:
+  a Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee or
+  Voodoo3 gives the display back and later takes it again, with the
+  textures where they were.
 - **Direct3D** (DX5 and DX6 immediate mode: execute buffers and
   `DrawPrimitive`) becomes a HAL on the same emulated hardware, the way
   3dfx's Direct3D driver was one. The target card is the Banshee or
@@ -386,6 +391,18 @@ What a change on the screen uncovers (`invalidate_screen` in
 `src/win32/user32/paint.rs`) stays cropped to the window's shape, so a
 window gets no WM_PAINT or WM_NCPAINT for what its region cuts off. No
 probe has compared that crop with Windows.
+
+### Movies
+
+AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions
+decompress and draw their frames (`src/win32/vfw/`). AVIStreamGetFrame
+decompresses a video stream's frames to a DIB of the program's choice, 24
+bits a pixel by default, from the last key frame on. The codecs are Indeo
+Video 3 and 5, which Windows 98 installs, decoded by the `oxideav-indeo`
+crate. ACM 1918 plays its Indeo 5 intro this way. Its frames match
+FFmpeg's, but for two that both decoders refuse as damaged, where the
+picture before stays. Indeo 5's frames that depend on earlier ones have
+not been compared with a reference: ACM 1918's are all key frames.
 
 ### Sound and input
 
@@ -559,7 +576,7 @@ shortcut:
   through, as on Windows 98. It warned that the disk was too small
   while the built-in Windows reported DOS's 80 MB free on a drive that
   is a host folder (Ignore went on); it now reports about 1 GB. The
-  game itself needs IMAGEHLP, AVIFIL32 and MSVFW32, which aren't there.
+  game itself needs IMAGEHLP, AVIFIL32 and MSVFW32.
 
 Some differences hold for every setup:
 
@@ -838,7 +855,10 @@ Wine 11.0's `msacm32.dll` with its IMA ADPCM codec, `imaadp32.acm`,
 encodes 16-bit PCM to IMA ADPCM and decodes it back through
 `acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
 written from the format's definition (`tests/wine_dlls.rs`, which runs
-when WINE_DLLS names the folder). MSACM32 finds the codec in SYSTEM.INI's
+when WINE_DLLS names the folder). It takes
+`win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
+exports and no codecs, for programs that only ask it how large a wave
+format can be (Test Drive 4). MSACM32 finds the codec in SYSTEM.INI's
 `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`) and opens it with
 OpenDriver, so WINMM's installable drivers are now real: OpenDriver loads
 the DLL as LoadLibrary does, finds its alias in SYSTEM.INI, and sends its

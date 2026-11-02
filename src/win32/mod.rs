@@ -37,6 +37,7 @@ mod lz32;
 mod mapping;
 pub(crate) mod memory;
 mod mpr;
+mod msacm32;
 mod msimg32;
 mod msvcrt;
 mod ntdll;
@@ -60,6 +61,7 @@ pub mod trace;
 pub mod user32;
 pub mod version;
 mod verdll;
+mod vfw;
 pub(crate) mod winmm;
 mod winspool;
 mod wnaspi32;
@@ -166,8 +168,8 @@ pub struct Module {
     pub entry: u32,
     /// Its file's DOS path, as GetModuleFileNameA gives it.
     pub path: String,
-    /// How many LoadLibrary calls hold it (not counted for the modules
-    /// that stay while the program runs).
+    /// How many LoadLibrary calls and DLLs that import from it hold it
+    /// (not counted for the modules that stay while the program runs).
     pub refs: u32,
     /// What it is (loader.rs: `BUILTIN`, `STATIC` and the others).
     pub flags: u32,
@@ -248,8 +250,9 @@ pub struct Process {
     /// time one of its threads looks for input with none there, which
     /// WaitForInputIdle and WinExec wait for, as in Wine.
     idle_event: Option<u32>,
-    /// Its IMAGEHLP options.
+    /// Its IMAGEHLP options, and its AVI files and DrawDib handles.
     imagehlp: imagehlp::State,
+    vfw: vfw::State,
     /// The process that started it with CreateProcessA or WinExec, or 0
     /// for the one DOS started.
     pub(crate) parent: u32,
@@ -973,6 +976,18 @@ pub(crate) fn exit(cpu: &mut Cpu, code: u32) {
     end_process(cpu, index, code);
 }
 
+/// End every process but the running one, with exit code 0: the session
+/// ends (user32/session.rs).
+pub(crate) fn end_others(cpu: &mut Cpu) {
+    loop {
+        let win32 = &cpu.bus.win32;
+        let Some(other) = (0..win32.processes.len()).find(|&i| i != win32.running) else {
+            break;
+        };
+        end_process(cpu, other, 0);
+    }
+}
+
 /// End the process at `index` with exit code `code`, as `exit`. Whether
 /// the running thread goes on: false when it was one of the process's.
 fn terminate(cpu: &mut Cpu, index: usize, code: u32) -> bool {
@@ -1347,6 +1362,7 @@ crate::state_fields!(Process {
     idle_event,
     imagehlp,
     parent,
+    vfw,
 });
 crate::state_fields!(Win32 {
     pending,

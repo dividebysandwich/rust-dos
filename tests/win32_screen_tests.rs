@@ -3316,6 +3316,212 @@ fn a_mouse_message_sets_the_class_cursor() {
     assert_ne!(r[4], r[6]);
 }
 
+const USER32_FIRST_MOVE: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "GetCursor",
+        "LoadCursorA",
+        "GetCursorPos",
+        "PeekMessageA",
+    ],
+);
+const MOVE_GET_CURSOR_POS: usize = 3;
+/// The POINT GetCursorPos fills.
+const CURSOR_POINT: u32 = 0xF40;
+
+/// A program's first window, shown full screen, brings the desktop on
+/// the screen with the cursor in its middle, over the window: Windows
+/// marks the mouse moved as SetWindowPos shows it, so with the mouse
+/// standing still the window gets a WM_MOUSEMOVE where the cursor is,
+/// and the WM_SETCURSOR that comes with it sets the class's cursor. A
+/// screen saver started from the prompt hides the cursor this way. The
+/// cursor was there before the desktop came, so a saver that kept its
+/// place before showing its window doesn't take the move for the mouse
+/// moving.
+#[test]
+fn the_first_window_shown_under_the_cursor_gets_a_mouse_move() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_FIRST_MOVE], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, MOVE_GET_CURSOR_POS, &[Arg::At(CURSOR_POINT)])?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        let mv = Arg::I(WM_MOUSEMOVE);
+        let peek = [Arg::At(CURSOR_MSG), Arg::I(0), mv, mv, Arg::I(PM_REMOVE)];
+        c.api(a, l, CLASS_PEEK_MESSAGE, &peek)?;
+        c.api(a, l, CLASS_GET_CURSOR, &[])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_IBEAM)])?;
+        c.api(a, l, CLASS_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_first_window_move", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 7);
+    assert_eq!(r[0], 1, "GetCursorPos");
+    assert_ne!(r[1], 0, "CreateWindowExA");
+    assert_eq!(r[2], r[6], "the arrow before the message");
+    assert_eq!(r[3], 1, "PeekMessageA finds a WM_MOUSEMOVE");
+    let msg = data + CURSOR_MSG;
+    assert_eq!(peek(&cpu, msg), r[1], "for the window");
+    let (x, y) = (cpu.bus.mouse.x as u32, cpu.bus.mouse.y as u32);
+    assert_eq!(peek(&cpu, msg + 12), y << 16 | x, "where the cursor is");
+    let point = data + CURSOR_POINT;
+    let before = (peek(&cpu, point), peek(&cpu, point + 4));
+    assert_eq!(before, (x, y), "where it was before the desktop");
+    assert_eq!(r[4], r[5], "the I-beam after it");
+    assert_ne!(r[4], r[6]);
+}
+
+const USER32_EARLY_SET_CURSOR_POS: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "SetCursorPos", "GetCursorPos"],
+);
+const EARLY_SET_CURSOR_POS: usize = 1;
+const EARLY_GET_CURSOR_POS: usize = 2;
+/// The POINT GetCursorPos fills after the window shows.
+const CURSOR_POINT_AFTER: u32 = 0xF48;
+
+/// SetCursorPos before the program's first window puts the cursor where
+/// the desktop then has it: the desktop doesn't take it back to the
+/// middle of the screen as it comes, so GetCursorPos gives the place the
+/// program set.
+#[test]
+fn the_desktop_keeps_the_cursor_set_before_it() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_EARLY_SET_CURSOR_POS], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, EARLY_SET_CURSOR_POS, &[Arg::I(100), Arg::I(120)])?;
+        c.api(a, l, EARLY_GET_CURSOR_POS, &[Arg::At(CURSOR_POINT)])?;
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, EARLY_GET_CURSOR_POS, &[Arg::At(CURSOR_POINT_AFTER)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("cursor_set_before_desktop", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 4);
+    assert_eq!(r[0], 1, "SetCursorPos");
+    assert_eq!(r[1], 1, "GetCursorPos");
+    assert_ne!(r[2], 0, "CreateWindowExA");
+    assert_eq!(r[3], 1, "GetCursorPos");
+    let point = |at: u32| (peek(&cpu, data + at), peek(&cpu, data + at + 4));
+    assert_eq!(point(CURSOR_POINT), (100, 120), "before the desktop");
+    assert_eq!(point(CURSOR_POINT_AFTER), (100, 120), "after it");
+    assert_eq!((cpu.bus.mouse.x, cpu.bus.mouse.y), (100, 120), "the mouse");
+}
+
+const USER32_SET_POS_MOVE: (&str, &[&str]) = (
+    "USER32.DLL",
+    &["CreateWindowExA", "SetWindowPos", "PeekMessageA"],
+);
+const SET_POS_SET_WINDOW_POS: usize = 1;
+const SET_POS_PEEK_MESSAGE: usize = 2;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+const PM_NOREMOVE: u32 = 0;
+
+/// SetWindowPos gives the window under the cursor a WM_MOUSEMOVE when the
+/// window's place changes, and none when it keeps its place. A program
+/// that answers a move by setting its window where it is would otherwise
+/// get moves forever.
+#[test]
+fn set_window_pos_gives_a_mouse_move_only_when_the_window_moves() {
+    let mut d = data();
+    put(&mut d, CLASS, b"Edit\0");
+    let (program, data) = program(&[USER32_SET_POS_MOVE], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let mv = Arg::I(WM_MOUSEMOVE);
+        let peek_moves = |flags: u32| [Arg::At(CURSOR_MSG), Arg::I(0), mv, mv, Arg::I(flags)];
+        let set_at = |x: u32, y: u32| {
+            [
+                Arg::Val(RESULTS),
+                Arg::I(0),
+                Arg::I(x),
+                Arg::I(y),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(SWP_NOZORDER | SWP_NOACTIVATE),
+            ]
+        };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(640),
+                Arg::I(480),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        // The move that showing the window queued.
+        c.api(a, l, SET_POS_PEEK_MESSAGE, &peek_moves(PM_REMOVE))?;
+        // In place: no move.
+        c.api(a, l, SET_POS_SET_WINDOW_POS, &set_at(0, 0))?;
+        c.api(a, l, SET_POS_PEEK_MESSAGE, &peek_moves(PM_NOREMOVE))?;
+        // Moved, and still under the cursor: a move.
+        c.api(a, l, SET_POS_SET_WINDOW_POS, &set_at(50, 60))?;
+        c.api(a, l, SET_POS_PEEK_MESSAGE, &peek_moves(PM_REMOVE))?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("set_window_pos_mouse_move", None, program);
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 6);
+    assert_ne!(r[0], 0, "CreateWindowExA");
+    assert_eq!(r[1], 1, "the move the showing queued");
+    assert_eq!(r[2], 1, "SetWindowPos in place");
+    assert_eq!(r[3], 0, "no move for a window that keeps its place");
+    assert_eq!(r[4], 1, "SetWindowPos moved");
+    assert_eq!(r[5], 1, "a move for the window that moved");
+    assert_eq!(peek(&cpu, data + CURSOR_MSG), r[0], "for the window");
+}
+
 /// A full-screen DirectDraw mode of `w` x `h` at 8 bits, the arrow set
 /// as the cursor and the cursor put at (100, 100) (step 1).
 fn mode_cursor_program(w: u32, h: u32) -> (Vec<u8>, u32) {
@@ -3418,4 +3624,79 @@ fn the_pointer_spans_a_320_by_240_vesa_mode() {
 #[test]
 fn the_pointer_spans_a_320_by_200_voodoo3_mode() {
     the_pointer_spans_a_small_mode("pointer_voodoo3_320", Some(Board::Voodoo3), (320, 200));
+}
+
+const DESKTOP_CURSOR_USER32: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetCursorPos"]);
+const DESKTOP_CURSOR_DDRAW: (&str, &[&str]) = ("DDRAW.DLL", &["DirectDrawCreate"]);
+const DESKTOP_CURSOR_POINTS: u32 = 0x800;
+
+/// GetCursorPos before any window, optionally a full-screen DirectDraw
+/// mode set first, then the first window (which starts the desktop),
+/// then GetCursorPos again. The points are at DESKTOP_CURSOR_POINTS.
+fn desktop_cursor_program(directdraw: bool) -> (Vec<u8>, u32) {
+    let d = data();
+    program(&[DESKTOP_CURSOR_USER32, DESKTOP_CURSOR_DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        let point = |k: u32| Arg::At(DESKTOP_CURSOR_POINTS + 8 * k);
+        c.api(a, l, 1, &[point(0)])?;
+        if directdraw {
+            c.api(a, l, 2, &[Arg::I(0), Arg::At(DD), Arg::I(0)])?;
+            c.com(
+                a,
+                l,
+                DD,
+                DD_SET_DISPLAY_MODE,
+                &[Arg::I(640), Arg::I(480), Arg::I(16)],
+            )?;
+        }
+        c.api(
+            a,
+            l,
+            0,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(320),
+                Arg::I(240),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        c.api(a, l, 1, &[point(1)])?;
+        finish(a, l, 1)
+    })
+}
+
+/// The cursor GetCursorPos gave before the desktop and after it started,
+/// with the host's pointer at (50, 40) when the program starts.
+fn desktop_cursor_before_and_after(test: &str, directdraw: bool) -> ((i32, i32), (i32, i32)) {
+    let (program, data) = desktop_cursor_program(directdraw);
+    let mut cpu = machine(test, program);
+    cpu.bus.mouse.warp(50, 40);
+    run_until(&mut cpu, data, 1);
+    let at = |k: u32| {
+        (
+            peek(&cpu, data + DESKTOP_CURSOR_POINTS + 8 * k) as i32,
+            peek(&cpu, data + DESKTOP_CURSOR_POINTS + 8 * k + 4) as i32,
+        )
+    };
+    (at(0), at(1))
+}
+
+#[test]
+fn the_desktop_starts_the_cursor_where_user_had_it() {
+    let (_, after) = desktop_cursor_before_and_after("cursor-desktop", false);
+    assert_eq!(after, (320, 240));
+}
+
+#[test]
+fn under_directdraw_the_desktop_keeps_the_host_pointer() {
+    let (_, after) = desktop_cursor_before_and_after("cursor-directdraw", true);
+    assert_eq!(after, (50, 40));
 }

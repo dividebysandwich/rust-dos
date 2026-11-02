@@ -14,7 +14,11 @@ impl Bus {
     /// Replace the sound hardware: the Sound Blaster (None removes it) and
     /// whether the FM chip is an OPL3.
     pub fn configure_sound(&mut self, sb: Option<crate::sb::SbConfig>, opl3: bool) {
-        self.sb = sb.map(crate::sb::SoundBlaster::new);
+        // The sound up to now is the old card's: mix it before the card
+        // goes, so the new one's frames start where the mixer is.
+        self.audio_catch_up();
+        let now = self.clock.now_ticks();
+        self.sb = sb.map(|config| crate::sb::SoundBlaster::new(config, now));
         self.isapnp = sb.filter(|sb| sb.model == crate::sb::SbModel::Sb16Vibra).map(|sb| crate::isapnp::IsaPnp::vibra16c(&sb));
         self.opl = crate::opl::Opl::new(opl3);
         self.configure_awe();

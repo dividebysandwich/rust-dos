@@ -131,6 +131,8 @@ pub struct Settings {
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
+    /// What plays the sound (`audio_output`), read at startup.
+    pub audio_output: crate::audio::OutputChoice,
     /// The sound waiting for the host's sound device (`blocksize` and
     /// `prebuffer`).
     pub audio_buffer: crate::audio::AudioBuffer,
@@ -211,6 +213,7 @@ impl Default for Settings {
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
+            audio_output: crate::audio::OutputChoice::default(),
             audio_buffer: crate::audio::AudioBuffer::default(),
             joystick: JoystickSettings::default(),
             network: crate::net::NetSettings::default(),
@@ -360,6 +363,7 @@ impl Settings {
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
+            audio_output: config.audio_output,
             audio_buffer: config.audio_buffer,
             joystick: config.joystick,
             network: config.network.clone(),
@@ -533,6 +537,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Section::Mixer, "reverb_mix", Some(settings.mixer.reverb_mix.to_string())),
         (Section::Mixer, "chorus", Some(settings.mixer.chorus.name().to_string())),
         (Section::Mixer, "chorus_mix", Some(settings.mixer.chorus_mix.to_string())),
+        (Section::Mixer, "audio_output", Some(settings.audio_output.name().to_string())),
         (Section::Mixer, "blocksize", Some(settings.audio_buffer.blocksize.to_string())),
         (Section::Mixer, "prebuffer", Some(settings.audio_buffer.prebuffer.to_string())),
     ]);

@@ -154,8 +154,7 @@ dsound/capture: capture: 29 tests executed (0 marked as todo, 0 failures), 0 ski
 dsound/ds3d: ds3d: 849 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dsound/ds3d8: ds3d8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 dsound/ds3d8: skipped ds3d8.c:1146
-dsound/dsound: dsound: 2040 tests executed (0 marked as todo, 1 failure), 48 skipped.
-dsound/dsound: failed dsound.c:1087
+dsound/dsound: dsound: 2040 tests executed (0 marked as todo, 0 failures), 48 skipped.
 dsound/dsound: skipped dsound.c:741 (x48)
 dsound/dsound8: dsound8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 dsound/dsound8: skipped dsound8.c:939
@@ -235,13 +234,12 @@ kernel32/locale: skipped locale.c:2372
 kernel32/locale: skipped locale.c:2455
 kernel32/locale: skipped locale.c:2629
 kernel32/locale: skipped locale.c:2645
-kernel32/module: module: 44 tests executed (0 marked as todo, 4 failures), 2 skipped.
+kernel32/module: module: 44 tests executed (0 marked as todo, 3 failures), 2 skipped.
 kernel32/module: skipped module.c:392
 kernel32/module: skipped module.c:242
 kernel32/module: failed module.c:259
 kernel32/module: failed module.c:270
 kernel32/module: failed module.c:282
-kernel32/module: failed module.c:374
 kernel32/path: path: 1797 tests executed (0 marked as todo, 0 failures), 11 skipped.
 kernel32/path: skipped path.c:1710
 kernel32/path: skipped path.c:926 (x3)

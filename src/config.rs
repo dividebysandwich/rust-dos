@@ -262,6 +262,8 @@ pub struct Config {
     pub disk: DiskSettings,
     /// `[mixer]`: the volumes of the sound sources.
     pub mixer: MixerSettings,
+    /// `[mixer]`'s `audio_output`: what plays the sound.
+    pub audio_output: crate::audio::OutputChoice,
     /// `[mixer]`'s `blocksize` and `prebuffer`: the sound waiting for the
     /// host's sound device.
     pub audio_buffer: crate::audio::AudioBuffer,

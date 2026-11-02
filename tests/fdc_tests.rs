@@ -216,3 +216,34 @@ fn only_a_booted_system_has_the_controller() {
     rust_dos::boot::reboot_dos(&mut cpu);
     assert!(cpu.bus.fdc.is_none());
 }
+
+#[test]
+fn the_built_in_dos_takes_controller_port_writes_quietly() {
+    // With no controller, writes to its ports go nowhere and must not log
+    // as unhandled. 3F6h is the IDE channel's, not the controller's, so it
+    // still logs: that line shows the log is kept at all.
+    let base = PathBuf::from("target/test_fdc/quiet");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.log_backlog = Some(Vec::new());
+    assert!(cpu.bus.fdc.is_none());
+    for port in [0x3F0, 0x3F1, DOR, 0x3F3, MSR, DATA, DIR] {
+        cpu.bus.io_write(port, 0x0C);
+    }
+    cpu.bus.io_write(0x3F6, 0x0C);
+    let lines: Vec<String> = cpu
+        .bus
+        .take_log_backlog()
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    for port in [0x3F0, 0x3F1, DOR, 0x3F3, MSR, DATA, DIR] {
+        let tag = format!("Port: {port:04X}");
+        assert!(lines.iter().all(|line| !line.contains(&tag)), "{lines:?}");
+    }
+    assert!(
+        lines.iter().any(|line| line.contains("Port: 03F6")),
+        "{lines:?}"
+    );
+}

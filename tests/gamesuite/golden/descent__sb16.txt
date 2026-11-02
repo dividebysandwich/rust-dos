@@ -4,4 +4,4 @@ menu 883997a3befcd080ce4eac9e
 briefing fb67a8c88f052c3de4947811
 cockpit 3671e18e5f098893944d749f
 flown fe53ecbab10e8eba7c799b7b
-laser 000c17abac119c1f6b765104
+laser 73d90e6d66b81f04d39b2645

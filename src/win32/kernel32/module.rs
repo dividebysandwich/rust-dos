@@ -150,8 +150,11 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
             let bases = data[LIST..].to_vec();
             with_process(cpu, |p, bus| {
                 let mut memory = std::mem::take(&mut p.memory);
+                // An entry point that ran may have loaded one again.
                 for base in bases {
-                    loader::unmap(bus, &mut memory, p, base);
+                    if p.modules.iter().any(|m| m.base == base && m.refs == 0) {
+                        loader::unmap(bus, &mut memory, p, base);
+                    }
                 }
                 p.memory = memory;
             });
