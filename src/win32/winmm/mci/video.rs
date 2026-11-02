@@ -484,10 +484,15 @@ pub fn next_due(d: &Device) -> Option<u64> {
     if v.hwnd == 0 {
         return Some(end);
     }
-    // A file without pictures (MPEG audio) has only its end to wait for.
-    let Some(m) = v.media.as_ref().filter(|m| m.frames > 0) else {
-        return Some(end);
+    // A file not read yet since a restore is read at once, by the next
+    // draw; one without pictures (MPEG audio) has only its end to wait
+    // for.
+    let Some(m) = v.media.as_ref() else {
+        return Some(started.min(end));
     };
+    if m.frames == 0 {
+        return Some(end);
+    }
     // The next frame's start, from the frame drawn last.
     let next = v.drawn.map_or(0, |n| n + 1);
     let at = m.frame_ms(next) as u64;
