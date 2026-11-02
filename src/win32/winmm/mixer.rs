@@ -369,8 +369,8 @@ pub fn mixer_get_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         unreachable!()
     };
     let result = device_of(cpu, object, flags);
-    // An auxiliary device without the mixer gets -1 for its mixer, as on
-    // Windows 95.
+    // An auxiliary device without the mixer, or a bad aux id, gets -1
+    // for its mixer, as on Windows 95.
     let aux = flags & MIXER_OBJECTF_TYPEMASK == MIXER_OBJECTF_AUX;
     if result.is_err() && (!aux || at == 0) {
         return result.err();
@@ -964,7 +964,8 @@ mod tests {
     }
 
     /// The wave and MIDI synthesizer's aux devices have no mixer; the
-    /// others have mixer 0.
+    /// others have mixer 0. mixerGetID gives -1 for the two and for a
+    /// bad id, as Windows 95 does.
     #[test]
     fn the_wave_and_midi_aux_devices_have_no_mixer() {
         let mut cpu = machine();
@@ -973,6 +974,7 @@ mod tests {
             (1, MMSYSERR_NODRIVER, u32::MAX),
             (2, MMSYSERR_NOERROR, 0),
             (6, MMSYSERR_NOERROR, 0),
+            (7, MMSYSERR_BADDEVICEID, u32::MAX),
         ] {
             cpu.bus.guest_write_32(AT, 0x1234);
             let got = mixer_get_id(&mut cpu, &[aux, AT, MIXER_OBJECTF_AUX]);
