@@ -142,6 +142,7 @@ pub static TASKS: &[Step] = &[
     super::user32::progman::step,
     super::dplayx::enum_step,
     super::user32::session::step,
+    super::oleaut32::step,
     super::winmm::mci::video::call_step,
 ];
 
@@ -164,7 +165,8 @@ pub const WINHELP: u16 = 35;
 pub const PROGMAN: u16 = 36;
 pub const DPLAY_ENUM: u16 = 37;
 pub const END_SESSION: u16 = 38;
-pub const MCI_CALL: u16 = 39;
+pub const OLEAUT32: u16 = 39;
+pub const MCI_CALL: u16 = 40;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's

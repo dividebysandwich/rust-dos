@@ -78,6 +78,62 @@ fn host_files_are_found_by_long_and_short_name() {
     assert_eq!(files, ["DAYOFT~1.BIN", "DAYOFT~2.CUE"]);
 }
 
+/// A dot that ends a name leaves its extension empty, as DOS packs it:
+/// Menzoberranzan opens its palette as "COLORS.", the file COLORS. The
+/// root is a verbatim path on Windows (`\\?\`), where the host keeps the
+/// dot and finds nothing.
+#[test]
+fn a_dot_that_ends_a_name_leaves_its_extension_empty() {
+    let base = scratch("trailing_dot");
+    fs::create_dir_all(base.join("GAME")).unwrap();
+    fs::write(base.join("COLORS"), b"palette").unwrap();
+    fs::write(base.join("GAME/INIT"), b"init").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("COLORS.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"palette");
+    disk.close_file(h);
+    let h = disk.open_file(r"C:\GAME.\INIT.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"init");
+    disk.close_file(h);
+    assert!(disk.is_file("colors."));
+    assert_eq!(disk.get_file_attribute("COLORS."), Ok(0x20));
+    assert_eq!(disk.qualify_path("COLORS.").as_deref(), Some(r"C:\COLORS"));
+
+    // A file created by such a name gets the name without the dot.
+    let h = disk.create_file("NEW.", PSP).unwrap();
+    disk.close_file(h);
+    assert!(base.join("NEW").is_file());
+    assert_eq!(disk.open_file("MISSING.", 0, PSP), Err(0x02));
+
+    // So do a directory made and a file renamed by such a name.
+    disk.create_directory("SAVES.").unwrap();
+    assert!(base.join("SAVES").is_dir());
+    disk.rename_file("NEW", r"SAVES\MOVED.").unwrap();
+    assert!(base.join("SAVES/MOVED").is_file());
+    assert!(disk.is_file(r"SAVES\MOVED"));
+
+    // "." and ".." padded with spaces are still themselves.
+    assert_eq!(disk.qualify_path(r"GAME\.. \COLORS").as_deref(), Some(r"C:\COLORS"));
+    assert_eq!(disk.qualify_path(r"GAME\. \INIT").as_deref(), Some(r"C:\GAME\INIT"));
+}
+
+/// A host file whose name ends in a dot, as builds that kept the dot
+/// made for "SAVE.", is still found by that name.
+#[test]
+fn a_host_name_that_ends_in_a_dot_is_found_without_it() {
+    let base = scratch("host_trailing_dot");
+    // A verbatim path on Windows, which keeps the dot.
+    let host = fs::canonicalize(&base).unwrap();
+    fs::write(host.join("SAVE."), b"save").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("SAVE.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"save");
+    disk.close_file(h);
+    assert!(disk.is_file("save"));
+}
+
 #[test]
 fn each_drive_has_its_own_current_directory() {
     let base = scratch("cwd");

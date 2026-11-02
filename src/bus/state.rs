@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 25;
+const WIN32_VERSION: u16 = 26;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -88,6 +88,7 @@ impl Bus {
             vfx1,
             dta_segment,
             dta_offset,
+            sda_written: _,
             search_handles,
             search_serial,
             cursor_x,
@@ -391,6 +392,7 @@ impl Bus {
             vfx1,
             dta_segment,
             dta_offset,
+            sda_written: _,
             search_handles,
             search_serial,
             cursor_x,
@@ -701,6 +703,10 @@ impl Bus {
         self.kbc_release_at = None;
         self.kbc.release();
         self.net.nic_changed();
+        // What the machine last wrote into its SDA isn't what the state's
+        // SDA holds: until the next DOS call writes it, nothing in it
+        // counts as the program's.
+        self.sda_written = None;
     }
 
     /// `after_load` for a state loaded into the machine that saved it,
@@ -777,7 +783,8 @@ mod tests {
         (22, 0x1329_1DAD_33BC_DC4A), // dinput's app_data
         (23, 0x1329_1DAD_33BC_DC4A), // the mixer's seven lines
         (24, 0xF61B_D786_C674_4FD3), // WNASPI32 and its pending requests
-        (25, 0x4A19_98AF_3706_725B), // the MPEGVideo device
+        (25, 0xABF4_8D5F_2FB4_2680), // OLEAUT32's type libraries and error objects
+        (26, 0x099B_CE30_453E_08F4), // the MPEGVideo and AVIVideo devices
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
