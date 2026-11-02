@@ -747,7 +747,14 @@ fn texture(
         let (oow, log) = rl.unwrap_or_else(|| tables().reciplog(iterw));
         s = (oow.wrapping_mul(iters) >> 29) as i32;
         tc = (oow.wrapping_mul(itert) >> 29) as i32;
-        lod = footprint(q, iters, itert, iterw) + 2 * log;
+        // With lodmin at or above lodmax (one level, as Glide sets up a
+        // texture without mipmaps) the clamps below make any level lodmax:
+        // the footprint isn't worked out for it.
+        lod = if t.lodmin < t.lodmax {
+            footprint(q, iters, itert, iterw) + 2 * log
+        } else {
+            t.lodmax
+        };
     } else {
         s = (iters >> 14) as i32;
         tc = (itert >> 14) as i32;
@@ -1542,9 +1549,10 @@ pub(crate) mod tests {
                     let w = at(q.startw, q.dwdx, q.dwdy);
                     let level = texture(&t, mode, 0, None, 0, &q, s, tc, w, None) & 0xFF;
                     // The texels the pixel covers: the area its image has
-                    // in the texture, from the derivatives of s and t.
-                    let (s, tc, w) = (s as f64 / one, tc as f64 / one, w as f64 / one);
-                    let (dsdx, dsdy) = (4.0 / w, (shift * dwdy * w - s * dwdy) / (w * w));
+                    // in the texture, from the derivatives of s and t: t
+                    // doesn't change across, so d(s)/dy doesn't count.
+                    let (tc, w) = (tc as f64 / one, w as f64 / one);
+                    let dsdx = 4.0 / w;
                     let dtdy = ((4.0 + shift * dwdy) * w - tc * dwdy) / (w * w);
                     let n = (dsdx * dtdy).abs().log2() / 2.0;
                     // The card takes the level below the one it works out,

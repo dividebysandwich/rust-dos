@@ -170,6 +170,18 @@ impl Tables {
         }
     }
 
+    /// The reciprocal table's entries for a mantissa `temp` with its
+    /// leading 1 at bit 31: 1/n and log2(n) at the entry below it and at
+    /// the one above, and how far it is from the first to the second in
+    /// 256ths.
+    #[inline(always)]
+    fn entries(&self, temp: u32) -> (&[u32], u32) {
+        let index = ((temp >> (31 - RECIPLOG_LOOKUP_BITS - 1))
+            & ((2 << RECIPLOG_LOOKUP_BITS) - 2)) as usize;
+        let interp = (temp >> (31 - RECIPLOG_LOOKUP_BITS - 8)) & 0xFF;
+        (&self.reciplog[index..index + 4], interp)
+    }
+
     /// A fast 16.16 reciprocal of a 16.32 value (1/w in the rasterizer),
     /// and log2 of it in 16.8 as the second result (`fast_reciplog`).
     #[inline]
@@ -189,9 +201,7 @@ impl Tables {
         let lz = temp.leading_zeros() as i32;
         temp <<= lz;
         exp += lz;
-        let index = ((temp >> (31 - RECIPLOG_LOOKUP_BITS - 1)) & ((2 << RECIPLOG_LOOKUP_BITS) - 2)) as usize;
-        let table = &self.reciplog[index..index + 4];
-        let interp = (temp >> (31 - RECIPLOG_LOOKUP_BITS - 8)) & 0xFF;
+        let (table, interp) = self.entries(temp);
         let rlog = table[1].wrapping_mul(0x100 - interp).wrapping_add(table[3].wrapping_mul(interp)) >> 8;
         let mut recip =
             (table[0].wrapping_mul(0x100 - interp).wrapping_add(table[2].wrapping_mul(interp)) >> 8) as u64;
@@ -215,9 +225,7 @@ impl Tables {
         let exp = ((bits >> 52) & 0x7FF) as i32 - 1023;
         // The mantissa's leading 32 bits, its leading 1 at bit 31.
         let temp = 0x8000_0000 | ((bits >> 21) as u32 & 0x7FFF_FFFF);
-        let index = (temp >> (31 - RECIPLOG_LOOKUP_BITS - 1)) & ((2 << RECIPLOG_LOOKUP_BITS) - 2);
-        let table = &self.reciplog[index as usize..index as usize + 4];
-        let interp = (temp >> (31 - RECIPLOG_LOOKUP_BITS - 8)) & 0xFF;
+        let (table, interp) = self.entries(temp);
         let rlog = (table[1] * (0x100 - interp) + table[3] * interp) >> 8;
         // log2 in 128ths is half of it in 256ths.
         let shift = RECIPLOG_LOOKUP_PREC - LOG_OUTPUT_PREC + 1;

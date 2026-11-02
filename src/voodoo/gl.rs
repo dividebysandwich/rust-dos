@@ -2910,6 +2910,20 @@ mod tests {
         [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2]
     }
 
+    /// The software rasterizer's picture on `dither_card`, through frame
+    /// buffer reads of the front buffer, which see everything drawn.
+    fn software_picture(bus: &mut crate::bus::Bus) -> Vec<u16> {
+        w(bus, 0x114, 0);
+        let mut software = Vec::with_capacity(640 * 480);
+        for y in 0..480 {
+            for x in (0..640).step_by(2) {
+                let pair = bus.read_32(BASE + 0x40_0000 + y * 2048 + x * 2);
+                software.extend([pair as u16, (pair >> 16) as u16]);
+            }
+        }
+        software
+    }
+
     /// What the software rasterizer and OpenGL at `scale` (with dithering
     /// `on`) draw of what `draw` draws on `dither_card`: the card's
     /// 640x480 pixels, and the buffer's RGB, rows from the top.
@@ -2926,16 +2940,7 @@ mod tests {
         draw(&mut bus);
         let card = bus.voodoo.as_mut().unwrap();
         let recording = card.take_mirror().unwrap();
-        // The software picture through frame buffer reads of the front
-        // buffer, which see everything drawn.
-        w(&mut bus, 0x114, 0);
-        let mut software = Vec::with_capacity(640 * 480);
-        for y in 0..480 {
-            for x in (0..640).step_by(2) {
-                let pair = bus.read_32(BASE + 0x40_0000 + y * 2048 + x * 2);
-                software.extend([pair as u16, (pair >> 16) as u16]);
-            }
-        }
+        let software = software_picture(&mut bus);
         let mut renderer = VoodooGl::new(gl, Glsl::Gl150, scale, 1, 1).unwrap();
         renderer.set_dither(on);
         renderer.run(gl, resync);
@@ -3105,6 +3110,24 @@ mod tests {
             .count()
     }
 
+    /// The card draws `draw_floor` 3072 texels from 0 from the levels it
+    /// draws it from near 0. 3072 texels is a whole number of every level's
+    /// size, so a pixel changes by a step of the bilinear blend where the
+    /// fixed point rounds the other way, not by a level's colour. Through
+    /// the registers, `Tmu::prepare` and the rasterizer, without OpenGL.
+    #[test]
+    fn floor_levels_stay_the_same_far_from_0() {
+        let picture = |shift: f32| {
+            let mut bus = dither_card();
+            mipmapped_texture(&mut bus, 1 | 2 | 4, LEVELS);
+            draw_floor(&mut bus, 1 << 8, shift);
+            software_picture(&mut bus)
+        };
+        let far: Vec<[u8; 3]> = picture(3072.0).into_iter().map(widen).collect();
+        let moved = far_apart(&picture(0.0), &far);
+        assert_eq!(moved, 0, "pixels that change levels 3072 texels away");
+    }
+
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
     fn mipmap_levels_are_the_cards() {
@@ -3121,7 +3144,7 @@ mod tests {
         // times the gradients of S/W and T/W nearly cancels S/W and T/W
         // times W's in each pixel's footprint; and with the dithered level
         // of detail (textureMode bit 4).
-        let (mut results, mut pictures) = (Vec::new(), Vec::new());
+        let mut results = Vec::new();
         for (shift, mode, lod, what) in [
             (0.0, bilinear, LEVELS, "near 0"),
             (3072.0, bilinear, LEVELS, "3072 texels away"),
@@ -3153,15 +3176,7 @@ mod tests {
             // edge takes the texel beside the card's: a few dozen of them.
             let far_allowed = if mode & 6 == 0 { 64 } else { 0 };
             results.push((what, exact, apart, far_allowed));
-            pictures.push(software);
         }
-        // 3072 texels is a whole number of every level's size, so the card
-        // draws the floor from the same levels as near 0: a pixel changes
-        // by a step of the bilinear blend where the fixed point rounds the
-        // other way, not by a level's colour.
-        let widened: Vec<[u8; 3]> = pictures[1].iter().map(|&v| widen(v)).collect();
-        let moved = far_apart(&pictures[0], &widened);
-        assert_eq!(moved, 0, "pixels that change levels 3072 texels away");
         // Few far from the card's, and few off it at all: the floor is
         // 32768 pixels, and a wrong fraction or texel would change most.
         let fine = results.iter().all(|&(_, exact, far, allowed)| far <= allowed && exact < 2048);
