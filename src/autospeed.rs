@@ -118,27 +118,25 @@ const MOST_BACKOFFS: u32 = 2;
 /// speed, and the speed with it, as the loss shows up at a speed already
 /// below what the heavy scenes want, and the speed the step came from kept
 /// the frames of the scene it was judged in only. It lasts if `LASTS` of the
-/// measurements around it fall short by more than `ONE_READING`, a frame in
-/// the `ENOUGH_FRAMES` a measurement counts, which is what a single reading
-/// can be off by. (`KEPT` is for a mean of `JUDGED`, and readings go past it
-/// on noise alone.) A slope like Myth's stays above that line: it loses
-/// little by the step, and the knee reckoned from it does the rest. A fall
-/// by `DROPPED` ends the step at once, so what comes after it at the speed
-/// the step came from counts: at once back at the frame rate, it was a wipe.
+/// measurements around it fall short by more than a frame (`short_of`),
+/// which is what a single reading can be off by. (`KEPT` is for a mean of
+/// `JUDGED`, and readings go past it on noise alone.) A slope like Myth's
+/// stays above that line: it loses little by the step, and the knee reckoned
+/// from it does the rest. A fall by `DROPPED` ends the step at once, so what
+/// comes after it at the speed the step came from counts: at once back at
+/// the frame rate, it was a wipe.
 ///
 /// A floor lapses after `FLOOR_WINDOWS` measurements, about two minutes,
 /// which finds a program that got lighter, and a new search clears it. It
 /// lapses whole: coming down by steps would rest for minutes in the speeds
 /// that lost the frames, where Doom draws 34. Of several losses the highest
-/// counts. A loss counts up to
-/// `TWO_STEPS` above the least speed that drew the record: a speed that far
-/// above what the program runs at isn't too low, and a floor there would pin
-/// a run that noise sent up (one at 700,000 in a program that holds at
-/// 85,000).
+/// counts. A loss counts up to `TWO_STEPS` above the least speed that drew
+/// the record: a speed that far above what the program runs at isn't too
+/// low, and a floor there would pin a run that noise sent up (one at 700,000
+/// in a program that holds at 85,000).
 const FLOOR_WINDOWS: u32 = 4 * HOLD_WINDOWS;
 const SEEN_TWICE: u32 = 2;
 const LASTS: u32 = JUDGED - 1;
-const ONE_READING: f64 = 1.0 - 1.0 / ENOUGH_FRAMES as f64;
 const TWO_STEPS: f64 = FINE_STEP * FINE_STEP;
 /// Emulated time running slower than this share of the host's didn't keep
 /// up: the host can't run that speed now, whatever its estimate says (a
@@ -356,6 +354,15 @@ fn trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("RUST_DOS_AUTO_TRACE").is_some())
 }
 
+/// The frame rate a reading of a program that draws `fps` falls under only
+/// by losing frames: a frame less is what one reading can be off by. A
+/// measurement counts `ENOUGH_FRAMES`, or what `LONG_WINDOW_NS` holds of a
+/// slower program's, of which a frame is a bigger share.
+fn short_of(fps: f64) -> f64 {
+    let frames = (fps * LONG_WINDOW_NS as f64 / 1e9).clamp(1.0, ENOUGH_FRAMES as f64);
+    fps * (1.0 - 1.0 / frames)
+}
+
 /// A measurement's start: the counts as they were.
 #[derive(Clone, Copy, Debug)]
 struct Mark {
@@ -461,7 +468,7 @@ enum Step {
     /// The speed went down from `from`, where the program drew `fps`. The
     /// frame rates measured here so far add up to `sum`, `seen` of them, and
     /// `short` of them were short of what the step has to keep, by more than
-    /// a reading can be off (`ONE_READING`).
+    /// a reading can be off (`short_of`).
     Lowered {
         from: u32,
         fps: f64,
@@ -510,7 +517,7 @@ pub struct AutoSpeed {
     /// `MOST_BACKOFFS`.
     backoffs: u32,
     /// The least speed steps down go to, since a speed under it lost frames,
-    /// and the measurements before that comes down (`FLOOR_WINDOWS`).
+    /// and the measurements before it lapses (`FLOOR_WINDOWS`).
     floor: Option<(u32, u32)>,
     /// A fall by `DROPPED` ended a step down to this speed: the measurements
     /// that have to stay short for it to count as lost (`LASTS`).
@@ -656,13 +663,19 @@ impl AutoSpeed {
     /// `speed` lost frames: raises the floor to `over` times it, no higher
     /// than `top`. Returns the floor, the least speed to hold at now.
     fn lost_frames(&mut self, speed: u32, over: f64, top: u32) -> f64 {
-        let was = self.floor.unwrap_or((0, 0));
+        let was = self.floor.map_or(0, |(floor, _)| floor);
         if self.least_held.is_some_and(|least| speed as f64 > least as f64 * TWO_STEPS) {
-            return was.0 as f64;
+            return was as f64;
         }
-        let floor = ((speed as f64 * over) as u32).min(top);
-        self.floor = Some((floor.max(was.0), FLOOR_WINDOWS));
-        floor.max(was.0) as f64
+        let floor = ((speed as f64 * over) as u32).min(top).max(was);
+        self.floor = Some((floor, FLOOR_WINDOWS));
+        floor as f64
+    }
+
+    /// The frame rate to keep, for a speed that drew `fps`: the record's, if
+    /// that is more.
+    fn to_keep(&self, fps: f64) -> f64 {
+        self.held.map_or(fps, |r| r.fps.max(fps))
     }
 
     /// After a frame: once a measurement is complete, the speed it asks
@@ -1015,8 +1028,8 @@ impl AutoSpeed {
                 short,
             } if current < from => {
                 let (sum, seen) = (sum + fps, seen + 1);
-                let kept = self.held.map_or(before, |r| r.fps.max(before));
-                let short = short + u32::from(fps < kept * ONE_READING);
+                let kept = self.to_keep(before);
+                let short = short + u32::from(fps < short_of(kept));
                 // A frame rate that fell by a fifth is no noise to average
                 // out: the program shouldn't wait out the rest of them.
                 let dropped = fps < before * DROPPED;
@@ -1061,10 +1074,8 @@ impl AutoSpeed {
                         // what `from` drew, so that a scene that got heavier
                         // during the step reads as one (`DROPPED`): measured
                         // afresh, the fall would be its frame rate to hold.
-                        if (from as f64) < least {
-                            return hold(self, least, left, true);
-                        }
-                        hold_drawing(self, before, clamp(from as f64), left, true)
+                        let back = clamp((from as f64).max(least));
+                        hold_drawing(self, before, back, left, true)
                     } else {
                         let knee = (c * before / fps).clamp(c, from as f64);
                         hold(self, (knee * HEADROOM).max(least), left, true)
@@ -1082,7 +1093,7 @@ impl AutoSpeed {
                 let held = if held.is_nan() { fps } else { held };
                 let mut least = 0.0;
                 if let Some((speed, short)) = self.fell.take()
-                    && fps < held * ONE_READING
+                    && fps < short_of(self.to_keep(held))
                 {
                     if short > 1 {
                         self.fell = Some((speed, short - 1));
@@ -1107,7 +1118,8 @@ impl AutoSpeed {
                         seen: seen_before,
                         dipped: JUDGED,
                     };
-                    return current;
+                    // A fall that lasted goes up to its floor all the same.
+                    return current.max(clamp(least));
                 }
                 if low {
                     // A heavier scene: what the last one held at says
@@ -1126,7 +1138,7 @@ impl AutoSpeed {
                     return up(self, FIRST_STEP, here);
                 }
                 if c < least {
-                    return hold(self, least, left, more);
+                    return hold_drawing(self, held, clamp(least), left, more);
                 }
                 let record = Record {
                     fps: recent,
@@ -1450,7 +1462,9 @@ mod tests {
         }
         // A tenth of the time is about what the game's own runs spend there.
         assert!(slow <= all / 10, "{} of {} slow", slow, all);
-        assert!(high <= all / 200, "{} of {} high", high, all);
+        // A floor that forms while a run is up holds it there until it lapses,
+        // 120 measurements at a time.
+        assert!(high <= all / 150, "{} of {} high", high, all);
     }
 
     #[test]
@@ -1845,13 +1859,18 @@ mod tests {
         drawing((speed as f64 * 35.0 / needs).min(35.0))
     }
 
-    /// The mean frame rate over `scene`.
-    fn in_scenes(floor: bool) -> f64 {
+    /// Over `scene`, with a floor or without: the mean frame rate, and the
+    /// measurements under the speed the light scenes want most of.
+    fn in_scenes(floor: bool) -> (f64, usize) {
         let (mut auto, mut speed) = doom_settled(300);
         let mut frames = Vec::new();
+        let mut under = 0;
         for i in 0..4000 {
             let m = scene(speed, i);
             frames.extend(m.fps);
+            if i > 1000 && speed < 40_000 {
+                under += 1;
+            }
             if !floor {
                 // Then no speed is near enough to what it runs at to count.
                 auto.least_held = Some(1);
@@ -1859,14 +1878,17 @@ mod tests {
             speed = auto.decide(speed, &m, false, HOST);
         }
         let later = &frames[1000..];
-        later.iter().sum::<f64>() / later.len() as f64
+        (later.iter().sum::<f64>() / later.len() as f64, under)
     }
 
     #[test]
     fn a_light_scene_does_not_take_the_speed_back_under_a_heavy_one() {
-        let with = in_scenes(true);
-        let without = in_scenes(false);
+        let (with, under) = in_scenes(true);
+        let (without, _) = in_scenes(false);
         assert!(with >= 34.8 && with > without, "{} {}", with, without);
+        // A floor that lapses costs the two steps down to the speed that
+        // lost frames, and no more than that each time.
+        assert!(under <= 80, "{}", under);
     }
 
     #[test]
@@ -1888,8 +1910,8 @@ mod tests {
         assert_eq!(auto.floor, None);
     }
 
-    /// A step down from 60,000 to 52,174 with `readings` still to come,
-    /// holding to 35 frames a second.
+    /// A step down from 60,000 to 52,174 with no reading in yet, holding to
+    /// 35 frames a second.
     fn stepped_down() -> AutoSpeed {
         let mut auto = AutoSpeed::new(3000, None);
         auto.held = Some(Record {
@@ -1972,6 +1994,81 @@ mod tests {
         assert_eq!(auto.floor.map(|f| f.0), Some(60_000));
         assert_eq!(auto.fell, None);
         assert_eq!(speed, 60_000);
+    }
+
+    #[test]
+    fn a_heavier_scene_at_the_floor_a_fall_went_up_to_is_one() {
+        // Measured afresh at the floor, the heavy scene's frame rate would be
+        // the one to hold, and the speed would stop far short of what it
+        // wants: 105,000 at 15 frames a second.
+        let mut auto = stepped_down();
+        let mut speed = 52_174;
+        for fps in [33.0, 33.0, 26.0] {
+            speed = auto.decide(speed, &drawing(fps), false, HOST);
+        }
+        assert_eq!(speed, 69_000);
+        let heavy = |speed: u32| drawing((speed as f64 * 35.0 / 240_000.0).min(35.0));
+        for _ in 0..3 {
+            speed = auto.decide(speed, &heavy(speed), false, HOST);
+        }
+        assert!(speed >= 240_000, "{}: {:?}", speed, auto.step);
+    }
+
+    #[test]
+    fn a_fall_that_lasts_into_a_dip_goes_up_to_the_floor() {
+        let mut auto = stepped_down();
+        let mut speed = auto.decide(52_174, &drawing(26.0), false, HOST);
+        speed = auto.decide(speed, &drawing(27.0), false, HOST);
+        assert_eq!(speed, 60_000);
+        speed = auto.decide(speed, &drawing(21.0), false, HOST);
+        assert_eq!(auto.floor.map(|f| f.0), Some(69_000));
+        assert_eq!(speed, 69_000);
+        assert!(matches!(auto.step, Step::Hold { dipped: JUDGED, .. }));
+    }
+
+    #[test]
+    fn a_fall_lasts_by_the_same_line_as_the_step_it_ended() {
+        // 32.9 is short of the record of 35.3, if not of the 34.4 that the
+        // speed above was drawing when the step left it.
+        let mut auto = stepped_down();
+        auto.held = Some(Record {
+            fps: 35.3,
+            at: 60_000,
+            climbed: 0,
+        });
+        auto.step = Step::Lowered {
+            from: 60_000,
+            fps: 34.4,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        let speed = auto.decide(52_174, &drawing(27.0), false, HOST);
+        auto.decide(speed, &drawing(32.9), false, HOST);
+        assert_eq!(auto.fell, Some((52_174, 1)));
+    }
+
+    #[test]
+    fn a_frame_more_or_less_of_a_slow_program_is_no_loss() {
+        // A measurement of a program at 5 frames a second counts 10 or 11,
+        // so it reads 5 or 5.5 and nothing changed.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.held = Some(Record {
+            fps: 5.4,
+            at: 20_000,
+            climbed: 0,
+        });
+        auto.step = Step::Lowered {
+            from: 20_000,
+            fps: 5.4,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        for fps in [5.0, 5.0, 5.0, 5.5] {
+            auto.decide(17_391, &drawing(fps), false, HOST);
+        }
+        assert_eq!(auto.floor, None);
     }
 
     #[test]
@@ -2076,9 +2173,15 @@ mod tests {
     /// the game below what was recorded, never heavier.
     const DOOM: &str = include_str!("autospeed_doom.txt");
 
-    fn replay(run: &str) -> (Vec<u32>, Option<usize>) {
+    /// `text`'s runs, whichever line ends git checked it out with.
+    fn runs(text: &str) -> Vec<Vec<&str>> {
+        let lines: Vec<&str> = text.lines().collect();
+        lines.split(|l| l.is_empty()).map(<[&str]>::to_vec).collect()
+    }
+
+    fn replay(run: &[&str]) -> (Vec<u32>, Option<usize>) {
         let readings: Vec<Vec<f64>> = run
-            .lines()
+            .iter()
             .map(|l| l.split(' ').map(|n| n.parse().unwrap()).collect())
             .collect();
         let mut auto = AutoSpeed::new(3000, None);
@@ -2107,7 +2210,10 @@ mod tests {
 
     #[test]
     fn doom_as_recorded_gets_its_floor_at_the_first_heavy_scene() {
-        for run in DOOM.trim().split("\n\n") {
+        let doom = runs(DOOM);
+        assert_eq!(doom.len(), 3);
+        assert_eq!(runs(&DOOM.replace('\n', "\r\n")), doom);
+        for run in &doom {
             let (speeds, floored) = replay(run);
             let floored = floored.expect("a floor");
             assert!(floored < 130, "{}: {:?}", floored, speeds);
