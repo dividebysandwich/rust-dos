@@ -827,7 +827,9 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
         let fits = state(cpu)
             .surface(level)
             .is_some_and(|l| (l.width, l.height) == (lw, lh));
-        if !fits || p != lw * bpp || addr != next {
+        // A level of one row has no padding to step over, whatever its
+        // pitch says: a 16-bit 1x1 level's is 4.
+        if !fits || (lh > 1 && p != lw * bpp) || addr != next {
             break;
         }
         // The card's level sizes, at least 4 texels.
