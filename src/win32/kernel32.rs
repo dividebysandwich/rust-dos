@@ -629,6 +629,11 @@ static APIS: &[Api] = &[
     stdcall("FreeLibrary16", 36, 1, flat::free_library16),
     stdcall("GetProcAddress16", 37, 2, flat::get_proc_address16),
     stdcall("SetProcessShutdownParameters", 734, 2, not_implemented),
+    // A debugger's loop. No process here debugs another, so these fail,
+    // but SafeDisc 2 resolves both through its own export walk and stops
+    // with "Fatal error, code 12" where either is missing.
+    stdcall("WaitForDebugEvent", 952, 2, not_implemented),
+    stdcall("ContinueDebugEvent", 953, 3, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.

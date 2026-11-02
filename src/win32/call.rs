@@ -48,6 +48,7 @@ pub static THENS: &[Then] = &[
     super::msvcrt::returned,
     super::task::returned,
     super::winmm::driver::returned,
+    super::wnaspi32::posted,
 ];
 
 /// The `THENS` places, by name.
@@ -61,6 +62,7 @@ pub const ENUM_STRINGS: u16 = 6;
 pub const MSVCRT: u16 = 7;
 pub const TASK: u16 = 8;
 pub const DRIVER: u16 = 9;
+pub const ASPI_POSTED: u16 = 10;
 
 /// Call the program's function at `target` with `args` (the first pushed
 /// last, as C does), on the running thread's stack below ESP. When it

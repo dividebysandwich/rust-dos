@@ -17,7 +17,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 /// A vertex: where it is in the buffer in pixels, rows counted from the
 /// top of the buffer (the Y origin applied), and the values the card
 /// iterates there: the colour in 8-bit units, Z in 16-bit units, W, and
-/// each texture unit's S, T and W (16.32 values as numbers).
+/// each texture unit's S, T and W (16.32 values as numbers). `lod` is each
+/// unit's base level of detail (8.8), the triangle's and the same at its
+/// three vertices: what the card works out from the gradients of S/W and
+/// T/W (`Tmu::prepare`), to which a pixel adds log2(1/W).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -25,6 +28,7 @@ pub struct Vertex {
     pub color: [f32; 4],
     pub zw: [f32; 2],
     pub tex: [[f32; 3]; 2],
+    pub lod: [f32; 2],
 }
 
 /// A texture unit as triangles draw with it.
@@ -45,6 +49,10 @@ pub struct TexUnit {
     pub lodmin: i32,
     pub lodmax: i32,
     pub lodbias: i32,
+    /// The levels the texture has (`TmuRaster::lodmask`), and the fraction
+    /// bits bilinear filtering blends with (`Chip::bilinear_mask`).
+    pub lodmask: u32,
+    pub bilinear_mask: i32,
     pub detailmax: i32,
     pub detailbias: i32,
     pub detailscale: u32,
@@ -711,6 +719,7 @@ impl Mirror {
                 ],
                 zw: [color(p.startz, p.dzdx, p.dzdy), wide(p.startw, p.dwdx, p.dwdy)],
                 tex,
+                lod: p.tmu.map(|q| q.lodbase as f32),
             }
         });
         // LFB writes between identical draws must stay between them,
@@ -809,7 +818,10 @@ impl Mirror {
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {
-        let first = (t.lodmin >> 8).clamp(0, 8);
+        // The card clamps the level to lodmin and then to lodmax, so with
+        // lodmin above lodmax it reads lodmax (as `backlog::texture_bytes`
+        // has it).
+        let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8);
         let last = (t.lodmax >> 8).clamp(first, 8);
         let key = TexKey {
             unit: unit as u8,
@@ -833,6 +845,8 @@ impl Mirror {
             lodmin: t.lodmin,
             lodmax: t.lodmax,
             lodbias: t.lodbias,
+            lodmask: t.lodmask,
+            bilinear_mask: t.bilinear_mask,
             detailmax: t.detailmax,
             detailbias: t.detailbias,
             detailscale: t.detailscale,

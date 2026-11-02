@@ -306,6 +306,15 @@ pub fn visible(cpu: &mut Cpu, dc: &Dc) -> (Region, (i32, i32)) {
     }
 }
 
+/// The visible region of the DC `hdc` on its surface, which for a window
+/// DC is the screen: what Windows 9x keeps as the DC's visible region,
+/// and what GDI's InquireVisRgn gives. None if `hdc` isn't a DC.
+pub fn visible_on_surface(cpu: &mut Cpu, hdc: u32) -> Option<Region> {
+    let dc = gdi(cpu).dc(hdc)?.clone();
+    let (vis, (x, y)) = visible(cpu, &dc);
+    Some(vis.offset_by(x, y))
+}
+
 /// The region a DC may draw on, in device coordinates: its visible
 /// region, clip region and meta region.
 pub fn effective_clip(cpu: &mut Cpu, dc: &Dc) -> (Region, (i32, i32)) {

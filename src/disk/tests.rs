@@ -1585,3 +1585,20 @@ fn an_open_system_file_reads_as_the_files_shown() {
     loaded.set_system_files(r"C:\WINDOWS\SYSTEM", shown(b"MZ98"));
     assert_eq!(loaded.read_file(h, 2).unwrap(), b"98");
 }
+
+#[test]
+fn a_created_long_name_keeps_its_case_and_a_short_one_is_uppercased() {
+    let root = scratch("create_keeps_long_case");
+    let mut disk = DiskController::new(root.clone());
+    for name in [r"C:\level0_Final.dat", r"C:\readme.txt"] {
+        let handle = disk.create_file(name, PSP).unwrap();
+        disk.close_file(handle);
+    }
+    disk.rename_file(r"C:\README.TXT", r"C:\Read Me First.txt").unwrap();
+    let mut names: Vec<String> =
+        fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["Read Me First.txt", "level0_Final.dat"]);
+    // Opening it again in another case finds it, as on Windows.
+    assert!(disk.is_file(r"C:\LEVEL0_FINAL.DAT"));
+}
