@@ -1085,3 +1085,51 @@ fn a_program_ending_without_closing_glide_gives_a_voodoo3_its_mode_back() {
     run_to_exit(&mut cpu);
     assert_eq!(cpu.bus.vga.crtc_regs, before, "the mode the screen was in");
 }
+
+/// A program that opens the card, clears the back buffer to grey
+/// 0x808080 undithered and swaps it to the screen.
+fn grey_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        let grey = [Arg::I(0x0080_8080), Arg::I(0), Arg::I(0)];
+        c.call(a, l, "_grBufferClear@12", &grey)?;
+        c.call(a, l, "_grBufferSwap@4", &[Arg::I(0)])?;
+        stay(a, l)
+    })
+}
+
+/// The red of the middle of the screen after `grey_program` on `board`.
+fn grey_shown(test: &str, board: Board) -> u8 {
+    let (program, data) = grey_program();
+    let mut cpu = machine(test, Some(board), program);
+    run_until_done(&mut cpu, data);
+    cpu.bus.sync_display();
+    let (w, h) = rust_dos::video::frame_size(&cpu.bus);
+    assert_eq!((w, h), (640, 480), "Glide's mode is shown");
+    let mut frame = rust_dos::video::Frame::new(w, h);
+    rust_dos::video::render_screen(&mut frame, &cpu.bus);
+    frame.rgba[4 * (240 * 640 + 320)]
+}
+
+/// The 5-bit level 16 (0x84 in 8 bits) through a gamma table of `gamma`.
+fn grey_through(gamma: f64) -> u8 {
+    ((0x84 as f64 / 255.0).powf(1.0 / gamma) * 255.0 + 0.5) as u8
+}
+
+/// grSstWinOpen loads the gamma table 3dfx's Glide 2 loads: 1.3 on a
+/// Voodoo2 and a Voodoo3, 1.7 on a Voodoo Graphics. A Voodoo Graphics'
+/// or Voodoo2's table has 33 entries the card interpolates between, so
+/// their levels come within a few of the formula's.
+#[test]
+fn gr_sst_win_open_loads_glides_gamma_table() {
+    let near = |got: u8, want: u8| got.abs_diff(want) <= 2;
+    let v3 = grey_shown("gamma_v3", Board::Voodoo3);
+    assert_eq!(v3, grey_through(1.3), "Voodoo3");
+    let v2 = grey_shown("gamma_v2", Board::Voodoo2);
+    assert!(near(v2, grey_through(1.3)), "Voodoo2: {v2}");
+    let v1 = grey_shown("gamma_v1", Board::Standard);
+    assert!(near(v1, grey_through(1.7)), "Voodoo Graphics: {v1}");
+}
