@@ -653,10 +653,109 @@ pub fn get(cpu: &mut Cpu) -> &mut Registry {
         let file = cpu.bus.disk.file_data(FILE).and_then(|f| f.read().ok());
         let text = file.map(|bytes| crate::dosstr::from_bytes(&bytes));
         let version = cpu.bus.win32.os;
-        cpu.bus.win32.registry = Registry::seeded(text.as_deref(), version);
+        // The CD-ROM drive ASPI shows, and where it is on the IDE
+        // channels: from the secondary master on without MOUNT's -ide.
+        let cd = super::wnaspi32::cd_drive(cpu).map(|(drive, _)| {
+            let slot = cpu.bus.disk.ide_slot(drive);
+            (drive, slot.unwrap_or(crate::ide::IdeSlot::CD_ORDER[0]))
+        });
+        let mut registry = Registry::seeded(text.as_deref(), version);
+        registry.import(&devices(cd));
+        registry.dirty = false;
+        cpu.bus.win32.registry = registry;
     }
     &mut cpu.bus.win32.registry
 }
+
+/// The device keys of the CD-ROM drive `cd` (its DOS drive and its IDE
+/// slot), the one WNASPI32 shows, as Windows 98 SE has them for an ATAPI
+/// drive on an IDE channel: the drive's key under HKLM\Enum\SCSI, named
+/// after its INQUIRY data; its channel's controller under
+/// HKLM\Enum\BIOS\*PNP0600; and their device nodes in
+/// HKEY_DYN_DATA\Config Manager\Enum, which name those keys.
+///
+/// Copy protections find the drive letter of an ASPI target this way.
+/// SafeDisc 2 goes through Config Manager's nodes to the CDROM-class keys,
+/// reads their SCSITargetID, SCSILUN and CurrentDriveLetterAssignment, and
+/// the DeviceDesc of the controller the instance name points to; with no
+/// such key it finds no CD-ROM drive ("Missing CD-ROM").
+///
+/// The values are those Windows 98 SE made for rust-dos's drive on the
+/// secondary master. ESDI_506 names a drive's instance after its
+/// controller's (0F for the primary channel, 10 for the secondary), its
+/// target (0 master, 1 slave) and its LUN. Windows remakes these keys at
+/// each start, so they are made each time the registry is read. Nothing
+/// without a CD-ROM drive.
+fn devices(cd: Option<(u8, crate::ide::IdeSlot)>) -> String {
+    use crate::ide::ChannelId;
+    use crate::ide::atapi::{INQUIRY_PRODUCT, INQUIRY_REVISION, INQUIRY_VENDOR};
+    let Some((drive, slot)) = cd else {
+        return String::new();
+    };
+    // The SCSI hardware id: vendor (8) and product (16), spaces as
+    // underscores, and the revision's first character.
+    let id: String = format!("{INQUIRY_VENDOR:<8.8}{INQUIRY_PRODUCT:<16.16}")
+        .replace(' ', "_")
+        + &INQUIRY_REVISION[..1];
+    let (controller, hdc) = match slot.channel {
+        ChannelId::Primary => ("0F", "0000"),
+        ChannelId::Secondary => ("10", "0001"),
+    };
+    let target = u8::from(slot.slave);
+    let instance = format!("BIOS&*PNP0600&{controller}{target}0");
+    let letter = (b'A' + drive) as char;
+    let master = u8::from(!slot.slave);
+    format!(
+        r#"REGEDIT4
+
+[HKEY_LOCAL_MACHINE\Enum\BIOS\*PNP0600\{controller}]
+"Capabilities"=hex:14,00,00,00
+"HardwareID"="BIOS\\*PNP0600,*PNP0600"
+"ClassGUID"="{{4d36e96a-e325-11ce-bfc1-08002be10318}}"
+"Class"="hdc"
+"Driver"="hdc\\{hdc}"
+"Mfg"="(Standard hard disk drivers)"
+"DeviceDesc"="Standard IDE/ESDI Hard Disk Controller"
+"ConfigFlags"=hex:00,00,00,00
+
+[HKEY_LOCAL_MACHINE\Enum\SCSI\{id}\{instance}]
+"Capabilities"=hex:14,00,00,00
+"AutoInsertNotification"=hex:01
+"SCSITargetID"="{target}"
+"SCSILUN"="0"
+"RevisionLevel"="{INQUIRY_REVISION:<4.4}"
+"ProductId"="{INQUIRY_PRODUCT:<16.16}"
+"Manufacturer"="{INQUIRY_VENDOR}"
+"DeviceType"=hex:05
+"Removable"=hex:01
+"CurrentDriveLetterAssignment"="{letter}"
+"IDEMaster"=hex:{master:02x}
+"HardwareID"="{id},GenCD,SCSI\\{id}"
+"Class"="CDROM"
+"ClassGUID"="{{4d36e965-e325-11ce-bfc1-08002be10318}}"
+"Driver"="CDROM\\0000"
+"Mfg"="(Standard CD-ROM device)"
+"DeviceDesc"="{INQUIRY_VENDOR} {INQUIRY_PRODUCT:<16.16}"
+"ConfigFlags"=hex:00,00,00,00
+
+[HKEY_DYN_DATA\Config Manager\Enum\{HDC_DEVNODE}]
+"HardWareKey"="BIOS\\*PNP0600\\{controller}"
+"Problem"=hex:00,00,00,00
+"Status"=hex:0a,60,00,00
+
+[HKEY_DYN_DATA\Config Manager\Enum\{CD_DEVNODE}]
+"HardWareKey"="SCSI\\{id}\\{instance}"
+"Problem"=hex:00,00,00,00
+"Status"=hex:0a,60,00,00
+"#
+    )
+}
+
+/// The names of the controller's and the CD-ROM drive's device nodes
+/// under Config Manager\Enum. Windows 98 names a node by its address in
+/// the configuration manager's memory; these are two such addresses.
+const HDC_DEVNODE: &str = "C29FF000";
+const CD_DEVNODE: &str = "C2A01000";
 
 /// Write the registry to its file, if it changed.
 pub fn save(cpu: &mut Cpu) {
@@ -875,5 +974,39 @@ mod tests {
         assert!(registry.close(handle, 7));
         assert!(!registry.close(handle, 7));
         assert!(matches!(registry.open(0, 7), Open::Error(ERROR_BADKEY)));
+    }
+
+    /// A string value's text, without its terminating zero.
+    fn text(registry: &Registry, key: u32, name: &str) -> String {
+        let data = &registry.value(key, name).unwrap().data;
+        String::from_utf8(data.strip_suffix(b"\0").unwrap_or(data).to_vec()).unwrap()
+    }
+
+    #[test]
+    fn a_cd_drive_is_found_as_safedisc_looks_for_it() {
+        use crate::ide::{ChannelId, IdeSlot};
+        let mut registry = Registry::seeded(None, Win98Se);
+        registry.import(&devices(Some((3, IdeSlot::new(ChannelId::Primary, true)))));
+        // Config Manager's nodes name the device keys under HKLM\Enum.
+        let nodes = registry.find(DYN_DATA, r"Config Manager\Enum").unwrap();
+        let cd = registry
+            .key(nodes)
+            .children
+            .iter()
+            .filter(|&&node| registry.value(node, "HardWareKey").is_some())
+            .map(|&node| text(&registry, node, "HardWareKey"))
+            .filter_map(|path| registry.find(LOCAL_MACHINE, &format!(r"Enum\{path}")))
+            .find(|&key| registry.value(key, "Class").is_some_and(|v| v.data.starts_with(b"CDROM")))
+            .unwrap();
+        assert_eq!(text(&registry, cd, "CurrentDriveLetterAssignment"), "D");
+        assert_eq!(text(&registry, cd, "SCSITargetID"), "1");
+        assert_eq!(text(&registry, cd, "SCSILUN"), "0");
+        // The instance names its controller: the primary channel's, 0F.
+        let instance = registry.key(cd).name.clone();
+        assert_eq!(instance, "BIOS&*PNP0600&0F10");
+        let hdc = registry.find(LOCAL_MACHINE, r"Enum\BIOS\*PNP0600\0F").unwrap();
+        assert_eq!(text(&registry, hdc, "Class"), "hdc");
+        // No drive, no keys.
+        assert_eq!(devices(None), "");
     }
 }

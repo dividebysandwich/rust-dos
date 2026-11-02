@@ -461,7 +461,7 @@ impl DiskController {
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        let target = parent.join(leaf.to_uppercase());
+        let target = parent.join(super::new_entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         self.host_dirs.touched(&source);

@@ -86,8 +86,8 @@ impl DiskController {
     /// among its folder's entries (`find_host_entry`): the path names
     /// nothing on the host then, which needs no stat to tell. Each
     /// component is the entry's long name, or, where it matches nothing,
-    /// the name uppercased, for creating it. A name the entries can't rule
-    /// out (`entries_settle`) is never missing.
+    /// the name to create it under (`new_entry_name`). A name the entries
+    /// can't rule out (`entries_settle`) is never missing.
     fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
@@ -114,10 +114,8 @@ impl DiskController {
                     sure = false;
                 }
             }
-            let (host_name, dos_name) = found.unwrap_or_else(|| {
-                let upper = part.to_ascii_uppercase();
-                (upper.clone(), upper)
-            });
+            let (host_name, dos_name) = found
+                .unwrap_or_else(|| (super::new_entry_name(part), part.to_ascii_uppercase()));
             full_path.push(host_name);
             dos_path.push(dos_name);
         }

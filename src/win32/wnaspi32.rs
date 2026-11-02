@@ -147,7 +147,7 @@ fn get_aspi32_dll_version(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 /// The DOS drive of the CD-ROM drive ASPI shows, and its target: the
 /// drive `cd_to_show` picks, given the one shown before.
-fn cd_drive(cpu: &mut Cpu) -> Option<(u8, u8)> {
+pub(super) fn cd_drive(cpu: &mut Cpu) -> Option<(u8, u8)> {
     let disk = &cpu.bus.disk;
     let current = cpu.bus.win32.wnaspi32.drive.as_ref().map(|cd| cd.drive);
     let drive = disk.cd_to_show(current)?;

@@ -1343,6 +1343,8 @@ static APIS: &[Api] = &[
     stdcall("ActivateInQueue", 0, 3, input::activate_in_queue),
     stdcall("DeactivateQueue", 0, 1, input::deactivate_queue),
     stdcall("ActivateByClick", 0, 1, input::activate_by_click),
+    // Windows 98's does nothing: there is no debug USER32 to tell.
+    stdcall("SetDebugErrorLevel", 624, 1, |_, _| Some(0)),
 ];
 
 crate::state_fields!(State {

@@ -92,6 +92,13 @@ pub struct PacketOutcome {
     pub sense: Option<[u8; 18]>,
 }
 
+/// The drive's identification in INQUIRY data, each padded with spaces
+/// to its field: vendor (8 bytes), product (16) and revision (4). Windows
+/// 98 names the drive's registry key after them (`win32::registry`).
+pub const INQUIRY_VENDOR: &str = "RUST-DOS";
+pub const INQUIRY_PRODUCT: &str = "CD-ROM";
+pub const INQUIRY_REVISION: &str = "1.0";
+
 /// The CD-ROM drive.
 #[derive(Clone, Debug)]
 pub struct Atapi {
@@ -1069,9 +1076,9 @@ impl Atapi {
                 *d = *s.as_bytes().get(i).unwrap_or(&b' ');
             }
         };
-        pad(&mut b[8..16], "RUST-DOS");
-        pad(&mut b[16..32], "CD-ROM");
-        pad(&mut b[32..36], "1.0");
+        pad(&mut b[8..16], INQUIRY_VENDOR);
+        pad(&mut b[16..32], INQUIRY_PRODUCT);
+        pad(&mut b[32..36], INQUIRY_REVISION);
     }
 
     // --- A host without a channel ---
