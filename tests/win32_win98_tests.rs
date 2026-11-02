@@ -790,6 +790,77 @@ fn a_session_starts_with_the_work_left_for_the_boot() {
     assert_eq!(ran.lines().count(), 1, "{:?}", ran);
 }
 
+/// A program that makes C:\WINDOWS the current directory.
+fn changes_directory() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["SetCurrentDirectoryA"])];
+    let mut data = b"C:\\WINDOWS\0".to_vec();
+    data.resize(0x10, 0);
+    program(imports, &data, |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(eax, 0)?;
+        a.ret()
+    })
+}
+
+/// A program that writes its current directory to C:\DIR.TXT.
+fn notes_its_directory() -> Vec<u8> {
+    const GENERIC_WRITE: i32 = 0x4000_0000;
+    const CREATE_ALWAYS: i32 = 2;
+    let kernel32 = [
+        "GetCurrentDirectoryA",
+        "CreateFileA",
+        "WriteFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &kernel32)];
+    let mut data = b"C:\\DIR.TXT\0".to_vec();
+    data.resize(0x80, 0);
+    program(imports, &data, |a, l| {
+        a.push(l.at(0x20) as i32)?;
+        a.push(0x40)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(0x80)?;
+        a.push(CREATE_ALWAYS)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(GENERIC_WRITE)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(1))?;
+        a.mov(ebx, eax)?;
+        a.push(0)?;
+        a.push(l.at(0x70) as i32)?;
+        a.push(edi)?;
+        a.push(l.at(0x20) as i32)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.mov(eax, 0)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn the_program_dos_started_keeps_its_directory_after_the_commands() {
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce]\r\n\
+        \"cd\"=\"C:\\\\CD.EXE\"\r\n";
+    let files = [
+        ("CD.EXE", changes_directory()),
+        ("D.EXE", notes_its_directory()),
+        ("REGISTRY.REG", registry.as_bytes().to_vec()),
+    ];
+    let base = boot_scratch("boot_directory", &files);
+    assert_eq!(run_in(&base, "D.EXE"), 0);
+    let registry = fs::read_to_string(base.join("REGISTRY.REG")).unwrap();
+    assert!(!registry.contains("\"cd\""), "the command ran: {}", registry);
+    // CD.EXE's directory was its own: D.EXE starts in DOS's, the root.
+    assert_eq!(fs::read_to_string(base.join("DIR.TXT")).unwrap(), "C:\\");
+}
+
 /// A setup program that leaves work for the next boot, a file to delete
 /// in WININIT.INI and a RunOnce command, then ends the session with
 /// ExitWindowsEx(`flags`). It ends with 9 if the call comes back.

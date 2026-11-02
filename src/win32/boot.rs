@@ -19,7 +19,8 @@
 //! the program DOS started: WININIT.INI first, then the RunOnce commands,
 //! one at a time. Each command's program, and what it starts, runs to its
 //! end before the next one starts, and the program DOS started comes
-//! last. Its exit code is the one DOS gets.
+//! last. Its exit code is the one DOS gets, and it starts in the current
+//! directories DOS had before the commands, whatever they changed.
 //!
 //! A restart (ExitWindowsEx with EWX_REBOOT) boots at once: when the
 //! session's last process has ended, WININIT.INI's work is done and the
@@ -66,10 +67,23 @@ pub struct Boot {
     restart: bool,
     /// The commands still to run, in order.
     commands: Vec<Command>,
-    /// The program DOS started, which waits for the commands.
+    /// The program DOS started, which waits for the commands, and DOS's
+    /// current directories when it was to start.
     program: Option<Program>,
+    directories: Option<Directories>,
     /// Whether the program that is to start is one of the commands'.
     command: bool,
+}
+
+/// DOS's current drive and each drive's current directory, and the long
+/// names SetCurrentDirectoryA was given for them (`Win32::long_dirs`).
+/// The program DOS started gets them back after the commands, which run
+/// in the same DOS process: on Windows a command changes Explorer's
+/// directory for no other program.
+#[derive(Clone, Debug, Default)]
+pub struct Directories {
+    current: (u8, Vec<(u8, String)>),
+    long: Vec<(String, String)>,
 }
 
 /// A command of a RunOnce key: the key, as `KEYS` has it, the value's
@@ -102,8 +116,11 @@ pub fn session_starts(cpu: &mut Cpu) {
     if cpu.bus.win32.boot.commands.is_empty() {
         return;
     }
-    let program = super::take_pending(cpu);
-    cpu.bus.win32.boot.program = program;
+    cpu.bus.win32.boot.program = cpu.bus.win32.pending.take();
+    cpu.bus.win32.boot.directories = Some(Directories {
+        current: cpu.bus.disk.current_directories(),
+        long: cpu.bus.win32.long_dirs.clone(),
+    });
     next(cpu);
 }
 
@@ -139,7 +156,7 @@ pub fn next(cpu: &mut Cpu) -> bool {
         cpu.bus.log_string(&line);
         match program_of(cpu, &command.line) {
             Ok(program) => {
-                super::set_pending(cpu, program);
+                cpu.bus.win32.pending = Some(program);
                 cpu.bus.win32.boot.command = true;
                 return true;
             }
@@ -152,9 +169,23 @@ pub fn next(cpu: &mut Cpu) -> bool {
     let Some(program) = cpu.bus.win32.boot.program.take() else {
         return false;
     };
-    super::set_pending(cpu, program);
+    if let Some(directories) = cpu.bus.win32.boot.directories.take() {
+        put_back(cpu, directories);
+    }
+    cpu.bus.win32.pending = Some(program);
     cpu.bus.win32.boot.command = false;
     true
+}
+
+/// Make `directories` DOS's current ones again, in its tables too.
+fn put_back(cpu: &mut Cpu, directories: Directories) {
+    cpu.bus.disk.set_current_directories(&directories.current);
+    cpu.bus.win32.long_dirs = directories.long;
+    super::dos(cpu, |cpu| {
+        for &(drive, _) in &directories.current.1 {
+            crate::dos_data::write_cds(&mut cpu.bus, drive);
+        }
+    });
 }
 
 /// Whether the program that starts is one of the boot's commands' rather
@@ -172,9 +203,10 @@ pub fn dos_process_ended(cpu: &mut Cpu) {
 /// are now, which run after it.
 fn boot(cpu: &mut Cpu) {
     wininit(cpu);
+    let keys = KEYS.map(|(hkey, path, _)| (hkey, path));
     let mut commands = Vec::new();
-    for (key, &(hkey, path, _)) in KEYS.iter().enumerate() {
-        for (name, line) in registry::string_values(cpu, hkey, path) {
+    for (key, values) in registry::string_values(cpu, &keys).into_iter().enumerate() {
+        for (name, line) in values {
             if !line.trim().is_empty() {
                 let key = key as u32;
                 commands.push(Command { key, name, line });
@@ -310,11 +342,13 @@ pub fn renames(text: &[u8]) -> Vec<(String, String)> {
 
 crate::state_fields!(Command { key, name, line });
 crate::state_fields!(Program { path, line, win16 });
+crate::state_fields!(Directories { current, long });
 crate::state_fields!(Boot {
     booted,
     restart,
     commands,
     program,
+    directories,
     command
 });
 

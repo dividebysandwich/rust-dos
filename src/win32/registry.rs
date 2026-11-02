@@ -824,26 +824,31 @@ fn change_and_save<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Registry) -> T) -> (T, 
     (result, saved)
 }
 
-/// The string values (REG_SZ and REG_EXPAND_SZ) of the key `path` under
-/// the predefined key `hkey`, as (name, text), in the order they were
-/// set: the order RegEnumValueA gives them in. Nothing for a key that
-/// isn't there. With no program running, the registry is let go after,
-/// as by `change_and_save`.
-pub fn string_values(cpu: &mut Cpu, hkey: u32, path: &str) -> Vec<(String, String)> {
+/// The string values (REG_SZ and REG_EXPAND_SZ) of each key of `keys`,
+/// a path under a predefined key, as (name, text), in the order they
+/// were set: the order RegEnumValueA gives them in. Nothing for a key
+/// that isn't there. The registry is read once for all of them, and with
+/// no program running it is let go after, as by `change_and_save`.
+pub fn string_values(cpu: &mut Cpu, keys: &[(u32, &str)]) -> Vec<Vec<(String, String)>> {
     let idle = cpu.bus.win32.processes.is_empty();
     let registry = get(cpu);
-    let values = match registry.open(hkey, 0) {
-        Open::Key(root) => registry.find(root, path).map_or_else(Vec::new, |key| {
-            registry
-                .key(key)
-                .values
-                .iter()
-                .filter(|v| v.kind == REG_SZ || v.kind == REG_EXPAND_SZ)
-                .map(|v| (v.name.clone(), v.text()))
-                .collect()
-        }),
-        Open::Error(_) => Vec::new(),
-    };
+    let values = keys
+        .iter()
+        .map(|&(hkey, path)| {
+            let Open::Key(root) = registry.open(hkey, 0) else {
+                return Vec::new();
+            };
+            registry.find(root, path).map_or_else(Vec::new, |key| {
+                registry
+                    .key(key)
+                    .values
+                    .iter()
+                    .filter(|v| v.kind == REG_SZ || v.kind == REG_EXPAND_SZ)
+                    .map(|v| (v.name.clone(), v.text()))
+                    .collect()
+            })
+        })
+        .collect();
     if idle {
         cpu.bus.win32.registry = Registry::default();
     }
