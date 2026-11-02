@@ -2651,9 +2651,6 @@ mod tests {
         renderer.destroy(&gl);
     }
 
-    /// DEBUG: replay a saved Banshee or Voodoo3 scene with the renderer
-    /// linked to the card, as the front end links it. RUST_DOS_VOODOO_GPU=1
-    /// leaves the 3D to the GPU (`voodoo_readback=gpu`).
     /// A Banshee's picture composed with OpenGL is the software one, pixel
     /// for pixel: desktops of every format, linear and tiled, the overlay
     /// in YUV, 8 bits and 5-6-5 with and without scaling, the cursor in
