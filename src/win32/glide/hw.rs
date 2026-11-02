@@ -18,8 +18,9 @@
 //! Glide has it. The 3D engine's colour buffers and depth buffer are at
 //! the top, tiled, and the video processor's overlay shows the front
 //! one, which a swap moves to the next one (leftOverlayBuf). Textures
-//! take the memory below the buffers. Closing gives the display back
-//! (`display::give_back`): the desktop's mode, repainted, or text mode.
+//! take the memory below the buffers, above where the desktop's picture
+//! ends. Closing gives the display back (`display::give_back`): the
+//! desktop's mode, repainted, or text mode.
 //! The linear frame buffer is the tiled aperture of BAR1 from the
 //! buffers' start (lfbMemoryConfig), rows of 4096 bytes, as 3dfx's
 //! library had it; writes through the pixel pipeline and in other
@@ -32,6 +33,7 @@ use crate::voodoo::banshee::{self as b, render3d};
 use crate::voodoo::regs::*;
 use crate::win32::ddraw::display;
 use crate::win32::memory::{MEM_MAPPED, PAGE, PAGE_READWRITE, SHARED, SYSTEM, USER, WRITABLE};
+use crate::win32::screen;
 
 /// Which chip the board has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,9 +234,6 @@ pub struct Screen {
     /// pipeline.
     pub pipe_view: View,
     pub saved: Saved,
-    /// Whether the program gave the monitor back with grSstControl:
-    /// the display stays open and the card goes on drawing, unseen.
-    pub deactivated: bool,
 }
 
 crate::state_fields!(Screen {
@@ -254,8 +253,7 @@ crate::state_fields!(Screen {
     tex_size,
     view,
     pipe_view,
-    saved,
-    deactivated
+    saved
 });
 
 /// The texture memory of texture unit `tmu` Glide has: where its
@@ -340,42 +338,38 @@ pub fn open_display(
     (s.color_buffers, s.aux_buffers) = (colors, auxes);
     s.front = 0;
     s.back = 1;
-    s.deactivated = false;
     true
 }
 
 /// Give the monitor to the card (`on`) or back to the 2D picture, as
-/// grSstControl does, with the display staying open. A Voodoo Graphics
-/// or Voodoo2 turns its pass-through. A Banshee or Voodoo3 has one
-/// picture: going off ends the overlay and gives the display back
+/// grSstControl does, with the display staying open, and the card going
+/// on drawing unseen while it is away. A Voodoo Graphics or Voodoo2
+/// turns its pass-through. A Banshee or Voodoo3 has one picture: going
+/// off ends the overlay and gives the display back
 /// (`display::give_back`), and coming on takes it again in the size the
-/// display was opened, from the mode a program set in between. False if
-/// the card can't take it back.
+/// display was opened, from the desktop or a mode DirectDraw set,
+/// whichever ended Glide's. False if the card can't take it back.
 pub fn set_active(cpu: &mut Cpu, on: bool) -> bool {
     let Some(board) = board(cpu) else {
         return false;
     };
-    let s = &state(cpu).screen;
-    if !s.open || s.deactivated != on {
+    if !state(cpu).screen.open {
         return true;
     }
-    match board.card {
-        Card::Banshee if on => {
-            if !reopen_banshee(cpu) {
-                return false;
-            }
-        }
-        Card::Banshee => {
-            let cfg = ext(cpu, b::VID_PROC_CFG);
-            set_ext(cpu, b::VID_PROC_CFG, cfg & !b::VIDPROC_OVERLAY_ENABLE);
-            display::give_back(cpu);
-        }
-        _ => {
-            let init0 = read_init(cpu, FBI_INIT0) & !1;
-            write(cpu, FBI, FBI_INIT0, init0 | on as u32);
-        }
+    if board.card != Card::Banshee {
+        let init0 = read_init(cpu, FBI_INIT0) & !1;
+        write(cpu, FBI, FBI_INIT0, init0 | on as u32);
+        return true;
     }
-    state(cpu).screen.deactivated = !on;
+    if display::glide_has_display(cpu) == on {
+        return true;
+    }
+    if on {
+        return reopen_banshee(cpu);
+    }
+    let cfg = ext(cpu, b::VID_PROC_CFG);
+    set_ext(cpu, b::VID_PROC_CFG, cfg & !b::VIDPROC_OVERLAY_ENABLE);
+    display::give_back(cpu);
     true
 }
 
@@ -481,19 +475,23 @@ fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32)
         return false;
     }
     let (dw, dh) = banshee_shown(width, height);
-    // What the picture of the mode will take, and whether the buffers
-    // fit above it, before anything changes.
-    let floor = banshee_floor(dw, dh);
+    // What the picture of the mode will take, or the desktop's, which
+    // grSstControl can bring back while the textures stay, and whether
+    // the buffers fit above it, before anything changes.
+    let desktop = screen::desktop(cpu);
+    let floor = (dw * 2 * dh)
+        .max(desktop.pitch * desktop.height)
+        .next_multiple_of(0x1000);
     let Some(layout) = banshee_layout(width, height, colors, auxes, floor) else {
         return false;
     };
     let Some(mode) = display::take(cpu, dw, dh, 16) else {
         return false;
     };
-    let Ok(block) = display::alloc(cpu, b::MEMORY as u32 - floor) else {
+    if display::alloc_rest(cpu).is_err() {
         display::give_back(cpu);
         return false;
-    };
+    }
 
     let tiles = layout.tiles;
     let s = &mut state(cpu).screen;
@@ -513,17 +511,16 @@ fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32)
     write(cpu, ALL, render3d::AUX_BUFFER_ADDR, layout.aux);
     write(cpu, ALL, render3d::COL_BUFFER_ADDR, layout.color[1]);
 
-    // The textures from the block's start; the two units share it, a half
-    // each.
-    let room = layout.start - block;
+    // The textures from the floor; the two units share it, a half each.
+    let room = layout.start - floor;
     let tmus = board(cpu).map_or(1, |b| b.tmus);
     let s = &mut state(cpu).screen;
     if tmus > 1 {
         let half = (room / 2) & !0xFFF;
-        s.tex_base = [block, block + half];
+        s.tex_base = [floor, floor + half];
         s.tex_size = [half, room - half];
     } else {
-        s.tex_base = [block, block];
+        s.tex_base = [floor, floor];
         s.tex_size = [room, 0];
     }
     true
@@ -539,22 +536,16 @@ fn banshee_shown(width: u32, height: u32) -> (u32, u32) {
     }
 }
 
-/// The bytes the picture of a mode of `dw` x `dh` for Glide takes at the
-/// start of the card's memory.
-fn banshee_floor(dw: u32, dh: u32) -> u32 {
-    (dw * 2 * dh).next_multiple_of(0x1000)
-}
-
 /// Take the display back for the open buffers (grSstControl): the same
-/// mode and the same block above it, whose textures are still there.
+/// mode, and the memory above it Glide's again, with the textures and
+/// buffers where they were.
 fn reopen_banshee(cpu: &mut Cpu) -> bool {
     let s = &state(cpu).screen;
     let (dw, dh) = banshee_shown(s.width, s.height);
-    let floor = banshee_floor(dw, dh);
     let Some(mode) = display::take(cpu, dw, dh, 16) else {
         return false;
     };
-    if display::alloc(cpu, b::MEMORY as u32 - floor).is_err() {
+    if display::alloc_rest(cpu).is_err() {
         display::give_back(cpu);
         return false;
     }
@@ -564,12 +555,11 @@ fn reopen_banshee(cpu: &mut Cpu) -> bool {
 
 /// Point the overlay at the front buffer of the open display, over the
 /// picture of a mode with `pitch` bytes a row, and the aperture at the
-/// buffers.
+/// buffers (`set_aperture`).
 fn show_banshee(cpu: &mut Cpu, pitch: u32) {
     let s = &state(cpu).screen;
     let (width, height, tiles) = (s.width, s.height, s.tiles);
     let (dw, dh) = banshee_shown(width, height);
-    let start = s.color[0];
     let front = s.color[s.front as usize];
     let stride = tiles << 16 | (pitch & 0x7FFF);
     let mut cfg = ext(cpu, b::VID_PROC_CFG)
@@ -591,19 +581,25 @@ fn show_banshee(cpu: &mut Cpu, pitch: u32) {
     set_ext(cpu, b::VID_OVERLAY_DVDY, (height << 20) / dh);
     set_ext(cpu, b::VID_OVERLAY_DVDY_OFFSET, 0);
     set_ext(cpu, b::VID_PROC_CFG, cfg);
-    // The aperture: tiled from the buffers on, rows of 4096 bytes; linear
-    // below them.
-    set_ext(
-        cpu,
-        b::LFB_MEMORY_CONFIG,
-        (start >> 12) & 0x1FFF | 2 << 13 | tiles << 16,
-    );
+    set_aperture(cpu);
     let misc = ext(cpu, b::MISC_INIT0) & !(0xFFF << 18);
     set_ext(cpu, b::MISC_INIT0, misc | (height - 1) << 18);
 
     write(cpu, ALL, render3d::LEFT_OVERLAY_BUF, front);
     write(cpu, ALL, render3d::SWAP_PENDING, 1);
     write(cpu, ALL, SWAPBUFFER_CMD, 0);
+}
+
+/// The aperture of the open display: tiled from the buffers on, rows of
+/// 4096 bytes; linear below them.
+fn set_aperture(cpu: &mut Cpu) {
+    let s = &state(cpu).screen;
+    let (start, tiles) = (s.color[0], s.tiles);
+    set_ext(
+        cpu,
+        b::LFB_MEMORY_CONFIG,
+        (start >> 12) & 0x1FFF | 2 << 13 | tiles << 16,
+    );
 }
 
 /// Close the card's display and give the screen back.
@@ -713,6 +709,10 @@ fn unmap_views(cpu: &mut Cpu) {
 /// yet: a Voodoo Graphics' or Voodoo2's 4 MB, a Banshee's aperture over
 /// Glide's buffers.
 pub fn view(cpu: &mut Cpu) -> Option<u32> {
+    // A mode set while the display is given back makes BAR1 linear.
+    if banshee(cpu) && !display::glide_has_display(cpu) {
+        set_aperture(cpu);
+    }
     let s = &state(cpu).screen;
     if s.view.at != 0 {
         return Some(s.view.at);
