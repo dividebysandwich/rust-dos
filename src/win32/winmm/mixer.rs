@@ -79,7 +79,9 @@ const MIXERLINECONTROLSA_SIZE: u32 = 24;
 const MIXERCONTROLA_SIZE: u32 = 148;
 const MIXERCONTROLDETAILS_SIZE: u32 = 24;
 
-/// AUXCAPS's support flags.
+/// AUXCAPS's technologies and support flags.
+const AUXCAPS_CDAUDIO: u16 = 1;
+const AUXCAPS_AUXIN: u16 = 2;
 const AUXCAPS_VOLUME: u32 = 1;
 const AUXCAPS_LRVOLUME: u32 = 2;
 
@@ -107,8 +109,8 @@ struct Aux {
 }
 
 /// The auxiliary devices, by their ids, as Windows 95's Sound Blaster 16
-/// driver numbers them. Its technologies past AUXCAPS_CDAUDIO (1) and
-/// AUXCAPS_AUXIN (2) are its own: one bit to a device.
+/// driver numbers them. Its technologies past AUXCAPS_CDAUDIO and
+/// AUXCAPS_AUXIN are its own: one bit to a device.
 const AUX: [Aux; 7] = [
     Aux {
         name: "Sound Card Aux: Wave",
@@ -124,13 +126,13 @@ const AUX: [Aux; 7] = [
     },
     Aux {
         name: "Sound Card Aux: CD",
-        technology: 1,
+        technology: AUXCAPS_CDAUDIO,
         stereo: true,
         line: CD,
     },
     Aux {
         name: "Sound Card Aux: Line-In",
-        technology: 2,
+        technology: AUXCAPS_AUXIN,
         stereo: true,
         line: LINE_IN,
     },
@@ -193,14 +195,20 @@ pub struct Mixer {
 }
 
 impl Mixer {
-    /// The scale (left, right) the source `line` plays at.
+    /// The scale (left, right) the source `line` plays at. A mono line
+    /// plays at its left's volume on both sides (`set_line_volume`).
     pub fn gain(&self, line: usize) -> (f32, f32) {
         let (m, s) = (&self.lines[SPEAKERS], &self.lines[line]);
         if m.mute || s.mute {
             return (0.0, 0.0);
         }
+        let right = if channels_of(line) == 1 {
+            s.left
+        } else {
+            s.right
+        };
         let scale = |a: u32, b: u32| (a as f32 / 65535.0) * (b as f32 / 65535.0);
-        (scale(m.left, s.left), scale(m.right, s.right))
+        (scale(m.left, s.left), scale(m.right, right))
     }
 
     pub fn midi_gain(&self) -> (f32, f32) {
@@ -416,13 +424,12 @@ fn target_of(line: usize) -> (u32, u32, u16, &'static str) {
     }
 }
 
-/// How many channels a line has: the microphone and the PC speaker are
-/// mono.
+/// How many channels a line has: one when its auxiliary device's volume
+/// has no left and right, as the microphone's and the PC speaker's.
 fn channels_of(line: usize) -> u32 {
-    if matches!(line, MIC | PC_SPEAKER) {
-        1
-    } else {
-        2
+    match aux_of_line(line) {
+        Some(id) if !AUX[id as usize].stereo => 1,
+        _ => 2,
     }
 }
 
@@ -903,3 +910,110 @@ crate::state_fields!(Open {
     callback
 });
 crate::state_fields!(Mixer { lines, opens });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where the tests' structures go in the guest's memory.
+    const AT: u32 = 0x2_0000;
+
+    fn machine() -> Cpu {
+        Cpu::new(std::path::PathBuf::from("."))
+    }
+
+    /// mixerGetLineInfoA on a MIXERLINEA whose Target is `target`: the
+    /// result, and the source the line is (dwSource).
+    fn by_target(cpu: &mut Cpu, target: &[u8]) -> (u32, u32) {
+        let mut line = vec![0; MIXERLINEA_SIZE as usize];
+        line[..4].copy_from_slice(&MIXERLINEA_SIZE.to_le_bytes());
+        line[TARGET_AT as usize..][..target.len()].copy_from_slice(target);
+        cpu.bus.guest_write_bytes(AT, &line);
+        let flags = MIXER_GETLINEINFOF_TARGETTYPE;
+        let result = mixer_get_line_info(cpu, &[0, AT, flags]).unwrap();
+        (result, cpu.bus.guest_read_32(AT + 8))
+    }
+
+    /// Each line is the volume of one auxiliary device, which the
+    /// line's Target (`target_of`) and channels (`channels_of`) take.
+    #[test]
+    fn each_line_has_one_aux_device() {
+        for line in 0..LINES {
+            let n = AUX.iter().filter(|a| a.line == line).count();
+            assert_eq!(n, 1, "line {line}");
+        }
+        assert_eq!(channels_of(MIC), 1);
+        assert_eq!(channels_of(PC_SPEAKER), 1);
+        assert_eq!(channels_of(CD), 2);
+    }
+
+    /// The target type query matches the whole Target but the device's
+    /// id, as the Sound Blaster 16's driver does: the type alone finds
+    /// no line.
+    #[test]
+    fn the_target_type_query_matches_the_whole_target() {
+        let mut cpu = machine();
+        let mut cd = target_struct(CD);
+        cd[4..8].copy_from_slice(&0xDEADu32.to_le_bytes());
+        assert_eq!(by_target(&mut cpu, &cd), (MMSYSERR_NOERROR, CD as u32 - 1));
+        let wave = target_struct(WAVE);
+        let found = by_target(&mut cpu, &wave);
+        assert_eq!(found, (MMSYSERR_NOERROR, WAVE as u32 - 1));
+        let only_type = TARGETTYPE_AUX.to_le_bytes();
+        assert_eq!(by_target(&mut cpu, &only_type).0, MIXERR_INVALLINE);
+    }
+
+    /// The wave and MIDI synthesizer's aux devices have no mixer; the
+    /// others have mixer 0.
+    #[test]
+    fn the_wave_and_midi_aux_devices_have_no_mixer() {
+        let mut cpu = machine();
+        for (aux, result, id) in [
+            (0, MMSYSERR_NODRIVER, u32::MAX),
+            (1, MMSYSERR_NODRIVER, u32::MAX),
+            (2, MMSYSERR_NOERROR, 0),
+            (6, MMSYSERR_NOERROR, 0),
+        ] {
+            cpu.bus.guest_write_32(AT, 0x1234);
+            let got = mixer_get_id(&mut cpu, &[aux, AT, MIXER_OBJECTF_AUX]);
+            assert_eq!(got, Some(result), "aux {aux}");
+            assert_eq!(cpu.bus.guest_read_32(AT), id, "aux {aux}");
+        }
+        let open = mixer_open(&mut cpu, &[AT, 1, 0, 0, MIXER_OBJECTF_AUX]);
+        assert_eq!(open, Some(MMSYSERR_NODRIVER));
+        let open = mixer_open(&mut cpu, &[AT, 7, 0, 0, MIXER_OBJECTF_AUX]);
+        assert_eq!(open, Some(MMSYSERR_BADDEVICEID));
+    }
+
+    /// The microphone is mono: one channel in its MIXERLINEA, no
+    /// AUXCAPS_LRVOLUME, a two-channel read of its volume refused, and
+    /// it plays at the left word of what auxSetVolume gave it.
+    #[test]
+    fn the_microphone_is_mono() {
+        let mut cpu = machine();
+        let mut line = vec![0; MIXERLINEA_SIZE as usize];
+        line[..4].copy_from_slice(&MIXERLINEA_SIZE.to_le_bytes());
+        line[8..12].copy_from_slice(&(MIC as u32 - 1).to_le_bytes());
+        cpu.bus.guest_write_bytes(AT, &line);
+        let flags = MIXER_GETLINEINFOF_SOURCE;
+        assert_eq!(mixer_get_line_info(&mut cpu, &[0, AT, flags]), Some(0));
+        assert_eq!(cpu.bus.guest_read_32(AT + 28), 1);
+
+        assert_eq!(aux_get_dev_caps(&mut cpu, &[4, AT, 48]), Some(0));
+        assert_eq!(cpu.bus.guest_read_32(AT + 44), AUXCAPS_VOLUME);
+
+        let place = AT + 0x100;
+        let id = control_id(MIC, false);
+        for (k, v) in [24, id, 2, 0, 4, place].into_iter().enumerate() {
+            cpu.bus.guest_write_32(AT + 4 * k as u32, v);
+        }
+        let got = mixer_get_control_details(&mut cpu, &[0, AT, 0]);
+        assert_eq!(got, Some(MIXERR_INVALVALUE));
+
+        assert_eq!(aux_set_volume(&mut cpu, &[4, 0x4000_2000]), Some(0));
+        assert_eq!(aux_get_volume(&mut cpu, &[4, AT]), Some(0));
+        assert_eq!(cpu.bus.guest_read_32(AT), 0x4000_2000);
+        let left = 0x2000 as f32 / 65535.0;
+        assert_eq!(mixer(&mut cpu).gain(MIC), (left, left));
+    }
+}
