@@ -36,7 +36,7 @@ use crate::ide::{Atapi, Env};
 
 pub static DLL: Dll = Dll {
     name: "WNASPI32.DLL",
-    base: 0xBF68_0000,
+    base: 0xBF66_0000,
     apis: APIS,
     vars: &[],
     init: None,

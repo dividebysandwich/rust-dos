@@ -168,7 +168,7 @@ impl State {
 
     /// A place for a new window: its handle, or None when there are too
     /// many.
-    fn new_window(&mut self, window: Window) -> Option<u32> {
+    pub(crate) fn new_window(&mut self, window: Window) -> Option<u32> {
         let len = self.windows.len();
         let free = (0..len)
             .map(|i| (self.next_window + i) % len.max(1))
