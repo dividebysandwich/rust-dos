@@ -1,0 +1,85 @@
+lib RdTest guid={11111111-2222-3333-4444-555555555555} lcid=0 syskind=1 ver=1.2 flags=8 doc="rust-dos type library test" ctx=7 file=F
+type Colour kind=0 guid={11111111-2222-3333-4444-000000000005} flags=0 ver=0.0 funcs=0 vars=3 impl=0 vft=0 size=4 align=4 lcid=0 doc="Colours" ctx=0 file=F
+ impl -1 hr=8002802b
+ var 0 memid=40000000 kind=2 flags=0 name=Red type=3 value=vt3:0
+ var 1 memid=40000001 kind=2 flags=0 name=Green type=3 value=vt3:1
+ var 2 memid=40000002 kind=2 flags=0 name=Blue type=3 value=vt3:5
+ ids(move,DY,dx) hr=80020006 ffffffff ffffffff ffffffff
+type Point kind=1 guid={00000000-0000-0000-0000-000000000000} flags=0 ver=0.0 funcs=0 vars=2 impl=0 vft=0 size=8 align=4 lcid=0 doc=null ctx=0 file=F
+ impl -1 hr=8002802b
+ var 0 memid=40000000 kind=0 flags=0 name=x type=3 oInst=0
+ var 1 memid=40000001 kind=0 flags=0 name=y type=3 oInst=4
+ ids(move,DY,dx) hr=80020006 ffffffff ffffffff ffffffff
+type Handle kind=6 guid={00000000-0000-0000-0000-000000000000} flags=0 ver=0.0 funcs=0 vars=0 impl=0 vft=0 size=4 align=4 lcid=0 doc=null ctx=0 file=F alias=3
+ impl -1 hr=8002802b
+ ids(move,DY,dx) hr=80020006 ffffffff ffffffff ffffffff
+type IShape kind=4 guid={11111111-2222-3333-4444-000000000001} flags=1040 ver=0.0 funcs=11 vars=0 impl=1 vft=28 size=4 align=4 lcid=0 doc="A shape" ctx=0 file=F
+ impl 0 hr=0 href=1 flags=0 -> IDispatch
+ impl -1 hr=0 href=fffffffe
+    type IShape kind=3 guid={11111111-2222-3333-4444-000000000001} flags=1140 ver=0.0 funcs=4 vars=0 impl=1 vft=44 size=4 align=4 lcid=0 doc="A shape" ctx=0 file=F
+     impl 0 hr=0 href=3 flags=0 -> IDispatch
+     impl -1 hr=0 href=fffffffe
+     func 0 memid=1 kind=1 inv=2 cc=4 params=1 opt=0 vft=28 flags=0 ret=25 names=2: Width value doc="The width"
+      param 0 flags=a type=ptr(3)
+     func 1 memid=1 kind=1 inv=4 cc=4 params=1 opt=0 vft=32 flags=0 ret=25 names=2: Width value doc="The width"
+      param 0 flags=1 type=3
+     func 2 memid=2 kind=1 inv=1 cc=4 params=2 opt=0 vft=36 flags=0 ret=25 names=3: Move dx dy doc="Moves it"
+      param 0 flags=1 type=3
+      param 1 flags=31 type=3 default=vt3:3
+     func 3 memid=3 kind=1 inv=1 cc=4 params=1 opt=0 vft=40 flags=0 ret=25 names=2: Name Name doc=null
+      param 0 flags=a type=ptr(8)
+     ids(move,DY,dx) hr=0 2 1 0
+
+ func 0 memid=60000000 kind=4 inv=1 cc=4 params=2 opt=0 vft=0 flags=1 ret=24 names=3: QueryInterface riid ppvObj doc=null
+  param 0 flags=1 type=ptr(user(1000000 GUID))
+  param 1 flags=2 type=ptr(ptr(24))
+ func 1 memid=60000001 kind=4 inv=1 cc=4 params=0 opt=0 vft=4 flags=1 ret=19 names=1: AddRef doc=null
+ func 2 memid=60000002 kind=4 inv=1 cc=4 params=0 opt=0 vft=8 flags=1 ret=19 names=1: Release doc=null
+ func 3 memid=60010000 kind=4 inv=1 cc=4 params=1 opt=0 vft=12 flags=1 ret=24 names=2: GetTypeInfoCount pctinfo doc=null
+  param 0 flags=2 type=ptr(23)
+ func 4 memid=60010001 kind=4 inv=1 cc=4 params=3 opt=0 vft=16 flags=1 ret=24 names=4: GetTypeInfo itinfo lcid pptinfo doc=null
+  param 0 flags=1 type=23
+  param 1 flags=1 type=19
+  param 2 flags=2 type=ptr(ptr(24))
+ func 5 memid=60010002 kind=4 inv=1 cc=4 params=5 opt=0 vft=20 flags=1 ret=24 names=6: GetIDsOfNames riid rgszNames cNames lcid rgdispid doc=null
+  param 0 flags=1 type=ptr(user(2000000 GUID))
+  param 1 flags=1 type=ptr(ptr(16))
+  param 2 flags=1 type=23
+  param 3 flags=1 type=19
+  param 4 flags=2 type=ptr(3)
+ func 6 memid=60010003 kind=4 inv=1 cc=4 params=8 opt=0 vft=24 flags=1 ret=24 names=8: Invoke dispidMember riid lcid wFlags pdispparams pvarResult pexcepinfo doc=null
+  param 0 flags=1 type=3
+  param 1 flags=1 type=ptr(user(2000000 GUID))
+  param 2 flags=1 type=19
+  param 3 flags=1 type=18
+  param 4 flags=1 type=ptr(user(2000064 DISPPARAMS))
+  param 5 flags=2 type=ptr(12)
+  param 6 flags=2 type=ptr(user(20000c8 EXCEPINFO))
+  param 7 flags=2 type=ptr(23)
+ func 7 memid=1 kind=4 inv=2 cc=4 params=0 opt=0 vft=28 flags=0 ret=3 names=1: Width doc="The width"
+ func 8 memid=1 kind=4 inv=4 cc=4 params=1 opt=0 vft=32 flags=0 ret=24 names=1: Width doc="The width"
+  param 0 flags=1 type=3
+ func 9 memid=2 kind=4 inv=1 cc=4 params=2 opt=0 vft=36 flags=0 ret=24 names=3: Move dx dy doc="Moves it"
+  param 0 flags=1 type=3
+  param 1 flags=31 type=3 default=vt3:3
+ func 10 memid=3 kind=4 inv=1 cc=4 params=0 opt=0 vft=40 flags=0 ret=8 names=1: Name doc=null
+ ids(move,DY,dx) hr=0 2 1 0
+type DShapeEvents kind=4 guid={11111111-2222-3333-4444-000000000002} flags=1000 ver=0.0 funcs=1 vars=0 impl=1 vft=28 size=4 align=4 lcid=0 doc=null ctx=0 file=F
+ impl 0 hr=0 href=1 flags=0 -> IDispatch
+ impl -1 hr=8002802b
+ func 0 memid=1 kind=4 inv=1 cc=4 params=2 opt=0 vft=0 flags=0 ret=24 names=3: Moved x y doc=null
+  param 0 flags=1 type=3
+  param 1 flags=1 type=3
+ ids(move,DY,dx) hr=80020006 ffffffff ffffffff ffffffff
+type IPlain kind=3 guid={11111111-2222-3333-4444-000000000003} flags=100 ver=0.0 funcs=1 vars=0 impl=1 vft=16 size=4 align=4 lcid=0 doc=null ctx=0 file=F
+ impl 0 hr=0 href=f flags=0 -> IUnknown
+ impl -1 hr=8002802b
+ func 0 memid=60010000 kind=1 inv=1 cc=4 params=2 opt=0 vft=12 flags=0 ret=25 names=3: Draw s p doc=null
+  param 0 flags=1 type=ptr(user(12c IShape))
+  param 1 flags=1 type=ptr(user(64 Point))
+ ids(move,DY,dx) hr=80020006 ffffffff ffffffff ffffffff
+type Shape kind=5 guid={11111111-2222-3333-4444-000000000004} flags=2 ver=0.0 funcs=0 vars=0 impl=2 vft=0 size=4 align=4 lcid=0 doc="The shape class" ctx=0 file=F
+ impl 0 hr=0 href=12c flags=1 -> IShape
+ impl 1 hr=0 href=190 flags=3 -> DShapeEvents
+ impl -1 hr=8002802b
+ ids(move,DY,dx) hr=0 2 1 0
