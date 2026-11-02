@@ -454,6 +454,8 @@ impl DiskController {
             Some((p, l)) => (p, l),
             None => (".", rest),
         };
+        // Renamed to "NEW.", the file is NEW, as opens name it.
+        let leaf = Self::dos_component(leaf);
         let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
         if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);

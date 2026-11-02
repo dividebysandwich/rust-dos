@@ -105,6 +105,33 @@ fn a_dot_that_ends_a_name_leaves_its_extension_empty() {
     disk.close_file(h);
     assert!(base.join("NEW").is_file());
     assert_eq!(disk.open_file("MISSING.", 0, PSP), Err(0x02));
+
+    // So do a directory made and a file renamed by such a name.
+    disk.create_directory("SAVES.").unwrap();
+    assert!(base.join("SAVES").is_dir());
+    disk.rename_file("NEW", r"SAVES\MOVED.").unwrap();
+    assert!(base.join("SAVES/MOVED").is_file());
+    assert!(disk.is_file(r"SAVES\MOVED"));
+
+    // "." and ".." padded with spaces are still themselves.
+    assert_eq!(disk.qualify_path(r"GAME\.. \COLORS").as_deref(), Some(r"C:\COLORS"));
+    assert_eq!(disk.qualify_path(r"GAME\. \INIT").as_deref(), Some(r"C:\GAME\INIT"));
+}
+
+/// A host file whose name ends in a dot, as builds that kept the dot
+/// made for "SAVE.", is still found by that name.
+#[test]
+fn a_host_name_that_ends_in_a_dot_is_found_without_it() {
+    let base = scratch("host_trailing_dot");
+    // A verbatim path on Windows, which keeps the dot.
+    let host = fs::canonicalize(&base).unwrap();
+    fs::write(host.join("SAVE."), b"save").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("SAVE.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"save");
+    disk.close_file(h);
+    assert!(disk.is_file("save"));
 }
 
 #[test]

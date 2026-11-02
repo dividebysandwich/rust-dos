@@ -1162,7 +1162,7 @@ fn temp_name(cpu: &mut Cpu, dir: &str, prefix: &str) -> String {
             format!("{}\\{}{}.", dir, prefix, base32(n))
         };
         let name = name.trim_end_matches('.').to_string() + ".";
-        if !cpu.bus.disk.exists(name.trim_end_matches('.')) {
+        if !cpu.bus.disk.exists(&name) {
             return name;
         }
     }
@@ -1194,7 +1194,7 @@ pub fn tmpnam(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             0 => base.clone(),
             n => format!("{}{}", base, base32(n)),
         };
-        if !cpu.bus.disk.exists(name.trim_end_matches('.')) {
+        if !cpu.bus.disk.exists(&name) {
             break name;
         }
     };
