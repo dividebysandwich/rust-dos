@@ -325,7 +325,12 @@ All output goes through the emulated video hardware:
 - **Glide 2.x** (`glide2x.dll`) is written in Rust against the emulated
   Voodoo's registers, as 3dfx's library was against the card. The Voodoo
   emulation (`src/voodoo/`) does the rendering, and 3dfx's MiniGL drivers,
-  which games of the time shipped, run on top of it.
+  which games of the time shipped, run on top of it. `grSstControl` moves
+  the monitor between the card and the 2D picture while the display stays
+  open, as Test Drive 4 does between its DirectDraw menus and its races:
+  a Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee or
+  Voodoo3 gives the display back and later takes it again, with the
+  textures where they were.
 - **Direct3D** (DX5 and DX6 immediate mode: execute buffers and
   `DrawPrimitive`) becomes a HAL on the same emulated hardware, the way
   3dfx's Direct3D driver was one. The target card is the Banshee or
