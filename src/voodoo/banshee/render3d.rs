@@ -1085,6 +1085,54 @@ mod tests {
     }
 
     #[test]
+    fn queued_frame_buffer_writes_leave_textures_outside_the_buffers() {
+        // Frame buffer writes go only into the buffers drawn now. Queued
+        // behind held jobs, they don't make a triangle textured from
+        // memory elsewhere draw the jobs held or decode its texture again.
+        let mut v = mirrored();
+        v.pool = super::super::super::workers::Pool::new(2);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1 << 15 | 10);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x40_0000);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1 << 15 | 10);
+        reg3d(&mut v, CLIP_LEFT_RIGHT, 640);
+        reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 64);
+        reg3d(&mut v, COL_BUFFER_ADDR, A);
+        let textured = |v: &mut Voodoo| {
+            reg3d(v, TEX_BASE_ADDR, 0x30_0000);
+            reg3d(v, T_LOD, 0);
+            let mode = 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27;
+            reg3d(v, TEXTURE_MODE, mode);
+            reg3d(v, FBZ_COLOR_PATH, 1 | 1 << 27);
+            reg3d(v, FBZ_MODE, 1 | 1 << 9);
+            rectangle(v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+            reg3d(v, FBZ_COLOR_PATH, 0);
+        };
+        let decoded = |frame: &Frame| {
+            let textures = frame.commands.iter();
+            textures
+                .filter(|c| matches!(c, Command::Texture(_)))
+                .count()
+        };
+        textured(&mut v);
+        assert!(decoded(&v.take_mirror().unwrap()) > 0);
+        reg3d(&mut v, FBZ_MODE, 1 << 9);
+        rectangle(&mut v, (0.0, 0.0, 64.0, 32.0), (255.0, 0.0, 0.0));
+        reg3d(&mut v, LFB_MODE, 0);
+        v.write(
+            0x100_0000 + 3 * 4096 + 6 * 2,
+            0x07E0_F800,
+            u32::MAX,
+            Now::default(),
+        );
+        let held = v.describe(Now::default())["held_jobs"].as_u64().unwrap();
+        assert!(held > 0);
+        let catch_ups = v.catch_ups.get();
+        textured(&mut v);
+        assert_eq!(v.catch_ups.get(), catch_ups, "the jobs stay held");
+        assert_eq!(decoded(&v.take_mirror().unwrap()), 0);
+    }
+
+    #[test]
     fn a_texture_from_a_buffer_drawn_in_software_is_decoded_again() {
         // A texture decoded from A, then A drawn by the software
         // rasterizer, and those jobs done before the next triangle that

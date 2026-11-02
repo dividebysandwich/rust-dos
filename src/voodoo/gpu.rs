@@ -353,9 +353,9 @@ impl Voodoo {
     /// picture at the card's resolution, never with memory that is
     /// behind it, and so does the software rasterizer.
     pub(crate) fn gpu_texels(&mut self, st: &RasterState, texcount: usize) {
-        if self.mirror_layout().is_none() {
+        let Some(key) = self.mirror_layout() else {
             return;
-        }
+        };
         for unit in 0..texcount.min(self.tmu.len()) {
             let Some(t) = &st.tmu[unit] else {
                 continue;
@@ -376,10 +376,14 @@ impl Voodoo {
             // decoded if rows there were read back (just now, or for the
             // program or the 2D engine), or drawn into in software
             // (`gpu_draws_here`), whether those jobs are drawn yet or not.
-            // Frame buffer writes still queued may land there too. What is
-            // queued is drawn first, and the recording decodes it again.
+            // Frame buffer writes still queued may land there too, if the
+            // texture is under the buffers drawn now: they go only into
+            // those (colBufferAddr's and the auxiliary buffer, which
+            // `mirror_sync` just put in the layout, catching up the
+            // writes queued for the layout before). What is queued is
+            // drawn first, and the recording decodes it again.
             let changed = self.gpu.get_mut().tracker.take_changed(start, end);
-            let words = !self.words.get_mut().is_empty();
+            let words = !self.words.get_mut().is_empty() && key.overlaps(start, end);
             if changed || words {
                 if words || self.outstanding.get() || !self.backlog.get_mut().is_empty() {
                     self.catch_up_workers();
