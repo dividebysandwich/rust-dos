@@ -741,6 +741,7 @@ impl Bus {
             && vga.latched_start_addr == 0
             && vga.split_row() >= 200
             && vga.pixel_panning() == 0
+            && vga.display_address_mask() == vga.plane_size() - 1
     }
 
     fn mode13_dirty_rows(&self, offset: usize) -> Option<(u32, u32)> {
@@ -2742,6 +2743,12 @@ impl Bus {
             Some(v) if v.output() => v.timing(),
             _ => self.vga.timing(),
         }
+    }
+
+    /// `Clock::past_blanking` for the picture the monitor shows.
+    pub fn past_blanking(&mut self, end: u64) -> u64 {
+        let refresh = self.refresh_timing();
+        self.clock.past_blanking(end, &refresh)
     }
 
     /// Latch the display Start Address if emulated time has passed the

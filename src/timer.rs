@@ -201,6 +201,20 @@ impl Clock {
         self.base_icount.saturating_add(mul_div_ceil(delta, self.cycles_per_ms as u64, 1_000_000))
     }
 
+    /// `end`, the instruction count a batch would end at, or the picture's
+    /// first line if `end` lies in the blanking after a vertical retrace of
+    /// the display (`refresh`'s). The frame is composed from the machine as
+    /// the batch left it, all at once, and a program that moves the Start
+    /// Address and redraws to match in the blanking has only done half of
+    /// that there: Prehistorik 2's difficulty screen showed its text out of
+    /// place in such frames, about one in twenty. A monitor shows no
+    /// blanking. At most a quarter of a frame is added (`blanking_end`), and
+    /// the next batch gives it back, as it runs to the same time it would
+    /// have.
+    pub fn past_blanking(&self, end: u64, refresh: &CrtTiming) -> u64 {
+        refresh.blanking_end(self.ns_at(end)).map_or(end, |ns| self.icount_at_ns(ns))
+    }
+
     /// Current emulated time in microseconds.
     pub fn now_micros(&self) -> u64 {
         mul_div(self.now_ticks(), 1_000_000, PIT_HZ)
@@ -1303,6 +1317,34 @@ mod tests {
             // The frame is shown at its deadline; the next starts then.
             now = at + Duration::from_micros(300);
         }
+    }
+
+    #[test]
+    fn a_batch_never_ends_in_the_blanking_after_a_retrace() {
+        let start = Instant::now();
+        let mut clock = Clock::new(1000);
+        let mut pacer = Pacer::new(CpuSpeed::Fixed(1000), None, start);
+        let refresh = CrtTiming::VGA_400;
+        let frame = refresh.frame_ns();
+        let mut moved = 0;
+        // 60 Hz host frames against a 70 Hz display, through every phase.
+        for n in 1..2000u64 {
+            let now = start + Duration::from_nanos(n * 16_666_667);
+            let plain = pacer.batch_end(&clock, now);
+            let end = clock.past_blanking(plain, &refresh);
+            assert!(end >= plain);
+            if end > plain {
+                // Held: to the picture's first line, and no further.
+                moved += 1;
+                assert_eq!(clock.ns_at(end) % frame / 1000, 0);
+            }
+            clock.icount = end;
+            assert_eq!(refresh.blanking_end(clock.now_ns()), None);
+            // Emulated time stays within the blanking of the wall clock.
+            let behind = (now - start).as_nanos() as i64 - clock.now_ns() as i64;
+            assert!(behind.abs() < (frame / 8) as i64, "{} ns", behind);
+        }
+        assert!(moved > 0);
     }
 
     #[test]
