@@ -979,6 +979,11 @@ pub fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
     text::ansi_to_wide(bytes)
 }
 
+/// Unicode text in the ANSI code page, '?' for what it lacks.
+pub fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
+    text::wide_to_ansi(units)
+}
+
 /// lstrcmpiA's comparison of two ANSI strings, without their zeros.
 pub fn compare_nocase(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     let (a, b) = (text::ansi_to_wide(a), text::ansi_to_wide(b));
