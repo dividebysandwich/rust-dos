@@ -417,6 +417,8 @@ pub struct Win32 {
     atoms: kernel32::atom::Table,
     /// WNASPI32's CD-ROM drive.
     wnaspi32: wnaspi32::State,
+    /// OLEAUT32's type libraries and error objects.
+    oleaut32: oleaut32::State,
 }
 
 impl Win32 {
@@ -1097,6 +1099,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     // back, so that the desktop is put on the screen once.
     user32::sysparams::process_ended(cpu, process.id);
     ole32::process_ended(cpu, process.id, &tids);
+    oleaut32::process_ended(cpu, process.id);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
     dsound::process_ended(cpu, process.id, &tids);
@@ -1278,6 +1281,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.win32.user = user32::State::default();
         cpu.bus.win32.gdi = gdi32::State::default();
         cpu.bus.win32.ole = ole32::State::default();
+        cpu.bus.win32.oleaut32 = oleaut32::State::default();
         cpu.bus.win32.ddraw = ddraw::State::default();
         cpu.bus.win32.d3d8 = d3d8::State::default();
         cpu.bus.win32.dsound = dsound::State::default();
@@ -1412,6 +1416,7 @@ crate::state_fields!(Win32 {
     atoms,
     desktop_size,
     wnaspi32,
+    oleaut32,
 } skip {
     enabled,
     guest_dlls,
