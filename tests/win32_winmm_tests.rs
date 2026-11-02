@@ -665,3 +665,79 @@ fn the_sequencer_takes_win32s_midi_mapper_as_its_port() {
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
     }
 }
+
+const AUX_CAPS: u32 = 0x00;
+const AUX_VOLUME: u32 = 0x40;
+
+/// The auxiliary devices as Test Drive 4 uses them: auxSetVolume on
+/// device 1 with no auxGetNumDevs first, then the CD's device and the
+/// microphone's, which is mono. A bit in the exit code for each call
+/// that returned what Windows 95's Sound Blaster 16 driver does.
+fn aux_program() -> Vec<u8> {
+    const MMSYSERR_BADDEVICEID: i32 = 2;
+    const AUXCAPS_CDAUDIO: i32 = 1;
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["Sleep", "ExitProcess"]),
+        (
+            "WINMM.dll",
+            &[
+                "auxGetNumDevs",
+                "auxGetDevCapsA",
+                "auxGetVolume",
+                "auxSetVolume",
+            ],
+        ),
+    ];
+    program(imports, &[0; 0x50], |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(5), &[1, 0x1FFF_1FFF])?;
+        check_eax(a, 0, 0)?;
+        a.call(l.import(2))?;
+        check_eax(a, 7, 1)?;
+        call(a, l.import(5), &[2, 0x4000_2000])?;
+        check_eax(a, 0, 2)?;
+        call(a, l.import(5), &[7, 0])?;
+        check_eax(a, MMSYSERR_BADDEVICEID, 3)?;
+        // Device 2 is the CD's: AUXCAPS' wTechnology, at 40, says so.
+        call(a, l.import(3), &[2, l.at(AUX_CAPS) as i32, 48])?;
+        check_eax(a, 0, 4)?;
+        a.movzx(eax, word_ptr(l.at(AUX_CAPS + 40)))?;
+        check_eax(a, AUXCAPS_CDAUDIO, 5)?;
+        // There is no aux mapper.
+        call(a, l.import(3), &[-1, l.at(AUX_CAPS) as i32, 48])?;
+        check_eax(a, MMSYSERR_BADDEVICEID, 6)?;
+        // The microphone keeps the volume it is given.
+        call(a, l.import(5), &[4, 0x4000_2000])?;
+        call(a, l.import(4), &[4, l.at(AUX_VOLUME) as i32])?;
+        a.mov(eax, dword_ptr(l.at(AUX_VOLUME)))?;
+        check_eax(a, 0x4000_2000, 7)?;
+        // A while for the test to see the volumes before the exit.
+        call(a, l.import(0), &[100])?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// Device 1 is the MIDI synthesizer's volume, as on a Sound Blaster 16,
+/// and device 2 the CD's: what they are set to scales what each plays.
+#[test]
+fn aux_devices_are_the_sound_blaster_16s_lines() {
+    for core in CORES {
+        let mut cpu = machine("aux", core, &[("T.EXE", aux_program())], |_| {});
+        let mut seen = Vec::new();
+        run_to_exit(&mut cpu, 20_000, |cpu| {
+            let now = (cpu.bus.win32.midi_gain(), cpu.bus.win32.cd_gain());
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        });
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
+        let level = |v: u32| v as f32 / 65535.0;
+        let set = (
+            (level(0x1FFF), level(0x1FFF)),
+            (level(0x2000), level(0x4000)),
+        );
+        assert!(seen.contains(&set), "{core:?}: {seen:?}");
+    }
+}

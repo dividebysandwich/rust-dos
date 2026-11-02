@@ -196,6 +196,9 @@ pub(crate) fn apply_args(settings: &mut Settings, args: &Args) -> Result<(), Str
     if args.vrr {
         settings.vrr = true;
     }
+    if let Some(output) = args.audio_output {
+        settings.audio_output = output;
+    }
     if args.vr {
         settings.vr.mode = rust_dos::vr::VrMode::Headset;
     } else if args.vr_desktop {

@@ -7,7 +7,7 @@ mod win16;
 use rust_dos_ne as ne;
 use rust_dos_pe as pe;
 use std::fs;
-use win16::{CODE, Code, program, run_with};
+use win16::{CODE, Code, program, run_command, run_with};
 
 /// KERNEL's ordinals.
 const GET_MODULE_FILE_NAME: u16 = 49;
@@ -148,4 +148,52 @@ fn a_program_starts_a_win32_program() {
     });
     assert_eq!(exit, 1, "{log}");
     assert!(log.contains("WIN32.EXE ended with exit code 9"), "{log}");
+}
+
+#[test]
+fn the_prompt_starts_a_screen_saver_by_its_scr_name() {
+    // A screen saver is a Windows program named .SCR, which Windows
+    // starts with /s to run it and /c for its settings. With the
+    // built-in Windows on, the prompt starts SAVER.SCR as Windows would.
+    // It ends with 7 when its command tail (ES is its PSP) is " /s", else
+    // with 1.
+    let mut code = Code::new();
+    code.emit(&[
+        0x26, 0x81, 0x3E, 0x81, 0x00, b' ', b'/', // cmp word es:[81h],'/ '
+        0xB0, 0x01, // mov al,1
+        0x75, 0x02, // jne over the next
+        0xB0, 0x07, // mov al,7
+    ])
+    .exit_al();
+    let saver = program(&code, CODE);
+    let (exit, log) = run_command("scr_prompt", Vec::new(), "SAVER.SCR", "/s", |_, base| {
+        fs::write(base.join("SAVER.SCR"), saver).unwrap();
+    });
+    assert_eq!(exit, 7, "{log}");
+}
+
+#[test]
+fn the_prompt_runs_no_scr_without_the_builtin_windows() {
+    // Without the built-in Windows, a .SCR is no program to COMMAND.COM.
+    let base = std::path::PathBuf::from("target/test_win16/scr_no_windows");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("SAVER.SCR"), program(Code::new().exit_al(), CODE)).unwrap();
+    let cpu = rust_dos::cpu::Cpu::new(base);
+    assert_eq!(rust_dos::exec::find_program(&cpu, "SAVER.SCR"), None);
+}
+
+#[test]
+fn a_command_with_non_ascii_bytes_is_looked_up() {
+    // DOS bytes above 127 reach the shell as chars of two bytes, so a
+    // name's last four bytes don't always start a char. Such a name has
+    // no program, with the built-in Windows on or off.
+    let base = std::path::PathBuf::from("target/test_win16/non_ascii_command");
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let mut cpu = rust_dos::cpu::Cpu::new(base);
+    for enabled in [false, true] {
+        cpu.bus.win32.enabled = enabled;
+        assert_eq!(rust_dos::exec::find_program(&cpu, "\u{e9}a12"), None);
+    }
 }

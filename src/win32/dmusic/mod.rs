@@ -61,6 +61,7 @@ pub static DMUSIC: Dll = Dll {
     apis: DMUSIC_APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: DMUSIC_VTABLES,
 };
 
@@ -70,6 +71,7 @@ pub static DMIME: Dll = Dll {
     apis: DMIME_APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: DMIME_VTABLES,
 };
 
@@ -79,6 +81,7 @@ pub static DMLOADER: Dll = Dll {
     apis: DMLOADER_APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: DMLOADER_VTABLES,
 };
 
@@ -88,6 +91,7 @@ pub static DMSTYLE: Dll = Dll {
     apis: DMSTYLE_APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: DMSTYLE_VTABLES,
 };
 
@@ -97,6 +101,7 @@ pub static DMBAND: Dll = Dll {
     apis: DMBAND_APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: DMBAND_VTABLES,
 };
 
@@ -106,6 +111,7 @@ pub static DMCOMPOS: Dll = Dll {
     apis: DMCOMPOS_APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: DMCOMPOS_VTABLES,
 };
 

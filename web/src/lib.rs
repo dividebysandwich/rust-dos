@@ -99,6 +99,10 @@ struct Sound {
 struct PageAudio(Rc<RefCell<Sound>>);
 
 impl AudioOutput for PageAudio {
+    fn name(&self) -> &str {
+        "browser"
+    }
+
     fn queued_frames(&self) -> usize {
         let sound = self.0.borrow();
         sound.queued + sound.out.len() / 2
@@ -376,7 +380,8 @@ impl Machine {
         let batch_end = if cpu.bus.exit_requested || waiting {
             cpu.bus.clock.icount
         } else {
-            self.pacer.batch_end(&cpu.bus.clock, batch_start)
+            let end = self.pacer.batch_end(&cpu.bus.clock, batch_start);
+            cpu.bus.past_blanking(end)
         };
         cpu.bus.start_batch(batch_end);
         let (icount, stalled, idle) = (cpu.bus.clock.icount, cpu.bus.clock.stalled, cpu.bus.clock.idle);

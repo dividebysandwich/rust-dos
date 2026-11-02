@@ -62,9 +62,10 @@ const TIME_BYTES: u32 = 0x4;
 /// The first handle of an open device; the next ones follow.
 const HANDLE_BASE: u32 = 0x5A00;
 
-/// The sound device's name, as waveOutGetDevCaps gives it, and the
-/// mapper's.
-const DEVICE_NAME: &str = "Built-in Windows sound";
+/// The sound device's name and product id, as waveOutGetDevCaps gives
+/// them, and the mapper's name.
+pub const DEVICE_NAME: &str = "Built-in Windows sound";
+pub const DEVICE_PID: u16 = 0x68;
 const MAPPER_NAME: &str = "Microsoft Sound Mapper";
 
 /// The times a loop of blocks plays at most (`dwLoops`).
@@ -419,7 +420,7 @@ pub fn wave_out_get_dev_caps_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut bytes = [0u8; WAVEOUTCAPS_SIZE];
     let mapper = id == WAVE_MAPPER;
     bytes[0..2].copy_from_slice(&1u16.to_le_bytes()); // MM_MICROSOFT
-    let product: u16 = if mapper { 2 } else { 0x68 };
+    let product: u16 = if mapper { 2 } else { DEVICE_PID };
     bytes[2..4].copy_from_slice(&product.to_le_bytes());
     bytes[4..8].copy_from_slice(&0x0400u32.to_le_bytes());
     let name = if mapper { MAPPER_NAME } else { DEVICE_NAME };

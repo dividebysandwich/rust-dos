@@ -113,6 +113,10 @@ fn master_is_the_volume_of_the_mix() {
 struct Recorder(Rc<RefCell<Vec<i16>>>);
 
 impl AudioOutput for Recorder {
+    fn name(&self) -> &str {
+        "recorder"
+    }
+
     // Always at its target, so the sound is neither padded, dropped nor
     // resampled.
     fn queued_frames(&self) -> usize {
