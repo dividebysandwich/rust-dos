@@ -133,7 +133,8 @@ const MOST_BACKOFFS: u32 = 2;
 /// counts. A loss counts up to `TWO_STEPS` above the least speed that drew
 /// the record: a speed that far above what the program runs at isn't too
 /// low, and a floor there would pin a run that noise sent up (one at 700,000
-/// in a program that holds at 85,000).
+/// in a program that holds at 85,000). A heavier scene clears that speed, so
+/// a run it sends up can still form a floor there, for as long as it lasts.
 const FLOOR_WINDOWS: u32 = 4 * HOLD_WINDOWS;
 const SEEN_TWICE: u32 = 2;
 const LASTS: u32 = JUDGED - 1;
@@ -1886,9 +1887,8 @@ mod tests {
         let (with, under) = in_scenes(true);
         let (without, _) = in_scenes(false);
         assert!(with >= 34.8 && with > without, "{} {}", with, without);
-        // A floor that lapses costs the two steps down to the speed that
-        // lost frames, and no more than that each time.
-        assert!(under <= 80, "{}", under);
+        // A floor that lapses costs a step under that speed, and no more.
+        assert!(under <= 3000 / FLOOR_WINDOWS as usize * JUDGED as usize, "{}", under);
     }
 
     #[test]
