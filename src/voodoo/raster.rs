@@ -188,6 +188,7 @@ pub struct TmuParams {
     pub dsdy: i64,
     pub dtdy: i64,
     pub dwdy: i64,
+    /// The level of detail without perspective (`Tmu::prepare`).
     pub lodbase: i32,
 }
 
@@ -689,11 +690,56 @@ const fn uses_local(mode: u32) -> bool {
         || (mode >> 27) & 3 != 0
 }
 
+/// A pixel's level of detail in perspective (8.8), less 2 log2(1/W): its
+/// footprint, log2 of how many texels s and t move a pixel across or down,
+/// whichever is more, from S/W, T/W and W at the pixel and the
+/// triangle's gradients of them. 3dfx's specifications don't give the
+/// card's equation; Glide 2.4 says that "an LOD of n is calculated when a
+/// pixel covers approximately 2^2n texels".
+///
+/// s is (S/W) / W, so d(s)/dx = (W d(S/W)/dx - (S/W) dW/dx) / W^2, and
+/// the same for t and down the screen: this takes log2 of the numerators'
+/// length, and the caller adds 2 log2(1/W). MAME and DOSBox-X take only
+/// d(S/W)/dx / W, without the (S/W) dW/dx term; far from the texture's
+/// origin the two nearly cancel, and that level comes out several levels
+/// too coarse.
+#[inline(always)]
+fn footprint(q: &TmuParams, iters: i64, itert: i64, iterw: i64) -> i32 {
+    let (s, t, w) = (iters as f64, itert as f64, iterw as f64);
+    let length = |ds: i64, dt: i64, dw: i64| {
+        let dw = dw as f64;
+        let (a, b) = (w * ds as f64 - s * dw, w * dt as f64 - t * dw);
+        a * a + b * b
+    };
+    let squared = length(q.dsdx, q.dtdx, q.dwdx).max(length(q.dsdy, q.dtdy, q.dwdy));
+    if squared > 0.0 {
+        // The values have 32 fraction bits, the products 64: a square's
+        // log2 is 128 too high, half of it 64.
+        tables().half_log2(squared) - (64 << 8)
+    } else {
+        NO_FOOTPRINT
+    }
+}
+
+/// `footprint` where s and t don't change: below every lodmin.
+const NO_FOOTPRINT: i32 = -(1000 << 8);
+
 /// A texture unit's colour for a pixel, combined with `cother`, the
 /// colour of the unit before it (`TEXTURE_PIPELINE`).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64, rl: Option<(i64, i32)>) -> u32 {
+fn texture(
+    t: &TmuRaster,
+    mode: u32,
+    x: i32,
+    dither4: Option<&[u8]>,
+    cother: u32,
+    q: &TmuParams,
+    iters: i64,
+    itert: i64,
+    iterw: i64,
+    rl: Option<(i64, i32)>,
+) -> u32 {
     let (mut s, mut tc, mut lod);
     if bit(mode, 0) {
         // (`rl`: the reciprocal and log of `iterw`, where the other unit
@@ -701,11 +747,11 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
         let (oow, log) = rl.unwrap_or_else(|| tables().reciplog(iterw));
         s = (oow.wrapping_mul(iters) >> 29) as i32;
         tc = (oow.wrapping_mul(itert) >> 29) as i32;
-        lod = log + lodbase;
+        lod = footprint(q, iters, itert, iterw) + 2 * log;
     } else {
         s = (iters >> 14) as i32;
         tc = (itert >> 14) as i32;
-        lod = lodbase;
+        lod = q.lodbase;
     }
     if bit(mode, 3) && iterw < 0 {
         s = 0;
@@ -1248,7 +1294,7 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
                 && t.lodmin < 8 << 8
             {
                 let (s, tc, w) = tex[1];
-                texel = texture(t, m.tex[1], x, row.dither4, texel, p.tmu[1].lodbase, s, tc, w, rl);
+                texel = texture(t, m.tex[1], x, row.dither4, texel, &p.tmu[1], s, tc, w, rl);
             }
             if TMUS >= 1
                 && let Some(t) = &st.tmu[0]
@@ -1258,7 +1304,7 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
                     Some(config) => config,
                     None => {
                         let (s, tc, w) = tex[0];
-                        texture(t, m.tex[0], x, row.dither4, texel, p.tmu[0].lodbase, s, tc, w, rl)
+                        texture(t, m.tex[0], x, row.dither4, texel, &p.tmu[0], s, tc, w, rl)
                     }
                 };
             }
@@ -1448,6 +1494,69 @@ pub(crate) mod tests {
             send_config: None,
             stipple: 0,
             tmu: [Some(tmu(regs[4])), Some(tmu(regs[5]))],
+        }
+    }
+
+    /// The level a pixel in perspective reads follows the texels it
+    /// covers: Glide 2.4 says that "an LOD of n is calculated when a pixel
+    /// covers approximately 2^2n texels". A floor whose W falls from 1 to
+    /// 0.6 down the screen, point sampled from a 256 by 256 texture whose
+    /// level n holds the value n, drawn near the texture's origin and 8000
+    /// texels from it, where a pixel covers as many texels.
+    #[test]
+    fn levels_follow_the_texels_a_pixel_covers() {
+        let mut t = two_unit_state([0; 6]).tmu[0].take().unwrap();
+        t.lookup = (0..0x10000u32).collect();
+        for level in 0..9 {
+            let start = t.lodoffset[level] as usize / 2;
+            for i in start..start + ((256 >> level) * (256 >> level)).max(4) {
+                t.ram.set(i, level as u16);
+            }
+        }
+        // In perspective, 5-6-5, and the combine passes the texel on.
+        let mode = 1 | (10 << 8) | (1 << 12) | (1 << 18) | (1 << 21) | (1 << 27);
+        let one = 4_294_967_296.0;
+        let fixed = |v: f64| (v * one) as i64;
+        let dwdy = -0.002;
+        for shift in [0.0, 8000.0] {
+            // s = (S/W) / W, 4 texels a pixel across and t 4 down where W
+            // is 1, both `shift` at pixel (0, 0).
+            let (dsdx, dsdy, dtdy) = (fixed(4.0), fixed(shift * dwdy), fixed(4.0 + shift * dwdy));
+            let q = TmuParams {
+                starts: fixed(shift),
+                startt: fixed(shift),
+                startw: fixed(1.0),
+                dsdx,
+                dtdx: 0,
+                dwdx: 0,
+                dsdy,
+                dtdy,
+                dwdy: fixed(dwdy),
+                lodbase: super::super::texture::lodbase([dsdx, 0, dsdy, dtdy]),
+            };
+            for y in (0..200i64).step_by(10) {
+                for x in (0..40i64).step_by(10) {
+                    let at = |start: i64, ddx: i64, ddy: i64| start + x * ddx + y * ddy;
+                    let s = at(q.starts, q.dsdx, q.dsdy);
+                    let tc = at(q.startt, q.dtdx, q.dtdy);
+                    let w = at(q.startw, q.dwdx, q.dwdy);
+                    let level = texture(&t, mode, 0, None, 0, &q, s, tc, w, None) & 0xFF;
+                    // The texels the pixel covers: the area its image has
+                    // in the texture, from the derivatives of s and t.
+                    let (s, tc, w) = (s as f64 / one, tc as f64 / one, w as f64 / one);
+                    let (dsdx, dsdy) = (4.0 / w, (shift * dwdy * w - s * dwdy) / (w * w));
+                    let dtdy = ((4.0 + shift * dwdy) * w - tc * dwdy) / (w * w);
+                    let n = (dsdx * dtdy).abs().log2() / 2.0;
+                    // The card takes the level below the one it works out,
+                    // from the longer side of a footprint a little longer
+                    // than wide.
+                    assert!(
+                        level as f64 > n - 1.0 && level as f64 <= n + 0.5,
+                        "{shift} texels away, pixel ({x}, {y}): level {level}, 2^{:.2} texels",
+                        2.0 * n
+                    );
+                }
+            }
         }
     }
 

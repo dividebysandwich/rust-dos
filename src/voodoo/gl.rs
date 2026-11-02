@@ -703,6 +703,10 @@ impl VoodooGl {
             (3, "a_tex0"),
             (4, "a_tex1"),
             (5, "a_lod"),
+            (6, "a_dx0"),
+            (7, "a_dy0"),
+            (8, "a_dx1"),
+            (9, "a_dy1"),
         ];
         let triangle: Program<Triangle> =
             compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes)?;
@@ -733,13 +737,19 @@ impl VoodooGl {
             let stride = std::mem::size_of::<Vertex>() as i32;
             // Each attribute where its field of `Vertex` is.
             let tex = std::mem::offset_of!(Vertex, tex);
+            let grad = std::mem::offset_of!(Vertex, grad);
+            let vec3 = std::mem::size_of::<[f32; 3]>();
             for (index, size, offset) in [
                 (0, 2, std::mem::offset_of!(Vertex, pos)),
                 (1, 4, std::mem::offset_of!(Vertex, color)),
                 (2, 2, std::mem::offset_of!(Vertex, zw)),
                 (3, 3, tex),
-                (4, 3, tex + std::mem::size_of::<[f32; 3]>()),
+                (4, 3, tex + vec3),
                 (5, 2, std::mem::offset_of!(Vertex, lod)),
+                (6, 3, grad),
+                (7, 3, grad + vec3),
+                (8, 3, grad + 2 * vec3),
+                (9, 3, grad + 3 * vec3),
             ] {
                 let offset = offset as i32;
                 gl.enable_vertex_attrib_array(index);
@@ -3048,7 +3058,8 @@ mod tests {
     /// pixel across and down where W is 1, at the top, and W falling to
     /// about 0.1 at the bottom, with S and T `shift` level 0 texels from
     /// where they start. A shift changes the gradients of S/W and T/W by
-    /// `shift` times W's, and with them the card's level of detail.
+    /// `shift` times W's, but not the texels a pixel covers, so the card's
+    /// levels of detail stay as they are.
     fn draw_floor(bus: &mut crate::bus::Bus, fbz: u32, shift: f32) {
         w(bus, 0x110, (1 << 9) | fbz);
         // The texture's colour and alpha, with texturing on.
@@ -3106,10 +3117,11 @@ mod tests {
         let (bilinear, point, clamped) = (1 | 2 | 4, 1, 1 | 2 | 4 | 0x40 | 0x80);
         let (bias, even, odd) = (LEVELS | (4 << 12), LEVELS | (1 << 19), LEVELS | (3 << 18));
         let crossed = 24 | (16 << 6);
-        // Near 0 and with coordinates thousands of texels away, where the
-        // card's level comes out higher than the texels on the screen ask
-        // for; and with the dithered level of detail (textureMode bit 4).
-        let mut results = Vec::new();
+        // Near 0 and with coordinates thousands of texels away, where W
+        // times the gradients of S/W and T/W nearly cancels S/W and T/W
+        // times W's in each pixel's footprint; and with the dithered level
+        // of detail (textureMode bit 4).
+        let (mut results, mut pictures) = (Vec::new(), Vec::new());
         for (shift, mode, lod, what) in [
             (0.0, bilinear, LEVELS, "near 0"),
             (3072.0, bilinear, LEVELS, "3072 texels away"),
@@ -3141,7 +3153,15 @@ mod tests {
             // edge takes the texel beside the card's: a few dozen of them.
             let far_allowed = if mode & 6 == 0 { 64 } else { 0 };
             results.push((what, exact, apart, far_allowed));
+            pictures.push(software);
         }
+        // 3072 texels is a whole number of every level's size, so the card
+        // draws the floor from the same levels as near 0: a pixel changes
+        // by a step of the bilinear blend where the fixed point rounds the
+        // other way, not by a level's colour.
+        let widened: Vec<[u8; 3]> = pictures[1].iter().map(|&v| widen(v)).collect();
+        let moved = far_apart(&pictures[0], &widened);
+        assert_eq!(moved, 0, "pixels that change levels 3072 texels away");
         // Few far from the card's, and few off it at all: the floor is
         // 32768 pixels, and a wrong fraction or texel would change most.
         let fine = results.iter().all(|&(_, exact, far, allowed)| far <= allowed && exact < 2048);

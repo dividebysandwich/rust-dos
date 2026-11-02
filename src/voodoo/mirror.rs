@@ -17,10 +17,12 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 /// A vertex: where it is in the buffer in pixels, rows counted from the
 /// top of the buffer (the Y origin applied), and the values the card
 /// iterates there: the colour in 8-bit units, Z in 16-bit units, W, and
-/// each texture unit's S, T and W (16.32 values as numbers). `lod` is each
-/// unit's base level of detail (8.8), the triangle's and the same at its
-/// three vertices: what the card works out from the gradients of S/W and
-/// T/W (`Tmu::prepare`), to which a pixel adds log2(1/W).
+/// each texture unit's S, T and W (16.32 values as numbers). The rest is
+/// the triangle's and the same at its three vertices. `lod` is each unit's
+/// level of detail without perspective (8.8, `Tmu::prepare`). `grad` is
+/// each unit's gradients of S, T and W across the screen and down it, from
+/// which a pixel in perspective works out its own level
+/// (`raster::footprint`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -29,6 +31,7 @@ pub struct Vertex {
     pub zw: [f32; 2],
     pub tex: [[f32; 3]; 2],
     pub lod: [f32; 2],
+    pub grad: [[[f32; 3]; 2]; 2],
 }
 
 /// A texture unit as triangles draw with it.
@@ -697,6 +700,10 @@ impl Mirror {
         let state = draw_state(st, stipple, tmu);
         let flip = st.fbz_mode & (1 << 17) != 0;
         let (ax, ay) = ((p.ax >> 4) as f64, (p.ay >> 4) as f64);
+        let number = |d: i64| (d as f64 / 4_294_967_296.0) as f32;
+        let grad = p.tmu.map(|q| {
+            [[q.dsdx, q.dtdx, q.dwdx], [q.dsdy, q.dtdy, q.dwdy]].map(|d| d.map(number))
+        });
         let vertices = verts.map(|(x, y)| {
             // The card iterates from vertex A's pixel, sampling each pixel
             // at its top left corner; here the values are at the vertex.
@@ -720,6 +727,7 @@ impl Mirror {
                 zw: [color(p.startz, p.dzdx, p.dzdy), wide(p.startw, p.dwdx, p.dwdy)],
                 tex,
                 lod: p.tmu.map(|q| q.lodbase as f32),
+                grad,
             }
         });
         // LFB writes between identical draws must stay between them,

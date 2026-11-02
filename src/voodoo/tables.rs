@@ -205,6 +205,24 @@ impl Tables {
         }
         (if neg { (recip as i64).wrapping_neg() } else { recip as i64 }, log2)
     }
+
+    /// Half of log2(`value`) in 8.8, rounded, for a `value` above 0: the
+    /// level of detail of a length whose square it is. From the exponent
+    /// and the table's log of the mantissa, interpolated as `reciplog`
+    /// interpolates it.
+    pub fn half_log2(&self, value: f64) -> i32 {
+        let bits = value.to_bits();
+        let exp = ((bits >> 52) & 0x7FF) as i32 - 1023;
+        // The mantissa's leading 32 bits, its leading 1 at bit 31.
+        let temp = 0x8000_0000 | ((bits >> 21) as u32 & 0x7FFF_FFFF);
+        let index = (temp >> (31 - RECIPLOG_LOOKUP_BITS - 1)) & ((2 << RECIPLOG_LOOKUP_BITS) - 2);
+        let table = &self.reciplog[index as usize..index as usize + 4];
+        let interp = (temp >> (31 - RECIPLOG_LOOKUP_BITS - 8)) & 0xFF;
+        let rlog = (table[1] * (0x100 - interp) + table[3] * interp) >> 8;
+        // log2 in 128ths is half of it in 256ths.
+        let shift = RECIPLOG_LOOKUP_PREC - LOG_OUTPUT_PREC + 1;
+        (exp << (LOG_OUTPUT_PREC - 1)) + ((rlog + (1 << (shift - 1))) >> shift) as i32
+    }
 }
 
 /// An IEEE single in a float register as a fixed-point value with
@@ -272,6 +290,19 @@ mod tests {
         assert_eq!(log, -256);
         assert_eq!(recip, 1 << (RECIP_OUTPUT_PREC - 1));
         assert_eq!(t.reciplog(0).1, 1000 << 8);
+    }
+
+    #[test]
+    fn half_log2_is_within_rounding_of_the_exact_one() {
+        let t = tables();
+        assert_eq!(t.half_log2(1.0), 0);
+        assert_eq!(t.half_log2(4.0), 256);
+        assert_eq!(t.half_log2(0.25), -256);
+        for i in 1..10_000 {
+            let v = i as f64 * 1.37e-3 * 2f64.powi(i % 90 - 45);
+            let exact = v.log2() * 128.0;
+            assert!((t.half_log2(v) as f64 - exact).abs() <= 0.51, "{v}");
+        }
     }
 
     #[test]
