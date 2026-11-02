@@ -606,6 +606,25 @@ fn get_long_path_name_gives_the_long_names() {
     assert_eq!(run_with(Win98Se, "long_path", exe, &[file]).0, 18);
 }
 
+/// A program that asks to restart Windows, and ends with 9 if the call
+/// comes back.
+fn restarts_windows() -> Vec<u8> {
+    const EWX_REBOOT: i32 = 2;
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["ExitWindowsEx"])];
+    program(imports, &[0u8; 0x10], |a, l| {
+        a.push(0)?;
+        a.push(EWX_REBOOT)?;
+        a.call(l.import(0))?;
+        a.mov(eax, 9)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn exit_windows_ex_ends_the_program() {
+    assert_eq!(run(Win98Se, "restart", restarts_windows()).0, 0);
+}
+
 /// A program that ends with 7 when MSIMG32.DLL is a file of the system
 /// directory (1), loads (2) and has GradientFill (4).
 fn finds_msimg32() -> Vec<u8> {

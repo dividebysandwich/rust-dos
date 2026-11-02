@@ -25,6 +25,7 @@ pub mod progman;
 pub mod rect;
 pub mod resource;
 pub mod saver;
+pub mod session;
 pub mod sysparams;
 pub mod text;
 pub mod window;
@@ -1224,7 +1225,7 @@ static APIS: &[Api] = &[
         2,
         sysparams::change_display_settings,
     ),
-    stdcall("ExitWindowsEx", 422, 2, nothing),
+    stdcall("ExitWindowsEx", 422, 2, session::exit_windows_ex),
     stdcall("GetGuiResources", 423, 2, nothing),
     stdcall(
         "GetProcessWindowStation",

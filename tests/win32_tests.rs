@@ -5682,12 +5682,17 @@ fn console_writes(name: &str) -> Vec<u8> {
 /// Run T.EXE, which starts the other programs of `files`, to its end:
 /// its exit code.
 fn run_family(test: &str, files: &[(&str, Vec<u8>)]) -> u8 {
+    run_family_for(test, files, 400)
+}
+
+/// `run_family`, for at most `batches` batches.
+fn run_family_for(test: &str, files: &[(&str, Vec<u8>)], batches: usize) -> u8 {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
-    assert!(run_to_exit(&mut cpu, 400), "{}", printed(&cpu));
+    assert!(run_to_exit(&mut cpu, batches), "{}", printed(&cpu));
     cpu.errorlevel
 }
 
@@ -6394,6 +6399,282 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
         &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
     );
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+const WM_QUERYENDSESSION: i32 = 0x0011;
+const WM_ENDSESSION: i32 = 0x0016;
+const EWX_REBOOT: i32 = 2;
+const EWX_FORCE: i32 = 4;
+
+/// Data for `session_window`, with `texts` as `child_data` puts them, the
+/// class's name at 0x10 of them and a WNDCLASSA at 0xE0.
+fn session_data(texts: &[(usize, &str)]) -> Vec<u8> {
+    let mut data = child_data(texts);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    data
+}
+
+/// Register the class named at 0x10 of the data, with the window procedure
+/// `proc` makes, which goes on to DefWindowProcA at its end.
+fn session_class(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+    proc: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> Result<(), IcedError> {
+    let mut start = a.create_label();
+    a.call(start)?;
+    proc(a)?;
+    a.jmp(f("DefWindowProcA"))?;
+    a.set_label(&mut start)?;
+    a.pop(eax)?;
+    a.mov(dword_ptr(l.at(0xE4)), eax)?;
+    a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+    a.push(l.at(0xE0) as i32)?;
+    a.call(f("RegisterClassA"))
+}
+
+/// A top-level window of the class named at 0x10 of the data.
+fn session_window(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+) -> Result<(), IcedError> {
+    let class = l.at(0x10) as i32;
+    let style = WS_POPUP | WS_VISIBLE;
+    let args = [0, class, class, style, 0, 0, 50, 50, 0, 0, BASE as i32, 0];
+    push_args(a, &args)?;
+    a.call(f("CreateWindowExA"))
+}
+
+/// A program that calls ExitWindowsEx(EWX_REBOOT, 0) and ends with 9 if
+/// the call comes back.
+fn restarts_windows() -> Vec<u8> {
+    let (kernel32, user32) = (["ExitProcess"], ["ExitWindowsEx"]);
+    win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &[0; 4], |a, _, f| {
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn a_window_that_refuses_keeps_the_session_going() {
+    // The second window asked refuses: ExitWindowsEx returns FALSE, the
+    // first window learns that the session goes on, and the second isn't
+    // told.
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "ExitWindowsEx",
+    ];
+    // WM_QUERYENDSESSION's count at 0xA0, WM_ENDSESSION's at 0xA4 and its
+    // wParam at 0xA8, which starts at 1.
+    let mut data = session_data(&[(0x10, "Frame")]);
+    data[0xA8] = 1;
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut ended = a.create_label();
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_QUERYENDSESSION)?;
+            a.jne(ended)?;
+            a.inc(dword_ptr(l.at(0xA0)))?;
+            a.xor(eax, eax)?;
+            a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+            a.setne(al)?;
+            a.ret_1(16)?;
+            a.set_label(&mut ended)?;
+            a.cmp(dword_ptr(esp + 8), WM_ENDSESSION)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA4)))?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.mov(dword_ptr(l.at(0xA8)), eax)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        session_window(a, l, f)?;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xA4)), 1)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xA8)), 0)?;
+        bit_if(a, eq, 3)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("session_refused", &[("T.EXE", program)]);
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
+}
+
+#[test]
+fn ewx_force_asks_no_window() {
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "ExitWindowsEx",
+    ];
+    let data = session_data(&[(0x10, "Frame")]);
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_QUERYENDSESSION)?;
+            a.jne(other)?;
+            a.xor(eax, eax)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        push_args(a, &[EWX_REBOOT | EWX_FORCE, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    assert_eq!(run_family("session_force", &[("T.EXE", program)]), 0);
+}
+
+#[test]
+fn the_callers_window_learns_the_session_ends_after_the_others_have_gone() {
+    // T.EXE's window ends T.EXE on WM_ENDSESSION, with what it saw: C.EXE
+    // has ended (1), wParam is TRUE (2) and lParam isn't ENDSESSION_LOGOFF
+    // (4).
+    let kernel32 = ["CreateProcessA", "WaitForSingleObject", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "ExitWindowsEx",
+    ];
+    let data = session_data(&[(0, "C.EXE"), (0x10, "Frame")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_ENDSESSION)?;
+            a.jne(other)?;
+            a.mov(esi, dword_ptr(esp + 12))?;
+            a.mov(edi, dword_ptr(esp + 16))?;
+            a.xor(ebx, ebx)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x90)))?;
+            a.call(f("WaitForSingleObject"))?;
+            a.test(eax, eax)?;
+            bit_if(a, eq, 0)?;
+            a.cmp(esi, 1)?;
+            bit_if(a, eq, 1)?;
+            a.test(edi, edi)?;
+            bit_if(a, eq, 2)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, 5000)?;
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "session_order",
+        &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
+    );
+    assert_eq!(code, 7, "the checks that failed: {:03b}", !code & 7);
+}
+
+#[test]
+fn a_child_that_restarts_windows_tells_its_parents_window() {
+    // C.EXE asks for the restart. T.EXE, which only gets messages, learns
+    // of it through its window, and ends with 0x5A there.
+    let kernel32 = ["CreateProcessA", "ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "GetMessageA",
+        "DispatchMessageA",
+    ];
+    // A MSG at 0xC0.
+    let data = session_data(&[(0, "C.EXE"), (0x10, "Frame")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_ENDSESSION)?;
+            a.jne(other)?;
+            a.push(0x5A)?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        create_child(a, l, f, 0)?;
+        let mut next = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(next)
+    });
+    let code = run_family(
+        "session_from_child",
+        &[("T.EXE", parent), ("C.EXE", restarts_windows())],
+    );
+    assert_eq!(code, 0x5A);
+}
+
+#[test]
+fn a_window_that_doesnt_answer_doesnt_stop_the_session_from_ending() {
+    // C.EXE shows a window and sleeps, so nobody takes the messages for
+    // it. T.EXE's restart goes on without its answer, and C.EXE ends with
+    // it: the run ends only when no process is left.
+    let child = {
+        let user32 = ["CreateWindowExA"];
+        let data = child_data(&[(0x10, "Static")]);
+        win_program(pe::SUBSYSTEM_GUI, &["Sleep"], &user32, &data, |a, l, f| {
+            let class = l.at(0x10) as i32;
+            let style = WS_POPUP | WS_VISIBLE;
+            push_args(a, &[0, class, class, style, 0, 0, 50, 50, 0, 0, 0, 0])?;
+            a.call(f("CreateWindowExA"))?;
+            a.push(INFINITE)?;
+            a.call(f("Sleep"))?;
+            a.int3()
+        })
+    };
+    let kernel32 = ["CreateProcessA", "Sleep", "ExitProcess"];
+    let user32 = ["ExitWindowsEx"];
+    let data = child_data(&[(0, "C.EXE")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        create_child(a, l, f, 0)?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    // The window gets 5 seconds for each of the two messages.
+    let files = [("T.EXE", parent), ("C.EXE", child)];
+    assert_eq!(run_family_for("session_no_answer", &files, 4000), 0);
 }
 
 #[test]
