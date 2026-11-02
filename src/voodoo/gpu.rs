@@ -344,26 +344,29 @@ impl Voodoo {
         }
     }
 
-    /// A Banshee's triangle draws with texels from the memory its 3D
-    /// buffers are in (a buffer drawn and then drawn with as a texture):
-    /// the memory there gets what was drawn before, read back from the
-    /// renderer's 3D buffers where they are newer, and the recording
-    /// decodes the texture again from it. The renderer then draws with
-    /// its own picture at the card's resolution, never with memory that
-    /// is behind it, and so does the software rasterizer.
+    /// A Banshee's triangle draws with texels from memory that is or was
+    /// one of its 3D buffers (a buffer drawn and then drawn with as a
+    /// texture, from this layout or an earlier one): the memory there
+    /// gets what was drawn before, read back from the renderer's 3D
+    /// buffers where they are newer, and the recording decodes the
+    /// texture again from it. The renderer then draws with its own
+    /// picture at the card's resolution, never with memory that is
+    /// behind it, and so does the software rasterizer.
     pub(crate) fn gpu_texels(&mut self, st: &RasterState, texcount: usize) {
-        let Some(key) = self.mirror_layout() else {
+        if self.mirror_layout().is_none() {
             return;
-        };
+        }
         for unit in 0..texcount.min(self.tmu.len()) {
             let Some(t) = &st.tmu[unit] else {
                 continue;
             };
             let (start, last) = super::mirror::texel_span(t);
             let end = last.saturating_add(1);
-            if !key.overlaps(start, end) {
-                continue;
-            }
+            // Every texture is looked up, not only those under the
+            // buffers drawn now: a buffer of the layout before (a texture
+            // drawn into as a render target) was read back as the layout
+            // changed, and the bytes it left in `changed` are only found
+            // here.
             // Read back for the card itself, the rows don't turn hot: the
             // program didn't ask for them.
             if self.gpu.get_mut().tracker.buffers_in(start, end) {

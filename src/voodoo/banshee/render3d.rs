@@ -1066,6 +1066,25 @@ mod tests {
     }
 
     #[test]
+    fn gpu_reads_decode_a_texture_again_after_its_buffer_left_the_layout() {
+        // A program that draws into a texture and then draws with it from
+        // another layout (Giants composes its ground textures so, with a
+        // render target the size of the texture): the texture was decoded
+        // from A before, A is then drawn by the renderer alone, and the
+        // next triangle draws into B with another depth buffer, a layout
+        // without A. A comes back from the renderer as the layout changes,
+        // and the triangle decodes the texture again from it.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        assert!(textured(&mut v).is_some());
+        draw_frame(&mut v, A);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x50_0000);
+        let texel = textured(&mut v);
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
+        assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
+    }
+
+    #[test]
     fn a_texture_from_a_buffer_drawn_in_software_is_decoded_again() {
         // A texture decoded from A, then A drawn by the software
         // rasterizer, and those jobs done before the next triangle that
