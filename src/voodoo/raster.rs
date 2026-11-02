@@ -1560,6 +1560,47 @@ pub(crate) mod tests {
         }
     }
 
+    /// Time the software rasterizer drawing a floor in perspective with
+    /// both units bilinear from mipmaps, as Unreal draws its floors: W
+    /// from 1 to 0.28 down 640 by 480 pixels, S and T 3000 texels from 0,
+    /// 20 times a round. `cargo test --release --lib -- --ignored
+    /// benchmark_perspective_texturing --nocapture`.
+    #[test]
+    #[ignore = "a benchmark"]
+    fn benchmark_perspective_texturing() {
+        let mode = 1 | 2 | 4 | (10 << 8) | (1 << 12) | (1 << 18) | (1 << 21) | (1 << 27);
+        let st = two_unit_state([1 << 9, 1 | (1 << 27), 0, 0, mode, mode]);
+        let dwdy = -6_442_450i64;
+        let tp = TmuParams {
+            starts: 3000 << 32,
+            startt: 3000 << 32,
+            startw: 1 << 32,
+            dsdx: 4 << 32,
+            dtdx: 0,
+            dwdx: 0,
+            dsdy: 3000 * dwdy,
+            dtdy: (4 << 32) + 3000 * dwdy,
+            dwdy,
+            // What `Tmu::prepare` gives, log2 of 4.53 texels.
+            lodbase: 558,
+        };
+        let p = TriParams { tmu: [tp, tp], ..Default::default() };
+        let (mut stipple, mut stats) = (0, Stats::default());
+        let mut ms = Vec::new();
+        for _ in 0..8 {
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                for y in 0..480 {
+                    scanline::<2, Generic>(&st, &p, y, 0, 640, &mut stipple, &mut stats);
+                }
+            }
+            ms.push(start.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        }
+        ms.sort_by(f64::total_cmp);
+        println!("perspective texturing: median {:.2} ms a frame {ms:.2?}", ms[4]);
+        assert!(stats.pixels_out > 0);
+    }
+
     #[test]
     fn texture_combines_without_local_ignore_the_texel() {
         let t = TmuRaster {
