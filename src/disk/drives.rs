@@ -528,7 +528,8 @@ mod tests {
 
     #[test]
     fn the_shown_cd_stays_while_it_has_a_disc() {
-        // E: has a disc; a disc going into D: (the first letter) doesn't move it.
+        // E: has a disc; a disc going into D: (the first letter) doesn't
+        // move it.
         assert_eq!(pick_cd(&[3, 4], Some(4), |d| d == 3 || d == 4), Some(4));
     }
 

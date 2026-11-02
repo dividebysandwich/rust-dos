@@ -7797,12 +7797,12 @@ fn wnaspi32_runs_scsi_commands_on_the_cd_rom_drive() {
 
 #[test]
 fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
-    // A READ(10) with SRB_EVENT_NOTIFY on the CD-ROM drive returns SS_PENDING
-    // with its block still empty, as APIX does. The scheduler finishes it
-    // later: the block is written, then its status, then the event (in the
-    // PostProc field) is set, and a wait on that event ends. A request to a target that isn't the drive
-    // is rejected the same way, later, with its status (SS_NO_DEVICE) and its
-    // own event.
+    // A READ(10) with SRB_EVENT_NOTIFY on the CD-ROM drive returns
+    // SS_PENDING with its block still empty, as APIX does. The scheduler
+    // finishes it later: the block is written, then its status, then the
+    // event (in the PostProc field) is set, and a wait on that event ends.
+    // A request to a target that isn't the drive is rejected the same way,
+    // later, with its status (SS_NO_DEVICE) and its own event.
     let dir = cdimage::scratch("wnaspi32_event");
     let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
     fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
@@ -7844,8 +7844,8 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
         }
         a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
         a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
-        // SendASPI32Command(accepted): the status comes back, the block
-        // says SS_COMP, and the event is set.
+        // SendASPI32Command(accepted): SS_PENDING comes back and the block
+        // says SS_PENDING. Once the wait on the event ends, it says SS_COMP.
         a.push(l.at(0x40) as i32)?;
         a.call(l.import(1))?;
         a.add(esp, 4)?;
@@ -7864,8 +7864,9 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
         a.mov(ebx, 5)?;
         a.cmp(byte_ptr(l.at(0x41)), 1)?;
         a.jne(fail)?;
-        // SendASPI32Command(rejected): target 1 has no device, so the
-        // status comes back, and the event is left alone.
+        // SendASPI32Command(rejected): target 1 has no device. SS_PENDING
+        // comes back too, and once the wait on its event ends, the block
+        // says SS_NO_DEVICE.
         a.push(l.at(0x100) as i32)?;
         a.call(l.import(1))?;
         a.add(esp, 4)?;
@@ -7889,6 +7890,85 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
         a.int3()
     });
     let mut cpu = machine("wnaspi32_event", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_finishes_an_event_request_while_the_program_polls() {
+    // A program that sends an event request and then watches the block's
+    // status byte, calling nothing, sees it finished by the scheduler's
+    // ticks, which run between its instructions rather than in a call of
+    // its own: the data and status land in its memory, and the event is
+    // set.
+    let dir = cdimage::scratch("wnaspi32_poll");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        ("WNASPI32.DLL", &["GetASPI32SupportInfo", "SendASPI32Command"]),
+        ("KERNEL32.DLL", &["ExitProcess", "CreateEventA", "WaitForSingleObject"]),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    let mut srb = read10_srb(16);
+    srb[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&srb);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let mut spin = a.create_label();
+        // A manual-reset event, not signaled, in the PostProc field.
+        a.push(0i32)?;
+        a.push(0i32)?;
+        a.push(1i32)?;
+        a.push(0i32)?;
+        a.call(l.import(3))?;
+        a.mov(dword_ptr(l.at(0x40 + 24)), eax)?;
+        a.mov(dword_ptr(l.at(0x180)), eax)?;
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        // The status byte, until it isn't SS_PENDING.
+        a.set_label(&mut spin)?;
+        a.cmp(byte_ptr(l.at(0x41)), 0)?;
+        a.je(spin)?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(dword_ptr(l.at(0x201)), 0x3030_4443)?;
+        a.jne(fail)?;
+        // The event is set: a wait that doesn't wait ends at once.
+        a.mov(eax, dword_ptr(l.at(0x180)))?;
+        a.push(0i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 4)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_poll", exe);
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();

@@ -314,10 +314,15 @@ exceptions run as the program's own code on top of that.
   Its target 0 is the CD-ROM drive a booted system's IDE channel would show:
   the one it shows stays while it has a disc, and it moves to a disc in
   another CD-ROM drive only when its own is empty (1 when MOUNT's `-ide`
-  puts it on a slave). Commands complete as Windows 98's do when APIX's
-  thread runs them at once: SS_PENDING for SC_EXEC_SCSI_CMD without an
-  event, the final status already in the block, the event set or the posting
-  routine called.
+  puts it on a slave). SC_EXEC_SCSI_CMD and SC_RESET_DEV run on the drive
+  at once. Without an event, SendASPI32Command returns SS_PENDING with the
+  final status already in the block and the posting routine called, as when
+  APIX's thread runs a command at once. With an event, it returns
+  SS_PENDING with the block still empty, and the scheduler finishes the
+  block and sets the event afterwards, as APIX's thread does. The
+  registry has the drive's device keys (HKLM\Enum and Config Manager's
+  nodes in HKEY_DYN_DATA), which SafeDisc 2 reads to find the drive letter
+  of an ASPI target.
 
 ### Video
 

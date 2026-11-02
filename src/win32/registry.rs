@@ -684,19 +684,25 @@ pub fn get(cpu: &mut Cpu) -> &mut Registry {
 /// secondary master. ESDI_506 names a drive's instance after its
 /// controller's (0F for the primary channel, 10 for the secondary), its
 /// target (0 master, 1 slave) and its LUN. Windows remakes these keys at
-/// each start, so they are made each time the registry is read. Nothing
-/// without a CD-ROM drive.
+/// each start, so they are made each time the registry is read.
+///
+/// The keys under HKLM\Enum go into the registry file with the rest, so
+/// the drive's keys from an earlier run are deleted first: a drive that
+/// moved to the other channel, or is gone, leaves no second CDROM-class
+/// key with a stale drive letter behind. Without a CD-ROM drive that
+/// deletion is all there is.
 fn devices(cd: Option<(u8, crate::ide::IdeSlot)>) -> String {
     use crate::ide::ChannelId;
     use crate::ide::atapi::{INQUIRY_PRODUCT, INQUIRY_REVISION, INQUIRY_VENDOR};
-    let Some((drive, slot)) = cd else {
-        return String::new();
-    };
     // The SCSI hardware id: vendor (8) and product (16), spaces as
     // underscores, and the revision's first character.
     let id: String = format!("{INQUIRY_VENDOR:<8.8}{INQUIRY_PRODUCT:<16.16}")
         .replace(' ', "_")
         + &INQUIRY_REVISION[..1];
+    let stale = format!("REGEDIT4\n\n[-HKEY_LOCAL_MACHINE\\Enum\\SCSI\\{id}]\n");
+    let Some((drive, slot)) = cd else {
+        return stale;
+    };
     let (controller, hdc) = match slot.channel {
         ChannelId::Primary => ("0F", "0000"),
         ChannelId::Secondary => ("10", "0001"),
@@ -706,8 +712,7 @@ fn devices(cd: Option<(u8, crate::ide::IdeSlot)>) -> String {
     let letter = (b'A' + drive) as char;
     let master = u8::from(!slot.slave);
     format!(
-        r#"REGEDIT4
-
+        r#"{stale}
 [HKEY_LOCAL_MACHINE\Enum\BIOS\*PNP0600\{controller}]
 "Capabilities"=hex:14,00,00,00
 "HardwareID"="BIOS\\*PNP0600,*PNP0600"
@@ -1006,7 +1011,12 @@ mod tests {
         assert_eq!(instance, "BIOS&*PNP0600&0F10");
         let hdc = registry.find(LOCAL_MACHINE, r"Enum\BIOS\*PNP0600\0F").unwrap();
         assert_eq!(text(&registry, hdc, "Class"), "hdc");
-        // No drive, no keys.
-        assert_eq!(devices(None), "");
+        // A run without the drive deletes the drive's key the registry file
+        // kept, and Config Manager's node, made anew each time, isn't there.
+        let mut later = Registry::seeded(Some(&registry.export()), Win98Se);
+        later.import(&devices(None));
+        let scsi = later.find(LOCAL_MACHINE, r"Enum\SCSI").unwrap();
+        assert!(later.key(scsi).children.is_empty());
+        assert!(later.find(DYN_DATA, r"Config Manager\Enum").is_none());
     }
 }

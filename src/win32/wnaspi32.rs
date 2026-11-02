@@ -18,14 +18,18 @@
 //!   the one a booted system's IDE channel shows (`cd_to_show`): it stays
 //!   the same while it has a disc.
 //! - SendASPI32Command does what Windows 98's does with each command,
-//!   and returns as it does: SS_PENDING for SC_EXEC_SCSI_CMD and
-//!   SC_RESET_DEV unless the block asks for an event, the block's status
-//!   otherwise. Commands finish before it returns, as if APIX's thread
-//!   had run them at once: the status is final, the event set and the
-//!   posting routine called by the time the program looks.
+//!   and returns as it does. SC_EXEC_SCSI_CMD and SC_RESET_DEV run on
+//!   the drive at once. Without an event, the block is finished and the
+//!   posting routine called before SendASPI32Command returns SS_PENDING,
+//!   as if APIX's thread had run the command at once. With an event, it
+//!   returns SS_PENDING with the block still empty, and the scheduler
+//!   finishes the block and sets the event afterwards (`tick`), as APIX
+//!   does from its own thread.
 //! - The functions are `cdecl`, as Windows 98's are.
 
 use super::call;
+use super::memory::write_process_bytes;
+use super::object::{self, Kind};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 use crate::ide::{Atapi, Env};
@@ -121,11 +125,17 @@ const MAX_TRANSFER: u32 = 0x1_0000;
 pub struct State {
     drive: Option<Atapi>,
     clock: u64,
-    /// Event requests whose drive work is done, waiting for `tick`.
+    /// Event requests whose drive work is done, waiting for `tick`. Saved
+    /// with the rest: a state saved before `tick` finishes them still
+    /// sets their events once loaded.
     finishing: Vec<Finished>,
 }
 
-crate::state_fields!(State { drive, clock } skip { finishing });
+crate::state_fields!(State {
+    drive,
+    clock,
+    finishing
+});
 
 /// GetASPI32SupportInfo(): SS_COMP (bits 8-15) and the host adapters
 /// (bits 0-7). Windows 98 SE's DLL returns its start status and its
@@ -202,36 +212,15 @@ fn send_aspi32_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let status = match cmd {
         SC_HA_INQUIRY => ha_inquiry(cpu, srb),
         SC_GET_DEV_TYPE => get_dev_type(cpu, srb, target),
-        SC_EXEC_SCSI_CMD => match exec_scsi_cmd(cpu, srb, flags, target) {
-            // An event request returns SS_PENDING and is finished later
-            // (`tick`), the way APIX does it: the block is written, then
-            // the event is set.
-            Ok(done) if flags & SRB_EVENT_NOTIFY != 0 => {
-                cpu.bus.win32.wnaspi32.finishing.push(done);
-                SS_PENDING
-            }
-            Ok(done) => {
-                finish(cpu, &done);
-                done.status
-            }
-            // APIX completes an event request for a target with no device
-            // later too, with that target's status.
-            Err(status) if flags & SRB_EVENT_NOTIFY != 0 && status != SS_INVALID_SRB => {
-                cpu.bus.win32.wnaspi32.finishing.push(Finished {
-                    srb,
-                    status,
-                    targ: 0,
-                    buf: 0,
-                    data: Vec::new(),
-                    residual: None,
-                    sense: None,
-                });
-                SS_PENDING
-            }
-            Err(status) => status,
-        },
+        SC_EXEC_SCSI_CMD => {
+            let ran = exec_scsi_cmd(cpu, srb, flags, target);
+            return complete(cpu, srb, flags, ran);
+        }
         SC_ABORT_SRB => SS_ABORT_FAIL,
-        SC_RESET_DEV => reset_dev(cpu, srb, target),
+        SC_RESET_DEV => {
+            let ran = reset_dev(cpu, srb, target);
+            return complete(cpu, srb, flags, ran);
+        }
         SC_GET_DISK_INFO => match device(cpu, srb, target) {
             // Not a disk of INT 13h's: no flags, no geometry.
             Ok(()) => {
@@ -243,44 +232,78 @@ fn send_aspi32_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         _ => SS_INVALID_CMD,
     };
     cpu.bus.guest_write_8(srb + 1, status);
-    // A pending request is finished by `tick`. A command that reached the
-    // drive and finished at once posts as before, and so does a reset.
-    // A rejected one (no such target, a bad block) returns its error
-    // status and posts nothing.
-    if status == SS_PENDING {
+    Some(status as u32)
+}
+
+/// What SendASPI32Command returns for an SC_EXEC_SCSI_CMD or SC_RESET_DEV
+/// that ran on the drive (`Ok`, what it gave) or was rejected (`Err`, its
+/// status), and the block finished or queued:
+///
+/// - An event request returns SS_PENDING with its block still empty, and
+///   `tick` finishes it and sets its event later, the way APIX does. A
+///   rejected one too, with its status, except a bad block
+///   (SS_INVALID_SRB), which returns that at once.
+/// - Any other request that ran is finished now and returns SS_PENDING,
+///   after its posting routine, if it has one, has been called.
+/// - Any other rejected request returns its status, and posts nothing.
+fn complete(cpu: &mut Cpu, srb: u32, flags: u8, ran: Result<Finished, u8>) -> Option<u32> {
+    // A block or buffer whose page isn't there: the call runs again once
+    // the system has put it there.
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    let pid = super::user32::current_pid(cpu);
+    let post = cpu.bus.guest_read_32(srb + EXEC_POST_PROC);
+    if flags & SRB_EVENT_NOTIFY != 0 && !matches!(ran, Err(SS_INVALID_SRB)) {
+        let mut done = ran.unwrap_or_else(|status| Finished {
+            srb,
+            status,
+            ..Finished::default()
+        });
+        done.pid = pid;
+        done.event = event_object(cpu, post);
+        cpu.bus.guest_write_8(srb + 1, SS_PENDING);
+        cpu.bus.win32.wnaspi32.finishing.push(done);
         return Some(SS_PENDING as u32);
     }
-    let ran = matches!(cmd, SC_EXEC_SCSI_CMD | SC_RESET_DEV) && matches!(status, SS_COMP | SS_ERR);
-    if !ran {
-        return Some(status as u32);
-    }
-    let post = cpu.bus.guest_read_32(srb + EXEC_POST_PROC);
-    let returns = if flags & SRB_EVENT_NOTIFY != 0 {
-        status
-    } else {
-        SS_PENDING
+    let mut done = match ran {
+        Ok(done) => done,
+        Err(status) => {
+            cpu.bus.guest_write_8(srb + 1, status);
+            return Some(status as u32);
+        }
     };
-    if flags & SRB_EVENT_NOTIFY != 0 && post != 0 {
-        super::kernel32::set_event_handle(cpu, post);
-    } else if flags & SRB_POSTING != 0 && post != 0 {
+    done.pid = pid;
+    finish(cpu, &done);
+    if flags & SRB_POSTING != 0 && post != 0 {
         let resume = call::here(cpu);
-        if call::call(
-            cpu,
-            post,
-            &[srb],
-            call::ASPI_POSTED,
-            resume,
-            vec![returns as u32],
-        ) {
+        let returns = vec![SS_PENDING as u32];
+        if call::call(cpu, post, &[srb], call::ASPI_POSTED, resume, returns) {
             return None;
         }
     }
-    Some(returns as u32)
+    Some(SS_PENDING as u32)
+}
+
+/// The event object the handle `handle` names in the running process,
+/// held until `tick` sets it, so it stays the same object whichever
+/// process runs then and whether or not the program closes its handle
+/// first. None if the handle isn't an event's.
+fn event_object(cpu: &mut Cpu, handle: u32) -> Option<u32> {
+    let id = object::resolve(cpu, handle)?;
+    let kind = object::objects(cpu).get(id).map(|o| &o.kind);
+    if !matches!(kind, Some(Kind::Event { .. })) {
+        return None;
+    }
+    object::objects(cpu).hold(id);
+    Some(id)
 }
 
 /// Finish the event requests whose drive work is done: write each block
 /// (its data, residual count, target status and sense), then its status
-/// byte, then set its event. Called on every scheduler tick.
+/// byte, then set its event. Called on every scheduler tick, which may
+/// come in another process or outside any call (an interrupt's), so the
+/// blocks are written through their own process's page tables.
 pub(crate) fn tick(cpu: &mut Cpu) {
     if cpu.bus.win32.wnaspi32.finishing.is_empty() {
         return;
@@ -288,17 +311,17 @@ pub(crate) fn tick(cpu: &mut Cpu) {
     let due = std::mem::take(&mut cpu.bus.win32.wnaspi32.finishing);
     for done in due {
         finish(cpu, &done);
-        cpu.bus.guest_write_8(done.srb + 1, done.status);
-        let post = cpu.bus.guest_read_32(done.srb + EXEC_POST_PROC);
-        if post != 0 {
-            super::kernel32::set_event_handle(cpu, post);
+        if let Some(id) = done.event {
+            super::winmm::callback::set_event(cpu, id);
+            object::objects(cpu).release(id);
         }
     }
 }
 
-#[derive(Clone, Debug)]
-/// What a finished SC_EXEC_SCSI_CMD writes into its block and the
-/// program's buffer. The status byte is written by the caller.
+/// A finished SC_EXEC_SCSI_CMD or SC_RESET_DEV: what it writes into its
+/// block and the program's buffer, in the memory of the process `pid`
+/// that sent it, and the event object to set (an event request's).
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Finished {
     srb: u32,
     status: u8,
@@ -307,20 +330,36 @@ pub(crate) struct Finished {
     data: Vec<u8>,
     residual: Option<u32>,
     sense: Option<Vec<u8>>,
+    pid: u32,
+    event: Option<u32>,
 }
 
+crate::state_fields!(Finished {
+    srb,
+    status,
+    targ,
+    buf,
+    data,
+    residual,
+    sense,
+    pid,
+    event
+});
+
 /// Write a finished command's data, residual count, target status and
-/// sense into its block and buffer.
+/// sense into its block and buffer, then its status byte.
 fn finish(cpu: &mut Cpu, done: &Finished) {
-    cpu.bus.guest_write_bytes(done.buf, &done.data);
+    let mut write = |lin: u32, bytes: &[u8]| write_process_bytes(&mut cpu.bus, done.pid, lin, bytes);
+    write(done.buf, &done.data);
     if let Some(residual) = done.residual {
-        cpu.bus.guest_write_32(done.srb + EXEC_BUF_LEN, residual);
+        write(done.srb + EXEC_BUF_LEN, &residual.to_le_bytes());
     }
-    cpu.bus.guest_write_8(done.srb + EXEC_HA_STAT, 0);
-    cpu.bus.guest_write_8(done.srb + EXEC_TARG_STAT, done.targ);
+    write(done.srb + EXEC_HA_STAT, &[0]);
+    write(done.srb + EXEC_TARG_STAT, &[done.targ]);
     if let Some(sense) = &done.sense {
-        cpu.bus.guest_write_bytes(done.srb + EXEC_SENSE, sense);
+        write(done.srb + EXEC_SENSE, sense);
     }
+    write(done.srb + 1, &[done.status]);
 }
 
 /// The posting routine returned: SendASPI32Command returns what it would
@@ -375,14 +414,15 @@ fn get_dev_type(cpu: &mut Cpu, srb: u32, cd: u8) -> u8 {
     }
 }
 
-/// SC_RESET_DEV: the drive's DEVICE RESET. The disc stays as it is.
-fn reset_dev(cpu: &mut Cpu, srb: u32, cd: u8) -> u8 {
-    if let Err(status) = device(cpu, srb, cd) {
-        return status;
-    }
-    cpu.bus.guest_write_8(srb + EXEC_HA_STAT, 0);
-    cpu.bus.guest_write_8(srb + EXEC_TARG_STAT, 0);
-    SS_COMP
+/// SC_RESET_DEV: the drive's DEVICE RESET. The disc stays as it is, and
+/// the block gets SS_COMP and zero adapter and target status (`finish`).
+fn reset_dev(cpu: &mut Cpu, srb: u32, cd: u8) -> Result<Finished, u8> {
+    device(cpu, srb, cd)?;
+    Ok(Finished {
+        srb,
+        status: SS_COMP,
+        ..Finished::default()
+    })
 }
 
 /// SC_EXEC_SCSI_CMD: the block's command run on the drive now. Its data,
@@ -434,32 +474,31 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
         bus.log_string(&line);
     }
 
-    let data = if flags & SRB_DIR_OUT != 0 {
-        Vec::new()
+    let mut data = outcome.data;
+    if flags & SRB_DIR_OUT != 0 {
+        data.clear();
     } else {
-        outcome.data[..outcome.data.len().min(len as usize)].to_vec()
-    };
+        data.truncate(len as usize);
+    }
     let residual = (flags & SRB_ENABLE_RESIDUAL_COUNT != 0 && flags & SRB_DIR_OUT == 0)
         .then(|| len - data.len() as u32);
-    Ok(match outcome.sense {
-        None => Finished {
-            srb,
-            status: SS_COMP,
-            targ: 0,
-            buf,
-            data,
-            residual,
-            sense: None,
-        },
+    let (status, targ, sense) = match outcome.sense {
+        None => (SS_COMP, 0, None),
         // The block's sense area is 16 bytes, whatever SenseLen says.
-        Some(sense) => Finished {
-            srb,
-            status: SS_ERR,
-            targ: STATUS_CHKCOND,
-            buf,
-            data,
-            residual,
-            sense: Some(sense[..sense_len.min(SENSE_AREA)].to_vec()),
-        },
+        Some(sense) => (
+            SS_ERR,
+            STATUS_CHKCOND,
+            Some(sense[..sense_len.min(SENSE_AREA)].to_vec()),
+        ),
+    };
+    Ok(Finished {
+        srb,
+        status,
+        targ,
+        buf,
+        data,
+        residual,
+        sense,
+        ..Finished::default()
     })
 }
