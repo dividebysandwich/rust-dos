@@ -658,8 +658,8 @@ pub fn open(
     state(cpu).owner = pid;
     super::gu::tex_mem_reset(cpu);
     init_state(cpu, width, height, color_format, origin);
-    if let Some(board) = hw::board(cpu) {
-        gamma_correction_value(cpu, open_gamma(board.card));
+    if let Some(card) = card(cpu) {
+        gamma_correction_value(cpu, open_gamma(card));
     }
     // A clean picture to start from.
     for buffer in [BUFFER_FRONTBUFFER, BUFFER_BACKBUFFER] {
@@ -681,9 +681,10 @@ pub fn attach(cpu: &mut Cpu, width: u32, height: u32) -> bool {
         return false;
     }
     init_state(cpu, width, height, COLORFORMAT_ARGB, ORIGIN_UPPER_LEFT);
-    // A linear table. With it, Giants: Citizen Kabuto's sand on a
-    // Voodoo3 is already a little brighter than with 3dfx's Direct3D
-    // driver, so Glide's 1.3 would take it further away.
+    // The table stays linear, without grSstWinOpen's 1.3. It is the
+    // overlay's, which only Glide's own display shows: Direct3D's
+    // picture is DirectDraw's desktop, which bypasses it or goes through
+    // the first table, SetDeviceGammaRamp's.
     gamma_correction_value(cpu, 1.0);
     true
 }
