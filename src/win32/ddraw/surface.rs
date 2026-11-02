@@ -528,6 +528,7 @@ fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     };
     let size = s.size();
     let card = on_card(cpu, id);
+    let level = level_of_block(cpu, &s);
     let (memory, bits) = if card {
         match voodoo::role(s.caps[0]) {
             Some(role) => {
@@ -555,16 +556,67 @@ fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     } else if s.caps[0] & DDSCAPS_SYSTEMMEMORY != 0 {
         let bits = crate::win32::kernel32::alloc_pages(cpu, size).ok_or(com::E_OUTOFMEMORY)?;
         (MEM_SYSTEM, bits)
+    } else if let Some(bits) = level {
+        (MEM_VIDEO, bits)
     } else {
+        let size = chain_size(cpu, &s);
         (MEM_VIDEO, display::alloc(cpu, size)?)
     };
     if let Some(s) = surface(cpu, id) {
         s.memory = memory;
         s.bits = bits;
-        s.owns_bits = true;
+        s.owns_bits = level.is_none();
         s.lost = false;
     }
     Ok(())
+}
+
+/// A mipmap level's bytes in video memory: as many as the texture units
+/// step over to the next level, which is at least 4 texels.
+fn level_bytes(s: &Surface) -> u32 {
+    s.size().max(4 * s.format.bits / 8)
+}
+
+/// The bytes the surface takes in video memory: a texture's top level
+/// takes its levels' too. Its levels lie one after the other in one
+/// block, as a Banshee or Voodoo3 needs them with its single base
+/// address, and as 3dfx's driver places them, whatever the holes in
+/// video memory.
+fn chain_size(cpu: &mut Cpu, s: &Surface) -> u32 {
+    if s.caps[0] & DDSCAPS_MIPMAP == 0 || s.compressed() {
+        return s.size();
+    }
+    let levels: u32 = s
+        .children
+        .iter()
+        .filter_map(|&id| state(cpu).surface(id).map(level_bytes))
+        .sum();
+    if levels == 0 {
+        s.size()
+    } else {
+        level_bytes(s) + levels
+    }
+}
+
+/// Where the mipmap level `s` lies, when its top level's block in video
+/// memory holds it.
+fn level_of_block(cpu: &mut Cpu, s: &Surface) -> Option<u32> {
+    if s.root == 0 || s.caps[0] & DDSCAPS_MIPMAP == 0 || s.compressed() {
+        return None;
+    }
+    let root = state(cpu).surface(s.root)?.clone();
+    if root.memory != MEM_VIDEO || root.lost || !root.owns_bits {
+        return None;
+    }
+    let mut at = root.bits + level_bytes(&root);
+    for &id in &root.children {
+        let level = state(cpu).surface(id)?;
+        if (level.width, level.height) == (s.width, s.height) {
+            return Some(at);
+        }
+        at += level_bytes(level);
+    }
+    None
 }
 
 /// Let go of the surface `id`'s pixels, unless another surface has them

@@ -1773,3 +1773,128 @@ fn back_in_exclusive_mode_the_primary_surfaces_palette_is_the_dacs_again() {
         assert_eq!(dac, expected, "entry {i}");
     }
 }
+
+/// A program that leaves a hole in video memory the size of a level of
+/// the mipmap it makes next, and locks the mipmap's top three levels.
+fn mipmap_program() -> (Vec<u8>, u32) {
+    const S_RELEASE: u32 = 2;
+    const DDSD_MIPMAPCOUNT: u32 = 0x2_0000;
+    const DDSCAPS_TEXTURE: u32 = 0x1000;
+    const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
+    const DDSCAPS_MIPMAP: u32 = 0x40_0000;
+    const TOP: u32 = PALETTE;
+    const SECOND: u32 = CLIPPER;
+    const THIRD: u32 = SOURCE;
+    const LEVEL_CAPS: u32 = CAPS;
+    let mut d = data();
+    let plain = |d: &mut [u8], offset, size| {
+        desc(
+            d,
+            offset,
+            DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+            DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY,
+            size,
+            size,
+            0,
+        );
+    };
+    // The hole is between two blocks, and is as big as the second level.
+    plain(&mut d, DESC, 32);
+    plain(&mut d, DESC + 0x70, 32);
+    desc(
+        &mut d,
+        FX,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | DDSCAPS_VIDEOMEMORY,
+        64,
+        64,
+        0,
+    );
+    put32(&mut d, FX + 0x18, 3);
+    let pf = FX + 0x48;
+    put32(&mut d, pf, 32);
+    put32(&mut d, pf + 4, 0x40);
+    put32(&mut d, pf + 12, 16);
+    put32(&mut d, pf + 16, 0xF800);
+    put32(&mut d, pf + 20, 0x7E0);
+    put32(&mut d, pf + 24, 0x1F);
+    put32(&mut d, LEVEL_CAPS, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
+    put32(&mut d, LOCKED, 108);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_COOPERATIVE_LEVEL,
+            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+        )?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_SET_DISPLAY_MODE,
+            &[Arg::I(320), Arg::I(200), Arg::I(8)],
+        )?;
+        for (desc, out) in [(DESC, FRONT), (DESC + 0x70, BACK), (DESC, OFFSCREEN)] {
+            c.com(
+                a,
+                l,
+                DD,
+                DD_CREATE_SURFACE,
+                &[Arg::At(desc), Arg::At(out), Arg::I(0)],
+            )?;
+        }
+        c.com(a, l, BACK, S_RELEASE, &[])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DD_CREATE_SURFACE,
+            &[Arg::At(FX), Arg::At(TOP), Arg::I(0)],
+        )?;
+        for (from, to) in [(TOP, SECOND), (SECOND, THIRD)] {
+            c.com(
+                a,
+                l,
+                from,
+                S_GET_ATTACHED_SURFACE,
+                &[Arg::At(LEVEL_CAPS), Arg::At(to)],
+            )?;
+        }
+        for (level, kept) in [(TOP, POLLS), (SECOND, LAST), (THIRD, LINE)] {
+            c.com(
+                a,
+                l,
+                level,
+                S_LOCK,
+                &[Arg::I(0), Arg::At(LOCKED), Arg::I(1), Arg::I(0)],
+            )?;
+            a.mov(eax, dword_ptr(l.at(LOCKED + 0x24)))?;
+            a.mov(dword_ptr(l.at(kept)), eax)?;
+            c.com(a, l, level, S_UNLOCK, &[Arg::I(0)])?;
+        }
+        finish(a, l)
+    })
+}
+
+/// A mipmap's levels in video memory lie one after the other whatever
+/// holes there are: a Banshee's or Voodoo3's texture unit has one base
+/// address for all of them, and a level left elsewhere cuts the texture
+/// off from its smaller levels.
+#[test]
+fn a_mipmaps_levels_lie_together_in_video_memory() {
+    let (program, data) = mipmap_program();
+    let mut cpu = machine("mipmap", program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 17);
+    assert_eq!(results[1..], [0; 16], "the calls' results");
+    let (top, second, third) = (
+        peek(&cpu, data + POLLS),
+        peek(&cpu, data + LAST),
+        peek(&cpu, data + LINE),
+    );
+    assert_eq!(second - top, 64 * 64 * 2);
+    assert_eq!(third - second, 32 * 32 * 2);
+}
