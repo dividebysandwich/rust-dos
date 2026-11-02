@@ -1774,18 +1774,88 @@ fn back_in_exclusive_mode_the_primary_surfaces_palette_is_the_dacs_again() {
     }
 }
 
-/// A program that leaves a hole in video memory the size of a level of
-/// the mipmap it makes next, and locks the mipmap's top three levels.
-fn mipmap_program() -> (Vec<u8>, u32) {
+const S_RESTORE: u32 = 27;
+const DDSD_MIPMAPCOUNT: u32 = 0x2_0000;
+const DDSCAPS_TEXTURE: u32 = 0x1000;
+const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
+const DDSCAPS_MIPMAP: u32 = 0x40_0000;
+const MIPMAP_TOP: u32 = PALETTE;
+const MIPMAP_SECOND: u32 = CLIPPER;
+const MIPMAP_THIRD: u32 = SOURCE;
+const LEVEL_CAPS: u32 = CAPS;
+
+/// A mipmap of `size` by `size` 5-6-5 texels and `levels` levels described
+/// at FX, and the caps that find its levels.
+fn mipmap_desc(d: &mut [u8], caps: u32, size: u32, levels: u32) {
+    desc(
+        d,
+        FX,
+        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | caps,
+        size,
+        size,
+        0,
+    );
+    put32(d, FX + 0x18, levels);
+    let pf = FX + 0x48;
+    put32(d, pf, 32);
+    put32(d, pf + 4, 0x40);
+    put32(d, pf + 12, 16);
+    put32(d, pf + 16, 0xF800);
+    put32(d, pf + 20, 0x7E0);
+    put32(d, pf + 24, 0x1F);
+    put32(d, LEVEL_CAPS, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
+}
+
+/// The program's start for a mipmap test: full screen in 320x200.
+fn mipmap_start(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    start(a, l, c, (0, 0, 320, 200))?;
+    c.com(
+        a,
+        l,
+        DD,
+        DD_SET_COOPERATIVE_LEVEL,
+        &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
+    )?;
+    c.com(
+        a,
+        l,
+        DD,
+        DD_SET_DISPLAY_MODE,
+        &[Arg::I(320), Arg::I(200), Arg::I(8)],
+    )
+}
+
+/// Make the mipmap FX describes, and get its second and third levels.
+fn make_mipmap(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
+    c.com(
+        a,
+        l,
+        DD,
+        DD_CREATE_SURFACE,
+        &[Arg::At(FX), Arg::At(MIPMAP_TOP), Arg::I(0)],
+    )?;
+    for (from, to) in [(MIPMAP_TOP, MIPMAP_SECOND), (MIPMAP_SECOND, MIPMAP_THIRD)] {
+        c.com(
+            a,
+            l,
+            from,
+            S_GET_ATTACHED_SURFACE,
+            &[Arg::At(LEVEL_CAPS), Arg::At(to)],
+        )?;
+    }
+    Ok(())
+}
+
+/// A program that leaves a hole in video memory a level of the mipmap it
+/// makes next fits in, and locks the mipmap's top three levels. With
+/// `restored` it loses the mipmap to a mode change first, and restores
+/// its second level before its top level.
+fn mipmap_program(restored: bool) -> (Vec<u8>, u32) {
     const S_RELEASE: u32 = 2;
-    const DDSD_MIPMAPCOUNT: u32 = 0x2_0000;
-    const DDSCAPS_TEXTURE: u32 = 0x1000;
-    const DDSCAPS_VIDEOMEMORY: u32 = 0x4000;
-    const DDSCAPS_MIPMAP: u32 = 0x40_0000;
-    const TOP: u32 = PALETTE;
-    const SECOND: u32 = CLIPPER;
-    const THIRD: u32 = SOURCE;
-    const LEVEL_CAPS: u32 = CAPS;
+    const TOP: u32 = MIPMAP_TOP;
+    const SECOND: u32 = MIPMAP_SECOND;
+    const THIRD: u32 = MIPMAP_THIRD;
     let mut d = data();
     let plain = |d: &mut [u8], offset, size| {
         desc(
@@ -1798,45 +1868,15 @@ fn mipmap_program() -> (Vec<u8>, u32) {
             0,
         );
     };
-    // The hole is between two blocks, and is as big as the second level.
+    // The hole is between two blocks. At 8 bits a pixel it has 1024
+    // bytes: the third level's 512 fit, the second's 2048 don't.
     plain(&mut d, DESC, 32);
     plain(&mut d, DESC + 0x70, 32);
-    desc(
-        &mut d,
-        FX,
-        DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
-        DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | DDSCAPS_VIDEOMEMORY,
-        64,
-        64,
-        0,
-    );
-    put32(&mut d, FX + 0x18, 3);
-    let pf = FX + 0x48;
-    put32(&mut d, pf, 32);
-    put32(&mut d, pf + 4, 0x40);
-    put32(&mut d, pf + 12, 16);
-    put32(&mut d, pf + 16, 0xF800);
-    put32(&mut d, pf + 20, 0x7E0);
-    put32(&mut d, pf + 24, 0x1F);
-    put32(&mut d, LEVEL_CAPS, DDSCAPS_TEXTURE | DDSCAPS_MIPMAP);
+    mipmap_desc(&mut d, DDSCAPS_VIDEOMEMORY, 64, 3);
     put32(&mut d, LOCKED, 108);
     program(&[USER32, DDRAW], &d, |a, l| {
         let mut c = Calls { next: 0 };
-        start(a, l, &mut c, (0, 0, 320, 200))?;
-        c.com(
-            a,
-            l,
-            DD,
-            DD_SET_COOPERATIVE_LEVEL,
-            &[Arg::Val(HWND), Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)],
-        )?;
-        c.com(
-            a,
-            l,
-            DD,
-            DD_SET_DISPLAY_MODE,
-            &[Arg::I(320), Arg::I(200), Arg::I(8)],
-        )?;
+        mipmap_start(a, l, &mut c)?;
         for (desc, out) in [(DESC, FRONT), (DESC + 0x70, BACK), (DESC, OFFSCREEN)] {
             c.com(
                 a,
@@ -1847,21 +1887,17 @@ fn mipmap_program() -> (Vec<u8>, u32) {
             )?;
         }
         c.com(a, l, BACK, S_RELEASE, &[])?;
-        c.com(
-            a,
-            l,
-            DD,
-            DD_CREATE_SURFACE,
-            &[Arg::At(FX), Arg::At(TOP), Arg::I(0)],
-        )?;
-        for (from, to) in [(TOP, SECOND), (SECOND, THIRD)] {
+        make_mipmap(a, l, &mut c)?;
+        if restored {
             c.com(
                 a,
                 l,
-                from,
-                S_GET_ATTACHED_SURFACE,
-                &[Arg::At(LEVEL_CAPS), Arg::At(to)],
+                DD,
+                DD_SET_DISPLAY_MODE,
+                &[Arg::I(640), Arg::I(480), Arg::I(8)],
             )?;
+            c.com(a, l, SECOND, S_RESTORE, &[])?;
+            c.com(a, l, TOP, S_RESTORE, &[])?;
         }
         for (level, kept) in [(TOP, POLLS), (SECOND, LAST), (THIRD, LINE)] {
             c.com(
@@ -1885,7 +1921,7 @@ fn mipmap_program() -> (Vec<u8>, u32) {
 /// off from its smaller levels.
 #[test]
 fn a_mipmaps_levels_lie_together_in_video_memory() {
-    let (program, data) = mipmap_program();
+    let (program, data) = mipmap_program(false);
     let mut cpu = machine("mipmap", program);
     run_until_done(&mut cpu, data);
     let results = results(&mut cpu, data, 17);
@@ -1895,6 +1931,60 @@ fn a_mipmaps_levels_lie_together_in_video_memory() {
         peek(&cpu, data + LAST),
         peek(&cpu, data + LINE),
     );
-    assert_eq!(second - top, 64 * 64 * 2);
-    assert_eq!(third - second, 32 * 32 * 2);
+    assert_eq!(second as i64 - top as i64, 64 * 64 * 2);
+    assert_eq!(third as i64 - second as i64, 32 * 32 * 2);
+}
+
+/// Restoring a level before its top level brings the whole mipmap back
+/// together: left to itself the level would take a block of its own, and
+/// the texture would be cut off from it for good.
+#[test]
+fn a_mipmap_restored_from_a_level_keeps_its_levels_together() {
+    let (program, data) = mipmap_program(true);
+    let mut cpu = machine("mipmap_restored", program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 20);
+    assert_eq!(results[1..], [0; 19], "the calls' results");
+    let (top, second, third) = (
+        peek(&cpu, data + POLLS),
+        peek(&cpu, data + LAST),
+        peek(&cpu, data + LINE),
+    );
+    assert_eq!(second as i64 - top as i64, 64 * 64 * 2);
+    assert_eq!(third as i64 - second as i64, 32 * 32 * 2);
+}
+
+/// A mipmap whose block doesn't fit in video memory is in system memory
+/// with all its levels, though the second level would fit on its own.
+#[test]
+fn a_mipmap_too_big_for_video_memory_is_in_system_memory_with_its_levels() {
+    let mut d = data();
+    // 8 MB and 2 MB of the adapter's 4 MB.
+    mipmap_desc(&mut d, 0, 2048, 3);
+    let (program, data) = program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        mipmap_start(a, l, &mut c)?;
+        make_mipmap(a, l, &mut c)?;
+        for (level, kept) in [
+            (MIPMAP_TOP, POLLS),
+            (MIPMAP_SECOND, LAST),
+            (MIPMAP_THIRD, LINE),
+        ] {
+            c.com(a, l, level, S_GET_CAPS, &[Arg::At(kept)])?;
+        }
+        finish(a, l)
+    });
+    let mut cpu = machine("mipmap_system", program);
+    run_until_done(&mut cpu, data);
+    let results = results(&mut cpu, data, 10);
+    assert_eq!(results[1..], [0; 9], "the calls' results");
+    for at in [POLLS, LAST, LINE] {
+        let caps = peek(&cpu, data + at);
+        assert_eq!(
+            caps & DDSCAPS_SYSTEMMEMORY,
+            DDSCAPS_SYSTEMMEMORY,
+            "{caps:#x}"
+        );
+        assert_eq!(caps & DDSCAPS_VIDEOMEMORY, 0, "{caps:#x}");
+    }
 }

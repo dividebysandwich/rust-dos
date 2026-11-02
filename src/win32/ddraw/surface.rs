@@ -265,7 +265,8 @@ pub struct Surface {
     /// offset in video memory.
     pub memory: u32,
     pub bits: u32,
-    /// Whether its pixels are DirectDraw's to free: not SetSurfaceDesc's.
+    /// Whether its pixels are DirectDraw's to free: not SetSurfaceDesc's,
+    /// or a mipmap level's in its top level's block.
     pub owns_bits: bool,
     pub lost: bool,
     pub locked: bool,
@@ -528,7 +529,7 @@ fn allocate(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     };
     let size = s.size();
     let card = on_card(cpu, id);
-    let level = level_of_block(cpu, &s);
+    let level = level_of_block(cpu, id, &s);
     let (memory, bits) = if card {
         match voodoo::role(s.caps[0]) {
             Some(role) => {
@@ -577,44 +578,50 @@ fn level_bytes(s: &Surface) -> u32 {
     s.size().max(4 * s.format.bits / 8)
 }
 
+/// Whether `s` is part of a mipmap whose levels share one block of video
+/// memory. A mipmap that flips doesn't: Flip moves the surfaces' pixels
+/// round the chain, levels too, and each needs a block it can free
+/// wherever its pixels end up.
+fn shares_block(s: &Surface) -> bool {
+    s.caps[0] & (DDSCAPS_MIPMAP | DDSCAPS_FLIP) == DDSCAPS_MIPMAP && !s.compressed()
+}
+
 /// The bytes the surface takes in video memory: a texture's top level
 /// takes its levels' too. Its levels lie one after the other in one
 /// block, as a Banshee or Voodoo3 needs them with its single base
 /// address, and as 3dfx's driver places them, whatever the holes in
 /// video memory.
 fn chain_size(cpu: &mut Cpu, s: &Surface) -> u32 {
-    if s.caps[0] & DDSCAPS_MIPMAP == 0 || s.compressed() {
+    if !shares_block(s) {
         return s.size();
     }
+    let st = &*state(cpu);
     let levels: u32 = s
         .children
         .iter()
-        .filter_map(|&id| state(cpu).surface(id).map(level_bytes))
+        .filter_map(|&id| st.surface(id))
+        .map(level_bytes)
         .sum();
-    if levels == 0 {
-        s.size()
-    } else {
-        level_bytes(s) + levels
-    }
+    level_bytes(s) + levels
 }
 
-/// Where the mipmap level `s` lies, when its top level's block in video
-/// memory holds it.
-fn level_of_block(cpu: &mut Cpu, s: &Surface) -> Option<u32> {
-    if s.root == 0 || s.caps[0] & DDSCAPS_MIPMAP == 0 || s.compressed() {
+/// Where the mipmap level `id`, which is `s`, lies, when its top level's
+/// block in video memory holds it.
+fn level_of_block(cpu: &mut Cpu, id: u32, s: &Surface) -> Option<u32> {
+    if s.root == 0 || !shares_block(s) {
         return None;
     }
-    let root = state(cpu).surface(s.root)?.clone();
-    if root.memory != MEM_VIDEO || root.lost || !root.owns_bits {
+    let st = &*state(cpu);
+    let root = st.surface(s.root)?;
+    if root.memory != MEM_VIDEO {
         return None;
     }
-    let mut at = root.bits + level_bytes(&root);
-    for &id in &root.children {
-        let level = state(cpu).surface(id)?;
-        if (level.width, level.height) == (s.width, s.height) {
+    let mut at = root.bits + level_bytes(root);
+    for &level in &root.children {
+        if level == id {
             return Some(at);
         }
-        at += level_bytes(level);
+        at += level_bytes(st.surface(level)?);
     }
     None
 }
@@ -1093,11 +1100,16 @@ pub fn make(
             }
         }
     }
-    for &id in &ids {
+    for (i, &id) in ids.iter().enumerate() {
         let mut result = allocate(cpu, id);
         if result == Err(DDERR_OUTOFVIDEOMEMORY) && !wants_video && !primary {
-            if let Some(s) = surface(cpu, id) {
-                s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
+            // The surfaces after it go with it: a mipmap whose block
+            // doesn't fit keeps its levels with its top level, though
+            // the smaller ones would fit on their own.
+            for &id in &ids[i..] {
+                if let Some(s) = surface(cpu, id) {
+                    s.caps[0] |= DDSCAPS_SYSTEMMEMORY;
+                }
             }
             result = allocate(cpu, id);
         }
@@ -1238,9 +1250,20 @@ fn restore_surface(cpu: &mut Cpu, id: u32) -> Result<(), u32> {
     if o.owner == 0 {
         return Err(DDERR_SURFACELOST);
     }
-    let Some(s) = o.surface.clone() else {
+    let Some(mut s) = o.surface.clone() else {
         return Err(DDERR_INVALIDOBJECT);
     };
+    // A mipmap level's pixels are in its top level's block, which has to
+    // come back first, so a level restored on its own brings all of them
+    // back.
+    let mut id = id;
+    if s.root != 0 && shares_block(&s) {
+        id = s.root;
+        let Some(root) = state(cpu).surface(id).cloned() else {
+            return Err(DDERR_INVALIDOBJECT);
+        };
+        s = root;
+    }
     let mut list = vec![id];
     list.extend(&s.children);
     for id in list {
