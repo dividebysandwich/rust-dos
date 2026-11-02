@@ -24,6 +24,7 @@ pub mod paint;
 pub mod progman;
 pub mod rect;
 pub mod resource;
+pub mod saver;
 pub mod sysparams;
 pub mod text;
 pub mod window;
@@ -43,6 +44,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -459,18 +461,26 @@ pub fn address_of(name: &str) -> u32 {
     super::stubs::stub_address(dll_index(), index)
 }
 
-/// The system starts: the desktop window, the system's classes, and the
+/// The system starts: the desktop window, the system's classes, the
 /// arrow as the cursor, which Windows shows from the start until a
-/// program sets another.
+/// program sets another, and the screen saver's settings.
 pub fn init(cpu: &mut Cpu) {
     if !user(cpu).windows.is_empty() {
         return;
     }
+    saver::init(cpu);
     sysparams::init_colors(cpu);
     class::register_system(cpu);
     window::create_desktop(cpu);
     let arrow = resource::system_cursor(cpu, resource::IDC_ARROW);
     cursor::set(cpu, arrow);
+    // The cursor starts in the middle of the screen, where the desktop puts
+    // it as it comes on the screen (`paint::ensure_desktop`). A DirectDraw
+    // mode may already be set when USER32 starts. Then the screen is that
+    // mode's, so the middle is the mode's too: the desktop's middle can lie
+    // off a smaller mode, where the cursor can't be.
+    let (w, h) = sysparams::screen_size(cpu);
+    user(cpu).input.cursor = (w / 2, h / 2);
 }
 
 /// The process `pid` ended: its windows, classes, hooks, timers, menus,

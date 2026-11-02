@@ -60,6 +60,7 @@ pub mod trace;
 pub mod user32;
 pub mod version;
 mod verdll;
+mod vfw;
 pub(crate) mod winmm;
 mod winspool;
 mod wow32;
@@ -165,8 +166,8 @@ pub struct Module {
     pub entry: u32,
     /// Its file's DOS path, as GetModuleFileNameA gives it.
     pub path: String,
-    /// How many LoadLibrary calls hold it (not counted for the modules
-    /// that stay while the program runs).
+    /// How many LoadLibrary calls and DLLs that import from it hold it
+    /// (not counted for the modules that stay while the program runs).
     pub refs: u32,
     /// What it is (loader.rs: `BUILTIN`, `STATIC` and the others).
     pub flags: u32,
@@ -247,8 +248,9 @@ pub struct Process {
     /// time one of its threads looks for input with none there, which
     /// WaitForInputIdle and WinExec wait for, as in Wine.
     idle_event: Option<u32>,
-    /// Its IMAGEHLP options.
+    /// Its IMAGEHLP options, and its AVI files and DrawDib handles.
     imagehlp: imagehlp::State,
+    vfw: vfw::State,
     /// The process that started it with CreateProcessA or WinExec, or 0
     /// for the one DOS started.
     pub(crate) parent: u32,
@@ -349,7 +351,7 @@ pub struct Win32 {
     exit_code: u32,
     /// When the running thread's turn started, by the clock's
     /// microseconds.
-    slice_start: u64,
+    pub slice_start: u64,
     /// When the first timed wait of a thread ends, by the clock's
     /// microseconds (`thread::schedule_waits`), so that a Sleep ends on
     /// time rather than at the next interrupt. Worked out again after a
@@ -462,7 +464,8 @@ impl Win32 {
     /// devices) or a thread's wait times out, in PIT ticks, for the bus's
     /// timer events.
     pub fn next_event(&self) -> Option<u64> {
-        let micros = [self.winmm.due, self.wait_due].into_iter().flatten().min()?;
+        let saver = Some(self.user.input.saver_due).filter(|&due| due != 0);
+        let micros = [self.winmm.due, self.wait_due, saver].into_iter().flatten().min()?;
         Some(crate::timer::mul_div_ceil(micros, crate::timer::PIT_HZ, 1_000_000))
     }
 
@@ -512,6 +515,7 @@ pub fn timer(cpu: &mut Cpu) {
     let ticks = cpu.bus.clock.now_ticks();
     let w = &cpu.bus.win32;
     let others = w.winmm.due.is_some_and(|d| d <= now)
+        || user32::saver::due(w, now)
         || [w.dsound.due, w.winmm.wave.due]
             .into_iter()
             .flatten()
@@ -526,9 +530,11 @@ pub fn timer(cpu: &mut Cpu) {
     if !cpu.bus.win32.active() {
         cpu.bus.win32.dsound.due = None;
         cpu.bus.win32.winmm.wave.due = None;
+        cpu.bus.win32.user.input.saver_due = 0;
         cpu.bus.reschedule_timers();
         return;
     }
+    user32::saver::tick(cpu);
     let in_program = cpu.pe()
         && !cpu.v86()
         && cpu.cpl == 3
@@ -1104,6 +1110,11 @@ pub(crate) fn discard_process(cpu: &mut Cpu, pid: u32) {
 /// End the program because of `what` (where `ctx` says, if it was in the
 /// program), saying so on standard error.
 pub(crate) fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
+    fatal_with(cpu, what, ctx, FAILED);
+}
+
+/// `fatal`, with the exit code `code`.
+pub(crate) fn fatal_with(cpu: &mut Cpu, what: &str, ctx: Option<&Context>, code: u32) {
     let name = running(cpu).map_or(String::new(), |p| p.name.clone());
     let place = match ctx {
         Some(ctx) => format!(" at {:04X}:{:08X}", ctx.seg[Seg::CS as usize], ctx.eip),
@@ -1112,7 +1123,7 @@ pub(crate) fn fatal(cpu: &mut Cpu, what: &str, ctx: Option<&Context>) {
     let message = format!("{} ended: {}{}.", name, what, place);
     cpu.bus.log_string(&format!("[W32] {}", message));
     say(cpu, &message);
-    exit(cpu, FAILED);
+    exit(cpu, code);
 }
 
 /// The 32-bit value at `lin` in the running process's memory, read
@@ -1329,6 +1340,7 @@ crate::state_fields!(Process {
     idle_event,
     imagehlp,
     parent,
+    vfw,
 });
 crate::state_fields!(Win32 {
     pending,

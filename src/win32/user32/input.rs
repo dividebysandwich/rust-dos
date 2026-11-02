@@ -134,6 +134,14 @@ pub struct Input {
     /// TrackMouseEvent's window, its TME_HOVER and TME_LEAVE flags and
     /// its hover time (monitor.rs).
     pub tracking: [u32; 3],
+    /// The screen saver (saver.rs): whether it is on and its timeout in
+    /// seconds, from WIN.INI or SystemParametersInfo; and in microseconds
+    /// of the emulated clock, when the last key or mouse input came and
+    /// when the timer ends (0 when it isn't set).
+    pub saver_active: bool,
+    pub saver_timeout: u32,
+    pub idle_since: u64,
+    pub saver_due: u64,
 }
 
 impl Input {
@@ -198,8 +206,10 @@ pub struct Clipboard {
     pub formats: Vec<(u32, u32)>,
 }
 
-/// The desktop came on the screen: the cursor starts in its middle,
-/// where the mouse is.
+/// The desktop came on the screen: the cursor is where the mouse is now.
+/// `ensure_desktop` has warped the mouse to USER's cursor, unless a
+/// DirectDraw mode owns the display, which keeps the host's pointer where
+/// it is.
 pub fn desktop_started(cpu: &mut Cpu) {
     let (x, y) = (cpu.bus.mouse.x, cpu.bus.mouse.y);
     let mouse = &cpu.bus.mouse;
@@ -212,6 +222,7 @@ pub fn desktop_started(cpu: &mut Cpu) {
     input.presses = presses;
     input.releases = releases;
     input.held = held;
+    super::saver::desktop_started(cpu);
 }
 
 // The devices.
@@ -365,10 +376,47 @@ pub fn poll(cpu: &mut Cpu) {
         let now = cpu.bus.clock.now_ns();
         cpu.bus.mouse.note_steering(now);
     }
+    let devices = |input: &Input| (input.held, input.device_pos, input.presses, input.releases);
+    let before = devices(&user(cpu).input);
     if desktop {
         poll_mouse(cpu, taken);
     }
-    poll_keyboard(cpu, desktop);
+    let pressed = poll_keyboard(cpu, desktop);
+    // Any input puts the screen saver off.
+    if pressed || devices(&user(cpu).input) != before {
+        super::saver::input(cpu);
+    }
+}
+
+/// What reading the devices (`poll`) may change, compared before and
+/// after a look at the queue that is to have changed nothing, as an idle
+/// proof's PeekMessage (message.rs). None when a key went down or the
+/// program steers with the mouse, which a read changes whatever comes of
+/// it.
+#[derive(PartialEq)]
+pub struct Seen {
+    cursor: (i32, i32),
+    device_pos: (i32, i32),
+    held: [u64; 8],
+    buttons: u8,
+    presses: [u16; 3],
+    releases: [u16; 3],
+}
+
+pub fn seen(cpu: &mut Cpu) -> Option<Seen> {
+    let taken = crate::win32::dinput::mouse_taken(cpu);
+    if cpu.bus.kbd.has_pressed() || steers_with_mouse(cpu, taken) {
+        return None;
+    }
+    let input = &user(cpu).input;
+    Some(Seen {
+        cursor: input.cursor,
+        device_pos: input.device_pos,
+        held: input.held,
+        buttons: input.buttons,
+        presses: input.presses,
+        releases: input.releases,
+    })
 }
 
 /// Whether the program steers with the mouse's motion: DirectInput has
@@ -386,9 +434,11 @@ fn steers_with_mouse(cpu: &mut Cpu, taken: bool) -> bool {
     input.cursor_count < 0 && input.capture != 0 && state.is_window(input.capture)
 }
 
-fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
+/// Read the keyboard: whether a key went down since the last read.
+fn poll_keyboard(cpu: &mut Cpu, desktop: bool) -> bool {
     let held = cpu.bus.kbd.held_keys();
     let pressed = cpu.bus.kbd.take_pressed();
+    let any_pressed = pressed.iter().any(|&p| p != 0);
     let before = user(cpu).input.held;
     let mut events = Vec::new();
     // It runs at each wake of the threads and each message the program
@@ -419,7 +469,7 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
                 crate::win32::dinput::key(cpu, id as u8 & 0x7F, id >= 256, false);
             }
         }
-        return;
+        return any_pressed;
     }
     // The keystrokes the BIOS got: each is taken, so the buffer doesn't
     // fill.
@@ -461,6 +511,7 @@ fn poll_keyboard(cpu: &mut Cpu, desktop: bool) {
             key_event(cpu, scan, id >= 256, false, false);
         }
     }
+    any_pressed
 }
 
 /// The key `vk` (and `side`, its left or right one) goes down or up:
@@ -667,6 +718,45 @@ fn mk_flags(input: &Input) -> u32 {
         }
     }
     flags
+}
+
+/// The window under the cursor, for `window_moved`: 0 with no desktop.
+pub fn under_cursor(state: &State) -> u32 {
+    if !state.desktop {
+        return 0;
+    }
+    let (x, y) = state.input.cursor;
+    window::window_at(state, x, y)
+}
+
+/// SetWindowPos showed, hid, moved or resized `hwnd` (`changed`), and
+/// `before` was the window under the cursor until then, 0 if the desktop
+/// wasn't on the screen before `hwnd` showed. The window under the cursor
+/// then gets a WM_MOUSEMOVE where the cursor is, when another window is
+/// under it now, or when `hwnd` or a child of it is. Windows marks the
+/// mouse moved for these changes (NT's SetWindowPos does, through
+/// zzzSetFMouseMoved), and ReactOS's co_WinPosSetWindowPos inserts a move
+/// when the cursor's window changed. A raise alone gives none, so two
+/// windows that raise each other from their WM_MOUSEMOVE don't get moves
+/// forever. A screen saver hides the cursor on the move, which otherwise
+/// stays an arrow until the mouse moves, and since the cursor stays put,
+/// the saver's next move is at the place it saw first and doesn't close
+/// it. The message goes out as any mouse message does (`mouse_event_at`),
+/// so a window holding the capture gets it in place of the window under
+/// the cursor. A program that holds the mouse exclusively through
+/// DirectInput gets no mouse messages (`poll_mouse`), so none here either.
+pub fn window_moved(cpu: &mut Cpu, hwnd: u32, before: u32, changed: bool) {
+    if !changed || !user(cpu).desktop || crate::win32::dinput::mouse_taken(cpu) {
+        return;
+    }
+    let state = user(cpu);
+    let now = under_cursor(state);
+    if now != before || now == hwnd || state.is_descendant(hwnd, now) {
+        mouse_event_at(cpu, WM_MOUSEMOVE, 0);
+        // The window under the cursor can be another thread's, waiting
+        // for a message: the wake paint::moved gave came before the move.
+        crate::win32::thread::wake(cpu);
+    }
 }
 
 /// A mouse message (a client one) at the cursor, for the window that has
@@ -2260,6 +2350,10 @@ pub fn send_input(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// mouse_event(flags, dx, dy, data, extra).
 pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // A relative move starts from the place the system starts the cursor
+    // at. `init` overwrites the cursor, so it runs before the move, as
+    // the cursor calls do.
+    super::init(cpu);
     let (flags, dx, dy) = (args[0], args[1] as i32, args[2] as i32);
     const MOVE: u32 = 0x0001;
     const ABSOLUTE: u32 = 0x8000;
@@ -2290,6 +2384,7 @@ pub fn mouse_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// GetCursorPos(point): where the mouse is now.
 pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::init(cpu);
     poll(cpu);
     let (x, y) = user(cpu).input.cursor;
     write_words(cpu, args[0], &[x as u32, y as u32]);
@@ -2303,6 +2398,9 @@ pub fn get_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// before is read first: a button that went down while it was elsewhere
 /// went down there, not where the cursor is put.
 pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The system starts first, so the place it starts the cursor at
+    // doesn't replace this one.
+    super::init(cpu);
     poll(cpu);
     let screen = screen_size(cpu);
     let input = &mut user(cpu).input;
@@ -2319,6 +2417,7 @@ pub fn set_cursor_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// ClipCursor(rect): 0 frees it.
 pub fn clip_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    super::init(cpu);
     let screen = screen_size(cpu);
     let clip = if args[0] == 0 {
         None
@@ -2692,7 +2791,11 @@ crate::state_fields!(Input {
     last_click,
     menu_keys,
     sys_key,
-    tracking
+    tracking,
+    saver_active,
+    saver_timeout,
+    idle_since,
+    saver_due
 });
 crate::state_fields!(Activation {
     queue,
@@ -2739,6 +2842,143 @@ mod tests {
         user(&mut other).input.cursor_count = -1;
         poll(&mut other);
         assert!(!other.bus.mouse.in_use(now), "no capture");
+    }
+
+    /// A window shown under the cursor gets a WM_MOUSEMOVE where the
+    /// cursor is, as a screen saver that hides the cursor on it expects.
+    /// A move that leaves it under the cursor gives another. A raise that
+    /// puts it under the cursor, or a change that leaves the same window
+    /// under the cursor unmoved, gives none.
+    #[test]
+    fn a_window_shown_under_the_cursor_gets_a_mouse_move() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let screen = Rect::new(0, 0, 640, 480);
+        // The desktop first, then a hidden window on it covering the
+        // screen.
+        let desktop = window::Window {
+            rect: screen,
+            client: screen,
+            style: WS_VISIBLE,
+            ..window::Window::default()
+        };
+        let desktop = user(&mut cpu).new_window(desktop).expect("the desktop");
+        assert_eq!(desktop, DESKTOP);
+        let w = window::Window {
+            tid: 1,
+            rect: screen,
+            client: screen,
+            parent: DESKTOP,
+            ..window::Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let state = user(&mut cpu);
+        if let Some(d) = state.window_mut(DESKTOP) {
+            d.children.push(hwnd);
+        }
+        state.desktop = true;
+        state.input.cursor = (100, 120);
+        let before = under_cursor(state);
+        assert_ne!(before, hwnd, "hidden, it isn't under the cursor");
+        let moves = |cpu: &mut Cpu| -> Vec<(u32, u32, u32)> {
+            let q = user(cpu).queue_mut(1);
+            let moves = q
+                .input
+                .iter()
+                .map(|m| (m.hwnd, m.message, m.lparam))
+                .collect();
+            q.input.clear();
+            moves
+        };
+        if let Some(w) = user(&mut cpu).window_mut(hwnd) {
+            w.style |= WS_VISIBLE;
+        }
+        window_moved(&mut cpu, hwnd, before, true);
+        assert_eq!(moves(&mut cpu), [(hwnd, WM_MOUSEMOVE, 120 << 16 | 100)]);
+        window_moved(&mut cpu, hwnd, hwnd, false);
+        assert_eq!(moves(&mut cpu), [], "nothing changed under the cursor");
+        window_moved(&mut cpu, hwnd, DESKTOP, false);
+        assert_eq!(moves(&mut cpu), [], "a raise alone gives none");
+        window_moved(&mut cpu, hwnd, hwnd, true);
+        assert_eq!(moves(&mut cpu), [(hwnd, WM_MOUSEMOVE, 120 << 16 | 100)]);
+        assert_eq!(user(&mut cpu).input.cursor, (100, 120), "the cursor stays");
+    }
+
+    /// A window moved with its child under the cursor leaves the child
+    /// under it, and the child gets the move, as the window it is in did.
+    #[test]
+    fn a_parent_moved_over_its_child_under_the_cursor_gives_the_child_a_move() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let screen = Rect::new(0, 0, 640, 480);
+        let desktop = window::Window {
+            rect: screen,
+            client: screen,
+            style: WS_VISIBLE,
+            ..window::Window::default()
+        };
+        assert_eq!(
+            user(&mut cpu).new_window(desktop).expect("the desktop"),
+            DESKTOP
+        );
+        let parent = window::Window {
+            tid: 1,
+            rect: screen,
+            client: screen,
+            style: WS_VISIBLE,
+            parent: DESKTOP,
+            ..window::Window::default()
+        };
+        let parent = user(&mut cpu).new_window(parent).expect("a window");
+        let child = window::Window {
+            tid: 1,
+            rect: screen,
+            client: screen,
+            style: WS_CHILD | WS_VISIBLE,
+            parent,
+            ..window::Window::default()
+        };
+        let child = user(&mut cpu).new_window(child).expect("a child");
+        if let Some(d) = user(&mut cpu).window_mut(DESKTOP) {
+            d.children.push(parent);
+        }
+        if let Some(p) = user(&mut cpu).window_mut(parent) {
+            p.children.push(child);
+        }
+        let state = user(&mut cpu);
+        state.desktop = true;
+        state.input.cursor = (100, 120);
+        let before = under_cursor(state);
+        assert_eq!(before, child, "the child is under the cursor");
+        window_moved(&mut cpu, parent, before, true);
+        let q = user(&mut cpu).queue_mut(1);
+        let got: Vec<(u32, u32, u32)> = q
+            .input
+            .iter()
+            .map(|m| (m.hwnd, m.message, m.lparam))
+            .collect();
+        assert_eq!(got, [(child, WM_MOUSEMOVE, 120 << 16 | 100)]);
+    }
+
+    /// USER32 starts under a DirectDraw mode set before it: the cursor
+    /// starts in the middle of that mode's screen. The desktop's middle
+    /// would be off a mode smaller than the desktop.
+    #[test]
+    fn the_cursor_starts_in_the_middle_of_a_directdraw_mode_set_before_user32() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.ddraw.display.mode = (320, 200, 8);
+        super::super::init(&mut cpu);
+        assert_eq!(user(&mut cpu).input.cursor, (160, 100));
+    }
+
+    /// A relative mouse_event before any window moves from the middle of
+    /// the screen, where the system starts the cursor. The system's start
+    /// doesn't put the cursor back in the middle after the move.
+    #[test]
+    fn a_relative_mouse_event_before_user32_starts_moves_from_the_middle() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let (w, h) = screen_size(&cpu);
+        // MOUSEEVENTF_MOVE, 10 right and 5 down.
+        mouse_event(&mut cpu, &[0x0001, 10, 5, 0, 0]);
+        assert_eq!(user(&mut cpu).input.cursor, (w / 2 + 10, h / 2 + 5));
     }
 
     /// A grey arrow held down is one WM_KEYDOWN, extended, and stays

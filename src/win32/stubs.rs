@@ -58,6 +58,8 @@ pub struct Dll {
     /// What fills the variables of a process the DLL is loaded in, once
     /// the process has its memory, heap and environment.
     pub init: Option<Init>,
+    /// What gives back what `init` took, at the last FreeLibrary.
+    pub term: Option<Term>,
     /// The tables of methods of its COM interfaces (com.rs), after the
     /// stubs in its code section.
     pub vtables: &'static [Vtable],
@@ -82,6 +84,9 @@ pub struct Var {
 
 /// A DLL's `init`: the process, which isn't the running one yet.
 pub type Init = fn(&mut crate::bus::Bus, &mut super::Process) -> Option<()>;
+
+/// A DLL's `term`: the process it is going from.
+pub type Term = fn(&mut crate::bus::Bus, &mut super::Process);
 
 /// The built-in DLLs. Append only (see the module's notes).
 pub static DLLS: &[&Dll] = &[
@@ -120,6 +125,9 @@ pub static DLLS: &[&Dll] = &[
     &super::msimg32::DLL,
     &super::opengl32::DLL,
     &super::wow32::DLL,
+    &super::vfw::msvfw32::DLL,
+    &super::vfw::avifil32::DLL,
+    &super::dinput::DLL8,
 ];
 
 /// Bytes each function's stub takes.
@@ -337,11 +345,16 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
 /// program's stack: its return address, then its arguments.
 pub fn call(cpu: &mut Cpu, id: u16) {
     let Some((dll, api)) = api(id) else {
-        super::fatal(
-            cpu,
-            &format!("a call of the unknown function {:04X}h", id),
-            None,
-        );
+        // Win32 code runs in flat segments, so EIP is the linear address
+        // the process's modules are found by.
+        let eip = cpu.eip();
+        let module = super::running(cpu).and_then(|p| {
+            p.modules
+                .iter()
+                .find(|m| (m.base..m.base.saturating_add(m.size)).contains(&eip))
+                .map(|m| m.name.clone())
+        });
+        super::fatal(cpu, &unknown_message(id, module.as_deref()), None);
         return;
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
@@ -372,8 +385,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
-    if !cpu.bus.win32.sections.is_empty() {
-        super::kernel32::sweep_mappings(cpu);
+    if !cpu.bus.win32.sections.is_empty() && super::kernel32::sweep_mappings(cpu) {
+        crate::idle::not_pure(cpu);
     }
     super::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
@@ -401,5 +414,102 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             args.join(", "),
             result
         ));
+    }
+}
+
+/// The fatal message for a call of the stub `id` whose code is in the
+/// module `module`: the table's entry for the id's DLL index, so that a
+/// stale id (saved states keep their stub ids) shows which DLL it was.
+fn unknown_message(id: u16, module: Option<&str>) -> String {
+    let from = module.unwrap_or("code outside any module");
+    let (index, function) = ((id >> 10) as usize, (id & 0x3FF) as usize);
+    let table = match DLLS.get(index) {
+        Some(dll) => format!(
+            "DLL index {} is {}, which has {} functions",
+            index,
+            dll.name,
+            dll.apis.len()
+        ),
+        None => format!("DLL index {} is not in the table", index),
+    };
+    format!(
+        "a call of the unknown function {:04X}h (from {}; {}; no function {})",
+        id, from, table, function
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The DLLs' names in the order of `DLLS`. Saved states keep the
+    /// stubs' ids (DLL index << 10 | function), so a DLL goes at the end
+    /// of this list, never in the middle: a DLL inserted before others
+    /// moves their index, and a state saved before the insert then calls
+    /// a different DLL's functions ("unknown function 881Ah": DINPUT8's
+    /// function 26 was WOW32's index 34 once WOW32 came before it).
+    /// Add the new DLL's name here at the end.
+    const ORDER: &[&str] = &[
+        "KERNEL32.DLL",
+        "ADVAPI32.DLL",
+        "MSVCRT.DLL",
+        "USER32.DLL",
+        "GDI32.DLL",
+        "OLE32.DLL",
+        "DDRAW.DLL",
+        "DSOUND.DLL",
+        "DINPUT.DLL",
+        "WINMM.DLL",
+        "GLIDE2X.DLL",
+        "DPLAYX.DLL",
+        "SHELL32.DLL",
+        "COMCTL32.DLL",
+        "COMDLG32.DLL",
+        "WSOCK32.DLL",
+        "NTDLL.DLL",
+        "DMUSIC.DLL",
+        "DMIME.DLL",
+        "DMLOADER.DLL",
+        "DMSTYLE.DLL",
+        "DMBAND.DLL",
+        "DMCOMPOS.DLL",
+        "LZ32.DLL",
+        "VERSION.DLL",
+        "OLEAUT32.DLL",
+        "ADVPACK.DLL",
+        "WINSPOOL.DRV",
+        "MPR.DLL",
+        "D3D8.DLL",
+        "IMAGEHLP.DLL",
+        "WS2_32.DLL",
+        "MSIMG32.DLL",
+        "OPENGL32.DLL",
+        "WOW32.DLL",
+        "MSVFW32.DLL",
+        "AVIFIL32.DLL",
+        "DINPUT8.DLL",
+    ];
+
+    #[test]
+    fn dlls_are_only_appended() {
+        let names: Vec<&str> = DLLS.iter().map(|dll| dll.name).collect();
+        assert_eq!(names, ORDER, "a DLL inserted before the end moves every later stub id");
+    }
+
+    #[test]
+    fn stub_id_is_dll_index_and_function() {
+        let dinput8 = ORDER.iter().position(|n| *n == "DINPUT8.DLL").unwrap();
+        assert_eq!(id(dinput8, 26), (dinput8 as u16) << 10 | 26);
+        assert_eq!(id(34, 26), 0x881A);
+    }
+
+    #[test]
+    fn unknown_message_names_the_module_and_the_table_entry() {
+        let text = unknown_message(0x881A, Some("DINPUT8.DLL"));
+        assert!(text.contains("881Ah"), "{text}");
+        assert!(text.contains("from DINPUT8.DLL"), "{text}");
+        assert!(text.contains("DLL index 34 is WOW32.DLL"), "{text}");
+        assert!(text.contains("no function 26"), "{text}");
+        assert!(unknown_message(0x881A, None).contains("outside any module"));
     }
 }

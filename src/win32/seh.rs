@@ -18,7 +18,7 @@
 use super::call::{self, Call, SEH_FILTER, SEH_HANDLER, SEH_UNWIND};
 use super::memory::{PAGE, PAGE_READWRITE, USER, WRITABLE};
 use super::{Context, ESP, process};
-use crate::cpu::{Cpu, Seg};
+use crate::cpu::{Cpu, CpuFlags, Seg};
 use crate::instructions::fpu::control;
 
 /// Exception codes.
@@ -51,6 +51,9 @@ const CONTINUE_EXECUTION: u32 = 0;
 /// What filters return.
 const FILTER_EXECUTE_HANDLER: u32 = 1;
 const FILTER_CONTINUE_EXECUTION: u32 = 0xFFFF_FFFF;
+/// The exit code of a process an unhandled exception ends, on Windows 98
+/// whatever the exception was, and with no stack to raise it on too.
+const UNHANDLED_EXIT_CODE: u32 = 0xFFFF_FFFF;
 
 /// CONTEXT's size, its flags (CONTEXT_i386 with the control, integer,
 /// segment and floating-point parts) and its fields' offsets.
@@ -60,6 +63,7 @@ const CONTEXT_CONTROL: u32 = 0x1;
 const CONTEXT_INTEGER: u32 = 0x2;
 const CONTEXT_SEGMENTS: u32 = 0x4;
 const CONTEXT_FLOATING_POINT: u32 = 0x8;
+const CONTEXT_DEBUG_REGISTERS: u32 = 0x10;
 const CTX_FLOAT: u32 = 0x1C;
 const CTX_GS: u32 = 0x8C;
 const CTX_EDI: u32 = 0x9C;
@@ -234,7 +238,8 @@ fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>,
     let (code, params) = match vector {
         0 => (INT_DIVIDE_BY_ZERO, vec![]),
         1 => (SINGLE_STEP, vec![]),
-        3 => (BREAKPOINT, vec![]),
+        // One parameter, as Windows 98 and NT give it.
+        3 => (BREAKPOINT, vec![0]),
         4 => (INT_OVERFLOW, vec![]),
         5 => (ARRAY_BOUNDS_EXCEEDED, vec![]),
         6 => (ILLEGAL_INSTRUCTION, vec![]),
@@ -274,7 +279,7 @@ fn fpu_exception(cpu: &Cpu) -> u32 {
 }
 
 /// A fault in the program, at `ctx`: an exception for its handlers.
-pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
+pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
@@ -285,13 +290,19 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
         return;
     }
     let (code, params, what) = fault_exception(cpu, vector, error);
+    // The context of a debug exception has TF clear, so that a handler
+    // that continues goes on running. To step on, it sets TF there. Any
+    // other exception's context keeps the TF the program had.
+    if vector == 1 {
+        ctx.eflags &= !CpuFlags::TF.bits();
+    }
     let code = if vector == 14 && in_stack_reserve(cpu, cpu.cr2) {
         STACK_OVERFLOW
     } else {
         code
     };
     let Some(thread) = process(cpu).current_thread_mut() else {
-        super::fatal(cpu, &what, Some(&ctx));
+        super::fatal_with(cpu, &what, Some(&ctx), UNHANDLED_EXIT_CODE);
         return;
     };
     thread.fault = what;
@@ -325,17 +336,23 @@ pub fn raise(
     let esp = record.wrapping_sub(BELOW_RECORD);
     if !present(cpu, esp, ctx.gpr[ESP].wrapping_sub(esp)) {
         let what = std::mem::take(&mut process(cpu).current_thread_mut().unwrap().fault);
-        super::fatal(
+        super::fatal_with(
             cpu,
             &format!("{}, and its stack is gone", describe(code, &what)),
             Some(&ctx),
+            UNHANDLED_EXIT_CODE,
         );
         return;
     }
+    // The handlers run with TF clear, whatever the context says: else
+    // each of their instructions would raise another exception. DF is
+    // clear too, as Windows 98 has it, and the context keeps both.
     let mut here = ctx;
     here.gpr[ESP] = esp;
+    here.eflags &= !(CpuFlags::TF | CpuFlags::DF).bits();
     super::system::enter_user(cpu, &here);
-    write_context(cpu, ctx_at, &ctx, fpu, CONTEXT_FULL);
+    let context_flags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
+    write_context(cpu, ctx_at, &ctx, fpu, context_flags);
     write_record(cpu, record, code, flags, address, params);
     let frame = handlers(cpu);
     dispatch(cpu, record, ctx_at, frame);
@@ -354,12 +371,12 @@ fn write_record(cpu: &mut Cpu, at: u32, code: u32, flags: u32, address: u32, par
 }
 
 /// The running thread's first exception handler frame (`fs:[0]`).
-fn handlers(cpu: &mut Cpu) -> u32 {
+pub fn handlers(cpu: &mut Cpu) -> u32 {
     let tib = process(cpu).tib;
     cpu.bus.guest_read_32(tib + TIB_EXCEPTION_LIST)
 }
 
-fn set_handlers(cpu: &mut Cpu, frame: u32) {
+pub fn set_handlers(cpu: &mut Cpu, frame: u32) {
     let tib = process(cpu).tib;
     cpu.bus.guest_write_32(tib + TIB_EXCEPTION_LIST, frame);
 }
@@ -383,7 +400,8 @@ fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32) {
         resume,
         vec![record, ctx_at, frame],
     ) {
-        super::fatal(cpu, "an exception, and its stack is gone", None);
+        let what = "an exception, and its stack is gone";
+        super::fatal_with(cpu, what, None, UNHANDLED_EXIT_CODE);
     }
 }
 
@@ -458,6 +476,9 @@ fn unhandled(cpu: &mut Cpu, record: u32, ctx_at: u32) {
     if filter != 0 {
         cpu.bus.guest_write_32(pointers, record);
         cpu.bus.guest_write_32(pointers + 4, ctx_at);
+        // The next handler gets DF as the last one left it, the filter
+        // doesn't: on Windows 98 it starts with DF clear either way.
+        cpu.set_cpu_flag(CpuFlags::DF, false);
         let resume = call::here(cpu);
         if call::call(
             cpu,
@@ -483,7 +504,7 @@ fn die(cpu: &mut Cpu, record: u32, ctx_at: u32) {
         .current_thread_mut()
         .map(|t| std::mem::take(&mut t.fault))
         .unwrap_or_default();
-    super::fatal(cpu, &describe(code, &what), Some(&ctx));
+    super::fatal_with(cpu, &describe(code, &what), Some(&ctx), UNHANDLED_EXIT_CODE);
 }
 
 /// What a message says of the exception `code`: what the fault was, if
@@ -520,10 +541,7 @@ pub fn filter_returned(cpu: &mut Cpu, value: u32, call: Call) {
     }
     match value {
         FILTER_CONTINUE_EXECUTION => continue_at(cpu, ctx_at),
-        FILTER_EXECUTE_HANDLER => {
-            let code = cpu.bus.guest_read_32(record);
-            super::exit(cpu, code);
-        }
+        FILTER_EXECUTE_HANDLER => super::exit(cpu, UNHANDLED_EXIT_CODE),
         _ => die(cpu, record, ctx_at),
     }
 }
@@ -593,13 +611,27 @@ pub fn raise_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let params: Vec<u32> = (0..count)
         .map(|i| cpu.bus.guest_read_32(at.wrapping_add(4 * i)))
         .collect();
+    raise_from_call(cpu, 4, code, flags, &params)
+}
+
+/// Raise the exception from the function the running stub is of, which
+/// takes `args` arguments: at the caller's context after the call. The
+/// context goes below those arguments, whatever their number, so that it
+/// leaves the caller's stack alone.
+pub fn raise_from_call(
+    cpu: &mut Cpu,
+    args: u32,
+    code: u32,
+    flags: u32,
+    params: &[u32],
+) -> Option<u32> {
     let mut ctx = Context::of(cpu);
     let esp = cpu.esp();
     ctx.eip = cpu.bus.guest_read_32(esp);
     if cpu.bus.guest_faulted() {
         return None;
     }
-    ctx.gpr[ESP] = esp + 4 + 16;
+    ctx.gpr[ESP] = esp + 4 + 4 * args;
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.fault.clear();
     }
@@ -611,7 +643,7 @@ pub fn raise_exception(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         code,
         flags & NONCONTINUABLE,
         ctx.eip,
-        &params,
+        params,
     );
     None
 }

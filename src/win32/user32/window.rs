@@ -156,8 +156,9 @@ pub struct Window {
     pub pid: u32,
     pub props: Vec<(String, u32)>,
     /// What needs painting, relative to the window's top left corner:
-    /// the frame and client area, and for a CS_PARENTDC child what of
-    /// its parent's client area it was given. `paint`'s flags say how.
+    /// the frame and client area, what lay in them before the window
+    /// got smaller, and for a CS_PARENTDC child what of its parent's
+    /// client area it was given. `paint`'s flags say how.
     pub update: Region,
     pub paint: u32,
     pub flags: u32,
@@ -1723,11 +1724,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let after = p[1];
                 let new = rect_var(t, P_WAS_VISIBLE + 1);
                 let client = rect_var(t, P_WAS_VISIBLE + 5);
-                let old = rect_var(t, P_OLD);
                 let old_client = rect_var(t, P_OLD_CLIENT);
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                let under = super::input::under_cursor(state);
                 // What siblings above it cover, which a raise shows.
                 let was_covered = if was_visible && flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0 {
                     super::paint::covered(state, hwnd)
@@ -1760,10 +1761,10 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if client.width() == old_client.width() && client.height() == old_client.height() {
                     flags |= SWP_NOCLIENTSIZE;
                 }
-                if client.left == old_client.left && client.top == old_client.top {
+                let client_moved = client.left != old_client.left || client.top != old_client.top;
+                if !client_moved {
                     flags |= SWP_NOCLIENTMOVE;
                 }
-                let _ = old;
                 super::paint::tree_changed(cpu);
                 // What it uncovered and what it shows now need painting.
                 let now_visible = user(cpu).is_visible(hwnd);
@@ -1786,6 +1787,24 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         state.input.capture = 0;
                     }
                 }
+                // The window under the cursor gets a move if the window
+                // moved, resized, showed or hid (`input::window_moved`
+                // says which changes count). After paint::moved, which
+                // puts the desktop on the screen as a program's first
+                // window shows (`under` is 0 then, as nothing was under
+                // the cursor), and after a hidden window lost the
+                // capture, so the move goes to the window under the
+                // cursor and not to the one hidden.
+                // Its place counts as changed if its place on the screen
+                // or its client area's did, not because the flags asked
+                // for a move: a WM_WINDOWPOSCHANGING that keeps the window
+                // where it is gives no move, which a program answering
+                // the move by moving the window again would otherwise get
+                // forever.
+                let changed = user(cpu).screen_rect(hwnd) != old_screen
+                    || client_moved
+                    || was_visible != now_visible;
+                super::input::window_moved(cpu, hwnd, under, changed);
                 cpu.bus.guest_write_32(winpos + 24, flags);
                 // Activate it.
                 let child = user(cpu)
@@ -2445,6 +2464,11 @@ pub fn map_window_points(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// through WM_GETTEXT, another's from where USER keeps it.
 pub fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, buffer, size) = (args[0], args[1], args[2]);
+    // Sent to another thread's window, the function runs again when the
+    // reply comes, with the text in the buffer. It only takes the reply.
+    if super::message::waiting_for_reply(cpu) {
+        return send_message_now(cpu, hwnd, WM_GETTEXT, size, buffer);
+    }
     let Some(w) = get(cpu, hwnd).cloned() else {
         if size > 0 && buffer != 0 {
             cpu.bus.guest_write_8(buffer, 0);

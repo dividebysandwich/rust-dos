@@ -11,6 +11,34 @@ use crate::disk::drive_letter;
 use crate::mount::display_host_path;
 use crate::video::{self, VideoMode};
 
+/// `audio` of `/api/status`.
+fn audio_json(cpu: &Cpu) -> Value {
+    json!({
+        "driver": super::run::audio_driver(cpu),
+        "muted": cpu.bus.mixer.muted,
+        "peak": cpu.bus.audio_peak,
+        "underruns": cpu.bus.audio_underruns,
+        "frames": cpu.bus.audio_frames(),
+        "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.queued_frames()),
+        "sound_blaster": cpu.bus.sb_blaster(),
+        "opl3": cpu.bus.opl.is_opl3(),
+        "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
+        "midi_synth": cpu.bus.mpu.synth_name(),
+        "midi_voices": cpu.bus.mpu.gus_synth().map(|s| s.active_voices()),
+        "missing_patches": cpu.bus.mpu.gus_synth().map(|s| s.missing_patches()),
+        // CD audio from an image drive (MSCDEX Play Audio).
+        "cd": cpu.bus.cdaudio.drive().map(|drive| {
+            let (m, s, f) = rust_dos::cdrom::lba_to_msf(cpu.bus.cdaudio.position());
+            json!({
+                "drive": drive_letter(drive).to_string(),
+                "state": format!("{:?}", cpu.bus.cdaudio.state()).to_ascii_lowercase(),
+                "track": cpu.bus.cdaudio.track(),
+                "position": format!("{:02}:{:02}:{:02}", m, s, f),
+            })
+        }),
+    })
+}
+
 impl DebugHub {
     pub(super) fn status(&self, cpu: &Cpu) -> Value {
         let (w, h) = cpu.bus.display_size();
@@ -153,28 +181,7 @@ impl DebugHub {
                 "imr": [format!("{:02X}", cpu.bus.pic.master.imr), format!("{:02X}", cpu.bus.pic.slave.imr)],
                 "isr": [format!("{:02X}", cpu.bus.pic.master.isr), format!("{:02X}", cpu.bus.pic.slave.isr)],
             },
-            "audio": {
-                "peak": cpu.bus.audio_peak,
-                "underruns": cpu.bus.audio_underruns,
-                "frames": cpu.bus.audio_frames(),
-                "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.queued_frames()),
-                "sound_blaster": cpu.bus.sb_blaster(),
-                "opl3": cpu.bus.opl.is_opl3(),
-                "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
-                "midi_synth": cpu.bus.mpu.synth_name(),
-                "midi_voices": cpu.bus.mpu.gus_synth().map(|s| s.active_voices()),
-                "missing_patches": cpu.bus.mpu.gus_synth().map(|s| s.missing_patches()),
-                // CD audio from an image drive (MSCDEX Play Audio).
-                "cd": cpu.bus.cdaudio.drive().map(|drive| {
-                    let (m, s, f) = rust_dos::cdrom::lba_to_msf(cpu.bus.cdaudio.position());
-                    json!({
-                        "drive": drive_letter(drive).to_string(),
-                        "state": format!("{:?}", cpu.bus.cdaudio.state()).to_ascii_lowercase(),
-                        "track": cpu.bus.cdaudio.track(),
-                        "position": format!("{:02}:{:02}:{:02}", m, s, f),
-                    })
-                }),
-            },
+            "audio": audio_json(cpu),
             // The VFX1 (`[vfx1]`): what the game told it, how often it wrote
             // the page select register and read the head tracker, and
             // whether the 3D BIOS has its glasses on.
