@@ -139,3 +139,80 @@ fn get_window_region_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     paint::release_dc(cpu, &[hwnd, hdc])?;
     bytes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::gdi32::{Rect, Region};
+    use crate::win32::user32::window::{WS_POPUP, WS_VISIBLE, Window};
+    use crate::win32::user32::{self, DESKTOP, user};
+
+    /// Where the RGNDATA goes.
+    const OUT: u32 = 0x0008_0000;
+
+    /// A top-level window, `rect` its frame and `client` its client
+    /// area on the screen, put on top of the others.
+    fn top_level(cpu: &mut Cpu, rect: Rect, client: Rect) -> u32 {
+        let w = Window {
+            style: WS_POPUP | WS_VISIBLE,
+            parent: DESKTOP,
+            rect,
+            client,
+            ..Window::default()
+        };
+        let state = user(cpu);
+        let hwnd = state.new_window(w).expect("a window");
+        if let Some(d) = state.window_mut(DESKTOP) {
+            d.children.insert(0, hwnd);
+        }
+        hwnd
+    }
+
+    /// The rectangles of the RGNDATA at OUT, which took `bytes`, after
+    /// checking its header.
+    fn rects(cpu: &mut Cpu, bytes: u32) -> Vec<Rect> {
+        let count = cpu.bus.guest_read_32(OUT + 8);
+        assert_eq!(cpu.bus.guest_read_32(OUT), 32, "dwSize");
+        assert_eq!(cpu.bus.guest_read_32(OUT + 4), 1, "RDH_RECTANGLES");
+        assert_eq!(bytes, 32 + 16 * count);
+        (0..count)
+            .map(|i| Rect::read(cpu, OUT + 32 + 16 * i))
+            .collect()
+    }
+
+    /// A window's region is its client area less the window over it, in
+    /// screen coordinates, not from the client area's corner.
+    #[test]
+    fn region_data_is_the_visible_region_on_the_screen() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        user32::init(&mut cpu);
+        let client = Rect::new(110, 70, 290, 240);
+        let hwnd = top_level(&mut cpu, Rect::new(100, 50, 300, 250), client);
+        let over = Rect::new(250, 0, 400, 100);
+        top_level(&mut cpu, over, over);
+        let expected = Region::from_rect(client).diff(&Region::from_rect(over));
+        assert!(
+            expected.rects.len() > 1,
+            "the window over it cuts a corner off"
+        );
+
+        let bytes = get_window_region_data(&mut cpu, &[hwnd, 0x100, OUT]).unwrap();
+        assert_eq!(rects(&mut cpu, bytes), expected.rects);
+        assert_eq!(Rect::read(&mut cpu, OUT + 16), client, "rcBound");
+
+        let hdc = paint::get_dc(&mut cpu, &[hwnd]).unwrap();
+        let bytes = get_dc_region_data(&mut cpu, &[hdc, 0x100, OUT]).unwrap();
+        assert_eq!(rects(&mut cpu, bytes), expected.rects);
+        paint::release_dc(&mut cpu, &[hwnd, hdc]);
+
+        // Too small a buffer takes nothing; none gives the size.
+        let needed = 32 + 16 * expected.rects.len() as u32;
+        let args = [hwnd, needed - 1, OUT];
+        assert_eq!(get_window_region_data(&mut cpu, &args), Some(0));
+        assert_eq!(
+            get_window_region_data(&mut cpu, &[hwnd, 0, 0]),
+            Some(needed)
+        );
+        assert_eq!(get_dc_region_data(&mut cpu, &[0x1234, 0x100, OUT]), Some(0));
+    }
+}
