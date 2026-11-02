@@ -285,7 +285,7 @@ pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image
 /// gives for it (verdll.rs).
 pub fn file(index: usize, version: super::version::WindowsVersion) -> Vec<u8> {
     let mut b = builder(index, version);
-    let resource = super::verdll::builtin_version(DLLS[index].name);
+    let resource = super::verdll::builtin_version(DLLS[index].name, version);
     b.resource(RT_VERSION, VS_VERSION_INFO, LANG_ENGLISH_US, &resource);
     b.build()
 }
