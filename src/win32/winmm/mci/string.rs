@@ -25,6 +25,8 @@ enum Arg {
     Value(Field, u32),
     /// A time format's name, or its number.
     TimeFormat,
+    /// Four numbers: a rectangle's left, top, width and height.
+    Rect,
 }
 
 /// The fields of `Parms` the keywords set.
@@ -43,6 +45,14 @@ enum Field {
     Channels,
     SamplesPerSec,
     BitsPerSample,
+    /// A digitalvideo device's window: its style, parent, handle, how it
+    /// shows and its caption; a DC.
+    Style,
+    Parent,
+    Hwnd,
+    CmdShow,
+    WindowText,
+    Hdc,
     /// A value the device works out itself (waveaudio's bytes a second
     /// and alignment, its input and output).
     Ignored,
@@ -62,11 +72,143 @@ const OPEN: &[Keyword] = &[
     (&["type"], MCI_OPEN_TYPE, Arg::Str(Field::Type)),
     (&["alias"], MCI_OPEN_ALIAS, Arg::Str(Field::Alias)),
     (&["shareable"], MCI_OPEN_SHAREABLE, Arg::None),
+    // digitalvideo's.
+    (
+        &["style", "child"],
+        video::MCI_DGV_OPEN_WS,
+        Arg::Value(Field::Style, 0x4000_0000),
+    ),
+    (
+        &["style", "popup"],
+        video::MCI_DGV_OPEN_WS,
+        Arg::Value(Field::Style, 0x8000_0000),
+    ),
+    (
+        &["style", "overlapped"],
+        video::MCI_DGV_OPEN_WS,
+        Arg::Value(Field::Style, 0x00CF_0000),
+    ),
+    (&["style"], video::MCI_DGV_OPEN_WS, Arg::Int(Field::Style)),
+    (
+        &["parent"],
+        video::MCI_DGV_OPEN_PARENT,
+        Arg::Int(Field::Parent),
+    ),
 ];
 
 const PLAY: &[Keyword] = &[
     (&["from"], MCI_FROM, Arg::Int(Field::From)),
     (&["to"], MCI_TO, Arg::Int(Field::To)),
+];
+
+/// MCI_PLAY's, which digitalvideo has more of.
+const PLAY_VIDEO: &[Keyword] = &[
+    (&["from"], MCI_FROM, Arg::Int(Field::From)),
+    (&["to"], MCI_TO, Arg::Int(Field::To)),
+    (&["repeat"], 0x0001_0000, Arg::None),
+    (&["reverse"], 0x0002_0000, Arg::None),
+];
+
+/// digitalvideo's MCI_WINDOW: the window, how it shows, its caption.
+const WINDOW: &[Keyword] = &[
+    (
+        &["handle", "default"],
+        video::MCI_DGV_WINDOW_HWND,
+        Arg::Value(Field::Hwnd, 0),
+    ),
+    (&["handle"], video::MCI_DGV_WINDOW_HWND, Arg::Int(Field::Hwnd)),
+    (
+        &["state", "hide"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 0),
+    ),
+    (
+        &["state", "minimize"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 6),
+    ),
+    (
+        &["state", "restore"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 9),
+    ),
+    (
+        &["state", "show", "maximized"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 3),
+    ),
+    (
+        &["state", "show", "minimized"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 2),
+    ),
+    (
+        &["state", "show", "min", "noactive"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 7),
+    ),
+    (
+        &["state", "show", "na"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 8),
+    ),
+    (
+        &["state", "show", "noactivate"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 4),
+    ),
+    (
+        &["state", "show", "normal"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 1),
+    ),
+    (
+        &["state", "show"],
+        video::MCI_DGV_WINDOW_STATE,
+        Arg::Value(Field::CmdShow, 5),
+    ),
+    (
+        &["text"],
+        video::MCI_DGV_WINDOW_TEXT,
+        Arg::Str(Field::WindowText),
+    ),
+];
+
+/// digitalvideo's MCI_PUT and MCI_WHERE: which rectangle, and MCI_PUT's.
+const PUT: &[Keyword] = &[
+    (&["source"], video::MCI_DGV_PUT_SOURCE, Arg::None),
+    (&["destination"], video::MCI_DGV_PUT_DESTINATION, Arg::None),
+    (&["frame"], 0x0008_0000, Arg::None),
+    (&["video"], 0x0010_0000, Arg::None),
+    (&["window"], video::MCI_DGV_PUT_WINDOW, Arg::None),
+    (&["at"], video::MCI_DGV_RECT, Arg::Rect),
+];
+
+const WHERE: &[Keyword] = &[
+    (&["source"], video::MCI_DGV_PUT_SOURCE, Arg::None),
+    (&["destination"], video::MCI_DGV_PUT_DESTINATION, Arg::None),
+    (&["frame"], 0x0008_0000, Arg::None),
+    (&["video"], 0x0010_0000, Arg::None),
+    (&["window"], video::MCI_DGV_PUT_WINDOW, Arg::None),
+    (&["max"], 0x0040_0000, Arg::None),
+];
+
+/// digitalvideo's MCI_UPDATE and MCI_REALIZE.
+const UPDATE: &[Keyword] = &[
+    (&["hdc"], video::MCI_DGV_UPDATE_HDC, Arg::Int(Field::Hdc)),
+    (&["at"], video::MCI_DGV_RECT, Arg::Rect),
+    (&["paint"], 0x0004_0000, Arg::None),
+];
+
+const REALIZE: &[Keyword] = &[
+    (&["normal"], 0x0001_0000, Arg::None),
+    (&["background"], 0x0002_0000, Arg::None),
+];
+
+/// digitalvideo's MCI_STEP.
+const STEP: &[Keyword] = &[
+    (&["by"], 0x0002_0000, Arg::Int(Field::Number)),
+    (&["reverse"], 0x0001_0000, Arg::None),
 ];
 
 const SEEK: &[Keyword] = &[
@@ -77,6 +219,12 @@ const SEEK: &[Keyword] = &[
 
 const STATUS: &[Keyword] = &[
     (&["length"], MCI_STATUS_ITEM, Arg::Item(MCI_STATUS_LENGTH)),
+    // digitalvideo's.
+    (
+        &["window", "handle"],
+        MCI_STATUS_ITEM,
+        Arg::Item(video::MCI_DGV_STATUS_HWND),
+    ),
     (
         &["position"],
         MCI_STATUS_ITEM,
@@ -259,7 +407,7 @@ const CUE: &[Keyword] = &[
 const VERBS: &[(&str, u32, &[Keyword])] = &[
     ("open", MCI_OPEN, OPEN),
     ("close", MCI_CLOSE, &[]),
-    ("play", MCI_PLAY, PLAY),
+    ("play", MCI_PLAY, PLAY_VIDEO),
     ("seek", MCI_SEEK, SEEK),
     ("stop", MCI_STOP, &[]),
     ("pause", MCI_PAUSE, &[]),
@@ -275,7 +423,12 @@ const VERBS: &[(&str, u32, &[Keyword])] = &[
     ("save", MCI_SAVE, &[]),
     ("load", MCI_LOAD, &[]),
     ("delete", MCI_DELETE, PLAY),
-    ("step", MCI_STEP, &[]),
+    ("step", MCI_STEP, STEP),
+    ("window", video::MCI_WINDOW, WINDOW),
+    ("put", video::MCI_PUT, PUT),
+    ("where", video::MCI_WHERE, WHERE),
+    ("update", video::MCI_UPDATE, UPDATE),
+    ("realize", video::MCI_REALIZE, REALIZE),
     ("spin", MCI_SPIN, &[]),
     ("sound", MCI_SOUND, &[]),
 ];
@@ -402,7 +555,12 @@ fn parse(mut rest: &[String], table: &[Keyword], p: &mut Parms) -> Result<u32, u
             Field::Channels => p.channels = v,
             Field::SamplesPerSec => p.samples_per_sec = v,
             Field::BitsPerSample => p.bits_per_sample = v,
-            Field::Type | Field::Alias | Field::Ignored => {}
+            Field::Style => p.style = v,
+            Field::Parent => p.parent = v,
+            Field::Hwnd => p.hwnd = v,
+            Field::CmdShow => p.cmd_show = v,
+            Field::Hdc => p.hdc = v,
+            Field::Type | Field::Alias | Field::WindowText | Field::Ignored => {}
         };
         match arg {
             Arg::None => {}
@@ -426,9 +584,23 @@ fn parse(mut rest: &[String], table: &[Keyword], p: &mut Parms) -> Result<u32, u
                 };
                 match field {
                     Field::Type => p.open_type = word.clone(),
+                    Field::WindowText => p.window_text = word.clone(),
                     _ => p.alias = word.clone(),
                 }
                 rest = &rest[1..];
+            }
+            Arg::Rect => {
+                if rest.len() < 4 {
+                    return Err(MCIERR_MISSING_PARAMETER);
+                }
+                for (value, word) in p.rect.iter_mut().zip(rest) {
+                    // A rectangle's numbers may be negative.
+                    *value = match word.strip_prefix('-') {
+                        Some(w) => -(number(w)? as i32),
+                        None => number(word)? as i32,
+                    };
+                }
+                rest = &rest[4..];
             }
             Arg::TimeFormat => {
                 if let Some(&(words, f)) = TIME_FORMATS.iter().find(|(w, _)| starts_with(rest, w)) {
@@ -458,6 +630,10 @@ fn return_text(p: &Parms) -> Option<String> {
         Ret::Colon3 => format!("{:02}:{:02}:{:02}", b0, b1, b2),
         Ret::Colon4 => format!("{:02}:{:02}:{:02}:{:02}", b0, b1, b2, b3),
         Ret::Text => p.text.clone(),
+        Ret::Rect => {
+            let [l, t, w, h] = p.rect;
+            format!("{l} {t} {w} {h}")
+        }
     })
 }
 
@@ -504,7 +680,7 @@ pub fn mci_send_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(MCIERR_MISSING_COMMAND_STRING);
     }
     let text = read_string(cpu, at, 1024)?;
-    send_string(cpu, &text, ret, size, hwnd)
+    with_calls(cpu, |cpu| send_string(cpu, &text, ret, size, hwnd))
 }
 
 /// mciSendStringA's work: None when the thread waits for a play, or a
@@ -658,7 +834,6 @@ fn auto_open(cpu: &mut Cpu, name: &str, msg: u32, flags: u32) -> Result<usize, u
     }
 }
 
-const MCIERR_INTERNAL: u32 = 277;
 const MCIERR_MISSING_DEVICE_NAME: u32 = 292;
 const MCIERR_DEVICE_TYPE_REQUIRED: u32 = 287;
 
@@ -666,7 +841,7 @@ const MCIERR_DEVICE_TYPE_REQUIRED: u32 = 287;
 /// worked.
 pub fn mci_execute(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let text = read_string(cpu, args[0], 1024)?;
-    let error = send_string(cpu, &text, 0, 0, 0)?;
+    let error = with_calls(cpu, |cpu| send_string(cpu, &text, 0, 0, 0))?;
     Some((error == 0) as u32)
 }
 

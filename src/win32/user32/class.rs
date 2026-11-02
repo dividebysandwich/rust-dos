@@ -263,6 +263,24 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
         32512,
         6,
     ),
+    // The windows MCI's MPEGVideo and AVIVideo devices paint
+    // (winmm/mci/video.rs).
+    (
+        crate::win32::winmm::mci::video::CLASS,
+        0,
+        "DefWindowProcA",
+        0,
+        32512,
+        0,
+    ),
+    (
+        crate::win32::winmm::mci::video::AVI_CLASS,
+        0,
+        "DefWindowProcA",
+        0,
+        32512,
+        0,
+    ),
 ];
 
 /// Register the system's classes.

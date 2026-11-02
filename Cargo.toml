@@ -84,6 +84,12 @@ rust-dos-installshield = { path = "crates/installshield" }
 # DrawDib and AVIFIL32's AVIStreamGetFrame). Pinned: its API changes
 # between 0.0.x versions.
 oxideav-indeo = "=0.0.2"
+# MPEG-1 video and its Layer II audio, which MCI's MPEGVideo device
+# plays, and the framework's packet and frame types the audio decoder
+# takes. Pinned as oxideav-indeo is.
+oxideav-mpeg12video = "=0.0.13"
+oxideav-mp2 = "=0.0.10"
+oxideav-core = "=0.1.42"
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }
