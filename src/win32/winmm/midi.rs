@@ -22,6 +22,9 @@ use crate::cpu::Cpu;
 /// MIDI_MAPPER, as a device id.
 pub const MIDI_MAPPER: u32 = 0xFFFF_FFFF;
 
+/// The name device 0, the synthesizer, has in its caps.
+pub const SYNTH_NAME: &str = "MPU-401 Synthesizer";
+
 /// The callback messages.
 const MOM_OPEN: u32 = 0x3C7;
 const MOM_CLOSE: u32 = 0x3C8;
@@ -333,7 +336,7 @@ pub fn midi_out_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     } else {
         (
             MM_MPU401_MIDIOUT,
-            "MPU-401 Synthesizer",
+            SYNTH_NAME,
             MOD_SYNTH,
             32,
             MIDICAPS_VOLUME | MIDICAPS_LRVOLUME | MIDICAPS_STREAM,

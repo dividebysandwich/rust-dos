@@ -191,7 +191,26 @@ fn a_programs_environment_and_data() {
     assert_eq!(mcb::read_name(&mut cpu.bus, psp - 1), "GAME");
     let lines = mem(&mut cpu, "/c");
     assert!(lines.iter().any(|l| l.starts_with("  GAME     ")), "{}", lines.join("\n"));
-    // Freed, it has none.
+    // Freed, it is a free block: DOS clears the owner and leaves the name.
     mcb::free_owned_by(&mut cpu.bus, psp);
-    assert_eq!(mcb::read_name(&mut cpu.bus, psp - 1), "");
+    assert!(mcb::read_mcb(&mut cpu.bus, psp - 1).is_free());
+    assert!(!mem(&mut cpu, "/c").iter().any(|l| l.starts_with("  GAME     ")));
+}
+
+/// DOS writes the signature, owner and size of the free block a shrink
+/// leaves. The rest of that paragraph stays as the program had it.
+#[test]
+fn a_split_writes_only_the_new_headers_owner_and_size() {
+    let mut cpu = machine("split", false, false);
+    let bus = &mut cpu.bus;
+    let block = mcb::alloc(bus, 0xFFFF, 0x100).unwrap();
+    let header = block as usize * 16;
+    for i in 0..16 {
+        bus.write_8(header + i, 0xA0 + i as u8);
+    }
+    mcb::resize(bus, block, 0).unwrap();
+    assert!(mcb::read_mcb(bus, block).is_free());
+    for i in 5..16 {
+        assert_eq!(bus.read_8(header + i), 0xA0 + i as u8, "byte {i}");
+    }
 }

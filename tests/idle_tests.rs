@@ -4,6 +4,7 @@
 //! change something every pass must not be skipped.
 
 mod dyndiff;
+mod win16;
 
 use chrono::NaiveDate;
 use dyndiff::lockstep;
@@ -23,20 +24,28 @@ const BATCHES: usize = 400;
 const KEY_AT: usize = 250;
 
 /// A machine that runs `T.COM`, the program `code` builds, from a
-/// directory of its own. The host's time is fixed first, so machines
-/// built a moment apart start with the same BIOS tick count.
+/// directory of its own.
 fn machine(test: &str, name: &str, code: &[u8], core: CoreMode, skip: bool) -> Cpu {
+    let mut cpu = machine_with(test, name, ("T.COM", code), core, skip);
+    cpu.load_shell();
+    cpu.pending_command = Some("T".to_string());
+    cpu
+}
+
+/// A machine with the file `file` (its name and bytes) alone in a
+/// directory of its own, its shell not loaded yet. The host's time is
+/// fixed first, so machines built a moment apart start with the same
+/// BIOS tick count.
+fn machine_with(test: &str, name: &str, file: (&str, &[u8]), core: CoreMode, skip: bool) -> Cpu {
     let at = NaiveDate::from_ymd_opt(1995, 4, 11).unwrap().and_hms_opt(12, 34, 56).unwrap();
     rust_dos::hosttime::fix(Some(at));
     let dir = Path::new("target/idle_tests").join(test).join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("T.COM"), code).unwrap();
+    fs::write(dir.join(file.0), file.1).unwrap();
     let mut cpu = Cpu::new(dir);
     cpu.core = core;
     cpu.bus.observe.enabled = skip;
-    cpu.load_shell();
-    cpu.pending_command = Some("T".to_string());
     cpu
 }
 
@@ -654,6 +663,97 @@ fn a_loop_that_adds_up_the_pit_count_is_not_skipped() {
         finish(a)
     });
     assert_eq!(stats.proofs, 0, "{:?}", stats);
+}
+
+/// A machine that runs the Windows 3.1 program `program` as T.EXE on the
+/// built-in Windows, as `machine` runs a DOS one.
+fn win16_machine(test: &str, name: &str, program: &[u8], core: CoreMode, skip: bool) -> Cpu {
+    let mut cpu = machine_with(test, name, ("T.EXE", program), core, skip);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+#[test]
+fn a_windows_3_1_peek_message_loop_is_skipped() {
+    // As Johnny Castaway's animation loop (#358): GetCurrentTime, and
+    // PeekMessage(PM_NOREMOVE) finding nothing, until 300 ms passed, then
+    // the exit code 1. Every service of the loop changes nothing but RAM
+    // and registers, and the time it reads holds until the next
+    // millisecond, which the passes skipped stop at.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("USER", 15).emit(&[0x8B, 0xF0]); // GetCurrentTime; mov si,ax
+    let top = code.here();
+    code.emit(&[0x1E]) // push ds
+        .push(0x10) // the MSG at DS:10h
+        .push(0)
+        .push(0)
+        .push(0)
+        .push(0) // PM_NOREMOVE
+        .call("USER", 109) // PeekMessage
+        .call("USER", 15)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_peek";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    // What the skip moves on outside RAM and the registers, as the passes
+    // would have, compared before every batch (`a` comes first): the count
+    // of calls and when the task's turn started.
+    let host = |cpu: &Cpu| (cpu.bus.win32.calls, cpu.bus.win32.slice_start);
+    let mut first = None;
+    let each = |n: usize, cpu: &mut Cpu| match first.take() {
+        None => first = Some(host(cpu)),
+        Some(a) => assert_eq!(a, host(cpu), "{test}: calls, turn before batch {n}"),
+    };
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, each) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    assert_eq!(host(&a), host(&b), "{test}: calls, turn at the end");
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    // A skip ends at the next millisecond, where GetCurrentTime gives
+    // another value, and at the default speed a millisecond holds only a
+    // few passes, so less is skipped than in the frame limiters.
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
+}
+
+#[test]
+fn a_windows_3_1_timegettime_loop_is_skipped() {
+    // A loop that waits 300 ms with timeGetTime, which reads the same
+    // clock as GetTickCount and changes nothing else: its passes are
+    // skipped as the GetCurrentTime loop's are.
+    use win16::{CODE, Code, program};
+    let mut code = Code::new();
+    code.call("MMSYSTEM", 607).emit(&[0x8B, 0xF0]); // timeGetTime; mov si,ax
+    let top = code.here();
+    code.call("MMSYSTEM", 607)
+        .emit(&[0x2B, 0xC6]) // sub ax,si
+        .emit(&[0x3D, 0x2C, 0x01]); // cmp ax,300
+    let back = top as i32 - (code.here() as i32 + 2);
+    code.emit(&[0x72, back as i8 as u8]) // jb top
+        .emit(&[0xB0, 0x01])
+        .exit_al();
+    let program = program(&code, CODE);
+    let test = "win16_timegettime";
+    let mut a = win16_machine(test, "a", &program, CoreMode::Normal, false);
+    let mut b = win16_machine(test, "b", &program, CoreMode::Dynamic, true);
+    if let Err(e) = lockstep(&mut a, &mut b, 600, 100_000, |_, _| {}) {
+        panic!("{}: {}\n  {:?}", test, e, b.bus.observe.stats);
+    }
+    let stats = b.bus.observe.stats;
+    println!("{}: {:?}", test, stats);
+    assert_eq!((a.errorlevel, b.errorlevel), (1, 1), "the loop ended");
+    assert!(stats.proofs >= 10 && stats.skipped > 200_000, "{:?}", stats);
 }
 
 /// Reads of the built-in Windows's clock in a row arm their place, but not

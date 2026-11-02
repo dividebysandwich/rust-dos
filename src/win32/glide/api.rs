@@ -658,6 +658,9 @@ pub fn open(
     state(cpu).owner = pid;
     super::gu::tex_mem_reset(cpu);
     init_state(cpu, width, height, color_format, origin);
+    if let Some(card) = card(cpu) {
+        gamma_correction_value(cpu, open_gamma(card));
+    }
     // A clean picture to start from.
     for buffer in [BUFFER_FRONTBUFFER, BUFFER_BACKBUFFER] {
         render_buffer(cpu, buffer);
@@ -678,7 +681,24 @@ pub fn attach(cpu: &mut Cpu, width: u32, height: u32) -> bool {
         return false;
     }
     init_state(cpu, width, height, COLORFORMAT_ARGB, ORIGIN_UPPER_LEFT);
+    // The table stays linear, without grSstWinOpen's 1.3. It is the
+    // overlay's, which only Glide's own display shows: Direct3D's
+    // picture is DirectDraw's desktop, which bypasses it or goes through
+    // the first table, SetDeviceGammaRamp's.
+    gamma_correction_value(cpu, 1.0);
     true
+}
+
+/// The gamma grSstWinOpen loads on `card`, as 3dfx's Glide 2 does: 1.7
+/// on a Voodoo Graphics, 1.3 on a Voodoo2 (GLIDE_DEFAULT_GAMMA in its
+/// makefile), a Banshee and a Voodoo3. The Voodoo2's Direct3D driver
+/// loads 1.3 as well, so the DirectDraw device that opens the card
+/// through `open` shows the same.
+fn open_gamma(card: Card) -> f32 {
+    match card {
+        Card::Voodoo1 => 1.7,
+        Card::Voodoo2 | Card::Banshee => 1.3,
+    }
 }
 
 /// The state grSstWinOpen leaves.
@@ -730,8 +750,6 @@ fn init_state(cpu: &mut Cpu, width: u32, height: u32, color_format: u32, origin:
     dither_mode(cpu, DITHER_4X4);
     fog_mode(cpu, FOG_DISABLE);
     fog_color_value(cpu, 0);
-    let gamma = if hw::banshee(cpu) { 1.0 } else { 1.7 };
-    gamma_correction_value(cpu, gamma);
     for tmu in 0..tmus {
         // A Voodoo Graphics' first texture units can't download 8-bit
         // texels in sequence; Glide uses it where it can, this library

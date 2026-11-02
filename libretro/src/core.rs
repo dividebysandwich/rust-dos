@@ -345,7 +345,8 @@ impl Core {
             self.tick_rem += PIT_HZ * if fast { AUTOINPUT_FAST_FRAMES } else { 1 };
             self.target_ticks += self.tick_rem / FPS as u64;
             self.tick_rem %= FPS as u64;
-            m.cpu.bus.clock.icount_at(self.target_ticks)
+            let end = m.cpu.bus.clock.icount_at(self.target_ticks);
+            m.cpu.bus.past_blanking(end)
         };
         m.cpu.bus.start_batch(batch_end);
         let clock = &m.cpu.bus.clock;
