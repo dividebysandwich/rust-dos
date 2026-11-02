@@ -562,9 +562,6 @@ pub struct Cpu {
     pub program: String,
     /// Error code of the last failed DOS call, for INT 21h AH=59h.
     pub last_dos_error: u16,
-    /// The state of DOS last written to the SDA (`dos_data::ProcessState`),
-    /// so that a DOS call can tell what a program changed there itself.
-    pub sda_written: Option<crate::dos_data::ProcessState>,
     /// Scan code of an extended key whose 00h the console functions of
     /// INT 21h have returned, for the next read.
     pub con_pending_scan: Option<u8>,
@@ -824,7 +821,6 @@ impl Cpu {
             errorlevel: 0,
             program: String::new(),
             last_dos_error: 0,
-            sda_written: None,
             con_pending_scan: None,
             con_line: None,
             con_pending: VecDeque::new(),

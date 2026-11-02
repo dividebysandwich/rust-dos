@@ -473,6 +473,31 @@ fn a_process_the_emulator_switches_to_stays_when_the_sda_is_untouched() {
 }
 
 #[test]
+fn a_program_the_shell_starts_after_another_runs_as_itself() {
+    // Starting a program from the shell clears conventional memory below
+    // the first MCB, the SDA with it: what the last DOS call wrote there
+    // is gone, and the program runs as the process the shell made.
+    let mut cpu = machine("sda_next_program");
+    let drive = dos(&mut cpu, 0x1900, 0, 0, 0).unwrap() & 0xFF;
+    // An EXE (which the shell loads over cleared memory) of one RET.
+    let mut exe = vec![0u8; 0x21];
+    exe[..2].copy_from_slice(b"MZ");
+    exe[2] = 0x21; // bytes in the last page
+    exe[4] = 1; // pages
+    exe[8] = 2; // header paragraphs
+    exe[12..14].copy_from_slice(&0xFFFFu16.to_le_bytes()); // MAXALLOC
+    exe[16] = 0xFE; // SP
+    exe[0x20] = 0xC3;
+    fs::write(PathBuf::from("target/test_file_tables/sda_next_program/E.EXE"), exe).unwrap();
+    assert!(cpu.load_executable("E.EXE", None));
+    let psp = cpu.current_psp;
+    assert_eq!(dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()), Ok(psp));
+    assert_eq!(dos(&mut cpu, 0x1900, 0, 0, 0).map(|ax| ax & 0xFF), Ok(drive));
+    dos(&mut cpu, 0x2F00, 0, 0, 0).unwrap();
+    assert_eq!((cpu.es(), cpu.bx()), (psp, 0x80));
+}
+
+#[test]
 fn a_psp_a_program_made_ends_back_in_its_parent_at_its_terminate_address() {
     // As Windows ends a task: its PSP made with AH=55h, then AH=4Ch with
     // it current.

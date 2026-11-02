@@ -88,6 +88,7 @@ impl Bus {
             vfx1,
             dta_segment,
             dta_offset,
+            sda_written: _,
             search_handles,
             search_serial,
             cursor_x,
@@ -391,6 +392,7 @@ impl Bus {
             vfx1,
             dta_segment,
             dta_offset,
+            sda_written: _,
             search_handles,
             search_serial,
             cursor_x,
@@ -701,6 +703,10 @@ impl Bus {
         self.kbc_release_at = None;
         self.kbc.release();
         self.net.nic_changed();
+        // What the machine last wrote into its SDA isn't what the state's
+        // SDA holds: until the next DOS call writes it, nothing in it
+        // counts as the program's.
+        self.sda_written = None;
     }
 
     /// `after_load` for a state loaded into the machine that saved it,

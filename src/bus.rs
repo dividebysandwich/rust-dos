@@ -261,6 +261,12 @@ pub struct Bus {
     pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
+    /// The state of DOS last written to the SDA (`dos_data::ProcessState`),
+    /// so that a DOS call can tell what a program changed there itself.
+    /// None while the SDA holds nothing a program wrote: before the first
+    /// DOS call, after the DOS data segment is written afresh (the shell
+    /// clears it when it starts a program) and after a state is loaded.
+    pub sda_written: Option<crate::dos_data::ProcessState>,
     /// The log file `log_string` writes to, if the emulator opened one.
     pub log_file: Option<crate::log::LogFile>,
 

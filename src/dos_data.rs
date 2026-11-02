@@ -210,6 +210,10 @@ pub fn write(bus: &mut Bus) {
     bus.write_8(address(SDA_FORMAT), 0x01);
     bus.write_16(address(CRIT_PATCHES), 0);
     write_dosmgr_patches(bus);
+    // What the last DOS call wrote into the SDA may be gone (the shell
+    // clears low memory before it starts a program): until the next call
+    // writes it again, nothing in it counts as a program's.
+    bus.sda_written = None;
 }
 
 /// Fill in the DOS 5 List of Lists for INT 21h AH=52h. Programs mostly
@@ -483,7 +487,7 @@ impl ProcessState {
 pub fn store_process_state(cpu: &mut Cpu) {
     let state = ProcessState::of(cpu);
     state.write(&mut cpu.bus);
-    cpu.sda_written = Some(state);
+    cpu.bus.sda_written = Some(state);
 }
 
 /// Take the state of DOS the SDA holds as the one to work on, as DOS keeps
@@ -503,11 +507,11 @@ pub fn store_process_state(cpu: &mut Cpu) {
 /// to open its swap file as itself.
 pub fn load_process_state(cpu: &mut Cpu) {
     let paged = cpu.bus.guest_paging.is_some();
-    if !paged && cpu.sda_written.is_none() {
+    if !paged && cpu.bus.sda_written.is_none() {
         return;
     }
     let Some(sda) = ProcessState::read(&mut cpu.bus) else { return };
-    let state = match cpu.sda_written {
+    let state = match cpu.bus.sda_written {
         Some(written) if !paged => {
             if sda == written {
                 return;
