@@ -457,7 +457,8 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   ending the program; the folder's import libraries (`lib<name>.a`) say
   how many bytes of arguments each takes. Empty (the default), there is
   no such folder. Wine's MSACM32.DLL with its ADPCM codecs runs this
-  way; see "Wine's DLLs as guest code" in
+  way, with `win32_dlls_replace=msacm32`, as the built-in MSACM32.DLL
+  has no codecs; see "Wine's DLLs as guest code" in
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as

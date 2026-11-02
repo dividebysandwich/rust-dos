@@ -826,7 +826,10 @@ Wine 11.0's `msacm32.dll` with its IMA ADPCM codec, `imaadp32.acm`,
 encodes 16-bit PCM to IMA ADPCM and decodes it back through
 `acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
 written from the format's definition (`tests/wine_dlls.rs`, which runs
-when WINE_DLLS names the folder). MSACM32 finds the codec in SYSTEM.INI's
+when WINE_DLLS names the folder). It takes
+`win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
+exports and no codecs, for programs that only ask it how large a wave
+format can be (Test Drive 4). MSACM32 finds the codec in SYSTEM.INI's
 `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`) and opens it with
 OpenDriver, so WINMM's installable drivers are now real: OpenDriver loads
 the DLL as LoadLibrary does, finds its alias in SYSTEM.INI, and sends its

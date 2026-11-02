@@ -642,6 +642,141 @@ fn finds_msimg32() -> Vec<u8> {
     })
 }
 
+/// One call of `asks_msacm32`: the function, its arguments, what it
+/// returns, and what the program's output variable holds after it.
+struct AcmCall(&'static str, &'static [i32], i32, Option<i32>);
+
+/// Stand-ins in a call's arguments for the addresses of `asks_msacm32`'s
+/// data, a handle no driver or stream has, and an address that isn't
+/// memory the program has.
+const OUT: i32 = -1;
+const FORMAT: i32 = -2;
+const HANDLE: i32 = 0x1234;
+const UNMAPPED: i32 = 0x10;
+
+/// acmStreamOpen's arguments: the first to convert, the second to ask if
+/// a conversion can be done.
+const STREAM: &[i32] = &[OUT, 0, FORMAT, FORMAT, 0, 0, 0, 0];
+const STREAM_QUERY: &[i32] = &[0, 0, FORMAT, FORMAT, 0, 0, 0, 1];
+const STREAM_OF_DRIVER: &[i32] = &[OUT, HANDLE, FORMAT, FORMAT, 0, 0, 0, 0];
+const STREAM_NO_OUT: &[i32] = &[0, 0, FORMAT, FORMAT, 0, 0, 0, 0];
+const STREAM_BAD_OUT: &[i32] = &[UNMAPPED, 0, FORMAT, FORMAT, 0, 0, 0, 0];
+const STREAM_NO_FORMATS: &[i32] = &[OUT, 0, 0, 0, 0, 0, 0, 0];
+
+/// What MSACM32's code answers without drivers, read from the code of
+/// Windows 98 SE's 4.03.1998; MAX_SIZE_FORMAT is the size on a Windows
+/// with its codecs, so programs that size a buffer by it run.
+const ACM_CALLS: &[AcmCall] = &[
+    AcmCall("acmMetrics", &[0, 50, OUT], 0, Some(50)),
+    AcmCall("acmMetrics", &[0, 51, OUT], 512, Some(0)),
+    AcmCall("acmMetrics", &[0, 1, OUT], 0, Some(0)),
+    AcmCall("acmMetrics", &[0, 24, OUT], 0, Some(0)),
+    AcmCall("acmMetrics", &[0, 30, OUT], 5, Some(-1)),
+    AcmCall("acmMetrics", &[0, 100, OUT], 5, Some(0)),
+    // The object goes first, then the metric, then the output.
+    AcmCall("acmMetrics", &[HANDLE, 7, 0], 5, None),
+    AcmCall("acmMetrics", &[0, 7, 0], 8, None),
+    AcmCall("acmMetrics", &[0, 50, 0], 11, None),
+    AcmCall("acmMetrics", &[0, 50, UNMAPPED], 11, None),
+    AcmCall("acmStreamOpen", STREAM, 512, Some(0)),
+    AcmCall("acmStreamOpen", STREAM_QUERY, 512, None),
+    AcmCall("acmStreamOpen", STREAM_OF_DRIVER, 5, Some(0)),
+    AcmCall("acmStreamOpen", STREAM_NO_OUT, 11, None),
+    AcmCall("acmStreamOpen", STREAM_BAD_OUT, 11, None),
+    AcmCall("acmStreamOpen", STREAM_NO_FORMATS, 11, Some(0)),
+    AcmCall("acmStreamSize", &[HANDLE, 0, OUT, 0], 5, Some(0)),
+    AcmCall("acmDriverOpen", &[OUT, HANDLE, 0], 5, Some(0)),
+    AcmCall("acmDriverEnum", &[0, 0, 0], 11, None),
+    AcmCall("acmDriverPriority", &[0, 0, 0x1_0000], 0, None),
+    AcmCall("acmDriverPriority", &[0, 0, 0x2_0000], 0, None),
+    AcmCall("acmDriverPriority", &[0, 0, 0], 10, None),
+    AcmCall("acmDriverPriority", &[HANDLE, 0, 0], 5, None),
+    AcmCall("acmFormatEnumA", &[0, 0, 0, 0, 0], 512, None),
+    AcmCall("acmFormatTagEnumA", &[0, 0, 0, 0, 0], 0, None),
+    AcmCall("acmFilterEnumA", &[0, 0, 0, 0, 0], 0, None),
+    AcmCall("acmFormatDetailsA", &[0, 0, 0], 6, None),
+    AcmCall("acmFilterDetailsA", &[0, 0, 0], 6, None),
+    AcmCall("acmFormatTagDetailsA", &[0, 0, 1], 512, None),
+];
+
+/// A program that asks acmMetrics for the largest wave format as Test
+/// Drive 4 does, into a variable on its stack, and then makes the calls
+/// of `ACM_CALLS`. It ends with 0, with 255 if the question failed, or
+/// with the number from 1 of the call that didn't answer as listed.
+fn asks_msacm32() -> Vec<u8> {
+    let mut names: Vec<&str> = ACM_CALLS.iter().map(|c| c.0).collect();
+    names.sort();
+    names.dedup();
+    let imports: &[(&str, &[&str])] = &[("MSACM32.DLL", &names)];
+    // The output variable, then a 22 kHz 8-bit mono PCM format.
+    let mut data = vec![0xFFu8; 4];
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&22050u32.to_le_bytes());
+    data.extend_from_slice(&22050u32.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&8u16.to_le_bytes());
+    program(imports, &data, |a, l| {
+        let mut failed = a.create_label();
+        a.mov(ebx, 255)?;
+        a.push(0)?;
+        a.push(esp)?;
+        a.push(50)?;
+        a.push(0)?;
+        a.call(l.import(names.iter().position(|n| *n == "acmMetrics").unwrap()))?;
+        a.pop(ecx)?;
+        a.test(eax, eax)?;
+        a.jnz(failed)?;
+        a.cmp(ecx, 50)?;
+        a.jne(failed)?;
+        for (number, call) in ACM_CALLS.iter().enumerate() {
+            a.mov(ebx, number as i32 + 1)?;
+            a.mov(dword_ptr(l.at(0)), -1)?;
+            for &arg in call.1.iter().rev() {
+                a.push(match arg {
+                    OUT => l.at(0) as i32,
+                    FORMAT => l.at(4) as i32,
+                    other => other,
+                })?;
+            }
+            a.call(l.import(names.iter().position(|n| *n == call.0).unwrap()))?;
+            a.cmp(eax, call.2)?;
+            a.jne(failed)?;
+            if let Some(value) = call.3 {
+                a.cmp(dword_ptr(l.at(0)), value)?;
+                a.jne(failed)?;
+            }
+        }
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut failed)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn msacm32_answers_without_codecs() {
+    assert_eq!(run(Win98Se, "msacm32", asks_msacm32()).0, 0);
+    assert_eq!(run(Win95, "msacm32", asks_msacm32()).0, 0);
+}
+
+/// A program that ends with acmGetVersion's minor version.
+fn asks_acm_version() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("MSACM32.DLL", &["acmGetVersion"])];
+    program(imports, &[0u8; 4], |a, l| {
+        a.call(l.import(0))?;
+        a.shr(eax, 16)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn msacm32_has_the_version_of_its_windows() {
+    assert_eq!(run(Win95, "acm_version", asks_acm_version()).0, 0);
+    assert_eq!(run(Win98, "acm_version", asks_acm_version()).0, 3);
+    assert_eq!(run(Win98Se, "acm_version", asks_acm_version()).0, 3);
+}
+
 #[test]
 fn msimg32_dll_comes_with_windows_98() {
     assert_eq!(run(Win95, "msimg32", finds_msimg32()).0, 0);

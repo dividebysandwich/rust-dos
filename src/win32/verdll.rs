@@ -20,6 +20,7 @@
 //! Copyright 2004, 2005 Juan Lang
 
 use super::stubs::{Api, Conv, Dll};
+use super::version::WindowsVersion;
 use super::{kernel32, process};
 use crate::cpu::Cpu;
 
@@ -400,9 +401,9 @@ pub fn parse(resource: &Resource) -> Option<Node> {
 const VS_FFI_SIGNATURE: u32 = 0xFEEF_04BD;
 const FIXED_SIZE: usize = 52;
 
-/// The version resource a built-in DLL has: Windows 95's version of the
-/// file, with its name.
-fn builtin_resource(name: &str) -> Resource {
+/// The version resource a built-in DLL has under `windows`: Windows 95's
+/// version of the file unless the table says otherwise, with its name.
+fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     let base = name.trim_end_matches(".DLL").trim_end_matches(".dll");
     // Windows 95's own files are 4.00.950. DirectX's are 6.0's, as the
     // registry says (Windows 98 and DirectX 6.1 differ: see p5-win98).
@@ -416,11 +417,13 @@ fn builtin_resource(name: &str) -> Resource {
         "D3D8" | "DINPUT8" => [4, 8, 1, 881],
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
+        "MSACM32" if windows.is_98() => [4, 3, 0, 1998],
         _ => [4, 0, 0, 950],
     };
     let text = match version {
         [4, 0, 0, 950] => "4.00.950".to_string(),
         [5, 0, 1693, 1] => "5.00.1693.1".to_string(),
+        [4, 3, 0, 1998] => "4.03.1998".to_string(),
         [a, b, c, d] => format!("{}.{:02}.{:02}.{:04}", a, b, c, d),
     };
     let ms = (version[0] as u32) << 16 | version[1] as u32;
@@ -496,8 +499,8 @@ fn builtin_resource(name: &str) -> Resource {
 
 /// The version resource of the built-in DLL `name`, as its file in the
 /// system directory has it (dll_files.rs).
-pub(super) fn builtin_version(name: &str) -> Vec<u8> {
-    match builtin_resource(name) {
+pub(super) fn builtin_version(name: &str, windows: WindowsVersion) -> Vec<u8> {
+    match builtin_resource(name, windows) {
         Resource::Unicode(b) | Resource::Ansi(b) => b,
     }
 }
@@ -525,7 +528,8 @@ fn file_resource(cpu: &mut Cpu, name: &str) -> Result<Resource, u32> {
             let file_name = super::loader::module_file_name(file);
             match super::loader::builtin_for(&cpu.bus, &file_name) {
                 Some(i) if system && !file.is_empty() => {
-                    Ok(builtin_resource(super::stubs::DLLS[i].name))
+                    let windows = super::version::shown(&cpu.bus.win32);
+                    Ok(builtin_resource(super::stubs::DLLS[i].name, windows))
                 }
                 _ => Err(not_found(cpu, name)),
             }
@@ -1156,7 +1160,7 @@ mod tests {
 
     #[test]
     fn builtin_resource_converts_to_the_ansi_layout() {
-        let resource = builtin_resource("KERNEL32.DLL");
+        let resource = builtin_resource("KERNEL32.DLL", WindowsVersion::Win95);
         let node = parse(&resource).unwrap();
         assert_eq!(node.key, b"VS_VERSION_INFO");
         assert_eq!(u32_at(&node.value, 0), Some(VS_FFI_SIGNATURE));
@@ -1175,5 +1179,18 @@ mod tests {
         let found = query(b, b"\\StringFileInfo\\040904E4\\InternalName", true).unwrap();
         assert_eq!(found.text.as_deref(), Some(&b"KERNEL32\0"[..]));
         assert!(query(&ansi, b"\\StringFileInfo\\040904E4\\FileVers", false).is_none());
+    }
+
+    #[test]
+    fn msacm32s_file_is_that_of_its_windows() {
+        let file_version = |windows| {
+            let resource = builtin_resource("MSACM32.DLL", windows);
+            let bytes = resource.bytes();
+            let key = b"\\StringFileInfo\\040904E4\\FileVersion";
+            query(bytes, key, true).unwrap().text.unwrap()
+        };
+        assert_eq!(file_version(WindowsVersion::Win95), b"4.00.950\0");
+        assert_eq!(file_version(WindowsVersion::Win98), b"4.03.1998\0");
+        assert_eq!(file_version(WindowsVersion::Win98Se), b"4.03.1998\0");
     }
 }
