@@ -625,6 +625,268 @@ fn exit_windows_ex_ends_the_program() {
     assert_eq!(run(Win98Se, "restart", restarts_windows()).0, 0);
 }
 
+/// A program that adds its command line and a line break to C:\RAN.TXT,
+/// and ends with 5.
+fn notes_its_command_line() -> Vec<u8> {
+    const GENERIC_WRITE: i32 = 0x4000_0000;
+    const OPEN_ALWAYS: i32 = 4;
+    const FILE_END: i32 = 2;
+    let kernel32 = [
+        "GetCommandLineA",
+        "lstrlenA",
+        "CreateFileA",
+        "SetFilePointer",
+        "WriteFile",
+        "CloseHandle",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &kernel32)];
+    let mut data = b"C:\\RAN.TXT\0".to_vec();
+    data.resize(0x20, 0);
+    data.extend_from_slice(b"\r\n");
+    data.resize(0x40, 0);
+    program(imports, &data, |a, l| {
+        a.call(l.import(0))?;
+        a.mov(esi, eax)?;
+        a.push(esi)?;
+        a.call(l.import(1))?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.push(0x80)?;
+        a.push(OPEN_ALWAYS)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(GENERIC_WRITE)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(2))?;
+        a.mov(ebx, eax)?;
+        a.push(FILE_END)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        for (at, len) in [(None, None), (Some(0x20), Some(2))] {
+            a.push(0)?;
+            a.push(l.at(0x30) as i32)?;
+            match len {
+                Some(len) => a.push(len)?,
+                None => a.push(edi)?,
+            }
+            match at {
+                Some(at) => a.push(l.at(at) as i32)?,
+                None => a.push(esi)?,
+            }
+            a.push(ebx)?;
+            a.call(l.import(4))?;
+        }
+        a.push(ebx)?;
+        a.call(l.import(5))?;
+        a.mov(eax, 5)?;
+        a.ret()
+    })
+}
+
+/// What a setup program leaves for the next boot: WININIT.INI's renames
+/// and deletes, and RunOnce commands in the three keys a boot runs, each
+/// running R.EXE, with one command whose program isn't there.
+fn boot_work() -> Vec<(&'static str, Vec<u8>)> {
+    let wininit = b"[Other]\r\nNUL=C:\\KEEP.TXT\r\n\r\n[rename]\r\nNUL=C:\\OLD.TMP\r\n\
+        C:\\WINDOWS\\SYSTEM\\Q.DLL=C:\\WINDOWS\\SYSTEM\\Q.NEW\r\nC:\\NEW.DLL=C:\\NEW.TMP\r\n";
+    let registry = "REGEDIT4\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce]\r\n\
+        \"first\"=\"C:\\\\R.EXE lm\"\r\n\"missing\"=\"C:\\\\NOWHERE.EXE x\"\r\n\r\n\
+        [HKEY_USERS\\.Default\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce]\r\n\
+        \"user\"=\"R.EXE cu\"\r\n\r\n\
+        [HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServicesOnce]\r\n\
+        \"service\"=\"C:\\\\R.EXE services\"\r\n";
+    vec![
+        ("R.EXE", notes_its_command_line()),
+        ("REGISTRY.REG", registry.as_bytes().to_vec()),
+        ("WINDOWS/WININIT.INI", wininit.to_vec()),
+        ("WINDOWS/SYSTEM/Q.DLL", b"old".to_vec()),
+        ("WINDOWS/SYSTEM/Q.NEW", b"new".to_vec()),
+        ("OLD.TMP", b"x".to_vec()),
+        ("KEEP.TXT", b"x".to_vec()),
+        ("NEW.TMP", b"new".to_vec()),
+    ]
+}
+
+/// Run `exe` from the folder `base`, as drive C:, to its end: its exit
+/// code.
+fn run_in(base: &std::path::Path, exe: &str) -> u8 {
+    let mut cpu = Cpu::new(base.to_path_buf());
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.version = Win98Se;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable(exe, None));
+    for _ in 0..1000 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        if run_batch(&mut cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            return cpu.errorlevel;
+        }
+    }
+    panic!("{} didn't end: {:?}", exe, printed(&cpu));
+}
+
+/// A folder for the test `name` with `files`, which may be in folders.
+fn boot_scratch(name: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
+    let base = scratch(name, &[]);
+    for (file, bytes) in files {
+        let path = base.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    base
+}
+
+/// Check that the boot's work in `boot_work` is done: the renames and
+/// deletes, WININIT.INI renamed, the commands run in the boot's order
+/// before `last`, and their values gone from the registry.
+fn check_boot_done(base: &std::path::Path, last: Option<&str>) {
+    let windows = base.join("WINDOWS");
+    assert!(!base.join("OLD.TMP").exists());
+    assert!(base.join("KEEP.TXT").exists(), "only [rename] counts");
+    let system = windows.join("SYSTEM");
+    assert_eq!(fs::read(system.join("Q.DLL")).unwrap(), b"new");
+    assert!(!system.join("Q.NEW").exists());
+    assert_eq!(fs::read(base.join("NEW.DLL")).unwrap(), b"new");
+    assert!(!base.join("NEW.TMP").exists());
+    assert!(!windows.join("WININIT.INI").exists());
+    assert!(windows.join("WININIT.BAK").exists());
+    let ran = fs::read_to_string(base.join("RAN.TXT")).unwrap();
+    let mut lines: Vec<&str> = ran.lines().collect();
+    if let Some(last) = last {
+        assert!(lines.pop().unwrap().ends_with(last), "{:?}", ran);
+    }
+    assert_eq!(lines, ["C:\\R.EXE services", "C:\\R.EXE lm", "R.EXE cu"]);
+    let registry = fs::read_to_string(base.join("REGISTRY.REG")).unwrap();
+    for name in ["first", "missing", "user", "service"] {
+        assert!(!registry.contains(&format!("\"{}\"", name)), "{}", registry);
+    }
+    assert!(registry.contains("CurrentVersion\\RunOnce]"));
+}
+
+#[test]
+fn a_restart_does_the_work_left_for_the_boot() {
+    let mut files = boot_work();
+    files.push(("T.EXE", restarts_windows()));
+    let base = boot_scratch("boot_restart", &files);
+    // DOS gets the exit code of the program that asked for the restart,
+    // not R.EXE's 5.
+    assert_eq!(run_in(&base, "T.EXE"), 0);
+    check_boot_done(&base, None);
+}
+
+#[test]
+fn a_session_starts_with_the_work_left_for_the_boot() {
+    let base = boot_scratch("boot_session", &boot_work());
+    // R.EXE itself is the program DOS starts, and it runs last.
+    assert_eq!(run_in(&base, "R.EXE"), 5);
+    check_boot_done(&base, Some("R.EXE"));
+    // The work is done once: the next session has none.
+    fs::remove_file(base.join("RAN.TXT")).unwrap();
+    assert_eq!(run_in(&base, "R.EXE"), 5);
+    let ran = fs::read_to_string(base.join("RAN.TXT")).unwrap();
+    assert_eq!(ran.lines().count(), 1, "{:?}", ran);
+}
+
+/// A setup program that leaves work for the next boot, a file to delete
+/// in WININIT.INI and a RunOnce command, then ends the session with
+/// ExitWindowsEx(`flags`). It ends with 9 if the call comes back.
+fn leaves_work_and_exits_windows(flags: i32) -> Vec<u8> {
+    const HKEY_LOCAL_MACHINE: i32 = 0x8000_0002_u32 as i32;
+    const REG_SZ: i32 = 1;
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["WritePrivateProfileStringA"]),
+        (
+            "ADVAPI32.DLL",
+            &["RegCreateKeyA", "RegSetValueExA", "RegCloseKey"],
+        ),
+        ("USER32.DLL", &["ExitWindowsEx"]),
+    ];
+    let mut data = Vec::new();
+    for (at, text) in [
+        (0x00, &b"rename"[..]),
+        (0x10, b"NUL"),
+        (0x20, b"C:\\LATER.TMP"),
+        (0x40, b"WININIT.INI"),
+        (0x60, b"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"),
+        (0xA0, b"later"),
+        (0xB0, b"C:\\R.EXE later"),
+    ] {
+        data.resize(at, 0);
+        data.extend_from_slice(text);
+        data.push(0);
+    }
+    data.resize(0x100, 0);
+    program(imports, &data, |a, l| {
+        for at in [0x40, 0x20, 0x10, 0x00] {
+            a.push(l.at(at) as i32)?;
+        }
+        a.call(l.import(0))?;
+        a.push(l.at(0xD0) as i32)?;
+        a.push(l.at(0x60) as i32)?;
+        a.push(HKEY_LOCAL_MACHINE)?;
+        a.call(l.import(1))?;
+        a.push(15)?;
+        a.push(l.at(0xB0) as i32)?;
+        a.push(REG_SZ)?;
+        a.push(0)?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0xD0)))?;
+        a.call(l.import(2))?;
+        a.push(dword_ptr(l.at(0xD0)))?;
+        a.call(l.import(3))?;
+        a.push(0)?;
+        a.push(flags)?;
+        a.call(l.import(4))?;
+        a.mov(eax, 9)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn a_restart_runs_what_the_session_left_for_it() {
+    const EWX_REBOOT: i32 = 2;
+    let files = [
+        ("T.EXE", leaves_work_and_exits_windows(EWX_REBOOT)),
+        ("R.EXE", notes_its_command_line()),
+        ("LATER.TMP", b"x".to_vec()),
+    ];
+    let base = boot_scratch("boot_left_restart", &files);
+    assert_eq!(run_in(&base, "T.EXE"), 0);
+    assert!(!base.join("LATER.TMP").exists());
+    assert!(base.join("WINDOWS").join("WININIT.BAK").exists());
+    let ran = fs::read_to_string(base.join("RAN.TXT")).unwrap();
+    assert_eq!(ran, "C:\\R.EXE later\r\n");
+    let registry = fs::read_to_string(base.join("REGISTRY.REG")).unwrap();
+    assert!(!registry.contains("\"later\""), "{}", registry);
+}
+
+#[test]
+fn a_shutdown_leaves_the_work_for_the_next_session() {
+    const EWX_SHUTDOWN: i32 = 1;
+    let files = [
+        ("T.EXE", leaves_work_and_exits_windows(EWX_SHUTDOWN)),
+        ("R.EXE", notes_its_command_line()),
+        ("LATER.TMP", b"x".to_vec()),
+    ];
+    let base = boot_scratch("boot_left_shutdown", &files);
+    assert_eq!(run_in(&base, "T.EXE"), 0);
+    let wininit = base.join("WINDOWS").join("WININIT.INI");
+    assert!(wininit.exists(), "a shutdown doesn't boot");
+    assert!(base.join("LATER.TMP").exists());
+    assert!(!base.join("RAN.TXT").exists());
+    // The next session, as in a later run of the emulator, boots first.
+    assert_eq!(run_in(&base, "R.EXE"), 5);
+    assert!(!wininit.exists());
+    assert!(!base.join("LATER.TMP").exists());
+    let ran = fs::read_to_string(base.join("RAN.TXT")).unwrap();
+    let lines: Vec<&str> = ran.lines().collect();
+    assert_eq!(lines.len(), 2, "{:?}", ran);
+    assert_eq!(lines[0], "C:\\R.EXE later");
+}
+
 /// A program that ends with 7 when MSIMG32.DLL is a file of the system
 /// directory (1), loads (2) and has GradientFill (4).
 fn finds_msimg32() -> Vec<u8> {
