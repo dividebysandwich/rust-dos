@@ -796,6 +796,105 @@ fn msacm32_has_the_version_of_its_windows() {
     assert_eq!(run(Win98Se, "acm_version", asks_acm_version()).0, 3);
 }
 
+/// A program that imports DCIMAN32.DLL as ActiveMovie's QUARTZ.DLL does,
+/// and ends with a bit for each answer that is Windows' on a display
+/// driver without DCI: 1 if DCIOpenProvider gives no DC, 2 if
+/// DCICreatePrimary fails with DCI_FAIL_UNSUPPORTED and 4 if it clears
+/// the surface pointer, 8 if GetDCRegionData sizes the desktop DC's
+/// visible region as one rectangle (an RGNDATA of 48 bytes) and 16 if
+/// it writes that one, and 32 if GetWindowRegionData sizes the desktop
+/// window's the same.
+fn asks_dciman32() -> Vec<u8> {
+    const DCI_FAIL_UNSUPPORTED: i32 = -4;
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "DCIMAN32.DLL",
+            &[
+                "DCIOpenProvider",
+                "DCICreatePrimary",
+                "GetDCRegionData",
+                "GetWindowRegionData",
+            ],
+        ),
+        ("USER32.DLL", &["GetDC", "GetDesktopWindow"]),
+    ];
+    let mut data = vec![0xFFu8; 4];
+    data.resize(0x100, 0);
+    program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        let mut provider = a.create_label();
+        a.jnz(provider)?;
+        a.or(ebx, 1)?;
+        a.set_label(&mut provider)?;
+
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.cmp(eax, DCI_FAIL_UNSUPPORTED)?;
+        let mut primary = a.create_label();
+        a.jne(primary)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut primary)?;
+        a.cmp(dword_ptr(l.at(0)), 0)?;
+        let mut cleared = a.create_label();
+        a.jne(cleared)?;
+        a.or(ebx, 4)?;
+        a.set_label(&mut cleared)?;
+
+        a.push(0)?;
+        a.call(l.import(4))?;
+        a.mov(esi, eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.cmp(eax, 48)?;
+        let mut sized = a.create_label();
+        a.jne(sized)?;
+        a.or(ebx, 8)?;
+        a.set_label(&mut sized)?;
+
+        a.push(l.at(0x10) as i32)?;
+        a.push(0xF0)?;
+        a.push(esi)?;
+        a.call(l.import(2))?;
+        a.cmp(eax, 48)?;
+        let mut written = a.create_label();
+        a.jne(written)?;
+        // One rectangle, of RDH_RECTANGLES, starting at the screen's
+        // corner.
+        a.cmp(dword_ptr(l.at(0x18)), 1)?;
+        a.jne(written)?;
+        a.cmp(dword_ptr(l.at(0x14)), 1)?;
+        a.jne(written)?;
+        a.cmp(dword_ptr(l.at(0x30)), 0)?;
+        a.jne(written)?;
+        a.or(ebx, 16)?;
+        a.set_label(&mut written)?;
+
+        a.call(l.import(5))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.call(l.import(3))?;
+        a.cmp(eax, 48)?;
+        let mut window = a.create_label();
+        a.jne(window)?;
+        a.or(ebx, 32)?;
+        a.set_label(&mut window)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    })
+}
+
+#[test]
+fn dciman32_has_no_provider_and_gives_visible_regions() {
+    assert_eq!(run(Win98Se, "dciman32", asks_dciman32()).0, 63);
+    assert_eq!(run(Win95, "dciman32", asks_dciman32()).0, 63);
+}
+
 #[test]
 fn msimg32_dll_comes_with_windows_98() {
     assert_eq!(run(Win95, "msimg32", finds_msimg32()).0, 0);

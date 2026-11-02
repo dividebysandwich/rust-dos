@@ -417,7 +417,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         "D3D8" | "DINPUT8" => [4, 8, 1, 881],
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
-        "MSACM32" if windows.is_98() => [4, 3, 0, 1998],
+        "MSACM32" | "DCIMAN32" if windows.is_98() => [4, 3, 0, 1998],
         _ => [4, 0, 0, 950],
     };
     let text = match version {
