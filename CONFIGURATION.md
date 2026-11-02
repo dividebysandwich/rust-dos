@@ -2578,8 +2578,8 @@ them only through the card's memory, at the card's resolution, and gets
 the card's levels at any scale: a game whose smaller levels are other
 pictures than its larger ones would otherwise change its look whenever
 what OpenGL drew is read back. The shader reads and filters the card's
-texels as the card does. With `voodoo_anisotropy` OpenGL filters them itself, from the
-card's level.
+texels as the card does. With `voodoo_anisotropy` OpenGL filters them
+itself, from the card's level.
 
 The card stores 16 bits a pixel (5-6-5), and where a game turns
 dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4

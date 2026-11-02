@@ -907,7 +907,10 @@ impl VoodooGl {
             }
             None => [self.front, None],
         };
-        let drawn = shown.into_iter().flatten().any(|b| self.targets.contains_key(&b));
+        let drawn = shown
+            .into_iter()
+            .flatten()
+            .any(|b| self.targets.contains_key(&b));
         if drawn { self.scale as f32 } else { 1.0 }
     }
 
@@ -2361,9 +2364,7 @@ mod tests {
     #[ignore = "requires a desktop OpenGL context"]
     fn texels_are_the_cards_levels_where_no_buffer_is_shown() {
         use super::*;
-        use crate::voodoo::mirror::{
-            DrawState, Layout, Level, Scanout, Surface, TexUnit, Texture,
-        };
+        use crate::voodoo::mirror::{DrawState, Layout, Level, Scanout, Surface, TexUnit, Texture};
         use crate::voodoo::raster::Stride;
         let t = test_context("Level scale");
         let gl = t.gl;
@@ -2450,8 +2451,18 @@ mod tests {
         };
         let (red, green) = ([255, 0, 0], [0, 255, 0]);
         for (front, scanout, expected, what) in [
-            (None, scanout(None), green, "a Banshee showing another surface"),
-            (Some(0), scanout(Some(0)), red, "a Banshee showing the buffer"),
+            (
+                None,
+                scanout(None),
+                green,
+                "a Banshee showing another surface",
+            ),
+            (
+                Some(0),
+                scanout(Some(0)),
+                red,
+                "a Banshee showing the buffer",
+            ),
             (Some(0), None, red, "a Voodoo showing the buffer"),
             (None, None, green, "nothing shown"),
         ] {
