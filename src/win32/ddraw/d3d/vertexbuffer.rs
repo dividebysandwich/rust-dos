@@ -4,6 +4,14 @@
 //! DrawPrimitiveVB. ProcessVertices puts vertices of another buffer
 //! through a device's transform and lighting into it, as screen
 //! vertices.
+//!
+//! With D3DVOP_CLIP, into a buffer made without D3DVBCAPS_DONOTCLIP, the
+//! buffer also keeps each vertex's clip coordinates, as DirectX 7 keeps
+//! them beside a buffer that can be clipped, and drawing it clips its
+//! primitives at the view volume as if the vertices had come through
+//! the pipeline then. A vertex behind the eye has no screen position a
+//! triangle could be clipped from: without them, a triangle through the
+//! near plane would be drawn across the screen.
 
 use super::super::{DDERR_INVALIDOBJECT, DDERR_INVALIDPARAMS};
 use super::draw::{device_setup, read_vertices};
@@ -11,6 +19,7 @@ use super::pipeline::{self, Layout, Vertex};
 use super::{D3D_OK, D3DERR_VERTEXBUFFEROPTIMIZED, probe, write_dwords};
 use crate::cpu::Cpu;
 use crate::win32::{com, kernel32};
+use std::sync::Arc;
 
 /// A vertex buffer.
 #[derive(Clone, Debug, Default)]
@@ -23,6 +32,23 @@ pub struct VertexBuffer {
     pub memory: u32,
     pub locked: bool,
     pub optimized: bool,
+    /// For each vertex ProcessVertices put here with D3DVOP_CLIP: what it
+    /// kept of it. A draw takes them only for a vertex still at the
+    /// screen position they map to, so a vertex the program wrote over
+    /// since isn't taken for them. Shared, so the copies of the buffer
+    /// that Lock and the draws make don't copy them. In save states: a
+    /// program may process a buffer once and draw it for as long as its
+    /// view stays, or be saved between the two.
+    pub clipped: Arc<Vec<Option<Clipped>>>,
+}
+
+/// What ProcessVertices keeps of a vertex it clipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Clipped {
+    /// Its clip coordinates.
+    pub clip: [f32; 4],
+    /// Its distances from the user's clip planes.
+    pub planes: [f32; 6],
 }
 
 crate::state_fields!(VertexBuffer {
@@ -31,14 +57,20 @@ crate::state_fields!(VertexBuffer {
     count,
     memory,
     locked,
-    optimized
+    optimized,
+    clipped
 });
+
+crate::state_fields!(Clipped { clip, planes });
 
 /// The most vertices a buffer has.
 const MAX_VERTICES: u32 = 0x1_0000;
 
 /// D3DVBCAPS_OPTIMIZED.
 const OPTIMIZED: u32 = 0x8000_0000;
+
+/// D3DVBCAPS_DONOTCLIP: a buffer without room for clip coordinates.
+const DONOTCLIP: u32 = 0x1;
 
 /// A new vertex buffer of `count` vertices of the FVF code `fvf`.
 pub fn make(cpu: &mut Cpu, caps: u32, fvf: u32, count: u32) -> Result<VertexBuffer, u32> {
@@ -137,6 +169,7 @@ pub fn optimize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 // D3DVOP_ and D3DPV_ flags.
 const D3DVOP_LIGHT: u32 = 0x400;
 const D3DVOP_TRANSFORM: u32 = 0x1;
+const D3DVOP_CLIP: u32 = 0x4;
 const D3DVOP_EXTENTS: u32 = 0x8;
 const D3DPV_DONOTCOPYDATA: u32 = 0x1;
 
@@ -181,7 +214,8 @@ pub fn process_vertices_strided(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Put `vertices` of `layout` through the device's pipeline into the
 /// buffer `this` from its vertex `index` on: each gets x, y, z and rhw
 /// on the screen (four floats, whatever the buffer's position has room
-/// for), and the colors and texture coordinates the buffer has.
+/// for), and the colors and texture coordinates the buffer has. With
+/// D3DVOP_CLIP the buffer keeps their clip coordinates too.
 #[allow(clippy::too_many_arguments)]
 fn process(
     cpu: &mut Cpu,
@@ -206,6 +240,9 @@ fn process(
     let (did, setup) = hr!(device_setup(cpu, device, layout, op & D3DVOP_LIGHT != 0));
     let processed = pipeline::process(&setup, vertices, layout);
     let end = d.memory + d.count * dl.size;
+    let clip = op & (D3DVOP_CLIP | D3DVOP_TRANSFORM) == D3DVOP_CLIP | D3DVOP_TRANSFORM
+        && d.caps & DONOTCLIP == 0
+        && dl.rhw;
     for (i, (p, v)) in processed.iter().zip(vertices).enumerate() {
         let base = d.memory + (index + i as u32) * dl.size;
         let screen = if p.tl || op & D3DVOP_TRANSFORM == 0 {
@@ -253,6 +290,24 @@ fn process(
             }
         }
     }
+    // The copy `d` goes first, so the buffer's clip coordinates aren't
+    // shared and change in place.
+    drop(d);
+    if let Some(b) = get(cpu, id) {
+        let at = index as usize;
+        if clip {
+            let kept = Arc::make_mut(&mut b.clipped);
+            kept.resize(b.count as usize, None);
+            for (k, p) in kept[at..].iter_mut().zip(&processed) {
+                *k = (!p.tl).then_some(Clipped {
+                    clip: p.clip,
+                    planes: p.planes,
+                });
+            }
+        } else if b.clipped.len() >= at + processed.len() {
+            Arc::make_mut(&mut b.clipped)[at..at + processed.len()].fill(None);
+        }
+    }
     let flags = if op & D3DVOP_EXTENTS != 0 {
         0
     } else {
@@ -267,4 +322,28 @@ fn process(
         flags,
     );
     Some(D3D_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::savestate::{Reader, State, Writer};
+
+    #[test]
+    fn a_save_state_keeps_the_clip_coordinates() {
+        let kept = Clipped {
+            clip: [1.0, 2.0, 3.0, -4.0],
+            planes: [0.5; 6],
+        };
+        let buffer = VertexBuffer {
+            count: 2,
+            clipped: Arc::new(vec![Some(kept), None]),
+            ..VertexBuffer::default()
+        };
+        let mut w = Writer::new();
+        buffer.save(&mut w);
+        let mut loaded = VertexBuffer::default();
+        loaded.load(&mut Reader::new(&w.buf)).unwrap();
+        assert_eq!(*loaded.clipped, *buffer.clipped);
+    }
 }

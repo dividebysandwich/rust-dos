@@ -2571,6 +2571,584 @@ fn a_dll_whose_entry_point_fails_is_not_loaded() {
     );
 }
 
+/// MSVCRT.DLL loaded by a program that doesn't import it, as Windows 98
+/// SE does it: LoadLibrary counts, the last FreeLibrary takes it out of the
+/// process, so that GetModuleHandle, GetProcAddress and FreeLibrary fail
+/// for it, and the next load starts the C runtime again (rand's seed).
+#[test]
+fn a_program_loads_and_frees_msvcrt_without_importing_it() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "GetLastError",
+        "SetUnhandledExceptionFilter",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0strlen\0srand\0rand\0";
+    const NAME: u32 = 0;
+    const STRLEN: u32 = 11;
+    const SRAND: u32 = 18;
+    const RAND: u32 = 24;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 0)?;
+        // Loaded, and known by its name.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 1)?;
+        // A function of it works.
+        a.push(l.at(STRLEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.push(l.at(STRLEN) as i32)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.cmp(eax, 6)?;
+        check(a, false, 2)?;
+        // Two references, the same module.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 3)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, esi)?;
+        check(a, false, 4)?;
+        // A seed for the state that the last free ends.
+        a.push(l.at(SRAND) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.push(5)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.mov(edi, eax)?;
+        // The C++ filter it set went with it.
+        a.push(0)?;
+        a.call(f("SetUnhandledExceptionFilter"))?;
+        a.or(eax, edi)?;
+        check(a, false, 5)?;
+        // The handle is no longer one: ERROR_INVALID_HANDLE.
+        let mut wrong = a.create_label();
+        a.push(l.at(STRLEN) as i32)?;
+        a.push(esi)?;
+        a.call(f("GetProcAddress"))?;
+        a.mov(edi, eax)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, 6)?;
+        a.jne(wrong)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.or(edi, eax)?;
+        a.set_label(&mut wrong)?;
+        check(a, false, 6)?;
+        // Loaded again, seeded with 1 as a new runtime is.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(l.at(RAND) as i32)?;
+        a.push(eax)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.cmp(eax, 41)?;
+        check(a, false, 7)?;
+        // All bits set is also the exit code of a program that faults, as
+        // this one does on a NULL from GetProcAddress.
+        a.mov(eax, ebx)?;
+        a.xor(eax, 0x55)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("load_msvcrt", &[("T.EXE", exe)]);
+    assert_eq!(
+        code ^ 0x55,
+        0xFF,
+        "the checks that failed: {:08b}, {}",
+        !(code ^ 0x55),
+        text
+    );
+}
+
+/// The last FreeLibrary of MSVCRT.DLL, as a probe measured it on Windows
+/// 98 SE. A stream left open isn't flushed and its file stays open, so
+/// its handle still works and a load of a file with no sharing fails.
+/// The runtime's heap goes: a block malloc gave is free address space
+/// after it, and a program that loads, mallocs 256 KB and frees the DLL
+/// 600 times neither runs out nor changes the process heap.
+#[test]
+fn the_last_free_of_msvcrt_takes_its_heap_and_leaves_its_streams() {
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "GetProcAddress",
+        "FreeLibrary",
+        "CreateFileA",
+        "CloseHandle",
+        "GetFileSize",
+        "GetLastError",
+        "VirtualQuery",
+        "GetProcessHeap",
+        "HeapAlloc",
+        "HeapFree",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0fopen\0fprintf\0_fileno\0_get_osfhandle\0malloc\0T.TMP\0w\0buffered\0";
+    const NAME: u32 = 0;
+    const FOPEN: u32 = 11;
+    const FPRINTF: u32 = 17;
+    const FILENO: u32 = 25;
+    const OSFHANDLE: u32 = 33;
+    const MALLOC: u32 = 48;
+    const FILE: u32 = 55;
+    const MODE: u32 = 61;
+    const TEXT: u32 = 63;
+    /// MEMORY_BASIC_INFORMATION, and its State.
+    const QUERY: u32 = PROGRAM_DATA + 0x100;
+    const STATE: u32 = QUERY + 16;
+    const MEM_COMMIT: i32 = 0x1000;
+    const MEM_FREE: i32 = 0x10000;
+    const GENERIC_READ_WRITE: u32 = 0xC000_0000;
+    const OPEN_EXISTING: i32 = 3;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const CYCLES: i32 = 600;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let crt = |a: &mut CodeAssembler, name: u32| -> Result<(), IcedError> {
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(f("GetProcAddress"))
+        };
+        let open_alone = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(0)?;
+            a.push(0)?;
+            a.push(OPEN_EXISTING)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(GENERIC_READ_WRITE as i32)?;
+            a.push(l.at(FILE) as i32)?;
+            a.call(f("CreateFileA"))
+        };
+        let query = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(28)?;
+            a.push(QUERY as i32)?;
+            a.push(edi)?;
+            a.call(f("VirtualQuery"))
+        };
+        let new_block = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.call(f("GetProcessHeap"))?;
+            a.push(32)?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("HeapAlloc"))?;
+            a.mov(edi, eax)?;
+            a.call(f("GetProcessHeap"))?;
+            a.push(edi)?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.call(f("HeapFree"))
+        };
+        a.xor(ebx, ebx)?;
+        // A stream with text in its buffer, and its handle.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, FOPEN)?;
+        a.push(l.at(MODE) as i32)?;
+        a.push(l.at(FILE) as i32)?;
+        a.call(eax)?;
+        a.add(esp, 8)?;
+        a.mov(edi, eax)?;
+        crt(a, FPRINTF)?;
+        a.push(l.at(TEXT) as i32)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 8)?;
+        crt(a, FILENO)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(edi, eax)?;
+        crt(a, OSFHANDLE)?;
+        a.push(edi)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(ebp, eax)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        // The file is open still, and has none of the text.
+        open_alone(a)?;
+        a.call(f("GetLastError"))?;
+        a.cmp(eax, ERROR_SHARING_VIOLATION)?;
+        check(a, false, 0)?;
+        a.push(0)?;
+        a.push(ebp)?;
+        a.call(f("GetFileSize"))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        // Closing the handle ends that.
+        a.push(ebp)?;
+        a.call(f("CloseHandle"))?;
+        open_alone(a)?;
+        a.mov(edi, eax)?;
+        a.cmp(eax, -1)?;
+        check(a, true, 2)?;
+        a.push(edi)?;
+        a.call(f("CloseHandle"))?;
+        // A block is there until the runtime goes.
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, MALLOC)?;
+        a.push(100)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.mov(edi, eax)?;
+        query(a)?;
+        a.cmp(dword_ptr(STATE as u64), MEM_COMMIT)?;
+        check(a, false, 3)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        query(a)?;
+        a.cmp(dword_ptr(STATE as u64), MEM_FREE)?;
+        check(a, false, 4)?;
+        // Blocks left behind again and again.
+        new_block(a)?;
+        a.mov(ebp, edi)?;
+        a.mov(edi, CYCLES)?;
+        let mut again = a.create_label();
+        let mut out = a.create_label();
+        a.set_label(&mut again)?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        crt(a, MALLOC)?;
+        a.push(0x40000)?;
+        a.call(eax)?;
+        a.add(esp, 4)?;
+        a.test(eax, eax)?;
+        a.je(out)?;
+        a.mov(byte_ptr(eax + 0x3FFFF), 1)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.dec(edi)?;
+        a.jne(again)?;
+        a.set_label(&mut out)?;
+        a.test(edi, edi)?;
+        check(a, false, 5)?;
+        new_block(a)?;
+        a.cmp(edi, ebp)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("msvcrt_last_free", &[("T.EXE", exe)]);
+    assert_eq!(code, 0x7F, "the checks that passed: {code:07b}, {text}");
+}
+
+/// Built-in DLLs loaded while a second thread runs. MSVCRT.DLL comes
+/// with a DLL file that calls it from its entry point and goes with it;
+/// OLE32.DLL goes at its FreeLibrary. A DLL the program imports stays, as
+/// does KERNEL32.DLL, whatever FreeLibrary it gets.
+#[test]
+fn a_built_in_dll_stays_while_something_holds_it() {
+    const SEEN: u32 = PROGRAM_DATA + 0x100;
+    let dll_data = b"hello\0";
+    let dll_imports: &[(&str, &[&str])] = &[("MSVCRT.DLL", &["strlen"])];
+    let entry = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 1)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.add(esp, 4)?;
+        a.mov(dword_ptr(SEEN as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        dll_imports,
+        dll_data,
+        &[("", &entry)],
+        &[],
+    );
+
+    let names: &[&str] = &[
+        "LoadLibraryA",
+        "FreeLibrary",
+        "GetModuleHandleA",
+        "CreateThread",
+        "Sleep",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] =
+        &[("KERNEL32.DLL", names), ("ADVAPI32.DLL", &["RegCloseKey"])];
+    let mut data = b"MSVCRT.DLL\0X.DLL\0OLE32.DLL\0ADVAPI32.DLL\0KERNEL32.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    const MSVCRT: u32 = 0;
+    const X: u32 = 11;
+    const OLE32: u32 = 17;
+    const ADVAPI32: u32 = 27;
+    const KERNEL32: u32 = 40;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut after = a.create_label();
+        a.xor(ebx, ebx)?;
+        // A thread that sleeps, whose function's address the call leaves.
+        a.call(after)?;
+        a.push(-1)?;
+        a.call(f("Sleep"))?;
+        a.set_label(&mut after)?;
+        a.pop(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(f("CreateThread"))?;
+        // Its entry point called strlen.
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(SEEN as u64))?;
+        a.cmp(eax, 5)?;
+        check(a, false, 0)?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 1)?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        // A built-in DLL with no variables goes as well.
+        a.push(l.at(OLE32) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(OLE32) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 3)?;
+        for (name, bit) in [(ADVAPI32, 4), (KERNEL32, 5)] {
+            a.push(l.at(name) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.push(eax)?;
+            a.call(f("FreeLibrary"))?;
+            a.push(l.at(name) as i32)?;
+            a.call(f("GetModuleHandleA"))?;
+            a.test(eax, eax)?;
+            check(a, true, bit)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_held", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b}, {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// A DLL's DLL_PROCESS_DETACH loads the built-in DLL that is going with
+/// it: the load holds it, so it stays, under the handle the load gave.
+#[test]
+fn a_built_in_dll_loaded_as_it_goes_stays() {
+    const SEEN: u32 = PROGRAM_DATA + 0x100;
+    let dll_imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["LoadLibraryA"]),
+        ("MSVCRT.DLL", &["strlen"]),
+    ];
+    let entry = |a: &mut CodeAssembler, l: &Layout| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(esp + 8), 0)?;
+        a.jne(done)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.mov(dword_ptr(SEEN as u64), eax)?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll = module_image(
+        DLL_BASE,
+        Some("X.DLL"),
+        dll_imports,
+        b"MSVCRT.DLL\0",
+        &[("", &entry)],
+        &[],
+    );
+
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetModuleHandleA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"X.DLL\0MSVCRT.DLL\0".to_vec();
+    data.resize(0x200, 0);
+    const X: u32 = 0;
+    const MSVCRT: u32 = 6;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        assert_eq!(l.data, PROGRAM_DATA);
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.xor(ebx, ebx)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(eax)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        a.push(l.at(MSVCRT) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.cmp(eax, dword_ptr(SEEN as u64))?;
+        check(a, false, 1)?;
+        a.push(l.at(X) as i32)?;
+        a.call(f("GetModuleHandleA"))?;
+        a.test(eax, eax)?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_revived", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b}, {}",
+        !code & 7,
+        text
+    );
+}
+
+/// A state saved after the last free of a built-in DLL has its mapping and
+/// stub pages: after a load the DLL isn't there, and it loads again where
+/// it was, with a new runtime.
+#[test]
+fn a_freed_built_in_dll_comes_back_after_a_saved_state() {
+    let names: &[&str] = &["LoadLibraryA", "FreeLibrary", "GetProcAddress", "Sleep"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"MSVCRT.DLL\0rand\0";
+    const NAME: u32 = 0;
+    const RAND: u32 = 11;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.mov(esi, eax)?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        a.push(esi)?;
+        a.call(f("FreeLibrary"))?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        a.push(l.at(NAME) as i32)?;
+        a.call(f("LoadLibraryA"))?;
+        a.push(l.at(RAND) as i32)?;
+        a.push(eax)?;
+        a.call(f("GetProcAddress"))?;
+        a.call(eax)?;
+        a.ret()
+    };
+    let image = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let mut cpu = machine("builtin_saved", image);
+    let has_crt = |cpu: &Cpu| {
+        let modules = cpu.bus.win32.modules();
+        modules.iter().any(|(name, ..)| name == "MSVCRT.DLL")
+    };
+    let run_until = |cpu: &mut Cpu, wanted: bool| {
+        for _ in 0..400_000 {
+            if has_crt(cpu) == wanted {
+                return;
+            }
+            cpu.bus.start_batch(cpu.bus.clock.icount + 1_000);
+            run_batch(cpu, &mut NoHook, false);
+        }
+        panic!("MSVCRT.DLL never went to {}", wanted);
+    };
+    run_until(&mut cpu, true);
+    run_until(&mut cpu, false);
+    let state = rust_dos::savestate::machine::save(&cpu);
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 41, "before the load");
+
+    rust_dos::savestate::machine::load(&mut cpu, &state).unwrap();
+    assert!(!has_crt(&cpu));
+    cpu.errorlevel = 0;
+    assert!(run_to_exit(&mut cpu, 2000), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 41, "after the load");
+}
+
+/// A DLL file over the place of a built-in DLL keeps it: that built-in
+/// DLL doesn't load, and nothing is written over the file's image.
+#[test]
+fn a_built_in_dll_does_not_load_over_a_dll_file() {
+    // Up to past BF740000h, where OPENGL32.DLL goes.
+    const X_BASE: u32 = 0xBF73_0000;
+    const OPENGL32_RVA: u32 = 0x1_0000;
+    let entry = |a: &mut CodeAssembler, _: &Layout| {
+        a.mov(eax, 1)?;
+        a.ret_1(12)
+    };
+    let dll_data = vec![0x5A; 0x1_2000];
+    let dll = module_image(X_BASE, Some("X.DLL"), &[], &dll_data, &[("", &entry)], &[]);
+
+    let names: &[&str] = &["LoadLibraryA"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let data = b"X.DLL\0OPENGL32.DLL\0";
+    const X: u32 = 0;
+    const OPENGL32: u32 = 6;
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.push(l.at(X) as i32)?;
+        a.call(l.import(0))?;
+        a.cmp(eax, X_BASE as i32)?;
+        check(a, false, 0)?;
+        a.push(l.at(OPENGL32) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.cmp(
+            dword_ptr((X_BASE + OPENGL32_RVA) as u64),
+            0x5A5A_5A5Au32 as i32,
+        )?;
+        check(a, false, 2)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, data, &[("", &main)], &[]);
+    let (code, text) = run_files("builtin_over_file", &[("T.EXE", exe), ("X.DLL", dll)]);
+    assert_eq!(
+        code,
+        7,
+        "the checks that failed: {:03b}, {}",
+        !code & 7,
+        text
+    );
+}
+
 #[test]
 fn a_program_missing_a_dll_function_is_refused() {
     let imports: &[(&str, &[&str])] = &[("C.DLL", &["G"])];
@@ -5397,6 +5975,303 @@ fn wait_for_input_idle_handles_messages_sent_to_the_waiting_thread() {
     assert_eq!(code, 0x7, "the checks that failed: {:03b}", !code & 0x7);
 }
 
+/// GetWindowTextA of another thread's window waits for that thread's
+/// reply and then runs again, and the text stays in the buffer. ACM 1918
+/// counts its windows by title this way when it starts.
+#[test]
+fn get_window_text_of_another_threads_window_keeps_the_text() {
+    let kernel32 = ["CreateThread", "Sleep", "ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "GetMessageA",
+        "DispatchMessageA",
+        "GetWindowTextA",
+    ];
+    // The window's handle at 0x20, the thread's id at 0x24, the text
+    // read at 0x50 and a MSG at 0x80.
+    let data = child_data(&[(0, "Title"), (0x10, "Static")]);
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (hwnd, text) = (l.at(0x20), l.at(0x50));
+        let mut over = a.create_label();
+        let mut pump = a.create_label();
+        let mut look = a.create_label();
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, 0, l.at(0x24) as i32])?;
+        a.call(over)?;
+        // The thread: its window, and its messages.
+        let class = l.at(0x10) as i32;
+        let title = l.at(0) as i32;
+        push_args(a, &[0, class, title, WS_POPUP, 0, 0, 10, 10, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(dword_ptr(hwnd), eax)?;
+        a.set_label(&mut pump)?;
+        push_args(a, &[l.at(0x80) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(l.at(0x80) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(pump)?;
+        a.set_label(&mut over)?;
+        push_args(a, &[0, 0])?;
+        a.call(f("CreateThread"))?;
+        a.set_label(&mut look)?;
+        a.push(1)?;
+        a.call(f("Sleep"))?;
+        a.cmp(dword_ptr(hwnd), 0)?;
+        a.je(look)?;
+        a.push(32)?;
+        a.push(text as i32)?;
+        a.push(dword_ptr(hwnd))?;
+        a.call(f("GetWindowTextA"))?;
+        a.cmp(eax, 5)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(byte_ptr(text), b'T' as i32)?;
+        bit_if(a, eq, 1)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("get_window_text_other_thread", &[("T.EXE", program)]);
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
+/// An AVI file of two frames, 2 by 1 pixels of 24 bits, uncompressed.
+fn small_avi() -> Vec<u8> {
+    fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        out.resize(out.len().next_multiple_of(2), 0);
+        out
+    }
+    fn list(id: &[u8; 4], kind: &[u8; 4], parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut data = kind.to_vec();
+        for p in parts {
+            data.extend_from_slice(p);
+        }
+        chunk(id, &data)
+    }
+    let le = |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    // Period, rates, flags, frames, initial, streams, buffer, size.
+    let avih = le(&[100_000, 0, 0, 0, 2, 0, 1, 8, 2, 1, 0, 0, 0, 0]);
+    // Type, handler, flags, priority, initial, scale, rate, start,
+    // length, buffer, quality, sample size, rectangle.
+    let mut strh = b"vidsDIB ".to_vec();
+    strh.extend(le(&[0, 0, 0, 1, 10, 0, 2, 8, 0, 0, 0, 0]));
+    let mut strf = le(&[40, 2, 1]);
+    strf.extend_from_slice(&1u16.to_le_bytes());
+    strf.extend_from_slice(&24u16.to_le_bytes());
+    strf.extend(le(&[0, 8, 0, 0, 0, 0]));
+    let strl = list(b"LIST", b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)]);
+    let hdrl = list(b"LIST", b"hdrl", &[chunk(b"avih", &avih), strl]);
+    let frames = [
+        chunk(b"00db", &[1, 2, 3, 4, 5, 6, 0, 0]),
+        chunk(b"00db", &[9, 8, 7, 6, 5, 4, 0, 0]),
+    ];
+    let movi = list(b"LIST", b"movi", &frames);
+    list(b"RIFF", b"AVI ", &[hdrl, movi])
+}
+
+/// AVIStreamGetFrame gives a frame's DIB, its header first, by its
+/// position: forward, back again, and nothing past the end.
+#[test]
+fn get_frame_gives_a_streams_frames_as_dibs() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let avifil32: &[&str] = &[
+        "AVIFileInit",
+        "AVIFileOpenA",
+        "AVIFileGetStream",
+        "AVIStreamGetFrameOpen",
+        "AVIStreamGetFrame",
+        "AVIStreamGetFrameClose",
+        "AVIStreamRelease",
+        "AVIFileRelease",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("AVIFIL32.DLL", avifil32)];
+    let mut data = vec![0; 0x100];
+    data[..7].copy_from_slice(b"T.AVI\0\0");
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = avifil32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        let (file, stream) = (l.at(0x20), l.at(0x24));
+        let frame = |a: &mut CodeAssembler, position: i32| {
+            a.push(position)?;
+            a.push(esi)?;
+            a.call(f("AVIStreamGetFrame"))
+        };
+        a.xor(ebx, ebx)?;
+        a.call(f("AVIFileInit"))?;
+        push_args(a, &[file as i32, l.at(0) as i32, 0x20, 0])?;
+        a.call(f("AVIFileOpenA"))?;
+        a.push(0)?;
+        a.push(0x7364_6976)?;
+        a.push(stream as i32)?;
+        a.push(dword_ptr(file))?;
+        a.call(f("AVIFileGetStream"))?;
+        a.push(0)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamGetFrameOpen"))?;
+        a.mov(esi, eax)?;
+        frame(a, 1)?;
+        a.mov(edi, eax)?;
+        a.cmp(byte_ptr(edi + 40), 9)?;
+        bit_if_equal(a, 0)?;
+        a.cmp(word_ptr(edi + 14), 24)?;
+        bit_if_equal(a, 1)?;
+        frame(a, 0)?;
+        a.cmp(byte_ptr(eax + 40), 1)?;
+        bit_if_equal(a, 2)?;
+        frame(a, 2)?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 3)?;
+        a.push(esi)?;
+        a.call(f("AVIStreamGetFrameClose"))?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamRelease"))?;
+        a.push(dword_ptr(file))?;
+        a.call(f("AVIFileRelease"))?;
+        a.test(eax, eax)?;
+        bit_if_equal(a, 4)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family(
+        "get_frame",
+        &[("T.EXE", program), ("T.AVI", small_avi())],
+    );
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
+/// A BITMAPINFOHEADER of `bits` bits a pixel, its image size unset.
+fn bitmap_info(width: u32, height: u32, bits: u16, compression: &[u8; 4]) -> Vec<u8> {
+    let mut info = [40, width, height].map(u32::to_le_bytes).concat();
+    info.extend_from_slice(&1u16.to_le_bytes());
+    info.extend_from_slice(&bits.to_le_bytes());
+    info.extend_from_slice(compression);
+    info.resize(40, 0);
+    info
+}
+
+/// DrawDibDraw reads a compressed frame's bytes only as far as the
+/// program has memory there: a frame's biSizeImage may be 0, or say more
+/// than its buffer holds. Here the buffer is the last 16 bytes of a page
+/// with none after it.
+#[test]
+fn draw_dib_reads_no_further_than_a_frames_memory() {
+    let kernel32: &[&str] = &["ExitProcess", "VirtualAlloc"];
+    let msvfw32: &[&str] = &["DrawDibOpen", "DrawDibDraw", "DrawDibClose"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", kernel32), ("MSVFW32.DLL", msvfw32)];
+    let data = bitmap_info(64, 64, 24, b"IV32");
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| {
+            let index = msvfw32.iter().position(|n| *n == name).unwrap();
+            l.import(kernel32.len() + index)
+        };
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, 0x1000, 0x3000, 4])?;
+        a.call(l.import(1))?;
+        a.lea(edi, dword_ptr(eax + 0xFF0))?;
+        a.call(f("DrawDibOpen"))?;
+        a.mov(esi, eax)?;
+        const DDF_DONTDRAW: i32 = 0x10;
+        for arg in [DDF_DONTDRAW, -1, -1, 0, 0] {
+            a.push(arg)?;
+        }
+        a.push(edi)?;
+        a.push(l.at(0) as i32)?;
+        push_args(a, &[0, 0, -1, -1])?;
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("DrawDibDraw"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 0)?;
+        a.push(esi)?;
+        a.call(f("DrawDibClose"))?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family("draw_dib_memory", &[("T.EXE", program)]);
+    assert_eq!(code, 1);
+}
+
+/// DrawDibDraw without bits takes the DIB as a packed one, which is what
+/// AVIStreamGetFrame gives.
+#[test]
+fn draw_dib_draws_what_get_frame_gives_with_no_bits() {
+    let kernel32: &[&str] = &["ExitProcess"];
+    let avifil32: &[&str] = &[
+        "AVIFileOpenA",
+        "AVIFileGetStream",
+        "AVIStreamGetFrameOpen",
+        "AVIStreamGetFrame",
+    ];
+    let msvfw32: &[&str] = &["DrawDibOpen", "DrawDibDraw"];
+    let gdi32: &[&str] = &["CreateCompatibleDC", "CreateDIBSection", "SelectObject"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", kernel32),
+        ("AVIFIL32.DLL", avifil32),
+        ("MSVFW32.DLL", msvfw32),
+        ("GDI32.DLL", gdi32),
+    ];
+    let names: Vec<&str> = imports.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+    let mut data = bitmap_info(2, 1, 24, &[0; 4]);
+    data.resize(0x100, 0);
+    data[0x40..0x46].copy_from_slice(b"T.AVI\0");
+    let program = program_with(Builder::exe(BASE), false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let (file, stream, pixels) = (l.at(0x50), l.at(0x54), l.at(0x58));
+        a.xor(ebx, ebx)?;
+        push_args(a, &[file as i32, l.at(0x40) as i32, 0x20, 0])?;
+        a.call(f("AVIFileOpenA"))?;
+        a.push(0)?;
+        a.push(0)?;
+        a.push(stream as i32)?;
+        a.push(dword_ptr(file))?;
+        a.call(f("AVIFileGetStream"))?;
+        a.push(0)?;
+        a.push(dword_ptr(stream))?;
+        a.call(f("AVIStreamGetFrameOpen"))?;
+        a.push(1)?;
+        a.push(eax)?;
+        a.call(f("AVIStreamGetFrame"))?;
+        a.mov(edi, eax)?;
+        a.push(0)?;
+        a.call(f("CreateCompatibleDC"))?;
+        a.mov(esi, eax)?;
+        push_args(a, &[l.at(0) as i32, 0, pixels as i32, 0, 0])?;
+        a.push(esi)?;
+        a.call(f("CreateDIBSection"))?;
+        a.push(eax)?;
+        a.push(esi)?;
+        a.call(f("SelectObject"))?;
+        a.call(f("DrawDibOpen"))?;
+        for arg in [0, -1, -1, 0, 0, 0] {
+            a.push(arg)?;
+        }
+        a.push(edi)?;
+        push_args(a, &[0, 0, -1, -1])?;
+        a.push(esi)?;
+        a.push(eax)?;
+        a.call(f("DrawDibDraw"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 0)?;
+        a.mov(eax, dword_ptr(pixels))?;
+        a.cmp(byte_ptr(eax), 9)?;
+        bit_if_equal(a, 1)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    let code = run_family(
+        "draw_dib_packed",
+        &[("T.EXE", program), ("T.AVI", small_avi())],
+    );
+    assert_eq!(code, 3, "the checks that failed: {:02b}", !code & 3);
+}
+
 const WS_VISIBLE: i32 = 0x1000_0000;
 const PM_REMOVE: i32 = 1;
 
@@ -6512,4 +7387,473 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     });
     let (code, text) = run("wow32", exe);
     assert_eq!(code, 0, "{}", text);
+}
+
+/// CONTEXT's Eip and EFlags, and TF.
+const CTX_EIP: i32 = 0xB8;
+const CTX_EFLAGS: i32 = 0xC0;
+const TF: u32 = 0x100;
+const DF: u32 = 0x400;
+const SINGLE_STEP: u32 = 0x8000_0004;
+const BREAKPOINT: u32 = 0x8000_0003;
+const ACCESS_VIOLATION: u32 = 0xC000_0005;
+
+/// `xor eax, eax`, then TF set with POPFD. What follows it is X.
+const SET_TF: &[u8] = &[0x31, 0xC0, 0x9C, 0x81, 0x0C, 0x24, 0, 1, 0, 0, 0x9D];
+/// Four `inc eax` and a RET.
+const INCS: &[u8] = &[0x40, 0x40, 0x40, 0x40, 0xC3];
+/// The arguments of RaiseException(RAISED, 0, 0, 0), and the call, with
+/// the function's address in EBX.
+const RAISE_ARGS: &[u8] = &[0x6A, 0, 0x6A, 0, 0x6A, 0, 0x68, 0x34, 0x12, 0, 0xE0];
+const CALL_EBX: &[u8] = &[0xFF, 0xD3];
+const RAISED: u32 = 0xE000_1234;
+/// What a handler's context says it has: the control, integer, segment,
+/// floating-point and debug register parts.
+const CONTEXT_FLAGS: u32 = 0x1_001F;
+/// The size of what `trace_program` notes of an exception, in words, and
+/// how many it has room for.
+const HIT_WORDS: usize = 6;
+const MAX_HITS: usize = 8;
+
+/// What one exception gave a handler.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct Hit {
+    code: u32,
+    address: u32,
+    eip: u32,
+    eflags: u32,
+    /// The flags the handler itself ran with.
+    live: u32,
+    context_flags: u32,
+}
+
+/// A program that runs `code`, with an exception handler that notes each
+/// exception and returns `answer`, or as the unhandled exception filter
+/// with `filter`. `then` runs in the handler for each exception, with the
+/// record at ECX, the context at EDX and the number of exceptions before
+/// this one in ESI. `code` starts with RaiseException's address in EBX.
+/// The program prints what it noted and EAX as `code` left it.
+fn trace_program(
+    code: &[u8],
+    filter: bool,
+    answer: i32,
+    then: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
+    const HITS: u32 = 0;
+    const EAX: u32 = 4;
+    const TABLE: u32 = 8;
+    const WRITTEN: u32 = 0xF0;
+    const CODE: u32 = 0x100;
+    let hit_size = 4 * HIT_WORDS as i32;
+    let mut data = vec![0u8; CODE as usize];
+    data.extend_from_slice(code);
+    let names: &[&str] = &[
+        "SetUnhandledExceptionFilter",
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess",
+        "RaiseException",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut at = 0;
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        at = l.at(CODE) as u32;
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let mut note = a.create_label();
+        let mut start = a.create_label();
+        let mut over = a.create_label();
+        a.jmp(start)?;
+        a.set_label(&mut note)?;
+        a.pushfd()?;
+        a.pop(eax)?;
+        a.mov(esi, dword_ptr(l.at(HITS)))?;
+        a.imul_3(edi, esi, hit_size)?;
+        a.add(edi, l.at(TABLE) as i32)?;
+        a.mov(dword_ptr(edi + 16), eax)?;
+        a.mov(eax, dword_ptr(ecx))?;
+        a.mov(dword_ptr(edi), eax)?;
+        a.mov(eax, dword_ptr(ecx + 12))?;
+        a.mov(dword_ptr(edi + 4), eax)?;
+        a.mov(eax, dword_ptr(edx + CTX_EIP))?;
+        a.mov(dword_ptr(edi + 8), eax)?;
+        a.mov(eax, dword_ptr(edx + CTX_EFLAGS))?;
+        a.mov(dword_ptr(edi + 12), eax)?;
+        a.mov(eax, dword_ptr(edx))?;
+        a.mov(dword_ptr(edi + 20), eax)?;
+        a.inc(dword_ptr(l.at(HITS)))?;
+        then(a)?;
+        a.ret()?;
+        a.set_label(&mut start)?;
+        // The handler's address, which the CALL over it pushes.
+        a.call(over)?;
+        a.pushad()?;
+        if filter {
+            a.mov(eax, dword_ptr(esp + 32 + 4))?;
+            a.mov(ecx, dword_ptr(eax))?;
+            a.mov(edx, dword_ptr(eax + 4))?;
+        } else {
+            a.mov(ecx, dword_ptr(esp + 32 + 4))?;
+            a.mov(edx, dword_ptr(esp + 32 + 12))?;
+        }
+        a.call(note)?;
+        a.popad()?;
+        a.mov(eax, answer)?;
+        if filter {
+            a.ret_1(4)?;
+        } else {
+            a.ret()?;
+        }
+        a.set_label(&mut over)?;
+        if filter {
+            a.call(f("SetUnhandledExceptionFilter"))?;
+        } else {
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+        }
+        a.mov(ebx, f("RaiseException"))?;
+        a.mov(eax, l.at(CODE) as i32)?;
+        a.call(eax)?;
+        a.mov(dword_ptr(l.at(EAX)), eax)?;
+        a.push(STD_OUTPUT_HANDLE)?;
+        a.call(f("GetStdHandle"))?;
+        a.push(0)?;
+        a.push(l.at(WRITTEN) as i32)?;
+        a.push(TABLE as i32 + MAX_HITS as i32 * hit_size)?;
+        a.push(l.at(0) as i32)?;
+        a.push(eax)?;
+        a.call(f("WriteFile"))?;
+        a.push(0)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    (exe, at)
+}
+
+/// Run `exe` to its end on the core `core`: EAX as the code left it and
+/// the exceptions noted.
+fn traced(test: &str, exe: Vec<u8>, core: CoreMode) -> (u32, Vec<Hit>) {
+    let mut cpu = machine(test, exe);
+    cpu.core = core;
+    assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+    let out = &cpu.host_console.as_ref().unwrap().stdout;
+    assert_eq!(out.len(), 8 + 4 * MAX_HITS * HIT_WORDS, "{:?}", printed(&cpu));
+    let word = |i: usize| u32::from_le_bytes(out[4 * i..4 * i + 4].try_into().unwrap());
+    let hits = (0..word(0) as usize)
+        .map(|i| {
+            let at = 2 + HIT_WORDS * i;
+            Hit {
+                code: word(at),
+                address: word(at + 1),
+                eip: word(at + 2),
+                eflags: word(at + 3),
+                live: word(at + 4),
+                context_flags: word(at + 5),
+            }
+        })
+        .collect();
+    (word(1), hits)
+}
+
+/// `SET_TF`, `next` at X, and `INCS`; and X's address.
+fn after_tf(next: &[u8]) -> (Vec<u8>, u32) {
+    ([SET_TF, next, INCS].concat(), SET_TF.len() as u32)
+}
+
+/// Check a single-step exception with the handler's flags.
+fn assert_step(hit: &Hit, at: u32) {
+    assert_eq!(hit.code, SINGLE_STEP, "{:X?}", hit);
+    assert_eq!(hit.address, at, "{:X?}", hit);
+    assert_eq!(hit.eip, at, "{:X?}", hit);
+    assert_eq!(hit.eflags & TF, 0, "{:X?}", hit);
+    assert_eq!(hit.live & TF, 0, "{:X?}", hit);
+    assert_eq!(hit.context_flags, CONTEXT_FLAGS, "{:X?}", hit);
+}
+
+/// As Windows 98: the trap comes after the instruction after POPFD, with
+/// TF clear in the handler and in the context, and the handler continuing
+/// at the context runs on untraced.
+#[test]
+fn a_program_that_sets_tf_gets_one_single_step_exception() {
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let (code, x) = after_tf(&[]);
+        let (exe, at) = trace_program(&code, false, 0, |_| Ok(()));
+        let (value, hits) = traced("single_step", exe, core);
+        assert_eq!(value, 4);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_step(&hits[0], at + x + 1);
+    }
+}
+
+/// Sets TF in the context until there have been `count` exceptions.
+fn keep_tf(a: &mut CodeAssembler, count: i32) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(esi, count - 1)?;
+    a.jge(done)?;
+    a.or(dword_ptr(edx + CTX_EFLAGS), TF as i32)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+#[test]
+fn a_handler_that_keeps_tf_in_the_context_steps_on() {
+    let (code, x) = after_tf(&[]);
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 5));
+    let (value, hits) = traced("step_on", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 5, "{:X?}", hits);
+    for (i, hit) in hits[..4].iter().enumerate() {
+        assert_step(hit, at + x + 1 + i as u32);
+    }
+    // The RET's trap is past the RET, in the code that called it.
+    assert_eq!(hits[4].code, SINGLE_STEP);
+    assert_eq!(hits[4].eip, hits[4].address);
+    let outside = !(at..at + code.len() as u32).contains(&hits[4].eip);
+    assert!(outside, "{:X?}", hits[4]);
+}
+
+#[test]
+fn the_unhandled_exception_filter_gets_the_single_step_exception() {
+    let (code, x) = after_tf(&[]);
+    let (exe, at) = trace_program(&code, true, -1, |a| keep_tf(a, 3));
+    let (value, hits) = traced("step_filter", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 3, "{:X?}", hits);
+    for (i, hit) in hits.iter().enumerate() {
+        assert_step(hit, at + x + 1 + i as u32);
+    }
+}
+
+/// A single-step exception no handler takes ends the program as any
+/// exception does.
+#[test]
+fn a_single_step_exception_nobody_takes_ends_the_program() {
+    let (code, _) = after_tf(&[]);
+    let (exe, _) = trace_program(&code, false, 1, |_| Ok(()));
+    let (exit, text) = run("step_unhandled", exe);
+    assert_eq!(exit, 0xFF);
+    assert!(text.contains("debug exception"), "{}", text);
+    assert!(!text.contains("its stack is gone"), "{}", text);
+}
+
+/// Another exception with TF set leaves TF in its context, though not in
+/// the handler, so going on at the context raises the trap after the
+/// next instruction, whose context has TF clear.
+#[test]
+fn a_fault_with_tf_set_keeps_it_in_the_context() {
+    // MOV EAX, [0]; the handler goes past it.
+    let (code, x) = after_tf(&[0xA1, 0, 0, 0, 0]);
+    let (exe, at) = trace_program(&code, false, 0, |a| {
+        let mut done = a.create_label();
+        a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+        a.jne(done)?;
+        a.add(dword_ptr(edx + CTX_EIP), 5)?;
+        a.set_label(&mut done)?;
+        a.nop()
+    });
+    let (value, hits) = traced("step_fault", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, ACCESS_VIOLATION);
+    assert_eq!(hits[0].eip, at + x);
+    assert_eq!(hits[0].eflags & TF, TF, "{:X?}", hits[0]);
+    assert_eq!(hits[0].live & TF, 0, "{:X?}", hits[0]);
+    assert_step(&hits[1], at + x + 6);
+}
+
+#[test]
+fn an_int3_with_tf_set_keeps_it_in_the_context() {
+    let (code, x) = after_tf(&[0xCC]);
+    let (exe, at) = trace_program(&code, false, 0, |_| Ok(()));
+    let (value, hits) = traced("step_int3", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, BREAKPOINT);
+    assert_eq!(hits[0].eip, at + x + 1);
+    assert_eq!(hits[0].eflags & TF, TF, "{:X?}", hits[0]);
+    assert_eq!(hits[0].live & TF, 0, "{:X?}", hits[0]);
+    assert_step(&hits[1], at + x + 2);
+}
+
+/// A handler can start the stepping: TF set in the context of a
+/// breakpoint, the trap follows the next instruction.
+#[test]
+fn a_handler_sets_tf_in_a_breakpoints_context() {
+    let code = [&[0x31, 0xC0, 0xCC], INCS].concat();
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 2));
+    let (value, hits) = traced("step_from_int3", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[0].code, BREAKPOINT);
+    assert_eq!(hits[0].eflags & TF, 0);
+    assert_step(&hits[1], at + 4);
+}
+
+/// RaiseException called with TF set. Its entry traps, and the exception
+/// comes next, with TF in its context: the handler it enters runs with TF
+/// clear, so no trap comes from the first instruction of the handler.
+#[test]
+fn raise_exception_with_tf_set_does_not_trap_in_the_handler() {
+    let code = [RAISE_ARGS, SET_TF, CALL_EBX, INCS].concat();
+    let x = (RAISE_ARGS.len() + SET_TF.len()) as u32;
+    let (exe, at) = trace_program(&code, false, 0, |a| keep_tf(a, 2));
+    let (value, hits) = traced("step_raise", exe, CoreMode::Normal);
+    assert_eq!(value, 4);
+    assert_eq!(hits.len(), 3, "{:X?}", hits);
+    assert_eq!(hits[0].code, SINGLE_STEP, "{:X?}", hits[0]);
+    assert_eq!(hits[0].eip, hits[0].address);
+    let outside = !(at..at + code.len() as u32).contains(&hits[0].eip);
+    assert!(outside, "{:X?}", hits[0]);
+    assert_eq!(hits[1].code, RAISED, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eip, at + x + 2, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eflags & TF, TF, "{:X?}", hits[1]);
+    assert_eq!(hits[1].live & TF, 0, "{:X?}", hits[1]);
+    assert_step(&hits[2], at + x + 3);
+}
+
+/// `pushfd; pop eax; cld; ret`: the flags the code goes on with, in EAX.
+const FLAGS_IN_EAX: &[u8] = &[0x9C, 0x58, 0xFC, 0xC3];
+/// `std; mov eax, [0]`, five bytes to go past from the MOV.
+const STD_FAULT: &[u8] = &[0xFD, 0xA1, 0, 0, 0, 0];
+const FAULT: &[u8] = &[0xA1, 0, 0, 0, 0];
+
+/// In a handler: go past the MOV of `FAULT`.
+fn skip_fault(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    let mut done = a.create_label();
+    a.cmp(dword_ptr(ecx), ACCESS_VIOLATION as i32)?;
+    a.jne(done)?;
+    a.add(dword_ptr(edx + CTX_EIP), 5)?;
+    a.set_label(&mut done)?;
+    a.nop()
+}
+
+/// As Windows 98: DF in a handler and in a filter is clear whatever the
+/// program had, the context keeps it, and continuing puts it back.
+#[test]
+fn an_exception_clears_df_for_the_handler_and_continuing_restores_it() {
+    // PUSHFD; OR DWORD [ESP], TF | DF; POPFD; NOP.
+    let step: &[u8] = &[0x9C, 0x81, 0x0C, 0x24, 0, 5, 0, 0, 0x9D, 0x90];
+    let cases: [(&[&[u8]], bool, i32, u32); 5] = [
+        (&[STD_FAULT], false, 0, ACCESS_VIOLATION),
+        (&[&[0xFD, 0xCC]], false, 0, BREAKPOINT),
+        (&[step], false, 0, SINGLE_STEP),
+        (&[RAISE_ARGS, &[0xFD], CALL_EBX], false, 0, RAISED),
+        (&[STD_FAULT], true, -1, ACCESS_VIOLATION),
+    ];
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        for (parts, filter, answer, exception) in cases {
+            let code = [parts.concat().as_slice(), FLAGS_IN_EAX].concat();
+            let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+            let (value, hits) = traced("df_clear", exe, core);
+            assert_eq!(hits.len(), 1, "{:X?}", hits);
+            assert_eq!(hits[0].code, exception, "{:X?}", hits);
+            assert_eq!(hits[0].live & DF, 0, "{:X?}", hits);
+            assert_eq!(hits[0].eflags & DF, DF, "{:X?}", hits);
+            assert_eq!(value & DF, DF, "{:X}", value);
+        }
+    }
+}
+
+/// Continuing takes DF from the context: what a handler changes there,
+/// and not what it left in its own flags.
+#[test]
+fn continuing_takes_df_from_the_context() {
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.or(dword_ptr(edx + CTX_EFLAGS), DF as i32)
+    });
+    let (value, _) = traced("df_set", exe, CoreMode::Normal);
+    assert_eq!(value & DF, DF, "{:X}", value);
+    let code = [STD_FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.and(dword_ptr(edx + CTX_EFLAGS), !(DF as i32))
+    });
+    let (value, _) = traced("df_cleared", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+    let code = [FAULT, FLAGS_IN_EAX].concat();
+    let (exe, _) = trace_program(&code, false, 0, |a| {
+        skip_fault(a)?;
+        a.std()
+    });
+    let (value, _) = traced("df_left", exe, CoreMode::Normal);
+    assert_eq!(value & DF, 0, "{:X}", value);
+}
+
+/// A handler that sets DF and searches on: the next handler starts with
+/// DF set and the unhandled exception filter with it clear, as on
+/// Windows 98, and the context stays as the fault left it.
+#[test]
+fn df_a_handler_leaves_reaches_the_next_handler_and_not_the_filter() {
+    // A frame of its own, whose handler is `std; mov eax, 1; ret`, around
+    // the fault, and its removal.
+    let frame_on: &[u8] = &[
+        0xE8, 7, 0, 0, 0, 0xFD, 0xB8, 1, 0, 0, 0, 0xC3, 0x64, 0xFF, 0x35, 0, 0, 0, 0, 0x64, 0x89,
+        0x25, 0, 0, 0, 0,
+    ];
+    let frame_off: &[u8] = &[0x64, 0x8F, 0x05, 0, 0, 0, 0, 0x83, 0xC4, 0x04];
+    let code = [frame_on, FAULT, frame_off, FLAGS_IN_EAX].concat();
+    for (filter, answer, live) in [(false, 0, DF), (true, -1, 0)] {
+        let (exe, _) = trace_program(&code, filter, answer, skip_fault);
+        let (value, hits) = traced("df_search", exe, CoreMode::Normal);
+        assert_eq!(hits.len(), 1, "{:X?}", hits);
+        assert_eq!(hits[0].live & DF, live, "{:X?}", hits);
+        assert_eq!(hits[0].eflags & DF, 0, "{:X?}", hits);
+        assert_eq!(value & DF, 0, "{:X}", value);
+    }
+}
+
+/// Windows 98's exit code for a process an unhandled exception ends,
+/// whatever the exception, with a filter that says so or with none.
+#[test]
+fn an_unhandled_exception_gives_the_exit_code_ffffffff() {
+    let names: &[&str] = &[
+        "CreateProcessA",
+        "WaitForSingleObject",
+        "GetExitCodeProcess",
+        "ExitProcess",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // The command line, STARTUPINFO at 0x40, PROCESS_INFORMATION at 0x90,
+    // the exit code at 0xA0.
+    let mut data = b"C.EXE".to_vec();
+    data.resize(0xB0, 0);
+    data[0x40] = 68;
+    let parent = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        a.push(l.at(0x90) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        for _ in 0..6 {
+            a.push(0)?;
+        }
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.call(f("CreateProcessA"))?;
+        a.push(-1)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("WaitForSingleObject"))?;
+        a.push(l.at(0xA0) as i32)?;
+        a.push(dword_ptr(l.at(0x90)))?;
+        a.call(f("GetExitCodeProcess"))?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(l.at(0xA0)), -1)?;
+        a.sete(al)?;
+        a.push(eax)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (step, _) = after_tf(&[]);
+    let fault = [&[0xA1, 0, 0, 0, 0], INCS].concat();
+    let raised = [RAISE_ARGS, CALL_EBX, INCS].concat();
+    // ESP on a page that isn't there: no handler can run.
+    let no_stack = [&[0xBC, 0x10, 0, 0, 0, 0xA1, 0, 0, 0, 0], INCS].concat();
+    for code in [&step, &fault, &raised, &no_stack] {
+        for filter in [false, true] {
+            let (child, _) = trace_program(code, filter, 1, |_| Ok(()));
+            let files = [("T.EXE", parent.clone()), ("C.EXE", child)];
+            let mut cpu = machine_with("unhandled_exit_code", &files);
+            assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+            assert_eq!(cpu.errorlevel, 1, "{}", printed(&cpu));
+        }
+    }
 }

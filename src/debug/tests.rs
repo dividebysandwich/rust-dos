@@ -1147,6 +1147,7 @@ fn underruns_and_frame_times_are_told_in_ms() {
     host.frame(Duration::from_millis(32), 0);
 
     let underruns = reply(&mut cpu, &mut hub, Cmd::Underruns).unwrap();
+    assert_eq!(underruns["audio_driver"], Value::Null, "no device here");
     assert_eq!(underruns["events"], 1);
     assert_eq!(underruns["dry_checks"], 1);
     let record = &underruns["log"][0];

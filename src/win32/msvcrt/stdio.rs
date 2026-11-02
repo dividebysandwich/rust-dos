@@ -1,7 +1,7 @@
 //! Streams: FILE structures in the program's memory, laid out as MSVC's
 //! `_iobuf`, since programs' getc and putc macros work on their `_ptr`
 //! and `_cnt` themselves and call `_filbuf` and `_flsbuf` when the buffer
-//! runs out. The buffers are on the process heap; a stream on a device
+//! runs out. The buffers are on the runtime's heap; a stream on a device
 //! (the console) has none and writes at once. The printf and scanf
 //! families are here too, on format.rs.
 

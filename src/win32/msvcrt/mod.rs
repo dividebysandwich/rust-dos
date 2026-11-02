@@ -1,8 +1,10 @@
 //! MSVCRT.DLL: the C runtime of Visual C++ 4.2 to 6, which programs built
 //! with `/MD` import instead of linking their own. Its functions are
 //! written in Rust on what KERNEL32 and DOS have; its state is in the
-//! DLL's data section and on the process heap, in the program's memory,
-//! so it is per process and goes into saved states with the memory.
+//! DLL's data section and on a heap of its own, in the program's memory,
+//! so it is per process and goes into saved states with the memory. The
+//! heap goes at the last FreeLibrary (`term`), with every block on it, as
+//! Windows 98 destroys the runtime's heap.
 //!
 //! The variables programs import as data (`_iob`, `_environ`, `_pctype`,
 //! `__mb_cur_max` and the others) are in that section, filled for each
@@ -28,6 +30,8 @@ mod time;
 pub(super) use stdio::vsnprintf;
 
 use super::call::{self, Call};
+use super::heap::Heap;
+use super::memory::{Memory, PAGE};
 use super::stubs::{Dll, Handler, Var};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -40,6 +44,7 @@ pub static DLL: Dll = Dll {
     apis: apis::APIS,
     vars: VARS,
     init: Some(init),
+    term: Some(term),
     vtables: &[],
 };
 
@@ -175,6 +180,8 @@ const S_MBCP: u32 = 0x28;
 const S_START: u32 = 0x2C;
 /// tmpnam's calls so far.
 const S_TMPNAM_COUNT: u32 = 0x30;
+/// The handle of the runtime's heap.
+const S_HEAP: u32 = 0x34;
 const S_SIGNALS: u32 = 0x80;
 
 /// A thread's block: its errno and _doserrno, rand's seed, strtok's
@@ -475,27 +482,46 @@ fn set_dos_error(cpu: &mut Cpu, code: u32) {
     set_errno(cpu, errno);
 }
 
-/// A block of `size` bytes from the process heap, as malloc gives them.
+/// What `f` gives for the runtime's heap. None when it has gone: a
+/// program still calls here through a pointer it kept after the last
+/// FreeLibrary, or it destroyed the heap itself.
+fn with_heap<T>(
+    cpu: &mut Cpu,
+    f: impl FnOnce(&mut Heap, &mut Memory, &mut Bus) -> T,
+) -> Option<T> {
+    let handle = state(cpu, S_HEAP);
+    super::with_process(cpu, |p, bus| {
+        let heap = p.heaps.iter_mut().find(|h| h.base == handle)?;
+        Some(f(heap, &mut p.memory, bus))
+    })
+}
+
+/// A block of `size` bytes from the runtime's heap, as malloc gives them.
 fn heap_alloc(cpu: &mut Cpu, size: u32) -> Option<u32> {
-    super::with_process(cpu, |p, bus| p.heap.alloc(&mut p.memory, bus, size))
+    with_heap(cpu, |heap, memory, bus| heap.alloc(memory, bus, size)).flatten()
 }
 
 fn heap_free(cpu: &mut Cpu, at: u32) -> bool {
-    super::process(cpu).heap.free(at)
+    with_heap(cpu, |heap, _, _| heap.free(at)).unwrap_or(false)
 }
 
 fn heap_size(cpu: &mut Cpu, at: u32) -> Option<u32> {
-    super::process(cpu).heap.size(at)
+    with_heap(cpu, |heap, _, _| heap.size(at)).flatten()
+}
+
+/// Whether the block at `at` could be made `size` bytes long where it is.
+fn heap_resize(cpu: &mut Cpu, at: u32, size: u32) -> bool {
+    with_heap(cpu, |heap, memory, bus| {
+        heap.resize_in_place(memory, bus, at, size)
+    })
+    .unwrap_or(false)
 }
 
 /// The block at `at` made `size` bytes long, moved if it has to be: its
 /// address, or None, the block as it was, when there is no room.
 fn heap_realloc(cpu: &mut Cpu, at: u32, size: u32) -> Option<u32> {
     let old = heap_size(cpu, at)?;
-    let in_place = super::with_process(cpu, |p, bus| {
-        p.heap.resize_in_place(&mut p.memory, bus, at, size)
-    });
-    if in_place {
+    if heap_resize(cpu, at, size) {
         return Some(at);
     }
     let to = heap_alloc(cpu, size)?;
@@ -662,10 +688,14 @@ fn error_text(errno: u32) -> &'static str {
 /// standard streams and descriptors, the character tables, the version,
 /// the command line split into arguments and the environment.
 fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
+    let created = Heap::create(&mut process.memory, bus, PAGE, 0)?;
+    let heap = created.base;
+    process.heaps.push(created);
     if process.exception_filter == 0 {
         process.exception_filter = startup::cxx_unhandled_filter_address();
     }
-    let mut w = Writer { bus, process };
+    let mut w = Writer { bus, process, heap };
+    w.u32(state_at(S_HEAP), heap)?;
     // The standard streams: stdin reads, stdout and stderr write.
     for (i, flag) in [stdio::IOREAD, stdio::IOWRT, stdio::IOWRT]
         .into_iter()
@@ -823,11 +853,27 @@ fn init(bus: &mut Bus, process: &mut super::Process) -> Option<()> {
     w.u32(var_at(V_INITENV), environ)
 }
 
+/// The last FreeLibrary: the runtime's heap goes, with what it held. The
+/// blocks `init` took and those the program left go with it. Streams
+/// aren't flushed and their files stay open, as on Windows 98. The filter
+/// `init` set goes too, as MSVCRT.DLL's detach restores the one before it.
+fn term(bus: &mut Bus, process: &mut super::Process) {
+    if process.exception_filter == startup::cxx_unhandled_filter_address() {
+        process.exception_filter = 0;
+    }
+    let handle = process.memory.read_32(bus, state_at(S_HEAP));
+    if let Some(i) = process.heaps.iter().position(|h| Some(h.base) == handle) {
+        let mut heap = process.heaps.remove(i);
+        heap.destroy(&mut process.memory, bus);
+    }
+}
+
 /// Writes into a process that isn't the running one, through its own
-/// page tables, and takes blocks from its heap.
+/// page tables, and takes blocks from the runtime's heap there.
 struct Writer<'a> {
     bus: &'a mut Bus,
     process: &'a mut super::Process,
+    heap: u32,
 }
 
 impl Writer<'_> {
@@ -841,7 +887,8 @@ impl Writer<'_> {
 
     fn alloc(&mut self, size: u32) -> Option<u32> {
         let p = &mut *self.process;
-        p.heap.alloc(&mut p.memory, self.bus, size)
+        let heap = p.heaps.iter_mut().find(|h| h.base == self.heap)?;
+        heap.alloc(&mut p.memory, self.bus, size)
     }
 
     /// A copy of `text` and a 0 on the heap.

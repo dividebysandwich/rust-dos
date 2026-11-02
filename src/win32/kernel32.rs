@@ -17,7 +17,7 @@ mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
-pub(in crate::win32) use profile::profile_value;
+pub(in crate::win32) use profile::{profile_int, profile_value};
 mod sort;
 mod sync;
 mod text;
@@ -49,6 +49,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -627,6 +628,7 @@ static APIS: &[Api] = &[
     stdcall("LoadLibrary16", 35, 1, flat::load_library16),
     stdcall("FreeLibrary16", 36, 1, flat::free_library16),
     stdcall("GetProcAddress16", 37, 2, flat::get_proc_address16),
+    stdcall("SetProcessShutdownParameters", 734, 2, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -645,9 +647,10 @@ pub fn has_environment_variable(cpu: &mut Cpu, name: &str) -> bool {
     variable(super::process(cpu), name).is_some()
 }
 
-/// Let go of the file mappings no handle or view holds any more.
-pub fn sweep_mappings(cpu: &mut Cpu) {
-    mapping::sweep(cpu);
+/// Let go of the file mappings no handle or view holds any more. Whether
+/// that changed anything.
+pub fn sweep_mappings(cpu: &mut Cpu) -> bool {
+    mapping::sweep(cpu)
 }
 
 /// Committed pages for a built-in DLL's own use, readable and writable
@@ -1173,7 +1176,7 @@ fn set_last_error(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Milliseconds since the machine started, by its clock.
 fn get_tick_count(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some((cpu.bus.clock.now_micros() / 1000) as u32)
+    Some(crate::idle::tick_count(cpu))
 }
 
 /// The environment variable `name`'s place in the environment: names are

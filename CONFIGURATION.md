@@ -429,23 +429,25 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   games: DirectDraw in full screen on the card's VESA modes or in a window,
   DirectSound and wave audio in the `windows` mixer channel, MIDI to the
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
-  keyboard, mouse and joystick through DirectInput; DMUSIC, DMIME, DMLOADER,
+  keyboard, mouse and joystick through DirectInput, which DINPUT8 is for
+  DirectX 8 games; AVIFIL32 and MSVFW32 read AVI files and decompress and draw
+  their frames, with Indeo Video 3 and 5 as codecs; DMUSIC, DMIME, DMLOADER,
   DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
   synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3, and
   OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's pixel
-  formats, SwapBuffers and gamma ramp, and on a Voodoo2 full screen as
-  3dfx's Voodoo2 OpenGL driver had it. A program that calls a function they
-  don't have ends with a message naming it, and one that needs a DLL that is
-  neither among them nor beside it is refused. The registry is kept in
-  `C:\REGISTRY.REG`, which is made the first time a program uses it, so a
-  host folder mounted as C: gets that file. The built-in DLLs show as
-  read-only files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and
-  `GLIDE2X.DLL` is among them only with a 3dfx card. A Windows 3.1 program
-  (an NE .EXE) runs too, as Windows 95 runs it: its KERNEL, USER, GDI and
-  other 16-bit modules are written into the emulator as well and go on to
-  the 32-bit ones, and its own DLLs, such as Visual Basic's runtimes, load
-  from beside it. Off, such a program runs its DOS stub, which says it needs
-  Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
+  formats, SwapBuffers and gamma ramp, and on a Voodoo2 full screen as 3dfx's
+  Voodoo2 OpenGL driver had it. A program that calls a function they don't
+  have ends with a message naming it, and one that needs a DLL that is neither
+  among them nor beside it is refused. The registry is kept in
+  `C:\REGISTRY.REG`, which is made the first time a program uses it, so a host
+  folder mounted as C: gets that file. The built-in DLLs show as read-only
+  files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and `GLIDE2X.DLL` is
+  among them only with a 3dfx card. A Windows 3.1 program (an NE .EXE) runs
+  too, as Windows 95 runs it: its KERNEL, USER, GDI and other 16-bit modules
+  are written into the emulator as well and go on to the 32-bit ones, and its
+  own DLLs, such as Visual Basic's runtimes, load from beside it. Off, such a
+  program runs its DOS stub, which says it needs Windows. The plan is in
+  [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
   `lib/wine/i386-windows` folder. A DLL a program needs that is neither
@@ -583,14 +585,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   BIOS, waiting for the vertical retrace, for the timer's tick count to
   change, for a time it reads from the PIT's count, as Windows 98's
   QueryPerformanceCounter does, or for the next millisecond of the
-  built-in Windows's GetTickCount or timeGetTime. A loop is skipped only
-  after the emulator has seen one of its passes come back with the
-  registers and the memory it wrote as they were, or as the same
-  function of the PIT's count it read, and with nothing else to tell the
-  passes apart (it reads no device but the video card's status, whose
-  bits it looks at only through a mask, and the PIT's count, and calls
-  no service but those clocks), so programs see the same as without it.
-  `false` runs every pass.
+  built-in Windows's GetTickCount, timeGetTime or Windows 3.1's
+  GetCurrentTime, or for the next timer event of a PeekMessage that
+  finds nothing, as Johnny Castaway's animation loop does. A loop is
+  skipped only after the emulator has seen one of its passes come back
+  with the registers and the memory it wrote as they were, or as the
+  same function of the PIT's count it read, and with nothing else to
+  tell the passes apart (it reads no device but the video card's status,
+  whose bits it looks at only through a mask, and the PIT's count, and
+  calls no service of the built-in Windows but the clocks and
+  PeekMessage), so programs see the same as without it. `false` runs
+  every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
@@ -751,6 +756,20 @@ programs set.
   dry, without the effect, `100` the effect alone, and at `50` (the
   default) both play in full; below 50 the effect fades out, above it
   the dry music does.
+* `audio_output` (`--audio-output`) is what plays the sound. It is read
+  at startup.
+  * `auto` (the default) plays on SDL's sound device. A run with no window
+    (`--hidden`, or `SDL_VIDEODRIVER=dummy`) takes the null output
+    instead, unless `SDL_AUDIODRIVER` names a driver, so nothing that
+    runs unseen comes out of the speakers.
+  * `sdl` plays on SDL's sound device, with a window or without.
+  * `null` opens no SDL sound device at all. Nothing plays, and the queue
+    empties at exactly 44,100 frames a second by the host's clock.
+
+  With no sound device to open, `auto` and `sdl` run silent on the null
+  output too. `SDL_AUDIODRIVER=dummy` picks SDL's own dummy driver, which
+  doesn't keep real time: the log warns about it, and no measurement may
+  use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
 * `blocksize` and `prebuffer` set how much sound waits for the host's
   sound device, and so how late it is heard: `blocksize` is the device's
   buffer in frames, `128`, `256`, `512` (the default, about 12 ms),
@@ -3529,6 +3548,8 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
 | `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
+| `--audio-output OUTPUT` | What plays the sound: `auto`, `sdl` or `null` (`audio_output` in [`[mixer]`](#mixer)) |
+| `--mute` | Start with the sound off, as Ctrl+F8 does: the sound device plays silence, and the debug server's stream and recordings keep the sound |
 | `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
 | `--vr-desktop` | Show the picture in a 3D scene in the window (`mode=desktop`) |
 | `--vr-scene FILE` | The 3D scene, a glTF file from Blender (`scene`); on its own it means `--vr-desktop` |

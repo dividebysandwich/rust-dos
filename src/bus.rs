@@ -372,8 +372,7 @@ pub struct Bus {
     audio_settled: bool,
     /// How `pump_audio` holds the output device's queue at its target.
     pub audio_feed: crate::audio::Feed,
-    /// Resampling position and last frame of the Sound Blaster's output.
-    sb_phase: f64,
+    /// The Sound Blaster's last frame, kept for a frame it has none for.
     sb_frame: (i16, i16),
     /// Frames left of a BEL beep.
     pub beep_frames: u32,
@@ -742,6 +741,7 @@ impl Bus {
             && vga.latched_start_addr == 0
             && vga.split_row() >= 200
             && vga.pixel_panning() == 0
+            && vga.display_address_mask() == vga.plane_size() - 1
     }
 
     fn mode13_dirty_rows(&self, offset: usize) -> Option<(u32, u32)> {
@@ -1619,6 +1619,12 @@ impl Bus {
             return;
         }
         self.audio_frames = target;
+        // The Sound Blaster made its frames up to `target` too: those
+        // before the span mixed now (skipped above) go.
+        if let Some(sb) = &mut self.sb {
+            let extra = sb.out.len().saturating_sub(frames);
+            sb.out.drain(..extra);
+        }
         // Silence from every source, with the filters and effects run out
         // to exact zeros (the last frames mixed were): the frames are those
         // zeros, without mixing them one by one.
@@ -1626,6 +1632,9 @@ impl Bus {
         if quiet && self.audio_settled {
             if let Some(gus) = &mut self.gus {
                 gus.skip_idle(frames, crate::opl::RATE);
+            }
+            if let Some(sb) = &mut self.sb {
+                sb.out.clear();
             }
             self.audio_out.extend(std::iter::repeat_n(0, 2 * frames));
             self.trim_audio();
@@ -1645,14 +1654,8 @@ impl Bus {
             let (wl, wr) = self.win32.cd_gain();
             (cl * wl, cr * wr)
         };
-        let (sb_on, sb_step, dac) = match &self.sb {
-            Some(sb) => (
-                sb.speaker_on || sb.config.model.is_sb16(),
-                sb.out_rate as f64 / rate as f64,
-                sb.dac,
-            ),
-            None => (false, 0.0, 0),
-        };
+        let sb_on =
+            self.sb.as_ref().is_some_and(|sb| sb.speaker_on || sb.config.model.is_sb16());
         const SPEAKER: f32 = 3000.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its
@@ -1701,19 +1704,10 @@ impl Bus {
             let (ol, or) = self.opl.render();
             self.mixer.add(&mut mix, &mut peaks, Channel::Fm, (ol as f32 * fl, or as f32 * fr));
             if let Some(sb) = &mut self.sb {
-                if sb.out.is_empty() && self.sb_phase < 1.0 {
-                    self.sb_frame = (dac, dac);
-                }
-                self.sb_phase += sb_step;
-                while self.sb_phase >= 1.0 {
-                    self.sb_phase -= 1.0;
-                    match sb.out.pop_front() {
-                        Some(f) => self.sb_frame = f,
-                        None => {
-                            self.sb_phase = 0.0;
-                            break;
-                        }
-                    }
+                // The DAC's level at this frame's time, as the card worked
+                // it out from its own clock (`SoundBlaster::advance`).
+                if let Some(f) = sb.out.pop_front() {
+                    self.sb_frame = f;
                 }
                 if sb_on {
                     let mut frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
@@ -1778,7 +1772,7 @@ impl Bus {
         !speaker
             && self.beep_frames == 0
             && self.opl.is_idle()
-            && self.sb.as_ref().is_none_or(|sb| sb.out.is_empty() && sb.dac == 0)
+            && self.sb.as_ref().is_none_or(|sb| sb.is_idle())
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
@@ -1799,15 +1793,6 @@ impl Bus {
         if self.audio_out.len() > max {
             let extra = self.audio_out.len() - max;
             self.audio_out.drain(..extra);
-        }
-        // The DSP's output gets ahead when its rate and ours round
-        // differently; keep at most a tenth of a second queued.
-        if let Some(sb) = &mut self.sb {
-            let keep = (sb.out_rate / 10).max(64) as usize;
-            if sb.out.len() > keep {
-                let extra = sb.out.len() - keep;
-                sb.out.drain(..extra);
-            }
         }
         if let Some(gus) = &mut self.gus {
             gus.trim_output();
@@ -2764,6 +2749,12 @@ impl Bus {
             Some(v) if v.output() => v.timing(),
             _ => self.vga.timing(),
         }
+    }
+
+    /// `Clock::past_blanking` for the picture the monitor shows.
+    pub fn past_blanking(&mut self, end: u64) -> u64 {
+        let refresh = self.refresh_timing();
+        self.clock.past_blanking(end, &refresh)
     }
 
     /// Latch the display Start Address if emulated time has passed the

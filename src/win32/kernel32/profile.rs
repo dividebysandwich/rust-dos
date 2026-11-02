@@ -375,9 +375,15 @@ fn get_int(
     let section = read_string(cpu, section)?;
     let key = read_string(cpu, key)?;
     let sections = load(cpu, file.as_deref());
-    match find(&sections, &section).and_then(|s| value_of(s, &key)) {
-        Some(value) if !value.is_empty() && !key.is_empty() => Some(parse_int(value)),
-        _ => Some(default),
+    Some(int_in(&sections, &section, &key, default))
+}
+
+/// The number that `key` has in `section` of `sections`, or `default`
+/// when the section has no such key or its value is empty.
+fn int_in(sections: &[Section], section: &[u8], key: &[u8], default: u32) -> u32 {
+    match find(sections, section).and_then(|s| value_of(s, key)) {
+        Some(value) if !value.is_empty() && !key.is_empty() => parse_int(value),
+        _ => default,
     }
 }
 
@@ -457,6 +463,19 @@ pub(in crate::win32) fn profile_value(
     find(&sections, section)
         .and_then(|s| value_of(s, key))
         .map(<[u8]>::to_vec)
+}
+
+/// `profile_value` as a number, as GetPrivateProfileIntA reads it:
+/// `default` when the file doesn't have the key or its value is empty.
+pub(in crate::win32) fn profile_int(
+    cpu: &mut Cpu,
+    file: &[u8],
+    section: &[u8],
+    key: &[u8],
+    default: u32,
+) -> u32 {
+    let sections = load(cpu, Some(file));
+    int_in(&sections, section, key, default)
 }
 
 /// GetPrivateProfileSectionNamesA(buffer, size, file).

@@ -29,6 +29,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -412,7 +413,7 @@ fn builtin_resource(name: &str) -> Resource {
         "MSVCRT" => [6, 0, 8168, 0],
         "GLIDE2X" => [2, 46, 0, 0],
         // DirectX 8.1's.
-        "D3D8" => [4, 8, 1, 881],
+        "D3D8" | "DINPUT8" => [4, 8, 1, 881],
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
         _ => [4, 0, 0, 950],
