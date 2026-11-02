@@ -28,14 +28,19 @@ impl DiskController {
     /// Logical path components of `rest` on `drive`, applying the drive's
     /// current directory for relative paths and folding "." / "..".
     /// Trailing spaces are the padding of a name DOS packs into 8 and 3
-    /// characters, and go: Comanche opens "LH66.RLE    ".
+    /// characters, and go: Comanche opens "LH66.RLE    ". So does a dot
+    /// that ends a name, which leaves its extension empty: DOS packs
+    /// "COLORS." as COLORS, and Menzoberranzan opens its palette by that
+    /// name. The host can't be left to drop it: a drive's root is a
+    /// verbatim path on Windows (`\\?\`), under which the dot stays, and
+    /// other hosts keep it too.
     pub(super) fn logical_components<'a>(drive: &'a Drive, rest: &'a str) -> Vec<&'a str> {
         let mut components: Vec<&str> = Vec::new();
         if !rest.starts_with('\\') {
             components.extend(drive.current_dir.split('\\').filter(|p| !p.is_empty()));
         }
         for part in rest.split('\\') {
-            let part = match part.trim_end_matches(' ') {
+            let part = match part.trim_end_matches([' ', '.']) {
                 "" => part,
                 trimmed => trimmed,
             };
@@ -131,11 +136,12 @@ impl DiskController {
     /// Whether a folder's entries settle that the path component `part`
     /// isn't in it when none matches it. They leave out names starting
     /// with a dot, and the host may know a name by a spelling they don't
-    /// match: Windows drops a dot that ends it ("README." is "README"),
-    /// has short names of its own (with a "~"), and Windows and macOS fold
-    /// the case of letters beyond ASCII. Such names go to the host.
+    /// match: Windows has short names of its own (with a "~"), and Windows
+    /// and macOS fold the case of letters beyond ASCII. Such names go to
+    /// the host. A dot that ends a name is gone by now
+    /// (`logical_components`).
     fn entries_settle(part: &str) -> bool {
-        !part.starts_with('.') && !part.ends_with('.') && !part.contains('~') && part.is_ascii()
+        !part.starts_with('.') && !part.contains('~') && part.is_ascii()
     }
 
     /// `locate`, and whether a component of the path isn't among its
