@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 23;
+const WIN32_VERSION: u16 = 24;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -776,6 +776,7 @@ mod tests {
         (21, 0x4413_3346_5643_A054), // Video for Windows, last of three
         (22, 0x1329_1DAD_33BC_DC4A), // dinput's app_data
         (23, 0x1329_1DAD_33BC_DC4A), // the mixer's seven lines
+        (24, 0xF61B_D786_C674_4FD3), // WNASPI32 and its pending requests
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

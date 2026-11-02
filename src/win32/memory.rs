@@ -453,6 +453,27 @@ pub fn free_page(bus: &mut Bus, phys: u32) {
     }
 }
 
+/// Write `data` at `lin` in the memory of the process `pid`, through its
+/// own page tables, whichever process runs and whether or not a service
+/// is running: for work the system finishes later, outside the call that
+/// asked for it. Bytes on pages the process hasn't mapped are left out.
+pub fn write_process_bytes(bus: &mut Bus, pid: u32, lin: u32, data: &[u8]) {
+    let Some(p) = bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return;
+    };
+    let mut done = 0;
+    while done < data.len() {
+        let at = lin.wrapping_add(done as u32);
+        let run = ((PAGE - (at & (PAGE - 1))) as usize).min(data.len() - done);
+        if let Some(phys) = bus.win32.processes[p].memory.translate(bus, at) {
+            for (i, &byte) in data[done..done + run].iter().enumerate() {
+                bus.write_8(phys as usize + i, byte);
+            }
+        }
+        done += run;
+    }
+}
+
 crate::state_fields!(Pool {
     base,
     len,

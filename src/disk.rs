@@ -181,6 +181,23 @@ fn is_short_name(name: &str) -> bool {
         && stem.chars().chain(ext.chars()).all(dos_name_char)
 }
 
+/// The name a new file or directory gets on a host drive when a program
+/// asks for `name`. DOS uppercases an 8.3 name. A longer name keeps the
+/// case it was given, as Windows 9x keeps a name from a long-name call
+/// (Win32's CreateFileA, CreateDirectoryA and MoveFileA, or INT 21h's
+/// 71xxh): Oni's setup makes "level0_Final.dat", and Oni reads the
+/// "Final" in the name back, case and all. The host path doesn't know
+/// which call asked, so DOS's own calls, which on DOS would cut such a
+/// name to 8.3, make it under the same name; what DOS programs see of it
+/// is its generated 8.3 name either way.
+pub(crate) fn new_entry_name(name: &str) -> String {
+    if is_short_name(name) {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_string()
+    }
+}
+
 /// The DOS names of the entries of a directory, given in the order that
 /// numbers them, as DOSBox and Windows make them: names that are 8.3
 /// already are only uppercased; the others lose their spaces and other
