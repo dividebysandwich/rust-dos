@@ -91,6 +91,11 @@ impl Reader<'_> {
                 out.push(' ');
             }
             out.push_str(&ansi(word));
+            // A table without a tree reads no bits for its one word, and
+            // would give it forever.
+            if table.first() != Some(&0x80) {
+                break;
+            }
         }
         Some(out)
     }
@@ -676,5 +681,23 @@ impl Members<'_, '_> {
             p = self.block + next as usize;
         }
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Reader;
+
+    #[test]
+    fn a_help_table_of_one_word_gives_it_once() {
+        // The table's length, its size, a leaf for "Hi" with no tree
+        // above it, and the string's bits.
+        let b = [0, 0, 4, 0, 0, 0, 1, b'H', b'i', 0, 0xFF, 0xFF];
+        let r = Reader {
+            b: &b,
+            names: 0,
+            help: 0,
+        };
+        assert_eq!(r.help_string(10, 2).as_deref(), Some("Hi"));
     }
 }

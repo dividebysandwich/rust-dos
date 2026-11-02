@@ -27,7 +27,7 @@
 //! Copyright 2013 Andrew Eikum for CodeWeavers
 
 use super::model::*;
-use super::{desc, dll_index, msft, sltg, stdole, vtable};
+use super::{desc, dll_index, insert, msft, sltg, stdole, vtable};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, Guid, S_OK};
 use crate::win32::registry::{self, HKEY_CLASSES_ROOT, Open, REG_SZ};
@@ -67,6 +67,10 @@ const DISPATCH_VFT: u16 = 28;
 /// from, plus this times its place among the interfaces it inherits
 /// from, counted from IUnknown's as 1.
 const LEVEL_SHIFT: u32 = 24;
+
+/// The most interfaces a type is taken to inherit from, one after
+/// another: a malformed library can make an interface its own base.
+const MAX_BASES: usize = 16;
 
 /// A library the program has loaded.
 #[derive(Clone, Debug, Default)]
@@ -207,24 +211,17 @@ fn release_lib(cpu: &mut Cpu, lib: u32) -> u32 {
     refs
 }
 
-/// The id of a free slot of `table`, filled with `item`.
-fn insert<T>(table: &mut Vec<Option<T>>, item: T) -> usize {
-    match table.iter().position(Option::is_none) {
-        Some(i) => {
-            table[i] = Some(item);
-            i
-        }
-        None => {
-            table.push(Some(item));
-            table.len() - 1
-        }
-    }
-}
-
-/// A new library object of the process, with one reference; None when
-/// memory is out.
-fn new_lib(cpu: &mut Cpu, path: String, resource: u32, builtin: u16, data: Vec<u8>) -> Option<u32> {
-    let parsed = Arc::new(parse(builtin, &data)?);
+/// A new library object of the process, with one reference: Err with
+/// TYPE_E_CANTLOADLIBRARY when `data` isn't a library, E_OUTOFMEMORY
+/// when memory is out.
+fn new_lib(
+    cpu: &mut Cpu,
+    path: String,
+    resource: u32,
+    builtin: u16,
+    data: Vec<u8>,
+) -> Result<u32, u32> {
+    let parsed = Arc::new(parse(builtin, &data).ok_or(TYPE_E_CANTLOADLIBRARY)?);
     let lib = Lib {
         pid: pid(cpu),
         refs: 1,
@@ -243,10 +240,10 @@ fn new_lib(cpu: &mut Cpu, path: String, resource: u32, builtin: u16, data: Vec<u
     let Some(iface) = com::new_interface(cpu, dll_index(), vtable("ITypeLib"), id as u32, 0) else {
         state(cpu).libs[id] = None;
         state(cpu).parsed.0[id] = None;
-        return None;
+        return Err(E_OUTOFMEMORY);
     };
     lib_mut(cpu, id as u32).iface = iface;
-    Some(id as u32)
+    Ok(id as u32)
 }
 
 /// The process's library object of the file `path` (in capitals) and
@@ -268,7 +265,7 @@ fn builtin_lib(cpu: &mut Cpu, major: u16) -> Result<u32, u32> {
     if let Some(id) = find_lib(cpu, "", 0, major) {
         return Ok(id);
     }
-    new_lib(cpu, String::new(), 0, major, Vec::new()).ok_or(E_OUTOFMEMORY)
+    new_lib(cpu, String::new(), 0, major, Vec::new())
 }
 
 /// The type library in the file `file`: its TYPELIB resource `resource`
@@ -325,10 +322,7 @@ fn load(cpu: &mut Cpu, name: &str) -> Result<(u32, String), u32> {
     let (file, _, _) =
         crate::win32::kernel32::read_path(cpu, &full).map_err(|_| TYPE_E_CANTLOADLIBRARY)?;
     let data = library_bytes(file, resource).ok_or(TYPE_E_CANTLOADLIBRARY)?;
-    if parse(0, &data).is_none() {
-        return Err(TYPE_E_CANTLOADLIBRARY);
-    }
-    let id = new_lib(cpu, key, resource, 0, data).ok_or(E_OUTOFMEMORY)?;
+    let id = new_lib(cpu, key, resource, 0, data)?;
     Ok((id, full))
 }
 
@@ -414,7 +408,7 @@ pub(super) fn bases_of<L: Clone, I: Copy>(
 ) -> Vec<(L, I)> {
     let mut chain: Vec<(L, I)> = Vec::new();
     let mut at = (lib, index);
-    while chain.len() < 16 {
+    while chain.len() < MAX_BASES {
         let Some(next) = base(&at.0, at.1) else {
             break;
         };
@@ -916,11 +910,8 @@ fn set_string(reg: &mut registry::Registry, key: u32, name: &str, value: &str) {
 /// marshals: its dispinterfaces, duals and [oleautomation] interfaces.
 fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 {
     let m = model(cpu, lib);
-    let platform = match m.syskind {
-        0 => "win16",
-        1 => "win32",
-        3 => "win64",
-        _ => return E_FAIL,
+    let Some(platform) = platform(m.syskind) else {
+        return E_FAIL;
     };
     let reg = registry::get(cpu);
     let Open::Key(root) = reg.open(HKEY_CLASSES_ROOT, 0) else {
@@ -980,6 +971,17 @@ fn register_lib(cpu: &mut Cpu, lib: u32, path: &str, help: Option<&str>) -> u32 
     S_OK
 }
 
+/// The registry's key of the SYSKIND `syskind` under a library's
+/// language.
+fn platform(syskind: u32) -> Option<&'static str> {
+    match syskind {
+        0 => Some("win16"),
+        1 => Some("win32"),
+        3 => Some("win64"),
+        _ => None,
+    }
+}
+
 /// The directory of the library's file `path`: without its file name and
 /// a resource's number after it.
 fn directory_of(path: &str) -> String {
@@ -994,9 +996,10 @@ fn directory_of(path: &str) -> String {
 }
 
 /// UnRegisterTypeLib(guid, major, minor, lcid, syskind): the library's
-/// version key and its interfaces' keys that name it go.
+/// path for the language and platform and its interfaces' keys that
+/// name it go.
 pub fn unregister_type_lib(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let &[guid, major, minor, lcid, _syskind] = args else {
+    let &[guid, major, minor, lcid, syskind] = args else {
         unreachable!()
     };
     let Some(guid) = Guid::read(cpu, guid) else {
@@ -1036,8 +1039,26 @@ pub fn unregister_type_lib(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             reg.delete(key);
         }
     }
-    if let Some(key) = reg.find(root, &format!("TypeLib\\{libid}\\{major:x}.{minor:x}")) {
-        reg.delete(key);
+    // The path of the language and platform asked for goes, and the
+    // version only when no other language or platform has a path there,
+    // as Wine has it.
+    if let Some(version) = reg.find(root, &format!("TypeLib\\{libid}\\{major:x}.{minor:x}")) {
+        let lcid_key = reg.find(version, &format!("{lcid:x}"));
+        if let (Some(lcid_key), Some(platform)) = (lcid_key, platform(syskind))
+            && let Some(file) = reg.find(lcid_key, platform)
+        {
+            reg.delete(file);
+            if reg.key(lcid_key).children.is_empty() {
+                reg.delete(lcid_key);
+            }
+        }
+        let others = reg.key(version).children.iter().any(|&k| {
+            let name = &reg.key(k).name;
+            !name.eq_ignore_ascii_case("FLAGS") && !name.eq_ignore_ascii_case("HELPDIR")
+        });
+        if !others {
+            reg.delete(version);
+        }
     }
     if let Some(key) = reg.find(root, &format!("TypeLib\\{libid}"))
         && reg.key(key).children.is_empty()
@@ -1461,13 +1482,27 @@ pub fn get_var_desc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Look `find` up in the type of `ctx`, and if it isn't there in the
 /// first interface it implements or inherits from, and so on.
 fn search<T>(cpu: &mut Cpu, ctx: &Ctx, find: &impl Fn(&View) -> Option<T>) -> Option<T> {
+    search_from(cpu, ctx, find, 0)
+}
+
+/// `search` with `depth` interfaces looked through already: it stops
+/// after `MAX_BASES` of them, as `bases_of` does.
+fn search_from<T>(
+    cpu: &mut Cpu,
+    ctx: &Ctx,
+    find: &impl Fn(&View) -> Option<T>,
+    depth: usize,
+) -> Option<T> {
     let v = view(cpu, ctx);
     if let Some(found) = find(&v) {
         return Some(found);
     }
+    if depth >= MAX_BASES {
+        return None;
+    }
     let first = v.impls.first()?.href;
     let base = resolve(cpu, ctx, first).ok()?;
-    let found = search(cpu, &base, find);
+    let found = search_from(cpu, &base, find, depth + 1);
     release_ctx(cpu, &base);
     found
 }
@@ -1606,7 +1641,7 @@ pub fn get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetIDsOfNames of `ctx` with the program's arguments.
-pub fn ids_at(cpu: &mut Cpu, ctx: &Ctx, names: u32, count: u32, ids: u32) -> u32 {
+fn ids_at(cpu: &mut Cpu, ctx: &Ctx, names: u32, count: u32, ids: u32) -> u32 {
     if count > 0x1000 || !cpu.bus.guest_probe(ids, 4 * count as usize, true) {
         return E_INVALIDARG;
     }

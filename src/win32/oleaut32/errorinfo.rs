@@ -9,7 +9,7 @@
 //!
 //! Copyright 2000 Patrik Stridvall, Juergen Schmied
 
-use super::{dll_index, vtable};
+use super::{dll_index, insert, vtable};
 use crate::cpu::Cpu;
 use crate::win32::com::{self, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, Guid, S_FALSE, S_OK};
 
@@ -96,17 +96,7 @@ pub fn create_error_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         refs: 1,
         ..ErrorObject::default()
     };
-    let table = errors(cpu);
-    let id = match table.iter().position(Option::is_none) {
-        Some(i) => {
-            table[i] = Some(object);
-            i
-        }
-        None => {
-            table.push(Some(object));
-            table.len() - 1
-        }
-    };
+    let id = insert(errors(cpu), object);
     let create = com::new_interface(cpu, dll_index(), vtable("ICreateErrorInfo"), id as u32, 0);
     let error = com::new_interface(cpu, dll_index(), vtable("IErrorInfo"), id as u32, 0);
     let (Some(create), Some(error)) = (create, error) else {

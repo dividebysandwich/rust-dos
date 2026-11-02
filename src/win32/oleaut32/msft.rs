@@ -443,8 +443,14 @@ fn read_func(r: &Reader, at: usize, len: usize) -> Option<Func> {
         params: Vec::new(),
         entry,
     };
-    let params = at + len - 12 * args;
-    let defaults = params - 4 * args;
+    // The parameters' records end the record; a record too short for
+    // them isn't one.
+    let params = at + len.checked_sub(12 * args)?;
+    let defaults = if has_defaults {
+        at + len.checked_sub(16 * args)?
+    } else {
+        params
+    };
     for j in 0..args {
         let p = params + 12 * j;
         let flags = r.u32(p + 8)? as u16;

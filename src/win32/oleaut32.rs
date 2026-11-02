@@ -328,6 +328,20 @@ fn vtable(name: &str) -> usize {
         .expect("a vtable of OLEAUT32's")
 }
 
+/// The id of a free slot of `table`, filled with `item`.
+fn insert<T>(table: &mut Vec<Option<T>>, item: T) -> usize {
+    match table.iter().position(Option::is_none) {
+        Some(i) => {
+            table[i] = Some(item);
+            i
+        }
+        None => {
+            table.push(Some(item));
+            table.len() - 1
+        }
+    }
+}
+
 /// A process ended: its objects went with its heap.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
     typelib::process_ended(cpu, pid);
@@ -372,13 +386,9 @@ fn disp_get_ids_of_names(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[info, names, count, ids] = args else {
         unreachable!()
     };
-    if let Some(id) = typelib::info_of(cpu, info) {
-        let ctx = cpu.bus.win32.oleaut32.infos[id as usize]
-            .as_ref()
-            .expect("a type of the table")
-            .ctx
-            .clone();
-        return Some(typelib::ids_at(cpu, &ctx, names, count, ids));
+    // One of these ITypeInfos: its method takes the same arguments.
+    if typelib::info_of(cpu, info).is_some() {
+        return typelib::get_ids_of_names(cpu, args);
     }
     // An ITypeInfo of the program's own.
     let Some(method) = super::ole32::method(cpu, info, 10) else {
