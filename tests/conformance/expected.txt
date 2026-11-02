@@ -695,7 +695,7 @@ winmm/mci: skipped mci.c:515
 winmm/mci: skipped mci.c:634
 winmm/mci: skipped mci.c:870
 winmm/midi: midi: 226 tests executed (0 marked as todo, 0 failures), 0 skipped.
-winmm/mixer: mixer: 38 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mixer: mixer: 56 tests executed (0 marked as todo, 0 failures), 0 skipped.
 winmm/mmio: mmio: 219 tests executed (0 marked as todo, 0 failures), 3 skipped.
 winmm/mmio: skipped mmio.c:77
 winmm/mmio: skipped mmio.c:244

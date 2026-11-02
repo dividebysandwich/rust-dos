@@ -1635,6 +1635,35 @@ fn a_flat_shaded_triangle_has_its_first_vertex_color() {
     assert_rgb(&p, 0, 0, [0, 0, 0x84], 4);
 }
 
+/// The HAL on a Voodoo3 leaves the card's second lookup table, the one
+/// Glide loads its gamma into, linear, where Glide's grSstWinOpen loads
+/// 1.3. The table is the overlay's, which only Glide's display shows:
+/// Direct3D's picture is the desktop, with the overlay off.
+#[test]
+fn direct3d_on_a_voodoo3_leaves_glides_gamma_table_linear() {
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0xFF00_0080,
+        zbuffer: None,
+        texture: None,
+        steps: vec![Step::Draw(corners())],
+    };
+    let (exe, data) = scene_program(&scene);
+    let mut cpu = machine("linear_gamma", exe);
+    run_until_done(&mut cpu, data);
+    let card = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    for i in 0..256 {
+        assert_eq!(card.clut[256 + i], (i * 0x01_0101) as u32, "entry {i}");
+    }
+    use rust_dos::voodoo::banshee::{
+        VID_PROC_CFG, VIDPROC_DESKTOP_CLUT_SEL, VIDPROC_OVERLAY_ENABLE,
+    };
+    let cfg = card.reg(VID_PROC_CFG);
+    assert_eq!(cfg & VIDPROC_OVERLAY_ENABLE, 0, "the overlay is off");
+    assert_eq!(cfg & VIDPROC_DESKTOP_CLUT_SEL, 0, "the desktop's table");
+}
+
 #[test]
 fn a_gouraud_shaded_triangle_blends_its_corners() {
     let scene = Scene {
