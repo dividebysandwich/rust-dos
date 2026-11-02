@@ -777,7 +777,7 @@ mod tests {
         (22, 0x1329_1DAD_33BC_DC4A), // dinput's app_data
         (23, 0x1329_1DAD_33BC_DC4A), // the mixer's seven lines
         (24, 0xF61B_D786_C674_4FD3), // WNASPI32 and its pending requests
-        (25, 0xDEEF_3CBA_9882_E209), // the MPEGVideo device
+        (25, 0x4A19_98AF_3706_725B), // the MPEGVideo device
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

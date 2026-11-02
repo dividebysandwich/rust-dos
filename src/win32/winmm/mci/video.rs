@@ -17,14 +17,15 @@
 //! A play shows the frame its emulated time is at on the process's
 //! multimedia thread (`poll`), drawn as StretchDIBits draws, and the
 //! sound plays as one sound from where the play starts. Positions are
-//! in milliseconds or frames.
+//! in milliseconds or frames. The device's own window draws its frame
+//! again when it gets WM_PAINT (`window_proc`).
 //!
 //! The window's calls into USER32 (CreateWindowExA, ShowWindow,
 //! SetWindowTextA, MoveWindow) send its window procedures messages, so
 //! a command that makes one returns `NEEDS_CALL`; the function that ran
 //! it makes the call (`call_step`) and runs again, and the command then
-//! finds what the call returned (`made`). Closing posts the window
-//! WM_CLOSE, which destroys it.
+//! finds what the call returned (`made`). Each thread keeps its own
+//! calls. Closing posts the window WM_CLOSE, which destroys it.
 //!
 //! A save state keeps where the device is, not the file: it is read
 //! again when it is next wanted.
@@ -135,23 +136,27 @@ pub struct Video {
     pub pictures: Pictures,
 }
 
-/// A command's calls into USER32, which the running thread makes before
+/// A call into USER32: the function, its arguments, and the strings it
+/// passes, each with the place of the argument that points to it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Call {
+    pub target: u32,
+    pub args: Vec<u32>,
+    pub strings: Vec<(u32, String)>,
+}
+
+/// A thread's command's calls into USER32, which the thread makes before
 /// the command runs again: those made, with what they returned, and the
-/// one it asks for next.
+/// one it asks for next. Each thread has its own, so that commands two
+/// threads send at once don't take each other's calls.
 #[derive(Clone, Debug, Default)]
 pub struct Calls {
     pub tid: u32,
-    pub made: Vec<(u32, Vec<u32>, u32)>,
-    pub next: Option<(u32, Vec<u32>)>,
-    /// The strings the calls pass, which `STRING` and its index stand
-    /// for among their arguments.
-    pub strings: Vec<String>,
+    pub made: Vec<(Call, u32)>,
+    pub next: Option<Call>,
     /// The file the command read, so that it isn't read again.
     pub media: Option<(String, Arc<Media>)>,
 }
-
-/// An argument that is the string at this index plus it.
-const STRING: u32 = 0xFFFF_FF00;
 
 /// The bytes of a call's scratch space for its strings.
 const SCRATCH: u32 = 1024;
@@ -160,51 +165,45 @@ fn video(cpu: &mut Cpu, i: usize) -> &mut Video {
     &mut device(cpu, i).video
 }
 
-/// What the call `api(args)` returned, if the command made it; else it
-/// asks for the call, and the command returns NEEDS_CALL.
-fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[&str]) -> Option<u32> {
-    let target = user32::address_of(api);
+/// The running thread's calls, made empty if it has none.
+fn calls(cpu: &mut Cpu) -> &mut Calls {
     let tid = user32::current_tid(cpu);
-    let calls = &mut mci(cpu).calls;
-    if calls.tid != tid {
-        *calls = Calls {
-            tid,
-            ..Calls::default()
-        };
-    }
-    let mut args = args.to_vec();
-    for (k, s) in strings.iter().enumerate() {
-        if let Some(a) = args.iter_mut().find(|a| **a == STRING + k as u32) {
-            *a = STRING + calls.strings.len() as u32;
-            calls.strings.push(s.to_string());
+    let list = &mut mci(cpu).calls;
+    let k = match list.iter().position(|c| c.tid == tid) {
+        Some(k) => k,
+        None => {
+            list.push(Calls {
+                tid,
+                ..Calls::default()
+            });
+            list.len() - 1
         }
-    }
-    if let Some((_, _, value)) = calls
-        .made
-        .iter()
-        .find(|(t, a, _)| *t == target && same_args(a, &args))
-    {
-        return Some(*value);
-    }
-    calls.next = Some((target, args));
-    None
+    };
+    &mut list[k]
 }
 
-/// Whether two calls' arguments are the same, the strings' places aside.
-fn same_args(a: &[u32], b: &[u32]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x == y || (x & !0xFF == STRING && y & !0xFF == STRING))
+/// What the call `api(args)` returned, if the command made it; else it
+/// asks for the call, and the command returns NEEDS_CALL. `strings` are
+/// the strings the call passes, each with the place of its argument.
+fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
+    let call = Call {
+        target: user32::address_of(api),
+        args: args.to_vec(),
+        strings: strings.iter().map(|&(k, s)| (k, s.to_string())).collect(),
+    };
+    let calls = calls(cpu);
+    if let Some((_, value)) = calls.made.iter().find(|(c, _)| *c == call) {
+        return Some(*value);
+    }
+    calls.next = Some(call);
+    None
 }
 
 /// The running thread's command is done: the calls it made are
 /// forgotten.
 pub fn command_done(cpu: &mut Cpu) {
     let tid = user32::current_tid(cpu);
-    if mci(cpu).calls.tid == tid {
-        mci(cpu).calls = Calls::default();
-    }
+    mci(cpu).calls.retain(|c| c.tid != tid);
 }
 
 /// The function that ran a command that returned NEEDS_CALL makes the
@@ -215,40 +214,33 @@ pub fn make_call(cpu: &mut Cpu) -> Option<u32> {
 
 /// The task of `make_call`.
 pub fn call_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
-    let tid = user32::current_tid(cpu);
     match t.step {
         0 => {
-            let calls = &mci(cpu).calls;
-            let Some((target, args)) = calls.next.clone().filter(|_| calls.tid == tid) else {
+            let Some(call) = calls(cpu).next.clone() else {
+                command_done(cpu);
                 return Next::Done(MCIERR_INTERNAL);
             };
-            let strings = calls.strings.clone();
             // The strings go to the scratch space, one after another.
+            let mut args = call.args;
             let mut at = t.scratch;
-            let mut places = Vec::new();
-            for s in &strings {
-                let len = (s.len() as u32 + 1).min(SCRATCH / 4);
+            let room = SCRATCH / call.strings.len().max(1) as u32;
+            for (k, s) in &call.strings {
+                let len = (s.len() as u32 + 1).min(room);
                 if write_text(cpu, at, len, s).is_none() {
+                    command_done(cpu);
                     return Next::Done(MCIERR_INTERNAL);
                 }
-                places.push(at);
+                if let Some(a) = args.get_mut(*k as usize) {
+                    *a = at;
+                }
                 at += len;
             }
-            let args: Vec<u32> = args
-                .iter()
-                .map(|&a| match a {
-                    _ if a & !0xFF == STRING => {
-                        places.get((a & 0xFF) as usize).copied().unwrap_or(0)
-                    }
-                    _ => a,
-                })
-                .collect();
-            Next::call(target, &args, 1)
+            Next::call(call.target, &args, 1)
         }
         _ => {
-            let calls = &mut mci(cpu).calls;
-            if let Some((target, args)) = calls.next.take() {
-                calls.made.push((target, args, value));
+            let calls = calls(cpu);
+            if let Some(call) = calls.next.take() {
+                calls.made.push((call, value));
             }
             t.retry(cpu);
             Next::Stop
@@ -356,8 +348,7 @@ fn open(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     let media = if element.is_empty() {
         None
     } else {
-        let cached = mci(cpu)
-            .calls
+        let cached = calls(cpu)
             .media
             .as_ref()
             .filter(|(e, _)| *e == element)
@@ -403,12 +394,13 @@ fn open(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
         (d, d, r.width(), r.height())
     };
     if let Some(m) = &media {
-        mci(cpu).calls.media = Some((element.clone(), m.clone()));
+        calls(cpu).media = Some((element.clone(), m.clone()));
     }
+    // The class and the caption are the second and third arguments.
     let args = [
         0,
-        STRING,
-        STRING + 1,
+        0,
+        0,
         style,
         x as u32,
         y as u32,
@@ -420,11 +412,12 @@ fn open(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
         0,
     ];
     let title = element.rsplit(['\\', '/', ':']).next().unwrap_or_default();
-    let names = if is_mpeg(cpu, i) {
-        [CLASS, CAPTION]
+    let (class, caption) = if is_mpeg(cpu, i) {
+        (CLASS, CAPTION)
     } else {
-        [AVI_CLASS, title]
+        (AVI_CLASS, title)
     };
+    let names = [(1, class), (2, caption)];
     let Some(hwnd) = made(cpu, "CreateWindowExA", &args, &names) else {
         return NEEDS_CALL;
     };
@@ -491,7 +484,8 @@ pub fn next_due(d: &Device) -> Option<u64> {
     if v.hwnd == 0 {
         return Some(end);
     }
-    let Some(m) = &v.media else {
+    // A file without pictures (MPEG audio) has only its end to wait for.
+    let Some(m) = v.media.as_ref().filter(|m| m.frames > 0) else {
         return Some(end);
     };
     // The next frame's start, from the frame drawn last.
@@ -516,7 +510,10 @@ pub fn poll(cpu: &mut Cpu, i: usize, now: u64) -> bool {
     halt(cpu, i);
     let v = video(cpu, i);
     if repeat {
+        // The frames come again from the first, which `next_due` waits
+        // for from the frame drawn last.
         v.pos = 0;
+        v.drawn = None;
         start(cpu, i);
         return false;
     }
@@ -772,7 +769,7 @@ fn set_window(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     }
     if flags & MCI_DGV_WINDOW_TEXT != 0 {
         let text = p.window_text.clone();
-        if made(cpu, "SetWindowTextA", &[hwnd, STRING], &[&text]).is_none() {
+        if made(cpu, "SetWindowTextA", &[hwnd, 0], &[(1, &text)]).is_none() {
             return NEEDS_CALL;
         }
     }
@@ -869,8 +866,17 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     }
     let n = m.frame_at(position(cpu, i) as u64);
     let hwnd = video(cpu, i).hwnd;
-    if to.is_none() && (video(cpu, i).drawn == Some(n) || !user32::user(cpu).is_window(hwnd)) {
-        return;
+    if to.is_none() {
+        if video(cpu, i).drawn == Some(n) {
+            return;
+        }
+        // Done with this frame even when it can't be drawn (its window
+        // is gone, or it doesn't decode): `next_due` waits for the next
+        // one rather than for this one again.
+        video(cpu, i).drawn = Some(n);
+        if !user32::user(cpu).is_window(hwnd) {
+            return;
+        }
     }
     let (w, h) = (m.width as i32, m.height as i32);
     let stride = dib_stride(w, 24);
@@ -911,6 +917,24 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     }
 }
 
+/// The window procedure of the devices' windows (`CLASS`, `AVI_CLASS`):
+/// WM_PAINT draws the frame the device is at again, as MCIAVI's and
+/// MCIQTZ's windows do when they are uncovered or the play is stopped,
+/// and the rest goes to DefWindowProcA.
+pub fn window_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (hwnd, msg) = (args[0], args[1]);
+    if msg == user32::message::WM_PAINT {
+        let painted = mci(cpu).devices.iter().position(|d| {
+            matches!(d.kind, MCI_DEVTYPE_DIGITAL_VIDEO | AVI_VIDEO) && d.video.hwnd == hwnd
+        });
+        if let Some(i) = painted {
+            video(cpu, i).drawn = None;
+            draw(cpu, i, None);
+        }
+    }
+    user32::defwnd::def_window_proc(cpu, args)
+}
+
 /// CreateWindowExA's default place.
 const CW_USEDEFAULT: i32 = 0x8000_0000_u32 as i32;
 /// An overlapped window with a caption, a frame and its boxes.
@@ -934,11 +958,16 @@ crate::state_fields!(Video {
     pictures
 });
 
+crate::state_fields!(Call {
+    target,
+    args,
+    strings
+});
+
 crate::state_fields!(Calls {
     tid,
     made,
-    next,
-    strings
+    next
 } skip {
     media
 });

@@ -268,7 +268,7 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
     (
         crate::win32::winmm::mci::video::CLASS,
         0,
-        "DefWindowProcA",
+        "MciVideoWndProc",
         0,
         32512,
         0,
@@ -276,7 +276,7 @@ const SYSTEM: &[(&str, u32, &str, u32, u32, u32)] = &[
     (
         crate::win32::winmm::mci::video::AVI_CLASS,
         0,
-        "DefWindowProcA",
+        "MciVideoWndProc",
         0,
         32512,
         0,

@@ -1157,6 +1157,12 @@ static APIS: &[Api] = &[
     stdcall("MenuWndProc", 0, 4, menu::popup_proc),
     stdcall("IconTitleWndProc", 0, 4, defwnd::def_window_proc),
     stdcall("ComboLBoxWndProc", 0, 4, controls::listbox_proc),
+    stdcall(
+        "MciVideoWndProc",
+        0,
+        4,
+        crate::win32::winmm::mci::video::window_proc,
+    ),
     // The clipboard.
     stdcall("OpenClipboard", 397, 1, input::open_clipboard),
     stdcall("CloseClipboard", 398, 0, input::close_clipboard),

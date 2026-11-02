@@ -283,8 +283,8 @@ pub struct Device {
 #[derive(Clone, Debug, Default)]
 pub struct Mci {
     pub devices: Vec<Device>,
-    /// The calls into USER32 a command makes (video.rs).
-    pub calls: video::Calls,
+    /// The calls into USER32 the threads' commands make (video.rs).
+    pub calls: Vec<video::Calls>,
 }
 
 fn mci(cpu: &mut Cpu) -> &mut Mci {
@@ -360,6 +360,12 @@ fn type_of_file(element: &str) -> Option<u32> {
         "avi" => Some(video::AVI_VIDEO),
         _ => None,
     }
+}
+
+/// The device type (MCI_DEVTYPE_*) of a device's kind: AVIVideo's kind
+/// has the digitalvideo type below a flag that tells it from MPEGVideo.
+pub fn device_type(kind: u32) -> u32 {
+    kind & 0xFFFF
 }
 
 /// The name of a device type.
@@ -447,7 +453,9 @@ pub fn device_command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Par
     let error = match kind {
         MCI_DEVTYPE_CD_AUDIO => cdaudio::command(cpu, i, msg, flags, p),
         MCI_DEVTYPE_SEQUENCER => sequencer::command(cpu, i, msg, flags, p),
-        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => video::command(cpu, i, msg, flags, p),
+        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {
+            video::command(cpu, i, msg, flags, p)
+        }
         _ => match WAVE_DRIVER {
             Some(driver) => driver(cpu, i, msg, flags, p),
             None => MCIERR_UNSUPPORTED_FUNCTION,
@@ -541,8 +549,7 @@ pub fn open(cpu: &mut Cpu, flags: u32, p: &mut Parms, auto: bool) -> u32 {
     let kind = if flags & MCI_OPEN_TYPE != 0 {
         if flags & MCI_OPEN_TYPE_ID != 0 {
             let id = p.open_type_id & 0xFFFF;
-            // AVIVideo's kind has the digitalvideo type below a flag.
-            match installed().into_iter().find(|&(t, _)| t & 0xFFFF == id) {
+            match installed().into_iter().find(|&(t, _)| device_type(t) == id) {
                 Some((t, _)) => t,
                 None => return MCIERR_INVALID_DEVICE_NAME,
             }
@@ -624,7 +631,9 @@ fn open_kind(
     let error = match kind {
         MCI_DEVTYPE_CD_AUDIO => cdaudio::open(cpu, i),
         MCI_DEVTYPE_SEQUENCER => sequencer::open(cpu, i),
-        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => video::command(cpu, i, MCI_OPEN, flags, p),
+        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {
+            video::command(cpu, i, MCI_OPEN, flags, p)
+        }
         _ => match WAVE_DRIVER {
             Some(driver) => driver(cpu, i, MCI_OPEN, flags, p),
             None => MCIERR_INVALID_DEVICE_NAME,
@@ -649,6 +658,8 @@ fn open_kind(
 /// MCI_SYSINFO, of all devices (`kind` None) or those of a type: how
 /// many there are, installed or open, or the name of one.
 pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u32 {
+    // By its device type: AVIVideo and MPEGVideo are both digitalvideo.
+    let kind = kind.map(device_type);
     let pid = crate::win32::user32::current_pid(cpu);
     let open: Vec<String> = cpu
         .bus
@@ -657,12 +668,12 @@ pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u
         .mci
         .devices
         .iter()
-        .filter(|d| d.pid == pid && kind.is_none_or(|k| d.kind == k))
+        .filter(|d| d.pid == pid && kind.is_none_or(|k| device_type(d.kind) == k))
         .map(|d| d.name.clone())
         .collect();
     let types: Vec<String> = installed()
         .into_iter()
-        .filter(|&(t, _)| kind.is_none_or(|k| k == t))
+        .filter(|&(t, _)| kind.is_none_or(|k| k == device_type(t)))
         .map(|(_, n)| n.to_string())
         .collect();
     let list = if flags & MCI_SYSINFO_OPEN != 0 {

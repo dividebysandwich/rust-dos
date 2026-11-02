@@ -773,9 +773,13 @@ fn send_string(cpu: &mut Cpu, text: &str, ret: u32, size: u32, hwnd: u32) -> Opt
             id = device(cpu, i).id;
             let auto = device(cpu, i).auto;
             let error = device_command(cpu, i, msg, flags, &mut p);
-            // A device opened for the command closes, unless it plays.
+            // A device opened for the command closes, unless it plays,
+            // or the command runs again after a call into USER32
+            // (video.rs), which finds the device still open: closing
+            // it would destroy the window the command goes on with.
             if auto
                 && msg != MCI_CLOSE
+                && error != video::NEEDS_CALL
                 && let Some(i) = find(cpu, id)
                 && busy_until(cpu, i).is_none()
             {
