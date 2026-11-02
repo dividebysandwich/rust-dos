@@ -90,6 +90,9 @@ crate::state_fields!(Cpu {
     programs_loaded, programs,
     // The frontend's, which asks the almanac again for a program waiting.
     almanac,
+    // Written again by the next DOS call; until then the SDA is taken to
+    // hold what the emulator wrote there.
+    sda_written,
 });
 
 impl Cpu {

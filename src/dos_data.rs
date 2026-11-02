@@ -427,49 +427,114 @@ pub fn leave_dos(cpu: &mut Cpu) {
     cpu.bus.guest_write_8(address(INDOS) as u32, 0);
 }
 
+/// The state of DOS that the SDA holds for the process running: the last
+/// error (SDA+04h), the DTA (+0Ch), the running process's PSP (+10h), the
+/// return code of the last process that ended (+14h) and the current
+/// drive (+16h).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessState {
+    error: u16,
+    dta: (u16, u16),
+    psp: u16,
+    returned: u16,
+    drive: u8,
+}
+
+impl ProcessState {
+    /// The emulator's copies.
+    fn of(cpu: &Cpu) -> Self {
+        let bus = &cpu.bus;
+        ProcessState {
+            error: cpu.last_dos_error,
+            dta: (bus.dta_segment, bus.dta_offset),
+            psp: cpu.current_psp,
+            returned: cpu.last_child_exit,
+            drive: bus.disk.get_current_drive(),
+        }
+    }
+
+    /// The SDA's, or None if a page of it is missing.
+    fn read(bus: &mut Bus) -> Option<Self> {
+        let sda = address(SDA) as u32;
+        let state = ProcessState {
+            error: bus.guest_read_16(sda + 0x04),
+            dta: (bus.guest_read_16(sda + 0x0E), bus.guest_read_16(sda + 0x0C)),
+            psp: bus.guest_read_16(sda + 0x10),
+            returned: bus.guest_read_16(sda + 0x14),
+            drive: bus.guest_read_8(sda + 0x16),
+        };
+        (!bus.guest_faulted()).then_some(state)
+    }
+
+    fn write(&self, bus: &mut Bus) {
+        let sda = address(SDA) as u32;
+        bus.guest_write_16(sda + 0x04, self.error);
+        bus.guest_write_16(sda + 0x0C, self.dta.1);
+        bus.guest_write_16(sda + 0x0E, self.dta.0);
+        bus.guest_write_16(sda + 0x10, self.psp);
+        bus.guest_write_16(sda + 0x14, self.returned);
+        bus.guest_write_8(sda + 0x16, self.drive);
+    }
+}
+
 /// Keep the state of DOS in the SDA, where `load_process_state` finds it:
 /// the DTA, the running process and the current drive, the last error and
 /// the return code of the last process that ended.
 pub fn store_process_state(cpu: &mut Cpu) {
-    let (psp, returned, error) = (cpu.current_psp, cpu.last_child_exit, cpu.last_dos_error);
-    let bus = &mut cpu.bus;
-    let (segment, offset) = (bus.dta_segment, bus.dta_offset);
-    let drive = bus.disk.get_current_drive();
-    let sda = address(SDA) as u32;
-    bus.guest_write_16(sda + 0x04, error);
-    bus.guest_write_16(sda + 0x0C, offset);
-    bus.guest_write_16(sda + 0x0E, segment);
-    bus.guest_write_16(sda + 0x10, psp);
-    bus.guest_write_16(sda + 0x14, returned);
-    bus.guest_write_8(sda + 0x16, drive);
+    let state = ProcessState::of(cpu);
+    state.write(&mut cpu.bus);
+    cpu.sda_written = Some(state);
 }
 
-/// Take the state of DOS the SDA holds as the one to work on, while a
-/// service runs with paging on: in Windows' 386 enhanced mode each virtual
+/// Take the state of DOS the SDA holds as the one to work on, as DOS keeps
+/// it there and nowhere else.
+///
+/// With paging on, all of it: in Windows' 386 enhanced mode each virtual
 /// machine has an SDA of its own (DOSMGR swaps it with the machine), and
 /// with it its own running process, DTA, current drive, last error and
 /// return code, which the emulator's copies are of the machine that
-/// called DOS last. Without paging the emulator's copies are the ones.
+/// called DOS last.
+///
+/// Without paging, what a program changed there since the last DOS call
+/// wrote it: the emulator changes its own copies between calls too (the
+/// shell starting a program), and those stay. DOS/4GW's virtual memory
+/// manager finds the current PSP's word in the SDA (it sets the PSP to its
+/// complement with AH=50h and looks for it), then writes its own PSP there
+/// to open its swap file as itself.
 pub fn load_process_state(cpu: &mut Cpu) {
-    if cpu.bus.guest_paging.is_none() {
+    let paged = cpu.bus.guest_paging.is_some();
+    if !paged && cpu.sda_written.is_none() {
         return;
     }
-    let sda = address(SDA) as u32;
-    let bus = &mut cpu.bus;
-    let error = bus.guest_read_16(sda + 0x04);
-    let (offset, segment) = (bus.guest_read_16(sda + 0x0C), bus.guest_read_16(sda + 0x0E));
-    let psp = bus.guest_read_16(sda + 0x10);
-    let returned = bus.guest_read_16(sda + 0x14);
-    let drive = bus.guest_read_8(sda + 0x16);
-    if bus.guest_faulted() {
-        return;
+    let Some(sda) = ProcessState::read(&mut cpu.bus) else { return };
+    let state = match cpu.sda_written {
+        Some(written) if !paged => {
+            if sda == written {
+                return;
+            }
+            let ours = ProcessState::of(cpu);
+            // The program's value where it changed the SDA's, else ours.
+            fn pick<T: PartialEq>(theirs: T, written: T, ours: T) -> T {
+                if theirs != written { theirs } else { ours }
+            }
+            ProcessState {
+                error: pick(sda.error, written.error, ours.error),
+                dta: pick(sda.dta, written.dta, ours.dta),
+                psp: pick(sda.psp, written.psp, ours.psp),
+                returned: pick(sda.returned, written.returned, ours.returned),
+                drive: pick(sda.drive, written.drive, ours.drive),
+            }
+        }
+        _ => sda,
+    };
+    (cpu.bus.dta_segment, cpu.bus.dta_offset) = state.dta;
+    cpu.bus.disk.set_current_drive(state.drive);
+    cpu.current_psp = state.psp;
+    cpu.last_child_exit = state.returned;
+    cpu.last_dos_error = state.error;
+    if paged {
+        load_current_directories(&mut cpu.bus);
     }
-    (bus.dta_segment, bus.dta_offset) = (segment, offset);
-    bus.disk.set_current_drive(drive);
-    cpu.current_psp = psp;
-    cpu.last_child_exit = returned;
-    cpu.last_dos_error = error;
-    load_current_directories(&mut cpu.bus);
 }
 
 /// Take each drive's current directory from its current directory

@@ -429,6 +429,50 @@ fn a_bigger_handle_table_moves_out_of_the_psp() {
 }
 
 #[test]
+fn a_psp_a_program_writes_into_the_sda_is_the_running_process() {
+    // DOS/4GW's virtual memory manager, as Lands of Lore: Guardians of
+    // Destiny runs it: it finds the current PSP's word in the SDA by
+    // setting the PSP to its complement and looking for that, then writes
+    // its own PSP there and creates its swap file. DOS keeps the running
+    // process in the SDA alone, so the file is the program's.
+    let mut cpu = machine("sda_psp");
+    let psp = dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()).unwrap();
+    dos(&mut cpu, 0x5D06, 0, 0, 0).unwrap();
+    let sda = cpu.ds() as usize * 16 + cpu.si() as usize;
+    let size = cpu.cx() as usize;
+    dos(&mut cpu, 0x5000, !psp, 0, 0).unwrap();
+    let field = (0..size)
+        .step_by(2)
+        .map(|i| sda + i)
+        .find(|&at| cpu.bus.read_16(at) == !psp)
+        .expect("the PSP's word in the SDA");
+    cpu.bus.write_16(field, psp);
+    let at = psp as usize * 16 + 0x200;
+    cpu.bus.load_bytes(at, b"SWAP.SWP\0");
+    cpu.set_ds(psp);
+    cpu.set_ax(0x3C00);
+    cpu.set_cx(0);
+    cpu.set_dx(0x200);
+    handle_hle(&mut cpu, 0x21);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "create failed with error {:02X}", cpu.ax());
+    assert_eq!(cpu.ax(), 5, "the program's first free handle");
+    assert_ne!(slot(&cpu, psp, 5), 0xFF);
+    assert_eq!(dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()), Ok(psp));
+}
+
+#[test]
+fn a_process_the_emulator_switches_to_stays_when_the_sda_is_untouched() {
+    // The shell starts programs without a DOS call: the SDA still has the
+    // process of the last call, which the program didn't change.
+    let mut cpu = machine("sda_untouched");
+    let psp = cpu.current_psp;
+    dos(&mut cpu, 0x6200, 0, 0, 0).unwrap();
+    let other = psp + 0x100;
+    cpu.current_psp = other;
+    assert_eq!(dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()), Ok(other));
+}
+
+#[test]
 fn a_psp_a_program_made_ends_back_in_its_parent_at_its_terminate_address() {
     // As Windows ends a task: its PSP made with AH=55h, then AH=4Ch with
     // it current.
