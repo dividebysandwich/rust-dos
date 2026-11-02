@@ -179,12 +179,14 @@ impl Tracker {
         }
     }
 
-    /// The renderer starts over: it has none of the memory. What only its
-    /// copy of the memory had is gone with it, so the caller reads that
+    /// The renderer starts over, or the card's memory was loaded: the
+    /// renderer has none of the memory, and what only it had, in its copy
+    /// of the memory or in its 3D buffers, is gone. The caller reads that
     /// back first.
     pub fn mark_all(&mut self) {
         self.dirty.fill(u64::MAX);
         self.gpu.clear();
+        self.buffers.clear();
     }
 
     /// The renderer lost pages sent to it, which the recording dropped:
@@ -439,5 +441,9 @@ mod tests {
         assert!(!p.hot_in(480 * row, 481 * row));
         p.forget_buffers();
         assert!(!p.any_in_buffers() && p.any_gpu());
+        // A renderer starting over has neither.
+        p.drawn_in_buffer(0, row);
+        p.mark_all();
+        assert!(!p.any_in_buffers() && !p.any_gpu());
     }
 }
