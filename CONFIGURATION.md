@@ -2565,6 +2565,14 @@ everything from the start). The CRT shaders draw their scanlines over the
 bigger picture. The libretro core draws it with the frontend's OpenGL (see
 [its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
 
+The textures' mipmap levels are the ones the card would take at
+`voodoo_scale` times its resolution: a pixel's level comes from how fast
+the triangle's S/W and T/W change and from its W, as the software
+rasterizer works it out, so at 1x they are the card's and at 2x one
+level sharper. The shader reads and filters the card's texels as the
+card does. With `voodoo_anisotropy` OpenGL filters them itself, from the
+card's level.
+
 The card stores 16 bits a pixel (5-6-5), and where a game turns
 dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4
 or 2x2 ordered dither to each colour before it drops the low bits: a
@@ -2591,12 +2599,12 @@ has the pattern, but its pixels aren't the card's, and fbzMode bit 19
 (taking the dither back out of the colour the blend reads) does nothing.
 Some games blend most of what they draw (Oni blends every triangle), so
 their pictures have the card's pattern but not its exact pixels. The
-texture units' dithered LOD isn't there either, as OpenGL picks the mipmap
-levels. Frame buffer writes and the Voodoo2's blitter show what the card's
-memory holds, dithered or not, whatever the setting. The Voodoo2's and
-Voodoo3's video output filter, which partly smooths the pattern on the
-card's own output, isn't modelled: with the setting on, the pattern shows
-as the card writes it.
+texture units' dithered level of detail (textureMode bit 4) follows the
+setting as well. Frame buffer writes and the Voodoo2's blitter show what
+the card's memory holds, dithered or not, whatever the setting. The
+Voodoo2's and Voodoo3's video output filter, which partly smooths the
+pattern on the card's own output, isn't modelled: with the setting on,
+the pattern shows as the card writes it.
 
 The dithering costs a few more instructions a pixel in the shader, and
 nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
