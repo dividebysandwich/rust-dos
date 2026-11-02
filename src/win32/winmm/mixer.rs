@@ -3,11 +3,16 @@
 //! devices play.
 //!
 //! The one mixer device has one destination, the speakers, with a master
-//! volume and mute, and three sources into it, wave audio, the MIDI
-//! synthesizer and CD audio, each with a volume and a mute of its own. A
-//! source plays at its volume times the master volume (`gain`), and not
-//! at all when it or the master is muted. The auxiliary device is the CD
-//! audio input, whose volume is the CD line's.
+//! volume and mute, and six sources into it, as Windows 95's Sound
+//! Blaster 16 driver has them: wave audio, the MIDI synthesizer, CD
+//! audio, line in, the microphone and the PC speaker, each with a volume
+//! and a mute of its own. A source plays at its volume times the master
+//! volume (`gain`), and not at all when it or the master is muted.
+//! Nothing plays through line in, the microphone or the PC speaker line.
+//!
+//! The auxiliary devices are that driver's seven, in its order (`AUX`),
+//! each the volume of one line: auxSetVolume(1), the MIDI synthesizer's,
+//! sets the mixer's MIDI volume, as it does on the real card.
 //!
 //! The ANSI functions are there; the Unicode ones fail with
 //! MMSYSERR_NOTSUPPORTED, as Windows 95's do.
@@ -42,6 +47,7 @@ const MIXER_OBJECTF_AUX: u32 = 0x5000_0000;
 /// The errors of the mixer.
 const MIXERR_INVALLINE: u32 = 1024;
 const MIXERR_INVALCONTROL: u32 = 1025;
+const MIXERR_INVALVALUE: u32 = 1026;
 
 /// The window message of a control's change.
 const MM_MIXM_LINE_CHANGE: u32 = 0x3D0;
@@ -51,10 +57,12 @@ const MM_MIXM_CONTROL_CHANGE: u32 = 0x3D1;
 const MIXERLINE_LINEF_ACTIVE: u32 = 0x0000_0001;
 const MIXERLINE_LINEF_SOURCE: u32 = 0x8000_0000;
 const COMPONENTTYPE_DST_SPEAKERS: u32 = 4;
+const COMPONENTTYPE_SRC_LINE: u32 = 0x1002;
+const COMPONENTTYPE_SRC_MICROPHONE: u32 = 0x1003;
 const COMPONENTTYPE_SRC_SYNTHESIZER: u32 = 0x1004;
 const COMPONENTTYPE_SRC_COMPACTDISC: u32 = 0x1005;
+const COMPONENTTYPE_SRC_PCSPEAKER: u32 = 0x1007;
 const COMPONENTTYPE_SRC_WAVEOUT: u32 = 0x1008;
-const TARGETTYPE_UNDEFINED: u32 = 0;
 const TARGETTYPE_WAVEOUT: u32 = 1;
 const TARGETTYPE_MIDIOUT: u32 = 3;
 const TARGETTYPE_AUX: u32 = 5;
@@ -71,8 +79,7 @@ const MIXERLINECONTROLSA_SIZE: u32 = 24;
 const MIXERCONTROLA_SIZE: u32 = 148;
 const MIXERCONTROLDETAILS_SIZE: u32 = 24;
 
-/// AUXCAPS's technology and support flags.
-const AUXCAPS_CDAUDIO: u16 = 1;
+/// AUXCAPS's support flags.
 const AUXCAPS_VOLUME: u32 = 1;
 const AUXCAPS_LRVOLUME: u32 = 2;
 
@@ -80,12 +87,77 @@ const AUXCAPS_LRVOLUME: u32 = 2;
 /// the time had.
 const VOLUME_STEPS: u32 = 64;
 
-/// The lines, by their ids: the destination and the three sources.
+/// The lines, by their ids: the destination and the six sources.
 pub const SPEAKERS: usize = 0;
 pub const WAVE: usize = 1;
 pub const SYNTH: usize = 2;
 pub const CD: usize = 3;
-const LINES: usize = 4;
+const LINE_IN: usize = 4;
+const MIC: usize = 5;
+const PC_SPEAKER: usize = 6;
+const LINES: usize = 7;
+
+/// An auxiliary device: its name, its AUXCAPS technology, whether its
+/// volume has a left and a right, and the line whose volume it is.
+struct Aux {
+    name: &'static str,
+    technology: u16,
+    stereo: bool,
+    line: usize,
+}
+
+/// The auxiliary devices, by their ids, as Windows 95's Sound Blaster 16
+/// driver numbers them. Its technologies past AUXCAPS_CDAUDIO (1) and
+/// AUXCAPS_AUXIN (2) are its own: one bit to a device.
+const AUX: [Aux; 7] = [
+    Aux {
+        name: "Sound Card Aux: Wave",
+        technology: 32,
+        stereo: true,
+        line: WAVE,
+    },
+    Aux {
+        name: "Sound Card Aux: MIDI Synth",
+        technology: 64,
+        stereo: true,
+        line: SYNTH,
+    },
+    Aux {
+        name: "Sound Card Aux: CD",
+        technology: 1,
+        stereo: true,
+        line: CD,
+    },
+    Aux {
+        name: "Sound Card Aux: Line-In",
+        technology: 2,
+        stereo: true,
+        line: LINE_IN,
+    },
+    Aux {
+        name: "Sound Card Aux: Mic",
+        technology: 4,
+        stereo: false,
+        line: MIC,
+    },
+    Aux {
+        name: "Sound Card Aux: Master",
+        technology: 8,
+        stereo: true,
+        line: SPEAKERS,
+    },
+    Aux {
+        name: "Sound Card Aux: PC Speaker",
+        technology: 16,
+        stereo: false,
+        line: PC_SPEAKER,
+    },
+];
+
+/// The auxiliary device whose volume `line` is.
+fn aux_of_line(line: usize) -> Option<u32> {
+    AUX.iter().position(|a| a.line == line).map(|i| i as u32)
+}
 
 /// A line's volume (0 to 65535 on each side) and mute.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,7 +238,16 @@ fn device_of(cpu: &Cpu, object: u32, flags: u32) -> Result<(), u32> {
         MIXER_OBJECTF_MIXER if object != 0 && find(cpu, object).is_none() => {
             return Err(MMSYSERR_BADDEVICEID);
         }
-        MIXER_OBJECTF_AUX if object != 0 => return Err(MMSYSERR_BADDEVICEID),
+        MIXER_OBJECTF_AUX => {
+            let Some(aux) = AUX.get(object as usize) else {
+                return Err(MMSYSERR_BADDEVICEID);
+            };
+            // The wave and MIDI lines go with their own devices, so the
+            // auxiliary devices of their volumes have no mixer.
+            if target_of(aux.line).0 != TARGETTYPE_AUX {
+                return Err(MMSYSERR_NODRIVER);
+            }
+        }
         MIXER_OBJECTF_MIDIOUT if handle => {
             if !super::midi::is_handle(cpu, object) {
                 return Err(MMSYSERR_INVALHANDLE);
@@ -191,8 +272,7 @@ fn device_of(cpu: &Cpu, object: u32, flags: u32) -> Result<(), u32> {
                 MMSYSERR_BADDEVICEID
             });
         }
-        MIXER_OBJECTF_MIXER | MIXER_OBJECTF_AUX | MIXER_OBJECTF_MIDIOUT | MIXER_OBJECTF_WAVEOUT => {
-        }
+        MIXER_OBJECTF_MIXER | MIXER_OBJECTF_MIDIOUT | MIXER_OBJECTF_WAVEOUT => {}
         _ => return Err(MMSYSERR_INVALFLAG),
     }
     Ok(())
@@ -280,8 +360,12 @@ pub fn mixer_get_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[object, at, flags] = args else {
         unreachable!()
     };
-    if let Err(e) = device_of(cpu, object, flags) {
-        return Some(e);
+    let result = device_of(cpu, object, flags);
+    // An auxiliary device without the mixer gets -1 for its mixer, as on
+    // Windows 95.
+    let aux = flags & MIXER_OBJECTF_TYPEMASK == MIXER_OBJECTF_AUX;
+    if result.is_err() && (!aux || at == 0) {
+        return result.err();
     }
     if at == 0 {
         return Some(MMSYSERR_INVALPARAM);
@@ -289,44 +373,62 @@ pub fn mixer_get_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if !cpu.bus.guest_probe(at, 4, true) {
         return None;
     }
-    cpu.bus.guest_write_32(at, 0);
-    Some(MMSYSERR_NOERROR)
+    cpu.bus
+        .guest_write_32(at, if result.is_ok() { 0 } else { u32::MAX });
+    Some(result.err().unwrap_or(MMSYSERR_NOERROR))
 }
 
-/// What a line is: its component and target type, names, and the device
-/// it goes with.
-fn line_info(line: usize) -> (u32, u32, &'static str, &'static str) {
+/// What a line is: its component type and names.
+fn line_info(line: usize) -> (u32, &'static str, &'static str) {
     match line {
-        SPEAKERS => (
-            COMPONENTTYPE_DST_SPEAKERS,
-            TARGETTYPE_WAVEOUT,
-            "Volume",
-            "Volume Control",
-        ),
+        SPEAKERS => (COMPONENTTYPE_DST_SPEAKERS, "Volume", "Volume Control"),
+        WAVE => (COMPONENTTYPE_SRC_WAVEOUT, "Wave", "Wave"),
+        SYNTH => (COMPONENTTYPE_SRC_SYNTHESIZER, "MIDI", "MIDI Synthesizer"),
+        CD => (COMPONENTTYPE_SRC_COMPACTDISC, "CD Audio", "CD Audio"),
+        LINE_IN => (COMPONENTTYPE_SRC_LINE, "Line", "Line-In"),
+        MIC => (COMPONENTTYPE_SRC_MICROPHONE, "Mic", "Microphone"),
+        _ => (COMPONENTTYPE_SRC_PCSPEAKER, "PC Spk", "PC Speaker"),
+    }
+}
+
+/// The device a line goes with, as its caps have it: the target type,
+/// the device's id, product id and name. The destination and the inputs
+/// are auxiliary devices, as the Sound Blaster 16's driver has them, the
+/// wave and MIDI lines their own devices.
+fn target_of(line: usize) -> (u32, u32, u16, &'static str) {
+    match line {
         WAVE => (
-            COMPONENTTYPE_SRC_WAVEOUT,
             TARGETTYPE_WAVEOUT,
-            "Wave",
-            "Wave",
+            0,
+            super::wave::DEVICE_PID,
+            super::wave::DEVICE_NAME,
         ),
         SYNTH => (
-            COMPONENTTYPE_SRC_SYNTHESIZER,
             TARGETTYPE_MIDIOUT,
-            "MIDI",
-            "MIDI Synthesizer",
+            0,
+            MM_MPU401_MIDIOUT,
+            super::midi::SYNTH_NAME,
         ),
-        _ => (
-            COMPONENTTYPE_SRC_COMPACTDISC,
-            TARGETTYPE_AUX,
-            "CD Audio",
-            "CD Audio",
-        ),
+        _ => {
+            let id = aux_of_line(line).unwrap();
+            (TARGETTYPE_AUX, id, MM_MIXER_PID, AUX[id as usize].name)
+        }
+    }
+}
+
+/// How many channels a line has: the microphone and the PC speaker are
+/// mono.
+fn channels_of(line: usize) -> u32 {
+    if matches!(line, MIC | PC_SPEAKER) {
+        1
+    } else {
+        2
     }
 }
 
 /// The MIXERLINEA of the line `line`.
 fn line_struct(line: usize) -> Vec<u8> {
-    let (component, target, short, name) = line_info(line);
+    let (component, short, name) = line_info(line);
     let source = line != SPEAKERS;
     let mut s = Vec::with_capacity(MIXERLINEA_SIZE as usize);
     let put = |s: &mut Vec<u8>, v: u32| s.extend_from_slice(&v.to_le_bytes());
@@ -344,29 +446,32 @@ fn line_struct(line: usize) -> Vec<u8> {
     );
     put(&mut s, 0);
     put(&mut s, component);
-    put(&mut s, 2);
+    put(&mut s, channels_of(line));
     put(&mut s, if source { 0 } else { LINES as u32 - 1 });
     put(&mut s, 2);
     s.extend_from_slice(&name_field(short, 16));
     s.extend_from_slice(&name_field(name, 64));
+    s.extend_from_slice(&target_struct(line));
+    s
+}
+
+/// The Target of a line's MIXERLINEA: the type, the device's id, its
+/// caps' ids and version, and its name.
+fn target_struct(line: usize) -> Vec<u8> {
+    let (target, device_id, pid, device) = target_of(line);
+    let mut s = Vec::with_capacity(TARGET_SIZE);
     s.extend_from_slice(&target.to_le_bytes());
-    s.extend_from_slice(&0u32.to_le_bytes());
-    let (mid, pid) = if target == TARGETTYPE_UNDEFINED {
-        (0, 0)
-    } else {
-        (MM_MICROSOFT, MM_MIXER_PID)
-    };
-    s.extend_from_slice(&mid.to_le_bytes());
+    s.extend_from_slice(&device_id.to_le_bytes());
+    s.extend_from_slice(&MM_MICROSOFT.to_le_bytes());
     s.extend_from_slice(&pid.to_le_bytes());
     s.extend_from_slice(&0x0400u32.to_le_bytes());
-    let device = match target {
-        TARGETTYPE_MIDIOUT => "MPU-401 Synthesizer",
-        TARGETTYPE_AUX => "CD Audio",
-        _ => "Sound Card Wave Out",
-    };
     s.extend_from_slice(&name_field(device, 32));
     s
 }
+
+/// Where a MIXERLINEA's Target is, and its size.
+const TARGET_AT: u32 = 120;
+const TARGET_SIZE: usize = 48;
 
 /// A line's id: the destination 0xFFFF0000, as Windows numbers it, the
 /// sources their index in the low word.
@@ -381,7 +486,7 @@ fn line_id(line: usize) -> u32 {
 fn line_of_id(id: u32) -> Option<usize> {
     match id {
         0xFFFF_0000 => Some(SPEAKERS),
-        0..=2 => Some(id as usize + 1),
+        id if id < LINES as u32 - 1 => Some(id as usize + 1),
         _ => None,
     }
 }
@@ -422,10 +527,19 @@ pub fn mixer_get_line_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             (0..LINES).find(|&l| line_info(l).0 == component)
         }
         _ => {
-            let target = read(cpu, 120);
-            [WAVE, SYNTH, CD]
-                .into_iter()
-                .find(|&l| line_info(l).1 == target)
+            // The device, as its caps have it: the type, the ids, the
+            // version and the name. The device's id isn't asked for.
+            let mut asked = vec![0; TARGET_SIZE];
+            cpu.bus.guest_read_bytes(at + TARGET_AT, &mut asked);
+            asked[4..8].fill(0);
+            let name = &mut asked[16..];
+            let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            name[end..].fill(0);
+            (0..LINES).find(|&l| {
+                let mut s = target_struct(l);
+                s[4..8].fill(0);
+                s == asked
+            })
         }
     };
     let Some(line) = line else {
@@ -582,6 +696,10 @@ fn details(cpu: &mut Cpu, at: u32) -> Option<Result<Details, u32>> {
     if !(channels == 1 || channels == 2 && !mute) {
         return Some(Err(MMSYSERR_INVALPARAM));
     }
+    // A mono line's volume has one channel.
+    if channels > channels_of(line) {
+        return Some(Err(MIXERR_INVALVALUE));
+    }
     if !cpu
         .bus
         .guest_probe(place, cb_details as usize * channels as usize, true)
@@ -622,6 +740,9 @@ pub fn mixer_get_control_details(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let l = mixer(cpu).lines[line].clone();
     let values = if mute {
         vec![l.mute as u32]
+    } else if channels_of(line) == 1 {
+        // A mono line's volume is its left's (`set_line_volume`).
+        vec![l.left]
     } else if channels == 1 {
         vec![l.left.max(l.right)]
     } else {
@@ -681,8 +802,9 @@ fn changed(cpu: &mut Cpu, msg: u32, id: u32) {
     }
 }
 
-/// Set a line's volume from elsewhere (auxSetVolume, midiOutSetVolume
-/// on the mixer's MIDI line): the windows hear of it.
+/// Set a line's volume from an auxiliary device (auxSetVolume): the
+/// windows hear of it. A mono line keeps both words, as the Sound Blaster
+/// 16's driver does, and plays at the left's.
 fn set_line_volume(cpu: &mut Cpu, line: usize, volume: u32) {
     cpu.bus.audio_catch_up();
     let l = &mut mixer(cpu).lines[line];
@@ -700,64 +822,70 @@ pub fn mixer_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(MMSYSERR_NOTSUPPORTED)
 }
 
-/// auxGetNumDevs: one, the CD audio input.
+/// auxGetNumDevs: the Sound Blaster 16's seven.
 pub fn aux_get_num_devs(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(1)
+    Some(AUX.len() as u32)
 }
 
-/// auxGetDevCapsA(id, caps, size).
+/// auxGetDevCapsA(id, caps, size). There is no aux mapper: -1 is a bad
+/// id, as on Windows 95.
 pub fn aux_get_dev_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[id, at, size] = args else {
         unreachable!()
     };
-    if id != 0 && id != u32::MAX {
+    let Some(aux) = AUX.get(id as usize) else {
         return Some(MMSYSERR_BADDEVICEID);
-    }
+    };
     if at == 0 {
         return Some(MMSYSERR_INVALPARAM);
     }
+    let support = if aux.stereo {
+        AUXCAPS_VOLUME | AUXCAPS_LRVOLUME
+    } else {
+        AUXCAPS_VOLUME
+    };
     let mut caps = Vec::with_capacity(48);
     caps.extend_from_slice(&MM_MICROSOFT.to_le_bytes());
     caps.extend_from_slice(&MM_MIXER_PID.to_le_bytes());
     caps.extend_from_slice(&0x0400u32.to_le_bytes());
-    caps.extend_from_slice(&name_field("CD Audio", 32));
-    caps.extend_from_slice(&AUXCAPS_CDAUDIO.to_le_bytes());
+    caps.extend_from_slice(&name_field(aux.name, 32));
+    caps.extend_from_slice(&aux.technology.to_le_bytes());
     caps.extend_from_slice(&0u16.to_le_bytes());
-    caps.extend_from_slice(&(AUXCAPS_VOLUME | AUXCAPS_LRVOLUME).to_le_bytes());
+    caps.extend_from_slice(&support.to_le_bytes());
     write_struct(cpu, at, size, &caps)
 }
 
-/// auxGetVolume(id, volume): the CD line's volume.
+/// auxGetVolume(id, volume): the volume of the device's line.
 pub fn aux_get_volume(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[id, at] = args else { unreachable!() };
-    if id != 0 {
+    let Some(aux) = AUX.get(id as usize) else {
         return Some(MMSYSERR_BADDEVICEID);
-    }
+    };
     if at == 0 {
         return Some(MMSYSERR_INVALPARAM);
     }
     if !cpu.bus.guest_probe(at, 4, true) {
         return None;
     }
-    let l = &mixer(cpu).lines[CD];
+    let l = &mixer(cpu).lines[aux.line];
     let volume = l.left | l.right << 16;
     cpu.bus.guest_write_32(at, volume);
     Some(MMSYSERR_NOERROR)
 }
 
-/// auxSetVolume(id, volume).
+/// auxSetVolume(id, volume): the volume of the device's line.
 pub fn aux_set_volume(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[id, volume] = args else { unreachable!() };
-    if id != 0 {
+    let Some(aux) = AUX.get(id as usize) else {
         return Some(MMSYSERR_BADDEVICEID);
-    }
-    set_line_volume(cpu, CD, volume);
+    };
+    set_line_volume(cpu, aux.line, volume);
     Some(MMSYSERR_NOERROR)
 }
 
 /// auxOutMessage(id, message, p1, p2).
 pub fn aux_out_message(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if args[0] != 0 {
+    if args[0] as usize >= AUX.len() {
         return Some(MMSYSERR_BADDEVICEID);
     }
     Some(MMSYSERR_NOTSUPPORTED)
