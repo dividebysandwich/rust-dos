@@ -504,6 +504,14 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
         cpu.bus.observe.enabled = skip;
         cpu
     };
+    // The host clock is frozen while the two machines run, so the wait loop
+    // reads the same time on both (see `hosttime::fix`). Without it the two
+    // machines read the wall clock at different moments and diverge.
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
     let mut plain = start("clock_wait_plain", CoreMode::Normal, false);
     let mut skipping = start("clock_wait_skipping", CoreMode::Dynamic, true);
     // The machines' call counts before each batch, by turns: the program's
