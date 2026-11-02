@@ -745,8 +745,7 @@ rust-dos is GPL-2.0-or-later.
   exports and SCSI commands through WNASPI32 among others. A
   protection is never patched, skipped or detected by name. An image
   that can't pass the check because of how it was made (its unreadable
-  sectors read back as good ones) fails it, as on Windows 98. Oni's
-  SafeDisc 2 is the case being worked through (#346).
+  sectors read back as good ones) fails it, as on Windows 98.
 - **Direct hardware access.** Games that talk to VxDs (`DeviceIoControl`
   on `\\.\VWIN32` for DOS calls is common and can go to the built-in
   DOS; others are not) or need a vendor's driver.
