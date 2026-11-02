@@ -1172,12 +1172,21 @@ impl Voodoo {
             .spare(range, &given_out, |a, b| self.gpu_sync_quiet(a as u32, b as u32))
     }
 
-    /// Whether frame buffer writes have to wait their turn behind jobs.
+    /// Whether frame buffer writes have to wait their turn behind jobs:
+    /// those the workers draw (`workers_queue`), or those left to the
+    /// OpenGL renderer.
     pub(crate) fn writes_queue(&self) -> bool {
+        self.workers_queue() || self.gpu_behind.get()
+    }
+
+    /// Whether jobs or frame buffer writes wait for the workers
+    /// (`catch_up_workers`). A Banshee's read or write of its memory that
+    /// reads back the rows behind the renderer there first (`gpu_sync`)
+    /// needs to catch up only these: the read back catches them up too.
+    fn workers_queue(&self) -> bool {
         self.outstanding.get()
             || !self.words.borrow().is_empty()
             || !self.backlog.borrow().is_empty()
-            || self.gpu_behind.get()
     }
 
     /// Frame buffer writes for the queue (`writes_queue`): held back with
@@ -1784,7 +1793,6 @@ impl Voodoo {
         self.display_dirty = true;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().tracker.mark_all();
-        self.gpu.get_mut().tracker.forget_buffers();
         self.gpu_behind.set(false);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();

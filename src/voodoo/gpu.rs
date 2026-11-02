@@ -18,9 +18,9 @@
 use super::backlog::Access;
 use super::mirror::{Blit, BlitSource, Command, row_bytes, rows_of};
 use super::raster::{RasterState, Stride};
-use super::{NONE, Voodoo};
 use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
+use super::{NONE, Voodoo};
 
 /// The bytes of the memory a job left to the renderer draws into, a range
 /// for each buffer (`gpu_job_bytes`).
@@ -284,11 +284,16 @@ impl Voodoo {
                         }
                         mark(dest, key.stride, all);
                     }
-                    // The auxiliary buffer, if the job tests or writes
+                    // The auxiliary buffer, if a triangle tests or writes
                     // depth, or uses alpha planes there (whose alpha it
-                    // may blend with without writing it): a job that
-                    // doesn't leaves it to whatever reads it.
-                    if st.fbz_mode & (1 << 4 | 1 << 10 | 1 << 18) != 0 {
+                    // may blend with without writing it), or a fastfill
+                    // writes it (`fastfill_row`, which tests nothing): a
+                    // job that doesn't leaves it to whatever reads it.
+                    let aux = match job {
+                        Job::Fastfill { .. } => 1 << 10,
+                        _ => 1 << 4 | 1 << 10 | 1 << 18,
+                    };
+                    if st.fbz_mode & aux != 0 {
                         mark(key.aux, key.aux_stride, all);
                     }
                 }
@@ -832,5 +837,35 @@ impl Voodoo {
             "left_to_cpu": gpu.hot,
             "pages_read_back": gpu.read_back,
         })
+    }
+}
+
+/// For the tests: an OpenGL renderer 640 pixels wide that drew each
+/// colour buffer in one colour and the depth buffer at one value, and
+/// notes what it is asked.
+#[cfg(test)]
+pub(crate) struct TestRenderer(pub std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+#[cfg(test)]
+impl GpuLink for TestRenderer {
+    fn ready(&self) -> bool {
+        false
+    }
+
+    fn run(&mut self, commands: Vec<Command>) {
+        self.0.borrow_mut().push(format!("run {}", commands.len()));
+    }
+
+    fn read(&mut self, _at: u32, _out: &mut [u8]) -> bool {
+        false
+    }
+
+    fn read_buffer(&mut self, dest: Option<u32>, (top, bottom): (u32, u32), out: &mut [u16]) -> bool {
+        assert_eq!(out.len(), 640 * (bottom - top) as usize);
+        out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
+        self.0
+            .borrow_mut()
+            .push(format!("read {dest:?} {top}..{bottom}"));
+        true
     }
 }
