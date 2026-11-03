@@ -1747,7 +1747,10 @@ impl Engine {
             CMD_SCREEN_TO_SCREEN => {
                 let (src_x, src_y) = if launch { xy(val) } else { (src_x, src_y) };
                 let same = self.src_format & COL_MASK == self.dst_format & COL_MASK;
-                if !same || command >> 24 != 0xCC || self.command_extra & CMDEXTRA_SRC_COLORKEY != 0 {
+                if !same
+                    || command >> 24 != 0xCC
+                    || self.command_extra & CMDEXTRA_SRC_COLORKEY != 0
+                {
                     return None;
                 }
                 let rect = rect(dst_x, dst_y)?;
@@ -2139,7 +2142,11 @@ pub(crate) mod tests {
     /// The engine's registers set up at random for a rectangle fill or a
     /// screen to screen copy, most of them ones a `Plan` can draw: the
     /// command, then words for the launch area.
-    pub(crate) fn random_fill_or_copy(n: &mut Numbers, e: &mut Engine, ram: &Vram) -> Vec<(u32, u32)> {
+    pub(crate) fn random_fill_or_copy(
+        n: &mut Numbers,
+        e: &mut Engine,
+        ram: &Vram,
+    ) -> Vec<(u32, u32)> {
         let size = ram.bytes() as u32;
         let formats = [COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP];
         let format = formats[n.below(4) as usize];
@@ -2148,7 +2155,7 @@ pub(crate) mod tests {
         let surface = |n: &mut Numbers, from: u32| {
             let tiled = n.below(2) == 0;
             let stride = if tiled { 10 + n.below(6) } else { 1700 + n.below(800) };
-            let base = from + n.below(size / 4) & !1;
+            let base = (from + n.below(size / 4)) & !1;
             (base | (tiled as u32) << 31, stride)
         };
         let (dst_base, dst_stride) = surface(n, 0);
@@ -2199,7 +2206,7 @@ pub(crate) mod tests {
         }
         let kind = if n.below(2) == 0 { CMD_RECTFILL } else { CMD_SCREEN_TO_SCREEN };
         let rop = if n.below(2) == 0 { 0xCC } else { rop(n) };
-        let command = (rop as u32) << 24 | flags | kind;
+        let command = rop << 24 | flags | kind;
         std::iter::once((0x70, command))
             .chain((0..6).map(|_| (0x80 + 4 * n.below(32), n.xy(300, 60))))
             .collect()

@@ -387,7 +387,11 @@ pub(crate) mod tests {
 
     /// A flat-shaded rectangle of two triangles, `x0..x1` by `y0..y1`, in
     /// colour `rgb`, the iterated colour.
-    pub(crate) fn rectangle(v: &mut Voodoo, (x0, y0, x1, y1): (f32, f32, f32, f32), rgb: (f32, f32, f32)) {
+    pub(crate) fn rectangle(
+        v: &mut Voodoo,
+        (x0, y0, x1, y1): (f32, f32, f32, f32),
+        rgb: (f32, f32, f32),
+    ) {
         for (a, b, c) in [
             ((x0, y0), (x1, y0), (x1, y1)),
             ((x0, y0), (x1, y1), (x0, y1)),

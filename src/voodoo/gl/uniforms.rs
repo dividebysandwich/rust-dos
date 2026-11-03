@@ -143,6 +143,11 @@ locations!(Quad {
     u_size: [f32; 2],
     u_scale: f32
 });
+locations!(CopyQuad {
+    u_rect: [f32; 4],
+    u_size: [f32; 2],
+    u_offset: [i32; 2]
+});
 locations!(FillQuad {
     u_rect: [f32; 4],
     u_size: [f32; 2],

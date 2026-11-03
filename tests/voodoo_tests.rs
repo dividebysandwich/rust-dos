@@ -1796,6 +1796,19 @@ fn pixel_in(mem: &[u8], at: usize, bpp: usize) -> u32 {
     mem[at..at + bpp].iter().rev().fold(0, |v, &b| v << 8 | b as u32)
 }
 
+/// Where the byte `x` of row `y` of `plane` is: in a tiled plane, tiles
+/// of 128 bytes by 32 rows, and `stride` bytes for each row of tiles.
+#[cfg(feature = "gl")]
+fn plane_at(plane: &rust_dos::voodoo::mirror::Plane, x: u32, y: u32) -> u32 {
+    match plane.tiled {
+        true => {
+            let column = (x & 127) + (x >> 7) * 4096;
+            plane.start + column + (y & 31) * 128 + (y >> 5) * plane.stride
+        }
+        false => plane.start + y * plane.stride + x,
+    }
+}
+
 /// `blit` done in `mem` as `mirror::Blit` says, one pixel after another.
 #[cfg(feature = "gl")]
 fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
@@ -1824,7 +1837,7 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
                         }
                         let sx = rect[0] + u * (rect[2] - rect[0]) / (right - left);
                         let sy = rect[1] + v * (rect[3] - rect[1]) / (bottom - top);
-                        let at = plane.start + sy as u32 * plane.stride + sx as u32 * plane.bpp;
+                        let at = plane_at(plane, sx as u32 * plane.bpp, sy as u32);
                         pixel_in(&before, at as usize, plane.bpp as usize)
                     }
                     BlitSource::Buffer { .. } => unreachable!(),
@@ -1843,7 +1856,7 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
                     }
                     Convert::ClearTop => value & 0xFF_FFFF,
                 };
-                let at = (d.start + y as u32 * d.stride + x as u32 * d.bpp) as usize;
+                let at = plane_at(&d, x as u32 * d.bpp, y as u32) as usize;
                 let bpp = d.bpp as usize;
                 if blit.dst_key.is_some_and(|k| !keyed(pixel_in(&before, at, bpp), &k)) {
                     continue;
@@ -1857,9 +1870,9 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
 /// The OpenGL renderer's 2D operations in its copy of a Voodoo3's
 /// memory (`voodoo::gpu`) leave the memory as the same operations done
 /// pixel by pixel do, once it is read back: copies, stretches, mirrors,
-/// colour keys, fills and conversions between 16 and 24 or 32 bits.
-/// Needs OpenGL 3.2: `cargo test --test voodoo_tests gpu_blits --
-/// --ignored`.
+/// colour keys, fills and conversions between 16 and 24 or 32 bits, in
+/// linear and tiled planes. Needs OpenGL 3.2:
+/// `cargo test --test voodoo_tests gpu_blits -- --ignored`.
 #[cfg(feature = "gl")]
 #[test]
 #[ignore]
@@ -1915,6 +1928,7 @@ fn without_the_blit_program_blits_stay_on_the_cpu() {
         start: 0x8_0000,
         stride: 1280,
         bpp: 2,
+        tiled: false,
     };
     let fill = Blit {
         dst: plane,
@@ -1995,11 +2009,20 @@ fn gpu_blits_within(limits: rust_dos::voodoo::gl::Limits) {
         start,
         stride,
         bpp: 2,
+        tiled: false,
     };
     let p32 = Plane {
         start: 0x10_0000,
         stride: 2560,
         bpp: 4,
+        tiled: false,
+    };
+    // Tiled: 5 tiles across, so 320 pixels of 16 bits or 160 of 32.
+    let tiled = |start, bpp| Plane {
+        start,
+        stride: 5 * 4096,
+        bpp,
+        tiled: true,
     };
     let plain = Blit {
         dst: p16(0x8_0000, 1280),
@@ -2071,6 +2094,7 @@ fn gpu_blits_within(limits: rust_dos::voodoo::gl::Limits) {
                 start: 0x18_0000,
                 stride: 1920,
                 bpp: 3,
+                tiled: false,
             },
             convert: Convert::Widen,
             ..plain.clone()
@@ -2088,6 +2112,7 @@ fn gpu_blits_within(limits: rust_dos::voodoo::gl::Limits) {
                 start: 0x14_0000,
                 stride: 2560,
                 bpp: 4,
+                tiled: false,
             },
             src: BlitSource::Memory {
                 plane: p32,
@@ -2101,12 +2126,14 @@ fn gpu_blits_within(limits: rust_dos::voodoo::gl::Limits) {
                 start: 0x1C_0000,
                 stride: 640,
                 bpp: 1,
+                tiled: false,
             },
             src: BlitSource::Memory {
                 plane: Plane {
                     start: 0x2_0000,
                     stride: 640,
                     bpp: 1,
+                    tiled: false,
                 },
                 rect: [0, 0, 64, 32],
             },
@@ -2116,6 +2143,31 @@ fn gpu_blits_within(limits: rust_dos::voodoo::gl::Limits) {
                 masks: [0; 3],
             }),
             ..at([0, 0, 64, 32])
+        },
+        // Tiled, across the edges of tiles both ways.
+        Blit {
+            dst: tiled(0x1D_0000, 2),
+            src: BlitSource::Fill(0xABCD),
+            ..at([30, 20, 250, 50])
+        },
+        Blit {
+            dst: tiled(0x1D_0000, 2),
+            ..at([50, 10, 114, 42])
+        },
+        Blit {
+            src: BlitSource::Memory {
+                plane: tiled(0x1D_0000, 2),
+                rect: [40, 15, 140, 60],
+            },
+            ..at([500, 60, 600, 105])
+        },
+        Blit {
+            dst: tiled(0x1E_0000, 4),
+            src: BlitSource::Memory {
+                plane: tiled(0x1E_0000, 4),
+                rect: [0, 0, 100, 40],
+            },
+            ..at([20, 25, 120, 65])
         },
     ];
     for blit in &blits {

@@ -936,7 +936,11 @@ impl Model {
                 Command::Resync(snapshot) => {
                     let layout = &snapshot.layout;
                     (self.width, self.height) = (layout.width, layout.height);
-                    let colour = layout.color.iter().copied().zip(snapshot.color.iter().cloned());
+                    let colour = layout
+                        .color
+                        .iter()
+                        .copied()
+                        .zip(snapshot.color.iter().cloned());
                     self.colour = colour.collect();
                     self.depth = snapshot.aux.clone();
                 }
@@ -957,7 +961,11 @@ impl Model {
                             }
                         }
                     }
-                    if let Some(depth) = self.depth.as_mut().filter(|_| draw.state.fbz_mode & 1 << 10 != 0) {
+                    if let Some(depth) = self
+                        .depth
+                        .as_mut()
+                        .filter(|_| draw.state.fbz_mode & 1 << 10 != 0)
+                    {
                         for y in y0..y1 {
                             for x in x0..x1 {
                                 depth[(y * w + x) as usize] = draws as u16;
@@ -1030,20 +1038,27 @@ impl Model {
                     let len = before.len();
                     let address = |p: &Plane, x: u32, y: u32| {
                         let a = if p.tiled {
-                            p.start + (x & 127) + (x >> 7) * 4096 + (y & 31) * 128 + (y >> 5) * p.stride
+                            p.start
+                                + (x & 127)
+                                + (x >> 7) * 4096
+                                + (y & 31) * 128
+                                + (y >> 5) * p.stride
                         } else {
                             p.start + y * p.stride + x
                         };
                         a as usize % len
                     };
                     let pixel = |a: usize, bpp: u32| {
-                        (0..bpp as usize).fold(0u32, |v, i| v | (before[(a + i) % len] as u32) << (8 * i))
+                        (0..bpp as usize)
+                            .fold(0u32, |v, i| v | (before[(a + i) % len] as u32) << (8 * i))
                     };
                     let keyed = |v: u32, k: &super::mirror::Key| {
                         if k.masks == [0; 3] {
                             return v >= k.low && v <= k.high;
                         }
-                        k.masks.iter().all(|&m| m == 0 || ((v & m) >= (k.low & m) && (v & m) <= (k.high & m)))
+                        k.masks
+                            .iter()
+                            .all(|&m| m == 0 || ((v & m) >= (k.low & m) && (v & m) <= (k.high & m)))
                     };
                     let [ax, ay, ar, ab] = blit.area;
                     for r in &blit.rects {
@@ -1055,9 +1070,8 @@ impl Model {
                                         value = *v;
                                         None
                                     }
-                                    BlitSource::Memory { rect, .. } | BlitSource::Buffer { rect, .. } => {
-                                        Some(*rect)
-                                    }
+                                    BlitSource::Memory { rect, .. }
+                                    | BlitSource::Buffer { rect, .. } => Some(*rect),
                                 };
                                 if let Some([sl, st, sr, sb]) = src {
                                     let (dw, dh, sw, sh) = (ar - ax, ab - ay, sr - sl, sb - st);
@@ -1071,13 +1085,22 @@ impl Model {
                                     let (sx, sy) = (sl + u * sw / dw, st + v * sh / dh);
                                     value = match &blit.src {
                                         BlitSource::Memory { plane, .. } => {
-                                            let a = address(plane, (sx * plane.bpp as i32) as u32, sy as u32);
+                                            let a = address(
+                                                plane,
+                                                (sx * plane.bpp as i32) as u32,
+                                                sy as u32,
+                                            );
                                             pixel(a, plane.bpp)
                                         }
                                         BlitSource::Buffer { buffer, .. } => {
                                             let b = &self.colour[buffer];
-                                            let (sx, sy) = (sx.clamp(0, w as i32 - 1), sy.clamp(0, h as i32 - 1));
-                                            super::blit::rgb888(b[(sy as u32 * w + sx as u32) as usize])
+                                            let (sx, sy) = (
+                                                sx.clamp(0, w as i32 - 1),
+                                                sy.clamp(0, h as i32 - 1),
+                                            );
+                                            super::blit::rgb888(
+                                                b[(sy as u32 * w + sx as u32) as usize],
+                                            )
                                         }
                                         BlitSource::Fill(_) => unreachable!(),
                                     };
@@ -1093,7 +1116,11 @@ impl Model {
                                 }
                                 let d = &blit.dst;
                                 let at = address(d, x as u32 * d.bpp, y as u32);
-                                if blit.dst_key.as_ref().is_some_and(|k| !keyed(pixel(at, d.bpp), k)) {
+                                if blit
+                                    .dst_key
+                                    .as_ref()
+                                    .is_some_and(|k| !keyed(pixel(at, d.bpp), k))
+                                {
                                     continue;
                                 }
                                 for i in 0..d.bpp as usize {
@@ -1139,7 +1166,12 @@ impl GpuLink for ModelRenderer {
         true
     }
 
-    fn read_buffer(&mut self, dest: Option<u32>, (top, bottom): (u32, u32), out: &mut [u16]) -> bool {
+    fn read_buffer(
+        &mut self,
+        dest: Option<u32>,
+        (top, bottom): (u32, u32),
+        out: &mut [u16],
+    ) -> bool {
         let model = self.0.borrow();
         let w = model.width as usize;
         let buffer = match dest {

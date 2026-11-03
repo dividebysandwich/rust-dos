@@ -193,7 +193,8 @@ pub(crate) mod tests {
     use super::super::render3d::{
         AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
     };
-    use crate::voodoo::gpu::{Model, ModelRenderer};
+    use crate::voodoo::gpu::{GpuLink, Model, ModelRenderer};
+    use crate::voodoo::mirror::Frame;
     use crate::voodoo::raster::Stride;
     use crate::voodoo::regs::{
         CLIP_LEFT_RIGHT, CLIP_LOW_Y_HIGH_Y, FASTFILL_CMD, FBZ_MODE, FSTART_Z, ZA_COLOR,
@@ -213,8 +214,8 @@ pub(crate) mod tests {
     fn surface(base: u32, bpp: u32, tiled: bool) -> (u32, u32) {
         let format = if bpp == 2 { 3 << 16 } else { 5 << 16 };
         match tiled {
-            true => (base | 1 << 31, format | 640 * bpp / 128),
-            false => (base, format | 640 * bpp),
+            true => (base | 1 << 31, format | (640 * bpp / 128)),
+            false => (base, format | (640 * bpp)),
         }
     }
 
@@ -222,9 +223,14 @@ pub(crate) mod tests {
     /// buffers of 640 by 64 at A and B and a depth buffer at `AUX`, in
     /// tiles if `tiled`.
     pub(crate) fn model_card(model: &Rc<RefCell<Model>>, tiled: bool) -> Voodoo {
+        card_with(Box::new(ModelRenderer(Rc::clone(model))), tiled)
+    }
+
+    /// The same card with `link` for its renderer.
+    fn card_with(link: Box<dyn GpuLink>, tiled: bool) -> Voodoo {
         let mut v = mirrored();
         v.set_software_picture(false);
-        v.set_gpu_link(Some(Box::new(ModelRenderer(Rc::clone(model)))));
+        v.set_gpu_link(Some(link));
         v.set_gpu_reads(true);
         let stride = if tiled { 1 << 15 | 10 } else { 1280 };
         reg3d(&mut v, COL_BUFFER_STRIDE, stride);
@@ -239,15 +245,21 @@ pub(crate) mod tests {
     /// A frame drawn into `buffer` as `draw_frame` draws it, but left
     /// unshown, by the renderer, which gets it.
     pub(crate) fn frame(v: &mut Voodoo, model: &Rc<RefCell<Model>>, buffer: u32) {
+        if let Some(frame) = unshown_frame(v, buffer) {
+            model.borrow_mut().apply(&frame.commands);
+        }
+    }
+
+    /// A frame drawn into `buffer` as `draw_frame` draws it, but left
+    /// unshown: what the renderer is to draw of it.
+    fn unshown_frame(v: &mut Voodoo, buffer: u32) -> Option<Frame> {
         reg3d(v, COL_BUFFER_ADDR, buffer);
         reg3d(v, FBZ_MODE, 1 << 10);
         reg3d(v, FASTFILL_CMD, 0);
         reg3d(v, FBZ_MODE, 1 | 1 << 4 | 3 << 5 | 1 << 9 | 1 << 10);
         float(v, FSTART_Z, 1000.0);
         rectangle(v, (0.0, 0.0, 640.0, 64.0), (200.0, 30.0, 60.0));
-        if let Some(frame) = v.take_mirror() {
-            model.borrow_mut().apply(&frame.commands);
-        }
+        v.take_mirror()
     }
 
     /// A fill or a copy (`command`, a raster operation and a command
@@ -465,30 +477,39 @@ pub(crate) mod tests {
             }
         }
         let kind = if n.below(2) == 0 { 5 } else { 1 };
-        words.push((0x70, (rop(n) as u32) << 24 | flags | kind));
+        words.push((0x70, rop(n) << 24 | flags | kind));
         for _ in 0..n.below(3) {
             words.push((0x80 + 4 * n.below(32), n.xy(660, 70)));
         }
         words
     }
 
-    #[test]
-    fn commands_on_the_gpu_draw_what_the_engine_draws() {
-        // Fills and copies at random between the 3D buffers, and memory
-        // outside them in 16 and 32 bits, linear and tiled, on a card
-        // whose buffers only the renderer drew, and on one that read them
-        // back before each command, which the engine draws in its memory.
-        // Read back, the memory of the two ends up the same, reads of
-        // parts of it between the commands or not.
-        let mut n = Numbers(5020);
+    /// A card, and what draws a frame into one of its buffers with the
+    /// card's renderer.
+    type Drawn = (Voodoo, Box<dyn FnMut(&mut Voodoo, u32)>);
+
+    /// Fills and copies at random between the 3D buffers, and memory
+    /// outside them in 16 and 32 bits, linear and tiled, on a card
+    /// whose buffers only the renderer drew, and on one that read them
+    /// back before each command, which the engine draws in its memory.
+    /// Read back, the memory of the two ends up the same, reads of
+    /// parts of it between the commands or not. With `buffers_only`,
+    /// the commands are only between the two colour buffers. How many
+    /// of the commands the renderer drew.
+    fn random_commands(
+        seed: u64,
+        cases: u32,
+        buffers_only: bool,
+        mut card: impl FnMut(bool) -> Drawn,
+    ) -> u64 {
+        let mut n = Numbers(seed);
         let mut on_gpu = 0;
-        for case in 0..40 {
+        for case in 0..cases {
             let tiled = n.below(2) == 0;
-            let models: [Rc<RefCell<Model>>; 2] = Default::default();
-            let mut cards = models.each_ref().map(|m| model_card(m, tiled));
-            for (v, model) in cards.iter_mut().zip(&models) {
+            let mut cards = [card(tiled), card(tiled)];
+            for (v, draw) in &mut cards {
                 for buffer in [A, B, A] {
-                    frame(v, model, buffer);
+                    draw(v, buffer);
                 }
             }
             let surfaces = [
@@ -499,18 +520,19 @@ pub(crate) mod tests {
                 surface(WIDE, 4, n.below(2) == 0),
                 surface(WIDE, 2, n.below(2) == 0),
             ];
+            let surfaces = if buffers_only { &surfaces[..2] } else { &surfaces[..] };
             for _ in 0..10 {
                 // Now and then a frame into a buffer, by the renderer
                 // alone: what was read back cools first.
                 if n.below(3) == 0 {
                     let buffer = if n.below(2) == 0 { A } else { B };
-                    for (v, model) in cards.iter_mut().zip(&models) {
+                    for (v, draw) in &mut cards {
                         v.gpu.get_mut().tracker.cool();
-                        frame(v, model, buffer);
+                        draw(v, buffer);
                     }
                 }
-                let [v, sw] = &mut cards;
-                let words = random_command(&mut n, &surfaces);
+                let [(v, _), (sw, _)] = &mut cards;
+                let words = random_command(&mut n, surfaces);
                 sw.gpu_sync_all();
                 for &(reg, value) in &words {
                     v.banshee_2d_write(reg, value);
@@ -521,7 +543,7 @@ pub(crate) mod tests {
                     v.gpu_sync(at, at + n.below(0x2000));
                 }
             }
-            let [v, sw] = &cards;
+            let [(v, _), (sw, _)] = &cards;
             on_gpu += status(v)["gpu_2d"]["engine_commands"].as_u64().unwrap();
             let (a, b) = (v.frame_buffer().to_bytes(), sw.frame_buffer().to_bytes());
             if a != b {
@@ -529,6 +551,68 @@ pub(crate) mod tests {
                 panic!("case {case}: byte {at:#x}, {:#x} against {:#x}", a[at], b[at]);
             }
         }
+        on_gpu
+    }
+
+    #[test]
+    fn commands_on_the_gpu_draw_what_the_engine_draws() {
+        let on_gpu = random_commands(5020, 40, false, |tiled| {
+            let model: Rc<RefCell<Model>> = Rc::default();
+            let v = model_card(&model, tiled);
+            (v, Box::new(move |v, buffer| frame(v, &model, buffer)))
+        });
         assert!(on_gpu > 60, "{on_gpu}");
+    }
+
+    /// The same with OpenGL's renderer, at 1 and 2 times the card's size
+    /// and with samples: the fills and copies between the buffers in its
+    /// buffers, those into the memory in its copy of the memory; then
+    /// commands between the buffers alone, which are fewer at random.
+    /// Needs
+    /// OpenGL 3.3: `cargo test --lib gl_commands_on_the_gpu -- --ignored`.
+    #[cfg(feature = "voodoo-gl")]
+    #[test]
+    #[ignore]
+    fn gl_commands_on_the_gpu_draw_what_the_engine_draws() {
+        use crate::video::shader::Glsl;
+        use crate::voodoo::gl::{SharedGl, VoodooGl, tests::test_context};
+
+        /// The renderer, destroyed with the card's drawer.
+        struct Owned(Rc<glow::Context>, Rc<RefCell<Option<VoodooGl>>>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                if let Some(r) = self.1.borrow_mut().take() {
+                    r.destroy(&self.0);
+                }
+            }
+        }
+
+        let context = test_context("2d on the gpu");
+        let gl = Rc::new(context.gl);
+        for (scale, samples) in [(1, 1), (2, 1), (2, 4)] {
+            let seed = 5021 + 10 * scale as u64 + samples as u64;
+            let card = |tiled| {
+                let renderer = VoodooGl::new(&gl, Glsl::Gl150, scale, samples, 1).unwrap();
+                let renderer = Rc::new(RefCell::new(Some(renderer)));
+                let link = SharedGl {
+                    gl: Rc::clone(&gl),
+                    renderer: Rc::clone(&renderer),
+                };
+                let v = card_with(Box::new(link), tiled);
+                let owned = Owned(Rc::clone(&gl), renderer);
+                let draw = move |v: &mut Voodoo, buffer| {
+                    let Some(frame) = unshown_frame(v, buffer) else { return };
+                    if let Some(r) = owned.1.borrow_mut().as_mut() {
+                        r.run_early(&owned.0, &frame.commands);
+                    }
+                };
+                (v, Box::new(draw) as Box<dyn FnMut(&mut Voodoo, u32)>)
+            };
+            let mut card = card;
+            let on_gpu = random_commands(seed, 12, false, &mut card);
+            assert!(on_gpu > 20, "scale {scale}, samples {samples}: {on_gpu}");
+            let between = random_commands(seed + 1, 30, true, &mut card);
+            assert!(between > 50, "scale {scale}, samples {samples}: {between}");
+        }
     }
 }
