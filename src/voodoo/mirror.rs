@@ -343,6 +343,16 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// The byte address of pixel (`x`, `y`), which are not negative.
+    pub fn at(&self, x: u32, y: u32) -> u32 {
+        let x = x * self.bpp;
+        if self.tiled {
+            self.start + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * self.stride
+        } else {
+            self.start + x + y * self.stride
+        }
+    }
+
     /// The bytes rows `top..bottom` of columns `left..right` span, first
     /// to last: in tiles, from the first byte of the first column in the
     /// first row of its tiles to the last of the last column in the last

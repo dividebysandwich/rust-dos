@@ -9,6 +9,7 @@
 //! word arrives, so it is never busy when the host looks.
 
 use crate::voodoo::mem::Vram;
+use crate::voodoo::mirror::Plane;
 
 const CMD_NOP: u32 = 0;
 const CMD_SCREEN_TO_SCREEN: u32 = 1;
@@ -1611,36 +1612,13 @@ impl Engine {
     }
 }
 
-/// A surface of the card's memory as the engine addresses it (`addr`):
-/// its first byte, the bytes from one row to the next (from one row of
-/// tiles to the next if `tiled`, in tiles of 128 bytes by 32 rows), and
-/// its bytes a pixel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Surface {
-    pub base: u32,
-    pub stride: u32,
-    pub tiled: bool,
-    pub bpp: u32,
-}
-
-impl Surface {
-    /// The byte address of pixel (`x`, `y`), which are not negative.
-    pub fn at(&self, x: u32, y: u32) -> u32 {
-        let x = x * self.bpp;
-        if self.tiled {
-            self.base + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * self.stride
-        } else {
-            self.base + x + y * self.stride
-        }
-    }
-}
-
 /// What a command draws, where every pixel of a rectangle of the
 /// destination gets one value or the source's pixel at the same place
 /// relative to it (`Engine::plan`). No two of the pixels share a byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plan {
-    pub dst: Surface,
+    /// The destination, as the engine addresses it (`addr`).
+    pub dst: Plane,
     /// The pixels drawn: left, top, right, bottom, the right and bottom
     /// ones not drawn, none negative.
     pub rect: [u32; 4],
@@ -1656,7 +1634,7 @@ pub enum Op {
     /// `from` (the rectangle's top left) on. The source and the
     /// destination share no byte, so the pixels are those the source had
     /// before the command.
-    Copy { src: Surface, from: [u32; 2] },
+    Copy { src: Plane, from: [u32; 2] },
 }
 
 impl Engine {
@@ -1709,24 +1687,34 @@ impl Engine {
             let (top, bottom) = positions(y as i64, dir_y, rows);
             Some([left, top, right + 1, bottom + 1].map(|v| v as u32))
         };
-        let dst = Surface {
-            base: self.dst_base,
+        let dst = Plane {
+            start: self.dst_base,
             stride: self.dst_stride,
             tiled: self.dst_tiled,
             bpp,
         };
         // A pixel of 3 bytes at the end of a tile's row goes on into the
         // tile's next row (`put`).
-        let whole = |s: Surface| !(s.tiled && s.bpp == 3);
+        let whole = |s: Plane| !(s.tiled && s.bpp == 3);
         if !whole(dst) {
             return None;
         }
-        // The bytes of `rect` of `surface`, if they are within the memory.
-        let span = |surface: Surface, [left, top, right, bottom]: [u32; 4]| {
-            let (x, y) = ((left as i64, right as i64 - 1), (top as i64, bottom as i64 - 1));
-            let (base, stride, tiled) = (surface.base, surface.stride, surface.tiled);
-            let bytes = surface.bpp as i64;
-            surface_span((base, stride, tiled), true, (x.0 * bytes, x.1 * bytes), bytes, y, size)
+        // The bytes of `rect` of `plane`, if they are within the memory.
+        let span = |plane: Plane, [left, top, right, bottom]: [u32; 4]| {
+            let (x, y) = (
+                (left as i64, right as i64 - 1),
+                (top as i64, bottom as i64 - 1),
+            );
+            let (base, stride, tiled) = (plane.start, plane.stride, plane.tiled);
+            let bytes = plane.bpp as i64;
+            surface_span(
+                (base, stride, tiled),
+                true,
+                (x.0 * bytes, x.1 * bytes),
+                bytes,
+                y,
+                size,
+            )
         };
         let (rect, op) = match command & 0xF {
             CMD_RECTFILL => {
@@ -1734,8 +1722,16 @@ impl Engine {
                 let rect = rect(x, y)?;
                 // The colour keys pick the operation by the foreground
                 // colour, the same for every pixel.
-                let n = if self.colorkey(self.color_fore, true, Key::K32) { 2 } else { 0 };
-                let rop = if n == 0 { (command >> 24) as u8 } else { self.rops[n] };
+                let n = if self.colorkey(self.color_fore, true, Key::K32) {
+                    2
+                } else {
+                    0
+                };
+                let rop = if n == 0 {
+                    (command >> 24) as u8
+                } else {
+                    self.rops[n]
+                };
                 // One that reads neither the destination nor the pattern.
                 let (d, p) = (rop ^ rop >> 1, rop ^ rop >> 4);
                 if d & 0x55 != 0 || p & 0x0F != 0 {
@@ -1747,9 +1743,7 @@ impl Engine {
             CMD_SCREEN_TO_SCREEN => {
                 let (src_x, src_y) = if launch { xy(val) } else { (src_x, src_y) };
                 let same = self.src_format & COL_MASK == self.dst_format & COL_MASK;
-                if !same
-                    || command >> 24 != 0xCC
-                    || self.command_extra & CMDEXTRA_SRC_COLORKEY != 0
+                if !same || command >> 24 != 0xCC || self.command_extra & CMDEXTRA_SRC_COLORKEY != 0
                 {
                     return None;
                 }
@@ -1763,8 +1757,8 @@ impl Engine {
                 let [Some(fx), Some(fy)] = from else {
                     return None;
                 };
-                let src = Surface {
-                    base: self.src_base,
+                let src = Plane {
+                    start: self.src_base,
                     stride: self.src_stride_dest,
                     tiled: self.src_tiled,
                     bpp,
@@ -1778,13 +1772,23 @@ impl Engine {
                 if a < d && c < b {
                     return None;
                 }
-                (rect, Op::Copy { src, from: [fx, fy] })
+                (
+                    rect,
+                    Op::Copy {
+                        src,
+                        from: [fx, fy],
+                    },
+                )
             }
             _ => return None,
         };
         // Each pixel drawn has bytes of its own: a row's are within the
         // stride (the 128 bytes a row of each tile has).
-        let across = if dst.tiled { dst.stride / 32 } else { dst.stride };
+        let across = if dst.tiled {
+            dst.stride / 32
+        } else {
+            dst.stride
+        };
         if rect[2] as u64 * bpp as u64 > across as u64 {
             return None;
         }
@@ -2154,7 +2158,11 @@ pub(crate) mod tests {
         // of the memory from `from` on.
         let surface = |n: &mut Numbers, from: u32| {
             let tiled = n.below(2) == 0;
-            let stride = if tiled { 10 + n.below(6) } else { 1700 + n.below(800) };
+            let stride = if tiled {
+                10 + n.below(6)
+            } else {
+                1700 + n.below(800)
+            };
             let base = (from + n.below(size / 4)) & !1;
             (base | (tiled as u32) << 31, stride)
         };
@@ -2204,7 +2212,11 @@ pub(crate) mod tests {
                 flags |= flag;
             }
         }
-        let kind = if n.below(2) == 0 { CMD_RECTFILL } else { CMD_SCREEN_TO_SCREEN };
+        let kind = if n.below(2) == 0 {
+            CMD_RECTFILL
+        } else {
+            CMD_SCREEN_TO_SCREEN
+        };
         let rop = if n.below(2) == 0 { 0xCC } else { rop(n) };
         let command = rop << 24 | flags | kind;
         std::iter::once((0x70, command))

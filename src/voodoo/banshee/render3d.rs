@@ -949,9 +949,8 @@ pub(crate) mod tests {
     }
 
     /// A frame drawn into `buffer`: the depth cleared, the picture
-    /// covered, the buffer shown. The recording of it, which no renderer
-    /// gets but for what the card hands it before.
-    pub(crate) fn draw_frame(v: &mut Voodoo, buffer: u32) -> Option<Frame> {
+    /// covered, the buffer shown.
+    fn draw_frame(v: &mut Voodoo, buffer: u32) {
         reg3d(v, COL_BUFFER_ADDR, buffer);
         reg3d(v, FBZ_MODE, 1 << 10);
         reg3d(v, FASTFILL_CMD, 0);
@@ -960,7 +959,7 @@ pub(crate) mod tests {
         rectangle(v, (0.0, 0.0, 640.0, 64.0), (200.0, 30.0, 60.0));
         reg3d(v, LEFT_OVERLAY_BUF, buffer);
         reg3d(v, SWAPBUFFER_CMD, 0);
-        v.take_mirror()
+        v.take_mirror();
     }
 
     /// A rectangle into B textured from A in 5-6-5: the first texel of the

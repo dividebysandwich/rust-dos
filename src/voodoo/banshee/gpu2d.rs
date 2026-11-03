@@ -10,7 +10,7 @@
 //! everything else in the card's memory, after the bytes it touches are
 //! read back (`banshee_2d_write`).
 
-use super::blit2d::{Op, Plan, Surface};
+use super::blit2d::{Op, Plan};
 use crate::voodoo::blit::rgb888;
 use crate::voodoo::mirror::{
     Blit, BlitSource, BufferCopy, Command, Convert, Fill, LayoutKey, Plane,
@@ -30,16 +30,16 @@ enum Place {
     Elsewhere,
 }
 
-/// Where pixels `rect` (left, top, right, bottom) of `surface` lie: in
-/// one of `key`'s buffers if the surface is that buffer's pixels, 16 bits
+/// Where pixels `rect` (left, top, right, bottom) of `plane` lie: in
+/// one of `key`'s buffers if the plane is that buffer's pixels, 16 bits
 /// each from its first byte, its rows as the buffer's, and the rectangle
 /// is within the buffer.
-fn place(key: &LayoutKey, surface: &Surface, [_, _, right, bottom]: [u32; 4]) -> Place {
+fn place(key: &LayoutKey, plane: &Plane, [_, _, right, bottom]: [u32; 4]) -> Place {
     let same = |base: u32, stride: Stride| {
-        surface.base == base
-            && surface.bpp == 2
-            && surface.tiled == stride.tiled
-            && surface.stride as usize == stride.words * 2
+        plane.start == base
+            && plane.bpp == 2
+            && plane.tiled == stride.tiled
+            && plane.stride as usize == stride.words * 2
     };
     let colour = key.color.iter().filter(|&&offs| offs != NONE);
     let colour = colour.map(|&offs| (offs, key.stride, Place::Colour(offs / 2)));
@@ -50,15 +50,6 @@ fn place(key: &LayoutKey, surface: &Surface, [_, _, right, bottom]: [u32; 4]) ->
         .find(|&(base, stride, _)| same(base, stride))
         .filter(|_| within)
         .map_or(Place::Elsewhere, |(_, _, place)| place)
-}
-
-fn plane(surface: &Surface) -> Plane {
-    Plane {
-        start: surface.base,
-        stride: surface.stride,
-        bpp: surface.bpp,
-        tiled: surface.tiled,
-    }
 }
 
 impl Voodoo {
@@ -80,7 +71,7 @@ impl Voodoo {
         let tracker = &self.gpu.get_mut().tracker;
         let touched = || spans.iter().flatten().copied();
         let newer = touched().any(|(a, b)| tracker.buffers_in(a, b) || tracker.gpu_in(a, b));
-        if !newer || touched().any(|(a, b)| tracker.hot_in(a, b)) {
+        if !newer {
             return false;
         }
         let size = self.fbi.ram.bytes() as u32;
@@ -91,6 +82,11 @@ impl Voodoo {
         let (Some(plan), Some(key)) = (plan, self.mirror_layout()) else {
             return false;
         };
+        let gpu = self.gpu.get_mut();
+        if touched().any(|(a, b)| gpu.tracker.hot_in(a, b)) {
+            gpu.hot += 1;
+            return false;
+        }
         if !self.gpu_draw_plan(&key, &plan) {
             return false;
         }
@@ -111,7 +107,7 @@ impl Voodoo {
             Op::Copy { src, from: [x, y] } => Some((src, [x, y, x + width, y + height])),
             Op::Fill(_) => None,
         };
-        let from = src.map(|(surface, rect)| place(key, &surface, rect));
+        let from = src.map(|(plane, rect)| place(key, &plane, rect));
         // A `Fill`'s and a `BufferCopy`'s rectangle.
         let rect = [left, right, top, bottom];
         match (place(key, &plan.dst, plan.rect), plan.op) {
@@ -127,6 +123,11 @@ impl Voodoo {
                 self.gpu_draw_buffer(Command::Fill(fill), Some(dest), (top, bottom))
             }
             (Place::Aux, Op::Fill(value)) => {
+                // A depth clear goes with the colour buffer drawn into,
+                // as a fastfill's does.
+                if self.gpu_colour_hot(key) {
+                    return false;
+                }
                 // The renderer clears its depth buffer through a colour
                 // buffer's picture, which has it.
                 let Some(&colour) = key.color.iter().find(|&&offs| offs != NONE) else {
@@ -165,14 +166,14 @@ impl Voodoo {
                         let rect = rect.map(i);
                         (BlitSource::Buffer { buffer, rect }, Convert::Narrow)
                     }
-                    (_, Some((surface, rect)), Some(Place::Elsewhere)) => {
-                        let (plane, rect) = (plane(&surface), rect.map(i));
+                    (_, Some((plane, rect)), Some(Place::Elsewhere)) => {
+                        let rect = rect.map(i);
                         (BlitSource::Memory { plane, rect }, Convert::None)
                     }
                     _ => return false,
                 };
                 self.gpu_blit(Blit {
-                    dst: plane(&plan.dst),
+                    dst: plan.dst,
                     area,
                     rects: vec![area],
                     src: source,
@@ -301,7 +302,10 @@ pub(crate) mod tests {
     /// Pixel (`x`, `y`) of the 16-bit surface at `base` in the memory, its
     /// rows as the buffers' (`tiled`), read back first.
     fn memory_pixel(v: &Voodoo, base: u32, tiled: bool, (x, y): (u32, u32)) -> u16 {
-        let stride = Stride { words: if tiled { 10 * 2048 } else { 640 }, tiled };
+        let stride = Stride {
+            words: if tiled { 10 * 2048 } else { 640 },
+            tiled,
+        };
         let at = base as usize / 2 + stride.row(y as usize) + stride.col(x as usize);
         v.frame_buffer().get(at)
     }
@@ -453,7 +457,11 @@ pub(crate) mod tests {
         // what the engine draws in the memory read back.
         let ops = [
             (0x66 << 24 | 1, surface(DESKTOP, 2, false), (0, 0)),
-            (0xF0 << 24 | 1 << 13 | 1 << 16 | 5, surface(A, 2, false), (0, 0)),
+            (
+                0xF0 << 24 | 1 << 13 | 1 << 16 | 5,
+                surface(A, 2, false),
+                (0, 0),
+            ),
             // A copy into a buffer from other memory.
             (COPY, surface(A, 2, false), (0, 0)),
         ];
@@ -466,7 +474,11 @@ pub(crate) mod tests {
                     v.banshee_2d_write(0x100 + 4 * i, 0x5A5A_0F0F ^ i);
                 }
             }
-            let src = if n == 2 { surface(WIDE, 2, false) } else { surface(A, 2, false) };
+            let src = if n == 2 {
+                surface(WIDE, 2, false)
+            } else {
+                surface(A, 2, false)
+            };
             let [v, sw] = &mut cards;
             sw.gpu_sync_all();
             for v in [v, sw] {
@@ -475,7 +487,10 @@ pub(crate) mod tests {
             let [v, sw] = &cards;
             assert_eq!(status(v)["gpu_2d"]["engine_commands"], 0, "{n}");
             assert!(status(v)["gpu_read_backs"].as_u64() > Some(0), "{n}");
-            assert!(v.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes(), "{n}");
+            assert!(
+                v.frame_buffer().to_bytes() == sw.frame_buffer().to_bytes(),
+                "{n}"
+            );
         }
     }
 
@@ -509,7 +524,11 @@ pub(crate) mod tests {
                 let at = |n: &mut Numbers| n.below(560) | n.below(56) << 16;
                 (at(n), at(n), (1 + n.below(80)) | (1 + n.below(8)) << 16)
             }
-            _ => (n.xy(660, 70), n.xy(660, 70), n.below(300) | n.below(70) << 16),
+            _ => (
+                n.xy(660, 70),
+                n.xy(660, 70),
+                n.below(300) | n.below(70) << 16,
+            ),
         };
         words.extend([(0x5C, from), (0x68, size), (0x6C, to)]);
         let mut flags = 1 << 8;
@@ -562,7 +581,11 @@ pub(crate) mod tests {
                 surface(WIDE, 4, n.below(2) == 0),
                 surface(WIDE, 2, n.below(2) == 0),
             ];
-            let surfaces = if buffers_only { &surfaces[..2] } else { &surfaces[..] };
+            let surfaces = if buffers_only {
+                &surfaces[..2]
+            } else {
+                &surfaces[..]
+            };
             for _ in 0..10 {
                 // Now and then a frame into a buffer, by the renderer
                 // alone: what was read back cools first.
@@ -590,7 +613,10 @@ pub(crate) mod tests {
             let (a, b) = (v.frame_buffer().to_bytes(), sw.frame_buffer().to_bytes());
             if a != b {
                 let at = (0..a.len()).find(|&i| a[i] != b[i]).unwrap();
-                panic!("case {case}: byte {at:#x}, {:#x} against {:#x}", a[at], b[at]);
+                panic!(
+                    "case {case}: byte {at:#x}, {:#x} against {:#x}",
+                    a[at], b[at]
+                );
             }
         }
         on_gpu
@@ -643,7 +669,9 @@ pub(crate) mod tests {
                 let v = card_with(Box::new(link), tiled);
                 let owned = Owned(Rc::clone(&gl), renderer);
                 let draw = move |v: &mut Voodoo, buffer| {
-                    let Some(frame) = unshown_frame(v, buffer) else { return };
+                    let Some(frame) = unshown_frame(v, buffer) else {
+                        return;
+                    };
                     if let Some(r) = owned.1.borrow_mut().as_mut() {
                         r.run_early(&owned.0, &frame.commands);
                     }

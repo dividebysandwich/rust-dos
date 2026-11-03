@@ -18,7 +18,7 @@
 use super::backlog::Access;
 #[cfg(test)]
 use super::mirror::Plane;
-use super::mirror::{Blit, BlitSource, Command, row_bytes, rows_of};
+use super::mirror::{Blit, BlitSource, Command, LayoutKey, row_bytes, rows_of};
 use super::raster::{RasterState, Stride};
 use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
@@ -150,7 +150,7 @@ pub struct Gpu {
     pub(super) engine: u64,
     /// 2D operations left to the CPU as the program reads or writes
     /// where they draw (the tracker's hot pages).
-    hot: u64,
+    pub(super) hot: u64,
     /// Frames since the hot pages last cooled.
     frames: u32,
     /// Pages only the GPU had were lost, which the log said.
@@ -228,18 +228,25 @@ impl Voodoo {
             // drawn in software has its depth in the memory too, rather than
             // read back before its first triangle every frame.
             let key = self.mirror_layout()?;
-            let col = self.fbi.rgboffs[0];
-            let colour = key
-                .color
-                .contains(&col)
-                .then(|| row_bytes(col / 2, key.stride, (0, key.height)));
             let gpu = self.gpu.borrow();
             let hot = |&(a, b): &(u32, u32)| gpu.tracker.hot_in(a, b);
-            if bytes.iter().flatten().any(hot) || colour.as_ref().is_some_and(hot) {
+            if bytes.iter().flatten().any(hot) || self.gpu_colour_hot(&key) {
                 return None;
             }
         }
         Some(bytes)
+    }
+
+    /// Whether the colour buffer the 3D engine draws into (colBufferAddr)
+    /// is one of `key`'s with rows hot: its triangles are drawn in
+    /// software, and a clear of the depth they test against goes into the
+    /// memory with them rather than be read back before them every frame.
+    pub(crate) fn gpu_colour_hot(&self, key: &LayoutKey) -> bool {
+        let col = self.fbi.rgboffs[0];
+        key.color.contains(&col) && {
+            let (start, end) = row_bytes(col / 2, key.stride, (0, key.height));
+            self.gpu.borrow().tracker.hot_in(start, end)
+        }
     }
 
     /// `job` is drawn here, in software. The memory is brought up to the
@@ -355,7 +362,9 @@ impl Voodoo {
     /// buffers where they are newer, and the recording decodes the
     /// texture again from it. The renderer then draws with its own
     /// picture at the card's resolution, never with memory that is
-    /// behind it, and so does the software rasterizer.
+    /// behind it, and so does the software rasterizer. The same goes for
+    /// pages a 2D operation drew in the renderer's copy of the memory
+    /// (`gpu_blit`): a 2D engine's copy of a buffer into a texture.
     pub(crate) fn gpu_texels(&mut self, st: &RasterState, texcount: usize) {
         let Some(key) = self.mirror_layout() else {
             return;
@@ -376,6 +385,16 @@ impl Voodoo {
             if self.gpu.get_mut().tracker.buffers_in(start, end) {
                 self.gpu_catch_up_in(Some((start, end)));
             }
+            // Pages only the renderer's copy of the memory has come back
+            // after the jobs queued before, which read the texels as they
+            // were, and the recording decodes the texture again.
+            let drawn_2d = self.gpu.get_mut().tracker.gpu_in(start, end);
+            if drawn_2d {
+                if self.workers_queue() {
+                    self.catch_up_workers();
+                }
+                self.gpu_sync_quiet(start, end);
+            }
             // The memory under the texture changed since it was last
             // decoded if rows there were read back (just now, or for the
             // program or the 2D engine), or drawn into in software
@@ -388,7 +407,7 @@ impl Voodoo {
             // drawn first, and the recording decodes it again.
             let changed = self.gpu.get_mut().tracker.take_changed(start, end);
             let words = !self.words.get_mut().is_empty() && key.overlaps(start, end);
-            if changed || words {
+            if changed || words || drawn_2d {
                 if words || self.outstanding.get() || !self.backlog.get_mut().is_empty() {
                     self.catch_up_workers();
                 }
@@ -1036,18 +1055,8 @@ impl Model {
                     // As blit.frag draws it, from the memory as it was.
                     let before = self.memory.clone();
                     let len = before.len();
-                    let address = |p: &Plane, x: u32, y: u32| {
-                        let a = if p.tiled {
-                            p.start
-                                + (x & 127)
-                                + (x >> 7) * 4096
-                                + (y & 31) * 128
-                                + (y >> 5) * p.stride
-                        } else {
-                            p.start + y * p.stride + x
-                        };
-                        a as usize % len
-                    };
+                    let address =
+                        |p: &Plane, x: i32, y: i32| p.at(x as u32, y as u32) as usize % len;
                     let pixel = |a: usize, bpp: u32| {
                         (0..bpp as usize)
                             .fold(0u32, |v, i| v | (before[(a + i) % len] as u32) << (8 * i))
@@ -1085,12 +1094,7 @@ impl Model {
                                     let (sx, sy) = (sl + u * sw / dw, st + v * sh / dh);
                                     value = match &blit.src {
                                         BlitSource::Memory { plane, .. } => {
-                                            let a = address(
-                                                plane,
-                                                (sx * plane.bpp as i32) as u32,
-                                                sy as u32,
-                                            );
-                                            pixel(a, plane.bpp)
+                                            pixel(address(plane, sx, sy), plane.bpp)
                                         }
                                         BlitSource::Buffer { buffer, .. } => {
                                             let b = &self.colour[buffer];
@@ -1115,7 +1119,7 @@ impl Model {
                                     };
                                 }
                                 let d = &blit.dst;
-                                let at = address(d, x as u32 * d.bpp, y as u32);
+                                let at = address(d, x, y);
                                 if blit
                                     .dst_key
                                     .as_ref()

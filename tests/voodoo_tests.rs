@@ -1796,19 +1796,6 @@ fn pixel_in(mem: &[u8], at: usize, bpp: usize) -> u32 {
     mem[at..at + bpp].iter().rev().fold(0, |v, &b| v << 8 | b as u32)
 }
 
-/// Where the byte `x` of row `y` of `plane` is: in a tiled plane, tiles
-/// of 128 bytes by 32 rows, and `stride` bytes for each row of tiles.
-#[cfg(feature = "gl")]
-fn plane_at(plane: &rust_dos::voodoo::mirror::Plane, x: u32, y: u32) -> u32 {
-    match plane.tiled {
-        true => {
-            let column = (x & 127) + (x >> 7) * 4096;
-            plane.start + column + (y & 31) * 128 + (y >> 5) * plane.stride
-        }
-        false => plane.start + y * plane.stride + x,
-    }
-}
-
 /// `blit` done in `mem` as `mirror::Blit` says, one pixel after another.
 #[cfg(feature = "gl")]
 fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
@@ -1837,7 +1824,7 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
                         }
                         let sx = rect[0] + u * (rect[2] - rect[0]) / (right - left);
                         let sy = rect[1] + v * (rect[3] - rect[1]) / (bottom - top);
-                        let at = plane_at(plane, sx as u32 * plane.bpp, sy as u32);
+                        let at = plane.at(sx as u32, sy as u32);
                         pixel_in(&before, at as usize, plane.bpp as usize)
                     }
                     BlitSource::Buffer { .. } => unreachable!(),
@@ -1856,7 +1843,7 @@ fn blit_in_software(mem: &mut [u8], blit: &rust_dos::voodoo::mirror::Blit) {
                     }
                     Convert::ClearTop => value & 0xFF_FFFF,
                 };
-                let at = plane_at(&d, x as u32 * d.bpp, y as u32) as usize;
+                let at = d.at(x as u32, y as u32) as usize;
                 let bpp = d.bpp as usize;
                 if blit.dst_key.is_some_and(|k| !keyed(pixel_in(&before, at, bpp), &k)) {
                     continue;
