@@ -435,7 +435,11 @@ pub(crate) mod tests {
         let models: [Rc<RefCell<Model>>; 2] = Default::default();
         let mut cards = models.each_ref().map(|m| model_card(m, false));
         for (v, model) in cards.iter_mut().zip(&models) {
-            frame(v, model, A);
+            // Both buffers in the layout, so that the textured rectangle
+            // into B doesn't read A back.
+            for buffer in [A, B, A] {
+                frame(v, model, buffer);
+            }
             textured_from(v, DESKTOP);
         }
         cards[1].gpu_sync_all();
