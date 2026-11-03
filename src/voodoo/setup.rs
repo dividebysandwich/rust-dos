@@ -172,6 +172,9 @@ impl Voodoo {
         super::raster::scene_profile::record(&st, texcount, verts);
         if self.recording() {
             self.mirror_sync();
+            if self.banshee.is_some() && texcount > 0 {
+                self.gpu_texels(&st, texcount);
+            }
             if let Some(mirror) = self.mirror.get_mut() {
                 mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
             }
@@ -185,6 +188,7 @@ impl Voodoo {
             // the triangle, and pixels right of the rows land in the next
             // row, which another worker draws: drawn here, whole.
             self.flush();
+            self.gpu_draws_here(&job);
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             job.run_all(&mut stipple, &mut stats);
@@ -263,6 +267,7 @@ impl Voodoo {
         if spills {
             // Into the next rows' memory, which other workers draw.
             self.flush();
+            self.gpu_draws_here(&job);
             let mut stats = self.stats;
             job.run_all(&mut 0, &mut stats);
             self.stats = stats;

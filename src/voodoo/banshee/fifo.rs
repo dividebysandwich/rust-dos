@@ -398,8 +398,8 @@ impl Voodoo {
                 let mut addr = self.fifo_take(n) & 0xFF_FFFF;
                 match header >> 30 {
                     0 | 1 => {
-                        if self.writes_queue() {
-                            self.catch_up();
+                        if self.workers_queue() {
+                            self.catch_up_workers();
                         }
                         let start = addr & self.fbi.mask;
                         self.gpu_sync_bytes(start, 4 * count as usize);

@@ -237,6 +237,7 @@ pub fn z_formats() -> Vec<Format> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::hal;
     use super::*;
     use crate::voodoo::Board;
 
@@ -266,12 +267,6 @@ mod tests {
         let z: Vec<u32> = z_formats().iter().map(|f| f.bits).collect();
         assert_eq!(z, [16]);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::hal;
-    use super::*;
 
     /// 3dfx's Voodoo3 Direct3D 7 driver's dwTextureOpCaps, as
     /// Giants: Citizen Kabuto's renderer got them on Windows 98 SE.

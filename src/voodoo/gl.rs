@@ -956,11 +956,40 @@ impl VoodooGl {
             || self.front != recording.front
             || self.clut != recording.clut;
         changed |= recording.scanout != self.scanout;
+        // What the card shows before its commands, which draw at the
+        // levels it asks for (`level_scale`).
         self.scanout = recording.scanout.take();
-        self.run_commands(gl, &recording.commands);
         self.front = recording.front;
+        self.run_commands(gl, &recording.commands);
         self.clut = recording.clut;
         changed
+    }
+
+    /// The scale the triangles' texels pick their levels for
+    /// (`triangle.frag`). Where the screen shows one of the buffers drawn
+    /// into, it shows them at `voodoo_scale`, and the levels are the ones
+    /// the card would take at that resolution: sharper above 1x. Where it
+    /// shows none of them, the buffers reach the screen only through the
+    /// card's memory (a Banshee game that copies its 3D into a desktop of
+    /// another format), at the card's resolution, and the levels are the
+    /// card's: a game whose smaller levels are other pictures than its
+    /// larger ones (Giants fades a terrain texture out with them) would
+    /// otherwise look different whenever what OpenGL drew is read back,
+    /// and frames the software rasterizer draws would look different from
+    /// those OpenGL draws.
+    fn level_scale(&self) -> f32 {
+        let shown = match &self.scanout {
+            Some(s) => {
+                let overlay = s.overlay.as_ref().and_then(|o| o.surface.buffer);
+                [s.desktop.buffer, overlay]
+            }
+            None => [self.front, None],
+        };
+        let drawn = shown
+            .into_iter()
+            .flatten()
+            .any(|b| self.targets.contains_key(&b));
+        if drawn { self.scale as f32 } else { 1.0 }
     }
 
     /// Do `commands`, part of a frame's recording that the card hands
@@ -1592,6 +1621,7 @@ impl VoodooGl {
             p.uniforms.u_fogblend.set(gl, s.fogblend);
             p.uniforms.u_fogdelta.set(gl, s.fogdelta);
             p.uniforms.u_scale.set(gl, scale);
+            p.uniforms.u_level_scale.set(gl, self.level_scale());
             p.uniforms.u_dither.set(gl, self.dither as i32);
             let mut units = 0;
             for (unit, t) in s.tmu.iter().enumerate() {
@@ -2578,6 +2608,164 @@ mod tests {
             }
         }
         renderer.destroy(&gl);
+    }
+
+    /// At 2x, the texels come from one level sharper than the card's
+    /// where the screen shows the buffer drawn into, and from the card's
+    /// level where it shows none of the buffers, which reach it only
+    /// through the card's memory at the card's resolution (Giants'
+    /// beach, read back into memory and copied to its desktop).
+    #[test]
+    #[ignore = "requires a desktop OpenGL context"]
+    fn texels_are_the_cards_levels_where_no_buffer_is_shown() {
+        use super::*;
+        use crate::voodoo::mirror::{DrawState, Layout, Level, Scanout, Surface, TexUnit, Texture};
+        use crate::voodoo::raster::Stride;
+        let t = test_context("Level scale");
+        let gl = t.gl;
+        // Level 0 red, level 1 green; the triangles at level 1, point
+        // sampled, the texel passed on (`mipmapped_texture`).
+        let level = |size: u32, argb: u32| Level {
+            width: size,
+            height: size,
+            argb: vec![argb; (size * size) as usize],
+        };
+        let texture = Texture {
+            id: 1,
+            levels: vec![level(8, 0xFFFF_0000), level(4, 0xFF00_FF00)],
+        };
+        let combine = (1 << 12) | (1 << 18) | (1 << 21) | (1 << 27);
+        let unit = TexUnit {
+            texture: 1,
+            mode: (10 << 8) | combine,
+            unfiltered: false,
+            width: 8,
+            height: 8,
+            first_level: 0,
+            lodmin: 0,
+            lodmax: 8 << 8,
+            lodbias: 0,
+            lodmask: 0x1FF,
+            bilinear_mask: 0xF0,
+            detailmax: 0,
+            detailbias: 0,
+            detailscale: 0,
+        };
+        let state = DrawState {
+            dest: 0,
+            fbz_color_path: 1 | (1 << 2) | (1 << 27),
+            fbz_mode: 1 << 9,
+            alpha_mode: 0,
+            fog_mode: 0,
+            za_color: 0,
+            chroma_key: 0,
+            chroma_range: 0,
+            color0: 0,
+            color1: 0,
+            fog_color: 0,
+            stipple: 0,
+            yorigin: 7,
+            clip: None,
+            aux: false,
+            fogblend: [0; 64],
+            fogdelta: [0; 64],
+            send_config: None,
+            tmu: [Some(unit), None],
+        };
+        let corner = |x: f32, y: f32| Vertex {
+            pos: [x, y],
+            color: [0.0, 0.0, 0.0, 255.0],
+            tex: [[x, y, 1.0]; 2],
+            lod: [256.0, 0.0],
+            ..Vertex::default()
+        };
+        let vertices = [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0)]
+            .into_iter()
+            .chain([(8.0, 0.0), (8.0, 8.0), (0.0, 8.0)])
+            .map(|(x, y)| corner(x, y))
+            .collect::<Vec<_>>();
+        let scanout = |buffer: Option<u32>| {
+            Some(Box::new(Scanout {
+                width: 8,
+                height: 8,
+                half: false,
+                wide: false,
+                desktop: Surface {
+                    start: 0x1_0000,
+                    stride: 32,
+                    tiled: false,
+                    format: 3,
+                    clut: 0,
+                    bypass: true,
+                    buffer,
+                },
+                overlay: None,
+                cursor: None,
+                clut: Vec::new(),
+            }))
+        };
+        let (red, green) = ([255, 0, 0], [0, 255, 0]);
+        for (front, scanout, expected, what) in [
+            (
+                None,
+                scanout(None),
+                green,
+                "a Banshee showing another surface",
+            ),
+            (
+                Some(0),
+                scanout(Some(0)),
+                red,
+                "a Banshee showing the buffer",
+            ),
+            (Some(0), None, red, "a Voodoo showing the buffer"),
+            (None, None, green, "nothing shown"),
+        ] {
+            let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 2, 1, 1).unwrap();
+            renderer.run(
+                &gl,
+                Recording {
+                    commands: vec![
+                        Command::Resync(Box::new(Snapshot {
+                            layout: Layout {
+                                width: 8,
+                                height: 8,
+                                stride: Stride::linear(8),
+                                aux_stride: Stride::linear(8),
+                                color: vec![0],
+                                aux: None,
+                            },
+                            color: vec![vec![0; 64]],
+                            aux: None,
+                        })),
+                        Command::Texture(Box::new(texture.clone())),
+                        Command::Draw(Box::new(Draw {
+                            state: state.clone(),
+                            vertices: vertices.clone(),
+                        })),
+                    ],
+                    front,
+                    output: true,
+                    width: 8,
+                    height: 8,
+                    clut: [0; 33],
+                    scanout,
+                },
+            );
+            let target = &renderer.targets[&0];
+            target.resolve(&gl, (16, 16));
+            let mut pixel = [0; 4];
+            // SAFETY: the context and framebuffer belong to this thread.
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+                let out = glow::PixelPackData::Slice(Some(&mut pixel));
+                gl.read_pixels(8, 8, 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, out);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+            }
+            assert_eq!(pixel[..3], expected, "{what}");
+            renderer.destroy(&gl);
+        }
     }
 
     #[test]

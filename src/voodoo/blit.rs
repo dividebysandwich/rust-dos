@@ -389,13 +389,13 @@ impl Voodoo {
             let picture = access
                 .clone()
                 .map(|a| super::backlog::Access { kept: false, ..a });
-            let split = width < rowpixels
-                && access.as_ref().is_some_and(|a| a.kept && !a.pinned)
-                && picture
-                    .as_ref()
-                    .is_some_and(|a| self.gpu_takes(&job((0, width)), a));
-            if split {
-                self.gpu_left(&job((0, width)));
+            let split = width < rowpixels && access.as_ref().is_some_and(|a| a.kept && !a.pinned);
+            let taken = picture
+                .as_ref()
+                .filter(|_| split)
+                .and_then(|a| self.gpu_takes(&job((0, width)), a));
+            if let Some(bytes) = taken {
+                self.gpu_left(&job((0, width)), bytes);
                 let outside = super::backlog::Access {
                     kept: true,
                     ..Default::default()
@@ -1331,37 +1331,7 @@ mod tests {
         }
     }
 
-    /// An OpenGL renderer that drew each colour buffer in one colour and
-    /// the depth buffer at one value, and notes what it is asked.
-    struct Renderer(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
-
-    impl crate::voodoo::gpu::GpuLink for Renderer {
-        fn ready(&self) -> bool {
-            false
-        }
-
-        fn run(&mut self, commands: Vec<crate::voodoo::mirror::Command>) {
-            self.0.borrow_mut().push(format!("run {}", commands.len()));
-        }
-
-        fn read(&mut self, _at: u32, _out: &mut [u8]) -> bool {
-            false
-        }
-
-        fn read_buffer(
-            &mut self,
-            dest: Option<u32>,
-            (top, bottom): (u32, u32),
-            out: &mut [u16],
-        ) -> bool {
-            assert_eq!(out.len(), 640 * (bottom - top) as usize);
-            out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
-            self.0
-                .borrow_mut()
-                .push(format!("read {dest:?} {top}..{bottom}"));
-            true
-        }
-    }
+    use crate::voodoo::gpu::TestRenderer as Renderer;
 
     #[test]
     fn gpu_reads_leave_the_drawing_to_the_renderer() {
