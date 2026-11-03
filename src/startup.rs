@@ -116,6 +116,18 @@ pub(crate) fn create_cpu(args: &Args, config: &config::Config, memory_mb: usize)
             warn(format!("cannot mount {}: {}", disk::drive_key(spec.drive), e));
         }
     }
+    // The log has it too, but a write that doesn't reach the image should
+    // be told where the user sees it.
+    for drive in 0..disk::DRIVE_SLOTS {
+        let Some(image) = cpu.bus.disk.bios_image(drive) else {
+            continue;
+        };
+        let beside = rust_dos::diskdelta::beside(image.path());
+        if image.delta_path() == Some(beside.as_path()) {
+            let note = disk::DiskController::default_delta_note(image.path(), &beside);
+            eprintln!("[DISK] {}", note);
+        }
+    }
 
     if let Some(path) = &config.source {
         let action = if config.created { "Created default" } else { "Using" };

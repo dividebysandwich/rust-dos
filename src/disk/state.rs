@@ -285,7 +285,7 @@ impl DiskController {
         let no_image = || match &saved {
             Some(SavedDisk::Changes(path)) => StateError::Media(format!(
                 "drive {} has no disk image here for the state's changes of its disk ({}) to go \
-                 over: mount the image they were made over{} as {} with -overlay DIR and load \
+                 over: mount the image they were made over{} as {} (without -inplace) and load \
                  again",
                 name,
                 path.display(),

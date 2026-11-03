@@ -491,7 +491,16 @@ impl ImageFile {
         }
     }
 
-    fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
+    /// Have what was written to a raw image on the disk; a VHD's and an
+    /// 86F image's writes are with the host already.
+    pub(crate) fn sync(&self) -> std::io::Result<()> {
+        match self {
+            ImageFile::Raw(file) => file.sync_all(),
+            ImageFile::Vhd(_) | ImageFile::D86f(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
         match self {
             ImageFile::Raw(file) => {
                 let mut file = file;
@@ -974,8 +983,8 @@ impl DiskImage {
             }
             (SavedDisk::Changes(changes), _) => Err(format!(
                 "the state keeps the disk as its changes ({}) over an image left as it is{}, \
-                 and {} is written in place: mount the image with its changes in a delta file \
-                 (-overlay DIR)",
+                 and {} is written in place: mount the image without -inplace, so that its \
+                 changes go to a delta file",
                 changes.display(),
                 crate::diskdelta::base_named_in(changes)
                     .map(|p| format!(" ({})", p.display()))

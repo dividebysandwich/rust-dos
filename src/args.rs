@@ -173,6 +173,19 @@ pub(crate) enum Command {
     /// by its header (data1.hdr, or a data1.cab holding one) or an
     /// InstallShield 3 archive (_SETUP.1, a .Z file)
     Unpack(UnpackArgs),
+    /// Write a disk image's changes into the image: the delta file beside
+    /// it (IMAGE.rdelta), or the one --delta names, which is deleted after
+    Commit(CommitArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CommitArgs {
+    /// The disk image
+    pub(crate) image: std::path::PathBuf,
+
+    /// The delta file [default: IMAGE.rdelta beside the image]
+    #[arg(long, value_name = "FILE")]
+    pub(crate) delta: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

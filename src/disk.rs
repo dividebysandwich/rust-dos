@@ -274,6 +274,10 @@ pub struct MountOptions {
     /// directory as it is (`-overlay`, `overlay`); a disk image's go to a
     /// delta file in it (`diskdelta`).
     pub overlay: Option<PathBuf>,
+    /// A hard disk image is written as it is (`-inplace`). Without it, or
+    /// an overlay folder, its changes go to a delta file beside it
+    /// (`<image>.rdelta`), and the image stays as it is.
+    pub in_place: bool,
     /// The launch configuration of an archive's .dosc (its `[variant]`
     /// folder) over the archive (`-variant`).
     pub variant: Option<String>,
@@ -291,6 +295,7 @@ impl Default for MountOptions {
             boot: false,
             share: None,
             overlay: None,
+            in_place: false,
             variant: None,
         }
     }

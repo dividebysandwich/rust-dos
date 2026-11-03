@@ -205,11 +205,83 @@ impl DiskController {
     }
 
     /// The floppy or hard disk image at `path`, its changes in a delta
-    /// file in the mount's overlay folder if it has one (`diskdelta`).
+    /// file (`diskdelta`) in the mount's overlay folder if it has one, and
+    /// otherwise beside a hard disk image (`default_delta`).
     fn open_disk(path: &Path, floppy: bool, opts: &MountOptions) -> Result<DiskImage, String> {
-        match Self::delta_for(path, opts) {
-            Some(delta) => DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only),
+        let delta = Self::delta_for(path, opts);
+        let beside = match (&delta, floppy) {
+            (None, false) => Self::default_delta(path, opts),
+            _ => None,
+        };
+        match delta.or_else(|| beside.clone()) {
+            Some(delta) => {
+                let disk =
+                    DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only)?;
+                if beside.is_some() {
+                    crate::diskdelta::note(Self::default_delta_note(path, &delta));
+                }
+                Ok(disk)
+            }
             None => DiskImage::open(path, floppy, opts.geometry, opts.read_only),
+        }
+    }
+
+    /// What to tell of the hard disk image at `path` whose changes go to
+    /// its default delta file `delta`: where they go, and how to get them
+    /// into the image or write the image itself.
+    pub fn default_delta_note(path: &Path, delta: &Path) -> String {
+        format!(
+            "{}: what is written to it goes to {} beside it, and the image stays as it is. \
+             `COMMIT drive` (or rust-dos commit IMAGE) writes the changes into the image; \
+             -inplace on the mount writes the image itself",
+            path.display(),
+            delta.display()
+        )
+    }
+
+    /// Where the changes of the hard disk image at `path` go when the
+    /// mount has no overlay folder: `<image>.rdelta` beside it, the same
+    /// for every run and every configuration that mounts the image, as the
+    /// image itself would be. None, and the image is written as it is,
+    /// with `-inplace`, for a mount that writes nothing (`-ro`, or an image
+    /// that can't be written, which stays write-protected), for an image
+    /// in an archive (read-only without an overlay folder), and where no
+    /// file can be made beside the image (the note says so).
+    pub(crate) fn default_delta(path: &Path, opts: &MountOptions) -> Option<PathBuf> {
+        if opts.in_place || opts.read_only || hostfs::is_layer(path) {
+            return None;
+        }
+        hostfs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+        let delta = crate::diskdelta::beside(path);
+        if hostfs::is_file(&delta) {
+            return Some(delta);
+        }
+        let mut probe = delta.clone().into_os_string();
+        probe.push(".probe");
+        let probe = PathBuf::from(probe);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                let _ = hostfs::remove_file(&probe);
+                Some(delta)
+            }
+            Err(e) => {
+                crate::diskdelta::note(format!(
+                    "{}: no delta file can be made beside it ({}), so what is written to it goes \
+                     into the image",
+                    path.display(),
+                    e
+                ));
+                None
+            }
         }
     }
 

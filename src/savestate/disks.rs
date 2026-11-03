@@ -5,14 +5,16 @@
 //! the state (the same run, `DiskImage::revert_to`):
 //!
 //! - A disk whose changes go to a delta file over an image left as it is
-//!   (`-overlay`, `diskdelta`) keeps only its changes: a copy of the delta
-//!   file, `slot1.C.rdelta` for `slot1.state` (`slot1.2.rdelta` for the
-//!   disk mounted as 2). Its header names the image they are over, with
-//!   the image's size and a hash of its start and end, and a load puts the
-//!   changes back only over that image, under a delta file again.
-//! - Any other disk is copied whole: `slot1.C.img`. On a filesystem that
-//!   shares data between files (btrfs, XFS), a copy takes no time and no
-//!   room.
+//!   (`diskdelta`: a hard disk image's by default, beside it, or in the
+//!   `-overlay` folder) keeps only its changes: a copy of the delta file,
+//!   `slot1.C.rdelta` for `slot1.state` (`slot1.2.rdelta` for the disk
+//!   mounted as 2). Its header names the image they are over, with the
+//!   image's size, modification time and a hash of its start and end, and
+//!   a load puts the changes back only over that image, under a delta file
+//!   again.
+//! - Any other disk (`-inplace`, a floppy, or one held in memory) is
+//!   copied whole: `slot1.C.img`. On a filesystem that shares data between
+//!   files (btrfs, XFS), a copy takes no time and no room.
 
 use crate::cpu::Cpu;
 use crate::disk::{DRIVE_SLOTS, drive_key, drive_name};
@@ -88,7 +90,7 @@ pub fn save_copies(cpu: &Cpu, state: &Path) -> Result<Vec<String>, String> {
         if matches!(saved, SavedDisk::Whole(_)) && disk.memory().is_none() && mb >= 64 {
             notes.push(format!(
                 "drive {}'s disk is written in place, so the state has a copy of all of it \
-                 ({} MB): mounted with -overlay DIR, it would keep only the disk's changes",
+                 ({} MB): mounted without -inplace, it would keep only the disk's changes",
                 drive_name(drive),
                 mb
             ));

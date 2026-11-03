@@ -20,13 +20,16 @@
 //!
 //! A mount spec, as `[drives]` takes it, is the same without the drive:
 //! `<host path> [more images] [type] [-t type] [-label NAME] [-ro]
-//! [-chs C,H,S] [-boot] [-overlay DIR]` where type is `floppy` (alias
-//! `fdd`), `hdd` (alias `dir`) or `cdrom` (alias `iso`).
+//! [-chs C,H,S] [-boot] [-overlay DIR] [-inplace]` where type is `floppy`
+//! (alias `fdd`), `hdd` (alias `dir`) or `cdrom` (alias `iso`).
 //!
 //! `-overlay DIR` leaves a host directory as it is: what DOS changes on
 //! the drive goes to DIR (`overlay`). A disk image's changes go to a delta
-//! file in DIR (`diskdelta`), one image under many. DOSBox's `MOUNT C DIR -t overlay`
-//! gives the drive mounted as C: one.
+//! file in DIR (`diskdelta`), one image under many. DOSBox's
+//! `MOUNT C DIR -t overlay` gives the drive mounted as C: one. Without an
+//! overlay folder, a hard disk image's changes go to a delta file beside
+//! it (`DiskController::default_delta`), and `-inplace` writes the image
+//! itself.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
 use crate::diskimage::Chs;
@@ -39,8 +42,9 @@ Usage: MOUNT drive directory|archive [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                              [-share|-noshare] [-overlay DIR]\r
        MOUNT drive DIR -t overlay\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
-                         [-chs C,H,S] [-size 512,S,H,C] [-overlay DIR]\r
-       MOUNT number image [image ...] [-chs C,H,S] [-ro] [-overlay DIR]\r
+                         [-chs C,H,S] [-size 512,S,H,C] [-overlay DIR|-inplace]\r
+       MOUNT number image [image ...] [-chs C,H,S] [-ro]\r
+                          [-overlay DIR|-inplace]\r
        MOUNT -u drive\r
        MOUNT             lists the drives\r
 An image can be on a mounted drive (C:\\GAME\\CD.CUE), and a wildcard\r
@@ -54,8 +58,10 @@ starts, once the drives are saved. A booted system has a directory on D:\r
 and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
 back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
 -overlay DIR leaves the directory or image as it is: changes go to DIR, an\r
-image's to IMAGE.rdelta (-t overlay: to the drive mounted). A zip or 7z is a\r
-drive of its files or the disk or CD image in it; without -overlay, read-only.\r
+image's to IMAGE.rdelta (-t overlay: to the drive mounted). Without it, a\r
+hard disk image's changes go to IMAGE.rdelta beside it, which COMMIT writes\r
+into the image; -inplace writes the image itself. A zip or 7z is a drive of\r
+its files or the disk or CD image in it; without -overlay, read-only.\r
 IMGMOUNT is the same command.\r
 ";
 
@@ -102,7 +108,7 @@ fn parse_size(value: &str) -> Result<Chs, String> {
 /// with a dash (`-label -DISK-`), but can't be one of these.
 const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-overlay", "-variant", "-freesize", "-usecd"];
 const FLAGS: &[&str] =
-    &["-u", "-ro", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
+    &["-u", "-ro", "-inplace", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
 
 fn is_option(token: &str) -> bool {
     VALUE_OPTIONS.iter().chain(FLAGS).any(|option| token.eq_ignore_ascii_case(option))
@@ -139,6 +145,7 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
         match option.as_str() {
             "-u" => args.unmount = true,
             "-ro" => args.opts.read_only = true,
+            "-inplace" => args.opts.in_place = true,
             "-pr" => args.config_relative = true,
             "-boot" => args.opts.boot = true,
             "-share" => args.opts.share = Some(true),
@@ -398,6 +405,9 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
         _ => return Err("Only A: to D: and the drive numbers 0 to 3 can be mounted with -fs none".to_string()),
     };
     let base = paths.config_dir.filter(|_| config_relative).unwrap_or(paths.base);
+    if opts.in_place && overlay.is_some() {
+        return Err("-inplace writes the image, -overlay leaves it as it is: take one".to_string());
+    }
     opts.overlay = overlay.map(|dir| expand_host_path(&dir, base, paths.home));
     let (first, rest) = words.split_first().ok_or("Missing host directory or disk image")?;
     let mut images = find_paths(first, base, paths)?;
@@ -576,6 +586,9 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     }
     if spec.opts.read_only {
         value.push_str(" -ro");
+    }
+    if spec.opts.in_place {
+        value.push_str(" -inplace");
     }
     if let Some(chs) = spec.opts.geometry {
         value.push_str(&format!(" -chs {},{},{}", chs.cylinders, chs.heads, chs.sectors));
@@ -758,6 +771,10 @@ mod tests {
         assert_eq!(mounted(mount("a disks -t FDD", cwd)).opts.kind, DriveKind::Floppy);
         assert_eq!(mount("c x -t overlay", cwd), Ok(MountCmd::Overlay(2, cwd.join("x"))));
         assert_eq!(mounted(mount("c game -overlay ../saves", cwd)).opts.overlay, Some(PathBuf::from("/saves")));
+        // -inplace writes the image itself, and has no overlay folder.
+        assert!(mounted(mount("c c.img -inplace", cwd)).opts.in_place);
+        assert!(!mounted(mount("c c.img", cwd)).opts.in_place);
+        assert!(mount("c c.img -inplace -overlay x", cwd).unwrap_err().contains("-inplace"));
         // Drive numbers give the BIOS disks without DOS drives.
         let spec = mounted(mount("2 hdd.img -size 512,63,16,142", cwd));
         assert_eq!((spec.drive, spec.path), (numbered_drive(2), cwd.join("hdd.img")));
@@ -884,6 +901,7 @@ mod tests {
                 },
             },
             MountSpec { drive: 2, path: "/hd/win95.img".into(), opts: MountOptions { boot: true, ..Default::default() } },
+            MountSpec { drive: 2, path: "/hd/c.img".into(), opts: MountOptions { in_place: true, ..Default::default() } },
             MountSpec { drive: 3, path: "/home/u/share".into(), opts: MountOptions { share: Some(false), ..Default::default() } },
             MountSpec { drive: 2, path: "/home/u/dos".into(), opts: MountOptions { share: Some(true), ..Default::default() } },
             MountSpec {
