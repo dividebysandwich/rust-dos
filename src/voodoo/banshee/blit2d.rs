@@ -1464,7 +1464,18 @@ impl Engine {
         let ((dst_x, dst_y), (src_x, src_y), cur_y) = if pending {
             (xy(self.dst_xy), xy(self.src_xy), 0)
         } else {
-            ((self.dst_x, self.dst_y), (self.src_x, self.src_y), self.cur_y)
+            (
+                (self.dst_x, self.dst_y),
+                (self.src_x, self.src_y),
+                self.cur_y,
+            )
+        };
+        let (dst_x, dst_y) = (dst_x as i64, dst_y as i64);
+        let (src_x, src_y) = (src_x as i64, src_y as i64);
+        // The XY a launch area write gives, else `at`.
+        let launched = |at: (i64, i64)| {
+            let (x, y) = xy(val);
+            if launch { (x as i64, y as i64) } else { at }
         };
         let clip = self.clip[(command & COMMAND_CLIP_SEL != 0) as usize];
         let clip_x = (clip.x_min as i64, clip.x_max as i64);
@@ -1477,7 +1488,14 @@ impl Engine {
         let src_surface = |stride| (self.src_base, stride, self.src_tiled);
         // Destination pixels `x` of rows `y`, first to last.
         let dst = |x: (i64, i64), y: (i64, i64)| {
-            surface_span(dst_surface, true, (x.0 * bytes, x.1 * bytes), bytes, y, size)
+            surface_span(
+                dst_surface,
+                true,
+                (x.0 * bytes, x.1 * bytes),
+                bytes,
+                y,
+                size,
+            )
         };
         // The source's bytes for pixels `x` of rows `y`: whole bytes of
         // them, with the most a pixel's conversion reads after each.
@@ -1490,39 +1508,36 @@ impl Engine {
             let x = ((x.0 * bpp) >> 3, (x.1 * bpp) >> 3);
             surface_span(src_surface(stride), tile_x, x, width, y, size)
         };
-        // A YUV source draws a pair of pixels for each it reads, the
-        // second one outside the clip too: the columns of the clip and
-        // one either side, as far as twice the width goes.
-        let yuv_columns = |x: i64, dir: i64, n: i64| {
-            let (a, b) = positions(x, dir, (0, 2 * n));
-            let (a, b) = (a.max(clip_x.0) - 1, b.min(clip_x.1 - 1) + 1);
-            (a <= b).then_some((a, b))
+        // The destination's columns a row draws from `x` on, `dir` apart,
+        // within the clip. A YUV source draws a pair of pixels for each
+        // it reads, the second one `dir` past the first, outside the clip
+        // too: as far as twice the width goes, and one column past the
+        // clip on that side.
+        let dst_columns = |x: i64, dir: i64| {
+            if !yuv {
+                return steps_within(x, size_x, dir, clip_x).map(|s| positions(x, dir, s));
+            }
+            if size_x <= 0 {
+                return None;
+            }
+            let (a, b) = positions(x, dir, (0, 2 * size_x));
+            let (a, b) = (a.max(clip_x.0), b.min(clip_x.1 - 1));
+            (a <= b).then(|| if dir > 0 { (a, b + 1) } else { (a - 1, b) })
         };
         let same = self.src_format & COL_MASK == self.dst_format & COL_MASK;
         let spans = match command & 0xF {
             CMD_SCREEN_TO_SCREEN => {
-                let (src_x, src_y) = if launch { xy(val) } else { (src_x, src_y) };
-                let (dst_x, dst_y, src_x, src_y) =
-                    (dst_x as i64, dst_y as i64, src_x as i64, src_y as i64);
-                let Some(rows) = steps_within(dst_y, size_y, dir_y, clip_y) else {
+                let (src_x, src_y) = launched((src_x, src_y));
+                let rows = steps_within(dst_y, size_y, dir_y, clip_y);
+                let (Some(rows), Some(columns)) = (rows, dst_columns(dst_x, dir_x)) else {
                     return Footprint::Nothing;
                 };
-                let (columns, src_columns) = if yuv {
-                    let Some(columns) = yuv_columns(dst_x, dir_x, size_x) else {
-                        return Footprint::Nothing;
-                    };
-                    if size_x <= 0 {
-                        return Footprint::Nothing;
-                    }
-                    (columns, positions(src_x, dir_x, (0, size_x - 1)))
+                // The source's columns step with the destination's, but
+                // for a YUV source's, each of which draws two.
+                let src_columns = if yuv {
+                    positions(src_x, dir_x, (0, size_x - 1))
                 } else {
-                    let Some(steps) = steps_within(dst_x, size_x, dir_x, clip_x) else {
-                        return Footprint::Nothing;
-                    };
-                    (
-                        positions(dst_x, dir_x, steps),
-                        positions(src_x, dir_x, steps),
-                    )
+                    (columns.0 + src_x - dst_x, columns.1 + src_x - dst_x)
                 };
                 let src_rows = positions(src_y, dir_y, rows);
                 let stride = self.src_stride_dest;
@@ -1532,17 +1547,8 @@ impl Engine {
                 ]
             }
             CMD_SCREEN_TO_SCREEN_STRETCH if !launch => {
-                let (dst_x, dst_y) = (dst_x as i64, dst_y as i64);
-                let (src_x, src_y) = (src_x as i64, src_y as i64);
-                let Some(rows) = steps_within(dst_y, size_y, dir_y, clip_y) else {
-                    return Footprint::Nothing;
-                };
-                let columns = if yuv {
-                    yuv_columns(dst_x, 1, size_x)
-                } else {
-                    steps_within(dst_x, size_x, 1, clip_x).map(|s| positions(dst_x, 1, s))
-                };
-                let Some(columns) = columns.filter(|_| size_x > 0) else {
+                let rows = steps_within(dst_y, size_y, dir_y, clip_y);
+                let (Some(rows), Some(columns)) = (rows, dst_columns(dst_x, 1)) else {
                     return Footprint::Nothing;
                 };
                 // Bresenham's steps through the source go no further than
@@ -1557,24 +1563,14 @@ impl Engine {
             }
             CMD_HOST_TO_SCREEN | CMD_HOST_TO_SCREEN_STRETCH if launch => {
                 // The rows still to come, from where the command is.
-                let (dst_x, dst_y) = (dst_x as i64, dst_y as i64);
-                let left = size_y - cur_y as i64;
-                let Some(rows) = steps_within(dst_y, left, dir_y, clip_y) else {
-                    return Footprint::Nothing;
-                };
-                let columns = if yuv {
-                    yuv_columns(dst_x, 1, size_x)
-                } else {
-                    steps_within(dst_x, size_x, 1, clip_x).map(|s| positions(dst_x, 1, s))
-                };
-                let Some(columns) = columns.filter(|_| size_x > 0) else {
+                let rows = steps_within(dst_y, size_y - cur_y as i64, dir_y, clip_y);
+                let (Some(rows), Some(columns)) = (rows, dst_columns(dst_x, 1)) else {
                     return Footprint::Nothing;
                 };
                 [Some(dst(columns, positions(dst_y, dir_y, rows))), None]
             }
             CMD_RECTFILL => {
-                let (x, y) = if launch { xy(val) } else { (dst_x, dst_y) };
-                let (x, y) = (x as i64, y as i64);
+                let (x, y) = launched((dst_x, dst_y));
                 let rows = steps_within(y, size_y, dir_y, clip_y);
                 let columns = steps_within(x, size_x, dir_x, clip_x);
                 let (Some(rows), Some(columns)) = (rows, columns) else {
@@ -1586,10 +1582,9 @@ impl Engine {
             CMD_LINE | CMD_POLYLINE => {
                 // From the source's XY to the destination's, within the
                 // box of the two and the clip.
-                let (x, y) = if launch { xy(val) } else { (dst_x, dst_y) };
-                let within = |a: i32, b: i32, (lo, hi): (i64, i64)| {
-                    let (a, b) = (a.min(b) as i64, a.max(b) as i64);
-                    let (a, b) = (a.max(lo), b.min(hi - 1));
+                let (x, y) = launched((dst_x, dst_y));
+                let within = |a: i64, b: i64, (lo, hi): (i64, i64)| {
+                    let (a, b) = (a.min(b).max(lo), a.max(b).min(hi - 1));
                     (a <= b).then_some((a, b))
                 };
                 let (Some(columns), Some(rows)) =
@@ -1609,14 +1604,10 @@ impl Engine {
             _ => return Footprint::Nothing,
         };
         // A span that can't be bounded is all of the memory.
-        let mut out = [None; 2];
-        for (out, span) in out.iter_mut().zip(spans).filter_map(|(o, s)| Some((o, s?))) {
-            let Some(span) = span else {
-                return Footprint::All;
-            };
-            *out = Some(span);
+        match spans {
+            [Some(None), _] | [_, Some(None)] => Footprint::All,
+            spans => Footprint::Spans(spans.map(Option::flatten)),
         }
-        Footprint::Spans(out)
     }
 }
 
@@ -1829,13 +1820,23 @@ mod tests {
             let ram = Vram::new(SIZE);
             let formats = [COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP];
             let tiled = n.below(3) == 0;
-            let stride = if tiled { 1 + n.below(2) } else { 64 + n.below(1600) };
+            let stride = if tiled {
+                1 + n.below(2)
+            } else {
+                64 + n.below(1600)
+            };
             let format = formats[n.below(4) as usize];
             e.write(&ram, 0x14, format | stride);
             e.write(&ram, 0x10, n.below(0x8000) | (tiled as u32) << 31);
-            let formats = [COL_1BPP, COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP, COL_YUYV, COL_UYVY];
+            let formats = [
+                COL_1BPP, COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP, COL_YUYV, COL_UYVY,
+            ];
             let src_tiled = n.below(3) == 0;
-            let stride = if src_tiled { 1 + n.below(2) } else { n.below(1600) };
+            let stride = if src_tiled {
+                1 + n.below(2)
+            } else {
+                n.below(1600)
+            };
             let src_format = formats[n.below(7) as usize];
             e.write(&ram, 0x54, src_format | stride | n.below(4) << 22);
             e.write(&ram, 0x34, n.below(0x8000) | (src_tiled as u32) << 31);
@@ -1858,7 +1859,11 @@ mod tests {
             }
             let flags = [COMMAND_INITIATE, COMMAND_DX, COMMAND_DY, COMMAND_CLIP_SEL]
                 .into_iter()
-                .chain([COMMAND_PATTERN_MONO, COMMAND_TRANS_MONO, COMMAND_INC_X_START])
+                .chain([
+                    COMMAND_PATTERN_MONO,
+                    COMMAND_TRANS_MONO,
+                    COMMAND_INC_X_START,
+                ])
                 .filter(|_| n.below(2) == 0)
                 .fold(0, |v, f| v | f);
             let command = n.next() & 0xFF00_0000 | flags | n.below(9);
@@ -1930,7 +1935,33 @@ mod tests {
         e.write(&ram, 0x6C, 2 << 16 | 1);
         let fill = COMMAND_INITIATE | CMD_RECTFILL;
         let rows = Some((2 * 2048 + 2, 4 * 2048 + 5 * 2));
-        assert_eq!(e.footprint(0x70, fill, size), Footprint::Spans([rows, None]));
+        assert_eq!(
+            e.footprint(0x70, fill, size),
+            Footprint::Spans([rows, None])
+        );
+    }
+
+    #[test]
+    fn a_yuv_blit_from_the_left_edge_has_a_bounded_footprint() {
+        // A YUV source's pairs go right of their first pixel: a copy to
+        // x 0 at the start of the memory draws nothing left of it, so
+        // its footprint is bounded rather than all of the memory.
+        let (mut e, ram) = engine();
+        setup_16(&mut e, &ram);
+        e.write(&ram, 0x34, 0x4_0000);
+        e.write(&ram, 0x54, COL_YUYV | 1024);
+        e.write(&ram, 0x5C, 0);
+        e.write(&ram, 0x68, 1 << 16 | 4);
+        e.write(&ram, 0x6C, 0);
+        let copy = 0xCC << 24 | COMMAND_INITIATE | CMD_SCREEN_TO_SCREEN;
+        let Footprint::Spans([Some(dst), Some(src)]) = e.footprint(0x70, copy, 1 << 20) else {
+            panic!("{:?}", e.footprint(0x70, copy, 1 << 20));
+        };
+        assert_eq!(dst.0, 0);
+        assert_eq!(src, (0x4_0000, 0x4_0010));
+        e.write(&ram, 0x70, copy);
+        assert!(!e.touched.is_empty());
+        assert!(e.touched.iter().all(|&(a, b)| a >= dst.0 && b <= dst.1));
     }
 
     #[test]

@@ -36,8 +36,8 @@ pub mod fifo;
 pub mod render3d;
 
 use super::{Effect, Now, Voodoo};
-use blit2d::Footprint;
 use crate::video::crt::Extension;
+use blit2d::Footprint;
 use std::collections::VecDeque;
 
 /// The size of BAR0 and of BAR1.
@@ -884,7 +884,10 @@ impl Voodoo {
     /// first, as for a program's read: the drawing queued before is done,
     /// and what only the GPU has there is read back and turns hot, so
     /// that a buffer of the 3D engine's blitted from every frame is drawn
-    /// in software, as one the program reads every frame is.
+    /// in software, as one the program reads every frame is. A command
+    /// whose bytes can't be bounded reads back all of the memory without
+    /// it turning hot: the engine reads little of it, and every 3D buffer
+    /// hot would send all the drawing to software for a second.
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
         let Some(b) = &self.banshee else { return };
         if self.writes_queue() || self.gpu.borrow().tracker.any_gpu() {
@@ -900,7 +903,7 @@ impl Voodoo {
                         self.gpu_sync(start, end);
                     }
                 }
-                Footprint::All => self.gpu_sync(0, size),
+                Footprint::All => self.gpu_sync_all(),
             }
         }
         let Some(b) = &mut self.banshee else { return };
