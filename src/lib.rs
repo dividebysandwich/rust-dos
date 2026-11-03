@@ -71,6 +71,7 @@ pub mod manuals;
 pub use rust_dos_mpu401::midiout;
 pub use rust_dos_lpt_dac as lpt_dac;
 pub mod makeimg;
+pub mod commit_command;
 pub mod makeimg_command;
 pub mod instructions;
 pub mod interrupts;
