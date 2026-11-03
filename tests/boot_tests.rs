@@ -406,6 +406,27 @@ fn a_booted_systems_state_keeps_only_the_changes_over_its_image() {
         "the image is as it was"
     );
 
+    // A folder as C: that a booted system has as a disk is no image
+    // either: the image is mounted as the state has it.
+    let mut cpu = Cpu::new(dir.join("folder"));
+    cpu.load_shell();
+    let share = MountOptions {
+        share: Some(true),
+        ..Default::default()
+    };
+    cpu.bus
+        .mount_drive(2, &dir.join("folder"), share, true)
+        .unwrap();
+    cpu.bus.disk.prepare_shared_disks();
+    assert!(cpu.bus.disk.bios_image(2).is_some(), "the folder's disk");
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), base.as_path());
+    assert_eq!(sector_of(&cpu, 1), [0xAA; SECTOR_SIZE]);
+    drop(cpu);
+
     // The image written in place, here as C: without a delta file: the
     // state's changes can't go over it.
     let refused = |cpu: &mut Cpu| {
@@ -427,6 +448,22 @@ fn a_booted_systems_state_keeps_only_the_changes_over_its_image() {
         error
     );
     assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+    drop(cpu);
+
+    // The image under a delta file mounted read-only: the changes can't
+    // go into it.
+    let mut cpu = machine("delta_state_read_only");
+    let read_only = MountOptions {
+        read_only: true,
+        ..over()
+    };
+    cpu.bus.mount_drive(2, &base, read_only, true).unwrap();
+    let error = refused(&mut cpu);
+    assert!(
+        error.contains("drive C:") && error.contains("can't be written"),
+        "{}",
+        error
+    );
     drop(cpu);
 
     // The image changed since the state: refused, naming the drive and

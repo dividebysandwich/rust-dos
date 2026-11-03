@@ -7,12 +7,11 @@
 //!
 //! The file: a header sector (`MAGIC`, the version, the block size, the
 //! image's size and what it begins and ends with, hashed, and the image's
-//! path where it fits, for messages), the block map
-//! (for each block of the image, a little-endian u32: 0 for the image's,
-//! or the number from 1 of the block in the file), then the blocks in the
-//! order they were first written. A block goes in before its entry in the
-//! map, so a file cut short where it was being written loses that write
-//! and nothing else.
+//! path where it fits, for messages), the block map (for each block of the
+//! image, a little-endian u32: 0 for the image's, or the number from 1 of
+//! the block in the file), then the blocks in the order they were first
+//! written. A block goes in before its entry in the map, so a file cut
+//! short where it was being written loses that write and nothing else.
 //!
 //! A copy of the file (`Delta::snapshot_to`) is the disk as it was then,
 //! for a save state of a system booted from it, and `Delta::restore` takes
@@ -99,9 +98,7 @@ impl Delta {
             Err(Mismatch::Changes(e)) if read_only => Err(e),
             Err(Mismatch::Changes(e)) => {
                 let time = crate::hosttime::now().format("%Y%m%d-%H%M%S");
-                let mut aside = path.as_os_str().to_owned();
-                aside.push(format!(".stale-{}", time));
-                let aside = PathBuf::from(aside);
+                let aside = with_suffix(path, &format!(".stale-{}", time));
                 hostfs::rename(path, &aside).map_err(|io| format!("{} (and it can't be set aside: {})", e, io))?;
                 NOTES.with(|notes| notes.borrow_mut().push(format!("{}; it is set aside as {}", e, aside.display())));
                 Self::open_as_is(base, path, read_only).map_err(Mismatch::into_message)

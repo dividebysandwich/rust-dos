@@ -47,14 +47,17 @@ pub fn saved(state: &Path, drive: u8) -> Option<SavedDisk> {
     saved_of(state, &drive_key(drive))
 }
 
-/// `saved` of the drive with the key `key`.
+/// `saved` of the drive with the key `key`. A save deletes both kinds
+/// first (`delete_copies`), but an older Rust-DOS deletes only the whole
+/// copy before it writes one: where both are there, the changes are of an
+/// earlier save, and the copy is the state's.
 pub fn saved_of(state: &Path, key: &str) -> Option<SavedDisk> {
-    let changes = changes_path_of(state, key);
-    if changes.is_file() {
-        return Some(SavedDisk::Changes(changes));
-    }
     let copy = copy_path_of(state, key);
-    copy.is_file().then_some(SavedDisk::Whole(copy))
+    if copy.is_file() {
+        return Some(SavedDisk::Whole(copy));
+    }
+    let changes = changes_path_of(state, key);
+    changes.is_file().then_some(SavedDisk::Changes(changes))
 }
 
 /// Whether the disk in `drive` keeps a journal: a booted system's, which
@@ -115,5 +118,30 @@ pub fn delete_copies(state: &Path) {
     for drive in 0..DRIVE_SLOTS {
         let _ = std::fs::remove_file(copy_path(state, drive));
         let _ = std::fs::remove_file(changes_path(state, drive));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A state an older Rust-DOS saved over one of this one's has its
+    /// whole copy beside the changes of the earlier save: the copy is the
+    /// state's.
+    #[test]
+    fn a_whole_copy_wins_over_changes_left_from_an_earlier_save() {
+        let dir = crate::test_dir::path("saved_disks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("slot1.state");
+        delete_copies(&state);
+        assert_eq!(saved(&state, 2), None);
+        let changes = changes_path(&state, 2);
+        std::fs::write(&changes, b"changes").unwrap();
+        assert_eq!(saved(&state, 2), Some(SavedDisk::Changes(changes)));
+        let copy = copy_path(&state, 2);
+        std::fs::write(&copy, b"copy").unwrap();
+        assert_eq!(saved(&state, 2), Some(SavedDisk::Whole(copy)));
+        delete_copies(&state);
+        assert_eq!(saved(&state, 2), None);
     }
 }

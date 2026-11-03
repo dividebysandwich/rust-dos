@@ -392,8 +392,9 @@ impl StateFiles {
 
     fn has(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        // `a.C.img`, `a.2.img`: the copy of a drive's disk (`disks::copy_path`),
-        // or `a.C.rdelta`, its changes (`disks::changes_path`).
+        // `a.C.img`, `a.2.img`: the copy of a drive's disk
+        // (`disks::copy_path`), or `a.C.rdelta`, its changes
+        // (`disks::changes_path`).
         let key = name
             .strip_prefix(&self.stem)
             .and_then(|rest| rest.strip_prefix('.'))

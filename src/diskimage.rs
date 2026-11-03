@@ -944,7 +944,7 @@ impl DiskImage {
     /// Whether `saved` can go back into this disk (`revert_to`), and if it
     /// can't, why: a whole copy must be the disk's size, and changes must
     /// be over this disk's image, which must have its changes in a delta
-    /// file too.
+    /// file too, one that can be written.
     pub fn check_saved(&self, saved: &SavedDisk) -> Result<(), String> {
         match (saved, &self.backing) {
             (SavedDisk::Whole(copy), _) => {
@@ -960,7 +960,18 @@ impl DiskImage {
                     )),
                 }
             }
-            (SavedDisk::Changes(changes), Backing::Delta(delta)) => delta.check_snapshot(changes),
+            (SavedDisk::Changes(changes), Backing::Delta(delta)) => {
+                delta.check_snapshot(changes)?;
+                match delta.writable() {
+                    true => Ok(()),
+                    false => Err(format!(
+                        "the state's changes of the disk ({}) can't go into {}, which can't be \
+                         written",
+                        changes.display(),
+                        delta.path().display()
+                    )),
+                }
+            }
             (SavedDisk::Changes(changes), _) => Err(format!(
                 "the state keeps the disk as its changes ({}) over an image left as it is{}, \
                  and {} is written in place: mount the image with its changes in a delta file \

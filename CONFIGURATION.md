@@ -2224,17 +2224,17 @@ keeps each disk beside it, which loading it puts back:
   delta file of the drive as the loading machine has it, or, with no
   image in that drive (a folder as C:, or nothing), the drive mounted as
   the state had it. A load over an image that is gone, has changed, or is
-  mounted without `-overlay` is refused, and the message names the drive
-  and the image.
+  mounted without `-overlay` or read-only (`-ro`) is refused, and the
+  message names the drive and the image.
 - Any other disk is copied whole (`slot1.C.img`, which takes no room where
-  the filesystem shares data between files), and the log says how big the
-  copy is. The copy goes into the image the loading machine has in that
-  drive, not the one the state was saved with, so a configuration that
-  mounts a scratch copy of the image as C: can load states of the system
-  without touching the original. The image must be the size of the copy,
-  and a machine with no image in the drive refuses the load. States saved
-  so by older versions load as they did, into an image with or without
-  `-overlay`.
+  the filesystem shares data between files), and for an image of 64 MB or
+  more the log says how big the copy is. The copy goes into the image the
+  loading machine has in that drive, not the one the state was saved
+  with, so a configuration that mounts a scratch copy of the image as C:
+  can load states of the system without touching the original. The image
+  must be the size of the copy, and a machine with no image in the drive
+  refuses the load. States saved so by older versions load as they did,
+  into an image with or without `-overlay`.
 
 The browser's slots can't hold disks and refuse a booted system's state.
 

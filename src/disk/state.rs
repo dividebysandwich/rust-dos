@@ -236,20 +236,21 @@ impl DiskController {
         // drive. The image the state names may be one this machine doesn't
         // mount (the original that the saving run's disk was a copy of),
         // and taking it would write the copy over it. Changes over an image
-        // left as it is need that image under a delta file: with no image in
-        // the drive here, the drive is mounted as the state has it, which
-        // writes only the delta file. (A folder's disk is made from the
-        // folder the state names, or the one `folders` gives. An image that
-        // `folders` names, a scratch disk, is mounted as it says.)
+        // left as it is need that image under a delta file: with no image
+        // in the drive here (a folder, even one a booted system shares as
+        // a disk, or nothing), the drive is mounted as the state has it,
+        // which writes only the delta file. (A folder's disk is made from
+        // the folder the state names, or the one `folders` gives. An image
+        // that `folders` names, a scratch disk, is mounted as it says.)
         let saved = self
             .copies_from
             .as_ref()
             .and_then(|state| crate::savestate::disks::saved(state, drive));
         let changes = matches!(saved, Some(SavedDisk::Changes(_)));
+        let no_image_here = self.drive(drive).is_none_or(|d| d.mounted_disk().is_none());
         let into_mounted = match (&mount, &saved) {
             (Some(text), Some(_)) if !folders.iter().any(|(d, _)| *d == drive) => {
-                !crate::hostfs::is_dir(&spec_of(text)?.path)
-                    && !(changes && self.bios_image(drive).is_none())
+                !crate::hostfs::is_dir(&spec_of(text)?.path) && !(changes && no_image_here)
             }
             _ => false,
         };
@@ -310,14 +311,11 @@ impl DiskController {
             }
             self.swap_image(drive).map_err(StateError::Mismatch)?;
         }
-        // The disk goes into the disk now in the drive once the state is
-        // in (`revert_disks`), where a disk of another size, or changes
-        // over another image, could only be logged: the load is refused
-        // here instead.
-        if let Some(saved) = saved.as_ref().filter(|_| into_mounted || changes) {
-            let disk = self.bios_image(drive).ok_or_else(no_image)?;
-            disk.check_saved(saved)
-                .map_err(|e| StateError::Media(format!("drive {}: {}", name, e)))?;
+        // The saved disk goes into the disk now in the drive once the state
+        // is in (`revert_disks`), if the journal doesn't reach back to the
+        // state: `load_checkpoints` checks then that it can.
+        if saved.is_some() && (into_mounted || changes) && self.bios_image(drive).is_none() {
+            return Err(no_image());
         }
         let d = self.drives[drive as usize].as_mut().expect("the drive is there");
         d.current_dir = dir;
@@ -348,7 +346,9 @@ impl DiskController {
                 .and_then(|state| crate::savestate::disks::saved(state, drive));
             if let Some(saved) = saved.filter(|_| !disk.has_checkpoint(id)) {
                 disk.check_saved(&saved).map_err(|e| {
-                    StateError::Media(format!("drive {}: {}", drive_name(drive), e))
+                    // `C:` or `2`: one colon after either.
+                    let name = drive_name(drive);
+                    StateError::Media(format!("drive {}: {}", name.trim_end_matches(':'), e))
                 })?;
                 disk.offer_replacement(Some(saved));
             }
