@@ -1227,6 +1227,13 @@ macro_rules! variants {
 // with one texture, which it gives TMU 1 while TMU 0 passes its colour
 // on: the texture times the iterated colour, with the iterated alpha or
 // the texture's times it. Oni draws its menu and its levels with these.
+// V10-V15 and C2 are 3dfx's Direct3D driver for the Voodoo2, which also
+// gives the texture to TMU 1 and has TMU 0 pass it on, modulated by the
+// iterated colour. V10-V14 are its textured states in a saved Omikron
+// scene, most drawn area first: the frame darkened by the colour, opaque,
+// blended by alpha with fog, opaque with fog, and added. V15 darkens
+// without a texture, and C2 covers the driver's other blends, fog and
+// formats.
 variants! {
     V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
     V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
@@ -1238,8 +1245,15 @@ variants! {
     V7: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
     V8: 2, full[0x80100, 0x0048_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F];
     V9: 2, full[0x80100, 0x0142_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1ACF];
+    V10: 2, full[0x10910, 0x0000_2401, 0x0000_601E, 0, 0x0000_0507, 0x0824_1507];
+    V11: 2, full[0x10910, 0x0000_2401, 0x0000_040E, 0, 0x0000_0507, 0x0824_1507];
+    V12: 2, full[0x10910, 0x0000_2401, 0x0000_511E, 0x41, 0x0000_0507, 0x0824_1507];
+    V13: 2, full[0x10910, 0x0000_2401, 0x0000_040E, 0x41, 0x0000_0507, 0x0824_1507];
+    V14: 2, full[0x10910, 0x0000_2401, 0x0000_441E, 0, 0x0000_0507, 0x0824_1507];
+    V15: 0, full[0x10900, 0, 0x0000_601E, 0, 0, 0];
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
+    C2: 2, combine_only[0x0000_2401, 0x0000_0507, 0x0824_1507];
 }
 
 /// The variant a triangle with `texcount` units and `st`'s registers can be
@@ -1820,3 +1834,7 @@ mod dispatch_output_tests;
 #[cfg(test)]
 #[path = "raster/oni_state_tests.rs"]
 mod oni_state_tests;
+
+#[cfg(test)]
+#[path = "raster/d3d_state_tests.rs"]
+mod d3d_state_tests;

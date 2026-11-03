@@ -40,6 +40,7 @@ pub const FILES: u16 = 127;
 
 // Drive numbers are 0-based (0=A:, 2=C:, 25=Z:).
 pub const DRIVE_C: u8 = 2;
+pub const DRIVE_D: u8 = 3;
 pub const DRIVE_Z: u8 = 25;
 /// A: and B: are the BIOS floppy units: whatever is mounted there is a
 /// floppy drive.
