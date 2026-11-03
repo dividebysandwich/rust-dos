@@ -972,10 +972,11 @@ impl Voodoo {
     }
 
     /// The same where what comes reads only `ranges` of the memory's
-    /// bytes (`catch_up_in`).
+    /// bytes (`catch_up_in`). On a Banshee the rows of the 3D buffers
+    /// read back there turn hot (`gpu_catch_up_hot`).
     pub(crate) fn flush_in(&mut self, ranges: &[(u32, u32)]) {
-        for &range in ranges {
-            self.gpu_catch_up_in(Some(range));
+        for &(start, end) in ranges {
+            self.gpu_catch_up_hot(start, end);
         }
         self.catch_up_workers();
         self.drawn_to.clear();
