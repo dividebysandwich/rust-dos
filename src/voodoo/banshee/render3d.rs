@@ -1318,6 +1318,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gpu_reads_a_buffer_blitted_from_every_frame_goes_back_to_the_gpu_once_cool() {
+        // The rows a copy reads back stay hot for `HOT_FRAMES` frames of
+        // the picture. Then one frame into the buffer goes to the GPU,
+        // its copy reads it back, and the buffer is hot again: the
+        // desktop gets the renderer's pixels in that frame and the
+        // software rasterizer's in the others.
+        use super::super::super::gpu::HOT_FRAMES;
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        let mut sw = gpu_card(None);
+        reg3d(&mut sw, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut sw, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut sw, A);
+        blit_2d(&mut sw, false, (0, 0), (640, 64));
+        let software = desktop(&sw, 320, 30);
+        assert_ne!(software, 0x1234);
+        let mut on_gpu = Vec::new();
+        for frame in 1..=2 * HOT_FRAMES + 2 {
+            let before = gpu_only(&v);
+            draw_frame(&mut v, A);
+            blit_2d(&mut v, false, (0, 0), (640, 64));
+            if gpu_only(&v) > before {
+                on_gpu.push(frame);
+                assert_eq!(desktop(&v, 320, 30), 0x1234, "frame {frame}");
+            } else {
+                assert_eq!(desktop(&v, 320, 30), software, "frame {frame}");
+            }
+        }
+        // One frame in each period of `HOT_FRAMES` frames goes to the GPU.
+        assert_eq!(on_gpu.len(), 2, "{on_gpu:?}");
+        assert_eq!(on_gpu[1] - on_gpu[0], HOT_FRAMES, "{on_gpu:?}");
+    }
+
+    #[test]
     fn gpu_reads_a_2d_fill_into_a_buffer_on_the_gpu_stays() {
         // A fill by the 2D engine into rows of a buffer only the renderer
         // drew: those rows come back first and the fill goes over them.

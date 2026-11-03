@@ -154,7 +154,7 @@ pub struct Gpu {
 }
 
 /// Frames a page read back from the GPU stays hot: about a second.
-const HOT_FRAMES: u32 = 60;
+pub(crate) const HOT_FRAMES: u32 = 60;
 
 impl Gpu {
     pub fn new(bytes: usize) -> Self {
