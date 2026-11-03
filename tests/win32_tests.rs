@@ -8448,3 +8448,276 @@ fn an_unhandled_exception_gives_the_exit_code_ffffffff() {
         }
     }
 }
+
+/// The UTF-16 string `s` with its zero.
+fn wide(s: &str) -> Vec<u8> {
+    s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
+}
+
+/// Call the method `index` of the interface whose pointer is at `this`
+/// in the data, with `args` after it.
+fn com_call(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    this: u32,
+    index: u32,
+    args: &[i32],
+) -> Result<(), IcedError> {
+    push_args(a, args)?;
+    a.mov(eax, dword_ptr(l.at(this)))?;
+    a.push(eax)?;
+    a.mov(ecx, dword_ptr(eax))?;
+    a.call(dword_ptr(ecx + 4 * index as i32))
+}
+
+/// Set bit `bit` of EBX when EAX is 0.
+fn bit_if_zero(a: &mut CodeAssembler, bit: u32) -> Result<(), IcedError> {
+    a.test(eax, eax)?;
+    bit_if_equal(a, bit)
+}
+
+/// The type library fixtures of src/win32/oleaut32/testdata: the SLTG one
+/// loaded, registered, and its interface's names looked up; LoadRegTypeLib
+/// finds the same library by the registry; and the MSFT one's dual
+/// interface shows its dispinterface side, and through
+/// GetRefTypeOfImplType(-1) its interface side. A bit each in the exit
+/// code; and the keys RegisterTypeLib wrote, as Windows writes them.
+#[test]
+fn a_type_library_loads_registers_and_names_its_members() {
+    let names: &[&str] = &[
+        "LoadTypeLib",
+        "RegisterTypeLib",
+        "DispGetIDsOfNames",
+        "LoadRegTypeLib",
+        "LoadTypeLibEx",
+    ];
+    let imports: &[(&str, &[&str])] = &[("OLEAUT32.DLL", names)];
+    let mut data = vec![0u8; 0x110];
+    put(&mut data, 0, &wide("C:\\RDSLTG.TLB"));
+    put(&mut data, 0x40, &wide("C:\\RDMSFT.TLB"));
+    // IShape's IID and the library's GUID.
+    let iid = [0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0, 0, 0, 0, 0, 1];
+    put(&mut data, 0x80, &iid);
+    put(&mut data, 0x90, &[0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33]);
+    put(&mut data, 0x98, &[0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55]);
+    put(&mut data, 0xA0, &wide("move"));
+    put(&mut data, 0xB0, &wide("DY"));
+    put(&mut data, 0xB8, &wide("dx"));
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[at(0), at(0xE0)])?;
+        a.call(f("LoadTypeLib"))?;
+        bit_if_zero(a, 0)?;
+        push_args(a, &[at(0), 0])?;
+        a.push(dword_ptr(l.at(0xE0)))?;
+        a.call(f("RegisterTypeLib"))?;
+        bit_if_zero(a, 1)?;
+        // GetTypeInfoOfGuid, then DispGetIDsOfNames of move, DY and dx.
+        com_call(a, l, 0xE0, 6, &[at(0x80), at(0xE4)])?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(l.at(0xC0)), at(0xA0))?;
+        a.mov(dword_ptr(l.at(0xC4)), at(0xB0))?;
+        a.mov(dword_ptr(l.at(0xC8)), at(0xB8))?;
+        push_args(a, &[at(0xC0), 3, at(0xD0)])?;
+        a.push(dword_ptr(l.at(0xE4)))?;
+        a.call(f("DispGetIDsOfNames"))?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 2)?;
+        let mut ids = a.create_label();
+        a.cmp(dword_ptr(l.at(0xD0)), 2)?;
+        a.jne(ids)?;
+        a.cmp(dword_ptr(l.at(0xD4)), 1)?;
+        a.jne(ids)?;
+        a.cmp(dword_ptr(l.at(0xD8)), 0)?;
+        a.jne(ids)?;
+        a.or(ebx, 1 << 3)?;
+        a.set_label(&mut ids)?;
+        a.nop()?;
+        // Version 1.2 of the library, from the registry: the same object.
+        push_args(a, &[at(0x90), 1, 2, 0, at(0xE8)])?;
+        a.call(f("LoadRegTypeLib"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xE8)))?;
+        a.xor(eax, dword_ptr(l.at(0xE0)))?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 4)?;
+        // REGKIND_NONE.
+        push_args(a, &[at(0x40), 2, at(0xEC)])?;
+        a.call(f("LoadTypeLibEx"))?;
+        a.mov(esi, eax)?;
+        com_call(a, l, 0xEC, 6, &[at(0x80), at(0xF0)])?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 5)?;
+        // GetTypeAttr: a dispinterface with IUnknown's, IDispatch's and
+        // its own 4 methods.
+        com_call(a, l, 0xF0, 3, &[at(0xF4)])?;
+        let mut dispatch = a.create_label();
+        a.mov(eax, dword_ptr(l.at(0xF4)))?;
+        a.cmp(dword_ptr(eax + 40), 4)?;
+        a.jne(dispatch)?;
+        a.cmp(word_ptr(eax + 44), 11)?;
+        a.jne(dispatch)?;
+        a.or(ebx, 1 << 6)?;
+        a.set_label(&mut dispatch)?;
+        // GetRefTypeOfImplType(-1), GetRefTypeInfo, GetTypeAttr: the
+        // interface with its 4.
+        com_call(a, l, 0xF0, 8, &[-1, at(0xF8)])?;
+        a.push(at(0xFC))?;
+        a.push(dword_ptr(l.at(0xF8)))?;
+        a.mov(eax, dword_ptr(l.at(0xF0)))?;
+        a.push(eax)?;
+        a.mov(ecx, dword_ptr(eax))?;
+        a.call(dword_ptr(ecx + 4 * 14))?;
+        com_call(a, l, 0xFC, 3, &[at(0x100)])?;
+        let mut interface = a.create_label();
+        a.mov(eax, dword_ptr(l.at(0x100)))?;
+        a.cmp(dword_ptr(eax + 40), 3)?;
+        a.jne(interface)?;
+        a.cmp(word_ptr(eax + 44), 4)?;
+        a.jne(interface)?;
+        a.or(ebx, 1 << 7)?;
+        a.set_label(&mut interface)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let dir = scratch(
+        "typelib",
+        &[
+            ("T.EXE", exe),
+            (
+                "RDSLTG.TLB",
+                include_bytes!("../src/win32/oleaut32/testdata/rdtest-sltg.tlb").to_vec(),
+            ),
+            (
+                "RDMSFT.TLB",
+                include_bytes!("../src/win32/oleaut32/testdata/rdtest-msft.tlb").to_vec(),
+            ),
+        ],
+    );
+    let mut cpu = Cpu::new(dir.clone());
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+    let saved = fs::read_to_string(dir.join("REGISTRY.REG")).unwrap();
+    let classes = "[HKEY_LOCAL_MACHINE\\Software\\Classes\\";
+    let lib = format!("{classes}TypeLib\\{{11111111-2222-3333-4444-555555555555}}\\1.2");
+    for want in [
+        format!("{lib}]\r\n@=\"rust-dos type library test\"\r\n"),
+        format!("{lib}\\0\\win32]\r\n@=\"C:\\\\RDSLTG.TLB\"\r\n"),
+        format!("{lib}\\FLAGS]\r\n@=\"0\"\r\n"),
+        format!("{lib}\\HELPDIR]\r\n@=\"C:\"\r\n"),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000001}}]\r\n@=\"IShape\"\r\n"
+        ),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000001}}\\ProxyStubClsid32]\r\n\
+             @=\"{{00020424-0000-0000-C000-000000000046}}\"\r\n"
+        ),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000001}}\\TypeLib]\r\n\
+             @=\"{{11111111-2222-3333-4444-555555555555}}\"\r\n\"Version\"=\"1.2\"\r\n"
+        ),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000002}}\\ProxyStubClsid32]\r\n\
+             @=\"{{00020420-0000-0000-C000-000000000046}}\"\r\n"
+        ),
+    ] {
+        assert!(saved.contains(&want), "{want} isn't in {saved}");
+    }
+    // The class is no interface; IPlain, an [oleautomation] one, is.
+    assert!(!saved.contains("Interface\\{11111111-2222-3333-4444-000000000004}"), "{saved}");
+    assert!(saved.contains("Interface\\{11111111-2222-3333-4444-000000000003}]"), "{saved}");
+}
+
+/// An error object made, filled, set as the thread's and taken back,
+/// once; and a VT_I4 changed to a VT_BSTR. A bit each in the exit code.
+#[test]
+fn an_error_object_goes_through_the_thread_and_a_variant_changes_type() {
+    let names: &[&str] = &[
+        "CreateErrorInfo",
+        "SetErrorInfo",
+        "GetErrorInfo",
+        "VariantChangeType",
+    ];
+    let imports: &[(&str, &[&str])] = &[("OLEAUT32.DLL", names)];
+    let mut data = vec![0u8; 0x60];
+    put(&mut data, 0, &wide("x9"));
+    // IID_IErrorInfo.
+    put(
+        &mut data,
+        0x10,
+        &[
+            0x20, 0xB1, 0xF2, 0x1C, 0x7D, 0x54, 0x1B, 0x10, 0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1,
+            0x19,
+        ],
+    );
+    // A VT_I4 of 1234.
+    put(&mut data, 0x30, &3u16.to_le_bytes());
+    put(&mut data, 0x38, &1234u32.to_le_bytes());
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        a.push(at(0x20))?;
+        a.call(f("CreateErrorInfo"))?;
+        bit_if_zero(a, 0)?;
+        // SetDescription, QueryInterface for IErrorInfo.
+        com_call(a, l, 0x20, 5, &[at(0)])?;
+        bit_if_zero(a, 1)?;
+        com_call(a, l, 0x20, 0, &[at(0x10), at(0x24)])?;
+        bit_if_zero(a, 2)?;
+        a.push(dword_ptr(l.at(0x24)))?;
+        a.push(0)?;
+        a.call(f("SetErrorInfo"))?;
+        bit_if_zero(a, 3)?;
+        com_call(a, l, 0x24, 2, &[])?;
+        com_call(a, l, 0x20, 2, &[])?;
+        push_args(a, &[0, at(0x28)])?;
+        a.call(f("GetErrorInfo"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(l.at(0x28)))?;
+        a.xor(eax, dword_ptr(l.at(0x24)))?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 4)?;
+        // GetDescription: "x9".
+        com_call(a, l, 0x28, 5, &[at(0x2C)])?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(l.at(0x2C)))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.xor(eax, 0x0039_0078)?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 5)?;
+        // The thread has none now: S_FALSE.
+        push_args(a, &[0, at(0x28)])?;
+        a.call(f("GetErrorInfo"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 6)?;
+        // VT_BSTR: "1234".
+        push_args(a, &[at(0x40), at(0x30), 0, 8])?;
+        a.call(f("VariantChangeType"))?;
+        let mut text = a.create_label();
+        a.test(eax, eax)?;
+        a.jne(text)?;
+        a.cmp(word_ptr(l.at(0x40)), 8)?;
+        a.jne(text)?;
+        a.mov(eax, dword_ptr(l.at(0x48)))?;
+        a.cmp(dword_ptr(eax), 0x0032_0031)?;
+        a.jne(text)?;
+        a.cmp(dword_ptr(eax + 4), 0x0034_0033)?;
+        a.jne(text)?;
+        a.cmp(dword_ptr(eax - 4), 8)?;
+        a.jne(text)?;
+        a.or(ebx, 1 << 7)?;
+        a.set_label(&mut text)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("errorinfo", exe);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {out}", !code);
+}

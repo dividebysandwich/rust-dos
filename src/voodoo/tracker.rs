@@ -13,10 +13,10 @@
 //! - newer on the GPU, in the renderer's copy of the memory, where a
 //!   Banshee's or Voodoo3's 2D operations drew (`gpu`), page by page;
 //! - newer on the GPU, in a 3D buffer the renderer draws at its own
-//!   resolution: rows of a Voodoo Graphics' or Voodoo2's colour and
-//!   auxiliary buffers, which jobs left to the renderer drew
-//!   (`voodoo_readback=gpu`). These are read back by rows of the buffer,
-//!   at the card's resolution, rather than by pages.
+//!   resolution: rows of any card's colour and auxiliary buffers, which
+//!   jobs left to the renderer drew (`voodoo_readback=gpu`). These are
+//!   read back by rows of the buffer, at the card's resolution, rather
+//!   than by pages.
 //!
 //! Whatever reads or writes the card's memory where it is behind the GPU
 //! reads those bytes back first. A byte is never both dirty and newer in
@@ -105,6 +105,10 @@ pub struct Tracker {
     gpu: Ranges,
     /// Bytes newer in the renderer's 3D buffers.
     buffers: Ranges,
+    /// Bytes of the 3D buffers that changed in the card's memory since a
+    /// Banshee's texture units last looked (`take_changed`): read back
+    /// from the renderer, or drawn into in software.
+    changed: Ranges,
     /// Bytes read back for the program since the last `cool`.
     hot: Ranges,
 }
@@ -271,10 +275,38 @@ impl Tracker {
         !self.buffers.is_empty()
     }
 
+    /// Whether any of bytes `start..end` is newer in the renderer's 3D
+    /// buffers.
+    #[inline]
+    pub fn buffers_in(&self, start: u32, end: u32) -> bool {
+        !self.buffers.is_empty() && self.buffers.any_in(start, end)
+    }
+
     /// The bytes within `start..end` newer in the renderer's 3D buffers,
-    /// first to last, which the caller reads back.
-    pub fn take_buffers(&mut self, start: u32, end: u32) -> Vec<(u32, u32)> {
-        self.buffers.take(start, end)
+    /// first to last, which the caller reads back: hot from now on if
+    /// `hot` (the program reads or writes them).
+    pub fn take_buffers(&mut self, start: u32, end: u32, hot: bool) -> Vec<(u32, u32)> {
+        let taken = self.buffers.take(start, end);
+        for &(a, b) in &taken {
+            self.changed.add(a, b);
+            if hot {
+                self.hot.add(a, b);
+            }
+        }
+        taken
+    }
+
+    /// Bytes `start..end` of a 3D buffer are drawn into in the card's
+    /// memory, by the software rasterizer.
+    pub fn drawn_in_memory(&mut self, start: u32, end: u32) {
+        self.changed.add(start, end.min(self.size));
+    }
+
+    /// Whether any of bytes `start..end` of the 3D buffers changed in the
+    /// card's memory (`changed`) since the last call for them: the
+    /// textures decoded from there are out of date.
+    pub fn take_changed(&mut self, start: u32, end: u32) -> bool {
+        !self.changed.is_empty() && !self.changed.take(start, end).is_empty()
     }
 
     /// The bytes newer in the renderer's 3D buffers are lost, or can't be
@@ -425,15 +457,27 @@ mod tests {
         p.drawn_in_buffer(0, 480 * row);
         p.drawn_in_buffer(480 * row, 960 * row);
         assert!(p.any_in_buffers() && !p.any_gpu());
+        assert!(p.buffers_in(479 * row, 481 * row) && !p.buffers_in(960 * row, u32::MAX));
         assert_eq!(
-            p.take_buffers(100 * row, 106 * row),
+            p.take_buffers(100 * row, 106 * row, true),
             [(100 * row, 106 * row)]
         );
-        assert!(p.take_buffers(100 * row, 106 * row).is_empty());
+        assert!(p.take_buffers(100 * row, 106 * row, true).is_empty());
+        // Read back for the program, the rows are hot; read back for the
+        // emulator, they stay cool.
+        assert!(p.hot_in(105 * row, 107 * row) && !p.hot_in(106 * row, 107 * row));
         assert_eq!(
-            p.take_buffers(0, 480 * row),
+            p.take_buffers(0, 480 * row, false),
             [(0, 100 * row), (106 * row, 480 * row)]
         );
+        assert!(!p.hot_in(0, 100 * row) && !p.hot_in(106 * row, 480 * row));
+        // Either way the texture units hear of them once, as they do of
+        // rows drawn into in software.
+        assert!(p.take_changed(105 * row, 106 * row));
+        assert!(!p.take_changed(105 * row, 106 * row));
+        assert!(!p.take_changed(480 * row, 481 * row));
+        p.drawn_in_memory(480 * row, 482 * row);
+        assert!(p.take_changed(481 * row, 490 * row));
         // They are kept apart from the pages of the renderer's copy of the
         // memory: neither reads back the other's.
         p.drawn_on_gpu(0, PAGE);

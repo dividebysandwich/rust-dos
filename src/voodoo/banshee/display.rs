@@ -491,7 +491,7 @@ impl Voodoo {
             .collect();
         if dirty && !shared.is_empty() {
             if self.writes_queue() {
-                self.flush();
+                self.flush_in(&shared);
             }
             for &(start, end) in &shared {
                 self.gpu_sync(start, end);

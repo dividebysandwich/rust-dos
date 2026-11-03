@@ -76,10 +76,9 @@ pub fn words(cpu: &Cpu) -> [u32; 53] {
     }
     // Eight sets of texture coordinates.
     w[35] = 8;
-    // D3DTEXOPCAPS_: what the card's combine units do (hal::can_do):
-    // disable, select argument 1 and 2, modulate, add, subtract, and
-    // blending by the diffuse and the texture alpha.
-    w[36] = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x200 | 0x800 | 0x1000;
+    // D3DTEXOPCAPS_: the operations the HAL draws, which ValidateDevice
+    // accepts (hal::can_do).
+    w[36] = crate::win32::ddraw::d3d::hal::OP_CAPS;
     w[37] = tmus;
     w[38] = tmus;
     // D3DVTXPCAPS_: texture generation, material sources, directional

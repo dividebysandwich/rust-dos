@@ -186,7 +186,7 @@ pub fn snapshot(cpu: &Cpu) -> Snapshot {
     Snapshot {
         enabled: win32.enabled,
         active: win32.active(),
-        pending: win32.pending.clone(),
+        pending: win32.pending.as_ref().map(|p| p.path.clone()),
         processes: win32
             .processes
             .iter()

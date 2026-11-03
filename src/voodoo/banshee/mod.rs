@@ -759,8 +759,8 @@ impl Voodoo {
                 return 0xFFFF_FFFF;
             };
             let addr = b.linear_addr(offset - LINEAR);
-            if self.writes_queue() {
-                self.catch_up();
+            if self.workers_queue() {
+                self.catch_up_workers();
             }
             let at = addr & self.fbi.mask;
             self.gpu_sync(at, at + 4);
@@ -836,8 +836,8 @@ impl Voodoo {
     /// queued before done: what reads through BAR1 below the tile base
     /// give, many at once. For a driver in Rust that reads the screen.
     pub fn banshee_memory_read(&self, addr: u32, data: &mut [u8]) {
-        if self.writes_queue() {
-            self.catch_up();
+        if self.workers_queue() {
+            self.catch_up_workers();
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
@@ -859,8 +859,8 @@ impl Voodoo {
         if data.is_empty() {
             return;
         }
-        if self.writes_queue() {
-            self.catch_up();
+        if self.workers_queue() {
+            self.catch_up_workers();
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
@@ -920,8 +920,8 @@ impl Voodoo {
         // them, which would keep the workers from drawing while the
         // program builds the next ones.
         let in_ring = mask == 0xFFFF_FFFF && b.fifo.iter().any(|f| f.holds(addr));
-        if self.writes_queue() && !in_ring {
-            self.catch_up();
+        if self.workers_queue() && !in_ring {
+            self.catch_up_workers();
         }
         self.gpu_sync(addr & self.fbi.mask, (addr & self.fbi.mask) + 4);
         let ram = &self.fbi.ram;

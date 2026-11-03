@@ -5,7 +5,7 @@
 mod present_tests;
 mod xbrz;
 
-use rust_dos::voodoo::gl::{SharedGl, VoodooGl};
+use rust_dos::voodoo::gl::{SharedGl, TextureBarrier, VoodooGl};
 use rust_dos::voodoo::gpu::GpuLink;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -88,6 +88,9 @@ pub struct GlScreen {
     /// The 3dfx card drawn with OpenGL, and why it can't be if it can't.
     voodoo: Rc<RefCell<Option<VoodooGl>>>,
     voodoo_failed: Option<String>,
+    /// The context's texture barrier, if it has one, for the card's
+    /// blending (`VoodooGl::set_texture_barrier`).
+    texture_barrier: Option<TextureBarrier>,
     /// Whether the log said that a Banshee's 2D operations stay on the
     /// CPU (`VoodooGl::gpu_2d_problem`).
     gpu_2d_logged: bool,
@@ -179,6 +182,9 @@ impl GlScreen {
             let reason = format!("OpenGL {}.{} is older than 3.0", version.major, version.minor);
             return Err(no_gl(Some(window), reason));
         };
+        // SAFETY: the context is current, and SDL looks up its functions.
+        let texture_barrier =
+            unsafe { TextureBarrier::load(&gl, |name| video.gl_get_proc_address(name).cast()) };
         // The emulator paces its frames itself, as with SDL's renderer.
         let _ = video.gl_set_swap_interval(SwapInterval::Immediate);
 
@@ -243,6 +249,7 @@ impl GlScreen {
             renderer,
             voodoo: Rc::new(RefCell::new(None)),
             voodoo_failed: (glsl == Glsl::Es300).then(|| "OpenGL ES can't draw it".to_string()),
+            texture_barrier,
             gpu_2d_logged: false,
             capture: None,
             layer: None,
@@ -623,7 +630,10 @@ impl GlScreen {
                 return Err(problem.clone());
             }
             match VoodooGl::new(&self.gl, self.glsl, scale, samples, anisotropy) {
-                Ok(voodoo) => *self.voodoo.borrow_mut() = Some(voodoo),
+                Ok(mut voodoo) => {
+                    voodoo.set_texture_barrier(self.texture_barrier);
+                    *self.voodoo.borrow_mut() = Some(voodoo);
+                }
                 Err(e) => {
                     eprintln!("[DISPLAY] {}", e);
                     self.voodoo_failed = Some(e.clone());

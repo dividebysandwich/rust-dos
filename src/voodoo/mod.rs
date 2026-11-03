@@ -990,7 +990,10 @@ impl Voodoo {
     /// memory (with None any of it): of the buffers behind the OpenGL
     /// renderer (`gpu_behind`), only the rows there are read back.
     pub(crate) fn catch_up_in(&self, range: Option<(u32, u32)>) {
-        self.gpu_catch_up_in(range);
+        match range {
+            Some((start, end)) => self.gpu_catch_up_hot(start, end),
+            None => self.gpu_catch_up(),
+        }
         self.catch_up_workers();
     }
 
@@ -1061,12 +1064,12 @@ impl Voodoo {
     /// Queue `job` after the frame buffer writes before it: held back
     /// with its `access`, or given to the workers.
     pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
-        if access.as_ref().is_some_and(|a| self.gpu_takes(&job, a)) {
-            self.gpu_left(&job);
+        if let Some(bytes) = access.as_ref().and_then(|a| self.gpu_takes(&job, a)) {
+            self.gpu_left(&job, bytes);
             return;
         }
         // Drawn here, over the memory as the renderer has it.
-        self.gpu_catch_up();
+        self.gpu_draws_here(&job);
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
         }
@@ -1169,12 +1172,21 @@ impl Voodoo {
             .spare(range, &given_out, |a, b| self.gpu_sync_quiet(a as u32, b as u32))
     }
 
-    /// Whether frame buffer writes have to wait their turn behind jobs.
+    /// Whether frame buffer writes have to wait their turn behind jobs:
+    /// those the workers draw (`workers_queue`), or those left to the
+    /// OpenGL renderer.
     pub(crate) fn writes_queue(&self) -> bool {
+        self.workers_queue() || self.gpu_behind.get()
+    }
+
+    /// Whether jobs or frame buffer writes wait for the workers
+    /// (`catch_up_workers`). A Banshee's read or write of its memory that
+    /// reads back the rows behind the renderer there first (`gpu_sync`)
+    /// needs to catch up only these: the read back catches them up too.
+    fn workers_queue(&self) -> bool {
         self.outstanding.get()
             || !self.words.borrow().is_empty()
             || !self.backlog.borrow().is_empty()
-            || self.gpu_behind.get()
     }
 
     /// Frame buffer writes for the queue (`writes_queue`): held back with
@@ -1781,6 +1793,7 @@ impl Voodoo {
         self.display_dirty = true;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().tracker.mark_all();
+        self.gpu_behind.set(false);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();
             mirror.forget_textures();

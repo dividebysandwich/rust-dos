@@ -257,6 +257,19 @@ exceptions run as the program's own code on top of that.
   flushed and when the last process ends. Without a writable C: the
   registry lasts until then. A game's profile brings its keys as a .reg
   file, which the same import puts in (`[-key]` and `"name"=-` delete).
+- What a setup program leaves for the next boot runs at the start of a
+  session, which is the built-in Windows' boot (`src/win32/boot.rs`):
+  first the `[rename]` section of `C:\WINDOWS\WININIT.INI`, whose
+  `NUL=file` lines delete files and `new=old` lines put one file in
+  another's place, after which the file is renamed to `WININIT.BAK`, as
+  WININIT.EXE does; then the commands of HKLM's RunServicesOnce, HKLM's
+  RunOnce and HKCU's RunOnce, each value deleted as its command starts.
+  The commands run one at a time, each to the end of what it started,
+  and the program DOS started comes after them, with its exit code for
+  DOS. A restart (`ExitWindowsEx` with `EWX_REBOOT`) boots as soon as
+  the session's last process has ended, and the DOS prompt comes back
+  after the commands. Both kinds of work are files on drive C:, so work
+  left when the emulator was closed runs at the next session.
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform
   1), or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the

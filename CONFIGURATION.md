@@ -2528,26 +2528,30 @@ draws into. What games write into the frame buffer themselves (menus,
 movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
 textures viewed at an angle, where the OpenGL driver supports
 anisotropic filtering.
-With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's
-on a Voodoo Graphics or Voodoo2: the software rasterizer draws none of
-the triangles, and where something reads the card's memory (a game
-reading the frame buffer or blitting from it, a save state, a
+With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's:
+the software rasterizer draws none of the triangles, and where something
+reads the card's memory (a game reading the frame buffer or blitting
+from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
 screenshot, the debugger) the rows it reads are read back from OpenGL,
 at the card's resolution and in its 16 bits a pixel. A read waits for
-the GPU, so a game that reads back every frame gains less. The pixels it
-reads differ in small ways from the card's: OpenGL draws a triangle's
-edges by its own rules, blends after the dither (see below) and keeps
-more depth precision. What a game writes itself, its frame buffer
-writes and the blitter's copies, reads back as it wrote it. A save state
-keeps OpenGL's pixels too, so states of the same scene saved on two
-GPUs differ slightly in the card's memory, and in what the game did with
-pixels it read back. Such a state loads on any machine. A game that
-needs the card's exact pixels, or states that match byte for byte, can
-have `voodoo_readback=exact`. Programs that use alpha planes, the
-Banshee and Voodoo3, and deterministic runs always get the exact pixels,
-as do the pixel counters: drawing left to OpenGL isn't counted, and once
-a game reads the counters everything after is drawn in software and
-counted.
+the GPU, so a game that reads back every frame gains less; on a Banshee
+or Voodoo3 the triangles into memory a game read back in the last
+second or so are drawn in software instead, and a triangle that takes
+its texture from a buffer the 3D drew reads that buffer back first, so
+that it draws with OpenGL's picture at the card's resolution. The pixels
+a game reads differ in small ways from the card's: OpenGL draws a
+triangle's edges by its own rules and keeps more depth precision, and
+where nothing dithers (see below) a blended triangle blends with 8 bits
+a colour. What a game writes itself, its frame buffer writes and the
+blitter's copies, reads back as it wrote it. A save state keeps OpenGL's
+pixels too, so states of the same scene saved on two GPUs differ
+slightly in the card's memory, and in what the game did with pixels it
+read back. Such a state loads on any machine. A game that needs the
+card's exact pixels, or states that match byte for byte, can have
+`voodoo_readback=exact`. Programs that use alpha planes and
+deterministic runs always get the exact pixels, as do the pixel
+counters: drawing left to OpenGL isn't counted, and once a game reads
+the counters everything after is drawn in software and counted.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws
@@ -2569,9 +2573,14 @@ The textures' mipmap levels are the ones the card would take at
 `voodoo_scale` times its resolution: a pixel's level comes from how fast
 the triangle's S/W and T/W change and from its W, as the software
 rasterizer works it out, so at 1x they are the card's and at 2x one
-level sharper. The shader reads and filters the card's texels as the
-card does. With `voodoo_anisotropy` OpenGL filters them itself, from the
-card's level.
+level sharper. A Banshee or Voodoo3 game whose screen shows none of the
+3D buffers (Giants copies its 3D into a desktop of another format) sees
+them only through the card's memory, at the card's resolution, and gets
+the card's levels at any scale: a game whose smaller levels are other
+pictures than its larger ones would otherwise change its look whenever
+what OpenGL drew is read back. The shader reads and filters the card's
+texels as the card does. With `voodoo_anisotropy` OpenGL filters them
+itself, from the card's level.
 
 The card stores 16 bits a pixel (5-6-5), and where a game turns
 dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4
@@ -2593,18 +2602,25 @@ from the card's memory (a new `voodoo_scale` or `voodoo_msaa`, a loaded
 state), it starts from the card's 16 bits, so with `voodoo_dither=false`
 the pattern shows until the game draws over it.
 
-Not all of the card's dithering is there. OpenGL blends after the shader,
-so a blended triangle is dithered before the blend instead of after it: it
-has the pattern, but its pixels aren't the card's, and fbzMode bit 19
-(taking the dither back out of the colour the blend reads) does nothing.
-Some games blend most of what they draw (Oni blends every triangle), so
-their pictures have the card's pattern but not its exact pixels. The
-texture units' dithered level of detail (textureMode bit 4) follows the
-setting as well. Frame buffer writes and the Voodoo2's blitter show what
-the card's memory holds, dithered or not, whatever the setting. The
-Voodoo2's and Voodoo3's video output filter, which partly smooths the
-pattern on the card's own output, isn't modelled: with the setting on,
-the pattern shows as the card writes it.
+The card blends a triangle with the 5-6-5 pixels under it before it
+dithers, and with fbzMode bit 19 it takes the dither back out of those
+pixels first. OpenGL blends after the shader, so for a triangle that
+blends and dithers the shader does the blend itself, the card's way,
+with the pixels under the triangle. Where the driver has a texture
+barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
+`GL_NV_texture_barrier`) the shader reads them from the buffer it draws
+into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
+copied out of the buffer before the triangle is drawn, and the shader
+reads them from the copy, which with `voodoo_msaa` holds each pixel's
+samples averaged. At `voodoo_scale=1` such a triangle comes out as the
+software rasterizer draws it too. Triangles of one draw that overlap go
+after a barrier or over a copy each, so each blends with what the one
+before drew. The texture units' dithered level of detail
+(textureMode bit 4) follows the setting as well. Frame buffer writes and
+the Voodoo2's blitter show what the card's memory holds, dithered or not,
+whatever the setting. The Voodoo2's and Voodoo3's video output filter,
+which partly smooths the pattern on the card's own output, isn't
+modelled: with the setting on, the pattern shows as the card writes it.
 
 The dithering costs a few more instructions a pixel in the shader, and
 nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
@@ -2616,6 +2632,14 @@ nothing but dithered triangles, 200 screen-sized rectangles a frame at
 2x, the graphics card took 7% longer with dithering on (1083 against
 1010 ms a frame, about 0.3 ns more for each of the 246 million pixels):
 the most it costs, where filling pixels is all a frame does.
+
+A dithered draw that blends costs more: the CPU sorts its triangles into
+groups that don't overlap, and each group is a draw of its own after a
+barrier or a copy. On an RTX 4080 with the barrier, Unreal's flyby
+(which blends its lightmaps, coronas and particles with dithering on)
+and 3DMark 2000 ran as fast as with OpenGL's blending; through the copy,
+which a driver without a barrier takes, they lost about 3% of their
+frame rate where the host held them back.
 
 ## 3dfx Voodoo3 and Banshee
 
@@ -2684,18 +2708,21 @@ the program's window stays white and the card draws nothing. Install
 DirectX 7.0 (`dx70eng.exe`) or later first.
 
 With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
-again at `voodoo_scale` times its resolution, as for the Voodoo Graphics
-(see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
+at `voodoo_scale` times its resolution, as for the Voodoo Graphics (see
+[3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
 together as the card's video processor does: the desktop, the overlay
 (the window or screen a game shows its 3D through, scaled and in YUV
 too) and the cursor. A desktop or overlay that is a 16-bit buffer the 3D
 draws into, laid out as the 3D draws it, comes from the bigger picture;
 anything else (the Windows desktop, 8, 24 and 32-bit modes, YUV video)
 comes from the card's memory at its own resolution, with the drawing
-still queued for it done first. The software rasterizer keeps the
-memory, so programs read back what they would on the card, and
-screenshots and recordings show the software picture. The libretro core
-draws a Banshee or Voodoo3 in software whatever `voodoo_renderer` says.
+still queued for it done first. With `voodoo_readback=gpu`, the default,
+OpenGL alone draws the 3D, and what reads the card's memory reads back
+OpenGL's picture, as on the Voodoo2; with `voodoo_readback=exact` the
+software rasterizer keeps the memory as well, so programs read back what
+they would on the card. Screenshots and recordings show the software
+picture, which reads everything back. The libretro core draws a Banshee
+or Voodoo3 in software whatever `voodoo_renderer` says.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
