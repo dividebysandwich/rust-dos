@@ -13,6 +13,9 @@
 //! after its WM_ENDSESSION, so a program can't count on the code after the
 //! call. Here it comes at once, and a call that isn't refused doesn't come
 //! back.
+//!
+//! A restart boots the built-in Windows once the session has ended: the
+//! work a setup program left for the boot runs then (boot.rs).
 
 use super::message::{WM_ENDSESSION, WM_QUERYENDSESSION, thread_alive};
 use super::{TRUE, address_of, current_pid, current_tid, user};
@@ -42,13 +45,14 @@ const NOTIFY: u16 = 2;
 
 /// The variables of the task: lParam of the messages, the next window's
 /// place, wParam of WM_ENDSESSION, the place of the caller's first
-/// window, the calling thread, then the windows.
+/// window, the calling thread, whether it is a restart, then the windows.
 const LPARAM: usize = 0;
 const NEXT: usize = 1;
 const ENDING: usize = 2;
 const OWN: usize = 3;
 const CALLER: usize = 4;
-const WINDOWS: usize = 5;
+const RESTART: usize = 5;
+const WINDOWS: usize = 6;
 
 /// ExitWindowsEx(flags, reserved). With EWX_FORCE no window is asked or
 /// told. FALSE when a window refused.
@@ -66,7 +70,8 @@ pub fn exit_windows_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             .into_iter()
             .partition(|&h| state.window(h).is_some_and(|w| w.pid == pid))
     };
-    let mut vars = vec![lparam, 0, TRUE, others.len() as u32, tid];
+    let restart = u32::from(flags & EWX_REBOOT != 0);
+    let mut vars = vec![lparam, 0, TRUE, others.len() as u32, tid, restart];
     vars.extend(others);
     vars.extend(own);
     // The answer comes back in the scratch space.
@@ -95,6 +100,12 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         match t.step {
             QUERY => {
                 let Some(&hwnd) = t.vars.get(WINDOWS + at) else {
+                    // No window refused: the session ends. A program
+                    // that ends itself on WM_ENDSESSION may end it before
+                    // this task does.
+                    if t.var(RESTART) != 0 {
+                        crate::win32::boot::restart(cpu);
+                    }
                     t.set(NEXT, 0);
                     t.step = NOTIFY;
                     continue;

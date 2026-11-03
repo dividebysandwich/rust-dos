@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 26;
+const WIN32_VERSION: u16 = 27;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -784,7 +784,8 @@ mod tests {
         (23, 0x1329_1DAD_33BC_DC4A), // the mixer's seven lines
         (24, 0xF61B_D786_C674_4FD3), // WNASPI32 and its pending requests
         (25, 0xABF4_8D5F_2FB4_2680), // OLEAUT32's type libraries and error objects
-        (26, 0x099B_CE30_453E_08F4), // the MPEGVideo and AVIVideo devices
+        (26, 0xEFE8_9E7A_456D_99B4), // the boot's work and the program pending
+        (27, 0x48DE_57AA_C42E_36F2), // the MPEGVideo and AVIVideo devices
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
