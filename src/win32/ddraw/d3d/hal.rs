@@ -38,10 +38,11 @@ use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, S
 use super::super::{current_pid, display, state, voodoo};
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
-    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDTEXTUREALPHA,
-    TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV,
-    TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP,
-    TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDCURRENTALPHA,
+    TOP_BLENDDIFFUSEALPHA, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TOP_SUBTRACT, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
+    TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
+    TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use crate::cpu::Cpu;
@@ -518,6 +519,14 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
             api::COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
             api::COMBINE_FACTOR_ONE_MINUS_LOCAL_ALPHA,
         ),
+        // The texture by the upstream unit's alpha, and stage 0's color
+        // by the rest. That alpha is stage 0's texture's: the unit has
+        // no diffuse alpha, so a stage 0 whose alpha is the diffuse
+        // one's blends by the texture's alpha here (#491).
+        TOP_BLENDCURRENTALPHA => (
+            api::COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
+            api::COMBINE_FACTOR_ONE_MINUS_OTHER_ALPHA,
+        ),
         // MODULATE and the rest.
         _ => (api::COMBINE_FUNCTION_SCALE_OTHER, api::COMBINE_FACTOR_LOCAL),
     }
@@ -561,7 +570,8 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
             return (scale, COMBINE_FACTOR_ONE, it, other_of(arg));
         }
         if !any_texture {
-            if (arg_is_factor(a1) || arg_is_factor(a2)) && matches!(op, TOP_MODULATE | TOP_ADD | 10)
+            if (arg_is_factor(a1) || arg_is_factor(a2))
+                && matches!(op, TOP_MODULATE | TOP_ADD | TOP_SUBTRACT)
             {
                 // The diffuse color and the texture factor, or the factor
                 // twice: the first argument is the other color and the
@@ -569,7 +579,7 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
                 // the second.
                 let (f, factor) = match op {
                     TOP_ADD => (COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL, COMBINE_FACTOR_ONE),
-                    10 => (COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL, COMBINE_FACTOR_ONE),
+                    TOP_SUBTRACT => (COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL, COMBINE_FACTOR_ONE),
                     _ => (scale, COMBINE_FACTOR_LOCAL),
                 };
                 return (f, factor, local_of(a2), other_of(a1));
@@ -587,14 +597,15 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
                 other_tex,
             ),
             // SUBTRACT: the texture less the diffuse color.
-            10 => (
+            TOP_SUBTRACT => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL,
                 COMBINE_FACTOR_ONE,
                 local_of(rest),
                 other_tex,
             ),
-            // BLENDDIFFUSEALPHA.
-            12 => (
+            // BLENDDIFFUSEALPHA, and BLENDCURRENTALPHA, whose current
+            // color is the diffuse one on stage 0.
+            TOP_BLENDDIFFUSEALPHA | TOP_BLENDCURRENTALPHA => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
                 COMBINE_FACTOR_LOCAL_ALPHA,
                 local_of(rest),
@@ -668,9 +679,44 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
     api::alpha_combine(cpu, f, factor, local, other, false);
 }
 
+/// The stage operations (D3DTOP_) the HAL draws: the device
+/// descriptions' TextureOpCaps (`OP_CAPS`), and what ValidateDevice
+/// accepts. They are the ones of 3dfx's Voodoo3 driver (its
+/// TextureOpCaps are 0x1EFA5F) that `fbi_combine` has a function for.
+/// MODULATE2X and 4X aren't among them, though 3dfx's driver reports
+/// MODULATE2X: the card's combine units have no doubling, and the HAL
+/// draws them as MODULATE (#488). SUBTRACT and the blends take the
+/// texture as their first argument. On stage 1 `tmu_function` draws
+/// SUBTRACT and BLENDDIFFUSEALPHA as MODULATE: the texture unit can't
+/// take its texture less the other one, and has no diffuse alpha (#491).
+pub const OPS: [u32; 9] = [
+    TOP_DISABLE,
+    TOP_SELECTARG1,
+    TOP_SELECTARG2,
+    TOP_MODULATE,
+    TOP_ADD,
+    TOP_SUBTRACT,
+    TOP_BLENDDIFFUSEALPHA,
+    TOP_BLENDTEXTUREALPHA,
+    TOP_BLENDCURRENTALPHA,
+];
+
+/// `OPS` as D3DTEXTUREOPCAPS_ (Direct3D 6 and 7) and D3DTEXOPCAPS_
+/// (Direct3D 8), which have the same bits: D3DTOP_ value n is bit
+/// n - 1.
+pub const OP_CAPS: u32 = {
+    let mut caps = 0;
+    let mut i = 0;
+    while i < OPS.len() {
+        caps |= 1 << (OPS[i] - 1);
+        i += 1;
+    }
+    caps
+};
+
 /// Whether the card can do a stage's operation, for ValidateDevice.
 pub fn can_do(op: u32) -> bool {
-    matches!(op, 1..=7 | 10 | 12 | 13)
+    OPS.contains(&op)
 }
 
 /// The W of fog table entry `i`, as Glide's utility library has it.

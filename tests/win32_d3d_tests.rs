@@ -1085,10 +1085,13 @@ const DEV7_DRAW_PRIMITIVE: u32 = 25;
 const DEV7_SET_TEXTURE: u32 = 35;
 const DEV7_SET_TEXTURE_STAGE_STATE: u32 = 37;
 const DDCKEY_SRCBLT: u32 = 8;
+const TSS_COLOROP: u32 = 1;
 const TSS_ALPHAOP: u32 = 4;
 const TOP_SELECTARG2: u32 = 3;
 const TOP_SELECTARG1: u32 = 2;
 const TOP_ADD: u32 = 7;
+const TOP_BLENDDIFFUSEALPHA: u32 = 12;
+const TOP_BLENDCURRENTALPHA: u32 = 16;
 const TSS_ALPHAARG1: u32 = 5;
 const TA_TFACTOR: u32 = 3;
 
@@ -1724,6 +1727,31 @@ fn a_textured_quad_shows_its_texels() {
     // The last column and row are the quad's too.
     assert_rgb(&p, 63, 0, [0, 255, 0], 8);
     assert_rgb(&p, 63, 63, [255, 255, 255], 8);
+}
+
+#[test]
+fn blending_by_the_current_alpha_on_stage_0_blends_by_the_diffuse_alpha() {
+    // White and blue halves, on a red quad with a diffuse alpha of 0x40:
+    // a quarter of the texture and three quarters of the red, with
+    // BLENDDIFFUSEALPHA and with BLENDCURRENTALPHA, whose current color
+    // on stage 0 is the diffuse one.
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0xFFFF } else { 0x001F });
+    for op in [TOP_BLENDDIFFUSEALPHA, TOP_BLENDCURRENTALPHA] {
+        let scene = Scene {
+            api: Api::D3D7,
+            card: None,
+            clear: 0,
+            zbuffer: None,
+            texture: Some(texels),
+            steps: vec![
+                Step::Stage(TSS_COLOROP, op),
+                Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_0000)),
+            ],
+        };
+        let p = draw_scene(&format!("blend_alpha{op}"), &scene);
+        assert_rgb(&p, 16, 32, [255, 64, 64], 8);
+        assert_rgb(&p, 48, 32, [191, 0, 64], 8);
+    }
 }
 
 #[test]
