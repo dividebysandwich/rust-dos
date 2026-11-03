@@ -161,6 +161,18 @@ pub struct Tmu {
 /// The pages `Tmu::page_writes` counts in.
 pub const PAGE_SHIFT: u32 = 12;
 
+/// The level of detail (8.8) of a triangle without perspective, from its
+/// gradients of S and T (16.32) across and down the screen: log2 of the
+/// longer of the two moves.
+pub fn lodbase([dsdx, dtdx, dsdy, dtdy]: [i64; 4]) -> i32 {
+    let sq = |d: i64| (d >> 14).wrapping_mul(d >> 14);
+    let texdx = sq(dsdx).wrapping_add(sq(dtdx));
+    let texdy = sq(dsdy).wrapping_add(sq(dtdy));
+    let texd = texdx.max(texdy) >> 16;
+    let (_, lodbase) = tables().reciplog(texd);
+    (-lodbase + (12 << 8)) / 2
+}
+
 crate::state_fields!(Tmu {
     starts, startt, startw, dsdx, dtdx, dwdx, dsdy, dtdy, dwdy, ncc, palette,
 } skip {
@@ -416,8 +428,10 @@ impl Tmu {
     }
 
     /// Get ready to draw a triangle with this texture: its layout and NCC
-    /// colours up to date, and the base level of detail from how fast S
-    /// and T change across the screen (`prepare_tmu`).
+    /// colours up to date, and the level of detail without perspective
+    /// (8.8), log2 of how many texels S and T move a pixel across or down,
+    /// whichever is more (`prepare_tmu`). In perspective the level comes
+    /// from each pixel's own footprint (`raster::footprint`).
     pub fn prepare(&mut self, reg: &[u32]) -> i32 {
         if self.regdirty {
             self.recompute(reg);
@@ -426,12 +440,7 @@ impl Tmu {
         if (mode >> 8) & 7 == 1 {
             self.ncc[((mode >> 5) & 1) as usize].update();
         }
-        let sq = |d: i64| (d >> 14).wrapping_mul(d >> 14);
-        let texdx = sq(self.dsdx).wrapping_add(sq(self.dtdx));
-        let texdy = sq(self.dsdy).wrapping_add(sq(self.dtdy));
-        let texd = texdx.max(texdy) >> 16;
-        let (_, lodbase) = tables().reciplog(texd);
-        (-lodbase + (12 << 8)) / 2
+        lodbase([self.dsdx, self.dtdx, self.dsdy, self.dtdy])
     }
 
     /// The host wrote `data` to the texture RAM at dword `offset` of the

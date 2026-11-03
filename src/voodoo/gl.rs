@@ -703,6 +703,10 @@ impl VoodooGl {
             (3, "a_tex0"),
             (4, "a_tex1"),
             (5, "a_lod"),
+            (6, "a_dx0"),
+            (7, "a_dy0"),
+            (8, "a_dx1"),
+            (9, "a_dy1"),
         ];
         let triangle: Program<Triangle> =
             compile(gl, glsl, TRIANGLE_VERT, TRIANGLE_FRAG, &attributes)?;
@@ -733,13 +737,19 @@ impl VoodooGl {
             let stride = std::mem::size_of::<Vertex>() as i32;
             // Each attribute where its field of `Vertex` is.
             let tex = std::mem::offset_of!(Vertex, tex);
+            let grad = std::mem::offset_of!(Vertex, grad);
+            let vec3 = std::mem::size_of::<[f32; 3]>();
             for (index, size, offset) in [
                 (0, 2, std::mem::offset_of!(Vertex, pos)),
                 (1, 4, std::mem::offset_of!(Vertex, color)),
                 (2, 2, std::mem::offset_of!(Vertex, zw)),
                 (3, 3, tex),
-                (4, 3, tex + std::mem::size_of::<[f32; 3]>()),
+                (4, 3, tex + vec3),
                 (5, 2, std::mem::offset_of!(Vertex, lod)),
+                (6, 3, grad),
+                (7, 3, grad + vec3),
+                (8, 3, grad + 2 * vec3),
+                (9, 3, grad + 3 * vec3),
             ] {
                 let offset = offset as i32;
                 gl.enable_vertex_attrib_array(index);
@@ -2900,6 +2910,20 @@ mod tests {
         [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2]
     }
 
+    /// The software rasterizer's picture on `dither_card`, through frame
+    /// buffer reads of the front buffer, which see everything drawn.
+    fn software_picture(bus: &mut crate::bus::Bus) -> Vec<u16> {
+        w(bus, 0x114, 0);
+        let mut software = Vec::with_capacity(640 * 480);
+        for y in 0..480 {
+            for x in (0..640).step_by(2) {
+                let pair = bus.read_32(BASE + 0x40_0000 + y * 2048 + x * 2);
+                software.extend([pair as u16, (pair >> 16) as u16]);
+            }
+        }
+        software
+    }
+
     /// What the software rasterizer and OpenGL at `scale` (with dithering
     /// `on`) draw of what `draw` draws on `dither_card`: the card's
     /// 640x480 pixels, and the buffer's RGB, rows from the top.
@@ -2916,16 +2940,7 @@ mod tests {
         draw(&mut bus);
         let card = bus.voodoo.as_mut().unwrap();
         let recording = card.take_mirror().unwrap();
-        // The software picture through frame buffer reads of the front
-        // buffer, which see everything drawn.
-        w(&mut bus, 0x114, 0);
-        let mut software = Vec::with_capacity(640 * 480);
-        for y in 0..480 {
-            for x in (0..640).step_by(2) {
-                let pair = bus.read_32(BASE + 0x40_0000 + y * 2048 + x * 2);
-                software.extend([pair as u16, (pair >> 16) as u16]);
-            }
-        }
+        let software = software_picture(&mut bus);
         let mut renderer = VoodooGl::new(gl, Glsl::Gl150, scale, 1, 1).unwrap();
         renderer.set_dither(on);
         renderer.run(gl, resync);
@@ -3048,7 +3063,8 @@ mod tests {
     /// pixel across and down where W is 1, at the top, and W falling to
     /// about 0.1 at the bottom, with S and T `shift` level 0 texels from
     /// where they start. A shift changes the gradients of S/W and T/W by
-    /// `shift` times W's, and with them the card's level of detail.
+    /// `shift` times W's, but not the texels a pixel covers, so the card's
+    /// levels of detail stay as they are.
     fn draw_floor(bus: &mut crate::bus::Bus, fbz: u32, shift: f32) {
         w(bus, 0x110, (1 << 9) | fbz);
         // The texture's colour and alpha, with texturing on.
@@ -3094,6 +3110,24 @@ mod tests {
             .count()
     }
 
+    /// The card draws `draw_floor` 3072 texels from 0 from the levels it
+    /// draws it from near 0. 3072 texels is a whole number of every level's
+    /// size, so a pixel changes by a step of the bilinear blend where the
+    /// fixed point rounds the other way, not by a level's colour. Through
+    /// the registers, `Tmu::prepare` and the rasterizer, without OpenGL.
+    #[test]
+    fn floor_levels_stay_the_same_far_from_0() {
+        let picture = |shift: f32| {
+            let mut bus = dither_card();
+            mipmapped_texture(&mut bus, 1 | 2 | 4, LEVELS);
+            draw_floor(&mut bus, 1 << 8, shift);
+            software_picture(&mut bus)
+        };
+        let far: Vec<[u8; 3]> = picture(3072.0).into_iter().map(widen).collect();
+        let moved = far_apart(&picture(0.0), &far);
+        assert_eq!(moved, 0, "pixels that change levels 3072 texels away");
+    }
+
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
     fn mipmap_levels_are_the_cards() {
@@ -3106,9 +3140,10 @@ mod tests {
         let (bilinear, point, clamped) = (1 | 2 | 4, 1, 1 | 2 | 4 | 0x40 | 0x80);
         let (bias, even, odd) = (LEVELS | (4 << 12), LEVELS | (1 << 19), LEVELS | (3 << 18));
         let crossed = 24 | (16 << 6);
-        // Near 0 and with coordinates thousands of texels away, where the
-        // card's level comes out higher than the texels on the screen ask
-        // for; and with the dithered level of detail (textureMode bit 4).
+        // Near 0 and with coordinates thousands of texels away, where W
+        // times the gradients of S/W and T/W nearly cancels S/W and T/W
+        // times W's in each pixel's footprint; and with the dithered level
+        // of detail (textureMode bit 4).
         let mut results = Vec::new();
         for (shift, mode, lod, what) in [
             (0.0, bilinear, LEVELS, "near 0"),
