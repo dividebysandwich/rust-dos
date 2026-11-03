@@ -87,19 +87,8 @@ fn prim_caps() -> [u32; 13] {
     ]
 }
 
-/// D3DTEXTUREOPCAPS_: the operations the HAL draws (`hal::OPS`), each
-/// D3DTOP_ value n as bit n - 1.
-const TEXTURE_OPS: u32 = op_caps(&super::hal::OPS);
-
-const fn op_caps(ops: &[u32]) -> u32 {
-    let mut caps = 0;
-    let mut i = 0;
-    while i < ops.len() {
-        caps |= 1 << (ops[i] - 1);
-        i += 1;
-    }
-    caps
-}
+/// D3DTEXTUREOPCAPS_: the operations the HAL draws (`hal::OPS`).
+const TEXTURE_OPS: u32 = super::hal::OP_CAPS;
 
 /// DDBD_16, and DDBD_24 and DDBD_32 on a Banshee or Voodoo3: the
 /// render target's and depth buffer's depths. The card draws 16 bits;
