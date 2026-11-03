@@ -227,27 +227,41 @@ fn keep_mask(s: &Surface) -> u32 {
 
 /// The surface into its shadow at `at`: each channel's top 5, 6 and 5
 /// bits, or depth's top 16.
+///
+/// The shadow is written, and read in `store`, in one go. With
+/// `voodoo_readback=gpu` it is a 3D buffer that the OpenGL renderer may
+/// have drawn alone, and each access to its rows waits for the renderer
+/// and reads back the rows it covers: the whole shadow at once waits
+/// once, where a row at a time would wait 600 times for Giants' frame.
 fn load(cpu: &mut Cpu, s: &Surface, at: u32) {
     let bpp = s.bytes_per_pixel() as usize;
-    let mut row = vec![0u8; s.width as usize * bpp];
-    let mut out = vec![0u8; s.width as usize * 2];
-    for y in 0..s.height {
+    let width = s.width as usize;
+    if width == 0 {
+        return;
+    }
+    let mut row = vec![0u8; width * bpp];
+    let mut shadow = vec![0u8; width * 2 * s.height as usize];
+    for (y, out) in (0..s.height).zip(shadow.chunks_exact_mut(width * 2)) {
         surface::read_bytes(cpu, s, y * s.pitch, &mut row);
         for (px, o) in row.chunks(bpp).zip(out.chunks_mut(2)) {
             o.copy_from_slice(&narrow(s, get(px)).to_le_bytes());
         }
-        screen::write(cpu, at + y * s.width * 2, &out);
     }
+    screen::write(cpu, at, &shadow);
 }
 
 /// The shadow at `at` into the surface, its values widened.
 fn store(cpu: &mut Cpu, s: &Surface, at: u32) {
     let bpp = s.bytes_per_pixel() as usize;
     let mask = keep_mask(s);
-    let mut row = vec![0u8; s.width as usize * bpp];
-    let mut shadow_row = vec![0u8; s.width as usize * 2];
-    for y in 0..s.height {
-        screen::read(cpu, at + y * s.width * 2, &mut shadow_row);
+    let width = s.width as usize;
+    if width == 0 {
+        return;
+    }
+    let mut row = vec![0u8; width * bpp];
+    let mut shadow = vec![0u8; width * 2 * s.height as usize];
+    screen::read(cpu, at, &mut shadow);
+    for (y, shadow_row) in (0..s.height).zip(shadow.chunks_exact(width * 2)) {
         surface::read_bytes(cpu, s, y * s.pitch, &mut row);
         for (px, v) in row.chunks_mut(bpp).zip(shadow_row.chunks(2)) {
             // A pixel whose 16 bits the card left as they were keeps its
@@ -367,5 +381,47 @@ mod tests {
         assert_eq!(widen_bits(0x10, 5, 8), 0x84);
         assert_eq!(widen_bits(0xFFFF, 16, 24), 0xFF_FFFF);
         assert_eq!(widen_bits(0x8000, 16, 24), 0x80_0080);
+    }
+
+    #[test]
+    fn a_shadow_only_the_renderer_drew_is_read_back_at_once() {
+        // Giants draws into a 32-bit render target, so the card draws
+        // into its 16-bit shadow, which with `voodoo_readback=gpu` only
+        // the OpenGL renderer has. Storing it into the surface asks the
+        // renderer for all its rows in one read: a read for each row
+        // waited for the renderer 600 times a frame.
+        use crate::voodoo::banshee::render3d::tests::{A, gpu_frame_in_linear_buffer};
+        use crate::win32::ddraw::Format;
+        let log = std::rc::Rc::default();
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.voodoo = Some(gpu_frame_in_linear_buffer(&log));
+        let s = Surface {
+            width: 640,
+            height: 64,
+            pitch: 640 * 4,
+            format: Format {
+                bits: 32,
+                r: 0xFF_0000,
+                g: 0xFF00,
+                b: 0xFF,
+                ..Format::default()
+            },
+            memory: MEM_VIDEO,
+            bits: 0x60_0000,
+            ..Surface::default()
+        };
+        store(&mut cpu, &s, A);
+        let reads: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .cloned()
+            .collect();
+        assert_eq!(reads, [format!("read Some({}) 0..64", A / 2)]);
+        for y in [0, 63] {
+            let mut px = [0u8; 4];
+            surface::read_bytes(&mut cpu, &s, y * s.pitch + 4 * 639, &mut px);
+            assert_eq!(u32::from_le_bytes(px), widen(&s, 0x1234), "row {y}");
+        }
     }
 }

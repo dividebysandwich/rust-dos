@@ -363,7 +363,7 @@ impl Voodoo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::super::Board;
     use super::super::{MISC_INIT0, VID_CURR_OVERLAY_START_ADDR};
     use super::*;
@@ -911,7 +911,7 @@ mod tests {
     /// Two colour buffers of 640 by 64 in tiles, and a depth buffer. The
     /// renderer (`TestRenderer`) drew both in 0x1234, as their word
     /// offsets end in 16 zero bits.
-    const A: u32 = 0x10_0000;
+    pub(crate) const A: u32 = 0x10_0000;
     const B: u32 = 0x20_0000;
 
     /// A card whose 3D buffers are read back from the renderer
@@ -930,6 +930,17 @@ mod tests {
         reg3d(&mut v, CLIP_LEFT_RIGHT, 640);
         reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 64);
         reg3d(&mut v, ZA_COLOR, 0xFFFF);
+        v
+    }
+
+    /// For tests elsewhere: a card whose renderer (`TestRenderer`, which
+    /// notes its reads in `log`) alone drew a frame of 640 by 64 into a
+    /// linear colour buffer at byte `A`, 1280 bytes a row, in 0x1234.
+    pub(crate) fn gpu_frame_in_linear_buffer(log: &Rc<RefCell<Vec<String>>>) -> Voodoo {
+        let mut v = gpu_card(Some(log));
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut v, A);
         v
     }
 
