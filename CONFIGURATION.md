@@ -777,8 +777,11 @@ programs set.
   `1024` or `2048`, and `prebuffer` the queue kept on top of it for a
   video frame that comes late, in milliseconds: `5`, `10`, `15`, `20`
   (the default), `25`, `30`, `40` or `50`. Smaller values bring the
-  sound sooner; if it crackles, the host can't keep up with them. Only
-  the rust-dos program has them: the libretro core and the browser leave
+  sound sooner; if it crackles, the host can't keep up with them. When
+  the host holds the emulator up long enough to run the device dry,
+  the queue is kept 10 ms longer from then on, up to 60 ms more, and it
+  comes back down by 5 ms after each minute without a gap. Only the
+  rust-dos program has them: the libretro core and the browser leave
   the buffering to the frontend.
 * The `MIXER` command shows the mixer and changes it at the prompt, or
   from `[autoexec]`, in DOSBox Staging's syntax:

@@ -20,6 +20,7 @@ fn audio_json(cpu: &Cpu) -> Value {
         "underruns": cpu.bus.audio_underruns,
         "frames": cpu.bus.audio_frames(),
         "queued_frames": cpu.bus.audio_device.as_ref().map_or(0, |d| d.queued_frames()),
+        "queue_growth_frames": cpu.bus.audio_feed.extra_frames(),
         "sound_blaster": cpu.bus.sb_blaster(),
         "opl3": cpu.bus.opl.is_opl3(),
         "ultrasound": cpu.bus.gus.as_ref().map(|gus| gus.config.ultrasnd()),
