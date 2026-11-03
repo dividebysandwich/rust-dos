@@ -43,8 +43,7 @@ Usage: MOUNT drive directory|archive [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
        MOUNT drive DIR -t overlay\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                          [-chs C,H,S] [-size 512,S,H,C] [-overlay DIR|-inplace]\r
-       MOUNT number image [image ...] [-chs C,H,S] [-ro]\r
-                          [-overlay DIR|-inplace]\r
+       MOUNT number image [image ...] [-chs C,H,S] [-ro] [-overlay DIR]\r
        MOUNT -u drive\r
        MOUNT             lists the drives\r
 An image can be on a mounted drive (C:\\GAME\\CD.CUE), and a wildcard\r
@@ -58,10 +57,9 @@ starts, once the drives are saved. A booted system has a directory on D:\r
 and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
 back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
 -overlay DIR leaves the directory or image as it is: changes go to DIR, an\r
-image's to IMAGE.rdelta (-t overlay: to the drive mounted). Without it, a\r
-hard disk image's changes go to IMAGE.rdelta beside it, which COMMIT writes\r
-into the image; -inplace writes the image itself. A zip or 7z is a drive of\r
-its files or the disk or CD image in it; without -overlay, read-only.\r
+image's to IMAGE.rdelta (-t overlay: the drive mounted). Without it, a hard\r
+disk image's go to IMAGE.rdelta beside it; COMMIT or -inplace write the image.\r
+A zip or 7z mounts its files or disk or CD image, read-only without -overlay.\r
 IMGMOUNT is the same command.\r
 ";
 
@@ -619,6 +617,15 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mistake's message and the usage after it fit on the 80 by 25
+    /// screen with the prompt, so the message doesn't scroll away.
+    #[test]
+    fn the_usage_fits_on_the_screen_under_a_message() {
+        let lines: Vec<&str> = MOUNT_USAGE.split("\r\n").filter(|l| !l.is_empty()).collect();
+        assert!(lines.len() <= 23, "{} lines", lines.len());
+        assert!(lines.iter().all(|l| l.len() < 80), "{:?}", lines);
+    }
 
     fn toks(s: &str) -> Vec<String> {
         tokenize(s).unwrap()
