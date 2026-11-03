@@ -114,7 +114,9 @@ crate::state_fields!(Hal {
 enum Undrawn {
     /// Another process has Glide open.
     Glide,
-    /// The render target isn't one the card can draw into.
+    /// The render target isn't one the card can draw into: gone, not
+    /// in its memory, or on an add-on card not a color buffer of the
+    /// mode this process set.
     Target,
     /// The 24 or 32-bit render target's shadow has no room.
     TargetShadow,
@@ -138,8 +140,8 @@ fn undrawn(cpu: &mut Cpu, why: Undrawn, id: u32) {
     let what = match why {
         Undrawn::Glide => "another process has Glide open: draws are not drawn".to_string(),
         Undrawn::Target => format!(
-            "the render target ({w}x{h}, {bits} bits) isn't in the card's memory: \
-             draws into it are not drawn"
+            "the render target ({w}x{h}, {bits} bits) isn't one the card can draw \
+             into: draws into it are not drawn"
         ),
         Undrawn::TargetShadow => format!(
             "no video memory for the 16-bit shadow of a {w}x{h} {bits}-bit render \
@@ -213,7 +215,8 @@ enum Specular {
 
 /// Whether the device `d` can be drawn by the card now, and the card's
 /// state for it: None draws nothing (no card, the render target isn't
-/// in its memory, or another process has Glide open).
+/// in its memory or its shadow has no room, or another process has
+/// Glide open), and `undrawn` logs why.
 pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let banshee = hw::banshee(cpu);
     let pid = current_pid(cpu);
@@ -222,7 +225,10 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         undrawn(cpu, Undrawn::Glide, d.target);
         return None;
     }
-    let (width, height) = state(cpu).surface(d.target).map(|s| (s.width, s.height))?;
+    let Some((width, height)) = state(cpu).surface(d.target).map(|s| (s.width, s.height)) else {
+        undrawn(cpu, Undrawn::Target, d.target);
+        return None;
+    };
     if banshee {
         // A 24- or 32-bit target is drawn in its 16-bit shadow.
         let (target_at, target_pitch) = match super::shadow::place(cpu, d.target) {
@@ -326,24 +332,30 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     api::hints(cpu, api::HINT_STWHINT, hint);
 
     // Depth: the render target's depth buffer, Z or W. On an add-on card
-    // it is the auxiliary buffer.
+    // it is the auxiliary buffer. A shadow is ahead of its surface only
+    // when the card writes depth into it.
     let z = super::device::depth_buffer(cpu, d).and_then(|z| {
-        if banshee {
-            let place = super::shadow::place(cpu, z);
-            super::shadow::drawn(cpu, z);
-            if let Err(why) = place
-                && zenable != 0
-            {
+        let place = if banshee {
+            super::shadow::place(cpu, z).map(Some)
+        } else if voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER) {
+            Ok(None)
+        } else {
+            Err(Unplaced::Gone)
+        };
+        match place {
+            Ok(_) if zenable != 0 && d.state(RS_ZWRITEENABLE) != 0 => {
+                super::shadow::drawn(cpu, z);
+            }
+            Err(why) if zenable != 0 => {
                 let why = match why {
                     Unplaced::Gone => Undrawn::Depth,
                     Unplaced::NoRoom => Undrawn::DepthShadow,
                 };
                 undrawn(cpu, why, z);
             }
-            place.ok().map(Some)
-        } else {
-            (voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER)).then_some(None)
+            _ => {}
         }
+        place.ok()
     });
     match z {
         Some(place) if zenable != 0 => {
