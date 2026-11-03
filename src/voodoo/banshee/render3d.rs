@@ -1070,7 +1070,7 @@ pub(crate) mod tests {
         let mut v = gpu_card(Some(&log));
         assert!(textured(&mut v).is_some());
         draw_frame(&mut v, A);
-        v.banshee_2d_write(0x08, 0);
+        blit_2d(&mut v, true, (0, 0), (8, 1));
         assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
         let texel = textured(&mut v);
         assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
@@ -1191,19 +1191,160 @@ pub(crate) mod tests {
         assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
     }
 
+    /// Where `blit_2d` copies to: a linear surface of 16-bit pixels,
+    /// 1280 bytes a row.
+    const DESKTOP: u32 = 0x60_0000;
+
+    /// A screen to screen copy by the 2D engine of `size` 16-bit pixels
+    /// from (`from`) of A, in tiles if `tiled` (as `gpu_card` has it),
+    /// else 1280 bytes a row, to (0, 0) of `DESKTOP`.
+    fn blit_2d(v: &mut Voodoo, tiled: bool, from: (u32, u32), size: (u32, u32)) {
+        let src = if tiled {
+            (A | 1 << 31, 3 << 16 | 10)
+        } else {
+            (A, 3 << 16 | 1280)
+        };
+        for (reg, value) in [
+            (0x08, 0),
+            (0x0C, 0x0FFF_0FFF),
+            (0x10, DESKTOP),
+            (0x14, 3 << 16 | 1280),
+            (0x34, src.0),
+            (0x54, src.1),
+            (0x5C, from.1 << 16 | from.0),
+            (0x68, size.1 << 16 | size.0),
+            (0x6C, 0),
+            (0x70, 0xCC << 24 | 1 << 8 | 1),
+        ] {
+            v.banshee_2d_write(reg, value);
+        }
+    }
+
+    /// Pixel (`x`, `y`) of `DESKTOP`.
+    fn desktop(v: &Voodoo, x: u32, y: u32) -> u16 {
+        v.fbi.ram.get(((DESKTOP + y * 1280) / 2 + x) as usize)
+    }
+
     #[test]
-    fn gpu_reads_bring_the_3d_back_before_the_2d_engine_runs() {
-        // The 2D engine may read anything: what the renderer drew comes
-        // back first, as for its own 2D operations.
+    fn gpu_reads_2d_register_writes_that_run_no_command_read_nothing_back() {
+        // The 2D engine reads and draws only when a command runs: the
+        // registers set up before then leave the renderer's buffers on
+        // the GPU.
         let log = Rc::default();
         let mut v = gpu_card(Some(&log));
         draw_frame(&mut v, A);
-        v.banshee_2d_write(0x08, 0);
-        assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
-        assert_eq!(v.fbi.ram.get(0x40_0000 / 2), 0x7777);
-        let n = reads(&log).len();
-        v.banshee_2d_write(0x08, 0);
-        assert_eq!(reads(&log).len(), n, "read back once");
+        for (reg, value) in [
+            (0x08, 0),
+            (0x0C, 0x0FFF_0FFF),
+            (0x10, A),
+            (0x14, 3 << 16 | 1280),
+            (0x64, 0xF800),
+            (0x68, 4 << 16 | 4),
+            (0x6C, 0),
+            // A fill without the initiate bit, and a host to screen blit
+            // still waiting for its data.
+            (0x70, 0xCC << 24 | 5),
+            (0x70, 0xCC << 24 | 1 << 8 | 3),
+        ] {
+            v.banshee_2d_write(reg, value);
+        }
+        assert!(reads(&log).is_empty(), "{:?}", log.borrow());
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0, "the memory waits");
+    }
+
+    #[test]
+    fn gpu_reads_bring_back_the_rows_a_blit_reads() {
+        // A blit from a buffer only the renderer drew: the rows it reads
+        // come back first, the band of 32 rows they are in for a tiled
+        // buffer, and the depth buffer stays on the GPU. Read back, the
+        // rows are the memory's, and the same blit again reads nothing.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        draw_frame(&mut v, A);
+        blit_2d(&mut v, true, (0, 0), (8, 1));
+        assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
+        assert_eq!(desktop(&v, 7, 0), 0x1234);
+        assert_eq!(v.fbi.ram.get(0x40_0000 / 2), 0, "the depth waits");
+        blit_2d(&mut v, true, (0, 0), (8, 1));
+        assert_eq!(reads(&log).len(), 1, "read back once");
+    }
+
+    #[test]
+    fn gpu_reads_a_blit_reads_back_only_its_rectangle() {
+        // In a linear buffer the rows are read back one by one: a copy of
+        // 100 by 4 pixels from (20, 10) reads rows 10 to 13 and no other,
+        // and copies the renderer's pixels.
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        blit_2d(&mut v, false, (20, 10), (100, 4));
+        assert_eq!(reads(&log), [format!("read {:?} 10..14", Some(A / 2))]);
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+        assert_eq!(desktop(&v, 0, 0), 0x1234);
+        assert_eq!(desktop(&v, 99, 3), 0x1234);
+        assert_eq!(desktop(&v, 100, 3), 0, "past the rectangle");
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0, "row 0 waits");
+    }
+
+    #[test]
+    fn gpu_reads_a_buffer_blitted_from_every_frame_is_drawn_in_software() {
+        // A windowed game copies its back buffer to the desktop with the
+        // 2D engine every frame. The rows the copy reads back are hot, as
+        // a program's reads are: the next frame into the buffer is drawn
+        // in software, and its copy reads nothing back. The desktop gets
+        // what the software path draws.
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        assert_eq!(gpu_only(&v), 3);
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        assert_eq!(desktop(&v, 639, 63), 0x1234);
+        draw_frame(&mut v, A);
+        assert_eq!(gpu_only(&v), 3, "the second frame is drawn in software");
+        log.borrow_mut().clear();
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        let buffer = format!("read {:?}", Some(A / 2));
+        assert!(
+            !reads(&log).iter().any(|l| l.starts_with(&buffer)),
+            "{:?}",
+            log.borrow()
+        );
+        let mut sw = gpu_card(None);
+        reg3d(&mut sw, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut sw, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut sw, A);
+        blit_2d(&mut sw, false, (0, 0), (640, 64));
+        for (x, y) in [(0, 0), (320, 30), (639, 63)] {
+            assert_eq!(desktop(&v, x, y), desktop(&sw, x, y), "pixel {x} {y}");
+        }
+    }
+
+    #[test]
+    fn gpu_reads_a_2d_fill_into_a_buffer_on_the_gpu_stays() {
+        // A fill by the 2D engine into rows of a buffer only the renderer
+        // drew: those rows come back first and the fill goes over them.
+        // The renderer hears of the fill, and the rows aren't behind it
+        // any more: reading back the rest of the buffer later leaves the
+        // fill where it is.
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        for (reg, value) in [
+            (0x08, 0),
+            (0x0C, 0x0FFF_0FFF),
+            (0x10, A),
+            (0x14, 3 << 16 | 1280),
+            (0x64, 0xF800),
+            (0x68, 2 << 16 | 8),
+            (0x6C, 0),
+            (0x70, 0xCC << 24 | 1 << 8 | 5),
+        ] {
+            v.banshee_2d_write(reg, value);
+        }
+        assert_eq!(reads(&log), [format!("read {:?} 0..2", Some(A / 2))]);
+        let memory = v.frame_buffer();
+        let row = 640;
+        assert_eq!(memory.get(A as usize / 2 + 7), 0xF800);
+        assert_eq!(memory.get(A as usize / 2 + row + 7), 0xF800);
+        assert_eq!(memory.get(A as usize / 2 + 8), 0x1234);
+        assert_eq!(memory.get(A as usize / 2 + 2 * row), 0x1234);
     }
 
     #[test]

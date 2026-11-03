@@ -36,6 +36,7 @@ pub mod fifo;
 pub mod render3d;
 
 use super::{Effect, Now, Voodoo};
+use blit2d::Footprint;
 use crate::video::crt::Extension;
 use std::collections::VecDeque;
 
@@ -879,12 +880,29 @@ impl Voodoo {
     }
 
     /// A 2D register written: the engine runs commands into the memory.
+    /// The bytes a command reads and draws into are brought up to date
+    /// first, as for a program's read: the drawing queued before is done,
+    /// and what only the GPU has there is read back and turns hot, so
+    /// that a buffer of the 3D engine's blitted from every frame is drawn
+    /// in software, as one the program reads every frame is.
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
-        if self.writes_queue() {
-            self.catch_up();
+        let Some(b) = &self.banshee else { return };
+        if self.writes_queue() || self.gpu.borrow().tracker.any_gpu() {
+            let size = self.fbi.ram.bytes() as u32;
+            let footprint = b.engine.footprint(reg, data, size);
+            if footprint != Footprint::Nothing && self.workers_queue() {
+                self.catch_up_workers();
+            }
+            match footprint {
+                Footprint::Nothing => {}
+                Footprint::Spans(spans) => {
+                    for (start, end) in spans.into_iter().flatten() {
+                        self.gpu_sync(start, end);
+                    }
+                }
+                Footprint::All => self.gpu_sync(0, size),
+            }
         }
-        // The engine may read and draw anywhere in the memory.
-        self.gpu_sync_all();
         let Some(b) = &mut self.banshee else { return };
         b.engine.write(&self.fbi.ram, reg, data);
         if std::mem::take(&mut b.engine.drawn) {

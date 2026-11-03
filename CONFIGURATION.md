@@ -2535,23 +2535,25 @@ from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
 screenshot, the debugger) the rows it reads are read back from OpenGL,
 at the card's resolution and in its 16 bits a pixel. A read waits for
 the GPU, so a game that reads back every frame gains less; on a Banshee
-or Voodoo3 the triangles into memory a game read back in the last
-second or so are drawn in software instead, and a triangle that takes
-its texture from a buffer the 3D drew reads that buffer back first, so
-that it draws with OpenGL's picture at the card's resolution. The pixels
-a game reads differ in small ways from the card's: OpenGL draws a
-triangle's edges by its own rules and keeps more depth precision, and
-where nothing dithers (see below) a blended triangle blends with 8 bits
-a colour. What a game writes itself, its frame buffer writes and the
-blitter's copies, reads back as it wrote it. A save state keeps OpenGL's
-pixels too, so states of the same scene saved on two GPUs differ
-slightly in the card's memory, and in what the game did with pixels it
-read back. Such a state loads on any machine. A game that needs the
-card's exact pixels, or states that match byte for byte, can have
-`voodoo_readback=exact`. Programs that use alpha planes and
-deterministic runs always get the exact pixels, as do the pixel
-counters: drawing left to OpenGL isn't counted, and once a game reads
-the counters everything after is drawn in software and counted.
+or Voodoo3 the triangles into memory a game read back in the last second
+or so are drawn in software instead (the rows the 2D engine reads or
+draws into, and those the card shows from outside its 3D buffers, count
+as read), and a triangle that takes its texture from a buffer the 3D
+drew reads that buffer back first, so that it draws with OpenGL's
+picture at the card's resolution. The pixels a game reads differ in
+small ways from the card's: OpenGL draws a triangle's edges by its own
+rules and keeps more depth precision, and where nothing dithers (see
+below) a blended triangle blends with 8 bits a colour. What a game
+writes itself, its frame buffer writes and the blitter's copies, reads
+back as it wrote it. A save state keeps OpenGL's pixels too, so states
+of the same scene saved on two GPUs differ slightly in the card's
+memory, and in what the game did with pixels it read back. Such a state
+loads on any machine. A game that needs the card's exact pixels, or
+states that match byte for byte, can have `voodoo_readback=exact`.
+Programs that use alpha planes and deterministic runs always get the
+exact pixels, as do the pixel counters: drawing left to OpenGL isn't
+counted, and once a game reads the counters everything after is drawn in
+software and counted.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws

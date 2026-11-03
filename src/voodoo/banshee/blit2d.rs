@@ -1364,6 +1364,262 @@ impl Engine {
     }
 }
 
+/// The bytes of the card's memory a register write has the engine read
+/// or draw into (`Engine::footprint`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Footprint {
+    /// No byte: the write sets what the next command does, or runs one
+    /// that draws nothing.
+    Nothing,
+    /// Bytes within these ranges, which are within the memory: the
+    /// destination's, then the source's.
+    Spans([Option<(u32, u32)>; 2]),
+    /// Any byte: the command wraps at the memory's end, or its bytes
+    /// can't be bounded.
+    All,
+}
+
+/// The steps `0..n` from `start`, `dir` apart, that land within
+/// `lo..hi`: the first and the last, if any.
+fn steps_within(start: i64, n: i64, dir: i64, (lo, hi): (i64, i64)) -> Option<(i64, i64)> {
+    let (first, last) = if dir > 0 {
+        (lo - start, hi - 1 - start)
+    } else {
+        (start - (hi - 1), start - lo)
+    };
+    let (first, last) = (first.max(0), last.min(n - 1));
+    (first <= last).then_some((first, last))
+}
+
+/// The lowest and highest of steps `first..=last` from `start`, `dir`
+/// apart.
+fn positions(start: i64, dir: i64, (first, last): (i64, i64)) -> (i64, i64) {
+    let (a, b) = (start + dir * first, start + dir * last);
+    (a.min(b), a.max(b))
+}
+
+/// The bytes of a surface at `base`, `stride` bytes a row (a row of
+/// tiles if `tiled`), that bytes `x.0..=x.1` of rows `y.0..=y.1` and
+/// `width` bytes after each take, within a memory of `size` bytes: the
+/// engine's `addr`, with the bytes of a row in tiles too if `tile_x`.
+/// None if they wrap at the memory's end, or could.
+fn surface_span(
+    (base, stride, tiled): (u32, u32, bool),
+    tile_x: bool,
+    x: (i64, i64),
+    width: i64,
+    y: (i64, i64),
+    size: u32,
+) -> Option<(u32, u32)> {
+    let (base, stride) = (base as i64, stride as i64);
+    // The engine shifts negative rows of tiles, and the bytes of a row
+    // in tiles, as unsigned numbers.
+    if tiled && (y.0 < 0 || tile_x && x.0 < 0) {
+        return None;
+    }
+    let col = |x: i64| {
+        if tiled && tile_x {
+            (x & 127) + (x >> 7) * 128 * 32
+        } else {
+            x
+        }
+    };
+    // Rows within a row of tiles are 128 bytes apart, rows of tiles
+    // `stride` apart.
+    let (top, bottom) = if tiled {
+        ((y.0 >> 5) * stride, (y.1 >> 5) * stride + 31 * 128)
+    } else {
+        (y.0 * stride, y.1 * stride)
+    };
+    let (start, end) = (base + col(x.0) + top, base + col(x.1) + bottom + width);
+    (start >= 0 && end <= size as i64).then_some((start as u32, end as u32))
+}
+
+impl Engine {
+    /// The bytes of the card's memory that writing `val` to register
+    /// `addr` has the engine read or draw into, in a memory of `size`
+    /// bytes: none but for a write to `command` that runs a command or
+    /// one to the launch area. The bytes may be more than the command
+    /// touches, never fewer: those of the rows and columns of the
+    /// destination it draws within the clip, and of the source's that
+    /// it reads for them; the whole clip for a polygon.
+    pub fn footprint(&self, addr: u32, val: u32, size: u32) -> Footprint {
+        let launch = addr & 0x1FC != 0x70;
+        let command = match addr & 0x1FC {
+            0x70 if val & COMMAND_INITIATE != 0 => val,
+            0x80..=0xFC => self.command,
+            _ => return Footprint::Nothing,
+        };
+        let bytes: i64 = match self.dst_format & COL_MASK {
+            COL_8BPP => 1,
+            COL_16BPP => 2,
+            COL_24BPP => 3,
+            COL_32BPP => 4,
+            // The engine draws no pixel, and reads none for one.
+            _ => return Footprint::Nothing,
+        };
+        // Where the command starts: from the registers if it begins with
+        // this write (`launch`), else where the last write left it.
+        let pending = !launch || self.launch_pending;
+        let ((dst_x, dst_y), (src_x, src_y), cur_y) = if pending {
+            (xy(self.dst_xy), xy(self.src_xy), 0)
+        } else {
+            ((self.dst_x, self.dst_y), (self.src_x, self.src_y), self.cur_y)
+        };
+        let clip = self.clip[(command & COMMAND_CLIP_SEL != 0) as usize];
+        let clip_x = (clip.x_min as i64, clip.x_max as i64);
+        let clip_y = (clip.y_min as i64, clip.y_max as i64);
+        let dir_x = step(command & COMMAND_DX != 0) as i64;
+        let dir_y = step(command & COMMAND_DY != 0) as i64;
+        let (size_x, size_y) = (self.dst_size_x as i64, self.dst_size_y as i64);
+        let yuv = matches!(self.src_format & COL_MASK, COL_YUYV | COL_UYVY);
+        let dst_surface = (self.dst_base, self.dst_stride, self.dst_tiled);
+        let src_surface = |stride| (self.src_base, stride, self.src_tiled);
+        // Destination pixels `x` of rows `y`, first to last.
+        let dst = |x: (i64, i64), y: (i64, i64)| {
+            surface_span(dst_surface, true, (x.0 * bytes, x.1 * bytes), bytes, y, size)
+        };
+        // The source's bytes for pixels `x` of rows `y`: whole bytes of
+        // them, with the most a pixel's conversion reads after each.
+        let src = |stride, tile_x, x: (i64, i64), y: (i64, i64), same: bool| {
+            let (bpp, width) = if same {
+                (bytes * 8, bytes)
+            } else {
+                (self.src_bpp as i64, 4)
+            };
+            let x = ((x.0 * bpp) >> 3, (x.1 * bpp) >> 3);
+            surface_span(src_surface(stride), tile_x, x, width, y, size)
+        };
+        // A YUV source draws a pair of pixels for each it reads, the
+        // second one outside the clip too: the columns of the clip and
+        // one either side, as far as twice the width goes.
+        let yuv_columns = |x: i64, dir: i64, n: i64| {
+            let (a, b) = positions(x, dir, (0, 2 * n));
+            let (a, b) = (a.max(clip_x.0) - 1, b.min(clip_x.1 - 1) + 1);
+            (a <= b).then_some((a, b))
+        };
+        let same = self.src_format & COL_MASK == self.dst_format & COL_MASK;
+        let spans = match command & 0xF {
+            CMD_SCREEN_TO_SCREEN => {
+                let (src_x, src_y) = if launch { xy(val) } else { (src_x, src_y) };
+                let (dst_x, dst_y, src_x, src_y) =
+                    (dst_x as i64, dst_y as i64, src_x as i64, src_y as i64);
+                let Some(rows) = steps_within(dst_y, size_y, dir_y, clip_y) else {
+                    return Footprint::Nothing;
+                };
+                let (columns, src_columns) = if yuv {
+                    let Some(columns) = yuv_columns(dst_x, dir_x, size_x) else {
+                        return Footprint::Nothing;
+                    };
+                    if size_x <= 0 {
+                        return Footprint::Nothing;
+                    }
+                    (columns, positions(src_x, dir_x, (0, size_x - 1)))
+                } else {
+                    let Some(steps) = steps_within(dst_x, size_x, dir_x, clip_x) else {
+                        return Footprint::Nothing;
+                    };
+                    (
+                        positions(dst_x, dir_x, steps),
+                        positions(src_x, dir_x, steps),
+                    )
+                };
+                let src_rows = positions(src_y, dir_y, rows);
+                let stride = self.src_stride_dest;
+                [
+                    Some(dst(columns, positions(dst_y, dir_y, rows))),
+                    Some(src(stride, true, src_columns, src_rows, same && !yuv)),
+                ]
+            }
+            CMD_SCREEN_TO_SCREEN_STRETCH if !launch => {
+                let (dst_x, dst_y) = (dst_x as i64, dst_y as i64);
+                let (src_x, src_y) = (src_x as i64, src_y as i64);
+                let Some(rows) = steps_within(dst_y, size_y, dir_y, clip_y) else {
+                    return Footprint::Nothing;
+                };
+                let columns = if yuv {
+                    yuv_columns(dst_x, 1, size_x)
+                } else {
+                    steps_within(dst_x, size_x, 1, clip_x).map(|s| positions(dst_x, 1, s))
+                };
+                let Some(columns) = columns.filter(|_| size_x > 0) else {
+                    return Footprint::Nothing;
+                };
+                // Bresenham's steps through the source go no further than
+                // its size, whatever the error terms start at.
+                let src_columns = (src_x, src_x + self.src_size_x as i64);
+                let src_rows = positions(src_y, dir_y, (0, self.src_size_y as i64));
+                let stride = self.src_stride_src;
+                [
+                    Some(dst(columns, positions(dst_y, dir_y, rows))),
+                    Some(src(stride, false, src_columns, src_rows, same && !yuv)),
+                ]
+            }
+            CMD_HOST_TO_SCREEN | CMD_HOST_TO_SCREEN_STRETCH if launch => {
+                // The rows still to come, from where the command is.
+                let (dst_x, dst_y) = (dst_x as i64, dst_y as i64);
+                let left = size_y - cur_y as i64;
+                let Some(rows) = steps_within(dst_y, left, dir_y, clip_y) else {
+                    return Footprint::Nothing;
+                };
+                let columns = if yuv {
+                    yuv_columns(dst_x, 1, size_x)
+                } else {
+                    steps_within(dst_x, size_x, 1, clip_x).map(|s| positions(dst_x, 1, s))
+                };
+                let Some(columns) = columns.filter(|_| size_x > 0) else {
+                    return Footprint::Nothing;
+                };
+                [Some(dst(columns, positions(dst_y, dir_y, rows))), None]
+            }
+            CMD_RECTFILL => {
+                let (x, y) = if launch { xy(val) } else { (dst_x, dst_y) };
+                let (x, y) = (x as i64, y as i64);
+                let rows = steps_within(y, size_y, dir_y, clip_y);
+                let columns = steps_within(x, size_x, dir_x, clip_x);
+                let (Some(rows), Some(columns)) = (rows, columns) else {
+                    return Footprint::Nothing;
+                };
+                let (columns, rows) = (positions(x, dir_x, columns), positions(y, dir_y, rows));
+                [Some(dst(columns, rows)), None]
+            }
+            CMD_LINE | CMD_POLYLINE => {
+                // From the source's XY to the destination's, within the
+                // box of the two and the clip.
+                let (x, y) = if launch { xy(val) } else { (dst_x, dst_y) };
+                let within = |a: i32, b: i32, (lo, hi): (i64, i64)| {
+                    let (a, b) = (a.min(b) as i64, a.max(b) as i64);
+                    let (a, b) = (a.max(lo), b.min(hi - 1));
+                    (a <= b).then_some((a, b))
+                };
+                let (Some(columns), Some(rows)) =
+                    (within(src_x, x, clip_x), within(src_y, y, clip_y))
+                else {
+                    return Footprint::Nothing;
+                };
+                [Some(dst(columns, rows)), None]
+            }
+            CMD_POLYFILL if launch => {
+                if clip_x.0 >= clip_x.1 || clip_y.0 >= clip_y.1 {
+                    return Footprint::Nothing;
+                }
+                let (columns, rows) = ((clip_x.0, clip_x.1 - 1), (clip_y.0, clip_y.1 - 1));
+                [Some(dst(columns, rows)), None]
+            }
+            _ => return Footprint::Nothing,
+        };
+        // A span that can't be bounded is all of the memory.
+        let mut out = [None; 2];
+        for (out, span) in out.iter_mut().zip(spans).filter_map(|(o, s)| Some((o, s?))) {
+            let Some(span) = span else {
+                return Footprint::All;
+            };
+            *out = Some(span);
+        }
+        Footprint::Spans(out)
+    }
+}
+
 /// A ternary raster operation: each of the eight bits of `rop` says
 /// whether a combination of pattern, source and destination bits makes
 /// a 1.
@@ -1526,6 +1782,155 @@ mod tests {
         let mask = ram.bytes() as u32 - 1;
         // Byte 130 of row 33: the second tile across, the second tile row.
         assert_eq!(e.addr(130, 33, false, 0, mask), 2 + 4096 + 128 + 2 * 4096);
+    }
+
+    /// Numbers for the tests, the same every run.
+    struct Numbers(u64);
+
+    impl Numbers {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            self.next() % n
+        }
+
+        /// An XY register's value with x in `-8..x` and y in `-8..y`.
+        fn xy(&mut self, x: u32, y: u32) -> u32 {
+            let x = self.below(x + 8) as i32 - 8;
+            let y = self.below(y + 8) as i32 - 8;
+            (x as u32 & 0x1FFF) | (y as u32 & 0x1FFF) << 16
+        }
+    }
+
+    /// A memory holding `bytes`.
+    fn memory(bytes: &[u8]) -> Vram {
+        let ram = Vram::new(bytes.len());
+        ram.write_bytes(0, bytes);
+        ram
+    }
+
+    #[test]
+    fn commands_read_and_draw_only_their_footprint() {
+        // Commands of every kind with random registers, then words for
+        // the launch area. Each write's footprint holds every byte it
+        // draws into, and every byte it reads: the same write into a
+        // memory changed everywhere else draws the same.
+        const SIZE: usize = 1 << 18;
+        let mut n = Numbers(375);
+        let (mut all, mut writes) = (0, 0);
+        for _ in 0..400 {
+            let (mut e, _) = engine();
+            let ram = Vram::new(SIZE);
+            let formats = [COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP];
+            let tiled = n.below(3) == 0;
+            let stride = if tiled { 1 + n.below(2) } else { 64 + n.below(1600) };
+            let format = formats[n.below(4) as usize];
+            e.write(&ram, 0x14, format | stride);
+            e.write(&ram, 0x10, n.below(0x8000) | (tiled as u32) << 31);
+            let formats = [COL_1BPP, COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP, COL_YUYV, COL_UYVY];
+            let src_tiled = n.below(3) == 0;
+            let stride = if src_tiled { 1 + n.below(2) } else { n.below(1600) };
+            let src_format = formats[n.below(7) as usize];
+            e.write(&ram, 0x54, src_format | stride | n.below(4) << 22);
+            e.write(&ram, 0x34, n.below(0x8000) | (src_tiled as u32) << 31);
+            for clip in [0x08, 0x4C] {
+                let (x, y) = (n.below(200), n.below(60));
+                e.write(&ram, clip, x | y << 16);
+                e.write(&ram, clip + 4, (x + n.below(200)) | (y + n.below(60)) << 16);
+            }
+            e.write(&ram, 0x28, n.below(0x1_0000));
+            e.write(&ram, 0x30, n.next());
+            e.write(&ram, 0x38, n.below(16));
+            e.write(&ram, 0x58, n.below(80) | n.below(40) << 16);
+            e.write(&ram, 0x5C, n.xy(300, 60));
+            e.write(&ram, 0x60, n.next());
+            e.write(&ram, 0x64, n.next());
+            e.write(&ram, 0x68, n.below(80) | n.below(40) << 16);
+            e.write(&ram, 0x6C, n.xy(300, 60));
+            for i in 0..64 {
+                e.write(&ram, 0x100 + 4 * i, n.next());
+            }
+            let flags = [COMMAND_INITIATE, COMMAND_DX, COMMAND_DY, COMMAND_CLIP_SEL]
+                .into_iter()
+                .chain([COMMAND_PATTERN_MONO, COMMAND_TRANS_MONO, COMMAND_INC_X_START])
+                .filter(|_| n.below(2) == 0)
+                .fold(0, |v, f| v | f);
+            let command = n.next() & 0xFF00_0000 | flags | n.below(9);
+            let words: Vec<(u32, u32)> = std::iter::once((0x70, command))
+                .chain((0..12).map(|_| (0x80 + 4 * n.below(32), n.xy(300, 60))))
+                .collect();
+            let mut fill = vec![0u8; SIZE];
+            fill.iter_mut().for_each(|b| *b = n.next() as u8);
+            ram.write_bytes(0, &fill);
+            for (reg, val) in words {
+                writes += 1;
+                let footprint = e.footprint(reg, val, SIZE as u32);
+                let spans = match footprint {
+                    Footprint::All => {
+                        all += 1;
+                        e.write(&ram, reg, val);
+                        continue;
+                    }
+                    Footprint::Nothing => [None; 2],
+                    Footprint::Spans(spans) => spans,
+                };
+                let inside = |at: usize| {
+                    spans
+                        .iter()
+                        .flatten()
+                        .any(|&(a, b)| (a as usize..b as usize).contains(&at))
+                };
+                let before = ram.to_bytes();
+                let changed: Vec<u8> = (0..SIZE)
+                    .map(|at| if inside(at) { before[at] } else { !before[at] })
+                    .collect();
+                let other = memory(&changed);
+                let mut twin = e.clone();
+                e.touched.clear();
+                e.write(&ram, reg, val);
+                twin.write(&other, reg, val);
+                let (after, twin_after) = (ram.to_bytes(), other.to_bytes());
+                for at in 0..SIZE {
+                    if inside(at) {
+                        assert_eq!(after[at], twin_after[at], "{reg:#x} {val:#x} read outside");
+                    } else {
+                        assert_eq!(after[at], before[at], "{reg:#x} {val:#x} drew at {at:#x}");
+                    }
+                }
+                for &(a, b) in &e.touched {
+                    assert!((a..b).all(|at| inside(at as usize)), "{reg:#x} {val:#x}");
+                }
+            }
+        }
+        // The footprints are bounded but where they wrap.
+        assert!(all * 20 < writes, "{all} of {writes}");
+    }
+
+    #[test]
+    fn footprints_of_register_writes_that_run_nothing() {
+        let (mut e, ram) = engine();
+        setup_16(&mut e, &ram);
+        e.write(&ram, 0x68, 3 << 16 | 4);
+        let size = ram.bytes() as u32;
+        for reg in [0x08, 0x0C, 0x10, 0x14, 0x60, 0x64, 0x68, 0x6C, 0x100] {
+            assert_eq!(e.footprint(reg, 0, size), Footprint::Nothing);
+        }
+        // A command without the initiate bit, and a host blit's, wait for
+        // the launch area.
+        assert_eq!(e.footprint(0x70, CMD_RECTFILL, size), Footprint::Nothing);
+        let host = COMMAND_INITIATE | CMD_HOST_TO_SCREEN;
+        assert_eq!(e.footprint(0x70, host, size), Footprint::Nothing);
+        // A fill of 4 by 3 at (1, 2): rows 2 to 4 of 2048 bytes.
+        e.write(&ram, 0x6C, 2 << 16 | 1);
+        let fill = COMMAND_INITIATE | CMD_RECTFILL;
+        let rows = Some((2 * 2048 + 2, 4 * 2048 + 5 * 2));
+        assert_eq!(e.footprint(0x70, fill, size), Footprint::Spans([rows, None]));
     }
 
     #[test]

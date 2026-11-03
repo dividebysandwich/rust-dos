@@ -483,6 +483,12 @@ impl Voodoo {
         // The 3D engine draws into its buffers without marking the pages
         // it changes: memory shown that shares pages with them goes again
         // whenever the picture may have changed, after the drawing queued.
+        // The rows of the 3D buffers read back for it turn hot, as for a
+        // program's read: the scanout reads them again every frame the
+        // picture changes, which costs a read back from the GPU each
+        // time, while the software rasterizer leaves them in the memory.
+        // `gpu_takes` refuses the GPU while the software picture is
+        // wanted for the same reason.
         let shared: Vec<(u32, u32)> = spans
             .iter()
             .flatten()
