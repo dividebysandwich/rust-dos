@@ -17,10 +17,7 @@
 use crate::bus::Bus;
 use crate::cpu::{Cpu, CpuFlags, CpuState};
 use crate::diskimage::SECTOR_SIZE;
-use crate::disk::{DRIVE_C, drive_name, drive_number, numbered_drive};
-
-/// D:, which BOOT -l takes for the disk mounted as 3.
-const DRIVE_D: u8 = 3;
+use crate::disk::{DRIVE_C, DRIVE_D, drive_name, drive_number, numbered_drive};
 
 /// A machine an operating system booted on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

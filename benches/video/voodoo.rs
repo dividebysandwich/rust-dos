@@ -115,7 +115,7 @@ pub fn pipelines(c: &mut Criterion) {
         pipeline(
             c,
             &format!("video/voodoo/{name}"),
-            [0x0001_0B71, 0x0800_2401, alpha, fog, 0x0000_0507, 0x0824_1507],
+            [0x0001_0F71, 0x0800_2401, alpha, fog, 0x0000_0507, 0x0824_1507],
         );
     }
 }

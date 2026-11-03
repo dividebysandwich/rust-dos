@@ -77,9 +77,10 @@ impl Drop for Capture {
 }
 
 /// RUST_DOS_VOODOO_STATE is read-only. PROFILE_DIR must already contain a
-/// scratch copy named run.C.img; loading can revert and write that copy.
-/// BATCHES and INSTRUCTIONS select the observation length. This collects
-/// submitted states and a final picture, not benchmark timings.
+/// scratch copy named run.C.img, and run.D.img for a state with a disk
+/// image as D:; loading can revert and write those copies. BATCHES and
+/// INSTRUCTIONS select the observation length. This collects submitted
+/// states and a final picture, not benchmark timings.
 #[test]
 #[ignore = "requires a saved Voodoo scene and a separate scratch disk"]
 fn profile_saved_voodoo_scene() {
@@ -113,7 +114,7 @@ fn profile_saved_voodoo_scene() {
         cpu.bus
             .disk
             .folders_from_state
-            .push((crate::disk::DRIVE_C + 1, scratch_d));
+            .push((crate::disk::DRIVE_D, scratch_d.clone()));
     }
     crate::savestate::disks::offer_copies(&mut cpu, &path);
     machine::load(&mut cpu, &state).unwrap();
@@ -123,6 +124,17 @@ fn profile_saved_voodoo_scene() {
         .bios_image(crate::disk::DRIVE_C)
         .expect("boot disk");
     assert_eq!(disk.path().canonicalize().unwrap(), scratch);
+    // Without run.D.img, an image the state has as D: is its original,
+    // which the guest would write.
+    if cpu.bus.disk.host_root(crate::disk::DRIVE_D).is_none()
+        && let Some(disk) = cpu.bus.disk.bios_image(crate::disk::DRIVE_D)
+    {
+        assert_eq!(
+            disk.path().canonicalize().ok(),
+            scratch_d.canonicalize().ok(),
+            "D: needs a scratch copy named run.D.img"
+        );
+    }
     cpu.bus
         .voodoo
         .as_mut()

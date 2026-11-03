@@ -421,10 +421,13 @@ from normal builds. Use an optimized test build; emulating a saved
 Windows scene in an unoptimized build can take hours.
 
 Set `RUST_DOS_VOODOO_STATE` to the saved state. Create a separate output
-directory and copy its C-drive sidecar there as `run.C.img`. Set
-`RUST_DOS_VOODOO_PROFILE_DIR` to that directory. The test restores and
-writes the scratch image, so keep it separate from the original. The
-original state and its sidecars must remain available for restoration.
+directory and copy its C-drive sidecar there as `run.C.img`. A state
+with a game on a second disk image, mounted as D:, needs a scratch copy
+of that one too, as `run.D.img`: the test stops if D: is an image other
+than that copy. Set `RUST_DOS_VOODOO_PROFILE_DIR` to that directory. The
+test restores and writes the scratch images, so keep them separate from
+the originals. The original state and its sidecars must remain available
+for restoration.
 
 ```sh
 cargo test --release --no-default-features --features sdl --lib \

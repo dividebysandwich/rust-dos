@@ -1231,8 +1231,9 @@ macro_rules! variants {
 // gives the texture to TMU 1 and has TMU 0 pass it on, modulated by the
 // iterated colour. V10-V14 are its textured states in a saved Omikron
 // scene, most drawn area first: the frame darkened by the colour, opaque,
-// blended by alpha, opaque with fog, and added. V15 darkens without a
-// texture, and C2 covers the driver's other blends, fog and formats.
+// blended by alpha with fog, opaque with fog, and added. V15 darkens
+// without a texture, and C2 covers the driver's other blends, fog and
+// formats.
 variants! {
     V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
     V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];

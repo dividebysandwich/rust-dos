@@ -38,9 +38,8 @@ fn parameters() -> TriParams {
     }
 }
 
-/// Draw 48 rows of `regs` with `index` (None for the generic code) and
-/// with the generic code, and require the same memory, counters and
-/// stipple.
+/// Draw 48 rows of `regs` with variant `index` and with the generic code,
+/// and require the same memory, counters and stipple.
 fn same_as_generic(regs: [u32; 6], tmus: usize, index: usize) {
     let selected = two_unit_state(regs);
     let generic = two_unit_state(regs);
@@ -60,8 +59,9 @@ fn same_as_generic(regs: [u32; 6], tmus: usize, index: usize) {
 }
 
 /// The bits of fbzMode a variant leaves to the triangle: the depth
-/// function (always, less, greater or equal), the colour and depth
-/// writes, clipping and the Y origin; and alphaMode's reference value.
+/// function (always, less, greater or equal, less or equal), the colour
+/// and depth writes, clipping and the Y origin; and alphaMode's reference
+/// value.
 fn dynamic(regs: [u32; 6]) -> impl Iterator<Item = [u32; 6]> {
     [
         (7 << 5 | 3 << 9, 0),
