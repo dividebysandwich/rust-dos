@@ -15,8 +15,9 @@
 // dithers, with the 5-6-5 pixel it reads, and with fbzMode bit 19 takes
 // the dither back out of that pixel first. OpenGL blends after the shader,
 // so for a dithered draw that blends (u_card_blend) the shader blends
-// itself, as the card does, with the pixels underneath that VoodooGl
-// copies into u_dst before it draws.
+// itself, as the card does, with the pixels underneath in u_dst: the
+// buffer being drawn into, behind a texture barrier, or where there is no
+// barrier or the buffer has samples, a copy VoodooGl makes before it draws.
 //
 // The texture units pick their levels of detail as the card does, in
 // perspective from each pixel's footprint (the triangle's gradients,

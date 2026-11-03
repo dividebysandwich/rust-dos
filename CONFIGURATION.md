@@ -2596,13 +2596,17 @@ the pattern shows until the game draws over it.
 The card blends a triangle with the 5-6-5 pixels under it before it
 dithers, and with fbzMode bit 19 it takes the dither back out of those
 pixels first. OpenGL blends after the shader, so for a triangle that
-blends and dithers the shader does the blend itself, the card's way: the
-pixels the triangle covers are copied out of the buffer before it is
-drawn, and the shader reads them from the copy. At `voodoo_scale=1` such
-a triangle comes out as the software rasterizer draws it too. Triangles
-of one draw that overlap go over a copy each, so each blends with what
-the one before drew. With `voodoo_msaa` the copy holds each pixel's
-samples averaged. The texture units' dithered level of detail
+blends and dithers the shader does the blend itself, the card's way,
+with the pixels under the triangle. Where the driver has a texture
+barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
+`GL_NV_texture_barrier`) the shader reads them from the buffer it draws
+into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
+copied out of the buffer before the triangle is drawn, and the shader
+reads them from the copy, which with `voodoo_msaa` holds each pixel's
+samples averaged. At `voodoo_scale=1` such a triangle comes out as the
+software rasterizer draws it too. Triangles of one draw that overlap go
+after a barrier or over a copy each, so each blends with what the one
+before drew. The texture units' dithered level of detail
 (textureMode bit 4) follows the setting as well. Frame buffer writes and
 the Voodoo2's blitter show what the card's memory holds, dithered or not,
 whatever the setting. The Voodoo2's and Voodoo3's video output filter,
@@ -2619,6 +2623,14 @@ nothing but dithered triangles, 200 screen-sized rectangles a frame at
 2x, the graphics card took 7% longer with dithering on (1083 against
 1010 ms a frame, about 0.3 ns more for each of the 246 million pixels):
 the most it costs, where filling pixels is all a frame does.
+
+A dithered draw that blends costs more: the CPU sorts its triangles into
+groups that don't overlap, and each group is a draw of its own after a
+barrier or a copy. On an RTX 4080 with the barrier, Unreal's flyby
+(which blends its lightmaps, coronas and particles with dithering on)
+and 3DMark 2000 ran as fast as with OpenGL's blending; through the copy,
+which a driver without a barrier takes, they lost about 3% of their
+frame rate where the host held them back.
 
 ## 3dfx Voodoo3 and Banshee
 

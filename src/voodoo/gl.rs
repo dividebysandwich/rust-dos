@@ -663,8 +663,10 @@ pub struct VoodooGl {
     /// The picture shown, and its size.
     composite: Option<(Target, (u32, u32))>,
     /// A copy of the pixels a blended draw goes over, which the shader
-    /// blends with as the card does (`card_blend`), and its size.
-    blend_copy: Option<(Target, (i32, i32))>,
+    /// blends with as the card does (`card_blend`), and its size. None in
+    /// the pair where OpenGL couldn't make one of that size, which isn't
+    /// tried again until the size changes.
+    blend_copy: Option<(Option<Target>, (i32, i32))>,
     /// Where the driver has it, the barrier that lets the shader read the
     /// buffer it draws into, which `card_blend` then does instead of
     /// reading a copy.
@@ -898,7 +900,7 @@ impl VoodooGl {
             if let Some((target, _)) = self.composite.take() {
                 target.delete(gl);
             }
-            if let Some((target, _)) = self.blend_copy.take() {
+            if let Some((Some(target), _)) = self.blend_copy.take() {
                 target.delete(gl);
             }
             gl.delete_texture(self.staging_texture);
@@ -1503,22 +1505,12 @@ impl VoodooGl {
         }
     }
 
-    /// Whether there is a copy of the buffers' size for `card_blend`,
-    /// made if there wasn't.
-    fn blend_copy_ready(&mut self, gl: &glow::Context) -> bool {
-        let size = self.scaled();
-        if self.blend_copy.as_ref().is_some_and(|&(_, s)| s == size) {
-            return true;
-        }
-        if let Some((old, _)) = self.blend_copy.take() {
-            old.delete(gl);
-        }
-        self.blend_copy = target(gl, size, 1, None).ok().map(|t| (t, size));
-        self.blend_copy.is_some()
-    }
-
     fn draw(&mut self, gl: &glow::Context, draw: &Draw) {
         let s = &draw.state;
+        let size = self.scaled();
+        let Some(target) = self.targets.get(&s.dest) else {
+            return;
+        };
         // Where the game dithers, the shader blends as the card does,
         // with the pixels underneath: read from the buffer itself behind a
         // texture barrier, or without one (or with samples, which the
@@ -1527,12 +1519,10 @@ impl VoodooGl {
             && s.alpha_mode & (1 << 4) != 0
             && s.fbz_mode & (1 << 8) != 0
             && s.fbz_mode & (1 << 9) != 0;
-        let Some(single) = self.targets.get(&s.dest).map(|t| t.samples.is_none()) else {
-            return;
-        };
+        let single = target.samples.is_none();
         let barrier = self.texture_barrier.filter(|_| card_blend && single);
-        let card_blend = card_blend && (barrier.is_some() || self.blend_copy_ready(gl));
-        let Some(target) = self.targets.get(&s.dest) else { return };
+        let card_blend =
+            card_blend && (barrier.is_some() || blend_copy_ready(&mut self.blend_copy, gl, size));
         let fbz = s.fbz_mode;
         let depth_test = fbz & (1 << 4) != 0;
         let func = ((fbz >> 5) & 7) as usize;
@@ -1544,7 +1534,7 @@ impl VoodooGl {
         let depth_write = has_depth && fbz & (1 << 10) != 0;
         let constant_depth = has_depth && depth_test && fbz & (1 << 20) != 0;
         let rgb = fbz & (1 << 9) != 0;
-        let (w, h) = self.scaled();
+        let (w, h) = size;
         let scale = self.scale as f32;
         let p = &self.triangle;
         // SAFETY: see `VoodooGl`.
@@ -1652,11 +1642,13 @@ impl VoodooGl {
             p.uniforms.u_units.set(gl, units);
             p.uniforms.u_constant_depth.set(gl, constant_depth as i32);
             p.uniforms.u_card_blend.set(gl, card_blend as i32);
-            let copy = self.blend_copy.as_ref().filter(|_| card_blend && barrier.is_none());
-            let copy = copy.map(|(c, _)| c);
-            let read = match (barrier, copy) {
-                (Some(_), _) => Some(target.color),
-                (None, copy) => copy.map(|c| c.color),
+            let copy = match &self.blend_copy {
+                Some((copy, _)) if card_blend && barrier.is_none() => copy.as_ref(),
+                _ => None,
+            };
+            let read = match barrier {
+                Some(_) => Some(target.color),
+                None => copy.map(|c| c.color),
             };
             if let Some(read) = read {
                 gl.active_texture(glow::TEXTURE3);
@@ -2180,19 +2172,43 @@ fn copy_rect(gl: &glow::Context, from: glow::Framebuffer, to: glow::Framebuffer,
     }
 }
 
+/// Whether `copy` (`VoodooGl::blend_copy`) has a copy of `size` for
+/// `card_blend`, made if it hadn't and OpenGL can make it.
+fn blend_copy_ready(
+    copy: &mut Option<(Option<Target>, (i32, i32))>,
+    gl: &glow::Context,
+    size: (i32, i32),
+) -> bool {
+    if copy.as_ref().is_none_or(|&(_, s)| s != size) {
+        if let Some((Some(old), _)) = copy.take() {
+            old.delete(gl);
+        }
+        *copy = Some((target(gl, size, 1, None).ok(), size));
+    }
+    copy.as_ref().is_some_and(|(t, _)| t.is_some())
+}
+
+/// The most triangles in one of `separate_triangles`' runs, which bounds
+/// the overlap tests a triangle takes to as many: a run of triangles that
+/// don't overlap is cut there, for one more barrier or copy.
+const RUN_TRIANGLES: usize = 64;
+
 /// The triangles of `vertices` in runs of ones that don't overlap, as
 /// (first vertex, vertices): a run's pixels are each drawn once, so what
 /// the barrier or the copy before it makes readable is what each of them
 /// blends with. Triangles that only share an edge don't overlap, as the
-/// edge's pixels go to one of them.
+/// edge's pixels go to one of them. A run has `RUN_TRIANGLES` at most.
 fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
     type Tri = [[f32; 2]; 3];
     // Whether the edges of `a` keep `b` out: for one edge, the vertices of
-    // `b` are on the far side of it from `a`'s third vertex, or on it.
+    // `b` are on the far side of it from `a`'s third vertex, or on it. The
+    // card's coordinates have 4 bits of fraction, so in f64 the products
+    // are exact, where f32 can round a vertex just inside an edge onto it.
     let apart = |a: &Tri, b: &Tri| {
         (0..3).any(|i| {
             let (p, q, r) = (a[i], a[(i + 1) % 3], a[(i + 2) % 3]);
-            let side = |v: [f32; 2]| (q[0] - p[0]) * (v[1] - p[1]) - (q[1] - p[1]) * (v[0] - p[0]);
+            let d = |a: f32, b: f32| f64::from(a) - f64::from(b);
+            let side = |v: [f32; 2]| d(q[0], p[0]) * d(v[1], p[1]) - d(q[1], p[1]) * d(v[0], p[0]);
             let inner = side(r);
             inner == 0.0 || b.iter().all(|&v| side(v) * inner.signum() <= 0.0)
         })
@@ -2218,7 +2234,7 @@ fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
                 && !apart(o, &tri)
                 && !apart(&tri, o)
         });
-        if overlaps {
+        if overlaps || run.len() == RUN_TRIANGLES {
             runs.push((first, i * 3 - first));
             first = i * 3;
             run.clear();
@@ -2475,7 +2491,7 @@ fn compile<U: Locations>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Vertex, buffer_rect, sampling_filters, separate_triangles};
+    use super::{RUN_TRIANGLES, Vertex, buffer_rect, sampling_filters, separate_triangles};
 
     #[test]
     #[ignore = "requires a desktop OpenGL context"]
@@ -3053,6 +3069,26 @@ mod tests {
             [0.0, 0.0, 2.0, 0.0, 0.0, 2.0],
         ];
         assert_eq!(separate_triangles(&triangles(&over)), [(0, 3), (3, 6)]);
+        // The second's first vertex is inside the first, by less than f32
+        // tells from its edge: they overlap.
+        let tip = [
+            [159.125, 220.25, 675.3125, 420.0625, 675.3125, 220.25],
+            [671.4375, 418.5625, 600.0, 500.0, 700.0, 500.0],
+        ];
+        assert_eq!(separate_triangles(&triangles(&tip)), [(0, 3), (3, 3)]);
+    }
+
+    #[test]
+    fn blended_triangle_runs_have_a_limit() {
+        // 100 triangles side by side, none over another.
+        let row: Vec<[f32; 6]> = (0..100)
+            .map(|i| {
+                let x = 2.0 * i as f32;
+                [x, 0.0, x + 1.0, 0.0, x, 1.0]
+            })
+            .collect();
+        let (first, rest) = (3 * RUN_TRIANGLES, 3 * (100 - RUN_TRIANGLES));
+        assert_eq!(separate_triangles(&triangles(&row)), [(0, first), (first, rest)]);
     }
 
     #[test]
@@ -3087,9 +3123,8 @@ mod tests {
         let gl =
             unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
         // SAFETY: as above.
-        let barrier = unsafe {
-            super::TextureBarrier::load(&gl, |s| video.gl_get_proc_address(s).cast())
-        };
+        let barrier =
+            unsafe { super::TextureBarrier::load(&gl, |s| video.gl_get_proc_address(s).cast()) };
         TestContext {
             gl,
             barrier,
