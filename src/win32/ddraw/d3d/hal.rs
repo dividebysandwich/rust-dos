@@ -36,7 +36,6 @@
 
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
 use super::super::{current_pid, display, state, voodoo};
-use super::shadow::Unplaced;
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
     RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDTEXTUREALPHA,
@@ -45,6 +44,7 @@ use super::device::{
     TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
+use super::shadow::Unplaced;
 use crate::cpu::Cpu;
 use crate::win32::glide::api::{self, TexInfo, TmuVertex, Vertex};
 use crate::win32::glide::hw;
@@ -154,7 +154,8 @@ fn undrawn(cpu: &mut Cpu, why: Undrawn, id: u32) {
              buffer: draws with it are drawn without the depth test"
         ),
     };
-    cpu.bus.log_string(&format!("[W32] DDRAW: Direct3D HAL: {what}"));
+    cpu.bus
+        .log_string(&format!("[W32] DDRAW: Direct3D HAL: {what}"));
 }
 
 fn hal(cpu: &mut Cpu) -> &mut Hal {
