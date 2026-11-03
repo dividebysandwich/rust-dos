@@ -148,6 +148,8 @@ pub struct Gpu {
     blits: u64,
     /// Commands of a Banshee's 2D engine drawn on the GPU (`banshee_2d_gpu`).
     pub(super) engine: u64,
+    /// Those commands, and the ones left to the CPU, by kind.
+    pub(super) engine_counts: EngineCounts,
     /// 2D operations left to the CPU as the program reads or writes
     /// where they draw (the tracker's hot pages).
     pub(super) hot: u64,
@@ -155,6 +157,18 @@ pub struct Gpu {
     frames: u32,
     /// Pages only the GPU had were lost, which the log said.
     lost: bool,
+}
+
+/// For `/api/status`: the commands of a Banshee's 2D engine whose bytes
+/// were newer on the GPU (`banshee_2d_gpu`).
+#[derive(Default)]
+pub(crate) struct EngineCounts {
+    /// Those drawn on the GPU, by how.
+    pub drawn: std::collections::BTreeMap<&'static str, u64>,
+    /// Those drawn on the GPU, by the destination's format.
+    pub formats: std::collections::BTreeMap<String, u64>,
+    /// Those left to the CPU, by why.
+    pub left: std::collections::BTreeMap<&'static str, u64>,
 }
 
 /// Frames a page read back from the GPU stays hot: about a second.
@@ -912,6 +926,9 @@ impl Voodoo {
             "linked": gpu.link.is_some(),
             "blits": gpu.blits,
             "engine_commands": gpu.engine,
+            "engine_drawn": gpu.engine_counts.drawn,
+            "engine_formats": gpu.engine_counts.formats,
+            "engine_left_to_cpu": gpu.engine_counts.left,
             "left_to_cpu": gpu.hot,
             "pages_read_back": gpu.read_back,
         })

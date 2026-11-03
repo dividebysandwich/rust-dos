@@ -1637,10 +1637,54 @@ pub enum Op {
     Copy { src: Plane, from: [u32; 2] },
 }
 
+/// Why a register write has no `Plan`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unplanned {
+    /// It runs no command.
+    NoCommand,
+    /// A command other than a rectangle fill or a screen to screen copy.
+    Kind,
+    /// A format without a size, a copy between two formats, or a tiled
+    /// surface of 24 bits.
+    Format,
+    /// A colour key: the destination's, or a copy's source's.
+    ColourKey,
+    /// A transparent mono pattern.
+    Pattern,
+    /// A fill whose raster operation reads the destination or the
+    /// pattern, or a copy's other than CCh.
+    Rop,
+    /// A copy whose source starts left of or above pixel 0.
+    NegativeSource,
+    /// A copy whose source and destination share bytes.
+    Overlap,
+    /// It draws nothing, a row's pixels go past the stride, or the bytes
+    /// go past the memory.
+    Bounds,
+}
+
+impl Unplanned {
+    /// Its name in `/api/status`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Unplanned::NoCommand => "no_command",
+            Unplanned::Kind => "command",
+            Unplanned::Format => "format",
+            Unplanned::ColourKey => "colour_key",
+            Unplanned::Pattern => "pattern",
+            Unplanned::Rop => "rop",
+            Unplanned::NegativeSource => "negative_source",
+            Unplanned::Overlap => "overlap",
+            Unplanned::Bounds => "bounds",
+        }
+    }
+}
+
 impl Engine {
     /// The command that writing `val` to register `addr` runs, as a
-    /// `Plan`, in a memory of `size` bytes: None for any other write, and
-    /// for a command that does anything else, or draws nothing.
+    /// `Plan`, in a memory of `size` bytes, or why it has none: any
+    /// other write, a command that does anything else, or one that draws
+    /// nothing.
     ///
     /// These are rectangle fills whose raster operation gives one value,
     /// whatever the destination and the pattern hold, and screen to
@@ -1648,23 +1692,29 @@ impl Engine {
     /// format that share no byte; neither with a destination colour key
     /// or a transparent mono pattern, nor the copies with a source colour
     /// key. The bytes they touch are within the memory.
-    pub fn plan(&self, addr: u32, val: u32, size: u32) -> Option<Plan> {
+    pub fn plan(&self, addr: u32, val: u32, size: u32) -> Result<Plan, Unplanned> {
         let launch = addr & 0x1FC != 0x70;
         let command = match addr & 0x1FC {
             0x70 if val & COMMAND_INITIATE != 0 => val,
             0x80..=0xFC => self.command,
-            _ => return None,
+            _ => return Err(Unplanned::NoCommand),
         };
+        if !matches!(command & 0xF, CMD_RECTFILL | CMD_SCREEN_TO_SCREEN) {
+            return Err(Unplanned::Kind);
+        }
         let bpp: u32 = match self.dst_format & COL_MASK {
             COL_8BPP => 1,
             COL_16BPP => 2,
             COL_24BPP => 3,
             COL_32BPP => 4,
-            _ => return None,
+            _ => return Err(Unplanned::Format),
         };
+        if self.command_extra & CMDEXTRA_DST_COLORKEY != 0 {
+            return Err(Unplanned::ColourKey);
+        }
         let trans = COMMAND_PATTERN_MONO | COMMAND_TRANS_MONO;
-        if self.command_extra & CMDEXTRA_DST_COLORKEY != 0 || command & trans == trans {
-            return None;
+        if command & trans == trans {
+            return Err(Unplanned::Pattern);
         }
         // Where the command starts, as `footprint` has it.
         let pending = !launch || self.launch_pending;
@@ -1687,6 +1737,7 @@ impl Engine {
             let (top, bottom) = positions(y as i64, dir_y, rows);
             Some([left, top, right + 1, bottom + 1].map(|v| v as u32))
         };
+        let rect = |x, y| rect(x, y).ok_or(Unplanned::Bounds);
         let dst = Plane {
             start: self.dst_base,
             stride: self.dst_stride,
@@ -1697,7 +1748,7 @@ impl Engine {
         // tile's next row (`put`).
         let whole = |s: Plane| !(s.tiled && s.bpp == 3);
         if !whole(dst) {
-            return None;
+            return Err(Unplanned::Format);
         }
         // The bytes of `rect` of `plane`, if they are within the memory.
         let span = |plane: Plane, [left, top, right, bottom]: [u32; 4]| {
@@ -1715,6 +1766,7 @@ impl Engine {
                 y,
                 size,
             )
+            .ok_or(Unplanned::Bounds)
         };
         let (rect, op) = match command & 0xF {
             CMD_RECTFILL => {
@@ -1735,7 +1787,7 @@ impl Engine {
                 // One that reads neither the destination nor the pattern.
                 let (d, p) = (rop ^ rop >> 1, rop ^ rop >> 4);
                 if d & 0x55 != 0 || p & 0x0F != 0 {
-                    return None;
+                    return Err(Unplanned::Rop);
                 }
                 let mask = (u64::MAX >> (64 - 8 * bpp)) as u32;
                 (rect, Op::Fill(rop3(rop, 0, self.color_fore, 0) & mask))
@@ -1743,9 +1795,14 @@ impl Engine {
             CMD_SCREEN_TO_SCREEN => {
                 let (src_x, src_y) = if launch { xy(val) } else { (src_x, src_y) };
                 let same = self.src_format & COL_MASK == self.dst_format & COL_MASK;
-                if !same || command >> 24 != 0xCC || self.command_extra & CMDEXTRA_SRC_COLORKEY != 0
-                {
-                    return None;
+                if !same {
+                    return Err(Unplanned::Format);
+                }
+                if command >> 24 != 0xCC {
+                    return Err(Unplanned::Rop);
+                }
+                if self.command_extra & CMDEXTRA_SRC_COLORKEY != 0 {
+                    return Err(Unplanned::ColourKey);
                 }
                 let rect = rect(dst_x, dst_y)?;
                 // The source's pixels step with the destination's.
@@ -1755,7 +1812,7 @@ impl Engine {
                 ];
                 let from = from.map(|v| u32::try_from(v).ok());
                 let [Some(fx), Some(fy)] = from else {
-                    return None;
+                    return Err(Unplanned::NegativeSource);
                 };
                 let src = Plane {
                     start: self.src_base,
@@ -1764,13 +1821,13 @@ impl Engine {
                     bpp,
                 };
                 if !whole(src) {
-                    return None;
+                    return Err(Unplanned::Format);
                 }
                 let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
                 let (a, b) = span(src, [fx, fy, fx + w, fy + h])?;
                 let (c, d) = span(dst, rect)?;
                 if a < d && c < b {
-                    return None;
+                    return Err(Unplanned::Overlap);
                 }
                 (
                     rect,
@@ -1780,7 +1837,7 @@ impl Engine {
                     },
                 )
             }
-            _ => return None,
+            _ => return Err(Unplanned::Kind),
         };
         // Each pixel drawn has bytes of its own: a row's are within the
         // stride (the 128 bytes a row of each tile has).
@@ -1790,10 +1847,10 @@ impl Engine {
             dst.stride
         };
         if rect[2] as u64 * bpp as u64 > across as u64 {
-            return None;
+            return Err(Unplanned::Bounds);
         }
         span(dst, rect)?;
-        Some(Plan { dst, rect, op })
+        Ok(Plan { dst, rect, op })
     }
 
     /// Write `val` to register `addr` as `write` does for a command that
@@ -2268,7 +2325,7 @@ pub(crate) mod tests {
                 let before = ram.to_bytes();
                 let mut twin = e.clone();
                 e.write(&ram, reg, val);
-                let Some(plan) = plan else { continue };
+                let Ok(plan) = plan else { continue };
                 match plan.op {
                     Op::Fill(_) => fills += 1,
                     Op::Copy { .. } => copies += 1,

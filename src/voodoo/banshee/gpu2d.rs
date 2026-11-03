@@ -10,7 +10,7 @@
 //! everything else in the card's memory, after the bytes it touches are
 //! read back (`banshee_2d_write`).
 
-use super::blit2d::{Op, Plan};
+use super::blit2d::{Op, Plan, Unplanned};
 use crate::voodoo::blit::rgb888;
 use crate::voodoo::mirror::{
     Blit, BlitSource, BufferCopy, Command, Convert, Fill, LayoutKey, Plane,
@@ -75,31 +75,71 @@ impl Voodoo {
             return false;
         }
         let size = self.fbi.ram.bytes() as u32;
-        let plan = self
+        let Some(plan) = self
             .banshee
             .as_ref()
-            .and_then(|b| b.engine.plan(reg, data, size));
-        let (Some(plan), Some(key)) = (plan, self.mirror_layout()) else {
+            .map(|b| b.engine.plan(reg, data, size))
+        else {
             return false;
         };
+        let drawn = match plan {
+            Err(Unplanned::NoCommand) => return false,
+            Err(why) => Err(why.name()),
+            Ok(plan) => self.gpu_draw_planned(&plan, spans),
+        };
         let gpu = self.gpu.get_mut();
-        if touched().any(|(a, b)| gpu.tracker.hot_in(a, b)) {
-            gpu.hot += 1;
-            return false;
+        let counts = &mut gpu.engine_counts;
+        match drawn {
+            Err(why) => {
+                *counts.left.entry(why).or_default() += 1;
+                false
+            }
+            Ok((how, format)) => {
+                *counts.drawn.entry(how).or_default() += 1;
+                *counts.formats.entry(format).or_default() += 1;
+                gpu.engine += 1;
+                if let Some(b) = &mut self.banshee {
+                    b.engine.skip(reg, data);
+                }
+                self.display_dirty = true;
+                true
+            }
         }
-        if !self.gpu_draw_plan(&key, &plan) {
-            return false;
-        }
-        if let Some(b) = &mut self.banshee {
-            b.engine.skip(reg, data);
-        }
-        self.gpu.get_mut().engine += 1;
-        self.display_dirty = true;
-        true
     }
 
-    /// Draw `plan` on the GPU, in the layout `key` the recording has.
-    fn gpu_draw_plan(&mut self, key: &LayoutKey, plan: &Plan) -> bool {
+    /// Draw `plan`, whose footprint is `spans`, on the GPU unless the
+    /// program reads or writes those bytes: how it was drawn and the
+    /// destination's format, or why it wasn't (`EngineCounts`).
+    fn gpu_draw_planned(
+        &mut self,
+        plan: &Plan,
+        spans: &[Option<(u32, u32)>; 2],
+    ) -> Result<(&'static str, String), &'static str> {
+        let Some(key) = self.mirror_layout() else {
+            return Err("no_layout");
+        };
+        let gpu = self.gpu.get_mut();
+        if spans
+            .iter()
+            .flatten()
+            .any(|&(a, b)| gpu.tracker.hot_in(a, b))
+        {
+            gpu.hot += 1;
+            return Err("hot");
+        }
+        let how = self.gpu_draw_plan(&key, plan)?;
+        let layout = if plan.dst.tiled { "tiled" } else { "linear" };
+        Ok((how, format!("{} bpp {layout}", 8 * plan.dst.bpp)))
+    }
+
+    /// Draw `plan` on the GPU, in the layout `key` the recording has: how
+    /// it was drawn, or why it wasn't.
+    fn gpu_draw_plan(
+        &mut self,
+        key: &LayoutKey,
+        plan: &Plan,
+    ) -> Result<&'static str, &'static str> {
+        let done = |drawn: bool, how, why| if drawn { Ok(how) } else { Err(why) };
         let [left, top, right, bottom] = plan.rect;
         let (width, height) = (right - left, bottom - top);
         // The source's pixels, as a rectangle like the destination's.
@@ -120,18 +160,19 @@ impl Voodoo {
                     alpha_planes: false,
                     pattern: None,
                 };
-                self.gpu_draw_buffer(Command::Fill(fill), Some(dest), (top, bottom))
+                let drawn = self.gpu_draw_buffer(Command::Fill(fill), Some(dest), (top, bottom));
+                done(drawn, "fill_buffer", "renderer")
             }
             (Place::Aux, Op::Fill(value)) => {
                 // A depth clear goes with the colour buffer drawn into,
                 // as a fastfill's does.
                 if self.gpu_colour_hot(key) {
-                    return false;
+                    return Err("colour_hot");
                 }
                 // The renderer clears its depth buffer through a colour
                 // buffer's picture, which has it.
                 let Some(&colour) = key.color.iter().find(|&&offs| offs != NONE) else {
-                    return false;
+                    return Err("no_colour_buffer");
                 };
                 let fill = Fill {
                     dest: colour / 2,
@@ -141,11 +182,12 @@ impl Voodoo {
                     alpha_planes: false,
                     pattern: None,
                 };
-                self.gpu_draw_buffer(Command::Fill(fill), None, (top, bottom))
+                let drawn = self.gpu_draw_buffer(Command::Fill(fill), None, (top, bottom));
+                done(drawn, "fill_depth", "renderer")
             }
             (Place::Colour(to), Op::Copy { from: at, .. }) => {
                 let Some(Place::Colour(from)) = from else {
-                    return false;
+                    return Err("copy_into_buffer");
                 };
                 let copy = BufferCopy {
                     from,
@@ -153,26 +195,31 @@ impl Voodoo {
                     src: at,
                     rect,
                 };
-                self.gpu_draw_buffer(Command::Copy(copy), Some(to), (top, bottom))
+                let drawn = self.gpu_draw_buffer(Command::Copy(copy), Some(to), (top, bottom));
+                done(drawn, "copy_buffer", "renderer")
             }
-            (Place::Aux, Op::Copy { .. }) => false,
+            (Place::Aux, Op::Copy { .. }) => Err("depth_copy"),
             (Place::Elsewhere, op) => {
                 let i = |v: u32| v as i32;
                 let area = [left, top, right, bottom].map(i);
-                let (source, convert) = match (op, src, from) {
-                    (Op::Fill(value), _, _) => (BlitSource::Fill(value), Convert::None),
+                let (source, convert, how) = match (op, src, from) {
+                    (Op::Fill(value), _, _) => {
+                        (BlitSource::Fill(value), Convert::None, "blit_fill")
+                    }
                     // The renderer's picture is 8 bits a channel.
                     (_, Some((_, rect)), Some(Place::Colour(buffer))) => {
                         let rect = rect.map(i);
-                        (BlitSource::Buffer { buffer, rect }, Convert::Narrow)
+                        let source = BlitSource::Buffer { buffer, rect };
+                        (source, Convert::Narrow, "blit_from_buffer")
                     }
                     (_, Some((plane, rect)), Some(Place::Elsewhere)) => {
                         let rect = rect.map(i);
-                        (BlitSource::Memory { plane, rect }, Convert::None)
+                        let source = BlitSource::Memory { plane, rect };
+                        (source, Convert::None, "blit_from_memory")
                     }
-                    _ => return false,
+                    _ => return Err("copy_from_depth"),
                 };
-                self.gpu_blit(Blit {
+                let drawn = self.gpu_blit(Blit {
                     dst: plan.dst,
                     area,
                     rects: vec![area],
@@ -181,7 +228,8 @@ impl Voodoo {
                     mirror: [false; 2],
                     src_key: None,
                     dst_key: None,
-                })
+                });
+                done(drawn, how, "blit_refused")
             }
         }
     }
@@ -496,6 +544,49 @@ pub(crate) mod tests {
                 "{n}"
             );
         }
+    }
+
+    #[test]
+    fn the_status_counts_the_commands_by_how_and_why() {
+        // `/api/status` counts the commands whose bytes were newer on the
+        // GPU: those drawn there by how and by the destination's format,
+        // those left to the CPU by why.
+        let model = Rc::default();
+        let mut v = model_card(&model, false);
+        for buffer in [A, B, A] {
+            frame(&mut v, &model, buffer);
+        }
+        let (a, b) = (surface(A, 2, false), surface(B, 2, false));
+        let (aux, desktop) = (surface(AUX, 2, false), surface(DESKTOP, 2, false));
+        let wide = surface(WIDE, 2, false);
+        let all = (640, 64);
+        command_2d(&mut v, FILL, a, a, (0, 0), (0, 0), all, 0x1234);
+        command_2d(&mut v, FILL, aux, aux, (0, 0), (0, 0), all, 0xFFFF);
+        command_2d(&mut v, COPY, b, a, (0, 0), (0, 0), (100, 10), 0);
+        command_2d(&mut v, COPY, desktop, a, (0, 0), (0, 0), all, 0);
+        // Each of these reads back the buffer: a frame between them
+        // brings it back to the GPU.
+        command_2d(&mut v, COPY, a, wide, (0, 0), (0, 0), (100, 10), 0);
+        v.gpu.get_mut().tracker.cool();
+        frame(&mut v, &model, A);
+        command_2d(&mut v, 0x66 << 24 | 1, desktop, a, (0, 0), (0, 0), all, 0);
+        v.gpu.get_mut().tracker.cool();
+        frame(&mut v, &model, A);
+        v.gpu_sync(A, A + 4);
+        command_2d(&mut v, FILL, a, a, (0, 0), (0, 0), all, 0x1234);
+        let s = &status(&v)["gpu_2d"];
+        let drawn = serde_json::json!({
+            "fill_buffer": 1, "fill_depth": 1, "copy_buffer": 1, "blit_from_buffer": 1,
+        });
+        assert_eq!(s["engine_drawn"], drawn, "{s}");
+        assert_eq!(
+            s["engine_formats"],
+            serde_json::json!({"16 bpp linear": 4}),
+            "{s}"
+        );
+        let left = serde_json::json!({"copy_into_buffer": 1, "rop": 1, "hot": 1});
+        assert_eq!(s["engine_left_to_cpu"], left, "{s}");
+        assert_eq!(s["engine_commands"], 4, "{s}");
     }
 
     /// The registers for a fill or a copy at random, between `surfaces`
