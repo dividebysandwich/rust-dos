@@ -617,7 +617,7 @@ fn a_hard_disk_images_writes_go_to_a_delta_file_beside_it() {
         .unwrap();
     let log = cpu.bus.take_log_backlog();
     let told = log.iter().any(|(_, line)| {
-        line.contains(&delta.display().to_string())
+        line.contains(&rust_dos::mount::display_host_path(&delta))
             && line.contains("COMMIT")
             && line.contains("-inplace")
     });

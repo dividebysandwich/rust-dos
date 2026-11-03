@@ -223,8 +223,8 @@ impl DiskController {
                     true => format!(
                         "{}: the drive is read-only, and shows the image with the changes in {} \
                          beside it",
-                        path.display(),
-                        delta.display()
+                        crate::mount::display_host_path(path),
+                        crate::mount::display_host_path(&delta)
                     ),
                 };
                 crate::diskdelta::note(note);
@@ -242,8 +242,8 @@ impl DiskController {
             "{}: what is written to it goes to {} beside it, and the image stays as it is. \
              `COMMIT drive` (or rust-dos commit IMAGE) writes the changes into the image; \
              -inplace on the mount writes the image itself",
-            path.display(),
-            delta.display()
+            crate::mount::display_host_path(path),
+            crate::mount::display_host_path(delta)
         )
     }
 
@@ -271,8 +271,8 @@ impl DiskController {
                     "{}: -inplace leaves out the changes in {} beside it, and once the image \
                      is written they no longer fit it: to keep them, mount it without -inplace \
                      and COMMIT them first",
-                    path.display(),
-                    delta.display()
+                    crate::mount::display_host_path(path),
+                    crate::mount::display_host_path(&delta)
                 ));
             }
             return None;
@@ -305,7 +305,7 @@ impl DiskController {
                 crate::diskdelta::note(format!(
                     "{}: no delta file can be made beside it ({}), so what is written to it goes \
                      into the image",
-                    path.display(),
+                    crate::mount::display_host_path(path),
                     e
                 ));
                 None
