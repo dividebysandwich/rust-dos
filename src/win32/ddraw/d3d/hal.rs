@@ -39,10 +39,10 @@ use super::super::{current_pid, display, state, voodoo};
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
     RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDCURRENTALPHA,
-    TOP_BLENDDIFFUSEALPHA, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_MODULATE2X,
-    TOP_SELECTARG1, TOP_SELECTARG2, TOP_SUBTRACT, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1,
-    TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER,
-    TSS_MINFILTER, TSS_MIPFILTER,
+    TOP_BLENDDIFFUSEALPHA, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TOP_SUBTRACT, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
+    TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
+    TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
 use crate::cpu::Cpu;
@@ -683,17 +683,17 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
 /// descriptions' TextureOpCaps (`OP_CAPS`), and what ValidateDevice
 /// accepts. They are the ones of 3dfx's Voodoo3 driver (its
 /// TextureOpCaps are 0x1EFA5F) that `fbi_combine` has a function for.
-/// MODULATE2X is drawn as MODULATE: the card's combine units have no
-/// doubling. SUBTRACT and the blends take the texture as their first
-/// argument. On stage 1 `tmu_function` draws SUBTRACT and
-/// BLENDDIFFUSEALPHA as MODULATE: the texture unit can't take its
-/// texture less the other one, and has no diffuse alpha (#491).
-pub const OPS: [u32; 10] = [
+/// MODULATE2X and 4X aren't among them, though 3dfx's driver reports
+/// MODULATE2X: the card's combine units have no doubling, and the HAL
+/// draws them as MODULATE (#488). SUBTRACT and the blends take the
+/// texture as their first argument. On stage 1 `tmu_function` draws
+/// SUBTRACT and BLENDDIFFUSEALPHA as MODULATE: the texture unit can't
+/// take its texture less the other one, and has no diffuse alpha (#491).
+pub const OPS: [u32; 9] = [
     TOP_DISABLE,
     TOP_SELECTARG1,
     TOP_SELECTARG2,
     TOP_MODULATE,
-    TOP_MODULATE2X,
     TOP_ADD,
     TOP_SUBTRACT,
     TOP_BLENDDIFFUSEALPHA,

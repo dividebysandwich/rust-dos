@@ -293,7 +293,6 @@ pub const TOP_DISABLE: u32 = 1;
 pub const TOP_SELECTARG1: u32 = 2;
 pub const TOP_SELECTARG2: u32 = 3;
 pub const TOP_MODULATE: u32 = 4;
-pub const TOP_MODULATE2X: u32 = 5;
 pub const TOP_ADD: u32 = 7;
 pub const TOP_SUBTRACT: u32 = 10;
 pub const TOP_BLENDDIFFUSEALPHA: u32 = 12;

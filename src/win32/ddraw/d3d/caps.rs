@@ -274,12 +274,12 @@ mod tests {
 
     #[test]
     fn the_texture_op_caps_are_the_drawn_part_of_3dfxs() {
-        // Disable, select argument 1 and 2, modulate and modulate 2x,
-        // add, subtract, and blending by diffuse, texture and current
-        // alpha. Not ADDSMOOTH (0x400), which 3dfx's driver doesn't
-        // report, or BLENDTEXTUREALPHAPM (0x4000), which the HAL doesn't
+        // Disable, select argument 1 and 2, modulate, add, subtract, and
+        // blending by diffuse, texture and current alpha. Not ADDSMOOTH
+        // (0x400), which 3dfx's driver doesn't report, or MODULATE2X
+        // (0x10) and BLENDTEXTUREALPHAPM (0x4000), which the HAL doesn't
         // draw.
-        assert_eq!(TEXTURE_OPS, 0x9A5F);
+        assert_eq!(TEXTURE_OPS, 0x9A4F);
         assert_eq!(TEXTURE_OPS & !VOODOO3_DRIVER, 0);
     }
 }
