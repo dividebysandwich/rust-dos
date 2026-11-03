@@ -643,16 +643,19 @@ machine runs or is paused (in deterministic mode a load waits for a pause,
 see "Deterministic runs"). A load puts in the hardware settings the state
 was saved with, then the machine, which mounts the drives as the state had
 them and unmounts the others; a state of another `memsize` brings its
-memory size as well. A booted system's disk image comes back from the
-copy beside the state file into the image the running machine has in
-that drive, which keeps it: a load never writes the image the state was
-saved with when this machine mounts another (see CONFIGURATION.md's
-"Booting a disk image"). The speed isn't one of the hardware settings: the
-machine goes on at the speed it runs at (`--cycles`, the configuration's,
-or the last `/api/speed`), whatever the state was saved at. A fixed speed
-and `max` keep their rate, and `auto` starts its search from the state's.
-In deterministic mode the machine takes the state's speed instead (see
-"Deterministic runs").
+memory size as well. A booted system's disk comes back from what the state
+file keeps beside it. The changes of a disk mounted with `-overlay`
+(`a.C.rdelta`) go back only over the image they were made over, into its
+delta file; a load over an image that is gone or changed is refused. A
+copy of a whole disk (`a.C.img`) goes into the image the running machine
+has in that drive, which keeps it: a load never writes the image the
+state was saved with when this machine mounts another (see
+CONFIGURATION.md's "Booting a disk image"). The speed isn't one of the
+hardware settings: the machine goes on at the speed it runs at
+(`--cycles`, the configuration's, or the last `/api/speed`), whatever the
+state was saved at. A fixed speed and `max` keep their rate, and `auto`
+starts its search from the state's. In deterministic mode the machine
+takes the state's speed instead (see "Deterministic runs").
 Breakpoints, watchpoints and `break_on` stops stay, and keys held down
 through `/api/input` or the window go up.
 
@@ -852,14 +855,14 @@ is loaded with `check_files`, these are compared as well:
 - the SHA-256 of each writable image, the whole file, and of a writable
   image's delta file.
 
-A booted system's disks are left out, as the state keeps a copy of them
-that the load puts back (see "Booted systems"). A state saved on a
-writable drive leaves its own files out (`a.state`, and `a.C.img` and the
-like beside it), but another state file there is a file like any other:
-keep states outside the drives' folders, or the next save to them
-counts as a change. Labels, the files' times
-and read-only folders' contents aren't compared. Z: and X:, which the
-machine makes itself, aren't listed.
+A booted system's disks are left out, as the state keeps them beside it
+and the load puts them back (see "Booted systems"). A state saved on a
+writable drive leaves its own files out (`a.state`, and `a.C.img`,
+`a.C.rdelta` and the like beside it), but another state file there is a
+file like any other: keep states outside the drives' folders, or the next
+save to them counts as a change. Labels, the files' times and read-only
+folders' contents aren't compared. Z: and X:, which the machine makes
+itself, aren't listed.
 
 #### Loading a state in another run
 
@@ -1058,8 +1061,9 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
   context. Watchpoints on physical addresses find who writes a page table
   entry or descriptor.
 - **Save states** of a booted system bring its disks back with it: in a
-  run through a journal of the writes, and from the `.C.img` copies
-  beside a state file in another.
+  run through a journal of the writes, and in another from what is beside
+  the state file: `.C.rdelta`, the changes of a disk mounted with
+  `-overlay`, which needs the same image, or `.C.img`, a whole copy.
 - **IDE:** the log's `[IDE]` lines at the boot say which hard disk and
   CD-ROM drive are on which channel, and name unknown commands. The
   system's own driver's traffic shows in the port log

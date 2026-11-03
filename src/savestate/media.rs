@@ -362,8 +362,8 @@ fn walk(dir: &Path, prefix: &str, own: &StateFiles, beside: Option<&str>, out: &
 }
 
 /// A state file's own files, which a record of the drive it is on leaves
-/// out: `a.state`, `a.partial` while it is written, and `a.C.img` and the
-/// like (disks.rs).
+/// out: `a.state`, `a.partial` while it is written, and `a.C.img`,
+/// `a.C.rdelta` and the like (disks.rs).
 struct StateFiles {
     /// The folder they are in, if it is there.
     dir: Option<PathBuf>,
@@ -392,8 +392,15 @@ impl StateFiles {
 
     fn has(&self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        // `a.C.img`, `a.2.img`: the copy of a drive's disk (`disks::copy_path`).
-        let key = name.strip_prefix(&self.stem).and_then(|rest| rest.strip_prefix('.')).and_then(|rest| rest.strip_suffix(".img"));
+        // `a.C.img`, `a.2.img`: the copy of a drive's disk (`disks::copy_path`),
+        // or `a.C.rdelta`, its changes (`disks::changes_path`).
+        let key = name
+            .strip_prefix(&self.stem)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .and_then(|rest| {
+                rest.strip_suffix(".img")
+                    .or_else(|| rest.strip_suffix(".rdelta"))
+            });
         let copy = key.is_some_and(|key| {
             (key.len() == 1 && key.bytes().all(|b| b.is_ascii_alphabetic()))
                 || (!key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()))

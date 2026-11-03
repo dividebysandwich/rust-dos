@@ -1894,8 +1894,9 @@ Deleting the `.rdelta` file takes the disk back to the image. The delta
 file is made for its image: if the image changes after, the delta file is
 refused. An image in an archive gets a delta file in the overlay folder in
 the same way (one copied there whole by an older Rust-DOS is still used).
-State files of a system booted from such a disk keep a copy of the whole
-disk, as they do of any other.
+State files of a system booted from such a disk keep only its changes, a
+copy of the delta file, and load only over the same image (see [Booting a
+disk image](#booting-a-disk-image)).
 
 A: and B: are always floppy drives, whatever type the mount gives, and
 can't hold a CD or a partitioned hard disk image. Programs see them the way
@@ -2206,19 +2207,36 @@ drive is empty by then, as a PC that boots from A: and then C: does.
 Changes to the hardware settings wait for the prompt.
 
 What the system writes goes into the image, so try things on a copy (on
-btrfs or XFS, `cp --reflink=auto` takes no room). [Save
+btrfs or XFS, `cp --reflink=auto` takes no room), or mount the image with
+[`-overlay DIR`](#mounting-drives), which leaves it as it is and puts what
+the system writes in a delta file in `DIR`. [Save
 states](README.md#save-states) and rewind keep the disks in step with the
 system's memory: in a run, the disks go back with a state through a journal
-of what the system wrote over (the last 256 MB of it), and a state file has
-a copy of each disk beside it (`slot1.C.img` for `slot1.state`, or
-`slot1.2.img` for the disk mounted as 2, which takes no room where the
-filesystem shares data between files) that loading it puts back. The copy
-goes into the image the loading machine has in that drive, not the one
-the state was saved with, so a configuration that mounts a scratch copy
-of the image as C: can load states of the system without touching the
-original. The image must be the size of the copy, and a machine with no
-image in the drive (a folder as C:, or nothing) refuses the load. The
-browser's slots can't hold disks and refuse a booted system's state.
+of what the system wrote over (the last 256 MB of it), and a state file
+keeps each disk beside it, which loading it puts back:
+
+- A disk mounted with `-overlay` keeps only its changes: a copy of its
+  delta file as it was at the state (`slot1.C.rdelta` for `slot1.state`,
+  or `slot1.2.rdelta` for the disk mounted as 2), a few MB to a few
+  hundred for a Windows session. Its header names the image, with the
+  image's size and a hash of its first MB and last 64 KB. The changes go
+  back only over that image, with its changes in a delta file again: the
+  delta file of the drive as the loading machine has it, or, with no
+  image in that drive (a folder as C:, or nothing), the drive mounted as
+  the state had it. A load over an image that is gone, has changed, or is
+  mounted without `-overlay` is refused, and the message names the drive
+  and the image.
+- Any other disk is copied whole (`slot1.C.img`, which takes no room where
+  the filesystem shares data between files), and the log says how big the
+  copy is. The copy goes into the image the loading machine has in that
+  drive, not the one the state was saved with, so a configuration that
+  mounts a scratch copy of the image as C: can load states of the system
+  without touching the original. The image must be the size of the copy,
+  and a machine with no image in the drive refuses the load. States saved
+  so by older versions load as they did, into an image with or without
+  `-overlay`.
+
+The browser's slots can't hold disks and refuse a booted system's state.
 
 ### Windows 95
 
