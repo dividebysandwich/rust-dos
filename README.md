@@ -336,20 +336,24 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
   deterministic mode.
 * A slot is the file `slot1.state` (to `slot9.state`): the machine,
   deflated, with a picture of the screen. Its size follows the memory in
-  use, from about a MB for a DOS game to some tens of MB for Windows with
+  use, from about a MB for a DOS game to 10 to 30 MB for Windows with
   128 MB.
 * Files on the host and in disk images aren't part of a state: a drive
   mounted from a folder is recorded by its path, and what a program wrote
   since stays written, as in DOSBox. So a state of a game stays small
   however big the game is, and loading it after you change the game's
-  files gives the game the changed files.
+  files gives the game the changed files. A file the game had open is
+  opened again at the place it had got to: one changed since reads as it
+  is now, and one deleted since stays closed.
 * A system [booted from a disk
   image](CONFIGURATION.md#booting-a-disk-image) is the exception: its
   disks go back with its state. A hard disk image's changes are kept
   beside the slot (`slot1.C.rdelta`), a few MB to a few hundred, and
   load only over the same image: after a `COMMIT`, or after the image
-  is replaced, the slots of the system from before no longer load. Copy
-  or delete a slot's `.rdelta` files along with its `.state`.
+  is replaced, the slots of the system from before no longer load. A
+  floppy, or a disk mounted with `-inplace`, is copied whole
+  (`slot1.A.img`, `slot1.C.img`). Copy or delete a slot's `.rdelta` and
+  `.img` files along with its `.state`.
 * The FM chip and MIDI synthesizers are told their registers and
   instruments again, so notes that were playing start again.
 
