@@ -1963,6 +1963,24 @@ changes after (put in anew, or written by another program or with
 as it is now. An image that was written in place before simply gets a
 delta file over it on its next mount.
 
+What that means for the usual tasks:
+
+- To start a disk again from the image, delete `<image>.rdelta`.
+- To keep several setups over one image (a clean install, and a copy of
+  it for each game), mount it with `-overlay DIR`, a folder for each
+  setup: each gets its own delta file there. Without `-overlay`, every
+  configuration that mounts the image shares the one beside it.
+- To back up a setup, copy its delta file; the image needs copying only
+  once.
+- To move a setup to another folder or machine, copy the image and its
+  delta file together, with the image's modification time kept (`cp -p`,
+  `rsync -t`, Explorer and `robocopy` keep it, a plain `cp` doesn't). The
+  time has to match to the nanosecond, so a copy to a drive that keeps
+  times less exactly (FAT32, exFAT, or NTFS for an image from Linux)
+  doesn't fit: `COMMIT` the changes into the image before such a move.
+- To give the disk to another program, or to share the image with its
+  changes in it, `COMMIT` it first.
+
 `-inplace` writes the image itself, and state files then keep a whole
 copy of the disk. It leaves out a delta file that is beside the image,
 which the log tells: once the image is written, those changes no longer
