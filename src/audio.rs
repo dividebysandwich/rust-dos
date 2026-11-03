@@ -157,9 +157,10 @@ pub struct Feed {
     pos: f64,
     last: (i16, i16),
     /// Frames kept queued on top of the device's target since the host
-    /// ran it dry (`GROWTH_MS`), and the pumps since it last did.
+    /// ran it dry (`GROWTH_MS`), and the frames of sound handed on since
+    /// it last did or the queue last shrank.
     extra: usize,
-    calm: u32,
+    calm: usize,
     /// The device has played sound since the start or the last wait, and
     /// whether the last pump found it dry.
     playing: bool,
@@ -171,15 +172,23 @@ pub struct Feed {
 /// the frame loop up once (the thread woke late from its sleep, another
 /// program took the processor) is likely to again, and each time the sound
 /// gaps. Silence fills the queue up to the longer target at once, in the
-/// gap that is there anyway. After `CALM_PUMPS` pumps (a minute of frames)
-/// with sound all along, it shrinks by `SHRINK_MS`, which the resampling
-/// takes out of the queue little by little. So a quiet host keeps the
+/// gap that is there anyway. After `CALM_SECONDS` of the machine's sound
+/// with sound queued all along, it shrinks by `SHRINK_MS`, which the
+/// resampling takes out of the queue little by little. The time counts in
+/// frames of sound, as the pumps come at the video mode's refresh rate:
+/// 3,600 of them are 51 seconds at 70 Hz. So a quiet host keeps the
 /// latency `blocksize` and `prebuffer` set, and a busy one trades a few
 /// milliseconds of it for sound without gaps.
 const GROWTH_MS: usize = 10;
 const MOST_GROWTH_MS: usize = 60;
-const SHRINK_MS: usize = 5;
-const CALM_PUMPS: u32 = 3600;
+const CALM_SECONDS: usize = 60;
+/// More than `STEER_FROM_MS`: a smaller step leaves the queue inside the
+/// band `steer` lets be, and its latency stays where it was.
+const SHRINK_MS: usize = 10;
+const _: () = assert!(SHRINK_MS > STEER_FROM_MS);
+/// How far the queue's average strays from its target before `steer`
+/// starts bringing it back.
+const STEER_FROM_MS: usize = 5;
 
 impl Default for Feed {
     fn default() -> Self {
@@ -202,15 +211,23 @@ impl Feed {
         self.extra
     }
 
-    /// A pump found `queued` frames waiting, `idle` while the machine
-    /// waits. The queue grows at the first dry pump of a stretch after
-    /// the device played sound, and shrinks after a calm minute.
-    fn looked(&mut self, queued: usize, idle: bool, rate: usize) {
+    /// The device started over with an empty queue, as a new block size
+    /// opens it again: its first pump finds it dry with no stall of the
+    /// host, as after a wait.
+    pub fn restart(&mut self) {
+        self.playing = false;
+        self.dry = false;
+    }
+
+    /// A pump found `queued` frames waiting and brought `frames` of
+    /// sound, `idle` while the machine waits. The queue grows at the
+    /// first dry pump of a stretch after the device played sound, and
+    /// shrinks after a calm minute.
+    fn looked(&mut self, queued: usize, frames: usize, idle: bool, rate: usize) {
         if idle {
             // The device may run out while nothing runs: no stall of the
             // host, and the next sound starts it again.
-            self.playing = false;
-            self.dry = false;
+            self.restart();
             return;
         }
         if queued == 0 {
@@ -224,8 +241,8 @@ impl Feed {
         }
         self.playing = true;
         self.dry = false;
-        self.calm += 1;
-        if self.calm >= CALM_PUMPS {
+        self.calm += frames;
+        if self.calm >= rate * CALM_SECONDS {
             self.calm = 0;
             self.extra = self.extra.saturating_sub(rate * SHRINK_MS / 1000);
         }
@@ -238,7 +255,8 @@ impl Feed {
         let level = self.level.map_or(queued as f64, |level| level + (queued as f64 - level) * 0.05);
         self.level = Some(level);
         let off = (level - target as f64) / rate as f64;
-        if off.abs() > 0.005 || (self.step != 1.0 && off.abs() > 0.001) {
+        let from = STEER_FROM_MS as f64 / 1000.0;
+        if off.abs() > from || (self.step != 1.0 && off.abs() > 0.001) {
             self.step = 1.0 + (off * DRIFT_PER_SECOND).clamp(-MAX_DRIFT, MAX_DRIFT);
         } else {
             self.stop_drifting();
@@ -302,9 +320,9 @@ pub fn pump_audio(bus: &mut Bus, idle: bool) -> Vec<i16> {
         let feed = &mut bus.audio_feed;
         let queued = device.queued_frames();
         let rate = crate::opl::RATE as usize;
-        feed.looked(queued, idle, rate);
-        let target = device.target_frames() + feed.extra;
         let frames = samples.len() / 2;
+        feed.looked(queued, frames, idle, rate);
+        let target = device.target_frames() + feed.extra;
         // Run dry: silence up to the target. A queue that is low but still
         // playing gets none, as silence there would be a gap: the sound
         // coming now keeps it going, and the sound of a slow frame comes
@@ -535,17 +553,34 @@ mod tests {
         pump(&mut bus, &device, 735, 0);
         assert_eq!(bus.audio_feed.extra_frames(), 2646);
 
-        // A minute with sound all along takes 5 ms off, and the queue
-        // drifts down to the shorter target.
-        for _ in 0..CALM_PUMPS {
+        // A minute of sound with sound queued all along takes 10 ms off,
+        // and the queue drifts down to the shorter target in seconds.
+        let shrink = 44_100 * SHRINK_MS / 1000;
+        let minute = 3600;
+        for _ in 0..minute {
             pump(&mut bus, &device, 735, 735);
         }
-        assert_eq!(bus.audio_feed.extra_frames(), 2646 - 220);
-        for _ in 0..CALM_PUMPS * 12 {
+        assert_eq!(bus.audio_feed.extra_frames(), 2646 - shrink);
+        let near = |device: &std::rc::Rc<std::cell::RefCell<Device>>, target: usize| {
+            let queued = device.borrow().queued - 735;
+            assert!(queued.abs_diff(target) <= 66, "{queued} for {target}");
+        };
+        for _ in 0..600 {
+            pump(&mut bus, &device, 735, 735);
+        }
+        near(&device, 1400 + 2646 - shrink);
+        // The time is the sound's: frames of a 70 Hz mode bring less each.
+        for _ in 0..(minute - 600) * 735 / 630 - 1 {
+            pump(&mut bus, &device, 630, 630);
+        }
+        assert_eq!(bus.audio_feed.extra_frames(), 2646 - shrink, "{}", bus.audio_feed.calm);
+        for _ in 0..(2646 / shrink) * minute {
             pump(&mut bus, &device, 735, 735);
         }
         assert_eq!(bus.audio_feed.extra_frames(), 0);
-        let queued = device.borrow().queued - 735;
-        assert!((1400 - 44..1400 + 265).contains(&queued), "{queued}");
+        for _ in 0..600 {
+            pump(&mut bus, &device, 735, 735);
+        }
+        near(&device, 1400);
     }
 }

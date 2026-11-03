@@ -192,7 +192,7 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
 
   The first check of a stretch after the device played sound keeps the
   queue 10 ms longer from then on, up to 60 ms over `blocksize` and
-  `prebuffer`, and a minute without a dry check takes 5 ms of that off
+  `prebuffer`, and a minute without a dry check takes 10 ms of that off
   again. `queue_growth_ms` is what it keeps on top now (in `/api/status`,
   `audio.queue_growth_frames`), and each record's `target_ms` includes
   it. So stalls of the host come with fewer gaps after the first, and a

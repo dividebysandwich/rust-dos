@@ -573,6 +573,10 @@ impl Host for MainHost<'_, '_> {
             && let Some(device) = &mut self.cpu.bus.audio_device
         {
             device.set_buffer(new.audio_buffer)?;
+            // A new block size empties the device's queue: no stall of the
+            // host to keep the queue longer for, whatever the machine is
+            // doing (a game's own settings come in while it runs).
+            self.cpu.bus.audio_feed.restart();
         }
         if new.joystick != old.joystick {
             self.cpu.bus.set_joystick(new.joystick);
