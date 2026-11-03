@@ -128,6 +128,9 @@ pub static DLLS: &[&Dll] = &[
     &super::vfw::msvfw32::DLL,
     &super::vfw::avifil32::DLL,
     &super::dinput::DLL8,
+    &super::msacm32::DLL,
+    &super::dciman32::DLL,
+    &super::wnaspi32::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -284,7 +287,7 @@ pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image
 /// gives for it (verdll.rs).
 pub fn file(index: usize, version: super::version::WindowsVersion) -> Vec<u8> {
     let mut b = builder(index, version);
-    let resource = super::verdll::builtin_version(DLLS[index].name);
+    let resource = super::verdll::builtin_version(DLLS[index].name, version);
     b.resource(RT_VERSION, VS_VERSION_INFO, LANG_ENGLISH_US, &resource);
     b.build()
 }
@@ -488,12 +491,33 @@ mod tests {
         "MSVFW32.DLL",
         "AVIFIL32.DLL",
         "DINPUT8.DLL",
+        "MSACM32.DLL",
+        "DCIMAN32.DLL",
+        "WNASPI32.DLL",
     ];
 
     #[test]
     fn dlls_are_only_appended() {
         let names: Vec<&str> = DLLS.iter().map(|dll| dll.name).collect();
         assert_eq!(names, ORDER, "a DLL inserted before the end moves every later stub id");
+    }
+
+    /// Two DLLs whose images overlap can't both be loaded: the second
+    /// would be mapped over the first.
+    #[test]
+    fn dll_images_dont_overlap() {
+        let version = super::super::version::WindowsVersion::Win98Se;
+        let mut spans: Vec<(u32, u32, &str)> = (0..DLLS.len())
+            .map(|i| {
+                let size = image(i, version).headers.size_of_image;
+                (DLLS[i].base, DLLS[i].base + size, DLLS[i].name)
+            })
+            .collect();
+        spans.sort();
+        for pair in spans.windows(2) {
+            let ((_, end, a), (start, _, b)) = (pair[0], pair[1]);
+            assert!(end <= start, "{a} ends at {end:08X}, past {b}'s base {start:08X}");
+        }
     }
 
     #[test]

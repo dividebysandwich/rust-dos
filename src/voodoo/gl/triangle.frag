@@ -2,25 +2,39 @@
 // rasterizer has it (src/voodoo/raster.rs) in the card's integers: the
 // texture units' lookups and combines, the colour and alpha combine,
 // chroma key, alpha mask and test, fog, the depth value and, with
-// u_dither, the dithering to 5-6-5. The depth test, blending and the write
-// masks are OpenGL's own, set for each draw.
+// u_dither, the dithering to 5-6-5. The depth test and the write masks
+// are OpenGL's own, set for each draw, and so is blending where the draw
+// doesn't dither.
 //
 // The buffers have 8 bits a component. Where fbzMode bit 8 dithers and
 // u_dither is on, the colour is dithered to 5-6-5 with the card's matrix
 // and rounding (`tables::dither_rb`) and widened again as the card's
-// picture widens its pixels, so an unblended pixel is the one the software
-// rasterizer writes. The matrix is indexed by the card's pixel, so above
-// 1x each cell covers u_scale by u_scale buffer pixels. OpenGL blends
-// after the shader, so a blended pixel is dithered before the blend
-// instead of after it, and isn't the card's: the card dithers the blend's
-// result (and with fbzMode bit 19 takes the dither back out of the colour
-// it reads first). The texture units' LOD dither isn't here either, as
-// OpenGL picks the mipmap levels.
+// picture widens its pixels, so a pixel is the one the software rasterizer
+// writes. The matrix is indexed by the card's pixel, so above 1x each cell
+// covers u_scale by u_scale buffer pixels. The card blends before it
+// dithers, with the 5-6-5 pixel it reads, and with fbzMode bit 19 takes
+// the dither back out of that pixel first. OpenGL blends after the shader,
+// so for a dithered draw that blends (u_card_blend) the shader blends
+// itself, as the card does, with the pixels underneath in u_dst: the
+// buffer being drawn into, behind a texture barrier, or where there is no
+// barrier or the buffer has samples, a copy VoodooGl makes before it draws.
+//
+// The texture units pick their levels of detail as the card does, in
+// perspective from each pixel's footprint (the triangle's gradients,
+// v_dx and v_dy, with S/W, T/W and W at the pixel), and without it the
+// triangle's level (v_lod). They read and filter the card's texels
+// themselves with its fractions. With anisotropy (u_gl_sampling) OpenGL
+// filters them instead, at the card's level.
 
 noperspective in vec4 v_color;
 noperspective in vec2 v_zw;
 noperspective in vec3 v_tex0;
 noperspective in vec3 v_tex1;
+flat in vec2 v_lod;
+flat in vec3 v_dx0;
+flat in vec3 v_dy0;
+flat in vec3 v_dx1;
+flat in vec3 v_dy1;
 
 out vec4 o_color;
 
@@ -44,6 +58,11 @@ uniform int u_fogdelta[64];
 uniform int u_constant_depth;
 // Buffer pixels a card pixel is across.
 uniform float u_scale;
+// The scale the texels' levels are picked for: u_scale where the screen
+// shows the buffer at that scale, 1 where the buffers reach it only
+// through the card's memory, at the card's resolution
+// (`VoodooGl::level_scale`).
+uniform float u_level_scale;
 // Whether to dither as the card does where fbzMode says so
 // (`voodoo_dither`).
 uniform int u_dither;
@@ -56,15 +75,27 @@ uniform sampler2D u_tex0;
 uniform sampler2D u_tex1;
 uniform int u_tmode0;
 uniform int u_tmode1;
-// Level 0's size in texels, and the LOD bias in levels.
-uniform vec3 u_tsize0;
-uniform vec3 u_tsize1;
+// Level 0's size in texels.
+uniform vec2 u_tsize0;
+uniform vec2 u_tsize1;
 // lodmin, lodmax, lodbias (8.8), and the detail factor's bias, maximum
 // and scale.
 uniform ivec3 u_tlod0;
 uniform ivec3 u_tlod1;
+// The card's level the texture's first starts at, the levels it has
+// (lodmask) and the fraction bits it filters with.
+uniform ivec3 u_tlevels0;
+uniform ivec3 u_tlevels1;
+// Whether OpenGL filters the texels (with anisotropy).
+uniform int u_gl_sampling;
 uniform ivec3 u_tdetail0;
 uniform ivec3 u_tdetail1;
+// Whether the shader blends as the card does, with the pixels the draw
+// goes over in u_dst (with OpenGL's blending off): 0 not, 1 with an alpha
+// of 255, 2 with the alpha planes' alpha (fbzMode bit 18 and an
+// auxiliary buffer to hold them).
+uniform int u_card_blend;
+uniform sampler2D u_dst;
 
 bool bit(int v, int n) {
     return ((v >> n) & 1) != 0;
@@ -213,19 +244,129 @@ int depthValue() {
     return d;
 }
 
-// A texture unit's texel and the level of detail it was read at (8.8).
-ivec4 fetch(sampler2D tex, vec3 stw, int mode, vec3 size, ivec3 lod, out int level) {
+// The pixel's footprint in perspective (8.8) less 2 log2(1/W), as
+// `Footprint` in src/voodoo/raster.rs has it: half of log2 of the longer
+// of W times the gradients of S/W and T/W less S/W and T/W times W's.
+int footprint(vec3 stw, vec3 dx, vec3 dy) {
+    vec2 across = stw.z * dx.xy - stw.xy * dx.z;
+    vec2 down = stw.z * dy.xy - stw.xy * dy.z;
+    float squared = max(dot(across, across), dot(down, down));
+    return squared > 0.0 ? int(round(log2(squared) * 128.0)) : -(1000 << 8);
+}
+
+// A texture unit's level of detail at the pixel (8.8), as `texture` in
+// src/voodoo/raster.rs has it: with perspective the footprint plus
+// 2 log2(1/W), without it the triangle's level, then the bias, and with
+// textureMode bit 4 the 4x4 dither matrix's 16ths of a level, before it
+// is clamped to the unit's limits.
+int levelOfDetail(vec3 stw, float lodbase, vec3 dx, vec3 dy, int mode, ivec3 lod) {
+    int l = int(lodbase);
+    if (bit(mode, 0)) {
+        // `reciplog` takes |W|, and gives 1000 levels for 0.
+        float aw = abs(stw.z);
+        l = footprint(stw, dx, dy) + 2 * (aw > 0.0 ? int(round(-log2(aw) * 256.0)) : 1000 << 8);
+    }
+    l += lod.z;
+    if (bit(mode, 4) && dithers()) {
+        l += DITHER4[ditherIndex(cardPixel())] << 4;
+    }
+    return l;
+}
+
+// A texel's coordinates at a level of `wrap` texels less one, clamped
+// where textureMode bits 6 and 7 say so, and wrapped.
+ivec2 texelAt(ivec2 at, int mode, ivec2 wrap) {
+    if (bit(mode, 6)) {
+        at.x = clamp(at.x, 0, wrap.x);
+    }
+    if (bit(mode, 7)) {
+        at.y = clamp(at.y, 0, wrap.y);
+    }
+    return at & wrap;
+}
+
+// The texel at `at` of a level, from texture level `stored`, which holds
+// it or (`spread` 1) the level after it at twice its size
+// (`mirror::decode`).
+ivec4 texel(sampler2D tex, ivec2 at, int stored, int spread) {
+    return ivec4(round(texelFetch(tex, at << spread, stored) * 255.0));
+}
+
+// Whether a texture unit's combine reads its texel, the unit's local
+// colour (`uses_local`): where it doesn't, the texel isn't read.
+bool usesLocal(int mode) {
+    int c = (mode >> 14) & 7;
+    int add = (mode >> 18) & 3;
+    int ca = (mode >> 23) & 7;
+    return bit(mode, 13) || c == 1 || c == 3 || add == 1 || add == 2 || bit(mode, 22)
+        || ca == 1 || ca == 3 || ((mode >> 27) & 3) != 0;
+}
+
+// a to b by `f` 256ths, as the card blends (`tables::bilinear`).
+ivec4 blend(ivec4 a, ivec4 b, int f) {
+    return a + (((b - a) * f) >> 8);
+}
+
+// A texture unit's texel and the level of detail it was read at (8.8),
+// with `dx` and `dy` the unit's gradients of S/W, T/W and W.
+ivec4 fetch(sampler2D tex, vec3 stw, float lodbase, vec3 dx, vec3 dy, int mode, vec2 size,
+    ivec3 lod, ivec3 levels, out int level) {
     vec2 st = bit(mode, 0) ? stw.xy / stw.z : stw.xy;
     if (bit(mode, 3) && stw.z < 0.0) {
         st = vec2(0.0);
     }
-    // How many level 0 texels a pixel of the card's spans.
-    vec2 dx = dFdx(st) * u_scale;
-    vec2 dy = dFdy(st) * u_scale;
-    float rho = max(dot(dx, dx), dot(dy, dy));
-    level = clamp(int(log2(max(rho, 1e-12)) * 128.0) + lod.z, lod.x, lod.y);
-    vec4 c = texture(tex, st / size.xy, size.z);
-    return ivec4(round(c * 255.0));
+    int l = levelOfDetail(stw, lodbase, dx, dy, mode, lod);
+    // The combine takes the card's level; the texels come from the level
+    // the card would take at u_level_scale times its resolution, where
+    // S/W and T/W change that many times slower a pixel: the same at 1x,
+    // sharper above.
+    // Raised to lodmin, then lowered to lodmax: lodmax where lodmin is
+    // above it, as the card has it (GLSL's clamp leaves that undefined).
+    level = min(max(l, lod.x), lod.y);
+    int sharper = int(round(log2(u_level_scale) * 256.0));
+    int sampled = min(max(l - sharper, lod.x), lod.y);
+    if (!usesLocal(mode)) {
+        // The combine reads only the level.
+        return ivec4(0);
+    }
+    if (u_gl_sampling != 0) {
+        // OpenGL's level from the gradients is log2 of the level 0 texels
+        // a pixel spans, less the levels before the texture's first:
+        // scaled to the card's level, less half a level, as OpenGL rounds
+        // to the nearest level where the card takes the one below.
+        vec2 dx = dFdx(st);
+        vec2 dy = dFdy(st);
+        float span = 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-12));
+        float k = exp2(float(sampled) / 256.0 - 0.498 - span);
+        vec4 c = textureGrad(tex, st / size, dx * k / size, dy * k / size);
+        return ivec4(round(c * 255.0));
+    }
+    // The level, the next one where the texture hasn't it, and the
+    // texture's level that holds it.
+    int ilod = sampled >> 8;
+    int stored = min(ilod, 8);
+    if (((levels.y >> min(ilod, 31)) & 1) == 0) {
+        ilod++;
+    }
+    ilod = min(ilod, 8);
+    int spread = ilod - stored;
+    stored -= levels.x;
+    ivec2 wrap = (ivec2(size) - 1) >> ilod;
+    // The card's S and T are 14.18 in level 0 texels, which wrap.
+    st -= 16384.0 * floor((st + 8192.0) / 16384.0);
+    bool point = sampled == lod.x ? !bit(mode, 2) : !bit(mode, 1);
+    if (point) {
+        ivec2 at = ivec2(floor(st * exp2(float(-ilod))));
+        return texel(tex, texelAt(at, mode, wrap), stored, spread);
+    }
+    // Bilinear, from half a texel back, with the card's fraction bits.
+    ivec2 at = ivec2(floor(st * exp2(float(8 - ilod)))) - 128;
+    ivec2 f = at & levels.z;
+    ivec2 a = texelAt(at >> 8, mode, wrap);
+    ivec2 b = texelAt((at >> 8) + 1, mode, wrap);
+    ivec4 top = blend(texel(tex, a, stored, spread), texel(tex, ivec2(b.x, a.y), stored, spread), f.x);
+    ivec4 bottom = blend(texel(tex, ivec2(a.x, b.y), stored, spread), texel(tex, b, stored, spread), f.x);
+    return blend(top, bottom, f.y);
 }
 
 // A texture unit's combine of its texel (local) with the unit before it
@@ -407,6 +548,66 @@ ivec3 fog(ivec3 c, int itera, ivec2 pixel) {
     return clamp(!bit(u_fog, 2) ? c + f : f, 0, 255);
 }
 
+// The card's alpha blending (`Row::finish` in src/voodoo/raster.rs) of
+// the colour `c` (before fog `prefog`) with the pixel there, read from
+// u_dst: its 5-6-5 bits, less the dither with fbzMode bit 19, and its
+// alpha from the alpha planes or 255 (u_card_blend).
+ivec4 cardBlend(ivec4 c, ivec3 prefog, ivec2 pixel) {
+    ivec4 dst = ivec4(round(texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0) * 255.0));
+    ivec3 d = dst.rgb & ivec3(0xF8, 0xFC, 0xF8);
+    int da = u_card_blend == 2 ? dst.a : 0xFF;
+    if (bit(u_fbz, 19) && dithers()) {
+        int i = ditherIndex(pixel);
+        int m = bit(u_fbz, 11) ? DITHER2[i] : DITHER4[i];
+        d = ivec3(((d.r << 1) + 15 - m) >> 1, ((d.g << 2) + 15 - m) >> 2, ((d.b << 1) + 15 - m) >> 1);
+    }
+    int sa = c.a;
+    ivec3 s = c.rgb;
+    int f = (u_alpha >> 8) & 15;
+    ivec3 src = ivec3(0);
+    if (f == 1) {
+        src = (s * (sa + 1)) >> 8;
+    } else if (f == 2) {
+        src = (s * (d + 1)) >> 8;
+    } else if (f == 3) {
+        src = (s * (da + 1)) >> 8;
+    } else if (f == 4) {
+        src = s;
+    } else if (f == 5) {
+        src = (s * (0x100 - sa)) >> 8;
+    } else if (f == 6) {
+        src = (s * (0x100 - d)) >> 8;
+    } else if (f == 7) {
+        src = (s * (0x100 - da)) >> 8;
+    } else if (f == 15) {
+        src = (s * (min(sa, 0x100 - da) + 1)) >> 8;
+    }
+    f = (u_alpha >> 12) & 15;
+    ivec3 add = ivec3(0);
+    if (f == 1) {
+        add = (d * (sa + 1)) >> 8;
+    } else if (f == 2) {
+        add = (d * (s + 1)) >> 8;
+    } else if (f == 3) {
+        add = (d * (da + 1)) >> 8;
+    } else if (f == 4) {
+        add = d;
+    } else if (f == 5) {
+        add = (d * (0x100 - sa)) >> 8;
+    } else if (f == 6) {
+        add = (d * (0x100 - s)) >> 8;
+    } else if (f == 7) {
+        add = (d * (0x100 - da)) >> 8;
+    } else if (f == 15) {
+        add = (d * (prefog + 1)) >> 8;
+    }
+    int a = ((u_alpha >> 16) & 15) == 4 ? sa : 0;
+    if (((u_alpha >> 20) & 15) == 4) {
+        a += da;
+    }
+    return clamp(ivec4(src + add, a), 0, 255);
+}
+
 void main() {
     ivec4 iter = ivec4(clampedColor(v_color.r), clampedColor(v_color.g), clampedColor(v_color.b), clampedColor(v_color.a));
 
@@ -417,10 +618,12 @@ void main() {
     ivec4 texel0 = ivec4(0);
     ivec4 texel1 = ivec4(0);
     if (bit(u_units, 1)) {
-        texel1 = fetch(u_tex1, v_tex1, u_tmode1, u_tsize1, u_tlod1, level1);
+        texel1 = fetch(u_tex1, v_tex1, v_lod.y, v_dx1, v_dy1, u_tmode1, u_tsize1, u_tlod1,
+            u_tlevels1, level1);
     }
     if (bit(u_units, 0)) {
-        texel0 = fetch(u_tex0, v_tex0, u_tmode0, u_tsize0, u_tlod0, level0);
+        texel0 = fetch(u_tex0, v_tex0, v_lod.x, v_dx0, v_dy0, u_tmode0, u_tsize0, u_tlod0,
+            u_tlevels0, level0);
     }
     ivec4 texel = ivec4(0);
     if (bit(u_units, 1)) {
@@ -466,12 +669,16 @@ void main() {
     select = (u_fbzcp >> 5) & 3;
     int alocal = select == 0 ? iter.a : select == 1 ? color0.a : select == 2 ? clampedZ(v_zw.x) & 0xFF : clampedW(v_zw.y) & 0xFF;
     ivec4 c = combineColor(other, ivec4(local, alocal), texel);
+    ivec3 prefog = c.rgb;
     if (bit(u_fog, 0)) {
         c.rgb = fog(c.rgb, iter.a, pixel);
     }
 
     int depth = u_constant_depth != 0 ? u_zacolor & 0xFFFF : depthValue();
     gl_FragDepth = float(depth) / 65535.0;
+    if (u_card_blend != 0) {
+        c = cardBlend(c, prefog, pixel);
+    }
     if (dithers()) {
         int i = ditherIndex(pixel);
         c.rgb = dither565(c.rgb, bit(u_fbz, 11) ? DITHER2[i] : DITHER4[i]);

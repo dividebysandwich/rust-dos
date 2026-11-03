@@ -22,7 +22,7 @@ use crate::timer::PIT_HZ;
 use std::rc::Rc;
 
 pub use ata::Ata;
-pub use atapi::Atapi;
+pub use atapi::{Atapi, PacketOutcome};
 
 pub(crate) const BSY: u8 = 0x80;
 pub(crate) const DRDY: u8 = 0x40;

@@ -365,7 +365,7 @@ impl Voodoo {
     /// one of them, in 5-6-5 and with its stride, comes from its drawing.
     /// The other surfaces come from the renderer's copy of the card's
     /// memory, which gets the pages shown that were written since it last
-    /// had them (`pages`), first in the recording.
+    /// had them (`tracker`), first in the recording.
     pub(crate) fn banshee_scanout(&mut self, key: &LayoutKey) -> Option<Box<Scanout>> {
         self.gpu_frame();
         let b = self.banshee.as_deref_mut()?;
@@ -483,6 +483,12 @@ impl Voodoo {
         // The 3D engine draws into its buffers without marking the pages
         // it changes: memory shown that shares pages with them goes again
         // whenever the picture may have changed, after the drawing queued.
+        // The rows of the 3D buffers read back for it turn hot, as for a
+        // program's read: the scanout reads them again every frame the
+        // picture changes, which costs a read back from the GPU each
+        // time, while the software rasterizer leaves them in the memory.
+        // `gpu_takes` refuses the GPU while the software picture is
+        // wanted for the same reason.
         let shared: Vec<(u32, u32)> = spans
             .iter()
             .flatten()
@@ -491,11 +497,11 @@ impl Voodoo {
             .collect();
         if dirty && !shared.is_empty() {
             if self.writes_queue() {
-                self.flush();
+                self.flush_in(&shared);
             }
             for &(start, end) in &shared {
                 self.gpu_sync(start, end);
-                self.gpu.get_mut().pages.mark(start, end);
+                self.gpu.get_mut().tracker.mark(start, end);
             }
         }
         // The pages shown that the renderer lacks.

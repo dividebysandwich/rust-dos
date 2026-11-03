@@ -28,7 +28,8 @@ static APIS: &[Api16] = &[
     win32("MessageBox", 1, "wppw", U, "MessageBoxA", b'w'),
     rust("InitApp", 5, "w", one),
     win32("PostQuitMessage", 6, "s", U, "PostQuitMessage", b'w'),
-    rust("ExitWindows", 7, "lw", zero),
+    // EW_RESTARTWINDOWS and EW_REBOOTSYSTEM are EWX_REBOOT's bit and more.
+    win32("ExitWindows", 7, "lw", U, "ExitWindowsEx", b'b'),
     rust("SetTimer", 10, "wwwS", set_timer),
     rust("SetSystemTimer", 11, "wwwS", set_timer),
     win32("KillTimer", 12, "ww", U, "KillTimer", b'b'),

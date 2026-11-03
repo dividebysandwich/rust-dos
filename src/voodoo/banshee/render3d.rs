@@ -363,7 +363,7 @@ impl Voodoo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::super::Board;
     use super::super::{MISC_INIT0, VID_CURR_OVERLAY_START_ADDR};
     use super::*;
@@ -904,6 +904,484 @@ mod tests {
         assert!(recorded == software, "the memory ends up the same");
     }
 
+    use super::super::super::gpu::TestRenderer as Renderer;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Two colour buffers of 640 by 64 in tiles, and a depth buffer. The
+    /// renderer (`TestRenderer`) drew both in 0x1234, as their word
+    /// offsets end in 16 zero bits.
+    pub(crate) const A: u32 = 0x10_0000;
+    const B: u32 = 0x20_0000;
+
+    /// A card whose 3D buffers are read back from the renderer
+    /// (`voodoo_readback=gpu`), with `TestRenderer` as the renderer, or
+    /// with None from the software rasterizer.
+    fn gpu_card(log: Option<&Rc<RefCell<Vec<String>>>>) -> Voodoo {
+        let mut v = mirrored();
+        v.set_software_picture(false);
+        if let Some(log) = log {
+            v.set_gpu_link(Some(Box::new(Renderer(Rc::clone(log)))));
+            v.set_gpu_reads(true);
+        }
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1 << 15 | 10);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x40_0000);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1 << 15 | 10);
+        reg3d(&mut v, CLIP_LEFT_RIGHT, 640);
+        reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 64);
+        reg3d(&mut v, ZA_COLOR, 0xFFFF);
+        v
+    }
+
+    /// For tests elsewhere: a card whose renderer (`TestRenderer`, which
+    /// notes its reads in `log`) alone drew a frame of 640 by 64 into a
+    /// linear colour buffer at byte `A`, 1280 bytes a row, in 0x1234.
+    pub(crate) fn gpu_frame_in_linear_buffer(log: &Rc<RefCell<Vec<String>>>) -> Voodoo {
+        let mut v = gpu_card(Some(log));
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut v, A);
+        v
+    }
+
+    /// A frame drawn into `buffer`: the depth cleared, the picture
+    /// covered, the buffer shown.
+    fn draw_frame(v: &mut Voodoo, buffer: u32) {
+        reg3d(v, COL_BUFFER_ADDR, buffer);
+        reg3d(v, FBZ_MODE, 1 << 10);
+        reg3d(v, FASTFILL_CMD, 0);
+        reg3d(v, FBZ_MODE, 1 | 1 << 4 | 3 << 5 | 1 << 9 | 1 << 10);
+        float(v, FSTART_Z, 1000.0);
+        rectangle(v, (0.0, 0.0, 640.0, 64.0), (200.0, 30.0, 60.0));
+        reg3d(v, LEFT_OVERLAY_BUF, buffer);
+        reg3d(v, SWAPBUFFER_CMD, 0);
+        v.take_mirror();
+    }
+
+    /// A rectangle into B textured from A in 5-6-5: the first texel of the
+    /// texture the recording decoded for it, None if it decoded none (it
+    /// had the texture already).
+    fn textured(v: &mut Voodoo) -> Option<u32> {
+        reg3d(v, COL_BUFFER_ADDR, B);
+        reg3d(v, TEX_BASE_ADDR, A);
+        reg3d(v, T_LOD, 0);
+        let mode = 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27;
+        reg3d(v, TEXTURE_MODE, mode);
+        reg3d(v, FBZ_COLOR_PATH, 1 | 1 << 27);
+        reg3d(v, FBZ_MODE, 1 | 1 << 9);
+        rectangle(v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+        reg3d(v, FBZ_COLOR_PATH, 0);
+        let frame = v.take_mirror().unwrap();
+        frame.commands.iter().rev().find_map(|c| match c {
+            Command::Texture(t) => t.levels.first()?.argb.first().copied(),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn reads(log: &Rc<RefCell<Vec<String>>>) -> Vec<String> {
+        let log = log.borrow();
+        log.iter()
+            .filter(|l| l.starts_with("read"))
+            .cloned()
+            .collect()
+    }
+
+    fn gpu_only(v: &Voodoo) -> u64 {
+        v.describe(Now::default())["gpu_only_jobs"]
+            .as_u64()
+            .unwrap()
+    }
+
+    #[test]
+    fn gpu_reads_leave_the_3d_to_the_renderer() {
+        // With voodoo_readback=gpu the triangles and fastfills are drawn
+        // by the renderer alone. A read of the memory through BAR1 reads
+        // back the band of 32 rows it is in, and makes it hot: the next
+        // frame's triangles into that buffer are drawn in software, over
+        // the renderer's pixels, as without the renderer.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        draw_frame(&mut v, A);
+        assert_eq!(gpu_only(&v), 3);
+        assert_eq!(v.describe(Now::default())["held_jobs"], 0);
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0, "the memory waits");
+        assert!(reads(&log).is_empty());
+        let mut pixel = [0u8; 2];
+        v.banshee_memory_read(A, &mut pixel);
+        assert_eq!(u16::from_le_bytes(pixel), 0x1234);
+        assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+        // The second band of rows is still the renderer's alone.
+        let band = 10 * 2048;
+        assert_eq!(v.fbi.ram.get(A as usize / 2 + band), 0);
+        // Hot, A is drawn in software with its depth clear, and only
+        // the rows of A and the depth buffer come back for it; B goes on
+        // on the GPU.
+        log.borrow_mut().clear();
+        draw_frame(&mut v, A);
+        assert_eq!(gpu_only(&v), 3, "A's frame is drawn in software");
+        assert_eq!(
+            reads(&log),
+            [
+                "read None 0..64".to_string(),
+                format!("read {:?} 32..64", Some(A / 2))
+            ]
+        );
+        let mut sw = gpu_card(None);
+        draw_frame(&mut sw, A);
+        let memory = v.frame_buffer();
+        assert_eq!(
+            memory.get(A as usize / 2),
+            sw.frame_buffer().get(A as usize / 2)
+        );
+        draw_frame(&mut v, B);
+        assert_eq!(gpu_only(&v), 6);
+    }
+
+    #[test]
+    fn gpu_reads_texture_from_a_3d_buffer_with_the_renderers_pixels() {
+        // A triangle in B textured from A, which the renderer alone drew:
+        // A comes back from the renderer before the texture is decoded
+        // from it, so the renderer draws with its own pixels, and so does
+        // the software rasterizer.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        draw_frame(&mut v, A);
+        draw_frame(&mut v, B);
+        let texel = textured(&mut v);
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
+        let read = format!("read {:?}", Some(A / 2));
+        assert!(
+            reads(&log).iter().any(|l| l.starts_with(&read)),
+            "{:?}",
+            log.borrow()
+        );
+        // The texture the frame draws with has A's pixels as the
+        // renderer drew them: 0x1234 in 5-6-5, widened.
+        assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
+    }
+
+    #[test]
+    fn gpu_reads_decode_a_texture_again_after_its_buffer_was_read_back() {
+        // A texture decoded from A, then A drawn by the renderer alone and
+        // read back by the 2D engine: the memory under the texture
+        // changed, and the next triangle decodes it again from there.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        assert!(textured(&mut v).is_some());
+        draw_frame(&mut v, A);
+        blit_2d(&mut v, true, (0, 0), (8, 1));
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
+        let texel = textured(&mut v);
+        assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
+    }
+
+    #[test]
+    fn gpu_reads_decode_a_texture_again_after_its_buffer_left_the_layout() {
+        // A program that draws into a texture and then draws with it from
+        // another layout (Giants composes its ground textures so, with a
+        // render target the size of the texture): the texture was decoded
+        // from A before, A is then drawn by the renderer alone, and the
+        // next triangle draws into B with another depth buffer, a layout
+        // without A. A comes back from the renderer as the layout changes,
+        // and the triangle decodes the texture again from it.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        assert!(textured(&mut v).is_some());
+        draw_frame(&mut v, A);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x50_0000);
+        let texel = textured(&mut v);
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0x1234);
+        assert_eq!(texel, Some(0xFF10_45A5), "{texel:x?}");
+    }
+
+    #[test]
+    fn queued_frame_buffer_writes_leave_textures_outside_the_buffers() {
+        // Frame buffer writes go only into the buffers drawn now. Queued
+        // behind held jobs, they don't make a triangle textured from
+        // memory elsewhere draw the jobs held or decode its texture again.
+        let mut v = mirrored();
+        v.pool = super::super::super::workers::Pool::new(2);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1 << 15 | 10);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x40_0000);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1 << 15 | 10);
+        reg3d(&mut v, CLIP_LEFT_RIGHT, 640);
+        reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 64);
+        reg3d(&mut v, COL_BUFFER_ADDR, A);
+        let textured = |v: &mut Voodoo| {
+            reg3d(v, TEX_BASE_ADDR, 0x30_0000);
+            reg3d(v, T_LOD, 0);
+            let mode = 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27;
+            reg3d(v, TEXTURE_MODE, mode);
+            reg3d(v, FBZ_COLOR_PATH, 1 | 1 << 27);
+            reg3d(v, FBZ_MODE, 1 | 1 << 9);
+            rectangle(v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+            reg3d(v, FBZ_COLOR_PATH, 0);
+        };
+        let decoded = |frame: &Frame| {
+            let textures = frame.commands.iter();
+            textures
+                .filter(|c| matches!(c, Command::Texture(_)))
+                .count()
+        };
+        textured(&mut v);
+        assert!(decoded(&v.take_mirror().unwrap()) > 0);
+        reg3d(&mut v, FBZ_MODE, 1 << 9);
+        rectangle(&mut v, (0.0, 0.0, 64.0, 32.0), (255.0, 0.0, 0.0));
+        reg3d(&mut v, LFB_MODE, 0);
+        v.write(
+            0x100_0000 + 3 * 4096 + 6 * 2,
+            0x07E0_F800,
+            u32::MAX,
+            Now::default(),
+        );
+        let held = v.describe(Now::default())["held_jobs"].as_u64().unwrap();
+        assert!(held > 0);
+        let catch_ups = v.catch_ups.get();
+        textured(&mut v);
+        assert_eq!(v.catch_ups.get(), catch_ups, "the jobs stay held");
+        assert_eq!(decoded(&v.take_mirror().unwrap()), 0);
+    }
+
+    #[test]
+    fn a_texture_from_a_buffer_drawn_in_software_is_decoded_again() {
+        // A texture decoded from A, then A drawn by the software
+        // rasterizer, and those jobs done before the next triangle that
+        // takes its texture from A: that triangle decodes it again, as a
+        // card that decodes it for the first time then does.
+        let mut v = gpu_card(None);
+        assert!(textured(&mut v).is_some());
+        draw_frame(&mut v, A);
+        v.flush();
+        let mut fresh = gpu_card(None);
+        draw_frame(&mut fresh, A);
+        let texel = textured(&mut fresh);
+        assert!(texel.is_some());
+        assert_eq!(textured(&mut v), texel, "{texel:x?}");
+    }
+
+    #[test]
+    fn gpu_reads_leave_alpha_planes_to_the_software_rasterizer() {
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, COL_BUFFER_ADDR, A);
+        reg3d(&mut v, FBZ_MODE, 1 << 9 | 1 << 18);
+        rectangle(&mut v, (0.0, 0.0, 64.0, 32.0), (255.0, 0.0, 0.0));
+        assert_eq!(gpu_only(&v), 0);
+        assert_eq!(v.frame_buffer().get(A as usize / 2), 0xF800);
+        assert!(reads(&log).is_empty());
+    }
+
+    #[test]
+    fn gpu_reads_of_the_depth_buffer_after_a_colour_fastfill_read_nothing_back() {
+        // A fastfill writes the depth buffer only with fbzMode's aux
+        // write mask (`fastfill_row`), whatever the depth test bit says:
+        // after one that fills only the colour buffer, the depth buffer
+        // isn't behind the renderer.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, COL_BUFFER_ADDR, A);
+        reg3d(&mut v, FBZ_MODE, 1 << 4 | 1 << 9);
+        reg3d(&mut v, FASTFILL_CMD, 0);
+        assert_eq!(gpu_only(&v), 1);
+        let mut pixel = [0u8; 2];
+        v.banshee_memory_read(0x40_0000, &mut pixel);
+        assert!(reads(&log).is_empty(), "{:?}", log.borrow());
+        v.banshee_memory_read(A, &mut pixel);
+        assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
+    }
+
+    /// Where `blit_2d` copies to: a linear surface of 16-bit pixels,
+    /// 1280 bytes a row.
+    const DESKTOP: u32 = 0x60_0000;
+
+    /// A screen to screen copy by the 2D engine of `size` 16-bit pixels
+    /// from (`from`) of A, in tiles if `tiled` (as `gpu_card` has it),
+    /// else 1280 bytes a row, to (0, 0) of `DESKTOP`.
+    fn blit_2d(v: &mut Voodoo, tiled: bool, from: (u32, u32), size: (u32, u32)) {
+        let src = if tiled {
+            (A | 1 << 31, 3 << 16 | 10)
+        } else {
+            (A, 3 << 16 | 1280)
+        };
+        for (reg, value) in [
+            (0x08, 0),
+            (0x0C, 0x0FFF_0FFF),
+            (0x10, DESKTOP),
+            (0x14, 3 << 16 | 1280),
+            (0x34, src.0),
+            (0x54, src.1),
+            (0x5C, from.1 << 16 | from.0),
+            (0x68, size.1 << 16 | size.0),
+            (0x6C, 0),
+            (0x70, 0xCC << 24 | 1 << 8 | 1),
+        ] {
+            v.banshee_2d_write(reg, value);
+        }
+    }
+
+    /// Pixel (`x`, `y`) of `DESKTOP`.
+    fn desktop(v: &Voodoo, x: u32, y: u32) -> u16 {
+        v.fbi.ram.get(((DESKTOP + y * 1280) / 2 + x) as usize)
+    }
+
+    #[test]
+    fn gpu_reads_2d_register_writes_that_run_no_command_read_nothing_back() {
+        // The 2D engine reads and draws only when a command runs: the
+        // registers set up before then leave the renderer's buffers on
+        // the GPU.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        draw_frame(&mut v, A);
+        for (reg, value) in [
+            (0x08, 0),
+            (0x0C, 0x0FFF_0FFF),
+            (0x10, A),
+            (0x14, 3 << 16 | 1280),
+            (0x64, 0xF800),
+            (0x68, 4 << 16 | 4),
+            (0x6C, 0),
+            // A fill without the initiate bit, and a host to screen blit
+            // still waiting for its data.
+            (0x70, 0xCC << 24 | 5),
+            (0x70, 0xCC << 24 | 1 << 8 | 3),
+        ] {
+            v.banshee_2d_write(reg, value);
+        }
+        assert!(reads(&log).is_empty(), "{:?}", log.borrow());
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0, "the memory waits");
+    }
+
+    #[test]
+    fn gpu_reads_bring_back_the_rows_a_blit_reads() {
+        // A blit from a buffer only the renderer drew: the rows it reads
+        // come back first, the band of 32 rows they are in for a tiled
+        // buffer, and the depth buffer stays on the GPU. Read back, the
+        // rows are the memory's, and the same blit again reads nothing.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        draw_frame(&mut v, A);
+        blit_2d(&mut v, true, (0, 0), (8, 1));
+        assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
+        assert_eq!(desktop(&v, 7, 0), 0x1234);
+        assert_eq!(v.fbi.ram.get(0x40_0000 / 2), 0, "the depth waits");
+        blit_2d(&mut v, true, (0, 0), (8, 1));
+        assert_eq!(reads(&log).len(), 1, "read back once");
+    }
+
+    #[test]
+    fn gpu_reads_a_blit_reads_back_only_its_rectangle() {
+        // In a linear buffer the rows are read back one by one: a copy of
+        // 100 by 4 pixels from (20, 10) reads rows 10 to 13 and no other,
+        // and copies the renderer's pixels.
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        blit_2d(&mut v, false, (20, 10), (100, 4));
+        assert_eq!(reads(&log), [format!("read {:?} 10..14", Some(A / 2))]);
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 1);
+        assert_eq!(desktop(&v, 0, 0), 0x1234);
+        assert_eq!(desktop(&v, 99, 3), 0x1234);
+        assert_eq!(desktop(&v, 100, 3), 0, "past the rectangle");
+        assert_eq!(v.fbi.ram.get(A as usize / 2), 0, "row 0 waits");
+    }
+
+    #[test]
+    fn gpu_reads_a_buffer_blitted_from_every_frame_is_drawn_in_software() {
+        // A windowed game copies its back buffer to the desktop with the
+        // 2D engine every frame. The rows the copy reads back are hot, as
+        // a program's reads are: the next frame into the buffer is drawn
+        // in software, and its copy reads nothing back. The desktop gets
+        // what the software path draws.
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        assert_eq!(gpu_only(&v), 3);
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        assert_eq!(desktop(&v, 639, 63), 0x1234);
+        draw_frame(&mut v, A);
+        assert_eq!(gpu_only(&v), 3, "the second frame is drawn in software");
+        log.borrow_mut().clear();
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        let buffer = format!("read {:?}", Some(A / 2));
+        assert!(
+            !reads(&log).iter().any(|l| l.starts_with(&buffer)),
+            "{:?}",
+            log.borrow()
+        );
+        let mut sw = gpu_card(None);
+        reg3d(&mut sw, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut sw, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut sw, A);
+        blit_2d(&mut sw, false, (0, 0), (640, 64));
+        for (x, y) in [(0, 0), (320, 30), (639, 63)] {
+            assert_eq!(desktop(&v, x, y), desktop(&sw, x, y), "pixel {x} {y}");
+        }
+    }
+
+    #[test]
+    fn gpu_reads_a_buffer_blitted_from_every_frame_goes_back_to_the_gpu_once_cool() {
+        // The rows a copy reads back stay hot for `HOT_FRAMES` frames of
+        // the picture. Then one frame into the buffer goes to the GPU,
+        // its copy reads it back, and the buffer is hot again: the
+        // desktop gets the renderer's pixels in that frame and the
+        // software rasterizer's in the others.
+        use super::super::super::gpu::HOT_FRAMES;
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        blit_2d(&mut v, false, (0, 0), (640, 64));
+        let mut sw = gpu_card(None);
+        reg3d(&mut sw, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut sw, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut sw, A);
+        blit_2d(&mut sw, false, (0, 0), (640, 64));
+        let software = desktop(&sw, 320, 30);
+        assert_ne!(software, 0x1234);
+        let mut on_gpu = Vec::new();
+        for frame in 1..=2 * HOT_FRAMES + 2 {
+            let before = gpu_only(&v);
+            draw_frame(&mut v, A);
+            blit_2d(&mut v, false, (0, 0), (640, 64));
+            if gpu_only(&v) > before {
+                on_gpu.push(frame);
+                assert_eq!(desktop(&v, 320, 30), 0x1234, "frame {frame}");
+            } else {
+                assert_eq!(desktop(&v, 320, 30), software, "frame {frame}");
+            }
+        }
+        // One frame in each period of `HOT_FRAMES` frames goes to the GPU.
+        assert_eq!(on_gpu.len(), 2, "{on_gpu:?}");
+        assert_eq!(on_gpu[1] - on_gpu[0], HOT_FRAMES, "{on_gpu:?}");
+    }
+
+    #[test]
+    fn gpu_reads_a_2d_fill_into_a_buffer_on_the_gpu_stays() {
+        // A fill by the 2D engine into rows of a buffer only the renderer
+        // drew: those rows come back first and the fill goes over them.
+        // The renderer hears of the fill, and the rows aren't behind it
+        // any more: reading back the rest of the buffer later leaves the
+        // fill where it is.
+        let log = Rc::default();
+        let mut v = gpu_frame_in_linear_buffer(&log);
+        for (reg, value) in [
+            (0x08, 0),
+            (0x0C, 0x0FFF_0FFF),
+            (0x10, A),
+            (0x14, 3 << 16 | 1280),
+            (0x64, 0xF800),
+            (0x68, 2 << 16 | 8),
+            (0x6C, 0),
+            (0x70, 0xCC << 24 | 1 << 8 | 5),
+        ] {
+            v.banshee_2d_write(reg, value);
+        }
+        assert_eq!(reads(&log), [format!("read {:?} 0..2", Some(A / 2))]);
+        let memory = v.frame_buffer();
+        let row = 640;
+        assert_eq!(memory.get(A as usize / 2 + 7), 0xF800);
+        assert_eq!(memory.get(A as usize / 2 + row + 7), 0xF800);
+        assert_eq!(memory.get(A as usize / 2 + 8), 0x1234);
+        assert_eq!(memory.get(A as usize / 2 + 2 * row), 0x1234);
+    }
+
     #[test]
     fn half_mode_buffers_are_half_the_desktop() {
         let mut v = mirrored();
@@ -1117,7 +1595,7 @@ mod tests {
 
     #[test]
     fn the_scanout_sends_the_pages_written_since_the_renderer_had_them() {
-        use super::super::super::pages::PAGE;
+        use super::super::super::tracker::PAGE;
         use super::super::{LINEAR, VID_DESKTOP_OVERLAY_STRIDE};
         let mut v = mirrored();
         v.set_software_picture(false);

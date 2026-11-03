@@ -1140,6 +1140,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-mp2"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19c132641af52d4dce3d1f56e92325f0c682e9b49d1dceadc96bd6d02fa74ee1"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-mpeg12video"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9004fa786827c64dec526454e5f9de6f9a6426b9e239124fed494ab4816776"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,7 +1348,7 @@ checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "rust-dos"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "ab_glyph_rasterizer",
  "base64",
@@ -1355,7 +1373,10 @@ dependencies = [
  "libloading",
  "md-5",
  "memchr",
+ "oxideav-core",
  "oxideav-indeo",
+ "oxideav-mp2",
+ "oxideav-mpeg12video",
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1388,21 +1409,21 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-audio-core"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-dma"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-savestate",
 ]
 
 [[package]]
 name = "rust-dos-gus"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1413,14 +1434,14 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-hostdirs"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "rust-dos-installshield"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "flate2",
  "md-5",
@@ -1428,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-libretro"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "glow",
  "rust-dos",
@@ -1437,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-lpt-dac"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1445,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mpu401"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-gus",
@@ -1457,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-mt32"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "libloading",
  "rust-dos-hostdirs",
@@ -1465,11 +1486,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-ne"
-version = "1.8.0"
+version = "1.8.1"
 
 [[package]]
 name = "rust-dos-opl"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "nuked-opl3",
  "rust-dos-audio-core",
@@ -1478,11 +1499,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-pe"
-version = "1.8.0"
+version = "1.8.1"
 
 [[package]]
 name = "rust-dos-rc"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-savestate",
  "rust-dos-zip",
@@ -1490,11 +1511,11 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-savestate"
-version = "1.8.0"
+version = "1.8.1"
 
 [[package]]
 name = "rust-dos-sc55"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "dirs",
  "rust-dos-hostdirs",
@@ -1504,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-soundblaster"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-dma",
@@ -1517,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-tandy"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "rust-dos-audio-core",
  "rust-dos-savestate",
@@ -1525,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "rust-dos-zip"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "flate2",
  "zip",

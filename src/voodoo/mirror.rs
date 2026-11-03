@@ -17,7 +17,12 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 /// A vertex: where it is in the buffer in pixels, rows counted from the
 /// top of the buffer (the Y origin applied), and the values the card
 /// iterates there: the colour in 8-bit units, Z in 16-bit units, W, and
-/// each texture unit's S, T and W (16.32 values as numbers).
+/// each texture unit's S, T and W (16.32 values as numbers). The rest is
+/// the triangle's and the same at its three vertices. `lod` is each unit's
+/// level of detail without perspective (8.8, `Tmu::prepare`). `grad` is
+/// each unit's gradients of S, T and W across the screen and down it, from
+/// which a pixel in perspective works out its own level
+/// (`raster::footprint`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -25,6 +30,8 @@ pub struct Vertex {
     pub color: [f32; 4],
     pub zw: [f32; 2],
     pub tex: [[f32; 3]; 2],
+    pub lod: [f32; 2],
+    pub grad: [[[f32; 3]; 2]; 2],
 }
 
 /// A texture unit as triangles draw with it.
@@ -45,6 +52,10 @@ pub struct TexUnit {
     pub lodmin: i32,
     pub lodmax: i32,
     pub lodbias: i32,
+    /// The levels the texture has (`TmuRaster::lodmask`), and the fraction
+    /// bits bilinear filtering blends with (`Chip::bilinear_mask`).
+    pub lodmask: u32,
+    pub bilinear_mask: i32,
     pub detailmax: i32,
     pub detailbias: i32,
     pub detailscale: u32,
@@ -201,22 +212,14 @@ impl LayoutKey {
     pub fn rows_in(&self, start: u32, end: u32) -> Vec<(Option<u32>, u32, u32)> {
         self.buffers()
             .filter_map(|(base, key, stride)| {
-                let (base, words) = (base as u64 * 2, stride.words.max(1) as u64);
-                let span = span(stride, self.height) as u64 * 2;
-                let (start, end) = ((start as u64).max(base), (end as u64).min(base + span));
+                let (first, last) = row_bytes(base, stride, (0, self.height));
+                let (start, end) = (start.max(first), end.min(last));
                 if start >= end {
                     return None;
                 }
-                let (w0, w1) = ((start - base) / 2, (end - base).div_ceil(2));
-                // Rows, or with tiles bands of 32 rows.
-                let (r0, r1) = (w0 / words, (w1 - 1) / words + 1);
-                let (r0, r1) = if stride.tiled {
-                    (r0 * 32, r1 * 32)
-                } else {
-                    (r0, r1)
-                };
-                let r1 = r1.min(self.height as u64);
-                (r0 < r1).then_some((key, r0 as u32, r1 as u32))
+                let (r0, r1) = rows_of(base, stride, (start, end));
+                let r1 = r1.min(self.height);
+                (r0 < r1).then_some((key, r0, r1))
             })
             .collect()
     }
@@ -229,6 +232,26 @@ pub fn span(stride: Stride, height: u32) -> usize {
     } else {
         height as usize * stride.words
     }
+}
+
+/// The bytes of the memory rows `top..bottom` of a buffer take, the
+/// buffer at word offset `base` with rows `stride` apart: whole rows, or
+/// in tiles whole bands of 32 rows.
+pub fn row_bytes(base: u32, stride: Stride, (top, bottom): (u32, u32)) -> (u32, u32) {
+    let (unit, per) = (stride.words as u64 * 2, if stride.tiled { 32 } else { 1 });
+    let at = |rows: u64| (base as u64 * 2 + rows * unit).min(u32::MAX as u64) as u32;
+    (at(top as u64 / per), at((bottom as u64).div_ceil(per)))
+}
+
+/// The rows of such a buffer that bytes `start..end` of the memory hold
+/// pixels of, rounded out to whole rows (or bands of 32 rows in tiles).
+/// The bytes are within the buffer: `start` is at or after its first.
+pub fn rows_of(base: u32, stride: Stride, (start, end): (u32, u32)) -> (u32, u32) {
+    let unit = stride.words.max(1) as u64 * 2;
+    let per = if stride.tiled { 32 } else { 1 };
+    let (a, b) = (start as u64 - base as u64 * 2, end as u64 - base as u64 * 2);
+    let rows = |n: u64| (n * per).min(u32::MAX as u64) as u32;
+    (rows(a / unit), rows(b.div_ceil(unit)))
 }
 
 /// The column and row of the pixel `at` words from a buffer's first.
@@ -281,7 +304,7 @@ pub enum Command {
     Texture(Box<Texture>),
     FreeTexture(u32),
     /// Bytes of a Banshee's or Voodoo3's memory of `size` bytes, from
-    /// byte `at` on (whole pages, `pages::PAGE`), for the renderer's copy
+    /// byte `at` on (whole pages, `tracker::PAGE`), for the renderer's copy
     /// of it.
     Memory { size: u32, at: u32, bytes: Vec<u8> },
     /// A 2D operation the renderer does in its copy of the memory, which
@@ -677,6 +700,10 @@ impl Mirror {
         let state = draw_state(st, stipple, tmu);
         let flip = st.fbz_mode & (1 << 17) != 0;
         let (ax, ay) = ((p.ax >> 4) as f64, (p.ay >> 4) as f64);
+        let number = |d: i64| (d as f64 / 4_294_967_296.0) as f32;
+        let grad = p.tmu.map(|q| {
+            [[q.dsdx, q.dtdx, q.dwdx], [q.dsdy, q.dtdy, q.dwdy]].map(|d| d.map(number))
+        });
         let vertices = verts.map(|(x, y)| {
             // The card iterates from vertex A's pixel, sampling each pixel
             // at its top left corner; here the values are at the vertex.
@@ -699,6 +726,8 @@ impl Mirror {
                 ],
                 zw: [color(p.startz, p.dzdx, p.dzdy), wide(p.startw, p.dwdx, p.dwdy)],
                 tex,
+                lod: p.tmu.map(|q| q.lodbase as f32),
+                grad,
             }
         });
         // LFB writes between identical draws must stay between them,
@@ -797,7 +826,10 @@ impl Mirror {
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {
-        let first = (t.lodmin >> 8).clamp(0, 8);
+        // The card clamps the level to lodmin and then to lodmax, so with
+        // lodmin above lodmax it reads lodmax (as `backlog::texture_bytes`
+        // has it).
+        let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8);
         let last = (t.lodmax >> 8).clamp(first, 8);
         let key = TexKey {
             unit: unit as u8,
@@ -821,6 +853,8 @@ impl Mirror {
             lodmin: t.lodmin,
             lodmax: t.lodmax,
             lodbias: t.lodbias,
+            lodmask: t.lodmask,
+            bilinear_mask: t.bilinear_mask,
             detailmax: t.detailmax,
             detailbias: t.detailbias,
             detailscale: t.detailscale,
@@ -865,8 +899,7 @@ impl Mirror {
                     self.next_id = self.next_id.wrapping_add(1).max(1);
                     self.next_id
                 });
-                let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
-                let (start, end) = if end > start && end <= t.mask + 1 { (start, end - 1) } else { (0, t.mask) };
+                let (start, end) = texel_span(t);
                 self.textures.insert(key, Cached { id, start, end, good_at: tmu.writes, used: frame });
                 self.push(Command::Texture(Box::new(Texture { id, levels: decode(t, first, last) })));
                 id
@@ -951,6 +984,18 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
         }),
         send_config: st.send_config,
         tmu,
+    }
+}
+
+/// The bytes of the memory the texture `t` draws with may read, first to
+/// last: from its first level's to past its last's, or all of the unit's
+/// memory where they don't make sense.
+pub fn texel_span(t: &TmuRaster) -> (u32, u32) {
+    let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
+    if end > start && end <= t.mask + 1 {
+        (start, end - 1)
+    } else {
+        (0, t.mask)
     }
 }
 

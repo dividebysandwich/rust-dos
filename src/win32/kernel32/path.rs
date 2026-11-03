@@ -336,11 +336,18 @@ pub(super) fn get_short_path_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     put_string(cpu, buffer, size, &short)
 }
 
-/// The value of the environment variable `name`, if it is set.
+/// The value of the environment variable `name`, if it is set: the
+/// running process's, or with none (as when the boot starts a program)
+/// DOS's.
 fn environment(cpu: &mut Cpu, name: &str) -> Option<String> {
-    let environment = &crate::win32::process(cpu).environment;
-    let value = crate::win32::variable_value(environment, name)?;
-    (!value.is_empty()).then(|| value.to_string())
+    let value = match crate::win32::running(cpu) {
+        Some(process) => crate::win32::variable_value(&process.environment, name)?.to_string(),
+        None => {
+            let environment = crate::win32::dos_environment(cpu, cpu.bus.win32.psp);
+            crate::win32::variable_value(&environment, name)?.to_string()
+        }
+    };
+    (!value.is_empty()).then_some(value)
 }
 
 /// GetTempPathA(size, buffer): TMP's directory, or TEMP's, or the
@@ -412,9 +419,12 @@ pub(super) fn get_temp_file_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// The directories SearchPathA looks in when it isn't given any: the
 /// program's, the current one, the system and Windows directories, and
-/// those of PATH.
+/// those of PATH. With no program running, as when the boot starts one,
+/// the program is Explorer, in the Windows directory, which starts the
+/// RunOnce commands on Windows.
 fn search_directories(cpu: &mut Cpu) -> Vec<String> {
-    let program = crate::win32::process(cpu).path.clone();
+    let program = crate::win32::running(cpu)
+        .map_or_else(|| format!("{}\\EXPLORER.EXE", WINDOWS), |p| p.path.clone());
     let mut dirs = vec![
         program
             .rsplit_once('\\')

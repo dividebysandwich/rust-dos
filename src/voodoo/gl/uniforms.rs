@@ -119,18 +119,23 @@ locations!(Triangle {
     u_fogblend: [u8; 64],
     u_fogdelta: [i16; 64],
     u_scale: f32,
+    u_level_scale: f32,
     u_units: i32,
     u_config: i32,
     u_tmode0: i32,
     u_tmode1: i32,
-    u_tsize0: [f32; 3],
-    u_tsize1: [f32; 3],
+    u_tsize0: [f32; 2],
+    u_tsize1: [f32; 2],
     u_tlod0: [i32; 3],
     u_tlod1: [i32; 3],
+    u_tlevels0: [i32; 3],
+    u_tlevels1: [i32; 3],
+    u_gl_sampling: i32,
     u_tdetail0: [i32; 3],
     u_tdetail1: [i32; 3],
     u_constant_depth: i32,
-    u_dither: i32
+    u_dither: i32,
+    u_card_blend: i32
 });
 locations!(Quad {
     u_rect: [f32; 4],

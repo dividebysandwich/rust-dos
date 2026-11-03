@@ -28,9 +28,9 @@ impl Layout {
     }
 }
 
-/// A program importing GLIDE2X.DLL's `GLIDE` and KERNEL32.DLL's
-/// ExitProcess, with `data` and the code `f` makes, and where its data
-/// is.
+/// A program importing GLIDE2X.DLL's `GLIDE`, KERNEL32.DLL's ExitProcess
+/// and DDRAW.DLL's DirectDrawCreate, with `data` and the code `f` makes,
+/// and where its data is.
 fn program(
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
@@ -38,8 +38,13 @@ fn program(
     let mut b = Builder::exe(BASE);
     let glide: Vec<Imp> = GLIDE.iter().map(|n| Imp::Name(n)).collect();
     let kernel = [Imp::Name("ExitProcess")];
+    let ddraw = [Imp::Name("DirectDrawCreate")];
     let iat = b
-        .imports(&[("GLIDE2X.DLL", &glide), ("KERNEL32.DLL", &kernel)])
+        .imports(&[
+            ("GLIDE2X.DLL", &glide),
+            ("KERNEL32.DLL", &kernel),
+            ("DDRAW.DLL", &ddraw),
+        ])
         .concat();
     let data_rva = b.section(
         ".data",
@@ -161,6 +166,7 @@ const GLIDE: &[&str] = &[
     "_grSstScreenWidth@0",
     "_grTexFilterMode@12",
     "_grDitherMode@4",
+    "_grSstControl@4",
 ];
 
 fn import(name: &str) -> usize {
@@ -168,6 +174,7 @@ fn import(name: &str) -> usize {
 }
 
 /// The functions' values the programs use.
+const GR_RESOLUTION_512X384: u32 = 3;
 const GR_RESOLUTION_640X480: u32 = 7;
 const GR_REFRESH_60HZ: u32 = 0;
 const GR_COLORFORMAT_ARGB: u32 = 0;
@@ -204,6 +211,8 @@ const FOG_TABLE: u32 = 0x340;
 const PIXELS: u32 = 0x400;
 /// A dword read through the locked frame buffer.
 const LOCK_READ: u32 = 0x480;
+/// The DirectDraw object's pointer.
+const DDRAW: u32 = 0x490;
 /// An 8x8 texture of 5-6-5 texels: blue on the left, red on the right.
 const TEXELS: u32 = 0x500;
 const VERTICES: u32 = 0x600;
@@ -818,6 +827,238 @@ fn leaving_program() -> (Vec<u8>, u32) {
     })
 }
 
+/// The start of the grSstControl programs: the card open at
+/// `resolution`.
+fn open_card(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    resolution: u32,
+) -> Result<(), IcedError> {
+    c.call(a, l, "_grGlideInit@0", &[])?;
+    c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+    c.call(
+        a,
+        l,
+        "_grSstWinOpen@28",
+        &[
+            Arg::I(0),
+            Arg::I(resolution),
+            Arg::I(GR_REFRESH_60HZ),
+            Arg::I(GR_COLORFORMAT_ARGB),
+            Arg::I(GR_ORIGIN_UPPER_LEFT),
+            Arg::I(2),
+            Arg::I(1),
+        ],
+    )?;
+    Ok(())
+}
+
+/// SetDisplayMode to 320x240x8, through a new DirectDraw object.
+fn directdraw_mode(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    const SET_DISPLAY_MODE: i32 = 21;
+    a.push(0)?;
+    a.push(l.at(DDRAW) as i32)?;
+    a.push(0)?;
+    a.call(dword_ptr(l.iat[GLIDE.len() + 1] as u64))?;
+    a.push(8)?;
+    a.push(240)?;
+    a.push(320)?;
+    a.mov(eax, dword_ptr(l.at(DDRAW)))?;
+    a.push(eax)?;
+    a.mov(eax, dword_ptr(eax))?;
+    a.call(dword_ptr(eax + 4 * SET_DISPLAY_MODE))
+}
+
+/// The end of a grSstControl program: DONE set, and it stays, with the
+/// card open, until the test is done with it.
+fn stay(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    a.mov(dword_ptr(l.at(DONE)), 1)?;
+    let mut spin = a.create_label();
+    a.set_label(&mut spin)?;
+    a.jmp(spin)
+}
+
+/// A program that opens the card and calls grSstControl with each of
+/// `codes`.
+fn control_program(codes: &'static [u32]) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        for &code in codes {
+            c.call(a, l, "_grSstControl@4", &[Arg::I(code)])?;
+        }
+        stay(a, l)
+    })
+}
+
+/// A program that opens the card, sets a DirectDraw mode, which ends
+/// Glide's, and calls grSstControl with each of `codes`.
+fn mode_then_control_program(codes: &'static [u32]) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        directdraw_mode(a, l)?;
+        for &code in codes {
+            c.call(a, l, "_grSstControl@4", &[Arg::I(code)])?;
+        }
+        stay(a, l)
+    })
+}
+
+/// Where `deactivated_lock_program` reads the back buffer.
+const LOCK_AT: (i32, i32) = (100, 450);
+
+/// A program that clears the card grey, deactivates it, sets a DirectDraw
+/// mode, and reads the back buffer through a lock into LOCK_READ.
+fn deactivated_lock_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        c.call(
+            a,
+            l,
+            "_grBufferClear@12",
+            &[Arg::I(0x0080_8080), Arg::I(0), Arg::I(0)],
+        )?;
+        let deactivate = Arg::I(GR_CONTROL_DEACTIVATE);
+        c.call(a, l, "_grSstControl@4", &[deactivate])?;
+        directdraw_mode(a, l)?;
+        a.mov(dword_ptr(l.at(LFB_INFO)), 20)?;
+        c.call(
+            a,
+            l,
+            "_grLfbLock@24",
+            &[
+                Arg::I(GR_LFB_READ_ONLY),
+                Arg::I(GR_BUFFER_BACKBUFFER),
+                Arg::I(GR_LFBWRITEMODE_ANY),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(0),
+                Arg::At(LFB_INFO),
+            ],
+        )?;
+        a.mov(eax, dword_ptr(l.at(LFB_INFO + 8)))?;
+        a.imul_3(eax, eax, LOCK_AT.1)?;
+        a.add(eax, dword_ptr(l.at(LFB_INFO + 4)))?;
+        a.mov(eax, dword_ptr(eax + 2 * LOCK_AT.0))?;
+        a.mov(dword_ptr(l.at(LOCK_READ)), eax)?;
+        stay(a, l)
+    })
+}
+
+/// A program that opens the card at 512x384 and downloads an 8x8
+/// texture to the start of texture unit 0's memory.
+fn small_mode_texture_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    for offset in (0..64 * 2).step_by(2) {
+        put(&mut d, TEXELS + offset, &0xF800u16.to_le_bytes());
+    }
+    for (i, v) in [5u32, 5, 3, 0xA].iter().enumerate() {
+        put32(&mut d, TEX_INFO + 4 * i as u32, *v);
+    }
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_512X384)?;
+        let start = c.call(a, l, "_grTexMinAddress@4", &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(TEX_INFO + 16)), l.at(TEXELS) as i32)?;
+        a.mov(eax, dword_ptr(l.at(RESULTS + 4 * start)))?;
+        a.push(l.at(TEX_INFO) as i32)?;
+        a.push(GR_MIPMAPLEVELMASK_BOTH as i32)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[import("_grTexDownloadMipMap@16")] as u64))?;
+        stay(a, l)
+    })
+}
+
+const GR_CONTROL_ACTIVATE: u32 = 1;
+const GR_CONTROL_DEACTIVATE: u32 = 2;
+
+/// The bit of a Banshee's vidProcCfg that shows the overlay, Glide's
+/// picture.
+const OVERLAY_ENABLE: u32 = 1 << 8;
+
+fn overlay_shown(cpu: &Cpu) -> bool {
+    let card = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    let cfg = card.reg(rust_dos::voodoo::banshee::VID_PROC_CFG);
+    cfg & OVERLAY_ENABLE != 0
+}
+
+#[test]
+fn gr_sst_control_turns_a_voodoo2s_pass_through() {
+    let (program, data) = control_program(&[GR_CONTROL_DEACTIVATE]);
+    let mut cpu = machine("control_off", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor");
+
+    let codes = &[GR_CONTROL_DEACTIVATE, GR_CONTROL_ACTIVATE];
+    let (program, data) = control_program(codes);
+    let mut cpu = machine("control_on", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor again");
+}
+
+#[test]
+fn gr_sst_control_gives_a_voodoo3s_display_away_and_takes_it_back() {
+    let (program, data) = control_program(&[GR_CONTROL_DEACTIVATE]);
+    let mut cpu = machine("control_off_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert!(!overlay_shown(&cpu), "Glide's picture is gone");
+    assert_eq!(cpu.bus.vga.crtc_regs, before, "the mode the screen was in");
+
+    let codes = &[GR_CONTROL_DEACTIVATE, GR_CONTROL_ACTIVATE];
+    let (program, data) = control_program(codes);
+    let mut cpu = machine("control_on_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert!(overlay_shown(&cpu), "Glide's picture is back");
+    assert_ne!(cpu.bus.vga.crtc_regs, before, "Glide's mode");
+}
+
+#[test]
+fn gr_sst_control_takes_the_display_back_from_a_directdraw_mode() {
+    let (program, data) = mode_then_control_program(&[]);
+    let mut cpu = machine("control_mode", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    assert!(!overlay_shown(&cpu), "DirectDraw's mode ended Glide's picture");
+
+    let (program, data) = mode_then_control_program(&[GR_CONTROL_ACTIVATE]);
+    let mut cpu = machine("control_mode_on", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    assert!(overlay_shown(&cpu), "Glide's picture is back");
+}
+
+#[test]
+fn gr_lfb_lock_reads_the_buffers_of_a_deactivated_card() {
+    let (program, data) = deactivated_lock_program();
+    let mut cpu = machine("control_lock", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + LOCK_READ) as u16, 0x8410, "the clear");
+}
+
+/// The desktop's picture, 640x480 at 16 bits a pixel, comes back when the
+/// card is deactivated, so the textures of a smaller mode start after it.
+#[test]
+fn a_small_modes_textures_are_above_the_desktops_picture() {
+    const DESKTOP_END: u32 = 640 * 480 * 2;
+    let (program, data) = small_mode_texture_program();
+    let mut cpu = machine("small_textures", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    let card = cpu.bus.voodoo.as_ref().unwrap();
+    let mut below = vec![0xFFu8; 0x1000];
+    card.banshee_memory_read(DESKTOP_END - 0x1000, &mut below);
+    assert!(below.iter().all(|&b| b == 0), "under the desktop's end");
+    let mut texel = [0u8; 2];
+    card.banshee_memory_read(DESKTOP_END, &mut texel);
+    assert_eq!(u16::from_le_bytes(texel), 0xF800, "the first texel");
+}
+
 /// The card's fbiInit0 (Voodoo Graphics and Voodoo2): bit 0 takes the
 /// monitor from the VGA.
 fn fbi_init0(cpu: &Cpu) -> u32 {
@@ -843,4 +1084,52 @@ fn a_program_ending_without_closing_glide_gives_a_voodoo3_its_mode_back() {
     assert_ne!(cpu.bus.vga.crtc_regs, before, "Glide's mode");
     run_to_exit(&mut cpu);
     assert_eq!(cpu.bus.vga.crtc_regs, before, "the mode the screen was in");
+}
+
+/// A program that opens the card, clears the back buffer to grey
+/// 0x808080 undithered and swaps it to the screen.
+fn grey_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        let grey = [Arg::I(0x0080_8080), Arg::I(0), Arg::I(0)];
+        c.call(a, l, "_grBufferClear@12", &grey)?;
+        c.call(a, l, "_grBufferSwap@4", &[Arg::I(0)])?;
+        stay(a, l)
+    })
+}
+
+/// The red of the middle of the screen after `grey_program` on `board`.
+fn grey_shown(test: &str, board: Board) -> u8 {
+    let (program, data) = grey_program();
+    let mut cpu = machine(test, Some(board), program);
+    run_until_done(&mut cpu, data);
+    cpu.bus.sync_display();
+    let (w, h) = rust_dos::video::frame_size(&cpu.bus);
+    assert_eq!((w, h), (640, 480), "Glide's mode is shown");
+    let mut frame = rust_dos::video::Frame::new(w, h);
+    rust_dos::video::render_screen(&mut frame, &cpu.bus);
+    frame.rgba[4 * (240 * 640 + 320)]
+}
+
+/// The 5-bit level 16 (0x84 in 8 bits) through a gamma table of `gamma`.
+fn grey_through(gamma: f64) -> u8 {
+    ((0x84 as f64 / 255.0).powf(1.0 / gamma) * 255.0 + 0.5) as u8
+}
+
+/// grSstWinOpen loads the gamma table 3dfx's Glide 2 loads: 1.3 on a
+/// Voodoo2 and a Voodoo3, 1.7 on a Voodoo Graphics. A Voodoo Graphics'
+/// or Voodoo2's table has 33 entries the card interpolates between, so
+/// their levels come within a few of the formula's.
+#[test]
+fn gr_sst_win_open_loads_glides_gamma_table() {
+    let near = |got: u8, want: u8| got.abs_diff(want) <= 2;
+    let v3 = grey_shown("gamma_v3", Board::Voodoo3);
+    assert_eq!(v3, grey_through(1.3), "Voodoo3");
+    let v2 = grey_shown("gamma_v2", Board::Voodoo2);
+    assert!(near(v2, grey_through(1.3)), "Voodoo2: {v2}");
+    let v1 = grey_shown("gamma_v1", Board::Standard);
+    assert!(near(v1, grey_through(1.7)), "Voodoo Graphics: {v1}");
 }

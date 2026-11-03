@@ -13,7 +13,7 @@ mod mapping;
 mod memory;
 mod message;
 pub(super) mod module;
-mod path;
+pub(crate) mod path;
 mod process;
 pub use process::ProgramInLine;
 mod profile;
@@ -629,6 +629,11 @@ static APIS: &[Api] = &[
     stdcall("FreeLibrary16", 36, 1, flat::free_library16),
     stdcall("GetProcAddress16", 37, 2, flat::get_proc_address16),
     stdcall("SetProcessShutdownParameters", 734, 2, not_implemented),
+    // A debugger's loop. No process here debugs another, so these fail,
+    // but SafeDisc 2 resolves both through its own export walk and stops
+    // with "Fatal error, code 12" where either is missing.
+    stdcall("WaitForDebugEvent", 952, 2, not_implemented),
+    stdcall("ContinueDebugEvent", 953, 3, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -972,6 +977,11 @@ pub fn global_free(cpu: &mut Cpu, handle: u32) {
 /// ANSI text in Unicode, by the ANSI code page.
 pub fn ansi_to_wide(bytes: &[u8]) -> Vec<u16> {
     text::ansi_to_wide(bytes)
+}
+
+/// Unicode text in the ANSI code page, '?' for what it lacks.
+pub fn wide_to_ansi(units: &[u16]) -> Vec<u8> {
+    text::wide_to_ansi(units)
 }
 
 /// lstrcmpiA's comparison of two ANSI strings, without their zeros.

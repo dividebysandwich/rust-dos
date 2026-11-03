@@ -454,6 +454,8 @@ impl DiskController {
             Some((p, l)) => (p, l),
             None => (".", rest),
         };
+        // Renamed to "NEW.", the file is NEW, as opens name it.
+        let leaf = Self::dos_component(leaf);
         let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
         if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);
@@ -461,7 +463,7 @@ impl DiskController {
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        let target = parent.join(leaf.to_uppercase());
+        let target = parent.join(super::new_entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         self.host_dirs.touched(&source);

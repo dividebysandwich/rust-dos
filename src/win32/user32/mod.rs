@@ -25,6 +25,7 @@ pub mod progman;
 pub mod rect;
 pub mod resource;
 pub mod saver;
+pub mod session;
 pub mod sysparams;
 pub mod text;
 pub mod window;
@@ -167,7 +168,7 @@ impl State {
 
     /// A place for a new window: its handle, or None when there are too
     /// many.
-    fn new_window(&mut self, window: Window) -> Option<u32> {
+    pub(crate) fn new_window(&mut self, window: Window) -> Option<u32> {
         let len = self.windows.len();
         let free = (0..len)
             .map(|i| (self.next_window + i) % len.max(1))
@@ -1156,6 +1157,12 @@ static APIS: &[Api] = &[
     stdcall("MenuWndProc", 0, 4, menu::popup_proc),
     stdcall("IconTitleWndProc", 0, 4, defwnd::def_window_proc),
     stdcall("ComboLBoxWndProc", 0, 4, controls::listbox_proc),
+    stdcall(
+        "MciVideoWndProc",
+        0,
+        4,
+        crate::win32::winmm::mci::video::window_proc,
+    ),
     // The clipboard.
     stdcall("OpenClipboard", 397, 1, input::open_clipboard),
     stdcall("CloseClipboard", 398, 0, input::close_clipboard),
@@ -1224,7 +1231,7 @@ static APIS: &[Api] = &[
         2,
         sysparams::change_display_settings,
     ),
-    stdcall("ExitWindowsEx", 422, 2, nothing),
+    stdcall("ExitWindowsEx", 422, 2, session::exit_windows_ex),
     stdcall("GetGuiResources", 423, 2, nothing),
     stdcall(
         "GetProcessWindowStation",
@@ -1342,6 +1349,8 @@ static APIS: &[Api] = &[
     stdcall("ActivateInQueue", 0, 3, input::activate_in_queue),
     stdcall("DeactivateQueue", 0, 1, input::deactivate_queue),
     stdcall("ActivateByClick", 0, 1, input::activate_by_click),
+    // Windows 98's does nothing: there is no debug USER32 to tell.
+    stdcall("SetDebugErrorLevel", 624, 1, |_, _| Some(0)),
 ];
 
 crate::state_fields!(State {

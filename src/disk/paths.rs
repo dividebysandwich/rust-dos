@@ -26,28 +26,42 @@ impl DiskController {
     }
 
     /// Logical path components of `rest` on `drive`, applying the drive's
-    /// current directory for relative paths and folding "." / "..".
-    /// Trailing spaces are the padding of a name DOS packs into 8 and 3
-    /// characters, and go: Comanche opens "LH66.RLE    ".
+    /// current directory for relative paths and folding "." / "..". Each
+    /// component is the name DOS packs it into (`dos_component`).
     pub(super) fn logical_components<'a>(drive: &'a Drive, rest: &'a str) -> Vec<&'a str> {
         let mut components: Vec<&str> = Vec::new();
         if !rest.starts_with('\\') {
             components.extend(drive.current_dir.split('\\').filter(|p| !p.is_empty()));
         }
         for part in rest.split('\\') {
-            let part = match part.trim_end_matches(' ') {
-                "" => part,
-                trimmed => trimmed,
-            };
-            match part {
+            match Self::dos_component(part) {
                 "" | "." => {}
                 ".." => {
                     components.pop();
                 }
-                _ => components.push(part),
+                part => components.push(part),
             }
         }
         components
+    }
+
+    /// The name a path component `part` stands for, as DOS packs it into
+    /// 8 and 3 characters. Trailing spaces are padding, and go: Comanche
+    /// opens "LH66.RLE    ". So does a dot that ends the name, which
+    /// leaves its extension empty: DOS packs "COLORS." as COLORS, and
+    /// Menzoberranzan opens its palette by that name. The host can't be
+    /// left to drop it: a drive's root is a verbatim path on Windows
+    /// (`\\?\`), under which the dot stays, and other hosts keep it too.
+    /// "." and ".." stay, padded or not.
+    pub(super) fn dos_component(part: &str) -> &str {
+        let unpadded = part.trim_end_matches(' ');
+        if unpadded == "." || unpadded == ".." {
+            return unpadded;
+        }
+        match unpadded.trim_end_matches([' ', '.']) {
+            "" => part,
+            trimmed => trimmed,
+        }
     }
 
     /// The path `rest` names on a drive held in memory, as `MemFs` keeps
@@ -86,8 +100,8 @@ impl DiskController {
     /// among its folder's entries (`find_host_entry`): the path names
     /// nothing on the host then, which needs no stat to tell. Each
     /// component is the entry's long name, or, where it matches nothing,
-    /// the name uppercased, for creating it. A name the entries can't rule
-    /// out (`entries_settle`) is never missing.
+    /// the name to create it under (`new_entry_name`). A name the entries
+    /// can't rule out (`entries_settle`) is never missing.
     fn walk_host(&self, drive_num: u8, rest: &str) -> Option<(PathBuf, String, bool)> {
         let drive = self.drive(drive_num)?;
         // Drives held in memory have no host paths; callers look there
@@ -114,10 +128,8 @@ impl DiskController {
                     sure = false;
                 }
             }
-            let (host_name, dos_name) = found.unwrap_or_else(|| {
-                let upper = part.to_ascii_uppercase();
-                (upper.clone(), upper)
-            });
+            let (host_name, dos_name) = found
+                .unwrap_or_else(|| (super::new_entry_name(part), part.to_ascii_uppercase()));
             full_path.push(host_name);
             dos_path.push(dos_name);
         }
@@ -133,11 +145,11 @@ impl DiskController {
     /// Whether a folder's entries settle that the path component `part`
     /// isn't in it when none matches it. They leave out names starting
     /// with a dot, and the host may know a name by a spelling they don't
-    /// match: Windows drops a dot that ends it ("README." is "README"),
-    /// has short names of its own (with a "~"), and Windows and macOS fold
-    /// the case of letters beyond ASCII. Such names go to the host.
+    /// match: Windows has short names of its own (with a "~"), and Windows
+    /// and macOS fold the case of letters beyond ASCII. Such names go to
+    /// the host. A dot that ends a name is gone by now (`dos_component`).
     fn entries_settle(part: &str) -> bool {
-        !part.starts_with('.') && !part.ends_with('.') && !part.contains('~') && part.is_ascii()
+        !part.starts_with('.') && !part.contains('~') && part.is_ascii()
     }
 
     /// `locate`, and whether a component of the path isn't among its
@@ -334,6 +346,11 @@ impl DiskController {
     /// its long name in any case, or by its short name. A name the kept
     /// entries lack is looked for in a fresh read, unless a recent read
     /// lacked it too (`HostDirCache`).
+    ///
+    /// Last comes a host name that is `name` with dots or spaces after
+    /// it, which DOS and Windows drop (`dos_component`): builds before
+    /// they were dropped made "SAVE." on the host for a program's
+    /// "SAVE.", and the program opens it as that name still.
     pub(super) fn find_host_entry(
         &self,
         dir: &Path,
@@ -345,6 +362,11 @@ impl DiskController {
                 .iter()
                 .find(|(long, _)| long.eq_ignore_ascii_case(name))
                 .or_else(|| entries.iter().find(|(_, short)| *short == upper))
+                .or_else(|| {
+                    entries.iter().find(|(long, _)| {
+                        long.trim_end_matches([' ', '.']).eq_ignore_ascii_case(name)
+                    })
+                })
                 .cloned()
         };
         let (mut entries, kept) = self.host_entries(dir);

@@ -40,6 +40,7 @@ pub const FILES: u16 = 127;
 
 // Drive numbers are 0-based (0=A:, 2=C:, 25=Z:).
 pub const DRIVE_C: u8 = 2;
+pub const DRIVE_D: u8 = 3;
 pub const DRIVE_Z: u8 = 25;
 /// A: and B: are the BIOS floppy units: whatever is mounted there is a
 /// floppy drive.
@@ -179,6 +180,23 @@ fn is_short_name(name: &str) -> bool {
         && ext.len() <= 3
         && !name.ends_with('.')
         && stem.chars().chain(ext.chars()).all(dos_name_char)
+}
+
+/// The name a new file or directory gets on a host drive when a program
+/// asks for `name`. DOS uppercases an 8.3 name. A longer name keeps the
+/// case it was given, as Windows 9x keeps a name from a long-name call
+/// (Win32's CreateFileA, CreateDirectoryA and MoveFileA, or INT 21h's
+/// 71xxh): Oni's setup makes "level0_Final.dat", and Oni reads the
+/// "Final" in the name back, case and all. The host path doesn't know
+/// which call asked, so DOS's own calls, which on DOS would cut such a
+/// name to 8.3, make it under the same name; what DOS programs see of it
+/// is its generated 8.3 name either way.
+pub(crate) fn new_entry_name(name: &str) -> String {
+    if is_short_name(name) {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_string()
+    }
 }
 
 /// The DOS names of the entries of a directory, given in the order that

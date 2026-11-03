@@ -10,6 +10,7 @@ use rust_dos_pe::{self as pe, Builder, Imp};
 use std::fs;
 use std::path::PathBuf;
 
+mod cdimage;
 mod dyndiff;
 mod win16;
 
@@ -504,6 +505,14 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
         cpu.bus.observe.enabled = skip;
         cpu
     };
+    // The host clock is frozen while the two machines run, so the wait loop
+    // reads the same time on both (see `hosttime::fix`). Without it the two
+    // machines read the wall clock at different moments and diverge.
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
     let mut plain = start("clock_wait_plain", CoreMode::Normal, false);
     let mut skipping = start("clock_wait_skipping", CoreMode::Dynamic, true);
     // The machines' call counts before each batch, by turns: the program's
@@ -5682,12 +5691,17 @@ fn console_writes(name: &str) -> Vec<u8> {
 /// Run T.EXE, which starts the other programs of `files`, to its end:
 /// its exit code.
 fn run_family(test: &str, files: &[(&str, Vec<u8>)]) -> u8 {
+    run_family_for(test, files, 400)
+}
+
+/// `run_family`, for at most `batches` batches.
+fn run_family_for(test: &str, files: &[(&str, Vec<u8>)], batches: usize) -> u8 {
     let mut cpu = Cpu::new(scratch(test, files));
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
     cpu.load_shell();
     assert!(cpu.load_executable("T.EXE", None));
-    assert!(run_to_exit(&mut cpu, 400), "{}", printed(&cpu));
+    assert!(run_to_exit(&mut cpu, batches), "{}", printed(&cpu));
     cpu.errorlevel
 }
 
@@ -6394,6 +6408,282 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
         &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
     );
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+const WM_QUERYENDSESSION: i32 = 0x0011;
+const WM_ENDSESSION: i32 = 0x0016;
+const EWX_REBOOT: i32 = 2;
+const EWX_FORCE: i32 = 4;
+
+/// Data for `session_window`, with `texts` as `child_data` puts them, the
+/// class's name at 0x10 of them and a WNDCLASSA at 0xE0.
+fn session_data(texts: &[(usize, &str)]) -> Vec<u8> {
+    let mut data = child_data(texts);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    data
+}
+
+/// Register the class named at 0x10 of the data, with the window procedure
+/// `proc` makes, which goes on to DefWindowProcA at its end.
+fn session_class(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+    proc: impl FnOnce(&mut CodeAssembler) -> Result<(), IcedError>,
+) -> Result<(), IcedError> {
+    let mut start = a.create_label();
+    a.call(start)?;
+    proc(a)?;
+    a.jmp(f("DefWindowProcA"))?;
+    a.set_label(&mut start)?;
+    a.pop(eax)?;
+    a.mov(dword_ptr(l.at(0xE4)), eax)?;
+    a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+    a.push(l.at(0xE0) as i32)?;
+    a.call(f("RegisterClassA"))
+}
+
+/// A top-level window of the class named at 0x10 of the data.
+fn session_window(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    f: &dyn Fn(&str) -> AsmMemoryOperand,
+) -> Result<(), IcedError> {
+    let class = l.at(0x10) as i32;
+    let style = WS_POPUP | WS_VISIBLE;
+    let args = [0, class, class, style, 0, 0, 50, 50, 0, 0, BASE as i32, 0];
+    push_args(a, &args)?;
+    a.call(f("CreateWindowExA"))
+}
+
+/// A program that calls ExitWindowsEx(EWX_REBOOT, 0) and ends with 9 if
+/// the call comes back.
+fn restarts_windows() -> Vec<u8> {
+    let (kernel32, user32) = (["ExitProcess"], ["ExitWindowsEx"]);
+    win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &[0; 4], |a, _, f| {
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    })
+}
+
+#[test]
+fn a_window_that_refuses_keeps_the_session_going() {
+    // The second window asked refuses: ExitWindowsEx returns FALSE, the
+    // first window learns that the session goes on, and the second isn't
+    // told.
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "ExitWindowsEx",
+    ];
+    // WM_QUERYENDSESSION's count at 0xA0, WM_ENDSESSION's at 0xA4 and its
+    // wParam at 0xA8, which starts at 1.
+    let mut data = session_data(&[(0x10, "Frame")]);
+    data[0xA8] = 1;
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut ended = a.create_label();
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_QUERYENDSESSION)?;
+            a.jne(ended)?;
+            a.inc(dword_ptr(l.at(0xA0)))?;
+            a.xor(eax, eax)?;
+            a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+            a.setne(al)?;
+            a.ret_1(16)?;
+            a.set_label(&mut ended)?;
+            a.cmp(dword_ptr(esp + 8), WM_ENDSESSION)?;
+            a.jne(other)?;
+            a.inc(dword_ptr(l.at(0xA4)))?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.mov(dword_ptr(l.at(0xA8)), eax)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        session_window(a, l, f)?;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(l.at(0xA0)), 2)?;
+        bit_if(a, eq, 1)?;
+        a.cmp(dword_ptr(l.at(0xA4)), 1)?;
+        bit_if(a, eq, 2)?;
+        a.cmp(dword_ptr(l.at(0xA8)), 0)?;
+        bit_if(a, eq, 3)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("session_refused", &[("T.EXE", program)]);
+    assert_eq!(code, 0xF, "the checks that failed: {:04b}", !code & 0xF);
+}
+
+#[test]
+fn ewx_force_asks_no_window() {
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "ExitWindowsEx",
+    ];
+    let data = session_data(&[(0x10, "Frame")]);
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_QUERYENDSESSION)?;
+            a.jne(other)?;
+            a.xor(eax, eax)?;
+            a.ret_1(16)?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        push_args(a, &[EWX_REBOOT | EWX_FORCE, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    assert_eq!(run_family("session_force", &[("T.EXE", program)]), 0);
+}
+
+#[test]
+fn the_callers_window_learns_the_session_ends_after_the_others_have_gone() {
+    // T.EXE's window ends T.EXE on WM_ENDSESSION, with what it saw: C.EXE
+    // has ended (1), wParam is TRUE (2) and lParam isn't ENDSESSION_LOGOFF
+    // (4).
+    let kernel32 = ["CreateProcessA", "WaitForSingleObject", "ExitProcess"];
+    let user32 = [
+        "WaitForInputIdle",
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "ExitWindowsEx",
+    ];
+    let data = session_data(&[(0, "C.EXE"), (0x10, "Frame")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_ENDSESSION)?;
+            a.jne(other)?;
+            a.mov(esi, dword_ptr(esp + 12))?;
+            a.mov(edi, dword_ptr(esp + 16))?;
+            a.xor(ebx, ebx)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(0x90)))?;
+            a.call(f("WaitForSingleObject"))?;
+            a.test(eax, eax)?;
+            bit_if(a, eq, 0)?;
+            a.cmp(esi, 1)?;
+            bit_if(a, eq, 1)?;
+            a.test(edi, edi)?;
+            bit_if(a, eq, 2)?;
+            a.push(ebx)?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        create_child(a, l, f, 0)?;
+        idle(a, l, f, 5000)?;
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family(
+        "session_order",
+        &[("T.EXE", parent), ("C.EXE", shows_a_window("Child", 0))],
+    );
+    assert_eq!(code, 7, "the checks that failed: {:03b}", !code & 7);
+}
+
+#[test]
+fn a_child_that_restarts_windows_tells_its_parents_window() {
+    // C.EXE asks for the restart. T.EXE, which only gets messages, learns
+    // of it through its window, and ends with 0x5A there.
+    let kernel32 = ["CreateProcessA", "ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "GetMessageA",
+        "DispatchMessageA",
+    ];
+    // A MSG at 0xC0.
+    let data = session_data(&[(0, "C.EXE"), (0x10, "Frame")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        session_class(a, l, f, |a| {
+            let mut other = a.create_label();
+            a.cmp(dword_ptr(esp + 8), WM_ENDSESSION)?;
+            a.jne(other)?;
+            a.push(0x5A)?;
+            a.call(f("ExitProcess"))?;
+            a.set_label(&mut other)?;
+            a.nop()
+        })?;
+        session_window(a, l, f)?;
+        create_child(a, l, f, 0)?;
+        let mut next = a.create_label();
+        a.set_label(&mut next)?;
+        push_args(a, &[l.at(0xC0) as i32, 0, 0, 0])?;
+        a.call(f("GetMessageA"))?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(f("DispatchMessageA"))?;
+        a.jmp(next)
+    });
+    let code = run_family(
+        "session_from_child",
+        &[("T.EXE", parent), ("C.EXE", restarts_windows())],
+    );
+    assert_eq!(code, 0x5A);
+}
+
+#[test]
+fn a_window_that_doesnt_answer_doesnt_stop_the_session_from_ending() {
+    // C.EXE shows a window and sleeps, so nobody takes the messages for
+    // it. T.EXE's restart goes on without its answer, and C.EXE ends with
+    // it: the run ends only when no process is left.
+    let child = {
+        let user32 = ["CreateWindowExA"];
+        let data = child_data(&[(0x10, "Static")]);
+        win_program(pe::SUBSYSTEM_GUI, &["Sleep"], &user32, &data, |a, l, f| {
+            let class = l.at(0x10) as i32;
+            let style = WS_POPUP | WS_VISIBLE;
+            push_args(a, &[0, class, class, style, 0, 0, 50, 50, 0, 0, 0, 0])?;
+            a.call(f("CreateWindowExA"))?;
+            a.push(INFINITE)?;
+            a.call(f("Sleep"))?;
+            a.int3()
+        })
+    };
+    let kernel32 = ["CreateProcessA", "Sleep", "ExitProcess"];
+    let user32 = ["ExitWindowsEx"];
+    let data = child_data(&[(0, "C.EXE")]);
+    let parent = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        create_child(a, l, f, 0)?;
+        a.push(300)?;
+        a.call(f("Sleep"))?;
+        push_args(a, &[EWX_REBOOT, 0])?;
+        a.call(f("ExitWindowsEx"))?;
+        a.push(9)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    // The window gets 5 seconds for each of the two messages.
+    let files = [("T.EXE", parent), ("C.EXE", child)];
+    assert_eq!(run_family_for("session_no_answer", &files, 4000), 0);
 }
 
 #[test]
@@ -7389,6 +7679,307 @@ fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     assert_eq!(code, 0, "{}", text);
 }
 
+/// An SRB_ExecSCSICmd for WNASPI32: READ(10) of sector `lba` into a
+/// 2048-byte buffer on adapter 0, target 0, with 14 bytes of sense data.
+fn read10_srb(lba: u32) -> [u8; 0x50] {
+    let mut srb = [0u8; 0x50];
+    srb[0] = 0x02;
+    srb[3] = 0x08;
+    srb[12..16].copy_from_slice(&2048u32.to_le_bytes());
+    srb[20] = 14;
+    srb[21] = 10;
+    srb[48] = 0x28;
+    srb[50..54].copy_from_slice(&lba.to_be_bytes());
+    srb[56] = 1;
+    srb
+}
+
+#[test]
+fn wnaspi32_runs_scsi_commands_on_the_cd_rom_drive() {
+    // A disc whose sector after the file system is mastered as copy
+    // protections do: an EDC that doesn't match its data.
+    let dir = cdimage::scratch("wnaspi32_disc");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    let bad = (image.len() / 2048) as u32;
+    image.extend(vec![0x55; 2 * 2048]);
+    let mut raw = cdimage::mode1_2352(&image);
+    let at = bad as usize * 2352 + 2064;
+    raw[at..at + 4].copy_from_slice(&[0x55; 4]);
+    fs::write(dir.join("GAME.BIN"), raw).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        ("KERNEL32.DLL", &["ExitProcess"]),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    // SC_GET_DEV_TYPE of target 0, two READ(10)s, SC_HA_INQUIRY.
+    data[0] = 0x01;
+    data[0x40..0x90].copy_from_slice(&read10_srb(16));
+    data[0x100..0x150].copy_from_slice(&read10_srb(bad));
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // One adapter, SS_COMP.
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 0x0101)?;
+        a.jne(fail)?;
+        // Target 0 is a CD-ROM drive.
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(10)), 5)?;
+        a.jne(fail)?;
+        // READ(10) of the primary volume descriptor: pending, as Windows
+        // 98's WNASPI32 returns without an event, and done.
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x201)), 0x3030_4443)?;
+        a.jne(fail)?;
+        // The unreadable sector: SS_ERR, CHECK CONDITION, and the drive's
+        // MEDIUM ERROR, UNRECOVERED READ ERROR in the sense data.
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        a.push(l.at(0x100) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 4)?;
+        a.cmp(byte_ptr(l.at(0x101)), 4)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x100 + 23)), 2)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x100 + 64 + 2)), 3)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x100 + 64 + 12)), 0x11)?;
+        a.jne(fail)?;
+        // SC_HA_INQUIRY: one adapter, ASPI for WIN32.
+        a.push(l.at(0x180) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 5)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x188)), 1)?;
+        a.jne(fail)?;
+        a.cmp(dword_ptr(l.at(0x18A)), 0x4950_5341)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
+    // A READ(10) with SRB_EVENT_NOTIFY on the CD-ROM drive returns
+    // SS_PENDING with its block still empty, as APIX does. The scheduler
+    // finishes it later: the block is written, then its status, then the
+    // event (in the PostProc field) is set, and a wait on that event ends.
+    // A request to a target that isn't the drive is rejected the same way,
+    // later, with its status (SS_NO_DEVICE) and its own event.
+    let dir = cdimage::scratch("wnaspi32_event");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &["ExitProcess", "CreateEventA", "WaitForSingleObject"],
+        ),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    // The event request: READ(10) of sector 16 with SRB_EVENT_NOTIFY.
+    let mut accepted = read10_srb(16);
+    accepted[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&accepted);
+    // The rejected one: target 1, with its own event.
+    let mut rejected = read10_srb(16);
+    rejected[3] |= 0x40;
+    rejected[8] = 1;
+    data[0x100..0x150].copy_from_slice(&rejected);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Two manual-reset events, not signaled.
+        for (srb, keep) in [(0x40, 0x180), (0x100, 0x184)] {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(srb + 24)), eax)?;
+            a.mov(dword_ptr(l.at(keep)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        // SendASPI32Command(accepted): SS_PENDING comes back and the block
+        // says SS_PENDING. Once the wait on the event ends, it says SS_COMP.
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.cmp(byte_ptr(l.at(0x41)), 0)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(l.at(0x180)))?;
+        a.push(-1i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 2)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        // SendASPI32Command(rejected): target 1 has no device. SS_PENDING
+        // comes back too, and once the wait on its event ends, the block
+        // says SS_NO_DEVICE.
+        a.push(l.at(0x100) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 3)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.mov(eax, dword_ptr(l.at(0x184)))?;
+        a.push(-1i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 4)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.cmp(byte_ptr(l.at(0x101)), 0x82)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_event", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_finishes_an_event_request_while_the_program_polls() {
+    // A program that sends an event request and then watches the block's
+    // status byte, calling nothing, sees it finished by the scheduler's
+    // ticks, which run between its instructions rather than in a call of
+    // its own: the data and status land in its memory, and the event is
+    // set.
+    let dir = cdimage::scratch("wnaspi32_poll");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        ("WNASPI32.DLL", &["GetASPI32SupportInfo", "SendASPI32Command"]),
+        ("KERNEL32.DLL", &["ExitProcess", "CreateEventA", "WaitForSingleObject"]),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    let mut srb = read10_srb(16);
+    srb[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&srb);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let mut spin = a.create_label();
+        // A manual-reset event, not signaled, in the PostProc field.
+        a.push(0i32)?;
+        a.push(0i32)?;
+        a.push(1i32)?;
+        a.push(0i32)?;
+        a.call(l.import(3))?;
+        a.mov(dword_ptr(l.at(0x40 + 24)), eax)?;
+        a.mov(dword_ptr(l.at(0x180)), eax)?;
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(l.import(1))?;
+        a.add(esp, 4)?;
+        a.mov(ebx, 1)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        // The status byte, until it isn't SS_PENDING.
+        a.set_label(&mut spin)?;
+        a.cmp(byte_ptr(l.at(0x41)), 0)?;
+        a.je(spin)?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(dword_ptr(l.at(0x201)), 0x3030_4443)?;
+        a.jne(fail)?;
+        // The event is set: a wait that doesn't wait ends at once.
+        a.mov(eax, dword_ptr(l.at(0x180)))?;
+        a.push(0i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 4)?;
+        a.test(eax, eax)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_poll", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    assert!(
+        run_to_exit(&mut cpu, 200),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
 /// CONTEXT's Eip and EFlags, and TF.
 const CTX_EIP: i32 = 0xB8;
 const CTX_EFLAGS: i32 = 0xC0;
@@ -7856,4 +8447,277 @@ fn an_unhandled_exception_gives_the_exit_code_ffffffff() {
             assert_eq!(cpu.errorlevel, 1, "{}", printed(&cpu));
         }
     }
+}
+
+/// The UTF-16 string `s` with its zero.
+fn wide(s: &str) -> Vec<u8> {
+    s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
+}
+
+/// Call the method `index` of the interface whose pointer is at `this`
+/// in the data, with `args` after it.
+fn com_call(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    this: u32,
+    index: u32,
+    args: &[i32],
+) -> Result<(), IcedError> {
+    push_args(a, args)?;
+    a.mov(eax, dword_ptr(l.at(this)))?;
+    a.push(eax)?;
+    a.mov(ecx, dword_ptr(eax))?;
+    a.call(dword_ptr(ecx + 4 * index as i32))
+}
+
+/// Set bit `bit` of EBX when EAX is 0.
+fn bit_if_zero(a: &mut CodeAssembler, bit: u32) -> Result<(), IcedError> {
+    a.test(eax, eax)?;
+    bit_if_equal(a, bit)
+}
+
+/// The type library fixtures of src/win32/oleaut32/testdata: the SLTG one
+/// loaded, registered, and its interface's names looked up; LoadRegTypeLib
+/// finds the same library by the registry; and the MSFT one's dual
+/// interface shows its dispinterface side, and through
+/// GetRefTypeOfImplType(-1) its interface side. A bit each in the exit
+/// code; and the keys RegisterTypeLib wrote, as Windows writes them.
+#[test]
+fn a_type_library_loads_registers_and_names_its_members() {
+    let names: &[&str] = &[
+        "LoadTypeLib",
+        "RegisterTypeLib",
+        "DispGetIDsOfNames",
+        "LoadRegTypeLib",
+        "LoadTypeLibEx",
+    ];
+    let imports: &[(&str, &[&str])] = &[("OLEAUT32.DLL", names)];
+    let mut data = vec![0u8; 0x110];
+    put(&mut data, 0, &wide("C:\\RDSLTG.TLB"));
+    put(&mut data, 0x40, &wide("C:\\RDMSFT.TLB"));
+    // IShape's IID and the library's GUID.
+    let iid = [0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0, 0, 0, 0, 0, 1];
+    put(&mut data, 0x80, &iid);
+    put(&mut data, 0x90, &[0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x33, 0x33]);
+    put(&mut data, 0x98, &[0x44, 0x44, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55]);
+    put(&mut data, 0xA0, &wide("move"));
+    put(&mut data, 0xB0, &wide("DY"));
+    put(&mut data, 0xB8, &wide("dx"));
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[at(0), at(0xE0)])?;
+        a.call(f("LoadTypeLib"))?;
+        bit_if_zero(a, 0)?;
+        push_args(a, &[at(0), 0])?;
+        a.push(dword_ptr(l.at(0xE0)))?;
+        a.call(f("RegisterTypeLib"))?;
+        bit_if_zero(a, 1)?;
+        // GetTypeInfoOfGuid, then DispGetIDsOfNames of move, DY and dx.
+        com_call(a, l, 0xE0, 6, &[at(0x80), at(0xE4)])?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(l.at(0xC0)), at(0xA0))?;
+        a.mov(dword_ptr(l.at(0xC4)), at(0xB0))?;
+        a.mov(dword_ptr(l.at(0xC8)), at(0xB8))?;
+        push_args(a, &[at(0xC0), 3, at(0xD0)])?;
+        a.push(dword_ptr(l.at(0xE4)))?;
+        a.call(f("DispGetIDsOfNames"))?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 2)?;
+        let mut ids = a.create_label();
+        a.cmp(dword_ptr(l.at(0xD0)), 2)?;
+        a.jne(ids)?;
+        a.cmp(dword_ptr(l.at(0xD4)), 1)?;
+        a.jne(ids)?;
+        a.cmp(dword_ptr(l.at(0xD8)), 0)?;
+        a.jne(ids)?;
+        a.or(ebx, 1 << 3)?;
+        a.set_label(&mut ids)?;
+        a.nop()?;
+        // Version 1.2 of the library, from the registry: the same object.
+        push_args(a, &[at(0x90), 1, 2, 0, at(0xE8)])?;
+        a.call(f("LoadRegTypeLib"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(l.at(0xE8)))?;
+        a.xor(eax, dword_ptr(l.at(0xE0)))?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 4)?;
+        // REGKIND_NONE.
+        push_args(a, &[at(0x40), 2, at(0xEC)])?;
+        a.call(f("LoadTypeLibEx"))?;
+        a.mov(esi, eax)?;
+        com_call(a, l, 0xEC, 6, &[at(0x80), at(0xF0)])?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 5)?;
+        // GetTypeAttr: a dispinterface with IUnknown's, IDispatch's and
+        // its own 4 methods.
+        com_call(a, l, 0xF0, 3, &[at(0xF4)])?;
+        let mut dispatch = a.create_label();
+        a.mov(eax, dword_ptr(l.at(0xF4)))?;
+        a.cmp(dword_ptr(eax + 40), 4)?;
+        a.jne(dispatch)?;
+        a.cmp(word_ptr(eax + 44), 11)?;
+        a.jne(dispatch)?;
+        a.or(ebx, 1 << 6)?;
+        a.set_label(&mut dispatch)?;
+        // GetRefTypeOfImplType(-1), GetRefTypeInfo, GetTypeAttr: the
+        // interface with its 4.
+        com_call(a, l, 0xF0, 8, &[-1, at(0xF8)])?;
+        a.push(at(0xFC))?;
+        a.push(dword_ptr(l.at(0xF8)))?;
+        a.mov(eax, dword_ptr(l.at(0xF0)))?;
+        a.push(eax)?;
+        a.mov(ecx, dword_ptr(eax))?;
+        a.call(dword_ptr(ecx + 4 * 14))?;
+        com_call(a, l, 0xFC, 3, &[at(0x100)])?;
+        let mut interface = a.create_label();
+        a.mov(eax, dword_ptr(l.at(0x100)))?;
+        a.cmp(dword_ptr(eax + 40), 3)?;
+        a.jne(interface)?;
+        a.cmp(word_ptr(eax + 44), 4)?;
+        a.jne(interface)?;
+        a.or(ebx, 1 << 7)?;
+        a.set_label(&mut interface)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let dir = scratch(
+        "typelib",
+        &[
+            ("T.EXE", exe),
+            (
+                "RDSLTG.TLB",
+                include_bytes!("../src/win32/oleaut32/testdata/rdtest-sltg.tlb").to_vec(),
+            ),
+            (
+                "RDMSFT.TLB",
+                include_bytes!("../src/win32/oleaut32/testdata/rdtest-msft.tlb").to_vec(),
+            ),
+        ],
+    );
+    let mut cpu = Cpu::new(dir.clone());
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(run_to_exit(&mut cpu, 400), "{:?}", printed(&cpu));
+    let code = cpu.errorlevel;
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+    let saved = fs::read_to_string(dir.join("REGISTRY.REG")).unwrap();
+    let classes = "[HKEY_LOCAL_MACHINE\\Software\\Classes\\";
+    let lib = format!("{classes}TypeLib\\{{11111111-2222-3333-4444-555555555555}}\\1.2");
+    for want in [
+        format!("{lib}]\r\n@=\"rust-dos type library test\"\r\n"),
+        format!("{lib}\\0\\win32]\r\n@=\"C:\\\\RDSLTG.TLB\"\r\n"),
+        format!("{lib}\\FLAGS]\r\n@=\"0\"\r\n"),
+        format!("{lib}\\HELPDIR]\r\n@=\"C:\"\r\n"),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000001}}]\r\n@=\"IShape\"\r\n"
+        ),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000001}}\\ProxyStubClsid32]\r\n\
+             @=\"{{00020424-0000-0000-C000-000000000046}}\"\r\n"
+        ),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000001}}\\TypeLib]\r\n\
+             @=\"{{11111111-2222-3333-4444-555555555555}}\"\r\n\"Version\"=\"1.2\"\r\n"
+        ),
+        format!(
+            "{classes}Interface\\{{11111111-2222-3333-4444-000000000002}}\\ProxyStubClsid32]\r\n\
+             @=\"{{00020420-0000-0000-C000-000000000046}}\"\r\n"
+        ),
+    ] {
+        assert!(saved.contains(&want), "{want} isn't in {saved}");
+    }
+    // The class is no interface; IPlain, an [oleautomation] one, is.
+    assert!(!saved.contains("Interface\\{11111111-2222-3333-4444-000000000004}"), "{saved}");
+    assert!(saved.contains("Interface\\{11111111-2222-3333-4444-000000000003}]"), "{saved}");
+}
+
+/// An error object made, filled, set as the thread's and taken back,
+/// once; and a VT_I4 changed to a VT_BSTR. A bit each in the exit code.
+#[test]
+fn an_error_object_goes_through_the_thread_and_a_variant_changes_type() {
+    let names: &[&str] = &[
+        "CreateErrorInfo",
+        "SetErrorInfo",
+        "GetErrorInfo",
+        "VariantChangeType",
+    ];
+    let imports: &[(&str, &[&str])] = &[("OLEAUT32.DLL", names)];
+    let mut data = vec![0u8; 0x60];
+    put(&mut data, 0, &wide("x9"));
+    // IID_IErrorInfo.
+    put(
+        &mut data,
+        0x10,
+        &[
+            0x20, 0xB1, 0xF2, 0x1C, 0x7D, 0x54, 0x1B, 0x10, 0x8E, 0x65, 0x08, 0x00, 0x2B, 0x2B, 0xD1,
+            0x19,
+        ],
+    );
+    // A VT_I4 of 1234.
+    put(&mut data, 0x30, &3u16.to_le_bytes());
+    put(&mut data, 0x38, &1234u32.to_le_bytes());
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+        let at = |offset: u32| l.at(offset) as i32;
+        a.xor(ebx, ebx)?;
+        a.push(at(0x20))?;
+        a.call(f("CreateErrorInfo"))?;
+        bit_if_zero(a, 0)?;
+        // SetDescription, QueryInterface for IErrorInfo.
+        com_call(a, l, 0x20, 5, &[at(0)])?;
+        bit_if_zero(a, 1)?;
+        com_call(a, l, 0x20, 0, &[at(0x10), at(0x24)])?;
+        bit_if_zero(a, 2)?;
+        a.push(dword_ptr(l.at(0x24)))?;
+        a.push(0)?;
+        a.call(f("SetErrorInfo"))?;
+        bit_if_zero(a, 3)?;
+        com_call(a, l, 0x24, 2, &[])?;
+        com_call(a, l, 0x20, 2, &[])?;
+        push_args(a, &[0, at(0x28)])?;
+        a.call(f("GetErrorInfo"))?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(l.at(0x28)))?;
+        a.xor(eax, dword_ptr(l.at(0x24)))?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 4)?;
+        // GetDescription: "x9".
+        com_call(a, l, 0x28, 5, &[at(0x2C)])?;
+        a.mov(esi, eax)?;
+        a.mov(eax, dword_ptr(l.at(0x2C)))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.xor(eax, 0x0039_0078)?;
+        a.or(eax, esi)?;
+        bit_if_zero(a, 5)?;
+        // The thread has none now: S_FALSE.
+        push_args(a, &[0, at(0x28)])?;
+        a.call(f("GetErrorInfo"))?;
+        a.cmp(eax, 1)?;
+        bit_if_equal(a, 6)?;
+        // VT_BSTR: "1234".
+        push_args(a, &[at(0x40), at(0x30), 0, 8])?;
+        a.call(f("VariantChangeType"))?;
+        let mut text = a.create_label();
+        a.test(eax, eax)?;
+        a.jne(text)?;
+        a.cmp(word_ptr(l.at(0x40)), 8)?;
+        a.jne(text)?;
+        a.mov(eax, dword_ptr(l.at(0x48)))?;
+        a.cmp(dword_ptr(eax), 0x0032_0031)?;
+        a.jne(text)?;
+        a.cmp(dword_ptr(eax + 4), 0x0034_0033)?;
+        a.jne(text)?;
+        a.cmp(dword_ptr(eax - 4), 8)?;
+        a.jne(text)?;
+        a.or(ebx, 1 << 7)?;
+        a.set_label(&mut text)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("errorinfo", exe);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {out}", !code);
 }

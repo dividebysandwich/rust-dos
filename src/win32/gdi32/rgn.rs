@@ -277,13 +277,19 @@ pub fn get_region_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         set_error(cpu, ERROR_INVALID_HANDLE);
         return Some(0);
     };
+    Some(write_region_data(cpu, &r, size, out))
+}
+
+/// Write `r` as an RGNDATA at `out`, as GetRegionData does: the bytes it
+/// takes, 0 if `size` can't hold them, and with `out` 0 the bytes only.
+pub fn write_region_data(cpu: &mut Cpu, r: &Region, size: u32, out: u32) -> u32 {
     let bytes = 16 * r.rects.len() as u32;
     let needed = 32 + bytes;
     if out == 0 {
-        return Some(needed);
+        return needed;
     }
     if size < needed {
-        return Some(0);
+        return 0;
     }
     let b = r.bounds();
     write_words(
@@ -303,7 +309,7 @@ pub fn get_region_data(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     for (i, rect) in r.rects.iter().enumerate() {
         rect.write(cpu, out + 32 + 16 * i as u32);
     }
-    Some(needed)
+    needed
 }
 
 /// PtInRegion(hrgn, x, y).

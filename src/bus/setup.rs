@@ -94,6 +94,7 @@ impl Bus {
             log_file: None,
             dta_segment: 0x1000,
             dta_offset: 0x0000,
+            sda_written: None,
             vga: crate::video::vga::VgaCard::new(),
             vbe: crate::video::vbe::Vbe::new(),
             s3_engine: crate::video::s3::engine::Engine::new(),

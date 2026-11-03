@@ -257,6 +257,19 @@ exceptions run as the program's own code on top of that.
   flushed and when the last process ends. Without a writable C: the
   registry lasts until then. A game's profile brings its keys as a .reg
   file, which the same import puts in (`[-key]` and `"name"=-` delete).
+- What a setup program leaves for the next boot runs at the start of a
+  session, which is the built-in Windows' boot (`src/win32/boot.rs`):
+  first the `[rename]` section of `C:\WINDOWS\WININIT.INI`, whose
+  `NUL=file` lines delete files and `new=old` lines put one file in
+  another's place, after which the file is renamed to `WININIT.BAK`, as
+  WININIT.EXE does; then the commands of HKLM's RunServicesOnce, HKLM's
+  RunOnce and HKCU's RunOnce, each value deleted as its command starts.
+  The commands run one at a time, each to the end of what it started,
+  and the program DOS started comes after them, with its exit code for
+  DOS. A restart (`ExitWindowsEx` with `EWX_REBOOT`) boots as soon as
+  the session's last process has ended, and the DOS prompt comes back
+  after the commands. Both kinds of work are files on drive C:, so work
+  left when the emulator was closed runs at the next session.
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform
   1), or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the
@@ -300,6 +313,29 @@ exceptions run as the program's own code on top of that.
   with just the DLLs in them, and are made on C: when a program makes a
   file or directory in them; neither can be removed while it holds
   them.
+- The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for Win32,
+  as Windows 98 SE's does (`src/win32/wnaspi32.rs`). Copy protections read
+  their discs that way: SafeDisc 2 loads it to check the CD. On Windows 98
+  the DLL hands each request block to APIX.VXD, and the IOS and the IDE port
+  driver send it to the drive as an ATAPI packet. Here the drive is the
+  ATAPI drive a booted Windows finds on the IDE channel (`ide::Atapi`), of
+  its own, since the built-in Windows has no IDE channel:
+  `Atapi::run_packet` runs each packet through its task file and data port
+  at once, and its delays pass at once. So the disc answers as it does to a
+  booted Windows 98, with the same data and the same sense data, MEDIUM
+  ERROR for a sector whose EDC doesn't match. ASPI shows one host adapter.
+  Its target 0 is the CD-ROM drive a booted system's IDE channel would show:
+  the one it shows stays while it has a disc, and it moves to a disc in
+  another CD-ROM drive only when its own is empty (1 when MOUNT's `-ide`
+  puts it on a slave). SC_EXEC_SCSI_CMD and SC_RESET_DEV run on the drive
+  at once. Without an event, SendASPI32Command returns SS_PENDING with the
+  final status already in the block and the posting routine called, as when
+  APIX's thread runs a command at once. With an event, it returns
+  SS_PENDING with the block still empty, and the scheduler finishes the
+  block and sets the event afterwards, as APIX's thread does. The
+  registry has the drive's device keys (HKLM\Enum and Config Manager's
+  nodes in HKEY_DYN_DATA), which SafeDisc 2 reads to find the drive letter
+  of an ASPI target.
 
 ### Video
 
@@ -325,7 +361,12 @@ All output goes through the emulated video hardware:
 - **Glide 2.x** (`glide2x.dll`) is written in Rust against the emulated
   Voodoo's registers, as 3dfx's library was against the card. The Voodoo
   emulation (`src/voodoo/`) does the rendering, and 3dfx's MiniGL drivers,
-  which games of the time shipped, run on top of it.
+  which games of the time shipped, run on top of it. `grSstControl` moves
+  the monitor between the card and the 2D picture while the display stays
+  open, as Test Drive 4 does between its DirectDraw menus and its races:
+  a Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee or
+  Voodoo3 gives the display back and later takes it again, with the
+  textures where they were.
 - **Direct3D** (DX5 and DX6 immediate mode: execute buffers and
   `DrawPrimitive`) becomes a HAL on the same emulated hardware, the way
   3dfx's Direct3D driver was one. The target card is the Banshee or
@@ -710,9 +751,14 @@ rust-dos is GPL-2.0-or-later.
 
 - **Scope.** The Win32 API is large. Trace-driven work and early
   milestones with real games keep it to what games call.
-- **Copy protection.** SafeDisc and SecuROM use VxDs and ring 0 tricks.
-  They are out of scope; games' no-CD releases or GOG versions are the
-  way around.
+- **Copy protection.** SafeDisc and SecuROM use VxDs, ring 0 tricks
+  and raw reads of the disc. The built-in Windows provides what Windows
+  98 and the machine provide, so a protection runs unchanged and reads
+  the disc image as Windows 98 would, through KERNEL32's ordinal-only
+  exports and SCSI commands through WNASPI32 among others. A
+  protection is never patched, skipped or detected by name. An image
+  that can't pass the check because of how it was made (its unreadable
+  sectors read back as good ones) fails it, as on Windows 98.
 - **Direct hardware access.** Games that talk to VxDs (`DeviceIoControl`
   on `\\.\VWIN32` for DOS calls is common and can go to the built-in
   DOS; others are not) or need a vendor's driver.
@@ -826,7 +872,10 @@ Wine 11.0's `msacm32.dll` with its IMA ADPCM codec, `imaadp32.acm`,
 encodes 16-bit PCM to IMA ADPCM and decodes it back through
 `acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
 written from the format's definition (`tests/wine_dlls.rs`, which runs
-when WINE_DLLS names the folder). MSACM32 finds the codec in SYSTEM.INI's
+when WINE_DLLS names the folder). It takes
+`win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
+exports and no codecs, for programs that only ask it how large a wave
+format can be (Test Drive 4). MSACM32 finds the codec in SYSTEM.INI's
 `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`) and opens it with
 OpenDriver, so WINMM's installable drivers are now real: OpenDriver loads
 the DLL as LoadLibrary does, finds its alias in SYSTEM.INI, and sends its
