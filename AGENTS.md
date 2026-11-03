@@ -140,8 +140,24 @@ other run hides real differences among those that timing makes.
   the largest channel difference for each frame, and compare main's pair
   at the same frames, which tells what the change added.
 
-Timing measurements are the exception: they measure how fast the host
-runs the emulator, and run without `--deterministic`.
+Two kinds of run can't be deterministic:
+
+- Timing measurements measure how fast the host runs the emulator.
+- Code that runs only outside deterministic mode can't be compared in
+  it. With `--deterministic` the Voodoo cards draw and take their
+  screenshots in software, and their 2D operations stay on the CPU,
+  because the GPU's pixels depend on the host's GPU. A change to OpenGL
+  drawing (`src/voodoo/gpu.rs`, `src/voodoo/gl`) is never run there.
+  Check that the code compared runs (`/api/status` tells which renderer
+  draws) before trusting identical pictures.
+
+A comparison that can't be deterministic keeps as much of it as it can:
+a fixed `--cycles` rather than `auto`, input sent at the same points of
+the program, and many shots close together. Match each shot with the
+other run's closest one, and log both emulated times. Say in the result
+that the runs weren't in step, and explain each match that still
+differs from the difference image: a different moment of the animation,
+or a different picture.
 
 ## Several agents on one machine
 
