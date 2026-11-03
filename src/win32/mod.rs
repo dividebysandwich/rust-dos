@@ -14,6 +14,7 @@
 //! INT 21h AH=4Ch, so the shell or the program that started it goes on.
 
 mod advapi32;
+mod boot;
 mod call;
 mod com;
 mod comctl32;
@@ -321,15 +322,11 @@ pub struct Win32 {
     /// The log's trace of the calls of the built-in functions (the
     /// `win32_trace` setting), which outlives the programs.
     pub(crate) trace: trace::Trace,
-    /// The program DOS loaded, which starts at `START`, and whether it is
-    /// a Windows 3.1 program, which starts as a Win16 task (src/win16).
-    pending: Option<String>,
-    pending_win16: bool,
-    /// The arguments it starts with when they aren't its PSP's: those
-    /// InstallShield's launcher gives its engine (`launcher`). Not saved
-    /// with the state: a state saved before the engine started has it
-    /// start without them.
-    pending_arguments: Option<String>,
+    /// The program that starts at `START`: the one DOS loaded, or a
+    /// RunOnce command's (`boot`).
+    pending: Option<boot::Program>,
+    /// The work of the session's boot (boot.rs).
+    boot: boot::Boot,
     /// The processes, the one DOS started first. They run in that DOS
     /// process, which waits for the last of them to end.
     pub(crate) processes: Vec<Process>,
@@ -620,12 +617,15 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     // InstallShield's Windows 3.1 setup launcher starts its 32-bit
     // engine, which runs in its place (`launcher`).
     // Other Windows 3.1 programs start as Win16 tasks.
-    let (path, arguments, win16) = if rust_dos_pe::is_pe(bytes) {
+    let (path, line, win16) = if rust_dos_pe::is_pe(bytes) {
         (cpu.program_path(filename), None, false)
     } else if launcher::is_ne(bytes) && !cpu.pe() {
         let launcher = cpu.program_path(filename);
         match launcher::engine(cpu, &launcher, bytes) {
-            Some((engine, arguments)) => (engine, Some(arguments), false),
+            Some((engine, arguments)) => {
+                let line = format!("{} {}", engine, arguments);
+                (engine, Some(line), false)
+            }
             // OS/2 programs, Borland's DPMI16 (RTM) ones among them, and
             // files that don't parse run their DOS stub as before.
             None if launcher::is_win16(bytes) => (launcher, None, true),
@@ -649,9 +649,7 @@ pub fn prepare(cpu: &mut Cpu, filename: &str, bytes: &[u8]) -> bool {
     let kind = if win16 { "Windows 3.1" } else { "Win32" };
     cpu.bus
         .log_string(&format!("[W32] {} is a {} program", path, kind));
-    cpu.bus.win32.pending = Some(path);
-    cpu.bus.win32.pending_win16 = win16;
-    cpu.bus.win32.pending_arguments = arguments;
+    cpu.bus.win32.pending = Some(boot::Program { path, line, win16 });
     cpu.set_cs(ROM_SEG);
     cpu.set_ip(START);
     true
@@ -706,10 +704,12 @@ pub fn service(cpu: &mut Cpu, id: u16) {
 
 /// The program DOS loaded starts: make its process and go to its entry
 /// point. A program that can't start ends with a message and exit code 1.
+/// At the session's first start, the boot's work comes first (boot.rs),
+/// and a RunOnce command that can't start makes way for the next.
 fn start(cpu: &mut Cpu) {
-    let Some(path) = cpu.bus.win32.pending.take() else {
+    if cpu.bus.win32.pending.is_none() {
         return;
-    };
+    }
     let (psp, rm_stack, a20, cr4) = (cpu.current_psp, (cpu.ss(), cpu.sp()), cpu.bus.a20(), cpu.cr4);
     let win32 = &mut cpu.bus.win32;
     win32.psp = psp;
@@ -718,46 +718,74 @@ fn start(cpu: &mut Cpu) {
     win32.cr4 = cr4;
     version::start(win32);
     dll_files::sync(&mut cpu.bus);
-    let environment = dos_environment(cpu, cpu.current_psp);
-    let line = match cpu.bus.win32.pending_arguments.take() {
-        Some(arguments) => format!("{} {}", path, arguments),
-        None => loader::dos_command_line(cpu, &path),
-    };
-    if std::mem::take(&mut cpu.bus.win32.pending_win16) {
-        match crate::win16::task::start(cpu, &path, &line, environment) {
-            Ok(()) => {
-                cpu.bus.win32.root = cpu.bus.win32.win16.pid;
+    boot::session_starts(cpu);
+    loop {
+        let Some(program) = cpu.bus.win32.pending.take() else {
+            return;
+        };
+        let command = boot::starts_command(cpu);
+        let tag = if program.win16 { "W16" } else { "W32" };
+        match start_program(cpu, program) {
+            Ok(pid) => {
+                // DOS gets the exit code of the program it started, not
+                // a RunOnce command's.
+                if !command {
+                    cpu.bus.win32.root = pid;
+                }
                 cpu.bus.set_a20(true);
                 thread::reschedule(cpu);
+                return;
+            }
+            Err(message) if command => {
+                cpu.bus.log_string(&format!("[W32] Boot: {}", message));
+                if !boot::next(cpu) {
+                    // Only RunOnce commands were left after a restart,
+                    // and none of them could start: back to DOS.
+                    release_session(cpu);
+                    let code = cpu.bus.win32.exit_code;
+                    cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
+                    cpu.set_ip(EXIT);
+                    return;
+                }
             }
             Err(message) => {
-                cpu.bus.log_string(&format!("[W16] {}", message));
+                cpu.bus.log_string(&format!("[{}] {}", tag, message));
                 say(cpu, &message);
                 if let Some(pool) = cpu.bus.win32.pool.take() {
                     pool.release(&mut cpu.bus);
                 }
                 cpu.set_ax(0x4C01);
                 cpu.set_ip(EXIT);
+                return;
             }
         }
-        return;
     }
-    match create_process(cpu, &path, &line, environment, Vec::new(), None, Vec::new(), false) {
-        Ok(created) => {
-            cpu.bus.win32.root = created.process.1;
-            cpu.bus.set_a20(true);
-            thread::reschedule(cpu);
-        }
-        Err(message) => {
-            cpu.bus.log_string(&format!("[W32] {}", message));
-            say(cpu, &message);
-            if let Some(pool) = cpu.bus.win32.pool.take() {
-                pool.release(&mut cpu.bus);
-            }
-            cpu.set_ax(0x4C01);
-            cpu.set_ip(EXIT);
-        }
+}
+
+/// Start `program` as the session's process, with DOS's environment: its
+/// process id, or a message for the user.
+fn start_program(cpu: &mut Cpu, program: boot::Program) -> Result<u32, String> {
+    let environment = dos_environment(cpu, cpu.current_psp);
+    let path = program.path;
+    let line = match program.line {
+        Some(line) => line,
+        None => loader::dos_command_line(cpu, &path),
+    };
+    if program.win16 {
+        crate::win16::task::start(cpu, &path, &line, environment)?;
+        return Ok(cpu.bus.win32.win16.pid);
     }
+    let created = create_process(
+        cpu,
+        &path,
+        &line,
+        environment,
+        Vec::new(),
+        None,
+        Vec::new(),
+        false,
+    )?;
+    Ok(created.process.1)
 }
 
 /// What `create_process` made: the process's object and id, and its main
@@ -1032,21 +1060,36 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
         thread::run_next(cpu);
         return;
     }
-    let (rm_stack, a20, code) = (win32.rm_stack, win32.a20, win32.exit_code);
+    let code = win32.exit_code;
     // The last program's loops get their summaries.
     trace::flush(cpu);
+    let (rm_stack, a20) = (cpu.bus.win32.rm_stack, cpu.bus.win32.a20);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
+    // The session's files are closed before a restart's work, as Windows
+    // closes them before it restarts: WININIT.INI's renames and deletes
+    // find them closed.
+    release_session(cpu);
+    // The boot may have a program to start next (boot.rs), which starts
+    // as one DOS loaded does.
+    if boot::next(cpu) {
+        cpu.set_ip(START);
+    } else {
+        cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
+    }
+    cpu.bus.set_a20(a20);
+    if cpu.state == CpuState::Halted {
+        cpu.state = CpuState::Running;
+    }
+}
+
+/// The session's processes are gone: its memory, files and objects go.
+fn release_session(cpu: &mut Cpu) {
     if let Some(pool) = cpu.bus.win32.pool.take() {
         pool.release(&mut cpu.bus);
     }
     object::close_all_files(&mut cpu.bus);
     cpu.bus.win32.objects = object::Objects::default();
     cpu.bus.win32.sections.clear();
-    cpu.bus.set_a20(a20);
-    cpu.set_ax(0x4C00 | (code & 0xFF) as u16);
-    if cpu.state == CpuState::Halted {
-        cpu.state = CpuState::Running;
-    }
 }
 
 /// Take the process at `index` away: its threads end with `code`, and
@@ -1294,7 +1337,7 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
         cpu.bus.set_a20(a20);
     }
     cpu.bus.win32.pending = None;
-    cpu.bus.win32.pending_arguments = None;
+    boot::dos_process_ended(cpu);
 }
 
 /// Put the .reg file `text` into the registry, as a game profile's
@@ -1410,7 +1453,7 @@ crate::state_fields!(Win32 {
     shell,
     dplay,
     dde,
-    pending_win16,
+    boot,
     win16,
     desktop_depth,
     atoms,
@@ -1423,7 +1466,6 @@ crate::state_fields!(Win32 {
     guest_replace,
     version,
     depth,
-    pending_arguments,
     dll_files,
     trace,
     wait_due,
