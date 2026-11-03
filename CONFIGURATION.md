@@ -1123,7 +1123,7 @@ headset.
 
 ### `[drives]`
 
-Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR]`,
+Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR] [-inplace]`,
 the options as `MOUNT` takes them. `-boot` boots the disk image when
 Rust-DOS starts (see [Booting at startup](#booting-at-startup)). A drive number 0 to 3 instead of the
 letter gives the BIOS a disk image without a DOS drive (see [Booting a disk
@@ -1881,21 +1881,19 @@ disks](#booting-a-disk-image) write their changes to the overlay too.
 `MOUNT` lists where each drive's changes go.
 
 A floppy or hard disk image with `-overlay DIR` is left as it is too: what
-is written to it goes to `DIR/<image name>.rdelta`, 64 KB at a time, and the
-rest is read from the image. That makes one image the base of many
-setups, a Windows 95 install with each game's changes in its own folder:
+is written to it goes to `DIR/<image name>.rdelta`, the same kind of delta
+file a hard disk image has beside it without `-overlay` (see [Disk
+images](#disk-images)). That makes one image the base of many setups, a
+Windows 95 install with each game's changes in its own folder:
 
 ```
 MOUNT 2 win95.img -overlay saves/carmageddon
 MOUNT 2 win95.img -overlay saves/fury3
 ```
 
-Deleting the `.rdelta` file takes the disk back to the image. The delta
-file is made for its image: if the image changes after, the delta file is
-refused. An image in an archive gets a delta file in the overlay folder in
-the same way (one copied there whole by an older Rust-DOS is still used).
-State files of a system booted from such a disk keep a copy of the whole
-disk, as they do of any other.
+An image in an archive gets a delta file in the overlay folder in the
+same way (one copied there whole by an older Rust-DOS is still used).
+`-inplace` and `-overlay` can't be given together.
 
 A: and B: are always floppy drives, whatever type the mount gives, and
 can't hold a CD or a partitioned hard disk image. Programs see them the way
@@ -1914,20 +1912,65 @@ long and the short name open the file.
 ### Disk images
 
 A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system that
-programs read and write like any other drive's; what they write goes into
-the image file. A FAT32 drive mounts at any `dos_version`, as programs
-reach its files through DOS; the functions of before FAT32 (INT 21h
-AH=36h, 1Ch) report no more than just under 2 GB of it, as MS-DOS 7.1
-does, and the FAT32 functions tell the rest (see `dos_version`). An image
-whose size is a floppy disk's (160 KB to 2.88 MB, as in DOSBox's table),
-or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or `.1440`, is a floppy,
-anything else a hard disk: an image of a whole disk with a partition
-table, whose first FAT12 or FAT16 partition (else its first FAT32 one) is
-the drive, or of a single volume. The hard disk's geometry comes from its
-partition table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
-`-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
-and an image file that can't be written, or `-ro`, makes a write-protected
-disk. `MOUNT C hdd.img` puts a hard disk image in place of C:'s directory.
+programs read and write like any other drive's; what they write to a hard
+disk image goes to a delta file beside it (below), and what they write to a
+floppy goes into the image. A FAT32 drive mounts at any `dos_version`, as
+programs reach its files through DOS; the functions of before FAT32 (INT 21h
+AH=36h, 1Ch) report no more than just under 2 GB of it, as MS-DOS 7.1 does,
+and the FAT32 functions tell the rest (see `dos_version`). An image whose
+size is a floppy disk's (160 KB to 2.88 MB, as in DOSBox's table), or named
+`.vfd`, `.flp`, `.360`, `.720`, `.1200` or `.1440`, is a floppy, anything
+else a hard disk: an image of a whole disk with a partition table, whose
+first FAT12 or FAT16 partition (else its first FAT32 one) is the drive, or
+of a single volume. The hard disk's geometry comes from its partition table
+or boot sector; where it can't, `-chs C,H,S` (or DOSBox's `-size 512,S,H,C`)
+gives it. `-t floppy` or `-t hdd` overrides the choice, and an image file
+that can't be written, or `-ro`, makes a write-protected disk. `MOUNT C
+hdd.img` puts a hard disk image in place of C:'s directory.
+
+A hard disk image mounted without `-overlay` is left as it is: what is
+written to it goes to `<image>.rdelta` beside it (`win98.img.rdelta` for
+`win98.img`), 64 KB at a time, and the rest is read from the image. Every
+run that mounts the image, from any configuration, takes up the same
+delta file, so the disk is as the last run left it, as an image written
+in place would be. State files of a system booted from it keep only its
+changes (see [Booting a disk image](#booting-a-disk-image)). The log, and
+the console at startup, name the delta file each image writes to.
+Deleting the delta file takes the disk back to the image.
+
+Other programs (an emulator, a disk tool, a loop mount) see the image
+without the changes. To write them into the image:
+
+```
+COMMIT C:
+rust-dos commit ~/images/win98.img
+```
+
+`COMMIT` takes a drive mounted from an image, by letter or disk number,
+while no booted system has it, and mounts it again over the image with
+the changes in it. `rust-dos commit IMAGE` does the same from the host's
+shell, for an image no running Rust-DOS has mounted; `--delta FILE` names
+a delta file elsewhere, such as one in an overlay folder. Both delete the
+delta file, and save states of the disk from before no longer load. A
+commit cut short (a crash, a power cut) leaves the delta file marked: a
+mount refuses it, and the next commit finishes it.
+
+The delta file is made for its image, and holds the image's size,
+modification time and a hash of its first MB and last 64 KB. If the image
+changes after (put in anew, or written by another program or with
+`-inplace`), the delta file no longer fits it: it is set aside as
+`<image>.rdelta.stale-<time>`, the log says so, and the disk is the image
+as it is now. An image that was written in place before simply gets a
+delta file over it on its next mount.
+
+`-inplace` writes the image itself, and state files then keep a whole
+copy of the disk. It leaves out a delta file that is beside the image,
+which the log tells: once the image is written, those changes no longer
+fit it, so `COMMIT` them first to keep them. A floppy image and one in an
+archive (which takes `-overlay`) have no delta file either, nor does an
+image where no file can be made beside it, which the log tells. A
+read-only mount (`-ro`, or a file that can't be written) makes no delta
+file, and shows the changes of one that is there.
 
 86Box's 86F floppy images (`.86f`, found by their contents whatever their
 name) mount like the others. They hold each track's FM or MFM bit cells,
@@ -2205,20 +2248,41 @@ system booted from a floppy starts from the first hard disk when the floppy
 drive is empty by then, as a PC that boots from A: and then C: does.
 Changes to the hardware settings wait for the prompt.
 
-What the system writes goes into the image, so try things on a copy (on
-btrfs or XFS, `cp --reflink=auto` takes no room). [Save
-states](README.md#save-states) and rewind keep the disks in step with the
-system's memory: in a run, the disks go back with a state through a journal
-of what the system wrote over (the last 256 MB of it), and a state file has
-a copy of each disk beside it (`slot1.C.img` for `slot1.state`, or
-`slot1.2.img` for the disk mounted as 2, which takes no room where the
-filesystem shares data between files) that loading it puts back. The copy
-goes into the image the loading machine has in that drive, not the one
-the state was saved with, so a configuration that mounts a scratch copy
-of the image as C: can load states of the system without touching the
-original. The image must be the size of the copy, and a machine with no
-image in the drive (a folder as C:, or nothing) refuses the load. The
-browser's slots can't hold disks and refuse a booted system's state.
+What the system writes to a hard disk image goes to its delta file
+(`<image>.rdelta` beside it, or in the [`-overlay DIR`](#mounting-drives)
+folder), and the image stays as it is until `COMMIT` writes the changes
+into it (see [Disk images](#disk-images)); with `-inplace` it goes into
+the image. [Save states](README.md#save-states) and rewind keep the disks
+in step with the system's memory: in a run, the disks go back with a
+state through a journal of what the system wrote over (the last 256 MB of
+it), and a state file keeps each disk beside it, which loading it puts
+back:
+
+- A disk with a delta file keeps only its changes: a copy of its delta
+  file as it was at the state (`slot1.C.rdelta` for `slot1.state`, or
+  `slot1.2.rdelta` for the disk mounted as 2), a few MB to a few hundred
+  for a Windows session. Its header names the image, with the image's
+  size, modification time and a hash of its first MB and last 64 KB. The
+  changes go back only over that image, with its changes in a delta file
+  again: the delta file of the drive as the loading machine has it, or,
+  with no image in that drive (a folder as C:, or nothing), the drive
+  mounted as the state had it. A load over an image that is gone, has
+  changed (a `COMMIT` since changes it), or is mounted with `-inplace` or
+  read-only (`-ro`) is refused, and the message names the drive and the
+  image.
+- Any other disk (`-inplace`, a floppy) is copied whole (`slot1.C.img`,
+  which takes no room where the filesystem shares data between files),
+  and for an image of 64 MB or more the log says how big the copy is. The
+  copy goes into the image the loading machine has in that drive, not the
+  one the state was saved with, so a configuration that mounts a scratch
+  copy of the image as C: can load states of the system without touching
+  the original. The image must be the size of the copy, and a machine with
+  no image in the drive refuses the load. States saved so by older
+  versions load as they did. Over an image with a delta file, the copy's
+  differences from the disk go into the delta file, and the image stays
+  as it is.
+
+The browser's slots can't hold disks and refuse a booted system's state.
 
 ### Windows 95
 
@@ -2251,7 +2315,7 @@ other hardware may look for devices this machine hasn't.
 
 Windows 95, OSR2 included, is the system the booted machine was built and
 tried with, and Windows 98 SE runs too (see below). Windows 98 First Edition
-and ME have no recorded run, so try them on a copy of the image. The machine
+and ME have no recorded run. The machine
 has APM and no ACPI, and its Sound Blaster
 is a legacy card that Windows finds at the resources [`[sound]`](#sound)
 gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
@@ -2471,9 +2535,9 @@ none of this. An OpenGL game reaches the card in one of three ways:
   OpenGL in a window no longer can.
 
 The copy into the game's folder can be made by the game's configuration,
-which leaves the disk image as it is. With the image mounted with
-[`-overlay`](#mounting-drives), the built-in DOS copies the file before
-the system boots, and the copy goes into the overlay's `.rdelta` file:
+which leaves the disk image as it is: the built-in DOS copies the file
+before the system boots, and the copy goes into the image's delta file,
+here in an [`-overlay`](#mounting-drives) folder for the game:
 
 ```ini
 [drives]

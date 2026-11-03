@@ -101,6 +101,19 @@ fn main() -> Result<(), String> {
                 },
             }))
         }
+        Some(Command::Commit(commit)) => {
+            let delta = commit.delta.unwrap_or_else(|| rust_dos::diskdelta::beside(&commit.image));
+            match rust_dos::diskdelta::commit(&commit.image, &delta) {
+                Ok(blocks) => {
+                    println!("{}: {} blocks of changes written in from {}", commit.image.display(), blocks, delta.display());
+                    std::process::exit(0)
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1)
+                }
+            }
+        }
         None => {}
     }
     if let Some(port) = args.relay {

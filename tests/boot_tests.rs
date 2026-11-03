@@ -76,6 +76,14 @@ fn machine(name: &str) -> Cpu {
     cpu
 }
 
+/// Mount options that write the image as it is (`-inplace`).
+fn in_place() -> MountOptions {
+    MountOptions {
+        in_place: true,
+        ..Default::default()
+    }
+}
+
 /// Run the machine for up to `ms` ms of emulated time, until `stop`.
 fn run_until(cpu: &mut Cpu, ms: u64, stop: impl Fn(&Cpu) -> bool) -> bool {
     for _ in 0..ms {
@@ -87,6 +95,23 @@ fn run_until(cpu: &mut Cpu, ms: u64, stop: impl Fn(&Cpu) -> bool) -> bool {
         exec::run_batch(cpu, &mut NoHook, false);
     }
     stop(cpu)
+}
+
+/// The text on the screen, a line for each row.
+fn screen(cpu: &Cpu) -> String {
+    let row = |row: &[u8]| {
+        let text: String = row.iter().step_by(2).map(|&b| b as char).collect();
+        text.trim_end().to_string()
+    };
+    let rows: Vec<String> = cpu
+        .bus
+        .vga
+        .vram_text
+        .chunks(160)
+        .take(25)
+        .map(row)
+        .collect();
+    rows.join("\n")
 }
 
 fn press(cpu: &mut Cpu, scan: u8, extended: bool) {
@@ -236,7 +261,12 @@ fn a_booted_systems_state_takes_its_disk_back() {
 fn a_booted_systems_state_writes_only_the_image_this_machine_mounts() {
     use rust_dos::disk::DriveKind;
     use rust_dos::savestate::{disks, machine as states};
-    let hard_disk = || MountOptions { kind: DriveKind::HardDisk, ..Default::default() };
+    // Written as they are: the copies are whole.
+    let hard_disk = || MountOptions {
+        kind: DriveKind::HardDisk,
+        in_place: true,
+        ..Default::default()
+    };
     let sector_of = |path: &PathBuf, lba: usize| {
         std::fs::read(path).unwrap()[lba * SECTOR_SIZE..][..SECTOR_SIZE].to_vec()
     };
@@ -303,6 +333,376 @@ fn a_booted_systems_state_writes_only_the_image_this_machine_mounts() {
     assert!(error.contains("drive C: has no disk image here"), "{}", error);
     assert_eq!(std::fs::read(&original).unwrap(), changed, "the original as it was");
     disks::delete_copies(&file);
+}
+
+/// A booted system whose disk image is left as it is, its changes in a
+/// delta file (`-overlay`), has states that keep only the changes, as they
+/// were at the state: another run puts them back over the same image,
+/// and refuses a state over an image that changed or is gone, or that is
+/// written in place. A state with a whole copy of the disk (one saved
+/// with the image written in place, or by an older rust-dos) still loads
+/// into the disk under a delta file.
+#[test]
+fn a_booted_systems_state_keeps_only_the_changes_over_its_image() {
+    use rust_dos::savestate::{disks, machine as states};
+    let sector_of = |cpu: &Cpu, lba: u64| {
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        cpu.bus
+            .disk
+            .bios_image(2)
+            .unwrap()
+            .read(lba, &mut buf)
+            .unwrap();
+        buf
+    };
+    let mut cpu = machine("delta_state");
+    let dir = std::fs::canonicalize("target/test_boot/delta_state").unwrap();
+    let disk = cpu.bus.disk.bios_image(2).unwrap();
+    let mut bytes = vec![0u8; disk.sectors() as usize * SECTOR_SIZE];
+    disk.read(0, &mut bytes).unwrap();
+    let base = dir.join("base.img");
+    std::fs::write(&base, &bytes).unwrap();
+    let overlay = dir.join("changes");
+    let over = || MountOptions {
+        overlay: Some(overlay.clone()),
+        ..Default::default()
+    };
+    cpu.bus.mount_drive(2, &base, over(), true).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    // The system writes its disk: into the delta file.
+    let disk = cpu.bus.disk.bios_image(2).unwrap();
+    disk.write(1, &[0xAA; SECTOR_SIZE]).unwrap();
+    let state = states::save(&cpu);
+    let file = dir.join("booted.state");
+    disks::save_copies(&cpu, &file).unwrap();
+    let changes = disks::changes_path(&file, 2);
+    assert!(
+        !disks::copy_path(&file, 2).exists(),
+        "no copy of the whole disk"
+    );
+    assert!(
+        std::fs::metadata(&changes).unwrap().len() < 1 << 20,
+        "the changes alone"
+    );
+    let saved = disks::saved(&file, 2);
+    assert_eq!(
+        saved,
+        Some(rust_dos::diskimage::SavedDisk::Changes(changes.clone()))
+    );
+    // Written after the state: the state's changes stay as they were.
+    disk.write(1, &[0xBB; SECTOR_SIZE]).unwrap();
+    disk.write(5000, &[0xCC; SECTOR_SIZE]).unwrap();
+    drop(disk);
+    drop(cpu);
+    assert_eq!(
+        std::fs::read(&base).unwrap(),
+        bytes,
+        "the image is as it was"
+    );
+
+    // Another run with the image under the same delta file, written
+    // since: the load puts the state's changes back.
+    let mut cpu = machine("delta_state_again");
+    cpu.bus.mount_drive(2, &base, over(), true).unwrap();
+    assert_eq!(sector_of(&cpu, 1), [0xBB; SECTOR_SIZE]);
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert!(cpu.bus.boot.is_some());
+    assert_eq!(sector_of(&cpu, 1), [0xAA; SECTOR_SIZE]);
+    assert_eq!(
+        sector_of(&cpu, 5000),
+        bytes[5000 * SECTOR_SIZE..][..SECTOR_SIZE]
+    );
+    drop(cpu);
+
+    // A run with no image in C: (a folder) mounts the image as the state
+    // has it, with its changes in the delta file.
+    std::fs::create_dir_all(dir.join("folder")).unwrap();
+    let mut cpu = Cpu::new(dir.join("folder"));
+    cpu.load_shell();
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), base.as_path());
+    assert_eq!(sector_of(&cpu, 1), [0xAA; SECTOR_SIZE]);
+    drop(cpu);
+    assert_eq!(
+        std::fs::read(&base).unwrap(),
+        bytes,
+        "the image is as it was"
+    );
+
+    // A folder as C: that a booted system has as a disk is no image
+    // either: the image is mounted as the state has it.
+    let mut cpu = Cpu::new(dir.join("folder"));
+    cpu.load_shell();
+    let share = MountOptions {
+        share: Some(true),
+        ..Default::default()
+    };
+    cpu.bus
+        .mount_drive(2, &dir.join("folder"), share, true)
+        .unwrap();
+    cpu.bus.disk.prepare_shared_disks();
+    assert!(cpu.bus.disk.bios_image(2).is_some(), "the folder's disk");
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &state);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), base.as_path());
+    assert_eq!(sector_of(&cpu, 1), [0xAA; SECTOR_SIZE]);
+    drop(cpu);
+
+    // The image written in place, here as C: without a delta file: the
+    // state's changes can't go over it.
+    let refused = |cpu: &mut Cpu| {
+        disks::offer_copies(cpu, &file);
+        let loaded = states::load(cpu, &state);
+        disks::withdraw(cpu);
+        loaded.unwrap_err().to_string()
+    };
+    let mut cpu = machine("delta_state_in_place");
+    let copy = dir.join("copy.img");
+    std::fs::write(&copy, &bytes).unwrap();
+    cpu.bus.mount_drive(2, &copy, in_place(), true).unwrap();
+    let error = refused(&mut cpu);
+    assert!(
+        error.contains("drive C:") && error.contains("written in place"),
+        "{}",
+        error
+    );
+    assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+    drop(cpu);
+
+    // The image under a delta file mounted read-only: the changes can't
+    // go into it.
+    let mut cpu = machine("delta_state_read_only");
+    let read_only = MountOptions {
+        read_only: true,
+        ..over()
+    };
+    cpu.bus.mount_drive(2, &base, read_only, true).unwrap();
+    let error = refused(&mut cpu);
+    assert!(
+        error.contains("drive C:") && error.contains("can't be written"),
+        "{}",
+        error
+    );
+    drop(cpu);
+
+    // The image changed since the state: refused, naming the drive and
+    // the image the changes were made over.
+    let mut changed = bytes.clone();
+    changed[3 * SECTOR_SIZE] ^= 0xFF;
+    std::fs::write(&base, &changed).unwrap();
+    let mut cpu = machine("delta_state_changed");
+    let other = MountOptions {
+        overlay: Some(dir.join("other")),
+        ..Default::default()
+    };
+    cpu.bus.mount_drive(2, &base, other, true).unwrap();
+    let error = refused(&mut cpu);
+    assert!(
+        error.contains("drive C:") && error.contains("another disk"),
+        "{}",
+        error
+    );
+    assert!(error.contains(&base.display().to_string()), "{}", error);
+    drop(cpu);
+
+    // The image gone: a machine with no image in C: can't mount it.
+    std::fs::remove_file(&base).unwrap();
+    let mut cpu = Cpu::new(dir.join("folder"));
+    cpu.load_shell();
+    let error = refused(&mut cpu);
+    assert!(
+        error.contains("drive C:") && error.contains("moved or deleted"),
+        "{}",
+        error
+    );
+    drop(cpu);
+    disks::delete_copies(&file);
+    assert!(!changes.exists());
+
+    // A state with a whole copy of the disk goes into the image under a
+    // delta file, which takes only what differs, and the image stays.
+    std::fs::write(&base, &bytes).unwrap();
+    let _ = std::fs::remove_dir_all(&overlay);
+    let mut cpu = machine("delta_state_whole");
+    cpu.bus.mount_drive(2, &copy, in_place(), true).unwrap();
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    cpu.bus
+        .disk
+        .bios_image(2)
+        .unwrap()
+        .write(7, &[0xEE; SECTOR_SIZE])
+        .unwrap();
+    let whole = states::save(&cpu);
+    disks::save_copies(&cpu, &file).unwrap();
+    assert!(matches!(
+        disks::saved(&file, 2),
+        Some(rust_dos::diskimage::SavedDisk::Whole(_))
+    ));
+    drop(cpu);
+    // Into the image under its default delta file, beside it.
+    let mut cpu = machine("delta_state_whole_again");
+    let _ = std::fs::remove_file(dir.join("base.img.rdelta"));
+    cpu.bus
+        .mount_drive(2, &base, MountOptions::default(), true)
+        .unwrap();
+    let delta = cpu
+        .bus
+        .disk
+        .bios_image(2)
+        .unwrap()
+        .delta_path()
+        .map(PathBuf::from);
+    assert_eq!(delta, Some(dir.join("base.img.rdelta")));
+    disks::offer_copies(&mut cpu, &file);
+    let loaded = states::load(&mut cpu, &whole);
+    disks::withdraw(&mut cpu);
+    loaded.unwrap();
+    assert_eq!(cpu.bus.disk.bios_image(2).unwrap().path(), base.as_path());
+    assert_eq!(sector_of(&cpu, 7), [0xEE; SECTOR_SIZE]);
+    assert_eq!(
+        std::fs::read(&base).unwrap(),
+        bytes,
+        "the image is as it was"
+    );
+    disks::delete_copies(&file);
+}
+
+/// A hard disk image mounted as it is keeps what is written to it in a
+/// delta file beside it, which the next run that mounts the image takes
+/// up again. `-inplace` writes the image itself, and COMMIT writes the
+/// delta file's changes into the image.
+#[test]
+fn a_hard_disk_images_writes_go_to_a_delta_file_beside_it() {
+    let sector_of = |cpu: &Cpu, lba: u64| {
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        let disk = cpu.bus.disk.bios_image(2).unwrap();
+        disk.read(lba, &mut buf).unwrap();
+        buf
+    };
+    let write = |cpu: &Cpu, lba: u64, byte: u8| {
+        let disk = cpu.bus.disk.bios_image(2).unwrap();
+        disk.write(lba, &[byte; SECTOR_SIZE]).unwrap();
+    };
+    let delta_of = |cpu: &Cpu| {
+        let disk = cpu.bus.disk.bios_image(2).unwrap();
+        disk.delta_path().map(PathBuf::from)
+    };
+    let mut cpu = machine("default_delta");
+    let dir = std::fs::canonicalize("target/test_boot/default_delta").unwrap();
+    let mut bytes = vec![0u8; cpu.bus.disk.bios_image(2).unwrap().sectors() as usize * SECTOR_SIZE];
+    cpu.bus
+        .disk
+        .bios_image(2)
+        .unwrap()
+        .read(0, &mut bytes)
+        .unwrap();
+    let image = dir.join("disk.img");
+    std::fs::write(&image, &bytes).unwrap();
+    let delta = dir.join("disk.img.rdelta");
+
+    // The mount says where the writes go, and how to opt out or commit.
+    cpu.bus.log_backlog = Some(Vec::new());
+    cpu.bus
+        .mount_drive(2, &image, MountOptions::default(), true)
+        .unwrap();
+    let log = cpu.bus.take_log_backlog();
+    let told = log.iter().any(|(_, line)| {
+        line.contains(&rust_dos::mount::display_host_path(&delta))
+            && line.contains("COMMIT")
+            && line.contains("-inplace")
+    });
+    assert!(told, "{:?}", log);
+    assert_eq!(delta_of(&cpu), Some(delta.clone()));
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    write(&cpu, 1, 0xAA);
+    drop(cpu);
+    assert_eq!(
+        std::fs::read(&image).unwrap(),
+        bytes,
+        "the image is as it was"
+    );
+    assert!(delta.is_file());
+
+    // The next run sees what the first wrote.
+    let mut cpu = machine("default_delta_again");
+    cpu.bus
+        .mount_drive(2, &image, MountOptions::default(), true)
+        .unwrap();
+    assert_eq!(sector_of(&cpu, 1), [0xAA; SECTOR_SIZE]);
+    drop(cpu);
+
+    // -inplace writes the image, and its states copy the disk whole.
+    let mut cpu = machine("default_delta_in_place");
+    cpu.bus.mount_drive(2, &image, in_place(), true).unwrap();
+    assert_eq!(delta_of(&cpu), None);
+    assert_eq!(sector_of(&cpu, 1), bytes[SECTOR_SIZE..][..SECTOR_SIZE]);
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    write(&cpu, 2, 0xBB);
+    let file = dir.join("in_place.state");
+    rust_dos::savestate::disks::save_copies(&cpu, &file).unwrap();
+    assert!(matches!(
+        rust_dos::savestate::disks::saved(&file, 2),
+        Some(rust_dos::diskimage::SavedDisk::Whole(_))
+    ));
+    rust_dos::savestate::disks::delete_copies(&file);
+    drop(cpu);
+    let mut expected = bytes.clone();
+    expected[2 * SECTOR_SIZE..][..SECTOR_SIZE].fill(0xBB);
+    assert_eq!(std::fs::read(&image).unwrap(), expected);
+
+    // The image written since: the delta file's changes no longer fit it,
+    // so it is set aside, and the disk is the image as it is now. The
+    // time is set on, for file systems that keep it coarsely.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image)
+        .unwrap();
+    file.set_modified(later).unwrap();
+    drop(file);
+    let mut cpu = machine("default_delta_after");
+    cpu.bus.log_backlog = Some(Vec::new());
+    cpu.bus
+        .mount_drive(2, &image, MountOptions::default(), true)
+        .unwrap();
+    let log = cpu.bus.take_log_backlog();
+    assert!(
+        log.iter().any(|(_, line)| line.contains("set aside")),
+        "{:?}",
+        log
+    );
+    assert_eq!(sector_of(&cpu, 1), bytes[SECTOR_SIZE..][..SECTOR_SIZE]);
+    assert_eq!(sector_of(&cpu, 2), [0xBB; SECTOR_SIZE]);
+
+    // COMMIT writes the changes into the image and deletes the delta
+    // file; the drive shows the image as it is then.
+    write(&cpu, 3, 0xCC);
+    assert!(delta.is_file());
+    exec::run_command_line(&mut cpu, "COMMIT C:");
+    assert!(!delta.exists(), "the delta file is gone: {}", screen(&cpu));
+    expected[3 * SECTOR_SIZE..][..SECTOR_SIZE].fill(0xCC);
+    assert_eq!(std::fs::read(&image).unwrap(), expected);
+    assert_eq!(delta_of(&cpu), Some(delta.clone()));
+    assert_eq!(sector_of(&cpu, 3), [0xCC; SECTOR_SIZE]);
+    // Not while a booted system has the disk.
+    write(&cpu, 4, 0xDD);
+    exec::run_command_line(&mut cpu, "BOOT -l C");
+    assert!(run_until(&mut cpu, 1000, |cpu| cpu.bus.read_8(WAITING) == 1));
+    exec::run_command_line(&mut cpu, "COMMIT C:");
+    assert!(delta.is_file());
+    assert_eq!(std::fs::read(&image).unwrap(), expected);
 }
 
 #[test]

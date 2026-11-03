@@ -51,6 +51,7 @@ static COMMANDS: &[(&str, &(dyn ShellCommand + Sync))] = &[
     ("REMOUNT", &RemountCommand),
     ("SUBST", &SubstCommand),
     ("MAKEIMG", &crate::makeimg_command::MakeImgCommand),
+    ("COMMIT", &crate::commit_command::CommitCommand),
     ("SET", &SetCommand),
     ("PATH", &PathCommand),
     ("DOSCONFIG", &DosConfigCommand),

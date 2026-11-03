@@ -427,7 +427,12 @@ of that one too, as `run.D.img`: the test stops if D: is an image other
 than that copy. Set `RUST_DOS_VOODOO_PROFILE_DIR` to that directory. The
 test restores and writes the scratch images, so keep them separate from
 the originals. The original state and its sidecars must remain available
-for restoration.
+for restoration. A state of a disk with a delta file (a hard disk image
+mounted without `-inplace`) has its changes beside it (`.C.rdelta`)
+instead of a whole copy: copy the image they were made over as
+`run.C.img`, keeping its modification time (`cp -p`), and the changes go
+into a delta file over it, `run.C.img.rdelta` beside it or in the overlay
+folder the state names.
 
 ```sh
 cargo test --release --no-default-features --features sdl --lib \

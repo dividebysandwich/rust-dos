@@ -11,6 +11,7 @@
 use super::{
     CharDevice, DRIVE_C, DRIVE_SLOTS, DiskController, Drive, LASTDRIVE, MountOptions, OpenData, OpenFile, drive_name,
 };
+use crate::diskimage::SavedDisk;
 use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
 use std::io::Seek;
@@ -230,21 +231,26 @@ impl DiskController {
             let spec = MountSpec { path: folder.clone(), ..spec_of(text)? };
             mount = Some(state_value(&spec));
         }
-        // A booted system's disk image comes back from the copy beside the
-        // state file, into the image this machine has in the drive. The
-        // image the state names may be one this machine doesn't mount (the
-        // original that the saving run's disk was a copy of), and taking
-        // it would write the copy over it. (A folder's disk is made from
+        // A booted system's disk image comes back from what the state file
+        // keeps of it beside it, into the image this machine has in the
+        // drive. The image the state names may be one this machine doesn't
+        // mount (the original that the saving run's disk was a copy of),
+        // and taking it would write the copy over it. Changes over an image
+        // left as it is need that image under a delta file: with no image
+        // in the drive here (a folder, even one a booted system shares as
+        // a disk, or nothing), the drive is mounted as the state has it,
+        // which writes only the delta file. (A folder's disk is made from
         // the folder the state names, or the one `folders` gives. An image
         // that `folders` names, a scratch disk, is mounted as it says.)
-        let copy = self
+        let saved = self
             .copies_from
             .as_ref()
-            .map(|state| crate::savestate::disks::copy_path(state, drive))
-            .filter(|copy| copy.is_file());
-        let into_mounted = match (&mount, &copy) {
+            .and_then(|state| crate::savestate::disks::saved(state, drive));
+        let changes = matches!(saved, Some(SavedDisk::Changes(_)));
+        let no_image_here = self.drive(drive).is_none_or(|d| d.mounted_disk().is_none());
+        let into_mounted = match (&mount, &saved) {
             (Some(text), Some(_)) if !folders.iter().any(|(d, _)| *d == drive) => {
-                !crate::hostfs::is_dir(&spec_of(text)?.path)
+                !crate::hostfs::is_dir(&spec_of(text)?.path) && !(changes && no_image_here)
             }
             _ => false,
         };
@@ -276,12 +282,23 @@ impl DiskController {
                 StateError::Media(format!("drive {} can't be mounted: {}{}", name, e, hint))
             })?;
         }
-        let no_image = || {
-            StateError::Media(format!(
+        let no_image = || match &saved {
+            Some(SavedDisk::Changes(path)) => StateError::Media(format!(
+                "drive {} has no disk image here for the state's changes of its disk ({}) to go \
+                 over: mount the image they were made over{} as {} (without -inplace) and load \
+                 again",
+                name,
+                path.display(),
+                crate::diskdelta::base_named_in(path)
+                    .map(|p| format!(" ({})", p.display()))
+                    .unwrap_or_default(),
+                name
+            )),
+            _ => StateError::Media(format!(
                 "drive {} has no disk image here for the state's copy of its disk to go into: \
                  mount one of the same size (a scratch copy) as {} and load again",
                 name, name
-            ))
+            )),
         };
         let images = match self.drive(drive) {
             Some(d) => d.images.len(),
@@ -294,22 +311,11 @@ impl DiskController {
             }
             self.swap_image(drive).map_err(StateError::Mismatch)?;
         }
-        // The copy goes into the disk now in the drive once the state is
-        // in (`revert_disks`), where a disk of another size could only be
-        // logged: the load is refused here instead.
-        if let Some(copy) = copy.filter(|_| into_mounted) {
-            let disk = self.bios_image(drive).ok_or_else(no_image)?;
-            let len = std::fs::metadata(&copy)
-                .map_err(|e| StateError::Media(format!("{}: {}", copy.display(), e)))?
-                .len();
-            if len.div_ceil(crate::diskimage::SECTOR_SIZE as u64) != disk.sectors() {
-                return Err(StateError::Media(format!(
-                    "the disk image in drive {} ({}) isn't the size of the state's copy of it ({})",
-                    name,
-                    disk.path().display(),
-                    copy.display()
-                )));
-            }
+        // The saved disk goes into the disk now in the drive once the state
+        // is in (`revert_disks`), if the journal doesn't reach back to the
+        // state: `load_checkpoints` checks then that it can.
+        if saved.is_some() && (into_mounted || changes) && self.bios_image(drive).is_none() {
+            return Err(no_image());
         }
         let d = self.drives[drive as usize].as_mut().expect("the drive is there");
         d.current_dir = dir;
@@ -319,30 +325,37 @@ impl DiskController {
 
     /// The checkpoints of the disks of `drives`, which they go back to once
     /// all of the state is in; the journals must still reach back to them,
-    /// or the state file have copies of the disks as they were.
+    /// or the state file keep the disks as they were, in a form that can
+    /// go back into the disks in the drives now.
     fn load_checkpoints(&mut self, drives: std::ops::Range<u8>, r: &mut Reader) -> Result<()> {
-        if let Some(state) = &self.copies_from {
-            for drive in drives.clone() {
-                let copy = crate::savestate::disks::copy_path(state, drive);
-                if let Some(disk) = self.bios_image(drive)
-                    && copy.is_file()
-                {
-                    disk.offer_replacement(Some(copy));
-                }
-            }
-        }
         for drive in drives {
             let mut checkpoint = None::<u64>;
             checkpoint.load(r)?;
-            if let Some(id) = checkpoint {
-                if !self.bios_image(drive).is_some_and(|disk| disk.has_checkpoint(id)) {
-                    return Err(StateError::Mismatch(format!(
-                        "the disk in drive {} changed since, and the state is of the system booted from it",
-                        drive_name(drive)
-                    )));
-                }
-                self.reverts.push((drive, id));
+            let Some(id) = checkpoint else { continue };
+            let changed = || {
+                StateError::Mismatch(format!(
+                    "the disk in drive {} changed since, and the state is of the system booted \
+                     from it",
+                    drive_name(drive)
+                ))
+            };
+            let disk = self.bios_image(drive).ok_or_else(changed)?;
+            let saved = self
+                .copies_from
+                .as_ref()
+                .and_then(|state| crate::savestate::disks::saved(state, drive));
+            if let Some(saved) = saved.filter(|_| !disk.has_checkpoint(id)) {
+                disk.check_saved(&saved).map_err(|e| {
+                    // `C:` or `2`: one colon after either.
+                    let name = drive_name(drive);
+                    StateError::Media(format!("drive {}: {}", name.trim_end_matches(':'), e))
+                })?;
+                disk.offer_replacement(Some(saved));
             }
+            if !disk.has_checkpoint(id) {
+                return Err(changed());
+            }
+            self.reverts.push((drive, id));
         }
         Ok(())
     }
