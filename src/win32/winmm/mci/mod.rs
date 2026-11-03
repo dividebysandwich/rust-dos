@@ -727,7 +727,6 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // without them.
     let window_open = video::MCI_DGV_OPEN_WS | video::MCI_DGV_OPEN_PARENT;
     let size: u32 = match msg {
-        MCI_OPEN if flags & window_open != 0 => 28,
         MCI_OPEN | MCI_SYSINFO => 20,
         video::MCI_UPDATE => 24,
         MCI_STATUS | video::MCI_WINDOW => 16,
@@ -774,8 +773,10 @@ fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if flags & MCI_OPEN_ALIAS != 0 {
                 p.alias = read_string(cpu, al, 128)?;
             }
-            // MCI_DGV_OPEN_PARMSA's style and parent.
-            if flags & window_open != 0 {
+            // MCI_DGV_OPEN_PARMSA's style and parent. Other devices
+            // give the flags other meanings (MCI_WAVE_OPEN_BUFFER) with
+            // shorter structures, so they are read only when there.
+            if flags & window_open != 0 && cpu.bus.guest_probe(at, 28, false) {
                 p.style = r(cpu, 20);
                 p.parent = r(cpu, 24);
             }
