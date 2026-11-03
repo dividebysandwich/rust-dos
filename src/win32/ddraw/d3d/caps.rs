@@ -87,9 +87,19 @@ fn prim_caps() -> [u32; 13] {
     ]
 }
 
-/// D3DTEXTUREOPCAPS_: disable, select argument 1 and 2, modulate and
-/// modulate 2x, add, and blending by diffuse, texture and current alpha.
-const TEXTURE_OPS: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40 | 0x400 | 0x800 | 0x4000;
+/// D3DTEXTUREOPCAPS_: the operations the HAL draws (`hal::OPS`), each
+/// D3DTOP_ value n as bit n - 1.
+const TEXTURE_OPS: u32 = op_caps(&super::hal::OPS);
+
+const fn op_caps(ops: &[u32]) -> u32 {
+    let mut caps = 0;
+    let mut i = 0;
+    while i < ops.len() {
+        caps |= 1 << (ops[i] - 1);
+        i += 1;
+    }
+    caps
+}
 
 /// DDBD_16, and DDBD_24 and DDBD_32 on a Banshee or Voodoo3: the
 /// render target's and depth buffer's depths. The card draws 16 bits;
@@ -249,4 +259,38 @@ pub fn z_formats(cpu: &mut Cpu) -> Vec<Format> {
             ..Format::default()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::hal;
+    use super::*;
+
+    /// 3dfx's Voodoo3 Direct3D 7 driver's dwTextureOpCaps, as
+    /// Giants: Citizen Kabuto's renderer got them on Windows 98 SE.
+    const VOODOO3_DRIVER: u32 = 0x1E_FA5F;
+
+    #[test]
+    fn the_texture_op_caps_are_what_validate_device_accepts() {
+        // D3DTOP_DISABLE (1) to D3DTOP_LERP (26).
+        for op in 1..=26 {
+            assert_eq!(
+                TEXTURE_OPS & 1 << (op - 1) != 0,
+                hal::can_do(op),
+                "D3DTOP {op}"
+            );
+        }
+        assert!(!hal::can_do(0) && !hal::can_do(27));
+    }
+
+    #[test]
+    fn the_texture_op_caps_are_the_drawn_part_of_3dfxs() {
+        // Disable, select argument 1 and 2, modulate and modulate 2x,
+        // add, subtract, and blending by diffuse, texture and current
+        // alpha. Not ADDSMOOTH (0x400), which 3dfx's driver doesn't
+        // report, or BLENDTEXTUREALPHAPM (0x4000), which the HAL doesn't
+        // draw.
+        assert_eq!(TEXTURE_OPS, 0x9A5F);
+        assert_eq!(TEXTURE_OPS & !VOODOO3_DRIVER, 0);
+    }
 }
