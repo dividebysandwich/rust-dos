@@ -978,7 +978,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn reads(log: &Rc<RefCell<Vec<String>>>) -> Vec<String> {
+    pub(crate) fn reads(log: &Rc<RefCell<Vec<String>>>) -> Vec<String> {
         let log = log.borrow();
         log.iter()
             .filter(|l| l.starts_with("read"))

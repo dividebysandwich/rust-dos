@@ -228,24 +228,24 @@ fn keep_mask(s: &Surface) -> u32 {
 /// The surface into its shadow at `at`: each channel's top 5, 6 and 5
 /// bits, or depth's top 16.
 ///
-/// The shadow is written, and read in `store`, in one go. With
-/// `voodoo_readback=gpu` it is a 3D buffer that the OpenGL renderer may
-/// have drawn alone, and each access to its rows waits for the renderer
-/// and reads back the rows it covers: the whole shadow at once waits
-/// once, where a row at a time would wait 600 times for Giants' frame.
+/// The shadow is written, and read in `store`, in one go, and so is the
+/// surface where its rows are back to back. With `voodoo_readback=gpu`
+/// the shadow is a 3D buffer that the OpenGL renderer may have drawn
+/// alone, and each access to its rows waits for the renderer and reads
+/// back the rows it covers: the whole shadow at once waits once, where
+/// a row at a time would wait 600 times for Giants' frame.
 fn load(cpu: &mut Cpu, s: &Surface, at: u32) {
     let bpp = s.bytes_per_pixel() as usize;
     let width = s.width as usize;
     if width == 0 {
         return;
     }
-    let mut row = vec![0u8; width * bpp];
-    let mut shadow = vec![0u8; width * 2 * s.height as usize];
-    for (y, out) in (0..s.height).zip(shadow.chunks_exact_mut(width * 2)) {
-        surface::read_bytes(cpu, s, y * s.pitch, &mut row);
-        for (px, o) in row.chunks(bpp).zip(out.chunks_mut(2)) {
-            o.copy_from_slice(&narrow(s, get(px)).to_le_bytes());
-        }
+    let height = s.height as usize;
+    let mut pixels = vec![0u8; width * bpp * height];
+    surface::read_rows(cpu, s, 0, width * bpp, &mut pixels);
+    let mut shadow = vec![0u8; width * 2 * height];
+    for (px, o) in pixels.chunks_exact(bpp).zip(shadow.as_chunks_mut::<2>().0) {
+        *o = narrow(s, get(px)).to_le_bytes();
     }
     screen::write(cpu, at, &shadow);
 }
@@ -258,22 +258,21 @@ fn store(cpu: &mut Cpu, s: &Surface, at: u32) {
     if width == 0 {
         return;
     }
-    let mut row = vec![0u8; width * bpp];
-    let mut shadow = vec![0u8; width * 2 * s.height as usize];
+    let height = s.height as usize;
+    let mut shadow = vec![0u8; width * 2 * height];
     screen::read(cpu, at, &mut shadow);
-    for (y, shadow_row) in (0..s.height).zip(shadow.chunks_exact(width * 2)) {
-        surface::read_bytes(cpu, s, y * s.pitch, &mut row);
-        for (px, v) in row.chunks_mut(bpp).zip(shadow_row.chunks(2)) {
-            // A pixel whose 16 bits the card left as they were keeps its
-            // own, which may have more.
-            let v = u16::from_le_bytes([v[0], v[1]]);
-            let old = get(px);
-            if narrow(s, old) != v {
-                put(px, old & mask | widen(s, v) & !mask);
-            }
+    let mut pixels = vec![0u8; width * bpp * height];
+    surface::read_rows(cpu, s, 0, width * bpp, &mut pixels);
+    for (px, v) in pixels.chunks_exact_mut(bpp).zip(shadow.as_chunks::<2>().0) {
+        // A pixel whose 16 bits the card left as they were keeps its
+        // own, which may have more.
+        let v = u16::from_le_bytes(*v);
+        let old = get(px);
+        if narrow(s, old) != v {
+            put(px, old & mask | widen(s, v) & !mask);
         }
-        surface::write_bytes(cpu, s, y * s.pitch, &row);
     }
+    surface::write_rows(cpu, s, 0, width * bpp, &pixels);
 }
 
 /// A pixel of 1 to 4 bytes, little-endian.
@@ -383,22 +382,22 @@ mod tests {
         assert_eq!(widen_bits(0x8000, 16, 24), 0x80_0080);
     }
 
-    #[test]
-    fn a_shadow_only_the_renderer_drew_is_read_back_at_once() {
-        // Giants draws into a 32-bit render target, so the card draws
-        // into its 16-bit shadow, which with `voodoo_readback=gpu` only
-        // the OpenGL renderer has. Storing it into the surface asks the
-        // renderer for all its rows in one read: a read for each row
-        // waited for the renderer 600 times a frame.
-        use crate::voodoo::banshee::render3d::tests::{A, gpu_frame_in_linear_buffer};
+    use crate::voodoo::banshee::render3d::tests::{A, gpu_frame_in_linear_buffer, reads};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A 32-bit render target of 640 by 64, `pitch` bytes a row, whose
+    /// shadow at `A` only the renderer drew, in 0x1234; and the log of
+    /// the renderer's reads.
+    fn renderer_drawn(pitch: u32) -> (Cpu, Surface, Rc<RefCell<Vec<String>>>) {
         use crate::win32::ddraw::Format;
-        let log = std::rc::Rc::default();
+        let log = Rc::default();
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
         cpu.bus.voodoo = Some(gpu_frame_in_linear_buffer(&log));
         let s = Surface {
             width: 640,
             height: 64,
-            pitch: 640 * 4,
+            pitch,
             format: Format {
                 bits: 32,
                 r: 0xFF_0000,
@@ -410,18 +409,40 @@ mod tests {
             bits: 0x60_0000,
             ..Surface::default()
         };
-        store(&mut cpu, &s, A);
-        let reads: Vec<String> = log
-            .borrow()
-            .iter()
-            .filter(|l| l.starts_with("read"))
-            .cloned()
-            .collect();
-        assert_eq!(reads, [format!("read Some({}) 0..64", A / 2)]);
-        for y in [0, 63] {
-            let mut px = [0u8; 4];
-            surface::read_bytes(&mut cpu, &s, y * s.pitch + 4 * 639, &mut px);
-            assert_eq!(u32::from_le_bytes(px), widen(&s, 0x1234), "row {y}");
+        (cpu, s, log)
+    }
+
+    #[test]
+    fn a_shadow_only_the_renderer_drew_is_read_back_at_once() {
+        // Giants draws into a 32-bit render target, so the card draws
+        // into its 16-bit shadow, which with `voodoo_readback=gpu` only
+        // the OpenGL renderer has. Storing it into the surface asks the
+        // renderer for all its rows in one read: a read for each row
+        // waited for the renderer 600 times a frame. The surface's rows
+        // may be back to back or have bytes between them.
+        for pitch in [640 * 4, 640 * 4 + 64] {
+            let (mut cpu, s, log) = renderer_drawn(pitch);
+            store(&mut cpu, &s, A);
+            let one = [format!("read Some({}) 0..64", A / 2)];
+            assert_eq!(reads(&log), one, "pitch {pitch}");
+            for y in [0, 63] {
+                let mut px = [0u8; 4];
+                surface::read_bytes(&mut cpu, &s, y * s.pitch + 4 * 639, &mut px);
+                let want = widen(&s, 0x1234);
+                assert_eq!(u32::from_le_bytes(px), want, "pitch {pitch}, row {y}");
+            }
         }
+    }
+
+    #[test]
+    fn a_shadow_only_the_renderer_drew_is_loaded_at_once() {
+        // Loading writes all the shadow's rows in one go, so the rows the
+        // renderer is ahead on are caught up once.
+        let (mut cpu, s, log) = renderer_drawn(640 * 4);
+        load(&mut cpu, &s, A);
+        assert_eq!(reads(&log), [format!("read Some({}) 0..64", A / 2)]);
+        let mut shadow = [0xFFu8; 2];
+        screen::read(&cpu, A + 63 * 1280 + 2 * 639, &mut shadow);
+        assert_eq!(shadow, [0, 0], "the surface's pixels, narrowed");
     }
 }
