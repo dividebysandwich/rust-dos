@@ -1842,8 +1842,14 @@ mod tests {
             e.write(&ram, 0x34, n.below(0x8000) | (src_tiled as u32) << 31);
             for clip in [0x08, 0x4C] {
                 let (x, y) = (n.below(200), n.below(60));
+                // Half the clips end at a band of 32 rows, whose last row
+                // is the last a tiled surface's band has.
+                let bottom = match n.below(2) {
+                    0 => y + n.below(60),
+                    _ => (y / 32 + 1) * 32,
+                };
                 e.write(&ram, clip, x | y << 16);
-                e.write(&ram, clip + 4, (x + n.below(200)) | (y + n.below(60)) << 16);
+                e.write(&ram, clip + 4, (x + n.below(200)) | bottom << 16);
             }
             e.write(&ram, 0x28, n.below(0x1_0000));
             e.write(&ram, 0x30, n.next());
