@@ -263,6 +263,8 @@ impl DiskController {
             Some((p, l)) => (p, l),
             None => (".", rest), // current directory of that drive
         };
+        // MKDIR "SAVES." makes SAVES, as the paths into it name it.
+        let leaf = Self::dos_component(leaf);
         if leaf.is_empty() {
             return Err(0x03); // Path not found / invalid
         }

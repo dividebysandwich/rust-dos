@@ -31,6 +31,7 @@ pub const HKEY_DYN_DATA: u32 = 0x8000_0006;
 
 /// Value types.
 pub const REG_SZ: u32 = 1;
+pub const REG_EXPAND_SZ: u32 = 2;
 pub const REG_BINARY: u32 = 3;
 pub const REG_DWORD: u32 = 4;
 
@@ -128,6 +129,30 @@ const SEED: &str = r#"REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Classes\Interface\{00000001-0000-0000-C000-000000000046}\ProxyStubClsid32]
 @="{00000320-0000-0000-C000-000000000046}"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0]
+@="OLE Automation"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0\0\win32]
+@="C:\\WINDOWS\\SYSTEM\\STDOLE32.TLB"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0\FLAGS]
+@="0"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0\HELPDIR]
+@="C:\\WINDOWS\\SYSTEM"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0]
+@="OLE Automation"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0\0\win32]
+@="C:\\WINDOWS\\SYSTEM\\STDOLE2.TLB"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0\FLAGS]
+@="0"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0\HELPDIR]
+@="C:\\WINDOWS\\SYSTEM"
 "#;
 
 /// A named value. The default value of a key has the empty name.
@@ -797,14 +822,21 @@ pub fn key_exists(cpu: &mut Cpu, hkey: u32, path: &str) -> bool {
     registry.find(root, path).is_some()
 }
 
-/// Put the .reg file `text` into the registry and save it. With no
-/// program running, the registry is read from its file for this and let
-/// go after, so the next program reads it again, as after
-/// `process_ended`.
+/// Put the .reg file `text` into the registry and save it.
 pub fn import_file(cpu: &mut Cpu, text: &str) -> Result<(), String> {
+    let ((), saved) = change_and_save(cpu, |registry| registry.import(text));
+    saved.map_err(|_| format!("the registry can't be saved to {}", FILE))
+}
+
+/// Change the registry with `f` and save it at once, whether a program
+/// runs or not. With no program running, the registry is read from its
+/// file for this and let go after, so the next program reads it again,
+/// as after `process_ended`. What `f` returns, and whether the file was
+/// written.
+fn change_and_save<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Registry) -> T) -> (T, Result<(), u8>) {
     let idle = cpu.bus.win32.processes.is_empty();
     let registry = get(cpu);
-    registry.import(text);
+    let result = f(registry);
     registry.dirty = false;
     let bytes = crate::dosstr::to_bytes(&registry.export());
     let saved = cpu.bus.disk.write_whole_file(FILE, &bytes, None);
@@ -813,7 +845,57 @@ pub fn import_file(cpu: &mut Cpu, text: &str) -> Result<(), String> {
     } else if saved.is_err() {
         cpu.bus.win32.registry.dirty = true;
     }
-    saved.map_err(|_| format!("the registry can't be saved to {}", FILE))
+    (result, saved)
+}
+
+/// The string values (REG_SZ and REG_EXPAND_SZ) of each key of `keys`,
+/// a path under a predefined key, as (name, text), in the order they
+/// were set: the order RegEnumValueA gives them in. Nothing for a key
+/// that isn't there. The registry is read once for all of them, and with
+/// no program running it is let go after, as by `change_and_save`.
+pub fn string_values(cpu: &mut Cpu, keys: &[(u32, &str)]) -> Vec<Vec<(String, String)>> {
+    let idle = cpu.bus.win32.processes.is_empty();
+    let registry = get(cpu);
+    let values = keys
+        .iter()
+        .map(|&(hkey, path)| {
+            let Open::Key(root) = registry.open(hkey, 0) else {
+                return Vec::new();
+            };
+            registry.find(root, path).map_or_else(Vec::new, |key| {
+                registry
+                    .key(key)
+                    .values
+                    .iter()
+                    .filter(|v| v.kind == REG_SZ || v.kind == REG_EXPAND_SZ)
+                    .map(|v| (v.name.clone(), v.text()))
+                    .collect()
+            })
+        })
+        .collect();
+    if idle {
+        cpu.bus.win32.registry = Registry::default();
+    }
+    values
+}
+
+/// Delete the value `name` of the key `path` under the predefined key
+/// `hkey`, and save the registry at once: false if there was no such
+/// value.
+pub fn delete_value_now(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> bool {
+    let (deleted, saved) = change_and_save(cpu, |registry| {
+        let Open::Key(root) = registry.open(hkey, 0) else {
+            return false;
+        };
+        registry
+            .find(root, path)
+            .is_some_and(|key| registry.delete_value(key, name))
+    });
+    if saved.is_err() {
+        cpu.bus
+            .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
+    }
+    deleted
 }
 
 /// The process `id` ended: its keys close. After the last process, the

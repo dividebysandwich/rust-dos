@@ -16,17 +16,22 @@
 // result (and with fbzMode bit 19 takes the dither back out of the colour
 // it reads first).
 //
-// The texture units pick their levels of detail as the card does, from
-// the triangle's base level (v_lod) and W at the pixel, and read and
-// filter the card's texels themselves with its fractions. With
-// anisotropy (u_gl_sampling) OpenGL filters them instead, at the card's
-// level.
+// The texture units pick their levels of detail as the card does, in
+// perspective from each pixel's footprint (the triangle's gradients,
+// v_dx and v_dy, with S/W, T/W and W at the pixel), and without it the
+// triangle's level (v_lod). They read and filter the card's texels
+// themselves with its fractions. With anisotropy (u_gl_sampling) OpenGL
+// filters them instead, at the card's level.
 
 noperspective in vec4 v_color;
 noperspective in vec2 v_zw;
 noperspective in vec3 v_tex0;
 noperspective in vec3 v_tex1;
 flat in vec2 v_lod;
+flat in vec3 v_dx0;
+flat in vec3 v_dy0;
+flat in vec3 v_dx1;
+flat in vec3 v_dy1;
 
 out vec4 o_color;
 
@@ -230,17 +235,27 @@ int depthValue() {
     return d;
 }
 
+// The pixel's footprint in perspective (8.8) less 2 log2(1/W), as
+// `Footprint` in src/voodoo/raster.rs has it: half of log2 of the longer
+// of W times the gradients of S/W and T/W less S/W and T/W times W's.
+int footprint(vec3 stw, vec3 dx, vec3 dy) {
+    vec2 across = stw.z * dx.xy - stw.xy * dx.z;
+    vec2 down = stw.z * dy.xy - stw.xy * dy.z;
+    float squared = max(dot(across, across), dot(down, down));
+    return squared > 0.0 ? int(round(log2(squared) * 128.0)) : -(1000 << 8);
+}
+
 // A texture unit's level of detail at the pixel (8.8), as `texture` in
-// src/voodoo/raster.rs has it: the triangle's base level, from its
-// gradients of S/W and T/W, plus log2(1/W) with perspective, the bias,
-// and with textureMode bit 4 the 4x4 dither matrix's 16ths of a level,
-// before it is clamped to the unit's limits.
-int levelOfDetail(float w, float lodbase, int mode, ivec3 lod) {
+// src/voodoo/raster.rs has it: with perspective the footprint plus
+// 2 log2(1/W), without it the triangle's level, then the bias, and with
+// textureMode bit 4 the 4x4 dither matrix's 16ths of a level, before it
+// is clamped to the unit's limits.
+int levelOfDetail(vec3 stw, float lodbase, vec3 dx, vec3 dy, int mode, ivec3 lod) {
     int l = int(lodbase);
     if (bit(mode, 0)) {
         // `reciplog` takes |W|, and gives 1000 levels for 0.
-        float aw = abs(w);
-        l += aw > 0.0 ? int(round(-log2(aw) * 256.0)) : 1000 << 8;
+        float aw = abs(stw.z);
+        l = footprint(stw, dx, dy) + 2 * (aw > 0.0 ? int(round(-log2(aw) * 256.0)) : 1000 << 8);
     }
     l += lod.z;
     if (bit(mode, 4) && dithers()) {
@@ -283,13 +298,15 @@ ivec4 blend(ivec4 a, ivec4 b, int f) {
     return a + (((b - a) * f) >> 8);
 }
 
-// A texture unit's texel and the level of detail it was read at (8.8).
-ivec4 fetch(sampler2D tex, vec3 stw, float lodbase, int mode, vec2 size, ivec3 lod, ivec3 levels, out int level) {
+// A texture unit's texel and the level of detail it was read at (8.8),
+// with `dx` and `dy` the unit's gradients of S/W, T/W and W.
+ivec4 fetch(sampler2D tex, vec3 stw, float lodbase, vec3 dx, vec3 dy, int mode, vec2 size,
+    ivec3 lod, ivec3 levels, out int level) {
     vec2 st = bit(mode, 0) ? stw.xy / stw.z : stw.xy;
     if (bit(mode, 3) && stw.z < 0.0) {
         st = vec2(0.0);
     }
-    int l = levelOfDetail(stw.z, lodbase, mode, lod);
+    int l = levelOfDetail(stw, lodbase, dx, dy, mode, lod);
     // The combine takes the card's level; the texels come from the level
     // the card would take at u_level_scale times its resolution, where
     // S/W and T/W change that many times slower a pixel: the same at 1x,
@@ -532,10 +549,12 @@ void main() {
     ivec4 texel0 = ivec4(0);
     ivec4 texel1 = ivec4(0);
     if (bit(u_units, 1)) {
-        texel1 = fetch(u_tex1, v_tex1, v_lod.y, u_tmode1, u_tsize1, u_tlod1, u_tlevels1, level1);
+        texel1 = fetch(u_tex1, v_tex1, v_lod.y, v_dx1, v_dy1, u_tmode1, u_tsize1, u_tlod1,
+            u_tlevels1, level1);
     }
     if (bit(u_units, 0)) {
-        texel0 = fetch(u_tex0, v_tex0, v_lod.x, u_tmode0, u_tsize0, u_tlod0, u_tlevels0, level0);
+        texel0 = fetch(u_tex0, v_tex0, v_lod.x, v_dx0, v_dy0, u_tmode0, u_tsize0, u_tlod0,
+            u_tlevels0, level0);
     }
     ivec4 texel = ivec4(0);
     if (bit(u_units, 1)) {

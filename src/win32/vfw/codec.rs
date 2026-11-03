@@ -132,7 +132,7 @@ const CBU: i32 = 132201; // 1.772 * 255 / 224
 
 /// One pixel in a DIB's order: blue, green, red.
 #[inline]
-fn bgr(y: u8, u: u8, v: u8) -> [u8; 3] {
+pub fn bgr(y: u8, u: u8, v: u8) -> [u8; 3] {
     let (u, v) = (u as i32 - 128, v as i32 - 128);
     let l = CY * (y as i32 - 16) + (1 << 15);
     let r = (l + CRV * v) >> 16;

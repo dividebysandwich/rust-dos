@@ -502,6 +502,29 @@ impl DiskController {
             self.drives.iter().position(Option::is_some).unwrap_or(DRIVE_C as usize) as u8
         };
     }
+
+    /// The current drive and the current directory of each mounted drive,
+    /// for `set_current_directories` to put back.
+    pub fn current_directories(&self) -> (u8, Vec<(u8, String)>) {
+        let dirs = self
+            .drives
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| Some((i as u8, d.as_ref()?.current_dir.clone())))
+            .collect();
+        (self.current_drive, dirs)
+    }
+
+    /// Put back the current directories `current_directories` gave, on
+    /// the drives that are still mounted, and the current drive.
+    pub fn set_current_directories(&mut self, (drive, dirs): &(u8, Vec<(u8, String)>)) {
+        for (i, dir) in dirs {
+            if let Some(Some(d)) = self.drives.get_mut(*i as usize) {
+                d.current_dir = dir.clone();
+            }
+        }
+        self.set_current_drive(*drive);
+    }
 }
 
 /// Which CD-ROM drive a booted system shows, out of `cds` (in drive-letter
