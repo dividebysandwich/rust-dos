@@ -967,8 +967,13 @@ pub(crate) mod tests {
     /// texture the recording decoded for it, None if it decoded none (it
     /// had the texture already).
     fn textured(v: &mut Voodoo) -> Option<u32> {
+        textured_from(v, A)
+    }
+
+    /// The same with the texture at byte `base`.
+    pub(crate) fn textured_from(v: &mut Voodoo, base: u32) -> Option<u32> {
         reg3d(v, COL_BUFFER_ADDR, B);
-        reg3d(v, TEX_BASE_ADDR, A);
+        reg3d(v, TEX_BASE_ADDR, base);
         reg3d(v, T_LOD, 0);
         let mode = 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27;
         reg3d(v, TEXTURE_MODE, mode);

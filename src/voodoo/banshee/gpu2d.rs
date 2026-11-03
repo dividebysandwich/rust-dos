@@ -189,7 +189,9 @@ impl Voodoo {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::blit2d::tests::Numbers;
-    use super::super::render3d::tests::{A, B, float, gpu_only, mirrored, rectangle, reg3d};
+    use super::super::render3d::tests::{
+        A, B, float, gpu_only, mirrored, rectangle, reg3d, textured_from,
+    };
     use super::super::render3d::{
         AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
     };
@@ -357,6 +359,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_depth_clear_for_a_colour_buffer_the_program_reads_stays_in_memory() {
+        // The program reads the colour buffer it draws into, which turns
+        // hot, so its triangles are drawn in software: the depth they
+        // test against is cleared in the memory too, as a fastfill's is
+        // (`gpu_takes`), rather than read back before them every frame.
+        let model = Rc::default();
+        let mut v = model_card(&model, false);
+        frame(&mut v, &model, A);
+        v.gpu_sync(A, A + 4);
+        let aux = surface(AUX, 2, false);
+        command_2d(&mut v, FILL, aux, aux, (0, 0), (0, 0), (640, 64), 0xFFFF);
+        assert_eq!(status(&v)["gpu_2d"]["engine_commands"], 0);
+        assert_eq!(memory_pixel(&v, AUX, false, (5, 5)), 0xFFFF);
+    }
+
+    #[test]
     fn a_buffer_copied_to_the_desktop_every_frame_stays_on_the_gpu() {
         // A windowed game copies its back buffer to the desktop every
         // frame: the copy is drawn in the renderer's copy of the memory
@@ -401,6 +419,30 @@ pub(crate) mod tests {
         assert_eq!(memory_pixel(&v, B, false, (100, 10)), a);
         assert_eq!(memory_pixel(&v, B, false, (299, 39)), b);
         assert_eq!(memory_pixel(&v, B, false, (99, 10)), outside);
+    }
+
+    #[test]
+    fn a_texture_copied_from_a_buffer_on_the_gpu_is_decoded_again() {
+        // A buffer only the renderer drew, copied into memory a texture
+        // is decoded from (a picture of the last frame drawn with): the
+        // texture units read the memory, which gets the copy back first,
+        // and the recording decodes the texture again. A card that read
+        // everything back before draws the copy in the memory.
+        let models: [Rc<RefCell<Model>>; 2] = Default::default();
+        let mut cards = models.each_ref().map(|m| model_card(m, false));
+        for (v, model) in cards.iter_mut().zip(&models) {
+            frame(v, model, A);
+            textured_from(v, DESKTOP);
+        }
+        cards[1].gpu_sync_all();
+        let (a, desktop) = (surface(A, 2, false), surface(DESKTOP, 2, false));
+        let texels = cards.each_mut().map(|v| {
+            command_2d(v, COPY, desktop, a, (0, 0), (0, 0), (64, 4), 0);
+            textured_from(v, DESKTOP)
+        });
+        assert_eq!(status(&cards[0])["gpu_2d"]["blits"], 1);
+        assert!(texels[1].is_some());
+        assert_eq!(texels[0], texels[1]);
     }
 
     #[test]
