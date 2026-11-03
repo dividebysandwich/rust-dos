@@ -683,8 +683,8 @@ pub(crate) mod tests {
                 (v, Box::new(draw) as Box<dyn FnMut(&mut Voodoo, u32)>)
             };
             let mut card = card;
-            let on_gpu = random_commands(seed, 12, false, &mut card);
-            assert!(on_gpu > 20, "scale {scale}, samples {samples}: {on_gpu}");
+            let on_gpu = random_commands(seed, 24, false, &mut card);
+            assert!(on_gpu > 30, "scale {scale}, samples {samples}: {on_gpu}");
             let between = random_commands(seed + 1, 30, true, &mut card);
             assert!(between > 50, "scale {scale}, samples {samples}: {between}");
         }
