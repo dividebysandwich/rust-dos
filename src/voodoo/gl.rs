@@ -1530,6 +1530,9 @@ impl VoodooGl {
             return;
         }
         let alpha_planes = fbz & (1 << 18) != 0;
+        // The alpha planes are the auxiliary buffer: without one the card
+        // keeps no alpha and blends with 255 (`Row::finish`).
+        let has_alpha = s.aux && alpha_planes;
         let has_depth = s.aux && !alpha_planes && self.depth.is_some();
         let depth_write = has_depth && fbz & (1 << 10) != 0;
         let constant_depth = has_depth && depth_test && fbz & (1 << 20) != 0;
@@ -1550,7 +1553,7 @@ impl VoodooGl {
             } else {
                 gl.disable(glow::DEPTH_TEST);
             }
-            gl.color_mask(rgb, rgb, rgb, alpha_planes && fbz & (1 << 10) != 0);
+            gl.color_mask(rgb, rgb, rgb, has_alpha && fbz & (1 << 10) != 0);
             let am = s.alpha_mode;
             if card_blend {
                 gl.disable(glow::BLEND);
@@ -1641,7 +1644,12 @@ impl VoodooGl {
             }
             p.uniforms.u_units.set(gl, units);
             p.uniforms.u_constant_depth.set(gl, constant_depth as i32);
-            p.uniforms.u_card_blend.set(gl, card_blend as i32);
+            let card_blend_mode = match (card_blend, has_alpha) {
+                (false, _) => 0,
+                (true, false) => 1,
+                (true, true) => 2,
+            };
+            p.uniforms.u_card_blend.set(gl, card_blend_mode);
             let copy = match &self.blend_copy {
                 Some((copy, _)) if card_blend && barrier.is_none() => copy.as_ref(),
                 _ => None,

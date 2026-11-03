@@ -86,7 +86,9 @@ uniform int u_gl_sampling;
 uniform ivec3 u_tdetail0;
 uniform ivec3 u_tdetail1;
 // Whether the shader blends as the card does, with the pixels the draw
-// goes over in u_dst (with OpenGL's blending off).
+// goes over in u_dst (with OpenGL's blending off): 0 not, 1 with an alpha
+// of 255, 2 with the alpha planes' alpha (fbzMode bit 18 and an
+// auxiliary buffer to hold them).
 uniform int u_card_blend;
 uniform sampler2D u_dst;
 
@@ -543,11 +545,11 @@ ivec3 fog(ivec3 c, int itera, ivec2 pixel) {
 // The card's alpha blending (`Row::finish` in src/voodoo/raster.rs) of
 // the colour `c` (before fog `prefog`) with the pixel there, read from
 // u_dst: its 5-6-5 bits, less the dither with fbzMode bit 19, and its
-// alpha from the alpha planes or 255.
+// alpha from the alpha planes or 255 (u_card_blend).
 ivec4 cardBlend(ivec4 c, ivec3 prefog, ivec2 pixel) {
     ivec4 dst = ivec4(round(texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0) * 255.0));
     ivec3 d = dst.rgb & ivec3(0xF8, 0xFC, 0xF8);
-    int da = bit(u_fbz, 18) ? dst.a : 0xFF;
+    int da = u_card_blend == 2 ? dst.a : 0xFF;
     if (bit(u_fbz, 19) && dithers()) {
         int i = ditherIndex(pixel);
         int m = bit(u_fbz, 11) ? DITHER2[i] : DITHER4[i];
