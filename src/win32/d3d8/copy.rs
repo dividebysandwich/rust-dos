@@ -391,7 +391,7 @@ fn present_on_gpu(
             (BlitSource::Buffer { buffer, rect }, convert)
         }
         _ => {
-            let plane = Plane { start: at, stride, bpp: format.bits / 8 };
+            let plane = Plane { start: at, stride, bpp: format.bits / 8, tiled: false };
             let convert = match (rgb565, rgb888, bytes) {
                 (true, _, 2) => Convert::None,
                 (true, _, _) => Convert::Widen,
@@ -405,7 +405,7 @@ fn present_on_gpu(
         }
     };
     card.gpu_blit(Blit {
-        dst: Plane { start: 0, stride: pitch, bpp: bytes },
+        dst: Plane { start: 0, stride: pitch, bpp: bytes, tiled: false },
         area: [dst.left, dst.top, dst.right, dst.bottom],
         rects: rects.iter().map(|r| [r.left, r.top, r.right, r.bottom]).collect(),
         src: source,

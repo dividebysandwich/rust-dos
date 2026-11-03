@@ -84,7 +84,7 @@ impl SgramTiles {
 type BufferRows = (usize, u32, u32);
 
 /// A 5-6-5 colour as 8-8-8.
-fn rgb888(color: u16) -> u32 {
+pub(crate) fn rgb888(color: u16) -> u32 {
     let (r, g, b) = (
         (color >> 11) as u32,
         ((color >> 5) & 0x3F) as u32,

@@ -1108,6 +1108,26 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
   last read of that buffer) and `gpu_read_rows_undrawn` (not drawn
   since, which a cache of the rows read would have had). A game with many
   undrawn rows would gain from such a cache; one with few wouldn't.
+- **2D on the GPU:** on a Banshee or Voodoo3, `gpu_2d` counts the 2D
+  operations done in OpenGL's copy of the memory (`blits`), the pages
+  read back for the CPU (`pages_read_back`), and the operations left to
+  the CPU because the program reads or writes where they draw
+  (`left_to_cpu`). Of the 2D engine's commands whose bytes were newer on
+  the GPU, `engine_commands` counts those drawn there, `engine_drawn`
+  says how: `fill_buffer`, `fill_depth` and `copy_buffer` into OpenGL's
+  pictures of the 3D buffers, `blit_fill`, `blit_from_buffer` and
+  `blit_from_memory` into other memory. `engine_formats` counts them by
+  the destination's format (`16 bpp tiled`), and `engine_left_to_cpu`
+  counts those drawn on the CPU after a read back, by why: `hot` bytes,
+  a `rop` that reads the destination or the pattern (or a copy's other
+  than CCh), a `colour_key`, a transparent mono `pattern`, a `format`
+  (two of them, a tiled one of 24 bits), an `overlap` of source and
+  destination, a `negative_source`, `bounds` past the stride or the
+  memory, another `command` (lines, polygons, host to screen), a
+  `copy_into_buffer` from other memory, a `depth_copy` or
+  `copy_from_depth`, a depth fill for a `colour_hot` buffer, and
+  `no_layout`, `no_colour_buffer`, `renderer` or `blit_refused` where
+  OpenGL couldn't take it.
 - **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
   registers at +0, the frame buffer at +400000h (2048 bytes a row of
   16-bit pixels), texture memory at +800000h (write-only; reads give FFh).

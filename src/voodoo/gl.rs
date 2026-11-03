@@ -18,8 +18,8 @@ use crate::video::Frame;
 use crate::video::shader::Glsl;
 use super::gpu::GpuLink;
 use super::mirror::{
-    Blit, BlitSource, Command, Convert, Draw, Fill, Frame as Recording, Key, Pixels, Scanout,
-    Snapshot, Surface, Texture, Vertex,
+    Blit, BlitSource, BufferCopy, Command, Convert, Draw, Fill, Frame as Recording, Key, Pixels,
+    Scanout, Snapshot, Surface, Texture, Vertex,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -35,9 +35,10 @@ const FILL_FRAG: &str = include_str!("gl/fill.frag");
 const CLUT_FRAG: &str = include_str!("gl/clut.frag");
 const BANSHEE_FRAG: &str = include_str!("gl/banshee.frag");
 const BLIT_FRAG: &str = include_str!("gl/blit.frag");
+const COPY_FRAG: &str = include_str!("gl/copy.frag");
 
 mod uniforms;
-use uniforms::{Banshee, Blit2d, FillQuad, Locations, Quad, Triangle};
+use uniforms::{Banshee, Blit2d, CopyQuad, FillQuad, Locations, Quad, Triangle};
 
 /// Bytes a row of the textures of the card's memory (`CardMemory`) at
 /// most: a page (`tracker::PAGE`).
@@ -676,6 +677,7 @@ pub struct VoodooGl {
     depth_program: Program<Quad>,
     clut_program: Program<Quad>,
     fill_program: Program<FillQuad>,
+    copy_program: Program<CopyQuad>,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     /// No attributes: the quads make their corners from the vertex number.
@@ -771,6 +773,7 @@ impl VoodooGl {
         let pixels: Program<Quad> = compile(gl, glsl, QUAD_VERT, PIXELS_FRAG, &[])?;
         let depth_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, DEPTH_FRAG, &[])?;
         let clut_program: Program<Quad> = compile(gl, glsl, QUAD_VERT, CLUT_FRAG, &[])?;
+        let copy_program: Program<CopyQuad> = compile(gl, glsl, QUAD_VERT, COPY_FRAG, &[])?;
         let banshee = BansheeGl::new(gl, glsl, limits);
         // SAFETY: see `VoodooGl`.
         unsafe {
@@ -779,6 +782,7 @@ impl VoodooGl {
                 (pixels.program, &[("u_src", 0)][..]),
                 (depth_program.program, &[("u_src", 0)][..]),
                 (clut_program.program, &[("u_src", 0), ("u_lut", 1)][..]),
+                (copy_program.program, &[("u_src", 0)][..]),
             ] {
                 gl.use_program(Some(program));
                 for &(name, unit) in samplers {
@@ -851,6 +855,7 @@ impl VoodooGl {
                 depth_program,
                 clut_program,
                 fill_program,
+                copy_program,
                 vao,
                 vbo,
                 quad_vao,
@@ -911,6 +916,7 @@ impl VoodooGl {
                 self.depth_program.program,
                 self.clut_program.program,
                 self.fill_program.program,
+                self.copy_program.program,
             ] {
                 gl.delete_program(program);
             }
@@ -1215,6 +1221,11 @@ impl VoodooGl {
                     }
                     self.blit(gl, blit);
                 }
+                Command::Copy(copy) => {
+                    self.flush_staging(gl, Some(copy.from));
+                    self.flush_staging(gl, Some(copy.to));
+                    self.copy(gl, copy);
+                }
             }
         }
         let keys: Vec<_> = self.staging.keys().copied().collect();
@@ -1283,6 +1294,8 @@ impl VoodooGl {
             u.u_mem_layout.set(gl, layout.uniform(memory.size));
             let d = &blit.dst;
             u.u_dst.set(gl, [i(d.start), i(d.stride.max(1)), i(d.bpp.clamp(1, 4))]);
+            let src_tiled = plane.is_some_and(|p| p.tiled);
+            u.u_tiled.set(gl, [d.tiled as i32, src_tiled as i32]);
             u.u_area.set(gl, blit.area);
             u.u_src.set(gl, src);
             u.u_src_rect.set(gl, rect);
@@ -1315,6 +1328,61 @@ impl VoodooGl {
                 }
             }
             gl.active_texture(glow::TEXTURE0);
+        }
+    }
+
+    /// A copy between colour buffers (`mirror::BufferCopy`), block by
+    /// block of `scale` by `scale` pixels: every sample of a pixel of the
+    /// destination gets the source's pixel as resolved, which is what a
+    /// read back of either takes (`read_buffer`). Without samples it is a
+    /// blit between the framebuffers. With them it is a quad drawn from
+    /// the source's texture into the destination's samples, as OpenGL
+    /// blits into a framebuffer of samples only from one with the same
+    /// rectangle.
+    fn copy(&mut self, gl: &glow::Context, copy: &BufferCopy) {
+        let [left, right, top, bottom] = copy.rect;
+        let [x, y] = copy.src;
+        let (w, h) = (right.saturating_sub(left), bottom.saturating_sub(top));
+        let within = |x: u32, y: u32| x + w <= self.width && y + h <= self.height;
+        if w == 0 || h == 0 || !within(left, top) || !within(x, y) {
+            return;
+        }
+        let (Some(from), Some(to)) = (self.targets.get(&copy.from), self.targets.get(&copy.to))
+        else {
+            return;
+        };
+        let quad = [left, top, left + w, top + h].map(|v| v as f32);
+        let s = self.scale as i32;
+        let (sw, sh) = self.scaled();
+        let [left, top, x, y, w, h] = [left, top, x, y, w, h].map(|v| v as i32 * s);
+        from.resolve_rows(gl, sw, (y, y + h));
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            if to.samples.is_none() {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from.fbo));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to.fbo));
+                let (bits, nearest) = (glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                let (x1, y1, right, bottom) = (x + w, y + h, left + w, top + h);
+                gl.blit_framebuffer(x, y, x1, y1, left, top, right, bottom, bits, nearest);
+            } else {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(to.draw_fbo()));
+                gl.viewport(0, 0, sw, sh);
+                gl.disable(glow::BLEND);
+                gl.disable(glow::DEPTH_TEST);
+                gl.disable(glow::STENCIL_TEST);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(from.color));
+                let program = &self.copy_program;
+                gl.use_program(Some(program.program));
+                program.uniforms.u_rect.set(gl, quad);
+                program.uniforms.u_size.set(gl, [self.width as f32, self.height as f32]);
+                program.uniforms.u_offset.set(gl, [x - left, y - top]);
+                gl.bind_vertex_array(Some(self.quad_vao));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
 
@@ -2528,7 +2596,7 @@ fn compile<U: Locations>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{RUN_TRIANGLES, Vertex, buffer_rect, sampling_filters, separate_triangles};
 
     #[test]
@@ -3298,8 +3366,8 @@ mod tests {
 
     /// A hidden window's desktop OpenGL 3.3 context, current on this
     /// thread, with the window and SDL that keep it.
-    struct TestContext {
-        gl: glow::Context,
+    pub(crate) struct TestContext {
+        pub gl: glow::Context,
         barrier: Option<super::TextureBarrier>,
         _context: sdl2::video::GLContext,
         _window: sdl2::video::Window,
@@ -3307,7 +3375,7 @@ mod tests {
         _sdl: sdl2::Sdl,
     }
 
-    fn test_context(title: &str) -> TestContext {
+    pub(crate) fn test_context(title: &str) -> TestContext {
         let sdl = sdl2::init().unwrap();
         let video = sdl.video().unwrap();
         let attrs = video.gl_attr();
