@@ -491,12 +491,12 @@ impl ImageFile {
         }
     }
 
-    /// Have what was written to a raw image on the disk; a VHD's and an
-    /// 86F image's writes are with the host already.
+    /// Have what was written to the image file on the disk.
     pub(crate) fn sync(&self) -> std::io::Result<()> {
         match self {
             ImageFile::Raw(file) => file.sync_all(),
-            ImageFile::Vhd(_) | ImageFile::D86f(_) => Ok(()),
+            ImageFile::Vhd(image) => image.sync(),
+            ImageFile::D86f(image) => image.sync(),
         }
     }
 

@@ -494,6 +494,40 @@ fn an_image_under_an_overlay_keeps_as_it_is() {
     assert!(disk.open_file(r"D:\GAME.TXT", 0, PSP).is_err());
 }
 
+/// The delta file beside a hard disk image holds the disk's changes: a
+/// read-only mount shows them, and -inplace leaves them out and says so.
+#[test]
+fn the_delta_file_beside_an_image_is_its_disk() {
+    let base = scratch("image_beside");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    let image = base.join("base.img");
+    blank.copy_to(&image).unwrap();
+    let before = fs::read(&image).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &image, MountOptions::default(), true).unwrap();
+    disk.bios_image(3).unwrap().write(5000, &[0xCD; 512]).unwrap();
+    let sector = |disk: &DiskController| {
+        let mut sector = [0u8; 512];
+        disk.bios_image(3).unwrap().read(5000, &mut sector).unwrap();
+        sector
+    };
+
+    let ro = MountOptions { read_only: true, ..MountOptions::default() };
+    disk.mount(3, &image, ro, true).unwrap();
+    assert_eq!(sector(&disk), [0xCD; 512]);
+    assert!(disk.bios_image(3).unwrap().write(5000, &[1; 512]).is_err());
+
+    crate::diskdelta::take_notes();
+    let in_place = MountOptions { in_place: true, ..MountOptions::default() };
+    disk.mount(3, &image, in_place, true).unwrap();
+    assert_eq!(disk.bios_image(3).unwrap().delta_path(), None);
+    assert_eq!(sector(&disk), before[5000 * 512..5001 * 512]);
+    let notes = crate::diskdelta::take_notes();
+    assert!(notes.iter().any(|n| n.contains("-inplace leaves out")), "{:?}", notes);
+    assert_eq!(fs::read(&image).unwrap(), before, "the image as it was");
+}
+
 #[test]
 fn names_padded_with_spaces_are_found_and_opened() {
     let base = scratch("pattern_padding");

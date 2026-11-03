@@ -75,8 +75,8 @@ fn journaled(cpu: &Cpu) -> Vec<u8> {
 
 /// Write the disks of the booted system beside the state file `state`, as
 /// they are now, when its state was just taken. Returns what the log
-/// should say of them: the disks copied whole that are big enough for the
-/// copy to matter.
+/// should say of them: the disks copied whole for `-inplace` that are big
+/// enough for the copy to matter.
 pub fn save_copies(cpu: &Cpu, state: &Path) -> Result<Vec<String>, String> {
     if let Some(dir) = state.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
@@ -86,8 +86,16 @@ pub fn save_copies(cpu: &Cpu, state: &Path) -> Result<Vec<String>, String> {
         let disk = cpu.bus.disk.bios_image(drive).expect("a journaled drive has a disk");
         let saved = disk.save(&copy_path(state, drive), &changes_path(state, drive))?;
         let mb = (disk.sectors() * crate::diskimage::SECTOR_SIZE as u64) >> 20;
-        // A disk made in memory (a shared folder's) is mostly holes.
-        if matches!(saved, SavedDisk::Whole(_)) && disk.memory().is_none() && mb >= 64 {
+        // Only -inplace is undone by mounting without it: a disk made in
+        // memory (a shared folder's, mostly holes), a read-only one and
+        // one with no room for a delta file beside it are copied whole too.
+        let in_place = cpu
+            .bus
+            .disk
+            .drive_info(drive)
+            .and_then(|info| info.mount)
+            .is_some_and(|spec| spec.opts.in_place);
+        if matches!(saved, SavedDisk::Whole(_)) && in_place && mb >= 64 {
             notes.push(format!(
                 "drive {}'s disk is written in place, so the state has a copy of all of it \
                  ({} MB): mounted without -inplace, it would keep only the disk's changes",

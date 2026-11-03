@@ -181,12 +181,18 @@ impl Delta {
         // Before the image is compared: a commit cut short has written
         // some of the changes into it.
         if header[COMMITTING] != 0 {
+            // A delta file in an overlay folder is named to the command.
+            let elsewhere = match path == beside(&self.base_path) {
+                true => String::new(),
+                false => format!(" --delta {}", path.display()),
+            };
             return Err(Mismatch::Other(format!(
                 "{} was being committed into {} and the commit didn't finish: commit it again \
-                 (rust-dos commit {})",
+                 (rust-dos commit {}{})",
                 path.display(),
                 self.base_path.display(),
-                self.base_path.display()
+                self.base_path.display(),
+                elsewhere
             )));
         }
         let len = u64::from_le_bytes(header[16..24].try_into().unwrap());
@@ -363,7 +369,16 @@ impl Delta {
         if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
             hostfs::create_dir_all(dir)?;
         }
-        let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&self.path)?;
+        // Not truncated: a delta file there now was made since the disk
+        // was opened (by another run that mounts the image, or a restore
+        // whose file couldn't be read back), and holds changes.
+        let file = OpenOptions::new().read(true).write(true).create(true).open(&self.path)?;
+        if file.len()? != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} was made since the disk was opened", self.path.display()),
+            ));
+        }
         write_all_at(&file, 0, &self.header())?;
         file.set_len(self.data_start())?;
         *self.file.borrow_mut() = Some(file);
@@ -474,7 +489,7 @@ impl Mismatch {
 }
 
 /// `path` with `suffix` after its name.
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
@@ -824,6 +839,39 @@ mod tests {
         assert_eq!(commit(&base, &path).unwrap(), 1);
         assert_eq!(std::fs::read(&base).unwrap(), expected);
         assert!(commit(&base, &path).is_err(), "nothing left to commit");
+    }
+
+    /// A delta file another run made after this one opened the disk isn't
+    /// made again over it: the write fails, and the other run's changes
+    /// stay.
+    #[test]
+    fn a_delta_file_made_meanwhile_stays() {
+        let dir = scratch("meanwhile");
+        let base = image(&dir, 4 * BLOCK);
+        let path = dir.join("C.rdelta");
+        let first = Delta::open(&base, &path, false).unwrap();
+        let second = Delta::open(&base, &path, false).unwrap();
+        first.write_at(0, &[0xAA; 512]).unwrap();
+        assert!(second.write_at(BLOCK as u64, &[0xBB; 512]).is_err());
+        drop((first, second));
+        let again = Delta::open(&base, &path, true).unwrap();
+        assert_eq!(read(&again, 0, 512), vec![0xAA; 512]);
+        assert_eq!(again.blocks(), 1);
+    }
+
+    /// A commit cut short of a delta file in an overlay folder tells the
+    /// command with the delta file named.
+    #[test]
+    fn a_commit_cut_short_elsewhere_names_the_delta_file() {
+        let dir = scratch("commit_elsewhere");
+        let base = image(&dir, 2 * BLOCK);
+        let path = dir.join("saves").join("base.img.rdelta");
+        Delta::open(&base, &path, false).unwrap().write_at(0, &[1; 512]).unwrap();
+        let file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        write_all_at(&file, COMMITTING as u64, &[1]).unwrap();
+        drop(file);
+        let error = Delta::open(&base, &path, false).err().unwrap();
+        assert!(error.contains(&format!("--delta {}", path.display())), "{}", error);
     }
 
     /// An image written since its delta file was made (by another program)

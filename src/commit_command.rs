@@ -71,17 +71,15 @@ fn commit(cpu: &mut Cpu, drive: u8) -> Result<String, String> {
             image.display()
         ));
     }
-    let spec = cpu
-        .bus
-        .disk
-        .drive_info(drive)
-        .and_then(|info| info.mount)
-        .ok_or_else(|| {
-            format!(
-                "Drive {} wasn't mounted by MOUNT or the configuration",
-                name
-            )
-        })?;
+    let info = cpu.bus.disk.drive_info(drive);
+    // The image of a list that is in the drive, which goes back in after.
+    let index = info.as_ref().map_or(0, |info| info.image_index);
+    let spec = info.and_then(|info| info.mount).ok_or_else(|| {
+        format!(
+            "Drive {} wasn't mounted by MOUNT or the configuration",
+            name
+        )
+    })?;
     if !crate::hostfs::is_file(&delta) {
         return Ok(format!("Drive {} has no changes to commit", name));
     }
@@ -94,8 +92,15 @@ fn commit(cpu: &mut Cpu, drive: u8) -> Result<String, String> {
     }
     let committed = crate::diskdelta::commit(&image, &delta);
     // Mounted again either way: over the image with the changes in it, or
-    // as it was, with them still in the delta file.
-    let mounted = cpu.bus.mount_drive(drive, &spec.path, spec.opts, true);
+    // as it was, with them still in the delta file. A list's image goes
+    // back in the drive too.
+    let mounted = cpu
+        .bus
+        .mount_drive(drive, &spec.path, spec.opts, true)
+        .and_then(|_| match index {
+            0 => Ok(None),
+            index => cpu.bus.select_image(drive, index),
+        });
     let blocks = committed?;
     mounted?;
     Ok(format!(

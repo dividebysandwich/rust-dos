@@ -208,18 +208,26 @@ impl DiskController {
     /// file (`diskdelta`) in the mount's overlay folder if it has one, and
     /// otherwise beside a hard disk image (`default_delta`).
     fn open_disk(path: &Path, floppy: bool, opts: &MountOptions) -> Result<DiskImage, String> {
-        let delta = Self::delta_for(path, opts);
-        let beside = match (&delta, floppy) {
-            (None, false) => Self::default_delta(path, opts),
-            _ => None,
+        if let Some(delta) = Self::delta_for(path, opts) {
+            return DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only);
+        }
+        let beside = match floppy {
+            false => Self::default_delta(path, opts),
+            true => None,
         };
-        match delta.or_else(|| beside.clone()) {
-            Some(delta) => {
-                let disk =
-                    DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only)?;
-                if beside.is_some() {
-                    crate::diskdelta::note(Self::default_delta_note(path, &delta));
-                }
+        match beside {
+            Some((delta, read_only)) => {
+                let disk = DiskImage::open_delta(path, &delta, floppy, opts.geometry, read_only)?;
+                let note = match read_only {
+                    false => Self::default_delta_note(path, &delta),
+                    true => format!(
+                        "{}: the drive is read-only, and shows the image with the changes in {} \
+                         beside it",
+                        path.display(),
+                        delta.display()
+                    ),
+                };
+                crate::diskdelta::note(note);
                 Ok(disk)
             }
             None => DiskImage::open(path, floppy, opts.geometry, opts.read_only),
@@ -239,30 +247,50 @@ impl DiskController {
         )
     }
 
-    /// Where the changes of the hard disk image at `path` go when the
+    /// Where the changes of the hard disk image at `path` are when the
     /// mount has no overlay folder: `<image>.rdelta` beside it, the same
     /// for every run and every configuration that mounts the image, as the
-    /// image itself would be. None, and the image is written as it is,
-    /// with `-inplace`, for a mount that writes nothing (`-ro`, or an image
-    /// that can't be written, which stays write-protected), for an image
-    /// in an archive (read-only without an overlay folder), and where no
-    /// file can be made beside the image (the note says so).
-    pub(crate) fn default_delta(path: &Path, opts: &MountOptions) -> Option<PathBuf> {
-        if opts.in_place || opts.read_only || hostfs::is_layer(path) {
+    /// image itself would be, and whether the disk is read-only. A delta
+    /// file that is there is the disk's changes, so a read-only mount
+    /// (`-ro`, or an image that can't be written) shows them too, read
+    /// only. With none there, the image is written as it is (None) with
+    /// `-inplace`, for a mount that writes nothing, which stays
+    /// write-protected, for an image in an archive (read-only without an
+    /// overlay folder), and where no file can be made beside the image
+    /// (the note says so). `-inplace` over a delta file that is there
+    /// leaves it out, and the note says that too.
+    pub(crate) fn default_delta(path: &Path, opts: &MountOptions) -> Option<(PathBuf, bool)> {
+        if hostfs::is_layer(path) {
             return None;
         }
-        hostfs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .ok()?;
         let delta = crate::diskdelta::beside(path);
-        if hostfs::is_file(&delta) {
-            return Some(delta);
+        let there = hostfs::is_file(&delta);
+        if opts.in_place {
+            if there {
+                crate::diskdelta::note(format!(
+                    "{}: -inplace leaves out the changes in {} beside it, and once the image \
+                     is written they no longer fit it: to keep them, mount it without -inplace \
+                     and COMMIT them first",
+                    path.display(),
+                    delta.display()
+                ));
+            }
+            return None;
         }
-        let mut probe = delta.clone().into_os_string();
-        probe.push(".probe");
-        let probe = PathBuf::from(probe);
+        let writable = !opts.read_only
+            && hostfs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .is_ok();
+        if there {
+            return Some((delta, !writable));
+        }
+        if !writable {
+            return None;
+        }
+        // hostfs has no `create_new`, and the delta file is a host path.
+        let probe = crate::diskdelta::with_suffix(&delta, ".probe");
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -271,7 +299,7 @@ impl DiskController {
             Ok(file) => {
                 drop(file);
                 let _ = hostfs::remove_file(&probe);
-                Some(delta)
+                Some((delta, false))
             }
             Err(e) => {
                 crate::diskdelta::note(format!(

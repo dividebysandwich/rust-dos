@@ -1964,10 +1964,13 @@ as it is now. An image that was written in place before simply gets a
 delta file over it on its next mount.
 
 `-inplace` writes the image itself, and state files then keep a whole
-copy of the disk. A floppy image, one mounted read-only (`-ro`, or a file
-that can't be written) and one in an archive (which takes `-overlay`)
-have no delta file either, nor does an image where no file can be made
-beside it, which the log tells.
+copy of the disk. It leaves out a delta file that is beside the image,
+which the log tells: once the image is written, those changes no longer
+fit it, so `COMMIT` them first to keep them. A floppy image and one in an
+archive (which takes `-overlay`) have no delta file either, nor does an
+image where no file can be made beside it, which the log tells. A
+read-only mount (`-ro`, or a file that can't be written) makes no delta
+file, and shows the changes of one that is there.
 
 86Box's 86F floppy images (`.86f`, found by their contents whatever their
 name) mount like the others. They hold each track's FM or MFM bit cells,

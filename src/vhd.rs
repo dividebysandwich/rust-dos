@@ -233,6 +233,12 @@ impl Vhd {
         }
     }
 
+    /// Have what was written to the file on the disk. A differencing
+    /// image's parent is only read.
+    pub fn sync(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
+
     pub fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
         if at.checked_add(data.len() as u64).is_none_or(|end| end > self.len) {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
