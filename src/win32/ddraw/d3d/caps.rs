@@ -87,24 +87,16 @@ fn prim_caps() -> [u32; 13] {
     ]
 }
 
-/// D3DTEXTUREOPCAPS_: disable, select argument 1 and 2, modulate and
-/// modulate 2x, add, and blending by diffuse, texture and current alpha.
-const TEXTURE_OPS: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40 | 0x400 | 0x800 | 0x4000;
+/// D3DTEXTUREOPCAPS_: the operations the HAL draws (`hal::OPS`).
+const TEXTURE_OPS: u32 = super::hal::OP_CAPS;
 
-/// DDBD_16, and DDBD_24 and DDBD_32 on a Banshee or Voodoo3: the
-/// render target's and depth buffer's depths. The card draws 16 bits;
-/// 24- and 32-bit surfaces have 16-bit shadows (`shadow.rs`). An add-on
-/// card's buffers are 16-bit.
-fn depths(cpu: &mut Cpu) -> u32 {
-    const DDBD_16: u32 = 0x400;
-    const DDBD_24: u32 = 0x200;
-    const DDBD_32: u32 = 0x100;
-    if crate::win32::glide::hw::banshee(cpu) {
-        DDBD_16 | DDBD_24 | DDBD_32
-    } else {
-        DDBD_16
-    }
-}
+/// DDBD_16: the render target's and depth buffer's depth, on every
+/// card. The 3D engine draws 16-bit color and depth only, and 3dfx's
+/// Voodoo3 driver for Direct3D 7 says so: a program that picks its
+/// depth from this makes a 16-bit target, which the card draws where it
+/// is. A Banshee or Voodoo3 draws a 24- or 32-bit one that a program
+/// makes all the same through a 16-bit shadow (`shadow.rs`).
+const DDBD_16: u32 = 0x400;
 
 /// The guard band: left, top, right, bottom.
 pub const GUARD_BAND: [f32; 4] = [-2048.0, -2048.0, 2048.0, 2048.0];
@@ -136,8 +128,8 @@ pub fn write_desc(cpu: &mut Cpu, at: u32, size: u32, hal: bool, tmus: u32) {
             words[base] = 56;
             words[base + 1..base + 14].copy_from_slice(&prim_caps());
         }
-        words[0x9C / 4] = depths(cpu);
-        words[0xA0 / 4] = depths(cpu);
+        words[0x9C / 4] = DDBD_16;
+        words[0xA0 / 4] = DDBD_16;
         words[0xA8 / 4] = 0xFFFF;
         // Direct3D 5's: the textures' sizes.
         words[0xAC / 4] = 1;
@@ -183,8 +175,8 @@ pub fn write_desc7(cpu: &mut Cpu, at: u32, tmus: u32) {
         words[base] = 56;
         words[base + 1..base + 14].copy_from_slice(&prim_caps());
     }
-    words[0x74 / 4] = depths(cpu);
-    words[0x78 / 4] = depths(cpu);
+    words[0x74 / 4] = DDBD_16;
+    words[0x78 / 4] = DDBD_16;
     words[0x7C / 4] = 1;
     words[0x80 / 4] = 1;
     words[0x84 / 4] = 256;
@@ -232,21 +224,80 @@ pub fn texture_formats() -> Vec<Format> {
     ]
 }
 
-/// The depth buffer formats: 16 bits, and on a Banshee or Voodoo3 24
-/// and 32 with 24 of depth.
-pub fn z_formats(cpu: &mut Cpu) -> Vec<Format> {
-    let n = if crate::win32::glide::hw::banshee(cpu) {
-        3
-    } else {
-        1
-    };
-    [(16, 0xFFFF), (24, 0xFF_FFFF), (32, 0xFF_FFFF)][..n]
-        .iter()
-        .map(|&(bits, mask)| Format {
-            flags: DDPF_ZBUFFER,
-            bits,
-            g: mask,
-            ..Format::default()
-        })
-        .collect()
+/// The depth buffer formats: the one the depth buffer depths list, 16
+/// bits.
+pub fn z_formats() -> Vec<Format> {
+    vec![Format {
+        flags: DDPF_ZBUFFER,
+        bits: 16,
+        g: 0xFFFF,
+        ..Format::default()
+    }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voodoo::Board;
+
+    const AT: u32 = 0x2_0000;
+
+    fn read(cpu: &mut Cpu, offset: u32) -> u32 {
+        cpu.bus.guest_read_32(AT + offset)
+    }
+
+    /// 3dfx's Voodoo3 driver for Direct3D 7 reports 16-bit render
+    /// targets and depth buffers alone, so a program that picks its
+    /// depths from the description draws in 16 bits.
+    #[test]
+    fn a_voodoo3_reports_16_bit_targets_and_depth_buffers_alone() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.configure_voodoo(Some(Board::Voodoo3));
+        assert!(crate::win32::glide::hw::banshee(&cpu));
+
+        write_desc7(&mut cpu, AT, 2);
+        assert_eq!(read(&mut cpu, 0x74), DDBD_16, "render target depths");
+        assert_eq!(read(&mut cpu, 0x78), DDBD_16, "depth buffer depths");
+
+        write_desc(&mut cpu, AT, DESC_V3, true, 2);
+        assert_eq!(read(&mut cpu, 0x9C), DDBD_16, "render target depths");
+        assert_eq!(read(&mut cpu, 0xA0), DDBD_16, "depth buffer depths");
+
+        let z: Vec<u32> = z_formats().iter().map(|f| f.bits).collect();
+        assert_eq!(z, [16]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::hal;
+    use super::*;
+
+    /// 3dfx's Voodoo3 Direct3D 7 driver's dwTextureOpCaps, as
+    /// Giants: Citizen Kabuto's renderer got them on Windows 98 SE.
+    const VOODOO3_DRIVER: u32 = 0x1E_FA5F;
+
+    #[test]
+    fn the_texture_op_caps_are_what_validate_device_accepts() {
+        // D3DTOP_DISABLE (1) to D3DTOP_LERP (26).
+        for op in 1..=26 {
+            assert_eq!(
+                TEXTURE_OPS & 1 << (op - 1) != 0,
+                hal::can_do(op),
+                "D3DTOP {op}"
+            );
+        }
+        assert!(!hal::can_do(0) && !hal::can_do(27));
+    }
+
+    #[test]
+    fn the_texture_op_caps_are_the_drawn_part_of_3dfxs() {
+        // Disable, select argument 1 and 2, modulate, add, subtract, and
+        // blending by diffuse, texture and current alpha. Not ADDSMOOTH
+        // (0x400), which 3dfx's driver doesn't report, or MODULATE2X
+        // (0x10) and BLENDTEXTUREALPHAPM (0x4000), which the HAL doesn't
+        // draw.
+        assert_eq!(TEXTURE_OPS, 0x9A4F);
+        assert_eq!(TEXTURE_OPS & !VOODOO3_DRIVER, 0);
+    }
 }

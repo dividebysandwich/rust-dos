@@ -15,7 +15,7 @@ use glow::HasContext;
 use rust_dos::bus::Bus;
 use rust_dos::video::Frame;
 use rust_dos::video::shader::{self, Glsl, Shader};
-use rust_dos::voodoo::gl::VoodooGl;
+use rust_dos::voodoo::gl::{TextureBarrier, VoodooGl};
 use rust_dos::voodoo::{Renderer, VoodooSettings};
 
 use crate::Callbacks;
@@ -73,15 +73,19 @@ pub fn with_screen<R>(f: impl FnOnce(&mut Screen) -> R) -> Option<R> {
 unsafe extern "C" fn context_reset() {
     let Some(hw) = HW.with(Cell::get) else { return };
     let (Some(proc_address), Some(framebuffer)) = (hw.get_proc_address, hw.get_current_framebuffer) else { return };
+    let address = |name: &str| {
+        let Ok(name) = CString::new(name) else { return std::ptr::null() };
+        // SAFETY: the frontend hands out its lookup with the context.
+        unsafe { proc_address(name.as_ptr()) }.map_or(std::ptr::null(), |f| f as *const c_void)
+    };
     // SAFETY: the frontend's context is current while it resets it, and
     // its functions are what it hands out for it.
-    let gl = unsafe {
-        glow::Context::from_loader_function(|name| {
-            let Ok(name) = CString::new(name) else { return std::ptr::null() };
-            proc_address(name.as_ptr()).map_or(std::ptr::null(), |f| f as *const c_void)
-        })
+    let (gl, barrier) = unsafe {
+        let gl = glow::Context::from_loader_function(address);
+        let barrier = TextureBarrier::load(&gl, address);
+        (gl, barrier)
     };
-    let screen = Screen::new(gl, framebuffer);
+    let screen = Screen::new(gl, framebuffer, barrier);
     if let Err(e) = &screen {
         crate::callbacks().log(RETRO_LOG_ERROR, &format!("The frontend's OpenGL can't draw: {}", e));
     }
@@ -116,10 +120,16 @@ pub struct Screen {
     voodoo_key: Option<(u32, u32, u32)>,
     /// Why OpenGL can't draw the card, once it couldn't.
     voodoo_failed: Option<String>,
+    /// The context's texture barrier, for the card's blending.
+    texture_barrier: Option<TextureBarrier>,
 }
 
 impl Screen {
-    fn new(gl: glow::Context, framebuffer: retro_hw_get_current_framebuffer_t) -> Result<Self, String> {
+    fn new(
+        gl: glow::Context,
+        framebuffer: retro_hw_get_current_framebuffer_t,
+        texture_barrier: Option<TextureBarrier>,
+    ) -> Result<Self, String> {
         let version = gl.version();
         let glsl = Glsl::for_gl(version.major, version.minor, version.is_embedded)
             .ok_or_else(|| format!("OpenGL {}.{} is older than 3.0", version.major, version.minor))?;
@@ -138,7 +148,18 @@ impl Screen {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
-            Ok(Screen { gl, glsl, framebuffer, program, vao, texture, voodoo: None, voodoo_key: None, voodoo_failed: None })
+            Ok(Screen {
+                gl,
+                glsl,
+                framebuffer,
+                program,
+                vao,
+                texture,
+                voodoo: None,
+                voodoo_key: None,
+                voodoo_failed: None,
+                texture_barrier,
+            })
         }
     }
 
@@ -188,7 +209,8 @@ impl Screen {
             card.set_mirror(false);
             self.drop_voodoo();
             match VoodooGl::new(&self.gl, self.glsl, key.0, key.1, key.2) {
-                Ok(voodoo) => {
+                Ok(mut voodoo) => {
+                    voodoo.set_texture_barrier(self.texture_barrier);
                     card.set_mirror(true);
                     self.voodoo = Some(voodoo);
                     self.voodoo_key = Some(key);
