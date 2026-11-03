@@ -22,6 +22,10 @@ uniform ivec3 u_mem_layout;
 uniform int u_layer;
 // The destination: its first byte, its stride and its bytes a pixel.
 uniform ivec3 u_dst;
+// Whether the destination and a source in the memory lie in tiles of
+// 128 bytes by 32 rows, as the 2D engine addresses them, their strides
+// the bytes from one row of tiles to the next.
+uniform ivec2 u_tiled;
 // The rectangle drawn now, and the one the source is stretched onto:
 // left, top, right, bottom, in the destination's pixels.
 uniform ivec4 u_clip;
@@ -52,6 +56,15 @@ uint byte_at(uint a) {
     uint x = a & ((1u << row) - 1u);
     uint y = (a & ((1u << layer) - 1u)) >> row;
     return texelFetch(u_mem, ivec3(int(x), int(y), int(a >> layer)), 0).r;
+}
+
+// The byte `x` bytes into row `y` of a surface from byte `start` on,
+// `stride` bytes a row (a row of tiles if `tiled`).
+uint address(uint start, uint stride, bool tiled, uint x, uint y) {
+    if (tiled) {
+        return start + (x & 127u) + (x >> 7) * 4096u + (y & 31u) * 128u + (y >> 5) * stride;
+    }
+    return start + y * stride + x;
 }
 
 // The pixel of `bpp` bytes from byte `a` on, little-endian.
@@ -105,8 +118,18 @@ void main() {
         discard;
     }
     uint off = a - start;
-    int row = int(off / stride);
-    uint col = off % stride;
+    int row;
+    uint col;
+    if (u_tiled.x != 0) {
+        // The byte's row of tiles, its tile, and its place in the tile.
+        uint within = off % stride;
+        uint at = within & 4095u;
+        row = int((off / stride) * 32u + (at >> 7));
+        col = (within >> 12) * 128u + (at & 127u);
+    } else {
+        row = int(off / stride);
+        col = off % stride;
+    }
     int x = int(col / uint(bpp));
     int k = int(col % uint(bpp));
     if (x < u_clip.x || x >= u_clip.z || row < u_clip.y || row >= u_clip.w) {
@@ -129,7 +152,8 @@ void main() {
         int sx = u_src_rect.x + u * sw / dw;
         int sy = u_src_rect.y + v * sh / dh;
         if (u_src.x == 1) {
-            uint from = uint(u_src.y) + uint(sy) * uint(u_src.z) + uint(sx * u_src.w);
+            uint x = uint(sx * u_src.w);
+            uint from = address(uint(u_src.y), uint(u_src.z), u_tiled.y != 0, x, uint(sy));
             value = pixel_at(from, u_src.w);
         } else {
             // The buffer's pixel at the middle of its block of scale by

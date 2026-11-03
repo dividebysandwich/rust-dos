@@ -113,6 +113,52 @@ scope; say which in a comment on it. When several agents work together,
 the one coordinating them marks pull requests ready, not the agents
 doing the work.
 
+## Comparing what two builds draw: deterministic runs
+
+A comparison of the pictures or the behaviour of two runs (main and a
+branch, OpenGL and the software renderer, two settings) runs both with
+`--deterministic`. Without it, the runs reach each scene at a different
+emulated moment: input sent after waits on the wall clock, screenshots
+taken on a wall-clock timer, and `cycles=auto` changing the speed with
+the host's. Their pictures then differ whether the change drew anything
+differently or not, and matching each shot with the closest one of the
+other run hides real differences among those that timing makes.
+
+- Start both runs with `--deterministic`, the same `--cycles` (a
+  number), the same `--start-time`, and the same configuration apart
+  from what is compared.
+- Send every key, click and command while the machine is paused, at
+  emulated times the script fixes: resume with `until_ms`, wait for the
+  pause, send the input, resume. "Deterministic runs" in
+  `docs/llm-debugging.md` has the requests.
+- Take each screenshot while paused at a fixed emulated time, never
+  after a wall-clock wait.
+- Compare the frames of equal emulated times. Where the change should
+  draw the same, they are identical: explain every pixel that differs,
+  from the difference image, before calling the change exact.
+- Two renderers may differ by rounding. Give the differing pixels and
+  the largest channel difference for each frame, and compare main's pair
+  at the same frames, which tells what the change added.
+
+Two kinds of run can't be deterministic:
+
+- Timing measurements measure how fast the host runs the emulator.
+- Code that runs only outside deterministic mode can't be compared in
+  it. With `--deterministic` the Voodoo cards draw and take their
+  screenshots in software, and their 2D operations stay on the CPU,
+  because the GPU's pixels depend on the host's GPU. A change to OpenGL
+  drawing (`src/voodoo/gpu.rs`, `src/voodoo/gl`) is never run there.
+  Check that the code compared runs (`/api/status` tells which renderer
+  draws) before trusting identical pictures.
+
+A comparison that can't be deterministic keeps as much of it as it can:
+a fixed `--cycles` rather than `auto`, input sent at the same points of
+the program, and many shots close together. Match each shot with the
+other run's closest one, and log both emulated times. Say in the result
+that the runs weren't in step, and explain each match that still
+differs from the difference image: a different moment of the animation,
+or a different picture.
+
 ## Several agents on one machine
 
 Agents often work on several branches at once, each in its own git

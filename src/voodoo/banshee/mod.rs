@@ -33,6 +33,7 @@ pub mod blit2d;
 pub mod ddc;
 pub mod display;
 pub mod fifo;
+mod gpu2d;
 pub mod render3d;
 
 use super::{Effect, Now, Voodoo};
@@ -893,6 +894,13 @@ impl Voodoo {
         if self.writes_queue() || self.gpu.borrow().tracker.any_gpu() {
             let size = self.fbi.ram.bytes() as u32;
             let footprint = b.engine.footprint(reg, data, size);
+            // The command drawn on the GPU, where it can be, reads nothing
+            // back and waits for nothing.
+            if let Footprint::Spans(spans) = footprint
+                && self.banshee_2d_gpu(reg, data, &spans)
+            {
+                return;
+            }
             if footprint != Footprint::Nothing && self.workers_queue() {
                 self.catch_up_workers();
             }

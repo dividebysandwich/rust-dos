@@ -311,25 +311,64 @@ pub enum Command {
     /// the card's memory doesn't get until something reads it there
     /// (`gpu`).
     Blit(Box<Blit>),
+    /// A copy between colour buffers in the renderer's pictures of them,
+    /// which the card's memory doesn't get until the rows are read back.
+    Copy(BufferCopy),
+}
+
+/// A copy of pixels from colour buffer `from` to colour buffer `to` (word
+/// offsets, as `Draw`'s `dest`): `rect` of `to` (left, right, top,
+/// bottom, the right and bottom ones not drawn, as `Fill`'s) gets the
+/// pixels of `from` from (`src[0]`, `src[1]`) on. The two rectangles
+/// share no pixel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferCopy {
+    pub from: u32,
+    pub to: u32,
+    pub src: [u32; 2],
+    pub rect: [u32; 4],
 }
 
 /// A surface in a Banshee's or Voodoo3's memory, for a 2D operation: its
 /// first byte, the bytes from one row to the next, and its bytes a pixel
-/// (1 to 4).
+/// (1 to 4). In tiles (`tiled`), as the 2D engine addresses them, the
+/// rows lie in tiles of 128 bytes by 32 rows, and `stride` is the bytes
+/// from one row of tiles to the next; a pixel is then 1, 2 or 4 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plane {
     pub start: u32,
     pub stride: u32,
     pub bpp: u32,
+    pub tiled: bool,
 }
 
 impl Plane {
-    /// The bytes rows `top..bottom` of columns `left..right` span.
+    /// The byte address of pixel (`x`, `y`), which are not negative.
+    pub fn at(&self, x: u32, y: u32) -> u32 {
+        let x = x * self.bpp;
+        if self.tiled {
+            self.start + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * self.stride
+        } else {
+            self.start + x + y * self.stride
+        }
+    }
+
+    /// The bytes rows `top..bottom` of columns `left..right` span, first
+    /// to last: in tiles, from the first byte of the first column in the
+    /// first row of its tiles to the last of the last column in the last
+    /// row of its tiles.
     pub fn span(&self, [left, top, right, bottom]: [i32; 4]) -> (u32, u32) {
         let (left, top) = (left.max(0) as u32, top.max(0) as u32);
         let (right, bottom) = (right.max(0) as u32, bottom.max(0) as u32);
         if left >= right || top >= bottom {
             return (self.start, self.start);
+        }
+        if self.tiled {
+            // A byte's place in its row of tiles, which grows with it.
+            let col = |x: u32| (x & 127) + (x >> 7) * 128 * 32;
+            let first = self.start + col(left * self.bpp) + (top >> 5) * self.stride;
+            let last = col(right * self.bpp - 1) + ((bottom - 1) >> 5) * self.stride + 31 * 128;
+            return (first, self.start + last + 1);
         }
         let first = self.start + top * self.stride + left * self.bpp;
         (first, self.start + (bottom - 1) * self.stride + right * self.bpp)
@@ -626,7 +665,10 @@ impl Mirror {
 
     fn push(&mut self, command: Command) {
         // The frame buffer writes before a drawing come before it.
-        if matches!(command, Command::Draw(_) | Command::Fill(_) | Command::Blit(_)) {
+        if matches!(
+            command,
+            Command::Draw(_) | Command::Fill(_) | Command::Blit(_) | Command::Copy(_)
+        ) {
             self.close_rows();
         }
         self.push_command(command);
@@ -662,6 +704,11 @@ impl Mirror {
     /// A 2D operation for the renderer to do in its copy of the memory.
     pub(crate) fn blit(&mut self, blit: Blit) {
         self.push(Command::Blit(Box::new(blit)));
+    }
+
+    /// A copy between colour buffers for the renderer to do.
+    pub(crate) fn copy(&mut self, copy: BufferCopy) {
+        self.push(Command::Copy(copy));
     }
 
     /// Whether commands were dropped since the last call, with the memory
