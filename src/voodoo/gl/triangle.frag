@@ -2,19 +2,21 @@
 // rasterizer has it (src/voodoo/raster.rs) in the card's integers: the
 // texture units' lookups and combines, the colour and alpha combine,
 // chroma key, alpha mask and test, fog, the depth value and, with
-// u_dither, the dithering to 5-6-5. The depth test, blending and the write
-// masks are OpenGL's own, set for each draw.
+// u_dither, the dithering to 5-6-5. The depth test and the write masks
+// are OpenGL's own, set for each draw, and so is blending where the draw
+// doesn't dither.
 //
 // The buffers have 8 bits a component. Where fbzMode bit 8 dithers and
 // u_dither is on, the colour is dithered to 5-6-5 with the card's matrix
 // and rounding (`tables::dither_rb`) and widened again as the card's
-// picture widens its pixels, so an unblended pixel is the one the software
-// rasterizer writes. The matrix is indexed by the card's pixel, so above
-// 1x each cell covers u_scale by u_scale buffer pixels. OpenGL blends
-// after the shader, so a blended pixel is dithered before the blend
-// instead of after it, and isn't the card's: the card dithers the blend's
-// result (and with fbzMode bit 19 takes the dither back out of the colour
-// it reads first).
+// picture widens its pixels, so a pixel is the one the software rasterizer
+// writes. The matrix is indexed by the card's pixel, so above 1x each cell
+// covers u_scale by u_scale buffer pixels. The card blends before it
+// dithers, with the 5-6-5 pixel it reads, and with fbzMode bit 19 takes
+// the dither back out of that pixel first. OpenGL blends after the shader,
+// so for a dithered draw that blends (u_card_blend) the shader blends
+// itself, as the card does, with the pixels underneath that VoodooGl
+// copies into u_dst before it draws.
 //
 // The texture units pick their levels of detail as the card does, in
 // perspective from each pixel's footprint (the triangle's gradients,
@@ -82,6 +84,10 @@ uniform ivec3 u_tlevels1;
 uniform int u_gl_sampling;
 uniform ivec3 u_tdetail0;
 uniform ivec3 u_tdetail1;
+// Whether the shader blends as the card does, with the pixels the draw
+// goes over in u_dst (with OpenGL's blending off).
+uniform int u_card_blend;
+uniform sampler2D u_dst;
 
 bool bit(int v, int n) {
     return ((v >> n) & 1) != 0;
@@ -533,6 +539,66 @@ ivec3 fog(ivec3 c, int itera, ivec2 pixel) {
     return clamp(!bit(u_fog, 2) ? c + f : f, 0, 255);
 }
 
+// The card's alpha blending (`Row::finish` in src/voodoo/raster.rs) of
+// the colour `c` (before fog `prefog`) with the pixel there, read from
+// u_dst: its 5-6-5 bits, less the dither with fbzMode bit 19, and its
+// alpha from the alpha planes or 255.
+ivec4 cardBlend(ivec4 c, ivec3 prefog, ivec2 pixel) {
+    ivec4 dst = ivec4(round(texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0) * 255.0));
+    ivec3 d = dst.rgb & ivec3(0xF8, 0xFC, 0xF8);
+    int da = bit(u_fbz, 18) ? dst.a : 0xFF;
+    if (bit(u_fbz, 19) && dithers()) {
+        int i = ditherIndex(pixel);
+        int m = bit(u_fbz, 11) ? DITHER2[i] : DITHER4[i];
+        d = ivec3(((d.r << 1) + 15 - m) >> 1, ((d.g << 2) + 15 - m) >> 2, ((d.b << 1) + 15 - m) >> 1);
+    }
+    int sa = c.a;
+    ivec3 s = c.rgb;
+    int f = (u_alpha >> 8) & 15;
+    ivec3 src = ivec3(0);
+    if (f == 1) {
+        src = (s * (sa + 1)) >> 8;
+    } else if (f == 2) {
+        src = (s * (d + 1)) >> 8;
+    } else if (f == 3) {
+        src = (s * (da + 1)) >> 8;
+    } else if (f == 4) {
+        src = s;
+    } else if (f == 5) {
+        src = (s * (0x100 - sa)) >> 8;
+    } else if (f == 6) {
+        src = (s * (0x100 - d)) >> 8;
+    } else if (f == 7) {
+        src = (s * (0x100 - da)) >> 8;
+    } else if (f == 15) {
+        src = (s * (min(sa, 0x100 - da) + 1)) >> 8;
+    }
+    f = (u_alpha >> 12) & 15;
+    ivec3 add = ivec3(0);
+    if (f == 1) {
+        add = (d * (sa + 1)) >> 8;
+    } else if (f == 2) {
+        add = (d * (s + 1)) >> 8;
+    } else if (f == 3) {
+        add = (d * (da + 1)) >> 8;
+    } else if (f == 4) {
+        add = d;
+    } else if (f == 5) {
+        add = (d * (0x100 - sa)) >> 8;
+    } else if (f == 6) {
+        add = (d * (0x100 - s)) >> 8;
+    } else if (f == 7) {
+        add = (d * (0x100 - da)) >> 8;
+    } else if (f == 15) {
+        add = (d * (prefog + 1)) >> 8;
+    }
+    int a = ((u_alpha >> 16) & 15) == 4 ? sa : 0;
+    if (((u_alpha >> 20) & 15) == 4) {
+        a += da;
+    }
+    return clamp(ivec4(src + add, a), 0, 255);
+}
+
 void main() {
     ivec4 iter = ivec4(clampedColor(v_color.r), clampedColor(v_color.g), clampedColor(v_color.b), clampedColor(v_color.a));
 
@@ -594,12 +660,16 @@ void main() {
     select = (u_fbzcp >> 5) & 3;
     int alocal = select == 0 ? iter.a : select == 1 ? color0.a : select == 2 ? clampedZ(v_zw.x) & 0xFF : clampedW(v_zw.y) & 0xFF;
     ivec4 c = combineColor(other, ivec4(local, alocal), texel);
+    ivec3 prefog = c.rgb;
     if (bit(u_fog, 0)) {
         c.rgb = fog(c.rgb, iter.a, pixel);
     }
 
     int depth = u_constant_depth != 0 ? u_zacolor & 0xFFFF : depthValue();
     gl_FragDepth = float(depth) / 65535.0;
+    if (u_card_blend != 0) {
+        c = cardBlend(c, prefog, pixel);
+    }
     if (dithers()) {
         int i = ditherIndex(pixel);
         c.rgb = dither565(c.rgb, bit(u_fbz, 11) ? DITHER2[i] : DITHER4[i]);

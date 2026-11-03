@@ -2536,18 +2536,18 @@ screenshot, the debugger) the rows it reads are read back from OpenGL,
 at the card's resolution and in its 16 bits a pixel. A read waits for
 the GPU, so a game that reads back every frame gains less. The pixels it
 reads differ in small ways from the card's: OpenGL draws a triangle's
-edges by its own rules, blends after the dither (see below) and keeps
-more depth precision. What a game writes itself, its frame buffer
-writes and the blitter's copies, reads back as it wrote it. A save state
-keeps OpenGL's pixels too, so states of the same scene saved on two
-GPUs differ slightly in the card's memory, and in what the game did with
-pixels it read back. Such a state loads on any machine. A game that
-needs the card's exact pixels, or states that match byte for byte, can
-have `voodoo_readback=exact`. Programs that use alpha planes, the
-Banshee and Voodoo3, and deterministic runs always get the exact pixels,
-as do the pixel counters: drawing left to OpenGL isn't counted, and once
-a game reads the counters everything after is drawn in software and
-counted.
+edges by its own rules and keeps more depth precision, and where nothing
+dithers (see below) a blended triangle blends with 8 bits a colour. What
+a game writes itself, its frame buffer writes and the blitter's copies,
+reads back as it wrote it. A save state keeps OpenGL's pixels too, so
+states of the same scene saved on two GPUs differ slightly in the card's
+memory, and in what the game did with pixels it read back. Such a state
+loads on any machine. A game that needs the card's exact pixels, or
+states that match byte for byte, can have `voodoo_readback=exact`.
+Programs that use alpha planes, the Banshee and Voodoo3, and
+deterministic runs always get the exact pixels, as do the pixel
+counters: drawing left to OpenGL isn't counted, and once a game reads
+the counters everything after is drawn in software and counted.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws
@@ -2593,18 +2593,21 @@ from the card's memory (a new `voodoo_scale` or `voodoo_msaa`, a loaded
 state), it starts from the card's 16 bits, so with `voodoo_dither=false`
 the pattern shows until the game draws over it.
 
-Not all of the card's dithering is there. OpenGL blends after the shader,
-so a blended triangle is dithered before the blend instead of after it: it
-has the pattern, but its pixels aren't the card's, and fbzMode bit 19
-(taking the dither back out of the colour the blend reads) does nothing.
-Some games blend most of what they draw (Oni blends every triangle), so
-their pictures have the card's pattern but not its exact pixels. The
-texture units' dithered level of detail (textureMode bit 4) follows the
-setting as well. Frame buffer writes and the Voodoo2's blitter show what
-the card's memory holds, dithered or not, whatever the setting. The
-Voodoo2's and Voodoo3's video output filter, which partly smooths the
-pattern on the card's own output, isn't modelled: with the setting on,
-the pattern shows as the card writes it.
+The card blends a triangle with the 5-6-5 pixels under it before it
+dithers, and with fbzMode bit 19 it takes the dither back out of those
+pixels first. OpenGL blends after the shader, so for a triangle that
+blends and dithers the shader does the blend itself, the card's way: the
+pixels the triangle covers are copied out of the buffer before it is
+drawn, and the shader reads them from the copy. At `voodoo_scale=1` such
+a triangle comes out as the software rasterizer draws it too. Triangles
+of one draw that overlap go over a copy each, so each blends with what
+the one before drew. With `voodoo_msaa` the copy holds each pixel's
+samples averaged. The texture units' dithered level of detail
+(textureMode bit 4) follows the setting as well. Frame buffer writes and
+the Voodoo2's blitter show what the card's memory holds, dithered or not,
+whatever the setting. The Voodoo2's and Voodoo3's video output filter,
+which partly smooths the pattern on the card's own output, isn't
+modelled: with the setting on, the pattern shows as the card writes it.
 
 The dithering costs a few more instructions a pixel in the shader, and
 nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
