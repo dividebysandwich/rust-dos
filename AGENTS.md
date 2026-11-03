@@ -113,6 +113,36 @@ scope; say which in a comment on it. When several agents work together,
 the one coordinating them marks pull requests ready, not the agents
 doing the work.
 
+## Comparing what two builds draw: deterministic runs
+
+A comparison of the pictures or the behaviour of two runs (main and a
+branch, OpenGL and the software renderer, two settings) runs both with
+`--deterministic`. Without it, the runs reach each scene at a different
+emulated moment: input sent after waits on the wall clock, screenshots
+taken on a wall-clock timer, and `cycles=auto` changing the speed with
+the host's. Their pictures then differ whether the change drew anything
+differently or not, and matching each shot with the closest one of the
+other run hides real differences among those that timing makes.
+
+- Start both runs with `--deterministic`, the same `--cycles` (a
+  number), the same `--start-time`, and the same configuration apart
+  from what is compared.
+- Send every key, click and command while the machine is paused, at
+  emulated times the script fixes: resume with `until_ms`, wait for the
+  pause, send the input, resume. "Deterministic runs" in
+  `docs/llm-debugging.md` has the requests.
+- Take each screenshot while paused at a fixed emulated time, never
+  after a wall-clock wait.
+- Compare the frames of equal emulated times. Where the change should
+  draw the same, they are identical: explain every pixel that differs,
+  from the difference image, before calling the change exact.
+- Two renderers may differ by rounding. Give the differing pixels and
+  the largest channel difference for each frame, and compare main's pair
+  at the same frames, which tells what the change added.
+
+Timing measurements are the exception: they measure how fast the host
+runs the emulator, and run without `--deterministic`.
+
 ## Several agents on one machine
 
 Agents often work on several branches at once, each in its own git
