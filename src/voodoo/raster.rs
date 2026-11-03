@@ -703,29 +703,60 @@ const fn uses_local(mode: u32) -> bool {
 /// d(S/W)/dx / W, without the (S/W) dW/dx term; far from the texture's
 /// origin the two nearly cancel, and that level comes out several levels
 /// too coarse.
-#[inline(always)]
-fn footprint(q: &TmuParams, iters: i64, itert: i64, iterw: i64) -> i32 {
-    let (s, t, w) = (iters as f64, itert as f64, iterw as f64);
-    let length = |ds: i64, dt: i64, dw: i64| {
-        let dw = dw as f64;
-        let (a, b) = (w * ds as f64 - s * dw, w * dt as f64 - t * dw);
-        a * a + b * b
-    };
-    let squared = length(q.dsdx, q.dtdx, q.dwdx).max(length(q.dsdy, q.dtdy, q.dwdy));
-    if squared > 0.0 {
-        // The values have 32 fraction bits, the products 64: a square's
-        // log2 is 128 too high, half of it 64.
-        tables().half_log2(squared) - (64 << 8)
-    } else {
-        NO_FOOTPRINT
+///
+/// Along a scanline the numerators are affine in the pixel's position:
+/// a pixel to the right adds d/dx to S/W, T/W and W, which leaves the
+/// ones across as they are and adds the same amount to each one down at
+/// every pixel. So `new` works them out once a row, and `at` only the
+/// two down at a pixel, from how far it is from the row's first.
+pub(crate) struct Footprint {
+    /// The squared length of the numerators across.
+    across: f64,
+    /// The numerators down for S/W and T/W at the row's first pixel.
+    down: [f64; 2],
+    /// What a pixel to the right adds to each of `down`.
+    step: [f64; 2],
+}
+
+impl Footprint {
+    /// The footprint of a row whose first pixel has `iters`, `itert` and
+    /// `iterw`.
+    pub(crate) fn new(q: &TmuParams, iters: i64, itert: i64, iterw: i64) -> Self {
+        let (s, t, w) = (iters as f64, itert as f64, iterw as f64);
+        let [dsdx, dtdx, dwdx] = [q.dsdx, q.dtdx, q.dwdx].map(|d| d as f64);
+        let [dsdy, dtdy, dwdy] = [q.dsdy, q.dtdy, q.dwdy].map(|d| d as f64);
+        let (a, b) = (w * dsdx - s * dwdx, w * dtdx - t * dwdx);
+        Self {
+            across: a * a + b * b,
+            down: [w * dsdy - s * dwdy, w * dtdy - t * dwdy],
+            step: [dwdx * dsdy - dsdx * dwdy, dwdx * dtdy - dtdx * dwdy],
+        }
+    }
+
+    /// The level, less 2 log2(1/W), of the pixel `n` to the right of the
+    /// row's first.
+    #[inline(always)]
+    fn at(&self, n: i32) -> i32 {
+        let n = n as f64;
+        let (a, b) = (self.down[0] + self.step[0] * n, self.down[1] + self.step[1] * n);
+        let squared = self.across.max(a * a + b * b);
+        if squared > 0.0 {
+            // The values have 32 fraction bits, the products 64: a
+            // square's log2 is 128 too high, half of it 64.
+            tables().half_log2(squared) - (64 << 8)
+        } else {
+            NO_FOOTPRINT
+        }
     }
 }
 
-/// `footprint` where s and t don't change: below every lodmin.
+/// The footprint where s and t don't change: below every lodmin.
 const NO_FOOTPRINT: i32 = -(1000 << 8);
 
 /// A texture unit's colour for a pixel, combined with `cother`, the
-/// colour of the unit before it (`TEXTURE_PIPELINE`).
+/// colour of the unit before it (`TEXTURE_PIPELINE`). `fp` is the
+/// footprint of the pixel's row, and `n` how far the pixel is from the
+/// row's first.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn texture(
@@ -734,7 +765,8 @@ fn texture(
     x: i32,
     dither4: Option<&[u8]>,
     cother: u32,
-    q: &TmuParams,
+    lodbase: i32,
+    (fp, n): (&Footprint, i32),
     iters: i64,
     itert: i64,
     iterw: i64,
@@ -750,15 +782,11 @@ fn texture(
         // With lodmin at or above lodmax (one level, as Glide sets up a
         // texture without mipmaps) the clamps below make any level lodmax:
         // the footprint isn't worked out for it.
-        lod = if t.lodmin < t.lodmax {
-            footprint(q, iters, itert, iterw) + 2 * log
-        } else {
-            t.lodmax
-        };
+        lod = if t.lodmin < t.lodmax { fp.at(n) + 2 * log } else { t.lodmax };
     } else {
         s = (iters >> 14) as i32;
         tc = (itert >> 14) as i32;
-        lod = q.lodbase;
+        lod = lodbase;
     }
     if bit(mode, 3) && iterw < 0 {
         s = 0;
@@ -1282,6 +1310,10 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         let q = &p.tmu[i];
         *t = (at64(q.starts, q.dsdy, q.dsdx), at64(q.startt, q.dtdy, q.dtdx), at64(q.startw, q.dwdy, q.dwdx));
     }
+    let fp: [Footprint; 2] = std::array::from_fn(|i| {
+        let (s, tc, w) = tex[i];
+        Footprint::new(&p.tmu[i], s, tc, w)
+    });
     // Both units iterating the same W (as Glide sets them up) divide by it
     // once.
     let (w0, w1) = (&p.tmu[0], &p.tmu[1]);
@@ -1301,7 +1333,9 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
                 && t.lodmin < 8 << 8
             {
                 let (s, tc, w) = tex[1];
-                texel = texture(t, m.tex[1], x, row.dither4, texel, &p.tmu[1], s, tc, w, rl);
+                let at = (&fp[1], x - startx);
+                let lodbase = p.tmu[1].lodbase;
+                texel = texture(t, m.tex[1], x, row.dither4, texel, lodbase, at, s, tc, w, rl);
             }
             if TMUS >= 1
                 && let Some(t) = &st.tmu[0]
@@ -1311,7 +1345,9 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
                     Some(config) => config,
                     None => {
                         let (s, tc, w) = tex[0];
-                        texture(t, m.tex[0], x, row.dither4, texel, &p.tmu[0], s, tc, w, rl)
+                        let at = (&fp[0], x - startx);
+                        let lodbase = p.tmu[0].lodbase;
+                        texture(t, m.tex[0], x, row.dither4, texel, lodbase, at, s, tc, w, rl)
                     }
                 };
             }
@@ -1542,12 +1578,18 @@ pub(crate) mod tests {
                 lodbase: super::super::texture::lodbase([dsdx, 0, dsdy, dtdy]),
             };
             for y in (0..200i64).step_by(10) {
+                // The row's footprint from its pixel at x = 0, as the
+                // scanline works it out.
+                let first = |start: i64, ddy: i64| start + y * ddy;
+                let (s0, t0) = (first(q.starts, q.dsdy), first(q.startt, q.dtdy));
+                let fp = Footprint::new(&q, s0, t0, first(q.startw, q.dwdy));
                 for x in (0..40i64).step_by(10) {
                     let at = |start: i64, ddx: i64, ddy: i64| start + x * ddx + y * ddy;
                     let s = at(q.starts, q.dsdx, q.dsdy);
                     let tc = at(q.startt, q.dtdx, q.dtdy);
                     let w = at(q.startw, q.dwdx, q.dwdy);
-                    let level = texture(&t, mode, 0, None, 0, &q, s, tc, w, None) & 0xFF;
+                    let n = (&fp, x as i32);
+                    let level = texture(&t, mode, 0, None, 0, q.lodbase, n, s, tc, w, None) & 0xFF;
                     // The texels the pixel covers: the area its image has
                     // in the texture, from the derivatives of s and t: t
                     // doesn't change across, so d(s)/dy doesn't count.
@@ -1565,6 +1607,33 @@ pub(crate) mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A row's footprint `n` pixels on is the one worked out at that
+    /// pixel, with every gradient in use, across a row as wide as the
+    /// screen and thousands of texels from the texture's origin.
+    #[test]
+    fn a_rows_footprint_is_each_pixels() {
+        let fixed = |v: f64| (v * 4_294_967_296.0) as i64;
+        let q = TmuParams {
+            starts: fixed(3000.0),
+            startt: fixed(-1700.0),
+            startw: fixed(0.9),
+            dsdx: fixed(1.3),
+            dtdx: fixed(-0.4),
+            dwdx: fixed(-0.0003),
+            dsdy: fixed(0.2),
+            dtdy: fixed(2.1),
+            dwdy: fixed(-0.0011),
+            lodbase: 0,
+        };
+        let row = Footprint::new(&q, q.starts, q.startt, q.startw);
+        for n in [0i64, 1, 7, 100, 639, 2047] {
+            let at = |start: i64, d: i64| start + n * d;
+            let (s, tc, w) = (at(q.starts, q.dsdx), at(q.startt, q.dtdx), at(q.startw, q.dwdx));
+            let pixel = Footprint::new(&q, s, tc, w);
+            assert_eq!(row.at(n as i32), pixel.at(0), "pixel {n}");
         }
     }
 

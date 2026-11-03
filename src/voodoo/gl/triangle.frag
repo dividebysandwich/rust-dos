@@ -231,7 +231,7 @@ int depthValue() {
 }
 
 // The pixel's footprint in perspective (8.8) less 2 log2(1/W), as
-// `footprint` in src/voodoo/raster.rs has it: half of log2 of the longer
+// `Footprint` in src/voodoo/raster.rs has it: half of log2 of the longer
 // of W times the gradients of S/W and T/W less S/W and T/W times W's.
 int footprint(vec3 stw, vec3 dx, vec3 dy) {
     vec2 across = stw.z * dx.xy - stw.xy * dx.z;
