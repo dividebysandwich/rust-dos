@@ -1851,6 +1851,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-mp2"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19c132641af52d4dce3d1f56e92325f0c682e9b49d1dceadc96bd6d02fa74ee1"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-mpeg12video"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9004fa786827c64dec526454e5f9de6f9a6426b9e239124fed494ab4816776"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2223,7 +2241,10 @@ dependencies = [
  "md-5",
  "memchr",
  "openxr",
+ "oxideav-core",
  "oxideav-indeo",
+ "oxideav-mp2",
+ "oxideav-mpeg12video",
  "png",
  "rust-dos-audio-core",
  "rust-dos-dma",

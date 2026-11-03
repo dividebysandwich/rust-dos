@@ -741,3 +741,221 @@ fn aux_devices_are_the_sound_blaster_16s_lines() {
         assert!(seen.contains(&set), "{core:?}: {seen:?}");
     }
 }
+
+/// 12 frames of 32 by 32 at 25 a second, 6 red and 6 blue: a video
+/// elementary stream, as an .MPG file may be.
+fn clip() -> Vec<u8> {
+    use oxideav_mpeg12video::frame_assembly::FrameBuffer;
+    use oxideav_mpeg12video::mpeg1_encoder::encode_mpeg1_display_order_sequence;
+    use oxideav_mpeg12video::mpeg1_stream_writer::Mpeg1SequenceParams;
+    use oxideav_mpeg12video::sequence_extension::ChromaFormat;
+    let frame = |(y, cb, cr): (u8, u8, u8)| {
+        let mut f = FrameBuffer::new(32, 32, ChromaFormat::Yuv420);
+        for (plane, v) in [(&mut f.y, y), (&mut f.cb, cb), (&mut f.cr, cr)] {
+            for row in 0..plane.height() {
+                for col in 0..plane.width() {
+                    plane.put_sample(col, row, v);
+                }
+            }
+        }
+        f
+    };
+    let frames: Vec<FrameBuffer> = (0..12)
+        .map(|n| frame(if n < 6 { (81, 90, 240) } else { (41, 240, 110) }))
+        .collect();
+    let seq = Mpeg1SequenceParams {
+        horizontal_size: 32,
+        vertical_size: 32,
+        picture_rate_code: 3,
+        ..Default::default()
+    };
+    encode_mpeg1_display_order_sequence(&frames, 2, 2, &seq, 4, 1, 1).unwrap()
+}
+
+// The program's data for the MPEGVideo test.
+const CLIP_NAME: u32 = 0x00;
+const STATIC: u32 = 0x20;
+const OPEN_PARMS: u32 = 0x40;
+const STATUS_PARMS: u32 = 0x60;
+const WHERE_PARMS: u32 = 0x80;
+const PLAY_PARMS: u32 = 0xA0;
+const CLOSE_PARMS: u32 = 0xC0;
+
+/// The program: a popup window, and the file `name` on C: opened in a
+/// child of it with MCI_DGV_OPEN_PARMSA, whose window (MCI_STATUS) is
+/// that child and whose source rectangle (MCI_WHERE) is the picture, 32
+/// by 32. A play draws a red frame 100 ms in and a blue one at its end,
+/// which GetPixel sees in the window, and the device then stops. The
+/// exit code has a bit for each.
+fn video_program(name: &str) -> Vec<u8> {
+    const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
+    const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
+    const MCI_OPEN: i32 = 0x803;
+    const MCI_CLOSE: i32 = 0x804;
+    const MCI_PLAY: i32 = 0x806;
+    const MCI_STATUS: i32 = 0x814;
+    const MCI_WHERE: i32 = 0x843;
+    const OPEN_FLAGS: i32 = 0x0200 | 0x1_0000 | 0x2_0000;
+    let mut data = vec![0u8; 0xE0];
+    put(&mut data, CLIP_NAME as usize, format!("C:\\{name}\0").as_bytes());
+    put(&mut data, STATIC as usize, b"Static\0");
+    let open = OPEN_PARMS as usize;
+    put(&mut data, open + 20, &(WS_CHILD_VISIBLE as u32).to_le_bytes());
+    put(&mut data, STATUS_PARMS as usize + 8, &0x4001u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["Sleep", "ExitProcess"]),
+        ("WINMM.dll", &["mciSendCommandA"]),
+        (
+            "USER32.dll",
+            &["CreateWindowExA", "GetParent", "GetDC"],
+        ),
+        ("GDI32.dll", &["GetPixel"]),
+    ];
+    program(imports, &data, |a, l| {
+        let send = |a: &mut CodeAssembler, msg: i32, flags: i32, parms: u32| {
+            a.push(l.at(parms) as i32)?;
+            a.push(flags)?;
+            a.push(msg)?;
+            a.push(edi)?;
+            a.call(l.import(2))
+        };
+        a.xor(ebx, ebx)?;
+        a.xor(edi, edi)?;
+        a.mov(dword_ptr(l.at(OPEN_PARMS + 12)), l.at(CLIP_NAME) as i32)?;
+        let args = [
+            0,
+            l.at(STATIC) as i32,
+            0,
+            WS_POPUP_VISIBLE,
+            0,
+            0,
+            64,
+            64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        call(a, l.import(3), &args)?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(l.at(OPEN_PARMS + 24)), eax)?;
+        send(a, MCI_OPEN, OPEN_FLAGS, OPEN_PARMS)?;
+        check_eax(a, 0, 0)?;
+        a.mov(edi, dword_ptr(l.at(OPEN_PARMS + 4)))?;
+        send(a, MCI_STATUS, 0x100, STATUS_PARMS)?;
+        check_eax(a, 0, 1)?;
+        a.push(dword_ptr(l.at(STATUS_PARMS + 4)))?;
+        a.call(l.import(4))?;
+        a.cmp(eax, esi)?;
+        let mut not_child = a.create_label();
+        a.jne(not_child)?;
+        a.or(ebx, 1 << 2)?;
+        a.set_label(&mut not_child)?;
+        a.nop()?;
+        send(a, MCI_WHERE, 0x2_0000, WHERE_PARMS)?;
+        check_eax(a, 0, 3)?;
+        a.mov(eax, dword_ptr(l.at(WHERE_PARMS + 12)))?;
+        a.add(eax, dword_ptr(l.at(WHERE_PARMS + 16)))?;
+        check_eax(a, 64, 4)?;
+        send(a, MCI_PLAY, 0, PLAY_PARMS)?;
+        check_eax(a, 0, 5)?;
+        for (sleep, bit, red) in [(100, 6, true), (500, 7, false)] {
+            call(a, l.import(0), &[sleep])?;
+            // GetPixel(GetDC(the device's window), 16, 16).
+            a.push(16)?;
+            a.push(16)?;
+            a.push(dword_ptr(l.at(STATUS_PARMS + 4)))?;
+            a.call(l.import(5))?;
+            a.push(eax)?;
+            a.call(l.import(6))?;
+            // Red is 0x0000FF-ish, blue 0xFF0000-ish.
+            let (hi, lo) = if red { (0, 16) } else { (16, 0) };
+            let mut skip = a.create_label();
+            a.mov(ecx, eax)?;
+            a.shr(ecx, hi)?;
+            a.and(ecx, 0xFF)?;
+            a.cmp(ecx, 0xC0)?;
+            a.jb(skip)?;
+            a.mov(ecx, eax)?;
+            a.shr(ecx, lo)?;
+            a.and(ecx, 0xFF)?;
+            a.cmp(ecx, 0x40)?;
+            a.jae(skip)?;
+            a.or(ebx, 1 << bit)?;
+            a.set_label(&mut skip)?;
+            a.nop()?;
+        }
+        send(a, MCI_CLOSE, 0, CLOSE_PARMS)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// MPEGVideo plays an MPEG-1 file in a child window of the program's,
+/// as Windows 98's MCIQTZ does: the frames come at their times.
+#[test]
+fn mpegvideo_draws_its_frames_in_a_child_window() {
+    for core in CORES {
+        let files = [("T.EXE", video_program("CLIP.MPG")), ("CLIP.MPG", clip())];
+        let mut cpu = machine("mpeg", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
+    }
+}
+
+/// The frames of `clip` in an AVI file: uncompressed 24-bit pictures,
+/// with an index.
+fn avi_clip() -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, id: &[u8], data: &[u8]) {
+        out.extend_from_slice(id);
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    let le = |v: u32| v.to_le_bytes();
+    let mut strh = vec![0; 56];
+    strh[..4].copy_from_slice(b"vids");
+    strh[20..24].copy_from_slice(&le(1));
+    strh[24..28].copy_from_slice(&le(25));
+    strh[32..36].copy_from_slice(&le(12));
+    let mut bih = vec![0; 40];
+    bih[..4].copy_from_slice(&le(40));
+    bih[4..8].copy_from_slice(&le(32));
+    bih[8..12].copy_from_slice(&le(32));
+    bih[12..16].copy_from_slice(&[1, 0, 24, 0]);
+    let mut strl = b"strl".to_vec();
+    chunk(&mut strl, b"strh", &strh);
+    chunk(&mut strl, b"strf", &bih);
+    let mut hdrl = b"hdrl".to_vec();
+    chunk(&mut hdrl, b"avih", &[0; 56]);
+    chunk(&mut hdrl, b"LIST", &strl);
+    let mut movi = b"movi".to_vec();
+    let mut idx1 = Vec::new();
+    for n in 0..12 {
+        let px: [u8; 3] = if n < 6 { [0, 0, 255] } else { [255, 0, 0] };
+        idx1.extend_from_slice(b"00db");
+        idx1.extend_from_slice(&le(0x10));
+        idx1.extend_from_slice(&le(movi.len() as u32));
+        idx1.extend_from_slice(&le(32 * 32 * 3));
+        chunk(&mut movi, b"00db", &px.repeat(32 * 32));
+    }
+    let mut body = b"AVI ".to_vec();
+    chunk(&mut body, b"LIST", &hdrl);
+    chunk(&mut body, b"LIST", &movi);
+    chunk(&mut body, b"idx1", &idx1);
+    let mut out = Vec::new();
+    chunk(&mut out, b"RIFF", &body);
+    out
+}
+
+/// A file with the .AVI extension opens on AVIVideo, which plays it as
+/// MPEGVideo plays an MPEG-1 file.
+#[test]
+fn avivideo_draws_its_frames_in_a_child_window() {
+    for core in CORES {
+        let files = [("T.EXE", video_program("CLIP.AVI")), ("CLIP.AVI", avi_clip())];
+        let mut cpu = machine("avi", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
+    }
+}
