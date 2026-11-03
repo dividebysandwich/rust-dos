@@ -16,6 +16,8 @@
 //! a read back then only has to read.
 
 use super::backlog::Access;
+#[cfg(test)]
+use super::mirror::Plane;
 use super::mirror::{Blit, BlitSource, Command, row_bytes, rows_of};
 use super::raster::{RasterState, Stride};
 use super::tracker::{PAGE, Tracker};
@@ -144,6 +146,8 @@ pub struct Gpu {
     read_back: u64,
     /// 2D operations done on the GPU.
     blits: u64,
+    /// Commands of a Banshee's 2D engine drawn on the GPU (`banshee_2d_gpu`).
+    pub(super) engine: u64,
     /// 2D operations left to the CPU as the program reads or writes
     /// where they draw (the tracker's hot pages).
     hot: u64,
@@ -660,6 +664,53 @@ impl Voodoo {
         true
     }
 
+    /// Record `command`, a fill (`Command::Fill`) or a copy between colour
+    /// buffers (`Command::Copy`) that draws into rows `rows` of one of the
+    /// 3D buffers the renderer draws (a colour buffer's word offset, None
+    /// for the auxiliary buffer), for the renderer alone: those rows are
+    /// newer on the GPU from now on, as a job left to it makes them
+    /// (`gpu_left`). False, with nothing recorded, where it can't be: the
+    /// buffers' reads don't get the renderer's pictures of them
+    /// (`voodoo_readback=exact`), the auxiliary buffer may hold alpha,
+    /// which the renderer keeps in its colour buffers, the software
+    /// picture is wanted, or the recording has no such buffer.
+    pub(crate) fn gpu_draw_buffer(
+        &mut self,
+        command: Command,
+        buffer: Option<u32>,
+        rows: (u32, u32),
+    ) -> bool {
+        let takes = self.gpu_reads
+            && !self.gpu_alpha.get()
+            && !self.software_picture
+            && self.gpu.get_mut().link.is_some();
+        let Some(key) = self.mirror_layout().filter(|_| takes) else {
+            return false;
+        };
+        let (base, stride) = match buffer {
+            Some(offs) if key.color.contains(&(offs * 2)) => (offs, key.stride),
+            None if key.aux != NONE => (key.aux / 2, key.aux_stride),
+            _ => return false,
+        };
+        let Some(mirror) = self.mirror.get_mut() else {
+            return false;
+        };
+        match command {
+            Command::Fill(fill) => mirror.fill(fill),
+            Command::Copy(copy) => mirror.copy(copy),
+            _ => return false,
+        }
+        self.gpu_behind.set(true);
+        if self.gpu_rows.get_mut().armed() {
+            let slot = self.gpu_rows_slot(buffer);
+            self.gpu_rows.get_mut().mark(slot, rows);
+        }
+        let (start, end) = row_bytes(base, stride, rows);
+        self.gpu.get_mut().tracker.drawn_in_buffer(start, end);
+        self.display_dirty = true;
+        true
+    }
+
     /// The recording dropped what it had (nobody took it), and the pages
     /// of memory with it: the renderer gets them all again, but for those
     /// it has newer.
@@ -841,9 +892,265 @@ impl Voodoo {
         serde_json::json!({
             "linked": gpu.link.is_some(),
             "blits": gpu.blits,
+            "engine_commands": gpu.engine,
             "left_to_cpu": gpu.hot,
             "pages_read_back": gpu.read_back,
         })
+    }
+}
+
+/// For the tests: what the OpenGL renderer keeps of the card, and does
+/// with the commands it gets, at the card's resolution: its copy of the
+/// memory, and its pictures of the colour buffers (5-6-5) and of the
+/// depth buffer. It draws no triangles: a draw gives every pixel of its
+/// box a value of its own, which a read back then shows.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Model {
+    pub memory: Vec<u8>,
+    width: u32,
+    height: u32,
+    colour: std::collections::HashMap<u32, Vec<u16>>,
+    depth: Option<Vec<u16>>,
+    draws: u32,
+}
+
+#[cfg(test)]
+impl Model {
+    /// Pixel (`x`, `y`) of colour buffer `dest` (its word offset), or
+    /// with None of the depth buffer.
+    pub fn pixel(&self, dest: Option<u32>, x: u32, y: u32) -> u16 {
+        let buffer = match dest {
+            Some(dest) => &self.colour[&dest],
+            None => self.depth.as_ref().unwrap(),
+        };
+        buffer[(y * self.width + x) as usize]
+    }
+
+    /// Do `commands`, as `VoodooGl::run_commands` does.
+    pub fn apply(&mut self, commands: &[Command]) {
+        use super::mirror::Convert;
+        for command in commands {
+            let (w, h) = (self.width, self.height);
+            match command {
+                Command::Resync(snapshot) => {
+                    let layout = &snapshot.layout;
+                    (self.width, self.height) = (layout.width, layout.height);
+                    let colour = layout.color.iter().copied().zip(snapshot.color.iter().cloned());
+                    self.colour = colour.collect();
+                    self.depth = snapshot.aux.clone();
+                }
+                Command::Draw(draw) => {
+                    self.draws += 1;
+                    let xs = draw.vertices.iter().map(|v| v.pos[0]);
+                    let ys = draw.vertices.iter().map(|v| v.pos[1]);
+                    let (x0, x1) = (xs.clone().fold(f32::MAX, f32::min), xs.fold(0.0, f32::max));
+                    let (y0, y1) = (ys.clone().fold(f32::MAX, f32::min), ys.fold(0.0, f32::max));
+                    let clamp = |v: f32, most: u32| (v.max(0.0) as u32).min(most);
+                    let (x0, x1, y0, y1) = (clamp(x0, w), clamp(x1, w), clamp(y0, h), clamp(y1, h));
+                    let draws = self.draws;
+                    if let Some(buffer) = self.colour.get_mut(&draw.state.dest) {
+                        for y in y0..y1 {
+                            for x in x0..x1 {
+                                let v = (draws * 40503 + x * 31 + y * 1009) as u16;
+                                buffer[(y * w + x) as usize] = v;
+                            }
+                        }
+                    }
+                    if let Some(depth) = self.depth.as_mut().filter(|_| draw.state.fbz_mode & 1 << 10 != 0) {
+                        for y in y0..y1 {
+                            for x in x0..x1 {
+                                depth[(y * w + x) as usize] = draws as u16;
+                            }
+                        }
+                    }
+                }
+                Command::Fill(fill) => {
+                    let [l, r, t, b] = fill.rect;
+                    let (l, r, t, b) = (l.min(w), r.min(w), t.min(h), b.min(h));
+                    let dest = if self.colour.contains_key(&fill.dest) {
+                        Some(fill.dest)
+                    } else {
+                        self.colour.keys().next().copied()
+                    };
+                    for y in t..b {
+                        for x in l..r {
+                            let at = (y * w + x) as usize;
+                            if let (Some(c), Some(dest)) = (fill.color, dest) {
+                                let v = match &fill.pattern {
+                                    Some(p) => p[(y as usize & 3) * 4 + (x as usize & 3)],
+                                    None => narrow(c) as u16,
+                                };
+                                self.colour.get_mut(&dest).unwrap()[at] = v;
+                            }
+                            if let (Some(aux), Some(depth), false) =
+                                (fill.aux, self.depth.as_mut(), fill.alpha_planes)
+                            {
+                                depth[at] = aux;
+                            }
+                        }
+                    }
+                }
+                Command::Pixels(p) => {
+                    let buffer = match p.dest {
+                        Some(dest) => self.colour.get_mut(&dest),
+                        None => self.depth.as_mut(),
+                    };
+                    if let Some(buffer) = buffer {
+                        let at = (p.y * w + p.x) as usize;
+                        buffer[at..at + p.values.len()].copy_from_slice(&p.values);
+                    }
+                }
+                Command::Texture(_) | Command::FreeTexture(_) => {}
+                Command::Memory { size, at, bytes } => {
+                    if self.memory.len() < *size as usize {
+                        self.memory.resize(*size as usize, 0);
+                    }
+                    let at = *at as usize;
+                    self.memory[at..at + bytes.len()].copy_from_slice(bytes);
+                }
+                Command::Copy(c) => {
+                    let [l, r, t, b] = c.rect;
+                    let Some(from) = self.colour.get(&c.from).cloned() else {
+                        continue;
+                    };
+                    let Some(to) = self.colour.get_mut(&c.to) else {
+                        continue;
+                    };
+                    for y in t..b {
+                        for x in l..r {
+                            let (sx, sy) = (c.src[0] + x - l, c.src[1] + y - t);
+                            to[(y * w + x) as usize] = from[(sy * w + sx) as usize];
+                        }
+                    }
+                }
+                Command::Blit(blit) => {
+                    // As blit.frag draws it, from the memory as it was.
+                    let before = self.memory.clone();
+                    let len = before.len();
+                    let address = |p: &Plane, x: u32, y: u32| {
+                        let a = if p.tiled {
+                            p.start + (x & 127) + (x >> 7) * 4096 + (y & 31) * 128 + (y >> 5) * p.stride
+                        } else {
+                            p.start + y * p.stride + x
+                        };
+                        a as usize % len
+                    };
+                    let pixel = |a: usize, bpp: u32| {
+                        (0..bpp as usize).fold(0u32, |v, i| v | (before[(a + i) % len] as u32) << (8 * i))
+                    };
+                    let keyed = |v: u32, k: &super::mirror::Key| {
+                        if k.masks == [0; 3] {
+                            return v >= k.low && v <= k.high;
+                        }
+                        k.masks.iter().all(|&m| m == 0 || ((v & m) >= (k.low & m) && (v & m) <= (k.high & m)))
+                    };
+                    let [ax, ay, ar, ab] = blit.area;
+                    for r in &blit.rects {
+                        for y in r[1].max(0)..r[3] {
+                            for x in r[0].max(0)..r[2] {
+                                let mut value = 0;
+                                let src = match &blit.src {
+                                    BlitSource::Fill(v) => {
+                                        value = *v;
+                                        None
+                                    }
+                                    BlitSource::Memory { rect, .. } | BlitSource::Buffer { rect, .. } => {
+                                        Some(*rect)
+                                    }
+                                };
+                                if let Some([sl, st, sr, sb]) = src {
+                                    let (dw, dh, sw, sh) = (ar - ax, ab - ay, sr - sl, sb - st);
+                                    let (mut u, mut v) = (x - ax, y - ay);
+                                    if blit.mirror[0] {
+                                        u = dw - 1 - u;
+                                    }
+                                    if blit.mirror[1] {
+                                        v = dh - 1 - v;
+                                    }
+                                    let (sx, sy) = (sl + u * sw / dw, st + v * sh / dh);
+                                    value = match &blit.src {
+                                        BlitSource::Memory { plane, .. } => {
+                                            let a = address(plane, (sx * plane.bpp as i32) as u32, sy as u32);
+                                            pixel(a, plane.bpp)
+                                        }
+                                        BlitSource::Buffer { buffer, .. } => {
+                                            let b = &self.colour[buffer];
+                                            let (sx, sy) = (sx.clamp(0, w as i32 - 1), sy.clamp(0, h as i32 - 1));
+                                            super::blit::rgb888(b[(sy as u32 * w + sx as u32) as usize])
+                                        }
+                                        BlitSource::Fill(_) => unreachable!(),
+                                    };
+                                    if blit.src_key.as_ref().is_some_and(|k| keyed(value, k)) {
+                                        continue;
+                                    }
+                                    value = match blit.convert {
+                                        Convert::None => value,
+                                        Convert::Widen => super::blit::rgb888(value as u16),
+                                        Convert::Narrow => narrow(value),
+                                        Convert::ClearTop => value & 0xFF_FFFF,
+                                    };
+                                }
+                                let d = &blit.dst;
+                                let at = address(d, x as u32 * d.bpp, y as u32);
+                                if blit.dst_key.as_ref().is_some_and(|k| !keyed(pixel(at, d.bpp), k)) {
+                                    continue;
+                                }
+                                for i in 0..d.bpp as usize {
+                                    self.memory[(at + i) % len] = (value >> (8 * i)) as u8;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 8-8-8 as 5-6-5, each channel's top bits.
+#[cfg(test)]
+fn narrow(p: u32) -> u32 {
+    ((p >> 19) & 31) << 11 | ((p >> 10) & 63) << 5 | ((p >> 3) & 31)
+}
+
+/// For the tests: a renderer that does what `Model` says, and keeps a
+/// copy of the card's memory to do 2D operations in.
+#[cfg(test)]
+pub(crate) struct ModelRenderer(pub std::rc::Rc<std::cell::RefCell<Model>>);
+
+#[cfg(test)]
+impl GpuLink for ModelRenderer {
+    fn ready(&self) -> bool {
+        true
+    }
+
+    fn run(&mut self, commands: Vec<Command>) {
+        self.0.borrow_mut().apply(&commands);
+    }
+
+    fn read(&mut self, at: u32, out: &mut [u8]) -> bool {
+        let model = self.0.borrow();
+        let at = at as usize;
+        let Some(bytes) = model.memory.get(at..at + out.len()) else {
+            return false;
+        };
+        out.copy_from_slice(bytes);
+        true
+    }
+
+    fn read_buffer(&mut self, dest: Option<u32>, (top, bottom): (u32, u32), out: &mut [u16]) -> bool {
+        let model = self.0.borrow();
+        let w = model.width as usize;
+        let buffer = match dest {
+            Some(dest) => model.colour.get(&dest),
+            None => model.depth.as_ref(),
+        };
+        let Some(buffer) = buffer.filter(|_| out.len() == w * (bottom - top) as usize) else {
+            return false;
+        };
+        out.copy_from_slice(&buffer[top as usize * w..bottom as usize * w]);
+        true
     }
 }
 

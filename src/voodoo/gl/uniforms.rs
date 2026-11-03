@@ -59,6 +59,7 @@ macro_rules! vector {
 vector!([f32; 2], uniform_2_f32, [0, 1]);
 vector!([f32; 3], uniform_3_f32, [0, 1, 2]);
 vector!([f32; 4], uniform_4_f32, [0, 1, 2, 3]);
+vector!([i32; 2], uniform_2_i32, [0, 1]);
 vector!([i32; 3], uniform_3_i32, [0, 1, 2]);
 vector!([i32; 4], uniform_4_i32, [0, 1, 2, 3]);
 
@@ -154,6 +155,7 @@ locations!(Blit2d {
     u_mem_layout: [i32; 3],
     u_layer: i32,
     u_dst: [i32; 3],
+    u_tiled: [i32; 2],
     u_clip: [i32; 4],
     u_area: [i32; 4],
     u_src: [i32; 4],

@@ -18,8 +18,8 @@ use crate::video::Frame;
 use crate::video::shader::Glsl;
 use super::gpu::GpuLink;
 use super::mirror::{
-    Blit, BlitSource, Command, Convert, Draw, Fill, Frame as Recording, Key, Pixels, Scanout,
-    Snapshot, Surface, Texture, Vertex,
+    Blit, BlitSource, BufferCopy, Command, Convert, Draw, Fill, Frame as Recording, Key, Pixels,
+    Scanout, Snapshot, Surface, Texture, Vertex,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1215,6 +1215,11 @@ impl VoodooGl {
                     }
                     self.blit(gl, blit);
                 }
+                Command::Copy(copy) => {
+                    self.flush_staging(gl, Some(copy.from));
+                    self.flush_staging(gl, Some(copy.to));
+                    self.copy(gl, copy);
+                }
             }
         }
         let keys: Vec<_> = self.staging.keys().copied().collect();
@@ -1283,6 +1288,8 @@ impl VoodooGl {
             u.u_mem_layout.set(gl, layout.uniform(memory.size));
             let d = &blit.dst;
             u.u_dst.set(gl, [i(d.start), i(d.stride.max(1)), i(d.bpp.clamp(1, 4))]);
+            let src_tiled = plane.is_some_and(|p| p.tiled);
+            u.u_tiled.set(gl, [d.tiled as i32, src_tiled as i32]);
             u.u_area.set(gl, blit.area);
             u.u_src.set(gl, src);
             u.u_src_rect.set(gl, rect);
@@ -1315,6 +1322,38 @@ impl VoodooGl {
                 }
             }
             gl.active_texture(glow::TEXTURE0);
+        }
+    }
+
+    /// A copy between colour buffers (`mirror::BufferCopy`), block by
+    /// block of `scale` by `scale` pixels: every sample of a pixel of the
+    /// destination gets the source's pixel as resolved, which is what a
+    /// read back of either takes (`read_buffer`).
+    fn copy(&mut self, gl: &glow::Context, copy: &BufferCopy) {
+        let [left, right, top, bottom] = copy.rect;
+        let [x, y] = copy.src;
+        let (w, h) = (right.saturating_sub(left), bottom.saturating_sub(top));
+        let within = |x: u32, y: u32| x + w <= self.width && y + h <= self.height;
+        if w == 0 || h == 0 || !within(left, top) || !within(x, y) {
+            return;
+        }
+        let (Some(from), Some(to)) = (self.targets.get(&copy.from), self.targets.get(&copy.to))
+        else {
+            return;
+        };
+        let s = self.scale as i32;
+        let (sw, _) = self.scaled();
+        let [left, top, x, y, w, h] = [left, top, x, y, w, h].map(|v| v as i32 * s);
+        from.resolve_rows(gl, sw, (y, y + h));
+        // SAFETY: see `VoodooGl`.
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to.draw_fbo()));
+            let (bits, nearest) = (glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.blit_framebuffer(x, y, x + w, y + h, left, top, left + w, top + h, bits, nearest);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
 

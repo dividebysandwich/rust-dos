@@ -1611,6 +1611,219 @@ impl Engine {
     }
 }
 
+/// A surface of the card's memory as the engine addresses it (`addr`):
+/// its first byte, the bytes from one row to the next (from one row of
+/// tiles to the next if `tiled`, in tiles of 128 bytes by 32 rows), and
+/// its bytes a pixel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Surface {
+    pub base: u32,
+    pub stride: u32,
+    pub tiled: bool,
+    pub bpp: u32,
+}
+
+impl Surface {
+    /// The byte address of pixel (`x`, `y`), which are not negative.
+    pub fn at(&self, x: u32, y: u32) -> u32 {
+        let x = x * self.bpp;
+        if self.tiled {
+            self.base + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * self.stride
+        } else {
+            self.base + x + y * self.stride
+        }
+    }
+}
+
+/// What a command draws, where every pixel of a rectangle of the
+/// destination gets one value or the source's pixel at the same place
+/// relative to it (`Engine::plan`). No two of the pixels share a byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub dst: Surface,
+    /// The pixels drawn: left, top, right, bottom, the right and bottom
+    /// ones not drawn, none negative.
+    pub rect: [u32; 4],
+    pub op: Op,
+}
+
+/// How a `Plan` draws its pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// The value, `bpp` bytes of it.
+    Fill(u32),
+    /// The bytes of the source's pixels, in the same format, from pixel
+    /// `from` (the rectangle's top left) on. The source and the
+    /// destination share no byte, so the pixels are those the source had
+    /// before the command.
+    Copy { src: Surface, from: [u32; 2] },
+}
+
+impl Engine {
+    /// The command that writing `val` to register `addr` runs, as a
+    /// `Plan`, in a memory of `size` bytes: None for any other write, and
+    /// for a command that does anything else, or draws nothing.
+    ///
+    /// These are rectangle fills whose raster operation gives one value,
+    /// whatever the destination and the pattern hold, and screen to
+    /// screen copies (raster operation CCh) between surfaces of the same
+    /// format that share no byte; neither with a destination colour key
+    /// or a transparent mono pattern, nor the copies with a source colour
+    /// key. The bytes they touch are within the memory.
+    pub fn plan(&self, addr: u32, val: u32, size: u32) -> Option<Plan> {
+        let launch = addr & 0x1FC != 0x70;
+        let command = match addr & 0x1FC {
+            0x70 if val & COMMAND_INITIATE != 0 => val,
+            0x80..=0xFC => self.command,
+            _ => return None,
+        };
+        let bpp: u32 = match self.dst_format & COL_MASK {
+            COL_8BPP => 1,
+            COL_16BPP => 2,
+            COL_24BPP => 3,
+            COL_32BPP => 4,
+            _ => return None,
+        };
+        let trans = COMMAND_PATTERN_MONO | COMMAND_TRANS_MONO;
+        if self.command_extra & CMDEXTRA_DST_COLORKEY != 0 || command & trans == trans {
+            return None;
+        }
+        // Where the command starts, as `footprint` has it.
+        let pending = !launch || self.launch_pending;
+        let ((dst_x, dst_y), (src_x, src_y)) = if pending {
+            (xy(self.dst_xy), xy(self.src_xy))
+        } else {
+            ((self.dst_x, self.dst_y), (self.src_x, self.src_y))
+        };
+        let clip = self.clip[(command & COMMAND_CLIP_SEL != 0) as usize];
+        let dir_x = step(command & COMMAND_DX != 0) as i64;
+        let dir_y = step(command & COMMAND_DY != 0) as i64;
+        let (size_x, size_y) = (self.dst_size_x as i64, self.dst_size_y as i64);
+        // The pixels drawn from (`x`, `y`) on, within the clip.
+        let rect = |x: i32, y: i32| {
+            let clip_x = (clip.x_min as i64, clip.x_max as i64);
+            let clip_y = (clip.y_min as i64, clip.y_max as i64);
+            let columns = steps_within(x as i64, size_x, dir_x, clip_x)?;
+            let rows = steps_within(y as i64, size_y, dir_y, clip_y)?;
+            let (left, right) = positions(x as i64, dir_x, columns);
+            let (top, bottom) = positions(y as i64, dir_y, rows);
+            Some([left, top, right + 1, bottom + 1].map(|v| v as u32))
+        };
+        let dst = Surface {
+            base: self.dst_base,
+            stride: self.dst_stride,
+            tiled: self.dst_tiled,
+            bpp,
+        };
+        // A pixel of 3 bytes at the end of a tile's row goes on into the
+        // tile's next row (`put`).
+        let whole = |s: Surface| !(s.tiled && s.bpp == 3);
+        if !whole(dst) {
+            return None;
+        }
+        // The bytes of `rect` of `surface`, if they are within the memory.
+        let span = |surface: Surface, [left, top, right, bottom]: [u32; 4]| {
+            let (x, y) = ((left as i64, right as i64 - 1), (top as i64, bottom as i64 - 1));
+            let (base, stride, tiled) = (surface.base, surface.stride, surface.tiled);
+            let bytes = surface.bpp as i64;
+            surface_span((base, stride, tiled), true, (x.0 * bytes, x.1 * bytes), bytes, y, size)
+        };
+        let (rect, op) = match command & 0xF {
+            CMD_RECTFILL => {
+                let (x, y) = if launch { xy(val) } else { (dst_x, dst_y) };
+                let rect = rect(x, y)?;
+                // The colour keys pick the operation by the foreground
+                // colour, the same for every pixel.
+                let n = if self.colorkey(self.color_fore, true, Key::K32) { 2 } else { 0 };
+                let rop = if n == 0 { (command >> 24) as u8 } else { self.rops[n] };
+                // One that reads neither the destination nor the pattern.
+                let (d, p) = (rop ^ rop >> 1, rop ^ rop >> 4);
+                if d & 0x55 != 0 || p & 0x0F != 0 {
+                    return None;
+                }
+                let mask = (u64::MAX >> (64 - 8 * bpp)) as u32;
+                (rect, Op::Fill(rop3(rop, 0, self.color_fore, 0) & mask))
+            }
+            CMD_SCREEN_TO_SCREEN => {
+                let (src_x, src_y) = if launch { xy(val) } else { (src_x, src_y) };
+                let same = self.src_format & COL_MASK == self.dst_format & COL_MASK;
+                if !same || command >> 24 != 0xCC || self.command_extra & CMDEXTRA_SRC_COLORKEY != 0 {
+                    return None;
+                }
+                let rect = rect(dst_x, dst_y)?;
+                // The source's pixels step with the destination's.
+                let from = [
+                    rect[0] as i64 + (src_x - dst_x) as i64,
+                    rect[1] as i64 + (src_y - dst_y) as i64,
+                ];
+                let from = from.map(|v| u32::try_from(v).ok());
+                let [Some(fx), Some(fy)] = from else {
+                    return None;
+                };
+                let src = Surface {
+                    base: self.src_base,
+                    stride: self.src_stride_dest,
+                    tiled: self.src_tiled,
+                    bpp,
+                };
+                if !whole(src) {
+                    return None;
+                }
+                let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+                let (a, b) = span(src, [fx, fy, fx + w, fy + h])?;
+                let (c, d) = span(dst, rect)?;
+                if a < d && c < b {
+                    return None;
+                }
+                (rect, Op::Copy { src, from: [fx, fy] })
+            }
+            _ => return None,
+        };
+        // Each pixel drawn has bytes of its own: a row's are within the
+        // stride (the 128 bytes a row of each tile has).
+        let across = if dst.tiled { dst.stride / 32 } else { dst.stride };
+        if rect[2] as u64 * bpp as u64 > across as u64 {
+            return None;
+        }
+        span(dst, rect)?;
+        Some(Plan { dst, rect, op })
+    }
+
+    /// Write `val` to register `addr` as `write` does for a command that
+    /// `plan` gives, drawn elsewhere: the registers and where the command
+    /// stands change as the command leaves them, but no pixel.
+    pub fn skip(&mut self, addr: u32, val: u32) {
+        if addr & 0x1FC == 0x70 {
+            self.command = val;
+            self.launch_pending = true;
+        }
+        if self.launch_pending {
+            self.launch();
+        }
+        let launch = addr & 0x1FC != 0x70;
+        match self.command & 0xF {
+            CMD_SCREEN_TO_SCREEN => {
+                if launch {
+                    self.src_xy = val;
+                    (self.src_x, self.src_y) = xy(val);
+                }
+                // Each row steps both down (or up) one.
+                let rows = self.dst_size_y;
+                let dy = step(self.command & COMMAND_DY != 0) * rows;
+                self.src_y += dy;
+                self.dst_y += dy;
+                self.cur_y = rows;
+            }
+            CMD_RECTFILL if launch => {
+                self.dst_xy = val;
+                (self.dst_x, self.dst_y) = xy(val);
+            }
+            _ => {}
+        }
+        self.end_command();
+    }
+}
+
 /// A ternary raster operation: each of the eight bits of `rop` says
 /// whether a combination of pattern, source and destination bits makes
 /// a 1.
@@ -1662,7 +1875,7 @@ pub fn write(ram: &Vram, addr: u32, bytes: u32, value: u32, mask: u32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn engine() -> (Engine, Vram) {
@@ -1776,10 +1989,10 @@ mod tests {
     }
 
     /// Numbers for the tests, the same every run.
-    struct Numbers(u64);
+    pub(crate) struct Numbers(pub u64);
 
     impl Numbers {
-        fn next(&mut self) -> u32 {
+        pub(crate) fn next(&mut self) -> u32 {
             self.0 = self
                 .0
                 .wrapping_mul(6364136223846793005)
@@ -1787,12 +2000,12 @@ mod tests {
             (self.0 >> 33) as u32
         }
 
-        fn below(&mut self, n: u32) -> u32 {
+        pub(crate) fn below(&mut self, n: u32) -> u32 {
             self.next() % n
         }
 
         /// An XY register's value with x in `-8..x` and y in `-8..y`.
-        fn xy(&mut self, x: u32, y: u32) -> u32 {
+        pub(crate) fn xy(&mut self, x: u32, y: u32) -> u32 {
             let x = self.below(x + 8) as i32 - 8;
             let y = self.below(y + 8) as i32 - 8;
             (x as u32 & 0x1FFF) | (y as u32 & 0x1FFF) << 16
@@ -1921,6 +2134,140 @@ mod tests {
         }
         // The footprints are bounded but where they wrap.
         assert!(all * 20 < writes, "{all} of {writes}");
+    }
+
+    /// The engine's registers set up at random for a rectangle fill or a
+    /// screen to screen copy, most of them ones a `Plan` can draw: the
+    /// command, then words for the launch area.
+    pub(crate) fn random_fill_or_copy(n: &mut Numbers, e: &mut Engine, ram: &Vram) -> Vec<(u32, u32)> {
+        let size = ram.bytes() as u32;
+        let formats = [COL_8BPP, COL_16BPP, COL_24BPP, COL_32BPP];
+        let format = formats[n.below(4) as usize];
+        // A surface's base and stride, linear or tiled, in the quarter
+        // of the memory from `from` on.
+        let surface = |n: &mut Numbers, from: u32| {
+            let tiled = n.below(2) == 0;
+            let stride = if tiled { 10 + n.below(6) } else { 1700 + n.below(800) };
+            let base = from + n.below(size / 4) & !1;
+            (base | (tiled as u32) << 31, stride)
+        };
+        let (dst_base, dst_stride) = surface(n, 0);
+        e.write(ram, 0x14, format | dst_stride);
+        e.write(ram, 0x10, dst_base);
+        // The source: elsewhere, the destination itself, or another format.
+        let (src_base, src_stride) = match n.below(4) {
+            0 => (dst_base, dst_stride),
+            _ => surface(n, size / 2),
+        };
+        let src_format = match n.below(6) {
+            0 => formats[n.below(4) as usize],
+            _ => format,
+        };
+        e.write(ram, 0x54, src_format | src_stride);
+        e.write(ram, 0x34, src_base);
+        for clip in [0x08, 0x4C] {
+            let (x, y) = (n.below(100), n.below(60));
+            e.write(ram, clip, x | y << 16);
+            e.write(ram, clip + 4, (x + n.below(300)) | (y + n.below(300)) << 16);
+        }
+        let rops = [0xCC, 0xCC, 0x33, 0x00, 0xFF, 0xF0, 0x66];
+        let rop = |n: &mut Numbers| rops[n.below(rops.len() as u32) as usize];
+        e.write(ram, 0x30, rop(n) | rop(n) << 8 | rop(n) << 16);
+        e.write(ram, 0x38, if n.below(4) == 0 { n.below(4) } else { 0 });
+        e.write(ram, 0x18, n.next() & 0xFF_FFFF);
+        e.write(ram, 0x1C, n.next() & 0xFF_FFFF);
+        e.write(ram, 0x5C, n.xy(300, 60));
+        e.write(ram, 0x64, n.next());
+        e.write(ram, 0x68, n.below(120) | n.below(50) << 16);
+        e.write(ram, 0x6C, n.xy(300, 60));
+        for i in 0..64 {
+            e.write(ram, 0x100 + 4 * i, n.next());
+        }
+        let mut flags = 0;
+        for flag in [COMMAND_INITIATE, COMMAND_DX, COMMAND_DY, COMMAND_CLIP_SEL]
+            .into_iter()
+            .chain([COMMAND_INC_X_START, COMMAND_INC_Y_START])
+        {
+            if n.below(3) != 0 {
+                flags |= flag;
+            }
+        }
+        for flag in [COMMAND_PATTERN_MONO, COMMAND_TRANS_MONO] {
+            if n.below(6) == 0 {
+                flags |= flag;
+            }
+        }
+        let kind = if n.below(2) == 0 { CMD_RECTFILL } else { CMD_SCREEN_TO_SCREEN };
+        let rop = if n.below(2) == 0 { 0xCC } else { rop(n) };
+        let command = (rop as u32) << 24 | flags | kind;
+        std::iter::once((0x70, command))
+            .chain((0..6).map(|_| (0x80 + 4 * n.below(32), n.xy(300, 60))))
+            .collect()
+    }
+
+    /// The memory `before` as `plan` draws it.
+    pub(crate) fn planned(plan: &Plan, before: &[u8]) -> Vec<u8> {
+        let mut after = before.to_vec();
+        let [left, top, right, bottom] = plan.rect;
+        let bpp = plan.dst.bpp as usize;
+        for y in top..bottom {
+            for x in left..right {
+                let to = plan.dst.at(x, y) as usize;
+                let value = match plan.op {
+                    Op::Fill(v) => v.to_le_bytes(),
+                    Op::Copy { src, from } => {
+                        let at = src.at(from[0] + x - left, from[1] + y - top) as usize;
+                        let mut v = [0; 4];
+                        v[..bpp].copy_from_slice(&before[at..at + bpp]);
+                        v
+                    }
+                };
+                after[to..to + bpp].copy_from_slice(&value[..bpp]);
+            }
+        }
+        after
+    }
+
+    #[test]
+    fn plans_draw_what_the_engine_draws() {
+        // Fills and copies with random registers. Where a write has a
+        // plan, the engine draws the plan's pixels and no others, and
+        // skipping the write leaves the engine where drawing it does.
+        const SIZE: usize = 1 << 21;
+        let mut n = Numbers(502);
+        let (mut fills, mut copies, mut writes) = (0, 0, 0);
+        for _ in 0..300 {
+            let (mut e, _) = engine();
+            let ram = Vram::new(SIZE);
+            let words = random_fill_or_copy(&mut n, &mut e, &ram);
+            let mut fill = vec![0u8; SIZE];
+            fill.iter_mut().for_each(|b| *b = n.next() as u8);
+            ram.write_bytes(0, &fill);
+            for (reg, val) in words {
+                writes += 1;
+                let plan = e.plan(reg, val, SIZE as u32);
+                let before = ram.to_bytes();
+                let mut twin = e.clone();
+                e.write(&ram, reg, val);
+                let Some(plan) = plan else { continue };
+                match plan.op {
+                    Op::Fill(_) => fills += 1,
+                    Op::Copy { .. } => copies += 1,
+                }
+                let (after, expected) = (ram.to_bytes(), planned(&plan, &before));
+                if after != expected {
+                    let at = (0..SIZE).find(|&at| after[at] != expected[at]);
+                    panic!("{reg:#x} {val:#x} {plan:?}: byte {at:x?}");
+                }
+                twin.skip(reg, val);
+                for e in [&mut e, &mut twin] {
+                    e.drawn = false;
+                    e.touched.clear();
+                }
+                assert_eq!(format!("{twin:?}"), format!("{e:?}"), "{reg:#x} {val:#x}");
+            }
+        }
+        assert!(fills > 100 && copies > 50, "{fills} {copies} of {writes}");
     }
 
     #[test]

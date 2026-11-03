@@ -372,7 +372,7 @@ pub(crate) mod tests {
         Voodoo::with_workers(Board::Voodoo3, 0)
     }
 
-    fn reg3d(v: &mut Voodoo, regnum: usize, data: u32) {
+    pub(crate) fn reg3d(v: &mut Voodoo, regnum: usize, data: u32) {
         v.write(
             0x20_0000 + 4 * regnum as u32,
             data,
@@ -381,13 +381,13 @@ pub(crate) mod tests {
         );
     }
 
-    fn float(v: &mut Voodoo, regnum: usize, value: f32) {
+    pub(crate) fn float(v: &mut Voodoo, regnum: usize, value: f32) {
         reg3d(v, regnum, value.to_bits());
     }
 
     /// A flat-shaded rectangle of two triangles, `x0..x1` by `y0..y1`, in
     /// colour `rgb`, the iterated colour.
-    fn rectangle(v: &mut Voodoo, (x0, y0, x1, y1): (f32, f32, f32, f32), rgb: (f32, f32, f32)) {
+    pub(crate) fn rectangle(v: &mut Voodoo, (x0, y0, x1, y1): (f32, f32, f32, f32), rgb: (f32, f32, f32)) {
         for (a, b, c) in [
             ((x0, y0), (x1, y0), (x1, y1)),
             ((x0, y0), (x1, y1), (x0, y1)),
@@ -614,7 +614,7 @@ pub(crate) mod tests {
 
     /// A card recording for the OpenGL renderer, a desktop of 64 rows on
     /// and the linear frame buffer untiled.
-    fn mirrored() -> Voodoo {
+    pub(crate) fn mirrored() -> Voodoo {
         let mut v = card();
         let now = Now::default();
         v.write(VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, u32::MAX, now);
@@ -912,7 +912,7 @@ pub(crate) mod tests {
     /// renderer (`TestRenderer`) drew both in 0x1234, as their word
     /// offsets end in 16 zero bits.
     pub(crate) const A: u32 = 0x10_0000;
-    const B: u32 = 0x20_0000;
+    pub(crate) const B: u32 = 0x20_0000;
 
     /// A card whose 3D buffers are read back from the renderer
     /// (`voodoo_readback=gpu`), with `TestRenderer` as the renderer, or
@@ -945,8 +945,9 @@ pub(crate) mod tests {
     }
 
     /// A frame drawn into `buffer`: the depth cleared, the picture
-    /// covered, the buffer shown.
-    fn draw_frame(v: &mut Voodoo, buffer: u32) {
+    /// covered, the buffer shown. The recording of it, which no renderer
+    /// gets but for what the card hands it before.
+    pub(crate) fn draw_frame(v: &mut Voodoo, buffer: u32) -> Option<Frame> {
         reg3d(v, COL_BUFFER_ADDR, buffer);
         reg3d(v, FBZ_MODE, 1 << 10);
         reg3d(v, FASTFILL_CMD, 0);
@@ -955,7 +956,7 @@ pub(crate) mod tests {
         rectangle(v, (0.0, 0.0, 640.0, 64.0), (200.0, 30.0, 60.0));
         reg3d(v, LEFT_OVERLAY_BUF, buffer);
         reg3d(v, SWAPBUFFER_CMD, 0);
-        v.take_mirror();
+        v.take_mirror()
     }
 
     /// A rectangle into B textured from A in 5-6-5: the first texel of the
@@ -986,7 +987,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn gpu_only(v: &Voodoo) -> u64 {
+    pub(crate) fn gpu_only(v: &Voodoo) -> u64 {
         v.describe(Now::default())["gpu_only_jobs"]
             .as_u64()
             .unwrap()
@@ -1320,12 +1321,13 @@ pub(crate) mod tests {
     #[test]
     fn gpu_reads_a_2d_fill_into_a_buffer_on_the_gpu_stays() {
         // A fill by the 2D engine into rows of a buffer only the renderer
-        // drew: those rows come back first and the fill goes over them.
-        // The renderer hears of the fill, and the rows aren't behind it
-        // any more: reading back the rest of the buffer later leaves the
-        // fill where it is.
-        let log = Rc::default();
-        let mut v = gpu_frame_in_linear_buffer(&log);
+        // drew is drawn by the renderer too (`gpu2d`): nothing is read
+        // back for it, and the rows stay the renderer's. Reading back the
+        // buffer later brings the fill and the renderer's pixels around it.
+        let model = Rc::default();
+        let mut v = super::super::gpu2d::tests::model_card(&model, false);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        super::super::gpu2d::tests::frame(&mut v, &model, A);
         for (reg, value) in [
             (0x08, 0),
             (0x0C, 0x0FFF_0FFF),
@@ -1338,13 +1340,15 @@ pub(crate) mod tests {
         ] {
             v.banshee_2d_write(reg, value);
         }
-        assert_eq!(reads(&log), [format!("read {:?} 0..2", Some(A / 2))]);
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 0);
+        let picture = |x, y| model.borrow().pixel(Some(A / 2), x, y);
+        let (right, below) = (picture(8, 0), picture(0, 2));
         let memory = v.frame_buffer();
         let row = 640;
         assert_eq!(memory.get(A as usize / 2 + 7), 0xF800);
         assert_eq!(memory.get(A as usize / 2 + row + 7), 0xF800);
-        assert_eq!(memory.get(A as usize / 2 + 8), 0x1234);
-        assert_eq!(memory.get(A as usize / 2 + 2 * row), 0x1234);
+        assert_eq!(memory.get(A as usize / 2 + 8), right);
+        assert_eq!(memory.get(A as usize / 2 + 2 * row), below);
     }
 
     #[test]
