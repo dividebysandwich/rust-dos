@@ -6,12 +6,16 @@
 //! without copying all of it out first.
 //!
 //! The file: a header sector (`MAGIC`, the version, the block size, the
-//! image's size and what it begins and ends with, hashed), the block map
-//! (for each block of the image, a little-endian u32: 0 for the image's,
-//! or the number from 1 of the block in the file), then the blocks in the
-//! order they were first written. A block goes in before its entry in the
-//! map, so a file cut short where it was being written loses that write
-//! and nothing else.
+//! image's size and what it begins and ends with, hashed, and the image's
+//! path where it fits, for messages), the block map (for each block of the
+//! image, a little-endian u32: 0 for the image's, or the number from 1 of
+//! the block in the file), then the blocks in the order they were first
+//! written. A block goes in before its entry in the map, so a file cut
+//! short where it was being written loses that write and nothing else.
+//!
+//! A copy of the file (`Delta::snapshot_to`) is the disk as it was then,
+//! for a save state of a system booted from it, and `Delta::restore` takes
+//! the disk back to one.
 
 use crate::diskimage::{Chs, ImageFile};
 use crate::hostfs::{self, File, OpenOptions};
@@ -27,6 +31,16 @@ const HEADER: u64 = 512;
 /// How much of the image's start and end the hash in the header covers.
 const HASHED_START: u64 = 1 << 20;
 const HASHED_END: u64 = 64 << 10;
+/// Where the header has the image's path: its length in bytes (a u16; 0
+/// for none, as in files from before it was there), then its UTF-8.
+const BASE_PATH: usize = 56;
+/// Where the header has a byte that isn't 0 while `commit` writes the
+/// changes into the image.
+const COMMITTING: usize = 503;
+/// Where the header has the image file's modification time when the
+/// delta file was made, in nanoseconds since 1970 (a u64; 0 for none, as
+/// in files from before it was there).
+const BASE_MODIFIED: usize = 504;
 
 /// Why a delta file can't be opened: it is another disk's changes (or no
 /// changes at all), or something else went wrong.
@@ -37,6 +51,11 @@ enum Mismatch {
 
 pub struct Delta {
     base: ImageFile,
+    base_path: PathBuf,
+    /// The image file's modification time, if the host tells it: nothing
+    /// writes the image while a delta is over it, so another time means
+    /// another program wrote it.
+    base_modified: Option<u64>,
     len: u64,
     path: PathBuf,
     /// What tells the image the delta was made over from another: its
@@ -57,9 +76,22 @@ thread_local! {
 }
 
 /// What opening deltas did since this was last called: the deltas set
-/// aside, as they were of another disk.
+/// aside, as they were of another disk, and what `note` was told.
 pub fn take_notes() -> Vec<String> {
     NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
+}
+
+/// Have the drive's mount tell `note` (`take_notes`).
+pub fn note(note: String) {
+    NOTES.with(|notes| notes.borrow_mut().push(note));
+}
+
+/// The modification time of the file at `path`, in nanoseconds since 1970,
+/// if the host tells it.
+fn modified(path: &Path) -> Option<u64> {
+    let time = hostfs::metadata(path).ok()?.modified?;
+    let nanos = time.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    u64::try_from(nanos).ok().filter(|&n| n != 0)
 }
 
 fn error(path: &Path, e: std::io::Error) -> String {
@@ -90,14 +122,10 @@ impl Delta {
             Err(Mismatch::Changes(e)) if read_only => Err(e),
             Err(Mismatch::Changes(e)) => {
                 let time = crate::hosttime::now().format("%Y%m%d-%H%M%S");
-                let mut aside = path.as_os_str().to_owned();
-                aside.push(format!(".stale-{}", time));
-                let aside = PathBuf::from(aside);
+                let aside = with_suffix(path, &format!(".stale-{}", time));
                 hostfs::rename(path, &aside).map_err(|io| format!("{} (and it can't be set aside: {})", e, io))?;
                 NOTES.with(|notes| notes.borrow_mut().push(format!("{}; it is set aside as {}", e, aside.display())));
-                Self::open_as_is(base, path, read_only).map_err(|m| match m {
-                    Mismatch::Changes(e) | Mismatch::Other(e) => e,
-                })
+                Self::open_as_is(base, path, read_only).map_err(Mismatch::into_message)
             }
             Ok(delta) => Ok(delta),
         }
@@ -112,6 +140,8 @@ impl Delta {
         let blocks_in_image = len.div_ceil(BLOCK as u64) as usize;
         let mut delta = Delta {
             base: base_file,
+            base_path: base.to_path_buf(),
+            base_modified: modified(base),
             len,
             path: path.to_path_buf(),
             id,
@@ -130,34 +160,79 @@ impl Delta {
                 File::open(path)
             })
             .map_err(|e| other(error(path, e)))?;
-            delta.load(&file, base)?;
+            delta.load(&file)?;
             *delta.file.borrow_mut() = Some(file);
         }
         Ok(delta)
     }
 
-    /// The header and map of `file`, if it is a delta over this image.
-    fn load(&mut self, file: &File, base: &Path) -> Result<(), Mismatch> {
-        let other = Mismatch::Other;
+    /// Whether the delta file `file`, at `path`, is of this image, and if
+    /// it isn't, why.
+    fn check_header(&self, file: &File, path: &Path) -> Result<(), Mismatch> {
         let mut header = [0u8; HEADER as usize];
-        read_exact_at(file, 0, &mut header).map_err(|e| Mismatch::Changes(error(&self.path, e)))?;
+        read_exact_at(file, 0, &mut header).map_err(|e| Mismatch::Changes(error(path, e)))?;
         let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
         if &header[..8] != MAGIC || u32_at(8) != VERSION || u32_at(12) as usize != BLOCK {
-            return Err(Mismatch::Changes(format!("{} is not a disk image's changes", self.path.display())));
+            return Err(Mismatch::Changes(format!(
+                "{} is not a disk image's changes",
+                path.display()
+            )));
+        }
+        // Before the image is compared: a commit cut short has written
+        // some of the changes into it.
+        if header[COMMITTING] != 0 {
+            // A delta file in an overlay folder is named to the command.
+            let elsewhere = match path == beside(&self.base_path) {
+                true => String::new(),
+                false => format!(" --delta {}", path.display()),
+            };
+            return Err(Mismatch::Other(format!(
+                "{} was being committed into {} and the commit didn't finish: commit it again \
+                 (rust-dos commit {}{})",
+                path.display(),
+                self.base_path.display(),
+                self.base_path.display(),
+                elsewhere
+            )));
         }
         let len = u64::from_le_bytes(header[16..24].try_into().unwrap());
         if len != self.len || header[24..56] != self.id {
+            let made_over = match header_base_path(&header) {
+                Some(made) if Path::new(&made) != self.base_path => {
+                    format!(" (they were made over {})", made)
+                }
+                _ => String::new(),
+            };
             return Err(Mismatch::Changes(format!(
-                "{} holds the changes of another disk than {}, or of the disk before it changed",
-                self.path.display(),
-                base.display()
+                "{} holds the changes of another disk than {}{}, or of the disk before it changed",
+                path.display(),
+                self.base_path.display(),
+                made_over
             )));
         }
+        let made = u64::from_le_bytes(header[BASE_MODIFIED..BASE_MODIFIED + 8].try_into().unwrap());
+        if made != 0 && self.base_modified.is_some_and(|now| now != made) {
+            return Err(Mismatch::Changes(format!(
+                "{} was written since {} was made over it (by another program, with -inplace, \
+                 or by COMMIT; a copy of the image must keep its modification time), so the \
+                 changes no longer fit it",
+                self.base_path.display(),
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// The header and map of `file`, if it is a delta over this image.
+    fn load(&self, file: &File) -> Result<(), Mismatch> {
+        let other = Mismatch::Other;
+        self.check_header(file, &self.path)?;
         let mut raw = vec![0u8; self.map.borrow().len() * 4];
         read_exact_at(file, HEADER, &mut raw).map_err(|e| other(error(&self.path, e)))?;
         let file_len = file.len().map_err(|e| other(error(&self.path, e)))?;
         let data = self.data_start();
         let mut map = self.map.borrow_mut();
+        map.fill(0);
         let mut blocks = 0;
         let mut lost = Vec::new();
         for (index, (entry, bytes)) in map.iter_mut().zip(raw.as_chunks::<4>().0).enumerate() {
@@ -294,18 +369,222 @@ impl Delta {
         if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
             hostfs::create_dir_all(dir)?;
         }
-        let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&self.path)?;
+        // Not truncated: a delta file there now was made since the disk
+        // was opened (by another run that mounts the image, or a restore
+        // whose file couldn't be read back), and holds changes.
+        let file = OpenOptions::new().read(true).write(true).create(true).open(&self.path)?;
+        if file.len()? != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} was made since the disk was opened", self.path.display()),
+            ));
+        }
+        write_all_at(&file, 0, &self.header())?;
+        file.set_len(self.data_start())?;
+        *self.file.borrow_mut() = Some(file);
+        Ok(())
+    }
+
+    /// The header sector of a delta file over this image.
+    fn header(&self) -> [u8; HEADER as usize] {
         let mut header = [0u8; HEADER as usize];
         header[..8].copy_from_slice(MAGIC);
         header[8..12].copy_from_slice(&VERSION.to_le_bytes());
         header[12..16].copy_from_slice(&(BLOCK as u32).to_le_bytes());
         header[16..24].copy_from_slice(&self.len.to_le_bytes());
         header[24..56].copy_from_slice(&self.id);
-        write_all_at(&file, 0, &header)?;
-        file.set_len(self.data_start())?;
-        *self.file.borrow_mut() = Some(file);
-        Ok(())
+        let modified = self.base_modified.unwrap_or(0);
+        header[BASE_MODIFIED..BASE_MODIFIED + 8].copy_from_slice(&modified.to_le_bytes());
+        // A path that doesn't fit, or isn't Unicode, is left out.
+        let path = self
+            .base_path
+            .to_str()
+            .map(str::as_bytes)
+            .unwrap_or_default();
+        if path.len() <= COMMITTING - BASE_PATH - 2 {
+            header[BASE_PATH..BASE_PATH + 2].copy_from_slice(&(path.len() as u16).to_le_bytes());
+            header[BASE_PATH + 2..BASE_PATH + 2 + path.len()].copy_from_slice(path);
+        }
+        header
     }
+
+    /// Write the disk's changes as they are now to the delta file `dest`,
+    /// which stays as it is whatever is written to the disk after: a copy
+    /// of the delta file (or one with no changes, if there is none yet),
+    /// whose header names the image as it is now. `restore` takes the disk
+    /// back to it.
+    pub fn snapshot_to(&self, dest: &Path) -> Result<(), String> {
+        let error = |e: std::io::Error| error(dest, e);
+        let partial = with_suffix(dest, ".partial");
+        let copied = match self.file.borrow().is_some() {
+            true => hostfs::copy(&self.path, &partial).map(drop),
+            false => File::create(&partial).and_then(|file| file.set_len(self.data_start())),
+        }
+        .and_then(|()| OpenOptions::new().write(true).open(&partial))
+        .and_then(|file| write_all_at(&file, 0, &self.header()));
+        if let Err(e) = copied {
+            let _ = hostfs::remove_file(&partial);
+            return Err(error(e));
+        }
+        hostfs::rename(&partial, dest).map_err(error)
+    }
+
+    /// Whether the delta file at `path` (one `snapshot_to` wrote) is of
+    /// this image as it is now, and if it isn't, why.
+    pub fn check_snapshot(&self, path: &Path) -> Result<(), String> {
+        let file = File::open(path).map_err(|e| error(path, e))?;
+        self.check_header(&file, path)
+            .map_err(Mismatch::into_message)
+    }
+
+    /// Make the disk's changes those of the delta file at `snapshot`, one
+    /// `snapshot_to` wrote over this image: a copy of it goes in place of
+    /// the delta file, which stays as it was if the copy can't be made.
+    pub fn restore(&self, snapshot: &Path) -> Result<(), String> {
+        self.check_snapshot(snapshot)?;
+        if !self.writable {
+            return Err(format!("{} can't be written", self.path.display()));
+        }
+        let partial = with_suffix(&self.path, ".partial");
+        if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            hostfs::create_dir_all(dir).map_err(|e| error(dir, e))?;
+        }
+        // The copy names the image as this run has it.
+        let copied = hostfs::copy(snapshot, &partial)
+            .and_then(|_| OpenOptions::new().write(true).open(&partial))
+            .and_then(|file| write_all_at(&file, 0, &self.header()));
+        if let Err(e) = copied {
+            let _ = hostfs::remove_file(&partial);
+            return Err(error(&partial, e));
+        }
+        // Closed first: Windows doesn't rename a file over an open one.
+        drop(self.file.borrow_mut().take());
+        let renamed = hostfs::rename(&partial, &self.path).map_err(|e| error(&self.path, e));
+        if renamed.is_err() {
+            let _ = hostfs::remove_file(&partial);
+        }
+        // The delta file there now: the snapshot's, or the old one if it
+        // couldn't be replaced. Without it the disk is the image's.
+        self.map.borrow_mut().fill(0);
+        self.blocks.set(0);
+        if hostfs::is_file(&self.path) {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.path)
+                .map_err(|e| error(&self.path, e))?;
+            self.load(&file).map_err(Mismatch::into_message)?;
+            *self.file.borrow_mut() = Some(file);
+        }
+        renamed
+    }
+}
+
+impl Mismatch {
+    fn into_message(self) -> String {
+        match self {
+            Mismatch::Changes(e) | Mismatch::Other(e) => e,
+        }
+    }
+}
+
+/// `path` with `suffix` after its name.
+pub(crate) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Where the changes of the image at `image` go by default, a hard disk
+/// image's when its mount has no overlay folder: `<image>.rdelta` beside
+/// it.
+pub fn beside(image: &Path) -> PathBuf {
+    with_suffix(image, ".rdelta")
+}
+
+/// Write the changes in the delta file `path` into the image `base` it is
+/// over, and delete the delta file: the image is then the disk as the
+/// delta showed it, for other programs. Returns how many blocks were
+/// written. The checks of a mount come first; while the image is written
+/// the delta file's header says so, so a commit cut short is refused by a
+/// mount and taken up again by the next commit. The image mustn't be
+/// mounted meanwhile.
+pub fn commit(base: &Path, path: &Path) -> Result<u32, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| error(path, e))?;
+    let mut header = [0u8; HEADER as usize];
+    read_exact_at(&file, 0, &mut header).map_err(|e| error(path, e))?;
+    if &header[..8] != MAGIC {
+        return Err(format!("{} is not a disk image's changes", path.display()));
+    }
+    if header[COMMITTING] == 0 {
+        Delta::open_as_is(base, path, true).map_err(Mismatch::into_message)?;
+        write_all_at(&file, COMMITTING as u64, &[1])
+            .and_then(|()| file.sync_all())
+            .map_err(|e| error(path, e))?;
+    }
+    let image = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(base)
+        .map_err(|e| error(base, e))?;
+    let image = ImageFile::new(image, base).map_err(|e| format!("{}: {}", base.display(), e))?;
+    let len = u64::from_le_bytes(header[16..24].try_into().unwrap());
+    if image.len().map_err(|e| error(base, e))? != len {
+        return Err(format!(
+            "{} isn't the size of the disk {} holds the changes of",
+            base.display(),
+            path.display()
+        ));
+    }
+    let blocks = len.div_ceil(BLOCK as u64) as usize;
+    let mut raw = vec![0u8; blocks * 4];
+    read_exact_at(&file, HEADER, &mut raw).map_err(|e| error(path, e))?;
+    let data = HEADER + (blocks as u64 * 4).next_multiple_of(512);
+    let file_len = file.len().map_err(|e| error(path, e))?;
+    let mut block = vec![0u8; BLOCK];
+    let mut written = 0;
+    for (index, bytes) in raw.as_chunks::<4>().0.iter().enumerate() {
+        let n = u32::from_le_bytes(*bytes);
+        // A block past the end of the file was lost as it was written.
+        if n == 0 || data + n as u64 * BLOCK as u64 > file_len {
+            continue;
+        }
+        let at = index as u64 * BLOCK as u64;
+        let part = &mut block[..(len - at).min(BLOCK as u64) as usize];
+        read_exact_at(&file, data + (n as u64 - 1) * BLOCK as u64, part)
+            .map_err(|e| error(path, e))?;
+        image.write_at(at, part).map_err(|e| error(base, e))?;
+        written += 1;
+    }
+    image.sync().map_err(|e| error(base, e))?;
+    drop(file);
+    hostfs::remove_file(path).map_err(|e| error(path, e))?;
+    Ok(written)
+}
+
+/// The image's path a delta file's header names, if it names one.
+fn header_base_path(header: &[u8]) -> Option<String> {
+    let len = u16::from_le_bytes([header[BASE_PATH], header[BASE_PATH + 1]]) as usize;
+    let path = header
+        .get(BASE_PATH + 2..BASE_PATH + 2 + len)
+        .filter(|_| len > 0)?;
+    String::from_utf8(path.to_vec()).ok()
+}
+
+/// The image the delta file at `path` names in its header as the one it
+/// is over, if it names one.
+pub fn base_named_in(path: &Path) -> Option<PathBuf> {
+    let file = File::open(path).ok()?;
+    let mut header = [0u8; HEADER as usize];
+    read_exact_at(&file, 0, &mut header).ok()?;
+    (&header[..8] == MAGIC)
+        .then(|| header_base_path(&header))
+        .flatten()
+        .map(PathBuf::from)
 }
 
 /// What tells an image from another, or from itself after it changed where
@@ -432,5 +711,205 @@ mod tests {
         let delta = Delta::open(&base, &path, true).unwrap();
         assert_eq!(read(&delta, 2 * BLOCK as u64, 512), before[2 * BLOCK..2 * BLOCK + 512]);
         assert_eq!(read(&delta, 3 * BLOCK as u64, 512), vec![0xCC; 512]);
+    }
+
+    /// A snapshot is the disk as it was when it was taken, whatever is
+    /// written after, and `restore` takes the disk back to it, over the
+    /// image it was taken over alone.
+    #[test]
+    fn a_snapshot_takes_the_disk_back() {
+        let dir = scratch("snapshot");
+        let base = image(&dir, 4 * BLOCK);
+        let before = std::fs::read(&base).unwrap();
+        let path = dir.join("C.rdelta");
+        let delta = Delta::open(&base, &path, false).unwrap();
+        // Before any write there is no delta file: the snapshot has no
+        // changes.
+        let empty = dir.join("empty.rdelta");
+        delta.snapshot_to(&empty).unwrap();
+        assert!(!path.exists());
+        assert_eq!(base_named_in(&empty).as_deref(), Some(base.as_path()));
+        delta.write_at(512, &[0xAA; 512]).unwrap();
+        let snapshot = dir.join("state.C.rdelta");
+        delta.snapshot_to(&snapshot).unwrap();
+        assert!(!with_suffix(&snapshot, ".partial").exists());
+        let len = std::fs::metadata(&snapshot).unwrap().len();
+        assert!(len < 2 * BLOCK as u64, "only the block written");
+        delta.write_at(512, &[0xBB; 512]).unwrap();
+        delta.write_at(3 * BLOCK as u64, &[0xCC; 512]).unwrap();
+
+        delta.restore(&snapshot).unwrap();
+        assert_eq!(read(&delta, 512, 512), vec![0xAA; 512]);
+        assert_eq!(
+            read(&delta, 3 * BLOCK as u64, 512),
+            before[3 * BLOCK..3 * BLOCK + 512]
+        );
+        assert_eq!(delta.blocks(), 1);
+        // Written again after, and opened again: the snapshot stays as it
+        // was, and the delta file has the writes.
+        delta.write_at(2 * BLOCK as u64, &[0xDD; 512]).unwrap();
+        drop(delta);
+        let delta = Delta::open(&base, &path, false).unwrap();
+        assert_eq!(
+            (
+                read(&delta, 512, 1)[0],
+                read(&delta, 2 * BLOCK as u64, 1)[0]
+            ),
+            (0xAA, 0xDD)
+        );
+        assert_eq!(Delta::open(&base, &snapshot, true).unwrap().blocks(), 1);
+        delta.restore(&empty).unwrap();
+        assert_eq!(read(&delta, 0, before.len()), before);
+        assert_eq!(
+            std::fs::read(&base).unwrap(),
+            before,
+            "the image is as it was"
+        );
+
+        // Over another image the snapshot is refused, naming the image it
+        // was taken over, and the disks stay as they are.
+        delta.write_at(0, &[0xEE; 512]).unwrap();
+        let other = dir.join("other.img");
+        let mut changed = before.clone();
+        changed[100] ^= 0xFF;
+        std::fs::write(&other, &changed).unwrap();
+        let over_other = Delta::open(&other, &dir.join("other.rdelta"), false).unwrap();
+        let error = over_other.restore(&snapshot).unwrap_err();
+        let named = error.contains(&base.display().to_string());
+        assert!(error.contains("another disk") && named, "{}", error);
+        assert!(over_other.check_snapshot(&dir.join("gone.rdelta")).is_err());
+        assert_eq!(read(&over_other, 0, 512), changed[..512]);
+        assert_eq!(read(&delta, 0, 1)[0], 0xEE);
+    }
+
+    /// Set the modification time of the file at `path`, `secs` seconds
+    /// after a fixed time, as another program's write would change it.
+    fn touch(path: &Path, secs: u64) {
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + secs);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    /// A commit writes the changes into the image and deletes the delta
+    /// file; one cut short is refused by a mount and finished by the next
+    /// commit.
+    #[test]
+    fn a_commit_writes_the_changes_into_the_image() {
+        let dir = scratch("commit");
+        let base = image(&dir, 3 * BLOCK + 1536);
+        let mut expected = std::fs::read(&base).unwrap();
+        let path = beside(&base);
+        assert_eq!(path, dir.join("base.img.rdelta"));
+        let delta = Delta::open(&base, &path, false).unwrap();
+        delta.write_at(BLOCK as u64 - 512, &[0xAA; 1024]).unwrap();
+        delta
+            .write_at(3 * BLOCK as u64 + 512, &[0xBB; 1024])
+            .unwrap();
+        expected[BLOCK - 512..BLOCK + 512].fill(0xAA);
+        expected[3 * BLOCK + 512..3 * BLOCK + 1536].fill(0xBB);
+        drop(delta);
+        assert_eq!(commit(&base, &path).unwrap(), 3);
+        assert_eq!(std::fs::read(&base).unwrap(), expected);
+        assert!(!path.exists());
+        // With no changes the disk is the image again.
+        let delta = Delta::open(&base, &path, false).unwrap();
+        assert_eq!(read(&delta, 0, expected.len()), expected);
+
+        // Cut short: the header says the commit started.
+        delta.write_at(0, &[0xCC; 512]).unwrap();
+        expected[..512].fill(0xCC);
+        drop(delta);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        write_all_at(&file, COMMITTING as u64, &[1]).unwrap();
+        drop(file);
+        let mut half = std::fs::read(&base).unwrap();
+        half[..256].fill(0xCC);
+        std::fs::write(&base, &half).unwrap();
+        let error = Delta::open(&base, &path, false).err().unwrap();
+        assert!(error.contains("didn't finish"), "{}", error);
+        assert!(path.exists(), "not set aside");
+        assert_eq!(commit(&base, &path).unwrap(), 1);
+        assert_eq!(std::fs::read(&base).unwrap(), expected);
+        assert!(commit(&base, &path).is_err(), "nothing left to commit");
+    }
+
+    /// A delta file another run made after this one opened the disk isn't
+    /// made again over it: the write fails, and the other run's changes
+    /// stay.
+    #[test]
+    fn a_delta_file_made_meanwhile_stays() {
+        let dir = scratch("meanwhile");
+        let base = image(&dir, 4 * BLOCK);
+        let path = dir.join("C.rdelta");
+        let first = Delta::open(&base, &path, false).unwrap();
+        let second = Delta::open(&base, &path, false).unwrap();
+        first.write_at(0, &[0xAA; 512]).unwrap();
+        assert!(second.write_at(BLOCK as u64, &[0xBB; 512]).is_err());
+        drop((first, second));
+        let again = Delta::open(&base, &path, true).unwrap();
+        assert_eq!(read(&again, 0, 512), vec![0xAA; 512]);
+        assert_eq!(again.blocks(), 1);
+    }
+
+    /// A commit cut short of a delta file in an overlay folder tells the
+    /// command with the delta file named.
+    #[test]
+    fn a_commit_cut_short_elsewhere_names_the_delta_file() {
+        let dir = scratch("commit_elsewhere");
+        let base = image(&dir, 2 * BLOCK);
+        let path = dir.join("saves").join("base.img.rdelta");
+        Delta::open(&base, &path, false).unwrap().write_at(0, &[1; 512]).unwrap();
+        let file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        write_all_at(&file, COMMITTING as u64, &[1]).unwrap();
+        drop(file);
+        let error = Delta::open(&base, &path, false).err().unwrap();
+        assert!(error.contains(&format!("--delta {}", path.display())), "{}", error);
+    }
+
+    /// An image written since its delta file was made (by another program)
+    /// is told by its modification time, where the hash of its start and
+    /// end can't tell it: the delta file is set aside, and a snapshot made
+    /// over the image before is refused.
+    #[test]
+    fn an_image_written_since_its_delta_was_made_is_told() {
+        let dir = scratch("modified");
+        let base = image(&dir, 40 * BLOCK);
+        touch(&base, 0);
+        let path = dir.join("C.rdelta");
+        let delta = Delta::open(&base, &path, false).unwrap();
+        delta.write_at(0, &[1; 512]).unwrap();
+        let snapshot = dir.join("state.C.rdelta");
+        delta.snapshot_to(&snapshot).unwrap();
+        drop(delta);
+        // Written in the middle, past what the hash covers.
+        let mut bytes = std::fs::read(&base).unwrap();
+        bytes[20 * BLOCK] ^= 0xFF;
+        std::fs::write(&base, &bytes).unwrap();
+        touch(&base, 60);
+        let error = Delta::open(&base, &path, true).err().unwrap();
+        assert!(error.contains("was written since"), "{}", error);
+        take_notes();
+        let delta = Delta::open(&base, &path, false).unwrap();
+        assert_eq!(delta.blocks(), 0, "the disk is the image's");
+        assert!(take_notes().iter().any(|n| n.contains("set aside")));
+        let error = delta.check_snapshot(&snapshot).unwrap_err();
+        assert!(error.contains("was written since"), "{}", error);
+        // A delta file from before the time was recorded has none to check.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&snapshot)
+            .unwrap();
+        write_all_at(&file, BASE_MODIFIED as u64, &[0; 8]).unwrap();
+        drop(file);
+        assert!(delta.check_snapshot(&snapshot).is_ok());
     }
 }

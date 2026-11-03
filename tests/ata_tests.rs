@@ -50,7 +50,13 @@ fn machine(name: &str, slave: bool) -> (Bus, PathBuf) {
     fs::write(&image, (0..SECTORS).flat_map(pattern).collect::<Vec<u8>>()).unwrap();
     let mut bus = Bus::new(dir.join("c"));
     let drive = numbered_drive(2);
-    let opts = MountOptions { geometry: Some(GEOMETRY), ..Default::default() };
+    // Written as it is, so that the tests read what the disk wrote from
+    // the image file.
+    let opts = MountOptions {
+        geometry: Some(GEOMETRY),
+        in_place: true,
+        ..Default::default()
+    };
     bus.mount_drive(drive, &image, opts, false).unwrap();
     bus.set_cycles_per_ms(1000);
     let mut channel = Channel::new(ChannelId::Primary);

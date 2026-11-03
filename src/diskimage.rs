@@ -491,7 +491,16 @@ impl ImageFile {
         }
     }
 
-    fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
+    /// Have what was written to the image file on the disk.
+    pub(crate) fn sync(&self) -> std::io::Result<()> {
+        match self {
+            ImageFile::Raw(file) => file.sync_all(),
+            ImageFile::Vhd(image) => image.sync(),
+            ImageFile::D86f(image) => image.sync(),
+        }
+    }
+
+    pub(crate) fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
         match self {
             ImageFile::Raw(file) => {
                 let mut file = file;
@@ -529,9 +538,30 @@ pub struct DiskImage {
     /// What the machine wrote over since its last states, while a booted
     /// system runs (`keep_journal`).
     journal: RefCell<Option<Journal>>,
-    /// A copy of the disk kept with a state file, for a load that goes
-    /// back further than the journal (`offer_replacement`).
-    replacement: RefCell<Option<PathBuf>>,
+    /// The disk as a state file keeps it, for a load that goes back
+    /// further than the journal (`offer_replacement`).
+    replacement: RefCell<Option<SavedDisk>>,
+}
+
+/// A disk as a state file of the system booted from it keeps it, beside
+/// the state file (`savestate::disks`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavedDisk {
+    /// A copy of all of the disk (`slot1.C.img`): of a disk written in
+    /// place, or held in memory.
+    Whole(PathBuf),
+    /// The disk's changes over an image left as it is (`slot1.C.rdelta`),
+    /// a copy of its delta file (`Delta::snapshot_to`). It goes back only
+    /// over the same image, with its changes in a delta file again.
+    Changes(PathBuf),
+}
+
+impl SavedDisk {
+    pub fn path(&self) -> &Path {
+        match self {
+            SavedDisk::Whole(path) | SavedDisk::Changes(path) => path,
+        }
+    }
 }
 
 /// A checkpoint of a `Journal`, and each sector's contents before its
@@ -887,20 +917,81 @@ impl DiskImage {
         self.journal.borrow().is_some()
     }
 
-    /// Whether the journal still reaches back to checkpoint `id`, or a
-    /// copy of the disk as it was then is offered.
+    /// Whether the journal still reaches back to checkpoint `id`, or the
+    /// disk as it was then is offered.
     pub fn has_checkpoint(&self, id: u64) -> bool {
         self.replacement.borrow().is_some() || self.journal.borrow().as_ref().is_some_and(|j| j.entries.iter().any(|(c, _)| *c == id))
     }
 
-    /// Offer the copy of the disk at `copy`, kept with the state file
-    /// being loaded, to take the disk back further than the journal goes,
-    /// or take the offer back.
-    pub fn offer_replacement(&self, copy: Option<PathBuf>) {
-        if copy.is_some() {
+    /// Offer the disk as the state file being loaded keeps it, to take
+    /// the disk back further than the journal goes, or take the offer
+    /// back.
+    pub fn offer_replacement(&self, saved: Option<SavedDisk>) {
+        if saved.is_some() {
             self.keep_journal(true);
         }
-        *self.replacement.borrow_mut() = copy;
+        *self.replacement.borrow_mut() = saved;
+    }
+
+    /// Write the disk as it is beside a state file of the system booted
+    /// from it: its changes to `changes` if they go to a delta file, over
+    /// an image left as it is, and otherwise a copy of all of it to
+    /// `whole`. Returns what was written.
+    pub fn save(&self, whole: &Path, changes: &Path) -> Result<SavedDisk, String> {
+        match &self.backing {
+            Backing::Delta(delta) => {
+                delta.snapshot_to(changes)?;
+                Ok(SavedDisk::Changes(changes.to_path_buf()))
+            }
+            _ => {
+                self.copy_to(whole)?;
+                Ok(SavedDisk::Whole(whole.to_path_buf()))
+            }
+        }
+    }
+
+    /// Whether `saved` can go back into this disk (`revert_to`), and if it
+    /// can't, why: a whole copy must be the disk's size, and changes must
+    /// be over this disk's image, which must have its changes in a delta
+    /// file too, one that can be written.
+    pub fn check_saved(&self, saved: &SavedDisk) -> Result<(), String> {
+        match (saved, &self.backing) {
+            (SavedDisk::Whole(copy), _) => {
+                let len = crate::hostfs::metadata(copy)
+                    .map_err(|e| format!("{}: {}", copy.display(), e))?
+                    .len;
+                match len.div_ceil(SECTOR_SIZE as u64) == self.sectors {
+                    true => Ok(()),
+                    false => Err(format!(
+                        "{} isn't the size of the state's copy of it ({})",
+                        self.path.display(),
+                        copy.display()
+                    )),
+                }
+            }
+            (SavedDisk::Changes(changes), Backing::Delta(delta)) => {
+                delta.check_snapshot(changes)?;
+                match delta.writable() {
+                    true => Ok(()),
+                    false => Err(format!(
+                        "the state's changes of the disk ({}) can't go into {}, which can't be \
+                         written",
+                        changes.display(),
+                        delta.path().display()
+                    )),
+                }
+            }
+            (SavedDisk::Changes(changes), _) => Err(format!(
+                "the state keeps the disk as its changes ({}) over an image left as it is{}, \
+                 and {} is written in place: mount the image without -inplace, so that its \
+                 changes go to a delta file",
+                changes.display(),
+                crate::diskdelta::base_named_in(changes)
+                    .map(|p| format!(" ({})", p.display()))
+                    .unwrap_or_default(),
+                self.path.display()
+            )),
+        }
     }
 
     /// Write a copy of the disk as it is to `dest`, for a state file of
@@ -946,8 +1037,19 @@ impl DiskImage {
         std::fs::rename(&partial, dest).map_err(error)
     }
 
-    /// Make the disk what the copy at `copy` holds.
-    fn replace_from(&self, copy: &Path) -> Result<(), String> {
+    /// Make the disk what the state file being loaded keeps of it.
+    fn replace_from(&self, saved: &SavedDisk) -> Result<(), String> {
+        let copy = match saved {
+            SavedDisk::Whole(copy) => copy,
+            SavedDisk::Changes(changes) => {
+                let Backing::Delta(delta) = &self.backing else {
+                    // Which says why the changes can't go into it.
+                    return self.check_saved(saved);
+                };
+                self.generation.set(self.generation.get() + 1);
+                return delta.restore(changes);
+            }
+        };
         let error = |e: std::io::Error| format!("{}: {}", copy.display(), e);
         let mut source = File::open(copy).map_err(error)?;
         let len = source.len().map_err(error)?;
@@ -1154,7 +1256,7 @@ mod tests {
         // Further back than the journal: from the copy.
         disk.write(7, &[0xDD; SECTOR_SIZE]).unwrap();
         disk.keep_journal(false);
-        disk.offer_replacement(Some(copy.clone()));
+        disk.offer_replacement(Some(SavedDisk::Whole(copy.clone())));
         disk.revert_to(first).unwrap();
         assert_eq!((read(&disk, 5), read(&disk, 7)), (0xAA, 0));
         assert_eq!(std::fs::read(&path).unwrap(), floppy, "the image as it was");

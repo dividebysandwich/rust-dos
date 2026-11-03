@@ -221,7 +221,9 @@ impl MainHost<'_, '_> {
         let (header, picture, state) = self.capture_state();
         // A booted system's disks as they are, beside its state.
         savestate::disks::delete_copies(&path);
-        savestate::disks::save_copies(self.cpu, &path)?;
+        for note in savestate::disks::save_copies(self.cpu, &path)? {
+            self.cpu.bus.log_string(&format!("[STATE] {}", note));
+        }
         let done = self.state_done.clone();
         self.cpu.bus.log_string(&format!("[STATE] Saving to {}", path.display()));
         std::thread::spawn(move || {
@@ -238,7 +240,9 @@ impl MainHost<'_, '_> {
     pub(crate) fn save_file(&mut self, path: &std::path::Path, contents: bool) -> Result<slots::Header, String> {
         let (mut header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
-        savestate::disks::save_copies(self.cpu, path)?;
+        for note in savestate::disks::save_copies(self.cpu, path)? {
+            self.cpu.bus.log_string(&format!("[STATE] {}", note));
+        }
         // After the copies, which make the state's folder.
         if contents && let Some(media) = header.media.as_mut() {
             savestate::media::add_contents(self.cpu, media, path, |_| true);
@@ -320,7 +324,7 @@ impl MainHost<'_, '_> {
                 // their files, so the state's isn't compared.
                 differences.extend(savestate::media::differences(media, &now));
                 if check_files {
-                    let copied = |key: &str| savestate::disks::copy_path_of(path, key).exists();
+                    let copied = |key: &str| savestate::disks::saved_of(path, key).is_some();
                     unchecked = savestate::media::unrecorded(media, copied);
                 }
             }
@@ -383,8 +387,8 @@ impl MainHost<'_, '_> {
                 config_warning(self.cpu, &warning);
             }
         }
-        // A booted system's disks come back from their copies, if the
-        // journals don't reach back to the state.
+        // A booted system's disks come back from what the state file keeps
+        // of them, if the journals don't reach back to the state.
         savestate::disks::offer_copies(self.cpu, path);
         let loaded = savestate::machine::load(self.cpu, state).map_err(|e| e.to_string());
         savestate::disks::withdraw(self.cpu);

@@ -713,6 +713,8 @@ impl Bus {
     /// whose FM chip, synthesizer and sound output are still those of the
     /// state.
     pub(crate) fn after_reload(&mut self) {
+        // The drives the state mounted as it had them.
+        self.log_disk_notes();
         for failed in self.disk.revert_disks() {
             self.log_string(&format!("[STATE] The disk can't go back with the state: {}", failed));
         }

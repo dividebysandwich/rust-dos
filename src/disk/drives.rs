@@ -272,7 +272,9 @@ impl DiskController {
         for (drive, id) in std::mem::take(&mut self.reverts) {
             let reverted = self.bios_image(drive).ok_or_else(|| "it's gone".to_string()).and_then(|disk| disk.revert_to(id));
             if let Err(e) = reverted {
-                failed.push(format!("drive {}: {}", drive_name(drive), e));
+                // `C:` or `2`: one colon after either.
+                let name = drive_name(drive);
+                failed.push(format!("drive {}: {}", name.trim_end_matches(':'), e));
             }
         }
         failed
