@@ -62,18 +62,17 @@ fn shadowed(cpu: &mut Cpu, s: &Surface) -> bool {
 
 /// Where the card draws the surface `id`: its block of the card's
 /// memory and the bytes a row; its shadow's for a 24- or 32-bit one,
-/// loaded from it first if the program changed it. None if it isn't in
-/// the card's memory or there is no room for the shadow.
-pub fn place(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
-    let s = state(cpu).surface(id)?.clone();
+/// loaded from it first if the program changed it.
+pub fn place(cpu: &mut Cpu, id: u32) -> Result<(u32, u32), Unplaced> {
+    let s = state(cpu).surface(id).ok_or(Unplaced::Gone)?.clone();
     if !shadowed(cpu, &s) {
-        return surface::card_memory(cpu, id);
+        return surface::card_memory(cpu, id).ok_or(Unplaced::Gone);
     }
     let len = s.width * s.height * 2;
     let i = match find(cpu, id, len) {
         Some(i) => i,
         None => {
-            let at = display::alloc(cpu, len).ok()?;
+            let at = display::alloc(cpu, len).map_err(|_| Unplaced::NoRoom)?;
             shadows(cpu).push(Shadow {
                 surface: id,
                 at,
@@ -89,7 +88,16 @@ pub fn place(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
         load(cpu, &s, sh.at);
         shadows(cpu)[i].uniqueness = s.uniqueness;
     }
-    Some((sh.at, s.width * 2))
+    Ok((sh.at, s.width * 2))
+}
+
+/// Why the card can't draw a surface (`place`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Unplaced {
+    /// It isn't in the card's memory: gone, lost or in system memory.
+    Gone,
+    /// It is 24 or 32-bit, and video memory has no room for its shadow.
+    NoRoom,
 }
 
 /// The shadow of `id`, if it has one whose block is still there and
@@ -150,8 +158,9 @@ pub fn expose_all(cpu: &mut Cpu) {
 }
 
 /// Fill `rects` of the shadowed surface `id` (all of it with none):
-/// the surface with `exact`, its shadow with the 16-bit `value`. False
-/// if `id` has no shadow, and nothing was filled.
+/// the surface with `exact`, its shadow with the 16-bit `value`. With
+/// no room for the shadow, the surface alone. False if `id` isn't drawn
+/// through a shadow, and nothing was filled.
 pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) -> bool {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return false;
@@ -161,9 +170,7 @@ pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) 
     }
     // What the card drew outside the rectangles stays.
     expose(cpu, id);
-    let Some((at, pitch)) = place(cpu, id) else {
-        return false;
-    };
+    let shadow = place(cpu, id).ok();
     let whole = [[0, 0, s.width as i32, s.height as i32]];
     let rects = if rects.is_empty() { &whole[..] } else { rects };
     let bpp = s.bytes_per_pixel();
@@ -187,7 +194,9 @@ pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) 
                 put(px, old & mask | exact & !mask);
             }
             surface::write_bytes(cpu, &s, offset, &row);
-            screen::write(cpu, at + y * pitch + x0 * 2, &shadow_row);
+            if let Some((at, pitch)) = shadow {
+                screen::write(cpu, at + y * pitch + x0 * 2, &shadow_row);
+            }
         }
     }
     surface::changed(cpu, id);
