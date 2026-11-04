@@ -1822,10 +1822,35 @@ fn params(g: &Context) -> u32 {
     p
 }
 
+/// The parameter registers a triangle writes (`param_list`), kept in
+/// place: 12 at most.
+struct ParamList {
+    list: [(Param, usize, u32); 12],
+    len: usize,
+}
+
+impl ParamList {
+    fn push(&mut self, entry: (Param, usize, u32)) {
+        self.list[self.len] = entry;
+        self.len += 1;
+    }
+}
+
+impl std::ops::Deref for ParamList {
+    type Target = [(Param, usize, u32)];
+
+    fn deref(&self) -> &[(Param, usize, u32)] {
+        &self.list[..self.len]
+    }
+}
+
 /// The parameter registers a triangle writes, each with the chips it
 /// goes to: (parameter, start register, chips).
-fn param_list(p: u32) -> Vec<(Param, usize, u32)> {
-    let mut list = Vec::with_capacity(12);
+fn param_list(p: u32) -> ParamList {
+    let mut list = ParamList {
+        list: [(Param::R, 0, 0); 12],
+        len: 0,
+    };
     if p & P_RGB != 0 {
         list.push((Param::R, FSTART_R, ALL));
         list.push((Param::G, FSTART_G, ALL));
@@ -1929,7 +1954,7 @@ pub fn draw_triangle(cpu: &mut Cpu, a: &Vertex, b: &Vertex, c: &Vertex) -> bool 
     }
     let (dx_bc, dy_ab, dx_ab, dy_bc) = (dx_bc * ooa, dy_ab * ooa, dx_ab * ooa, dy_bc * ooa);
     let p = params(gc(cpu));
-    for (param, reg, chips) in param_list(p) {
+    for &(param, reg, chips) in param_list(p).iter() {
         let (pa, pb, pc) = (va.param(param), vb.param(param), vc.param(param));
         let d_ab = pa - pb;
         let d_bc = pb - pc;
@@ -1964,7 +1989,7 @@ pub fn draw_line(cpu: &mut Cpu, a: &Vertex, b: &Vertex) {
         hw::write_f(cpu, ALL, FVERTEX_AY, a.y - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_BY, b.y - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_CY, b.y + 0.5);
-        for &(param, reg, chips) in &list {
+        for &(param, reg, chips) in list.iter() {
             let pa = a.param(param);
             hw::write_f(cpu, chips, reg, pa);
             hw::write_f(cpu, chips, reg + DX, (b.param(param) - pa) * m);
@@ -1982,7 +2007,7 @@ pub fn draw_line(cpu: &mut Cpu, a: &Vertex, b: &Vertex) {
         hw::write_f(cpu, ALL, FVERTEX_AX, a.x - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_BX, b.x - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_CX, b.x + 0.5);
-        for &(param, reg, chips) in &list {
+        for &(param, reg, chips) in list.iter() {
             let pa = a.param(param);
             hw::write_f(cpu, chips, reg, pa);
             hw::write_f(cpu, chips, reg + DX, 0.0);
@@ -2020,7 +2045,7 @@ pub fn draw_point(cpu: &mut Cpu, p: &Vertex) {
     hw::write(cpu, ALL, VERTEX_BY, y);
     hw::write(cpu, ALL, VERTEX_CY, (y + 8) & 0xFFFF);
     hw::write(cpu, ALL, VERTEX_CX, (x + 8) & 0xFFFF);
-    for (param, reg, chips) in param_list(params(gc(cpu))) {
+    for &(param, reg, chips) in param_list(params(gc(cpu))).iter() {
         hw::write_f(cpu, chips, reg, p.param(param));
     }
     hw::write(cpu, ALL, TRIANGLE_CMD, 1);

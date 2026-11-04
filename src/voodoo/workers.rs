@@ -156,6 +156,9 @@ struct Queue {
     shutdown: bool,
     /// A worker's panic, handed on to the emulator.
     panic: Option<Box<dyn std::any::Any + Send>>,
+    /// Batches every worker has drawn, emptied, for the emulator to fill
+    /// again (`Pool::take_pending`).
+    spare: Vec<Vec<Job>>,
 }
 
 impl Queue {
@@ -198,6 +201,10 @@ pub struct Pool {
 /// How many jobs go out at a time.
 const BATCH: usize = 128;
 
+/// Emptied batches kept for the emulator to fill again: it fills one at
+/// a time, and the workers hand them back as fast as they finish them.
+const SPARE_BATCHES: usize = 8;
+
 /// Batches the workers may have before the emulator waits for them.
 /// Myth downloads over a texture in use 46 times a game frame, each a
 /// batch of bytes and one of what came before, and the workers finish
@@ -231,6 +238,7 @@ impl Pool {
                 stats: Stats::default(),
                 shutdown: false,
                 panic: None,
+                spare: Vec::new(),
             }),
             work: Condvar::new(),
             idle: Condvar::new(),
@@ -279,7 +287,7 @@ impl Pool {
         }
         let mut pending = self.pending.lock().unwrap();
         if matches!(job, Job::Bytes { .. }) {
-            let batch = std::mem::take(&mut *pending);
+            let batch = self.take_pending(&mut pending);
             drop(pending);
             self.publish(batch);
             self.publish(vec![job]);
@@ -289,10 +297,22 @@ impl Pool {
         let now = matches!(job, Job::Pixels { .. });
         pending.push(job);
         if now || pending.len() >= BATCH {
-            let batch = std::mem::take(&mut *pending);
+            let batch = self.take_pending(&mut pending);
             drop(pending);
             self.publish(batch);
         }
+    }
+
+    /// The jobs `pending` holds, to give out, leaving in their place a
+    /// batch the workers have finished with (`Queue::spare`) or a new one
+    /// with room for `BATCH`. One that grew from nothing would move its
+    /// jobs each time it doubled.
+    fn take_pending(&self, pending: &mut Vec<Job>) -> Vec<Job> {
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let spare = self.shared.queue.lock().unwrap().spare.pop();
+        std::mem::replace(pending, spare.unwrap_or_else(|| Vec::with_capacity(BATCH)))
     }
 
     fn publish(&self, batch: Vec<Job>) {
@@ -321,7 +341,7 @@ impl Pool {
         if self.workers == 0 {
             return;
         }
-        let batch = std::mem::take(&mut *self.pending.lock().unwrap());
+        let batch = self.take_pending(&mut self.pending.lock().unwrap());
         self.publish(batch);
         let mut queue = self.shared.queue.lock().unwrap();
         while queue.done.iter().any(|&d| d < queue.last) {
@@ -338,7 +358,7 @@ impl Pool {
         if self.workers == 0 {
             return;
         }
-        let batch = std::mem::take(&mut *self.pending.lock().unwrap());
+        let batch = self.take_pending(&mut self.pending.lock().unwrap());
         self.publish(batch);
     }
 
@@ -450,11 +470,21 @@ fn worker(shared: Arc<Shared>, k: usize, n: usize) {
         }
         queue.stats.add(&stats);
         queue.done[k] = number;
-        // A batch every worker has drawn can go.
+        // A batch every worker has drawn can go, emptied for the emulator
+        // to fill again. Each worker lets go of its own here, under the
+        // lock, so the queue holds the last one once all have drawn it.
+        drop(batch);
         let oldest = queue.done.iter().copied().min().unwrap_or(0);
         while queue.batches.front().is_some_and(|(number, _)| *number <= oldest) {
             if let Some((_, batch)) = queue.batches.pop_front() {
                 queue.bytes -= bytes_of(&batch);
+                if let Ok(mut jobs) = Arc::try_unwrap(batch)
+                    && jobs.capacity() >= BATCH
+                    && queue.spare.len() < SPARE_BATCHES
+                {
+                    jobs.clear();
+                    queue.spare.push(jobs);
+                }
             }
         }
         shared.idle.notify_all();
