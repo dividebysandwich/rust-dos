@@ -128,68 +128,133 @@ pub struct Pixels {
     pub values: Vec<u16>,
 }
 
-/// Where the buffers are: their size in pixels, how their rows lie in
-/// memory (the colour buffers' and the auxiliary buffer's, linear or in
-/// a Banshee's tiles), and the word offsets of the colour buffers and the
-/// auxiliary buffer.
+/// The renderer's pictures of the buffers: their size in pixels, the
+/// same for all of them (as wide as the widest buffer, `LayoutKey`), and
+/// the word offsets of the colour buffers and the auxiliary buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub width: u32,
     pub height: u32,
-    pub stride: Stride,
-    pub aux_stride: Stride,
     pub color: Vec<u32>,
     pub aux: Option<u32>,
 }
 
+/// The most colour buffers a layout has: a Voodoo2's three, and on a
+/// Banshee or Voodoo3 the render targets a program draws into in turn
+/// (`banshee_mirror_key`), such as a game's two back buffers and the
+/// textures it draws into each frame.
+pub const COLOR_BUFFERS: usize = 8;
+
+/// A buffer of a layout: the byte offset of its first pixel (`NONE` for
+/// none), how its rows lie in memory (linear or in a Banshee's tiles),
+/// and its width in pixels. Each buffer has its own, so that a program
+/// that draws into render targets of different widths in turn keeps
+/// them all in one layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferKey {
+    pub at: u32,
+    pub stride: Stride,
+    pub width: u32,
+}
+
+impl BufferKey {
+    pub const NONE: Self = Self {
+        at: NONE,
+        stride: Stride::linear(0),
+        width: 0,
+    };
+
+    pub fn new(at: u32, stride: Stride, width: u32) -> Self {
+        if at == NONE {
+            return Self::NONE;
+        }
+        Self { at, stride, width }
+    }
+
+    pub fn is_some(&self) -> bool {
+        self.at != NONE
+    }
+
+    /// The bytes of the frame buffer its `height` rows take.
+    pub fn span(&self, height: u32) -> (u64, u64) {
+        let base = self.at as u64;
+        (base, base + span(self.stride, height) as u64 * 2)
+    }
+}
+
 /// What the layout is worked out from, which the card compares on every
-/// command without building a `Layout`: the size, the strides and the
-/// byte offsets of the colour buffers and the auxiliary buffer (`NONE`
-/// where there is none).
+/// command without building a `Layout`: the rows the buffers have, the
+/// colour buffers and the auxiliary buffer (`BufferKey::NONE` where there
+/// is none), and the width of the renderer's pictures, the widest
+/// buffer's (`new`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutKey {
     pub width: u32,
     pub height: u32,
-    pub stride: Stride,
-    pub aux_stride: Stride,
-    pub color: [u32; 3],
-    pub aux: u32,
+    pub color: [BufferKey; COLOR_BUFFERS],
+    pub aux: BufferKey,
 }
 
 impl LayoutKey {
+    /// The layout of these buffers, `height` rows each. The renderer
+    /// draws every one of them in a picture as wide as the widest, and
+    /// only a buffer's own columns are its pixels.
+    pub fn new(height: u32, color: [BufferKey; COLOR_BUFFERS], aux: BufferKey) -> Self {
+        let buffers = color.iter().chain([&aux]).filter(|b| b.is_some());
+        Self {
+            width: buffers.map(|b| b.width).max().unwrap_or(0).max(1),
+            height,
+            color,
+            aux,
+        }
+    }
+
+    /// The colour buffers there are.
+    pub fn colors(&self) -> impl Iterator<Item = &BufferKey> + '_ {
+        self.color.iter().filter(|b| b.is_some())
+    }
+
+    /// The colour buffer whose first byte is `at`, if there is one.
+    pub fn color_at(&self, at: u32) -> Option<&BufferKey> {
+        self.colors().find(|b| b.at == at)
+    }
+
+    /// The buffer with key `key` in the recording (`buffers`): a colour
+    /// buffer by its word offset, or with None the auxiliary buffer.
+    pub fn buffer(&self, key: Option<u32>) -> Option<&BufferKey> {
+        match key {
+            Some(offs) => self.color_at(offs.checked_mul(2)?),
+            None => Some(&self.aux).filter(|b| b.is_some()),
+        }
+    }
+
     pub fn layout(&self) -> Layout {
         Layout {
             width: self.width,
             height: self.height,
-            stride: self.stride,
-            aux_stride: self.aux_stride,
-            color: self
-                .color
-                .iter()
-                .filter(|&&offs| offs != NONE)
-                .map(|&offs| offs / 2)
-                .collect(),
-            aux: (self.aux != NONE).then_some(self.aux / 2),
+            color: self.colors().map(|b| b.at / 2).collect(),
+            aux: self.aux.is_some().then_some(self.aux.at / 2),
         }
     }
 
     /// The buffers: each one's word offset, its key in the recording (the
-    /// offset for a colour buffer, None for the auxiliary buffer) and its
-    /// stride.
-    fn buffers(&self) -> impl Iterator<Item = (u32, Option<u32>, Stride)> + '_ {
-        let color = self.color.iter().filter(|&&offs| offs != NONE);
-        let color = color.map(|&offs| (offs / 2, Some(offs / 2), self.stride));
-        let aux = (self.aux != NONE).then_some((self.aux / 2, None, self.aux_stride));
-        color.chain(aux)
+    /// offset for a colour buffer, None for the auxiliary buffer), its
+    /// stride and its width.
+    fn buffers(&self) -> impl Iterator<Item = (u32, Option<u32>, Stride, u32)> + '_ {
+        let color = self
+            .colors()
+            .map(|b| (b.at / 2, Some(b.at / 2), b.stride, b.width));
+        let aux = Some(self.aux).filter(|b| b.is_some());
+        color.chain(aux.map(|b| (b.at / 2, None, b.stride, b.width)))
     }
 
     /// Where word `at` of the frame buffer is in the buffers: the buffer's
     /// key (`buffers`) and the pixel's column and row, if it is a pixel
     /// of one.
     pub fn locate(&self, at: u32) -> Option<(Option<u32>, u32, u32)> {
-        self.buffers().find_map(|(base, key, stride)| {
+        self.buffers().find_map(|(base, key, stride, width)| {
             let (x, y) = pixel_at(stride, at.checked_sub(base)? as usize)?;
-            (x < self.width && y < self.height).then_some((key, x, y))
+            (x < width && y < self.height).then_some((key, x, y))
         })
     }
 
@@ -201,17 +266,15 @@ impl LayoutKey {
 
     /// The bytes of the frame buffer each buffer takes, first to last.
     pub fn spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.buffers().map(|(base, _, stride)| {
-            let (base, span) = (base as u64 * 2, span(stride, self.height) as u64 * 2);
-            (base, base + span)
-        })
+        let aux = Some(&self.aux).filter(|b| b.is_some());
+        self.colors().chain(aux).map(|b| b.span(self.height))
     }
 
     /// The buffers' rows that bytes `start..end` of the frame buffer may
     /// hold pixels of: the buffer's key (`buffers`) and rows `first..last`.
     pub fn rows_in(&self, start: u32, end: u32) -> Vec<(Option<u32>, u32, u32)> {
         self.buffers()
-            .filter_map(|(base, key, stride)| {
+            .filter_map(|(base, key, stride, _)| {
                 let (first, last) = row_bytes(base, stride, (0, self.height));
                 let (start, end) = (start.max(first), end.min(last));
                 if start >= end {
@@ -1068,14 +1131,9 @@ mod tests {
         } else {
             Stride::linear(100)
         };
-        LayoutKey {
-            width: 96,
-            height: 40,
-            stride,
-            aux_stride: Stride::linear(64),
-            color: [0x1_0000, NONE, NONE],
-            aux: 0x4_0000,
-        }
+        let mut color = [BufferKey::NONE; COLOR_BUFFERS];
+        color[0] = BufferKey::new(0x1_0000, stride, 96);
+        LayoutKey::new(40, color, BufferKey::new(0x4_0000, Stride::linear(64), 64))
     }
 
     #[test]

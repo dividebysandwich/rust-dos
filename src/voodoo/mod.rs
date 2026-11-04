@@ -1381,10 +1381,26 @@ impl Voodoo {
         let words = fbi.ram.len();
         let layout = match recorded {
             Some(key) => {
-                let [a, b, c] = key.color.map(word);
-                let bases = [a, b, c, word(key.aux)];
-                let size = (key.width, key.height);
-                TileLayout::new(bases, size, key.stride, key.aux_stride, words)
+                // The backlog's tiles have one stride and width for the
+                // colour buffers, and three of them: colBufferAddr's, and
+                // the recording's others that share its stride and width,
+                // in the recording's order, which a swap between them
+                // leaves as it is.
+                let current = key.color_at(fbi.rgboffs[0]).or(key.colors().next());
+                let current = current.copied().unwrap_or(mirror::BufferKey::NONE);
+                let mut others = 0;
+                let mut colour = key.colors().filter(|b| {
+                    let take = (b.stride, b.width) == (current.stride, current.width)
+                        && (b.at == current.at || others < 2);
+                    others += (take && b.at != current.at) as usize;
+                    take
+                });
+                let mut bases = [None, None, None, word(key.aux.at)];
+                for slot in &mut bases[..3] {
+                    *slot = colour.next().and_then(|b| word(b.at));
+                }
+                let size = (current.width, key.height);
+                TileLayout::new(bases, size, current.stride, key.aux.stride, words)
             }
             None => {
                 let [a, b, c] = fbi.rgboffs.map(word);
@@ -1890,7 +1906,7 @@ impl Voodoo {
         for (start, end) in key.spans().map(clamp) {
             self.gpu_sync(start, end);
         }
-        let snapshot = self.snapshot(key.layout());
+        let snapshot = self.snapshot(&key);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.resync(snapshot, key);
         }
@@ -1904,38 +1920,41 @@ impl Voodoo {
             return self.banshee_mirror_key(old);
         }
         let fbi = &self.fbi;
+        let buffer = |offs: u32, stride| mirror::BufferKey::new(offs, stride, fbi.width);
+        let mut color = [mirror::BufferKey::NONE; mirror::COLOR_BUFFERS];
+        for (c, &offs) in color.iter_mut().zip(&fbi.rgboffs) {
+            *c = buffer(offs, fbi.stride);
+        }
+        let aux = buffer(fbi.auxoffs, fbi.aux_stride);
         mirror::LayoutKey {
             width: fbi.width,
-            height: fbi.height,
-            stride: fbi.stride,
-            aux_stride: fbi.aux_stride,
-            color: fbi.rgboffs,
-            aux: fbi.auxoffs,
+            ..mirror::LayoutKey::new(fbi.height, color, aux)
         }
     }
 
-    fn snapshot(&self, layout: mirror::Layout) -> mirror::Snapshot {
+    /// The pixels of `key`'s buffers, each in a picture of the key's
+    /// width: its columns past its own width are 0.
+    fn snapshot(&self, key: &mirror::LayoutKey) -> mirror::Snapshot {
         let ram = &self.fbi.ram;
-        let (width, height) = (layout.width as usize, layout.height as usize);
-        let pixels = |base: u32, stride: raster::Stride| -> Vec<u16> {
+        let (width, height) = (key.width as usize, key.height as usize);
+        let pixels = |b: &mirror::BufferKey| -> Vec<u16> {
+            let (base, stride) = (b.at as usize / 2, b.stride);
+            let own = (b.width as usize).min(width);
             let mut out = Vec::with_capacity(width * height);
             for y in 0..height {
-                let row = base as usize + stride.row(y);
-                out.extend((0..width).map(|x| {
+                let row = base + stride.row(y);
+                out.extend((0..own).map(|x| {
                     let at = row + stride.col(x);
                     if at < ram.len() { ram.get(at) } else { 0 }
                 }));
+                out.resize((y + 1) * width, 0);
             }
             out
         };
         mirror::Snapshot {
-            color: layout
-                .color
-                .iter()
-                .map(|&offs| pixels(offs, layout.stride))
-                .collect(),
-            aux: layout.aux.map(|offs| pixels(offs, layout.aux_stride)),
-            layout,
+            color: key.colors().map(pixels).collect(),
+            aux: key.aux.is_some().then(|| pixels(&key.aux)),
+            layout: key.layout(),
         }
     }
 
@@ -2005,22 +2024,23 @@ impl Voodoo {
         // are fewer: a tiled buffer's rows come in bands of 32, which a
         // burst into one tile would push whole.
         let rows = key.rows_in(start, end);
+        let width = |dest| key.buffer(dest).map_or(0, |b| b.width);
         let pixels: u64 = rows
             .iter()
-            .map(|&(_, first, last)| (last - first) as u64 * key.width as u64)
+            .map(|&(dest, first, last)| (last - first) as u64 * width(dest) as u64)
             .sum();
         if (end - start).div_ceil(2) as u64 <= pixels {
             by_word(mirror);
             return;
         }
         for (dest, first, last) in rows {
-            let (base, stride) = match dest {
-                Some(offs) => (offs, key.stride),
-                None => (key.aux / 2, key.aux_stride),
+            let Some(&buffer) = key.buffer(dest) else {
+                continue;
             };
+            let (base, stride) = (buffer.at / 2, buffer.stride);
             for y in first..last {
                 let row = base as usize + stride.row(y as usize);
-                for x in 0..key.width {
+                for x in 0..buffer.width {
                     let value = word(row + stride.col(x as usize));
                     mirror.pixel(dest, x, y, value, key.width);
                 }
@@ -2036,16 +2056,24 @@ impl Voodoo {
         let fbi = &self.fbi;
         // The recorded buffers' size: on a Banshee the 3D engine reaches
         // further down than they go (`banshee_buffers`).
-        let (width, height) =
-            mirror.layout().map_or((fbi.width, fbi.height), |k| (k.width, k.height));
-        if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
-            return;
+        let key = mirror.layout().copied();
+        let size = |buffer: Option<u32>| match &key {
+            Some(k) => (k.buffer(buffer).map_or(k.width, |b| b.width), k.height),
+            None => (fbi.width, fbi.height),
+        };
+        let inside = |(width, height): (u32, u32)| {
+            x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height
+        };
+        let dest = Some(dest as u32);
+        if let Some(value) = color
+            && inside(size(dest))
+        {
+            mirror.pixel(dest, x as u32, y as u32, value, size(dest).0);
         }
-        if let Some(value) = color {
-            mirror.pixel(Some(dest as u32), x as u32, y as u32, value, width);
-        }
-        if let Some(value) = aux {
-            mirror.pixel(None, x as u32, y as u32, value, width);
+        if let Some(value) = aux
+            && inside(size(None))
+        {
+            mirror.pixel(None, x as u32, y as u32, value, size(None).0);
         }
     }
 

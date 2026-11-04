@@ -393,8 +393,16 @@ pub fn spills(st: &RasterState, verts: &[(f32, f32); 3], height: u32) -> bool {
 
 /// The same for a fastfill of columns `..x1` and rows `y0..y1`.
 pub fn fill_spills(st: &RasterState, x1: i32, y0: i32, y1: i32, height: u32) -> bool {
+    // Only the buffers it writes have rows to spill past: a depth clear
+    // isn't limited by the colour buffer's rows, which colBufferAddr may
+    // leave at a narrower surface than the depth buffer (the Direct3D
+    // HAL's clears, `hal::card_fill`).
+    let rgb = st.fbz_mode & (1 << 9) != 0;
+    let aux = st.fbz_mode & (1 << 10) != 0 && st.aux.is_some();
+    let past = |pixels: usize| x1 > pixels as i32;
+    let across = rgb && past(st.rowpixels) || aux && past(st.aux_stride.pixels());
     match buffer_rows(st, y0, y1) {
-        Some((r0, r1)) => x1 > st.rowpixels as i32 || (r1 > height as i32 && r1 > r0.max(0)),
+        Some((r0, r1)) => across || (r1 > height as i32 && r1 > r0.max(0)),
         None => true,
     }
 }
