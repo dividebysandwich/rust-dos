@@ -2800,23 +2800,9 @@ The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
 Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
 DirectDraw gives it when a program starts Direct3D for the one DirectX 7
 has, and faults: the program's window stays white and the card draws
-nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first.
-
-Glover (1998) draws wrongly with the 1.07.00 driver. 86Box shows the
-same, and the fault is in the driver's code, so a real Voodoo3 with that
-driver should too. The game creates its primary surface without
-`DDSCAPS_3DDEVICE` and attaches a back buffer to it, so DirectX 7 gives
-the primary no Direct3D handle. The driver keeps drawing into one
-surface until DirectX 7 names another by its handle, and it ignores
-handle 0. After each flip the game then draws into the picture on
-screen: about half the frames show only the clear colour or a scene half
-drawn, and the LOADING text, the star-shaped wipe and the title are
-missing. The driver from 3dfx's Voodoo3 driver CD version 1.2
-(`3dfx32v3.dll` 4.11.01.1151) reads the buffer's address from the
-surface each time it draws, so it follows the flips, and Glover draws
-correctly with it on DirectX 7 and on Windows 98 SE's own 6.1. That
-driver was tried only with Glover, with its files copied over the
-1.07.00 driver's rather than installed from its `.inf`.
+nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. A few games
+need an earlier driver; [docs/compatibility.md](docs/compatibility.md)
+names them.
 
 With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
 at `voodoo_scale` times its resolution, as for the Voodoo Graphics (see
