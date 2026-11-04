@@ -380,8 +380,9 @@ mod poll {
     #[cfg(not(target_os = "macos"))]
     use std::sync::atomic::AtomicBool;
 
-    /// How often the process is looked at.
-    const INTERVAL: Duration = Duration::from_millis(200);
+    /// How often the process is looked at. rust-dos may quit up to this
+    /// long after the process ends, and it seldom wakes up while it waits.
+    const INTERVAL: Duration = Duration::from_secs(3);
 
     /// Whether the process is still there. For the parent, rust-dos gets a
     /// new one when it ends, which a reused ID doesn't hide; a named

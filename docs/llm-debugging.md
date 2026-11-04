@@ -540,9 +540,10 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
   kqueue event on macOS), so another process that gets the ID later
   doesn't keep it running; other Unix systems, and Linux before 5.3 or
   in a container whose seccomp filter refuses `pidfd_open`, look at the
-  process five times a second instead. A process that has ended already
-  ends rust-dos at once, with the same code. A PID rust-dos may not watch
-  is an error at start, and so is the option with `--relay`.
+  process every three seconds instead, so they quit up to three seconds
+  after it ends. A process that has ended already ends rust-dos at once,
+  with the same code. A PID rust-dos may not watch is an error at start,
+  and so is the option with `--relay`.
 
 ### Inspect or patch state
 
