@@ -507,15 +507,22 @@ impl Banshee {
         }
     }
 
-    /// The bytes a program writes for the desktop's picture: its rows
-    /// (half of the CRTC's lines in half mode, which shows each twice) of
+    /// The rows of the desktop in memory: the CRTC's lines, or half of
+    /// them in half mode, which shows each row twice.
+    pub fn desktop_rows(&self) -> u32 {
+        let (_, lines) = self.desktop_size();
+        if self.reg(VID_PROC_CFG) & VIDPROC_HALF_MODE != 0 {
+            lines / 2
+        } else {
+            lines
+        }
+    }
+
+    /// The bytes a program writes for the desktop's picture: its rows of
     /// its pixels.
     pub fn desktop_bytes(&self) -> u32 {
-        let (width, mut height) = self.desktop_size();
-        if self.reg(VID_PROC_CFG) & VIDPROC_HALF_MODE != 0 {
-            height /= 2;
-        }
-        width * height * self.desktop_bytes_per_pixel()
+        let (width, _) = self.desktop_size();
+        width * self.desktop_rows() * self.desktop_bytes_per_pixel()
     }
 
     /// Whether the desktop's rows follow each other in memory: it isn't

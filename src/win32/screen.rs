@@ -30,6 +30,7 @@ use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
 use crate::video::vbe::{self, LFB_BASE, VRAM_SIZE, VbeMode};
 use crate::voodoo::banshee as card;
+use crate::win32::gdi32::Rect;
 
 /// A display mode: its size, bits a pixel and bytes a row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -130,18 +131,11 @@ pub fn mode(cpu: &Cpu) -> Option<Mode> {
         if !b.extended() {
             return None;
         }
-        let cfg = b.reg(card::VID_PROC_CFG);
-        let (width, mut height) = b.desktop_size();
-        if cfg & card::VIDPROC_HALF_MODE != 0 {
-            height /= 2;
-        }
-        let bpp = b.desktop_bytes_per_pixel() * 8;
-        let pitch = b.reg(card::VID_DESKTOP_OVERLAY_STRIDE) & 0x3FFF;
         return Some(Mode {
-            width,
-            height,
-            bpp,
-            pitch,
+            width: b.desktop_size().0,
+            height: b.desktop_rows(),
+            bpp: b.desktop_bytes_per_pixel() * 8,
+            pitch: b.reg(card::VID_DESKTOP_OVERLAY_STRIDE) & 0x3FFF,
         });
     }
     if cpu.bus.video_mode != crate::video::VideoMode::Vesa {
@@ -303,7 +297,7 @@ fn shown_bytes(cpu: &Cpu) -> Option<std::ops::Range<u32>> {
 /// how `cycles=auto` sees its frames. A blit to the primary surface or
 /// GDI's drawing on the screen shows the frame; the copies into
 /// surfaces out of sight that make it don't, as a flip of them does.
-pub fn drew(cpu: &mut Cpu, low: u32, high: u32, bytes: u64) {
+fn drew(cpu: &mut Cpu, low: u32, high: u32, bytes: u64) {
     let Some(shown) = shown_bytes(cpu) else {
         return;
     };
@@ -318,6 +312,18 @@ pub fn drew(cpu: &mut Cpu, low: u32, high: u32, bytes: u64) {
         .shown_write(at, low as u64, high as u64, bytes);
 }
 
+/// `drew` for the rectangles `rects` of a picture from byte `at` of
+/// video memory, `pitch` bytes a row and `bytes` a pixel: what the
+/// OpenGL renderer copied in its own copy of the card's memory, which
+/// doesn't come through `write`.
+pub fn drew_rects(cpu: &mut Cpu, at: u32, pitch: u32, bytes: u32, rects: &[Rect]) {
+    for r in rects.iter().filter(|r| !r.is_empty()) {
+        let row = |y: i32, x: i32| at + y as u32 * pitch + x as u32 * bytes;
+        let len = r.width() as u64 * bytes as u64 * r.height() as u64;
+        drew(cpu, row(r.top, r.left), row(r.bottom - 1, r.right), len);
+    }
+}
+
 // What the picture is.
 
 /// Show the picture at byte `offset` of video memory, from the next
@@ -326,6 +332,7 @@ pub fn show(cpu: &mut Cpu, offset: u32) {
     if is_card(cpu) {
         cpu.bus
             .voodoo_write_32(card::VID_DESKTOP_START_ADDR, offset);
+        cpu.bus.note_display_start();
         return;
     }
     cpu.bus.vbe.start = offset;

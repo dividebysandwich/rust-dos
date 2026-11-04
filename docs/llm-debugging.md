@@ -1228,11 +1228,10 @@ frame rate at a few fixed speeds shows where it stops growing. Under the
 built-in Windows, what its blits to the primary surface and GDI's drawing on
 the screen write into the picture shown counts in `bursts` and `copies` as
 the program's own writes would, while what they copy to surfaces out of
-sight doesn't.
-Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
-and the speed it chose printed to stderr, with `longest_frame`, the longest
-host frame during the measurement (`none` in a frontend that doesn't time
-its frames).
+sight doesn't. Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every
+measurement and the speed it chose printed to stderr, with `longest_frame`,
+the longest host frame during the measurement (`none` in a frontend that
+doesn't time its frames).
 
 ### Where the emulator's time goes (profiling)
 
