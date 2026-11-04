@@ -688,9 +688,8 @@ impl Voodoo {
     /// program waits for the swap.
     pub(crate) fn banshee_status(&self, now: Now) -> u32 {
         let Some(b) = &self.banshee else { return 0 };
-        let in_retrace = self.timing.status(now.ns) & 0x08 != 0;
         let drawing = self.drawing();
-        b.status(in_retrace, drawing || self.banshee_fifo_waits())
+        b.status(self.in_vretrace(now), drawing || self.banshee_fifo_waits())
     }
 
     /// CRTC register 11h now holds `value`: bit 4 written 0 clears the

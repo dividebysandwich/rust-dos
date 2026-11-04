@@ -445,8 +445,17 @@ mod tests {
     #[test]
     fn status_bit_6_is_clear_only_during_the_vertical_retrace() {
         // Glide's grSstVRetraceOn returns whether bit 6 is 0, and a
-        // program that waits for the retrace with it waits for that.
-        for board in [Board::Standard, Board::Voodoo2Max] {
+        // program that waits for the retrace with it waits for that. Every
+        // chip has the bit the same way; for a Banshee or a Voodoo3 the
+        // read at 0 is the status in its init registers.
+        for board in [
+            Board::Standard,
+            Board::Max,
+            Board::Voodoo2,
+            Board::Voodoo2Max,
+            Board::Banshee,
+            Board::Voodoo3,
+        ] {
             let v = Voodoo::with_workers(board, 0);
             let t = v.timing;
             let line = t.line_ns as u64;
