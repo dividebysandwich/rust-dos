@@ -1751,11 +1751,23 @@ impl Voodoo {
         }
     }
 
-    /// The status register (`register_r`'s status case).
+    /// Whether the card's video is in the vertical retrace at `now`. Every
+    /// chip's status register shows it in bit 6, which is clear during the
+    /// retrace and set outside it.
+    fn in_vretrace(&self, now: Now) -> bool {
+        self.timing.status(now.ns) & 0x08 != 0
+    }
+
+    /// The status register (`register_r`'s status case). Bit 6 is set
+    /// outside the vertical retrace and clear during it, as the Voodoo
+    /// and Voodoo2 specifications say. 3dfx's drivers read it that way:
+    /// grSstVRetraceOn in the Voodoo2's glide2x.dll 2.56.00.0456 (driver
+    /// 3.03.00) returns whether `status & 0x40` is 0, and so does the
+    /// vertical blank test of its DirectDraw driver, 3dfx32v2.dll.
     fn status(&self, now: Now) -> u32 {
         let pending = self.pending_swaps(now.ticks) as u32;
         let mut result = 0x3F;
-        if self.timing.status(now.ns) & 0x08 != 0 {
+        if !self.in_vretrace(now) {
             result |= 1 << 6;
         }
         if pending > 0 {

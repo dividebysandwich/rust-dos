@@ -443,6 +443,32 @@ mod tests {
     }
 
     #[test]
+    fn status_bit_6_is_clear_only_during_the_vertical_retrace() {
+        // Glide's grSstVRetraceOn returns whether bit 6 is 0, and a
+        // program that waits for the retrace with it waits for that. Every
+        // chip has the bit the same way; for a Banshee or a Voodoo3 the
+        // read at 0 is the status in its init registers.
+        for board in [
+            Board::Standard,
+            Board::Max,
+            Board::Voodoo2,
+            Board::Voodoo2Max,
+            Board::Banshee,
+            Board::Voodoo3,
+        ] {
+            let v = Voodoo::with_workers(board, 0);
+            let t = v.timing;
+            let line = t.line_ns as u64;
+            let status = |ns: u64| v.read((STATUS as u32) << 2, Now { ns, ticks: 0 }) & 1 << 6;
+            assert_ne!(status(0), 0, "{board:?}: the first line is shown");
+            let retrace = t.retrace_start as u64 * line;
+            assert_eq!(status(retrace), 0, "{board:?}: in the retrace");
+            let after = t.retrace_end as u64 * line;
+            assert_ne!(status(after), 0, "{board:?}: after the retrace");
+        }
+    }
+
+    #[test]
     fn a_graphics_reset_turns_chroma_ranging_off() {
         let mut v = Voodoo::with_workers(Board::Voodoo2Max, 0);
         v.config_write(0x40, 1);
