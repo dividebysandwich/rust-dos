@@ -2023,6 +2023,13 @@ fn run_displayed_until_done(cpu: &mut Cpu, layout_data: u32) {
     panic!("the program didn't finish: {:?}", printed(cpu));
 }
 
+/// The frames `cycles=auto` counted: those the built-in Windows showed,
+/// and the program's own bursts and copies.
+fn activity(cpu: &Cpu) -> [u64; 3] {
+    let a = &cpu.bus.activity;
+    [a.presents, a.bursts, a.copies]
+}
+
 const SHOWN_FRAMES: u32 = 5;
 
 /// Full screen in a 320x200 8-bit mode, as Magic & Mayhem draws: each
@@ -2083,21 +2090,20 @@ fn blitting_program() -> (Vec<u8>, u32) {
 fn a_frame_blitted_to_the_primary_surface_counts_and_one_out_of_sight_doesnt() {
     let (program, data) = blitting_program();
     let mut cpu = machine("blitted_frames", program);
-    let before = (cpu.bus.activity.bursts, cpu.bus.activity.copies);
+    let before = activity(&cpu);
     run_displayed_until_done(&mut cpu, data);
     let calls = 8 + 2 * SHOWN_FRAMES as usize;
     assert_eq!(
         results(&mut cpu, data, calls as u32)[1..],
         vec![0; calls - 1]
     );
-    let a = &cpu.bus.activity;
-    // Each blit to the primary surface is a frame copied to the screen;
-    // the copies to the surface out of sight, in the same video memory,
-    // are none, and the pixel filled is too small to be one.
-    assert_eq!(
-        (a.bursts - before.0, a.copies - before.1),
-        (SHOWN_FRAMES as u64, 0)
-    );
+    // Each blit to the primary surface is a frame shown; the copies to
+    // the surface out of sight, in the same video memory, are none, and
+    // the pixel filled is too small to be one. The program itself wrote
+    // nothing to video memory.
+    let after = activity(&cpu);
+    let counted: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [SHOWN_FRAMES as u64, 0, 0]);
 }
 
 const GDI_FRAMES: u32 = 3;
@@ -2149,14 +2155,12 @@ fn gdi_program() -> (Vec<u8>, u32) {
 fn gdis_drawing_of_the_whole_screen_counts_as_frames_and_small_drawing_doesnt() {
     let (program, data) = gdi_program();
     let mut cpu = machine("gdi_frames", program);
-    let before = (cpu.bus.activity.bursts, cpu.bus.activity.copies);
+    let before = activity(&cpu);
     run_displayed_until_done(&mut cpu, data);
     let calls = 2 + 2 * GDI_FRAMES as usize;
     let results = results(&mut cpu, data, calls as u32);
     assert!(results[1..].iter().all(|&r| r == 1), "{results:X?}");
-    let a = &cpu.bus.activity;
-    assert_eq!(
-        (a.bursts - before.0, a.copies - before.1),
-        (GDI_FRAMES as u64, 0)
-    );
+    let after = activity(&cpu);
+    let counted: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [GDI_FRAMES as u64, 0, 0]);
 }

@@ -67,16 +67,18 @@ impl DebugHub {
             // time, the frames the program drew (at most one a retrace),
             // its bursts of writes to video memory the size of a frame,
             // the smaller ones that reach across the screen (copies of
-            // what changed), and its page flips (the frames it draws,
-            // however many), its checks for keys that weren't there and
-            // idle calls, and its reads of the input status register
-            // (retrace polling).
+            // what changed), its page flips (the frames it draws, however
+            // many), the frames the built-in Windows showed for it (its
+            // blits to the screen, as bursts and copies), its checks for
+            // keys that weren't there and idle calls, and its reads of the
+            // input status register (retrace polling).
             "activity": {
                 "emulated_ns": cpu.bus.clock.now_ns(),
                 "frames_drawn": cpu.bus.frames_drawn,
                 "bursts": cpu.bus.activity.bursts,
                 "copies": cpu.bus.activity.copies,
                 "flips": cpu.bus.activity.flips,
+                "presents": cpu.bus.activity.presents,
                 "polls": cpu.bus.activity.polls,
                 "status_reads": cpu.bus.activity.status_reads,
             },

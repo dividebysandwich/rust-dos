@@ -1221,17 +1221,19 @@ what the program does, and `/api/status` → `activity` has its counts since
 start: `bursts` (writes to video memory the size of a frame, the frames a
 program copies there), `copies` (smaller bursts that reach across at least
 half the screen, frames copied as what changed; counted as frames for
-protected-mode programs only), `flips` (display start changes), `polls` (key
-checks that found nothing, idle calls) and `status_reads` (port 3DAh), with
-`emulated_ns` to make rates of them. Sample it twice and divide: a game's
-frame rate at a few fixed speeds shows where it stops growing. Under the
-built-in Windows, what its blits to the primary surface and GDI's drawing on
-the screen write into the picture shown counts in `bursts` and `copies` as
-the program's own writes would, while what they copy to surfaces out of
-sight doesn't. Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every
-measurement and the speed it chose printed to stderr, with `longest_frame`,
-the longest host frame during the measurement (`none` in a frontend that
-doesn't time its frames).
+protected-mode programs only), `flips` (display start changes), `presents`
+(what the built-in Windows drew on the screen for the program, its blits to
+the primary surface and GDI's drawing, in bursts that are a frame or a copy
+by the same rules), `polls` (key checks that found nothing, idle calls) and
+`status_reads` (port 3DAh), with `emulated_ns` to make rates of them. Sample
+it twice and divide: a game's frame rate at a few fixed speeds shows where
+it stops growing. `presents` count only what lands in the picture shown, not
+the copies to surfaces out of sight, and where there are any, they are the
+frames instead of the program's own bursts and copies, which may be the same
+frames drawn in video memory before they were shown. Start the emulator with
+`RUST_DOS_AUTO_TRACE=1` to have every measurement and the speed it chose
+printed to stderr, with `longest_frame`, the longest host frame during the
+measurement (`none` in a frontend that doesn't time its frames).
 
 ### Where the emulator's time goes (profiling)
 
