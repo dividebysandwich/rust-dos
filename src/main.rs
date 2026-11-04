@@ -4,6 +4,7 @@ use sdl2::keyboard::{Keycode, Mod, Scancode};
 use sdl2::mouse::{MouseButton, MouseWheelDirection};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::audio::pump_audio;
@@ -27,6 +28,7 @@ mod input;
 mod main_almanac;
 mod main_host;
 mod monitor_power;
+mod parent_watch;
 mod sdl_audio;
 mod sdl_keys;
 mod startup;
@@ -76,7 +78,7 @@ pub static NvOptimusEnablement: u32 = 1;
 #[allow(non_upper_case_globals)]
 pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<ExitCode, String> {
     let mut args = Args::parse();
     match args.command.take() {
         Some(Command::Run(run)) => {
@@ -123,8 +125,25 @@ fn main() -> Result<(), String> {
             name,
             password: args.relay_password,
             port,
-        });
+        })
+        .map(|()| ExitCode::SUCCESS);
     }
+    // The process whose end ends rust-dos, watched from before the window
+    // opens: one gone already ends it at once.
+    let parent_watch = match args.exit_with_parent {
+        None => None,
+        Some(pid) => {
+            let target = pid.map_or(parent_watch::Target::Parent, parent_watch::Target::Pid);
+            match parent_watch::ParentWatch::start(target) {
+                Ok(watch) => Some(watch),
+                Err(parent_watch::StartError::Gone(pid)) => {
+                    eprintln!("[EXIT] Process {} has ended already (--exit-with-parent): quitting", pid);
+                    return Ok(ExitCode::from(parent_watch::EXIT_CODE));
+                }
+                Err(parent_watch::StartError::Failed(e)) => return Err(format!("--exit-with-parent: {}", e)),
+            }
+        }
+    };
     #[cfg(windows)]
     leave_explorer_console();
     let config = load_config(&args)?;
@@ -172,7 +191,7 @@ fn main() -> Result<(), String> {
     if args.vr_probe {
         display::vr_probe(&video_subsystem, &settings.vr);
         if !args.vr {
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
     }
     let headless = args.hidden
@@ -1307,6 +1326,13 @@ fn main() -> Result<(), String> {
             shutdown = debug::ShutdownReason::Quit;
             break 'running;
         }
+        if let Some(watch) = parent_watch.as_ref().filter(|w| w.gone()) {
+            let line = format!("[EXIT] Process {} ended (--exit-with-parent): quitting", watch.pid());
+            eprintln!("{}", line);
+            cpu.bus.log_string(&line);
+            shutdown = debug::ShutdownReason::Parent;
+            break 'running;
+        }
         if dbg.take_hotkey() {
             toggle_ui!();
         }
@@ -2244,7 +2270,7 @@ fn shut_down(
     shutdown: debug::ShutdownReason,
     video_recording: Option<VideoRecorder>,
     sound_recording: Option<WavWriter>,
-) -> Result<(), String> {
+) -> Result<ExitCode, String> {
     // The profile ends with the machine's last frame, before the monitor's
     // animation, which isn't the machine's work.
     if let Some(path) = &args.profile {
@@ -2267,7 +2293,7 @@ fn shut_down(
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
-    dbg.shutdown(cpu, shutdown, 0);
+    dbg.shutdown(cpu, shutdown, shutdown.exit_code() as i32);
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
@@ -2291,7 +2317,7 @@ fn shut_down(
         eprintln!("The sound recording failed: {}", e);
     }
 
-    Ok(())
+    Ok(ExitCode::from(shutdown.exit_code()))
 }
 
 /// The red dot in the top right corner that says something is being

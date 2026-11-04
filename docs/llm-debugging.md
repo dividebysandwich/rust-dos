@@ -530,6 +530,18 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Quit:** `POST /api/control/quit` turns the emulator off. The journal
   ends with `shutdown`, which long polls and streams get before the
   connection closes, and the process exits with code 0.
+- **Quit with the script:** `--exit-with-parent` turns the emulator off
+  when the process that started it ends, and `--exit-with-parent PID`
+  when that process does, so a script that dies before it sends the quit
+  leaves no emulator behind. It shuts down as the quit does, but the
+  `shutdown` entry has `"reason": "parent"`, a `[EXIT]` line in the log
+  names the process, and the exit code is 4. rust-dos takes a handle on
+  the process at start (a process handle on Windows, a pidfd on Linux, a
+  kqueue event on macOS), so another process that gets the ID later
+  doesn't keep it running; other Unix systems, and Linux before 5.3, look
+  at the process five times a second instead. A process that has ended
+  already ends rust-dos at once, with the same code. A PID rust-dos may
+  not watch is an error at start.
 
 ### Inspect or patch state
 

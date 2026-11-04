@@ -274,6 +274,7 @@ impl DebugHub {
                 ShutdownReason::Quit => "quit",
                 ShutdownReason::Exit => "exit",
                 ShutdownReason::Window => "window",
+                ShutdownReason::Parent => "parent",
             },
             "by": by.as_ref().map(|c| c.req),
             "cancelled": cancelled,
