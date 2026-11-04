@@ -647,12 +647,6 @@ impl Voodoo {
         // After what is drawn, unless the copy goes into the queue behind
         // it (`blt_queue_dest`). Mostly nothing is queued, and the words
         // skip the wait: Moto Racer sends 40,000 a frame for its sky.
-        // The recording's layout is checked once a copy, like the queue's
-        // answer: what it is worked out from changes with the same writes,
-        // which drop that answer. A recording that lost its layout since
-        // (too many commands) gets it back.
-        let synced = self.blt_queue.get().is_some()
-            && (self.mirror.get_mut().as_ref()).is_none_or(|m| m.layout().is_some());
         let queue = self.blt_queue_cached();
         if queue.is_none() && self.writes_queue() {
             // The rows it has left to write, whose pixels it may read.
@@ -664,15 +658,10 @@ impl Voodoo {
                 self.blt.y + self.blt.rows,
             )]);
         }
-        if synced {
-            debug_assert!(
-                (self.mirror.borrow().as_ref())
-                    .is_none_or(|m| !m.needs_snapshot(&self.mirror_key(m.layout()))),
-                "a layout change blt_queue_stale missed"
-            );
-        } else {
-            self.mirror_sync();
-        }
+        // Per word, not per copy: the layout it checks includes a
+        // Banshee's CRTC and VID_PROC_CFG, which a write outside
+        // `register_to` changes without dropping `blt_queue`.
+        self.mirror_sync();
         let mut data = data;
         if command & (1 << 8) != 0 {
             data = data.swap_bytes();
