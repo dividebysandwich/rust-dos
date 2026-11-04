@@ -326,8 +326,12 @@ impl Activity {
     /// drawing on the screen. Its bursts count as `presents`, apart from
     /// the program's own writes, which may be the same frame drawn in
     /// video memory out of sight before it is blitted to the screen.
+    ///
+    /// They don't add to `video_bytes`, the program's output: a program
+    /// without frames that only has small things drawn for it (Johnny
+    /// Castaway's sprites, through GDI) waits, as on main, and isn't
+    /// taken for a program at work and run flat out.
     pub fn shown_write(&mut self, at: u64, low: u64, high: u64, bytes: u64) {
-        self.video_bytes += bytes;
         let s = self.shown;
         if at.saturating_sub(s.last) > BURST_GAP {
             if s.bytes >= self.burst_min || self.is_copy(s.bytes, s.low, s.high) {
@@ -2969,6 +2973,32 @@ mod tests {
             panic!("{:?}", auto.step);
         };
         assert!((27.0..=32.0).contains(&fps), "{fps}");
+    }
+
+    #[test]
+    fn small_drawing_shown_for_a_program_isnt_work() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(100_000);
+        let screen = 640 * 480 * 2;
+        bus.activity.set_screen(screen, true);
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        // A screen saver's 32x32 sprite drawn by GDI 20 times a second:
+        // 40 KB a second, more than a program at work writes, but no
+        // frames.
+        let sprite = 32 * 32 * 2;
+        let step = 100_000_000 / 20;
+        let speed = loop {
+            bus.clock.icount += step;
+            let at = bus.clock.icount;
+            bus.activity.shown_write(at, 100_000, 100_000 + 640 * 2 * 32, sprite);
+            if let Some(speed) = auto.update(bus, true, HOST, 0) {
+                break speed;
+            }
+        };
+        assert_eq!(bus.activity.presents, 0);
+        assert!(speed < 100_000, "{speed}");
     }
 
     #[test]
