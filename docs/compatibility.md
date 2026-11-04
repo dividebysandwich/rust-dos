@@ -50,9 +50,6 @@ that names the game, its settings and what happened.
 
 ## DOS games
 
-The [game fixes](../CONFIGURATION.md#game-fixes) named below are on by
-default: `game_fixes=false` or `game_fixes_off` turns them off.
-
 * **3D Blaster PCI games** (Battle Arena Toshinden SE, Rebel Moon,
   Flight Unlimited, Hi-Octane): `machine=svga_verite`, and copy the four
   `VRIT*170.CGL` modules into the game's folder
@@ -64,15 +61,17 @@ default: `game_fixes=false` or `game_fixes_off` turns them off.
   in the game's profile.
 * **BloodNet** (GOG): GOG's `.bdn` file mounts as a CUE sheet
   ([disk images](../CONFIGURATION.md#disk-images)).
-* **Blues Brothers: Jukebox Adventure**: the sound clicks and the game
-  hangs about 75 seconds into the title music, on a real PC too. The
-  game fixes `jukebox-sb-mix` and `jukebox-mod-hang` deal with both; the
-  second was made for Razor 1911's BLUES.EXE only.
+* **Blues Brothers: Jukebox Adventure**: the game hangs about 75
+  seconds into the title screen's music, on a real PC too. Rust-DOS
+  fixes that only in Razor 1911's release (BLUES.EXE of 25096 bytes);
+  with any other, press a key on the title screen before then
+  ([game fixes](../CONFIGURATION.md#game-fixes)).
 * **Comanche 3** on a VFX1: in flight, Video > Stereoscopic, then
   Alt+F12 for head tracking
   ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
-* **Descent**: plays badly at frame rates above the display's;
-  `cycles=auto` doesn't speed it past the refresh rate. On a VFX1
+* **Descent**: keep `cycles=auto`, the default. A high fixed `cycles`
+  runs it faster than the display's refresh rate, and it plays badly
+  there. On a VFX1
   headset, start it as `DESCENT -vfx -vfxtrak` with `steer=true` in
   [`[vfx1]`](../CONFIGURATION.md#vfx1); its heads-up display shows in
   the left eye only. [docs/vfx1.md](vfx1.md) has the resolutions.
@@ -86,17 +85,10 @@ default: `game_fixes=false` or `game_fixes_off` turns them off.
   `IPXSETUP -nodes 2`, or `SERSETUP -com2`
   ([playing over a LAN](../CONFIGURATION.md#playing-over-a-lan),
   [serial and modem games](../CONFIGURATION.md#serial-and-modem-games)).
-* **F-117A, F-19, Gunship 2000, Covert Action** (MicroProse): DSWAP.EXE
-  waits for the install disk and PLAYER.EXE loops forever without the
-  copy protection's data; the game fixes `microprose-dswap` and
-  `microprose-player` skip them.
 * **King's Quest, Ultima and other early CGA games**: their composite
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`
   ([`[emulator]`](../CONFIGURATION.md#emulator)).
-* **Prehistorik 2**: the sound clicks at every note, on a real Sound
-  Blaster too. The game fix `prehistorik2-sb-mix` mixes it around the
-  centre.
 * **Quake 1.08** on a VFX1:
   `VFX1QK QUAKE.EXE +vid_mode 7 +lcd_x 1` with `stereo=lines`, as the
   forte-vfx1-vr project found it; it hasn't been tried in rust-dos
@@ -158,12 +150,10 @@ which drivers to install.
   ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
 * **Glover**: on a Voodoo3 (`machine=svga_voodoo3`), install the driver
   from 3dfx's Voodoo3 driver CD 1.2 (`3dfx32v3.dll` 4.11.01.1151), not
-  the later 1.07.00. With 1.07.00 the game's 3D goes to the buffer on
-  screen: about half the frames show only the background colour, and the
-  LOADING text is missing. At a low `cycles` (50000) the other frames are
-  half drawn, and the star wipe and the title screen don't show either.
-  4.11.01.1151 draws it correctly with DirectX 6.1 or 7. This was
-  checked only with that driver's files copied over 1.07.00's
+  the later 1.07.00. With 1.07.00 the picture flickers: about half the
+  frames show only the background colour, and the LOADING text is
+  missing. 4.11.01.1151 draws it correctly with DirectX 6.1 or 7. It
+  was checked only with its files copied over 1.07.00's
   ([the Voodoo3 driver](win9x-howto.md#the-voodoo3-driver)). On the
   built-in Windows Glover needs neither.
 * **GLQuake with the shareware data**: rebuilds its palette table at
@@ -189,11 +179,6 @@ which drivers to install.
 * **SubCulture** (3dfx version): Windows 95, `voodoo=true`,
   `machine=svga_s3`, `memsize=64`, `cpu=pentium`
   ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
-* **Unreal Tournament demo**: to set it up before its first start, put
-  `GameRenderDevice=GlideDrv.GlideRenderDevice` and `FirstRun=348` in
-  `System\UnrealTournament.ini`
-  ([a game that has to be
-  installed](win9x-howto.md#a-game-that-has-to-be-installed)).
 * **Wipeout for 3D Rage**: `machine=svga_ati_3drage` and ATI's driver
   4.35 with one line added to its INF
   ([ATI 3D RAGE](../CONFIGURATION.md#ati-3d-rage)).
