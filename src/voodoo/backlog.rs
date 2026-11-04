@@ -17,8 +17,8 @@
 //! picture, rows that wrap) is kept, and taken to read everything.
 
 use super::mem::Vram;
-use super::mirror::{pixel_at, span};
-use super::raster::{RasterState, Stride, TmuRaster, screen_y};
+use super::mirror::{pixel_at, span, texel_span};
+use super::raster::{RasterState, Stride, screen_y};
 use super::setup::render_triangle;
 use super::workers::{Job, Word};
 use std::collections::{HashMap, VecDeque};
@@ -488,7 +488,7 @@ fn frame_buffer_units(st: &RasterState) -> impl Iterator<Item = (usize, (u64, u6
         let t = t
             .as_ref()
             .filter(|t| t.lodmin < 8 << 8 && t.ram.same(&st.fb))?;
-        Some((unit, texture_bytes(t)))
+        Some((unit, texel_span(t)))
     })
 }
 
@@ -496,31 +496,6 @@ fn frame_buffer_units(st: &RasterState) -> impl Iterator<Item = (usize, (u64, u6
 /// take texels from, a range for each unit that reads there.
 fn frame_buffer_texels(st: &RasterState) -> impl Iterator<Item = (u64, u64)> + '_ {
     frame_buffer_units(st).map(|(_, range)| range)
-}
-
-/// The bytes the texture `t` may take texels from, first to past the
-/// last: the levels its LOD range picks, or all of the memory where they
-/// wrap around. The rasterizer clamps the LOD to lodmin..lodmax, and a
-/// level the texture hasn't takes the next (`texture`). The levels
-/// outside the range aren't read: Glide points texBaseAddr below a
-/// texture whose largest level is smaller than 256x256, so those lie in
-/// other memory, a colour buffer's among it.
-fn texture_bytes(t: &TmuRaster) -> (u64, u64) {
-    let wide = ((t.mode >> 8) & 0xF >= 8) as u32;
-    let memory = t.mask as u64 + 1;
-    let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8) as usize;
-    let last = ((t.lodmax >> 8) + 1).clamp(0, 8) as usize;
-    let (mut start, mut end) = (memory, 0);
-    for (level, &base) in t.lodoffset.iter().enumerate().take(last + 1).skip(first) {
-        let texels = ((t.wmask >> level) + 1) as u64 * ((t.hmask >> level) + 1) as u64;
-        let last = base as u64 + (texels << wide);
-        if last > memory {
-            return (0, memory);
-        }
-        start = start.min(base as u64);
-        end = end.max(last);
-    }
-    (start, end)
 }
 
 /// The card's memory the jobs given out or held back may read or write,
@@ -761,7 +736,7 @@ const MAX_WORDS: usize = 1 << 20;
 const PIXEL_MARKS: usize = 16;
 
 /// The textures held triangles take texels from in the frame buffer's
-/// memory (`texture_bytes`): each range of bytes, with the numbers of the
+/// memory (`texel_span`): each range of bytes, with the numbers of the
 /// jobs that read it and through which texture unit.
 #[derive(Default)]
 struct Readers {

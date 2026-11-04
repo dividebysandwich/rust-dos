@@ -563,8 +563,8 @@ struct TexKey {
 
 struct Cached {
     id: u32,
-    /// The bytes of texture RAM its levels come from, all of it if they
-    /// wrap.
+    /// The bytes of texture RAM the levels it was decoded from lie in,
+    /// first to last (`texel_span`), all of it if they wrap.
     start: u32,
     end: u32,
     /// The unit's write count it was last known good at.
@@ -874,8 +874,7 @@ impl Mirror {
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {
         // The card clamps the level to lodmin and then to lodmax, so with
-        // lodmin above lodmax it reads lodmax (as `backlog::texture_bytes`
-        // has it).
+        // lodmin above lodmax it reads lodmax (as `texel_span` has it).
         let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8);
         let last = (t.lodmax >> 8).clamp(first, 8);
         let key = TexKey {
@@ -947,6 +946,7 @@ impl Mirror {
                     self.next_id
                 });
                 let (start, end) = texel_span(t);
+                let (start, end) = (start as u32, end.saturating_sub(1) as u32);
                 self.textures.insert(key, Cached { id, start, end, good_at: tmu.writes, used: frame });
                 self.push(Command::Texture(Box::new(Texture { id, levels: decode(t, first, last) })));
                 id
@@ -1034,16 +1034,29 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
     }
 }
 
-/// The bytes of the memory the texture `t` draws with may read, first to
-/// last: from its first level's to past its last's, or all of the unit's
-/// memory where they don't make sense.
-pub fn texel_span(t: &TmuRaster) -> (u32, u32) {
-    let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
-    if end > start && end <= t.mask + 1 {
-        (start, end - 1)
-    } else {
-        (0, t.mask)
+/// The bytes the texture `t` may take texels from, first to past the
+/// last: the levels its LOD range picks, or all of the memory where they
+/// wrap around. The rasterizer clamps the LOD to lodmin..lodmax, and a
+/// level the texture hasn't takes the next (`raster::texture`). The
+/// levels outside the range aren't read: Glide points texBaseAddr below
+/// a texture whose largest level is smaller than 256x256, so those lie
+/// in other memory, a colour or depth buffer's among it.
+pub fn texel_span(t: &TmuRaster) -> (u64, u64) {
+    let wide = ((t.mode >> 8) & 0xF >= 8) as u32;
+    let memory = t.mask as u64 + 1;
+    let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8) as usize;
+    let last = ((t.lodmax >> 8) + 1).clamp(0, 8) as usize;
+    let (mut start, mut end) = (memory, 0);
+    for (level, &base) in t.lodoffset.iter().enumerate().take(last + 1).skip(first) {
+        let texels = ((t.wmask >> level) + 1) as u64 * ((t.hmask >> level) + 1) as u64;
+        let last = base as u64 + (texels << wide);
+        if last > memory {
+            return (0, memory);
+        }
+        start = start.min(base as u64);
+        end = end.max(last);
     }
+    (start, end)
 }
 
 /// Levels `first..=last` of the texture `t` draws with, as its texels
