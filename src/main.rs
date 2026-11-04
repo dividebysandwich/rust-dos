@@ -137,10 +137,15 @@ fn main() -> Result<ExitCode, String> {
             match parent_watch::ParentWatch::start(target) {
                 Ok(watch) => Some(watch),
                 Err(parent_watch::StartError::Gone(pid)) => {
-                    eprintln!("[EXIT] Process {} has ended already (--exit-with-parent): quitting", pid);
+                    eprintln!(
+                        "[EXIT] Process {} has ended already (--exit-with-parent): quitting",
+                        pid
+                    );
                     return Ok(ExitCode::from(parent_watch::EXIT_CODE));
                 }
-                Err(parent_watch::StartError::Failed(e)) => return Err(format!("--exit-with-parent: {}", e)),
+                Err(parent_watch::StartError::Failed(e)) => {
+                    return Err(format!("--exit-with-parent: {}", e));
+                }
             }
         }
     };
@@ -1327,7 +1332,8 @@ fn main() -> Result<ExitCode, String> {
             break 'running;
         }
         if let Some(watch) = parent_watch.as_ref().filter(|w| w.gone()) {
-            let line = format!("[EXIT] Process {} ended (--exit-with-parent): quitting", watch.pid());
+            let line =
+                format!("[EXIT] Process {} ended (--exit-with-parent): quitting", watch.pid());
             eprintln!("{}", line);
             cpu.bus.log_string(&line);
             shutdown = debug::ShutdownReason::Parent;
@@ -2293,7 +2299,7 @@ fn shut_down(
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
-    dbg.shutdown(cpu, shutdown, shutdown.exit_code() as i32);
+    dbg.shutdown(cpu, shutdown);
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
@@ -2366,6 +2372,25 @@ mod tests {
         assert!(text.starts_with("rust-dos "), "{text}");
         assert!(text.ends_with("[DOS] this run\n"), "{text}");
         assert!(!text.contains("previous run"), "{text}");
+    }
+
+    #[test]
+    fn exit_with_parent_takes_a_pid_that_names_one_process() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["rust-dos", "--no-config"];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).map(|a| a.exit_with_parent)
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["--exit-with-parent"]).unwrap(), Some(None));
+        assert_eq!(parse(&["--exit-with-parent", "1234"]).unwrap(), Some(Some(1234)));
+        // 0 names no process on Windows and the caller's process group to
+        // kill(2); IDs past i32::MAX turn into negative pid_t values, which
+        // kill(2) also takes for groups.
+        assert!(parse(&["--exit-with-parent", "0"]).is_err());
+        assert!(parse(&["--exit-with-parent", "2147483648"]).is_err());
+        // The relay never runs the watch.
+        assert!(parse(&["--exit-with-parent", "--relay", "4000"]).is_err());
     }
 
     #[test]

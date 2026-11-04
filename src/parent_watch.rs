@@ -10,6 +10,11 @@
 //! main loop quits as `/api/control/quit` does when it sees the flag: the
 //! log, the journal and the recordings get finished, which a kill from
 //! outside (a job object, `PR_SET_PDEATHSIG`) doesn't allow.
+//!
+//! The flag goes up only when the process has ended. A wait that fails is
+//! tried again, or the process is looked at every so often instead, so a
+//! failure of the watch doesn't end the emulator under a process that
+//! still runs.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,7 +68,7 @@ impl ParentWatch {
 }
 
 /// Starts the thread that waits for the process, and raises `gone` when
-/// it ends.
+/// it ends. `wait` returns only once the process has ended.
 fn spawn_waiter(
     pid: u32,
     gone: Arc<AtomicBool>,
@@ -94,10 +99,12 @@ fn parent_id() -> u32 {
 #[cfg(windows)]
 mod imp {
     use super::{StartError, Target, spawn_waiter};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+        ERROR_INVALID_PARAMETER, FILETIME, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
         WAIT_OBJECT_0,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -134,10 +141,11 @@ mod imp {
                 std::io::Error::from_raw_os_error(error as i32)
             )));
         }
-        let handle = Handle(handle);
+        // SAFETY: the handle is open, and nothing else owns it.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
         // The process ended, and something still holds a handle on it.
         // SAFETY: the handle is open and has SYNCHRONIZE.
-        if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 {
+        if unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == WAIT_OBJECT_0 {
             return Err(StartError::Gone(pid));
         }
         // Windows keeps a process's parent ID after the parent ends, and
@@ -147,31 +155,22 @@ mod imp {
             // SAFETY: GetCurrentProcess returns a pseudo handle that needs
             // no closing.
             let ours = created(unsafe { GetCurrentProcess() });
-            if let (Some(theirs), Some(ours)) = (created(handle.0), ours)
+            if let (Some(theirs), Some(ours)) = (created(handle.as_raw_handle()), ours)
                 && theirs > ours
             {
                 return Err(StartError::Gone(pid));
             }
         }
         spawn_waiter(pid, gone, move || {
-            let handle = handle;
-            // SAFETY: the handle stays open until `handle` drops.
-            unsafe { WaitForSingleObject(handle.0, INFINITE) };
+            // A wait that fails is tried again rather than taken for the
+            // process's end.
+            // SAFETY: `handle` keeps the handle open.
+            while unsafe { WaitForSingleObject(handle.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0
+            {
+                std::thread::sleep(Duration::from_millis(200));
+            }
         })?;
         Ok(pid)
-    }
-
-    /// A process handle, closed when it drops.
-    struct Handle(HANDLE);
-
-    // SAFETY: a process handle may be used and closed from any thread.
-    unsafe impl Send for Handle {}
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: the handle is open, and nothing else closes it.
-            unsafe { CloseHandle(self.0) };
-        }
     }
 
     /// When the process was created, in 100 ns units.
@@ -199,20 +198,21 @@ mod imp {
                 std::io::Error::last_os_error()
             )));
         }
-        let snapshot = Handle(snapshot);
+        // SAFETY: the snapshot is open, and nothing else owns it.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
         // SAFETY: takes no pointers.
         let me = unsafe { GetCurrentProcessId() };
         // SAFETY: PROCESSENTRY32W is plain data, for which zero is valid.
         let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         // SAFETY: the snapshot is open and the entry's size is set.
-        let mut more = unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0;
+        let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
         while more {
             if entry.th32ProcessID == me {
                 return Ok(entry.th32ParentProcessID);
             }
             // SAFETY: as for Process32FirstW.
-            more = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
+            more = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
         }
         Err(StartError::Failed(
             "can't find the process that started rust-dos".into(),
@@ -223,7 +223,8 @@ mod imp {
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{StartError, Target, spawn_waiter};
-    use std::io::Error;
+    use std::io::{Error, ErrorKind};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -240,34 +241,40 @@ mod imp {
             let error = Error::last_os_error();
             return match error.raw_os_error() {
                 Some(libc::ESRCH) => Err(StartError::Gone(pid)),
-                // Linux before 5.3: the process is looked at every so often
-                // instead.
-                Some(libc::ENOSYS) => super::poll::watch(target, pid, gone),
+                // Linux before 5.3 has no pidfd_open (ENOSYS), and a
+                // seccomp filter that doesn't know the call, as older
+                // container runtimes have, refuses it with EPERM, which
+                // pidfd_open itself never returns: the process is looked
+                // at every so often instead.
+                Some(libc::ENOSYS | libc::EPERM) => super::poll::watch(target, pid, gone),
                 _ => Err(StartError::Failed(format!(
                     "can't watch process {pid}: {error}"
                 ))),
             };
         }
+        // SAFETY: the descriptor is new, and nothing else owns it.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         // The parent ended before the pidfd was taken, and the ID went to
         // another process: rust-dos has a new parent by now.
         if target == Target::Parent && super::parent_id() != pid {
-            // SAFETY: the descriptor is ours and open.
-            unsafe { libc::close(fd) };
             return Err(StartError::Gone(pid));
         }
         spawn_waiter(pid, gone, move || {
             let mut poll = libc::pollfd {
-                fd,
+                fd: fd.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
             // The pidfd becomes readable when the process ends.
-            // SAFETY: one pollfd, which lives on this stack.
-            while unsafe { libc::poll(&mut poll, 1, -1) } < 0
-                && Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-            {}
-            // SAFETY: the descriptor is ours and open.
-            unsafe { libc::close(fd) };
+            // SAFETY: one pollfd, which lives on this stack, for a
+            // descriptor `fd` keeps open.
+            while unsafe { libc::poll(&mut poll, 1, -1) } < 0 {
+                if Error::last_os_error().kind() != ErrorKind::Interrupted {
+                    // The wait failed, which isn't the process's end.
+                    super::poll::wait(target, pid);
+                    break;
+                }
+            }
         })?;
         Ok(pid)
     }
@@ -276,7 +283,8 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{StartError, Target, spawn_waiter};
-    use std::io::Error;
+    use std::io::{Error, ErrorKind};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -293,10 +301,8 @@ mod imp {
                 Error::last_os_error()
             )));
         }
-        let close = || {
-            // SAFETY: the descriptor is ours and open.
-            unsafe { libc::close(kq) };
-        };
+        // SAFETY: the descriptor is new, and nothing else owns it.
+        let kq = unsafe { OwnedFd::from_raw_fd(kq) };
         // SAFETY: kevent is plain data, for which zero is valid.
         let mut change: libc::kevent = unsafe { std::mem::zeroed() };
         change.ident = pid as usize;
@@ -304,9 +310,18 @@ mod imp {
         change.flags = libc::EV_ADD | libc::EV_ONESHOT;
         change.fflags = libc::NOTE_EXIT;
         // SAFETY: one change, no events asked for, no timeout.
-        if unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+        let added = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if added < 0 {
             let error = Error::last_os_error();
-            close();
             return match error.raw_os_error() {
                 Some(libc::ESRCH) => Err(StartError::Gone(pid)),
                 _ => Err(StartError::Failed(format!(
@@ -317,38 +332,53 @@ mod imp {
         // The parent ended before the event was added, and the ID went to
         // another process: rust-dos has a new parent by now.
         if target == Target::Parent && super::parent_id() != pid {
-            close();
             return Err(StartError::Gone(pid));
         }
         spawn_waiter(pid, gone, move || {
             // SAFETY: as above.
             let mut event: libc::kevent = unsafe { std::mem::zeroed() };
             loop {
-                // SAFETY: no changes, room for one event, no timeout.
+                // SAFETY: no changes, room for one event, no timeout, on a
+                // descriptor `kq` keeps open.
                 let n = unsafe {
-                    libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null())
+                    libc::kevent(
+                        kq.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        &mut event,
+                        1,
+                        std::ptr::null(),
+                    )
                 };
-                if n > 0 || Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                if n > 0 {
+                    break;
+                }
+                if Error::last_os_error().kind() != ErrorKind::Interrupted {
+                    // The wait failed, which isn't the process's end.
+                    super::poll::wait(target, pid);
                     break;
                 }
             }
-            // SAFETY: the descriptor is ours and open.
-            unsafe { libc::close(kq) };
         })?;
         Ok(pid)
     }
 }
 
-/// Unix systems other than Linux and macOS have no handle on a process
-/// here: the process is looked at every so often. Linux uses this too
-/// before 5.3, which has no pidfd.
-#[cfg(all(unix, not(target_os = "macos")))]
+/// Looking at the process every so often. Unix systems other than Linux
+/// and macOS have no handle on a process here, and Linux has none before
+/// 5.3; the others fall back on it when their wait fails.
+#[cfg(unix)]
 mod poll {
-    use super::{StartError, Target, spawn_waiter};
     use std::io::Error;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    use super::Target;
+    #[cfg(not(target_os = "macos"))]
+    use super::{StartError, spawn_waiter};
+    #[cfg(not(target_os = "macos"))]
+    use std::sync::Arc;
+    #[cfg(not(target_os = "macos"))]
+    use std::sync::atomic::AtomicBool;
 
     /// How often the process is looked at.
     const INTERVAL: Duration = Duration::from_millis(200);
@@ -368,6 +398,14 @@ mod poll {
         }
     }
 
+    /// Returns once the process has ended.
+    pub(super) fn wait(target: Target, pid: u32) {
+        while alive(target, pid) {
+            std::thread::sleep(INTERVAL);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn watch(
         target: Target,
         pid: u32,
@@ -376,11 +414,7 @@ mod poll {
         if !alive(target, pid) {
             return Err(StartError::Gone(pid));
         }
-        spawn_waiter(pid, gone, move || {
-            while alive(target, pid) {
-                std::thread::sleep(INTERVAL);
-            }
-        })?;
+        spawn_waiter(pid, gone, move || wait(target, pid))?;
         Ok(pid)
     }
 }

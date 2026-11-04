@@ -100,7 +100,13 @@ pub(crate) struct Args {
     /// Quit when the process that started rust-dos ends, or the process
     /// PID: as POST /api/control/quit does, with exit code 4. If the
     /// process has ended already, rust-dos exits at once
-    #[arg(long, value_name = "PID", num_args = 0..=1)]
+    #[arg(
+        long,
+        value_name = "PID",
+        num_args = 0..=1,
+        value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64),
+        conflicts_with = "relay"
+    )]
     pub(crate) exit_with_parent: Option<Option<u32>>,
 
     /// Instruction trace ring buffer capacity (entries, ~64 bytes each).
