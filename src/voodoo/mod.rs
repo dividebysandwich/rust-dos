@@ -1760,9 +1760,10 @@ impl Voodoo {
 
     /// The status register (`register_r`'s status case). Bit 6 is set
     /// outside the vertical retrace and clear during it, as the Voodoo
-    /// and Voodoo2 specifications say. 3dfx's Glide reads it that way:
-    /// grSstVRetraceOn in the Voodoo2's GLIDE2X.DLL 3.01 returns whether
-    /// `status & 0x40` is 0.
+    /// and Voodoo2 specifications say. 3dfx's drivers read it that way:
+    /// grSstVRetraceOn in the Voodoo2's glide2x.dll 2.56.00.0456 (driver
+    /// 3.03.00) returns whether `status & 0x40` is 0, and so does the
+    /// vertical blank test of its DirectDraw driver, 3dfx32v2.dll.
     fn status(&self, now: Now) -> u32 {
         let pending = self.pending_swaps(now.ticks) as u32;
         let mut result = 0x3F;
