@@ -17,7 +17,7 @@
 //! picture, rows that wrap) is kept, and taken to read everything.
 
 use super::mem::Vram;
-use super::mirror::{pixel_at, span, texel_span};
+use super::mirror::{pixel_at, span};
 use super::raster::{RasterState, Stride, screen_y};
 use super::setup::render_triangle;
 use super::workers::{Job, Word};
@@ -488,7 +488,7 @@ fn frame_buffer_units(st: &RasterState) -> impl Iterator<Item = (usize, (u64, u6
         let t = t
             .as_ref()
             .filter(|t| t.lodmin < 8 << 8 && t.ram.same(&st.fb))?;
-        Some((unit, texel_span(t)))
+        Some((unit, t.texel_span()))
     })
 }
 
@@ -736,8 +736,8 @@ const MAX_WORDS: usize = 1 << 20;
 const PIXEL_MARKS: usize = 16;
 
 /// The textures held triangles take texels from in the frame buffer's
-/// memory (`texel_span`): each range of bytes, with the numbers of the
-/// jobs that read it and through which texture unit.
+/// memory (`TmuRaster::texel_span`): each range of bytes, with the
+/// numbers of the jobs that read it and through which texture unit.
 #[derive(Default)]
 struct Readers {
     ranges: Vec<Reader>,
