@@ -112,7 +112,11 @@ handover() {
     esac
     owner=${2:-}
     case $owner in
-    '' | *[!A-Za-z0-9._-]*) exec "$bin" --help ;;
+    '' | *[!A-Za-z0-9._-]*)
+        echo "usage: run-lock.sh heavy|measure OWNER [MAX_WAIT_S] -- CMD..." >&2
+        echo "run-lock: OWNER is letters, digits, '.', '_' and '-'" >&2
+        exit 2
+        ;;
     esac
     shift 2
     if [ $# -gt 0 ] && [ "$1" != -- ]; then

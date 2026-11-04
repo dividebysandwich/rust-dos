@@ -33,18 +33,26 @@
 //! - Shared: it takes `gate` exclusive, takes `lock` shared, and lets
 //!   `gate` go. It holds `gate` only for that moment. If `lock` can't be
 //!   had (a measurement is letting go), it lets `gate` go and tries again.
-//! - Exclusive: it takes `gate` exclusive and keeps it, while it waits for
+//! - Exclusive: it takes `gate` shared and keeps it, while it waits for
 //!   `lock` and while it runs; then it takes `lock` exclusive.
 //!
-//! While a measurement waits or runs it holds `gate`, so no new shared
-//! run gets in, and the running ones drain. Measurements thus come before
-//! every shared run that asked after them. Among several waiting
-//! measurements there is no order.
+//! While a measurement waits or runs it holds `gate` shared, so no new
+//! shared run can take it exclusive and get in, and the running ones
+//! drain. Every waiting measurement holds `gate` at once, so when one
+//! lets go, the next takes `lock` while the shared runs that asked after
+//! it still find `gate` held. Measurements thus come before every shared
+//! run that asked after them. Among several waiting measurements there is
+//! no order.
+//!
+//! A shared take finds `gate` held for a moment by another shared take,
+//! too. It tells the two apart by the holders' records (an exclusive one
+//! is listed) and may try again sooner when none is.
 //!
 //! A program that waits with a limit polls the `try_` forms, since a
 //! blocked lock call can't be given up. One that waits without a limit
-//! may poll too. When the wait runs out, it lets go of everything, removes
-//! its holder files, and fails.
+//! may poll too. When the wait runs out, or the program gives up for a
+//! reason of its own (the process it serves has ended), it lets go of
+//! everything, removes its holder files, and fails.
 //!
 //! Once it holds the lock, it rewrites its record with `state` `holding`.
 //! It lets go by removing its holder files (the JSON first), then `lock`,
@@ -83,8 +91,10 @@
 //! A reader lists the `.json` files. When it can lock the matching
 //! `.lock` file, or there is none, that holder is gone: the reader removes
 //! the JSON, then the `.lock` file, and lets the lock go. A `.lock` file
-//! with no JSON that it can lock is removed the same way. A reader takes
-//! no other lock, so listing the holders never gets in a waiter's way.
+//! with no JSON that it can lock is removed the same way, and so is a
+//! `<name>.json.tmp` with no `.lock` file left (a writer killed before its
+//! rename). A reader takes no other lock, so listing the holders never
+//! gets in a waiter's way.
 //!
 //! # Nested holds
 //!
@@ -101,6 +111,8 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod cli;
@@ -123,6 +135,10 @@ pub const ENV_DIR: &str = "RUST_DOS_RUN_LOCK_DIR";
 pub const EXIT_TIMED_OUT: i32 = 3;
 /// How often a wait tries again.
 pub const POLL: Duration = Duration::from_millis(100);
+/// How long a wait with nobody listed in the way counts as a moment's
+/// contention, and how often it tries again meanwhile.
+const BRIEF: Duration = Duration::from_secs(1);
+const BRIEF_POLL: Duration = Duration::from_millis(5);
 
 /// How the lock is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -265,6 +281,9 @@ pub struct Request {
     pub name: Option<String>,
     /// How often the wait tries again.
     pub poll: Duration,
+    /// A flag that ends the wait when it goes up (another thread raises
+    /// it), with [`Error::Cancelled`].
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Request {
@@ -275,7 +294,14 @@ impl Request {
             program: program.to_string(),
             name: None,
             poll: POLL,
+            cancel: None,
         }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
     }
 }
 
@@ -293,6 +319,8 @@ pub enum Error {
     },
     /// An exclusive hold asked for inside a shared one.
     Conflict { dir: PathBuf },
+    /// The request's `cancel` flag went up during the wait.
+    Cancelled { mode: Mode, dir: PathBuf },
 }
 
 impl Error {
@@ -300,7 +328,9 @@ impl Error {
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Io { .. } => 1,
-            Error::TimedOut { .. } | Error::Conflict { .. } => EXIT_TIMED_OUT,
+            Error::TimedOut { .. } | Error::Conflict { .. } | Error::Cancelled { .. } => {
+                EXIT_TIMED_OUT
+            }
         }
     }
 }
@@ -333,6 +363,12 @@ impl std::fmt::Display for Error {
                  it would wait for its own parent",
                 dir.display(),
                 ENV_HELD
+            ),
+            Error::Cancelled { mode, dir } => write!(
+                f,
+                "stopped waiting for the {} lock in {}",
+                mode.as_str(),
+                dir.display()
             ),
         }
     }
@@ -560,12 +596,16 @@ impl Hold {
         let mut told: Option<Vec<String>> = None;
         let mut gate_held = false;
         loop {
-            if hold.try_once(&mut gate_held).map_err(io_err(&lock_path))? {
+            if hold.try_once(&mut gate_held, &gate_path, &lock_path)? {
                 break;
             }
-            let in_way = hold.in_the_way(gate_held);
+            let in_way = hold.in_the_way();
+            // Nobody listed in the way, early in the wait: another shared
+            // take has `gate` for a moment, or a holder's record isn't
+            // written yet. Not worth a line about waiting, and soon over.
+            let brief = in_way.is_empty() && told.is_none() && start.elapsed() < BRIEF;
             let files: Vec<String> = in_way.iter().map(|h| h.file.clone()).collect();
-            if told.as_ref() != Some(&files) {
+            if !brief && told.as_ref() != Some(&files) {
                 waiting(&in_way);
                 told = Some(files);
             }
@@ -579,7 +619,17 @@ impl Hold {
                     holders: in_way,
                 });
             }
-            std::thread::sleep(request.poll);
+            if request.cancelled() {
+                return Err(Error::Cancelled {
+                    mode: hold.mode,
+                    dir: hold.dir.clone(),
+                });
+            }
+            std::thread::sleep(if brief {
+                request.poll.min(BRIEF_POLL)
+            } else {
+                request.poll
+            });
         }
         if hold.mode == Mode::Shared {
             hold.gate = None;
@@ -591,39 +641,43 @@ impl Hold {
 
     /// One try at the lock. `gate_held` is whether an exclusive take has
     /// the gate already.
-    fn try_once(&mut self, gate_held: &mut bool) -> io::Result<bool> {
+    fn try_once(
+        &mut self,
+        gate_held: &mut bool,
+        gate_path: &Path,
+        lock_path: &Path,
+    ) -> Result<bool, Error> {
         let gate = self.gate.as_ref().expect("the gate is open while taking");
         match self.mode {
             Mode::Shared => {
-                if !got(gate.try_lock())? {
+                if !got(gate.try_lock()).map_err(io_err(gate_path))? {
                     return Ok(false);
                 }
-                let taken = got(self.lock.try_lock_shared());
-                gate.unlock()?;
+                let taken = got(self.lock.try_lock_shared()).map_err(io_err(lock_path));
+                gate.unlock().map_err(io_err(gate_path))?;
                 taken
             }
             Mode::Exclusive => {
                 if !*gate_held {
-                    *gate_held = got(gate.try_lock())?;
+                    *gate_held = got(gate.try_lock_shared()).map_err(io_err(gate_path))?;
                     if !*gate_held {
                         return Ok(false);
                     }
                 }
-                got(self.lock.try_lock())
+                got(self.lock.try_lock()).map_err(io_err(lock_path))
             }
         }
     }
 
-    /// The other holders this take waits for: those that hold the gate or
-    /// may (the exclusive ones), and for an exclusive take that has the
-    /// gate, the shared holders too.
-    fn in_the_way(&self, gate_held: bool) -> Vec<Holder> {
+    /// The other holders this take waits for. A shared take waits for the
+    /// exclusive ones, which hold the gate while they wait and run. An
+    /// exclusive take waits for those that hold the lock, in either mode.
+    fn in_the_way(&self) -> Vec<Holder> {
         let mut found = holders(&self.dir).unwrap_or_default();
         found.retain(|h| h.file != self.entry.file);
-        found.retain(|h| match (self.mode, h.record.mode) {
-            (_, Mode::Exclusive) => !gate_held,
-            (Mode::Exclusive, Mode::Shared) => h.record.state == State::Holding,
-            (Mode::Shared, Mode::Shared) => false,
+        found.retain(|h| match self.mode {
+            Mode::Shared => h.record.mode == Mode::Exclusive,
+            Mode::Exclusive => h.record.state == State::Holding,
         });
         found
     }
@@ -673,12 +727,15 @@ pub fn holders(dir: &Path) -> io::Result<Vec<Holder>> {
     };
     let mut jsons = Vec::new();
     let mut locks = Vec::new();
+    let mut tmps = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(stem) = name.strip_suffix(".json") {
             jsons.push(stem.to_string());
         } else if let Some(stem) = name.strip_suffix(".lock") {
             locks.push(stem.to_string());
+        } else if let Some(stem) = name.strip_suffix(".json.tmp") {
+            tmps.push(stem.to_string());
         }
     }
     let mut found = Vec::new();
@@ -702,6 +759,13 @@ pub fn holders(dir: &Path) -> io::Result<Vec<Holder>> {
     }
     for stem in locks.iter().filter(|stem| !jsons.contains(stem)) {
         alive(&holders_dir.join(format!("{}.lock", stem)), None);
+    }
+    // A writer killed between its write and its rename left this; a live
+    // one keeps its `.lock` file, which the loops above left in place.
+    for stem in &tmps {
+        if !holders_dir.join(format!("{}.lock", stem)).exists() {
+            let _ = std::fs::remove_file(holders_dir.join(format!("{}.json.tmp", stem)));
+        }
     }
     found.sort_by(|a, b| (a.record.asked, &a.file).cmp(&(b.record.asked, &b.file)));
     Ok(found)
@@ -869,6 +933,62 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_measurement_comes_before_later_shared_holds_at_the_hand_over() {
+        let dir = scratch("handover");
+        let first = held(take_with(&dir, &request(Mode::Exclusive, 0), None, |_| {}));
+        let dir2 = dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            // Slow to try again, so that the shared take below tries
+            // first once the first measurement has let go.
+            let req = Request {
+                poll: Duration::from_millis(500),
+                ..Request::new(Mode::Exclusive, "second")
+            };
+            let hold = held(take_with(&dir2, &req, None, |_| {}));
+            tx.send(()).unwrap();
+            drop(hold);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !holders(&dir)
+            .unwrap()
+            .iter()
+            .any(|h| h.record.state == State::Waiting)
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(first);
+        // The second measurement asked first: the gate it holds keeps
+        // this shared take out although the lock is free.
+        assert!(matches!(
+            take_with(&dir, &request(Mode::Shared, 0), None, |_| {}),
+            Err(Error::TimedOut { .. })
+        ));
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the second measurement got the lock");
+        second.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_raised_cancel_flag_ends_the_wait() {
+        let dir = scratch("cancel");
+        let excl = held(take_with(&dir, &request(Mode::Exclusive, 0), None, |_| {}));
+        let flag = Arc::new(AtomicBool::new(true));
+        let req = Request {
+            cancel: Some(flag),
+            poll: Duration::from_millis(10),
+            ..Request::new(Mode::Shared, "test")
+        };
+        let err = take_with(&dir, &req, None, |_| {}).unwrap_err();
+        assert!(matches!(err, Error::Cancelled { .. }), "{:?}", err);
+        assert_eq!(holders(&dir).unwrap().len(), 1);
+        drop(excl);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn nested_holds_inherit() {
         let dir = scratch("nested");
         std::fs::create_dir_all(&dir).unwrap();
@@ -931,6 +1051,8 @@ mod tests {
             serde_json::to_string(&record).unwrap(),
         )
         .unwrap();
+        // One killed between writing its record and renaming it.
+        std::fs::write(holders_dir.join("999996.json.tmp"), "{").unwrap();
         assert!(holders(&dir).unwrap().is_empty());
         let left: Vec<_> = std::fs::read_dir(&holders_dir)
             .unwrap()

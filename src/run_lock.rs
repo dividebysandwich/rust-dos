@@ -7,6 +7,8 @@
 //! instead.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use rust_dos::config::RunLockSetting;
@@ -15,9 +17,15 @@ use rust_dos_runlock::{self as runlock, Error, Mode, Request, Taken};
 use crate::args::Args;
 
 /// Takes the lock as `args` and the configuration file's `setting` say,
-/// before any window or device opens. Ok(None) when the run goes without
-/// it; Err(code) when rust-dos is to exit with `code`, having said why.
-pub(crate) fn take(args: &Args, setting: Option<&RunLockSetting>) -> Result<Option<Taken>, i32> {
+/// before any window or device opens. A wait ends early, with
+/// [`crate::parent_watch::EXIT_CODE`], when `parent_gone` goes up
+/// (`--exit-with-parent`). Ok(None) when the run goes without it;
+/// Err(code) when rust-dos is to exit with `code`, having said why.
+pub(crate) fn take(
+    args: &Args,
+    setting: Option<&RunLockSetting>,
+    parent_gone: Option<Arc<AtomicBool>>,
+) -> Result<Option<Taken>, i32> {
     let explicit =
         args.run_lock.is_some() || args.run_lock_exclusive || args.run_lock_wait.is_some();
     if args.no_run_lock || (!explicit && setting == Some(&RunLockSetting::Off)) {
@@ -43,6 +51,7 @@ pub(crate) fn take(args: &Args, setting: Option<&RunLockSetting>) -> Result<Opti
             .run_lock_wait
             .filter(|&secs| secs > 0)
             .map(Duration::from_secs),
+        cancel: parent_gone,
         ..Request::new(mode, "rust-dos")
     };
     let start = Instant::now();
@@ -74,6 +83,13 @@ pub(crate) fn take(args: &Args, setting: Option<&RunLockSetting>) -> Result<Opti
             }
             Ok(Some(taken))
         }
+        Err(Error::Cancelled { .. }) => {
+            eprintln!(
+                "[EXIT] The process watched (--exit-with-parent) ended while rust-dos \
+                 waited for the run lock: quitting"
+            );
+            Err(crate::parent_watch::EXIT_CODE.into())
+        }
         Err(e @ Error::Io { .. }) if !explicit => {
             eprintln!("run-lock: running without the run lock: {}", e);
             Ok(None)
@@ -91,7 +107,9 @@ fn export(vars: [(&'static str, std::ffi::OsString); 2]) {
     for (key, value) in vars {
         // SAFETY: called from the main thread at startup, before the
         // threads that could read the environment start (the debug
-        // server's, the sound's, the printer's).
+        // server's, the sound's, the printer's). The one thread that may
+        // run already, --exit-with-parent's watch, only waits on a
+        // process handle and reads no environment.
         unsafe { std::env::set_var(key, value) };
     }
 }

@@ -3707,10 +3707,14 @@ exits instead, since the run asked for the lock.
   that takes the lock reads.
 * While it waits, rust-dos prints `run-lock: waiting for ...` on standard
   error, naming the holders. A wait that `--run-lock-wait` ends exits
-  with code 3, before any window or sound device opens.
-* `rust-dos run` takes it as the emulator does; `rust-dos unpack` and
-  `rust-dos commit` don't. The libretro core and `rust-dos-relay` take no
-  lock.
+  with code 3, before any window or sound device opens. With
+  `--exit-with-parent`, a run whose watched process ends while it waits
+  exits with code 4 and doesn't start.
+* `rust-dos run` takes it as the emulator does, but reads no
+  configuration file, so `run_lock` doesn't apply to it: give it
+  `--no-run-lock` or `--run-lock DIR` instead (`rust-dos --no-run-lock
+  run ...`). `rust-dos unpack` and `rust-dos commit` take no lock. The
+  libretro core and `rust-dos-relay` take no lock either.
 
 `rust-dos-lock` holds the lock around any command, so that builds and
 scripts count too, and lists who holds it. `rust-dos lock` does the same

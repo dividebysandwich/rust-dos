@@ -85,7 +85,7 @@ fn main() -> Result<ExitCode, String> {
         Some(Command::Run(run)) => {
             // An emulator run like any other, under the run lock; it reads
             // no configuration file.
-            let run_lock = match run_lock::take(&args, None) {
+            let run_lock = match run_lock::take(&args, None, None) {
                 Ok(taken) => taken,
                 Err(code) => std::process::exit(code),
             };
@@ -167,8 +167,10 @@ fn main() -> Result<ExitCode, String> {
     let mut settings = Settings::from_config(&config);
     apply_args(&mut settings, &args)?;
     // The machine-wide run lock, held until rust-dos ends; a run that
-    // gives up waiting exits before any window or device opens.
-    let mut run_lock = match run_lock::take(&args, config.run_lock.as_ref()) {
+    // gives up waiting, or whose watched parent ends meanwhile, exits
+    // before any window or device opens.
+    let parent_gone = parent_watch.as_ref().map(parent_watch::ParentWatch::flag);
+    let mut run_lock = match run_lock::take(&args, config.run_lock.as_ref(), parent_gone) {
         Ok(taken) => taken,
         Err(code) => return Ok(ExitCode::from(code as u8)),
     };

@@ -65,6 +65,12 @@ impl ParentWatch {
     pub fn gone(&self) -> bool {
         self.gone.load(Ordering::Acquire)
     }
+
+    /// The flag that goes up when the process ends, for a wait elsewhere
+    /// (the run lock's) to stop on.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.gone.clone()
+    }
 }
 
 /// Starts the thread that waits for the process, and raises `gone` when

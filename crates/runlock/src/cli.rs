@@ -382,14 +382,21 @@ mod platform {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     static CHILD: AtomicI32 = AtomicI32::new(0);
+    /// A TERM or HUP that came before CMD was started, for CMD.
+    static PENDING: AtomicI32 = AtomicI32::new(0);
 
     /// TERM and HUP go on to CMD, and the wrapper waits for it to end;
     /// INT and QUIT, which the terminal sends CMD too, are left to it.
     /// Handlers, unlike ignored signals, don't pass on to CMD.
     extern "C" fn forward(signal: libc::c_int) {
+        if signal != libc::SIGTERM && signal != libc::SIGHUP {
+            return;
+        }
         let pid = CHILD.load(Ordering::SeqCst);
-        if pid > 0 && (signal == libc::SIGTERM || signal == libc::SIGHUP) {
+        if pid > 0 {
             unsafe { libc::kill(pid, signal) };
+        } else {
+            PENDING.store(signal, Ordering::SeqCst);
         }
     }
 
@@ -407,6 +414,11 @@ mod platform {
 
     pub(super) fn spawned(child: &Child) {
         CHILD.store(child.id() as i32, Ordering::SeqCst);
+        // One that came while CMD was being started.
+        let signal = PENDING.swap(0, Ordering::SeqCst);
+        if signal != 0 {
+            unsafe { libc::kill(child.id() as i32, signal) };
+        }
     }
 
     pub(super) fn exit_code(status: ExitStatus) -> i32 {
