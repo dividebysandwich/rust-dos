@@ -276,6 +276,10 @@
 # over the picture and under the box above the first prompt: true (the
 # default) or false.
 #version_check=true
+# The machine-wide run lock, which lets a timing measurement run alone
+# among scripted runs (CONFIGURATION.md, "The run lock"): on (the
+# default), off, or the folder to keep it in.
+#run_lock=on
 # Ask almanac.rust-dos.com for the settings players found best for a
 # program as it starts from the prompt (by its file's name and checksum),
 # and play it with them; your own come back when it ends. The start waits

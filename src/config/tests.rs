@@ -17,6 +17,21 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
+fn run_lock_is_off_on_or_a_directory() {
+    let home = Path::new("/home/u");
+    let get = |value: &str| {
+        parse(&format!("[emulator]\nrun_lock={}\n", value), Path::new("/cfg"), Some(home))
+    };
+    assert_eq!(get("off").run_lock, Some(RunLockSetting::Off));
+    assert_eq!(get("on").run_lock, None);
+    assert_eq!(get("~/locks").run_lock, Some(RunLockSetting::Dir(home.join("locks"))));
+    let relative = Some(RunLockSetting::Dir(Path::new("/cfg").join("locks")));
+    assert_eq!(get("\"locks\"").run_lock, relative);
+    assert!(get("off").warnings.is_empty());
+    assert!(get("\"\"").warnings.iter().any(|w| w.contains("invalid run_lock")));
+}
+
+#[test]
 fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
     let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
     assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));

@@ -14,6 +14,8 @@ mkdir -p "$work"
 
 export RUST_DOS_RUN_LOCK_DIR=$work/lock
 export RUST_DOS_RUN_LOCK_POLL=0.1
+# The script's own lock, even where rust-dos-lock is installed.
+export RUST_DOS_RUN_LOCK_FALLBACK=1
 unset RUST_DOS_RUN_LOCK_INSIDE
 LOCK=$RUST_DOS_RUN_LOCK_DIR/measure
 HEAVY=$RUST_DOS_RUN_LOCK_DIR/heavy

@@ -2,8 +2,8 @@
 
 use super::types::parse_bool;
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, Settings, Win32Trace,
-    WindowsVersion, parse_mouse_sensitivity,
+    AspectRatio, Config, DesktopDepth, DosVersion, Filter, RunLockSetting, Section, Settings,
+    Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -23,6 +23,25 @@ use std::path::{Path, PathBuf};
 /// the CPU that takes the most (`CpuModel::max_memsize`).
 pub const MIN_MEMSIZE: usize = 2;
 pub const MAX_MEMSIZE: usize = 512;
+
+/// `run_lock`: off, on (the default) or the lock's directory, relative
+/// to the configuration file's.
+fn parse_run_lock(
+    value: &str,
+    base_dir: &Path,
+    home: Option<&Path>,
+) -> Result<Option<RunLockSetting>, String> {
+    let value = value.trim_matches('"');
+    Ok(match value.to_ascii_lowercase().as_str() {
+        "" => return Err("invalid run_lock '' (off, on or a directory)".to_string()),
+        "off" | "false" | "no" => Some(RunLockSetting::Off),
+        "on" | "true" | "yes" => None,
+        _ => Some(RunLockSetting::Dir(match (value.strip_prefix("~/"), home) {
+            (Some(rest), Some(h)) => h.join(rest),
+            _ => base_dir.join(value),
+        })),
+    })
+}
 
 /// A memory size as written: a number of MB, with or without the MB.
 pub fn parse_memsize(value: &str) -> Result<usize, String> {
@@ -357,6 +376,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "version_check" => match parse_bool(value) {
                             Some(on) => config.version_check = Some(on),
                             None => warn(format!("invalid version_check '{}' (true or false)", value)),
+                        },
+                        "run_lock" => match parse_run_lock(value, base_dir, home) {
+                            Ok(setting) => config.run_lock = setting,
+                            Err(e) => warn(e),
                         },
                         "almanac_auto" => match parse_bool(value) {
                             Some(on) => config.almanac_auto = Some(on),

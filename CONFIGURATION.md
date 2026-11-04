@@ -553,6 +553,9 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   version the last check found, and the notification follows once the
   answer is in. `true` (the default) or `false`. Deterministic mode and
   the debug server never check.
+* `run_lock` is the machine-wide [run lock](#the-run-lock): `on` (the
+  default), `off`, or the directory to keep it in, relative to the
+  configuration file's directory.
 * `almanac_auto` asks almanac.rust-dos.com for the settings players
   found best for a program started from the prompt, by its file's name,
   size and checksums, and starts it with them; your own settings come
@@ -3673,6 +3676,72 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--start-time "YYYY-MM-DD HH:MM:SS"` | The date and time the clock starts at with `--deterministic` (default 1995-04-11 12:34:56) |
 | `--relay [PORT]` | Relay [LAN](#playing-over-a-lan) rooms on this UDP port (default 21213) instead of starting the emulator |
 | `--relay-password TEXT` | One password for all the rooms of `--relay` (without it, whoever makes a room gives it one or none) |
+| `--no-run-lock` | Take no [run lock](#the-run-lock) (`run_lock=off`) |
+| `--run-lock DIR` | Keep the run lock in `DIR`, and exit instead of running without it when it can't be taken |
+| `--run-lock-exclusive` | Take the run lock exclusive, for a measurement: wait for the other runs to end, and keep new ones out while this one runs |
+| `--run-lock-wait SECONDS` | Wait at most this long for the run lock, then exit with code 3 before opening a window (default 0, no limit) |
+
+### The run lock
+
+Scripts and agents that drive rust-dos often run several jobs on one
+machine at once: emulator runs, builds, tests. Most of them can share it,
+but a timing measurement (a benchmark, a frame-time capture) can't: any
+other emulator or compiler beside it spoils the number. The run lock lets
+them share the machine: every rust-dos run takes it shared, a measurement
+takes it exclusive and runs alone, and a measurement that waits keeps new
+shared runs out until it has run.
+
+It costs a player nothing. A run that takes it shared locks two small files
+in a `run-lock` folder in the per-user configuration directory (the table
+in [Configuration file](#configuration-file)) and writes a record of a few
+hundred bytes; after that it does nothing until rust-dos ends. It waits
+only while a measurement runs or waits on the same machine. Where the
+folder can't be written, rust-dos says so in one line and runs without the
+lock; with `--run-lock`, `--run-lock-exclusive` or `--run-lock-wait` it
+exits instead, since the run asked for the lock.
+
+* `--no-run-lock` or `run_lock=off` takes no lock.
+* `RUST_DOS_RUN_LOCK_DIR`, `run_lock=DIR` or `--run-lock DIR` moves it.
+  Programs exclude each other only when they use the same folder, so a
+  machine that moves it does so in the environment, which every program
+  that takes the lock reads.
+* While it waits, rust-dos prints `run-lock: waiting for ...` on standard
+  error, naming the holders. A wait that `--run-lock-wait` ends exits
+  with code 3, before any window or sound device opens. With
+  `--exit-with-parent`, a run whose watched process ends while it waits
+  exits with code 4 and doesn't start.
+* `rust-dos run` takes it as the emulator does, but reads no
+  configuration file, so `run_lock` doesn't apply to it: give it
+  `--no-run-lock` or `--run-lock DIR` instead (`rust-dos --no-run-lock
+  run ...`). `rust-dos unpack` and `rust-dos commit` take no lock. The
+  libretro core and `rust-dos-relay` take no lock either.
+
+`rust-dos-lock` holds the lock around any command, so that builds and
+scripts count too, and lists who holds it. `rust-dos lock` does the same
+for a machine with only the emulator installed:
+
+```sh
+rust-dos-lock shared -- cargo build
+rust-dos-lock exclusive --wait 600 -- bash bench.sh
+rust-dos-lock status
+```
+
+It exits with the command's exit code, or with 3 and without running the
+command when `--wait SECONDS` runs out. `--name NAME` labels the hold in
+`status` (by default the command's name), `--dir DIR` picks the folder,
+and `status --json` prints the records. A program the wrapper starts, and
+rust-dos above all, inherits its hold through `RUST_DOS_RUN_LOCK_HELD`
+and `RUST_DOS_RUN_LOCK_DIR` and takes nothing, so a measurement script
+under `exclusive` starts emulators without waiting for itself; an
+exclusive take inside a shared hold exits with 3. On Windows the wrapper
+runs the command in a job object, so killing the wrapper ends the command
+and its children too; on Linux and macOS a process the command leaves
+running in the background isn't held.
+
+A hold is the OS's lock on a file, which ends with the process however it
+ends, so a killed run leaves nothing to clean up. The protocol, for
+programs that take the lock themselves, is in the module comment of
+[`crates/runlock`](crates/runlock/src/lib.rs).
 
 ### Running DOS tools from the host's shell
 

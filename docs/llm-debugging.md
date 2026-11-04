@@ -29,6 +29,13 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 
   Before quoting a result, check that `audio_driver` in `/api/underruns`
   or `/api/stats` says what you meant to run on.
+- **The run lock:** every run takes the machine-wide run lock shared, so
+  a timing measurement started with `--run-lock-exclusive` (or wrapped
+  in `rust-dos-lock exclusive -- CMD`) runs alone; see "The run lock" in
+  CONFIGURATION.md. A run that waits for it has no debug server yet and
+  says `run-lock: waiting for ...` on stderr, so a script that polls
+  `/api/status` should watch stderr too. `rust-dos-lock status` lists
+  the runs holding it with their debug servers.
 - **Build mode:** use a release build. A debug build runs about 5x slower,
   which changes timing-sensitive behaviour.
 - **No window:** `SDL_VIDEODRIVER=dummy` needs no window, and without a
