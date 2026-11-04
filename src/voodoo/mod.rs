@@ -1751,11 +1751,15 @@ impl Voodoo {
         }
     }
 
-    /// The status register (`register_r`'s status case).
+    /// The status register (`register_r`'s status case). Bit 6 is set
+    /// outside the vertical retrace and clear during it, as the Voodoo
+    /// and Voodoo2 specifications say. 3dfx's Glide reads it that way:
+    /// grSstVRetraceOn in the Voodoo2's GLIDE2X.DLL 3.01 returns whether
+    /// `status & 0x40` is 0.
     fn status(&self, now: Now) -> u32 {
         let pending = self.pending_swaps(now.ticks) as u32;
         let mut result = 0x3F;
-        if self.timing.status(now.ns) & 0x08 != 0 {
+        if self.timing.status(now.ns) & 0x08 == 0 {
             result |= 1 << 6;
         }
         if pending > 0 {
