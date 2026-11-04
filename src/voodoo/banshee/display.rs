@@ -552,6 +552,20 @@ mod tests {
     }
 
     #[test]
+    fn the_bytes_of_the_desktops_picture() {
+        // 1024x768 at 16 bits a pixel: 1.5 MB, its rows one after another.
+        let b = card_1024x768(1 << 18);
+        assert_eq!(b.desktop_bytes_per_pixel(), 2);
+        assert_eq!(b.desktop_bytes(), 1024 * 768 * 2);
+        assert!(b.desktop_linear());
+        // At 32 bits, 3 MB; half mode shows each of its 384 rows twice.
+        let b = card_1024x768(3 << 18 | VIDPROC_HALF_MODE);
+        assert_eq!(b.desktop_bytes(), 1024 * 384 * 4);
+        // Tiled, its rows aren't one after another.
+        assert!(!card_1024x768(1 << 18 | VIDPROC_DESKTOP_TILED).desktop_linear());
+    }
+
+    #[test]
     fn what_the_picture_shows() {
         // A 1024x768 desktop at 1 MB, 2048 bytes a row: 1.5 MB of it.
         let mut b = card_1024x768(1 << 18);

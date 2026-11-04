@@ -14,8 +14,12 @@
 //! program draws out of sight and copies the finished picture to video
 //! memory, the bursts of writes that copy it. A protected-mode program may
 //! copy only what changed since the frame before (Alien Legacy): a burst
-//! too small to be a frame that reaches across the screen is one too. A
-//! program that checks for keystrokes that aren't there, calls DOS's idle
+//! too small to be a frame that reaches across the screen is one too.
+//! Under the built-in Windows, a program's blits to the primary surface
+//! and GDI's drawing on the screen copy the picture in the emulator's own
+//! code: what they write into the picture shown counts as the program's
+//! writes (Magic & Mayhem blits each frame from system memory). A program
+//! that checks for keystrokes that aren't there, calls DOS's idle
 //! interrupts or polls for the retrace in a loop is waiting, and has speed
 //! to spare.
 //!
@@ -265,6 +269,20 @@ impl Activity {
     /// a little.)
     #[inline]
     pub fn video_write(&mut self, at: u64, offset: u64, bytes: u64) {
+        self.area_write(at, offset, offset + bytes, bytes);
+    }
+
+    /// The built-in Windows wrote `bytes` bytes between `low` and `high`
+    /// of video memory, in the picture the display shows, at instruction
+    /// `at`: a blit to the primary surface, or GDI's drawing on the
+    /// screen. They are the program's frames as much as its own writes
+    /// would be, and count the same.
+    pub fn shown_write(&mut self, at: u64, low: u64, high: u64, bytes: u64) {
+        self.area_write(at, low, high, bytes);
+    }
+
+    #[inline]
+    fn area_write(&mut self, at: u64, low: u64, high: u64, bytes: u64) {
         self.video_bytes += bytes;
         if at.saturating_sub(self.last_write) > BURST_GAP {
             if self.burst >= self.burst_min {
@@ -276,8 +294,8 @@ impl Activity {
             (self.low, self.high) = (u64::MAX, 0);
         }
         self.burst += bytes;
-        self.low = self.low.min(offset);
-        self.high = self.high.max(offset + bytes);
+        self.low = self.low.min(low);
+        self.high = self.high.max(high);
         self.last_write = at;
     }
 
@@ -316,8 +334,12 @@ impl Activity {
 }
 
 /// Whether the screen's rows lie one after the other in video memory in
-/// the mode `bus` is in: the EGA's and VGA's graphics and VESA modes.
+/// the mode `bus` is in: the EGA's and VGA's graphics and VESA modes, and
+/// a Banshee's or Voodoo3's own modes with the desktop not tiled.
 pub fn linear_screen(bus: &Bus) -> bool {
+    if let Some(b) = bus.banshee().filter(|b| b.extended()) {
+        return b.desktop_linear();
+    }
     matches!(
         bus.video_mode,
         VideoMode::Ega320x200
@@ -334,6 +356,11 @@ pub fn linear_screen(bus: &Bus) -> bool {
 /// The bytes a program writes for a whole screen in the mode `bus` is in:
 /// in the 16-colour modes and the unchained 256-colour ones, one plane's.
 pub fn screen_bytes(bus: &Bus) -> u64 {
+    // A Banshee's or Voodoo3's own modes, which `video_mode` (the VGA's)
+    // doesn't describe.
+    if let Some(b) = bus.banshee().filter(|b| b.extended()) {
+        return b.desktop_bytes() as u64;
+    }
     let (w, h) = bus.display_size();
     let pixels = (w * h) as u64;
     match bus.video_mode {

@@ -135,12 +135,7 @@ pub fn mode(cpu: &Cpu) -> Option<Mode> {
         if cfg & card::VIDPROC_HALF_MODE != 0 {
             height /= 2;
         }
-        let bpp = match (cfg >> 18) & 7 {
-            0 => 8,
-            1 => 16,
-            2 => 24,
-            _ => 32,
-        };
+        let bpp = b.desktop_bytes_per_pixel() * 8;
         let pitch = b.reg(card::VID_DESKTOP_OVERLAY_STRIDE) & 0x3FFF;
         return Some(Mode {
             width,
@@ -275,6 +270,7 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
+    drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo
         && v.banshee().is_some()
     {
@@ -287,6 +283,39 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
     {
         cpu.bus.vga.mark_dirty_rows(first, last);
     }
+}
+
+/// The bytes of video memory the picture the display shows takes: from
+/// the display start, the mode's rows. None while the adapter shows
+/// none of its own modes.
+fn shown_bytes(cpu: &Cpu) -> Option<std::ops::Range<u32>> {
+    let m = mode(cpu)?;
+    let start = match cpu.bus.banshee() {
+        Some(b) => b.reg(card::VID_DESKTOP_START_ADDR),
+        None => cpu.bus.vbe.start,
+    };
+    Some(start..start + m.pitch * m.height)
+}
+
+/// The built-in Windows wrote `bytes` bytes of video memory from byte
+/// `low` to before byte `high`, for the program: count those in the
+/// picture shown as its writes to video memory (`Activity`), which is
+/// how `cycles=auto` sees its frames. A blit to the primary surface or
+/// GDI's drawing on the screen shows the frame; the copies into
+/// surfaces out of sight that make it don't, as a flip of them does.
+pub fn drew(cpu: &mut Cpu, low: u32, high: u32, bytes: u64) {
+    let Some(shown) = shown_bytes(cpu) else {
+        return;
+    };
+    let (low, high) = (low.max(shown.start), high.min(shown.end));
+    if low >= high {
+        return;
+    }
+    let bytes = bytes.min((high - low) as u64);
+    let at = cpu.bus.clock.icount;
+    cpu.bus
+        .activity
+        .shown_write(at, low as u64, high as u64, bytes);
 }
 
 // What the picture is.
