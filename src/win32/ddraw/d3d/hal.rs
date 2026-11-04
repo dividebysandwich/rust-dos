@@ -723,9 +723,7 @@ fn fbi_combine(
     if [a1, a2, aa1, aa2].into_iter().any(arg_is_factor) {
         api::constant_color_value(cpu, d.state(RS_TEXTUREFACTOR));
     }
-    let (f, factor, local, other) = pick(d.stage(0, TSS_COLOROP), a1, a2);
-    let blends_by_diffuse_alpha = factor == api::COMBINE_FACTOR_LOCAL_ALPHA;
-    api::color_combine(cpu, f, factor, local, other, false);
+    let color = pick(d.stage(0, TSS_COLOROP), a1, a2);
     let (f, factor, local, other) = pick(alpha_op, aa1, aa2);
     // The alpha unit's factor is alpha already.
     let factor = match factor {
@@ -769,35 +767,45 @@ fn fbi_combine(
     } else {
         (f, factor, local, other)
     };
-    // The color unit's local alpha, which BLENDDIFFUSEALPHA and
-    // BLENDCURRENTALPHA blend by, is the alpha unit's local one: it has
-    // to be the diffuse alpha, not the texture factor's (#492).
-    let alpha = (f, factor, local, other);
-    let alpha = if blends_by_diffuse_alpha && local != it && !alpha_tested {
-        iterated_local(alpha).unwrap_or(alpha)
-    } else {
-        alpha
-    };
+    // BLENDDIFFUSEALPHA and BLENDCURRENTALPHA blend the color by the
+    // color unit's local alpha, which is the alpha unit's local one: it
+    // has to be the diffuse alpha, not the texture factor's (#492). When
+    // the alpha unit's other alpha is the diffuse one, the color unit
+    // blends by its other alpha, which is that one, and the alpha unit
+    // stays as it is. Otherwise the alpha unit takes the iterated alpha
+    // as its local one where it can (`iterated_local`), which changes
+    // its other alpha, and so not under an alpha test, which compares
+    // that one.
+    let (cf, mut cfactor, clocal, cother) = color;
+    let mut alpha = (f, factor, local, other);
+    if cfactor == api::COMBINE_FACTOR_LOCAL_ALPHA && local == api::COMBINE_LOCAL_CONSTANT {
+        if other == other_it {
+            cfactor = api::COMBINE_FACTOR_OTHER_ALPHA;
+        } else if !alpha_tested {
+            alpha = iterated_local(alpha).unwrap_or(alpha);
+        }
+    }
+    api::color_combine(cpu, cf, cfactor, clocal, cother, false);
     let (f, factor, local, other) = alpha;
     api::alpha_combine(cpu, f, factor, local, other, false);
 }
 
 /// The alpha unit's function, factor, local and other alpha with the
 /// same result and the iterated alpha as the local one, for a local
-/// that is the texture factor's alpha (the constant color's), where the
-/// unit can have it. The texture factor moves to the other alpha: color1,
-/// which holds the same color as color0. MODULATE and ADD can swap their
-/// arguments, so MODULATE of the texture, the diffuse alpha or the
-/// factor by the factor, and ADD of the diffuse alpha and the factor,
-/// have one. ADD of the texture and the factor, SUBTRACT and the blends
-/// with a factor need it as the local alpha along with another alpha the
-/// unit can only take as its other one or its factor, and have none.
+/// that is the texture factor's alpha (the constant color's) and an
+/// other alpha that isn't the iterated one, where the unit can have it.
+/// The texture factor moves to the other alpha: color1, which holds the
+/// same color as color0. A product can swap its operands, so MODULATE
+/// of the texture or the factor by the factor has one. ADD of the
+/// texture and the factor, SUBTRACT of the texture less the factor and
+/// the blends with a factor need it as the local alpha along with
+/// another alpha the unit can only take as its other one or its factor,
+/// and have none. ADD of the factor twice needs it as both.
 ///
-/// The other alpha is the one the card's alpha test compares, and the
-/// one a keyed texture's has to stay the texture's for, so the caller
-/// leaves the units as they are under an alpha test. The product's
-/// operands swap, and the card rounds a product by the second one's
-/// alpha plus one: the result can differ from the first by one in 255.
+/// The other alpha is the one the card's alpha test compares, so the
+/// caller leaves the units as they are under an alpha test. The card
+/// rounds a product by its factor plus one, so with the operands
+/// swapped the result can differ by one in 255.
 fn iterated_local(alpha: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
     use api::*;
     let (f, factor, local, other) = alpha;
@@ -808,14 +816,8 @@ fn iterated_local(alpha: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
         (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_TEXTURE) => {
             COMBINE_FACTOR_TEXTURE_ALPHA
         }
-        (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_ITERATED) => {
-            COMBINE_FACTOR_LOCAL_ALPHA
-        }
         (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_CONSTANT) => {
             COMBINE_FACTOR_OTHER_ALPHA
-        }
-        (COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL, COMBINE_FACTOR_ONE, COMBINE_OTHER_ITERATED) => {
-            COMBINE_FACTOR_ONE
         }
         _ => return None,
     };

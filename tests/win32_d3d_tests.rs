@@ -1795,24 +1795,53 @@ fn diffuse_alpha_blend_steps(op: u32, a1: u32, a2: u32, factor: u32) -> Vec<Step
 
 #[test]
 fn blending_by_the_diffuse_alpha_ignores_the_texture_factor_of_the_alpha() {
-    // A white texture of alpha 0x88 on a red quad of diffuse alpha 0x40,
-    // with the alpha the texture's by the texture factor's, 0xC0. The
-    // color is a quarter of the white and three quarters of the red, by
-    // the diffuse alpha (#492), and blends over black by 0x88 by 0xC0,
-    // about 0x66.
-    let mut steps = diffuse_alpha_blend_steps(TOP_MODULATE, TA_TEXTURE, TA_TFACTOR, 0xC0FF_FFFF);
-    steps.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_0000)));
-    let scene = Scene {
-        api: Api::D3D7,
-        card: None,
-        clear: 0,
-        zbuffer: None,
-        texture: Some([0x8FFF; 64]),
-        texture_alpha: true,
-        steps,
-    };
-    let p = draw_scene("blend_diffuse_alpha_tfactor", &scene);
-    assert_rgb(&p, 32, 32, [102, 26, 26], 8);
+    // A white texture of alpha 0x88 on a red quad, with alpha operations
+    // that take the texture factor. The color blends the white and the
+    // red by the diffuse alpha (#492), and then over black by the
+    // stage's alpha. With a diffuse alpha of 0x40 the color is
+    // (255, 64, 64), and the factor's alpha of 0xC0 would make it
+    // (255, 191, 191); with 0xC0 and 0x40 it is the other way round.
+    // The cases with the diffuse alpha as an argument run under an alpha
+    // test too, which passes every pixel here.
+    #[rustfmt::skip]
+    let cases = [
+        // 0x88 by 0xC0: about 0x66.
+        (TOP_MODULATE, TA_TEXTURE, TA_TFACTOR, 0x40, 0xC0, false, [102, 26, 26]),
+        // 0x40 by 0xC0: about 0x30.
+        (TOP_MODULATE, TA_DIFFUSE, TA_TFACTOR, 0x40, 0xC0, false, [48, 12, 12]),
+        (TOP_MODULATE, TA_DIFFUSE, TA_TFACTOR, 0x40, 0xC0, true, [48, 12, 12]),
+        // 0xC0 by 0xC0: about 0x90.
+        (TOP_MODULATE, TA_TFACTOR, TA_TFACTOR, 0x40, 0xC0, false, [145, 36, 36]),
+        // 0x40 and 0xC0: 0xFF, clamped.
+        (TOP_ADD, TA_DIFFUSE, TA_TFACTOR, 0x40, 0xC0, false, [255, 64, 64]),
+        (TOP_ADD, TA_DIFFUSE, TA_TFACTOR, 0x40, 0xC0, true, [255, 64, 64]),
+        // 0xC0 less 0x40: 0x80.
+        (TOP_SUBTRACT, TA_DIFFUSE, TA_TFACTOR, 0xC0, 0x40, false, [128, 96, 96]),
+        (TOP_SUBTRACT, TA_DIFFUSE, TA_TFACTOR, 0xC0, 0x40, true, [128, 96, 96]),
+    ];
+    for (i, (op, a1, a2, diffuse, factor, tested, want)) in cases.into_iter().enumerate() {
+        let mut steps = diffuse_alpha_blend_steps(op, a1, a2, factor << 24 | 0xFF_FFFF);
+        if tested {
+            steps.extend([
+                Step::State(RS_ALPHATESTENABLE, 1),
+                Step::State(RS_ALPHAFUNC, 5),
+                Step::State(RS_ALPHAREF, 0),
+            ]);
+        }
+        let color = diffuse << 24 | 0xFF_0000;
+        steps.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, color)));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: None,
+            clear: 0,
+            zbuffer: None,
+            texture: Some([0x8FFF; 64]),
+            texture_alpha: true,
+            steps,
+        };
+        let p = draw_scene(&format!("blend_diffuse_alpha_tfactor_color{i}"), &scene);
+        assert_rgb(&p, 32, 32, want, 8);
+    }
 }
 
 #[test]
