@@ -188,6 +188,9 @@ changes most settings without a restart, and F2 saves them to the file.
 * [CRT shaders](CONFIGURATION.md#crt-shaders)
 * [command-line options](CONFIGURATION.md#command-line-options)
 
+**[docs/compatibility.md](docs/compatibility.md)** lists what particular
+games need: settings, drivers, setup steps and known limits.
+
 ## The DOS prompt
 
 ### Batch files
