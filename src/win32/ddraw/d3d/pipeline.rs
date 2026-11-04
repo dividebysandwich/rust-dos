@@ -12,6 +12,8 @@
 //! `Rasterizer`. The matrices are Direct3D's: row-major, and a row
 //! vector is transformed by multiplying it on their left.
 
+use crate::fixed_vec::FixedVec;
+
 /// A 4x4 matrix, row by row (D3DMATRIX's _11 to _44).
 pub type Matrix = [f32; 16];
 
@@ -993,35 +995,14 @@ impl Plane {
 const MAX_PLANES: usize = 12;
 
 /// The planes a draw clips at (`clip_planes`), kept in place.
-struct Planes {
-    list: [Plane; MAX_PLANES],
-    len: usize,
-}
-
-impl Planes {
-    fn push(&mut self, plane: Plane) {
-        self.list[self.len] = plane;
-        self.len += 1;
-    }
-}
-
-impl std::ops::Deref for Planes {
-    type Target = [Plane];
-
-    fn deref(&self) -> &[Plane] {
-        &self.list[..self.len]
-    }
-}
+type Planes = FixedVec<Plane, MAX_PLANES>;
 
 /// The planes primitives are clipped at: the near and far planes and
 /// the user's when the setup clips, and the guard band always. A
 /// transformed vertex's near and far planes are z 0 and 1, as Wine's
 /// depth_clamp_test has them on Windows.
 fn clip_planes(setup: &Setup, tl: bool) -> Planes {
-    let mut planes = Planes {
-        list: [Plane::User(0); MAX_PLANES],
-        len: 0,
-    };
+    let mut planes = Planes::new(Plane::User(0));
     let band = setup.guard_band;
     if tl {
         if setup.clip {
@@ -1061,73 +1042,53 @@ const MAX_POLYGON: usize = 3 + MAX_PLANES;
 
 /// A convex polygon, each vertex with whether the edge from it to the
 /// next is to be drawn in wireframe, kept in place.
-struct Polygon {
-    verts: [(Processed, bool); MAX_POLYGON],
-    len: usize,
+type Polygon = FixedVec<(Processed, bool), MAX_POLYGON>;
+
+/// The two polygons a draw clips its triangles between
+/// (`clip_polygon`), made once for all of them: each is a few kilobytes.
+fn clip_scratch() -> [Polygon; 2] {
+    [Polygon::new((Processed::default(), false)); 2]
 }
 
-impl Polygon {
-    fn empty() -> Self {
-        Polygon {
-            verts: [(Processed::default(), false); MAX_POLYGON],
-            len: 0,
-        }
-    }
-
-    fn new(tri: [(Processed, bool); 3]) -> Self {
-        let mut poly = Polygon::empty();
-        poly.verts[..3].copy_from_slice(&tri);
-        poly.len = 3;
-        poly
-    }
-
-    fn push(&mut self, v: (Processed, bool)) {
-        self.verts[self.len] = v;
-        self.len += 1;
-    }
-}
-
-impl std::ops::Deref for Polygon {
-    type Target = [(Processed, bool)];
-
-    fn deref(&self) -> &[(Processed, bool)] {
-        &self.verts[..self.len]
-    }
-}
-
-/// Clip the polygon `poly` at `planes`, in place. False, with `poly`
-/// clipped at some of them, if a plane would leave more vertices than
-/// it has room for: the caller clips the triangle again with
-/// `clip_spilled`, which gives the same polygon.
-fn clip_polygon(poly: &mut Polygon, planes: &[Plane]) -> bool {
-    let mut spare: Option<Polygon> = None;
+/// Clip the triangle `tri` at `planes`, from one polygon of `scratch`
+/// into the other and back: the polygon left. None if a plane would
+/// leave more vertices than a polygon has room for: the caller clips
+/// the triangle again with `clip_spilled`, which gives the same polygon.
+fn clip_polygon<'a>(
+    tri: &[(Processed, bool); 3],
+    planes: &[Plane],
+    scratch: &'a mut [Polygon; 2],
+) -> Option<&'a Polygon> {
+    let [poly, out] = scratch;
+    let (mut poly, mut out) = (poly, out);
+    poly.clear();
+    poly.extend_from_slice(tri);
     for &plane in planes {
-        if poly.len == 0 {
+        if poly.is_empty() {
             break;
         }
         let mut d = [0.0f32; MAX_POLYGON];
         for (slot, (v, _)) in d.iter_mut().zip(poly.iter()) {
             *slot = plane.distance(v);
         }
-        let d = &d[..poly.len];
+        let d = &d[..poly.len()];
         if d.iter().all(|&d| d >= 0.0) {
             continue;
         }
         // Each vertex inside stays, and each edge across the plane adds
         // the point where it crosses.
-        let kept = (0..poly.len)
+        let kept = (0..poly.len())
             .map(|i| {
-                let (inside, next) = (d[i] >= 0.0, d[(i + 1) % poly.len] >= 0.0);
+                let (inside, next) = (d[i] >= 0.0, d[(i + 1) % poly.len()] >= 0.0);
                 inside as usize + (inside != next) as usize
             })
             .sum::<usize>();
         if kept > MAX_POLYGON {
-            return false;
+            return None;
         }
-        let out = spare.get_or_insert_with(Polygon::empty);
-        out.len = 0;
-        for i in 0..poly.len {
-            let j = (i + 1) % poly.len;
+        out.clear();
+        for i in 0..poly.len() {
+            let j = (i + 1) % poly.len();
             let (a, edge) = poly[i];
             let (b, _) = poly[j];
             let (da, db) = (d[i], d[j]);
@@ -1140,9 +1101,10 @@ fn clip_polygon(poly: &mut Polygon, planes: &[Plane]) -> bool {
                 out.push((a.lerp(&b, da / (da - db)), edge));
             }
         }
-        std::mem::swap(poly, out);
+        // The references swap, not the polygons.
+        std::mem::swap(&mut poly, &mut out);
     }
-    true
+    Some(poly)
 }
 
 /// `clip_polygon` with no limit on the vertices, for a triangle that
@@ -1214,6 +1176,7 @@ pub fn draw(
     let mut drawn = Drawn::default();
     let planes = clip_planes(setup, false);
     let tl_planes = clip_planes(setup, true);
+    let mut scratch = clip_scratch();
     let flat = setup.shade == SHADE_FLAT;
     for prim in prims {
         match *prim {
@@ -1251,7 +1214,8 @@ pub fn draw(
                         t.take_flat_colors(p);
                     }
                 }
-                triangle(setup, tri, edges, &planes, &tl_planes, raster, &mut drawn);
+                let planes = [&planes[..], &tl_planes[..]];
+                triangle(setup, tri, edges, planes, &mut scratch, raster, &mut drawn);
             }
         }
     }
@@ -1344,12 +1308,15 @@ fn as_tl(setup: &Setup, p: &Processed) -> Processed {
     }
 }
 
+/// Draw the triangle `tri`, clipped at `planes` (those of vertices at
+/// clip coordinates, and those of transformed ones) between the
+/// polygons of `scratch`.
 fn triangle(
     setup: &Setup,
     tri: [Processed; 3],
     edges: u8,
-    planes: &[Plane],
-    tl_planes: &[Plane],
+    [planes, tl_planes]: [&[Plane]; 2],
+    scratch: &mut [Polygon; 2],
     raster: &mut dyn Rasterizer,
     drawn: &mut Drawn,
 ) {
@@ -1372,23 +1339,20 @@ fn triangle(
     ];
     let planes = if tl { tl_planes } else { planes };
     // Most triangles are inside every plane, which leaves them whole.
-    if planes
-        .iter()
-        .all(|p| corners.iter().all(|(v, _)| p.distance(v) >= 0.0))
-    {
+    // The planes before the first with a corner outside it leave the
+    // triangle as it is, so clipping starts at that one.
+    let inside = |p: &Plane| corners.iter().all(|(v, _)| p.distance(v) >= 0.0);
+    let Some(first) = planes.iter().position(|p| !inside(p)) else {
         polygon(setup, &corners, raster, drawn);
         return;
-    }
-    let mut poly = Polygon::new(corners);
-    if clip_polygon(&mut poly, planes) {
-        polygon(setup, &poly, raster, drawn);
-    } else {
-        polygon(
-            setup,
-            &clip_spilled(corners.to_vec(), planes),
-            raster,
-            drawn,
-        );
+    };
+    let planes = &planes[first..];
+    match clip_polygon(&corners, planes, scratch) {
+        Some(poly) => polygon(setup, poly, raster, drawn),
+        None => {
+            let spilled = clip_spilled(corners.to_vec(), planes);
+            polygon(setup, &spilled, raster, drawn)
+        }
     }
 }
 
@@ -1834,10 +1798,7 @@ mod tests {
         // planes, against random triangles, most of them across some:
         // `clip_polygon` leaves the same vertices, to the bit, as
         // `clip_spilled`, the version that clips into vectors.
-        let mut planes = Planes {
-            list: [Plane::User(0); MAX_PLANES],
-            len: 0,
-        };
+        let mut planes = Planes::new(Plane::User(0));
         for plane in [
             Plane::AboveW(2, 0.0),
             Plane::BelowW(2, 1.0),
@@ -1858,6 +1819,7 @@ mod tests {
             seed as f32 / u32::MAX as f32 * 6.0 - 3.0
         };
         let mut cut = 0;
+        let mut scratch = clip_scratch();
         for _ in 0..20_000 {
             let mut vertex = || Processed {
                 clip: [next(), next(), next(), next().abs() + 0.1],
@@ -1868,8 +1830,7 @@ mod tests {
             };
             let corners = [(vertex(), true), (vertex(), false), (vertex(), true)];
             let spilled = clip_spilled(corners.to_vec(), &planes);
-            let mut poly = Polygon::new(corners);
-            assert!(clip_polygon(&mut poly, &planes));
+            let poly = clip_polygon(&corners, &planes, &mut scratch).expect("room");
             assert_eq!(format!("{:?}", &poly[..]), format!("{spilled:?}"));
             if format!("{spilled:?}") != format!("{:?}", &corners[..]) {
                 cut += 1;

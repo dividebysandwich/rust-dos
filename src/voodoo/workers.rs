@@ -677,4 +677,33 @@ mod tests {
         pool.flush();
         assert!(!pool.busy());
     }
+
+    /// A batch every worker has drawn comes back, emptied, for a later
+    /// one to be filled in: the emulator doesn't allocate a batch each
+    /// time it gives one out.
+    #[test]
+    fn drawn_batches_come_back_to_be_filled_again() {
+        let pool = Pool::new(2);
+        let fb = Vram::new(0x1000);
+        let word = |row| Job::Pixels {
+            fb: fb.clone(),
+            words: vec![Word {
+                row,
+                at: row as u32,
+                value: 1,
+            }],
+        };
+        // Each word goes out at once. The first batch grew from nothing;
+        // those after it have room for a whole one, and come back.
+        for row in 0..3 {
+            pool.submit(word(row));
+        }
+        pool.flush();
+        assert!(pool.pending.lock().unwrap().capacity() >= BATCH);
+        let queue = pool.shared.queue.lock().unwrap();
+        assert!(!queue.spare.is_empty(), "no batch came back");
+        assert!(queue.spare.len() <= SPARE_BATCHES);
+        let emptied = |b: &Vec<Job>| b.is_empty() && b.capacity() >= BATCH;
+        assert!(queue.spare.iter().all(emptied));
+    }
 }

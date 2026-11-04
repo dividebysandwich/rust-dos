@@ -34,6 +34,7 @@
 use super::hw::{self, ALL, Card, FBI, tmu_chip};
 use super::state;
 use crate::cpu::Cpu;
+use crate::fixed_vec::FixedVec;
 use crate::voodoo::banshee::render3d;
 use crate::voodoo::regs::*;
 
@@ -1823,34 +1824,13 @@ fn params(g: &Context) -> u32 {
 }
 
 /// The parameter registers a triangle writes (`param_list`), kept in
-/// place: 12 at most.
-struct ParamList {
-    list: [(Param, usize, u32); 12],
-    len: usize,
-}
-
-impl ParamList {
-    fn push(&mut self, entry: (Param, usize, u32)) {
-        self.list[self.len] = entry;
-        self.len += 1;
-    }
-}
-
-impl std::ops::Deref for ParamList {
-    type Target = [(Param, usize, u32)];
-
-    fn deref(&self) -> &[(Param, usize, u32)] {
-        &self.list[..self.len]
-    }
-}
+/// place: 12 at most, when every one of `params` is on.
+type ParamList = FixedVec<(Param, usize, u32), 12>;
 
 /// The parameter registers a triangle writes, each with the chips it
 /// goes to: (parameter, start register, chips).
 fn param_list(p: u32) -> ParamList {
-    let mut list = ParamList {
-        list: [(Param::R, 0, 0); 12],
-        len: 0,
-    };
+    let mut list = ParamList::new((Param::R, 0, 0));
     if p & P_RGB != 0 {
         list.push((Param::R, FSTART_R, ALL));
         list.push((Param::G, FSTART_G, ALL));
