@@ -15,21 +15,30 @@ ways:
   [`[emulator]`](../CONFIGURATION.md#emulator), a program started from
   the prompt waits a moment while Rust-DOS asks, and starts with the
   settings the almanac recommends; yours come back when it ends. A game
-  started from its profile doesn't ask.
+  that has a [game profile](../CONFIGURATION.md#game-profiles) and is
+  started from it runs with the profile's settings, and Rust-DOS doesn't
+  ask the almanac for it.
 
-The almanac knows a program by its file, so it covers DOS games and
-games on the built-in Windows. It carries the machine's settings only:
-the processor, speed, memory, DPMI, the Windows version, the 3D cards
-and the sound cards.
+Rust-DOS finds a game in the almanac by the name, size and checksums of
+the program file started at its prompt. That works for DOS games and
+for games on the built-in Windows, which start from the same prompt.
+The almanac carries the machine's settings only: the processor, speed,
+memory, DPMI, the Windows version, the 3D cards and the sound cards.
 
 ## What this page adds
 
-What the almanac can't carry: files to copy or remove, drivers,
-command-line switches and install steps, settings outside its list
-(such as `win32_depth`), limits that are known, and every game that
-runs inside a booted Windows 95 or 98 image, whose files Rust-DOS
-doesn't see. Where an entry also names settings the almanac takes, they
-can be fetched from it or reported to it like any other.
+What the almanac can't carry:
+
+* files to copy or remove, drivers, command-line switches and install
+  steps;
+* settings outside its list, such as `win32_depth`;
+* limits that are known;
+* games on a Windows 95 or 98 disk image. There the game is started by
+  the Windows inside the image, not at Rust-DOS's prompt, so Rust-DOS
+  never sees which program runs and can't look it up.
+
+Where an entry also names settings the almanac takes, they can be
+fetched from it or reported to it like any other.
 
 Each entry says what to do and links to the section that explains it.
 Notes for a game on the built-in Windows don't apply to the same game
