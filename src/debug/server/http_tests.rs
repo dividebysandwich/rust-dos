@@ -197,7 +197,7 @@ fn run_machine(dir: std::path::PathBuf, rx: mpsc::Receiver<super::super::Request
     loop {
         hub.poll(&mut cpu);
         if hub.quit_requested() {
-            hub.shutdown(&cpu, ShutdownReason::Quit, 0);
+            hub.shutdown(&cpu, ShutdownReason::Quit);
             std::thread::sleep(options.linger);
             return;
         }

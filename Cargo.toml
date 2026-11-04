@@ -182,13 +182,16 @@ ash = { version = "0.38", default-features = false, features = ["loaded", "std"]
 dynasm = "5"
 dynasmrt = "5"
 
-[target.'cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+# The dynamic recompiler's executable memory, and the process
+# --exit-with-parent watches (src/parent_watch.rs).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# The dynamic recompiler's executable memory, and the console the program
-# leaves when Explorer opened one for it (src/main.rs).
+# The dynamic recompiler's executable memory, the console the program
+# leaves when Explorer opened one for it (src/main.rs), and the process
+# --exit-with-parent watches (src/parent_watch.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_Console"] }
 
 [features]
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]

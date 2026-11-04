@@ -97,6 +97,18 @@ pub(crate) struct Args {
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
     pub(crate) debug_server: Option<std::net::SocketAddr>,
 
+    /// Quit when the process that started rust-dos ends, or the process
+    /// PID: as POST /api/control/quit does, with exit code 4. If the
+    /// process has ended already, rust-dos exits at once
+    #[arg(
+        long,
+        value_name = "PID",
+        num_args = 0..=1,
+        value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64),
+        conflicts_with = "relay"
+    )]
+    pub(crate) exit_with_parent: Option<Option<u32>>,
+
     /// Instruction trace ring buffer capacity (entries, ~64 bytes each).
     /// Allocated only once tracing is enabled via the debug server.
     #[arg(long, default_value_t = 1_000_000)]

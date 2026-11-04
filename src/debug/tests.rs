@@ -1521,7 +1521,7 @@ fn a_quit_cancels_what_is_pending_and_ends_the_journal() {
     let (refused, _) = ask_guarded(&mut cpu, &mut hub, Cmd::GetRegs, None);
     assert_eq!(refused.unwrap_err().0, 503);
 
-    hub.shutdown(&cpu, super::ShutdownReason::Quit, 0);
+    hub.shutdown(&cpu, super::ShutdownReason::Quit);
     assert!(matches!(late_rx.try_recv().map(|a| a.reply), Ok(Reply::Error(503, _))));
     assert_ne!(cpu.bus.peek_8(0x2000), 9);
     let last = entries(&hub).pop().unwrap();

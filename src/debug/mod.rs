@@ -456,6 +456,18 @@ pub enum ShutdownReason {
     Exit,
     /// The window was closed.
     Window,
+    /// The process `--exit-with-parent` watches ended.
+    Parent,
+}
+
+impl ShutdownReason {
+    /// The exit code rust-dos exits with.
+    pub fn exit_code(self) -> u8 {
+        match self {
+            ShutdownReason::Parent => crate::parent_watch::EXIT_CODE,
+            ShutdownReason::Quit | ShutdownReason::Exit | ShutdownReason::Window => 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
