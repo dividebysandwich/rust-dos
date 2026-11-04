@@ -954,10 +954,17 @@ impl AutoSpeed {
             if current <= base {
                 return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, true);
             }
-            // Trying more instead, the only way left to go, would climb.
-            if this.floor.is_some_and(|(floor, _)| c / FINE_STEP < floor as f64) {
-                return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, false);
-            }
+            // A step that would pass the floor stops at it. At the floor,
+            // trying more instead, the only way left to go, would climb.
+            let to = match this.floor {
+                Some((floor, _)) if c / FINE_STEP < floor as f64 => {
+                    if floor as f64 * 1.01 >= c {
+                        return hold_drawing(this, fps, clamp(c), HOLD_WINDOWS, false);
+                    }
+                    floor as f64
+                }
+                _ => c / FINE_STEP,
+            };
             this.step = Step::Lowered {
                 from: current,
                 fps,
@@ -965,7 +972,7 @@ impl AutoSpeed {
                 seen: 0,
                 short: 0,
             };
-            clamp(c / FINE_STEP)
+            clamp(to)
         };
         // The step up gained nothing, and `fps` is what the program draws
         // with all it could want: the frame rate to keep, or the reckoning
@@ -1052,6 +1059,14 @@ impl AutoSpeed {
                         ..r
                     });
                     down(self, fps)
+                } else if (current as f64) * FINE_STEP * 1.01 < from as f64 {
+                    // The host's estimate took the step further than a step
+                    // (`clamp`), as it can while the program waits for the
+                    // display: what so much less speed lost says nothing of
+                    // a step's, and is no loss to back off from. Its frame
+                    // rate gives the knee, as for a step that lost frames.
+                    let knee = (c * before / fps).clamp(c, from as f64);
+                    hold(self, knee * HEADROOM, HOLD_WINDOWS, true)
                 } else {
                     let left = HOLD_WINDOWS << self.backoffs;
                     self.backoffs = (self.backoffs + 1).min(MOST_BACKOFFS);
@@ -1903,10 +1918,24 @@ mod tests {
             seen: JUDGED,
             dipped: 0,
         };
-        assert_eq!(auto.decide(75_000, &drawing(35.0), false, HOST), 75_000);
+        // A step from 75,000 would pass the floor: it stops at the floor.
+        assert_eq!(auto.decide(75_000, &drawing(35.0), false, HOST), 70_000);
+        assert!(matches!(auto.step, Step::Lowered { from: 75_000, .. }));
+        assert_eq!(auto.floor, Some((70_000, 1)));
+        // At the floor, it holds.
+        auto.step = Step::Hold {
+            fps: 35.0,
+            left: 1,
+            more: false,
+            recent: 35.0,
+            seen: JUDGED,
+            dipped: 0,
+        };
+        auto.floor = Some((70_000, 2));
+        assert_eq!(auto.decide(70_000, &drawing(35.0), false, HOST), 70_000);
         assert!(matches!(auto.step, Step::Hold { more: false, .. }));
         assert_eq!(auto.floor, Some((70_000, 1)));
-        auto.decide(75_000, &drawing(35.0), false, HOST);
+        auto.decide(70_000, &drawing(35.0), false, HOST);
         assert_eq!(auto.floor, None);
     }
 
@@ -2116,6 +2145,28 @@ mod tests {
     }
 
     #[test]
+    fn a_step_the_host_estimate_cut_deep_goes_to_the_knee() {
+        // Unreal at its 60 Hz cap: the estimate read 122,015 while the host
+        // kept up at 403,909, and the step down went there. Back at 403,909
+        // with a doubled hold, the speed stayed at the cap for a minute and
+        // its heaviest frames ran the sound dry.
+        let mut auto = AutoSpeed::new(3000, None);
+        auto.step = Step::Lowered {
+            from: 403_909,
+            fps: 59.6,
+            sum: 0.0,
+            seen: 0,
+            short: 0,
+        };
+        let speed = auto.decide(122_015, &drawing(31.2), true, 412_301);
+        let knee = 122_015.0 * 59.6 / 31.2 * HEADROOM;
+        assert!((speed as f64 - knee).abs() < 1000.0, "{}: {:?}", speed, auto.step);
+        assert_eq!(auto.backoffs, 0);
+        assert_eq!(auto.floor, None);
+        assert_eq!(auto.fell, None);
+    }
+
+    #[test]
     fn stopping_at_the_floor_goes_on_from_the_frame_rate_judged() {
         // The last reading of a hold ran low, but not by `DROPPED`. From
         // that alone the frames that follow would read as short of the
@@ -2124,7 +2175,7 @@ mod tests {
         auto.floor = Some((70_000, 500));
         auto.held = Some(Record {
             fps: 35.0,
-            at: 75_000,
+            at: 70_000,
             climbed: 0,
         });
         auto.step = Step::Hold {
@@ -2135,9 +2186,9 @@ mod tests {
             seen: 20,
             dipped: 0,
         };
-        let mut speed = auto.decide(75_000, &drawing(31.0), false, HOST);
+        let mut speed = auto.decide(70_000, &drawing(31.0), false, HOST);
         for _ in 0..8 {
-            assert_eq!(speed, 75_000, "{:?}", auto.step);
+            assert_eq!(speed, 70_000, "{:?}", auto.step);
             speed = auto.decide(speed, &drawing(35.0), false, HOST);
         }
     }
