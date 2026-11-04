@@ -48,6 +48,7 @@ mod gamma;
 mod gpu_blt;
 pub(super) mod inspect;
 mod palette;
+pub mod picture;
 pub(super) mod surface;
 pub mod voodoo;
 

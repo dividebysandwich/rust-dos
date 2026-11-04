@@ -31,6 +31,7 @@ use std::sync::OnceLock;
 static LISTS: &[(&str, &str)] = &[
     ("ADVAPI32.DLL", include_str!("ordinals/advapi32_dll.txt")),
     ("ADVPACK.DLL", include_str!("ordinals/advpack_dll.txt")),
+    ("AMSTREAM.DLL", include_str!("ordinals/amstream_dll.txt")),
     ("AVIFIL32.DLL", include_str!("ordinals/avifil32_dll.txt")),
     ("COMCTL32.DLL", include_str!("ordinals/comctl32_dll.txt")),
     ("COMDLG32.DLL", include_str!("ordinals/comdlg32_dll.txt")),
@@ -58,6 +59,7 @@ static LISTS: &[(&str, &str)] = &[
     ("OLE32.DLL", include_str!("ordinals/ole32_dll.txt")),
     ("OLEAUT32.DLL", include_str!("ordinals/oleaut32_dll.txt")),
     ("OPENGL32.DLL", include_str!("ordinals/opengl32_dll.txt")),
+    ("QUARTZ.DLL", include_str!("ordinals/quartz_dll.txt")),
     ("SHELL32.DLL", include_str!("ordinals/shell32_dll.txt")),
     ("USER32.DLL", include_str!("ordinals/user32_dll.txt")),
     ("VERSION.DLL", include_str!("ordinals/version_dll.txt")),

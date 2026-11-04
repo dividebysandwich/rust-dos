@@ -1,7 +1,8 @@
 //! The video decompressors Video for Windows has: Indeo Video 3 (IV31,
-//! IV32) and Indeo Video 5 (IV50), decoded by the `oxideav-indeo` crate.
-//! Windows 98 installs codecs for the two. A picture comes out as what
-//! ICDecompress gives for a BI_RGB output of 24 bits: a bottom-up DIB.
+//! IV32) and Indeo Video 5 (IV50), decoded by the `oxideav-indeo` crate,
+//! and Indeo Video Interactive 4 (IV41, indeo4/). Windows 98 installs
+//! codecs for the three. A picture comes out as what ICDecompress gives
+//! for a BI_RGB output of 24 bits: a bottom-up DIB.
 //!
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
@@ -13,6 +14,7 @@ use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
 const IV31: u32 = u32::from_le_bytes(*b"IV31");
 const IV32: u32 = u32::from_le_bytes(*b"IV32");
 const IV50: u32 = u32::from_le_bytes(*b"IV50");
+const IV41: u32 = u32::from_le_bytes(*b"IV41");
 
 /// The largest picture Indeo 3's decoder takes.
 const INDEO3_MAX: (u32, u32) = (640, 480);
@@ -27,6 +29,7 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
     match upper(compression) {
         IV31 | IV32 => (1..=INDEO3_MAX.0).contains(&width) && (1..=INDEO3_MAX.1).contains(&height),
         IV50 => width >= 1 && height >= 1,
+        IV41 => (1..=4096).contains(&width) && (1..=4096).contains(&height),
         _ => false,
     }
 }
@@ -36,6 +39,7 @@ enum Decoder {
     /// With the last frame's output and size, which a frame that fails
     /// to decode leaves as it is.
     Indeo5(Box<Indeo5Decoder>, Option<(HostBuffer, (u32, u32))>),
+    Indeo4(Box<super::indeo4::Decoder>),
 }
 
 /// A decompressor, or none yet.
@@ -53,6 +57,7 @@ impl std::fmt::Debug for Codec {
         f.write_str(match self.0 {
             Some(Decoder::Indeo3(_)) => "Codec(Indeo 3)",
             Some(Decoder::Indeo5(..)) => "Codec(Indeo 5)",
+            Some(Decoder::Indeo4(_)) => "Codec(Indeo 4)",
             None => "Codec(None)",
         })
     }
@@ -64,6 +69,7 @@ impl Codec {
         Codec(match upper(compression) {
             IV31 | IV32 => Some(Decoder::Indeo3(Box::default())),
             IV50 => Some(Decoder::Indeo5(Box::default(), None)),
+            IV41 => Some(Decoder::Indeo4(Box::new(super::indeo4::Decoder::new()))),
             _ => None,
         })
     }
@@ -92,6 +98,7 @@ impl Codec {
                 *last = Some((out.output, out.dimensions));
                 Ok(())
             }
+            Some(Decoder::Indeo4(d)) => d.decode(frame),
             None => Err("no decoder".to_string()),
         }
     }
@@ -111,6 +118,12 @@ impl Codec {
                 }
                 let yuy2 = pack_yuy2(output, width as usize, height as usize)?;
                 Some(yuy2_dib(&yuy2, width as usize, height as usize))
+            }
+            Decoder::Indeo4(d) => {
+                let p = d.picture()?;
+                (p.width == width as usize && p.height == height as usize).then(|| {
+                    yvu9_dib(&p.y, &p.u, &p.v, (p.width, p.height), p.chroma_width())
+                })
             }
         }
     }
@@ -141,23 +154,28 @@ pub fn bgr(y: u8, u: u8, v: u8) -> [u8; 3] {
     [b, g, r].map(|c| c.clamp(0, 255) as u8)
 }
 
-/// An Indeo 3 picture as a DIB: each chroma sample colours its 4x4
-/// block.
+/// An Indeo 3 picture as a DIB.
 fn indeo3_dib(picture: &DecodedPicture) -> Vec<u8> {
-    let (w, h) = (picture.width as usize, picture.height as usize);
-    let cw = picture.chroma_width as usize;
-    let stride = dib_stride(picture.width as i32, 24);
+    yvu9_dib(
+        &picture.luma,
+        &picture.chroma_u,
+        &picture.chroma_v,
+        (picture.width as usize, picture.height as usize),
+        picture.chroma_width as usize,
+    )
+}
+
+/// A YVU9 picture (Indeo 3's and 4's) as a DIB: each chroma sample, of
+/// rows `cw` wide, colours its 4x4 block.
+fn yvu9_dib(luma: &[u8], u: &[u8], v: &[u8], (w, h): (usize, usize), cw: usize) -> Vec<u8> {
+    let stride = dib_stride(w as i32, 24);
     let mut out = vec![0; stride * h];
     for y in 0..h {
         let crow = y / 4 * cw;
-        let ys = &picture.luma[y * w..y * w + w];
+        let ys = &luma[y * w..y * w + w];
         let row = &mut out[(h - 1 - y) * stride..][..w * 3];
         for (x, (&yv, d)) in ys.iter().zip(row.as_chunks_mut::<3>().0).enumerate() {
-            *d = bgr(
-                yv,
-                picture.chroma_u[crow + x / 4],
-                picture.chroma_v[crow + x / 4],
-            );
+            *d = bgr(yv, u[crow + x / 4], v[crow + x / 4]);
         }
     }
     out

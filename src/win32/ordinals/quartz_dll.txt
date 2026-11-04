@@ -1,0 +1,8 @@
+1 AMGetErrorTextA
+2 AMGetErrorTextW
+3 AmpFactorToDB
+4 DBToAmpFactor
+5 DllCanUnloadNow
+6 DllGetClassObject
+7 DllRegisterServer
+8 DllUnregisterServer

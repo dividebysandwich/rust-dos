@@ -15,6 +15,12 @@
 //! built-in sound device; it is installed when `WAVE_DRIVER` is set.
 //! AVIVideo and MPEGVideo (video.rs) play AVI and MPEG-1 files
 //! (media.rs) in a window.
+//!
+//! A DirectShow filter graph (dshow/graph.rs) plays its file through an
+//! MPEGVideo device of its own, as ActiveMovie's MCIQTZ device plays
+//! through a filter graph on Windows. The program doesn't see that
+//! device: its commands, MCI_SYSINFO and "close all" leave it out, and
+//! the end of its play goes to the graph.
 
 pub mod avi;
 pub mod cdaudio;
@@ -277,6 +283,9 @@ pub struct Device {
     /// The waveaudio driver's own state.
     pub wave: waveaudio::Wav,
     pub video: video::Video,
+    /// The DirectShow filter graph that plays through it, by its object
+    /// id (dshow/), or 0 for a device of the program's.
+    pub graph: u32,
 }
 
 /// MCI's state.
@@ -300,7 +309,7 @@ fn find(cpu: &Cpu, id: u32) -> Option<usize> {
         .mci
         .devices
         .iter()
-        .position(|d| d.id == id && d.pid == pid)
+        .position(|d| d.id == id && d.pid == pid && d.graph == 0)
 }
 
 /// The device of the running process that `name` names.
@@ -312,11 +321,40 @@ pub fn find_name(cpu: &Cpu, name: &str) -> Option<usize> {
         .mci
         .devices
         .iter()
-        .position(|d| d.pid == pid && d.name.eq_ignore_ascii_case(name))
+        .position(|d| d.pid == pid && d.graph == 0 && d.name.eq_ignore_ascii_case(name))
 }
 
 pub fn device(cpu: &mut Cpu, i: usize) -> &mut Device {
     &mut cpu.bus.win32.winmm.mci.devices[i]
+}
+
+/// The ids of the devices DirectShow's graphs play through: the graph's
+/// id with this bit, which leaves the ids of the program's devices as
+/// Windows numbers them.
+const GRAPH_IDS: u32 = 0x4000_0000;
+
+/// The running process's device `id`, just opened, becomes the one the
+/// DirectShow graph `graph` plays through: its place.
+pub fn give_to_graph(cpu: &mut Cpu, id: u32, graph: u32) -> Option<usize> {
+    let i = find(cpu, id)?;
+    let d = device(cpu, i);
+    d.graph = graph;
+    d.id = GRAPH_IDS | graph;
+    Some(i)
+}
+
+/// The device the DirectShow graph `graph` plays through.
+pub fn graph_device(cpu: &Cpu, graph: u32) -> Option<usize> {
+    if graph == 0 {
+        return None;
+    }
+    cpu.bus
+        .win32
+        .winmm
+        .mci
+        .devices
+        .iter()
+        .position(|d| d.graph == graph)
 }
 
 /// Whether `id` is all devices: the 32-bit id or Windows 95's 16-bit
@@ -412,6 +450,11 @@ pub fn abort(cpu: &mut Cpu, i: usize) {
 fn play_ended(cpu: &mut Cpu, i: usize) {
     let d = device(cpu, i);
     let id = d.id;
+    if d.graph != 0 {
+        let graph = d.graph;
+        crate::win32::dshow::play_ended(cpu, graph);
+        return;
+    }
     if let Some(hwnd) = d.pending.take() {
         post(cpu, hwnd, MCI_NOTIFY_SUCCESSFUL, id);
     }
@@ -668,7 +711,8 @@ pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u
         .mci
         .devices
         .iter()
-        .filter(|d| d.pid == pid && kind.is_none_or(|k| device_type(d.kind) == k))
+        .filter(|d| d.pid == pid && d.graph == 0)
+        .filter(|d| kind.is_none_or(|k| device_type(d.kind) == k))
         .map(|d| d.name.clone())
         .collect();
     let types: Vec<String> = installed()
@@ -901,7 +945,7 @@ pub fn close_all(cpu: &mut Cpu, flags: u32, p: &mut Parms) {
             .mci
             .devices
             .iter()
-            .position(|d| d.pid == pid)
+            .position(|d| d.pid == pid && d.graph == 0)
     } {
         device_command(cpu, i, MCI_CLOSE, flags, p);
     }
@@ -1030,6 +1074,7 @@ crate::state_fields!(Device {
     cd,
     seq,
     wave,
-    video
+    video,
+    graph
 });
 crate::state_fields!(Mci { devices, calls });

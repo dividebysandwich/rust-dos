@@ -430,6 +430,17 @@ fn alloc(cpu: &mut Cpu, from: u32, len: u32) -> u32 {
     block + 4
 }
 
+/// A new BSTR of `text`, for a built-in object's method that gives one
+/// (IVideoWindow::get_Caption): its address, or 0 when memory is out.
+pub fn new_bstr(cpu: &mut Cpu, text: &str) -> u32 {
+    let units: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let at = alloc(cpu, 0, units.len() as u32);
+    if at != 0 {
+        cpu.bus.guest_write_bytes(at, &units);
+    }
+    at
+}
+
 /// The length in characters of the Unicode string at `at`.
 fn wide_len(cpu: &mut Cpu, at: u32) -> u32 {
     let mut n = 0;
