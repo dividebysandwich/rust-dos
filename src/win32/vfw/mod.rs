@@ -3,11 +3,12 @@
 //! frames. Games of the late 1990s play their movies with the two:
 //! Grom reads its intro with AVIStreamRead and draws each frame with
 //! DrawDibDraw, and ACM 1918 takes its frames from AVIStreamGetFrame.
-//! codec.rs has the codecs, Indeo Video 3 and 5.
+//! codec.rs has the codecs, Indeo Video 3, 4 and 5.
 
 pub mod avi;
 pub mod avifil32;
 pub mod codec;
+pub mod indeo4;
 pub mod msvfw32;
 
 /// What a process has open of the two: its AVI files, their
