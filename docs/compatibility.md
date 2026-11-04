@@ -53,58 +53,59 @@ that names the game, its settings and what happened.
 ## DOS games
 
 * **3D Blaster PCI games** (Battle Arena Toshinden SE, Rebel Moon,
-  Flight Unlimited, Hi-Octane): `machine=svga_verite`, and copy the four
-  `VRIT*170.CGL` modules into the game's folder
-  ([3D Blaster PCI games](../CONFIGURATION.md#3d-blaster-pci-games-cgl)
-  has each game's start command).
-* **Bao Xiao San Guo Zhi** (`SANGO.EXE`): every random roll comes out
-  the same unless timer 2's gate is high at start. Set
-  `pit2_gate_at_start=true` in [`[sound]`](../CONFIGURATION.md#sound),
-  in the game's profile.
+  Flight Unlimited, Hi-Octane):
+  [3D Blaster PCI games](../CONFIGURATION.md#3d-blaster-pci-games-cgl)
+  has the modules to copy and each game's start command.
+* **Bao Xiao San Guo Zhi** (`SANGO.EXE`): `pit2_gate_at_start=true` in
+  its profile; [`[sound]`](../CONFIGURATION.md#sound) says why.
 * **BloodNet** (GOG): GOG's `.bdn` file mounts as a CUE sheet
   ([disk images](../CONFIGURATION.md#disk-images)).
-* **Comanche 3** on a VFX1: in flight, Video > Stereoscopic, then
-  Alt+F12 for head tracking
-  ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
 * **Descent**: keep `cycles=auto`, the default. A high fixed `cycles`
   runs it faster than the display's refresh rate, and it plays badly
-  there. On a VFX1 headset, start it as `DESCENT -vfx -vfxtrak` with
-  `steer=true` in [`[vfx1]`](../CONFIGURATION.md#vfx1); its heads-up
-  display shows in the left eye only. [docs/vfx1.md](vfx1.md) has the
+  there.
+* **Descent, Descent 2 and Comanche 3** on a VFX1 headset, and Quake
+  1.08, which hasn't been tried: the table in
+  [the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset) has each
+  one's start command and settings, and [docs/vfx1.md](vfx1.md) their
   resolutions.
-* **Descent 2** on a VFX1: `VR_type=1` and `VR_tracking=1` in
-  `DESCENT.CFG` (its SETUP writes them) and `steer=true`
-  ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
-  [docs/vfx1.md](vfx1.md) has a mode with more pixels that loses the
-  head tracker.
-* **Doom and Heretic** over a LAN or a serial line: both players join
-  one room with `LAN HOST` or `LAN JOIN`, then start
-  `IPXSETUP -nodes 2`, or `SERSETUP -com2`
-  ([playing over a LAN](../CONFIGURATION.md#playing-over-a-lan),
-  [serial and modem games](../CONFIGURATION.md#serial-and-modem-games)).
+* **Doom and Heretic** over a LAN or a serial line:
+  [playing over a LAN](../CONFIGURATION.md#playing-over-a-lan) and
+  [serial and modem games](../CONFIGURATION.md#serial-and-modem-games).
 * **King's Quest, Ultima and other early CGA games**: their composite
   colours need `machine=cga`; `composite` and `composite_era` keep their
   defaults, `auto` and `old`
   ([`[emulator]`](../CONFIGURATION.md#emulator)).
-* **Quake 1.08** on a VFX1:
-  `VFX1QK QUAKE.EXE +vid_mode 7 +lcd_x 1` with `stereo=lines`, as the
-  forte-vfx1-vr project found it; it hasn't been tried in rust-dos
-  ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
-* **Tomb Raider's 3D patches** (Gold CD, `3DPATCH`):
-  * 3dfx: `voodoo=true`, `cpu=pentium`
+* **Tomb Raider's 3D patches** (in `3DPATCH` on the Tomb Raider Gold
+  CD), each copied into the game's folder:
+  * 3dfx (`3DFX\TOMB.EXE`): `voodoo=true`, `cpu=pentium`
     ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
-  * Voodoo Rush: `voodoo=true` and 3dfx's `GLIDE2X.OVL`, which the
-    settings window downloads onto Z:.
-  * Vérité: copy `Tomb.exe` and `spd3d.uc` into the game's folder,
-    renaming the executable so the 2D one stays;
-    `machine=svga_verite`, `cpu=pentium`, `memsize=32`
+  * Voodoo Rush (`VOORUSH\TOMB.EXE`): `voodoo=true` and 3dfx's
+    `GLIDE2X.OVL`, which the settings window downloads onto Z:.
+  * Vérité (`RENDVRT`): copy `Tomb.exe` and `spd3d.uc`, renaming the
+    executable so the 2D one stays; `machine=svga_verite`,
+    `cpu=pentium`, `memsize=32`
     ([Rendition Vérité](../CONFIGURATION.md#rendition-vérité)).
-  * PowerVR: `powervr=pcx2`, `cpu=pentium`, `memsize=32`
+  * PowerVR (`PWRVR\TOMBPCX2.EXE`): `powervr=pcx2`, `cpu=pentium`,
+    `memsize=32` (it wants 20 MB free); `TOMBPCX1.EXE` is the same with
+    `powervr=pcx1`, and each tells you if the card is the other one
     ([PowerVR PCX1 and PCX2](../CONFIGURATION.md#powervr-pcx1-and-pcx2)).
-    Its saves don't load in the other versions, nor theirs in it.
-* **vQuake**: `machine=svga_verite`, `dpmi=false` (it brings its own
-  CWSDPMI), `cpu=pentium`, `memsize=32`, and `-nocdaudio` unless the CD
-  is mounted ([Rendition Vérité](../CONFIGURATION.md#rendition-vérité)).
+    F1 and F2 change the resolution, F3 shows it and the frame rate, F4
+    shows or hides the PowerVR logo (in the full game only), Z and X
+    zoom the camera in and out. F8 switches to single buffering, which
+    can be 4 or 5 frames a second faster, going back to 640x480 as it
+    does.
+  * The versions' saved games share the names `SAVEGAME.x` but don't
+    load in each other: one way round the game loads to a black screen,
+    the other way it quits with an error about GetHeight.
+    [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
+    has `TOMBPCX2.EXE` (v2.1e and v2.0e) changed to save as
+    `SAVEPCX2.x`, and Unfinished Business's PowerVR version changed to
+    save as `SVUBPX.x`, so they can share a folder with the others.
+* **vQuake** (1.07 beta 5 with its `spd3d.uc`, or 1.08 beta 1, copied
+  into the Quake folder): `machine=svga_verite`, `dpmi=false` (it needs
+  the CWSDPMI it brings), `cpu=pentium`, `memsize=32`, and `-nocdaudio`
+  unless the CD is mounted
+  ([Rendition Vérité](../CONFIGURATION.md#rendition-vérité)).
 
 ## Windows games on the built-in Windows
 
@@ -157,18 +158,17 @@ which drivers to install.
   [the Voodoo3 driver](win9x-howto.md#the-voodoo3-driver) says; the CD's
   own `Voodoo3.inf` hasn't been tried. On the built-in Windows Glover
   needs neither.
-* **GLQuake with the shareware data**: rebuilds its palette table at
-  every start, behind a window that takes the focus, so the game stays
-  minimised (Alt+Tab brings it back). The registered data doesn't
-  ([game notes](win9x-howto.md#game-notes)).
+* **GLQuake with the shareware data**: shareware Quake reads no files
+  from subfolders outside its pak, so GLQuake can't read what it caches
+  in `id1\glquake` and rebuilds its palette table at every start. The
+  progress window it shows takes the focus from the full-screen game,
+  which stays minimised on the taskbar: Alt+Tab brings it back. A pak
+  with the table doesn't help, since shareware Quake refuses "modified
+  games". The registered data has neither problem.
 * **Incoming** (GOG release): run it without GOG's wrapper DLLs. On a
   Voodoo3 with the 1.07.00 driver it needs DirectX 7
   ([3dfx Voodoo3 and
   Banshee](../CONFIGURATION.md#3dfx-voodoo3-and-banshee)).
-* **OpenGL games for a Voodoo1 or 2** that bring 3dfx's MiniGL as
-  `opengl32.dll` in their folder: on a Voodoo3, take it away so the game
-  gets the card's OpenGL driver. Quake II's `3dfxgl.dll` is used only
-  when chosen in its video menu ([game notes](win9x-howto.md#game-notes)).
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL` ([OpenGL games under
@@ -176,7 +176,8 @@ which drivers to install.
 * **Quake III Arena** on a Voodoo2: `r_glDriver 3dfxvgl` ([OpenGL games
   under Windows](../CONFIGURATION.md#opengl-games-under-windows)).
 * **SubCulture** (3dfx version): Windows 95, `voodoo=true`,
-  `machine=svga_s3`, `memsize=64`, `cpu=pentium`
+  `machine=svga_s3`, `memsize=64`, `cpu=pentium`. It installs from its
+  CD in the image's CD-ROM drive and plays its CD music
   ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
 * **Wipeout for 3D Rage**: `machine=svga_ati_3drage` and ATI's driver
   4.35 with one line added to its INF

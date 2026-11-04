@@ -370,12 +370,5 @@ on an image and on the built-in Windows.
   `opengl32.dll`. A game that brings 3dfx's MiniGL as `opengl32.dll` in
   its own folder (for a Voodoo1 or 2) should have it taken away; Quake
   II's `3dfxgl.dll` is only used when chosen in its video menu.
-* **GLQuake with the shareware data** can't read the files it caches in
-  `id1\glquake`: shareware Quake reads no files from subfolders outside
-  its pak. So it rebuilds its palette table at every start, behind a
-  progress window that takes the focus from the full-screen game, which
-  then stays minimised on the taskbar (Alt+Tab brings it back). Adding
-  a pak with the table doesn't help either: shareware Quake refuses
-  "modified games". The registered data has neither problem.
 * **Glide games** use the Voodoo3's `glide2x.dll` or `glide3x.dll`.
   Choose the Glide renderer in the game.

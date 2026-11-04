@@ -2461,38 +2461,35 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
 
 * **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
   the game) and run under a DOS extender such as DOS/4GW, which maps the
-  card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
-  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`. Its
-  saved games don't load in the PowerVR version, nor that version's in
-  it (see the PowerVR card below).
-  Games made for the Voodoo Rush and later boards load Glide from
-  `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
-  and the one of 3dfx's Voodoo Graphics driver drives this card whatever
-  board they were made for. It is 3dfx's and doesn't come with rust-dos:
-  the settings window's Emulator page downloads it, after asking, from the
-  driver (3.01.00) the Internet Archive keeps, into rust-dos's
-  configuration directory, and Z: has it from then on, where they find it
-  on the PATH (one beside the game comes first). A game that looks for it
-  while it is missing says so on the screen. Such a game runs without
-  rust-dos's DPMI host: the overlay is a DOS/4G DLL whose start-up only
-  works with DOS/4GW as its own host, at level 0. Its accesses to the
-  Pentium II's memory type range registers, which it marks for 3dfx's
-  Windows driver to catch, do nothing.
+  card's memory. Games made for the Voodoo Rush and later boards load
+  Glide from `GLIDE2X.OVL`, and the one of 3dfx's Voodoo Graphics driver
+  drives this card whatever board they were made for. It is 3dfx's and
+  doesn't come with rust-dos: the settings window's Emulator page
+  downloads it, after asking, from the driver (3.01.00) the Internet
+  Archive keeps, into rust-dos's configuration directory, and Z: has it
+  from then on, where they find it on the PATH (one beside the game
+  comes first). A game that looks for it while it is missing says so on
+  the screen. Such a game runs without rust-dos's DPMI host: the overlay
+  is a DOS/4G DLL whose start-up only works with DOS/4GW as its own
+  host, at level 0. Its accesses to the Pentium II's memory type range
+  registers, which it marks for 3dfx's Windows driver to catch, do
+  nothing.
 * **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
   the card as a "PCI Multimedia Video Device", which needs no driver:
   games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
-  `fxmemmap.vxd`). SubCulture's 3dfx version installs from its CD in the
-  [CD-ROM drive](#booting-a-disk-image) and plays with its CD music, with
-  `machine=svga_s3`, `memsize=64` and `cpu=pentium`.
+  `fxmemmap.vxd`).
 * **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
   and installs its own driver for it from the Windows 98 CD, asking for the
   CD's `WIN98` folder (give it the drive letter the CD has in this
-  machine), without a restart. The driver gives DirectDraw and Direct3D the
-  Voodoo as a second device beside the 2D card, and Direct3D games that let
-  you choose the 3D card draw on it: Expendable does with
-  `DisplayDriver [1]` in its `config.txt`, with `machine=svga_s3virge`,
-  `cpu=pentium_ii` and `memsize=128`. While a game draws on the card,
-  `video.voodoo.output` in the debug server's `/api/status` is true.
+  machine), without a restart. The driver gives DirectDraw and Direct3D
+  the Voodoo as a second device beside the 2D card, and Direct3D games
+  that let you choose the 3D card draw on it. While a game draws on the
+  card, `video.voodoo.output` in the debug server's `/api/status` is
+  true.
+
+[docs/compatibility.md](docs/compatibility.md) has the settings of the
+games tried on the card: Tomb Raider's 3dfx and Rush patches under DOS,
+SubCulture on Windows 95 and Expendable on Windows 98 SE.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
@@ -2867,18 +2864,11 @@ card through the BIOS (INT 10h AX=158Dh describes the board), load
 has these functions; its VESA modes are the card's own, shown by its
 CRTC, with the memory's byte order set for the PC to see it linear.
 
-* **Tomb Raider**'s Vérité patch (`3DPATCH\RENDVRT` on the Tomb Raider
-  Gold CD: `Tomb.exe` and `spd3d.uc`, copied into the game's folder, the
-  executable renamed so the 2D one stays) runs with `cpu=pentium` and
-  `memsize=32`.
-
-* **vQuake** (Rendition's port of Quake; 1.07 beta 5 with its `spd3d.uc`,
-  or 1.08 beta 1, copied into the Quake folder) runs with `dpmi=false`,
-  `cpu=pentium` and `memsize=32`, and `-nocdaudio` unless the CD is
-  mounted. It brings its own DPMI host, CWSDPMI, which it needs: its
-  copy of Rendition's library finds the physical addresses for DMA by
-  walking the processor's page tables, which the built-in host doesn't
-  use.
+Tomb Raider's Vérité patch and vQuake run this way;
+[docs/compatibility.md](docs/compatibility.md) has their files and
+settings. vQuake needs the DPMI host it brings, CWSDPMI: its copy of
+Rendition's library finds the physical addresses for DMA by walking the
+processor's page tables, which the built-in host doesn't use.
 
 ### 3D Blaster PCI games (CGL)
 
@@ -3019,27 +3009,9 @@ tiles are drawn on as many threads as the host has, and the picture is
 the same however many there are. Save states and rewind keep the card
 with its texture memory.
 
-* **Tomb Raider**'s PowerVR patch (`3DPATCH\PWRVR\TOMBPCX2.EXE` on the Tomb
-  Raider Gold CD, copied into the game's folder) runs with `cpu=pentium`
-  and `memsize=32` (it wants 20 MB free), under its DOS/4GW. It finds a
-  VESA 2.0 BIOS, so it doesn't run UniVBE. F1 and F2 change the
-  resolution, F3 shows it and the frame rate. F8 switches between double
-  and single buffering, going back to 640x480 as it does; single
-  buffering can be 4 or 5 frames a second faster, which counts while the
-  emulated card runs at 15 to 20 on a typical host. Keys this version has and the others
-  don't (or use differently): F4 shows or hides the PowerVR logo (in the
-  full game only), Z zooms the camera in and X out.
-  Its saved games and the 3dfx version's (and the other versions') share
-  the names `SAVEGAME.x` but don't work in each other: one way round the
-  game loads to a black screen, the other way it quits with an error
-  about GetHeight. The textures aren't harmed. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
-  has TOMBPCX2.EXE (v2.1e and v2.0e) modified to save as `SAVEPCX2.x`
-  instead, so it lives peacefully beside the others in one folder, and
-  the same for Tomb Raider: Unfinished Business's PowerVR version, which
-  saves as `SVUBPX.x` instead of `SAVEUB.x`.
-* The same patch's `TOMBPCX1.EXE` is the version for the PCX1, and runs
-  the same way with `powervr=pcx1`. Each version tells you if the card is
-  the other one.
+Tomb Raider's PowerVR patch, with a version for each chip, runs on both
+under its DOS/4GW; [docs/compatibility.md](docs/compatibility.md) has
+its settings, its keys and what to know about its saved games.
 
 The PCX1 does without some of what the PCX2 added. It has no bilinear
 filtering: where a texture's two mip map levels meet, it blends a texel
