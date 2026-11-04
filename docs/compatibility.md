@@ -146,7 +146,7 @@ which drivers to install.
 * **OpenGL games for a Voodoo1 or 2** that bring 3dfx's MiniGL as
   `opengl32.dll` in their folder: on a Voodoo3, take it away so the game
   gets the card's OpenGL driver. Quake II's `3dfxgl.dll` is used only
-  when chosen in its video menu.
+  when chosen in its video menu ([game notes](win9x-howto.md#game-notes)).
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
   `OPENGL32.DLL`
