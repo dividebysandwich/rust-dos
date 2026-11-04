@@ -63,12 +63,6 @@ that names the game, its settings and what happened.
   in the game's profile.
 * **BloodNet** (GOG): GOG's `.bdn` file mounts as a CUE sheet
   ([disk images](../CONFIGURATION.md#disk-images)).
-* **Blues Brothers: Jukebox Adventure**: the game hangs about 75
-  seconds into the title screen's music, on a real PC too. Rust-DOS
-  takes the hang out of any copy whose music player has the code of
-  Razor 1911's release (BLUES.EXE of 25096 bytes), the only one tried;
-  if another release still hangs, press a key on the title screen
-  before then ([game fixes](../CONFIGURATION.md#game-fixes)).
 * **Comanche 3** on a VFX1: in flight, Video > Stereoscopic, then
   Alt+F12 for head tracking
   ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
