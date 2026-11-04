@@ -171,6 +171,28 @@ pub(crate) struct Args {
     #[arg(long, value_name = "PASSWORD", requires = "relay")]
     pub(crate) relay_password: Option<String>,
 
+    /// Take no machine-wide run lock. Every emulator run takes it shared
+    /// unless told not to (`run_lock=off` in the config file)
+    #[arg(long, conflicts_with_all = ["run_lock", "run_lock_exclusive", "run_lock_wait"])]
+    pub(crate) no_run_lock: bool,
+
+    /// The machine-wide run lock's directory, and fail instead of running
+    /// without the lock when it can't be taken [default: the config
+    /// file's run_lock, $RUST_DOS_RUN_LOCK_DIR, or run-lock in the profile
+    /// directory]
+    #[arg(long, value_name = "DIR")]
+    pub(crate) run_lock: Option<std::path::PathBuf>,
+
+    /// Take the run lock exclusive, for a measurement: wait for every
+    /// other run to end, and keep new ones out until this one ends
+    #[arg(long)]
+    pub(crate) run_lock_exclusive: bool,
+
+    /// Wait at most this long for the run lock, then exit with code 3
+    /// before opening a window [default: 0, no limit]
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) run_lock_wait: Option<u64>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -188,6 +210,19 @@ pub(crate) enum Command {
     /// Write a disk image's changes into the image: the delta file beside
     /// it (IMAGE.rdelta), or the one --delta names, which is deleted after
     Commit(CommitArgs),
+    /// Hold the machine-wide run lock around a command, or list who holds
+    /// it: `lock shared|exclusive -- CMD`, `lock status`, as rust-dos-lock
+    /// does (`lock --help`)
+    #[command(disable_help_flag = true)]
+    Lock(LockArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct LockArgs {
+    /// shared|exclusive [--dir DIR] [--wait SECONDS] [--name NAME] -- CMD,
+    /// or status [--dir DIR] [--json]
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<std::ffi::OsString>,
 }
 
 #[derive(clap::Args, Debug)]

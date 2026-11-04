@@ -9,6 +9,17 @@
 #   bash tools/run-lock.sh status
 #   bash tools/run-lock.sh clear OWNER
 #
+# Where rust-dos-lock is installed (on PATH), the script hands over to
+# it, the one lock every rust-dos run takes as well (AGENTS.md): heavy
+# runs `rust-dos-lock shared --wait MAX_WAIT_S --name OWNER -- CMD...`,
+# measure the same with exclusive, and status its status. clear has
+# nothing to do there, since a hold ends with its process. A nested call
+# inherits the outer hold instead of exiting with 5, and an exclusive
+# one inside a shared one exits with 3. Everything below describes the
+# script's own mkdir lock, which it keeps only for a machine without
+# rust-dos-lock, or with RUST_DOS_RUN_LOCK_FALLBACK=1. The two locks
+# don't see each other.
+#
 # heavy waits while a measurement runs or waits, then runs CMD. Any number
 # of heavy jobs run at once.
 #
@@ -89,6 +100,47 @@
 # by command line above catches those.
 
 set -u
+
+# heavy|measure OWNER [MAX_WAIT_S] -- CMD... as rust-dos-lock's
+# shared|exclusive, run by the program at $1.
+handover() {
+    local bin=$1 mode wait=7200 owner
+    shift
+    case $1 in
+    heavy) mode=shared ;;
+    *) mode=exclusive ;;
+    esac
+    owner=${2:-}
+    case $owner in
+    '' | *[!A-Za-z0-9._-]*) exec "$bin" --help ;;
+    esac
+    shift 2
+    if [ $# -gt 0 ] && [ "$1" != -- ]; then
+        case $1 in
+        '' | *[!0-9]*) echo "run-lock: MAX_WAIT_S must be whole seconds" >&2; exit 2 ;;
+        esac
+        wait=$1
+        shift
+    fi
+    if [ "${1:-}" != -- ] || [ $# -lt 2 ]; then
+        echo "usage: run-lock.sh heavy|measure OWNER [MAX_WAIT_S] -- CMD..." >&2
+        exit 2
+    fi
+    shift
+    exec "$bin" "$mode" --wait "$wait" --name "$owner" -- "$@"
+}
+
+if [ "${RUST_DOS_RUN_LOCK_FALLBACK:-}" != 1 ] &&
+    lock_bin=$(command -v rust-dos-lock 2>/dev/null) && [ -n "$lock_bin" ]; then
+    case ${1:-} in
+    heavy | measure) handover "$lock_bin" "$@" ;;
+    status) exec "$lock_bin" status ;;
+    clear)
+        echo "run-lock: rust-dos-lock keeps no holds to clear: each ends with its process" >&2
+        exit 0
+        ;;
+    esac
+fi
 
 DIR=${RUST_DOS_RUN_LOCK_DIR:-$HOME/.rust-dos-run-lock}
 LOCK=$DIR/measure

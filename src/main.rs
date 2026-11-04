@@ -29,6 +29,7 @@ mod main_almanac;
 mod main_host;
 mod monitor_power;
 mod parent_watch;
+mod run_lock;
 mod sdl_audio;
 mod sdl_keys;
 mod startup;
@@ -82,14 +83,25 @@ fn main() -> Result<ExitCode, String> {
     let mut args = Args::parse();
     match args.command.take() {
         Some(Command::Run(run)) => {
-            std::process::exit(rust_dos::cli::run(rust_dos::cli::RunOptions {
+            // An emulator run like any other, under the run lock; it reads
+            // no configuration file.
+            let run_lock = match run_lock::take(&args, None) {
+                Ok(taken) => taken,
+                Err(code) => std::process::exit(code),
+            };
+            let code = rust_dos::cli::run(rust_dos::cli::RunOptions {
                 command: run.command,
                 dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
                 cycles: run.cycles,
                 memory_mb: run.mem as usize,
                 screen: run.screen,
                 win32: run.win32,
-            }))
+            });
+            drop(run_lock);
+            std::process::exit(code)
+        }
+        Some(Command::Lock(lock)) => {
+            std::process::exit(rust_dos_runlock::cli::main("rust-dos lock", lock.args))
         }
         Some(Command::Unpack(unpack)) => {
             std::process::exit(rust_dos::unpack::run(rust_dos::unpack::UnpackOptions {
@@ -154,6 +166,12 @@ fn main() -> Result<ExitCode, String> {
     let config = load_config(&args)?;
     let mut settings = Settings::from_config(&config);
     apply_args(&mut settings, &args)?;
+    // The machine-wide run lock, held until rust-dos ends; a run that
+    // gives up waiting exits before any window or device opens.
+    let mut run_lock = match run_lock::take(&args, config.run_lock.as_ref()) {
+        Ok(taken) => taken,
+        Err(code) => return Ok(ExitCode::from(code as u8)),
+    };
     // Ask rust-dos.com whether there is a newer version while the window
     // opens; not in runs whose screens must come out the same.
     let mut update_check = (settings.version_check && !args.deterministic && args.debug_server.is_none())
@@ -273,6 +291,7 @@ fn main() -> Result<ExitCode, String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = start_debug_hub(&mut cpu, &args, &det, &settings)?;
+    run_lock::record_server(&mut run_lock, dbg.server());
     dbg.display = display.renderer().to_string();
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.

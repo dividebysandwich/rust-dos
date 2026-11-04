@@ -1000,6 +1000,7 @@ dependencies = [
  "rust-dos-opl",
  "rust-dos-pe",
  "rust-dos-rc",
+ "rust-dos-runlock",
  "rust-dos-savestate",
  "rust-dos-sc55",
  "rust-dos-soundblaster",
@@ -1105,6 +1106,17 @@ version = "1.8.1"
 dependencies = [
  "rust-dos-savestate",
  "rust-dos-zip",
+]
+
+[[package]]
+name = "rust-dos-runlock"
+version = "1.8.1"
+dependencies = [
+ "libc",
+ "rust-dos-hostdirs",
+ "serde",
+ "serde_json",
+ "windows-sys",
 ]
 
 [[package]]

@@ -211,26 +211,47 @@ disk.
   `SDL_VIDEODRIVER=dummy` or `--hidden` takes the null output. Check
   `audio_driver` in `/api/underruns` or `/api/stats` before quoting a
   result.
-- Run jobs through `tools/run-lock.sh` (bash on Linux and macOS, Git
-  Bash on Windows). Builds, tests and every heavy emulator run take the
-  heavy form, so they run together:
-  `bash tools/run-lock.sh heavy NAME 0 -- cargo test ...`. Only timing
-  measurements take the exclusive form:
-  `bash tools/run-lock.sh measure NAME 0 -- CMD...` blocks new heavy jobs,
-  waits for the running ones to end, and then runs alone, in the order
-  measurements asked. Either form releases when the command ends and
-  passes on its exit code. The third argument is the longest wait in
-  seconds; `0` waits without limit, which is the right value for queued
-  work. If the script exits with code 3, the command did not run: check
-  `status`, and if the job is still wanted, run the same command again at
-  once under the same NAME. Never call one form inside the other: that
-  deadlocks.
-  `status` shows what runs and waits, and `clear NAME` cleans up after a
-  stopped worker. NAME is yours alone. The lock lives in
-  `RUST_DOS_RUN_LOCK_DIR` (by default `~/.rust-dos-run-lock`), so all
-  callers on the machine need the same one. Read the script's header
-  before using it: its rules come from clashes that spoiled
-  measurements.
+- Run jobs under the machine-wide run lock with `rust-dos-lock`,
+  installed once on the machine, outside every checkout: build it
+  (`cargo build --release --bin rust-dos-lock`, which links no SDL2) and
+  copy the program to a folder on `PATH` such as `~/bin`. A copy inside
+  a target directory can't wrap a build into that directory, since
+  Windows can't overwrite a running program. Builds, tests and every
+  heavy emulator run take the lock shared, so they run together:
+  `rust-dos-lock shared --name NAME -- cargo test ...`. Only timing
+  measurements take it exclusive:
+  `rust-dos-lock exclusive --name NAME -- CMD...` keeps new shared jobs
+  out from the moment it asks, waits for the running ones to end, and
+  then runs alone. Either form lets go when the command ends, however it
+  ends, and passes on its exit code. `--wait SECONDS` limits the wait
+  (there is none by default); exit code 3 then means the command did not
+  run. `rust-dos-lock status` lists the holders and the jobs waiting,
+  with their names, states and debug servers.
+- Every rust-dos run takes the lock shared by itself, a run started with
+  `--run-lock-exclusive` takes it exclusive, and `--no-run-lock` takes
+  none. A program inside a wrapper inherits its hold (through
+  `RUST_DOS_RUN_LOCK_HELD` and `RUST_DOS_RUN_LOCK_DIR`): shared under
+  either form and exclusive under exclusive take nothing, so a
+  measurement script under `exclusive` may start emulators and wrappers.
+  Exclusive under shared exits with 3 instead of waiting for itself. A
+  job that loses its environment on the way, such as one started over
+  ssh, deadlocks; its `run-lock: waiting for ...` line on stderr shows
+  it.
+- The lock lives in `run-lock` in the per-user profile directory
+  (`%APPDATA%\rust-dos`, `~/.config/rust-dos`). `RUST_DOS_RUN_LOCK_DIR`
+  moves it for every program that takes it; set it for the whole
+  machine or not at all. A hold is an OS file lock, which ends with its
+  process, so a killed job leaves nothing to clear. On Windows the
+  wrapper runs the command in a job object, and killing the wrapper ends
+  the command and its children; on Linux and macOS a process the command
+  leaves in the background isn't held, so check by command line as
+  above. The protocol is in `crates/runlock`'s module comment.
+- `tools/run-lock.sh` hands over to an installed `rust-dos-lock`
+  (`heavy` takes it shared, `measure` exclusive) and keeps its own
+  `mkdir` lock only for a machine without one. The two locks don't see
+  each other, so a machine uses one or the other. Read the script's
+  header before using the fallback: its rules come from clashes that
+  spoiled measurements.
 - If CI's step times are enough for the claim, use them instead of a local
   timing.
 
