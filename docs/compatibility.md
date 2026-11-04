@@ -20,10 +20,12 @@ ways:
   ask the almanac for it.
 
 Rust-DOS finds a game in the almanac by the name, size and checksums of
-the program file started at its prompt. That works for DOS games and
-for games on the built-in Windows, which start from the same prompt.
-The almanac carries the machine's settings only: the processor, speed,
-memory, DPMI, the Windows version, the 3D cards and the sound cards.
+the program file started at its prompt; `almanac_auto` takes the
+settings of a game only when the checksums match. That works for DOS
+games and for games on the built-in Windows, which start from the same
+prompt. The almanac carries the machine's settings only: the graphics
+card, processor, speed, memory, DPMI, the DOS and Windows versions, the
+3D cards, the sound cards, the joystick and the disks' speeds.
 
 ## What this page adds
 
@@ -63,18 +65,19 @@ that names the game, its settings and what happened.
   ([disk images](../CONFIGURATION.md#disk-images)).
 * **Blues Brothers: Jukebox Adventure**: the game hangs about 75
   seconds into the title screen's music, on a real PC too. Rust-DOS
-  fixes that only in Razor 1911's release (BLUES.EXE of 25096 bytes);
-  with any other, press a key on the title screen before then
-  ([game fixes](../CONFIGURATION.md#game-fixes)).
+  takes the hang out of any copy whose music player has the code of
+  Razor 1911's release (BLUES.EXE of 25096 bytes), the only one tried;
+  if another release still hangs, press a key on the title screen
+  before then ([game fixes](../CONFIGURATION.md#game-fixes)).
 * **Comanche 3** on a VFX1: in flight, Video > Stereoscopic, then
   Alt+F12 for head tracking
   ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
 * **Descent**: keep `cycles=auto`, the default. A high fixed `cycles`
   runs it faster than the display's refresh rate, and it plays badly
-  there. On a VFX1
-  headset, start it as `DESCENT -vfx -vfxtrak` with `steer=true` in
-  [`[vfx1]`](../CONFIGURATION.md#vfx1); its heads-up display shows in
-  the left eye only. [docs/vfx1.md](vfx1.md) has the resolutions.
+  there. On a VFX1 headset, start it as `DESCENT -vfx -vfxtrak` with
+  `steer=true` in [`[vfx1]`](../CONFIGURATION.md#vfx1); its heads-up
+  display shows in the left eye only. [docs/vfx1.md](vfx1.md) has the
+  resolutions.
 * **Descent 2** on a VFX1: `VR_type=1` and `VR_tracking=1` in
   `DESCENT.CFG` (its SETUP writes them) and `steer=true`
   ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
@@ -121,7 +124,8 @@ opcode, `win32_version=98se` when a message names the version, more
 * **Enemy Infestation**: the profile in
   [a profile to start from](../CONFIGURATION.md#a-profile-to-start-from)
   installs and runs it. For a CD copied to a folder, give the drive the
-  label `EI`.
+  label `EI` ([the CD's drive letter and
+  label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
 * **Grom**: two CDs; list both images on the drive line and press
   Ctrl+F4 when the setup asks for the second ([running the
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
@@ -153,9 +157,12 @@ which drivers to install.
   the later 1.07.00. With 1.07.00 the picture flickers: about half the
   frames show only the background colour, and the LOADING text is
   missing. 4.11.01.1151 draws it correctly with DirectX 6.1 or 7. It
-  was checked only with its files copied over 1.07.00's
-  ([the Voodoo3 driver](win9x-howto.md#the-voodoo3-driver)). On the
-  built-in Windows Glover needs neither.
+  was checked only with the driver files of the CD's driver folder
+  (`3dfx32v3.dll`, `3dfx16v3.drv`, `3dfxv3.vxd` and the rest) copied over
+  those of 1.07.00, installed first as
+  [the Voodoo3 driver](win9x-howto.md#the-voodoo3-driver) says; the CD's
+  own `Voodoo3.inf` hasn't been tried. On the built-in Windows Glover
+  needs neither.
 * **GLQuake with the shareware data**: rebuilds its palette table at
   every start, behind a window that takes the focus, so the game stays
   minimised (Alt+Tab brings it back). The registered data doesn't
@@ -170,12 +177,10 @@ which drivers to install.
   when chosen in its video menu ([game notes](win9x-howto.md#game-notes)).
 * **Oni**: on a Voodoo3, take away a MiniGL `opengl32.dll` from its
   folder. On a Voodoo2, copy `3DFXVGL.DLL` into its folder as
-  `OPENGL32.DLL`
-  ([OpenGL games under
+  `OPENGL32.DLL` ([OpenGL games under
   Windows](../CONFIGURATION.md#opengl-games-under-windows)).
-* **Quake III Arena** on a Voodoo2: `r_glDriver 3dfxvgl`
-  ([OpenGL games under
-  Windows](../CONFIGURATION.md#opengl-games-under-windows)).
+* **Quake III Arena** on a Voodoo2: `r_glDriver 3dfxvgl` ([OpenGL games
+  under Windows](../CONFIGURATION.md#opengl-games-under-windows)).
 * **SubCulture** (3dfx version): Windows 95, `voodoo=true`,
   `machine=svga_s3`, `memsize=64`, `cpu=pentium`
   ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).

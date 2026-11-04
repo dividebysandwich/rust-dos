@@ -149,7 +149,7 @@ CD. At the first start with `machine=svga_voodoo3`, Windows finds a
 The driver brings Glide 2 and 3 (`glide2x.dll`, `glide3x.dll`), the
 OpenGL ICD (`3dfxOGL.dll`) and Direct3D. Glover draws wrongly with
 1.07.00 and needs an earlier driver; [compatibility.md](compatibility.md)
-names the games known to.
+names the games that need another driver.
 
 ### DirectX
 
