@@ -1,20 +1,43 @@
 # Game compatibility notes
 
-Games that need a setting, a setup step or a particular driver to run
-well in rust-dos, and the limits that are known. A game that isn't
-listed here may run fine with the defaults; if one doesn't, please
+## The almanac first
+
+[almanac.rust-dos.com](https://almanac.rust-dos.com) collects players'
+reports of the settings games run well with. Rust-DOS asks it in two
+ways:
+
+* In the settings window (**Ctrl+F12**), on the Emulator page, *Fetch
+  settings from Almanac* lists the games it has for the program started
+  last, or for a name you type, and Enter puts the settings of the one
+  you pick in place. *Report settings to Almanac* tells it how a game
+  played with the settings as they are, which helps the next player.
+* With `almanac_auto=true` in
+  [`[emulator]`](../CONFIGURATION.md#emulator), a program started from
+  the prompt waits a moment while Rust-DOS asks, and starts with the
+  settings the almanac recommends; yours come back when it ends. A game
+  started from its profile doesn't ask.
+
+The almanac knows a program by its file, so it covers DOS games and
+games on the built-in Windows. It carries the machine's settings only:
+the processor, speed, memory, DPMI, the Windows version, the 3D cards
+and the sound cards.
+
+## What this page adds
+
+What the almanac can't carry: files to copy or remove, drivers,
+command-line switches and install steps, settings outside its list
+(such as `win32_depth`), limits that are known, and every game that
+runs inside a booted Windows 95 or 98 image, whose files Rust-DOS
+doesn't see. Where an entry also names settings the almanac takes, they
+can be fetched from it or reported to it like any other.
+
+Each entry says what to do and links to the section that explains it.
+Notes for a game on the built-in Windows don't apply to the same game
+on a Windows image, and the other way round. A game that isn't listed
+may run fine with the defaults or the almanac's settings; if one
+doesn't, please
 [open an issue](https://github.com/dividebysandwich/rust-dos/issues)
 that names the game, its settings and what happened.
-
-Each entry says what to do and links to the section that explains the
-setting. Notes for a game run on rust-dos's built-in Windows don't apply
-to the same game on a Windows 95 or 98 image, and the other way round.
-
-For DOS programs started from the prompt, `almanac_auto` (see
-[`[emulator]`](../CONFIGURATION.md#emulator)) can fetch the settings
-other players found best. It covers the machine's settings only, not
-drivers, files or install steps. A game started from its profile never
-asks, and it doesn't see a game that runs inside a booted Windows image.
 
 ## DOS games
 
@@ -65,8 +88,7 @@ default: `game_fixes=false` or `game_fixes_off` turns them off.
 * **Prehistorik 2**: the sound clicks at every note, on a real Sound
   Blaster too. The game fix `prehistorik2-sb-mix` mixes it around the
   centre.
-* **Quake 1.08**: `fpu=fast` in [`[emulator]`](../CONFIGURATION.md#emulator)
-  saves host processor time. On a VFX1:
+* **Quake 1.08** on a VFX1:
   `VFX1QK QUAKE.EXE +vid_mode 7 +lcd_x 1` with `stereo=lines`, as the
   forte-vfx1-vr project found it; it hasn't been tried in rust-dos
   ([the VFX1 headset](../CONFIGURATION.md#the-vfx1-headset)).
