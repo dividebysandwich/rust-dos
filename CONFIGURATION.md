@@ -779,7 +779,10 @@ programs set.
   (the default), `25`, `30`, `40` or `50`. Smaller values bring the
   sound sooner; if it crackles, the host can't keep up with them. Only
   the rust-dos program has them: the libretro core and the browser leave
-  the buffering to the frontend.
+  the buffering to the frontend. When the host holds the emulator up
+  long enough to run the device dry, the queue is kept 10 ms longer from
+  then on, up to 60 ms more, and it comes back down by 10 ms after each
+  minute without a gap.
 * The `MIXER` command shows the mixer and changes it at the prompt, or
   from `[autoexec]`, in DOSBox Staging's syntax:
   `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,

@@ -190,6 +190,15 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   window counts as neither and ends a stretch. The first check after the
   start finds the queue empty, so `events` starts at 1.
 
+  The first check of a stretch after the device played sound keeps the
+  queue 10 ms longer from then on, up to 60 ms over `blocksize` and
+  `prebuffer`, and a minute without a dry check takes 10 ms of that off
+  again. `queue_growth_ms` is what it keeps on top now (in `/api/status`,
+  `audio.queue_growth_frames`), and each record's `target_ms` includes
+  it. So stalls of the host come with fewer gaps after the first, and a
+  count of dry checks over a run reads a little lower than it did with a
+  fixed queue; compare counts of runs of one build only.
+
   `audio_driver` says what the counts ran on. Measure underruns on a real
   sound device, muted (on Windows, `SDL_AUDIODRIVER=wasapi` and `--mute`),
   or on the null output (`--audio-output null`) on a machine without one.

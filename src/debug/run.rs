@@ -64,6 +64,9 @@ pub(super) fn underruns_json(cpu: &Cpu) -> Value {
         "audio_driver": audio_driver(cpu),
         "events": host.underrun_events(),
         "dry_checks": cpu.bus.audio_underruns,
+        // What the queue keeps on top of its target since the host ran it
+        // dry (`audio::Feed`); each record's `target_ms` includes it.
+        "queue_growth_ms": queue_ms(cpu.bus.audio_feed.extra_frames()),
         "log": log,
     })
 }
