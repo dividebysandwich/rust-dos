@@ -73,7 +73,7 @@ default: `game_fixes=false` or `game_fixes_off` turns them off.
 * **Tomb Raider's 3D patches** (Gold CD, `3DPATCH`):
   * 3dfx: `voodoo=true`, `cpu=pentium`
     ([3dfx Voodoo Graphics](../CONFIGURATION.md#3dfx-voodoo-graphics)).
-  * Voodoo Rush: the same settings, and 3dfx's `GLIDE2X.OVL`, which the
+  * Voodoo Rush: `voodoo=true` and 3dfx's `GLIDE2X.OVL`, which the
     settings window downloads onto Z:.
   * Vérité: copy `Tomb.exe` and `spd3d.uc` into the game's folder,
     renaming the executable so the 2D one stays;
@@ -128,11 +128,11 @@ which drivers to install.
 * **Glover**: on a Voodoo3 (`machine=svga_voodoo3`), install the driver
   from 3dfx's Voodoo3 driver CD 1.2 (`3dfx32v3.dll` 4.11.01.1151), not
   the later 1.07.00. With 1.07.00 the game's 3D goes to the buffer on
-  screen: about half the frames show only the background colour, and at
-  a low `cycles` (50000) the rest are half drawn and the LOADING text,
-  the star wipe and the title screen don't show. 4.11.01.1151 draws it
-  correctly with DirectX 6.1 or 7. This was checked only with that
-  driver's files copied over 1.07.00's
+  screen: about half the frames show only the background colour, and the
+  LOADING text is missing. At a low `cycles` (50000) the other frames are
+  half drawn, and the star wipe and the title screen don't show either.
+  4.11.01.1151 draws it correctly with DirectX 6.1 or 7. This was
+  checked only with that driver's files copied over 1.07.00's
   ([the Voodoo3 driver](win9x-howto.md#the-voodoo3-driver)). On the
   built-in Windows Glover needs neither.
 * **GLQuake with the shareware data**: rebuilds its palette table at
