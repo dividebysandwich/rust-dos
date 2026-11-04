@@ -2800,9 +2800,9 @@ The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
 Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
 DirectDraw gives it when a program starts Direct3D for the one DirectX 7
 has, and faults: the program's window stays white and the card draws
-nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. A few games
-need an earlier driver; [docs/compatibility.md](docs/compatibility.md)
-names them.
+nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. Glover
+draws wrongly with 1.07.00 and needs an earlier driver;
+[docs/compatibility.md](docs/compatibility.md) names the games known to.
 
 With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
 at `voodoo_scale` times its resolution, as for the Voodoo Graphics (see

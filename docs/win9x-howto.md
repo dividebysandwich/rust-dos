@@ -147,16 +147,15 @@ CD. At the first start with `machine=svga_voodoo3`, Windows finds a
    it from its own files. The desktop comes up at 1024x768.
 
 The driver brings Glide 2 and 3 (`glide2x.dll`, `glide3x.dll`), the
-OpenGL ICD (`3dfxOGL.dll`) and Direct3D. A few games draw wrongly with
-1.07.00 and need an earlier driver: see
-[compatibility.md](compatibility.md).
+OpenGL ICD (`3dfxOGL.dll`) and Direct3D. Glover draws wrongly with
+1.07.00 and needs an earlier driver; [compatibility.md](compatibility.md)
+names the games known to.
 
 ### DirectX
 
 The 1.07.00 driver's Direct3D needs DirectX 7 or later; 98 SE comes with
-6.1.
-Install DirectX 7.0 (`dx70eng.exe`, which unpacks with 7-Zip; run its
-`DXSETUP.EXE`) or later. Check first: an image that has had other
+6.1. Install DirectX 7.0 (`dx70eng.exe`, which unpacks with 7-Zip; run
+its `DXSETUP.EXE`) or later. Check first: an image that has had other
 software installed may already have 9.0c, and DirectX setup says so and
 stops.
 
