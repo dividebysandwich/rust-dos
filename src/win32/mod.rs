@@ -27,6 +27,7 @@ mod dinput;
 pub mod dll_files;
 mod dmusic;
 mod dplayx;
+mod dshow;
 mod dsound;
 pub mod gdi32;
 mod glide;
@@ -400,6 +401,8 @@ pub struct Win32 {
     guids: u32,
     /// DirectMusic's objects (dmusic/).
     dmusic: dmusic::State,
+    /// DirectShow's objects (dshow/).
+    dshow: dshow::State,
     /// The common controls' state, the system's.
     comctl32: comctl32::State,
     /// The common dialogs' state.
@@ -1151,6 +1154,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     glide::process_ended(cpu, process.id, &tids);
     opengl32::process_ended(cpu, process.id);
     dmusic::process_ended(cpu, process.id);
+    dshow::process_ended(cpu, process.id);
     shell32::process_ended(cpu, process.id);
     dplayx::process_ended(cpu, process.id);
     user32::ddeml::process_ended(cpu, process.id);
@@ -1448,6 +1452,7 @@ crate::state_fields!(Win32 {
     guids,
     os,
     dmusic,
+    dshow,
     comctl32,
     comdlg32,
     shell,

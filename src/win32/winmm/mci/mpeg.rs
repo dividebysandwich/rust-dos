@@ -49,6 +49,13 @@ pub struct Video {
     groups: Vec<(usize, u32)>,
 }
 
+impl Video {
+    /// The bytes of the file it is in.
+    pub fn bytes(&self) -> usize {
+        self.data.len()
+    }
+}
+
 /// Why a file doesn't open: it isn't MPEG-1 (or is MPEG-2, which
 /// ActiveMovie's decoder doesn't take), or has no stream it plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

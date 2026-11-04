@@ -74,12 +74,38 @@ impl Media {
         (n as u64 * den as u64 * 1000 / num.max(1) as u64) as u32
     }
 
+    /// The bytes of the video stream: the frames' of an AVI file, the
+    /// whole of an MPEG-1 one.
+    pub fn video_bytes(&self) -> usize {
+        match &self.video {
+            Kind::None => 0,
+            Kind::Mpeg(v) => v.bytes(),
+            Kind::Avi(v) => v.bytes(),
+        }
+    }
+
     /// The frame shown at `ms` milliseconds.
     pub fn frame_at(&self, ms: u64) -> u32 {
         let (num, den) = self.rate;
         let n = ms * num as u64 / (den.max(1) as u64 * 1000);
         n.min(self.frames.saturating_sub(1) as u64) as u32
     }
+}
+
+/// The bytes of the file at `path`, as the running process opens it.
+/// None if it can't be opened.
+pub fn read_file(cpu: &mut crate::cpu::Cpu, path: &str) -> Option<Vec<u8>> {
+    use crate::win32::kernel32;
+    let handle = kernel32::open_handle(cpu, path, 0x8000_0000, 1, 3).ok()?;
+    let mut bytes = Vec::new();
+    loop {
+        match kernel32::read_file(cpu, handle, 1 << 20) {
+            Ok(chunk) if !chunk.is_empty() => bytes.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    crate::win32::object::close(cpu, handle);
+    Some(bytes)
 }
 
 /// A file's picture decoder, made for its format when the first frame

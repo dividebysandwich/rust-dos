@@ -366,6 +366,7 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) -> Option<u64> {
     mci::poll(cpu, pid, now);
     joy::poll(cpu, pid, now);
     super::dmusic::poll(cpu, pid, now);
+    super::dshow::poll(cpu, pid, now);
     schedule(cpu);
     next_due(cpu, pid)
 }
@@ -378,6 +379,8 @@ fn next_due(cpu: &Cpu, pid: u32) -> Option<u64> {
         mci::next_due(cpu, Some(pid)),
         joy::next_due(cpu, Some(pid)),
         super::dmusic::next_due(cpu, Some(pid)),
+        super::dshow::next_due(cpu, Some(pid)),
+
     ]
     .into_iter()
     .flatten()

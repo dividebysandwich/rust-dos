@@ -129,6 +129,15 @@ pub struct Video {
     pub paused: bool,
     /// MCI_SET_AUDIO's off.
     pub muted: bool,
+    /// The sound's volume and balance, as a DirectShow graph that plays
+    /// through the device sets them (IBasicAudio): hundredths of a
+    /// decibel, 0 for full, and -10000 for the left channel's silence to
+    /// 10000 for the right's. MCI leaves them at 0.
+    pub volume: i32,
+    pub balance: i32,
+    /// Whether a play leaves the device's own window hidden: a graph's
+    /// with IVideoWindow's AutoShow off.
+    pub manual_show: bool,
     /// The frame drawn last.
     pub drawn: Option<u32>,
     /// The file, which a save state doesn't keep, and its decoder.
@@ -185,7 +194,7 @@ fn calls(cpu: &mut Cpu) -> &mut Calls {
 /// What the call `api(args)` returned, if the command made it; else it
 /// asks for the call, and the command returns NEEDS_CALL. `strings` are
 /// the strings the call passes, each with the place of its argument.
-fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
+pub fn made(cpu: &mut Cpu, api: &str, args: &[u32], strings: &[(u32, &str)]) -> Option<u32> {
     let call = Call {
         target: user32::address_of(api),
         args: args.to_vec(),
@@ -249,7 +258,8 @@ pub fn call_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 }
 
 /// The open device `i`'s file, read again after a restore.
-fn media(cpu: &mut Cpu, i: usize) -> Option<Arc<Media>> {
+pub fn media(cpu: &mut Cpu, i: usize) -> Option<Arc<Media>> {
+
     if let Some(m) = &video(cpu, i).media {
         return Some(m.clone());
     }
@@ -264,17 +274,7 @@ fn media(cpu: &mut Cpu, i: usize) -> Option<Arc<Media>> {
 
 /// Reads the file `path`, for the device `i`.
 fn read(cpu: &mut Cpu, i: usize, path: &str) -> Result<Media, u32> {
-    use crate::win32::kernel32;
-    let handle =
-        kernel32::open_handle(cpu, path, 0x8000_0000, 1, 3).map_err(|_| MCIERR_FILE_NOT_FOUND)?;
-    let mut bytes = Vec::new();
-    loop {
-        match kernel32::read_file(cpu, handle, 1 << 20) {
-            Ok(chunk) if !chunk.is_empty() => bytes.extend_from_slice(&chunk),
-            _ => break,
-        }
-    }
-    crate::win32::object::close(cpu, handle);
+    let bytes = super::media::read_file(cpu, path).ok_or(MCIERR_FILE_NOT_FOUND)?;
     Media::parse(&bytes, is_mpeg(cpu, i)).ok_or(MCIERR_INVALID_FILE)
 }
 
@@ -554,8 +554,12 @@ fn start(cpu: &mut Cpu, i: usize) {
         let (a, b) = (at(pos).min(data.len()), at(to).min(data.len()));
         (a < b).then(|| (*f, data[a..b].to_vec()))
     });
+    let (volume, balance) = (video(cpu, i).volume, video(cpu, i).balance);
     let sound = match audio {
-        Some((f, samples)) if !video(cpu, i).muted => wave::play_wav(cpu, f, samples, false),
+        Some((f, mut samples)) if !video(cpu, i).muted && volume > -10000 => {
+            attenuate(&f, &mut samples, volume, balance);
+            wave::play_wav(cpu, f, samples, false)
+        }
         _ => 0,
     };
     let now = cpu.bus.clock.now_micros();
@@ -564,8 +568,45 @@ fn start(cpu: &mut Cpu, i: usize) {
     v.started = Some(now);
 }
 
+/// Scale PCM `samples` of the format `f` by a volume and a balance in
+/// hundredths of a decibel (`Video::volume`): a channel turned down by
+/// 20 dB has a tenth of its amplitude.
+pub fn attenuate(
+    f: &crate::win32::dsound::device::Format,
+    samples: &mut [u8],
+    volume: i32,
+    balance: i32,
+) {
+    if volume == 0 && balance == 0 {
+        return;
+    }
+    let gain = |db: i32| 10f32.powf(db.clamp(-10000, 0) as f32 / 2000.0);
+    let left = gain(volume - balance.max(0));
+    let right = gain(volume + balance.min(0));
+    let channels = f.channels.max(1) as usize;
+    let scale = |k: usize| if channels == 2 && k % 2 == 1 { right } else { left };
+    let mono = (left + right) / 2.0;
+    let pick = |k: usize| if channels == 1 { mono } else { scale(k) };
+    match f.bits {
+        8 => {
+            for (k, s) in samples.iter_mut().enumerate() {
+                let v = (*s as f32 - 128.0) * pick(k);
+                *s = (v.round() + 128.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+        16 => {
+            for (k, s) in samples.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                let v = i16::from_le_bytes(*s) as f32 * pick(k);
+                *s = (v.round() as i16).to_le_bytes();
+            }
+        }
+        _ => {}
+    }
+}
+
 /// MCI_PLAY: from where the device is, or `from`, to its end, or `to`.
-/// A window of its own that is hidden shows.
+/// A window of its own that is hidden shows, when it is the one the
+/// device paints.
 fn play(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     if flags & MCI_DGV_PLAY_REVERSE != 0 {
         return MCIERR_UNSUPPORTED_FUNCTION;
@@ -587,9 +628,10 @@ fn play(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     if from > length || to > length {
         return MCIERR_OUTOFRANGE;
     }
-    let own = video(cpu, i).own;
+    let (own, hwnd) = (video(cpu, i).own, video(cpu, i).hwnd);
+    let manual = video(cpu, i).manual_show;
     let state = user32::user(cpu);
-    if own != 0 && state.is_window(own) && !state.is_visible(own) {
+    if own != 0 && hwnd == own && !manual && state.is_window(own) && !state.is_visible(own) {
         let shown = window::SW_SHOWNA;
         if made(cpu, "ShowWindow", &[own, shown], &[]).is_none() {
             return NEEDS_CALL;
@@ -610,6 +652,24 @@ fn play(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
     v.drawn = None;
     start(cpu, i);
     0
+}
+
+/// The sound's volume and balance (`Video::volume`): a play goes on from
+/// where it is with them.
+pub fn set_gain(cpu: &mut Cpu, i: usize, volume: i32, balance: i32) {
+    let playing = video(cpu, i).started.is_some();
+    halt(cpu, i);
+    let v = video(cpu, i);
+    v.volume = volume;
+    v.balance = balance;
+    if playing {
+        start(cpu, i);
+    }
+}
+
+/// Where the device `i` is, in milliseconds.
+pub fn position_ms(cpu: &mut Cpu, i: usize) -> u32 {
+    position(cpu, i)
 }
 
 /// MCI_SEEK: to the start, the end or a position; it stops the play,
@@ -957,6 +1017,9 @@ crate::state_fields!(Video {
     sound,
     paused,
     muted,
+    volume,
+    balance,
+    manual_show,
     drawn
 } skip {
     media,

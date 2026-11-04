@@ -418,6 +418,10 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
         "MSACM32" | "DCIMAN32" if windows.is_98() => [4, 3, 0, 1998],
+        // DirectX 6.1's DirectShow, as Windows 98 SE has it.
+        "QUARTZ" => [6, 1, 5, 319],
+        "AMSTREAM" => [6, 1, 5, 217],
+
         _ => [4, 0, 0, 950],
     };
     let text = match version {

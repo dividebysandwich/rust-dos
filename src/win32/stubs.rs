@@ -131,6 +131,8 @@ pub static DLLS: &[&Dll] = &[
     &super::msacm32::DLL,
     &super::dciman32::DLL,
     &super::wnaspi32::DLL,
+    &super::dshow::QUARTZ,
+    &super::dshow::AMSTREAM,
 ];
 
 /// Bytes each function's stub takes.
@@ -494,6 +496,8 @@ mod tests {
         "MSACM32.DLL",
         "DCIMAN32.DLL",
         "WNASPI32.DLL",
+        "QUARTZ.DLL",
+        "AMSTREAM.DLL",
     ];
 
     #[test]

@@ -37,6 +37,13 @@ pub struct Video {
     palette: Vec<[u8; 3]>,
 }
 
+impl Video {
+    /// The bytes of its frames.
+    pub fn bytes(&self) -> usize {
+        self.chunks.iter().map(|c| c.size as usize).sum()
+    }
+}
+
 fn le16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
 }
