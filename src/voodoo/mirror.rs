@@ -563,8 +563,8 @@ struct TexKey {
 
 struct Cached {
     id: u32,
-    /// The bytes of texture RAM its levels come from, all of it if they
-    /// wrap.
+    /// The bytes of texture RAM the levels it was decoded from lie in,
+    /// first to last (`TmuRaster::texel_span`), all of it if they wrap.
     start: u32,
     end: u32,
     /// The unit's write count it was last known good at.
@@ -873,11 +873,7 @@ impl Mirror {
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {
-        // The card clamps the level to lodmin and then to lodmax, so with
-        // lodmin above lodmax it reads lodmax (as `backlog::texture_bytes`
-        // has it).
-        let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8);
-        let last = (t.lodmax >> 8).clamp(first, 8);
+        let (first, last) = t.levels();
         let key = TexKey {
             unit: unit as u8,
             base: t.lodoffset[0],
@@ -946,7 +942,8 @@ impl Mirror {
                     self.next_id = self.next_id.wrapping_add(1).max(1);
                     self.next_id
                 });
-                let (start, end) = texel_span(t);
+                let (start, end) = t.texel_span();
+                let (start, end) = (start as u32, end.saturating_sub(1) as u32);
                 self.textures.insert(key, Cached { id, start, end, good_at: tmu.writes, used: frame });
                 self.push(Command::Texture(Box::new(Texture { id, levels: decode(t, first, last) })));
                 id
@@ -1034,18 +1031,6 @@ fn draw_state(st: &RasterState, stipple: u32, tmu: [Option<TexUnit>; 2]) -> Draw
     }
 }
 
-/// The bytes of the memory the texture `t` draws with may read, first to
-/// last: from its first level's to past its last's, or all of the unit's
-/// memory where they don't make sense.
-pub fn texel_span(t: &TmuRaster) -> (u32, u32) {
-    let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
-    if end > start && end <= t.mask + 1 {
-        (start, end - 1)
-    } else {
-        (0, t.mask)
-    }
-}
-
 /// Levels `first..=last` of the texture `t` draws with, as its texels
 /// read: a level the texture hasn't (with the LOD split) is the next one
 /// up, twice the size.
@@ -1053,11 +1038,7 @@ pub fn decode(t: &TmuRaster, first: i32, last: i32) -> Vec<Level> {
     (first..=last)
         .map(|level| {
             let (width, height) = ((t.wmask >> level) + 1, (t.hmask >> level) + 1);
-            let mut source = level;
-            if (t.lodmask >> source) & 1 == 0 {
-                source += 1;
-            }
-            let source = source.clamp(0, 8);
+            let source = t.level_read(level);
             let shift = source - level;
             let (smax, tmax) = (t.wmask >> source, t.hmask >> source);
             let texbase = t.lodoffset[source as usize];

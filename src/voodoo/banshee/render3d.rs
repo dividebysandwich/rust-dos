@@ -1200,6 +1200,88 @@ pub(crate) mod tests {
         assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
     }
 
+    /// A 64x32 5-6-5 texture whose levels start right after the depth
+    /// buffer of `gpu_card` made linear, 1280 bytes a row and 64 rows to
+    /// 0x41_4000, as Glide points the card at it: grTexSource sets
+    /// texBaseAddr where a 256x128 level 0 would start, the sizes of the
+    /// 256x128 and 128x64 levels it hasn't below the texture, which is at
+    /// the depth buffer's first byte here. tLOD's LOD range is levels 2
+    /// (64x32) to 8, aspect 2:1 with s wider.
+    const BELOW_DEPTH: u32 = 0x41_4000 - 2 * (256 * 128 + 128 * 64);
+
+    /// A rectangle into A textured with the texture at `BELOW_DEPTH`'s
+    /// levels: the frame the recording made of it. A, as `draw_frame`
+    /// left the layout: drawing into another buffer would read the
+    /// layout's buffers back as it changes.
+    fn textured_above_depth(v: &mut Voodoo) -> Frame {
+        reg3d(v, COL_BUFFER_ADDR, A);
+        reg3d(v, TEX_BASE_ADDR, BELOW_DEPTH);
+        reg3d(v, T_LOD, 8 | 32 << 6 | 1 << 20 | 1 << 21);
+        let mode = 10 << 8 | 1 << 12 | 1 << 18 | 1 << 21 | 1 << 27;
+        reg3d(v, TEXTURE_MODE, mode);
+        reg3d(v, FBZ_COLOR_PATH, 1 | 1 << 27);
+        reg3d(v, FBZ_MODE, 1 | 1 << 4 | 3 << 5 | 1 << 9 | 1 << 10);
+        rectangle(v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+        reg3d(v, FBZ_COLOR_PATH, 0);
+        v.take_mirror().unwrap()
+    }
+
+    #[test]
+    fn gpu_reads_a_texture_above_the_depth_buffer_reads_nothing_back() {
+        // Giants on the built-in Windows (#487): the HAL puts textures
+        // right after the depth buffer, and Glide's texBaseAddr for one
+        // smaller than 256x256 points into the depth buffer's last rows.
+        // The texture units read only the levels the LOD range picks,
+        // which lie above it, so a textured triangle reads no depth rows
+        // back from the renderer, though the renderer alone drew them.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        draw_frame(&mut v, A);
+        assert!(v.describe(Now::default())["gpu_only_jobs"].as_u64() > Some(0));
+        log.borrow_mut().clear();
+        textured_above_depth(&mut v);
+        assert!(reads(&log).is_empty(), "{:?}", log.borrow());
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], 0);
+        // The same texture with level 0 in its LOD range reads from the
+        // depth buffer's rows, and they come back first.
+        reg3d(&mut v, T_LOD, 32 << 6 | 1 << 20 | 1 << 21);
+        reg3d(&mut v, FBZ_COLOR_PATH, 1 | 1 << 27);
+        rectangle(&mut v, (400.0, 20.0, 440.0, 40.0), (0.0, 0.0, 0.0));
+        assert!(
+            reads(&log).iter().any(|l| l.starts_with("read None")),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    #[test]
+    fn a_write_below_a_textures_levels_doesnt_decode_it_again() {
+        // The recording decodes a texture again when the memory its
+        // levels lie in changes. A write into the depth buffer under
+        // `BELOW_DEPTH`'s texture, where its base address points but no
+        // level it reads is, leaves it as it is; one into its first
+        // level decodes it again.
+        use super::super::LINEAR;
+        let decoded = |frame: &Frame| {
+            let textures = frame.commands.iter();
+            textures
+                .filter(|c| matches!(c, Command::Texture(_)))
+                .count()
+        };
+        let mut v = gpu_card(None);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        assert!(decoded(&textured_above_depth(&mut v)) > 0);
+        assert_eq!(decoded(&textured_above_depth(&mut v)), 0);
+        let now = Now::default();
+        v.write(LINEAR + 0x41_3000, 0xF800, 0xFFFF, now);
+        assert_eq!(decoded(&textured_above_depth(&mut v)), 0);
+        v.write(LINEAR + 0x41_4000, 0xF800, 0xFFFF, now);
+        assert!(decoded(&textured_above_depth(&mut v)) > 0);
+    }
+
     /// Where `blit_2d` copies to: a linear surface of 16-bit pixels,
     /// 1280 bytes a row.
     const DESKTOP: u32 = 0x60_0000;

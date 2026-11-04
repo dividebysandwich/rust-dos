@@ -70,6 +70,49 @@ pub struct TmuRaster {
     pub bilinear_mask: i32,
 }
 
+impl TmuRaster {
+    /// The levels the LOD range picks, first to last. The rasterizer
+    /// clamps the LOD to lodmin and then to lodmax (`texture`), so with
+    /// lodmin above lodmax it reads lodmax alone.
+    pub fn levels(&self) -> (i32, i32) {
+        let first = (self.lodmin.min(self.lodmax) >> 8).clamp(0, 8);
+        (first, (self.lodmax >> 8).clamp(first, 8))
+    }
+
+    /// The level whose texels level `level` takes: the next one where
+    /// the texture hasn't it (with the LOD split, `lodmask`).
+    #[inline(always)]
+    pub fn level_read(&self, level: i32) -> i32 {
+        let skipped = (self.lodmask >> level.clamp(0, 31)) & 1 == 0;
+        (level + skipped as i32).clamp(0, 8)
+    }
+
+    /// The bytes the texture may take texels from, first to past the
+    /// last: those of the levels its LOD range reads (`levels`, each as
+    /// `level_read` takes it), or all of the memory where one wraps
+    /// around. The other levels aren't read: Glide points texBaseAddr
+    /// below a texture whose largest level is smaller than 256x256, and
+    /// past its smallest level is the memory after it, so those lie in
+    /// other memory, a colour or depth buffer's among it.
+    pub fn texel_span(&self) -> (u64, u64) {
+        let wide = ((self.mode >> 8) & 0xF >= 8) as u32;
+        let memory = self.mask as u64 + 1;
+        let (first, last) = self.levels();
+        let (mut start, mut end) = (memory, 0);
+        for level in (first..=last).map(|level| self.level_read(level) as usize) {
+            let texels = ((self.wmask >> level) + 1) as u64 * ((self.hmask >> level) + 1) as u64;
+            let base = self.lodoffset[level] as u64;
+            let past = base + (texels << wide);
+            if past > memory {
+                return (0, memory);
+            }
+            start = start.min(base);
+            end = end.max(past);
+        }
+        (start, end)
+    }
+}
+
 /// The registers and memory layout a triangle, a fastfill or a pipelined
 /// frame buffer write draws with.
 #[derive(Clone)]
@@ -818,11 +861,7 @@ fn texture(
         lod = t.lodmax;
     }
     // A level the texture hasn't (with the LOD split) takes the next.
-    let mut ilod = lod >> 8;
-    if (t.lodmask >> ilod.clamp(0, 31)) & 1 == 0 {
-        ilod += 1;
-    }
-    let ilod = ilod.clamp(0, 8);
+    let ilod = t.level_read(lod >> 8);
     let texbase = t.lodoffset[ilod as usize];
     let smax = t.wmask >> ilod;
     let tmax = t.hmask >> ilod;
@@ -1749,6 +1788,56 @@ pub(crate) mod tests {
                 assert_eq!(a, b, "textureMode {mode:08X} reads c_local");
             }
         }
+    }
+
+    #[test]
+    fn a_texels_span_is_the_levels_its_lod_range_reads() {
+        // A 5-6-5 texture of 256x256 levels, laid out as `Tmu` lays them
+        // out from texBaseAddr, the levels `lodmask` hasn't taking no
+        // room.
+        let unit = |lodmin: i32, lodmax: i32, lodmask: u32, base: u32| {
+            let mut lodoffset = [base; 9];
+            for level in 1..9 {
+                let texels = (256u32 >> (level - 1))
+                    .pow(2)
+                    .max(if level >= 4 { 4 } else { 0 });
+                let had = (lodmask >> (level - 1)) & 1;
+                lodoffset[level] = lodoffset[level - 1] + had * 2 * texels;
+            }
+            let t = TmuRaster {
+                ram: Vram::new(2),
+                mask: 0xFF_FFFF,
+                mode: 10 << 8,
+                unfiltered: false,
+                lodmin: lodmin << 8,
+                lodmax: lodmax << 8,
+                lodbias: 0,
+                lodmask,
+                lodoffset,
+                detailmax: 0,
+                detailbias: 0,
+                detailscale: 0,
+                wmask: 255,
+                hmask: 255,
+                lookup: Arc::new([0; 256]),
+                bilinear_mask: 0xFF,
+            };
+            (t.texel_span(), lodoffset.map(u64::from))
+        };
+        let level = |n: u32| 2 * (256u64 >> n).pow(2);
+        // Levels 2 to 5: not the ones below, nor level 6 past them.
+        let (span, at) = unit(2, 5, 0x1FF, 0x10_0000);
+        assert_eq!(span, (at[2], at[5] + level(5)));
+        // With lodmin above lodmax, lodmax alone.
+        let (span, at) = unit(6, 3, 0x1FF, 0x10_0000);
+        assert_eq!(span, (at[3], at[3] + level(3)));
+        // Only the odd levels (the LOD split): 2 reads 3, and 5 is the
+        // last read.
+        let (span, at) = unit(2, 5, 0xAA, 0x10_0000);
+        assert_eq!(span, (at[3], at[5] + level(5)));
+        // Levels that run past the end of the memory wrap around.
+        let (span, _) = unit(0, 8, 0x1FF, 0xFF_0000);
+        assert_eq!(span, (0, 0x100_0000));
     }
 
     #[test]

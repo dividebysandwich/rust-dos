@@ -384,11 +384,18 @@ impl Voodoo {
             return;
         };
         for unit in 0..texcount.min(self.tmu.len()) {
-            let Some(t) = &st.tmu[unit] else {
+            // A unit whose lodmin is 8 or more reads no texels (`raster`),
+            // as Glide leaves one it doesn't use: its stale base address
+            // may lie in a buffer, whose rows needn't come back for it.
+            let Some(t) = st.tmu[unit].as_ref().filter(|t| t.lodmin < 8 << 8) else {
                 continue;
             };
-            let (start, last) = super::mirror::texel_span(t);
-            let end = last.saturating_add(1);
+            // The levels the LOD range reads, not the ones Glide's base
+            // address puts below the texture: those lie in other memory,
+            // often the depth buffer under it, whose rows a textured
+            // triangle would otherwise read back every time (#487).
+            let (start, end) = t.texel_span();
+            let (start, end) = (start as u32, end as u32);
             // Every texture is looked up, not only those under the
             // buffers drawn now: a buffer of the layout before (a texture
             // drawn into as a render target) was read back as the layout
