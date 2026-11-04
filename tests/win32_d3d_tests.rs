@@ -1054,6 +1054,7 @@ const DDSCAPS_COMPLEX: u32 = 0x8;
 const DDSCAPS_FLIP: u32 = 0x10;
 const DDSCAPS_PRIMARYSURFACE: u32 = 0x200;
 const DDSD_BACKBUFFERCOUNT: u32 = 0x20;
+const DDPF_ALPHAPIXELS: u32 = 0x1;
 const DDPF_RGB: u32 = 0x40;
 const DDPF_ZBUFFER: u32 = 0x400;
 const DDLOCK_WAIT: u32 = 1;
@@ -1093,6 +1094,11 @@ const TOP_ADD: u32 = 7;
 const TOP_BLENDDIFFUSEALPHA: u32 = 12;
 const TOP_BLENDCURRENTALPHA: u32 = 16;
 const TSS_ALPHAARG1: u32 = 5;
+const TSS_ALPHAARG2: u32 = 6;
+const TOP_MODULATE: u32 = 4;
+const TOP_SUBTRACT: u32 = 10;
+const TA_DIFFUSE: u32 = 0;
+const TA_TEXTURE: u32 = 2;
 const TA_TFACTOR: u32 = 3;
 
 // Render states.
@@ -1109,6 +1115,7 @@ const RS_FOGSTART: u32 = 36;
 const RS_FOGEND: u32 = 37;
 const RS_SPECULARENABLE: u32 = 29;
 const RS_ALPHATESTENABLE: u32 = 15;
+const RS_ALPHAREF: u32 = 24;
 const RS_ALPHAFUNC: u32 = 25;
 const RS_COLORKEYENABLE: u32 = 41;
 const RS_TEXTUREFACTOR: u32 = 60;
@@ -1202,6 +1209,8 @@ struct Scene {
     zbuffer: Option<f32>,
     /// An 8x8 565 texture on stage 0 (Direct3D 7).
     texture: Option<[u16; 64]>,
+    /// The texture is 4444, with alpha, in place of 565.
+    texture_alpha: bool,
     steps: Vec<Step>,
 }
 
@@ -1273,11 +1282,19 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
     put32(&mut d, TEX_DESC + 0x08, 8);
     put32(&mut d, TEX_DESC + 0x0C, 8);
     put32(&mut d, TEX_DESC + 0x48, 32);
-    put32(&mut d, TEX_DESC + 0x4C, DDPF_RGB);
     put32(&mut d, TEX_DESC + 0x54, 16);
-    put32(&mut d, TEX_DESC + 0x58, 0xF800);
-    put32(&mut d, TEX_DESC + 0x5C, 0x07E0);
-    put32(&mut d, TEX_DESC + 0x60, 0x001F);
+    if scene.texture_alpha {
+        put32(&mut d, TEX_DESC + 0x4C, DDPF_RGB | DDPF_ALPHAPIXELS);
+        put32(&mut d, TEX_DESC + 0x58, 0x0F00);
+        put32(&mut d, TEX_DESC + 0x5C, 0x00F0);
+        put32(&mut d, TEX_DESC + 0x60, 0x000F);
+        put32(&mut d, TEX_DESC + 0x64, 0xF000);
+    } else {
+        put32(&mut d, TEX_DESC + 0x4C, DDPF_RGB);
+        put32(&mut d, TEX_DESC + 0x58, 0xF800);
+        put32(&mut d, TEX_DESC + 0x5C, 0x07E0);
+        put32(&mut d, TEX_DESC + 0x60, 0x001F);
+    }
     put32(&mut d, TEX_DESC + 0x68, DDSCAPS_TEXTURE);
     let tex_desc = d[TEX_DESC as usize..TEX_DESC as usize + 124].to_vec();
     put(&mut d, FILL_DESC, &tex_desc);
@@ -1627,6 +1644,7 @@ fn a_flat_shaded_triangle_has_its_first_vertex_color() {
         clear: 0xFF00_0080,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![Step::State(RS_SHADEMODE, 1), Step::Draw(corners())],
     };
     let p = draw_scene("flat", &scene);
@@ -1650,6 +1668,7 @@ fn direct3d_on_a_voodoo3_leaves_glides_gamma_table_linear() {
         clear: 0xFF00_0080,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![Step::Draw(corners())],
     };
     let (exe, data) = scene_program(&scene);
@@ -1675,6 +1694,7 @@ fn a_gouraud_shaded_triangle_blends_its_corners() {
         clear: 0,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![Step::Draw(corners())],
     };
     let p = draw_scene("gouraud", &scene);
@@ -1694,6 +1714,7 @@ fn direct3d_6_clears_through_its_viewport_and_draws() {
         clear: 0xFF00_0080,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![Step::Draw(corners())],
     };
     let p = draw_scene("d3d6", &scene);
@@ -1717,6 +1738,7 @@ fn a_textured_quad_shows_its_texels() {
         clear: 0,
         zbuffer: None,
         texture: Some(texels),
+        texture_alpha: false,
         steps: vec![Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE))],
     };
     let p = draw_scene("textured", &scene);
@@ -1743,6 +1765,7 @@ fn blending_by_the_current_alpha_on_stage_0_blends_by_the_diffuse_alpha() {
             clear: 0,
             zbuffer: None,
             texture: Some(texels),
+            texture_alpha: false,
             steps: vec![
                 Step::Stage(TSS_COLOROP, op),
                 Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_0000)),
@@ -1752,6 +1775,104 @@ fn blending_by_the_current_alpha_on_stage_0_blends_by_the_diffuse_alpha() {
         assert_rgb(&p, 16, 32, [255, 64, 64], 8);
         assert_rgb(&p, 48, 32, [191, 0, 64], 8);
     }
+}
+
+/// The steps that blend a scene by its alpha over the target, and give
+/// stage 0 BLENDDIFFUSEALPHA and the alpha operation `op` of `a1` and
+/// `a2`, with the texture factor `factor`.
+fn diffuse_alpha_blend_steps(op: u32, a1: u32, a2: u32, factor: u32) -> Vec<Step> {
+    vec![
+        Step::State(RS_ALPHABLENDENABLE, 1),
+        Step::State(RS_SRCBLEND, 5),
+        Step::State(RS_DESTBLEND, 6),
+        Step::State(RS_TEXTUREFACTOR, factor),
+        Step::Stage(TSS_COLOROP, TOP_BLENDDIFFUSEALPHA),
+        Step::Stage(TSS_ALPHAOP, op),
+        Step::Stage(TSS_ALPHAARG1, a1),
+        Step::Stage(TSS_ALPHAARG2, a2),
+    ]
+}
+
+#[test]
+fn blending_by_the_diffuse_alpha_ignores_the_texture_factor_of_the_alpha() {
+    // A white texture of alpha 0x88 on a red quad of diffuse alpha 0x40,
+    // with the alpha the texture's by the texture factor's, 0xC0. The
+    // color is a quarter of the white and three quarters of the red, by
+    // the diffuse alpha (#492), and blends over black by 0x88 by 0xC0,
+    // about 0x66.
+    let mut steps = diffuse_alpha_blend_steps(TOP_MODULATE, TA_TEXTURE, TA_TFACTOR, 0xC0FF_FFFF);
+    steps.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_0000)));
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: Some([0x8FFF; 64]),
+        texture_alpha: true,
+        steps,
+    };
+    let p = draw_scene("blend_diffuse_alpha_tfactor", &scene);
+    assert_rgb(&p, 32, 32, [102, 26, 26], 8);
+}
+
+#[test]
+fn blending_by_the_diffuse_alpha_keeps_the_alpha_of_the_texture_factor() {
+    // The alpha operations with the texture factor under
+    // BLENDDIFFUSEALPHA, white over black, which shows the alpha: the
+    // texture's is 0x88, the diffuse 0x40 and the factor's 0x60.
+    let cases = [
+        (TOP_MODULATE, TA_TEXTURE, TA_TFACTOR, 51),
+        (TOP_MODULATE, TA_DIFFUSE, TA_TFACTOR, 24),
+        (TOP_MODULATE, TA_TFACTOR, TA_TFACTOR, 36),
+        (TOP_ADD, TA_DIFFUSE, TA_TFACTOR, 160),
+        (TOP_ADD, TA_TEXTURE, TA_TFACTOR, 232),
+        (TOP_SUBTRACT, TA_TEXTURE, TA_TFACTOR, 40),
+        (TOP_SUBTRACT, TA_TFACTOR, TA_DIFFUSE, 32),
+        (TOP_SELECTARG1, TA_TFACTOR, TA_DIFFUSE, 96),
+    ];
+    for (i, (op, a1, a2, alpha)) in cases.into_iter().enumerate() {
+        let mut steps = diffuse_alpha_blend_steps(op, a1, a2, 0x60FF_FFFF);
+        steps.push(Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_FFFF)));
+        let scene = Scene {
+            api: Api::D3D7,
+            card: None,
+            clear: 0,
+            zbuffer: None,
+            texture: Some([0x8FFF; 64]),
+            texture_alpha: true,
+            steps,
+        };
+        let p = draw_scene(&format!("blend_diffuse_alpha_tfactor{i}"), &scene);
+        assert_rgb(&p, 32, 32, [alpha; 3], 8);
+    }
+}
+
+#[test]
+fn blending_by_the_diffuse_alpha_keeps_the_alpha_test_on_the_texture() {
+    // A white texture of alpha 0 in its left half and 1 in its right,
+    // with the alpha the texture's by the texture factor's and the
+    // alpha test passing what is above 0: the left half stays out.
+    let texels = std::array::from_fn(|i| if i % 8 < 4 { 0x0FFF } else { 0xFFFF });
+    let mut steps = diffuse_alpha_blend_steps(TOP_MODULATE, TA_TEXTURE, TA_TFACTOR, 0x60FF_FFFF);
+    steps[0] = Step::State(RS_ALPHABLENDENABLE, 0);
+    steps.extend([
+        Step::State(RS_ALPHATESTENABLE, 1),
+        Step::State(RS_ALPHAFUNC, 5),
+        Step::State(RS_ALPHAREF, 0),
+        Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, 0x40FF_FFFF)),
+    ]);
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: BLUE,
+        zbuffer: None,
+        texture: Some(texels),
+        texture_alpha: true,
+        steps,
+    };
+    let p = draw_scene("blend_diffuse_alpha_tfactor_test", &scene);
+    assert_rgb(&p, 16, 32, [0, 0, 255], 4);
+    assert_rgb(&p, 48, 32, [255, 255, 255], 8);
 }
 
 #[test]
@@ -1765,6 +1886,7 @@ fn a_texture_draws_after_its_program_fills_video_memory() {
         clear: 0,
         zbuffer: None,
         texture: Some([0xF800; 64]),
+        texture_alpha: false,
         steps: vec![
             Step::Fill,
             Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, WHITE)),
@@ -1782,6 +1904,7 @@ fn the_z_buffer_keeps_the_nearer_of_two_quads() {
         clear: 0,
         zbuffer: Some(1.0),
         texture: None,
+        texture_alpha: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::Draw(quad(0.0, 0.0, 32.0, 64.0, 0.25, GREEN)),
@@ -1811,6 +1934,7 @@ fn a_quad_nearer_than_the_cleared_depth_passes_the_depth_test() {
             clear: RED,
             zbuffer: Some(0.5),
             texture: None,
+            texture_alpha: false,
             steps: vec![
                 Step::State(RS_ZENABLE, 1),
                 Step::State(RS_ZFUNC, 4),
@@ -1838,6 +1962,7 @@ fn a_32_bit_target_keeps_its_clear_color_exactly_and_widens_drawn_pixels() {
             clear: 0xFF12_3456,
             zbuffer: Some(0.5),
             texture: None,
+            texture_alpha: false,
             steps: vec![
                 Step::State(RS_ZENABLE, 1),
                 Step::State(RS_ZFUNC, 4),
@@ -1871,6 +1996,7 @@ fn the_voodoo3_draws_into_a_back_buffer_at_the_start_of_its_memory() {
         clear: RED,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![
             Step::Draw(quad(0.0, 0.0, 64.0, 64.0, 0.5, GREEN)),
             Step::Flip,
@@ -1890,6 +2016,7 @@ fn alpha_blending_mixes_with_the_target() {
         clear: BLUE,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![
             Step::State(RS_ALPHABLENDENABLE, 1),
             Step::State(RS_SRCBLEND, 5),
@@ -1921,6 +2048,7 @@ fn vertex_fog_and_table_fog_mix_in_the_fog_color() {
         clear: 0,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![
             Step::State(RS_FOGENABLE, 1),
             Step::State(RS_FOGCOLOR, 0x00_FF00),
@@ -1954,6 +2082,7 @@ fn flat_shading_keeps_each_vertex_fog() {
         clear: 0,
         zbuffer: None,
         texture: None,
+        texture_alpha: false,
         steps: vec![
             Step::State(RS_SHADEMODE, 1),
             Step::State(RS_FOGENABLE, 1),
@@ -1980,6 +2109,7 @@ fn card_scene(test: &str, board: Board) {
         clear: 0xFF00_0080,
         zbuffer: Some(1.0),
         texture: Some(texels),
+        texture_alpha: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::Draw(quad(0.0, 0.0, 32.0, 32.0, 0.25, GREEN)),
@@ -2026,6 +2156,7 @@ fn keyed_texels_stay_out_whatever_the_alpha_on_a_voodoo2() {
             clear: 0xFF00_0080,
             zbuffer: None,
             texture: Some(texels),
+            texture_alpha: false,
             steps: all,
         };
         let p = draw_scene(&format!("card_v2_keyed{i}"), &scene);
@@ -2070,6 +2201,7 @@ fn keyed_texels_blend_with_the_stages_alpha_on_a_voodoo2() {
             clear: BLUE,
             zbuffer: None,
             texture: Some(texels),
+            texture_alpha: false,
             steps: all,
         };
         let p = draw_scene(&format!("card_v2_keyed_blend{i}"), &scene);
@@ -2192,6 +2324,7 @@ fn the_specular_color_adds_to_textured_and_untextured_triangles() {
         clear: 0,
         zbuffer: Some(1.0),
         texture: textured.then_some([0xFFFF; 64]),
+        texture_alpha: false,
         steps: vec![
             Step::State(RS_ZENABLE, 1),
             Step::State(RS_SPECULARENABLE, 1),

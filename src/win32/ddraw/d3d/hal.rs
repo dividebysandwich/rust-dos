@@ -490,18 +490,6 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         && first
             .and_then(|id| state(cpu).surface(id))
             .is_some_and(|s| s.format.a == 0);
-    fbi_combine(cpu, d, textured, diffuse_alpha, keyed);
-    if d.state(RS_SPECULARENABLE) != 0 {
-        card.specular = if textured {
-            Specular::Pass {
-                source,
-                equal: depth_written,
-            }
-        } else {
-            Specular::Vertices
-        };
-    }
-
     // The alpha test, and the keyed texels it leaves out: the program's
     // test, unless it passes every alpha (ALWAYS, GREATEREQUAL 0,
     // LESSEQUAL 255). A test that passes alpha 0 and not every alpha
@@ -516,6 +504,18 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         api::alpha_test_reference_value(cpu, 0);
     } else {
         api::alpha_test_function(cpu, api::CMP_ALWAYS);
+    }
+    let tested = keyed || (d.state(RS_ALPHATESTENABLE) != 0 && !passes_all);
+    fbi_combine(cpu, d, textured, diffuse_alpha, keyed, tested);
+    if d.state(RS_SPECULARENABLE) != 0 {
+        card.specular = if textured {
+            Specular::Pass {
+                source,
+                equal: depth_written,
+            }
+        } else {
+            Specular::Vertices
+        };
     }
     Some(card)
 }
@@ -621,7 +621,16 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
 /// `keyed`: the texture is a keyed copy, whose keyed texels have alpha 0
 /// and the others their alpha's top bit (1 for a texture without
 /// alpha), and the alpha test leaves out what comes to 0.
-fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, keyed: bool) {
+/// `alpha_tested`: the alpha test can leave pixels out, for the keyed
+/// texels or the program's test.
+fn fbi_combine(
+    cpu: &mut Cpu,
+    d: &Device,
+    textured: bool,
+    diffuse_alpha: bool,
+    keyed: bool,
+    alpha_tested: bool,
+) {
     let it = api::COMBINE_LOCAL_ITERATED;
     let (other_tex, other_it) = (api::COMBINE_OTHER_TEXTURE, api::COMBINE_OTHER_ITERATED);
     let arg_is_texture = |arg: u32| textured && arg & 0xF == TA_TEXTURE;
@@ -715,6 +724,7 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
         api::constant_color_value(cpu, d.state(RS_TEXTUREFACTOR));
     }
     let (f, factor, local, other) = pick(d.stage(0, TSS_COLOROP), a1, a2);
+    let blends_by_diffuse_alpha = factor == api::COMBINE_FACTOR_LOCAL_ALPHA;
     api::color_combine(cpu, f, factor, local, other, false);
     let (f, factor, local, other) = pick(alpha_op, aa1, aa2);
     // The alpha unit's factor is alpha already.
@@ -759,7 +769,57 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
     } else {
         (f, factor, local, other)
     };
+    // The color unit's local alpha, which BLENDDIFFUSEALPHA and
+    // BLENDCURRENTALPHA blend by, is the alpha unit's local one: it has
+    // to be the diffuse alpha, not the texture factor's (#492).
+    let alpha = (f, factor, local, other);
+    let alpha = if blends_by_diffuse_alpha && local != it && !alpha_tested {
+        iterated_local(alpha).unwrap_or(alpha)
+    } else {
+        alpha
+    };
+    let (f, factor, local, other) = alpha;
     api::alpha_combine(cpu, f, factor, local, other, false);
+}
+
+/// The alpha unit's function, factor, local and other alpha with the
+/// same result and the iterated alpha as the local one, for a local
+/// that is the texture factor's alpha (the constant color's), where the
+/// unit can have it. The texture factor moves to the other alpha: color1,
+/// which holds the same color as color0. MODULATE and ADD can swap their
+/// arguments, so MODULATE of the texture, the diffuse alpha or the
+/// factor by the factor, and ADD of the diffuse alpha and the factor,
+/// have one. ADD of the texture and the factor, SUBTRACT and the blends
+/// with a factor need it as the local alpha along with another alpha the
+/// unit can only take as its other one or its factor, and have none.
+///
+/// The other alpha is the one the card's alpha test compares, and the
+/// one a keyed texture's has to stay the texture's for, so the caller
+/// leaves the units as they are under an alpha test. The product's
+/// operands swap, and the card rounds a product by the second one's
+/// alpha plus one: the result can differ from the first by one in 255.
+fn iterated_local(alpha: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+    use api::*;
+    let (f, factor, local, other) = alpha;
+    if local != COMBINE_LOCAL_CONSTANT {
+        return None;
+    }
+    let factor = match (f, factor, other) {
+        (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_TEXTURE) => {
+            COMBINE_FACTOR_TEXTURE_ALPHA
+        }
+        (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_ITERATED) => {
+            COMBINE_FACTOR_LOCAL_ALPHA
+        }
+        (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_CONSTANT) => {
+            COMBINE_FACTOR_OTHER_ALPHA
+        }
+        (COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL, COMBINE_FACTOR_ONE, COMBINE_OTHER_ITERATED) => {
+            COMBINE_FACTOR_ONE
+        }
+        _ => return None,
+    };
+    Some((f, factor, COMBINE_LOCAL_ITERATED, COMBINE_OTHER_CONSTANT))
 }
 
 /// The stage operations (D3DTOP_) the HAL draws: the device
