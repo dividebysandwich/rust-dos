@@ -380,7 +380,6 @@ fn next_due(cpu: &Cpu, pid: u32) -> Option<u64> {
         joy::next_due(cpu, Some(pid)),
         super::dmusic::next_due(cpu, Some(pid)),
         super::dshow::next_due(cpu, Some(pid)),
-
     ]
     .into_iter()
     .flatten()

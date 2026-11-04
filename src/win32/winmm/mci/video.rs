@@ -259,7 +259,6 @@ pub fn call_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 
 /// The open device `i`'s file, read again after a restore.
 pub fn media(cpu: &mut Cpu, i: usize) -> Option<Arc<Media>> {
-
     if let Some(m) = &video(cpu, i).media {
         return Some(m.clone());
     }
@@ -284,8 +283,10 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
         MCI_OPEN => open(cpu, i, flags, p),
         MCI_CLOSE => {
             halt(cpu, i);
+            // A process that ended has no windows left, and no process
+            // to post to: its devices close after USER32's windows go.
             let own = video(cpu, i).own;
-            if own != 0 {
+            if own != 0 && user32::user(cpu).is_window(own) {
                 user32::message::post_message(cpu, &[own, WM_CLOSE, 0, 0]);
             }
             0

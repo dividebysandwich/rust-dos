@@ -357,7 +357,6 @@ pub fn graph_device(cpu: &Cpu, graph: u32) -> Option<usize> {
         .position(|d| d.graph == graph)
 }
 
-
 /// Whether `id` is all devices: the 32-bit id or Windows 95's 16-bit
 /// one.
 fn is_all(id: u32) -> bool {

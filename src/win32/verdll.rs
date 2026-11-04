@@ -421,7 +421,6 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         // DirectX 6.1's DirectShow, as Windows 98 SE has it.
         "QUARTZ" => [6, 1, 5, 319],
         "AMSTREAM" => [6, 1, 5, 217],
-
         _ => [4, 0, 0, 950],
     };
     let text = match version {

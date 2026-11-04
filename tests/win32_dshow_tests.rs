@@ -193,12 +193,17 @@ fn exit(
 }
 
 const IMPORTS: &[(&str, &[&str])] = &[
-    ("KERNEL32.dll", &["ExitProcess"]),
+    (
+        "KERNEL32.dll",
+        &["ExitProcess", "WaitForSingleObject", "Sleep"],
+    ),
     ("OLE32.dll", &["CoInitialize", "CoCreateInstance"]),
 ];
 const EXIT: usize = 0;
-const CO_INITIALIZE: usize = 1;
-const CO_CREATE: usize = 2;
+const WAIT: usize = 1;
+const SLEEP: usize = 2;
+const CO_INITIALIZE: usize = 3;
+const CO_CREATE: usize = 4;
 
 const S_OK: u32 = 0;
 const E_NOINTERFACE: u32 = 0x8000_4002;
@@ -277,6 +282,9 @@ const SAMPLE: u32 = 0x118;
 const SURFACE: u32 = 0x11C;
 const VALUE: u32 = 0x120;
 const COUNT: u32 = 0x128;
+const PARAM1: u32 = 0x12C;
+const PARAM2: u32 = 0x130;
+const HANDLE: u32 = 0x134;
 const FILE: u32 = 0x140;
 const RECT: u32 = 0x180;
 const FORMAT: u32 = 0x200;
@@ -363,6 +371,8 @@ const QUERY_INTERFACE: i32 = 0;
 const RELEASE: i32 = 8;
 const GRAPH_RENDER_FILE: i32 = 52;
 const CONTROL_RUN: i32 = 28;
+const EVENT_GET_EVENT_HANDLE: i32 = 28;
+const EVENT_GET_EVENT: i32 = 32;
 const EVENT_WAIT_FOR_COMPLETION: i32 = 36;
 const MMS_GET_MEDIA_STREAM: i32 = 16;
 const MMS_SET_STATE: i32 = 28;
@@ -431,6 +441,82 @@ fn a_filter_graph_plays_a_movie_to_its_end() {
         exit(a, l, &mut fail, Imm(0))
     });
     let mut cpu = machine("graph", exe, &[("CLIP.AVI", clip())]);
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+}
+
+/// A program that waits on the graph's event handle rather than in
+/// WaitForCompletion: the multimedia thread sees the play's end, sets
+/// the event, and GetEvent gives EC_COMPLETE. The program sleeps before
+/// Run, as one that pumps its messages does, so that the multimedia
+/// thread has gone to sleep with nothing to do: Run must wake it.
+#[test]
+fn a_running_graph_sets_its_event_at_the_end() {
+    let exe = program(IMPORTS, &data(), |a, l| {
+        let mut fail = a.create_label();
+        call(a, l, fail, 1, CO_INITIALIZE, &[Imm(0)], S_OK)?;
+        let args = [
+            Ptr(G_CLSID_GRAPH),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_GRAPH),
+            Ptr(GRAPH),
+        ];
+        call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
+        let args = [Ptr(FILE), Imm(0)];
+        method(a, l, fail, 3, (GRAPH, GRAPH_RENDER_FILE), &args, S_OK)?;
+        let args = [Ptr(G_IID_CONTROL), Ptr(CONTROL)];
+        method(a, l, fail, 4, (GRAPH, QUERY_INTERFACE), &args, S_OK)?;
+        let args = [Ptr(G_IID_EVENT), Ptr(EVENT)];
+        method(a, l, fail, 5, (GRAPH, QUERY_INTERFACE), &args, S_OK)?;
+        let args = [Ptr(HANDLE)];
+        method(a, l, fail, 6, (EVENT, EVENT_GET_EVENT_HANDLE), &args, S_OK)?;
+        push(a, l, &[Imm(100)])?;
+        a.call(l.import(SLEEP))?;
+        method(a, l, fail, 7, (CONTROL, CONTROL_RUN), &[], S_OK)?;
+        // WAIT_OBJECT_0 within the five seconds: the clip is 480 ms.
+        call(a, l, fail, 8, WAIT, &[Val(HANDLE), Imm(5000)], 0)?;
+        let args = [Ptr(COUNT), Ptr(PARAM1), Ptr(PARAM2), Imm(0)];
+        method(a, l, fail, 9, (EVENT, EVENT_GET_EVENT), &args, S_OK)?;
+        a.mov(eax, dword_ptr(l.at(COUNT)))?;
+        expect(a, fail, 10, 1)?;
+        method(a, l, fail, 11, (EVENT, RELEASE), &[], 2)?;
+        method(a, l, fail, 12, (CONTROL, RELEASE), &[], 1)?;
+        method(a, l, fail, 13, (GRAPH, RELEASE), &[], 0)?;
+        exit(a, l, &mut fail, Imm(0))
+    });
+    let mut cpu = machine("graph-event", exe, &[("CLIP.AVI", clip())]);
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+}
+
+/// A program that ends while its graph plays, without releasing it: the
+/// process's objects, device and window go with it.
+#[test]
+fn a_program_can_end_while_its_graph_plays() {
+    let exe = program(IMPORTS, &data(), |a, l| {
+        let mut fail = a.create_label();
+        call(a, l, fail, 1, CO_INITIALIZE, &[Imm(0)], S_OK)?;
+        let args = [
+            Ptr(G_CLSID_GRAPH),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_GRAPH),
+            Ptr(GRAPH),
+        ];
+        call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
+        let args = [Ptr(FILE), Imm(0)];
+        method(a, l, fail, 3, (GRAPH, GRAPH_RENDER_FILE), &args, S_OK)?;
+        let args = [Ptr(G_IID_CONTROL), Ptr(CONTROL)];
+        method(a, l, fail, 4, (GRAPH, QUERY_INTERFACE), &args, S_OK)?;
+        push(a, l, &[Imm(100)])?;
+        a.call(l.import(SLEEP))?;
+        method(a, l, fail, 5, (CONTROL, CONTROL_RUN), &[], S_OK)?;
+        push(a, l, &[Imm(100)])?;
+        a.call(l.import(SLEEP))?;
+        exit(a, l, &mut fail, Imm(0))
+    });
+    let mut cpu = machine("graph-exit", exe, &[("CLIP.AVI", clip())]);
     let code = run(&mut cpu);
     assert_eq!(code, 0, "{}", printed(&cpu));
 }

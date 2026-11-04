@@ -15,7 +15,8 @@
 //! which sets the graph's event and posts its notification message.
 //!
 //! The graph has no filters a program can see: the methods that add,
-//! connect or list filters return E_NOTIMPL, and so do IDispatch's.
+//! connect or list filters return E_NOTIMPL, and so do IDispatch's,
+//! but for GetTypeInfoCount, which counts no type information.
 //! Positions are in milliseconds within, in 100-nanosecond units
 //! (TIME_FORMAT_MEDIA_TIME) through IMediaSeeking and in seconds
 //! through IMediaPosition. The play's rate is always 1.
@@ -113,6 +114,13 @@ pub struct Graph {
 
 /// CoCreateInstance's CLSID_FilterGraph: a graph with nothing in it.
 pub fn create(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
+    let id = new(cpu);
+    super::give_new(cpu, id, iid, out)
+}
+
+/// A new graph with nothing in it, with one reference: its id. amstream
+/// makes its multimedia stream's graph with it.
+pub fn new(cpu: &mut Cpu) -> u32 {
     let id = super::add(
         cpu,
         Kind::Graph {
@@ -123,7 +131,7 @@ pub fn create(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
     if let Some(g) = graph(cpu, id) {
         g.event = event;
     }
-    super::give_new(cpu, id, iid, out)
+    id
 }
 
 /// The graph `id` goes: its device closes, its event too.
@@ -195,14 +203,17 @@ fn positions(cpu: &mut Cpu, i: usize) -> (u32, u32) {
     (video::position_ms(cpu, i), mci::device(cpu, i).video.to)
 }
 
-/// An MCI command of the device `i`, as a method's result.
+/// An MCI command of the device `i`, as a method's result. It goes
+/// through MCI's dispatch, as a program's command does, so that a play
+/// wakes the multimedia thread, which draws its pictures and sees its
+/// end (`play_ended`).
 fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, from: u32, to: u32) -> Result<(), u32> {
     let mut p = Parms {
         from,
         to,
         ..Parms::default()
     };
-    match video::command(cpu, i, msg, flags, &mut p) {
+    match mci::device_command(cpu, i, msg, flags, &mut p) {
         0 => Ok(()),
         video::NEEDS_CALL => Err(video::NEEDS_CALL),
         _ => Err(E_FAIL),
@@ -271,9 +282,10 @@ pub fn find_filter_by_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(VFW_E_NOT_FOUND)
 }
 
-/// IDispatch::GetTypeInfoCount(this, out): no type information.
+/// IDispatch::GetTypeInfoCount(this, out): no type information, which
+/// is a count of 0 and S_OK.
 pub fn get_type_info_count(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(put32(cpu, args[1], 0).map_or_else(|e| e, |_| E_NOTIMPL))
+    Some(put32(cpu, args[1], 0).map_or_else(|e| e, |_| S_OK))
 }
 
 // IMediaControl.

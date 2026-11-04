@@ -388,6 +388,21 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) {
     for id in due {
         complete(cpu, id);
     }
+    // A running stream's file, not read again since a restore, is read
+    // now, so that its end can be seen. One that is gone has nothing
+    // more to give: the stream ends.
+    let unread: Vec<u32> = super::state(cpu)
+        .objects
+        .iter()
+        .filter(|o| o.pid == pid)
+        .filter(|o| matches!(&o.kind, Kind::Multi { m } if needs_read(m)))
+        .map(|o| o.id)
+        .collect();
+    for id in unread {
+        if media(cpu, id).is_none() {
+            reach_end(cpu, id);
+        }
+    }
     let ended: Vec<u32> = super::state(cpu)
         .objects
         .iter()
@@ -412,10 +427,17 @@ pub fn next_due(s: &super::State, pid: Option<u32>) -> Option<u64> {
         .filter(|o| pid.is_none_or(|p| o.pid == p))
         .filter_map(|o| match &o.kind {
             Kind::VideoSample { s } | Kind::AudioSample { s } => s.due,
+            Kind::Multi { m } if needs_read(m) => m.started,
             Kind::Multi { m } => end_of(m, m.media.as_ref()?.length_ms()),
             _ => None,
         })
         .min()
+}
+
+/// Whether the multimedia stream `m` runs towards its end on its clock
+/// without its file, as after a restore: `poll` reads it at once.
+fn needs_read(m: &Multi) -> bool {
+    m.media.is_none() && !m.file.is_empty() && m.started.is_some() && m.clock && !m.ended
 }
 
 /// The asynchronous update of the sample `id` is done: its event is set.
@@ -429,6 +451,21 @@ fn complete(cpu: &mut Cpu, id: u32) {
         super::set_event(cpu, event);
         crate::win32::object::objects(cpu).release(event);
     }
+}
+
+/// Whether the sample `id` has an asynchronous update still to come. One
+/// whose time has passed completes here, before the multimedia thread
+/// gets to it: a thread that waited for it with CompletionStatus can
+/// wake first, and its next Update mustn't find the sample busy.
+fn pending(cpu: &mut Cpu, id: u32) -> bool {
+    let Some(due) = sample(cpu, id).and_then(|s| s.due) else {
+        return false;
+    };
+    if due > cpu.bus.clock.now_micros() {
+        return true;
+    }
+    complete(cpu, id);
+    false
 }
 
 /// The multimedia thread's times changed.
@@ -684,15 +721,8 @@ pub fn get_filter_graph(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let mut g = multi(cpu, id).map_or(0, |m| m.graph);
     if g == 0 {
-        let scratch = hr!(scratch_out(cpu));
-        let hr = super::graph::create(cpu, &super::IID_IGRAPH_BUILDER, scratch);
-        let at = cpu.bus.guest_read_32(scratch);
-        free_scratch(cpu, scratch);
-        if hr != S_OK {
-            return Some(hr);
-        }
-        g = super::object_of(cpu, at).unwrap_or(0);
-        // The stream keeps the reference create gave.
+        // The stream keeps the reference the new graph has.
+        g = super::graph::new(cpu);
         if let Some(m) = multi(cpu, id) {
             m.graph = g;
         }
@@ -702,15 +732,6 @@ pub fn get_filter_graph(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     super::hold(cpu, g);
     Some(put32(cpu, args[1], at).map_or_else(|e| e, |_| S_OK))
-}
-
-/// Four bytes of the heap for an out pointer.
-fn scratch_out(cpu: &mut Cpu) -> Result<u32, u32> {
-    crate::win32::dmusic::alloc(cpu, 4).ok_or(E_OUTOFMEMORY)
-}
-
-fn free_scratch(cpu: &mut Cpu, at: u32) {
-    crate::win32::dmusic::free(cpu, at);
 }
 
 /// IAMMultiMediaStream::AddMediaStream(this, object, purpose, flags,
@@ -1262,7 +1283,7 @@ pub fn update(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if apc != 0 {
         return Some(E_NOTIMPL);
     }
-    if sample(cpu, id).is_some_and(|s| s.due.is_some()) {
+    if pending(cpu, id) {
         return Some(MS_E_BUSY);
     }
     let event_id = if event == 0 {
@@ -1329,12 +1350,11 @@ pub fn completion_status(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     };
     let id = hr!(sample_of(cpu, this));
-    let Some(s) = sample(cpu, id) else {
+    if !pending(cpu, id) {
+        return Some(sample(cpu, id).map_or(E_POINTER, |s| s.status));
+    }
+    let Some((Some(due), status)) = sample(cpu, id).map(|s| (s.due, s.status)) else {
         return Some(E_POINTER);
-    };
-    let (due, status) = (s.due, s.status);
-    let Some(due) = due else {
-        return Some(status);
     };
     if flags & COMPSTAT_ABORT != 0 {
         complete(cpu, id);
