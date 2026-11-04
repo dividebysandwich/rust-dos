@@ -47,9 +47,9 @@ pub struct Totals {
     pub decode_misses: u64,
     pub dynrec: crate::dynrec::DynStats,
     pub calls: Option<crate::dynrec::Calls>,
-    /// `autospeed::Activity`: bursts, copies, flips, polls, status reads,
-    /// video bytes and I/O bytes.
-    pub activity: [u64; 7],
+    /// `autospeed::Activity`: bursts, copies, flips, presents, polls,
+    /// status reads, video bytes and I/O bytes.
+    pub activity: [u64; 8],
 }
 
 impl Totals {
@@ -71,6 +71,7 @@ impl Totals {
                 a.bursts,
                 a.copies,
                 a.flips,
+                a.presents,
                 a.polls,
                 a.status_reads,
                 a.video_bytes,

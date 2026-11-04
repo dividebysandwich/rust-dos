@@ -497,6 +497,40 @@ impl Banshee {
         (width.clamp(8, 2048), height.clamp(1, 2048))
     }
 
+    /// The bytes of a pixel of the desktop: its format's.
+    pub fn desktop_bytes_per_pixel(&self) -> u32 {
+        match (self.reg(VID_PROC_CFG) >> 18) & 7 {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            _ => 4,
+        }
+    }
+
+    /// The rows of the desktop in memory: the CRTC's lines, or half of
+    /// them in half mode, which shows each row twice.
+    pub fn desktop_rows(&self) -> u32 {
+        let (_, lines) = self.desktop_size();
+        if self.reg(VID_PROC_CFG) & VIDPROC_HALF_MODE != 0 {
+            lines / 2
+        } else {
+            lines
+        }
+    }
+
+    /// The bytes a program writes for the desktop's picture: its rows of
+    /// its pixels.
+    pub fn desktop_bytes(&self) -> u32 {
+        let (width, _) = self.desktop_size();
+        width * self.desktop_rows() * self.desktop_bytes_per_pixel()
+    }
+
+    /// Whether the desktop's rows follow each other in memory: it isn't
+    /// tiled.
+    pub fn desktop_linear(&self) -> bool {
+        self.reg(VID_PROC_CFG) & VIDPROC_DESKTOP_TILED == 0
+    }
+
     /// Whether the monitor shows each of the desktop's pixels twice as
     /// wide as it has them: a desktop less than `NARROW_WIDTH` pixels
     /// wide. 3dfx's driver runs such a mode (320x200, 320x240) at half

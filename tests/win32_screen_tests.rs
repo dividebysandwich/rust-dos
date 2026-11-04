@@ -640,10 +640,14 @@ fn a_flip_on_the_card_counts_as_a_frame() {
     let (program, data) = fullscreen_program();
     let mut cpu = machine("flip_frames", program);
     run_until(&mut cpu, data, 1);
+    let flips = cpu.bus.activity.flips;
     go_on(&mut cpu, data);
     // The program stops right after its flip.
     run_until(&mut cpu, data, 2);
     assert_eq!(results(&cpu, data, 9)[1..], [0; 8]);
+    // `cycles=auto` sees it as a flip, a change of the display start,
+    // as it sees the VESA BIOS's.
+    assert_eq!(cpu.bus.activity.flips - flips, 1);
     // The flip is one frame, at the retrace after it, and nothing after
     // it is another.
     let before = cpu.bus.frames_drawn;

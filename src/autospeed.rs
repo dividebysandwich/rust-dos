@@ -14,10 +14,15 @@
 //! program draws out of sight and copies the finished picture to video
 //! memory, the bursts of writes that copy it. A protected-mode program may
 //! copy only what changed since the frame before (Alien Legacy): a burst
-//! too small to be a frame that reaches across the screen is one too. A
-//! program that checks for keystrokes that aren't there, calls DOS's idle
-//! interrupts or polls for the retrace in a loop is waiting, and has speed
-//! to spare.
+//! too small to be a frame that reaches across the screen is one too.
+//! Under the built-in Windows, a program's blits to the primary surface
+//! and GDI's drawing on the screen copy the picture in the emulator's own
+//! code (Magic & Mayhem blits each frame from system memory): the bursts
+//! of what they write into the picture shown are frames by the same rules,
+//! counted apart from the program's own writes, which they come before.
+//! A program that checks for keystrokes that aren't there, calls DOS's
+//! idle interrupts or polls for the retrace in a loop is waiting, and has
+//! speed to spare.
 //!
 //! Where there are no frames to go by, a real-mode program runs at the
 //! real-mode speed (3000, about a 286, DOSBox's for `cycles=auto`): the
@@ -216,6 +221,10 @@ pub struct Activity {
     /// the screen: frames copied as the parts of them that changed.
     /// `AutoSpeed::update` counts them for protected-mode programs only.
     pub copies: u64,
+    /// Frames the built-in Windows showed for the program: bursts of what
+    /// it wrote into the picture shown (`shown_write`) that are a frame
+    /// or a copy by the rules above.
+    pub presents: u64,
     /// Checks for a keystroke that found none, and calls of DOS's and
     /// Windows' idle interrupts.
     pub polls: u64,
@@ -240,6 +249,29 @@ pub struct Activity {
     /// The display start, and the instruction it last changed at.
     start: u32,
     last_flip: u64,
+    /// The burst of the built-in Windows' writes going on.
+    shown: Burst,
+}
+
+/// A burst of writes to video memory: its bytes, the instruction of its
+/// last write, and the lowest and highest place it wrote.
+#[derive(Clone, Copy, Debug)]
+struct Burst {
+    bytes: u64,
+    last: u64,
+    low: u64,
+    high: u64,
+}
+
+impl Default for Burst {
+    fn default() -> Self {
+        Burst {
+            bytes: 0,
+            last: 0,
+            low: u64::MAX,
+            high: 0,
+        }
+    }
 }
 
 /// Where translated code finds `video_write`'s counts (`Activity`'s
@@ -269,7 +301,7 @@ impl Activity {
         if at.saturating_sub(self.last_write) > BURST_GAP {
             if self.burst >= self.burst_min {
                 self.bursts += 1;
-            } else if self.burst >= self.copy_min && self.high.saturating_sub(self.low) >= self.span_min {
+            } else if self.is_copy(self.burst, self.low, self.high) {
                 self.copies += 1;
             }
             self.burst = 0;
@@ -279,6 +311,39 @@ impl Activity {
         self.low = self.low.min(offset);
         self.high = self.high.max(offset + bytes);
         self.last_write = at;
+    }
+
+    /// Whether a burst of `bytes` bytes too small to be a frame, which
+    /// wrote from `low` to `high`, is a copy.
+    #[inline]
+    fn is_copy(&self, bytes: u64, low: u64, high: u64) -> bool {
+        bytes >= self.copy_min && high.saturating_sub(low) >= self.span_min
+    }
+
+    /// The built-in Windows wrote `bytes` bytes between `low` and `high`
+    /// of video memory, in the picture the display shows, at instruction
+    /// `at`, for the program: a blit to the primary surface, or GDI's
+    /// drawing on the screen. Its bursts count as `presents`, apart from
+    /// the program's own writes, which may be the same frame drawn in
+    /// video memory out of sight before it is blitted to the screen.
+    ///
+    /// They don't add to `video_bytes`, the program's output: a program
+    /// without frames that only has small things drawn for it (Johnny
+    /// Castaway's sprites, through GDI) waits, as on main, and isn't
+    /// taken for a program at work and run flat out.
+    pub fn shown_write(&mut self, at: u64, low: u64, high: u64, bytes: u64) {
+        let s = self.shown;
+        if at.saturating_sub(s.last) > BURST_GAP {
+            if s.bytes >= self.burst_min || self.is_copy(s.bytes, s.low, s.high) {
+                self.presents += 1;
+            }
+            self.shown = Burst::default();
+        }
+        let s = &mut self.shown;
+        s.bytes += bytes;
+        s.low = s.low.min(low);
+        s.high = s.high.max(high);
+        s.last = at;
     }
 
     /// The display start is `start` at instruction `at`.
@@ -316,8 +381,12 @@ impl Activity {
 }
 
 /// Whether the screen's rows lie one after the other in video memory in
-/// the mode `bus` is in: the EGA's and VGA's graphics and VESA modes.
+/// the mode `bus` is in: the EGA's and VGA's graphics and VESA modes, and
+/// a Banshee's or Voodoo3's own modes with the desktop not tiled.
 pub fn linear_screen(bus: &Bus) -> bool {
+    if let Some(b) = bus.banshee().filter(|b| b.extended()) {
+        return b.desktop_linear();
+    }
     matches!(
         bus.video_mode,
         VideoMode::Ega320x200
@@ -334,6 +403,11 @@ pub fn linear_screen(bus: &Bus) -> bool {
 /// The bytes a program writes for a whole screen in the mode `bus` is in:
 /// in the 16-colour modes and the unchained 256-colour ones, one plane's.
 pub fn screen_bytes(bus: &Bus) -> u64 {
+    // A Banshee's or Voodoo3's own modes, which `video_mode` (the VGA's)
+    // doesn't describe.
+    if let Some(b) = bus.banshee().filter(|b| b.extended()) {
+        return b.desktop_bytes() as u64;
+    }
     let (w, h) = bus.display_size();
     let pixels = (w * h) as u64;
     match bus.video_mode {
@@ -373,6 +447,7 @@ struct Mark {
     bursts: u64,
     copies: u64,
     flips: u64,
+    presents: u64,
     polls: u64,
     status_reads: u64,
     output: u64,
@@ -396,6 +471,7 @@ impl Mark {
             bursts: a.bursts,
             copies: a.copies,
             flips: a.flips,
+            presents: a.presents,
             polls: a.polls,
             status_reads: a.status_reads,
             output: a.video_bytes + a.io_bytes,
@@ -726,10 +802,15 @@ impl AutoSpeed {
         // game that copies its view whole and then draws its gauges at the
         // top and the bottom of the screen draws one frame, not two.
         let copies = if protected { now.copies - mark.copies } else { 0 };
-        let frames = match (flips, bursts) {
-            (0, 0) => copies,
-            (0, bursts) => bursts,
-            (flips, _) => flips,
+        // What the built-in Windows showed comes before the program's own
+        // writes: a frame it draws in video memory out of sight and then
+        // blits to the screen would count twice.
+        let presents = now.presents - mark.presents;
+        let frames = match (flips, presents, bursts) {
+            (0, 0, 0) => copies,
+            (0, 0, bursts) => bursts,
+            (0, presents, _) => presents,
+            (flips, _, _) => flips,
         };
         if ns < WINDOW_NS || (frames > 0 && frames < ENOUGH_FRAMES && ns < LONG_WINDOW_NS) {
             return cut;
@@ -2861,6 +2942,63 @@ mod tests {
         assert!(speeds.iter().all(|&s| s <= 200_000), "{:?}", speeds);
         // A real-mode program's copies don't count: the real-mode speed.
         assert!(run_copying(false, 1_200_000, 10).iter().all(|&s| s == 3000));
+    }
+
+    #[test]
+    fn a_frame_drawn_out_of_sight_and_then_shown_counts_once() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(100_000);
+        // 640x480 at 16 bits: the picture at 0, a back buffer after it.
+        let screen = 640 * 480 * 2;
+        bus.activity.set_screen(screen, true);
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        // 30 frames a second, each drawn by the program in the back
+        // buffer and then blitted to the screen by the built-in Windows.
+        let half_frame = 100_000_000 / 60;
+        while auto.update(bus, true, HOST, 0).is_none() {
+            bus.clock.icount += half_frame;
+            let at = bus.clock.icount;
+            bus.activity.video_write(at, screen, screen);
+            bus.clock.icount += half_frame;
+            let at = bus.clock.icount;
+            bus.activity.shown_write(at, 0, screen, screen);
+        }
+        // Both count, and the frame rate goes by the frames shown: about
+        // 30 (a burst ends with the next, so a measurement's edges are a
+        // frame off), where both together would be 60.
+        assert!(bus.activity.bursts >= 20 && bus.activity.presents >= 20);
+        let Step::Raised { fps, .. } = auto.step else {
+            panic!("{:?}", auto.step);
+        };
+        assert!((27.0..=32.0).contains(&fps), "{fps}");
+    }
+
+    #[test]
+    fn small_drawing_shown_for_a_program_isnt_work() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(100_000);
+        let screen = 640 * 480 * 2;
+        bus.activity.set_screen(screen, true);
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        // A screen saver's 32x32 sprite drawn by GDI 20 times a second:
+        // 40 KB a second, more than a program at work writes, but no
+        // frames.
+        let sprite = 32 * 32 * 2;
+        let step = 100_000_000 / 20;
+        let speed = loop {
+            bus.clock.icount += step;
+            let at = bus.clock.icount;
+            bus.activity.shown_write(at, 100_000, 100_000 + 640 * 2 * 32, sprite);
+            if let Some(speed) = auto.update(bus, true, HOST, 0) {
+                break speed;
+            }
+        };
+        assert_eq!(bus.activity.presents, 0);
+        assert!(speed < 100_000, "{speed}");
     }
 
     #[test]

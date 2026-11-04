@@ -1126,10 +1126,14 @@ impl Bus {
         false
     }
 
-    /// The program set the display start (CRTC registers 0Ch and 0Dh, or
-    /// the VESA BIOS's): a page flip, for `cycles=auto`.
+    /// The program set the display start (CRTC registers 0Ch and 0Dh, the
+    /// VESA BIOS's, or a Banshee's or Voodoo3's vidDesktopStartAddr in
+    /// the card's own modes): a page flip, for `cycles=auto`.
     pub fn note_display_start(&mut self) {
-        let start = if self.video_mode == VideoMode::Vesa {
+        let card = self.banshee().filter(|b| b.extended());
+        let start = if let Some(b) = card {
+            b.reg(crate::voodoo::banshee::VID_DESKTOP_START_ADDR)
+        } else if self.video_mode == VideoMode::Vesa {
             self.vbe.start
         } else {
             (self.vga.crtc_regs[0x0C] as u32) << 8 | self.vga.crtc_regs[0x0D] as u32

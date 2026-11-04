@@ -1988,3 +1988,179 @@ fn a_mipmap_too_big_for_video_memory_is_in_system_memory_with_its_levels() {
         assert_eq!(caps & DDSCAPS_VIDEOMEMORY, 0, "{caps:#x}");
     }
 }
+
+// The frames `cycles=auto` sees (#524).
+
+/// A loop of 40,000 instructions: more than end a burst of writes to
+/// video memory (`autospeed::BURST_GAP`), as a game's work on its next
+/// frame does.
+fn work(a: &mut CodeAssembler) -> Result<(), IcedError> {
+    work_for(a, 20_000)
+}
+
+/// A loop of `passes` passes, two instructions each.
+fn work_for(a: &mut CodeAssembler, passes: u32) -> Result<(), IcedError> {
+    a.mov(ecx, passes)?;
+    let mut again = a.create_label();
+    a.set_label(&mut again)?;
+    a.dec(ecx)?;
+    a.jnz(again)
+}
+
+/// `run_until_done`, with the display brought up to date after each
+/// batch as the frontend does once a frame: at its retraces the frame
+/// counts learn the size of the screen (`Activity::set_screen`).
+fn run_displayed_until_done(cpu: &mut Cpu, layout_data: u32) {
+    for _ in 0..400 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(cpu, &mut NoHook, false);
+        cpu.bus.sync_display();
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, layout_data + DONE) == 1 {
+            return;
+        }
+    }
+    panic!("the program didn't finish: {:?}", printed(cpu));
+}
+
+/// The frames `cycles=auto` counted: those the built-in Windows showed,
+/// and the program's own bursts and copies.
+fn activity(cpu: &Cpu) -> [u64; 3] {
+    let a = &cpu.bus.activity;
+    [a.presents, a.bursts, a.copies]
+}
+
+const SHOWN_FRAMES: u32 = 5;
+
+/// Full screen in a 320x200 8-bit mode, as Magic & Mayhem draws: each
+/// frame made in system memory, copied to a surface in video memory out
+/// of sight and then blitted to the primary surface, `SHOWN_FRAMES`
+/// times. Then a pixel filled on the primary surface ends the last
+/// frame's burst of writes.
+fn blitting_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    desc(&mut d, DESC, DDSD_CAPS, DDSCAPS_PRIMARYSURFACE, 0, 0, 0);
+    let plain = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    let system = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    desc(&mut d, LOCKED, plain, system, 320, 200, 0);
+    desc(&mut d, ENTRIES, plain, DDSCAPS_OFFSCREENPLAIN, 320, 200, 0);
+    put32(&mut d, FX, 100);
+    put32(&mut d, FX + 0x50, 7);
+    for (i, v) in [0u32, 0, 1, 1].iter().enumerate() {
+        put32(&mut d, RECT + 4 * i as u32, *v);
+    }
+    program(&[USER32, DDRAW], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 320, 200))?;
+        let exclusive = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+        let level = [Arg::Val(HWND), Arg::I(exclusive)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        let mode = [Arg::I(320), Arg::I(200), Arg::I(8)];
+        c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+        for (desc, at) in [(DESC, FRONT), (LOCKED, SOURCE), (ENTRIES, OFFSCREEN)] {
+            let args = [Arg::At(desc), Arg::At(at), Arg::I(0)];
+            c.com(a, l, DD, DD_CREATE_SURFACE, &args)?;
+        }
+        for _ in 0..SHOWN_FRAMES {
+            for to in [OFFSCREEN, FRONT] {
+                let args = [
+                    Arg::I(0),
+                    Arg::Val(SOURCE),
+                    Arg::I(0),
+                    Arg::I(DDBLT_WAIT),
+                    Arg::I(0),
+                ];
+                c.com(a, l, to, S_BLT, &args)?;
+                work(a)?;
+            }
+        }
+        let fill = [
+            Arg::At(RECT),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(DDBLT_COLORFILL | DDBLT_WAIT),
+            Arg::At(FX),
+        ];
+        c.com(a, l, FRONT, S_BLT, &fill)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn a_frame_blitted_to_the_primary_surface_counts_and_one_out_of_sight_doesnt() {
+    let (program, data) = blitting_program();
+    let mut cpu = machine("blitted_frames", program);
+    let before = activity(&cpu);
+    run_displayed_until_done(&mut cpu, data);
+    let calls = 8 + 2 * SHOWN_FRAMES as usize;
+    assert_eq!(
+        results(&mut cpu, data, calls as u32)[1..],
+        vec![0; calls - 1]
+    );
+    // Each blit to the primary surface is a frame shown; the copies to
+    // the surface out of sight, in the same video memory, are none, and
+    // the pixel filled is too small to be one. The program itself wrote
+    // nothing to video memory.
+    let after = activity(&cpu);
+    let counted: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [SHOWN_FRAMES as u64, 0, 0]);
+}
+
+const GDI_FRAMES: u32 = 3;
+
+/// GDI's drawing on the screen's DC, after some work: `GDI_FRAMES`
+/// rectangles as big as the desktop, then as many of 8x8 pixels, and a
+/// last one of those to end the bursts.
+fn gdi_program() -> (Vec<u8>, u32) {
+    let imports: &[(&str, &[&str])] = &[("USER32.DLL", &["GetDC"]), ("GDI32.DLL", &["PatBlt"])];
+    const GET_DC: usize = 0;
+    const PAT_BLT: usize = 1;
+    const WHITENESS: u32 = 0x00FF_0062;
+    program(imports, &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(a, l, GET_DC, &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        // Starting up for a few batches, as the desktop shows for frames
+        // before a program draws on it.
+        work_for(a, 200_000)?;
+        let (w, h) = (640, 480);
+        for size in [(w, h), (8, 8)] {
+            for _ in 0..GDI_FRAMES {
+                let args = [
+                    Arg::Val(HWND),
+                    Arg::I(0),
+                    Arg::I(0),
+                    Arg::I(size.0),
+                    Arg::I(size.1),
+                    Arg::I(WHITENESS),
+                ];
+                c.api(a, l, PAT_BLT, &args)?;
+                work(a)?;
+            }
+        }
+        let args = [
+            Arg::Val(HWND),
+            Arg::I(0),
+            Arg::I(0),
+            Arg::I(8),
+            Arg::I(8),
+            Arg::I(WHITENESS),
+        ];
+        c.api(a, l, PAT_BLT, &args)?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn gdis_drawing_of_the_whole_screen_counts_as_frames_and_small_drawing_doesnt() {
+    let (program, data) = gdi_program();
+    let mut cpu = machine("gdi_frames", program);
+    let before = activity(&cpu);
+    run_displayed_until_done(&mut cpu, data);
+    let calls = 2 + 2 * GDI_FRAMES as usize;
+    let results = results(&mut cpu, data, calls as u32);
+    assert!(results[1..].iter().all(|&r| r == 1), "{results:X?}");
+    let after = activity(&cpu);
+    let counted: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [GDI_FRAMES as u64, 0, 0]);
+}

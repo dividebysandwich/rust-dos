@@ -233,6 +233,10 @@ fn run(cpu: &mut Cpu, dst_id: u32, op: &Op) -> Result<(), u32> {
         mirror: [op.mirror_x, op.mirror_y],
     };
     if super::gpu_blt::run(cpu, &gpu) {
+        // The renderer copied the pixels in its own copy of the card's
+        // memory, not through `screen::write`, which counts them.
+        let bytes = d.bytes_per_pixel();
+        crate::win32::screen::drew_rects(cpu, d.bits, d.pitch, bytes, &rects);
         surface::changed(cpu, dst_id);
         return Ok(());
     }
