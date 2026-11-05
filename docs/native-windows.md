@@ -449,6 +449,24 @@ not been compared with a reference: ACM 1918's are all key frames.
   remapping need no changes. DirectInput and window messages both read
   from them.
 
+### Network play
+
+- **DirectPlay** (`src/win32/dplayx/`): IDirectPlay of DirectX 3 to
+  IDirectPlay4A, with the IPX and TCP/IP service providers. Both carry
+  the session over the instance's LAN room: DirectPlay's packets are IPX
+  packets on a socket of the built-in DOS's IPX driver, which the switch
+  and the relay pass on as they do a DOS game's. The host of a session
+  answers the enumeration requests every endpoint broadcasts, so every
+  member of a room sees every session hosted in it, and takes in the
+  members, who then talk to each other directly. Messages that must
+  arrive (guaranteed ones, and every change to the session) go over a
+  link that sends them again until they are acknowledged, in order; a
+  member silent for 20 seconds is taken for gone. The protocol is
+  rust-dos's own, not Windows'. What the program sees follows Windows 98
+  as Wine's DirectPlay tests recorded it: which players get which system
+  messages, in which order, and the sizes of the messages.
+- **WS2_32 and WSOCK32** have no network yet.
+
 ### Installing games
 
 Most Windows 95 CD games have to be installed before they run. A setup

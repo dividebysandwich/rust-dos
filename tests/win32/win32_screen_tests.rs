@@ -2087,8 +2087,8 @@ fn a_high_color_desktop_on_an_s3_has_16_bits() {
     );
 }
 
-// DirectPlay, with no service provider it can use: objects are made,
-// and list no connections; and its lobby, with no lobby.
+// DirectPlay, its service providers and sessions; and its lobby, with
+// no lobby.
 
 const DPERR_INVALIDPARAMS: u32 = 0x8007_0057;
 const DPERR_ALREADYINITIALIZED: u32 = 0x8877_0005;
@@ -2107,10 +2107,12 @@ const DP_QUERY_INTERFACE: u32 = 0;
 const DP_ADD_REF: u32 = 1;
 const DP_RELEASE: u32 = 2;
 const DP_CLOSE: u32 = 4;
+const DP_CREATE_PLAYER: u32 = 6;
 const DP_ENUM_SESSIONS: u32 = 13;
 const DP_GET_CAPS: u32 = 14;
 const DP_OPEN: u32 = 24;
 const DP_RECEIVE: u32 = 25;
+const DP_SEND: u32 = 26;
 const DP_ENUM_CONNECTIONS: u32 = 35;
 const DP_INITIALIZE_CONNECTION: u32 = 38;
 const DP1_ENUM_SESSIONS: u32 = 14;
@@ -2158,6 +2160,11 @@ const DP_PLAY2A: u32 = 0x74C;
 const DP_NONE: u32 = 0x750;
 const DP_LOBBY: u32 = 0x754;
 const DP_LOBBY3A: u32 = 0x758;
+/// The IPX provider's GUID, two players' ids, and a message's buffer.
+const DP_IPX: u32 = 0x760;
+const DP_ID1: u32 = 0x770;
+const DP_ID2: u32 = 0x774;
+const DP_MESSAGE: u32 = 0x780;
 
 /// A GUID's bytes as dplay.h writes it.
 fn guid_bytes(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Vec<u8> {
@@ -2269,6 +2276,15 @@ fn directplay_data() -> Vec<u8> {
                 [0x9C, 0x4E, 0, 0xA0, 0xC9, 0x05, 0x42, 0x5E],
             ),
         ),
+        (
+            DP_IPX,
+            guid_bytes(
+                0x685B_C400,
+                0x9D2C,
+                0x11CF,
+                [0xA9, 0xCD, 0, 0xAA, 0x00, 0x68, 0x86, 0xE3],
+            ),
+        ),
     ];
     for (at, guid) in guids {
         put(&mut d, at, &guid);
@@ -2342,15 +2358,15 @@ fn data_word(cpu: &Cpu, data: u32, offset: u32) -> u32 {
     peek(cpu, data + offset)
 }
 
-/// CoCreateInstance makes a DirectPlay object, as Windows 98 does with
-/// no network card. Each IID is an interface of its own with its own
-/// count, IUnknown is the same pointer whichever interface it is asked
-/// of, and an IID it hasn't gives E_NOINTERFACE. It lists no
-/// connections, can't be given one the program made up, and the methods
-/// that need one say it has none. A call through an interface of an
+/// CoCreateInstance makes a DirectPlay object with no connection yet.
+/// Each IID is an interface of its own with its own count, IUnknown is
+/// the same pointer whichever interface it is asked of, and an IID it
+/// hasn't gives E_NOINTERFACE. It lists two connections, IPX's and
+/// TCP/IP's, can't be given one the program made up, and the methods
+/// that need one say it has none yet. A call through an interface of an
 /// object that is gone gives DPERR_INVALIDOBJECT.
 #[test]
-fn cocreateinstance_makes_a_directplay_with_no_connections() {
+fn cocreateinstance_makes_a_directplay_that_lists_its_connections() {
     let ole32: (&str, &[&str]) = ("OLE32.DLL", &["CoInitialize", "CoCreateInstance"]);
     let (program, data) = program(&[ole32], &directplay_data(), |a, l| {
         counting_callback(a, l, 0, 6, DP_CALLED)?;
@@ -2468,18 +2484,19 @@ fn cocreateinstance_makes_a_directplay_with_no_connections() {
     }
     assert_eq!(word(DP_UNKNOWN1), word(DP_UNKNOWN2), "COM identity");
     assert_eq!(word(DP_NONE), 0);
-    assert_eq!(word(DP_CALLED), 0, "callbacks called");
+    assert_eq!(word(DP_CALLED), 2, "the connections listed");
 }
 
 /// DirectPlayCreate with GUID_NULL makes an IDirectPlay with no service
 /// provider, which has IDirectPlay3A too and keeps its interfaces'
-/// counts apart. With any other provider it fails, as there is none,
-/// and an outer object is refused before the arguments are looked at.
-/// There are no providers to enumerate.
+/// counts apart. With a provider that isn't there it fails, and an outer
+/// object is refused before the arguments are looked at.
+/// DirectPlayEnumerateA lists the two providers.
 #[test]
 fn directplaycreate_makes_a_directplay_with_no_service_provider() {
     let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayCreate", "DirectPlayEnumerateA"]);
     let (program, data) = program(&[dplayx], &directplay_data(), |a, l| {
+        counting_callback(a, l, 0, 5, DP_CALLED)?;
         let mut c = Calls { next: 0 };
         let none = Arg::I(0);
         let null = Arg::At(DP_GUID_NULL);
@@ -2499,7 +2516,7 @@ fn directplaycreate_makes_a_directplay_with_no_service_provider() {
         // The IDirectPlay is still there.
         c.com(a, l, DD, DP_CLOSE, &[])?;
         c.com(a, l, DD, DP_RELEASE, &[])?;
-        c.api(a, l, 1, &[Arg::I(BASE), none])?;
+        c.api(a, l, 1, &[Arg::Val(CALLBACKS), none])?;
         finish(a, l, 1)
     });
     let mut cpu = card_machine("directplay_create", None, program);
@@ -2526,6 +2543,110 @@ fn directplaycreate_makes_a_directplay_with_no_service_provider() {
     assert_ne!(peek(&cpu, data + TARGET), this);
     assert_eq!(peek(&cpu, data + FRONT), 0);
     assert_eq!(peek(&cpu, data + BACK), 0x1234_5678, "BACK written");
+    assert_eq!(peek(&cpu, data + DP_CALLED), 2, "the providers listed");
+}
+
+/// One program hosts a session over IPX and joins it with a second
+/// DirectPlay object over TCP/IP, which is the same LAN underneath: the
+/// packets come back through the built-in IPX driver. EnumSessions finds
+/// the session, Open joins it, and the host's player is told of the
+/// joiner's player and then gets its message, as one machine's two
+/// DirectPlay objects would on Windows 98.
+#[test]
+fn a_directplay_session_is_found_joined_and_played_in() {
+    let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayCreate"]);
+    let mut d = directplay_data();
+    // A session of the application DP_IID2A's bytes name, for 4.
+    let application = d[DP_IID2A as usize..DP_IID2A as usize + 16].to_vec();
+    put(&mut d, DP_SESSION + 24, &application);
+    put32(&mut d, DP_SESSION + 40, 4);
+    let (program, data) = program(&[dplayx], &d, |a, l| {
+        // EnumSessions' callback (desc, timeout, flags, context): the
+        // first session's instance GUID goes to DP_SESSION, and it stops.
+        callback(a, l, 0, |a| {
+            let mut done = a.create_label();
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.test(eax, eax)?;
+            a.jz(done)?;
+            a.inc(dword_ptr(l.at(DP_CALLED)))?;
+            for i in 0..4 {
+                a.mov(ecx, dword_ptr(eax + 8 + 4 * i))?;
+                a.mov(dword_ptr(l.at(DP_SESSION + 8 + 4 * i as u32)), ecx)?;
+            }
+            a.set_label(&mut done)?;
+            a.xor(eax, eax)?;
+            a.ret_1(16)
+        })?;
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        let session = Arg::At(DP_SESSION);
+        c.api(a, l, 0, &[Arg::At(DP_IPX), Arg::At(DD), none])?;
+        c.api(a, l, 0, &[Arg::At(DP_TCPIP), Arg::At(FRONT), none])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DP_QUERY_INTERFACE,
+            &[Arg::At(DP_IID4A), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            DP_QUERY_INTERFACE,
+            &[Arg::At(DP_IID4A), Arg::At(TARGET)],
+        )?;
+        c.com(a, l, BACK, DP_OPEN, &[session, Arg::I(2)])?;
+        let player = |id| [Arg::At(id), none, none, none, none, none];
+        c.com(a, l, BACK, DP_CREATE_PLAYER, &player(DP_ID1))?;
+        let enum_sessions = [session, Arg::I(100), Arg::Val(CALLBACKS), none, none];
+        c.com(a, l, TARGET, DP_ENUM_SESSIONS, &enum_sessions)?;
+        c.com(a, l, TARGET, DP_OPEN, &[session, Arg::I(1)])?;
+        c.com(a, l, TARGET, DP_CREATE_PLAYER, &player(DP_ID2))?;
+        let message = [
+            Arg::Val(DP_ID2),
+            Arg::Val(DP_ID1),
+            none,
+            Arg::At(DP_HOST),
+            Arg::I(4),
+        ];
+        c.com(a, l, TARGET, DP_SEND, &message)?;
+        let receive = [
+            Arg::At(DP_FROM),
+            Arg::At(DP_TO),
+            none,
+            Arg::At(DP_MESSAGE),
+            Arg::At(DP_SIZE),
+        ];
+        for slot in [0, 3] {
+            a.mov(dword_ptr(l.at(DP_SIZE)), 0x100)?;
+            c.com(a, l, BACK, DP_RECEIVE, &receive)?;
+            see(a, l, DP_SIZE, slot)?;
+            see(a, l, DP_FROM, slot + 1)?;
+            see(a, l, DP_MESSAGE, slot + 2)?;
+        }
+        c.com(a, l, BACK, DP_RECEIVE, &receive)?;
+        c.com(a, l, TARGET, DP_CLOSE, &[])?;
+        c.com(a, l, BACK, DP_CLOSE, &[])?;
+        for object in [TARGET, BACK, FRONT, DD] {
+            c.com(a, l, object, DP_RELEASE, &[])?;
+        }
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("directplay_session", None, program);
+    run_until(&mut cpu, data, 1);
+    let mut expected = [0; 19];
+    expected[12] = DPERR_NOMESSAGES;
+    assert_eq!(results(&cpu, data, 19), expected);
+    let word = |offset| data_word(&cpu, data, offset);
+    assert_eq!(word(DP_CALLED), 1, "the session found");
+    let (host, guest) = (word(DP_ID1), word(DP_ID2));
+    assert!(![0, 1, host].contains(&guest), "{host:X} {guest:X}");
+    // DPSYS_CREATEPLAYERORGROUP, from the system, then the message.
+    let seen = |slot| seen(&cpu, data, slot);
+    assert_eq!([seen(0), seen(1), seen(2)], [48, 0, 3]);
+    let text = u32::from_le_bytes(*b"10.0");
+    assert_eq!([seen(3), seen(4), seen(5)], [4, guest, text]);
 }
 
 /// A DirectPlay object is in the save state: loaded, the program goes

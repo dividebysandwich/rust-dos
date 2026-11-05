@@ -126,7 +126,10 @@ opcode, `win32_version=98se` when a message names the version, more
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
-  it sets its own mode.
+  it sets its own mode. *Play Link* races between instances in a [LAN
+  room](../CONFIGURATION.md#directplay-games-on-the-built-in-windows)
+  over the IPX connection, the only one the game takes; it lists the
+  TCP/IP one but ignores it, on Windows too (tested with the demo).
 * **Wages of War**: `win32_depth=8`; it says it must run with 256
   colours and stops on the default desktop, which has more.
 * **Xenocracy**: its hardware check looks for `GLIDE2X.DLL`, which is

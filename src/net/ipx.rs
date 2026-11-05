@@ -14,6 +14,12 @@
 //! and calls the ECB's event service routine (ESR) if it has one.
 //! Programs that poll the ECB's in-use flag instead find it cleared there,
 //! or at their next call of the driver.
+//!
+//! The emulator has sockets of its own on the driver too
+//! (`open_host_socket`): the built-in Windows's DirectPlay sends and
+//! receives its packets on one, so they go out from the same node, in the
+//! same frames, as a DOS game's. What comes for such a socket waits in
+//! `host_inbox` for the emulator.
 
 use super::frame::{self, ETHERTYPE_IPX, Mac};
 use crate::cpu::{Cpu, CpuFlags};
@@ -53,6 +59,11 @@ const BIOS_TICK: u64 = 65536;
 /// The packet sizes functions 0Dh and 1Ah report, as DOSBox's driver does.
 const PACKET_SIZE: u16 = 1024;
 const MAX_PACKET_SIZE: u16 = 1424;
+/// Packets kept for the emulator's own sockets; more drop the oldest.
+const HOST_INBOX: usize = 1024;
+/// The packet type of the emulator's packets: the Packet Exchange
+/// Protocol's, which is what programs' own packets use.
+const PEP: u8 = 4;
 
 /// How packets go into Ethernet frames (`ipxframe`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -199,6 +210,16 @@ pub struct Held {
     pub until: u64,
 }
 
+/// A packet that came for one of the emulator's own sockets: its data
+/// after the IPX header, and the node and socket it came from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostPacket {
+    pub socket: u16,
+    pub data: Vec<u8>,
+    pub from: Mac,
+    pub from_socket: u16,
+}
+
 #[derive(Clone, Debug)]
 pub struct Ipx {
     /// The node address, which is also the address its frames come from.
@@ -219,6 +240,11 @@ pub struct Ipx {
     pub arm: bool,
     /// What became of the packets, for the debugger.
     pub stats: IpxStats,
+    /// The sockets the emulator itself has open, and what came for them.
+    /// Neither is saved: their owner opens its socket again when it
+    /// needs it.
+    pub host_sockets: Vec<u16>,
+    pub host_inbox: VecDeque<HostPacket>,
 }
 
 /// Packets sent and what became of those that came.
@@ -241,7 +267,8 @@ impl Default for Ipx {
     }
 }
 
-crate::state_fields!(Ipx { node, irq, frame_type, sockets, listens, events, completions, held } skip { outgoing, log, arm, stats });
+crate::state_fields!(Ipx { node, irq, frame_type, sockets, listens, events, completions, held }
+    skip { outgoing, log, arm, stats, host_sockets, host_inbox });
 crate::state_fields!(Socket { number, long_lived, owner });
 crate::state_fields!(Listen { ecb, socket, owner });
 crate::state_fields!(Event { ecb, due, owner });
@@ -380,11 +407,62 @@ impl Ipx {
             log: Vec::new(),
             arm: false,
             stats: IpxStats::default(),
+            host_sockets: Vec::new(),
+            host_inbox: VecDeque::new(),
         }
     }
 
     pub fn is_open(&self, socket: u16) -> bool {
         self.sockets.iter().any(|s| s.number == socket)
+    }
+
+    /// Whether a program or the emulator has `socket` open.
+    fn taken(&self, socket: u16) -> bool {
+        self.is_open(socket) || self.host_sockets.contains(&socket)
+    }
+
+    /// Open `socket` for the emulator: false if a program has it.
+    pub fn open_host_socket(&mut self, socket: u16) -> bool {
+        if self.is_open(socket) {
+            return false;
+        }
+        if !self.host_sockets.contains(&socket) {
+            self.host_sockets.push(socket);
+        }
+        true
+    }
+
+    /// The largest data a packet of the emulator's can carry.
+    pub fn max_host_data(&self) -> usize {
+        self.frame_type.max_packet() - HEADER
+    }
+
+    /// Send `data` from the emulator's socket `socket` to the socket
+    /// `to_socket` of the node `to` (Mac::BROADCAST for every node): false
+    /// if it is too long for a packet. A packet for this node, or for
+    /// all, comes back to it too, as the driver's broadcasts do.
+    pub fn send_host(&mut self, socket: u16, to: Mac, to_socket: u16, data: &[u8]) -> bool {
+        if data.len() > self.max_host_data() {
+            return false;
+        }
+        let mut packet = vec![0u8; HEADER];
+        packet[0..2].copy_from_slice(&[0xFF, 0xFF]);
+        packet[2..4].copy_from_slice(&((HEADER + data.len()) as u16).to_be_bytes());
+        packet[5] = PEP;
+        packet[10..16].copy_from_slice(&to.0);
+        packet[16..18].copy_from_slice(&to_socket.to_be_bytes());
+        packet[22..28].copy_from_slice(&self.node.0);
+        packet[28..30].copy_from_slice(&socket.to_be_bytes());
+        packet.extend_from_slice(data);
+        if to != self.node {
+            self.outgoing
+                .push(encapsulate(self.frame_type, to, self.node, &packet));
+        }
+        self.stats.sent += 1;
+        if to == self.node || to.is_broadcast() {
+            self.receive(packet, self.node, 0);
+        }
+        true
     }
 
     /// Whether completions wait for the IRQ's handler.
@@ -440,6 +518,20 @@ impl Ipx {
             return;
         }
         let socket = u16::from_be_bytes([packet[16], packet[17]]);
+        if self.host_sockets.contains(&socket) {
+            self.stats.received += 1;
+            if self.host_inbox.len() >= HOST_INBOX {
+                self.host_inbox.pop_front();
+                self.stats.unheard += 1;
+            }
+            self.host_inbox.push_back(HostPacket {
+                socket,
+                from: Mac(packet[22..28].try_into().unwrap()),
+                from_socket: u16::from_be_bytes([packet[28], packet[29]]),
+                data: packet[HEADER..].to_vec(),
+            });
+            return;
+        }
         if !self.is_open(socket) {
             self.stats.closed_socket += 1;
             return;
@@ -529,14 +621,14 @@ impl Ipx {
             return;
         }
         let number = if requested == 0 {
-            match (DYNAMIC_SOCKETS..=0x7FFF).find(|n| !self.is_open(*n)) {
+            match (DYNAMIC_SOCKETS..=0x7FFF).find(|n| !self.taken(*n)) {
                 Some(n) => n,
                 None => {
                     set_al(cpu, 0xFE);
                     return;
                 }
             }
-        } else if self.is_open(requested) {
+        } else if self.taken(requested) {
             set_al(cpu, 0xFF);
             return;
         } else {
@@ -749,6 +841,8 @@ impl Ipx {
         self.completions.clear();
         self.held.clear();
         self.outgoing.clear();
+        self.host_sockets.clear();
+        self.host_inbox.clear();
     }
 
     /// The program with PSP `psp` ended: its short-lived sockets close,
@@ -795,6 +889,50 @@ mod tests {
         assert_eq!(decapsulate(&frame::build(b, a, 20, &[0x42; 20])), None);
         assert_eq!(FrameType::EthernetII.max_packet(), 1500);
         assert_eq!(FrameType::Snap.max_packet(), 1492);
+    }
+
+    #[test]
+    fn the_emulators_own_sockets_get_their_packets() {
+        let node = Mac([2, 0, 0, 0, 0, 1]);
+        let mut ipx = Ipx::new(node, 11, FrameType::EthernetII);
+        assert!(ipx.open_host_socket(0x7D50));
+        // Neither takes a socket the other has.
+        ipx.sockets.push(Socket {
+            number: 0x4002,
+            long_lived: false,
+            owner: 1,
+        });
+        assert!(!ipx.open_host_socket(0x4002));
+        assert!(ipx.taken(0x7D50));
+        // To another node a frame goes out; to all, it comes back too.
+        assert!(ipx.send_host(0x7D50, Mac([2, 0, 0, 0, 0, 2]), 0x7D50, b"one"));
+        assert_eq!(ipx.outgoing.len(), 1);
+        assert!(ipx.host_inbox.is_empty());
+        assert!(ipx.send_host(0x7D50, Mac::BROADCAST, 0x7D50, b"two"));
+        assert_eq!(ipx.outgoing.len(), 2);
+        let back = ipx.host_inbox.pop_front().unwrap();
+        assert_eq!(
+            (&back.data[..], back.from, back.from_socket),
+            (&b"two"[..], node, 0x7D50)
+        );
+        // What another node sends to the socket waits for the emulator,
+        // not for an ECB.
+        let other = Mac([2, 0, 0, 0, 0, 3]);
+        let frame = encapsulate(
+            FrameType::EthernetII,
+            node,
+            other,
+            &packet(node, 0x7D50, b"3"),
+        );
+        ipx.receive_frame(&frame, 0);
+        assert_eq!(
+            ipx.host_inbox.pop_front().map(|p| p.data),
+            Some(b"3".to_vec())
+        );
+        assert!(ipx.held.is_empty() && ipx.completions.is_empty());
+        assert!(!ipx.send_host(0x7D50, node, 0x7D50, &[0; 1500]), "too long");
+        ipx.reset();
+        assert!(!ipx.taken(0x7D50));
     }
 
     #[test]

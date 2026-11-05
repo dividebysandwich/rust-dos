@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 28;
+const WIN32_VERSION: u16 = 29;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -789,6 +789,7 @@ mod tests {
         (26, 0xEFE8_9E7A_456D_99B4), // the boot's work and the program pending
         (27, 0x48DE_57AA_C42E_36F2), // the MPEGVideo and AVIVideo devices
         (28, 0x8D14_5D81_BEAF_AC09), // DirectShow's objects and graph devices
+        (29, 0x6A10_30CA_74D4_A5B0), // DirectPlay's connections and sessions
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
