@@ -2547,11 +2547,11 @@ fn directplaycreate_makes_a_directplay_with_no_service_provider() {
 }
 
 /// One program hosts a session over IPX and joins it with a second
-/// DirectPlay object, whose packets come back to it through the
-/// built-in IPX driver: EnumSessions finds the session, Open joins it,
-/// and the host's player is told of the joiner's player and then gets
-/// its message, as one machine's two DirectPlay objects would on
-/// Windows 98.
+/// DirectPlay object over TCP/IP, which is the same LAN underneath: the
+/// packets come back through the built-in IPX driver. EnumSessions finds
+/// the session, Open joins it, and the host's player is told of the
+/// joiner's player and then gets its message, as one machine's two
+/// DirectPlay objects would on Windows 98.
 #[test]
 fn a_directplay_session_is_found_joined_and_played_in() {
     let dplayx: (&str, &[&str]) = ("DPLAYX.DLL", &["DirectPlayCreate"]);
@@ -2581,7 +2581,7 @@ fn a_directplay_session_is_found_joined_and_played_in() {
         let none = Arg::I(0);
         let session = Arg::At(DP_SESSION);
         c.api(a, l, 0, &[Arg::At(DP_IPX), Arg::At(DD), none])?;
-        c.api(a, l, 0, &[Arg::At(DP_IPX), Arg::At(FRONT), none])?;
+        c.api(a, l, 0, &[Arg::At(DP_TCPIP), Arg::At(FRONT), none])?;
         c.com(a, l, DD, DP_QUERY_INTERFACE, &[Arg::At(DP_IID4A), Arg::At(BACK)])?;
         c.com(a, l, FRONT, DP_QUERY_INTERFACE, &[Arg::At(DP_IID4A), Arg::At(TARGET)])?;
         c.com(a, l, BACK, DP_OPEN, &[session, Arg::I(2)])?;
