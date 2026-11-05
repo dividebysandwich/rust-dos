@@ -4,7 +4,7 @@
 //! host's speed.
 //!
 //! It runs the machine as the game suite's harness does
-//! (`tests/gamesuite/machine.rs`):
+//! (`tests/program/gamesuite/machine.rs`):
 //!
 //! - The speed is a fixed number of instructions per emulated millisecond,
 //!   never `auto` or `max`, which follow the host's clock.

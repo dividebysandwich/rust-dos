@@ -22,8 +22,9 @@ impl Bus {
             self.vga.svga_ext = None;
             self.vga.invalidate_timing();
         }
-        // The accesses of a session, for `tests/voodoo_tests.rs` to replay.
-        // A recording names a Voodoo Graphics or Voodoo2, not a Banshee.
+        // The accesses of a session, for `tests/video/voodoo_tests.rs` to
+        // replay. A recording names a Voodoo Graphics or Voodoo2, not a
+        // Banshee.
         if let (Some(v), Ok(path)) = (&mut self.voodoo, std::env::var("RUST_DOS_VOODOO_RECORD")) {
             if v.board.banshee().is_some() {
                 self.log_string("[3DFX] Can't record a Banshee or Voodoo3's accesses");

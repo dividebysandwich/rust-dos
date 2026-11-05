@@ -55,17 +55,25 @@ around it.
 
 ## Checking a change: build what you touched, CI runs the rest
 
-`tests/` holds about 128 test programs, and each links the whole crate.
-`cargo build --all-targets`, `cargo clippy --all-targets` and a plain
-`cargo test` build and link every one of them. CI does that on every
-push, on Linux, Windows and macOS, so you don't need to before you push.
+`tests/` holds seven test programs, one for each folder (`cpu`, `dos`,
+`devices`, `video`, `win16`, `win32`, `program`), and each links the
+whole crate. A file in a folder is a module of the folder's `main.rs`, so
+its tests are named `<file>::<test>`. `cargo build --all-targets`,
+`cargo clippy --all-targets` and a plain `cargo test` build and link all
+seven. CI does that on every push, on Linux, Windows and macOS, so you
+don't need to before you push.
 
 - Build the library and the program with `cargo build`, and lint them
   with `cargo clippy`.
-- Run the tests that cover what you changed: `cargo test --test <name>`
-  for the files in `tests/`, and `cargo test --lib <module>` for unit
-  tests. When you change a test file, lint it with
-  `cargo clippy --test <name>`.
+- Run the tests that cover what you changed: for a file in `tests/`,
+  `cargo nextest run --test <folder> <file>::` (or
+  `cargo test --test <folder> <file>::`), and `cargo test --lib <module>`
+  for unit tests. When you change a test file, lint its folder with
+  `cargo clippy --test <folder>`.
+- A new test file goes in the folder of the code it tests, with a
+  `mod <file>;` line in that folder's `main.rs`. Helpers that one folder
+  uses live in it; helpers that several use live in `tests/common/` and
+  each folder's `main.rs` declares them with `#[path]`.
 - Push, and fix the branch if CI fails. Run the whole suite locally only
   when you can't use CI.
 

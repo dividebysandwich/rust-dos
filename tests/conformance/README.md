@@ -1,8 +1,8 @@
 # Conformance tests
 
 Wine's conformance tests for the DLLs of the built-in Windows, which
-`tests/conformance_tests.rs` builds with MinGW and runs under it. Each
-test checks what a Windows function returns against what Windows
+`tests/win32/conformance_tests.rs` builds with MinGW and runs under it.
+Each test checks what a Windows function returns against what Windows
 returned when Wine's developers ran it, accepting the Windows 9x answers
 where they differ from NT's.
 
@@ -226,7 +226,7 @@ since another version can build them into code that gives other
 results.
 
 ```sh
-CONFORMANCE_CC=i686-w64-mingw32-gcc-win32 cargo test --release --test conformance_tests
+CONFORMANCE_CC=i686-w64-mingw32-gcc-win32 cargo test --release --test win32 conformance_tests::
 ```
 
 Without a compiler the test says so and passes, so `cargo test` works
@@ -252,7 +252,7 @@ emulator's log, with every call a program makes, to
 `target/conformance/<dll>/<file>.trace`.
 
 ```sh
-CONFORMANCE_ONLY=user32/dce cargo test --release --test conformance_tests -- --nocapture
+CONFORMANCE_ONLY=user32/dce cargo test --release --test win32 conformance_tests:: -- --nocapture
 ```
 
 ## The results
@@ -265,7 +265,7 @@ fails when the results differ, better or worse, so the change shows in
 the file's diff. When it is right, write the results anew:
 
 ```sh
-CONFORMANCE_BLESS=1 cargo test --release --test conformance_tests
+CONFORMANCE_BLESS=1 cargo test --release --test win32 conformance_tests::
 ```
 
 The results that aren't clean, and why:

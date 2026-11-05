@@ -1,7 +1,7 @@
 // Nuked-SC55 (jcmoyer's fork, at the commit crates/sc55 was ported from)
 // switched on with given ROMs and MIDI bytes posted at given frames, for
-// tests/sc55_tests.rs to compare with the port: writes every frame at the
-// chip's rate to stdout as two little-endian int32s.
+// tests/devices/sc55_tests.rs to compare with the port: writes every frame
+// at the chip's rate to stdout as two little-endian int32s.
 //
 // usage: harness <family> <frames> <events> rom1=path rom2=path ...
 // <events> has a line per message: the frame, then the bytes in hex.

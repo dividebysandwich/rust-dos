@@ -623,7 +623,7 @@ pub struct Voodoo {
     /// Messages already logged once.
     logged: u32,
     /// Where the card's accesses are recorded (`RUST_DOS_VOODOO_RECORD`),
-    /// for `tests/voodoo_tests.rs` to replay and compare.
+    /// for `tests/video/voodoo_tests.rs` to replay and compare.
     recorder: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>>,
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
@@ -894,8 +894,8 @@ impl Voodoo {
         }
     }
 
-    /// Record an access as `tests/voodoo_tests.rs` replays it: a kind and
-    /// three words, little-endian.
+    /// Record an access as `tests/video/voodoo_tests.rs` replays it: a kind
+    /// and three words, little-endian.
     fn record(&self, kind: u8, words: [u32; 3]) {
         use std::io::Write;
         let mut recorder = self.recorder.borrow_mut();

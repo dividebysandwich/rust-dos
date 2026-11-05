@@ -8,6 +8,8 @@ version.workspace = true
 edition.workspace = true
 # `cargo run` runs the emulator, not the relay (src/bin).
 default-run = "rust-dos"
+# The tests in tests/ are a few programs, listed below, not one per file.
+autotests = false
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -248,9 +250,10 @@ rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
 rust-dos-installshield = { path = "crates/installshield", features = ["test-util"] }
 # Writes the 7z archives of src/archive's tests.
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress"] }
-# Reads the gzip-compressed SingleStepTests suite in tests/sst386.rs.
+# Reads the gzip-compressed SingleStepTests suite in tests/cpu/sst386.rs.
 flate2 = "1"
-# The assembler builds the protected-mode test programs in tests/pm_*.rs.
+# The assembler builds the protected-mode test programs in
+# tests/cpu/pm_tests.rs.
 iced-x86 = { version = "1.21.0", features = ["code_asm"] }
 # The WebSocket client of the debug server's tests.
 tungstenite = "0.29"
@@ -288,12 +291,48 @@ harness = false
 name = "cpu"
 harness = false
 
+# The tests in tests/, one program for each folder. Every file of a folder
+# is a module of its main.rs, so a group links the library once, where
+# a program for each file linked it 139 times: on Linux that was 6 to 8 GB
+# of test programs, nearly all of it the same code (#549). A change to one
+# file rebuilds its group. A new test file goes in the folder of the code
+# it tests, with a `mod` line in that folder's main.rs; layout_tests in
+# tests/program checks that none is left out. cargo-nextest runs each test
+# in a process of its own (README.md).
+[[test]]
+name = "cpu"
+path = "tests/cpu/main.rs"
+
+[[test]]
+name = "dos"
+path = "tests/dos/main.rs"
+
+[[test]]
+name = "devices"
+path = "tests/devices/main.rs"
+
+[[test]]
+name = "video"
+path = "tests/video/main.rs"
+
+[[test]]
+name = "win16"
+path = "tests/win16/main.rs"
+
+[[test]]
+name = "win32"
+path = "tests/win32/main.rs"
+
+[[test]]
+name = "program"
+path = "tests/program/main.rs"
+
 # `cargo test`'s build. Most of the suite's time goes to running guest
 # code on the emulator: optimized (opt-level 1), the tests run five to six
 # times faster than in a debug build, for about four more minutes of
 # compiling on CI. Debug assertions and overflow checks stay on, as in
 # the dev profile. Line tables only: backtraces keep their files and
-# lines, and the 128 test programs in tests/ link without full debug
+# lines, and the test programs in tests/ link without full debug
 # information, which on Windows made a PDB of 300 MB for each. For a
 # debugger's view of a test's variables, set CARGO_PROFILE_TEST_DEBUG=full.
 [profile.test]
