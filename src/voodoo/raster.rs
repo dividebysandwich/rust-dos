@@ -733,6 +733,15 @@ const fn uses_local(mode: u32) -> bool {
         || (mode >> 27) & 3 != 0
 }
 
+/// Whether the texture combine of textureMode `mode` reads the colour the
+/// unit before it passes on (c_other): as the value it starts from, or as
+/// the blend factor (a_other). TMU 0 under Glide's `grTexCombine` with
+/// `GR_COMBINE_FUNCTION_LOCAL`, as games with one texture set it on a
+/// card with two units, doesn't, and TMU 1's texel is then thrown away.
+const fn uses_other(mode: u32) -> bool {
+    !bit(mode, 12) || (mode >> 14) & 7 == 2 || !bit(mode, 21) || (mode >> 23) & 7 == 2
+}
+
 /// A pixel's level of detail in perspective (8.8), less 2 log2(1/W): its
 /// footprint, log2 of how many texels s and t move a pixel across or down,
 /// whichever is more, from S/W, T/W and W at the pixel and the
@@ -1272,7 +1281,9 @@ macro_rules! variants {
 // scene, most drawn area first: the frame darkened by the colour, opaque,
 // blended by alpha with fog, opaque with fog, and added. V15 darkens
 // without a texture, and C2 covers the driver's other blends, fog and
-// formats.
+// formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel alone,
+// which it draws its terrain, units and lighting with, opaque or
+// blended, in its palettized, intensity and 16-bit formats.
 variants! {
     V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
     V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
@@ -1293,6 +1304,7 @@ variants! {
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
     C2: 2, combine_only[0x0000_2401, 0x0000_0507, 0x0824_1507];
+    C3: 2, combine_only[0x0C00_0035, 0x0C26_150F, 0x0422_10C0];
 }
 
 /// The variant a triangle with `texcount` units and `st`'s registers can be
@@ -1393,6 +1405,12 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         (q.starts, q.startt, q.startw, q.dsdx, q.dtdx, q.dwdx, q.dsdy, q.dtdy, q.dwdy)
     };
     let same_stw = TMUS >= 2 && stw(w0) == stw(w1);
+    // TMU 1's texel goes only to TMU 0: where TMU 0 draws and doesn't read
+    // it, or sends its configuration instead, nothing does.
+    let tmu1_read = TMUS >= 2
+        && !st.tmu[0].as_ref().is_some_and(|t| {
+            t.lodmin < 8 << 8 && (st.send_config.is_some() || !uses_other(m.tex[0]))
+        });
 
     for x in startx..stopx {
         if let Some(depthval) = row.begin(x, y, iterz, iterw, stipple, stats) {
@@ -1402,7 +1420,7 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
             let n = x - startx;
             // TMU 1's footprint, where TMU 0's is the same.
             let mut shared = None;
-            if TMUS >= 2
+            if tmu1_read
                 && let Some(t) = &st.tmu[1]
                 && t.lodmin < 8 << 8
             {
@@ -1927,3 +1945,7 @@ mod oni_state_tests;
 #[cfg(test)]
 #[path = "raster/d3d_state_tests.rs"]
 mod d3d_state_tests;
+
+#[cfg(test)]
+#[path = "raster/myth_state_tests.rs"]
+mod myth_state_tests;

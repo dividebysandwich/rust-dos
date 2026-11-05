@@ -118,6 +118,19 @@ pub fn pipelines(c: &mut Criterion) {
             [0x0001_0F71, 0x0800_2401, alpha, fog, 0x0000_0507, 0x0824_1507],
         );
     }
+    // Myth's Glide renderer on a Voodoo3, which draws its terrain twice:
+    // a palettized texture, then an intensity texture multiplying the
+    // frame by its alpha. TMU 0 combines its own texel alone.
+    for (name, alpha, texture) in [
+        ("myth-terrain", 0x0004_0400, 0x0C26_150F),
+        ("myth-light", 0x0004_2010, 0x0C26_130F),
+    ] {
+        pipeline(
+            c,
+            &format!("video/voodoo/{name}"),
+            [0x0008_4321, 0x0C00_0035, alpha, 0, texture, 0x0422_10C0],
+        );
+    }
 }
 
 fn pipeline(c: &mut Criterion, name: &str, regs: [u32; 6]) {
