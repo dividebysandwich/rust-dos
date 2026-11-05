@@ -440,10 +440,13 @@ fn format_date_time(format: &[u8], st: &SystemTime, flags: u32, date: bool) -> V
     out
 }
 
-/// The SYSTEMTIME at `at`, or the machine's time for NULL.
+/// The SYSTEMTIME at `at`, or the system's time for NULL. Reading it
+/// doesn't make GetDateFormat or GetTimeFormat a service an idle proof
+/// can follow: they may set the last error after it (`idle::nested`).
 fn read_time(cpu: &mut Cpu, at: u32) -> Option<SystemTime> {
     if at == 0 {
-        return Some(convert::system_time_of(super::time::now(cpu)));
+        let now = crate::idle::nested(cpu, super::time::now);
+        return Some(convert::system_time_of(now));
     }
     let st = std::array::from_fn(|i| cpu.bus.guest_read_16(at.wrapping_add(2 * i as u32)));
     (!cpu.bus.guest_faulted()).then_some(st)

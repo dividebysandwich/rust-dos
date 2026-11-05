@@ -517,14 +517,65 @@ fn a_wait_on_the_system_time_moves_with_the_machine_and_is_skipped() {
     let mut skipping = start("system_time_wait_skipping", CoreMode::Dynamic, true);
     let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, _| {});
     if let Err(e) = run {
-        panic!("{e}
-  {:?}", skipping.bus.observe.stats);
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
     }
     assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
     assert_eq!(skipping.errorlevel, 0x2A, "{:?}", skipping.bus.observe.stats);
     let stats = &skipping.bus.observe.stats;
     assert!(stats.proofs >= 10, "a proof for most milliseconds: {stats:?}");
     assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// SetSystemTime sets the system's time also when the machine's clock
+/// is already at the time set: the host's clock stands still, the
+/// system's time moves 5 ms on from it, and the program sets it back to
+/// the host's time. GetSystemTime then reads the time set, to the
+/// millisecond.
+#[test]
+fn set_system_time_to_the_machine_clock_takes_the_system_time_back() {
+    // The SYSTEMTIME to set, Friday 2026-09-25 14:03:05.000, two
+    // FILETIMEs and the SYSTEMTIME read back.
+    let mut data = vec![0u8; 48];
+    for (i, value) in [2026u16, 9, 5, 25, 14, 3, 5, 0].into_iter().enumerate() {
+        data[2 * i..2 * i + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetSystemTimeAsFileTime", "SetSystemTime", "GetSystemTime"],
+    )];
+    let image = program(BASE, false, imports, &data, |a, l| {
+        let mut wait = a.create_label();
+        let mut fail = a.create_label();
+        a.push(l.data + 16)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, dword_ptr(l.at(16)))?;
+        a.set_label(&mut wait)?;
+        a.push(l.data + 24)?;
+        a.call(l.import(0))?;
+        a.mov(eax, dword_ptr(l.at(24)))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 50_000)?;
+        a.jb(wait)?;
+        a.push(l.data)?;
+        a.call(l.import(1))?;
+        a.push(l.data + 32)?;
+        a.call(l.import(2))?;
+        // wSecond and wMilliseconds: 5 and 0.
+        a.cmp(dword_ptr(l.at(44)), 5)?;
+        a.jne(fail)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let (code, _) = run("set_system_time_back", image);
+    assert_eq!(code, 0x2A, "GetSystemTime read the time set");
 }
 
 /// A frame limiter that calls GetTickCount or timeGetTime until the time

@@ -753,12 +753,14 @@ impl Bus {
         // The built-in DLLs' files are of the version of Windows the
         // state's programs run under, which may not be the settings'.
         crate::win32::dll_files::sync(self);
+        // The system's time starts from the machine's clock again, which
+        // isn't in the state (`kernel32::time::now`).
+        self.win32.system_clock = None;
         // When the first of the state's threads' timeouts ends, which
         // isn't in the state either. The clock's deadline is in the state,
         // so it is worked out again only when a thread has such a wait:
         // a machine without one saves the same bytes it was loaded from.
         let now = self.clock.now_micros();
-        self.win32.system_clock = None;
         self.win32.wait_due = crate::win32::thread::wait_due(&self.win32, now);
         if self.win32.wait_due.is_some() {
             self.reschedule_timers();
