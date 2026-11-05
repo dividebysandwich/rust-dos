@@ -1,6 +1,6 @@
 //! Win16 MMSYSTEM: what a Windows 3.1 program gets back from the
 //! multimedia functions on the built-in Windows. The programs are made
-//! byte by byte (tests/win16).
+//! byte by byte (tests/common/win16).
 
 use crate::win16;
 

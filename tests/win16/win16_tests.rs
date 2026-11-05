@@ -2,7 +2,8 @@
 //! with segments flagged 32-bit, and the selectors such programs make
 //! 32-bit; what Windows does for their CLI, STI and INT n; and the
 //! real-mode code they run through DPMI (INT 31h AX=0300h to 0304h).
-//! The programs are made byte by byte (tests/win16), or assembled.
+//! The programs are made byte by byte (tests/common/win16), or
+//! assembled.
 
 use crate::win16;
 

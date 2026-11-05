@@ -1,8 +1,8 @@
 # Conformance tests
 
 Wine's conformance tests for the DLLs of the built-in Windows, which
-`tests/conformance_tests.rs` builds with MinGW and runs under it. Each
-test checks what a Windows function returns against what Windows
+`tests/win32/conformance_tests.rs` builds with MinGW and runs under it.
+Each test checks what a Windows function returns against what Windows
 returned when Wine's developers ran it, accepting the Windows 9x answers
 where they differ from NT's.
 

@@ -5,7 +5,8 @@ Two opt-in suites check the CPU against real hardware:
 real mode, and [test386.asm](#test386asm) for everything from reset through
 protected mode, paging, privilege levels, virtual-8086 mode and task
 switches. The regular test suite covers protected mode as well, in
-`tests/cpu/pm_tests.rs` (see [Protected-mode unit tests](#protected-mode-unit-tests)).
+`tests/cpu/pm_tests.rs` (see
+[Protected-mode unit tests](#protected-mode-unit-tests)).
 
 All of them run on the dynamic recompiler as well (see
 [On the dynamic recompiler](#on-the-dynamic-recompiler)).

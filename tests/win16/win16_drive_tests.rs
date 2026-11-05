@@ -1,6 +1,6 @@
 //! Win16 KERNEL's drives: what a Windows 3.1 program is told about the
 //! machine's drives on the built-in Windows. The programs are made byte
-//! by byte (tests/win16).
+//! by byte (tests/common/win16).
 
 use crate::win16;
 

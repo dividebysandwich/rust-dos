@@ -1,6 +1,6 @@
 //! Win16's hooks: a Windows 3.1 program's hook procedures, called by the
 //! built-in Windows with Windows 3.1's arguments. The programs are made
-//! byte by byte (tests/win16).
+//! byte by byte (tests/common/win16).
 
 use crate::win16;
 

@@ -19,7 +19,7 @@ The suite is opt-in and local. It downloads about 20 MB of games on first
 use, and it never runs in CI or in a plain `cargo test`.
 
 ```sh
-cargo test --release --test program game_suite:: -- --ignored --nocapture        # fetch, install, play
+cargo test --release --test program game_suite:: -- --ignored --nocapture       # fetch, install, play
 cargo test --release --test program game_suite::fetch -- --ignored --nocapture  # only download and install
 cargo test --release --test program game_suite::suite -- --ignored --nocapture  # only play
 ```

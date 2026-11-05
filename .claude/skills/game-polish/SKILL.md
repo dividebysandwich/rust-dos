@@ -34,10 +34,10 @@ skill covers what to do on top of that.
    `/tmp/game-polish-<game>-<date>`. Call it `$W`. It holds the log,
    screenshots, save states, profiles and `findings.md`.
 2. **The game.**
-   - A suite game: `cargo test --release --test program game_suite:: -- --ignored
-     fetch --nocapture` downloads and installs it into
-     `~/.cache/rust-dos/game-suite`; copy its installed tree into `$W/c`,
-     so the play session doesn't change the cached copy.
+   - A suite game: `cargo test --release --test program
+     game_suite::fetch -- --ignored --nocapture` downloads and installs
+     it into `~/.cache/rust-dos/game-suite`; copy its installed tree into
+     `$W/c`, so the play session doesn't change the cached copy.
    - A directory: copy it into `$W/c` for the same reason, unless it is
      large; then use it in place and say so in the report.
    - A package: unpack it into `$W/c`, and read its `rust-dos.conf` (or
@@ -288,8 +288,8 @@ Fix the issues in rank order. For each one:
    - Play a few minutes around the place, to see the fix broke nothing
      nearby.
    - If the game is in the game suite, run its scenarios
-     (`GAME_SUITE=<game> cargo test --release --test program game_suite:: --
-     --ignored --nocapture`); if the fix changes the hashes on purpose,
+     (`GAME_SUITE=<game> cargo test --release --test program
+     game_suite::suite -- --ignored --nocapture`); if the fix changes the hashes on purpose,
      look at the new shots before blessing them.
 8. **Mark the pull request ready for review** once validation succeeds:
    write what step 7 did and found under manual testing, then take it out

@@ -682,8 +682,8 @@ for `objdump -D -b binary -m i386` (or `i386:x86-64`, `aarch64`).
 
 ## Testing
 
-**Lockstep.** `tests/dyndiff` runs two machines side by side in batches
-and compares them after each:
+**Lockstep.** `tests/common/dyndiff` runs two machines side by side in
+batches and compares them after each:
 
 - the registers, CR0, CR2, CR3 and CPL;
 - the FPU's registers, tags, stack top, status and control words;
