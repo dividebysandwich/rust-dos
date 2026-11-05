@@ -1646,8 +1646,13 @@ impl Voodoo {
     pub(crate) fn note_drawn(&self, place: Place) {
         // Frame buffer writes waiting (`words`) go out with the next job
         // submitted, or at the next swap, in the batch after the last one
-        // given out.
-        let batch = if self.words.borrow().is_empty() {
+        // given out. Jobs held back for the OpenGL renderer go out in a
+        // batch not known yet, which may come after a swap's from before
+        // the recording: noted as later than any, they hold the picture
+        // until the workers catch up.
+        let batch = if self.deferring() {
+            u64::MAX
+        } else if self.words.borrow().is_empty() {
             self.pool.latest_batch()
         } else {
             self.pool.next_batch()

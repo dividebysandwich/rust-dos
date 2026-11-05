@@ -457,10 +457,6 @@ pub(crate) mod tests {
         assert!(!v.pool.busy(), "{label}");
     }
 
-    /// After a swap the picture waits for the jobs given out before it,
-    /// and the next frame's go on drawing beside the program; unless one
-    /// of those draws into what is shown when the picture is made, which
-    /// waits for all.
     /// Double buffering, as Myth draws: the next frame goes into the
     /// buffer shown until its swap's retrace, and is sent before it. The
     /// picture made after the retrace shows the other buffer, and doesn't
@@ -557,6 +553,41 @@ pub(crate) mod tests {
         picture_waits_for_all(&mut v, &gate, "the waiting swap's buffer");
     }
 
+    /// Triangles held back for the OpenGL renderer go out in a batch not
+    /// known as they come. Drawn into the buffer shown after a swap from
+    /// before the recording, and given out when it stops, they hold the
+    /// picture.
+    #[test]
+    fn jobs_held_for_the_renderer_hold_the_picture_once_given_out() {
+        use super::super::super::workers::Job;
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let shown = 0x10_0000u32;
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, COL_BUFFER_ADDR, shown);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x20_0000);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, FBZ_MODE, 1 << 9);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        v.set_mirror(true);
+        rectangle(&mut v, (0.0, 0.0, 16.0, 16.0), (255.0, 0.0, 0.0));
+        assert!(v.writes_queue(), "the rectangle is held back");
+        // The workers wait at a gate, which goes out ahead of it.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.set_mirror(false);
+        picture_waits_for_all(&mut v, &gate, "held back for the renderer");
+        assert_eq!(v.fbi.ram.get(shown as usize / 2), 0xF800);
+    }
+
+    /// After a swap the picture waits for the jobs given out before it,
+    /// and the next frame's go on drawing beside the program; unless one
+    /// of those draws into what is shown when the picture is made, which
+    /// waits for all.
     #[test]
     fn the_picture_waits_for_the_frame_a_swap_shows() {
         use super::super::super::workers::{Job, Word};
