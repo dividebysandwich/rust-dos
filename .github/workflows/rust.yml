@@ -72,6 +72,18 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
+      - name: Measure disk at start (temporary)
+        if: runner.os == 'Linux'
+        run: |
+          df -h
+          lsblk || true
+          sudo du -sh /usr/local/lib/android /usr/share/dotnet /opt/ghc             /usr/local/.ghcup /opt/hostedtoolcache /opt/hostedtoolcache/*             /usr/local/share/boost /usr/local/share/powershell /usr/share/swift             /opt/az /opt/microsoft /opt/google /usr/lib/jvm /usr/local/julia*             /usr/local/lib/node_modules /usr/local/share/chromium /opt/pipx             /usr/local/aws-cli /usr/local/bin /usr/local /opt /usr/share /usr/lib             /swapfile /mnt/* /var/lib/docker "$HOME/.rustup" "$HOME/.cargo"             2>/dev/null || true
+          sudo docker system df || true
+          nohup bash -c 'while true; do
+            echo "$(date +%T) root_used_avail_MB=$(df --output=used,avail -BM / | tail -1 | tr -s " ") target_MB=$(du -sm target 2>/dev/null | cut -f1)"
+            sleep 10
+          done' > "$RUNNER_TEMP/disk.log" 2>&1 &
+
       - name: Check for shader changes
         id: shader_changes
         if: matrix.label == 'linux-x86_64'
@@ -138,9 +150,21 @@ jobs:
           key: test-${{ matrix.label }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Measure disk after cache restore (temporary)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          du -sh target "$HOME/.cargo/registry" "$HOME/.cargo/git" 2>/dev/null || true
+
       - name: Run tests
         if: matrix.full
         run: cargo test --workspace --locked --verbose
+
+      - name: Measure disk after Run tests (temporary)
+        if: always() && runner.os == 'Linux'
+        run: |
+          df -h /
+          du -sh target target/* target/*/* 2>/dev/null | sort -h | tail -25 || true
 
       - name: Check SDL renderer without OpenGL (Linux x86_64)
         if: matrix.label == 'linux-x86_64' && steps.shader_changes.outputs.needed == 'true'
@@ -176,6 +200,14 @@ jobs:
         run: |
           cargo test --locked --test deterministic_tests
           cargo test --locked --bin rust-dos determinis
+
+      - name: Measure disk at end (temporary)
+        if: always() && runner.os == 'Linux'
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
+          cat "$RUNNER_TEMP/disk.log"
+          sort -t= -k2 -n "$RUNNER_TEMP/disk.log" | tail -1
 
       # Starts the debug build of the program, whose large frames must fit
       # in Windows's 1 MB main thread stack. The test profile is optimized,
