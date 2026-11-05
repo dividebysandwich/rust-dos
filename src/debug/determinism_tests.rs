@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
 
-#[path = "../../tests/cdimage/mod.rs"]
+#[path = "../../tests/common/cdimage/mod.rs"]
 mod cdimage;
 
 // ----- the program --------------------------------------------------------

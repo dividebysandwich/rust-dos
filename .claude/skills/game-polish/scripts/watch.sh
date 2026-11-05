@@ -19,7 +19,8 @@ OUT="${2:?out-dir}"
 INTERVAL="${3:-5}"
 mkdir -p "$OUT"
 
-# The patterns tests/gamesuite/machine.rs flags as trouble, plus panics.
+# The patterns tests/program/gamesuite/machine.rs flags as trouble, plus
+# panics.
 TROUBLE='Unhandled|Unsupported|Unknown|Invalid opcode|Triple fault|shutdown|panic|not implemented'
 
 after_n=0

@@ -1,10 +1,10 @@
 name: Conformance
 
 # Wine's conformance tests under the built-in Windows
-# (tests/conformance_tests.rs), and those ported to Windows 3.1 programs
-# (tests/win16_conformance_tests.rs). They need MinGW and OpenWatcom, so
-# they run in jobs of their own: on changes to what they test, every
-# night, and by hand.
+# (tests/win32/conformance_tests.rs), and those ported to Windows 3.1
+# programs (tests/win16/win16_conformance_tests.rs). They need MinGW and
+# OpenWatcom, so they run in jobs of their own: on changes to what they
+# test, every night, and by hand.
 on:
   push:
     paths: &paths
@@ -27,9 +27,9 @@ on:
       - "src/win16/**"
       - "crates/ne/**"
       - "tests/conformance/**"
-      - "tests/conformance_tests.rs"
+      - "tests/win32/conformance_tests.rs"
       - "tests/conformance16/**"
-      - "tests/win16_conformance_tests.rs"
+      - "tests/win16/win16_conformance_tests.rs"
       - ".github/workflows/conformance.yml"
       - ".github/actions/apt-install/**"
   pull_request:
@@ -93,7 +93,7 @@ jobs:
         env:
           CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --release --test conformance_tests
+        run: "cargo test --locked --release --test win32 conformance_tests::"
 
       # What each test program printed, to look at when they fail.
       - name: Keep the test programs' output
@@ -142,7 +142,7 @@ jobs:
       - name: Run the Win16 conformance tests
         env:
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --release --test win16_conformance_tests
+        run: "cargo test --locked --release --test win16 win16_conformance_tests::"
 
       - name: Keep the test programs' output
         if: failure()

@@ -243,7 +243,7 @@ mod tests {
         let dir = std::path::PathBuf::from("target/test_cd_player_state");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy("tests/cdimage/audio/tone.wav", dir.join("tone.wav")).unwrap();
+        std::fs::copy("tests/common/cdimage/audio/tone.wav", dir.join("tone.wav")).unwrap();
         std::fs::write(dir.join("tone.cue"), "FILE \"tone.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n").unwrap();
         Rc::new(CdImage::open(&dir.join("tone.cue")).unwrap())
     }
