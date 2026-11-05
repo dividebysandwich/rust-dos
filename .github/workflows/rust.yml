@@ -72,6 +72,23 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
+      # More room on top: the x86-64 image comes with about 27 GB of
+      # toolchains this job never uses, the Android SDK, .NET, GHC, Swift,
+      # CodeQL and Docker images. Removing them takes 100 s on its own and
+      # nearly 3 minutes beside the build, so it runs in the background
+      # while the job installs packages and compiles the dependencies; the
+      # test programs, which take most of the space, link minutes later.
+      - name: Free disk space (Linux x86_64)
+        if: matrix.label == 'linux-x86_64'
+        run: |
+          nohup sudo bash -c '
+            rm -rf /usr/local/lib/android /usr/share/dotnet
+            rm -rf /usr/local/.ghcup /opt/ghc /usr/share/swift
+            rm -rf /opt/hostedtoolcache/CodeQL
+            docker image prune --all --force
+            df -h /
+          ' > "$RUNNER_TEMP/free-disk.log" 2>&1 &
+
       - name: Check for shader changes
         id: shader_changes
         if: matrix.label == 'linux-x86_64'
@@ -202,11 +219,16 @@ jobs:
           CARGO_PROFILE_TEST_OPT_LEVEL: 0
         run: "cargo nextest run --locked --profile ci --test program debug_journal_tests::"
 
-      # The size of the test build, so a run's log shows it and a change
-      # that makes it grow again shows up (#549).
-      - name: Size of the test build (Linux)
+      # The size of the test build and the room it left, so a run's log
+      # shows them and a change that makes the build grow again shows up
+      # (#546, #549). The removal's log ends with the free space right after
+      # the removal.
+      - name: Size of the test build and free disk space (Linux)
         if: ${{ !cancelled() && runner.os == 'Linux' }}
-        run: du -sh target/debug/deps
+        run: |
+          cat "$RUNNER_TEMP/free-disk.log" 2>/dev/null || true
+          df -h /
+          du -sh target target/debug/deps || true
 
   # The release builds and packages, the ones `scope` picks: every target
   # on pushes, tags and manual runs, one on most pull requests and none on
