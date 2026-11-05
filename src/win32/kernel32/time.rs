@@ -5,6 +5,50 @@
 use super::{FALSE, TRUE};
 use crate::cpu::Cpu;
 use crate::win32::convert::{self, SystemTime};
+use chrono::{NaiveDateTime, TimeDelta};
+
+/// The machine's clock as the system's time started from it: its time
+/// then, the emulated millisecond then, and how far DOS had moved it.
+#[derive(Debug, Clone, Copy)]
+pub struct Anchor {
+    at: NaiveDateTime,
+    ms: u64,
+    offset: TimeDelta,
+}
+
+/// The system's time, as GetSystemTime and the C library's time() read
+/// it. Windows reads the real-time clock once and moves the time on with
+/// its timer, as GetTickCount's count, so this is the machine's clock
+/// when it was first read, plus the emulated milliseconds since. The
+/// host's clock, which the real-time clock follows, goes on whether the
+/// machine runs or not, and a program that waits for this time to move
+/// in a loop would wait in host time, calling the system all along. Here
+/// what it reads moves on with the instructions run, at the same whole
+/// milliseconds as GetTickCount's count, so the idle detection skips the
+/// passes that see the same time (`idle::pure_call`). Starting at a whole
+/// millisecond also makes the time a function of emulated time alone in
+/// a deterministic run, where the machine's clock is set at each one:
+/// a loaded state reads what the run that saved it would have read. The
+/// start is taken again when DOS or SetSystemTime sets the clock
+/// (`Cmos::set_now`) and after a state is loaded.
+pub(crate) fn now(cpu: &mut Cpu) -> NaiveDateTime {
+    let ms = cpu.bus.clock.now_micros() / 1000;
+    let offset = cpu.bus.cmos.offset();
+    let anchor = match cpu.bus.win32.system_clock {
+        Some(a) if a.offset == offset && a.ms <= ms => a,
+        _ => {
+            let at = cpu.bus.cmos.now();
+            let a = Anchor { at, ms, offset };
+            cpu.bus.win32.system_clock = Some(a);
+            a
+        }
+    };
+    if cpu.bus.observe.on {
+        let next = cpu.bus.clock.icount_at_ms(ms + 1);
+        crate::idle::pure_call(cpu, Some(next));
+    }
+    anchor.at + TimeDelta::milliseconds((ms - anchor.ms) as i64)
+}
 
 /// TIME_ZONE_INFORMATION's size, and GetTimeZoneInformation's answer when
 /// there is no time zone.
@@ -33,9 +77,9 @@ fn write_file_time(cpu: &mut Cpu, at: u32, ticks: u64) {
     cpu.bus.guest_write_32(at + 4, (ticks >> 32) as u32);
 }
 
-/// GetSystemTime and GetLocalTime: the machine's clock.
+/// GetSystemTime and GetLocalTime: the system's time (`now`).
 pub(super) fn get_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let st = convert::system_time_of(cpu.bus.cmos.now());
+    let st = convert::system_time_of(now(cpu));
     write_system_time(cpu, args[0], &st);
     Some(0)
 }
@@ -96,9 +140,9 @@ pub(super) fn get_time_zone_information(cpu: &mut Cpu, args: &[u32]) -> Option<u
     Some(TIME_ZONE_ID_UNKNOWN)
 }
 
-/// GetSystemTimeAsFileTime: the machine's clock as a FILETIME.
+/// GetSystemTimeAsFileTime: the system's time (`now`) as a FILETIME.
 pub(super) fn get_system_time_as_file_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let st = convert::system_time_of(cpu.bus.cmos.now());
+    let st = convert::system_time_of(now(cpu));
     let ticks = convert::system_time_to_ticks(&st).unwrap_or(0);
     write_file_time(cpu, args[0], ticks);
     Some(0)
@@ -124,5 +168,8 @@ pub(super) fn set_system_time(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     };
     cpu.bus.cmos.set_now(at);
+    // The system's time starts from the time set, also when the machine's
+    // clock was already at it and only the system's time had moved away.
+    cpu.bus.win32.system_clock = None;
     Some(TRUE)
 }

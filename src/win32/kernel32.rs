@@ -22,7 +22,7 @@ mod sort;
 mod sync;
 mod text;
 mod threads;
-mod time;
+pub(crate) mod time;
 mod win98;
 pub use win98::is_directory;
 pub(crate) mod virtual_memory;

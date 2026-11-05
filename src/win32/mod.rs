@@ -358,6 +358,9 @@ pub struct Win32 {
     /// time rather than at the next interrupt. Worked out again after a
     /// load.
     pub(crate) wait_due: Option<u64>,
+    /// Where the system's time was taken from the machine's clock
+    /// (`kernel32::time::now`). Worked out again after a load.
+    pub(crate) system_clock: Option<kernel32::time::Anchor>,
     /// How many times programs have called functions of the system's
     /// modules, built-in or missing (`service`), to tell whether a thread
     /// called anything between two polls.
@@ -1316,6 +1319,10 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
             process.memory.release(&mut cpu.bus);
             registry::process_ended(cpu, process.id);
         }
+        // DirectPlay's objects leave their sessions, which the room would
+        // otherwise go on finding, before the objects their players'
+        // events are go.
+        dplayx::session_ended(cpu);
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
         }
@@ -1474,4 +1481,5 @@ crate::state_fields!(Win32 {
     dll_files,
     trace,
     wait_due,
+    system_clock,
 });

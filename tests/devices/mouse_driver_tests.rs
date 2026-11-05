@@ -442,6 +442,21 @@ fn a_vesa_mode_change_keeps_the_range_the_program_set_before_it() {
 }
 
 #[test]
+fn an_oem_vesa_mode_keeps_the_range_as_the_standard_vesa_modes_do() {
+    // Mode 213h (640x400 in truecolour) is a VESA mode: bit 9 belongs to
+    // its number, so the range set before it stays, as for mode 101h.
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x0003, 0);
+    call(&mut cpu, 0x0000);
+    range(&mut cpu, 0x0007, 0, 1280);
+    range(&mut cpu, 0x0008, 0, 800);
+    int10(&mut cpu, 0x4F02, 0x4213);
+    assert_eq!(cpu.ax(), 0x004F);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 1280, 0, 800));
+}
+
+#[test]
 fn a_vesa_mode_change_with_no_range_set_gives_the_modes_size() {
     // The reset's range is the old screen's (text mode: 640x200), which
     // the program never asked for.

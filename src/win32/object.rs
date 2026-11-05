@@ -270,6 +270,22 @@ pub fn close(cpu: &mut Cpu, handle: u32) -> bool {
     }
 }
 
+/// Close the handle `handle` of the process `pid`, as `close` does one
+/// of the running process's: false if that process or handle isn't
+/// there, as when the process ended and its handles went with it.
+pub fn close_of(cpu: &mut Cpu, pid: u32, handle: u32) -> bool {
+    let win32 = &mut cpu.bus.win32;
+    let Some(process) = win32.processes.iter_mut().find(|p| p.id == pid) else {
+        return false;
+    };
+    let Some(id) = process.handles.remove(handle) else {
+        return false;
+    };
+    win32.objects.release(id);
+    close_files(&mut cpu.bus);
+    true
+}
+
 /// Close in DOS the files whose objects went.
 pub fn close_files(bus: &mut crate::bus::Bus) {
     for sft in std::mem::take(&mut bus.win32.objects.closed) {

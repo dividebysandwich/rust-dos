@@ -244,38 +244,37 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   as Win32 programs built with MSVC do, gets close to what a 387
   gives). Loads, stores, integer conversions, compares and FRNDINT use
   all 80 bits.
-* `machine` is the display adapter programs find when they look for
-  one, and so the graphics they choose: `svga` (the default, a VGA with
-  VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
-  with its VESA modes, 2D accelerator and hardware cursor, for systems
-  [booted from disk images](#booting-a-disk-image) whose drivers program
-  it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX on
-  the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
+* `machine` is the display adapter programs find when they look for one, and
+  so the graphics they choose: `svga` (the default, a VGA with VESA modes up
+  to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3
+  cards such as Diamond's Stealth64 Video), `svga_s3` (an S3 Trio64 on the
+  PCI bus, with its VESA modes, 2D accelerator and hardware cursor, for
+  systems [booted from disk images](#booting-a-disk-image) whose drivers
+  program it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX
+  on the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
   engine and streams processor, which Windows 95's Direct3D uses through
-  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite`
-  (a Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games'
-  Vérité versions; see [Rendition Vérité](#rendition-vérité)),
-  `svga_ati_3drage` and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE
-  II with 4 MB on the PCI bus, whose 2D and 3D engines ATI's Windows
-  drivers use; see [ATI 3D RAGE](#ati-3d-rage)),
-  `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3 3000 or Voodoo
-  Banshee with 16 MB on the PCI bus, which 3dfx's Windows drivers use for
-  the desktop, Direct3D and OpenGL; see
-  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000`
-  (a Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC, see below),
-  `vga` (an IBM VGA, without VESA modes),
-  `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
-  640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
+  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite` (a
+  Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games' Vérité
+  versions; see [Rendition Vérité](#rendition-vérité)), `svga_ati_3drage`
+  and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE II with 4 MB on the PCI
+  bus, whose 2D and 3D engines ATI's Windows drivers use; see [ATI 3D
+  RAGE](#ati-3d-rage)), `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3
+  3000 or Voodoo Banshee with 16 MB on the PCI bus, which 3dfx's Windows
+  drivers use for the desktop, Direct3D and OpenGL; see [3dfx
+  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000` (a Tseng Labs ET4000AX
+  with 1 MB and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
+  VESA modes), `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64
+  colours at 640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
-  as `svga`, which is what DOS games get from it there; one that boots a
-  hard disk, or runs in a Windows of files (a package's `os=win311`),
-  keeps `svga_s3`, as that Windows was installed with the S3's driver
-  (unless the package's `os` boots another system in its place).
-  `machine=` in its `[rust-dos]` or `[emulator]` section goes over the
-  import's, as rust-dos's other settings there do (see
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports as
+  `svga`, which is what DOS games get from it there; one that boots a hard
+  disk, or runs in a Windows of files (a package's `os=win311`), keeps
+  `svga_s3`, as that Windows was installed with the S3's driver (unless the
+  package's `os` boots another system in its place). `machine=` in its
+  `[rust-dos]` or `[emulator]` section goes over the import's, as rust-dos's
+  other settings there do (see
   [GAME-PACKAGES.md](GAME-PACKAGES.md#packages-made-for-dosbox)).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
@@ -1351,7 +1350,7 @@ Windows. `windows=` in the profile's `[game]` picks which:
 |---|---|---|
 | What runs the game | rust-dos's own Windows: the system DLLs are written into the emulator, and the game starts from the DOS prompt | A real Windows 95 or 98, installed on a disk image that the profile's `[autoexec]` boots |
 | What you need besides the game | Nothing | A Windows CD, and the time to install Windows and its drivers on an image ([docs/win9x-howto.md](docs/win9x-howto.md)) |
-| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
+| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput, DirectPlay and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
 | State | Experimental: not every game runs yet | Depends on how well the emulated display, sound and 3D cards run their Windows drivers |
 
 Start with `windows=builtin`. If the game doesn't run there, see
@@ -3042,8 +3041,9 @@ need the first one:
 |---|---|---|
 | Play a DOS game in multiplayer (Doom, Duke Nukem 3D, Warcraft 2, Descent, C&C) | the **IPX driver** and a **room** | join a room, then pick the game's IPX option |
 | Play a serial or modem game with one other player | a **room** | join a room, then pick the game's null modem or modem option |
+| Play a DirectPlay game (Moto Racer, most Windows 9x games) on the built-in Windows | a **room** | join a room, then pick the game's IPX or TCP/IP connection |
 | Browse the web, telnet, FTP or IRC from DOS, Windows 3.x or Windows 9x | the **NE2000 network card** | `ne2000=true`, plus a driver in the guest |
-| Play a Windows 9x network game, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
+| Play a network game on a Windows 9x image, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
 
 ### The words
 
@@ -3135,16 +3135,19 @@ public relay or `rust-dos-relay` on a server avoids that.
 | System | IPX games | Internet (TCP/IP) | LAN with other instances |
 |---|---|---|---|
 | Built-in DOS | built-in IPX driver | NE2000 + packet driver + mTCP or similar | IPX; TCP/IP over the NE2000 |
+| Windows games on the built-in Windows | DirectPlay's IPX and TCP/IP connections, both over the built-in IPX driver | not yet | DirectPlay sessions |
 | Windows 3.1 started from the built-in DOS | DOS games in a DOS box: no IPX (see below) | NE2000 + packet driver + WINPKT + Trumpet Winsock | TCP/IP over the NE2000 |
 | Windows for Workgroups 3.11 with its own network setup | its own IPX over the NE2000 | its own NE2000 driver and TCP/IP-32 | its own networking over the NE2000 |
 | Windows 95/98 booted from an image | its IPX/SPX protocol over the NE2000 | its NE2000 driver and TCP/IP | its networking over the NE2000 |
 
-The built-in IPX driver belongs to the built-in DOS: inside Windows, and
-in systems booted from a disk image, games need that system's own IPX
-over the NE2000. The steps for each system are under [Network
-card](#network-card).
+The built-in IPX driver belongs to the built-in DOS and to the built-in
+Windows's DirectPlay: inside Windows 3.x, and in systems booted from a
+disk image, games need that system's own IPX over the NE2000. The steps
+for each system are under [Network card](#network-card).
 
 Tested so far: IPX games between instances (Doom, Heretic, Descent);
+DirectPlay on the built-in Windows (a race of Moto Racer's demo between
+two instances);
 the internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock
 and Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
 Windows 95's IPX against the built-in IPX driver, two Windows guests on
@@ -3188,8 +3191,9 @@ the room, the members in it and the round trip to the relay.
   `ipx` in [`[network]`](#network) says otherwise. It works for DOS
   programs and for protected-mode games that call it through their DOS
   extender, such as Descent (Doom and Heretic reach it through
-  IPXSETUP); it is not there for systems booted from a disk image, nor
-  inside Windows.
+  IPXSETUP), and it carries the built-in Windows's DirectPlay (below).
+  It is not there for systems booted from a disk image, nor for programs
+  inside Windows 3.x.
 * **`LAN HOST [port]`** relays rooms on a UDP port (21213 unless given)
   and joins one. `LAN STOP` stops relaying. Over the internet, that port
   has to reach the host through its router.
@@ -3226,6 +3230,35 @@ the room, the members in it and the round trip to the relay.
   packets are on the same LAN as the network cards of other instances, in
   the frame type `ipxframe` sets (Ethernet II by default), where the IPX
   protocol of a system booted with a card can take them.
+
+### DirectPlay games on the built-in Windows
+
+Windows 9x games played with `windows=builtin` find each other through
+DirectPlay, Windows' own multiplayer library, which the built-in Windows
+has: its sessions go through the room like the IPX driver's packets do.
+Join a room, start the game on each computer, and pick its network play:
+
+* The game lists two connections, **IPX Connection For DirectPlay** and
+  **Internet TCP/IP Connection For DirectPlay**, as Windows 98 does with
+  both protocols installed. Either works, and players may pick different
+  ones: both are the room underneath. A host address the game asks for
+  with TCP/IP isn't needed, and isn't used.
+* One player makes the game (the game's *Create*, *Host* or *New game*);
+  the others see it in the game's list of sessions, with its players, and
+  join it. Every member of the room sees every session hosted in it.
+* When the player who made the game leaves, a game that asked for it
+  (DPSESSION_MIGRATEHOST) goes on with another host; otherwise the others
+  go on playing, and no one can join any more. A player whose instance
+  stops answering is taken out of the game after 20 seconds.
+* Before a room is joined, sessions are found in this instance only. The
+  first game that picks a connection installs the IPX driver; with
+  `ipx=false` there is none, and the sessions stay in the instance.
+* Messages a game sends as guaranteed arrive in order, whatever the
+  relay's UDP loses; the others are sent once, as on a real network.
+* DirectPlay's protocol here is rust-dos's own: a game on a Windows 95 or
+  98 image in another instance doesn't see these sessions, nor these
+  games its. The lobby (games started by a lobby program such as the
+  Zone) isn't there.
 
 ### Serial and modem games
 
