@@ -6,8 +6,9 @@
 //! Every packet starts with a header: a magic number with the protocol's
 //! version, the packet's kind, the endpoints it is from and to (each
 //! DirectPlay object is one, by a random number, on its instance's IPX
-//! node), and a sequence number and acknowledgement for the reliable
-//! packets between two endpoints (link.rs). Its body is one of:
+//! node), and for the packets between two endpoints (link.rs) a sequence
+//! number, an acknowledgement, the sender's number for its link and the
+//! oldest piece it still waits to have acknowledged. Its body is one of:
 //!
 //! - an enumeration request, broadcast to every endpoint, and the replies
 //!   of the sessions' hosts;
@@ -30,8 +31,8 @@ use crate::net::frame::Mac;
 pub const SOCKET: u16 = 0x7D50;
 
 const MAGIC: [u8; 3] = *b"rDP";
-const VERSION: u8 = 1;
-pub const HEADER: usize = 22;
+const VERSION: u8 = 2;
+pub const HEADER: usize = 30;
 
 /// The kinds of packets.
 pub const ENUM_REQUEST: u8 = 1;
@@ -61,6 +62,10 @@ pub struct Header {
     pub to: u32,
     pub seq: u32,
     pub ack: u32,
+    /// The sender's link (0 for a packet of none) and its base
+    /// (`Link::base`).
+    pub link: u32,
+    pub base: u32,
 }
 
 impl Header {
@@ -74,6 +79,8 @@ impl Header {
         p.extend_from_slice(&self.to.to_le_bytes());
         p.extend_from_slice(&self.seq.to_le_bytes());
         p.extend_from_slice(&self.ack.to_le_bytes());
+        p.extend_from_slice(&self.link.to_le_bytes());
+        p.extend_from_slice(&self.base.to_le_bytes());
         p.extend_from_slice(body);
         p
     }
@@ -91,6 +98,8 @@ impl Header {
             to: word(10),
             seq: word(14),
             ack: word(18),
+            link: word(22),
+            base: word(26),
         };
         Some((header, &packet[HEADER..]))
     }
@@ -647,12 +656,14 @@ mod tests {
             to: 9,
             seq: 3,
             ack: 2,
+            link: 4,
+            base: 3,
         };
         let packet = header.write(b"body");
         assert_eq!(Header::read(&packet), Some((header, &b"body"[..])));
         assert_eq!(Header::read(&packet[..HEADER - 1]), None);
         let mut other = packet.clone();
-        other[3] = 2;
+        other[3] = 1;
         assert_eq!(Header::read(&other), None, "another version");
 
         let owner = Addr {

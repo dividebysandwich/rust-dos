@@ -12,7 +12,7 @@
 
 use super::guest::{self, Blob};
 use super::session::DP_OK;
-use super::{PROVIDERS, connection, objects, wide_of};
+use super::{DPCONNECTION_DIRECTPLAY, PROVIDERS, objects};
 use crate::cpu::Cpu;
 use crate::win32::task::{self, Next, Task};
 use crate::win32::thread::{self, Wait};
@@ -42,8 +42,6 @@ const ITEMS: usize = 9;
 
 /// EnumSessions' callback's flag for its last call.
 const DPESC_TIMEDOUT: u32 = 1;
-/// The flags of a connection EnumConnections lists.
-const DPCONNECTION_DIRECTPLAY: u32 = 1;
 
 /// A call's start: its fixed variables.
 pub struct List {
@@ -162,7 +160,7 @@ fn provider_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         return Next::call(callback, &args, 1);
     }
     // (GUID, connection, its size, name, flags, context).
-    let address = connection(&guid);
+    let address = super::address::of_provider(&guid);
     let name_at = at + 16 + address.len() as u32;
     cpu.bus.guest_write_bytes(at + 16, &address);
     let name = guest::name_blob(&Some(name), &None, wide);
@@ -280,7 +278,7 @@ fn player_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             return Next::call(callback, &[item, at, at + 2048, flags, context], 1);
         }
         // (id, player type, name, flags, context).
-        let mut name = guest::name_blob(&e.short, &e.long, wide_of(t.var(WIDE)));
+        let mut name = guest::name_blob(&e.short, &e.long, t.var(WIDE) != 0);
         if name.len() > 4096 {
             name = guest::name_blob(&None, &None, false);
         }

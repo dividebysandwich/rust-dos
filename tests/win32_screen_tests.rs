@@ -2582,8 +2582,20 @@ fn a_directplay_session_is_found_joined_and_played_in() {
         let session = Arg::At(DP_SESSION);
         c.api(a, l, 0, &[Arg::At(DP_IPX), Arg::At(DD), none])?;
         c.api(a, l, 0, &[Arg::At(DP_TCPIP), Arg::At(FRONT), none])?;
-        c.com(a, l, DD, DP_QUERY_INTERFACE, &[Arg::At(DP_IID4A), Arg::At(BACK)])?;
-        c.com(a, l, FRONT, DP_QUERY_INTERFACE, &[Arg::At(DP_IID4A), Arg::At(TARGET)])?;
+        c.com(
+            a,
+            l,
+            DD,
+            DP_QUERY_INTERFACE,
+            &[Arg::At(DP_IID4A), Arg::At(BACK)],
+        )?;
+        c.com(
+            a,
+            l,
+            FRONT,
+            DP_QUERY_INTERFACE,
+            &[Arg::At(DP_IID4A), Arg::At(TARGET)],
+        )?;
         c.com(a, l, BACK, DP_OPEN, &[session, Arg::I(2)])?;
         let player = |id| [Arg::At(id), none, none, none, none, none];
         c.com(a, l, BACK, DP_CREATE_PLAYER, &player(DP_ID1))?;
@@ -2591,7 +2603,13 @@ fn a_directplay_session_is_found_joined_and_played_in() {
         c.com(a, l, TARGET, DP_ENUM_SESSIONS, &enum_sessions)?;
         c.com(a, l, TARGET, DP_OPEN, &[session, Arg::I(1)])?;
         c.com(a, l, TARGET, DP_CREATE_PLAYER, &player(DP_ID2))?;
-        let message = [Arg::Val(DP_ID2), Arg::Val(DP_ID1), none, Arg::At(DP_HOST), Arg::I(4)];
+        let message = [
+            Arg::Val(DP_ID2),
+            Arg::Val(DP_ID1),
+            none,
+            Arg::At(DP_HOST),
+            Arg::I(4),
+        ];
         c.com(a, l, TARGET, DP_SEND, &message)?;
         let receive = [
             Arg::At(DP_FROM),
@@ -2617,18 +2635,18 @@ fn a_directplay_session_is_found_joined_and_played_in() {
     });
     let mut cpu = card_machine("directplay_session", None, program);
     run_until(&mut cpu, data, 1);
-    assert_eq!(
-        results(&cpu, data, 19),
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, DPERR_NOMESSAGES, 0, 0, 0, 0, 0, 0]
-    );
+    let mut expected = [0; 19];
+    expected[12] = DPERR_NOMESSAGES;
+    assert_eq!(results(&cpu, data, 19), expected);
     let word = |offset| data_word(&cpu, data, offset);
     assert_eq!(word(DP_CALLED), 1, "the session found");
     let (host, guest) = (word(DP_ID1), word(DP_ID2));
     assert!(![0, 1, host].contains(&guest), "{host:X} {guest:X}");
     // DPSYS_CREATEPLAYERORGROUP, from the system, then the message.
-    assert_eq!([seen(&cpu, data, 0), seen(&cpu, data, 1), seen(&cpu, data, 2)], [48, 0, 3]);
+    let seen = |slot| seen(&cpu, data, slot);
+    assert_eq!([seen(0), seen(1), seen(2)], [48, 0, 3]);
     let text = u32::from_le_bytes(*b"10.0");
-    assert_eq!([seen(&cpu, data, 3), seen(&cpu, data, 4), seen(&cpu, data, 5)], [4, guest, text]);
+    assert_eq!([seen(3), seen(4), seen(5)], [4, guest, text]);
 }
 
 /// A DirectPlay object is in the save state: loaded, the program goes

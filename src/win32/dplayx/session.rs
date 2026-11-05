@@ -39,16 +39,13 @@ pub const DPID_ALLPLAYERS: u32 = 0;
 pub const DPID_SERVERPLAYER: u32 = 1;
 pub const DPID_UNKNOWN: u32 = 0xFFFF_FFFF;
 
-pub const DP_OK: u32 = 0;
-const fn dperr(code: u32) -> u32 {
-    0x8877_0000 | code
-}
+use super::dperr;
+pub(super) use super::{DP_OK, DPERR_INVALIDPARAMS};
 pub const DPERR_ACCESSDENIED: u32 = dperr(10);
 pub const DPERR_CANTADDPLAYER: u32 = dperr(40);
 pub const DPERR_CANTCREATEPLAYER: u32 = dperr(60);
 pub const DPERR_INVALIDPLAYER: u32 = dperr(150);
 pub const DPERR_INVALIDGROUP: u32 = dperr(155);
-pub const DPERR_INVALIDPARAMS: u32 = 0x8007_0057;
 pub const DPERR_NOSESSIONS: u32 = dperr(220);
 pub const DPERR_TIMEOUT: u32 = dperr(240);
 pub const DPERR_NONEWPLAYERS: u32 = dperr(330);
@@ -498,6 +495,8 @@ pub struct Play {
     pub waiting: Option<Waiting>,
     pub joining: Option<Joining>,
     pub links: Vec<Link>,
+    /// How many links it made, which numbers them (`Link::id`).
+    pub links_made: u32,
     pub queue: VecDeque<Queued>,
     /// SendEx's message ids.
     pub sends: u32,
@@ -521,6 +520,7 @@ crate::state_fields!(Play {
     waiting,
     joining,
     links,
+    links_made,
     queue,
     sends,
 } skip {
@@ -560,7 +560,8 @@ impl Play {
         let i = match self.links.iter().position(|l| l.peer == peer) {
             Some(i) => i,
             None => {
-                self.links.push(Link::new(peer, now));
+                self.links_made = self.links_made.wrapping_add(1).max(1);
+                self.links.push(Link::new(peer, self.links_made, now));
                 self.links.len() - 1
             }
         };
@@ -568,17 +569,16 @@ impl Play {
     }
 
     fn packet(&mut self, to: Addr, kind: u8, seq: u32, body: &[u8]) {
-        let ack = self
-            .links
-            .iter()
-            .find(|l| l.peer == to)
-            .map_or(0, Link::ack);
+        let link = self.links.iter().find(|l| l.peer == to);
+        let (ack, link, base) = link.map_or((0, 0, 0), |l| (l.ack(), l.id, l.base()));
         let header = Header {
             kind,
             from: self.endpoint,
             to: to.endpoint,
             seq,
             ack,
+            link,
+            base,
         };
         self.outbox.push((to.node, header.write(body)));
     }
@@ -1244,6 +1244,11 @@ impl Play {
                     return;
                 }
                 let link = self.link(from, now);
+                // A datagram from an endpoint with no link to this one
+                // has no link number, and nothing to start from.
+                if header.link != 0 && !link.heard_link(header.link, header.base) {
+                    return;
+                }
                 link.heard = now;
                 link.acked(header.ack);
                 let messages = match header.kind {
@@ -1758,15 +1763,16 @@ impl Play {
             self.links.retain(|l| l.peer != addr);
         }
         // Links of no use any more: their peer isn't a member, and they
-        // have nothing left to send.
-        let session = self.session.clone();
-        let joining = self.joining.clone();
+        // have nothing left to send, not even an acknowledgement (that of
+        // a member's Leave, which `flush` sends after this).
+        let members: Vec<Addr> = self
+            .session
+            .iter()
+            .flat_map(|s| s.members.iter().map(|m| m.addr))
+            .collect();
+        let host = self.joining.as_ref().map(|j| j.host);
         self.links.retain(|l| {
-            let member = session
-                .as_ref()
-                .is_some_and(|s| s.members.iter().any(|m| m.addr == l.peer));
-            let host = joining.as_ref().is_some_and(|j| j.host == l.peer);
-            member || host || !l.unacked.is_empty()
+            members.contains(&l.peer) || host == Some(l.peer) || !l.unacked.is_empty() || l.ack_owed
         });
         if let Some(j) = self.joining.as_mut()
             && j.result.is_none()
@@ -1846,11 +1852,13 @@ mod tests {
     }
 
     /// Hand every packet in every outbox to the endpoints it is for,
-    /// until none are left: a network that loses nothing.
+    /// until none are left: a network that loses nothing. Each endpoint
+    /// lets time pass before it sends, as `net::poll` has it.
     fn deliver(plays: &mut [&mut Play], now: u64) {
         for _ in 0..50 {
             let mut packets = Vec::new();
             for p in plays.iter_mut() {
+                p.tick(now);
                 p.flush(now);
                 let from = p.node;
                 packets.extend(p.outbox.drain(..).map(|(to, bytes)| (from, to, bytes)));
@@ -2066,6 +2074,59 @@ mod tests {
         b.search([1; 16], Vec::new(), false, 0);
         deliver(&mut [&mut a, &mut b], 0);
         assert!(b.found.is_empty());
+    }
+
+    /// An object that left a session joins it again at once, and one
+    /// whose host left and made a new session joins that: their links
+    /// start again although one end dropped its link and the other kept
+    /// it.
+    #[test]
+    fn an_object_that_left_joins_again() {
+        let (mut a, mut b) = (play(1, 10), play(2, 20));
+        a.create(info(0, 0), Vec::new(), 1);
+        join(&mut a, &mut b, 0);
+        b.create_entity(false, 0, None, None, vec![], 0, 0, 0)
+            .unwrap();
+        b.close(0);
+        deliver(&mut [&mut a, &mut b], 0);
+        assert_eq!(a.session.as_ref().unwrap().members.len(), 1);
+        assert!(b.links.is_empty(), "the Leave was acknowledged");
+        join(&mut a, &mut b, 0);
+        let pb = b
+            .create_entity(false, 0, None, None, vec![], 0, 0, 0)
+            .unwrap();
+        deliver(&mut [&mut a, &mut b], 0);
+        assert!(a.session.as_ref().unwrap().player(pb).is_some());
+        // The host leaves, and b drops its link before its
+        // acknowledgement of the Leave goes, so the host keeps its own.
+        // The host makes a new session, which b joins.
+        a.close(0);
+        a.flush(0);
+        for (_, bytes) in std::mem::take(&mut a.outbox) {
+            b.handle(a.node, &bytes, 0);
+        }
+        b.links.clear();
+        assert_eq!(a.links.len(), 1, "the Leave waits for b");
+        a.create(
+            Info {
+                instance: [5; 16],
+                ..info(0, 0)
+            },
+            Vec::new(),
+            2,
+        );
+        b.close(0);
+        b.search(APP, Vec::new(), false, 0);
+        deliver(&mut [&mut a, &mut b], 0);
+        let found = b.found[0].clone();
+        b.join(&found, Vec::new(), 0);
+        deliver(&mut [&mut a, &mut b], 0);
+        // b's new link hears the host's from its oldest piece, the Leave,
+        // which goes again in time and comes before the answer.
+        assert_eq!(b.joining.as_ref().unwrap().result, None);
+        deliver(&mut [&mut a, &mut b], super::super::link::RETRY + 1);
+        assert_eq!(b.joining.as_ref().unwrap().result, Some(DP_OK));
+        assert_eq!(b.session.as_ref().unwrap().info.instance, [5; 16]);
     }
 
     #[test]

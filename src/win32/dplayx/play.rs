@@ -10,19 +10,19 @@ use super::calls::{self, List};
 use super::guest::{self, Blob};
 use super::net;
 use super::session::*;
-use super::{DPERR_UNINITIALIZED, MAX_DATA, object, object_of, play, provider_of};
+use super::{
+    DPERR_ALREADYINITIALIZED, DPERR_BUFFERTOOSMALL, DPERR_INVALIDFLAGS, DPERR_UNINITIALIZED,
+    MAX_DATA, object, object_of, play, provider_of,
+};
 use crate::cpu::Cpu;
 use crate::win32::com;
 use crate::win32::object::{self as kernel, Kind};
 use crate::win32::task::{Next, Task};
 
-pub const DPERR_ALREADYINITIALIZED: u32 = 0x8877_0005;
-const DPERR_BUFFERTOOSMALL: u32 = 0x8877_001E;
-const DPERR_INVALIDFLAGS: u32 = 0x8877_0078;
 const DPERR_NOMESSAGES: u32 = 0x8877_00BE;
 const DPERR_CONNECTING: u32 = 0x8877_015E;
 const DPERR_UNKNOWNMESSAGE: u32 = 0x8877_0172;
-const DPERR_UNSUPPORTED: u32 = com::E_NOTIMPL;
+pub(super) const DPERR_UNSUPPORTED: u32 = com::E_NOTIMPL;
 const DPERR_PENDING: u32 = 0x8000_000A;
 
 const DPOPEN_JOIN: u32 = 1;
@@ -67,7 +67,7 @@ const MUTABLE_FLAGS: u32 = DPSESSION_NEWPLAYERSDISABLED
 /// What a method that has an object returns.
 type Answer = Result<u32, u32>;
 
-fn answer(r: Answer) -> Option<u32> {
+pub(super) fn answer(r: Answer) -> Option<u32> {
     Some(r.unwrap_or_else(|e| e))
 }
 
@@ -421,8 +421,8 @@ pub fn open_session(
     let t = now(cpu);
     if flags & DPOPEN_CREATE != 0 {
         let mut instance = [0u8; 16];
-        crate::net::fill_random(&mut instance);
-        let key = crate::net::random_u64() as u32;
+        crate::net::fill_machine_random(&mut instance);
+        let key = super::random_u32();
         let info = Info {
             instance,
             current_players: 0,
@@ -758,7 +758,7 @@ pub fn get_player_address(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let r = (|| {
         entity(cpu, id, args[1], false)?;
         let provider = provider_of(play(cpu, id).provider);
-        let address = super::connection(&provider);
+        let address = super::address::of_provider(&provider);
         give(cpu, &bytes_blob(&address), args[2], args[3])
     })();
     answer(r)

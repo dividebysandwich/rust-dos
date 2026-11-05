@@ -7,22 +7,18 @@
 
 use super::calls::{self, List};
 use super::guest;
-use super::play::{self, DPERR_ALREADYINITIALIZED};
+use super::play::{self, DPERR_UNSUPPORTED, answer};
 use super::session::*;
-use super::{PLAY, object, object_of, play as play_of};
+use super::{
+    DPERR_ALREADYINITIALIZED, DPERR_BUFFERTOOSMALL, PLAY, object, object_of, play as play_of,
+};
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
 use crate::win32::object::{self as kernel, Kind};
 
-const DPERR_BUFFERTOOSMALL: u32 = 0x8877_001E;
-const DPERR_UNSUPPORTED: u32 = crate::win32::com::E_NOTIMPL;
 /// IDirectPlay's EnumPlayers flag: list the players of the session
 /// enumerated before, instead of the open one, which isn't there.
 const DPENUMPLAYERS_PREVIOUS: u32 = 0x4;
-
-fn answer(r: Result<u32, u32>) -> Option<u32> {
-    Some(r.unwrap_or_else(|e| e))
-}
 
 /// CreatePlayer(this, id, short name, long name, event): with an event
 /// pointer, DirectPlay makes the player's event and writes its handle.

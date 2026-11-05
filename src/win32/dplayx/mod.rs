@@ -636,12 +636,6 @@ fn provider_of(code: u8) -> Guid {
     }
 }
 
-/// A provider's connection, the DirectPlay address EnumConnections
-/// gives: its total size, and the provider.
-fn connection(provider: &Guid) -> Vec<u8> {
-    address::of_provider(provider)
-}
-
 /// Give the object `id` the provider `guid`: DP_OK, or
 /// DPERR_UNAVAILABLE for one there isn't.
 fn initialize(cpu: &mut Cpu, id: usize, guid: &Guid) -> u32 {
@@ -652,20 +646,24 @@ fn initialize(cpu: &mut Cpu, id: usize, guid: &Guid) -> u32 {
     let p = play(cpu, id);
     p.provider = code;
     while p.endpoint == 0 {
-        p.endpoint = crate::net::random_u64() as u32;
+        p.endpoint = random_u32();
     }
     net::prepare(cpu, id);
     DP_OK
+}
+
+/// A random number a program sees (an endpoint, a session's key), the
+/// same in every run of deterministic mode.
+fn random_u32() -> u32 {
+    let mut bytes = [0; 4];
+    crate::net::fill_machine_random(&mut bytes);
+    u32::from_le_bytes(bytes)
 }
 
 /// Whether the interface `vtable` has Unicode strings: IDirectPlay2, 3
 /// and 4, against their A forms and IDirectPlay.
 fn wide(vtable: usize) -> bool {
     matches!(vtable, 1 | 3 | 5)
-}
-
-fn wide_of(flag: u32) -> bool {
-    flag != 0
 }
 
 /// A DirectPlay or lobby object.
@@ -806,6 +804,19 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
         leave(cpu, id);
         objects(cpu)[id] = None;
     }
+}
+
+/// The Win32 session ended at once, with the DOS process it ran in: every
+/// object leaves its session, and DirectPlay starts again with none, as
+/// the other DLLs do. Their processes, and the handles of their players'
+/// events, are gone already.
+pub fn session_ended(cpu: &mut Cpu) {
+    for id in 0..objects(cpu).len() {
+        if objects(cpu)[id].is_some() {
+            leave(cpu, id);
+        }
+    }
+    cpu.bus.win32.dplay = State::default();
 }
 
 /// The object `id` goes: it leaves its session, telling the others once
@@ -979,6 +990,31 @@ mod tests {
             .map(|o| o.as_ref().map(|o| o.pid))
             .collect();
         assert_eq!(left, [None, Some(2), None, None]);
+    }
+
+    /// An object whose process ended leaves its session after the
+    /// process went (`remove_process`): the handle DirectPlay made for a
+    /// player's event went with the process, and isn't closed in another.
+    #[test]
+    fn an_ended_process_leaves_its_session_without_its_handles() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let mut play = session::Play {
+            provider: IPX,
+            endpoint: 7,
+            ..session::Play::default()
+        };
+        play.create(session::Info::default(), Vec::new(), 1);
+        let player = play.create_entity(false, 0, None, None, vec![], 0, 5, 0);
+        assert!(player.is_ok());
+        // IDirectPlay's CreatePlayer made the event and its handle.
+        play.session.as_mut().unwrap().entities[0].own_event = 8;
+        *objects(&mut cpu) = vec![Some(Object {
+            pid: 1,
+            play,
+            ..Object::default()
+        })];
+        process_ended(&mut cpu, 1);
+        assert!(objects(&mut cpu)[0].is_none());
     }
 
     #[test]

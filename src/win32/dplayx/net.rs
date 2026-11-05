@@ -92,9 +92,9 @@ pub fn poll(cpu: &mut Cpu) {
             // socket opens again for those that go on.
             ipx.open_host_socket(SOCKET);
             let mut packets = Vec::new();
-            ipx.host_inbox.retain(|p| {
+            ipx.host_inbox.retain_mut(|p| {
                 if p.socket == SOCKET {
-                    packets.push((p.from, p.data.clone()));
+                    packets.push((p.from, std::mem::take(&mut p.data)));
                 }
                 p.socket != SOCKET
             });
@@ -127,6 +127,9 @@ pub fn after(cpu: &mut Cpu, id: usize) {
 
 /// Send the packets the objects left, set the events of the players
 /// whose messages came, and let go of the events of players that went.
+/// The handles DirectPlay made for them are closed in the process of the
+/// object, not the running one: an object leaves its session also when
+/// its process ended, whose handles went with it.
 pub fn settle(cpu: &mut Cpu) {
     let mut packets = Vec::new();
     let mut signal = Vec::new();
@@ -134,7 +137,8 @@ pub fn settle(cpu: &mut Cpu) {
     for o in cpu.bus.win32.dplay.objects.iter_mut().flatten() {
         packets.append(&mut o.play.outbox);
         signal.append(&mut o.play.signal);
-        released.append(&mut o.play.released);
+        let pid = o.pid;
+        released.extend(o.play.released.drain(..).map(|(e, h)| (pid, e, h)));
     }
     let (node, _) = place(cpu);
     match cpu.bus.net.ipx.as_mut() {
@@ -167,9 +171,9 @@ pub fn settle(cpu: &mut Cpu) {
             *signaled = true;
         }
     }
-    for (event, handle) in released {
+    for (pid, event, handle) in released {
         if handle != 0 {
-            object::close(cpu, handle);
+            object::close_of(cpu, pid, handle);
         }
         if event != 0 {
             object::objects(cpu).release(event);

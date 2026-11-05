@@ -1316,6 +1316,10 @@ pub fn process_ended(cpu: &mut Cpu, psp: u16) {
             process.memory.release(&mut cpu.bus);
             registry::process_ended(cpu, process.id);
         }
+        // DirectPlay's objects leave their sessions, which the room would
+        // otherwise go on finding, before the objects their players'
+        // events are go.
+        dplayx::session_ended(cpu);
         if let Some(pool) = cpu.bus.win32.pool.take() {
             pool.release(&mut cpu.bus);
         }

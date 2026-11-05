@@ -897,7 +897,11 @@ mod tests {
         let mut ipx = Ipx::new(node, 11, FrameType::EthernetII);
         assert!(ipx.open_host_socket(0x7D50));
         // Neither takes a socket the other has.
-        ipx.sockets.push(Socket { number: 0x4002, long_lived: false, owner: 1 });
+        ipx.sockets.push(Socket {
+            number: 0x4002,
+            long_lived: false,
+            owner: 1,
+        });
         assert!(!ipx.open_host_socket(0x4002));
         assert!(ipx.taken(0x7D50));
         // To another node a frame goes out; to all, it comes back too.
@@ -907,13 +911,24 @@ mod tests {
         assert!(ipx.send_host(0x7D50, Mac::BROADCAST, 0x7D50, b"two"));
         assert_eq!(ipx.outgoing.len(), 2);
         let back = ipx.host_inbox.pop_front().unwrap();
-        assert_eq!((&back.data[..], back.from, back.from_socket), (&b"two"[..], node, 0x7D50));
+        assert_eq!(
+            (&back.data[..], back.from, back.from_socket),
+            (&b"two"[..], node, 0x7D50)
+        );
         // What another node sends to the socket waits for the emulator,
         // not for an ECB.
         let other = Mac([2, 0, 0, 0, 0, 3]);
-        let frame = encapsulate(FrameType::EthernetII, node, other, &packet(node, 0x7D50, b"3"));
+        let frame = encapsulate(
+            FrameType::EthernetII,
+            node,
+            other,
+            &packet(node, 0x7D50, b"3"),
+        );
         ipx.receive_frame(&frame, 0);
-        assert_eq!(ipx.host_inbox.pop_front().map(|p| p.data), Some(b"3".to_vec()));
+        assert_eq!(
+            ipx.host_inbox.pop_front().map(|p| p.data),
+            Some(b"3".to_vec())
+        );
         assert!(ipx.held.is_empty() && ipx.completions.is_empty());
         assert!(!ipx.send_host(0x7D50, node, 0x7D50, &[0; 1500]), "too long");
         ipx.reset();

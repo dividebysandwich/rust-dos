@@ -10,6 +10,17 @@
 //! that has received something and has nothing to send soon sends an
 //! acknowledgement alone. Pieces that come early wait for the ones before
 //! them. Times are the emulated clock's microseconds.
+//!
+//! Each end numbers its links as it makes them (`Link::id`), and every
+//! packet of a link carries that number and the sequence number of the
+//! oldest piece its sender still waits to have acknowledged (`base`).
+//! An end that drops its link (the peer left, or went silent) and later
+//! makes a new one to the same peer starts again from 1, while the peer
+//! may still have the old link: a packet with a newer link number than
+//! the one heard before tells the peer to receive from `base` on, and one
+//! with an older number is a straggler of the old link, which is
+//! ignored. Without that, the two ends would wait for pieces that never
+//! come, or take the new ones for repeats.
 
 use super::wire::Addr;
 use std::collections::VecDeque;
@@ -49,6 +60,10 @@ crate::state_fields!(Piece {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Link {
     pub peer: Addr,
+    /// This end's number for the link, and the peer's for its own, 0
+    /// until a packet of it came.
+    pub id: u32,
+    pub peer_link: u32,
     /// The sequence number of the next piece queued, from 1.
     pub next_seq: u32,
     /// The pieces not acknowledged yet, in order.
@@ -57,8 +72,10 @@ pub struct Link {
     pub expected: u32,
     /// Pieces that came before those ahead of them.
     pub early: Vec<Piece>,
-    /// The message the pieces received so far are of.
+    /// The message the pieces received so far are of, and whether the
+    /// rest of a message too long to keep is being skipped.
     pub partial: Vec<u8>,
+    pub discarding: bool,
     /// When something came from the other end last, and when something
     /// went to it.
     pub heard: u64,
@@ -69,20 +86,25 @@ pub struct Link {
 
 crate::state_fields!(Link {
     peer,
+    id,
+    peer_link,
     next_seq,
     unacked,
     expected,
     early,
     partial,
+    discarding,
     heard,
     spoke,
     ack_owed
 });
 
 impl Link {
-    pub fn new(peer: Addr, now: u64) -> Link {
+    /// A new link to `peer`, this end's `id`th.
+    pub fn new(peer: Addr, id: u32, now: u64) -> Link {
         Link {
             peer,
+            id,
             next_seq: 1,
             expected: 1,
             heard: now,
@@ -149,6 +171,33 @@ impl Link {
         self.expected.wrapping_sub(1)
     }
 
+    /// The sequence number of the oldest piece not acknowledged yet, or
+    /// of the next one when every piece is: where the peer receives from
+    /// when it hears this link first.
+    pub fn base(&self) -> u32 {
+        self.unacked.front().map_or(self.next_seq, |p| p.seq)
+    }
+
+    /// A packet of the peer's link `peer_link` came, whose oldest piece
+    /// not acknowledged is `base`: false if it is of a link older than
+    /// the one heard before, which the packet is to be ignored for. A
+    /// newer one starts receiving again from `base`.
+    pub fn heard_link(&mut self, peer_link: u32, base: u32) -> bool {
+        if peer_link == self.peer_link {
+            return true;
+        }
+        let newer = self.peer_link == 0 || (peer_link.wrapping_sub(self.peer_link) as i32) > 0;
+        if !newer {
+            return false;
+        }
+        self.peer_link = peer_link;
+        self.expected = base;
+        self.early.clear();
+        self.partial.clear();
+        self.discarding = false;
+        true
+    }
+
     /// The piece `seq` came: the messages it completes, in order.
     pub fn received(&mut self, seq: u32, body: &[u8]) -> Vec<Vec<u8>> {
         self.ack_owed = true;
@@ -179,8 +228,10 @@ impl Link {
         let Some((&more, data)) = body.split_first() else {
             return;
         };
-        if self.partial.len() + data.len() > LONGEST {
+        // A message too long to keep goes whole, its last piece too.
+        if self.discarding || self.partial.len() + data.len() > LONGEST {
             self.partial.clear();
+            self.discarding = more != 0;
             return;
         }
         self.partial.extend_from_slice(data);
@@ -211,7 +262,10 @@ mod tests {
     use super::*;
 
     fn pair() -> (Link, Link) {
-        (Link::new(Addr::default(), 0), Link::new(Addr::default(), 0))
+        (
+            Link::new(Addr::default(), 1, 0),
+            Link::new(Addr::default(), 1, 0),
+        )
     }
 
     #[test]
@@ -257,5 +311,52 @@ mod tests {
         assert!(a.lost(LOST + 10), "nothing acknowledged");
         assert!(!a.wants_ack(11));
         assert!(a.wants_ack(10 + KEEPALIVE));
+    }
+
+    #[test]
+    fn a_new_link_of_the_peer_is_received_from_its_base() {
+        let (mut a, mut b) = pair();
+        assert!(b.heard_link(a.id, a.base()));
+        a.queue(b"one", 100);
+        a.queue(b"two", 100);
+        for (seq, body) in a.due(1) {
+            b.received(seq, &body);
+        }
+        assert_eq!(b.ack(), 2);
+        // a dropped its link and made a new one, which starts from 1: b
+        // takes it from there, and not for repeats of the old one's.
+        let mut a = Link::new(Addr::default(), 2, 5);
+        a.queue(b"three", 100);
+        assert!(b.heard_link(a.id, a.base()));
+        let got: Vec<Vec<u8>> = a
+            .due(5)
+            .iter()
+            .flat_map(|(s, p)| b.received(*s, p))
+            .collect();
+        assert_eq!(got, vec![b"three".to_vec()]);
+        // A straggler of the old link changes nothing.
+        assert!(!b.heard_link(1, 9));
+        assert_eq!(b.ack(), 1);
+        // b dropped its own: a hears of the new one, from its base.
+        let mut b = Link::new(Addr::default(), 2, 5);
+        b.queue(b"x", 100);
+        b.due(5);
+        b.acked(1);
+        assert!(a.heard_link(b.id, b.base()));
+        assert_eq!(a.ack(), 1, "b's new link has nothing for a yet");
+    }
+
+    #[test]
+    fn a_message_too_long_goes_whole() {
+        let (mut a, mut b) = pair();
+        let long = vec![7u8; LONGEST + 100];
+        a.queue(&long, 1 << 20);
+        a.queue(b"after", 1 << 20);
+        let got: Vec<Vec<u8>> = a
+            .due(1)
+            .iter()
+            .flat_map(|(s, p)| b.received(*s, p))
+            .collect();
+        assert_eq!(got, vec![b"after".to_vec()]);
     }
 }
