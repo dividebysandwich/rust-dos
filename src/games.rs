@@ -471,8 +471,10 @@ pub fn import(dir: &Path, source: &Path, home: Option<&Path>) -> Result<(String,
     if is_package(source) || (crate::archive::is_archive_name(source) && hostfs::is_file(source)) {
         return add_package(dir, source);
     }
-    // The profile's paths are absolute: it lives in another folder.
-    let source = hostfs::canonicalize(source).map_err(|e| format!("{}: {}", source.display(), e))?;
+    // The profile's paths are absolute: it lives in another folder. They
+    // are without Windows' `\\?\`, as the profile writes them.
+    let source =
+        hostfs::canonicalize_plain(source).map_err(|e| format!("{}: {}", source.display(), e))?;
     let source = source.as_path();
     let imported = if hostfs::is_dir(source) {
         crate::import::gog::import(source, home)?
@@ -625,9 +627,9 @@ pub fn add_package(dir: &Path, package: &Path) -> Result<(String, String, Vec<St
 /// `add_package`, the game running in the operating system `os` (as
 /// `[rust-dos] os=` has it) when its package doesn't name one.
 pub fn add_package_in(dir: &Path, package: &Path, os: Option<&str>) -> Result<(String, String, Vec<String>), String> {
-    let package = hostfs::canonicalize(package).map_err(|e| format!("{}: {}", package.display(), e))?;
     // Without Windows' `\\?\`, as the profile has it, or it isn't found again.
-    let package = PathBuf::from(crate::mount::display_host_path(&package));
+    let package =
+        hostfs::canonicalize_plain(package).map_err(|e| format!("{}: {}", package.display(), e))?;
     let profiles = list(dir);
     let is_archive = !hostfs::is_dir(&package);
     let source = package_source(&package, is_archive, os);
@@ -1108,7 +1110,7 @@ mod tests {
         assert!(warnings.is_empty(), "{:?}", warnings);
         let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
-        let archive = std::fs::canonicalize(&archive).unwrap();
+        let archive = crate::hostfs::canonicalize_plain(&archive).unwrap();
         let d = prepared.drives.iter().find(|d| d.drive == 3).unwrap();
         assert_eq!(d.path, archive.join("automount/d.iso"));
         assert_eq!(d.opts.more_images, [archive.join("automount/d1.iso")]);
@@ -1153,7 +1155,7 @@ mod tests {
         assert_eq!(achievements_hash(&hash.to_uppercase(), &games, None).unwrap(), hash);
         assert_eq!(achievements_hash("../Commander Keen.zip", &games, None).unwrap(), hash);
         assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
-        let archive = std::fs::canonicalize(&archive).unwrap();
+        let archive = crate::hostfs::canonicalize_plain(&archive).unwrap();
         assert_eq!(prepared.drives[0].path, archive, "C: is the archive");
         assert_eq!(prepared.autoexec, ["C:", "KEEN4E.EXE"]);
         // Its changes go to its saves.
@@ -1188,7 +1190,7 @@ mod tests {
         assert!(prepared.warnings.is_empty(), "{:?}\n{}", prepared.warnings, text);
         assert_eq!(prepared.settings.cycles, crate::timer::CpuSpeed::Fixed(8000));
         assert_eq!(prepared.settings.sound.sb.model, crate::sb::SbModel::SbPro2);
-        let archive = std::fs::canonicalize(dir.join("Game.zip")).unwrap();
+        let archive = crate::hostfs::canonicalize_plain(dir.join("Game.zip")).unwrap();
         assert_eq!(prepared.drives.len(), 1);
         assert_eq!(prepared.drives[0].path, archive.join("game"));
         assert_eq!(prepared.autoexec, ["c:", "game.exe"]);
@@ -1201,7 +1203,10 @@ mod tests {
         let (id, _, _) = add_package(&games, &dir.join("Other.zip")).unwrap();
         let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
-        assert_eq!(prepared.drives[0].path, std::fs::canonicalize(dir.join("Other.zip")).unwrap());
+        assert_eq!(
+            prepared.drives[0].path,
+            crate::hostfs::canonicalize_plain(dir.join("Other.zip")).unwrap()
+        );
         assert_eq!(prepared.autoexec, ["C:", "run.bat"]);
         assert!(text.contains("machine=ega"), "{}", text);
 
@@ -1285,8 +1290,18 @@ mod tests {
         let text = std::fs::read_to_string(games.join(format!("{}.conf", id))).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
         let drive = |letter| prepared.drives.iter().find(|d| d.drive == letter).map(|d| d.path.clone());
-        assert_eq!(drive(3), Some(std::fs::canonicalize(dir.join("Win.dosz")).unwrap()), "{}", text);
-        assert_eq!(drive(crate::disk::DRIVE_C), Some(std::fs::canonicalize(dir.join("win98.img")).unwrap()), "{}", text);
+        assert_eq!(
+            drive(3),
+            Some(crate::hostfs::canonicalize_plain(dir.join("Win.dosz")).unwrap()),
+            "{}",
+            text
+        );
+        assert_eq!(
+            drive(crate::disk::DRIVE_C),
+            Some(crate::hostfs::canonicalize_plain(dir.join("win98.img")).unwrap()),
+            "{}",
+            text
+        );
         assert_eq!(prepared.autoexec, ["boot -l C"]);
         // Found again on D:.
         assert_eq!(add_package(&games, &dir.join("Win.dosz")).unwrap().0, id);
@@ -1336,7 +1351,7 @@ mod tests {
         let text = std::fs::read_to_string(games.join("pool-of-radiance.conf")).unwrap();
         let prepared = prepare(&id, &Settings::default(), &text, &games, None).unwrap();
         assert!(prepared.warnings.is_empty(), "{:?}\n{}", prepared.warnings, text);
-        let package = std::fs::canonicalize(&package).unwrap();
+        let package = crate::hostfs::canonicalize_plain(&package).unwrap();
         let drives: Vec<(u8, PathBuf)> = prepared.drives.iter().map(|d| (d.drive, d.path.clone())).collect();
         assert_eq!(drives, [(2, package.clone()), (3, package.join("CD"))]);
         assert_eq!(prepared.drives[1].opts.kind, crate::disk::DriveKind::CdRom);

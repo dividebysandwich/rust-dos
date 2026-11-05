@@ -14,7 +14,8 @@ fn scratch(name: &str) -> PathBuf {
     let base = PathBuf::from("target/test_makeimg").join(name);
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
-    base.canonicalize().unwrap()
+    // As the program shows host paths: without Windows' `\\?\`.
+    rust_dos::hostfs::canonicalize_plain(&base).unwrap()
 }
 
 fn machine(dir: &Path) -> Cpu {

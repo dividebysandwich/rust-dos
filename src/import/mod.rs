@@ -124,7 +124,10 @@ impl Imported {
 
 /// `rel` on the host from `base`: a path written for DOSBox on Windows,
 /// with backslashes, and with its names in any case, as the files may
-/// have been renamed in another. Names that aren't there stay as written.
+/// have been renamed in another. A name that is there is the folder's
+/// spelling of it, also where the file system would find it by another
+/// (Windows, macOS), so the profile names the file the same on every
+/// host. Names that aren't there stay as written.
 pub fn host_path(base: &Path, rel: &str) -> PathBuf {
     let rel = rel.trim().trim_matches('"');
     let normalized = rel.replace('\\', "/");
@@ -138,17 +141,14 @@ pub fn host_path(base: &Path, rel: &str) -> PathBuf {
             out.pop();
             continue;
         }
-        let exact = out.join(part);
-        if crate::hostfs::exists(&exact) {
-            out = exact;
-            continue;
-        }
-        let found = crate::hostfs::read_dir(&out)
-            .into_iter()
-            .flatten()
-            .find(|entry| entry.name.to_string_lossy().eq_ignore_ascii_case(part))
-            .map(|entry| entry.path);
-        out = found.unwrap_or(exact);
+        // A name the folder doesn't list, as Windows' short names
+        // (`GAME~1.INS`), stays as written too.
+        let entries = crate::hostfs::read_dir(&out).unwrap_or_default();
+        let found = entries
+            .iter()
+            .find(|entry| entry.name == part)
+            .or_else(|| entries.iter().find(|entry| entry.name.to_string_lossy().eq_ignore_ascii_case(part)));
+        out = found.map_or_else(|| out.join(part), |entry| entry.path.clone());
     }
     out
 }

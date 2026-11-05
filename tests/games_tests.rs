@@ -97,7 +97,10 @@ fn an_imported_dosbox_game_runs_and_its_drives_come_back() {
     let base = Settings::default();
     let prepared = games::prepare(&id, &base, &text, &games_dir, None).unwrap();
     assert_eq!(prepared.settings.cycles, CpuSpeed::Fixed(3000));
-    assert_eq!(prepared.drives[0].path, fs::canonicalize(&game_dir).unwrap());
+    assert_eq!(
+        prepared.drives[0].path,
+        rust_dos::hostfs::canonicalize_plain(&game_dir).unwrap()
+    );
 
     let mut cpu = Cpu::new(dir.clone());
     cpu.bus.set_cycles_per_ms(1000);

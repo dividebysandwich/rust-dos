@@ -896,7 +896,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("DOSBOX")).unwrap();
         fs::write(dir.join("GAME.INS"), "FILE \"GAME.GOG\" BINARY\n").unwrap();
-        fs::canonicalize(&dir).unwrap()
+        // As `games::import` gives the folder, and the profile writes it.
+        crate::hostfs::canonicalize_plain(&dir).unwrap()
     }
 
     #[test]
