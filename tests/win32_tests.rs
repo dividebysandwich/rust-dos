@@ -8721,3 +8721,120 @@ fn an_error_object_goes_through_the_thread_and_a_variant_changes_type() {
     let (code, out) = run("errorinfo", exe);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b} {out}", !code);
 }
+
+/// An OPENGL32.DLL of the program's own, as 3dfx's Voodoo2 OpenGL
+/// driver is: its wgl functions return 101h to 105h, and CallGdi calls
+/// GDI32's GetPixelFormat itself and returns what it gave.
+fn guest_opengl32() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", &["GetPixelFormat"])];
+    let returns = |value: i32, bytes: u16| {
+        move |a: &mut CodeAssembler, _: &Layout| {
+            a.mov(eax, value)?;
+            a.ret_1(bytes as i32)
+        }
+    };
+    let main = returns(1, 12);
+    let choose = returns(0x101, 8);
+    let set = returns(0x102, 12);
+    let get = returns(0x103, 4);
+    let describe = returns(0x104, 16);
+    let swap = returns(0x105, 4);
+    let call_gdi = |a: &mut CodeAssembler, l: &Layout| {
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.ret()
+    };
+    module_image(
+        DLL_BASE,
+        Some("OPENGL32.DLL"),
+        imports,
+        &[0; 0x10],
+        &[
+            ("", &main),
+            ("wglChoosePixelFormat", &choose),
+            ("wglSetPixelFormat", &set),
+            ("wglGetPixelFormat", &get),
+            ("wglDescribePixelFormat", &describe),
+            ("wglSwapBuffers", &swap),
+            ("CallGdi", &call_gdi),
+        ],
+        &[],
+    )
+}
+
+/// GDI32's pixel format functions and SwapBuffers go to the wgl
+/// functions of an OPENGL32.DLL that replaces the built-in one
+/// (`win32_dlls_replace`), as Windows' GDI32 calls the loaded
+/// OpenGL32's, with the caller's arguments and stack. A call from that
+/// DLL itself gets GDI32's own answer (no format on a DC of no window),
+/// not its own function again.
+#[test]
+fn gdi32s_pixel_formats_go_to_a_guest_opengl32() {
+    let imports: &[(&str, &[&str])] = &[
+        ("OPENGL32.DLL", &["CallGdi"]),
+        (
+            "GDI32.DLL",
+            &[
+                "ChoosePixelFormat",
+                "SetPixelFormat",
+                "GetPixelFormat",
+                "DescribePixelFormat",
+                "SwapBuffers",
+            ],
+        ),
+    ];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
+        // The functions with their arguments, each with what the
+        // DLL's function returns.
+        let calls: [(usize, u32, i32); 5] = [
+            (1, 2, 0x101),
+            (2, 3, 0x102),
+            (3, 1, 0x103),
+            (4, 4, 0x104),
+            (5, 1, 0x105),
+        ];
+        for (bit, (import, args, want)) in calls.into_iter().enumerate() {
+            for _ in 0..args {
+                a.push(0)?;
+            }
+            a.call(l.import(import))?;
+            a.cmp(eax, want)?;
+            check(a, false, bit as u32)?;
+        }
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        // Each popped its own arguments.
+        a.cmp(esp, esi)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &[0; 0x200], &[("", &main)], &[]);
+    let dir = scratch("gdi_guest_wgl", &[("T.EXE", exe)]);
+    let dlls = dir.join("DLLS");
+    fs::create_dir_all(&dlls).unwrap();
+    fs::write(dlls.join("OPENGL32.DLL"), guest_opengl32()).unwrap();
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.guest_dlls = Some(dlls);
+    cpu.bus.win32.guest_replace = vec!["opengl32".to_string()];
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    let code = cpu.errorlevel;
+    assert_eq!(
+        code,
+        0x7F,
+        "the checks that failed: {:07b} {}",
+        !code & 0x7F,
+        printed(&cpu)
+    );
+}

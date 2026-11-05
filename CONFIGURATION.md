@@ -463,7 +463,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
-  `comctl32,comdlg32`. Empty (the default), the built-in ones are used.
+  `comctl32,comdlg32`. Empty (the default), the built-in ones are used. An
+  `opengl32.dll` that replaces the built-in one, such as 3dfx's Voodoo2
+  OpenGL driver (`3dfxVGL.dll`, which draws with `GLIDE3X.DLL`), gets
+  GDI32's `ChoosePixelFormat`, `SetPixelFormat`, `GetPixelFormat`,
+  `DescribePixelFormat` and `SwapBuffers`, as Windows' GDI32 calls the
+  loaded OpenGL32's.
 * `win32_version` is the version of Windows the built-in Windows is:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
