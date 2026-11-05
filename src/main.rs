@@ -274,9 +274,9 @@ fn main() -> Result<ExitCode, String> {
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
     // The 3D scene's own sounds, on a device of their own, where SDL has one.
     let room_audio = audio_output.subsystem();
-    sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix);
-    cpu.bus.mixer.muted = args.mute;
     let mut room_sound = sdl_audio::RoomDevice::new();
+    sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix, &room_sound);
+    cpu.bus.mixer.muted = args.mute;
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
@@ -583,7 +583,7 @@ fn main() -> Result<ExitCode, String> {
                     menu_hold.press(std::time::Instant::now());
                 }
                 Event::MouseMotion { x, y, xrel, yrel, .. } => {
-                    menu_hold.motion(*xrel as i32, *yrel as i32);
+                    menu_hold.motion(*xrel, *yrel);
                     // A key of the scene's keyboard under the mouse shows
                     // lit, as a click would press it.
                     if !mouse_captured && !ui.is_open() && display.every_frame() {
@@ -640,7 +640,9 @@ fn main() -> Result<ExitCode, String> {
                 }
                 // The pointer left the window: coming back, it captures
                 // the mouse again.
-                Event::Window { win_event: WindowEvent::MouseLeave, .. } if !mouse_captured => auto_capture.armed = true,
+                Event::Window { win_event: WindowEvent::MouseLeave, .. } if !mouse_captured => {
+                    auto_capture.armed = true
+                }
                 // Uncovered, resized or moved to another display: the
                 // picture is drawn again.
                 Event::Window {

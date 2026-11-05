@@ -107,7 +107,7 @@ pub fn probe(video: &sdl3::VideoSubsystem, settings: &VrSettings) {
         return;
     }
     // SAFETY: the context just made current.
-    let gl = unsafe { glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)) };
+    let gl = unsafe { glow::Context::from_loader_function(crate::display::gl::proc_address) };
     super::xr::probe::run(&gl, video.current_video_driver(), settings);
     // (The context goes before its window.)
     drop(context);
@@ -375,7 +375,8 @@ impl Headset {
         };
         let shared = Arc::new(Shared { state: Mutex::new(state), stop: AtomicBool::new(false), presses: AtomicU32::new(0) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
-        let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }.cast()));
+        let raw_context = Raw(unsafe { context.raw() }.cast());
+        let raw_window = Raw(hidden.raw().cast());
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
@@ -651,12 +652,7 @@ fn run(
         shared.note("No headset (its thread has no OpenGL context); the scene is shown in the window".into());
     } else {
         // SAFETY: the context just made current.
-        let gl = unsafe {
-            glow::Context::from_loader_function(|name| {
-                let name = std::ffi::CString::new(name).unwrap_or_default();
-                sdl3::sys::video::SDL_GL_GetProcAddress(name.as_ptr()).map_or(std::ptr::null(), |f| f as *const _)
-            })
-        };
+        let gl = unsafe { glow::Context::from_loader_function(crate::display::gl::proc_address) };
         if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings, &world) {
             shared.note(e);
         }
@@ -696,13 +692,10 @@ fn session(
     let samples = look.samples;
     // Both eyes in one pass where OpenGL can (and multisample them, if
     // they are); RUST_DOS_VR_MULTIVIEW=0 draws them one by one, to compare.
-    let multiview = Multiview::load(&features, |name| {
-        let name = std::ffi::CString::new(name).unwrap_or_default();
-        // SAFETY: this thread's context is current.
-        unsafe { sdl3::sys::video::SDL_GL_GetProcAddress(name.as_ptr()).map_or(std::ptr::null(), |f| f as *const _) }
-    })
-    .filter(|m| samples == 0 || m.multisamples())
-    .filter(|_| std::env::var("RUST_DOS_VR_MULTIVIEW").map_or(true, |v| v != "0"));
+    // (This thread's context is current.)
+    let multiview = Multiview::load(&features, crate::display::gl::proc_address)
+        .filter(|m| samples == 0 || m.multisamples())
+        .filter(|_| std::env::var("RUST_DOS_VR_MULTIVIEW").map_or(true, |v| v != "0"));
     let options = XrOptions {
         graphics: settings.graphics,
         resolution: resolution.percent,

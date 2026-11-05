@@ -20,6 +20,15 @@ use sdl3::VideoSubsystem;
 use sdl3::video::{GLContext, GLProfile, SwapInterval, Window};
 use std::collections::HashMap;
 
+/// The address of the OpenGL function `name` in the context current on
+/// this thread, or null if it has none: the loader glow takes.
+pub(crate) fn proc_address(name: &str) -> *const std::ffi::c_void {
+    let Ok(name) = std::ffi::CString::new(name) else { return std::ptr::null() };
+    // SAFETY: SDL only reads the name.
+    unsafe { sdl3::sys::video::SDL_GL_GetProcAddress(name.as_ptr()) }
+        .map_or(std::ptr::null(), |f| f as *const _)
+}
+
 /// Why there is no OpenGL 3 to draw with, and the window if one was made
 /// for it, which SDL's renderer can take instead.
 pub struct NoGl {
@@ -180,15 +189,14 @@ impl GlScreen {
             }
         };
         // SAFETY: the context just made is current.
-        let gl = unsafe { glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)) };
+        let gl = unsafe { glow::Context::from_loader_function(proc_address) };
         let version = gl.version();
         let Some(glsl) = Glsl::for_gl(version.major, version.minor, version.is_embedded) else {
             let reason = format!("OpenGL {}.{} is older than 3.0", version.major, version.minor);
             return Err(no_gl(Some(window), reason));
         };
         // SAFETY: the context is current, and SDL looks up its functions.
-        let texture_barrier =
-            unsafe { TextureBarrier::load(&gl, |name| video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)) };
+        let texture_barrier = unsafe { TextureBarrier::load(&gl, proc_address) };
         // The emulator paces its frames itself, as with SDL's renderer.
         let _ = video.gl_set_swap_interval(SwapInterval::Immediate);
 

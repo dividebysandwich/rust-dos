@@ -1955,7 +1955,9 @@ fn gl_context(
     let context = window.gl_create_context().unwrap();
     // SAFETY: the context just made is current.
     let gl = unsafe {
-        glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _))
+        glow::Context::from_loader_function(|name| {
+            video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)
+        })
     };
     let v = glow::HasContext::version(&gl);
     let glsl = rust_dos::video::shader::Glsl::for_gl(v.major, v.minor, v.is_embedded).unwrap();

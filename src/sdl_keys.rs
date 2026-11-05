@@ -3,8 +3,8 @@
 //! types in with `keyboard_layout=auto`.
 
 use rust_dos::keylayout::{self, Layout};
-use sdl3::keyboard::{Keycode, Mod, Scancode};
-use sdl3::sys::keycode::SDL_Keymod;
+use sdl3::keyboard::Scancode;
+use sdl3::sys::keycode::{SDL_KMOD_NONE, SDLK_UNKNOWN};
 
 /// The PC keyboard's set-1 scan code of the key at `scancode`, and whether
 /// it sends E0 first. SDL's scan codes are the positions of the keys, as
@@ -138,9 +138,17 @@ pub fn detect_layout() -> &'static Layout {
         .filter_map(|scancode| {
             let (scan, _) = pc_scan(scancode)?;
             // Not as a key event: SDL's options for those (French digits,
-            // Latin letters) would hide what the layout types.
-            let keycode = Keycode::from_scancode(scancode, SDL_Keymod(Mod::NOMOD.bits()), false)?;
-            let c = char::from_u32(keycode as u32).filter(|c| !c.is_control())?;
+            // Latin letters) would hide what the layout types. And not
+            // through the sdl3 crate's Keycode, an enum of SDL's named
+            // keys, which has none for 'é', 'ü' or a dead key's accent.
+            let code = sdl3::sys::scancode::SDL_Scancode(scancode as i32);
+            // SAFETY: a lookup in SDL's keymap, which takes any scan code.
+            let keycode =
+                unsafe { sdl3::sys::keyboard::SDL_GetKeyFromScancode(code, SDL_KMOD_NONE, false) };
+            if keycode == SDLK_UNKNOWN {
+                return None;
+            }
+            let c = char::from_u32(keycode.0).filter(|c| !c.is_control())?;
             Some((scan, c))
         })
         .collect();

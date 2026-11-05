@@ -22,6 +22,10 @@ pub(crate) struct SdlAudio {
     mix: std::rc::Rc<std::cell::Cell<display::audio_mix::Mix>>,
     mixed: display::audio_mix::Mix,
     buffer: Vec<i16>,
+    /// The 3D scene's sound stream, on the same device: closed with the
+    /// machine's when the block size changes, or the device would stay
+    /// open at the old size. RoomDevice opens it again when it needs it.
+    room: RoomSlot,
 }
 
 /// The machine's sound on its way to the device: SDL's stream, which the
@@ -30,7 +34,8 @@ pub(crate) struct Stream {
     stream: sdl3::audio::AudioStreamOwner,
     /// The block size asked for, which the device may round.
     blocksize: u16,
-    /// The device's buffer, in frames, as SDL says it opened it.
+    /// The device's buffer as SDL says it opened it, in frames of the
+    /// machine's rate, as the stream's queue counts them.
     device_frames: usize,
 }
 
@@ -59,7 +64,13 @@ fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream
         let device = sdl3::sys::audio::SDL_GetAudioStreamDevice(stream.raw());
         sdl3::sys::audio::SDL_GetAudioDeviceFormat(device, &mut format, &mut frames)
     };
-    let device_frames = if known && frames > 0 { frames as usize } else { blocksize as usize };
+    // The device may run at another rate (48 kHz): its buffer drains as
+    // fast as that many of the machine's frames.
+    let device_frames = if known && frames > 0 && format.freq > 0 {
+        (frames as i64 * FREQ as i64 / format.freq as i64) as usize
+    } else {
+        blocksize as usize
+    };
     Ok(Stream { stream, blocksize, device_frames })
 }
 
@@ -77,9 +88,9 @@ impl audio::AudioOutput for SdlAudio {
 
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         use display::audio_mix::{IDENTITY, apply};
-        let Some(stream) = &self.stream else {
-            return Err("the sound device couldn't be opened again".to_string());
-        };
+        // The sound is dropped: set_buffer said why there is no device,
+        // and an error here would be printed for every video frame.
+        let Some(stream) = &self.stream else { return Ok(()) };
         let mix = self.mix.get();
         if mix == IDENTITY && self.mixed == IDENTITY {
             return stream.stream.put_data_i16(samples).map_err(|e| e.to_string());
@@ -98,10 +109,12 @@ impl audio::AudioOutput for SdlAudio {
     /// A new block size opens the device again, which drops the little
     /// sound waiting in it. The old stream closes first: SDL shares one
     /// device among its streams, and it would keep the old size while one
-    /// is open. If the new size won't open, the old one is tried again.
+    /// is open (the 3D scene's too, which closes as well). If the new size
+    /// won't open, the old one is tried again.
     fn set_buffer(&mut self, buffer: rust_dos::audio::AudioBuffer) -> Result<(), String> {
         let old = self.stream.as_ref().map(|s| s.blocksize);
         if old != Some(buffer.blocksize) {
+            self.room.borrow_mut().take();
             self.stream = None;
             match open_audio(&self.subsystem, buffer.blocksize) {
                 Ok(stream) => self.stream = Some(stream),
@@ -164,6 +177,7 @@ pub(crate) fn attach(
     output: Output,
     settings: &Settings,
     audio_mix: &Rc<Cell<display::audio_mix::Mix>>,
+    room: &RoomDevice,
 ) {
     match output {
         Output::Sdl(stream, subsystem) => {
@@ -182,6 +196,7 @@ pub(crate) fn attach(
                 mix,
                 mixed: display::audio_mix::IDENTITY,
                 buffer: Vec::new(),
+                room: room.device.clone(),
             };
             cpu.bus.audio_device = Some(Box::new(output));
         }
@@ -216,7 +231,8 @@ fn warn_dummy(cpu: &mut Cpu) {
 /// there is something to hear, paused while there is nothing.
 pub(crate) struct RoomDevice {
     pub sound: std::sync::Arc<std::sync::Mutex<display::room_sound::RoomSound>>,
-    device: Option<sdl3::audio::AudioStreamWithCallback<RoomCallback>>,
+    /// Shared with SdlAudio, which closes it to change the block size.
+    device: RoomSlot,
     /// Whether the device plays (it opens paused).
     playing: bool,
     /// It couldn't be opened: not tried again.
@@ -238,16 +254,41 @@ impl sdl3::audio::AudioCallback<i16> for RoomCallback {
     }
 }
 
+/// Where the 3D scene's sound stream is, while it is open.
+type RoomSlot = Rc<std::cell::RefCell<Option<RoomStream>>>;
+
+/// The 3D scene's sound stream.
+struct RoomStream(sdl3::audio::AudioStreamWithCallback<RoomCallback>);
+
+impl Drop for RoomStream {
+    /// The sdl3 crate frees the callback before it destroys the stream,
+    /// and SDL's audio thread may call it in between. Taking the callback
+    /// off first waits for one running to finish (SDL does it under the
+    /// stream's lock), and none starts after.
+    fn drop(&mut self) {
+        // SAFETY: the stream is alive until the field drops, after this.
+        unsafe {
+            sdl3::sys::audio::SDL_SetAudioStreamGetCallback(
+                self.0.raw(),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+    }
+}
+
 impl RoomDevice {
     pub fn new() -> Self {
-        RoomDevice { sound: Default::default(), device: None, playing: false, failed: false }
+        let device = Default::default();
+        RoomDevice { sound: Default::default(), device, playing: false, failed: false }
     }
 
     /// Play while there is something to hear, on `subsystem`'s device.
     pub fn update(&mut self, subsystem: Option<&sdl3::AudioSubsystem>) {
         let active = self.sound.lock().unwrap_or_else(|e| e.into_inner()).active();
+        let mut slot = self.device.borrow_mut();
         if active
-            && self.device.is_none()
+            && slot.is_none()
             && !self.failed
             && let Some(subsystem) = subsystem
         {
@@ -256,7 +297,7 @@ impl RoomDevice {
             let device = subsystem.default_playback_device();
             match device.open_playback_stream_with_callback(&spec(), callback) {
                 Ok(device) => {
-                    self.device = Some(device);
+                    *slot = Some(RoomStream(device));
                     self.playing = false;
                 }
                 Err(e) => {
@@ -265,7 +306,7 @@ impl RoomDevice {
                 }
             }
         }
-        let Some(device) = &self.device else {
+        let Some(RoomStream(device)) = &*slot else {
             self.sound.lock().unwrap_or_else(|e| e.into_inner()).clear();
             return;
         };

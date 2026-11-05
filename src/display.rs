@@ -190,7 +190,8 @@ impl<'a> Display<'a> {
                         builder.build().map_err(|e| e.to_string())?
                     }
                 };
-                let canvas = sdl3::render::create_renderer(window, None).map_err(|e| e.to_string())?;
+                let canvas =
+                    sdl3::render::create_renderer(window, None).map_err(|e| e.to_string())?;
                 let creator = textures.get_or_init(|| canvas.texture_creator());
                 let texture = create_texture(creator, frame, settings.filter)?;
                 if settings.shader != Shader::None {
@@ -200,7 +201,8 @@ impl<'a> Display<'a> {
                         reason
                     ));
                 }
-                let renderer = format!("SDL renderer {} (no OpenGL 3: {})", renderer_name(&canvas), reason);
+                let name = renderer_name(&canvas);
+                let renderer = format!("SDL renderer {} (no OpenGL 3: {})", name, reason);
                 (Output::Sdl { canvas, creator, texture, layer: None }, renderer)
             }
         };
@@ -621,18 +623,9 @@ impl<'a> Display<'a> {
     /// its events' units) is, across and down.
     pub fn frame_scale(&self) -> (f64, f64) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
-        let (w, h) = match &self.out {
-            Output::Gl(gl) => {
-                let (_, _, w, h) = letterbox(gl.window().size(), display);
-                (w, h)
-            }
-            // SDL3's events are in the window's units, not the renderer's
-            // logical ones, which letterbox the picture in the window.
-            Output::Sdl { canvas, .. } => {
-                let (_, _, w, h) = letterbox(canvas.window().size(), display);
-                (w, h)
-            }
-        };
+        // In the window's units for both: SDL3 leaves the events of SDL's
+        // renderer in them too, not in its logical size.
+        let (_, _, w, h) = letterbox(self.out.window().size(), display);
         (self.frame.0 as f64 / w.max(1) as f64, self.frame.1 as f64 / h.max(1) as f64)
     }
 
@@ -1001,13 +994,12 @@ impl Display<'_> {
     /// picture as it is drawn (but for the CRT shader's curve).
     pub fn warp_mouse(&self, mouse: &sdl3::mouse::MouseUtil, (fx, fy): (f64, f64)) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
-        let window = match &self.out {
-            Output::Gl(gl) => gl.window(),
-            Output::Sdl { canvas, .. } => canvas.window(),
-        };
+        let window = self.out.window();
         let (x, y) = match &self.out {
             Output::Gl(_) => {
-                frame_to_window((fx, fy), window.size(), window.size_in_pixels(), display, self.frame)
+                let (ws, ds) = (window.size(), window.size_in_pixels());
+                let (x, y) = frame_to_window((fx, fy), ws, ds, display, self.frame);
+                (x as f32, y as f32)
             }
             // SDL's renderer says where its logical point is in the window.
             Output::Sdl { canvas, .. } => {
@@ -1018,10 +1010,10 @@ impl Display<'_> {
                 unsafe {
                     sdl3::sys::render::SDL_RenderCoordinatesToWindow(canvas.raw(), lx, ly, &mut x, &mut y)
                 };
-                (x as i32, y as i32)
+                (x, y)
             }
         };
-        mouse.warp_mouse_in_window(window, x as f32, y as f32);
+        mouse.warp_mouse_in_window(window, x, y);
     }
 }
 
