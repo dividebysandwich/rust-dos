@@ -495,6 +495,68 @@ pub(crate) mod tests {
         v.flush();
     }
 
+    /// Frame buffer writes into the buffer shown, queued right after the
+    /// swap, go out with the next job, in a batch after the swap's: the
+    /// picture waits for them.
+    #[test]
+    fn frame_buffer_writes_queued_after_a_swap_hold_the_picture() {
+        use super::super::super::workers::{Job, Word};
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let shown = 0x10_0000u32;
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        let word = |value| Word {
+            row: 0,
+            at: shown / 2,
+            value,
+        };
+        let fb = v.fbi.ram.clone();
+        let words = vec![word(0x1234)];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        // A write into it waits behind the jobs, as `lfb_write` queues
+        // it, and the next frame's job, held, takes it out.
+        assert!(v.writes_queue());
+        v.queue_words(&[word(0x5678)]);
+        v.mark_drawn(shown as usize / 2);
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        picture_waits_for_all(&mut v, &gate, "frame buffer write");
+        assert_eq!(v.fbi.ram.get(shown as usize / 2), 0x5678);
+    }
+
+    /// A swap shown at once while one waits for its retrace: the jobs
+    /// drawn between the two into the waiting swap's buffer stay noted,
+    /// and the picture waits for them once that buffer is shown.
+    #[test]
+    fn a_swap_past_a_waiting_one_keeps_what_that_one_shows() {
+        use super::super::super::workers::Job;
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, LEFT_OVERLAY_BUF, a);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
+        // Written straight to the register, the swap doesn't wait.
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        let due = v.next_event().expect("the first swap waits for a retrace");
+        v.service(Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        });
+        assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, a);
+        picture_waits_for_all(&mut v, &gate, "the waiting swap's buffer");
+    }
+
     #[test]
     fn the_picture_waits_for_the_frame_a_swap_shows() {
         use super::super::super::workers::{Job, Word};

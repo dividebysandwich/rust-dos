@@ -381,7 +381,14 @@ impl Drawn {
                 Some(entry) => entry.1 = batch,
                 None => self.buffers.push((dest, batch)),
             },
-            Place::Bytes(at, len) => self.bytes.push((at, len, batch)),
+            // A texture downloaded again over the same bytes keeps one
+            // entry, as a buffer drawn into again does.
+            Place::Bytes(at, len) => {
+                match self.bytes.iter_mut().find(|(a, l, _)| (*a, *l) == (at, len)) {
+                    Some(entry) => entry.2 = batch,
+                    None => self.bytes.push((at, len, batch)),
+                }
+            }
         }
     }
 
@@ -1579,7 +1586,6 @@ impl Voodoo {
         changed || switched
     }
 
-
     /// Wait for the jobs the picture shown needs: those given out before
     /// the swap that showed it (`front_jobs`). The later ones draw the
     /// next frame into another buffer, beside the program, unless one of
@@ -1607,33 +1613,45 @@ impl Voodoo {
     /// shows.
     fn drawn_shown(&self, number: u64) -> bool {
         let drawn = self.drawn.borrow();
-        let buffers = drawn.buffers.iter().filter(|&&(_, batch)| batch > number);
-        let bytes = drawn.bytes.iter().filter(|&&(_, _, batch)| batch > number);
+        let mut buffers = drawn.buffers.iter().filter(|&&(_, batch)| batch > number);
+        let mut bytes = drawn.bytes.iter().filter(|&&(_, _, batch)| batch > number);
         match &self.banshee {
             Some(b) => {
-                buffers.into_iter().any(|&(dest, _)| b.shows(dest as u32 * 2))
-                    || bytes.into_iter().any(|&(at, len, _)| b.shows_bytes(at, Some(len)))
+                buffers.any(|&(dest, _)| b.shows(dest as u32 * 2))
+                    || bytes.any(|&(at, len, _)| b.shows_bytes(at, Some(len)))
             }
             None => {
                 let front = self.color_buffer(0);
-                buffers.into_iter().any(|&(dest, _)| front == Some(dest))
+                buffers.any(|&(dest, _)| front == Some(dest))
             }
         }
     }
 
     /// A swap shows what the jobs up to batch `mark` drew
     /// (`swap_mark`): what came before it is drawn when the picture is.
+    /// A swap still waiting for its retrace has an earlier mark when one
+    /// is shown at once past it, and what was drawn after its mark stays
+    /// noted for when it shows its buffer.
     fn shown_up_to(&mut self, mark: Option<u64>) {
         self.front_jobs = mark;
         if let Some(mark) = mark {
-            self.drawn.get_mut().forget_before(mark);
+            let waiting = self.swap_marks.iter().flatten().copied().min();
+            let drawn = waiting.map_or(mark, |w| w.min(mark));
+            self.drawn.get_mut().forget_before(drawn);
         }
     }
 
     /// The job just submitted draws into `place`: colour buffer `dest`
     /// (a word offset), or `len` bytes from byte `at`.
     pub(crate) fn note_drawn(&self, place: Place) {
-        let batch = self.pool.latest_batch();
+        // Frame buffer writes waiting (`words`) go out with the next job
+        // submitted, or at the next swap, in the batch after the last one
+        // given out.
+        let batch = if self.words.borrow().is_empty() {
+            self.pool.latest_batch()
+        } else {
+            self.pool.next_batch()
+        };
         self.drawn.borrow_mut().note(place, batch);
     }
 
@@ -1648,7 +1666,6 @@ impl Voodoo {
         self.submit_words();
         Some(self.pool.mark())
     }
-
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
     /// `picture_size` big), through the gamma table (see

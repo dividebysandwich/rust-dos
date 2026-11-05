@@ -16,7 +16,7 @@
 //! triangles may read, the pixel counters, and a save state. The queue
 //! has limits (`MAX_JOBS`, `MAX_BATCHES`, `MAX_BYTES`): past one the
 //! emulator waits for a batch to finish, so what such a read waits for
-//! stays short.
+//! has a bound.
 //! With no workers (the browser, a single core) jobs run at once.
 
 use super::Voodoo;
@@ -221,12 +221,14 @@ const MAX_JOBS: usize = 8192;
 /// Bytes (`Job::Bytes`) go out as a batch of their own, after one of
 /// what came before, and the workers meet around them: Myth downloads
 /// over a texture in use 46 times a game frame, and the workers finish
-/// such a pair in about 0.26 ms. 512 batches are about 70 ms of these
-/// meetings, two game frames of Myth's. The queue holds the frame after
-/// the one a swap shows (`Voodoo::catch_up_shown`), so the program draws
-/// it while the workers finish the one before: at 64 batches the
-/// emulator waited for room within a frame instead, and Myth's emulation
-/// thread was busy 63% of the time at 170,000 cycles, against 40% here.
+/// such a pair in about 0.26 ms. 512 batches are 256 such pairs, the
+/// batches of five or so of Myth's game frames, and about 70 ms of the
+/// workers' time: a frame buffer read behind a full queue of them waits
+/// that long. The queue holds the frame after the one a swap shows
+/// (`Voodoo::catch_up_shown`), so the program draws it while the
+/// workers finish the one before: at 64 batches the emulator waited for
+/// room within a frame instead, and Myth's emulation thread was busy 63%
+/// of the time at 170,000 cycles, against 40% here.
 const MAX_BATCHES: u64 = 512;
 
 /// Bytes of texture data the queue may hold before the emulator waits:
@@ -384,6 +386,12 @@ impl Pool {
     pub fn latest_batch(&self) -> u64 {
         let waiting = !self.pending.lock().unwrap().is_empty();
         self.given_out.load(std::sync::atomic::Ordering::Relaxed) + waiting as u64
+    }
+
+    /// The batch a job submitted now goes out in, unless it goes out on
+    /// its own (`Job::Bytes`): the one after the last given out.
+    pub fn next_batch(&self) -> u64 {
+        self.given_out.load(std::sync::atomic::Ordering::Relaxed) + 1
     }
 
     /// Give out what is pending, and the number of the last batch given
