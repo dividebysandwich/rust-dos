@@ -183,6 +183,14 @@ disk.
 - Stop the emulators you start, by their process ID, before you finish:
   one left running holds its files, its debug server's port and a
   processor.
+- A script that starts an emulator asks for a free port with
+  `--debug-server 127.0.0.1:0` and reads the address the emulator
+  prints ("Free port" in `docs/llm-debugging.md`). Heavy runs share the
+  lock and run side by side, so with a fixed port two agents running
+  the same script reach each other's emulators. An emulator waiting for
+  the lock hasn't opened its port yet either, and its script then talks
+  to whichever emulator has that port, which can be another agent's
+  measurement.
 - Every emulator run is heavy unless it is a timing measurement. The
   test is what the claim quotes: if it contains a number that comes from
   how fast the host ran the emulator, the run is a timing measurement,
