@@ -72,11 +72,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   run several instances side by side, or when 8086 may be taken:
 
   ```sh
-  : > rust-dos.out
+  OUT=$(mktemp)
   SDL_VIDEODRIVER=dummy \
     ./target/release/rust-dos --no-config -d /path/to/dos/files \
-    --debug-server 127.0.0.1:0 > rust-dos.out &
-  until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' rust-dos.out) &&
+    --debug-server 127.0.0.1:0 > "$OUT" &
+  until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' "$OUT") &&
         curl -sf $H/api/status >/dev/null; do
     kill -0 $! 2>/dev/null || { echo 'rust-dos exited'; break; }
     sleep 0.2
@@ -84,8 +84,9 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   ```
 
   The address line prints before the emulator starts answering requests,
-  so the loop also waits for `/api/status`. Emptying `rust-dos.out` first
-  keeps the loop from reading a port left there by an earlier run, and
+  so the loop also waits for `/api/status`. A new, empty file from
+  `mktemp` for every run keeps the loop from reading a port left there by
+  an earlier run, or one written by another run of the same script, and
   from failing to find the file before the shell creates it.
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
@@ -1180,7 +1181,7 @@ the card into `<dir>/trace.txt`, and the registers, texture memory and
 the machine's RAM at the first four renders and every thousandth (every
 `RUST_DOS_POWERVR_TRACE_EVERY`th) as
 `render-N.regs`, `.tex` and `.ram`. `RUST_DOS_POWERVR_SNAPSHOT=<dir>/render-N
-cargo test --release --test powervr_tests -- --ignored renders_a_snapshot`
+cargo test --release --test video powervr_tests::renders_a_snapshot -- --ignored`
 renders one into `render-N.png`, and prints the time it took.
 
 ### Rendition Vérité games

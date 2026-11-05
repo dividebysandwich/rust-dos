@@ -1468,8 +1468,8 @@ mod tests {
     #[test]
     fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
         // After a read of everything, a fastfill draws rows 20..40. A read
-        // of depth rows 96..160 then reads only rows nothing drew since:
-        // a cache would have had them. One of rows 0..64 reads the 20
+        // of depth rows 96..160 then reads nothing: the fill drew none of
+        // them, and they are in the memory. One of rows 0..64 reads the 20
         // drawn among them.
         let mut v = glide_card(2);
         v.set_mirror(true);
@@ -1500,7 +1500,7 @@ mod tests {
         let now = count(&v);
         assert_eq!(
             [now[0] - rows, now[1] - partial, now[2] - drawn, now[3] - undrawn],
-            [64, 1, 0, 64]
+            [0, 0, 0, 0]
         );
         v.lfb_read(30 << 9 | 5);
         let last = count(&v);

@@ -15,31 +15,39 @@
 //! that its copy of the memory is never behind the operations recorded:
 //! a read back then only has to read.
 
-use super::backlog::Access;
+use super::backlog::{self, Access};
 #[cfg(test)]
 use super::mirror::Plane;
-use super::mirror::{Blit, BlitSource, Command, LayoutKey, row_bytes, rows_of};
+use super::mirror::{
+    Blit, BlitSource, BufferKey, COLOR_BUFFERS, Command, LayoutKey, row_bytes, rows_of,
+};
 use super::raster::{RasterState, Stride};
 use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
 use super::{NONE, Voodoo};
 
 /// The bytes of the memory a job left to the renderer draws into, a range
-/// for each buffer (`gpu_job_bytes`).
-pub(crate) type JobBytes = [Option<(u32, u32)>; 4];
+/// for each buffer (`gpu_job_bytes`): the colour buffers and the auxiliary
+/// buffer.
+pub(crate) type JobBytes = [Option<(u32, u32)>; SLOTS];
+
+/// The buffers `ReadRows` and `JobBytes` keep apart: the colour buffers,
+/// then the auxiliary buffer in slot `AUX_SLOT`.
+const SLOTS: usize = COLOR_BUFFERS + 1;
+const AUX_SLOT: usize = COLOR_BUFFERS;
 
 /// Rows a bit each in `ReadRows`: up to 2,048 rows a buffer.
 const ROW_WORDS: usize = 32;
 
 /// What the reads back of the buffers (`gpu_catch_up_in`) covered, for
 /// the debugger: whether a cache of the rows read, kept until something
-/// draws over them, would have saved reads. Each buffer (the three colour
+/// draws over them, would have saved reads. Each buffer (the colour
 /// buffers, then the auxiliary one) has a bit for each of its rows that
 /// was drawn since it was last read. Until the first read every bit is
 /// set and nothing marks them, so a program that reads nothing back pays
 /// nothing.
 pub(crate) struct ReadRows {
-    drawn: [[u64; ROW_WORDS]; 4],
+    drawn: [[u64; ROW_WORDS]; SLOTS],
     armed: bool,
     /// Rows read back, summed over the reads.
     pub rows: u64,
@@ -54,7 +62,7 @@ pub(crate) struct ReadRows {
 impl Default for ReadRows {
     fn default() -> Self {
         Self {
-            drawn: [[!0; ROW_WORDS]; 4],
+            drawn: [[!0; ROW_WORDS]; SLOTS],
             armed: false,
             rows: 0,
             partial: 0,
@@ -227,12 +235,14 @@ impl Voodoo {
         {
             self.gpu_alpha.set(true);
         }
+        // A job the backlog can't place in its tiles may still lie within
+        // the recording's buffers, which is all the renderer needs.
         let takes = self.gpu_reads
             && !self.gpu_alpha.get()
-            && !access.pinned
             && !access.kept
             && self.gpu.borrow().link.is_some()
-            && !(self.banshee.is_some() && self.software_picture);
+            && !(self.banshee.is_some() && self.software_picture)
+            && (!access.pinned || self.gpu_fill_inside(job));
         if !takes {
             return None;
         }
@@ -251,16 +261,61 @@ impl Voodoo {
         Some(bytes)
     }
 
+    /// Whether `job` is a Banshee's fastfill of pixels that all lie within
+    /// the recording's buffers it writes, each with its own width: the
+    /// backlog's tiles have the width of colBufferAddr's buffer, and the
+    /// Direct3D HAL clears the depth buffer with colBufferAddr left at
+    /// the last render target, often a narrower texture (Giants, #541),
+    /// which the backlog can't hold and the renderer can still draw.
+    fn gpu_fill_inside(&self, job: &Job) -> bool {
+        let Job::Fastfill {
+            st, x0, x1, y0, y1, ..
+        } = job
+        else {
+            return false;
+        };
+        if self.banshee.is_none() {
+            return false;
+        }
+        let Some(key) = self.mirror_layout() else {
+            return false;
+        };
+        // The buffer rows, as the backlog counts them.
+        let Some((top, bottom)) = super::backlog::buffer_rows(st, *y0, *y1) else {
+            return false;
+        };
+        let within = |b: &BufferKey, stride| {
+            b.stride == stride
+                && *x0 >= 0
+                && *x1 <= b.width as i32
+                && top >= 0
+                && bottom <= key.height as i32
+        };
+        let rgb = st.fbz_mode & (1 << 9) != 0;
+        let aux = st.fbz_mode & (1 << 10) != 0;
+        let colour_in = || {
+            let buffer = key.color_at(st.dest as u32 * 2);
+            buffer.is_some_and(|b| within(b, st.stride))
+        };
+        let aux_in = |base: usize| {
+            let buffer = key.buffer(None).filter(|b| b.at as usize == 2 * base);
+            buffer.is_some_and(|b| within(b, st.aux_stride))
+        };
+        match st.aux.filter(|_| aux) {
+            Some(base) => (!rgb || colour_in()) && aux_in(base),
+            None => rgb && colour_in(),
+        }
+    }
+
     /// Whether the colour buffer the 3D engine draws into (colBufferAddr)
     /// is one of `key`'s with rows hot: its triangles are drawn in
     /// software, and a clear of the depth they test against goes into the
     /// memory with them rather than be read back before them every frame.
     pub(crate) fn gpu_colour_hot(&self, key: &LayoutKey) -> bool {
-        let col = self.fbi.rgboffs[0];
-        key.color.contains(&col) && {
-            let (start, end) = row_bytes(col / 2, key.stride, (0, key.height));
+        key.color_at(self.fbi.rgboffs[0]).is_some_and(|b| {
+            let (start, end) = row_bytes(b.at / 2, b.stride, (0, key.height));
             self.gpu.borrow().tracker.hot_in(start, end)
-        }
+        })
     }
 
     /// `job` is drawn here, in software. The memory is brought up to the
@@ -284,15 +339,16 @@ impl Voodoo {
     }
 
     /// The bytes of the memory a job left to the renderer draws into, as
-    /// all the rows of its buffers: its colour buffer and the auxiliary
-    /// buffer, or every colour buffer for a job of another kind. On a
-    /// Banshee they are the recording's buffers, None if the job draws
-    /// colours into one the recording doesn't have.
+    /// rows of its buffers: of its colour buffer and the auxiliary buffer
+    /// the rows a triangle or a fastfill can write (`job_rows`), or all the
+    /// rows of every colour buffer for a job of another kind. On a Banshee
+    /// they are the recording's buffers, None if the job draws colours
+    /// into one the recording doesn't have.
     fn gpu_job_bytes(&self, job: &Job) -> Option<JobBytes> {
-        let mut bytes = [None; 4];
+        let mut bytes = [None; SLOTS];
         let mut n = 0;
         let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
-            if base != NONE && n < bytes.len() {
+            if base != NONE && rows.0 < rows.1 && n < bytes.len() {
                 bytes[n] = Some(row_bytes(base / 2, stride, rows));
                 n += 1;
             }
@@ -303,11 +359,10 @@ impl Voodoo {
             match job {
                 Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
                     let dest = st.dest as u32 * 2;
+                    let rows = job_rows(job, key.height);
                     if st.fbz_mode & (1 << 9) != 0 {
-                        if !key.color.contains(&dest) {
-                            return None;
-                        }
-                        mark(dest, key.stride, all);
+                        let buffer = key.color_at(dest)?;
+                        mark(dest, buffer.stride, rows);
                     }
                     // The auxiliary buffer, if a triangle tests or writes
                     // depth, or uses alpha planes there (whose alpha it
@@ -319,14 +374,14 @@ impl Voodoo {
                         _ => 1 << 4 | 1 << 10 | 1 << 18,
                     };
                     if st.fbz_mode & aux != 0 {
-                        mark(key.aux, key.aux_stride, all);
+                        mark(key.aux.at, key.aux.stride, rows);
                     }
                 }
                 _ => {
-                    for offs in key.color {
-                        mark(offs, key.stride, all);
+                    for b in key.color {
+                        mark(b.at, b.stride, all);
                     }
-                    mark(key.aux, key.aux_stride, all);
+                    mark(key.aux.at, key.aux.stride, all);
                 }
             }
             return Some(bytes);
@@ -335,8 +390,9 @@ impl Voodoo {
         let all = (0, fbi.height);
         match job {
             Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                mark(st.dest as u32 * 2, fbi.stride, all);
-                mark(fbi.auxoffs, fbi.aux_stride, all);
+                let rows = job_rows(job, fbi.height);
+                mark(st.dest as u32 * 2, fbi.stride, rows);
+                mark(fbi.auxoffs, fbi.aux_stride, rows);
             }
             // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
             Job::Rows { base, rows, .. } => {
@@ -444,9 +500,12 @@ impl Voodoo {
     /// the colour buffers in the recording's order, which on a Banshee
     /// isn't the registers' (`banshee_mirror_key`).
     fn gpu_rows_slot(&self, key: Option<u32>) -> usize {
-        let colour = self.mirror_layout().map_or(self.fbi.rgboffs, |k| k.color);
+        let colour = match self.mirror_layout() {
+            Some(k) => k.color.map(|b| b.at),
+            None => std::array::from_fn(|i| self.fbi.rgboffs.get(i).copied().unwrap_or(NONE)),
+        };
         key.and_then(|k| colour.iter().position(|&o| o != NONE && o / 2 == k))
-            .unwrap_or(3)
+            .unwrap_or(AUX_SLOT)
     }
 
     /// Mark the rows `job` draws into in `ReadRows`, generously.
@@ -474,24 +533,24 @@ impl Voodoo {
                     (0, height)
                 };
                 reads.mark(self.gpu_rows_slot(Some(st.dest as u32)), r);
-                reads.mark(3, r);
+                reads.mark(AUX_SLOT, r);
             }
             Job::Fastfill { st, y0, y1, .. } => {
                 let r = rows(st, *y0, *y1);
                 reads.mark(self.gpu_rows_slot(Some(st.dest as u32)), r);
-                reads.mark(3, r);
+                reads.mark(AUX_SLOT, r);
             }
             Job::Rows { base, rows, .. } => {
                 let aux = self.fbi.auxoffs != super::NONE && *base == self.fbi.auxoffs as usize / 2;
                 let slot = if aux {
-                    3
+                    AUX_SLOT
                 } else {
                     self.gpu_rows_slot(Some(*base as u32))
                 };
                 reads.mark(slot, *rows);
             }
             _ => {
-                for slot in 0..4 {
+                for slot in 0..SLOTS {
                     reads.mark(slot, (0, height));
                 }
             }
@@ -557,34 +616,33 @@ impl Voodoo {
             return;
         };
         link.run(commands);
-        let layout = key.layout();
+        let height = key.height;
         // The rows asked for, buffer by buffer: the buffer's key in the
         // recording (a colour buffer's word offset, None for the auxiliary
         // buffer) and the rows.
         let asked = match range {
-            None => layout
-                .color
-                .iter()
-                .map(|&offs| Some(offs))
-                .chain(layout.aux.map(|_| None))
-                .map(|k| (k, 0, layout.height))
-                .collect(),
+            None => {
+                let colour = key.colors().map(|b| Some(b.at / 2));
+                let aux = key.aux.is_some().then_some(None);
+                colour.chain(aux).map(|k| (k, 0, height)).collect()
+            }
             Some((start, end)) => key.rows_in(start, end),
         };
-        let width = layout.width as usize;
+        // The renderer's pictures are all as wide as the widest buffer;
+        // a buffer's pixels are its own width of them.
+        let width = key.width as usize;
         let ram = &self.fbi.ram;
         let mut read = false;
         for (buffer, top, bottom) in asked {
-            let (base, stride) = match (buffer, layout.aux) {
-                (Some(offs), _) => (offs, layout.stride),
-                (None, Some(offs)) => (offs, layout.aux_stride),
-                (None, None) => continue,
+            let Some(&b) = key.buffer(buffer) else {
+                continue;
             };
+            let (base, stride, own) = (b.at / 2, b.stride, (b.width as usize).min(width));
             // The bytes of those rows that are behind, read back by rows.
             let (start, end) = row_bytes(base, stride, (top, bottom));
             for bytes in gpu.tracker.take_buffers(start, end, hot) {
                 let (top, bottom) = rows_of(base, stride, bytes);
-                let bottom = bottom.min(layout.height);
+                let bottom = bottom.min(height);
                 if top >= bottom {
                     continue;
                 }
@@ -593,10 +651,10 @@ impl Voodoo {
                     read = true;
                     let slot = self.gpu_rows_slot(buffer);
                     let mut reads = self.gpu_rows.borrow_mut();
-                    reads.read(slot, (top, bottom), layout.height);
+                    reads.read(slot, (top, bottom), height);
                     for (y, row) in (top as usize..).zip(pixels.chunks_exact(width)) {
                         let start = base as usize + stride.row(y);
-                        for (x, &value) in row.iter().enumerate() {
+                        for (x, &value) in row[..own].iter().enumerate() {
                             let at = start + stride.col(x);
                             if at < ram.len() {
                                 ram.set(at, value);
@@ -669,7 +727,7 @@ impl Voodoo {
                 }
             }
             BlitSource::Buffer { buffer, .. } => {
-                if !key.is_some_and(|k| k.color.contains(&(buffer * 2))) {
+                if !key.is_some_and(|k| k.color_at(buffer * 2).is_some()) {
                     return false;
                 }
             }
@@ -727,11 +785,10 @@ impl Voodoo {
         let Some(key) = self.mirror_layout().filter(|_| takes) else {
             return false;
         };
-        let (base, stride) = match buffer {
-            Some(offs) if key.color.contains(&(offs * 2)) => (offs, key.stride),
-            None if key.aux != NONE => (key.aux / 2, key.aux_stride),
-            _ => return false,
+        let Some(&target) = key.buffer(buffer) else {
+            return false;
         };
+        let (base, stride) = (target.at / 2, target.stride);
         let Some(mirror) = self.mirror.get_mut() else {
             return false;
         };
@@ -770,8 +827,9 @@ impl Voodoo {
     /// if the renderer draws one there.
     pub fn gpu_color_buffer(&self, at: u32, stride: u32) -> Option<u32> {
         let key = self.mirror_layout()?;
-        let linear = !key.stride.tiled && key.stride.words as u32 * 2 == stride;
-        (linear && key.color.contains(&at)).then_some(at / 2)
+        let b = key.color_at(at)?;
+        let linear = !b.stride.tiled && b.stride.words as u32 * 2 == stride;
+        linear.then_some(at / 2)
     }
 
     /// A frame of the card's picture went by: pages read back long
@@ -1163,6 +1221,21 @@ impl Model {
     }
 }
 
+/// The rows of buffers `height` rows high a triangle or a fastfill can
+/// write, within `0..height`: all of them if they could wrap around.
+fn job_rows(job: &Job, height: u32) -> (u32, u32) {
+    let rows = match job {
+        Job::Triangle { st, verts, .. } => backlog::triangle_rows(st, verts),
+        Job::Fastfill { st, y0, y1, .. } => backlog::fill_rows(st, *y0, *y1),
+        _ => None,
+    };
+    let Some((r0, r1)) = rows else {
+        return (0, height);
+    };
+    let clamp = |r: i32| r.clamp(0, height as i32) as u32;
+    (clamp(r0), clamp(r1).max(clamp(r0)))
+}
+
 /// 8-8-8 as 5-6-5, each channel's top bits.
 #[cfg(test)]
 fn narrow(p: u32) -> u32 {
@@ -1235,6 +1308,9 @@ impl GpuLink for TestRenderer {
     }
 
     fn read_buffer(&mut self, dest: Option<u32>, (top, bottom): (u32, u32), out: &mut [u16]) -> bool {
+        // Whole rows of the renderer's pictures, which are as wide as the
+        // layout's widest buffer: 640 pixels in the tests that use it,
+        // whatever the width of the buffer read.
         assert_eq!(out.len(), 640 * (bottom - top) as usize);
         out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
         self.0

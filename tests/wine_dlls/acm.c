@@ -1,5 +1,5 @@
 /* Wine's MSACM32.DLL and its IMA ADPCM codec (imaadp32.acm), run as
- * guest code (tests/wine_dlls.rs): 16-bit PCM is encoded to IMA ADPCM
+ * guest code (tests/win32/wine_dlls.rs): 16-bit PCM is encoded to IMA ADPCM
  * and decoded back through acmStreamOpen and acmStreamConvert, and the
  * decoded samples are checked against a decoder of this program's own.
  * Each line it prints is a result; the last says whether all held. */

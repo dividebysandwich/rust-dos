@@ -641,7 +641,17 @@ mod tests {
         let report = shared.sync(true);
         assert_eq!((report.written, report.deleted), (1, 0), "{:?}", report);
         assert_eq!(fs::read(root.join("Read Me First.txt")).unwrap(), b"edited in DOS");
-        assert!(!root.join("README~1.TXT").exists());
+        // No file of the DOS name beside it. Not `exists`: on Windows the
+        // host's own short name of "Read Me First.txt" can be README~1.TXT.
+        let names: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.eq_ignore_ascii_case("README~1.TXT")),
+            "{:?}",
+            names
+        );
     }
 
     #[test]

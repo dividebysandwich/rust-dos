@@ -13,7 +13,7 @@
 //! and vid_voodoo_banshee.c (Sarah Walker, GPLv2) and sections 5 and 8
 //! of 3dfx's Voodoo3 specification.
 
-use super::super::mirror::{LayoutKey, span};
+use super::super::mirror::{BufferKey, COLOR_BUFFERS, LayoutKey};
 use super::super::raster::Stride;
 use super::super::regs::*;
 use super::super::{Effect, NONE, Now, PendingSwap, Voodoo};
@@ -162,19 +162,21 @@ impl Voodoo {
 
     /// The buffers the OpenGL renderer's recording keeps (`mirror_sync`),
     /// `old` the layout recorded last. A program swaps by moving
-    /// colBufferAddr between two or three buffers, so those drawn into
-    /// lately stay in the layout beside colBufferAddr's, and a swap
-    /// doesn't make the recording start over from memory: up to three,
-    /// the oldest dropped first, while they keep their size and stride
-    /// and stay apart from colBufferAddr's buffer and the auxiliary one.
-    /// The buffers are as wide as their stride and as high as the
-    /// desktop, which is as much as the video processor shows of them
-    /// unscaled; in half mode with the overlay off, half as high, as it
-    /// shows each row of the desktop's buffer twice. The card has no
-    /// register for their height.
+    /// colBufferAddr between two or three buffers, and may draw into
+    /// textures in between (a render target of another size, which
+    /// colBufferAddr and colBufferStride point at while it draws there).
+    /// Those drawn into lately stay in the layout beside colBufferAddr's,
+    /// each with its own stride, so that neither a swap nor a turn at a
+    /// texture makes the recording start over from memory, which would
+    /// read every buffer the renderer drew back first: up to
+    /// `COLOR_BUFFERS`, the oldest dropped first, while they stay apart
+    /// from colBufferAddr's buffer and the auxiliary one. The buffers are
+    /// as wide as their stride and as high as the desktop, which is as
+    /// much as the video processor shows of them unscaled; in half mode
+    /// with the overlay off, half as high, as it shows each row of the
+    /// desktop's buffer twice. The card has no register for their height.
     pub(crate) fn banshee_mirror_key(&self, old: Option<&LayoutKey>) -> LayoutKey {
         let fbi = &self.fbi;
-        let width = (fbi.stride.pixels() as u32).clamp(1, 2048);
         let height = self.banshee.as_ref().map_or(1, |b| {
             let cfg = b.reg(VID_PROC_CFG);
             let rows = b.desktop_size().1;
@@ -182,44 +184,37 @@ impl Voodoo {
             if half { rows.div_ceil(2) } else { rows }
         });
         let height = height.clamp(1, 2048);
-        let col = fbi.rgboffs[0];
-        let key = LayoutKey {
-            width,
-            height,
-            stride: fbi.stride,
-            aux_stride: fbi.aux_stride,
-            color: [col, NONE, NONE],
-            aux: fbi.auxoffs,
+        let buffer = |at: u32, stride: Stride| {
+            BufferKey::new(at, stride, (stride.pixels() as u32).clamp(1, 2048))
         };
-        let same = |o: &&LayoutKey| {
-            (o.width, o.height, o.stride, o.aux_stride, o.aux)
-                == (width, height, fbi.stride, fbi.aux_stride, fbi.auxoffs)
+        let col = buffer(fbi.rgboffs[0], fbi.stride);
+        let aux = buffer(fbi.auxoffs, fbi.aux_stride);
+        let Some(old) = old.filter(|o| (o.height, o.aux) == (height, aux)) else {
+            let mut color = [BufferKey::NONE; COLOR_BUFFERS];
+            color[0] = col;
+            return LayoutKey::new(height, color, aux);
         };
-        let Some(old) = old.filter(same) else {
-            return key;
-        };
-        if old.color.contains(&col) {
+        if !col.is_some() || old.colors().any(|c| *c == col) {
             return *old;
         }
-        let bytes = 2 * span(fbi.stride, height) as u64;
-        let aux_bytes = 2 * span(fbi.aux_stride, height) as u64;
-        let apart = |a: u32, a_len: u64, b: u32, b_len: u64| {
-            a as u64 + a_len <= b as u64 || b as u64 + b_len <= a as u64
+        let apart = |a: &BufferKey, b: &BufferKey| {
+            let ((a0, a1), (b0, b1)) = (a.span(height), b.span(height));
+            !b.is_some() || a1 <= b0 || b1 <= a0
         };
-        let mut color = [NONE; 3];
+        let mut color = [BufferKey::NONE; COLOR_BUFFERS];
         let mut n = 0;
-        for c in old.color {
-            if c != NONE && apart(c, bytes, col, bytes) && apart(c, bytes, fbi.auxoffs, aux_bytes) {
-                color[n] = c;
+        for c in old.colors() {
+            if apart(c, &col) && apart(c, &aux) {
+                color[n] = *c;
                 n += 1;
             }
         }
-        if n == 3 {
+        if n == COLOR_BUFFERS {
             color.rotate_left(1);
-            n = 2;
+            n -= 1;
         }
         color[n] = col;
-        LayoutKey { color, ..key }
+        LayoutKey::new(height, color, aux)
     }
 
     /// The colour buffer of the recording (its word offset) the video
@@ -232,7 +227,7 @@ impl Voodoo {
         } else {
             b.reg(VID_DESKTOP_START_ADDR)
         };
-        key.color.contains(&addr).then_some(addr / 2)
+        key.color_at(addr).map(|_| addr / 2)
     }
 
     /// swapbufferCMD: the overlay shows leftOverlayBuf, now or with bit 0
@@ -646,7 +641,7 @@ pub(crate) mod tests {
         rows.collect()
     }
 
-    use super::super::super::mirror::{Command, Frame, Pixels, Snapshot};
+    use super::super::super::mirror::{COLOR_BUFFERS, Command, Frame, Pixels, Snapshot};
     use super::super::{LFB_MEMORY_CONFIG, VGA_INIT0, VGAINIT0_EXTENDED_SHIFT_OUT, VIDPROC_ENABLE};
 
     #[test]
@@ -1531,24 +1526,151 @@ pub(crate) mod tests {
             Now::default(),
         );
         assert_eq!(v.take_mirror().unwrap().front, Some(a / 2));
-        // A third buffer joins, a fourth drops the oldest.
-        for (draw, expect) in [
-            (0x30_0000, [a, b, 0x30_0000]),
-            (0x50_0000, [b, 0x30_0000, 0x50_0000]),
-        ] {
+        // More buffers join up to `COLOR_BUFFERS`, and the one after
+        // drops the oldest.
+        let mut expect = vec![a, b];
+        for draw in [0x30, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0].map(|mb| mb << 16) {
             reg3d(&mut v, COL_BUFFER_ADDR, draw);
             rectangle(&mut v, (0.0, 0.0, 8.0, 8.0), (255.0, 0.0, 0.0));
+            if expect.len() == COLOR_BUFFERS {
+                expect.remove(0);
+            }
+            expect.push(draw);
             let frame = v.take_mirror().unwrap();
-            assert_eq!(snapshots(&frame)[0].layout.color, expect.map(|c| c / 2));
+            let words: Vec<u32> = expect.iter().map(|c| c / 2).collect();
+            assert_eq!(snapshots(&frame)[0].layout.color, words);
         }
+        assert_eq!(expect[0], b, "a went first");
         // One that overlaps a buffer replaces it.
         reg3d(&mut v, COL_BUFFER_ADDR, 0x30_0000 + 0x8000);
         rectangle(&mut v, (0.0, 0.0, 8.0, 8.0), (255.0, 0.0, 0.0));
+        expect.retain(|&c| c != 0x30_0000);
+        expect.push(0x30_8000);
         let frame = v.take_mirror().unwrap();
-        assert_eq!(
-            snapshots(&frame)[0].layout.color,
-            [b / 2, 0x50_0000 / 2, 0x30_8000 / 2]
-        );
+        let words: Vec<u32> = expect.iter().map(|c| c / 2).collect();
+        assert_eq!(snapshots(&frame)[0].layout.color, words);
+    }
+
+    /// Colour buffers at byte `at` with rows of `stride` bytes, linear,
+    /// `width` pixels wide, and the clip rectangle on all of it, as the
+    /// Direct3D HAL points the card at a render target or a surface it
+    /// clears (`hal::card_fill`).
+    fn render_target(v: &mut Voodoo, at: u32, stride: u32, width: u32) {
+        reg3d(v, COL_BUFFER_ADDR, at);
+        reg3d(v, COL_BUFFER_STRIDE, stride);
+        reg3d(v, CLIP_LEFT_RIGHT, width);
+        reg3d(v, CLIP_LOW_Y_HIGH_Y, 64);
+    }
+
+    /// A frame as Giants draws one on a Voodoo3 (#541): it clears its back
+    /// buffer A (640 pixels a row here) and the depth buffer with
+    /// colBufferAddr left at the texture it drew into last, clears two
+    /// textures it draws into (64 and 256 pixels a row), and draws into
+    /// A and into the wider texture, each test and write depth.
+    const SMALL: u32 = 0x60_0000;
+    const WIDE: u32 = 0x70_0000;
+
+    fn frame_of_render_targets(v: &mut Voodoo) -> Frame {
+        let fill = |v: &mut Voodoo, fbz: u32| {
+            reg3d(v, FBZ_MODE, fbz);
+            reg3d(v, FASTFILL_CMD, 0);
+        };
+        let draw = |v: &mut Voodoo, width: f32| {
+            reg3d(v, FBZ_MODE, 1 | 1 << 4 | 3 << 5 | 1 << 9 | 1 << 10);
+            float(v, FSTART_Z, 1000.0);
+            rectangle(v, (0.0, 0.0, width, 64.0), (200.0, 30.0, 60.0));
+        };
+        render_target(v, A, 1280, 640);
+        fill(v, 1 | 1 << 9);
+        // The depth buffer's clear: colBufferAddr where the texture
+        // left it, the clip rectangle the depth buffer's.
+        render_target(v, WIDE, 512, 256);
+        reg3d(v, CLIP_LEFT_RIGHT, 640);
+        fill(v, 1 | 1 << 10);
+        render_target(v, SMALL, 128, 64);
+        fill(v, 1 | 1 << 9);
+        render_target(v, A, 1280, 640);
+        draw(v, 640.0);
+        render_target(v, WIDE, 512, 256);
+        draw(v, 256.0);
+        v.take_mirror().unwrap()
+    }
+
+    #[test]
+    fn render_targets_of_other_widths_stay_in_the_layout() {
+        // Each buffer keeps its own stride and width in the layout: after
+        // the frame that brings them in, moving colBufferAddr and
+        // colBufferStride between them neither starts the recording over
+        // from memory nor reads back what the renderer drew. With one
+        // stride for the layout, every move to a buffer of another width
+        // did both, about 7 whole buffers read back a frame in Giants.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        let first = frame_of_render_targets(&mut v);
+        let read_backs = v.describe(Now::default())["gpu_read_backs"].clone();
+        let layout = &snapshots(&first).last().unwrap().layout;
+        assert_eq!(layout.color, [A / 2, WIDE / 2, SMALL / 2]);
+        assert_eq!((layout.width, layout.height), (640, 64));
+        let key = v.mirror_layout().unwrap();
+        let widths = [A, WIDE, SMALL].map(|at| key.color_at(at).unwrap().width);
+        assert_eq!(widths, [640, 256, 64]);
+        log.borrow_mut().clear();
+        for _ in 0..3 {
+            let frame = frame_of_render_targets(&mut v);
+            assert!(snapshots(&frame).is_empty());
+        }
+        assert!(reads(&log).is_empty(), "{:?}", reads(&log));
+        assert_eq!(v.describe(Now::default())["gpu_read_backs"], read_backs);
+        assert!(gpu_only(&v) > 0);
+    }
+
+    #[test]
+    fn a_narrow_buffer_reads_back_only_its_own_columns() {
+        // The renderer's pictures are as wide as the widest buffer, 640
+        // pixels here: a read of the 64 pixels wide texture takes its 64
+        // pixels of each row, and leaves the memory after its rows alone.
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        frame_of_render_targets(&mut v);
+        frame_of_render_targets(&mut v);
+        log.borrow_mut().clear();
+        let mut rows = vec![0u8; 128 * 64];
+        v.banshee_memory_read(SMALL, &mut rows);
+        assert_eq!(reads(&log), [format!("read {:?} 0..64", Some(SMALL / 2))]);
+        let value = (0x1234 ^ (SMALL / 2)) as u16;
+        let pixels = rows.as_chunks::<2>().0;
+        assert!(pixels.iter().all(|p| u16::from_le_bytes(*p) == value));
+        assert_eq!(v.fbi.ram.get((SMALL + 128 * 64) as usize / 2), 0);
+    }
+
+    #[test]
+    fn a_clear_leaves_the_rows_past_its_clip_in_memory() {
+        // The renderer draws a job's rows, those of its clip rectangle:
+        // memory past them, such as a texture after a smaller render
+        // target, isn't read back from the renderer's picture of the
+        // buffer, which is as high as the desktop (64 rows here).
+        const TARGET: u32 = 0x50_0000;
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        frame_of_render_targets(&mut v);
+        frame_of_render_targets(&mut v);
+        for _ in 0..2 {
+            frame_of_render_targets(&mut v);
+            render_target(&mut v, TARGET, 128, 64);
+            reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 16);
+            reg3d(&mut v, FBZ_MODE, 1 | 1 << 9);
+            reg3d(&mut v, FASTFILL_CMD, 0);
+            v.take_mirror();
+        }
+        log.borrow_mut().clear();
+        let mut rows = vec![0u8; 128 * 16];
+        v.banshee_memory_read(TARGET + 128 * 32, &mut rows);
+        assert!(reads(&log).is_empty(), "{:?}", reads(&log));
+        v.banshee_memory_read(TARGET, &mut rows);
+        assert_eq!(reads(&log), [format!("read {:?} 0..16", Some(TARGET / 2))]);
     }
 
     #[test]

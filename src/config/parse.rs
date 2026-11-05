@@ -37,7 +37,7 @@ fn parse_run_lock(
         "off" | "false" | "no" => Some(RunLockSetting::Off),
         "on" | "true" | "yes" => None,
         _ => Some(RunLockSetting::Dir(match (value.strip_prefix("~/"), home) {
-            (Some(rest), Some(h)) => h.join(rest),
+            (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
             _ => base_dir.join(value),
         })),
     })
@@ -142,7 +142,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "capture_dir" => {
                             let value = value.trim_matches('"');
                             config.capture_dir = Some(match (value.strip_prefix("~/"), home) {
-                                (Some(rest), Some(h)) => h.join(rest),
+                                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
                                 _ => PathBuf::from(value),
                             });
                         }
@@ -177,7 +177,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "verite_rom" => {
                             let value = value.trim_matches('"');
                             let path = match (value.strip_prefix("~/"), home) {
-                                (Some(rest), Some(h)) => h.join(rest),
+                                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
                                 _ => PathBuf::from(value),
                             };
                             config.verite_rom = (!value.is_empty()).then_some(path);
@@ -310,7 +310,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_dlls" => {
                             let value = value.trim_matches('"');
                             let path = match (value.strip_prefix("~/"), home) {
-                                (Some(rest), Some(h)) => h.join(rest),
+                                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
                                 _ => PathBuf::from(value),
                             };
                             config.win32_dlls = (!value.is_empty()).then_some(path);

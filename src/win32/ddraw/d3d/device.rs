@@ -226,6 +226,21 @@ pub fn get(cpu: &mut Cpu, id: u32) -> Option<&mut Device> {
     super::object(cpu, id)?.device.as_mut()
 }
 
+/// Call `f` with the device `id` lent out of its object, for code that
+/// reads the device while it works on the machine, as every draw does:
+/// a copy of the device would copy its states, transforms and lights
+/// each time. None if there is no such device. While `f` runs the
+/// object has no device, so nothing `f` calls may look this one up by
+/// its id (`get`); the draw's setup and the card's binding don't.
+pub fn lend<T>(cpu: &mut Cpu, id: u32, f: impl FnOnce(&mut Cpu, &Device) -> T) -> Option<T> {
+    let d = super::object(cpu, id)?.device.take()?;
+    let out = f(cpu, &d);
+    if let Some(o) = super::object(cpu, id) {
+        o.device = Some(d);
+    }
+    Some(out)
+}
+
 // Render states the device starts with.
 pub const RS_TEXTUREHANDLE: u32 = 1;
 pub const RS_TEXTUREADDRESS: u32 = 3;

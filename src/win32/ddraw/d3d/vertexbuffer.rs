@@ -282,11 +282,8 @@ fn process(
         if copy {
             for t in 0..dl.textures {
                 let (at, dims) = dl.tex[t];
-                let words: Vec<u32> = p.tex[t][..dims as usize]
-                    .iter()
-                    .map(|f| f.to_bits())
-                    .collect();
-                write_dwords(cpu, base + at, &words);
+                let words = p.tex[t].map(f32::to_bits);
+                write_dwords(cpu, base + at, &words[..dims as usize]);
             }
         }
     }

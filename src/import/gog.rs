@@ -270,7 +270,8 @@ mod tests {
         let dir = PathBuf::from("target/test_import_gog").join(name);
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(&dir).unwrap()
+        // As `games::import` gives the folder.
+        crate::hostfs::canonicalize_plain(&dir).unwrap()
     }
 
     #[test]
