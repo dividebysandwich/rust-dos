@@ -1397,7 +1397,10 @@ sbtype=sb16vibra
         let imported = import(&[conf], &bases, "x", None);
         let drive = |d| imported.drives.iter().find(|m| m.drive == d).map(|m| (m.path.clone(), m.opts.more_images.clone()));
         assert_eq!(drive(crate::disk::numbered_drive(2)), Some((dir.join("hdd.img"), vec![])), "{:?}", imported.drives);
-        assert_eq!(drive(23).map(|(p, _)| p), Some(dir.join("..\\sources")));
+        // From the package's folder, as MOUNT takes a host path: on
+        // Windows `..\` is the folder above, elsewhere a part of the name.
+        let sources = crate::mount::expand_host_path("..\\sources", &dir, None);
+        assert_eq!(drive(23).map(|(p, _)| p), Some(sources));
     }
 
     /// A package's automount folder: its drives by their names, and its
