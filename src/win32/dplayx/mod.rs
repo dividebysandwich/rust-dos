@@ -1,22 +1,25 @@
-//! DPLAYX.DLL: DirectPlay and its lobby, as on a machine where no
-//! service provider can be used. DirectPlay objects are made, by
-//! DirectPlayCreate and by CoCreateInstance, as Windows 98 makes them
-//! with no network card: games of DirectX 5 and 6 make one at startup
-//! even to play alone, and quit when they can't. What such an object
-//! lacks is a connection. EnumConnections lists none,
-//! InitializeConnection can't make one, and the methods that need one
-//! say DPERR_UNINITIALIZED, as DirectPlay does before
-//! InitializeConnection.
+//! DPLAYX.DLL: DirectPlay and its lobby. DirectPlay objects are made by
+//! DirectPlayCreate and by CoCreateInstance, and have the interfaces
+//! IDirectPlay (DirectX 3) to IDirectPlay4A.
 //!
-//! Windows 98 with DirectX 5 or 6 lists the Serial and Modem providers
-//! even without a network card, and IPX and TCP/IP where those
-//! protocols are installed. Listing none is a deliberate departure from
-//! that, until a provider can be initialized: a program offered a
-//! connection goes on to initialize it and to look for sessions on it,
-//! and there is nothing here to find them with yet. A TCP/IP provider
-//! over WSOCK32, which reaches the other instances of a LAN room
-//! (CONFIGURATION.md), is the natural next step. DirectPlayEnumerate
-//! lists no providers for the same reason.
+//! Two service providers are listed, IPX and TCP/IP, as on a Windows 98
+//! machine with both protocols. Both are the same connection underneath:
+//! the LAN room of rust-dos, which DirectPlay reaches through the
+//! built-in IPX driver (net.rs). Its packets go out as IPX frames, as a
+//! DOS game's do, so a session hosted on one member of a room is found by
+//! every other member, whichever of the two providers each program
+//! picked. A TCP/IP address a program gives is not used: a room is one
+//! network, where a broadcast finds every session. The protocol between
+//! the objects is rust-dos's own (wire.rs), not Windows'; a program on a
+//! Windows 95 or 98 image in another instance doesn't hear it.
+//!
+//! session.rs keeps an object's session: its members, players and groups,
+//! and the messages waiting for its players, which follow what DirectPlay
+//! does on Windows 98 as Wine's tests recorded it. link.rs carries the
+//! messages that must arrive, in order. play.rs has IDirectPlay2 to 4's
+//! methods and play1.rs IDirectPlay's own; guest.rs reads and writes
+//! their structures, ANSI or Unicode as the interface has them, and
+//! calls.rs calls the program's callbacks and makes a method wait.
 //!
 //! The lobby (lobby.rs) is there as well. No lobby launched the program
 //! and no application is registered to be launched, but the lobby
@@ -29,12 +32,22 @@
 //! part of one list. IUnknown is the IDirectPlay interface, or the
 //! IDirectPlayLobby one, whichever interface it is asked of. An object
 //! goes when no interface of it has a reference left, or when its
-//! process ends.
+//! process ends; in a session, it leaves it first.
 
 mod address;
+mod calls;
+mod guest;
+mod link;
 mod lobby;
+mod net;
+mod play;
+mod play1;
+mod session;
+mod wire;
 
 pub use address::step as enum_step;
+pub use calls::step as call_step;
+pub use net::poll;
 
 use super::com::{self, CLASS_E_NOAGGREGATION, E_NOINTERFACE, E_OUTOFMEMORY, GUID_NULL, Guid};
 use super::stubs::{Api, Conv, Dll, Vtable};
@@ -76,7 +89,7 @@ const fn method(name: &'static str, args: u8, handler: super::stubs::Handler) ->
 static APIS: &[Api] = &[
     stdcall("DirectPlayCreate", 1, 3, direct_play_create),
     stdcall("DirectPlayEnumerateA", 2, 2, direct_play_enumerate),
-    stdcall("DirectPlayEnumerateW", 3, 2, direct_play_enumerate),
+    stdcall("DirectPlayEnumerateW", 3, 2, direct_play_enumerate_w),
     stdcall("DirectPlayLobbyCreateA", 4, 5, lobby::create_a),
     stdcall("DirectPlayLobbyCreateW", 5, 5, lobby::create_w),
     stdcall("DirectPlayEnumerate", 9, 2, direct_play_enumerate),
@@ -85,85 +98,117 @@ static APIS: &[Api] = &[
     method("IUnknown_AddRef", 1, add_ref),
     method("IUnknown_Release", 1, release),
     // IDirectPlay2.
-    method("IDirectPlayX_AddPlayerToGroup", 3, uninitialized),
-    method("IDirectPlayX_Close", 1, close),
-    method("IDirectPlayX_CreateGroup", 6, uninitialized),
-    method("IDirectPlayX_CreatePlayer", 7, uninitialized),
-    method("IDirectPlayX_DeletePlayerFromGroup", 3, uninitialized),
-    method("IDirectPlayX_DestroyGroup", 2, uninitialized),
-    method("IDirectPlayX_DestroyPlayer", 2, uninitialized),
-    method("IDirectPlayX_EnumGroupPlayers", 6, uninitialized),
-    method("IDirectPlayX_EnumGroups", 5, uninitialized),
-    method("IDirectPlayX_EnumPlayers", 5, uninitialized),
-    method("IDirectPlayX_EnumSessions", 6, needs_session),
-    method("IDirectPlayX_GetCaps", 3, get_caps),
-    method("IDirectPlayX_GetGroupData", 5, uninitialized),
-    method("IDirectPlayX_GetGroupName", 4, uninitialized),
-    method("IDirectPlayX_GetMessageCount", 3, uninitialized),
-    method("IDirectPlayX_GetPlayerAddress", 4, uninitialized),
-    method("IDirectPlayX_GetPlayerCaps", 4, uninitialized),
-    method("IDirectPlayX_GetPlayerData", 5, uninitialized),
-    method("IDirectPlayX_GetPlayerName", 4, uninitialized),
-    method("IDirectPlayX_GetSessionDesc", 3, uninitialized),
-    method("IDirectPlayX_Initialize", 2, initialize),
-    method("IDirectPlayX_Open", 3, needs_session),
-    method("IDirectPlayX_Receive", 6, receive),
-    method("IDirectPlayX_Send", 6, uninitialized),
-    method("IDirectPlayX_SetGroupData", 5, uninitialized),
-    method("IDirectPlayX_SetGroupName", 4, uninitialized),
-    method("IDirectPlayX_SetPlayerData", 5, uninitialized),
-    method("IDirectPlayX_SetPlayerName", 4, uninitialized),
-    method("IDirectPlayX_SetSessionDesc", 3, uninitialized),
+    method(
+        "IDirectPlayX_AddPlayerToGroup",
+        3,
+        play::add_player_to_group,
+    ),
+    method("IDirectPlayX_Close", 1, play::close),
+    method("IDirectPlayX_CreateGroup", 6, play::create_group),
+    method("IDirectPlayX_CreatePlayer", 7, play::create_player),
+    method(
+        "IDirectPlayX_DeletePlayerFromGroup",
+        3,
+        play::delete_player_from_group,
+    ),
+    method("IDirectPlayX_DestroyGroup", 2, play::destroy_group),
+    method("IDirectPlayX_DestroyPlayer", 2, play::destroy_player),
+    method("IDirectPlayX_EnumGroupPlayers", 6, play::enum_group_players),
+    method("IDirectPlayX_EnumGroups", 5, play::enum_groups),
+    method("IDirectPlayX_EnumPlayers", 5, play::enum_players),
+    method("IDirectPlayX_EnumSessions", 6, play::enum_sessions),
+    method("IDirectPlayX_GetCaps", 3, play::get_caps),
+    method("IDirectPlayX_GetGroupData", 5, play::get_group_data),
+    method("IDirectPlayX_GetGroupName", 4, play::get_group_name),
+    method("IDirectPlayX_GetMessageCount", 3, play::get_message_count),
+    method("IDirectPlayX_GetPlayerAddress", 4, play::get_player_address),
+    method("IDirectPlayX_GetPlayerCaps", 4, play::get_player_caps),
+    method("IDirectPlayX_GetPlayerData", 5, play::get_player_data),
+    method("IDirectPlayX_GetPlayerName", 4, play::get_player_name),
+    method("IDirectPlayX_GetSessionDesc", 3, play::get_session_desc),
+    method("IDirectPlayX_Initialize", 2, initialize_method),
+    method("IDirectPlayX_Open", 3, play::open),
+    method("IDirectPlayX_Receive", 6, play::receive),
+    method("IDirectPlayX_Send", 6, play::send),
+    method("IDirectPlayX_SetGroupData", 5, play::set_group_data),
+    method("IDirectPlayX_SetGroupName", 4, play::set_group_name),
+    method("IDirectPlayX_SetPlayerData", 5, play::set_player_data),
+    method("IDirectPlayX_SetPlayerName", 4, play::set_player_name),
+    method("IDirectPlayX_SetSessionDesc", 3, play::set_session_desc),
     // IDirectPlay3.
-    method("IDirectPlayX_AddGroupToGroup", 3, uninitialized),
-    method("IDirectPlayX_CreateGroupInGroup", 7, uninitialized),
-    method("IDirectPlayX_DeleteGroupFromGroup", 3, uninitialized),
-    method("IDirectPlayX_EnumConnections", 5, enum_connections),
-    method("IDirectPlayX_EnumGroupsInGroup", 6, uninitialized),
-    method("IDirectPlayX_GetGroupConnectionSettings", 5, uninitialized),
+    method("IDirectPlayX_AddGroupToGroup", 3, play::add_group_to_group),
+    method(
+        "IDirectPlayX_CreateGroupInGroup",
+        7,
+        play::create_group_in_group,
+    ),
+    method(
+        "IDirectPlayX_DeleteGroupFromGroup",
+        3,
+        play::delete_group_from_group,
+    ),
+    method("IDirectPlayX_EnumConnections", 5, play::enum_connections),
+    method(
+        "IDirectPlayX_EnumGroupsInGroup",
+        6,
+        play::enum_groups_in_group,
+    ),
+    method(
+        "IDirectPlayX_GetGroupConnectionSettings",
+        5,
+        play::unsupported,
+    ),
     method(
         "IDirectPlayX_InitializeConnection",
         3,
-        initialize_connection,
+        play::initialize_connection,
     ),
-    method("IDirectPlayX_SecureOpen", 5, needs_session),
-    method("IDirectPlayX_SendChatMessage", 5, uninitialized),
-    method("IDirectPlayX_SetGroupConnectionSettings", 4, uninitialized),
-    method("IDirectPlayX_StartSession", 3, uninitialized),
-    method("IDirectPlayX_GetGroupFlags", 3, uninitialized),
-    method("IDirectPlayX_GetGroupParent", 3, uninitialized),
-    method("IDirectPlayX_GetPlayerAccount", 5, uninitialized),
-    method("IDirectPlayX_GetPlayerFlags", 3, uninitialized),
+    method("IDirectPlayX_SecureOpen", 5, play::open),
+    method("IDirectPlayX_SendChatMessage", 5, play::send_chat_message),
+    method(
+        "IDirectPlayX_SetGroupConnectionSettings",
+        4,
+        play::unsupported,
+    ),
+    method("IDirectPlayX_StartSession", 3, play::unsupported),
+    method("IDirectPlayX_GetGroupFlags", 3, play::get_group_flags),
+    method("IDirectPlayX_GetGroupParent", 3, play::get_group_parent),
+    method("IDirectPlayX_GetPlayerAccount", 5, play::unsupported),
+    method("IDirectPlayX_GetPlayerFlags", 3, play::get_player_flags),
     // IDirectPlay4.
-    method("IDirectPlayX_GetGroupOwner", 3, uninitialized),
-    method("IDirectPlayX_SetGroupOwner", 3, uninitialized),
-    method("IDirectPlayX_SendEx", 10, uninitialized),
-    method("IDirectPlayX_GetMessageQueue", 6, uninitialized),
-    method("IDirectPlayX_CancelMessage", 3, uninitialized),
-    method("IDirectPlayX_CancelPriority", 4, uninitialized),
+    method("IDirectPlayX_GetGroupOwner", 3, play::get_group_owner),
+    method("IDirectPlayX_SetGroupOwner", 3, play::set_group_owner),
+    method("IDirectPlayX_SendEx", 10, play::send_ex),
+    method("IDirectPlayX_GetMessageQueue", 6, play::get_message_queue),
+    method("IDirectPlayX_CancelMessage", 3, play::cancel_message),
+    method("IDirectPlayX_CancelPriority", 4, play::cancel_priority),
     // IDirectPlay, the first interface.
-    method("IDirectPlay_AddPlayerToGroup", 3, uninitialized),
-    method("IDirectPlay_Close", 1, close),
-    method("IDirectPlay_CreatePlayer", 5, uninitialized),
-    method("IDirectPlay_CreateGroup", 4, uninitialized),
-    method("IDirectPlay_DeletePlayerFromGroup", 3, uninitialized),
-    method("IDirectPlay_DestroyPlayer", 2, uninitialized),
-    method("IDirectPlay_DestroyGroup", 2, uninitialized),
-    method("IDirectPlay_EnableNewPlayers", 2, uninitialized),
-    method("IDirectPlay_EnumGroupPlayers", 5, uninitialized),
-    method("IDirectPlay_EnumGroups", 5, uninitialized),
-    method("IDirectPlay_EnumPlayers", 5, uninitialized),
-    method("IDirectPlay_EnumSessions", 6, needs_session),
-    method("IDirectPlay_GetCaps", 2, get_caps),
-    method("IDirectPlay_GetMessageCount", 3, uninitialized),
-    method("IDirectPlay_GetPlayerCaps", 3, uninitialized),
-    method("IDirectPlay_GetPlayerName", 6, uninitialized),
-    method("IDirectPlay_Initialize", 2, initialize),
-    method("IDirectPlay_Open", 2, needs_session),
-    method("IDirectPlay_Receive", 6, receive),
-    method("IDirectPlay_SaveSession", 2, uninitialized),
-    method("IDirectPlay_Send", 6, uninitialized),
-    method("IDirectPlay_SetPlayerName", 4, uninitialized),
+    method("IDirectPlay_AddPlayerToGroup", 3, play::add_player_to_group),
+    method("IDirectPlay_Close", 1, play::close),
+    method("IDirectPlay_CreatePlayer", 5, play1::create_player),
+    method("IDirectPlay_CreateGroup", 4, play1::create_group),
+    method(
+        "IDirectPlay_DeletePlayerFromGroup",
+        3,
+        play::delete_player_from_group,
+    ),
+    method("IDirectPlay_DestroyPlayer", 2, play::destroy_player),
+    method("IDirectPlay_DestroyGroup", 2, play::destroy_group),
+    method("IDirectPlay_EnableNewPlayers", 2, play1::enable_new_players),
+    method("IDirectPlay_EnumGroupPlayers", 5, play1::enum_group_players),
+    method("IDirectPlay_EnumGroups", 5, play1::enum_groups),
+    method("IDirectPlay_EnumPlayers", 5, play1::enum_players),
+    method("IDirectPlay_EnumSessions", 6, play1::enum_sessions),
+    method("IDirectPlay_GetCaps", 2, play1::get_caps),
+    method("IDirectPlay_GetMessageCount", 3, play::get_message_count),
+    method("IDirectPlay_GetPlayerCaps", 3, play1::get_player_caps),
+    method("IDirectPlay_GetPlayerName", 6, play1::get_player_name),
+    method("IDirectPlay_Initialize", 2, play1::initialize),
+    method("IDirectPlay_Open", 2, play1::open),
+    method("IDirectPlay_Receive", 6, play::receive),
+    method("IDirectPlay_SaveSession", 2, play1::save_session),
+    method("IDirectPlay_Send", 6, play::send),
+    method("IDirectPlay_SetPlayerName", 4, play1::set_player_name),
     // IDirectPlayLobby.
     method("IDirectPlayLobbyX_Connect", 4, lobby::connect),
     method(
@@ -535,7 +580,6 @@ const DPERR_ALREADYINITIALIZED: u32 = dperr(5);
 const DPERR_BUFFERTOOSMALL: u32 = dperr(30);
 const DPERR_INVALIDFLAGS: u32 = dperr(120);
 const DPERR_INVALIDOBJECT: u32 = dperr(130);
-const DPERR_NOMESSAGES: u32 = dperr(190);
 const DPERR_UNAVAILABLE: u32 = dperr(250);
 const DPERR_UNINITIALIZED: u32 = dperr(320);
 const DPERR_UNKNOWNAPPLICATION: u32 = dperr(1050);
@@ -545,10 +589,84 @@ const DPERR_INVALIDPARAMS: u32 = com::E_INVALIDARG;
 /// EnumConnections' flags: DirectPlay's service providers, the lobby's.
 const DPCONNECTION_DIRECTPLAY: u32 = 1;
 const DPCONNECTION_DIRECTPLAYLOBBY: u32 = 2;
-/// Receive's flags: DPRECEIVE_ALL, TOPLAYER, FROMPLAYER and PEEK.
-const DPRECEIVE_FLAGS: u32 = 0xF;
 /// A DPADDRESS chunk's header: its data's GUID and size.
 const CHUNK_HEADER: u32 = 20;
+/// The most data a message, a player's or a group's carries.
+const MAX_DATA: u32 = 0x10_0000;
+
+/// The service providers, as `Play::provider` numbers them.
+const IPX: u8 = 1;
+const TCPIP: u8 = 2;
+const DPSPGUID_IPX: Guid = Guid::new(
+    0x685B_C400,
+    0x9D2C,
+    0x11CF,
+    [0xA9, 0xCD, 0x00, 0xAA, 0x00, 0x68, 0x86, 0xE3],
+);
+const DPSPGUID_TCPIP: Guid = Guid::new(
+    0x36E9_5EE0,
+    0x8577,
+    0x11CF,
+    [0x96, 0x0C, 0x00, 0x80, 0xC7, 0x53, 0x4E, 0x82],
+);
+
+/// The providers DirectPlayEnumerate and EnumConnections list, with the
+/// names Windows 98 gives them.
+const PROVIDERS: &[(Guid, &str)] = &[
+    (DPSPGUID_IPX, "IPX Connection For DirectPlay"),
+    (DPSPGUID_TCPIP, "Internet TCP/IP Connection For DirectPlay"),
+];
+/// The version DirectPlayEnumerate gives each provider: DirectX 6's.
+const PROVIDER_VERSION: (u32, u32) = (6, 0);
+
+/// A provider's number, if it is one there is.
+fn provider_code(guid: &Guid) -> Option<u8> {
+    match *guid {
+        DPSPGUID_IPX => Some(IPX),
+        DPSPGUID_TCPIP => Some(TCPIP),
+        _ => None,
+    }
+}
+
+fn provider_of(code: u8) -> Guid {
+    if code == TCPIP {
+        DPSPGUID_TCPIP
+    } else {
+        DPSPGUID_IPX
+    }
+}
+
+/// A provider's connection, the DirectPlay address EnumConnections
+/// gives: its total size, and the provider.
+fn connection(provider: &Guid) -> Vec<u8> {
+    address::of_provider(provider)
+}
+
+/// Give the object `id` the provider `guid`: DP_OK, or
+/// DPERR_UNAVAILABLE for one there isn't.
+fn initialize(cpu: &mut Cpu, id: usize, guid: &Guid) -> u32 {
+    let Some(code) = provider_code(guid) else {
+        return DPERR_UNAVAILABLE;
+    };
+    net::connect(cpu);
+    let p = play(cpu, id);
+    p.provider = code;
+    while p.endpoint == 0 {
+        p.endpoint = crate::net::random_u64() as u32;
+    }
+    net::prepare(cpu, id);
+    DP_OK
+}
+
+/// Whether the interface `vtable` has Unicode strings: IDirectPlay2, 3
+/// and 4, against their A forms and IDirectPlay.
+fn wide(vtable: usize) -> bool {
+    matches!(vtable, 1 | 3 | 5)
+}
+
+fn wide_of(flag: u32) -> bool {
+    flag != 0
+}
 
 /// A DirectPlay or lobby object.
 #[derive(Clone, Debug, Default)]
@@ -560,25 +678,36 @@ pub struct Object {
     /// counts.
     pub interfaces: Vec<u32>,
     pub refs: Vec<u32>,
+    /// A DirectPlay object's connection and session.
+    pub play: session::Play,
 }
 
 crate::state_fields!(Object {
     pid,
     lobby,
     interfaces,
-    refs
+    refs,
+    play
 });
 
-/// DPLAYX's state: the objects, by their ids.
+/// DPLAYX's state: the objects, by their ids, and the packets between
+/// them when there is no IPX driver, which a state doesn't keep.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     objects: Vec<Option<Object>>,
+    local: net::Local,
 }
 
-crate::state_fields!(State { objects });
+crate::state_fields!(State { objects } skip { local });
 
 fn objects(cpu: &mut Cpu) -> &mut Vec<Option<Object>> {
     &mut cpu.bus.win32.dplay.objects
+}
+
+/// The network side of the object `id`, which the method's `object!`
+/// found.
+fn play(cpu: &mut Cpu, id: usize) -> &mut session::Play {
+    &mut objects(cpu)[id].as_mut().expect("a live object").play
 }
 
 fn dll_index() -> usize {
@@ -606,6 +735,7 @@ fn new_object(cpu: &mut Cpu, vtable: usize) -> Option<u32> {
         lobby: vtable >= LOBBY,
         interfaces: vec![0; VTABLES.len()],
         refs: vec![0; VTABLES.len()],
+        play: session::Play::default(),
     };
     let list = objects(cpu);
     let id = match list.iter().position(Option::is_none) {
@@ -666,11 +796,28 @@ use object;
 
 /// The process `pid` ended: its objects go with its heap.
 pub fn process_ended(cpu: &mut Cpu, pid: u32) {
-    for slot in objects(cpu).iter_mut() {
-        if slot.as_ref().is_some_and(|o| o.pid == pid) {
-            *slot = None;
-        }
+    let ids: Vec<usize> = objects(cpu)
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.as_ref().is_some_and(|o| o.pid == pid))
+        .map(|(i, _)| i)
+        .collect();
+    for id in ids {
+        leave(cpu, id);
+        objects(cpu)[id] = None;
     }
+}
+
+/// The object `id` goes: it leaves its session, telling the others once
+/// (they take it for gone in time if they don't hear it), and lets go of
+/// its players' events.
+fn leave(cpu: &mut Cpu, id: usize) {
+    let now = cpu.bus.clock.now_micros();
+    net::prepare(cpu, id);
+    let p = play(cpu, id);
+    p.close(now);
+    p.flush(now);
+    net::settle(cpu);
 }
 
 /// Make an object of the vtable `iid` asks for, of a lobby or of
@@ -697,10 +844,9 @@ fn create_lobby(cpu: &mut Cpu, iid: &Guid, out: u32) -> u32 {
     create(cpu, true, iid, out)
 }
 
-/// DirectPlayCreate(provider, out, outer): an IDirectPlay. GUID_NULL
-/// asks for an object with no service provider, which is made; there is
-/// no other provider to make one with. The outer object is looked at
-/// first, as Wine does.
+/// DirectPlayCreate(provider, out, outer): an IDirectPlay with the
+/// provider, or with none for GUID_NULL (Initialize gives it one). The
+/// outer object is looked at first, as Wine does.
 fn direct_play_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [provider, out, outer] = args[..] else {
         return Some(DPERR_INVALIDPARAMS);
@@ -712,25 +858,48 @@ fn direct_play_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if provider.is_none() || !com::write_out(cpu, out, 0) {
         return Some(DPERR_INVALIDPARAMS);
     }
-    if provider != Some(GUID_NULL) {
+    let provider = provider.unwrap_or(GUID_NULL);
+    if provider != GUID_NULL && provider_code(&provider).is_none() {
         return Some(DPERR_UNAVAILABLE);
     }
-    match new_object(cpu, PLAY) {
-        Some(this) => {
-            com::write_out(cpu, out, this);
-            Some(DP_OK)
-        }
-        None => Some(E_OUTOFMEMORY),
+    let Some(this) = new_object(cpu, PLAY) else {
+        return Some(E_OUTOFMEMORY);
+    };
+    if provider != GUID_NULL {
+        let (id, _) = object!(cpu, this);
+        initialize(cpu, id, &provider);
     }
+    com::write_out(cpu, out, this);
+    Some(DP_OK)
 }
 
-/// DirectPlayEnumerate(A, W)(callback, context): the service providers,
-/// of which none is listed (see the module's notes).
-fn direct_play_enumerate(_: &mut Cpu, args: &[u32]) -> Option<u32> {
-    if args[0] == 0 {
+/// DirectPlayEnumerateA and DirectPlayEnumerate(callback, context): the
+/// service providers, with ANSI names; DirectPlayEnumerateW's are
+/// Unicode.
+fn direct_play_enumerate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    enumerate_providers(cpu, args, false)
+}
+
+fn direct_play_enumerate_w(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    enumerate_providers(cpu, args, true)
+}
+
+fn enumerate_providers(cpu: &mut Cpu, args: &[u32], wide: bool) -> Option<u32> {
+    let [callback, context] = args[..] else {
+        return Some(DPERR_INVALIDPARAMS);
+    };
+    if callback == 0 || !super::kernel32::virtual_memory::allows(cpu, callback, 1, false) {
         return Some(DPERR_INVALIDPARAMS);
     }
-    Some(DP_OK)
+    let list = calls::List {
+        kind: calls::PROVIDER_LIST,
+        callback,
+        context,
+        wide,
+        object: 0,
+        version: 0,
+    };
+    calls::providers(cpu, list)
 }
 
 /// QueryInterface(this, iid, out), of every interface.
@@ -774,6 +943,7 @@ fn release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     object.refs[vtable] = object.refs[vtable].saturating_sub(1);
     let refs = object.refs[vtable];
     if object.refs.iter().all(|&r| r == 0) {
+        leave(cpu, id);
         let gone = objects(cpu)[id].take()?;
         for this in gone.interfaces.into_iter().filter(|&i| i != 0) {
             com::free_interface(cpu, this);
@@ -782,100 +952,11 @@ fn release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(refs)
 }
 
-/// A method that needs a connection, which the object hasn't.
-fn uninitialized(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    object!(cpu, args[0]);
-    Some(DPERR_UNINITIALIZED)
-}
-
-/// Close(this): no session is open, and that is closed already.
-fn close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    object!(cpu, args[0]);
-    Some(DP_OK)
-}
-
-/// Initialize(this, guid): DirectPlay's objects are initialized as
-/// they are made, and the method says so.
-fn initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// Initialize(this, guid) of IDirectPlay2 and later: their objects are
+/// initialized as they are made, and the method says so.
+fn initialize_method(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     object!(cpu, args[0]);
     Some(DPERR_ALREADYINITIALIZED)
-}
-
-/// EnumConnections(this, application, callback, context, flags): the
-/// connections of DirectPlay's service providers or of the lobby's, of
-/// which none is listed (see the module's notes).
-fn enum_connections(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, _, callback, _, flags] = args[..] else {
-        return Some(DPERR_INVALIDPARAMS);
-    };
-    object!(cpu, this);
-    if callback == 0 {
-        return Some(DPERR_INVALIDPARAMS);
-    }
-    if flags & !(DPCONNECTION_DIRECTPLAY | DPCONNECTION_DIRECTPLAYLOBBY) != 0 {
-        return Some(DPERR_INVALIDFLAGS);
-    }
-    Some(DP_OK)
-}
-
-/// InitializeConnection(this, connection, flags): the connection is a
-/// DirectPlay address, at least a chunk's header, and its service
-/// provider, whichever it names, isn't one this machine can use.
-fn initialize_connection(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, connection, flags] = args[..] else {
-        return Some(DPERR_INVALIDPARAMS);
-    };
-    object!(cpu, this);
-    if flags != 0 {
-        return Some(DPERR_INVALIDFLAGS);
-    }
-    if connection == 0
-        || !cpu
-            .bus
-            .guest_probe(connection, CHUNK_HEADER as usize, false)
-    {
-        return Some(DPERR_INVALIDPARAMS);
-    }
-    Some(DPERR_UNAVAILABLE)
-}
-
-/// EnumSessions(this, desc, timeout, callback, context, flags),
-/// Open(this, desc, flags), SecureOpen(this, desc, ...) and
-/// IDirectPlay's Open(this, desc): there is no connection to find or
-/// open a session with. Only the description's pointer is checked; the
-/// rest of what DirectPlay checks (a dwSize of 80, the flags, the
-/// callback) waits for a provider to use them with.
-fn needs_session(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    object!(cpu, args[0]);
-    if args[1] == 0 {
-        return Some(DPERR_INVALIDPARAMS);
-    }
-    Some(DPERR_UNINITIALIZED)
-}
-
-/// GetCaps(this, caps, flags), and IDirectPlay's GetCaps(this, caps):
-/// the caps are the connection's, and there is none, whatever the
-/// arguments are. Their dwSize is checked once there is a provider.
-fn get_caps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    object!(cpu, args[0]);
-    Some(DPERR_UNINITIALIZED)
-}
-
-/// Receive(this, from, to, flags, data, size): no player gets messages.
-/// It says DPERR_NOMESSAGES rather than DPERR_UNINITIALIZED, as Wine
-/// does: games poll it in a loop that ends on that answer.
-fn receive(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, from, to, flags, _, size] = args[..] else {
-        return Some(DPERR_INVALIDPARAMS);
-    };
-    object!(cpu, this);
-    if flags & !DPRECEIVE_FLAGS != 0 {
-        return Some(DPERR_INVALIDFLAGS);
-    }
-    if from == 0 || to == 0 || size == 0 {
-        return Some(DPERR_INVALIDPARAMS);
-    }
-    Some(DPERR_NOMESSAGES)
 }
 
 #[cfg(test)]

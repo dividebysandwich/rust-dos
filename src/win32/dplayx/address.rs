@@ -289,6 +289,52 @@ pub(super) fn enum_types(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     task::start(cpu, task::DPLAY_ENUM, vars, 16)
 }
 
+/// A provider's connection: an address of its total size and the
+/// provider, as EnumConnections gives it.
+pub(super) fn of_provider(provider: &Guid) -> Vec<u8> {
+    let total = 2 * CHUNK_HEADER + 4 + 16;
+    let mut bytes = Vec::with_capacity(total as usize);
+    for (kind, data) in [
+        (DPAID_TOTAL_SIZE, total.to_le_bytes().to_vec()),
+        (DPAID_SERVICE_PROVIDER, provider.0.to_vec()),
+    ] {
+        bytes.extend_from_slice(&kind.0);
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&data);
+    }
+    bytes
+}
+
+/// The service provider the address at `at` names (InitializeConnection's
+/// connection): from its DPAID_ServiceProvider chunk, among the chunks
+/// its DPAID_TotalSize chunk spans, or the first chunk when there is no
+/// such size. None if it names none or can't be read.
+pub(super) fn provider_of_address(cpu: &mut Cpu, at: u32) -> Option<Guid> {
+    if at == 0 || !cpu.bus.guest_probe(at, CHUNK_HEADER as usize, false) {
+        return None;
+    }
+    let first = Guid::read(cpu, at)?;
+    let size = if first == DPAID_TOTAL_SIZE && cpu.bus.guest_read_32(at + 16) == 4 {
+        cpu.bus.guest_read_32(at + CHUNK_HEADER).min(MAX_DATA)
+    } else {
+        CHUNK_HEADER + 16
+    };
+    if !cpu.bus.guest_probe(at, size as usize, false) {
+        return None;
+    }
+    let mut offset = 0u32;
+    while offset + CHUNK_HEADER <= size {
+        let chunk = at + offset;
+        let kind = Guid::read(cpu, chunk)?;
+        let len = cpu.bus.guest_read_32(chunk + 16);
+        if kind == DPAID_SERVICE_PROVIDER && len == 16 && offset + CHUNK_HEADER + 16 <= size {
+            return Guid::read(cpu, chunk + CHUNK_HEADER);
+        }
+        offset = offset.checked_add(CHUNK_HEADER)?.checked_add(len)?;
+    }
+    None
+}
+
 /// The task's step: the next item to the callback, until there are no
 /// more or the callback returned FALSE.
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
