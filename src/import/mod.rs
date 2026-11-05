@@ -144,10 +144,11 @@ pub fn host_path(base: &Path, rel: &str) -> PathBuf {
         // A name the folder doesn't list, as Windows' short names
         // (`GAME~1.INS`), stays as written too.
         let entries = crate::hostfs::read_dir(&out).unwrap_or_default();
-        let found = entries
-            .iter()
-            .find(|entry| entry.name == part)
-            .or_else(|| entries.iter().find(|entry| entry.name.to_string_lossy().eq_ignore_ascii_case(part)));
+        let found = entries.iter().find(|entry| entry.name == part).or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.name.to_string_lossy().eq_ignore_ascii_case(part))
+        });
         out = found.map_or_else(|| out.join(part), |entry| entry.path.clone());
     }
     out

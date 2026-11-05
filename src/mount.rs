@@ -308,6 +308,14 @@ fn parse_drive(word: &str) -> Result<u8, String> {
     }
 }
 
+/// The path `rest` names under `home`, the rest of a `~/` path, with the
+/// host's separator between its parts: `~/dos/game.img`, which
+/// `contract_home` writes on every host, is `C:\Users\u\dos\game.img` on
+/// Windows, not `C:\Users\u\dos/game.img`.
+pub fn home_join(home: &Path, rest: &str) -> PathBuf {
+    home.join(Path::new(rest).components().collect::<PathBuf>())
+}
+
 /// Turn a user-supplied host path into a usable one: `~` expands to the
 /// home directory and relative paths are taken relative to `base`, with
 /// `.` and `..` folded away ("../games" from /home/u/dos is /home/u/games).
@@ -317,7 +325,7 @@ pub fn expand_host_path(raw: &str, base: &Path, home: Option<&Path>) -> PathBuf 
             return home.to_path_buf();
         }
         if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-            return home.join(rest);
+            return home_join(home, rest);
         }
     }
     let path = Path::new(raw);
@@ -957,10 +965,10 @@ mod tests {
         let home = std::env::temp_dir();
         let path = home.join("dos").join("game.img");
         assert_eq!(contract_home(&path, Some(&home)), "~/dos/game.img");
-        assert_eq!(
-            expand_host_path("~/dos/game.img", Path::new("/"), Some(&home)),
-            path
-        );
+        // Back with the host's separator alone: not `dos/game.img` after
+        // the home folder on Windows, which `Path`'s `==` lets pass.
+        let expanded = expand_host_path("~/dos/game.img", Path::new("/"), Some(&home));
+        assert_eq!(expanded.as_os_str(), path.as_os_str());
         assert_eq!(contract_home(&home, Some(&home)), "~");
         assert_eq!(contract_home(&path, None), path.display().to_string());
     }
