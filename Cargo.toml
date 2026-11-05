@@ -296,8 +296,8 @@ harness = false
 # lines, and the 128 test programs in tests/ link without full debug
 # information, which on Windows made a PDB of 300 MB for each. For a
 # debugger's view of a test's variables, set CARGO_PROFILE_TEST_DEBUG=full.
-# CI's test jobs set it to 0 (.github/workflows/rust.yml), as the line
-# tables of the whole suite fill a runner's disk.
+# The `test` job in .github/workflows/rust.yml sets it to 0, as the line
+# tables of the whole suite fill a runner's disk there.
 [profile.test]
 opt-level = 1
 debug = "line-tables-only"

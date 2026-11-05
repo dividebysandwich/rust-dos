@@ -67,10 +67,12 @@ jobs:
     #
     # No debug information in the test builds. With Cargo.toml's line
     # tables, the full suite's target/ grows to 27 GB on Linux, more than
-    # a runner is sure to have free (#546); without them, to 6.5 GB. A
+    # a runner is sure to have free (#546); without them, to about 6 GB. A
     # failing test still prints the file and line of its panic, which come
     # from the panic's location and not from debug information. Only a
-    # backtrace, which CI doesn't ask for, loses its line numbers.
+    # backtrace, which CI doesn't ask for, loses its line numbers. The size
+    # comes from each file in tests/ linking the whole crate into a program
+    # of its own: with fewer programs (#549), the line tables may fit again.
     env:
       CARGO_PROFILE_TEST_OPT_LEVEL: ${{ matrix.full && '1' || '0' }}
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -82,7 +84,7 @@ jobs:
 
       # More room on top: the x86-64 image comes with about 27 GB of
       # toolchains this job never uses, the Android SDK, .NET, GHC, Swift,
-      # CodeQL and Docker images. Removing them takes about 100 s, so it
+      # CodeQL and Docker images. Removing them takes 100 to 150 s, so it
       # runs in the background while the job installs packages and compiles
       # the dependencies; the test programs, which take most of the space,
       # link minutes later.
@@ -216,7 +218,7 @@ jobs:
       # grown, without a branch that measures it. The removal's log ends
       # with the free space right after the removal.
       - name: Show free disk space (Linux)
-        if: always() && runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
           cat "$RUNNER_TEMP/free-disk.log" 2>/dev/null || true
           df -h /
