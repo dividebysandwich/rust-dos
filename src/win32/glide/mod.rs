@@ -1,6 +1,7 @@
 //! GLIDE2X.DLL: 3dfx's Glide 2.x, the library Windows games of 1996 to
 //! 1999 drew on a Voodoo with, written against the emulated Voodoo's
-//! registers as 3dfx's own library was against the card.
+//! registers as 3dfx's own library was against the card. GLIDE3X.DLL,
+//! Glide 3, is the same library with Glide 3's functions (`glide3`).
 //!
 //! It has three layers:
 //!
@@ -34,6 +35,7 @@
 pub mod api;
 mod exports;
 mod file3df;
+mod glide3;
 mod gu;
 pub mod hw;
 
@@ -50,6 +52,23 @@ pub static DLL: Dll = Dll {
     vtables: &[],
 };
 
+/// GLIDE3X.DLL, beside GLIDE2X.DLL in the space the latter leaves.
+pub static DLL3: Dll = Dll {
+    name: "GLIDE3X.DLL",
+    base: 0xBFB4_0000,
+    apis: glide3::APIS,
+    vars: glide3::VARS,
+    init: None,
+    term: None,
+    vtables: &[],
+};
+
+/// Whether `name` is one of Glide's DLLs, which are there with a 3dfx
+/// card alone, as 3dfx's driver brings them.
+pub fn is_glide(name: &str) -> bool {
+    name == DLL.name || name == DLL3.name
+}
+
 /// Glide's state: the system's, as there is one card.
 #[derive(Clone, Debug, Default)]
 pub struct State {
@@ -61,13 +80,16 @@ pub struct State {
     pub gc: api::Context,
     /// The utility library's texture memory manager.
     pub gu: gu::Gu,
+    /// Glide 3's own state.
+    pub g3: glide3::State,
 }
 
 crate::state_fields!(State {
     owner,
     screen,
     gc,
-    gu
+    gu,
+    g3
 });
 
 pub fn state(cpu: &mut Cpu) -> &mut State {

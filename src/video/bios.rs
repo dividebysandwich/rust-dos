@@ -233,6 +233,7 @@ pub fn install(bus: &mut Bus, setup: VideoSetup) {
         bus.write_rom(((segment as usize) << 4) + offset as usize, &data);
     }
     bus.vbe.lfb_base = if s3 || setup.adapter.is_et4000() { None } else { Some(super::vbe::LFB_BASE as u32) };
+    crate::interrupts::vbe::install_mode_list(bus, setup.adapter);
     // A mach64's BIOS: its data in the ROM, the card as its POST leaves
     // it.
     if setup.adapter.is_mach64() {

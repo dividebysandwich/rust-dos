@@ -206,15 +206,12 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
     if ![8, 16, truecolor].contains(&bpp) {
         return None;
     }
-    let listed = vbe::MODES.iter().find(|m| {
-        let depth = match m.bpp {
-            32 if packed => 24,
-            d => d as u32,
-        };
-        m.width as u32 == w && m.height as u32 == h && depth == bpp
-    });
-    if let Some(m) = listed {
-        return vbe::find_mode(m.number, packed);
+    let adapter = cpu.bus.vga.adapter;
+    let listed = vbe::modes(adapter)
+        .filter_map(|m| vbe::adapter_mode(m.number, adapter))
+        .find(|m| (m.width as u32, m.height as u32, m.bpp as u32) == (w, h, bpp));
+    if listed.is_some() {
+        return listed;
     }
     let index = SIZES.iter().position(|&s| s == (w, h))?;
     // Small modes are shown doubled, at the timing of the doubled lines.

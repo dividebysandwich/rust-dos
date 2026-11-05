@@ -413,6 +413,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         "OLE32" => [2, 10, 35, 35],
         "MSVCRT" => [6, 0, 8168, 0],
         "GLIDE2X" => [2, 46, 0, 0],
+        "GLIDE3X" => [3, 3, 0, 667],
         // DirectX 8.1's.
         "D3D8" | "DINPUT8" => [4, 8, 1, 881],
         // Windows 98 SE's.

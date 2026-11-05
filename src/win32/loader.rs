@@ -658,7 +658,7 @@ pub(super) fn load_module(
         } else {
             ERROR_DLL_NOT_FOUND
         },
-        message: if file == super::glide::DLL.name {
+        message: if super::glide::is_glide(&file) {
             format!(
                 "{} needs {}, which the built-in Windows has with a 3dfx card \
                  alone (the voodoo setting).",
@@ -1027,9 +1027,10 @@ fn bind_imports(
 /// names. With the `win32_dlls` setting, NTDLL.DLL is one, UCRT's
 /// ucrtbase.dll and api-ms-win-crt-*.dll are MSVCRT.DLL and
 /// KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs import; a DLL the
-/// setting replaces, which the folder has, isn't. GLIDE2X.DLL is there
-/// with a 3dfx card alone, as 3dfx's driver brings it. The system
-/// directory shows the same DLLs as files (dll_files.rs).
+/// setting replaces, which the folder has, isn't. GLIDE2X.DLL and
+/// GLIDE3X.DLL are there with a 3dfx card alone, as 3dfx's driver
+/// brings them. The system directory shows the same DLLs as files
+/// (dll_files.rs).
 pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;
@@ -1050,7 +1051,7 @@ pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     // MSIMG32.DLL came with Windows 98.
     let version = super::version::shown(win32);
     found
-        .filter(|&i| stubs::DLLS[i].name != super::glide::DLL.name || bus.voodoo.is_some())
+        .filter(|&i| !super::glide::is_glide(stubs::DLLS[i].name) || bus.voodoo.is_some())
         .filter(|&i| {
             stubs::DLLS[i].name != super::msimg32::DLL.name || super::msimg32::present(version)
         })

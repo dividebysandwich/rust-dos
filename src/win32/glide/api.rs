@@ -405,6 +405,21 @@ impl Vertex {
     }
 }
 
+crate::state_fields!(TmuVertex { sow, tow, oow });
+
+crate::state_fields!(Vertex {
+    x,
+    y,
+    z,
+    r,
+    g,
+    b,
+    ooz,
+    a,
+    oow,
+    tmu
+});
+
 #[derive(Clone, Copy, Debug)]
 enum Param {
     R,

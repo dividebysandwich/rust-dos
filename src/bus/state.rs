@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 29;
+const WIN32_VERSION: u16 = 30;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -753,6 +753,9 @@ impl Bus {
         // The built-in DLLs' files are of the version of Windows the
         // state's programs run under, which may not be the settings'.
         crate::win32::dll_files::sync(self);
+        // The system's time starts from the machine's clock again, which
+        // isn't in the state (`kernel32::time::now`).
+        self.win32.system_clock = None;
         // When the first of the state's threads' timeouts ends, which
         // isn't in the state either. The clock's deadline is in the state,
         // so it is worked out again only when a thread has such a wait:
@@ -790,6 +793,7 @@ mod tests {
         (27, 0x48DE_57AA_C42E_36F2), // the MPEGVideo and AVIVideo devices
         (28, 0x8D14_5D81_BEAF_AC09), // DirectShow's objects and graph devices
         (29, 0x6A10_30CA_74D4_A5B0), // DirectPlay's connections and sessions
+        (30, 0xC6E5_70EA_CFE3_C03E), // Glide 3's vertex layout, viewport and strips
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

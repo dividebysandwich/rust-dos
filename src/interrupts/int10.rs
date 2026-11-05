@@ -1584,7 +1584,7 @@ pub fn handle(cpu: &mut Cpu) {
             // number below 100h is a standard mode, set as AH=00h sets it,
             // and changes the range as AH=00h does.
             let before = (cpu.get_al() == 0x02).then(|| mouse_screen(cpu));
-            let vesa = cpu.bx() & 0x1FF >= 0x100;
+            let vesa = cpu.bx() & crate::video::vbe::MODE_NUMBER >= 0x100;
             super::vbe::handle(cpu);
             if let Some(before) = before
                 && cpu.ax() == 0x004F

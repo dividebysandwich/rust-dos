@@ -478,6 +478,106 @@ fn a_program_reads_its_static_tls() {
     assert_eq!(code, 0x2A);
 }
 
+/// A wait on the system's time, as Magic & Mayhem's between two lives:
+/// GetSystemTimeAsFileTime until 20 ms have gone. The time moves on with
+/// emulated time, as GetTickCount's count does, though the host's clock
+/// stands still, so the wait ends; one machine skips the passes and the
+/// other runs them all, and they come out the same after every batch.
+#[test]
+fn a_wait_on_the_system_time_moves_with_the_machine_and_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetSystemTimeAsFileTime"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut wait = a.create_label();
+        a.push(l.data)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, dword_ptr(l.data))?;
+        a.set_label(&mut wait)?;
+        a.push(l.data)?;
+        a.call(l.import(0))?;
+        // FILETIME counts 100 ns: 20 ms is 200,000 of them.
+        a.mov(eax, dword_ptr(l.data))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200_000)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("system_time_wait_plain", CoreMode::Normal, false);
+    let mut skipping = start("system_time_wait_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(skipping.errorlevel, 0x2A, "{:?}", skipping.bus.observe.stats);
+    let stats = &skipping.bus.observe.stats;
+    assert!(stats.proofs >= 10, "a proof for most milliseconds: {stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// SetSystemTime sets the system's time also when the machine's clock
+/// is already at the time set: the host's clock stands still, the
+/// system's time moves 5 ms on from it, and the program sets it back to
+/// the host's time. GetSystemTime then reads the time set, to the
+/// millisecond.
+#[test]
+fn set_system_time_to_the_machine_clock_takes_the_system_time_back() {
+    // The SYSTEMTIME to set, Friday 2026-09-25 14:03:05.000, two
+    // FILETIMEs and the SYSTEMTIME read back.
+    let mut data = vec![0u8; 48];
+    for (i, value) in [2026u16, 9, 5, 25, 14, 3, 5, 0].into_iter().enumerate() {
+        data[2 * i..2 * i + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["GetSystemTimeAsFileTime", "SetSystemTime", "GetSystemTime"],
+    )];
+    let image = program(BASE, false, imports, &data, |a, l| {
+        let mut wait = a.create_label();
+        let mut fail = a.create_label();
+        a.push(l.data + 16)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, dword_ptr(l.at(16)))?;
+        a.set_label(&mut wait)?;
+        a.push(l.data + 24)?;
+        a.call(l.import(0))?;
+        a.mov(eax, dword_ptr(l.at(24)))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 50_000)?;
+        a.jb(wait)?;
+        a.push(l.data)?;
+        a.call(l.import(1))?;
+        a.push(l.data + 32)?;
+        a.call(l.import(2))?;
+        // wSecond and wMilliseconds: 5 and 0.
+        a.cmp(dword_ptr(l.at(44)), 5)?;
+        a.jne(fail)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()?;
+        a.set_label(&mut fail)?;
+        a.mov(eax, 1)?;
+        a.ret()
+    });
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let (code, _) = run("set_system_time_back", image);
+    assert_eq!(code, 0x2A, "GetSystemTime read the time set");
+}
+
 /// A frame limiter that calls GetTickCount or timeGetTime until the time
 /// comes: one machine skips the passes and the other runs them all, and
 /// they must come out the same after every batch, each of the milliseconds
@@ -8720,4 +8820,152 @@ fn an_error_object_goes_through_the_thread_and_a_variant_changes_type() {
     });
     let (code, out) = run("errorinfo", exe);
     assert_eq!(code, 0xFF, "the checks that failed: {:08b} {out}", !code);
+}
+
+/// An OPENGL32.DLL of the program's own, as 3dfx's Voodoo2 OpenGL
+/// driver is: its wgl functions return 101h to 105h, and CallGdi calls
+/// GDI32's GetPixelFormat itself and returns what it gave.
+fn guest_opengl32() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[("GDI32.DLL", &["GetPixelFormat"])];
+    let returns = |value: i32, bytes: u16| {
+        move |a: &mut CodeAssembler, _: &Layout| {
+            a.mov(eax, value)?;
+            a.ret_1(bytes as i32)
+        }
+    };
+    let main = returns(1, 12);
+    let choose = returns(0x101, 8);
+    let set = returns(0x102, 12);
+    let get = returns(0x103, 4);
+    let describe = returns(0x104, 16);
+    let swap = returns(0x105, 4);
+    let call_gdi = |a: &mut CodeAssembler, l: &Layout| {
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.ret()
+    };
+    module_image(
+        DLL_BASE,
+        Some("OPENGL32.DLL"),
+        imports,
+        &[0; 0x10],
+        &[
+            ("", &main),
+            ("wglChoosePixelFormat", &choose),
+            ("wglSetPixelFormat", &set),
+            ("wglGetPixelFormat", &get),
+            ("wglDescribePixelFormat", &describe),
+            ("wglSwapBuffers", &swap),
+            ("CallGdi", &call_gdi),
+        ],
+        &[],
+    )
+}
+
+/// GDI32's pixel format functions and SwapBuffers go to the wgl
+/// functions of an OPENGL32.DLL that replaces the built-in one
+/// (`win32_dlls_replace`), as Windows' GDI32 calls the loaded
+/// OpenGL32's, with the caller's arguments and stack. A call from that
+/// DLL itself gets GDI32's own answer (no format on a DC of no window),
+/// not its own function again.
+#[test]
+fn gdi32s_pixel_formats_go_to_a_guest_opengl32() {
+    let imports: &[(&str, &[&str])] = &[
+        ("OPENGL32.DLL", &["CallGdi"]),
+        (
+            "GDI32.DLL",
+            &[
+                "ChoosePixelFormat",
+                "SetPixelFormat",
+                "GetPixelFormat",
+                "DescribePixelFormat",
+                "SwapBuffers",
+            ],
+        ),
+    ];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.mov(esi, esp)?;
+        // The functions with their arguments, each with what the
+        // DLL's function returns.
+        let calls: [(usize, u32, i32); 5] = [
+            (1, 2, 0x101),
+            (2, 3, 0x102),
+            (3, 1, 0x103),
+            (4, 4, 0x104),
+            (5, 1, 0x105),
+        ];
+        for (bit, (import, args, want)) in calls.into_iter().enumerate() {
+            for _ in 0..args {
+                a.push(0)?;
+            }
+            a.call(l.import(import))?;
+            a.cmp(eax, want)?;
+            check(a, false, bit as u32)?;
+        }
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, false, 5)?;
+        // Each popped its own arguments.
+        a.cmp(esp, esi)?;
+        check(a, false, 6)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &[0; 0x200], &[("", &main)], &[]);
+    let (code, out) = run_with_guest_opengl32("gdi_guest_wgl", exe);
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b} {out}", !code & 0x7F);
+}
+
+/// Run `exe` with `guest_opengl32` as the `win32_dlls` folder's
+/// OPENGL32.DLL, which replaces the built-in one: its exit code and what
+/// it printed.
+fn run_with_guest_opengl32(name: &str, exe: Vec<u8>) -> (u8, String) {
+    let dir = scratch(name, &[("T.EXE", exe)]);
+    let dlls = dir.join("DLLS");
+    fs::create_dir_all(&dlls).unwrap();
+    fs::write(dlls.join("OPENGL32.DLL"), guest_opengl32()).unwrap();
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.win32.guest_dlls = Some(dlls);
+    cpu.bus.win32.guest_replace = vec!["opengl32".to_string()];
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    (cpu.errorlevel, printed(&cpu))
+}
+
+/// An OPENGL32.DLL mapped as data (LOAD_LIBRARY_AS_DATAFILE) isn't the
+/// loaded OpenGL32: GDI32 answers GetPixelFormat itself rather than
+/// jumping into an image that was neither relocated nor bound.
+#[test]
+fn gdi32_doesnt_call_an_opengl32_mapped_as_data() {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", &["LoadLibraryExA"]),
+        ("GDI32.DLL", &["GetPixelFormat"]),
+    ];
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        // LOAD_LIBRARY_AS_DATAFILE.
+        a.push(2)?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        a.push(0)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, b"OPENGL32.DLL\0", &[("", &main)], &[]);
+    let (code, out) = run_with_guest_opengl32("gdi_datafile_wgl", exe);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }

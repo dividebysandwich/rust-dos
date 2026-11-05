@@ -6,6 +6,8 @@ use crate::pmrig;
 use iced_x86::Register;
 use rust_dos::cpu::Cpu;
 use rust_dos::interrupts::int10;
+use rust_dos::video::adapter::{Adapter, VideoSetup};
+use rust_dos::video::bios;
 use rust_dos::video::vbe::LFB_BASE;
 use rust_dos::video::{self, Frame, VideoMode};
 use std::path::PathBuf;
@@ -43,6 +45,25 @@ fn pixel(cpu: &mut Cpu, x: usize, y: usize) -> (u8, u8, u8) {
     (frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2])
 }
 
+/// The mode list of the VbeInfoBlock at `BUF`, through its far pointer.
+fn mode_list(cpu: &Cpu) -> Vec<u16> {
+    let ptr = cpu.bus.read_32(BUF + 14);
+    let at = ((ptr >> 16) as usize) * 16 + (ptr & 0xFFFF) as usize;
+    (0..)
+        .map(|i| cpu.bus.read_16(at + i * 2))
+        .take_while(|&m| m != 0xFFFF)
+        .collect()
+}
+
+/// Function 00h's VbeInfoBlock at `BUF`, of VBE 2.0 with `vbe2`.
+fn controller_info(cpu: &mut Cpu, vbe2: bool) {
+    let signature = if vbe2 { *b"VBE2" } else { [0; 4] };
+    for (i, &b) in signature.iter().enumerate() {
+        cpu.bus.write_8(BUF + i, b);
+    }
+    assert_eq!(int10(cpu, 0x4F00, 0, 0, 0), 0x004F);
+}
+
 #[test]
 fn controller_info_in_both_sizes() {
     let mut cpu = machine();
@@ -52,15 +73,14 @@ fn controller_info_in_both_sizes() {
     assert_eq!(cpu.bus.read_16(BUF + 4), 0x0200);
     assert_eq!(cpu.bus.read_16(BUF + 18), 64, "4 MB");
     assert_eq!(cpu.bus.read_8(BUF + 256), 0xAA, "a VBE 1.x block is 256 bytes");
-    // The mode list, through its far pointer.
-    let list = |cpu: &Cpu| {
-        let ptr = cpu.bus.read_32(BUF + 14);
-        let at = ((ptr >> 16) as usize) * 16 + (ptr & 0xFFFF) as usize;
-        (0..).map(|i| cpu.bus.read_16(at + i * 2)).take_while(|&m| m != 0xFFFF).collect::<Vec<u16>>()
-    };
-    let modes = list(&cpu);
-    assert_eq!(modes.len(), 16);
+    let modes = mode_list(&cpu);
+    assert_eq!(modes.len(), 17);
     assert!(modes.contains(&0x101) && modes.contains(&0x118));
+    assert_eq!(
+        modes.last(),
+        Some(&0x213),
+        "the OEM mode after the standard ones"
+    );
 
     // VBE 2.0: 512 bytes, with the list and strings in the buffer.
     for (i, &b) in b"VBE2".iter().enumerate() {
@@ -69,7 +89,7 @@ fn controller_info_in_both_sizes() {
     assert_eq!(int10(&mut cpu, 0x4F00, 0, 0, 0), 0x004F);
     assert_eq!(cpu.bus.read_32(BUF), u32::from_le_bytes(*b"VESA"));
     assert_eq!(cpu.bus.read_32(BUF + 14), 0x3000_0022, "mode list at 3000:0022");
-    assert_eq!(list(&cpu), modes);
+    assert_eq!(mode_list(&cpu), modes);
     let oem = cpu.bus.read_32(BUF + 6);
     assert_eq!(oem >> 16, 0x3000);
     assert_eq!(cpu.bus.read_8(BUF + (oem & 0xFFFF) as usize), b'r');
@@ -94,6 +114,59 @@ fn mode_info() {
     assert_eq!((cpu.bus.read_16(BUF + 16), cpu.bus.read_8(BUF + 25)), (4096, 32));
 
     assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x102, 0), 0x014F);
+}
+
+/// 640x400 in truecolour, mode 213h as S3 cards such as Diamond's
+/// Stealth64 Video have it: the generic Super VGA lists and sets it, so
+/// programs that choose by size and colours (SDL3's DOS video) find it.
+/// An S3 Trio64 has its own BIOS's modes, without it.
+#[test]
+fn the_oem_640x400_truecolour_mode() {
+    let mut cpu = machine();
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x213, 0), 0x004F);
+    assert_eq!(cpu.bus.read_16(BUF), 0x009B);
+    let size = (
+        cpu.bus.read_16(BUF + 18),
+        cpu.bus.read_16(BUF + 20),
+        cpu.bus.read_8(BUF + 25),
+    );
+    assert_eq!(size, (640, 400, 32));
+    assert_eq!(cpu.bus.read_16(BUF + 16), 2560, "bytes per scan line");
+    assert_eq!(cpu.bus.read_32(BUF + 40), LFB_BASE as u32);
+
+    set_mode(&mut cpu, 0x4213);
+    assert_eq!(cpu.bus.video_mode, VideoMode::Vesa);
+    assert_eq!(video::frame_size(&cpu.bus), (640, 400));
+    assert!((cpu.bus.vga.timing().hz() - 70.09).abs() < 0.05);
+    assert_eq!(int10(&mut cpu, 0x4F03, 0, 0, 0), 0x004F);
+    assert_eq!(cpu.bx(), 0x4213);
+    cpu.bus.write_32(LFB_BASE + (10 * 640 + 20) * 4, 0x0012_3456);
+    assert_eq!(pixel(&mut cpu, 20, 10), (0x12, 0x34, 0x56));
+
+    // Bit 9 belongs to the number: 213h isn't mode 13h.
+    set_mode(&mut cpu, 0x03);
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x213, 0, 0), 0x004F);
+    assert_eq!(cpu.bus.vbe.mode.map(|m| m.number), Some(0x213));
+
+    // The S3's list, in the ROM for VBE 1.x and in the buffer for 2.0.
+    let setup = VideoSetup {
+        adapter: Adapter::S3,
+        ..Default::default()
+    };
+    bios::install(&mut cpu.bus, setup);
+    assert_eq!(int10(&mut cpu, 0x4F01, 0, 0x213, 0), 0x014F);
+    assert_eq!(int10(&mut cpu, 0x4F02, 0x213, 0, 0), 0x014F);
+    for vbe2 in [false, true] {
+        controller_info(&mut cpu, vbe2);
+        let modes = mode_list(&cpu);
+        assert_eq!(modes.len(), 16, "VBE 2.0: {vbe2}");
+        assert!(!modes.contains(&0x213), "VBE 2.0: {vbe2}");
+    }
+
+    // Back on the generic Super VGA, the ROM's list has it again.
+    bios::install(&mut cpu.bus, VideoSetup::default());
+    controller_info(&mut cpu, false);
+    assert_eq!(mode_list(&cpu).last(), Some(&0x213));
 }
 
 #[test]
