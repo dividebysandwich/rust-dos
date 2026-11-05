@@ -1,0 +1,207 @@
+use rust_dos::cpu::{Cpu, FpuFlags, FPU_TAG_EMPTY};
+use rust_dos::f80::F80;
+
+use crate::testrunners;
+
+// Helper to push values quickly
+fn push_val(cpu: &mut Cpu, val: f64) {
+    let mut f = F80::new();
+    f.set_f64(val);
+    cpu.fpu_push(f);
+}
+
+#[test]
+fn test_fcompp_stack_cleanup() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    let initial_top = cpu.fpu_top;
+    
+    cpu.fpu_push(F80::new());
+    cpu.fpu_push(F80::new());
+    
+    // DE D9: FCOMPP (Compare ST(0) with ST(1) and pop twice)
+    testrunners::run_fpu_code(&mut cpu, &[0xDE, 0xD9]);
+
+    assert_eq!(cpu.fpu_top, initial_top, "FCOMPP failed to restore FPU TOP");
+    assert_eq!(cpu.fpu_tags[initial_top], FPU_TAG_EMPTY);
+}
+
+#[test]
+fn test_fcom_alias_opcode_dc() {
+    // DC D0+i, DC D8+i and DE D0+i are aliases of D8 D0+i and D8 D8+i:
+    // ST(0) with ST(i), C0 set for 8.0 < 10.0.
+    for (code, pops) in [([0xDC, 0xD1], 0), ([0xDC, 0xD9], 1), ([0xDE, 0xD1], 1)] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        push_val(&mut cpu, 10.0); // ST(1)
+        push_val(&mut cpu, 8.0); // ST(0)
+        let top = cpu.fpu_top;
+
+        testrunners::run_fpu_code(&mut cpu, &code);
+
+        let flags = cpu.get_fpu_flags();
+        assert!(flags.contains(FpuFlags::C0), "{code:02X?}: 8.0 < 10.0 should set C0");
+        assert!(!flags.contains(FpuFlags::C3), "{code:02X?}: not equal");
+        assert_eq!(cpu.fpu_top, (top + pops) & 7, "{code:02X?}: pops");
+    }
+}
+
+#[test]
+fn test_fcom_standard_register() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    
+    // Scenario: ST(0)=10.0, ST(1)=8.0
+    push_val(&mut cpu, 8.0);  // ST(1)
+    push_val(&mut cpu, 10.0); // ST(0)
+
+    // D8 D1: FCOM ST(1) -> Compare ST(0) [LHS] with ST(1) [RHS]
+    // 10.0 > 8.0? -> YES. C0=0, C3=0.
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xD1]);
+
+    let flags = cpu.get_fpu_flags();
+    assert!(!flags.contains(FpuFlags::C0)); // Not Less Than
+    assert!(!flags.contains(FpuFlags::C3)); // Not Equal
+}
+
+#[test]
+fn test_fcom_memory_float32() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    push_val(&mut cpu, 5.0); // ST(0)
+
+    // Write 10.0f32 to memory at 0x1000
+    let addr = 0x1000;
+    let val_f32 = 10.0f32;
+    let bytes = val_f32.to_le_bytes();
+    for (i, &byte) in bytes.iter().enumerate() {
+        cpu.bus.write_8(addr + i, byte);
+    }
+
+    // D8 16 00 10: FCOM DWORD PTR [1000]
+    // Compare 5.0 vs 10.0 -> Less Than -> C0=1
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0x16, 0x00, 0x10]);
+
+    assert!(cpu.get_fpu_flag(FpuFlags::C0), "5.0 < 10.0 should set C0");
+}
+
+#[test]
+fn test_fcom_memory_float64() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    push_val(&mut cpu, 20.0); // ST(0)
+
+    // Write 20.0f64 to memory at 0x1000
+    let addr = 0x1000;
+    let val_f64 = 20.0f64;
+    let bytes = val_f64.to_le_bytes();
+    for (i, &byte) in bytes.iter().enumerate() {
+        cpu.bus.write_8(addr + i, byte);
+    }
+
+    // DC 16 00 10: FCOM QWORD PTR [1000]
+    // Compare 20.0 vs 20.0 -> Equal -> C3=1
+    testrunners::run_fpu_code(&mut cpu, &[0xDC, 0x16, 0x00, 0x10]);
+
+    assert!(cpu.get_fpu_flag(FpuFlags::C3), "20.0 == 20.0 should set C3");
+}
+
+#[test]
+fn test_ficom_integer_memory() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    push_val(&mut cpu, 100.0); // ST(0)
+
+    // Write 50 (Int16) to memory
+    let addr = 0x1000;
+    cpu.bus.write_16(addr, 50);
+
+    // DE 16 00 10: FICOM WORD PTR [1000]
+    // Compare 100.0 vs 50 -> Greater -> C0=0, C3=0
+    testrunners::run_fpu_code(&mut cpu, &[0xDE, 0x16, 0x00, 0x10]);
+
+    assert!(!cpu.get_fpu_flag(FpuFlags::C0));
+    assert!(!cpu.get_fpu_flag(FpuFlags::C3));
+}
+
+#[test]
+fn test_ftst_compare_zero() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    
+    // Case 1: Positive
+    push_val(&mut cpu, 123.4);
+    // D9 E4: FTST
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE4]);
+    assert!(!cpu.get_fpu_flag(FpuFlags::C0)); // Not < 0.0
+    assert!(!cpu.get_fpu_flag(FpuFlags::C3)); // Not == 0.0
+
+    // Case 2: Zero
+    push_val(&mut cpu, 0.0);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE4]);
+    assert!(cpu.get_fpu_flag(FpuFlags::C3)); // Equal 0.0
+
+    // Case 3: Negative
+    push_val(&mut cpu, -5.0);
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE4]);
+    assert!(cpu.get_fpu_flag(FpuFlags::C0)); // Less than 0.0
+}
+
+#[test]
+fn test_fcomp_single_pop() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    push_val(&mut cpu, 1.0);
+    push_val(&mut cpu, 2.0); // ST(0)
+
+    let initial_top = cpu.fpu_top;
+
+    // D8 D9: FCOMP ST(1)
+    // Compare 2.0 vs 1.0, then Pop ONCE.
+    testrunners::run_fpu_code(&mut cpu, &[0xD8, 0xD9]);
+
+    assert_eq!(cpu.fpu_top, (initial_top + 1) % 8, "FCOMP should pop once");
+    assert_eq!(cpu.fpu_get(0).get_f64(), 1.0, "Old ST(1) should now be ST(0)");
+}
+
+#[test]
+fn test_nan_unordered_compare() {
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    
+    // Create a NaN
+    let mut nan = F80::new();
+    nan.set_QNaN();
+    cpu.fpu_push(nan);
+    
+    // Compare NaN vs 0.0 (FTST)
+    // D9 E4: FTST
+    testrunners::run_fpu_code(&mut cpu, &[0xD9, 0xE4]);
+
+    // Expect Unordered: C3=1, C2=1, C0=1
+    assert!(cpu.get_fpu_flag(FpuFlags::C0));
+    assert!(cpu.get_fpu_flag(FpuFlags::C2));
+    assert!(cpu.get_fpu_flag(FpuFlags::C3));
+}
+#[test]
+fn djgpp_finds_a_387() {
+    // DJGPP's _detect_80387: 1/0 is +inf (zero divide masked), and +inf
+    // isn't -inf, as a 287 would say with its projective infinity.
+    let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+    for code in [[0xDB, 0xE3], [0xD9, 0xE8], [0xD9, 0xEE], [0xDE, 0xF9], [0xD9, 0xC0], [0xD9, 0xE0], [0xDE, 0xD9]] {
+        testrunners::run_fpu_code(&mut cpu, &code);
+    }
+    let flags = cpu.get_fpu_flags();
+    assert!(!flags.contains(FpuFlags::C3), "+inf and -inf are not equal: {:?}", flags);
+    assert!(!flags.contains(FpuFlags::C2), "nor unordered: {:?}", flags);
+}
+
+#[test]
+fn fcom_st0_compares_st0_with_itself() {
+    // GCC tests for NaN with FUCOMP ST(0) (DD E8): a number equals itself,
+    // whatever ST(1) holds. Lua's "table index is NaN" came from comparing
+    // with an empty ST(1) instead.
+    for code in [[0xDD, 0xE8], [0xDD, 0xE0], [0xD8, 0xD0], [0xD8, 0xD8]] {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        push_val(&mut cpu, 0.5);
+        let top = cpu.fpu_top;
+        testrunners::run_fpu_code(&mut cpu, &code);
+        let flags = cpu.get_fpu_flags();
+        assert!(flags.contains(FpuFlags::C3), "{code:02X?}: 0.5 equals itself: {flags:?}");
+        assert!(!flags.contains(FpuFlags::C2), "{code:02X?}: and is ordered: {flags:?}");
+        assert!(!flags.contains(FpuFlags::C0), "{code:02X?}: {flags:?}");
+        let pops = if code == [0xDD, 0xE8] || code == [0xD8, 0xD8] { 1 } else { 0 };
+        assert_eq!(cpu.fpu_top, (top + pops) % 8, "{code:02X?}");
+    }
+}

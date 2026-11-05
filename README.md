@@ -162,9 +162,16 @@ To run the program, put `SDL2.dll` from the same `lib\x64` next to
 `rust-dos.exe` (in `target\release`) or on `PATH`. `cargo test` starts the
 debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
 
-`cargo test` runs the tests. A few of them host a LAN relay or look for one
-by broadcast, on all of the computer's network interfaces; if your firewall
-asks about them on every run, `cargo test-local` skips those few.
+`cargo test` runs the tests. CI runs them with
+[cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`,
+then `cargo nextest run`), which runs each test in a process of its own and
+times it. The tests in `tests/` are seven programs, one for each folder,
+and a test's name starts with its file's:
+`cargo nextest run --test dos shell_tests::` runs those in
+`tests/dos/shell_tests.rs`. A few tests host a LAN relay or look for one by
+broadcast, on all of the computer's network interfaces; if your firewall
+asks about them on every run, `cargo test-local` skips those few (with
+nextest, add `--features skip-host-network-tests`).
 `cargo bench` runs the benchmarks ([docs/benchmarks.md](docs/benchmarks.md)).
 
 ## Configuration

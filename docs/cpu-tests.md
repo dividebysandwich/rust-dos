@@ -5,7 +5,8 @@ Two opt-in suites check the CPU against real hardware:
 real mode, and [test386.asm](#test386asm) for everything from reset through
 protected mode, paging, privilege levels, virtual-8086 mode and task
 switches. The regular test suite covers protected mode as well, in
-`tests/pm_tests.rs` (see [Protected-mode unit tests](#protected-mode-unit-tests)).
+`tests/cpu/pm_tests.rs` (see
+[Protected-mode unit tests](#protected-mode-unit-tests)).
 
 All of them run on the dynamic recompiler as well (see
 [On the dynamic recompiler](#on-the-dynamic-recompiler)).
@@ -14,7 +15,7 @@ Real games are played by the opt-in [game regression suite](game-suite.md).
 
 ## SingleStepTests/80386
 
-`tests/sst386.rs` runs the [SingleStepTests/80386](https://github.com/SingleStepTests/80386)
+`tests/cpu/sst386.rs` runs the [SingleStepTests/80386](https://github.com/SingleStepTests/80386)
 real-mode suite against the emulator's CPU and reports pass rates per opcode.
 The suite was captured from a real 80386EX. Each test gives the initial
 registers and memory, runs one instruction plus the `HLT` (F4) after it, and
@@ -29,7 +30,7 @@ so it can measure progress while the CPU is incomplete.
 ### Fetch the suite
 
 ```sh
-tests/sst386/fetch.sh            # into target/sst386/ (about 580 MB)
+tests/cpu/sst386/fetch.sh            # into target/sst386/ (about 580 MB)
 ```
 
 This makes a shallow, sparse git clone with only `v1_ex_real_mode/`
@@ -42,7 +43,7 @@ again to update the clone.
 
 ```sh
 SST386_DIR=target/sst386/v1_ex_real_mode \
-  cargo test --release --test sst386 -- --ignored --nocapture
+  cargo test --release --test cpu sst386:: -- --ignored --nocapture
 ```
 
 A full run takes a few seconds on a multi-core machine. The summary goes to
@@ -61,7 +62,7 @@ To work on one instruction, filter to it and ask for more samples:
 
 ```sh
 SST386_DIR=target/sst386/v1_ex_real_mode SST386_FILTER=D0.0 SST386_SAMPLES=20 \
-  cargo test --release --test sst386 -- --ignored --nocapture
+  cargo test --release --test cpu sst386:: -- --ignored --nocapture
 ```
 
 ### Reading the report
@@ -148,7 +149,7 @@ this setup:
 - **Machines:** each file runs on a fresh `Cpu`, so results don't depend on
   thread scheduling.
 
-`tests/sst386/machine.rs` is the only file that uses the emulator's API.
+`tests/cpu/sst386/machine.rs` is the only file that uses the emulator's API.
 When the CPU changes (EFLAGS setter, CR0 accessor, larger RAM, a different
 `page_gen`), update that file.
 
@@ -204,7 +205,7 @@ port 190h. It halts with the code of the stage that failed, or FFh.
 ```sh
 tests/test386/build.sh           # clone and assemble into target/test386/ (needs nasm)
 TEST386_DIR=target/test386 \
-  cargo test --release --test test386 -- --ignored --nocapture
+  cargo test --release --test cpu test386:: -- --ignored --nocapture
 ```
 
 The build script configures the ROM for the emulator: POST codes on port
@@ -250,12 +251,12 @@ the RPL changes.
 
 ## Protected-mode unit tests
 
-`tests/pm_tests.rs` runs small programs, assembled with iced's code
-assembler, on a machine that `tests/pmrig/mod.rs` sets up: a GDT with flat
-ring 0 and ring 3 segments, an IDT, a TSS, and a real-mode stub that enters
-protected mode as DOS extenders do (LGDT, LIDT, MOV CR0, far JMP, LTR).
-Handlers record the vector and their stack frame, so the tests check error
-codes, pushed addresses and frames: segment limits and types, null
+`tests/cpu/pm_tests.rs` runs small programs, assembled with iced's code
+assembler, on a machine that `tests/common/pmrig/mod.rs` sets up: a GDT with
+flat ring 0 and ring 3 segments, an IDT, a TSS, and a real-mode stub that
+enters protected mode as DOS extenders do (LGDT, LIDT, MOV CR0, far JMP,
+LTR). Handlers record the vector and their stack frame, so the tests check
+error codes, pushed addresses and frames: segment limits and types, null
 selectors, expand-down segments, far calls between 16 and 32-bit code, call
 gates with parameter copying, interrupts and IRET across privilege levels,
 the I/O permission bitmap, paging with accessed and dirty bits, page faults,
@@ -275,9 +276,9 @@ code as they check the interpreter:
 ```sh
 RUST_DOS_CORE=dynamic cargo test --release
 RUST_DOS_CORE=dynamic SST386_DIR=target/sst386/v1_ex_real_mode \
-  cargo test --release --test sst386 -- --ignored --nocapture
+  cargo test --release --test cpu sst386:: -- --ignored --nocapture
 RUST_DOS_CORE=dynamic TEST386_DIR=target/test386 \
-  cargo test --release --test test386 -- --ignored --nocapture
+  cargo test --release --test cpu test386:: -- --ignored --nocapture
 ```
 
 - **SingleStepTests.** They step the CPU with `Cpu::step`, which on the

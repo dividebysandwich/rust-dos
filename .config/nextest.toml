@@ -1,0 +1,11 @@
+# cargo-nextest's settings (https://nexte.st). It runs each test in a
+# process of its own, so tests of one program (a folder of tests/) don't
+# share their statics, and one that aborts takes nothing else with it.
+
+# CI's runs (`--profile ci`).
+[profile.ci]
+# Every failure, not only the first.
+fail-fast = false
+# A test still running after 10 minutes is stuck: end it, so the job
+# fails with its name instead of running into the job's time limit.
+slow-timeout = { period = "60s", terminate-after = 10 }

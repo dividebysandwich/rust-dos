@@ -49,7 +49,7 @@ I have:
 - [ ] checked that all my commits can be built.
 - [ ] added or updated the on-line help insofar relevant for my changes
 - [ ] confirmed that my code does not cause performance regressions (e.g. by running the Heretic timedemo).
-- [ ] successfully executed the game regression test suite (```cargo test --release --test game_suite -- --ignored --nocapture```)
+- [ ] successfully executed the game regression test suite (```cargo test --release --test program game_suite:: -- --ignored --nocapture```)
 - [ ] added unit tests where applicable to prove the correctness of my code and to avoid future regressions.
 - [ ] provided the release notes draft (for significant user-facing changes).
 
