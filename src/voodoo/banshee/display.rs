@@ -9,7 +9,7 @@
 //! whole when the display asks, not a line at a time as 86Box does.
 
 use super::super::mem::Vram;
-use super::super::mirror::{Cursor, LayoutKey, Overlay, Scanout, Surface};
+use super::super::mirror::{BufferKey, Cursor, LayoutKey, Overlay, Scanout, Surface};
 use super::*;
 
 /// One tile: 128 bytes by 32 rows.
@@ -375,8 +375,10 @@ impl Voodoo {
         let b = self.banshee.as_deref()?;
         let f = b.frame();
         let buffer = |start: u32, stride: u32, tiled: bool| {
-            let same = key.stride.tiled == tiled && key.stride.words as u64 * 2 == stride as u64;
-            (same && key.color.contains(&start)).then_some(start / 2)
+            let same = |b: &&BufferKey| {
+                b.stride.tiled == tiled && b.stride.words as u64 * 2 == stride as u64
+            };
+            key.color_at(start).filter(same).map(|_| start / 2)
         };
         let clut_half = |select: u32| if f.cfg & select != 0 { 256 } else { 0 };
         let format = (f.cfg >> 18) & 7;

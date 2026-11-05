@@ -337,7 +337,7 @@ impl Access {
 
 /// Rows `y0..y1` as a triangle or fastfill counts them, as buffer rows
 /// `r0..r1` (the Y origin applied); None if they could wrap around.
-fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
+pub(crate) fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
     if y0 >= y1 {
         return Some((0, 0));
     }
@@ -393,8 +393,16 @@ pub fn spills(st: &RasterState, verts: &[(f32, f32); 3], height: u32) -> bool {
 
 /// The same for a fastfill of columns `..x1` and rows `y0..y1`.
 pub fn fill_spills(st: &RasterState, x1: i32, y0: i32, y1: i32, height: u32) -> bool {
+    // Only the buffers it writes have rows to spill past: a depth clear
+    // isn't limited by the colour buffer's rows, which colBufferAddr may
+    // leave at a narrower surface than the depth buffer (the Direct3D
+    // HAL's clears, `hal::card_fill`).
+    let rgb = st.fbz_mode & (1 << 9) != 0;
+    let aux = st.fbz_mode & (1 << 10) != 0 && st.aux.is_some();
+    let past = |pixels: usize| x1 > pixels as i32;
+    let across = rgb && past(st.rowpixels) || aux && past(st.aux_stride.pixels());
     match buffer_rows(st, y0, y1) {
-        Some((r0, r1)) => x1 > st.rowpixels as i32 || (r1 > height as i32 && r1 > r0.max(0)),
+        Some((r0, r1)) => across || (r1 > height as i32 && r1 > r0.max(0)),
         None => true,
     }
 }
@@ -417,17 +425,15 @@ pub fn triangle(layout: &TileLayout, st: &RasterState, verts: &[(f32, f32); 3]) 
     // rounded vertex coordinates, with a pixel to spare.
     let bound = |f: fn(f32, f32) -> f32, c: fn(&(f32, f32)) -> f32| verts.iter().map(c).fold(c(&verts[0]), f);
     let (minx, maxx) = (bound(f32::min, |v| v.0), bound(f32::max, |v| v.0));
-    let (miny, maxy) = (bound(f32::min, |v| v.1), bound(f32::max, |v| v.1));
     let clamp = |v: f32| v.clamp(-8192.0, 8192.0) as i32;
     let (mut x0, mut x1) = (clamp(minx.floor()) - 1, clamp(maxx.ceil()) + 2);
-    let (y0, y1) = ((clamp(miny.floor()) - 1).max(-2048), (clamp(maxy.ceil()) + 2).min(4096));
-    let Some((mut r0, mut r1)) = buffer_rows(st, y0, y1) else { return Access::PINNED };
+    let Some((r0, r1)) = triangle_rows(st, verts) else {
+        return Access::PINNED;
+    };
     if fbz & 1 != 0 {
-        let (left, right, low, high) = st.clip();
+        let (left, right, _, _) = st.clip();
         x0 = x0.max(left);
         x1 = x1.min(right);
-        r0 = r0.max(low);
-        r1 = r1.min(high);
     }
     let Some(rect) = inside(layout, x0, x1, r0, r1) else { return Access::PINNED };
     let touched = layout.tiles(rect, false);
@@ -450,6 +456,34 @@ pub fn triangle(layout: &TileLayout, st: &RasterState, verts: &[(f32, f32); 3]) 
     }
     access.sampled = textures_read(layout, st);
     access
+}
+
+/// The buffer rows `r0..r1` a triangle with vertices `verts` drawn with
+/// `st` can write: its rounded vertex rows with a pixel to spare, within
+/// the clip rectangle when clipping is on. None if they could wrap around
+/// or a vertex isn't a number.
+pub fn triangle_rows(st: &RasterState, verts: &[(f32, f32); 3]) -> Option<(i32, i32)> {
+    if verts.iter().any(|v| !v.1.is_finite()) {
+        return None;
+    }
+    let miny = verts.iter().map(|v| v.1).fold(f32::INFINITY, f32::min);
+    let maxy = verts.iter().map(|v| v.1).fold(f32::NEG_INFINITY, f32::max);
+    let clamp = |v: f32| v.clamp(-8192.0, 8192.0) as i32;
+    let y0 = (clamp(miny.floor()) - 1).max(-2048);
+    let y1 = (clamp(maxy.ceil()) + 2).min(4096);
+    let (mut r0, mut r1) = buffer_rows(st, y0, y1)?;
+    if st.fbz_mode & 1 != 0 {
+        let (_, _, low, high) = st.clip();
+        r0 = r0.max(low);
+        r1 = r1.min(high);
+    }
+    Some((r0, r1))
+}
+
+/// The buffer rows a fastfill of rows `y0..y1` drawn with `st` writes;
+/// None if they could wrap around.
+pub fn fill_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
+    buffer_rows(st, y0, y1)
 }
 
 /// Whether `st` draws with rows or an auxiliary buffer other than the

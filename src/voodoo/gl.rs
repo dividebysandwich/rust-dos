@@ -2688,7 +2688,6 @@ pub(crate) mod tests {
     fn texels_are_the_cards_levels_where_no_buffer_is_shown() {
         use super::*;
         use crate::voodoo::mirror::{DrawState, Layout, Level, Scanout, Surface, TexUnit, Texture};
-        use crate::voodoo::raster::Stride;
         let t = test_context("Level scale");
         let gl = t.gl;
         // Level 0 red, level 1 green; the triangles at level 1, point
@@ -2798,8 +2797,6 @@ pub(crate) mod tests {
                             layout: Layout {
                                 width: 8,
                                 height: 8,
-                                stride: Stride::linear(8),
-                                aux_stride: Stride::linear(8),
                                 color: vec![0],
                                 aux: None,
                             },
@@ -2841,7 +2838,6 @@ pub(crate) mod tests {
     fn constant_depth_comparison_writes_interpolated_depth() {
         use super::*;
         use crate::voodoo::mirror::{DrawState, Layout};
-        use crate::voodoo::raster::Stride;
         let t = test_context("Depth regression");
         let gl = t.gl;
         for samples in [1, 4] {
@@ -2864,8 +2860,6 @@ pub(crate) mod tests {
                         layout: Layout {
                             width: 8,
                             height: 8,
-                            stride: Stride::linear(8),
-                            aux_stride: Stride::linear(8),
                             color: vec![0, 64],
                             aux: Some(128),
                         },
@@ -3885,7 +3879,6 @@ pub(crate) mod tests {
     fn benchmark_dithering() {
         use super::*;
         use crate::voodoo::mirror::{DrawState, Layout};
-        use crate::voodoo::raster::Stride;
         let t = test_context("Dither benchmark");
         let gl = &t.gl;
         let state = DrawState {
@@ -3935,8 +3928,6 @@ pub(crate) mod tests {
                 layout: Layout {
                     width: 640,
                     height: 480,
-                    stride: Stride::linear(640),
-                    aux_stride: Stride::linear(640),
                     color: vec![0],
                     aux: None,
                 },

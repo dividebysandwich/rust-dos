@@ -11,12 +11,11 @@
 //! read back (`banshee_2d_write`).
 
 use super::blit2d::{Op, Plan, Unplanned};
+use crate::voodoo::Voodoo;
 use crate::voodoo::blit::rgb888;
 use crate::voodoo::mirror::{
-    Blit, BlitSource, BufferCopy, Command, Convert, Fill, LayoutKey, Plane,
+    Blit, BlitSource, BufferCopy, BufferKey, Command, Convert, Fill, LayoutKey, Plane,
 };
-use crate::voodoo::raster::Stride;
-use crate::voodoo::{NONE, Voodoo};
 
 /// Where a surface of the engine's lies among the 3D buffers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,21 +34,19 @@ enum Place {
 /// each from its first byte, its rows as the buffer's, and the rectangle
 /// is within the buffer.
 fn place(key: &LayoutKey, plane: &Plane, [_, _, right, bottom]: [u32; 4]) -> Place {
-    let same = |base: u32, stride: Stride| {
-        plane.start == base
+    let same = |b: &BufferKey| {
+        plane.start == b.at
             && plane.bpp == 2
-            && plane.tiled == stride.tiled
-            && plane.stride as usize == stride.words * 2
+            && plane.tiled == b.stride.tiled
+            && plane.stride as usize == b.stride.words * 2
     };
-    let colour = key.color.iter().filter(|&&offs| offs != NONE);
-    let colour = colour.map(|&offs| (offs, key.stride, Place::Colour(offs / 2)));
-    let aux = (key.aux != NONE).then_some((key.aux, key.aux_stride, Place::Aux));
-    let within = right <= key.width && bottom <= key.height;
+    let colour = key.colors().map(|b| (b, Place::Colour(b.at / 2)));
+    let aux = key.aux.is_some().then_some((&key.aux, Place::Aux));
     colour
         .chain(aux)
-        .find(|&(base, stride, _)| same(base, stride))
-        .filter(|_| within)
-        .map_or(Place::Elsewhere, |(_, _, place)| place)
+        .find(|&(b, _)| same(b))
+        .filter(|&(b, _)| right <= b.width && bottom <= key.height)
+        .map_or(Place::Elsewhere, |(_, place)| place)
 }
 
 impl Voodoo {
@@ -171,11 +168,11 @@ impl Voodoo {
                 }
                 // The renderer clears its depth buffer through a colour
                 // buffer's picture, which has it.
-                let Some(&colour) = key.color.iter().find(|&&offs| offs != NONE) else {
+                let Some(colour) = key.colors().next() else {
                     return Err("no_colour_buffer");
                 };
                 let fill = Fill {
-                    dest: colour / 2,
+                    dest: colour.at / 2,
                     rect,
                     color: None,
                     aux: Some(value as u16),
