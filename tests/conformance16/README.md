@@ -1,10 +1,10 @@
 # Win16 conformance tests
 
 Wine's conformance tests ported to Windows 3.1 programs, for the
-built-in Windows's Win16 layer. `tests/win16_conformance_tests.rs`
-builds each with OpenWatcom (`wcl`, large model, `-bt=windows`) and
-runs it under the built-in Windows as Windows 95 would run it. Its
-results must be those in `expected.txt`.
+built-in Windows's Win16 layer. `tests/win16/win16_conformance_tests.rs`
+builds each with OpenWatcom (`wcl`, large model, `-bt=windows`) and runs
+it under the built-in Windows as Windows 95 would run it. Its results
+must be those in `expected.txt`.
 
 ## Where they come from
 
@@ -42,9 +42,9 @@ where `.github/workflows/conformance.yml` installs the snapshot
 `expected.txt` was made with.
 
 ```sh
-cargo test --release --test win16_conformance_tests
-CONFORMANCE_ONLY=user/win cargo test --release --test win16_conformance_tests -- --nocapture
-CONFORMANCE_BLESS=1 cargo test --release --test win16_conformance_tests
+cargo test --release --test win16 win16_conformance_tests::
+CONFORMANCE_ONLY=user/win cargo test --release --test win16 win16_conformance_tests:: -- --nocapture
+CONFORMANCE_BLESS=1 cargo test --release --test win16 win16_conformance_tests::
 ```
 
 ## License

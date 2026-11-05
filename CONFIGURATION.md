@@ -1735,9 +1735,9 @@ PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
 for play. PLAYER.EXE is a common name (Millennia's intro player has it
 too), so only the one with DSWAP.EXE beside it is skipped.
 
-To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of
-its own, the game, the reason, and how to recognise it; a test that
-runs it (`tests/game_fixes_tests.rs`, or `tests/exec_tests.rs` for a
+To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
+own, the game, the reason, and how to recognise it; a test that runs it
+(`tests/program/game_fixes_tests.rs`, or `tests/dos/exec_tests.rs` for a
 program skipped as it starts); and a row in the table above.
 
 ## RetroAchievements

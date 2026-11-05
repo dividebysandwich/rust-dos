@@ -1181,7 +1181,7 @@ the card into `<dir>/trace.txt`, and the registers, texture memory and
 the machine's RAM at the first four renders and every thousandth (every
 `RUST_DOS_POWERVR_TRACE_EVERY`th) as
 `render-N.regs`, `.tex` and `.ram`. `RUST_DOS_POWERVR_SNAPSHOT=<dir>/render-N
-cargo test --release --test powervr_tests -- --ignored renders_a_snapshot`
+cargo test --release --test video powervr_tests::renders_a_snapshot -- --ignored`
 renders one into `render-N.png`, and prints the time it took.
 
 ### Rendition Vérité games

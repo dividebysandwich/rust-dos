@@ -354,7 +354,7 @@ and require the same machine: `a_profile_leaves_the_machine_as_it_would_be`
 in `src/debug/determinism_tests.rs` starts a profile partway through the
 program that uses every device and compares the whole save state, the
 picture, the sound and the instruction count at each stop;
-`a_profile_leaves_ring_changes_as_they_would_be` in `tests/pm_tests.rs`
+`a_profile_leaves_ring_changes_as_they_would_be` in `tests/cpu/pm_tests.rs`
 does the same for the ring changes, call gates and thunks the profile
 notes in protected mode.
 

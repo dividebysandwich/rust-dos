@@ -1,9 +1,10 @@
 # Game regression suite
 
-`tests/game_suite.rs` plays real DOS games on the emulator. The games are
-shareware and freeware: Doom, Heretic, Duke Nukem 3D, Descent, Raptor,
-Wolfenstein 3D, Commander Keen, Jill of the Jungle, Cosmo, Duke Nukum,
-Scorched Earth, and the early PC games Alley Cat, Digger, Sopwith and Rogue.
+`tests/program/game_suite.rs` plays real DOS games on the emulator. The
+games are shareware and freeware: Doom, Heretic, Duke Nukem 3D, Descent,
+Raptor, Wolfenstein 3D, Commander Keen, Jill of the Jungle, Cosmo, Duke
+Nukum, Scorched Earth, and the early PC games Alley Cat, Digger, Sopwith and
+Rogue.
 
 Each game is played on machines set up in many ways:
 
@@ -18,9 +19,9 @@ The suite is opt-in and local. It downloads about 20 MB of games on first
 use, and it never runs in CI or in a plain `cargo test`.
 
 ```sh
-cargo test --release --test game_suite -- --ignored --nocapture        # fetch, install, play
-cargo test --release --test game_suite -- --ignored fetch --nocapture  # only download and install
-cargo test --release --test game_suite -- --ignored suite --nocapture  # only play
+cargo test --release --test program game_suite:: -- --ignored --nocapture       # fetch, install, play
+cargo test --release --test program game_suite::fetch -- --ignored --nocapture  # only download and install
+cargo test --release --test program game_suite::suite -- --ignored --nocapture  # only play
 ```
 
 Always use a release build. On a 16-core machine a full run takes about a
@@ -47,7 +48,7 @@ A scenario fails in any of these cases:
 - a check doesn't hold;
 - a `Listen` hears silence;
 - the emulator panics;
-- a hash differs from the golden file in `tests/gamesuite/golden/`.
+- a hash differs from the golden file in `tests/program/gamesuite/golden/`.
 
 The machines are deterministic, so every run has to give the same hashes:
 
@@ -81,7 +82,7 @@ After a change that alters a game's picture or sound on purpose, check the
 new pictures, then re-record:
 
 ```sh
-GAME_SUITE_BLESS=1 cargo test --release --test game_suite -- --ignored suite --nocapture
+GAME_SUITE_BLESS=1 cargo test --release --test program game_suite::suite -- --ignored --nocapture
 ```
 
 ## Known failures
@@ -94,7 +95,7 @@ No scenario is marked at present.
 
 ## Adding a game
 
-Everything about the games is in `tests/gamesuite/catalog.rs`.
+Everything about the games is in `tests/program/gamesuite/catalog.rs`.
 
 1. Add an `archive!` with the download URL and the archive's SHA-256.
 2. Add a `Game` to `games()`. Archives that run as they are use
@@ -116,7 +117,8 @@ Everything about the games is in `tests/gamesuite/catalog.rs`.
 
 ## How the harness runs a machine
 
-`tests/gamesuite/machine.rs` builds the machine the way `src/main.rs` does:
+`tests/program/gamesuite/machine.rs` builds the machine the way
+`src/main.rs` does:
 
 - `config::parse` of the scenario's INI text;
 - `Settings::from_config`;

@@ -664,7 +664,7 @@ A `.SCR` can also be run from the prompt by its name, for example
   - They run as Windows 98 SE (`win32_version=98se`), so
     that the functions Windows 98 added are there for the tests that
     use them.
-  - `tests/conformance_tests.rs` builds them with MinGW and runs each
+  - `tests/win32/conformance_tests.rs` builds them with MinGW and runs each
     under the built-in Windows: all but msvcrt's as 486 code linked with
     a small C runtime of rust-dos's own on KERNEL32, so they test the
     built-in DLLs alone; msvcrt's linked with the built-in MSVCRT.DLL,
@@ -685,7 +685,7 @@ A `.SCR` can also be run from the prompt by its name, for example
   seven of USER's and nine of GDI's, each cut from the Win32 test of
   the same functions in the 1.2.3 tree to what Windows 3.1 has, and a
   test of the DPMI services written here.
-  `tests/win16_conformance_tests.rs` builds them with OpenWatcom and
+  `tests/win16/win16_conformance_tests.rs` builds them with OpenWatcom and
   checks their results against `expected.txt` as the Win32 tests are
   checked. CI runs them in the conformance workflow with a pinned
   OpenWatcom snapshot.
@@ -874,7 +874,7 @@ that has it.
 Wine 11.0's `msacm32.dll` with its IMA ADPCM codec, `imaadp32.acm`,
 encodes 16-bit PCM to IMA ADPCM and decodes it back through
 `acmStreamOpen` and `acmStreamConvert`, and the samples match a decoder
-written from the format's definition (`tests/wine_dlls.rs`, which runs
+written from the format's definition (`tests/win32/wine_dlls.rs`, which runs
 when WINE_DLLS names the folder). It takes
 `win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
 exports and no codecs, for programs that only ask it how large a wave
