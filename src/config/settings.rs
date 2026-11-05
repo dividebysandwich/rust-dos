@@ -351,7 +351,7 @@ impl Settings {
             mouse_capture_messages: config.mouse_capture_messages.unwrap_or(default.mouse_capture_messages),
             mouse_menu_hold: config.mouse_menu_hold.unwrap_or(default.mouse_menu_hold),
             pause_in_settings: config.pause_in_settings.unwrap_or(default.pause_in_settings),
-            version_check: config.version_check.unwrap_or(default.version_check),
+            version_check: config.version_check.map_or(default.version_check, |v| v.is_on()),
             almanac_auto: config.almanac_auto.unwrap_or(default.almanac_auto),
             rewind: config.rewind.unwrap_or(default.rewind),
             rewind_memory: config.rewind_memory.unwrap_or(default.rewind_memory),

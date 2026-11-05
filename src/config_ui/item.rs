@@ -572,6 +572,9 @@ impl Item {
     pub(super) fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
+            // Off for good in a copy shipped with a game: a switch that
+            // does nothing would only puzzle.
+            Item::VersionCheck => !crate::version_check::turned_off(),
             Item::VrScene
             | Item::VrSpatialAudio
             | Item::VrScreenFit

@@ -274,7 +274,8 @@
 #pause_in_settings=true
 # Ask rust-dos.com at startup whether a newer version is out, and say so
 # over the picture and under the box above the first prompt: true (the
-# default) or false.
+# default), false, or never (off, and left out of the settings window,
+# for a copy shipped with a game and kept at one version).
 #version_check=true
 # The machine-wide run lock, which lets a timing measurement run alone
 # among scripted runs (CONFIGURATION.md, "The run lock"): on (the

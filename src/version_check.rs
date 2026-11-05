@@ -3,6 +3,13 @@
 //! the first DOS prompt and as a notification over the picture. The answer
 //! is kept in rust-dos's directory, for the box of a start whose answer
 //! doesn't come in time.
+//!
+//! A copy shipped with a game and kept at one version turns the check off
+//! for good with `version_check=never` in its configuration file. The
+//! setting then leaves the settings window too, so it can't be turned back
+//! on there, and saving the settings keeps the line as it is.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What the website says the latest release is: `{"version": "1.6.0",
 /// "published": "..."}`.
@@ -14,6 +21,34 @@ pub const SITE: &str = "rust-dos.com";
 /// The file in rust-dos's directory with the version last answered.
 #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
 const REMEMBERED: &str = "latest-version";
+
+/// The configuration file's `version_check`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setting {
+    On,
+    Off,
+    /// Off, and out of the settings window: for a copy shipped with a game.
+    Never,
+}
+
+impl Setting {
+    pub fn is_on(self) -> bool {
+        self == Setting::On
+    }
+}
+
+/// The check is off for good in this run.
+static TURNED_OFF: AtomicBool = AtomicBool::new(false);
+
+/// Turn the check off for good in this run (`version_check=never`).
+pub fn turn_off() {
+    TURNED_OFF.store(true, Ordering::Relaxed);
+}
+
+/// Whether the check is off for good, and its setting hidden.
+pub fn turned_off() -> bool {
+    TURNED_OFF.load(Ordering::Relaxed)
+}
 
 /// The version in version.json's text.
 pub fn parse(text: &str) -> Result<String, String> {

@@ -67,6 +67,39 @@ D:
 
 Mistakes in the file are printed as warnings; the emulator still starts.
 
+### Shipping Rust-DOS with a game
+
+A store or an installer that ships Rust-DOS with a game, and keeps it at
+the version it tested, sets it up like this:
+
+* Ship one configuration file for the machine, `rust-dos.conf`, next to
+  the executable or passed with `--config FILE`. Put
+  `version_check=never` in its `[emulator]` section: Rust-DOS then never
+  asks rust-dos.com for a newer version or says there is one, and the
+  setting is left out of the settings window. It has to be in this file:
+  a game profile's settings apply only when the game launches, after the
+  check would have started.
+* Put each way of starting the game (the game, its setup program, a
+  network game) in a [game profile](#game-profiles) in the `games` folder
+  beside that file, and give each its own shortcut:
+  `rust-dos --config rust-dos.conf --game "Setup"`. This is what GOG's
+  pairs of DOSBox files (`dosboxGame.conf` and `dosboxGame_single.conf`)
+  become; `--import` turns them into profiles.
+
+Rust-DOS needs no internet connection. Nothing it does online is needed
+to run a game, and each request runs on a thread of its own with a time
+limit, so without a connection it goes on as it would with one:
+
+* The version check (off with `never`) waits at most a second at
+  startup, and a failure only goes to the console.
+* The sound ROM, Glide overlay and VR scene downloads, and the modem
+  phonebook's list of boards, are asked for only from the settings
+  window, and say there when they fail.
+* RetroAchievements asks the site only for a player who has logged in
+  (a saved login logs in again at startup), on its own thread.
+* `almanac_auto` is off by default. When it is on, a program started
+  from the prompt waits up to ten seconds for the almanac's answer.
+
 ### `[emulator]`
 
 * `scale` is the window scale factor. `-s/--scale` overrides it.
@@ -556,8 +589,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   notification over the picture and in a line under the box above the
   first DOS prompt. When the answer is slow to come, the line names the
   version the last check found, and the notification follows once the
-  answer is in. `true` (the default) or `false`. Deterministic mode and
-  the debug server never check.
+  answer is in. `true` (the default), `false`, or `never`. Deterministic
+  mode and the debug server never check. `never` is for a copy shipped
+  with a game and kept at one version: the check is off, the setting
+  leaves the settings window so it can't be turned back on there, and
+  saving the settings keeps the line. See [Shipping Rust-DOS with a
+  game](#shipping-rust-dos-with-a-game).
 * `run_lock` is the machine-wide [run lock](#the-run-lock): `on` (the
   default), `off`, or the directory to keep it in, relative to the
   configuration file's directory.
