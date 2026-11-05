@@ -34,7 +34,7 @@ fn b(v: u32) -> bool {
 
 /// A function this library has only as a name: the log says it was
 /// called.
-fn missing(cpu: &mut Cpu, name: &str) -> Option<u32> {
+pub(super) fn missing(cpu: &mut Cpu, name: &str) -> Option<u32> {
     if cpu.bus.logs() {
         cpu.bus
             .log_string(&format!("[W32] GLIDE2X: {} is not implemented", name));
@@ -44,7 +44,7 @@ fn missing(cpu: &mut Cpu, name: &str) -> Option<u32> {
 
 macro_rules! missing {
     ($($handler:ident $name:literal),* $(,)?) => {
-        $(fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+        $(pub(super) fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
             missing(cpu, $name)
         })*
     };
@@ -123,20 +123,20 @@ fn tex_info(cpu: &mut Cpu, at: u32) -> Option<(TexInfo, u32)> {
 }
 
 /// `len` bytes at `at`.
-fn bytes(cpu: &mut Cpu, at: u32, len: usize) -> Option<Vec<u8>> {
+pub(super) fn bytes(cpu: &mut Cpu, at: u32, len: usize) -> Option<Vec<u8>> {
     let mut data = vec![0; len];
     cpu.bus.guest_read_bytes(at, &mut data);
     (!cpu.bus.guest_faulted()).then_some(data)
 }
 
 /// The bytes of a mipmap level's texels as the program passes them.
-fn level_len(aspect: u32, lod: u32, format: u32) -> usize {
+pub(super) fn level_len(aspect: u32, lod: u32, format: u32) -> usize {
     let (w, h) = api::level_size(aspect.min(6), lod.min(8));
     (w * h * if format >= api::TEXFMT_16BIT { 2 } else { 1 }) as usize
 }
 
 /// The bytes of all a texture's levels.
-fn mipmap_len(info: &TexInfo) -> usize {
+pub(super) fn mipmap_len(info: &TexInfo) -> usize {
     if info.large_lod > info.small_lod || info.small_lod > 8 {
         return 0;
     }
@@ -147,12 +147,12 @@ fn mipmap_len(info: &TexInfo) -> usize {
 
 // --- Initialisation and the board ---
 
-fn gr_glide_init(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_glide_init(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
 /// grGlideShutdown: the screen back, if this process has the card.
-fn gr_glide_shutdown(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_glide_shutdown(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let pid = crate::win32::user32::current_pid(cpu);
     if state(cpu).owner == pid {
         api::close(cpu);
@@ -160,7 +160,7 @@ fn gr_glide_shutdown(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_glide_get_version(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_glide_get_version(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let version = match api::card(cpu) {
         Some(hw::Card::Voodoo1) | None => "Glide Version 2.43",
         _ => "Glide Version 2.53",
@@ -219,7 +219,7 @@ fn hwconfig(cpu: &mut Cpu) -> Option<[u8; HWCONFIG_SIZE]> {
 }
 
 /// grSstQueryHardware: the board, or FALSE without a 3dfx card.
-fn gr_sst_query_hardware(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_query_hardware(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some(config) = hwconfig(cpu) else {
         cpu.bus.guest_write_32(a[0], 0);
         return Some(FALSE);
@@ -229,19 +229,19 @@ fn gr_sst_query_hardware(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 }
 
 /// grSstQueryBoards: how many boards there are.
-fn gr_sst_query_boards(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_query_boards(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let n = api::query(cpu).is_some() as u32;
     cpu.bus.guest_write_32(a[0], n);
     Some(TRUE)
 }
 
-fn gr_sst_select(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_select(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
 /// grSstWinOpen: resolutions by number only (GR_RESOLUTION_NONE, a
 /// window's size, is for the Voodoo Rush).
-fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some((w, h)) = api::resolution_size(a[1]) else {
         return Some(FALSE);
     };
@@ -249,7 +249,7 @@ fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(ok as u32)
 }
 
-fn gr_sst_win_close(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_win_close(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let pid = crate::win32::user32::current_pid(cpu);
     if state(cpu).owner == pid {
         api::close(cpu);
@@ -257,11 +257,11 @@ fn gr_sst_win_close(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_sst_screen_width(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_screen_width(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::screen_size(cpu).0)
 }
 
-fn gr_sst_screen_height(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_screen_height(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::screen_size(cpu).1)
 }
 
@@ -269,7 +269,7 @@ fn gr_sst_screen_height(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// card and GR_CONTROL_DEACTIVATE takes it away. The codes for a window
 /// that resizes or moves have nothing to do on a full screen, and a
 /// process that hasn't the card open has nothing to do at all.
-fn gr_sst_control(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_control(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     const ACTIVATE: u32 = 1;
     const DEACTIVATE: u32 = 2;
     let pid = crate::win32::user32::current_pid(cpu);
@@ -284,33 +284,33 @@ fn gr_sst_control(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(if done { TRUE } else { FALSE })
 }
 
-fn gr_sst_idle(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_idle(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_sst_is_busy(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_is_busy(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::sst_is_busy(cpu) as u32)
 }
 
-fn gr_sst_status(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_status(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::sst_status(cpu))
 }
 
-fn gr_sst_v_retrace_on(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_v_retrace_on(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::sst_vretrace_on(cpu) as u32)
 }
 
-fn gr_sst_video_line(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_video_line(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::sst_video_line(cpu))
 }
 
-fn gr_sst_origin(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_origin(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::sst_origin(cpu, a[0]);
     Some(0)
 }
 
 /// grSstPerfStats: the card's pixel counters (GrSstPerfStats_t).
-fn gr_sst_perf_stats(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_perf_stats(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     use crate::voodoo::regs::*;
     if cpu.bus.voodoo.is_none() {
         return Some(0);
@@ -329,14 +329,14 @@ fn gr_sst_perf_stats(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_sst_reset_perf_stats(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_sst_reset_perf_stats(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     if cpu.bus.voodoo.is_some() {
         hw::write(cpu, hw::ALL, crate::voodoo::regs::NOP_CMD, 1);
     }
     Some(0)
 }
 
-fn gr_tri_stats(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tri_stats(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let [drawn, processed] = state(cpu).gc.triangles;
     if !cpu.bus.guest_probe(a[0], 4, true) || !cpu.bus.guest_probe(a[1], 4, true) {
         return None;
@@ -346,36 +346,36 @@ fn gr_tri_stats(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_reset_tri_stats(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_reset_tri_stats(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     state(cpu).gc.triangles = [0; 2];
     Some(0)
 }
 
-fn gr_check_for_room(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_check_for_room(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_glide_shameless_plug(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_glide_shameless_plug(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_error_set_callback(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_error_set_callback(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     state(cpu).gc.error_callback = a[0];
     Some(0)
 }
 
-fn gr_hints(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_hints(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::hints(cpu, a[0], a[1]);
     Some(0)
 }
 
-fn gr_glide_get_state(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_glide_get_state(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let s = api::get_state(cpu);
     cpu.bus.guest_write_bytes(a[0], &s);
     Some(0)
 }
 
-fn gr_glide_set_state(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_glide_set_state(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let data = bytes(cpu, a[0], api::STATE_SIZE)?;
     let mut s = [0; api::STATE_SIZE];
     s.copy_from_slice(&data);
@@ -385,107 +385,107 @@ fn gr_glide_set_state(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 
 // --- State ---
 
-fn gr_alpha_blend_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_alpha_blend_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::alpha_blend_function(cpu, a[0], a[1], a[2], a[3]);
     Some(0)
 }
 
-fn gr_alpha_combine(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_alpha_combine(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::alpha_combine(cpu, a[0], a[1], a[2], a[3], b(a[4]));
     Some(0)
 }
 
-fn gr_alpha_controls_itrgb_lighting(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_alpha_controls_itrgb_lighting(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::alpha_controls_itrgb_lighting(cpu, b(a[0]));
     Some(0)
 }
 
-fn gr_alpha_test_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_alpha_test_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::alpha_test_function(cpu, a[0]);
     Some(0)
 }
 
-fn gr_alpha_test_reference_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_alpha_test_reference_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::alpha_test_reference_value(cpu, a[0] & 0xFF);
     Some(0)
 }
 
-fn gr_chromakey_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_chromakey_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::chromakey_mode(cpu, a[0]);
     Some(0)
 }
 
-fn gr_chromakey_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_chromakey_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::chromakey_value(cpu, a[0]);
     Some(0)
 }
 
-fn gr_clip_window(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_clip_window(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::clip_window(cpu, a[0], a[1], a[2], a[3]);
     Some(0)
 }
 
-fn gr_color_combine(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_color_combine(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::color_combine(cpu, a[0], a[1], a[2], a[3], b(a[4]));
     Some(0)
 }
 
-fn gr_color_mask(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_color_mask(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::color_mask(cpu, b(a[0]), b(a[1]));
     Some(0)
 }
 
-fn gr_constant_color_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_constant_color_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::constant_color_value(cpu, a[0]);
     Some(0)
 }
 
-fn gr_constant_color_value4(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_constant_color_value4(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::constant_color_value4(cpu, f(a[0]), f(a[1]), f(a[2]), f(a[3]));
     Some(0)
 }
 
-fn gr_cull_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_cull_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::cull_mode(cpu, a[0]);
     Some(0)
 }
 
-fn gr_depth_bias_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_depth_bias_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::depth_bias_level(cpu, a[0] as u16 as i16);
     Some(0)
 }
 
-fn gr_depth_buffer_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_depth_buffer_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::depth_buffer_function(cpu, a[0]);
     Some(0)
 }
 
-fn gr_depth_buffer_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_depth_buffer_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::depth_buffer_mode(cpu, a[0]);
     Some(0)
 }
 
-fn gr_depth_mask(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_depth_mask(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::depth_mask(cpu, b(a[0]));
     Some(0)
 }
 
-fn gr_disable_all_effects(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_disable_all_effects(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     api::disable_all_effects(cpu);
     Some(0)
 }
 
-fn gr_dither_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_dither_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::dither_mode(cpu, a[0]);
     Some(0)
 }
 
-fn gr_fog_color_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_fog_color_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::fog_color_value(cpu, a[0]);
     Some(0)
 }
 
-fn gr_fog_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_fog_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     // Glide 2's sources of fog end at iterated Z: a higher one, such as
     // the HAL's own FOG_WITH_ITERATED_W, turns fog off as in Glide.
     let mut mode = a[0];
@@ -496,7 +496,7 @@ fn gr_fog_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_fog_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_fog_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let data = bytes(cpu, a[0], api::FOG_TABLE_SIZE)?;
     let mut table = [0; api::FOG_TABLE_SIZE];
     table.copy_from_slice(&data);
@@ -504,38 +504,38 @@ fn gr_fog_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(0)
 }
 
-fn gr_gamma_correction_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_gamma_correction_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::gamma_correction_value(cpu, f(a[0]));
     Some(0)
 }
 
-fn gr_render_buffer(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_render_buffer(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::render_buffer(cpu, a[0]);
     Some(0)
 }
 
 // --- Drawing ---
 
-fn gr_draw_triangle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_draw_triangle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (p, q, r) = (vertex(cpu, a[0])?, vertex(cpu, a[1])?, vertex(cpu, a[2])?);
     api::draw_triangle(cpu, &p, &q, &r);
     Some(0)
 }
 
-fn gr_draw_line(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_draw_line(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (p, q) = (vertex(cpu, a[0])?, vertex(cpu, a[1])?);
     api::draw_line(cpu, &p, &q);
     Some(0)
 }
 
-fn gr_draw_point(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_draw_point(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let p = vertex(cpu, a[0])?;
     api::draw_point(cpu, &p);
     Some(0)
 }
 
 /// grDrawPolygon and grDrawPlanarPolygon: vertices by their indices.
-fn gr_draw_polygon(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_draw_polygon(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let n = a[0].min(1024);
     let mut list = Vec::with_capacity(n as usize);
     for i in 0..n {
@@ -553,36 +553,36 @@ fn gr_draw_polygon(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 }
 
 /// grDrawPolygonVertexList and grDrawPlanarPolygonVertexList.
-fn gr_draw_polygon_vertex_list(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_draw_polygon_vertex_list(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let list = vertices(cpu, a[0], a[1])?;
     api::draw_polygon(cpu, &list);
     Some(0)
 }
 
 /// grAADrawTriangle: drawn without its antialiased edges.
-fn gr_aa_draw_triangle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_aa_draw_triangle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gr_draw_triangle(cpu, a)
 }
 
 // --- Buffers ---
 
-fn gr_buffer_clear(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_buffer_clear(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::buffer_clear(cpu, a[0], a[1] & 0xFF, a[2] & 0xFFFF);
     Some(0)
 }
 
-fn gr_buffer_swap(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_buffer_swap(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::buffer_swap(cpu, a[0]);
     Some(0)
 }
 
-fn gr_buffer_num_pending(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gr_buffer_num_pending(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(api::buffer_num_pending(cpu))
 }
 
 // --- The linear frame buffer ---
 
-fn gr_lfb_lock(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_lock(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     if !cpu.bus.guest_probe(a[5], 20, true) {
         return None;
     }
@@ -602,32 +602,32 @@ fn gr_lfb_lock(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
-fn gr_lfb_unlock(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_unlock(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(api::lfb_unlock(cpu, a[0], a[1]) as u32)
 }
 
-fn gr_lfb_constant_alpha(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_constant_alpha(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::lfb_constant_alpha(cpu, a[0]);
     Some(0)
 }
 
-fn gr_lfb_constant_depth(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_constant_depth(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::lfb_constant_depth(cpu, a[0]);
     Some(0)
 }
 
-fn gr_lfb_write_color_format(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_write_color_format(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::lfb_write_color_format(cpu, a[0]);
     Some(0)
 }
 
-fn gr_lfb_write_color_swizzle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_write_color_swizzle(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::lfb_write_color_swizzle(cpu, b(a[0]), b(a[1]));
     Some(0)
 }
 
 /// grLfbReadRegion: 16-bit pixels into rows `dst_stride` apart.
-fn gr_lfb_read_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_read_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let [buffer, x, y, w, h, stride, dst] = a[..7].try_into().ok()?;
     if w == 0 || h == 0 || w > 2048 || h > 2048 || x > 2048 || y > 2048 {
         return Some(FALSE);
@@ -652,7 +652,7 @@ fn gr_lfb_read_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 
 /// grLfbWriteRegion: pixels from rows `src_stride` apart, a signed
 /// stride (an image stored bottom up has a negative one).
-fn gr_lfb_write_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_lfb_write_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let [buffer, x, y, format, w, h, stride, src] = a[..8].try_into().ok()?;
     if w == 0 || h == 0 || w > 2048 || h > 2048 || x > 2048 || y > 2048 {
         return Some(FALSE);
@@ -673,7 +673,7 @@ fn gr_lfb_write_region(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 
 // --- Textures ---
 
-fn gr_tex_calc_mem_required(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_calc_mem_required(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let info = TexInfo {
         small_lod: a[0],
         large_lod: a[1],
@@ -687,79 +687,79 @@ fn gr_tex_calc_mem_required(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     ))
 }
 
-fn gr_tex_texture_mem_required(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_texture_mem_required(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (info, _) = tex_info(cpu, a[1])?;
     Some(api::tex_texture_mem_required(cpu, a[0], &info))
 }
 
-fn gr_tex_min_address(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_min_address(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(api::tex_min_address(cpu, a[0]))
 }
 
-fn gr_tex_max_address(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_max_address(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(api::tex_max_address(cpu, a[0]))
 }
 
-fn gr_tex_source(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_source(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (info, _) = tex_info(cpu, a[3])?;
     api::tex_source(cpu, a[0], a[1], a[2], &info);
     Some(0)
 }
 
-fn gr_tex_multibase(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_multibase(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_multibase(cpu, a[0], b(a[1]));
     Some(0)
 }
 
-fn gr_tex_multibase_address(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_multibase_address(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (info, _) = tex_info(cpu, a[4])?;
     api::tex_multibase_address(cpu, a[0], a[1], a[2], a[3], &info);
     Some(0)
 }
 
-fn gr_tex_clamp_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_clamp_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_clamp_mode(cpu, a[0], a[1], a[2]);
     Some(0)
 }
 
-fn gr_tex_combine(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_combine(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_combine(cpu, a[0], a[1], a[2], a[3], a[4], b(a[5]), b(a[6]));
     Some(0)
 }
 
-fn gr_tex_combine_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_combine_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gu::tex_combine_function(cpu, a[0], a[1]);
     Some(0)
 }
 
-fn gr_tex_detail_control(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_detail_control(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_detail_control(cpu, a[0], a[1] as i32, a[2] & 0xFF, f(a[3]));
     Some(0)
 }
 
-fn gr_tex_filter_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_filter_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_filter_mode(cpu, a[0], a[1], a[2]);
     Some(0)
 }
 
-fn gr_tex_lod_bias_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_lod_bias_value(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_lod_bias_value(cpu, a[0], f(a[1]));
     Some(0)
 }
 
-fn gr_tex_mip_map_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_mip_map_mode(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_mipmap_mode(cpu, a[0], a[1], b(a[2]));
     Some(0)
 }
 
-fn gr_tex_ncc_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_ncc_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     api::tex_ncc_table(cpu, a[0], a[1]);
     Some(0)
 }
 
 /// The packed registers of a GuNccTable at `data`, which follow its Y,
 /// I and Q.
-fn ncc_table(cpu: &mut Cpu, data: u32) -> Option<[u32; 12]> {
+pub(super) fn ncc_table(cpu: &mut Cpu, data: u32) -> Option<[u32; 12]> {
     let raw = bytes(cpu, data.wrapping_add(64), 48)?;
     Some(std::array::from_fn(|i| {
         u32::from_le_bytes([raw[4 * i], raw[4 * i + 1], raw[4 * i + 2], raw[4 * i + 3]])
@@ -768,7 +768,7 @@ fn ncc_table(cpu: &mut Cpu, data: u32) -> Option<[u32; 12]> {
 
 /// An NCC table (GuNccTable) or a palette (GuTexPalette) for texture
 /// unit `tmu`, entries `start` to `end` of a palette.
-fn download_table(
+pub(super) fn download_table(
     cpu: &mut Cpu,
     tmu: u32,
     kind: u32,
@@ -793,15 +793,15 @@ fn download_table(
     Some(0)
 }
 
-fn gr_tex_download_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_download_table(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     download_table(cpu, a[0], a[1], a[2], 0, 255)
 }
 
-fn gr_tex_download_table_partial(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_download_table_partial(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     download_table(cpu, a[0], a[1], a[2], a[3], a[4])
 }
 
-fn gr_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (info, data) = tex_info(cpu, a[3])?;
     let texels = bytes(cpu, data, mipmap_len(&info))?;
     api::tex_download_mipmap(cpu, a[0], a[1], a[2], &info, &texels);
@@ -810,7 +810,7 @@ fn gr_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 
 /// Rows `t0` to `t1` of a level, from `data`.
 #[allow(clippy::too_many_arguments)]
-fn download_level(cpu: &mut Cpu, a: &[u32], t0: u32, t1: u32) -> Option<u32> {
+pub(super) fn download_level(cpu: &mut Cpu, a: &[u32], t0: u32, t1: u32) -> Option<u32> {
     let [tmu, start, lod, large, aspect, format, even_odd, data] = a[..8].try_into().ok()?;
     if lod > 8 || aspect > 6 {
         return Some(0);
@@ -828,33 +828,33 @@ fn download_level(cpu: &mut Cpu, a: &[u32], t0: u32, t1: u32) -> Option<u32> {
     Some(0)
 }
 
-fn gr_tex_download_mip_map_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_download_mip_map_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     download_level(cpu, a, 0, 255)
 }
 
-fn gr_tex_download_mip_map_level_partial(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gr_tex_download_mip_map_level_partial(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     download_level(cpu, a, a[8], a[9])
 }
 
 // --- The utility library ---
 
-fn gu_alpha_source(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_alpha_source(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gu::alpha_source(cpu, a[0]);
     Some(0)
 }
 
-fn gu_color_combine_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_color_combine_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gu::color_combine_function(cpu, a[0]);
     Some(0)
 }
 
-fn gu_tex_combine_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_combine_function(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gu::tex_combine_function(cpu, a[0], a[1]);
     Some(0)
 }
 
 /// guFogTableIndexToW: a float, returned on the FPU's stack.
-fn gu_fog_table_index_to_w(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_fog_table_index_to_w(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     cpu.fpu_push_f64(gu::fog_table_index_to_w(a[0] as i32) as f64);
     Some(0)
 }
@@ -864,33 +864,33 @@ fn write_fog(cpu: &mut Cpu, at: u32, table: &[u8; api::FOG_TABLE_SIZE]) -> Optio
     Some(0)
 }
 
-fn gu_fog_generate_exp(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_fog_generate_exp(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     write_fog(cpu, a[0], &gu::fog_generate_exp(f(a[1])))
 }
 
-fn gu_fog_generate_exp2(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_fog_generate_exp2(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     write_fog(cpu, a[0], &gu::fog_generate_exp2(f(a[1])))
 }
 
-fn gu_fog_generate_linear(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_fog_generate_linear(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     write_fog(cpu, a[0], &gu::fog_generate_linear(f(a[1]), f(a[2])))
 }
 
-fn gu_endian_swap_bytes(_: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_endian_swap_bytes(_: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some((a[0] as u16).swap_bytes() as u32)
 }
 
-fn gu_endian_swap_words(_: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_endian_swap_words(_: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(a[0].rotate_left(16))
 }
 
-fn gu_draw_triangle_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_draw_triangle_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let (p, q, r) = (vertex(cpu, a[0])?, vertex(cpu, a[1])?, vertex(cpu, a[2])?);
     gu::draw_triangle_with_clip(cpu, &p, &q, &r);
     Some(0)
 }
 
-fn gu_draw_polygon_vertex_list_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_draw_polygon_vertex_list_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let list = vertices(cpu, a[0], a[1])?;
     gu::draw_polygon_with_clip(cpu, &list);
     Some(0)
@@ -911,7 +911,7 @@ fn mipmap_from(m: &mut MipMap, a: &[u32]) {
     m.filter = [a[7], a[8]];
 }
 
-fn gu_tex_allocate_memory(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_allocate_memory(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let mut m = MipMap {
         tmu: a[0],
         even_odd: a[1] & 0xFF,
@@ -926,7 +926,7 @@ fn gu_tex_allocate_memory(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 }
 
 /// guTexChangeAttributes: an argument of -1 keeps what the texture had.
-fn gu_tex_change_attributes(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_change_attributes(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let ok = gu::tex_change_attributes(cpu, a[0], |m| {
         let keep = |arg: u32, old: u32| if arg == u32::MAX { old } else { arg };
         m.width = keep(a[1], m.width);
@@ -944,27 +944,27 @@ fn gu_tex_change_attributes(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(ok as u32)
 }
 
-fn gu_tex_source(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_source(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gu::tex_source(cpu, a[0]);
     Some(0)
 }
 
-fn gu_tex_get_current_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_get_current_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(gu::tex_current(cpu, a[0]))
 }
 
-fn gu_tex_mem_query_avail(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_mem_query_avail(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     Some(gu::tex_mem_query_avail(cpu, a[0]))
 }
 
-fn gu_tex_mem_reset(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_mem_reset(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     gu::tex_mem_reset(cpu);
     Some(0)
 }
 
 /// guTexDownloadMipMap: all the texture's levels, and its NCC table
 /// for a YIQ texture, which the texture keeps for guTexSource.
-fn gu_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some(m) = gu::mipmap(cpu, a[0]) else {
         return Some(0);
     };
@@ -981,7 +981,7 @@ fn gu_tex_download_mip_map(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 
 /// guTexDownloadMipMapLevel: one level from `*src`, which moves on
 /// past it.
-fn gu_tex_download_mip_map_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_tex_download_mip_map_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     let Some(m) = gu::mipmap(cpu, a[0]) else {
         return Some(0);
     };
@@ -1014,7 +1014,7 @@ fn gu_tex_download_mip_map_level(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
 }
 
 /// guAADrawTriangleWithClip: clipped, without antialiased edges.
-fn gu_aa_draw_triangle_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
+pub(super) fn gu_aa_draw_triangle_with_clip(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
     gu_draw_triangle_with_clip(cpu, a)
 }
 

@@ -1,9 +1,9 @@
 //! The built-in DLLs as files in the system directory, C:\WINDOWS\SYSTEM,
 //! as Windows has its DLLs there: programs and setups that look for a DLL
 //! by its file (open it, GetFileAttributes, FindFirstFile) find the ones
-//! LoadLibrary would load, GLIDE2X.DLL with a 3dfx card. MPROFILE.EXE,
-//! Xenocracy's hardware profiler, opens C:\WINDOWS\SYSTEM\GLIDE2X.DLL to
-//! tell whether the machine has Glide.
+//! LoadLibrary would load, GLIDE2X.DLL and GLIDE3X.DLL with a 3dfx
+//! card. MPROFILE.EXE, Xenocracy's hardware profiler, opens
+//! C:\WINDOWS\SYSTEM\GLIDE2X.DLL to tell whether the machine has Glide.
 //!
 //! Each file is a PE image of the DLL: its headers, sections and export
 //! directory as the DLL is mapped in a process, with the functions the

@@ -33,7 +33,7 @@ impl Bus {
         }
         self.vga.mark_dirty_full();
         self.clock.schedule(self.next_event());
-        // GLIDE2X.DLL comes and goes with the card.
+        // Glide's DLLs come and go with the card.
         crate::win32::dll_files::sync(self);
     }
 
