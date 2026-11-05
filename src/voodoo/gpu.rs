@@ -237,13 +237,12 @@ impl Voodoo {
         }
         // A job the backlog can't place in its tiles may still lie within
         // the recording's buffers, which is all the renderer needs.
-        let inside = !access.pinned || self.gpu_fill_inside(job);
         let takes = self.gpu_reads
             && !self.gpu_alpha.get()
-            && inside
             && !access.kept
             && self.gpu.borrow().link.is_some()
-            && !(self.banshee.is_some() && self.software_picture);
+            && !(self.banshee.is_some() && self.software_picture)
+            && (!access.pinned || self.gpu_fill_inside(job));
         if !takes {
             return None;
         }
@@ -275,33 +274,37 @@ impl Voodoo {
         else {
             return false;
         };
-        let Some(key) = self.banshee.as_ref().and(self.mirror_layout()) else {
+        if self.banshee.is_none() {
+            return false;
+        }
+        let Some(key) = self.mirror_layout() else {
             return false;
         };
-        let (top, bottom) = if st.fbz_mode & (1 << 17) != 0 {
-            (st.yorigin as i32 + 1 - y1, st.yorigin as i32 + 1 - y0)
-        } else {
-            (*y0, *y1)
+        // The buffer rows, as the backlog counts them.
+        let Some((top, bottom)) = super::backlog::buffer_rows(st, *y0, *y1) else {
+            return false;
         };
-        let within = |b: &BufferKey, base: usize, stride| {
-            b.at as usize == 2 * base
-                && b.stride == stride
+        let within = |b: &BufferKey, stride| {
+            b.stride == stride
                 && *x0 >= 0
                 && *x1 <= b.width as i32
                 && top >= 0
                 && bottom <= key.height as i32
         };
         let rgb = st.fbz_mode & (1 << 9) != 0;
-        let aux = st.fbz_mode & (1 << 10) != 0 && st.aux.is_some();
+        let aux = st.fbz_mode & (1 << 10) != 0;
         let colour_in = || {
             let buffer = key.color_at(st.dest as u32 * 2);
-            buffer.is_some_and(|b| within(b, st.dest, st.stride))
+            buffer.is_some_and(|b| within(b, st.stride))
         };
-        let aux_in = || {
-            let base = st.aux.unwrap_or(usize::MAX);
-            key.aux.is_some() && within(&key.aux, base, st.aux_stride)
+        let aux_in = |base: usize| {
+            let buffer = key.buffer(None).filter(|b| b.at as usize == 2 * base);
+            buffer.is_some_and(|b| within(b, st.aux_stride))
         };
-        (rgb || aux) && (!rgb || colour_in()) && (!aux || aux_in())
+        match st.aux.filter(|_| aux) {
+            Some(base) => (!rgb || colour_in()) && aux_in(base),
+            None => rgb && colour_in(),
+        }
     }
 
     /// Whether the colour buffer the 3D engine draws into (colBufferAddr)
@@ -1288,8 +1291,9 @@ impl GpuLink for TestRenderer {
 
     fn read_buffer(&mut self, dest: Option<u32>, (top, bottom): (u32, u32), out: &mut [u16]) -> bool {
         // Whole rows of the renderer's pictures, which are as wide as the
-        // layout's widest buffer.
-        assert_eq!(out.len() % (bottom - top) as usize, 0);
+        // layout's widest buffer: 640 pixels in the tests that use it,
+        // whatever the width of the buffer read.
+        assert_eq!(out.len(), 640 * (bottom - top) as usize);
         out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
         self.0
             .borrow_mut()

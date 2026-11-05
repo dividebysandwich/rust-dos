@@ -337,7 +337,7 @@ impl Access {
 
 /// Rows `y0..y1` as a triangle or fastfill counts them, as buffer rows
 /// `r0..r1` (the Y origin applied); None if they could wrap around.
-fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
+pub(crate) fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
     if y0 >= y1 {
         return Some((0, 0));
     }
