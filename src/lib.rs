@@ -49,6 +49,7 @@ pub mod fat;
 pub mod fdc;
 pub mod file_commands;
 pub mod filter_commands;
+pub mod fixed_vec;
 pub mod games;
 pub mod hardware;
 pub use rust_dos_hostdirs as hostdirs;
