@@ -1639,10 +1639,38 @@ pub(crate) mod tests {
         let mut rows = vec![0u8; 128 * 64];
         v.banshee_memory_read(SMALL, &mut rows);
         assert_eq!(reads(&log), [format!("read {:?} 0..64", Some(SMALL / 2))]);
-        let value = (0x1234 ^ SMALL / 2) as u16;
+        let value = (0x1234 ^ (SMALL / 2)) as u16;
         let pixels = rows.as_chunks::<2>().0;
         assert!(pixels.iter().all(|p| u16::from_le_bytes(*p) == value));
         assert_eq!(v.fbi.ram.get((SMALL + 128 * 64) as usize / 2), 0);
+    }
+
+    #[test]
+    fn a_clear_leaves_the_rows_past_its_clip_in_memory() {
+        // The renderer draws a job's rows, those of its clip rectangle:
+        // memory past them, such as a texture after a smaller render
+        // target, isn't read back from the renderer's picture of the
+        // buffer, which is as high as the desktop (64 rows here).
+        const TARGET: u32 = 0x50_0000;
+        let log = Rc::default();
+        let mut v = gpu_card(Some(&log));
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        frame_of_render_targets(&mut v);
+        frame_of_render_targets(&mut v);
+        for _ in 0..2 {
+            frame_of_render_targets(&mut v);
+            render_target(&mut v, TARGET, 128, 64);
+            reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 16);
+            reg3d(&mut v, FBZ_MODE, 1 | 1 << 9);
+            reg3d(&mut v, FASTFILL_CMD, 0);
+            v.take_mirror();
+        }
+        log.borrow_mut().clear();
+        let mut rows = vec![0u8; 128 * 16];
+        v.banshee_memory_read(TARGET + 128 * 32, &mut rows);
+        assert!(reads(&log).is_empty(), "{:?}", reads(&log));
+        v.banshee_memory_read(TARGET, &mut rows);
+        assert_eq!(reads(&log), [format!("read {:?} 0..16", Some(TARGET / 2))]);
     }
 
     #[test]

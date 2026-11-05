@@ -15,7 +15,7 @@
 //! that its copy of the memory is never behind the operations recorded:
 //! a read back then only has to read.
 
-use super::backlog::Access;
+use super::backlog::{self, Access};
 #[cfg(test)]
 use super::mirror::Plane;
 use super::mirror::{
@@ -339,15 +339,16 @@ impl Voodoo {
     }
 
     /// The bytes of the memory a job left to the renderer draws into, as
-    /// all the rows of its buffers: its colour buffer and the auxiliary
-    /// buffer, or every colour buffer for a job of another kind. On a
-    /// Banshee they are the recording's buffers, None if the job draws
-    /// colours into one the recording doesn't have.
+    /// rows of its buffers: of its colour buffer and the auxiliary buffer
+    /// the rows a triangle or a fastfill can write (`job_rows`), or all the
+    /// rows of every colour buffer for a job of another kind. On a Banshee
+    /// they are the recording's buffers, None if the job draws colours
+    /// into one the recording doesn't have.
     fn gpu_job_bytes(&self, job: &Job) -> Option<JobBytes> {
         let mut bytes = [None; SLOTS];
         let mut n = 0;
         let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
-            if base != NONE && n < bytes.len() {
+            if base != NONE && rows.0 < rows.1 && n < bytes.len() {
                 bytes[n] = Some(row_bytes(base / 2, stride, rows));
                 n += 1;
             }
@@ -358,9 +359,10 @@ impl Voodoo {
             match job {
                 Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
                     let dest = st.dest as u32 * 2;
+                    let rows = job_rows(job, key.height);
                     if st.fbz_mode & (1 << 9) != 0 {
                         let buffer = key.color_at(dest)?;
-                        mark(dest, buffer.stride, all);
+                        mark(dest, buffer.stride, rows);
                     }
                     // The auxiliary buffer, if a triangle tests or writes
                     // depth, or uses alpha planes there (whose alpha it
@@ -372,7 +374,7 @@ impl Voodoo {
                         _ => 1 << 4 | 1 << 10 | 1 << 18,
                     };
                     if st.fbz_mode & aux != 0 {
-                        mark(key.aux.at, key.aux.stride, all);
+                        mark(key.aux.at, key.aux.stride, rows);
                     }
                 }
                 _ => {
@@ -388,8 +390,9 @@ impl Voodoo {
         let all = (0, fbi.height);
         match job {
             Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                mark(st.dest as u32 * 2, fbi.stride, all);
-                mark(fbi.auxoffs, fbi.aux_stride, all);
+                let rows = job_rows(job, fbi.height);
+                mark(st.dest as u32 * 2, fbi.stride, rows);
+                mark(fbi.auxoffs, fbi.aux_stride, rows);
             }
             // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
             Job::Rows { base, rows, .. } => {
@@ -1216,6 +1219,21 @@ impl Model {
             }
         }
     }
+}
+
+/// The rows of buffers `height` rows high a triangle or a fastfill can
+/// write, within `0..height`: all of them if they could wrap around.
+fn job_rows(job: &Job, height: u32) -> (u32, u32) {
+    let rows = match job {
+        Job::Triangle { st, verts, .. } => backlog::triangle_rows(st, verts),
+        Job::Fastfill { st, y0, y1, .. } => backlog::fill_rows(st, *y0, *y1),
+        _ => None,
+    };
+    let Some((r0, r1)) = rows else {
+        return (0, height);
+    };
+    let clamp = |r: i32| r.clamp(0, height as i32) as u32;
+    (clamp(r0), clamp(r1).max(clamp(r0)))
 }
 
 /// 8-8-8 as 5-6-5, each channel's top bits.
