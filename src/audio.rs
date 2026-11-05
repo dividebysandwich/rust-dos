@@ -27,7 +27,7 @@ pub trait AudioOutput {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OutputChoice {
     /// SDL's sound device, or the null output in a headless run where
-    /// `SDL_AUDIODRIVER` doesn't name a driver.
+    /// `SDL_AUDIO_DRIVER` doesn't name a driver.
     #[default]
     Auto,
     /// SDL's sound device, headless or not.
@@ -56,7 +56,7 @@ impl OutputChoice {
 
     /// Whether to try SDL's sound device at all. A run with no window
     /// has nobody listening, so it stays off the host's speakers, unless
-    /// `SDL_AUDIODRIVER` asks for a driver by name: that is how a timing
+    /// `SDL_AUDIO_DRIVER` asks for a driver by name: that is how a timing
     /// run asks for a real device, and how SDL's own drivers are tested.
     pub fn wants_sdl(self, headless: bool, driver_named: bool) -> bool {
         match self {
@@ -413,7 +413,7 @@ mod tests {
             !Auto.wants_sdl(true, false),
             "headless runs take the null output"
         );
-        assert!(Auto.wants_sdl(true, true), "SDL_AUDIODRIVER names a driver");
+        assert!(Auto.wants_sdl(true, true), "SDL_AUDIO_DRIVER names a driver");
         assert!(Sdl.wants_sdl(true, false));
         assert!(!Null.wants_sdl(false, true));
         for choice in [Auto, Sdl, Null] {

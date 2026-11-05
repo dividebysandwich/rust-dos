@@ -44,13 +44,13 @@ skill covers what to do on top of that.
      DOSBox configuration) for the machine it wants: pass those settings
      on the command line or with `--config $W/game.conf`.
 3. **Build** a release build of the current `HEAD` (`cargo build
-   --release`; on Linux it needs `libsdl2-dev` and `libasound2-dev`).
+   --release`; on Linux it needs SDL3's and ALSA's development files).
    Record `git rev-parse HEAD`: every finding is against this commit.
 4. **Launch** headless on a free port, with the log in `$W`:
 
    ```sh
    : > $W/rust-dos.out
-   SDL_VIDEODRIVER=dummy \
+   SDL_VIDEO_DRIVER=dummy \
      ./target/release/rust-dos --no-config -d $W/c \
      --debug-server 127.0.0.1:0 > $W/rust-dos.out 2> $W/rust-dos.err &
    echo $! > $W/emu.pid
@@ -59,10 +59,10 @@ skill covers what to do on top of that.
    ```
 
    With no window the sound goes to the null output. Never add
-   `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver doesn't keep real
+   `SDL_AUDIO_DRIVER=dummy`: SDL's dummy audio driver doesn't keep real
    time and must not be used for any measurement. To file a timing
    or underrun finding, rerun it on a real device with `--mute`
-   (`SDL_AUDIODRIVER=wasapi` on Windows), or with `--audio-output null`
+   (`SDL_AUDIO_DRIVER=wasapi` on Windows), or with `--audio-output null`
    on a machine without one, and quote `audio_driver` from `/api/stats`
    or `/api/underruns`.
 

@@ -720,9 +720,9 @@ impl Binding {
 /// What SDL is told before it starts, for the headset to be drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SdlHints {
-    /// SDL_VIDEODRIVER=x11: GLX contexts are X11's.
+    /// SDL_VIDEO_DRIVER=x11: GLX contexts are X11's.
     pub force_x11: bool,
-    /// SDL_VIDEO_X11_FORCE_EGL=1: EGL contexts under X11 too.
+    /// SDL_VIDEO_FORCE_EGL=1: EGL contexts under X11 too.
     pub force_egl: bool,
 }
 

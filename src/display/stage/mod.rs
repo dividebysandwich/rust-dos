@@ -166,7 +166,7 @@ pub fn before_sdl(settings: &VrSettings) {
 /// Write what the OpenXR runtime and OpenGL offer a headset (`--vr-probe`),
 /// with an OpenGL context of its own, as the headset's thread has.
 #[cfg_attr(not(xr), allow(unused_variables))]
-pub fn probe(video: &sdl2::VideoSubsystem, settings: &VrSettings) {
+pub fn probe(video: &sdl3::VideoSubsystem, settings: &VrSettings) {
     #[cfg(xr)]
     headset::probe(video, settings);
     #[cfg(not(xr))]
@@ -183,8 +183,8 @@ impl Stage {
         gl: &glow::Context,
         glsl: Glsl,
         settings: &VrSettings,
-        window: &sdl2::video::Window,
-        main: &sdl2::video::GLContext,
+        window: &sdl3::video::Window,
+        main: &sdl3::video::GLContext,
     ) -> Result<(Self, Vec<String>), String> {
         let mut notes = Vec::new();
         let scene = load(settings.scene.as_deref()).unwrap_or_else(|e| {
@@ -272,8 +272,8 @@ impl Stage {
     fn start_headset(
         &mut self,
         settings: &VrSettings,
-        window: &sdl2::video::Window,
-        main: &sdl2::video::GLContext,
+        window: &sdl3::video::Window,
+        main: &sdl3::video::GLContext,
     ) -> Option<String> {
         #[cfg(xr)]
         {
@@ -718,8 +718,8 @@ impl Stage {
         &mut self,
         gl: &glow::Context,
         settings: &VrSettings,
-        window: &sdl2::video::Window,
-        main: &sdl2::video::GLContext,
+        window: &sdl3::video::Window,
+        main: &sdl3::video::GLContext,
     ) -> Vec<String> {
         let mut notes = Vec::new();
         let mut restart = false;

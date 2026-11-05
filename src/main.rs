@@ -1,7 +1,7 @@
 use clap::Parser;
-use sdl2::event::{Event, WindowEvent};
-use sdl2::keyboard::{Keycode, Mod, Scancode};
-use sdl2::mouse::{MouseButton, MouseWheelDirection};
+use sdl3::event::{Event, WindowEvent};
+use sdl3::keyboard::{Keycode, Mod, Scancode};
+use sdl3::mouse::{MouseButton, MouseWheelDirection};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -190,7 +190,7 @@ fn main() -> Result<ExitCode, String> {
     // TODO: Make configurable
     let mut recorder = ScreenRecorder::new(15);
 
-    // SDL2 Setup
+    // SDL3 Setup
     // SDL is told what the headset's session needs of the window's OpenGL
     // context (GLX's under X11, or EGL's), and Xlib is made ready for the
     // headset's thread either way, for a headset turned on in the settings
@@ -201,8 +201,8 @@ fn main() -> Result<ExitCode, String> {
         headset.mode = rust_dos::vr::VrMode::Headset;
     }
     display::before_headset(&headset);
-    let sdl_context = sdl2::init()?;
-    let video_subsystem = sdl_context.video()?;
+    let sdl_context = sdl3::init().map_err(|e| e.to_string())?;
+    let video_subsystem = sdl_context.video().map_err(|e| e.to_string())?;
     // Without a desktop session (started over SSH, say) SDL draws on the
     // display itself: a standalone headset's own, taken from its
     // compositor, which doesn't get it back when Rust-DOS quits.
@@ -225,7 +225,7 @@ fn main() -> Result<ExitCode, String> {
             .eq_ignore_ascii_case("dummy");
     let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
-    let controller_subsystem = match sdl_context.game_controller() {
+    let controller_subsystem = match sdl_context.gamepad() {
         Ok(subsystem) => Some(subsystem),
         Err(e) => {
             eprintln!("[INPUT] No game controllers: {}", e);
@@ -233,7 +233,7 @@ fn main() -> Result<ExitCode, String> {
         }
     };
     // The controllers plugged in, in the order they came.
-    let mut controllers: Vec<sdl2::controller::GameController> = Vec::new();
+    let mut controllers: Vec<sdl3::gamepad::Gamepad> = Vec::new();
 
     // The picture has the size the video mode gives it; the display scales
     // it to the window. The textures are for SDL's renderer, which draws
@@ -254,7 +254,7 @@ fn main() -> Result<ExitCode, String> {
     };
     // Typed text is only wanted in the settings window.
     let text_input = video_subsystem.text_input();
-    text_input.stop();
+    text_input.stop(display.window());
     let host_clipboard = video_subsystem.clipboard();
 
     // Deterministic mode sets the clock before the machine's BIOS reads it.
@@ -274,9 +274,9 @@ fn main() -> Result<ExitCode, String> {
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
     // The 3D scene's own sounds, on a device of their own, where SDL has one.
     let room_audio = audio_output.subsystem();
-    sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix);
-    cpu.bus.mixer.muted = args.mute;
     let mut room_sound = sdl_audio::RoomDevice::new();
+    sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix, &room_sound);
+    cpu.bus.mixer.muted = args.mute;
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
@@ -298,7 +298,7 @@ fn main() -> Result<ExitCode, String> {
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.
     let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
-    let mut event_pump = sdl_context.event_pump()?;
+    let mut event_pump = sdl_context.event_pump().map_err(|e| e.to_string())?;
     // RetroAchievements: the session with the site, and when the game's
     // logic is checked next (emulated PIT ticks, every 1/60 s). Hardcore
     // mode needs the debug server off, which could change memory.
@@ -400,7 +400,7 @@ fn main() -> Result<ExitCode, String> {
         ($on:expr) => {{
             let on = $on;
             if on != mouse_captured {
-                sdl_mouse.set_relative_mouse_mode(on);
+                sdl_mouse.set_relative_mouse_mode(display.window(), on);
                 mouse_captured = on;
             }
             auto_capture.captured &= on;
@@ -573,7 +573,16 @@ fn main() -> Result<ExitCode, String> {
         // frame, which the debug server's journal tells while it holds it.
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
         let mut host_keys = false;
-        for event in event_pump.poll_iter() {
+        for mut event in event_pump.poll_iter() {
+            // The sdl3 crate's Keycode is an enum of SDL's named keys, and
+            // a key whose character has no name there (ü, ß, ù, ², a dead
+            // key) comes with none. The key still goes to the machine by
+            // its scan code, as with any other: it is an unknown keycode.
+            if let Event::KeyDown { keycode: keycode @ None, .. }
+            | Event::KeyUp { keycode: keycode @ None, .. } = &mut event
+            {
+                *keycode = Some(Keycode::Unknown);
+            }
             // The right button held still for the settings window; its
             // release is swallowed once the window opened.
             match &event {
@@ -595,22 +604,29 @@ fn main() -> Result<ExitCode, String> {
             }
             match event {
                 Event::Quit { .. } => break 'running,
+                // SDL3 quits only once every window is closed, and the 3D
+                // scene's headset may have one of its own, never shown.
+                Event::Window { win_event: WindowEvent::CloseRequested, window_id, .. }
+                    if window_id == display.window().id() =>
+                {
+                    break 'running
+                }
                 // Ctrl+Shift and the mouse fly the 3D scene's camera: look
                 // around, drag (left button) to slide, right button or the
                 // wheel to move ahead and back; Home goes back to the start.
                 Event::MouseMotion { xrel, yrel, mousestate, .. } if steering!() => {
                     if mousestate.left() {
-                        display.camera_pan(xrel as f32, yrel as f32);
+                        display.camera_pan(xrel, yrel);
                     } else if mousestate.right() {
-                        display.camera_dolly(-yrel as f32);
+                        display.camera_dolly(-yrel);
                     } else {
-                        display.camera_look(xrel as f32, yrel as f32);
+                        display.camera_look(xrel, yrel);
                     }
                 }
                 Event::MouseButtonDown { .. } | Event::MouseButtonUp { .. } if steering!() => {}
                 Event::MouseWheel { y, direction, .. } if steering!() => {
                     let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
-                    display.camera_dolly(dy as f32 * 20.0);
+                    display.camera_dolly(dy * 20.0);
                 }
                 Event::KeyDown { keycode: Some(keycode @ (Keycode::Home | Keycode::Q | Keycode::E)), keymod, repeat, .. }
                     if display.every_frame()
@@ -633,7 +649,9 @@ fn main() -> Result<ExitCode, String> {
                 }
                 // The pointer left the window: coming back, it captures
                 // the mouse again.
-                Event::Window { win_event: WindowEvent::Leave, .. } if !mouse_captured => auto_capture.armed = true,
+                Event::Window { win_event: WindowEvent::MouseLeave, .. } if !mouse_captured => {
+                    auto_capture.armed = true
+                }
                 // Uncovered, resized or moved to another display: the
                 // picture is drawn again.
                 Event::Window {
@@ -643,7 +661,7 @@ fn main() -> Result<ExitCode, String> {
                         | WindowEvent::Restored
                         | WindowEvent::Maximized
                         | WindowEvent::Resized(..)
-                        | WindowEvent::SizeChanged(..)
+                        | WindowEvent::PixelSizeChanged(..)
                         | WindowEvent::DisplayChanged(..),
                     ..
                 } => display.redraw(),
@@ -1076,21 +1094,23 @@ fn main() -> Result<ExitCode, String> {
 
                 // Game controllers come and go; the first two are the
                 // game port's.
-                Event::ControllerDeviceAdded { which, .. } => {
+                Event::GamepadAdded { which, .. } => {
                     let Some(subsystem) = &controller_subsystem else { continue };
                     match subsystem.open(which) {
-                        Ok(pad) if controllers.iter().all(|c| c.instance_id() != pad.instance_id()) => {
-                            cpu.bus.log_string(&format!("[INPUT] Game controller: {}", pad.name()));
-                            osd.show(format!("Game controller: {}", pad.name()));
+                        Ok(pad) if controllers.iter().all(|c| c.id().ok() != pad.id().ok()) => {
+                            let name = pad.name().unwrap_or_default();
+                            cpu.bus.log_string(&format!("[INPUT] Game controller: {}", name));
+                            osd.show(format!("Game controller: {}", name));
                             controllers.push(pad);
                         }
                         Ok(_) => {}
                         Err(e) => cpu.bus.log_string(&format!("[INPUT] Can't open game controller {}: {}", which, e)),
                     }
                 }
-                Event::ControllerDeviceRemoved { which, .. } => {
-                    if let Some(i) = controllers.iter().position(|c| c.instance_id() == which) {
-                        osd.show(format!("Game controller unplugged: {}", controllers[i].name()));
+                Event::GamepadRemoved { which, .. } => {
+                    if let Some(i) = controllers.iter().position(|c| c.id().ok() == Some(which)) {
+                        let name = controllers[i].name().unwrap_or_default();
+                        osd.show(format!("Game controller unplugged: {}", name));
                         controllers.remove(i);
                     }
                 }
@@ -1118,12 +1138,13 @@ fn main() -> Result<ExitCode, String> {
                     ui.click(fx, fy, &mut host!());
                 }
 
-                Event::MouseWheel { y, direction, .. } if ui.is_open() => {
+                // In whole notches: SDL3 adds them up from a smooth wheel's.
+                Event::MouseWheel { integer_y: y, direction, .. } if ui.is_open() => {
                     let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
                     ui.wheel(dy, &mut host!());
                 }
                 // The game's mapping can bind the mouse's wheel.
-                Event::MouseWheel { y, direction, .. }
+                Event::MouseWheel { integer_y: y, direction, .. }
                     if y != 0
                         && padmap.as_mut().is_some_and(|m| {
                             let up = (y > 0) != matches!(direction, MouseWheelDirection::Flipped);
@@ -1325,7 +1346,7 @@ fn main() -> Result<ExitCode, String> {
         let steer = steering!();
         if steer != steering_mouse {
             if !mouse_captured {
-                sdl_mouse.set_relative_mouse_mode(steer);
+                sdl_mouse.set_relative_mouse_mode(display.window(), steer);
             }
             steering_mouse = steer;
         }
@@ -1493,9 +1514,9 @@ fn main() -> Result<ExitCode, String> {
                 clipboard.clear();
                 capture_mouse!(false);
                 dbg.release_keys(&mut cpu);
-                text_input.start();
+                text_input.start(display.window());
             } else {
-                text_input.stop();
+                text_input.stop(display.window());
                 // Caps and Num Lock may have changed while the window had
                 // the keys.
                 sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
