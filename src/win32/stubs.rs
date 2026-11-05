@@ -162,17 +162,26 @@ pub fn id(dll: usize, api: usize) -> u16 {
 
 /// Whether the function of the id `id`, of a built-in DLL (16-bit modules
 /// have ids of their own), only reads the emulated clock in milliseconds:
-/// GetTickCount or timeGetTime, which programs call in a loop to wait
-/// (`idle::clock_read`).
+/// GetTickCount, timeGetTime, or the system's time (GetSystemTime,
+/// GetLocalTime, GetSystemTimeAsFileTime), which programs call in a loop
+/// to wait (`idle::clock_read`).
 pub fn reads_clock(id: u16) -> bool {
-    static IDS: std::sync::OnceLock<[Option<u16>; 2]> = std::sync::OnceLock::new();
+    static IDS: std::sync::OnceLock<[Option<u16>; 5]> = std::sync::OnceLock::new();
     let find = |dll: &str, name: &str| {
         let dll = find_dll(dll)?;
         let api = DLLS[dll].apis.iter().position(|api| api.name == name)?;
         Some(self::id(dll, api))
     };
-    IDS.get_or_init(|| [find("KERNEL32", "GetTickCount"), find("WINMM", "timeGetTime")])
-        .contains(&Some(id))
+    IDS.get_or_init(|| {
+        [
+            find("KERNEL32", "GetTickCount"),
+            find("WINMM", "timeGetTime"),
+            find("KERNEL32", "GetSystemTimeAsFileTime"),
+            find("KERNEL32", "GetSystemTime"),
+            find("KERNEL32", "GetLocalTime"),
+        ]
+    })
+    .contains(&Some(id))
 }
 
 /// The DLL and function of the id `id`.

@@ -478,6 +478,55 @@ fn a_program_reads_its_static_tls() {
     assert_eq!(code, 0x2A);
 }
 
+/// A wait on the system's time, as Magic & Mayhem's between two lives:
+/// GetSystemTimeAsFileTime until 20 ms have gone. The time moves on with
+/// emulated time, as GetTickCount's count does, though the host's clock
+/// stands still, so the wait ends; one machine skips the passes and the
+/// other runs them all, and they come out the same after every batch.
+#[test]
+fn a_wait_on_the_system_time_moves_with_the_machine_and_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetSystemTimeAsFileTime"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut wait = a.create_label();
+        a.push(l.data)?;
+        a.call(l.import(0))?;
+        a.mov(ebx, dword_ptr(l.data))?;
+        a.set_label(&mut wait)?;
+        a.push(l.data)?;
+        a.call(l.import(0))?;
+        // FILETIME counts 100 ns: 20 ms is 200,000 of them.
+        a.mov(eax, dword_ptr(l.data))?;
+        a.sub(eax, ebx)?;
+        a.cmp(eax, 200_000)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start("system_time_wait_plain", CoreMode::Normal, false);
+    let mut skipping = start("system_time_wait_skipping", CoreMode::Dynamic, true);
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, _| {});
+    if let Err(e) = run {
+        panic!("{e}
+  {:?}", skipping.bus.observe.stats);
+    }
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(skipping.errorlevel, 0x2A, "{:?}", skipping.bus.observe.stats);
+    let stats = &skipping.bus.observe.stats;
+    assert!(stats.proofs >= 10, "a proof for most milliseconds: {stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
 /// A frame limiter that calls GetTickCount or timeGetTime until the time
 /// comes: one machine skips the passes and the other runs them all, and
 /// they must come out the same after every batch, each of the milliseconds

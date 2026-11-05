@@ -358,6 +358,9 @@ pub struct Win32 {
     /// time rather than at the next interrupt. Worked out again after a
     /// load.
     pub(crate) wait_due: Option<u64>,
+    /// Where the system's time was taken from the machine's clock
+    /// (`kernel32::time::now`). Worked out again after a load.
+    pub(crate) system_clock: Option<kernel32::time::Anchor>,
     /// How many times programs have called functions of the system's
     /// modules, built-in or missing (`service`), to tell whether a thread
     /// called anything between two polls.
@@ -1474,4 +1477,5 @@ crate::state_fields!(Win32 {
     dll_files,
     trace,
     wait_due,
+    system_clock,
 });
