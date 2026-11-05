@@ -213,6 +213,7 @@ impl Voodoo {
         };
         if shown {
             self.display_dirty = true;
+            self.front_drawn.set(true);
         }
         if !self.drawn_to.contains(&dest) {
             self.drawn_to.push(dest);

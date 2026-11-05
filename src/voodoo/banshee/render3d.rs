@@ -239,9 +239,10 @@ impl Voodoo {
         self.backlog.borrow_mut().swapped();
         let addr = self.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF;
         let current = self.retraces(now.ns);
+        let mark = self.swap_mark();
         if data & 1 == 0 {
             self.last_swap = current;
-            self.banshee_show(addr);
+            self.banshee_show(addr, mark);
             return;
         }
         let interval = ((data >> 1) & 0xFF) as u64;
@@ -251,12 +252,14 @@ impl Voodoo {
         self.swaps.push_back(PendingSwap { retrace, due });
         if let Some(b) = &mut self.banshee {
             b.overlay_queue.push_back(addr);
+            self.swap_marks.push_back(mark);
         }
         effect.reschedule = true;
     }
 
-    /// A swap happened: the overlay shows `addr`.
-    fn banshee_show(&mut self, addr: u32) {
+    /// A swap happened: the overlay shows `addr`, which needs the jobs up
+    /// to batch `mark` drawn (`swap_mark`).
+    fn banshee_show(&mut self, addr: u32, mark: Option<u64>) {
         if let Some(b) = &mut self.banshee {
             b.overlay_addr = addr;
             b.swap_count = b.swap_count.saturating_sub(1);
@@ -264,6 +267,7 @@ impl Voodoo {
         }
         self.swapped += 1;
         self.display_dirty = true;
+        self.front_jobs = mark.map(|number| (number, self.shown_key()));
     }
 
     /// `retired` swaps happened: their buffers shown, and the command
@@ -274,8 +278,10 @@ impl Voodoo {
                 .banshee
                 .as_mut()
                 .and_then(|b| b.overlay_queue.pop_front());
+            // After a load the swaps have no batches: wait for all.
+            let mark = self.swap_marks.pop_front().flatten();
             if let Some(addr) = addr {
-                self.banshee_show(addr);
+                self.banshee_show(addr, mark);
             }
         }
         if retired > 0 && self.swaps.is_empty() {
@@ -401,6 +407,56 @@ pub(crate) mod tests {
             float(v, FSTART_G, rgb.1);
             float(v, FSTART_B, rgb.2);
             reg3d(v, FTRIANGLE_CMD, 0);
+        }
+    }
+
+    /// After a swap the picture waits for the jobs given out before it,
+    /// and the next frame's go on drawing beside the program; unless one
+    /// of those draws into what is shown, or the card shows something
+    /// else since, which wait for all.
+    #[test]
+    fn the_picture_waits_for_the_frame_a_swap_shows() {
+        use super::super::super::workers::{Job, Word};
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let shown = 0x10_0000;
+        for change in ["drawn into", "desktop moved"] {
+            let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+            let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+            v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+            // The frame shown: a word of the buffer at 100000h.
+            let word = Word { row: 0, at: shown / 2, value: 0x1234 };
+            let fb = v.fbi.ram.clone();
+            v.submit_outside(Job::Pixels { fb, words: vec![word] }, None);
+            reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
+            reg3d(&mut v, SWAPBUFFER_CMD, 0);
+            // The next frame's jobs, held.
+            let gate: Arc<(Mutex<bool>, Condvar)> = Arc::default();
+            v.submit_outside(Job::Hold(gate.clone()), None);
+            v.catch_up_shown();
+            assert_eq!(v.fbi.ram.get(shown as usize / 2), 0x1234);
+            assert!(v.pool.busy(), "the next frame waits at the gate");
+
+            match change {
+                "drawn into" => v.mark_drawn(shown as usize / 2),
+                _ => {
+                    v.write(VID_DESKTOP_START_ADDR, 0x20_0000, u32::MAX, Now::default());
+                }
+            }
+            let returned = AtomicBool::new(false);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    assert!(!returned.load(Ordering::SeqCst), "{change}: it waits for all");
+                    *gate.0.lock().unwrap() = true;
+                    gate.1.notify_all();
+                });
+                v.catch_up_shown();
+                returned.store(true, Ordering::SeqCst);
+            });
+            assert!(!v.pool.busy(), "{change}");
         }
     }
 

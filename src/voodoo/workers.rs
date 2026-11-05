@@ -362,6 +362,33 @@ impl Pool {
         self.publish(batch);
     }
 
+    /// Give out what is pending, and the number of the last batch given
+    /// out: `wait_for` it waits for the jobs submitted so far.
+    pub fn mark(&self) -> u64 {
+        if self.workers == 0 {
+            return 0;
+        }
+        self.give_out();
+        self.shared.queue.lock().unwrap().last
+    }
+
+    /// Wait until every worker drew batch `number` (from `mark`) and those
+    /// before it, leaving the later ones drawing. A worker's panic comes
+    /// back here.
+    pub fn wait_for(&self, number: u64) {
+        if self.workers == 0 {
+            return;
+        }
+        let mut queue = self.shared.queue.lock().unwrap();
+        while queue.done.iter().any(|&d| d < number) {
+            queue = self.shared.idle.wait(queue).unwrap();
+        }
+        if let Some(panic) = queue.panic.take() {
+            drop(queue);
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     /// Whether jobs are waiting or being drawn.
     pub fn busy(&self) -> bool {
         if self.workers == 0 {

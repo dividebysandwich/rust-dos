@@ -359,6 +359,9 @@ pub struct Effect {
     pub settle: bool,
 }
 
+/// What the card shows (`Voodoo::shown_key`).
+type ShownKey = (u32, u32, u32);
+
 /// A swap waiting for the vertical retrace it is due at: the retrace's
 /// number (`CrtTiming::retraces`) and when it begins, in PIT ticks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -572,6 +575,17 @@ pub struct Voodoo {
     /// they last finished.
     pool: workers::Pool,
     drawn_to: Vec<usize>,
+    /// What the picture shown needs drawn (`catch_up_shown`): the last
+    /// batch given out before the swap that showed it, and what the card
+    /// showed then (`shown_key`). None where that isn't known: no swap
+    /// since a load or a reset, or jobs held back then.
+    front_jobs: Option<(u64, ShownKey)>,
+    /// The same for each Banshee swap waiting for its retrace, beside
+    /// its `overlay_queue`.
+    swap_marks: VecDeque<Option<u64>>,
+    /// A job given out or waiting since the workers last finished draws
+    /// into a buffer shown.
+    front_drawn: Cell<bool>,
     /// Jobs were given to the workers since they last finished, and the
     /// texture units queued triangles read.
     outstanding: Cell<bool>,
@@ -698,6 +712,9 @@ impl Voodoo {
             palette_dirty: true,
             pool: workers::Pool::new(workers),
             drawn_to: Vec::new(),
+            front_jobs: None,
+            swap_marks: VecDeque::new(),
+            front_drawn: Cell::new(false),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
             footprint: RefCell::new(Footprint::default()),
@@ -768,6 +785,8 @@ impl Voodoo {
         self.stats = Stats::default();
         self.clut = default_clut();
         self.swaps.clear();
+        self.swap_marks.clear();
+        self.front_jobs = None;
         self.last_swap = 0;
         self.fifo_writes = 0;
         self.capped_at = 0;
@@ -1006,6 +1025,7 @@ impl Voodoo {
         self.submit_words();
         self.release_backlog();
         self.pool.flush();
+        self.front_drawn.set(false);
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
         self.footprint.borrow_mut().clear();
@@ -1508,19 +1528,66 @@ impl Voodoo {
             // Jobs may still be drawing into what it shows. Those that draw
             // elsewhere, into the next frame, go on beside the program.
             if draw && self.writes_queue() {
-                self.flush();
+                self.catch_up_shown();
             }
             return draw;
         }
         // Jobs may still be drawing into the buffer shown.
         let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
         if front != NONE && self.drawn_to.contains(&(front as usize / 2)) {
-            self.flush();
+            self.catch_up_shown();
         }
         if self.palette_dirty {
             self.build_palette();
         }
         changed || switched
+    }
+
+    /// Wait for the jobs the picture shown needs: those given out before
+    /// the swap that showed it (`front_jobs`), while the card still shows
+    /// what it showed then and nothing given out or waiting since draws
+    /// into what it shows. The later ones draw the next frame into
+    /// another buffer, beside the program. Where that isn't known, wait
+    /// for all of them.
+    fn catch_up_shown(&mut self) {
+        match self.front_jobs {
+            Some((number, key))
+                if key == self.shown_key()
+                    && !self.front_drawn.get()
+                    && self.words.borrow().is_empty()
+                    && self.backlog.borrow().is_empty()
+                    && !self.gpu_behind.get() =>
+            {
+                self.pool.wait_for(number)
+            }
+            _ => self.flush(),
+        }
+    }
+
+    /// The batch the jobs submitted so far end with, given out (with the
+    /// frame buffer writes waiting): what a swap now needs drawn before
+    /// the buffer it shows is. None while jobs are held back for the
+    /// OpenGL renderer, which `catch_up_shown` doesn't wait for apart.
+    pub(crate) fn swap_mark(&self) -> Option<u64> {
+        if self.recording() || !self.backlog.borrow().is_empty() {
+            return None;
+        }
+        self.submit_words();
+        Some(self.pool.mark())
+    }
+
+    /// What the card shows: a Banshee's video processor setup and the
+    /// addresses of its desktop and overlay, or the front buffer of the
+    /// others. A swap's `front_jobs` hold while it stays the same.
+    fn shown_key(&self) -> ShownKey {
+        match &self.banshee {
+            Some(b) => (
+                b.reg(banshee::VID_PROC_CFG),
+                b.reg(banshee::VID_DESKTOP_START_ADDR),
+                b.overlay_addr,
+            ),
+            None => (self.fbi.rgboffs[self.fbi.frontbuf as usize], 0, 0),
+        }
     }
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
@@ -1666,7 +1733,9 @@ impl Voodoo {
     }
 
     fn swap_now(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        let mark = self.swap_mark();
         self.rotate_buffers();
+        self.front_jobs = mark.map(|number| (number, self.shown_key()));
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
             self.last_swap = current;
@@ -1820,6 +1889,9 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        // The swaps' batches were the workers' before the load.
+        self.swap_marks.clear();
+        self.front_jobs = None;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().tracker.mark_all();
         self.gpu_behind.set(false);
