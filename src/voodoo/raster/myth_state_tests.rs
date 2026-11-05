@@ -1,54 +1,5 @@
-use super::tests::two_unit_state;
+use super::tests::{draw_rows, first_difference, same_as_generic, two_unit_state};
 use super::*;
-
-/// A triangle's parameters with every iterator moving, so that the
-/// texture's level of detail and the colours change along a scanline and
-/// down the rows.
-fn parameters() -> TriParams {
-    let tp = TmuParams {
-        starts: 10 << 32,
-        startt: 20 << 32,
-        startw: 1 << 32,
-        dsdx: 3 << 28,
-        dtdx: 1 << 27,
-        dwdx: 1 << 20,
-        dsdy: 1 << 27,
-        dtdy: 3 << 28,
-        dwdy: 1 << 20,
-        lodbase: 0,
-    };
-    TriParams {
-        startr: 100 << 12,
-        startg: 50 << 12,
-        startb: 20 << 12,
-        starta: 200 << 12,
-        startz: 0x4000 << 12,
-        startw: 1 << 32,
-        drdx: 1 << 10,
-        dadx: -(1 << 10),
-        dzdx: 1 << 14,
-        dwdx: 1 << 20,
-        dzdy: -(1 << 13),
-        dwdy: 1 << 20,
-        tmu: [tp, tp],
-        ..Default::default()
-    }
-}
-
-/// 48 rows of `st` drawn with variant `index` (None: the generic code):
-/// the stipple and counters after them.
-fn draw(st: &RasterState, index: Option<usize>) -> (u32, Stats) {
-    let p = parameters();
-    let (mut stipple, mut stats) = (0x1234_5678, Stats::default());
-    for y in 0..48 {
-        scanline_as(index, 2, st, &p, y, 0, 320, &mut stipple, &mut stats);
-    }
-    (stipple, stats)
-}
-
-fn same_memory(a: &RasterState, b: &RasterState) -> Option<usize> {
-    (0..a.fb.len()).find(|&i| a.fb.get(i) != b.fb.get(i))
-}
 
 /// The states with the most area in a saved Myth scene (Crow's Bridge),
 /// and the same colour path and combines with the units' highlights and
@@ -107,21 +58,9 @@ const STATES: [[u32; 6]; 6] = [
 #[test]
 fn myths_combine_variant_draws_its_states_as_the_generic_code() {
     for regs in STATES {
-        let selected = two_unit_state(regs);
-        assert_eq!(
-            variant(&selected, 2),
-            Some(VariantId::C3 as usize),
-            "{regs:08X?}"
-        );
-        let generic = two_unit_state(regs);
-        let expected = draw(&generic, None);
-        assert!(expected.1.pixels_out > 0, "{regs:08X?} writes nothing");
-        assert_eq!(
-            draw(&selected, Some(VariantId::C3 as usize)),
-            expected,
-            "{regs:08X?}"
-        );
-        assert_eq!(same_memory(&selected, &generic), None, "{regs:08X?}");
+        let index = variant(&two_unit_state(regs), 2);
+        assert_eq!(index, Some(VariantId::C3 as usize), "{regs:08X?}");
+        same_as_generic(regs, 2, VariantId::C3 as usize);
     }
 }
 
@@ -168,7 +107,11 @@ fn tmu_1s_texture_shows_only_where_tmu_0_reads_it() {
         let a = two_unit_state(regs);
         let mut b = two_unit_state(regs);
         other(&mut b);
-        assert_eq!(draw(&a, None), draw(&b, None));
-        assert_eq!(same_memory(&a, &b).is_some(), read, "textureMode {t0:08X}");
+        assert_eq!(draw_rows(&a, 2, None), draw_rows(&b, 2, None));
+        assert_eq!(
+            first_difference(&a, &b).is_some(),
+            read,
+            "textureMode {t0:08X}"
+        );
     }
 }

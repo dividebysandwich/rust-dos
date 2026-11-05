@@ -1636,6 +1636,76 @@ pub(crate) mod tests {
         }
     }
 
+    /// A triangle's parameters with every iterator moving, so that depth,
+    /// fog, the texture's level of detail and the colours change along a
+    /// scanline and down the rows.
+    pub(crate) fn moving_parameters() -> TriParams {
+        let tp = TmuParams {
+            starts: 10 << 32,
+            startt: 20 << 32,
+            startw: 1 << 32,
+            dsdx: 3 << 28,
+            dtdx: 1 << 27,
+            dwdx: 1 << 20,
+            dsdy: 1 << 27,
+            dtdy: 3 << 28,
+            dwdy: 1 << 20,
+            lodbase: 0,
+        };
+        TriParams {
+            startr: 100 << 12,
+            startg: 50 << 12,
+            startb: 20 << 12,
+            starta: 200 << 12,
+            startz: 0x4000 << 12,
+            startw: 1 << 32,
+            drdx: 1 << 10,
+            dgdx: 1 << 9,
+            dbdx: 1 << 8,
+            dadx: -(1 << 10),
+            dzdx: 1 << 14,
+            dwdx: 1 << 20,
+            drdy: 1 << 9,
+            dzdy: -(1 << 13),
+            dwdy: 1 << 20,
+            tmu: [tp, tp],
+            ..Default::default()
+        }
+    }
+
+    /// 48 rows of `st` with `moving_parameters`, drawn with variant
+    /// `index` (None: the generic code) for `tmus` units: the stipple
+    /// and counters after them.
+    pub(crate) fn draw_rows(st: &RasterState, tmus: usize, index: Option<usize>) -> (u32, Stats) {
+        let p = moving_parameters();
+        let (mut stipple, mut stats) = (0x1234_5678, Stats::default());
+        for y in 0..48 {
+            scanline_as(index, tmus, st, &p, y, 0, 320, &mut stipple, &mut stats);
+        }
+        (stipple, stats)
+    }
+
+    /// The first word two states' colour and depth buffers differ in.
+    pub(crate) fn first_difference(a: &RasterState, b: &RasterState) -> Option<usize> {
+        (0..a.fb.len()).find(|&i| a.fb.get(i) != b.fb.get(i))
+    }
+
+    /// Draw `regs` with variant `index` and with the generic code, and
+    /// require the same memory, counters and stipple.
+    pub(crate) fn same_as_generic(regs: [u32; 6], tmus: usize, index: usize) {
+        let selected = two_unit_state(regs);
+        let generic = two_unit_state(regs);
+        let expected = draw_rows(&generic, tmus, None);
+        assert!(expected.1.pixels_out > 0, "{regs:08X?} writes nothing");
+        assert_eq!(
+            draw_rows(&selected, tmus, Some(index)),
+            expected,
+            "{regs:08X?}"
+        );
+        let differ = first_difference(&selected, &generic);
+        assert_eq!(differ, None, "{regs:08X?} drawn with variant {index}");
+    }
+
     /// The level a pixel in perspective reads follows the texels it
     /// covers: Glide 2.4 says that "an LOD of n is calculated when a pixel
     /// covers approximately 2^2n texels". A floor whose W falls from 1 to
