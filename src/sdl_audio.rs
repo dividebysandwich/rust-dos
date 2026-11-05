@@ -47,7 +47,7 @@ fn spec() -> sdl3::audio::AudioSpec {
 /// may round it; the device's buffer is what SDL says it opened.
 fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream, String> {
     sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", &blocksize.to_string());
-    let mut stream = subsystem
+    let stream = subsystem
         .default_playback_device()
         .open_device_stream(Some(&spec()))
         .map_err(|e| e.to_string())?;
@@ -56,7 +56,7 @@ fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream
     let mut frames = 0;
     // SAFETY: the stream is open, and SDL only fills in the two values.
     let known = unsafe {
-        let device = sdl3::sys::audio::SDL_GetAudioStreamDevice(stream.stream());
+        let device = sdl3::sys::audio::SDL_GetAudioStreamDevice(stream.raw());
         sdl3::sys::audio::SDL_GetAudioDeviceFormat(device, &mut format, &mut frames)
     };
     let device_frames = if known && frames > 0 { frames as usize } else { blocksize as usize };
@@ -138,7 +138,8 @@ impl Output {
 /// window to go with the sound.
 pub(crate) fn open_output(sdl: &sdl3::Sdl, settings: &Settings, headless: bool) -> Output {
     // (SDL takes an empty value as no value, and picks a device itself.
-    // SDL3 reads SDL_AUDIO_DRIVER, and SDL2's SDL_AUDIODRIVER too.)
+    // SDL3 reads SDL_AUDIO_DRIVER, or the older SDL_AUDIODRIVER when it is
+    // unset.)
     let driver_named = ["SDL_AUDIO_DRIVER", "SDL_AUDIODRIVER"]
         .iter()
         .any(|var| std::env::var_os(var).is_some_and(|name| !name.is_empty()));
@@ -202,7 +203,7 @@ pub(crate) fn attach(
 fn warn_dummy(cpu: &mut Cpu) {
     let warning = "[AUDIO] WARNING: SDL's dummy audio driver is active. It doesn't keep real \
                    time, so underrun counts mean nothing, and no measurement may use it. \
-                   Use a real driver (SDL_AUDIODRIVER=wasapi on Windows) with --mute, or \
+                   Use a real driver (SDL_AUDIO_DRIVER=wasapi on Windows) with --mute, or \
                    --audio-output null without a sound device.";
     eprintln!("{}", warning);
     cpu.bus.log_string(warning);

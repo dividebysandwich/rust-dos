@@ -768,15 +768,15 @@ programs set.
 * `audio_output` (`--audio-output`) is what plays the sound. It is read
   at startup.
   * `auto` (the default) plays on SDL's sound device. A run with no window
-    (`--hidden`, or `SDL_VIDEODRIVER=dummy`) takes the null output
-    instead, unless `SDL_AUDIODRIVER` names a driver, so nothing that
+    (`--hidden`, or `SDL_VIDEO_DRIVER=dummy`) takes the null output
+    instead, unless `SDL_AUDIO_DRIVER` names a driver, so nothing that
     runs unseen comes out of the speakers.
   * `sdl` plays on SDL's sound device, with a window or without.
   * `null` opens no SDL sound device at all. Nothing plays, and the queue
     empties at exactly 44,100 frames a second by the host's clock.
 
   With no sound device to open, `auto` and `sdl` run silent on the null
-  output too. `SDL_AUDIODRIVER=dummy` picks SDL's own dummy driver, which
+  output too. `SDL_AUDIO_DRIVER=dummy` picks SDL's own dummy driver, which
   doesn't keep real time: the log warns about it, and no measurement may
   use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
 * `blocksize` and `prebuffer` set how much sound waits for the host's
@@ -3447,7 +3447,7 @@ in fullscreen on a large screen. At exactly 2x or 3x with `aspect=none`
 the scanlines are sharpest.
 
 The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
-`SDL_VIDEODRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
+`SDL_VIDEO_DRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
 before and says why at startup; the log names what draws the picture.
 Screenshots and video recordings show the shader with `record_shader=true`
 (see `capture_dir` in [`[emulator]`](#emulator)); animations and

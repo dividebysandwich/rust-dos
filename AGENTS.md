@@ -49,7 +49,7 @@ around it.
   and add its `lib\x64` to `LIB` before building.
 - A new shell, a git worktree, or a subagent's shell may not have the
   `LIB` you set elsewhere, so set it in the same command as the build,
-  for example `LIB='C:\SDL3-3.4.10\lib\x64' cargo test` in Git Bash.
+  for example `LIB='C:\SDL3-3.4.20\lib\x64' cargo test` in Git Bash.
 - The tests start the built `rust-dos.exe`, which needs `SDL3.dll` from
   the same folder on `PATH`.
 
@@ -209,14 +209,14 @@ disk.
 - A run that does both takes the timing measurement form only when the
   timing is part of the claim. A reproduction boot that also logs how
   long something took is still heavy, unless that time is quoted.
-- Never use SDL's dummy audio driver (`SDL_AUDIODRIVER=dummy`) for a
+- Never use SDL's dummy audio driver (`SDL_AUDIO_DRIVER=dummy`) for a
   measurement of any kind. It doesn't keep real time and its rate changes
   from run to run, so the sound queue may run dry however well the host
   keeps up, or may not, and a count from it means nothing either way. A
   timing run or an underrun count uses a real device, muted
-  (`SDL_AUDIODRIVER=wasapi` and `--mute` on Windows), or `--audio-output
+  (`SDL_AUDIO_DRIVER=wasapi` and `--mute` on Windows), or `--audio-output
   null` on a machine without one. Other runs with no window need nothing:
-  `SDL_VIDEODRIVER=dummy` or `--hidden` takes the null output. Check
+  `SDL_VIDEO_DRIVER=dummy` or `--hidden` takes the null output. Check
   `audio_driver` in `/api/underruns` or `/api/stats` before quoting a
   result.
 - Run jobs under the machine-wide run lock with `rust-dos-lock`,

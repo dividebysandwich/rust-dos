@@ -142,9 +142,9 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          curl -fsSL -o SDL3-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-VC.zip
+          curl -fsSL -o SDL3-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip
           unzip -q SDL3-devel-VC.zip
-          mv SDL3-3.4.10 SDL3
+          mv SDL3-3.4.20 SDL3
           echo "LIB=${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_ENV"
           echo "INCLUDE=${{ github.workspace }}/SDL3/include" >> "$GITHUB_ENV"
           # SDL3.dll for the program the tests start.
@@ -329,9 +329,9 @@ jobs:
           # SDL3 development libraries for Visual C++. SDL3.dll imports no
           # C runtime and nothing newer than Windows 7 has, so the Windows 7
           # build ships it too.
-          curl -fsSL -o SDL3-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-VC.zip
+          curl -fsSL -o SDL3-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip
           unzip -q SDL3-devel-VC.zip
-          mv SDL3-3.4.10 SDL3
+          mv SDL3-3.4.20 SDL3
           # So the linker finds SDL3.lib
           echo "LIB=${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_ENV"
           echo "INCLUDE=${{ github.workspace }}/SDL3/include" >> "$GITHUB_ENV"
@@ -380,8 +380,8 @@ jobs:
 
       # OpenXR-SDK's CMake stops without the headers of its presentation
       # backend (xlib by default), though the loader uses them for type
-      # definitions only. libsdl2-dev used to bring them in; the SDL3 build
-      # installs them only when its cache misses.
+      # definitions only. The SDL3 build installs them only when its cache
+      # misses.
       - name: Install the OpenXR loader's build dependencies (Linux)
         if: runner.os == 'Linux'
         uses: $/.github/actions/apt-install

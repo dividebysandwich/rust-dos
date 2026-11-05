@@ -1083,9 +1083,9 @@ fn main() -> Result<ExitCode, String> {
 
                 // Game controllers come and go; the first two are the
                 // game port's.
-                Event::ControllerDeviceAdded { which, .. } => {
+                Event::GamepadAdded { which, .. } => {
                     let Some(subsystem) = &controller_subsystem else { continue };
-                    match subsystem.open(sdl3::sys::joystick::SDL_JoystickID(which)) {
+                    match subsystem.open(which) {
                         Ok(pad) if controllers.iter().all(|c| c.id().ok() != pad.id().ok()) => {
                             let name = pad.name().unwrap_or_default();
                             cpu.bus.log_string(&format!("[INPUT] Game controller: {}", name));
@@ -1096,8 +1096,8 @@ fn main() -> Result<ExitCode, String> {
                         Err(e) => cpu.bus.log_string(&format!("[INPUT] Can't open game controller {}: {}", which, e)),
                     }
                 }
-                Event::ControllerDeviceRemoved { which, .. } => {
-                    if let Some(i) = controllers.iter().position(|c| c.id().ok() == Some(sdl3::sys::joystick::SDL_JoystickID(which))) {
+                Event::GamepadRemoved { which, .. } => {
+                    if let Some(i) = controllers.iter().position(|c| c.id().ok() == Some(which)) {
                         let name = controllers[i].name().unwrap_or_default();
                         osd.show(format!("Game controller unplugged: {}", name));
                         controllers.remove(i);

@@ -151,12 +151,12 @@ On Windows (MSVC), take SDL3's Visual C++ development package,
 `SDL3-devel-<version>-VC.zip` from
 [SDL's releases](https://github.com/libsdl-org/SDL/releases) (CI builds
 with
-[3.4.10](https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-VC.zip)),
+[3.4.20](https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip)),
 unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL3.lib`.
-With 3.4.10 unpacked to `C:\`:
+With 3.4.20 unpacked to `C:\`:
 
 ```powershell
-$env:LIB = "C:\SDL3-3.4.10\lib\x64;$env:LIB"
+$env:LIB = "C:\SDL3-3.4.20\lib\x64;$env:LIB"
 cargo build --release
 ```
 
@@ -462,13 +462,14 @@ curl -o screen.png localhost:8086/api/screenshot
 curl 'localhost:8086/api/memory?addr=DS:SI&len=64'
 ```
 
-Set `SDL_VIDEODRIVER=dummy` to run without a window, which also needs no
+Set `SDL_VIDEO_DRIVER=dummy` to run without a window, which also needs no
 sound device: the sound goes to the null output
 ([`audio_output`](CONFIGURATION.md#mixer)). Don't set
-`SDL_AUDIODRIVER=dummy`: SDL's dummy driver doesn't keep real time, at a
-rate that changes from run to run, and makes any measurement wrong.
-[docs/llm-debugging.md](docs/llm-debugging.md) is a guide to using the
-server, and says what to use for timing runs.
+`SDL_AUDIO_DRIVER=dummy`: SDL's dummy driver doesn't keep real time, at a
+rate that changes from run to run, and makes any measurement wrong. SDL3
+still reads SDL2's names, `SDL_VIDEODRIVER` and `SDL_AUDIODRIVER`, when
+the new ones are unset. [docs/llm-debugging.md](docs/llm-debugging.md) is
+a guide to using the server, and says what to use for timing runs.
 
 ## Profiling
 

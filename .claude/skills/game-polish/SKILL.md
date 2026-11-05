@@ -50,7 +50,7 @@ skill covers what to do on top of that.
 
    ```sh
    : > $W/rust-dos.out
-   SDL_VIDEODRIVER=dummy \
+   SDL_VIDEO_DRIVER=dummy \
      ./target/release/rust-dos --no-config -d $W/c \
      --debug-server 127.0.0.1:0 > $W/rust-dos.out 2> $W/rust-dos.err &
    echo $! > $W/emu.pid
@@ -59,10 +59,10 @@ skill covers what to do on top of that.
    ```
 
    With no window the sound goes to the null output. Never add
-   `SDL_AUDIODRIVER=dummy`: SDL's dummy audio driver doesn't keep real
+   `SDL_AUDIO_DRIVER=dummy`: SDL's dummy audio driver doesn't keep real
    time and must not be used for any measurement. To file a timing
    or underrun finding, rerun it on a real device with `--mute`
-   (`SDL_AUDIODRIVER=wasapi` on Windows), or with `--audio-output null`
+   (`SDL_AUDIO_DRIVER=wasapi` on Windows), or with `--audio-output null`
    on a machine without one, and quote `audio_driver` from `/api/stats`
    or `/api/underruns`.
 

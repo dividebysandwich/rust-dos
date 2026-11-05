@@ -1,5 +1,5 @@
 //! The debug server's journal in the emulator itself: the binary with no
-//! window (`SDL_VIDEODRIVER=dummy`), on a free port, driven over HTTP from
+//! window (`SDL_VIDEO_DRIVER=dummy`), on a free port, driven over HTTP from
 //! a program's entry to `quit`. The binary needs the `sdl` feature.
 #![cfg(feature = "sdl")]
 
@@ -70,9 +70,9 @@ fn start_with_config(
     let stderr_path = dir.join("stderr.txt");
     let mut command = Command::new(exe);
     if let Some(config) = config {
-        command.arg("--config").arg(config).env("SDL_VIDEODRIVER", "x11");
+        command.arg("--config").arg(config).env("SDL_VIDEO_DRIVER", "x11");
     } else {
-        command.arg("--no-config").env("SDL_VIDEODRIVER", "dummy");
+        command.arg("--no-config").env("SDL_VIDEO_DRIVER", "dummy");
     }
     if capture_log {
         command.arg("--log").arg(dir.join("emulator.log"));

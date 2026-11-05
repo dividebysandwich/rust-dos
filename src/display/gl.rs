@@ -155,7 +155,7 @@ impl GlScreen {
         }
         attr.set_double_buffer(true);
         attr.set_depth_size(0);
-        // SDL3 asks for an alpha channel unless told not to (SDL2 didn't):
+        // SDL3 asks for an alpha channel unless told not to:
         // the shaders' alpha would show through the window, and in its
         // pixels read back.
         attr.set_alpha_size(0);
