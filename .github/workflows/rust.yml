@@ -64,18 +64,8 @@ jobs:
     # it than compiling it costs. macOS and Windows run a few short tests,
     # so there it only adds compiling: 2.5 and 3 minutes. Windows also
     # starts the debug build of the program, to check its stack frames.
-    #
-    # No debug information in the test builds. With Cargo.toml's line
-    # tables, the full suite's target/ grows to 27 GB on Linux, more than
-    # a runner is sure to have free (#546); without them, to about 6 GB. A
-    # failing test still prints the file and line of its panic, which come
-    # from the panic's location and not from debug information. Only a
-    # backtrace, which CI doesn't ask for, loses its line numbers. The size
-    # comes from each file in tests/ linking the whole crate into a program
-    # of its own: with fewer programs (#549), the line tables may fit again.
     env:
       CARGO_PROFILE_TEST_OPT_LEVEL: ${{ matrix.full && '1' || '0' }}
-      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -229,21 +219,16 @@ jobs:
           CARGO_PROFILE_TEST_OPT_LEVEL: 0
         run: "cargo nextest run --locked --profile ci --test program debug_journal_tests::"
 
-      # The size of the test build, so a run's log shows it and a change
-      # that makes it grow again shows up (#549).
-      - name: Size of the test build (Linux)
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
-        run: du -sh target/debug/deps
-
-      # How much room the tests left, to read in any run once the suite has
-      # grown, without a branch that measures it. The removal's log ends
-      # with the free space right after the removal.
-      - name: Show free disk space (Linux)
+      # The size of the test build and the room it left, so a run's log
+      # shows them and a change that makes the build grow again shows up
+      # (#546, #549). The removal's log ends with the free space right after
+      # the removal.
+      - name: Size of the test build and free disk space (Linux)
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
           cat "$RUNNER_TEMP/free-disk.log" 2>/dev/null || true
           df -h /
-          du -sh target || true
+          du -sh target target/debug/deps || true
 
   # The release builds and packages, the ones `scope` picks: every target
   # on pushes, tags and manual runs, one on most pull requests and none on
