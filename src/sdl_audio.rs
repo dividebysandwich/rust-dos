@@ -13,8 +13,9 @@ use rust_dos::null_audio::NullAudio;
 /// scene's mix of the channels for where the viewer is (`mix`, which the
 /// main loop sets), from the one of the last samples (`mixed`).
 pub(crate) struct SdlAudio {
-    /// None only after the device couldn't be opened again.
-    stream: Option<Stream>,
+    /// The device's stream, or the null output after the device couldn't
+    /// be opened again.
+    sink: Sink,
     /// To open the device again with another buffer.
     subsystem: sdl3::AudioSubsystem,
     /// The queue kept on top of the device's buffer, in frames.
@@ -26,6 +27,16 @@ pub(crate) struct SdlAudio {
     /// machine's when the block size changes, or the device would stay
     /// open at the old size. RoomDevice opens it again when it needs it.
     room: RoomSlot,
+}
+
+/// Where SdlAudio's sound goes.
+enum Sink {
+    Sdl(Stream),
+    /// No device would open again with a new block size. The null output
+    /// keeps time as a device would, so the queue doesn't read as empty
+    /// and each video frame doesn't count as an underrun; the next block
+    /// size tries the device again.
+    Null(NullAudio),
 }
 
 /// The machine's sound on its way to the device: SDL's stream, which the
@@ -61,6 +72,8 @@ fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream
     let mut format = spec().into();
     let mut frames = 0;
     // SAFETY: the stream is open, and SDL only fills in the two values.
+    // (Not through the sdl3 crate's AudioDevice::format: an AudioDevice
+    // made for it would close the device when it drops.)
     let known = unsafe {
         let device = sdl3::sys::audio::SDL_GetAudioStreamDevice(stream.raw());
         sdl3::sys::audio::SDL_GetAudioDeviceFormat(device, &mut format, &mut frames)
@@ -77,21 +90,27 @@ fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream
 
 impl audio::AudioOutput for SdlAudio {
     fn name(&self) -> &str {
-        self.subsystem.current_audio_driver()
+        match &self.sink {
+            Sink::Sdl(_) => self.subsystem.current_audio_driver(),
+            Sink::Null(null) => null.name(),
+        }
     }
 
     /// The frames waiting in the stream, in the machine's format: SDL
     /// counts them before it converts them for the device.
     fn queued_frames(&self) -> usize {
-        let Some(stream) = &self.stream else { return 0 };
-        stream.stream.queued_bytes().unwrap_or(0).max(0) as usize / 4
+        match &self.sink {
+            Sink::Sdl(stream) => stream.stream.queued_bytes().unwrap_or(0).max(0) as usize / 4,
+            Sink::Null(null) => null.queued_frames(),
+        }
     }
 
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         use display::audio_mix::{IDENTITY, apply};
-        // The sound is dropped: set_buffer said why there is no device,
-        // and an error here would be printed for every video frame.
-        let Some(stream) = &self.stream else { return Ok(()) };
+        let stream = match &mut self.sink {
+            Sink::Sdl(stream) => stream,
+            Sink::Null(null) => return null.queue(samples),
+        };
         let mix = self.mix.get();
         if mix == IDENTITY && self.mixed == IDENTITY {
             return stream.stream.put_data_i16(samples).map_err(|e| e.to_string());
@@ -104,23 +123,32 @@ impl audio::AudioOutput for SdlAudio {
     /// The device takes its buffer from the stream at once; the prebuffer
     /// is for a video frame that comes late.
     fn target_frames(&self) -> usize {
-        self.stream.as_ref().map_or(0, |s| s.device_frames) + self.prebuffer
+        match &self.sink {
+            Sink::Sdl(stream) => stream.device_frames + self.prebuffer,
+            Sink::Null(null) => null.target_frames(),
+        }
     }
 
     /// A new block size opens the device again, which drops the little
     /// sound waiting in it. The old stream closes first: SDL shares one
     /// device among its streams, and it would keep the old size while one
     /// is open (the 3D scene's too, which closes as well). If the new size
-    /// won't open, the old one is tried again.
+    /// won't open, the old one is tried again, and if neither does, the
+    /// sound goes to the null output.
     fn set_buffer(&mut self, buffer: rust_dos::audio::AudioBuffer) -> Result<(), String> {
-        let old = self.stream.as_ref().map(|s| s.blocksize);
+        let old = match &self.sink {
+            Sink::Sdl(stream) => Some(stream.blocksize),
+            Sink::Null(_) => None,
+        };
         if old != Some(buffer.blocksize) {
             self.room.borrow_mut().take();
-            self.stream = None;
+            self.sink = Sink::Null(NullAudio::new(buffer));
             match open_audio(&self.subsystem, buffer.blocksize) {
-                Ok(stream) => self.stream = Some(stream),
+                Ok(stream) => self.sink = Sink::Sdl(stream),
                 Err(e) => {
-                    self.stream = old.and_then(|size| open_audio(&self.subsystem, size).ok());
+                    if let Some(Ok(stream)) = old.map(|size| open_audio(&self.subsystem, size)) {
+                        self.sink = Sink::Sdl(stream);
+                    }
                     return Err(e);
                 }
             }
@@ -152,11 +180,11 @@ impl Output {
 /// window to go with the sound.
 pub(crate) fn open_output(sdl: &sdl3::Sdl, settings: &Settings, headless: bool) -> Output {
     // (SDL takes an empty value as no value, and picks a device itself.
-    // SDL3 reads SDL_AUDIO_DRIVER, or the older SDL_AUDIODRIVER when it is
-    // unset.)
-    let driver_named = ["SDL_AUDIO_DRIVER", "SDL_AUDIODRIVER"]
-        .iter()
-        .any(|var| std::env::var_os(var).is_some_and(|name| !name.is_empty()));
+    // SDL3 reads SDL_AUDIO_DRIVER, and the older SDL_AUDIODRIVER only when
+    // that is unset: an empty SDL_AUDIO_DRIVER hides it.)
+    let driver_named = std::env::var_os("SDL_AUDIO_DRIVER")
+        .or_else(|| std::env::var_os("SDL_AUDIODRIVER"))
+        .is_some_and(|name| !name.is_empty());
     if !settings.audio_output.wants_sdl(headless, driver_named) {
         return Output::Null(None);
     }
@@ -191,7 +219,7 @@ pub(crate) fn attach(
             let mix = audio_mix.clone();
             let prebuffer = settings.audio_buffer.prebuffer_frames(FREQ as usize);
             let output = SdlAudio {
-                stream: Some(stream),
+                sink: Sink::Sdl(stream),
                 subsystem,
                 prebuffer,
                 mix,

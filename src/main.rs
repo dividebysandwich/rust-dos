@@ -573,7 +573,16 @@ fn main() -> Result<ExitCode, String> {
         // frame, which the debug server's journal tells while it holds it.
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
         let mut host_keys = false;
-        for event in event_pump.poll_iter() {
+        for mut event in event_pump.poll_iter() {
+            // The sdl3 crate's Keycode is an enum of SDL's named keys, and
+            // a key whose character has no name there (ü, ß, ù, ², a dead
+            // key) comes with none. The key still goes to the machine by
+            // its scan code, as with any other: it is an unknown keycode.
+            if let Event::KeyDown { keycode: keycode @ None, .. }
+            | Event::KeyUp { keycode: keycode @ None, .. } = &mut event
+            {
+                *keycode = Some(Keycode::Unknown);
+            }
             // The right button held still for the settings window; its
             // release is swallowed once the window opened.
             match &event {
