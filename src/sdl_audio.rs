@@ -46,10 +46,11 @@ fn spec() -> sdl3::audio::AudioSpec {
     sdl3::audio::AudioSpec::new(Some(FREQ), Some(2), Some(sdl3::audio::AudioFormat::s16_sys()))
 }
 
-/// The sound device, playing, with a buffer of `blocksize` frames (SDL's
-/// default is about 46 ms at 44.1 kHz), through a stream of its own. SDL
-/// takes the size from a hint it reads when it opens the device, which
-/// may round it; the device's buffer is what SDL says it opened.
+/// The sound device, playing, with a buffer of `blocksize` frames (SDL3's
+/// default is 1024 frames, about 23 ms at 44.1 kHz), through a stream of
+/// its own. SDL takes the size from a hint it reads when it opens the
+/// device, which may round it; the device's buffer is what SDL says it
+/// opened.
 fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream, String> {
     sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", &blocksize.to_string());
     let stream = subsystem
