@@ -289,8 +289,8 @@ Fix the issues in rank order. For each one:
      nearby.
    - If the game is in the game suite, run its scenarios
      (`GAME_SUITE=<game> cargo test --release --test program
-     game_suite::suite -- --ignored --nocapture`); if the fix changes the hashes on purpose,
-     look at the new shots before blessing them.
+     game_suite:: -- --ignored --nocapture`); if the fix changes the
+     hashes on purpose, look at the new shots before blessing them.
 8. **Mark the pull request ready for review** once validation succeeds:
    write what step 7 did and found under manual testing, then take it out
    of draft. If validation fails, go back to step 2; the pull request
