@@ -1014,6 +1014,38 @@ mod tests {
         }
     }
 
+    /// On a Voodoo2 too, after a swap the picture waits for the jobs given
+    /// out before it and not for the next frame's, unless one of those
+    /// draws into the front buffer.
+    #[test]
+    fn the_picture_waits_for_the_frame_a_swap_shows() {
+        use crate::voodoo::banshee::render3d::tests::{
+            Gate, picture_comes_before, picture_waits_for_all,
+        };
+        use crate::voodoo::workers::{Job, Word};
+
+        let mut v = glide_card(2);
+        // The frame shown: a word of the back buffer, which the swap
+        // shows.
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize] as usize / 2;
+        let word = Word {
+            row: 0,
+            at: back as u32,
+            value: 0x1234,
+        };
+        let fb = v.fbi.ram.clone();
+        let words = vec![word];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        write(&mut v, SWAPBUFFER_CMD, 0);
+        // The next frame's jobs, held.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        picture_comes_before(&mut v, &gate, "Voodoo2");
+        assert_eq!(v.fbi.ram.get(back), 0x1234);
+        v.mark_drawn(back);
+        picture_waits_for_all(&mut v, &gate, "Voodoo2 front drawn into");
+    }
+
     #[test]
     fn sgram_fills_of_whole_buffers_drop_what_they_cover() {
         // With the OpenGL renderer, a buffer cleared with an SGRAM fill

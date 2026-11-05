@@ -360,7 +360,7 @@ pub struct Effect {
 }
 
 /// What the card shows (`Voodoo::shown_key`).
-type ShownKey = (u32, u32, u32);
+type ShownKey = [u32; 5];
 
 /// A swap waiting for the vertical retrace it is due at: the retrace's
 /// number (`CrtTiming::retraces`) and when it begins, in PIT ticks.
@@ -1576,17 +1576,40 @@ impl Voodoo {
         Some(self.pool.mark())
     }
 
-    /// What the card shows: a Banshee's video processor setup and the
-    /// addresses of its desktop and overlay, or the front buffer of the
+    /// What the card shows: a Banshee's video processor setup, the
+    /// addresses and strides of its desktop and overlay and the desktop's
+    /// size, all that `Banshee::shows` reads, or the front buffer of the
     /// others. A swap's `front_jobs` hold while it stays the same.
     fn shown_key(&self) -> ShownKey {
         match &self.banshee {
-            Some(b) => (
-                b.reg(banshee::VID_PROC_CFG),
-                b.reg(banshee::VID_DESKTOP_START_ADDR),
-                b.overlay_addr,
-            ),
-            None => (self.fbi.rgboffs[self.fbi.frontbuf as usize], 0, 0),
+            Some(b) => {
+                let (width, height) = b.desktop_size();
+                [
+                    b.reg(banshee::VID_PROC_CFG),
+                    b.reg(banshee::VID_DESKTOP_START_ADDR),
+                    b.overlay_addr,
+                    b.reg(banshee::VID_DESKTOP_OVERLAY_STRIDE),
+                    width << 16 | height,
+                ]
+            }
+            None => [self.fbi.rgboffs[self.fbi.frontbuf as usize], 0, 0, 0, 0],
+        }
+    }
+
+    /// A job given out or held draws into the card's memory, into what
+    /// it shows if `shown`: the picture then waits for every job
+    /// (`catch_up_shown`). So it does if the card shows something other
+    /// than at the swap of `front_jobs`, which it may go back to before
+    /// the picture, with this job never checked against it.
+    fn note_drawn(&self, shown: bool) {
+        if self.front_drawn.get() {
+            return;
+        }
+        let elsewhere = self
+            .front_jobs
+            .is_some_and(|(_, key)| key != self.shown_key());
+        if shown || elsewhere {
+            self.front_drawn.set(true);
         }
     }
 
@@ -1889,8 +1912,11 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
-        // The swaps' batches were the workers' before the load.
-        self.swap_marks.clear();
+        // The swaps' batches were the workers' before the load: each swap
+        // still pending waits for all, and those queued later keep their
+        // place beside `overlay_queue`.
+        let pending = self.banshee.as_ref().map_or(0, |b| b.overlay_queue.len());
+        self.swap_marks = std::iter::repeat_n(None, pending).collect();
         self.front_jobs = None;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().tracker.mark_all();

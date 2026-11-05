@@ -410,6 +410,53 @@ pub(crate) mod tests {
         }
     }
 
+    /// A gate the next frame's job waits at (`Job::Hold`).
+    pub(crate) type Gate = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+    fn open(gate: &Gate) {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    /// The picture comes with the job at `gate` still held. If it waits
+    /// for that job after all, the gate opens after a while and the test
+    /// fails, instead of waiting for ever.
+    pub(crate) fn picture_comes_before(v: &mut Voodoo, gate: &Gate, label: &str) {
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|s| {
+            let watchdog = s.spawn(move || {
+                let late = wait
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .is_err();
+                if late {
+                    open(gate);
+                }
+                late
+            });
+            v.catch_up_shown();
+            let _ = done.send(());
+            assert!(!watchdog.join().unwrap(), "{label}: the picture waited");
+        });
+        assert!(v.pool.busy(), "{label}: the next frame waits at the gate");
+    }
+
+    /// The picture waits for every job, the one at `gate` too.
+    pub(crate) fn picture_waits_for_all(v: &mut Voodoo, gate: &Gate, label: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let returned = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let early = returned.load(Ordering::SeqCst);
+                open(gate);
+                assert!(!early, "{label}: it waits for all");
+            });
+            v.catch_up_shown();
+            returned.store(true, Ordering::SeqCst);
+        });
+        assert!(!v.pool.busy(), "{label}");
+    }
+
     /// After a swap the picture waits for the jobs given out before it,
     /// and the next frame's go on drawing beside the program; unless one
     /// of those draws into what is shown, or the card shows something
@@ -417,46 +464,55 @@ pub(crate) mod tests {
     #[test]
     fn the_picture_waits_for_the_frame_a_swap_shows() {
         use super::super::super::workers::{Job, Word};
-        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, Condvar, Mutex};
+        use super::super::{VID_DESKTOP_OVERLAY_STRIDE, VID_PROC_CFG, VIDPROC_ENABLE};
 
         let shown = 0x10_0000;
-        for change in ["drawn into", "desktop moved"] {
+        let changes = [
+            "drawn into",
+            "texture written",
+            "drawn while hidden",
+            "desktop moved",
+            "stride changed",
+        ];
+        for change in changes {
             let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
             let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
             v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
             // The frame shown: a word of the buffer at 100000h.
-            let word = Word { row: 0, at: shown / 2, value: 0x1234 };
+            let word = Word {
+                row: 0,
+                at: shown / 2,
+                value: 0x1234,
+            };
             let fb = v.fbi.ram.clone();
-            v.submit_outside(Job::Pixels { fb, words: vec![word] }, None);
+            let words = vec![word];
+            v.submit_outside(Job::Pixels { fb, words }, None);
             reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
             reg3d(&mut v, SWAPBUFFER_CMD, 0);
             // The next frame's jobs, held.
-            let gate: Arc<(Mutex<bool>, Condvar)> = Arc::default();
+            let gate = Gate::default();
             v.submit_outside(Job::Hold(gate.clone()), None);
-            v.catch_up_shown();
+            picture_comes_before(&mut v, &gate, change);
             assert_eq!(v.fbi.ram.get(shown as usize / 2), 0x1234);
-            assert!(v.pool.busy(), "the next frame waits at the gate");
 
+            let write = |v: &mut Voodoo, reg, value| {
+                v.write(reg, value, u32::MAX, Now::default());
+            };
             match change {
                 "drawn into" => v.mark_drawn(shown as usize / 2),
-                _ => {
-                    v.write(VID_DESKTOP_START_ADDR, 0x20_0000, u32::MAX, Now::default());
+                "texture written" => {
+                    assert!(v.banshee_texture_queue(shown as usize, &[1, 2, 3, 4]));
                 }
+                // Drawn while the overlay is off, then shown again.
+                "drawn while hidden" => {
+                    write(&mut v, VID_PROC_CFG, VIDPROC_ENABLE);
+                    v.mark_drawn(shown as usize / 2);
+                    write(&mut v, VID_PROC_CFG, cfg);
+                }
+                "desktop moved" => write(&mut v, VID_DESKTOP_START_ADDR, 0x20_0000),
+                _ => write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280),
             }
-            let returned = AtomicBool::new(false);
-            std::thread::scope(|s| {
-                s.spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    assert!(!returned.load(Ordering::SeqCst), "{change}: it waits for all");
-                    *gate.0.lock().unwrap() = true;
-                    gate.1.notify_all();
-                });
-                v.catch_up_shown();
-                returned.store(true, Ordering::SeqCst);
-            });
-            assert!(!v.pool.busy(), "{change}");
+            picture_waits_for_all(&mut v, &gate, change);
         }
     }
 

@@ -105,6 +105,12 @@ impl Banshee {
     /// Whether a surface from byte `addr` on, as big as the desktop, is
     /// in memory the picture shows: the desktop's or the overlay's.
     pub fn shows(&self, addr: u32) -> bool {
+        self.shows_bytes(addr, None)
+    }
+
+    /// Whether any of the `len` bytes from byte `addr` on (with None, a
+    /// surface as big as the desktop) is in memory the picture shows.
+    pub fn shows_bytes(&self, addr: u32, len: Option<u64>) -> bool {
         let f = self.frame();
         // A surface's bytes: its stride times its rows, or its rows of
         // tiles, each counted as the surface itself is laid out.
@@ -124,7 +130,7 @@ impl Banshee {
             (self.overlay_addr, span(stride, tiled))
         });
         // The surface drawn, as big as the bigger of the two.
-        let drawn = overlay.map_or(desktop.1, |o| o.1.max(desktop.1));
+        let drawn = len.unwrap_or_else(|| overlay.map_or(desktop.1, |o| o.1.max(desktop.1)));
         let a = addr as u64;
         [Some(desktop), overlay]
             .into_iter()

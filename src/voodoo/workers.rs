@@ -338,19 +338,7 @@ impl Pool {
     /// Give out what is pending and wait until everything is drawn. A
     /// worker's panic comes back here.
     pub fn flush(&self) {
-        if self.workers == 0 {
-            return;
-        }
-        let batch = self.take_pending(&mut self.pending.lock().unwrap());
-        self.publish(batch);
-        let mut queue = self.shared.queue.lock().unwrap();
-        while queue.done.iter().any(|&d| d < queue.last) {
-            queue = self.shared.idle.wait(queue).unwrap();
-        }
-        if let Some(panic) = queue.panic.take() {
-            drop(queue);
-            std::panic::resume_unwind(panic);
-        }
+        self.wait_for(self.mark());
     }
 
     /// Give out what is pending, without waiting for it to be drawn.
@@ -449,6 +437,14 @@ impl Voodoo {
             bytes: data.to_vec(),
         };
         self.submit_outside(job, None);
+        // The bytes may land in what the card shows, where the picture
+        // has to wait for them.
+        let len = Some(data.len() as u64);
+        let shown = self
+            .banshee
+            .as_ref()
+            .is_some_and(|b| b.shows_bytes(at as u32, len));
+        self.note_drawn(shown);
         true
     }
 }
