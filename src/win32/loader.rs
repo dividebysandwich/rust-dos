@@ -1029,8 +1029,8 @@ fn bind_imports(
 /// KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs import; a DLL the
 /// setting replaces, which the folder has, isn't. GLIDE2X.DLL and
 /// GLIDE3X.DLL are there with a 3dfx card alone, as 3dfx's driver
-/// brings them. The system
-/// directory shows the same DLLs as files (dll_files.rs).
+/// brings them. The system directory shows the same DLLs as files
+/// (dll_files.rs).
 pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;

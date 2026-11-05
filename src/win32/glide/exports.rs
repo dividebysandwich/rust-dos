@@ -32,20 +32,19 @@ fn b(v: u32) -> bool {
     v != 0
 }
 
-/// A function this library has only as a name: the log says it was
-/// called.
-pub(super) fn missing(cpu: &mut Cpu, name: &str) -> Option<u32> {
+/// A function the library `dll` (GLIDE2X or GLIDE3X) has only as a
+/// name: the log says it was called.
+pub(super) fn missing_in(cpu: &mut Cpu, dll: &str, name: &str) -> Option<u32> {
     if cpu.bus.logs() {
-        cpu.bus
-            .log_string(&format!("[W32] GLIDE2X: {} is not implemented", name));
+        cpu.bus.log_string(&format!("[W32] {dll}: {name} is not implemented"));
     }
     Some(0)
 }
 
 macro_rules! missing {
     ($($handler:ident $name:literal),* $(,)?) => {
-        $(pub(super) fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-            missing(cpu, $name)
+        $(fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+            missing_in(cpu, "GLIDE2X", $name)
         })*
     };
 }

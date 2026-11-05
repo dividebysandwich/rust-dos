@@ -287,6 +287,10 @@ fn banshee_layout(
     auxes: u32,
     floor: u32,
 ) -> Option<BansheeLayout> {
+    // The largest display Glide opens on a Banshee or Voodoo3.
+    if width > 1600 || height > 1200 {
+        return None;
+    }
     let tiles = (width * 2).div_ceil(128);
     let bytes = tiles * 4096 * height.div_ceil(32);
     let total = bytes * (colors + auxes);
@@ -322,7 +326,7 @@ pub fn open_display(
     let Some(board) = board(cpu) else {
         return false;
     };
-    if width == 0 || height == 0 || !(2..=3).contains(&colors) || auxes > 1 {
+    if !buffers_ok(width, height, colors, auxes) {
         return false;
     }
     let ok = match board.card {
@@ -496,24 +500,23 @@ pub fn fits(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32) -> 
     let Some(board) = board(cpu) else {
         return false;
     };
-    if width == 0 || height == 0 || !(2..=3).contains(&colors) || auxes > 1 {
+    if !buffers_ok(width, height, colors, auxes) {
         return false;
     }
     match board.card {
         Card::Banshee => {
-            width <= 1600
-                && height <= 1200
-                && banshee_layout(
-                    width,
-                    height,
-                    colors,
-                    auxes,
-                    banshee_floor(cpu, width, height),
-                )
-                .is_some()
+            let floor = banshee_floor(cpu, width, height);
+            banshee_layout(width, height, colors, auxes, floor).is_some()
         }
         _ => voodoo_layout(board, width, height, colors, auxes).is_some(),
     }
+}
+
+/// Whether any board takes a display of `width` x `height` with
+/// `colors` colour buffers and `auxes` auxiliary buffers: double or
+/// triple buffered, with one depth or alpha buffer at most.
+fn buffers_ok(width: u32, height: u32, colors: u32, auxes: u32) -> bool {
+    width != 0 && height != 0 && (2..=3).contains(&colors) && auxes <= 1
 }
 
 /// An fbiInit register as the card has it.
@@ -528,9 +531,6 @@ fn read_init(cpu: &Cpu, reg: usize) -> u32 {
 /// its top, tiled, and the overlay shows the front one over the mode's
 /// picture; the textures have the memory below them.
 fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32) -> bool {
-    if width > 1600 || height > 1200 {
-        return false;
-    }
     let (dw, dh) = banshee_shown(width, height);
     // Whether the buffers fit above the picture, before anything
     // changes.
@@ -718,12 +718,21 @@ pub fn gamma_levels(board: Board) -> u32 {
 
 /// Load the gamma lookup table: red, green and blue of each entry, as
 /// many as `gamma_levels`; a shorter table's last entry goes on to the
-/// end.
+/// end. A Voodoo Graphics' or Voodoo2's 33rd entry is full intensity
+/// unless the table gives it: Glide 3 tells programs the table has 32
+/// (GR_GAMMA_TABLE_ENTRIES), and the card blends the 32nd towards the
+/// 33rd for the brightest levels.
 pub fn load_gamma(cpu: &mut Cpu, table: &[[u8; 3]]) {
     let Some(board) = board(cpu) else { return };
     let Some(&last) = table.last() else { return };
-    for i in 0..gamma_levels(board) {
-        let [r, g, bl] = table.get(i as usize).copied().unwrap_or(last).map(u32::from);
+    let levels = gamma_levels(board);
+    for i in 0..levels {
+        let past = if board.card != Card::Banshee && i == levels - 1 {
+            [0xFF; 3]
+        } else {
+            last
+        };
+        let [r, g, bl] = table.get(i as usize).copied().unwrap_or(past).map(u32::from);
         if board.card == Card::Banshee {
             // The overlay's lookup table, the card's second.
             set_ext(cpu, b::DAC_ADDR, 256 + i);

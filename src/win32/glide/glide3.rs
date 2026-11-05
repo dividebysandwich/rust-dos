@@ -419,20 +419,10 @@ fn fan(cpu: &mut Cpu, list: &[Vertex], go_on: bool) {
 
 // --- Functions this library has only as names ---
 
-/// A function this library has only as a name: the log says it was
-/// called.
-fn missing(cpu: &mut Cpu, name: &str) -> Option<u32> {
-    if cpu.bus.logs() {
-        cpu.bus
-            .log_string(&format!("[W32] GLIDE3X: {} is not implemented", name));
-    }
-    Some(0)
-}
-
 macro_rules! missing {
     ($($handler:ident $name:literal),* $(,)?) => {
         $(fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-            missing(cpu, $name)
+            x::missing_in(cpu, "GLIDE3X", $name)
         })*
     };
 }
@@ -516,11 +506,35 @@ pub(super) static VARS: &[Var] = &[
     },
 ];
 
-/// grSstWinOpen: Glide 2's, which returns a context. A new context has
-/// no vertex parameters, window coordinates, and a viewport and depth
-/// range of the whole screen.
+/// The size of each of Glide 3's resolutions: Glide 2's sixteen, then
+/// the larger ones Glide 3 added, GR_RESOLUTION_1152x864 (0x10) to
+/// GR_RESOLUTION_2048x2048 (0x17).
+fn resolution_size(resolution: u32) -> Option<(u32, u32)> {
+    const MORE: [(u32, u32); 8] = [
+        (1152, 864),
+        (1280, 960),
+        (1600, 1024),
+        (1792, 1344),
+        (1856, 1392),
+        (1920, 1440),
+        (2048, 1536),
+        (2048, 2048),
+    ];
+    api::resolution_size(resolution)
+        .or_else(|| MORE.get(resolution.checked_sub(0x10)? as usize).copied())
+}
+
+/// GR_RESOLUTION_* past the last, for grQueryResolutions.
+const RESOLUTIONS: u32 = 0x18;
+
+/// grSstWinOpen: Glide 2's, with Glide 3's resolutions, which returns a
+/// context. A new context has no vertex parameters, window coordinates,
+/// and a viewport and depth range of the whole screen.
 fn gr_sst_win_open(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
-    if x::gr_sst_win_open(cpu, a)? == FALSE {
+    let Some((w, h)) = resolution_size(a[1]) else {
+        return Some(0);
+    };
+    if !api::open(cpu, w, h, api::refresh_hz(a[2]), a[3], a[4], a[5], a[6]) {
         return Some(0);
     }
     let (w, h) = api::screen_size(cpu);
@@ -564,8 +578,8 @@ fn gr_query_resolutions(cpu: &mut Cpu, a: &[u32]) -> Option<u32> {
         return Some(0);
     }
     let mut found = Vec::new();
-    for res in 0..16 {
-        let Some((w, h)) = api::resolution_size(res) else {
+    for res in 0..RESOLUTIONS {
+        let Some((w, h)) = resolution_size(res) else {
             continue;
         };
         for colors in 2..=3 {
@@ -679,7 +693,10 @@ fn get(cpu: &mut Cpu, what: u32, asked: u32) -> Option<Vec<u32>> {
             0
         }],
         NON_POWER_OF_TWO_TEXTURES => vec![FALSE],
-        NUM_FB => vec![state(cpu).screen.color_buffers.max(2)],
+        // The frame buffer chips (Pixelfx), two only for a pair of
+        // Voodoo2s in SLI, which the emulator doesn't have; not the
+        // colour buffers.
+        NUM_FB => vec![1],
         NUM_SWAP_HISTORY_BUFFER => vec![0],
         NUM_TMU => vec![board.tmus],
         PENDING_BUFFERSWAPS => vec![api::buffer_num_pending(cpu)],
@@ -702,7 +719,8 @@ fn get(cpu: &mut Cpu, what: u32, asked: u32) -> Option<Vec<u32>> {
         SUPPORTS_PASSTHRU => vec![!banshee as u32],
         TEXTURE_ALIGN => vec![if banshee { 16 } else { 8 }],
         VIDEO_POSITION => vec![0, api::sst_video_line(cpu)],
-        VIEWPORT => g3(cpu).viewport.map(|n| (n as f32).to_bits()).to_vec(),
+        // Integers, as 3dfx's grGet casts them (FxI32).
+        VIEWPORT => g3(cpu).viewport.map(|n| n as u32).to_vec(),
         WDEPTH_MIN_MAX => vec![0, 0xFFFF],
         ZDEPTH_MIN_MAX => vec![0xFFFF, 0],
         VERTEX_PARAMETER => {
@@ -1360,6 +1378,17 @@ mod tests {
         assert_eq!(aspect_glide2(3), Some(api::ASPECT_8X1));
         assert_eq!(aspect_glide2(-3i32 as u32), Some(api::ASPECT_1X8));
         assert_eq!(aspect_glide2(4), None);
+    }
+
+    #[test]
+    fn glide3_has_glide2s_resolutions_and_more() {
+        for res in 0..0x10 {
+            assert_eq!(resolution_size(res), api::resolution_size(res));
+        }
+        assert_eq!(resolution_size(0x10), Some((1152, 864)));
+        assert_eq!(resolution_size(0x11), Some((1280, 960)));
+        assert_eq!(resolution_size(RESOLUTIONS - 1), Some((2048, 2048)));
+        assert_eq!(resolution_size(RESOLUTIONS), None);
     }
 
     #[test]
