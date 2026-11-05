@@ -733,6 +733,15 @@ const fn uses_local(mode: u32) -> bool {
         || (mode >> 27) & 3 != 0
 }
 
+/// Whether the texture combine of textureMode `mode` reads the colour the
+/// unit before it passes on (c_other): as the value it starts from, or as
+/// the blend factor (a_other). TMU 0 under Glide's `grTexCombine` with
+/// `GR_COMBINE_FUNCTION_LOCAL`, as games with one texture set it on a
+/// card with two units, doesn't, and TMU 1's texel is then thrown away.
+const fn uses_other(mode: u32) -> bool {
+    !bit(mode, 12) || (mode >> 14) & 7 == 2 || !bit(mode, 21) || (mode >> 23) & 7 == 2
+}
+
 /// A pixel's level of detail in perspective (8.8), less 2 log2(1/W): its
 /// footprint, log2 of how many texels s and t move a pixel across or down,
 /// whichever is more, from S/W, T/W and W at the pixel and the
@@ -1272,7 +1281,9 @@ macro_rules! variants {
 // scene, most drawn area first: the frame darkened by the colour, opaque,
 // blended by alpha with fog, opaque with fog, and added. V15 darkens
 // without a texture, and C2 covers the driver's other blends, fog and
-// formats.
+// formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel alone,
+// which it draws its terrain, units and lighting with, opaque or
+// blended, in its palettized, intensity and 16-bit formats.
 variants! {
     V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
     V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
@@ -1293,6 +1304,7 @@ variants! {
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
     C2: 2, combine_only[0x0000_2401, 0x0000_0507, 0x0824_1507];
+    C3: 2, combine_only[0x0C00_0035, 0x0C26_150F, 0x0422_10C0];
 }
 
 /// The variant a triangle with `texcount` units and `st`'s registers can be
@@ -1393,6 +1405,12 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         (q.starts, q.startt, q.startw, q.dsdx, q.dtdx, q.dwdx, q.dsdy, q.dtdy, q.dwdy)
     };
     let same_stw = TMUS >= 2 && stw(w0) == stw(w1);
+    // TMU 1's texel goes only to TMU 0: where TMU 0 draws and doesn't read
+    // it, or sends its configuration instead, nothing does.
+    let tmu1_read = TMUS >= 2
+        && !st.tmu[0].as_ref().is_some_and(|t| {
+            t.lodmin < 8 << 8 && (st.send_config.is_some() || !uses_other(m.tex[0]))
+        });
 
     for x in startx..stopx {
         if let Some(depthval) = row.begin(x, y, iterz, iterw, stipple, stats) {
@@ -1402,7 +1420,7 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
             let n = x - startx;
             // TMU 1's footprint, where TMU 0's is the same.
             let mut shared = None;
-            if TMUS >= 2
+            if tmu1_read
                 && let Some(t) = &st.tmu[1]
                 && t.lodmin < 8 << 8
             {
@@ -1616,6 +1634,76 @@ pub(crate) mod tests {
             stipple: 0,
             tmu: [Some(tmu(regs[4])), Some(tmu(regs[5]))],
         }
+    }
+
+    /// A triangle's parameters with every iterator moving, so that depth,
+    /// fog, the texture's level of detail and the colours change along a
+    /// scanline and down the rows.
+    pub(crate) fn moving_parameters() -> TriParams {
+        let tp = TmuParams {
+            starts: 10 << 32,
+            startt: 20 << 32,
+            startw: 1 << 32,
+            dsdx: 3 << 28,
+            dtdx: 1 << 27,
+            dwdx: 1 << 20,
+            dsdy: 1 << 27,
+            dtdy: 3 << 28,
+            dwdy: 1 << 20,
+            lodbase: 0,
+        };
+        TriParams {
+            startr: 100 << 12,
+            startg: 50 << 12,
+            startb: 20 << 12,
+            starta: 200 << 12,
+            startz: 0x4000 << 12,
+            startw: 1 << 32,
+            drdx: 1 << 10,
+            dgdx: 1 << 9,
+            dbdx: 1 << 8,
+            dadx: -(1 << 10),
+            dzdx: 1 << 14,
+            dwdx: 1 << 20,
+            drdy: 1 << 9,
+            dzdy: -(1 << 13),
+            dwdy: 1 << 20,
+            tmu: [tp, tp],
+            ..Default::default()
+        }
+    }
+
+    /// 48 rows of `st` with `moving_parameters`, drawn with variant
+    /// `index` (None: the generic code) for `tmus` units: the stipple
+    /// and counters after them.
+    pub(crate) fn draw_rows(st: &RasterState, tmus: usize, index: Option<usize>) -> (u32, Stats) {
+        let p = moving_parameters();
+        let (mut stipple, mut stats) = (0x1234_5678, Stats::default());
+        for y in 0..48 {
+            scanline_as(index, tmus, st, &p, y, 0, 320, &mut stipple, &mut stats);
+        }
+        (stipple, stats)
+    }
+
+    /// The first word two states' colour and depth buffers differ in.
+    pub(crate) fn first_difference(a: &RasterState, b: &RasterState) -> Option<usize> {
+        (0..a.fb.len()).find(|&i| a.fb.get(i) != b.fb.get(i))
+    }
+
+    /// Draw `regs` with variant `index` and with the generic code, and
+    /// require the same memory, counters and stipple.
+    pub(crate) fn same_as_generic(regs: [u32; 6], tmus: usize, index: usize) {
+        let selected = two_unit_state(regs);
+        let generic = two_unit_state(regs);
+        let expected = draw_rows(&generic, tmus, None);
+        assert!(expected.1.pixels_out > 0, "{regs:08X?} writes nothing");
+        assert_eq!(
+            draw_rows(&selected, tmus, Some(index)),
+            expected,
+            "{regs:08X?}"
+        );
+        let differ = first_difference(&selected, &generic);
+        assert_eq!(differ, None, "{regs:08X?} drawn with variant {index}");
     }
 
     /// The level a pixel in perspective reads follows the texels it
@@ -1927,3 +2015,7 @@ mod oni_state_tests;
 #[cfg(test)]
 #[path = "raster/d3d_state_tests.rs"]
 mod d3d_state_tests;
+
+#[cfg(test)]
+#[path = "raster/myth_state_tests.rs"]
+mod myth_state_tests;
