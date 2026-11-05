@@ -58,10 +58,10 @@ pub fn before_sdl(settings: &VrSettings) {
             log::line(format!("Before starting, the runtime offers {}; SDL is told {:?}", offered.describe(), hints));
         }
         if hints.force_x11 {
-            sdl2::hint::set_with_priority("SDL_VIDEODRIVER", "x11", &sdl2::hint::Hint::Override);
+            sdl3::hint::set_with_priority("SDL_VIDEO_DRIVER", "x11", &sdl3::hint::Hint::Override);
         }
         if hints.force_egl {
-            sdl2::hint::set_with_priority("SDL_VIDEO_X11_FORCE_EGL", "1", &sdl2::hint::Hint::Override);
+            sdl3::hint::set_with_priority("SDL_VIDEO_FORCE_EGL", "1", &sdl3::hint::Hint::Override);
         }
     }
     #[cfg(target_os = "linux")]
@@ -81,14 +81,14 @@ pub fn before_sdl(settings: &VrSettings) {
 /// Write what the OpenXR runtime and OpenGL offer the headset
 /// (`--vr-probe`), with a context made as the headset's thread's is, on a
 /// hidden window.
-pub fn probe(video: &sdl2::VideoSubsystem, settings: &VrSettings) {
+pub fn probe(video: &sdl3::VideoSubsystem, settings: &VrSettings) {
     let attr = video.gl_attr();
-    attr.set_context_profile(sdl2::video::GLProfile::Core);
+    attr.set_context_profile(sdl3::video::GLProfile::Core);
     let made = video.window("Rust-DOS VR probe", 64, 64).opengl().hidden().build().map_err(|e| e.to_string()).and_then(|window| {
         let mut context = Err(String::new());
         for newer in NEWER_GL.into_iter().chain([(3, 2)]) {
             attr.set_context_version(newer.0, newer.1);
-            context = window.gl_create_context();
+            context = window.gl_create_context().map_err(|e| e.to_string());
             if context.is_ok() {
                 break;
             }
@@ -107,7 +107,7 @@ pub fn probe(video: &sdl2::VideoSubsystem, settings: &VrSettings) {
         return;
     }
     // SAFETY: the context just made current.
-    let gl = unsafe { glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast()) };
+    let gl = unsafe { glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)) };
     super::xr::probe::run(&gl, video.current_video_driver(), settings);
     // (The context goes before its window.)
     drop(context);
@@ -310,10 +310,10 @@ pub struct Headset {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     /// The thread's context, deleted once the thread is over.
-    context: Option<sdl2::video::GLContext>,
+    context: Option<sdl3::video::GLContext>,
     /// The hidden window the thread's context draws with, closed after
     /// the context is deleted.
-    window: Option<sdl2::video::Window>,
+    window: Option<sdl3::video::Window>,
     /// The main thread's framebuffers of the mirror's textures.
     mirror_framebuffers: Vec<glow::Framebuffer>,
 }
@@ -324,8 +324,8 @@ impl Headset {
     /// VFX1's `eyes`.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
-        window: &sdl2::video::Window,
-        main: &sdl2::video::GLContext,
+        window: &sdl3::video::Window,
+        main: &sdl3::video::GLContext,
         glsl: Glsl,
         scene: Arc<Scene>,
         screens: [glow::Texture; 3],
@@ -343,7 +343,7 @@ impl Headset {
         // window's (the same attributes), never shown.
         let hidden = video.window("Rust-DOS headset", 64, 64).opengl().hidden().build().map_err(|e| e.to_string())?;
         let attr = video.gl_attr();
-        window.gl_make_current(main)?;
+        window.gl_make_current(main).map_err(|e| e.to_string())?;
         // The newest OpenGL there is, in the window's profile: OpenXR
         // runtimes want more than the window's 3.2 (SteamVR 4.3), and
         // call what they want of it whether the context has it or not.
@@ -352,19 +352,19 @@ impl Headset {
         let mut context = Err(String::new());
         for newer in NEWER_GL {
             attr.set_context_version(newer.0, newer.1);
-            context = hidden.gl_create_context();
+            context = hidden.gl_create_context().map_err(|e| e.to_string());
             if context.is_ok() {
                 break;
             }
         }
         if context.is_err() {
             attr.set_context_version(version.0, version.1);
-            context = hidden.gl_create_context();
+            context = hidden.gl_create_context().map_err(|e| e.to_string());
         }
         attr.set_context_version(version.0, version.1);
         attr.set_share_with_current_context(false);
         // (Making it made it current here.)
-        window.gl_make_current(main)?;
+        window.gl_make_current(main).map_err(|e| e.to_string())?;
         let context = context?;
         let state = State {
             controllers,
@@ -375,7 +375,7 @@ impl Headset {
         };
         let shared = Arc::new(Shared { state: Mutex::new(state), stop: AtomicBool::new(false), presses: AtomicU32::new(0) });
         // SAFETY: the context outlives the thread (`Headset::drop`).
-        let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }));
+        let (raw_window, raw_context) = (Raw(hidden.raw().cast()), Raw(unsafe { context.raw() }.cast()));
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("vr-headset".into())
@@ -646,15 +646,15 @@ fn run(
 ) {
     // SAFETY: the window and the context are alive until the thread ends
     // (see `Headset::drop`), and the context is current nowhere else.
-    let made = unsafe { sdl2::sys::SDL_GL_MakeCurrent(window.0.cast(), context.0) };
-    if made != 0 {
+    let made = unsafe { sdl3::sys::video::SDL_GL_MakeCurrent(window.0.cast(), context.0.cast()) };
+    if !made {
         shared.note("No headset (its thread has no OpenGL context); the scene is shown in the window".into());
     } else {
         // SAFETY: the context just made current.
         let gl = unsafe {
             glow::Context::from_loader_function(|name| {
                 let name = std::ffi::CString::new(name).unwrap_or_default();
-                sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _
+                sdl3::sys::video::SDL_GL_GetProcAddress(name.as_ptr()).map_or(std::ptr::null(), |f| f as *const _)
             })
         };
         if let Err(e) = session(&shared, &gl, glsl, scene, screens, &settings, &world) {
@@ -663,7 +663,7 @@ fn run(
         // SAFETY: as above.
         unsafe {
             gl.finish();
-            sdl2::sys::SDL_GL_MakeCurrent(window.0.cast(), std::ptr::null_mut());
+            sdl3::sys::video::SDL_GL_MakeCurrent(window.0.cast(), std::ptr::null_mut());
         }
     }
     let mut state = shared.lock();
@@ -699,7 +699,7 @@ fn session(
     let multiview = Multiview::load(&features, |name| {
         let name = std::ffi::CString::new(name).unwrap_or_default();
         // SAFETY: this thread's context is current.
-        unsafe { sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as *const _ }
+        unsafe { sdl3::sys::video::SDL_GL_GetProcAddress(name.as_ptr()).map_or(std::ptr::null(), |f| f as *const _) }
     })
     .filter(|m| samples == 0 || m.multisamples())
     .filter(|_| std::env::var("RUST_DOS_VR_MULTIVIEW").map_or(true, |v| v != "0"));

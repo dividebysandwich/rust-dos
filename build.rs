@@ -22,7 +22,7 @@ fn main() {
     }
     // The relay program uses nothing of SDL, which the library links. The
     // GNU linker leaves such a library out by itself; macOS's keeps it
-    // unless told otherwise, and the relay would want SDL2 to start.
+    // unless told otherwise, and the relay would want SDL3 to start.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo::rustc-link-arg-bin=rust-dos-relay=-Wl,-dead_strip_dylibs");
     }

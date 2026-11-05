@@ -3,7 +3,8 @@
 //! types in with `keyboard_layout=auto`.
 
 use rust_dos::keylayout::{self, Layout};
-use sdl2::keyboard::{Keycode, Scancode};
+use sdl3::keyboard::{Keycode, Mod, Scancode};
+use sdl3::sys::keycode::SDL_Keymod;
 
 /// The PC keyboard's set-1 scan code of the key at `scancode`, and whether
 /// it sends E0 first. SDL's scan codes are the positions of the keys, as
@@ -39,16 +40,16 @@ pub fn pc_scan(scancode: Scancode) -> Option<(u8, bool)> {
         X => plain(0x2D),
         Y => plain(0x15),
         Z => plain(0x2C),
-        Num1 => plain(0x02),
-        Num2 => plain(0x03),
-        Num3 => plain(0x04),
-        Num4 => plain(0x05),
-        Num5 => plain(0x06),
-        Num6 => plain(0x07),
-        Num7 => plain(0x08),
-        Num8 => plain(0x09),
-        Num9 => plain(0x0A),
-        Num0 => plain(0x0B),
+        Scancode::_1 => plain(0x02),
+        Scancode::_2 => plain(0x03),
+        Scancode::_3 => plain(0x04),
+        Scancode::_4 => plain(0x05),
+        Scancode::_5 => plain(0x06),
+        Scancode::_6 => plain(0x07),
+        Scancode::_7 => plain(0x08),
+        Scancode::_8 => plain(0x09),
+        Scancode::_9 => plain(0x0A),
+        Scancode::_0 => plain(0x0B),
         Return => plain(0x1C),
         Escape => plain(0x01),
         Backspace => plain(0x0E),
@@ -126,21 +127,51 @@ pub fn detect_layout() -> &'static Layout {
     // The keys whose characters tell layouts apart, by where they are.
     use Scancode::*;
     let keys = [
-        Q, W, E, R, T, Y, U, I, O, P, A, S, D, F, G, H, J, K, L, Z, X, C, V, B, N, M, Num1, Num2, Num3, Num4, Num5,
-        Num6, Num7, Num8, Num9, Num0, Minus, Equals, LeftBracket, RightBracket, Backslash, Semicolon, Apostrophe,
+        Q, W, E, R, T, Y, U, I, O, P, A, S, D, F, G, H, J, K, L, Z, X, C, V, B, N, M,
+        Scancode::_1, Scancode::_2, Scancode::_3, Scancode::_4, Scancode::_5,
+        Scancode::_6, Scancode::_7, Scancode::_8, Scancode::_9, Scancode::_0,
+        Minus, Equals, LeftBracket, RightBracket, Backslash, Semicolon, Apostrophe,
         Grave, Comma, Period, Slash, NonUsBackslash,
     ];
     let host: Vec<(u8, char)> = keys
         .into_iter()
         .filter_map(|scancode| {
             let (scan, _) = pc_scan(scancode)?;
-            let keycode = Keycode::from_scancode(scancode)?;
-            let c = char::from_u32(keycode.into_i32() as u32).filter(|c| !c.is_control())?;
+            // Not as a key event: SDL's options for those (French digits,
+            // Latin letters) would hide what the layout types.
+            let keycode = Keycode::from_scancode(scancode, SDL_Keymod(Mod::NOMOD.bits()), false)?;
+            let c = char::from_u32(keycode as u32).filter(|c| !c.is_control())?;
             Some((scan, c))
         })
         .collect();
-    let locale = sdl2::locale::get_preferred_locales()
-        .next()
-        .and_then(|l| keylayout::locale_layout(&l.lang, l.country.as_deref()));
+    let locale = preferred_locale()
+        .and_then(|(lang, country)| keylayout::locale_layout(&lang, country.as_deref()));
     keylayout::detect(&host, locale)
+}
+
+/// The language and country of the host's first preferred locale.
+fn preferred_locale() -> Option<(String, Option<String>)> {
+    use sdl3::sys::locale::SDL_GetPreferredLocales;
+    use std::ffi::CStr;
+    let mut count = 0;
+    // SAFETY: SDL returns an array of `count` locale pointers, or null,
+    // in one allocation that SDL_free releases.
+    unsafe {
+        let locales = SDL_GetPreferredLocales(&mut count);
+        if locales.is_null() {
+            return None;
+        }
+        let first = (count > 0).then(|| *locales).filter(|l| !l.is_null()).and_then(|l| {
+            let l = &*l;
+            if l.language.is_null() {
+                return None;
+            }
+            let lang = CStr::from_ptr(l.language).to_string_lossy().into_owned();
+            let country = (!l.country.is_null())
+                .then(|| CStr::from_ptr(l.country).to_string_lossy().into_owned());
+            Some((lang, country))
+        });
+        sdl3::sys::stdinc::SDL_free(locales.cast());
+        first
+    }
 }

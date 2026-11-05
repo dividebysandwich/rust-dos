@@ -36,8 +36,8 @@ impl Interop {
         let get = |name: &str| -> Result<*const c_void, String> {
             let c = CString::new(name).unwrap_or_default();
             // SAFETY: a context is current on this thread.
-            let address = unsafe { sdl2::sys::SDL_GL_GetProcAddress(c.as_ptr()) };
-            if address.is_null() { Err(format!("OpenGL has no {}", name)) } else { Ok(address as *const c_void) }
+            let address = unsafe { sdl3::sys::video::SDL_GL_GetProcAddress(c.as_ptr()) };
+            address.map(|f| f as *const c_void).ok_or_else(|| format!("OpenGL has no {}", name))
         };
         // SAFETY: the functions are the extensions', with their signatures.
         unsafe {

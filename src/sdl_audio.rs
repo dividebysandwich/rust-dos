@@ -13,9 +13,10 @@ use rust_dos::null_audio::NullAudio;
 /// scene's mix of the channels for where the viewer is (`mix`, which the
 /// main loop sets), from the one of the last samples (`mixed`).
 pub(crate) struct SdlAudio {
-    queue: sdl2::audio::AudioQueue<i16>,
+    /// None only after the device couldn't be opened again.
+    stream: Option<Stream>,
     /// To open the device again with another buffer.
-    subsystem: sdl2::AudioSubsystem,
+    subsystem: sdl3::AudioSubsystem,
     /// The queue kept on top of the device's buffer, in frames.
     prebuffer: usize,
     mix: std::rc::Rc<std::cell::Cell<display::audio_mix::Mix>>,
@@ -23,17 +24,43 @@ pub(crate) struct SdlAudio {
     buffer: Vec<i16>,
 }
 
-/// The sound device, playing, with a buffer of `blocksize` frames (SDL's
-/// default is 2048 frames, 46 ms of latency).
-fn open_audio(
-    subsystem: &sdl2::AudioSubsystem,
+/// The machine's sound on its way to the device: SDL's stream, which the
+/// device takes its buffer from, and that buffer's size.
+pub(crate) struct Stream {
+    stream: sdl3::audio::AudioStreamOwner,
+    /// The block size asked for, which the device may round.
     blocksize: u16,
-) -> Result<sdl2::audio::AudioQueue<i16>, String> {
-    let desired_spec =
-        sdl2::audio::AudioSpecDesired { freq: Some(44100), channels: Some(2), samples: Some(blocksize) };
-    let device = subsystem.open_queue::<i16, _>(None, &desired_spec)?;
-    device.resume();
-    Ok(device)
+    /// The device's buffer, in frames, as SDL says it opened it.
+    device_frames: usize,
+}
+
+/// The rate the machine mixes at, in stereo 16-bit samples.
+const FREQ: i32 = 44100;
+
+fn spec() -> sdl3::audio::AudioSpec {
+    sdl3::audio::AudioSpec::new(Some(FREQ), Some(2), Some(sdl3::audio::AudioFormat::s16_sys()))
+}
+
+/// The sound device, playing, with a buffer of `blocksize` frames (SDL's
+/// default is about 46 ms at 44.1 kHz), through a stream of its own. SDL
+/// takes the size from a hint it reads when it opens the device, which
+/// may round it; the device's buffer is what SDL says it opened.
+fn open_audio(subsystem: &sdl3::AudioSubsystem, blocksize: u16) -> Result<Stream, String> {
+    sdl3::hint::set("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", &blocksize.to_string());
+    let mut stream = subsystem
+        .default_playback_device()
+        .open_device_stream(Some(&spec()))
+        .map_err(|e| e.to_string())?;
+    stream.resume().map_err(|e| e.to_string())?;
+    let mut format = spec().into();
+    let mut frames = 0;
+    // SAFETY: the stream is open, and SDL only fills in the two values.
+    let known = unsafe {
+        let device = sdl3::sys::audio::SDL_GetAudioStreamDevice(stream.stream());
+        sdl3::sys::audio::SDL_GetAudioDeviceFormat(device, &mut format, &mut frames)
+    };
+    let device_frames = if known && frames > 0 { frames as usize } else { blocksize as usize };
+    Ok(Stream { stream, blocksize, device_frames })
 }
 
 impl audio::AudioOutput for SdlAudio {
@@ -41,42 +68,57 @@ impl audio::AudioOutput for SdlAudio {
         self.subsystem.current_audio_driver()
     }
 
+    /// The frames waiting in the stream, in the machine's format: SDL
+    /// counts them before it converts them for the device.
     fn queued_frames(&self) -> usize {
-        self.queue.size() as usize / 4
+        let Some(stream) = &self.stream else { return 0 };
+        stream.stream.queued_bytes().unwrap_or(0).max(0) as usize / 4
     }
 
     fn queue(&mut self, samples: &[i16]) -> Result<(), String> {
         use display::audio_mix::{IDENTITY, apply};
+        let Some(stream) = &self.stream else {
+            return Err("the sound device couldn't be opened again".to_string());
+        };
         let mix = self.mix.get();
         if mix == IDENTITY && self.mixed == IDENTITY {
-            return self.queue.queue_audio(samples);
+            return stream.stream.put_data_i16(samples).map_err(|e| e.to_string());
         }
         apply(samples, self.mixed, mix, &mut self.buffer);
         self.mixed = mix;
-        self.queue.queue_audio(&self.buffer)
+        stream.stream.put_data_i16(&self.buffer).map_err(|e| e.to_string())
     }
 
-    /// The device takes its buffer from the queue at once; the prebuffer
+    /// The device takes its buffer from the stream at once; the prebuffer
     /// is for a video frame that comes late.
     fn target_frames(&self) -> usize {
-        self.queue.spec().samples as usize + self.prebuffer
+        self.stream.as_ref().map_or(0, |s| s.device_frames) + self.prebuffer
     }
 
     /// A new block size opens the device again, which drops the little
-    /// sound waiting in it.
+    /// sound waiting in it. The old stream closes first: SDL shares one
+    /// device among its streams, and it would keep the old size while one
+    /// is open. If the new size won't open, the old one is tried again.
     fn set_buffer(&mut self, buffer: rust_dos::audio::AudioBuffer) -> Result<(), String> {
-        if self.queue.spec().samples != buffer.blocksize {
-            let queue = open_audio(&self.subsystem, buffer.blocksize)?;
-            self.queue = queue;
+        let old = self.stream.as_ref().map(|s| s.blocksize);
+        if old != Some(buffer.blocksize) {
+            self.stream = None;
+            match open_audio(&self.subsystem, buffer.blocksize) {
+                Ok(stream) => self.stream = Some(stream),
+                Err(e) => {
+                    self.stream = old.and_then(|size| open_audio(&self.subsystem, size).ok());
+                    return Err(e);
+                }
+            }
         }
-        self.prebuffer = buffer.prebuffer_frames(self.queue.spec().freq as usize);
+        self.prebuffer = buffer.prebuffer_frames(FREQ as usize);
         Ok(())
     }
 }
 
 /// What `open_output` chose.
 pub(crate) enum Output {
-    Sdl(sdl2::audio::AudioQueue<i16>, sdl2::AudioSubsystem),
+    Sdl(Stream, sdl3::AudioSubsystem),
     /// The null output; the error is why SDL's device couldn't be opened,
     /// if it was tried.
     Null(Option<String>),
@@ -84,7 +126,7 @@ pub(crate) enum Output {
 
 impl Output {
     /// SDL's audio, for the devices of the 3D scene's own sounds.
-    pub(crate) fn subsystem(&self) -> Option<sdl2::AudioSubsystem> {
+    pub(crate) fn subsystem(&self) -> Option<sdl3::AudioSubsystem> {
         match self {
             Output::Sdl(_, subsystem) => Some(subsystem.clone()),
             Output::Null(_) => None,
@@ -94,15 +136,18 @@ impl Output {
 
 /// Open the sound output `settings` choose. `headless` is a run with no
 /// window to go with the sound.
-pub(crate) fn open_output(sdl: &sdl2::Sdl, settings: &Settings, headless: bool) -> Output {
-    // (SDL takes an empty value as no value, and picks a device itself.)
-    let driver_named = std::env::var_os("SDL_AUDIODRIVER").is_some_and(|name| !name.is_empty());
+pub(crate) fn open_output(sdl: &sdl3::Sdl, settings: &Settings, headless: bool) -> Output {
+    // (SDL takes an empty value as no value, and picks a device itself.
+    // SDL3 reads SDL_AUDIO_DRIVER, and SDL2's SDL_AUDIODRIVER too.)
+    let driver_named = ["SDL_AUDIO_DRIVER", "SDL_AUDIODRIVER"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some_and(|name| !name.is_empty()));
     if !settings.audio_output.wants_sdl(headless, driver_named) {
         return Output::Null(None);
     }
-    let device = sdl.audio().and_then(|subsystem| {
-        let queue = open_audio(&subsystem, settings.audio_buffer.blocksize)?;
-        Ok((queue, subsystem))
+    let device = sdl.audio().map_err(|e| e.to_string()).and_then(|subsystem| {
+        let stream = open_audio(&subsystem, settings.audio_buffer.blocksize)?;
+        Ok((stream, subsystem))
     });
     match device {
         Ok((queue, subsystem)) => Output::Sdl(queue, subsystem),
@@ -120,7 +165,7 @@ pub(crate) fn attach(
     audio_mix: &Rc<Cell<display::audio_mix::Mix>>,
 ) {
     match output {
-        Output::Sdl(queue, subsystem) => {
+        Output::Sdl(stream, subsystem) => {
             let driver = subsystem.current_audio_driver();
             if driver.eq_ignore_ascii_case("dummy") {
                 warn_dummy(cpu);
@@ -128,11 +173,9 @@ pub(crate) fn attach(
             cpu.bus
                 .log_string(&format!("[AUDIO] Sound output: SDL's {} driver", driver));
             let mix = audio_mix.clone();
-            let prebuffer = settings
-                .audio_buffer
-                .prebuffer_frames(queue.spec().freq as usize);
+            let prebuffer = settings.audio_buffer.prebuffer_frames(FREQ as usize);
             let output = SdlAudio {
-                queue,
+                stream: Some(stream),
                 subsystem,
                 prebuffer,
                 mix,
@@ -172,29 +215,35 @@ fn warn_dummy(cpu: &mut Cpu) {
 /// there is something to hear, paused while there is nothing.
 pub(crate) struct RoomDevice {
     pub sound: std::sync::Arc<std::sync::Mutex<display::room_sound::RoomSound>>,
-    device: Option<sdl2::audio::AudioDevice<RoomCallback>>,
+    device: Option<sdl3::audio::AudioStreamWithCallback<RoomCallback>>,
+    /// Whether the device plays (it opens paused).
+    playing: bool,
     /// It couldn't be opened: not tried again.
     failed: bool,
 }
 
-pub(crate) struct RoomCallback(std::sync::Arc<std::sync::Mutex<display::room_sound::RoomSound>>);
+pub(crate) struct RoomCallback {
+    sound: std::sync::Arc<std::sync::Mutex<display::room_sound::RoomSound>>,
+    buffer: Vec<i16>,
+}
 
-impl sdl2::audio::AudioCallback for RoomCallback {
-    type Channel = i16;
-
-    fn callback(&mut self, out: &mut [i16]) {
-        out.fill(0);
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).mix_into(out);
+impl sdl3::audio::AudioCallback<i16> for RoomCallback {
+    /// SDL asks for `requested` samples more.
+    fn callback(&mut self, stream: &mut sdl3::audio::AudioStream, requested: i32) {
+        self.buffer.clear();
+        self.buffer.resize(requested.max(0) as usize, 0);
+        self.sound.lock().unwrap_or_else(|e| e.into_inner()).mix_into(&mut self.buffer);
+        let _ = stream.put_data_i16(&self.buffer);
     }
 }
 
 impl RoomDevice {
     pub fn new() -> Self {
-        RoomDevice { sound: Default::default(), device: None, failed: false }
+        RoomDevice { sound: Default::default(), device: None, playing: false, failed: false }
     }
 
     /// Play while there is something to hear, on `subsystem`'s device.
-    pub fn update(&mut self, subsystem: Option<&sdl2::AudioSubsystem>) {
+    pub fn update(&mut self, subsystem: Option<&sdl3::AudioSubsystem>) {
         let active = self.sound.lock().unwrap_or_else(|e| e.into_inner()).active();
         if active
             && self.device.is_none()
@@ -202,9 +251,13 @@ impl RoomDevice {
             && let Some(subsystem) = subsystem
         {
             // (SDL converts to the device's own rate and format.)
-            let spec = sdl2::audio::AudioSpecDesired { freq: Some(44100), channels: Some(2), samples: Some(1024) };
-            match subsystem.open_playback(None, &spec, |_| RoomCallback(self.sound.clone())) {
-                Ok(device) => self.device = Some(device),
+            let callback = RoomCallback { sound: self.sound.clone(), buffer: Vec::new() };
+            let device = subsystem.default_playback_device();
+            match device.open_playback_stream_with_callback(&spec(), callback) {
+                Ok(device) => {
+                    self.device = Some(device);
+                    self.playing = false;
+                }
                 Err(e) => {
                     eprintln!("[AUDIO] No sound device for the 3D scene's sounds: {}", e);
                     self.failed = true;
@@ -215,11 +268,9 @@ impl RoomDevice {
             self.sound.lock().unwrap_or_else(|e| e.into_inner()).clear();
             return;
         };
-        match (active, device.status()) {
-            (true, sdl2::audio::AudioStatus::Playing)
-            | (false, sdl2::audio::AudioStatus::Paused) => {}
-            (true, _) => device.resume(),
-            (false, _) => device.pause(),
+        if active != self.playing {
+            let done = if active { device.resume() } else { device.pause() };
+            self.playing = if done.is_ok() { active } else { self.playing };
         }
     }
 }

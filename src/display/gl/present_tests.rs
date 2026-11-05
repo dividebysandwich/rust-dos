@@ -67,7 +67,7 @@ fn reference_capture(
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn xbrz_overlay_uploads_preserve_other_rows_and_recover_missed_revisions() {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ overlay bands", (4, 6), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
@@ -155,7 +155,7 @@ fn xbrz_overlay_uploads_preserve_other_rows_and_recover_missed_revisions() {
 fn failed_xbrz_preparation_reuploads_the_complete_composed_frame() {
     use crate::config::Settings;
     use crate::display::{Display, Output};
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let textures = std::cell::OnceCell::new();
     let settings = Settings {
@@ -202,7 +202,7 @@ fn failed_xbrz_preparation_reuploads_the_complete_composed_frame() {
 #[ignore = "requires a desktop OpenGL context"]
 fn xbrz_clean_and_flattened_presentations_share_preparation() {
     use crate::video::{mono, power};
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ input regression", (16, 12), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
@@ -304,7 +304,7 @@ fn xbrz_clean_and_flattened_presentations_share_preparation() {
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ cache regression", (32, 24), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
@@ -470,7 +470,7 @@ fn xbrz_cached_passes_match_reference_and_reuse_source_work() {
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "RGBA presentation regression", (8, 8), true)
         .unwrap_or_else(|e| panic!("{}", e.reason));
@@ -535,7 +535,7 @@ fn rgba_uploads_preserve_full_partial_and_subsampled_rows() {
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn xbrz_overlays_preserve_native_input_and_filtered_background() {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let native = Frame::from_rgb(
         8,
@@ -668,7 +668,7 @@ fn xbrz_overlays_preserve_native_input_and_filtered_background() {
 #[ignore = "requires an OpenGL display; run in CI under Xvfb"]
 fn xbrz_near_colour_edges_use_exact_colour_inequality() {
     use crate::video::mono::Monochrome;
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let values = [
         160, 32, 160, 0, 32, 32, 16, 16, 160, 0, 32, 16, 0, 0, 16, 255, 16, 0, 16, 255, 16,
@@ -687,7 +687,7 @@ fn xbrz_near_colour_edges_use_exact_colour_inequality() {
 #[ignore = "requires a desktop OpenGL context"]
 fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
     use crate::display::{Display, Output};
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let textures = std::cell::OnceCell::new();
     let mut display = Display::open(
@@ -785,7 +785,7 @@ fn persistent_compositions_keep_their_pixels_after_partial_presentation() {
 #[test]
 #[ignore = "requires a desktop OpenGL context"]
 fn xbrz_incremental_regions_match_full_kernels_after_deferred_updates() {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let mut screen = GlScreen::open(&video, "xBRZ damage regression", (96, 64), true)
         .unwrap_or_else(|error| panic!("{}", error.reason));
