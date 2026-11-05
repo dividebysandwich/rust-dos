@@ -111,6 +111,18 @@ impl Banshee {
     /// Whether any of the `len` bytes from byte `addr` on (with None, a
     /// surface as big as the desktop) is in memory the picture shows.
     pub fn shows_bytes(&self, addr: u32, len: Option<u64>) -> bool {
+        self.shows_with(self.overlay_addr, addr, len)
+    }
+
+    /// The same for the pictures the swaps waiting for their retrace
+    /// show (`overlay_queue`).
+    pub fn will_show(&self, addr: u32, len: Option<u64>) -> bool {
+        let shows = |&overlay: &u32| self.shows_with(overlay, addr, len);
+        self.overlay_queue.iter().any(shows)
+    }
+
+    /// `shows_bytes` with the overlay at byte `overlay_addr`.
+    fn shows_with(&self, overlay_addr: u32, addr: u32, len: Option<u64>) -> bool {
         let f = self.frame();
         // A surface's bytes: its stride times its rows, or its rows of
         // tiles, each counted as the surface itself is laid out.
@@ -127,7 +139,7 @@ impl Banshee {
             let tiled = f.cfg & VIDPROC_OVERLAY_TILED != 0;
             let stride = (self.reg(VID_DESKTOP_OVERLAY_STRIDE) >> 16) & 0x7FFF;
             let stride = if tiled { stride * TILE } else { stride };
-            (self.overlay_addr, span(stride, tiled))
+            (overlay_addr, span(stride, tiled))
         });
         // The surface drawn, as big as the bigger of the two.
         let drawn = len.unwrap_or_else(|| overlay.map_or(desktop.1, |o| o.1.max(desktop.1)));

@@ -207,14 +207,14 @@ impl Voodoo {
     /// if it is the one shown (on a Banshee, if the desktop or the overlay
     /// shows its memory).
     pub(crate) fn mark_drawn(&mut self, dest: usize) {
-        let shown = match &self.banshee {
-            Some(b) => b.shows(dest as u32 * 2),
-            None => self.color_buffer(0) == Some(dest),
+        let (shown, queued) = match &self.banshee {
+            Some(b) => (b.shows(dest as u32 * 2), b.will_show(dest as u32 * 2, None)),
+            None => (self.color_buffer(0) == Some(dest), false),
         };
         if shown {
             self.display_dirty = true;
         }
-        self.note_drawn(shown);
+        self.note_drawn(shown || queued);
         if !self.drawn_to.contains(&dest) {
             self.drawn_to.push(dest);
         }

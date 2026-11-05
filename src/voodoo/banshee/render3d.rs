@@ -471,6 +471,7 @@ pub(crate) mod tests {
             "drawn into",
             "texture written",
             "drawn while hidden",
+            "drawn into a swap's to come",
             "desktop moved",
             "stride changed",
         ];
@@ -489,6 +490,12 @@ pub(crate) mod tests {
             v.submit_outside(Job::Pixels { fb, words }, None);
             reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
             reg3d(&mut v, SWAPBUFFER_CMD, 0);
+            // A swap at the next retrace, to the buffer at 300000h.
+            let next = 0x30_0000;
+            if change == "drawn into a swap's to come" {
+                reg3d(&mut v, LEFT_OVERLAY_BUF, next);
+                reg3d(&mut v, SWAPBUFFER_CMD, 1);
+            }
             // The next frame's jobs, held.
             let gate = Gate::default();
             v.submit_outside(Job::Hold(gate.clone()), None);
@@ -508,6 +515,16 @@ pub(crate) mod tests {
                     write(&mut v, VID_PROC_CFG, VIDPROC_ENABLE);
                     v.mark_drawn(shown as usize / 2);
                     write(&mut v, VID_PROC_CFG, cfg);
+                }
+                // Drawn while the swap waits, which then shows it.
+                "drawn into a swap's to come" => {
+                    v.mark_drawn(next as usize / 2);
+                    let due = v.next_event().expect("the swap waits for a retrace");
+                    v.service(Now {
+                        ns: 1_000_000_000,
+                        ticks: due,
+                    });
+                    assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, next);
                 }
                 "desktop moved" => write(&mut v, VID_DESKTOP_START_ADDR, 0x20_0000),
                 _ => write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280),

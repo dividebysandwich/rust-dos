@@ -437,13 +437,13 @@ impl Voodoo {
             bytes: data.to_vec(),
         };
         self.submit_outside(job, None);
-        // The bytes may land in what the card shows, where the picture
-        // has to wait for them.
+        // The bytes may land in what the card shows, or will once the
+        // swaps waiting are done, where the picture has to wait for them.
         let len = Some(data.len() as u64);
         let shown = self
             .banshee
             .as_ref()
-            .is_some_and(|b| b.shows_bytes(at as u32, len));
+            .is_some_and(|b| b.shows_bytes(at as u32, len) || b.will_show(at as u32, len));
         self.note_drawn(shown);
         true
     }
