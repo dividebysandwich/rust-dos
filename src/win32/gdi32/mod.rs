@@ -1203,15 +1203,15 @@ pub fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// OpenGL32 keeps its own pixel formats, and its wglCreateContext fails
 /// (ERROR_INVALID_PIXEL_FORMAT) on a DC whose format only the built-in
 /// one knows. A driver that calls GDI32's function itself gets GDI32's
-/// own answer, as it would otherwise call itself for ever.
+/// own answer, as it would otherwise call itself for ever. A file mapped
+/// as data (LOAD_LIBRARY_AS_DATAFILE) isn't the loaded OpenGL32: it is
+/// neither relocated nor bound, and GetModuleHandle doesn't find it.
 fn guest_wgl(cpu: &mut Cpu, name: &str) -> Option<u32> {
-    let caller = cpu.bus.guest_read_32(cpu.esp());
-    if cpu.bus.guest_faulted() {
-        return None;
-    }
+    use super::loader::{BUILTIN, DATAFILE};
+    let caller = super::peek_32(cpu, cpu.esp())?;
     let p = super::running(cpu)?;
     let gl = p.modules.iter().find(|m| {
-        m.name.eq_ignore_ascii_case("OPENGL32.DLL") && m.flags & super::loader::BUILTIN == 0
+        m.name.eq_ignore_ascii_case("OPENGL32.DLL") && m.flags & (BUILTIN | DATAFILE) == 0
     })?;
     if (gl.base..gl.base.saturating_add(gl.size)).contains(&caller) {
         return None;
@@ -1255,11 +1255,9 @@ fn describe_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// SwapBuffers(hdc): the ICD shows what OpenGL drew in the DC's
-/// window.
+/// window, or a guest OpenGL32's wglSwapBuffers does (`guest_wgl`).
 fn swap_buffers(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    or_guest_wgl(cpu, args, "wglSwapBuffers", |cpu, args| {
-        Some(wgl::swap_dc(cpu, args[0]) as u32)
-    })
+    or_guest_wgl(cpu, args, "wglSwapBuffers", wgl::swap_buffers)
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
