@@ -19,7 +19,7 @@ fn round_coordinate(value: f32) -> i32 {
 
 impl Voodoo {
     /// The word offset of a colour buffer, or None for a reserved choice.
-    fn color_buffer(&self, select: u32) -> Option<usize> {
+    pub(super) fn color_buffer(&self, select: u32) -> Option<usize> {
         let index = match select {
             // A Banshee draws where colBufferAddr says, whatever fbzMode
             // selects.
@@ -207,14 +207,14 @@ impl Voodoo {
     /// if it is the one shown (on a Banshee, if the desktop or the overlay
     /// shows its memory).
     pub(crate) fn mark_drawn(&mut self, dest: usize) {
-        let (shown, queued) = match &self.banshee {
-            Some(b) => (b.shows(dest as u32 * 2), b.will_show(dest as u32 * 2, None)),
-            None => (self.color_buffer(0) == Some(dest), false),
+        let shown = match &self.banshee {
+            Some(b) => b.shows(dest as u32 * 2),
+            None => self.color_buffer(0) == Some(dest),
         };
         if shown {
             self.display_dirty = true;
         }
-        self.note_drawn(shown || queued);
+        self.note_drawn(super::Place::Buffer(dest));
         if !self.drawn_to.contains(&dest) {
             self.drawn_to.push(dest);
         }

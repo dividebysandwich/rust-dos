@@ -359,8 +359,43 @@ pub struct Effect {
     pub settle: bool,
 }
 
-/// What the card shows (`Voodoo::shown_key`).
-type ShownKey = [u32; 5];
+/// Where jobs draw (`Voodoo::drawn`): colour buffers by their word
+/// offset, and the byte ranges of texture data queued, each with the
+/// batch of the latest job there.
+#[derive(Default)]
+struct Drawn {
+    buffers: Vec<(usize, u64)>,
+    bytes: Vec<(u32, u64, u64)>,
+}
+
+/// A place a job draws into (`Voodoo::note_drawn`).
+pub(crate) enum Place {
+    Buffer(usize),
+    Bytes(u32, u64),
+}
+
+impl Drawn {
+    fn note(&mut self, place: Place, batch: u64) {
+        match place {
+            Place::Buffer(dest) => match self.buffers.iter_mut().find(|(d, _)| *d == dest) {
+                Some(entry) => entry.1 = batch,
+                None => self.buffers.push((dest, batch)),
+            },
+            Place::Bytes(at, len) => self.bytes.push((at, len, batch)),
+        }
+    }
+
+    /// The jobs in batches up to `mark` are drawn with it.
+    fn forget_before(&mut self, mark: u64) {
+        self.buffers.retain(|&(_, batch)| batch > mark);
+        self.bytes.retain(|&(_, _, batch)| batch > mark);
+    }
+
+    fn clear(&mut self) {
+        self.buffers.clear();
+        self.bytes.clear();
+    }
+}
 
 /// A swap waiting for the vertical retrace it is due at: the retrace's
 /// number (`CrtTiming::retraces`) and when it begins, in PIT ticks.
@@ -576,16 +611,17 @@ pub struct Voodoo {
     pool: workers::Pool,
     drawn_to: Vec<usize>,
     /// What the picture shown needs drawn (`catch_up_shown`): the last
-    /// batch given out before the swap that showed it, and what the card
-    /// showed then (`shown_key`). None where that isn't known: no swap
-    /// since a load or a reset, or jobs held back then.
-    front_jobs: Option<(u64, ShownKey)>,
+    /// batch given out before the swap that showed it. None where that
+    /// isn't known: no swap since a load or a reset, or jobs held back
+    /// then.
+    front_jobs: Option<u64>,
     /// The same for each Banshee swap waiting for its retrace, beside
     /// its `overlay_queue`.
     swap_marks: VecDeque<Option<u64>>,
-    /// A job given out or waiting since the workers last finished draws
-    /// into a buffer shown.
-    front_drawn: Cell<bool>,
+    /// Where the jobs given out or waiting since the workers last
+    /// finished draw (`note_drawn`), each with the batch of the latest
+    /// job there: one after `front_jobs` if it is a later batch.
+    drawn: RefCell<Drawn>,
     /// Jobs were given to the workers since they last finished, and the
     /// texture units queued triangles read.
     outstanding: Cell<bool>,
@@ -714,7 +750,7 @@ impl Voodoo {
             drawn_to: Vec::new(),
             front_jobs: None,
             swap_marks: VecDeque::new(),
-            front_drawn: Cell::new(false),
+            drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
             footprint: RefCell::new(Footprint::default()),
@@ -1025,7 +1061,7 @@ impl Voodoo {
         self.submit_words();
         self.release_backlog();
         self.pool.flush();
-        self.front_drawn.set(false);
+        self.drawn.borrow_mut().clear();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
         self.footprint.borrow_mut().clear();
@@ -1543,25 +1579,62 @@ impl Voodoo {
         changed || switched
     }
 
+
     /// Wait for the jobs the picture shown needs: those given out before
-    /// the swap that showed it (`front_jobs`), while the card still shows
-    /// what it showed then and nothing given out or waiting since draws
-    /// into what it shows. The later ones draw the next frame into
-    /// another buffer, beside the program. Where that isn't known, wait
-    /// for all of them.
+    /// the swap that showed it (`front_jobs`). The later ones draw the
+    /// next frame into another buffer, beside the program, unless one of
+    /// them draws into what the card shows now: then, or where the swap's
+    /// jobs aren't known, wait for all of them. What they draw into is
+    /// looked at now, not as they come, so a buffer drawn into while it
+    /// was shown (double buffering's next frame, sent before the retrace
+    /// of its swap) and hidden since doesn't count, and one drawn into
+    /// while hidden and shown since does.
     fn catch_up_shown(&mut self) {
         match self.front_jobs {
-            Some((number, key))
-                if key == self.shown_key()
-                    && !self.front_drawn.get()
-                    && self.words.borrow().is_empty()
+            Some(number)
+                if self.words.borrow().is_empty()
                     && self.backlog.borrow().is_empty()
-                    && !self.gpu_behind.get() =>
+                    && !self.gpu_behind.get()
+                    && !self.drawn_shown(number) =>
             {
                 self.pool.wait_for(number)
             }
             _ => self.flush(),
         }
+    }
+
+    /// Whether a job in a batch after `number` draws into what the card
+    /// shows.
+    fn drawn_shown(&self, number: u64) -> bool {
+        let drawn = self.drawn.borrow();
+        let buffers = drawn.buffers.iter().filter(|&&(_, batch)| batch > number);
+        let bytes = drawn.bytes.iter().filter(|&&(_, _, batch)| batch > number);
+        match &self.banshee {
+            Some(b) => {
+                buffers.into_iter().any(|&(dest, _)| b.shows(dest as u32 * 2))
+                    || bytes.into_iter().any(|&(at, len, _)| b.shows_bytes(at, Some(len)))
+            }
+            None => {
+                let front = self.color_buffer(0);
+                buffers.into_iter().any(|&(dest, _)| front == Some(dest))
+            }
+        }
+    }
+
+    /// A swap shows what the jobs up to batch `mark` drew
+    /// (`swap_mark`): what came before it is drawn when the picture is.
+    fn shown_up_to(&mut self, mark: Option<u64>) {
+        self.front_jobs = mark;
+        if let Some(mark) = mark {
+            self.drawn.get_mut().forget_before(mark);
+        }
+    }
+
+    /// The job just submitted draws into `place`: colour buffer `dest`
+    /// (a word offset), or `len` bytes from byte `at`.
+    pub(crate) fn note_drawn(&self, place: Place) {
+        let batch = self.pool.latest_batch();
+        self.drawn.borrow_mut().note(place, batch);
     }
 
     /// The batch the jobs submitted so far end with, given out (with the
@@ -1576,42 +1649,6 @@ impl Voodoo {
         Some(self.pool.mark())
     }
 
-    /// What the card shows: a Banshee's video processor setup, the
-    /// addresses and strides of its desktop and overlay and the desktop's
-    /// size, all that `Banshee::shows` reads, or the front buffer of the
-    /// others. A swap's `front_jobs` hold while it stays the same.
-    fn shown_key(&self) -> ShownKey {
-        match &self.banshee {
-            Some(b) => {
-                let (width, height) = b.desktop_size();
-                [
-                    b.reg(banshee::VID_PROC_CFG),
-                    b.reg(banshee::VID_DESKTOP_START_ADDR),
-                    b.overlay_addr,
-                    b.reg(banshee::VID_DESKTOP_OVERLAY_STRIDE),
-                    width << 16 | height,
-                ]
-            }
-            None => [self.fbi.rgboffs[self.fbi.frontbuf as usize], 0, 0, 0, 0],
-        }
-    }
-
-    /// A job given out or held draws into the card's memory, into what
-    /// it shows if `shown`: the picture then waits for every job
-    /// (`catch_up_shown`). So it does if the card shows something other
-    /// than at the swap of `front_jobs`, which it may go back to before
-    /// the picture, with this job never checked against it.
-    fn note_drawn(&self, shown: bool) {
-        if self.front_drawn.get() {
-            return;
-        }
-        let elsewhere = self
-            .front_jobs
-            .is_some_and(|(_, key)| key != self.shown_key());
-        if shown || elsewhere {
-            self.front_drawn.set(true);
-        }
-    }
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
     /// `picture_size` big), through the gamma table (see
@@ -1758,7 +1795,7 @@ impl Voodoo {
     fn swap_now(&mut self, data: u32, now: Now, effect: &mut Effect) {
         let mark = self.swap_mark();
         self.rotate_buffers();
-        self.front_jobs = mark.map(|number| (number, self.shown_key()));
+        self.shown_up_to(mark);
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
             self.last_swap = current;

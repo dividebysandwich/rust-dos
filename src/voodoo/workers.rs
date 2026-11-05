@@ -194,6 +194,8 @@ pub struct Pool {
     /// Jobs not yet given out.
     pending: Mutex<Vec<Job>>,
     workers: usize,
+    /// The queue's `last`, read without its lock (`latest_batch`).
+    given_out: std::sync::atomic::AtomicU64,
     #[cfg(not(target_arch = "wasm32"))]
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -257,6 +259,7 @@ impl Pool {
             shared,
             pending: Mutex::new(Vec::new()),
             workers,
+            given_out: std::sync::atomic::AtomicU64::new(0),
             #[cfg(not(target_arch = "wasm32"))]
             threads,
         }
@@ -322,6 +325,7 @@ impl Pool {
         let mut queue = self.shared.queue.lock().unwrap();
         queue.last += 1;
         let number = queue.last;
+        self.given_out.store(number, std::sync::atomic::Ordering::Relaxed);
         queue.bytes += bytes_of(&batch);
         queue.batches.push_back((number, Arc::new(batch)));
         self.shared.work.notify_all();
@@ -348,6 +352,13 @@ impl Pool {
         }
         let batch = self.take_pending(&mut self.pending.lock().unwrap());
         self.publish(batch);
+    }
+
+    /// The batch the job submitted last is in, or goes out in: the next
+    /// one while it waits, else the last given out.
+    pub fn latest_batch(&self) -> u64 {
+        let waiting = !self.pending.lock().unwrap().is_empty();
+        self.given_out.load(std::sync::atomic::Ordering::Relaxed) + waiting as u64
     }
 
     /// Give out what is pending, and the number of the last batch given
@@ -437,14 +448,9 @@ impl Voodoo {
             bytes: data.to_vec(),
         };
         self.submit_outside(job, None);
-        // The bytes may land in what the card shows, or will once the
-        // swaps waiting are done, where the picture has to wait for them.
-        let len = Some(data.len() as u64);
-        let shown = self
-            .banshee
-            .as_ref()
-            .is_some_and(|b| b.shows_bytes(at as u32, len) || b.will_show(at as u32, len));
-        self.note_drawn(shown);
+        // The bytes may land in what the card shows when the picture is
+        // made, which then waits for them.
+        self.note_drawn(super::Place::Bytes(at as u32, data.len() as u64));
         true
     }
 }

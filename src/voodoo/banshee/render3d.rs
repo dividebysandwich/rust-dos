@@ -267,7 +267,7 @@ impl Voodoo {
         }
         self.swapped += 1;
         self.display_dirty = true;
-        self.front_jobs = mark.map(|number| (number, self.shown_key()));
+        self.shown_up_to(mark);
     }
 
     /// `retired` swaps happened: their buffers shown, and the command
@@ -459,8 +459,42 @@ pub(crate) mod tests {
 
     /// After a swap the picture waits for the jobs given out before it,
     /// and the next frame's go on drawing beside the program; unless one
-    /// of those draws into what is shown, or the card shows something
-    /// else since, which wait for all.
+    /// of those draws into what is shown when the picture is made, which
+    /// waits for all.
+    /// Double buffering, as Myth draws: the next frame goes into the
+    /// buffer shown until its swap's retrace, and is sent before it. The
+    /// picture made after the retrace shows the other buffer, and doesn't
+    /// wait for that frame.
+    #[test]
+    fn the_next_frame_drawn_before_the_retrace_doesnt_hold_the_picture() {
+        use super::super::super::workers::Job;
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, LEFT_OVERLAY_BUF, a);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        // A frame into B, swapped at the next retrace; the next one into A,
+        // shown meanwhile, held.
+        v.mark_drawn(b as usize / 2);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        v.service(Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        });
+        assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, b);
+        picture_comes_before(&mut v, &gate, "double buffering");
+        open(&gate);
+        v.flush();
+    }
+
     #[test]
     fn the_picture_waits_for_the_frame_a_swap_shows() {
         use super::super::super::workers::{Job, Word};
@@ -526,8 +560,17 @@ pub(crate) mod tests {
                     });
                     assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, next);
                 }
-                "desktop moved" => write(&mut v, VID_DESKTOP_START_ADDR, 0x20_0000),
-                _ => write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280),
+                // Drawn into a buffer the desktop then shows.
+                "desktop moved" => {
+                    v.mark_drawn(0x20_0000 / 2);
+                    write(&mut v, VID_DESKTOP_START_ADDR, 0x20_0000);
+                }
+                // Texture data past the overlay's rows, which a wider stride
+                // then shows.
+                _ => {
+                    assert!(v.banshee_texture_queue(shown as usize + 0x100, &[1, 2, 3, 4]));
+                    write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280);
+                }
             }
             picture_waits_for_all(&mut v, &gate, change);
         }

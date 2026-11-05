@@ -114,12 +114,6 @@ impl Banshee {
         self.shows_with(self.overlay_addr, addr, len)
     }
 
-    /// The same for the pictures the swaps waiting for their retrace
-    /// show (`overlay_queue`).
-    pub fn will_show(&self, addr: u32, len: Option<u64>) -> bool {
-        let shows = |&overlay: &u32| self.shows_with(overlay, addr, len);
-        self.overlay_queue.iter().any(shows)
-    }
 
     /// `shows_bytes` with the overlay at byte `overlay_addr`.
     fn shows_with(&self, overlay_addr: u32, addr: u32, len: Option<u64>) -> bool {
