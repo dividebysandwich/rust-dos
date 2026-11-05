@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use sdl2::keyboard::{Keycode, Mod, Scancode};
-use sdl2::mouse::MouseButton;
+use sdl3::keyboard::{Keycode, Mod, Scancode};
+use sdl3::mouse::MouseButton;
 
 use crate::config_ui::UiKey;
 use crate::cpu::Cpu;
@@ -101,8 +101,8 @@ pub(crate) fn apply_keyboard_layout(cpu: &mut Cpu, setting: rust_dos::keylayout:
 
 /// A game controller's sticks and buttons, as the game port takes them.
 /// All of a controller's inputs, for a game's gamepad mapping (padmap.rs).
-pub(crate) fn pad_snapshot(pad: &sdl2::controller::GameController) -> rust_dos::padmap::PadSnapshot {
-    use sdl2::controller::{Axis, Button};
+pub(crate) fn pad_snapshot(pad: &sdl3::gamepad::Gamepad) -> rust_dos::padmap::PadSnapshot {
+    use sdl3::gamepad::{Axis, Button};
     let axis = |axis| pad.axis(axis) as f32 / 32767.0;
     // In the order of padmap::INPUTS.
     let order = [
@@ -110,10 +110,10 @@ pub(crate) fn pad_snapshot(pad: &sdl2::controller::GameController) -> rust_dos::
         Button::DPadDown,
         Button::DPadLeft,
         Button::DPadRight,
-        Button::A,
-        Button::B,
-        Button::X,
-        Button::Y,
+        Button::South,
+        Button::East,
+        Button::West,
+        Button::North,
         Button::LeftShoulder,
         Button::RightShoulder,
     ];
@@ -131,14 +131,14 @@ pub(crate) fn pad_snapshot(pad: &sdl2::controller::GameController) -> rust_dos::
     }
 }
 
-pub(crate) fn pad_state(pad: &sdl2::controller::GameController) -> joystick::PadState {
-    use sdl2::controller::{Axis, Button};
+pub(crate) fn pad_state(pad: &sdl3::gamepad::Gamepad) -> joystick::PadState {
+    use sdl3::gamepad::{Axis, Button};
     let axis = |axis| pad.axis(axis) as f32 / 32767.0;
     let buttons = [
-        (Button::A, joystick::PAD_A),
-        (Button::B, joystick::PAD_B),
-        (Button::X, joystick::PAD_X),
-        (Button::Y, joystick::PAD_Y),
+        (Button::South, joystick::PAD_A),
+        (Button::East, joystick::PAD_B),
+        (Button::West, joystick::PAD_X),
+        (Button::North, joystick::PAD_Y),
         (Button::DPadUp, joystick::PAD_UP),
         (Button::DPadDown, joystick::PAD_DOWN),
         (Button::DPadLeft, joystick::PAD_LEFT),

@@ -6,8 +6,8 @@ use crate::config::Filter;
 use crate::video::Frame;
 use crate::video::shader::{CrtSettings, Shader};
 use rust_dos::config_ui::Layer;
-use sdl2::VideoSubsystem;
-use sdl2::video::Window;
+use sdl3::VideoSubsystem;
+use sdl3::video::Window;
 
 /// Why there is no OpenGL 3 to draw with, and the window if one was made
 /// for it, which SDL's renderer can take instead.

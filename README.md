@@ -125,9 +125,11 @@ Download Rust-DOS for Windows, macOS, Linux, the browser or
 [releases page](https://github.com/dividebysandwich/rust-dos/releases);
 its notes say which file to take.
 
-To build it yourself, install Rust and SDL2's development files
-(`libsdl2-dev` and `libasound2-dev` on Debian and Ubuntu, `brew install sdl2`
-on macOS), then:
+To build it yourself, install Rust and SDL3's development files
+(`libsdl3-dev` and `libasound2-dev` on Debian 13 and Ubuntu 25.04 or
+later, `sdl3` on Arch, `SDL3-devel` on Fedora, `brew install sdl3` on
+macOS; older distributions have none, and need SDL3
+[built from source](https://wiki.libsdl.org/SDL3/README-cmake)), then:
 
 ```sh
 cargo build --release
@@ -145,20 +147,20 @@ runs a DOS tool from the host's shell without a window
 InstallShield installer archives without running its setup
 ([more](CONFIGURATION.md#unpacking-installshield-installers)).
 
-On Windows (MSVC), take SDL2's Visual C++ development package,
-`SDL2-devel-<version>-VC.zip` from
-[SDL's releases](https://github.com/libsdl-org/SDL/releases) (a 2.x release,
-since the SDL3 packages listed beside them have no `SDL2.lib`; CI builds with
-[2.30.0](https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip)),
-unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL2.lib`.
-With 2.30.0 unpacked to `C:\`:
+On Windows (MSVC), take SDL3's Visual C++ development package,
+`SDL3-devel-<version>-VC.zip` from
+[SDL's releases](https://github.com/libsdl-org/SDL/releases) (CI builds
+with
+[3.4.20](https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip)),
+unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL3.lib`.
+With 3.4.20 unpacked to `C:\`:
 
 ```powershell
-$env:LIB = "C:\SDL2-2.30.0\lib\x64;$env:LIB"
+$env:LIB = "C:\SDL3-3.4.20\lib\x64;$env:LIB"
 cargo build --release
 ```
 
-To run the program, put `SDL2.dll` from the same `lib\x64` next to
+To run the program, put `SDL3.dll` from the same `lib\x64` next to
 `rust-dos.exe` (in `target\release`) or on `PATH`. `cargo test` starts the
 debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
 
@@ -460,13 +462,14 @@ curl -o screen.png localhost:8086/api/screenshot
 curl 'localhost:8086/api/memory?addr=DS:SI&len=64'
 ```
 
-Set `SDL_VIDEODRIVER=dummy` to run without a window, which also needs no
+Set `SDL_VIDEO_DRIVER=dummy` to run without a window, which also needs no
 sound device: the sound goes to the null output
 ([`audio_output`](CONFIGURATION.md#mixer)). Don't set
-`SDL_AUDIODRIVER=dummy`: SDL's dummy driver doesn't keep real time, at a
-rate that changes from run to run, and makes any measurement wrong.
-[docs/llm-debugging.md](docs/llm-debugging.md) is a guide to using the
-server, and says what to use for timing runs.
+`SDL_AUDIO_DRIVER=dummy`: SDL's dummy driver doesn't keep real time, at a
+rate that changes from run to run, and makes any measurement wrong. SDL3
+still reads SDL2's names, `SDL_VIDEODRIVER` and `SDL_AUDIODRIVER`, when
+the new ones are unset. [docs/llm-debugging.md](docs/llm-debugging.md) is
+a guide to using the server, and says what to use for timing runs.
 
 ## Profiling
 

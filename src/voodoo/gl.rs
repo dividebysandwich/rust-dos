@@ -2604,10 +2604,10 @@ pub(crate) mod tests {
     fn texture_updates_replace_pixels_and_resize_mip_storage() {
         use super::*;
         use crate::voodoo::mirror::Level;
-        let sdl = sdl2::init().unwrap();
+        let sdl = sdl3::init().unwrap();
         let video = sdl.video().unwrap();
         let attrs = video.gl_attr();
-        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_profile(sdl3::video::GLProfile::Core);
         attrs.set_context_version(3, 3);
         let window = video
             .window("Texture regression", 8, 8)
@@ -2617,9 +2617,7 @@ pub(crate) mod tests {
             .unwrap();
         let _context = window.gl_create_context().unwrap();
         // SAFETY: this thread owns the current SDL OpenGL context.
-        let gl = unsafe {
-            glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast())
-        };
+        let gl = unsafe { glow::Context::from_loader_function(|name| proc_address(&video, name)) };
         let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, 1, 1).unwrap();
         for (width, height, count, color) in [
             (4, 4, 2, 0xFF11_2233u32),
@@ -2914,15 +2912,15 @@ pub(crate) mod tests {
         cpu.bus.voodoo.as_mut().unwrap().set_mirror(true);
         cpu.bus.voodoo.as_mut().unwrap().set_software_picture(true);
 
-        let sdl = sdl2::init().unwrap();
+        let sdl = sdl3::init().unwrap();
         let video = sdl.video().unwrap();
         let attrs = video.gl_attr();
-        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_profile(sdl3::video::GLProfile::Core);
         attrs.set_context_version(3, 3);
         let window = video.window("Glide replay", 640, 480).opengl().hidden().build().unwrap();
         let _context = window.gl_create_context().unwrap();
         // SAFETY: this thread owns the current SDL OpenGL context.
-        let gl = unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        let gl = unsafe { glow::Context::from_loader_function(|s| proc_address(&video, s)) };
         let samples = std::env::var("RUST_DOS_VOODOO_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
         let mut renderer = VoodooGl::new(&gl, Glsl::Gl150, 1, samples, 1).unwrap();
         let save = |name: &str, rgb: &[u8], w, h| {
@@ -2996,10 +2994,10 @@ pub(crate) mod tests {
         use crate::voodoo::regs::SWAPBUFFER_CMD;
         use crate::voodoo::{Board, Now, Voodoo};
 
-        let sdl = sdl2::init().unwrap();
+        let sdl = sdl3::init().unwrap();
         let video = sdl.video().unwrap();
         let attrs = video.gl_attr();
-        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_profile(sdl3::video::GLProfile::Core);
         attrs.set_context_version(3, 3);
         let window = video
             .window("Banshee composition", 8, 8)
@@ -3009,8 +3007,7 @@ pub(crate) mod tests {
             .unwrap();
         let _context = window.gl_create_context().unwrap();
         // SAFETY: this thread owns the current SDL OpenGL context.
-        let gl =
-            unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        let gl = unsafe { glow::Context::from_loader_function(|s| proc_address(&video, s)) };
 
         // A 160x100 desktop at 1000h, memory and CLUT of noise. It is
         // narrow, so the picture shows each pixel twice across.
@@ -3363,26 +3360,30 @@ pub(crate) mod tests {
     pub(crate) struct TestContext {
         pub gl: glow::Context,
         barrier: Option<super::TextureBarrier>,
-        _context: sdl2::video::GLContext,
-        _window: sdl2::video::Window,
-        _video: sdl2::VideoSubsystem,
-        _sdl: sdl2::Sdl,
+        _context: sdl3::video::GLContext,
+        _window: sdl3::video::Window,
+        _video: sdl3::VideoSubsystem,
+        _sdl: sdl3::Sdl,
+    }
+
+    /// glow's loader: the address of OpenGL's function `name` in the
+    /// current context, or null.
+    fn proc_address(video: &sdl3::VideoSubsystem, name: &str) -> *const std::ffi::c_void {
+        video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)
     }
 
     pub(crate) fn test_context(title: &str) -> TestContext {
-        let sdl = sdl2::init().unwrap();
+        let sdl = sdl3::init().unwrap();
         let video = sdl.video().unwrap();
         let attrs = video.gl_attr();
-        attrs.set_context_profile(sdl2::video::GLProfile::Core);
+        attrs.set_context_profile(sdl3::video::GLProfile::Core);
         attrs.set_context_version(3, 3);
         let window = video.window(title, 8, 8).opengl().hidden().build().unwrap();
         let context = window.gl_create_context().unwrap();
         // SAFETY: this thread owns the current SDL OpenGL context.
-        let gl =
-            unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s).cast()) };
+        let gl = unsafe { glow::Context::from_loader_function(|s| proc_address(&video, s)) };
         // SAFETY: as above.
-        let barrier =
-            unsafe { super::TextureBarrier::load(&gl, |s| video.gl_get_proc_address(s).cast()) };
+        let barrier = unsafe { super::TextureBarrier::load(&gl, |s| proc_address(&video, s)) };
         TestContext {
             gl,
             barrier,

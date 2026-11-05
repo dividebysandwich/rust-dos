@@ -148,7 +148,7 @@ sevenz-rust2 = { version = "0.24", default-features = false, features = ["bzip2"
 # The window, the sound device and the debug server of the rust-dos program,
 # which the browser build (web/) has in JavaScript instead.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-sdl2 = { version = "0.38", optional = true }
+sdl3 = { version = "0.22", optional = true }
 # The window's OpenGL, which draws the CRT shaders.
 glow = { version = "0.18.0", optional = true }
 axum = { version = "0.8", features = ["ws"], optional = true }
@@ -208,7 +208,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 default = ["sdl", "gl", "vr", "midi", "hostmidi", "cdaudio", "chd", "sevenz", "manuals"]
 # The rust-dos program: its window and sound device, its debug server and
 # its connection to RetroAchievements.
-sdl = ["dep:sdl2", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "rust-dos-sc55/download"]
+sdl = ["dep:sdl3", "dep:axum", "dep:ureq", "rust-dos-soundblaster/download", "rust-dos-sc55/download"]
 # The window drawn with OpenGL 3: the CRT shaders, and the 3dfx card at
 # higher resolutions. Without it (as on Redox), SDL's renderer draws the
 # picture, without them.

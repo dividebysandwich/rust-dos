@@ -23,11 +23,11 @@ use gl::{GlScreen, NoGl};
 use rust_dos::bus::Bus;
 use rust_dos::config_ui::Layer;
 use rust_dos::voodoo::{Renderer, VoodooSettings};
-use sdl2::VideoSubsystem;
-use sdl2::pixels::PixelFormatEnum;
-use sdl2::render::{ScaleMode, Texture, TextureCreator, WindowCanvas};
-use sdl2::surface::Surface;
-use sdl2::video::{FullscreenType, Window, WindowContext, WindowPos};
+use sdl3::VideoSubsystem;
+use sdl3::pixels::PixelFormat;
+use sdl3::render::{ScaleMode, Texture, TextureCreator, WindowCanvas};
+use sdl3::surface::Surface;
+use sdl3::video::{Window, WindowContext, WindowPos};
 use std::cell::OnceCell;
 
 /// The window's icon: packaging/linux/rust-dos.png scaled to 128x128.
@@ -74,7 +74,6 @@ impl From<std::ops::Range<usize>> for PresentRows {
 }
 
 pub struct Display<'a> {
-    video: VideoSubsystem,
     out: Output<'a>,
     frame: (u32, u32),
     scale: u32,
@@ -129,6 +128,13 @@ enum Output<'a> {
 }
 
 impl Output<'_> {
+    fn window(&self) -> &Window {
+        match self {
+            Output::Gl(gl) => gl.window(),
+            Output::Sdl { canvas, .. } => canvas.window(),
+        }
+    }
+
     fn window_mut(&mut self) -> &mut Window {
         match self {
             Output::Gl(gl) => gl.window_mut(),
@@ -172,7 +178,7 @@ impl<'a> Display<'a> {
             Err(NoGl { window, reason }) => {
                 // What was asked of OpenGL isn't for SDL's renderer.
                 // SAFETY: it only resets SDL's settings for new contexts.
-                unsafe { sdl2::sys::SDL_GL_ResetAttributes() };
+                unsafe { sdl3::sys::video::SDL_GL_ResetAttributes() };
                 let window = match window {
                     Some(window) => window,
                     None => {
@@ -184,7 +190,8 @@ impl<'a> Display<'a> {
                         builder.build().map_err(|e| e.to_string())?
                     }
                 };
-                let canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
+                let canvas =
+                    sdl3::render::create_renderer(window, None).map_err(|e| e.to_string())?;
                 let creator = textures.get_or_init(|| canvas.texture_creator());
                 let texture = create_texture(creator, frame, settings.filter)?;
                 if settings.shader != Shader::None {
@@ -194,12 +201,12 @@ impl<'a> Display<'a> {
                         reason
                     ));
                 }
-                let renderer = format!("SDL renderer {} (no OpenGL 3: {})", canvas.info().name, reason);
+                let name = &canvas.renderer_name;
+                let renderer = format!("SDL renderer {} (no OpenGL 3: {})", name, reason);
                 (Output::Sdl { canvas, creator, texture, layer: None }, renderer)
             }
         };
         let mut display = Self {
-            video: video.clone(),
             out,
             frame,
             scale: settings.scale,
@@ -230,6 +237,11 @@ impl<'a> Display<'a> {
         Ok(display)
     }
 
+    /// The window the picture is in.
+    pub fn window(&self) -> &Window {
+        self.out.window()
+    }
+
     /// What draws the picture: OpenGL and its version, or SDL's renderer.
     pub fn renderer(&self) -> &str {
         &self.renderer
@@ -254,9 +266,9 @@ impl<'a> Display<'a> {
     }
 
     fn update_refresh_rate(&mut self) {
-        let index = self.out.window_mut().display_index();
-        self.refresh_hz = index
-            .and_then(|i| self.video.current_display_mode(i))
+        let display = self.out.window_mut().get_display();
+        self.refresh_hz = display
+            .and_then(|d| d.get_mode())
             .ok()
             .map(|mode| mode.refresh_rate as f64)
             .filter(|&hz| hz > 0.0);
@@ -331,8 +343,8 @@ impl<'a> Display<'a> {
         // SDL makes a hidden window fullscreen only once it is shown, and
         // until then it would keep its first size, whatever the picture's.
         let on = on && !self.hidden;
-        let mode = if on { FullscreenType::Desktop } else { FullscreenType::Off };
-        self.out.window_mut().set_fullscreen(mode)?;
+        // (Without a display mode set, SDL's fullscreen is the desktop's.)
+        self.out.window_mut().set_fullscreen(on).map_err(|e| e.to_string())?;
         self.fullscreen = on;
         self.layout()
     }
@@ -344,10 +356,11 @@ impl<'a> Display<'a> {
         self.redraw = true;
         let (w, h) = display_size(self.frame.0, self.frame.1, self.aspect);
         if let Output::Sdl { canvas, .. } = &mut self.out {
-            canvas.set_logical_size(w, h).map_err(|e| e.to_string())?;
+            let letterbox = sdl3::sys::render::SDL_LOGICAL_PRESENTATION_LETTERBOX;
+            canvas.set_logical_size(w, h, letterbox).map_err(|e| e.to_string())?;
         }
         if !self.fullscreen {
-            fit_window(&self.video, self.out.window_mut(), w, h, self.scale);
+            fit_window(self.out.window_mut(), w, h, self.scale);
         }
         Ok(())
     }
@@ -512,13 +525,14 @@ impl<'a> Display<'a> {
                 Ok(())
             }
             Output::Sdl { canvas, creator, texture, layer: layer_texture } => {
-                let rect = sdl2::rect::Rect::new(0, rows.start as i32, frame.width, (rows.end - rows.start) as u32);
+                let height = (rows.end - rows.start) as u32;
+                let rect = sdl3::rect::Rect::new(0, rows.start as i32, frame.width, height);
                 let pixels = &frame.rgba[rows.start * row_bytes..rows.end * row_bytes];
                 texture.update(Some(rect), pixels, row_bytes).map_err(|e| e.to_string())?;
                 canvas.clear();
                 // Stretched over the whole logical size: that is the 4:3
                 // correction.
-                canvas.copy(texture, None, None)?;
+                canvas.copy(texture, None, None).map_err(|e| e.to_string())?;
                 if let Some(layer) = layer {
                     let picture = &layer.picture;
                     let fits = layer_texture.as_ref().is_some_and(|(t, _)| {
@@ -539,8 +553,8 @@ impl<'a> Display<'a> {
                     // In logical pixels, which the picture is stretched over.
                     let (sx, sy) = (display.0 as f32 / frame.width as f32, display.1 as f32 / frame.height as f32);
                     let (x, y, w, h) = layer.rect;
-                    let to = sdl2::rect::Rect::new((x * sx) as i32, (y * sy) as i32, (w * sx) as u32, (h * sy) as u32);
-                    canvas.copy(t, None, Some(to))?;
+                    let to = sdl3::render::FRect::new(x * sx, y * sy, w * sx, h * sy);
+                    canvas.copy(t, None, Some(to)).map_err(|e| e.to_string())?;
                 }
                 canvas.present();
                 Ok(())
@@ -599,7 +613,7 @@ impl<'a> Display<'a> {
     pub fn output_scale(&self) -> (f64, f64) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
         let size = match &self.out {
-            Output::Gl(gl) => gl.window().drawable_size(),
+            Output::Gl(gl) => gl.window().size_in_pixels(),
             Output::Sdl { canvas, .. } => canvas.output_size().unwrap_or(display),
         };
         let (_, _, w, h) = letterbox(size, display);
@@ -610,26 +624,18 @@ impl<'a> Display<'a> {
     /// its events' units) is, across and down.
     pub fn frame_scale(&self) -> (f64, f64) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
-        let (w, h) = match &self.out {
-            Output::Gl(gl) => {
-                let (_, _, w, h) = letterbox(gl.window().size(), display);
-                (w, h)
-            }
-            Output::Sdl { .. } => display,
-        };
+        // In the window's units for both: SDL3 leaves the events of SDL's
+        // renderer in them too, not in its logical size.
+        let (_, _, w, h) = letterbox(self.out.window().size(), display);
         (self.frame.0 as f64 / w.max(1) as f64, self.frame.1 as f64 / h.max(1) as f64)
     }
 
-    pub fn to_frame(&self, x: i32, y: i32) -> (i32, i32) {
+    pub fn to_frame(&self, x: f32, y: f32) -> (i32, i32) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
         match &self.out {
             #[cfg(feature = "vr")]
             Output::Gl(gl) if let Some(stage) = gl.stage() => {
-                let window = gl.window();
-                let (ws, ds) = (window.size(), window.drawable_size());
-                let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
-                let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
-                if let Some(uv) = stage.pick((px, py)) {
+                if let Some(uv) = stage.pick(pixel_under(gl.window(), (x, y))) {
                     let texture = stage.screen_size(display);
                     let flat = CrtSettings { curvature: 0, ..self.crt };
                     self.picked.set(screen_to_frame((uv.x, uv.y), texture, display, self.frame, (gl.active(), flat)));
@@ -639,10 +645,23 @@ impl<'a> Display<'a> {
             Output::Gl(gl) => {
                 let window = gl.window();
                 let look = (gl.active(), self.crt);
-                window_to_frame((x, y), window.size(), window.drawable_size(), display, self.frame, look)
+                let (ws, ds) = (window.size(), window.size_in_pixels());
+                window_to_frame((x, y), ws, ds, display, self.frame, look)
             }
-            Output::Sdl { .. } => {
-                (logical_to_frame(x, display.0, self.frame.0), logical_to_frame(y, display.1, self.frame.1))
+            Output::Sdl { canvas, .. } => {
+                // SDL3 leaves the events in the window's units: the
+                // renderer says where they are in its logical size.
+                let (mut lx, mut ly) = (0.0, 0.0);
+                // SAFETY: the renderer is alive, and SDL only writes the two.
+                unsafe {
+                    use sdl3::sys::render::SDL_RenderCoordinatesFromWindow;
+                    SDL_RenderCoordinatesFromWindow(canvas.raw(), x, y, &mut lx, &mut ly)
+                };
+                let (lx, ly) = (lx.floor() as i32, ly.floor() as i32);
+                (
+                    logical_to_frame(lx, display.0, self.frame.0),
+                    logical_to_frame(ly, display.1, self.frame.1),
+                )
             }
         }
     }
@@ -660,7 +679,7 @@ pub fn before_headset(vr: &rust_dos::vr::VrSettings) {
 /// Write what the OpenXR runtime and OpenGL offer a VR headset to the
 /// console and vr-probe.log (`--vr-probe`).
 #[cfg_attr(not(feature = "vr"), allow(unused_variables))]
-pub fn vr_probe(video: &sdl2::VideoSubsystem, vr: &rust_dos::vr::VrSettings) {
+pub fn vr_probe(video: &sdl3::VideoSubsystem, vr: &rust_dos::vr::VrSettings) {
     #[cfg(feature = "vr")]
     stage::probe(video, vr);
     #[cfg(not(feature = "vr"))]
@@ -716,25 +735,19 @@ impl Display<'_> {
 
     /// A click at the window's point (`x`, `y`) on something of the 3D
     /// scene's (a lamp, a camera) rather than the screen: done, and true.
-    pub fn click_scene(&mut self, x: i32, y: i32) -> bool {
+    pub fn click_scene(&mut self, x: f32, y: f32) -> bool {
         let Output::Gl(gl) = &mut self.out else { return false };
-        let window = gl.window();
-        let (ws, ds) = (window.size(), window.drawable_size());
-        let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
-        let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
-        gl.stage_mut().is_some_and(|stage| stage.click((px, py)))
+        let at = pixel_under(gl.window(), (x, y));
+        gl.stage_mut().is_some_and(|stage| stage.click(at))
     }
 
     /// The mouse at the window's point (`x`, `y`): a key of the 3D scene's
     /// keyboard there shows lit.
-    pub fn hover_scene(&mut self, x: i32, y: i32) {
+    pub fn hover_scene(&mut self, x: f32, y: f32) {
         let Output::Gl(gl) = &mut self.out else { return };
-        let window = gl.window();
-        let (ws, ds) = (window.size(), window.drawable_size());
-        let px = (x as f32 + 0.5) * ds.0 as f32 / ws.0.max(1) as f32;
-        let py = (y as f32 + 0.5) * ds.1 as f32 / ws.1.max(1) as f32;
+        let at = pixel_under(gl.window(), (x, y));
         if let Some(stage) = gl.stage_mut() {
-            stage.hover((px, py));
+            stage.hover(at);
         }
     }
 
@@ -937,9 +950,9 @@ impl Display<'_> {
         false
     }
 
-    pub fn hover_scene(&mut self, _x: i32, _y: i32) {}
+    pub fn hover_scene(&mut self, _x: f32, _y: f32) {}
 
-    pub fn click_scene(&mut self, _x: i32, _y: i32) -> bool {
+    pub fn click_scene(&mut self, _x: f32, _y: f32) -> bool {
         false
     }
 
@@ -974,31 +987,63 @@ impl Display<'_> {
 impl Display<'_> {
     /// Put the host's pointer over the frame's point (`fx`, `fy`), on the
     /// picture as it is drawn (but for the CRT shader's curve).
-    pub fn warp_mouse(&self, mouse: &sdl2::mouse::MouseUtil, (fx, fy): (f64, f64)) {
+    pub fn warp_mouse(&self, mouse: &sdl3::mouse::MouseUtil, (fx, fy): (f64, f64)) {
         let display = display_size(self.frame.0, self.frame.1, self.aspect);
-        let window = match &self.out {
-            Output::Gl(gl) => gl.window(),
-            Output::Sdl { canvas, .. } => canvas.window(),
+        let window = self.out.window();
+        let (x, y) = match &self.out {
+            Output::Gl(_) => {
+                let (ws, ds) = (window.size(), window.size_in_pixels());
+                frame_to_window((fx, fy), ws, ds, display, self.frame)
+            }
+            // SDL's renderer says where its logical point is in the window.
+            Output::Sdl { canvas, .. } => {
+                let lx = (fx / self.frame.0.max(1) as f64 * display.0 as f64) as f32;
+                let ly = (fy / self.frame.1.max(1) as f64 * display.1 as f64) as f32;
+                let (mut x, mut y) = (0.0, 0.0);
+                // SAFETY: the renderer is alive, and SDL only writes the two.
+                unsafe {
+                    use sdl3::sys::render::SDL_RenderCoordinatesToWindow;
+                    SDL_RenderCoordinatesToWindow(canvas.raw(), lx, ly, &mut x, &mut y)
+                };
+                (x, y)
+            }
         };
-        // SDL's renderer scales its logical size to the window itself.
-        let drawable = match &self.out {
-            Output::Gl(_) => window.drawable_size(),
-            Output::Sdl { .. } => window.size(),
-        };
-        let (x, y) = frame_to_window((fx, fy), window.size(), drawable, display, self.frame);
         mouse.warp_mouse_in_window(window, x, y);
     }
 }
 
-/// The window's pixel showing the frame's point (`fx`, `fy`): the reverse
-/// of `window_to_frame`, without a shader's curve.
-fn frame_to_window((fx, fy): (f64, f64), window: Size, drawable: Size, display: Size, frame: Size) -> (i32, i32) {
+/// The window's point showing the frame's point (`fx`, `fy`): the reverse
+/// of `window_to_frame`, without a shader's curve. SDL3 takes the point in
+/// fractions of the window's units, which a high-DPI window has more
+/// pixels than.
+fn frame_to_window(
+    (fx, fy): (f64, f64),
+    window: Size,
+    drawable: Size,
+    display: Size,
+    frame: Size,
+) -> (f32, f32) {
     let (vx, vy, vw, vh) = letterbox(drawable, display);
     let px = vx as f64 + fx / frame.0.max(1) as f64 * vw as f64;
     let py = vy as f64 + fy / frame.1.max(1) as f64 * vh as f64;
     let x = px * window.0 as f64 / drawable.0.max(1) as f64;
     let y = py * window.1 as f64 / drawable.1.max(1) as f64;
-    (x as i32, y as i32)
+    (x as f32, y as f32)
+}
+
+/// The middle of the drawable's pixel under the window's point (`x`, `y`).
+/// SDL3 gives the point in fractions of the window's units, so a high-DPI
+/// window's mouse tells apart each of the drawable's pixels.
+fn drawable_pixel((x, y): (f32, f32), window: Size, drawable: Size) -> (f32, f32) {
+    let px = (x * drawable.0 as f32 / window.0.max(1) as f32).floor() + 0.5;
+    let py = (y * drawable.1 as f32 / window.1.max(1) as f32).floor() + 0.5;
+    (px, py)
+}
+
+/// `drawable_pixel` in `window`, for the 3D scene's picking.
+#[cfg(feature = "vr")]
+fn pixel_under(window: &Window, at: (f32, f32)) -> (f32, f32) {
+    drawable_pixel(at, window.size(), window.size_in_pixels())
 }
 
 /// Where a picture of `inner` proportions goes in `outer` pixels, as big as
@@ -1027,7 +1072,7 @@ type Size = (u32, u32);
 /// settings: in a `window` whose drawable has `drawable` pixels (more on a
 /// high-DPI screen), the `frame` shown at `display` proportions.
 fn window_to_frame(
-    (x, y): (i32, i32),
+    at: (f32, f32),
     window: Size,
     drawable: Size,
     display: Size,
@@ -1035,9 +1080,7 @@ fn window_to_frame(
     (shader, crt): (Shader, CrtSettings),
 ) -> (i32, i32) {
     let (vx, vy, vw, vh) = letterbox(drawable, display);
-    // The middle of the window's pixel, in the drawable's.
-    let px = (x as f32 + 0.5) * drawable.0 as f32 / window.0.max(1) as f32;
-    let py = (y as f32 + 0.5) * drawable.1 as f32 / window.1.max(1) as f32;
+    let (px, py) = drawable_pixel(at, window, drawable);
     let u = (px - vx as f32) / vw.max(1) as f32;
     let v = (py - vy as f32) / vh.max(1) as f32;
     let (u, v) = shader.warp(crt, u, v);
@@ -1078,7 +1121,8 @@ fn icon() -> Result<(u32, u32, Vec<u8>), String> {
 
 fn set_icon(window: &mut Window) -> Result<(), String> {
     let (width, height, mut pixels) = icon()?;
-    let surface = Surface::from_data(&mut pixels, width, height, width * 4, PixelFormatEnum::RGBA32)?;
+    let surface = Surface::from_data(&mut pixels, width, height, width * 4, PixelFormat::RGBA32)
+        .map_err(|e| e.to_string())?;
     // SDL keeps a copy.
     window.set_icon(surface);
     Ok(())
@@ -1097,7 +1141,7 @@ fn create_texture<'a>(
     filter: Filter,
 ) -> Result<Texture<'a>, String> {
     let mut texture = creator
-        .create_texture_streaming(PixelFormatEnum::RGBA32, width, height)
+        .create_texture_streaming(PixelFormat::RGBA32, width, height)
         .map_err(|e| e.to_string())?;
     texture.set_scale_mode(scale_mode(filter));
     Ok(texture)
@@ -1105,8 +1149,8 @@ fn create_texture<'a>(
 
 /// Make the window `scale` times the picture's size, or as big as fits the
 /// desktop with its frame, and move it where all of it is on the desktop.
-fn fit_window(video: &VideoSubsystem, window: &mut Window, width: u32, height: u32, scale: u32) {
-    let Ok(bounds) = window.display_index().and_then(|display| video.display_usable_bounds(display)) else {
+fn fit_window(window: &mut Window, width: u32, height: u32, scale: u32) {
+    let Ok(bounds) = window.get_display().and_then(|display| display.get_usable_bounds()) else {
         let _ = window.set_size(width * scale.max(1), height * scale.max(1));
         return;
     };
@@ -1224,24 +1268,32 @@ mod tests {
         // A 640x400 frame at 2x, as SDL's renderer maps it.
         let twice = ((1280, 800), (1280, 800), (640, 400), (640, 400));
         for x in [0, 1, 639, 1278, 1279] {
-            assert_eq!(at((x, x / 2), twice, Shader::None), (logical_to_frame(x, 1280, 640), x / 4));
+            let at = at((x as f32, (x / 2) as f32), twice, Shader::None);
+            assert_eq!(at, (logical_to_frame(x, 1280, 640), x / 4));
         }
         // The bars of fullscreen are outside the frame.
         let full = ((1920, 1080), (1920, 1080), (640, 480), (640, 400));
-        assert_eq!(at((100, 540), full, Shader::None).0, -62);
-        assert_eq!(at((1900, 540), full, Shader::None).0, 738);
-        assert_eq!(at((960, 1079), full, Shader::None), (320, 399));
-        // A high-DPI window has twice the pixels in its drawable.
+        assert_eq!(at((100.0, 540.0), full, Shader::None).0, -62);
+        assert_eq!(at((1900.0, 540.0), full, Shader::None).0, 738);
+        assert_eq!(at((960.0, 1079.0), full, Shader::None), (320, 399));
+        // A high-DPI window has twice the pixels in its drawable, and its
+        // mouse comes in fractions of the window's units, a step for each.
         let retina = ((640, 400), (1280, 800), (640, 400), (640, 400));
-        assert_eq!(at((320, 200), retina, Shader::None), (320, 200));
+        assert_eq!(at((320.0, 200.0), retina, Shader::None), (320, 200));
+        assert_eq!(at((320.5, 200.5), retina, Shader::None), (320, 200));
+        let fine = ((640, 480), (1280, 960), (640, 480), (1280, 960));
+        assert_eq!(at((320.0, 200.0), fine, Shader::None), (640, 400));
+        assert_eq!(at((320.5, 200.5), fine, Shader::None), (641, 401));
         // The curved tube keeps the middle and bends the corners away.
-        assert_eq!(at((639, 399), twice, Shader::Crt), (319, 199));
-        let (x, y) = at((0, 0), twice, Shader::Crt);
+        assert_eq!(at((639.0, 399.0), twice, Shader::Crt), (319, 199));
+        let (x, y) = at((0.0, 0.0), twice, Shader::Crt);
         assert!(x < 0 && y < 0);
         // A flat CRT only has the overscan.
-        let flat = window_to_frame((0, 0), twice.0, twice.1, twice.2, twice.3, (Shader::Crt, CrtSettings { curvature: 0, ..CrtSettings::default() }));
+        let flat = CrtSettings { curvature: 0, ..CrtSettings::default() };
+        let (window, drawable, display, frame) = twice;
+        let flat = window_to_frame((0.0, 0.0), window, drawable, display, frame, (Shader::Crt, flat));
         assert!(flat.0 > x && flat.0 < 0 && flat.1 > y && flat.1 < 0, "{:?}", flat);
-        assert_eq!(at((0, 0), twice, Shader::Aperture), (0, 0));
+        assert_eq!(at((0.0, 0.0), twice, Shader::Aperture), (0, 0));
     }
 
     #[test]

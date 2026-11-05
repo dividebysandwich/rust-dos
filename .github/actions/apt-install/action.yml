@@ -5,7 +5,7 @@ description: >-
 
 # The x86-64 runner images fetch packages from azure.archive.ubuntu.com,
 # which now and then serves at a few tens of kB/s and turns a 25 s install
-# of libsdl2-dev's dependencies into 8 to 16 minutes. The container jobs,
+# of SDL's build dependencies into 8 to 16 minutes. The container jobs,
 # which use archive.ubuntu.com and ports.ubuntu.com, have not had that
 # problem. So on a runner image this takes the Azure mirror out of apt's
 # mirror list, or out of the sources where they name it directly, and

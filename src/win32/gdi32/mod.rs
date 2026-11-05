@@ -1193,10 +1193,71 @@ pub fn not_implemented(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(FALSE)
 }
 
+/// The address of `name` in the process's OPENGL32.DLL when that is a
+/// DLL of its own rather than the built-in one (`win32_dlls_replace`,
+/// such as 3dfx's Voodoo2 OpenGL driver), unless the call comes from
+/// that DLL itself.
+///
+/// GDI32's pixel format functions and SwapBuffers are the loaded
+/// OpenGL32's wgl functions: Windows' GDI32 calls them. A guest
+/// OpenGL32 keeps its own pixel formats, and its wglCreateContext fails
+/// (ERROR_INVALID_PIXEL_FORMAT) on a DC whose format only the built-in
+/// one knows. A driver that calls GDI32's function itself gets GDI32's
+/// own answer, as it would otherwise call itself for ever. A file mapped
+/// as data (LOAD_LIBRARY_AS_DATAFILE) isn't the loaded OpenGL32: it is
+/// neither relocated nor bound, and GetModuleHandle doesn't find it.
+fn guest_wgl(cpu: &mut Cpu, name: &str) -> Option<u32> {
+    use super::loader::{BUILTIN, DATAFILE};
+    let caller = super::peek_32(cpu, cpu.esp())?;
+    let p = super::running(cpu)?;
+    let gl = p.modules.iter().find(|m| {
+        m.name.eq_ignore_ascii_case("OPENGL32.DLL") && m.flags & (BUILTIN | DATAFILE) == 0
+    })?;
+    if (gl.base..gl.base.saturating_add(gl.size)).contains(&caller) {
+        return None;
+    }
+    let (base, wanted) = (gl.base, super::loader::Wanted::Name(name.to_string()));
+    super::with_process(cpu, |p, bus| super::loader::find_export(bus, p, base, &wanted))
+}
+
+/// Go on in the guest OpenGL32's `name` if there is one (`guest_wgl`),
+/// with the caller's stack as it is: its arguments are GDI32's, and it
+/// returns to GDI32's caller. Otherwise `own`.
+fn or_guest_wgl(
+    cpu: &mut Cpu,
+    args: &[u32],
+    name: &str,
+    own: fn(&mut Cpu, &[u32]) -> Option<u32>,
+) -> Option<u32> {
+    match guest_wgl(cpu, name) {
+        Some(target) => {
+            cpu.set_eip(target);
+            None
+        }
+        None => own(cpu, args),
+    }
+}
+
+fn choose_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    or_guest_wgl(cpu, args, "wglChoosePixelFormat", wgl::choose_pixel_format)
+}
+
+fn set_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    or_guest_wgl(cpu, args, "wglSetPixelFormat", wgl::set_pixel_format)
+}
+
+fn get_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    or_guest_wgl(cpu, args, "wglGetPixelFormat", wgl::get_pixel_format)
+}
+
+fn describe_pixel_format(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    or_guest_wgl(cpu, args, "wglDescribePixelFormat", wgl::describe_pixel_format)
+}
+
 /// SwapBuffers(hdc): the ICD shows what OpenGL drew in the DC's
-/// window.
+/// window, or a guest OpenGL32's wglSwapBuffers does (`guest_wgl`).
 fn swap_buffers(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(wgl::swap_dc(cpu, args[0]) as u32)
+    or_guest_wgl(cpu, args, "wglSwapBuffers", wgl::swap_buffers)
 }
 
 fn nothing(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -1542,10 +1603,10 @@ static APIS: &[Api] = &[
     stdcall("SetAbortProc", 217, 2, nothing),
     stdcall("Escape", 218, 5, nothing),
     stdcall("ExtEscape", 219, 6, nothing),
-    stdcall("ChoosePixelFormat", 220, 2, wgl::choose_pixel_format),
-    stdcall("SetPixelFormat", 221, 3, wgl::set_pixel_format),
-    stdcall("GetPixelFormat", 222, 1, wgl::get_pixel_format),
-    stdcall("DescribePixelFormat", 223, 4, wgl::describe_pixel_format),
+    stdcall("ChoosePixelFormat", 220, 2, choose_pixel_format),
+    stdcall("SetPixelFormat", 221, 3, set_pixel_format),
+    stdcall("GetPixelFormat", 222, 1, get_pixel_format),
+    stdcall("DescribePixelFormat", 223, 4, describe_pixel_format),
     stdcall("SwapBuffers", 224, 1, swap_buffers),
     stdcall("GdiComment", 225, 3, succeed),
     stdcall("CombineTransform", 226, 3, not_implemented),

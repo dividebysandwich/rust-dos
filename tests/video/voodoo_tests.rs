@@ -1940,22 +1940,24 @@ fn without_the_blit_program_blits_stay_on_the_cpu() {
 fn gl_context(
     title: &str,
 ) -> (
-    sdl2::Sdl,
-    sdl2::video::Window,
-    sdl2::video::GLContext,
+    sdl3::Sdl,
+    sdl3::video::Window,
+    sdl3::video::GLContext,
     glow::Context,
     rust_dos::video::shader::Glsl,
 ) {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let video = sdl.video().unwrap();
     let attr = video.gl_attr();
-    attr.set_context_profile(sdl2::video::GLProfile::Core);
+    attr.set_context_profile(sdl3::video::GLProfile::Core);
     attr.set_context_version(3, 2);
     let window = video.window(title, 64, 64).opengl().hidden().build().unwrap();
     let context = window.gl_create_context().unwrap();
     // SAFETY: the context just made is current.
     let gl = unsafe {
-        glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast())
+        glow::Context::from_loader_function(|name| {
+            video.gl_get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _)
+        })
     };
     let v = glow::HasContext::version(&gl);
     let glsl = rust_dos::video::shader::Glsl::for_gl(v.major, v.minor, v.is_embedded).unwrap();

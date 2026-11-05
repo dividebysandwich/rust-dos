@@ -49,7 +49,7 @@ pub(crate) struct MainHost<'m, 'd> {
     /// Deterministic mode: the date and time its clock started at. The
     /// speed stays fixed, and save states record the start.
     pub(crate) deterministic: Option<chrono::NaiveDateTime>,
-    pub(crate) clipboard: &'m sdl2::clipboard::ClipboardUtil,
+    pub(crate) clipboard: &'m sdl3::clipboard::ClipboardUtil,
 }
 
 impl MainHost<'_, '_> {
@@ -635,7 +635,7 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn copy_text(&mut self, text: &str) -> Result<(), String> {
-        self.clipboard.set_clipboard_text(text)
+        self.clipboard.set_clipboard_text(text).map_err(|e| e.to_string())
     }
 
     fn sync_shared(&mut self, drive: u8) -> Result<String, String> {

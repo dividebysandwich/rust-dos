@@ -9,12 +9,12 @@ This file covers how to use the endpoints well.
 
 ```sh
 cargo build --release
-SDL_VIDEODRIVER=dummy \
+SDL_VIDEO_DRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/dos/files --debug-server &
 until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 ```
 
-- **Never use SDL's dummy audio driver (`SDL_AUDIODRIVER=dummy`) for a
+- **Never use SDL's dummy audio driver (`SDL_AUDIO_DRIVER=dummy`) for a
   measurement of any kind.** It doesn't keep real time and its rate
   changes from run to run, so underrun counts and everything else read
   from the sound queue say nothing about the emulator, high or low (see
@@ -23,9 +23,9 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 
   | The run | What to use |
   |---|---|
-  | A timing measurement, or underrun counts | A real device, muted: `SDL_AUDIODRIVER=wasapi` (on Windows; `pipewire`, `pulseaudio` or `alsa` on Linux, `coreaudio` on macOS) and `--mute` |
+  | A timing measurement, or underrun counts | A real device, muted: `SDL_AUDIO_DRIVER=wasapi` (on Windows; `pipewire`, `pulseaudio` or `alsa` on Linux, `coreaudio` on macOS) and `--mute` |
   | The same on a machine with no sound device | The null output: `--audio-output null` |
-  | Anything else with no window | Nothing to set: `SDL_VIDEODRIVER=dummy` or `--hidden` takes the null output |
+  | Anything else with no window | Nothing to set: `SDL_VIDEO_DRIVER=dummy` or `--hidden` takes the null output |
 
   Before quoting a result, check that `audio_driver` in `/api/underruns`
   or `/api/stats` says what you meant to run on.
@@ -38,15 +38,15 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   the runs holding it with their debug servers.
 - **Build mode:** use a release build. A debug build runs about 5x slower,
   which changes timing-sensitive behaviour.
-- **No window:** `SDL_VIDEODRIVER=dummy` needs no window, and without a
+- **No window:** `SDL_VIDEO_DRIVER=dummy` needs no window, and without a
   window `audio_output=auto` plays on the null output unless
-  `SDL_AUDIODRIVER` names a driver. Nothing reaches the speakers, the
+  `SDL_AUDIO_DRIVER` names a driver. Nothing reaches the speakers, the
   output's queue empties at exactly 44,100 frames a second, and audio is
   still mixed and streamed. A run on a machine with no sound device
   plays on the null output too, with a window or without.
 - **OpenGL without a window:** the dummy video driver has no OpenGL, so
   `voodoo_renderer=opengl` falls back to the software rasterizer. To run
-  the OpenGL renderer on the host's GPU, leave `SDL_VIDEODRIVER` unset
+  the OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset
   and pass `--hidden`: the window is made with its OpenGL context but
   never shown.
 - **A smaller OpenGL:** `RUST_DOS_GL_MAX_TEXTURE_SIZE=1024` makes the
@@ -73,7 +73,7 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 
   ```sh
   OUT=$(mktemp)
-  SDL_VIDEODRIVER=dummy \
+  SDL_VIDEO_DRIVER=dummy \
     ./target/release/rust-dos --no-config -d /path/to/dos/files \
     --debug-server 127.0.0.1:0 > "$OUT" &
   until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' "$OUT") &&
@@ -208,7 +208,7 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   fixed queue; compare counts of runs of one build only.
 
   `audio_driver` says what the counts ran on. Measure underruns on a real
-  sound device, muted (on Windows, `SDL_AUDIODRIVER=wasapi` and `--mute`),
+  sound device, muted (on Windows, `SDL_AUDIO_DRIVER=wasapi` and `--mute`),
   or on the null output (`--audio-output null`) on a machine without one.
   Never on SDL's `dummy` driver: it plays nothing, doesn't keep real time,
   and its dry checks can't be predicted. The resampling that holds the
@@ -986,7 +986,7 @@ come out the same: the same instructions, memory and pictures at the same
 emulated time, however fast the host is.
 
 ```sh
-SDL_VIDEODRIVER=dummy \
+SDL_VIDEO_DRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
   --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
 OP=$(curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume | jq .op)
@@ -1425,11 +1425,11 @@ address mapped to when it was set.
 - **Sound in a timing run.** The audio output is part of the setup: run
   every side of a comparison on the same one, and quote `audio_driver`
   from `/api/stats` with the result. Use a real device with `--mute`
-  (`SDL_AUDIODRIVER=wasapi` on Windows), or `--audio-output null` where
-  there is no device, and never `SDL_AUDIODRIVER=dummy` (see
-  [Start the emulator](#1-start-the-emulator)). `SDL_VIDEODRIVER=dummy`
+  (`SDL_AUDIO_DRIVER=wasapi` on Windows), or `--audio-output null` where
+  there is no device, and never `SDL_AUDIO_DRIVER=dummy` (see
+  [Start the emulator](#1-start-the-emulator)). `SDL_VIDEO_DRIVER=dummy`
   and `--hidden` alone take the null output, so a timing run on a real
-  device has to set `SDL_AUDIODRIVER` as well.
+  device has to set `SDL_AUDIO_DRIVER` as well.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its

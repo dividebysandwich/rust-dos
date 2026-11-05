@@ -282,21 +282,20 @@ exceptions run as the program's own code on top of that.
   doesn't load, as on Windows 95, and `GetProcAddress` doesn't find it.
   The setting is read when the first process starts, and kept in save
   states.
-- The built-in DLLs are files in the system directory,
-  `C:\WINDOWS\SYSTEM`, as Windows has its DLLs there: programs and
-  setups that look for a DLL by its file (`CreateFile` or `fopen` for
-  reading, `OpenFile` with `OF_EXIST`, `GetFileAttributes`,
-  `FindFirstFile`) find the ones `LoadLibrary` loads
+- The built-in DLLs are files in the system directory, `C:\WINDOWS\SYSTEM`,
+  as Windows has its DLLs there: programs and setups that look for a DLL by
+  its file (`CreateFile` or `fopen` for reading, `OpenFile` with `OF_EXIST`,
+  `GetFileAttributes`, `FindFirstFile`) find the ones `LoadLibrary` loads
   (`src/win32/dll_files.rs`). Xenocracy's hardware profiler opens
-  `GLIDE2X.DLL` there to tell whether the machine has Glide. Each file
-  is the DLL's PE image: its headers, sections and export directory as
-  it is mapped in a process, with the functions the version of Windows
-  has, and the version resource `GetFileVersionInfo` gives for it. They
-  are there while the built-in Windows is on, and follow the loader's
-  rules: `GLIDE2X.DLL` with a 3dfx card alone (`voodoo=true`, or a
-  Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
-  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with
-  one of the folder's not at all.
+  `GLIDE2X.DLL` there to tell whether the machine has Glide. Each file is
+  the DLL's PE image: its headers, sections and export directory as it is
+  mapped in a process, with the functions the version of Windows has, and
+  the version resource `GetFileVersionInfo` gives for it. They are there
+  while the built-in Windows is on, and follow the loader's rules:
+  `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card alone (`voodoo=true`, or
+  a Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
+  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with one
+  of the folder's not at all.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
@@ -363,10 +362,14 @@ All output goes through the emulated video hardware:
   emulation (`src/voodoo/`) does the rendering, and 3dfx's MiniGL drivers,
   which games of the time shipped, run on top of it. `grSstControl` moves
   the monitor between the card and the 2D picture while the display stays
-  open, as Test Drive 4 does between its DirectDraw menus and its races:
-  a Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee or
-  Voodoo3 gives the display back and later takes it again, with the
-  textures where they were.
+  open, as Test Drive 4 does between its DirectDraw menus and its races: a
+  Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee or
+  Voodoo3 gives the display back and later takes it again, with the textures
+  where they were. **Glide 3** (`glide3x.dll`), which 3dfx's OpenGL drivers
+  for the Voodoo2, Banshee and Voodoo3 use, is the same code with Glide 3's
+  functions: vertices in the program's own layout, in arrays, strips and
+  fans and in clip coordinates, log2 texture sizes, and `grGet` and
+  `grQueryResolutions` in place of `grSstQueryHardware`.
 - **Direct3D** (DX5 and DX6 immediate mode: execute buffers and
   `DrawPrimitive`) becomes a HAL on the same emulated hardware, the way
   3dfx's Direct3D driver was one. The target card is the Banshee or

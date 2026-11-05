@@ -742,7 +742,7 @@ The test binaries don't use SDL, but the emulator binary built with them
 links it, so a stub library stands in:
 
 ```sh
-mkdir -p /tmp/a64stub && aarch64-linux-gnu-gcc -shared -o /tmp/a64stub/libSDL2.so -x c /dev/null
+mkdir -p /tmp/a64stub && aarch64-linux-gnu-gcc -shared -o /tmp/a64stub/libSDL3.so -x c /dev/null
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-L /tmp/a64stub -C link-arg=-Wl,--unresolved-symbols=ignore-all"

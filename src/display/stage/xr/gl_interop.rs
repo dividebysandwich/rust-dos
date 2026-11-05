@@ -3,7 +3,7 @@
 //! storage is memory Vulkan allocated, and the GPU and driver OpenGL draws
 //! with, which must be Vulkan's for that.
 
-use std::ffi::{CString, c_int, c_void};
+use std::ffi::{c_int, c_void};
 
 const GL_TEXTURE_TILING_EXT: u32 = 0x9580;
 const GL_DEDICATED_MEMORY_OBJECT_EXT: u32 = 0x9581;
@@ -34,10 +34,9 @@ impl Interop {
             }
         }
         let get = |name: &str| -> Result<*const c_void, String> {
-            let c = CString::new(name).unwrap_or_default();
-            // SAFETY: a context is current on this thread.
-            let address = unsafe { sdl2::sys::SDL_GL_GetProcAddress(c.as_ptr()) };
-            if address.is_null() { Err(format!("OpenGL has no {}", name)) } else { Ok(address as *const c_void) }
+            // (A context is current on this thread.)
+            let address = crate::display::gl::proc_address(name);
+            if address.is_null() { Err(format!("OpenGL has no {}", name)) } else { Ok(address) }
         };
         // SAFETY: the functions are the extensions', with their signatures.
         unsafe {

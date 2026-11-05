@@ -1,7 +1,10 @@
 //! WGL: pixel formats, rendering contexts and swapping buffers, and the
 //! ICD's side of GDI's ChoosePixelFormat, DescribePixelFormat,
 //! SetPixelFormat, GetPixelFormat and SwapBuffers, which on Windows go
-//! to the ICD of the DC's device.
+//! to the loaded OpenGL32's wgl functions and through them to the ICD
+//! of the DC's device. When the program's own OPENGL32.DLL replaces
+//! this one, GDI32 calls that DLL's functions instead (gdi32's
+//! `guest_wgl`).
 //!
 //! The ICD has the pixel formats 3dfx's driver had on a Banshee or
 //! Voodoo3, which draw only in 16 bits: 5-6-5 color, single or double

@@ -152,12 +152,13 @@ mod tests {
 
     #[test]
     fn every_built_in_dll_windows_98_has_has_its_list() {
-        // GLIDE2X is 3dfx's, and D3D8 and DINPUT8 DirectX 8's, none of
-        // them Windows 98 SE's. A DLL added to the built-in ones needs a
-        // list made by tools/win98_ordinals.py, or it keeps numbers of
-        // its own.
+        // GLIDE2X and GLIDE3X are 3dfx's, and D3D8 and DINPUT8 DirectX
+        // 8's, none of them Windows 98 SE's. A DLL added to the built-in
+        // ones needs a list made by tools/win98_ordinals.py, or it keeps
+        // numbers of its own.
         for dll in super::super::stubs::DLLS {
-            let other = ["GLIDE2X.DLL", "D3D8.DLL", "DINPUT8.DLL"].contains(&dll.name);
+            let other =
+                ["GLIDE2X.DLL", "GLIDE3X.DLL", "D3D8.DLL", "DINPUT8.DLL"].contains(&dll.name);
             assert_eq!(win98(dll.name).is_some(), !other, "{}", dll.name);
         }
     }

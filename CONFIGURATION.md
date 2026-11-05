@@ -244,38 +244,37 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   as Win32 programs built with MSVC do, gets close to what a 387
   gives). Loads, stores, integer conversions, compares and FRNDINT use
   all 80 bits.
-* `machine` is the display adapter programs find when they look for
-  one, and so the graphics they choose: `svga` (the default, a VGA with
-  VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
-  with its VESA modes, 2D accelerator and hardware cursor, for systems
-  [booted from disk images](#booting-a-disk-image) whose drivers program
-  it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX on
-  the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
+* `machine` is the display adapter programs find when they look for one, and
+  so the graphics they choose: `svga` (the default, a VGA with VESA modes up
+  to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3
+  cards such as Diamond's Stealth64 Video), `svga_s3` (an S3 Trio64 on the
+  PCI bus, with its VESA modes, 2D accelerator and hardware cursor, for
+  systems [booted from disk images](#booting-a-disk-image) whose drivers
+  program it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX
+  on the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
   engine and streams processor, which Windows 95's Direct3D uses through
-  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite`
-  (a Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games'
-  Vérité versions; see [Rendition Vérité](#rendition-vérité)),
-  `svga_ati_3drage` and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE
-  II with 4 MB on the PCI bus, whose 2D and 3D engines ATI's Windows
-  drivers use; see [ATI 3D RAGE](#ati-3d-rage)),
-  `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3 3000 or Voodoo
-  Banshee with 16 MB on the PCI bus, which 3dfx's Windows drivers use for
-  the desktop, Direct3D and OpenGL; see
-  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000`
-  (a Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC, see below),
-  `vga` (an IBM VGA, without VESA modes),
-  `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
-  640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
+  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite` (a
+  Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games' Vérité
+  versions; see [Rendition Vérité](#rendition-vérité)), `svga_ati_3drage`
+  and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE II with 4 MB on the PCI
+  bus, whose 2D and 3D engines ATI's Windows drivers use; see [ATI 3D
+  RAGE](#ati-3d-rage)), `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3
+  3000 or Voodoo Banshee with 16 MB on the PCI bus, which 3dfx's Windows
+  drivers use for the desktop, Direct3D and OpenGL; see [3dfx
+  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000` (a Tseng Labs ET4000AX
+  with 1 MB and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
+  VESA modes), `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64
+  colours at 640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
-  as `svga`, which is what DOS games get from it there; one that boots a
-  hard disk, or runs in a Windows of files (a package's `os=win311`),
-  keeps `svga_s3`, as that Windows was installed with the S3's driver
-  (unless the package's `os` boots another system in its place).
-  `machine=` in its `[rust-dos]` or `[emulator]` section goes over the
-  import's, as rust-dos's other settings there do (see
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports as
+  `svga`, which is what DOS games get from it there; one that boots a hard
+  disk, or runs in a Windows of files (a package's `os=win311`), keeps
+  `svga_s3`, as that Windows was installed with the S3's driver (unless the
+  package's `os` boots another system in its place). `machine=` in its
+  `[rust-dos]` or `[emulator]` section goes over the import's, as rust-dos's
+  other settings there do (see
   [GAME-PACKAGES.md](GAME-PACKAGES.md#packages-made-for-dosbox)).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
@@ -430,23 +429,24 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   DirectSound and wave audio in the `windows` mixer channel, MIDI to the
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
   keyboard, mouse and joystick through DirectInput, which DINPUT8 is for
-  DirectX 8 games; AVIFIL32 and MSVFW32 read AVI files and decompress and draw
-  their frames, with Indeo Video 3 and 5 as codecs; DMUSIC, DMIME, DMLOADER,
-  DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
-  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3, and
-  OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's pixel
-  formats, SwapBuffers and gamma ramp, and on a Voodoo2 full screen as 3dfx's
-  Voodoo2 OpenGL driver had it. A program that calls a function they don't
-  have ends with a message naming it, and one that needs a DLL that is neither
-  among them nor beside it is refused. The registry is kept in
-  `C:\REGISTRY.REG`, which is made the first time a program uses it, so a host
-  folder mounted as C: gets that file. The built-in DLLs show as read-only
-  files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and `GLIDE2X.DLL` is
-  among them only with a 3dfx card. A Windows 3.1 program (an NE .EXE) runs
-  too, as Windows 95 runs it: its KERNEL, USER, GDI and other 16-bit modules
-  are written into the emulator as well and go on to the 32-bit ones, and its
-  own DLLs, such as Visual Basic's runtimes, load from beside it. Off, such a
-  program runs its DOS stub, which says it needs Windows. The plan is in
+  DirectX 8 games; AVIFIL32 and MSVFW32 read AVI files and decompress and
+  draw their frames, with Indeo Video 3 and 5 as codecs; DMUSIC, DMIME,
+  DMLOADER, DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on
+  the same synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or
+  Voodoo3, and OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with
+  GDI32's pixel formats, SwapBuffers and gamma ramp, and on a Voodoo2 full
+  screen as 3dfx's Voodoo2 OpenGL driver had it. A program that calls a
+  function they don't have ends with a message naming it, and one that needs
+  a DLL that is neither among them nor beside it is refused. The registry is
+  kept in `C:\REGISTRY.REG`, which is made the first time a program uses it,
+  so a host folder mounted as C: gets that file. The built-in DLLs show as
+  read-only files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and
+  `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a 3dfx card. A
+  Windows 3.1 program (an NE .EXE) runs too, as Windows 95 runs it: its
+  KERNEL, USER, GDI and other 16-bit modules are written into the emulator
+  as well and go on to the 32-bit ones, and its own DLLs, such as Visual
+  Basic's runtimes, load from beside it. Off, such a program runs its DOS
+  stub, which says it needs Windows. The plan is in
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
@@ -462,7 +462,12 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   [docs/native-windows.md](docs/native-windows.md).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
-  `comctl32,comdlg32`. Empty (the default), the built-in ones are used.
+  `comctl32,comdlg32`. Empty (the default), the built-in ones are used. An
+  `opengl32.dll` that replaces the built-in one, such as 3dfx's Voodoo2
+  OpenGL driver (`3dfxVGL.dll`, which draws with `GLIDE3X.DLL`), gets
+  GDI32's `ChoosePixelFormat`, `SetPixelFormat`, `GetPixelFormat`,
+  `DescribePixelFormat` and `SwapBuffers`, as Windows' GDI32 calls the
+  loaded OpenGL32's.
 * `win32_version` is the version of Windows the built-in Windows is:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
@@ -763,15 +768,15 @@ programs set.
 * `audio_output` (`--audio-output`) is what plays the sound. It is read
   at startup.
   * `auto` (the default) plays on SDL's sound device. A run with no window
-    (`--hidden`, or `SDL_VIDEODRIVER=dummy`) takes the null output
-    instead, unless `SDL_AUDIODRIVER` names a driver, so nothing that
+    (`--hidden`, or `SDL_VIDEO_DRIVER=dummy`) takes the null output
+    instead, unless `SDL_AUDIO_DRIVER` names a driver, so nothing that
     runs unseen comes out of the speakers.
   * `sdl` plays on SDL's sound device, with a window or without.
   * `null` opens no SDL sound device at all. Nothing plays, and the queue
     empties at exactly 44,100 frames a second by the host's clock.
 
   With no sound device to open, `auto` and `sdl` run silent on the null
-  output too. `SDL_AUDIODRIVER=dummy` picks SDL's own dummy driver, which
+  output too. `SDL_AUDIO_DRIVER=dummy` picks SDL's own dummy driver, which
   doesn't keep real time: the log warns about it, and no measurement may
   use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
 * `blocksize` and `prebuffer` set how much sound waits for the host's
@@ -1395,7 +1400,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too, and with the Banshee it is the only card Direct3D 8 and OpenGL run on. `GLIDE2X.DLL` is there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too, and with the Banshee it is the only card Direct3D 8 and OpenGL run on. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
 | `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
@@ -3312,7 +3317,7 @@ up their routers, as the public one at `relay.rust-dos.com` does.
 `rust-dos-relay` is a small program of its own, in every release package
 beside rust-dos, that needs neither a display nor SDL or a sound library
 (to build it alone: `cargo build --release --no-default-features --bin
-rust-dos-relay`, which needs SDL2's development files but not ALSA's).
+rust-dos-relay`, which needs neither SDL's development files nor ALSA's).
 `rust-dos --relay [PORT]` does the same without starting the emulator.
 
 * `--port` is its UDP port (default 21213), which the server's firewall
@@ -3442,7 +3447,7 @@ in fullscreen on a large screen. At exactly 2x or 3x with `aspect=none`
 the scanlines are sharpest.
 
 The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
-`SDL_VIDEODRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
+`SDL_VIDEO_DRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
 before and says why at startup; the log names what draws the picture.
 Screenshots and video recordings show the shader with `record_shader=true`
 (see `capture_dir` in [`[emulator]`](#emulator)); animations and

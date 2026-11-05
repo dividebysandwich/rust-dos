@@ -1,6 +1,6 @@
 //! OpenGL through EGL (XR_MNDX_egl_enable), which the openxr crate has no
 //! binding for: the context current on the headset's thread, made by SDL
-//! under Wayland (or under X11 with SDL_VIDEO_X11_FORCE_EGL), as Monado
+//! under Wayland (or under X11 with SDL_VIDEO_FORCE_EGL), as Monado
 //! takes it. The swapchains' images are OpenGL textures, as with GLX.
 
 use openxr as xr;

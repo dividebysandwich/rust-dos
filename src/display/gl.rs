@@ -16,9 +16,18 @@ use rust_dos::config_ui::Layer;
 use crate::video::shader::{self, CrtSettings, Glsl, Shader};
 use glow::HasContext;
 use super::PresentRows;
-use sdl2::VideoSubsystem;
-use sdl2::video::{GLContext, GLProfile, SwapInterval, Window};
+use sdl3::VideoSubsystem;
+use sdl3::video::{GLContext, GLProfile, SwapInterval, Window};
 use std::collections::HashMap;
+
+/// The address of the OpenGL function `name` in the context current on
+/// this thread, or null if it has none: the loader glow takes.
+pub(crate) fn proc_address(name: &str) -> *const std::ffi::c_void {
+    let Ok(name) = std::ffi::CString::new(name) else { return std::ptr::null() };
+    // SAFETY: SDL only reads the name.
+    unsafe { sdl3::sys::video::SDL_GL_GetProcAddress(name.as_ptr()) }
+        .map_or(std::ptr::null(), |f| f as *const _)
+}
 
 /// Why there is no OpenGL 3 to draw with, and the window if one was made
 /// for it, which SDL's renderer can take instead.
@@ -155,8 +164,11 @@ impl GlScreen {
         }
         attr.set_double_buffer(true);
         attr.set_depth_size(0);
+        // SDL3 asks for an alpha channel unless told not to: the shaders'
+        // alpha would show through the window, and in its pixels read back.
+        attr.set_alpha_size(0);
         let mut builder = video.window(title, width, height);
-        builder.position_centered().opengl().allow_highdpi();
+        builder.position_centered().opengl().high_pixel_density();
         if hidden {
             builder.hidden();
         }
@@ -176,15 +188,14 @@ impl GlScreen {
             }
         };
         // SAFETY: the context just made is current.
-        let gl = unsafe { glow::Context::from_loader_function(|name| video.gl_get_proc_address(name).cast()) };
+        let gl = unsafe { glow::Context::from_loader_function(proc_address) };
         let version = gl.version();
         let Some(glsl) = Glsl::for_gl(version.major, version.minor, version.is_embedded) else {
             let reason = format!("OpenGL {}.{} is older than 3.0", version.major, version.minor);
             return Err(no_gl(Some(window), reason));
         };
         // SAFETY: the context is current, and SDL looks up its functions.
-        let texture_barrier =
-            unsafe { TextureBarrier::load(&gl, |name| video.gl_get_proc_address(name).cast()) };
+        let texture_barrier = unsafe { TextureBarrier::load(&gl, proc_address) };
         // The emulator paces its frames itself, as with SDL's renderer.
         let _ = video.gl_set_swap_interval(SwapInterval::Immediate);
 
@@ -718,7 +729,7 @@ impl GlScreen {
             self.render_stage();
             return;
         }
-        let drawable = self.window.drawable_size();
+        let drawable = self.window.size_in_pixels();
         self.compose(texture, size, display, layer, drawable, line);
         self.window.gl_swap_window();
     }
@@ -922,7 +933,7 @@ impl GlScreen {
     /// it: the viewer may have moved.
     #[cfg(feature = "vr")]
     pub fn render_stage(&mut self) {
-        let drawable = self.window.drawable_size();
+        let drawable = self.window.size_in_pixels();
         if let Some(stage) = &mut self.stage {
             stage.render(&self.gl, drawable);
             self.window.gl_swap_window();
@@ -932,7 +943,7 @@ impl GlScreen {
     /// The size the window shows a picture of `display` proportions at,
     /// without the black bars around it, if it shows it through a look.
     pub fn capture_size(&self, display: (u32, u32)) -> Option<(u32, u32)> {
-        let (_, _, w, h) = super::letterbox(self.window.drawable_size(), display);
+        let (_, _, w, h) = super::letterbox(self.window.size_in_pixels(), display);
         (self.active != Shader::None && w > 0 && h > 0).then_some((w, h))
     }
 
