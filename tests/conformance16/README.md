@@ -42,9 +42,9 @@ where `.github/workflows/conformance.yml` installs the snapshot
 `expected.txt` was made with.
 
 ```sh
-cargo test --release --test win16_conformance_tests
-CONFORMANCE_ONLY=user/win cargo test --release --test win16_conformance_tests -- --nocapture
-CONFORMANCE_BLESS=1 cargo test --release --test win16_conformance_tests
+cargo test --release --test win16 win16_conformance_tests::
+CONFORMANCE_ONLY=user/win cargo test --release --test win16 win16_conformance_tests:: -- --nocapture
+CONFORMANCE_BLESS=1 cargo test --release --test win16 win16_conformance_tests::
 ```
 
 ## License

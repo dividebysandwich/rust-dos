@@ -43,10 +43,10 @@
 //!   value derived from the mix so far), goes: an ended channel now just
 //!   adds nothing to the centre.
 //!
-//! To add a fix: an entry in [`FIXES`] with a name of its own, a test
-//! that runs it (`tests/game_fixes_tests.rs`, or `tests/exec_tests.rs`
-//! for a program skipped at EXEC), and a line in CONFIGURATION.md's list
-//! of game fixes.
+//! To add a fix: an entry in [`FIXES`] with a name of its own, a test that
+//! runs it (`tests/program/game_fixes_tests.rs`, or
+//! `tests/dos/exec_tests.rs` for a program skipped at EXEC), and a line in
+//! CONFIGURATION.md's list of game fixes.
 
 use memchr::memmem::Finder;
 use std::sync::OnceLock;
