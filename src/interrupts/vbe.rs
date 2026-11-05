@@ -5,7 +5,7 @@
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::video::adapter::Adapter;
-use crate::video::vbe::{self, VbeMode, LFB_BASE, MODE_NUMBER, VRAM_SIZE, WINDOW_SIZE};
+use crate::video::vbe::{self, LFB_BASE, MODE_NUMBER, VRAM_SIZE, VbeMode, WINDOW_SIZE};
 use crate::video::VideoMode;
 use iced_x86::Register;
 
@@ -237,7 +237,9 @@ fn ddc(cpu: &mut Cpu, addr: usize) -> u16 {
 
 /// The mode numbers of the BIOS of `adapter`, ending in FFFFh.
 fn mode_list(adapter: Adapter) -> Vec<u8> {
-    let mut list: Vec<u8> = vbe::modes(adapter).flat_map(|m| m.number.to_le_bytes()).collect();
+    let mut list: Vec<u8> = vbe::modes(adapter)
+        .flat_map(|m| m.number.to_le_bytes())
+        .collect();
     list.extend([0xFF, 0xFF]);
     list
 }
@@ -245,7 +247,10 @@ fn mode_list(adapter: Adapter) -> Vec<u8> {
 /// Write the mode list of the BIOS of `adapter` into the ROM, where the
 /// VbeInfoBlock of VBE 1.x callers points.
 pub fn install_mode_list(bus: &mut Bus, adapter: Adapter) {
-    bus.write_rom(rom(MODE_LIST), &mode_list(adapter));
+    let list = mode_list(adapter);
+    // The list ends before the window function that follows it.
+    assert!(MODE_LIST as usize + list.len() <= WINDOW_FUNCTION as usize);
+    bus.write_rom(rom(MODE_LIST), &list);
 }
 
 /// Function 00h: the VbeInfoBlock. Callers asking for VBE 2.0 (with "VBE2"
@@ -344,7 +349,10 @@ fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
         return SUCCESS;
     }
     let Some(mode) = vbe::adapter_mode(bx, cpu.bus.vga.adapter) else {
-        let line = format!("[BIOS] VESA mode {:03X}h isn't one of this BIOS's", bx & MODE_NUMBER);
+        let line = format!(
+            "[BIOS] VESA mode {:03X}h isn't one of this BIOS's",
+            bx & MODE_NUMBER
+        );
         cpu.bus.log_string(&line);
         return FAILED;
     };

@@ -75,7 +75,11 @@ pub const MODE_NUMBER: u16 = 0x07FF;
 
 /// The modes the BIOS of `adapter` lists, in order.
 pub fn modes(adapter: Adapter) -> impl Iterator<Item = &'static VbeMode> {
-    let oem: &[VbeMode] = if adapter == Adapter::Svga { &OEM_MODES } else { &[] };
+    let oem: &[VbeMode] = if adapter == Adapter::Svga {
+        &OEM_MODES
+    } else {
+        &[]
+    };
     MODES.iter().chain(oem)
 }
 
@@ -83,13 +87,19 @@ pub fn modes(adapter: Adapter) -> impl Iterator<Item = &'static VbeMode> {
 /// bytes a pixel on an S3 ViRGE: its Windows drivers only offer packed
 /// 24-bit truecolour, and set it through the BIOS.
 pub fn adapter_mode(number: u16, adapter: Adapter) -> Option<VbeMode> {
-    modes(adapter).find(|m| m.number == number & MODE_NUMBER).map(|m| packed(m, adapter.is_virge()))
+    modes(adapter)
+        .find(|m| m.number == number & MODE_NUMBER)
+        .map(|m| packed(m, adapter.is_virge()))
 }
 
 /// Mode `number` of the list or of the OEM modes, its "24-bit" colour
 /// three bytes a pixel with `packed24`.
 pub fn find_mode(number: u16, packed24: bool) -> Option<VbeMode> {
-    MODES.iter().chain(&OEM_MODES).find(|m| m.number == number & MODE_NUMBER).map(|m| packed(m, packed24))
+    MODES
+        .iter()
+        .chain(&OEM_MODES)
+        .find(|m| m.number == number & MODE_NUMBER)
+        .map(|m| packed(m, packed24))
 }
 
 fn packed(m: &VbeMode, packed24: bool) -> VbeMode {
