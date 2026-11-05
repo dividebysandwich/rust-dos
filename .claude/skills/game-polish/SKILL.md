@@ -44,7 +44,7 @@ skill covers what to do on top of that.
      DOSBox configuration) for the machine it wants: pass those settings
      on the command line or with `--config $W/game.conf`.
 3. **Build** a release build of the current `HEAD` (`cargo build
-   --release`; on Linux it needs `libsdl2-dev` and `libasound2-dev`).
+   --release`; on Linux it needs SDL3's and ALSA's development files).
    Record `git rev-parse HEAD`: every finding is against this commit.
 4. **Launch** headless on a free port, with the log in `$W`:
 

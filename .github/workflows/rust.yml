@@ -117,8 +117,14 @@ jobs:
         if: runner.os == 'Linux'
         uses: $/.github/actions/apt-install
         with:
-          packages: libsdl2-dev libasound2-dev
+          packages: libasound2-dev
           update: false
+
+      - name: Build SDL3 (Linux)
+        if: runner.os == 'Linux'
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ${{ matrix.os }}
 
       - name: Install OpenGL test dependencies (Linux x86_64)
         if: matrix.label == 'linux-x86_64' && steps.shader_changes.outputs.needed == 'true'
@@ -130,19 +136,19 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install sdl2
+          brew install sdl3
           echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
-          unzip -q SDL2-devel-VC.zip
-          mv SDL2-2.30.0 SDL2
-          echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
-          echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
-          # SDL2.dll for the program the tests start.
-          echo "${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_PATH"
+          curl -fsSL -o SDL3-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-VC.zip
+          unzip -q SDL3-devel-VC.zip
+          mv SDL3-3.4.10 SDL3
+          echo "LIB=${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_ENV"
+          echo "INCLUDE=${{ github.workspace }}/SDL3/include" >> "$GITHUB_ENV"
+          # SDL3.dll for the program the tests start.
+          echo "${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -256,18 +262,14 @@ jobs:
       # without git in the container, actions/checkout falls back to
       # downloading through the REST API. zstd is for the cache archives, and
       # build-essential also brings binutils (strip) and dpkg-dev
-      # (dpkg-shlibdeps, which cargo-deb runs for the .deb's Depends). The
-      # packages from libx11-dev on are what the AppImage's SDL2 is built
-      # against.
+      # (dpkg-shlibdeps, which the .deb's Depends come from). SDL3's own
+      # build dependencies come with it (.github/actions/sdl3).
       - name: Install build environment (compat container)
         if: matrix.container
         uses: $/.github/actions/apt-install
         with:
           packages: >-
-            git ca-certificates curl zstd build-essential cmake pkg-config libsdl2-dev libasound2-dev
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev
-            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev
-            libgbm-dev libdrm-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev file
+            git ca-certificates curl zstd build-essential cmake pkg-config libasound2-dev file
           update: true
 
       # The workspace belongs to the runner's user and the container runs as
@@ -302,25 +304,37 @@ jobs:
         if: runner.os == 'Linux' && !matrix.container
         uses: $/.github/actions/apt-install
         with:
-          packages: libsdl2-dev libasound2-dev
+          packages: libasound2-dev
           update: true
+
+      # The release's SDL3, which the Linux packages ship: no Ubuntu before
+      # 25.04, Debian before 13 or Mint has one to install.
+      - name: Build SDL3 (Linux)
+        id: sdl3
+        if: runner.os == 'Linux'
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ${{ matrix.container || matrix.os }}
+          update: "true"
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install sdl2
+          brew install sdl3
           echo "LIBRARY_PATH=$(brew --prefix)/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          # SDL2 development libraries for Visual C++
-          curl -fsSL -o SDL2-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip
-          unzip -q SDL2-devel-VC.zip
-          mv SDL2-2.30.0 SDL2
-          # So the linker finds SDL2.lib
-          echo "LIB=${{ github.workspace }}/SDL2/lib/x64" >> "$GITHUB_ENV"
-          echo "INCLUDE=${{ github.workspace }}/SDL2/include" >> "$GITHUB_ENV"
+          # SDL3 development libraries for Visual C++. SDL3.dll imports no
+          # C runtime and nothing newer than Windows 7 has, so the Windows 7
+          # build ships it too.
+          curl -fsSL -o SDL3-devel-VC.zip https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-devel-3.4.10-VC.zip
+          unzip -q SDL3-devel-VC.zip
+          mv SDL3-3.4.10 SDL3
+          # So the linker finds SDL3.lib
+          echo "LIB=${{ github.workspace }}/SDL3/lib/x64" >> "$GITHUB_ENV"
+          echo "INCLUDE=${{ github.workspace }}/SDL3/include" >> "$GITHUB_ENV"
 
       # munt's libmt32emu, which rust-dos loads for midisynth=mt32, from its
       # source: munt publishes no Windows build of the library. Its shared
@@ -405,8 +419,14 @@ jobs:
           key: ${{ matrix.label }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # On Linux the program finds the SDL3 the packages ship through its
+      # runpath: lib/ beside it in the tarball, /usr/lib/rust-dos for the
+      # .deb's /usr/bin/rust-dos. Only here, so that builds from source and
+      # distributions' packages use the system's SDL3 alone.
       - name: Build
         if: ${{ !matrix.win7 }}
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-Wl,-rpath,$ORIGIN/lib:$ORIGIN/../lib/rust-dos' || '' }}
         run: cargo build --release --locked --verbose
 
       # The standard library built for the Windows 7 target, and the C runtime
@@ -420,25 +440,56 @@ jobs:
 
       # rust-dos-relay, the LAN relay for servers, goes in every package
       # beside rust-dos (the .deb takes every program the build made).
+      # The tarball has SDL3 in lib/ and the .deb in /usr/lib/rust-dos,
+      # where the program's runpath finds it (see Build), with its licence
+      # (zlib). The .deb's Depends are dpkg-shlibdeps's but for SDL3, which
+      # no package of the build's system has: cargo-deb's $auto would drop
+      # them all, so they are worked out here and written in for it.
       - name: Package (Linux)
         if: runner.os == 'Linux'
+        env:
+          SDL3_PREFIX: ${{ steps.sdl3.outputs.prefix }}
         run: |
           strip target/release/rust-dos target/release/rust-dos-relay
           # The relay runs on servers without a display or sound.
           if ldd target/release/rust-dos-relay | grep -Ei 'sdl|asound'; then
-            echo "::warning::rust-dos-relay links SDL2 or ALSA"
+            echo "::warning::rust-dos-relay links SDL3 or ALSA"
           fi
-          mkdir -p out stage/rust-dos
-          cp target/release/rust-dos target/release/rust-dos-relay openxr/* README.md CONFIGURATION.md LICENSE stage/rust-dos/
+          mkdir -p out stage/rust-dos/lib sdl3
+          cp -L "$SDL3_PREFIX/lib/libSDL3.so.0" sdl3/
+          strip sdl3/libSDL3.so.0
+          cp "$SDL3_PREFIX/share/licenses/SDL3/LICENSE.txt" sdl3/SDL3-LICENSE.txt
+          cp target/release/rust-dos target/release/rust-dos-relay openxr/* README.md CONFIGURATION.md LICENSE \
+            sdl3/SDL3-LICENSE.txt stage/rust-dos/
+          cp sdl3/libSDL3.so.0 stage/rust-dos/lib/
+          # The bundled SDL3 is the one found, without the build's on the
+          # loader's path.
+          env -u LD_LIBRARY_PATH ldd stage/rust-dos/rust-dos | grep -F 'libSDL3.so.0 => '"$PWD"'/stage/rust-dos/lib/'
           tar czf "out/$PKG.tar.gz" -C stage rust-dos
+
+          SHLIBS=$(mktemp -d)
+          mkdir "$SHLIBS/debian"
+          touch "$SHLIBS/debian/control"
+          DEPENDS=$(cd "$SHLIBS" && dpkg-shlibdeps --ignore-missing-info -xlibgcc -O \
+            "$GITHUB_WORKSPACE"/target/release/rust-dos{,-relay,-lock} | sed -n 's/^shlibs:Depends=//p')
+          echo "The .deb depends on: $DEPENDS"
+          if [ -z "$DEPENDS" ] || grep -qi sdl <<< "$DEPENDS"; then
+            echo "::error::Unexpected .deb dependencies: '$DEPENDS'"
+            exit 1
+          fi
+          sed -i "s|^depends = \"\$auto\"|depends = \"$DEPENDS\"|" Cargo.toml
+          sed -i '/^assets = \[/a\    ["sdl3/libSDL3.so.0", "usr/lib/rust-dos/", "644"],\n    ["sdl3/SDL3-LICENSE.txt", "usr/share/doc/rust-dos/", "644"],' Cargo.toml
+          sed -n '/^\[package.metadata.deb\]/,/^\]/p' Cargo.toml
           cargo install cargo-deb --locked
           cargo deb --no-build -o "out/$PKG.deb"
+          dpkg-deb -c "out/$PKG.deb" | grep -i sdl
+          dpkg-deb -f "out/$PKG.deb" Depends
 
       # An AppImage per architecture, from the -compat builds so it runs on
       # glibc 2.35 and later: one file to download, mark executable and run,
       # for SteamOS (the Steam Deck, the Steam Frame) and other systems where
       # unpacking a tarball in a terminal is a chore. It has the OpenXR loader
-      # beside rust-dos, as the tarball does, and SDL2 as a fallback for
+      # beside rust-dos, as the tarball does, and SDL3 as a fallback for
       # systems without one (packaging/linux/AppRun): built from source with
       # every backend loaded at run time, as Ubuntu's links sndio and others
       # that most systems lack. Its update information lets AppImageUpdate
@@ -446,33 +497,26 @@ jobs:
       - name: Package (AppImage)
         if: matrix.container
         env:
-          SDL_VERSION: 2.32.10
           APPIMAGETOOL_VERSION: 1.9.1
           APPIMAGE_RUNTIME_VERSION: "20251108"
         run: |
-          curl -fsSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-$SDL_VERSION.tar.gz"
-          tar xzf sdl.tar.gz
-          cmake -S "SDL2-$SDL_VERSION" -B sdl-build -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_TEST=OFF
-          cmake --build sdl-build --parallel
-
           ARCH=$(uname -m)
           APPDIR=AppDir
           mkdir -p $APPDIR/usr/bin $APPDIR/usr/lib/fallback $APPDIR/usr/share/applications \
             $APPDIR/usr/share/icons/hicolor/256x256/apps $APPDIR/usr/share/doc/rust-dos
           cp target/release/rust-dos openxr/libopenxr_loader.so.1 $APPDIR/usr/bin/
-          cp -L sdl-build/libSDL2-2.0.so.0 $APPDIR/usr/lib/fallback/
-          strip $APPDIR/usr/lib/fallback/libSDL2-2.0.so.0
-          echo "SDL2 fallback needs:"
-          ldd $APPDIR/usr/lib/fallback/libSDL2-2.0.so.0
+          # SDL3 as the Linux package step stripped it.
+          cp sdl3/libSDL3.so.0 $APPDIR/usr/lib/fallback/
+          echo "SDL3 fallback needs:"
+          ldd $APPDIR/usr/lib/fallback/libSDL3.so.0
           cp packaging/linux/AppRun $APPDIR/
           cp packaging/linux/rust-dos.desktop $APPDIR/
           cp packaging/linux/rust-dos.desktop $APPDIR/usr/share/applications/
           cp packaging/linux/rust-dos.png $APPDIR/
           cp packaging/linux/rust-dos.png $APPDIR/usr/share/icons/hicolor/256x256/apps/
           ln -s rust-dos.png $APPDIR/.DirIcon
-          cp README.md CONFIGURATION.md LICENSE openxr/openxr-LICENSE.txt "SDL2-$SDL_VERSION/LICENSE.txt" \
+          cp README.md CONFIGURATION.md LICENSE openxr/openxr-LICENSE.txt sdl3/SDL3-LICENSE.txt \
             $APPDIR/usr/share/doc/rust-dos/
-          mv $APPDIR/usr/share/doc/rust-dos/LICENSE.txt $APPDIR/usr/share/doc/rust-dos/SDL2-LICENSE.txt
 
           curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
           curl -fsSL -o runtime "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-$ARCH"
@@ -489,12 +533,12 @@ jobs:
         if: runner.os == 'Windows' && !matrix.win7
         run: |
           mkdir -p out stage/rust-dos
-          cp target/release/rust-dos.exe target/release/rust-dos-relay.exe SDL2/lib/x64/SDL2.dll mt32emu/* openxr/* README.md CONFIGURATION.md stage/rust-dos/
+          cp target/release/rust-dos.exe target/release/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* openxr/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
           dotnet tool install --global wix --version 5.0.2
           wix build packaging/windows/main.wxs -arch x64 \
-            -d Version="$CARGO_VERSION" -d BinDir=target/release -d SdlDir=SDL2/lib/x64 -d MuntDir=mt32emu -d OpenXrDir=openxr \
+            -d Version="$CARGO_VERSION" -d BinDir=target/release -d SdlDir=SDL3/lib/x64 -d MuntDir=mt32emu -d OpenXrDir=openxr \
             -o "out/$PKG.msi"
 
       # A .zip alone: an .msi would take the regular build's place.
@@ -503,7 +547,7 @@ jobs:
         run: |
           mkdir -p out stage/rust-dos
           BIN=target/x86_64-win7-windows-msvc/release
-          cp $BIN/rust-dos.exe $BIN/rust-dos-relay.exe SDL2/lib/x64/SDL2.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
+          cp $BIN/rust-dos.exe $BIN/rust-dos-relay.exe SDL3/lib/x64/SDL3.dll mt32emu/* README.md CONFIGURATION.md stage/rust-dos/
           cp LICENSE stage/rust-dos/LICENSE.txt
           7z a "out/$PKG.zip" ./stage/rust-dos > /dev/null
 
@@ -521,7 +565,7 @@ jobs:
           # The relay, the docs and LICENSE beside the app, so the zip has
           # clean paths.
           if otool -L target/release/rust-dos-relay | grep -i sdl; then
-            echo "::warning::rust-dos-relay links SDL2"
+            echo "::warning::rust-dos-relay links SDL3"
           fi
           cp target/release/rust-dos-relay README.md CONFIGURATION.md LICENSE "$APP_DIR/"
           mkdir -p out
@@ -606,7 +650,7 @@ jobs:
   #   re-run the workflow). Other pull requests get linux-x86_64-compat
   #   alone: the test jobs have compiled and linked the program on every
   #   system already, and this build is the one that finds code needing a
-  #   newer SDL than Ubuntu 22.04's 2.0.20. Drafts get none, and a
+  #   newer glibc than Ubuntu 22.04's 2.35. Drafts get none, and a
   #   `ready_for_review` run makes them.
   scope:
     name: scope
@@ -623,16 +667,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # The -compat builds are the two Linux builds compiled inside an
-          # Ubuntu 22.04 container, so the binaries link glibc 2.35 and SDL
-          # 2.0.20 and run on stable/LTS distributions (Ubuntu 22.04, Mint
-          # 21, Debian 12, Raspberry Pi OS bookworm) that refuse the regular
-          # builds with "version `GLIBC_2.39' not found". A container rather
-          # than `runs-on: ubuntu-22.04` because GitHub is retiring that
-          # runner image, while a container image keeps working on any
-          # runner. For Windows 7: Rust's standard library for Windows needs
-          # a newer one (ProcessPrng from bcryptprimitives.dll,
-          # WaitOnAddress), except its Windows 7 target's, which nightly
-          # builds from source.
+          # Ubuntu 22.04 container, so the binaries (and the SDL3 they ship)
+          # link glibc 2.35 and run on stable/LTS distributions (Ubuntu
+          # 22.04, Mint 21, Debian 12, Raspberry Pi OS bookworm) that refuse
+          # the regular builds with "version `GLIBC_2.39' not found". A
+          # container rather than `runs-on: ubuntu-22.04` because GitHub is
+          # retiring that runner image, while a container image keeps
+          # working on any runner. For Windows 7: Rust's standard library
+          # for Windows needs a newer one (ProcessPrng from
+          # bcryptprimitives.dll, WaitOnAddress), except its Windows 7
+          # target's, which nightly builds from source.
           BUILDS: |
             [
               {"label": "linux-x86_64", "os": "ubuntu-latest"},
@@ -932,7 +976,7 @@ jobs:
           cat > notes.md <<'EOF'
           ### Which file to download
 
-          - **Windows**: the `.msi` installs rust-dos with SDL2, munt's
+          - **Windows**: the `.msi` installs rust-dos with SDL3, munt's
             MT-32 emulation and the OpenXR loader for VR headsets, and adds it
             to the Start menu and PATH; the `.zip` is the same, portable. On
             Windows 7, or where they refuse to start with an error about
@@ -940,16 +984,17 @@ jobs:
             `windows-x86_64-win7` `.zip`, a portable build for Windows 7 and
             later.
           - **macOS**: the `.zip` holds the app, for Apple Silicon
-            (`macos-aarch64`) or Intel (`macos-x86_64`). It needs SDL2 from
-            Homebrew (`brew install sdl2`). The app is unsigned: right-click →
+            (`macos-aarch64`) or Intel (`macos-x86_64`). It needs SDL3 from
+            Homebrew (`brew install sdl3`). The app is unsigned: right-click →
             Open on first launch, or clear the quarantine with
             `xattr -dr com.apple.quarantine <app>`.
           - **Linux**: a `.deb` or a portable `.tar.gz`, for PCs (`x86_64`) or
-            ARM boards such as a Raspberry Pi (`aarch64`). The tarball needs
-            SDL2 and ALSA (`libsdl2-2.0-0` and `libasound2` on Debian and
-            Ubuntu); the `.deb` declares them. For the MT-32, install munt's
-            library (`libmt32emu2`). For VR headsets, the tarball has the
-            OpenXR loader; the `.deb` recommends `libopenxr-loader1`.
+            ARM boards such as a Raspberry Pi (`aarch64`). Both bring their
+            own SDL3, as few distributions have one yet; the tarball needs
+            ALSA (`libasound2` on Debian and Ubuntu), which the `.deb`
+            declares. For the MT-32, install munt's library
+            (`libmt32emu2`). For VR headsets, the tarball has the OpenXR
+            loader; the `.deb` recommends `libopenxr-loader1`.
             Take the **`-compat`** file if the regular one refuses to start
             with ``version `GLIBC_2.39' not found``, as it does on Ubuntu 22.04,
             Linux Mint 21, Debian 12 and Raspberry Pi OS (bookworm). It is

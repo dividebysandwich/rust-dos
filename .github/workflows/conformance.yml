@@ -32,6 +32,7 @@ on:
       - "tests/win16/win16_conformance_tests.rs"
       - ".github/workflows/conformance.yml"
       - ".github/actions/apt-install/**"
+      - ".github/actions/sdl3/**"
   pull_request:
     paths: *paths
   schedule:
@@ -66,9 +67,15 @@ jobs:
         uses: $/.github/actions/apt-install
         with:
           packages: >-
-            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev
+            git ca-certificates curl zstd build-essential pkg-config libasound2-dev
             gcc-mingw-w64-i686-win32
           update: true
+
+      - name: Build SDL3
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ubuntu:22.04
+          update: "true"
 
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -114,8 +121,13 @@ jobs:
       - name: Install build environment
         uses: $/.github/actions/apt-install
         with:
-          packages: libsdl2-dev libasound2-dev
+          packages: libasound2-dev
           update: false
+
+      - name: Build SDL3
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ubuntu-latest
 
       - name: Install OpenWatcom
         run: |

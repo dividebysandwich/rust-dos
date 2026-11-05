@@ -39,8 +39,13 @@ jobs:
       - name: Install dependencies
         uses: $/.github/actions/apt-install
         with:
-          packages: libsdl2-dev libasound2-dev
+          packages: libasound2-dev
           update: false
+
+      - name: Build SDL3
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ubuntu-latest
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:

@@ -3312,7 +3312,7 @@ up their routers, as the public one at `relay.rust-dos.com` does.
 `rust-dos-relay` is a small program of its own, in every release package
 beside rust-dos, that needs neither a display nor SDL or a sound library
 (to build it alone: `cargo build --release --no-default-features --bin
-rust-dos-relay`, which needs SDL2's development files but not ALSA's).
+rust-dos-relay`, which needs neither SDL's development files nor ALSA's).
 `rust-dos --relay [PORT]` does the same without starting the emulator.
 
 * `--port` is its UDP port (default 21213), which the server's firewall
