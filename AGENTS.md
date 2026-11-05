@@ -237,6 +237,17 @@ disk.
   job that loses its environment on the way, such as one started over
   ssh, deadlocks; its `run-lock: waiting for ...` line on stderr shows
   it.
+- A script that starts an emulator asks for a free port with
+  `--debug-server 127.0.0.1:0` and reads the address the emulator
+  prints ("Free port" in `docs/llm-debugging.md`). Heavy runs share the
+  lock and run side by side, so with a fixed port two agents running
+  the same script reach each other's emulators. An emulator waiting for
+  the lock hasn't opened its port yet either, and its script then talks
+  to whichever emulator has that port, which can be another agent's
+  measurement. Files clash the same way: send the emulator's stdout to
+  a file of this run's own, not a fixed name in the script's folder,
+  and give the run its own `--log FILE`. Otherwise two runs of the
+  script read each other's port and replace each other's log.
 - The lock lives in `run-lock` in the per-user profile directory
   (`%APPDATA%\rust-dos`, `~/.config/rust-dos`). `RUST_DOS_RUN_LOCK_DIR`
   moves it for every program that takes it; set it for the whole
