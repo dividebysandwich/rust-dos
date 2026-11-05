@@ -384,7 +384,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         },
                         "version_check" => match parse_version_check(value) {
                             Some(setting) => config.version_check = Some(setting),
-                            None => warn(format!("invalid version_check '{}' (true, false or never)", value)),
+                            None => warn(format!(
+                                "invalid version_check '{}' (true, false or never)",
+                                value
+                            )),
                         },
                         "run_lock" => match parse_run_lock(value, base_dir, home) {
                             Ok(setting) => config.run_lock = setting,

@@ -6,10 +6,8 @@
 //!
 //! A copy shipped with a game and kept at one version turns the check off
 //! for good with `version_check=never` in its configuration file. The
-//! setting then leaves the settings window too, so it can't be turned back
-//! on there, and saving the settings keeps the line as it is.
-
-use std::sync::atomic::{AtomicBool, Ordering};
+//! setting (`Setting::Never`) then leaves the settings window too, so it
+//! can't be turned back on there, and saving the settings writes `never`.
 
 /// What the website says the latest release is: `{"version": "1.6.0",
 /// "published": "..."}`.
@@ -35,19 +33,15 @@ impl Setting {
     pub fn is_on(self) -> bool {
         self == Setting::On
     }
-}
 
-/// The check is off for good in this run.
-static TURNED_OFF: AtomicBool = AtomicBool::new(false);
-
-/// Turn the check off for good in this run (`version_check=never`).
-pub fn turn_off() {
-    TURNED_OFF.store(true, Ordering::Relaxed);
-}
-
-/// Whether the check is off for good, and its setting hidden.
-pub fn turned_off() -> bool {
-    TURNED_OFF.load(Ordering::Relaxed)
+    /// The value as the configuration file has it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Setting::On => "true",
+            Setting::Off => "false",
+            Setting::Never => "never",
+        }
+    }
 }
 
 /// The version in version.json's text.

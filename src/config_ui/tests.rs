@@ -1451,6 +1451,28 @@ fn mouse_sensitivity_is_live_typed_and_resettable() {
 }
 
 #[test]
+fn version_check_never_leaves_the_window_and_the_switch_toggles_on_and_off() {
+    use crate::version_check::Setting;
+    let item = Item::VersionCheck;
+    let mut s = Settings::default();
+    assert!(item.shown(&s));
+    item.step(&mut s, 1, &[], Frontend::DESKTOP);
+    assert_eq!(s.version_check, Setting::Off);
+    item.step(&mut s, 1, &[], Frontend::DESKTOP);
+    assert_eq!(s.version_check, Setting::On);
+    s.version_check = Setting::Never;
+    assert!(!item.shown(&s));
+    let host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    ui.open(&Settings::default(), None, &host);
+    ui.page = Page::Emulator;
+    assert!(ui.items().contains(&item));
+    ui.open(&s, None, &host);
+    ui.page = Page::Emulator;
+    assert!(!ui.items().contains(&item));
+}
+
+#[test]
 fn mouse_sensitivity_steps_through_tenths_from_one_tenth_to_ten() {
     let item = Item::MouseSensitivity;
     let mut s = Settings::default();

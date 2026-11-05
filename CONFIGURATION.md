@@ -84,7 +84,9 @@ the version it tested, sets it up like this:
   beside that file, and give each its own shortcut:
   `rust-dos --config rust-dos.conf --game "Setup"`. This is what GOG's
   pairs of DOSBox files (`dosboxGame.conf` and `dosboxGame_single.conf`)
-  become; `--import` turns them into profiles.
+  become; `--import` turns them into profiles. An imported profile's
+  `[drives]` paths are absolute, to the folders the game was imported
+  from: make them relative, to the `games` folder, before shipping it.
 
 Rust-DOS needs no internet connection. Nothing it does online is needed
 to run a game, and each request runs on a thread of its own with a time
