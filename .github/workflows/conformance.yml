@@ -93,7 +93,7 @@ jobs:
         env:
           CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --release --test win32 conformance_tests::
+        run: "cargo test --locked --release --test win32 conformance_tests::"
 
       # What each test program printed, to look at when they fail.
       - name: Keep the test programs' output
@@ -142,7 +142,7 @@ jobs:
       - name: Run the Win16 conformance tests
         env:
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --release --test win16 win16_conformance_tests::
+        run: "cargo test --locked --release --test win16 win16_conformance_tests::"
 
       - name: Keep the test programs' output
         if: failure()
