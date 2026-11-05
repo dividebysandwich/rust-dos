@@ -378,6 +378,17 @@ jobs:
           cp openxr-sdk/x64/bin/openxr_loader.dll openxr/
           cp openxr-sdk/share/doc/openxr/LICENSE openxr/openxr-LICENSE.txt
 
+      # OpenXR-SDK's CMake stops without the headers of its presentation
+      # backend (xlib by default), though the loader uses them for type
+      # definitions only. libsdl2-dev used to bring them in; the SDL3 build
+      # installs them only when its cache misses.
+      - name: Install the OpenXR loader's build dependencies (Linux)
+        if: runner.os == 'Linux'
+        uses: $/.github/actions/apt-install
+        with:
+          packages: libx11-dev libwayland-dev
+          update: false
+
       # The Linux tarballs ship libopenxr_loader.so.1 beside rust-dos with
       # its licence (Apache 2.0), for systems without the openxr package or
       # that can't install it (SteamOS); rust-dos looks for it there when the
