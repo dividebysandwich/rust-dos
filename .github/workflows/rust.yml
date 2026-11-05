@@ -65,11 +65,11 @@ jobs:
     # so there it only adds compiling: 2.5 and 3 minutes. Windows also
     # starts the debug build of the program, to check its stack frames.
     #
-    # No debug information in the test build here. With Cargo.toml's line
-    # tables, the full suite's target/ grows to 27 GB on Linux, more than a
-    # runner is sure to have free (#546); without them, to 6 GB. A failing
-    # test still prints the file and line of its panic, which come from
-    # the panic's location and not from debug information. Only a
+    # No debug information in the test builds. With Cargo.toml's line
+    # tables, the full suite's target/ grows to 27 GB on Linux, more than
+    # a runner is sure to have free (#546); without them, to 6.5 GB. A
+    # failing test still prints the file and line of its panic, which come
+    # from the panic's location and not from debug information. Only a
     # backtrace, which CI doesn't ask for, loses its line numbers.
     env:
       CARGO_PROFILE_TEST_OPT_LEVEL: ${{ matrix.full && '1' || '0' }}
@@ -80,29 +80,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      # The x86-64 image comes with about 27 GB of toolchains this job
-      # never uses: the Android SDK, .NET, GHC, Swift, CodeQL and Docker
-      # images. Removing them takes about 100 s, so it runs in the
-      # background while the job installs packages and compiles the
-      # dependencies; the test programs, which take most of the space, link
-      # minutes later.
+      # More room on top: the x86-64 image comes with about 27 GB of
+      # toolchains this job never uses, the Android SDK, .NET, GHC, Swift,
+      # CodeQL and Docker images. Removing them takes about 100 s, so it
+      # runs in the background while the job installs packages and compiles
+      # the dependencies; the test programs, which take most of the space,
+      # link minutes later.
       - name: Free disk space (Linux x86_64)
         if: matrix.label == 'linux-x86_64'
         run: |
           nohup sudo bash -c '
-            rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup               /opt/ghc /usr/share/swift /opt/hostedtoolcache/CodeQL
+            rm -rf /usr/local/lib/android /usr/share/dotnet
+            rm -rf /usr/local/.ghcup /opt/ghc /usr/share/swift
+            rm -rf /opt/hostedtoolcache/CodeQL
             docker image prune --all --force
             df -h /
           ' > "$RUNNER_TEMP/free-disk.log" 2>&1 &
-
-      - name: Measure disk at start (temporary)
-        if: runner.os == 'Linux'
-        run: |
-          df -h /
-          nohup bash -c 'while true; do
-            echo "$(date +%T) root_used_avail_MB=$(df --output=used,avail -BM / | tail -1 | tr -s " ") target_MB=$(du -sm target 2>/dev/null | cut -f1)"
-            sleep 10
-          done' > "$RUNNER_TEMP/disk.log" 2>&1 &
 
       - name: Check for shader changes
         id: shader_changes
@@ -170,23 +163,9 @@ jobs:
           key: test-${{ matrix.label }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Measure disk after cache restore (temporary)
-        if: runner.os == 'Linux'
-        run: |
-          df -h /
-          du -sh target "$HOME/.cargo/registry" "$HOME/.cargo/git" 2>/dev/null || true
-
       - name: Run tests
         if: matrix.full
         run: cargo test --workspace --locked --verbose
-
-      - name: Measure disk after Run tests (temporary)
-        if: always() && runner.os == 'Linux'
-        run: |
-          df -h /
-          for d in target/* target/*/*; do du -sh "$d"; done 2>/dev/null | sort -h | tail -25 || true
-          echo "test programs: $(find target/debug/deps -maxdepth 1 -type f -executable | wc -l)"
-          find target/debug/deps -maxdepth 1 -type f -executable -printf '%s\n' | awk '{s+=$1} END {print "their total MB:", s/1048576}'
 
       - name: Check SDL renderer without OpenGL (Linux x86_64)
         if: matrix.label == 'linux-x86_64' && steps.shader_changes.outputs.needed == 'true'
@@ -223,15 +202,6 @@ jobs:
           cargo test --locked --test deterministic_tests
           cargo test --locked --bin rust-dos determinis
 
-      - name: Measure disk at end (temporary)
-        if: always() && runner.os == 'Linux'
-        run: |
-          df -h /
-          du -sh target 2>/dev/null || true
-          cat "$RUNNER_TEMP/free-disk.log" || true
-          cat "$RUNNER_TEMP/disk.log"
-          sort -t= -k2 -n "$RUNNER_TEMP/disk.log" | tail -1
-
       # Starts the debug build of the program, whose large frames must fit
       # in Windows's 1 MB main thread stack. The test profile is optimized,
       # and optimized frames are smaller, so this step builds the program
@@ -241,6 +211,16 @@ jobs:
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: 0
         run: cargo test --locked --test debug_journal_tests
+
+      # How much room the tests left, to read in any run once the suite has
+      # grown, without a branch that measures it. The removal's log ends
+      # with the free space right after the removal.
+      - name: Show free disk space (Linux)
+        if: always() && runner.os == 'Linux'
+        run: |
+          cat "$RUNNER_TEMP/free-disk.log" 2>/dev/null || true
+          df -h /
+          du -sh target || true
 
   # The release builds and packages, the ones `scope` picks: every target
   # on pushes, tags and manual runs, one on most pull requests and none on
