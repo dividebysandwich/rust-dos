@@ -4,7 +4,8 @@
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
-use crate::video::vbe::{self, VbeMode, LFB_BASE, MODES, VRAM_SIZE, WINDOW_SIZE};
+use crate::video::adapter::Adapter;
+use crate::video::vbe::{self, VbeMode, LFB_BASE, MODE_NUMBER, VRAM_SIZE, WINDOW_SIZE};
 use crate::video::VideoMode;
 use iced_x86::Register;
 
@@ -43,7 +44,8 @@ fn rom(offset: u16) -> usize {
     ((ROM_SEGMENT as usize) << 4) + offset as usize
 }
 
-/// Write the VBE data into the video BIOS.
+/// Write the VBE data into the video BIOS. The mode list depends on the
+/// card, which `video::bios::install` writes (`install_mode_list`).
 pub fn install_rom(bus: &mut Bus) {
     for (offset, text) in [
         (OEM_STRING, OEM),
@@ -55,9 +57,6 @@ pub fn install_rom(bus: &mut Bus) {
     ] {
         bus.write_rom(rom(offset), text);
     }
-    let mut list: Vec<u8> = MODES.iter().flat_map(|m| m.number.to_le_bytes()).collect();
-    list.extend([0xFF, 0xFF]);
-    bus.write_rom(rom(MODE_LIST), &list);
     bus.write_rom(rom(WINDOW_FUNCTION), &[0xFE, 0x39, crate::bios::SERVICE_VBE_WINDOW, 0xCB]);
     bus.write_rom(rom(PM_TABLE), &pm_table());
     super::vbe_tseng::install_rom(bus);
@@ -236,6 +235,19 @@ fn ddc(cpu: &mut Cpu, addr: usize) -> u16 {
     }
 }
 
+/// The mode numbers of the BIOS of `adapter`, ending in FFFFh.
+fn mode_list(adapter: Adapter) -> Vec<u8> {
+    let mut list: Vec<u8> = vbe::modes(adapter).flat_map(|m| m.number.to_le_bytes()).collect();
+    list.extend([0xFF, 0xFF]);
+    list
+}
+
+/// Write the mode list of the BIOS of `adapter` into the ROM, where the
+/// VbeInfoBlock of VBE 1.x callers points.
+pub fn install_mode_list(bus: &mut Bus, adapter: Adapter) {
+    bus.write_rom(rom(MODE_LIST), &mode_list(adapter));
+}
+
 /// Function 00h: the VbeInfoBlock. Callers asking for VBE 2.0 (with "VBE2"
 /// in the buffer) get 512 bytes with the mode list and the strings in the
 /// buffer, where protected-mode programs can reach them; others get the
@@ -258,8 +270,7 @@ fn controller_info(cpu: &mut Cpu, addr: usize) -> u16 {
     if vbe2 {
         // The mode list in the reserved area, the strings in OemData.
         let in_buffer = |at: usize| (seg as u32) << 16 | off.wrapping_add(at as u16) as u32;
-        let mut list: Vec<u8> = MODES.iter().flat_map(|m| m.number.to_le_bytes()).collect();
-        list.extend([0xFF, 0xFF]);
+        let list = mode_list(cpu.bus.vga.adapter);
         block[34..34 + list.len()].copy_from_slice(&list);
         block[14..18].copy_from_slice(&in_buffer(34).to_le_bytes());
         block[20..22].copy_from_slice(&0x0200u16.to_le_bytes());
@@ -291,7 +302,7 @@ pub(super) fn color_masks(bpp: u8) -> [u8; 8] {
 
 /// Function 01h: the ModeInfoBlock of mode CX.
 fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
-    let Some(mode) = vbe::find_mode(number, cpu.bus.vga.adapter.is_virge()) else {
+    let Some(mode) = vbe::adapter_mode(number, cpu.bus.vga.adapter) else {
         return FAILED;
     };
     let mut block = [0u8; 256];
@@ -328,12 +339,12 @@ fn mode_info(cpu: &mut Cpu, number: u16, addr: usize) -> u16 {
 /// keeping video memory). Standard modes go to AH=00h.
 fn set_mode(cpu: &mut Cpu, bx: u16) -> u16 {
     let keep = bx & 0x8000 != 0;
-    if bx & 0x1FF < 0x100 {
+    if bx & MODE_NUMBER < 0x100 {
         super::int10::set_mode(cpu, (bx & 0x7F) as u8 | if keep { 0x80 } else { 0 });
         return SUCCESS;
     }
-    let Some(mode) = vbe::find_mode(bx, cpu.bus.vga.adapter.is_virge()) else {
-        let line = format!("[BIOS] VESA mode {:03X}h isn't one of this BIOS's", bx & 0x1FF);
+    let Some(mode) = vbe::adapter_mode(bx, cpu.bus.vga.adapter) else {
+        let line = format!("[BIOS] VESA mode {:03X}h isn't one of this BIOS's", bx & MODE_NUMBER);
         cpu.bus.log_string(&line);
         return FAILED;
     };
@@ -392,8 +403,7 @@ fn save_restore_state(cpu: &mut Cpu) -> u16 {
         }
         0x02 => {
             let mode = cpu.bus.guest_read_16((addr) as u32);
-            let packed24 = cpu.bus.vga.adapter.is_virge();
-            if let Some(m) = vbe::find_mode(mode, packed24).filter(|_| mode != 0) {
+            if let Some(m) = vbe::adapter_mode(mode, cpu.bus.vga.adapter).filter(|_| mode != 0) {
                 let m = &m;
                 if cpu.bus.vbe.mode != Some(*m) {
                     enter_mode(&mut cpu.bus, m, mode & 0x4000 != 0, true);

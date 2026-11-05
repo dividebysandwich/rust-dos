@@ -6,6 +6,7 @@
 //! The standard VGA modes keep the VGA's own planar memory; only VBE modes
 //! use this memory.
 
+use super::adapter::Adapter;
 use super::crt::CrtTiming;
 
 /// Physical address of the linear frame buffer.
@@ -57,14 +58,43 @@ pub static MODES: [VbeMode; 16] = [
     mode(0x118, 1024, 768, 32, CrtTiming::VESA_768),
 ];
 
-/// Mode `number` of the list, its "24-bit" colour three bytes a pixel
-/// with `packed24`, as on an S3 ViRGE: its Windows drivers only offer
-/// packed 24-bit truecolour, and set it through the BIOS.
+/// The OEM modes the generic Super VGA (`machine=svga`) lists after the
+/// standard ones: 640x400 in truecolour, mode 213h, as BIOSes of S3
+/// cards such as Diamond's Stealth64 Video have it (Ralf Brown's
+/// Interrupt List, table 00084) and DOSBox-X's S3 lists it. Programs that
+/// pick a mode by its size and the most colours, such as SDL3's DOS
+/// video, then get 640x400 in truecolour instead of mode 100h's 256
+/// colours. The other cards have the BIOS modes of their own chips.
+pub static OEM_MODES: [VbeMode; 1] = [mode(0x213, 640, 400, 32, CrtTiming::VGA_400)];
+
+/// The bits of a VBE mode number that name the mode: 0-8 for the
+/// standard modes, and 9 and 10 for OEM modes such as S3's 2xxh. Bit 11
+/// asks for a CRTC table, 14 for the linear frame buffer, 15 keeps video
+/// memory.
+pub const MODE_NUMBER: u16 = 0x07FF;
+
+/// The modes the BIOS of `adapter` lists, in order.
+pub fn modes(adapter: Adapter) -> impl Iterator<Item = &'static VbeMode> {
+    let oem: &[VbeMode] = if adapter == Adapter::Svga { &OEM_MODES } else { &[] };
+    MODES.iter().chain(oem)
+}
+
+/// Mode `number` of the BIOS of `adapter`, its "24-bit" colour three
+/// bytes a pixel on an S3 ViRGE: its Windows drivers only offer packed
+/// 24-bit truecolour, and set it through the BIOS.
+pub fn adapter_mode(number: u16, adapter: Adapter) -> Option<VbeMode> {
+    modes(adapter).find(|m| m.number == number & MODE_NUMBER).map(|m| packed(m, adapter.is_virge()))
+}
+
+/// Mode `number` of the list or of the OEM modes, its "24-bit" colour
+/// three bytes a pixel with `packed24`.
 pub fn find_mode(number: u16, packed24: bool) -> Option<VbeMode> {
-    MODES.iter().find(|m| m.number == number & 0x1FF).map(|m| {
-        let bpp = if packed24 && m.bpp == 32 { 24 } else { m.bpp };
-        VbeMode { bpp, ..*m }
-    })
+    MODES.iter().chain(&OEM_MODES).find(|m| m.number == number & MODE_NUMBER).map(|m| packed(m, packed24))
+}
+
+fn packed(m: &VbeMode, packed24: bool) -> VbeMode {
+    let bpp = if packed24 && m.bpp == 32 { 24 } else { m.bpp };
+    VbeMode { bpp, ..*m }
 }
 
 /// The display timing of a mode `height` lines high, as the modes of the
