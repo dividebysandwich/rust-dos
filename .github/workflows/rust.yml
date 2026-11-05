@@ -66,11 +66,29 @@ jobs:
     # starts the debug build of the program, to check its stack frames.
     env:
       CARGO_PROFILE_TEST_OPT_LEVEL: ${{ matrix.full && '1' || '0' }}
+      CARGO_PROFILE_TEST_DEBUG: ${{ matrix.full && '0' || 'line-tables-only' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 2
+
+      - name: Free disk (experiment)
+        if: runner.os == 'Linux' && matrix.full
+        run: |
+          start=$(date +%s)
+          df -h /
+          ls /opt/hostedtoolcache || true
+          sudo du -sh /opt/hostedtoolcache/* 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android &
+          sudo rm -rf /usr/share/dotnet &
+          sudo rm -rf /usr/local/.ghcup /opt/ghc &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          sudo rm -rf /usr/share/swift &
+          sudo docker image prune --all --force > /dev/null &
+          wait
+          df -h /
+          echo "freeing took $(( $(date +%s) - start )) s"
 
       - name: Measure disk at start (temporary)
         if: runner.os == 'Linux'
@@ -164,7 +182,10 @@ jobs:
         if: always() && runner.os == 'Linux'
         run: |
           df -h /
-          du -sh target target/* target/*/* 2>/dev/null | sort -h | tail -25 || true
+          for d in target/* target/*/*; do du -sh "$d"; done 2>/dev/null | sort -h | tail -25 || true
+          ls -S -l target/debug/deps | head -15
+          echo "test programs: $(find target/debug/deps -maxdepth 1 -type f -executable | wc -l)"
+          find target/debug/deps -maxdepth 1 -type f -executable -printf '%s\n' | awk '{s+=$1} END {print "their total MB:", s/1048576}'
 
       - name: Check SDL renderer without OpenGL (Linux x86_64)
         if: matrix.label == 'linux-x86_64' && steps.shader_changes.outputs.needed == 'true'
