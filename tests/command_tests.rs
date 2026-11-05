@@ -11,7 +11,8 @@ fn scratch(name: &str, dirs: &[&str]) -> PathBuf {
     for d in dirs {
         fs::create_dir_all(base.join(d)).unwrap();
     }
-    fs::canonicalize(&base).unwrap()
+    // As the program shows host paths: without Windows' `\\?\`.
+    rust_dos::hostfs::canonicalize_plain(&base).unwrap()
 }
 
 /// Run a shell command line and return what it printed. A row ends where

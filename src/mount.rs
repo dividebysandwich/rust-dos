@@ -308,6 +308,14 @@ fn parse_drive(word: &str) -> Result<u8, String> {
     }
 }
 
+/// The path `rest` names under `home`, the rest of a `~/` path, with the
+/// host's separator between its parts: `~/dos/game.img`, which
+/// `contract_home` writes on every host, is `C:\Users\u\dos\game.img` on
+/// Windows, not `C:\Users\u\dos/game.img`.
+pub fn home_join(home: &Path, rest: &str) -> PathBuf {
+    home.join(Path::new(rest).components().collect::<PathBuf>())
+}
+
 /// Turn a user-supplied host path into a usable one: `~` expands to the
 /// home directory and relative paths are taken relative to `base`, with
 /// `.` and `..` folded away ("../games" from /home/u/dos is /home/u/games).
@@ -317,7 +325,7 @@ pub fn expand_host_path(raw: &str, base: &Path, home: Option<&Path>) -> PathBuf 
             return home.to_path_buf();
         }
         if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-            return home.join(rest);
+            return home_join(home, rest);
         }
     }
     let path = Path::new(raw);
@@ -541,17 +549,25 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
 /// `canonicalize` adds.
 pub fn display_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
-    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    crate::hostfs::verbatim_stripped(&s).unwrap_or_else(|| s.into_owned())
 }
 
 /// Host path as the user would write it: under the home directory it
 /// starts with `~/`, which `expand_host_path` turns back into the path.
+/// The rest is separated by `/` too, also on Windows, so the path has one
+/// kind of separator and the settings that only take `~/` read it back.
 pub fn contract_home(path: &Path, home: Option<&Path>) -> String {
     let display = display_host_path(path);
     let Some(home) = home else { return display };
     match Path::new(&display).strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => {
+            let parts: Vec<_> = rest
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
+            format!("~/{}", parts.join("/"))
+        }
         Err(_) => display,
     }
 }
@@ -932,6 +948,28 @@ mod tests {
     #[test]
     fn display_strips_verbatim_prefix() {
         assert_eq!(display_host_path(Path::new(r"\\?\C:\dos")), r"C:\dos");
+        assert_eq!(
+            display_host_path(Path::new(r"\\?\UNC\server\share\dos")),
+            r"\\server\share\dos"
+        );
+        // A volume without a letter has no other form.
+        let volume = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\dos";
+        assert_eq!(display_host_path(Path::new(volume)), volume);
         assert_eq!(display_host_path(Path::new("/home/u")), "/home/u");
+    }
+
+    /// Under the home folder, one kind of separator, which the settings
+    /// that only take `~/` read back, on every host.
+    #[test]
+    fn home_contracts_with_slashes() {
+        let home = std::env::temp_dir();
+        let path = home.join("dos").join("game.img");
+        assert_eq!(contract_home(&path, Some(&home)), "~/dos/game.img");
+        // Back with the host's separator alone: not `dos/game.img` after
+        // the home folder on Windows, which `Path`'s `==` lets pass.
+        let expanded = expand_host_path("~/dos/game.img", Path::new("/"), Some(&home));
+        assert_eq!(expanded.as_os_str(), path.as_os_str());
+        assert_eq!(contract_home(&home, Some(&home)), "~");
+        assert_eq!(contract_home(&path, None), path.display().to_string());
     }
 }

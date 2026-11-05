@@ -280,11 +280,26 @@ fn the_modem_dials_a_host_and_takes_calls() {
             bus.io_write(COM2, byte);
         }
     };
+    // Waits are counted in emulated time, as the modem's own are: a call
+    // to a host takes 5.3 s of dialing and 20.4 s of handshake before
+    // CONNECT, and an answered call 20.4 s. The short sleeps every 10 ms
+    // let the network thread run. A wall-clock deadline alone would
+    // depend on how long they take: a 200 us sleep takes about 570 us on
+    // Windows, and with one each emulated ms, 10 s of wall clock ended
+    // inside the handshake there. What comes over the network (the
+    // host's greeting, its hanging up, a caller's text) comes in wall
+    // time instead, so a wait ends only when both have run out: 60 s
+    // emulated and 10 s of wall clock.
     let read_until = |bus: &mut Bus, want: &str| {
         let mut text = String::new();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !text.contains(want) && Instant::now() < deadline {
-            run_networked(bus, 2);
+        let mut ms = 0u32;
+        while !text.contains(want) && (ms < 60_000 || Instant::now() < deadline) {
+            ms += 1;
+            pass(bus, 1);
+            if ms.is_multiple_of(10) {
+                std::thread::sleep(Duration::from_micros(200));
+            }
             while bus.io_read(COM2 + 5) & 1 != 0 {
                 text.push(bus.io_read(COM2) as char);
             }
