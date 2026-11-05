@@ -161,8 +161,21 @@ pub fn setup_in(
     flags: u32,
     viewport: u32,
 ) -> Option<Setup> {
-    let d = get(cpu, id)?.clone();
-    let view_map = view_map(cpu, &d, version, viewport);
+    super::device::lend(cpu, id, |cpu, d| {
+        setup_of(cpu, d, version, layout, flags, viewport)
+    })
+}
+
+/// The pipeline's setup for the device `d`, as `setup_in` says.
+fn setup_of(
+    cpu: &mut Cpu,
+    d: &Device,
+    version: u32,
+    layout: &Layout,
+    flags: u32,
+    viewport: u32,
+) -> Setup {
+    let view_map = view_map(cpu, d, version, viewport);
     let s = |r: u32| d.state(r);
     let mut planes = Vec::new();
     if version >= 7 {
@@ -189,7 +202,7 @@ pub fn setup_in(
             (lights, material(&d.material))
         } else {
             let lights = super::light::lights_of(cpu, viewport);
-            let m = super::material::of_handle(cpu, &d, d.light_states[1]).unwrap_or_default();
+            let m = super::material::of_handle(cpu, d, d.light_states[1]).unwrap_or_default();
             (lights, m)
         };
         let a = pipeline::rgba(s(RS_AMBIENT));
@@ -223,7 +236,7 @@ pub fn setup_in(
             range: s(48) != 0,
         });
     let tex = |stage: u32| (d.stage(stage, TSS_TEXCOORDINDEX) & 7) as usize;
-    Some(Setup {
+    Setup {
         world: d.transforms[1],
         view: d.transforms[2],
         projection: d.transforms[3],
@@ -237,7 +250,7 @@ pub fn setup_in(
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
         tex_index: [tex(0), tex(1)],
-    })
+    }
 }
 
 /// Count what was drawn, and the vertices' clip codes and extents, in
@@ -380,9 +393,7 @@ fn rasterize(
     verts: &[Processed],
     prims: &[Prim],
 ) -> pipeline::Drawn {
-    let card = get(cpu, id)
-        .cloned()
-        .and_then(|d| super::hal::bind(cpu, &d, setup));
+    let card = super::device::lend(cpu, id, |cpu, d| super::hal::bind(cpu, d, setup)).flatten();
     match card {
         Some(card) => {
             let mut raster = super::hal::Raster::new(cpu, card);
