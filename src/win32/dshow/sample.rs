@@ -495,10 +495,14 @@ pub fn get_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(put32(cpu, args[1], buffer).map_or_else(|e| e, |_| S_OK))
 }
 
-/// IMediaSample::GetSize(this): the buffer's size.
+/// IMediaSample::GetSize(this): the buffer's size, 0 for what isn't a
+/// sample.
 pub fn get_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = sample_of(cpu, args[0]).ok()?;
-    Some(sample(cpu, id).map_or(0, |s| s.size))
+    let size = sample_of(cpu, args[0])
+        .ok()
+        .and_then(|id| sample(cpu, id))
+        .map_or(0, |s| s.size);
+    Some(size)
 }
 
 /// IMediaSample::GetTime(this, start, end).
@@ -577,10 +581,14 @@ pub fn set_discontinuity(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-/// IMediaSample::GetActualDataLength(this): the bytes of data.
+/// IMediaSample::GetActualDataLength(this): the bytes of data, 0 for
+/// what isn't a sample.
 pub fn get_actual(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = sample_of(cpu, args[0]).ok()?;
-    Some(sample(cpu, id).map_or(0, |s| s.actual))
+    let actual = sample_of(cpu, args[0])
+        .ok()
+        .and_then(|id| sample(cpu, id))
+        .map_or(0, |s| s.actual);
+    Some(actual)
 }
 
 /// IMediaSample::SetActualDataLength(this, length).
@@ -641,9 +649,10 @@ pub fn set_media_type(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(S_OK)
 }
 
-/// Free an AM_MEDIA_TYPE of the program's memory that a sample keeps:
-/// its format block, then itself (DeleteMediaType).
-fn free_media_type(cpu: &mut Cpu, at: u32) {
+/// Free an AM_MEDIA_TYPE of the program's task heap, as a sample keeps
+/// or an enumerator gives: its format block, then itself
+/// (DeleteMediaType).
+pub fn free_media_type(cpu: &mut Cpu, at: u32) {
     if at == 0 {
         return;
     }

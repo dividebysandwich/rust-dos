@@ -29,7 +29,7 @@ use super::filter;
 use super::{
     E_ABORT, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_POINTER, FILE_NOT_FOUND, Kind,
     S_FALSE, S_OK, TIME_FORMAT_MEDIA_TIME, VFW_E_NO_PALETTE_AVAILABLE, VFW_E_NOT_FOUND,
-    VFW_E_UNKNOWN_FILE_TYPE, VFW_E_WRONG_STATE, get64, put32, put64,
+    VFW_E_NOT_STOPPED, VFW_E_UNKNOWN_FILE_TYPE, VFW_E_WRONG_STATE, get64, put32, put64,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
@@ -69,7 +69,6 @@ const OATRUE: u32 = 0xFFFF_FFFF;
 const OAFALSE: u32 = 0;
 
 const INFINITE: u32 = 0xFFFF_FFFF;
-const VFW_E_NOT_STOPPED: u32 = 0x8004_0224;
 
 /// 100-nanosecond units a millisecond.
 const UNITS_MS: i64 = 10_000;
@@ -188,7 +187,7 @@ pub(super) fn graph(cpu: &mut Cpu, id: u32) -> Option<&mut Graph> {
 }
 
 /// The graph `this` is an interface of.
-fn graph_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
+pub(super) fn graph_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
     let id = super::object_of(cpu, this).ok_or(E_POINTER)?;
     graph(cpu, id).ok_or(E_POINTER)?;
     Ok(id)
@@ -355,9 +354,12 @@ pub fn run(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         if pos >= to {
             set_state(cpu, id, STATE_RUNNING);
             // The program's renderer tells its own end, after the
-            // stream's.
+            // stream's; the sound's, already at its end, counts now, as
+            // this Run counts the renderers again.
             if !filter::linked(cpu, id) {
                 queue(cpu, id, EC_COMPLETE, S_OK, 0);
+            } else if sound_renders(cpu, id) {
+                complete(cpu, id, S_OK, 0);
             }
             return Ok(S_OK);
         }

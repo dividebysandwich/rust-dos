@@ -32,6 +32,7 @@
 //! Wine's quartz is under the LGPL 2.1 or later; what is taken from it
 //! here is its behaviour, with credit to its authors.
 
+use super::graph::{graph, graph_of};
 use super::sample;
 use super::{
     E_FAIL, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Kind, S_FALSE, S_OK, VFW_E_ALREADY_CONNECTED,
@@ -254,20 +255,6 @@ pub struct Pin {
     pub graph: u32,
 }
 
-/// The graph `id`'s state.
-fn graph(cpu: &mut Cpu, id: u32) -> Option<&mut super::graph::Graph> {
-    match super::kind(cpu, id)? {
-        Kind::Graph { g } => Some(g),
-        _ => None,
-    }
-}
-
-fn graph_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
-    let id = super::object_of(cpu, this).ok_or(E_POINTER)?;
-    graph(cpu, id).ok_or(E_POINTER)?;
-    Ok(id)
-}
-
 /// The graph of the decoder or pin `this`.
 fn owner_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
     let id = super::object_of(cpu, this).ok_or(E_POINTER)?;
@@ -279,7 +266,7 @@ fn owner_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
 }
 
 fn link(cpu: &mut Cpu, id: u32) -> Option<&mut Link> {
-    graph(cpu, id)?.link.as_mut()
+    slot(cpu, id, false)
 }
 
 /// Whether the graph `id` has filters of the program's in it.
@@ -495,8 +482,10 @@ pub fn add_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// IFilterGraph::RemoveFilter(this, filter): the filter leaves the
-/// graph, its connection with the decoder undone. E_FAIL for one that
-/// isn't in it.
+/// graph, its connection with the decoder undone. A filter of a graph
+/// that isn't stopped is stopped first (paused first when it runs), as
+/// Wine's filtergraph.c does, so that its pins can disconnect. E_FAIL
+/// for one that isn't in it.
 pub fn remove_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let id = hr!(graph_of(cpu, args[0]));
     let filter = args[1];
@@ -507,9 +496,16 @@ pub fn remove_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_FAIL);
     };
     g.filters.remove(k);
+    let state = g.state;
     let linked = g.link.as_ref().is_some_and(|l| l.filter == filter);
     let then = if linked { THEN_UNLINKED } else { THEN_DONE };
     let mut list = List::new(S_OK, then, id, 0, 0);
+    if state == STATE_RUNNING {
+        list.call(cpu, filter, FILTER_PAUSE, &[], 0);
+    }
+    if state != STATE_STOPPED {
+        list.call(cpu, filter, FILTER_STOP, &[], 0);
+    }
     if linked {
         disconnect_calls(cpu, &mut list, id);
     }
@@ -639,7 +635,9 @@ pub fn forget(cpu: &mut Cpu, id: u32) {
 /// Move the program's filters in the graph `id` to `state`, as the
 /// graph does before it changes its own: from the renderers up, a Run
 /// from Stopped going through Pause first, the clock given to every
-/// filter the first time the graph leaves Stopped. None while the calls
+/// filter the first time the graph leaves Stopped. Each Run counts the
+/// renderers' EC_COMPLETE again (Wine's `graph_start`), since a renderer
+/// at its stream's end tells it again when it runs. None while the calls
 /// are made, after which the method runs again with `filters_state`
 /// set; Some(()) when there is nothing to call.
 pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
@@ -653,9 +651,11 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
     let mut list = List::new(S_OK, THEN_STATE, id, state, 0);
     if from == STATE_STOPPED && state != STATE_STOPPED {
         give_clock(cpu, id, &mut list, &filters);
-        if let Some(g) = graph(cpu, id) {
-            g.completes = 0;
-        }
+    }
+    if state == STATE_RUNNING
+        && let Some(g) = graph(cpu, id)
+    {
+        g.completes = 0;
     }
     let now = sample::now(cpu);
     let g = graph(cpu, id)?;
@@ -798,13 +798,6 @@ fn first_frame(m: &Media, ms: u32) -> u32 {
 
 /// Start the link's streaming thread, with the event that wakes it.
 fn start_thread(cpu: &mut Cpu, id: u32) {
-    let wake = crate::win32::object::objects(cpu).add(
-        crate::win32::object::Kind::Event {
-            manual: false,
-            signaled: false,
-        },
-        None,
-    );
     let Some(dll) = crate::win32::stubs::find_dll(super::QUARTZ.name) else {
         return;
     };
@@ -816,6 +809,13 @@ fn start_thread(cpu: &mut Cpu, id: u32) {
         return;
     };
     let start = crate::win32::stubs::stub_address(dll, index);
+    let wake = crate::win32::object::objects(cpu).add(
+        crate::win32::object::Kind::Event {
+            manual: false,
+            signaled: false,
+        },
+        None,
+    );
     let tid = crate::win32::kernel32::create_system_thread(cpu, start).unwrap_or(0);
     match link(cpu, id) {
         Some(l) if tid != 0 => {
@@ -829,13 +829,36 @@ fn start_thread(cpu: &mut Cpu, id: u32) {
 /// The file the link of the graph `id` streams, read again after a
 /// restore.
 fn stream_media(cpu: &mut Cpu, id: u32) -> Option<Arc<Media>> {
-    let l = link(cpu, id)?;
+    media_of(cpu, id, false)
+}
+
+/// The file of the connection RenderFile is making in the graph `id`,
+/// read again after a restore.
+fn connecting_media(cpu: &mut Cpu, id: u32) -> Option<Arc<Media>> {
+    media_of(cpu, id, true)
+}
+
+/// The graph `id`'s link, or the one being made while RenderFile
+/// connects.
+fn slot(cpu: &mut Cpu, id: u32, connecting: bool) -> Option<&mut Link> {
+    let g = graph(cpu, id)?;
+    if connecting {
+        g.connecting.as_mut()
+    } else {
+        g.link.as_mut()
+    }
+}
+
+/// The file of a link (`slot`), which a save state doesn't keep: read
+/// again when it isn't there.
+fn media_of(cpu: &mut Cpu, id: u32, connecting: bool) -> Option<Arc<Media>> {
+    let l = slot(cpu, id, connecting)?;
     if let Some(m) = &l.media {
         return Some(m.clone());
     }
     let file = l.file.clone();
     let m = Arc::new(read_media(cpu, &file)?);
-    link(cpu, id)?.media = Some(m.clone());
+    slot(cpu, id, connecting)?.media = Some(m.clone());
     Some(m)
 }
 
@@ -918,31 +941,14 @@ impl Link {
     /// The link's state without its file, its media type and its
     /// decoder, to read while the link changes.
     fn clone_shallow(&self) -> Link {
+        // The fields left are numbers and flags, which copy.
         Link {
-            filter: self.filter,
-            pin: self.pin,
-            input: self.input,
-            allocator: self.allocator,
-            decoder: self.decoder,
-            out_pin: self.out_pin,
             head: Vec::new(),
             format: Vec::new(),
-            kind: self.kind,
-            bottom_up: self.bottom_up,
             file: String::new(),
-            tid: self.tid,
-            wake: self.wake,
-            next: self.next,
-            from_ms: self.from_ms,
-            to_ms: self.to_ms,
-            active: self.active,
-            ended: self.ended,
-            refused: self.refused,
-            segment: self.segment,
-            discontinuity: self.discontinuity,
-            generation: self.generation,
             media: None,
             pictures: Pictures::default(),
+            ..*self
         }
     }
 }
@@ -1343,7 +1349,7 @@ const S_RECEIVED: u16 = 15;
 const S_NEXT_CANDIDATE: u16 = 16;
 const S_INPUT: u16 = 17;
 const S_ALLOCATOR: u16 = 18;
-const S_REQUIREMENTS: u16 = 19;
+const S_REQUIRED: u16 = 19;
 const S_DECIDE: u16 = 20;
 const S_NOTIFIED: u16 = 21;
 const S_FAILED: u16 = 22;
@@ -1522,16 +1528,11 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(V_TYPES, 0);
                 return release_then(t, e, S_OWN_START);
             }
-            // The type is the caller's to free (DeleteMediaType).
+            // The type is the caller's to free (DeleteMediaType), its
+            // format block too when it can't be read.
             let mt = read_media_type(cpu, at);
-            if let Some(mt) = &mt {
-                let p = word(&mt.head, 68);
-                crate::win32::ole32::task_free(cpu, p);
-            }
-            crate::win32::ole32::task_free(cpu, at);
-            let media = graph(cpu, id)
-                .and_then(|g| g.connecting.as_ref())
-                .and_then(|l| l.media.clone());
+            sample::free_media_type(cpu, at);
+            let media = connecting_media(cpu, id);
             let found = mt
                 .as_ref()
                 .zip(media)
@@ -1551,9 +1552,7 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         S_OWN => {
             let k = t.var(V_OWN) as usize;
-            let media = graph(cpu, id)
-                .and_then(|g| g.connecting.as_ref())
-                .and_then(|l| l.media.clone());
+            let media = connecting_media(cpu, id);
             let (Some(m), true) = (media, k < FORMATS.len()) else {
                 return goto(S_SKIP_PIN);
             };
@@ -1607,7 +1606,26 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return goto(S_DISCONNECT);
             }
             t.set(V_INPUT, input);
+            // The base classes' DecideAllocator: the pin's requirements
+            // first, then its allocator.
+            cpu.bus.guest_fill(s + C_PROPS, 16, 0);
+            if method(cpu, input, INPUT_GET_ALLOCATOR_REQUIREMENTS).is_none() {
+                return goto(S_REQUIRED);
+            }
+            call_method(
+                cpu,
+                input,
+                INPUT_GET_ALLOCATOR_REQUIREMENTS,
+                &[s + C_PROPS],
+                S_REQUIRED,
+            )
+        }
+        S_REQUIRED => {
+            if failed(value) {
+                cpu.bus.guest_fill(s + C_PROPS, 16, 0);
+            }
             clear_out(cpu, t);
+            let input = t.var(V_INPUT);
             call_method(cpu, input, INPUT_GET_ALLOCATOR, &[s + C_OUT], S_ALLOCATOR)
         }
         S_ALLOCATOR => {
@@ -1623,7 +1641,7 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 // GetAllocator gave is the link's.
                 Some(a) => {
                     t.set(V_ALLOC, a);
-                    goto(S_REQUIREMENTS)
+                    goto(S_DECIDE)
                 }
                 None => {
                     // None, or one of the program's own: the decoder's
@@ -1632,37 +1650,17 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                     let a = sample::new_allocator(cpu);
                     t.set(V_ALLOC, a);
                     if !failed(value) && given != 0 {
-                        return release_then(t, given, S_REQUIREMENTS);
+                        return release_then(t, given, S_DECIDE);
                     }
-                    goto(S_REQUIREMENTS)
+                    goto(S_DECIDE)
                 }
             }
         }
-        S_REQUIREMENTS => {
-            cpu.bus.guest_fill(s + C_PROPS, 16, 0);
-            let input = t.var(V_INPUT);
-            if method(cpu, input, INPUT_GET_ALLOCATOR_REQUIREMENTS).is_none() {
-                return Next::call(0, &[], S_DECIDE);
-            }
-            call_method(
-                cpu,
-                input,
-                INPUT_GET_ALLOCATOR_REQUIREMENTS,
-                &[s + C_PROPS],
-                S_DECIDE,
-            )
-        }
         S_DECIDE => {
-            let req = if failed(value) {
-                [0; 4]
-            } else {
-                sample::read_props(cpu, s + C_PROPS)
-            };
+            // The requirements, zero when the pin gave none (S_REQUIRED).
+            let req = sample::read_props(cpu, s + C_PROPS);
             let k = t.var(V_KIND) as usize;
-            let size = graph(cpu, id)
-                .and_then(|g| g.connecting.as_ref())
-                .and_then(|l| l.media.clone())
-                .map_or(0, |m| image_size(k, m.width, m.height));
+            let size = connecting_media(cpu, id).map_or(0, |m| image_size(k, m.width, m.height));
             // DecideBufferSize: a buffer at least, a picture's size at
             // least, an alignment of 1 at least (quartz_transform.c).
             let props = [req[0].max(1), req[1].max(size), req[2].max(1), req[3]];
@@ -1962,11 +1960,7 @@ pub fn pin_query_accept(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(mt) = read_media_type(cpu, args[1]) else {
         return Some(E_POINTER);
     };
-    let media = link(cpu, id).and_then(|l| l.media.clone()).or_else(|| {
-        graph(cpu, id)
-            .and_then(|g| g.connecting.as_ref())
-            .and_then(|l| l.media.clone())
-    });
+    let media = stream_media(cpu, id).or_else(|| connecting_media(cpu, id));
     let ok = media.is_some_and(|m| accepts(&m, &mt).is_some());
     Some(if ok { S_OK } else { S_FALSE })
 }

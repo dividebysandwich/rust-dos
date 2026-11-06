@@ -1396,6 +1396,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
             Kind::Multi { m } => vec![m.end_event.1],
             Kind::VideoSample { s } | Kind::AudioSample { s } => vec![s.event],
             Kind::Clock { c } => c.advises.iter().map(|a| a.object).collect(),
+            Kind::Allocator { a } => vec![a.freed],
             _ => Vec::new(),
         })
         .filter(|&e| e != 0)
