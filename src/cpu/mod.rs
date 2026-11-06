@@ -1955,8 +1955,14 @@ impl Cpu {
             bytes.len()
         ));
         // A program whose file a game fix patches as it loads
-        // (`game_fixes`: Lands of Lore 2's launcher).
-        let patched = self.patch_at_load(filename, bytes);
+        // (`game_fixes`: Lands of Lore 2's launcher). Of a Win32 program
+        // DOS runs no more than the stub, and the built-in Windows makes
+        // its process from the file again, where the fix is for it.
+        let patched = if rust_dos_pe::is_pe(bytes) {
+            None
+        } else {
+            self.patch_at_load(filename, bytes)
+        };
         let bytes = patched.as_deref().unwrap_or(bytes);
 
         // Check for EXE Signature ("MZ")

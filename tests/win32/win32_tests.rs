@@ -1027,6 +1027,34 @@ fn create_process_loads_a_program_as_a_game_fix_patches_it() {
     assert_eq!(run("zanzarah_fix_off", false), 0x11);
 }
 
+/// ZANTHP.EXE started from the DOS prompt is patched once, as the
+/// built-in Windows makes its process: DOS runs no more than a Win32
+/// program's stub, so it leaves the file alone.
+#[test]
+fn a_program_from_the_prompt_is_patched_once() {
+    let base = scratch("zanzarah_prompt", &[("ZANTHP.EXE", zanzarah_program())]);
+    let mut cpu = Cpu::new(base);
+    cpu.bus.win32.enabled = true;
+    cpu.bus.configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+    cpu.host_console = Some(HostConsole::default());
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    cpu.bus.log_hook = Some(Box::new(move |line: &str| {
+        sink.lock().unwrap().push(line.to_string())
+    }));
+    cpu.load_shell();
+    assert!(cpu.load_executable("ZANTHP.EXE", None));
+    assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
+    assert_eq!(cpu.errorlevel, 2);
+    let lines = lines.lock().unwrap();
+    let patched: Vec<_> = lines
+        .iter()
+        .filter(|l| l.starts_with("[game fix] zanzarah-bmp-rows"))
+        .collect();
+    assert_eq!(patched.len(), 1, "{patched:?}");
+    assert!(patched[0].ends_with("since the 3D card's texture formats have no DXTn"));
+}
+
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a
 /// task of its 16-bit system: it succeeds, the process handle is
 /// signaled when the task ends, and GetExitCodeProcess gives the task's
