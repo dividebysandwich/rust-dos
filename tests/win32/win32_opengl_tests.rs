@@ -481,6 +481,77 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
 }
 
+/// A program that draws a red triangle over the bottom left half and,
+/// with `clear`, then clears the color buffer to blue and the depth
+/// buffer, before it draws a green triangle over the top right half.
+/// The depth test is on for the triangles with `depth_test`; without it
+/// the frames are drawn as Oni's menus draw theirs.
+fn two_triangles(clear: bool, depth_test: bool) -> (Cpu, u32) {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let both = [Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)];
+        c.api(a, l, CLEAR, &both)?;
+        if depth_test {
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        }
+        let triangle = |a: &mut CodeAssembler,
+                        c: &mut Calls,
+                        rgb: [f32; 3],
+                        corners: [[f32; 2]; 3]|
+         -> Result<(), IcedError> {
+            c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+            let [r, g, b] = rgb.map(Arg::F);
+            c.api(a, l, COLOR3F, &[r, g, b])?;
+            for [x, y] in corners {
+                c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+            }
+            c.api(a, l, END, &[])
+        };
+        triangle(a, &mut c, [1.0, 0.0, 0.0], [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]])?;
+        if clear {
+            let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+            c.api(a, l, CLEAR_COLOR, &blue)?;
+            c.api(a, l, CLEAR, &both)?;
+        }
+        triangle(a, &mut c, [0.0, 1.0, 0.0], [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let name = format!("two_triangles_{clear}_{depth_test}");
+    let mut cpu = machine(&name, true, exe);
+    run_until_done(&mut cpu, data);
+    (cpu, data)
+}
+
+/// The card's colBufferAddr, colBufferStride, auxBufferAddr and
+/// auxBufferStride.
+fn buffer_registers(cpu: &Cpu) -> [u32; 4] {
+    use rust_dos::voodoo::banshee::render3d::{
+        AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
+    };
+    let v = cpu.bus.voodoo.as_ref().unwrap();
+    [COL_BUFFER_ADDR, COL_BUFFER_STRIDE, AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE].map(|r| v.reg[r])
+}
+
+#[test]
+fn a_depth_clear_without_the_depth_test_gives_the_card_the_depth_buffer() {
+    // The card's fastfill clears the depth buffer, and the card keeps
+    // it as its depth buffer, where drawing with the depth test on puts
+    // it: pointing the card at it for the fill alone and back would move
+    // the buffer in the OpenGL renderer's layout at every clear.
+    let (cleared, data) = two_triangles(true, false);
+    assert_eq!(peek(&cleared, data + RESULTS + 4 * 23), 0, "glGetError");
+    assert_eq!(pixel(&cleared, data, 4, 4), [0, 0, 255]);
+    assert_eq!(pixel(&cleared, data, 60, 60), [0, 255, 0]);
+    let (plain, _) = two_triangles(false, false);
+    let (depth_tested, data) = two_triangles(false, true);
+    assert_eq!(pixel(&depth_tested, data, 4, 4), [255, 0, 0]);
+    let registers = buffer_registers(&cleared);
+    assert_eq!(registers, buffer_registers(&depth_tested));
+    assert_ne!(registers[2..], buffer_registers(&plain)[2..]);
+}
+
 #[test]
 fn flat_shading_takes_the_color_of_the_vertex_opengl_gives() {
     // Two flat triangles, each vertex its own color: OpenGL colors an

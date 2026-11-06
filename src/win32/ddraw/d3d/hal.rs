@@ -1606,10 +1606,16 @@ impl Rasterizer for Raster<'_> {
 /// otherwise draw all that first to have the memory to write into. A
 /// depth buffer gets `value` as zaColor's depth, a render target as
 /// color1, the 5-6-5 value's channels widened and not dithered, which
-/// the fill takes back to `value`. False, with nothing done, while the
-/// card isn't set up for the HAL's drawing (Glide closed or another
-/// process's, or no render target or depth buffer of the HAL's given to
-/// it yet) or the surface isn't in its memory.
+/// the fill takes back to `value`. A depth buffer while the card has
+/// none of the HAL's becomes its depth buffer, as the HAL's drawing with
+/// the depth test on makes it: a game that clears its depth buffer every
+/// frame but draws with the test off, as Oni's menus do, never gives the
+/// card one, and pointing the card at the buffer for each fill and back
+/// would move it in the OpenGL renderer's layout, which reads the buffer
+/// back each time. False, with nothing done, while the card isn't set up
+/// for the HAL's drawing (Glide closed or another process's, or no
+/// render target of the HAL's given to it yet) or the surface isn't in
+/// its memory.
 pub(in crate::win32::ddraw) fn card_fill(
     cpu: &mut Cpu,
     s: &Surface,
@@ -1637,18 +1643,24 @@ pub(in crate::win32::ddraw) fn card_fill(
         return false;
     }
     let depth = s.format.flags & surface::DDPF_ZBUFFER != 0;
+    let Some((at, pitch)) = surface::card_memory(cpu, id) else {
+        return false;
+    };
     // The registers the fill takes the place of, put back after it.
     let (at_reg, stride_reg, value_reg, saved) = if depth {
-        (AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, ZA_COLOR, (g.target[2], g.target[3], g.za_color))
+        let (aux, aux_stride) = if g.target[3] == 0 {
+            api::set_depth_buffer(cpu, at, pitch);
+            (at, pitch)
+        } else {
+            (g.target[2], g.target[3])
+        };
+        (AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, ZA_COLOR, (aux, aux_stride, g.za_color))
     } else {
         (COL_BUFFER_ADDR, COL_BUFFER_STRIDE, COLOR1, (g.target[0], g.target[1], g.color1))
     };
     if saved.1 == 0 {
         return false;
     }
-    let Some((at, pitch)) = surface::card_memory(cpu, id) else {
-        return false;
-    };
     let (fbz, fill) = if depth {
         (ENRECTCLIP | ZAWRMASK, g.za_color & !0xFFFF | value as u32)
     } else {
