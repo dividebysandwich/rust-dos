@@ -321,6 +321,11 @@ impl Tracker {
         self.hot.any_in(start, end)
     }
 
+    /// Whether anything was read back since the last `cool`.
+    pub fn any_hot(&self) -> bool {
+        !self.hot.is_empty()
+    }
+
     /// Nothing is hot any more: the program may have stopped reading it.
     pub fn cool(&mut self) {
         self.hot.clear();

@@ -585,3 +585,183 @@ fn mci_plays_a_wav_file() {
 fn mci_plays_a_wav_file_on_the_dynamic_recompiler() {
     mci_play(CoreMode::Dynamic);
 }
+
+/// The data of `acm_decodes`: a stereo MS ADPCM sound and what it
+/// decodes to, both made by ffmpeg 7 (its `adpcm_ms` encoder, 64-byte
+/// blocks, and its decoder) from a 440 Hz sine on the left and noise on
+/// the right at 22050 Hz. The sound is a whole block and 30 bytes of the
+/// next: a partial block at the end, which decodes as far as its bytes
+/// go, 18 frames.
+const MS_ADPCM_FORMAT: [u8; 50] = [
+    0x02, 0x00, 0x02, 0x00, 0x22, 0x56, 0x00, 0x00, 0x02, 0x6A, 0x00, 0x00, 0x40, 0x00, 0x04, 0x00,
+    0x20, 0x00, 0x34, 0x00, 0x07, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0xFF, 0x00, 0x00,
+    0x00, 0x00, 0xC0, 0x00, 0x40, 0x00, 0xF0, 0x00, 0x00, 0x00, 0xCC, 0x01, 0x30, 0xFF, 0x88, 0x01,
+    0x18, 0xFF,
+];
+const MS_ADPCM_SOUND: [u8; 94] = [
+    0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0xFF, 0x01, 0xE8, 0x19, 0x00, 0x00, 0xBF, 0x07, 0x78, 0x77,
+    0x78, 0x48, 0x25, 0x1C, 0x1E, 0x25, 0x1F, 0x10, 0x0C, 0x0F, 0x02, 0xE3, 0xE3, 0xD8, 0xC2, 0xC0,
+    0xCE, 0xC2, 0xDE, 0xC1, 0xCE, 0xDF, 0xD4, 0xD0, 0xCF, 0xDE, 0xD6, 0xCD, 0xE0, 0xD3, 0xE1, 0xFC,
+    0xEE, 0xF1, 0x01, 0x12, 0x2E, 0x40, 0x4F, 0x46, 0x40, 0x3F, 0x52, 0x30, 0x4B, 0x32, 0x3C, 0x44,
+    0x00, 0x00, 0x9A, 0x00, 0x4C, 0x0F, 0xAA, 0x05, 0x8B, 0x0F, 0xBF, 0x03, 0x90, 0xE7, 0x3D, 0x34,
+    0x3C, 0x41, 0x22, 0x2D, 0x22, 0x2E, 0x15, 0x00, 0xFD, 0xE4, 0xC0, 0xD0, 0xAF, 0xD1,
+];
+const MS_ADPCM_DECODED: [i16; 140] = [
+    0, 1983, 511, 6632, 623, 6504, 889, 6840, 1526, 5920, 2398, 3160, 2920, 8335, 3154, 1723, 3364,
+    -2241, 3740, 6659, 3908, 3816, 4058, 3816, 4058, -5360, 4058, -8111, 4058, -3169, 3866, 3491,
+    3694, 9473, 3463, -4855, 3187, 5891, 2859, 5891, 2467, -2781, 1999, 5009, 1579, -1989, 1079,
+    1154, 483, -4492, -51, -7028, -528, 2084, -954, 2084, -1462, -369, -1918, -4775, -2326, 7099,
+    -2814, -4775, -3106, -4775, -3499, 4807, -3733, 7676, -3838, -2632, -4026, -8812, -4110, -6036,
+    -4110, -3542, -4043, 938, -3923, -3086, -3711, -3086, -3459, -4709, -3159, 4039, -2803, 4039,
+    -2485, 1420, -2010, 6126, -1557, 6126, -1017, -3369, -534, 2697, -102, -8199, 414, 4865, 959,
+    -6256, 1450, 3979, 1912, -7769, 2326, 6303, 2695, -10569, 3135, -5511, 3397, 3577, 3631, -8669,
+    3841, -1335, 4029, -7923, 4113, 6872, 4113, 6872, 4046, -5866, 3926, 9390, 3714, 9390, 3525,
+    9390, 3189, 5700, 2853, 9015,
+];
+
+const MSACM32: &[&str] = &[
+    "acmFormatSuggest",
+    "acmStreamOpen",
+    "acmStreamSize",
+    "acmStreamPrepareHeader",
+    "acmStreamConvert",
+    "acmStreamUnprepareHeader",
+    "acmStreamClose",
+];
+
+// The data of `acm_decodes`.
+const ACM_STREAM: u32 = 0x00;
+const ACM_SIZE: u32 = 0x04;
+const ACM_PCM: u32 = 0x08;
+const ACM_ADPCM: u32 = 0x20;
+const ACM_HEADER: u32 = 0x60;
+const ACM_SOUND: u32 = 0x100;
+const ACM_OUT: u32 = 0x200;
+const ACM_DECODED: u32 = 0x400;
+/// The destination's room: the PCM of two whole blocks, which
+/// acmStreamSize gives for the sound's block and a half and the codec
+/// asks for, though the half block decodes to less.
+const ACM_ROOM: u32 = 0x1A0;
+/// Room for one block's PCM, too little for the sound.
+const ACM_SMALL_ROOM: u32 = 0x180;
+
+/// A program decodes `MS_ADPCM_SOUND` through MSACM32 as Oni decodes
+/// its sounds: it asks acmFormatSuggest for a PCM format, opens a stream
+/// to it, sizes the PCM and converts the sound with a prepared header.
+fn acm_decodes(core: CoreMode) {
+    let decoded: Vec<u8> = MS_ADPCM_DECODED
+        .iter()
+        .flat_map(|s| s.to_le_bytes())
+        .collect();
+    let mut data = vec![0xFFu8; ACM_DECODED as usize + decoded.len()];
+    let mut put = |at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    put(ACM_ADPCM, &MS_ADPCM_FORMAT);
+    put(ACM_HEADER, &[0; 84]);
+    put(ACM_HEADER, &84u32.to_le_bytes());
+    put(ACM_SOUND, &MS_ADPCM_SOUND);
+    put(ACM_DECODED, &decoded);
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.dll", KERNEL32), ("MSACM32.dll", MSACM32)];
+    let acm = |n: usize| OTHER + n;
+    let exe = program(imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        let at = |offset: u32| l.at(offset) as i32;
+        let field = |offset: u32| dword_ptr(l.at(ACM_HEADER + offset));
+        let stream = dword_ptr(l.at(ACM_STREAM));
+        // acmFormatSuggest(0, adpcm, pcm, 18, ACM_FORMATSUGGESTF_WFORMATTAG)
+        // with the tag PCM.
+        a.mov(word_ptr(l.at(ACM_PCM)), 1)?;
+        for arg in [0x1_0000, 18, at(ACM_PCM), at(ACM_ADPCM), 0] {
+            a.push(arg)?;
+        }
+        a.call(l.import(acm(0)))?;
+        check(a, fail, 1)?;
+        // 16-bit stereo PCM at 22050 Hz, with no extra bytes.
+        let pcm: [(u32, u32); 4] = [(0, 0x0002_0001), (4, 22050), (8, 88200), (12, 0x0010_0004)];
+        for (n, (offset, value)) in pcm.into_iter().enumerate() {
+            a.mov(ebx, 20 + n as i32)?;
+            a.cmp(dword_ptr(l.at(ACM_PCM + offset)), value as i32)?;
+            a.jne(fail)?;
+        }
+        a.cmp(word_ptr(l.at(ACM_PCM + 16)), 0)?;
+        a.jne(fail)?;
+        // acmStreamOpen(&stream, 0, adpcm, pcm, 0, 0, 0,
+        // ACM_STREAMOPENF_NONREALTIME).
+        for arg in [4, 0, 0, 0, at(ACM_PCM), at(ACM_ADPCM), 0, at(ACM_STREAM)] {
+            a.push(arg)?;
+        }
+        a.call(l.import(acm(1)))?;
+        check(a, fail, 2)?;
+        // The PCM of the sound, its half block counted whole as
+        // msadp32.acm counts it, and the ADPCM whose PCM fits the room:
+        // the whole blocks only.
+        for (step, size, flags, wanted) in [(3, 94, 0, 416), (4, ACM_ROOM as i32, 1, 128)] {
+            a.push(flags)?;
+            a.push(at(ACM_SIZE))?;
+            a.push(size)?;
+            a.push(stream)?;
+            a.call(l.import(acm(2)))?;
+            check(a, fail, step)?;
+            a.mov(ebx, 30 + step)?;
+            a.cmp(dword_ptr(l.at(ACM_SIZE)), wanted)?;
+            a.jne(fail)?;
+        }
+        a.mov(field(0x0C), at(ACM_SOUND))?;
+        a.mov(field(0x10), MS_ADPCM_SOUND.len() as i32)?;
+        a.mov(field(0x1C), at(ACM_OUT))?;
+        // Prepare; convert into one block's room, which the codec
+        // refuses with ACMERR_NOTPOSSIBLE; convert into the room the
+        // size asks for, and unprepare.
+        for (step, function, room, wanted) in [
+            (5, 3, ACM_ROOM, 0),
+            (6, 4, ACM_SMALL_ROOM, 512),
+            (7, 4, ACM_ROOM, 0),
+            (8, 5, ACM_ROOM, 0),
+        ] {
+            a.mov(field(0x20), room as i32)?;
+            a.push(0)?;
+            a.push(at(ACM_HEADER))?;
+            a.push(stream)?;
+            a.call(l.import(acm(function)))?;
+            a.mov(ebx, step)?;
+            a.cmp(eax, wanted)?;
+            a.jne(fail)?;
+        }
+        // All of the sound used, and the PCM written.
+        a.mov(ebx, 40)?;
+        a.cmp(field(0x14), MS_ADPCM_SOUND.len() as i32)?;
+        a.jne(fail)?;
+        a.mov(ebx, 41)?;
+        a.cmp(field(0x24), decoded.len() as i32)?;
+        a.jne(fail)?;
+        // ACMSTREAMHEADER_STATUSF_DONE, and no longer prepared.
+        a.mov(ebx, 42)?;
+        a.cmp(field(4), 0x1_0000)?;
+        a.jne(fail)?;
+        a.mov(ebx, 43)?;
+        a.mov(esi, at(ACM_OUT))?;
+        a.mov(edi, at(ACM_DECODED))?;
+        a.mov(ecx, decoded.len() as i32)?;
+        a.repe().cmpsb()?;
+        a.jne(fail)?;
+        // Closed, the stream's handle is no more.
+        for (step, wanted) in [(9, 0), (10, 5)] {
+            a.push(0)?;
+            a.push(stream)?;
+            a.call(l.import(acm(6)))?;
+            a.mov(ebx, step)?;
+            a.cmp(eax, wanted)?;
+            a.jne(fail)?;
+        }
+        exit(a, l, &mut fail)
+    });
+    let mut cpu = machine("acm_decodes", exe, core, &[]);
+    let (code, _) = run(&mut cpu, 200);
+    assert_eq!(code, 0, "the program failed at step {code}");
+}
+
+#[test]
+fn msacm32_decodes_ms_adpcm_as_ffmpeg_does() {
+    acm_decodes(CoreMode::Normal);
+}
