@@ -1754,6 +1754,7 @@ code it would have given.
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 | `zanzarah-bmp-rows` | Zanzarah: The Hidden Portal | On a 3D card without DXTn textures, such as the Voodoo3, the game faults in its heap when the title screen's Next is clicked | Patches ZANTHP.EXE as it starts, when the 3D card's Direct3D texture formats have no DXTn, to give its BMP reader a row buffer big enough for 32-bit images |
+| `zanzarah-bmp-mipmaps` | Zanzarah: The Hidden Portal | On a 3D card without DXTn textures, the Fairy Garden's cave walls, rocks and ground draw near-white, without their textures | Patches ZANTHP.EXE as it starts, under the same condition, so RenderWare makes every texture's mipmap levels from its BMP instead of looking for an image of each level |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without
@@ -1803,6 +1804,18 @@ when the texture formats the built-in Direct3D lists for the card
 it applies. It was made for the Russian release by Russobit-M, version
 1.008: ZANTHP.EXE of 2170880 bytes, MD5
 `f3f68fe9bbddde746fd53d47e9483ca5`.
+
+On the same cards a second fix is needed. A RenderWare texture in a
+scene file has a flag that says its mipmap levels come with it, and
+the game's DDS files carry those levels. Its BMP files don't, and with
+the flag set RenderWare looks for an image of each level (FGR13TPM1
+for level 1 of FGR13TP). There is none, so RenderWare drops the
+texture, and what uses it draws untextured. The Fairy Garden's scene
+sets the flag on all its world textures, and a few other scenes on one
+or two; London's sets it on none. A real Voodoo3 draws the same. The
+fix makes RenderWare make the levels from the image itself, as it does
+when the flag is clear, and applies on the same cards and the same
+release as `zanzarah-bmp-rows`.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed

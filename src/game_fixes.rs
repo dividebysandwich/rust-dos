@@ -504,6 +504,86 @@ const ZANZARAH_BMP_ROWS: CodePatch = CodePatch {
     )],
 };
 
+/// RenderWare 3.10 stores a texture's filtering and addressing in one
+/// word, and its texture stream reader in ZANTHP.EXE (at 4F8BC7h) turns
+/// bit 16 of it into the mipmap levels' source: with the bit clear, and a
+/// mipmapped filter mode (3 to 6), it calls
+/// RwTextureSetAutoMipmapping(TRUE) and RenderWare makes the levels from
+/// the image; with the bit set it calls RwTextureSetAutoMipmapping(FALSE),
+/// and RenderWare reads each level from an image of its own, named by the
+/// texture's name and the level (FGR13TPM1 for level 1 of FGR13TP).
+/// Without the level's image the texture isn't made, and whatever uses
+/// it draws untextured.
+///
+/// The game's DDS files carry their mipmap levels, and the BMP files have
+/// none: DATA_0.PAK holds no level image for any world texture. Two scenes
+/// set the bit on every world texture, the Fairy Garden (SC_2421.BSP) and
+/// SC_1412.BSP, and several set it on one or two; London's (SC_2800.BSP,
+/// SC_2801.BSP) doesn't. As with `zanzarah-bmp-rows`, the game reads BMP
+/// files only when the 3D card has no DXTn texture format, and on such a
+/// card, a Voodoo3 among them, the Fairy Garden's cave walls, rocks and
+/// ground draw without their textures, as near-white lit shading. It
+/// comes from the reader and the files, so a real Voodoo3 draws the same.
+///
+/// The patch makes the reader call RwTextureSetAutoMipmapping(TRUE) for
+/// a texture with the bit set too (mov dword ptr [esp],0 to
+/// mov dword ptr [esp],1 before the call), so RenderWare makes its levels
+/// from the BMP as it does for London's textures. It applies only on a
+/// machine whose built-in Direct3D lists no DXTn texture format; with a
+/// card that has DXTn the game reads the DDS files and their levels. For
+/// the Russian release by Russobit-M, version 1.008: ZANTHP.EXE of
+/// 2170880 bytes, MD5 f3f68fe9bbddde746fd53d47e9483ca5, whose file
+/// offsets are its addresses less 0x400000.
+const ZANZARAH_BMP_MIPMAPS: CodePatch = CodePatch {
+    checks: &[
+        // The word's bit 16 and up: sar eax,10h / mov ebp,eax /
+        // and ebp,0FFh
+        Bytes {
+            at: 0xF8BF2,
+            bytes: &[
+                0xC1, 0xF8, 0x10, 0x8B, 0xE8, 0x81, 0xE5, 0xFF, 0x00, 0x00, 0x00,
+            ],
+        },
+        // The mipmapped filter modes: cmp esi,3 / je 4F8DDCh, and the
+        // same for 4, 5 and 6.
+        Bytes {
+            at: 0xF8C15,
+            bytes: &[
+                0x83, 0xFE, 0x03, 0x0F, 0x84, 0xBE, 0x01, 0x00, 0x00, 0x83, 0xFE, 0x04, 0x0F, 0x84,
+                0xB5, 0x01, 0x00, 0x00, 0x83, 0xFE, 0x05, 0x0F, 0x84, 0xAC, 0x01, 0x00, 0x00, 0x83,
+                0xFE, 0x06, 0x0F, 0x84, 0xA3, 0x01, 0x00, 0x00,
+            ],
+        },
+        // At 4F8DDCh: mov dword ptr [esp],1 / call RwTextureSetMipmapping
+        // / test ebp,1 / je 4F8E01h
+        Bytes {
+            at: 0xF8DDC,
+            bytes: &[
+                0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00, 0xE8, 0xB8, 0x4F, 0xFF, 0xFF, 0xF7, 0xC5,
+                0x01, 0x00, 0x00, 0x00, 0x74, 0x11,
+            ],
+        },
+        // The patched mov's call of RwTextureSetAutoMipmapping and the
+        // jump back, then the other branch: mov dword ptr [esp],1 /
+        // call RwTextureSetAutoMipmapping / jmp back.
+        Bytes {
+            at: 0xF8DF7,
+            bytes: &[
+                0xE8, 0xD4, 0x4F, 0xFF, 0xFF, 0xE9, 0x50, 0xFE, 0xFF, 0xFF, 0xC7, 0x04, 0x24, 0x01,
+                0x00, 0x00, 0x00, 0xE8, 0xC3, 0x4F, 0xFF, 0xFF, 0xE9, 0x3F, 0xFE, 0xFF, 0xFF,
+            ],
+        },
+    ],
+    irq_handler: None,
+    patches: &[(
+        Bytes {
+            at: 0xF8DF0,
+            bytes: &[0xC7, 0x04, 0x24, 0x00, 0x00, 0x00, 0x00],
+        },
+        &[0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00],
+    )],
+};
+
 /// The fixes rust-dos knows.
 pub const FIXES: &[Fix] = &[
     Fix {
@@ -567,6 +647,16 @@ pub const FIXES: &[Fix] = &[
         reason: "its BMP reader overruns its row buffer on 32-bit images",
         kind: Kind::AtLoad {
             programs: &[("ZANTHP.EXE", &ZANZARAH_BMP_ROWS)],
+            beside: None,
+            machine: Machine::NoDxtnTextures,
+        },
+    },
+    Fix {
+        name: "zanzarah-bmp-mipmaps",
+        game: "Zanzarah: The Hidden Portal",
+        reason: "textures that want mipmap level images, which only its DDS files have, are dropped",
+        kind: Kind::AtLoad {
+            programs: &[("ZANTHP.EXE", &ZANZARAH_BMP_MIPMAPS)],
             beside: None,
             machine: Machine::NoDxtnTextures,
         },
@@ -688,42 +778,48 @@ pub fn skip_at_exec(
     })
 }
 
-/// The fix for the program file `bytes` that DOS loads from `path`, or
-/// the built-in Windows makes a process of, and the file as the fix
-/// patches it: `is_file` says whether a path names a file, `enabled`
-/// whether a fix applies, and `machine` whether the emulated machine is
-/// one a fix is for. None when no fix is for the program and the
-/// machine, or its file isn't as the game shipped it.
+/// The fixes for the program file `bytes` that DOS loads from `path`, or
+/// the built-in Windows makes a process of, and the file as they patch
+/// it: `is_file` says whether a path names a file, `enabled` whether a
+/// fix applies, and `machine` whether the emulated machine is one a fix
+/// is for. Each fix checks the file as the game shipped it, so one fix's
+/// patch doesn't stop another's, and they patch it in the order of
+/// [`FIXES`]. None when no fix is for the program and the machine, or
+/// its file isn't as the game shipped it.
 pub fn patch_at_load(
     path: &str,
     bytes: &[u8],
     is_file: impl Fn(&str) -> bool,
     enabled: impl Fn(&Fix) -> bool,
     machine: impl Fn(Machine) -> bool,
-) -> Option<(&'static Fix, Vec<u8>)> {
-    FIXES.iter().filter(|fix| enabled(fix)).find_map(|fix| {
+) -> Option<(Vec<&'static Fix>, Vec<u8>)> {
+    let mut fixes = Vec::new();
+    let mut patched = bytes.to_vec();
+    for fix in FIXES.iter().filter(|fix| enabled(fix)) {
         let Kind::AtLoad {
             programs,
             beside,
             machine: needs,
         } = fix.kind
         else {
-            return None;
+            continue;
         };
-        let (_, code) = programs.iter().find(|(program, code)| {
+        let Some((_, code)) = programs.iter().find(|(program, code)| {
             is_program(path, program, beside, &is_file) && matches(bytes, 0, code)
-        })?;
+        }) else {
+            continue;
+        };
         // Asked of the fix's own program only, not of every program that
         // loads.
         if !machine(needs) {
-            return None;
+            continue;
         }
-        let mut patched = bytes.to_vec();
         for (at, byte) in writes(code, 0) {
             patched[at] = byte;
         }
-        Some((fix, patched))
-    })
+        fixes.push(fix);
+    }
+    (!fixes.is_empty()).then_some((fixes, patched))
 }
 
 /// Whether `path` names the file `program` and, with `beside`, a file of
@@ -975,7 +1071,7 @@ mod tests {
             let is_file = |p: &str| other.as_ref().is_some_and(|o| p.eq_ignore_ascii_case(o));
             let (found, patched) =
                 patch_at_load(&path, &bytes, is_file, |_| true, |_| true).unwrap();
-            assert_eq!(found.name, fix.name);
+            assert_eq!(found.iter().map(|f| f.name).collect::<Vec<_>>(), [fix.name]);
             assert_eq!(patched.len(), bytes.len());
             for (old, new) in code.patches {
                 assert_eq!(&patched[old.at..old.at + new.len()], *new, "{}", fix.name);
@@ -1036,5 +1132,48 @@ mod tests {
             };
             assert!(patch_at_load(other, &bytes, is_file, |_| true, |_| true).is_none());
         }
+    }
+
+    #[test]
+    fn patches_zanzarah_with_both_its_fixes() {
+        let names = ["zanzarah-bmp-rows", "zanzarah-bmp-mipmaps"];
+        let codes = names.map(|name| {
+            let Kind::AtLoad { programs, .. } = by_name(name).unwrap().kind else {
+                panic!("{name} patches ZANTHP.EXE as it loads");
+            };
+            programs[0].1
+        });
+        // ZANTHP.EXE as the game shipped it holds the code of both.
+        let mut bytes = file(codes[0]);
+        let len = file(codes[1]).len().max(bytes.len());
+        bytes.resize(len, 0);
+        for b in pieces(codes[1]) {
+            bytes[b.at..b.at + b.bytes.len()].copy_from_slice(b.bytes);
+        }
+        let path = "C:\\ZANZARAH\\SYSTEM\\ZANTHP.EXE";
+        let no = |_: &str| false;
+        let patched_by = |off: &[&str]| {
+            let off: Vec<_> = off.iter().map(|o| o.to_string()).collect();
+            patch_at_load(path, &bytes, no, |f| enabled(f, true, &off), |_| true)
+        };
+        let has_patches = |patched: &[u8], code: &CodePatch| {
+            code.patches
+                .iter()
+                .all(|(old, new)| &patched[old.at..old.at + new.len()] == *new)
+        };
+        let (fixes, patched) = patched_by(&[]).unwrap();
+        assert_eq!(fixes.iter().map(|f| f.name).collect::<Vec<_>>(), names);
+        assert!(codes.iter().all(|code| has_patches(&patched, code)));
+        // Each one can be turned off without the other.
+        for (i, name) in names.iter().enumerate() {
+            let (fixes, patched) = patched_by(&[name]).unwrap();
+            assert_eq!(
+                fixes.iter().map(|f| f.name).collect::<Vec<_>>(),
+                [names[1 - i]]
+            );
+            assert!(has_patches(&patched, codes[1 - i]));
+            assert!(!has_patches(&patched, codes[i]));
+        }
+        assert!(patched_by(&names).is_none());
     }
 }

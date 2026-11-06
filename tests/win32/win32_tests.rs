@@ -969,23 +969,44 @@ fn a_program_starts_another_and_waits_for_its_exit_code() {
     assert_eq!(code, 0x71);
 }
 
-/// A ZANTHP.EXE with the code the game fix `zanzarah-bmp-rows` patches
-/// at its file offsets, in its data section. It ends with 2 when the
-/// byte the patch changes reads 9Bh in its memory, and 1 when not.
+/// A ZANTHP.EXE with the code the game fixes `zanzarah-bmp-rows` and
+/// `zanzarah-bmp-mipmaps` patch at their file offsets, in its data
+/// section. It ends with 1, plus 1 when the byte the first patch changes
+/// reads 9Bh in its memory, plus 2 when the byte the second changes reads
+/// 01h: 4 with both patched.
 fn zanzarah_program() -> Vec<u8> {
-    use rust_dos::game_fixes::{Kind, by_name};
-    let Kind::AtLoad { programs, .. } = by_name("zanzarah-bmp-rows").unwrap().kind else {
-        panic!("zanzarah-bmp-rows patches ZANTHP.EXE as it loads");
+    use rust_dos::game_fixes::{CodePatch, Kind, by_name};
+    let code = |name: &str| -> &'static CodePatch {
+        let Kind::AtLoad { programs, .. } = by_name(name).unwrap().kind else {
+            panic!("{name} patches ZANTHP.EXE as it loads");
+        };
+        programs[0].1
     };
-    let code = programs[0].1;
-    let (patch, _) = &code.patches[0];
+    let codes = [code("zanzarah-bmp-rows"), code("zanzarah-bmp-mipmaps")];
+    let pieces = || {
+        codes.iter().flat_map(|code| {
+            code.checks
+                .iter()
+                .chain(code.patches.iter().map(|(old, _)| old))
+        })
+    };
+    // The bytes the patches change: the scale of an lea, and the value a
+    // mov stores.
+    let rows = codes[0].patches[0].0.at + 2;
+    let mipmaps = codes[1].patches[0].0.at + 3;
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
     let build = |data: &[u8], data_at: usize| {
         program(BASE, false, imports, data, |a, l| {
-            a.movzx(eax, byte_ptr(l.at((patch.at - data_at) as u32 + 2)))?;
+            a.movzx(eax, byte_ptr(l.at((rows - data_at) as u32)))?;
             a.cmp(eax, 0x9B)?;
             a.sete(al)?;
+            a.movzx(ecx, al)?;
+            a.movzx(eax, byte_ptr(l.at((mipmaps - data_at) as u32)))?;
+            a.cmp(eax, 1)?;
+            a.sete(al)?;
             a.movzx(eax, al)?;
+            a.add(eax, eax)?;
+            a.add(eax, ecx)?;
             a.inc(eax)?;
             a.push(eax)?;
             a.call(l.import(0))?;
@@ -995,25 +1016,26 @@ fn zanzarah_program() -> Vec<u8> {
     // Where the data section starts in the file, found by a mark; the
     // layout depends only on the sizes.
     let mark = b"ZANZARAH DATA AT";
-    let mut data = vec![0u8; patch.at + 0x100];
+    let end = pieces().map(|b| b.at + b.bytes.len()).max().unwrap();
+    let mut data = vec![0u8; end + 0x100];
     data[..mark.len()].copy_from_slice(mark);
     let first = build(&data, 0);
     let data_at = first.windows(mark.len()).position(|w| w == mark).unwrap();
-    for b in code.checks.iter().chain([patch]) {
+    for b in pieces() {
         data[b.at - data_at..][..b.bytes.len()].copy_from_slice(b.bytes);
     }
     let bytes = build(&data, data_at);
     assert_eq!(bytes.len(), first.len());
-    for b in code.checks.iter().chain([patch]) {
+    for b in pieces() {
         assert_eq!(&bytes[b.at..][..b.bytes.len()], b.bytes);
     }
     bytes
 }
 
-/// The game fix `zanzarah-bmp-rows` patches ZANTHP.EXE as CreateProcessA
-/// loads it on a Voodoo3, whose texture formats have no DXTn: the
-/// program's memory has the patched byte. With the fix off it has the
-/// byte as the game shipped it.
+/// The game fixes `zanzarah-bmp-rows` and `zanzarah-bmp-mipmaps` patch
+/// ZANTHP.EXE as CreateProcessA loads it on a Voodoo3, whose texture
+/// formats have no DXTn: the program's memory has both patched bytes.
+/// With the fixes off it has the bytes as the game shipped them.
 #[test]
 fn create_process_loads_a_program_as_a_game_fix_patches_it() {
     let line = "ZANTHP.EXE";
@@ -1023,13 +1045,13 @@ fn create_process_loads_a_program_as_a_game_fix_patches_it() {
             cpu.bus.game_fixes = fixes;
         })
     };
-    assert_eq!(run("zanzarah_fix", true), 0x21);
+    assert_eq!(run("zanzarah_fix", true), 0x41);
     assert_eq!(run("zanzarah_fix_off", false), 0x11);
 }
 
-/// ZANTHP.EXE started from the DOS prompt is patched once, as the
-/// built-in Windows makes its process: DOS runs no more than a Win32
-/// program's stub, so it leaves the file alone.
+/// ZANTHP.EXE started from the DOS prompt is patched once by each fix,
+/// as the built-in Windows makes its process: DOS runs no more than a
+/// Win32 program's stub, so it leaves the file alone.
 #[test]
 fn a_program_from_the_prompt_is_patched_once() {
     let base = scratch("zanzarah_prompt", &[("ZANTHP.EXE", zanzarah_program())]);
@@ -1045,14 +1067,16 @@ fn a_program_from_the_prompt_is_patched_once() {
     cpu.load_shell();
     assert!(cpu.load_executable("ZANTHP.EXE", None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
-    assert_eq!(cpu.errorlevel, 2);
+    assert_eq!(cpu.errorlevel, 4);
     let lines = lines.lock().unwrap();
-    let patched: Vec<_> = lines
-        .iter()
-        .filter(|l| l.starts_with("[game fix] zanzarah-bmp-rows"))
-        .collect();
-    assert_eq!(patched.len(), 1, "{patched:?}");
-    assert!(patched[0].ends_with("since the 3D card's texture formats have no DXTn"));
+    for name in ["zanzarah-bmp-rows", "zanzarah-bmp-mipmaps"] {
+        let patched: Vec<_> = lines
+            .iter()
+            .filter(|l| l.starts_with(&format!("[game fix] {name}:")))
+            .collect();
+        assert_eq!(patched.len(), 1, "{name}: {patched:?}");
+        assert!(patched[0].ends_with("since the 3D card's texture formats have no DXTn"));
+    }
 }
 
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a

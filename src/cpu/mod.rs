@@ -2036,22 +2036,24 @@ impl Cpu {
             return None;
         }
         let bus = &self.bus;
-        let (fix, patched) = crate::game_fixes::patch_at_load(
+        let (fixes, patched) = crate::game_fixes::patch_at_load(
             filename,
             bytes,
             |path| bus.disk.is_file(path),
             |fix| bus.game_fix_enabled(fix),
             |machine| crate::win32::machine_is(bus, machine),
         )?;
-        let why = match fix.kind {
-            crate::game_fixes::Kind::AtLoad { machine, .. } => machine.reason(),
-            _ => None,
-        };
-        let why = why.map(|why| format!(", since {why}")).unwrap_or_default();
-        self.bus.log_string(&format!(
-            "[game fix] {}: {} ({}): {} patched as it loads{}",
-            fix.name, fix.game, fix.reason, filename, why
-        ));
+        for fix in fixes {
+            let why = match fix.kind {
+                crate::game_fixes::Kind::AtLoad { machine, .. } => machine.reason(),
+                _ => None,
+            };
+            let why = why.map(|why| format!(", since {why}")).unwrap_or_default();
+            self.bus.log_string(&format!(
+                "[game fix] {}: {} ({}): {} patched as it loads{}",
+                fix.name, fix.game, fix.reason, filename, why
+            ));
+        }
         Some(patched)
     }
 
