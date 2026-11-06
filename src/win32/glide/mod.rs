@@ -30,7 +30,7 @@
 //! closes it or ends; its end gives the screen back as grSstWinClose
 //! does.
 //!
-//! ("Video" in docs/native-windows.md.)
+//! ("Video" in docs/builtin-windows-architecture.md.)
 
 pub mod api;
 mod exports;

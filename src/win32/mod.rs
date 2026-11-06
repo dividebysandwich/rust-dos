@@ -1,6 +1,6 @@
 //! The built-in Windows: Win32 programs (PE files) run without a copy of
 //! Windows, on the built-in DOS, as they did on Windows 95's. See
-//! docs/native-windows.md for how it is built.
+//! docs/builtin-windows-architecture.md for how it is built.
 //!
 //! When DOS loads a program that is a PE file and `win32` is on, the DOS
 //! stub doesn't run: the program starts at a trap in the ROM (`START`),

@@ -25,7 +25,7 @@
 //! full screen its primary surface, back buffer and Z buffer are the
 //! card's buffers.
 //!
-//! ("Video" in docs/native-windows.md.)
+//! ("Video" in docs/builtin-windows-architecture.md.)
 
 /// The value of a `Result` whose error is an HRESULT, or the method
 /// returns the error.

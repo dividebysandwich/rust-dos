@@ -1334,7 +1334,7 @@ access rights.
 ### Win32 programs (the built-in Windows)
 
 With `win32` on, a Win32 console program runs on the built-in Windows
-(`docs/native-windows.md`). `GET /api/win32` shows it:
+(`docs/builtin-windows-architecture.md`). `GET /api/win32` shows it:
 
 - `enabled`, `active` (a Win32 program runs) and `pending` (DOS loaded
   one that hasn't started yet).

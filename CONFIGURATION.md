@@ -483,7 +483,8 @@ limit, so without a connection it goes on as it would with one:
   Basic's runtimes, load from beside it. Off, such a program runs its DOS
   stub, which says it needs Windows. How to use it and what differs from
   Windows 98 is in [docs/builtin-windows.md](docs/builtin-windows.md),
-  how it is built in [docs/native-windows.md](docs/native-windows.md).
+  and how it is built in
+  [docs/builtin-windows-architecture.md](docs/builtin-windows-architecture.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
   `lib/wine/i386-windows` folder. A DLL a program needs that is neither
@@ -494,8 +495,8 @@ limit, so without a connection it goes on as it would with one:
   how many bytes of arguments each takes. Empty (the default), there is
   no such folder. Wine's MSACM32.DLL with its codecs runs this way, with
   `win32_dlls_replace=msacm32`, for what the built-in MSACM32.DLL can't
-  convert: it only decodes MS ADPCM and IMA ADPCM. See "Wine's DLLs as
-  guest code" in [docs/native-windows.md](docs/native-windows.md).
+  convert: it only decodes MS ADPCM and IMA ADPCM. See
+  [Wine's DLLs as guest code](docs/builtin-windows-architecture.md#wines-dlls-as-guest-code).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
   `comctl32,comdlg32`. Empty (the default), the built-in ones are used. An

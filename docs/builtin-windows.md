@@ -13,7 +13,8 @@ message naming it.
 This page is about using it. The games known to run, and what each
 needs, are in
 [compatibility.md](compatibility.md#windows-games-on-the-built-in-windows).
-How it is built is in [native-windows.md](native-windows.md).
+How it is built is in
+[builtin-windows-architecture.md](builtin-windows-architecture.md).
 
 ## Turning it on
 
