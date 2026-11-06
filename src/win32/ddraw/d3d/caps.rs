@@ -245,6 +245,12 @@ pub fn card_texture_formats(board: Option<Board>) -> Vec<Format> {
     }
 }
 
+/// The texture formats a device's EnumTextureFormats lists on the
+/// machine `bus` emulates: its 3D card's.
+pub fn listed_texture_formats(bus: &crate::bus::Bus) -> Vec<Format> {
+    card_texture_formats(bus.voodoo.as_ref().map(|v| v.board))
+}
+
 /// Whether `formats` has a DXTn (S3TC) format: DXT1 to DXT5 by FourCC.
 pub fn has_dxtn(formats: &[Format]) -> bool {
     formats.iter().any(|f| {

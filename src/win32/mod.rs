@@ -629,10 +629,7 @@ pub fn machine_is(bus: &crate::bus::Bus, machine: crate::game_fixes::Machine) ->
     use ddraw::d3d::caps;
     match machine {
         Machine::Any => true,
-        Machine::NoDxtnTextures => {
-            let board = bus.voodoo.as_ref().map(|v| v.board);
-            !caps::has_dxtn(&caps::card_texture_formats(board))
-        }
+        Machine::NoDxtnTextures => !caps::has_dxtn(&caps::listed_texture_formats(bus)),
     }
 }
 
