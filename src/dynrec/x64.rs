@@ -193,8 +193,8 @@ enum Thunk {
     DevTlbUserRead,
     DevTlbUserWrite,
     /// EAX = `jit_dev_write_run` of the 8 or 16 bytes at RCX at handle RDX,
-    /// which has `DEV_BIT`: 1 where they went into the 3dfx card's memory
-    /// in one call.
+    /// which has `DEV_BIT`: 1 where they went into the VESA linear frame
+    /// buffer or the 3dfx card's memory in one call.
     StoreRun8,
     StoreRun16,
     /// A store hit the block's later bytes (`JitCtx::smc`): clear that
@@ -779,9 +779,9 @@ enum Slow {
     /// its generations bumped and a store into the rest of the block noted.
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, thunk: Thunk, lo: u32, hi: u32 },
     /// `Uop::VStore` of XMM`x`'s low `size` bytes at a handle with
-    /// `DEV_BIT`: into a 3dfx card's memory in one call where they all go
-    /// there (`Thunk::StoreRun8`), else through `Thunk::Store4` a dword at
-    /// a time, as `Store`.
+    /// `DEV_BIT`: into the VESA linear frame buffer or a 3dfx card's
+    /// memory in one call where they all go there (`Thunk::StoreRun8`),
+    /// else through `Thunk::Store4` a dword at a time, as `Store`.
     VStore {
         at: DynamicLabel,
         back: DynamicLabel,
@@ -1645,18 +1645,23 @@ impl Gen<'_> {
                 } => {
                     // The calls into Rust don't keep the XMM registers, so
                     // the bytes go on the stack first (16 keeps it
-                    // aligned).
+                    // aligned). Below 1 MB (the VGA's planes, which
+                    // `Thunk::Store4` writes inline) they go a dword at a
+                    // time without asking first.
                     let run = if size == 8 { Thunk::StoreRun8 } else { Thunk::StoreRun16 };
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
                         ; sub rsp, 16
                         ; movups [rsp], Rx(x)
+                        ; cmp Rd(r(m)), EXTENDED as i32
+                        ; jb >dwords
                         ; mov rdx, Rq(r(m))
                         ; mov rcx, rsp
                         ; call QWORD [BYTE r12 + run.slot()]
                         ; test eax, eax
                         ; jnz >done
+                        ; dwords:
                     );
                     for i in 0..size as i32 / 4 {
                         // (The thunk changes RAX.)

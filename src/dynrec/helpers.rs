@@ -1066,9 +1066,9 @@ jit_fn! {
         }
         // Pixels into a 3dfx card's memory, which the same loops write on
         // a Banshee or Voodoo3: in one call, without what a write to its
-        // registers would need.
+        // registers would need. (A panic in it is the store's, as above.)
         if size == 4
-            && guard(ctx, false, || cpu.bus.write_to_voodoo(phys as usize, &value.to_le_bytes()))
+            && guard(ctx, true, || cpu.bus.write_to_voodoo(phys as usize, &value.to_le_bytes()))
         {
             return 0;
         }
@@ -1079,10 +1079,11 @@ jit_fn! {
 jit_fn! {
     /// Write the `len` bytes at `bytes` (an MMX or SSE register's) at
     /// physical address `phys`, within one page and not plain RAM, where
-    /// they all go into a 3dfx card's memory (`Bus::write_to_voodoo`):
-    /// DirectDraw's MMX blits into the linear frame buffer. Returns 1 if
-    /// it wrote them, else 0, having written nothing, for the store to go
-    /// through `jit_dev_write` a dword at a time.
+    /// they all go into the VESA linear frame buffer or a 3dfx card's
+    /// memory (`Bus::write_to_lfb`, `Bus::write_to_voodoo`): DirectDraw's
+    /// MMX blits. Returns 1 if it wrote them, else 0, having written
+    /// nothing, for the store to go through `jit_dev_write` a dword at a
+    /// time.
     fn jit_dev_write_run(
         cpu: *mut Cpu,
         ctx: *mut JitCtx,
@@ -1095,7 +1096,11 @@ jit_fn! {
         let (cpu, ctx, bytes) =
             unsafe { (&mut *cpu, &mut *ctx, std::slice::from_raw_parts(bytes, len as usize)) };
         ctx.calls.dev += 1;
-        guard(ctx, false, || cpu.bus.write_to_voodoo(phys as usize, bytes)) as u32
+        // (A panic in it is the store's, which the dwords don't make
+        // again.)
+        let p = phys as usize;
+        guard(ctx, true, || cpu.bus.write_to_lfb(p, bytes) || cpu.bus.write_to_voodoo(p, bytes))
+            as u32
     }
 }
 

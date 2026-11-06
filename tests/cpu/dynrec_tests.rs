@@ -5435,6 +5435,10 @@ fn mmx_and_sse_stores_into_the_linear_frame_buffer_are_translated() {
     // (ARM64's code generator doesn't translate them.)
     if AVAILABLE && cfg!(target_arch = "x86_64") {
         assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+        // The loop's 1024 stores of 8 bytes take a call each, where a
+        // dword at a time would take two.
+        let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev);
+        assert!(calls < 1100, "{calls} calls");
     }
     assert_handled_only(
         &b,
