@@ -8160,6 +8160,176 @@ fn a_flat_thunk_calls_a_16_bit_dll_with_a_mapped_pointer() {
 }
 
 #[test]
+fn ft_thunk_calls_a_16_bit_dll_with_the_pointers_its_mask_names_mapped() {
+    // The thunk data as in the QT_Thunk test: ThunkConnect32 writes the
+    // code that goes on to FT_Prolog at 44h. The value the 16-bit side
+    // reads and changes is at C0h; the stack pointer is kept at D0h.
+    let mut data = vec![0u8; 0x100];
+    data[..4].copy_from_slice(b"LS01");
+    data[4..8].copy_from_slice(&THUNK_CHECKSUM.to_le_bytes());
+    data[0x0C..0x10].copy_from_slice(b"LB01");
+    data[0x1C..0x20].copy_from_slice(&0x24u32.to_le_bytes());
+    data[0x20..0x24].copy_from_slice(&0x44u32.to_le_bytes());
+    data[0x24..0x64].fill(0xCC);
+    data[0x80..0x90].copy_from_slice(b"THK_THUNKDATA16\0");
+    data[0xA0..0xAB].copy_from_slice(b"TEST16.DLL\0");
+    data[0xB0..0xB6].copy_from_slice(b"T.EXE\0");
+    data[0xC0..0xC4].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["ThunkConnect32", "FT_Thunk", "FT_Exit4", "ExitProcess"],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut read = a.create_label();
+        let mut fail = a.create_label();
+        let ft = l.at(0x44);
+        a.push(1)?;
+        a.push(0)?;
+        for at in [0xB0, 0xA0, 0x80, 0] {
+            a.push(l.at(at) as i32)?;
+        }
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        // READ(&value) through the thunk, with registers FT_ExitN is to
+        // give back as they were.
+        a.mov(ebx, 0x3131)?;
+        a.mov(esi, 0x5151)?;
+        a.mov(edi, 0x7171)?;
+        a.mov(dword_ptr(l.at(0xD0)), esp)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(read)?;
+        a.mov(ecx, ebx)?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 0x1122_3344)?;
+        a.jne(fail)?;
+        // The 16-bit side added 1 to the thunk's copy through the mapped
+        // pointer, and the thunk copied it back.
+        a.mov(ebx, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 0x1122_3345)?;
+        a.jne(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(ecx, 0x3131)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(esi, 0x5151)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.cmp(edi, 0x7171)?;
+        a.jne(fail)?;
+        // FT_Exit4 took the argument off.
+        a.mov(ebx, 7)?;
+        a.cmp(esp, dword_ptr(l.at(0xD0)))?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()?;
+        // The thunk compiler's FT thunk for READ(LPDWORD): target 0 in CL,
+        // one DWORD of arguments and the error value -1 in CH. Below the
+        // frame FT_Prolog makes, a copy of the DWORD, then the pointer to
+        // it, which bit 0 of the mask at EBP - 14h names.
+        a.set_label(&mut read)?;
+        a.mov(cx, 0x0700)?;
+        a.mov(eax, ft as u32)?;
+        a.call(eax)?;
+        a.sub(esp, 4)?;
+        a.mov(eax, dword_ptr(ebp + 8))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.push(esp)?;
+        a.or(dword_ptr(ebp - 0x14), 1)?;
+        a.call(l.import(1))?;
+        a.shl(eax, 16)?;
+        a.shrd(eax, edx, 16)?;
+        a.mov(ebx, eax)?;
+        // The function took the pointer off: the copy is at ESP.
+        a.mov(eax, dword_ptr(esp))?;
+        a.mov(ecx, dword_ptr(ebp + 8))?;
+        a.mov(dword_ptr(ecx), eax)?;
+        a.jmp(l.import(2))
+    });
+    let dir = scratch("ft_thunk", &[("T.EXE", exe), ("TEST16.DLL", thunk_dll16())]);
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn an_exception_in_an_ft_thunk_returns_its_error_value() {
+    // A thunk faults after FT_Prolog: its frame's handler unwinds and
+    // returns the error value CH names to the thunk's caller, the
+    // arguments taken off and the caller's registers back.
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["FT_Prolog", "ExitProcess"])];
+    let data = vec![0u8; 0x20];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut thunk = a.create_label();
+        let mut fail = a.create_label();
+        a.mov(ebx, 0x3131)?;
+        a.mov(esi, 0x5151)?;
+        a.mov(edi, 0x7171)?;
+        a.mov(dword_ptr(l.at(0x10)), esp)?;
+        // Two DWORDs of arguments; the caller's EAX as the error value.
+        a.push(1)?;
+        a.push(2)?;
+        a.mov(eax, 0x2468)?;
+        a.call(thunk)?;
+        a.mov(ecx, ebx)?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 0x2468)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.cmp(esp, dword_ptr(l.at(0x10)))?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(ecx, 0x3131)?;
+        a.jne(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(esi, 0x5151)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(edi, 0x7171)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()?;
+        a.set_label(&mut thunk)?;
+        a.mov(cx, 0x0A00)?;
+        a.xor(edx, edx)?;
+        a.call(l.import(0))?;
+        a.xor(ebx, ebx)?;
+        a.mov(esi, ebx)?;
+        a.mov(edi, ebx)?;
+        a.mov(eax, dword_ptr(ebx))?;
+        a.int3()
+    });
+    let dir = scratch("ft_thunk_fault", &[("T.EXE", exe)]);
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
 fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
     // KERNEL32's functions by Windows 98's ordinals: #35 LoadLibrary16,
     // #36 FreeLibrary16, #37 GetProcAddress16 and #1 VxDCall0, which have

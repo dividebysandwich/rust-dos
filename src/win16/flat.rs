@@ -12,7 +12,10 @@
 //! the others), and calls the code ThunkConnect32 wrote into its block,
 //! which takes the 16-bit function's address from the 16-bit DLL's
 //! table of targets and goes on to QT_Thunk. That copies the arguments
-//! to a 16-bit stack and calls the function.
+//! to a 16-bit stack and calls the function. The thunks of functions
+//! whose structures the thunk compiler converts go through FT_Prolog,
+//! FT_Thunk and FT_ExitN instead, and FT_Thunk maps the pointers to the
+//! converted copies before it calls.
 //!
 //! The 16-bit code runs in the Win16 process, where the 16-bit modules
 //! and their selectors are, on a task of the Win32 process's own (its
@@ -48,6 +51,9 @@ pub const LOAD: u8 = 2;
 /// function with arguments from a buffer, which gives back DX:AX.
 pub const CALLBACK: u8 = 3;
 pub const CALLBACK_EX: u8 = 4;
+/// FT_Thunk's: a call as QT_Thunk's, whose pointers the mask in
+/// `Request::data32` names were mapped, and are let go when it returns.
+pub const FT_CALL: u8 = 5;
 
 /// The bytes of a thunk block's header: magic and checksum.
 const HEADER: usize = 8;
@@ -94,7 +100,7 @@ pub struct Request {
     /// its thunk data and the directory to look for it in, and the
     /// module loaded. LOAD: the DLL's name, an empty one and the
     /// directory, and the instance loaded. CALLBACK_EX: where DX:AX
-    /// goes, or 0.
+    /// goes, or 0. FT_CALL: the mask of the arguments mapped.
     pub data32: u32,
     pub names: Vec<String>,
     pub module: u16,
@@ -436,15 +442,250 @@ fn post_call(cpu: &mut Cpu, request: Request, what: &str) -> Option<u32> {
     None
 }
 
-/// FT_Prolog, the thunk compiler's other way of calling 16-bit code,
-/// which the built-in Windows doesn't have.
+// The thunk compiler's other 32-bit to 16-bit thunks, for functions
+// whose structures it converts: FT_Prolog makes their frame, FT_Thunk
+// calls the 16-bit function, and FT_ExitN takes the frame down and
+// returns. Each place below is under the frame's EBP, as Windows 98's
+// KERNEL32 has them (FT_Prolog at BFF7268Dh).
+
+/// The caller's EBX, ESI, EDI and ECX, which has the thunk's target
+/// number in CL and, in CH, the error value's kind in the low two bits
+/// and the DWORDs of arguments in the others.
+const FT_EBX: u32 = 0x04;
+const FT_ESI: u32 = 0x08;
+const FT_EDI: u32 = 0x0C;
+const FT_ECX: u32 = 0x10;
+/// The bit mask of the argument words that hold pointers FT_Thunk is to
+/// map, which the thunk sets: bit i is the DWORD at word i.
+const FT_MASK: u32 = 0x14;
+/// The exception handler frame FT_Prolog puts on the chain.
+const FT_SEH: u32 = 0x2C;
+/// The caller's EAX, and the 16-bit target (EDX).
+const FT_EAX: u32 = 0x30;
+const FT_TARGET: u32 = 0x34;
+/// The frame's bytes, from EBP down.
+const FT_FRAME: u32 = 0x40;
+
+/// FT_Prolog, a register function the thunk's code goes on to with the
+/// target's 16:16 address in EDX and its flags in CX: as Windows 98's,
+/// the caller's EBP is pushed and EBP is the frame's, the caller's
+/// registers are kept in the frame, the mask is 0, and an exception
+/// handler frame goes on the chain (`ft_handler`). It returns with ESP
+/// 40h below EBP and ESI the return address, as Windows 98's does.
 pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-    crate::win32::fatal(
-        cpu,
-        "a flat thunk through FT_Prolog, which the built-in Windows doesn't have yet",
-        None,
-    );
+    let ebp = cpu.esp();
+    let ret = cpu.bus.guest_read_32(ebp);
+    let low = ebp.wrapping_sub(FT_FRAME);
+    if cpu.bus.guest_faulted() || !cpu.bus.guest_probe(low, FT_FRAME as usize + 4, true) {
+        return None;
+    }
+    let next = crate::win32::seh::handlers(cpu);
+    let handler = crate::win32::kernel32::address_of("FlatThunkHandler");
+    for (at, value) in [
+        (0, cpu.ebp()),
+        (FT_EBX, cpu.ebx()),
+        (FT_ESI, cpu.esi()),
+        (FT_EDI, cpu.edi()),
+        (FT_ECX, cpu.ecx()),
+        (FT_MASK, 0),
+        (FT_SEH, next),
+        (FT_SEH - 4, handler),
+        (FT_EAX, cpu.eax()),
+        (FT_TARGET, cpu.edx()),
+    ] {
+        cpu.bus.guest_write_32(ebp.wrapping_sub(at), value);
+    }
+    crate::win32::seh::set_handlers(cpu, ebp.wrapping_sub(FT_SEH));
+    cpu.set_ebp(ebp);
+    cpu.set_esi(ret);
+    cpu.set_esp(low);
+    cpu.set_dflag(false);
+    cpu.set_eip(ret);
     None
+}
+
+/// FT_Thunk, a register function the thunk calls once it has pushed the
+/// 16-bit function's arguments below FT_Prolog's frame and set the mask:
+/// the arguments from above its return address to the frame are copied
+/// to a 16-bit stack, each pointer the mask names mapped as MapLS maps
+/// it, and the target is called as QT_Thunk calls it. The caller gets
+/// EAX, ECX and EDX back, and its stack without the arguments the
+/// function took off; the pointers are let go when it returns.
+///
+/// Windows 98 runs the function on the 32-bit stack itself, through a
+/// selector for it, and makes the pointers 16:16 ones on that selector
+/// (at BFF729CBh). The thunk points them at structures it copied to its
+/// stack, and a MapLS selector reaches the same memory, so the function
+/// reads and writes them as there.
+pub fn ft_thunk(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+    let esp = cpu.esp();
+    let ebp = cpu.ebp();
+    let ret = cpu.bus.guest_read_32(esp);
+    let target = cpu.bus.guest_read_32(ebp.wrapping_sub(FT_TARGET));
+    let mask = cpu.bus.guest_read_32(ebp.wrapping_sub(FT_MASK));
+    let from = esp.wrapping_add(4);
+    let to = ebp.wrapping_sub(FT_FRAME);
+    let len = to.saturating_sub(from).min(0x1000) & !1;
+    let mut args = guest_bytes(cpu, from, len as usize);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    let mask = mask_in(mask, args.len());
+    for at in mask_words(mask) {
+        let ptr = u32::from_le_bytes(args[at..at + 4].try_into().unwrap());
+        let segptr = map_ls(cpu, ptr);
+        args[at..at + 4].copy_from_slice(&segptr.to_le_bytes());
+    }
+    let mut regs = Context::of(cpu);
+    regs.eip = ret;
+    regs.gpr[ESP] = from;
+    let request = Request {
+        kind: FT_CALL,
+        target,
+        regs,
+        args,
+        data32: mask,
+        ..Request::default()
+    };
+    post_call(cpu, request, "a flat thunk's call with no Win16 side")
+}
+
+/// The bits of `mask` whose DWORDs are inside `len` bytes of arguments.
+fn mask_in(mask: u32, len: usize) -> u32 {
+    (0..32)
+        .filter(|&i| mask & 1 << i != 0 && 2 * i + 4 <= len)
+        .fold(0, |m, i| m | 1 << i)
+}
+
+/// The places in the arguments of the DWORDs `mask` names.
+fn mask_words(mask: u32) -> impl Iterator<Item = usize> {
+    (0..32usize)
+        .filter(move |&i| mask & 1 << i != 0)
+        .map(|i| 2 * i)
+}
+
+/// FT_ExitN, where the thunk goes on to when it is done: as Windows 98's,
+/// the frame's exception handler comes off the chain, EAX is EBX (where
+/// the thunk keeps the function's result), the caller's EBX, ESI and EDI
+/// are back, and the thunk returns to its caller, taking `n` bytes of
+/// arguments off.
+fn ft_exit(cpu: &mut Cpu, n: u32) -> Option<u32> {
+    let ebp = cpu.ebp();
+    let below = |at: u32| ebp.wrapping_sub(at);
+    if !cpu
+        .bus
+        .guest_probe(below(FT_SEH), FT_SEH as usize + 8, false)
+    {
+        return None;
+    }
+    let next = cpu.bus.guest_read_32(below(FT_SEH));
+    let result = cpu.ebx();
+    let edi = cpu.bus.guest_read_32(below(FT_EDI));
+    let esi = cpu.bus.guest_read_32(below(FT_ESI));
+    let ebx = cpu.bus.guest_read_32(below(FT_EBX));
+    let caller_ebp = cpu.bus.guest_read_32(ebp);
+    let ret = cpu.bus.guest_read_32(ebp.wrapping_add(4));
+    crate::win32::seh::set_handlers(cpu, next);
+    cpu.set_edi(edi);
+    cpu.set_esi(esi);
+    cpu.set_ebx(ebx);
+    cpu.set_ebp(caller_ebp);
+    cpu.set_esp(ebp.wrapping_add(8).wrapping_add(n));
+    cpu.set_eip(ret);
+    Some(result)
+}
+
+/// The FT_ExitN functions, for n from 0 to 56, as KERNEL32 exports them.
+macro_rules! exit_functions {
+    ($($n:literal: $name:ident;)*) => {
+        $(
+            pub fn $name(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
+                ft_exit(cpu, $n)
+            }
+        )*
+    };
+}
+
+exit_functions! {
+    0: ft_exit0;
+    4: ft_exit4;
+    8: ft_exit8;
+    12: ft_exit12;
+    16: ft_exit16;
+    20: ft_exit20;
+    24: ft_exit24;
+    28: ft_exit28;
+    32: ft_exit32;
+    36: ft_exit36;
+    40: ft_exit40;
+    44: ft_exit44;
+    48: ft_exit48;
+    52: ft_exit52;
+    56: ft_exit56;
+}
+
+/// FlatThunkHandler(record, frame, context, dispatcher), the handler of
+/// FT_Prolog's frame, Windows 98's at BFF726C4h: an exception in the
+/// thunk's code unwinds the frames above this one and makes the thunk
+/// return to its caller with the error value its flags say (0, 1, the
+/// caller's EAX or -1), taking its arguments off. An unwind it lets go.
+pub fn ft_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[record, frame, _, _] = args else {
+        unreachable!()
+    };
+    let flags = cpu.bus.guest_read_32(record.wrapping_add(4));
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    // EXCEPTION_UNWINDING and EXCEPTION_EXIT_UNWIND.
+    if flags & 6 != 0 {
+        return Some(1);
+    }
+    let unwind = crate::win32::kernel32::address_of("RtlUnwind");
+    let resume = crate::win32::call::here(cpu);
+    let then = crate::win32::call::FT_UNWOUND;
+    if !crate::win32::call::call(cpu, unwind, &[frame, 0, 0, 0], then, resume, vec![frame]) {
+        return Some(1);
+    }
+    None
+}
+
+/// RtlUnwind returned to `ft_handler`, the frames above FT_Prolog's at
+/// `call.data[0]` unwound: the thunk returns its error value to its
+/// caller, as FT_ExitN would, with ECX the DWORDs taken off.
+pub fn ft_unwound(cpu: &mut Cpu, _: u32, call: crate::win32::call::Call) {
+    let Some(&frame) = call.data.first() else {
+        return;
+    };
+    let ebp = frame.wrapping_add(FT_SEH);
+    let below = |at: u32| ebp.wrapping_sub(at);
+    let flags = (cpu.bus.guest_read_32(below(FT_ECX)) >> 8) as u8;
+    let eax = cpu.bus.guest_read_32(below(FT_EAX));
+    let next = cpu.bus.guest_read_32(below(FT_SEH));
+    let edi = cpu.bus.guest_read_32(below(FT_EDI));
+    let esi = cpu.bus.guest_read_32(below(FT_ESI));
+    let ebx = cpu.bus.guest_read_32(below(FT_EBX));
+    let caller_ebp = cpu.bus.guest_read_32(ebp);
+    let ret = cpu.bus.guest_read_32(ebp.wrapping_add(4));
+    if cpu.bus.guest_faulted() {
+        return;
+    }
+    let dwords = (flags >> 2) as u32;
+    let result = match flags & 3 {
+        0 => 0,
+        1 => 1,
+        2 => eax,
+        _ => u32::MAX,
+    };
+    crate::win32::seh::set_handlers(cpu, next);
+    cpu.set_eax(result);
+    cpu.set_ecx(dwords);
+    cpu.set_edi(edi);
+    cpu.set_esi(esi);
+    cpu.set_ebx(ebx);
+    cpu.set_ebp(caller_ebp);
+    cpu.set_esp(ebp.wrapping_add(8).wrapping_add(4 * dwords));
+    cpu.set_eip(ret);
 }
 
 /// WOWCallback16(function, argument), WOW32's: call the 16-bit function
@@ -770,7 +1011,7 @@ pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         let request = client.queue.remove(0);
         client.current = Some(request.clone());
         match request.kind {
-            CALL | CALLBACK | CALLBACK_EX => start_call(cpu, c, request),
+            CALL | CALLBACK | CALLBACK_EX | FT_CALL => start_call(cpu, c, request),
             LOAD => start_load(cpu, c, request),
             _ => start_connect(cpu, c, request),
         }
@@ -832,8 +1073,9 @@ fn start_call(cpu: &mut Cpu, c: usize, request: Request) {
 }
 
 /// The 16-bit function a client called returned (`start_call`). After
-/// QT_Thunk the Win32 thread goes on with its EAX, ECX and EDX, and its
-/// stack without the arguments the function took off. WOWCallback16
+/// QT_Thunk and FT_Thunk the Win32 thread goes on with its EAX, ECX and
+/// EDX, and its stack without the arguments the function took off, and
+/// the pointers FT_Thunk mapped are let go. WOWCallback16
 /// returns DX:AX; WOWCallback16Ex TRUE, with DX:AX written where the
 /// program asked. Their arguments were a copy, so the Win32 thread goes
 /// on from their stub, which takes its own arguments off.
@@ -846,7 +1088,10 @@ pub fn then_call(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opti
         return Some(ctx.gpr[EAX]);
     };
     let (eax, ecx, edx) = (cpu.eax(), cpu.ecx(), cpu.edx());
-    if request.kind == CALL {
+    if request.kind == FT_CALL {
+        unmap_args(cpu, &request);
+    }
+    if matches!(request.kind, CALL | FT_CALL) {
         let popped = (cpu.sp() as u32).wrapping_sub(request.sp) & 0xFFFF;
         finish(cpu, request.tid, eax, |t| {
             t.gpr[ECX] = ecx;
@@ -868,6 +1113,15 @@ pub fn then_call(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opti
         finish(cpu, request.tid, result, |_| ());
     }
     Some(ctx.gpr[EAX])
+}
+
+/// The pointers FT_Thunk mapped for the call `request` are let go.
+fn unmap_args(cpu: &mut Cpu, request: &Request) {
+    for at in mask_words(request.data32) {
+        if let Some(word) = request.args.get(at..at + 4) {
+            unmap_ls(cpu, u32::from_le_bytes(word.try_into().unwrap()));
+        }
+    }
 }
 
 /// Load the 16-bit DLL of the ThunkConnect32 `request` on the client
@@ -1168,8 +1422,11 @@ pub fn c16_thk_sl01(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// calls failed: EAX 0, and a call's caller back at its return address.
 fn fail_requests(cpu: &mut Cpu, client: Client) {
     for request in client.current.into_iter().chain(client.queue) {
+        if request.kind == FT_CALL {
+            unmap_args(cpu, &request);
+        }
         finish(cpu, request.tid, 0, |t| {
-            if request.kind == CALL {
+            if matches!(request.kind, CALL | FT_CALL) {
                 t.eip = request.regs.eip;
                 t.gpr[ESP] = request.regs.gpr[ESP];
             }
