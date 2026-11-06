@@ -1606,10 +1606,17 @@ impl Rasterizer for Raster<'_> {
 /// otherwise draw all that first to have the memory to write into. A
 /// depth buffer gets `value` as zaColor's depth, a render target as
 /// color1, the 5-6-5 value's channels widened and not dithered, which
-/// the fill takes back to `value`. False, with nothing done, while the
-/// card isn't set up for the HAL's drawing (Glide closed or another
-/// process's, or no render target or depth buffer of the HAL's given to
-/// it yet) or the surface isn't in its memory.
+/// the fill takes back to `value`. A depth buffer becomes the card's
+/// depth buffer and stays it. `clear` fills only the device's, which
+/// the device's drawing with the depth test on gives the card as well,
+/// but a game that clears it every frame and draws with the test off,
+/// as Oni's menus do, never gives the card it, or leaves the card one it
+/// had before (another device's, or a released one's). Pointing the
+/// card at the buffer for each fill and back would move it in the OpenGL
+/// renderer's layout, which reads the buffer back each time. False,
+/// with nothing done, while the card isn't set up for the HAL's drawing
+/// (Glide closed or another process's, or for a render target, none of
+/// the HAL's given to it yet) or the surface isn't in its memory.
 pub(in crate::win32::ddraw) fn card_fill(
     cpu: &mut Cpu,
     s: &Surface,
@@ -1617,9 +1624,7 @@ pub(in crate::win32::ddraw) fn card_fill(
     rects: &[[i32; 4]],
     value: u16,
 ) -> bool {
-    use crate::voodoo::banshee::render3d::{
-        AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
-    };
+    use crate::voodoo::banshee::render3d::{COL_BUFFER_ADDR, COL_BUFFER_STRIDE};
     use crate::voodoo::regs::{
         CLIP_LEFT_RIGHT, CLIP_LOW_Y_HIGH_Y, COLOR1, FASTFILL_CMD, FBZ_MODE, ZA_COLOR,
     };
@@ -1637,26 +1642,25 @@ pub(in crate::win32::ddraw) fn card_fill(
         return false;
     }
     let depth = s.format.flags & surface::DDPF_ZBUFFER != 0;
-    // The registers the fill takes the place of, put back after it.
-    let (at_reg, stride_reg, value_reg, saved) = if depth {
-        (AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, ZA_COLOR, (g.target[2], g.target[3], g.za_color))
-    } else {
-        (COL_BUFFER_ADDR, COL_BUFFER_STRIDE, COLOR1, (g.target[0], g.target[1], g.color1))
-    };
-    if saved.1 == 0 {
+    if !depth && g.target[1] == 0 {
         return false;
     }
     let Some((at, pitch)) = surface::card_memory(cpu, id) else {
         return false;
     };
-    let (fbz, fill) = if depth {
-        (ENRECTCLIP | ZAWRMASK, g.za_color & !0xFFFF | value as u32)
+    // The register the fill's value takes the place of, and its value,
+    // put back after it, as are the render target's buffer registers.
+    let (fbz, value_reg, fill, saved) = if depth {
+        api::set_depth_buffer(cpu, at, pitch);
+        let fill = g.za_color & !0xFFFF | value as u32;
+        (ENRECTCLIP | ZAWRMASK, ZA_COLOR, fill, g.za_color)
     } else {
+        hw::write(cpu, hw::ALL, COL_BUFFER_ADDR, at);
+        hw::write(cpu, hw::ALL, COL_BUFFER_STRIDE, pitch);
         let rgb = crate::win32::screen::from_565(value);
-        (ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER, rgb)
+        let fbz = ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER;
+        (fbz, COLOR1, rgb, g.color1)
     };
-    hw::write(cpu, hw::ALL, at_reg, at);
-    hw::write(cpu, hw::ALL, stride_reg, pitch);
     hw::write(cpu, hw::ALL, FBZ_MODE, fbz);
     hw::write(cpu, hw::ALL, value_reg, fill);
     let whole = [[0, 0, s.width as i32, s.height as i32]];
@@ -1671,10 +1675,12 @@ pub(in crate::win32::ddraw) fn card_fill(
         hw::write(cpu, hw::ALL, CLIP_LOW_Y_HIGH_Y, top << 16 | bottom);
         hw::write(cpu, hw::ALL, FASTFILL_CMD, 1);
     }
-    hw::write(cpu, hw::ALL, at_reg, saved.0);
-    hw::write(cpu, hw::ALL, stride_reg, saved.1);
+    if !depth {
+        hw::write(cpu, hw::ALL, COL_BUFFER_ADDR, g.target[0]);
+        hw::write(cpu, hw::ALL, COL_BUFFER_STRIDE, g.target[1]);
+    }
     hw::write(cpu, hw::ALL, FBZ_MODE, g.fbz_mode);
-    hw::write(cpu, hw::ALL, value_reg, saved.2);
+    hw::write(cpu, hw::ALL, value_reg, saved);
     hw::write(cpu, hw::ALL, CLIP_LEFT_RIGHT, g.clip_left_right);
     hw::write(cpu, hw::ALL, CLIP_LOW_Y_HIGH_Y, g.clip_bottom_top);
     true
