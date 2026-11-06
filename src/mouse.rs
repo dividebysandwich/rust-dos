@@ -482,10 +482,18 @@ impl MouseState {
 /// the mode's pixels in a graphics mode, and 8 a character in a text mode
 /// whatever its font (640x200 for 80x25, 640x400 for 80x50), which
 /// programs divide by 8 for the column and row.
+///
+/// The mode is the display adapter's (`Bus::adapter_display_size`),
+/// which the driver learns from the BIOS, also while a Voodoo Graphics
+/// shows its own picture of another size. Lands of Lore 2 in its 3dfx
+/// mode keeps VESA mode 100h (640x400) set, draws 640x480 on the Voodoo
+/// and puts its pointer at the driver's y times 480/400. The host's
+/// pointer has to span the driver's 400 rows over the Voodoo's 480 for
+/// that pointer to stay under it.
 pub fn screen_size(bus: &crate::bus::Bus) -> (usize, usize) {
     match crate::video::text::geometry(bus) {
         Some(text) => (text.cols * 8, text.rows * 8),
-        None => bus.display_size(),
+        None => bus.adapter_display_size(),
     }
 }
 

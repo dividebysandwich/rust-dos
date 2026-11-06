@@ -2991,6 +2991,24 @@ impl Bus {
             let (w, h) = v.size();
             return (w as usize, h as usize);
         }
+        self.adapter_display_size()
+    }
+
+    /// The size of the screen of the mode the display adapter is in:
+    /// `display_size`, but a Voodoo Graphics or Voodoo2 showing its
+    /// picture instead of the VGA's doesn't count. That card is a second
+    /// one on the bus, which no BIOS call or mouse driver knows of. A
+    /// Banshee or Voodoo3 is the adapter, and its desktop counts while
+    /// its own modes are on. A driver turns them on through the card's
+    /// registers, as 3dfx's Windows 98 driver does, and a BIOS mode set
+    /// turns them off (`banshee_mode_set`).
+    pub fn adapter_display_size(&self) -> (usize, usize) {
+        if let Some(b) = self.banshee()
+            && b.extended()
+        {
+            let (w, h) = b.desktop_size();
+            return (w as usize, h as usize);
+        }
         match (self.video_mode, self.vbe.mode) {
             (VideoMode::Vesa, Some(mode)) => (mode.width as usize, mode.height as usize),
             // An ET4000's modes are the VGA's at the size its registers
