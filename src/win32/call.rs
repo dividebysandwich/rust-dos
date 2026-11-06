@@ -92,8 +92,7 @@ pub fn call(
     // Calls whose frames were at or above the stack pointer won't return:
     // the program left them, as a handler of its own C runtime does when
     // it jumps to its __except block.
-    let stack = thread.stack;
-    thread.calls.retain(|c| !left(c, esp, stack));
+    leave(thread, esp);
     thread.calls.push(Call {
         resume,
         esp,
@@ -151,17 +150,30 @@ pub fn returned(cpu: &mut Cpu) {
 /// exception unwound past them).
 pub fn unwound_to(cpu: &mut Cpu, esp: u32) {
     if let Some(thread) = process(cpu).current_thread_mut() {
-        let stack = thread.stack;
-        thread.calls.retain(|c| !left(c, esp, stack));
+        leave(thread, esp);
+    }
+}
+
+/// The running thread runs at the stack pointer `esp`: the calls it left
+/// come off its list, and with each the calls made after it, which ran
+/// inside it. A call made on another stack can't tell by its frame that
+/// the program left it, when the program went back to the thread's stack
+/// past an earlier call (a handler that jumps to its __except block from
+/// a stack of its own).
+fn leave(thread: &mut super::thread::Thread, esp: u32) {
+    let stack = thread.stack;
+    if let Some(i) = thread.calls.iter().position(|c| left(c, esp, stack)) {
+        thread.calls.truncate(i);
     }
 }
 
 /// Whether the program left `call` when it runs at the stack pointer
-/// `esp`: its frame is at or below `esp` on the same stack, the thread's
-/// own (`stack`) or another. A program that runs on a stack of its own
-/// above the thread's, as Petite's unpacker does on a block from
-/// GlobalAlloc in a DLL's entry point, hasn't left the calls on the
-/// thread's stack (the call of that entry point, which it returns to).
+/// `esp`: its frame is at or below `esp`, and both are on the thread's
+/// stack (`stack`) or both outside it. Stacks outside the thread's count
+/// as one. A program that runs on a stack of its own above the thread's,
+/// as Petite's unpacker does on a block from GlobalAlloc in a DLL's entry
+/// point, hasn't left the calls on the thread's stack (the call of that
+/// entry point, which it returns to).
 fn left(call: &Call, esp: u32, stack: (u32, u32)) -> bool {
     let on_thread_stack = |at: u32| (stack.0..=stack.1).contains(&at);
     call.esp <= esp && on_thread_stack(call.esp) == on_thread_stack(esp)

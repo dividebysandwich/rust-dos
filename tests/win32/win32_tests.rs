@@ -1628,6 +1628,155 @@ fn rtl_unwind_calls_a_handler_below_the_systems_frame() {
     assert_eq!(code, 1, "{}", out);
 }
 
+/// A handler that answers what the dispatcher doesn't take (5) gets
+/// STATUS_INVALID_DISPOSITION (C0000026h) raised, as Windows 98's
+/// dispatcher does: it can't be continued, and its record leads to the
+/// exception the handler answered for.
+#[test]
+fn a_bad_answer_from_a_handler_raises_invalid_disposition() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    // Data: the inner handler's calls.
+    let (code, out) = run(
+        "seh_disposition",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut outer = a.create_label();
+            let mut inner = a.create_label();
+            let mut start = a.create_label();
+            let mut done = a.create_label();
+            let mut continuable = a.create_label();
+            let mut search = a.create_label();
+            a.jmp(start)?;
+            // The outer handler: 1 for C0000026h, 2 if it can't be
+            // continued, 4 if its record leads to the divide error's.
+            a.set_label(&mut outer)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.xor(edx, edx)?;
+            a.cmp(dword_ptr(eax), 0xC000_0026u32 as i32)?;
+            a.jne(done)?;
+            a.or(edx, 1)?;
+            a.test(dword_ptr(eax + 4), 1)?;
+            a.je(continuable)?;
+            a.or(edx, 2)?;
+            a.set_label(&mut continuable)?;
+            a.mov(ecx, dword_ptr(eax + 8))?;
+            a.test(ecx, ecx)?;
+            a.je(done)?;
+            a.cmp(dword_ptr(ecx), 0xC000_0094u32 as i32)?;
+            a.jne(done)?;
+            a.or(edx, 4)?;
+            a.set_label(&mut done)?;
+            a.push(edx)?;
+            a.call(l.import(0))?;
+            // The inner handler: 5 for the divide error, then on.
+            a.set_label(&mut inner)?;
+            a.inc(dword_ptr(l.at(0)))?;
+            a.mov(eax, 1)?;
+            a.cmp(dword_ptr(l.at(0)), 1)?;
+            a.jne(search)?;
+            a.mov(eax, 5)?;
+            a.set_label(&mut search)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_label(a, outer)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            push_label(a, inner)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.push(99)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 7, "{}", out);
+}
+
+/// An unwind handler that unwinds again collides with the unwind that
+/// called it, as in Windows 98's RtlUnwind: the second unwind reaches the
+/// system's frame around that handler first and goes on after the frame
+/// the first was unwinding, without calling that frame's handler again.
+#[test]
+fn an_unwind_inside_an_unwind_handler_collides() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["RtlUnwind", "ExitProcess"])];
+    // Data: the inner and middle handlers' calls, and the outer frame.
+    let (code, out) = run(
+        "seh_collided",
+        program(BASE, false, imports, &[0; 12], |a, l| {
+            let mut inner = a.create_label();
+            let mut middle = a.create_label();
+            let mut start = a.create_label();
+            let mut again = a.create_label();
+            let mut twice = a.create_label();
+            let mut other = a.create_label();
+            let mut moved = a.create_label();
+            a.jmp(start)?;
+            // The middle handler: counted, then on.
+            a.set_label(&mut middle)?;
+            a.inc(dword_ptr(l.at(4)))?;
+            a.mov(eax, 1)?;
+            a.ret()?;
+            // The inner handler: called first, it unwinds to the outer
+            // frame again, then ends the program with 1 if it was called
+            // once, 2 if the middle handler was, 4 if the outer frame is
+            // first on the chain.
+            a.set_label(&mut inner)?;
+            a.inc(dword_ptr(l.at(0)))?;
+            a.cmp(dword_ptr(l.at(0)), 1)?;
+            a.jne(again)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(8)))?;
+            a.call(l.import(0))?;
+            a.xor(edx, edx)?;
+            a.cmp(dword_ptr(l.at(0)), 1)?;
+            a.jne(twice)?;
+            a.or(edx, 1)?;
+            a.set_label(&mut twice)?;
+            a.cmp(dword_ptr(l.at(4)), 1)?;
+            a.jne(other)?;
+            a.or(edx, 2)?;
+            a.set_label(&mut other)?;
+            a.mov(eax, dword_ptr(l.at(8)))?;
+            a.cmp(dword_ptr(0).fs(), eax)?;
+            a.jne(moved)?;
+            a.or(edx, 4)?;
+            a.set_label(&mut moved)?;
+            a.push(edx)?;
+            a.call(l.import(1))?;
+            a.set_label(&mut again)?;
+            a.mov(eax, 1)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            // The outer frame, whose handler is never called, the middle
+            // and the inner one; unwind to the outer one.
+            push_label(a, middle)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.mov(dword_ptr(l.at(8)), esp)?;
+            push_label(a, middle)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            push_label(a, inner)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(dword_ptr(l.at(8)))?;
+            a.call(l.import(0))?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 7, "{}", out);
+}
+
 /// As on Windows 98, where SafeDisc's loader does this: the program finds
 /// the IDT with SIDT, writes its own code over the handler the divide
 /// error's gate leads to, divides by zero to run it at level 0, and puts

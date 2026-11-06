@@ -33,6 +33,9 @@ const RELEASE: u32 = 2;
 /// object owns it, a file deleted only then and its name freed either way,
 /// a stream or storage released. Then the type is TYMED_NULL and the
 /// owning object, if there is one, is released and cleared.
+///
+/// What it reads of the program's memory it reads before it frees
+/// anything: a missing page runs it again from the start.
 pub fn release_stg_medium(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = args[0];
     if at == 0 || !cpu.bus.guest_probe(at, STGMEDIUM as usize, true) {
@@ -41,13 +44,22 @@ pub fn release_stg_medium(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let tymed = cpu.bus.guest_read_32(at);
     let handle = cpu.bus.guest_read_32(at + 4);
     let owner = cpu.bus.guest_read_32(at + 8);
-    let mut releases = Vec::new();
     let own = owner == 0 && handle != 0;
+    let name = (tymed == TYMED_FILE && own).then(|| wide_name(cpu, handle));
+    let metafile = if tymed == TYMED_MFPICT && own {
+        let picture = kernel32::global_address(cpu, handle);
+        (picture != 0).then(|| cpu.bus.guest_read_32(picture + MFP_HMF))
+    } else {
+        None
+    };
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    let mut releases = Vec::new();
     match tymed {
         TYMED_HGLOBAL if own => kernel32::global_free(cpu, handle),
         TYMED_FILE if handle != 0 => {
-            if owner == 0 {
-                let name = wide_name(cpu, handle);
+            if let Some(name) = name {
                 let _ = kernel32::files::delete_file(cpu, &name);
             }
             task_free(cpu, handle);
@@ -61,14 +73,15 @@ pub fn release_stg_medium(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             gdi32::delete_object(cpu, &[handle]);
         }
         TYMED_MFPICT if own => {
-            let picture = kernel32::global_address(cpu, handle);
-            if picture != 0 {
-                let metafile = cpu.bus.guest_read_32(picture + MFP_HMF);
+            if let Some(metafile) = metafile {
                 gdi32::metafile::delete_meta_file(cpu, &[metafile]);
             }
             kernel32::global_free(cpu, handle);
         }
-        TYMED_ENHMF if own => gdi32::delete_object_now(cpu, handle),
+        // GDI32 here makes no enhanced metafiles, so the handle is another
+        // object's or none, and DeleteEnhMetaFile fails for those without
+        // deleting anything.
+        TYMED_ENHMF => {}
         _ => {}
     }
     cpu.bus.guest_write_32(at, TYMED_NULL);
@@ -86,7 +99,7 @@ fn wide_name(cpu: &mut Cpu, at: u32) -> String {
     let mut units = Vec::new();
     for i in 0..260u32 {
         let c = cpu.bus.guest_read_16(at + 2 * i);
-        if c == 0 {
+        if c == 0 || cpu.bus.guest_faulted() {
             break;
         }
         units.push(c);

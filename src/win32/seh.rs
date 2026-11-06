@@ -346,8 +346,7 @@ fn in_stack_reserve(cpu: &mut Cpu, address: u32) -> bool {
 
 /// Raise the exception `code` in the running thread, at the context
 /// `ctx`: its record and context on the thread's stack below ctx's ESP,
-/// and its handlers called. Where the record is, or None when the stack
-/// isn't there and the process ended.
+/// and its handlers called.
 pub fn raise(
     cpu: &mut Cpu,
     ctx: Context,
@@ -356,7 +355,15 @@ pub fn raise(
     flags: u32,
     address: u32,
     params: &[u32],
-) -> Option<u32> {
+) {
+    raise_record(cpu, ctx, fpu, [code, flags, 0, address], params);
+}
+
+/// Raise an exception as `raise` does, whose record starts with the
+/// words `head`: the code, the flags, the record of the exception it was
+/// raised for (0 for none) and the address. The record is written whole
+/// before the first handler is called, since the process may end there.
+fn raise_record(cpu: &mut Cpu, ctx: Context, fpu: &[u8; 108], head: [u32; 4], params: &[u32]) {
     let ctx_at = (ctx.gpr[ESP].wrapping_sub(CONTEXT_SIZE)) & !3;
     let record = ctx_at.wrapping_sub(RECORD_SIZE);
     let esp = record.wrapping_sub(BELOW_RECORD);
@@ -364,11 +371,11 @@ pub fn raise(
         let what = std::mem::take(&mut process(cpu).current_thread_mut().unwrap().fault);
         super::fatal_with(
             cpu,
-            &format!("{}, and its stack is gone", describe(code, &what)),
+            &format!("{}, and its stack is gone", describe(head[0], &what)),
             Some(&ctx),
             UNHANDLED_EXIT_CODE,
         );
-        return None;
+        return;
     }
     // The handlers run with TF clear, whatever the context says: else
     // each of their instructions would raise another exception. DF is
@@ -379,17 +386,17 @@ pub fn raise(
     super::system::enter_user(cpu, &here);
     let context_flags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
     write_context(cpu, ctx_at, &ctx, fpu, context_flags);
-    write_record(cpu, record, code, flags, address, params);
+    write_record(cpu, record, head, params);
     let frame = handlers(cpu);
     dispatch(cpu, record, ctx_at, frame, 0);
-    Some(record)
 }
 
-/// Write an EXCEPTION_RECORD at `at`.
-fn write_record(cpu: &mut Cpu, at: u32, code: u32, flags: u32, address: u32, params: &[u32]) {
+/// Write an EXCEPTION_RECORD at `at`, which starts with the words `head`
+/// (the code, the flags, the inner record and the address).
+fn write_record(cpu: &mut Cpu, at: u32, head: [u32; 4], params: &[u32]) {
     cpu.bus.guest_fill(at, RECORD_SIZE as usize, 0);
     let n = (params.len() as u32).min(MAX_PARAMETERS);
-    for (i, word) in [code, flags, 0, address, n].into_iter().enumerate() {
+    for (i, word) in head.into_iter().chain([n]).enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, word);
     }
     for (i, &param) in params.iter().take(n as usize).enumerate() {
@@ -555,9 +562,8 @@ fn raise_for(cpu: &mut Cpu, record: u32, code: u32) {
     let address = cpu.bus.guest_read_32(record + 12);
     let ctx = Context::of(cpu);
     let fpu = control::save_image(cpu);
-    if let Some(at) = raise(cpu, ctx, &fpu, code, NONCONTINUABLE, address, &[]) {
-        cpu.bus.guest_write_32(at + 8, record);
-    }
+    let head = [code, NONCONTINUABLE, record, address];
+    raise_record(cpu, ctx, &fpu, head, &[]);
 }
 
 /// Go on in the running thread at the CONTEXT at `at`.
@@ -810,7 +816,7 @@ pub fn rtl_unwind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let fpu = control::save_image(cpu);
     write_context(cpu, ctx_at, &ctx, &fpu, CONTEXT_FULL);
     let record = if record == 0 {
-        write_record(cpu, own_record, UNWIND, 0, resume.0, &[]);
+        write_record(cpu, own_record, [UNWIND, 0, 0, resume.0], &[]);
         own_record
     } else {
         record
