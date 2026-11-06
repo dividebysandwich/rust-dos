@@ -1753,7 +1753,7 @@ code it would have given.
 | `lol2-virtual-size` | Lands of Lore: Guardians of Destiny | In Huline's cantina, after Baccata speaks, the game stops with "Memory allocation of 1309694 bytes failed!!" | Patches its launchers, LOLG.EXE and SETUPG.EXE, when LOLG.DAT is beside them, to give DOS/4GW 32 MB of virtual memory instead of 24 MB |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
-| `zanzarah-bmp-rows` | Zanzarah: The Hidden Portal | On a 3D card without DXTn textures, such as the Voodoo3, the game faults in its heap when the title screen's Next is clicked | Patches ZANTHP.EXE as it starts to give its BMP reader a row buffer big enough for 32-bit images |
+| `zanzarah-bmp-rows` | Zanzarah: The Hidden Portal | On a 3D card without DXTn textures, such as the Voodoo3, the game faults in its heap when the title screen's Next is clicked | Patches ZANTHP.EXE as it starts, when the 3D card's Direct3D texture formats have no DXTn, to give its BMP reader a row buffer big enough for 32-bit images |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without
@@ -1795,9 +1795,13 @@ main menu's logo and its mask are 32-bit BMPs. Every row overruns the
 buffer, the last one with zeros, which breaks the C runtime's heap: the
 game faults as soon as it frees the buffer, after Next on the title
 screen. A real PC with a Voodoo3 does the same, since the overrun comes
-from the reader and the file. The fix makes the buffer big enough for
-32-bit rows. It was made for the Russian release by Russobit-M,
-version 1.008: ZANTHP.EXE of 2170880 bytes, MD5
+from the reader and the file. The game's published minimum is a
+GeForce or a Voodoo 5500, both with DXTn, so the Voodoo3 is below it.
+The fix makes the buffer big enough for 32-bit rows, and applies only
+when the texture formats the built-in Direct3D lists for the card
+(EnumTextureFormats) have none of DXT1 to DXT5; the log says so when
+it applies. It was made for the Russian release by Russobit-M, version
+1.008: ZANTHP.EXE of 2170880 bytes, MD5
 `f3f68fe9bbddde746fd53d47e9483ca5`.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and

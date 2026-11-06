@@ -95,11 +95,34 @@ pub enum Kind {
     /// Windows makes a process of them: each program's file name with its
     /// code, for a file of that name that has, with `beside`, that file in
     /// the same directory. The offsets of the code are in the file, and
-    /// only a file where every piece is as the game shipped it is patched.
+    /// only a file where every piece is as the game shipped it is patched,
+    /// on a machine that `machine` holds for.
     AtLoad {
         programs: &'static [(&'static str, &'static CodePatch)],
         beside: Option<&'static str>,
+        machine: Machine,
     },
+}
+
+/// What the emulated machine has to be like for a fix to apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Machine {
+    /// Any machine.
+    Any,
+    /// One whose 3D card has no DXTn (S3TC) texture format: the formats
+    /// the built-in Direct3D's EnumTextureFormats lists have no DXT1 to
+    /// DXT5.
+    NoDxtnTextures,
+}
+
+impl Machine {
+    /// Why a fix for this machine applied, for the log; None for any.
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Machine::Any => None,
+            Machine::NoDxtnTextures => Some("the 3D card's texture formats have no DXTn"),
+        }
+    }
 }
 
 /// A fix for one game.
@@ -434,7 +457,10 @@ const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
 /// Voodoo3, which rust-dos emulates and whose Direct3D driver lists only
 /// 16-bit and 8-bit palettized formats, sends them through it, and so
 /// would a real one: the overrun and the zeros come from the reader's
-/// code and the file, whatever the heap's layout.
+/// code and the file, whatever the heap's layout. So the fix applies only
+/// on a machine whose built-in Direct3D lists no DXTn texture format
+/// ([`Machine::NoDxtnTextures`]); with a card that has DXTn the game
+/// runs as it shipped.
 ///
 /// The patch makes the buffer `((width + 7) & ~7) * 5` bytes, of the same
 /// length (lea ebp,[ebx+ebx*2] to lea ebp,[ebx+ebx*4]), which holds a row
@@ -532,6 +558,7 @@ pub const FIXES: &[Fix] = &[
                 ("SETUPG.EXE", &LOL2_SETUP_LAUNCHER),
             ],
             beside: Some("LOLG.DAT"),
+            machine: Machine::Any,
         },
     },
     Fix {
@@ -541,6 +568,7 @@ pub const FIXES: &[Fix] = &[
         kind: Kind::AtLoad {
             programs: &[("ZANTHP.EXE", &ZANZARAH_BMP_ROWS)],
             beside: None,
+            machine: Machine::NoDxtnTextures,
         },
     },
     Fix {
@@ -662,18 +690,28 @@ pub fn skip_at_exec(
 
 /// The fix for the program file `bytes` that DOS loads from `path`, and
 /// the file as the fix patches it: `is_file` says whether a path names a
-/// file, `enabled` whether a fix applies. None when no fix is for the
-/// program, or its file isn't as the game shipped it.
+/// file, `enabled` whether a fix applies, and `machine` whether the
+/// emulated machine is one a fix is for. None when no fix is for the
+/// program and the machine, or its file isn't as the game shipped it.
 pub fn patch_at_load(
     path: &str,
     bytes: &[u8],
     is_file: impl Fn(&str) -> bool,
     enabled: impl Fn(&Fix) -> bool,
+    machine: impl Fn(Machine) -> bool,
 ) -> Option<(&'static Fix, Vec<u8>)> {
     FIXES.iter().filter(|fix| enabled(fix)).find_map(|fix| {
-        let Kind::AtLoad { programs, beside } = fix.kind else {
+        let Kind::AtLoad {
+            programs,
+            beside,
+            machine: needs,
+        } = fix.kind
+        else {
             return None;
         };
+        if !machine(needs) {
+            return None;
+        }
         let (_, code) = programs.iter().find(|(program, code)| {
             is_program(path, program, beside, &is_file) && matches(bytes, 0, code)
         })?;
@@ -916,7 +954,9 @@ mod tests {
         let at_load: Vec<_> = FIXES
             .iter()
             .flat_map(|fix| match fix.kind {
-                Kind::AtLoad { programs, beside } => programs
+                Kind::AtLoad {
+                    programs, beside, ..
+                } => programs
                     .iter()
                     .map(|&(program, code)| (fix, program, beside, code))
                     .collect(),
@@ -930,30 +970,41 @@ mod tests {
             let path = format!("{dir}{}", program.to_ascii_lowercase());
             let other = beside.map(|beside| format!("{dir}{beside}"));
             let is_file = |p: &str| other.as_ref().is_some_and(|o| p.eq_ignore_ascii_case(o));
-            let (found, patched) = patch_at_load(&path, &bytes, is_file, |_| true).unwrap();
+            let (found, patched) =
+                patch_at_load(&path, &bytes, is_file, |_| true, |_| true).unwrap();
             assert_eq!(found.name, fix.name);
             assert_eq!(patched.len(), bytes.len());
             for (old, new) in code.patches {
                 assert_eq!(&patched[old.at..old.at + new.len()], *new, "{}", fix.name);
             }
             // Patched once: the result isn't the file as the game shipped it.
-            assert!(patch_at_load(&path, &patched, is_file, |_| true).is_none());
+            assert!(patch_at_load(&path, &patched, is_file, |_| true, |_| true).is_none());
             // Not without the file beside it, with the fix off, or under
             // another name.
             if beside.is_some() {
-                assert!(patch_at_load(&path, &bytes, |_| false, |_| true).is_none());
+                assert!(patch_at_load(&path, &bytes, |_| false, |_| true, |_| true).is_none());
             }
             let off = vec![fix.name.to_string()];
-            assert!(patch_at_load(&path, &bytes, is_file, |f| enabled(f, true, &off)).is_none());
+            assert!(
+                patch_at_load(&path, &bytes, is_file, |f| enabled(f, true, &off), |_| true)
+                    .is_none()
+            );
+            // Not on a machine it isn't for.
+            if let Kind::AtLoad { machine, .. } = fix.kind
+                && machine != Machine::Any
+            {
+                let other = |m: Machine| m != machine;
+                assert!(patch_at_load(&path, &bytes, is_file, |_| true, other).is_none());
+            }
             let renamed = format!("{dir}OTHER.EXE");
-            assert!(patch_at_load(&renamed, &bytes, is_file, |_| true).is_none());
+            assert!(patch_at_load(&renamed, &bytes, is_file, |_| true, |_| true).is_none());
             // Not when any piece differs, or the file is too short for it.
             for b in pieces(code) {
                 let mut changed = bytes.clone();
                 changed[b.at] ^= 1;
-                assert!(patch_at_load(&path, &changed, is_file, |_| true).is_none());
+                assert!(patch_at_load(&path, &changed, is_file, |_| true, |_| true).is_none());
                 let short = &bytes[..b.at + b.bytes.len() - 1];
-                assert!(patch_at_load(&path, short, is_file, |_| true).is_none());
+                assert!(patch_at_load(&path, short, is_file, |_| true, |_| true).is_none());
             }
         }
     }
@@ -968,7 +1019,7 @@ mod tests {
         for (program, at) in [("LOLG.EXE", 0x481), ("SETUPG.EXE", 0x441)] {
             let (_, code) = programs.iter().find(|(name, _)| *name == program).unwrap();
             let bytes = file(code);
-            let (_, patched) = patch_at_load(program, &bytes, is_file, |_| true).unwrap();
+            let (_, patched) = patch_at_load(program, &bytes, is_file, |_| true, |_| true).unwrap();
             assert_eq!(
                 &patched[at..at + 89],
                 b"DOS4GVM=VirtualMemory:ON,VirtualSize:32M,SwapFileName:lolgswap.swp,SwapMin:20M,SwapInc:0\0",
@@ -980,7 +1031,7 @@ mod tests {
             } else {
                 "LOLG.EXE"
             };
-            assert!(patch_at_load(other, &bytes, is_file, |_| true).is_none());
+            assert!(patch_at_load(other, &bytes, is_file, |_| true, |_| true).is_none());
         }
     }
 }

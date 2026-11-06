@@ -8,9 +8,12 @@
 //! clipping).
 
 use super::super::Format;
-use super::super::surface::{DDPF_ALPHAPIXELS, DDPF_PALETTEINDEXED8, DDPF_RGB, DDPF_ZBUFFER};
+use super::super::surface::{
+    DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_PALETTEINDEXED8, DDPF_RGB, DDPF_ZBUFFER,
+};
 use super::{IID_HAL, write_dwords, write_f32};
 use crate::cpu::Cpu;
+use crate::voodoo::Board;
 
 /// The sizes of D3DDEVICEDESC: Direct3D 3's, 5's and 6's.
 pub const DESC_V1: u32 = 172;
@@ -224,6 +227,32 @@ pub fn texture_formats() -> Vec<Format> {
     ]
 }
 
+/// The texture formats the Direct3D driver of the 3D card `board` lists
+/// (EnumTextureFormats), none without a card. 3dfx's drivers list the
+/// same 16-bit and 8-bit palettized formats for every Voodoo, with no
+/// compressed one: the first with DXTn was the VSA-100 (Voodoo4 and 5).
+pub fn card_texture_formats(board: Option<Board>) -> Vec<Format> {
+    match board {
+        None => Vec::new(),
+        Some(
+            Board::Standard
+            | Board::Max
+            | Board::Voodoo2
+            | Board::Voodoo2Max
+            | Board::Banshee
+            | Board::Voodoo3,
+        ) => texture_formats(),
+    }
+}
+
+/// Whether `formats` has a DXTn (S3TC) format: DXT1 to DXT5 by FourCC.
+pub fn has_dxtn(formats: &[Format]) -> bool {
+    formats.iter().any(|f| {
+        let code = f.fourcc.to_le_bytes();
+        f.flags & DDPF_FOURCC != 0 && code[..3] == *b"DXT" && (b'1'..=b'5').contains(&code[3])
+    })
+}
+
 /// The depth buffer formats: the one the depth buffer depths list, 16
 /// bits.
 pub fn z_formats() -> Vec<Format> {
@@ -239,9 +268,39 @@ pub fn z_formats() -> Vec<Format> {
 mod tests {
     use super::super::hal;
     use super::*;
-    use crate::voodoo::Board;
 
     const AT: u32 = 0x2_0000;
+
+    /// The Voodoos list no compressed texture format, and neither did
+    /// 3dfx's driver for the Voodoo3 and the Banshee. A list with any of
+    /// DXT1 to DXT5 has DXTn; other FourCC codes don't count.
+    #[test]
+    fn only_a_list_with_dxt1_to_dxt5_has_dxtn() {
+        assert!(!has_dxtn(&texture_formats()));
+        let boards = [Board::Max, Board::Voodoo2, Board::Banshee, Board::Voodoo3];
+        for board in boards {
+            assert!(!has_dxtn(&card_texture_formats(Some(board))), "{board:?}");
+        }
+        let fourcc = |code: &[u8; 4]| Format {
+            flags: DDPF_FOURCC,
+            fourcc: u32::from_le_bytes(*code),
+            ..Format::default()
+        };
+        for code in [b"DXT1", b"DXT3", b"DXT5"] {
+            let mut list = texture_formats();
+            list.push(fourcc(code));
+            assert!(has_dxtn(&list), "{:?}", code);
+        }
+        for code in [b"DXT6", b"FXT1", b"UYVY"] {
+            let mut list = texture_formats();
+            list.push(fourcc(code));
+            assert!(!has_dxtn(&list), "{:?}", code);
+        }
+        // A FourCC code in an RGB format's field isn't one.
+        let mut rgb = fourcc(b"DXT1");
+        rgb.flags = DDPF_RGB;
+        assert!(!has_dxtn(&[rgb]));
+    }
 
     fn read(cpu: &mut Cpu, offset: u32) -> u32 {
         cpu.bus.guest_read_32(AT + offset)

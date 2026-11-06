@@ -1011,23 +1011,20 @@ fn zanzarah_program() -> Vec<u8> {
 }
 
 /// The game fix `zanzarah-bmp-rows` patches ZANTHP.EXE as CreateProcessA
-/// loads it: the program's memory has the patched byte. With the fix
-/// off it has the byte as the game shipped it.
+/// loads it on a Voodoo3, whose texture formats have no DXTn: the
+/// program's memory has the patched byte. With the fix off it has the
+/// byte as the game shipped it.
 #[test]
 fn create_process_loads_a_program_as_a_game_fix_patches_it() {
     let line = "ZANTHP.EXE";
-    let patched = start_program("zanzarah_fix", line, line, zanzarah_program(), &[]);
-    assert_eq!(patched, 0x21);
-    let off = start_program_set_up(
-        "zanzarah_fix_off",
-        "T.EXE",
-        line,
-        line,
-        zanzarah_program(),
-        &[],
-        |cpu| cpu.bus.game_fixes = false,
-    );
-    assert_eq!(off, 0x11);
+    let run = |test: &str, fixes: bool| {
+        start_program_set_up(test, "T.EXE", line, line, zanzarah_program(), &[], |cpu| {
+            cpu.bus.configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+            cpu.bus.game_fixes = fixes;
+        })
+    };
+    assert_eq!(run("zanzarah_fix", true), 0x21);
+    assert_eq!(run("zanzarah_fix_off", false), 0x11);
 }
 
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a

@@ -2035,10 +2035,16 @@ impl Cpu {
             bytes,
             |path| bus.disk.is_file(path),
             |fix| bus.game_fix_enabled(fix),
+            |machine| crate::win32::machine_is(bus, machine),
         )?;
+        let why = match fix.kind {
+            crate::game_fixes::Kind::AtLoad { machine, .. } => machine.reason(),
+            _ => None,
+        };
+        let why = why.map(|why| format!(", since {why}")).unwrap_or_default();
         self.bus.log_string(&format!(
-            "[game fix] {}: {} ({}): {} patched as it loads",
-            fix.name, fix.game, fix.reason, filename
+            "[game fix] {}: {} ({}): {} patched as it loads{}",
+            fix.name, fix.game, fix.reason, filename, why
         ));
         Some(patched)
     }

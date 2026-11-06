@@ -195,7 +195,7 @@ pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let list = if kind == Z_FORMATS {
                 caps::z_formats()
             } else {
-                caps::texture_formats()
+                caps::card_texture_formats(cpu.bus.voodoo.as_ref().map(|v| v.board))
             };
             let Some(f) = list.get(next) else {
                 return Next::Done(D3D_OK);

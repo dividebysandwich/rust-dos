@@ -620,6 +620,22 @@ pub fn install_rom(bus: &mut crate::bus::Bus) {
     bus.write_rom(at(IDT_TRAPS), &idt);
 }
 
+/// Whether the machine `bus` emulates is like `machine` says, for the
+/// game fixes that are for some machines only (`game_fixes`). A machine
+/// without DXTn textures is one whose 3D card's formats, as the built-in
+/// Direct3D lists them in EnumTextureFormats, have no DXT1 to DXT5.
+pub fn machine_is(bus: &crate::bus::Bus, machine: crate::game_fixes::Machine) -> bool {
+    use crate::game_fixes::Machine;
+    use ddraw::d3d::caps;
+    match machine {
+        Machine::Any => true,
+        Machine::NoDxtnTextures => {
+            let board = bus.voodoo.as_ref().map(|v| v.board);
+            !caps::has_dxtn(&caps::card_texture_formats(board))
+        }
+    }
+}
+
 /// DOS loaded the program `filename` (its file is `bytes`) as an EXE: if
 /// it is a PE file and the built-in Windows is on, make it start as a
 /// Win32 program, or the engine it unpacks if it is InstallShield's setup
