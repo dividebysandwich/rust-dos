@@ -650,6 +650,12 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: super::seh::nested_unwind_handler,
     },
+    // Windows 98 SE's is one of its stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED and return 0, leaving the structure as
+    // it was. SafeDisc 1's loader (Omikron's RUNTIME.EXE) resolves it
+    // with the process functions it uses and exits with -1 where
+    // GetProcAddress finds it missing.
+    stdcall("GetStartupInfoW", 954, 1, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
