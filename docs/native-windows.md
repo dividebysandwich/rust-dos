@@ -617,7 +617,9 @@ shortcut:
   through, as on Windows 98. It warned that the disk was too small
   while the built-in Windows reported DOS's 80 MB free on a drive that
   is a host folder (Ignore went on); it now reports between 1.75 and
-  3.75 GB. The game itself needs IMAGEHLP, AVIFIL32 and MSVFW32.
+  3.75 GB through GetDiskFreeSpaceExA, and at most just under 2 GB
+  through GetDiskFreeSpaceA. The game itself needs IMAGEHLP, AVIFIL32
+  and MSVFW32.
 
 Some differences hold for every setup:
 

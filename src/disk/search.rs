@@ -56,7 +56,7 @@ impl DiskController {
     /// (`windows_hard_disk_free`): Windows 95 and 98 report a real disk's
     /// space, up to 2 GB through GetDiskFreeSpaceA and all of it through
     /// GetDiskFreeSpaceExA, and their setup programs check whole installs
-    /// of up to 2 GB against it.
+    /// of more than 1 GB against it.
     pub fn windows_free_space(&self, drive: u8) -> Result<(u32, u32, u32, u32), u16> {
         self.free_space(drive, true)
     }
@@ -792,9 +792,9 @@ fn hard_disk_free(step: u32, used: u64) -> u32 {
 /// built-in Windows sees it (`windows_free_space`), `used` of them in
 /// use: 3.75 GB less what was written since the last 2 GB, so that free
 /// space drops cluster by cluster as files are written and stays above
-/// 1.75 GB. That is room for the largest installs of Windows 98's time
-/// (Omikron's Full install takes 1.6 GB), as a disk of the time had. It
-/// stays below 4 GB, so a program that reads only the low 32 bits of
+/// 1.75 GB, whatever the folder holds. That is room for an install of
+/// 1.6 GB, Omikron's Full one, as a disk of the time had. It stays
+/// below 4 GB, so a program that reads only the low 32 bits of
 /// GetDiskFreeSpaceExA's numbers still sees it all. GetDiskFreeSpaceA
 /// gives at most 2 GB of it (`old_space`), as Windows 95 and 98 do.
 pub(super) fn windows_hard_disk_free(used: u64) -> u32 {
@@ -802,9 +802,11 @@ pub(super) fn windows_hard_disk_free(used: u64) -> u32 {
 }
 
 /// The most free space of a folder hard disk under the built-in Windows,
-/// 3.75 GB, and how far it drops before it goes back up, 2 GB, both in
-/// 4 KB clusters (`windows_hard_disk_free`).
+/// 3.75 GB in 4 KB clusters (`windows_hard_disk_free`).
 const WINDOWS_FREE_MOST: u64 = 0xF_0000;
+
+/// How far that free space drops before it goes back up, 2 GB in 4 KB
+/// clusters (`windows_hard_disk_free`).
 const WINDOWS_FREE_DROP: u64 = 0x8_0000;
 
 /// The first slot a FAT disk's search gives the system entries listed
