@@ -477,7 +477,9 @@ pub struct Cpu {
     pub sse: Sse,
     /// The K6-2's model-specific registers.
     pub k6: K6Msrs,
-    /// Debug registers; stored, but breakpoints are not implemented.
+    /// Debug registers. The instruction breakpoints DR7 enables raise
+    /// debug exceptions (`instruction_breakpoint`); data and I/O
+    /// breakpoints are stored, with nothing behind them.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
     pub idtr: DescTable,

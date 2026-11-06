@@ -9117,6 +9117,79 @@ fn a_handler_sets_tf_in_a_breakpoints_context() {
     assert_step(&hits[1], at + 4);
 }
 
+/// `xor eax, eax`, INT3 and `INCS`, with a handler that answers the INT3
+/// with an instruction breakpoint in its context: Dr0 `offset` bytes past
+/// the INT3, L0 in Dr7, and with `tf` TF too. The handler of the next
+/// exception clears Dr7 and adds to EAX Dr6's B0-B3 times 100h and its BS
+/// bit (4000h) divided by 4. EAX at the end, the exceptions and the
+/// address of the code.
+fn dr7_breakpoint(test: &str, core: CoreMode, offset: i32, tf: bool) -> (u32, Vec<Hit>, u32) {
+    const CTX_DR0: i32 = 0x04;
+    const CTX_DR6: i32 = 0x14;
+    const CTX_DR7: i32 = 0x18;
+    const CTX_EAX: i32 = 0xB0;
+    let code = [&[0x31, 0xC0, 0xCC], INCS].concat();
+    let (exe, at) = trace_program(&code, false, 0, |a| {
+        let mut second = a.create_label();
+        let mut done = a.create_label();
+        a.test(esi, esi)?;
+        a.jnz(second)?;
+        a.mov(eax, dword_ptr(edx + CTX_EIP))?;
+        a.add(eax, offset)?;
+        a.mov(dword_ptr(edx + CTX_DR0), eax)?;
+        a.mov(dword_ptr(edx + CTX_DR7), 1)?;
+        if tf {
+            a.or(dword_ptr(edx + CTX_EFLAGS), TF as i32)?;
+        }
+        a.jmp(done)?;
+        a.set_label(&mut second)?;
+        a.mov(eax, dword_ptr(edx + CTX_DR6))?;
+        a.mov(ecx, eax)?;
+        a.and(eax, 0xF)?;
+        a.shl(eax, 8)?;
+        a.and(ecx, 0x4000)?;
+        a.shr(ecx, 2)?;
+        a.add(eax, ecx)?;
+        a.add(dword_ptr(edx + CTX_EAX), eax)?;
+        a.mov(dword_ptr(edx + CTX_DR7), 0)?;
+        a.set_label(&mut done)?;
+        a.nop()
+    });
+    let (value, hits) = traced(test, exe, core);
+    (value, hits, at)
+}
+
+/// A handler sets an instruction breakpoint in a context, on the third
+/// INC. Going on, that INC raises a single-step exception before it runs,
+/// with B0 in Dr6 and BS clear. SecuROM resumes its single-step tracing
+/// after a call this way.
+#[test]
+fn a_breakpoint_a_handler_sets_in_dr7_raises_a_single_step_exception() {
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let (value, hits, at) = dr7_breakpoint("dr7_breakpoint", core, 2, false);
+        assert_eq!(value, 0x104, "{:X?}", hits);
+        assert_eq!(hits.len(), 2, "{:X?}", hits);
+        assert_eq!(hits[0].code, BREAKPOINT);
+        assert_eq!(hits[1].code, SINGLE_STEP, "{:X?}", hits[1]);
+        assert_eq!(hits[1].eip, at + 5, "{:X?}", hits[1]);
+        assert_eq!(hits[1].address, at + 5, "{:X?}", hits[1]);
+    }
+}
+
+/// With TF set as well and the breakpoint on the second INC, the trap
+/// after the first INC and the breakpoint come as one exception, with BS
+/// and B0 in Dr6: the processor reports a breakpoint on the next
+/// instruction with the trap. Its handler clears Dr7, so nothing more
+/// comes, and SecuROM's tracer counts each instruction once.
+#[test]
+fn a_breakpoint_after_a_traced_instruction_comes_with_its_trap() {
+    let (value, hits, at) = dr7_breakpoint("dr7_with_trap", CoreMode::Normal, 1, true);
+    assert_eq!(value, 0x1104, "{:X?}", hits);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[1].code, SINGLE_STEP, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eip, at + 4, "{:X?}", hits[1]);
+}
+
 /// RaiseException called with TF set. Its entry traps, and the exception
 /// comes next, with TF in its context: the handler it enters runs with TF
 /// clear, so no trap comes from the first instruction of the handler.

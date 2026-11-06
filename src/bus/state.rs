@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 34;
+const WIN32_VERSION: u16 = 35;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -798,6 +798,7 @@ mod tests {
         (32, 0xC2B1_4444_B41A_6AA5), // when an OpenGL window's next swap may show
         (33, 0xC498_7C01_FF00_3137), // the threads higher ones preempted
         (34, 0x3B90_6B22_9BC8_A1E1), // which Win16 modules' own loaders are yet to run
+        (35, 0x74A3_31D9_5B6A_AC21), // each thread's debug registers
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

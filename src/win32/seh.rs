@@ -85,6 +85,8 @@ const CONTEXT_INTEGER: u32 = 0x2;
 const CONTEXT_SEGMENTS: u32 = 0x4;
 const CONTEXT_FLOATING_POINT: u32 = 0x8;
 const CONTEXT_DEBUG_REGISTERS: u32 = 0x10;
+/// Dr0-Dr3, Dr6 and Dr7, in this order.
+const CTX_DR0: u32 = 0x04;
 const CTX_FLOAT: u32 = 0x1C;
 const CTX_GS: u32 = 0x8C;
 const CTX_EDI: u32 = 0x9C;
@@ -105,11 +107,43 @@ const TIB_EXCEPTION_LIST: u32 = 0x00;
 const TIB_STACK_LIMIT: u32 = 0x08;
 const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
-/// Write the context `ctx` and the FPU's state `fpu` as a CONTEXT at `at`,
-/// with the flags `flags`.
-pub fn write_context(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108], flags: u32) {
+/// A thread's debug registers as a CONTEXT has them: DR0-DR3, DR6, DR7.
+pub type DebugRegs = [u32; 6];
+
+/// The processor's debug registers, as a CONTEXT has them.
+pub fn debug_registers(cpu: &Cpu) -> DebugRegs {
+    let dr = &cpu.dr;
+    [dr[0], dr[1], dr[2], dr[3], dr[6], dr[7]]
+}
+
+/// The bits of DR7 a context sets: the breakpoints' enable, R/W and LEN
+/// bits. GD and the reserved bits aren't a program's to set.
+pub const DR7_SETTABLE: u32 = 0xFFFF_00FF;
+
+/// Load the debug registers `regs`.
+pub fn set_debug_registers(cpu: &mut Cpu, regs: &DebugRegs) {
+    cpu.dr[..4].copy_from_slice(&regs[..4]);
+    cpu.dr[6] = regs[4];
+    cpu.dr[7] = regs[5] & DR7_SETTABLE;
+}
+
+/// Write the context `ctx`, the FPU's state `fpu` and the debug registers
+/// `dr` as a CONTEXT at `at`, with the flags `flags`.
+pub fn write_context(
+    cpu: &mut Cpu,
+    at: u32,
+    ctx: &Context,
+    fpu: &[u8; 108],
+    dr: &DebugRegs,
+    flags: u32,
+) {
     cpu.bus.guest_fill(at, CONTEXT_SIZE as usize, 0);
     cpu.bus.guest_write_32(at, flags);
+    if flags & CONTEXT_DEBUG_REGISTERS != 0 {
+        for (i, &word) in dr.iter().enumerate() {
+            cpu.bus.guest_write_32(at + CTX_DR0 + 4 * i as u32, word);
+        }
+    }
     cpu.bus.guest_write_bytes(at + CTX_FLOAT, fpu);
     // GS, FS, ES, DS; EDI, ESI, EBX, EDX, ECX, EAX; EBP, EIP, CS, EFLAGS,
     // ESP, SS.
@@ -138,11 +172,22 @@ pub fn write_context(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108], fla
     }
 }
 
-/// Change `ctx` and `fpu` to the parts the CONTEXT at `at` has by its
-/// flags.
-pub fn read_context(cpu: &mut Cpu, at: u32, ctx: &mut Context, fpu: &mut [u8; 108]) {
+/// Change `ctx`, `fpu` and the debug registers `dr` to the parts the
+/// CONTEXT at `at` has by its flags.
+pub fn read_context(
+    cpu: &mut Cpu,
+    at: u32,
+    ctx: &mut Context,
+    fpu: &mut [u8; 108],
+    dr: &mut DebugRegs,
+) {
     let flags = cpu.bus.guest_read_32(at);
     let word = |cpu: &mut Cpu, offset: u32| cpu.bus.guest_read_32(at + offset);
+    if flags & CONTEXT_DEBUG_REGISTERS != 0 {
+        for (i, reg) in dr.iter_mut().enumerate() {
+            *reg = word(cpu, CTX_DR0 + 4 * i as u32);
+        }
+    }
     if flags & CONTEXT_SEGMENTS != 0 {
         for (i, seg) in [Seg::GS, Seg::FS, Seg::ES, Seg::DS].into_iter().enumerate() {
             ctx.seg[seg as usize] = word(cpu, CTX_GS + 4 * i as u32) as u16;
@@ -385,7 +430,8 @@ fn raise_record(cpu: &mut Cpu, ctx: Context, fpu: &[u8; 108], head: [u32; 4], pa
     here.eflags &= !(CpuFlags::TF | CpuFlags::DF).bits();
     super::system::enter_user(cpu, &here);
     let context_flags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
-    write_context(cpu, ctx_at, &ctx, fpu, context_flags);
+    let dr = debug_registers(cpu);
+    write_context(cpu, ctx_at, &ctx, fpu, &dr, context_flags);
     write_record(cpu, record, head, params);
     let frame = handlers(cpu);
     dispatch(cpu, record, ctx_at, frame, 0);
@@ -570,8 +616,10 @@ fn raise_for(cpu: &mut Cpu, record: u32, code: u32) {
 pub fn continue_at(cpu: &mut Cpu, at: u32) {
     let mut ctx = Context::of(cpu);
     let mut fpu = control::save_image(cpu);
-    read_context(cpu, at, &mut ctx, &mut fpu);
+    let mut dr = debug_registers(cpu);
+    read_context(cpu, at, &mut ctx, &mut fpu, &mut dr);
     control::load_image(cpu, &fpu);
+    set_debug_registers(cpu, &dr);
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.fault.clear();
     }
@@ -628,7 +676,8 @@ fn die(cpu: &mut Cpu, record: u32, ctx_at: u32) {
     let code = cpu.bus.guest_read_32(record);
     let mut ctx = Context::of(cpu);
     let mut fpu = [0; 108];
-    read_context(cpu, ctx_at, &mut ctx, &mut fpu);
+    let mut dr = [0; 6];
+    read_context(cpu, ctx_at, &mut ctx, &mut fpu, &mut dr);
     let what = process(cpu)
         .current_thread_mut()
         .map(|t| std::mem::take(&mut t.fault))
@@ -814,7 +863,7 @@ pub fn rtl_unwind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let ctx = Context::of(cpu);
     let fpu = control::save_image(cpu);
-    write_context(cpu, ctx_at, &ctx, &fpu, CONTEXT_FULL);
+    write_context(cpu, ctx_at, &ctx, &fpu, &[0; 6], CONTEXT_FULL);
     let record = if record == 0 {
         write_record(cpu, own_record, [UNWIND, 0, 0, resume.0], &[]);
         own_record

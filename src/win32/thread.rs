@@ -22,6 +22,7 @@
 use super::call::{self, THREAD_ATTACHED};
 use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
 use super::object::{Kind, Objects};
+use super::seh;
 use super::{Context, ESP, Win32, process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -112,6 +113,9 @@ pub struct Thread {
     /// Its XMM registers and MXCSR while it doesn't run, on a processor
     /// with SSE; None for a thread that hasn't run yet.
     pub sse: Option<([u128; 8], u32)>,
+    /// Its debug registers while it doesn't run, as a CONTEXT has them:
+    /// each thread has its own breakpoints.
+    pub dr: seh::DebugRegs,
     pub last_error: u32,
     /// How many times it is suspended; it runs at 0.
     pub suspended: u32,
@@ -161,6 +165,7 @@ pub fn find(win32: &Win32, id: u32) -> Option<At> {
 fn save(cpu: &mut Cpu, ctx: Context) {
     let fpu = control::save_image(cpu).to_vec();
     let sse = cpu.model.has_sse().then_some((cpu.sse.xmm, cpu.sse.mxcsr));
+    let dr = seh::debug_registers(cpu);
     let win32 = &mut cpu.bus.win32;
     let Some(process) = win32.processes.get_mut(win32.running) else {
         return;
@@ -170,6 +175,7 @@ fn save(cpu: &mut Cpu, ctx: Context) {
         thread.ctx = ctx;
         thread.fpu = fpu;
         thread.sse = sse;
+        thread.dr = dr;
         thread.last_error = last_error;
     }
 }
@@ -189,10 +195,11 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     let process = &mut win32.processes[p];
     process.current = Some(t);
     let thread = &process.threads[t];
-    let (ctx, fpu, sse, last_error, tib) = (
+    let (ctx, fpu, sse, dr, last_error, tib) = (
         thread.ctx,
         thread.fpu.clone(),
         thread.sse,
+        thread.dr,
         thread.last_error,
         thread.tib,
     );
@@ -212,6 +219,7 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
         cpu.sse.xmm = xmm;
         cpu.sse.mxcsr = mxcsr;
     }
+    seh::set_debug_registers(cpu, &dr);
     super::system::enter_user(cpu, &ctx);
 }
 
@@ -724,6 +732,7 @@ crate::state_fields!(Thread {
     ctx,
     fpu,
     sse,
+    dr,
     last_error,
     suspended,
     priority,
