@@ -1700,14 +1700,17 @@ the game shipped it. A fix that changes what the driver builds as it
 sets up, such as the mixing fixes, also waits for a driver that hasn't
 set itself up yet. The patch is part of the game's memory, so a save
 state keeps it, and a state saved without it stays unpatched until the
-game starts again. Others skip a program the game starts, with the exit
-code it would have given.
+game starts again. Some patch a program's file as DOS loads it, from
+the shell or by EXEC, when every piece the fix checks is as the game
+shipped it; the file on the disk doesn't change. Others skip a program
+the game starts, with the exit code it would have given.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
 | `prehistorik2-sb-mix` | Prehistorik 2 | Music and effects click at every note and sit far below the centre line, on a real Sound Blaster too | Patches the driver to mix around the centre |
 | `jukebox-sb-mix` | Blues Brothers: Jukebox Adventure | The same driver, with the same clicks | The same, for its build of the driver |
 | `jukebox-mod-hang` | Blues Brothers: Jukebox Adventure | The game hangs about 75 seconds into the title screen's music | Takes out the jump to itself in front of the music player's position jump |
+| `lol2-virtual-size` | Lands of Lore: Guardians of Destiny | In Huline's cantina, after Baccata speaks, the game stops with "Memory allocation of 1309694 bytes failed!!" | Patches LOLG.EXE, when LOLG.DAT is beside it, to give DOS/4GW 32 MB of virtual memory instead of 24 MB |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 
@@ -1728,6 +1731,19 @@ screen doesn't leave on its own, so a player who waits on it hangs the
 game on a real PC too. The fix was made for BLUES.EXE of 25096 bytes,
 MD5 `4e4e60dbc63bdd867f7ff65725b7e8b4` (TOSEC's [h1] release), which is
 Razor 1911's version. Prehistorik 2's player, the same engine, has no such check.
+
+Lands of Lore 2's launcher, LOLG.EXE, starts the game (LOLG.DAT, with
+DOS/4GW bound in) with `DOS4GVM=...VirtualSize:24M...` in its
+environment, which holds DOS/4GW's virtual memory to 24 MB whatever the
+machine has. The game puts up to 16 MB in its heap as it starts and asks
+DOS/4GW for more as it needs it. The cantina scene needs more than the
+24 MB allow, so DOS/4GW refuses the block (DPMI error 8016h) and the
+game exits. GOG's copy does the same in DOSBox, and the game's
+`-LOWMEM` switch avoids it. The fix changes the 24 to 32 in the launcher
+as it loads, which the 20 MB swap file the same setting asks for covers
+with `memsize`'s default 16 MB. The fix was made for LOLG.EXE of 2847
+bytes, MD5 `1036beaf32bf4d25de4109d4a245d1a0` (GOG's copy, version
+1.30).
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed

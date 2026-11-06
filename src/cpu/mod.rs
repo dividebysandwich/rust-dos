@@ -1954,6 +1954,10 @@ impl Cpu {
             filename,
             bytes.len()
         ));
+        // A program whose file a game fix patches as it loads
+        // (`game_fixes`: Lands of Lore 2's launcher).
+        let patched = self.patch_at_load(filename, bytes);
+        let bytes = patched.as_deref().unwrap_or(bytes);
 
         // Check for EXE Signature ("MZ")
         let loaded = if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
@@ -2017,6 +2021,26 @@ impl Cpu {
             self.bus.dpmi.passed_over = own.then_some(self.current_psp);
         }
         loaded
+    }
+
+    /// The program file `bytes`, read from `filename`, as a game fix
+    /// patches it before it loads, or None when no fix applies.
+    fn patch_at_load(&mut self, filename: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+        if !self.bus.game_fixes {
+            return None;
+        }
+        let bus = &self.bus;
+        let (fix, patched) = crate::game_fixes::patch_at_load(
+            filename,
+            bytes,
+            |path| bus.disk.is_file(path),
+            |fix| bus.game_fix_enabled(fix),
+        )?;
+        self.bus.log_string(&format!(
+            "[game fix] {}: {} ({}): {} patched as it loads",
+            fix.name, fix.game, fix.reason, filename
+        ));
+        Some(patched)
     }
 
     /// A variable of the master environment.
