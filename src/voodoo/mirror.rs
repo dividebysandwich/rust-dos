@@ -645,6 +645,83 @@ struct LastTexture {
     frame: u64,
 }
 
+/// Where the OpenGL renderer keeps the alpha planes, which the card keeps
+/// in its one auxiliary buffer (`Row::finish`): in the alpha of the
+/// colour buffer drawn into, so of one colour buffer at a time. The
+/// recording and the renderer follow it from the same commands
+/// (`command`), so the card knows which alpha the renderer has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlphaPlanes {
+    /// The colour buffer (its word offset) whose alpha holds what the
+    /// auxiliary buffer holds as alpha planes: the one drawn into by the
+    /// last command that wrote alpha planes there. None while the
+    /// auxiliary buffer holds depth or values the renderer keeps in its
+    /// depth buffer: frame buffer writes, a snapshot, the blitter's or
+    /// the 2D engine's fills.
+    pub owner: Option<u32>,
+}
+
+impl AlphaPlanes {
+    /// Follow `command`: true if it is a triangle that reads alpha planes
+    /// the renderer doesn't have where it draws (`alpha_read`).
+    pub fn command(&mut self, command: &Command) -> bool {
+        match command {
+            Command::Resync(_) => self.owner = None,
+            Command::Draw(draw) => {
+                let s = &draw.state;
+                let missing = match alpha_read(s.fbz_mode, s.alpha_mode, s.aux) {
+                    AlphaRead::None => false,
+                    AlphaRead::Blend => self.owner != Some(s.dest),
+                    AlphaRead::DepthTest => true,
+                };
+                if s.aux && s.fbz_mode & (1 << 10) != 0 {
+                    self.owner = (s.fbz_mode & (1 << 18) != 0).then_some(s.dest);
+                }
+                return missing;
+            }
+            Command::Fill(fill) if fill.aux.is_some() => {
+                self.owner = fill.alpha_planes.then_some(fill.dest);
+            }
+            Command::Pixels(Pixels { dest: None, .. }) => self.owner = None,
+            // The renderer copies the alpha with the colours.
+            Command::Copy(copy) if self.owner == Some(copy.to) => self.owner = None,
+            _ => {}
+        }
+        false
+    }
+}
+
+/// How a triangle drawn with fbzMode `fbz` and alphaMode `am` reads the
+/// alpha planes, which it has (fbzMode bit 18) in an auxiliary buffer if
+/// `aux` (`Row::finish`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlphaRead {
+    None,
+    /// It blends with the destination's alpha: a colour factor of
+    /// ADST_ALPHA, AOMDST_ALPHA or ASATURATE, or the destination's alpha
+    /// added to the alpha it writes. The renderer blends with the alpha
+    /// of the colour buffer drawn into.
+    Blend,
+    /// Its depth test compares with the alpha there, which the renderer
+    /// doesn't do.
+    DepthTest,
+}
+
+fn alpha_read(fbz: u32, am: u32, aux: bool) -> AlphaRead {
+    if fbz & (1 << 18) == 0 || !aux {
+        return AlphaRead::None;
+    }
+    let blend = am & (1 << 4) != 0;
+    let (src, dst, dst_alpha) = ((am >> 8) & 15, (am >> 12) & 15, (am >> 20) & 15);
+    if fbz & (1 << 4) != 0 {
+        AlphaRead::DepthTest
+    } else if blend && (matches!(src, 3 | 7 | 15) || matches!(dst, 3 | 7) || dst_alpha == 4) {
+        AlphaRead::Blend
+    } else {
+        AlphaRead::None
+    }
+}
+
 /// The recording.
 pub struct Mirror {
     /// Commands were dropped since the card last asked (`take_dropped`),
@@ -665,6 +742,12 @@ pub struct Mirror {
     /// Each unit's look-up table as hashed last: its change count
     /// (`Tmu::lookup_key`) and the hash of its colours.
     lookups: [(u64, u64); 2],
+    /// Where the renderer keeps the alpha planes, as of the commands
+    /// recorded.
+    alpha: AlphaPlanes,
+    /// A triangle recorded read alpha planes the renderer didn't have
+    /// (`alpha_lost`).
+    alpha_lost: bool,
 }
 
 impl Default for Mirror {
@@ -686,7 +769,23 @@ impl Mirror {
             last_open: 0,
             last_texture: [None; 2],
             lookups: [(0, 0); 2],
+            alpha: AlphaPlanes::default(),
+            alpha_lost: false,
         }
+    }
+
+    /// Whether a triangle recorded since the recording started (or since
+    /// `forget_alpha_lost`) read alpha planes the renderer didn't have: an
+    /// alpha written with another colour buffer, by the CPU or by the
+    /// blitter, or a depth test against them (`AlphaPlanes`). The
+    /// renderer drew it with other values than the card.
+    pub(crate) fn alpha_lost(&self) -> bool {
+        self.alpha_lost
+    }
+
+    /// Start `alpha_lost` over: the card was reset.
+    pub(crate) fn forget_alpha_lost(&mut self) {
+        self.alpha_lost = false;
     }
 
     /// The layout the next command is in: a snapshot first if it is new,
@@ -708,7 +807,9 @@ impl Mirror {
         });
         self.open.clear();
         self.layout = Some(key);
-        self.commands.push(Command::Resync(Box::new(snapshot)));
+        let command = Command::Resync(Box::new(snapshot));
+        self.alpha.command(&command);
+        self.commands.push(command);
     }
 
     /// Take a snapshot before the next command: the memory changed under
@@ -747,6 +848,7 @@ impl Mirror {
             self.layout = None;
             self.dropped = true;
         }
+        self.alpha_lost |= self.alpha.command(&command);
         self.commands.push(command);
     }
 
@@ -1134,6 +1236,45 @@ mod tests {
         let mut color = [BufferKey::NONE; COLOR_BUFFERS];
         color[0] = BufferKey::new(0x1_0000, stride, 96);
         LayoutKey::new(40, color, BufferKey::new(0x4_0000, Stride::linear(64), 64))
+    }
+
+    #[test]
+    fn the_alpha_planes_follow_what_writes_the_auxiliary_buffer() {
+        let fill = |aux, alpha_planes| {
+            Command::Fill(Fill {
+                dest: 8,
+                rect: [0, 4, 0, 4],
+                color: None,
+                aux,
+                alpha_planes,
+                pattern: None,
+            })
+        };
+        let pixels = |dest| Command::Pixels(Pixels { dest, x: 0, y: 0, values: vec![0] });
+        let mut a = AlphaPlanes::default();
+        a.command(&fill(Some(0x80), true));
+        assert_eq!(a.owner, Some(8));
+        // Colours alone leave them.
+        a.command(&fill(None, false));
+        a.command(&pixels(Some(8)));
+        assert_eq!(a.owner, Some(8));
+        // The blitter's or the 2D engine's fill of the auxiliary buffer.
+        a.command(&fill(Some(0x80), false));
+        assert_eq!(a.owner, None);
+        // Frame buffer writes there, which the renderer keeps as depth.
+        a.command(&fill(Some(0x80), true));
+        a.command(&pixels(None));
+        assert_eq!(a.owner, None);
+        // A copy into the buffer brings the alpha of the one copied.
+        a.command(&fill(Some(0x80), true));
+        let copy = BufferCopy {
+            from: 16,
+            to: 8,
+            src: [0, 0],
+            rect: [0, 4, 0, 4],
+        };
+        a.command(&Command::Copy(copy));
+        assert_eq!(a.owner, None);
     }
 
     #[test]

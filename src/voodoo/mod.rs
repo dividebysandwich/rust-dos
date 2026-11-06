@@ -658,13 +658,12 @@ pub struct Voodoo {
     /// With `voodoo_readback=gpu`: whether the renderer's pictures of the
     /// buffers are what reads of them get (`gpu_reads`), whether the
     /// memory is behind them (jobs since were left to the renderer
-    /// alone; which bytes are, the tracker in `gpu` keeps), whether the
-    /// program used alpha planes, which the renderer keeps where they
-    /// can't be read back, and the read backs and the jobs left to the
-    /// renderer, for the debugger.
+    /// alone; which bytes are, the tracker in `gpu` keeps), and the read
+    /// backs and the jobs left to the renderer, for the debugger. Whether
+    /// the renderer has the alpha planes the program read, the recording
+    /// keeps (`gpu_alpha`).
     gpu_reads: bool,
     gpu_behind: Cell<bool>,
-    gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
     /// What the reads back covered (`gpu::ReadRows`).
     gpu_rows: RefCell<gpu::ReadRows>,
@@ -771,7 +770,6 @@ impl Voodoo {
             mirror: RefCell::new(None),
             gpu_reads: false,
             gpu_behind: Cell::new(false),
-            gpu_alpha: Cell::new(false),
             gpu_read_backs: Cell::new(0),
             gpu_rows: RefCell::default(),
             gpu_only: Cell::new(0),
@@ -819,7 +817,9 @@ impl Voodoo {
         self.blt_queue_stale();
         self.pool.reset_stats();
         self.counters_read.set(false);
-        self.gpu_alpha.set(false);
+        if let Some(mirror) = self.mirror.get_mut() {
+            mirror.forget_alpha_lost();
+        }
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];
@@ -2281,6 +2281,7 @@ impl Voodoo {
             "catch_ups": self.catch_ups.get(),
             "queue_full": self.pool.full_waits(),
             "gpu_reads": self.gpu_reads,
+            "gpu_alpha": self.gpu_alpha(),
             "gpu_read_backs": self.gpu_read_backs.get(),
             "gpu_read_rows": self.gpu_rows.borrow().rows,
             "gpu_partial_reads": self.gpu_rows.borrow().partial,
