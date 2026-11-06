@@ -614,8 +614,24 @@ fn ensure_selection_visible(cpu: &mut Cpu, hwnd: u32, t: &mut Tab) -> Vec<Op> {
 }
 
 /// TAB_SetItemBounds: where each tab goes, the tabs' height, the rows,
-/// and whether the row scrolls.
+/// and whether the row scrolls. Where the tabs took more room than they
+/// take now (fewer rows, lower tabs), what they left is drawn again:
+/// invalidate_tabs covers only the tabs' new place, and the display area
+/// that grows over the old one would keep the tabs drawn there.
 fn set_item_bounds(cpu: &mut Cpu, hwnd: u32, t: &mut Tab) -> Vec<Op> {
+    let before = (t.rows >= 1).then(|| tab_area(t, super::client(cpu, hwnd)));
+    let ops = place_items(cpu, hwnd, t);
+    if let Some(old) = before {
+        let new = (t.rows >= 1).then(|| tab_area(t, super::client(cpu, hwnd)));
+        if new != Some(old) {
+            super::header::invalidate_rect(cpu, hwnd, old, true);
+        }
+    }
+    ops
+}
+
+/// set_item_bounds's work: the tabs placed, the rows and the scrolling.
+fn place_items(cpu: &mut Cpu, hwnd: u32, t: &mut Tab) -> Vec<Op> {
     let hdc = user32::paint::get_dc(cpu, &[hwnd]).unwrap_or(0);
     let font = if t.font != 0 {
         t.font
@@ -2067,8 +2083,14 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             0
         }
         WM_KILLFOCUS | WM_SETFOCUS => {
-            // A button control's focus goes back to the selected one.
+            // TAB_KillFocus: a button control's focus goes back to the
+            // selected one, and the button that had it is drawn again
+            // without its focus rectangle.
             if msg == WM_KILLFOCUS && t.style & TCS_BUTTONS != 0 && t.focus != t.selected {
+                let (visible, r, _) = item_rect(&t, super::client(cpu, hwnd), t.focus);
+                if visible {
+                    super::header::invalidate_rect(cpu, hwnd, r, false);
+                }
                 t.focus = t.selected;
             }
             // TAB_FocusChanging: only the focused tab is drawn again,

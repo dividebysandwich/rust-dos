@@ -124,7 +124,16 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "GetTextExtentPoint32A",
         ],
     ),
-    ("USER32.DLL", &["ValidateRect", "GetUpdateRect", "ShowWindow"]),
+    (
+        "USER32.DLL",
+        &[
+            "ValidateRect",
+            "GetUpdateRect",
+            "ShowWindow",
+            "InvalidateRect",
+            "SetWindowPos",
+        ],
+    ),
 ];
 
 /// The import slot of `name`.
@@ -1070,9 +1079,9 @@ fn selecting_a_tab_leaves_a_child_page_alone() {
     let base = data_address(&calls);
     let mut d = data();
     strings(&mut d);
-    put(&mut d, S_TAB, b"SysTabControl32 ");
-    put(&mut d, FREE + 0x100, b"One ");
-    put(&mut d, FREE + 0x110, b"Two ");
+    put(&mut d, S_TAB, b"SysTabControl32\0");
+    put(&mut d, FREE + 0x100, b"One\0");
+    put(&mut d, FREE + 0x110, b"Two\0");
     for (at, words) in [
         (FREE, item(base + FREE + 0x100)),
         (FREE + 0x20, item(base + FREE + 0x110)),
@@ -1136,14 +1145,145 @@ fn hiding_a_page_erases_the_tab_control_at_once() {
     ];
     let mut d = data();
     strings(&mut d);
-    put(&mut d, S_TAB, b"SysTabControl32 ");
+    put(&mut d, S_TAB, b"SysTabControl32\0");
     let (mut cpu, at) = run("tab_hide", &d, &calls);
     let r = results(&cpu, at, calls.len());
     assert_ne!(r[3], 0, "the page is made");
     assert_ne!(r[5], 0, "the page was visible");
     let tab = user32::user(&mut cpu).window(r[2]).unwrap();
-    assert!(!tab.update.is_empty(), "the tab control paints where it was");
+    assert!(
+        !tab.update.is_empty(),
+        "the tab control paints where it was"
+    );
     assert_eq!(tab.paint & PAINT_ERASE, 0, "and has erased it already");
+}
+
+/// SetWindowPos erases the parent at once only for a child hidden: a
+/// page resized, or its frame changed, leaves the erase to the parent's
+/// BeginPaint. Windows sends no WM_ERASEBKGND within SetWindowPos for
+/// those (the sequences of Wine's msg.c and updown.c, recorded from
+/// Windows), and an optional one to the parent for a child hidden.
+#[test]
+fn only_hiding_a_page_erases_the_parent_at_once() {
+    use Arg::*;
+    use rust_dos::win32::user32::{self, paint::PAINT_ERASE};
+    const S_TAB: u32 = 0x260;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+    const SWP_HIDEWINDOW: u32 = 0x0080;
+    let page = || {
+        call(
+            "CreateWindowExA",
+            &[
+                I(0),
+                At(S_STATIC),
+                I(0),
+                I(WS_CHILD | WS_VISIBLE),
+                I(4),
+                I(40),
+                I(190),
+                I(100),
+                Res(2),
+                I(2),
+                I(0),
+                I(0),
+            ],
+        )
+    };
+    let in_place = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER;
+    let set_pos = |flags: u32| {
+        call(
+            "SetWindowPos",
+            &[Res(3), I(0), I(0), I(0), I(150), I(80), I(flags)],
+        )
+    };
+    for (flags, erased) in [
+        (SWP_NOMOVE | SWP_NOZORDER, false),
+        (in_place | SWP_FRAMECHANGED, false),
+        (in_place | SWP_HIDEWINDOW, true),
+    ] {
+        let calls = [
+            call("InitCommonControls", &[]),
+            parent(),
+            child(S_TAB, 0, 200, 150, 1, 1),
+            page(),
+            call("ValidateRect", &[Res(2), I(0)]),
+            call("InvalidateRect", &[Res(2), I(0), I(1)]),
+            set_pos(flags),
+        ];
+        let mut d = data();
+        strings(&mut d);
+        put(&mut d, S_TAB, b"SysTabControl32\0");
+        let (mut cpu, at) = run("tab_page_pos", &d, &calls);
+        let r = results(&cpu, at, calls.len());
+        assert_ne!(r[6], 0, "SetWindowPos succeeds");
+        let tab = user32::user(&mut cpu).window(r[2]).unwrap();
+        assert!(
+            !tab.update.is_empty(),
+            "{flags:X}: the control still paints"
+        );
+        let left = tab.paint & PAINT_ERASE != 0;
+        assert_eq!(left, !erased, "{flags:X}: erased already: {erased}");
+    }
+}
+
+/// A button control losing the focus gives it back to the selected
+/// button and draws the one that had it again, without its focus
+/// rectangle (Wine's TAB_KillFocus).
+#[test]
+fn a_button_that_loses_the_focus_is_drawn_again() {
+    use Arg::*;
+    const S_TAB: u32 = 0x260;
+    const TCS_BUTTONS: u32 = 0x0100;
+    const TCIF_TEXT: u32 = 0x0001;
+    const TCM_INSERTITEMA: u32 = 0x1307;
+    const TCM_GETITEMRECT: u32 = 0x130A;
+    const TCM_SETCURSEL: u32 = 0x130C;
+    const TCM_SETCURFOCUS: u32 = 0x1330;
+    const WM_KILLFOCUS: u32 = 0x0008;
+    const ITEM_RECT: u32 = FREE + 0x200;
+    const UPDATE_RECT: u32 = FREE + 0x210;
+    let item = |text: u32| [TCIF_TEXT, 0, 0, text, 32, 0, 0];
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TAB, TCS_BUTTONS, 200, 150, 1, 1),
+        send(2, TCM_INSERTITEMA, I(0), At(FREE)),
+        send(2, TCM_INSERTITEMA, I(1), At(FREE + 0x20)),
+        send(2, TCM_SETCURSEL, I(0), I(0)),
+        send(2, TCM_SETCURFOCUS, I(1), I(0)),
+        send(2, TCM_GETITEMRECT, I(1), At(ITEM_RECT)),
+        call("ValidateRect", &[Res(2), I(0)]),
+        send(2, WM_KILLFOCUS, I(0), I(0)),
+        call("GetUpdateRect", &[Res(2), At(UPDATE_RECT), I(0)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TAB, b"SysTabControl32\0");
+    put(&mut d, FREE + 0x100, b"One\0");
+    put(&mut d, FREE + 0x110, b"Two\0");
+    for (at, words) in [
+        (FREE, item(base + FREE + 0x100)),
+        (FREE + 0x20, item(base + FREE + 0x110)),
+    ] {
+        for (i, w) in words.iter().enumerate() {
+            put32(&mut d, at + 4 * i as u32, *w);
+        }
+    }
+    let (cpu, at) = run("tab_btn_focus", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[7], 0, "the second button is in sight");
+    assert_ne!(r[10], 0, "something is drawn again");
+    let rect = |at: u32| -> Vec<i32> { (0..4).map(|i| peek(&cpu, at + 4 * i) as i32).collect() };
+    let (button, update) = (rect(base + ITEM_RECT), rect(base + UPDATE_RECT));
+    assert!(
+        update[0] <= button[0] && update[2] >= button[2],
+        "the second button {button:?} is drawn again: {update:?}"
+    );
 }
 
 #[test]
