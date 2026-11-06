@@ -958,8 +958,9 @@ fn aux_devices_are_the_sound_blaster_16s_lines() {
 }
 
 /// 12 frames of 32 by 32 at 25 a second, 6 red and 6 blue: a video
-/// elementary stream, as an .MPG file may be.
-fn clip() -> Vec<u8> {
+/// elementary stream, as an .MPG file may be. The DirectShow tests
+/// play it too.
+pub(super) fn clip() -> Vec<u8> {
     use oxideav_mpeg12video::frame_assembly::FrameBuffer;
     use oxideav_mpeg12video::mpeg1_encoder::encode_mpeg1_display_order_sequence;
     use oxideav_mpeg12video::mpeg1_stream_writer::Mpeg1SequenceParams;

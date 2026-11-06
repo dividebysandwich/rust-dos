@@ -254,7 +254,13 @@ pub fn let_go(cpu: &mut Cpu, kind: &Kind) {
                 crate::win32::dmusic::free(cpu, d.buffer);
             }
         }
-        Kind::Graph { .. } | Kind::Audio { .. } => {}
+        Kind::Graph { .. }
+        | Kind::Audio { .. }
+        | Kind::Decoder { .. }
+        | Kind::Pin { .. }
+        | Kind::Allocator { .. }
+        | Kind::MediaSample { .. }
+        | Kind::Clock { .. } => {}
     }
 }
 
