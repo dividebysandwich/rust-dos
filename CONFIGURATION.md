@@ -1502,12 +1502,13 @@ takes the install away and the next start runs the setup again.
 
 The settings of [the profile above](#a-profile-to-start-from) apply to
 the setup as well as the game, and `SET TEMP` matters most here. The
-setups listed in
-[docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
-are known to run. For a game on more than one CD, list every image on
-the drive's `[drives]` line; when the setup asks for the next disc,
-Ctrl+F4 puts it in. Run `DIR` at the prompt after the setup to find the
-8.3 names of the folders it made.
+games whose setups are known to run are in
+[docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows),
+and [docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
+says how an install differs from one on Windows 98. For a game on more
+than one CD, list every image on the drive's `[drives]` line; when the
+setup asks for the next disc, Ctrl+F4 puts it in. Run `DIR` at the
+prompt after the setup to find the 8.3 names of the folders it made.
 
 InstallShield's `SETUP.EXE` is a 16-bit launcher, which the built-in
 Windows doesn't run. When `_INST32I.EX_` is beside it, the built-in

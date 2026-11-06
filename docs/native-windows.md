@@ -25,7 +25,7 @@ The built-in Windows subsystem was designed and implemented by
 | [Wine](https://gitlab.winehq.org/wine/wine) | LGPL-2.1+ | Win32 reimplemented on a Unix host; since Wine 8 every DLL builds as PE and reaches Unix through an internal syscall table | API semantics, and code we may port (LGPL-2.1 section 3 allows relicensing a copy to GPL-2.0-or-later) |
 | [ReactOS](https://github.com/reactos/reactos) | GPL-2.0 | An NT 5.2 operating system, user mode mostly from Wine | Nothing beyond Wine for us; it is NT, not 9x |
 | [retrowin32](https://github.com/evmar/retrowin32) | Apache-2.0 | x86 interpreter plus Win32 DLLs written in Rust | The closest design to this plan (see below); ideas only, since Apache-2.0 code can't go into a GPL-2.0 work |
-| [HX DOS Extender](https://github.com/Baron-von-Riedesel/HX) | Freeware, no license file | Win32 PE programs on DOS plus a DPMI host; DLLs written in assembly, including a software DirectDraw and DirectSound, no Direct3D | Proof that a Win32 layer on top of DOS runs games (Descent, Quake 2); its documented behaviour; it already runs on rust-dos's DPMI host |
+| [HX DOS Extender](https://github.com/Baron-von-Riedesel/HX) | Freeware, no license file | Win32 PE programs on DOS plus a DPMI host; DLLs written in assembly, including a software DirectDraw and DirectSound, no Direct3D | Proof that a Win32 layer on top of DOS runs games; its documented behaviour; it already runs on rust-dos's DPMI host |
 | [winevdm](https://github.com/otya128/winevdm) | GPL-2.0 | Win16 on Win64 with MAME's CPU and Wine's 16-bit DLLs | Scope of a Win16 layer, for 16-bit setup programs |
 | [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw) | MIT | DirectDraw reimplemented on GDI, OpenGL or D3D9 | DirectDraw semantics for 2D games, in code we may reuse |
 | [DDrawCompat](https://github.com/narzoul/DDrawCompat) | 0BSD | DirectDraw and D3D 1-7 fixes on modern Windows | The same, for the parts games depend on that the docs don't say |
@@ -86,8 +86,8 @@ emulator has most of what it needs:
   MPU-401 and its synthesizers. Then every frontend (SDL, libretro, web),
   save states, rewind, screenshots and recording keep working unchanged.
 
-A game uses a few hundred Win32 functions, not the whole API. Expendable
-(1999, Direct3D) imports 54 functions from KERNEL32, 10 from USER32, 4
+A game uses a few hundred Win32 functions, not the whole API. A Direct3D
+game of 1999 imports 54 functions from KERNEL32, 10 from USER32, 4
 registry functions, 2 from OLE32, 2 from DDRAW and `PropertySheetA`; its
 DLLs add WinMM and some of GDI32. Implementing against trace logs of real
 games keeps the work bounded.
@@ -292,16 +292,16 @@ exceptions run as the program's own code on top of that.
   as Windows has its DLLs there: programs and setups that look for a DLL by
   its file (`CreateFile` or `fopen` for reading, `OpenFile` with `OF_EXIST`,
   `GetFileAttributes`, `FindFirstFile`) find the ones `LoadLibrary` loads
-  (`src/win32/dll_files.rs`). Xenocracy's hardware profiler opens
+  (`src/win32/dll_files.rs`). A game's hardware check may open
   `GLIDE2X.DLL` there to tell whether the machine has Glide. Each file is
   the DLL's PE image: its headers, sections and export directory as it is
   mapped in a process, with the functions the version of Windows has, and
   the version resource `GetFileVersionInfo` gives for it. They are there
   while the built-in Windows is on, and follow the loader's rules:
-  `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card alone (`voodoo=true`, or
-  a Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
-  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with one
-  of the folder's not at all.
+  `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card alone (`voodoo=true`,
+  or a Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
+  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with
+  one of the folder's not at all.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
@@ -368,14 +368,14 @@ All output goes through the emulated video hardware:
   emulation (`src/voodoo/`) does the rendering, and 3dfx's MiniGL drivers,
   which games of the time shipped, run on top of it. `grSstControl` moves
   the monitor between the card and the 2D picture while the display stays
-  open, as Test Drive 4 does between its DirectDraw menus and its races: a
-  Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee or
-  Voodoo3 gives the display back and later takes it again, with the textures
-  where they were. **Glide 3** (`glide3x.dll`), which 3dfx's OpenGL drivers
-  for the Voodoo2, Banshee and Voodoo3 use, is the same code with Glide 3's
-  functions: vertices in the program's own layout, in arrays, strips and
-  fans and in clip coordinates, log2 texture sizes, and `grGet` and
-  `grQueryResolutions` in place of `grSstQueryHardware`.
+  open, as a game with DirectDraw menus and Glide races does between the
+  two: a Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee
+  or Voodoo3 gives the display back and later takes it again, with the
+  textures where they were. **Glide 3** (`glide3x.dll`), which 3dfx's
+  OpenGL drivers for the Voodoo2, Banshee and Voodoo3 use, is the same
+  code with Glide 3's functions: vertices in the program's own layout, in
+  arrays, strips and fans and in clip coordinates, log2 texture sizes,
+  and `grGet` and `grQueryResolutions` in place of `grSstQueryHardware`.
 - **Direct3D** (DX5 and DX6 immediate mode: execute buffers and
   `DrawPrimitive`) becomes a HAL on the same emulated hardware, the way
   3dfx's Direct3D driver was one. The target card is the Banshee or
@@ -426,10 +426,10 @@ decompress and draw their frames (`src/win32/vfw/`). AVIStreamGetFrame
 decompresses a video stream's frames to a DIB of the program's choice, 24
 bits a pixel by default, from the last key frame on. The codecs are Indeo
 Video 3 and 5, which Windows 98 installs, decoded by the `oxideav-indeo`
-crate. ACM 1918 plays its Indeo 5 intro this way. Its frames match
-FFmpeg's, but for two that both decoders refuse as damaged, where the
-picture before stays. Indeo 5's frames that depend on earlier ones have
-not been compared with a reference: ACM 1918's are all key frames.
+crate. Indeo 5 key frames match FFmpeg's, but for frames that both
+decoders refuse as damaged, where the picture before stays. Indeo 5's
+frames that depend on earlier ones have not been compared with a
+reference.
 
 ### Sound and input
 
@@ -474,8 +474,8 @@ not been compared with a reference: ACM 1918's are all key frames.
   rust-dos's own, not Windows'. What the program sees follows Windows 98
   as Wine's DirectPlay tests recorded it: which players get which system
   messages, in which order, and the sizes of the messages. DPLAY.DLL,
-  DirectX 3's, which Bedlam imports by ordinal, makes and lists DPLAYX's
-  objects and providers, as Wine's does.
+  DirectX 3's, which some games import by ordinal, makes and lists
+  DPLAYX's objects and providers, as Wine's does.
 - **WS2_32 and WSOCK32** have no network yet.
 
 ### Installing games
@@ -555,10 +555,10 @@ it, as a probe program read it from the running engine there:
 C:\WINDOWS\TEMP\_INS0432._MP -fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\
 ```
 
-That is Enemy Infestation's launcher, 5.00.149. Later ones (5.00.212
-and 5.00.221) add the setup's folder and its language, the `Default=`
-of `SETUP.LID`'s `[Languages]`; Xenocracy's gave this, found in the
-memory of Windows 98 SE running it:
+That is launcher 5.00.149's. Later ones (5.00.212 and 5.00.221) add the
+setup's folder and its language, the `Default=` of `SETUP.LID`'s
+`[Languages]`; one of them gave this, found in the memory of Windows 98
+SE running it:
 
 ```
 -fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\ -x1D:\ -q10009
@@ -594,44 +594,32 @@ it, checked with a probe program there:
 - GDI32 keeps metafiles (SetMetaFileBitsEx) and plays them
   (PlayMetaFile): Wise's dialogs draw their pictures from them.
 
-Each install was compared with the same setup run on Windows 98 SE,
-file by file with hashes, registry key by key and shortcut by
-shortcut:
+Setups of InstallShield 5, of InstallShield 3's 32-bit engine and of
+Wise were compared with the same setup run on Windows 98 SE, file by
+file with hashes, registry key by key and shortcut by shortcut
+([docs/compatibility.md](compatibility.md#windows-games-on-the-built-in-windows)
+lists the games). The files they install and the registry keys they
+write are the same, with these differences:
 
-- **Enemy Infestation** (InstallShield 5): the 9 game files are the
-  same. `Ei.cfg` differs in the CD's letter (D: here, E: on the
-  Windows 98 machine). The registry keys are the same. The uninstall
-  log `Uninst.isu` is 3729 bytes against 3680, with the names of the
-  engine's dialog variables (`ResultA`, `bOpt1A`) and `5.00.000` in
-  it. The Read Me shortcut points to `D:\NOTEPAD.EXE`, as the setup
-  finds no Notepad on C:. The game starts, plays its intro and shows
-  its menu.
-- **Wages of War** (InstallShield 3's 32-bit engine): 361 of 362 files
-  are the same, all but the uninstall log `DeIsL1.isu` (22979 bytes
-  against 22922). The registry keys are the same, and the setup also
-  makes an empty `HKLM\SharedDLLs`: the engine creates SharedDLLs
-  under the wrong key when it doesn't find it, which Windows 98, where
-  it is always there, never shows. The game says it must run in
-  256-colour mode and stops on the default desktop, which has 32 bits
-  per pixel; `win32_depth=8` gives the desktop 256 colours.
-- **Grom** (Wise, two CDs, the minimum installation): 1931 of 1932
-  files are the same, all but the install log `INSTALL.LOG`, which
-  differs in the time, the CD's letter, a `Made Dir` line for
-  `C:\Program Files` and the case of names. The registry keys are the
-  same but for the time of the last update check and the case of the
-  Start menu folder's path. The setup asks for the second CD halfway
-  through, as on Windows 98. The game itself needs IMAGEHLP, AVIFIL32
-  and MSVFW32.
-
-Some differences hold for every setup:
-
+- The setup's own logs differ: InstallShield's uninstall log (`.isu`)
+  is a few dozen bytes larger, with the names of the engine's dialog
+  variables in it, and Wise's `INSTALL.LOG` differs in the time, the
+  CD's letter, a `Made Dir` line for `C:\Program Files` and the case of
+  names.
+- A file the setup writes the CD's letter into has the letter of the
+  emulator's drive.
+- InstallShield 3's engine also makes an empty `HKLM\SharedDLLs`: it
+  creates SharedDLLs under the wrong key when it doesn't find it, which
+  Windows 98, where it is always there, never shows.
 - Names on a drive that is a host folder are in capitals, as DOS made
   them: the Start menu's folder is `START MENU`.
 - Shortcuts are smaller: they have no relative path and no file
-  times. Their targets, working folders and icons are the same.
+  times. Their targets, working folders and icons are the same. A
+  shortcut to Notepad points to the CD's drive, as the setup finds no
+  Notepad on C:.
 - Dialog text is laid out with other font metrics, so some lines wrap
   or are cut where Windows 98's aren't, and characters the built-in
-  fonts lack show as `?` (Grom's "DirectX®").
+  fonts lack, such as `®`, show as `?`.
 
 ### Timing
 
@@ -648,7 +636,7 @@ run with `/s`. Programs can read and change both settings through
 SystemParametersInfo.
 
 A `.SCR` can also be run from the prompt by its name, for example
-`scrantic.scr /s`, with `win32=true`.
+`saver.scr /s`, with `win32=true`.
 
 ## Testing
 
@@ -729,22 +717,20 @@ A `.SCR` can also be run from the prompt by its name, for example
   and a coded-literal stream pwexplode expanded to the same text. A
   game's own archive, compared entry by entry with what Unshield (or
   idecomp, for InstallShield 3) extracts, is the acceptance check. It
-  runs outside the repository, as the game suite does. It covered, all files equal by SHA-1:
-  - Oni (Europe): three version 5 sets with `.hdr` files (data1, _sys1,
-    _user1), 122 files, among them paths that hold one file per language
-    and are read by group.
-  - Rent-A-Hero (Europe): version 5 with the header in `data1.cab` (129
-    files) and its `_sys1.cab` (4).
-  - WarGames (USA) v1.01: version 0 sets (`data1.cab`, 224 files, and
-    `_sys1.cab`, 4), which need the marker-delimited form; the chunked
+  runs outside the repository, as the game suite does. It covered these,
+  all files equal by SHA-1 (the games are in
+  [docs/compatibility.md](compatibility.md#installer-archives)):
+  - Version 5 sets with `.hdr` files (data1, _sys1, _user1), among them
+    paths that hold one file per language and are read by group.
+  - Version 5 sets with the header in `data1.cab`.
+  - Version 0 sets, which need the marker-delimited form; the chunked
     one fails on them with a message that names the other.
-  - Wages of War: InstallShield 3 `_SETUP.1` (622 files) and five
-    `.Z` archives (61 files), paths equal too.
-  - Railroad Tycoon II (USA): InstallShield 3 `_SETUP.1` (63 files).
+  - InstallShield 3 `_SETUP.1` archives and `.Z` archives, paths equal
+    too.
 
   No version 6 set was found on the media at hand, so version 6 is
-  tested by the writer's sets alone. Magic: The Gathering - Battlegrounds
-  has a major version 7 header, which the reader refuses.
+  tested by the writer's sets alone. A major version 7 header is
+  refused.
 - Installs: a real installer, run under the built-in Windows or
   unpacked in Rust, from media kept outside the repository as the game
   suite's are. The check is what the install leaves behind, the files
@@ -901,9 +887,9 @@ encodes 16-bit PCM to IMA ADPCM and decodes it back through
 written from the format's definition (`tests/win32/wine_dlls.rs`, which
 runs when WINE_DLLS names the folder). It takes
 `win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
-exports and only the decoders of MS ADPCM and IMA ADPCM, for Oni's
-sounds and for programs that only ask it how large a wave format can be
-(Test Drive 4). MSACM32 finds the codec in SYSTEM.INI's `[drivers32]`
+exports and only the decoders of MS ADPCM and IMA ADPCM, for games'
+compressed sounds and for programs that only ask it how large a wave
+format can be. MSACM32 finds the codec in SYSTEM.INI's `[drivers32]`
 (`msacm.imaadpcm=imaadp32.acm`) and opens it with OpenDriver, so WINMM's
 installable drivers are now real: OpenDriver loads the DLL as
 LoadLibrary does, finds its alias in SYSTEM.INI, and sends its
