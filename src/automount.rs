@@ -15,9 +15,12 @@ use std::path::{Path, PathBuf};
 /// The folder's name.
 pub const FOLDER: &str = "automount";
 
-const CD_EXTENSIONS: [&str; 7] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd"];
+const CD_EXTENSIONS: [&str; 9] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t"];
 /// The CUE sheets' extensions, GOG's among them.
 const SHEET_EXTENSIONS: [&str; 4] = ["cue", "ins", "inst", "bdn"];
+/// The extensions of BlindWrite's descriptors, which name data files as
+/// CUE sheets name tracks.
+const DESCRIPTOR_EXTENSIONS: [&str; 2] = ["b5t", "b6t"];
 const DISK_EXTENSIONS: [&str; 7] = ["vhd", "img", "ima", "dsk", "vfd", "flp", "86f"];
 /// A system's, in the order `os_images` looks for a name.
 const SYSTEM_EXTENSIONS: [&str; 6] = ["img", "vhd", "ima", "dosz", "zip", "7z"];
@@ -228,17 +231,31 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
     let mut scan = Scan::default();
     let mut entries: Vec<&Entry> = entries.iter().collect();
     entries.sort_by_key(|e| e.name.to_ascii_lowercase());
-    // The tracks a CUE sheet names are its disc's, not discs of their own.
+    // The tracks a CUE sheet or BlindWrite descriptor names are its
+    // disc's, not discs of their own.
     let mut tracks: Vec<String> = Vec::new();
-    let sheet = |name: &str| {
-        Path::new(name).extension().is_some_and(|e| SHEET_EXTENSIONS.iter().any(|s| e.eq_ignore_ascii_case(s)))
+    let named = |name: &str, extensions: &[&str]| {
+        Path::new(name)
+            .extension()
+            .is_some_and(|e| extensions.iter().any(|s| e.eq_ignore_ascii_case(s)))
     };
-    for entry in entries.iter().filter(|e| !e.is_dir && sheet(&e.name)) {
-        let text = crate::archive::read_member(&folder.join(&entry.name))
+    let read = |entry: &Entry| {
+        crate::archive::read_member(&folder.join(&entry.name))
             .unwrap_or_else(|| crate::hostfs::read(folder.join(&entry.name)).map_err(|e| e.to_string()))
-            .map(|data| String::from_utf8_lossy(&data).into_owned())
-            .unwrap_or_default();
-        tracks.extend(cue_files(&text).into_iter().map(|t| t.to_ascii_lowercase()));
+            .unwrap_or_default()
+    };
+    for entry in entries.iter().filter(|e| !e.is_dir) {
+        if named(&entry.name, &SHEET_EXTENSIONS) {
+            let text = String::from_utf8_lossy(&read(entry)).into_owned();
+            tracks.extend(cue_files(&text).into_iter().map(|t| t.to_ascii_lowercase()));
+        } else if named(&entry.name, &DESCRIPTOR_EXTENSIONS) {
+            let disc = crate::cdrom::b6t::parse(&read(entry)).unwrap_or_default();
+            let name = |file: &str| file.rsplit(['/', '\\']).next().unwrap_or(file).to_ascii_lowercase();
+            tracks.extend(disc.blocks.iter().map(|b| name(&b.file)));
+            // And DPM data beside it.
+            let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
+            tracks.push(format!("{}.bwa", stem.to_ascii_lowercase()));
+        }
     }
     let mut found: Vec<(u8, u32, Option<String>, Kind, &Entry)> = Vec::new();
     for entry in entries {
@@ -373,6 +390,25 @@ mod tests {
         assert_eq!(spec.opts.more_images.len(), 2);
         assert_eq!(scan.mount(2).unwrap().kind, Kind::HardDisk);
         assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+    }
+
+    #[test]
+    fn blindwrite_data_files_are_the_descriptors() {
+        let package = crate::test_dir::path("automount_b6t");
+        let _ = std::fs::remove_dir_all(&package);
+        let folder = package.join("automount");
+        std::fs::create_dir_all(&folder).unwrap();
+        let blocks = [("D.B6I", 0, 0, 10, 2352), ("D.B00", 0, 10, 10, 2352)];
+        let descriptor = crate::cdrom::b6t::build(None, &blocks, &[&[(2, 4, 1, 0, 0, 20)]], None);
+        std::fs::write(folder.join("d.b6t"), descriptor).unwrap();
+        for name in ["d.b6i", "d.b00", "d.bwa"] {
+            std::fs::write(folder.join(name), [0u8; 16]).unwrap();
+        }
+        let scan = scan(&package);
+        assert_eq!(names(scan.mount(3).unwrap()), ["d.b6t"]);
+        assert!(scan.systems.is_empty(), "{:?}", scan.systems);
+        assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+        let _ = std::fs::remove_dir_all(&package);
     }
 
     #[test]

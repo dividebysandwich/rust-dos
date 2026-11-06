@@ -204,7 +204,7 @@ fn medium(info: &DriveInfo) -> Option<Medium> {
         .flat_map(|p| {
             #[cfg(test)]
             SHEET_READS.with(|n| n.set(n.get() + 1));
-            std::iter::once(p.clone()).chain(crate::cdrom::image::cue_files(&p))
+            std::iter::once(p.clone()).chain(crate::cdrom::image::track_files(&p))
         })
         .collect();
     if info.root.is_none() && paths.is_empty() {

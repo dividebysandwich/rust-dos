@@ -156,8 +156,10 @@ fn kind_by_name(path: &Path, requested: DriveKind) -> Option<ImageKind> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     // GOG's CD images are .gog (the sectors) and .ins (the CUE sheet);
     // Steam's releases of GOG's games name the CUE sheet .inst.
-    // BloodNet from GOG names its sheet .bdn.
-    if requested == DriveKind::CdRom || matches!(ext.as_str(), "iso" | "cue" | "bin" | "gog" | "ins" | "inst" | "bdn" | "chd") {
+    // BloodNet from GOG names its sheet .bdn. BlindWrite's descriptors
+    // are .b5t and .b6t.
+    let cd = ["iso", "cue", "bin", "gog", "ins", "inst", "bdn", "chd", "b5t", "b6t"];
+    if requested == DriveKind::CdRom || cd.contains(&ext.as_str()) {
         return Some(ImageKind::Cd);
     }
     if requested == DriveKind::Floppy || matches!(ext.as_str(), "vfd" | "flp" | "360" | "720" | "1200" | "1440" | "86f") {

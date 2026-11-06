@@ -9,11 +9,13 @@
 //! commands, 3 ms a read), the disc's spin-up and a new disc's insertion,
 //! and the packet commands Windows 95 uses. Beyond DOSBox-X: the ATAPI
 //! signature after a soft reset, READ CAPACITY's last sector (not the
-//! lead-out), sense data for unknown commands, and the relative address of
-//! READ SUB-CHANNEL.
+//! lead-out), sense data for unknown commands, the relative address of
+//! READ SUB-CHANNEL, the subchannel of READ CD and READ SUB-CHANNEL from
+//! the image where it keeps it, and the sessions of READ TOC.
 
 use super::{BSY, DRDY, DRQ, DSC, ERR, Env, ticks};
 use crate::cdrom::audio::PlayState;
+use crate::cdrom::image::QPosition;
 use crate::cdrom::{DATA_SECTOR, LBA_OFFSET, RAW_SECTOR, lba_to_msf};
 
 /// The largest data block, as DOSBox-X's buffer.
@@ -188,6 +190,18 @@ const READ_CD_SIZE: [[u16; 32]; 5] = [
         2352, 2352,
     ],
 ];
+
+/// Bytes of subchannel READ CD returns after each sector for the
+/// selection in byte 10 of its packet: none, raw P-W, formatted Q, or
+/// R-W. None for the selections MMC reserves.
+fn subchannel_bytes(selection: u8) -> Option<u32> {
+    match selection & 7 {
+        0 => Some(0),
+        1 | 4 => Some(96),
+        2 => Some(16),
+        _ => None,
+    }
+}
 
 impl Atapi {
     /// The drive as a booted machine's BIOS leaves it, with the CD of
@@ -715,6 +729,7 @@ impl Atapi {
                         size += 294;
                     }
                 }
+                size += subchannel_bytes(cdb[10]).unwrap_or(0);
                 self.sector_size = size;
                 ((cdb[6] as u32) << 16 | (cdb[7] as u32) << 8 | cdb[8] as u32, size)
             }
@@ -880,23 +895,64 @@ impl Atapi {
             self.allow_writing = true;
             return false;
         }
-        let raw = self.cdb[0] == 0xBE && self.sector_size == RAW_SECTOR as u32;
-        let size = if raw { RAW_SECTOR } else { DATA_SECTOR };
-        let supported = self.cdb[0] != 0xBE || matches!(self.sector_size as usize, DATA_SECTOR | RAW_SECTOR);
-        let mut ok = supported && env.cd(self.drive).is_some();
+        // The bytes of each sector and of its subchannel: READ CD reads
+        // whole sectors, their user data or neither, with subchannel or
+        // without.
+        let (main, sub) = match self.cdb[0] {
+            0xBE => match subchannel_bytes(self.cdb[10]) {
+                Some(sub) => match self.sector_size.checked_sub(sub).map(|m| m as usize) {
+                    Some(main @ (0 | DATA_SECTOR | RAW_SECTOR)) => (Some(main), sub as usize),
+                    _ => (None, 0),
+                },
+                None => (None, 0),
+            },
+            _ => (Some(DATA_SECTOR), 0),
+        };
+        let size = main.unwrap_or(0) + sub;
+        let mut ok = main.is_some() && env.cd(self.drive).is_some();
         let mut unreadable = None;
         if ok {
             let image = env.cd(self.drive).unwrap();
+            let selection = self.cdb[10] & 7;
             for i in 0..self.xfer as usize {
                 let lba = self.lba_next + i as u32;
                 let at = i * size;
-                let read = if raw {
-                    let mut sector = [0u8; RAW_SECTOR];
-                    image.read_raw(lba, &mut sector).map(|()| self.buf[at..at + RAW_SECTOR].copy_from_slice(&sector))
-                } else {
-                    let mut sector = [0u8; DATA_SECTOR];
-                    image.read_data(lba, &mut sector).map(|()| self.buf[at..at + DATA_SECTOR].copy_from_slice(&sector))
+                let read = match main {
+                    Some(RAW_SECTOR) => {
+                        let mut sector = [0u8; RAW_SECTOR];
+                        let read = image.read_raw(lba, &mut sector);
+                        read.map(|()| self.buf[at..at + RAW_SECTOR].copy_from_slice(&sector))
+                    }
+                    Some(DATA_SECTOR) => {
+                        let mut sector = [0u8; DATA_SECTOR];
+                        let read = image.read_data(lba, &mut sector);
+                        read.map(|()| self.buf[at..at + DATA_SECTOR].copy_from_slice(&sector))
+                    }
+                    _ => Ok(()),
                 };
+                let at = at + main.unwrap_or(0);
+                let read = read.and_then(|()| match sub {
+                    0 => Ok(()),
+                    _ => {
+                        let mut linear = [0u8; 96];
+                        image.read_subchannel(lba, &mut linear)?;
+                        let out = &mut self.buf[at..at + sub];
+                        match selection {
+                            // Formatted Q: its 12 bytes, then zeros.
+                            2 => {
+                                out.fill(0);
+                                out[..12].copy_from_slice(&linear[12..24]);
+                            }
+                            // R-W without P and Q.
+                            4 => {
+                                let raw = crate::cdrom::interleave_subchannel(&linear);
+                                out.iter_mut().zip(raw).for_each(|(o, r)| *o = r & 0x3F);
+                            }
+                            _ => out.copy_from_slice(&crate::cdrom::interleave_subchannel(&linear)),
+                        }
+                        Ok(())
+                    }
+                });
                 if let Err(e) = read {
                     if crate::cdrom::image::is_unreadable(&e) {
                         self.log.push(format!("[IDE] CD-ROM read error: {}", e));
@@ -934,12 +990,14 @@ impl Atapi {
         true
     }
 
-    /// READ SUB-CHANNEL: the current position of CD audio.
+    /// READ SUB-CHANNEL: the Q subchannel at the head, where CD audio
+    /// plays or else at the last sector read, as the image keeps it or
+    /// as the disc's layout makes it; or the media catalog number.
     fn read_subchannel(&mut self, env: &mut Env) {
         let cdb = self.cdb;
         let list = cdb[3];
         self.buf[..24].fill(0);
-        if list != 1 {
+        if !matches!(list, 1 | 2) {
             self.prepare_read(8.min(self.max_bytes as usize));
             return;
         }
@@ -949,29 +1007,54 @@ impl Atapi {
             PlayState::Paused if playing => 0x12,
             _ => 0x13,
         };
-        let position = if playing { env.player.position() } else { 0 };
-        let track = env.cd(self.drive).as_ref().and_then(|i| i.track_at(position).cloned());
-        let (audio, number, index, relative) = match &track {
-            Some(t) if position < t.start => (t.is_audio(), t.number, 0u8, 0),
-            Some(t) => (t.is_audio(), t.number, 1u8, position - t.start),
-            None => (false, 0, 0, 0),
+        let position = if playing {
+            env.player.position()
+        } else {
+            self.lba_next.saturating_sub(1)
         };
+        let image = env.cd(self.drive);
+        let q = image.as_ref().and_then(|i| i.q_position(position));
+        let mcn = image
+            .as_ref()
+            .and_then(|i| i.mcn().map(|m| m.as_bytes().to_vec()));
         let b = &mut self.buf;
         b[1] = status;
         let mut len = 4;
-        if cdb[2] & 0x40 != 0 {
+        if cdb[2] & 0x40 != 0 && list == 2 {
+            b[4] = 0x02;
+            if let Some(mcn) = mcn {
+                b[8] = 0x80;
+                b[9..22].copy_from_slice(&mcn);
+            }
+            len = 24;
+        } else if cdb[2] & 0x40 != 0 {
+            let q = q.unwrap_or(QPosition {
+                control: 4,
+                track: 0,
+                index: 0,
+                relative: 0,
+                absolute: position,
+            });
             b[4] = 0x01;
-            b[5] = if audio { 0x10 } else { 0x14 };
-            b[6] = number;
-            b[7] = index;
+            b[5] = 0x10 | q.control;
+            b[6] = q.track;
+            b[7] = q.index;
             if cdb[1] & 2 != 0 {
-                let (m, s, f) = lba_to_msf(position);
+                let (m, s, f) = lba_to_msf(q.absolute);
                 b[8..12].copy_from_slice(&[0, m, s, f]);
-                // The time into the track, a duration.
+                // The time into the track, or in a pregap left until it,
+                // a duration.
+                let relative = q.relative;
                 let (m, s, f) = (relative / 75 / 60, relative / 75 % 60, relative % 75);
                 b[12..16].copy_from_slice(&[0, m as u8, s as u8, f as u8]);
             } else {
-                b[8..12].copy_from_slice(&position.to_be_bytes());
+                b[8..12].copy_from_slice(&q.absolute.to_be_bytes());
+                // Negative in a pregap.
+                let relative = if q.index == 0 {
+                    (q.relative as i32).wrapping_neg()
+                } else {
+                    q.relative as i32
+                };
                 b[12..16].copy_from_slice(&relative.to_be_bytes());
             }
             len = 16;
@@ -1011,7 +1094,7 @@ impl Atapi {
                     if out.len() + 8 > allocation {
                         break;
                     }
-                    out.extend([0, if t.is_audio() { 0x10 } else { 0x14 }, t.number, 0]);
+                    out.extend([0, 0x10 | t.control, t.number, 0]);
                     out.extend(address(t.start));
                 }
                 if out.len() + 8 <= allocation {
@@ -1019,10 +1102,12 @@ impl Atapi {
                     out.extend(address(image.leadout()));
                 }
             }
+            // The first track of the last session.
             1 => {
-                out.extend([1, 1]);
-                let t = tracks.first();
-                out.extend([0, if t.is_some_and(|t| t.is_audio()) { 0x10 } else { 0x14 }, t.map_or(1, |t| t.number), 0]);
+                let last = tracks.last().map_or(1, |t| t.session);
+                out.extend([1, last]);
+                let t = tracks.iter().find(|t| t.session == last);
+                out.extend([0, t.map_or(0x14, |t| 0x10 | t.control), t.map_or(1, |t| t.number), 0]);
                 out.extend(address(t.map_or(0, |t| t.start)));
             }
             _ => {
