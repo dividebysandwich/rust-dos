@@ -44,7 +44,18 @@ fn program(
     data: &[u8],
     f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
 ) -> Vec<u8> {
+    program_with(imports, data, |_| {}, f)
+}
+
+/// `program`, with what `extra` adds to the image (its resources).
+fn program_with(
+    imports: &[(&str, &[&str])],
+    data: &[u8],
+    extra: impl FnOnce(&mut Builder),
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> Vec<u8> {
     let mut b = Builder::exe(BASE);
+    extra(&mut b);
     let lists: Vec<Vec<Imp>> = imports
         .iter()
         .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
@@ -1173,5 +1184,137 @@ fn avivideo_draws_its_frames_in_a_child_window() {
         let mut cpu = machine("avi", core, &files, |_| {});
         run_to_exit(&mut cpu, 20_000, |_| {});
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
+    }
+}
+
+/// A WAV file of 100 ms of 8-bit mono silence at 11025 Hz.
+fn short_wav() -> Vec<u8> {
+    let samples = vec![0x80u8; 1102];
+    let mut wav = b"RIFF".to_vec();
+    wav.extend((36 + samples.len() as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    // PCM, mono, 11025 Hz, 11025 bytes a second, 1-byte blocks, 8 bits.
+    wav.extend([1, 0, 1, 0]);
+    wav.extend(11025u32.to_le_bytes());
+    wav.extend(11025u32.to_le_bytes());
+    wav.extend([1, 0, 8, 0]);
+    wav.extend(b"data");
+    wav.extend((samples.len() as u32).to_le_bytes());
+    wav.extend(samples);
+    wav
+}
+
+const SND_ASYNC: i32 = 0x1;
+const SND_MEMORY: i32 = 0x4;
+const SND_LOOP: i32 = 0x8;
+const SND_PURGE: i32 = 0x40;
+const SND_RESOURCE: i32 = 0x4_0004;
+const SND_ALIAS_ID: i32 = 0x11_0000;
+/// SND_ALIAS_SYSTEMASTERISK, sndAlias('S', '*').
+const ASTERISK: i32 = 0x2A53;
+
+/// sndPlaySoundA as an autorun program calls it, the way Windows 98's
+/// passes it to PlaySoundA with the program's module: a click that is
+/// WAVE resource 89h of the program, after a call that stops the sound.
+/// Also PlaySoundA with the module, a resource the program hasn't, and
+/// a "WAV in memory" that is a number. A bit in the exit code for each
+/// call that returned what Windows 98's does.
+fn sound_resource_program() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess", "GetModuleHandleA"]),
+        ("WINMM.dll", &["sndPlaySoundA", "PlaySoundA"]),
+    ];
+    let wav = short_wav();
+    program_with(
+        imports,
+        &[0; 0x10],
+        |b| {
+            b.named_resource("WAVE", 0x89, 0x409, &wav);
+        },
+        |a, l| {
+            a.xor(ebx, ebx)?;
+            call(a, l.import(2), &[0, SND_PURGE])?;
+            check_eax(a, 1, 0)?;
+            call(a, l.import(2), &[0x89, SND_RESOURCE | SND_ASYNC])?;
+            check_eax(a, 1, 1)?;
+            call(a, l.import(1), &[0])?;
+            a.push(SND_RESOURCE | SND_ASYNC)?;
+            a.push(eax)?;
+            a.push(0x89)?;
+            a.call(l.import(3))?;
+            check_eax(a, 1, 2)?;
+            call(a, l.import(2), &[0x8A, SND_RESOURCE | SND_ASYNC])?;
+            check_eax(a, 0, 3)?;
+            // IsBadReadPtr fails it before it reads.
+            call(a, l.import(2), &[0x89, SND_MEMORY | SND_ASYNC])?;
+            check_eax(a, 0, 4)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
+        },
+    )
+}
+
+/// A program's own WAVE resources play through sndPlaySoundA and
+/// PlaySoundA with SND_RESOURCE, as on Windows 98, and a bad pointer
+/// fails the call instead of faulting.
+#[test]
+fn sounds_play_from_the_programs_wave_resources() {
+    for core in CORES {
+        let mut cpu = machine(
+            "sound_resource",
+            core,
+            &[("T.EXE", sound_resource_program())],
+            |_| {},
+        );
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x1F, "{core:?}: {:?}", printed(&cpu));
+    }
+}
+
+/// An address no page of the program is at.
+const UNMAPPED: i32 = 0x7FF0_0000;
+
+/// Names that aren't strings to read: a pointer to no page, which
+/// IsBadStringPtrA fails, and a number with and without SND_ALIAS_ID.
+/// Then a system sound's number in a loop that isn't asynchronous and
+/// with a flag PlaySoundA doesn't know, which both fail. A bit in the
+/// exit code for each call that returned what Windows 98's does; bit 0
+/// says that the address is a bad one.
+fn sound_name_program() -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess", "IsBadReadPtr"]),
+        ("WINMM.dll", &["sndPlaySoundA", "PlaySoundA"]),
+    ];
+    program(imports, &[0; 0x10], |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[UNMAPPED, 1])?;
+        check_eax(a, 1, 0)?;
+        call(a, l.import(2), &[UNMAPPED, SND_ASYNC])?;
+        check_eax(a, 0, 1)?;
+        call(a, l.import(3), &[ASTERISK, 0, SND_ALIAS_ID | SND_ASYNC])?;
+        check_eax(a, 1, 2)?;
+        call(a, l.import(2), &[0x89, SND_ASYNC])?;
+        check_eax(a, 0, 3)?;
+        call(a, l.import(3), &[ASTERISK, 0, SND_ALIAS_ID | SND_LOOP])?;
+        check_eax(a, 0, 4)?;
+        call(a, l.import(3), &[ASTERISK, 0, SND_ALIAS_ID | SND_ASYNC | 0x100])?;
+        check_eax(a, 0, 5)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    })
+}
+
+/// PlaySoundA and sndPlaySoundA fail for a name they can't read, or a
+/// number that names no sound, without a page fault, and play a system
+/// sound by its SND_ALIAS_ID number, as on Windows 98.
+#[test]
+fn sound_names_that_are_not_strings_fail_without_a_fault() {
+    for core in CORES {
+        let mut cpu = machine("sound_name", core, &[("T.EXE", sound_name_program())], |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {:?}", printed(&cpu));
     }
 }
