@@ -883,6 +883,20 @@ fn start_program_from(
     program_bytes: Vec<u8>,
     dirs: &[&str],
 ) -> u8 {
+    start_program_set_up(test, parent_at, line, child, program_bytes, dirs, |_| {})
+}
+
+/// `start_program_from`, with `set_up` run on the machine before T.EXE
+/// starts.
+fn start_program_set_up(
+    test: &str,
+    parent_at: &str,
+    line: &str,
+    child: &str,
+    program_bytes: Vec<u8>,
+    dirs: &[&str],
+    set_up: impl FnOnce(&mut Cpu),
+) -> u8 {
     let names: &[&str] = &[
         "CreateProcessA",
         "WaitForSingleObject",
@@ -941,6 +955,7 @@ fn start_program_from(
     let mut cpu = Cpu::new(base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());
+    set_up(&mut cpu);
     cpu.load_shell();
     assert!(cpu.load_executable(parent_at, None));
     assert!(run_to_exit(&mut cpu, 200), "{}", printed(&cpu));
@@ -952,6 +967,67 @@ fn start_program_from(
 fn a_program_starts_another_and_waits_for_its_exit_code() {
     let code = start_child("child_process", "C.EXE an argument", "C.EXE", &[]);
     assert_eq!(code, 0x71);
+}
+
+/// A ZANTHP.EXE with the code the game fix `zanzarah-bmp-rows` patches
+/// at its file offsets, in its data section. It ends with 2 when the
+/// byte the patch changes reads 9Bh in its memory, and 1 when not.
+fn zanzarah_program() -> Vec<u8> {
+    use rust_dos::game_fixes::{Kind, by_name};
+    let Kind::AtLoad { programs, .. } = by_name("zanzarah-bmp-rows").unwrap().kind else {
+        panic!("zanzarah-bmp-rows patches ZANTHP.EXE as it loads");
+    };
+    let code = programs[0].1;
+    let (patch, _) = &code.patches[0];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let build = |data: &[u8], data_at: usize| {
+        program(BASE, false, imports, data, |a, l| {
+            a.movzx(eax, byte_ptr(l.at((patch.at - data_at) as u32 + 2)))?;
+            a.cmp(eax, 0x9B)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.inc(eax)?;
+            a.push(eax)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    // Where the data section starts in the file, found by a mark; the
+    // layout depends only on the sizes.
+    let mark = b"ZANZARAH DATA AT";
+    let mut data = vec![0u8; patch.at + 0x100];
+    data[..mark.len()].copy_from_slice(mark);
+    let first = build(&data, 0);
+    let data_at = first.windows(mark.len()).position(|w| w == mark).unwrap();
+    for b in code.checks.iter().chain([patch]) {
+        data[b.at - data_at..][..b.bytes.len()].copy_from_slice(b.bytes);
+    }
+    let bytes = build(&data, data_at);
+    assert_eq!(bytes.len(), first.len());
+    for b in code.checks.iter().chain([patch]) {
+        assert_eq!(&bytes[b.at..][..b.bytes.len()], b.bytes);
+    }
+    bytes
+}
+
+/// The game fix `zanzarah-bmp-rows` patches ZANTHP.EXE as CreateProcessA
+/// loads it: the program's memory has the patched byte. With the fix
+/// off it has the byte as the game shipped it.
+#[test]
+fn create_process_loads_a_program_as_a_game_fix_patches_it() {
+    let line = "ZANTHP.EXE";
+    let patched = start_program("zanzarah_fix", line, line, zanzarah_program(), &[]);
+    assert_eq!(patched, 0x21);
+    let off = start_program_set_up(
+        "zanzarah_fix_off",
+        "T.EXE",
+        line,
+        line,
+        zanzarah_program(),
+        &[],
+        |cpu| cpu.bus.game_fixes = false,
+    );
+    assert_eq!(off, 0x11);
 }
 
 /// CreateProcessA of a Windows 3.1 program, which Windows 98 runs as a

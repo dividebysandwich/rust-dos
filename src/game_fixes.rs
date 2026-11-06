@@ -20,9 +20,11 @@
 //! - [`Kind::SkipAtExec`]: a program by name, which DOS's EXEC doesn't run
 //!   but answers as if it had, with an exit code.
 //! - [`Kind::AtLoad`]: programs by name whose files are patched as DOS
-//!   loads them, from the shell or by EXEC, before any of them runs. It is
-//!   for what a program hands on before a sound driver could start, such
-//!   as the environment Lands of Lore 2's launchers give DOS/4GW.
+//!   loads them, from the shell or by EXEC, or as the built-in Windows
+//!   makes a process of them, before any of them runs. It is for what a
+//!   program hands on before a sound driver could start, such as the
+//!   environment Lands of Lore 2's launchers give DOS/4GW, and for Win32
+//!   programs, whose code is in extended memory.
 //!
 //! The Sound Blaster fixes are for the driver of two Titus games of 1993
 //! with the same sound engine: Prehistorik 2 and Blues Brothers: Jukebox
@@ -48,8 +50,9 @@
 //!   adds nothing to the centre.
 //!
 //! To add a fix: an entry in [`FIXES`] with a name of its own, a test that
-//! runs it (`tests/program/game_fixes_tests.rs`, or
-//! `tests/dos/exec_tests.rs` for a program skipped at EXEC), and a line in
+//! runs it (`tests/program/game_fixes_tests.rs`,
+//! `tests/dos/exec_tests.rs` for a program skipped at EXEC, or
+//! `tests/win32/win32_tests.rs` for a Win32 program), and a line in
 //! CONFIGURATION.md's list of game fixes.
 
 use memchr::memmem::Finder;
@@ -88,11 +91,11 @@ pub enum Kind {
         beside: Option<&'static str>,
         exit_code: u8,
     },
-    /// Programs whose files are patched as DOS loads them: each program's
-    /// file name with its code, for a file of that name that has, with
-    /// `beside`, that file in the same directory. The offsets of the code
-    /// are in the file, and only a file where every piece is as the game
-    /// shipped it is patched.
+    /// Programs whose files are patched as DOS loads them or the built-in
+    /// Windows makes a process of them: each program's file name with its
+    /// code, for a file of that name that has, with `beside`, that file in
+    /// the same directory. The offsets of the code are in the file, and
+    /// only a file where every piece is as the game shipped it is patched.
     AtLoad {
         programs: &'static [(&'static str, &'static CodePatch)],
         beside: Option<&'static str>,
@@ -411,6 +414,70 @@ const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
     )],
 };
 
+/// RenderWare 3.10's BMP reader in Zanzarah's ZANTHP.EXE allocates the
+/// buffer for one row of a BMP of more than 8 bits a pixel as
+/// `((width + 7) & ~7) * 3` bytes, enough for 24 bits, and reads each row
+/// into it as `((bits * width + 7) / 8 + 3) & ~3` bytes. A 32-bit BMP
+/// overruns it by a quarter of a row. The game has two, the 256x256 logo
+/// texture of its main menu and its mask (TEXTURES\MISC\LOG000T.BMP and
+/// LOG000M.BMP in DATA_0.PAK), read when the title screen's Next is
+/// clicked: each row runs 0xF4 bytes past the 0x310-byte block the C
+/// runtime's small-block heap gives for 0x300, and the last row read has
+/// zeros there. That zeroes the header of whatever follows, which the
+/// heap then takes for a free block with null links, and the buffer's
+/// `free` writes to address 4.
+///
+/// The game reads the same textures as DDS files instead when the 3D
+/// card has a DXTn texture format: it installs RenderWare's DDS reader
+/// only if IDirect3DDevice7::EnumTextureFormats lists one. On a card with
+/// DXTn (a GeForce or a Radeon) the BMP reader never sees these files. A
+/// Voodoo3, which rust-dos emulates and whose Direct3D driver lists only
+/// 16-bit and 8-bit palettized formats, sends them through it, and so
+/// would a real one: the overrun and the zeros come from the reader's
+/// code and the file, whatever the heap's layout.
+///
+/// The patch makes the buffer `((width + 7) & ~7) * 5` bytes, of the same
+/// length (lea ebp,[ebx+ebx*2] to lea ebp,[ebx+ebx*4]), which holds a row
+/// of up to 40 bits a pixel. Rows of 16 and 24 bits read as before; the
+/// buffer is freed after the image is read. For the Russian release by
+/// Russobit-M, version 1.008: ZANTHP.EXE of 2170880 bytes, MD5
+/// f3f68fe9bbddde746fd53d47e9483ca5, whose file offsets are its
+/// addresses less 0x400000.
+const ZANZARAH_BMP_ROWS: CodePatch = CodePatch {
+    checks: &[
+        // mov eax,[esp+44Ch] (bits) / mov edx,[esp+460h] (width) /
+        // mov ecx,[607134h] / mov ebx,7 / add ebx,edx / imul eax,edx /
+        // and ebx,-8 / lea edx,[eax+7] / sar edx,2
+        Bytes {
+            at: 0x1345D1,
+            bytes: &[
+                0x8B, 0x84, 0x24, 0x4C, 0x04, 0x00, 0x00, 0x8B, 0x94, 0x24, 0x60, 0x04, 0x00, 0x00,
+                0x8B, 0x0D, 0x34, 0x71, 0x60, 0x00, 0xBB, 0x07, 0x00, 0x00, 0x00, 0x03, 0xDA, 0x0F,
+                0xAF, 0xC2, 0x83, 0xE3, 0xF8, 0x8D, 0x50, 0x07, 0xC1, 0xFA, 0x02,
+            ],
+        },
+        // shr edx,1Dh / mov [esp],ebp (the size to allocate) / the row's
+        // size: lea edx,[edx+eax+7] / sar edx,3 / add edx,3 / and edx,-4 /
+        // mov [esp+454h],edx / call [ecx+130h] (RenderWare's malloc)
+        Bytes {
+            at: 0x1345FB,
+            bytes: &[
+                0xC1, 0xEA, 0x1D, 0x89, 0x2C, 0x24, 0x8D, 0x54, 0x02, 0x07, 0xC1, 0xFA, 0x03, 0x83,
+                0xC2, 0x03, 0x83, 0xE2, 0xFC, 0x89, 0x94, 0x24, 0x54, 0x04, 0x00, 0x00, 0xFF, 0x91,
+                0x30, 0x01, 0x00, 0x00,
+            ],
+        },
+    ],
+    irq_handler: None,
+    patches: &[(
+        Bytes {
+            at: 0x1345F8,
+            bytes: &[0x8D, 0x2C, 0x5B],
+        },
+        &[0x8D, 0x2C, 0x9B],
+    )],
+};
+
 /// The fixes rust-dos knows.
 pub const FIXES: &[Fix] = &[
     Fix {
@@ -465,6 +532,15 @@ pub const FIXES: &[Fix] = &[
                 ("SETUPG.EXE", &LOL2_SETUP_LAUNCHER),
             ],
             beside: Some("LOLG.DAT"),
+        },
+    },
+    Fix {
+        name: "zanzarah-bmp-rows",
+        game: "Zanzarah: The Hidden Portal",
+        reason: "its BMP reader overruns its row buffer on 32-bit images",
+        kind: Kind::AtLoad {
+            programs: &[("ZANTHP.EXE", &ZANZARAH_BMP_ROWS)],
+            beside: None,
         },
     },
     Fix {

@@ -1740,9 +1740,10 @@ sets up, such as the mixing fixes, also waits for a driver that hasn't
 set itself up yet. The patch is part of the game's memory, so a save
 state keeps it, and a state saved without it stays unpatched until the
 game starts again. Some patch a program's file as DOS loads it, from
-the shell or by EXEC, when every piece the fix checks is as the game
-shipped it; the file on the disk doesn't change. Others skip a program
-the game starts, with the exit code it would have given.
+the shell or by EXEC, or as the built-in Windows starts it, when every
+piece the fix checks is as the game shipped it; the file on the disk
+doesn't change. Others skip a program the game starts, with the exit
+code it would have given.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
@@ -1752,6 +1753,7 @@ the game starts, with the exit code it would have given.
 | `lol2-virtual-size` | Lands of Lore: Guardians of Destiny | In Huline's cantina, after Baccata speaks, the game stops with "Memory allocation of 1309694 bytes failed!!" | Patches its launchers, LOLG.EXE and SETUPG.EXE, when LOLG.DAT is beside them, to give DOS/4GW 32 MB of virtual memory instead of 24 MB |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
+| `zanzarah-bmp-rows` | Zanzarah: The Hidden Portal | On a 3D card without DXTn textures, such as the Voodoo3, the game faults in its heap when the title screen's Next is clicked | Patches ZANTHP.EXE as it starts to give its BMP reader a row buffer big enough for 32-bit images |
 
 The two Titus games share a sound engine that turns each signed sample
 into an unsigned 0 to 63 and scales it by the note's volume without
@@ -1785,15 +1787,29 @@ default 16 MB. The fix was made for GOG's copy, version 1.30: LOLG.EXE
 of 2847 bytes, MD5 `1036beaf32bf4d25de4109d4a245d1a0`, and SETUPG.EXE
 of 2262 bytes, MD5 `6f4b513ea0dcd4af601446bfab178b38`.
 
+Zanzarah reads its textures as DDS files when the 3D card has a DXTn
+(S3TC) texture format, and as BMP files when it hasn't, as on the
+Voodoo3. Its BMP reader, RenderWare's, makes the buffer for a row big
+enough for 24 bits a pixel and reads rows of 32 bits into it, and the
+main menu's logo and its mask are 32-bit BMPs. Every row overruns the
+buffer, the last one with zeros, which breaks the C runtime's heap: the
+game faults as soon as it frees the buffer, after Next on the title
+screen. A real PC with a Voodoo3 does the same, since the overrun comes
+from the reader and the file. The fix makes the buffer big enough for
+32-bit rows. It was made for the Russian release by Russobit-M,
+version 1.008: ZANTHP.EXE of 2170880 bytes, MD5
+`f3f68fe9bbddde746fd53d47e9483ca5`.
+
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
 for play. PLAYER.EXE is a common name (Millennia's intro player has it
 too), so only the one with DSWAP.EXE beside it is skipped.
 
-To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
-own, the game, the reason, and how to recognise it; a test that runs it
-(`tests/program/game_fixes_tests.rs`, or `tests/dos/exec_tests.rs` for a
-program skipped as it starts); and a row in the table above.
+To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of
+its own, the game, the reason, and how to recognise it; a test that runs
+it (`tests/program/game_fixes_tests.rs`, `tests/dos/exec_tests.rs` for a
+program skipped as it starts, or `tests/win32/win32_tests.rs` for a
+Win32 program); and a row in the table above.
 
 ## RetroAchievements
 

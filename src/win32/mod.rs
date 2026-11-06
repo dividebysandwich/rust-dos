@@ -850,6 +850,10 @@ pub(crate) fn create_process_from(
     if cpu.bus.win32.pool.is_none() {
         cpu.bus.win32.pool = memory::Pool::take(&mut cpu.bus, loader::MIN_MEMORY);
     }
+    // A program whose file a game fix patches as it loads (`game_fixes`:
+    // Zanzarah's ZANTHP.EXE).
+    let patched = cpu.patch_at_load(path, file);
+    let file = patched.as_deref().unwrap_or(file);
     let loaded = loader::load(cpu, path, line, file, environment)?;
     let mut process = loaded.process;
     process.priority_class = 0x20;

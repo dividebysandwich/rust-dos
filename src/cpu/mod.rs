@@ -2025,7 +2025,7 @@ impl Cpu {
 
     /// The program file `bytes`, read from `filename`, as a game fix
     /// patches it before it loads, or None when no fix applies.
-    fn patch_at_load(&mut self, filename: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    pub(crate) fn patch_at_load(&mut self, filename: &str, bytes: &[u8]) -> Option<Vec<u8>> {
         if !self.bus.game_fixes {
             return None;
         }
