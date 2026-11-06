@@ -270,6 +270,12 @@ exceptions run as the program's own code on top of that.
   the session's last process has ended, and the DOS prompt comes back
   after the commands. Both kinds of work are files on drive C:, so work
   left when the emulator was closed runs at the next session.
+- A hard disk that is a host folder has no size of its own, so its
+  free space is made up: between 1.75 and 3.75 GB through
+  `GetDiskFreeSpaceExA`, and at most just under 2 GB through
+  `GetDiskFreeSpaceA`, as Windows 95 and 98 give a real disk's space.
+  It drops as files are written. DOS's own answer for such a drive is
+  80 MB, too little for a setup that checks the space it needs.
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform
   1), or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the
@@ -614,11 +620,7 @@ shortcut:
   `C:\Program Files` and the case of names. The registry keys are the
   same but for the time of the last update check and the case of the
   Start menu folder's path. The setup asks for the second CD halfway
-  through, as on Windows 98. It warned that the disk was too small
-  while the built-in Windows reported DOS's 80 MB free on a drive that
-  is a host folder (Ignore went on); it now reports between 1.75 and
-  3.75 GB through GetDiskFreeSpaceExA, and at most just under 2 GB
-  through GetDiskFreeSpaceA. The game itself needs IMAGEHLP, AVIFIL32
+  through, as on Windows 98. The game itself needs IMAGEHLP, AVIFIL32
   and MSVFW32.
 
 Some differences hold for every setup:
