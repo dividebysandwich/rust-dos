@@ -993,6 +993,24 @@ pub fn resource_data(
     module::resource_data(cpu, module, kind, name)
 }
 
+/// The data of the resource `name` of the named type `kind` ("WAVE"), as
+/// `resource_data` gives it.
+pub fn named_resource_data(
+    cpu: &mut Cpu,
+    module: u32,
+    kind: &str,
+    name: u32,
+) -> Option<Result<(u32, u32), u32>> {
+    module::named_resource_data(cpu, module, kind, name)
+}
+
+/// IsBadStringPtrA(at, max): whether the string at `at`, up to its 0 or
+/// `max` bytes, can't be read. Unlike a service's own read, a page that
+/// isn't there doesn't fault.
+pub fn bad_string_ptr(cpu: &mut Cpu, at: u32, max: u32) -> bool {
+    virtual_memory::is_bad_string_ptr_a(cpu, &[at, max]) != Some(0)
+}
+
 /// GlobalAlloc(flags, size) for a built-in DLL (the clipboard's data):
 /// the handle, or 0.
 pub fn global_alloc(cpu: &mut Cpu, flags: u32, size: u32) -> u32 {

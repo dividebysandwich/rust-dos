@@ -118,11 +118,12 @@ opcode, `win32_version=98se` when a message names the version, more
 
 * **Enemy Infestation**: the profile in
   [a profile to start from](../CONFIGURATION.md#a-profile-to-start-from)
-  installs and runs it. For a CD copied to a folder, give the drive the
-  label `EI` ([the CD's drive letter and
-  label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
-* **Grom**: two CDs; list both images on the drive line and press
-  Ctrl+F4 when the setup asks for the second ([running the
+  installs it with its InstallShield 5 setup and runs it. For a CD
+  copied to a folder, give the drive the label `EI` ([the CD's drive
+  letter and label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
+* **Grom**: its Wise setup runs (tested with the minimum installation).
+  It is on two CDs; list both images on the drive line and press Ctrl+F4
+  when the setup asks for the second ([running the
   setup](../CONFIGURATION.md#running-the-setup-on-first-start)).
 * **Iron Helix**: `win32_depth=8` (256 colours).
 * **Moto Racer**: `win32_depth=16`; it checks the desktop's depth before
@@ -131,15 +132,36 @@ opcode, `win32_version=98se` when a message names the version, more
   over the IPX connection, the only one the game takes; it lists the
   TCP/IP one but ignores it, on Windows too (tested with the demo).
 * **Wages of War**: `win32_depth=8`; it says it must run with 256
-  colours and stops on the default desktop, which has more.
+  colours and stops on the default desktop, which has more. Its setup
+  (InstallShield 3's 32-bit engine) runs, and its archives also unpack
+  ([installer archives](#installer-archives)).
 * **Xenocracy**: its hardware check looks for `GLIDE2X.DLL`, which is
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`
-  ([docs/native-windows.md](native-windows.md)).
+  ([the system folder](builtin-windows.md#the-system-folder)).
 * **SafeDisc 2 games**: use a CD image that keeps the error-correction
   data (a BIN or CHD dumped Redump-style). An image whose unreadable
   sectors read back as good fails the check, as on Windows 98
   ([disk images](../CONFIGURATION.md#disk-images)).
+
+### Installer archives
+
+These games' InstallShield archives were unpacked by
+[`rust-dos unpack`](../CONFIGURATION.md#unpacking-installshield-installers),
+which reads them as a profile's
+[`[install]` section](../CONFIGURATION.md#unpacking-the-installer) does,
+with every file the same as Unshield's or idecomp's:
+
+* **Oni** (Europe): three cabinet sets (`data1`, `_sys1`, `_user1`).
+  Some paths hold one file per language; unpack those by file group.
+* **Railroad Tycoon II** (USA): `_SETUP.1`.
+* **Rent-A-Hero** (Europe): `data1.cab`, which holds the header, and
+  `_sys1.cab`.
+* **Wages of War**: `_SETUP.1` and five `.Z` archives.
+* **WarGames** (USA) v1.01: `data1.cab` and `_sys1.cab`, with
+  `compression=markers` (`--old-compression` for `rust-dos unpack`).
+* **Magic: The Gathering - Battlegrounds**: its cabinets have a major
+  version 7 header, which the reader refuses.
 
 ## Windows games on a Windows 95 or 98 image
 

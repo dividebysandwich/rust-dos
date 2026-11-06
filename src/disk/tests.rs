@@ -637,22 +637,39 @@ fn floppy_free_space_tracks_usage() {
     assert_eq!(disk.get_disk_free_space(5), Err(0x0F));
 }
 
-/// The built-in Windows sees a folder hard disk as a fake 1 GB one whose
-/// free space drops as files are written, while DOS keeps its 80 MB one.
+/// The built-in Windows sees 3.75 GB free on an empty folder hard disk,
+/// which drops as files are written, while DOS keeps its 80 MB disk.
 #[test]
 fn windows_sees_a_larger_hard_disk() {
     let base = scratch("windows_hd");
     fs::create_dir_all(base.join("c")).unwrap();
     let disk = DiskController::new(base.join("c"));
-    assert_eq!(disk.windows_free_space(3), Ok((8, 1 << 18, 512, 1 << 18)));
+    assert_eq!(disk.windows_free_space(3), Ok((8, 0xF_0000, 512, 0xF_0000)));
 
     fs::write(base.join("c/SETUP.DAT"), vec![0u8; 16 * 1024]).unwrap();
     assert_eq!(
         disk.windows_free_space(3),
-        Ok((8, (1 << 18) - 4, 512, 1 << 18))
+        Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
     );
     assert_eq!(disk.get_disk_free_space32(3), Ok((8, 19996, 512, 20000)));
     assert_eq!(disk.windows_free_space(5), Err(0x0F));
+}
+
+/// The built-in Windows's free space of a folder hard disk stays between
+/// 1.75 GB and 3.75 GB in 4 KB clusters, below 4 GB, however much the
+/// folder holds, and drops by each cluster written.
+#[test]
+fn windows_free_space_stays_between_1_75_and_3_75_gb() {
+    use super::search::windows_hard_disk_free as free;
+    const GB: u64 = 1 << 18;
+    assert_eq!(free(0), 0xF_0000);
+    assert_eq!(free(1), 0xF_0000 - 1);
+    assert_eq!(free(2 * GB - 1), 0x7_0001);
+    assert_eq!(free(2 * GB), 0xF_0000);
+    for used in (0..20 * GB).step_by(12_345) {
+        let f = free(used) as u64;
+        assert!((0x7_0001..=0xF_0000).contains(&f), "{used}: {f}");
+    }
 }
 
 #[test]

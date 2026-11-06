@@ -394,6 +394,12 @@ fn open(cpu: &mut Cpu, i: usize, flags: u32, p: &Parms) -> u32 {
         let d = CW_USEDEFAULT;
         (d, d, r.width(), r.height())
     };
+    if p.windowless {
+        let v = video(cpu, i);
+        v.source = [0, 0, w, h];
+        v.media = media;
+        return 0;
+    }
     if let Some(m) = &media {
         calls(cpu).media = Some((element.clone(), m.clone()));
     }

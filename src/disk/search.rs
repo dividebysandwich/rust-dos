@@ -52,10 +52,11 @@ impl DiskController {
 
     /// The free space of `drive` (0 the current one, 1 A:) as the built-in
     /// Windows tells it, in the numbers of `get_disk_free_space32`. A
-    /// folder hard disk is a larger fake disk here than DOS's 80 MB
-    /// (`WINDOWS_HARD_DISK_STEP`): Windows 95 and 98 report a real disk's
-    /// space, up to 2 GB through GetDiskFreeSpaceA, and their setup
-    /// programs check whole installs of a few hundred MB against it.
+    /// folder hard disk has more room here than DOS's fake 80 MB
+    /// (`windows_hard_disk_free`): Windows 95 and 98 report a real disk's
+    /// space, up to 2 GB through GetDiskFreeSpaceA and all of it through
+    /// GetDiskFreeSpaceExA, and their setup programs check whole installs
+    /// of more than 1 GB against it.
     pub fn windows_free_space(&self, drive: u8) -> Result<(u32, u32, u32, u32), u16> {
         self.free_space(drive, true)
     }
@@ -91,16 +92,15 @@ impl DiskController {
             // doesn't for a compressed one. DOS sees a fake 80 MB disk in
             // no more clusters than AH=36h holds, so that it doesn't count
             // in larger clusters (`old_space`) and every 4 KB written
-            // shows. The built-in Windows sees a fake 1 GB one
-            // (`WINDOWS_HARD_DISK_STEP`).
+            // shows. The built-in Windows sees between 1.75 and 3.75 GB
+            // free (`windows_hard_disk_free`).
             DriveKind::HardDisk => {
-                let (step, max_total) = if windows {
-                    (WINDOWS_HARD_DISK_STEP, u32::MAX)
-                } else {
-                    (total, 0xFFFF)
-                };
                 let used = used(u64::MAX);
-                let free = hard_disk_free(step, used);
+                let (free, max_total) = if windows {
+                    (windows_hard_disk_free(used), u32::MAX)
+                } else {
+                    (hard_disk_free(total, used), 0xFFFF)
+                };
                 let total = (used + free as u64).min(max_total as u64) as u32;
                 (spc, free, bps, total)
             }
@@ -782,18 +782,32 @@ impl DiskController {
 /// cluster as files are written, and a folder holding more than the fake
 /// size still has room for a save. Free clusters stay between half a step
 /// and one and a half: 10,001 to 30,000 of DOS's 80 MB, which signed
-/// 16-bit numbers hold, and just over 512 MB to 1.5 GB of the built-in
-/// Windows's 1 GB (`WINDOWS_HARD_DISK_STEP`).
+/// 16-bit numbers hold.
 fn hard_disk_free(step: u32, used: u64) -> u32 {
     let step = step as u64;
     (((used + step / 2) / step + 1) * step - used) as u32
 }
 
-/// The step of a folder hard disk's fake size for the built-in Windows
-/// (`windows_free_space`): 1 GB of 4 KB clusters. Its free space then
-/// stays between 512 MB and 1.5 GB, below the 2 GB that programs of the
-/// time multiply out in signed 32-bit numbers.
-const WINDOWS_HARD_DISK_STEP: u32 = 1 << 18;
+/// The free 4 KB clusters of a hard disk made of a host folder as the
+/// built-in Windows sees it (`windows_free_space`), `used` of them in
+/// use: 3.75 GB less what was written since the last 2 GB, so that free
+/// space drops cluster by cluster as files are written and stays above
+/// 1.75 GB, whatever the folder holds. That is room for an install of
+/// 1.6 GB, Omikron's Full one, as a disk of the time had. It stays
+/// below 4 GB, so a program that reads only the low 32 bits of
+/// GetDiskFreeSpaceExA's numbers still sees it all. GetDiskFreeSpaceA
+/// gives at most 2 GB of it (`old_space`), as Windows 95 and 98 do.
+pub(super) fn windows_hard_disk_free(used: u64) -> u32 {
+    (WINDOWS_FREE_MOST - used % WINDOWS_FREE_DROP) as u32
+}
+
+/// The most free space of a folder hard disk under the built-in Windows,
+/// 3.75 GB in 4 KB clusters (`windows_hard_disk_free`).
+const WINDOWS_FREE_MOST: u64 = 0xF_0000;
+
+/// How far that free space drops before it goes back up, 2 GB in 4 KB
+/// clusters (`windows_hard_disk_free`).
+const WINDOWS_FREE_DROP: u64 = 0x8_0000;
 
 /// The first slot a FAT disk's search gives the system entries listed
 /// after its own (`DiskController::fat_slots`): past any directory short

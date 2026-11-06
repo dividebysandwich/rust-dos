@@ -295,6 +295,28 @@ fn read_long_cooked_and_raw() {
 }
 
 #[test]
+fn catalog_number_and_track_flags_from_the_sheet() {
+    let dir = cdimage::scratch("mscdex_catalog");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let mut cpu = Cpu::new(dir.join("c"));
+    let image = iso("TESTDISC", &[file("HELLO.COM", &[0xC3])]);
+    let cue = mixed_disc(&dir, &image, 10);
+    let sheet = fs::read_to_string(&cue).unwrap().replace(
+        "TRACK 02 AUDIO\r\n",
+        "TRACK 02 AUDIO\r\n    FLAGS DCP PRE\r\n",
+    );
+    fs::write(&cue, format!("CATALOG 0123456789012\r\n{}", sheet)).unwrap();
+    cpu.bus
+        .mount_drive(3, &cue, MountOptions::default(), false)
+        .unwrap();
+    assert_eq!(ioctl(&mut cpu, 0x03, &[0x0B, 2]), 0x0100);
+    assert_eq!(cpu.bus.read_8(BUFFER + 6), 0x30, "copy permitted, pre-emphasis");
+    assert_eq!(ioctl(&mut cpu, 0x03, &[0x0E]), 0x0100);
+    let upc: Vec<u8> = (2..9).map(|i| cpu.bus.read_8(BUFFER + i)).collect();
+    assert_eq!(upc, [0x01, 0x23, 0x45, 0x67, 0x89, 0x01, 0x20]);
+}
+
+#[test]
 fn table_of_contents() {
     let (mut cpu, audio_start) = disc("toc");
     assert_eq!(ioctl(&mut cpu, 0x03, &[0x0A]), 0x0100);
