@@ -359,6 +359,51 @@ pub struct Effect {
     pub settle: bool,
 }
 
+/// Where jobs draw (`Voodoo::drawn`): colour buffers by their word
+/// offset, and the byte ranges of texture data queued, each with the
+/// batch of the latest job there.
+#[derive(Default)]
+struct Drawn {
+    buffers: Vec<(usize, u64)>,
+    bytes: Vec<(u32, u64, u64)>,
+}
+
+/// A place a job draws into (`Voodoo::note_drawn`).
+pub(crate) enum Place {
+    Buffer(usize),
+    Bytes(u32, u64),
+}
+
+impl Drawn {
+    fn note(&mut self, place: Place, batch: u64) {
+        match place {
+            Place::Buffer(dest) => match self.buffers.iter_mut().find(|(d, _)| *d == dest) {
+                Some(entry) => entry.1 = batch,
+                None => self.buffers.push((dest, batch)),
+            },
+            // A texture downloaded again over the same bytes keeps one
+            // entry, as a buffer drawn into again does.
+            Place::Bytes(at, len) => {
+                match self.bytes.iter_mut().find(|(a, l, _)| (*a, *l) == (at, len)) {
+                    Some(entry) => entry.2 = batch,
+                    None => self.bytes.push((at, len, batch)),
+                }
+            }
+        }
+    }
+
+    /// The jobs in batches up to `mark` are drawn with it.
+    fn forget_before(&mut self, mark: u64) {
+        self.buffers.retain(|&(_, batch)| batch > mark);
+        self.bytes.retain(|&(_, _, batch)| batch > mark);
+    }
+
+    fn clear(&mut self) {
+        self.buffers.clear();
+        self.bytes.clear();
+    }
+}
+
 /// A swap waiting for the vertical retrace it is due at: the retrace's
 /// number (`CrtTiming::retraces`) and when it begins, in PIT ticks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -572,6 +617,18 @@ pub struct Voodoo {
     /// they last finished.
     pool: workers::Pool,
     drawn_to: Vec<usize>,
+    /// What the picture shown needs drawn (`catch_up_shown`): the last
+    /// batch given out before the swap that showed it. None where that
+    /// isn't known: no swap since a load or a reset, or jobs held back
+    /// then.
+    front_jobs: Option<u64>,
+    /// The same for each Banshee swap waiting for its retrace, beside
+    /// its `overlay_queue`.
+    swap_marks: VecDeque<Option<u64>>,
+    /// Where the jobs given out or waiting since the workers last
+    /// finished draw (`note_drawn`), each with the batch of the latest
+    /// job there: one after `front_jobs` if it is a later batch.
+    drawn: RefCell<Drawn>,
     /// Jobs were given to the workers since they last finished, and the
     /// texture units queued triangles read.
     outstanding: Cell<bool>,
@@ -698,6 +755,9 @@ impl Voodoo {
             palette_dirty: true,
             pool: workers::Pool::new(workers),
             drawn_to: Vec::new(),
+            front_jobs: None,
+            swap_marks: VecDeque::new(),
+            drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
             footprint: RefCell::new(Footprint::default()),
@@ -768,6 +828,8 @@ impl Voodoo {
         self.stats = Stats::default();
         self.clut = default_clut();
         self.swaps.clear();
+        self.swap_marks.clear();
+        self.front_jobs = None;
         self.last_swap = 0;
         self.fifo_writes = 0;
         self.capped_at = 0;
@@ -1006,6 +1068,7 @@ impl Voodoo {
         self.submit_words();
         self.release_backlog();
         self.pool.flush();
+        self.drawn.borrow_mut().clear();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
         self.footprint.borrow_mut().clear();
@@ -1508,19 +1571,106 @@ impl Voodoo {
             // Jobs may still be drawing into what it shows. Those that draw
             // elsewhere, into the next frame, go on beside the program.
             if draw && self.writes_queue() {
-                self.flush();
+                self.catch_up_shown();
             }
             return draw;
         }
         // Jobs may still be drawing into the buffer shown.
         let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
         if front != NONE && self.drawn_to.contains(&(front as usize / 2)) {
-            self.flush();
+            self.catch_up_shown();
         }
         if self.palette_dirty {
             self.build_palette();
         }
         changed || switched
+    }
+
+    /// Wait for the jobs the picture shown needs: those given out before
+    /// the swap that showed it (`front_jobs`). The later ones draw the
+    /// next frame into another buffer, beside the program, unless one of
+    /// them draws into what the card shows now: then, or where the swap's
+    /// jobs aren't known, wait for all of them. What they draw into is
+    /// looked at now, not as they come, so a buffer drawn into while it
+    /// was shown (double buffering's next frame, sent before the retrace
+    /// of its swap) and hidden since doesn't count, and one drawn into
+    /// while hidden and shown since does. Of the later jobs, the queue
+    /// keeps at most half of what it may hold (`Pool::wait_for_shown`).
+    fn catch_up_shown(&mut self) {
+        match self.front_jobs {
+            Some(number)
+                if self.words.borrow().is_empty()
+                    && self.backlog.borrow().is_empty()
+                    && !self.gpu_behind.get()
+                    && !self.drawn_shown(number) =>
+            {
+                self.pool.wait_for_shown(number)
+            }
+            _ => self.flush(),
+        }
+    }
+
+    /// Whether a job in a batch after `number` draws into what the card
+    /// shows.
+    fn drawn_shown(&self, number: u64) -> bool {
+        let drawn = self.drawn.borrow();
+        let mut buffers = drawn.buffers.iter().filter(|&&(_, batch)| batch > number);
+        let mut bytes = drawn.bytes.iter().filter(|&&(_, _, batch)| batch > number);
+        match &self.banshee {
+            Some(b) => {
+                buffers.any(|&(dest, _)| b.shows(dest as u32 * 2))
+                    || bytes.any(|&(at, len, _)| b.shows_bytes(at, Some(len)))
+            }
+            None => {
+                let front = self.color_buffer(0);
+                buffers.any(|&(dest, _)| front == Some(dest))
+            }
+        }
+    }
+
+    /// A swap shows what the jobs up to batch `mark` drew
+    /// (`swap_mark`): what came before it is drawn when the picture is.
+    /// A swap still waiting for its retrace has an earlier mark when one
+    /// is shown at once past it, and what was drawn after its mark stays
+    /// noted for when it shows its buffer.
+    fn shown_up_to(&mut self, mark: Option<u64>) {
+        self.front_jobs = mark;
+        if let Some(mark) = mark {
+            let waiting = self.swap_marks.iter().flatten().copied().min();
+            let drawn = waiting.map_or(mark, |w| w.min(mark));
+            self.drawn.get_mut().forget_before(drawn);
+        }
+    }
+
+    /// The job just submitted draws into `place`: colour buffer `dest`
+    /// (a word offset), or `len` bytes from byte `at`.
+    pub(crate) fn note_drawn(&self, place: Place) {
+        // Frame buffer writes waiting (`words`) go out with the next job
+        // submitted, or at the next swap, in the batch after the last one
+        // given out. Jobs held back for the OpenGL renderer go out in a
+        // batch not known yet, which may come after a swap's from before
+        // the recording: noted as later than any, they hold the picture
+        // until the workers catch up.
+        let batch = if self.deferring() {
+            u64::MAX
+        } else if self.words.borrow().is_empty() {
+            self.pool.latest_batch()
+        } else {
+            self.pool.next_batch()
+        };
+        self.drawn.borrow_mut().note(place, batch);
+    }
+
+    /// The batch the jobs submitted so far end with, given out (with the
+    /// frame buffer writes waiting): what a swap now needs drawn before
+    /// the buffer it shows is. None while jobs are held back for the
+    /// OpenGL renderer, which `catch_up_shown` doesn't wait for apart.
+    pub(crate) fn swap_mark(&self) -> Option<u64> {
+        if self.recording() || !self.backlog.borrow().is_empty() {
+            return None;
+        }
+        self.submit_words();
+        Some(self.pool.mark())
     }
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
@@ -1666,7 +1816,9 @@ impl Voodoo {
     }
 
     fn swap_now(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        let mark = self.swap_mark();
         self.rotate_buffers();
+        self.shown_up_to(mark);
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
             self.last_swap = current;
@@ -1820,6 +1972,12 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        // The swaps' batches were the workers' before the load: each swap
+        // still pending waits for all, and those queued later keep their
+        // place beside `overlay_queue`.
+        let pending = self.banshee.as_ref().map_or(0, |b| b.overlay_queue.len());
+        self.swap_marks = std::iter::repeat_n(None, pending).collect();
+        self.front_jobs = None;
         // The memory loaded is newer than anything on the GPU.
         self.gpu.get_mut().tracker.mark_all();
         self.gpu_behind.set(false);

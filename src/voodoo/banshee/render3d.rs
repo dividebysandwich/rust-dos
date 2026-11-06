@@ -239,9 +239,10 @@ impl Voodoo {
         self.backlog.borrow_mut().swapped();
         let addr = self.reg[LEFT_OVERLAY_BUF] & 0xFF_FFFF;
         let current = self.retraces(now.ns);
+        let mark = self.swap_mark();
         if data & 1 == 0 {
             self.last_swap = current;
-            self.banshee_show(addr);
+            self.banshee_show(addr, mark);
             return;
         }
         let interval = ((data >> 1) & 0xFF) as u64;
@@ -251,12 +252,14 @@ impl Voodoo {
         self.swaps.push_back(PendingSwap { retrace, due });
         if let Some(b) = &mut self.banshee {
             b.overlay_queue.push_back(addr);
+            self.swap_marks.push_back(mark);
         }
         effect.reschedule = true;
     }
 
-    /// A swap happened: the overlay shows `addr`.
-    fn banshee_show(&mut self, addr: u32) {
+    /// A swap happened: the overlay shows `addr`, which needs the jobs up
+    /// to batch `mark` drawn (`swap_mark`).
+    fn banshee_show(&mut self, addr: u32, mark: Option<u64>) {
         if let Some(b) = &mut self.banshee {
             b.overlay_addr = addr;
             b.swap_count = b.swap_count.saturating_sub(1);
@@ -264,6 +267,7 @@ impl Voodoo {
         }
         self.swapped += 1;
         self.display_dirty = true;
+        self.shown_up_to(mark);
     }
 
     /// `retired` swaps happened: their buffers shown, and the command
@@ -274,8 +278,10 @@ impl Voodoo {
                 .banshee
                 .as_mut()
                 .and_then(|b| b.overlay_queue.pop_front());
+            // After a load the swaps have no batches: wait for all.
+            let mark = self.swap_marks.pop_front().flatten();
             if let Some(addr) = addr {
-                self.banshee_show(addr);
+                self.banshee_show(addr, mark);
             }
         }
         if retired > 0 && self.swaps.is_empty() {
@@ -401,6 +407,265 @@ pub(crate) mod tests {
             float(v, FSTART_G, rgb.1);
             float(v, FSTART_B, rgb.2);
             reg3d(v, FTRIANGLE_CMD, 0);
+        }
+    }
+
+    /// A gate the next frame's job waits at (`Job::Hold`).
+    pub(crate) type Gate = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+    fn open(gate: &Gate) {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    /// The picture comes with the job at `gate` still held. If it waits
+    /// for that job after all, the gate opens after a while and the test
+    /// fails, instead of waiting for ever.
+    pub(crate) fn picture_comes_before(v: &mut Voodoo, gate: &Gate, label: &str) {
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|s| {
+            let watchdog = s.spawn(move || {
+                let late = wait
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .is_err();
+                if late {
+                    open(gate);
+                }
+                late
+            });
+            v.catch_up_shown();
+            let _ = done.send(());
+            assert!(!watchdog.join().unwrap(), "{label}: the picture waited");
+        });
+        assert!(v.pool.busy(), "{label}: the next frame waits at the gate");
+    }
+
+    /// The picture waits for every job, the one at `gate` too.
+    pub(crate) fn picture_waits_for_all(v: &mut Voodoo, gate: &Gate, label: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let returned = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let early = returned.load(Ordering::SeqCst);
+                open(gate);
+                assert!(!early, "{label}: it waits for all");
+            });
+            v.catch_up_shown();
+            returned.store(true, Ordering::SeqCst);
+        });
+        assert!(!v.pool.busy(), "{label}");
+    }
+
+    /// Double buffering, as Myth draws: the next frame goes into the
+    /// buffer shown until its swap's retrace, and is sent before it. The
+    /// picture made after the retrace shows the other buffer, and doesn't
+    /// wait for that frame.
+    #[test]
+    fn the_next_frame_drawn_before_the_retrace_doesnt_hold_the_picture() {
+        use super::super::super::workers::Job;
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, LEFT_OVERLAY_BUF, a);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        // A frame into B, swapped at the next retrace; the next one into A,
+        // shown meanwhile, held.
+        v.mark_drawn(b as usize / 2);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
+        let due = v.next_event().expect("the swap waits for a retrace");
+        v.service(Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        });
+        assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, b);
+        picture_comes_before(&mut v, &gate, "double buffering");
+        open(&gate);
+        v.flush();
+    }
+
+    /// Frame buffer writes into the buffer shown, queued right after the
+    /// swap, go out with the next job, in a batch after the swap's: the
+    /// picture waits for them.
+    #[test]
+    fn frame_buffer_writes_queued_after_a_swap_hold_the_picture() {
+        use super::super::super::workers::{Job, Word};
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let shown = 0x10_0000u32;
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        let word = |value| Word {
+            row: 0,
+            at: shown / 2,
+            value,
+        };
+        let fb = v.fbi.ram.clone();
+        let words = vec![word(0x1234)];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        // A write into it waits behind the jobs, as `lfb_write` queues
+        // it, and the next frame's job, held, takes it out.
+        assert!(v.writes_queue());
+        v.queue_words(&[word(0x5678)]);
+        v.mark_drawn(shown as usize / 2);
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        picture_waits_for_all(&mut v, &gate, "frame buffer write");
+        assert_eq!(v.fbi.ram.get(shown as usize / 2), 0x5678);
+    }
+
+    /// A swap shown at once while one waits for its retrace: the jobs
+    /// drawn between the two into the waiting swap's buffer stay noted,
+    /// and the picture waits for them once that buffer is shown.
+    #[test]
+    fn a_swap_past_a_waiting_one_keeps_what_that_one_shows() {
+        use super::super::super::workers::Job;
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let (a, b) = (0x10_0000u32, 0x20_0000u32);
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, LEFT_OVERLAY_BUF, a);
+        reg3d(&mut v, SWAPBUFFER_CMD, 1);
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.mark_drawn(a as usize / 2);
+        // Written straight to the register, the swap doesn't wait.
+        reg3d(&mut v, LEFT_OVERLAY_BUF, b);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        let due = v.next_event().expect("the first swap waits for a retrace");
+        v.service(Now {
+            ns: 1_000_000_000,
+            ticks: due,
+        });
+        assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, a);
+        picture_waits_for_all(&mut v, &gate, "the waiting swap's buffer");
+    }
+
+    /// Triangles held back for the OpenGL renderer go out in a batch not
+    /// known as they come. Drawn into the buffer shown after a swap from
+    /// before the recording, and given out when it stops, they hold the
+    /// picture.
+    #[test]
+    fn jobs_held_for_the_renderer_hold_the_picture_once_given_out() {
+        use super::super::super::workers::Job;
+        use super::super::{VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let shown = 0x10_0000u32;
+        let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+        let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+        v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+        reg3d(&mut v, COL_BUFFER_ADDR, shown);
+        reg3d(&mut v, COL_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, AUX_BUFFER_ADDR, 0x20_0000);
+        reg3d(&mut v, AUX_BUFFER_STRIDE, 1280);
+        reg3d(&mut v, FBZ_MODE, 1 << 9);
+        reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
+        reg3d(&mut v, SWAPBUFFER_CMD, 0);
+        v.set_mirror(true);
+        rectangle(&mut v, (0.0, 0.0, 16.0, 16.0), (255.0, 0.0, 0.0));
+        assert!(v.writes_queue(), "the rectangle is held back");
+        // The workers wait at a gate, which goes out ahead of it.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        v.set_mirror(false);
+        picture_waits_for_all(&mut v, &gate, "held back for the renderer");
+        assert_eq!(v.fbi.ram.get(shown as usize / 2), 0xF800);
+    }
+
+    /// After a swap the picture waits for the jobs given out before it,
+    /// and the next frame's go on drawing beside the program; unless one
+    /// of those draws into what is shown when the picture is made, which
+    /// waits for all.
+    #[test]
+    fn the_picture_waits_for_the_frame_a_swap_shows() {
+        use super::super::super::workers::{Job, Word};
+        use super::super::{VID_DESKTOP_OVERLAY_STRIDE, VID_PROC_CFG, VIDPROC_ENABLE};
+
+        let shown = 0x10_0000;
+        let changes = [
+            "drawn into",
+            "texture written",
+            "drawn while hidden",
+            "drawn into a swap's to come",
+            "desktop moved",
+            "stride changed",
+        ];
+        for change in changes {
+            let mut v = Voodoo::with_workers(Board::Voodoo3, 2);
+            let cfg = VIDPROC_ENABLE | VIDPROC_OVERLAY_ENABLE;
+            v.write(VID_PROC_CFG, cfg, u32::MAX, Now::default());
+            // The frame shown: a word of the buffer at 100000h.
+            let word = Word {
+                row: 0,
+                at: shown / 2,
+                value: 0x1234,
+            };
+            let fb = v.fbi.ram.clone();
+            let words = vec![word];
+            v.submit_outside(Job::Pixels { fb, words }, None);
+            reg3d(&mut v, LEFT_OVERLAY_BUF, shown);
+            reg3d(&mut v, SWAPBUFFER_CMD, 0);
+            // A swap at the next retrace, to the buffer at 300000h.
+            let next = 0x30_0000;
+            if change == "drawn into a swap's to come" {
+                reg3d(&mut v, LEFT_OVERLAY_BUF, next);
+                reg3d(&mut v, SWAPBUFFER_CMD, 1);
+            }
+            // The next frame's jobs, held.
+            let gate = Gate::default();
+            v.submit_outside(Job::Hold(gate.clone()), None);
+            picture_comes_before(&mut v, &gate, change);
+            assert_eq!(v.fbi.ram.get(shown as usize / 2), 0x1234);
+
+            let write = |v: &mut Voodoo, reg, value| {
+                v.write(reg, value, u32::MAX, Now::default());
+            };
+            match change {
+                "drawn into" => v.mark_drawn(shown as usize / 2),
+                "texture written" => {
+                    assert!(v.banshee_texture_queue(shown as usize, &[1, 2, 3, 4]));
+                }
+                // Drawn while the overlay is off, then shown again.
+                "drawn while hidden" => {
+                    write(&mut v, VID_PROC_CFG, VIDPROC_ENABLE);
+                    v.mark_drawn(shown as usize / 2);
+                    write(&mut v, VID_PROC_CFG, cfg);
+                }
+                // Drawn while the swap waits, which then shows it.
+                "drawn into a swap's to come" => {
+                    v.mark_drawn(next as usize / 2);
+                    let due = v.next_event().expect("the swap waits for a retrace");
+                    v.service(Now {
+                        ns: 1_000_000_000,
+                        ticks: due,
+                    });
+                    assert_eq!(v.banshee.as_ref().unwrap().overlay_addr, next);
+                }
+                // Drawn into a buffer the desktop then shows.
+                "desktop moved" => {
+                    v.mark_drawn(0x20_0000 / 2);
+                    write(&mut v, VID_DESKTOP_START_ADDR, 0x20_0000);
+                }
+                // Texture data past the overlay's rows, which a wider stride
+                // then shows.
+                _ => {
+                    assert!(v.banshee_texture_queue(shown as usize + 0x100, &[1, 2, 3, 4]));
+                    write(&mut v, VID_DESKTOP_OVERLAY_STRIDE, 1280 << 16 | 1280);
+                }
+            }
+            picture_waits_for_all(&mut v, &gate, change);
         }
     }
 

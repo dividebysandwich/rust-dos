@@ -14,8 +14,9 @@
 //! emulator waits for the workers (`flush`) before anything that reads
 //! what they draw: frame buffer reads, other texture writes the queued
 //! triangles may read, the pixel counters, and a save state. The queue
-//! has a limit (`MAX_BATCHES`, `MAX_BYTES`): past it the emulator waits
-//! for a batch to finish, so what such a read waits for stays short.
+//! has limits (`MAX_JOBS`, `MAX_BATCHES`, `MAX_BYTES`): past one the
+//! emulator waits for a batch to finish, so what such a read waits for
+//! has a bound.
 //! With no workers (the browser, a single core) jobs run at once.
 
 use super::Voodoo;
@@ -147,6 +148,8 @@ struct Queue {
     last: u64,
     /// The last batch each worker finished.
     done: Vec<u64>,
+    /// The jobs in `batches`.
+    jobs: usize,
     /// The bytes of `Job::Bytes` in `batches`.
     bytes: usize,
     /// How many times the emulator found the queue full.
@@ -166,8 +169,16 @@ impl Queue {
     /// count from the slowest worker's; a panic counts as finished, and
     /// reaches the emulator at the next `flush`.
     fn full(&self) -> bool {
+        self.over(1) && !self.shutdown
+    }
+
+    /// Whether the queue holds more than `1 / share` of a limit: of the
+    /// batches (from the slowest worker's), the jobs or the bytes.
+    fn over(&self, share: usize) -> bool {
         let oldest = self.done.iter().copied().min().unwrap_or(self.last);
-        (self.last - oldest > MAX_BATCHES || self.bytes > MAX_BYTES) && !self.shutdown
+        (self.last - oldest) * share as u64 > MAX_BATCHES
+            || self.jobs * share > MAX_JOBS
+            || self.bytes * share > MAX_BYTES
     }
 }
 
@@ -194,6 +205,8 @@ pub struct Pool {
     /// Jobs not yet given out.
     pending: Mutex<Vec<Job>>,
     workers: usize,
+    /// The queue's `last`, read without its lock (`latest_batch`).
+    given_out: std::sync::atomic::AtomicU64,
     #[cfg(not(target_arch = "wasm32"))]
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -205,15 +218,36 @@ const BATCH: usize = 128;
 /// a time, and the workers hand them back as fast as they finish them.
 const SPARE_BATCHES: usize = 8;
 
+/// Jobs the workers may have before the emulator waits for them: what
+/// a frame buffer read or a save state may have to wait for. 8,192
+/// triangles are 64 full batches.
+const MAX_JOBS: usize = 8192;
+
 /// Batches the workers may have before the emulator waits for them.
-/// Myth downloads over a texture in use 46 times a game frame, each a
-/// batch of bytes and one of what came before, and the workers finish
-/// such a pair in about 0.26 ms: 64 batches are about 8 ms of work,
-/// well inside a host frame, and most of what a game frame gives them
-/// when they keep up. Full batches of triangles reach it at 8,192
-/// triangles, where the workers are behind anyway. The limit counts
-/// batches, not time: 64 of the largest triangles take longer.
-const MAX_BATCHES: u64 = 64;
+/// Bytes (`Job::Bytes`) go out as a batch of their own, after one of
+/// what came before, and the workers meet around them: Myth downloads
+/// over a texture in use 46 times a game frame, and the workers finish
+/// such a pair in about 0.26 ms. 512 batches are 256 such pairs, the
+/// batches of five or so of Myth's game frames, and about 70 ms of the
+/// workers' time: a frame buffer read behind a full queue of them waits
+/// that long. The queue holds the frame after the one a swap shows
+/// (`Voodoo::catch_up_shown`), so the program draws it while the
+/// workers finish the one before: at 64 batches the emulator waited for
+/// room within a frame instead, and Myth's emulation thread was busy 63%
+/// of the time at 170,000 cycles, against 40% here.
+const MAX_BATCHES: u64 = 512;
+
+/// The share of each limit the queue may keep when the picture is made
+/// (`Pool::wait_for_shown`): half. The jobs after a swap draw the next
+/// frame beside the program, but a burst of drawing (Myth sends one now
+/// and then, texture downloads and all) that fills the queue would then
+/// meet what the frame before left, and wait for both: at 265,000
+/// cycles, a few frames of 66-72 ms, against 58-63 ms on main. Kept to
+/// half, the longest are 57-58 ms, at the same speed and sound
+/// underruns, and a 99th percentile frame 3 ms longer (41-43 ms, against
+/// 52 ms on main). A quarter brings that to 47-49 ms for no shorter
+/// longest frame.
+const SHOWN_SHARE: usize = 2;
 
 /// Bytes of texture data the queue may hold before the emulator waits:
 /// about 20 game frames of Myth's. Against a program that downloads a
@@ -233,6 +267,7 @@ impl Pool {
                 batches: VecDeque::new(),
                 last: 0,
                 done: vec![0; workers],
+                jobs: 0,
                 bytes: 0,
                 full: 0,
                 stats: Stats::default(),
@@ -257,6 +292,7 @@ impl Pool {
             shared,
             pending: Mutex::new(Vec::new()),
             workers,
+            given_out: std::sync::atomic::AtomicU64::new(0),
             #[cfg(not(target_arch = "wasm32"))]
             threads,
         }
@@ -306,10 +342,21 @@ impl Pool {
     /// The jobs `pending` holds, to give out, leaving in their place a
     /// batch the workers have finished with (`Queue::spare`) or a new one
     /// with room for `BATCH`. One that grew from nothing would move its
-    /// jobs each time it doubled.
+    /// jobs each time it doubled. A few jobs, as go out before texture
+    /// data (`Job::Bytes`), move to a batch of their own size, and
+    /// `pending` keeps its room: the queue holds hundreds of such batches
+    /// (`MAX_BATCHES`), and with room for `BATCH` each they would take
+    /// about 100 KB apiece.
     fn take_pending(&self, pending: &mut Vec<Job>) -> Vec<Job> {
         if pending.is_empty() {
             return Vec::new();
+        }
+        if pending.len() < BATCH / 4 {
+            // `mem::take` would hand out the room this keeps.
+            #[allow(clippy::drain_collect)]
+            let few = pending.drain(..).collect();
+            pending.reserve(BATCH);
+            return few;
         }
         let spare = self.shared.queue.lock().unwrap().spare.pop();
         std::mem::replace(pending, spare.unwrap_or_else(|| Vec::with_capacity(BATCH)))
@@ -322,6 +369,8 @@ impl Pool {
         let mut queue = self.shared.queue.lock().unwrap();
         queue.last += 1;
         let number = queue.last;
+        self.given_out.store(number, std::sync::atomic::Ordering::Relaxed);
+        queue.jobs += batch.len();
         queue.bytes += bytes_of(&batch);
         queue.batches.push_back((number, Arc::new(batch)));
         self.shared.work.notify_all();
@@ -338,19 +387,7 @@ impl Pool {
     /// Give out what is pending and wait until everything is drawn. A
     /// worker's panic comes back here.
     pub fn flush(&self) {
-        if self.workers == 0 {
-            return;
-        }
-        let batch = self.take_pending(&mut self.pending.lock().unwrap());
-        self.publish(batch);
-        let mut queue = self.shared.queue.lock().unwrap();
-        while queue.done.iter().any(|&d| d < queue.last) {
-            queue = self.shared.idle.wait(queue).unwrap();
-        }
-        if let Some(panic) = queue.panic.take() {
-            drop(queue);
-            std::panic::resume_unwind(panic);
-        }
+        self.wait_for(self.mark());
     }
 
     /// Give out what is pending, without waiting for it to be drawn.
@@ -360,6 +397,59 @@ impl Pool {
         }
         let batch = self.take_pending(&mut self.pending.lock().unwrap());
         self.publish(batch);
+    }
+
+    /// The batch the job submitted last is in, or goes out in: the next
+    /// one while it waits, else the last given out.
+    pub fn latest_batch(&self) -> u64 {
+        let waiting = !self.pending.lock().unwrap().is_empty();
+        self.given_out.load(std::sync::atomic::Ordering::Relaxed) + waiting as u64
+    }
+
+    /// The batch a job submitted now goes out in, unless it goes out on
+    /// its own (`Job::Bytes`): the one after the last given out.
+    pub fn next_batch(&self) -> u64 {
+        self.given_out.load(std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
+    /// Give out what is pending, and the number of the last batch given
+    /// out: `wait_for` it waits for the jobs submitted so far.
+    pub fn mark(&self) -> u64 {
+        if self.workers == 0 {
+            return 0;
+        }
+        self.give_out();
+        self.shared.queue.lock().unwrap().last
+    }
+
+    /// Wait until every worker drew batch `number` (from `mark`) and those
+    /// before it, leaving the later ones drawing. A worker's panic comes
+    /// back here.
+    pub fn wait_for(&self, number: u64) {
+        self.wait_until(number, None);
+    }
+
+    /// The same for the picture: then also until the queue holds at most
+    /// its share (`SHOWN_SHARE`) of each limit.
+    pub fn wait_for_shown(&self, number: u64) {
+        self.wait_until(number, Some(SHOWN_SHARE));
+    }
+
+    fn wait_until(&self, number: u64, share: Option<usize>) {
+        if self.workers == 0 {
+            return;
+        }
+        let mut queue = self.shared.queue.lock().unwrap();
+        while queue.done.iter().any(|&d| d < number)
+            || share
+                .is_some_and(|share| queue.over(share) && !queue.shutdown && queue.panic.is_none())
+        {
+            queue = self.shared.idle.wait(queue).unwrap();
+        }
+        if let Some(panic) = queue.panic.take() {
+            drop(queue);
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// Whether jobs are waiting or being drawn.
@@ -422,6 +512,9 @@ impl Voodoo {
             bytes: data.to_vec(),
         };
         self.submit_outside(job, None);
+        // The bytes may land in what the card shows when the picture is
+        // made, which then waits for them.
+        self.note_drawn(super::Place::Bytes(at as u32, data.len() as u64));
         true
     }
 }
@@ -477,6 +570,7 @@ fn worker(shared: Arc<Shared>, k: usize, n: usize) {
         let oldest = queue.done.iter().copied().min().unwrap_or(0);
         while queue.batches.front().is_some_and(|(number, _)| *number <= oldest) {
             if let Some((_, batch)) = queue.batches.pop_front() {
+                queue.jobs -= batch.len();
                 queue.bytes -= bytes_of(&batch);
                 if let Ok(mut jobs) = Arc::try_unwrap(batch)
                     && jobs.capacity() >= BATCH
@@ -616,16 +710,38 @@ mod tests {
         assert!(!v.pool.busy());
     }
 
-    /// The emulator stops at the batches and queued bytes allowed, with
-    /// the workers held at the first job, and goes on when they do.
+    /// The emulator stops at the batches, jobs and queued bytes allowed,
+    /// with the workers held at the first job, and goes on when they do.
     #[test]
     fn a_full_queue_holds_the_emulator_until_the_workers_go_on() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        // With the held job, the 64th batch of bytes reaches the first
-        // limit, and the 5th quarter of the bytes allowed the second.
-        for (size, stops_after) in [(1, MAX_BATCHES as usize - 1), (MAX_BYTES / 4, 4)] {
+        let fb = Vram::new(MAX_BYTES / 2);
+        let bytes = |size: usize| {
+            let fb = fb.clone();
+            move || Job::Bytes {
+                fb: fb.clone(),
+                at: 0,
+                bytes: vec![1; size],
+            }
+        };
+        let row = || Job::Rows {
+            fb: fb.clone(),
+            base: 0,
+            rowpixels: 1,
+            rows: (0, 1),
+            columns: (0, 1),
+            value: 1,
+        };
+        // With the held job: the 512th batch of bytes reaches the batch
+        // limit, the 8,192nd row (64 full batches) the job limit, and the
+        // 5th quarter of the bytes allowed the byte limit.
+        let cases: [(&(dyn Fn() -> Job + Sync), usize); 3] = [
+            (&bytes(1), MAX_BATCHES as usize - 1),
+            (&row, MAX_JOBS - 1),
+            (&bytes(MAX_BYTES / 4), 4),
+        ];
+        for (job, stops_after) in cases {
             let pool = Pool::new(2);
-            let fb = Vram::new(MAX_BYTES / 2);
             let gate = Gate::default();
             let submitted = AtomicUsize::new(0);
             let total = 3 * (stops_after + 1);
@@ -634,8 +750,7 @@ mod tests {
                     pool.submit(Job::Hold(gate.clone()));
                     pool.give_out();
                     for _ in 0..total {
-                        let (fb, bytes) = (fb.clone(), vec![1; size]);
-                        pool.submit(Job::Bytes { fb, at: 0, bytes });
+                        pool.submit(job());
                         submitted.fetch_add(1, Ordering::SeqCst);
                     }
                 });
@@ -648,8 +763,77 @@ mod tests {
             });
             assert_eq!(submitted.load(Ordering::SeqCst), total);
             pool.flush();
-            assert_eq!(pool.shared.queue.lock().unwrap().bytes, 0);
+            let queue = pool.shared.queue.lock().unwrap();
+            assert_eq!((queue.jobs, queue.bytes), (0, 0));
         }
+    }
+
+    /// The picture waits for the frame shown and then until the queue
+    /// holds at most half of a limit: the next frame goes on drawing, but
+    /// not a full queue of it. The first gate holds more than half the
+    /// jobs allowed behind it, the second only a few, so the picture
+    /// comes once the first opens, with the second still shut.
+    #[test]
+    fn the_picture_waits_until_the_queue_is_half_empty() {
+        use std::time::Duration;
+        let pool = Pool::new(2);
+        let fb = Vram::new(0x1000);
+        let row = || Job::Rows {
+            fb: fb.clone(),
+            base: 0,
+            rowpixels: 1,
+            rows: (0, 1),
+            columns: (0, 1),
+            value: 1,
+        };
+        pool.submit(row());
+        let shown = pool.mark();
+        // The next frame: more than half the jobs allowed, then a few.
+        let first = Gate::default();
+        let second = Gate::default();
+        pool.submit(Job::Hold(first.clone()));
+        for _ in 0..MAX_JOBS / 2 + BATCH {
+            pool.submit(row());
+        }
+        pool.submit(Job::Hold(second.clone()));
+        pool.submit(row());
+        pool.give_out();
+        pool.wait_for(shown);
+        let (back, wait) = std::sync::mpsc::channel();
+        let pool = &pool;
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                pool.wait_for_shown(shown);
+                let over = pool.shared.queue.lock().unwrap().over(SHOWN_SHARE);
+                let _ = back.send(over);
+            });
+            let early = wait.recv_timeout(Duration::from_millis(50)).is_ok();
+            open(&first);
+            let late = wait.recv_timeout(Duration::from_secs(10));
+            // Open before asserting: shut, it would hold the workers, and
+            // the pool's drop with them.
+            open(&second);
+            assert!(!early, "it waited for more than the frame shown");
+            assert_eq!(late, Ok(false), "it came back at half, not after every job");
+        });
+        pool.flush();
+    }
+
+    /// A few jobs given out before texture data go in a batch of their
+    /// own size, and the pending batch keeps its room for the next ones.
+    #[test]
+    fn a_few_jobs_go_out_in_a_batch_of_their_size() {
+        let pool = Pool::new(2);
+        let fb = Vram::new(0x100);
+        let mut pending = Vec::with_capacity(BATCH);
+        pending.push(Job::Bytes {
+            fb,
+            at: 0,
+            bytes: vec![1],
+        });
+        let batch = pool.take_pending(&mut pending);
+        assert_eq!((batch.len(), batch.capacity()), (1, 1));
+        assert!(pending.is_empty() && pending.capacity() >= BATCH);
     }
 
     /// The worker reads a word to write half of it: the emulator can't
@@ -678,25 +862,25 @@ mod tests {
         assert!(!pool.busy());
     }
 
-    /// A batch every worker has drawn comes back, emptied, for a later
-    /// one to be filled in: the emulator doesn't allocate a batch each
-    /// time it gives one out.
+    /// A full batch every worker has drawn comes back, emptied, for a
+    /// later one to be filled in: the emulator doesn't allocate a batch
+    /// each time it gives one out.
     #[test]
     fn drawn_batches_come_back_to_be_filled_again() {
         let pool = Pool::new(2);
         let fb = Vram::new(0x1000);
-        let word = |row| Job::Pixels {
+        let row = || Job::Rows {
             fb: fb.clone(),
-            words: vec![Word {
-                row,
-                at: row as u32,
-                value: 1,
-            }],
+            base: 0,
+            rowpixels: 1,
+            rows: (0, 1),
+            columns: (0, 1),
+            value: 1,
         };
-        // Each word goes out at once. The first batch grew from nothing;
-        // those after it have room for a whole one, and come back.
-        for row in 0..3 {
-            pool.submit(word(row));
+        // The first batch grew from nothing; those after it have room for
+        // a whole one, and come back.
+        for _ in 0..3 * BATCH {
+            pool.submit(row());
         }
         pool.flush();
         assert!(pool.pending.lock().unwrap().capacity() >= BATCH);
