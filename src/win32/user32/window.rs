@@ -1826,6 +1826,35 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(TRUE);
                 }
+                // A child window hidden has its parent erase now what it
+                // uncovered (WM_ERASEBKGND before WM_WINDOWPOSCHANGED, as
+                // in the sequence Wine's msg.c recorded from Windows for
+                // ShowWindow(SW_HIDE) of a child), unless SWP_DEFERERASE
+                // says not to. The parent's WM_PAINT that comes later has
+                // nothing left to erase, so a page shown in the place of
+                // the one hidden, as a tab control's pages are, keeps what
+                // it drew. Only the parent erases: the siblings wait for
+                // their BeginPaint. A move, a resize or a frame change
+                // erases nothing here: Windows sends no WM_NCPAINT or
+                // WM_ERASEBKGND within SetWindowPos then (msg.c's
+                // SetScrollRange sequence, updown.c's buddy resized), and
+                // Windows 98 keeps a pending frame through a resize.
+                let flags = cpu.bus.guest_read_32(winpos + 24);
+                t.step = 7;
+                let parent = user(cpu).parent(hwnd);
+                if flags & SWP_HIDEWINDOW != 0
+                    && flags & SWP_DEFERERASE == 0
+                    && parent != 0
+                    && parent != DESKTOP
+                {
+                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_NOCHILDREN;
+                    return Next::call(address_of("RedrawWindow"), &[parent, 0, 0, erase], 7);
+                }
+            }
+            7 => {
+                if !user(cpu).is_window(hwnd) {
+                    return Next::Done(TRUE);
+                }
                 // A top-level window shown is erased now (WM_NCPAINT,
                 // WM_ERASEBKGND), after its activation and before
                 // WM_WINDOWPOSCHANGED and its WM_PAINT, unless
