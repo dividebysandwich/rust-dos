@@ -422,6 +422,8 @@ pub struct Win32 {
     wnaspi32: wnaspi32::State,
     /// OLEAUT32's type libraries and error objects.
     oleaut32: oleaut32::State,
+    /// MSACM32's streams.
+    msacm32: msacm32::State,
 }
 
 impl Win32 {
@@ -1149,6 +1151,7 @@ fn remove_process(cpu: &mut Cpu, index: usize, code: u32) -> bool {
     user32::sysparams::process_ended(cpu, process.id);
     ole32::process_ended(cpu, process.id, &tids);
     oleaut32::process_ended(cpu, process.id);
+    msacm32::process_ended(cpu, process.id);
     d3d8::process_ended(cpu, process.id);
     ddraw::process_ended(cpu, process.id, &tids);
     dsound::process_ended(cpu, process.id, &tids);
@@ -1472,6 +1475,7 @@ crate::state_fields!(Win32 {
     desktop_size,
     wnaspi32,
     oleaut32,
+    msacm32,
 } skip {
     enabled,
     guest_dlls,
