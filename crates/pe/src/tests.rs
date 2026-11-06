@@ -170,7 +170,8 @@ fn relocations_move_the_image() {
     assert_eq!(image.u32_at(data).unwrap(), 0x80_0000 + data + 8);
     assert_eq!(image.u32_at(data + 0x1004).unwrap(), 0x80_1234);
     assert_eq!(image.headers.image_base, 0x80_0000);
-    assert_eq!(Headers::parse(&image.data).unwrap().image_base, 0x80_0000);
+    // The headers keep the file's image base, as Windows 98 maps them.
+    assert_eq!(Headers::parse(&image.data).unwrap().image_base, 0x40_0000);
 }
 
 #[test]

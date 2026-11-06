@@ -193,6 +193,7 @@ static APIS: &[Api] = &[
     stdcall("IErrorInfo_GetDescription", 0, 2, errorinfo::get_description),
     stdcall("IErrorInfo_GetHelpFile", 0, 2, errorinfo::get_help_file),
     stdcall("IErrorInfo_GetHelpContext", 0, 2, errorinfo::get_help_context),
+    stdcall("VarUI4FromStr", 277, 4, variant::var_ui4_from_str),
 ];
 
 /// The vtables, by their places in this list. ITypeLib's and ITypeInfo's
