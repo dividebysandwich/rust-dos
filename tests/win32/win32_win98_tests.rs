@@ -502,8 +502,9 @@ fn get_disk_free_space_ex_gives_bytes() {
 
 /// A setup checks a whole install against the free space, so a folder
 /// hard disk has more room under the built-in Windows than DOS's fake
-/// 80 MB: about 1 GB when empty, which GetDiskFreeSpaceA gives in 32 KB
-/// clusters, fewer than 65536 of them, as Windows 95 and 98 do.
+/// 80 MB: about 3.75 GB when empty. GetDiskFreeSpaceExA gives it all.
+/// GetDiskFreeSpaceA gives it as Windows 95 and 98 do, through INT 21h
+/// AH=36h's 16-bit numbers: 65535 clusters of 32 KB, just under 2 GB.
 #[test]
 fn a_folder_hard_disk_has_room_for_an_install() {
     let imports: &[(&str, &[&str])] = &[(
@@ -527,17 +528,11 @@ fn a_folder_hard_disk_has_room_for_an_install() {
         a.cmp(dword_ptr(l.at(0x04)), 512)?;
         a.jne(0)?;
         a.cmp(dword_ptr(l.at(0x0C)), 0xFFFF)?;
-        a.ja(0)?;
-        // Free bytes: under 1 GB by what T.EXE takes, at most 1 GB.
-        a.mov(eax, dword_ptr(l.at(0x08)))?;
-        a.shl(eax, 15)?;
-        a.cmp(eax, 0x3FF0_0000)?;
-        a.jb(0)?;
-        a.cmp(eax, 0x4000_0000)?;
-        a.ja(0)?;
-        a.mov(ebx, eax)?;
-        // GetDiskFreeSpaceExA's free bytes, in 4 KB clusters: within 32 KB
-        // of GetDiskFreeSpaceA's, with nothing above 4 GB.
+        a.jne(0)?;
+        a.cmp(dword_ptr(l.at(0x08)), 0xFFFF)?;
+        a.jne(0)?;
+        // GetDiskFreeSpaceExA's free bytes: under 3.75 GB by what T.EXE
+        // takes, with nothing above 4 GB.
         a.push(0)?;
         a.push(0)?;
         a.push(l.at(0x10) as i32)?;
@@ -548,9 +543,10 @@ fn a_folder_hard_disk_has_room_for_an_install() {
         a.cmp(dword_ptr(l.at(0x14)), 0)?;
         a.jne(0)?;
         a.mov(eax, dword_ptr(l.at(0x10)))?;
-        a.sub(eax, ebx)?;
-        a.cmp(eax, 0x8000)?;
-        a.jae(0)?;
+        a.cmp(eax, 0xEFF0_0000u32 as i32)?;
+        a.jb(0)?;
+        a.cmp(eax, 0xF000_0000u32 as i32)?;
+        a.ja(0)?;
         a.mov(eax, 1)?;
         a.ret()
     });

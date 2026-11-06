@@ -3191,6 +3191,213 @@ fn a_program_loads_and_frees_dlls() {
     assert_eq!(text, "B detached\r\n");
 }
 
+/// GetThreadContext writes the parts of the CONTEXT its flags name and
+/// nothing else. SafeDisc 1's loader keeps a CONTEXT of Windows 98's
+/// headers, 0CCh bytes, with its own pointers after it, and asks for the
+/// control and integer registers. With every part asked for, the 0CCh
+/// bytes are written and nothing after them.
+#[test]
+fn get_thread_context_writes_only_the_parts_asked_for() {
+    let names: &[&str] = &["GetCurrentThread", "GetThreadContext"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A CONTEXT asking for CONTEXT_i386 | CONTEXT_CONTROL, and one for
+    // CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS, each in 300h bytes of 5Ah.
+    const CONTROL: u32 = 0x40;
+    const ALL: u32 = 0x340;
+    let mut data = vec![0u8; CONTROL as usize];
+    data.resize(ALL as usize + 0x300, 0x5A);
+    put(&mut data, CONTROL as usize, &0x1_0001u32.to_le_bytes());
+    put(&mut data, ALL as usize, &0x1_001Fu32.to_le_bytes());
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        // Whether the dwords from `from` to `to` of the CONTEXT at `ctx`
+        // all are `value`, in bit `bit`.
+        let unchanged = |a: &mut CodeAssembler, ctx: u32, from: u32, to: u32, value: u32, bit| {
+            a.mov(edi, l.at(ctx + from) as u32)?;
+            a.mov(ecx, (to - from) / 4)?;
+            a.mov(eax, value)?;
+            a.repe().scasd()?;
+            check(a, false, bit)
+        };
+        a.xor(ebx, ebx)?;
+        a.cld()?;
+        for ctx in [CONTROL, ALL] {
+            a.call(l.import(0))?;
+            a.push(l.at(ctx) as i32)?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+        }
+        // The second call returned TRUE. A first one that failed
+        // leaves ESP as it was.
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // Asked for the control registers: the flags as they were, ESP
+        // written, and the debug, floating-point, segment and integer
+        // registers and the 200h bytes after the 0CCh as they were.
+        a.cmp(dword_ptr(l.at(CONTROL)), 0x1_0001)?;
+        check(a, false, 1)?;
+        a.cmp(dword_ptr(l.at(CONTROL + 0xC4)), 0x5A5A_5A5A)?;
+        check(a, true, 2)?;
+        unchanged(a, CONTROL, 4, 0xB4, 0x5A5A_5A5A, 3)?;
+        unchanged(a, CONTROL, 0xCC, 0x2CC, 0x5A5A_5A5A, 4)?;
+        // Asked for all: ESP written, the debug registers 0, and the
+        // 200h bytes after the 0CCh as they were.
+        a.cmp(dword_ptr(l.at(ALL + 0xC4)), 0x5A5A_5A5A)?;
+        check(a, true, 5)?;
+        unchanged(a, ALL, 4, 0x1C, 0, 6)?;
+        unchanged(a, ALL, 0xCC, 0x2CC, 0x5A5A_5A5A, 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run("get_thread_context", exe);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {text}", !code);
+}
+
+/// GetThreadContext on a thread made suspended, which hasn't run yet,
+/// gives the FPU's state it will start with: FNINIT's, with the
+/// precision at 53 bits (control word 27Fh) and every register empty
+/// (tag word FFFFh). SafeDisc 1's loader reads such a thread's context.
+#[test]
+fn get_thread_context_of_a_new_thread_gives_its_starting_fpu() {
+    let names: &[&str] = &["CreateThread", "GetThreadContext", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    const CTX: u32 = 0x40;
+    let mut data = vec![0u8; CTX as usize + 0xCC];
+    // CONTEXT_i386 | CONTEXT_FLOATING_POINT.
+    put(&mut data, CTX as usize, &0x1_0008u32.to_le_bytes());
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        // CREATE_SUSPENDED, so the thread never runs: its start address
+        // doesn't matter.
+        a.push(0)?;
+        a.push(4)?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.push(l.at(CTX) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // FloatSave's ControlWord and TagWord, at 1Ch and 24h.
+        a.cmp(word_ptr(l.at(CTX + 0x1C)), 0x027F)?;
+        check(a, false, 1)?;
+        a.cmp(word_ptr(l.at(CTX + 0x24)), -1)?;
+        check(a, false, 2)?;
+        // The suspended thread keeps the process alive past a return.
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run("new_thread_fpu", exe);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
+}
+
+/// GetStartupInfoW, which SafeDisc 1's loader looks up with
+/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
+/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
+/// structure as it was.
+#[test]
+fn get_startup_info_w_is_a_stub_that_fails() {
+    let names: &[&str] = &["GetModuleHandleA", "GetProcAddress", "GetLastError"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"KERNEL32.DLL\0GetStartupInfoW\0".to_vec();
+    data.resize(0x40, 0);
+    data.resize(0x84, 0x5A);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(l.at(13) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.test(esi, esi)?;
+        a.je(end)?;
+        a.mov(edi, esp)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(esi)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.cmp(esp, edi)?;
+        check(a, false, 2)?;
+        a.call(l.import(2))?;
+        a.cmp(eax, 120)?;
+        check(a, false, 3)?;
+        // All 68 bytes of the structure are as they were.
+        a.cld()?;
+        a.mov(edi, l.at(0x40) as u32)?;
+        a.mov(ecx, 17)?;
+        a.mov(eax, 0x5A5A_5A5A)?;
+        a.repe().scasd()?;
+        check(a, false, 4)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, _) = run("startup_info_w", exe);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
+/// INT 68h, WDEB386's interface, as Windows 98 has it without the
+/// debugger: the program goes on after it with its registers as they
+/// were. SafeDisc 1's loader asks it with AX=4300h for a debugger.
+#[test]
+fn int_68h_finds_no_debugger() {
+    let main = |a: &mut CodeAssembler, _: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.mov(eax, 0x4300)?;
+        a.mov(ecx, 0x1234_5678)?;
+        a.int(0x68)?;
+        a.cmp(eax, 0x4300)?;
+        check(a, false, 0)?;
+        a.cmp(ecx, 0x1234_5678)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, &[], &[0; 4], &[("", &main)], &[]);
+    let (code, text) = run("int_68h", exe);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
+}
+
+/// HLT, which only the system may run, raises a privileged-instruction
+/// exception (C0000096) for the program's handlers, as on Windows 98.
+/// The handler ends the program with 1 for that code, 0 for another.
+#[test]
+fn hlt_raises_a_privileged_instruction_exception() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, text) = run(
+        "privileged",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut setup = a.create_label();
+            // The CALL pushes the handler's address, which follows it.
+            a.call(setup)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.xor(ecx, ecx)?;
+            a.cmp(eax, 0xC000_0096u32 as i32)?;
+            a.sete(cl)?;
+            a.push(ecx)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            a.set_label(&mut setup)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.hlt()?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// C.DLL, whose entry point returns FALSE, and exports F.
 fn dll_c() -> Vec<u8> {
     let main = |a: &mut CodeAssembler, _: &Layout| {

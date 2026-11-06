@@ -45,7 +45,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   It runs InstallShield and Wise setups. It runs fewer games than
   booting Windows: a program that calls a function it doesn't have yet
   stops with a message naming it
-  ([docs/native-windows.md](docs/native-windows.md))
+  ([docs/builtin-windows.md](docs/builtin-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
   Trio64 with its 2D accelerator, an

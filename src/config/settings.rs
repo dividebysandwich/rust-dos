@@ -71,8 +71,8 @@ pub struct Settings {
     pub umb: bool,
     /// The DPMI host for DOS extenders.
     pub dpmi: bool,
-    /// The built-in Windows runs Win32 console programs (`win32`), the
-    /// start of the work in docs/native-windows.md.
+    /// The built-in Windows runs Win32 and Win16 programs (`win32`); see
+    /// docs/builtin-windows.md.
     pub win32: bool,
     /// A host folder of Win32 DLLs (`win32_dlls`) that programs may load
     /// as guest code when no built-in DLL has the name, or when the

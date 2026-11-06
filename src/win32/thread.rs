@@ -141,7 +141,32 @@ impl Thread {
     pub fn stack_bottom(&self) -> u32 {
         self.stack.0 + STACK_FLOOR
     }
+
+    /// Its FPU's state while it doesn't run, as FSAVE stores it: for a
+    /// thread that hasn't run yet, the state it starts with.
+    pub fn fpu_image(&self) -> [u8; 108] {
+        <[u8; 108]>::try_from(self.fpu.as_slice()).unwrap_or(INITIAL_FPU)
+    }
 }
+
+/// The FPU's state a thread starts with, as FSAVE stores it: FNINIT's,
+/// with the precision at 53 bits (control word 27Fh), the status word 0
+/// and every register empty (tag word FFFFh).
+pub const INITIAL_FPU: [u8; 108] = {
+    let mut image = [0u8; 108];
+    let words = [0xFFFF_027Fu32, 0xFFFF_0000, 0xFFFF_FFFF];
+    let mut i = 0;
+    while i < words.len() {
+        let bytes = words[i].to_le_bytes();
+        let mut b = 0;
+        while b < 4 {
+            image[4 * i + b] = bytes[b];
+            b += 1;
+        }
+        i += 1;
+    }
+    image
+};
 
 /// A thread by its process's place and its own in that process's list.
 type At = (usize, usize);
@@ -197,7 +222,7 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     let thread = &process.threads[t];
     let (ctx, fpu, sse, dr, last_error, tib) = (
         thread.ctx,
-        thread.fpu.clone(),
+        thread.fpu_image(),
         thread.sse,
         thread.dr,
         thread.last_error,
@@ -205,14 +230,7 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     );
     process.last_error = last_error;
     process.tib = tib;
-    match <&[u8; 108]>::try_from(fpu.as_slice()) {
-        Ok(image) => control::load_image(cpu, image),
-        Err(_) => {
-            // A thread starts with the FPU's precision at 53 bits.
-            control::fninit(cpu);
-            cpu.fpu_control = 0x027F;
-        }
-    }
+    control::load_image(cpu, &fpu);
     if cpu.model.has_sse() {
         // A thread starts with its XMM registers clear.
         let (xmm, mxcsr) = sse.unwrap_or(([0; 8], MXCSR_DEFAULT));

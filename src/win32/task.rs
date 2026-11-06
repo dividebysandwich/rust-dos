@@ -145,6 +145,7 @@ pub static TASKS: &[Step] = &[
     super::oleaut32::step,
     super::winmm::mci::video::call_step,
     super::dplayx::call_step,
+    super::dshow::filter::step,
 ];
 
 /// The `TASKS` places of the tasks other DLLs than USER32 start.
@@ -169,6 +170,7 @@ pub const END_SESSION: u16 = 38;
 pub const OLEAUT32: u16 = 39;
 pub const MCI_CALL: u16 = 40;
 pub const DPLAY_CALL: u16 = 41;
+pub const DSHOW: u16 = 42;
 
 /// Start the task `kind` with the variables `vars` and, if `scratch` is
 /// more than 0, that many bytes of scratch space: for a function's
