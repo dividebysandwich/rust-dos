@@ -1139,6 +1139,10 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
   last read of that buffer) and `gpu_read_rows_undrawn` (not drawn
   since, which a cache of the rows read would have had). A game with many
   undrawn rows would gain from such a cache; one with few wouldn't.
+  `gpu_alpha` turns true once a triangle read alpha planes OpenGL doesn't
+  have: alpha written with another colour buffer, by the CPU or by the
+  blitter, or a depth test against them. From then on every job is drawn
+  in software too, and `released_jobs` grows with `triangles`.
 - **2D on the GPU:** on a Banshee or Voodoo3, `gpu_2d` counts the 2D
   operations done in OpenGL's copy of the memory (`blits`), the pages
   read back for the CPU (`pages_read_back`), and the operations left to
