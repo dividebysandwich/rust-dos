@@ -5445,6 +5445,102 @@ fn mmx_and_sse_stores_into_the_linear_frame_buffer_are_translated() {
     );
 }
 
+/// MechCommander's MMX copy of its picture into a DirectDraw surface in a
+/// Voodoo3's memory through BAR1, `rows` times 256 bytes, then dword and
+/// SSE stores there. Above the tile base BAR1 is tiled, and an unaligned
+/// dword is two dwords' bytes: those go a dword at a time. The card's
+/// memory as each rig left it, which must be the same, and the recompiler's
+/// calls of its device helpers.
+fn voodoo3_stores(rows: u32) -> (Vec<u32>, Vec<u32>, u64) {
+    const BAR0: usize = 0xD000_0000;
+    const BAR1: u32 = 0xD200_0000;
+    const TILED: u32 = BAR1 + 0x40_0000;
+    let (mut a, mut b) = twins(|rig| {
+        rig.cpu.model = rust_dos::cpu::CpuModel::PentiumIII;
+        rig.cpu.cr4 |= 0x200;
+        rig.cpu.bus.configure_voodoo(Some(rust_dos::voodoo::Board::Voodoo3));
+        // lfbMemoryConfig: the tile base at 4 MB.
+        rig.cpu.bus.write_32(BAR0 + 0x0C, 0x400);
+        for i in 0..0x1000u32 {
+            rig.write32(DATA + 4 * i, i.wrapping_mul(0x0103_0507));
+        }
+        rig.load(
+            CODE,
+            &asm32(CODE, |a| {
+                let (mut mmx, mut dword) = (a.create_label(), a.create_label());
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x1000)?;
+                a.mov(ecx, 16 * rows)?;
+                a.set_label(&mut mmx)?;
+                a.movq(mm0, qword_ptr(esi))?;
+                a.movq(mm1, qword_ptr(esi + 8))?;
+                a.movq(qword_ptr(edi), mm0)?;
+                a.movq(qword_ptr(edi + 8), mm1)?;
+                a.add(esi, 16)?;
+                a.add(edi, 16)?;
+                a.dec(ecx)?;
+                a.jnz(mmx)?;
+                a.mov(esi, DATA)?;
+                a.mov(edi, BAR1 + 0x3000)?;
+                a.mov(ecx, 0x400u32)?;
+                a.set_label(&mut dword)?;
+                a.mov(eax, dword_ptr(esi))?;
+                a.mov(dword_ptr(edi), eax)?;
+                a.add(esi, 4)?;
+                a.add(edi, 4)?;
+                a.dec(ecx)?;
+                a.jnz(dword)?;
+                a.movups(xmm0, xmmword_ptr(DATA + 0x40))?;
+                a.movups(xmmword_ptr(BAR1 + 0x5004), xmm0)?;
+                a.movaps(xmmword_ptr(BAR1 + 0x5010), xmm0)?;
+                a.movlps(qword_ptr(BAR1 + 0x5020), xmm0)?;
+                a.movq(qword_ptr(TILED + 0x10), mm1)?;
+                a.mov(dword_ptr(TILED + 0x100), eax)?;
+                a.mov(dword_ptr(BAR1 + 0x6001), eax)?;
+                a.emms()?;
+                a.hlt()
+            }),
+        );
+    });
+    let stats = run_both(&mut a, &mut b);
+    if AVAILABLE && cfg!(target_arch = "x86_64") {
+        assert_eq!(untranslated(&stats), 0, "{:?}", stats);
+    }
+    let memory = |rig: &Rig| -> Vec<u32> {
+        let bus = &rig.cpu.bus;
+        let below = (0..0x7000).step_by(4).map(|i| bus.read_32(BAR1 as usize + i));
+        below.chain((0..0x2000).step_by(4).map(|i| bus.read_32(TILED as usize + i))).collect()
+    };
+    let calls = b.cpu.dynrec.calls().map_or(0, |c| c.dev);
+    (memory(&a), memory(&b), calls)
+}
+
+#[test]
+fn stores_into_a_voodoo3s_memory_are_the_interpreters() {
+    let (a, b, _) = voodoo3_stores(16);
+    assert!(a == b, "the card's memory differs");
+    assert_eq!(b[0x1004 / 4], 0x0103_0507);
+    assert_eq!(b[0x3008 / 4], 0x0103_0507 * 2);
+    assert_eq!(b[0x5010 / 4], 0x0103_0507u32.wrapping_mul(16));
+    assert_ne!(b[0x6000 / 4], 0);
+    assert_ne!(b[(0x7000 + 0x10) / 4], 0);
+}
+
+#[test]
+fn an_mmx_store_into_a_voodoo3s_memory_is_one_call() {
+    // (ARM64's code generator doesn't translate MMX.)
+    if !(AVAILABLE && cfg!(target_arch = "x86_64")) {
+        return;
+    }
+    // 16 more rows are 512 more stores of 8 bytes: a call each, where a
+    // dword at a time would take three (one that finds them not all in
+    // the card's memory, then one a dword). A few run in the interpreter
+    // where the lockstep's batches stop in the loop.
+    let (_, _, fewer) = voodoo3_stores(16);
+    let (_, _, more) = voodoo3_stores(32);
+    assert!((480..=512).contains(&(more - fewer)), "{} calls", more - fewer);
+}
+
 #[test]
 fn video_memory_is_written_and_read_by_its_physical_address() {
     let (_, b) = video_memory_program(false);

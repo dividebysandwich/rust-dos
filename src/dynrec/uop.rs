@@ -595,7 +595,9 @@ pub enum Uop {
     /// `BailUnlessStorable` let through: into RAM as they are, or with
     /// `DEV_BIT` a dword at a time from the lowest, as the handlers write
     /// them (`Cpu::mem_write` or `Cpu::lin_write_32` each), through
-    /// `jit_dev_write`.
+    /// `jit_dev_write`. Where they all go into a 3dfx card's memory, they
+    /// go in one call that writes what those dwords would
+    /// (`jit_dev_write_run`).
     VStore { m: T, x: X, size: u8 },
     /// What every MMX instruction but EMMS does to the FPU: the stack top
     /// 0, all registers valid (`mmx::enter_mmx`).

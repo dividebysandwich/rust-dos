@@ -148,6 +148,10 @@ pub fn trampoline() -> Trampoline {
         thunks[thunk as usize] = ops.offset().0;
         dev_thunk(&mut ops, thunk.tlb(), memref);
     }
+    for (thunk, size) in [(Thunk::StoreRun8, 8), (Thunk::StoreRun16, 16)] {
+        thunks[thunk as usize] = ops.offset().0;
+        store_run_thunk(&mut ops, size);
+    }
     thunks[Thunk::SmcCheck as usize] = ops.offset().0;
     smc_check_thunk(&mut ops);
     Trampoline { bytes: ops.finalize().expect("trampoline"), enter, exit, addsub, thunks }
@@ -188,6 +192,11 @@ enum Thunk {
     DevTlbWrite,
     DevTlbUserRead,
     DevTlbUserWrite,
+    /// EAX = `jit_dev_write_run` of the 8 or 16 bytes at RCX at handle RDX,
+    /// which has `DEV_BIT`: 1 where they went into the 3dfx card's memory
+    /// in one call.
+    StoreRun8,
+    StoreRun16,
     /// A store hit the block's later bytes (`JitCtx::smc`): clear that
     /// note, and EAX = `jit_smc_check` of block RDX and its instruction
     /// ECX, 0 for the block to go on.
@@ -299,6 +308,18 @@ fn load_thunk(ops: &mut Asm) {
         ; and edx, 3
         ; call QWORD [r12 + CTX_READ]
         ; done:
+    );
+    thunk_restore(ops);
+    dynasm!(ops ; .arch x64 ; ret);
+}
+
+/// `Thunk::StoreRun8` and `Thunk::StoreRun16`.
+fn store_run_thunk(ops: &mut Asm, size: i32) {
+    thunk_save(ops);
+    dynasm!(ops
+        ; .arch x64
+        ; mov r8d, size
+        ; call QWORD [r12 + CTX_DEV + 16]
     );
     thunk_restore(ops);
     dynasm!(ops ; .arch x64 ; ret);
@@ -758,7 +779,9 @@ enum Slow {
     /// its generations bumped and a store into the rest of the block noted.
     Store { at: DynamicLabel, back: DynamicLabel, m: T, src: T, thunk: Thunk, lo: u32, hi: u32 },
     /// `Uop::VStore` of XMM`x`'s low `size` bytes at a handle with
-    /// `DEV_BIT`: through `Thunk::Store4` a dword at a time, as `Store`.
+    /// `DEV_BIT`: into a 3dfx card's memory in one call where they all go
+    /// there (`Thunk::StoreRun8`), else through `Thunk::Store4` a dword at
+    /// a time, as `Store`.
     VStore {
         at: DynamicLabel,
         back: DynamicLabel,
@@ -1623,11 +1646,17 @@ impl Gen<'_> {
                     // The calls into Rust don't keep the XMM registers, so
                     // the bytes go on the stack first (16 keeps it
                     // aligned).
+                    let run = if size == 8 { Thunk::StoreRun8 } else { Thunk::StoreRun16 };
                     dynasm!(self.ops
                         ; .arch x64
                         ; =>at
                         ; sub rsp, 16
                         ; movups [rsp], Rx(x)
+                        ; mov rdx, Rq(r(m))
+                        ; mov rcx, rsp
+                        ; call QWORD [BYTE r12 + run.slot()]
+                        ; test eax, eax
+                        ; jnz >done
                     );
                     for i in 0..size as i32 / 4 {
                         // (The thunk changes RAX.)
@@ -1641,6 +1670,7 @@ impl Gen<'_> {
                     }
                     dynasm!(self.ops
                         ; .arch x64
+                        ; done:
                         ; add rsp, 16
                         ; jmp =>back
                     );

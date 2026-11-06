@@ -161,8 +161,8 @@ pub struct JitCtx {
     /// `jit_fpu_div_zero`; and the trampoline's own exact 80-bit sum
     /// (AArch64's `fpu_addsub`).
     pub fpu: [usize; 5],
-    /// `jit_dev_read` and `jit_dev_write` (x86-64).
-    pub dev: [usize; 2],
+    /// `jit_dev_read`, `jit_dev_write` and `jit_dev_write_run` (x86-64).
+    pub dev: [usize; 3],
     /// `jit_fetch`.
     pub fetch: usize,
     /// `jit_smc_check`.
@@ -220,7 +220,7 @@ pub const CTX_EXIT: i32 = offset_of!(JitCtx, exit) as i32;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub const CTX_THUNKS: i32 = offset_of!(JitCtx, thunks) as i32;
 /// The number of `JitCtx::thunks`.
-pub const THUNKS: usize = 11;
+pub const THUNKS: usize = 13;
 const _: () = assert!(CTX_THUNKS + 8 * THUNKS as i32 <= 128 && CTX_SMC < 128);
 const _: () = assert!(CTX_SMC_HI == CTX_SMC_LO + 4);
 pub const CTX_RAM: i32 = offset_of!(JitCtx, ram) as i32;
@@ -342,7 +342,11 @@ impl JitCtx {
                 jit_fpu_div_zero as *const () as usize,
                 0,
             ],
-            dev: [jit_dev_read as *const () as usize, jit_dev_write as *const () as usize],
+            dev: [
+                jit_dev_read as *const () as usize,
+                jit_dev_write as *const () as usize,
+                jit_dev_write_run as *const () as usize,
+            ],
             fetch: jit_fetch as *const () as usize,
             smc_check: jit_smc_check as *const () as usize,
             lazy_fn: jit_lazy_flags as *const () as usize,
@@ -1060,7 +1064,38 @@ jit_fn! {
         if cpu.bus.write_planes_plainly(phys as usize, value, size as usize) {
             return 0;
         }
+        // Pixels into a 3dfx card's memory, which the same loops write on
+        // a Banshee or Voodoo3: in one call, without what a write to its
+        // registers would need.
+        if size == 4
+            && guard(ctx, false, || cpu.bus.write_to_voodoo(phys as usize, &value.to_le_bytes()))
+        {
+            return 0;
+        }
         dev_write(cpu, ctx, phys, value, size)
+    }
+}
+
+jit_fn! {
+    /// Write the `len` bytes at `bytes` (an MMX or SSE register's) at
+    /// physical address `phys`, within one page and not plain RAM, where
+    /// they all go into a 3dfx card's memory (`Bus::write_to_voodoo`):
+    /// DirectDraw's MMX blits into the linear frame buffer. Returns 1 if
+    /// it wrote them, else 0, having written nothing, for the store to go
+    /// through `jit_dev_write` a dword at a time.
+    fn jit_dev_write_run(
+        cpu: *mut Cpu,
+        ctx: *mut JitCtx,
+        phys: u32,
+        bytes: *const u8,
+        len: u32
+    ) -> u32 {
+        // SAFETY: as in `jit_fallback`; the code passes `len` bytes it
+        // put on its stack.
+        let (cpu, ctx, bytes) =
+            unsafe { (&mut *cpu, &mut *ctx, std::slice::from_raw_parts(bytes, len as usize)) };
+        ctx.calls.dev += 1;
+        guard(ctx, false, || cpu.bus.write_to_voodoo(phys as usize, bytes)) as u32
     }
 }
 

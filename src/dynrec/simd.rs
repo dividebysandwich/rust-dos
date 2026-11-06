@@ -1,17 +1,18 @@
 //! MMX and SSE instructions as operations: moves, logic, shuffles and the
-//! packed integer forms, and the single-precision arithmetic, which runs
-//! on the host's SSE with MXCSR's rounding (`Uop::VFloat`). Each starts
-//! with a `SimdGuard`, which leaves the rare cases (CR0's EM or TS set, SSE
-//! not enabled in CR4, an MMX register the FPU left stale) to the handler,
-//! and an operand of 8 or 16 bytes that isn't plain RAM within a page goes
-//! to the handler too (`BailUnlessRam`), but for a store into something
-//! else within a page, such as the linear frame buffer that DirectDraw's
-//! MMX blits write, which goes a dword at a time through `jit_dev_write`
-//! (`BailUnlessStorable`, `VStore`). RCPPS, RSQRTPS and their scalar
-//! forms, whose approximations the host's own instructions don't match,
-//! run as the handlers compute them: a division, or a square root and a
-//! division on doubles (`VOp::Rcp`, `VOp::Rsqrt`). PINSRW, MASKMOVQ,
-//! LDMXCSR and STMXCSR go through their handlers.
+//! packed integer forms, and the single-precision arithmetic, which runs on
+//! the host's SSE with MXCSR's rounding (`Uop::VFloat`). Each starts with a
+//! `SimdGuard`, which leaves the rare cases (CR0's EM or TS set, SSE not
+//! enabled in CR4, an MMX register the FPU left stale) to the handler, and
+//! an operand of 8 or 16 bytes that isn't plain RAM within a page goes to
+//! the handler too (`BailUnlessRam`), but for a store into something else
+//! within a page, such as the linear frame buffer that DirectDraw's MMX
+//! blits write, which goes a dword at a time through `jit_dev_write`, or
+//! into a 3dfx card's memory in one call (`BailUnlessStorable`, `VStore`).
+//! RCPPS, RSQRTPS and their scalar forms, whose approximations the host's
+//! own instructions don't match, run as the handlers compute them: a
+//! division, or a square root and a division on doubles (`VOp::Rcp`,
+//! `VOp::Rsqrt`). PINSRW, MASKMOVQ, LDMXCSR and STMXCSR go through their
+//! handlers.
 
 use iced_x86::{CpuidFeature, Instruction, Mnemonic, OpKind, Register};
 
