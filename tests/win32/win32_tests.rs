@@ -3191,6 +3191,50 @@ fn a_program_loads_and_frees_dlls() {
     assert_eq!(text, "B detached\r\n");
 }
 
+/// GetThreadContext writes the parts of the CONTEXT its flags name and
+/// nothing else. SafeDisc 1's loader keeps a CONTEXT of Windows 98's
+/// headers, 0CCh bytes, with its own pointers after it, and asks for the
+/// control and integer registers.
+#[test]
+fn get_thread_context_writes_only_the_parts_asked_for() {
+    let names: &[&str] = &["GetCurrentThread", "GetThreadContext"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    const CTX: u32 = 0x40;
+    let mut data = vec![0u8; CTX as usize];
+    data.resize(CTX as usize + 0x300, 0x5A);
+    // CONTEXT_i386 | CONTEXT_CONTROL.
+    put(&mut data, CTX as usize, &0x1_0001u32.to_le_bytes());
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.call(l.import(0))?;
+        a.push(l.at(CTX) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // The flags as they were, and ESP, a control register, written.
+        a.cmp(dword_ptr(l.at(CTX)), 0x1_0001)?;
+        check(a, false, 1)?;
+        a.cmp(dword_ptr(l.at(CTX + 0xC4)), 0x5A5A_5A5A)?;
+        check(a, true, 2)?;
+        // The debug, floating-point, segment and integer registers, and
+        // the 200h bytes after the 0CCh, as they were.
+        a.cld()?;
+        for (from, to) in [(4, 0xB4), (0xCC, 0x2CC)] {
+            a.mov(edi, l.at(CTX + from) as u32)?;
+            a.mov(ecx, (to - from) / 4)?;
+            a.mov(eax, 0x5A5A_5A5A)?;
+            a.repe().scasd()?;
+            check(a, false, if from == 4 { 3 } else { 4 })?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run("get_thread_context", exe);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b} {}", !code & 0x1F, text);
+}
+
 /// C.DLL, whose entry point returns FALSE, and exports F.
 fn dll_c() -> Vec<u8> {
     let main = |a: &mut CodeAssembler, _: &Layout| {
