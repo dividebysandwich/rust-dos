@@ -467,7 +467,9 @@ not been compared with a reference: ACM 1918's are all key frames.
   member silent for 20 seconds is taken for gone. The protocol is
   rust-dos's own, not Windows'. What the program sees follows Windows 98
   as Wine's DirectPlay tests recorded it: which players get which system
-  messages, in which order, and the sizes of the messages.
+  messages, in which order, and the sizes of the messages. DPLAY.DLL,
+  DirectX 3's, which Bedlam imports by ordinal, makes and lists DPLAYX's
+  objects and providers, as Wine's does.
 - **WS2_32 and WSOCK32** have no network yet.
 
 ### Installing games

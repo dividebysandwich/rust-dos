@@ -1,6 +1,7 @@
 //! DPLAYX.DLL: DirectPlay and its lobby. DirectPlay objects are made by
 //! DirectPlayCreate and by CoCreateInstance, and have the interfaces
-//! IDirectPlay (DirectX 3) to IDirectPlay4A.
+//! IDirectPlay (DirectX 3) to IDirectPlay4A. DPLAY.DLL, DirectX 3's,
+//! is here as well, and its two functions are DPLAYX's.
 //!
 //! Two service providers are listed, IPX and TCP/IP, as on a Windows 98
 //! machine with both protocols. Both are the same connection underneath:
@@ -64,9 +65,12 @@ pub static DLL: Dll = Dll {
 };
 
 /// DPLAY.DLL, DirectX 3's DirectPlay, which programs of its time import
-/// by ordinal (Bedlam takes 1 and 2). Later versions of DirectX keep it
-/// for them, with its two functions handing over to DPLAYX's, and so
-/// does this one: its objects are DPLAYX's, with DPLAYX's methods.
+/// by ordinal (Bedlam takes 1 and 2). DirectX 5 to 7 leave DirectX 3's
+/// file in place, DirectPlay 1.0 with service providers of its own
+/// (DPWSOCK.DLL, DPSERIAL.DLL). Wine's forwards its two functions to
+/// DPLAYX's, and this one hands them over too: its objects are DPLAYX's,
+/// with DPLAYX's methods and service providers, so DirectX 3 programs
+/// meet the same sessions as later ones.
 pub static DPLAY: Dll = Dll {
     name: "DPLAY.DLL",
     base: 0xBFBC_0000,
