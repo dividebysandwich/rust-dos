@@ -19,10 +19,10 @@
 //!   again.
 //! - [`Kind::SkipAtExec`]: a program by name, which DOS's EXEC doesn't run
 //!   but answers as if it had, with an exit code.
-//! - [`Kind::AtLoad`]: a program by name whose file is patched as DOS
-//!   loads it, from the shell or by EXEC, before any of it runs. It is for
-//!   what a program hands on before a sound driver could start, such as
-//!   the environment Lands of Lore 2's launcher gives DOS/4GW.
+//! - [`Kind::AtLoad`]: programs by name whose files are patched as DOS
+//!   loads them, from the shell or by EXEC, before any of them runs. It is
+//!   for what a program hands on before a sound driver could start, such
+//!   as the environment Lands of Lore 2's launchers give DOS/4GW.
 //!
 //! The Sound Blaster fixes are for the driver of two Titus games of 1993
 //! with the same sound engine: Prehistorik 2 and Blues Brothers: Jukebox
@@ -88,14 +88,14 @@ pub enum Kind {
         beside: Option<&'static str>,
         exit_code: u8,
     },
-    /// A program whose file is patched as DOS loads it, when its file name
-    /// is `program` and, with `beside`, that file is in the same
-    /// directory. The offsets of `code` are in the file, and only a file
-    /// where every piece is as the game shipped it is patched.
+    /// Programs whose files are patched as DOS loads them: each program's
+    /// file name with its code, for a file of that name that has, with
+    /// `beside`, that file in the same directory. The offsets of the code
+    /// are in the file, and only a file where every piece is as the game
+    /// shipped it is patched.
     AtLoad {
-        program: &'static str,
+        programs: &'static [(&'static str, &'static CodePatch)],
         beside: Option<&'static str>,
-        code: &'static CodePatch,
     },
 }
 
@@ -332,27 +332,32 @@ const JUKEBOX_MOD_HANG: CodePatch = CodePatch {
     )],
 };
 
-/// The DOS/4GW settings that Lands of Lore 2's launcher, LOLG.EXE, adds to
-/// the environment it starts the game (LOLG.DAT, with DOS/4GW bound in)
-/// with. DOS/4GW is its own DPMI host for the game (rust-dos's host passes
-/// over a program that loads Glide's overlay, and DOSBox and plain DOS
-/// have none), and `VirtualSize:24M` makes its virtual memory manager give
-/// the program 24 MB of memory in all, whatever the machine has. The game
-/// takes up to 16 MB of that into its heap at its first allocation, and
-/// its C library's malloc takes more from DOS/4GW (DPMI 0501h) whenever
-/// the heap runs out. In Huline's cantina, after Baccata's first words,
-/// the game asks for 1309694 bytes with about 23.6 MB in use, DOS/4GW
-/// refuses the block with error 8016h, and the game stops with "Memory
-/// allocation of 1309694 bytes failed!!". GOG's copy in DOSBox stops the
-/// same way, and so would a real PC, which runs the same launcher.
+/// The DOS/4GW settings that Lands of Lore 2's launchers add to the
+/// environment they start the game (LOLG.DAT, with DOS/4GW bound in)
+/// with: LOLG.EXE, which starts the game, and SETUPG.EXE, which runs the
+/// setup program (_SETUP.EXE) and then the game. DOS/4GW is its own DPMI
+/// host for the game (rust-dos's host passes over a program that loads
+/// Glide's overlay, and DOSBox and plain DOS have none), and
+/// `VirtualSize:24M` makes its virtual memory manager give the program 24
+/// MB of memory in all, whatever the machine has. The game takes up to 16
+/// MB of that into its heap at its first allocation, and its C library's
+/// malloc takes more from DOS/4GW (DPMI 0501h) whenever the heap runs
+/// out. In Huline's cantina, after Baccata's first words, the game asks
+/// for 1309694 bytes with about 23.6 MB in use, DOS/4GW refuses the block
+/// with error 8016h, and the game stops with "Memory allocation of
+/// 1309694 bytes failed!!". GOG's copy in DOSBox stops the same way, and
+/// so would a real PC, which runs the same launchers.
 ///
 /// The patch makes it `VirtualSize:32M`, of the same length. 32 MB is
 /// what 16 MB of memory (`memsize`'s default) and the 20 MB swap file the
 /// same string asks for (`SwapMin:20M`) cover, so DOS/4GW can back it on
 /// a machine of the size the game asked for. It never gives the game less
-/// memory than 24 MB did. For LOLG.EXE of 2847 bytes, MD5
-/// 1036beaf32bf4d25de4109d4a245d1a0 (version 1.30, GOG's copy).
-const LOL2_VIRTUAL_SIZE: CodePatch = CodePatch {
+/// memory than 24 MB did. Both launchers append the string with the same
+/// loop (mov si,offset / lodsb / stosb / test al,al / jne / movsb), from
+/// their own offsets. For version 1.30, GOG's copy: LOLG.EXE of 2847
+/// bytes, MD5 1036beaf32bf4d25de4109d4a245d1a0, and SETUPG.EXE of 2262
+/// bytes, MD5 6f4b513ea0dcd4af601446bfab178b38.
+const LOL2_LAUNCHER: CodePatch = CodePatch {
     checks: &[
         // The string around the patch.
         Bytes {
@@ -363,9 +368,7 @@ const LOL2_VIRTUAL_SIZE: CodePatch = CodePatch {
             at: 0x4A8,
             bytes: b"M,SwapFileName:lolgswap.swp,SwapMin:20M,SwapInc:0\0",
         },
-        // The code that appends it to the game's environment: mov si,71h
-        // (its offset in the data segment) / lodsb / stosb / test al,al /
-        // jne / movsb.
+        // The loop that appends it, from DS:0071h.
         Bytes {
             at: 0x3DA,
             bytes: &[0xBE, 0x71, 0x00, 0xAC, 0xAA, 0x84, 0xC0, 0x75, 0xFA, 0xA4],
@@ -375,6 +378,33 @@ const LOL2_VIRTUAL_SIZE: CodePatch = CodePatch {
     patches: &[(
         Bytes {
             at: 0x4A6,
+            bytes: b"24",
+        },
+        b"32",
+    )],
+};
+
+/// SETUPG.EXE's copy of the settings `LOL2_LAUNCHER` patches.
+const LOL2_SETUP_LAUNCHER: CodePatch = CodePatch {
+    checks: &[
+        Bytes {
+            at: 0x441,
+            bytes: b"DOS4GVM=VirtualMemory:ON,VirtualSize:",
+        },
+        Bytes {
+            at: 0x468,
+            bytes: b"M,SwapFileName:lolgswap.swp,SwapMin:20M,SwapInc:0\0",
+        },
+        // The loop that appends it, from DS:0061h.
+        Bytes {
+            at: 0x3DD,
+            bytes: &[0xBE, 0x61, 0x00, 0xAC, 0xAA, 0x84, 0xC0, 0x75, 0xFA, 0xA4],
+        },
+    ],
+    irq_handler: None,
+    patches: &[(
+        Bytes {
+            at: 0x466,
             bytes: b"24",
         },
         b"32",
@@ -428,11 +458,13 @@ pub const FIXES: &[Fix] = &[
     Fix {
         name: "lol2-virtual-size",
         game: "Lands of Lore: Guardians of Destiny",
-        reason: "its launcher gives DOS/4GW too little memory for Huline's cantina",
+        reason: "its launchers give DOS/4GW too little memory for Huline's cantina",
         kind: Kind::AtLoad {
-            program: "LOLG.EXE",
+            programs: &[
+                ("LOLG.EXE", &LOL2_LAUNCHER),
+                ("SETUPG.EXE", &LOL2_SETUP_LAUNCHER),
+            ],
             beside: Some("LOLG.DAT"),
-            code: &LOL2_VIRTUAL_SIZE,
         },
     },
     Fix {
@@ -461,6 +493,13 @@ pub fn enabled(fix: &Fix, on: bool, off: &[String]) -> bool {
 /// Whether `ram` holds `b` at `base`.
 fn has(ram: &[u8], base: usize, b: &Bytes) -> bool {
     ram.get(base + b.at..base + b.at + b.bytes.len()) == Some(b.bytes)
+}
+
+/// Whether `ram` holds every piece of `code` at `base`, its checks and
+/// the bytes its patches replace, as the game shipped them.
+fn matches(ram: &[u8], base: usize, code: &CodePatch) -> bool {
+    code.checks.iter().all(|b| has(ram, base, b))
+        && code.patches.iter().all(|(old, _)| has(ram, base, old))
 }
 
 /// The code fixes that `enabled` lets through whose code is in `ram`
@@ -498,9 +537,7 @@ pub fn find_code(
         // be at. Every copy, so that one left in a buffer below the code
         // that runs doesn't take its place.
         let bases = finder.find_iter(after).filter(|&base| {
-            code.checks.iter().all(|b| has(ram, base, b))
-                && code.patches.iter().all(|(old, _)| has(ram, base, old))
-                && !code.irq_handler.is_some_and(|at| set_up(ram, base + at))
+            matches(ram, base, code) && !code.irq_handler.is_some_and(|at| set_up(ram, base + at))
         });
         found.extend(bases.map(|base| (fix, *code, base)));
     }
@@ -542,7 +579,7 @@ pub fn skip_at_exec(
             program,
             beside,
             exit_code,
-        } if names(path, program, beside, &is_file) && enabled(fix) => Some((fix, exit_code)),
+        } if is_program(path, program, beside, &is_file) && enabled(fix) => Some((fix, exit_code)),
         _ => None,
     })
 }
@@ -557,30 +594,30 @@ pub fn patch_at_load(
     is_file: impl Fn(&str) -> bool,
     enabled: impl Fn(&Fix) -> bool,
 ) -> Option<(&'static Fix, Vec<u8>)> {
-    FIXES.iter().find_map(|fix| match fix.kind {
-        Kind::AtLoad {
-            program,
-            beside,
-            code,
-        } if names(path, program, beside, &is_file)
-            && enabled(fix)
-            && code.checks.iter().all(|b| has(bytes, 0, b))
-            && code.patches.iter().all(|(old, _)| has(bytes, 0, old)) =>
-        {
-            let mut patched = bytes.to_vec();
-            for (at, byte) in writes(code, 0) {
-                patched[at] = byte;
-            }
-            Some((fix, patched))
+    FIXES.iter().filter(|fix| enabled(fix)).find_map(|fix| {
+        let Kind::AtLoad { programs, beside } = fix.kind else {
+            return None;
+        };
+        let (_, code) = programs.iter().find(|(program, code)| {
+            is_program(path, program, beside, &is_file) && matches(bytes, 0, code)
+        })?;
+        let mut patched = bytes.to_vec();
+        for (at, byte) in writes(code, 0) {
+            patched[at] = byte;
         }
-        _ => None,
+        Some((fix, patched))
     })
 }
 
 /// Whether `path` names the file `program` and, with `beside`, a file of
 /// that name is in the same directory: `is_file` says whether a path
 /// names a file.
-fn names(path: &str, program: &str, beside: Option<&str>, is_file: &impl Fn(&str) -> bool) -> bool {
+fn is_program(
+    path: &str,
+    program: &str,
+    beside: Option<&str>,
+    is_file: &impl Fn(&str) -> bool,
+) -> bool {
     let upper = path.to_ascii_uppercase();
     let name = upper.rsplit(&['\\', '/', ':'][..]).next().unwrap_or("");
     let dir = &path[..path.len() - name.len()];
@@ -599,6 +636,18 @@ mod tests {
         })
     }
 
+    /// Every fix that patches bytes, in memory or in a program's file,
+    /// each with its code.
+    fn all_codes() -> impl Iterator<Item = (&'static Fix, &'static CodePatch)> {
+        FIXES.iter().flat_map(|fix| match fix.kind {
+            Kind::Code(code) => vec![(fix, code)],
+            Kind::AtLoad { programs, .. } => {
+                programs.iter().map(|&(_, code)| (fix, code)).collect()
+            }
+            Kind::SkipAtExec { .. } => vec![],
+        })
+    }
+
     /// The code's pieces, checks and patches' old bytes.
     fn pieces(code: &CodePatch) -> impl Iterator<Item = &Bytes> {
         code.checks
@@ -606,13 +655,18 @@ mod tests {
             .chain(code.patches.iter().map(|(old, _)| old))
     }
 
+    /// `len` zeros with a copy of the code's pieces at `base`.
+    fn placed(code: &CodePatch, base: usize, len: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; len];
+        for b in pieces(code) {
+            bytes[base + b.at..base + b.at + b.bytes.len()].copy_from_slice(b.bytes);
+        }
+        bytes
+    }
+
     /// A copy of the code's pieces at `base` in 640 KB of zeros.
     fn memory(code: &CodePatch, base: usize) -> Vec<u8> {
-        let mut ram = vec![0u8; 0xA0000];
-        for b in pieces(code) {
-            ram[base + b.at..base + b.at + b.bytes.len()].copy_from_slice(b.bytes);
-        }
-        ram
+        placed(code, base, 0xA0000)
     }
 
     fn names(found: &[(&Fix, &CodePatch, usize)]) -> Vec<(&'static str, usize)> {
@@ -733,7 +787,7 @@ mod tests {
 
     #[test]
     fn patches_keep_their_lengths_and_stay_apart() {
-        for (fix, code) in codes() {
+        for (fix, code) in all_codes() {
             let mut all: Vec<_> = pieces(code).collect();
             all.sort_by_key(|b| b.at);
             for pair in all.windows(2) {
@@ -772,38 +826,34 @@ mod tests {
         assert!(skip_at_exec("DSWAP.EXE", |_| false, |f| enabled(f, false, &[])).is_none());
     }
 
-    /// The fixes that patch a program as it loads, each with its program,
-    /// the file beside it and its code.
-    fn at_load() -> impl Iterator<Item = (&'static Fix, &'static str, &'static str, &'static CodePatch)>
-    {
-        FIXES.iter().filter_map(|fix| match fix.kind {
-            Kind::AtLoad {
-                program,
-                beside: Some(beside),
-                code,
-            } => Some((fix, program, beside, code)),
-            _ => None,
-        })
-    }
-
-    /// A program file of `len` zeros with the code's pieces in it.
-    fn file(code: &CodePatch, len: usize) -> Vec<u8> {
-        let mut bytes = vec![0u8; len];
-        for b in pieces(code) {
-            bytes[b.at..b.at + b.bytes.len()].copy_from_slice(b.bytes);
-        }
-        bytes
+    /// A program file of zeros, a little longer than the code's last
+    /// piece, with the code's pieces in it.
+    fn file(code: &CodePatch) -> Vec<u8> {
+        let end = pieces(code).map(|b| b.at + b.bytes.len()).max().unwrap();
+        placed(code, 0, end + 0x40)
     }
 
     #[test]
     fn patches_a_program_as_it_loads() {
-        assert!(at_load().count() > 0);
-        for (fix, program, beside, code) in at_load() {
-            let bytes = file(code, 0xB20);
+        // The fixes that patch a program as it loads, each with its
+        // program, the file that has to be beside it and its code.
+        let at_load: Vec<_> = FIXES
+            .iter()
+            .flat_map(|fix| match fix.kind {
+                Kind::AtLoad { programs, beside } => programs
+                    .iter()
+                    .map(|&(program, code)| (fix, program, beside, code))
+                    .collect(),
+                _ => vec![],
+            })
+            .collect();
+        assert!(!at_load.is_empty());
+        for (fix, program, beside, code) in at_load {
+            let bytes = file(code);
             let dir = "C:\\GAME\\";
             let path = format!("{dir}{}", program.to_ascii_lowercase());
-            let other = format!("{dir}{beside}");
-            let is_file = |p: &str| p.eq_ignore_ascii_case(&other);
+            let other = beside.map(|beside| format!("{dir}{beside}"));
+            let is_file = |p: &str| other.as_ref().is_some_and(|o| p.eq_ignore_ascii_case(o));
             let (found, patched) = patch_at_load(&path, &bytes, is_file, |_| true).unwrap();
             assert_eq!(found.name, fix.name);
             assert_eq!(patched.len(), bytes.len());
@@ -814,7 +864,9 @@ mod tests {
             assert!(patch_at_load(&path, &patched, is_file, |_| true).is_none());
             // Not without the file beside it, with the fix off, or under
             // another name.
-            assert!(patch_at_load(&path, &bytes, |_| false, |_| true).is_none());
+            if beside.is_some() {
+                assert!(patch_at_load(&path, &bytes, |_| false, |_| true).is_none());
+            }
             let off = vec![fix.name.to_string()];
             assert!(patch_at_load(&path, &bytes, is_file, |f| enabled(f, true, &off)).is_none());
             let renamed = format!("{dir}OTHER.EXE");
@@ -832,16 +884,27 @@ mod tests {
 
     #[test]
     fn lands_of_lore_2_gets_32_mb_of_virtual_memory() {
-        let Kind::AtLoad { code, .. } = by_name("lol2-virtual-size").unwrap().kind else {
-            panic!("lol2-virtual-size patches LOLG.EXE as it loads");
+        let Kind::AtLoad { programs, .. } = by_name("lol2-virtual-size").unwrap().kind else {
+            panic!("lol2-virtual-size patches the launchers as they load");
         };
-        let bytes = file(code, 0xB1F);
         let is_file = |p: &str| p == "LOLG.DAT";
-        let (_, patched) = patch_at_load("LOLG.EXE", &bytes, is_file, |_| true).unwrap();
-        let setting = &patched[0x481..0x4A8 + 50];
-        assert_eq!(
-            setting,
-            b"DOS4GVM=VirtualMemory:ON,VirtualSize:32M,SwapFileName:lolgswap.swp,SwapMin:20M,SwapInc:0\0"
-        );
+        // Each launcher, with where its string starts in the file.
+        for (program, at) in [("LOLG.EXE", 0x481), ("SETUPG.EXE", 0x441)] {
+            let (_, code) = programs.iter().find(|(name, _)| *name == program).unwrap();
+            let bytes = file(code);
+            let (_, patched) = patch_at_load(program, &bytes, is_file, |_| true).unwrap();
+            assert_eq!(
+                &patched[at..at + 89],
+                b"DOS4GVM=VirtualMemory:ON,VirtualSize:32M,SwapFileName:lolgswap.swp,SwapMin:20M,SwapInc:0\0",
+                "{program}"
+            );
+            // Each launcher's code is its own.
+            let other = if program == "LOLG.EXE" {
+                "SETUPG.EXE"
+            } else {
+                "LOLG.EXE"
+            };
+            assert!(patch_at_load(other, &bytes, is_file, |_| true).is_none());
+        }
     }
 }
