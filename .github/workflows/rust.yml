@@ -72,23 +72,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
 
-      # More room on top: the x86-64 image comes with about 27 GB of
-      # toolchains this job never uses, the Android SDK, .NET, GHC, Swift,
-      # CodeQL and Docker images. Removing them takes 100 s on its own and
-      # nearly 3 minutes beside the build, so it runs in the background
-      # while the job installs packages and compiles the dependencies; the
-      # test programs, which take most of the space, link minutes later.
-      - name: Free disk space (Linux x86_64)
-        if: matrix.label == 'linux-x86_64'
-        run: |
-          nohup sudo bash -c '
-            rm -rf /usr/local/lib/android /usr/share/dotnet
-            rm -rf /usr/local/.ghcup /opt/ghc /usr/share/swift
-            rm -rf /opt/hostedtoolcache/CodeQL
-            docker image prune --all --force
-            df -h /
-          ' > "$RUNNER_TEMP/free-disk.log" 2>&1 &
-
       - name: Check for shader changes
         id: shader_changes
         if: matrix.label == 'linux-x86_64'
@@ -227,12 +210,10 @@ jobs:
 
       # The size of the test build and the room it left, so a run's log
       # shows them and a change that makes the build grow again shows up
-      # (#546, #549). The removal's log ends with the free space right after
-      # the removal.
+      # (#546, #549).
       - name: Size of the test build and free disk space (Linux)
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
-          cat "$RUNNER_TEMP/free-disk.log" 2>/dev/null || true
           df -h /
           du -sh target target/debug/deps || true
 
