@@ -824,11 +824,13 @@ impl Atapi {
                 }
             }
             // SEEK stops CD audio: Windows 95's CD Player stops playing
-            // with it.
+            // with it. The head is then at the sector sought, which READ
+            // SUB-CHANNEL reports as it does the last sector read.
             0x2B => {
                 if env.player.state() == PlayState::Playing {
                     env.player.reset();
                 }
+                self.lba_next = be32(&cdb[2..6]).saturating_add(1);
             }
             0x45 | 0xA5 | 0x47 => {
                 let (start, end) = match cdb[0] {
@@ -958,6 +960,9 @@ impl Atapi {
                         self.log.push(format!("[IDE] CD-ROM read error: {}", e));
                         unreadable = Some(lba);
                     }
+                    // The head stays at the sector that failed, for READ
+                    // SUB-CHANNEL.
+                    self.lba_next = lba.saturating_add(1);
                     ok = false;
                     break;
                 }
@@ -966,6 +971,12 @@ impl Atapi {
         if !ok {
             if env.cd(self.drive).is_none() {
                 self.set_sense(0x02, 0x3A, 0);
+            } else if main.is_none() {
+                // ILLEGAL REQUEST, INVALID FIELD IN CDB: a subchannel
+                // selection MMC reserves, or fields of READ CD whose
+                // layout this drive doesn't make. The disc isn't at fault,
+                // as a medium error would say.
+                self.set_sense(0x05, 0x24, 0);
             } else {
                 // MEDIUM ERROR, UNRECOVERED READ ERROR: what a drive says
                 // of a sector it can't read, as copy protections expect.
@@ -1049,9 +1060,10 @@ impl Atapi {
                 b[12..16].copy_from_slice(&[0, m as u8, s as u8, f as u8]);
             } else {
                 b[8..12].copy_from_slice(&q.absolute.to_be_bytes());
-                // Negative in a pregap.
+                // Negative in a pregap: the sector less the track's start,
+                // -1 for the pregap's last sector, whose Q has 0.
                 let relative = if q.index == 0 {
-                    (q.relative as i32).wrapping_neg()
+                    -(q.relative as i32) - 1
                 } else {
                     q.relative as i32
                 };

@@ -538,6 +538,13 @@ fn blindwrite_subchannel_sessions_and_catalog_number() {
     assert_eq!((position[5], position[6], position[7]), (0x14, 7, 1));
     assert_eq!(u32::from_be_bytes(position[8..12].try_into().unwrap()), 17);
     assert_eq!(u32::from_be_bytes(position[12..16].try_into().unwrap()), 17);
+    // SEEK moves the head too.
+    packet(&mut bus, [0x2B, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0], 0).unwrap();
+    let position = packet(&mut bus, [0x42, 0, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0], 16).unwrap();
+    assert_eq!(u32::from_be_bytes(position[8..12].try_into().unwrap()), 20);
+    // A subchannel selection MMC reserves is an invalid field.
+    assert!(packet(&mut bus, read_cd(16, 0xF8, 3), 0xFFFE).is_err());
+    assert_eq!(sense(&mut bus), (0x05, 0x24, 0x00));
     // The media catalog number.
     let mcn = packet(&mut bus, [0x42, 0, 0x40, 2, 0, 0, 0, 0, 24, 0, 0, 0], 24).unwrap();
     assert_eq!((mcn[4], mcn[8]), (2, 0x80));
@@ -556,9 +563,10 @@ fn a_disc_without_subchannel_reads_the_layouts() {
         let l = lba.to_be_bytes();
         [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0, 2, 0]
     };
-    // Track 2's pregap: index 0, counting down to the track, with P set.
+    // Track 2's pregap: index 0, counting down to 0 at its last sector,
+    // with P set.
     let q = packet(&mut bus, read_cd(track2 - 2), 16).unwrap();
-    assert_eq!(q[..6], [0x01, 0x02, 0x00, 0x00, 0x00, 0x02]);
+    assert_eq!(q[..6], [0x01, 0x02, 0x00, 0x00, 0x00, 0x01]);
     let crc = cdimage::q_crc(&q).to_be_bytes();
     assert_eq!(q[10..12], crc);
     let l = (track2 - 2).to_be_bytes();

@@ -89,7 +89,9 @@ pub struct QPosition {
     pub track: u8,
     /// 0 in a pregap, then 1 and up.
     pub index: u8,
-    /// Sectors into the track, or in a pregap, left until it starts.
+    /// Sectors into the track, or in a pregap, left after this one until
+    /// it starts: the pregap's last sector has 0, as its first sector
+    /// after the track's start does (ECMA-130, 22.3.3.3).
     pub relative: u32,
     /// The sector.
     pub absolute: u32,
@@ -245,7 +247,8 @@ impl CdImage {
                 let data = Span::new(data_start, data_end, file, offset, size);
                 let pregap_start = data_start - t.pregap;
                 let (start, end) = (base + t.index1, data_end + t.postgap);
-                let track = Track::stored(t.number, t.mode, pregap_start, start, end, data);
+                let mut track = Track::stored(t.number, t.mode, pregap_start, start, end, data);
+                track.control |= t.flags;
                 image.tracks.push(track);
                 offset += (last - first) as u64 * size;
                 base += t.postgap;
@@ -253,6 +256,7 @@ impl CdImage {
             }
             image.files.push(backing);
         }
+        image.mcn = sheet.catalog;
         Ok(image)
     }
 
@@ -679,10 +683,11 @@ fn q_crc(q: &[u8]) -> u16 {
 }
 
 /// The Q subchannel of sector `lba` of `track` as a pressed disc has it:
-/// the position (ADR 1) and its CRC.
+/// the position (ADR 1) and its CRC. In a pregap the relative time counts
+/// down to 0 at its last sector.
 fn made_q(track: &Track, lba: u32) -> [u8; 12] {
     let (index, relative) = match lba < track.start {
-        true => (0, track.start - lba),
+        true => (0, track.start - lba - 1),
         false => (1, lba - track.start),
     };
     let msf = |frames: u32| {
@@ -833,13 +838,15 @@ fn b6t_files(path: &Path) -> Vec<Result<PathBuf, String>> {
     else {
         return Vec::new();
     };
-    let mut names: Vec<&str> = disc.blocks.iter().map(|b| b.file.as_str()).collect();
-    names.sort_unstable();
-    names.dedup();
-    let mut files: Vec<_> = names
-        .into_iter()
-        .map(|n| find_file(dir_of(path), n))
-        .collect();
+    // Blocks name a file once each, in whatever case and with whatever
+    // folder BlindWrite wrote; the file found is what counts once.
+    let mut files: Vec<Result<PathBuf, String>> = Vec::new();
+    for block in &disc.blocks {
+        let file = find_file(dir_of(path), &block.file);
+        if !files.contains(&file) {
+            files.push(file);
+        }
+    }
     files.extend(bwa_file(path).map(Ok));
     files
 }
@@ -1334,7 +1341,7 @@ mod tests {
                 control: 2,
                 track: 2,
                 index: 0,
-                relative: 5,
+                relative: 4,
                 absolute: 25
             }
         );

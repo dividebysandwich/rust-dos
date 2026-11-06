@@ -250,7 +250,12 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             tracks.extend(cue_files(&text).into_iter().map(|t| t.to_ascii_lowercase()));
         } else if named(&entry.name, &DESCRIPTOR_EXTENSIONS) {
             let disc = crate::cdrom::b6t::parse(&read(entry)).unwrap_or_default();
-            let name = |file: &str| file.rsplit(['/', '\\']).next().unwrap_or(file).to_ascii_lowercase();
+            let name = |file: &str| {
+                file.rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(file)
+                    .to_ascii_lowercase()
+            };
             tracks.extend(disc.blocks.iter().map(|b| name(&b.file)));
             // And DPM data beside it.
             let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
