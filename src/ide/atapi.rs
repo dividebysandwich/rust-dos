@@ -945,7 +945,9 @@ impl Atapi {
                                 out.fill(0);
                                 out[..12].copy_from_slice(&linear[12..24]);
                             }
-                            // R-W without P and Q.
+                            // R-W without P and Q, in the raw order: MMC
+                            // asks for de-interleaved, corrected packs
+                            // (issue #594).
                             4 => {
                                 let raw = crate::cdrom::interleave_subchannel(&linear);
                                 out.iter_mut().zip(raw).for_each(|(o, r)| *o = r & 0x3F);
