@@ -230,13 +230,36 @@ impl CdImage {
             // Sector of the disc where this file's sector 0 is, moved on by
             // the gaps that aren't in the file.
             let mut base = next;
-            let mut offset = 0u64;
+            // The first two seconds of track 1's pregap are before the
+            // disc's sector 0, where no read reaches. A data track 1 starts
+            // at sector 0, so an image that keeps its pregap (INDEX 00
+            // 00:00:00, INDEX 01 00:02:00, as BlindWrite's cue sheets give
+            // it) has the disc start that far into the file. An audio
+            // track 1 can start later, after hidden audio in its pregap:
+            // sheets for those (INDEX 00 00:00:00, INDEX 01 03:22:70) count
+            // the file from sector 0, so its sectors before INDEX 01 stay
+            // on the disc.
+            let first_file = image.tracks.is_empty();
+            let (lead, mut offset) = match cue_file.tracks.first() {
+                Some(t) if first_file && !t.mode.is_audio() => {
+                    (t.index1, t.index1 as u64 * t.mode.sector_size())
+                }
+                _ => (0, 0),
+            };
+            let at = |index: u32| index.saturating_sub(lead);
             for (i, t) in cue_file.tracks.iter().enumerate() {
-                base += t.pregap;
+                // Track 1's PREGAP is silence before INDEX 01, of which
+                // the first two seconds are before sector 0.
+                let pregap = if first_file && i == 0 {
+                    t.pregap.saturating_sub(super::LBA_OFFSET)
+                } else {
+                    t.pregap
+                };
+                base += pregap;
                 let size = t.mode.sector_size();
-                let first = t.index0.unwrap_or(t.index1).min(t.index1);
+                let first = t.index0.map_or(at(t.index1), at).min(at(t.index1));
                 let last = match cue_file.tracks.get(i + 1) {
-                    Some(n) => n.index0.unwrap_or(n.index1),
+                    Some(n) => n.index0.map_or(at(n.index1), at),
                     None => first + ((backing.len.saturating_sub(offset)) / size) as u32,
                 };
                 if last < first {
@@ -245,8 +268,8 @@ impl CdImage {
                 let data_start = base + first;
                 let data_end = base + last;
                 let data = Span::new(data_start, data_end, file, offset, size);
-                let pregap_start = data_start - t.pregap;
-                let (start, end) = (base + t.index1, data_end + t.postgap);
+                let pregap_start = data_start - pregap;
+                let (start, end) = (base + at(t.index1), data_end + t.postgap);
                 let mut track = Track::stored(t.number, t.mode, pregap_start, start, end, data);
                 track.control |= t.flags;
                 image.tracks.push(track);
@@ -1094,6 +1117,79 @@ mod tests {
         image.read_data(3, &mut data).unwrap();
         assert!(data.iter().all(|&b| b == 1));
         assert!(image.read_data(25, &mut data).is_err(), "audio isn't data");
+    }
+
+    #[test]
+    fn a_first_track_whose_pregap_is_in_the_file() {
+        // BlindWrite's images keep track 1's pregap; the disc's sector 0
+        // is a data track 1's INDEX 01, three sectors into the file.
+        let dir = scratch("first_pregap");
+        let mut data = sectors(3, 9);
+        data.extend(sectors(5, 1));
+        data.extend(sectors(4, 2));
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 00 00:00:00\n  \
+             INDEX 01 00:00:03\n TRACK 02 MODE1/2352\n  INDEX 01 00:00:08\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let tracks = image.tracks();
+        assert_eq!((tracks[0].pregap_start, tracks[0].start, tracks[0].end), (0, 0, 5));
+        assert_eq!((tracks[1].start, tracks[1].end), (5, 9));
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(0, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 1), "sector 0 is INDEX 01's");
+        image.read_data(5, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 2));
+
+        // A PREGAP on track 1 is the same two seconds, before sector 0.
+        fs::write(
+            dir.join("gap.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  PREGAP 00:02:00\n  \
+             INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("gap.cue")).unwrap();
+        assert_eq!((image.tracks()[0].start, image.tracks()[0].end), (0, 12));
+
+        // A longer one leaves the rest of it on the disc, silent.
+        fs::write(
+            dir.join("long_gap.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  PREGAP 00:04:00\n  \
+             INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("long_gap.cue")).unwrap();
+        let t = &image.tracks()[0];
+        assert_eq!((t.pregap_start, t.start, t.end), (0, 150, 162));
+        image.read_data(150, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 9));
+    }
+
+    #[test]
+    fn an_audio_first_track_with_audio_in_its_pregap() {
+        // Hidden audio before track 1's INDEX 01 is on the disc from
+        // sector 0, as sheets of single-file rips have it.
+        let dir = scratch("first_audio_pregap");
+        let mut data = sectors(3, 9);
+        data.extend(sectors(5, 1));
+        data.extend(sectors(4, 2));
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 AUDIO\n  INDEX 00 00:00:00\n  \
+             INDEX 01 00:00:03\n TRACK 02 MODE1/2352\n  INDEX 01 00:00:08\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let tracks = image.tracks();
+        assert_eq!((tracks[0].pregap_start, tracks[0].start, tracks[0].end), (0, 3, 8));
+        assert_eq!((tracks[1].start, tracks[1].end), (8, 12));
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(0, &mut raw).unwrap();
+        assert!(raw.iter().all(|&b| b == 9), "the hidden audio");
     }
 
     #[test]

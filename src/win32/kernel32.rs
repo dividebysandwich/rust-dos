@@ -650,6 +650,12 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: super::seh::nested_unwind_handler,
     },
+    // Windows 98 SE's is one of its stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED and return 0, leaving the structure as
+    // it was. SafeDisc 1's loader (Omikron's RUNTIME.EXE) resolves it
+    // with the process functions it uses and exits with -1 where
+    // GetProcAddress finds it missing.
+    stdcall("GetStartupInfoW", 954, 1, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
@@ -966,6 +972,24 @@ pub fn resource_data(
     name: u32,
 ) -> Option<Result<(u32, u32), u32>> {
     module::resource_data(cpu, module, kind, name)
+}
+
+/// The data of the resource `name` of the named type `kind` ("WAVE"), as
+/// `resource_data` gives it.
+pub fn named_resource_data(
+    cpu: &mut Cpu,
+    module: u32,
+    kind: &str,
+    name: u32,
+) -> Option<Result<(u32, u32), u32>> {
+    module::named_resource_data(cpu, module, kind, name)
+}
+
+/// IsBadStringPtrA(at, max): whether the string at `at`, up to its 0 or
+/// `max` bytes, can't be read. Unlike a service's own read, a page that
+/// isn't there doesn't fault.
+pub fn bad_string_ptr(cpu: &mut Cpu, at: u32, max: u32) -> bool {
+    virtual_memory::is_bad_string_ptr_a(cpu, &[at, max]) != Some(0)
 }
 
 /// GlobalAlloc(flags, size) for a built-in DLL (the clipboard's data):

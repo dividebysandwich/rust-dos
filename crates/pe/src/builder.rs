@@ -51,7 +51,15 @@ pub struct Builder {
     dirs: [DataDir; 16],
     exports: Vec<(Option<String>, u16, u32)>,
     relocs: Vec<u32>,
-    resources: BTreeMap<u16, BTreeMap<u16, BTreeMap<u16, Vec<u8>>>>,
+    resources: BTreeMap<ResKey, BTreeMap<u16, BTreeMap<u16, Vec<u8>>>>,
+}
+
+/// A resource type: a name ("WAVE") or a number. Names sort first, as a
+/// resource directory lists its named entries before its numbered ones.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ResKey {
+    Name(String),
+    Id(u16),
 }
 
 fn align(n: u32) -> u32 {
@@ -217,6 +225,22 @@ impl Builder {
 
     /// A resource with numeric type, name and language.
     pub fn resource(&mut self, kind: u16, name: u16, language: u16, data: &[u8]) -> &mut Self {
+        self.add_resource(ResKey::Id(kind), name, language, data)
+    }
+
+    /// A resource with a named type ("WAVE"), and numeric name and
+    /// language. Windows looks names up in capitals.
+    pub fn named_resource(
+        &mut self,
+        kind: &str,
+        name: u16,
+        language: u16,
+        data: &[u8],
+    ) -> &mut Self {
+        self.add_resource(ResKey::Name(kind.to_uppercase()), name, language, data)
+    }
+
+    fn add_resource(&mut self, kind: ResKey, name: u16, language: u16, data: &[u8]) -> &mut Self {
         self.resources
             .entry(kind)
             .or_default()
@@ -330,6 +354,17 @@ impl Builder {
                 at += dir_size(languages.len());
             }
         }
+        // The names of the named types: a length, then UTF-16.
+        let mut type_names = Vec::new();
+        for kind in self.resources.keys() {
+            if let ResKey::Name(name) = kind {
+                let units: Vec<u16> = name.encode_utf16().collect();
+                let size = 2 + 2 * units.len();
+                type_names.push((at, units));
+                at += size;
+            }
+        }
+        at = at.div_ceil(4) * 4;
         let leaves: usize = self
             .resources
             .values()
@@ -339,17 +374,35 @@ impl Builder {
         let mut data_entry = at;
         let mut data_at = at + 16 * leaves;
         let mut out = vec![0u8; data_at];
-        let directory = |out: &mut Vec<u8>, at: usize, ids: Vec<u16>, targets: Vec<u32>| {
-            put16(out, at + 14, ids.len() as u16);
-            for (i, (id, target)) in ids.iter().zip(targets).enumerate() {
-                put32(out, at + 16 + 8 * i, *id as u32);
-                put32(out, at + 20 + 8 * i, target);
+        // `named` of the entries name a string (bit 31 of their id).
+        let directory =
+            |out: &mut Vec<u8>, at: usize, named: usize, ids: Vec<u32>, targets: Vec<u32>| {
+                put16(out, at + 12, named as u16);
+                put16(out, at + 14, (ids.len() - named) as u16);
+                for (i, (id, target)) in ids.iter().zip(targets).enumerate() {
+                    put32(out, at + 16 + 8 * i, *id);
+                    put32(out, at + 20 + 8 * i, target);
+                }
+            };
+        let mut names_at = type_names.iter();
+        let kinds: Vec<u32> = self
+            .resources
+            .keys()
+            .map(|kind| match kind {
+                ResKey::Name(_) => 0x8000_0000 | names_at.next().unwrap().0 as u32,
+                ResKey::Id(id) => *id as u32,
+            })
+            .collect();
+        for (at, units) in &type_names {
+            put16(&mut out, *at, units.len() as u16);
+            for (i, unit) in units.iter().enumerate() {
+                put16(&mut out, at + 2 + 2 * i, *unit);
             }
-        };
-        let kinds: Vec<u16> = self.resources.keys().copied().collect();
+        }
         directory(
             &mut out,
             0,
+            type_names.len(),
             kinds,
             type_dirs.iter().map(|&d| 0x8000_0000 | d as u32).collect(),
         );
@@ -358,10 +411,11 @@ impl Builder {
             let dirs: Vec<usize> = (0..names.len())
                 .map(|_| *name_dir.next().unwrap())
                 .collect();
-            let ids = names.keys().copied().collect();
+            let ids = names.keys().map(|&id| id as u32).collect();
             directory(
                 &mut out,
                 type_dir,
+                0,
                 ids,
                 dirs.iter().map(|&d| 0x8000_0000 | d as u32).collect(),
             );
@@ -376,7 +430,8 @@ impl Builder {
                     data_at = out.len().div_ceil(4) * 4;
                     data_entry += 16;
                 }
-                directory(&mut out, dir, languages.keys().copied().collect(), entries);
+                let ids = languages.keys().map(|&id| id as u32).collect();
+                directory(&mut out, dir, 0, ids, entries);
             }
         }
         let size = out.len() as u32;

@@ -243,8 +243,14 @@ fn write_resource(cpu: &mut Cpu, address: u32) -> bool {
 }
 
 /// The code and parameters of the exception a fault (`vector`, with the
-/// error code `error`) is, and what it says in a message.
-fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>, String) {
+/// error code `error`, of the instruction at `eip`) is, and what it says
+/// in a message.
+fn fault_exception(
+    cpu: &Cpu,
+    vector: u8,
+    error: Option<u32>,
+    eip: u32,
+) -> (u32, Vec<u32>, String) {
     let name = match vector {
         0 => "divide error",
         1 => "debug exception",
@@ -280,22 +286,32 @@ fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>,
         6 => (ILLEGAL_INSTRUCTION, vec![]),
         // Writing, as the error code's bit 1 says, and where.
         14 => (ACCESS_VIOLATION, vec![error.unwrap_or(0) >> 1 & 1, cpu.cr2]),
-        13 if error.unwrap_or(0) == 0 && privileged(cpu) => (PRIV_INSTRUCTION, vec![]),
+        13 if error.unwrap_or(0) == 0 && privileged(cpu, eip) => (PRIV_INSTRUCTION, vec![]),
         16 => (fpu_exception(cpu), vec![]),
         _ => (ACCESS_VIOLATION, vec![0, 0xFFFF_FFFF]),
     };
     (code, params, what)
 }
 
-/// Whether the instruction that faulted is one only the system may run:
-/// HLT, CLI, STI, IN or OUT, or a move to or from a control register.
-fn privileged(cpu: &Cpu) -> bool {
-    let process = super::running(cpu).expect("a Win32 process");
-    let Some(phys) = process.memory.translate(&cpu.bus, cpu.eip()) else {
-        return false;
-    };
-    let byte = cpu.bus.read_8(phys as usize);
-    matches!(byte, 0xF4 | 0xFA | 0xFB | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F)
+/// The `len` bytes of the program's code at `eip`, read through its page
+/// tables without a page fault: None where a page isn't there. A fault's
+/// instruction is at its context's EIP: the CPU's own EIP is the trap's
+/// in the ROM by then.
+fn code_at(cpu: &Cpu, eip: u32, len: usize) -> Option<Vec<u8>> {
+    let process = super::running(cpu)?;
+    super::loader::peek(&cpu.bus, &process.memory, eip, len)
+}
+
+/// Whether the instruction at `eip`, which faulted, is one only the
+/// system may run: HLT, CLI, STI, IN or OUT, or a move to or from a
+/// control register.
+fn privileged(cpu: &Cpu, eip: u32) -> bool {
+    let byte = |at: u32| code_at(cpu, at, 1).map(|b| b[0]);
+    match byte(eip) {
+        Some(0x0F) => matches!(byte(eip.wrapping_add(1)), Some(0x20 | 0x22)),
+        Some(b) => matches!(b, 0xF4 | 0xFA | 0xFB | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F),
+        None => false,
+    }
 }
 
 /// The exception code of an FPU error, from the status word's flags.
@@ -313,6 +329,22 @@ fn fpu_exception(cpu: &Cpu) -> u32 {
     }
 }
 
+/// INT 68h is WDEB386's interface, which programs call to find the
+/// debugger: with it loaded, AH=43h answers F386h. Its gate is the
+/// system's, so a program's INT 68h is a #GP whose error code names the
+/// gate (vector 68h, bit 1 for the IDT). Windows 98's VMM takes that #GP
+/// and passes the interrupt on to the system VM, where nothing answers
+/// without the debugger, and the program goes on after the INT with its
+/// registers as they were. SafeDisc 1's loader (Omikron's RUNTIME.EXE)
+/// calls it with AX=4300h and takes AX still 4300h for "no debugger";
+/// its handlers don't take the fault.
+const DEBUGGER_INT_ERROR: u32 = 0x68 << 3 | 2;
+
+/// Whether the instruction at `eip` is INT 68h.
+fn is_debugger_int(cpu: &Cpu, eip: u32) -> bool {
+    code_at(cpu, eip, 2).as_deref() == Some(&[0xCD, 0x68])
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
@@ -324,7 +356,12 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    let (code, params, what) = fault_exception(cpu, vector, error);
+    if vector == 13 && error == Some(DEBUGGER_INT_ERROR) && is_debugger_int(cpu, ctx.eip) {
+        ctx.eip = ctx.eip.wrapping_add(2);
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    let (code, params, what) = fault_exception(cpu, vector, error, ctx.eip);
     // The context of a debug exception has TF clear, so that a handler
     // that continues goes on running. To step on, it sets TF there. Any
     // other exception's context keeps the TF the program had.

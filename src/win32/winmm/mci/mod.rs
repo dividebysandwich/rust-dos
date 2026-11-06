@@ -242,6 +242,10 @@ pub struct Parms {
     pub window_text: String,
     pub rect: [i32; 4],
     pub hdc: u32,
+    /// Whether a digitalvideo device opens without a window: the device
+    /// of a DirectShow graph whose pictures go to the program's own
+    /// renderer (dshow/filter.rs), which plays only the sound.
+    pub windowless: bool,
     /// What it returns: a number, how it reads, or text.
     pub ret: u32,
     pub ret_kind: Ret,
