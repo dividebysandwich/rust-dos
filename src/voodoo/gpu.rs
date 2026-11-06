@@ -336,20 +336,33 @@ impl Voodoo {
     }
 
     /// `job` is drawn here, in software. The memory is brought up to the
-    /// renderer for it: on a Banshee only the rows of the buffers it
-    /// draws into (its textures came back before it was recorded,
-    /// `gpu_texels`), which leaves the others on the GPU; on the other
-    /// cards all of it. On a Banshee those rows change in the memory the
-    /// texture units read, which `gpu_texels` hears of.
+    /// renderer for it: on a Banshee only the buffers it draws into (its
+    /// textures came back before it was recorded, `gpu_texels`), which
+    /// leaves the others on the GPU; on the other cards all of it. On a
+    /// Banshee the rows it draws change in the memory the texture units
+    /// read, which `gpu_texels` hears of.
+    ///
+    /// Where rows it draws over are behind, the buffer comes back whole
+    /// rather than those rows: the jobs after it into the same buffers
+    /// are drawn here too, for the same reason (the program reads the
+    /// buffer back, `gpu_takes`), and each would wait for the GPU again
+    /// for its own rows. Test Drive 4 reads two pixels of the back buffer
+    /// in the middle of each frame, and the frame after the rows cool
+    /// (`HOT_FRAMES`) waited for the GPU some 25 times, a band of rows
+    /// for each triangle after the read.
     pub(crate) fn gpu_draws_here(&self, job: &Job) {
         let bytes = self.banshee.is_some().then(|| self.gpu_job_bytes(job));
         let Some(Some(bytes)) = bytes else {
             self.gpu_catch_up();
             return;
         };
-        for (start, end) in bytes.into_iter().flatten() {
+        let whole = self.gpu_job_buffers(job).unwrap_or(bytes);
+        for (rows, buffer) in bytes.into_iter().zip(whole) {
+            let (Some((start, end)), Some(buffer)) = (rows, buffer) else {
+                continue;
+            };
             if self.gpu_behind.get() && self.gpu.borrow().tracker.buffers_in(start, end) {
-                self.gpu_catch_up_in(Some((start, end)));
+                self.gpu_catch_up_in(Some(buffer));
             }
             self.gpu.borrow_mut().tracker.drawn_in_memory(start, end);
         }
@@ -362,6 +375,17 @@ impl Voodoo {
     /// they are the recording's buffers, None if the job draws colours
     /// into one the recording doesn't have.
     fn gpu_job_bytes(&self, job: &Job) -> Option<JobBytes> {
+        self.job_bytes(job, false)
+    }
+
+    /// The same as whole buffers: every row of the buffers the job draws
+    /// into, in the same slots.
+    fn gpu_job_buffers(&self, job: &Job) -> Option<JobBytes> {
+        self.job_bytes(job, true)
+    }
+
+    /// `gpu_job_bytes`, every row of the buffers if `whole`.
+    fn job_bytes(&self, job: &Job, whole: bool) -> Option<JobBytes> {
         let mut bytes = [None; SLOTS];
         let mut n = 0;
         let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
@@ -376,7 +400,7 @@ impl Voodoo {
             match job {
                 Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
                     let dest = st.dest as u32 * 2;
-                    let rows = job_rows(job, key.height);
+                    let rows = if whole { all } else { job_rows(job, key.height) };
                     if st.fbz_mode & (1 << 9) != 0 {
                         let buffer = key.color_at(dest)?;
                         mark(dest, buffer.stride, rows);
@@ -407,7 +431,7 @@ impl Voodoo {
         let all = (0, fbi.height);
         match job {
             Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                let rows = job_rows(job, fbi.height);
+                let rows = if whole { all } else { job_rows(job, fbi.height) };
                 mark(st.dest as u32 * 2, fbi.stride, rows);
                 mark(fbi.auxoffs, fbi.aux_stride, rows);
             }

@@ -1335,6 +1335,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gpu_reads_bring_back_whole_buffers_for_the_first_job_drawn_in_software() {
+        // A job into a hot buffer is drawn in software, over the
+        // renderer's pixels: the first one that draws over rows still
+        // behind brings back the rest of its colour buffer and its depth
+        // buffer in one read each, as the jobs after it are drawn in
+        // software too. Test Drive 4 reads two pixels of the back buffer
+        // in the middle of a frame, and each triangle after that read
+        // back a band of its own, waiting for the GPU every time.
+        let log = Rc::default();
+        let mut v = gpu_card_hot_after_a_read(&log);
+        float(&mut v, FSTART_Z, 500.0);
+        rectangle(&mut v, (0.0, 100.0, 64.0, 110.0), (0.0, 255.0, 0.0));
+        assert_eq!(gpu_only(&v), 3, "drawn in software");
+        assert_eq!(
+            reads(&log),
+            [
+                format!("read {:?} 32..256", Some(A / 2)),
+                "read None 0..256".to_string()
+            ]
+        );
+        log.borrow_mut().clear();
+        rectangle(&mut v, (0.0, 200.0, 64.0, 210.0), (0.0, 255.0, 0.0));
+        assert!(reads(&log).is_empty(), "{:?}", reads(&log));
+        // The memory has the renderer's frame under what was drawn since.
+        let memory = v.frame_buffer();
+        assert_eq!(memory.get(tiled_row(A, 150)), 0x1234);
+        assert_ne!(memory.get(tiled_row(A, 105)), 0x1234);
+    }
+
+    #[test]
     fn gpu_reads_hand_jobs_into_a_hot_buffer_to_the_workers_at_once() {
         // The program reads a hot buffer back every frame, so its jobs
         // aren't held back for a read that may never come: held, a read
