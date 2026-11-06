@@ -5,12 +5,28 @@
 //! segment. The module database (its handle's block) is a copy of the
 //! file's header and resident tables.
 //!
-//! The relocations and the prologues are ported from Wine's krnl386
-//! ne_segment.c (LGPL 2.1 or later, copyright 1993 Robert J. Amstadt,
-//! 1995 Alexandre Julliard).
+//! The module database has the layout of Windows' (KRNL386's) in-memory
+//! header: the segment table's entries are ten bytes, the segment's
+//! handle after the file's eight, offset 8 has the automatic data
+//! segment's entry, offset 0Ah the file's OFSTRUCT, and the module
+//! references are the modules' handles.
+//!
+//! A module that loads its own segments (the header's SELFLOAD flag, as
+//! compressed ones do) has its first segment loaded and relocated as any
+//! other, and its own loader loads the rest before its entry point runs
+//! (`boot`): KERNEL writes the addresses of its MyAlloc, EntryAddrProc
+//! and SetOwner into the loader's table at the start of that segment,
+//! calls its BootApp with the module and the open file, then its
+//! LoadAppSeg for each segment BootApp didn't load. The loader writes
+//! the segments' handles into the module database.
+//!
+//! The relocations, the prologues and the self-loading are ported from
+//! Wine's krnl386 ne_segment.c and ne_module.c (LGPL 2.1 or later,
+//! copyright 1993 Robert J. Amstadt, 1995 Alexandre Julliard).
 
 use super::{Module16, Segment16, builtin, global, ldt};
 use crate::cpu::Cpu;
+use crate::dpmi::Context;
 use crate::win32::memory::{PAGE, SHARED, SYSTEM, USER};
 use rust_dos_ne as ne;
 
@@ -194,11 +210,16 @@ pub fn load_file(
     if parsed.target_os == ne::OS_OS2 {
         return Err(bad(format!("{} is an OS/2 program.", file_name)));
     }
-    if parsed.flags & ne::SELFLOAD != 0 {
+    let self_loading = parsed.flags & ne::SELFLOAD != 0;
+    if self_loading && !parsed.is_dll() {
         return Err(bad(format!(
-            "{} loads its own segments, which the built-in Windows doesn't support yet.",
+            "{} is a program that loads its own segments, which the built-in Windows \
+             doesn't support yet.",
             file_name
         )));
+    }
+    if self_loading && parsed.segments.first().is_none_or(|s| s.offset == 0) {
+        return Err(bad(format!("{} has no loader segment.", file_name)));
     }
     // A segment flagged 32-bit (`ne::SEG_32BIT`) loads as a 16-bit one,
     // as Windows 3.1 and 95 load it. The programs that have one, such as
@@ -207,10 +228,11 @@ pub fn load_file(
     let name = parsed.name().to_ascii_uppercase();
 
     // The module database.
+    let database = database(&parsed, path);
     let db = global::alloc(
         cpu,
         global::GMEM_ZEROINIT,
-        parsed.tables.len() as u32 + 0x40,
+        database.len() as u32 + 0x40,
         0,
         false,
     );
@@ -218,13 +240,21 @@ pub fn load_file(
         return Err(out_of_memory(&file_name));
     }
     if let Some(a) = global::get(cpu, db) {
-        super::poke(cpu, a.base, &parsed.tables);
+        super::poke(cpu, a.base, &database);
     }
     set_owner(cpu, db, db);
 
     // The segments' blocks.
     let mut segments = Vec::new();
     for (i, seg) in parsed.segments.iter().enumerate() {
+        // A self-loading module's loader allocates its other segments.
+        if self_loading && i > 0 {
+            segments.push(Segment16 {
+                flags: seg.flags,
+                ..Segment16::default()
+            });
+            continue;
+        }
         let mut size = seg.size();
         if parsed.auto_data as usize == i + 1 {
             let mut extra = parsed.heap as u32;
@@ -280,6 +310,7 @@ pub fn load_file(
         flags: parsed.flags,
         expected_version: parsed.expected_version,
         loaded: Vec::new(),
+        unbooted: self_loading,
     });
 
     // The modules it imports from.
@@ -299,9 +330,18 @@ pub fn load_file(
         }
     }
     cpu.bus.win32.win16.modules[index].deps = deps.clone();
+    write_tables(cpu, db, &parsed, &segments, &deps);
 
-    // The segments' contents, relocated.
+    // The segments' contents, relocated: the loader segment alone of a
+    // self-loading module.
+    let dgroup_sel = match parsed.auto_data {
+        0 => 0,
+        n => segments.get(n as usize - 1).map_or(0, |s| s.selector),
+    };
     for (i, seg) in parsed.segments.iter().enumerate() {
+        if self_loading && i > 0 {
+            break;
+        }
         let Ok(data) = seg.data(&file) else {
             continue;
         };
@@ -318,12 +358,15 @@ pub fn load_file(
             index,
         );
         if !seg.is_data() {
-            patch_prologues(&parsed, i as u8 + 1, &mut bytes, &segments, dgroup);
+            patch_prologues(&parsed, i as u8 + 1, &mut bytes, dgroup_sel);
         }
         if let Some(a) = global::get(cpu, segments[i].handle) {
             bytes.truncate(a.size as usize);
             super::poke(cpu, a.base, &bytes);
         }
+    }
+    if self_loading {
+        fill_loader_table(cpu, segments[0].selector);
     }
     if parsed.is_dll() && builtin.is_none() {
         inits.push(index);
@@ -374,7 +417,7 @@ fn free_segments(cpu: &mut Cpu, segments: &[Segment16]) {
 }
 
 /// Set the owner of the block `handle`.
-fn set_owner(cpu: &mut Cpu, handle: u16, owner: u16) {
+pub(super) fn set_owner(cpu: &mut Cpu, handle: u16, owner: u16) {
     let sel = global::handle_to_sel(handle);
     if let Some(a) = cpu.bus.win32.win16.arena.get_mut(&ldt::index(sel)) {
         a.owner = owner;
@@ -412,11 +455,8 @@ pub fn entry_point(cpu: &Cpu, module: u16, ordinal: u16) -> u32 {
     match parsed.entry(ordinal) {
         Some(ne::Entry::Code {
             segment, offset, ..
-        }) => match (segment as usize)
-            .checked_sub(1)
-            .and_then(|i| m.segments.get(i))
-        {
-            Some(s) => (s.selector as u32) << 16 | offset as u32,
+        }) => match segment_selector(cpu, m, segment) {
+            Some(sel) => (sel as u32) << 16 | offset as u32,
             None => 0,
         },
         Some(ne::Entry::Constant { value, .. }) => (CONSTANT_SEL as u32) << 16 | value as u32,
@@ -631,22 +671,14 @@ fn unresolved(cpu: &mut Cpu, module: u16, what: &str) -> u32 {
 /// Patch the prologues of the exported functions of the code segment
 /// `segnum`, whose bytes are `bytes`, as Windows 3.1's loader does:
 /// "push ds; pop ax" and "mov ax, ds" become "mov ax, DGROUP" in a
-/// function using the shared data segment, and "nop; nop" in an exported
-/// one of a module with an instance for each task, which gets its data
-/// segment in AX from its caller.
-fn patch_prologues(
-    parsed: &ne::Module,
-    segnum: u8,
-    bytes: &mut [u8],
-    segments: &[Segment16],
-    dgroup: u16,
-) {
-    if parsed.auto_data == 0 || dgroup == 0 {
+/// function using the shared data segment, whose selector is
+/// `dgroup_sel`, and "nop; nop" in an exported one of a module with an
+/// instance for each task, which gets its data segment in AX from its
+/// caller. Nothing changes for a module without a data segment.
+fn patch_prologues(parsed: &ne::Module, segnum: u8, bytes: &mut [u8], dgroup_sel: u16) {
+    if parsed.auto_data == 0 || dgroup_sel == 0 {
         return;
     }
-    let dgroup_sel = segments
-        .get(parsed.auto_data as usize - 1)
-        .map_or(0, |s| s.selector);
     for entry in &parsed.entries {
         let ne::Entry::Code {
             segment,
@@ -805,4 +837,295 @@ pub fn builtin_selector(cpu: &Cpu, builtin: usize) -> Option<u16> {
         .find(|m| m.builtin == Some(builtin as u16))
         .and_then(|m| m.segments.first())
         .map(|s| s.selector)
+}
+
+// The module database.
+
+/// The segment table entries' flags the loader keeps: the segment has
+/// its block, and its contents.
+pub const SEG_ALLOCATED: u16 = 0x0002;
+pub const SEG_LOADED: u16 = 0x0004;
+/// The bytes of an entry of the database's segment table.
+const SEGMENT_ENTRY: u32 = 10;
+/// The bytes of an OFSTRUCT before its path, and the path's most.
+const OFSTRUCT_HEAD: usize = 8;
+const OFS_MAXPATHNAME: usize = 128;
+
+/// The module database of `parsed`, loaded from `path`: the file's header
+/// and tables, then the segment table with a handle in each entry and
+/// the file's OFSTRUCT, which the header points to as KRNL386's does.
+/// The handles and the module references are written once the module
+/// has its segments and the modules it imports from (`write_tables`).
+fn database(parsed: &ne::Module, path: &str) -> Vec<u8> {
+    let mut db = parsed.tables.clone();
+    db.resize(db.len().max(0x40), 0);
+    let segtab = db.len();
+    let file_table = parsed.table_offsets[0] as usize;
+    for (i, seg) in parsed.segments.iter().enumerate() {
+        let at = file_table + 8 * i;
+        let mut entry = match parsed.tables.get(at..at + 8) {
+            Some(raw) => raw.to_vec(),
+            None => {
+                let mut raw = Vec::with_capacity(8);
+                let sector = seg.offset >> parsed.align_shift;
+                raw.extend_from_slice(&(sector as u16).to_le_bytes());
+                raw.extend_from_slice(&(seg.length as u16).to_le_bytes());
+                raw.extend_from_slice(&seg.flags.to_le_bytes());
+                raw.extend_from_slice(&(seg.min_alloc as u16).to_le_bytes());
+                raw
+            }
+        };
+        let flags = u16::from_le_bytes([entry[4], entry[5]]) & !(SEG_ALLOCATED | SEG_LOADED);
+        entry[4..6].copy_from_slice(&flags.to_le_bytes());
+        entry.extend_from_slice(&[0, 0]);
+        db.extend_from_slice(&entry);
+    }
+    let dgroup_entry = match parsed.auto_data {
+        0 => 0,
+        n => segtab + (n as usize - 1) * SEGMENT_ENTRY as usize,
+    };
+    let fileinfo = db.len();
+    let mut name = crate::dosstr::to_bytes(path);
+    name.truncate(OFS_MAXPATHNAME - 1);
+    db.push((OFSTRUCT_HEAD + name.len() + 1) as u8);
+    // fFixedDisk, nErrCode and the reserved bytes.
+    db.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0]);
+    db.extend_from_slice(&name);
+    db.push(0);
+    db[0x08..0x0A].copy_from_slice(&(dgroup_entry as u16).to_le_bytes());
+    db[0x0A..0x0C].copy_from_slice(&(fileinfo as u16).to_le_bytes());
+    db[0x22..0x24].copy_from_slice(&(segtab as u16).to_le_bytes());
+    db
+}
+
+/// The linear address of the entry of segment `n` (from 1) in the
+/// segment table of the module database `db`.
+fn segment_entry(cpu: &Cpu, db: u16, n: u16) -> u32 {
+    let segtab = super::read_16(cpu, super::lin(cpu, db, 0x22));
+    super::lin(cpu, db, segtab) + (n as u32 - 1) * SEGMENT_ENTRY
+}
+
+/// The flags and the handle the segment table of `db` has for segment
+/// `n`.
+fn db_segment(cpu: &Cpu, db: u16, n: u16) -> (u16, u16) {
+    let at = segment_entry(cpu, db, n);
+    (super::read_16(cpu, at + 4), super::read_16(cpu, at + 8))
+}
+
+/// Write the handles of the segments `segments` that have blocks into the
+/// segment table of `db`, each flagged allocated and loaded, and the
+/// handles of the modules it imports from, `deps`, into its module
+/// references.
+fn write_tables(cpu: &mut Cpu, db: u16, parsed: &ne::Module, segments: &[Segment16], deps: &[u16]) {
+    for (i, s) in segments.iter().enumerate().filter(|(_, s)| s.handle != 0) {
+        let at = segment_entry(cpu, db, i as u16 + 1);
+        let flags = super::read_16(cpu, at + 4) | SEG_ALLOCATED | SEG_LOADED;
+        super::write_16(cpu, at + 4, flags);
+        super::write_16(cpu, at + 8, s.handle);
+    }
+    let refs = super::lin(cpu, db, parsed.table_offsets[3]);
+    for (i, &dep) in deps.iter().enumerate() {
+        super::write_16(cpu, refs + 2 * i as u32, dep);
+    }
+}
+
+/// The selector of segment `n` (from 1) of the module `m`, if it has a
+/// block. A self-loading module's loader keeps them in the module
+/// database while it runs.
+fn segment_selector(cpu: &Cpu, m: &Module16, n: u8) -> Option<u16> {
+    let i = (n as usize).checked_sub(1)?;
+    let sel = if m.unbooted && i < m.segments.len() {
+        global::handle_to_sel(db_segment(cpu, m.handle, n as u16).1)
+    } else {
+        m.segments.get(i)?.selector
+    };
+    (sel != 0).then_some(sel)
+}
+
+// Self-loading modules.
+
+/// Write KERNEL's functions into the loader's table at the start of the
+/// loader segment `sel`, as KRNL386 does: MyAlloc at 10h, EntryAddrProc
+/// at 14h and SetOwner at 24h. BootApp is at 4, LoadAppSeg at 8.
+fn fill_loader_table(cpu: &mut Cpu, sel: u16) {
+    let at = super::lin(cpu, sel, 0);
+    for (offset, name) in [
+        (0x10, "MyAlloc"),
+        (0x14, "EntryAddrProc"),
+        (0x24, "FarSetOwner"),
+    ] {
+        let address = builtin::stub_address(cpu, 0, name).unwrap_or(0);
+        super::write_32(cpu, at + offset, address);
+    }
+}
+
+/// Whether the module `handle` loads its own segments and its loader
+/// hasn't run yet.
+pub fn needs_boot(cpu: &Cpu, handle: u16) -> bool {
+    super::module_index(cpu, handle).is_some_and(|i| cpu.bus.win32.win16.modules[i].unbooted)
+}
+
+/// Run the loader of the self-loading module `module`, as KRNL386 does
+/// before its entry point runs: BootApp(module, file) with the module's
+/// file open, then LoadAppSeg(module, file, n) for each segment n the
+/// loader hasn't loaded (`then_boot`). Then `task::call_lib_init` goes
+/// on with `then` and `data`, the context `resume` after it.
+///
+/// Windows loads the segments BootApp leaves when a fault finds one not
+/// present; here, as in Wine, they all load before the entry point.
+pub fn boot(cpu: &mut Cpu, module: u16, resume: Context, then: u16, data: Vec<u32>) {
+    let Some(index) = super::module_index(cpu, module) else {
+        return;
+    };
+    let m = &cpu.bus.win32.win16.modules[index];
+    let (name, path) = (m.name.clone(), m.path.clone());
+    let loader = m.segments.first().map_or(0, |s| s.selector);
+    let path_bytes = crate::dosstr::to_bytes(&path);
+    // OF_READ | OF_SHARE_DENY_WRITE, as Wine's NE_OpenFile opens it.
+    let file = match super::dos::call21(cpu, [0x3D20, 0, 0, 0], Some(&path_bytes)) {
+        Ok((ax, _)) => ax,
+        Err(_) => {
+            cpu.bus
+                .log_string(&format!("[W16] {} can't be opened for its loader", path));
+            0xFFFF
+        }
+    };
+    let boot_app = super::read_32(cpu, super::lin(cpu, loader, 4));
+    cpu.bus.log_string(&format!(
+        "[W16] Calling the loader of {} at {:04X}:{:04X}",
+        name,
+        boot_app >> 16,
+        boot_app & 0xFFFF
+    ));
+    let mut chained = vec![module as u32, file as u32, 0, then as u32];
+    chained.extend(data);
+    super::thunk::call16(
+        cpu,
+        boot_app,
+        &[module, file],
+        0,
+        resume,
+        super::thunk::THEN_BOOT,
+        chained,
+    );
+}
+
+/// The loader of a self-loading module returned (`boot`): `data` is the
+/// module, its file, the segment LoadAppSeg loaded (0 after BootApp), and
+/// the `then` and data of the init it is for. LoadAppSeg returns the
+/// segment's handle, which goes into the module database, as Wine has
+/// it. The next segment not loaded loads, or, all done, the file closes,
+/// the module takes its segments from the database, and its init goes
+/// on.
+pub fn then_boot(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
+    let &[module, file, done, then, ..] = data else {
+        return Some(ctx.gpr[super::thunk::EAX]);
+    };
+    let rest = data[4..].to_vec();
+    let (module, file, done) = (module as u16, file as u16, done as u16);
+    if let Some(index) = super::module_index(cpu, module) {
+        let count = cpu.bus.win32.win16.modules[index].segments.len() as u16;
+        if done != 0 && value as u16 != 0 {
+            let at = segment_entry(cpu, module, done);
+            let flags = super::read_16(cpu, at + 4) | SEG_LOADED;
+            super::write_16(cpu, at + 4, flags);
+            super::write_16(cpu, at + 8, value as u16);
+        }
+        let next =
+            (done.max(1) + 1..=count).find(|&n| db_segment(cpu, module, n).0 & SEG_LOADED == 0);
+        if let Some(n) = next {
+            let loader = cpu.bus.win32.win16.modules[index].segments[0].selector;
+            let load_app_seg = super::read_32(cpu, super::lin(cpu, loader, 8));
+            let mut chained = vec![module as u32, file as u32, n as u32, then];
+            chained.extend(rest);
+            super::thunk::call16(
+                cpu,
+                load_app_seg,
+                &[module, file, n],
+                0,
+                *ctx,
+                super::thunk::THEN_BOOT,
+                chained,
+            );
+            return None;
+        }
+        take_segments(cpu, index);
+    }
+    if file != 0xFFFF {
+        let _ = super::dos::call21(cpu, [0x3E00, file, 0, 0], None);
+    }
+    super::task::call_lib_init(cpu, module, *ctx, then as u16, rest);
+    None
+}
+
+/// The self-loading module at `index` takes the segments its loader
+/// loaded from its database, and its automatic data segment's handle.
+fn take_segments(cpu: &mut Cpu, index: usize) {
+    let db = cpu.bus.win32.win16.modules[index].handle;
+    let count = cpu.bus.win32.win16.modules[index].segments.len();
+    let mut missing = Vec::new();
+    for n in 1..=count {
+        let (flags, handle) = db_segment(cpu, db, n as u16);
+        if flags & SEG_LOADED == 0 || handle == 0 {
+            missing.push(n);
+        }
+        let size = global::size(cpu, handle);
+        let s = &mut cpu.bus.win32.win16.modules[index].segments[n - 1];
+        s.handle = handle;
+        s.selector = global::handle_to_sel(handle);
+        s.size = size;
+    }
+    let auto_data = super::read_16(cpu, super::lin(cpu, db, 0x0E)) as usize;
+    let m = &mut cpu.bus.win32.win16.modules[index];
+    m.dgroup = match auto_data {
+        0 => 0,
+        n => m.segments.get(n - 1).map_or(0, |s| s.handle),
+    };
+    m.unbooted = false;
+    let name = m.name.clone();
+    if missing.is_empty() {
+        cpu.bus
+            .log_string(&format!("[W16] The loader of {} loaded its segments", name));
+    } else {
+        cpu.bus.log_string(&format!(
+            "[W16] The loader of {} didn't load segments {:?}",
+            name, missing
+        ));
+    }
+}
+
+/// PatchCodeHandle(segment): the prologues of the exported functions of
+/// a module's code segment, which its own loader loaded, patched as the
+/// loader patches the others' (`patch_prologues`). As Wine's, it returns
+/// the segment's selector and handle in DX:AX.
+pub fn patch_code_handle(cpu: &mut Cpu, handle: u16) -> u32 {
+    let sel = global::handle_to_sel(handle);
+    let result = (sel as u32) << 16 | handle as u32;
+    let modules = &cpu.bus.win32.win16.modules;
+    let found = modules.iter().enumerate().find_map(|(i, m)| {
+        let n = (1..=m.segments.len() as u16)
+            .find(|&n| global::handle_to_sel(db_segment(cpu, m.handle, n).1) == sel)?;
+        Some((i, n))
+    });
+    let Some((index, n)) = found else {
+        return result;
+    };
+    let m = &cpu.bus.win32.win16.modules[index];
+    let db = m.handle;
+    let Some(parsed) = parsed_of(cpu, m) else {
+        return result;
+    };
+    let dgroup_sel = match parsed.auto_data {
+        0 => 0,
+        auto => global::handle_to_sel(db_segment(cpu, db, auto).1),
+    };
+    let Some(a) = global::get(cpu, handle) else {
+        return result;
+    };
+    let Some(mut bytes) = super::peek(cpu, a.base, a.size as usize) else {
+        return result;
+    };
+    patch_prologues(&parsed, n as u8, &mut bytes, dgroup_sel);
+    super::poke(cpu, a.base, &bytes);
+    result
 }

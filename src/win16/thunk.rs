@@ -98,6 +98,7 @@ pub static THENS: &[Then] = &[
     super::flat::then_inits,
     super::hook::then,
     super::dpmi::then_callback,
+    super::module::then_boot,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -110,6 +111,7 @@ pub const THEN_FLAT_CALL: u16 = 6;
 pub const THEN_FLAT_INITS: u16 = 7;
 pub const THEN_HOOK: u16 = 8;
 pub const THEN_CALLBACK: u16 = 9;
+pub const THEN_BOOT: u16 = 10;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)

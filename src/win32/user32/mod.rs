@@ -1351,6 +1351,7 @@ static APIS: &[Api] = &[
     stdcall("ActivateByClick", 0, 1, input::activate_by_click),
     // Windows 98's does nothing: there is no debug USER32 to tell.
     stdcall("SetDebugErrorLevel", 624, 1, |_, _| Some(0)),
+    stdcall("SetSystemCursor", 625, 2, resource::set_system_cursor),
 ];
 
 crate::state_fields!(State {
