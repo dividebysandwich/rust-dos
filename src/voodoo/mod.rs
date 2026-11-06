@@ -1034,8 +1034,8 @@ impl Voodoo {
     }
 
     /// The same where what comes reads only `ranges` of the memory's
-    /// bytes (`catch_up_in`). On a Banshee the rows of the 3D buffers
-    /// read back there turn hot (`gpu_catch_up_hot`).
+    /// bytes (`catch_up_in`). The rows of the 3D buffers read back there
+    /// turn hot (`gpu_catch_up_hot`).
     pub(crate) fn flush_in(&mut self, ranges: &[(u32, u32)]) {
         for &(start, end) in ranges {
             self.gpu_catch_up_hot(start, end);
@@ -1067,7 +1067,10 @@ impl Voodoo {
         }
         self.submit_words();
         self.release_backlog();
-        self.pool.flush();
+        {
+            let _zone = crate::profile::zone(crate::profile::Zone::VoodooWait);
+            self.pool.flush();
+        }
         self.drawn.borrow_mut().clear();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
@@ -1136,6 +1139,16 @@ impl Voodoo {
         self.gpu_draws_here(&job);
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
+        }
+        // A job into memory the program reads back every frame (hot) goes
+        // to the workers at once, after those held: the read comes before
+        // the frame ends, and would otherwise wait on this thread for the
+        // whole frame's jobs to be drawn then, instead of the last few.
+        if access.is_some() && self.gpu_job_hot(&job) {
+            self.submit_words();
+            self.release_backlog();
+            self.hand_over([job]);
+            return;
         }
         self.submit_outside(job, access);
     }
@@ -2127,6 +2140,9 @@ impl Voodoo {
                 (front != NONE).then_some(front / 2)
             }
         };
+        // The rows read back cool after a second or so of frames, whether
+        // the card shows its picture or not.
+        self.gpu_frame();
         let output = self.output();
         let scanout = if output && self.banshee.is_some() {
             self.banshee_scanout(&key)

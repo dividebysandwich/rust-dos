@@ -131,7 +131,7 @@ The JSON's sections:
 | `dynrec` | `dynrec.dispatch` (between translated blocks), `dynrec.translate`, `dynrec.fallback` (an instruction translated code hands to the interpreter), `dynrec.slow_mem` (translated code's memory operands checked in Rust, where its TLB or segment checks miss, and its accesses across a page or outside plain RAM) |
 | `timers`, `irq`, `shell`, `idle` | Timer events, delivering hardware interrupts, the built-in shell, `idle.proof` (proving a loop only waits) |
 | `mem` | `mem.video`, `mem.upper`, `mem.device` |
-| `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `powervr` |
+| `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `voodoo.wait` (waiting for the worker threads to draw what was queued, as something reads the card's memory), `voodoo.readback` (reading the 3D buffers or the 2D engine's pages back from the OpenGL renderer, waiting for the GPU), `powervr` |
 | `hle` | `hle.int08` ... `hle.int67`, `hle.other`, `hle.inline`, `hle.far`, `hle.dpmi` |
 | `io` | One zone per device: `io.vga`, `io.pic`, `io.pit`, `io.sb`, `io.opl`, `io.ide`, `io.s3`, ... and `io.unhandled` |
 
