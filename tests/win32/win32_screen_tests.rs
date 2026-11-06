@@ -46,8 +46,16 @@ impl Layout {
     }
 }
 
-/// A program importing `imports`, with `data` and the code `f` makes,
-/// and where its data is.
+/// The import `name` says: "#2" is ordinal 2, any other a name.
+fn import(name: &str) -> Imp<'_> {
+    match name.strip_prefix('#').and_then(|n| n.parse().ok()) {
+        Some(ordinal) => Imp::Ordinal(ordinal),
+        None => Imp::Name(name),
+    }
+}
+
+/// A program importing `imports` (see `import`), with `data` and the
+/// code `f` makes, and where its data is.
 fn program(
     imports: &[(&str, &[&str])],
     data: &[u8],
@@ -56,7 +64,7 @@ fn program(
     let mut b = Builder::exe(BASE);
     let lists: Vec<Vec<Imp>> = imports
         .iter()
-        .map(|(_, names)| names.iter().map(|n| Imp::Name(n)).collect())
+        .map(|(_, names)| names.iter().map(|n| import(n)).collect())
         .collect();
     let dlls: Vec<(&str, &[Imp])> = imports
         .iter()
@@ -2543,6 +2551,30 @@ fn directplaycreate_makes_a_directplay_with_no_service_provider() {
     assert_ne!(peek(&cpu, data + TARGET), this);
     assert_eq!(peek(&cpu, data + FRONT), 0);
     assert_eq!(peek(&cpu, data + BACK), 0x1234_5678, "BACK written");
+    assert_eq!(peek(&cpu, data + DP_CALLED), 2, "the providers listed");
+}
+
+/// DPLAY.DLL, DirectX 3's, which Bedlam imports by ordinal: 1 is
+/// DirectPlayCreate and 2 DirectPlayEnumerate, and they make and list
+/// what DPLAYX's do, though the program doesn't import DPLAYX.
+#[test]
+fn dplay_dlls_ordinals_are_directplays_create_and_enumerate() {
+    let dplay: (&str, &[&str]) = ("DPLAY.DLL", &["#1", "#2"]);
+    let (program, data) = program(&[dplay], &directplay_data(), |a, l| {
+        counting_callback(a, l, 0, 5, DP_CALLED)?;
+        let mut c = Calls { next: 0 };
+        let none = Arg::I(0);
+        c.api(a, l, 0, &[Arg::At(DP_GUID_NULL), Arg::At(DD), none])?;
+        c.com(a, l, DD, DP_CLOSE, &[])?;
+        c.com(a, l, DD, DP_RELEASE, &[])?;
+        c.api(a, l, 1, &[Arg::Val(CALLBACKS), none])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine("dplay_ordinals", None, program);
+    run_until(&mut cpu, data, 1);
+    assert_eq!(results(&cpu, data, 4), [0, 0, 0, 0]);
+    let this = peek(&cpu, data + DD);
+    assert!(this != 0 && this != 0x1234_5678, "{this:X}");
     assert_eq!(peek(&cpu, data + DP_CALLED), 2, "the providers listed");
 }
 

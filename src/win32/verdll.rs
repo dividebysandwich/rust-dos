@@ -409,6 +409,10 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     // registry says (Windows 98 and DirectX 6.1 differ: see p5-win98).
     let version: [u16; 4] = match base.to_ascii_uppercase().as_str() {
         "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" => [4, 6, 0, 318],
+        // DirectX 5 to 7 leave DirectX 3's DPLAY.DLL as it is: Windows 98
+        // SE and a Windows 95 machine with DirectX 7 both have
+        // 4.03.00.1096, of July 1997.
+        "DPLAY" => [4, 3, 0, 1096],
         "COMCTL32" => [4, 70, 0, 1146],
         "OLE32" => [2, 10, 35, 35],
         "MSVCRT" => [6, 0, 8168, 0],
@@ -1196,5 +1200,13 @@ mod tests {
         assert_eq!(file_version(WindowsVersion::Win95), b"4.00.950\0");
         assert_eq!(file_version(WindowsVersion::Win98), b"4.03.1998\0");
         assert_eq!(file_version(WindowsVersion::Win98Se), b"4.03.1998\0");
+    }
+
+    #[test]
+    fn dplays_file_is_directx_3s() {
+        let resource = builtin_resource("DPLAY.DLL", WindowsVersion::Win98Se);
+        let key = b"\\StringFileInfo\\040904E4\\FileVersion";
+        let found = query(resource.bytes(), key, true).unwrap();
+        assert_eq!(found.text.unwrap(), b"4.03.00.1096\0");
     }
 }
