@@ -169,10 +169,16 @@ impl Queue {
     /// count from the slowest worker's; a panic counts as finished, and
     /// reaches the emulator at the next `flush`.
     fn full(&self) -> bool {
+        self.over(1) && !self.shutdown
+    }
+
+    /// Whether the queue holds more than `1 / share` of a limit: of the
+    /// batches (from the slowest worker's), the jobs or the bytes.
+    fn over(&self, share: usize) -> bool {
         let oldest = self.done.iter().copied().min().unwrap_or(self.last);
-        let over =
-            self.last - oldest > MAX_BATCHES || self.jobs > MAX_JOBS || self.bytes > MAX_BYTES;
-        over && !self.shutdown
+        (self.last - oldest) * share as u64 > MAX_BATCHES
+            || self.jobs * share > MAX_JOBS
+            || self.bytes * share > MAX_BYTES
     }
 }
 
@@ -230,6 +236,18 @@ const MAX_JOBS: usize = 8192;
 /// room within a frame instead, and Myth's emulation thread was busy 63%
 /// of the time at 170,000 cycles, against 40% here.
 const MAX_BATCHES: u64 = 512;
+
+/// The share of each limit the queue may keep when the picture is made
+/// (`Pool::wait_for_shown`): half. The jobs after a swap draw the next
+/// frame beside the program, but a burst of drawing (Myth sends one now
+/// and then, texture downloads and all) that fills the queue would then
+/// meet what the frame before left, and wait for both: at 265,000
+/// cycles, a few frames of 66-72 ms, against 58-63 ms on main. Kept to
+/// half, the longest are 57-58 ms, at the same speed and sound
+/// underruns, and a 99th percentile frame 3 ms longer (41-43 ms, against
+/// 52 ms on main). A quarter brings that to 47-49 ms for no shorter
+/// longest frame.
+const SHOWN_SHARE: usize = 2;
 
 /// Bytes of texture data the queue may hold before the emulator waits:
 /// about 20 game frames of Myth's. Against a program that downloads a
@@ -408,11 +426,25 @@ impl Pool {
     /// before it, leaving the later ones drawing. A worker's panic comes
     /// back here.
     pub fn wait_for(&self, number: u64) {
+        self.wait_until(number, None);
+    }
+
+    /// The same for the picture: then also until the queue holds at most
+    /// its share (`SHOWN_SHARE`) of each limit.
+    pub fn wait_for_shown(&self, number: u64) {
+        self.wait_until(number, Some(SHOWN_SHARE));
+    }
+
+    fn wait_until(&self, number: u64, share: Option<usize>) {
         if self.workers == 0 {
             return;
         }
         let mut queue = self.shared.queue.lock().unwrap();
-        while queue.done.iter().any(|&d| d < number) {
+        while queue.done.iter().any(|&d| d < number)
+            || share.is_some_and(|share| {
+                queue.over(share) && !queue.shutdown && queue.panic.is_none()
+            })
+        {
             queue = self.shared.idle.wait(queue).unwrap();
         }
         if let Some(panic) = queue.panic.take() {
@@ -735,6 +767,46 @@ mod tests {
             let queue = pool.shared.queue.lock().unwrap();
             assert_eq!((queue.jobs, queue.bytes), (0, 0));
         }
+    }
+
+    /// The picture waits for the frame shown and then until the queue
+    /// holds at most half of a limit: the next frame goes on drawing, but
+    /// not a full queue of it.
+    #[test]
+    fn the_picture_waits_until_the_queue_is_half_empty() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pool = Pool::new(2);
+        let fb = Vram::new(0x1000);
+        let row = || Job::Rows {
+            fb: fb.clone(),
+            base: 0,
+            rowpixels: 1,
+            rows: (0, 1),
+            columns: (0, 1),
+            value: 1,
+        };
+        pool.submit(row());
+        let shown = pool.mark();
+        // The next frame: held, and more than half the jobs allowed.
+        let gate = Gate::default();
+        pool.submit(Job::Hold(gate.clone()));
+        for _ in 0..MAX_JOBS / 2 + BATCH {
+            pool.submit(row());
+        }
+        pool.give_out();
+        pool.wait_for(shown);
+        let back = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                pool.wait_for_shown(shown);
+                back.store(true, Ordering::SeqCst);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(!back.load(Ordering::SeqCst), "it waited for the frame shown only");
+            open(&gate);
+        });
+        assert!(!pool.shared.queue.lock().unwrap().over(SHOWN_SHARE));
+        pool.flush();
     }
 
     /// A few jobs given out before texture data go in a batch of their

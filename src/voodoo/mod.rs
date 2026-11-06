@@ -1594,7 +1594,8 @@ impl Voodoo {
     /// looked at now, not as they come, so a buffer drawn into while it
     /// was shown (double buffering's next frame, sent before the retrace
     /// of its swap) and hidden since doesn't count, and one drawn into
-    /// while hidden and shown since does.
+    /// while hidden and shown since does. Of the later jobs, the queue
+    /// keeps at most half of what it may hold (`Pool::wait_for_shown`).
     fn catch_up_shown(&mut self) {
         match self.front_jobs {
             Some(number)
@@ -1603,7 +1604,7 @@ impl Voodoo {
                     && !self.gpu_behind.get()
                     && !self.drawn_shown(number) =>
             {
-                self.pool.wait_for(number)
+                self.pool.wait_for_shown(number)
             }
             _ => self.flush(),
         }
