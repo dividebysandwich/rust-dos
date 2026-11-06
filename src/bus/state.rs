@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 31;
+const WIN32_VERSION: u16 = 32;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -795,6 +795,7 @@ mod tests {
         (29, 0x6A10_30CA_74D4_A5B0), // DirectPlay's connections and sessions
         (30, 0xC6E5_70EA_CFE3_C03E), // Glide 3's vertex layout, viewport and strips
         (31, 0xA966_371F_B41A_E64E), // MSACM32's streams
+        (32, 0xC2B1_4444_B41A_6AA5), // when an OpenGL window's next swap may show
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

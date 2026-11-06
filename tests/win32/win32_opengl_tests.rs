@@ -605,6 +605,93 @@ fn a_depth_clear_without_the_depth_test_takes_the_card_from_another_depth_buffer
 }
 
 #[test]
+fn a_window_swaps_its_buffers_once_a_frame() {
+    // The swap interval is 1, as 3dfx's ICD has it: of ten swaps in a
+    // row the first shows at once, and each of the others comes back
+    // when the next frame's picture begins, 60 Hz frames of the 640x480
+    // desktop apart.
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        for _ in 0..10 {
+            c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+        }
+        finish(a, l)
+    });
+    let mut cpu = machine("swap_interval", true, exe);
+    // When each swap's result is stored, run in small batches.
+    let mut times = Vec::new();
+    for _ in 0..1_000_000 {
+        if times.len() == 10 {
+            break;
+        }
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100);
+        run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.cr0 & 0x8000_0001 != 0x8000_0001 {
+            continue;
+        }
+        while times.len() < 10 && peek(&cpu, data + RESULTS + 4 * (7 + times.len() as u32)) != 0 {
+            times.push(cpu.bus.clock.now_ns());
+        }
+    }
+    let swaps: Vec<u32> = (7..17)
+        .map(|i| peek(&cpu, data + RESULTS + 4 * i))
+        .collect();
+    assert_eq!(swaps, [1; 10], "SwapBuffers");
+    // The desktop's frame, about 16.7 ms.
+    let frame = cpu.bus.vga.peek_timing().frame_ns();
+    assert!((16_600_000..16_800_000).contains(&frame), "{frame} ns");
+    // A batch's hundred instructions late at most.
+    let late = 100_000;
+    assert!(times[1] - times[0] < frame + late, "{times:?}");
+    for pair in times[1..].windows(2) {
+        assert!(pair[1] - pair[0] < frame + late, "{times:?}");
+        assert!(pair[1] - pair[0] > frame - late, "{times:?}");
+    }
+    for &t in &times[1..] {
+        assert!(t % frame < late, "{t} ns: past a frame's start, {times:?}");
+    }
+}
+
+#[test]
+fn a_negative_swap_interval_fails_and_the_last_one_stays() {
+    // WGL_EXT_swap_control: a negative interval fails. Kept, -1 would
+    // have the next swap wait 2^32 - 2 frames.
+    const SET_NAME: u32 = 0x160;
+    const GET_NAME: u32 = 0x180;
+    const PROCS: u32 = 0x10;
+    let mut d = data();
+    put(&mut d, SET_NAME, b"wglSwapIntervalEXT\0");
+    put(&mut d, GET_NAME, b"wglGetSwapIntervalEXT\0");
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, WGL_GET_PROC_ADDRESS, &[Arg::At(SET_NAME)])?;
+        a.mov(dword_ptr(l.at(PROCS)), eax)?;
+        c.api(a, l, WGL_GET_PROC_ADDRESS, &[Arg::At(GET_NAME)])?;
+        a.mov(dword_ptr(l.at(PROCS + 4)), eax)?;
+        for interval in [2, -1] {
+            a.push(interval)?;
+            a.call(dword_ptr(l.at(PROCS)))?;
+            a.mov(dword_ptr(l.at(RESULTS + 4 * c.next)), eax)?;
+            c.next += 1;
+        }
+        a.call(dword_ptr(l.at(PROCS + 4)))?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * c.next)), eax)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("negative_swap_interval", true, exe);
+    run_until_done(&mut cpu, data);
+    let r: Vec<u32> = (6..11)
+        .map(|i| peek(&cpu, data + RESULTS + 4 * i))
+        .collect();
+    assert_ne!(r[0], 0, "wglSwapIntervalEXT");
+    assert_ne!(r[1], 0, "wglGetSwapIntervalEXT");
+    assert_eq!(r[2..], [1, 0, 2], "set 2, set -1, get");
+}
+
+#[test]
 fn flat_shading_takes_the_color_of_the_vertex_opengl_gives() {
     // Two flat triangles, each vertex its own color: OpenGL colors an
     // independent triangle as its third vertex, and a fan's triangle
