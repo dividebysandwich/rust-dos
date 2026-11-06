@@ -367,7 +367,7 @@ fn finish(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
 }
 
 /// Make a 64x64 window and its DC, choose and set a pixel format, and
-/// make a context current on it: five results.
+/// make a context current on it: six results.
 fn start(a: &mut CodeAssembler, l: &Layout, c: &mut Calls) -> Result<(), IcedError> {
     c.api(
         a,
@@ -479,6 +479,129 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
     assert_eq!(r[20], 0, "glGetError");
     assert_eq!(pixel(&cpu, data, 4, 4), [255, 0, 0]);
     assert_eq!(pixel(&cpu, data, 60, 60), [0, 0, 255]);
+}
+
+/// Draw a triangle of color `rgb` with the corners `corners`.
+fn triangle(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
+    rgb: [f32; 3],
+    corners: [[f32; 2]; 3],
+) -> Result<(), IcedError> {
+    c.api(a, l, BEGIN, &[Arg::I(GL_TRIANGLES)])?;
+    let [r, g, b] = rgb.map(Arg::F);
+    c.api(a, l, COLOR3F, &[r, g, b])?;
+    for [x, y] in corners {
+        c.api(a, l, VERTEX2F, &[Arg::F(x), Arg::F(y)])?;
+    }
+    c.api(a, l, END, &[])
+}
+
+/// The bottom left half of the window, and the top right half.
+const BOTTOM_LEFT: [[f32; 2]; 3] = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]];
+const TOP_RIGHT: [[f32; 2]; 3] = [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+
+/// A program that clears the color and depth buffers and draws a red
+/// triangle over the bottom left half and, with `clear`, then clears
+/// the color buffer to blue and the depth buffer, before it draws a
+/// green triangle over the top right half. The depth test is on for the
+/// triangles with `depth_test`; without it the frames are drawn as Oni's
+/// menus draw theirs.
+fn two_triangles(clear: bool, depth_test: bool) -> (Cpu, u32) {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let both = [Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)];
+        c.api(a, l, CLEAR, &both)?;
+        if depth_test {
+            c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        }
+        triangle(a, l, &mut c, [1.0, 0.0, 0.0], BOTTOM_LEFT)?;
+        if clear {
+            let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+            c.api(a, l, CLEAR_COLOR, &blue)?;
+            c.api(a, l, CLEAR, &both)?;
+        }
+        triangle(a, l, &mut c, [0.0, 1.0, 0.0], TOP_RIGHT)?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let name = format!("two_triangles_{clear}_{depth_test}");
+    let mut cpu = machine(&name, true, exe);
+    run_until_done(&mut cpu, data);
+    (cpu, data)
+}
+
+/// The card's colBufferAddr, colBufferStride, auxBufferAddr and
+/// auxBufferStride.
+fn buffer_registers(cpu: &Cpu) -> [u32; 4] {
+    use rust_dos::voodoo::banshee::render3d::{
+        AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
+    };
+    let v = cpu.bus.voodoo.as_ref().unwrap();
+    [COL_BUFFER_ADDR, COL_BUFFER_STRIDE, AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE].map(|r| v.reg[r])
+}
+
+#[test]
+fn a_depth_clear_without_the_depth_test_gives_the_card_the_depth_buffer() {
+    // The card's fastfill clears the depth buffer, and the card keeps
+    // it as its depth buffer, where drawing with the depth test on puts
+    // it: pointing the card at it for the fill alone and back would move
+    // the buffer in the OpenGL renderer's layout at every clear.
+    let (cleared, data) = two_triangles(true, false);
+    assert_eq!(peek(&cleared, data + RESULTS + 4 * 23), 0, "glGetError");
+    assert_eq!(pixel(&cleared, data, 4, 4), [0, 0, 255]);
+    assert_eq!(pixel(&cleared, data, 60, 60), [0, 255, 0]);
+    let (plain, _) = two_triangles(false, false);
+    let (depth_tested, data) = two_triangles(false, true);
+    assert_eq!(pixel(&depth_tested, data, 4, 4), [255, 0, 0]);
+    let registers = buffer_registers(&cleared);
+    assert_eq!(registers, buffer_registers(&depth_tested));
+    assert_ne!(registers[2..], buffer_registers(&plain)[2..]);
+}
+
+/// A program that draws a red triangle with the depth test on in one
+/// window and then, with `second`, makes a context in another window,
+/// clears its color and depth buffers and draws a green triangle in it,
+/// with the depth test on if `second` is true.
+fn two_contexts(second: Option<bool>) -> (Cpu, u32) {
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        let both = [Arg::I(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)];
+        start(a, l, &mut c)?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+        c.api(a, l, CLEAR, &both)?;
+        triangle(a, l, &mut c, [1.0, 0.0, 0.0], BOTTOM_LEFT)?;
+        if let Some(depth_test) = second {
+            start(a, l, &mut c)?;
+            c.api(a, l, CLEAR, &both)?;
+            if depth_test {
+                c.api(a, l, ENABLE, &[Arg::I(GL_DEPTH_TEST)])?;
+            }
+            triangle(a, l, &mut c, [0.0, 1.0, 0.0], TOP_RIGHT)?;
+        }
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let name = format!("two_contexts_{second:?}");
+    let mut cpu = machine(&name, true, exe);
+    run_until_done(&mut cpu, data);
+    (cpu, data)
+}
+
+#[test]
+fn a_depth_clear_without_the_depth_test_takes_the_card_from_another_depth_buffer() {
+    // The card has the first context's depth buffer from its drawing
+    // when the second clears its own and draws with the test off: the
+    // card keeps the second's, as when it draws with the test on.
+    let (cleared, data) = two_contexts(Some(false));
+    assert_eq!(pixel(&cleared, data, 60, 60), [0, 255, 0]);
+    let (depth_tested, _) = two_contexts(Some(true));
+    let (first, _) = two_contexts(None);
+    let registers = buffer_registers(&cleared);
+    assert_eq!(registers, buffer_registers(&depth_tested));
+    assert_ne!(registers[2..], buffer_registers(&first)[2..]);
 }
 
 #[test]
