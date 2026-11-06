@@ -47,6 +47,7 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INVALID_PIXEL_FORMAT: u32 = 2000;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+const ERROR_INVALID_DATA: u32 = 13;
 
 // PIXELFORMATDESCRIPTOR's flags.
 const PFD_DOUBLEBUFFER: u32 = 0x1;
@@ -816,12 +817,13 @@ pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// A double-buffered context in a window swaps as 3dfx's ICD does with
 /// its swap interval (1 unless the program set another): no more than
 /// once in that many frames of the display. The swap shows at once, and
-/// the next one waits for the retrace, the call coming back when it
-/// begins. The card's own swaps on the Voodoo2 wait for the retrace in
-/// the card (`swap_card`). Without it a game that draws a frame in less
-/// than a frame's time, as Oni's menus do, swapped hundreds of times a
-/// second of emulated time, and each swap's drawing cost the host as
-/// much as one at the display's rate.
+/// a later one called before the next frame's picture begins (that
+/// many frames on) waits for it, the call coming back then. The card's
+/// own swaps on the Voodoo2 wait for the retrace in the card
+/// (`swap_card`). Without it a game that draws a frame in less than a
+/// frame's time, as Oni's menus do, swapped hundreds of times a second
+/// of emulated time, and each swap's drawing cost the host as much as
+/// one at the display's rate.
 fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
     let Some(index) = dc_context(cpu, hdc) else {
         return Some(FALSE);
@@ -855,7 +857,6 @@ fn dc_context(cpu: &mut Cpu, hdc: u32) -> Option<usize> {
     let hwnd = window_of(cpu, hdc);
     let tid = super::super::user32::current_tid(cpu);
     let s = state(cpu);
-    // The thread's context, or another of the window's.
     let mine = s.current.iter().find(|c| c.0 == tid).map(|c| c.1);
     mine.and_then(|h| h.checked_sub(hglrc(0)))
         .map(|i| i as usize)
@@ -941,9 +942,16 @@ pub fn swap_layer_buffers(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     swap_paced(cpu, args[0])
 }
 
-/// wglSwapIntervalEXT(interval): kept. Frames are shown as they are
-/// swapped.
+/// wglSwapIntervalEXT(interval): the frames of the display a swap of
+/// the current context waits for (`swap_paced`, `swap_card`), 0 for
+/// none. A negative interval fails with ERROR_INVALID_DATA, as
+/// WGL_EXT_swap_control has it: kept, it would put a window's next swap
+/// years ahead.
 pub fn swap_interval(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] > i32::MAX as u32 {
+        super::super::gdi32::set_error(cpu, ERROR_INVALID_DATA);
+        return Some(FALSE);
+    }
     let Some(c) = super::ctx(cpu) else {
         return Some(FALSE);
     };

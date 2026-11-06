@@ -483,8 +483,9 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
 
 #[test]
 fn a_window_swaps_its_buffers_once_a_frame() {
-    // The swap interval is 1, as 3dfx's ICD has it: ten swaps in a row
-    // show at nine retraces after the first, 60 Hz frames of the 640x480
+    // The swap interval is 1, as 3dfx's ICD has it: of ten swaps in a
+    // row the first shows at once, and each of the others comes back
+    // when the next frame's picture begins, 60 Hz frames of the 640x480
     // desktop apart.
     let (exe, data) = program(&data(), |a, l| {
         let mut c = Calls { next: 0 };
@@ -496,14 +497,75 @@ fn a_window_swaps_its_buffers_once_a_frame() {
         finish(a, l)
     });
     let mut cpu = machine("swap_interval", true, exe);
-    let before = cpu.bus.clock.now_ns();
-    run_until_done(&mut cpu, data);
-    let swaps: Vec<u32> = (7..17).map(|i| peek(&cpu, data + RESULTS + 4 * i)).collect();
+    // When each swap's result is stored, run in small batches.
+    let mut times = Vec::new();
+    for _ in 0..1_000_000 {
+        if times.len() == 10 {
+            break;
+        }
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100);
+        run_batch(&mut cpu, &mut NoHook, false);
+        if cpu.cr0 & 0x8000_0001 != 0x8000_0001 {
+            continue;
+        }
+        while times.len() < 10 && peek(&cpu, data + RESULTS + 4 * (7 + times.len() as u32)) != 0 {
+            times.push(cpu.bus.clock.now_ns());
+        }
+    }
+    let swaps: Vec<u32> = (7..17)
+        .map(|i| peek(&cpu, data + RESULTS + 4 * i))
+        .collect();
     assert_eq!(swaps, [1; 10], "SwapBuffers");
-    let elapsed = cpu.bus.clock.now_ns() - before;
-    // Nine frames of about 16.7 ms at least, and less than a tenth more.
-    assert!(elapsed >= 9 * 16_600_000, "{elapsed} ns");
-    assert!(elapsed < 11 * 16_700_000, "{elapsed} ns");
+    // The desktop's frame, about 16.7 ms.
+    let frame = cpu.bus.vga.peek_timing().frame_ns();
+    assert!((16_600_000..16_800_000).contains(&frame), "{frame} ns");
+    // A batch's hundred instructions late at most.
+    let late = 100_000;
+    assert!(times[1] - times[0] < frame + late, "{times:?}");
+    for pair in times[1..].windows(2) {
+        assert!(pair[1] - pair[0] < frame + late, "{times:?}");
+        assert!(pair[1] - pair[0] > frame - late, "{times:?}");
+    }
+    for &t in &times[1..] {
+        assert!(t % frame < late, "{t} ns: past a frame's start, {times:?}");
+    }
+}
+
+#[test]
+fn a_negative_swap_interval_fails_and_the_last_one_stays() {
+    // WGL_EXT_swap_control: a negative interval fails. Kept, -1 would
+    // have the next swap wait 2^32 - 2 frames.
+    const SET_NAME: u32 = 0x160;
+    const GET_NAME: u32 = 0x180;
+    const PROCS: u32 = 0x10;
+    let mut d = data();
+    put(&mut d, SET_NAME, b"wglSwapIntervalEXT\0");
+    put(&mut d, GET_NAME, b"wglGetSwapIntervalEXT\0");
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, WGL_GET_PROC_ADDRESS, &[Arg::At(SET_NAME)])?;
+        a.mov(dword_ptr(l.at(PROCS)), eax)?;
+        c.api(a, l, WGL_GET_PROC_ADDRESS, &[Arg::At(GET_NAME)])?;
+        a.mov(dword_ptr(l.at(PROCS + 4)), eax)?;
+        for interval in [2, -1] {
+            a.push(interval)?;
+            a.call(dword_ptr(l.at(PROCS)))?;
+            a.mov(dword_ptr(l.at(RESULTS + 4 * c.next)), eax)?;
+            c.next += 1;
+        }
+        a.call(dword_ptr(l.at(PROCS + 4)))?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * c.next)), eax)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("negative_swap_interval", true, exe);
+    run_until_done(&mut cpu, data);
+    let r: Vec<u32> = (6..11)
+        .map(|i| peek(&cpu, data + RESULTS + 4 * i))
+        .collect();
+    assert_ne!(r[0], 0, "wglSwapIntervalEXT");
+    assert_ne!(r[1], 0, "wglGetSwapIntervalEXT");
+    assert_eq!(r[2..], [1, 0, 2], "set 2, set -1, get");
 }
 
 #[test]

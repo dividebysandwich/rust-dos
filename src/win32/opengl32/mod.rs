@@ -246,8 +246,8 @@ pub struct Context {
     pub begin: Option<u32>,
     pub vertices: Vec<ImmVertex>,
     pub swap_interval: u32,
-    /// The time (ns) of the retrace a window's next swap waits for: the
-    /// swap interval's frames after the last one.
+    /// The time (ns) a window's next swap waits for: the start of the
+    /// frame's picture the swap interval's frames after the last swap.
     pub swap_at: u64,
     /// Whether it drew since the buffers were last swapped or flushed.
     pub drawn: bool,
