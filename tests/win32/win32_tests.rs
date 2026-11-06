@@ -3225,7 +3225,12 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.call(l.import(2))?;
         a.cmp(eax, 120)?;
         check(a, false, 3)?;
-        a.cmp(dword_ptr(l.at(0x40) as u64), 0x5A5A_5A5A)?;
+        // All 68 bytes of the structure are as they were.
+        a.cld()?;
+        a.mov(edi, l.at(0x40) as u32)?;
+        a.mov(ecx, 17)?;
+        a.mov(eax, 0x5A5A_5A5A)?;
+        a.repe().scasd()?;
         check(a, false, 4)?;
         a.set_label(&mut end)?;
         a.mov(eax, ebx)?;
