@@ -1,7 +1,9 @@
 //! `game_fixes`: the code fixes are applied when a program resets the
 //! DSP, the patched Sound Blaster drivers mix around the centre line, and
-//! Jukebox Adventure's music player gets past effect Bxx. The fixes that
-//! skip a program at EXEC are tested in exec_tests.rs.
+//! Jukebox Adventure's music player gets past effect Bxx, and Lands of
+//! Lore 2's launchers, patched as they load, start the game with 32 MB
+//! of virtual memory. The fixes that skip a program at EXEC are tested in
+//! exec_tests.rs.
 
 use rust_dos::cpu::Cpu;
 use rust_dos::game_fixes::{CodePatch, Kind, by_name};
@@ -63,7 +65,7 @@ const LAYOUTS: [Layout; 2] = [
 fn code(name: &str) -> &'static CodePatch {
     match by_name(name).unwrap().kind {
         Kind::Code(code) => code,
-        Kind::SkipAtExec { .. } => panic!("{name} isn't a code fix"),
+        Kind::SkipAtExec { .. } | Kind::AtLoad { .. } => panic!("{name} isn't a code fix"),
     }
 }
 
@@ -270,4 +272,191 @@ fn a_fix_left_out_by_name_stays_out() {
     reset_dsp(&mut cpu);
     assert_eq!(cpu.bus.read_8(volume_table), before);
     assert_ne!(dispatch(&mut cpu, 0x0B, 100), 0x47D7);
+}
+
+/// One of Lands of Lore 2's launchers: its file name and size, where its
+/// data segment starts in its load module (in paragraphs), and the offset
+/// in its code of the loop that appends its DOS/4GW settings.
+struct Launcher {
+    name: &'static str,
+    len: usize,
+    data: u8,
+    append: u16,
+}
+
+const LAUNCHERS: [Launcher; 2] = [
+    Launcher {
+        name: "LOLG.EXE",
+        len: 2847,
+        data: 0x21,
+        append: 0x1DA,
+    },
+    Launcher {
+        name: "SETUPG.EXE",
+        len: 2262,
+        data: 0x1E,
+        append: 0x1DD,
+    },
+];
+
+/// The code `lol2-virtual-size` patches the launcher with.
+fn lol2_code(launcher: &Launcher) -> &'static CodePatch {
+    let Kind::AtLoad { programs, .. } = by_name("lol2-virtual-size").unwrap().kind else {
+        panic!("lol2-virtual-size patches the launchers as they load");
+    };
+    programs
+        .iter()
+        .find(|(name, _)| *name == launcher.name)
+        .unwrap()
+        .1
+}
+
+/// A launcher that does what one of Lands of Lore 2's does with its
+/// DOS/4GW settings, with the pieces `lol2-virtual-size` checks at their
+/// offsets in the file: it builds an environment of the settings with the
+/// launcher's own loop, and EXECs LOLG.DAT with it.
+fn lol2_launcher(launcher: &Launcher) -> Vec<u8> {
+    let code = lol2_code(launcher);
+    // The launcher's size, 512 bytes of header and the load module.
+    let mut file = vec![0u8; launcher.len];
+    for b in code
+        .checks
+        .iter()
+        .chain(code.patches.iter().map(|(old, _)| old))
+    {
+        file[b.at..b.at + b.bytes.len()].copy_from_slice(b.bytes);
+    }
+    let header: [u16; 14] = [
+        0x5A4D,
+        (file.len() % 512) as u16,
+        file.len().div_ceil(512) as u16,
+        0,                                        // no relocations
+        0x20,                                     // header paragraphs
+        0x20,                                     // MINALLOC
+        0xFFFF,                                   // MAXALLOC
+        (file.len() - 0x200).div_ceil(16) as u16, // SS: after the load module
+        0x100,                                    // SP
+        0,
+        0, // IP
+        0, // CS
+        0x1C,
+        0,
+    ];
+    for (i, word) in header.iter().enumerate() {
+        file[i * 2..i * 2 + 2].copy_from_slice(&word.to_le_bytes());
+    }
+    let [call_lo, call_hi] = (launcher.append - 0x1E).to_le_bytes();
+    #[rustfmt::skip]
+    let start = [
+        0x8C, 0xC5,             // MOV BP,ES: the PSP
+        0x8C, 0xC8,             // MOV AX,CS
+        0x05, launcher.data, 0x00, // ADD AX,data: the data segment
+        0x8E, 0xD8,             // MOV DS,AX
+        0x8E, 0xC5,             // MOV ES,BP
+        0xBB, 0x00, 0x01,       // MOV BX,100h
+        0xB4, 0x4A,             // MOV AH,4Ah: keep 4 KB
+        0xCD, 0x21,             // INT 21h
+        0x8C, 0xC8,             // MOV AX,CS
+        0x05, 0x60, 0x00,       // ADD AX,60h: the environment's block
+        0x8E, 0xC0,             // MOV ES,AX
+        0x31, 0xFF,             // XOR DI,DI
+        0xE8, call_lo, call_hi, // CALL append: append the settings
+        0x8C, 0xC0,             // MOV AX,ES
+        0xA3, 0x20, 0x03,       // MOV [320h],AX: EXEC's environment
+        0x8C, 0xD8,             // MOV AX,DS
+        0xA3, 0x24, 0x03,       // MOV [324h],AX: the command tail's segment
+        0xA3, 0x28, 0x03,       // MOV [328h],AX: FCB 1's
+        0xA3, 0x2C, 0x03,       // MOV [32Ch],AX: FCB 2's
+        0x1E,                   // PUSH DS
+        0x07,                   // POP ES
+        0xBB, 0x20, 0x03,       // MOV BX,320h
+        0xBA, 0x00, 0x03,       // MOV DX,300h: LOLG.DAT
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    file[0x200..0x200 + start.len()].copy_from_slice(&start);
+    // RET after the loop.
+    file[0x200 + launcher.append as usize + 10] = 0xC3;
+    let data = 0x200 + launcher.data as usize * 16;
+    file[data + 0x300..data + 0x309].copy_from_slice(b"LOLG.DAT\0");
+    file[data + 0x322..data + 0x324].copy_from_slice(&0x340u16.to_le_bytes());
+    file[data + 0x326..data + 0x328].copy_from_slice(&0x350u16.to_le_bytes());
+    file[data + 0x32A..data + 0x32C].copy_from_slice(&0x350u16.to_le_bytes());
+    file[data + 0x341] = 0x0D;
+    file
+}
+
+/// Run the launcher in a directory of its own, with LOLG.DAT (a HLT)
+/// beside it when `game`, until a program halts: the environment LOLG.DAT
+/// got, or the launcher's own string when it couldn't start it.
+fn run_lol2_launcher(
+    launcher: &Launcher,
+    name: &str,
+    game: bool,
+    setup: impl Fn(&mut Cpu),
+) -> String {
+    let dir = PathBuf::from("target/test_game_fixes").join(format!("{name}_{}", launcher.name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(launcher.name), lol2_launcher(launcher)).unwrap();
+    if game {
+        std::fs::write(dir.join("LOLG.DAT"), [0xF4]).unwrap();
+    }
+    let mut cpu = Cpu::new(dir);
+    setup(&mut cpu);
+    assert!(cpu.load_executable(launcher.name, None));
+    let psp = cpu.current_psp;
+    let mut steps = 0;
+    while cpu.bus.read_8(cpu.get_physical_addr(cpu.cs(), cpu.ip())) != 0xF4 {
+        cpu.step();
+        steps += 1;
+        assert!(steps < 10_000, "stuck at {:04X}:{:04X}", cpu.cs(), cpu.ip());
+    }
+    // LOLG.DAT runs only when it is there.
+    assert_eq!(cpu.current_psp != psp, game);
+    let text = if game {
+        let child = cpu.current_psp as usize * 16;
+        let env = cpu.bus.read_16(child + 0x2C) as usize * 16;
+        read(&mut cpu, env, 0x100)
+    } else {
+        // The string in the launcher's load module.
+        let at = lol2_code(launcher).checks[0].at - 0x200;
+        read(&mut cpu, (psp as usize + 0x10) * 16 + at, 0x5A)
+    };
+    let end = text.iter().position(|&b| b == 0).unwrap();
+    String::from_utf8(text[..end].to_vec()).unwrap()
+}
+
+const SETTINGS: &str =
+    "DOS4GVM=VirtualMemory:ON,VirtualSize:XXM,SwapFileName:lolgswap.swp,SwapMin:20M,SwapInc:0";
+
+#[test]
+fn lands_of_lore_2_starts_with_32_mb_of_virtual_memory() {
+    for launcher in &LAUNCHERS {
+        let got = run_lol2_launcher(launcher, "lol2", true, |_| {});
+        assert_eq!(got, SETTINGS.replace("XX", "32"), "{}", launcher.name);
+    }
+}
+
+#[test]
+fn lands_of_lore_2_keeps_its_settings_with_the_fix_off() {
+    for launcher in &LAUNCHERS {
+        let off = run_lol2_launcher(launcher, "lol2_fixes_off", true, |cpu| {
+            cpu.bus.game_fixes = false;
+        });
+        assert_eq!(off, SETTINGS.replace("XX", "24"), "{}", launcher.name);
+        let left_out = run_lol2_launcher(launcher, "lol2_fix_left_out", true, |cpu| {
+            cpu.bus.game_fixes_off = vec!["lol2-virtual-size".to_string()];
+        });
+        assert_eq!(left_out, SETTINGS.replace("XX", "24"), "{}", launcher.name);
+    }
+}
+
+#[test]
+fn a_launcher_without_lolg_dat_beside_it_isnt_patched() {
+    for launcher in &LAUNCHERS {
+        let got = run_lol2_launcher(launcher, "lol2_alone", false, |_| {});
+        assert_eq!(got, SETTINGS.replace("XX", "24"), "{}", launcher.name);
+    }
 }
