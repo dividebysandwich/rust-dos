@@ -42,6 +42,37 @@ fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
 }
 
 #[test]
+fn version_check_never_is_off_for_good_and_saving_keeps_it() {
+    use crate::version_check::Setting;
+    let text = "[emulator]\nversion_check=never\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert_eq!(config.version_check, Some(Setting::Never));
+    assert!(config.warnings.is_empty());
+    let settings = Settings::from_config(&config);
+    assert_eq!(settings.version_check, Setting::Never);
+    assert!(!settings.version_check.is_on());
+    // Saving another change, or every setting, leaves the line as it is.
+    let mut changed = settings.clone();
+    changed.scale = 3;
+    assert!(update_text(text, &settings, &changed, &[], None).contains("version_check=never"));
+    let all = complete_text(text, Path::new("/cfg"), &settings, &changed, &[], None);
+    assert!(all.contains("version_check=never"));
+    // Settings written out from scratch, as a game profile is layered
+    // over them, say never too.
+    let from_scratch = update_text("", &Settings::default(), &settings, &[], None);
+    assert!(from_scratch.contains("version_check=never"));
+    // A later line wins, as with every key.
+    let twice = "[emulator]\nversion_check=never\nversion_check=true\n";
+    let later = parse(twice, Path::new("/cfg"), None);
+    assert_eq!(later.version_check, Some(Setting::On));
+    let off = parse("[emulator]\nversion_check=false\n", Path::new("/cfg"), None);
+    assert_eq!(off.version_check, Some(Setting::Off));
+    let invalid = parse("[emulator]\nversion_check=maybe\n", Path::new("/cfg"), None);
+    let warned = |w: &String| w.contains("invalid version_check") && w.contains("never");
+    assert!(invalid.warnings.iter().any(warned));
+}
+
+#[test]
 fn vr_settings_saved_before_auto_are_auto() {
     let old = parse("[vr]\nquality=high\nresolution=100\n", Path::new("/cfg"), None);
     assert_eq!((old.vr.quality, old.vr.resolution), (crate::vr::VrQuality::Auto, None));
@@ -761,7 +792,7 @@ fn changed_settings() -> Settings {
         mouse_capture_messages: false,
         mouse_menu_hold: false,
         pause_in_settings: false,
-        version_check: false,
+        version_check: crate::version_check::Setting::Off,
         almanac_auto: true,
         rewind: true,
         rewind_memory: 512,

@@ -247,7 +247,7 @@ pub struct Config {
     /// (`pause_in_settings`).
     pub pause_in_settings: Option<bool>,
     /// The check for a newer rust-dos at startup (`version_check`).
-    pub version_check: Option<bool>,
+    pub version_check: Option<crate::version_check::Setting>,
     /// The machine-wide run lock (`run_lock`).
     pub run_lock: Option<RunLockSetting>,
     /// Programs started from the prompt with the almanac's settings

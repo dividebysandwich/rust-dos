@@ -291,7 +291,10 @@ impl Item {
             ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
-            VersionCheck => on_off(|s, on| s.version_check = on),
+            VersionCheck => on_off(|s, on| {
+                use crate::version_check::Setting;
+                s.version_check = if on { Setting::On } else { Setting::Off };
+            }),
             AlmanacAuto => on_off(|s, on| s.almanac_auto = on),
             GameFixes => on_off(|s, on| s.game_fixes = on),
             Rewind => on_off(|s, on| s.rewind = on),

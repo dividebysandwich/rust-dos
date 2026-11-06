@@ -175,9 +175,11 @@ fn main() -> Result<ExitCode, String> {
         Err(code) => return Ok(ExitCode::from(code as u8)),
     };
     // Ask rust-dos.com whether there is a newer version while the window
-    // opens; not in runs whose screens must come out the same.
-    let mut update_check = (settings.version_check && !args.deterministic && args.debug_server.is_none())
-        .then(rust_dos::version_check::Check::start);
+    // opens; not in runs whose screens must come out the same, and never
+    // in a copy that a game's installer keeps at one version.
+    let mut update_check =
+        (settings.version_check.is_on() && !args.deterministic && args.debug_server.is_none())
+            .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
     let (startup_game, memory_mb) = game_to_launch(&args, &config, &settings)?;

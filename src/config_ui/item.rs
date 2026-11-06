@@ -572,6 +572,9 @@ impl Item {
     pub(super) fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
+            // Off for good in a copy shipped with a game: a switch that
+            // does nothing would only puzzle.
+            Item::VersionCheck => s.version_check != crate::version_check::Setting::Never,
             Item::VrScene
             | Item::VrSpatialAudio
             | Item::VrScreenFit
@@ -876,7 +879,7 @@ impl Item {
             ShellSuggestions => on_off(s.shell.autosuggest),
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),
-            VersionCheck => on_off(s.version_check),
+            VersionCheck => on_off(s.version_check.is_on()),
             AlmanacAuto => on_off(s.almanac_auto),
             GameFixes => on_off(s.game_fixes),
             AlmanacFetch | AlmanacReport => String::new(),

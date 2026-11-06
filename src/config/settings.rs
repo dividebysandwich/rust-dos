@@ -112,8 +112,9 @@ pub struct Settings {
     /// The machine waits while the settings window is open (but for the
     /// Mixer and Stats pages); never while in a LAN room.
     pub pause_in_settings: bool,
-    /// Ask rust-dos.com at startup whether there is a newer version.
-    pub version_check: bool,
+    /// Ask rust-dos.com at startup whether there is a newer version; never
+    /// in a copy shipped with a game, whose settings window leaves it out.
+    pub version_check: crate::version_check::Setting,
     /// Ask almanac.rust-dos.com for a program's settings as it starts from
     /// the prompt, and play it with them (almanac.rs).
     pub almanac_auto: bool,
@@ -202,7 +203,7 @@ impl Default for Settings {
             mouse_capture_messages: true,
             mouse_menu_hold: true,
             pause_in_settings: true,
-            version_check: true,
+            version_check: crate::version_check::Setting::On,
             almanac_auto: false,
             rewind: false,
             rewind_memory: 256,
@@ -482,7 +483,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
         (Emulator, "mouse_menu_hold", yes_no(settings.mouse_menu_hold)),
         (Emulator, "pause_in_settings", yes_no(settings.pause_in_settings)),
-        (Emulator, "version_check", yes_no(settings.version_check)),
+        (Emulator, "version_check", Some(settings.version_check.name().to_string())),
         (Emulator, "almanac_auto", yes_no(settings.almanac_auto)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),

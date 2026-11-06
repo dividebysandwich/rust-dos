@@ -24,6 +24,15 @@ use std::path::{Path, PathBuf};
 pub const MIN_MEMSIZE: usize = 2;
 pub const MAX_MEMSIZE: usize = 512;
 
+/// `version_check`: a switch's words, or `never`.
+fn parse_version_check(value: &str) -> Option<crate::version_check::Setting> {
+    use crate::version_check::Setting;
+    if value.trim().eq_ignore_ascii_case("never") {
+        return Some(Setting::Never);
+    }
+    parse_bool(value).map(|on| if on { Setting::On } else { Setting::Off })
+}
+
 /// `run_lock`: off, on (the default) or the lock's directory, relative
 /// to the configuration file's.
 fn parse_run_lock(
@@ -373,9 +382,12 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.pause_in_settings = Some(on),
                             None => warn(format!("invalid pause_in_settings '{}' (true or false)", value)),
                         },
-                        "version_check" => match parse_bool(value) {
-                            Some(on) => config.version_check = Some(on),
-                            None => warn(format!("invalid version_check '{}' (true or false)", value)),
+                        "version_check" => match parse_version_check(value) {
+                            Some(setting) => config.version_check = Some(setting),
+                            None => warn(format!(
+                                "invalid version_check '{}' (true, false or never)",
+                                value
+                            )),
                         },
                         "run_lock" => match parse_run_lock(value, base_dir, home) {
                             Ok(setting) => config.run_lock = setting,
