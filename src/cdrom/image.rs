@@ -230,13 +230,29 @@ impl CdImage {
             // Sector of the disc where this file's sector 0 is, moved on by
             // the gaps that aren't in the file.
             let mut base = next;
-            let mut offset = 0u64;
+            // The disc's sector 0 is track 1's INDEX 01, and the track's
+            // pregap is before it, where no read reaches. An image that
+            // keeps the pregap (INDEX 00 00:00:00, INDEX 01 00:02:00, as
+            // BlindWrite's and CloneCD's cue sheets give it) has it at the
+            // start of the file, so the disc starts that far into the file.
+            let first_file = image.tracks.is_empty();
+            let lead = match cue_file.tracks.first() {
+                Some(t) if first_file => t.index1,
+                _ => 0,
+            };
+            let mut offset = cue_file
+                .tracks
+                .first()
+                .map_or(0, |t| t.mode.sector_size() * lead as u64);
+            let at = |index: u32| index.saturating_sub(lead);
             for (i, t) in cue_file.tracks.iter().enumerate() {
-                base += t.pregap;
+                // Track 1's PREGAP is those two seconds too, before sector 0.
+                let pregap = if first_file && i == 0 { 0 } else { t.pregap };
+                base += pregap;
                 let size = t.mode.sector_size();
-                let first = t.index0.unwrap_or(t.index1).min(t.index1);
+                let first = t.index0.map_or(at(t.index1), at).min(at(t.index1));
                 let last = match cue_file.tracks.get(i + 1) {
-                    Some(n) => n.index0.unwrap_or(n.index1),
+                    Some(n) => n.index0.map_or(at(n.index1), at),
                     None => first + ((backing.len.saturating_sub(offset)) / size) as u32,
                 };
                 if last < first {
@@ -245,8 +261,8 @@ impl CdImage {
                 let data_start = base + first;
                 let data_end = base + last;
                 let data = Span::new(data_start, data_end, file, offset, size);
-                let pregap_start = data_start - t.pregap;
-                let (start, end) = (base + t.index1, data_end + t.postgap);
+                let pregap_start = data_start - pregap;
+                let (start, end) = (base + at(t.index1), data_end + t.postgap);
                 let mut track = Track::stored(t.number, t.mode, pregap_start, start, end, data);
                 track.control |= t.flags;
                 image.tracks.push(track);
@@ -1095,6 +1111,43 @@ mod tests {
         assert!(data.iter().all(|&b| b == 1));
         assert!(image.read_data(25, &mut data).is_err(), "audio isn't data");
     }
+
+    #[test]
+    fn a_first_track_whose_pregap_is_in_the_file() {
+        // BlindWrite's and CloneCD's images keep track 1's pregap; the
+        // disc's sector 0 is its INDEX 01, three sectors into the file.
+        let dir = scratch("first_pregap");
+        let mut data = sectors(3, 9);
+        data.extend(sectors(5, 1));
+        data.extend(sectors(4, 2));
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 00 00:00:00\n  \
+             INDEX 01 00:00:03\n TRACK 02 MODE1/2352\n  INDEX 01 00:00:08\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let tracks = image.tracks();
+        assert_eq!((tracks[0].pregap_start, tracks[0].start, tracks[0].end), (0, 0, 5));
+        assert_eq!((tracks[1].start, tracks[1].end), (5, 9));
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(0, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 1), "sector 0 is INDEX 01's");
+        image.read_data(5, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 2));
+
+        // A PREGAP on track 1 is the same two seconds, before sector 0.
+        fs::write(
+            dir.join("gap.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  PREGAP 00:02:00\n  \
+             INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("gap.cue")).unwrap();
+        assert_eq!((image.tracks()[0].start, image.tracks()[0].end), (0, 12));
+    }
+
 
     #[test]
     fn files_per_track_with_gaps_outside_them() {
