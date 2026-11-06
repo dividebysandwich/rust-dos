@@ -76,12 +76,12 @@ const FILTER_CONTINUE_EXECUTION: u32 = 0xFFFF_FFFF;
 /// whatever the exception was, and with no stack to raise it on too.
 const UNHANDLED_EXIT_CODE: u32 = 0xFFFF_FFFF;
 
-/// CONTEXT's size, its flags (CONTEXT_i386 with the control, integer,
-/// segment and floating-point parts) and its fields' offsets.
-pub const CONTEXT_SIZE: u32 = 0x2CC;
 /// CONTEXT without the extended registers, as Windows 98's headers have
 /// it.
 pub const CONTEXT_BASE_SIZE: u32 = 0xCC;
+/// CONTEXT's size, its flags (CONTEXT_i386 with the control, integer,
+/// segment and floating-point parts) and its fields' offsets.
+const CONTEXT_SIZE: u32 = 0x2CC;
 pub const CONTEXT_FULL: u32 = 0x1_000F;
 const CONTEXT_CONTROL: u32 = 0x1;
 const CONTEXT_INTEGER: u32 = 0x2;
@@ -109,11 +109,12 @@ const TIB_STACK_LIMIT: u32 = 0x08;
 const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
 /// Write the context `ctx` and the FPU's state `fpu` as a CONTEXT at `at`,
-/// with the flags `flags`.
+/// with the flags `flags`: the parts they name, and 0 in the rest of
+/// CONTEXT_SIZE bytes.
 pub fn write_context(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108], flags: u32) {
     cpu.bus.guest_fill(at, CONTEXT_SIZE as usize, 0);
     cpu.bus.guest_write_32(at, flags);
-    write_context_parts(cpu, at, ctx, fpu, CONTEXT_FULL);
+    write_context_parts(cpu, at, ctx, fpu, flags);
 }
 
 /// Write the parts of the CONTEXT at `at` that `flags` names, from the
@@ -135,7 +136,8 @@ pub fn write_context_parts(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108
         words(cpu, CTX_FLOAT + 108, &[0]);
     }
     if flags & CONTEXT_SEGMENTS != 0 {
-        words(cpu, CTX_GS, &[s(Seg::GS), s(Seg::FS), s(Seg::ES), s(Seg::DS)]);
+        let segments = [s(Seg::GS), s(Seg::FS), s(Seg::ES), s(Seg::DS)];
+        words(cpu, CTX_GS, &segments);
     }
     if flags & CONTEXT_INTEGER != 0 {
         words(cpu, CTX_EDI, &[g(7), g(6), g(3), g(2), g(1), g(0)]);

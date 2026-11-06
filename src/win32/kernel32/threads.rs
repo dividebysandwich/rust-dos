@@ -376,8 +376,7 @@ pub(super) fn get_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         (Context::of(cpu), control::save_image(cpu))
     } else {
         let thread = thread_at(cpu, which);
-        let fpu = <[u8; 108]>::try_from(thread.fpu.as_slice()).unwrap_or([0; 108]);
-        (thread.ctx, fpu)
+        (thread.ctx, thread.fpu_image())
     };
     seh::write_context_parts(cpu, at, &ctx, &fpu, flags);
     Some(TRUE)
@@ -395,7 +394,7 @@ pub(super) fn set_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let thread = thread_at(cpu, which);
     let mut ctx = thread.ctx;
-    let mut fpu = <[u8; 108]>::try_from(thread.fpu.as_slice()).unwrap_or([0; 108]);
+    let mut fpu = thread.fpu_image();
     let had_fpu = !thread.fpu.is_empty();
     seh::read_context(cpu, args[1], &mut ctx, &mut fpu);
     if cpu.bus.guest_faulted() {
@@ -403,7 +402,7 @@ pub(super) fn set_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let thread = thread_at(cpu, which);
     thread.ctx = ctx;
-    if had_fpu || fpu != [0; 108] {
+    if had_fpu || fpu != thread::INITIAL_FPU {
         thread.fpu = fpu.to_vec();
     }
     Some(TRUE)
