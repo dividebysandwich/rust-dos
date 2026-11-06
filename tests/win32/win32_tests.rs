@@ -3213,6 +3213,36 @@ fn int_68h_finds_no_debugger() {
     assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
 }
 
+/// HLT, which only the system may run, raises a privileged-instruction
+/// exception (C0000096) for the program's handlers, as on Windows 98.
+/// The handler ends the program with 1 for that code, 0 for another.
+#[test]
+fn hlt_raises_a_privileged_instruction_exception() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, text) = run(
+        "privileged",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut setup = a.create_label();
+            // The CALL pushes the handler's address, which follows it.
+            a.call(setup)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.xor(ecx, ecx)?;
+            a.cmp(eax, 0xC000_0096u32 as i32)?;
+            a.sete(cl)?;
+            a.push(ecx)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            a.set_label(&mut setup)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.hlt()?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// C.DLL, whose entry point returns FALSE, and exports F.
 fn dll_c() -> Vec<u8> {
     let main = |a: &mut CodeAssembler, _: &Layout| {
