@@ -3191,6 +3191,51 @@ fn a_program_loads_and_frees_dlls() {
     assert_eq!(text, "B detached\r\n");
 }
 
+/// GetStartupInfoW, which SafeDisc 1's loader looks up with
+/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
+/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
+/// structure as it was.
+#[test]
+fn get_startup_info_w_is_a_stub_that_fails() {
+    let names: &[&str] = &["GetModuleHandleA", "GetProcAddress", "GetLastError"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"KERNEL32.DLL\0GetStartupInfoW\0".to_vec();
+    data.resize(0x40, 0);
+    data.resize(0x84, 0x5A);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(l.at(13) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.test(esi, esi)?;
+        a.je(end)?;
+        a.mov(edi, esp)?;
+        a.push(l.at(0x40) as i32)?;
+        a.call(esi)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.cmp(esp, edi)?;
+        check(a, false, 2)?;
+        a.call(l.import(2))?;
+        a.cmp(eax, 120)?;
+        check(a, false, 3)?;
+        a.cmp(dword_ptr(l.at(0x40) as u64), 0x5A5A_5A5A)?;
+        check(a, false, 4)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, _) = run("startup_info_w", exe);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
 /// C.DLL, whose entry point returns FALSE, and exports F.
 fn dll_c() -> Vec<u8> {
     let main = |a: &mut CodeAssembler, _: &Layout| {

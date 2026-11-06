@@ -634,6 +634,12 @@ static APIS: &[Api] = &[
     // with "Fatal error, code 12" where either is missing.
     stdcall("WaitForDebugEvent", 952, 2, not_implemented),
     stdcall("ContinueDebugEvent", 953, 3, not_implemented),
+    // Windows 98 SE's is one of its stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED and return 0, leaving the structure as
+    // it was. SafeDisc 1's loader (Omikron's RUNTIME.EXE) resolves it
+    // with the process functions it uses and exits with -1 where
+    // GetProcAddress finds it missing.
+    stdcall("GetStartupInfoW", 954, 1, not_implemented),
     // The handlers of the frames the exception dispatcher and RtlUnwind
     // put on the chain around each handler they call (seh.rs).
     Api {
