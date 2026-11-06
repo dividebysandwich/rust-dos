@@ -487,3 +487,104 @@ fn a_packet_run_at_once_sees_a_disc_change_once_its_timers_have_run() {
     assert_eq!(later.sense, None);
     assert_eq!(later.data.len(), 2048);
 }
+
+#[test]
+fn blindwrite_subchannel_sessions_and_catalog_number() {
+    let dir = cdimage::scratch("ide_blindwrite");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
+    let second = 12_000;
+    let descriptor = cdimage::blindwrite_disc(&dir, &image, second, "0123456789012");
+    let mut bus = Bus::new(dir.join("c"));
+    bus.mount_drive(3, &descriptor, MountOptions::default(), false)
+        .unwrap();
+    bus.set_cycles_per_ms(1000);
+    bus.attach_ide();
+
+    // READ TOC's session format: the last session's first track.
+    let toc = packet(&mut bus, [0x43, 0, 1, 0, 0, 0, 0, 0, 12, 0, 0, 0], 12).unwrap();
+    assert_eq!((toc[2], toc[3], toc[6]), (1, 2, 2));
+    assert_eq!(u32::from_be_bytes(toc[8..12].try_into().unwrap()), second);
+
+    // READ CD of sector 16 with each subchannel selection: the image's.
+    // Any sector type, but Mode 1 for its user data alone.
+    let read_cd = |lba: u32, fields: u8, sub: u8| {
+        let l = lba.to_be_bytes();
+        let kind = if fields == 0x10 { 0x08 } else { 0 };
+        [0xBE, kind, l[0], l[1], l[2], l[3], 0, 0, 1, fields, sub, 0]
+    };
+    let raw = packet(&mut bus, read_cd(16, 0xF8, 1), 0xFFFE).unwrap();
+    assert_eq!(raw.len(), 2352 + 96);
+    assert_eq!(raw[16..2064], image[16 * 2048..17 * 2048]);
+    // Bit 7 of each byte is P, bit 6 Q, bits 5 to 0 R to W: the first bit
+    // of A5h is 1, the second 0. Q starts with control 4, ADR 1.
+    let sub = &raw[2352..];
+    assert_eq!(sub[..2], [0x3F, 0x40]);
+    assert!(sub.iter().all(|b| b & 0x80 == 0), "no P in a track");
+    let rw = packet(&mut bus, read_cd(16, 0, 4), 0xFFFE).unwrap();
+    assert_eq!(rw.len(), 96);
+    assert!(rw.iter().zip(sub).all(|(&r, &s)| r == s & 0x3F));
+    let q = packet(&mut bus, read_cd(16, 0x10, 2), 0xFFFE).unwrap();
+    assert_eq!(q.len(), 2048 + 16);
+    assert_eq!(
+        q[2048..2058],
+        [0x41, 0x07, 0x01, 0x00, 0x00, 0x16, 0, 0x00, 0x02, 0x16]
+    );
+    assert_eq!(q[2060..], [0; 4]);
+
+    // READ SUB-CHANNEL after a read: the Q of the image at the head.
+    packet(&mut bus, read10(17, 1), 2048).unwrap();
+    let position = packet(&mut bus, [0x42, 0, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0], 16).unwrap();
+    assert_eq!((position[5], position[6], position[7]), (0x14, 7, 1));
+    assert_eq!(u32::from_be_bytes(position[8..12].try_into().unwrap()), 17);
+    assert_eq!(u32::from_be_bytes(position[12..16].try_into().unwrap()), 17);
+    // SEEK moves the head too.
+    packet(&mut bus, [0x2B, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0], 0).unwrap();
+    let position = packet(&mut bus, [0x42, 0, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0], 16).unwrap();
+    assert_eq!(u32::from_be_bytes(position[8..12].try_into().unwrap()), 20);
+    // A subchannel selection MMC reserves is an invalid field.
+    assert!(packet(&mut bus, read_cd(16, 0xF8, 3), 0xFFFE).is_err());
+    assert_eq!(sense(&mut bus), (0x05, 0x24, 0x00));
+    // The media catalog number.
+    let mcn = packet(&mut bus, [0x42, 0, 0x40, 2, 0, 0, 0, 0, 24, 0, 0, 0], 24).unwrap();
+    assert_eq!((mcn[4], mcn[8]), (2, 0x80));
+    assert_eq!(&mcn[9..22], b"0123456789012");
+
+    // Session 2 has no subchannel: P and Q as the layout makes them.
+    let q = packet(&mut bus, read_cd(second + 3, 0, 2), 0xFFFE).unwrap();
+    assert_eq!(q[..3], [0x41, 0x02, 0x01]);
+}
+
+#[test]
+fn a_disc_without_subchannel_reads_the_layouts() {
+    let (mut bus, image) = drive("made_subchannel");
+    let track2 = (image.len() / 2048) as u32 + 150;
+    let read_cd = |lba: u32| {
+        let l = lba.to_be_bytes();
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0, 2, 0]
+    };
+    // Track 2's pregap: index 0, counting down to 0 at its last sector,
+    // with P set.
+    let q = packet(&mut bus, read_cd(track2 - 2), 16).unwrap();
+    assert_eq!(q[..6], [0x01, 0x02, 0x00, 0x00, 0x00, 0x01]);
+    let crc = cdimage::q_crc(&q).to_be_bytes();
+    assert_eq!(q[10..12], crc);
+    let l = (track2 - 2).to_be_bytes();
+    let raw = packet(
+        &mut bus,
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0, 1, 0],
+        96,
+    )
+    .unwrap();
+    assert!(raw.iter().all(|b| b & 0x80 != 0), "P in a pregap");
+    // In LBA form READ SUB-CHANNEL counts a pregap back from the track.
+    packet(
+        &mut bus,
+        [0xBE, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0xF8, 0, 0],
+        2352,
+    )
+    .unwrap();
+    let position = packet(&mut bus, [0x42, 0, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0], 16).unwrap();
+    assert_eq!((position[5], position[6], position[7]), (0x10, 2, 0));
+    assert_eq!(i32::from_be_bytes(position[12..16].try_into().unwrap()), -2);
+}

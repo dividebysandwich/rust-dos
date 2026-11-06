@@ -77,6 +77,9 @@ pub struct CueTrack {
     /// Silent sectors before and after the track that aren't in the file.
     pub pregap: u32,
     pub postgap: u32,
+    /// The control bits FLAGS sets: 8 for four channels (4CH), 2 for
+    /// digital copy permitted (DCP), 1 for pre-emphasis (PRE).
+    pub flags: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +92,8 @@ pub struct CueFile {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CueSheet {
     pub files: Vec<CueFile>,
+    /// The media catalog number CATALOG gives, 13 digits.
+    pub catalog: Option<String>,
 }
 
 /// "mm:ss:ff" in sectors.
@@ -138,7 +143,15 @@ pub fn parse_cue(text: &str) -> Result<CueSheet, String> {
                     "MODE2/2352" => TrackMode::Mode2_2352,
                     other => return Err(error(format!("{} tracks are not supported", other))),
                 };
-                file.tracks.push(CueTrack { number, mode, index0: None, index1: 0, pregap: 0, postgap: 0 });
+                file.tracks.push(CueTrack {
+                    number,
+                    mode,
+                    index0: None,
+                    index1: 0,
+                    pregap: 0,
+                    postgap: 0,
+                    flags: 0,
+                });
             }
             keyword @ ("INDEX" | "PREGAP" | "POSTGAP") => {
                 let track = sheet
@@ -160,7 +173,29 @@ pub fn parse_cue(text: &str) -> Result<CueSheet, String> {
                     _ => track.postgap = parse_msf(arg(1)?).map_err(error)?,
                 }
             }
-            // CD-Text, catalog numbers, flags and comments.
+            "FLAGS" => {
+                let track = sheet
+                    .files
+                    .last_mut()
+                    .and_then(|f| f.tracks.last_mut())
+                    .ok_or_else(|| error("FLAGS before TRACK".into()))?;
+                // SCMS, serial copy management, isn't a control bit.
+                for flag in &tokens[1..] {
+                    track.flags |= match flag.to_ascii_uppercase().as_str() {
+                        "4CH" => 8,
+                        "DCP" => 2,
+                        "PRE" => 1,
+                        _ => 0,
+                    };
+                }
+            }
+            "CATALOG" => {
+                let code = arg(1)?;
+                if code.len() == 13 && code.bytes().all(|b| b.is_ascii_digit()) {
+                    sheet.catalog = Some(code.to_string());
+                }
+            }
+            // CD-Text and comments.
             _ => {}
         }
     }
@@ -195,7 +230,8 @@ mod tests {
                 index0: Some(102_978),
                 index1: 103_128,
                 pregap: 0,
-                postgap: 0
+                postgap: 0,
+                flags: 0
             }
         );
     }
@@ -212,6 +248,8 @@ mod tests {
         assert_eq!(sheet.files[1].format, FileFormat::Wave);
         let track = &sheet.files[1].tracks[0];
         assert_eq!((track.pregap, track.postgap), (150, 75));
+        assert_eq!((sheet.files[0].tracks[0].flags, track.flags), (0, 2));
+        assert_eq!(sheet.catalog.as_deref(), Some("0000000000000"));
     }
 
     #[test]
