@@ -134,6 +134,7 @@ pub static DLLS: &[&Dll] = &[
     &super::dshow::QUARTZ,
     &super::dshow::AMSTREAM,
     &super::glide::DLL3,
+    &super::dplayx::DPLAY,
 ];
 
 /// Bytes each function's stub takes.
@@ -509,6 +510,7 @@ mod tests {
         "QUARTZ.DLL",
         "AMSTREAM.DLL",
         "GLIDE3X.DLL",
+        "DPLAY.DLL",
     ];
 
     #[test]

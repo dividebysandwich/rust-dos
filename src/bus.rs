@@ -692,6 +692,24 @@ impl Bus {
         true
     }
 
+    /// Write `bytes` into the VESA linear frame buffer at `dst`, as the
+    /// dwords of `write_32` from the first to the last would, in one call:
+    /// an MMX or SSE store of 8 or 16 bytes (a DirectDraw blit's). False,
+    /// having written nothing, where they aren't all in the frame buffer.
+    pub(crate) fn write_to_lfb(&mut self, dst: usize, bytes: &[u8]) -> bool {
+        let len = bytes.len();
+        let Some(offset) = self.lfb_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        self.vbe.vram[offset..offset + len].copy_from_slice(bytes);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
     /// Fill the VESA linear frame buffer at `dst` with `count` elements of
     /// `size` bytes of `value`, as a string store's writes do (see
     /// `move_to_lfb`).
