@@ -97,6 +97,19 @@ pub fn interleave_subchannel(linear: &[u8; 96]) -> [u8; 96] {
     raw
 }
 
+/// The subchannel `interleave_subchannel` made `raw` from: each of P to
+/// W's 12 bytes after the one before.
+pub fn deinterleave_subchannel(raw: &[u8; 96]) -> [u8; 96] {
+    let mut linear = [0u8; 96];
+    for (i, byte) in raw.iter().enumerate() {
+        for channel in 0..8 {
+            let bit = byte >> (7 - channel) & 1;
+            linear[channel * 12 + i / 8] |= bit << (7 - i % 8);
+        }
+    }
+    linear
+}
+
 /// Minute, second and frame of a sector.
 pub fn lba_to_msf(lba: u32) -> (u8, u8, u8) {
     let frames = lba + LBA_OFFSET;
@@ -179,6 +192,9 @@ mod tests {
         assert_eq!(raw[0], 0xC0);
         assert!(raw[1..95].iter().all(|&b| b == 0x80));
         assert_eq!(raw[95], 0x81);
+        assert_eq!(deinterleave_subchannel(&raw), linear);
+        let any: [u8; 96] = std::array::from_fn(|i| (i * 37 + 11) as u8);
+        assert_eq!(deinterleave_subchannel(&interleave_subchannel(&any)), any);
     }
 
     #[test]
