@@ -230,7 +230,13 @@ impl Builder {
 
     /// A resource with a named type ("WAVE"), and numeric name and
     /// language. Windows looks names up in capitals.
-    pub fn named_resource(&mut self, kind: &str, name: u16, language: u16, data: &[u8]) -> &mut Self {
+    pub fn named_resource(
+        &mut self,
+        kind: &str,
+        name: u16,
+        language: u16,
+        data: &[u8],
+    ) -> &mut Self {
         self.add_resource(ResKey::Name(kind.to_uppercase()), name, language, data)
     }
 
@@ -352,8 +358,10 @@ impl Builder {
         let mut type_names = Vec::new();
         for kind in self.resources.keys() {
             if let ResKey::Name(name) = kind {
-                type_names.push((at, name.encode_utf16().collect::<Vec<u16>>()));
-                at += 2 + 2 * name.encode_utf16().count();
+                let units: Vec<u16> = name.encode_utf16().collect();
+                let size = 2 + 2 * units.len();
+                type_names.push((at, units));
+                at += size;
             }
         }
         at = at.div_ceil(4) * 4;
@@ -367,14 +375,15 @@ impl Builder {
         let mut data_at = at + 16 * leaves;
         let mut out = vec![0u8; data_at];
         // `named` of the entries name a string (bit 31 of their id).
-        let directory = |out: &mut Vec<u8>, at: usize, named: usize, ids: Vec<u32>, targets: Vec<u32>| {
-            put16(out, at + 12, named as u16);
-            put16(out, at + 14, (ids.len() - named) as u16);
-            for (i, (id, target)) in ids.iter().zip(targets).enumerate() {
-                put32(out, at + 16 + 8 * i, *id);
-                put32(out, at + 20 + 8 * i, target);
-            }
-        };
+        let directory =
+            |out: &mut Vec<u8>, at: usize, named: usize, ids: Vec<u32>, targets: Vec<u32>| {
+                put16(out, at + 12, named as u16);
+                put16(out, at + 14, (ids.len() - named) as u16);
+                for (i, (id, target)) in ids.iter().zip(targets).enumerate() {
+                    put32(out, at + 16 + 8 * i, *id);
+                    put32(out, at + 20 + 8 * i, target);
+                }
+            };
         let mut names_at = type_names.iter();
         let kinds: Vec<u32> = self
             .resources
