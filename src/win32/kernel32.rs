@@ -652,22 +652,22 @@ static APIS: &[Api] = &[
     },
     // The flat thunks' FT_Thunk and FT_ExitN (src/win16/flat.rs), and the
     // handler of the exception handler frame FT_Prolog makes.
-    stdcall("FT_Thunk", 954, 0, flat::ft_thunk),
-    stdcall("FT_Exit0", 955, 0, flat::ft_exit0),
-    stdcall("FT_Exit4", 956, 0, flat::ft_exit4),
-    stdcall("FT_Exit8", 957, 0, flat::ft_exit8),
-    stdcall("FT_Exit12", 958, 0, flat::ft_exit12),
-    stdcall("FT_Exit16", 959, 0, flat::ft_exit16),
-    stdcall("FT_Exit20", 960, 0, flat::ft_exit20),
-    stdcall("FT_Exit24", 961, 0, flat::ft_exit24),
-    stdcall("FT_Exit28", 962, 0, flat::ft_exit28),
-    stdcall("FT_Exit32", 963, 0, flat::ft_exit32),
-    stdcall("FT_Exit36", 964, 0, flat::ft_exit36),
-    stdcall("FT_Exit40", 965, 0, flat::ft_exit40),
-    stdcall("FT_Exit44", 966, 0, flat::ft_exit44),
-    stdcall("FT_Exit48", 967, 0, flat::ft_exit48),
-    stdcall("FT_Exit52", 968, 0, flat::ft_exit52),
-    stdcall("FT_Exit56", 969, 0, flat::ft_exit56),
+    stdcall("FT_Thunk", 955, 0, flat::ft_thunk),
+    stdcall("FT_Exit0", 956, 0, flat::ft_exit0),
+    stdcall("FT_Exit4", 957, 0, flat::ft_exit4),
+    stdcall("FT_Exit8", 958, 0, flat::ft_exit8),
+    stdcall("FT_Exit12", 959, 0, flat::ft_exit12),
+    stdcall("FT_Exit16", 960, 0, flat::ft_exit16),
+    stdcall("FT_Exit20", 961, 0, flat::ft_exit20),
+    stdcall("FT_Exit24", 962, 0, flat::ft_exit24),
+    stdcall("FT_Exit28", 963, 0, flat::ft_exit28),
+    stdcall("FT_Exit32", 964, 0, flat::ft_exit32),
+    stdcall("FT_Exit36", 965, 0, flat::ft_exit36),
+    stdcall("FT_Exit40", 966, 0, flat::ft_exit40),
+    stdcall("FT_Exit44", 967, 0, flat::ft_exit44),
+    stdcall("FT_Exit48", 968, 0, flat::ft_exit48),
+    stdcall("FT_Exit52", 969, 0, flat::ft_exit52),
+    stdcall("FT_Exit56", 970, 0, flat::ft_exit56),
     Api {
         name: "FlatThunkHandler",
         ordinal: 0,
@@ -675,6 +675,12 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: flat::ft_handler,
     },
+    // Windows 98 SE's is one of its stubs that fail with
+    // ERROR_CALL_NOT_IMPLEMENTED and return 0, leaving the structure as
+    // it was. SafeDisc 1's loader (Omikron's RUNTIME.EXE) resolves it
+    // with the process functions it uses and exits with -1 where
+    // GetProcAddress finds it missing.
+    stdcall("GetStartupInfoW", 954, 1, not_implemented),
 ];
 
 /// The places in `APIS` of the system's own stubs.
