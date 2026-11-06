@@ -120,7 +120,7 @@ impl Machine {
     pub fn reason(self) -> Option<&'static str> {
         match self {
             Machine::Any => None,
-            Machine::NoDxtnTextures => Some("the 3D card's texture formats have no DXTn"),
+            Machine::NoDxtnTextures => Some("Direct3D lists no DXTn texture format"),
         }
     }
 }
@@ -518,8 +518,8 @@ const ZANZARAH_BMP_ROWS: CodePatch = CodePatch {
 /// The game's DDS files carry their mipmap levels, and the BMP files have
 /// none: DATA_0.PAK holds no level image for any world texture. Two scenes
 /// set the bit on every world texture, the Fairy Garden (SC_2421.BSP) and
-/// SC_1412.BSP, and several set it on one or two; London's (SC_2800.BSP,
-/// SC_2801.BSP) doesn't. As with `zanzarah-bmp-rows`, the game reads BMP
+/// SC_1412.BSP, several set it on a few, and London's (SC_2800.BSP and
+/// SC_2801.BSP) on none. As with `zanzarah-bmp-rows`, the game reads BMP
 /// files only when the 3D card has no DXTn texture format, and on such a
 /// card, a Voodoo3 among them, the Fairy Garden's cave walls, rocks and
 /// ground draw without their textures, as near-white lit shading. It
@@ -654,7 +654,7 @@ pub const FIXES: &[Fix] = &[
     Fix {
         name: "zanzarah-bmp-mipmaps",
         game: "Zanzarah: The Hidden Portal",
-        reason: "textures that want mipmap level images, which only its DDS files have, are dropped",
+        reason: "its BMP textures that want mipmap level images of their own are dropped",
         kind: Kind::AtLoad {
             programs: &[("ZANTHP.EXE", &ZANZARAH_BMP_MIPMAPS)],
             beside: None,
@@ -794,7 +794,9 @@ pub fn patch_at_load(
     machine: impl Fn(Machine) -> bool,
 ) -> Option<(Vec<&'static Fix>, Vec<u8>)> {
     let mut fixes = Vec::new();
-    let mut patched = bytes.to_vec();
+    // Copied only for a fix that applies: every program DOS loads and
+    // every process the built-in Windows makes comes through here.
+    let mut patched: Option<Vec<u8>> = None;
     for fix in FIXES.iter().filter(|fix| enabled(fix)) {
         let Kind::AtLoad {
             programs,
@@ -814,12 +816,13 @@ pub fn patch_at_load(
         if !machine(needs) {
             continue;
         }
+        let patched = patched.get_or_insert_with(|| bytes.to_vec());
         for (at, byte) in writes(code, 0) {
             patched[at] = byte;
         }
         fixes.push(fix);
     }
-    (!fixes.is_empty()).then_some((fixes, patched))
+    patched.map(|patched| (fixes, patched))
 }
 
 /// Whether `path` names the file `program` and, with `beside`, a file of
@@ -1175,5 +1178,35 @@ mod tests {
             assert!(!has_patches(&patched, codes[i]));
         }
         assert!(patched_by(&names).is_none());
+    }
+
+    /// `patch_at_load` checks every fix against the file as the game
+    /// shipped it and applies them all, so no fix may write a byte that
+    /// another fix of the same program checks or writes: the later one
+    /// would then patch code it never checked, or undo the other's patch.
+    #[test]
+    fn fixes_of_one_program_at_load_keep_apart() {
+        let at_load: Vec<_> = FIXES
+            .iter()
+            .flat_map(|fix| match fix.kind {
+                Kind::AtLoad { programs, .. } => programs
+                    .iter()
+                    .map(|&(program, code)| (fix.name, program, code))
+                    .collect(),
+                _ => vec![],
+            })
+            .collect();
+        for (i, &(name, program, code)) in at_load.iter().enumerate() {
+            for &(other, _, other_code) in at_load[..i].iter().filter(|o| o.1 == program) {
+                let written: Vec<usize> = writes(code, 0).map(|(at, _)| at).collect();
+                let other_written: Vec<usize> = writes(other_code, 0).map(|(at, _)| at).collect();
+                let touches = |at: &[usize], code: &CodePatch| {
+                    pieces(code)
+                        .any(|b| at.iter().any(|a| (b.at..b.at + b.bytes.len()).contains(a)))
+                };
+                assert!(!touches(&written, other_code), "{name} writes into {other}");
+                assert!(!touches(&other_written, code), "{other} writes into {name}");
+            }
+        }
     }
 }

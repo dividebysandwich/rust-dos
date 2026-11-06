@@ -1075,7 +1075,7 @@ fn a_program_from_the_prompt_is_patched_once() {
             .filter(|l| l.starts_with(&format!("[game fix] {name}:")))
             .collect();
         assert_eq!(patched.len(), 1, "{name}: {patched:?}");
-        assert!(patched[0].ends_with("since the 3D card's texture formats have no DXTn"));
+        assert!(patched[0].ends_with("since Direct3D lists no DXTn texture format"));
     }
 }
 

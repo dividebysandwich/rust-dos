@@ -283,8 +283,8 @@ mod tests {
     #[test]
     fn only_a_list_with_dxt1_to_dxt5_has_dxtn() {
         assert!(!has_dxtn(&texture_formats()));
-        let boards = [Board::Max, Board::Voodoo2, Board::Banshee, Board::Voodoo3];
-        for board in boards {
+        let adapters = [Board::Banshee, Board::Voodoo3];
+        for board in Board::ALL.into_iter().chain(adapters) {
             assert!(!has_dxtn(&card_texture_formats(Some(board))), "{board:?}");
         }
         let fourcc = |code: &[u8; 4]| Format {

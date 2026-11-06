@@ -1811,10 +1811,10 @@ the game's DDS files carry those levels. Its BMP files don't, and with
 the flag set RenderWare looks for an image of each level (FGR13TPM1
 for level 1 of FGR13TP). There is none, so RenderWare drops the
 texture, and what uses it draws untextured. The Fairy Garden's scene
-sets the flag on all its world textures, and a few other scenes on one
-or two; London's sets it on none. A real Voodoo3 draws the same. The
-fix makes RenderWare make the levels from the image itself, as it does
-when the flag is clear, and applies on the same cards and the same
+and one other set the flag on all their world textures, a few other
+scenes on a few, and London's on none. A real Voodoo3 draws the same.
+The fix makes RenderWare make the levels from the image itself, as it
+does when the flag is clear, and applies on the same cards and the same
 release as `zanzarah-bmp-rows`.
 
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
