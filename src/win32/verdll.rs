@@ -408,7 +408,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     // Windows 95's own files are 4.00.950. DirectX's are 6.0's, as the
     // registry says (Windows 98 and DirectX 6.1 differ: see p5-win98).
     let version: [u16; 4] = match base.to_ascii_uppercase().as_str() {
-        "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" => [4, 6, 0, 318],
+        "DDRAW" | "DSOUND" | "DINPUT" | "DPLAY" | "DPLAYX" => [4, 6, 0, 318],
         "COMCTL32" => [4, 70, 0, 1146],
         "OLE32" => [2, 10, 35, 35],
         "MSVCRT" => [6, 0, 8168, 0],

@@ -63,6 +63,49 @@ pub static DLL: Dll = Dll {
     vtables: VTABLES,
 };
 
+/// DPLAY.DLL, DirectX 3's DirectPlay, which programs of its time import
+/// by ordinal (Bedlam takes 1 and 2). Later versions of DirectX keep it
+/// for them, with its two functions handing over to DPLAYX's, and so
+/// does this one: its objects are DPLAYX's, with DPLAYX's methods.
+pub static DPLAY: Dll = Dll {
+    name: "DPLAY.DLL",
+    base: 0xBFBC_0000,
+    apis: DPLAY_APIS,
+    vars: &[],
+    init: None,
+    term: None,
+    vtables: &[],
+};
+
+/// DPLAY.DLL's functions, by its ordinals. Append only (see `stubs`).
+static DPLAY_APIS: &[Api] = &[
+    stdcall("DirectPlayCreate", 1, 3, dplay_create),
+    stdcall("DirectPlayEnumerate", 2, 2, dplay_enumerate),
+];
+
+/// DPLAY's DirectPlayCreate, DPLAYX's.
+fn dplay_create(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if !map_dplayx(cpu) {
+        return Some(E_OUTOFMEMORY);
+    }
+    direct_play_create(cpu, args)
+}
+
+/// DPLAY's DirectPlayEnumerate, DPLAYX's DirectPlayEnumerateA.
+fn dplay_enumerate(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if !map_dplayx(cpu) {
+        return Some(E_OUTOFMEMORY);
+    }
+    direct_play_enumerate(cpu, args)
+}
+
+/// Map DPLAYX in the running process for DPLAY, whose program doesn't
+/// import it: the objects' methods, and the code that calls the
+/// program's callbacks, are in its image.
+fn map_dplayx(cpu: &mut Cpu) -> bool {
+    super::loader::map_builtin_named(cpu, DLL.name).is_some()
+}
+
 const fn stdcall(
     name: &'static str,
     ordinal: u16,
