@@ -1017,8 +1017,9 @@ pub const CLEAR_TARGET: u32 = 1;
 pub const CLEAR_ZBUFFER: u32 = 2;
 pub const CLEAR_STENCIL: u32 = 4;
 
-/// Clear(this, count, rects, flags, color, z, stencil). The depth
-/// buffer is cleared only if there is one, and there is no stencil.
+/// Clear(this, count, rects, flags, color, z, stencil). A clear of a
+/// buffer the target doesn't have fails as `missing_buffer` says, and
+/// clears nothing.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, count, rects, flags, color, z, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1030,11 +1031,8 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(d) = get(cpu, id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
-    if flags & CLEAR_ZBUFFER != 0 && z_buffer(cpu, d.target).is_none() {
-        return Some(D3DERR_ZBUFFER_NOTPRESENT);
-    }
-    if flags & CLEAR_STENCIL != 0 {
-        return Some(D3DERR_STENCILBUFFER_NOTPRESENT);
+    if let Some(hr) = missing_buffer(cpu, &d, flags) {
+        return Some(hr);
     }
     let v = &d.viewport;
     let list = clip_rects(read_rects(cpu, rects, count), [v.x, v.y, v.width, v.height]);
@@ -1045,6 +1043,25 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let depth = (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z));
     super::hal::clear(cpu, &d, &list, target, depth);
     Some(D3D_OK)
+}
+
+/// The error of a Clear (IDirect3DDevice7) or Clear2
+/// (IDirect3DViewport3) of `flags` on the device `d` that asks for a
+/// buffer its target doesn't have. D3DCLEAR_ZBUFFER or D3DCLEAR_STENCIL
+/// without a depth buffer attached fails with D3DERR_ZBUFFER_NOTPRESENT,
+/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT,
+/// as none of the depth buffers here has stencil bits. The call then
+/// clears nothing, the target included. DirectX 7 does this on Windows
+/// 95 with a Voodoo3, with the HAL and the RGB device alike, and so does
+/// Windows 11.
+pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
+    if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) == 0 {
+        return None;
+    }
+    if depth_buffer(cpu, d).is_none() {
+        return Some(D3DERR_ZBUFFER_NOTPRESENT);
+    }
+    (flags & CLEAR_STENCIL != 0).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
 }
 
 /// Clear keeps to the viewport (x, y, width, height): the rectangles

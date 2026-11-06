@@ -363,6 +363,8 @@ pub fn get_background_depth(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Clear(this, count, rects, flags): the viewport's rectangles to its
 /// background material's color and the depth buffer to its far end.
+/// D3DCLEAR_ZBUFFER on a target without a depth buffer clears the
+/// target alone and succeeds, as Windows does.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, count, rects, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -370,7 +372,9 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     clear_with(cpu, this, count, rects, flags, None, 1.0)
 }
 
-/// Clear2(this, count, rects, flags, color, z, stencil).
+/// Clear2(this, count, rects, flags, color, z, stencil). A clear of a
+/// buffer the target doesn't have fails, and clears nothing, as
+/// IDirect3DDevice7's Clear does (`device::missing_buffer`).
 pub fn clear2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, count, rects, flags, color, z, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -389,6 +393,8 @@ pub fn clear2(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// Clear the rectangles of the viewport's device's render target
 /// (D3DCLEAR_TARGET) with `color`, or the background material's
 /// diffuse color, and of its depth buffer (D3DCLEAR_ZBUFFER) with `z`.
+/// A `color` is Clear2's, which fails on a buffer the target doesn't
+/// have; Clear skips the missing depth buffer.
 fn clear_with(
     cpu: &mut Cpu,
     this: u32,
@@ -408,6 +414,11 @@ fn clear_with(
     let Some(d) = super::device::get(cpu, v.device).cloned() else {
         return Some(D3D_OK);
     };
+    if color.is_some()
+        && let Some(hr) = super::device::missing_buffer(cpu, &d, flags)
+    {
+        return Some(hr);
+    }
     let color = color.unwrap_or_else(|| {
         super::material::of_handle(cpu, &d, v.background)
             .map_or(0, |m| super::pipeline::color(m.diffuse))
