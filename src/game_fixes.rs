@@ -688,11 +688,12 @@ pub fn skip_at_exec(
     })
 }
 
-/// The fix for the program file `bytes` that DOS loads from `path`, and
-/// the file as the fix patches it: `is_file` says whether a path names a
-/// file, `enabled` whether a fix applies, and `machine` whether the
-/// emulated machine is one a fix is for. None when no fix is for the
-/// program and the machine, or its file isn't as the game shipped it.
+/// The fix for the program file `bytes` that DOS loads from `path`, or
+/// the built-in Windows makes a process of, and the file as the fix
+/// patches it: `is_file` says whether a path names a file, `enabled`
+/// whether a fix applies, and `machine` whether the emulated machine is
+/// one a fix is for. None when no fix is for the program and the
+/// machine, or its file isn't as the game shipped it.
 pub fn patch_at_load(
     path: &str,
     bytes: &[u8],
@@ -709,12 +710,14 @@ pub fn patch_at_load(
         else {
             return None;
         };
-        if !machine(needs) {
-            return None;
-        }
         let (_, code) = programs.iter().find(|(program, code)| {
             is_program(path, program, beside, &is_file) && matches(bytes, 0, code)
         })?;
+        // Asked of the fix's own program only, not of every program that
+        // loads.
+        if !machine(needs) {
+            return None;
+        }
         let mut patched = bytes.to_vec();
         for (at, byte) in writes(code, 0) {
             patched[at] = byte;
