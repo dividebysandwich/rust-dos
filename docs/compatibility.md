@@ -138,7 +138,7 @@ opcode, `win32_version=98se` when a message names the version, more
 * **Xenocracy**: its hardware check looks for `GLIDE2X.DLL`, which is
   there only with a 3dfx card: `voodoo=true`, or
   `machine=svga_voodoo3` or `svga_banshee`
-  ([docs/native-windows.md](native-windows.md#files-registry-and-version)).
+  ([the system folder](builtin-windows.md#the-system-folder)).
 * **SafeDisc 2 games**: use a CD image that keeps the error-correction
   data (a BIN or CHD dumped Redump-style). An image whose unreadable
   sectors read back as good fails the check, as on Windows 98

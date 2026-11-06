@@ -1,7 +1,7 @@
 //! WINMM.DLL: the multimedia functions: timers, wave audio, MIDI, MCI
 //! with CD audio, multimedia files, the mixer and the joystick.
 //!
-//! (Phase 3 of docs/native-windows.md.)
+//! ("Sound and input" in docs/native-windows.md.)
 //!
 //! The devices' work that has to happen at a time (a timer's callback, a
 //! MIDI stream's next event, the end of a CD track) happens on the

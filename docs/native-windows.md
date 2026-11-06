@@ -1,449 +1,412 @@
-# Built-in Windows 95: a plan
+# The built-in Windows: architecture
 
 rust-dos runs DOS programs without a copy of DOS: its DOS is written in
-Rust and is part of the emulator. Windows 95 and 98 games run today only
-by booting a real Windows image (see `win9x-howto.md`), which the user has
-to own, install and configure: a VHD, the right drivers for the emulated
-video card, and a per-game delta. This document plans a built-in Win32
-layer that runs Windows 95 games the way the built-in DOS runs DOS games:
-type the game's name at the prompt, or start it from a game profile, and
-it runs. No Windows files are involved.
+Rust and is part of the emulator. The built-in Windows does the same for
+Windows 95 and 98 programs (`src/win32/`) and Windows 3.1 programs
+(`src/win16/`): their system DLLs are written in Rust, on top of the
+built-in DOS and the emulated machine, and a program starts from the DOS
+prompt. No Windows files are involved. The target is games from about
+1995 to 1999: Win32 programs that use DirectX 3 to 6 (DirectDraw,
+Direct3D immediate mode, DirectSound, DirectInput), WinMM and Glide, and
+the setup programs that install them.
 
-The scope is games from about 1995 to 1999: Win32 programs that use
-DirectX 3 to 6 (DirectDraw, Direct3D immediate mode, DirectSound,
-DirectInput), WinMM and Glide. Windows 98 comes after Windows 95; the API
-the games of the two use is nearly the same.
+This page describes how the subsystem is built. How to use it, and what
+a player sees differ from Windows 98, is in
+[builtin-windows.md](builtin-windows.md); which games run is in
+[compatibility.md](compatibility.md#windows-games-on-the-built-in-windows).
 
 The built-in Windows subsystem was designed and implemented by
 [kibertoad](https://github.com/kibertoad).
 
-## Prior art
+## The approach
 
-| Project | License | Approach | What it gives us |
-|---|---|---|---|
-| [Boxedwine](https://github.com/danoon2/Boxedwine) | GPL-2.0-only | x86 emulator plus Linux syscall emulation, running stock 32-bit Wine on Tiny Core Linux | Proof that the emulate-and-run-Wine path works for late-90s games; its x86 tests |
-| [Wine](https://gitlab.winehq.org/wine/wine) | LGPL-2.1+ | Win32 reimplemented on a Unix host; since Wine 8 every DLL builds as PE and reaches Unix through an internal syscall table | API semantics, and code we may port (LGPL-2.1 section 3 allows relicensing a copy to GPL-2.0-or-later) |
-| [ReactOS](https://github.com/reactos/reactos) | GPL-2.0 | An NT 5.2 operating system, user mode mostly from Wine | Nothing beyond Wine for us; it is NT, not 9x |
-| [retrowin32](https://github.com/evmar/retrowin32) | Apache-2.0 | x86 interpreter plus Win32 DLLs written in Rust | The closest design to this plan (see below); ideas only, since Apache-2.0 code can't go into a GPL-2.0 work |
-| [HX DOS Extender](https://github.com/Baron-von-Riedesel/HX) | Freeware, no license file | Win32 PE programs on DOS plus a DPMI host; DLLs written in assembly, including a software DirectDraw and DirectSound, no Direct3D | Proof that a Win32 layer on top of DOS runs games; its documented behaviour; it already runs on rust-dos's DPMI host |
-| [winevdm](https://github.com/otya128/winevdm) | GPL-2.0 | Win16 on Win64 with MAME's CPU and Wine's 16-bit DLLs | Scope of a Win16 layer, for 16-bit setup programs |
-| [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw) | MIT | DirectDraw reimplemented on GDI, OpenGL or D3D9 | DirectDraw semantics for 2D games, in code we may reuse |
-| [DDrawCompat](https://github.com/narzoul/DDrawCompat) | 0BSD | DirectDraw and D3D 1-7 fixes on modern Windows | The same, for the parts games depend on that the docs don't say |
-| [RetroTick](https://github.com/lqs/retrotick) | CC0 | Browser emulator with reimplemented Win16/Win32 APIs | Small, but reusable without conditions |
-| [Cxbx-Reloaded](https://github.com/Cxbx-Reloaded/Cxbx-Reloaded) | GPL-2.0 | Xbox kernel and Direct3D 8 reimplemented | Precedent for HLE of one fixed DirectX version |
+The Win32 DLLs are written in Rust on the emulated machine, as the
+built-in DOS is, with a PE loader and stub DLLs that trap into the
+emulator. The other ways to run Win32 programs were to emulate a Linux
+that runs Wine, as Boxedwine does, or to run Wine's PE DLLs as guest
+code on Rust implementations of Wine's internal system call table. The
+first brings a Linux system call layer and a large userland, and Wine's
+Direct3D would need the host's OpenGL or Vulkan from inside the guest,
+past the emulated hardware, so save states, the web build and libretro
+would each need their own answers; it is also NT's behaviour, not 9x's.
+The second ties the emulator to an interface Wine changes between
+releases. Wine's DLLs still run as guest code at the edges of the API
+(see "Wine's DLLs as guest code").
 
-"RetroOS": no Win32-compatible system by that name turned up. The nearest
-hit, [RetrOS-32](https://github.com/joexbayer/RetrOS-32), is a hobby i386
-OS with its own GUI and no PE or Win32 support.
-
-What retrowin32 learned matters most, since it is the same problem in the
-same language:
-
-- It first called Rust from fake addresses in the import table. That broke
-  `LoadLibrary` (programs read the returned module's headers), data
-  exports (vtables, CRT variables) and the debugger. It now builds real PE
-  DLLs whose exports are small stubs that trap into the emulator.
-- Calls from Rust back into the program (window procedures, enumeration
-  callbacks, timer callbacks) are its hardest part. It uses Rust `async`
-  for them, which its author describes as possibly not fully correct.
-- Guest threads are CPU contexts switched on one host thread.
-- Its DirectDraw keeps surfaces in guest memory and converts them for the
-  host after `Unlock`.
-
-## Three ways to do it
-
-1. **Emulate an OS that runs Wine** (Boxedwine). It is the most
-   compatible, and for rust-dos the most foreign: a Linux system call layer
-   with `mmap`, signals and threads, a 100 MB or larger Linux and Wine
-   userland, and Wine's Direct3D needing host OpenGL or Vulkan from inside
-   the guest. None of it would use the emulated hardware, so save states,
-   the web build and libretro would each need their own answers. It is
-   also NT behaviour, not 9x.
-2. **Run Wine's PE DLLs as guest code** and implement Wine's internal
-   syscall table (`ntdll`, `win32u` and the `__wine_unix_call` libraries)
-   in Rust. The license fits, but the interface is Wine-internal, changes
-   between releases, and still leaves a display driver and wined3d (OpenGL
-   or Vulkan, or 2D only) to provide.
-3. **Write the Win32 DLLs in Rust** (retrowin32, HX): a PE loader, stub
-   DLLs that trap into the emulator, and the APIs games call implemented
-   in Rust on top of the emulated machine.
-
-**Recommendation: 3.** It is what rust-dos already does for DOS, and the
-emulator has most of what it needs:
+The built-in Windows builds on what the emulator has:
 
 - **The CPU** runs 32-bit protected mode with paging, and the dynamic
-  recompiler engages on exactly this kind of code (flat 32-bit programs).
-- **Service traps** (`FE 38..3B`, `src/exec.rs:1291`) already let guest
-  code call Rust. The DPMI host (`src/dpmi/`) is a working example of a
-  protected-mode environment built by Rust code: its GDT, IDT and TSS live
-  in XMS memory, its clients run at CPL 3, and it has a save state section.
+  recompiler engages on flat 32-bit code.
+- **Service traps** let guest code call Rust (`is_service_trap` and
+  `service_trap` in `src/exec.rs`). The DPMI host (`src/dpmi/`) was the
+  model: a protected-mode environment built by Rust code, its tables in
+  extended memory, its clients at CPL 3, with a save state section.
 - **The DOS layer** (`DiskController`, `hostfs`, archives, CD images,
-  MSCDEX) gives kernel32 its drives, and stays underneath as real DOS did
-  under Windows 95.
-- **The emulated hardware** can carry the output. DirectDraw can draw into
-  the SVGA card's linear frame buffer through VBE modes; Glide can drive
-  the emulated Voodoo; DirectSound can feed the mixer; MIDI can go to the
-  MPU-401 and its synthesizers. Then every frontend (SDL, libretro, web),
-  save states, rewind, screenshots and recording keep working unchanged.
+  MSCDEX) gives KERNEL32 its drives, and stays underneath as real DOS
+  did under Windows 95.
+- **The emulated hardware** carries the output: DirectDraw and GDI draw
+  on the SVGA card's or the 3dfx card's video memory, Glide and Direct3D
+  on the emulated Voodoo, DirectSound and wave audio feed the mixer, and
+  MIDI goes to the MPU-401's synthesizers. Every frontend (SDL,
+  libretro, web), save states, rewind, screenshots and recording work
+  with it as with DOS programs.
 
-A game uses a few hundred Win32 functions, not the whole API. A Direct3D
-game of 1999 imports 54 functions from KERNEL32, 10 from USER32, 4
-registry functions, 2 from OLE32, 2 from DDRAW and `PropertySheetA`; its
-DLLs add WinMM and some of GDI32. Implementing against trace logs of real
-games keeps the work bounded.
+## Starting a program
 
-Option 2 stays open for the DLLs at the edges (see "Wine's DLLs as
-guest code").
+When DOS loads an EXE, `Cpu::load_executable` (`src/cpu/mod.rs`) hands
+it to `win32::prepare` (`src/win32/mod.rs`). With `win32` on, a PE file
+doesn't run its DOS stub: the program starts at a trap in the ROM
+(`START`), which makes its process (`loader.rs`). That takes a block of
+extended memory for the process's pages and tables, maps the built-in
+DLLs and the program where Windows 95 has them, and goes on in
+protected mode at level 3 at the program's entry point (`system.rs`).
+ExitProcess goes back to real mode and ends the DOS process with INT 21h
+AH=4Ch, so the shell or the program that started it goes on. An NE file
+starts as a Win16 task, or, if it is InstallShield's setup launcher, as
+the 32-bit engine it would have started (`launcher.rs`). Under a
+virtual-8086 monitor (EMM386, or a booted Windows' DOS box) the DOS stub
+runs.
 
-## Architecture
+The state is a `Bus` field, `win32`, kept in save states in a section of
+its own (`W32 `). The parts that need no CPU or bus are workspace crates
+with their own tests: `crates/pe` parses PE files, `crates/ne` NE
+files, and `crates/installshield` reads installer archives.
 
-### Where it runs
-
-A Win32 program starts like a DOS one. When EXEC (the shell, `INT 21h`
-4Bh, or `rust-dos run`) finds an MZ file whose `e_lfanew` points at a
-`PE\0\0` header, and the layer is on, `Cpu::load_executable`
-(`src/cpu/mod.rs:1856`) hands it to the Win32 loader instead of running
-the DOS stub ("This program requires Microsoft Windows"). The DOS program
-that started it waits, as COMMAND.COM did for a DOS box, and gets control
-back when the last Win32 process ends.
-
-New code goes in `src/win32/`, a sibling of `src/dpmi/`, with its state a
-`Bus` field and a save state section of its own. The parts that need no
-CPU or bus, such as the PE parser, the registry and GDI's rasterizer, can
-be workspace crates (`crates/pe`, ...) with their own tests.
+The main files of `src/win32/`:
 
 ```text
-src/win32/
-  mod.rs        state, starting and ending a process
-  pe.rs         or crates/pe: parsing, mapping, relocations, imports
-  stubs.rs      building the system DLLs' images in guest memory
-  dispatch.rs   the service trap, the function tables, the API trace
-  mem.rs        page tables, VirtualAlloc, heaps
-  process.rs    PEB, TEB/TIB, selectors, modules, handles
-  thread.rs     guest threads and their scheduler
-  seh.rs        CPU faults to structured exceptions
-  glue.rs       guest-side code for calls back into the program
-  kernel32/ user32/ gdi32/ advapi32/ winmm/ ole32/
-  ddraw/ dsound/ dinput/ glide/ d3d/
+mod.rs        the state, starting a process, the ROM's traps
+loader.rs     processes and DLLs: mapping, relocations, imports, TLS
+stubs.rs      the built-in DLLs' images and their function tables
+ordinals.rs   Windows 98 SE's export ordinals
+trace.rs      the API trace
+memory.rs     physical pages, page tables, the arenas
+heap.rs       heaps
+system.rs     descriptor tables, the TSS, interrupts and exceptions
+realmode.rs   real-mode code run for a protected-mode program
+thread.rs     guest threads and their scheduler
+object.rs     kernel objects and handles
+call.rs       calls from the system into the program
+task.rs       USER32 and GDI32 functions that call into the program
+seh.rs        structured exceptions
+registry.rs   the registry
+boot.rs       the session's start: WININIT.INI and RunOnce
+dll_files.rs  the built-in DLLs as files in C:\WINDOWS\SYSTEM
+screen.rs     the display adapter as the built-in Windows drives it
+kernel32/ user32/ gdi32/ advapi32.rs ole32/ comctl32/ comdlg32/ shell32/
+ddraw/ dsound/ dinput/ dplayx/ dmusic/ glide/ d3d8/ opengl32/ winmm/ vfw/
 ```
 
-### Machine state while a Win32 program runs
+## Machine state while a Win32 program runs
 
-Rust builds the protected-mode environment itself, as the DPMI host does,
-but with paging on:
+Rust builds the protected-mode environment itself, as the DPMI host
+does, but with paging on (`system.rs`, `memory.rs`):
 
-- Flat code and data selectors at CPL 3 for the program; a per-thread
-  selector in FS for the TIB (`fs:[0]` exception chain, `fs:[18h]` self
-  pointer, stack bounds).
-- Page tables laid out like Windows 95's: the program's private arena from
-  4 MB to 2 GB, the shared arena from 2 GB to 3 GB. The system DLLs' stub
-  images go where Windows 95 had them (KERNEL32 near `BFF70000h`), because
-  games and copy protection check for a KERNEL32 above 2 GB to tell 9x
-  from NT. Paging also lets `VirtualAlloc` reserve more than the machine
-  has, as games do, and commit pages on demand. Physical pages come from
-  extended memory, as the DPMI host's tables do.
-- An IDT whose exception and IRQ gates lead to service traps in the ROM.
-  Hardware interrupts (PIT, keyboard, PS/2 mouse) are acknowledged there
-  and feed timers, input and thread switching.
-- An I/O permission bitmap that lets the program reach the ports Windows
-  95 left open. Some games read the joystick port or check the Sound
-  Blaster themselves.
+- Flat code and data selectors at CPL 3 for the program, and a
+  per-thread selector in FS for the TIB (`fs:[0]` exception chain,
+  `fs:[18h]` self pointer, stack bounds).
+- Page tables laid out like Windows 95's: the program's private arena
+  from 4 MB to 2 GB, the shared arena (system DLLs, memory-mapped files)
+  from 2 GB to 3 GB, the system's above. The system DLLs' images are
+  where Windows 95 has them (KERNEL32 at `BFF70000h`), because games and
+  copy protections check for a KERNEL32 above 2 GB to tell 9x from NT.
+  Paging lets `VirtualAlloc` reserve more than the machine has, as games
+  do, and commit pages on demand. Physical pages come from extended
+  memory, taken from the XMS pool when the first process starts.
+- An IDT whose gates lead to service traps in the ROM. Hardware
+  interrupts go to their real-mode handlers (the BIOS's, DOS's, resident
+  programs') as under Windows 95, through `realmode.rs`, and the timer's
+  drives thread switching.
+- A TSS whose I/O permission bitmap leaves every port open, as Windows
+  95 leaves those no driver of its own claims. Some games read the
+  joystick port or check the Sound Blaster themselves.
 
-### Calling Rust from the program
+## Calling Rust from the program
 
-The system DLLs are real PE images that Rust writes into guest memory
-when the layer starts: DOS header, PE header, sections, an export
-directory with names and ordinals, and a code section of stubs:
+The system DLLs are real PE images that Rust writes into guest memory:
+DOS header, PE header, sections, an export directory with names and
+ordinals, and a code section of stubs (`stubs.rs`):
 
 ```text
-GetTickCount:   FE 3E 41 02      ; service trap, function 0241h
-                C3               ; ret        (cdecl, or no arguments)
-Sleep:          FE 3E 42 02
-                C2 04 00         ; ret 4      (stdcall, one argument)
+GetTickCount:  FE 3E 04 00     service trap, function 0004h
+               C3              ret       (no arguments, or cdecl)
+Sleep:         FE 3E 05 00
+               C2 04 00        ret 4     (stdcall, one argument)
 ```
 
-The trap reads the arguments off the guest stack, runs the Rust function,
-sets EAX (and EDX), and execution continues with the `RET`. This is a
-fifth trap kind next to `FE 38..3B`, accepted in protected mode only while
-the layer is active and only inside the stub images' code pages. The
-places that know the trap kinds (`is_service_trap`, the `allowed` match in
-`service_trap`, `idle::pure_service`, the profiler's zones and the
-disassembler's `trap_name`) each learn the new one. `FE 3E` and `FE 3F`
-are the free encodings that need no SIB byte or displacement in 32-bit
-code, so the disassembler's lengths stay simple. Dynrec blocks already end
-before invalid encodings.
+The trap reads the arguments off the guest stack, runs the Rust
+function, sets EAX (and EDX), and execution continues with the `RET`.
+`FE 3E` is a trap kind of its own next to the DOS and DPMI ones
+(`FE 38` to `FE 3B`); `win32::accepts` takes it only from the stubs of a
+running process, and the system's traps only from the ROM. The places
+that know the trap kinds each know this one: `is_service_trap`,
+`service_trap` and `win32_trap` in `src/exec.rs`, the idle detector's
+service checks, the profiler's `Win32` zone and the debugger's trap
+names.
 
 Because the DLLs are real images, `LoadLibrary`, `GetProcAddress`,
-`GetModuleHandle`, programs that walk export tables, data exports and the
-debugger all work on them like on any DLL. DirectX objects are COM
-objects whose vtables are data in the stub images, pointing at stubs.
+`GetModuleHandle`, programs that walk export tables, data exports and
+the debugger all work on them like on any DLL. retrowin32, which solves
+the same problem in Rust, found that fake addresses in the import table
+break exactly these; its code is Apache-2.0 and isn't used, only that
+finding. DirectX objects are COM objects whose vtables are data in the
+stub images, pointing at stubs (`com.rs`).
 
 The export directories number the functions as Windows 98 SE's DLLs do
 (`src/win32/ordinals.rs`, from lists `tools/win98_ordinals.py` made from
-the real DLLs), so a program that imports a function by its ordinal
-gets the one it would on Windows 98. KERNEL32 also has, under their
-ordinals, functions Windows 98 exports by ordinal only: VxDCall0 to
-VxDCall8 (1 to 9) and LoadLibrary16, FreeLibrary16 and GetProcAddress16
-(35 to 37), which SafeDisc's loader imports that way. A function the
-built-in DLL doesn't have keeps no ordinal of Windows': an import of it
-by ordinal binds to the missing-function stub below, as an import by
-name does.
+the real DLLs), so a program that imports a function by its ordinal gets
+the one it would on Windows 98. KERNEL32 also has, under their ordinals,
+functions Windows 98 exports by ordinal only: VxDCall0 to VxDCall8 (1
+to 9) and LoadLibrary16, FreeLibrary16 and GetProcAddress16 (35 to 37),
+which SafeDisc's loader imports that way. A function the built-in DLL
+doesn't have keeps no ordinal of Windows': an import of it by ordinal
+binds to the missing-function stub below, as an import by name does.
 
-Functions are declared in Rust tables, one line each: DLL, name, ordinal,
-calling convention, argument count, handler. A missing function is bound
-to a stub that logs `dll!name` with its arguments and ends the program
-with a message saying which function it needed, so the trace of a game
-that fails says what to write next. The trace of every call (like Wine's
-`+relay`) goes to the log and to the debug server.
+Functions are declared in Rust tables, one entry each: name, ordinal,
+argument count, calling convention, handler. A function's id is its
+DLL's place in `DLLS` and its own in the DLL's table; saved states keep
+the stubs in memory, so tables are only added to at their ends. A
+missing function is bound to a stub that logs `dll!name` with its
+arguments and ends the program with a message saying which function it
+needed, so the log of a game that fails says what to write next. The
+trace of every call (`trace.rs`, like Wine's `+relay`) goes to the log
+and to the debug server.
 
-### Calling the program from Rust
+## Calling the program from Rust
 
-Window procedures, `EnumDisplayModes` callbacks, `timeSetEvent` and
-DirectSound notifications call into the program. A Rust function can't
-keep its stack frame across that: the program may switch threads, and a
-save state must be possible at any instruction. So no Rust frame lives
-across a guest call. The loops that call back are written as guest code
-(`glue.rs`, assembled with iced's `code_asm` as the tests' `pmrig` does)
-that calls a trap for each step:
+Window procedures, enumeration callbacks, `timeSetEvent`, DLL entry
+points and exception handlers call into the program. A Rust function
+can't keep its stack frame across that: the program may switch threads,
+and a save state must be possible at any instruction. So no Rust frame
+lives across a guest call.
 
-```text
-DispatchMessageA:
-    trap  msg_target        ; Rust: find the window procedure and args
-    push  args...           ; glue pushes what Rust put in registers
-    call  eax               ; the program's window procedure
-    trap  msg_done          ; Rust: record the result
-    ret   4
-```
+Instead the call is a frame on the program's stack, its return address
+the stub of `CallReturn`, and a `Call` in the thread's list that says
+what runs when it returns: `then`, a function in `THENS`, with the data
+it needs (`call.rs`). The USER32 and GDI32 functions that call into the
+program as they go (CreateWindowExA sends messages one after another,
+DispatchMessageA calls a window procedure, hooks and enumeration
+functions call callbacks) are tasks: functions written as steps, each of
+which does its part and says what comes next, a call into the program
+and the step that goes on when it returns, or the value the function
+returns (`task.rs`). The state between steps is on the guest stack and
+in Rust tables of plain data, which the save state covers.
 
-The state between steps is on the guest stack and in Rust tables of plain
-data, which the save state covers.
+## Threads
 
-### Threads
+Guest threads are saved CPU contexts, switched on one host thread
+(`thread.rs`). A thread that blocks (`WaitForSingleObject`,
+`GetMessage`, `Sleep`) is switched out at once; one that runs gives way
+to another that is ready after a fixed slice, switched on the timer's
+interrupt, because games spin on flags that another thread sets. There
+are no host threads, so the web build works, and runs stay
+deterministic.
 
-Guest threads are saved CPU contexts, switched on one host thread. A
-thread that blocks (`WaitForSingleObject`, `GetMessage`, `Sleep`) is
-switched out at once; others are preempted on the PIT interrupt at a
-fixed time slice, because games spin on flags that another thread sets.
-There are no host threads, so the web build works, and the dynrec's
-interrupt points keep runs deterministic.
-
-### Exceptions
+## Exceptions
 
 A fault at CPL 3 (#GP, #PF on an uncommitted page, #DE, INT 3) reaches
 Rust through the IDT. A page fault on a reserved page that should be
-committed (stack growth, guard pages) is handled there. Others become an
-`EXCEPTION_RECORD` and a `CONTEXT` on the thread's stack, and glue code
-walks the `fs:[0]` chain, calls the handlers and unwinds, as
-`KiUserExceptionDispatcher` does. MSVC's `_except_handler3` and C++
-exceptions run as the program's own code on top of that.
+committed (stack growth, guard pages) is handled there. Others, and
+RaiseException, become an `EXCEPTION_RECORD` and a `CONTEXT` on the
+thread's stack, and the handlers on the `fs:[0]` chain are called one
+after the other as Windows' dispatcher calls them, through `call.rs`,
+until one continues the program or none is left; then the filter of
+SetUnhandledExceptionFilter gets its say (`seh.rs`). MSVC's
+`_except_handler3` and C++ exceptions run as the program's own code on
+top of that.
 
-### Files, registry and version
+## Files, registry and version
 
-- Paths go to `DiskController`'s drives, so a game sees the same C: and
-  D: as under the built-in DOS, CD images included (`GetDriveType` says
-  CD-ROM, `GetVolumeInformation` gives the label the CD check wants).
-- Long file names are needed from the start. The built-in DOS doesn't
-  have them (`INT 21h` AX=71xxh returns 7100h, `int21.rs:2178`), so
-  kernel32 works on host directories' names directly, and `fat.rs` needs
-  to read and write LFN entries for images.
-- The registry is a tree in Rust (`src/win32/registry.rs`), the
-  system's, shared by the processes and kept in save states. It is seeded
-  with the keys games read (`HKLM\Software\Microsoft\Windows\CurrentVersion`
-  with VersionNumber 4.00.950 and a ProductId, DirectX's version, the
-  display settings, the user and computer names) and kept on drive C: as
-  `C:\REGISTRY.REG`, a REGEDIT4 file that can be read and edited by hand.
-  A program's first registry call reads the seed with the file's keys
-  and values over it; changes are written back when a key is closed or
-  flushed and when the last process ends. Without a writable C: the
-  registry lasts until then. A game's profile brings its keys as a .reg
-  file, which the same import puts in (`[-key]` and `"name"=-` delete).
+- Paths go to `DiskController`'s drives, so a program sees the same C:
+  and D: as under the built-in DOS, CD images included (`GetDriveType`
+  says CD-ROM, `GetVolumeInformation` gives the label the CD check
+  wants).
+- The built-in DOS has no long file names (`INT 21h` AX=71xxh returns
+  7100h, in `src/interrupts/int21.rs`), but its host drives keep the
+  host's names, which are the long ones Windows 95 shows, and KERNEL32
+  uses them (`kernel32/path.rs`). Names on disk images and CDs are 8.3
+  alone.
+- The registry is a tree in Rust (`registry.rs`), the system's, shared
+  by the processes and kept in save states. It is seeded with the keys
+  games read (`HKLM\Software\Microsoft\Windows\CurrentVersion` with
+  VersionNumber and a ProductId, DirectX's version, the display
+  settings, the user and computer names) and kept on drive C: as
+  `C:\REGISTRY.REG`, a REGEDIT4 file. A program's first registry call
+  reads the seed with the file's keys and values over it; changes are
+  written back when a key is closed or flushed and when the last process
+  ends. Without a writable C: the registry lasts until then. A game's
+  profile brings its keys as a .reg file, which the same import puts in
+  (`[-key]` and `"name"=-` delete).
 - What a setup program leaves for the next boot runs at the start of a
-  session, which is the built-in Windows' boot (`src/win32/boot.rs`):
-  first the `[rename]` section of `C:\WINDOWS\WININIT.INI`, whose
-  `NUL=file` lines delete files and `new=old` lines put one file in
-  another's place, after which the file is renamed to `WININIT.BAK`, as
-  WININIT.EXE does; then the commands of HKLM's RunServicesOnce, HKLM's
-  RunOnce and HKCU's RunOnce, each value deleted as its command starts.
-  The commands run one at a time, each to the end of what it started,
-  and the program DOS started comes after them, with its exit code for
-  DOS. A restart (`ExitWindowsEx` with `EWX_REBOOT`) boots as soon as
-  the session's last process has ended, and the DOS prompt comes back
-  after the commands. Both kinds of work are files on drive C:, so work
-  left when the emulator was closed runs at the next session.
-- A hard disk that is a host folder has no size of its own, so its
-  free space is made up: between 1.75 and 3.75 GB through
-  `GetDiskFreeSpaceExA`, and at most just under 2 GB through
-  `GetDiskFreeSpaceA`, as Windows 95 and 98 give a real disk's space.
-  It drops as files are written. DOS's own answer for such a drive is
-  80 MB, too little for a setup that checks the space it needs.
-- `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform
-  1), or with `win32_version=98` Windows 98 (4.10.1998) and with
+  session, which is the built-in Windows' boot (`boot.rs`): first the
+  `[rename]` section of `C:\WINDOWS\WININIT.INI`, whose `NUL=file` lines
+  delete files and `new=old` lines put one file in another's place,
+  after which the file is renamed to `WININIT.BAK`, as WININIT.EXE does;
+  then the commands of HKLM's RunServicesOnce, HKLM's RunOnce and HKCU's
+  RunOnce, each value deleted as its command starts. The commands run
+  one at a time, each to the end of what it started, and the program DOS
+  started comes after them, with its exit code for DOS. A restart
+  (`ExitWindowsEx` with `EWX_REBOOT`) boots as soon as the session's
+  last process has ended, and the DOS prompt comes back after the
+  commands. Both kinds of work are files on drive C:, so work left when
+  the emulator was closed runs at the next session.
+- A hard disk that is a host folder has no size of its own, so its free
+  space is made up: between 1.75 and 3.75 GB through
+  `GetDiskFreeSpaceExA` (`kernel32/win98.rs`), and at most just under 2
+  GB through `GetDiskFreeSpaceA` (`kernel32/disk.rs`), as Windows 95 and
+  98 give a real disk's space. It drops as files are written. DOS's own
+  answer for such a drive is 80 MB, too little for a setup that checks
+  the space it needs.
+- `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
+  or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the
-  registry's version values and MSVCRT's `_osver`. Under 98 the
-  built-in DLLs also export the functions Windows 98 added that games
-  use (`version.rs` lists them: USER32's monitor functions,
-  `AnimateWindow`, `GetCursorInfo`, KERNEL32's `IsDebuggerPresent`,
+  registry's version values and MSVCRT's `_osver`. Under 98 the built-in
+  DLLs also export the functions Windows 98 added that games use
+  (`version.rs` lists them: USER32's monitor functions, `AnimateWindow`,
+  `GetCursorInfo`, KERNEL32's `IsDebuggerPresent`,
   `InterlockedCompareExchange`, `GetFileAttributesExA`,
   `GetLongPathNameA` and others); under 95 a program that imports one
   doesn't load, as on Windows 95, and `GetProcAddress` doesn't find it.
   The setting is read when the first process starts, and kept in save
   states.
-- The built-in DLLs are files in the system directory, `C:\WINDOWS\SYSTEM`,
-  as Windows has its DLLs there: programs and setups that look for a DLL by
-  its file (`CreateFile` or `fopen` for reading, `OpenFile` with `OF_EXIST`,
-  `GetFileAttributes`, `FindFirstFile`) find the ones `LoadLibrary` loads
-  (`src/win32/dll_files.rs`). A game's hardware check may open
-  `GLIDE2X.DLL` there to tell whether the machine has Glide. Each file is
-  the DLL's PE image: its headers, sections and export directory as it is
-  mapped in a process, with the functions the version of Windows has, and
-  the version resource `GetFileVersionInfo` gives for it. They are there
-  while the built-in Windows is on, and follow the loader's rules:
-  `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card alone (`voodoo=true`,
-  or a Banshee or Voodoo3 as the display adapter), `NTDLL.DLL` with
-  `win32_dlls` alone, and a DLL that `win32_dlls_replace` replaces with
-  one of the folder's not at all.
+- The built-in DLLs are files in the system directory,
+  `C:\WINDOWS\SYSTEM`, as Windows has its DLLs there: programs and
+  setups that look for a DLL by its file (`CreateFile` or `fopen` for
+  reading, `OpenFile` with `OF_EXIST`, `GetFileAttributes`,
+  `FindFirstFile`) find the ones `LoadLibrary` loads (`dll_files.rs`).
+  Each file is the DLL's PE image: its headers, sections and export
+  directory as it is mapped in a process, with the functions the version
+  of Windows has, and the version resource `GetFileVersionInfo` gives
+  for it. They are there while the built-in Windows is on, and follow
+  the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
+  alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
+  `NTDLL.DLL` with `win32_dlls` alone, and a DLL that
+  `win32_dlls_replace` replaces with one of the folder's not at all.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
   writing, making, deleting or renaming one, copying a file over it or
   changing its attributes fails with ERROR_ACCESS_DENIED, as for a
-  read-only file. A file of the same name on C: wins: a game that
-  copies its own DLL there has it. `DiskController` shows them
-  (`src/disk/system_files.rs`), under the drive's own files, so DOS
-  sees them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h
-  list and open them, as in a DOS box of Windows 98. A save state
-  opens a file that was open again by its path, and once loaded the
-  files are of the version of Windows its programs run under. While C:
-  has no `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories
-  with just the DLLs in them, and are made on C: when a program makes a
-  file or directory in them; neither can be removed while it holds
-  them.
-- The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for Win32,
-  as Windows 98 SE's does (`src/win32/wnaspi32.rs`). Copy protections read
-  their discs that way: SafeDisc 2 loads it to check the CD. On Windows 98
-  the DLL hands each request block to APIX.VXD, and the IOS and the IDE port
-  driver send it to the drive as an ATAPI packet. Here the drive is the
-  ATAPI drive a booted Windows finds on the IDE channel (`ide::Atapi`), of
-  its own, since the built-in Windows has no IDE channel:
-  `Atapi::run_packet` runs each packet through its task file and data port
-  at once, and its delays pass at once. So the disc answers as it does to a
-  booted Windows 98, with the same data and the same sense data, MEDIUM
-  ERROR for a sector whose EDC doesn't match. ASPI shows one host adapter.
-  Its target 0 is the CD-ROM drive a booted system's IDE channel would show:
-  the one it shows stays while it has a disc, and it moves to a disc in
-  another CD-ROM drive only when its own is empty (1 when MOUNT's `-ide`
-  puts it on a slave). SC_EXEC_SCSI_CMD and SC_RESET_DEV run on the drive
-  at once. Without an event, SendASPI32Command returns SS_PENDING with the
-  final status already in the block and the posting routine called, as when
-  APIX's thread runs a command at once. With an event, it returns
-  SS_PENDING with the block still empty, and the scheduler finishes the
-  block and sets the event afterwards, as APIX's thread does. The
-  registry has the drive's device keys (HKLM\Enum and Config Manager's
-  nodes in HKEY_DYN_DATA), which SafeDisc 2 reads to find the drive letter
-  of an ASPI target.
+  read-only file. A file of the same name on C: wins: a game that copies
+  its own DLL there has it. `DiskController` shows them
+  (`src/disk/system_files.rs`), under the drive's own files, so DOS sees
+  them too: `DIR C:\WINDOWS\SYSTEM` and a DOS program's INT 21h list and
+  open them, as in a DOS box of Windows 98. A save state opens a file
+  that was open again by its path, and once loaded the files are of the
+  version of Windows its programs run under. While C: has no
+  `WINDOWS\SYSTEM` folder, it and `WINDOWS` show as directories with
+  just the DLLs in them, and are made on C: when a program makes a file
+  or directory in them; neither can be removed while it holds them.
+- The CD-ROM drive takes SCSI commands through WNASPI32.DLL, ASPI for
+  Win32, as Windows 98 SE's does (`wnaspi32.rs`). Copy protections read
+  their discs that way: SafeDisc 2 loads it to check the CD. On Windows
+  98 the DLL hands each request block to APIX.VXD, and the IOS and the
+  IDE port driver send it to the drive as an ATAPI packet. Here the
+  drive is the ATAPI drive a booted Windows finds on the IDE channel
+  (`ide::Atapi`), of its own, since the built-in Windows has no IDE
+  channel: `Atapi::run_packet` runs each packet through its task file
+  and data port at once, and its delays pass at once. So the disc
+  answers as it does to a booted Windows 98, with the same data and the
+  same sense data, MEDIUM ERROR for a sector whose EDC doesn't match.
+  ASPI shows one host adapter. Its target 0 is the CD-ROM drive a booted
+  system's IDE channel would show: the one it shows stays while it has a
+  disc, and it moves to a disc in another CD-ROM drive only when its own
+  is empty (1 when MOUNT's `-ide` puts it on a slave). SC_EXEC_SCSI_CMD
+  and SC_RESET_DEV run on the drive at once. Without an event,
+  SendASPI32Command returns SS_PENDING with the final status already in
+  the block and the posting routine called, as when APIX's thread runs a
+  command at once. With an event, it returns SS_PENDING with the block
+  still empty, and the scheduler finishes the block and sets the event
+  afterwards, as APIX's thread does. The registry has the drive's device
+  keys (HKLM\Enum and Config Manager's nodes in HKEY_DYN_DATA), which
+  SafeDisc 2 reads to find the drive letter of an ASPI target.
 
-### Video
+## Video
 
-All output goes through the emulated video hardware:
+All output goes through the emulated video hardware (`screen.rs`):
 
-- **GDI and windows**: one desktop surface in a VBE mode (640x480 at 8,
-  16 or 32 bits per pixel, or the size the game asks for). Windows are
-  drawn into it; the fonts are a bundled bitmap font under a license that
-  lets us ship it. Most games have one top-level window, and HX gets far
-  with that alone. With `win32_depth=8` the desktop is 640x480 at 8 bits
-  per pixel, and GDI keeps a system palette in the DAC as Windows does
-  on a 256-colour display: palettes realized in the foreground or the
+- **GDI and windows**: one desktop in a mode of the display adapter:
+  640x480 at 32 bits a pixel on a VESA card, and at 16 on a Banshee or
+  Voodoo3, which use the card's own modes, set through its registers as
+  3dfx's driver set them. Windows are drawn into it. The fonts are
+  raster fonts drawn from the VGA's ROM glyphs, scaled, with the dialog
+  faces' character widths taken from Windows 98's own raster fonts
+  (`gdi32/font.rs`). With `win32_depth=8` the desktop has 8 bits a
+  pixel, and GDI keeps a system palette in the DAC as Windows does on a
+  256-colour display: palettes realized in the foreground or the
   background, `PC_RESERVED` entries for `AnimatePalette`,
   `SetSystemPaletteUse`, and `WM_PALETTECHANGED` and
-  `WM_QUERYNEWPALETTE` for the windows (gdi32/palette.rs).
-- **DirectDraw** in exclusive full-screen mode sets the VBE mode the game
-  asks for. The primary surface is the linear frame buffer, so `Lock`
-  returns a pointer into it and the game's own pixel loops write straight
-  to the card. `Flip` changes the display start (VBE 4F07h), and palettes
-  go to the DAC. Off-screen surfaces live in guest memory; `Blt` and
-  `BltFast` (fills, color keys, stretching) are done in Rust. Windowed
-  DirectDraw composes into the desktop surface.
-- **Glide 2.x** (`glide2x.dll`) is written in Rust against the emulated
-  Voodoo's registers, as 3dfx's library was against the card. The Voodoo
-  emulation (`src/voodoo/`) does the rendering, and 3dfx's MiniGL drivers,
-  which games of the time shipped, run on top of it. `grSstControl` moves
-  the monitor between the card and the 2D picture while the display stays
-  open, as a game with DirectDraw menus and Glide races does between the
-  two: a Voodoo Graphics or Voodoo2 turns its pass-through, and a Banshee
-  or Voodoo3 gives the display back and later takes it again, with the
-  textures where they were. **Glide 3** (`glide3x.dll`), which 3dfx's
-  OpenGL drivers for the Voodoo2, Banshee and Voodoo3 use, is the same
-  code with Glide 3's functions: vertices in the program's own layout, in
-  arrays, strips and fans and in clip coordinates, log2 texture sizes,
-  and `grGet` and `grQueryResolutions` in place of `grSstQueryHardware`.
-- **Direct3D** (DX5 and DX6 immediate mode: execute buffers and
-  `DrawPrimitive`) becomes a HAL on the same emulated hardware, the way
-  3dfx's Direct3D driver was one. The target card is the Banshee or
-  Voodoo3 (`svga_banshee`, `svga_voodoo3`): 2D and 3D on one card, so
-  DirectDraw, GDI and Direct3D share one frame buffer, and Direct3D in a
-  window works. On a Voodoo 1 or 2, 3D shows only in full screen,
-  through the pass-through. The emulated Voodoo already replays its
-  triangles in OpenGL (`voodoo_renderer=opengl`), and issue #164 removes
-  the software rendering that still runs alongside the replay. A software
-  rasterizer in Rust would have neither, and would be a second 3D
-  pipeline to keep correct. The HAL can feed triangles to the Voodoo's
-  setup code directly, instead of encoding them as register writes that
-  the card then decodes. The card's limits (16-bit color and depth,
-  256x256 textures) are the ones games of the time were written for;
-  games that want 32-bit color or larger textures get the 16-bit modes
-  and downscaled textures they got on a Voodoo3.
+  `WM_QUERYNEWPALETTE` for the windows (`gdi32/palette.rs`).
+- **DirectDraw** (`ddraw/`) in exclusive full-screen mode sets the mode
+  the game asks for. Surfaces in video memory are in the card's memory,
+  which each process that uses DirectDraw has mapped whole, so `Lock`
+  returns a pointer into it and the game's own pixel loops write
+  straight to the card; surfaces in system memory are in the process's
+  pages. `Flip` moves the display start, and palettes go to the DAC. In
+  a window the primary surface is the desktop. A Voodoo Graphics or
+  Voodoo2 add-on card is a second DirectDraw device (`ddraw/voodoo.rs`),
+  as 3dfx's DirectX drivers made it, whose primary surface, back buffer
+  and Z buffer are the card's buffers.
+- **Glide 2.x** (`glide2x.dll`, `glide/`) is written in Rust against the
+  emulated Voodoo's registers, as 3dfx's library was against the card.
+  The Voodoo emulation (`src/voodoo/`) does the rendering, and 3dfx's
+  MiniGL drivers, which games of the time shipped, run on top of it.
+  `grSstControl` moves the monitor between the card and the 2D picture
+  while the display stays open, as a game with DirectDraw menus and
+  Glide races does between the two: a Voodoo Graphics or Voodoo2 turns
+  its pass-through, and a Banshee or Voodoo3 gives the display back and
+  later takes it again, with the textures where they were. **Glide 3**
+  (`glide3x.dll`), which 3dfx's OpenGL drivers for the Voodoo2, Banshee
+  and Voodoo3 use, is the same code with Glide 3's functions: vertices
+  in the program's own layout, in arrays, strips and fans and in clip
+  coordinates, log2 texture sizes, and `grGet` and `grQueryResolutions`
+  in place of `grSstQueryHardware`.
+- **Direct3D** (IDirect3D to IDirect3D7, `ddraw/d3d/`) has one device,
+  the card's HAL, as 3dfx's Direct3D driver was: on a Banshee or Voodoo3
+  as the display adapter, so DirectDraw, GDI and Direct3D share one
+  frame buffer and Direct3D in a window works, and on a Voodoo Graphics
+  or Voodoo2 add-on card in full screen. Transform, lighting, clipping
+  and fog are done on the processor (`pipeline.rs`), as Windows'
+  Direct3D did them for the card, and the HAL draws the screen vertices
+  through the Glide layer's triangle setup (`hal.rs`). There is no
+  software rasterizer: it would be a second 3D pipeline to keep correct,
+  and the Voodoo emulation already replays its triangles in OpenGL. The
+  card's limits (16-bit colour and depth, 256x256 textures) are the ones
+  games of the time were written for. D3D8.DLL (`d3d8/`) is DirectX
+  8.1's Direct3D on a Banshee or Voodoo3, and OPENGL32.DLL
+  (`opengl32/`) is OpenGL 1.1 there and on a Voodoo2 in full screen.
 
-### Painting: known differences from Windows 98
+Painting follows Windows 98 SE's messages, compared by probes there.
+The differences that remain are listed in
+[builtin-windows.md](builtin-windows.md#painting). What a change on the
+screen uncovers (`invalidate_screen` in `user32/paint.rs`) stays cropped
+to the window's shape, so a window gets no WM_PAINT or WM_NCPAINT for
+what its region cuts off. No probe has compared that crop with Windows.
 
-Probes compared line by line with Windows 98 SE match on shrinking,
-window regions, validating, frames, BeginPaint and DefWindowProc. These
-differences remain, and a program that counts paint messages can see
-them:
-
-- A child shown in a visible parent also invalidates the parent over
-  the child on Windows, even with WS_CLIPCHILDREN. The built-in Windows
-  doesn't, so the parent gets one WM_PAINT fewer, and PeekMessage
-  filtered on the child finds the child's WM_PAINT, where on Windows
-  the parent's comes first.
-- SetWindowPos with a redraw sends WM_NCPAINT and WM_ERASEBKGND at once
-  on Windows and leaves a shrunk window nothing to paint. The built-in
-  Windows invalidates the whole window and paints it later.
-- A CS_PARENTDC child of a parent with a pending invalidate reports the
-  parent's WM_PAINT through a filtered PeekMessage, and gets its
-  WM_NCPAINT and WM_ERASEBKGND at another time than on Windows.
-- A child with a border gets its frame later, with one more WM_PAINT
-  and WM_NCPAINT after UpdateWindow.
-
-What a change on the screen uncovers (`invalidate_screen` in
-`src/win32/user32/paint.rs`) stays cropped to the window's shape, so a
-window gets no WM_PAINT or WM_NCPAINT for what its region cuts off. No
-probe has compared that crop with Windows.
-
-### Movies
+## Movies
 
 AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions
-decompress and draw their frames (`src/win32/vfw/`). AVIStreamGetFrame
-decompresses a video stream's frames to a DIB of the program's choice, 24
-bits a pixel by default, from the last key frame on. The codecs are Indeo
-Video 3 and 5, which Windows 98 installs, decoded by the `oxideav-indeo`
-crate. Indeo 5 key frames match FFmpeg's, but for frames that both
-decoders refuse as damaged, where the picture before stays. Indeo 5's
-frames that depend on earlier ones have not been compared with a
-reference.
+decompress and draw their frames (`vfw/`). AVIStreamGetFrame decompresses
+a video stream's frames to a DIB of the program's choice, 24 bits a pixel
+by default, from the last key frame on. The codecs are Indeo Video 3 and
+5, which Windows 98 installs, decoded by the `oxideav-indeo` crate. Indeo
+5 key frames match FFmpeg's, but for frames that both decoders refuse as
+damaged, where the picture before stays. Indeo 5's frames that depend on
+earlier ones have not been compared with a reference.
 
-### Sound and input
+## Sound and input
 
-- **DirectSound and `waveOut`**: buffers stay in guest memory; a mixer
-  device on the bus reads them at the emulated rate and writes to
-  `Bus::audio_out`, so it goes through the host mixer like the Sound
-  Blaster. Play cursors and notifications come from emulated time.
+- **DirectSound and `waveOut`**: buffers stay in guest memory; a device
+  reads them at the emulated rate and mixes them into the host's sound,
+  through the host mixer like the Sound Blaster. Play cursors and
+  notifications come from emulated time (`dsound/`, `winmm/`).
 - **`midiOut` and MCI**: MIDI goes to the MPU-401's synthesizers
   (FluidSynth, MT-32, SC-55); MCI CD audio to the CD audio player.
-- **DirectMusic** (DirectX 6.1, `src/win32/dmusic/`): DMUSIC, DMIME,
-  DMLOADER, DMSTYLE, DMBAND and DMCOMPOS, their classes made through
-  OLE32. The loader reads segments (.sgt), MIDI files, DLS collections,
-  bands, styles and chord maps from files, memory or OLE32's streams on
-  global memory and caches them, and the objects load themselves from such
+- **DirectMusic** (DirectX 6.1, `dmusic/`): DMUSIC, DMIME, DMLOADER,
+  DMSTYLE, DMBAND and DMCOMPOS, their classes made through OLE32. The
+  loader reads segments (.sgt), MIDI files, DLS collections, bands,
+  styles and chord maps from files, memory or OLE32's streams on global
+  memory and caches them, and the objects load themselves from such
   streams (IPersistStream::Load); a program's own IStream isn't read. A
   performance plays segments' sequence, tempo, time signature, system
   exclusive and band tracks by the emulated clock on the process's
@@ -451,105 +414,49 @@ reference.
   Microsoft Synthesizer and the MIDI mapper) are the MPU-401's
   synthesizer, which plays downloaded DLS instruments by their General
   MIDI patches. Styles' patterns, chord and command tracks and the
-  composer need the composition engine, which isn't there: they load and
-  play nothing.
-- **Input**: from the emulated 8042 keyboard, the PS/2 mouse and the game
-  port, so the frontends, the debug server's input injection and key
-  remapping need no changes. DirectInput and window messages both read
-  from them.
+  composer need the composition engine, which isn't there: they load
+  and play nothing.
+- **Input**: from the emulated 8042 keyboard, the PS/2 mouse and the
+  game port, so the frontends, the debug server's input injection and
+  key remapping need no changes. DirectInput (`dinput/`) and window
+  messages both read from them.
 
-### Network play
+## Network play
 
-- **DirectPlay** (`src/win32/dplayx/`): IDirectPlay of DirectX 3 to
-  IDirectPlay4A, with the IPX and TCP/IP service providers. Both carry
-  the session over the instance's LAN room: DirectPlay's packets are IPX
-  packets on a socket of the built-in DOS's IPX driver, which the switch
-  and the relay pass on as they do a DOS game's. The host of a session
-  answers the enumeration requests every endpoint broadcasts, so every
-  member of a room sees every session hosted in it, and takes in the
-  members, who then talk to each other directly. Messages that must
-  arrive (guaranteed ones, and every change to the session) go over a
-  link that sends them again until they are acknowledged, in order; a
-  member silent for 20 seconds is taken for gone. The protocol is
-  rust-dos's own, not Windows'. What the program sees follows Windows 98
-  as Wine's DirectPlay tests recorded it: which players get which system
-  messages, in which order, and the sizes of the messages. DPLAY.DLL,
-  DirectX 3's, which some games import by ordinal, makes and lists
-  DPLAYX's objects and providers, as Wine's does.
-- **WS2_32 and WSOCK32** have no network yet.
+DirectPlay (`dplayx/`) has IDirectPlay of DirectX 3 to IDirectPlay4A,
+with the IPX and TCP/IP service providers. Both carry the session over
+the instance's LAN room: DirectPlay's packets are IPX packets on a socket
+of the built-in DOS's IPX driver, which the switch and the relay pass on
+as they do a DOS game's. The host of a session answers the enumeration
+requests every endpoint broadcasts, so every member of a room sees every
+session hosted in it, and takes in the members, who then talk to each
+other directly. Messages that must arrive (guaranteed ones, and every
+change to the session) go over a link that sends them again until they
+are acknowledged, in order; a member silent for 20 seconds is taken for
+gone. The protocol is rust-dos's own. What the program sees follows
+Windows 98 as Wine's DirectPlay tests recorded it: which players get
+which system messages, in which order, and the sizes of the messages.
+DPLAY.DLL, DirectX 3's, which some games import by ordinal, makes and
+lists DPLAYX's objects and providers, as Wine's does. WS2_32 and WSOCK32
+have no network yet.
 
-### Installing games
+## Setup programs
 
-Most Windows 95 CD games have to be installed before they run. A setup
-program decompresses files from the CD to the hard disk, writes registry
-keys (the install folder, the CD's drive letter, settings), may install
-DirectX, and adds Start menu shortcuts. Games read those keys when they
-start and fail without them. Many of these setup programs are 16-bit or
-start with a 16-bit stub, from the Windows 3.1 era: InstallShield 3 is
-16-bit throughout, and InstallShield 5's `SETUP.EXE` is a 16-bit stub
-that starts a 32-bit engine. Running them as they are needs a Win16
-layer: an NE loader, 16-bit segments as LDT selectors, and KERNEL, USER
-and GDI's 16-bit APIs thunked to the 32-bit ones, as winevdm does. That is
-a second project of its own.
+A game on CD is installed in one of three ways, which the player page
+lists: its setup runs under the built-in Windows, its installer's
+archives are unpacked in Rust, or an installed copy is used with its
+registry keys from the profile's `.reg` file.
 
-Most installs can do without it:
+### InstallShield's launcher
 
-1. **Installed folders.** GOG and other digital releases, and folders
-   copied from a real Windows installation, need no setup. The game's
-   profile carries the registry keys it reads (a `.reg` file next to it),
-   so it starts as if setup had run.
-2. **32-bit setup engines.** For a known 16-bit stub, run its 32-bit
-   engine directly, as 64-bit Windows does for InstallShield 5. Wise and
-   later InstallShield setups are 32-bit already. This needs the layer to
-   be broad enough for setup programs (dialogs, common controls, shell
-   links).
-3. **Unpacking in Rust.** Read the installer's archives to copy files
-   without running setup at all, with the registry keys from the profile
-   as in 1. The readers follow those of the refurbished-dinosaurs
-   toolkit (`RefurbishedDinosaurs.LegacyFormats`, MIT), which are C#, so
-   they are ported rather than reused:
-   - InstallShield 5 and 6 cabinets (`data1.hdr` and `dataN.cab`, major
-     versions 0, 5 and 6), laid out as Unshield reads them. Compressed
-     members are deflate chunks with 16-bit lengths or, in some version
-     0 sets, raw deflate ending each chunk with `00 00 FF FF` (Unshield's
-     `-O`). Nothing in the header tells the two apart, so the profile
-     names the form and the reader never guesses it. Version 6 members
-     are checked against the header's MD5, the others by size.
-   - InstallShield 3 archives (`_SETUP.1`, `.Z` files inside
-     self-extractors), whose members are compressed with PKWARE's DCL
-     implode, decoded as zlib's `contrib/blast` describes the format.
-   - The header is checked whole before any member is read: relative
-     paths, data inside the volumes, and limits on counts and sizes.
-     Entries the reader can't read (marked invalid, stored outside the
-     cabinet, two different files at one path) are listed with the
-     reason, and the rest of the set still opens; a file at a shared
-     path is read by its index.
-   - A cabinet places files by file group. The reader reports each
-     member's groups, and the profile maps groups to folders under the
-     install folder, recorded from a real install as its registry keys
-     are.
-
-   The readers are the `rust-dos-installshield` crate
-   (`crates/installshield`), pure Rust without unsafe code, with deflate
-   from flate2. `rust-dos unpack` lists or extracts a set or an archive
-   on the host, by file group if asked, and a game profile's `[install]`
-   section unpacks one from the game's drives onto them the first time
-   the game starts (`src/install.rs`), with the profile's `windows=builtin`
-   and `games/<id>.reg` doing the rest of what setup would. A GOG folder
-   whose launcher starts a Windows program imports as such a profile.
-
-With these, a Win16 layer isn't needed to start. It is for the Windows 3.1 games and the 16-bit setup programs that these don't reach.
-
-### Setup programs that ran
-
-InstallShield's 16-bit `SETUP.EXE` (InstallShield 5, and InstallShield
-3 releases that ship the 32-bit engine) only unpacks its engine and
-starts it. An NE `SETUP.EXE` with `_INST32I.EX_` beside it is taken
-for that launcher (`src/win32/launcher.rs`): the files of the archive
-(a list of PKWARE DCL members, read by the installshield crate's
-`EngineArchive`) go to `TEMP`, all but the 16-bit `BOOT16.EXE`, and
-the engine starts with the command line Windows 98 SE's launcher gives
-it, as a probe program read it from the running engine there:
+InstallShield's 16-bit `SETUP.EXE` (InstallShield 5, and InstallShield 3
+releases that ship the 32-bit engine) only unpacks its engine and starts
+it. An NE `SETUP.EXE` with `_INST32I.EX_` beside it is taken for that
+launcher (`launcher.rs`): the files of the archive (a list of PKWARE DCL
+members, read by the installshield crate's `EngineArchive`) go to
+`TEMP`, all but the 16-bit `BOOT16.EXE`, and the engine starts with the
+command line Windows 98 SE's launcher gives it, as a probe program read
+it from the running engine there:
 
 ```
 C:\WINDOWS\TEMP\_INS0432._MP -fD:\SETUP.INS  -z1 -cx -xC:\WINDOWS\TEMP\
@@ -568,295 +475,98 @@ Their engine looks for the setup's `layout.bin` and cabinets in the
 folder `-x1` names, or without it in `TEMP`, and ends at once when they
 aren't there. Which arguments a launcher gives is in its table of them,
 strings ending in a zero, so the built-in Windows gives `-x1` and `-q1`
-when that table has them.
+when that table has them. The launcher's `_ISDEL.EXE`, which deletes
+those files after setup, is 16-bit and isn't run, so they stay in
+`TEMP`.
 
-The launcher's `_ISDEL.EXE`, which deletes those files after setup, is
-16-bit and isn't run, so they stay in `TEMP`.
+### What setups need
 
-Getting the setups to the end took these, each as Windows 98 SE does
-it, checked with a probe program there:
+These behaviours exist for setup engines, each as Windows 98 SE does it,
+checked with a probe program there:
 
-- A write to a module's resources, which are read-only pages,
-  succeeds: Windows 98 makes the page writable and the write goes
-  through, though VirtualQuery says read-only and IsBadWritePtr says
-  the page can't be written (InstallShield's engine draws into its own
-  bitmap resource).
+- A write to a module's resources, which are read-only pages, succeeds:
+  Windows 98 makes the page writable and the write goes through, though
+  VirtualQuery says read-only and IsBadWritePtr says the page can't be
+  written (InstallShield's engine draws into its own bitmap resource).
 - WINSPOOL.DRV with EnumPortsA (FILE:, LPT1:, COM1:, COM2:).
 - ADVAPI32's security descriptor functions return TRUE with error 120
   (InitializeSecurityDescriptor, SetSecurityDescriptorDacl and
   SetSecurityDescriptorOwner) or FALSE with it (InitializeAcl,
   AllocateAndInitializeSid and the token functions). InstallShield's
-  engine writes no registry key when InitializeSecurityDescriptor
-  fails.
+  engine writes no registry key when InitializeSecurityDescriptor fails.
 - MPR.DLL with WNetGetConnectionA, which finds no drive redirected.
 - GetTempPathA makes the folder it names when it isn't there, as a
   game's C: drive has no `C:\WINDOWS\TEMP` until something makes it.
 - GDI32 keeps metafiles (SetMetaFileBitsEx) and plays them
   (PlayMetaFile): Wise's dialogs draw their pictures from them.
 
-Setups of InstallShield 5, of InstallShield 3's 32-bit engine and of
-Wise were compared with the same setup run on Windows 98 SE, file by
-file with hashes, registry key by key and shortcut by shortcut
-([docs/compatibility.md](compatibility.md#windows-games-on-the-built-in-windows)
-lists the games). The files they install and the registry keys they
-write are the same, with these differences:
+What an install by these setups differs in from one on Windows 98 is in
+[builtin-windows.md](builtin-windows.md#how-an-install-differs).
 
-- The setup's own logs differ: InstallShield's uninstall log (`.isu`)
-  is a few dozen bytes larger, with the names of the engine's dialog
-  variables in it, and Wise's `INSTALL.LOG` differs in the time, the
-  CD's letter, a `Made Dir` line for `C:\Program Files` and the case of
-  names.
-- A file the setup writes the CD's letter into has the letter of the
-  emulator's drive.
-- InstallShield 3's engine also makes an empty `HKLM\SharedDLLs`: it
-  creates SharedDLLs under the wrong key when it doesn't find it, which
-  Windows 98, where it is always there, never shows.
-- Names on a drive that is a host folder are in capitals, as DOS made
-  them: the Start menu's folder is `START MENU`.
-- Shortcuts are smaller: they have no relative path and no file
-  times. Their targets, working folders and icons are the same. A
-  shortcut to Notepad points to the CD's drive, as the setup finds no
-  Notepad on C:.
-- Dialog text is laid out with other font metrics, so some lines wrap
-  or are cut where Windows 98's aren't, and characters the built-in
-  fonts lack, such as `®`, show as `?`.
+### Unpacking in Rust
 
-### Timing
+`crates/installshield` (`rust-dos-installshield`, pure Rust without
+unsafe code, deflate from flate2) reads installer archives without
+running the setup. Its readers follow those of the refurbished-dinosaurs
+toolkit (`RefurbishedDinosaurs.LegacyFormats`, MIT), which are C#, so
+they are ported rather than reused:
+
+- InstallShield 5 and 6 cabinets (`data1.hdr` and `dataN.cab`, major
+  versions 0, 5 and 6), laid out as Unshield reads them. Compressed
+  members are deflate chunks with 16-bit lengths or, in some version 0
+  sets, raw deflate ending each chunk with `00 00 FF FF` (Unshield's
+  `-O`). Nothing in the header tells the two apart, so the profile names
+  the form and the reader never guesses it. Version 6 members are
+  checked against the header's MD5, the others by size. A major version
+  7 header is refused.
+- InstallShield 3 archives (`_SETUP.1`, `.Z` files inside
+  self-extractors), whose members are compressed with PKWARE's DCL
+  implode, decoded as zlib's `contrib/blast` describes the format.
+- The header is checked whole before any member is read: relative paths,
+  data inside the volumes, and limits on counts and sizes. Entries the
+  reader can't read (marked invalid, stored outside the cabinet, two
+  different files at one path) are listed with the reason, and the rest
+  of the set still opens; a file at a shared path is read by its index.
+- A cabinet places files by file group. The reader reports each member's
+  groups, and the profile maps groups to folders under the install
+  folder, recorded from a real install as its registry keys are.
+
+`rust-dos unpack` (`src/unpack.rs`) lists or extracts a set or an archive
+on the host, by file group if asked, and a game profile's `[install]`
+section unpacks one from the game's drives onto them the first time the
+game starts (`src/install.rs`), with the profile's `windows=builtin` and
+`games/<id>.reg` doing the rest of what setup would.
+
+## Windows 3.1 programs
+
+Win16 programs (NE files) run as Windows 95 runs them (`src/win16/`).
+Their tasks are threads of one Win32 process, the Win16 process
+(KRNL386.EXE), which they share: its address space, its LDT, where their
+segments' selectors are, and the global heap. The system's 16-bit
+modules (KERNEL, USER, GDI and the others) are NE images the emulator
+builds, each export a stub that traps into Rust, and most of them go on
+to the 32-bit function that does the work (`thunk.rs`). Tasks take turns
+as Windows 3.1's do, while the Win32 processes' threads go on around
+them.
+
+## Timing
 
 `GetTickCount`, `timeGetTime`, `QueryPerformanceCounter` (at the PIT's
-1.193182 MHz, as Windows 95 reported) and RDTSC all come from the emulated
-clock, so a game's frame pacing follows `cycles` and is deterministic.
-
-## Screen savers
-
-Windows starts a screen saver after WIN.INI's `[windows]`
-`ScreenSaveTimeOut` seconds with no key or mouse input, when
-`ScreenSaveActive=1`. The saver is SYSTEM.INI's `[boot] SCRNSAVE.EXE`,
-run with `/s`. Programs can read and change both settings through
-SystemParametersInfo.
-
-A `.SCR` can also be run from the prompt by its name, for example
-`saver.scr /s`, with `win32=true`.
-
-## Testing
-
-- Unit tests per DLL area, with generated PE programs, run on both cores
-  as the rest of the suite is (`RUST_DOS_CORE=dynamic`).
-- Win32 games in the game suite (`docs/game-suite.md`), from freeware
-  releases and demos, with golden screen hashes. Determinism makes the
-  hashes stable.
-- Comparisons with the same game on a booted Windows 95 image
-  (a booted Windows 98 SE image has the setup for that), using the debug server to
-  compare screens and the API trace to find where they part.
-- Wine's conformance tests (`dlls/*/tests/*.c`), in
-  `tests/conformance/`. They are Win32 programs that check the API's
-  behaviour against what real Windows returned. These rules apply:
-  - They are kept in the repository, copied from one pinned Wine tree,
-    so CI fetches nothing and they change only in a commit. Any patch
-    one needs is listed in the folder's README.
-  - The tree is Wine 1.2.3. Wine tested on Windows 9x until about 2010,
-    and its tests of that time accept 9x's results (`broken()`,
-    `win_skip`); later trees expect NT's in places. DirectMusic's tests
-    are the exception: 1.2.3 has only dmloader's `loader.c`, dmime's
-    `performance.c` came in 1.4.1 and dmusic's `dmusic.c` in 1.6.2. They
-    are copied from the release that first has them, and each check
-    that fails is compared with the booted Windows 98 image before it
-    is fixed or its result is written into `expected.txt`.
-  - A test file is copied once the built-in DLL has the functions it
-    calls directly, so the set grows with the DLLs: twenty of
-    kernel32's files, advapi32's `registry`, ten of msvcrt's, eleven of
-    user32's (`msg` and `win` among them), eight of gdi32's, four of ddraw's, six of dsound's, four of dinput's and seven
-    of winmm's (the folder's README lists them). Ddraw's `d3d` and `visual` test Direct3D. The DLLs that setup programs use are all from the 1.2.3 tree: sixteen of comctl32's,
-    comdlg32's `filedlg`, six of shell32's (`progman_dde` among them,
-    for the program groups InstallShield 5 makes through DDE),
-    version's `info` and `install`, lz32's `lzexpand_main`, and ole32's
-    `compobj`, `hglobalstream` and `propvariant`; and DirectMusic's
-    three, from the releases named above. D3D8.DLL brings all eight of
-    d3d8's.
-  - They run as Windows 98 SE (`win32_version=98se`), so
-    that the functions Windows 98 added are there for the tests that
-    use them.
-  - `tests/win32/conformance_tests.rs` builds them with MinGW and runs each
-    under the built-in Windows: all but msvcrt's as 486 code linked with
-    a small C runtime of rust-dos's own on KERNEL32, so they test the
-    built-in DLLs alone; msvcrt's linked with the built-in MSVCRT.DLL,
-    on a Pentium Pro. No binaries are checked in.
-  - Their results (each file's summary, the places of the checks that
-    fail and the tests skipped, or how a program ended early) must be
-    those in `expected.txt`. Any difference, better or worse, fails the
-    test, so every change to them shows in that file's diff.
-  - CI runs them in a workflow of their own with Ubuntu 22.04's MinGW,
-    the one the expected results were made with: on changes to the
-    built-in Windows, the PE crate, the processor and recompiler, DOS's
-    file writes or the tests, and every night. Without MinGW the test
-    passes with a note, so `cargo test` works on any machine.
-  - They are under the LGPL 2.1 or later, kept with their notices,
-    which rust-dos's GPL-2.0-or-later allows.
-- Wine's tests ported to Windows 3.1 programs, for Win16, in
-  `tests/conformance16/` (its README lists them): five of KERNEL's,
-  seven of USER's and nine of GDI's, each cut from the Win32 test of
-  the same functions in the 1.2.3 tree to what Windows 3.1 has, and a
-  test of the DPMI services written here.
-  `tests/win16/win16_conformance_tests.rs` builds them with OpenWatcom and
-  checks their results against `expected.txt` as the Win32 tests are
-  checked. CI runs them in the conformance workflow with a pinned
-  OpenWatcom snapshot.
-- The same test programs on the booted Windows 95 and 98 images give
-  the expected output where Wine's tests don't say what 9x does: a test
-  passes when the built-in layer prints what Windows printed. Wine's
-  1.2.3 tests accept 95's, 98's and ME's answers alike, so they show
-  that the Windows 98 setting breaks nothing, but not where 98 should
-  answer differently from 95. Those differences come from the booted
-  images.
-- Installer archives: unit tests build InstallShield cabinets,
-  InstallShield 3 archives and implode streams with a writer in the
-  tests, as the PE tests build programs. A writer and a reader made
-  from one reading of a format only show that the two agree, so the
-  tests also decode streams that an independent decoder expanded, as
-  the toolkit's tests do: the example in blast's format description,
-  and a coded-literal stream pwexplode expanded to the same text. A
-  game's own archive, compared entry by entry with what Unshield (or
-  idecomp, for InstallShield 3) extracts, is the acceptance check. It
-  runs outside the repository, as the game suite does. It covered these,
-  all files equal by SHA-1 (the games are in
-  [docs/compatibility.md](compatibility.md#installer-archives)):
-  - Version 5 sets with `.hdr` files (data1, _sys1, _user1), among them
-    paths that hold one file per language and are read by group.
-  - Version 5 sets with the header in `data1.cab`.
-  - Version 0 sets, which need the marker-delimited form; the chunked
-    one fails on them with a message that names the other.
-  - InstallShield 3 `_SETUP.1` archives and `.Z` archives, paths equal
-    too.
-
-  No version 6 set was found on the media at hand, so version 6 is
-  tested by the writer's sets alone. A major version 7 header is
-  refused.
-- Installs: a real installer, run under the built-in Windows or
-  unpacked in Rust, from media kept outside the repository as the game
-  suite's are. The check is what the install leaves behind, the files
-  written with their hashes and the registry keys set, compared with an
-  install of the same game on the booted Windows 98 image.
-
-## Licensing
-
-rust-dos is GPL-2.0-or-later.
-
-- Wine's code (LGPL-2.1+) may be ported, with its copyright notices kept.
-- cnc-ddraw (MIT) and DDrawCompat (0BSD) may be reused.
-- Boxedwine (GPL-2.0-only) can't be: it would make the whole program
-  GPL-2.0-only.
-- retrowin32 (Apache-2.0) is incompatible with GPL-2.0, so we take its
-  ideas and not its code, unless its author agrees to relicense.
-- HX has no license file, so it serves as a reference and a test, not a
-  source.
-- The refurbished-dinosaurs toolkit's format readers (MIT) and Unshield
-  (MIT) may be ported. Code from idecomp or pwexplode (GPL-3.0) would
-  make the whole program GPL-3.0, which isn't ours to decide, so their
-  code is not used. The readers implement the same formats from
-  descriptions of them (the toolkit's decision records, blast's format
-  description), and the two tools are run as programs outside the
-  repository: for research into what an archive holds, and to check
-  what the readers extract.
-- Nothing from Microsoft is used or shipped: no DLLs, fonts or headers
-  beyond what Wine's and MinGW's public headers document.
-
-## Risks
-
-- **Scope.** The Win32 API is large. Trace-driven work and early
-  milestones with real games keep it to what games call.
-- **Copy protection.** SafeDisc and SecuROM use VxDs, ring 0 tricks
-  and raw reads of the disc. The built-in Windows provides what Windows
-  98 and the machine provide, so a protection runs unchanged and reads
-  the disc image as Windows 98 would, through KERNEL32's ordinal-only
-  exports and SCSI commands through WNASPI32 among others. A
-  protection is never patched, skipped or detected by name. An image
-  that can't pass the check because of how it was made (its unreadable
-  sectors read back as good ones) fails it, as on Windows 98.
-- **Direct hardware access.** Games that talk to VxDs (`DeviceIoControl`
-  on `\\.\VWIN32` for DOS calls is common and can go to the built-in
-  DOS; others are not) or need a vendor's driver.
-- **Direct3D's spread.** Games use D3D in many ways; the Voodoo HAL covers
-  what Voodoo cards could do, which most games of the period targeted.
-- **Fonts and look.** Dialogs and text in games depend on Windows' fonts'
-  metrics; a bundled font changes layout in places.
+1.193182 MHz, as Windows 95 reported) and RDTSC all come from the
+emulated clock, so a game's frame pacing follows `cycles` and is
+deterministic.
 
 ## Wine's DLLs as guest code
 
-Wine's PE builds of DLLs at the edges of the API could run as guest code
-on top of the Rust core, instead of being written again. The candidates
-are the DLLs games use a little of but whose behaviour is large:
-
-- `comctl32` and `comdlg32` for launchers and setup programs;
-- `msacm32` with its ADPCM codecs, for compressed WAV files;
-- `quartz` and `amstream` for DirectShow video, as late-90s games used for
-  their cut scenes.
-
-The core (kernel32, user32, gdi32, ddraw, dsound, dinput, winmm) stays in
-Rust. Wine's versions of those sit on its NT kernel interface and on
-wined3d, which is what this plan avoids.
-
-The cost is what the Wine DLLs import:
-
-- Most of them call `ntdll` (`Rtl*`, `Nt*`) and Wine's own exports
-  (`__wine_dbg_*`).
-- They implement the ANSI functions on top of the Unicode ones, so the
-  Rust user32 and gdi32 would need the `W` functions as well, which Win9x
-  games themselves rarely call.
-- Shipping them means following the LGPL: the DLLs stay separate files,
-  and their source is offered.
-
-Which Wine version to use follows from that. The PE conversion was
-complete in Wine 8.0, and in 8.10 the last direct calls between PE and
-Unix code went through the syscall interface, so 8.10 is the oldest
-version to consider. The latest release has the most fixes. Each release
-also changes what its DLLs import, so the version is pinned and moved
-only on purpose. Before committing to one, list the imports of each
-candidate DLL in the latest release and in an older one, and take the
-version whose import list the Rust core can cover with the least work.
-Usually that will be the latest. Wine's code may also be ported into Rust
-instead (LGPL-2.1 section 3 allows that for a GPL project), which avoids
-the import problem for DLLs that are small enough.
-
-### The experiment: imports of Wine 9.0 and 11.0
-
-The DLLs came from WineHQ's Ubuntu packages of the two stable releases,
-`wine-stable-i386` 9.0 (jammy) and 11.0 (noble), whose
-`lib/wine/i386-windows` folders hold the PE builds. Each DLL's import
-table was read and every import compared with the exports of the
-built-in DLLs. "Missing" is an import no built-in DLL exports; "stub" is
-one a built-in DLL exports as Windows 95 does, as a stub that fails
-(mostly `W` functions of USER32 and KERNEL32).
-
-| DLL            | 9.0: imports, missing, stub | 11.0: imports, missing, stub |
-|----------------|-----------------------------|------------------------------|
-| `msacm32`      | 67, 22, 9                   | 67, 22, 9                    |
-| `imaadp32.acm` | 24, 14, 1                   | 24, 14, 1                    |
-| `msadp32.acm`  | 24, 14, 1                   | 24, 14, 1                    |
-| `comctl32`     | 378, 115, 37                | 307, 79, 36                  |
-| `comdlg32`     | 297, 102, 46                | 285, 88, 46                  |
-| `quartz`       | 215, 124, 22                | 181, 64, 22                  |
-| `amstream`     | 52, 25, 5                   | 53, 8, 5                     |
-
-Wine 11.0 is the one to use. The ACM DLLs miss the same functions in
-both. Counted after the aliases described below (UCRT as MSVCRT,
-KERNELBASE as KERNEL32), 11.0 misses fewer functions for `comctl32` (13
-against 36), `comdlg32` (58 against 73) and `quartz` (63 against 94);
-only `amstream` misses more (8 against 5), and it is the smallest.
-
-Most of what the ACM DLLs miss is UCRT: Wine's DLLs import their C
-runtime from `ucrtbase.dll`, whose functions are MSVCRT's but for four
-(`__acrt_iob_func`, `__stdio_common_vsprintf`,
-`__stdio_common_vswprintf`, `_assert`). The rest is `ntdll`'s
-`_vsnprintf` and KERNEL32's `GetPrivateProfileSectionW`. None of these
-DLLs imports Wine's own `__wine_dbg_*` exports: the ACM DLLs look them
-up in `ntdll` with `GetProcAddress` and print nothing without them.
-
-### How they load
+Wine's PE builds of DLLs at the edges of the API can run as guest code
+on top of the Rust core. The core (KERNEL32, USER32, GDI32, DirectX,
+WinMM) stays in Rust: Wine's versions of those sit on its NT kernel
+interface and on wined3d.
 
 The `win32_dlls` setting names a host folder, such as Wine's
 `i386-windows`, whose DLLs a program may load (CONFIGURATION.md). The
-loader (`src/win32/loader.rs`) looks there for a DLL that has no built-in
-DLL and isn't on the search path, and reads it as if it were in
+loader (`loader.rs`) looks there for a DLL that has no built-in DLL and
+isn't on the search path, and reads it as if it were in
 `C:\WINDOWS\SYSTEM`; `win32_dlls_replace` lets the folder's DLL replace
 a built-in one of the same name. With the setting, `ucrtbase.dll` and
 `api-ms-win-crt-*.dll` are the built-in MSVCRT, `kernelbase.dll` is
@@ -876,10 +586,8 @@ Wine's DLLs are built for the i686 and use CMOV, so they need
 `cpu=pentium_pro` or a later processor. They inline GetProcessHeap as a
 read of `fs:[30h]` and the field at 18h there. That is the process
 database on Windows 95 and the PEB on Windows NT, and on both the field
-is the process heap, so each TIB now points at a block of the process's
-that has it.
-
-### What ran
+is the process heap, so each TIB points at a block of the process's that
+has it.
 
 Wine 11.0's `msacm32.dll` with its IMA ADPCM codec, `imaadp32.acm`,
 encodes 16-bit PCM to IMA ADPCM and decodes it back through
@@ -887,58 +595,152 @@ encodes 16-bit PCM to IMA ADPCM and decodes it back through
 written from the format's definition (`tests/win32/wine_dlls.rs`, which
 runs when WINE_DLLS names the folder). It takes
 `win32_dlls_replace=msacm32`: the built-in MSACM32.DLL has Windows'
-exports and only the decoders of MS ADPCM and IMA ADPCM, for games'
-compressed sounds and for programs that only ask it how large a wave
-format can be. MSACM32 finds the codec in SYSTEM.INI's `[drivers32]`
-(`msacm.imaadpcm=imaadp32.acm`) and opens it with OpenDriver, so WINMM's
-installable drivers are now real: OpenDriver loads the DLL as
-LoadLibrary does, finds its alias in SYSTEM.INI, and sends its
-`DriverProc` DRV_LOAD, DRV_ENABLE and DRV_OPEN; SendDriverMessage and
-CloseDriver call it as Wine's `winmm` does.
+exports and only the decoders of MS ADPCM and IMA ADPCM. MSACM32 finds
+the codec in SYSTEM.INI's `[drivers32]` (`msacm.imaadpcm=imaadp32.acm`)
+and opens it with OpenDriver. WINMM's installable drivers are real for
+that: OpenDriver loads the DLL as LoadLibrary does, finds its alias in
+SYSTEM.INI, and sends its `DriverProc` DRV_LOAD, DRV_ENABLE and
+DRV_OPEN; SendDriverMessage and CloseDriver call it as Wine's `winmm`
+does. ADVAPI32's `Reg*W` stubs return ERROR_CALL_NOT_IMPLEMENTED to
+guest code: Windows 95's return 0 with that error set, and MSACM32 takes
+0 as ERROR_SUCCESS.
 
-What it needed besides the loader: the four UCRT functions, NTDLL's
-`_vsnprintf`, `GetPrivateProfileSectionW`, the installable drivers, the
-process heap at `fs:[30h]`, and ADVAPI32's `Reg*W` stubs returning
-ERROR_CALL_NOT_IMPLEMENTED to guest code. Windows 95's stubs return 0
-with that error set, as Wine's registry tests find, and programs keep
-getting that; MSACM32 takes 0 as ERROR_SUCCESS and would enumerate the
-registry with a key it never got. No call failed through a guest stub
-on the way. The other stubs it met fail as on Windows 95 and MSACM32
-copes: `GetModuleHandleW` (for `ntdll`'s debug functions),
-`RegOpenKeyExW` and `RegCreateKeyW` (its driver cache, which it fills
-from the drivers instead).
+Wine's `comctl32`, `comdlg32` and `quartz` don't run this way: their
+window classes and dialogs are written in Unicode, so they need USER32's
+and GDI32's `W` functions, which the built-in DLLs have as stubs that
+fail, as Windows 95's are, and more of NTDLL and KERNEL32. The built-in
+COMCTL32 and COMDLG32 are written in Rust instead, partly ported from
+Wine's.
 
-### What the others would take
+## Testing
 
-The counts after this work, with the aliases and the functions above:
+- Unit tests per DLL area, with generated PE programs, run on both cores
+  as the rest of the suite is (`RUST_DOS_CORE=dynamic`).
+- Win32 games in the game suite (`docs/game-suite.md`), with golden
+  screen hashes. Determinism makes the hashes stable.
+- Comparisons with the same program on a booted Windows 98 SE image,
+  using the debug server to compare screens and the API trace to find
+  where they part.
+- Wine's conformance tests (`dlls/*/tests/*.c`), in `tests/conformance/`.
+  They are Win32 programs that check the API's behaviour against what
+  real Windows returned. These rules apply:
+  - They are kept in the repository, copied from one pinned Wine tree,
+    so CI fetches nothing and they change only in a commit. Any patch
+    one needs is listed in the folder's README, which also lists the
+    files.
+  - The tree is Wine 1.2.3. Wine tested on Windows 9x until about 2010,
+    and its tests of that time accept 9x's results (`broken()`,
+    `win_skip`); later trees expect NT's in places. DirectMusic's tests
+    are the exception: 1.2.3 has only dmloader's `loader.c`, dmime's
+    `performance.c` came in 1.4.1 and dmusic's `dmusic.c` in 1.6.2. They
+    are copied from the release that first has them, and each check that
+    fails is compared with the booted Windows 98 image before it is
+    fixed or its result is written into `expected.txt`.
+  - A test file is copied once the built-in DLL has the functions it
+    calls directly, so the set grows with the DLLs.
+  - They run as Windows 98 SE (`win32_version=98se`), so that the
+    functions Windows 98 added are there for the tests that use them.
+  - `tests/win32/conformance_tests.rs` builds them with MinGW and runs
+    each under the built-in Windows: all but msvcrt's as 486 code linked
+    with a small C runtime of rust-dos's own on KERNEL32, so they test
+    the built-in DLLs alone; msvcrt's linked with the built-in
+    MSVCRT.DLL, on a Pentium Pro. No binaries are checked in.
+  - Their results (each file's summary, the places of the checks that
+    fail and the tests skipped, or how a program ended early) must be
+    those in `expected.txt`. Any difference, better or worse, fails the
+    test, so every change to them shows in that file's diff.
+  - CI runs them in a workflow of their own with Ubuntu 22.04's MinGW,
+    the one the expected results were made with: on changes to the
+    built-in Windows, the PE crate, the processor and recompiler, DOS's
+    file writes or the tests, and every night. Without MinGW the test
+    passes with a note, so `cargo test` works on any machine.
+- Wine's tests ported to Windows 3.1 programs, for Win16, in
+  `tests/conformance16/` (its README lists them), each cut from the
+  Win32 test of the same functions in the 1.2.3 tree to what Windows 3.1
+  has, and a test of the DPMI services written here.
+  `tests/win16/win16_conformance_tests.rs` builds them with OpenWatcom
+  and checks their results against `expected.txt` as the Win32 tests
+  are checked. CI runs them in the conformance workflow with a pinned
+  OpenWatcom snapshot.
+- The same test programs on the booted Windows 95 and 98 images give
+  the expected output where Wine's tests don't say what 9x does: a test
+  passes when the built-in layer prints what Windows printed. Wine's
+  1.2.3 tests accept 95's, 98's and ME's answers alike, so they show
+  that the Windows 98 setting breaks nothing, but not where 98 should
+  answer differently from 95. Those differences come from the booted
+  images.
+- Installer archives: unit tests build InstallShield cabinets,
+  InstallShield 3 archives and implode streams with a writer in the
+  tests, as the PE tests build programs. A writer and a reader made from
+  one reading of a format only show that the two agree, so the tests
+  also decode streams that an independent decoder expanded, as the
+  toolkit's tests do: the example in blast's format description, and a
+  coded-literal stream pwexplode expanded to the same text. A game's own
+  archive, compared entry by entry with what Unshield (or idecomp, for
+  InstallShield 3) extracts, is the acceptance check. It runs outside
+  the repository, as the game suite does. It covered these, all files
+  equal by SHA-1 (the games are in
+  [compatibility.md](compatibility.md#installer-archives)):
+  - Version 5 sets with `.hdr` files (data1, _sys1, _user1), among them
+    paths that hold one file per language and are read by group.
+  - Version 5 sets with the header in `data1.cab`.
+  - Version 0 sets, which need the marker-delimited form; the chunked
+    one fails on them with a message that names the other.
+  - InstallShield 3 `_SETUP.1` archives and `.Z` archives, paths equal
+    too.
 
-- `comctl32` 11.0: 13 missing, 36 stubs. The missing ones are mostly
-  Vista functions (`ResolveDelayLoadedAPI`, `DelayLoadFailureHook`,
-  `GdiAlphaBlend`, `GetMonitorInfoW`, `IsDialogMessageW`). The stubs are
-  the larger work: its window classes are written in Unicode, so
-  `CreateWindowExW`, `DefWindowProcW`, `SendMessageW` and the other `W`
-  functions of USER32 and GDI32 would have to work for guest code, with
-  windows whose procedures take Unicode messages. With the built-in
-  COMCTL32 written in Rust, it is only worth it for controls that one
-  doesn't have.
-- `comdlg32` 11.0: 58 missing, 46 stubs. It needs `comctl32`'s image
-  lists and up-down control, `shell32` and `shlwapi` for its file
-  dialogs, activation contexts and resource functions in Unicode
-  (`FindResourceW`, `EnumResourceNamesW`), `CreateDCW` for printing, and
-  `ntdll`'s Unicode strings. It would come after `comctl32`.
-- `quartz` 11.0: 63 missing, 22 stubs. It needs I/O completion ports,
-  the thread pool and condition variables of KERNEL32,
-  `DirectSoundCreate8`, OLEAUT32, RPCRT4 for its COM proxies, and
-  `msvfw32` for its codecs, which are Wine DLLs in turn. Of the three it
-  is the furthest off; `amstream` (8 missing: condition variables,
-  `InitializeCriticalSectionEx`, `__iob_func`) sits on top of it.
+  No version 6 set was found on the media at hand, so version 6 is
+  tested by the writer's sets alone.
+- Installs: a real installer, run under the built-in Windows or unpacked
+  in Rust, from media kept outside the repository as the game suite's
+  are. The check is what the install leaves behind, the files written
+  with their hashes and the registry keys set, compared with an install
+  of the same game on the booted Windows 98 image.
 
-## Decisions
+## Licensing
 
-1. **Direct3D**: on the emulated Banshee/Voodoo3, with its OpenGL replay
-   (see "Video").
-2. **Installers and Win16**: installed folders with registry keys from
-   the profile first, then 32-bit setup engines and unpacking in Rust
-   (see "Installing games").
-3. **Wine's DLLs**: an experiment, limited to the DLLs at
-   the edges, on a pinned version chosen by measuring its imports.
+rust-dos is GPL-2.0-or-later.
+
+- Wine's code (LGPL-2.1+) is ported, with its copyright notices kept in
+  the files it went into (Direct3D, D3D8, COMCTL32, COMDLG32 and
+  others); LGPL-2.1 section 3 allows a copy under GPL-2.0-or-later. The
+  conformance tests are kept under the LGPL with their notices.
+- The refurbished-dinosaurs toolkit's format readers (MIT) and Unshield
+  (MIT) are ported into `crates/installshield`. Code from idecomp or
+  pwexplode (GPL-3.0) would make the whole program GPL-3.0, which isn't
+  ours to decide, so their code is not used. The readers implement the
+  same formats from descriptions of them (the toolkit's decision
+  records, blast's format description), and the two tools are run as
+  programs outside the repository: for research into what an archive
+  holds, and to check what the readers extract.
+- retrowin32 (Apache-2.0) is incompatible with GPL-2.0, and Boxedwine
+  (GPL-2.0-only) would make the whole program GPL-2.0-only: neither's
+  code is used. HX DOS Extender has no license file, so it serves as a
+  reference and a test, not a source.
+- Nothing from Microsoft is used or shipped: no DLLs, fonts or headers
+  beyond what Wine's and MinGW's public headers document.
+
+## Rules the code follows
+
+1. **Output goes through the emulated hardware.** No DLL draws or plays
+   on the host directly, so frontends, save states and recording need
+   nothing of their own for Windows programs.
+2. **Direct3D runs on the emulated 3dfx card's HAL** (see "Video"),
+   without a software rasterizer.
+3. **No Rust frame lives across a call into the program** (see "Calling
+   the program from Rust"), so a save state is possible at any
+   instruction.
+4. **Behaviour follows Windows 98 SE**, as probes on a booted image and
+   Wine's tests recorded it, under `win32_version=98se`, and Windows 95's
+   under the default.
+5. **Copy protections run unchanged.** The built-in Windows provides
+   what Windows 98 and the machine provide (KERNEL32's ordinal-only
+   exports, VxDCall, SCSI commands through WNASPI32), and a protection
+   reads the disc image as on Windows 98. A protection is never patched,
+   skipped or detected by name. An image that can't pass the check
+   because of how it was made fails it, as on Windows 98.
+6. **Installs come from the game's own installer** where it runs, and
+   from unpacking its archives or an installed copy with registry keys
+   from the profile where it doesn't (see "Setup programs").
+7. **Wine's DLLs run only at the edges**, as guest code from a folder
+   the user names, never in place of the core DLLs.
