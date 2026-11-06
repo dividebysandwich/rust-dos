@@ -441,9 +441,8 @@ impl Pool {
         }
         let mut queue = self.shared.queue.lock().unwrap();
         while queue.done.iter().any(|&d| d < number)
-            || share.is_some_and(|share| {
-                queue.over(share) && !queue.shutdown && queue.panic.is_none()
-            })
+            || share
+                .is_some_and(|share| queue.over(share) && !queue.shutdown && queue.panic.is_none())
         {
             queue = self.shared.idle.wait(queue).unwrap();
         }
@@ -771,10 +770,12 @@ mod tests {
 
     /// The picture waits for the frame shown and then until the queue
     /// holds at most half of a limit: the next frame goes on drawing, but
-    /// not a full queue of it.
+    /// not a full queue of it. The first gate holds more than half the
+    /// jobs allowed behind it, the second only a few, so the picture
+    /// comes once the first opens, with the second still shut.
     #[test]
     fn the_picture_waits_until_the_queue_is_half_empty() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
         let pool = Pool::new(2);
         let fb = Vram::new(0x1000);
         let row = || Job::Rows {
@@ -787,25 +788,34 @@ mod tests {
         };
         pool.submit(row());
         let shown = pool.mark();
-        // The next frame: held, and more than half the jobs allowed.
-        let gate = Gate::default();
-        pool.submit(Job::Hold(gate.clone()));
+        // The next frame: more than half the jobs allowed, then a few.
+        let first = Gate::default();
+        let second = Gate::default();
+        pool.submit(Job::Hold(first.clone()));
         for _ in 0..MAX_JOBS / 2 + BATCH {
             pool.submit(row());
         }
+        pool.submit(Job::Hold(second.clone()));
+        pool.submit(row());
         pool.give_out();
         pool.wait_for(shown);
-        let back = AtomicBool::new(false);
+        let (back, wait) = std::sync::mpsc::channel();
+        let pool = &pool;
         std::thread::scope(|s| {
-            s.spawn(|| {
+            s.spawn(move || {
                 pool.wait_for_shown(shown);
-                back.store(true, Ordering::SeqCst);
+                let over = pool.shared.queue.lock().unwrap().over(SHOWN_SHARE);
+                let _ = back.send(over);
             });
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            assert!(!back.load(Ordering::SeqCst), "it waited for the frame shown only");
-            open(&gate);
+            let early = wait.recv_timeout(Duration::from_millis(50)).is_ok();
+            open(&first);
+            let late = wait.recv_timeout(Duration::from_secs(10));
+            // Open before asserting: shut, it would hold the workers, and
+            // the pool's drop with them.
+            open(&second);
+            assert!(!early, "it waited for more than the frame shown");
+            assert_eq!(late, Ok(false), "it came back at half, not after every job");
         });
-        assert!(!pool.shared.queue.lock().unwrap().over(SHOWN_SHARE));
         pool.flush();
     }
 
