@@ -615,6 +615,7 @@ impl Voodoo {
             self.gpu_behind.set(false);
             return;
         };
+        let _zone = crate::profile::zone(crate::profile::Zone::VoodooReadBack);
         link.run(commands);
         let height = key.height;
         // The rows asked for, buffer by buffer: the buffer's key in the
@@ -965,6 +966,7 @@ impl Voodoo {
         let mut gpu = self.gpu.borrow_mut();
         let gpu = &mut *gpu;
         let runs = gpu.tracker.take_gpu(start, end, hot);
+        let _zone = crate::profile::zone(crate::profile::Zone::VoodooReadBack);
         let mut bytes = Vec::new();
         for (a, b) in runs {
             bytes.resize((b - a) as usize, 0);

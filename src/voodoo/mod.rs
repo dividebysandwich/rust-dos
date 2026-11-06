@@ -1067,7 +1067,10 @@ impl Voodoo {
         }
         self.submit_words();
         self.release_backlog();
-        self.pool.flush();
+        {
+            let _zone = crate::profile::zone(crate::profile::Zone::VoodooWait);
+            self.pool.flush();
+        }
         self.drawn.borrow_mut().clear();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
