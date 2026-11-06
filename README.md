@@ -45,7 +45,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   It runs InstallShield and Wise setups. It runs fewer games than
   booting Windows: a program that calls a function it doesn't have yet
   stops with a message naming it
-  ([docs/native-windows.md](docs/native-windows.md))
+  ([docs/builtin-windows.md](docs/builtin-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
   Trio64 with its 2D accelerator, an
@@ -71,8 +71,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   SC-55 (a port of Nuked-SC55) or the host's MIDI ports, Covox and Disney Sound Source, the Tandy/PCjr sound chip, and CD
   audio
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
-  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO, CHD) and FAT12, FAT16
-  and FAT32 disk images (raw, VHD, and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
+  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO, CHD, BlindWrite)
+  and FAT12, FAT16 and FAT32 disk images (raw, VHD, and 86Box's 86F
+  floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
   (`BOOT`): MS-DOS, [Windows 95](CONFIGURATION.md#windows-95) and other systems of their own, with a Plug

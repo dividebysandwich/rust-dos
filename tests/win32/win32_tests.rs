@@ -3241,6 +3241,58 @@ fn get_startup_info_w_is_a_stub_that_fails() {
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
 }
 
+/// INT 68h, WDEB386's interface, as Windows 98 has it without the
+/// debugger: the program goes on after it with its registers as they
+/// were. SafeDisc 1's loader asks it with AX=4300h for a debugger.
+#[test]
+fn int_68h_finds_no_debugger() {
+    let main = |a: &mut CodeAssembler, _: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.mov(eax, 0x4300)?;
+        a.mov(ecx, 0x1234_5678)?;
+        a.int(0x68)?;
+        a.cmp(eax, 0x4300)?;
+        check(a, false, 0)?;
+        a.cmp(ecx, 0x1234_5678)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, &[], &[0; 4], &[("", &main)], &[]);
+    let (code, text) = run("int_68h", exe);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
+}
+
+/// HLT, which only the system may run, raises a privileged-instruction
+/// exception (C0000096) for the program's handlers, as on Windows 98.
+/// The handler ends the program with 1 for that code, 0 for another.
+#[test]
+fn hlt_raises_a_privileged_instruction_exception() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, text) = run(
+        "privileged",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut setup = a.create_label();
+            // The CALL pushes the handler's address, which follows it.
+            a.call(setup)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.xor(ecx, ecx)?;
+            a.cmp(eax, 0xC000_0096u32 as i32)?;
+            a.sete(cl)?;
+            a.push(ecx)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            a.set_label(&mut setup)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.hlt()?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// C.DLL, whose entry point returns FALSE, and exports F.
 fn dll_c() -> Vec<u8> {
     let main = |a: &mut CodeAssembler, _: &Layout| {

@@ -481,8 +481,10 @@ limit, so without a connection it goes on as it would with one:
   KERNEL, USER, GDI and other 16-bit modules are written into the emulator
   as well and go on to the 32-bit ones, and its own DLLs, such as Visual
   Basic's runtimes, load from beside it. Off, such a program runs its DOS
-  stub, which says it needs Windows. The plan is in
-  [docs/native-windows.md](docs/native-windows.md).
+  stub, which says it needs Windows. How to use it and what differs from
+  Windows 98 is in [docs/builtin-windows.md](docs/builtin-windows.md),
+  and how it is built in
+  [docs/builtin-windows-architecture.md](docs/builtin-windows-architecture.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
   `lib/wine/i386-windows` folder. A DLL a program needs that is neither
@@ -493,8 +495,8 @@ limit, so without a connection it goes on as it would with one:
   how many bytes of arguments each takes. Empty (the default), there is
   no such folder. Wine's MSACM32.DLL with its codecs runs this way, with
   `win32_dlls_replace=msacm32`, for what the built-in MSACM32.DLL can't
-  convert: it only decodes MS ADPCM and IMA ADPCM. See "Wine's DLLs as
-  guest code" in [docs/native-windows.md](docs/native-windows.md).
+  convert: it only decodes MS ADPCM and IMA ADPCM. See
+  [Wine's DLLs as guest code](docs/builtin-windows-architecture.md#wines-dlls-as-guest-code).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
   `comctl32,comdlg32`. Empty (the default), the built-in ones are used. An
@@ -1404,7 +1406,9 @@ when its `[autoexec]` boots nothing (see
 [an operating system](GAME-PACKAGES.md#an-operating-system)). A GOG
 install whose launcher starts a Windows program gets a `windows=builtin`
 profile when it is [imported](#game-profiles). The rest of this section
-is about the built-in Windows.
+is about the built-in Windows, and
+[docs/builtin-windows.md](docs/builtin-windows.md) says what in it
+differs from Windows 98.
 
 #### A profile to start from
 
@@ -1502,12 +1506,13 @@ takes the install away and the next start runs the setup again.
 
 The settings of [the profile above](#a-profile-to-start-from) apply to
 the setup as well as the game, and `SET TEMP` matters most here. The
-setups listed in
-[docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
-are known to run. For a game on more than one CD, list every image on
-the drive's `[drives]` line; when the setup asks for the next disc,
-Ctrl+F4 puts it in. Run `DIR` at the prompt after the setup to find the
-8.3 names of the folders it made.
+games whose setups are known to run are in
+[docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows),
+and [docs/builtin-windows.md](docs/builtin-windows.md#how-an-install-differs)
+says how an install differs from one on Windows 98. For a game on more
+than one CD, list every image on the drive's `[drives]` line; when the
+setup asks for the next disc, Ctrl+F4 puts it in. Run `DIR` at the
+prompt after the setup to find the 8.3 names of the folders it made.
 
 InstallShield's `SETUP.EXE` is a 16-bit launcher, which the built-in
 Windows doesn't run. When `_INST32I.EX_` is beside it, the built-in
@@ -1887,29 +1892,49 @@ lists the options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
-GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
-is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
-files, any number of tracks and gaps), a CD image in MAME's compressed CHD
-format (`.chd`, as `chdman createcd` makes them; its data and audio
-tracks, decompressed as they are read), or a bare image of a data track
-in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
-`.gog`). The data track can be ISO 9660 or High Sierra, the format of
-discs mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or
-MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them),
-and WAVE files at other rates: they are decoded to CD audio as they play.
-Programs run from the image as from any other drive. DOS programs see the
-names of the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs
-on the built-in Windows see its Joliet long names where the disc has
-them, as on Windows 95.
+GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that is
+at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE files,
+any number of tracks and gaps), a CD image in MAME's compressed CHD format
+(`.chd`, as `chdman createcd` makes them; its data and audio tracks,
+decompressed as they are read), a BlindWrite 5 or 6 image (the `.b5t` or
+`.b6t` descriptor, with its `.b5i` or `.b6i` data files and the `.b00`,
+`.b01`... BlindWrite split them into, beside it), or a bare image of a data
+track in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
+`.gog`). The data track can be ISO 9660 or High Sierra, the format of discs
+mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or MP3 files
+(FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them), and WAVE
+files at other rates: they are decoded to CD audio as they play. Programs
+run from the image as from any other drive. DOS programs see the names of
+the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs on the
+built-in Windows see its Joliet long names where the disc has them, as on
+Windows 95.
 
-An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
-sector's EDC, and a sector whose EDC doesn't match its data reads as a
-drive reads it: as an error (MEDIUM ERROR, unrecovered read error, on the
-IDE drive; a CRC error through MSCDEX, and a data error when DOS reads a
-file over it). Some copy protections master such sectors on purpose and
-refuse to run when reading them succeeds, so an image as Redump makes it
-passes their check. Sectors with an EDC of 0, which tools that turn an
-ISO into a BIN leave, aren't checked.
+An image of whole 2352-byte sectors (a BIN, a CHD, or a BlindWrite image
+read in raw mode) keeps each data sector's EDC, and a sector whose EDC
+doesn't match its data reads as a drive reads it: as an error (MEDIUM
+ERROR, unrecovered read error, on the IDE drive; a CRC error through
+MSCDEX, and a data error when DOS reads a file over it). Some copy
+protections master such sectors on purpose and refuse to run when reading
+them succeeds, so an image as Redump makes it passes their check. Sectors
+with an EDC of 0, which tools that turn an ISO into a BIN leave, aren't
+checked.
+
+The IDE drive also reads each sector's subchannel: READ CD returns it after
+the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
+Q at the head (where audio plays, or else the last sector read or sought)
+and the disc's catalog number. A BlindWrite image read with subchannel
+(2448-byte sectors) keeps what the disc had, deliberately bad Q included;
+for other images and sectors the drive makes P and Q from the disc's
+layout, with R-W empty. A Q whose CRC is bad reads back as it is through
+READ CD, and READ SUB-CHANNEL reports the layout's position in its place,
+as a drive keeps the last good one. MSCDEX's Q channel reports the same
+position. The catalog number and the tracks' copy and pre-emphasis flags
+come from a BlindWrite descriptor, or from a CUE sheet's CATALOG and FLAGS,
+and both the IDE drive and MSCDEX report them. BlindWrite's data position
+measurement (DPM, in the descriptor or a `.bwa` file) is read, but the
+drive doesn't time its reads by it yet
+([#591](https://github.com/dividebysandwich/rust-dos/issues/591)), so a
+protection that measures sector angles may not pass.
 
 The type of a drive is the word after the path in `[drives]`, or `-t` at
 the prompt:

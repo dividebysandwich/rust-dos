@@ -1,5 +1,6 @@
-//! A CD image: its tracks laid out on the disc the way the CUE sheet
-//! describes them, and sector reads from the files behind them.
+//! A CD image: its tracks laid out on the disc the way the CUE sheet,
+//! CHD file or BlindWrite descriptor describes them, and sector and
+//! subchannel reads from the files behind them.
 
 use super::cue::{parse_cue, CueSheet, FileFormat, TrackMode};
 use super::{DATA_SECTOR, Extent, RAW_SECTOR, SYNC};
@@ -14,24 +15,119 @@ use std::path::{Path, PathBuf};
 pub struct Track {
     pub number: u8,
     pub mode: TrackMode,
+    /// The session the track is in, from 1.
+    pub session: u8,
+    /// The control bits of its TOC entry and Q subchannel: 4 for data,
+    /// 2 for digital copy permitted, 1 for pre-emphasis.
+    pub control: u8,
     /// First sector of the pregap before the track (as `start` if none).
     pub pregap_start: u32,
     /// First sector of the track proper (INDEX 01).
     pub start: u32,
     /// First sector after the track, and after its postgap.
     pub end: u32,
-    /// First sector that is in the file; those before it are silence.
-    data_start: u32,
-    /// First sector after those in the file.
-    data_end: u32,
+    /// Where its sectors are stored, in order; those in none of them are
+    /// silence.
+    spans: Vec<Span>,
+}
+
+/// Sectors of a track stored one after the other in a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Span {
+    /// The first sector, and the first after them.
+    start: u32,
+    end: u32,
     file: usize,
-    /// Byte offset of sector `data_start` in the file.
+    /// Byte offset of sector `start` in the file.
     offset: u64,
+    /// Bytes from one sector to the next.
+    stride: u64,
+    /// The subchannel stored after each sector's 2352 bytes.
+    subcode: Subcode,
+}
+
+impl Span {
+    /// Sectors from `start` on, `stride` bytes apart, from byte `offset`
+    /// of `file`, without subchannel.
+    fn new(start: u32, end: u32, file: usize, offset: u64, stride: u64) -> Self {
+        Span {
+            start,
+            end,
+            file,
+            offset,
+            stride,
+            subcode: Subcode::None,
+        }
+    }
+}
+
+/// What subchannel an image keeps with each sector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Subcode {
+    None,
+    /// 96 bytes of P-W, each channel's 12 after the one before.
+    Linear,
+    /// 16 bytes: the 12 of Q, then 4 more.
+    Q,
+}
+
+impl Subcode {
+    fn bytes(self) -> u64 {
+        match self {
+            Subcode::None => 0,
+            Subcode::Linear => 96,
+            Subcode::Q => 16,
+        }
+    }
+}
+
+/// Where the Q subchannel of a sector says it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QPosition {
+    /// The control bits (`Track::control`).
+    pub control: u8,
+    pub track: u8,
+    /// 0 in a pregap, then 1 and up.
+    pub index: u8,
+    /// Sectors into the track, or in a pregap, left after this one until
+    /// it starts: the pregap's last sector has 0, as its first sector
+    /// after the track's start does (ECMA-130, 22.3.3.3).
+    pub relative: u32,
+    /// The sector.
+    pub absolute: u32,
 }
 
 impl Track {
+    /// A track of session 1 with the usual control bits, its sectors in
+    /// `data`.
+    fn stored(
+        number: u8,
+        mode: TrackMode,
+        pregap_start: u32,
+        start: u32,
+        end: u32,
+        data: Span,
+    ) -> Self {
+        let control = if mode.is_audio() { 0 } else { 4 };
+        Track {
+            number,
+            mode,
+            session: 1,
+            control,
+            pregap_start,
+            start,
+            end,
+            spans: vec![data],
+        }
+    }
+
     pub fn is_audio(&self) -> bool {
         self.mode.is_audio()
+    }
+
+    /// Where sector `lba` is stored, if it is.
+    fn span(&self, lba: u32) -> Option<&Span> {
+        self.spans.iter().find(|s| (s.start..s.end).contains(&lba))
     }
 }
 
@@ -65,6 +161,10 @@ pub struct CdImage {
     path: PathBuf,
     files: Vec<Backing>,
     tracks: Vec<Track>,
+    /// The media catalog number, where the image keeps it.
+    mcn: Option<String>,
+    /// The data position measurement the image keeps.
+    dpm: Option<super::b6t::Dpm>,
 }
 
 /// The error of reading a sector a drive can't read: one whose EDC
@@ -102,11 +202,14 @@ fn check_readable(lba: u32, raw: &[u8; RAW_SECTOR]) -> io::Result<()> {
 }
 
 impl CdImage {
-    /// Open a CD image: a CUE sheet, a CHD file, or a bare image of one
-    /// data track (.iso, .bin, .img), whose sector format is found from
-    /// where the ISO 9660 or High Sierra volume descriptor is.
+    /// Open a CD image: a CUE sheet, a CHD file, a BlindWrite descriptor,
+    /// or a bare image of one data track (.iso, .bin, .img), whose sector
+    /// format is found from where the ISO 9660 or High Sierra volume
+    /// descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if let Some(sheet) = sheet(path) {
+        if is_b6t(path) {
+            Self::open_b6t(path)
+        } else if let Some(sheet) = sheet(path) {
             Self::open_cue(path, sheet?)
         } else if is_chd(path) {
             Self::open_chd(path)
@@ -116,11 +219,8 @@ impl CdImage {
     }
 
     fn open_cue(path: &Path, sheet: CueSheet) -> Result<Self, String> {
-        // A bare file name's parent is "", which can't be listed to match
-        // names in any case.
-        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-
-        let mut image = CdImage { path: path.to_path_buf(), files: Vec::new(), tracks: Vec::new() };
+        let dir = dir_of(path);
+        let mut image = CdImage::new(path, Vec::new(), Vec::new());
         // Sector of the disc where the next file starts.
         let mut next = 0u32;
         for cue_file in &sheet.files {
@@ -130,13 +230,36 @@ impl CdImage {
             // Sector of the disc where this file's sector 0 is, moved on by
             // the gaps that aren't in the file.
             let mut base = next;
-            let mut offset = 0u64;
+            // The first two seconds of track 1's pregap are before the
+            // disc's sector 0, where no read reaches. A data track 1 starts
+            // at sector 0, so an image that keeps its pregap (INDEX 00
+            // 00:00:00, INDEX 01 00:02:00, as BlindWrite's cue sheets give
+            // it) has the disc start that far into the file. An audio
+            // track 1 can start later, after hidden audio in its pregap:
+            // sheets for those (INDEX 00 00:00:00, INDEX 01 03:22:70) count
+            // the file from sector 0, so its sectors before INDEX 01 stay
+            // on the disc.
+            let first_file = image.tracks.is_empty();
+            let (lead, mut offset) = match cue_file.tracks.first() {
+                Some(t) if first_file && !t.mode.is_audio() => {
+                    (t.index1, t.index1 as u64 * t.mode.sector_size())
+                }
+                _ => (0, 0),
+            };
+            let at = |index: u32| index.saturating_sub(lead);
             for (i, t) in cue_file.tracks.iter().enumerate() {
-                base += t.pregap;
+                // Track 1's PREGAP is silence before INDEX 01, of which
+                // the first two seconds are before sector 0.
+                let pregap = if first_file && i == 0 {
+                    t.pregap.saturating_sub(super::LBA_OFFSET)
+                } else {
+                    t.pregap
+                };
+                base += pregap;
                 let size = t.mode.sector_size();
-                let first = t.index0.unwrap_or(t.index1).min(t.index1);
+                let first = t.index0.map_or(at(t.index1), at).min(at(t.index1));
                 let last = match cue_file.tracks.get(i + 1) {
-                    Some(n) => n.index0.unwrap_or(n.index1),
+                    Some(n) => n.index0.map_or(at(n.index1), at),
                     None => first + ((backing.len.saturating_sub(offset)) / size) as u32,
                 };
                 if last < first {
@@ -144,23 +267,132 @@ impl CdImage {
                 }
                 let data_start = base + first;
                 let data_end = base + last;
-                image.tracks.push(Track {
-                    number: t.number,
-                    mode: t.mode,
-                    pregap_start: data_start - t.pregap,
-                    start: base + t.index1,
-                    end: data_end + t.postgap,
-                    data_start,
-                    data_end,
-                    file,
-                    offset,
-                });
+                let data = Span::new(data_start, data_end, file, offset, size);
+                let pregap_start = data_start - pregap;
+                let (start, end) = (base + at(t.index1), data_end + t.postgap);
+                let mut track = Track::stored(t.number, t.mode, pregap_start, start, end, data);
+                track.control |= t.flags;
+                image.tracks.push(track);
                 offset += (last - first) as u64 * size;
                 base += t.postgap;
                 next = data_end + t.postgap;
             }
             image.files.push(backing);
         }
+        image.mcn = sheet.catalog;
+        Ok(image)
+    }
+
+    /// The sessions and tracks a BlindWrite descriptor lists, their
+    /// sectors in its data files, with the subchannel those keep and the
+    /// DPM data of the `.bwa` file beside it or of the descriptor.
+    fn open_b6t(path: &Path) -> Result<Self, String> {
+        use super::b6t::{self, TrackType};
+        let error = |e: String| format!("{}: {}", path.display(), e);
+        let data = hostfs::read(path).map_err(|e| error(e.to_string()))?;
+        let disc = b6t::parse(&data).map_err(error)?;
+        let dir = dir_of(path);
+        let mut image = CdImage::new(path, Vec::new(), Vec::new());
+        image.mcn = disc.mcn.clone();
+        // The file of each data block, each file opened once.
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut files = Vec::new();
+        for block in &disc.blocks {
+            let found = find_file(dir, &block.file)?;
+            let file = match paths.iter().position(|p| *p == found) {
+                Some(file) => file,
+                None => {
+                    image.files.push(Backing::open(&found, FileFormat::Binary)?);
+                    paths.push(found);
+                    paths.len() - 1
+                }
+            };
+            files.push(file);
+        }
+        for session in &disc.sessions {
+            for t in &session.tracks {
+                let sector = |at: i64| {
+                    u32::try_from(at).map_err(|_| {
+                        error(format!("track {} isn't where a CD's sectors are", t.number))
+                    })
+                };
+                // The first track's pregap starts at -150, where no read
+                // reaches.
+                let (first, end) = (t.start.max(0), t.start + t.sectors as i64);
+                let mut spans = Vec::new();
+                let mut sizes = Vec::new();
+                for (block, &file) in disc.blocks.iter().zip(&files) {
+                    let (from, to) = (
+                        first.max(block.start),
+                        end.min(block.start + block.sectors as i64),
+                    );
+                    if from < to {
+                        let offset = block.offset + (from - block.start) as u64 * block.sector_size;
+                        let mut span =
+                            Span::new(sector(from)?, sector(to)?, file, offset, block.sector_size);
+                        span.subcode = match block.subchannel() {
+                            96 => Subcode::Linear,
+                            16 => Subcode::Q,
+                            _ => Subcode::None,
+                        };
+                        sizes.push(block.sector_size - block.subchannel());
+                        spans.push(span);
+                    }
+                }
+                let size = match sizes[..] {
+                    [] => {
+                        return Err(error(format!(
+                            "track {} is in none of its data files",
+                            t.number
+                        )));
+                    }
+                    [size, ..] if sizes.iter().all(|&s| s == size) => size,
+                    _ => {
+                        return Err(error(format!(
+                            "track {} has sectors of different sizes",
+                            t.number
+                        )));
+                    }
+                };
+                let mode = match (t.kind, size) {
+                    (TrackType::Audio, 2352) => TrackMode::Audio,
+                    (TrackType::Mode1 | TrackType::Dvd, 2352) => TrackMode::Mode1_2352,
+                    (TrackType::Mode1 | TrackType::Dvd | TrackType::Mode2Form1, 2048) => {
+                        TrackMode::Mode1_2048
+                    }
+                    (TrackType::Mode2 | TrackType::Mode2Form1 | TrackType::Mode2Form2, 2336) => {
+                        TrackMode::Mode2_2336
+                    }
+                    (TrackType::Mode2 | TrackType::Mode2Form1 | TrackType::Mode2Form2, 2352) => {
+                        TrackMode::Mode2_2352
+                    }
+                    (kind, size) => {
+                        return Err(error(format!(
+                            "track {} is {:?} in sectors of {} bytes, which isn't read",
+                            t.number, kind, size
+                        )));
+                    }
+                };
+                image.tracks.push(Track {
+                    number: t.number,
+                    mode,
+                    session: session.number as u8,
+                    control: t.control,
+                    pregap_start: sector(first)?,
+                    start: sector(t.start + t.pregap as i64)?,
+                    end: sector(end)?,
+                    spans,
+                });
+            }
+        }
+        image.tracks.sort_by_key(|t| t.number);
+        if image.tracks.is_empty() {
+            return Err(error("it has no tracks".into()));
+        }
+        image.dpm = bwa_file(path)
+            .and_then(|p| hostfs::read(p).ok())
+            .and_then(|d| b6t::parse_bwa(&d))
+            .or(disc.dpm);
         Ok(image)
     }
 
@@ -191,23 +423,24 @@ impl CdImage {
             let start = next + t.pregap;
             let data_start = if t.pregap_stored { next } else { start };
             let data_end = data_start + t.frames;
-            tracks.push(Track {
-                number: t.number,
-                mode: t.mode,
-                pregap_start: next,
-                start,
-                end: data_end + t.postgap,
-                data_start,
-                data_end,
-                file: 0,
-                offset: frame * FRAME,
-            });
+            let data = Span::new(data_start, data_end, 0, frame * FRAME, FRAME);
+            tracks.push(Track::stored(t.number, t.mode, next, start, data_end + t.postgap, data));
             frame += t.frames.next_multiple_of(4) as u64;
             next = data_end + t.postgap;
         }
         let len = disc.byte_len();
         let backing = Backing { source: Source::Chd(RefCell::new(disc)), data_offset: 0, len, swap: true };
-        Ok(CdImage { path: path.to_path_buf(), files: vec![backing], tracks })
+        Ok(CdImage::new(path, vec![backing], tracks))
+    }
+
+    fn new(path: &Path, files: Vec<Backing>, tracks: Vec<Track>) -> Self {
+        CdImage {
+            path: path.to_path_buf(),
+            files,
+            tracks,
+            mcn: None,
+            dpm: None,
+        }
     }
 
     /// An image held in memory, as `open` makes of a file with those bytes
@@ -263,18 +496,9 @@ impl CdImage {
                 )
             })?;
         let sectors = (backing.len / mode.sector_size()) as u32;
-        let track = Track {
-            number: 1,
-            mode,
-            pregap_start: 0,
-            start: 0,
-            end: sectors,
-            data_start: 0,
-            data_end: sectors,
-            file: 0,
-            offset: 0,
-        };
-        Ok(CdImage { path: path.to_path_buf(), files: vec![backing], tracks: vec![track] })
+        let data = Span::new(0, sectors, 0, 0, mode.sector_size());
+        let track = Track::stored(1, mode, 0, 0, sectors, data);
+        Ok(CdImage::new(path, vec![backing], vec![track]))
     }
 
     /// The file the image was opened from.
@@ -296,21 +520,41 @@ impl CdImage {
         self.tracks.iter().find(|t| (t.pregap_start..t.end).contains(&lba))
     }
 
-    /// The first data track, where the file system is.
+    /// The first data track of the last session that has one, where the
+    /// file system is: a disc written in several sessions has its latest
+    /// volume descriptors there, and a CD Extra its audio tracks before.
     pub fn data_track(&self) -> Option<&Track> {
-        self.tracks.iter().find(|t| !t.is_audio())
+        let session = self
+            .tracks
+            .iter()
+            .filter(|t| !t.is_audio())
+            .map(|t| t.session)
+            .max()?;
+        self.tracks
+            .iter()
+            .find(|t| !t.is_audio() && t.session == session)
+    }
+
+    /// The disc's media catalog number, 13 digits, if the image keeps it.
+    pub fn mcn(&self) -> Option<&str> {
+        self.mcn.as_deref()
+    }
+
+    /// The data position measurement of the disc, if the image keeps it.
+    /// Nothing times reads by it yet.
+    pub fn dpm(&self) -> Option<&super::b6t::Dpm> {
+        self.dpm.as_ref()
     }
 
     /// `len` bytes of sector `lba` from `skip` on, as the file has them;
     /// zeros for the parts of a gap that aren't in the file.
     fn read_stored(&self, track: &Track, lba: u32, skip: u64, buf: &mut [u8]) -> io::Result<()> {
-        if !(track.data_start..track.data_end).contains(&lba) {
+        let Some(span) = track.span(lba) else {
             buf.fill(0);
             return Ok(());
-        }
-        let file = &self.files[track.file];
-        let at = track.offset + (lba - track.data_start) as u64 * file.stride(track.mode) + skip;
-        file.read_at(at, buf)
+        };
+        let at = span.offset + (lba - span.start) as u64 * span.stride + skip;
+        self.files[span.file].read_at(at, buf)
     }
 
     /// The 2048 bytes of user data of data sector `lba`. Fails with
@@ -359,7 +603,7 @@ impl CdImage {
         match track.mode {
             TrackMode::Audio => {
                 self.read_stored(track, lba, 0, buf)?;
-                if self.files[track.file].swap {
+                if track.span(lba).is_some_and(|s| self.files[s.file].swap) {
                     swap_samples(buf);
                 }
                 Ok(())
@@ -398,6 +642,110 @@ impl CdImage {
         );
         Ok(())
     }
+
+    /// The 96 bytes of P-W subchannel of sector `lba`, each channel's 12
+    /// after the one before: as the image keeps them, and where it keeps
+    /// none (or only Q), P and Q as the disc's layout makes them, with
+    /// R-W zero.
+    pub fn read_subchannel(&self, lba: u32, out: &mut [u8; 96]) -> io::Result<()> {
+        let track = self.track_at(lba).ok_or_else(out_of_range)?;
+        out.fill(0);
+        // P marks the pause before a track.
+        if lba < track.start {
+            out[..12].fill(0xFF);
+        }
+        out[12..24].copy_from_slice(&made_q(track, lba));
+        let Some(span) = track.span(lba) else {
+            return Ok(());
+        };
+        let at = span.offset + (lba - span.start) as u64 * span.stride + span.stride
+            - span.subcode.bytes();
+        match span.subcode {
+            Subcode::None => Ok(()),
+            Subcode::Linear => self.files[span.file].read_at(at, out),
+            Subcode::Q => self.files[span.file].read_at(at, &mut out[12..24]),
+        }
+    }
+
+    /// Where the Q subchannel of sector `lba` says it is: the image's Q
+    /// where it keeps a position there with a good CRC; else, as a drive
+    /// that reads a Q it can't use reports the last good one, where the
+    /// disc's layout has the sector.
+    pub fn q_position(&self, lba: u32) -> Option<QPosition> {
+        let track = self.track_at(lba)?;
+        let mut sub = [0u8; 96];
+        let stored = self
+            .read_subchannel(lba, &mut sub)
+            .ok()
+            .and_then(|()| decode_q(&sub[12..24]));
+        stored.or_else(|| decode_q(&made_q(track, lba)))
+    }
+}
+
+/// `v` in binary-coded decimal.
+fn bcd(v: u32) -> u8 {
+    (((v / 10 % 10) << 4) | (v % 10)) as u8
+}
+
+/// CCITT's CRC-16 of `data`: polynomial x^16 + x^12 + x^5 + 1, from 0.
+fn crc16(data: &[u8]) -> u16 {
+    data.iter().fold(0u16, |crc, &b| {
+        (0..8).fold(crc ^ (b as u16) << 8, |c, _| {
+            if c & 0x8000 != 0 {
+                c << 1 ^ 0x1021
+            } else {
+                c << 1
+            }
+        })
+    })
+}
+
+/// The CRC the Q subchannel keeps of its first 10 bytes, inverted.
+fn q_crc(q: &[u8]) -> u16 {
+    !crc16(&q[..10])
+}
+
+/// The Q subchannel of sector `lba` of `track` as a pressed disc has it:
+/// the position (ADR 1) and its CRC. In a pregap the relative time counts
+/// down to 0 at its last sector.
+fn made_q(track: &Track, lba: u32) -> [u8; 12] {
+    let (index, relative) = match lba < track.start {
+        true => (0, track.start - lba - 1),
+        false => (1, lba - track.start),
+    };
+    let msf = |frames: u32| {
+        [
+            bcd(frames / 75 / 60),
+            bcd(frames / 75 % 60),
+            bcd(frames % 75),
+        ]
+    };
+    let mut q = [0u8; 12];
+    q[0] = track.control << 4 | 1;
+    q[1] = bcd(track.number as u32);
+    q[2] = index;
+    q[3..6].copy_from_slice(&msf(relative));
+    q[7..10].copy_from_slice(&msf(lba + super::LBA_OFFSET));
+    let crc = q_crc(&q);
+    q[10..12].copy_from_slice(&crc.to_be_bytes());
+    q
+}
+
+/// The position a Q subchannel of ADR 1 gives, if its CRC is good.
+fn decode_q(q: &[u8]) -> Option<QPosition> {
+    if q[0] & 0x0F != 1 || u16::from_be_bytes([q[10], q[11]]) != q_crc(q) {
+        return None;
+    }
+    let from_bcd =
+        |b: u8| (b >> 4 < 10 && b & 0x0F < 10).then_some((b >> 4) as u32 * 10 + (b & 0x0F) as u32);
+    let frames = |m: &[u8]| Some((from_bcd(m[0])? * 60 + from_bcd(m[1])?) * 75 + from_bcd(m[2])?);
+    Some(QPosition {
+        control: q[0] >> 4,
+        track: from_bcd(q[1])? as u8,
+        index: from_bcd(q[2])? as u8,
+        relative: frames(&q[3..6])?,
+        absolute: frames(&q[7..10])?.checked_sub(super::LBA_OFFSET)?,
+    })
 }
 
 impl Backing {
@@ -432,15 +780,6 @@ impl Backing {
     #[cfg(not(feature = "cdaudio"))]
     fn decoded(path: &Path) -> Result<Self, String> {
         Err(format!("{}: this rust-dos can't play compressed audio files", path.display()))
-    }
-
-    /// Bytes from one sector of a track in `mode` to the next.
-    fn stride(&self, mode: TrackMode) -> u64 {
-        match self.source {
-            #[cfg(feature = "chd")]
-            Source::Chd(_) => super::chd::FRAME,
-            _ => mode.sector_size(),
-        }
     }
 
     /// Fill `buf` from byte `at` of the sector data; past the end of the
@@ -487,6 +826,60 @@ fn is_chd(path: &Path) -> bool {
     }
     let mut magic = [0u8; 8];
     File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok()) && &magic == CHD_MAGIC
+}
+
+/// Whether `path` is a BlindWrite descriptor: named .b5t or .b6t, or
+/// starting as one does.
+fn is_b6t(path: &Path) -> bool {
+    if path
+        .extension()
+        .is_some_and(|e| ["b5t", "b6t"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+    {
+        return true;
+    }
+    let mut magic = [0u8; 16];
+    File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
+        && &magic == super::b6t::SIGNATURE
+}
+
+/// The `.bwa` file of DPM data beside the BlindWrite descriptor at `path`,
+/// if there is one.
+fn bwa_file(path: &Path) -> Option<PathBuf> {
+    let name = path.with_extension("bwa");
+    find_in(dir_of(path), &name.file_name()?.to_string_lossy(), |p| {
+        hostfs::is_file(p)
+    })
+}
+
+/// The files the BlindWrite descriptor at `path` keeps its sectors in,
+/// each found or why not, and its `.bwa` file if there is one; none if it
+/// can't be read.
+fn b6t_files(path: &Path) -> Vec<Result<PathBuf, String>> {
+    let Some(disc) = hostfs::read(path)
+        .ok()
+        .and_then(|d| super::b6t::parse(&d).ok())
+    else {
+        return Vec::new();
+    };
+    // Blocks name a file once each, in whatever case and with whatever
+    // folder BlindWrite wrote; the file found is what counts once.
+    let mut files: Vec<Result<PathBuf, String>> = Vec::new();
+    for block in &disc.blocks {
+        let file = find_file(dir_of(path), &block.file);
+        if !files.contains(&file) {
+            files.push(file);
+        }
+    }
+    files.extend(bwa_file(path).map(Ok));
+    files
+}
+
+/// The folder of the file at `path`. A bare file name's parent is "",
+/// which can't be listed to match names in any case.
+fn dir_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 fn is_chd_memory(data: &MemoryImage) -> bool {
@@ -598,25 +991,36 @@ fn sheet(path: &Path) -> Option<Result<CueSheet, String>> {
     (named || sheet.is_ok()).then_some(sheet)
 }
 
-/// The files the CUE sheet at `path` keeps its tracks in, those that are
-/// there; none if `path` isn't a CUE sheet `CdImage::open` reads as one.
-pub fn cue_files(path: &Path) -> Vec<PathBuf> {
-    let Some(Ok(sheet)) = sheet(path) else { return Vec::new() };
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    sheet.files.iter().filter_map(|f| find_file(dir, &f.name).ok()).collect()
+/// The files a CUE sheet or BlindWrite descriptor at `path` keeps its
+/// tracks in, those that are there; none if `path` isn't one that
+/// `CdImage::open` reads as one.
+pub fn track_files(path: &Path) -> Vec<PathBuf> {
+    if is_b6t(path) {
+        return b6t_files(path).into_iter().filter_map(Result::ok).collect();
+    }
+    let Some(Ok(sheet)) = sheet(path) else {
+        return Vec::new();
+    };
+    sheet
+        .files
+        .iter()
+        .filter_map(|f| find_file(dir_of(path), &f.name).ok())
+        .collect()
 }
 
-/// Whether `path` is a CUE sheet `CdImage::open` reads as one that names a
-/// track file that isn't there.
-pub fn cue_lacks_a_file(path: &Path) -> bool {
+/// Whether `path` is a CUE sheet or BlindWrite descriptor `CdImage::open`
+/// reads as one that names a track file that isn't there.
+pub fn lacks_a_track_file(path: &Path) -> bool {
+    if is_b6t(path) {
+        return b6t_files(path).iter().any(Result::is_err);
+    }
     let Some(Ok(sheet)) = sheet(path) else {
         return false;
     };
-    let dir = path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    sheet.files.iter().any(|f| find_file(dir, &f.name).is_err())
+    sheet
+        .files
+        .iter()
+        .any(|f| find_file(dir_of(path), &f.name).is_err())
 }
 
 /// A file named in a CUE sheet: below the sheet's folder by its relative
@@ -713,6 +1117,79 @@ mod tests {
         image.read_data(3, &mut data).unwrap();
         assert!(data.iter().all(|&b| b == 1));
         assert!(image.read_data(25, &mut data).is_err(), "audio isn't data");
+    }
+
+    #[test]
+    fn a_first_track_whose_pregap_is_in_the_file() {
+        // BlindWrite's images keep track 1's pregap; the disc's sector 0
+        // is a data track 1's INDEX 01, three sectors into the file.
+        let dir = scratch("first_pregap");
+        let mut data = sectors(3, 9);
+        data.extend(sectors(5, 1));
+        data.extend(sectors(4, 2));
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  INDEX 00 00:00:00\n  \
+             INDEX 01 00:00:03\n TRACK 02 MODE1/2352\n  INDEX 01 00:00:08\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let tracks = image.tracks();
+        assert_eq!((tracks[0].pregap_start, tracks[0].start, tracks[0].end), (0, 0, 5));
+        assert_eq!((tracks[1].start, tracks[1].end), (5, 9));
+        let mut data = [0u8; DATA_SECTOR];
+        image.read_data(0, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 1), "sector 0 is INDEX 01's");
+        image.read_data(5, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 2));
+
+        // A PREGAP on track 1 is the same two seconds, before sector 0.
+        fs::write(
+            dir.join("gap.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  PREGAP 00:02:00\n  \
+             INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("gap.cue")).unwrap();
+        assert_eq!((image.tracks()[0].start, image.tracks()[0].end), (0, 12));
+
+        // A longer one leaves the rest of it on the disc, silent.
+        fs::write(
+            dir.join("long_gap.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 MODE1/2352\n  PREGAP 00:04:00\n  \
+             INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("long_gap.cue")).unwrap();
+        let t = &image.tracks()[0];
+        assert_eq!((t.pregap_start, t.start, t.end), (0, 150, 162));
+        image.read_data(150, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 9));
+    }
+
+    #[test]
+    fn an_audio_first_track_with_audio_in_its_pregap() {
+        // Hidden audio before track 1's INDEX 01 is on the disc from
+        // sector 0, as sheets of single-file rips have it.
+        let dir = scratch("first_audio_pregap");
+        let mut data = sectors(3, 9);
+        data.extend(sectors(5, 1));
+        data.extend(sectors(4, 2));
+        fs::write(dir.join("disc.bin"), data).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            "FILE \"disc.bin\" BINARY\n TRACK 01 AUDIO\n  INDEX 00 00:00:00\n  \
+             INDEX 01 00:00:03\n TRACK 02 MODE1/2352\n  INDEX 01 00:00:08\n",
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("disc.cue")).unwrap();
+        let tracks = image.tracks();
+        assert_eq!((tracks[0].pregap_start, tracks[0].start, tracks[0].end), (0, 3, 8));
+        assert_eq!((tracks[1].start, tracks[1].end), (8, 12));
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(0, &mut raw).unwrap();
+        assert!(raw.iter().all(|&b| b == 9), "the hidden audio");
     }
 
     #[test]
@@ -823,6 +1300,239 @@ mod tests {
         );
         // Past the disc is another error.
         assert!(!is_unreadable(&image.read_data(10, &mut data).unwrap_err()));
+    }
+
+    /// Raw sector `lba` of a BlindWrite data file: a Mode 1 sector whose
+    /// data is all `lba`, and 96 bytes of subchannel holding `q` as Q.
+    fn with_subchannel(lba: u32, q: [u8; 12]) -> Vec<u8> {
+        let mut sector = crate::cdrom::mode1_sector(lba, lba as u8).to_vec();
+        let mut sub = [0u8; 96];
+        sub[12..24].copy_from_slice(&q);
+        sector.extend(sub);
+        sector
+    }
+
+    #[test]
+    fn blindwrite_images() {
+        use crate::cdrom::b6t::{self, Dpm};
+        let dir = scratch("blindwrite");
+        // Track 1, Mode 1 with subchannel, its pregap stored from sector
+        // -150 on: sector 5's Q names track 9 (as a protection might
+        // master it), sector 6's has a bad CRC, the others none.
+        let mut q5 = [0x41, 0x09, 0x01, 0, 0, 0, 0, 0x00, 0x02, 0x05, 0, 0];
+        let crc = q_crc(&q5);
+        q5[10..12].copy_from_slice(&crc.to_be_bytes());
+        let mut q6 = q5;
+        q6[11] ^= 1;
+        let mut data = vec![0u8; 150 * 2448];
+        for lba in 0..20 {
+            let q = match lba {
+                5 => q5,
+                6 => q6,
+                _ => [0; 12],
+            };
+            data.extend(with_subchannel(lba, q));
+        }
+        // Sector 7 as copy protections master it: its EDC fails.
+        data[(157 * 2448 + 100)..(157 * 2448 + 104)].fill(0xEE);
+        fs::write(dir.join("Game.b6i"), data).unwrap();
+        // Track 2, audio with a pregap of 10, split into the next file.
+        fs::write(dir.join("Game.b00"), sectors(30, 0x22)).unwrap();
+        // Track 3 in session 2, Mode 2 Form 1 as 2048-byte sectors.
+        fs::write(dir.join("Game.b01"), vec![0x33u8; 10 * 2048]).unwrap();
+        let blocks = [
+            ("GAME.B6I", 0, -150, 170, 2448),
+            ("C:\\Images\\GAME.B00", 0, 20, 30, 2352),
+            ("GAME.B01", 0, 60, 10, 2048),
+        ];
+        let dpm = Dpm {
+            start: 0,
+            resolution: 10,
+            angles: vec![10, 20],
+        };
+        let descriptor = b6t::build(
+            Some("1234567890123"),
+            &blocks,
+            &[
+                &[(2, 4, 1, -150, 150, 170), (1, 2, 2, 20, 10, 30)],
+                &[(4, 4, 3, 60, 0, 10)],
+            ],
+            Some(&dpm),
+        );
+        fs::write(dir.join("Game.b6t"), descriptor).unwrap();
+        let image = CdImage::open(&dir.join("Game.b6t")).unwrap();
+
+        let tracks = image.tracks();
+        let layout: Vec<_> = tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.number,
+                    t.mode,
+                    t.session,
+                    t.control,
+                    t.pregap_start,
+                    t.start,
+                    t.end,
+                )
+            })
+            .collect();
+        assert_eq!(
+            layout,
+            [
+                (1, TrackMode::Mode1_2352, 1, 4, 0, 0, 20),
+                (2, TrackMode::Audio, 1, 2, 20, 30, 50),
+                (3, TrackMode::Mode1_2048, 2, 4, 60, 60, 70),
+            ]
+        );
+        assert_eq!(image.leadout(), 70);
+        assert_eq!(image.data_track().unwrap().number, 3, "the last session's");
+        assert_eq!(image.mcn(), Some("1234567890123"));
+        assert_eq!(image.dpm(), Some(&dpm));
+
+        let mut sector = [0u8; DATA_SECTOR];
+        image.read_data(4, &mut sector).unwrap();
+        assert!(sector.iter().all(|&b| b == 4));
+        assert!(is_unreadable(&image.read_data(7, &mut sector).unwrap_err()));
+        image.read_data(65, &mut sector).unwrap();
+        assert!(sector.iter().all(|&b| b == 0x33));
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(40, &mut raw).unwrap();
+        assert!(raw.iter().all(|&b| b == 0x22));
+        assert!(
+            image.read_raw(55, &mut raw).is_err(),
+            "between the sessions"
+        );
+
+        // The image's subchannel, and for the sectors without, P and Q
+        // as the layout has them.
+        let mut sub = [0u8; 96];
+        image.read_subchannel(5, &mut sub).unwrap();
+        assert_eq!(sub[12..24], q5);
+        let at = |lba| image.q_position(lba).unwrap();
+        assert_eq!(
+            at(5),
+            QPosition {
+                control: 4,
+                track: 9,
+                index: 1,
+                relative: 0,
+                absolute: 5
+            }
+        );
+        assert_eq!(
+            at(6),
+            QPosition {
+                control: 4,
+                track: 1,
+                index: 1,
+                relative: 6,
+                absolute: 6
+            },
+            "a bad CRC"
+        );
+        assert_eq!(
+            at(25),
+            QPosition {
+                control: 2,
+                track: 2,
+                index: 0,
+                relative: 4,
+                absolute: 25
+            }
+        );
+        assert_eq!(at(33).relative, 3);
+        image.read_subchannel(25, &mut sub).unwrap();
+        assert!(sub[..12].iter().all(|&b| b == 0xFF), "P in the pregap");
+        assert_eq!(sub[12..15], [0x21, 0x02, 0x00]);
+        image.read_subchannel(33, &mut sub).unwrap();
+        assert!(sub[..12].iter().all(|&b| b == 0));
+
+        // The files a state and an automount folder count as the disc's.
+        let files = track_files(&dir.join("Game.b6t"));
+        assert_eq!(files.len(), 3);
+        assert!(!lacks_a_track_file(&dir.join("Game.b6t")));
+
+        // A .bwa file beside the descriptor has the whole disc's DPM data.
+        let mut bwa = vec![1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0];
+        for word in [0u32, 5, 3, 1, 2, 3] {
+            bwa.extend(word.to_le_bytes());
+        }
+        fs::write(dir.join("GAME.BWA"), bwa).unwrap();
+        let image = CdImage::open(&dir.join("Game.b6t")).unwrap();
+        assert_eq!(image.dpm().unwrap().angles, [1, 2, 3]);
+        assert_eq!(track_files(&dir.join("Game.b6t")).len(), 4);
+
+        fs::remove_file(dir.join("Game.b01")).unwrap();
+        assert!(lacks_a_track_file(&dir.join("Game.b6t")));
+        assert!(CdImage::open(&dir.join("Game.b6t")).is_err());
+    }
+
+    #[test]
+    fn blindwrite_descriptors_of_any_name() {
+        // Found by their signature, as CHD files are.
+        let dir = scratch("blindwrite_named");
+        fs::write(dir.join("disc.b5i"), sectors(4, 0)).unwrap();
+        let descriptor = crate::cdrom::b6t::build(
+            None,
+            &[("disc.b5i", 0, 0, 4, 2352)],
+            &[&[(1, 0, 1, 0, 0, 4)]],
+            None,
+        );
+        fs::write(dir.join("disc.dat"), descriptor).unwrap();
+        let image = CdImage::open(&dir.join("disc.dat")).unwrap();
+        assert!(image.tracks()[0].is_audio());
+        assert_eq!(image.data_track(), None);
+        // A data track can't be in sectors of a size its mode hasn't.
+        let descriptor = crate::cdrom::b6t::build(
+            None,
+            &[("disc.b5i", 0, 0, 4, 2352)],
+            &[&[(4, 4, 1, 0, 0, 4)]],
+            None,
+        );
+        fs::write(dir.join("disc.b5t"), descriptor).unwrap();
+        assert!(
+            CdImage::open(&dir.join("disc.b5t")).is_ok(),
+            "Mode 2 Form 1 as whole sectors"
+        );
+        let descriptor = crate::cdrom::b6t::build(
+            None,
+            &[("disc.b5i", 0, 0, 4, 2048)],
+            &[&[(1, 0, 1, 0, 0, 4)]],
+            None,
+        );
+        fs::write(dir.join("disc.b5t"), descriptor).unwrap();
+        assert!(
+            CdImage::open(&dir.join("disc.b5t")).is_err(),
+            "audio in 2048-byte sectors"
+        );
+    }
+
+    #[test]
+    fn q_subchannel_crc() {
+        // CRC-16/XMODEM's check value.
+        assert_eq!(crc16(b"123456789"), 0x31C3);
+        // A pressed disc's Q at 00:02:00, track 1 index 1, decodes back.
+        let track = Track::stored(
+            1,
+            TrackMode::Mode1_2048,
+            0,
+            0,
+            10,
+            Span::new(0, 10, 0, 0, 2048),
+        );
+        let q = made_q(&track, 0);
+        assert_eq!(q[..10], [0x41, 0x01, 0x01, 0, 0, 0, 0, 0x00, 0x02, 0x00]);
+        assert_eq!(
+            decode_q(&q),
+            Some(QPosition {
+                control: 4,
+                track: 1,
+                index: 1,
+                relative: 0,
+                absolute: 0
+            })
+        );
     }
 
     #[test]

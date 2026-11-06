@@ -273,7 +273,7 @@ impl DiskController {
                         && crate::archive::split(p).is_none()
                 };
                 let gone = std::iter::once(&spec.path).chain(&more_images).any(missing)
-                    || crate::cdrom::image::cue_lacks_a_file(&spec.path);
+                    || crate::cdrom::image::lacks_a_track_file(&spec.path);
                 let hint = if gone {
                     " (moved or deleted since the state was saved?)"
                 } else {

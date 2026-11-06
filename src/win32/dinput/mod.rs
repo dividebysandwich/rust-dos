@@ -30,7 +30,7 @@
 //! EnumDevicesBySemantics, ConfigureDevices) and device images aren't there
 //! (#378).
 //!
-//! (Phase 3 of docs/native-windows.md.)
+//! ("Sound and input" in docs/builtin-windows-architecture.md.)
 
 mod device;
 mod enumerate;

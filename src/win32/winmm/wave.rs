@@ -903,6 +903,12 @@ const SND_PURGE: u32 = 0x40;
 const SND_ALIAS: u32 = 0x1_0000;
 const SND_FILENAME: u32 = 0x2_0000;
 const SND_RESOURCE: u32 = 0x4_0004;
+const SND_ALIAS_ID: u32 = 0x11_0000;
+
+/// The system sounds SND_ALIAS_ID names by number (sndAlias('S', c)):
+/// asterisk, question, hand, exit, start, welcome, exclamation and
+/// default. Like `SYSTEM_SOUNDS`, they play nothing.
+const SYSTEM_SOUND_IDS: &[u8] = b"*?HESW!D";
 
 /// The system's sounds by their names, which Windows without a sound
 /// scheme has no files for: they play nothing.
@@ -1001,15 +1007,29 @@ fn stop_play_sound(cpu: &mut Cpu) {
     reschedule(cpu);
 }
 
-/// The data of a WAV file in memory at `at`: its RIFF chunk.
+/// The data of a WAV file in memory at `at`: its RIFF chunk. None when
+/// it can't be read, which Windows 98's PlaySound checks with
+/// IsBadReadPtr before it reads, so a bad pointer fails the call.
 fn wav_in_memory(cpu: &mut Cpu, at: u32) -> Option<Vec<u8>> {
-    if at == 0 || !cpu.bus.guest_probe(at, 8, false) {
+    let readable =
+        |cpu: &Cpu, len| crate::win32::kernel32::virtual_memory::allows(cpu, at, len, false);
+    if at == 0 || !readable(cpu, 0x14) {
         return None;
     }
     let size = cpu.bus.guest_read_32(at + 4).checked_add(8)?;
-    if size > 0x0400_0000 || !cpu.bus.guest_probe(at, size as usize, false) {
+    if size > 0x0400_0000 || !readable(cpu, size) {
         return None;
     }
+    let mut bytes = vec![0; size as usize];
+    cpu.bus.guest_read_bytes(at, &mut bytes);
+    Some(bytes)
+}
+
+/// The data of the WAVE resource `name` (a string or a number) of the
+/// module `module` (0: the program).
+fn wav_resource(cpu: &mut Cpu, module: u32, name: u32) -> Option<Vec<u8>> {
+    let (at, size) =
+        crate::win32::kernel32::named_resource_data(cpu, module, "WAVE", name)?.ok()?;
     let mut bytes = vec![0; size as usize];
     cpu.bus.guest_read_bytes(at, &mut bytes);
     Some(bytes)
@@ -1024,25 +1044,41 @@ fn wav_file(cpu: &mut Cpu, name: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// PlaySoundA(name, module, flags): a WAV file, one in memory, or a
-/// system sound by its name; from now, in a loop, or until it is done
-/// before PlaySound returns. A sound PlaySound plays stops the one it
-/// played before; a NULL name or SND_PURGE only stops it.
+/// The flags Windows 98's PlaySoundA takes; one of the others fails it.
+const SND_VALID: u32 = !0xDFE8_DF20;
+
+/// PlaySoundA(name, module, flags): a WAV file, one in memory, one in a
+/// module's WAVE resources or a system sound by its name or number; from
+/// now, in a loop, or until it is done before PlaySound returns. A sound
+/// PlaySound plays stops the one it played before; a NULL name or
+/// SND_PURGE only stops it.
 pub fn play_sound_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [name, _module, flags] = args[..] else {
+    let [name, module, flags] = args[..] else {
         return Some(0);
     };
-    play(cpu, name, flags)
+    play(cpu, name, module, flags)
 }
 
-/// sndPlaySoundA(name, flags): PlaySound with a name that is a system
-/// sound's or a file's.
+/// sndPlaySoundA(name, flags): as Windows 98's, PlaySoundA with the
+/// program's module (GetModuleHandleA(NULL)) and the same flags, so that
+/// a number with SND_RESOURCE names one of the program's WAVE resources.
 pub fn snd_play_sound_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    play(cpu, args[0], args[1] & 0xFF)
+    play(cpu, args[0], 0, args[1])
 }
 
-fn play(cpu: &mut Cpu, name: u32, flags: u32) -> Option<u32> {
+fn play(cpu: &mut Cpu, name: u32, module: u32, flags: u32) -> Option<u32> {
     const TRUE: u32 = 1;
+    // A loop has to play asynchronously, and a name that isn't a number
+    // has to be a string that can be read (IsBadStringPtrA, 90h bytes).
+    if flags & !SND_VALID != 0 || flags & (SND_LOOP | SND_ASYNC) == SND_LOOP {
+        return Some(0);
+    }
+    if flags & SND_MEMORY == 0
+        && name >> 16 != 0
+        && crate::win32::kernel32::bad_string_ptr(cpu, name, 0x90)
+    {
+        return Some(0);
+    }
     if name == 0 || flags & SND_PURGE != 0 {
         stop_play_sound(cpu);
         return Some(TRUE);
@@ -1050,10 +1086,19 @@ fn play(cpu: &mut Cpu, name: u32, flags: u32) -> Option<u32> {
     if flags & SND_NOSTOP != 0 && wave(cpu).sounds.iter().any(|s| s.play_sound) {
         return Some(0);
     }
-    let data = if flags & SND_MEMORY != 0 && flags & SND_RESOURCE != SND_RESOURCE {
+    let data = if flags & SND_RESOURCE == SND_RESOURCE {
+        wav_resource(cpu, module, name)
+    } else if flags & SND_MEMORY != 0 {
         wav_in_memory(cpu, name)
-    } else if flags & SND_RESOURCE == SND_RESOURCE {
-        // Sounds in a module's resources aren't looked for.
+    } else if name >> 16 == 0 {
+        // A number names a system sound with SND_ALIAS_ID, which is why
+        // the string check above skips numbers. Without it the number
+        // names no sound, and it isn't a string to read.
+        let [low, high, ..] = name.to_le_bytes();
+        if flags & SND_ALIAS_ID == SND_ALIAS_ID && low == b'S' && SYSTEM_SOUND_IDS.contains(&high) {
+            stop_play_sound(cpu);
+            return Some(TRUE);
+        }
         None
     } else {
         let Some(text) = crate::win32::user32::string_at(cpu, name) else {
@@ -1080,7 +1125,8 @@ fn play(cpu: &mut Cpu, name: u32, flags: u32) -> Option<u32> {
     let looping = flags & SND_LOOP != 0;
     let frames = samples.len() as u64 / format.block() as u64;
     start_sound(cpu, format, samples, looping, true);
-    if flags & SND_ASYNC != 0 || looping {
+    // A loop is asynchronous: SND_LOOP without SND_ASYNC failed above.
+    if flags & SND_ASYNC != 0 {
         return Some(TRUE);
     }
     // Synchronous: the thread waits until the sound is done.
