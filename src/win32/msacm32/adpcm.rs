@@ -52,10 +52,10 @@ impl Format {
 
     /// The samples of each channel a block of `bytes` bytes holds: its
     /// header's, and two codes a byte after it, which IMA ADPCM takes in
-    /// groups of 4 bytes a channel. 0 if it has no more than headers.
+    /// groups of 4 bytes a channel. 0 if it is shorter than its headers.
     pub fn samples_in(&self, bytes: usize) -> u32 {
         let ch = self.channels as usize;
-        let Some(data) = bytes.checked_sub(self.header()).filter(|&d| d > 0) else {
+        let Some(data) = bytes.checked_sub(self.header()) else {
             return 0;
         };
         (if self.tag == MS_ADPCM {
@@ -90,18 +90,57 @@ impl Format {
         (first..=self.samples_in_block()).contains(&(self.samples_per_block as u32))
     }
 
+    /// Decode a buffer of blocks as Windows 98's codecs do, the samples
+    /// of all channels interleaved. MS ADPCM decodes a partial block at
+    /// the end as far as its bytes go, from its headers on; IMA ADPCM's
+    /// codec passes only whole blocks to its decoder, so its partial
+    /// block decodes to nothing. An MS ADPCM block whose predictor isn't
+    /// one of the format's makes the codec write nothing at all.
+    pub fn decode_buffer(&self, source: &[u8]) -> Vec<i16> {
+        let mut out = Vec::new();
+        for block in source.chunks(self.block_align as usize) {
+            let frames = if block.len() == self.block_align as usize {
+                self.samples_per_block as u32
+            } else if self.tag == MS_ADPCM {
+                self.samples_in(block.len())
+                    .min(self.samples_per_block as u32)
+            } else {
+                0
+            };
+            if frames == 0 {
+                break;
+            }
+            if !self.decode(block, frames as usize, &mut out) {
+                return Vec::new();
+            }
+        }
+        out
+    }
+
     /// Decode `frames` frames of a block into `out`, the samples of all
     /// channels interleaved. `frames` is at most what the block's bytes
-    /// hold (`samples_in`), and at least 1.
-    pub fn decode(&self, block: &[u8], frames: usize, out: &mut Vec<i16>) {
+    /// hold (`samples_in`), and at least 1. False, with nothing decoded,
+    /// if an MS ADPCM channel's predictor is past the format's
+    /// coefficients.
+    pub fn decode(&self, block: &[u8], frames: usize, out: &mut Vec<i16>) -> bool {
         match self.tag {
             MS_ADPCM => self.decode_ms(block, frames, out),
-            _ => self.decode_ima(block, frames, out),
+            _ => {
+                self.decode_ima(block, frames, out);
+                true
+            }
         }
     }
 
-    fn decode_ms(&self, block: &[u8], frames: usize, out: &mut Vec<i16>) {
+    fn decode_ms(&self, block: &[u8], frames: usize, out: &mut Vec<i16>) -> bool {
         let ch = self.channels as usize;
+        // msadp32.acm stops at such a block and says it wrote nothing.
+        if block[..ch]
+            .iter()
+            .any(|&p| p as usize >= self.coefficients.len())
+        {
+            return false;
+        }
         let word = |at: usize| i16::from_le_bytes([block[at], block[at + 1]]) as i32;
         // The header's fields, each for every channel: the predictor,
         // the step, then the last two samples, the later one first.
@@ -110,8 +149,7 @@ impl Format {
         let mut s1 = [0i32; 2];
         let mut s2 = [0i32; 2];
         for c in 0..ch {
-            let index = (block[c] as usize).min(self.coefficients.len() - 1);
-            let (c1, c2) = self.coefficients[index];
+            let (c1, c2) = self.coefficients[block[c] as usize];
             coef[c] = (c1 as i32, c2 as i32);
             delta[c] = word(ch + 2 * c);
             s1[c] = word(3 * ch + 2 * c);
@@ -119,7 +157,7 @@ impl Format {
         }
         out.extend((0..ch).map(|c| s2[c] as i16));
         if frames < 2 {
-            return;
+            return true;
         }
         out.extend((0..ch).map(|c| s1[c] as i16));
         // The codes, the high nibble first; in stereo the channels take
@@ -130,6 +168,9 @@ impl Format {
             let code = if n % 2 == 0 { byte >> 4 } else { byte & 15 } as i32;
             let c = n % ch;
             let signed = if code >= 8 { code - 16 } else { code };
+            // An arithmetic shift, rounding down, as msadp32.acm's `sar`
+            // does; ffmpeg divides, rounding toward 0, and its samples
+            // differ by 1 where the sum is negative.
             let predicted = (s1[c] * coef[c].0 + s2[c] * coef[c].1) >> 8;
             let sample = (predicted + signed * delta[c]).clamp(-32768, 32767);
             s2[c] = s1[c];
@@ -137,6 +178,7 @@ impl Format {
             delta[c] = ((MS_ADAPTATION[code as usize] * delta[c]) >> 8).max(16);
             out.push(sample as i16);
         }
+        true
     }
 
     fn decode_ima(&self, block: &[u8], frames: usize, out: &mut Vec<i16>) {
@@ -260,6 +302,47 @@ mod tests {
         // Left: 20 + 16 = 36, then 36 + 0. Right: 2*-10 - -5 = -15, plus
         // 32 = 17; then 2*17 - -10 = 44.
         assert_eq!(out, [10, -5, 20, -10, 36, 17, 36, 44]);
+    }
+
+    #[test]
+    fn ms_adpcm_rounds_its_prediction_down_as_msadp32_does() {
+        // Predictor 3 (0.75, 0.25), step 16, samples 0 then -3, and two
+        // zero codes. msadp32.acm shifts the sum right by 8 with `sar`:
+        // -576 >> 8 = -3 (a division would give -2, as ffmpeg's does),
+        // then (-3 * 192 + -3 * 64) >> 8 = -768 >> 8 = -3.
+        let block = [3, 16, 0, 0xFD, 0xFF, 0, 0, 0x00];
+        let mut f = ms(1, block.len() as u16);
+        f.samples_per_block = 4;
+        let mut out = Vec::new();
+        assert!(f.decode(&block, 4, &mut out));
+        assert_eq!(out, [0, -3, -3, -3]);
+    }
+
+    #[test]
+    fn a_buffer_decodes_its_partial_block_as_each_codec_does() {
+        // MS ADPCM mono, 9-byte blocks of 4 samples: a whole block, then
+        // a partial one of its 7-byte header alone, which holds 2.
+        let mut f = ms(1, 9);
+        f.samples_per_block = 4;
+        let mut source = vec![0, 16, 0, 2, 0, 1, 0, 0, 0];
+        source.extend([0, 16, 0, 4, 0, 3, 0]);
+        assert_eq!(f.decode_buffer(&source), [1, 2, 2, 2, 3, 4]);
+        // A predictor past the coefficients in the second block:
+        // msadp32.acm writes nothing, not even the first block.
+        source.truncate(9);
+        source.extend([7, 16, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(f.decode_buffer(&source), [] as [i16; 0]);
+        // IMA ADPCM's codec decodes only the whole blocks.
+        let ima = Format {
+            tag: IMA_ADPCM,
+            channels: 1,
+            block_align: 8,
+            samples_per_block: 9,
+            coefficients: Vec::new(),
+        };
+        let mut source = vec![0xE8, 0x03, 0, 0, 0, 0, 0, 0];
+        source.extend([0xE8, 0x03, 0, 0, 0, 0]);
+        assert_eq!(ima.decode_buffer(&source).len(), 9);
     }
 
     #[test]

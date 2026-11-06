@@ -134,13 +134,31 @@ impl Stream {
         self.source.channels as u32 * self.bits as u32 / 8
     }
 
-    /// The frames that `bytes` bytes of the source decode to: those of
-    /// the whole blocks, and those a partial block at the end holds.
-    fn frames(&self, bytes: u32) -> u32 {
-        let f = &self.source;
-        let blocks = bytes / f.block_align as u32;
-        let part = f.samples_in((bytes % f.block_align as u32) as usize);
-        blocks * f.samples_per_block as u32 + part.min(f.samples_per_block as u32)
+    /// The bytes of the PCM of a whole block.
+    fn block_pcm(&self) -> u32 {
+        self.source.samples_per_block as u32 * self.frame()
+    }
+
+    /// The PCM bytes that `adpcm` bytes of the source decode to, as
+    /// msadp32.acm and imaadp32.acm size it: a partial block at the end
+    /// counts as a whole one. None if `adpcm` holds no whole block, or
+    /// if the whole blocks' PCM would pass 4 GB.
+    fn pcm_size(&self, adpcm: u32) -> Option<u32> {
+        let align = self.source.block_align as u32;
+        let blocks = adpcm / align;
+        if blocks == 0 || u32::MAX / self.block_pcm() < blocks {
+            return None;
+        }
+        // The codecs check the whole blocks only, so one more can wrap.
+        let partial = u32::from(!adpcm.is_multiple_of(align));
+        Some((blocks + partial).wrapping_mul(self.block_pcm()))
+    }
+
+    /// The ADPCM bytes of the whole blocks whose PCM fits in `pcm`
+    /// bytes, None if not even one does.
+    fn adpcm_size(&self, pcm: u32) -> Option<u32> {
+        let blocks = pcm / self.block_pcm();
+        (blocks != 0).then(|| blocks.wrapping_mul(self.source.block_align as u32))
     }
 }
 
@@ -484,9 +502,10 @@ fn stream_message(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// acmStreamSize(stream, size, out, flags): the PCM bytes that `size`
-/// bytes of ADPCM decode to, a partial block at the end counted, or the
-/// ADPCM of the whole blocks whose PCM fits in `size`. ACMERR_NOTPOSSIBLE
-/// if that is nothing.
+/// bytes of ADPCM decode to, a partial block at the end counted whole,
+/// or the ADPCM of the whole blocks whose PCM fits in `size`.
+/// ACMERR_NOTPOSSIBLE if there is no whole block, or if the PCM would
+/// pass 4 GB.
 fn stream_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, size, out, flags] = args else {
         unreachable!()
@@ -498,16 +517,13 @@ fn stream_size(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(MMSYSERR_INVALHANDLE);
     };
     let bytes = match flags {
-        SIZE_SOURCE => s.frames(size) * s.frame(),
-        SIZE_DESTINATION => {
-            let block = s.source.samples_per_block as u32 * s.frame();
-            size / block * s.source.block_align as u32
-        }
+        SIZE_SOURCE => s.pcm_size(size),
+        SIZE_DESTINATION => s.adpcm_size(size),
         _ => return Some(MMSYSERR_INVALFLAG),
     };
-    if bytes == 0 {
+    let Some(bytes) = bytes else {
         return Some(ACMERR_NOTPOSSIBLE);
-    }
+    };
     cpu.bus.guest_write_32(out, bytes);
     Some(MMSYSERR_NOERROR)
 }
@@ -581,9 +597,12 @@ fn unprepare_header(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// acmStreamConvert(stream, header, flags): decode the header's source
-/// into its destination, block by block while the PCM fits, and say how
-/// much of each was used. A partial block at the end of the source is
-/// decoded too unless the flags ask for whole blocks.
+/// into its destination, and say how much of each was used. As the
+/// codecs do, it fails with ACMERR_NOTPOSSIBLE unless the destination
+/// holds the PCM of all the source's blocks, a partial one counted
+/// whole, as acmStreamSize gives it. All of the source is used, or its
+/// whole blocks if the flags ask for those; a partial block at the end
+/// decodes as `adpcm::Format::decode_buffer` says.
 fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[handle, header, flags] = args else {
         unreachable!()
@@ -601,28 +620,19 @@ fn stream_convert(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((at, length, destination, room)) = buffers(cpu, header) else {
         return Some(MMSYSERR_INVALPARAM);
     };
-    let mut source = vec![0; length as usize];
-    cpu.bus.guest_read_bytes(at, &mut source);
-    let room = room / s.frame();
-    let f = &s.source;
-    let mut pcm = Vec::new();
-    let mut used = 0;
-    let mut frames = 0;
-    for block in source.chunks(f.block_align as usize) {
-        let n = if block.len() == f.block_align as usize {
-            f.samples_per_block as u32
-        } else if flags & CONVERT_BLOCKALIGN != 0 {
-            0
-        } else {
-            f.samples_in(block.len()).min(f.samples_per_block as u32)
-        };
-        if n == 0 || frames + n > room {
-            break;
-        }
-        f.decode(block, n as usize, &mut pcm);
-        frames += n;
-        used += block.len() as u32;
+    // The codecs size the destination's source first and refuse a
+    // source longer than that, so the PCM always fits.
+    if s.adpcm_size(room).unwrap_or(0) < length {
+        return Some(ACMERR_NOTPOSSIBLE);
     }
+    let used = if flags & CONVERT_BLOCKALIGN != 0 {
+        length - length % s.source.block_align as u32
+    } else {
+        length
+    };
+    let mut source = vec![0; used as usize];
+    cpu.bus.guest_read_bytes(at, &mut source);
+    let pcm = s.source.decode_buffer(&source);
     let bytes: Vec<u8> = if s.bits == 8 {
         pcm.iter().map(|&v| ((v >> 8) as u8) ^ 0x80).collect()
     } else {

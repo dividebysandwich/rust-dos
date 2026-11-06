@@ -638,8 +638,12 @@ const ACM_HEADER: u32 = 0x60;
 const ACM_SOUND: u32 = 0x100;
 const ACM_OUT: u32 = 0x200;
 const ACM_DECODED: u32 = 0x400;
-/// The destination's room, more than the sound decodes to.
-const ACM_ROOM: u32 = 0x180;
+/// The destination's room: the PCM of two whole blocks, which
+/// acmStreamSize gives for the sound's block and a half and the codec
+/// asks for, though the half block decodes to less.
+const ACM_ROOM: u32 = 0x1A0;
+/// Room for one block's PCM, too little for the sound.
+const ACM_SMALL_ROOM: u32 = 0x180;
 
 /// A program decodes `MS_ADPCM_SOUND` through MSACM32 as Oni decodes
 /// its sounds: it asks acmFormatSuggest for a PCM format, opens a stream
@@ -689,9 +693,10 @@ fn acm_decodes(core: CoreMode) {
         }
         a.call(l.import(acm(1)))?;
         check(a, fail, 2)?;
-        // The PCM of the sound, and the ADPCM whose PCM fits the room:
+        // The PCM of the sound, its half block counted whole as
+        // msadp32.acm counts it, and the ADPCM whose PCM fits the room:
         // the whole blocks only.
-        for (step, size, flags, wanted) in [(3, 94, 0, 280), (4, ACM_ROOM as i32, 1, 64)] {
+        for (step, size, flags, wanted) in [(3, 94, 0, 416), (4, ACM_ROOM as i32, 1, 128)] {
             a.push(flags)?;
             a.push(at(ACM_SIZE))?;
             a.push(size)?;
@@ -705,13 +710,23 @@ fn acm_decodes(core: CoreMode) {
         a.mov(field(0x0C), at(ACM_SOUND))?;
         a.mov(field(0x10), MS_ADPCM_SOUND.len() as i32)?;
         a.mov(field(0x1C), at(ACM_OUT))?;
-        a.mov(field(0x20), ACM_ROOM as i32)?;
-        for (step, function) in [(5, 3), (6, 4), (7, 5)] {
+        // Prepare; convert into one block's room, which the codec
+        // refuses with ACMERR_NOTPOSSIBLE; convert into the room the
+        // size asks for, and unprepare.
+        for (step, function, room, wanted) in [
+            (5, 3, ACM_ROOM, 0),
+            (6, 4, ACM_SMALL_ROOM, 512),
+            (7, 4, ACM_ROOM, 0),
+            (8, 5, ACM_ROOM, 0),
+        ] {
+            a.mov(field(0x20), room as i32)?;
             a.push(0)?;
             a.push(at(ACM_HEADER))?;
             a.push(stream)?;
             a.call(l.import(acm(function)))?;
-            check(a, fail, step)?;
+            a.mov(ebx, step)?;
+            a.cmp(eax, wanted)?;
+            a.jne(fail)?;
         }
         // All of the sound used, and the PCM written.
         a.mov(ebx, 40)?;
@@ -731,7 +746,7 @@ fn acm_decodes(core: CoreMode) {
         a.repe().cmpsb()?;
         a.jne(fail)?;
         // Closed, the stream's handle is no more.
-        for (step, wanted) in [(8, 0), (9, 5)] {
+        for (step, wanted) in [(9, 0), (10, 5)] {
             a.push(0)?;
             a.push(stream)?;
             a.call(l.import(acm(6)))?;
