@@ -247,18 +247,35 @@ impl Voodoo {
             return None;
         }
         let bytes = self.gpu_job_bytes(job)?;
-        if self.banshee.is_some() {
-            // A depth clear goes with the colour buffer it clears for: one
-            // drawn in software has its depth in the memory too, rather than
-            // read back before its first triangle every frame.
-            let key = self.mirror_layout()?;
-            let gpu = self.gpu.borrow();
-            let hot = |&(a, b): &(u32, u32)| gpu.tracker.hot_in(a, b);
-            if bytes.iter().flatten().any(hot) || self.gpu_colour_hot(&key) {
-                return None;
-            }
+        if self.banshee.is_some() && self.mirror_layout().is_none() || self.gpu_bytes_hot(&bytes) {
+            return None;
         }
         Some(bytes)
+    }
+
+    /// Whether `job` is drawn in software because it draws into memory
+    /// the program read back lately (`gpu_takes`).
+    pub(crate) fn gpu_job_hot(&self, job: &Job) -> bool {
+        self.gpu.borrow().tracker.any_hot()
+            && self.gpu_job_bytes(job).is_some_and(|bytes| self.gpu_bytes_hot(&bytes))
+    }
+
+    /// Whether `bytes`, what a job draws into (`gpu_job_bytes`), or on a
+    /// Banshee the colour buffer the 3D engine draws into hold hot rows. A
+    /// depth clear goes with the colour buffer it clears for: one drawn in
+    /// software has its depth in the memory too, rather than read back
+    /// before its first triangle every frame.
+    fn gpu_bytes_hot(&self, bytes: &JobBytes) -> bool {
+        {
+            let gpu = self.gpu.borrow();
+            if !gpu.tracker.any_hot() {
+                return false;
+            }
+            if bytes.iter().flatten().any(|&(a, b)| gpu.tracker.hot_in(a, b)) {
+                return true;
+            }
+        }
+        self.banshee.is_some() && self.mirror_layout().is_some_and(|key| self.gpu_colour_hot(&key))
     }
 
     /// Whether `job` is a Banshee's fastfill of pixels that all lie within

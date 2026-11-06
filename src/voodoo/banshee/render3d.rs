@@ -1307,6 +1307,52 @@ pub(crate) mod tests {
         assert_eq!(gpu_only(&v), 6);
     }
 
+    /// A card as `gpu_card` gives, with buffers 256 rows high, whose
+    /// renderer alone drew a frame into A; then the program read A's first
+    /// pixel, which brought back the band of rows it is in and made A hot.
+    fn gpu_card_hot_after_a_read(log: &Rc<RefCell<Vec<String>>>) -> Voodoo {
+        let mut v = gpu_card(Some(log));
+        v.banshee.as_mut().unwrap().crtc[0x12] = 255;
+        reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 256);
+        reg3d(&mut v, COL_BUFFER_ADDR, A);
+        reg3d(&mut v, FBZ_MODE, 1 << 10);
+        reg3d(&mut v, FASTFILL_CMD, 0);
+        reg3d(&mut v, FBZ_MODE, 1 | 1 << 4 | 3 << 5 | 1 << 9 | 1 << 10);
+        float(&mut v, FSTART_Z, 1000.0);
+        rectangle(&mut v, (0.0, 0.0, 640.0, 256.0), (200.0, 30.0, 60.0));
+        assert_eq!(gpu_only(&v), 3);
+        let mut pixel = [0u8; 2];
+        v.banshee_memory_read(A, &mut pixel);
+        assert_eq!(reads(log), [format!("read {:?} 0..32", Some(A / 2))]);
+        log.borrow_mut().clear();
+        v
+    }
+
+    /// The word of the first pixel of row `y` of a buffer at byte `base`,
+    /// tiled 10 tiles wide as `gpu_card` makes them.
+    fn tiled_row(base: u32, y: usize) -> usize {
+        base as usize / 2 + y / 32 * 10 * 2048 + y % 32 * 64
+    }
+
+    #[test]
+    fn gpu_reads_hand_jobs_into_a_hot_buffer_to_the_workers_at_once() {
+        // The program reads a hot buffer back every frame, so its jobs
+        // aren't held back for a read that may never come: held, a read
+        // in the middle of the frame would wait for all of them to be
+        // drawn then, instead of the few the workers haven't done yet.
+        let log = Rc::default();
+        let mut v = gpu_card_hot_after_a_read(&log);
+        assert_eq!(v.describe(Now::default())["held_jobs"], 0);
+        rectangle(&mut v, (0.0, 100.0, 64.0, 110.0), (0.0, 255.0, 0.0));
+        rectangle(&mut v, (0.0, 200.0, 64.0, 210.0), (0.0, 255.0, 0.0));
+        assert_eq!(gpu_only(&v), 3, "drawn in software");
+        assert_eq!(v.describe(Now::default())["held_jobs"], 0);
+        assert_eq!(v.describe(Now::default())["catch_ups"], 0);
+        let memory = v.frame_buffer();
+        assert_ne!(memory.get(tiled_row(A, 105)), 0x1234);
+        assert_ne!(memory.get(tiled_row(A, 205)), 0x1234);
+    }
+
     #[test]
     fn gpu_reads_texture_from_a_3d_buffer_with_the_renderers_pixels() {
         // A triangle in B textured from A, which the renderer alone drew:

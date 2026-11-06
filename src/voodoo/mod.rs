@@ -1140,6 +1140,16 @@ impl Voodoo {
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
         }
+        // A job into memory the program reads back every frame (hot) goes
+        // to the workers at once, after those held: the read comes before
+        // the frame ends, and would otherwise wait on this thread for the
+        // whole frame's jobs to be drawn then, instead of the last few.
+        if access.is_some() && self.gpu_job_hot(&job) {
+            self.submit_words();
+            self.release_backlog();
+            self.hand_over([job]);
+            return;
+        }
         self.submit_outside(job, access);
     }
 
