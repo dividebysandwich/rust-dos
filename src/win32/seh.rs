@@ -118,13 +118,22 @@ pub fn debug_registers(cpu: &Cpu) -> DebugRegs {
 
 /// The bits of DR7 a context sets: the breakpoints' enable, R/W and LEN
 /// bits. GD and the reserved bits aren't a program's to set.
-pub const DR7_SETTABLE: u32 = 0xFFFF_00FF;
+const DR7_SETTABLE: u32 = 0xFFFF_00FF;
+
+/// The debug registers `regs` a context sets, with only the bits of DR7
+/// a program may set.
+pub fn settable(regs: &DebugRegs) -> DebugRegs {
+    let mut regs = *regs;
+    regs[5] &= DR7_SETTABLE;
+    regs
+}
 
 /// Load the debug registers `regs`.
 pub fn set_debug_registers(cpu: &mut Cpu, regs: &DebugRegs) {
+    let regs = settable(regs);
     cpu.dr[..4].copy_from_slice(&regs[..4]);
     cpu.dr[6] = regs[4];
-    cpu.dr[7] = regs[5] & DR7_SETTABLE;
+    cpu.dr[7] = regs[5];
 }
 
 /// Write the context `ctx`, the FPU's state `fpu` and the debug registers
@@ -424,10 +433,12 @@ fn raise_record(cpu: &mut Cpu, ctx: Context, fpu: &[u8; 108], head: [u32; 4], pa
     }
     // The handlers run with TF clear, whatever the context says: else
     // each of their instructions would raise another exception. DF is
-    // clear too, as Windows 98 has it, and the context keeps both.
+    // clear too, as Windows 98 has it, and the context keeps both. RF is
+    // clear, as entering an interrupt handler leaves it, so a breakpoint
+    // on the handler's first instruction isn't skipped.
     let mut here = ctx;
     here.gpr[ESP] = esp;
-    here.eflags &= !(CpuFlags::TF | CpuFlags::DF).bits();
+    here.eflags &= !(CpuFlags::TF | CpuFlags::DF | CpuFlags::RF).bits();
     super::system::enter_user(cpu, &here);
     let context_flags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
     let dr = debug_registers(cpu);

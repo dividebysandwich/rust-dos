@@ -281,6 +281,12 @@ fn load_registers(cpu: &mut Cpu, ctx: &Context) {
     // IOPL 0: CLI, STI and the like are the system's.
     let flags = ctx.eflags & !(CpuFlags::VM | CpuFlags::NT | CpuFlags::RF | CpuFlags::IOPL).bits();
     cpu.load_eflags(flags | CpuFlags::IF.bits());
+    // RF, which a handler sets in a context to go on past the instruction
+    // breakpoint it was called for, skips that breakpoint once. With no
+    // instruction breakpoint enabled it has nothing to skip, and is left
+    // clear so that it can't linger into later contexts.
+    let rf = ctx.eflags & CpuFlags::RF.bits() != 0;
+    cpu.set_cpu_flag(CpuFlags::RF, rf && cpu.code_breakpoints());
 }
 
 /// Put the processor in real mode at `cs:ip`, on the stack `ss:sp`, with

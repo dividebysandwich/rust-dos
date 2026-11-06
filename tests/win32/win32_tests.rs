@@ -8823,6 +8823,7 @@ const CTX_EIP: i32 = 0xB8;
 const CTX_EFLAGS: i32 = 0xC0;
 const TF: u32 = 0x100;
 const DF: u32 = 0x400;
+const RF: u32 = 0x1_0000;
 const SINGLE_STEP: u32 = 0x8000_0004;
 const BREAKPOINT: u32 = 0x8000_0003;
 const ACCESS_VIOLATION: u32 = 0xC000_0005;
@@ -9120,10 +9121,17 @@ fn a_handler_sets_tf_in_a_breakpoints_context() {
 /// `xor eax, eax`, INT3 and `INCS`, with a handler that answers the INT3
 /// with an instruction breakpoint in its context: Dr0 `offset` bytes past
 /// the INT3, L0 in Dr7, and with `tf` TF too. The handler of the next
-/// exception clears Dr7 and adds to EAX Dr6's B0-B3 times 100h and its BS
-/// bit (4000h) divided by 4. EAX at the end, the exceptions and the
-/// address of the code.
-fn dr7_breakpoint(test: &str, core: CoreMode, offset: i32, tf: bool) -> (u32, Vec<Hit>, u32) {
+/// exception adds to EAX Dr6's B0-B3 times 100h and its BS bit (4000h)
+/// divided by 4, and clears Dr7, or with `rf` leaves it and sets RF in
+/// the context. EAX at the end, the exceptions and the address of the
+/// code.
+fn dr7_breakpoint(
+    test: &str,
+    core: CoreMode,
+    offset: i32,
+    tf: bool,
+    rf: bool,
+) -> (u32, Vec<Hit>, u32) {
     const CTX_DR0: i32 = 0x04;
     const CTX_DR6: i32 = 0x14;
     const CTX_DR7: i32 = 0x18;
@@ -9151,7 +9159,11 @@ fn dr7_breakpoint(test: &str, core: CoreMode, offset: i32, tf: bool) -> (u32, Ve
         a.shr(ecx, 2)?;
         a.add(eax, ecx)?;
         a.add(dword_ptr(edx + CTX_EAX), eax)?;
-        a.mov(dword_ptr(edx + CTX_DR7), 0)?;
+        if rf {
+            a.or(dword_ptr(edx + CTX_EFLAGS), RF as i32)?;
+        } else {
+            a.mov(dword_ptr(edx + CTX_DR7), 0)?;
+        }
         a.set_label(&mut done)?;
         a.nop()
     });
@@ -9166,7 +9178,7 @@ fn dr7_breakpoint(test: &str, core: CoreMode, offset: i32, tf: bool) -> (u32, Ve
 #[test]
 fn a_breakpoint_a_handler_sets_in_dr7_raises_a_single_step_exception() {
     for core in [CoreMode::Normal, CoreMode::Dynamic] {
-        let (value, hits, at) = dr7_breakpoint("dr7_breakpoint", core, 2, false);
+        let (value, hits, at) = dr7_breakpoint("dr7_breakpoint", core, 2, false, false);
         assert_eq!(value, 0x104, "{:X?}", hits);
         assert_eq!(hits.len(), 2, "{:X?}", hits);
         assert_eq!(hits[0].code, BREAKPOINT);
@@ -9183,11 +9195,24 @@ fn a_breakpoint_a_handler_sets_in_dr7_raises_a_single_step_exception() {
 /// comes, and SecuROM's tracer counts each instruction once.
 #[test]
 fn a_breakpoint_after_a_traced_instruction_comes_with_its_trap() {
-    let (value, hits, at) = dr7_breakpoint("dr7_with_trap", CoreMode::Normal, 1, true);
+    let (value, hits, at) = dr7_breakpoint("dr7_with_trap", CoreMode::Normal, 1, true, false);
     assert_eq!(value, 0x1104, "{:X?}", hits);
     assert_eq!(hits.len(), 2, "{:X?}", hits);
     assert_eq!(hits[1].code, SINGLE_STEP, "{:X?}", hits[1]);
     assert_eq!(hits[1].eip, at + 4, "{:X?}", hits[1]);
+}
+
+/// A handler that goes on at the instruction breakpoint it was called
+/// for with RF set in the context, the breakpoint left in Dr7, runs that
+/// instruction: RF skips the breakpoint once, as when an IRET loads it.
+/// Debuggers go on past an instruction breakpoint this way.
+#[test]
+fn rf_in_a_context_goes_on_past_its_instruction_breakpoint() {
+    let (value, hits, at) = dr7_breakpoint("dr7_rf", CoreMode::Normal, 2, false, true);
+    assert_eq!(value, 0x104, "{:X?}", hits);
+    assert_eq!(hits.len(), 2, "{:X?}", hits);
+    assert_eq!(hits[1].code, SINGLE_STEP, "{:X?}", hits[1]);
+    assert_eq!(hits[1].eip, at + 5, "{:X?}", hits[1]);
 }
 
 /// RaiseException called with TF set. Its entry traps, and the exception

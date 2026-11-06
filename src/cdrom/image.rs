@@ -261,7 +261,7 @@ impl CdImage {
         }
         image.mcn = sheet.catalog;
         let names = sheet.files.iter().map(|f| f.name.as_str());
-        image.sub_file = sub_file_path(path, names).and_then(|p| SubFile::open(&p));
+        image.sub_file = sub_file(path, names).map(|(_, sub)| sub);
         Ok(image)
     }
 
@@ -380,7 +380,7 @@ impl CdImage {
 
     fn open_bare(path: &Path) -> Result<Self, String> {
         let mut image = Self::bare(path, Backing::open(path, FileFormat::Binary)?)?;
-        image.sub_file = sub_file_path(path, std::iter::empty()).and_then(|p| SubFile::open(&p));
+        image.sub_file = sub_file(path, std::iter::empty()).map(|(_, sub)| sub);
         Ok(image)
     }
 
@@ -641,14 +641,14 @@ impl CdImage {
             out[..12].fill(0xFF);
         }
         out[12..24].copy_from_slice(&made_q(track, lba));
-        if let Some(span) = track.span(lba).filter(|s| s.subcode != Subcode::None) {
+        if let Some(span) = track.span(lba) {
             let at = span.offset + (lba - span.start) as u64 * span.stride + span.stride
                 - span.subcode.bytes();
-            return match span.subcode {
-                Subcode::None => Ok(()),
-                Subcode::Linear => self.files[span.file].read_at(at, out),
-                Subcode::Q => self.files[span.file].read_at(at, &mut out[12..24]),
-            };
+            match span.subcode {
+                Subcode::None => {}
+                Subcode::Linear => return self.files[span.file].read_at(at, out),
+                Subcode::Q => return self.files[span.file].read_at(at, &mut out[12..24]),
+            }
         }
         match &self.sub_file {
             Some(sub) => sub.read(lba, out),
@@ -754,25 +754,54 @@ impl SubFile {
 }
 
 /// The subchannel file beside the image at `path` whose data files are
-/// named `files`: the first file there, in any case, with the name of the
-/// image or of one of its files and the extension `.sub` or `.subcode`.
-fn sub_file_path<'a>(path: &Path, files: impl Iterator<Item = &'a str>) -> Option<PathBuf> {
+/// named `files`, and where it is: of the files there, in any case, with
+/// the name of the image or of one of its files and the extension `.sub`
+/// or `.subcode`, in that order, the first that `SubFile::open` takes.
+fn sub_file<'a>(path: &Path, files: impl Iterator<Item = &'a str>) -> Option<(PathBuf, SubFile)> {
     let stem = |name: &str| {
         let file = name.rsplit(['\\', '/']).next()?;
         Some(Path::new(file).file_stem()?.to_string_lossy().into_owned())
     };
-    let stems: Vec<String> = path
+    let stems = path
         .file_name()
         .and_then(|n| stem(&n.to_string_lossy()))
         .into_iter()
-        .chain(files.filter_map(stem))
-        .collect();
-    stems.iter().find_map(|s| {
-        ["sub", "subcode"].iter().find_map(|ext| {
-            find_in(dir_of(path), &format!("{}.{}", s, ext), |p| {
-                hostfs::is_file(p)
-            })
-        })
+        .chain(files.filter_map(stem));
+    let mut names: Vec<String> = Vec::new();
+    for s in stems {
+        for ext in ["sub", "subcode"] {
+            let name = format!("{}.{}", s, ext);
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                names.push(name);
+            }
+        }
+    }
+    // A sheet of many files has many names to look for: the folder is
+    // listed once, for those that aren't there as they are spelt.
+    let dir = dir_of(path);
+    let mut listing: Option<Vec<PathBuf>> = None;
+    names.iter().find_map(|name| {
+        let exact = dir.join(name);
+        let found = if hostfs::is_file(&exact) {
+            exact
+        } else {
+            let listing = listing.get_or_insert_with(|| {
+                hostfs::read_dir(dir)
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| entry.path)
+                    .collect()
+            });
+            listing
+                .iter()
+                .find(|p| {
+                    p.file_name()
+                        .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
+                        && hostfs::is_file(p)
+                })?
+                .clone()
+        };
+        SubFile::open(&found).map(|sub| (found, sub))
     })
 }
 
@@ -1100,7 +1129,7 @@ pub fn track_files(path: &Path) -> Vec<PathBuf> {
         .files
         .iter()
         .filter_map(|f| find_file(dir_of(path), &f.name).ok())
-        .chain(sub_file_path(path, names))
+        .chain(sub_file(path, names).map(|(p, _)| p))
         .collect()
 }
 
@@ -1693,5 +1722,13 @@ mod tests {
         let image = CdImage::open(&dir.join("game.cue")).unwrap();
         image.read_subchannel(7, &mut sub).unwrap();
         assert_eq!(sub[12..24], made_q(&track, 7));
+
+        // A file left alone doesn't hide one named as a data file.
+        fs::write(dir.join("DISC.SUB"), &clone).unwrap();
+        let image = CdImage::open(&dir.join("game.cue")).unwrap();
+        image.read_subchannel(100, &mut sub).unwrap();
+        assert_eq!(sub, linear_sub(&track, 100, true));
+        let files = track_files(&dir.join("game.cue"));
+        assert!(files.iter().any(named), "{:?}", files);
     }
 }

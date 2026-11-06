@@ -401,7 +401,7 @@ pub(super) fn set_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let thread = thread_at(cpu, which);
     thread.ctx = ctx;
-    thread.dr = [dr[0], dr[1], dr[2], dr[3], dr[4], dr[5] & seh::DR7_SETTABLE];
+    thread.dr = seh::settable(&dr);
     if had_fpu || fpu != [0; 108] {
         thread.fpu = fpu.to_vec();
     }
