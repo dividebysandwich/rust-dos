@@ -3191,6 +3191,28 @@ fn a_program_loads_and_frees_dlls() {
     assert_eq!(text, "B detached\r\n");
 }
 
+/// INT 68h, WDEB386's interface, as Windows 98 has it without the
+/// debugger: the program goes on after it with its registers as they
+/// were. SafeDisc 1's loader asks it with AX=4300h for a debugger.
+#[test]
+fn int_68h_finds_no_debugger() {
+    let main = |a: &mut CodeAssembler, _: &Layout| {
+        a.xor(ebx, ebx)?;
+        a.mov(eax, 0x4300)?;
+        a.mov(ecx, 0x1234_5678)?;
+        a.int(0x68)?;
+        a.cmp(eax, 0x4300)?;
+        check(a, false, 0)?;
+        a.cmp(ecx, 0x1234_5678)?;
+        check(a, false, 1)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, &[], &[0; 4], &[("", &main)], &[]);
+    let (code, text) = run("int_68h", exe);
+    assert_eq!(code, 3, "the checks that failed: {:02b} {}", !code & 3, text);
+}
+
 /// C.DLL, whose entry point returns FALSE, and exports F.
 fn dll_c() -> Vec<u8> {
     let main = |a: &mut CodeAssembler, _: &Layout| {

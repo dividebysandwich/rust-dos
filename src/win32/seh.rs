@@ -303,6 +303,24 @@ fn fpu_exception(cpu: &Cpu) -> u32 {
     }
 }
 
+/// INT 68h is WDEB386's interface, which programs call to find the
+/// debugger: with it loaded, AH=43h answers F386h. Its gate is the
+/// system's, so a program's INT 68h is a #GP whose error code names the
+/// gate (vector 68h, bit 1 for the IDT). Windows 98's VMM takes that #GP
+/// and passes the interrupt on to the system VM, where nothing answers
+/// without the debugger, and the program goes on after the INT with its
+/// registers as they were. SafeDisc 1's loader (Omikron's RUNTIME.EXE)
+/// calls it with AX=4300h and takes AX still 4300h for "no debugger";
+/// its handlers don't take the fault.
+const DEBUGGER_INT_ERROR: u32 = 0x68 << 3 | 2;
+
+/// Whether the instruction at `eip` is INT 68h.
+fn is_debugger_int(cpu: &mut Cpu, eip: u32) -> bool {
+    super::kernel32::virtual_memory::allows(cpu, eip, 2, false)
+        && cpu.bus.guest_read_8(eip) == 0xCD
+        && cpu.bus.guest_read_8(eip.wrapping_add(1)) == 0x68
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
@@ -311,6 +329,11 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     }
     // A write (error code bit 1) to a page that is there (bit 0).
     if vector == 14 && error.is_some_and(|e| e & 3 == 3) && write_resource(cpu, cpu.cr2) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    if vector == 13 && error == Some(DEBUGGER_INT_ERROR) && is_debugger_int(cpu, ctx.eip) {
+        ctx.eip = ctx.eip.wrapping_add(2);
         super::system::enter_user(cpu, &ctx);
         return;
     }
