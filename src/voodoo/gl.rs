@@ -652,6 +652,11 @@ pub struct VoodooGl {
     /// depth texture they share if the card has an auxiliary buffer.
     targets: HashMap<u32, Target>,
     depth: Option<Depth>,
+    /// The colour buffer whose alpha channel holds what the card's
+    /// auxiliary buffer has while it keeps alpha planes: the one the last
+    /// draw that wrote the auxiliary buffer wrote alpha into. None while
+    /// the auxiliary buffer holds depth.
+    alpha_source: Option<u32>,
     /// Frame buffer writes waiting: a colour buffer's, or with None the
     /// auxiliary buffer's.
     staging: HashMap<Option<u32>, Staging>,
@@ -841,6 +846,7 @@ impl VoodooGl {
                 height: 0,
                 targets: HashMap::new(),
                 depth: None,
+                alpha_source: None,
                 staging: HashMap::new(),
                 staging_texture,
                 textures: HashMap::new(),
@@ -1031,7 +1037,10 @@ impl VoodooGl {
         out: &mut [u16],
     ) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
-        let target = match key {
+        // The auxiliary buffer's alpha planes are in a colour buffer's
+        // alpha channel (`alpha_source`), its depth in the depth buffer.
+        let alpha = key.is_none() && self.alpha_source.is_some();
+        let target = match key.or(self.alpha_source) {
             Some(offs) => self.targets.get(&offs),
             None => self.depth.and(self.targets.values().next()),
         };
@@ -1047,7 +1056,7 @@ impl VoodooGl {
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-            if key.is_some() {
+            if key.is_some() || alpha {
                 // Only the rows asked for: a game reading the buffer
                 // reads it a band at a time (`lfb_band`).
                 let band = (top as i32 * scale as i32, bottom as i32 * scale as i32);
@@ -1084,10 +1093,11 @@ impl VoodooGl {
                     gl.delete_texture(texture);
                 }
                 // The colours are 5-6-5 values widened by repeating their
-                // top bits, which the top bits give back.
+                // top bits, which the top bits give back. The alpha planes
+                // hold the alpha in a word of its own (`Row::finish`).
                 for (value, rgba) in out.iter_mut().zip(rgba.as_chunks::<4>().0) {
-                    let [r, g, b] = [rgba[0], rgba[1], rgba[2]].map(u16::from);
-                    *value = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
+                    let [r, g, b, a] = rgba.map(u16::from);
+                    *value = if alpha { a } else { (r >> 3) << 11 | (g >> 2) << 5 | b >> 3 };
                 }
             } else {
                 let band = ((top as usize * scale) as i32, (rows * scale) as i32);
@@ -1390,6 +1400,7 @@ impl VoodooGl {
     fn resync(&mut self, gl: &glow::Context, snapshot: &Snapshot) {
         self.drop_targets(gl);
         self.staging.clear();
+        self.alpha_source = None;
         let layout = &snapshot.layout;
         (self.width, self.height) = (layout.width.max(1), layout.height.max(1));
         let (w, h) = self.scaled();
@@ -1632,6 +1643,10 @@ impl VoodooGl {
         let has_alpha = s.aux && alpha_planes;
         let has_depth = s.aux && !alpha_planes && self.depth.is_some();
         let depth_write = has_depth && fbz & (1 << 10) != 0;
+        // What the card writes into the auxiliary buffer (`Row::finish`).
+        if s.aux && fbz & (1 << 10) != 0 {
+            self.alpha_source = has_alpha.then_some(s.dest);
+        }
         let constant_depth = has_depth && depth_test && fbz & (1 << 20) != 0;
         let rgb = fbz & (1 << 9) != 0;
         let (w, h) = size;
@@ -1859,8 +1874,12 @@ impl VoodooGl {
         unsafe {
             gl.disable(glow::BLEND);
             self.clip(gl, Some([l, r, t, b]));
-            let target = self.targets.get(&fill.dest).or_else(|| self.targets.values().next());
-            let Some(target) = target else { return };
+            let key = Some(fill.dest)
+                .filter(|dest| self.targets.contains_key(dest))
+                .or_else(|| self.targets.keys().next().copied());
+            let Some(target) = key.and_then(|key| self.targets.get(&key)) else {
+                return;
+            };
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
             if let Some(pattern) =
                 fill.pattern.as_deref().filter(|_| self.dither && fill.color.is_some())
@@ -1886,6 +1905,7 @@ impl VoodooGl {
                 gl.clear(glow::COLOR_BUFFER_BIT);
             }
             if let Some(aux) = fill.aux {
+                self.alpha_source = key.filter(|_| fill.alpha_planes);
                 if fill.alpha_planes {
                     gl.color_mask(false, false, false, true);
                     gl.clear_color(0.0, 0.0, 0.0, (aux & 0xFF) as f32 / 255.0);

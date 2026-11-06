@@ -219,10 +219,10 @@ impl Voodoo {
 
     /// Whether `job`, which the backlog would hold with `access`, is the
     /// renderer's alone: reads of the buffers get the renderer's pictures
-    /// of them, and the job draws nothing outside them, nor into alpha
-    /// planes, which the renderer keeps in its colour buffers. On a
-    /// Banshee or Voodoo3 the job draws into the recording's buffers, the
-    /// software picture isn't wanted (it would read them back every
+    /// of them, the job draws nothing outside them, and the renderer had
+    /// the alpha planes every triangle so far read (`gpu_alpha_planes`).
+    /// On a Banshee or Voodoo3 the job draws into the recording's buffers,
+    /// the software picture isn't wanted (it would read them back every
     /// frame), and the program didn't read back memory there lately (it
     /// is hot): a program that reads what the 3D draws every frame waits
     /// less for the software rasterizer than for the GPU.
@@ -230,11 +230,6 @@ impl Voodoo {
     /// The bytes the job draws into (`gpu_job_bytes`) if it is, for
     /// `gpu_left`.
     pub(crate) fn gpu_takes(&self, job: &Job, access: &Access) -> Option<JobBytes> {
-        if let Job::Triangle { st, .. } | Job::Fastfill { st, .. } = job
-            && st.fbz_mode & (1 << 18) != 0
-        {
-            self.gpu_alpha.set(true);
-        }
         // A job the backlog can't place in its tiles may still lie within
         // the recording's buffers, which is all the renderer needs.
         let takes = self.gpu_reads
@@ -335,6 +330,45 @@ impl Voodoo {
                 self.gpu_catch_up_in(Some((start, end)));
             }
             self.gpu.borrow_mut().tracker.drawn_in_memory(start, end);
+        }
+    }
+
+    /// Follow what `job` does to the alpha planes, before it is drawn
+    /// anywhere. The card keeps them in its one auxiliary buffer, the
+    /// renderer in the alpha of the colour buffer drawn into, one for each
+    /// colour buffer: its alpha is the card's for a triangle that blends
+    /// by them (`alpha_read`) where the alpha was last written with the
+    /// colour buffer the triangle draws into, as a program that blends a
+    /// second pass by the alpha its first pass wrote does (Lands of Lore
+    /// 2's alphaMode 7310h after 410h). A triangle that blends by the
+    /// alpha of another colour buffer, or the CPU's, would get other
+    /// values from the renderer, and so would a depth test against them,
+    /// which the renderer doesn't do: from then on the software rasterizer
+    /// draws every job into the memory (`gpu_alpha`). A read of the
+    /// auxiliary buffer gets the alpha of the colour buffer last written
+    /// with it (`VoodooGl`'s `alpha_source`), which is the card's.
+    pub(crate) fn gpu_alpha_planes(&self, job: &Job) {
+        let (st, triangle) = match job {
+            Job::Triangle { st, .. } => (st, true),
+            Job::Fastfill { st, .. } => (st, false),
+            _ => return,
+        };
+        if st.aux.is_none() {
+            return;
+        }
+        let planes = st.fbz_mode & (1 << 18) != 0;
+        let dest = st.dest as u32;
+        let software = match alpha_read(st) {
+            _ if !triangle => false,
+            AlphaRead::None => false,
+            AlphaRead::Blend => self.alpha_owner.get() != Some(dest),
+            AlphaRead::DepthTest => true,
+        };
+        if software {
+            self.gpu_alpha.set(true);
+        }
+        if st.fbz_mode & (1 << 10) != 0 {
+            self.alpha_owner.set(planes.then_some(dest));
         }
     }
 
@@ -1221,6 +1255,37 @@ impl Model {
     }
 }
 
+/// How a triangle drawn with `st` reads the alpha planes, which it has
+/// (fbzMode bit 18) in an auxiliary buffer (`Row::finish`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlphaRead {
+    None,
+    /// It blends with the destination's alpha: a colour factor of
+    /// ADST_ALPHA, AOMDST_ALPHA or ASATURATE, or the destination's alpha
+    /// added to the alpha it writes. The renderer blends with the alpha
+    /// of the colour buffer drawn into.
+    Blend,
+    /// Its depth test compares with the alpha there, which the renderer
+    /// doesn't do.
+    DepthTest,
+}
+
+fn alpha_read(st: &RasterState) -> AlphaRead {
+    let (fbz, am) = (st.fbz_mode, st.alpha_mode);
+    if fbz & (1 << 18) == 0 || st.aux.is_none() {
+        return AlphaRead::None;
+    }
+    let blend = am & (1 << 4) != 0;
+    let (src, dst, dst_alpha) = ((am >> 8) & 15, (am >> 12) & 15, (am >> 20) & 15);
+    if fbz & (1 << 4) != 0 {
+        AlphaRead::DepthTest
+    } else if blend && (matches!(src, 3 | 7 | 15) || matches!(dst, 3 | 7) || dst_alpha == 4) {
+        AlphaRead::Blend
+    } else {
+        AlphaRead::None
+    }
+}
+
 /// The rows of buffers `height` rows high a triangle or a fastfill can
 /// write, within `0..height`: all of them if they could wrap around.
 fn job_rows(job: &Job, height: u32) -> (u32, u32) {
@@ -1317,5 +1382,88 @@ impl GpuLink for TestRenderer {
             .borrow_mut()
             .push(format!("read {dest:?} {top}..{bottom}"));
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestRenderer;
+    use crate::voodoo::regs::*;
+    use crate::voodoo::{Board, Now, Voodoo};
+
+    fn write(v: &mut Voodoo, reg: usize, data: u32) {
+        v.write((reg as u32) << 2, data, u32::MAX, Now::default());
+    }
+
+    /// A Voodoo2 set up for 640x480 as Glide sets it (two colour buffers
+    /// and the auxiliary buffer), drawn by a renderer whose pictures the
+    /// buffers' reads get.
+    fn card() -> Voodoo {
+        let mut v = Voodoo::with_workers(Board::Voodoo2, 2);
+        v.reg[FBI_INIT1] = 10 << 4;
+        v.reg[FBI_INIT2] = 150 << 11;
+        v.reg[FBI_INIT5] &= !(3 << 9);
+        v.reg[FBI_INIT6] &= !(1 << 30);
+        v.recompute_video_memory();
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        v.set_gpu_link(Some(Box::new(TestRenderer(std::rc::Rc::default()))));
+        v.set_gpu_reads(true);
+        v
+    }
+
+    /// A triangle with the alpha planes on, writing colours and alpha,
+    /// blended by `alpha_mode`.
+    fn triangle(v: &mut Voodoo, alpha_mode: u32) {
+        write(v, ALPHA_MODE, alpha_mode);
+        write(v, FBZ_MODE, 1 << 9 | 1 << 10 | 1 << 18);
+        for (i, (x, y)) in [(0, 0), (32, 0), (0, 32)].into_iter().enumerate() {
+            write(v, VERTEX_AX + 2 * i, x << 4);
+            write(v, VERTEX_AX + 2 * i + 1, y << 4);
+        }
+        write(v, TRIANGLE_CMD, 0);
+    }
+
+    fn gpu_alpha(v: &Voodoo) -> bool {
+        v.describe(Now::default())["gpu_alpha"].as_bool().unwrap()
+    }
+
+    #[test]
+    fn a_pass_blended_by_the_alpha_the_pass_before_wrote_stays_on_the_gpu() {
+        // Lands of Lore 2 writes the alpha planes with alphaMode 410h and
+        // blends the next pass into the same buffer by them (7310h): the
+        // renderer keeps them in that buffer's alpha, as the card has them.
+        let mut v = card();
+        for _ in 0..2 {
+            triangle(&mut v, 0x0410);
+            triangle(&mut v, 0x7310);
+            write(&mut v, SWAPBUFFER_CMD, 0);
+        }
+        assert!(!gpu_alpha(&v));
+        let status = v.describe(Now::default());
+        assert!(status["gpu_only_jobs"].as_u64().unwrap() >= 4, "{status}");
+    }
+
+    #[test]
+    fn a_pass_blended_by_another_buffers_alpha_goes_to_software() {
+        // The card's one auxiliary buffer has the alpha written with the
+        // other colour buffer, which the renderer kept in that buffer's
+        // alpha: the software rasterizer draws from then on.
+        let mut v = card();
+        triangle(&mut v, 0x0410);
+        write(&mut v, SWAPBUFFER_CMD, 0);
+        triangle(&mut v, 0x7310);
+        assert!(gpu_alpha(&v));
+    }
+
+    #[test]
+    fn a_depth_test_with_the_alpha_planes_goes_to_software() {
+        // With the alpha planes on, the depth test compares with the alpha
+        // there, which the renderer doesn't test against.
+        let mut v = card();
+        triangle(&mut v, 0x0410);
+        write(&mut v, FBZ_MODE, 1 << 4 | 7 << 5 | 1 << 9 | 1 << 18);
+        write(&mut v, TRIANGLE_CMD, 0);
+        assert!(gpu_alpha(&v));
     }
 }

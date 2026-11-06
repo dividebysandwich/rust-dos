@@ -1430,15 +1430,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn gpu_reads_leave_alpha_planes_to_the_software_rasterizer() {
+    fn gpu_reads_leave_alpha_planes_another_buffer_wrote_to_software() {
+        // The renderer keeps the alpha planes in the alpha of the colour
+        // buffer drawn into: writing them stays with it, and so does
+        // blending by them into that buffer. Blending into another buffer
+        // by the alpha written with A reads alpha the renderer doesn't
+        // have there, and the software rasterizer draws from then on.
         let log = Rc::default();
         let mut v = gpu_card(Some(&log));
         reg3d(&mut v, COL_BUFFER_ADDR, A);
-        reg3d(&mut v, FBZ_MODE, 1 << 9 | 1 << 18);
+        reg3d(&mut v, FBZ_MODE, 1 << 9 | 1 << 10 | 1 << 18);
         rectangle(&mut v, (0.0, 0.0, 64.0, 32.0), (255.0, 0.0, 0.0));
-        assert_eq!(gpu_only(&v), 0);
-        assert_eq!(v.frame_buffer().get(A as usize / 2), 0xF800);
-        assert!(reads(&log).is_empty());
+        reg3d(&mut v, ALPHA_MODE, 1 << 4 | 3 << 8 | 7 << 12);
+        reg3d(&mut v, FBZ_MODE, 1 << 9 | 1 << 18);
+        rectangle(&mut v, (0.0, 0.0, 64.0, 32.0), (0.0, 255.0, 0.0));
+        assert_eq!(gpu_only(&v), 4);
+        reg3d(&mut v, COL_BUFFER_ADDR, B);
+        rectangle(&mut v, (0.0, 0.0, 64.0, 32.0), (0.0, 0.0, 255.0));
+        assert_eq!(gpu_only(&v), 4);
+        assert!(v.describe(Now::default())["gpu_alpha"].as_bool().unwrap());
     }
 
     #[test]

@@ -2648,10 +2648,14 @@ of the same scene saved on two GPUs differ slightly in the card's
 memory, and in what the game did with pixels it read back. Such a state
 loads on any machine. A game that needs the card's exact pixels, or
 states that match byte for byte, can have `voodoo_readback=exact`.
-Programs that use alpha planes and deterministic runs always get the
-exact pixels, as do the pixel counters: drawing left to OpenGL isn't
-counted, and once a game reads the counters everything after is drawn in
-software and counted.
+Deterministic runs always get the exact pixels, as do the pixel
+counters: drawing left to OpenGL isn't counted, and once a game reads the
+counters everything after is drawn in software and counted. OpenGL keeps
+the alpha planes in the alpha of the colour buffer drawn into, so a game
+that blends by the alpha it wrote into the same buffer (Lands of Lore 2)
+stays on the GPU. Once a game blends by alpha written with another
+colour buffer or by the CPU, or tests depth against the alpha planes,
+everything after is drawn in software too.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws

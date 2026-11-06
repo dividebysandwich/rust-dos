@@ -665,6 +665,11 @@ pub struct Voodoo {
     gpu_reads: bool,
     gpu_behind: Cell<bool>,
     gpu_alpha: Cell<bool>,
+    /// The colour buffer (its word offset) the alpha planes' alpha was
+    /// last written with, the one whose alpha the renderer keeps it in;
+    /// None while the auxiliary buffer holds depth, or what the CPU wrote
+    /// there (`gpu_alpha_planes`).
+    alpha_owner: Cell<Option<u32>>,
     gpu_read_backs: Cell<u64>,
     /// What the reads back covered (`gpu::ReadRows`).
     gpu_rows: RefCell<gpu::ReadRows>,
@@ -772,6 +777,7 @@ impl Voodoo {
             gpu_reads: false,
             gpu_behind: Cell::new(false),
             gpu_alpha: Cell::new(false),
+            alpha_owner: Cell::new(None),
             gpu_read_backs: Cell::new(0),
             gpu_rows: RefCell::default(),
             gpu_only: Cell::new(0),
@@ -820,6 +826,7 @@ impl Voodoo {
         self.pool.reset_stats();
         self.counters_read.set(false);
         self.gpu_alpha.set(false);
+        self.alpha_owner.set(None);
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];
@@ -1128,6 +1135,7 @@ impl Voodoo {
     /// Queue `job` after the frame buffer writes before it: held back
     /// with its `access`, or given to the workers.
     pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
+        self.gpu_alpha_planes(&job);
         if let Some(bytes) = access.as_ref().and_then(|a| self.gpu_takes(&job, a)) {
             self.gpu_left(&job, bytes);
             return;
@@ -1369,6 +1377,7 @@ impl Voodoo {
     /// Where the buffers are, from the fbiInit registers (`recompute_video_memory`).
     pub(crate) fn recompute_video_memory(&mut self) {
         self.blt_queue_stale();
+        self.alpha_owner.set(None);
         if self.banshee.is_some() {
             self.banshee_buffers();
             return;
@@ -2281,6 +2290,7 @@ impl Voodoo {
             "catch_ups": self.catch_ups.get(),
             "queue_full": self.pool.full_waits(),
             "gpu_reads": self.gpu_reads,
+            "gpu_alpha": self.gpu_alpha.get(),
             "gpu_read_backs": self.gpu_read_backs.get(),
             "gpu_read_rows": self.gpu_rows.borrow().rows,
             "gpu_partial_reads": self.gpu_rows.borrow().partial,
