@@ -796,10 +796,15 @@ fn next_init(cpu: &mut Cpu, t: usize) -> Option<u16> {
 }
 
 /// Initialize the library `module` as Windows 95 does when it loads one:
-/// its entry point (`call_lib_main`), then, for a library made for
-/// Windows 4.0, the DllEntryPoint it exports, with DLL_PROCESS_ATTACH.
-/// `then` runs, with `data`, after both.
+/// a self-loading library's loader loads its segments first
+/// (`module::boot`), then its entry point runs (`call_lib_main`), then,
+/// for a library made for Windows 4.0, the DllEntryPoint it exports,
+/// with DLL_PROCESS_ATTACH. `then` runs, with `data`, after them.
 pub fn call_lib_init(cpu: &mut Cpu, module: u16, resume: Context, then: u16, data: Vec<u32>) {
+    if module::needs_boot(cpu, module) {
+        module::boot(cpu, module, resume, then, data);
+        return;
+    }
     let mut chained = vec![then as u32, module as u32];
     chained.extend(data);
     call_lib_main(cpu, module, resume, thunk::THEN_DLL_ENTRY, chained);

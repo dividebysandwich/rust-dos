@@ -8,6 +8,7 @@ use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
 use crate::disk::LASTDRIVE;
 use crate::dpmi::Context;
+use rust_dos_ne as ne;
 
 pub static MODULE: Def = Def {
     name: "KERNEL",
@@ -263,7 +264,7 @@ static APIS: &[Api16] = &[
     rust("GetAppCompatFlags", 354, "w", zero),
     rust("GetWinDebugInfo", 355, "pw", zero),
     rust("SetWinDebugInfo", 356, "p", zero),
-    rust("FarSetOwner", 403, "ww", zero),
+    rust("FarSetOwner", 403, "ww", far_set_owner),
     rust("RegOpenKey", 217, "lpp", reg_fail),
     rust("RegCreateKey", 218, "lpp", reg_fail),
     rust("RegDeleteKey", 219, "lp", reg_fail),
@@ -283,6 +284,11 @@ static APIS: &[Api16] = &[
     // Flat thunks (flat.rs).
     register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
     rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
+    // The functions a self-loading module's loader gets in its table
+    // (module.rs), and the one it patches its code segments with.
+    rust("MyAlloc", 0, "www", my_alloc),
+    rust("EntryAddrProc", 0, "ww", entry_addr_proc),
+    rust("PatchCodeHandle", 110, "w", patch_code_handle),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -864,6 +870,54 @@ fn throw(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 }
 
 // Modules.
+
+/// FarSetOwner(block, owner): the block is the owner's, a task's or a
+/// module's, and goes with it.
+fn far_set_owner(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    module::set_owner(cpu, args[0] as u16, args[1] as u16);
+    Some(0)
+}
+
+/// MyAlloc(segment flags, size, shift), which a self-loading module's
+/// loader allocates its segments with, as Wine's: a block of `size <<
+/// shift` bytes, moveable and discardable as the segment's flags say, a
+/// code segment unless the flags say data. DX:AX the selector and the
+/// handle, or for an empty block 0 and its handle.
+fn my_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (flags, size, shift) = (args[0] as u16, args[1], args[2]);
+    let bytes = (size << shift.min(16)).min(0x1_0000);
+    let moveable = flags & ne::SEG_MOVEABLE != 0
+        || flags & (ne::SEG_DATA | module::SEG_LOADED | module::SEG_ALLOCATED) == 0;
+    let mut mem = global::GMEM_ZEROINIT;
+    if flags & ne::SEG_DISCARDABLE != 0 {
+        mem |= global::GMEM_DISCARDABLE;
+    }
+    if moveable {
+        mem |= global::GMEM_MOVEABLE;
+    }
+    let code = !matches!(flags & 7, 1 | 7);
+    let handle = if size != 0 || flags & ne::SEG_MOVEABLE != 0 {
+        global::alloc(cpu, mem, bytes, current_handle(cpu), code)
+    } else {
+        0
+    };
+    Some(if bytes != 0 {
+        (global::handle_to_sel(handle) as u32) << 16 | handle as u32
+    } else {
+        (handle as u32) << 16
+    })
+}
+
+/// EntryAddrProc(module, ordinal): the 16:16 address of the module's
+/// entry point, which a self-loading module's loader relocates with.
+fn entry_addr_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(module::entry_point(cpu, args[0] as u16, args[1] as u16))
+}
+
+fn patch_code_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    module::patch_code_handle(cpu, args[0] as u16);
+    Some(0)
+}
 
 /// The directory of the running task's program, for the libraries it
 /// loads.
