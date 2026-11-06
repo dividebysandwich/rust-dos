@@ -8348,6 +8348,81 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
 }
 
 #[test]
+fn built_in_dlls_export_windows_98_ses_ordinals() {
+    // GetProcAddress by Windows 98 SE's ordinal finds the function it
+    // finds by name: KERNEL32's GetStartupInfoA (441) and GetStartupInfoW
+    // (442), DirectX 6.1's DDRAW and DINPUT, and SHELL32's #179, which
+    // Windows 98 exports by ordinal only. Imports by ordinal bind to the
+    // same functions.
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "GetProcAddress", "ExitProcess", "#441"],
+        ),
+        ("DDRAW.DLL", &["#8"]),
+    ];
+    let strings: &[(u32, &[u8])] = &[
+        (0x00, b"KERNEL32.DLL"),
+        (0x10, b"DDRAW.DLL"),
+        (0x20, b"DINPUT.DLL"),
+        (0x30, b"SHELL32.DLL"),
+        (0x40, b"GetStartupInfoA"),
+        (0x60, b"GetStartupInfoW"),
+        (0x80, b"DirectDrawCreate"),
+        (0xA0, b"DirectDrawEnumerateA"),
+        (0xC0, b"DllCanUnloadNow"),
+        (0xE0, b"SHGetNewLinkInfoA"),
+    ];
+    let mut data = vec![0u8; 0x100];
+    for (at, s) in strings {
+        data[*at as usize..*at as usize + s.len()].copy_from_slice(s);
+    }
+    // The DLL, the ordinal and the name, and an import that is the same
+    // function.
+    let checks: &[(u32, i32, u32, Option<usize>)] = &[
+        (0x00, 441, 0x40, Some(3)),
+        (0x00, 442, 0x60, None),
+        (0x10, 8, 0x80, Some(4)),
+        (0x10, 10, 0xA0, None),
+        (0x10, 14, 0xC0, None),
+        (0x20, 3, 0xC0, None),
+        (0x30, 179, 0xE0, None),
+    ];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (step, &(dll, ordinal, name, import)) in checks.iter().enumerate() {
+            a.push(l.at(dll) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.push(ordinal)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.mov(edi, eax)?;
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.mov(ebx, 2 * step as i32 + 1)?;
+            a.test(edi, edi)?;
+            a.je(fail)?;
+            a.cmp(eax, edi)?;
+            a.jne(fail)?;
+            if let Some(slot) = import {
+                a.mov(ebx, 2 * step as i32 + 2)?;
+                a.cmp(eax, l.import(slot))?;
+                a.jne(fail)?;
+            }
+        }
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("win98_ordinals", exe);
+    assert_eq!(code, 0, "{}", text);
+}
+
+#[test]
 fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     // KRNL386's GetVersion, called with WOWCallback16 and
     // WOWCallback16Ex, as SafeDisc's loader calls into KRNL386, and its

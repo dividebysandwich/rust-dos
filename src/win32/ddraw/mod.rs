@@ -92,29 +92,29 @@ const fn method(name: &'static str, args: u8, handler: super::stubs::Handler) ->
 /// The functions. Append only (see `stubs`). The methods of the objects'
 /// interfaces have ordinal 0: they aren't exported.
 static APIS: &[Api] = &[
-    stdcall("DllCanUnloadNow", 1, 0, dll_can_unload_now),
-    stdcall("DllGetClassObject", 2, 3, dll_get_class_object),
-    stdcall("DirectDrawCreate", 3, 3, directdraw::direct_draw_create),
+    stdcall("DllCanUnloadNow", 14, 0, dll_can_unload_now),
+    stdcall("DllGetClassObject", 15, 3, dll_get_class_object),
+    stdcall("DirectDrawCreate", 8, 3, directdraw::direct_draw_create),
     stdcall(
         "DirectDrawCreateEx",
-        4,
+        34,
         4,
         directdraw::direct_draw_create_ex,
     ),
     stdcall(
         "DirectDrawEnumerateA",
-        5,
+        10,
         2,
         enumerate::direct_draw_enumerate,
     ),
-    stdcall("DirectDrawEnumerateW", 6, 2, enumerate::unsupported),
+    stdcall("DirectDrawEnumerateW", 13, 2, enumerate::unsupported),
     stdcall(
         "DirectDrawEnumerateExA",
-        7,
+        11,
         3,
         enumerate::direct_draw_enumerate_ex,
     ),
-    stdcall("DirectDrawEnumerateExW", 8, 3, enumerate::unsupported),
+    stdcall("DirectDrawEnumerateExW", 12, 3, enumerate::unsupported),
     stdcall(
         "DirectDrawCreateClipper",
         9,

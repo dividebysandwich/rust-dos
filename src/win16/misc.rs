@@ -88,9 +88,9 @@ pub static WIN87EM: Def = Def {
     file: "WIN87EM.DLL",
     apis: &[
         register("__fpMath", 1, fp_math),
-        rust("__WinEm87Info", 3, "pw", zero),
-        rust("__WinEm87Restore", 4, "pw", zero),
-        rust("__WinEm87Save", 5, "pw", zero),
+        rust("__Win87EmInfo", 3, "pw", zero),
+        rust("__Win87EmRestore", 4, "pw", zero),
+        rust("__Win87EmSave", 5, "pw", zero),
     ],
     library: true,
 };

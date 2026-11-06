@@ -27,4 +27,4 @@ const fn cdecl(name: &'static str, ordinal: u16, args: u8, handler: Handler) -> 
 }
 
 /// The functions. Append only (see `stubs`).
-static APIS: &[Api] = &[cdecl("_vsnprintf", 1, 4, super::msvcrt::vsnprintf)];
+static APIS: &[Api] = &[cdecl("_vsnprintf", 53, 4, super::msvcrt::vsnprintf)];

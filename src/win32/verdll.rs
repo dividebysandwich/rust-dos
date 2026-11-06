@@ -56,14 +56,14 @@ static APIS: &[Api] = &[
     stdcall("GetFileVersionInfoSizeA", 2, 2, get_file_version_info_size),
     stdcall("GetFileVersionInfoSizeW", 3, 2, not_implemented),
     stdcall("GetFileVersionInfoW", 4, 4, not_implemented),
-    stdcall("VerFindFileA", 5, 8, ver_find_file),
-    stdcall("VerFindFileW", 6, 8, not_implemented),
-    stdcall("VerInstallFileA", 7, 8, ver_install_file),
-    stdcall("VerInstallFileW", 8, 8, not_implemented),
-    stdcall("VerLanguageNameA", 9, 3, ver_language_name),
-    stdcall("VerLanguageNameW", 10, 3, not_implemented),
-    stdcall("VerQueryValueA", 11, 4, ver_query_value),
-    stdcall("VerQueryValueW", 12, 4, not_implemented),
+    stdcall("VerFindFileA", 6, 8, ver_find_file),
+    stdcall("VerFindFileW", 7, 8, not_implemented),
+    stdcall("VerInstallFileA", 8, 8, ver_install_file),
+    stdcall("VerInstallFileW", 9, 8, not_implemented),
+    stdcall("VerLanguageNameA", 10, 3, ver_language_name),
+    stdcall("VerLanguageNameW", 11, 3, not_implemented),
+    stdcall("VerQueryValueA", 12, 4, ver_query_value),
+    stdcall("VerQueryValueW", 13, 4, not_implemented),
 ];
 
 const TRUE: u32 = 1;

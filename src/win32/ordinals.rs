@@ -1,31 +1,34 @@
 //! The ordinals Windows 98 SE's DLLs export their functions under, which
-//! the built-in DLLs take for theirs. A program may import a function by
-//! its ordinal alone, and copy protections such as SafeDisc import
-//! KERNEL32's functions that have no name (VxDCall0 at 1, LoadLibrary16
-//! at 35) that way, so the numbers have to be Windows' own.
+//! the tables of the built-in DLLs (`Api::ordinal`, `Var::ordinal`) give
+//! theirs, and the tests that hold the tables to them. A program may
+//! import a function by its ordinal alone, and copy protections such as
+//! SafeDisc import KERNEL32's functions that have no name (VxDCall0 at 1,
+//! LoadLibrary16 at 35) that way, so the numbers have to be Windows' own.
 //!
 //! `ordinals/<dll>.txt` lists the exports of the DLL as Windows 98 SE has
-//! it, made by `tools/win98_ordinals.py` from the DLLs of an installation
-//! with DirectX 7 (whose DDRAW, DSOUND, DINPUT and DirectMusic DLLs those
-//! are): a line an export, its ordinal and its name, or "-" for one
-//! exported by ordinal only.
+//! it, made by `tools/win98_ordinals.py` from the DLLs on its CD (DirectX
+//! 6.1's DDRAW, DSOUND, DINPUT and DirectMusic, the DirectX the built-in
+//! Windows reports): a line an export, its ordinal and its name, or "-"
+//! for one exported by ordinal only.
 //!
-//! A built-in function gets its ordinal by these rules:
+//! A built-in function's ordinal follows these rules, which the tests
+//! check:
 //!
 //! - One Windows 98 exports by name has the ordinal Windows gives it.
-//! - One whose own ordinal (`Api::ordinal`) is one Windows exports by
-//!   ordinal only keeps it: COMCTL32's DPA functions, SHELL32's ID list
-//!   ones and KERNEL32's VxDCall0 are numbered as Windows numbers them.
-//!   It keeps its name too, so a program that asks for it by name still
-//!   finds it.
+//! - One Windows exports by ordinal only has that ordinal, and its name
+//!   too, so a program that asks for it by name still finds it:
+//!   COMCTL32's DPA functions, SHELL32's ID list ones and KERNEL32's
+//!   VxDCall0 are numbered as Windows numbers them.
 //! - Any other, a function Windows 98 doesn't have, goes after the last
-//!   of Windows' ordinals: that plus its own.
+//!   of Windows' ordinals, where no program expects one of Windows'.
 //!
 //! The ordinals are the same under every `win32_version`. Programs import
 //! by ordinal only what has no name, and that is the same on Windows 95.
+//! The built-in DLLs Windows 98 SE doesn't have (GLIDE2X, GLIDE3X, D3D8,
+//! DINPUT8) number their functions as the DLLs they stand for do.
 
+use super::stubs::{DLLS, Dll};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 /// The DLLs' export lists, by the built-in DLL's name.
 static LISTS: &[(&str, &str)] = &[
@@ -73,11 +76,11 @@ static LISTS: &[(&str, &str)] = &[
 ];
 
 /// A DLL's exports on Windows 98 SE.
-pub struct Exports {
+struct Exports {
     /// The ordinal of each function exported by name.
     named: HashMap<&'static str, u16>,
-    /// Whether each ordinal up to the last is one exported by ordinal only.
-    unnamed: Vec<bool>,
+    /// The ordinals of the functions exported by ordinal only.
+    unnamed: Vec<u16>,
     last: u16,
 }
 
@@ -91,10 +94,7 @@ impl Exports {
             let ordinal: u16 = ordinal.parse().expect("an ordinal");
             last = last.max(ordinal);
             if name == "-" {
-                if unnamed.len() <= ordinal as usize {
-                    unnamed.resize(ordinal as usize + 1, false);
-                }
-                unnamed[ordinal as usize] = true;
+                unnamed.push(ordinal);
             } else {
                 named.insert(name, ordinal);
             }
@@ -105,75 +105,91 @@ impl Exports {
             last,
         }
     }
-
-    /// The ordinal the built-in function `name`, numbered `own` in its
-    /// DLL's table, is exported under (see the module's notes).
-    pub fn ordinal(&self, name: &str, own: u16) -> u16 {
-        if let Some(&ordinal) = self.named.get(name) {
-            ordinal
-        } else if self.unnamed.get(own as usize) == Some(&true) {
-            own
-        } else {
-            self.last + own
-        }
-    }
 }
 
 /// Windows 98 SE's exports of the DLL `dll`, if it has the DLL.
-pub fn win98(dll: &str) -> Option<&'static Exports> {
-    static PARSED: OnceLock<Vec<Exports>> = OnceLock::new();
-    let parsed = PARSED.get_or_init(|| LISTS.iter().map(|(_, l)| Exports::parse(l)).collect());
-    let i = LISTS
+fn win98(dll: &str) -> Option<Exports> {
+    let (_, list) = LISTS
         .iter()
-        .position(|(name, _)| name.eq_ignore_ascii_case(dll))?;
-    Some(&parsed[i])
+        .find(|(name, _)| name.eq_ignore_ascii_case(dll))?;
+    Some(Exports::parse(list))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The exported functions and variables of the built-in DLL `dll`, by
+/// name and ordinal.
+fn exports(dll: &Dll) -> impl Iterator<Item = (&'static str, u16)> + '_ {
+    let apis = dll.apis.iter().map(|a| (a.name, a.ordinal));
+    let vars = dll.vars.iter().map(|v| (v.name, v.ordinal));
+    apis.chain(vars).filter(|e| e.1 != 0)
+}
 
-    #[test]
-    fn every_export_of_a_built_in_dll_has_an_ordinal_of_its_own() {
-        for dll in super::super::stubs::DLLS {
-            let Some(win98) = win98(dll.name) else {
-                continue;
-            };
-            let apis = dll.apis.iter().map(|a| (a.name, a.ordinal));
-            let vars = dll.vars.iter().map(|v| (v.name, v.ordinal));
-            let mut taken = HashMap::new();
-            for (name, own) in apis.chain(vars).filter(|e| e.1 != 0) {
-                let ordinal = win98.ordinal(name, own);
-                if let Some(other) = taken.insert(ordinal, name) {
-                    panic!("{}: {} and {} are both #{}", dll.name, other, name, ordinal);
-                }
+#[test]
+fn every_export_has_windows_98s_ordinal_or_one_after_them() {
+    let mut wrong = Vec::new();
+    for dll in DLLS {
+        let Some(win98) = win98(dll.name) else {
+            continue;
+        };
+        for (name, ordinal) in exports(dll) {
+            match win98.named.get(name) {
+                Some(&real) if real != ordinal => wrong.push(format!(
+                    "{}: {} is #{}, not #{}",
+                    dll.name, name, real, ordinal
+                )),
+                Some(_) => {}
+                None if win98.unnamed.contains(&ordinal) || ordinal > win98.last => {}
+                None => wrong.push(format!(
+                    "{}: {} isn't Windows 98's, so goes after #{}, not at #{}",
+                    dll.name, name, win98.last, ordinal
+                )),
             }
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
 
-    #[test]
-    fn every_built_in_dll_windows_98_has_has_its_list() {
-        // GLIDE2X and GLIDE3X are 3dfx's, and D3D8 and DINPUT8 DirectX
-        // 8's, none of them Windows 98 SE's. A DLL added to the built-in
-        // ones needs a list made by tools/win98_ordinals.py, or it keeps
-        // numbers of its own.
-        for dll in super::super::stubs::DLLS {
-            let other =
-                ["GLIDE2X.DLL", "GLIDE3X.DLL", "D3D8.DLL", "DINPUT8.DLL"].contains(&dll.name);
-            assert_eq!(win98(dll.name).is_some(), !other, "{}", dll.name);
+#[test]
+fn no_two_exports_of_a_dll_share_an_ordinal() {
+    for dll in DLLS {
+        let mut taken = HashMap::new();
+        for (name, ordinal) in exports(dll) {
+            if let Some(other) = taken.insert(ordinal, name) {
+                panic!("{}: {} and {} are both #{}", dll.name, other, name, ordinal);
+            }
         }
     }
+}
 
-    #[test]
-    fn kernel32s_unnamed_functions_have_windows_98s_ordinals() {
-        let kernel32 = win98("KERNEL32.DLL").unwrap();
-        assert_eq!(kernel32.ordinal("VxDCall0", 1), 1);
-        assert_eq!(kernel32.ordinal("VxDCall8", 9), 9);
-        assert_eq!(kernel32.ordinal("LoadLibrary16", 35), 35);
-        assert_eq!(kernel32.ordinal("GetProcAddress16", 37), 37);
-        // Named ones take Windows' ordinal whatever their own is.
-        assert_eq!(kernel32.ordinal("AddAtomA", 1), 50);
-        // One Windows 98 doesn't have goes after its last.
-        assert_eq!(kernel32.ordinal("Win16Return", 950), 865 + 950);
+#[test]
+fn every_built_in_dll_windows_98_has_has_its_list() {
+    // GLIDE2X and GLIDE3X are 3dfx's, and D3D8 and DINPUT8 DirectX 8's,
+    // none of them Windows 98 SE's. A DLL added to the built-in ones
+    // needs a list made by tools/win98_ordinals.py.
+    for dll in DLLS {
+        let other = ["GLIDE2X.DLL", "GLIDE3X.DLL", "D3D8.DLL", "DINPUT8.DLL"].contains(&dll.name);
+        assert_eq!(win98(dll.name).is_some(), !other, "{}", dll.name);
     }
+}
+
+#[test]
+fn functions_windows_exports_by_ordinal_only_have_its_ordinals() {
+    let ordinal = |dll: &str, name: &str| {
+        let dll = DLLS.iter().find(|d| d.name == dll).unwrap();
+        dll.apis.iter().find(|a| a.name == name).unwrap().ordinal
+    };
+    let kernel32 = win98("KERNEL32.DLL").unwrap();
+    for (name, real) in [
+        ("VxDCall0", 1),
+        ("VxDCall8", 9),
+        ("LoadLibrary16", 35),
+        ("FreeLibrary16", 36),
+        ("GetProcAddress16", 37),
+    ] {
+        assert_eq!(ordinal("KERNEL32.DLL", name), real, "{}", name);
+        assert!(kernel32.unnamed.contains(&real));
+    }
+    // SHGetNewLinkInfo's code on Windows 98 SE is also #179's, which
+    // Windows NT names SHGetNewLinkInfoA.
+    assert_eq!(ordinal("SHELL32.DLL", "SHGetNewLinkInfoA"), 179);
+    assert_eq!(ordinal("COMCTL32.DLL", "DPA_Create"), 328);
 }
