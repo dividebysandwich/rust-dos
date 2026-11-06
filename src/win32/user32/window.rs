@@ -1826,6 +1826,42 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(TRUE);
                 }
+                // After a window is hidden, or changed in any way but a
+                // move alone or a show, its parent and the parent's
+                // children erase now what needs erasing (WM_NCPAINT,
+                // WM_ERASEBKGND), unless SWP_DEFERERASE says not to:
+                // Wine's set_window_pos, "erase parent when hiding or
+                // resizing child". The parent's WM_PAINT that comes later
+                // has nothing left to erase, so a page shown in the place
+                // of the one hidden, as a tab control's pages are, keeps
+                // what it drew. A top-level window erases itself.
+                let flags = cpu.bus.guest_read_32(winpos + 24);
+                const STATUS: u32 = SWP_NOSIZE
+                    | SWP_NOCLIENTSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOMOVE
+                    | SWP_NOCLIENTMOVE
+                    | SWP_FRAMECHANGED
+                    | SWP_HIDEWINDOW
+                    | SWP_SHOWWINDOW;
+                const MOVE_ONLY: u32 = SWP_NOSIZE | SWP_NOCLIENTSIZE | SWP_NOZORDER;
+                let uncovers = flags & SWP_HIDEWINDOW != 0
+                    || flags & SWP_SHOWWINDOW == 0 && flags & STATUS != MOVE_ONLY;
+                t.step = 7;
+                if flags & SWP_DEFERERASE == 0 && uncovers {
+                    let state = user(cpu);
+                    let parent = match state.parent(hwnd) {
+                        0 | DESKTOP => hwnd,
+                        p => p,
+                    };
+                    let erase = super::paint::RDW_ERASENOW;
+                    return Next::call(address_of("RedrawWindow"), &[parent, 0, 0, erase], 7);
+                }
+            }
+            7 => {
+                if !user(cpu).is_window(hwnd) {
+                    return Next::Done(TRUE);
+                }
                 // A top-level window shown is erased now (WM_NCPAINT,
                 // WM_ERASEBKGND), after its activation and before
                 // WM_WINDOWPOSCHANGED and its WM_PAINT, unless

@@ -834,13 +834,47 @@ fn recalc_hot_track(cpu: &mut Cpu, hwnd: u32, t: &mut Tab, pos: Option<(i32, i32
     (leave, enter)
 }
 
-/// TAB_InvalidateTabArea. The whole control is drawn again, which
-/// covers the tabs Wine works out.
+/// TAB_InvalidateTabArea: the strip of the client area the tabs are in,
+/// up to the display area. The display area isn't drawn again: a
+/// program's pages are often children of the control, which has no
+/// WS_CLIPCHILDREN, and the erase of a repaint there would wipe the
+/// page the program just showed (Zanzarah's settings dialog).
 fn invalidate_tabs(cpu: &mut Cpu, hwnd: u32, t: &Tab) {
     if t.rows < 1 {
         return;
     }
-    super::invalidate(cpu, hwnd, true);
+    let client = super::client(cpu, hwnd);
+    let r = tab_area(t, client);
+    super::header::invalidate_rect(cpu, hwnd, r, true);
+}
+
+/// The part of `client` TAB_InvalidateTabArea invalidates: from the
+/// edge the tabs are on to the display area, and with one row only as
+/// far as the last tab reaches; the up-down control draws itself.
+fn tab_area(t: &Tab, client: Rect) -> Rect {
+    let mut area = client;
+    let mut display = client;
+    adjust_rect(t, false, &mut display);
+    let last = item_rect(t, client, t.items.len() as i32 - 1).1;
+    let one_row = t.rows == 1;
+    let (vertical, bottom) = (t.style & TCS_VERTICAL != 0, t.style & TCS_BOTTOM != 0);
+    match (vertical, bottom) {
+        (true, true) => area.left = display.right,
+        (true, false) => area.right = display.left,
+        (false, true) => area.top = display.bottom,
+        (false, false) => area.bottom = display.top,
+    }
+    if one_row {
+        if vertical {
+            area.bottom = client.top + last.bottom + 2 * SELECTED_TAB_OFFSET;
+        } else {
+            area.right = client.left + last.right + 2 * SELECTED_TAB_OFFSET;
+        }
+    }
+    if t.scrolling {
+        area.right = area.right.min(updown_rect(t, client).left);
+    }
+    area
 }
 
 /// Draw the tab `i` again at once, through the window's DC, as the
@@ -2036,9 +2070,14 @@ pub fn proc_(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             // A button control's focus goes back to the selected one.
             if msg == WM_KILLFOCUS && t.style & TCS_BUTTONS != 0 && t.focus != t.selected {
                 t.focus = t.selected;
-                put(cpu, hwnd, t);
             }
-            super::invalidate(cpu, hwnd, true);
+            // TAB_FocusChanging: only the focused tab is drawn again,
+            // for its focus rectangle.
+            let (visible, _, sel) = item_rect(&t, super::client(cpu, hwnd), t.focus);
+            put(cpu, hwnd, t);
+            if visible {
+                super::header::invalidate_rect(cpu, hwnd, sel, true);
+            }
             return defwnd::def_window_proc(cpu, args);
         }
         WM_KEYDOWN => {

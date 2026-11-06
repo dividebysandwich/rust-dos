@@ -124,6 +124,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "GetTextExtentPoint32A",
         ],
     ),
+    ("USER32.DLL", &["ValidateRect", "GetUpdateRect", "ShowWindow"]),
 ];
 
 /// The import slot of `name`.
@@ -1017,6 +1018,132 @@ fn a_tab_control_keeps_its_items_and_selection() {
     assert_eq!(r[9], u32::MAX, "there is no item 5");
     assert_eq!(r[10], 1);
     assert_eq!(peek_str(&cpu, at + FREE + 0x180), "Two");
+}
+
+/// Selecting a tab, and the focus coming to the control, draw the tabs
+/// again, and only them: a page that is a child of the control, which
+/// has no WS_CLIPCHILDREN, keeps what it drew. Zanzarah's settings
+/// dialog has its pages there, and they came out blank when the control
+/// erased its whole client area over them.
+#[test]
+fn selecting_a_tab_leaves_a_child_page_alone() {
+    use Arg::*;
+    const S_TAB: u32 = 0x260;
+    const TCIF_TEXT: u32 = 0x0001;
+    const TCM_INSERTITEMA: u32 = 0x1307;
+    const TCM_SETCURSEL: u32 = 0x130C;
+    const WM_SETFOCUS: u32 = 0x0007;
+    const PAGE_RECT: u32 = FREE + 0x200;
+    const TABS_RECT: u32 = FREE + 0x210;
+    let item = |text: u32| [TCIF_TEXT, 0, 0, text, 32, 0, 0];
+    let page = call(
+        "CreateWindowExA",
+        &[
+            I(0),
+            At(S_STATIC),
+            I(0),
+            I(WS_CHILD | WS_VISIBLE),
+            I(4),
+            I(40),
+            I(190),
+            I(100),
+            Res(2),
+            I(2),
+            I(0),
+            I(0),
+        ],
+    );
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TAB, 0, 200, 150, 1, 1),
+        send(2, TCM_INSERTITEMA, I(0), At(FREE)),
+        send(2, TCM_INSERTITEMA, I(1), At(FREE + 0x20)),
+        page,
+        call("ValidateRect", &[Res(2), I(0)]),
+        call("ValidateRect", &[Res(5), I(0)]),
+        send(2, TCM_SETCURSEL, I(1), I(0)),
+        send(2, WM_SETFOCUS, I(0), I(0)),
+        call("GetUpdateRect", &[Res(5), At(PAGE_RECT), I(0)]),
+        call("GetUpdateRect", &[Res(2), At(TABS_RECT), I(0)]),
+    ];
+    let base = data_address(&calls);
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TAB, b"SysTabControl32 ");
+    put(&mut d, FREE + 0x100, b"One ");
+    put(&mut d, FREE + 0x110, b"Two ");
+    for (at, words) in [
+        (FREE, item(base + FREE + 0x100)),
+        (FREE + 0x20, item(base + FREE + 0x110)),
+    ] {
+        for (i, w) in words.iter().enumerate() {
+            put32(&mut d, at + 4 * i as u32, *w);
+        }
+    }
+    let (cpu, at) = run("tab_page", &d, &calls);
+    assert_eq!(at, base);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[5], 0, "the page is made");
+    assert_eq!(r[8], 0, "SETCURSEL gives the one before");
+    assert_eq!(r[10], 0, "the page has nothing to draw again");
+    assert_ne!(r[11], 0, "the tabs are drawn again");
+    let rect: Vec<i32> = (0..4)
+        .map(|i| peek(&cpu, at + TABS_RECT + 4 * i) as i32)
+        .collect();
+    assert_eq!(rect[..2], [0, 0], "from the top left corner");
+    assert!(
+        rect[3] > 0 && rect[3] < 40,
+        "down to the display area, above the page: {rect:?}"
+    );
+}
+
+/// Hiding a child erases what it uncovered of its parent at once, as
+/// Windows does (Wine's set_window_pos: "erase parent when hiding or
+/// resizing child"): the parent's WM_PAINT that comes later has nothing
+/// to erase. A tab control's page shown in the place of the one hidden
+/// keeps what it drew, where the erase in that WM_PAINT wiped it.
+#[test]
+fn hiding_a_page_erases_the_tab_control_at_once() {
+    use Arg::*;
+    use rust_dos::win32::user32::{self, paint::PAINT_ERASE};
+    const S_TAB: u32 = 0x260;
+    const SW_HIDE: u32 = 0;
+    let page = call(
+        "CreateWindowExA",
+        &[
+            I(0),
+            At(S_STATIC),
+            I(0),
+            I(WS_CHILD | WS_VISIBLE),
+            I(4),
+            I(40),
+            I(190),
+            I(100),
+            Res(2),
+            I(2),
+            I(0),
+            I(0),
+        ],
+    );
+    let calls = [
+        call("InitCommonControls", &[]),
+        parent(),
+        child(S_TAB, 0, 200, 150, 1, 1),
+        page,
+        call("ValidateRect", &[Res(2), I(0)]),
+        call("ShowWindow", &[Res(3), I(SW_HIDE)]),
+    ];
+    let mut d = data();
+    strings(&mut d);
+    put(&mut d, S_TAB, b"SysTabControl32 ");
+    let (mut cpu, at) = run("tab_hide", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_ne!(r[3], 0, "the page is made");
+    assert_ne!(r[5], 0, "the page was visible");
+    let tab = user32::user(&mut cpu).window(r[2]).unwrap();
+    assert!(!tab.update.is_empty(), "the tab control paints where it was");
+    assert_eq!(tab.paint & PAINT_ERASE, 0, "and has erased it already");
 }
 
 #[test]
