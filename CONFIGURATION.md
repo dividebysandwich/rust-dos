@@ -481,8 +481,10 @@ limit, so without a connection it goes on as it would with one:
   KERNEL, USER, GDI and other 16-bit modules are written into the emulator
   as well and go on to the 32-bit ones, and its own DLLs, such as Visual
   Basic's runtimes, load from beside it. Off, such a program runs its DOS
-  stub, which says it needs Windows. The plan is in
-  [docs/native-windows.md](docs/native-windows.md).
+  stub, which says it needs Windows. How to use it and what differs from
+  Windows 98 is in [docs/builtin-windows.md](docs/builtin-windows.md),
+  and how it is built in
+  [docs/builtin-windows-architecture.md](docs/builtin-windows-architecture.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
   `lib/wine/i386-windows` folder. A DLL a program needs that is neither
@@ -493,8 +495,8 @@ limit, so without a connection it goes on as it would with one:
   how many bytes of arguments each takes. Empty (the default), there is
   no such folder. Wine's MSACM32.DLL with its codecs runs this way, with
   `win32_dlls_replace=msacm32`, for what the built-in MSACM32.DLL can't
-  convert: it only decodes MS ADPCM and IMA ADPCM. See "Wine's DLLs as
-  guest code" in [docs/native-windows.md](docs/native-windows.md).
+  convert: it only decodes MS ADPCM and IMA ADPCM. See
+  [Wine's DLLs as guest code](docs/builtin-windows-architecture.md#wines-dlls-as-guest-code).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
   `comctl32,comdlg32`. Empty (the default), the built-in ones are used. An
@@ -1404,7 +1406,9 @@ when its `[autoexec]` boots nothing (see
 [an operating system](GAME-PACKAGES.md#an-operating-system)). A GOG
 install whose launcher starts a Windows program gets a `windows=builtin`
 profile when it is [imported](#game-profiles). The rest of this section
-is about the built-in Windows.
+is about the built-in Windows, and
+[docs/builtin-windows.md](docs/builtin-windows.md) says what in it
+differs from Windows 98.
 
 #### A profile to start from
 
@@ -1502,12 +1506,13 @@ takes the install away and the next start runs the setup again.
 
 The settings of [the profile above](#a-profile-to-start-from) apply to
 the setup as well as the game, and `SET TEMP` matters most here. The
-setups listed in
-[docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
-are known to run. For a game on more than one CD, list every image on
-the drive's `[drives]` line; when the setup asks for the next disc,
-Ctrl+F4 puts it in. Run `DIR` at the prompt after the setup to find the
-8.3 names of the folders it made.
+games whose setups are known to run are in
+[docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows),
+and [docs/builtin-windows.md](docs/builtin-windows.md#how-an-install-differs)
+says how an install differs from one on Windows 98. For a game on more
+than one CD, list every image on the drive's `[drives]` line; when the
+setup asks for the next disc, Ctrl+F4 puts it in. Run `DIR` at the
+prompt after the setup to find the 8.3 names of the folders it made.
 
 InstallShield's `SETUP.EXE` is a 16-bit launcher, which the built-in
 Windows doesn't run. When `_INST32I.EX_` is beside it, the built-in
