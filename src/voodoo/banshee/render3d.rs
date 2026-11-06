@@ -1311,6 +1311,16 @@ pub(crate) mod tests {
     /// renderer alone drew a frame into A; then the program read A's first
     /// pixel, which brought back the band of rows it is in and made A hot.
     fn gpu_card_hot_after_a_read(log: &Rc<RefCell<Vec<String>>>) -> Voodoo {
+        gpu_card_hot_after_reading(log, A, Some(A / 2))
+    }
+
+    /// The same with the first pixel at byte `at` read, of the buffer
+    /// whose key in the recording is `key`.
+    fn gpu_card_hot_after_reading(
+        log: &Rc<RefCell<Vec<String>>>,
+        at: u32,
+        key: Option<u32>,
+    ) -> Voodoo {
         let mut v = gpu_card(Some(log));
         v.banshee.as_mut().unwrap().crtc[0x12] = 255;
         reg3d(&mut v, CLIP_LOW_Y_HIGH_Y, 256);
@@ -1322,8 +1332,8 @@ pub(crate) mod tests {
         rectangle(&mut v, (0.0, 0.0, 640.0, 256.0), (200.0, 30.0, 60.0));
         assert_eq!(gpu_only(&v), 3);
         let mut pixel = [0u8; 2];
-        v.banshee_memory_read(A, &mut pixel);
-        assert_eq!(reads(log), [format!("read {:?} 0..32", Some(A / 2))]);
+        v.banshee_memory_read(at, &mut pixel);
+        assert_eq!(reads(log), [format!("read {key:?} 0..32")]);
         log.borrow_mut().clear();
         v
     }
@@ -1362,6 +1372,23 @@ pub(crate) mod tests {
         let memory = v.frame_buffer();
         assert_eq!(memory.get(tiled_row(A, 150)), 0x1234);
         assert_ne!(memory.get(tiled_row(A, 105)), 0x1234);
+    }
+
+    #[test]
+    fn gpu_reads_of_depth_rows_bring_back_only_the_rows_of_a_job_over_them() {
+        // A read of one depth (3DMark 2000's lens flares) makes its band
+        // of depth rows hot, not the colour buffer: a triangle over the
+        // band is drawn in software after reading back its own band of
+        // colour rows, not the whole buffer, as the triangles elsewhere
+        // still go to the GPU.
+        let log = Rc::default();
+        let mut v = gpu_card_hot_after_reading(&log, 0x40_0000, None);
+        float(&mut v, FSTART_Z, 500.0);
+        rectangle(&mut v, (0.0, 0.0, 64.0, 10.0), (0.0, 255.0, 0.0));
+        assert_eq!(gpu_only(&v), 3, "drawn in software");
+        assert_eq!(reads(&log), [format!("read {:?} 0..32", Some(A / 2))]);
+        rectangle(&mut v, (0.0, 100.0, 64.0, 110.0), (0.0, 255.0, 0.0));
+        assert_eq!(gpu_only(&v), 5, "both triangles on the GPU");
     }
 
     #[test]

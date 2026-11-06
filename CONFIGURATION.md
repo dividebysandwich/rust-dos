@@ -2638,10 +2638,10 @@ only for the worker threads (on a Banshee or Voodoo3 the rows the 2D
 engine reads or draws into, and those the card shows from outside its
 3D buffers, count as read), and a triangle that takes its texture from
 a buffer the 3D drew reads that buffer back first, so that it draws
-with OpenGL's picture at the card's resolution. The pixels a game reads differ in
-small ways from the card's: OpenGL draws a triangle's edges by its own
-rules and keeps more depth precision, and where nothing dithers (see
-below) a blended triangle blends with 8 bits a colour. What a game
+with OpenGL's picture at the card's resolution. The pixels a game reads
+differ in small ways from the card's: OpenGL draws a triangle's edges by
+its own rules and keeps more depth precision, and where nothing dithers
+(see below) a blended triangle blends with 8 bits a colour. What a game
 writes itself, its frame buffer writes and the blitter's copies, reads
 back as it wrote it. A save state keeps OpenGL's pixels too, so states
 of the same scene saved on two GPUs differ slightly in the card's

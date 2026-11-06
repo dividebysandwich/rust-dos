@@ -245,11 +245,7 @@ impl Voodoo {
             return None;
         }
         let bytes = self.gpu_job_bytes(job)?;
-        let no_layout = self.banshee.is_some() && self.mirror_layout().is_none();
-        if no_layout || self.gpu_bytes_hot(job, &bytes) {
-            return None;
-        }
-        Some(bytes)
+        (!self.gpu_bytes_hot(job, &bytes)).then_some(bytes)
     }
 
     /// Whether `job` is drawn in software because it draws into memory
@@ -279,6 +275,18 @@ impl Voodoo {
             {
                 return true;
             }
+        }
+        self.gpu_buffer_hot(job)
+    }
+
+    /// Whether the colour buffer `job` draws into holds hot rows, in any
+    /// of its rows: every job into it is drawn in software until they
+    /// cool, not only those over the rows read (`gpu_bytes_hot`). On a
+    /// Banshee that is colBufferAddr's buffer, which a depth clear goes
+    /// with too.
+    fn gpu_buffer_hot(&self, job: &Job) -> bool {
+        if !self.gpu.borrow().tracker.any_hot() {
+            return false;
         }
         match &self.banshee {
             Some(_) => self
@@ -353,27 +361,36 @@ impl Voodoo {
     }
 
     /// `job` is drawn here, in software. The memory is brought up to the
-    /// renderer for it: on a Banshee only the buffers it draws into (its
-    /// textures came back before it was recorded, `gpu_texels`), which
-    /// leaves the others on the GPU; on the other cards all of it. On a
-    /// Banshee the rows it draws change in the memory the texture units
-    /// read, which `gpu_texels` hears of.
+    /// renderer for it in the buffers it draws into, which leaves the
+    /// others on the GPU: a Banshee's textures came back before the job
+    /// was recorded (`gpu_texels`), and the other cards' are in the
+    /// texture units' own memory. All of it comes back for a job into a
+    /// buffer the recording doesn't have. On a Banshee the rows it draws
+    /// change in the memory the texture units read, which `gpu_texels`
+    /// hears of.
     ///
-    /// Where rows it draws over are behind, the buffer comes back whole
-    /// rather than those rows: the jobs after it into the same buffers
-    /// are drawn here too, for the same reason (the program reads the
-    /// buffer back, `gpu_takes`), and each would wait for the GPU again
-    /// for its own rows. Test Drive 4 reads two pixels of the back buffer
-    /// in the middle of each frame, and the frame after the rows cool
-    /// (`HOT_FRAMES`) waited for the GPU some 25 times, a band of rows
-    /// for each triangle after the read.
+    /// Where rows it draws over are behind and the jobs after it into
+    /// the same buffers are drawn here too (its colour buffer is hot,
+    /// `gpu_buffer_hot`, or the renderer lacks the alpha planes,
+    /// `gpu_alpha`), the buffers come back whole rather than those rows:
+    /// each of those jobs would wait for the GPU again for its own rows.
+    /// Test Drive 4 reads two pixels of the back buffer in the middle of
+    /// each frame, and the frame after the rows cool (`HOT_FRAMES`)
+    /// waited for the GPU some 25 times, a band of rows for each triangle
+    /// after the read. A job drawn here for reasons of its own (one the
+    /// backlog keeps, one that spills into the next rows) and a job over
+    /// rows read in a buffer that isn't hot itself get their rows only,
+    /// as the jobs after them go back to the GPU.
     pub(crate) fn gpu_draws_here(&self, job: &Job) {
-        let bytes = self.banshee.is_some().then(|| self.gpu_job_bytes(job));
-        let Some(Some(bytes)) = bytes else {
+        let Some(bytes) = self.gpu_job_bytes(job) else {
             self.gpu_catch_up();
             return;
         };
-        let whole = self.gpu_job_buffers(job).unwrap_or(bytes);
+        let stays = self.gpu_alpha() || self.gpu_buffer_hot(job);
+        let whole = stays
+            .then(|| self.gpu_job_buffers(job))
+            .flatten()
+            .unwrap_or(bytes);
         for (rows, buffer) in bytes.into_iter().zip(whole) {
             let (Some((start, end)), Some(buffer)) = (rows, buffer) else {
                 continue;
@@ -482,7 +499,7 @@ impl Voodoo {
             Job::Rows { base, rows, .. } => {
                 let aux = fbi.auxoffs != NONE && *base == fbi.auxoffs as usize / 2;
                 let stride = if aux { fbi.aux_stride } else { fbi.stride };
-                mark(*base as u32 * 2, stride, *rows);
+                mark(*base as u32 * 2, stride, if whole { all } else { *rows });
             }
             _ => {
                 for offs in fbi.rgboffs {

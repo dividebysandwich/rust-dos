@@ -1546,6 +1546,50 @@ mod tests {
     }
 
     #[test]
+    fn gpu_reads_of_depth_rows_leave_the_rest_of_the_frame_on_the_gpu() {
+        // A read of one depth (3DMark 2000's lens flares) makes its band
+        // of depth rows hot, not the colour buffer: a fill over other
+        // rows stays on the GPU, and one over the band is drawn in
+        // software after reading back only its own colour rows, not the
+        // whole memory, as the fills after it may go to the GPU again.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let gpu_only = |v: &Voodoo| {
+            v.describe(Now::default())["gpu_only_jobs"]
+                .as_u64()
+                .unwrap()
+        };
+        let fill = |v: &mut Voodoo, (top, bottom): (u32, u32)| {
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+            write(v, CLIP_LEFT_RIGHT, 300);
+            write(v, CLIP_LOW_Y_HIGH_Y, top << 16 | bottom);
+            write(v, COLOR1, 0x00F8_0000);
+            write(v, FASTFILL_CMD, 0);
+        };
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        fill(&mut v, (0, 20));
+        assert_eq!(gpu_only(&v), before + 1, "outside the band, on the GPU");
+        log.borrow_mut().clear();
+        fill(&mut v, (100, 110));
+        assert_eq!(gpu_only(&v), before + 1, "over the band, in software");
+        let reads: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .cloned()
+            .collect();
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        assert_eq!(reads, [format!("read {:?} 100..110", Some(back / 2))]);
+    }
+
+    #[test]
     fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
         // After a read of everything, a fastfill draws rows 20..40. A read
         // of depth rows 96..160 then reads nothing: the fill drew none of
