@@ -256,7 +256,9 @@ impl Voodoo {
     /// the program read back lately (`gpu_takes`).
     pub(crate) fn gpu_job_hot(&self, job: &Job) -> bool {
         self.gpu.borrow().tracker.any_hot()
-            && self.gpu_job_bytes(job).is_some_and(|bytes| self.gpu_bytes_hot(job, &bytes))
+            && self
+                .gpu_job_bytes(job)
+                .is_some_and(|bytes| self.gpu_bytes_hot(job, &bytes))
     }
 
     /// Whether `bytes`, what `job` draws into (`gpu_job_bytes`), or the
@@ -270,12 +272,18 @@ impl Voodoo {
             if !gpu.tracker.any_hot() {
                 return false;
             }
-            if bytes.iter().flatten().any(|&(a, b)| gpu.tracker.hot_in(a, b)) {
+            if bytes
+                .iter()
+                .flatten()
+                .any(|&(a, b)| gpu.tracker.hot_in(a, b))
+            {
                 return true;
             }
         }
         match &self.banshee {
-            Some(_) => self.mirror_layout().is_some_and(|key| self.gpu_colour_hot(&key)),
+            Some(_) => self
+                .mirror_layout()
+                .is_some_and(|key| self.gpu_colour_hot(&key)),
             None => {
                 let (Job::Triangle { st, .. } | Job::Fastfill { st, .. }) = job else {
                     return false;
@@ -427,7 +435,11 @@ impl Voodoo {
             match job {
                 Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
                     let dest = st.dest as u32 * 2;
-                    let rows = if whole { all } else { job_rows(job, key.height) };
+                    let rows = if whole {
+                        all
+                    } else {
+                        job_rows(job, key.height)
+                    };
                     if st.fbz_mode & (1 << 9) != 0 {
                         let buffer = key.color_at(dest)?;
                         mark(dest, buffer.stride, rows);
@@ -458,7 +470,11 @@ impl Voodoo {
         let all = (0, fbi.height);
         match job {
             Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                let rows = if whole { all } else { job_rows(job, fbi.height) };
+                let rows = if whole {
+                    all
+                } else {
+                    job_rows(job, fbi.height)
+                };
                 mark(st.dest as u32 * 2, fbi.stride, rows);
                 mark(fbi.auxoffs, fbi.aux_stride, rows);
             }

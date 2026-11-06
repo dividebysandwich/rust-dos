@@ -1513,7 +1513,11 @@ mod tests {
         v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
         v.set_gpu_reads(true);
         glide_frames(&mut v, 2);
-        let gpu_only = |v: &Voodoo| v.describe(Now::default())["gpu_only_jobs"].as_u64().unwrap();
+        let gpu_only = |v: &Voodoo| {
+            v.describe(Now::default())["gpu_only_jobs"]
+                .as_u64()
+                .unwrap()
+        };
         let fill = |v: &mut Voodoo, color: u32| {
             write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
             write(v, CLIP_LEFT_RIGHT, 300);
@@ -1528,7 +1532,11 @@ mod tests {
         assert_eq!(gpu_only(&v), before, "drawn in software");
         log.borrow_mut().clear();
         assert_eq!(v.lfb_read(100 << 9 | 5) & 0xFFFF, 0xF800);
-        let reads = log.borrow().iter().filter(|l| l.starts_with("read")).count();
+        let reads = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .count();
         assert_eq!(reads, 0, "{:?}", log.borrow());
         for _ in 0..HOT_FRAMES {
             v.take_mirror();
