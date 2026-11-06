@@ -8,6 +8,20 @@
 //! program's code (MSVC's `_except_handler3`, C++'s), called through
 //! `call` (see call.rs).
 //!
+//! As Windows 98's KERNEL32 does (BFF76819h to BFF76854h), each handler
+//! is called with a frame of the system's on top of the chain, below the
+//! dispatcher's own stack: the next frame, its handler (a nested
+//! exception's or a collided unwind's, which KERNEL32 has as
+//! NestedExceptionHandler and NestedUnwindHandler), and the frame whose
+//! handler runs. `fs:[0]` is that frame while the handler runs, so the
+//! handler's own frame is `fs:[0]`'s next, and the frame comes off when
+//! the handler returns. Petite's unpacker finds its stack that way: its
+//! handler, which doesn't return, takes the frame after `fs:[0]`'s
+//! (Grom's CmdLineExt02.dll). An exception raised in a handler reaches
+//! the system's frame first, which marks it as nested and goes on to the
+//! frames after it; an unwind that reaches the frame of an unwind that
+//! runs goes on from where that one got to.
+//!
 //! A page fault in the part of a thread's stack that is reserved but not
 //! committed yet commits it, and the program goes on: stacks grow as on
 //! Windows. A write to a module's resources, which are read-only, makes
@@ -24,6 +38,7 @@ use crate::instructions::fpu::control;
 /// Exception codes.
 pub const ACCESS_VIOLATION: u32 = 0xC000_0005;
 const NONCONTINUABLE_EXCEPTION: u32 = 0xC000_0025;
+const INVALID_DISPOSITION: u32 = 0xC000_0026;
 const UNWIND: u32 = 0xC000_0027;
 const BREAKPOINT: u32 = 0x8000_0003;
 const SINGLE_STEP: u32 = 0x8000_0004;
@@ -45,9 +60,15 @@ const STACK_OVERFLOW: u32 = 0xC000_00FD;
 const NONCONTINUABLE: u32 = 1;
 const UNWINDING: u32 = 2;
 const EXIT_UNWIND: u32 = 4;
+/// Set while the dispatcher calls the handlers between a nested
+/// exception and the frame whose handler it was raised in.
+const NESTED_CALL: u32 = 0x10;
 
 /// What handlers return.
 const CONTINUE_EXECUTION: u32 = 0;
+const CONTINUE_SEARCH: u32 = 1;
+const NESTED_EXCEPTION: u32 = 2;
+const COLLIDED_UNWIND: u32 = 3;
 /// What filters return.
 const FILTER_EXECUTE_HANDLER: u32 = 1;
 const FILTER_CONTINUE_EXECUTION: u32 = 0xFFFF_FFFF;
@@ -74,6 +95,10 @@ const MAX_PARAMETERS: u32 = 15;
 /// Below the record on the stack: EXCEPTION_POINTERS and the dispatcher
 /// context handlers get.
 const BELOW_RECORD: u32 = 16;
+/// The system's frame around a handler: the next frame, the handler and
+/// the frame whose handler runs.
+const GUARD_SIZE: u32 = 12;
+const GUARD_ESTABLISHER: u32 = 8;
 
 /// The TIB's first field: the exception handler chain.
 const TIB_EXCEPTION_LIST: u32 = 0x00;
@@ -321,7 +346,8 @@ fn in_stack_reserve(cpu: &mut Cpu, address: u32) -> bool {
 
 /// Raise the exception `code` in the running thread, at the context
 /// `ctx`: its record and context on the thread's stack below ctx's ESP,
-/// and its handlers called.
+/// and its handlers called. Where the record is, or None when the stack
+/// isn't there and the process ended.
 pub fn raise(
     cpu: &mut Cpu,
     ctx: Context,
@@ -330,7 +356,7 @@ pub fn raise(
     flags: u32,
     address: u32,
     params: &[u32],
-) {
+) -> Option<u32> {
     let ctx_at = (ctx.gpr[ESP].wrapping_sub(CONTEXT_SIZE)) & !3;
     let record = ctx_at.wrapping_sub(RECORD_SIZE);
     let esp = record.wrapping_sub(BELOW_RECORD);
@@ -342,7 +368,7 @@ pub fn raise(
             Some(&ctx),
             UNHANDLED_EXIT_CODE,
         );
-        return;
+        return None;
     }
     // The handlers run with TF clear, whatever the context says: else
     // each of their instructions would raise another exception. DF is
@@ -355,7 +381,8 @@ pub fn raise(
     write_context(cpu, ctx_at, &ctx, fpu, context_flags);
     write_record(cpu, record, code, flags, address, params);
     let frame = handlers(cpu);
-    dispatch(cpu, record, ctx_at, frame);
+    dispatch(cpu, record, ctx_at, frame, 0);
+    Some(record)
 }
 
 /// Write an EXCEPTION_RECORD at `at`.
@@ -383,8 +410,9 @@ pub fn set_handlers(cpu: &mut Cpu, frame: u32) {
 
 /// Call the handler of the frame `frame` for the exception whose record
 /// and context are at `record` and `ctx_at`, or with none left, the
-/// unhandled exception filter.
-fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32) {
+/// unhandled exception filter. `nested` is the frame whose handler a
+/// nested exception was raised in, until the search has passed it, or 0.
+fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32, nested: u32) {
     if frame == END_OF_CHAIN || frame == 0 || !present(cpu, frame, 8) {
         unhandled(cpu, record, ctx_at);
         return;
@@ -392,49 +420,144 @@ fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32) {
     let handler = cpu.bus.guest_read_32(frame + 4);
     let dispatcher = record - 12;
     let resume = call::here(cpu);
-    if !call::call(
-        cpu,
-        handler,
-        &[record, frame, ctx_at, dispatcher],
-        SEH_HANDLER,
-        resume,
-        vec![record, ctx_at, frame],
-    ) {
+    if !push_guard(cpu, "NestedExceptionHandler", frame)
+        || !call::call(
+            cpu,
+            handler,
+            &[record, frame, ctx_at, dispatcher],
+            SEH_HANDLER,
+            resume,
+            vec![record, ctx_at, frame, nested],
+        )
+    {
         let what = "an exception, and its stack is gone";
         super::fatal_with(cpu, what, None, UNHANDLED_EXIT_CODE);
     }
 }
 
-/// A handler returned: the program goes on at the context, or the next
-/// handler is called.
-pub fn handler_returned(cpu: &mut Cpu, value: u32, call: Call) {
-    let &[record, ctx_at, frame] = call.data.as_slice() else {
-        return;
+/// Put the system's frame for a call of the handler of `frame` on the
+/// chain, below the stack, with the handler of KERNEL32's called
+/// `handler`. False, with nothing changed, if the stack isn't there.
+fn push_guard(cpu: &mut Cpu, handler: &str, frame: u32) -> bool {
+    let at = cpu.esp().wrapping_sub(GUARD_SIZE);
+    if !cpu.bus.guest_probe(at, GUARD_SIZE as usize, true) {
+        return false;
+    }
+    let next = handlers(cpu);
+    let handler = super::kernel32::address_of(handler);
+    cpu.bus.guest_write_32(at, next);
+    cpu.bus.guest_write_32(at + 4, handler);
+    cpu.bus.guest_write_32(at + GUARD_ESTABLISHER, frame);
+    cpu.set_esp(at);
+    set_handlers(cpu, at);
+    true
+}
+
+/// Take the system's frame at `at` off the chain, as KERNEL32 pops it
+/// when the handler returns: `fs:[0]` becomes the next frame it holds,
+/// whatever the handler did to the chain, and the stack is above it.
+fn pop_guard(cpu: &mut Cpu, at: u32) {
+    let next = cpu.bus.guest_read_32(at);
+    set_handlers(cpu, next);
+    cpu.set_esp(at.wrapping_add(GUARD_SIZE));
+}
+
+/// NestedExceptionHandler(record, frame, context, dispatcher): the
+/// handler of the system's frame around an exception handler, which an
+/// exception raised in that handler reaches first. Unwinding, it lets
+/// the frame go (ExceptionContinueSearch); otherwise it gives the
+/// dispatcher the frame whose handler runs, and the exception is nested
+/// (ExceptionNestedException). Windows 98's is at BFF76855h.
+pub fn nested_exception_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guard_handler(cpu, args, false, NESTED_EXCEPTION)
+}
+
+/// NestedUnwindHandler(record, frame, context, dispatcher): the handler
+/// of the system's frame around a handler RtlUnwind calls. An unwind
+/// that reaches it collided with that one: it gives the frame that one
+/// was unwinding (ExceptionCollidedUnwind). An exception it lets go.
+/// Windows 98's is at BFF7687Ah.
+pub fn nested_unwind_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guard_handler(cpu, args, true, COLLIDED_UNWIND)
+}
+
+/// What the handler of a system's frame does: when the record's
+/// unwinding flags say `unwinding` is how it was reached, it puts the
+/// frame whose handler runs in the dispatcher's word and returns
+/// `answer`; otherwise ExceptionContinueSearch.
+fn guard_handler(cpu: &mut Cpu, args: &[u32], unwinding: bool, answer: u32) -> Option<u32> {
+    let &[record, frame, _, dispatcher] = args else {
+        unreachable!()
     };
-    if value == CONTINUE_EXECUTION {
-        let flags = cpu.bus.guest_read_32(record + 4);
-        if flags & NONCONTINUABLE != 0 {
-            let address = cpu.bus.guest_read_32(record + 12);
-            let mut ctx = Context::of(cpu);
-            ctx.gpr[ESP] = record - BELOW_RECORD;
-            let fpu = control::save_image(cpu);
-            raise(
-                cpu,
-                ctx,
-                &fpu,
-                NONCONTINUABLE_EXCEPTION,
-                NONCONTINUABLE,
-                address,
-                &[],
-            );
+    let flags = cpu.bus.guest_read_32(record + 4);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    if (flags & (UNWINDING | EXIT_UNWIND) != 0) != unwinding {
+        return Some(CONTINUE_SEARCH);
+    }
+    let establisher = cpu.bus.guest_read_32(frame + GUARD_ESTABLISHER);
+    cpu.bus.guest_write_32(dispatcher, establisher);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    Some(answer)
+}
+
+/// A handler returned: the program goes on at the context, or the next
+/// handler is called. As Windows 98's dispatcher does (BFF87FE9h), a
+/// nested exception marks the record as nested until the search passes
+/// the frame it was raised in, and an answer that isn't one raises
+/// STATUS_INVALID_DISPOSITION.
+pub fn handler_returned(cpu: &mut Cpu, value: u32, call: Call) {
+    let (record, ctx_at, frame, mut nested) = match *call.data.as_slice() {
+        [record, ctx_at, frame, nested] => {
+            pop_guard(cpu, call.esp);
+            (record, ctx_at, frame, nested)
+        }
+        // A state saved while a handler ran without the system's frame.
+        [record, ctx_at, frame] => (record, ctx_at, frame, 0),
+        _ => return,
+    };
+    let flags = cpu.bus.guest_read_32(record + 4);
+    if frame == nested {
+        cpu.bus.guest_write_32(record + 4, flags & !NESTED_CALL);
+        nested = 0;
+    }
+    match value {
+        CONTINUE_EXECUTION if flags & NONCONTINUABLE != 0 => {
+            raise_for(cpu, record, NONCONTINUABLE_EXCEPTION);
             return;
         }
-        continue_at(cpu, ctx_at);
-        return;
+        CONTINUE_EXECUTION => {
+            continue_at(cpu, ctx_at);
+            return;
+        }
+        CONTINUE_SEARCH => {}
+        NESTED_EXCEPTION => {
+            let flags = cpu.bus.guest_read_32(record + 4);
+            cpu.bus.guest_write_32(record + 4, flags | NESTED_CALL);
+            nested = nested.max(cpu.bus.guest_read_32(record - 12));
+        }
+        _ => {
+            raise_for(cpu, record, INVALID_DISPOSITION);
+            return;
+        }
     }
-    // Go on searching (nested and collided exceptions too).
     let next = cpu.bus.guest_read_32(frame);
-    dispatch(cpu, record, ctx_at, next);
+    dispatch(cpu, record, ctx_at, next, nested);
+}
+
+/// Raise `code`, which can't be continued, for what a handler answered
+/// for the exception at `record`, at the stack as it is: its record
+/// leads to that one, as Windows 98's has it.
+fn raise_for(cpu: &mut Cpu, record: u32, code: u32) {
+    let address = cpu.bus.guest_read_32(record + 12);
+    let ctx = Context::of(cpu);
+    let fpu = control::save_image(cpu);
+    if let Some(at) = raise(cpu, ctx, &fpu, code, NONCONTINUABLE, address, &[]) {
+        cpu.bus.guest_write_32(at + 8, record);
+    }
 }
 
 /// Go on in the running thread at the CONTEXT at `at`.
@@ -714,25 +837,56 @@ fn unwind(cpu: &mut Cpu, state: [u32; 5], resume: (u32, u32)) {
         return;
     }
     let handler = cpu.bus.guest_read_32(frame + 4);
-    let dispatcher = ctx_at - RECORD_SIZE - 12;
+    let dispatcher = unwind_dispatcher(ctx_at);
+    if !push_guard(cpu, "NestedUnwindHandler", frame) {
+        call::finish(cpu, resume, value);
+        return;
+    }
+    // The state, and that the system's frame is on the chain.
+    let mut data = state.to_vec();
+    data.push(1);
     if !call::call(
         cpu,
         handler,
         &[record, frame, ctx_at, dispatcher],
         SEH_UNWIND,
         resume,
-        state.to_vec(),
+        data,
     ) {
+        pop_guard(cpu, cpu.esp());
         call::finish(cpu, resume, value);
     }
 }
 
+/// The word RtlUnwind gives the handlers it calls as their dispatcher
+/// context, below its context at `ctx_at` and the record it may make.
+fn unwind_dispatcher(ctx_at: u32) -> u32 {
+    ctx_at - RECORD_SIZE - 12
+}
+
 /// A handler returned from unwinding: its frame comes off the chain, and
-/// the next one unwinds.
-pub fn unwind_handler_returned(cpu: &mut Cpu, _: u32, call: Call) {
-    let Ok(mut state) = <[u32; 5]>::try_from(call.data.as_slice()) else {
+/// the next one unwinds. As Windows 98's RtlUnwind does (BFF884AAh), an
+/// unwind that collided with another goes on from the frame that one had
+/// got to, and an answer that isn't one raises
+/// STATUS_INVALID_DISPOSITION.
+pub fn unwind_handler_returned(cpu: &mut Cpu, value: u32, call: Call) {
+    let data = call.data.as_slice();
+    let Some(Ok(mut state)) = data.get(..5).map(<[u32; 5]>::try_from) else {
         return;
     };
+    // A state saved while a handler ran without the system's frame has
+    // only the unwind's own.
+    if data.len() > 5 {
+        pop_guard(cpu, call.esp);
+    }
+    match value {
+        CONTINUE_SEARCH => {}
+        COLLIDED_UNWIND => state[2] = cpu.bus.guest_read_32(unwind_dispatcher(state[1])),
+        _ => {
+            raise_for(cpu, state[0], INVALID_DISPOSITION);
+            return;
+        }
+    }
     let next = cpu.bus.guest_read_32(state[2]);
     set_handlers(cpu, next);
     state[2] = next;

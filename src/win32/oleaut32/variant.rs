@@ -495,6 +495,44 @@ pub fn variant_copy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
 }
 
+/// VarUI4FromStr(text, lcid, flags, out): the number a string of Unicode
+/// characters ends at its zero, read as VarParseNumFromStr reads one
+/// (with the formats of English (United States), whatever the locale),
+/// rounded half to even. DISP_E_TYPEMISMATCH if it isn't a number,
+/// DISP_E_OVERFLOW if it is outside 0 to FFFFFFFFh; `out` is then left
+/// alone. ATL's registrar reads its scripts' DWORD values with it.
+pub fn var_ui4_from_str(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[text, _lcid, _flags, out] = args else {
+        unreachable!()
+    };
+    if text == 0 || !cpu.bus.guest_probe(out, 4, true) {
+        return Some(E_INVALIDARG);
+    }
+    let mut units = Vec::new();
+    loop {
+        let at = text.wrapping_add(2 * units.len() as u32);
+        if !cpu.bus.guest_probe(at, 2, false) {
+            return Some(E_INVALIDARG);
+        }
+        match cpu.bus.guest_read_16(at) {
+            0 => break,
+            c => units.push(c),
+        }
+    }
+    match ui4(&units) {
+        Ok(n) => {
+            cpu.bus.guest_write_32(out, n);
+            Some(S_OK)
+        }
+        Err(e) => Some(e),
+    }
+}
+
+fn ui4(units: &[u16]) -> Result<u32, u32> {
+    let n = parse_number(units).ok_or(DISP_E_TYPEMISMATCH)?;
+    Ok(integer(n, 0, u32::MAX as i128)? as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +588,17 @@ mod tests {
             Ok(Out::Bits(VT_BOOL, b)) => assert_eq!(b, VARIANT_TRUE),
             _ => panic!("no bool"),
         }
+    }
+
+    #[test]
+    fn ui4_from_str_takes_unsigned_32_bit_numbers() {
+        let ui4 = |s: &str| ui4(&s.encode_utf16().collect::<Vec<_>>());
+        assert_eq!(ui4(" 4294967295 "), Ok(u32::MAX));
+        assert_eq!(ui4("&H10"), Ok(16));
+        assert_eq!(ui4("2.5"), Ok(2));
+        assert_eq!(ui4("4294967296"), Err(DISP_E_OVERFLOW));
+        assert_eq!(ui4("-1"), Err(DISP_E_OVERFLOW));
+        assert_eq!(ui4("x"), Err(DISP_E_TYPEMISMATCH));
     }
 
     #[test]

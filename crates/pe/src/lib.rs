@@ -621,7 +621,11 @@ impl Image {
     }
 
     /// Move the image to `base`: apply its relocations, and change the
-    /// image base in the headers and here.
+    /// image base here. The headers in `data` keep the file's image base,
+    /// as Windows 98 (and Windows NT before Vista) leave the mapped
+    /// headers of a relocated module: Petite's unpacker checksums them,
+    /// that field too, and stops with "This file has been tampered with"
+    /// when they differ from the file's.
     pub fn relocate(&mut self, base: u32) -> Result<()> {
         let delta = base.wrapping_sub(self.headers.image_base);
         if delta == 0 {
@@ -647,9 +651,6 @@ impl Image {
             }
         }
         self.headers.image_base = base;
-        if let Some(pe) = pe_offset(&self.data) {
-            self.set_u32(pe as u32 + 24 + 28, base)?;
-        }
         Ok(())
     }
 

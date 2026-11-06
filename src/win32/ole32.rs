@@ -21,6 +21,7 @@ use crate::cpu::Cpu;
 
 mod calls;
 mod compobj;
+mod medium;
 mod propvariant;
 pub mod stream;
 
@@ -163,6 +164,7 @@ static APIS: &[Api] = &[
     stdcall("ILockBytes_WriteAt", 0, 6, stream::write_at),
     stdcall("ILockBytes_Flush", 0, 1, stream::nothing),
     stdcall("ILockBytes_SetSize", 0, 3, stream::stream_set_size),
+    stdcall("ReleaseStgMedium", 41, 1, medium::release_stg_medium),
 ];
 
 /// The vtables, by their places in this list.

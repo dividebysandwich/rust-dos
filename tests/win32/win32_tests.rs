@@ -277,6 +277,47 @@ fn a_program_is_relocated_when_its_base_is_taken() {
     assert_eq!(code as usize, HELLO.len());
 }
 
+/// Windows 98 leaves the headers of a module it relocated as the file
+/// has them: their image base is the one the file asks for. Petite's
+/// unpacker checksums its DLL's mapped headers (Grom's CmdLineExt02.dll)
+/// and stops with "This file has been tampered with" otherwise.
+#[test]
+fn a_relocated_program_keeps_the_file_image_base_in_its_headers() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetModuleHandleA", "ExitProcess"])];
+    // 8FFFFFFFh, which the relocations leave alone, is one below the
+    // base the file asks for.
+    let below = 0x8FFF_FFFFu32 as i32;
+    let (code, out) = run(
+        "relocated_headers",
+        program(0x9000_0000, true, imports, &[0; 4], |a, l| {
+            let mut moved = a.create_label();
+            let mut kept = a.create_label();
+            a.push(0)?;
+            a.call(l.import(0))?;
+            // Not at the base it asked for, or the test says nothing.
+            a.mov(ecx, eax)?;
+            a.sub(ecx, below)?;
+            a.cmp(ecx, 1)?;
+            a.jne(moved)?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            a.set_label(&mut moved)?;
+            // 1 if the optional header's ImageBase is the file's, else 2.
+            a.mov(ecx, dword_ptr(eax + 0x3C))?;
+            a.mov(ecx, dword_ptr(eax + ecx + 0x34))?;
+            a.sub(ecx, below)?;
+            a.cmp(ecx, 1)?;
+            a.je(kept)?;
+            a.mov(ecx, 2)?;
+            a.set_label(&mut kept)?;
+            a.push(ecx)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", out);
+}
+
 #[test]
 fn a_program_that_must_stay_at_its_base_is_refused() {
     let (code, text) = run("fixed", hello(0x9000_0000, false));
@@ -1306,6 +1347,287 @@ fn a_handler_on_the_exception_chain_resumes_after_a_divide_error() {
     assert_eq!(code, 42, "{}", out);
 }
 
+/// As Windows 98's KERNEL32 calls a handler: with a frame of its own on
+/// top of the chain, whose next frame and third word are the handler's
+/// own frame, and off the chain again when the handler returns. Petite's
+/// unpacker finds its stack through `fs:[0]`'s next frame that way.
+#[test]
+fn a_handler_runs_below_the_systems_frame_on_the_chain() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, out) = run(
+        "seh_guard",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut over = a.create_label();
+            let mut bad = a.create_label();
+            let mut kept = a.create_label();
+            a.call(over)?;
+            // The handler: EDX 1 if fs:[0] is a frame whose next and
+            // third word are the frame it was called for (its second
+            // argument), then on after the 2-byte DIV with that in EAX.
+            a.xor(edx, edx)?;
+            a.mov(eax, dword_ptr(0).fs())?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.cmp(eax, ecx)?;
+            a.je(bad)?;
+            a.cmp(dword_ptr(eax), ecx)?;
+            a.jne(bad)?;
+            a.cmp(dword_ptr(eax + 8), ecx)?;
+            a.jne(bad)?;
+            a.mov(edx, 1)?;
+            a.set_label(&mut bad)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), edx)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut over)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            // The program's frame is first on the chain again.
+            a.cmp(dword_ptr(0).fs(), esp)?;
+            a.je(kept)?;
+            a.add(eax, 10)?;
+            a.set_label(&mut kept)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            a.push(eax)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", out);
+}
+
+/// A handler that runs on a stack of its own above the thread's, as
+/// Petite's unpacker does in Grom's CmdLineExt02.dll, and takes an
+/// exception there, still returns to the system that called it once it is
+/// back on the thread's stack. The exception on the other stack isn't a
+/// sign that the program left the call of the first handler.
+#[test]
+fn a_handler_on_a_stack_above_the_threads_returns_to_its_caller() {
+    const MEM_COMMIT_RESERVE: i32 = 0x3000;
+    const PAGE_READWRITE: i32 = 4;
+    const HIGH: i32 = 0x6000_0000;
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["VirtualAlloc", "ExitProcess"])];
+    // Data: the thread's stack pointer in the first handler, and the
+    // second handler's calls.
+    let (code, out) = run(
+        "seh_other_stack",
+        program(BASE, false, imports, &[0; 8], |a, l| {
+            let mut first = a.create_label();
+            let mut second = a.create_label();
+            let mut start = a.create_label();
+            let mut fail = a.create_label();
+            a.jmp(start)?;
+            a.set_label(&mut fail)?;
+            a.push(99)?;
+            a.call(l.import(1))?;
+            // The second handler, on the high stack: on after the 2-byte
+            // DIV.
+            a.set_label(&mut second)?;
+            a.inc(dword_ptr(l.at(4)))?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            // The first handler: over to the high stack, a frame there
+            // and a DIV by zero, back to the thread's stack, and on after
+            // the program's DIV with 1 in EAX.
+            a.set_label(&mut first)?;
+            a.mov(dword_ptr(l.at(0)), esp)?;
+            a.mov(esp, HIGH + 0x8000)?;
+            push_label(a, second)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.mov(esp, dword_ptr(l.at(0)))?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.mov(dword_ptr(eax + 0xB0), 1)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_args(a, &[HIGH, 0x10000, MEM_COMMIT_RESERVE, PAGE_READWRITE])?;
+            a.call(l.import(0))?;
+            a.cmp(eax, HIGH)?;
+            a.jne(fail)?;
+            push_label(a, first)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 7)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            // 1 from the first handler, 2 more if the second one ran once.
+            a.cmp(dword_ptr(l.at(4)), 1)?;
+            a.jne(fail)?;
+            a.add(eax, 2)?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 3, "{}", out);
+}
+
+/// An exception raised in a handler, as Windows 98 dispatches it: the
+/// system's frame around that handler marks it as nested, the handlers
+/// up to and with the frame whose handler raised it see
+/// EXCEPTION_NESTED_CALL (10h), and those after it don't.
+#[test]
+fn an_exception_in_a_handler_is_nested_until_its_frame() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    // Data: the inner handler's calls, and the flags it and the outer
+    // handler saw for the second exception.
+    let (code, out) = run(
+        "seh_nested",
+        program(BASE, false, imports, &[0; 12], |a, l| {
+            let mut outer = a.create_label();
+            let mut inner = a.create_label();
+            let mut again = a.create_label();
+            let mut start = a.create_label();
+            let mut once = a.create_label();
+            a.jmp(start)?;
+            // The outer handler: notes the flags, goes on after the
+            // 5-byte MOV that faulted in the inner handler.
+            a.set_label(&mut outer)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax + 4))?;
+            a.mov(dword_ptr(l.at(8)), eax)?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 5)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            // The inner handler: called first for the DIV, it faults; for
+            // that fault it notes the flags and searches on. Back from
+            // the fault, it goes on after the DIV.
+            a.set_label(&mut inner)?;
+            a.inc(dword_ptr(l.at(0)))?;
+            a.cmp(dword_ptr(l.at(0)), 1)?;
+            a.jne(again)?;
+            a.mov(eax, dword_ptr(0))?;
+            a.mov(eax, dword_ptr(esp + 12))?;
+            a.add(dword_ptr(eax + 0xB8), 2)?;
+            a.xor(eax, eax)?;
+            a.ret()?;
+            a.set_label(&mut again)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.mov(eax, dword_ptr(eax + 4))?;
+            a.mov(dword_ptr(l.at(4)), eax)?;
+            a.mov(eax, 1)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            push_label(a, outer)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            push_label(a, inner)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            // 1 for the inner handler's NESTED_CALL, 2 for none at the
+            // outer one's, 4 for the inner handler called twice.
+            a.xor(eax, eax)?;
+            a.mov(ecx, dword_ptr(l.at(4)))?;
+            a.shr(ecx, 4)?;
+            a.and(ecx, 1)?;
+            a.or(eax, ecx)?;
+            a.mov(ecx, dword_ptr(l.at(8)))?;
+            a.not(ecx)?;
+            a.shr(ecx, 3)?;
+            a.and(ecx, 2)?;
+            a.or(eax, ecx)?;
+            a.cmp(dword_ptr(l.at(0)), 2)?;
+            a.jne(once)?;
+            a.or(eax, 4)?;
+            a.set_label(&mut once)?;
+            a.push(eax)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 7, "{}", out);
+}
+
+/// RtlUnwind calls a handler as the dispatcher does, with Windows 98's
+/// frame for a collided unwind on top of the chain, its next and third
+/// word the frame being unwound, and takes the frame off the chain.
+#[test]
+fn rtl_unwind_calls_a_handler_below_the_systems_frame() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["RtlUnwind", "ExitProcess"])];
+    let (code, out) = run(
+        "seh_unwind_guard",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut handler = a.create_label();
+            let mut bad = a.create_label();
+            let mut start = a.create_label();
+            let mut kept = a.create_label();
+            a.jmp(start)?;
+            // The inner frame's handler: 1 in the data if fs:[0]'s next
+            // and third word are its frame, and the unwinding flag set.
+            a.set_label(&mut handler)?;
+            a.mov(eax, dword_ptr(0).fs())?;
+            a.mov(ecx, dword_ptr(esp + 8))?;
+            a.cmp(eax, ecx)?;
+            a.je(bad)?;
+            a.cmp(dword_ptr(eax), ecx)?;
+            a.jne(bad)?;
+            a.cmp(dword_ptr(eax + 8), ecx)?;
+            a.jne(bad)?;
+            a.mov(eax, dword_ptr(esp + 4))?;
+            a.test(dword_ptr(eax + 4), 2)?;
+            a.je(bad)?;
+            a.mov(dword_ptr(l.at(0)), 1)?;
+            a.set_label(&mut bad)?;
+            a.mov(eax, 1)?;
+            a.ret()?;
+            a.set_label(&mut start)?;
+            // An outer frame whose handler is never called, then the
+            // inner one; unwind to the outer one.
+            push_label(a, handler)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.mov(ebx, esp)?;
+            push_label(a, handler)?;
+            a.push(dword_ptr(0).fs())?;
+            a.mov(dword_ptr(0).fs(), esp)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(0)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.mov(eax, dword_ptr(l.at(0)))?;
+            a.cmp(dword_ptr(0).fs(), ebx)?;
+            a.je(kept)?;
+            a.add(eax, 10)?;
+            a.set_label(&mut kept)?;
+            a.mov(esp, ebx)?;
+            a.pop(dword_ptr(0).fs())?;
+            a.add(esp, 4)?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", out);
+}
+
 /// As on Windows 98, where SafeDisc's loader does this: the program finds
 /// the IDT with SIDT, writes its own code over the handler the divide
 /// error's gate leads to, divides by zero to run it at level 0, and puts
@@ -1634,6 +1956,16 @@ fn push_args(a: &mut CodeAssembler, args: &[i32]) -> Result<(), IcedError> {
         a.push(arg)?;
     }
     Ok(())
+}
+
+/// Push the address of a jump to the code at `label`: a CALL over that
+/// jump, since 32-bit code can't take a label's address.
+fn push_label(a: &mut CodeAssembler, label: CodeLabel) -> Result<(), IcedError> {
+    let mut over = a.create_label();
+    a.call(over)?;
+    a.jmp(label)?;
+    a.set_label(&mut over)?;
+    a.nop()
 }
 
 /// Set bit `bit` of EBX when the flags say equal.
@@ -1976,6 +2308,93 @@ fn a_program_uses_heaps_global_memory_and_mappings() {
             a.push(esi)?;
             a.call(f("UnmapViewOfFile"))?;
             a.cmp(dword_ptr(edi + 0x1000), 7)?;
+            bit_if_equal(a, 5)?;
+            a.mov(eax, ebx)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(
+        code,
+        0x3F,
+        "the checks that failed: {:06b} {}",
+        !code & 0x3F,
+        text
+    );
+}
+
+/// ReleaseStgMedium, as Windows' table of it has it: a global block no
+/// object owns is freed, a stream and the object that owns a medium are
+/// released, a block an object owns is left alone, and the medium is
+/// TYMED_NULL with no owner after. A bit each in the exit code.
+#[test]
+fn release_stg_medium_frees_what_the_medium_holds() {
+    const GMEM_MOVEABLE: i32 = 2;
+    const TYMED_HGLOBAL: i32 = 1;
+    const TYMED_ISTREAM: i32 = 4;
+    let names: &[&str] = &["GlobalAlloc", "GlobalSize"];
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.DLL", names),
+        ("OLE32.DLL", &["ReleaseStgMedium"]),
+    ];
+    // Data: the count of Release calls at 0, an object's vtable at 10h,
+    // the object at 20h, the STGMEDIUM at 30h.
+    let (code, text) = run(
+        "release_stg_medium",
+        program(BASE, false, imports, &[0; 0x40], |a, l| {
+            let mut release = a.create_label();
+            let mut start = a.create_label();
+            let medium = l.at(0x30);
+            let release_medium = |a: &mut CodeAssembler| {
+                a.push(medium as i32)?;
+                a.call(l.import(2))
+            };
+            a.jmp(start)?;
+            // The object's Release, stdcall with its interface.
+            a.set_label(&mut release)?;
+            a.inc(dword_ptr(l.at(0)))?;
+            a.xor(eax, eax)?;
+            a.ret_1(4)?;
+            a.set_label(&mut start)?;
+            a.xor(ebx, ebx)?;
+            push_label(a, release)?;
+            a.pop(dword_ptr(l.at(0x18)))?;
+            a.mov(dword_ptr(l.at(0x20)), l.at(0x10) as i32)?;
+            // A global block nobody owns: freed, and the type cleared.
+            push_args(a, &[GMEM_MOVEABLE, 16])?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.mov(dword_ptr(medium), TYMED_HGLOBAL)?;
+            a.mov(dword_ptr(medium + 4), esi)?;
+            a.mov(dword_ptr(medium + 8), 0)?;
+            release_medium(a)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.test(eax, eax)?;
+            bit_if_equal(a, 0)?;
+            a.cmp(dword_ptr(medium), 0)?;
+            bit_if_equal(a, 1)?;
+            // A stream with an owner: both released, the owner cleared.
+            a.mov(dword_ptr(medium), TYMED_ISTREAM)?;
+            a.mov(dword_ptr(medium + 4), l.at(0x20) as i32)?;
+            a.mov(dword_ptr(medium + 8), l.at(0x20) as i32)?;
+            release_medium(a)?;
+            a.cmp(dword_ptr(l.at(0)), 2)?;
+            bit_if_equal(a, 2)?;
+            a.cmp(dword_ptr(medium + 8), 0)?;
+            bit_if_equal(a, 3)?;
+            // A global block an object owns: only the owner released.
+            push_args(a, &[GMEM_MOVEABLE, 16])?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.mov(dword_ptr(medium), TYMED_HGLOBAL)?;
+            a.mov(dword_ptr(medium + 4), esi)?;
+            a.mov(dword_ptr(medium + 8), l.at(0x20) as i32)?;
+            release_medium(a)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.cmp(eax, 16)?;
+            bit_if_equal(a, 4)?;
+            a.cmp(dword_ptr(l.at(0)), 3)?;
             bit_if_equal(a, 5)?;
             a.mov(eax, ebx)?;
             a.ret()

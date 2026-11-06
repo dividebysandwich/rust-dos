@@ -92,7 +92,8 @@ pub fn call(
     // Calls whose frames were at or above the stack pointer won't return:
     // the program left them, as a handler of its own C runtime does when
     // it jumps to its __except block.
-    thread.calls.retain(|c| c.esp > esp);
+    let stack = thread.stack;
+    thread.calls.retain(|c| !left(c, esp, stack));
     thread.calls.push(Call {
         resume,
         esp,
@@ -150,8 +151,20 @@ pub fn returned(cpu: &mut Cpu) {
 /// exception unwound past them).
 pub fn unwound_to(cpu: &mut Cpu, esp: u32) {
     if let Some(thread) = process(cpu).current_thread_mut() {
-        thread.calls.retain(|c| c.esp > esp);
+        let stack = thread.stack;
+        thread.calls.retain(|c| !left(c, esp, stack));
     }
+}
+
+/// Whether the program left `call` when it runs at the stack pointer
+/// `esp`: its frame is at or below `esp` on the same stack, the thread's
+/// own (`stack`) or another. A program that runs on a stack of its own
+/// above the thread's, as Petite's unpacker does on a block from
+/// GlobalAlloc in a DLL's entry point, hasn't left the calls on the
+/// thread's stack (the call of that entry point, which it returns to).
+fn left(call: &Call, esp: u32, stack: (u32, u32)) -> bool {
+    let on_thread_stack = |at: u32| (stack.0..=stack.1).contains(&at);
+    call.esp <= esp && on_thread_stack(call.esp) == on_thread_stack(esp)
 }
 
 crate::state_fields!(Call {
