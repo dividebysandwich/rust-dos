@@ -135,11 +135,32 @@ impl Opl {
 
     fn timer_control(&mut self, value: u8, now_us: u64) {
         if value & 0x80 != 0 {
-            // Reset the timer flags.
+            // Reset the timer flags. A running timer raises its flag
+            // again at its next overflow.
             self.timer_expired = [false; 2];
+            for i in 0..2 {
+                self.skip_to_last_overflow(i, now_us);
+            }
             return;
         }
-        self.timer_mask = [value & 0x40 != 0, value & 0x20 != 0];
+        let mask = [value & 0x40 != 0, value & 0x20 != 0];
+        for (i, &masked) in mask.iter().enumerate() {
+            if masked {
+                // Setting a timer's mask bit clears its flag, as on the
+                // YM3812 (MAME's fmopl clears the status bits that a write
+                // to 04h masks, and DOSBox does the same). Titus the Fox
+                // and Moktar detect the AdLib by it: they mask timer 1
+                // after it ran out, and wait for status A0h, the flag of
+                // timer 2 alone.
+                self.timer_expired[i] = false;
+            } else if self.timer_mask[i] {
+                // The timer ran on while masked, overflowing without
+                // raising its flag; its first flag comes at its next
+                // overflow.
+                self.skip_to_last_overflow(i, now_us);
+            }
+        }
+        self.timer_mask = mask;
         for (i, bit) in [0x01u8, 0x02].into_iter().enumerate() {
             let start = value & bit != 0;
             if start && self.timer_start[i].is_none() {
@@ -151,18 +172,33 @@ impl Opl {
         }
     }
 
+    /// Timer `i`'s period in microseconds: timer 1 counts 80 us steps,
+    /// timer 2 320 us steps, up from its value to 256, and then starts
+    /// again from the value.
+    fn timer_period(&self, i: usize) -> u64 {
+        (256 - self.timer_value[i] as u64) * [80, 320][i]
+    }
+
+    /// Count a running timer from its last overflow up to `now_us`, so
+    /// that its flag goes up at the next one: the overflows before it
+    /// raised none.
+    fn skip_to_last_overflow(&mut self, i: usize, now_us: u64) {
+        if let Some(start) = self.timer_start[i] {
+            let period = self.timer_period(i);
+            self.timer_start[i] = Some(start + now_us.saturating_sub(start) / period * period);
+        }
+    }
+
     /// The status register: IRQ (bit 7) and the timer flags (6, 5). An
     /// OPL2 also reads 06h in the low bits, which is how programs tell the
     /// two apart.
     pub fn read_status(&mut self, now_us: u64) -> u8 {
-        // Timer 1 counts 80 us steps, timer 2 320 us steps, up from the
-        // value to 256.
-        for (i, step) in [80u64, 320].into_iter().enumerate() {
-            if let Some(start) = self.timer_start[i] {
-                let period = (256 - self.timer_value[i] as u64) * step;
-                if now_us.saturating_sub(start) >= period && !self.timer_mask[i] {
-                    self.timer_expired[i] = true;
-                }
+        for i in 0..2 {
+            if let Some(start) = self.timer_start[i]
+                && now_us.saturating_sub(start) >= self.timer_period(i)
+                && !self.timer_mask[i]
+            {
+                self.timer_expired[i] = true;
             }
         }
         let mut status = 0;
@@ -237,5 +273,66 @@ mod mute_tests {
         assert!(opl.channels()[0].key_on, "it goes on playing");
         opl.set_mute(0);
         assert!(loudest(&mut opl, 2000) > 1000);
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    fn write(opl: &mut Opl, reg: u8, value: u8, now_us: u64) {
+        opl.write_address(0, reg);
+        opl.write_data(0, value, now_us);
+    }
+
+    /// Titus the Fox's and Moktar's AdLib check: both timers run masked,
+    /// then timer 1 alone is unmasked until it runs out, then masked again
+    /// and timer 2 unmasked. The game waits for A0h, timer 2's flag alone.
+    #[test]
+    fn masking_a_timer_clears_its_flag() {
+        let mut opl = Opl::new(false);
+        write(&mut opl, 0x04, 0x63, 0);
+        assert_eq!(opl.read_status(10_000), 0x06);
+        write(&mut opl, 0x04, 0x23, 19_000);
+        // Timer 1, at value 0, runs out 256 * 80 us after its start.
+        assert_eq!(opl.read_status(20_000), 0x06);
+        assert_eq!(opl.read_status(20_480), 0xC6);
+        write(&mut opl, 0x04, 0x43, 20_500);
+        assert_eq!(
+            opl.read_status(20_500),
+            0x06,
+            "the mask cleared timer 1's flag"
+        );
+        // Timer 2 runs out 256 * 320 us after its start.
+        assert_eq!(opl.read_status(81_910), 0x06);
+        assert_eq!(opl.read_status(81_920), 0xA6);
+    }
+
+    /// A timer that overflowed while masked raises its flag at its next
+    /// overflow after the unmask, not at once.
+    #[test]
+    fn an_unmasked_timer_flags_its_next_overflow() {
+        let mut opl = Opl::new(false);
+        write(&mut opl, 0x02, 0xFF, 0);
+        write(&mut opl, 0x04, 0x41, 0);
+        write(&mut opl, 0x04, 0x01, 1_000);
+        assert_eq!(opl.read_status(1_000), 0x06);
+        // It overflows every 80 us: at 960, then at 1040.
+        assert_eq!(opl.read_status(1_039), 0x06);
+        assert_eq!(opl.read_status(1_040), 0xC6);
+    }
+
+    /// The reset bit clears the flags of running timers until their next
+    /// overflow.
+    #[test]
+    fn a_reset_flag_comes_back_at_the_next_overflow() {
+        let mut opl = Opl::new(false);
+        write(&mut opl, 0x02, 0xFF, 0);
+        write(&mut opl, 0x04, 0x01, 0);
+        assert_eq!(opl.read_status(100), 0xC6);
+        write(&mut opl, 0x04, 0x80, 100);
+        assert_eq!(opl.read_status(100), 0x06);
+        assert_eq!(opl.read_status(159), 0x06);
+        assert_eq!(opl.read_status(160), 0xC6);
     }
 }
