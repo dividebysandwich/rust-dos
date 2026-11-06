@@ -14,17 +14,22 @@
 //! window's own. The play's end (`play_ended`) queues EC_COMPLETE,
 //! which sets the graph's event and posts its notification message.
 //!
-//! The graph has no filters a program can see: the methods that add,
-//! connect or list filters return E_NOTIMPL, and so do IDispatch's,
-//! but for GetTypeInfoCount, which counts no type information.
+//! The graph's own filters aren't seen by the program. A program adds
+//! filters of its own with AddFilter, and RenderFile connects the
+//! movie's pictures to one of their input pins when one takes them
+//! (filter.rs): the device then opens without a window and plays the
+//! sound. The methods that connect or list filters themselves return
+//! E_NOTIMPL, and so do IDispatch's, but for GetTypeInfoCount, which
+//! counts no type information.
 //! Positions are in milliseconds within, in 100-nanosecond units
 //! (TIME_FORMAT_MEDIA_TIME) through IMediaSeeking and in seconds
 //! through IMediaPosition. The play's rate is always 1.
 
+use super::filter;
 use super::{
     E_ABORT, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_POINTER, FILE_NOT_FOUND, Kind,
-    S_FALSE, S_OK, TIME_FORMAT_MEDIA_TIME, VFW_E_NO_PALETTE_AVAILABLE, VFW_E_UNKNOWN_FILE_TYPE,
-    VFW_E_WRONG_STATE, get64, put32, put64,
+    S_FALSE, S_OK, TIME_FORMAT_MEDIA_TIME, VFW_E_NO_PALETTE_AVAILABLE, VFW_E_NOT_FOUND,
+    VFW_E_UNKNOWN_FILE_TYPE, VFW_E_WRONG_STATE, get64, put32, put64,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
@@ -37,12 +42,13 @@ use crate::win32::winmm::mci::{
 use std::sync::Arc;
 
 /// IMediaControl's states.
-const STATE_STOPPED: u32 = 0;
-const STATE_PAUSED: u32 = 1;
-const STATE_RUNNING: u32 = 2;
+use filter::{STATE_PAUSED, STATE_RUNNING, STATE_STOPPED};
 
-/// The events.
+/// The events: the play's end, and its ends by the user and by an
+/// error, the three WaitForCompletion ends with.
 pub const EC_COMPLETE: u32 = 0x01;
+const EC_USERABORT: u32 = 0x02;
+const EC_ERRORABORT: u32 = 0x03;
 
 /// IMediaEventEx's flag that stops the notifications.
 const AM_MEDIAEVENT_NONOTIFY: u32 = 0x01;
@@ -64,7 +70,6 @@ const OAFALSE: u32 = 0;
 
 const INFINITE: u32 = 0xFFFF_FFFF;
 const VFW_E_NOT_STOPPED: u32 = 0x8004_0224;
-const VFW_E_NOT_FOUND: u32 = 0x8004_0216;
 
 /// 100-nanosecond units a millisecond.
 const UNITS_MS: i64 = 10_000;
@@ -110,6 +115,36 @@ pub struct Graph {
     /// Whether a wait (GetEvent, WaitForCompletion) took the play's
     /// EC_COMPLETE before the play's end could queue it.
     pub complete_taken: bool,
+    /// The program's filters (filter.rs), the connection of the movie's
+    /// pictures to one of them, and the one being made while RenderFile
+    /// connects; whether RenderFile tried to connect, so that it opens
+    /// its device when it runs again.
+    pub filters: Vec<filter::Filter>,
+    pub link: Option<filter::Link>,
+    pub connecting: Option<filter::Link>,
+    pub connect_tried: bool,
+    /// The number the next filter's made name has.
+    pub name_index: u32,
+    /// The reference clock (sample.rs, by its object), which the graph
+    /// holds, and whether its filters were given it.
+    pub clock: u32,
+    pub clock_given: bool,
+    /// The state the program's filters were moved to by the method that
+    /// runs, which runs again after the calls.
+    pub filters_state: Option<u32>,
+    /// Since when the graph runs, in the clock's 100-nanosecond units,
+    /// and how long it ran before it paused.
+    pub start: i64,
+    pub elapsed: i64,
+    /// Whether CancelDefaultHandling(EC_COMPLETE) passes each renderer's
+    /// EC_COMPLETE on, and how many renderers told it since the graph
+    /// started.
+    pub cancelled: bool,
+    pub completes: u32,
+    /// The threads waiting for an event of a graph whose pictures go to
+    /// the program's filter (GetEvent, WaitForCompletion), each with when
+    /// its wait times out.
+    pub waits: Vec<(u32, Option<u64>)>,
 }
 
 /// CoCreateInstance's CLSID_FilterGraph: a graph with nothing in it.
@@ -134,16 +169,18 @@ pub fn new(cpu: &mut Cpu) -> u32 {
     id
 }
 
-/// The graph `id` goes: its device closes, its event too.
+/// The graph `id` goes: its device closes, its event too, and its link
+/// and clock are let go.
 pub fn close(cpu: &mut Cpu, id: u32) {
     if let Some(i) = mci::graph_device(cpu, id) {
         mci::close_device(cpu, i);
     }
+    filter::forget(cpu, id);
     let event = graph(cpu, id).map_or((0, 0), |g| std::mem::take(&mut g.event));
     super::free_event(cpu, event);
 }
 
-fn graph(cpu: &mut Cpu, id: u32) -> Option<&mut Graph> {
+pub(super) fn graph(cpu: &mut Cpu, id: u32) -> Option<&mut Graph> {
     match super::kind(cpu, id)? {
         Kind::Graph { g } => Some(g),
         _ => None,
@@ -172,11 +209,11 @@ fn media(cpu: &mut Cpu, i: usize) -> Result<Arc<Media>, u32> {
 
 /// The graph `this`, and the device that shows its pictures: for
 /// IVideoWindow and IBasicVideo, which a file without pictures doesn't
-/// have.
+/// have, nor one whose pictures go to the program's filter.
 fn renderer(cpu: &mut Cpu, this: u32) -> Result<(u32, usize, Arc<Media>), u32> {
     let (id, i) = player(cpu, this)?;
     let m = media(cpu, i)?;
-    if m.frames == 0 {
+    if m.frames == 0 || filter::linked(cpu, id) {
         return Err(E_NOINTERFACE);
     }
     Ok((id, i, m))
@@ -222,10 +259,26 @@ fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, from: u32, to: u32) ->
 
 // IGraphBuilder.
 
-/// IGraphBuilder::RenderFile(this, file, play list).
+/// IGraphBuilder::RenderFile(this, file, play list). With filters of the
+/// program's in the graph, the decoder connects to one of them first.
 pub fn render_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, file) = (args[0], args[1]);
-    with_calls(cpu, |cpu| render(cpu, this, file))
+    if let Ok(id) = graph_of(cpu, this)
+        && file != 0
+        && graph(cpu, id).is_some_and(|g| !g.connect_tried && g.state == STATE_STOPPED)
+        && filter::has_filters(cpu, id)
+        && !filter::linked(cpu, id)
+    {
+        return filter::connect(cpu, id, file);
+    }
+    let done = with_calls(cpu, |cpu| render(cpu, this, file));
+    if done.is_some()
+        && let Ok(id) = graph_of(cpu, this)
+        && let Some(g) = graph(cpu, id)
+    {
+        g.connect_tried = false;
+    }
+    done
 }
 
 /// IMediaControl::RenderFile(this, file): the same, with a BSTR.
@@ -252,6 +305,7 @@ fn render(cpu: &mut Cpu, this: u32, file: u32) -> Result<u32, u32> {
         open_type: "MPEGVideo".to_string(),
         element: path.clone(),
         alias: format!("DirectShow graph {id}"),
+        windowless: filter::linked(cpu, id),
         ..Parms::default()
     };
     let flags = MCI_OPEN_TYPE | MCI_OPEN_ELEMENT | MCI_OPEN_ALIAS;
@@ -275,13 +329,6 @@ fn render(cpu: &mut Cpu, this: u32, file: u32) -> Result<u32, u32> {
     Ok(S_OK)
 }
 
-/// IGraphBuilder::FindFilterByName(this, name, out): there are none to
-/// find.
-pub fn find_filter_by_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    crate::win32::com::write_out(cpu, args[2], 0);
-    Some(VFW_E_NOT_FOUND)
-}
-
 /// IDispatch::GetTypeInfoCount(this, out): no type information, which
 /// is a count of 0 and S_OK.
 pub fn get_type_info_count(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
@@ -294,7 +341,8 @@ pub fn get_type_info_count(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// stop position. One there already completes at once.
 pub fn run(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let this = args[0];
-    with_calls(cpu, |cpu| {
+    filters_first(cpu, this, STATE_RUNNING)?;
+    let done = with_calls(cpu, |cpu| {
         let id = graph_of(cpu, this)?;
         let Some(i) = mci::graph_device(cpu, id) else {
             set_state(cpu, id, STATE_RUNNING);
@@ -306,20 +354,51 @@ pub fn run(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (pos, to) = positions(cpu, i);
         if pos >= to {
             set_state(cpu, id, STATE_RUNNING);
-            queue(cpu, id, EC_COMPLETE, S_OK, 0);
+            // The program's renderer tells its own end, after the
+            // stream's.
+            if !filter::linked(cpu, id) {
+                queue(cpu, id, EC_COMPLETE, S_OK, 0);
+            }
             return Ok(S_OK);
         }
         command(cpu, i, MCI_PLAY, MCI_FROM | MCI_TO, pos, to)?;
         set_state(cpu, id, STATE_RUNNING);
         Ok(S_OK)
-    })
+    });
+    filters_done(cpu, this, done)
+}
+
+/// Before the graph `this` moves to `state`, its program's filters do
+/// (filter.rs `change_state`): None while their calls are made, after
+/// which the method runs again.
+fn filters_first(cpu: &mut Cpu, this: u32, state: u32) -> Option<()> {
+    let Ok(id) = graph_of(cpu, this) else {
+        return Some(());
+    };
+    if graph(cpu, id).is_some_and(|g| g.state == state) {
+        return Some(());
+    }
+    filter::change_state(cpu, id, state)
+}
+
+/// The method that moved the graph `this` is done with `done`: the
+/// filters' move is forgotten.
+fn filters_done(cpu: &mut Cpu, this: u32, done: Option<u32>) -> Option<u32> {
+    if done.is_some()
+        && let Ok(id) = graph_of(cpu, this)
+        && let Some(g) = graph(cpu, id)
+    {
+        g.filters_state = None;
+    }
+    done
 }
 
 /// IMediaControl::Pause(this): the play stops where it is, its picture
 /// shown.
 pub fn pause(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let this = args[0];
-    with_calls(cpu, |cpu| {
+    filters_first(cpu, this, STATE_PAUSED)?;
+    let done = with_calls(cpu, |cpu| {
         let id = graph_of(cpu, this)?;
         if let Some(i) = mci::graph_device(cpu, id) {
             if mci::device(cpu, i).video.started.is_some() {
@@ -332,7 +411,8 @@ pub fn pause(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
         set_state(cpu, id, STATE_PAUSED);
         Ok(S_OK)
-    })
+    });
+    filters_done(cpu, this, done)
 }
 
 /// The video renderer's window shows, as it does when its graph pauses
@@ -350,14 +430,16 @@ fn show(cpu: &mut Cpu, id: u32, i: usize) -> Result<(), u32> {
 /// IMediaControl::Stop(this): the play stops where it is.
 pub fn stop(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let this = args[0];
-    with_calls(cpu, |cpu| {
+    filters_first(cpu, this, STATE_STOPPED)?;
+    let done = with_calls(cpu, |cpu| {
         let id = graph_of(cpu, this)?;
         if let Some(i) = mci::graph_device(cpu, id) {
             command(cpu, i, MCI_STOP, 0, 0, 0)?;
         }
         set_state(cpu, id, STATE_STOPPED);
         Ok(S_OK)
-    })
+    });
+    filters_done(cpu, this, done)
 }
 
 /// IMediaControl::StopWhenReady(this): paused, then stopped.
@@ -401,8 +483,15 @@ fn queue(cpu: &mut Cpu, id: u32, code: u32, p1: u32, p2: u32) {
 }
 
 /// The play of the graph `id` reached its end (winmm/mci): EC_COMPLETE,
-/// unless a wait has taken it already.
+/// unless a wait has taken it already. When the pictures go to the
+/// program's filter, the device is the sound's renderer, one of two.
 pub fn play_ended(cpu: &mut Cpu, id: u32) {
+    if filter::linked(cpu, id) {
+        if sound_renders(cpu, id) {
+            complete(cpu, id, S_OK, 0);
+        }
+        return;
+    }
     let Some(g) = graph(cpu, id) else {
         return;
     };
@@ -410,6 +499,69 @@ pub fn play_ended(cpu: &mut Cpu, id: u32) {
         return;
     }
     queue(cpu, id, EC_COMPLETE, S_OK, 0);
+}
+
+/// Whether the device of the graph `id` plays sound: whether it is a
+/// renderer of a graph whose pictures go to the program's filter.
+fn sound_renders(cpu: &mut Cpu, id: u32) -> bool {
+    mci::graph_device(cpu, id)
+        .and_then(|i| video::media(cpu, i))
+        .is_some_and(|m| m.audio.is_some())
+}
+
+/// A renderer of the graph `id` reached its stream's end: EC_COMPLETE
+/// when all have (Wine's filtergraph.c counts them), or each one's when
+/// the program cancelled the default handling.
+fn complete(cpu: &mut Cpu, id: u32, p1: u32, p2: u32) {
+    let renderers = 1 + sound_renders(cpu, id) as u32;
+    let Some(g) = graph(cpu, id) else {
+        return;
+    };
+    if g.cancelled {
+        queue(cpu, id, EC_COMPLETE, p1, p2);
+        return;
+    }
+    g.completes += 1;
+    if g.completes == renderers {
+        queue(cpu, id, EC_COMPLETE, S_OK, 0);
+    }
+}
+
+/// IMediaEventSink::Notify(this, code, param1, param2): an event of a
+/// filter's. EC_COMPLETE counts the renderers, unless its default
+/// handling is cancelled.
+pub fn sink_notify(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, code, p1, p2] = args[..] else {
+        return Some(E_INVALIDARG);
+    };
+    let id = hr!(graph_of(cpu, this));
+    if code == EC_COMPLETE {
+        complete(cpu, id, p1, p2);
+    } else {
+        queue(cpu, id, code, p1, p2);
+    }
+    Some(S_OK)
+}
+
+/// IMediaEvent::CancelDefaultHandling(this, code): EC_COMPLETE's is the
+/// one the graph has.
+pub fn cancel_default_handling(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    default_handling(cpu, args, true)
+}
+
+/// IMediaEvent::RestoreDefaultHandling(this, code).
+pub fn restore_default_handling(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    default_handling(cpu, args, false)
+}
+
+fn default_handling(cpu: &mut Cpu, args: &[u32], cancelled: bool) -> Option<u32> {
+    let id = hr!(graph_of(cpu, args[0]));
+    if args[1] == EC_COMPLETE
+        && let Some(g) = graph(cpu, id)
+    {
+        g.cancelled = cancelled;
+    }
+    Some(S_OK)
 }
 
 /// When the play of the graph `id` ends, in the clock's microseconds, if
@@ -433,10 +585,15 @@ pub fn get_event_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// first event queued, or the play's EC_COMPLETE when it comes before
 /// the timeout; E_ABORT after the timeout without one.
 pub fn get_event(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, code, p1, p2, timeout] = args[..] else {
+    let id = hr!(graph_of(cpu, args[0]));
+    let done = take_event(cpu, id, args);
+    waited(cpu, id, done)
+}
+
+fn take_event(cpu: &mut Cpu, id: u32, args: &[u32]) -> Option<u32> {
+    let [_, code, p1, p2, timeout] = args[..] else {
         return Some(E_INVALIDARG);
     };
-    let id = hr!(graph_of(cpu, this));
     for at in [code, p1, p2] {
         if at == 0 || !cpu.bus.guest_probe(at, 4, true) {
             return Some(E_POINTER);
@@ -474,6 +631,9 @@ fn wait_for(cpu: &mut Cpu, id: u32, timeout: u32, took: impl FnOnce(&mut Cpu)) -
     if timeout == 0 {
         return Some(E_ABORT);
     }
+    if filter::linked(cpu, id) {
+        return wait_event(cpu, id, timeout);
+    }
     let now = cpu.bus.clock.now_micros();
     let limit = (timeout != INFINITE).then(|| now + timeout as u64 * 1000);
     let end = ends_at(cpu, id);
@@ -499,19 +659,90 @@ fn wait_for(cpu: &mut Cpu, id: u32, timeout: u32, took: impl FnOnce(&mut Cpu)) -
     None
 }
 
+/// Wait up to `timeout` milliseconds for an event of the graph `id`,
+/// whose pictures go to the program's filter, which tells their end: the
+/// method runs again when one comes, and E_ABORT when none came in time.
+fn wait_event(cpu: &mut Cpu, id: u32, timeout: u32) -> Option<u32> {
+    let tid = user32::current_tid(cpu);
+    let now = cpu.bus.clock.now_micros();
+    let g = graph(cpu, id)?;
+    let deadline = match g.waits.iter().find(|w| w.0 == tid) {
+        Some(w) => w.1,
+        None => {
+            let d = (timeout != INFINITE).then(|| now + timeout as u64 * 1000);
+            g.waits.push((tid, d));
+            d
+        }
+    };
+    if deadline.is_some_and(|d| d <= now) {
+        return Some(E_ABORT);
+    }
+    let event = g.event.1;
+    cpu.set_eip(cpu.eip().wrapping_sub(4));
+    thread::block(
+        cpu,
+        Wait {
+            objects: vec![event],
+            deadline,
+            ..Wait::default()
+        },
+    );
+    None
+}
+
+/// A method that waits for the graph `id`'s events is done with `done`:
+/// its thread's wait is forgotten.
+fn waited(cpu: &mut Cpu, id: u32, done: Option<u32>) -> Option<u32> {
+    if done.is_some() {
+        let tid = user32::current_tid(cpu);
+        if let Some(g) = graph(cpu, id) {
+            g.waits.retain(|w| w.0 != tid);
+        }
+    }
+    done
+}
+
 /// IMediaEvent::WaitForCompletion(this, timeout, code): until the play
-/// ends, its EC_COMPLETE taken with the events before it.
+/// ends, its EC_COMPLETE taken with the events before it. A graph whose
+/// pictures go to the program's filter also ends with EC_USERABORT and
+/// EC_ERRORABORT, and the other events are dropped while it waits.
 pub fn wait_for_completion(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, timeout, code] = args[..] else {
+    let id = hr!(graph_of(cpu, args[0]));
+    let done = wait_completion(cpu, id, args);
+    waited(cpu, id, done)
+}
+
+fn wait_completion(cpu: &mut Cpu, id: u32, args: &[u32]) -> Option<u32> {
+    let [_, timeout, code] = args[..] else {
         return Some(E_INVALIDARG);
     };
-    let id = hr!(graph_of(cpu, this));
     hr!(put32(cpu, code, 0));
+    let linked = filter::linked(cpu, id);
     let Some(g) = graph(cpu, id) else {
         return Some(E_POINTER);
     };
     if g.state != STATE_RUNNING {
         return Some(VFW_E_WRONG_STATE);
+    }
+    if linked {
+        let ends = [EC_COMPLETE, EC_USERABORT, EC_ERRORABORT];
+        let found = g.events.iter().position(|e| ends.contains(&e.0));
+        let taken = match found {
+            Some(k) => g.events.drain(..=k).next_back().map(|e| e.0),
+            None => {
+                g.events.clear();
+                None
+            }
+        };
+        let (empty, event) = (g.events.is_empty(), g.event.1);
+        if empty {
+            super::reset_event(cpu, event);
+        }
+        if let Some(c) = taken {
+            cpu.bus.guest_write_32(code, c);
+            return Some(S_OK);
+        }
+        return wait_for(cpu, id, timeout, |_| {});
     }
     if let Some(k) = g.events.iter().position(|e| e.0 == EC_COMPLETE) {
         g.events.drain(..=k);
@@ -575,8 +806,10 @@ fn seek_to(cpu: &mut Cpu, id: u32, i: usize, ms: u32) -> Result<(), u32> {
     let running = graph(cpu, id).is_some_and(|g| g.state == STATE_RUNNING);
     if let Some(g) = graph(cpu, id) {
         g.complete_taken = false;
+        g.completes = 0;
     }
     let to = mci::device(cpu, i).video.to;
+    filter::seeked(cpu, id, ms, to);
     if running && ms < to {
         command(cpu, i, MCI_PLAY, MCI_FROM | MCI_TO, ms, to)
     } else {
@@ -1591,7 +1824,20 @@ crate::state_fields!(Graph {
     border_color,
     background_palette,
     cursor_hidden,
-    complete_taken
+    complete_taken,
+    filters,
+    link,
+    connecting,
+    connect_tried,
+    name_index,
+    clock,
+    clock_given,
+    filters_state,
+    start,
+    elapsed,
+    cancelled,
+    completes,
+    waits
 });
 
 #[cfg(test)]

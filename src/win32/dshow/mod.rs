@@ -31,7 +31,9 @@ macro_rules! hr {
     };
 }
 
+pub mod filter;
 pub mod graph;
+pub mod sample;
 pub mod stream;
 
 use super::com::{self, Guid};
@@ -121,6 +123,40 @@ pub const IID_IMEDIA_SEEKING: Guid = guid(
     0x11CF,
     [0x8B, 0x46, 0x00, 0x80, 0x5F, 0x6C, 0xEF, 0x60],
 );
+pub const IID_IMEDIA_EVENT_SINK: Guid = quartz_iid(0x56A8_68A2);
+pub const IID_IBASE_FILTER: Guid = quartz_iid(0x56A8_6895);
+pub const IID_IMEDIA_FILTER: Guid = quartz_iid(0x56A8_6899);
+pub const IID_IPERSIST: Guid = guid(0x0000_010C, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+pub const IID_IPIN: Guid = quartz_iid(0x56A8_6891);
+pub const IID_IMEM_INPUT_PIN: Guid = quartz_iid(0x56A8_689D);
+pub const IID_IMEM_ALLOCATOR: Guid = quartz_iid(0x56A8_689C);
+pub const IID_IMEDIA_SAMPLE: Guid = quartz_iid(0x56A8_689A);
+pub const IID_IMEDIA_SAMPLE2: Guid = guid(
+    0x36B7_3884,
+    0xC2C8,
+    0x11CF,
+    [0x8B, 0x46, 0x00, 0x80, 0x5F, 0x6C, 0xEF, 0x60],
+);
+pub const IID_IREFERENCE_CLOCK: Guid = quartz_iid(0x56A8_6897);
+pub const IID_IQUALITY_CONTROL: Guid = quartz_iid(0x56A8_68A5);
+pub const CLSID_MEMORY_ALLOCATOR: Guid = guid(
+    0x1E65_1CC0,
+    0xB199,
+    0x11D0,
+    [0x82, 0x12, 0x00, 0xC0, 0x4F, 0xC3, 0x2C, 0x45],
+);
+pub const CLSID_SYSTEM_CLOCK: Guid = guid(
+    0xE436_EBB1,
+    0x524F,
+    0x11CE,
+    [0x9F, 0x53, 0x00, 0x20, 0xAF, 0x0B, 0xA7, 0x70],
+);
+pub const CLSID_MPEG_VIDEO_CODEC: Guid = guid(
+    0xFEB5_0740,
+    0x7BEF,
+    0x11CE,
+    [0x9B, 0xD9, 0x00, 0x00, 0xE2, 0x02, 0x59, 0x9C],
+);
 pub const TIME_FORMAT_MEDIA_TIME: Guid = guid(
     0x7B78_5574,
     0x8C82,
@@ -187,8 +223,24 @@ pub const E_UNEXPECTED: u32 = 0x8000_FFFF;
 /// HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND).
 pub const FILE_NOT_FOUND: u32 = 0x8007_0002;
 pub const VFW_E_UNKNOWN_FILE_TYPE: u32 = 0x8004_0240;
-pub const VFW_E_NO_PALETTE_AVAILABLE: u32 = 0x8004_0213;
+pub const VFW_E_NO_PALETTE_AVAILABLE: u32 = 0x8004_0220;
 pub const VFW_E_WRONG_STATE: u32 = 0x8004_0227;
+pub const VFW_S_DUPLICATE_NAME: u32 = 0x0004_022D;
+pub const VFW_S_NO_STOP_TIME: u32 = 0x0004_0270;
+pub const VFW_E_NOT_CONNECTED: u32 = 0x8004_0209;
+pub const VFW_E_ALREADY_CONNECTED: u32 = 0x8004_0204;
+pub const VFW_E_BUFFER_NOTSET: u32 = 0x8004_020C;
+pub const VFW_E_BUFFER_OVERFLOW: u32 = 0x8004_020D;
+pub const VFW_E_BADALIGN: u32 = 0x8004_020E;
+pub const VFW_E_ALREADY_COMMITTED: u32 = 0x8004_020F;
+pub const VFW_E_BUFFERS_OUTSTANDING: u32 = 0x8004_0210;
+pub const VFW_E_NOT_COMMITTED: u32 = 0x8004_0211;
+pub const VFW_E_SIZENOTSET: u32 = 0x8004_0212;
+pub const VFW_E_NOT_FOUND: u32 = 0x8004_0216;
+pub const VFW_E_NOT_STOPPED: u32 = 0x8004_0224;
+pub const VFW_E_TIMEOUT: u32 = 0x8004_022E;
+pub const VFW_E_SAMPLE_TIME_NOT_SET: u32 = 0x8004_0249;
+pub const VFW_E_MEDIA_TIME_NOT_SET: u32 = 0x8004_0251;
 
 // The tables.
 
@@ -237,10 +289,10 @@ static QUARTZ_APIS: &[Api] = &[
     method("Dispatch_GetIDsOfNames", 6, e_notimpl),
     method("Dispatch_Invoke", 9, e_notimpl),
     // IGraphBuilder (IFilterGraph's first).
-    method("Graph_AddFilter", 3, e_notimpl),
-    method("Graph_RemoveFilter", 2, e_notimpl),
+    method("Graph_AddFilter", 3, filter::add_filter),
+    method("Graph_RemoveFilter", 2, filter::remove_filter),
     method("Graph_EnumFilters", 2, e_notimpl),
-    method("Graph_FindFilterByName", 3, graph::find_filter_by_name),
+    method("Graph_FindFilterByName", 3, filter::find_filter_by_name),
     method("Graph_ConnectDirect", 4, e_notimpl),
     method("Graph_Reconnect", 2, e_notimpl),
     method("Graph_Disconnect", 2, e_notimpl),
@@ -266,8 +318,16 @@ static QUARTZ_APIS: &[Api] = &[
     method("Event_GetEventHandle", 2, graph::get_event_handle),
     method("Event_GetEvent", 5, graph::get_event),
     method("Event_WaitForCompletion", 3, graph::wait_for_completion),
-    method("Event_CancelDefaultHandling", 2, s_ok),
-    method("Event_RestoreDefaultHandling", 2, s_ok),
+    method(
+        "Event_CancelDefaultHandling",
+        2,
+        graph::cancel_default_handling,
+    ),
+    method(
+        "Event_RestoreDefaultHandling",
+        2,
+        graph::restore_default_handling,
+    ),
     method("Event_FreeEventParams", 4, s_ok),
     method("Event_SetNotifyWindow", 4, graph::set_notify_window),
     method("Event_SetNotifyFlags", 2, graph::set_notify_flags),
@@ -432,6 +492,95 @@ static QUARTZ_APIS: &[Api] = &[
     method("Audio_get_Volume", 2, graph::get_volume),
     method("Audio_put_Balance", 2, graph::put_balance),
     method("Audio_get_Balance", 2, graph::get_balance),
+    // IMediaEventSink, which the program's filters tell the graph their
+    // events through.
+    method("Sink_Notify", 4, graph::sink_notify),
+    // The MPEG video decoder's IBaseFilter (IMediaFilter's and
+    // IPersist's first), its output pin's IPin and IQualityControl.
+    method("Decoder_GetClassID", 2, filter::decoder_get_class_id),
+    method("Decoder_Stop", 1, s_ok),
+    method("Decoder_Pause", 1, s_ok),
+    method("Decoder_Run", 3, s_ok),
+    method("Decoder_GetState", 3, filter::decoder_get_state),
+    method("Decoder_SetSyncSource", 2, s_ok),
+    method("Decoder_GetSyncSource", 2, filter::decoder_get_sync_source),
+    method("Decoder_EnumPins", 2, e_notimpl),
+    method("Decoder_FindPin", 3, filter::decoder_find_pin),
+    method(
+        "Decoder_QueryFilterInfo",
+        2,
+        filter::decoder_query_filter_info,
+    ),
+    method("Decoder_JoinFilterGraph", 3, s_ok),
+    method("Decoder_QueryVendorInfo", 2, e_notimpl),
+    method("Pin_Connect", 3, filter::pin_connect),
+    method("Pin_ReceiveConnection", 3, e_unexpected),
+    method("Pin_Disconnect", 1, filter::pin_disconnect),
+    method("Pin_ConnectedTo", 2, filter::pin_connected_to),
+    method(
+        "Pin_ConnectionMediaType",
+        2,
+        filter::pin_connection_media_type,
+    ),
+    method("Pin_QueryPinInfo", 2, filter::pin_query_pin_info),
+    method("Pin_QueryDirection", 2, filter::pin_query_direction),
+    method("Pin_QueryId", 2, filter::pin_query_id),
+    method("Pin_QueryAccept", 2, filter::pin_query_accept),
+    method("Pin_EnumMediaTypes", 2, e_notimpl),
+    method("Pin_QueryInternalConnections", 3, e_notimpl),
+    method("Pin_EndOfStream", 1, e_unexpected),
+    method("Pin_BeginFlush", 1, e_unexpected),
+    method("Pin_EndFlush", 1, e_unexpected),
+    method("Pin_NewSegment", 7, s_ok),
+    method("Quality_Notify", 8, s_ok),
+    method("Quality_SetSink", 2, s_ok),
+    // The memory allocator (CLSID_MemoryAllocator) and its samples'
+    // IMediaSample2 (IMediaSample's first).
+    method("Alloc_SetProperties", 3, sample::set_properties),
+    method("Alloc_GetProperties", 2, sample::get_properties),
+    method("Alloc_Commit", 1, sample::commit),
+    method("Alloc_Decommit", 1, sample::decommit),
+    method("Alloc_GetBuffer", 5, sample::get_buffer),
+    method("Alloc_ReleaseBuffer", 2, s_ok),
+    method("MediaSample_GetPointer", 2, sample::get_pointer),
+    method("MediaSample_GetSize", 1, sample::get_size),
+    method("MediaSample_GetTime", 3, sample::get_time),
+    method("MediaSample_SetTime", 3, sample::set_time),
+    method("MediaSample_IsSyncPoint", 1, sample::is_sync_point),
+    method("MediaSample_SetSyncPoint", 2, sample::set_sync_point),
+    method("MediaSample_IsPreroll", 1, sample::is_preroll),
+    method("MediaSample_SetPreroll", 2, sample::set_preroll),
+    method("MediaSample_GetActualDataLength", 1, sample::get_actual),
+    method("MediaSample_SetActualDataLength", 2, sample::set_actual),
+    method("MediaSample_GetMediaType", 2, sample::get_media_type),
+    method("MediaSample_SetMediaType", 2, sample::set_media_type),
+    method("MediaSample_IsDiscontinuity", 1, sample::is_discontinuity),
+    method("MediaSample_SetDiscontinuity", 2, sample::set_discontinuity),
+    method("MediaSample_GetMediaTime", 3, sample::get_media_time),
+    method("MediaSample_SetMediaTime", 3, sample::set_media_time),
+    method(
+        "MediaSample_GetProperties",
+        3,
+        sample::get_sample_properties,
+    ),
+    method(
+        "MediaSample_SetProperties",
+        3,
+        sample::set_sample_properties,
+    ),
+    // The system clock (CLSID_SystemClock), the graph's reference clock.
+    method("Clock_GetTime", 2, sample::clock_get_time),
+    method("Clock_AdviseTime", 7, sample::clock_advise_time),
+    method("Clock_AdvisePeriodic", 7, sample::clock_advise_periodic),
+    method("Clock_Unadvise", 2, sample::clock_unadvise),
+    // The decoder's streaming thread: a loop (`filter::stream_thread`).
+    Api {
+        name: "StreamThread",
+        ordinal: 0,
+        args: 1,
+        conv: Conv::Loop,
+        handler: filter::stream_thread,
+    },
 ];
 
 static QUARTZ_VTABLES: &[Vtable] = &[
@@ -609,6 +758,94 @@ static QUARTZ_VTABLES: &[Vtable] = &[
             "Audio_get_Volume",
             "Audio_put_Balance",
             "Audio_get_Balance",
+        ],
+    },
+    Vtable {
+        name: "IMediaEventSink",
+        methods: unknown!["Sink_Notify"],
+    },
+    Vtable {
+        name: "IBaseFilter",
+        methods: unknown![
+            "Decoder_GetClassID",
+            "Decoder_Stop",
+            "Decoder_Pause",
+            "Decoder_Run",
+            "Decoder_GetState",
+            "Decoder_SetSyncSource",
+            "Decoder_GetSyncSource",
+            "Decoder_EnumPins",
+            "Decoder_FindPin",
+            "Decoder_QueryFilterInfo",
+            "Decoder_JoinFilterGraph",
+            "Decoder_QueryVendorInfo",
+        ],
+    },
+    Vtable {
+        name: "IPin",
+        methods: unknown![
+            "Pin_Connect",
+            "Pin_ReceiveConnection",
+            "Pin_Disconnect",
+            "Pin_ConnectedTo",
+            "Pin_ConnectionMediaType",
+            "Pin_QueryPinInfo",
+            "Pin_QueryDirection",
+            "Pin_QueryId",
+            "Pin_QueryAccept",
+            "Pin_EnumMediaTypes",
+            "Pin_QueryInternalConnections",
+            "Pin_EndOfStream",
+            "Pin_BeginFlush",
+            "Pin_EndFlush",
+            "Pin_NewSegment",
+        ],
+    },
+    Vtable {
+        name: "IQualityControl",
+        methods: unknown!["Quality_Notify", "Quality_SetSink"],
+    },
+    Vtable {
+        name: "IMemAllocator",
+        methods: unknown![
+            "Alloc_SetProperties",
+            "Alloc_GetProperties",
+            "Alloc_Commit",
+            "Alloc_Decommit",
+            "Alloc_GetBuffer",
+            "Alloc_ReleaseBuffer",
+        ],
+    },
+    Vtable {
+        name: "IMediaSample2",
+        methods: unknown![
+            "MediaSample_GetPointer",
+            "MediaSample_GetSize",
+            "MediaSample_GetTime",
+            "MediaSample_SetTime",
+            "MediaSample_IsSyncPoint",
+            "MediaSample_SetSyncPoint",
+            "MediaSample_IsPreroll",
+            "MediaSample_SetPreroll",
+            "MediaSample_GetActualDataLength",
+            "MediaSample_SetActualDataLength",
+            "MediaSample_GetMediaType",
+            "MediaSample_SetMediaType",
+            "MediaSample_IsDiscontinuity",
+            "MediaSample_SetDiscontinuity",
+            "MediaSample_GetMediaTime",
+            "MediaSample_SetMediaTime",
+            "MediaSample_GetProperties",
+            "MediaSample_SetProperties",
+        ],
+    },
+    Vtable {
+        name: "IReferenceClock",
+        methods: unknown![
+            "Clock_GetTime",
+            "Clock_AdviseTime",
+            "Clock_AdvisePeriodic",
+            "Clock_Unadvise",
         ],
     },
 ];
@@ -793,6 +1030,13 @@ pub const MEDIA_SEEKING: Iface = Iface(D_QUARTZ, 4);
 pub const VIDEO_WINDOW: Iface = Iface(D_QUARTZ, 5);
 pub const BASIC_VIDEO: Iface = Iface(D_QUARTZ, 6);
 pub const BASIC_AUDIO: Iface = Iface(D_QUARTZ, 7);
+pub const EVENT_SINK: Iface = Iface(D_QUARTZ, 8);
+pub const DECODER: Iface = Iface(D_QUARTZ, 9);
+pub const PIN: Iface = Iface(D_QUARTZ, 10);
+pub const QUALITY: Iface = Iface(D_QUARTZ, 11);
+pub const ALLOCATOR: Iface = Iface(D_QUARTZ, 12);
+pub const MEDIA_SAMPLE: Iface = Iface(D_QUARTZ, 13);
+pub const CLOCK: Iface = Iface(D_QUARTZ, 14);
 pub const MULTI_STREAM: Iface = Iface(D_AMSTREAM, 0);
 pub const DD_STREAM: Iface = Iface(D_AMSTREAM, 1);
 pub const AUDIO_STREAM: Iface = Iface(D_AMSTREAM, 2);
@@ -813,6 +1057,18 @@ pub static CLASSES: &[com::Class] = &[
         dll: "QUARTZ.DLL",
         name: "Filter Graph no thread",
         create: graph::create,
+    },
+    com::Class {
+        clsid: CLSID_MEMORY_ALLOCATOR,
+        dll: "QUARTZ.DLL",
+        name: "Memory Allocator",
+        create: sample::create_allocator,
+    },
+    com::Class {
+        clsid: CLSID_SYSTEM_CLOCK,
+        dll: "QUARTZ.DLL",
+        name: "System Clock",
+        create: sample::create_clock,
     },
     com::Class {
         clsid: CLSID_AM_MULTI_MEDIA_STREAM,
@@ -852,6 +1108,11 @@ pub enum Kind {
     VideoSample { s: stream::Sample },
     AudioSample { s: stream::Sample },
     AudioData { d: stream::AudioData },
+    Decoder { d: filter::Decoder },
+    Pin { p: filter::Pin },
+    Allocator { a: sample::Allocator },
+    MediaSample { s: sample::MediaSample },
+    Clock { c: sample::Clock },
 }
 
 impl Default for Kind {
@@ -878,7 +1139,20 @@ impl Kind {
                 (IID_IVIDEO_WINDOW, VIDEO_WINDOW),
                 (IID_IBASIC_VIDEO, BASIC_VIDEO),
                 (IID_IBASIC_AUDIO, BASIC_AUDIO),
+                (IID_IMEDIA_EVENT_SINK, EVENT_SINK),
             ],
+            Kind::Decoder { .. } => &[
+                (IID_IBASE_FILTER, DECODER),
+                (IID_IMEDIA_FILTER, DECODER),
+                (IID_IPERSIST, DECODER),
+            ],
+            Kind::Pin { .. } => &[(IID_IPIN, PIN), (IID_IQUALITY_CONTROL, QUALITY)],
+            Kind::Allocator { .. } => &[(IID_IMEM_ALLOCATOR, ALLOCATOR)],
+            Kind::MediaSample { .. } => &[
+                (IID_IMEDIA_SAMPLE, MEDIA_SAMPLE),
+                (IID_IMEDIA_SAMPLE2, MEDIA_SAMPLE),
+            ],
+            Kind::Clock { .. } => &[(IID_IREFERENCE_CLOCK, CLOCK)],
             Kind::Multi { .. } => &[
                 (IID_IAM_MULTI_MEDIA_STREAM, MULTI_STREAM),
                 (IID_IMULTI_MEDIA_STREAM, MULTI_STREAM),
@@ -986,6 +1260,13 @@ pub fn drop_ref(cpu: &mut Cpu, id: u32) -> u32 {
     match &o.kind {
         Kind::Graph { .. } => graph::close(cpu, id),
         Kind::Multi { .. } => stream::close(cpu, id),
+        // A sample goes back to its allocator, which keeps it.
+        Kind::MediaSample { .. } => {
+            sample::returned(cpu, id);
+            return 0;
+        }
+        Kind::Allocator { .. } => sample::free_allocator(cpu, id),
+        Kind::Clock { .. } => sample::close_clock(cpu, id),
         _ => {}
     }
     let s = state(cpu);
@@ -998,6 +1279,19 @@ pub fn drop_ref(cpu: &mut Cpu, id: u32) -> u32 {
     }
     stream::let_go(cpu, &gone.kind);
     0
+}
+
+/// The object `id` goes, whatever its count, with its interfaces: for
+/// an allocator's samples, which it frees with itself.
+pub fn forget(cpu: &mut Cpu, id: u32) {
+    let s = state(cpu);
+    let Some(i) = s.objects.iter().position(|o| o.id == id) else {
+        return;
+    };
+    let gone = s.objects.remove(i);
+    for &(_, at) in &gone.ifaces {
+        com::free_interface(cpu, at);
+    }
 }
 
 /// The object `this` is an interface of: its id and the interface.
@@ -1094,9 +1388,14 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
         .iter()
         .filter(|o| o.pid == pid)
         .flat_map(|o| match &o.kind {
-            Kind::Graph { g } => vec![g.event.1],
+            Kind::Graph { g } => {
+                let mut held = vec![g.event.1];
+                held.extend(g.link.as_ref().map(|l| l.wake));
+                held
+            }
             Kind::Multi { m } => vec![m.end_event.1],
             Kind::VideoSample { s } | Kind::AudioSample { s } => vec![s.event],
+            Kind::Clock { c } => c.advises.iter().map(|a| a.object).collect(),
             _ => Vec::new(),
         })
         .filter(|&e| e != 0)
@@ -1117,11 +1416,17 @@ pub fn play_ended(cpu: &mut Cpu, graph: u32) {
 /// end-of-stream events and their samples' updates.
 pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) {
     stream::poll(cpu, pid, now);
+    sample::poll(cpu, pid, now);
 }
 
-/// When the process `pid`'s multimedia streams next have something due.
+/// When the process `pid`'s multimedia streams next have something due,
+/// or its clocks an advise.
 pub fn next_due(cpu: &Cpu, pid: Option<u32>) -> Option<u64> {
-    stream::next_due(&cpu.bus.win32.dshow, pid)
+    let s = &cpu.bus.win32.dshow;
+    [stream::next_due(s, pid), sample::next_due(s, pid)]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 /// Set the event object `id` (by its id, not a handle), and wake what
@@ -1191,6 +1496,10 @@ fn e_notimpl(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(E_NOTIMPL)
 }
 
+fn e_unexpected(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(E_UNEXPECTED)
+}
+
 /// IUnknown::QueryInterface(this, iid, out), for every interface here.
 fn query_interface(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, iid, out] = args[..] else {
@@ -1222,6 +1531,11 @@ fn release(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(id) = object_of(cpu, args[0]) else {
         return Some(0);
     };
+    // A graph's last reference: the program's filters in it are told
+    // first, which calls into the program.
+    if state(cpu).get(id).is_some_and(|o| o.refs == 1) && filter::has_filters(cpu, id) {
+        return filter::close(cpu, id);
+    }
     Some(drop_ref(cpu, id))
 }
 
@@ -1269,5 +1583,10 @@ super::state_variants!(Kind {
     VideoSample { s },
     AudioSample { s },
     AudioData { d },
+    Decoder { d },
+    Pin { p },
+    Allocator { a },
+    MediaSample { s },
+    Clock { c },
 });
 crate::state_fields!(State { objects, last_id });
