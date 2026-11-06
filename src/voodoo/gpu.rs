@@ -21,7 +21,7 @@ use super::mirror::Plane;
 use super::mirror::{
     Blit, BlitSource, BufferKey, COLOR_BUFFERS, Command, LayoutKey, row_bytes, rows_of,
 };
-use super::raster::{RasterState, Stride};
+use super::raster::RasterState;
 use super::tracker::{PAGE, Tracker};
 use super::workers::{Job, Word};
 use super::{NONE, Voodoo};
@@ -281,26 +281,23 @@ impl Voodoo {
 
     /// Whether the colour buffer `job` draws into holds hot rows, in any
     /// of its rows: every job into it is drawn in software until they
-    /// cool, not only those over the rows read (`gpu_bytes_hot`). On a
-    /// Banshee that is colBufferAddr's buffer, which a depth clear goes
-    /// with too.
+    /// cool, not only those over the rows read (`gpu_bytes_hot`). That is
+    /// the buffer fbzMode selects (`color_buffer`: colBufferAddr's on a
+    /// Banshee), which a fill of the depth alone goes with too, though
+    /// its dest is 0. A job of another kind (a Voodoo2's SGRAM fill) has
+    /// no colour buffer it goes with.
     fn gpu_buffer_hot(&self, job: &Job) -> bool {
         if !self.gpu.borrow().tracker.any_hot() {
             return false;
         }
-        match &self.banshee {
-            Some(_) => self
-                .mirror_layout()
-                .is_some_and(|key| self.gpu_colour_hot(&key)),
-            None => {
-                let (Job::Triangle { st, .. } | Job::Fastfill { st, .. }) = job else {
-                    return false;
-                };
-                let all = (0, self.fbi.height);
-                let (start, end) = row_bytes(st.dest as u32, self.fbi.stride, all);
-                self.gpu.borrow().tracker.hot_in(start, end)
-            }
-        }
+        let (Job::Triangle { st, .. } | Job::Fastfill { st, .. }) = job else {
+            return false;
+        };
+        let Some(at) = self.color_buffer((st.fbz_mode >> 14) & 3) else {
+            return false;
+        };
+        self.mirror_layout()
+            .is_some_and(|key| self.buffer_hot(&key, at as u32 * 2))
     }
 
     /// Whether `job` is a Banshee's fastfill of pixels that all lie within
@@ -354,7 +351,12 @@ impl Voodoo {
     /// software, and a clear of the depth they test against goes into the
     /// memory with them rather than be read back before them every frame.
     pub(crate) fn gpu_colour_hot(&self, key: &LayoutKey) -> bool {
-        key.color_at(self.fbi.rgboffs[0]).is_some_and(|b| {
+        self.buffer_hot(key, self.fbi.rgboffs[0])
+    }
+
+    /// Whether `key`'s colour buffer at byte `at` has rows hot.
+    fn buffer_hot(&self, key: &LayoutKey, at: u32) -> bool {
+        key.color_at(at).is_some_and(|b| {
             let (start, end) = row_bytes(b.at / 2, b.stride, (0, key.height));
             self.gpu.borrow().tracker.hot_in(start, end)
         })
@@ -423,9 +425,9 @@ impl Voodoo {
     /// The bytes of the memory a job left to the renderer draws into, as
     /// rows of its buffers: of its colour buffer and the auxiliary buffer
     /// the rows a triangle or a fastfill can write (`job_rows`), or all the
-    /// rows of every colour buffer for a job of another kind. On a Banshee
-    /// they are the recording's buffers, None if the job draws colours
-    /// into one the recording doesn't have.
+    /// rows of every colour buffer for a job of another kind. They are the
+    /// recording's buffers, None if the job draws colours into one the
+    /// recording doesn't have.
     fn gpu_job_bytes(&self, job: &Job) -> Option<JobBytes> {
         self.job_bytes(job, false)
     }
@@ -437,75 +439,61 @@ impl Voodoo {
     }
 
     /// `gpu_job_bytes`, every row of the buffers if `whole`.
+    ///
+    /// The buffers are the recording's (`mirror_layout`) on every card,
+    /// which are the ones the renderer draws and the tracker counts. On a
+    /// Voodoo Graphics or Voodoo2 they are the registers' too: the jobs
+    /// that come here are recorded after `mirror_sync`, which records the
+    /// registers' layout (`mirror_key`) when it changed.
     fn job_bytes(&self, job: &Job, whole: bool) -> Option<JobBytes> {
+        let key = self.mirror_layout()?;
         let mut bytes = [None; SLOTS];
         let mut n = 0;
-        let mut mark = |base: u32, stride: Stride, rows: (u32, u32)| {
-            if base != NONE && rows.0 < rows.1 && n < bytes.len() {
-                bytes[n] = Some(row_bytes(base / 2, stride, rows));
+        let mut mark = |b: &BufferKey, rows: (u32, u32)| {
+            if b.is_some() && rows.0 < rows.1 && n < bytes.len() {
+                bytes[n] = Some(row_bytes(b.at / 2, b.stride, rows));
                 n += 1;
             }
         };
-        if self.banshee.is_some() {
-            let key = self.mirror_layout()?;
-            let all = (0, key.height);
-            match job {
-                Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
-                    let dest = st.dest as u32 * 2;
-                    let rows = if whole {
-                        all
-                    } else {
-                        job_rows(job, key.height)
-                    };
-                    if st.fbz_mode & (1 << 9) != 0 {
-                        let buffer = key.color_at(dest)?;
-                        mark(dest, buffer.stride, rows);
-                    }
-                    // The auxiliary buffer, if a triangle tests or writes
-                    // depth, or uses alpha planes there (whose alpha it
-                    // may blend with without writing it), or a fastfill
-                    // writes it (`fastfill_row`, which tests nothing): a
-                    // job that doesn't leaves it to whatever reads it.
-                    let aux = match job {
-                        Job::Fastfill { .. } => 1 << 10,
-                        _ => 1 << 4 | 1 << 10 | 1 << 18,
-                    };
-                    if st.fbz_mode & aux != 0 {
-                        mark(key.aux.at, key.aux.stride, rows);
-                    }
-                }
-                _ => {
-                    for b in key.color {
-                        mark(b.at, b.stride, all);
-                    }
-                    mark(key.aux.at, key.aux.stride, all);
-                }
-            }
-            return Some(bytes);
-        }
-        let fbi = &self.fbi;
-        let all = (0, fbi.height);
+        let all = (0, key.height);
         match job {
             Job::Triangle { st, .. } | Job::Fastfill { st, .. } => {
                 let rows = if whole {
                     all
                 } else {
-                    job_rows(job, fbi.height)
+                    job_rows(job, key.height)
                 };
-                mark(st.dest as u32 * 2, fbi.stride, rows);
-                mark(fbi.auxoffs, fbi.aux_stride, rows);
+                // The colour buffer, if the job writes colours: a fill of
+                // the depth alone has dest 0 (`fastfill`).
+                if st.fbz_mode & (1 << 9) != 0 {
+                    mark(key.color_at(st.dest as u32 * 2)?, rows);
+                }
+                // The auxiliary buffer, if a triangle tests or writes
+                // depth, or uses alpha planes there (whose alpha it may
+                // blend with without writing it), or a fastfill writes it
+                // (`fastfill_row`, which tests nothing): a job that
+                // doesn't leaves it to whatever reads it. The bits are the
+                // same on every card.
+                let aux = match job {
+                    Job::Fastfill { .. } => 1 << 10,
+                    _ => 1 << 4 | 1 << 10 | 1 << 18,
+                };
+                if st.fbz_mode & aux != 0 {
+                    mark(&key.aux, rows);
+                }
             }
             // A Voodoo2's SGRAM fill of a buffer's rows (`sgram_fill_rows`).
             Job::Rows { base, rows, .. } => {
-                let aux = fbi.auxoffs != NONE && *base == fbi.auxoffs as usize / 2;
-                let stride = if aux { fbi.aux_stride } else { fbi.stride };
-                mark(*base as u32 * 2, stride, if whole { all } else { *rows });
+                let at = *base as u32 * 2;
+                let aux = (key.aux.is_some() && key.aux.at == at).then_some(&key.aux);
+                let buffer = key.color_at(at).or(aux)?;
+                mark(buffer, if whole { all } else { *rows });
             }
             _ => {
-                for offs in fbi.rgboffs {
-                    mark(offs, fbi.stride, all);
+                for b in &key.color {
+                    mark(b, all);
                 }
-                mark(fbi.auxoffs, fbi.aux_stride, all);
+                mark(&key.aux, all);
             }
         }
         Some(bytes)

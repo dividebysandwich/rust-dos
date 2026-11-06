@@ -1549,9 +1549,10 @@ mod tests {
     fn gpu_reads_of_depth_rows_leave_the_rest_of_the_frame_on_the_gpu() {
         // A read of one depth (3DMark 2000's lens flares) makes its band
         // of depth rows hot, not the colour buffer: a fill over other
-        // rows stays on the GPU, and one over the band is drawn in
-        // software after reading back only its own colour rows, not the
-        // whole memory, as the fills after it may go to the GPU again.
+        // rows stays on the GPU, and one that writes depth over the band
+        // is drawn in software after reading back only its own colour
+        // rows, not the whole memory, as the fills after it may go to the
+        // GPU again.
         let mut v = glide_card(2);
         v.set_mirror(true);
         v.set_software_picture(false);
@@ -1565,7 +1566,7 @@ mod tests {
                 .unwrap()
         };
         let fill = |v: &mut Voodoo, (top, bottom): (u32, u32)| {
-            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 10 | 1 << 14);
             write(v, CLIP_LEFT_RIGHT, 300);
             write(v, CLIP_LOW_Y_HIGH_Y, top << 16 | bottom);
             write(v, COLOR1, 0x00F8_0000);
@@ -1589,12 +1590,61 @@ mod tests {
         assert_eq!(reads, [format!("read {:?} 100..110", Some(back / 2))]);
     }
 
+    /// A Voodoo2 with the renderer and reads of the buffers from it, two
+    /// frames drawn, and a count of the jobs left to the renderer.
+    fn hot_card() -> (Voodoo, impl Fn(&Voodoo) -> u64) {
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(log))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let gpu_only = |v: &Voodoo| {
+            v.describe(Now::default())["gpu_only_jobs"]
+                .as_u64()
+                .unwrap()
+        };
+        (v, gpu_only)
+    }
+
+    #[test]
+    fn gpu_reads_of_depth_rows_leave_colour_fills_over_them_on_the_gpu() {
+        // A fill that writes colours alone doesn't touch the auxiliary
+        // buffer: hot depth rows under it leave it to the GPU.
+        let (mut v, gpu_only) = hot_card();
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        write(&mut v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+        write(&mut v, CLIP_LEFT_RIGHT, 300);
+        write(&mut v, CLIP_LOW_Y_HIGH_Y, 100 << 16 | 110);
+        write(&mut v, FASTFILL_CMD, 0);
+        assert_eq!(gpu_only(&v), before + 1, "on the GPU");
+    }
+
+    #[test]
+    fn gpu_reads_of_the_back_buffer_take_its_depth_clears_to_software() {
+        // A fill of the depth alone has dest 0, the front buffer here, and
+        // goes with the colour buffer fbzMode selects: the back buffer,
+        // whose rows are hot, so it is drawn in software with it.
+        let (mut v, gpu_only) = hot_card();
+        v.reg[crate::voodoo::regs::LFB_MODE] = 1 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        write(&mut v, FBZ_MODE, 1 | 1 << 10 | 1 << 14);
+        write(&mut v, CLIP_LEFT_RIGHT, 300);
+        write(&mut v, CLIP_LOW_Y_HIGH_Y, 200 << 16 | 210);
+        write(&mut v, FASTFILL_CMD, 0);
+        assert_eq!(gpu_only(&v), before, "in software");
+    }
+
     #[test]
     fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
-        // After a read of everything, a fastfill draws rows 20..40. A read
-        // of depth rows 96..160 then reads nothing: the fill drew none of
-        // them, and they are in the memory. One of rows 0..64 reads the 20
-        // drawn among them.
+        // After a read of everything, a fastfill draws colour and depth
+        // rows 20..40. A read of depth rows 96..160 then reads nothing:
+        // the fill drew none of them, and they are in the memory. One of
+        // rows 0..64 reads the 20 drawn among them.
         let mut v = glide_card(2);
         v.set_mirror(true);
         v.set_software_picture(false);
@@ -1616,6 +1666,7 @@ mod tests {
         let [rows, partial, drawn, undrawn] = count(&v);
         assert!(rows >= 3 * 480 && rows == drawn + undrawn, "{rows} {drawn}");
         assert_eq!((partial, undrawn), (0, 0), "the first reads read what was drawn");
+        write(&mut v, FBZ_MODE, 1 | 1 << 9 | 1 << 10 | 1 << 14);
         write(&mut v, CLIP_LEFT_RIGHT, 10 << 16 | 300);
         write(&mut v, CLIP_LOW_Y_HIGH_Y, 20 << 16 | 40);
         write(&mut v, FASTFILL_CMD, 0);
