@@ -1733,8 +1733,6 @@ fn clear_test_scene(api: Api, zbuffer: bool, steps: Vec<Step>) -> Scene {
     }
 }
 
-const RED: u32 = 0xFFFF_0000;
-
 /// IDirect3DDevice7's Clear and IDirect3DViewport3's Clear2 of a depth
 /// buffer or a stencil on a target without a depth buffer fail with
 /// D3DERR_ZBUFFER_NOTPRESENT and leave the target as it was, the
