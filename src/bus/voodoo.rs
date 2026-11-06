@@ -7,6 +7,16 @@ use super::{Bus, Hold};
 use crate::voodoo::lfb::MemoryRun;
 use crate::voodoo::{Board, Effect, Now, Voodoo, WINDOW};
 
+/// Where the bytes of a run written into the card come from
+/// (`Bus::run_to_voodoo`).
+#[derive(Clone, Copy)]
+enum RunSource<'a> {
+    /// Plain RAM from this address on: a string move's source.
+    Ram(usize),
+    /// These bytes: a store's.
+    Bytes(&'a [u8]),
+}
+
 impl Bus {
     /// Put in the 3dfx card `board` (None: take it out). A card already
     /// there of the same kind stays as it is.
@@ -175,7 +185,25 @@ impl Bus {
         size: usize,
         backward: bool,
     ) -> bool {
-        if size != 4 || backward || dst & 3 != 0 || len == 0 || !len.is_multiple_of(4) {
+        if size != 4 || backward {
+            return false;
+        }
+        self.run_to_voodoo(dst, len, RunSource::Ram(src))
+    }
+
+    /// Write `bytes` into the 3dfx card's window at `dst` as the dwords
+    /// of `write_32` from the first to the last would, in one call: an MMX
+    /// or SSE store of 8 or 16 bytes, or a single dword, into the linear
+    /// frame buffer. False, having written nothing, where `move_to_voodoo`
+    /// is false for them.
+    pub(crate) fn write_to_voodoo(&mut self, dst: usize, bytes: &[u8]) -> bool {
+        self.run_to_voodoo(dst, bytes.len(), RunSource::Bytes(bytes))
+    }
+
+    /// `move_to_voodoo` and `write_to_voodoo`: `len` bytes from `src` at
+    /// `dst`.
+    fn run_to_voodoo(&mut self, dst: usize, len: usize, src: RunSource<'_>) -> bool {
+        if self.voodoo.is_none() || dst & 3 != 0 || len == 0 || !len.is_multiple_of(4) {
             return false;
         }
         let Some(first) = self.voodoo_at(dst) else {
@@ -208,11 +236,14 @@ impl Bus {
         if self.observe.on {
             self.observe.mapped_write(dst, self.ram.len());
         }
-        let bytes = src..src + len;
         if run == MemoryRun::Fifo {
-            for i in bytes.step_by(4) {
-                let value = u32::from_le_bytes(self.ram[i..i + 4].try_into().unwrap());
-                self.voodoo_write_32(first + (i - src) as u32, value);
+            for i in (0..len).step_by(4) {
+                let value = match src {
+                    RunSource::Ram(at) => &self.ram[at + i..at + i + 4],
+                    RunSource::Bytes(bytes) => &bytes[i..i + 4],
+                };
+                let value = u32::from_le_bytes(value.try_into().unwrap());
+                self.voodoo_write_32(first + i as u32, value);
             }
             return true;
         }
@@ -221,12 +252,16 @@ impl Bus {
         let Some(v) = &mut self.voodoo else {
             return true;
         };
+        let data = match src {
+            RunSource::Ram(at) => &self.ram[at..at + len],
+            RunSource::Bytes(bytes) => bytes,
+        };
         match run {
             MemoryRun::Lfb(index) => {
-                let dwords = self.ram[bytes].as_chunks::<4>().0.iter();
+                let dwords = data.as_chunks::<4>().0.iter();
                 v.lfb_write_run(index, dwords.map(|&d| u32::from_le_bytes(d)));
             }
-            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, &self.ram[bytes]),
+            MemoryRun::Linear(addr) => v.banshee_memory_write(addr, data),
             MemoryRun::Fifo => {}
         }
         true

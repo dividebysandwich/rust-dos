@@ -44,6 +44,7 @@ static LISTS: &[(&str, &str)] = &[
     ("DMLOADER.DLL", include_str!("ordinals/dmloader_dll.txt")),
     ("DMSTYLE.DLL", include_str!("ordinals/dmstyle_dll.txt")),
     ("DMUSIC.DLL", include_str!("ordinals/dmusic_dll.txt")),
+    ("DPLAY.DLL", include_str!("ordinals/dplay_dll.txt")),
     ("DPLAYX.DLL", include_str!("ordinals/dplayx_dll.txt")),
     ("DSOUND.DLL", include_str!("ordinals/dsound_dll.txt")),
     ("GDI32.DLL", include_str!("ordinals/gdi32_dll.txt")),
