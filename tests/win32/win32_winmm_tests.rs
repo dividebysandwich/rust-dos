@@ -253,7 +253,9 @@ fn preempted_spin_program() -> Vec<u8> {
         ("WINMM.dll", &["timeSetEvent", "timeGetTime"]),
     ];
     program(imports, &[0; 0x20], |a, l| {
-        // The thread: set the flag and end.
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's, which
+        // sets the flag and ends.
         let mut start = a.create_label();
         a.push(0)?;
         a.push(0)?;
@@ -262,7 +264,8 @@ fn preempted_spin_program() -> Vec<u8> {
         a.mov(dword_ptr(l.at(SPIN_FLAG)), 1)?;
         a.xor(eax, eax)?;
         a.ret_1(4)?;
-        // The timer's callback (id, msg, user, dw1, dw2): count.
+        // The timer's callback (id, msg, user, dw1, dw2), whose address
+        // the call before it pushes: count.
         let mut main = a.create_label();
         a.set_label(&mut start)?;
         a.push(0)?;
@@ -316,6 +319,135 @@ fn a_thread_a_timer_preempts_still_gives_way_at_the_end_of_its_turn() {
         run_to_exit(&mut cpu, 20_000, |_| {});
         let code = cpu.errorlevel;
         assert_eq!(code, 1, "{core:?}: exit code {code:#x}");
+        assert!(printed(&cpu).is_empty(), "{:?}", printed(&cpu));
+    }
+}
+
+const NEST_DONE: u32 = 0x00;
+const NEST_BUSY: u32 = 0x04;
+const NEST_TICKS: u32 = 0x08;
+const NEST_SEEN: u32 = 0x0C;
+const NEST_OVERLAP: u32 = 0x10;
+const NEST_MAIN_BUSY: u32 = 0x14;
+const NEST_START: u32 = 0x18;
+
+/// A thread that ten times sleeps 1 ms and then is busy for 8 ms, with a
+/// flag set, a periodic timer of 5 ms, and the main thread, of the
+/// thread's priority, spinning until the thread is done, for at most 2
+/// seconds, counting the passes it makes while the flag is set. The
+/// thread whose sleep ends preempts the main one, and the timer's thread
+/// preempts it while it is busy. The exit code has bit 0 set if the
+/// thread never finished, bit 1 if the main thread ran while the other
+/// was busy, and bit 2 if the timer never ran while it was.
+fn nested_preemption_program() -> Vec<u8> {
+    const TIME_PERIODIC: i32 = 1;
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["CreateThread", "ExitProcess", "Sleep"]),
+        ("WINMM.dll", &["timeSetEvent", "timeGetTime"]),
+    ];
+    program(imports, &[0; 0x20], |a, l| {
+        // CreateThread's last three arguments, then its start address,
+        // which the call pushes: the code after it, the thread's.
+        let mut create = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(create)?;
+        let (mut round, mut spin, mut quiet) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.mov(esi, 10)?;
+        a.set_label(&mut round)?;
+        a.push(1)?;
+        a.call(l.import(2))?;
+        a.mov(dword_ptr(l.at(NEST_BUSY)), 1)?;
+        a.mov(eax, dword_ptr(l.at(NEST_TICKS)))?;
+        a.mov(dword_ptr(l.at(NEST_SEEN)), eax)?;
+        a.call(l.import(4))?;
+        a.mov(edi, eax)?;
+        a.set_label(&mut spin)?;
+        a.call(l.import(4))?;
+        a.sub(eax, edi)?;
+        a.cmp(eax, 8)?;
+        a.jb(spin)?;
+        a.mov(eax, dword_ptr(l.at(NEST_TICKS)))?;
+        a.cmp(eax, dword_ptr(l.at(NEST_SEEN)))?;
+        a.je(quiet)?;
+        a.mov(dword_ptr(l.at(NEST_OVERLAP)), 1)?;
+        a.set_label(&mut quiet)?;
+        a.mov(dword_ptr(l.at(NEST_BUSY)), 0)?;
+        a.dec(esi)?;
+        a.jnz(round)?;
+        a.mov(dword_ptr(l.at(NEST_DONE)), 1)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        // The timer's callback (id, msg, user, dw1, dw2), whose address
+        // the call before it pushes: count.
+        let mut main = a.create_label();
+        a.set_label(&mut create)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.call(main)?;
+        a.inc(dword_ptr(l.at(NEST_TICKS)))?;
+        a.ret_1(20)?;
+        a.set_label(&mut main)?;
+        a.pop(ebp)?;
+        a.push(TIME_PERIODIC)?;
+        a.push(0)?;
+        a.push(ebp)?;
+        a.push(1)?;
+        a.push(5)?;
+        a.call(l.import(3))?;
+        a.call(l.import(4))?;
+        a.mov(dword_ptr(l.at(NEST_START)), eax)?;
+        let (mut wait, mut free, mut finish) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.set_label(&mut wait)?;
+        a.cmp(dword_ptr(l.at(NEST_DONE)), 0)?;
+        a.jne(finish)?;
+        a.cmp(dword_ptr(l.at(NEST_BUSY)), 0)?;
+        a.je(free)?;
+        a.inc(dword_ptr(l.at(NEST_MAIN_BUSY)))?;
+        a.set_label(&mut free)?;
+        a.call(l.import(4))?;
+        a.sub(eax, dword_ptr(l.at(NEST_START)))?;
+        a.cmp(eax, 2000)?;
+        a.jb(wait)?;
+        a.set_label(&mut finish)?;
+        let (mut finished, mut alone, mut overlapped) =
+            (a.create_label(), a.create_label(), a.create_label());
+        a.xor(ebx, ebx)?;
+        a.cmp(dword_ptr(l.at(NEST_DONE)), 0)?;
+        a.jne(finished)?;
+        a.or(ebx, 1)?;
+        a.set_label(&mut finished)?;
+        a.cmp(dword_ptr(l.at(NEST_MAIN_BUSY)), 0)?;
+        a.je(alone)?;
+        a.or(ebx, 2)?;
+        a.set_label(&mut alone)?;
+        a.cmp(dword_ptr(l.at(NEST_OVERLAP)), 0)?;
+        a.jne(overlapped)?;
+        a.or(ebx, 4)?;
+        a.set_label(&mut overlapped)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// A thread that preempted another and is preempted in turn goes on
+/// first when the thread that preempted it stops, as Windows puts each
+/// preempted thread back at the head of its priority's queue. The main
+/// thread, preempted first, used to go on instead, while the other was in
+/// the middle of its work.
+#[test]
+fn a_thread_preempted_while_it_preempts_another_goes_on_first() {
+    for core in CORES {
+        let files = [("T.EXE", nested_preemption_program())];
+        let mut cpu = machine("nested_preemption", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        let code = cpu.errorlevel;
+        assert_eq!(code, 0, "{core:?}: exit code {code:#x}");
         assert!(printed(&cpu).is_empty(), "{:?}", printed(&cpu));
     }
 }
