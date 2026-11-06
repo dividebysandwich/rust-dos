@@ -409,8 +409,9 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
     // registry says (Windows 98 and DirectX 6.1 differ: see p5-win98).
     let version: [u16; 4] = match base.to_ascii_uppercase().as_str() {
         "DDRAW" | "DSOUND" | "DINPUT" | "DPLAYX" => [4, 6, 0, 318],
-        // DirectX 5 to 7 leave DirectX 3's DPLAY.DLL as it is: a Windows
-        // 95 machine with DirectX 7 has 4.03.00.1096, of July 1997.
+        // DirectX 5 to 7 leave DirectX 3's DPLAY.DLL as it is: Windows 98
+        // SE and a Windows 95 machine with DirectX 7 both have
+        // 4.03.00.1096, of July 1997.
         "DPLAY" => [4, 3, 0, 1096],
         "COMCTL32" => [4, 70, 0, 1146],
         "OLE32" => [2, 10, 35, 35],
