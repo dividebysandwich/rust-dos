@@ -228,7 +228,15 @@ impl Voodoo {
         if !rgb && !aux {
             return;
         }
-        let dest = if rgb { self.color_buffer((fbz >> 14) & 3) } else { Some(0) };
+        // A fill of the alpha planes alone is still for the colour buffer
+        // drawn into: the OpenGL renderer keeps them in its alpha
+        // (`mirror::AlphaPlanes`), which the triangles blending by them
+        // after the fill read.
+        let dest = match self.color_buffer((fbz >> 14) & 3) {
+            Some(dest) if rgb || fbz & (1 << 18) != 0 => Some(dest),
+            _ if rgb => None,
+            _ => Some(0),
+        };
         let Some(dest) = dest else { return };
         let st = self.raster_state(dest, 0);
         let (sx, ex, sy, ey) = st.clip();

@@ -2654,8 +2654,8 @@ counters everything after is drawn in software and counted. OpenGL keeps
 the alpha planes in the alpha of the colour buffer drawn into, so a game
 that blends by the alpha it wrote into the same buffer (Lands of Lore 2)
 stays on the GPU. Once a game blends by alpha written with another
-colour buffer or by the CPU, or tests depth against the alpha planes,
-everything after is drawn in software too.
+colour buffer, by the CPU or by the blitter, or tests depth against the
+alpha planes, everything after is drawn in software too.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws

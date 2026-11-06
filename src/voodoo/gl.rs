@@ -18,8 +18,8 @@ use crate::video::Frame;
 use crate::video::shader::Glsl;
 use super::gpu::GpuLink;
 use super::mirror::{
-    Blit, BlitSource, BufferCopy, Command, Convert, Draw, Fill, Frame as Recording, Key, Pixels,
-    Scanout, Snapshot, Surface, Texture, Vertex,
+    AlphaPlanes, Blit, BlitSource, BufferCopy, Command, Convert, Draw, Fill, Frame as Recording,
+    Key, Pixels, Scanout, Snapshot, Surface, Texture, Vertex,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -652,11 +652,10 @@ pub struct VoodooGl {
     /// depth texture they share if the card has an auxiliary buffer.
     targets: HashMap<u32, Target>,
     depth: Option<Depth>,
-    /// The colour buffer whose alpha channel holds what the card's
-    /// auxiliary buffer has while it keeps alpha planes: the one the last
-    /// draw that wrote the auxiliary buffer wrote alpha into. None while
-    /// the auxiliary buffer holds depth.
-    alpha_source: Option<u32>,
+    /// The colour buffer whose alpha holds what the card's auxiliary
+    /// buffer has while it keeps alpha planes, followed from the commands
+    /// as the recording follows it.
+    alpha: AlphaPlanes,
     /// Frame buffer writes waiting: a colour buffer's, or with None the
     /// auxiliary buffer's.
     staging: HashMap<Option<u32>, Staging>,
@@ -846,7 +845,7 @@ impl VoodooGl {
                 height: 0,
                 targets: HashMap::new(),
                 depth: None,
-                alpha_source: None,
+                alpha: AlphaPlanes::default(),
                 staging: HashMap::new(),
                 staging_texture,
                 textures: HashMap::new(),
@@ -1038,9 +1037,9 @@ impl VoodooGl {
     ) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
         // The auxiliary buffer's alpha planes are in a colour buffer's
-        // alpha channel (`alpha_source`), its depth in the depth buffer.
-        let alpha = key.is_none() && self.alpha_source.is_some();
-        let target = match key.or(self.alpha_source) {
+        // alpha channel (`AlphaPlanes`), its depth in the depth buffer.
+        let alpha = key.is_none() && self.alpha.owner.is_some();
+        let target = match key.or(self.alpha.owner) {
             Some(offs) => self.targets.get(&offs),
             None => self.depth.and(self.targets.values().next()),
         };
@@ -1200,6 +1199,7 @@ impl VoodooGl {
 
     fn run_commands(&mut self, gl: &glow::Context, commands: &[Command]) {
         for command in commands {
+            self.alpha.command(command);
             match command {
                 Command::Resync(snapshot) => self.resync(gl, snapshot),
                 Command::Draw(draw) => {
@@ -1400,7 +1400,6 @@ impl VoodooGl {
     fn resync(&mut self, gl: &glow::Context, snapshot: &Snapshot) {
         self.drop_targets(gl);
         self.staging.clear();
-        self.alpha_source = None;
         let layout = &snapshot.layout;
         (self.width, self.height) = (layout.width.max(1), layout.height.max(1));
         let (w, h) = self.scaled();
@@ -1643,10 +1642,6 @@ impl VoodooGl {
         let has_alpha = s.aux && alpha_planes;
         let has_depth = s.aux && !alpha_planes && self.depth.is_some();
         let depth_write = has_depth && fbz & (1 << 10) != 0;
-        // What the card writes into the auxiliary buffer (`Row::finish`).
-        if s.aux && fbz & (1 << 10) != 0 {
-            self.alpha_source = has_alpha.then_some(s.dest);
-        }
         let constant_depth = has_depth && depth_test && fbz & (1 << 20) != 0;
         let rgb = fbz & (1 << 9) != 0;
         let (w, h) = size;
@@ -1671,10 +1666,18 @@ impl VoodooGl {
                 gl.disable(glow::BLEND);
             } else if am & (1 << 4) != 0 {
                 let alpha = |f: u32| if f == 4 { glow::ONE } else { glow::ZERO };
+                // Without alpha planes the card blends with a destination
+                // alpha of 255, whatever the colour buffer's alpha holds.
+                let (src, dst) = ((am >> 8) & 15, (am >> 12) & 15);
+                let (src, dst) = if has_alpha {
+                    (src, dst)
+                } else {
+                    (opaque_destination(src, true), opaque_destination(dst, false))
+                };
                 gl.enable(glow::BLEND);
                 gl.blend_func_separate(
-                    source_factor((am >> 8) & 15),
-                    dest_factor((am >> 12) & 15),
+                    source_factor(src),
+                    dest_factor(dst),
                     alpha((am >> 16) & 15),
                     alpha((am >> 20) & 15),
                 );
@@ -1874,12 +1877,11 @@ impl VoodooGl {
         unsafe {
             gl.disable(glow::BLEND);
             self.clip(gl, Some([l, r, t, b]));
-            let key = Some(fill.dest)
-                .filter(|dest| self.targets.contains_key(dest))
-                .or_else(|| self.targets.keys().next().copied());
-            let Some(target) = key.and_then(|key| self.targets.get(&key)) else {
+            let own = self.targets.get(&fill.dest);
+            let Some(target) = own.or_else(|| self.targets.values().next()) else {
                 return;
             };
+            let own = own.is_some();
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.draw_fbo()));
             if let Some(pattern) =
                 fill.pattern.as_deref().filter(|_| self.dither && fill.color.is_some())
@@ -1905,8 +1907,12 @@ impl VoodooGl {
                 gl.clear(glow::COLOR_BUFFER_BIT);
             }
             if let Some(aux) = fill.aux {
-                self.alpha_source = key.filter(|_| fill.alpha_planes);
+                // The alpha planes go into the alpha of the colour buffer
+                // the fill is for (`AlphaPlanes`), and of no other.
                 if fill.alpha_planes {
+                    if !own {
+                        return;
+                    }
                     gl.color_mask(false, false, false, true);
                     gl.clear_color(0.0, 0.0, 0.0, (aux & 0xFF) as f32 / 255.0);
                     gl.clear(glow::COLOR_BUFFER_BIT);
@@ -2371,6 +2377,21 @@ fn separate_triangles(vertices: &[Vertex]) -> Vec<(usize, usize)> {
         runs.push((first, run.len() * 3));
     }
     runs
+}
+
+/// Blend factor `f` (`source_factor` if `source`, else `dest_factor`)
+/// with a destination alpha of 255, as the card blends without alpha
+/// planes (`Row::finish`): ADST_ALPHA is AONE, AOMDST_ALPHA AZERO, and so
+/// is the source's ASATURATE, which leaves at most 2/256 of the colour.
+/// The destination's factor 15 is the colour before fog, which reads no
+/// alpha.
+fn opaque_destination(f: u32, source: bool) -> u32 {
+    match f {
+        3 => 4,
+        7 => 0,
+        15 if source => 0,
+        f => f,
+    }
 }
 
 /// The card's destination blend factors as OpenGL's. 15, the colour

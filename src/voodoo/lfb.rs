@@ -311,8 +311,6 @@ impl Voodoo {
                         let value = if has_alpha { sa[pix] as u16 } else { sw[pix] as u16 };
                         put(at, value);
                         auxval = Some(value);
-                        // The renderer's alpha doesn't follow these.
-                        self.alpha_owner.set(None);
                     }
                     self.stats.pixels_out += 1;
                     written[count] = (x, color, auxval);
