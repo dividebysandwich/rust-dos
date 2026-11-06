@@ -2164,3 +2164,86 @@ fn gdis_drawing_of_the_whole_screen_counts_as_frames_and_small_drawing_doesnt() 
     let counted: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
     assert_eq!(counted, [GDI_FRAMES as u64, 0, 0]);
 }
+
+const DD_ENUM_SURFACES: u32 = 9;
+const DDENUMSURFACES_ALL: u32 = 0x1;
+const DDENUMSURFACES_MATCH: u32 = 0x2;
+const DDENUMSURFACES_CANBECREATED: u32 = 0x8;
+const DDENUMSURFACES_DOESEXIST: u32 = 0x10;
+/// What the EnumSurfaces callback saw: how often it was called, its
+/// surface and the description's flags, height, width, pitch, bits per
+/// pixel and caps; and the callback's address.
+const E_COUNT: u32 = 0x890;
+const E_SURFACE: u32 = 0x894;
+const E_DESC: u32 = 0x898;
+const E_CALLBACK: u32 = 0x8B0;
+
+/// EnumSurfaces asked for a system memory surface that could be made,
+/// with no size; then for one with DDENUMSURFACES_ALL, which can't go
+/// with DDENUMSURFACES_CANBECREATED; then for the surfaces that exist.
+fn can_be_created_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    let caps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    desc(&mut d, DESC, DDSD_CAPS, caps, 0, 0, 0);
+    program(&[USER32, DDRAW], &d, |a, l| {
+        // The call over the callback pushes the callback's address.
+        let mut code = a.create_label();
+        a.call(code)?;
+        // The callback (surface, desc, context): it keeps what it got
+        // and goes on (DDENUMRET_OK).
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(dword_ptr(l.at(E_SURFACE)), eax)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        for (i, field) in [0x04, 0x08, 0x0C, 0x10, 0x54, 0x68].iter().enumerate() {
+            a.mov(ecx, dword_ptr(eax + *field))?;
+            a.mov(dword_ptr(l.at(E_DESC + 4 * i as u32)), ecx)?;
+        }
+        a.inc(dword_ptr(l.at(E_COUNT)))?;
+        a.mov(eax, 1)?;
+        a.ret_1(12)?;
+        a.set_label(&mut code)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(E_CALLBACK)), eax)?;
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c, (0, 0, 64, 64))?;
+        let level = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+        c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &level)?;
+        for flags in [
+            DDENUMSURFACES_CANBECREATED | DDENUMSURFACES_MATCH,
+            DDENUMSURFACES_CANBECREATED | DDENUMSURFACES_ALL,
+            DDENUMSURFACES_DOESEXIST | DDENUMSURFACES_ALL,
+        ] {
+            let args = [
+                Arg::I(flags),
+                Arg::At(DESC),
+                Arg::I(0),
+                Arg::Val(E_CALLBACK),
+            ];
+            c.com(a, l, DD, DD_ENUM_SURFACES, &args)?;
+        }
+        finish(a, l)
+    })
+}
+
+#[test]
+fn enum_surfaces_describes_a_surface_that_can_be_created() {
+    let (program, data) = can_be_created_program();
+    let mut cpu = machine("can_be_created", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 6);
+    assert_eq!(r[1..], [0, 0, 0, 0x8007_0057, 0], "{r:X?}");
+    // One call, for the surface that could be made, with no surface:
+    // the one made for it went, so the surfaces that exist are none.
+    assert_eq!(peek(&cpu, data + E_COUNT), 1);
+    assert_eq!(peek(&cpu, data + E_SURFACE), 0);
+    let field = |i: u32| peek(&cpu, data + E_DESC + 4 * i);
+    let flags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT;
+    assert_eq!(field(0) & flags, flags);
+    // Without a size in the description, it is 512 by 512.
+    assert_eq!((field(1), field(2)), (512, 512));
+    let bits = field(4);
+    assert!(matches!(bits, 8 | 16 | 24 | 32), "{bits}");
+    assert!(field(3) >= 512 * bits / 8, "pitch {}", field(3));
+    let caps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    assert_eq!(field(5) & caps, caps);
+}
