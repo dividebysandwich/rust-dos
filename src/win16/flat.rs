@@ -99,7 +99,7 @@ pub struct Request {
     /// CONNECT: the 32-bit thunk data, the names of the 16-bit DLL and
     /// its thunk data and the directory to look for it in, and the
     /// module loaded. LOAD: the DLL's name, an empty one and the
-    /// directory, and the instance loaded. CALLBACK_EX: where DX:AX
+    /// directory, and the module loaded. CALLBACK_EX: where DX:AX
     /// goes, or 0. FT_CALL: the mask of the arguments mapped.
     pub data32: u32,
     pub names: Vec<String>,
@@ -471,7 +471,8 @@ const FT_FRAME: u32 = 0x40;
 /// the caller's EBP is pushed and EBP is the frame's, the caller's
 /// registers are kept in the frame, the mask is 0, and an exception
 /// handler frame goes on the chain (`ft_handler`). It returns with ESP
-/// 40h below EBP and ESI the return address, as Windows 98's does.
+/// 40h below EBP, ESI the return address and EAX the handler frame's
+/// address, as Windows 98's does.
 pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let ebp = cpu.esp();
     let ret = cpu.bus.guest_read_32(ebp);
@@ -496,6 +497,7 @@ pub fn ft_prolog(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         cpu.bus.guest_write_32(ebp.wrapping_sub(at), value);
     }
     crate::win32::seh::set_handlers(cpu, ebp.wrapping_sub(FT_SEH));
+    cpu.set_eax(ebp.wrapping_sub(FT_SEH));
     cpu.set_ebp(ebp);
     cpu.set_esi(ret);
     cpu.set_esp(low);
@@ -652,7 +654,8 @@ pub fn ft_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// RtlUnwind returned to `ft_handler`, the frames above FT_Prolog's at
 /// `call.data[0]` unwound: the thunk returns its error value to its
-/// caller, as FT_ExitN would, with ECX the DWORDs taken off.
+/// caller, as FT_ExitN would, with ECX the DWORDs taken off and EDX the
+/// return address, as Windows 98's handler leaves them.
 pub fn ft_unwound(cpu: &mut Cpu, _: u32, call: crate::win32::call::Call) {
     let Some(&frame) = call.data.first() else {
         return;
@@ -678,13 +681,22 @@ pub fn ft_unwound(cpu: &mut Cpu, _: u32, call: crate::win32::call::Call) {
         _ => u32::MAX,
     };
     crate::win32::seh::set_handlers(cpu, next);
+    // The exception is over: the dispatch's calls into the program below
+    // the caller's stack won't return, and the fault is no longer the
+    // thread's.
+    let esp = ebp.wrapping_add(8).wrapping_add(4 * dwords);
+    if let Some(thread) = crate::win32::process(cpu).current_thread_mut() {
+        thread.fault.clear();
+    }
+    crate::win32::call::unwound_to(cpu, esp);
     cpu.set_eax(result);
     cpu.set_ecx(dwords);
+    cpu.set_edx(ret);
     cpu.set_edi(edi);
     cpu.set_esi(esi);
     cpu.set_ebx(ebx);
     cpu.set_ebp(caller_ebp);
-    cpu.set_esp(ebp.wrapping_add(8).wrapping_add(4 * dwords));
+    cpu.set_esp(esp);
     cpu.set_eip(ret);
 }
 
@@ -1187,8 +1199,12 @@ pub fn then_inits(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Opt
     if let Some(c) = client_of(cpu, tid) {
         let load = cpu.bus.win32.win16.clients[c].current.as_ref();
         if let Some(r) = load.filter(|r| r.kind == LOAD) {
-            let instance = r.module as u32;
-            done(cpu, c, instance);
+            // The instance once the entry points ran: a self-loading
+            // library's loader allocates its data segment.
+            let module = r.module;
+            let instance =
+                super::module_index(cpu, module).map_or(module, |i| module::instance_of(cpu, i));
+            done(cpu, c, instance as u32);
         } else {
             let joined = connect(cpu, c);
             done(cpu, c, joined as u32);
@@ -1214,11 +1230,10 @@ fn start_load(cpu: &mut Cpu, c: usize, request: Request) {
         }
     };
     let handle = cpu.bus.win32.win16.modules[index].handle;
-    let instance = module::instance_of(cpu, index);
     let client = &mut cpu.bus.win32.win16.clients[c];
     client.modules.push(handle);
     if let Some(current) = client.current.as_mut() {
-        current.module = instance;
+        current.module = handle;
     }
     let mut data = vec![client.tid];
     data.extend(

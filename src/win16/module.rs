@@ -213,7 +213,8 @@ pub fn load_file(
     let self_loading = parsed.flags & ne::SELFLOAD != 0;
     if self_loading && !parsed.is_dll() {
         return Err(bad(format!(
-            "{} is a program that loads its own segments, which the built-in Windows              doesn't support yet.",
+            "{} is a program that loads its own segments, which the built-in Windows \
+             doesn't support yet.",
             file_name
         )));
     }
@@ -333,6 +334,10 @@ pub fn load_file(
 
     // The segments' contents, relocated: the loader segment alone of a
     // self-loading module.
+    let dgroup_sel = match parsed.auto_data {
+        0 => 0,
+        n => segments.get(n as usize - 1).map_or(0, |s| s.selector),
+    };
     for (i, seg) in parsed.segments.iter().enumerate() {
         if self_loading && i > 0 {
             break;
@@ -353,10 +358,6 @@ pub fn load_file(
             index,
         );
         if !seg.is_data() {
-            let dgroup_sel = match (parsed.auto_data, dgroup) {
-                (0, _) | (_, 0) => 0,
-                (n, _) => segments.get(n as usize - 1).map_or(0, |s| s.selector),
-            };
             patch_prologues(&parsed, i as u8 + 1, &mut bytes, dgroup_sel);
         }
         if let Some(a) = global::get(cpu, segments[i].handle) {
@@ -1095,30 +1096,36 @@ fn take_segments(cpu: &mut Cpu, index: usize) {
 
 /// PatchCodeHandle(segment): the prologues of the exported functions of
 /// a module's code segment, which its own loader loaded, patched as the
-/// loader patches the others' (`patch_prologues`).
-pub fn patch_code_handle(cpu: &mut Cpu, handle: u16) {
+/// loader patches the others' (`patch_prologues`). As Wine's, it returns
+/// the segment's selector and handle in DX:AX.
+pub fn patch_code_handle(cpu: &mut Cpu, handle: u16) -> u32 {
     let sel = global::handle_to_sel(handle);
-    let found = cpu.bus.win32.win16.modules.iter().find_map(|m| {
+    let result = (sel as u32) << 16 | handle as u32;
+    let modules = &cpu.bus.win32.win16.modules;
+    let found = modules.iter().enumerate().find_map(|(i, m)| {
         let n = (1..=m.segments.len() as u16)
             .find(|&n| global::handle_to_sel(db_segment(cpu, m.handle, n).1) == sel)?;
-        Some((m.clone(), n))
+        Some((i, n))
     });
-    let Some((m, n)) = found else {
-        return;
+    let Some((index, n)) = found else {
+        return result;
     };
-    let Some(parsed) = parsed_of(cpu, &m) else {
-        return;
+    let m = &cpu.bus.win32.win16.modules[index];
+    let db = m.handle;
+    let Some(parsed) = parsed_of(cpu, m) else {
+        return result;
     };
     let dgroup_sel = match parsed.auto_data {
         0 => 0,
-        auto => global::handle_to_sel(db_segment(cpu, m.handle, auto).1),
+        auto => global::handle_to_sel(db_segment(cpu, db, auto).1),
     };
     let Some(a) = global::get(cpu, handle) else {
-        return;
+        return result;
     };
     let Some(mut bytes) = super::peek(cpu, a.base, a.size as usize) else {
-        return;
+        return result;
     };
     patch_prologues(&parsed, n as u8, &mut bytes, dgroup_sel);
     super::poke(cpu, a.base, &bytes);
+    result
 }

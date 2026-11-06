@@ -286,8 +286,8 @@ static APIS: &[Api16] = &[
     rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
     // The functions a self-loading module's loader gets in its table
     // (module.rs), and the one it patches its code segments with.
-    rust("MyAlloc", 0, "www", my_alloc),
-    rust("EntryAddrProc", 0, "ww", entry_addr_proc),
+    rust("MyAlloc", 668, "www", my_alloc),
+    rust("EntryAddrProc", 667, "ww", entry_addr_proc),
     rust("PatchCodeHandle", 110, "w", patch_code_handle),
 ];
 
@@ -915,8 +915,7 @@ fn entry_addr_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 fn patch_code_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    module::patch_code_handle(cpu, args[0] as u16);
-    Some(0)
+    Some(module::patch_code_handle(cpu, args[0] as u16))
 }
 
 /// The directory of the running task's program, for the libraries it
@@ -945,8 +944,7 @@ fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(e.code);
         }
     };
-    let instance = module::instance_of(cpu, index) as u32;
-    let mut data = vec![instance];
+    let mut data = vec![cpu.bus.win32.win16.modules[index].handle as u32];
     data.extend(
         inits
             .iter()
@@ -957,11 +955,16 @@ fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The libraries `data[1..]` are to have their entry points run, then
-/// the context goes on with `data[0]` in AX. None when an entry point
-/// runs first (and this then again after it).
+/// the context goes on with the instance of the module `data[0]` in AX.
+/// The instance is known only then: a self-loading library's loader
+/// allocates its data segment. None when an entry point runs first (and
+/// this then again after it).
 pub fn then_libs(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     if data.len() <= 1 {
-        return Some(data.first().copied().unwrap_or(0));
+        let module = data.first().copied().unwrap_or(0);
+        let instance = super::module_index(cpu, module as u16)
+            .map_or(module, |i| module::instance_of(cpu, i) as u32);
+        return Some(instance);
     }
     let mut rest = vec![data[0]];
     rest.extend_from_slice(&data[2..]);

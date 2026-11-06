@@ -601,8 +601,9 @@ fn dpmi_real_mode_code_calls_back_into_a_task_that_calls_real_mode_again() {
 /// start. BootApp allocates segment 2 with the MyAlloc KERNEL put in the
 /// table and writes its handle into the module database; LoadAppSeg reads
 /// the segment from the file into it through a data alias. Segment 2 has
-/// VALUE, which returns 42.
-fn self_loading_dll() -> Vec<u8> {
+/// VALUE, which returns 42. With `dgroup`, segment 2 is instead the
+/// library's automatic data segment.
+fn self_loading_dll(dgroup: bool) -> Vec<u8> {
     let mut b = ne::Builder::new("SELF", ne::LIBMODULE | ne::SELFLOAD | ne::PROTMODE);
     let kernel = b.import_module("KERNEL");
     let mut relocations = Vec::new();
@@ -702,10 +703,17 @@ fn self_loading_dll() -> Vec<u8> {
     b.segment(ne::SegmentSpec {
         // VALUE: mov ax, 42; retf.
         data: vec![0xB8, 0x2A, 0x00, 0xCB],
-        flags: CODE,
+        flags: if dgroup {
+            ne::SEG_MOVEABLE | ne::SEG_DATA
+        } else {
+            CODE
+        },
         alloc: 0x10,
         relocations: Vec::new(),
     });
+    if dgroup {
+        b.auto_data(2, 0, 0);
+    }
     b.entry(
         1,
         ne::Entry::Code {
@@ -742,9 +750,43 @@ fn a_self_loading_dll_loads_its_segments_with_its_own_loader() {
     code.patch(value_name, at);
     code.emit(b"VALUE\0");
     let (exit, log) = win16::run_with("self_loading_dll", program(&code, CODE), |_, dir| {
-        std::fs::write(dir.join("SELF.DLL"), self_loading_dll()).unwrap();
+        std::fs::write(dir.join("SELF.DLL"), self_loading_dll(false)).unwrap();
     });
     assert_eq!(exit, 42, "{log}");
+    assert!(
+        log.contains("The loader of SELF loaded its segments"),
+        "{log}"
+    );
+}
+
+#[test]
+fn load_library_gives_the_data_segment_a_self_loading_dlls_loader_made() {
+    // LoadLibrary("SELF.DLL") of a library whose automatic data segment
+    // its loader allocates returns that segment's handle, the instance,
+    // as Windows does: not the module's handle, which is all there is
+    // before the loader runs. 0 if they differ, 2 if they are the same.
+    let mut code = Code::new();
+    let dll_name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 95);
+    code.emit(&[0x3D, 0x20, 0x00, 0x73, 0x06, 0xB0, 0x01]); // cmp ax, 32; jae; mov al, 1
+    code.exit_al();
+    code.emit(&[0x50]); // push ax
+    let module_name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 47); // GetModuleHandle
+    code.emit(&[0x59, 0x3B, 0xC1, 0xB0, 0x02, 0x74, 0x02, 0xB0, 0x00]); // pop cx; cmp; je
+    code.exit_al();
+    let at = code.here();
+    code.patch(dll_name, at);
+    code.emit(b"SELF.DLL\0");
+    let at = code.here();
+    code.patch(module_name, at);
+    code.emit(b"SELF\0");
+    let (exit, log) = win16::run_with("self_loading_dgroup", program(&code, CODE), |_, dir| {
+        std::fs::write(dir.join("SELF.DLL"), self_loading_dll(true)).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
     assert!(
         log.contains("The loader of SELF loaded its segments"),
         "{log}"
