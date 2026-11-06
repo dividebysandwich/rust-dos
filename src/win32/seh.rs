@@ -76,9 +76,12 @@ const FILTER_CONTINUE_EXECUTION: u32 = 0xFFFF_FFFF;
 /// whatever the exception was, and with no stack to raise it on too.
 const UNHANDLED_EXIT_CODE: u32 = 0xFFFF_FFFF;
 
+/// CONTEXT without the extended registers, as Windows 98's headers have
+/// it.
+pub const CONTEXT_BASE_SIZE: u32 = 0xCC;
 /// CONTEXT's size, its flags (CONTEXT_i386 with the control, integer,
 /// segment and floating-point parts) and its fields' offsets.
-pub const CONTEXT_SIZE: u32 = 0x2CC;
+const CONTEXT_SIZE: u32 = 0x2CC;
 pub const CONTEXT_FULL: u32 = 0x1_000F;
 const CONTEXT_CONTROL: u32 = 0x1;
 const CONTEXT_INTEGER: u32 = 0x2;
@@ -106,35 +109,42 @@ const TIB_STACK_LIMIT: u32 = 0x08;
 const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
 /// Write the context `ctx` and the FPU's state `fpu` as a CONTEXT at `at`,
-/// with the flags `flags`.
+/// with the flags `flags`: the parts they name, and 0 in the rest of
+/// CONTEXT_SIZE bytes.
 pub fn write_context(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108], flags: u32) {
     cpu.bus.guest_fill(at, CONTEXT_SIZE as usize, 0);
     cpu.bus.guest_write_32(at, flags);
-    cpu.bus.guest_write_bytes(at + CTX_FLOAT, fpu);
-    // GS, FS, ES, DS; EDI, ESI, EBX, EDX, ECX, EAX; EBP, EIP, CS, EFLAGS,
-    // ESP, SS.
+    write_context_parts(cpu, at, ctx, fpu, flags);
+}
+
+/// Write the parts of the CONTEXT at `at` that `flags` names, from the
+/// context `ctx` and the FPU's state `fpu`, and leave the rest of it as
+/// it was. The debug registers read 0.
+pub fn write_context_parts(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108], flags: u32) {
     let s = |seg: Seg| ctx.seg[seg as usize] as u32;
     let g = |i: usize| ctx.gpr[i];
-    let words = [
-        s(Seg::GS),
-        s(Seg::FS),
-        s(Seg::ES),
-        s(Seg::DS),
-        g(7),
-        g(6),
-        g(3),
-        g(2),
-        g(1),
-        g(0),
-        g(5),
-        ctx.eip,
-        s(Seg::CS),
-        ctx.eflags,
-        g(ESP),
-        s(Seg::SS),
-    ];
-    for (i, word) in words.into_iter().enumerate() {
-        cpu.bus.guest_write_32(at + CTX_GS + 4 * i as u32, word);
+    let words = |cpu: &mut Cpu, from: u32, words: &[u32]| {
+        for (i, &word) in words.iter().enumerate() {
+            cpu.bus.guest_write_32(at + from + 4 * i as u32, word);
+        }
+    };
+    if flags & CONTEXT_DEBUG_REGISTERS != 0 {
+        words(cpu, 4, &[0; 6]);
+    }
+    if flags & CONTEXT_FLOATING_POINT != 0 {
+        cpu.bus.guest_write_bytes(at + CTX_FLOAT, fpu);
+        words(cpu, CTX_FLOAT + 108, &[0]);
+    }
+    if flags & CONTEXT_SEGMENTS != 0 {
+        let segments = [s(Seg::GS), s(Seg::FS), s(Seg::ES), s(Seg::DS)];
+        words(cpu, CTX_GS, &segments);
+    }
+    if flags & CONTEXT_INTEGER != 0 {
+        words(cpu, CTX_EDI, &[g(7), g(6), g(3), g(2), g(1), g(0)]);
+    }
+    if flags & CONTEXT_CONTROL != 0 {
+        let control = [g(5), ctx.eip, s(Seg::CS), ctx.eflags, g(ESP), s(Seg::SS)];
+        words(cpu, CTX_EBP, &control);
     }
 }
 
