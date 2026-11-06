@@ -321,6 +321,54 @@ fn a_reset_gives_the_monitor_back() {
     assert_eq!(cfg_read(&mut bus, 0, 0x40), 0);
 }
 
+/// Lands of Lore 2's 3dfx mode: VESA mode 100h (640x400) stays set while
+/// the card shows 640x480, and the game draws its pointer at the mouse
+/// driver's y times 480/400. The driver knows only the VGA's mode, so its
+/// screen stays 640x400, and the host's pointer at a place of the
+/// Voodoo's picture is that place of the driver's screen.
+#[test]
+fn the_mouse_driver_keeps_the_vga_modes_screen_under_the_voodoos_picture() {
+    use rust_dos::video::{Frame, overlay};
+    let mut cpu = rust_dos::cpu::Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_voodoo(Some(Board::Max));
+    let int10 = |cpu: &mut rust_dos::cpu::Cpu, mode: u16| {
+        cpu.set_ax(0x4F02);
+        cpu.set_bx(mode);
+        rust_dos::interrupts::int10::handle(cpu);
+        assert_eq!(cpu.ax(), 0x004F);
+    };
+    let reset = |cpu: &mut rust_dos::cpu::Cpu| {
+        cpu.set_ax(0x0000);
+        rust_dos::interrupts::int33::handle(cpu);
+    };
+    int10(&mut cpu, 0x0100);
+    init(&mut cpu.bus);
+    assert!(cpu.bus.voodoo_output());
+    assert_eq!(rust_dos::video::frame_size(&cpu.bus), (640, 480));
+
+    // A reset while the card shows its picture.
+    reset(&mut cpu);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 399));
+    assert_eq!((m.x, m.y), (320, 200));
+    assert_eq!(m.virtual_screen(&cpu.bus), (640, 400));
+
+    let frame = Frame::new(640, 480);
+    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (320, 240)), (320, 200));
+    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (100, 120)), (100, 100));
+    assert_eq!(overlay::frame_to_mouse(&cpu.bus, &frame, (639, 479)), (639, 399));
+    let (x, y) = overlay::mouse_to_frame(&cpu.bus, &frame, (320, 200));
+    assert_eq!((x.floor(), y.floor()), (320.0, 240.0));
+    assert_eq!(overlay::frame_motion_to_mouse(&cpu.bus, &frame, (6.0, 6.0)), (6.0, 5.0));
+
+    // A mode set while it shows gives the VGA mode's screen too.
+    int10(&mut cpu, 0x0101);
+    int10(&mut cpu, 0x0100);
+    let m = &cpu.bus.mouse;
+    assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 399));
+}
+
 #[test]
 fn fastfill_clears_colour_and_depth() {
     let mut bus = bus(Board::Standard);
