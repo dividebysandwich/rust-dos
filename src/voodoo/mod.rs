@@ -2140,6 +2140,9 @@ impl Voodoo {
                 (front != NONE).then_some(front / 2)
             }
         };
+        // The rows read back cool after a second or so of frames, whether
+        // the card shows its picture or not.
+        self.gpu_frame();
         let output = self.output();
         let scanout = if output && self.banshee.is_some() {
             self.banshee_scanout(&key)

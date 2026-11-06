@@ -221,11 +221,15 @@ impl Voodoo {
     /// renderer's alone: reads of the buffers get the renderer's pictures
     /// of them, and the job draws nothing outside them, nor into alpha
     /// planes, which the renderer keeps in its colour buffers. On a
-    /// Banshee or Voodoo3 the job draws into the recording's buffers, the
-    /// software picture isn't wanted (it would read them back every
-    /// frame), and the program didn't read back memory there lately (it
-    /// is hot): a program that reads what the 3D draws every frame waits
-    /// less for the software rasterizer than for the GPU.
+    /// Banshee or Voodoo3 the job draws into the recording's buffers and
+    /// the software picture isn't wanted (it would read them back every
+    /// frame). And on every card, the program didn't read back memory
+    /// there lately (it is hot): a program that reads what the 3D draws
+    /// every frame waits less for the software rasterizer than for the
+    /// GPU.
+    /// Test Drive 4 reads two pixels of the back buffer twice a frame to
+    /// see whether the sun shows, and each read waited 3 to 4 ms for the
+    /// GPU to finish what came before.
     ///
     /// The bytes the job draws into (`gpu_job_bytes`) if it is, for
     /// `gpu_left`.
@@ -247,7 +251,8 @@ impl Voodoo {
             return None;
         }
         let bytes = self.gpu_job_bytes(job)?;
-        if self.banshee.is_some() && self.mirror_layout().is_none() || self.gpu_bytes_hot(&bytes) {
+        let no_layout = self.banshee.is_some() && self.mirror_layout().is_none();
+        if no_layout || self.gpu_bytes_hot(job, &bytes) {
             return None;
         }
         Some(bytes)
@@ -257,15 +262,15 @@ impl Voodoo {
     /// the program read back lately (`gpu_takes`).
     pub(crate) fn gpu_job_hot(&self, job: &Job) -> bool {
         self.gpu.borrow().tracker.any_hot()
-            && self.gpu_job_bytes(job).is_some_and(|bytes| self.gpu_bytes_hot(&bytes))
+            && self.gpu_job_bytes(job).is_some_and(|bytes| self.gpu_bytes_hot(job, &bytes))
     }
 
-    /// Whether `bytes`, what a job draws into (`gpu_job_bytes`), or on a
-    /// Banshee the colour buffer the 3D engine draws into hold hot rows. A
-    /// depth clear goes with the colour buffer it clears for: one drawn in
-    /// software has its depth in the memory too, rather than read back
-    /// before its first triangle every frame.
-    fn gpu_bytes_hot(&self, bytes: &JobBytes) -> bool {
+    /// Whether `bytes`, what `job` draws into (`gpu_job_bytes`), or the
+    /// colour buffer it draws into hold hot rows. A depth clear goes with
+    /// the colour buffer it clears for: one drawn in software has its
+    /// depth in the memory too, rather than read back before its first
+    /// triangle every frame.
+    fn gpu_bytes_hot(&self, job: &Job, bytes: &JobBytes) -> bool {
         {
             let gpu = self.gpu.borrow();
             if !gpu.tracker.any_hot() {
@@ -275,7 +280,17 @@ impl Voodoo {
                 return true;
             }
         }
-        self.banshee.is_some() && self.mirror_layout().is_some_and(|key| self.gpu_colour_hot(&key))
+        match &self.banshee {
+            Some(_) => self.mirror_layout().is_some_and(|key| self.gpu_colour_hot(&key)),
+            None => {
+                let (Job::Triangle { st, .. } | Job::Fastfill { st, .. }) = job else {
+                    return false;
+                };
+                let all = (0, self.fbi.height);
+                let (start, end) = row_bytes(st.dest as u32, self.fbi.stride, all);
+                self.gpu.borrow().tracker.hot_in(start, end)
+            }
+        }
     }
 
     /// Whether `job` is a Banshee's fastfill of pixels that all lie within
@@ -606,10 +621,10 @@ impl Voodoo {
     }
 
     /// The same for the rows of the buffers bytes `start..end` of the
-    /// memory hold, which the program reads or writes: on a Banshee they
-    /// are hot from then on (`gpu_takes`).
+    /// memory hold, which the program reads or writes: they are hot from
+    /// then on (`gpu_takes`).
     pub(crate) fn gpu_catch_up_hot(&self, start: u32, end: u32) {
-        self.gpu_catch_up_rows(Some((start, end)), self.banshee.is_some());
+        self.gpu_catch_up_rows(Some((start, end)), true);
     }
 
     /// The same for the rows of the buffers that bytes `start..end` of

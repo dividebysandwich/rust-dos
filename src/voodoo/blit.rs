@@ -1498,6 +1498,46 @@ mod tests {
     }
 
     #[test]
+    fn gpu_reads_of_the_lfb_leave_the_buffer_to_software_until_it_cools() {
+        // Test Drive 4 reads two pixels of the back buffer twice a frame
+        // to see whether the sun shows. The rows read turn hot: what is
+        // drawn into that buffer after is drawn in software, and the
+        // next read finds it in the memory without waiting for the GPU.
+        // After `HOT_FRAMES` frames of the picture the buffer goes back
+        // to the renderer.
+        use crate::voodoo::gpu::HOT_FRAMES;
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let gpu_only = |v: &Voodoo| v.describe(Now::default())["gpu_only_jobs"].as_u64().unwrap();
+        let fill = |v: &mut Voodoo, color: u32| {
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+            write(v, CLIP_LEFT_RIGHT, 300);
+            write(v, CLIP_LOW_Y_HIGH_Y, 200);
+            write(v, COLOR1, color);
+            write(v, FASTFILL_CMD, 0);
+        };
+        v.reg[crate::voodoo::regs::LFB_MODE] = 1 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        fill(&mut v, 0x00F8_0000);
+        assert_eq!(gpu_only(&v), before, "drawn in software");
+        log.borrow_mut().clear();
+        assert_eq!(v.lfb_read(100 << 9 | 5) & 0xFFFF, 0xF800);
+        let reads = log.borrow().iter().filter(|l| l.starts_with("read")).count();
+        assert_eq!(reads, 0, "{:?}", log.borrow());
+        for _ in 0..HOT_FRAMES {
+            v.take_mirror();
+        }
+        fill(&mut v, 0x0000_00F8);
+        assert_eq!(gpu_only(&v), before + 1, "back on the GPU");
+    }
+
+    #[test]
     fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
         // After a read of everything, a fastfill draws rows 20..40. A read
         // of depth rows 96..160 then reads nothing: the fill drew none of

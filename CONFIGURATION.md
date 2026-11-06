@@ -2632,13 +2632,13 @@ reads the card's memory (a game reading the frame buffer or blitting
 from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
 screenshot, the debugger) the rows it reads are read back from OpenGL,
 at the card's resolution and in its 16 bits a pixel. A read waits for
-the GPU, so a game that reads back every frame gains less; on a Banshee
-or Voodoo3 the triangles into memory a game read back in the last second
-or so are drawn in software instead (the rows the 2D engine reads or
-draws into, and those the card shows from outside its 3D buffers, count
-as read), and a triangle that takes its texture from a buffer the 3D
-drew reads that buffer back first, so that it draws with OpenGL's
-picture at the card's resolution. The pixels a game reads differ in
+the GPU, so the triangles into a buffer a game read back in the last
+second or so are drawn in software instead, where the next read waits
+only for the worker threads (on a Banshee or Voodoo3 the rows the 2D
+engine reads or draws into, and those the card shows from outside its
+3D buffers, count as read), and a triangle that takes its texture from
+a buffer the 3D drew reads that buffer back first, so that it draws
+with OpenGL's picture at the card's resolution. The pixels a game reads differ in
 small ways from the card's: OpenGL draws a triangle's edges by its own
 rules and keeps more depth precision, and where nothing dithers (see
 below) a blended triangle blends with 8 bits a colour. What a game
