@@ -2994,12 +2994,14 @@ impl Bus {
         self.adapter_display_size()
     }
 
-    /// The size of the screen of the mode the display adapter is in, as
-    /// its BIOS set it: `display_size`, but a Voodoo Graphics or
-    /// Voodoo2 showing its picture instead of the VGA's doesn't count.
-    /// That card is a second one on the bus, which no BIOS call or mouse
-    /// driver knows of. A Banshee's or Voodoo3's own modes are the
-    /// adapter's, which its VESA BIOS sets.
+    /// The size of the screen of the mode the display adapter is in:
+    /// `display_size`, but a Voodoo Graphics or Voodoo2 showing its
+    /// picture instead of the VGA's doesn't count. That card is a second
+    /// one on the bus, which no BIOS call or mouse driver knows of. A
+    /// Banshee or Voodoo3 is the adapter, and its desktop counts while
+    /// its own modes are on. A driver turns them on through the card's
+    /// registers, as 3dfx's Windows 98 driver does, and a BIOS mode set
+    /// turns them off (`banshee_mode_set`).
     pub fn adapter_display_size(&self) -> (usize, usize) {
         if let Some(b) = self.banshee()
             && b.extended()

@@ -365,6 +365,7 @@ fn the_mouse_driver_keeps_the_vga_modes_screen_under_the_voodoos_picture() {
     // A mode set while it shows gives the VGA mode's screen too.
     int10(&mut cpu, 0x0101);
     int10(&mut cpu, 0x0100);
+    assert!(cpu.bus.voodoo_output());
     let m = &cpu.bus.mouse;
     assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 399));
 }
