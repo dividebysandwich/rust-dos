@@ -1,9 +1,9 @@
 //! The built-in Windows's Win16 loader and memory: Windows 3.1 programs
 //! with segments flagged 32-bit, and the selectors such programs make
-//! 32-bit; what Windows does for their CLI, STI and INT n; and the
-//! real-mode code they run through DPMI (INT 31h AX=0300h to 0304h).
-//! The programs are made byte by byte (tests/common/win16), or
-//! assembled.
+//! 32-bit; libraries that load their own segments; what Windows does for
+//! their CLI, STI and INT n; and the real-mode code they run through
+//! DPMI (INT 31h AX=0300h to 0304h). The programs are made byte by byte
+//! (tests/common/win16), or assembled.
 
 use crate::win16;
 
@@ -594,4 +594,201 @@ fn dpmi_real_mode_code_calls_back_into_a_task_that_calls_real_mode_again() {
         }),
     );
     assert_eq!(exit, 0x42, "{log}");
+}
+
+/// SELF.DLL, a library that loads its own segments, as a compressed one
+/// does: its first segment is the loader, with the loader's table at its
+/// start. BootApp allocates segment 2 with the MyAlloc KERNEL put in the
+/// table and writes its handle into the module database; LoadAppSeg reads
+/// the segment from the file into it through a data alias. Segment 2 has
+/// VALUE, which returns 42. With `dgroup`, segment 2 is instead the
+/// library's automatic data segment.
+fn self_loading_dll(dgroup: bool) -> Vec<u8> {
+    let mut b = ne::Builder::new("SELF", ne::LIBMODULE | ne::SELFLOAD | ne::PROTMODE);
+    let kernel = b.import_module("KERNEL");
+    let mut relocations = Vec::new();
+    let mut code = vec![0u8; 0x28];
+    code[..2].copy_from_slice(b"A0");
+    let mut call = |code: &mut Vec<u8>, ordinal: u16| {
+        relocations.push(ne::Relocation {
+            source: ne::ADDR_FARPTR,
+            additive: false,
+            offset: code.len() as u16 + 1,
+            target: ne::Target::Ordinal {
+                module: kernel,
+                ordinal,
+            },
+        });
+        code.extend_from_slice(&[0x9A, 0xFF, 0xFF, 0x00, 0x00]);
+    };
+    // BootApp(module, file).
+    let boot = code.len() as u16;
+    code.extend_from_slice(&[
+        0x55, 0x8B, 0xEC, // push bp; mov bp, sp
+        0x1E, 0x56, // push ds; push si
+        0x8E, 0x5E, 0x08, // mov ds, [bp+8] (the module database)
+        0x8B, 0x36, 0x22, 0x00, // mov si, [22h] (the segment table)
+        0x83, 0xC6, 0x0A, // add si, 10 (segment 2's entry)
+        0xFF, 0x74, 0x04, // push word [si+4] (its flags)
+        0xFF, 0x74, 0x06, // push word [si+6] (its size)
+        0x6A, 0x00, // push 0
+        0x2E, 0xFF, 0x1E, 0x10, 0x00, // call far [cs:10h] (MyAlloc)
+        0x89, 0x54, 0x08, // mov [si+8], dx
+        0x83, 0x4C, 0x04, 0x02, // or word [si+4], 2 (allocated)
+        0x5E, 0x1F, 0x5D, // pop si; pop ds; pop bp
+        0xCA, 0x04, 0x00, // retf 4
+    ]);
+    // LoadAppSeg(module, file, segment).
+    let load = code.len() as u16;
+    code.extend_from_slice(&[
+        0x55, 0x8B, 0xEC, // push bp; mov bp, sp
+        0x1E, 0x56, 0x57, // push ds; push si; push di
+        0x8E, 0x5E, 0x0A, // mov ds, [bp+0Ah]
+        0x8B, 0x36, 0x22, 0x00, // mov si, [22h]
+        0x8B, 0x46, 0x06, // mov ax, [bp+6]
+        0x48, // dec ax
+        0xB9, 0x0A, 0x00, // mov cx, 10
+        0xF7, 0xE1, // mul cx
+        0x03, 0xF0, // add si, ax
+        0x6A, 0x00, // push 0
+    ]);
+    call(&mut code, 175); // AllocSelector
+    code.extend_from_slice(&[
+        0xFF, 0x74, 0x08, // push word [si+8]
+        0x50, // push ax
+    ]);
+    call(&mut code, 177); // PrestoChangoSelector: a data alias
+    code.extend_from_slice(&[
+        0x8B, 0xF8, // mov di, ax
+        0x8B, 0x04, // mov ax, [si] (the sector)
+        0x33, 0xD2, // xor dx, dx
+        0x8B, 0x0E, 0x32, 0x00, // mov cx, [32h] (the alignment shift)
+        0xE3, 0x06, // jcxz +6
+        0xD1, 0xE0, 0xD1, 0xD2, 0xE2, 0xFA, // shl ax, 1; rcl dx, 1; loop
+        0xFF, 0x76, 0x08, // push word [bp+8]
+        0x52, 0x50, // push dx; push ax
+        0x6A, 0x00, // push 0
+    ]);
+    call(&mut code, 84); // _llseek
+    code.extend_from_slice(&[
+        0xFF, 0x76, 0x08, // push word [bp+8]
+        0x57, 0x6A, 0x00, // push di; push 0
+        0xFF, 0x74, 0x02, // push word [si+2] (the length)
+    ]);
+    call(&mut code, 82); // _lread
+    code.push(0x57); // push di
+    call(&mut code, 176); // FreeSelector
+    code.extend_from_slice(&[
+        0x83, 0x4C, 0x04, 0x04, // or word [si+4], 4 (loaded)
+        0x8B, 0x44, 0x08, // mov ax, [si+8]
+        0x5F, 0x5E, 0x1F, 0x5D, // pop di; pop si; pop ds; pop bp
+        0xCA, 0x06, 0x00, // retf 6
+    ]);
+    let internal = |offset: u16| ne::Target::Internal { segment: 1, offset };
+    for (at, offset) in [(4, boot), (8, load)] {
+        code[at..at + 2].copy_from_slice(&[0xFF, 0xFF]);
+        relocations.push(ne::Relocation {
+            source: ne::ADDR_FARPTR,
+            additive: false,
+            offset: at as u16,
+            target: internal(offset),
+        });
+    }
+    b.segment(ne::SegmentSpec {
+        data: code,
+        flags: CODE,
+        alloc: 0,
+        relocations,
+    });
+    b.segment(ne::SegmentSpec {
+        // VALUE: mov ax, 42; retf.
+        data: vec![0xB8, 0x2A, 0x00, 0xCB],
+        flags: if dgroup {
+            ne::SEG_MOVEABLE | ne::SEG_DATA
+        } else {
+            CODE
+        },
+        alloc: 0x10,
+        relocations: Vec::new(),
+    });
+    if dgroup {
+        b.auto_data(2, 0, 0);
+    }
+    b.entry(
+        1,
+        ne::Entry::Code {
+            segment: 2,
+            offset: 0,
+            flags: ne::ENTRY_EXPORTED,
+            moveable: true,
+        },
+    );
+    b.export("VALUE", 1, true);
+    b.build()
+}
+
+#[test]
+fn a_self_loading_dll_loads_its_segments_with_its_own_loader() {
+    // LoadLibrary("SELF.DLL"), GetProcAddress(it, "VALUE"), and the call
+    // of VALUE, whose 42 is the exit code. 1 if the library didn't load.
+    let mut code = Code::new();
+    let dll_name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 95);
+    code.emit(&[0x3D, 0x20, 0x00, 0x73, 0x06, 0xB0, 0x01]); // cmp ax, 32; jae; mov al, 1
+    code.exit_al();
+    code.emit(&[0x50]); // push ax
+    let value_name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 50);
+    code.emit(&[0x52, 0x50, 0x8B, 0xEC, 0xFF, 0x5E, 0x00]); // push dx; push ax; call far [bp]
+    code.exit_al();
+    let at = code.here();
+    code.patch(dll_name, at);
+    code.emit(b"SELF.DLL\0");
+    let at = code.here();
+    code.patch(value_name, at);
+    code.emit(b"VALUE\0");
+    let (exit, log) = win16::run_with("self_loading_dll", program(&code, CODE), |_, dir| {
+        std::fs::write(dir.join("SELF.DLL"), self_loading_dll(false)).unwrap();
+    });
+    assert_eq!(exit, 42, "{log}");
+    assert!(
+        log.contains("The loader of SELF loaded its segments"),
+        "{log}"
+    );
+}
+
+#[test]
+fn load_library_gives_the_data_segment_a_self_loading_dlls_loader_made() {
+    // LoadLibrary("SELF.DLL") of a library whose automatic data segment
+    // its loader allocates returns that segment's handle, the instance,
+    // as Windows does: not the module's handle, which is all there is
+    // before the loader runs. 0 if they differ, 2 if they are the same.
+    let mut code = Code::new();
+    let dll_name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 95);
+    code.emit(&[0x3D, 0x20, 0x00, 0x73, 0x06, 0xB0, 0x01]); // cmp ax, 32; jae; mov al, 1
+    code.exit_al();
+    code.emit(&[0x50]); // push ax
+    let module_name = code.here() + 2;
+    code.push_far(0);
+    code.call("KERNEL", 47); // GetModuleHandle
+    code.emit(&[0x59, 0x3B, 0xC1, 0xB0, 0x02, 0x74, 0x02, 0xB0, 0x00]); // pop cx; cmp; je
+    code.exit_al();
+    let at = code.here();
+    code.patch(dll_name, at);
+    code.emit(b"SELF.DLL\0");
+    let at = code.here();
+    code.patch(module_name, at);
+    code.emit(b"SELF\0");
+    let (exit, log) = win16::run_with("self_loading_dgroup", program(&code, CODE), |_, dir| {
+        std::fs::write(dir.join("SELF.DLL"), self_loading_dll(true)).unwrap();
+    });
+    assert_eq!(exit, 0, "{log}");
+    assert!(
+        log.contains("The loader of SELF loaded its segments"),
+        "{log}"
+    );
 }

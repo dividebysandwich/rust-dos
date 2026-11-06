@@ -15,7 +15,7 @@
 
 mod advapi32;
 mod boot;
-mod call;
+pub(crate) mod call;
 mod com;
 mod comctl32;
 mod comdlg32;
@@ -54,7 +54,7 @@ mod advpack;
 pub(crate) mod realmode;
 mod registry;
 mod screen;
-mod seh;
+pub(crate) mod seh;
 mod shell32;
 pub mod snapshot;
 pub(crate) mod stubs;

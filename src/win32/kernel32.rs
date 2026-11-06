@@ -650,6 +650,31 @@ static APIS: &[Api] = &[
         conv: Conv::Cdecl,
         handler: super::seh::nested_unwind_handler,
     },
+    // The flat thunks' FT_Thunk and FT_ExitN (src/win16/flat.rs), and the
+    // handler of the exception handler frame FT_Prolog makes.
+    stdcall("FT_Thunk", 268, 0, flat::ft_thunk),
+    stdcall("FT_Exit0", 252, 0, flat::ft_exit0),
+    stdcall("FT_Exit4", 260, 0, flat::ft_exit4),
+    stdcall("FT_Exit8", 266, 0, flat::ft_exit8),
+    stdcall("FT_Exit12", 253, 0, flat::ft_exit12),
+    stdcall("FT_Exit16", 254, 0, flat::ft_exit16),
+    stdcall("FT_Exit20", 255, 0, flat::ft_exit20),
+    stdcall("FT_Exit24", 256, 0, flat::ft_exit24),
+    stdcall("FT_Exit28", 257, 0, flat::ft_exit28),
+    stdcall("FT_Exit32", 258, 0, flat::ft_exit32),
+    stdcall("FT_Exit36", 259, 0, flat::ft_exit36),
+    stdcall("FT_Exit40", 261, 0, flat::ft_exit40),
+    stdcall("FT_Exit44", 262, 0, flat::ft_exit44),
+    stdcall("FT_Exit48", 263, 0, flat::ft_exit48),
+    stdcall("FT_Exit52", 264, 0, flat::ft_exit52),
+    stdcall("FT_Exit56", 265, 0, flat::ft_exit56),
+    Api {
+        name: "FlatThunkHandler",
+        ordinal: 0,
+        args: 4,
+        conv: Conv::Cdecl,
+        handler: flat::ft_handler,
+    },
     // Windows 98 SE's is one of its stubs that fail with
     // ERROR_CALL_NOT_IMPLEMENTED and return 0, leaving the structure as
     // it was. SafeDisc 1's loader (Omikron's RUNTIME.EXE) resolves it

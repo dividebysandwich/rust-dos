@@ -9,9 +9,9 @@
 
 use super::message::{WM_CHAR, WM_COMMAND, WM_KEYDOWN, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN};
 use super::{
-    ERROR_INVALID_ACCEL_HANDLE, ERROR_INVALID_ICON_HANDLE, ERROR_INVALID_PARAMETER,
-    ERROR_RESOURCE_NAME_NOT_FOUND, FALSE, TRUE, current_pid, read_words, set_error, user,
-    write_words,
+    ERROR_INVALID_ACCEL_HANDLE, ERROR_INVALID_CURSOR_HANDLE, ERROR_INVALID_ICON_HANDLE,
+    ERROR_INVALID_PARAMETER, ERROR_RESOURCE_NAME_NOT_FOUND, FALSE, TRUE, current_pid, read_words,
+    set_error, user, write_words,
 };
 use crate::cpu::Cpu;
 use crate::win32::gdi32::surface::{Surface, Target};
@@ -379,6 +379,72 @@ fn system_image(cpu: &mut Cpu, id: u32, cursor: bool) -> u32 {
     ic.name = key;
     ic.pid = 0;
     add_icon(cpu, ic)
+}
+
+/// SetSystemCursor(cursor, id): the system's cursor `id` (an OCR_ value,
+/// as LoadCursor and LoadImage take it) takes the picture of `cursor`,
+/// and `cursor` is destroyed, as Windows 98 does. Every handle of the
+/// system's cursor shows the new picture, the screen too if it is the
+/// cursor set. FALSE for an id that isn't one of the system's cursors
+/// and for a handle that isn't a cursor's.
+pub fn set_system_cursor(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (handle, id) = (args[0], args[1]);
+    super::init(cpu);
+    if !is_system_cursor(id) {
+        set_error(cpu, ERROR_INVALID_PARAMETER);
+        return Some(FALSE);
+    }
+    let Some(ic) = icon(cpu, handle) else {
+        set_error(cpu, ERROR_INVALID_CURSOR_HANDLE);
+        return Some(FALSE);
+    };
+    let system = system_image(cpu, id, true);
+    if system == handle {
+        return Some(TRUE);
+    }
+    // A shared cursor stays, so the system's gets copies of its bitmaps;
+    // another one's bitmaps become the system's.
+    let (mask, color) = if ic.shared {
+        let color = if ic.color != 0 {
+            copy_bitmap(cpu, ic.color)
+        } else {
+            0
+        };
+        (copy_bitmap(cpu, ic.mask), color)
+    } else {
+        let i = ((handle - ICON_BASE) / STEP) as usize;
+        user(cpu).icons[i] = None;
+        (ic.mask, ic.color)
+    };
+    for b in [mask, color] {
+        if b != 0 {
+            keep(cpu, b);
+        }
+    }
+    let i = ((system - ICON_BASE) / STEP) as usize;
+    let Some(old) = user(cpu).icons[i].clone() else {
+        return Some(FALSE);
+    };
+    user(cpu).icons[i] = Some(Icon {
+        width: ic.width,
+        height: ic.height,
+        hotspot: ic.hotspot,
+        mask,
+        color,
+        ..old.clone()
+    });
+    for b in [old.mask, old.color] {
+        if let Some(o) = gdi32::gdi(cpu).get_mut(b) {
+            o.stock = false;
+        }
+        if b != 0 {
+            gdi32::delete_object_now(cpu, b);
+        }
+    }
+    if user(cpu).input.cursor_handle == system {
+        super::cursor::set(cpu, system);
+    }
+    Some(TRUE)
 }
 
 /// The system's icons and cursors a program may load.

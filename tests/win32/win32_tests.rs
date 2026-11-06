@@ -3191,6 +3191,111 @@ fn a_program_loads_and_frees_dlls() {
     assert_eq!(text, "B detached\r\n");
 }
 
+/// GetThreadContext writes the parts of the CONTEXT its flags name and
+/// nothing else. SafeDisc 1's loader keeps a CONTEXT of Windows 98's
+/// headers, 0CCh bytes, with its own pointers after it, and asks for the
+/// control and integer registers. With every part asked for, the 0CCh
+/// bytes are written and nothing after them.
+#[test]
+fn get_thread_context_writes_only_the_parts_asked_for() {
+    let names: &[&str] = &["GetCurrentThread", "GetThreadContext"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    // A CONTEXT asking for CONTEXT_i386 | CONTEXT_CONTROL, and one for
+    // CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS, each in 300h bytes of 5Ah.
+    const CONTROL: u32 = 0x40;
+    const ALL: u32 = 0x340;
+    let mut data = vec![0u8; CONTROL as usize];
+    data.resize(ALL as usize + 0x300, 0x5A);
+    put(&mut data, CONTROL as usize, &0x1_0001u32.to_le_bytes());
+    put(&mut data, ALL as usize, &0x1_001Fu32.to_le_bytes());
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        // Whether the dwords from `from` to `to` of the CONTEXT at `ctx`
+        // all are `value`, in bit `bit`.
+        let unchanged = |a: &mut CodeAssembler, ctx: u32, from: u32, to: u32, value: u32, bit| {
+            a.mov(edi, l.at(ctx + from) as u32)?;
+            a.mov(ecx, (to - from) / 4)?;
+            a.mov(eax, value)?;
+            a.repe().scasd()?;
+            check(a, false, bit)
+        };
+        a.xor(ebx, ebx)?;
+        a.cld()?;
+        for ctx in [CONTROL, ALL] {
+            a.call(l.import(0))?;
+            a.push(l.at(ctx) as i32)?;
+            a.push(eax)?;
+            a.call(l.import(1))?;
+        }
+        // The second call returned TRUE. A first one that failed
+        // leaves ESP as it was.
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // Asked for the control registers: the flags as they were, ESP
+        // written, and the debug, floating-point, segment and integer
+        // registers and the 200h bytes after the 0CCh as they were.
+        a.cmp(dword_ptr(l.at(CONTROL)), 0x1_0001)?;
+        check(a, false, 1)?;
+        a.cmp(dword_ptr(l.at(CONTROL + 0xC4)), 0x5A5A_5A5A)?;
+        check(a, true, 2)?;
+        unchanged(a, CONTROL, 4, 0xB4, 0x5A5A_5A5A, 3)?;
+        unchanged(a, CONTROL, 0xCC, 0x2CC, 0x5A5A_5A5A, 4)?;
+        // Asked for all: ESP written, the debug registers 0, and the
+        // 200h bytes after the 0CCh as they were.
+        a.cmp(dword_ptr(l.at(ALL + 0xC4)), 0x5A5A_5A5A)?;
+        check(a, true, 5)?;
+        unchanged(a, ALL, 4, 0x1C, 0, 6)?;
+        unchanged(a, ALL, 0xCC, 0x2CC, 0x5A5A_5A5A, 7)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run("get_thread_context", exe);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {text}", !code);
+}
+
+/// GetThreadContext on a thread made suspended, which hasn't run yet,
+/// gives the FPU's state it will start with: FNINIT's, with the
+/// precision at 53 bits (control word 27Fh) and every register empty
+/// (tag word FFFFh). SafeDisc 1's loader reads such a thread's context.
+#[test]
+fn get_thread_context_of_a_new_thread_gives_its_starting_fpu() {
+    let names: &[&str] = &["CreateThread", "GetThreadContext", "ExitProcess"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    const CTX: u32 = 0x40;
+    let mut data = vec![0u8; CTX as usize + 0xCC];
+    // CONTEXT_i386 | CONTEXT_FLOATING_POINT.
+    put(&mut data, CTX as usize, &0x1_0008u32.to_le_bytes());
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        a.xor(ebx, ebx)?;
+        // CREATE_SUSPENDED, so the thread never runs: its start address
+        // doesn't matter.
+        a.push(0)?;
+        a.push(4)?;
+        a.push(0)?;
+        a.push(l.at(0) as i32)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.push(l.at(CTX) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.test(eax, eax)?;
+        check(a, true, 0)?;
+        // FloatSave's ControlWord and TagWord, at 1Ch and 24h.
+        a.cmp(word_ptr(l.at(CTX + 0x1C)), 0x027F)?;
+        check(a, false, 1)?;
+        a.cmp(word_ptr(l.at(CTX + 0x24)), -1)?;
+        check(a, false, 2)?;
+        // The suspended thread keeps the process alive past a return.
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, text) = run("new_thread_fpu", exe);
+    assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
+}
+
 /// GetStartupInfoW, which SafeDisc 1's loader looks up with
 /// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
 /// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
@@ -8262,6 +8367,176 @@ fn a_flat_thunk_calls_a_16_bit_dll_with_a_mapped_pointer() {
 }
 
 #[test]
+fn ft_thunk_calls_a_16_bit_dll_with_the_pointers_its_mask_names_mapped() {
+    // The thunk data as in the QT_Thunk test: ThunkConnect32 writes the
+    // code that goes on to FT_Prolog at 44h. The value the 16-bit side
+    // reads and changes is at C0h; the stack pointer is kept at D0h.
+    let mut data = vec![0u8; 0x100];
+    data[..4].copy_from_slice(b"LS01");
+    data[4..8].copy_from_slice(&THUNK_CHECKSUM.to_le_bytes());
+    data[0x0C..0x10].copy_from_slice(b"LB01");
+    data[0x1C..0x20].copy_from_slice(&0x24u32.to_le_bytes());
+    data[0x20..0x24].copy_from_slice(&0x44u32.to_le_bytes());
+    data[0x24..0x64].fill(0xCC);
+    data[0x80..0x90].copy_from_slice(b"THK_THUNKDATA16\0");
+    data[0xA0..0xAB].copy_from_slice(b"TEST16.DLL\0");
+    data[0xB0..0xB6].copy_from_slice(b"T.EXE\0");
+    data[0xC0..0xC4].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+    let imports: &[(&str, &[&str])] = &[(
+        "KERNEL32.DLL",
+        &["ThunkConnect32", "FT_Thunk", "FT_Exit4", "ExitProcess"],
+    )];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut read = a.create_label();
+        let mut fail = a.create_label();
+        let ft = l.at(0x44);
+        a.push(1)?;
+        a.push(0)?;
+        for at in [0xB0, 0xA0, 0x80, 0] {
+            a.push(l.at(at) as i32)?;
+        }
+        a.call(l.import(0))?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 1)?;
+        a.jne(fail)?;
+        // READ(&value) through the thunk, with registers FT_ExitN is to
+        // give back as they were.
+        a.mov(ebx, 0x3131)?;
+        a.mov(esi, 0x5151)?;
+        a.mov(edi, 0x7171)?;
+        a.mov(dword_ptr(l.at(0xD0)), esp)?;
+        a.push(l.at(0xC0) as i32)?;
+        a.call(read)?;
+        a.mov(ecx, ebx)?;
+        a.mov(ebx, 2)?;
+        a.cmp(eax, 0x1122_3344)?;
+        a.jne(fail)?;
+        // The 16-bit side added 1 to the thunk's copy through the mapped
+        // pointer, and the thunk copied it back.
+        a.mov(ebx, 3)?;
+        a.cmp(dword_ptr(l.at(0xC0)), 0x1122_3345)?;
+        a.jne(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(ecx, 0x3131)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(esi, 0x5151)?;
+        a.jne(fail)?;
+        a.mov(ebx, 6)?;
+        a.cmp(edi, 0x7171)?;
+        a.jne(fail)?;
+        // FT_Exit4 took the argument off.
+        a.mov(ebx, 7)?;
+        a.cmp(esp, dword_ptr(l.at(0xD0)))?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(3))?;
+        a.int3()?;
+        // The thunk compiler's FT thunk for READ(LPDWORD): target 0 in CL,
+        // one DWORD of arguments and the error value -1 in CH. Below the
+        // frame FT_Prolog makes, a copy of the DWORD, then the pointer to
+        // it, which bit 0 of the mask at EBP - 14h names.
+        a.set_label(&mut read)?;
+        a.mov(cx, 0x0700)?;
+        a.mov(eax, ft as u32)?;
+        a.call(eax)?;
+        a.sub(esp, 4)?;
+        a.mov(eax, dword_ptr(ebp + 8))?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.mov(dword_ptr(esp), eax)?;
+        a.push(esp)?;
+        a.or(dword_ptr(ebp - 0x14), 1)?;
+        a.call(l.import(1))?;
+        a.shl(eax, 16)?;
+        a.shrd(eax, edx, 16)?;
+        a.mov(ebx, eax)?;
+        // The function took the pointer off: the copy is at ESP.
+        a.mov(eax, dword_ptr(esp))?;
+        a.mov(ecx, dword_ptr(ebp + 8))?;
+        a.mov(dword_ptr(ecx), eax)?;
+        a.jmp(l.import(2))
+    });
+    let dir = scratch("ft_thunk", &[("T.EXE", exe), ("TEST16.DLL", thunk_dll16())]);
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn an_exception_in_an_ft_thunk_returns_its_error_value() {
+    // A thunk faults after FT_Prolog: its frame's handler unwinds and
+    // returns the error value CH names to the thunk's caller, the
+    // arguments taken off and the caller's registers back.
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["FT_Prolog", "ExitProcess"])];
+    let data = vec![0u8; 0x20];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut thunk = a.create_label();
+        let mut fail = a.create_label();
+        a.mov(ebx, 0x3131)?;
+        a.mov(esi, 0x5151)?;
+        a.mov(edi, 0x7171)?;
+        a.mov(dword_ptr(l.at(0x10)), esp)?;
+        // Two DWORDs of arguments; the caller's EAX as the error value.
+        a.push(1)?;
+        a.push(2)?;
+        a.mov(eax, 0x2468)?;
+        a.call(thunk)?;
+        a.mov(ecx, ebx)?;
+        a.mov(ebx, 1)?;
+        a.cmp(eax, 0x2468)?;
+        a.jne(fail)?;
+        a.mov(ebx, 2)?;
+        a.cmp(esp, dword_ptr(l.at(0x10)))?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(ecx, 0x3131)?;
+        a.jne(fail)?;
+        a.mov(ebx, 4)?;
+        a.cmp(esi, 0x5151)?;
+        a.jne(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(edi, 0x7171)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()?;
+        a.set_label(&mut thunk)?;
+        a.mov(cx, 0x0A00)?;
+        a.xor(edx, edx)?;
+        a.call(l.import(0))?;
+        a.xor(ebx, ebx)?;
+        a.mov(esi, ebx)?;
+        a.mov(edi, ebx)?;
+        a.mov(eax, dword_ptr(ebx))?;
+        a.int3()
+    });
+    let dir = scratch("ft_thunk_fault", &[("T.EXE", exe)]);
+    let mut cpu = Cpu::new(dir);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
 fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
     // KERNEL32's functions by Windows 98's ordinals: #35 LoadLibrary16,
     // #36 FreeLibrary16, #37 GetProcAddress16 and #1 VxDCall0, which have
@@ -8350,14 +8625,15 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
 #[test]
 fn built_in_dlls_export_windows_98_ses_ordinals() {
     // GetProcAddress by Windows 98 SE's ordinal finds the function it
-    // finds by name: KERNEL32's GetStartupInfoA (441) and GetStartupInfoW
-    // (442), DirectX 6.1's DDRAW and DINPUT, and SHELL32's #179, which
-    // Windows 98 exports by ordinal only. Imports by ordinal bind to the
-    // same functions.
+    // finds by name: KERNEL32's GetStartupInfoA (441), GetStartupInfoW
+    // (442), FT_Thunk (268) and FT_Exit8 (266, the FT_Exits go in the
+    // order of their names), DirectX 6.1's DDRAW and DINPUT, and
+    // SHELL32's #179, which Windows 98 exports by ordinal only. Imports
+    // by ordinal bind to the same functions.
     let imports: &[(&str, &[&str])] = &[
         (
             "KERNEL32.DLL",
-            &["LoadLibraryA", "GetProcAddress", "ExitProcess", "#441"],
+            &["LoadLibraryA", "GetProcAddress", "ExitProcess", "#441", "#268"],
         ),
         ("DDRAW.DLL", &["#8"]),
     ];
@@ -8372,8 +8648,10 @@ fn built_in_dlls_export_windows_98_ses_ordinals() {
         (0xA0, b"DirectDrawEnumerateA"),
         (0xC0, b"DllCanUnloadNow"),
         (0xE0, b"SHGetNewLinkInfoA"),
+        (0x100, b"FT_Thunk"),
+        (0x110, b"FT_Exit8"),
     ];
-    let mut data = vec![0u8; 0x100];
+    let mut data = vec![0u8; 0x120];
     for (at, s) in strings {
         data[*at as usize..*at as usize + s.len()].copy_from_slice(s);
     }
@@ -8382,7 +8660,9 @@ fn built_in_dlls_export_windows_98_ses_ordinals() {
     let checks: &[(u32, i32, u32, Option<usize>)] = &[
         (0x00, 441, 0x40, Some(3)),
         (0x00, 442, 0x60, None),
-        (0x10, 8, 0x80, Some(4)),
+        (0x00, 268, 0x100, Some(4)),
+        (0x00, 266, 0x110, None),
+        (0x10, 8, 0x80, Some(5)),
         (0x10, 10, 0xA0, None),
         (0x10, 14, 0xC0, None),
         (0x20, 3, 0xC0, None),

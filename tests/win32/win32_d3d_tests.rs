@@ -1062,6 +1062,9 @@ const DDFLIP_WAIT: u32 = 1;
 const DDFLIP_NOVSYNC: u32 = 8;
 const D3DCLEAR_TARGET: u32 = 1;
 const D3DCLEAR_ZBUFFER: u32 = 2;
+const D3DCLEAR_STENCIL: u32 = 4;
+const D3DERR_ZBUFFER_NOTPRESENT: u32 = 0x8876_0816;
+const D3DERR_STENCILBUFFER_NOTPRESENT: u32 = 0x8876_0817;
 /// D3DFVF_XYZRHW, DIFFUSE, SPECULAR and TEX1: a D3DTLVERTEX.
 const TL_FVF: u32 = 0x1C4;
 
@@ -1079,6 +1082,7 @@ const DEV3_END_SCENE: u32 = 10;
 const DEV3_SET_CURRENT_VIEWPORT: u32 = 12;
 const DEV3_SET_RENDER_STATE: u32 = 22;
 const DEV3_DRAW_PRIMITIVE: u32 = 28;
+const VP3_CLEAR: u32 = 12;
 const VP3_CLEAR2: u32 = 20;
 const DEV7_CLEAR: u32 = 10;
 const DEV7_SET_RENDER_STATE: u32 = 20;
@@ -1185,6 +1189,14 @@ enum Step {
     /// SetColorKey of the texture: its source blit key (Direct3D 7).
     /// A scene has one key: every Key step sets the last one's.
     Key(u32),
+    /// A clear with D3DCLEAR_ flags and an ARGB color, to depth 1:
+    /// IDirect3DDevice7's Clear, or Direct3D 6's viewport's Clear2. Its
+    /// result is the test's to check (`clear_scene`).
+    Clear(u32, u32),
+    /// The Direct3D 6 viewport's Clear with D3DCLEAR_ flags, to its
+    /// background material, black without one. Its result is the
+    /// test's to check.
+    ViewportClear(u32),
 }
 
 /// Which Direct3D draws a scene.
@@ -1222,6 +1234,12 @@ fn scene_program(scene: &Scene) -> (Vec<u8>, u32) {
 /// The same in a mode of `bpp` bits a pixel (16 or 32), whose z-buffer
 /// has as many bits (24 of them depth at 32).
 fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
+    scene_program_with(scene, bpp, &mut Vec::new())
+}
+
+/// The same, noting in `checked` where in the results the calls of the
+/// scene's Clear and ViewportClear steps are.
+fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u8>, u32) {
     let mut d = data();
     let size = if scene.api == Api::D3D7 { 124 } else { 108 };
     let (zw, zh) = if let Some(board) = scene.card {
@@ -1313,6 +1331,9 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
     for step in &scene.steps {
         if matches!(step, Step::Stage(..) | Step::Key(_)) {
             assert!(scene.api == Api::D3D7, "a Direct3D 7 step");
+        }
+        if matches!(step, Step::ViewportClear(_)) {
+            assert!(scene.api == Api::D3D6, "a Direct3D 6 step");
         }
         if let Step::Key(key) = step {
             assert!(scene.texture.is_some(), "a key without a texture");
@@ -1490,6 +1511,28 @@ fn scene_program_in(scene: &Scene, bpp: u32) -> (Vec<u8>, u32) {
                     let args = [Arg::I(DDCKEY_SRCBLT), Arg::At(KEY)];
                     c.com(a, l, TEXTURE, SURF_SET_COLOR_KEY, &args)?;
                 }
+                Step::Clear(flags, color) => {
+                    checked.push(c.next);
+                    let (object, method, count, rects) = if ex {
+                        (DEVICE, DEV7_CLEAR, 0, Arg::I(0))
+                    } else {
+                        (VIEWPORT, VP3_CLEAR2, 1, Arg::At(RECT))
+                    };
+                    let args = [
+                        Arg::I(count),
+                        rects,
+                        Arg::I(*flags),
+                        Arg::I(*color),
+                        Arg::I(1.0f32.to_bits()),
+                        Arg::I(0),
+                    ];
+                    c.com(a, l, object, method, &args)?;
+                }
+                Step::ViewportClear(flags) => {
+                    checked.push(c.next);
+                    let args = [Arg::I(1), Arg::At(RECT), Arg::I(*flags)];
+                    c.com(a, l, VIEWPORT, VP3_CLEAR, &args)?;
+                }
                 Step::Flip => {
                     let flags = DDFLIP_WAIT | DDFLIP_NOVSYNC;
                     c.com(a, l, FRONT, SURF_FLIP, &[Arg::I(0), Arg::I(flags)])?;
@@ -1570,18 +1613,29 @@ fn read_target(
 /// The render target's pixels after `scene`, row after row, 5-6-5,
 /// once every call in it succeeded.
 fn draw_scene(test: &str, scene: &Scene) -> Vec<u16> {
-    let (exe, data) = scene_program(scene);
+    let (r, pixels) = clear_scene(test, scene);
+    assert!(r.iter().all(|&hr| hr == 0), "Clear results: {r:X?}");
+    pixels
+}
+
+/// The results of `scene`'s Clear and ViewportClear steps, and the
+/// render target's pixels after it, once every other call succeeded.
+fn clear_scene(test: &str, scene: &Scene) -> (Vec<u32>, Vec<u16>) {
+    let mut checked = Vec::new();
+    let (exe, data) = scene_program_with(scene, 16, &mut checked);
     let mut cpu = machine_with(test, scene.card, exe);
     run_until_done(&mut cpu, data);
     let n = peek(&cpu, data + CALLS);
     let r = results(&cpu, data, n);
-    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
-    (0..64 * 64)
+    let mut others = (1..n).filter(|i| !checked.contains(i));
+    assert!(others.all(|i| r[i as usize] == 0), "results: {r:X?}");
+    let pixels = (0..64 * 64)
         .map(|i| {
             let at = data + PIXELS + 2 * i;
             (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
         })
-        .collect()
+        .collect();
+    (checked.iter().map(|&i| r[i as usize]).collect(), pixels)
 }
 
 /// The render target's pixels after `scene` in a 32-bit mode, row
@@ -1654,6 +1708,75 @@ fn a_flat_shaded_triangle_has_its_first_vertex_color() {
     // Outside the triangle, the clear color.
     assert_rgb(&p, 60, 60, [0, 0, 0x84], 4);
     assert_rgb(&p, 0, 0, [0, 0, 0x84], 4);
+}
+
+/// A scene cleared to blue with `steps` after it, on a target with a
+/// 16-bit z-buffer or none.
+fn clear_test_scene(api: Api, zbuffer: bool, steps: Vec<Step>) -> Scene {
+    Scene {
+        api,
+        card: None,
+        clear: 0xFF00_00FF,
+        zbuffer: zbuffer.then_some(1.0),
+        texture: None,
+        texture_alpha: false,
+        steps,
+    }
+}
+
+/// IDirect3DDevice7's Clear and IDirect3DViewport3's Clear2 of a depth
+/// buffer or a stencil on a target without a depth buffer fail with
+/// D3DERR_ZBUFFER_NOTPRESENT and leave the target as it was, the
+/// target's own clear in the same call included. DirectX 7 on Windows
+/// 95 with a Voodoo3 does this with the HAL and the RGB device, and so
+/// does Windows 11 (issue 616).
+#[test]
+fn a_clear_of_a_missing_depth_buffer_fails_and_clears_nothing() {
+    for (test, api) in [("nozclear7", Api::D3D7), ("nozclear6", Api::D3D6)] {
+        let steps = vec![
+            Step::Clear(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, RED),
+            Step::Clear(D3DCLEAR_ZBUFFER, RED),
+            Step::Clear(D3DCLEAR_TARGET | D3DCLEAR_STENCIL, RED),
+        ];
+        let (r, p) = clear_scene(test, &clear_test_scene(api, false, steps));
+        assert_eq!(r, [D3DERR_ZBUFFER_NOTPRESENT; 3], "{test}");
+        assert_rgb(&p, 0, 0, [0, 0, 0xFF], 4);
+        assert_rgb(&p, 63, 63, [0, 0, 0xFF], 4);
+        // The target alone clears.
+        let steps = vec![Step::Clear(D3DCLEAR_TARGET, RED)];
+        let (r, p) = clear_scene(test, &clear_test_scene(api, false, steps));
+        assert_eq!(r, [0], "{test}");
+        assert_rgb(&p, 0, 0, [0xFF, 0, 0], 4);
+    }
+}
+
+/// With a depth buffer, which has no stencil bits, a clear of the
+/// stencil fails with D3DERR_STENCILBUFFER_NOTPRESENT and clears
+/// nothing, and one of the target and the depth buffer clears both.
+#[test]
+fn a_clear_of_a_missing_stencil_fails_and_clears_nothing() {
+    for (test, api) in [("nostencil7", Api::D3D7), ("nostencil6", Api::D3D6)] {
+        let steps = vec![Step::Clear(D3DCLEAR_TARGET | D3DCLEAR_STENCIL, RED)];
+        let (r, p) = clear_scene(test, &clear_test_scene(api, true, steps));
+        assert_eq!(r, [D3DERR_STENCILBUFFER_NOTPRESENT], "{test}");
+        assert_rgb(&p, 0, 0, [0, 0, 0xFF], 4);
+        let steps = vec![Step::Clear(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, RED)];
+        let (r, p) = clear_scene(test, &clear_test_scene(api, true, steps));
+        assert_eq!(r, [0], "{test}");
+        assert_rgb(&p, 0, 0, [0xFF, 0, 0], 4);
+    }
+}
+
+/// The viewport's older Clear, unlike Clear2, clears the target of one
+/// without a depth buffer and succeeds when asked for the depth buffer
+/// too, as Windows 95's DirectX 7 and Windows 11 do.
+#[test]
+fn the_viewports_clear_skips_a_missing_depth_buffer() {
+    let steps = vec![Step::ViewportClear(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER)];
+    let (r, p) = clear_scene("vpclear", &clear_test_scene(Api::D3D6, false, steps));
+    assert_eq!(r, [0]);
+    assert_rgb(&p, 0, 0, [0, 0, 0], 0);
+    assert_rgb(&p, 63, 63, [0, 0, 0], 0);
 }
 
 /// The HAL on a Voodoo3 leaves the card's second lookup table, the one

@@ -157,6 +157,10 @@ pub struct Module16 {
     pub expected_version: u16,
     /// The resources LoadResource loaded: (resource handle, block).
     pub loaded: Vec<(u16, u16)>,
+    /// Whether it loads its own segments and its loader hasn't run yet
+    /// (module.rs): its database's segment table has the segments the
+    /// loader made.
+    pub unbooted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -614,7 +618,8 @@ crate::state_fields!(Module16 {
     deps,
     flags,
     expected_version,
-    loaded
+    loaded,
+    unbooted
 });
 crate::state_fields!(Segment16 {
     handle,

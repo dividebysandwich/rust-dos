@@ -3328,6 +3328,90 @@ fn the_cursor_shows_on_a_voodoo3_desktop() {
     the_cursor_shows("cursor_voodoo3", Some(Board::Voodoo3));
 }
 
+const USER32_SYSTEM_CURSOR: (&str, &[&str]) = (
+    "USER32.DLL",
+    &[
+        "CreateWindowExA",
+        "LoadCursorA",
+        "SetCursor",
+        "SetCursorPos",
+        "CopyImage",
+        "SetSystemCursor",
+    ],
+);
+const SYSTEM_LOAD_CURSOR: usize = 1;
+const SYSTEM_SET_CURSOR: usize = 2;
+const SYSTEM_SET_CURSOR_POS: usize = 3;
+const SYSTEM_COPY_IMAGE: usize = 4;
+const SYSTEM_SET_SYSTEM_CURSOR: usize = 5;
+const IMAGE_CURSOR: u32 = 2;
+const OCR_NORMAL: u32 = 32512;
+
+/// What a program that set the arrow does next.
+#[derive(Clone, Copy, PartialEq)]
+enum Then {
+    /// Nothing: the arrow shows.
+    Nothing,
+    /// SetCursor of the I-beam.
+    SetCursor,
+    /// SetSystemCursor of a copy of the I-beam as the arrow.
+    SetSystemCursor,
+}
+
+/// The screen around the cursor at (100, 100) after the arrow is set and
+/// `then`, and the program's results: CreateWindowExA, LoadCursorA of
+/// the arrow, SetCursor, LoadCursorA of the I-beam, CopyImage of it, the
+/// call of `then`, SetCursorPos and LoadCursorA of the arrow again.
+fn system_cursor_run(test: &str, then: Then) -> (Vec<[u8; 3]>, Vec<u32>) {
+    let (program, data) = program(&[USER32_SYSTEM_CURSOR], &data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        popup_window(&mut c, a, l)?;
+        c.api(a, l, SYSTEM_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        c.api(a, l, SYSTEM_SET_CURSOR, &[Arg::Val(RESULTS + 4)])?;
+        c.api(a, l, SYSTEM_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_IBEAM)])?;
+        let ibeam = Arg::Val(RESULTS + 12);
+        let copy = [ibeam, Arg::I(IMAGE_CURSOR), Arg::I(0), Arg::I(0), Arg::I(0)];
+        c.api(a, l, SYSTEM_COPY_IMAGE, &copy)?;
+        match then {
+            Then::Nothing => c.keep(a, l)?,
+            Then::SetCursor => c.api(a, l, SYSTEM_SET_CURSOR, &[ibeam])?,
+            Then::SetSystemCursor => c.api(
+                a,
+                l,
+                SYSTEM_SET_SYSTEM_CURSOR,
+                &[Arg::Val(RESULTS + 16), Arg::I(OCR_NORMAL)],
+            )?,
+        }
+        c.api(a, l, SYSTEM_SET_CURSOR_POS, &[Arg::I(100), Arg::I(100)])?;
+        c.api(a, l, SYSTEM_LOAD_CURSOR, &[Arg::I(0), Arg::I(IDC_ARROW)])?;
+        finish(a, l, 1)
+    });
+    let mut cpu = card_machine(test, None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let points: Vec<_> = (84..116)
+        .flat_map(|y| (84..116).map(move |x| (x, y)))
+        .collect();
+    (with_cursors(&cpu, &points), results(&cpu, data, 8))
+}
+
+/// SetSystemCursor(cursor, OCR_NORMAL) gives the arrow the picture of
+/// `cursor`, as Windows 98 does: the arrow set as the cursor shows the
+/// I-beam copied, pixel for pixel as SetCursor of the I-beam shows it,
+/// and LoadCursorA(IDC_ARROW) still gives the arrow's handle.
+#[test]
+fn set_system_cursor_gives_the_arrow_another_picture() {
+    let (arrow, _) = system_cursor_run("system_cursor_arrow", Then::Nothing);
+    let (ibeam, _) = system_cursor_run("system_cursor_ibeam", Then::SetCursor);
+    let (system, r) = system_cursor_run("system_cursor_set", Then::SetSystemCursor);
+    assert_ne!(r[1], 0, "LoadCursorA(IDC_ARROW)");
+    assert_ne!(r[4], 0, "CopyImage of the I-beam");
+    assert_eq!(r[5], 1, "SetSystemCursor");
+    assert_eq!(r[7], r[1], "LoadCursorA(IDC_ARROW) after SetSystemCursor");
+    assert_ne!(arrow, ibeam, "the arrow and the I-beam look different");
+    assert!(system == ibeam, "the arrow shows the I-beam's picture");
+}
+
 const USER32_FIRST_CURSOR: (&str, &[&str]) = (
     "USER32.DLL",
     &[
