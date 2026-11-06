@@ -246,6 +246,9 @@ pub struct Context {
     pub begin: Option<u32>,
     pub vertices: Vec<ImmVertex>,
     pub swap_interval: u32,
+    /// The time (ns) of the retrace a window's next swap waits for: the
+    /// swap interval's frames after the last one.
+    pub swap_at: u64,
     /// Whether it drew since the buffers were last swapped or flushed.
     pub drawn: bool,
 }
@@ -543,6 +546,7 @@ crate::state_fields!(Context {
     begin,
     vertices,
     swap_interval,
+    swap_at,
     drawn
 });
 crate::state_fields!(State {

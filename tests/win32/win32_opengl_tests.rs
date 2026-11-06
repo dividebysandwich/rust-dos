@@ -482,6 +482,31 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
 }
 
 #[test]
+fn a_window_swaps_its_buffers_once_a_frame() {
+    // The swap interval is 1, as 3dfx's ICD has it: ten swaps in a row
+    // show at nine retraces after the first, 60 Hz frames of the 640x480
+    // desktop apart.
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        for _ in 0..10 {
+            c.api(a, l, SWAP_BUFFERS, &[Arg::Val(HDC)])?;
+        }
+        finish(a, l)
+    });
+    let mut cpu = machine("swap_interval", true, exe);
+    let before = cpu.bus.clock.now_ns();
+    run_until_done(&mut cpu, data);
+    let swaps: Vec<u32> = (7..17).map(|i| peek(&cpu, data + RESULTS + 4 * i)).collect();
+    assert_eq!(swaps, [1; 10], "SwapBuffers");
+    let elapsed = cpu.bus.clock.now_ns() - before;
+    // Nine frames of about 16.7 ms at least, and less than a tenth more.
+    assert!(elapsed >= 9 * 16_600_000, "{elapsed} ns");
+    assert!(elapsed < 11 * 16_700_000, "{elapsed} ns");
+}
+
+#[test]
 fn flat_shading_takes_the_color_of_the_vertex_opengl_gives() {
     // Two flat triangles, each vertex its own color: OpenGL colors an
     // independent triangle as its third vertex, and a fan's triangle
