@@ -484,41 +484,47 @@ fn ioctl_input(cpu: &mut Cpu, drive: u8, image: &CdImage, buf: usize) -> u16 {
             bus.guest_write_8((buf + 2) as u32, tracks.last().map_or(1, |t| t.number));
             bus.guest_write_32((buf + 3) as u32, cdrom::redbook(image.leadout()));
         }
-        // Audio track info: where a track starts and its control bits
-        // (40h for data).
+        // Audio track info: where a track starts and its control bits in
+        // the high nibble (40h for data).
         0x0B => {
             let number = bus.guest_read_8((buf + 1) as u32);
             let Some(track) = image.tracks().iter().find(|t| t.number == number) else {
                 return SECTOR_NOT_FOUND;
             };
             bus.guest_write_32((buf + 2) as u32, cdrom::redbook(track.start));
-            bus.guest_write_8((buf + 6) as u32, if track.is_audio() { 0x00 } else { 0x40 });
+            bus.guest_write_8((buf + 6) as u32, track.control << 4);
         }
-        // Q channel: the track, index and times at the head.
+        // Q channel: the track, index and times at the head, as the IDE
+        // drive's READ SUB-CHANNEL reports them.
         0x0C => {
-            let track = image.track_at(position);
-            let (control, number, index, relative) = match track {
-                Some(t) if position < t.start => (t.is_audio(), t.number, 0, t.start - position),
-                Some(t) => (t.is_audio(), t.number, 1, position - t.start),
-                None => (false, 0, 0, 0),
+            let (control, number, index, relative, absolute) = match image.q_position(position) {
+                Some(q) => (q.control, q.track, q.index, q.relative, q.absolute),
+                None => (4, 0, 0, 0, position),
             };
-            bus.guest_write_8((buf + 1) as u32, if control { 0x01 } else { 0x41 });
+            bus.guest_write_8((buf + 1) as u32, control << 4 | 1);
             bus.guest_write_8((buf + 2) as u32, number);
             bus.guest_write_8((buf + 3) as u32, index);
             for (i, b) in duration_msf(relative).into_iter().enumerate() {
                 bus.guest_write_8((buf + 4 + i) as u32, b);
             }
             bus.guest_write_8((buf + 7) as u32, 0);
-            let (m, s, f) = cdrom::lba_to_msf(position);
+            let (m, s, f) = cdrom::lba_to_msf(absolute);
             for (i, b) in [m, s, f].into_iter().enumerate() {
                 bus.guest_write_8((buf + 8 + i) as u32, b);
             }
         }
-        // UPC/EAN code: the disc has none.
+        // UPC/EAN code: the disc's catalog number, its 13 digits in BCD
+        // (the last in the high nibble of the seventh byte), or zeros.
         0x0E => {
             bus.guest_write_8((buf + 1) as u32, 0x02);
             for i in 2..11 {
                 bus.guest_write_8((buf + i) as u32, 0);
+            }
+            if let Some(mcn) = image.mcn() {
+                let digits: Vec<u8> = mcn.bytes().map(|b| b - b'0').chain([0]).collect();
+                for (i, pair) in digits.chunks(2).enumerate() {
+                    bus.guest_write_8((buf + 2 + i) as u32, pair[0] << 4 | pair[1]);
+                }
             }
         }
         // Audio status: paused, and the range of the last Play.

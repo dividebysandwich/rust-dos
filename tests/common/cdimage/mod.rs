@@ -237,3 +237,112 @@ pub fn mixed_disc(dir: &std::path::Path, iso_image: &[u8], audio_sectors: usize)
     .unwrap();
     cue
 }
+
+/// The CRC the Q subchannel keeps of its first 10 bytes: CCITT's CRC-16,
+/// inverted.
+pub fn q_crc(q: &[u8]) -> u16 {
+    let crc = q[..10].iter().fold(0u16, |crc, &b| {
+        (0..8).fold(crc ^ (b as u16) << 8, |c, _| {
+            if c & 0x8000 != 0 {
+                c << 1 ^ 0x1021
+            } else {
+                c << 1
+            }
+        })
+    });
+    !crc
+}
+
+/// A BlindWrite 6 image of two sessions, each a Mode 1 track with the
+/// file system `iso_image`: session 1's in GAME.B6I as whole sectors with
+/// 96 bytes of P-W subchannel each, whose Q names track 7 and whose R-W
+/// bytes are all A5h; session 2's, from sector `second`, in GAME.B00 as
+/// 2048-byte sectors. The disc's catalog number is `mcn`. Returns the
+/// descriptor's path, GAME.B6T.
+pub fn blindwrite_disc(dir: &std::path::Path, iso_image: &[u8], second: u32, mcn: &str) -> PathBuf {
+    let le32 = |v: u32| v.to_le_bytes();
+    let utf16 = |s: &str| {
+        s.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>()
+    };
+    let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
+    let sectors = (iso_image.len() / SECTOR) as u32;
+
+    let mut first = Vec::new();
+    for (lba, sector) in mode1_2352(iso_image).chunks(RAW).enumerate() {
+        first.extend(sector);
+        let (rel, abs) = (lba as u32, lba as u32 + 150);
+        let mut q = [
+            0x41,
+            0x07,
+            0x01,
+            bcd(rel / 75 / 60),
+            bcd(rel / 75 % 60),
+            bcd(rel % 75),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        q[7..10].copy_from_slice(&[bcd(abs / 75 / 60), bcd(abs / 75 % 60), bcd(abs % 75)]);
+        let crc = q_crc(&q);
+        q[10..12].copy_from_slice(&crc.to_be_bytes());
+        first.extend([0u8; 12]);
+        first.extend(q);
+        first.extend([0xA5u8; 72]);
+    }
+    fs::write(dir.join("GAME.B6I"), first).unwrap();
+    fs::write(dir.join("GAME.B00"), iso_image).unwrap();
+
+    let mut blocks = Vec::new();
+    blocks.extend(le32(2));
+    blocks.extend(le32(0));
+    for (name, start, size) in [("GAME.B6I", 0, 2448), ("GAME.B00", second, 2048)] {
+        blocks.extend(le32(0));
+        blocks.extend(le32(sectors * size));
+        blocks.extend([0u8; 16]);
+        blocks.extend(le32(0));
+        blocks.extend([0u8; 12]);
+        blocks.extend(le32(start));
+        blocks.extend(le32(sectors));
+        let name = utf16(name);
+        blocks.extend(le32(name.len() as u32));
+        blocks.extend(name);
+        blocks.extend([0u8; 4]);
+    }
+    let mut sessions = Vec::new();
+    for (number, start) in [(1u8, 0u32), (2, second)] {
+        sessions.extend([number, 0, 1, 3]);
+        sessions.extend([0u8; 12]);
+        // A Mode 1 data track and its 8 more bytes.
+        let mut entry = [0u8; 72];
+        entry[0] = 2;
+        entry[10] = 4;
+        entry[11] = 1;
+        entry[12] = number;
+        entry[42..46].copy_from_slice(&le32(start));
+        entry[46..50].copy_from_slice(&le32(sectors));
+        sessions.extend(entry);
+    }
+
+    let mut out = b"BWT5 STREAM SIGN".to_vec();
+    out.extend([0u8; 32]);
+    out.extend([0x08, 0, 2, 0]);
+    out.extend([0u8; 12]);
+    out.push(1);
+    out.extend(mcn.as_bytes());
+    out.extend([0u8; 2 + 16 + 8 + 4 + 12 + 8 + 32 + 48 + 32]);
+    for len in [0, 0, blocks.len(), sessions.len(), 0] {
+        out.extend(le32(len as u32));
+    }
+    out.extend(blocks);
+    out.extend(sessions);
+    out.extend([0u8; 4]);
+    out.extend(b"BWT5 STREAM FOOT");
+    let path = dir.join("GAME.B6T");
+    fs::write(&path, out).unwrap();
+    path
+}
