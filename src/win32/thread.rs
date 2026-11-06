@@ -8,7 +8,9 @@
 //! its time comes (`schedule_waits`), and its thread runs at once, as the
 //! boost Windows gives a thread whose wait ends lets it: a game that
 //! sleeps out the rest of its frame while another of its threads spins
-//! gets its next frame on time, not at the next interrupt. When no thread
+//! gets its next frame on time, not at the next interrupt. A thread that
+//! one of a higher priority took the processor from goes on with the rest
+//! of its turn when that one stops (`resume_preempted`). When no thread
 //! can run, the processor runs the idle loop, a trap in KERNEL32 that
 //! lets time pass to the next interrupt or timeout.
 //!
@@ -182,6 +184,9 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     win32.running = p;
     win32.slice_start = now;
     let tid = win32.processes[p].threads[t].id;
+    if win32.preempted.is_some_and(|(id, _)| id == tid) {
+        win32.preempted = None;
+    }
     crate::win16::task::entered(win32, tid);
     let process = &mut win32.processes[p];
     process.current = Some(t);
@@ -237,6 +242,9 @@ fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
 pub fn reschedule(cpu: &mut Cpu) {
     let ctx = Context::of(cpu);
     save(cpu, ctx);
+    if resume_preempted(cpu) {
+        return;
+    }
     let win32 = &cpu.bus.win32;
     match next_ready(win32, current(win32)) {
         Some(at) => enter(cpu, at),
@@ -247,10 +255,41 @@ pub fn reschedule(cpu: &mut Cpu) {
 /// Run the first thread that can run, or else the idle loop, with nothing
 /// running to save (its process ended).
 pub fn run_next(cpu: &mut Cpu) {
+    if resume_preempted(cpu) {
+        return;
+    }
     match next_ready(&cpu.bus.win32, None) {
         Some(at) => enter(cpu, at),
         None => idle(cpu),
     }
+}
+
+/// Run the thread a thread of a higher priority preempted, if it can
+/// still run, with the rest of its turn, as Windows puts a preempted
+/// thread back at the head of its priority's queue with what is left of
+/// its quantum. Without that, the thread after the preempting one in
+/// turn ran with a new turn: a multimedia timer of 10 ms, whose thread
+/// preempts every period, started the main thread's turn over each time,
+/// and another thread of the main one's priority never ran (Bedlam's
+/// Windows version waits on its loader thread for ever).
+fn resume_preempted(cpu: &mut Cpu) -> bool {
+    let Some((tid, used)) = cpu.bus.win32.preempted.take() else {
+        return false;
+    };
+    let win32 = &cpu.bus.win32;
+    let Some((p, t)) = find(win32, tid) else {
+        return false;
+    };
+    if Some((p, t)) == current(win32)
+        || !win32.processes[p].threads[t].ready()
+        || !crate::win16::task::may_run(win32, p, t)
+    {
+        return false;
+    }
+    enter(cpu, (p, t));
+    let now = cpu.bus.clock.now_micros();
+    cpu.bus.win32.slice_start = now.saturating_sub(used);
+    true
 }
 
 /// Run the idle loop, in the running process: no thread runs.
@@ -338,6 +377,15 @@ pub fn preempt(cpu: &mut Cpu) {
         })
     };
     if let Some(next) = higher.or_else(boosted).filter(|&n| n != (p, t)) {
+        // The thread taken from goes on when the other stops. Of nested
+        // preemptions the first is kept: the threads above it run and
+        // stop before it does.
+        let now = cpu.bus.clock.now_micros();
+        let win32 = &mut cpu.bus.win32;
+        if win32.preempted.is_none() {
+            let used = now.saturating_sub(win32.slice_start);
+            win32.preempted = Some((win32.processes[p].threads[t].id, used));
+        }
         save(cpu, Context::of(cpu));
         enter(cpu, next);
     }

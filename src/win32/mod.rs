@@ -353,6 +353,11 @@ pub struct Win32 {
     /// When the running thread's turn started, by the clock's
     /// microseconds.
     pub slice_start: u64,
+    /// The thread a thread of a higher priority took the processor from
+    /// (`thread::preempt`), by its id, and how much of its turn it had
+    /// used, in microseconds: it goes on with the rest of its turn when
+    /// that thread stops.
+    preempted: Option<(u32, u64)>,
     /// When the first timed wait of a thread ends, by the clock's
     /// microseconds (`thread::schedule_waits`), so that a Sleep ends on
     /// time rather than at the next interrupt. Worked out again after a
@@ -1436,6 +1441,7 @@ crate::state_fields!(Win32 {
     real_mode,
     exit_code,
     slice_start,
+    preempted,
     calls,
     ids,
     root,

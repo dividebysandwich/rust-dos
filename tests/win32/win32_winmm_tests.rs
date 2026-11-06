@@ -237,6 +237,89 @@ fn a_periodic_timer_fires_once_a_period_of_emulated_time() {
     }
 }
 
+const SPIN_FLAG: u32 = 0x00;
+const SPIN_START: u32 = 0x04;
+const SPIN_TICKS: u32 = 0x08;
+
+/// A thread started, then a periodic timer of 5 ms, whose thread is of a
+/// higher priority and preempts the main one every period, and the main
+/// thread spinning until the thread sets a flag, for at most 2 seconds.
+/// The exit code is 1 if the flag came, 2 if it didn't, with bit 4 set if
+/// the timer never ran.
+fn preempted_spin_program() -> Vec<u8> {
+    const TIME_PERIODIC: i32 = 1;
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["CreateThread", "ExitProcess"]),
+        ("WINMM.dll", &["timeSetEvent", "timeGetTime"]),
+    ];
+    program(imports, &[0; 0x20], |a, l| {
+        // The thread: set the flag and end.
+        let mut start = a.create_label();
+        a.push(0)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(start)?;
+        a.mov(dword_ptr(l.at(SPIN_FLAG)), 1)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        // The timer's callback (id, msg, user, dw1, dw2): count.
+        let mut main = a.create_label();
+        a.set_label(&mut start)?;
+        a.push(0)?;
+        a.push(0)?;
+        a.call(l.import(0))?;
+        a.call(main)?;
+        a.inc(dword_ptr(l.at(SPIN_TICKS)))?;
+        a.ret_1(20)?;
+        a.set_label(&mut main)?;
+        a.pop(ebp)?;
+        a.push(TIME_PERIODIC)?;
+        a.push(0)?;
+        a.push(ebp)?;
+        a.push(1)?;
+        a.push(5)?;
+        a.call(l.import(2))?;
+        a.call(l.import(3))?;
+        a.mov(dword_ptr(l.at(SPIN_START)), eax)?;
+        let (mut spin, mut done) = (a.create_label(), a.create_label());
+        a.mov(ebx, 1)?;
+        a.set_label(&mut spin)?;
+        a.cmp(dword_ptr(l.at(SPIN_FLAG)), 0)?;
+        a.jne(done)?;
+        a.call(l.import(3))?;
+        a.sub(eax, dword_ptr(l.at(SPIN_START)))?;
+        a.cmp(eax, 2000)?;
+        a.jb(spin)?;
+        a.mov(ebx, 2)?;
+        a.set_label(&mut done)?;
+        let mut ticked = a.create_label();
+        a.cmp(dword_ptr(l.at(SPIN_TICKS)), 0)?;
+        a.jne(ticked)?;
+        a.or(ebx, 1 << 4)?;
+        a.set_label(&mut ticked)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.int3()
+    })
+}
+
+/// A thread that a multimedia timer's thread preempts goes on with the
+/// rest of its turn, so another thread of its priority gets the
+/// processor when that turn is over, as on Windows. The timer used to
+/// start the spinning thread's turn over every period, and the other
+/// thread, started before the timer, never ran.
+#[test]
+fn a_thread_a_timer_preempts_still_gives_way_at_the_end_of_its_turn() {
+    for core in CORES {
+        let files = [("T.EXE", preempted_spin_program())];
+        let mut cpu = machine("preempted_spin", core, &files, |_| {});
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        let code = cpu.errorlevel;
+        assert_eq!(code, 1, "{core:?}: exit code {code:#x}");
+        assert!(printed(&cpu).is_empty(), "{:?}", printed(&cpu));
+    }
+}
+
 /// MIDI out device 0 opened, a note played on channel 1 for 100 ms and
 /// stopped, a second one on channel 2 left for midiOutReset, and the
 /// device closed. A bit in the exit code for each call that worked.
