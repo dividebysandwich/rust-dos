@@ -1613,18 +1613,9 @@ fn read_target(
 /// The render target's pixels after `scene`, row after row, 5-6-5,
 /// once every call in it succeeded.
 fn draw_scene(test: &str, scene: &Scene) -> Vec<u16> {
-    let (exe, data) = scene_program(scene);
-    let mut cpu = machine_with(test, scene.card, exe);
-    run_until_done(&mut cpu, data);
-    let n = peek(&cpu, data + CALLS);
-    let r = results(&cpu, data, n);
-    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
-    (0..64 * 64)
-        .map(|i| {
-            let at = data + PIXELS + 2 * i;
-            (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
-        })
-        .collect()
+    let (r, pixels) = clear_scene(test, scene);
+    assert!(r.iter().all(|&hr| hr == 0), "Clear results: {r:X?}");
+    pixels
 }
 
 /// The results of `scene`'s Clear and ViewportClear steps, and the
