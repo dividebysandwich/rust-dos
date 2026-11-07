@@ -16,6 +16,7 @@
 //! processes' threads go on around them.
 
 mod builtin;
+mod comm;
 pub mod dos;
 pub(crate) mod dpmi;
 pub(crate) mod flat;
@@ -126,6 +127,8 @@ pub struct State {
     pub clients: Vec<flat::Client>,
     pub aliases: Vec<flat::Alias>,
     pub links: Vec<flat::Link>,
+    /// The serial ports open (comm.rs).
+    pub comm: Vec<comm::Port>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -623,7 +626,8 @@ crate::state_fields!(State {
     clients,
     aliases,
     links,
-    exit_code
+    exit_code,
+    comm
 });
 crate::state_fields!(Module16 {
     name,
