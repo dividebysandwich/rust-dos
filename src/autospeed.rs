@@ -29,21 +29,23 @@
 //! speed-sensitive games of the 1980s draw without full frames. While it
 //! moves data on its drives, it loads, and gets all the host has: Wolf's
 //! loading screens unpack its data for 25 seconds at 3000 and for 6 at a
-//! 486's speed. Its writes to video memory don't count for that, as those
-//! games draw piecemeal all the time. A protected-mode program gets all
-//! the host has while it reads and writes (loading, compiling, Windows),
-//! and otherwise goes down to a 486's speed, or a quarter of a faster CPU
-//! model's clock: it spins in a loop, as game menus do. (It was written
-//! for a 386 or better, and paces itself.) Under an operating system that
-//! halts the processor when it has nothing to run (Windows, OS/2, Linux,
-//! and the built-in Windows, which is known to from the start), a program
-//! that keeps it from halting is at work and gets all the host has as
-//! well. Once a program stops reading and writing (a real-mode one, its
-//! drives), it goes back to the speed it had at once, not a measurement
-//! later: programs time their delay loops right after loading, and a loop
-//! timed at all the host has waits for ever (Sam & Max's General MIDI
-//! driver counts to a million in a timer tick, and hangs if it gets there
-//! first).
+//! 486's speed. It does from the second measurement that finds it doing so,
+//! as the first may have found DOS loading the program itself, which times
+//! its delay loops right after. Its writes to video memory don't count for
+//! that, as those games draw piecemeal all the time. A protected-mode
+//! program gets all the host has while it reads and writes (loading,
+//! compiling, Windows), and otherwise goes down to a 486's speed, or a
+//! quarter of a faster CPU model's clock: it spins in a loop, as game menus
+//! do. (It was written for a 386 or better, and paces itself.) Under an
+//! operating system that halts the processor when it has nothing to run
+//! (Windows, OS/2, Linux, and the built-in Windows, which is known to from
+//! the start), a program that keeps it from halting is at work and gets all
+//! the host has as well. Once a program stops reading and writing (a
+//! real-mode one, its drives), it goes back to the speed it had at once,
+//! not a measurement later: programs time their delay loops right after
+//! loading, and a loop timed at all the host has waits for ever (Sam &
+//! Max's General MIDI driver counts to a million in a timer tick, and hangs
+//! if it gets there first).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -196,9 +198,10 @@ const BUSY: f64 = 0.05;
 /// a program without frames is at work; a real-mode program's on drives
 /// only. Wolf moves 52 KB a second while it loads.
 const WORKING: f64 = 32768.0;
-/// Emulated time without reads and writes after which a program that got
-/// all the host has for them goes back to the speed it had: less than the
-/// four timer ticks a delay loop's timing waits for.
+/// Emulated time without reads and writes (a real-mode program's, on its
+/// drives) after which a program that got all the host has for them goes
+/// back to the speed it had: less than the four timer ticks a delay loop's
+/// timing waits for.
 const WORK_DONE_NS: u64 = 100_000_000;
 /// What a read of the input status register (3DAh) in a retrace-polling
 /// loop takes, the I/O's time and the loop's.
@@ -629,6 +632,12 @@ pub struct AutoSpeed {
     /// the same of the bytes moved on drives.
     output: (u64, u64),
     io: (u64, u64),
+    /// The last measurement found a real-mode program without frames
+    /// moving `WORKING` on its drives. It loads once a second one does too:
+    /// one alone may be its own program file, read as it started, and a
+    /// delay loop timed right after that would be timed at all the host
+    /// has.
+    loading: bool,
     /// The least speed of a protected-mode program for the CPU model
     /// (`CpuModel::auto_least`), when that is more than `PROTECTED_LEAST`.
     protected_least: u32,
@@ -663,6 +672,7 @@ impl AutoSpeed {
             flat_out: false,
             output: (0, 0),
             io: (0, 0),
+            loading: false,
             protected_least: PROTECTED_LEAST,
             idles: false,
             busy_os: true,
@@ -736,6 +746,7 @@ impl AutoSpeed {
         self.restart_search();
         self.working = None;
         self.flat_out = false;
+        self.loading = false;
     }
 
     /// The search starts again from the next measurement, forgetting the
@@ -789,19 +800,11 @@ impl AutoSpeed {
         }
         // A real-mode program's work is on its drives only (see `decide`).
         let worked = if protected { self.output.1 } else { self.io.1 };
-        if let Some(before) = self.working
-            && now.ns.saturating_sub(worked) >= WORK_DONE_NS
-        {
-            if trace() {
-                eprintln!("[auto] work done: back to {}", before);
-            }
-            // The work may have found the host short of that speed.
-            let before = self.lagged.map_or(before, |(most, _)| before.min(most));
-            self.start_over();
-            self.settle_until = now.ns + SETTLE_NS;
-            return (before != bus.clock.cycles_per_ms()).then_some(before);
-        }
+        let done = now.ns.saturating_sub(worked) >= WORK_DONE_NS;
         let current = bus.clock.cycles_per_ms();
+        if let Some(before) = self.working.filter(|_| done) {
+            return self.work_done(before, now.ns, current);
+        }
         let cut = (self.flat_out && current > host_max)
             .then(|| host_max.max(self.least(protected, host_max)))
             .filter(|&speed| speed < current);
@@ -893,6 +896,13 @@ impl AutoSpeed {
                 longest
             );
         }
+        // The reads and writes the measurement found ended before it did:
+        // going to all the host has for them would only last until the
+        // next frame, and time a delay loop that starts after loading at
+        // that speed.
+        if let Some(before) = self.working.filter(|_| done) {
+            return self.work_done(before, now.ns, current);
+        }
         if next == current {
             return None;
         }
@@ -901,6 +911,19 @@ impl AutoSpeed {
         self.settle_until = now.ns + if lowered { SETTLE_DOWN_NS } else { SETTLE_NS };
         self.unsettled = Some((f64::NAN, 0));
         Some(next)
+    }
+
+    /// The work the program got all the host has for is done: back to
+    /// `before`, the speed it had, at once.
+    fn work_done(&mut self, before: u32, now_ns: u64, current: u32) -> Option<u32> {
+        if trace() {
+            eprintln!("[auto] work done: back to {}", before);
+        }
+        // The work may have found the host short of that speed.
+        let before = self.lagged.map_or(before, |(most, _)| before.min(most));
+        self.start_over();
+        self.settle_until = now_ns + SETTLE_NS;
+        (before != current).then_some(before)
     }
 
     /// The least speed there is: a faster model's only up to what the host
@@ -926,6 +949,7 @@ impl AutoSpeed {
         let top = host_max.max(base);
         let c = current as f64;
         self.flat_out = false;
+        let loading = std::mem::take(&mut self.loading);
         if protected && m.halted >= IDLES {
             self.idles = true;
         }
@@ -983,23 +1007,24 @@ impl AutoSpeed {
             // too (3DMark 2000 builds a scene for seconds, with disk reads
             // the emulator's own services don't see). Otherwise one that
             // does neither spins in a loop, as a game's menu does. A
-            // real-mode program loads while it moves data on its drives;
-            // its writes to video memory are the 1980s games' piecemeal
-            // drawing, which keeps the real-mode speed.
-            return if !protected {
-                if m.io >= WORKING {
-                    self.working = Some(clamp(c));
-                    self.flat_out = true;
-                    top
-                } else {
-                    base
-                }
-            } else if m.halted >= IDLES {
-                clamp(c)
-            } else if m.output >= WORKING {
+            // real-mode program loads while it moves data on its drives,
+            // from the second measurement running that finds it doing so
+            // (`loading`); its writes to video memory are the 1980s games'
+            // piecemeal drawing, which keeps the real-mode speed.
+            let works = if protected {
+                m.halted < IDLES && m.output >= WORKING
+            } else {
+                self.loading = m.io >= WORKING;
+                loading && self.loading
+            };
+            return if works {
                 self.working = Some(clamp(c));
                 self.flat_out = true;
                 top
+            } else if !protected {
+                base
+            } else if m.halted >= IDLES {
+                clamp(c)
             } else if self.busy_os && self.idles && m.halted < BUSY {
                 self.flat_out = true;
                 top
@@ -2638,13 +2663,48 @@ mod tests {
         };
         // Drawing piecemeal, as the games of the 1980s do, it keeps the
         // real-mode speed; moving data on its drives, as Wolf does for 25
-        // seconds at 3000, it loads.
+        // seconds at 3000, it loads, from the second measurement on.
         assert_eq!(run(doing(1e6, 0.0), false, 3), [3000, 3000, 3000]);
-        assert_eq!(run(doing(1e6, 52_000.0), false, 2), [HOST, HOST]);
+        assert_eq!(run(doing(1e6, 52_000.0), false, 3), [3000, HOST, HOST]);
         assert_eq!(run(doing(1e6, 1000.0), false, 2), [3000, 3000]);
         let mut auto = AutoSpeed::new(3000, None);
         auto.decide(3000, &doing(52_000.0, 52_000.0)(0), false, HOST);
+        assert_eq!(auto.working, None, "one measurement may be its own file");
+        auto.decide(3000, &doing(52_000.0, 52_000.0)(0), false, HOST);
         assert_eq!(auto.working, Some(3000), "where it goes back to");
+    }
+
+    #[test]
+    fn a_real_mode_program_loading_once_keeps_its_speed() {
+        // DOS loads a game's program file, and the game times its delay
+        // loop: a measurement in between, then one with the drives still.
+        let doing = |io| Measurement { io, ..STILL };
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.decide(3000, &doing(200_000.0), false, HOST), 3000);
+        assert_eq!(auto.decide(3000, &doing(0.0), false, HOST), 3000);
+        assert_eq!(auto.decide(3000, &doing(52_000.0), false, HOST), 3000);
+        assert_eq!(auto.working, None);
+    }
+
+    #[test]
+    fn work_over_before_its_measurement_ends_keeps_the_speed() {
+        // Moving data on its drives in the first 100 ms of a measurement
+        // and nothing after: no frame at all the host has.
+        let program = |still_ms: u64| {
+            let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+            cpu.bus.set_cycles_per_ms(3000);
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.loading = true;
+            let bus = &mut cpu.bus;
+            assert_eq!(auto.update(bus, false, HOST, 0), None);
+            bus.clock.icount += 3000 * (500 - still_ms);
+            bus.activity.io_bytes += 64_000;
+            assert_eq!(auto.update(bus, false, HOST, 0), None);
+            bus.clock.icount += 3000 * still_ms;
+            auto.update(bus, false, HOST, 0)
+        };
+        assert_eq!(program(400), None);
+        assert_eq!(program(10), Some(HOST));
     }
 
     #[test]
