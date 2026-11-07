@@ -31,6 +31,7 @@ const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
+const KEY_QUEUE_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -222,6 +223,9 @@ impl Bus {
         // The time stamp counter's clock, in a section of its own so states
         // saved before it load (counting instructions, as it did then).
         w.section(b"TSC ", TSC_VERSION, |w| clock.tsc.save(w));
+        // Which queued keystrokes the BIOS never saw, in a section of its
+        // own so states saved before it load.
+        w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
@@ -537,6 +541,11 @@ impl Bus {
         clock.tsc = Default::default();
         if r.next_is(b"TSC ") {
             clock.tsc.load(&mut r.section(b"TSC ", TSC_VERSION)?)?;
+        }
+        if r.next_is(b"KEYQ") {
+            kbd.load_queue(&mut r.section(b"KEYQ", KEY_QUEUE_VERSION)?)?;
+        } else {
+            kbd.forget_queue();
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
