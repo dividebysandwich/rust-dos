@@ -4,7 +4,7 @@
 //! emulated cards' own levels, such as the Sound Blaster's mixer chip,
 //! which programs set and a new program resets.
 
-use crate::dsp::{Chorus, Reverb, SpeakerFilter, StereoLowpass};
+use crate::dsp::{Chorus, OutputCoupling, Reverb, SpeakerFilter, StereoLowpass};
 pub use crate::dsp::{ChorusPreset, ReverbPreset};
 
 /// A sound source the mixer has a volume for, or `Master` for the mix.
@@ -218,6 +218,7 @@ fn dry_wet(mix: u16) -> (f32, f32) {
 struct Dsp {
     speaker: SpeakerFilter,
     sb: StereoLowpass,
+    sb_coupling: OutputCoupling,
     reverb: Option<Reverb>,
     chorus: Option<Chorus>,
 }
@@ -344,6 +345,7 @@ impl Mixer {
     pub fn clear_tails(&mut self) {
         self.dsp.speaker = SpeakerFilter::default();
         self.dsp.sb = StereoLowpass::default();
+        self.dsp.sb_coupling = OutputCoupling::default();
         self.dsp.reverb = (self.settings.reverb != ReverbPreset::Off).then(|| Reverb::new(self.settings.reverb));
         self.dsp.chorus = (self.settings.chorus != ChorusPreset::Off).then(Chorus::new);
     }
@@ -453,6 +455,14 @@ impl Mixer {
     #[inline]
     pub(crate) fn sb_filter(&mut self, frame: (f32, f32), cutoff: f32, order: usize) -> (f32, f32) {
         self.dsp.sb.process(frame, cutoff, order)
+    }
+
+    /// The Sound Blaster's frame through the capacitor on the card's
+    /// output (`OutputCoupling`), which keeps the level its DAC holds
+    /// after a transfer out of the mix.
+    #[inline]
+    pub(crate) fn sb_coupling(&mut self, frame: (f32, f32)) -> (f32, f32) {
+        self.dsp.sb_coupling.process(frame)
     }
 
     /// The mix of a frame: the sources with the reverb and chorus of what

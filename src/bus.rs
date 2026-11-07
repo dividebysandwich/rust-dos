@@ -1738,7 +1738,8 @@ impl Bus {
                     self.sb_frame = f;
                 }
                 if sb_on {
-                    let mut frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    let mut frame = self.mixer.sb_coupling(held);
                     if let Some((cutoff, order)) = sb_filter {
                         frame = self.mixer.sb_filter(frame, cutoff, order);
                     }

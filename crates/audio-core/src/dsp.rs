@@ -96,6 +96,43 @@ impl OnePoleHighpass {
     }
 }
 
+/// Where a sound card's output coupling starts to cut, in hertz: its
+/// capacitor and the load behind it make a high-pass of a few hertz, far
+/// below anything heard.
+pub const COUPLING_HZ: f32 = 3.0;
+
+/// The capacitor in series with a sound card's output, left and right: a
+/// first-order high-pass at `COUPLING_HZ`. A DAC holds its last sample
+/// until the next, however long, and the capacitor lets none of that steady
+/// level through: it fades within a fraction of a second, a click at most.
+///
+/// It starts settled on the first frame it gets (after `Default`, as after
+/// a state was loaded): a level the DAC held already then passes as it
+/// would have after a long while, with no click of its own.
+#[derive(Clone, Copy, Debug)]
+pub struct OutputCoupling {
+    filters: [OnePoleHighpass; 2],
+    settled: bool,
+}
+
+impl Default for OutputCoupling {
+    fn default() -> Self {
+        Self { filters: [OnePoleHighpass::new(COUPLING_HZ); 2], settled: false }
+    }
+}
+
+impl OutputCoupling {
+    #[inline]
+    pub fn process(&mut self, (l, r): (f32, f32)) -> (f32, f32) {
+        if !self.settled {
+            self.settled = true;
+            self.filters[0].x1 = l;
+            self.filters[1].x1 = r;
+        }
+        (self.filters[0].process(l), self.filters[1].process(r))
+    }
+}
+
 /// The small speaker of a PC, as DOSBox Staging has it: a third-order
 /// high-pass at 120 Hz, as it can't move much air, and a second-order
 /// low-pass at 4.8 kHz.
