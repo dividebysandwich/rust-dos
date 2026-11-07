@@ -161,7 +161,20 @@ pub struct Port {
 }
 
 crate::state_fields!(Port {
-    id, task, in_size, out_size, input, unget, held, xoff, brk, dcb, block, mask, errors, lines,
+    id,
+    task,
+    in_size,
+    out_size,
+    input,
+    unget,
+    held,
+    xoff,
+    brk,
+    dcb,
+    block,
+    mask,
+    errors,
+    lines,
     sending
 });
 
@@ -176,7 +189,12 @@ fn find(cpu: &Cpu, cid: u32) -> Option<usize> {
     if cid as usize >= PORTS {
         return None;
     }
-    cpu.bus.win32.win16.comm.iter().position(|p| p.id as u16 == cid)
+    cpu.bus
+        .win32
+        .win16
+        .comm
+        .iter()
+        .position(|p| p.id as u16 == cid)
 }
 
 /// The COM port a device name names ("COM1", "com2:"): its number from
@@ -184,9 +202,9 @@ fn find(cpu: &Cpu, cid: u32) -> Option<usize> {
 fn com_number(name: &[u8]) -> Option<usize> {
     let name = name.strip_suffix(b":").unwrap_or(name);
     match name {
-        [c, o, m, digit] if [c, o, m].map(u8::to_ascii_uppercase) == *b"COM" => {
-            (b'1'..=b'9').contains(digit).then(|| (digit - b'1') as usize)
-        }
+        [c, o, m, digit] if [c, o, m].map(u8::to_ascii_uppercase) == *b"COM" => (b'1'..=b'9')
+            .contains(digit)
+            .then(|| (digit - b'1') as usize),
         _ => None,
     }
 }
@@ -467,9 +485,8 @@ pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return ret(IE_OPEN);
     }
     let key = format!("COM{}:", n + 1);
-    let settings =
-        crate::win32::kernel32::profile_value(cpu, b"WIN.INI", b"ports", key.as_bytes())
-            .unwrap_or_else(|| b"9600,n,8,1".to_vec());
+    let settings = crate::win32::kernel32::profile_value(cpu, b"WIN.INI", b"ports", key.as_bytes())
+        .unwrap_or_else(|| b"9600,n,8,1".to_vec());
     let mut def = key.into_bytes();
     def.extend_from_slice(&settings);
     let Some(dcb) = build_dcb(&def) else {
@@ -753,8 +770,15 @@ pub fn escape_comm_function(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         GETMAXCOM => return Some(PORTS as u32 - 1),
         GETMAXLPT => return Some(0x82),
         GETBASEIRQ => {
-            let port = cpu.bus.serial.ports.get(cid as usize).and_then(|p| p.as_ref());
-            return Some(port.map_or(0xFFFF_FFFF, |p| p.uart.base as u32 | (p.uart.irq as u32) << 16));
+            let port = cpu
+                .bus
+                .serial
+                .ports
+                .get(cid as usize)
+                .and_then(|p| p.as_ref());
+            return Some(port.map_or(0xFFFF_FFFF, |p| {
+                p.uart.base as u32 | (p.uart.irq as u32) << 16
+            }));
         }
         _ => {}
     }
@@ -807,14 +831,23 @@ mod tests {
         let dcb = build_dcb(b"COM2:9600,n,8,1").unwrap();
         assert_eq!(dcb[0], 1);
         assert_eq!(dcb_word(&dcb, DCB_BAUD), 9600);
-        assert_eq!((dcb[DCB_BYTESIZE], dcb[DCB_PARITY], dcb[DCB_STOPBITS]), (8, 0, 0));
+        assert_eq!(
+            (dcb[DCB_BYTESIZE], dcb[DCB_PARITY], dcb[DCB_STOPBITS]),
+            (8, 0, 0)
+        );
         assert_eq!(dcb_word(&dcb, DCB_FLAGS), F_BINARY);
 
         let dcb = build_dcb(b"com1: 96, E, 7, 2, x").unwrap();
         assert_eq!(dcb[0], 0);
         assert_eq!(dcb_word(&dcb, DCB_BAUD), 9600);
-        assert_eq!((dcb[DCB_BYTESIZE], dcb[DCB_PARITY], dcb[DCB_STOPBITS]), (7, 2, 2));
-        assert_eq!(dcb_word(&dcb, DCB_FLAGS), F_BINARY | F_PARITY | F_OUTX | F_INX);
+        assert_eq!(
+            (dcb[DCB_BYTESIZE], dcb[DCB_PARITY], dcb[DCB_STOPBITS]),
+            (7, 2, 2)
+        );
+        assert_eq!(
+            dcb_word(&dcb, DCB_FLAGS),
+            F_BINARY | F_PARITY | F_OUTX | F_INX
+        );
 
         let dcb = build_dcb(b"COM1:115200,n,8,1.5,p").unwrap();
         assert_eq!(divisor(dcb_word(&dcb, DCB_BAUD)), Ok(1));

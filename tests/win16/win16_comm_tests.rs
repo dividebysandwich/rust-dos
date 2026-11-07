@@ -262,16 +262,28 @@ fn comm_state_escapes_and_held_transmission() {
     p.push_data(0x40).call("USER", BUILD_COMM_DCB);
     expect_ax(&mut p.code, 0xFFFF, 8);
     // COM2's base address and IRQ, and the highest COM port id.
-    p.code.push(1).push(GETBASEIRQ).call("USER", ESCAPE_COMM_FUNCTION);
+    p.code
+        .push(1)
+        .push(GETBASEIRQ)
+        .call("USER", ESCAPE_COMM_FUNCTION);
     expect_ax(&mut p.code, 0x2F8, 9);
     expect_dx(&mut p.code, 3, 10);
-    p.code.push(1).push(GETMAXCOM).call("USER", ESCAPE_COMM_FUNCTION);
+    p.code
+        .push(1)
+        .push(GETMAXCOM)
+        .call("USER", ESCAPE_COMM_FUNCTION);
     expect_ax(&mut p.code, 3, 11);
-    p.code.push(1).push(CLRDTR).call("USER", ESCAPE_COMM_FUNCTION);
+    p.code
+        .push(1)
+        .push(CLRDTR)
+        .call("USER", ESCAPE_COMM_FUNCTION);
     expect_ax(&mut p.code, 0, 12);
     // SETXOFF holds what WriteComm queues: COMSTAT says so, with the
     // three characters in cbOutQue.
-    p.code.push(1).push(SETXOFF).call("USER", ESCAPE_COMM_FUNCTION);
+    p.code
+        .push(1)
+        .push(SETXOFF)
+        .call("USER", ESCAPE_COMM_FUNCTION);
     expect_ax(&mut p.code, 0, 13);
     p.code.push(1);
     p.push_string(b"AT\r");
@@ -282,7 +294,10 @@ fn comm_state_escapes_and_held_transmission() {
     expect_ax(&mut p.code, 0, 15);
     expect_byte(&mut p.code, 0x30, 0x08, 16); // CSTF_XOFFHOLD
     expect_word(&mut p.code, 0x33, 3, 17);
-    p.code.push(1).push(SETXON).call("USER", ESCAPE_COMM_FUNCTION);
+    p.code
+        .push(1)
+        .push(SETXON)
+        .call("USER", ESCAPE_COMM_FUNCTION);
     expect_ax(&mut p.code, 0, 18);
     // The receive queue flushes; there is no queue 7.
     p.code.push(1).push(1).call("USER", FLUSH_COMM);
