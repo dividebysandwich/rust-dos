@@ -114,22 +114,42 @@ pub fn parse(d: &[u8]) -> Option<Media> {
         }
     }
     if let Some(s) = file.streams.iter().find(|s| s.kind() == AUDS) {
-        let f = &s.format;
-        let data = || -> Vec<u8> { s.chunks.iter().flat_map(|c| bytes(d, c)).copied().collect() };
-        if le16(f, 0)? == WAVE_FORMAT_PCM {
-            let format = Format::pcm(le32(f, 4)?, le16(f, 14)?, le16(f, 2)?);
-            if format.rate > 0 && matches!(format.bits, 8 | 16) && matches!(format.channels, 1 | 2)
-            {
-                media.audio = Some((format, data()));
-            }
-        } else if let Some((adpcm, rate)) = adpcm::Format::from_wave_format(f) {
-            // ACM decodes it to 16-bit PCM of its rate and channels.
-            let pcm = adpcm.decode_buffer(&data());
-            let format = Format::pcm(rate, 16, adpcm.channels);
-            media.audio = Some((format, pcm.iter().flat_map(|v| v.to_le_bytes()).collect()));
-        }
+        media.audio = audio(d, s);
     }
     (media.frames > 0 || media.audio.is_some()).then_some(media)
+}
+
+/// The sound of the audio stream `s` of the file `d` as PCM, if it is
+/// PCM or ADPCM: None for another format, or a format too short to say,
+/// which leaves the file's video to play without it.
+fn audio(d: &[u8], s: &avi::Stream) -> Option<(Format, Vec<u8>)> {
+    let f = &s.format;
+    let data = || -> Vec<u8> { s.chunks.iter().flat_map(|c| bytes(d, c)).copied().collect() };
+    if le16(f, 0)? == WAVE_FORMAT_PCM {
+        let format = Format::pcm(le32(f, 4)?, le16(f, 14)?, le16(f, 2)?);
+        let plays =
+            format.rate > 0 && matches!(format.bits, 8 | 16) && matches!(format.channels, 1 | 2);
+        return plays.then(|| (format, data()));
+    }
+    let (adpcm, rate) = adpcm::Format::from_wave_format(f)?;
+    // ACM decodes it to 16-bit PCM of its rate and channels, block by
+    // block here. msadp32.acm writes nothing for a conversion that meets
+    // a block it can't decode, and MCIAVI converts the sound a buffer at
+    // a time as it plays: such a block is silence, which keeps the sound
+    // after it in step with the pictures, where decoding the file in one
+    // conversion would silence the whole of it.
+    let block = adpcm.block_align as usize;
+    // A block's 16-bit samples, all channels'.
+    let silence = adpcm.samples_per_block as usize * adpcm.channels as usize * 2;
+    let mut pcm = Vec::new();
+    for b in data().chunks(block) {
+        let samples = adpcm.decode_buffer(b);
+        if samples.is_empty() && b.len() == block {
+            pcm.resize(pcm.len() + silence, 0);
+        }
+        pcm.extend(samples.iter().flat_map(|v| v.to_le_bytes()));
+    }
+    Some((Format::pcm(rate, 16, adpcm.channels), pcm))
 }
 
 /// A picture decoder, which goes on from where it got to. A copy is
@@ -178,11 +198,11 @@ impl Pictures {
         if video.compression == BI_RLE8 {
             return self.rle_frame(video, size, n);
         }
-        // Back, or on: from the key frame before, unless the decoder is
-        // past it.
+        // Back, or on: from the key frame before, unless the decoder goes
+        // on from where it is.
         let key = key_frame(video, n);
         let from = match self.at {
-            Some(at) if at <= n && at >= key && !self.codec.is_empty() => at + 1,
+            Some(at) if goes_on(at, key, n) && !self.codec.is_empty() => at + 1,
             _ => {
                 self.codec = Codec::new(video.compression);
                 key
@@ -213,7 +233,7 @@ impl Pictures {
         let len = stride * h as usize;
         let key = key_frame(video, n);
         let from = match self.at {
-            Some(at) if at <= n && at >= key && self.indexes.len() == len => at + 1,
+            Some(at) if goes_on(at, key, n) && self.indexes.len() == len => at + 1,
             _ => {
                 self.indexes = vec![0; len];
                 key
@@ -238,6 +258,17 @@ fn key_frame(video: &Video, n: u32) -> u32 {
         .rev()
         .find(|&i| video.chunks[i as usize].flags & AVIIF_KEYFRAME != 0)
         .unwrap_or(0)
+}
+
+/// Whether a decoder that has decoded the frames up to `at` goes on to
+/// the frame `n`, whose key frame is `key`, rather than start again at
+/// `key`: when it hasn't passed `n` and has reached the frame before
+/// `key`. A key frame decoded on from the frame before it gives the
+/// picture it gives on its own, so playing on never starts again. A
+/// file without an index has every frame marked a key frame, and
+/// starting again at each would decode each frame's changes alone.
+fn goes_on(at: u32, key: u32, n: u32) -> bool {
+    at <= n && at + 1 >= key
 }
 
 /// The rows of a bottom-up DIB, from the top.
@@ -435,8 +466,9 @@ pub mod tests {
         }
     }
 
-    #[test]
-    fn rle8_frames_draw_onto_the_picture_before() {
+    /// Show the frames `shown` of an RLE8 file, with an index or without
+    /// one, and check each picture.
+    fn rle8_pictures(index: bool, shown: &[u32]) {
         // Black, red, green, blue.
         let colors = [[0, 0, 0], [0, 0, 255], [0, 255, 0], [255, 0, 0]];
         let bih = bitmap_info(4, 2, 8, BI_RLE8, &colors);
@@ -450,7 +482,7 @@ pub mod tests {
             // Only the bitmap's end: the picture stays as it was.
             (vec![0, 1], false),
         ];
-        let m = parse(&avi_file(&bih, &frames, &pcm_format(), &[0x80; 10], true)).unwrap();
+        let m = parse(&avi_file(&bih, &frames, &pcm_format(), &[0x80; 10], index)).unwrap();
         assert_eq!((m.width, m.height, m.frames), (4, 2, 3));
         let Kind::Avi(v) = &m.video else { panic!() };
         let px = |rows: &[u8], x: usize, y: usize| -> [u8; 3] {
@@ -459,8 +491,7 @@ pub mod tests {
         };
         let (red, green, blue) = (colors[1], colors[2], colors[3]);
         let mut p = Pictures::default();
-        // On from frame 0, back to it, then a seek past the delta.
-        for n in [0, 1, 2, 0, 2] {
+        for &n in shown {
             let rows = p.frame(v, (4, 2), n).unwrap();
             let top: Vec<_> = (0..4).map(|x| px(rows, x, 0)).collect();
             let bottom: Vec<_> = (0..4).map(|x| px(rows, x, 1)).collect();
@@ -472,6 +503,19 @@ pub mod tests {
             };
             assert_eq!(top, want, "frame {n}");
         }
+    }
+
+    #[test]
+    fn rle8_frames_draw_onto_the_picture_before() {
+        // On from frame 0, back to it, then a seek past the delta.
+        rle8_pictures(true, &[0, 1, 2, 0, 2]);
+    }
+
+    #[test]
+    fn rle8_frames_of_a_file_without_an_index_play_on() {
+        // Every frame of such a file is marked a key frame, and playing
+        // on still draws each onto the one before.
+        rle8_pictures(false, &[0, 1, 2]);
     }
 
     #[test]
@@ -496,20 +540,32 @@ pub mod tests {
         block.extend_from_slice(&1000i16.to_le_bytes());
         block.extend_from_slice(&500i16.to_le_bytes());
         block.extend_from_slice(&[0; 9]);
-        let sound = [block.clone(), block].concat();
+        // A block whose predictor is past the coefficients, which the
+        // codec doesn't decode, between two that it does.
+        let mut bad = block.clone();
+        bad[0] = 7;
+        let sound = [block.clone(), bad, block].concat();
         let bih = bitmap_info(2, 2, 24, BI_RGB, &[]);
         let frame = [(flat(2, 2, [0, 0, 0]), true)];
         let m = parse(&avi_file(&bih, &frame, &wf, &sound, false)).unwrap();
         let (format, pcm) = m.audio.clone().unwrap();
         let f = (format.tag, format.rate, format.bits, format.channels);
         assert_eq!(f, (WAVE_FORMAT_PCM, 11025, 16, 1));
-        // Two blocks of 20 samples, 2 bytes each.
-        assert_eq!(pcm.len(), 2 * 20 * 2);
+        // Three blocks of 20 samples, 2 bytes each, the second silent.
+        assert_eq!(pcm.len(), 3 * 20 * 2);
         let sample = |i: usize| i16::from_le_bytes([pcm[i * 2], pcm[i * 2 + 1]]);
-        assert_eq!(
-            (sample(0), sample(1), sample(20), sample(21)),
-            (500, 1000, 500, 1000)
-        );
+        assert_eq!((sample(0), sample(1)), (500, 1000));
+        assert!((20..40).all(|i| sample(i) == 0));
+        assert_eq!((sample(40), sample(41)), (500, 1000));
+    }
+
+    #[test]
+    fn a_sound_format_too_short_leaves_the_pictures() {
+        let bih = bitmap_info(2, 2, 24, BI_RGB, &[]);
+        let frame = [(flat(2, 2, [0, 0, 0]), true)];
+        let m = parse(&avi_file(&bih, &frame, &[1], &[0x80; 10], false)).unwrap();
+        assert_eq!(m.frames, 1);
+        assert!(m.audio.is_none());
     }
 
     #[test]
