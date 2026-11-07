@@ -239,9 +239,9 @@ pub struct Activity {
     /// The burst going on: its bytes, and the instruction of its last write.
     burst: u64,
     last_write: u64,
-    /// Of its writes in the picture shown (`picture`), the bytes, and the
-    /// lowest and highest place in video memory they wrote, past their
-    /// last byte. (The recompiler's own writes to the VGA's planes, which
+    /// Of the bytes it wrote in the picture shown (`picture`), how many,
+    /// and the lowest and highest place in video memory they are at, past
+    /// the last. (The recompiler's own writes to the VGA's planes, which
     /// go on a burst without coming here, leave them out.)
     shown_bytes: u64,
     low: u64,
@@ -325,11 +325,15 @@ impl Activity {
             (self.low, self.high) = (u64::MAX, 0);
         }
         self.burst += bytes;
+        // Only the part in the picture: a string move without paging comes
+        // here whole, and one to the copy out of sight may reach into the
+        // picture's first rows.
         let (first, end) = self.picture;
-        if offset < end && offset + bytes > first {
-            self.shown_bytes += bytes;
-            self.low = self.low.min(offset);
-            self.high = self.high.max(offset + bytes);
+        let (from, to) = (offset.max(first), (offset + bytes).min(end));
+        if from < to {
+            self.shown_bytes += to - from;
+            self.low = self.low.min(from);
+            self.high = self.high.max(to);
         }
         self.last_write = at;
     }
@@ -413,9 +417,15 @@ impl Activity {
 /// to video memory, where that is known: in a VESA mode, the offsets are
 /// video memory's own, and the picture starts at the display start.
 /// Elsewhere they are the window's the program wrote through, and the
-/// whole window counts.
+/// whole window counts. So does all of video memory in a ViRGE's full
+/// streams mode: the picture is the primary stream's, and a program that
+/// flips pages with its address (as S3D Toolkit programs do) makes no
+/// flips here, so its drawing out of sight has to count as before.
 pub fn picture(bus: &Bus) -> Option<(u64, u64)> {
-    if bus.video_mode != VideoMode::Vesa || bus.banshee().is_some_and(|b| b.extended()) {
+    if bus.video_mode != VideoMode::Vesa
+        || bus.banshee().is_some_and(|b| b.extended())
+        || bus.virge_full_streams()
+    {
         return None;
     }
     bus.vbe.picture()
@@ -3076,6 +3086,26 @@ mod tests {
         // The last one ends with the next write.
         a.video_write(at + 100_000, 1932, 1);
         assert_eq!((a.bursts, a.copies), (0, 5));
+    }
+
+    #[test]
+    fn a_move_into_the_picture_counts_only_its_part_there() {
+        // The same, with each screen copied whole by one string move, as
+        // one without paging writes the frame buffer: the copy out of sight
+        // reaches into the picture's first three rows, which are no frame.
+        let page = 640 * 480;
+        let mut a = Activity::new();
+        a.set_screen(page, true);
+        a.set_picture(Some((1932, 1932 + page)));
+        let mut at = 0;
+        for _ in 0..5 {
+            for base in [1932, page] {
+                at += 100_000;
+                a.video_write(at, base, page);
+            }
+        }
+        a.video_write(at + 100_000, 1932, 1);
+        assert_eq!((a.bursts, a.copies), (5, 0));
     }
 
     #[test]

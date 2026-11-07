@@ -33,6 +33,12 @@ impl Bus {
         self.vga.adapter.is_virge()
     }
 
+    /// Whether a ViRGE is in full streams mode, where the picture is the
+    /// primary stream's, from its own address in video memory.
+    pub(crate) fn virge_full_streams(&self) -> bool {
+        self.virge() && crate::video::s3::streams::Streams::full(self.vga.s3.crtc(0x67))
+    }
+
     pub(crate) fn s3_crtc_write(&mut self, index: u8, value: u8) {
         // The ViRGE's engine reset: CR66 bit 1, CR63's on the ViRGE/VX.
         let reset = match self.vga.adapter {

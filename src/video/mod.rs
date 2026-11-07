@@ -629,7 +629,7 @@ fn render_vbe(canvas: &mut [u8], canvas_w: usize, y_min: usize, y_max: usize, bu
     // pages with it), and the secondary stream goes over it.
     let virge = bus.vga.adapter.is_virge();
     let streams = &bus.virge.streams;
-    let full = virge && s3::streams::Streams::full(bus.vga.s3.crtc(0x67));
+    let full = bus.virge_full_streams();
     let start = if full { streams.primary_address() as usize } else { vbe.latched_start as usize };
     let overlay = virge
         .then(|| streams.overlay(bus.vga.adapter == adapter::Adapter::S3VirgeVx))
