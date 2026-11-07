@@ -169,7 +169,8 @@ pub fn set_tib(cpu: &mut Cpu, phys: u32, selector: u16, tib: u32) {
 }
 
 /// Put the processor in the program's context `ctx`, from wherever it is:
-/// protected mode with paging, the process's tables, level 3.
+/// protected mode with paging, the process's tables, level 3, or level 0
+/// for a context in the system's code segment (`is_system`).
 pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
     let process = super::running(cpu).expect("a Win32 process");
     let cr3 = process.memory.cr3;
@@ -199,7 +200,8 @@ pub fn enter_user(cpu: &mut Cpu, ctx: &Context) {
     };
     cpu.ldtr = SegCache::from_descriptor(LDT_SEL, SYSTEM + LDT, 8 * LDT_ENTRIES - 1, 0x82);
     cpu.tr = SegCache::from_descriptor(TSS_SEL, SYSTEM + TSS, IOPB_END - TSS, 0x8B);
-    cpu.cpl = 3;
+    // A program's level 0 code goes on at level 0 (`Entry::System`).
+    cpu.cpl = if is_system(ctx) { 0 } else { 3 };
     load_segments(cpu, ctx, &tibs, system);
     load_registers(cpu, ctx);
 }
@@ -229,10 +231,18 @@ pub fn load_context(cpu: &mut Cpu, ctx: &Context) {
 fn load_segments(cpu: &mut Cpu, ctx: &Context, tibs: &[(u16, u32)], system: u32) {
     let code = SegCache::from_descriptor(CODE3, 0, 0xFFFF_FFFF, attr(ACCESS_CODE3, FLAT));
     let data = SegCache::from_descriptor(DATA3, 0, 0xFFFF_FFFF, attr(ACCESS_DATA3, FLAT));
+    let system_ctx = is_system(ctx);
     for seg in Seg::ALL {
         let cache = match ctx.seg[seg as usize] {
             CODE3 => code,
             DATA3 => data,
+            // The system's segments, for a program's level 0 code only.
+            CODE0 if system_ctx => {
+                SegCache::from_descriptor(CODE0, 0, 0xFFFF_FFFF, attr(0x9B, FLAT))
+            }
+            DATA0 if system_ctx => {
+                SegCache::from_descriptor(DATA0, 0, 0xFFFF_FFFF, attr(0x93, FLAT))
+            }
             selector => match tibs.iter().find(|&&(s, _)| s == selector) {
                 Some(&(_, tib)) => {
                     SegCache::from_descriptor(selector, tib, PAGE - 1, attr(ACCESS_DATA3, BIG))
@@ -331,25 +341,57 @@ fn dos_psp(cpu: &Cpu) -> u16 {
     }
 }
 
-/// The program's context where it entered the IDT's gate, from the frame
-/// on the level 0 stack, and the error code, if one came with it. None if
-/// the gate wasn't entered from level 3.
-fn gate_context(cpu: &mut Cpu) -> Option<(Context, Option<u32>)> {
+/// Where the processor entered an IDT's gate, from the frame it pushed.
+enum Entry {
+    /// The program's code at level 3, its context and the error code if
+    /// one came with it: the frame is at the top of the level 0 stack.
+    User(Context, Option<u32>),
+    /// Code at level 0 in the system's code segment, a program's own as
+    /// SafeDisc runs through the IDT, with no error code: the frame is on
+    /// the stack that code was using.
+    System(Context),
+}
+
+/// Where the processor entered the IDT's gate, from the frame on the
+/// stack. None if it is neither of `Entry`'s: an exception with an error
+/// code at level 0, or a frame that is no gate's.
+///
+/// The frame's CS tells them apart. A program's level 0 code that SafeDisc
+/// runs uses the level 0 stack right below the frame of the exception it
+/// came in by, so an interrupt there can push its frame where one from
+/// level 3 would be.
+fn gate_entry(cpu: &mut Cpu) -> Option<Entry> {
     let top = SYSTEM + RING0_STACK_TOP;
     let sp = cpu.esp();
+    let read = |cpu: &mut Cpu, at: u32| cpu.bus.guest_read_32(at);
+    let user = |cpu: &mut Cpu, frame: u32| read(cpu, frame + 4) & 3 == 3;
     let (error, frame) = match top.wrapping_sub(sp) {
-        20 => (None, sp),
-        24 => (Some(cpu.bus.guest_read_32(sp)), sp + 4),
-        _ => return None,
+        20 if user(cpu, sp) => (None, sp),
+        24 if user(cpu, sp + 4) => (Some(read(cpu, sp)), sp + 4),
+        _ => {
+            if read(cpu, sp + 4) as u16 != CODE0 {
+                return None;
+            }
+            let mut ctx = Context::of(cpu);
+            ctx.eip = read(cpu, sp);
+            ctx.seg[Seg::CS as usize] = CODE0;
+            ctx.eflags = read(cpu, sp + 8);
+            ctx.gpr[ESP] = sp + 12;
+            return Some(Entry::System(ctx));
+        }
     };
-    let read = |cpu: &mut Cpu, i: u32| cpu.bus.guest_read_32(frame + 4 * i);
     let mut ctx = Context::of(cpu);
-    ctx.eip = read(cpu, 0);
-    ctx.seg[Seg::CS as usize] = read(cpu, 1) as u16;
-    ctx.eflags = read(cpu, 2);
-    ctx.gpr[ESP] = read(cpu, 3);
-    ctx.seg[Seg::SS as usize] = read(cpu, 4) as u16;
-    Some((ctx, error))
+    ctx.eip = read(cpu, frame);
+    ctx.seg[Seg::CS as usize] = read(cpu, frame + 4) as u16;
+    ctx.eflags = read(cpu, frame + 8);
+    ctx.gpr[ESP] = read(cpu, frame + 12);
+    ctx.seg[Seg::SS as usize] = read(cpu, frame + 16) as u16;
+    Some(Entry::User(ctx, error))
+}
+
+/// Whether `ctx` runs at level 0, in the system's code segment.
+pub fn is_system(ctx: &Context) -> bool {
+    ctx.seg[Seg::CS as usize] == CODE0
 }
 
 /// The vectors of the hardware interrupts, as the PICs are programmed.
@@ -357,15 +399,26 @@ fn is_irq(cpu: &Cpu, vector: u8) -> bool {
     (0..16).any(|irq| cpu.bus.pic.vector(irq) == vector)
 }
 
-/// A vector's trap in the ROM: an interrupt or exception at level 3.
+/// A vector's trap in the ROM: an interrupt or exception at level 3, or a
+/// hardware interrupt in a program's level 0 code.
 pub fn idt(cpu: &mut Cpu, vector: u8) {
-    let Some((ctx, error)) = gate_context(cpu) else {
-        super::fatal(
-            cpu,
-            &format!("exception {:02X}h in the system", vector),
-            None,
-        );
-        return;
+    let (ctx, error) = match gate_entry(cpu) {
+        Some(Entry::User(ctx, error)) => (ctx, error),
+        // A hardware interrupt while a program's level 0 code runs with
+        // interrupts on, as SafeDisc's does between its two divide errors:
+        // Windows 98 serves it and goes back to that code.
+        Some(Entry::System(ctx)) if is_irq(cpu, vector) => {
+            reflect(cpu, vector, ctx);
+            return;
+        }
+        _ => {
+            super::fatal(
+                cpu,
+                &format!("exception {:02X}h in the system", vector),
+                None,
+            );
+            return;
+        }
     };
     // A Win16 task's INT n: DOS, DPMI and the BIOS (src/win16/dos.rs).
     if error.is_none() && crate::win16::is_soft_int(cpu, vector, &ctx) {

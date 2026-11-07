@@ -1857,6 +1857,101 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
     assert_eq!(code, 42, "{}", out);
 }
 
+/// SafeDisc 1's loader (Omikron's RUNTIME.EXE) goes on at level 0 with
+/// interrupts on: its divide error's handler returns to the program's code
+/// with CS 0008, leaving the user's EFLAGS (IF set), and that code divides
+/// by zero again, through a handler that returns to level 3. A timer
+/// interrupt between the two comes from level 0, on the level 0 stack 8
+/// bytes below the top, so its frame lies where one from level 3 would.
+/// As on Windows 98 the interrupt is served and the level 0 code goes on.
+#[test]
+fn a_timer_interrupt_in_level_0_code_returns_to_it() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let mut data = vec![0u8; 0x40];
+    // SafeDisc's first handler, at 30h: drop the frame's EIP and CS and
+    // return at level 0 to EBX.
+    data[0x30..0x35].copy_from_slice(&[
+        0x58, // pop eax
+        0x58, // pop eax
+        0x0E, // push cs
+        0x53, // push ebx
+        0xCF, // iretd
+    ]);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut level0 = a.create_label();
+        let mut spin = a.create_label();
+        let mut served = a.create_label();
+        let mut back = a.create_label();
+        let mut fail = a.create_label();
+        // The divide error's handler, from the IDT's gate, in EDI; its
+        // first 16 bytes kept at 10h and the first handler written there.
+        a.sidt(ptr(l.at(0)))?;
+        a.mov(esi, dword_ptr(l.at(2)))?;
+        a.movzx(edi, word_ptr(esi + 6))?;
+        a.shl(edi, 16)?;
+        a.mov(di, word_ptr(esi))?;
+        a.mov(esi, edi)?;
+        a.push(edi)?;
+        a.mov(edi, l.at(0x10) as u32)?;
+        a.mov(ecx, 16)?;
+        a.rep().movsb()?;
+        a.mov(edi, dword_ptr(esp))?;
+        a.mov(esi, l.at(0x30) as u32)?;
+        a.mov(ecx, 16)?;
+        a.rep().movsb()?;
+        a.pop(edi)?;
+        // The program's code segment, for the way back.
+        a.mov(word_ptr(l.at(8)), cs)?;
+        push_label(a, level0)?;
+        a.pop(ebx)?;
+        a.xor(edx, edx)?;
+        a.xor(ecx, ecx)?;
+        a.mov(eax, 1)?;
+        a.div(ecx)?;
+        // Level 0, interrupts on, ESP 8 bytes below the stack's top: wait
+        // for an interrupt's frame (CS 0008) to appear below ESP.
+        a.set_label(&mut level0)?;
+        a.mov(dword_ptr(esp - 8), 0)?;
+        a.mov(edx, 1_000_000)?;
+        a.set_label(&mut spin)?;
+        a.cmp(dword_ptr(esp - 8), 8)?;
+        a.je(served)?;
+        a.dec(edx)?;
+        a.jnz(spin)?;
+        a.set_label(&mut served)?;
+        // The second handler: pop eax, pop eax, push ecx, push ebx, iretd,
+        // back to level 3 at `back` with the first frame's ESP and SS.
+        a.mov(dword_ptr(edi + 1), 0xCF53_5158u32)?;
+        a.mov(byte_ptr(edi), 0x58)?;
+        a.movzx(ecx, word_ptr(l.at(8)))?;
+        push_label(a, back)?;
+        a.pop(ebx)?;
+        a.xor(eax, eax)?;
+        a.div(eax)?;
+        a.set_label(&mut back)?;
+        // Put the handler back; 42 if an interrupt came at level 0.
+        a.mov(esi, l.at(0x10) as u32)?;
+        a.mov(ecx, 16)?;
+        a.rep().movsb()?;
+        a.mov(ebx, 2)?;
+        a.test(edx, edx)?;
+        a.je(fail)?;
+        a.mov(ebx, 42)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    for core in [CoreMode::Normal, CoreMode::Dynamic] {
+        let mut cpu = machine("idt_ring0_irq", exe.clone());
+        cpu.core = core;
+        // 55 ms between timer interrupts is 165,000 cycles.
+        cpu.bus.set_cycles_per_ms(3000);
+        assert!(run_to_exit(&mut cpu, 200), "{:?}: {}", core, printed(&cpu));
+        assert_eq!(cpu.errorlevel, 42, "{:?}: {}", core, printed(&cpu));
+    }
+}
+
 /// What a debugger sees of a program whose main thread spins while a
 /// second thread waits for an event and a third was made suspended.
 #[test]
