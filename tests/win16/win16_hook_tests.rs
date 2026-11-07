@@ -9,9 +9,9 @@ use win16::{CODE, Code, program, run};
 /// USER's ordinals.
 const MESSAGE_BOX: u16 = 1;
 const GET_WINDOW_RECT: u16 = 32;
+const CREATE_WINDOW: u16 = 41;
 const GET_ACTIVE_WINDOW: u16 = 60;
 const END_DIALOG: u16 = 88;
-const CREATE_WINDOW: u16 = 41;
 const SET_WINDOWS_HOOK: u16 = 121;
 const CALL_MSG_FILTER: u16 = 123;
 const DEF_HOOK_PROC: u16 = 235;

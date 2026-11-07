@@ -296,7 +296,7 @@ pub fn then(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Optio
     // USER32's code that called the hook goes on, with `ctx`; its frame
     // is off the list, so its stack starts at the context's ESP, and
     // scratch space goes below that.
-    to32(cpu, &call, ctx.gpr[thunk::ESP]);
+    to32(cpu, &call, ctx.gpr[ESP]);
     if call.kind == WH_JOURNALPLAYBACK {
         Some(value)
     } else {
