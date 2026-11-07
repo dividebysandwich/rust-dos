@@ -69,6 +69,139 @@ pub fn needs_paint(w: &Window) -> bool {
     !w.update.is_empty() || w.paint & PAINT_INTERNAL != 0
 }
 
+/// The screen under a top-level window of a class with CS_SAVEBITS (a
+/// menu, a dialog), kept from when the window showed: when it hides, the
+/// screen gets these pixels back, and the windows under it aren't asked
+/// to paint. A change under it (a window there that moves, shows or
+/// hides) makes them out of date, and they go (`moved`).
+#[derive(Clone, Debug, Default)]
+pub struct SavedBits {
+    pub hwnd: u32,
+    pub rect: Rect,
+    /// The screen's mode they were taken in.
+    pub width: u32,
+    pub height: u32,
+    pub bpp: u32,
+    /// `screen::load_area`'s pixels of `rect`.
+    pub data: Vec<u8>,
+}
+
+crate::state_fields!(SavedBits {
+    hwnd,
+    rect,
+    width,
+    height,
+    bpp,
+    data
+});
+
+/// Whether the window's class has CS_SAVEBITS.
+fn saves_bits(state: &State, hwnd: u32) -> bool {
+    state.window(hwnd).is_some_and(|w| {
+        state
+            .classes
+            .get(w.class as usize)
+            .and_then(|c| c.as_ref())
+            .is_some_and(|c| c.style & super::class::CS_SAVEBITS != 0)
+    })
+}
+
+/// Keep the screen under the top-level window `hwnd` at `rect`, which
+/// shows now (`SavedBits`).
+fn save_bits(cpu: &mut Cpu, hwnd: u32, rect: Rect) {
+    user(cpu).saved_bits.retain(|s| s.hwnd != hwnd);
+    let Some(mode) = crate::win32::screen::gdi_mode(cpu) else {
+        return;
+    };
+    let rect = rect.intersect(&Rect::new(0, 0, mode.width as i32, mode.height as i32));
+    if rect.is_empty() {
+        return;
+    }
+    let data = crate::win32::screen::load_area(
+        cpu,
+        &mode,
+        rect.top as u32,
+        rect.height() as u32,
+        rect.left as u32,
+        rect.width() as u32,
+    );
+    user(cpu).saved_bits.push(SavedBits {
+        hwnd,
+        rect,
+        width: mode.width,
+        height: mode.height,
+        bpp: mode.bpp,
+        data,
+    });
+}
+
+/// Give the screen back what was under `hwnd`, which hid from `old`,
+/// where the windows above it don't cover it: whether it had it kept, in
+/// the screen's mode, for where it was.
+fn restore_bits(cpu: &mut Cpu, hwnd: u32, old: Rect) -> bool {
+    let state = user(cpu);
+    let Some(at) = state.saved_bits.iter().position(|s| s.hwnd == hwnd) else {
+        return false;
+    };
+    let saved = state.saved_bits.remove(at);
+    let Some(mode) = crate::win32::screen::gdi_mode(cpu) else {
+        return false;
+    };
+    let same_mode = (mode.width, mode.height, mode.bpp) == (saved.width, saved.height, saved.bpp);
+    let screen = Rect::new(0, 0, mode.width as i32, mode.height as i32);
+    if !same_mode || saved.rect != old.intersect(&screen) {
+        return false;
+    }
+    let state = user(cpu);
+    let shown = Region::from_rect(saved.rect).diff(&covered_by_above(state, hwnd, saved.rect));
+    let bytes = if mode.bpp == 8 { 1 } else { 4 };
+    let row = saved.rect.width() as usize * bytes;
+    for r in &shown.rects {
+        let cols = r.width() as usize;
+        let skip = (r.left - saved.rect.left) as usize * bytes;
+        let mut part = Vec::with_capacity(cols * bytes * r.height() as usize);
+        for y in r.top..r.bottom {
+            let start = (y - saved.rect.top) as usize * row + skip;
+            part.extend_from_slice(&saved.data[start..start + cols * bytes]);
+        }
+        let (top, left) = (r.top as u32, r.left as u32);
+        crate::win32::screen::store_area(cpu, &mode, top, left, cols as u32, &part);
+    }
+    true
+}
+
+/// What of `rect` the visible top-level windows above `hwnd` cover.
+fn covered_by_above(state: &State, hwnd: u32, rect: Rect) -> Region {
+    let mut area = Region::new();
+    for h in state.top_levels().into_iter().take_while(|&h| h != hwnd) {
+        if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+            area = area.or(&shape(state, h));
+        }
+    }
+    area.and_rect(&rect)
+}
+
+/// The window `hwnd` moved, showed or hid over `areas` of the screen:
+/// the kept screens (`SavedBits`) of the windows it changed what is
+/// under go, as they no longer match it. A window above them (a submenu
+/// over its menu) changes nothing under them.
+fn forget_bits_under(state: &mut State, hwnd: u32, areas: &[Rect]) {
+    if state.saved_bits.is_empty() {
+        return;
+    }
+    let tops = state.top_levels();
+    let top = state.top_level(hwnd);
+    let place = |h: u32| tops.iter().position(|&t| t == h);
+    let changed = place(top);
+    state.saved_bits.retain(|s| {
+        if s.hwnd == top {
+            return true;
+        }
+        let above = matches!((changed, place(s.hwnd)), (Some(c), Some(p)) if c < p);
+        above || !areas.iter().any(|a| !a.intersect(&s.rect).is_empty())
+    });
+}
+
 /// The window tree changed: nothing is kept that depends on it, as
 /// visible regions are worked out when a DC draws, so this only wakes
 /// the threads, whose windows may need painting now.
@@ -631,10 +764,29 @@ pub fn moved(
     if !now_visible {
         clear_updates(state, hwnd);
     }
+    // A change under the kept screens of the windows above makes them
+    // out of date; this window's own goes when it moves.
+    let mut changed = Vec::new();
+    if was_visible {
+        changed.push(old);
+    }
+    if now_visible {
+        changed.push(new);
+    }
+    if old != new {
+        let top = state.top_level(hwnd);
+        state.saved_bits.retain(|s| s.hwnd != top);
+    }
+    forget_bits_under(state, hwnd, &changed);
     if flags & SWP_NOREDRAW != 0 && flags & SWP_HIDEWINDOW == 0 {
         return;
     }
-    if was_visible && (!now_visible || old != new) {
+    // A top-level window of a class with CS_SAVEBITS that hides gives the
+    // screen back what was under it, which needs no painting.
+    let top_level = matches!(state.parent(hwnd), DESKTOP | 0);
+    let restored = top_level && was_visible && !now_visible && restore_bits(cpu, hwnd, old);
+    let state = user(cpu);
+    if was_visible && (!now_visible || old != new) && !restored {
         let mut gone = Region::from_rect(old);
         if now_visible {
             gone = gone.diff_rect(&new);
@@ -658,6 +810,9 @@ pub fn moved(
             }
             paint_background(cpu, &background);
         }
+    }
+    if top_level && now_visible && !was_visible && saves_bits(user(cpu), hwnd) {
+        save_bits(cpu, hwnd, new);
     }
     let state = user(cpu);
     if now_visible && (!was_visible || old != new || flags & super::window::SWP_FRAMECHANGED != 0) {

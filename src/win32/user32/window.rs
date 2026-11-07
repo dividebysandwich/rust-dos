@@ -1022,6 +1022,7 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
         c.windows = c.windows.saturating_sub(1);
     }
     state.forget_activation(|h| h == hwnd);
+    state.saved_bits.retain(|s| s.hwnd != hwnd);
     let input = &mut state.input;
     if input.capture == hwnd {
         input.capture = 0;
