@@ -465,12 +465,12 @@ limit, so without a connection it goes on as it would with one:
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
   keyboard, mouse and joystick through DirectInput, which DINPUT8 is for
   DirectX 8 games; AVIFIL32 and MSVFW32 read AVI files and decompress and
-  draw their frames, with Indeo Video 3 and 5 as codecs; DMUSIC, DMIME,
-  DMLOADER, DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on
-  the same synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or
-  Voodoo3, and OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with
-  GDI32's pixel formats, SwapBuffers and gamma ramp, and on a Voodoo2 full
-  screen as 3dfx's Voodoo2 OpenGL driver had it. A program that calls a
+  draw their frames, with Indeo Video 3, 4 and 5 and Cinepak as codecs;
+  DMUSIC, DMIME, DMLOADER, DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's
+  DirectMusic on the same synthesizer; D3D8 is DirectX 8.1's Direct3D on a
+  Banshee or Voodoo3, and OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it,
+  with GDI32's pixel formats, SwapBuffers and gamma ramp, and on a Voodoo2
+  full screen as 3dfx's Voodoo2 OpenGL driver had it. A program that calls a
   function they don't have ends with a message naming it, and one that needs
   a DLL that is neither among them nor beside it is refused. The registry is
   kept in `C:\REGISTRY.REG`, which is made the first time a program uses it,
@@ -482,8 +482,8 @@ limit, so without a connection it goes on as it would with one:
   as well and go on to the 32-bit ones, and its own DLLs, such as Visual
   Basic's runtimes, load from beside it. Off, such a program runs its DOS
   stub, which says it needs Windows. How to use it and what differs from
-  Windows 98 is in [docs/builtin-windows.md](docs/builtin-windows.md),
-  and how it is built in
+  Windows 98 is in [docs/builtin-windows.md](docs/builtin-windows.md), and
+  how it is built in
   [docs/builtin-windows-architecture.md](docs/builtin-windows-architecture.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
