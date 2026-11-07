@@ -1,6 +1,7 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
-//! decompress it first when it is compressed. The behaviour follows
-//! Wine's drawdib.c (LGPL 2.1 or later):
+//! decompress it first when it is compressed, and ICInfo, which lists
+//! the decompressors codec.rs has. The DrawDib functions' behaviour
+//! follows Wine's drawdib.c (LGPL 2.1 or later):
 //!
 //! Copyright 2000 Bradley Baetz
 //!
@@ -54,7 +55,56 @@ static APIS: &[Api] = &[
     stdcall("DrawDibGetBuffer", 8, 4, zero),
     stdcall("DrawDibTime", 16, 2, zero),
     stdcall("DrawDibProfileDisplay", 11, 1, profile_display),
+    stdcall("ICInfo", 33, 3, ic_info),
 ];
+
+/// ICINFO's size: six DWORDs, then szName[16], szDescription[128] and
+/// szDriver[128] in UTF-16.
+const ICINFO: u32 = 24 + 2 * (16 + 128 + 128);
+const ICTYPE_VIDEO: u32 = u32::from_le_bytes(*b"vidc");
+/// ICINFO's dwVersionICM: the ICM version, 1.04.
+const ICVERSION: u32 = 0x0104;
+
+/// ICInfo(fccType, fccHandler, lpicinfo): whether a codec of the type
+/// (`vidc`, or any with 0) is installed. A handler under 256 is an index
+/// into the type's codecs, which a program counts up from 0 until the
+/// call fails; any other is the codec's FourCC, compared without regard
+/// to case. The ICINFO filled is as Wine's ICInfo fills it: the type and
+/// handler, dwVersionICM and the driver's file, with no name or
+/// description (ICGetInfo's). Age of Empires asks for `iv41`, Indeo 4,
+/// before it plays its films.
+fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[kind, handler, info] = args else {
+        unreachable!()
+    };
+    if info == 0 || !allows(cpu, info, ICINFO, true) {
+        return Some(0);
+    }
+    if kind != 0 && codec::upper(kind) != codec::upper(ICTYPE_VIDEO) {
+        return Some(0);
+    }
+    let found = if handler < 256 {
+        codec::INSTALLED.get(handler as usize)
+    } else {
+        codec::INSTALLED
+            .iter()
+            .find(|(fourcc, _)| codec::upper(u32::from_le_bytes(**fourcc)) == codec::upper(handler))
+    };
+    let Some(&(fourcc, driver)) = found else {
+        return Some(0);
+    };
+    let mut bytes = Vec::with_capacity(ICINFO as usize);
+    for value in [ICINFO, ICTYPE_VIDEO, u32::from_le_bytes(*fourcc), 0, 0, ICVERSION] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.resize(24 + 2 * (16 + 128), 0);
+    for unit in driver.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.resize(ICINFO as usize, 0);
+    cpu.bus.guest_write_bytes(info, &bytes);
+    Some(1)
+}
 
 /// DrawDibDraw's flags.
 const DDF_UPDATE: u32 = 0x0002;

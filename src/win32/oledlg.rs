@@ -16,7 +16,7 @@ use super::stubs::{Api, Conv, Dll};
 
 pub static DLL: Dll = Dll {
     name: "OLEDLG.DLL",
-    base: 0xBF5E_0000,
+    base: 0xBF5C_0000,
     apis: APIS,
     vars: &[],
     init: None,

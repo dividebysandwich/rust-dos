@@ -10222,25 +10222,24 @@ fn gdi32_doesnt_call_an_opengl32_mapped_as_data() {
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }
 
-/// An argument of `tapi`: the address of the program's data, eight bytes
-/// of CCh.
-const TAPI_DATA: u32 = 0xDA7A_0000;
-/// An argument of `tapi`: the address of the function called, in
-/// TAPI32's code, which the program can read and not write.
-const TAPI_CODE: u32 = 0xC0DE_0000;
+/// An argument of `call_byte`: the address of the program's data, 1024
+/// bytes of CCh.
+const CALL_DATA: u32 = 0xDA7A_0000;
+/// An argument of `call_byte`: the address of the function called, in
+/// its DLL's code, which the program can read and not write.
+const CALL_CODE: u32 = 0xC0DE_0000;
 
-/// What a TAPI32 function gives back on a machine with no modem: a
-/// program calls `function` with `args`, pushed last first, where
-/// `TAPI_DATA` and `TAPI_CODE` stand for the addresses they name, and
-/// ends with the low byte of the result, or with the first byte of the
-/// data when `byte` is set.
-fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
-    let imports: &[(&str, &[&str])] = &[("TAPI32.DLL", &[function])];
-    let exe = program(BASE, false, imports, &[0xCC; 8], |a, l| {
+/// A program calls `function` of `dll` with `args`, pushed last first,
+/// where `CALL_DATA` and `CALL_CODE` stand for the addresses they name,
+/// and ends with the low byte of the result, or with the byte at `byte`
+/// in the data when it is given.
+fn call_byte(test: &str, dll: &str, function: &str, args: &[u32], byte: Option<u32>) -> u8 {
+    let imports: &[(&str, &[&str])] = &[(dll, &[function])];
+    let exe = program(BASE, false, imports, &[0xCC; 1024], |a, l| {
         for &arg in args.iter().rev() {
             match arg {
-                TAPI_DATA => a.push(l.at(0) as i32)?,
-                TAPI_CODE => {
+                CALL_DATA => a.push(l.at(0) as i32)?,
+                CALL_CODE => {
                     a.mov(eax, l.import(0))?;
                     a.push(eax)?;
                 }
@@ -10248,45 +10247,94 @@ fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
             }
         }
         a.call(l.import(0))?;
-        if byte {
-            a.movzx(eax, byte_ptr(l.at(0)))?;
+        if let Some(at) = byte {
+            a.movzx(eax, byte_ptr(l.at(at)))?;
         }
         a.ret()
     });
     run(test, exe).0
 }
 
+/// What a TAPI32 function gives back on a machine with no modem: the
+/// low byte of the result of `call_byte`, or the first byte of the data
+/// when `byte` is set.
+fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
+    call_byte(test, "TAPI32.DLL", function, args, byte.then_some(0))
+}
+
 #[test]
 fn tapi_has_no_line_device() {
-    let init = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_DATA];
+    let init = [CALL_DATA, 0, 0x40_1000, 0, CALL_DATA];
     // LINEERR_NODEVICE, and no handle written.
     assert_eq!(tapi("tapi_init", "lineInitialize", &init, false), 0x42);
     assert_eq!(tapi("tapi_init_handle", "lineInitialize", &init, true), 0xCC);
     // LINEERR_INVALPOINTER without a callback or a place for the count.
-    let no_callback = [TAPI_DATA, 0, 0, 0, TAPI_DATA];
+    let no_callback = [CALL_DATA, 0, 0, 0, CALL_DATA];
     assert_eq!(tapi("tapi_init_cb", "lineInitialize", &no_callback, false), 0x35);
-    let no_count = [TAPI_DATA, 0, 0x40_1000, 0, 0];
+    let no_count = [CALL_DATA, 0, 0x40_1000, 0, 0];
     assert_eq!(tapi("tapi_init_count", "lineInitialize", &no_count, false), 0x35);
     // LINEERR_INVALPOINTER for a handle or a count the program can't
     // write, as IsBadWritePtr sees it, with no page fault in the program.
-    let read_only_handle = [TAPI_CODE, 0, 0x40_1000, 0, TAPI_DATA];
+    let read_only_handle = [CALL_CODE, 0, 0x40_1000, 0, CALL_DATA];
     assert_eq!(tapi("tapi_init_ro_app", "lineInitialize", &read_only_handle, false), 0x35);
-    let read_only_count = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_CODE];
+    let read_only_count = [CALL_DATA, 0, 0x40_1000, 0, CALL_CODE];
     assert_eq!(tapi("tapi_init_ro_count", "lineInitialize", &read_only_count, false), 0x35);
     // LINEERR_INVALAPPHANDLE, LINEERR_BADDEVICEID, LINEERR_INVALLINEHANDLE
     // and LINEERR_INVALCALLHANDLE.
     assert_eq!(tapi("tapi_shutdown", "lineShutdown", &[1], false), 0x14);
-    let config = [0, TAPI_DATA, 0];
+    let config = [0, CALL_DATA, 0];
     assert_eq!(tapi("tapi_devconfig", "lineGetDevConfig", &config, false), 0x02);
-    let open = [1, 0, TAPI_DATA, 0x10004, 0, 0, 1, 0x10, 0];
+    let open = [1, 0, CALL_DATA, 0x10004, 0, 0, 1, 0x10, 0];
     assert_eq!(tapi("tapi_open", "lineOpen", &open, false), 0x14);
-    let call_id = [0, 0, 1, 4, TAPI_DATA, 0];
+    let call_id = [0, 0, 1, 4, CALL_DATA, 0];
     assert_eq!(tapi("tapi_id_call", "lineGetID", &call_id, false), 0x18);
-    let line_id = [1, 0, 0, 1, TAPI_DATA, 0];
+    let line_id = [1, 0, 0, 1, CALL_DATA, 0];
     assert_eq!(tapi("tapi_id_line", "lineGetID", &line_id, false), 0x2B);
     // LINEERR_INIFILECORRUPT: no dialing location was set up.
-    let caps = [0, 0x10004, TAPI_DATA];
+    let caps = [0, 0x10004, CALL_DATA];
     assert_eq!(tapi("tapi_caps", "lineGetTranslateCaps", &caps, false), 0x0E);
+}
+
+/// IMM32 is Windows 98's outside East Asia, with no input method: no
+/// context, IMM_ERROR_GENERAL for a composition string and VK_PROCESSKEY
+/// for a virtual key, as its stub code returns.
+#[test]
+fn imm32_has_no_input_method() {
+    let context = call_byte("imm_context", "IMM32.DLL", "ImmGetContext", &[0x404], None);
+    assert_eq!(context, 0);
+    let associate = [0x404, 0];
+    let old = call_byte("imm_assoc", "IMM32.DLL", "ImmAssociateContext", &associate, None);
+    assert_eq!(old, 0);
+    let composition = [0, 8, CALL_DATA, 16];
+    let string = "ImmGetCompositionStringA";
+    assert_eq!(call_byte("imm_comp", "IMM32.DLL", string, &composition, None), 0xFF);
+    assert_eq!(call_byte("imm_comp_buf", "IMM32.DLL", string, &composition, Some(0)), 0xCC);
+    let key = call_byte("imm_vkey", "IMM32.DLL", "ImmGetVirtualKey", &[0x404], None);
+    assert_eq!(key, 0xE5);
+}
+
+/// ICInfo finds the codecs Windows 98 SE installs, by FourCC in either
+/// case or by index, and fills ICINFO with the type, the handler and the
+/// driver's file; it finds no other codec and no other type.
+#[test]
+fn icinfo_lists_the_installed_codecs() {
+    let vidc = u32::from_le_bytes(*b"vidc");
+    let iv41 = u32::from_le_bytes(*b"iv41");
+    let info = |test, kind, handler, byte| {
+        call_byte(test, "MSVFW32.DLL", "ICInfo", &[kind, handler, CALL_DATA], byte)
+    };
+    assert_eq!(info("icinfo_iv41", vidc, iv41, None), 1);
+    // dwSize, 568, fccHandler 'iv41', and szDriver "ir41_32.ax".
+    assert_eq!(info("icinfo_size", vidc, iv41, Some(1)), 0x02);
+    assert_eq!(info("icinfo_handler", vidc, iv41, Some(8)), b'i');
+    assert_eq!(info("icinfo_driver", vidc, iv41, Some(312)), b'i');
+    assert_eq!(info("icinfo_driver_end", vidc, iv41, Some(312 + 20)), 0);
+    let upper = u32::from_le_bytes(*b"CVID");
+    assert_eq!(info("icinfo_cvid", vidc, upper, None), 1);
+    assert_eq!(info("icinfo_index", vidc, 0, Some(8)), b'c');
+    assert_eq!(info("icinfo_past", vidc, 5, None), 0);
+    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
+    assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
 }
 
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's

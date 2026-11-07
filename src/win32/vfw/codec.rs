@@ -26,8 +26,23 @@ const INDEO3_MAX: (u32, u32) = (640, 480);
 /// a damaged header could ask for gigabytes.
 const CINEPAK_MAX: u32 = 4096;
 
+/// The decompressors installed: those of Windows 98 SE's SYSTEM.INI
+/// [drivers32] (`VIDC.<FourCC>=<driver>`, from its INFs, and IV41's and
+/// IV50's from the registration of IR41_32.AX and IR50_32.DLL) that this
+/// module decodes, with the FourCC in lower case as programs write it
+/// and the driver's file. Windows 98 SE also lists MSVC, MRLE and IYUV,
+/// which no decoder here takes, so a program that finds a codec in this
+/// list can play it. `Codec::new` and `supported` take each of them.
+pub const INSTALLED: &[(&[u8; 4], &str)] = &[
+    (b"cvid", "iccvid.dll"),
+    (b"iv31", "ir32_32.dll"),
+    (b"iv32", "ir32_32.dll"),
+    (b"iv41", "ir41_32.ax"),
+    (b"iv50", "ir50_32.dll"),
+];
+
 /// The FourCC `compression` in capitals, as ICOpen compares them.
-fn upper(compression: u32) -> u32 {
+pub fn upper(compression: u32) -> u32 {
     u32::from_le_bytes(compression.to_le_bytes().map(|b| b.to_ascii_uppercase()))
 }
 
@@ -407,5 +422,22 @@ mod tests {
         assert!(!supported(IV32, 800, 600));
         assert!(!Codec::new(iv50).is_empty());
         assert!(Codec::new(0).is_empty());
+    }
+
+    /// What ICInfo says is installed is what the decoders take, and the
+    /// other way round.
+    #[test]
+    fn installed_codecs_are_the_decoded_ones() {
+        for (fourcc, _) in INSTALLED {
+            let fourcc = u32::from_le_bytes(**fourcc);
+            assert!(!Codec::new(fourcc).is_empty());
+            assert!(supported(fourcc, 320, 240));
+        }
+        for fourcc in [IV31, IV32, IV41, IV50, CVID] {
+            let listed = INSTALLED
+                .iter()
+                .any(|(f, _)| upper(u32::from_le_bytes(**f)) == fourcc);
+            assert!(listed);
+        }
     }
 }

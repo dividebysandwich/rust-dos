@@ -504,7 +504,9 @@ limit, so without a connection it goes on as it would with one:
   OpenGL driver (`3dfxVGL.dll`, which draws with `GLIDE3X.DLL`), gets
   GDI32's `ChoosePixelFormat`, `SetPixelFormat`, `GetPixelFormat`,
   `DescribePixelFormat` and `SwapBuffers`, as Windows' GDI32 calls the
-  loaded OpenGL32's.
+  loaded OpenGL32's. It takes the folder's `glu32.dll` with it, if
+  there is one, since the built-in GLU32.DLL draws only through the
+  built-in OpenGL32.
 * `win32_version` is the version of Windows the built-in Windows is:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
@@ -3241,10 +3243,12 @@ disk image, games need that system's own IPX over the NE2000. The steps
 for each system are under [Network card](#network-card).
 
 Tested so far: IPX games between instances (Doom, Heretic, Descent);
-DirectPlay on the built-in Windows (a race of Moto Racer's demo between
-two instances);
-the internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock
-and Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
+DirectPlay on the built-in Windows between two instances (a race of
+Moto Racer's demo; and in a room of the public relay, one on IPX and one
+on TCP/IP, the demos of Age of Empires and Midtown Madness from finding
+the game to playing it, and Monster Truck Madness 2's lobby); the
+internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock and
+Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
 Windows 95's IPX against the built-in IPX driver, two Windows guests on
 one LAN, and Windows for Workgroups' own TCP/IP-32. Reports are welcome.
 

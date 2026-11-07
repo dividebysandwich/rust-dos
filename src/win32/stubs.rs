@@ -137,6 +137,8 @@ pub static DLLS: &[&Dll] = &[
     &super::glide::DLL3,
     &super::dplayx::DPLAY,
     &super::tapi32::DLL,
+    &super::imm32::DLL,
+    &super::glu32::DLL,
     &super::oledlg::DLL,
     &super::olepro32::DLL,
 ];
@@ -511,6 +513,8 @@ mod tests {
         "GLIDE3X.DLL",
         "DPLAY.DLL",
         "TAPI32.DLL",
+        "IMM32.DLL",
+        "GLU32.DLL",
         "OLEDLG.DLL",
         "OLEPRO32.DLL",
     ];

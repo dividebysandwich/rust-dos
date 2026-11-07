@@ -346,7 +346,13 @@ enum Storage {
     Host(PathBuf),
     /// A tree held in memory, whose files are either in memory too or on
     /// the CD image.
-    Tree { files: MemFs, image: Option<Rc<CdImage>> },
+    Tree {
+        files: MemFs,
+        image: Option<Rc<CdImage>>,
+        /// The sectors of the CD's file system (`IsoVolume::sectors`): 0
+        /// for a disc without one, or without a disc.
+        sectors: u32,
+    },
     /// The FAT file system of a floppy or hard disk image.
     Fat(Rc<FatVolume>),
     /// A disk mounted by number: its sectors for the BIOS, and no files.
@@ -433,6 +439,20 @@ impl Drive {
     fn image(&self) -> Option<&Rc<CdImage>> {
         match &self.storage {
             Storage::Tree { image, .. } => image.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The sectors of the file system on the drive's CD image, read from
+    /// its primary volume descriptor when it went in: None without an
+    /// image, 0 for a disc of audio tracks alone.
+    fn image_sectors(&self) -> Option<u32> {
+        match &self.storage {
+            Storage::Tree {
+                image: Some(_),
+                sectors,
+                ..
+            } => Some(*sectors),
             _ => None,
         }
     }
@@ -783,7 +803,11 @@ impl DiskController {
     fn memory_drive(files: MemFs, label: &str) -> Drive {
         Drive {
             kind: DriveKind::Virtual,
-            storage: Storage::Tree { files, image: None },
+            storage: Storage::Tree {
+                files,
+                image: None,
+                sectors: 0,
+            },
             current_dir: String::new(),
             label: normalize_label(label),
             read_only: true,

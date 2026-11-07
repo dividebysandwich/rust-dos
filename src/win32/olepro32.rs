@@ -19,7 +19,7 @@ use crate::cpu::Cpu;
 
 pub static DLL: Dll = Dll {
     name: "OLEPRO32.DLL",
-    base: 0xBF5C_0000,
+    base: 0xBF5A_0000,
     apis: APIS,
     vars: &[],
     init: None,
