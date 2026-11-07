@@ -1,8 +1,9 @@
 //! The video decompressors Video for Windows has: Indeo Video 3 (IV31,
 //! IV32) and Indeo Video 5 (IV50), decoded by the `oxideav-indeo` crate,
 //! Indeo Video Interactive 4 (IV41, indeo4/), and Cinepak (CVID,
-//! `iccvid.dll`, cinepak.rs). Windows 98 installs codecs for the four. A picture comes out as what
-//! ICDecompress gives for a BI_RGB output of 24 bits: a bottom-up DIB.
+//! `iccvid.dll`, cinepak.rs). Windows 98 installs codecs for the four.
+//! A picture comes out as what ICDecompress gives for a BI_RGB output of
+//! 24 bits: a bottom-up DIB.
 //!
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
@@ -89,7 +90,8 @@ impl Codec {
     }
 
     /// Decompress one frame. After an error the picture stays the one
-    /// before.
+    /// before, but for Cinepak's: a Cinepak frame that fails partway
+    /// keeps the blocks it drew, as FFmpeg's decoder does.
     pub fn decode(&mut self, frame: &[u8]) -> Result<(), String> {
         match &mut self.0 {
             Some(Decoder::Indeo3(d)) => {
@@ -371,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cinepak_frame_cut_short_leaves_the_decoder_as_it_was() {
+    fn a_cinepak_frame_with_no_strip_leaves_the_decoder_as_it_was() {
         let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
         let key = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
         // A frame that keeps the codebooks: one inter strip with no
