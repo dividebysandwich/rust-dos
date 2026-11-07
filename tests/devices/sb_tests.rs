@@ -25,9 +25,15 @@ fn sb16() -> Bus {
     bus_with(SbConfig::default())
 }
 
-/// Let `ms` milliseconds of emulated time pass, running due timer events.
+/// Let `ms` milliseconds of emulated time pass (at `bus_with`'s speed),
+/// running due timer events.
 fn wait_ms(bus: &mut Bus, ms: f64) {
-    let target = bus.clock.icount + (ms * 1000.0) as u64;
+    spin(bus, (ms * 1000.0) as u64);
+}
+
+/// Run `n` instructions, running due timer events: a driver's delay loop.
+fn spin(bus: &mut Bus, n: u64) {
+    let target = bus.clock.icount + n;
     while bus.clock.icount < target {
         let step = (target - bus.clock.icount).min(10);
         bus.clock.icount += step;
@@ -898,18 +904,6 @@ fn a_reset_between_renders_keeps_the_sound_played_before_it() {
     assert_eq!(off, None, "a frame before the reset is off the level");
     let on = samples[played..].iter().position(|&s| s != 0);
     assert_eq!(on, None, "a frame after the reset carries the old card's level");
-}
-
-/// Run `n` instructions, running due timer events: a driver's delay loop.
-fn spin(bus: &mut Bus, n: u64) {
-    let target = bus.clock.icount + n;
-    while bus.clock.icount < target {
-        let step = (target - bus.clock.icount).min(10);
-        bus.clock.icount += step;
-        if bus.clock.icount >= bus.clock.deadline {
-            bus.service_timers();
-        }
-    }
 }
 
 /// The IRQ probe of Kingdom O' Magic's HMI Sound Blaster Pro driver: a

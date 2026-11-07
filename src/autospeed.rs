@@ -2693,8 +2693,10 @@ mod tests {
         assert_eq!(auto.update(bus, true, HOST, 0), None, "the bus is there already");
         assert_eq!(auto.work_return(), None);
         assert_eq!(auto.settle_until, bus.clock.now_ns() + SETTLE_NS);
-        // The next cut is news only once.
+        // A cut is news only once: a boost after it isn't cut by it again.
+        assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
         assert_eq!(auto.update(bus, true, HOST, 0), None);
+        assert_eq!(auto.work_return(), Some(PROTECTED_LEAST));
     }
 
     #[test]

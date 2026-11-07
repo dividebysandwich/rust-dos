@@ -422,11 +422,9 @@ impl MainHost<'_, '_> {
                 CpuSpeed::Auto(_) => {}
             }
         }
-        // The state's time stamp counter goes on at this machine's speed,
-        // and `auto` starts over: nothing it found before is to go back to.
+        // The state's time stamp counter goes on at this machine's speed.
         self.cpu.set_tsc_speed(self.settings.cycles);
-        self.cpu.bus.activity.work_return = None;
-        self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
+        self.pacer.rebase(&mut self.cpu.bus, std::time::Instant::now());
         *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
         Ok(header)
