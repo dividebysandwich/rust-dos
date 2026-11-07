@@ -1273,8 +1273,9 @@ fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 fn mci_block32(cpu: &mut Cpu, segptr: u32, at16: u32, block: u32, msg: u32, flags: u32) {
     // The bytes up to the end of the program's segment, at most the
     // block's.
-    let room = super::selector_base(cpu, (segptr >> 16) as u16)
-        .map_or(0, |(_, limit, _)| (limit + 1).saturating_sub(segptr & 0xFFFF));
+    let room = super::selector_base(cpu, (segptr >> 16) as u16).map_or(0, |(_, limit, _)| {
+        (limit + 1).saturating_sub(segptr & 0xFFFF)
+    });
     let mut bytes = super::peek_upto(cpu, at16, room.min(MCI_BLOCK) as usize);
     bytes.resize(MCI_BLOCK as usize, 0);
     super::poke(cpu, block, &bytes);
@@ -1329,7 +1330,11 @@ fn mci_block32(cpu: &mut Cpu, segptr: u32, at16: u32, block: u32, msg: u32, flag
             for (k, v) in rect.into_iter().enumerate() {
                 w32(cpu, block + 4 + 4 * k as u32, v);
             }
-            let hdc = if msg == video::MCI_UPDATE { word(12) } else { 0 };
+            let hdc = if msg == video::MCI_UPDATE {
+                word(12)
+            } else {
+                0
+            };
             w32(cpu, block + 20, hdc);
         }
         wmci::MCI_BREAK => {

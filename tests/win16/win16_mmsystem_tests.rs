@@ -466,7 +466,14 @@ fn mci_send_command_opens_a_sequencer_with_its_16_bit_parameter_block() {
     // check that failed.
     let mut code = Code::new();
     let (ty, element) = open_parms(&mut code);
-    mci(&mut code, MCI_OPEN, MCI_OPEN_TYPE | MCI_OPEN_ELEMENT, OPEN, 0, 2);
+    mci(
+        &mut code,
+        MCI_OPEN,
+        MCI_OPEN_TYPE | MCI_OPEN_ELEMENT,
+        OPEN,
+        0,
+        2,
+    );
     expect(&mut code, DEVICE, 0xEEEE, false, 3);
     expect(&mut code, DEVICE, 0, false, 3);
     expect(&mut code, DEVICE + 2, 0xCAFE, true, 4);
