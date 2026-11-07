@@ -29,6 +29,19 @@ fn parse_drive_prefix_handles_letters_and_non_ascii() {
 }
 
 #[test]
+fn a_device_name_may_end_in_a_colon() {
+    assert_eq!(char_device("NUL"), Some(CharDevice::Nul));
+    assert_eq!(char_device("nul:"), Some(CharDevice::Nul));
+    assert_eq!(char_device("C:\\GAMES\\CON:"), Some(CharDevice::Con));
+    assert_eq!(char_device("lpt1:"), Some(CharDevice::Prn));
+    assert_eq!(char_device("COM2: "), Some(CharDevice::Com2));
+    assert_eq!(char_device("D:NUL"), Some(CharDevice::Nul));
+    assert_eq!(char_device("C:"), None);
+    assert_eq!(char_device("NULL:"), None);
+    assert_eq!(char_device("NUL::"), None);
+}
+
+#[test]
 fn long_names_get_dosbox_short_names() {
     let names = [
         "Day Of The Tentacle.BIN",

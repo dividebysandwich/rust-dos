@@ -580,6 +580,8 @@ fn output_and_input_can_be_redirected() {
         "@echo second>>OUT.TXT",
         "@dir > NUL",
         "@md SUB > NUL",
+        "@dir >nul:",
+        "@HELLO > nul:",
         "@HELLO > PROG.TXT",
         "@HELLO >> PROG.TXT",
         "@ECHOIN < IN.TXT > COPY.TXT",
@@ -592,6 +594,7 @@ fn output_and_input_can_be_redirected() {
     assert_eq!(fs::read(dir.join("COPY.TXT")).unwrap(), b"from a file");
     let screen = screen(&cpu);
     assert!(!screen.contains("hi") && !screen.contains("Volume"), "{}", screen);
+    assert!(!screen.contains("File creation error"), "NUL: is NUL: {}", screen);
     assert!(screen.contains("shown"), "{}", screen);
 }
 

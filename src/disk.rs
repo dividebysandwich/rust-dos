@@ -615,9 +615,12 @@ impl CharDevice {
 }
 
 /// The character device a file name names. DOS finds devices by name in
-/// any directory, with any extension: "C:\GAME\NUL.TXT" is NUL.
+/// any directory, with any extension: "C:\GAME\NUL.TXT" is NUL. A colon
+/// may end the name, as in `DIR >NUL:` or `CTTY CON:`.
 pub fn char_device(filename: &str) -> Option<CharDevice> {
-    let last = filename.rsplit(['\\', '/', ':']).next()?;
+    let name = filename.trim_end();
+    let name = name.strip_suffix(':').unwrap_or(name);
+    let last = name.rsplit(['\\', '/', ':']).next()?;
     let stem = last.split('.').next()?.trim().to_ascii_uppercase();
     match stem.as_str() {
         "CON" => Some(CharDevice::Con),
