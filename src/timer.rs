@@ -727,6 +727,12 @@ impl Pacer {
             (executed.saturating_sub(run), exec - watched, overhead + watched);
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
+        // What a device may go back to in the middle of the next frame
+        // (`Bus::end_work_boost`): only a speed `Auto` set.
+        cpu.bus.activity.work_return = match self.speed {
+            CpuSpeed::Auto(_) => self.auto.work_return(),
+            _ => None,
+        };
         next
     }
 

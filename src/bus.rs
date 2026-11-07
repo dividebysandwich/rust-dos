@@ -1437,6 +1437,34 @@ impl Bus {
         self.clock.schedule(self.next_event());
     }
 
+    /// The program resets hardware it times with delay loops, as a sound
+    /// driver does before it plays a short block to find the card's IRQ.
+    /// If `cycles=auto` gives it all the host has for its reads and writes
+    /// (`Activity::work_return`), it goes back to its speed from this
+    /// instruction on, without waiting for the end of the frame: drivers
+    /// set up in the middle of the loading, and a loop counted for the
+    /// machines of the time ends too soon at the host's speed (Kingdom O'
+    /// Magic's HMI driver waits about a million instructions for a 2.65 ms
+    /// block, and finds no IRQ at 500,000 instructions per ms or more).
+    /// The batch still ends at the emulated time it was to end at, and
+    /// `AutoSpeed` measures afresh from there (`Activity::work_cuts`).
+    pub fn end_work_boost(&mut self) {
+        let Some(speed) = self.activity.work_return.take() else {
+            return;
+        };
+        if speed >= self.clock.cycles_per_ms() {
+            return;
+        }
+        let end = self.clock.batch_end();
+        let end_ticks = (end != u64::MAX).then(|| self.clock.ticks_at(end));
+        self.clock.set_cycles_per_ms(speed);
+        if let Some(ticks) = end_ticks {
+            self.clock.set_batch_end(self.clock.icount_at(ticks));
+        }
+        self.clock.schedule(self.next_event());
+        self.activity.work_cuts += 1;
+    }
+
     /// The next time (PIT ticks) a device needs attention: the timer's
     /// next IRQ 0, the end of the Sound Blaster's current block, the
     /// Ultrasound's next timer, DMA or voice interrupt, the retrace a
@@ -1891,8 +1919,11 @@ impl Bus {
             _ => {
                 // Once, as the reset starts (bit 0 set), not again as it
                 // ends.
-                if offset == 0x6 && value & 1 != 0 && self.game_fixes {
-                    self.apply_code_fixes();
+                if offset == 0x6 && value & 1 != 0 {
+                    if self.game_fixes {
+                        self.apply_code_fixes();
+                    }
+                    self.end_work_boost();
                 }
                 self.audio_catch_up();
                 // The DSP's time up to the command, so what it starts counts

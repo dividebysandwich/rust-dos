@@ -899,3 +899,67 @@ fn a_reset_between_renders_keeps_the_sound_played_before_it() {
     let on = samples[played..].iter().position(|&s| s != 0);
     assert_eq!(on, None, "a frame after the reset carries the old card's level");
 }
+
+/// Run `n` instructions, running due timer events: a driver's delay loop.
+fn spin(bus: &mut Bus, n: u64) {
+    let target = bus.clock.icount + n;
+    while bus.clock.icount < target {
+        let step = (target - bus.clock.icount).min(10);
+        bus.clock.icount += step;
+        if bus.clock.icount >= bus.clock.deadline {
+            bus.service_timers();
+        }
+    }
+}
+
+/// The IRQ probe of Kingdom O' Magic's HMI Sound Blaster Pro driver: a
+/// 17-byte block at time constant 64h (2.65 ms), then a delay loop of
+/// about a million instructions, after which the block's IRQ has to have
+/// come.
+fn hmi_irq_probe(bus: &mut Bus) -> Option<u8> {
+    reset_dsp(bus);
+    program_dma1(bus, 0x20000, 17, false);
+    dsp_write(bus, 0x40);
+    dsp_write(bus, 0x64);
+    dsp_write(bus, 0x14);
+    dsp_write(bus, 0x10);
+    dsp_write(bus, 0x00);
+    spin(bus, 1_050_000);
+    bus.pic_pending_irq()
+}
+
+#[test]
+fn a_dsp_reset_ends_the_auto_loading_boost_at_once() {
+    // All the host has: the loop ends before the block does.
+    let mut bus = sb16();
+    bus.set_cycles_per_ms(700_000);
+    assert_eq!(hmi_irq_probe(&mut bus), None);
+
+    // `auto` gives a loading program that speed, to go back to 20,000
+    // once the loading ends: the reset goes back at once.
+    let mut bus = sb16();
+    bus.set_cycles_per_ms(700_000);
+    bus.activity.work_return = Some(20_000);
+    let end_ticks = bus.clock.now_ticks() + rust_dos::timer::PIT_HZ / 60;
+    bus.start_batch(bus.clock.icount_at(end_ticks));
+    bus.io_write(0x226, 1);
+    assert_eq!(bus.clock.cycles_per_ms(), 20_000);
+    assert_eq!(bus.activity.work_return, None);
+    assert_eq!(bus.activity.work_cuts, 1);
+    let end = bus.clock.ticks_at(bus.clock.batch_end());
+    assert!(end.abs_diff(end_ticks) <= 1, "the batch ends at {} ticks, not {}", end, end_ticks);
+    bus.io_write(0x226, 0);
+    bus.io_read(0x22A);
+    bus.start_batch(u64::MAX);
+    assert_eq!(hmi_irq_probe(&mut bus), Some(7));
+    // Once is all: the next reset leaves the speed as it is.
+    assert_eq!(bus.activity.work_cuts, 1);
+
+    // A speed `auto` didn't raise for loading stays.
+    let mut bus = sb16();
+    bus.set_cycles_per_ms(20_000);
+    bus.activity.work_return = Some(50_000);
+    reset_dsp(&mut bus);
+    assert_eq!(bus.clock.cycles_per_ms(), 20_000);
+    assert_eq!(bus.activity.work_cuts, 0);
+}

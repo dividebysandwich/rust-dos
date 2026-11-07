@@ -28,18 +28,20 @@
 //! real-mode speed (3000, about a 286, DOSBox's for `cycles=auto`): the
 //! speed-sensitive games of the 1980s draw without full frames. A
 //! protected-mode program gets all the host has while it reads and writes
-//! (loading, compiling, Windows), and otherwise goes down to a 486's
-//! speed, or a quarter of a faster CPU model's clock: it spins in a loop,
-//! as game menus do. (It was written for a 386 or better, and paces
-//! itself.) Under an operating system that halts the processor when it has
-//! nothing to run (Windows, OS/2, Linux, and the built-in Windows, which
-//! is known to from the start), a program that keeps it from halting is
-//! at work and gets all the host has as well. Once a program stops
-//! reading and writing, it goes back to the speed it had at once, not a
-//! measurement later: programs time their delay loops right after
-//! loading, and a loop timed at all the host has waits for ever (Sam &
-//! Max's General MIDI driver counts to a million in a timer tick, and
-//! hangs if it gets there first).
+//! (loading, compiling, Windows), and otherwise goes down to a 486's speed,
+//! or a quarter of a faster CPU model's clock: it spins in a loop, as game
+//! menus do. (It was written for a 386 or better, and paces itself.) Under
+//! an operating system that halts the processor when it has nothing to run
+//! (Windows, OS/2, Linux, and the built-in Windows, which is known to from
+//! the start), a program that keeps it from halting is at work and gets all
+//! the host has as well. Once a program stops reading and writing, it goes
+//! back to the speed it had at once, not a measurement later: programs time
+//! their delay loops right after loading, and a loop timed at all the host
+//! has waits for ever (Sam & Max's General MIDI driver counts to a million
+//! in a timer tick, and hangs if it gets there first). A driver set up in
+//! the middle of the loading can't wait for that: a reset of the Sound
+//! Blaster, which comes before a driver times the card, goes back at once
+//! (`Bus::end_work_boost`).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -233,6 +235,14 @@ pub struct Activity {
     /// Bytes written to video memory, and moved on drives.
     pub video_bytes: u64,
     pub io_bytes: u64,
+    /// While `AutoSpeed` gives a protected-mode program all the host has
+    /// for its reads and writes, the speed it goes back to after them
+    /// (`AutoSpeed::work_return`), for `Bus::end_work_boost`.
+    pub work_return: Option<u32>,
+    /// The times a program reset hardware it times with delay loops while
+    /// it had all the host has for its reads and writes, which ended that
+    /// at once (`Bus::end_work_boost`).
+    pub work_cuts: u64,
     /// The burst going on: its bytes, and the instruction of its last write.
     burst: u64,
     last_write: u64,
@@ -610,6 +620,8 @@ pub struct AutoSpeed {
     /// While a protected-mode program gets all the host has for its reads
     /// and writes, the speed it had before.
     working: Option<u32>,
+    /// `Activity::work_cuts` as last seen.
+    work_cuts: u64,
     /// The program gets all the host has. The host estimate is its speed
     /// then, so a frame takes it down with the estimate: a measurement at
     /// an estimate that ran high would leave it behind for half a second
@@ -649,6 +661,7 @@ impl AutoSpeed {
             pace: 1.0,
             behind: false,
             working: None,
+            work_cuts: 0,
             flat_out: false,
             output: (0, 0),
             protected_least: PROTECTED_LEAST,
@@ -715,6 +728,14 @@ impl AutoSpeed {
         self.behind = false;
     }
 
+    /// While a protected-mode program gets all the host has for its reads
+    /// and writes, the speed it goes back to once they end: the one it had
+    /// before, or less if the work found the host short of that.
+    pub fn work_return(&self) -> Option<u32> {
+        let before = self.working?;
+        Some(self.lagged.map_or(before, |(most, _)| before.min(most)))
+    }
+
     /// Measure afresh. How the host kept up stays: it says the same of
     /// what the same program does next.
     pub fn start_over(&mut self) {
@@ -772,14 +793,26 @@ impl AutoSpeed {
         if now.output != self.output.0 {
             self.output = (now.output, now.ns);
         }
-        if let Some(before) = self.working
+        let cuts = bus.activity.work_cuts;
+        if cuts != self.work_cuts {
+            self.work_cuts = cuts;
+            if self.working.is_some() {
+                // The bus went back to the speed in the middle of the
+                // frame (`Bus::end_work_boost`): measure afresh from there.
+                if trace() {
+                    eprintln!("[auto] work cut short: at {}", bus.clock.cycles_per_ms());
+                }
+                self.start_over();
+                self.settle_until = now.ns + SETTLE_NS;
+                return None;
+            }
+        }
+        if let Some(before) = self.work_return()
             && now.ns.saturating_sub(self.output.1) >= WORK_DONE_NS
         {
             if trace() {
                 eprintln!("[auto] work done: back to {}", before);
             }
-            // The work may have found the host short of that speed.
-            let before = self.lagged.map_or(before, |(most, _)| before.min(most));
             self.start_over();
             self.settle_until = now.ns + SETTLE_NS;
             return (before != bus.clock.cycles_per_ms()).then_some(before);
@@ -2635,6 +2668,33 @@ mod tests {
         // A speed that isn't all the host has stays until a measurement.
         auto.reset();
         assert_eq!(auto.update(bus, true, HOST / 2, 0), None);
+    }
+
+    #[test]
+    fn a_work_boost_cut_short_on_the_bus_measures_afresh() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        let loading = Measurement {
+            output: 1e6,
+            ..STILL
+        };
+        assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
+        assert_eq!(auto.work_return(), Some(PROTECTED_LEAST));
+        // No faster than the host kept up with while it worked.
+        auto.lagged = Some((15_000, LAGGED_WINDOWS));
+        assert_eq!(auto.work_return(), Some(15_000));
+        auto.lagged = None;
+        // A driver resets its sound card in the middle of the loading.
+        bus.activity.work_return = auto.work_return();
+        bus.end_work_boost();
+        assert_eq!(bus.clock.cycles_per_ms(), PROTECTED_LEAST);
+        assert_eq!(auto.update(bus, true, HOST, 0), None, "the bus is there already");
+        assert_eq!(auto.work_return(), None);
+        assert_eq!(auto.settle_until, bus.clock.now_ns() + SETTLE_NS);
+        // The next cut is news only once.
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
     }
 
     #[test]
