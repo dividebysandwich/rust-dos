@@ -663,7 +663,8 @@ fn floppy_free_space_tracks_usage() {
 }
 
 /// The built-in Windows sees 3.75 GB free on an empty folder hard disk,
-/// which drops as files are written, while DOS keeps its 80 MB disk.
+/// in 4 KB clusters, which drops as files are written, while DOS keeps
+/// its 320 MB disk of 16 KB clusters.
 #[test]
 fn windows_sees_a_larger_hard_disk() {
     let base = scratch("windows_hd");
@@ -676,7 +677,7 @@ fn windows_sees_a_larger_hard_disk() {
         disk.windows_free_space(3),
         Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
     );
-    assert_eq!(disk.get_disk_free_space32(3), Ok((8, 19996, 512, 20000)));
+    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 19999, 512, 20000)));
     assert_eq!(disk.windows_free_space(5), Err(0x0F));
 }
 
@@ -786,7 +787,7 @@ fn floppies_have_a_1_44_mb_diskette_layout() {
 
     let hdd = DriveKind::HardDisk.layout();
     assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (79, b"FAT16   "));
-    assert_eq!(hdd.total_sectors(), 191 + 8 * 20000);
+    assert_eq!(hdd.total_sectors(), 191 + 32 * 20000);
     let bpb = hdd.bpb();
     assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
     assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());

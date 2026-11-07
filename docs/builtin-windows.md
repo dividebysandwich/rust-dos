@@ -101,7 +101,7 @@ space is made up: between 1.75 and 3.75 GB through
 `GetDiskFreeSpaceExA`, and at most just under 2 GB through
 `GetDiskFreeSpaceA`, as Windows 95 and 98 give a real disk's space. It
 drops as files are written. A setup that checks for the space it needs
-finds enough. DOS's own answer for such a drive is 80 MB.
+finds enough. DOS's own answer for such a drive is 160 to 480 MB.
 
 ### The system folder
 
