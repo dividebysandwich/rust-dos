@@ -306,6 +306,7 @@ pub fn load_file(
         refs: 1,
         builtin,
         resources32: 0,
+        image32: None,
         deps: Vec::new(),
         flags: parsed.flags,
         expected_version: parsed.expected_version,

@@ -1831,6 +1831,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "oxideav-cinepak"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "992a0ea3442dfa3a0ec893c117297f5dc76d50f19c8600853875896956618835"
+
+[[package]]
 name = "oxideav-core"
 version = "0.1.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2241,6 +2247,7 @@ dependencies = [
  "md-5",
  "memchr",
  "openxr",
+ "oxideav-cinepak",
  "oxideav-core",
  "oxideav-indeo",
  "oxideav-mp2",

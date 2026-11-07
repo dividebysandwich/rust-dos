@@ -419,9 +419,12 @@ impl DiskController {
         };
         let (time, date) = self.file_time(sft).unwrap_or((0, 0));
         let leaf = open.path.rsplit(['\\', '/', ':']).next().unwrap_or("");
-        let (stem, ext) = match open.data {
-            OpenData::Device(_) => (leaf.split('.').next().unwrap_or(""), ""),
-            _ => leaf.rsplit_once('.').unwrap_or((leaf, "")),
+        // A device keeps its name alone, also when it was opened as "NUL:".
+        let device = matches!(open.data, OpenData::Device(_))
+            .then(|| device_name(&open.path).unwrap_or_default());
+        let (stem, ext) = match &device {
+            Some(device) => (device.as_str(), ""),
+            None => leaf.rsplit_once('.').unwrap_or((leaf, "")),
         };
         let mut name = [b' '; 11];
         for (slot, b) in name[..8].iter_mut().zip(stem.trim().bytes()) {

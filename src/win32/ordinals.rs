@@ -67,6 +67,7 @@ static LISTS: &[(&str, &str)] = &[
     ("OPENGL32.DLL", include_str!("ordinals/opengl32_dll.txt")),
     ("QUARTZ.DLL", include_str!("ordinals/quartz_dll.txt")),
     ("SHELL32.DLL", include_str!("ordinals/shell32_dll.txt")),
+    ("TAPI32.DLL", include_str!("ordinals/tapi32_dll.txt")),
     ("USER32.DLL", include_str!("ordinals/user32_dll.txt")),
     ("VERSION.DLL", include_str!("ordinals/version_dll.txt")),
     ("WINMM.DLL", include_str!("ordinals/winmm_dll.txt")),
