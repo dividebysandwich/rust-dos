@@ -13,7 +13,6 @@
 //! servers, never does.
 
 use super::stubs::{Api, Conv, Dll};
-use crate::cpu::Cpu;
 
 pub static DLL: Dll = Dll {
     name: "OLEDLG.DLL",
@@ -38,18 +37,6 @@ const fn stdcall(
         conv: Conv::Stdcall,
         handler,
     }
-}
-
-/// Handlers for functions that aren't written yet, one a function, each
-/// of which reports its own name.
-macro_rules! not_written {
-    ($($handler:ident: $name:literal),* $(,)?) => {
-        $(
-            fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-                super::not_written(cpu, DLL.name, $name)
-            }
-        )*
-    };
 }
 
 /// The functions, with Windows 98 SE's ordinals. Append only (see
@@ -92,28 +79,31 @@ static APIS: &[Api] = &[
     stdcall("OleUIUpdateLinksW", 23, 4, update_links_w),
 ];
 
-not_written! {
-    add_verb_menu_a: "OleUIAddVerbMenuA",
-    can_convert: "OleUICanConvertOrActivateAs",
-    insert_object_a: "OleUIInsertObjectA",
-    paste_special_a: "OleUIPasteSpecialA",
-    edit_links_a: "OleUIEditLinksA",
-    change_icon_a: "OleUIChangeIconA",
-    convert_a: "OleUIConvertA",
-    busy_a: "OleUIBusyA",
-    update_links_a: "OleUIUpdateLinksA",
-    prompt_user_a: "OleUIPromptUserA",
-    object_properties_a: "OleUIObjectPropertiesA",
-    change_source_a: "OleUIChangeSourceA",
-    prompt_user_w: "OleUIPromptUserW",
-    add_verb_menu_w: "OleUIAddVerbMenuW",
-    busy_w: "OleUIBusyW",
-    change_icon_w: "OleUIChangeIconW",
-    change_source_w: "OleUIChangeSourceW",
-    convert_w: "OleUIConvertW",
-    edit_links_w: "OleUIEditLinksW",
-    insert_object_w: "OleUIInsertObjectW",
-    object_properties_w: "OleUIObjectPropertiesW",
-    paste_special_w: "OleUIPasteSpecialW",
-    update_links_w: "OleUIUpdateLinksW",
+// Each returns a UINT or a BOOL, and fails from guest code with 0
+// (OLEUI_FALSE, FALSE).
+super::not_written_handlers! {
+    DLL.name;
+    add_verb_menu_a: "OleUIAddVerbMenuA" => 0,
+    can_convert: "OleUICanConvertOrActivateAs" => 0,
+    insert_object_a: "OleUIInsertObjectA" => 0,
+    paste_special_a: "OleUIPasteSpecialA" => 0,
+    edit_links_a: "OleUIEditLinksA" => 0,
+    change_icon_a: "OleUIChangeIconA" => 0,
+    convert_a: "OleUIConvertA" => 0,
+    busy_a: "OleUIBusyA" => 0,
+    update_links_a: "OleUIUpdateLinksA" => 0,
+    prompt_user_a: "OleUIPromptUserA" => 0,
+    object_properties_a: "OleUIObjectPropertiesA" => 0,
+    change_source_a: "OleUIChangeSourceA" => 0,
+    prompt_user_w: "OleUIPromptUserW" => 0,
+    add_verb_menu_w: "OleUIAddVerbMenuW" => 0,
+    busy_w: "OleUIBusyW" => 0,
+    change_icon_w: "OleUIChangeIconW" => 0,
+    change_source_w: "OleUIChangeSourceW" => 0,
+    convert_w: "OleUIConvertW" => 0,
+    edit_links_w: "OleUIEditLinksW" => 0,
+    insert_object_w: "OleUIInsertObjectW" => 0,
+    object_properties_w: "OleUIObjectPropertiesW" => 0,
+    paste_special_w: "OleUIPasteSpecialW" => 0,
+    update_links_w: "OleUIUpdateLinksW" => 0,
 }

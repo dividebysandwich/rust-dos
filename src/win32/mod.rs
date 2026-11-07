@@ -79,6 +79,20 @@ mod wsock32;
 pub use snapshot::snapshot;
 pub use stubs::function_name;
 
+/// Handlers for functions of the built-in DLL `$dll` that aren't written
+/// yet, each calling `not_written` with its name and the value it fails
+/// with from guest code: `handler: "Name" => failed`.
+macro_rules! not_written_handlers {
+    ($dll:expr; $($handler:ident: $name:literal => $failed:expr),* $(,)?) => {
+        $(
+            fn $handler(cpu: &mut crate::cpu::Cpu, _: &[u32]) -> Option<u32> {
+                crate::win32::not_written(cpu, $dll, $name, $failed)
+            }
+        )*
+    };
+}
+pub(crate) use not_written_handlers;
+
 /// `State` for an enum whose variants have named fields (or `{}`), as the
 /// variant's place in the list and then its fields.
 macro_rules! state_variants {
@@ -1252,8 +1266,8 @@ fn missing(cpu: &mut Cpu, index: u16) {
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
-    if not_written(cpu, &dll, &function).is_some() {
-        cpu.set_eax(0);
+    if let Some(result) = not_written(cpu, &dll, &function, 0) {
+        cpu.set_eax(result);
         cpu.set_eip(cpu.eip().wrapping_add(4));
     }
 }
@@ -1261,11 +1275,13 @@ fn missing(cpu: &mut Cpu, index: u16) {
 /// A call of `function`, which the built-in DLL `dll` exports but has
 /// no code for yet: what a call of a missing function does (`missing`).
 /// From guest code the call fails with ERROR_CALL_NOT_IMPLEMENTED and
-/// the result is `Some(0)`; otherwise the program ends, saying what it
-/// needed, and the result is None. For the handler of such a function
-/// in a DLL's table, where it has to be for programs that import it by
-/// ordinal.
-fn not_written(cpu: &mut Cpu, dll: &str, function: &str) -> Option<u32> {
+/// the result is `Some(failed)`, the value the function fails with (0,
+/// or E_NOTIMPL for one returning an HRESULT, where 0 is S_OK);
+/// otherwise the program ends, saying what it needed, and the result is
+/// None. For the handler of such a function in a DLL's table, where it
+/// has to be for programs that import it by ordinal
+/// (`not_written_handlers`).
+fn not_written(cpu: &mut Cpu, dll: &str, function: &str, failed: u32) -> Option<u32> {
     let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     if let Some(module) = guest_caller(cpu) {
         let message = format!(
@@ -1275,7 +1291,7 @@ fn not_written(cpu: &mut Cpu, dll: &str, function: &str) -> Option<u32> {
         );
         cpu.bus.log_string(&message);
         process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
-        return Some(0);
+        return Some(failed);
     }
     let message = format!(
         "{} needs {}'s function {} (called from {:08X}), which the built-in Windows doesn't have yet.",

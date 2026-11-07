@@ -5,14 +5,15 @@
 //! the DLL such a program, Discworld Noir's setup among them, doesn't
 //! start.
 //!
-//! OleTranslateColor and DllCanUnloadNow are written. The font and
-//! picture objects, the property frames, OleIconToCursor and the class
-//! factory aren't yet: each is in the table with Windows 98 SE's
-//! ordinal, so a program that imports it by name or by ordinal loads,
-//! and calling it does what calling a missing function does
-//! (`super::not_written`): the program ends with a message naming it.
+//! OleTranslateColor, DllCanUnloadNow and the registration functions are
+//! written. The font and picture objects, the property frames,
+//! OleIconToCursor and the class factory aren't yet: each is in the
+//! table with Windows 98 SE's ordinal, so a program that imports it by
+//! name or by ordinal loads, and calling it does what calling a missing
+//! function does (`super::not_written`): the program ends with a message
+//! naming it.
 
-use super::com::{E_INVALIDARG, S_OK};
+use super::com::{E_INVALIDARG, E_NOTIMPL, S_OK};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -41,18 +42,6 @@ const fn stdcall(
     }
 }
 
-/// Handlers for functions that aren't written yet, one a function, each
-/// of which reports its own name.
-macro_rules! not_written {
-    ($($handler:ident: $name:literal),* $(,)?) => {
-        $(
-            fn $handler(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
-                super::not_written(cpu, DLL.name, $name)
-            }
-        )*
-    };
-}
-
 /// The functions, with Windows 98 SE's ordinals. Append only (see
 /// `stubs`).
 static APIS: &[Api] = &[
@@ -70,20 +59,22 @@ static APIS: &[Api] = &[
     stdcall("OleTranslateColor", 254, 3, translate_color),
     stdcall("DllCanUnloadNow", 255, 0, dll_can_unload_now),
     stdcall("DllGetClassObject", 256, 3, dll_get_class_object),
-    stdcall("DllRegisterServer", 257, 0, dll_register_server),
-    stdcall("DllUnregisterServer", 258, 0, dll_unregister_server),
+    stdcall("DllRegisterServer", 257, 0, register_server),
+    stdcall("DllUnregisterServer", 258, 0, register_server),
 ];
 
-not_written! {
-    icon_to_cursor: "OleIconToCursor",
-    property_frame_indirect: "OleCreatePropertyFrameIndirect",
-    property_frame: "OleCreatePropertyFrame",
-    load_picture: "OleLoadPicture",
-    create_picture_indirect: "OleCreatePictureIndirect",
-    create_font_indirect: "OleCreateFontIndirect",
-    dll_get_class_object: "DllGetClassObject",
-    dll_register_server: "DllRegisterServer",
-    dll_unregister_server: "DllUnregisterServer",
+// From guest code OleIconToCursor fails with no cursor, and the others,
+// which return an HRESULT, with E_NOTIMPL: 0 would be S_OK, and the
+// caller would use the object it didn't get.
+super::not_written_handlers! {
+    DLL.name;
+    icon_to_cursor: "OleIconToCursor" => 0,
+    property_frame_indirect: "OleCreatePropertyFrameIndirect" => E_NOTIMPL,
+    property_frame: "OleCreatePropertyFrame" => E_NOTIMPL,
+    load_picture: "OleLoadPicture" => E_NOTIMPL,
+    create_picture_indirect: "OleCreatePictureIndirect" => E_NOTIMPL,
+    create_font_indirect: "OleCreateFontIndirect" => E_NOTIMPL,
+    dll_get_class_object: "DllGetClassObject" => E_NOTIMPL,
 }
 
 /// The last system colour index OleTranslateColor takes, as Wine's
@@ -106,7 +97,8 @@ const PALETTE_RGB: u32 = 0x0200_0000;
 ///
 /// Any other high byte, a system colour past the last, or an index the
 /// palette doesn't have, fails with E_INVALIDARG and writes nothing.
-fn translate_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+/// OLEAUT32 exports the function too.
+pub(super) fn translate_color(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (color, palette, out) = (args[0], args[1], args[2]);
     let translated = match color >> 24 {
         0x00 if palette != 0 => color | PALETTE_RGB,
@@ -143,5 +135,13 @@ fn palette_has(cpu: &mut Cpu, handle: u32, index: u32) -> bool {
 /// DllCanUnloadNow(): S_OK, as no object of the DLL's can be there for
 /// a program to hold.
 fn dll_can_unload_now(_: &mut Cpu, _: &[u32]) -> Option<u32> {
+    Some(S_OK)
+}
+
+/// DllRegisterServer() and DllUnregisterServer(): S_OK, as the built-in
+/// DMUSIC and DINPUT8 answer. Setups such as Visual Basic's runtime
+/// register OLEPRO32 again after copying it, and the classes it would
+/// enter (StdFont, StdPicture) have no code to start here either way.
+fn register_server(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(S_OK)
 }
