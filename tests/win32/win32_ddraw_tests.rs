@@ -1492,7 +1492,8 @@ fn the_screen_takes_the_size_of_the_mode_directdraw_sets() {
 
 /// Full screen at 640x480 from a hidden popup window of that size that
 /// the program never shows, as WarGames makes it: whether the window is
-/// visible after SetDisplayMode, and its extended style.
+/// visible after SetDisplayMode, and its extended style then and after
+/// SetCooperativeLevel with DDSCL_NORMAL.
 fn hidden_window_program() -> (Vec<u8>, u32) {
     program(
         &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
@@ -1510,6 +1511,9 @@ fn hidden_window_program() -> (Vec<u8>, u32) {
             let gwl_exstyle = -20i32 as u32;
             let ex_style = [Arg::Val(HWND), Arg::I(gwl_exstyle)];
             c.api(a, l, S_GET_WINDOW_LONG, &ex_style)?;
+            let normal = [Arg::Val(HWND), Arg::I(DDSCL_NORMAL)];
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &normal)?;
+            c.api(a, l, S_GET_WINDOW_LONG, &ex_style)?;
             finish(a, l)
         },
     )
@@ -1520,13 +1524,17 @@ fn the_hidden_window_of_exclusive_mode_is_shown_and_topmost() {
     let (program, data) = hidden_window_program();
     let mut cpu = machine("hidden_window", program);
     run_until_done(&mut cpu, data);
-    let r = results(&mut cpu, data, 6);
+    let r = results(&mut cpu, data, 8);
     assert_eq!(r[1..4], [0; 3]);
     // Windows 98's DirectDraw shows the window of exclusive mode when the
     // mode is set, and makes it topmost, while it is the foreground
     // window: the mouse's clicks then reach it.
     assert_eq!(r[4], 1);
     assert_eq!(r[5] & WS_EX_TOPMOST, WS_EX_TOPMOST);
+    // Leaving exclusive mode, SetCooperativeLevel makes it a plain
+    // window again (SetWindowPos with HWND_NOTOPMOST).
+    assert_eq!(r[6], 0);
+    assert_eq!(r[7] & WS_EX_TOPMOST, 0);
 }
 
 /// A DEVMODEA at `offset` with `fields` and the size and depth given.
