@@ -1106,9 +1106,12 @@ fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
 /// The heap's copy of the surface `id`, made if it has none that is
 /// up to date.
 fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
-    let s = state(cpu).surface(id)?.clone();
-    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
-    let paletted = s.format.flags & DDPF_PALETTEINDEXED8 != 0;
+    let (key_set, flags, uniqueness) = {
+        let s = state(cpu).surface(id)?;
+        (s.key_set, s.format.flags, s.uniqueness)
+    };
+    let keyed = key && key_set & 1 << KEY_SRC_BLT != 0;
+    let paletted = flags & DDPF_PALETTEINDEXED8 != 0;
     let variant = if paletted {
         hash_words(&palette(cpu, id)) ^ keyed as u32
     } else {
@@ -1125,7 +1128,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     };
     let clock = hal(cpu).clock;
     if let Some(c) = hal(cpu).textures.iter_mut().find(|c| {
-        c.surface == id && c.tmu == unit && c.uniqueness == s.uniqueness && c.variant == variant
+        c.surface == id && c.tmu == unit && c.uniqueness == uniqueness && c.variant == variant
     }) {
         c.used = clock;
         return Some(c.clone());
@@ -1147,7 +1150,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     let c = Cached {
         surface: id,
         tmu: unit,
-        uniqueness: s.uniqueness,
+        uniqueness,
         variant,
         start,
         size,
@@ -1167,19 +1170,24 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
 /// The heap there, taken from video memory if it isn't (or video
 /// memory was lost since).
 fn heap(cpu: &mut Cpu) -> bool {
-    let h = hal(cpu).clone();
+    // Only these: a copy of all of it would copy the texture list, at
+    // every draw that samples a texture from the heap.
+    let (heap, heap_len, owner) = {
+        let h = hal(cpu);
+        (h.heap, h.heap_len, h.pid)
+    };
     let pid = current_pid(cpu);
-    if h.heap_len != 0 {
+    if heap_len != 0 {
         let there = state(cpu)
             .display
             .blocks
             .iter()
-            .any(|&(at, len)| at == h.heap && len >= h.heap_len);
-        if there && h.pid == pid {
+            .any(|&(at, len)| at == heap && len >= heap_len);
+        if there && owner == pid {
             return true;
         }
         if there {
-            display::free(cpu, h.heap);
+            display::free(cpu, heap);
         }
     }
     let (_, free) = display::video_memory(cpu);
