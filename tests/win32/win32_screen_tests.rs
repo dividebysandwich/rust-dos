@@ -3227,6 +3227,107 @@ fn a_256_colour_desktop_has_a_system_palette() {
     assert_eq!(dac[10 * 3..11 * 3], [10 >> shift, 20 >> shift, 30 >> shift]);
 }
 
+const USER32_DITHER: (&str, &[&str]) = ("USER32.DLL", &["CreateWindowExA", "GetDC", "FillRect"]);
+const GDI32_DITHER: (&str, &[&str]) = ("GDI32.DLL", &["CreateSolidBrush"]);
+const FILL_RECT: usize = 2;
+const CREATE_SOLID_BRUSH: usize = 3;
+const BRUSH: u32 = 0x20;
+const RECTS: u32 = 0x400;
+
+/// The colors the dither program fills its four cells with: (0,0,200),
+/// (200,100,50), the static (128,0,0), and PALETTERGB(0,0,200).
+const DITHER_COLORS: [u32; 4] = [0xC8_0000, 0x32_64C8, 0x00_0080, 0x02C8_0000];
+
+/// On a desktop of 256 colours, a window at (3, 5) and four 16x16 cells
+/// of it filled by FillRect with solid brushes of `DITHER_COLORS`.
+fn dither_program() -> (Vec<u8>, u32) {
+    let mut d = data();
+    for i in 0..4 {
+        let rect = RECTS + 16 * i;
+        put32(&mut d, rect, 16 * i);
+        put32(&mut d, rect + 4, 0);
+        put32(&mut d, rect + 8, 16 * i + 16);
+        put32(&mut d, rect + 12, 16);
+    }
+    program(&[USER32_DITHER, GDI32_DITHER], &d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.api(
+            a,
+            l,
+            CREATE_WINDOW,
+            &[
+                Arg::I(0),
+                Arg::At(CLASS),
+                Arg::At(CLASS),
+                Arg::I(WS_POPUP | WS_VISIBLE),
+                Arg::I(3),
+                Arg::I(5),
+                Arg::I(64),
+                Arg::I(16),
+                Arg::I(0),
+                Arg::I(0),
+                Arg::I(BASE),
+                Arg::I(0),
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(HWND)), eax)?;
+        c.api(a, l, GET_DC, &[Arg::Val(HWND)])?;
+        a.mov(dword_ptr(l.at(HDC)), eax)?;
+        for (i, color) in DITHER_COLORS.into_iter().enumerate() {
+            c.api(a, l, CREATE_SOLID_BRUSH, &[Arg::I(color)])?;
+            a.mov(dword_ptr(l.at(BRUSH)), eax)?;
+            let rect = Arg::At(RECTS + 16 * i as u32);
+            c.api(a, l, FILL_RECT, &[Arg::Val(HDC), rect, Arg::Val(BRUSH)])?;
+        }
+        finish(a, l, 1)
+    })
+}
+
+/// On a desktop of 256 colours a solid brush of a color that isn't a
+/// static one fills with the 8x8 pattern Windows 95's display drivers
+/// draw, aligned to the window; a static color and a PALETTERGB one
+/// fill solid. The patterns were read back from Windows 95 OSR2 with a
+/// Voodoo 3's driver at 640x480 in 256 colours.
+#[test]
+fn a_256_colour_desktop_dithers_solid_brushes() {
+    let (program, data) = dither_program();
+    let mut cpu = card_machine("dither", None, program);
+    cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+    run_until(&mut cpu, data, 1);
+    let r = results(&cpu, data, 10);
+    assert!(r.iter().all(|&v| v != 0), "{r:X?}");
+    // The system palette's indices, rows from the window's top.
+    let blue: [[u8; 8]; 4] = [
+        [4, 252, 4, 252, 4, 252, 4, 252],
+        [252, 4, 252, 4, 252, 4, 252, 4],
+        [4, 252, 4, 252, 4, 252, 4, 252],
+        [252, 252, 252, 4, 252, 252, 252, 4],
+    ];
+    let brown: [[u8; 8]; 8] = [
+        [3, 249, 248, 249, 3, 249, 248, 249],
+        [249, 248, 251, 248, 249, 248, 251, 248],
+        [248, 249, 248, 249, 248, 249, 248, 249],
+        [251, 249, 249, 248, 251, 249, 251, 248],
+        [3, 249, 248, 249, 3, 249, 248, 249],
+        [249, 248, 251, 248, 249, 248, 251, 248],
+        [248, 249, 248, 249, 248, 249, 248, 249],
+        [251, 249, 251, 248, 251, 249, 251, 248],
+    ];
+    let vram = &cpu.bus.vbe.vram;
+    for y in 0..16 {
+        for x in 0..64 {
+            let want = match x / 16 {
+                0 => blue[y % 4][x % 8],
+                1 => brown[y % 8][x % 8],
+                2 => 1,
+                _ => 252,
+            };
+            let got = vram[(5 + y) * 640 + 3 + x];
+            assert_eq!(got, want, "cell {} at ({x}, {y})", x / 16);
+        }
+    }
+}
+
 const USER32_CURSOR: (&str, &[&str]) = (
     "USER32.DLL",
     &["CreateWindowExA", "LoadCursorA", "SetCursor", "SetCursorPos", "ShowCursor"],

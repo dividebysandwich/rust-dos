@@ -449,6 +449,7 @@ const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
 const ERROR_RESOURCE_NAME_NOT_FOUND: u32 = 1814;
 const ERROR_RESOURCE_LANG_NOT_FOUND: u32 = 1815;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 
 /// The resource directory's data directory.
 const DIR_RESOURCE: u32 = 2;
@@ -639,11 +640,15 @@ fn data_of(cpu: &mut Cpu, module: u32, kind: &Res, name: &Res) -> Result<(u32, u
     let Some(base) = resource_module(cpu, module) else {
         return Err(ERROR_INVALID_HANDLE);
     };
-    find(cpu, base, kind, name, None).and_then(|entry| {
+    let (at, size) = find(cpu, base, kind, name, None).and_then(|entry| {
         data_entry(cpu, entry)
             .map(|(rva, size)| (base.wrapping_add(rva), size))
             .ok_or(ERROR_RESOURCE_DATA_NOT_FOUND)
-    })
+    })?;
+    if !crate::win16::resource::page_in(cpu, base, at, size) {
+        return Err(ERROR_NOT_ENOUGH_MEMORY);
+    }
+    Ok((at, size))
 }
 
 /// FindResourceA(module, name, type).
@@ -670,7 +675,14 @@ pub(super) fn load_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let base = resource_module(cpu, args[0]);
     let found = base.zip((args[1] != 0).then(|| data_entry(cpu, args[1])).flatten());
     match found {
-        Some((base, (rva, _))) => Some(base.wrapping_add(rva)),
+        Some((base, (rva, size))) => {
+            let at = base.wrapping_add(rva);
+            if !crate::win16::resource::page_in(cpu, base, at, size) {
+                set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+                return Some(0);
+            }
+            Some(at)
+        }
         None => {
             set_error(cpu, ERROR_RESOURCE_DATA_NOT_FOUND);
             Some(0)

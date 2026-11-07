@@ -105,7 +105,20 @@ impl Code {
 /// flags `flags` (and relocations if it calls functions), starting at the
 /// code's first byte.
 pub fn program(code: &Code, flags: u16) -> Vec<u8> {
+    program_with_resources(code, flags, &[])
+}
+
+/// `program`, with the resources `resources` (type, name, data),
+/// moveable and discardable.
+pub fn program_with_resources(
+    code: &Code,
+    flags: u16,
+    resources: &[(ne::ResId, ne::ResId, &[u8])],
+) -> Vec<u8> {
     let mut b = ne::Builder::new("T", ne::MULTIPLEDATA);
+    for (kind, name, data) in resources {
+        b.resource(kind.clone(), name.clone(), 0x1030, data);
+    }
     for (i, m) in code.modules.iter().enumerate() {
         let number = b.import_module(m);
         assert_eq!(number as usize, i + 1, "the module reference of {m}");
@@ -170,8 +183,27 @@ pub fn run_command(
     args: &str,
     setup: impl FnOnce(&mut Cpu, &Path),
 ) -> (u8, String) {
+    run_machine(test, program, command, args, None, setup)
+}
+
+/// `run`, on a machine with `memory_mb` MB of RAM.
+pub fn run_in_memory(test: &str, program: Vec<u8>, memory_mb: usize) -> (u8, String) {
+    run_machine(test, program, "T.EXE", "", Some(memory_mb), |_, _| {})
+}
+
+fn run_machine(
+    test: &str,
+    program: Vec<u8>,
+    command: &str,
+    args: &str,
+    memory_mb: Option<usize>,
+    setup: impl FnOnce(&mut Cpu, &Path),
+) -> (u8, String) {
     let base = scratch(test, &[("T.EXE", program)]);
-    let mut cpu = Cpu::new(base.clone());
+    let mut cpu = match memory_mb {
+        Some(mb) => Cpu::with_memory(base.clone(), mb),
+        None => Cpu::new(base.clone()),
+    };
     setup(&mut cpu, &base);
     cpu.bus.win32.enabled = true;
     cpu.host_console = Some(HostConsole::default());

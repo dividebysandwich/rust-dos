@@ -30,7 +30,7 @@ mod lz;
 mod message;
 mod misc;
 mod module;
-mod resource;
+pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
 mod user;
@@ -155,6 +155,9 @@ pub struct Module16 {
     /// The base of the image of its resources the 32-bit functions read
     /// (resource.rs), or 0 before one is made.
     pub resources32: u32,
+    /// That image's bytes, which its pages are filled from as they are
+    /// needed; None until it is made, and after a saved state is loaded.
+    pub image32: Option<std::sync::Arc<[u8]>>,
     /// The module handles of the modules it imports from, which it holds.
     pub deps: Vec<u16>,
     /// The header's flags, and the version of Windows it expects.
@@ -455,6 +458,17 @@ pub fn linear(cpu: &Cpu, segptr: u32) -> u32 {
     }
 }
 
+/// How many bytes there are from the 16:16 pointer `segptr` to the end
+/// of its segment: 0 when the selector isn't there. A segment of 4 GB
+/// (a limit of FFFFFFFFh) has as many as a u32 can count.
+pub fn segment_room(cpu: &Cpu, segptr: u32) -> u32 {
+    selector_base(cpu, (segptr >> 16) as u16).map_or(0, |(_, limit, _)| {
+        (limit as u64 + 1)
+            .saturating_sub((segptr & 0xFFFF) as u64)
+            .min(u32::MAX as u64) as u32
+    })
+}
+
 /// The linear address of `sel:off`.
 pub fn lin(cpu: &Cpu, sel: u16, off: u16) -> u32 {
     linear(cpu, (sel as u32) << 16 | off as u32)
@@ -626,6 +640,8 @@ crate::state_fields!(Module16 {
     expected_version,
     loaded,
     unbooted
+} skip {
+    image32
 });
 crate::state_fields!(Segment16 {
     handle,

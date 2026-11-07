@@ -450,6 +450,7 @@ const P_WAVE_UNPREPARE: u32 = P_MISC + 5;
 const P_MMTIME: u32 = P_MISC + 6;
 const P_WING_BITMAP: u32 = P_MISC + 7;
 const P_SEGPTR: u32 = P_MISC + 8;
+const P_MCI: u32 = P_MISC + 9;
 
 /// The size of Windows 3.1's MMTIME: wType and a union of 6 bytes, its
 /// SMPTE time being hour, minute, second, frame, fps and a pad byte
@@ -515,6 +516,12 @@ pub fn post(cpu: &mut Cpu, value: u32, data: &[u32]) -> Option<u32> {
             Some(value)
         }
         P_WING_BITMAP => Some(wing_bitmap_made(cpu, value, d(1), d(2), d(3))),
+        P_MCI => {
+            if value == 0 {
+                mci_returned(cpu, d(1), d(2), d(3));
+            }
+            Some(value)
+        }
         P_SEGPTR => {
             // VerQueryValue: the pointer it wrote at d(1), flat, as a
             // 16:16 one into the block at d(2) (flat) and d(3) (16:16).
@@ -1227,14 +1234,151 @@ fn mmio_set_buffer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(result)
 }
 
-/// mciSendCommand: the 16-bit parameter blocks aren't converted;
-/// MCIERR_UNSUPPORTED_FUNCTION.
+// MCI: WINMM's mciSendCommandA, called with the program's parameter
+// block made a 32-bit one, as Windows 95's MMSYSTEM thunks to WINMM.
+// The blocks of Windows 3.1 have the 32-bit ones' layout but for their
+// UINT and HWND fields, which are words (most of them followed by a
+// reserved word, so the offsets stay), their RECTs, which have words,
+// and their strings, which are 16:16 pointers. A callback window's
+// handle is its 32-bit one, as for the wave functions.
+
+use crate::win32::winmm::mci::{self as wmci, video};
+
+/// The longest block WINMM reads: MCI_WAVE_SET_PARMS, 44 bytes.
+const MCI_BLOCK: u32 = 48;
+
+/// mciSendCommand(id, message, flags, parms).
 fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    cpu.bus.log_string(&format!(
-        "[W16] mciSendCommand({:X}, {:X}) isn't done",
-        args[0], args[1]
-    ));
-    Some(274)
+    let (id, msg, flags, segptr) = (args[0], args[1], args[2], args[3]);
+    let at16 = super::linear(cpu, segptr);
+    let block = thunk::scratch32(cpu, MCI_BLOCK);
+    let target = if at16 == 0 {
+        0
+    } else {
+        mci_block32(cpu, segptr, at16, block, msg, flags);
+        block
+    };
+    // The program's block goes to `post` as its 16:16 pointer: the
+    // command can call into USER32, whose messages run the program's
+    // window procedures, and a segment they grow can move.
+    go_at(
+        cpu,
+        block,
+        MM,
+        "mciSendCommandA",
+        &[id, msg, flags, target],
+        vec![P_MCI, block, segptr, msg],
+    )
+}
+
+/// The 32-bit block at `block` made from the program's at `segptr`
+/// (`at16` linear) for the command `msg`.
+fn mci_block32(cpu: &mut Cpu, segptr: u32, at16: u32, block: u32, msg: u32, flags: u32) {
+    // The bytes up to the end of the program's segment, at most the
+    // block's.
+    let room = super::segment_room(cpu, segptr).min(MCI_BLOCK);
+    let mut bytes = super::peek_upto(cpu, at16, room as usize);
+    bytes.resize(MCI_BLOCK as usize, 0);
+    super::poke(cpu, block, &bytes);
+    let word = |at: u32| u16::from_le_bytes([bytes[at as usize], bytes[at as usize + 1]]) as u32;
+    let signed = |at: u32| word(at) as i16 as u32;
+    // The field at `at`, a word, made a DWORD at the same offset.
+    let widen = |cpu: &mut Cpu, at: u32| w32(cpu, block + at, word(at));
+    // The 16:16 pointer at `at` made flat.
+    let pointer = |cpu: &mut Cpu, at: u32| {
+        let p = super::linear(cpu, r32(cpu, block + at));
+        w32(cpu, block + at, p);
+    };
+    // The RECT of words at `at` made one of longs.
+    let rect = |cpu: &mut Cpu, at: u32| {
+        let longs = [0, 2, 4, 6].map(|k| signed(at + k));
+        for (k, v) in longs.into_iter().enumerate() {
+            w32(cpu, block + at + 4 * k as u32, v);
+        }
+    };
+    // dwCallback's window is its low word.
+    widen(cpu, 0);
+    match msg {
+        wmci::MCI_OPEN => {
+            // wDeviceID comes back; the strings are 16:16 unless they
+            // are numbers (the _ID flags). MCI_ANIM_OPEN_PARMS's and
+            // MCI_DGV_OPEN_PARMS's hWndParent is a word.
+            if flags & wmci::MCI_OPEN_TYPE != 0 && flags & wmci::MCI_OPEN_TYPE_ID == 0 {
+                pointer(cpu, 8);
+            }
+            if flags & wmci::MCI_OPEN_ELEMENT != 0 && flags & wmci::MCI_OPEN_ELEMENT_ID == 0 {
+                pointer(cpu, 12);
+            }
+            if flags & wmci::MCI_OPEN_ALIAS != 0 {
+                pointer(cpu, 16);
+            }
+            widen(cpu, 24);
+        }
+        wmci::MCI_INFO | wmci::MCI_SYSINFO => {
+            // lpstrReturn; MCI_SYSINFO_PARMS's wDeviceType is a word.
+            pointer(cpu, 4);
+            if msg == wmci::MCI_SYSINFO {
+                widen(cpu, 16);
+            }
+        }
+        wmci::MCI_LOAD | wmci::MCI_SAVE => {
+            // The file, and the RECT of words that MCI_OVLY_LOAD_PARMS,
+            // MCI_OVLY_SAVE_PARMS and MCI_DGV_SAVE_PARMS have after it
+            // (MCI_OVLY_RECT and MCI_DGV_RECT).
+            pointer(cpu, 4);
+            rect(cpu, 8);
+        }
+        video::MCI_WINDOW => {
+            // hWnd and nCmdShow are words, lpstrText a 16:16 pointer.
+            widen(cpu, 4);
+            w32(cpu, block + 8, signed(8));
+            if flags & video::MCI_DGV_WINDOW_TEXT != 0 {
+                pointer(cpu, 12);
+            }
+        }
+        video::MCI_PUT | video::MCI_WHERE | video::MCI_UPDATE => {
+            // A RECT of words, and MCI_UPDATE's hDC after it.
+            rect(cpu, 4);
+            let hdc = if msg == video::MCI_UPDATE {
+                word(12)
+            } else {
+                0
+            };
+            w32(cpu, block + 20, hdc);
+        }
+        wmci::MCI_BREAK => {
+            // nVirtKey and hwndBreak.
+            w32(cpu, block + 4, signed(4));
+            widen(cpu, 8);
+        }
+        _ => {}
+    }
+}
+
+/// mciSendCommandA returned 0: what the command gives back, from the
+/// 32-bit block to the program's at `segptr`.
+fn mci_returned(cpu: &mut Cpu, block: u32, segptr: u32, msg: u32) {
+    let at16 = super::linear(cpu, segptr);
+    if at16 == 0 {
+        return;
+    }
+    match msg {
+        wmci::MCI_OPEN => {
+            let id = r32(cpu, block + 4);
+            super::write_16(cpu, at16 + 4, id as u16);
+        }
+        wmci::MCI_STATUS | wmci::MCI_GETDEVCAPS => {
+            let value = r32(cpu, block + 4);
+            super::write_32(cpu, at16 + 4, value);
+        }
+        video::MCI_WHERE => {
+            for k in 0..4 {
+                let v = r32(cpu, block + 4 + 4 * k);
+                super::write_16(cpu, at16 + 4 + 2 * k, v as u16);
+            }
+        }
+        _ => {}
+    }
 }
 
 // VER.
