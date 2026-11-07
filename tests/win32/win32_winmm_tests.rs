@@ -1012,9 +1012,10 @@ const CLOSE_PARMS: u32 = 0xC0;
 /// child of it with MCI_DGV_OPEN_PARMSA, whose window (MCI_STATUS) is
 /// that child and whose source rectangle (MCI_WHERE) is the picture, 32
 /// by 32. A play draws a red frame 100 ms in and a blue one at its end,
-/// which GetPixel sees in the window, and the device then stops. The
-/// exit code has a bit for each.
-fn video_program(name: &str) -> Vec<u8> {
+/// which GetPixel sees in the window, and the device then stops. With
+/// `exact`, GetPixel gives the two colors as they are. The exit code has
+/// a bit for each.
+fn video_program(name: &str, exact: Option<[u32; 2]>) -> Vec<u8> {
     const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
     const WS_CHILD_VISIBLE: i32 = 0x5000_0000;
     const MCI_OPEN: i32 = 0x803;
@@ -1086,7 +1087,7 @@ fn video_program(name: &str) -> Vec<u8> {
         check_eax(a, 64, 4)?;
         send(a, MCI_PLAY, 0, PLAY_PARMS)?;
         check_eax(a, 0, 5)?;
-        for (sleep, bit, red) in [(100, 6, true), (500, 7, false)] {
+        for (n, (sleep, bit, red)) in [(100, 6, true), (500, 7, false)].into_iter().enumerate() {
             call(a, l.import(0), &[sleep])?;
             // GetPixel(GetDC(the device's window), 16, 16).
             a.push(16)?;
@@ -1095,9 +1096,17 @@ fn video_program(name: &str) -> Vec<u8> {
             a.call(l.import(5))?;
             a.push(eax)?;
             a.call(l.import(6))?;
+            let mut skip = a.create_label();
+            if let Some(colors) = exact {
+                a.cmp(eax, colors[n] as i32)?;
+                a.jne(skip)?;
+                a.or(ebx, 1 << bit)?;
+                a.set_label(&mut skip)?;
+                a.nop()?;
+                continue;
+            }
             // Red is 0x0000FF-ish, blue 0xFF0000-ish.
             let (hi, lo) = if red { (0, 16) } else { (16, 0) };
-            let mut skip = a.create_label();
             a.mov(ecx, eax)?;
             a.shr(ecx, hi)?;
             a.and(ecx, 0xFF)?;
@@ -1124,7 +1133,10 @@ fn video_program(name: &str) -> Vec<u8> {
 #[test]
 fn mpegvideo_draws_its_frames_in_a_child_window() {
     for core in CORES {
-        let files = [("T.EXE", video_program("CLIP.MPG")), ("CLIP.MPG", clip())];
+        let files = [
+            ("T.EXE", video_program("CLIP.MPG", None)),
+            ("CLIP.MPG", clip()),
+        ];
         let mut cpu = machine("mpeg", core, &files, |_| {});
         run_to_exit(&mut cpu, 20_000, |_| {});
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
@@ -1134,6 +1146,14 @@ fn mpegvideo_draws_its_frames_in_a_child_window() {
 /// The frames of `clip` in an AVI file: uncompressed 24-bit pictures,
 /// with an index.
 fn avi_clip() -> Vec<u8> {
+    avi_clip_of(&[[0, 0, 255], [255, 0, 0]], &[])
+}
+
+/// An AVI file of 12 frames of 32 by 32, the first 6 of color 0 and
+/// the others of color 1, with an index. `colors` are blue, green and
+/// red; with a `palette` (of the same order) the pictures are 8-bit and
+/// the colors their indexes.
+fn avi_clip_of(colors: &[[u8; 3]; 2], palette: &[[u8; 3]]) -> Vec<u8> {
     fn chunk(out: &mut Vec<u8>, id: &[u8], data: &[u8]) {
         out.extend_from_slice(id);
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -1149,7 +1169,12 @@ fn avi_clip() -> Vec<u8> {
     bih[..4].copy_from_slice(&le(40));
     bih[4..8].copy_from_slice(&le(32));
     bih[8..12].copy_from_slice(&le(32));
-    bih[12..16].copy_from_slice(&[1, 0, 24, 0]);
+    let bits = if palette.is_empty() { 24 } else { 8 };
+    bih[12..16].copy_from_slice(&[1, 0, bits, 0]);
+    bih[32..36].copy_from_slice(&le(palette.len() as u32));
+    for q in palette {
+        bih.extend_from_slice(&[q[0], q[1], q[2], 0]);
+    }
     let mut strl = b"strl".to_vec();
     chunk(&mut strl, b"strh", &strh);
     chunk(&mut strl, b"strf", &bih);
@@ -1159,12 +1184,17 @@ fn avi_clip() -> Vec<u8> {
     let mut movi = b"movi".to_vec();
     let mut idx1 = Vec::new();
     for n in 0..12 {
-        let px: [u8; 3] = if n < 6 { [0, 0, 255] } else { [255, 0, 0] };
+        let px: &[u8] = match (palette.is_empty(), n < 6) {
+            (true, first) => &colors[usize::from(!first)],
+            (false, true) => &[0],
+            (false, false) => &[1],
+        };
+        let frame = px.repeat(32 * 32);
         idx1.extend_from_slice(b"00db");
         idx1.extend_from_slice(&le(0x10));
         idx1.extend_from_slice(&le(movi.len() as u32));
-        idx1.extend_from_slice(&le(32 * 32 * 3));
-        chunk(&mut movi, b"00db", &px.repeat(32 * 32));
+        idx1.extend_from_slice(&le(frame.len() as u32));
+        chunk(&mut movi, b"00db", &frame);
     }
     let mut body = b"AVI ".to_vec();
     chunk(&mut body, b"LIST", &hdrl);
@@ -1180,10 +1210,45 @@ fn avi_clip() -> Vec<u8> {
 #[test]
 fn avivideo_draws_its_frames_in_a_child_window() {
     for core in CORES {
-        let files = [("T.EXE", video_program("CLIP.AVI")), ("CLIP.AVI", avi_clip())];
+        let files = [
+            ("T.EXE", video_program("CLIP.AVI", None)),
+            ("CLIP.AVI", avi_clip()),
+        ];
         let mut cpu = machine("avi", core, &files, |_| {});
         run_to_exit(&mut cpu, 20_000, |_| {});
         assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {:?}", printed(&cpu));
+    }
+}
+
+/// On a desktop of 256 colours, AVIVideo realizes a palette for the
+/// movie in the window before it draws, as MCIAVI's DrawDib does: an
+/// 8-bit movie's own colors, and the halftone palette for one of more
+/// bits. The program's window is the foreground one, so the colors go
+/// into the system palette and GetPixel gives them as they are, though
+/// none of them is a static color. Without the palette each pixel would
+/// be the nearest static color.
+#[test]
+fn avivideo_realizes_the_movies_palette_on_a_256_colour_desktop() {
+    // Blue, green and red: (200, 100, 50) and (30, 160, 90) in RGB.
+    let own = [[50, 100, 200], [90, 160, 30]];
+    // Colors of the halftone palette's cube, which has steps of 51.
+    let cube = [[51, 102, 204], [204, 153, 0]];
+    let colorref = |q: [u8; 3]| u32::from_le_bytes([q[2], q[1], q[0], 0]);
+    let movies = [
+        ("eight", avi_clip_of(&[[0; 3]; 2], &own), own),
+        ("true", avi_clip_of(&cube, &[]), cube),
+    ];
+    for (test, avi, colors) in movies {
+        let exact = Some(colors.map(colorref));
+        let files = [
+            ("T.EXE", video_program("CLIP.AVI", exact)),
+            ("CLIP.AVI", avi),
+        ];
+        let mut cpu = machine(test, CoreMode::Normal, &files, |cpu| {
+            cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+        });
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0xFF, "{test}: {:?}", printed(&cpu));
     }
 }
 

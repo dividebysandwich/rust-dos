@@ -30,9 +30,10 @@
 //! A save state keeps where the device is, not the file: it is read
 //! again when it is next wanted.
 
-use super::media::{Media, Pictures};
+use super::media::{Kind as MediaKind, Media, Pictures};
 use super::*;
 use crate::win32::gdi32::draw::{self, Source};
+use crate::win32::gdi32::palette;
 use crate::win32::gdi32::surface::{Surface, default_masks, dib_stride};
 use crate::win32::task::{self, Next, Task};
 use crate::win32::user32::{self, window};
@@ -143,6 +144,9 @@ pub struct Video {
     /// The file, which a save state doesn't keep, and its decoder.
     pub media: Option<Arc<Media>>,
     pub pictures: Pictures,
+    /// On a palette device, the palette the pictures are drawn with,
+    /// once one was drawn; 0 before.
+    pub palette: u32,
 }
 
 /// A call into USER32: the function, its arguments, and the strings it
@@ -283,6 +287,10 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
         MCI_OPEN => open(cpu, i, flags, p),
         MCI_CLOSE => {
             halt(cpu, i);
+            let palette = std::mem::take(&mut video(cpu, i).palette);
+            if palette != 0 {
+                crate::win32::gdi32::delete_object(cpu, &[palette]);
+            }
             // A process that ended has no windows left, and no process
             // to post to: its devices close after USER32's windows go.
             let own = video(cpu, i).own;
@@ -983,10 +991,39 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     let (x0, y0) = dc.to_device(dx, dy);
     let (x1, y1) = dc.to_device(dx + dw, dy + dh);
     let src = (sx, sy, sx + sw, sy + sh);
+    let old = select_movie_palette(cpu, i, &m, hdc);
     draw::blit_from(cpu, hdc, (x0, y0, x1, y1), Some((source, src)), SRCCOPY);
+    if let Some(old) = old {
+        palette::select_palette(cpu, &[hdc, old, 1]);
+    }
     if to.is_none() {
         user32::paint::release_dc(cpu, &[hwnd, hdc]);
     }
+}
+
+/// On a palette device, select the movie's palette into `hdc` and
+/// realize it, as MCIAVI's DrawDib does before it draws: the movie's own
+/// colours for an 8-bit movie, the halftone palette for one of more
+/// bits. It is selected as a foreground palette, so in the foreground
+/// window or a child of it, its colours take the system palette's free
+/// entries. Returns the palette it replaced, which goes back in after
+/// the picture is drawn.
+fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<u32> {
+    if !palette::palette_device(cpu) {
+        return None;
+    }
+    let mut hpal = video(cpu, i).palette;
+    if crate::win32::gdi32::gdi(cpu).palette(hpal).is_none() {
+        let colors = match &m.video {
+            MediaKind::Avi(v) if !v.colors().is_empty() => v.colors(),
+            _ => palette::halftone_colors(),
+        };
+        hpal = palette::palette_of(cpu, &colors);
+        video(cpu, i).palette = hpal;
+    }
+    let old = palette::select_palette(cpu, &[hdc, hpal, 0]).filter(|&o| o != 0)?;
+    palette::realize_posted(cpu, hdc);
+    Some(old)
 }
 
 /// The window procedure of the devices' windows (`CLASS`, `AVI_CLASS`):
@@ -1027,7 +1064,8 @@ crate::state_fields!(Video {
     volume,
     balance,
     manual_show,
-    drawn
+    drawn,
+    palette
 } skip {
     media,
     pictures
