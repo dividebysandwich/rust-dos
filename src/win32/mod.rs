@@ -1078,6 +1078,8 @@ fn end_process(cpu: &mut Cpu, index: usize, code: u32) {
     // The last program's loops get their summaries.
     trace::flush(cpu);
     let (rm_stack, a20) = (cpu.bus.win32.rm_stack, cpu.bus.win32.a20);
+    // The breakpoints were the last thread's, which is gone.
+    seh::set_debug_registers(cpu, &[0; 6]);
     system::enter_real(cpu, (ROM_SEG, EXIT), rm_stack, 0x0202);
     // The session's files are closed before a restart's work, as Windows
     // closes them before it restarts: WININIT.INI's renames and deletes

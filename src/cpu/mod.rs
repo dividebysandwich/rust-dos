@@ -477,7 +477,9 @@ pub struct Cpu {
     pub sse: Sse,
     /// The K6-2's model-specific registers.
     pub k6: K6Msrs,
-    /// Debug registers; stored, but breakpoints are not implemented.
+    /// Debug registers. The instruction breakpoints DR7 enables raise
+    /// debug exceptions (`instruction_breakpoint`); data and I/O
+    /// breakpoints are stored, with nothing behind them.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
     pub idtr: DescTable,
@@ -1293,8 +1295,9 @@ impl Cpu {
         self.flags = CpuFlags::from_bits_retain(upper | (value as u32 & FLAGS16_WRITABLE) | 0x0002);
     }
 
-    /// Load EFLAGS, as POPFD and IRETD do in real mode. VM and RF can't be
-    /// set this way; AC only exists from the 486 on, ID on a Pentium.
+    /// Load EFLAGS, as POPFD and IRETD do in real mode (IRETD loads RF
+    /// too). VM and RF can't be set this way; AC only exists from the 486
+    /// on, ID on a Pentium.
     pub fn load_eflags(&mut self, value: u32) {
         let writable = FLAGS16_WRITABLE | self.model.eflags_extra();
         let keep = self.flags.bits() & CpuFlags::VM.bits();

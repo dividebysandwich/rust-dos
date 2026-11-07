@@ -1011,7 +1011,8 @@ fn idt(cpu: &mut Cpu, vector: u8) {
 /// client before its exception handler sees the #GP, as Windows does.
 /// Clients read the control registers as they are and can't change them;
 /// the debug registers are theirs to set (DOS/4GW Professional's NULLP
-/// option sets DR0-DR3 and DR7 itself), with no breakpoints behind them.
+/// option sets DR0-DR3 and DR7 itself). Instruction breakpoints raise
+/// debug exceptions; data breakpoints, which NULLP sets, do nothing.
 /// Returns whether the instruction was one.
 fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
     let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else { return false };
