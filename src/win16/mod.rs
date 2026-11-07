@@ -450,6 +450,17 @@ pub fn linear(cpu: &Cpu, segptr: u32) -> u32 {
     }
 }
 
+/// How many bytes there are from the 16:16 pointer `segptr` to the end
+/// of its segment: 0 when the selector isn't there. A segment of 4 GB
+/// (a limit of FFFFFFFFh) has as many as a u32 can count.
+pub fn segment_room(cpu: &Cpu, segptr: u32) -> u32 {
+    selector_base(cpu, (segptr >> 16) as u16).map_or(0, |(_, limit, _)| {
+        (limit as u64 + 1)
+            .saturating_sub((segptr & 0xFFFF) as u64)
+            .min(u32::MAX as u64) as u32
+    })
+}
+
 /// The linear address of `sel:off`.
 pub fn lin(cpu: &Cpu, sel: u16, off: u16) -> u32 {
     linear(cpu, (sel as u32) << 16 | off as u32)

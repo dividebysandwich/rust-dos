@@ -505,6 +505,39 @@ fn mci_send_command_opens_a_sequencer_with_its_16_bit_parameter_block() {
     assert_eq!(exit, 1, "{log}");
 }
 
+const MCI_SYSINFO: u16 = 0x810;
+const MCI_SYSINFO_NAME: u32 = 0x400;
+const MCI_DEVTYPE_SEQUENCER: u16 = 523;
+/// Where the MCI_SYSINFO test keeps its MCI_SYSINFO_PARMS.
+const SYSINFO: u16 = 0xA0;
+
+#[test]
+fn mci_send_command_gives_sysinfos_name_in_a_16_bit_buffer() {
+    // MCI_SYSINFO_NAME of the first installed sequencer: the name comes
+    // back in the 16:16 buffer lpstrReturn points to. wDeviceType is a
+    // word with a reserved word after it, marked here, which stays as
+    // it was. Exit code 1, or the check that failed.
+    let mut code = Code::new();
+    set(&mut code, DEVICE, 0);
+    set(&mut code, SYSINFO, 0);
+    set(&mut code, SYSINFO + 2, 0);
+    set(&mut code, SYSINFO + 4, BUFFER);
+    set_seg(&mut code, SYSINFO + 6, true);
+    set(&mut code, SYSINFO + 8, 32);
+    set(&mut code, SYSINFO + 10, 0);
+    set(&mut code, SYSINFO + 12, 1);
+    set(&mut code, SYSINFO + 14, 0);
+    set(&mut code, SYSINFO + 16, MCI_DEVTYPE_SEQUENCER);
+    set(&mut code, SYSINFO + 18, 0xCAFE);
+    mci(&mut code, MCI_SYSINFO, MCI_SYSINFO_NAME, SYSINFO, 0, 2);
+    expect(&mut code, BUFFER, u16::from_le_bytes(*b"se"), true, 3);
+    expect(&mut code, BUFFER + 8, u16::from_le_bytes(*b"r\0"), true, 4);
+    expect(&mut code, SYSINFO + 18, 0xCAFE, true, 5);
+    code.emit(&[0xB0, 0x01]).exit_al();
+    let (exit, log) = run("mci_sysinfo", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
+}
+
 /// The frames of an AVI file: twelve uncompressed 24-bit 32x32
 /// pictures, with an index.
 fn avi_clip() -> Vec<u8> {
