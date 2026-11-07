@@ -47,13 +47,16 @@ const HANDLERS: u32 = RING0_STACK_TOP;
 const HANDLER_SIZE: u32 = 32;
 pub const SYSTEM_BLOCK_PAGES: u32 = (HANDLERS + 256 * HANDLER_SIZE) / PAGE;
 
-/// The GDT's selectors: level 0 code and data covering everything, the
-/// TSS and the LDT.
-const CODE0: u16 = 0x08;
-const DATA0: u16 = 0x10;
+/// The GDT's selectors: the TSS, the LDT, and level 0 code and data
+/// covering everything at 28h and 30h, where Windows 98's VMM has its
+/// flat segments. Programs that run their own code at level 0 through
+/// the IDT build its gate with those numbers: SafeDisc 2.30 (Anachronox)
+/// writes 28h into the gate rather than copying the system's.
 const TSS_SEL: u16 = 0x18;
 const LDT_SEL: u16 = 0x20;
-const GDT_ENTRIES: u32 = 5;
+const CODE0: u16 = 0x28;
+const DATA0: u16 = 0x30;
+const GDT_ENTRIES: u32 = 7;
 
 /// The program's selectors, in the LDT where Windows 95 has its flat code
 /// and data segments (0137h and 013Fh), and the thread's TIB after them.
@@ -362,16 +365,19 @@ enum Entry {
 /// runs uses the level 0 stack right below the frame of the exception it
 /// came in by, so an interrupt there can push its frame where one from
 /// level 3 would be, with or without an error code. Such a frame's second
-/// dword is its CS, 8, pushed with the upper half 0. A frame from level 3
-/// has its CS there, with RPL 3, or the EIP of an exception with an error
-/// code, never 8: no program's code is in the first page. The CS is
-/// checked first, since the third dword of a frame from level 0, its
-/// EFLAGS, reads as a CS with RPL 3 when CF is set.
+/// dword is its CS, 28h, pushed with the upper half 0, and its first its
+/// EIP, in a module's image or the system arena, above the first 64K. A
+/// frame from level 3 has its CS there, with RPL 3, or the EIP of an
+/// exception with an error code. That EIP is 28h when a Win16 task faults
+/// at offset 28h of its segment, but the frame's first dword is then the
+/// error code, which has its upper half 0. The CS is checked first, since
+/// the third dword of a frame from level 0, its EFLAGS, reads as a CS with
+/// RPL 3 when CF is set.
 fn gate_entry(cpu: &mut Cpu) -> Option<Entry> {
     let top = SYSTEM + RING0_STACK_TOP;
     let sp = cpu.esp();
     let read = |cpu: &mut Cpu, at: u32| cpu.bus.guest_read_32(at);
-    if read(cpu, sp + 4) == CODE0 as u32 {
+    if read(cpu, sp + 4) == CODE0 as u32 && read(cpu, sp) > 0xFFFF {
         let mut ctx = Context::of(cpu);
         ctx.eip = read(cpu, sp);
         ctx.seg[Seg::CS as usize] = CODE0;
@@ -414,6 +420,27 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // Windows 98 serves it and goes back to that code.
         Some(Entry::System(ctx)) if is_irq(cpu, vector) => {
             reflect(cpu, vector, ctx);
+            return;
+        }
+        // INT 20h at level 0 is a VxD's call of a VMM or VxD service, its
+        // number in the dword after the INT, as SafeDisc 2.30's level 0
+        // code makes it. The built-in Windows has no VxDs, so it ends the
+        // program, naming the service, as for VxDCall from level 3, and
+        // the INT, 2 bytes before the dword. The service's bit 15 marks a
+        // VxDJmp, which doesn't come back; the number is in bits 0-14.
+        Some(Entry::System(mut ctx)) if vector == 0x20 => {
+            let service = cpu.bus.guest_read_32(ctx.eip);
+            ctx.eip = ctx.eip.wrapping_sub(2);
+            super::fatal(
+                cpu,
+                &format!(
+                    "an invalid VxD call at level 0: VxD {:04X}h's service {:04X}h, \
+                     which the built-in Windows doesn't have",
+                    service >> 16,
+                    service & 0x7FFF
+                ),
+                Some(&ctx),
+            );
             return;
         }
         _ => {

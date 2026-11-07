@@ -58,6 +58,9 @@ fn programs_find_a_tandy() {
     // 624 KB: the top 16 KB is the video memory.
     int12::handle(&mut cpu);
     assert_eq!(cpu.ax(), 624);
+    // The memory installed, 640 KB, at 40:15h, which Civilization's Tandy
+    // driver takes the base memory from.
+    assert_eq!(cpu.bus.read_16(0x0415), 640);
     // No VGA or EGA.
     int10(&mut cpu, 0x1A00, 0, 0, 0);
     assert_eq!(cpu.get_al(), 0x00);
@@ -74,9 +77,11 @@ fn programs_find_a_pcjr() {
     assert_ne!(cpu.bus.read_16(0x0410) & 0x0100, 0);
     int12::handle(&mut cpu);
     assert_eq!(cpu.ax(), 640);
-    // Another machine again: an AT with 640 KB.
+    assert_eq!(cpu.bus.read_16(0x0415), 640);
+    // Another machine again: an AT with 640 KB, and nothing at 40:15h.
     bios::install(&mut cpu.bus, VideoSetup::default());
     assert_eq!((cpu.bus.read_8(0xFFFFE), cpu.bus.read_16(0x0413)), (0xFC, 640));
+    assert_eq!(cpu.bus.read_16(0x0415), 0);
 }
 
 #[test]

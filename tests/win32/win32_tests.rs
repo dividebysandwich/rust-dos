@@ -1859,7 +1859,7 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
 
 /// SafeDisc 1's loader (Omikron's RUNTIME.EXE) goes on at level 0 with
 /// interrupts on: its divide error's handler returns to the program's code
-/// with CS 0008, leaving the user's EFLAGS (IF set), and that code divides
+/// with CS 0028, leaving the user's EFLAGS (IF set), and that code divides
 /// by zero again, through a handler that returns to level 3. A timer
 /// interrupt between the two comes from level 0, on the level 0 stack 8
 /// bytes below the top, so its frame lies where one from level 3 would.
@@ -1915,7 +1915,7 @@ fn a_timer_interrupt_in_level_0_code_returns_to_it() {
             a.div(ecx)?;
             // Level 0, interrupts on, ESP 8 bytes below the stack's top, or
             // 12 with a dword pushed: wait for an interrupt's frame (CS
-            // 0008) to appear below ESP.
+            // 0028) to appear below ESP.
             a.set_label(&mut level0)?;
             if pushed {
                 a.push(eax)?;
@@ -1923,7 +1923,7 @@ fn a_timer_interrupt_in_level_0_code_returns_to_it() {
             a.mov(dword_ptr(esp - 8), 0)?;
             a.mov(edx, 1_000_000)?;
             a.set_label(&mut spin)?;
-            a.cmp(dword_ptr(esp - 8), 8)?;
+            a.cmp(dword_ptr(esp - 8), 0x28)?;
             a.je(served)?;
             a.dec(edx)?;
             a.jnz(spin)?;
@@ -3409,23 +3409,27 @@ fn get_thread_context_of_a_new_thread_gives_its_starting_fpu() {
     assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
 }
 
-/// GetStartupInfoW, which SafeDisc 1's loader looks up with
-/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
-/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
-/// structure as it was.
-#[test]
-fn get_startup_info_w_is_a_stub_that_fails() {
+/// Check that KERNEL32's `name` is one of Windows 98 SE's stubs that
+/// fail: GetProcAddress finds it, and the call with `args` (pushed last
+/// first: `Some(offset)` the address of the data at `offset`, `None`
+/// NULL) returns 0 with the stack balanced, GetLastError gives
+/// ERROR_CALL_NOT_IMPLEMENTED (120), and the `len` bytes the call was to
+/// fill at offset `out` of the data, a multiple of 4, are as they were.
+fn check_failing_stub(test: &str, name: &str, args: &[Option<u32>], out: u32, len: u32) {
+    const NAME: u32 = 13;
+    assert!(NAME as usize + name.len() < 0x40 && out >= 0x40 && len.is_multiple_of(4));
     let names: &[&str] = &["GetModuleHandleA", "GetProcAddress", "GetLastError"];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
-    let mut data = b"KERNEL32.DLL\0GetStartupInfoW\0".to_vec();
-    data.resize(0x40, 0);
-    data.resize(0x84, 0x5A);
+    let mut data = b"KERNEL32.DLL\0".to_vec();
+    data.extend_from_slice(name.as_bytes());
+    data.resize(out as usize, 0);
+    data.resize((out + len) as usize, 0x5A);
     let main = |a: &mut CodeAssembler, l: &Layout| {
         let mut end = a.create_label();
         a.xor(ebx, ebx)?;
         a.push(l.at(0) as i32)?;
         a.call(l.import(0))?;
-        a.push(l.at(13) as i32)?;
+        a.push(l.at(NAME) as i32)?;
         a.push(eax)?;
         a.call(l.import(1))?;
         a.mov(esi, eax)?;
@@ -3434,7 +3438,9 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.test(esi, esi)?;
         a.je(end)?;
         a.mov(edi, esp)?;
-        a.push(l.at(0x40) as i32)?;
+        for arg in args.iter().rev() {
+            a.push(arg.map_or(0, |offset| l.at(offset) as i32))?;
+        }
         a.call(esi)?;
         a.test(eax, eax)?;
         check(a, false, 1)?;
@@ -3443,10 +3449,9 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.call(l.import(2))?;
         a.cmp(eax, 120)?;
         check(a, false, 3)?;
-        // All 68 bytes of the structure are as they were.
         a.cld()?;
-        a.mov(edi, l.at(0x40) as u32)?;
-        a.mov(ecx, 17)?;
+        a.mov(edi, l.at(out) as u32)?;
+        a.mov(ecx, len / 4)?;
         a.mov(eax, 0x5A5A_5A5A)?;
         a.repe().scasd()?;
         check(a, false, 4)?;
@@ -3455,8 +3460,29 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.ret()
     };
     let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
-    let (code, _) = run("startup_info_w", exe);
+    let (code, _) = run(test, exe);
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
+/// GetStartupInfoW, which SafeDisc 1's loader looks up with
+/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
+/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
+/// 68-byte structure as it was.
+#[test]
+fn get_startup_info_w_is_a_stub_that_fails() {
+    check_failing_stub("startup_info_w", "GetStartupInfoW", &[Some(0x40)], 0x40, 68);
+}
+
+/// SystemTimeToTzSpecificLocalTime, which Myth II 1.8.3 imports, is
+/// there as Windows 98 SE's stub: it takes its three arguments, fails
+/// with ERROR_CALL_NOT_IMPLEMENTED and leaves the SYSTEMTIME it was to
+/// fill as it was.
+#[test]
+fn system_time_to_tz_specific_local_time_is_a_stub_that_fails() {
+    let name = "SystemTimeToTzSpecificLocalTime";
+    // No time zone, the SYSTEMTIME given at 0x40, the one to fill at 0x50.
+    let args = &[None, Some(0x40), Some(0x50)];
+    check_failing_stub("tz_specific_local_time", name, args, 0x50, 16);
 }
 
 /// INT 68h, WDEB386's interface, as Windows 98 has it without the
@@ -3509,6 +3535,117 @@ fn hlt_raises_a_privileged_instruction_exception() {
         }),
     );
     assert_eq!(code, 1, "{}", text);
+}
+
+/// CLI and STI at level 3 go on with no exception, as Windows 98's VMM
+/// simulates them for the system VM. SafeDisc 2.30 brackets its writes
+/// to the IDT with them. A handler would end the program with 2.
+#[test]
+fn cli_and_sti_go_on_as_on_windows_98() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, text) = run(
+        "cli_sti",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut setup = a.create_label();
+            a.call(setup)?;
+            a.push(2)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            a.set_label(&mut setup)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.cli()?;
+            a.sti()?;
+            a.cli()?;
+            a.sti()?;
+            a.push(1)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The GDT has Windows 98's level 0 flat code segment at 28h. SafeDisc
+/// 2.30 writes a gate of its own into the IDT with that selector and
+/// raises its vector from level 3 (INT 5, through a gate of level 3) to
+/// run its code at level 0. The code puts CR0 in EBX and returns, and
+/// the program ends with CR0's PE bit, 1.
+#[test]
+fn a_gate_to_selector_28h_runs_level_0_code() {
+    let (code, text) = run_through_gate_28h(
+        "gate_28h",
+        &[
+            0x0F, 0x20, 0xC3, // mov ebx, cr0
+            0xCF, // iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A VxD service call at level 0, INT 20h and the service's dword, as
+/// SafeDisc 2.30's level 0 code makes one: the built-in Windows has no
+/// VxDs, so the program ends, naming the service and the INT's address.
+/// Bit 15 of the service's word marks a VxDJmp and isn't part of its
+/// number.
+#[test]
+fn a_vxd_call_at_level_0_names_the_service() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_level0",
+        &[
+            0xCD, 0x20, // int 20h
+            0x3E, 0x81, 0x01, 0x00, // VMM's service 013Eh, as a VxDJmp
+        ],
+    );
+    assert_eq!(code, 0xFF, "{}", text);
+    assert!(text.contains("VxD 0001h's service 013Eh"), "{}", text);
+    // The INT, at 30h of the data section, which starts at a page.
+    let at = text
+        .split_once("doesn't have at 0028:")
+        .and_then(|(_, rest)| u32::from_str_radix(rest.get(..8)?, 16).ok());
+    assert_eq!(at.map(|at| at & 0xFFF), Some(0x30), "{}", text);
+}
+
+/// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
+/// section, through a gate of level 3 for vector 5 with selector 28h. The
+/// program ends with EBX's bit 0 after it returns.
+fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let mut data = vec![0u8; 0x40];
+    data[0x30..0x30 + level0.len()].copy_from_slice(level0);
+    run(
+        name,
+        program(BASE, false, imports, &data, |a, l| {
+            // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
+            // gate, kept at 10h.
+            a.sidt(ptr(l.at(0)))?;
+            a.mov(esi, dword_ptr(l.at(2)))?;
+            a.add(esi, 5 * 8)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.mov(dword_ptr(l.at(0x10)), eax)?;
+            a.mov(eax, dword_ptr(esi + 4))?;
+            a.mov(dword_ptr(l.at(0x14)), eax)?;
+            // A 32-bit interrupt gate of level 3 to the code at 30h,
+            // selector 28h.
+            a.mov(eax, l.at(0x30) as u32)?;
+            a.mov(word_ptr(esi), ax)?;
+            a.mov(word_ptr(esi + 2), 0x28)?;
+            a.mov(word_ptr(esi + 4), 0xEE00)?;
+            a.shr(eax, 16)?;
+            a.mov(word_ptr(esi + 6), ax)?;
+            a.xor(ebx, ebx)?;
+            a.int(5)?;
+            // Put the gate back.
+            a.mov(eax, dword_ptr(l.at(0x10)))?;
+            a.mov(dword_ptr(esi), eax)?;
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            a.mov(dword_ptr(esi + 4), eax)?;
+            a.and(ebx, 1)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    )
 }
 
 /// C.DLL, whose entry point returns FALSE, and exports F.
@@ -7907,6 +8044,122 @@ fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
 }
 
 #[test]
+fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
+    // SetWindowPos with SWP_NOSENDCHANGING sends no WM_WINDOWPOSCHANGING
+    // but still sends WM_WINDOWPOSCHANGED, whose WINDOWPOS has the place
+    // and size the call gave the window, also where SWP_NOMOVE kept the
+    // place the call passed from being used, as Wine's win.c checks on
+    // Windows. A call without the flag sends both, and its
+    // WM_WINDOWPOSCHANGED has the window's place too. (Myth II's window
+    // learns it is active only from this message.)
+    const WM_WINDOWPOSCHANGING: i32 = 0x0046;
+    const WM_WINDOWPOSCHANGED: i32 = 0x0047;
+    const SWP_NOMOVE: i32 = 0x0002;
+    const SWP_NOZORDER: i32 = 0x0004;
+    const SWP_NOACTIVATE: i32 = 0x0010;
+    const SWP_NOSENDCHANGING: i32 = 0x0400;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+    ];
+    // What the window procedure saw: WM_WINDOWPOSCHANGING's count at
+    // 0xA0, WM_WINDOWPOSCHANGED's at 0xA4 and the last one's x, y and cx
+    // at 0xA8, 0xAC and 0xB0. A WNDCLASSA at 0xE0, its procedure put in
+    // by the code.
+    let mut data = child_data(&[(0x10, "Frame")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_WINDOWPOSCHANGING)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_WINDOWPOSCHANGED)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA4)))?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        for (field, at) in [(8, 0xA8), (12, 0xAC), (16, 0xB0)] {
+            a.mov(ecx, dword_ptr(eax + field))?;
+            a.mov(dword_ptr(l.at(at)), ecx)?;
+        }
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 50, 50, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(0xA0)), 0)?;
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        // Moved and resized.
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+        push_args(a, &[0, 10, 20, 60, 70, flags])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        let moved = [(0xA0, 0), (0xA4, 1), (0xA8, 10), (0xAC, 20), (0xB0, 60)];
+        all_equal(a, l, &moved, 0)?;
+        // Resized only: the place in the WINDOWPOS is the window's.
+        push_args(a, &[0, 999, 999, 80, 90, flags | SWP_NOMOVE])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 0), (0xA4, 2)], 1)?;
+        all_equal(a, l, &[(0xA8, 10), (0xAC, 20)], 2)?;
+        all_equal(a, l, &[(0xB0, 80)], 3)?;
+        // The same without SWP_NOSENDCHANGING: both messages, and the
+        // place in WM_WINDOWPOSCHANGED's WINDOWPOS is the window's.
+        let flags = flags & !SWP_NOSENDCHANGING;
+        push_args(a, &[0, 999, 999, 100, 110, flags | SWP_NOMOVE])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 1), (0xA4, 3)], 4)?;
+        all_equal(a, l, &[(0xA8, 10), (0xAC, 20)], 5)?;
+        all_equal(a, l, &[(0xB0, 100)], 6)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("swp_nosendchanging", program);
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
+}
+
+/// Set bit `bit` of EBX if every dword at the data offsets in `checks`
+/// holds its value.
+fn all_equal(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    checks: &[(u32, i32)],
+    bit: u32,
+) -> Result<(), IcedError> {
+    a.xor(edx, edx)?;
+    for &(at, value) in checks {
+        a.mov(eax, dword_ptr(l.at(at)))?;
+        a.xor(eax, value)?;
+        a.or(edx, eax)?;
+    }
+    a.test(edx, edx)?;
+    bit_if(a, eq, bit)
+}
+
+#[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then
     // gets messages. The state is saved once C0.DAT is there, while the
@@ -10310,25 +10563,24 @@ fn gdi32_doesnt_call_an_opengl32_mapped_as_data() {
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }
 
-/// An argument of `tapi`: the address of the program's data, eight bytes
-/// of CCh.
-const TAPI_DATA: u32 = 0xDA7A_0000;
-/// An argument of `tapi`: the address of the function called, in
-/// TAPI32's code, which the program can read and not write.
-const TAPI_CODE: u32 = 0xC0DE_0000;
+/// An argument of `call_byte`: the address of the program's data, 1024
+/// bytes of CCh.
+const CALL_DATA: u32 = 0xDA7A_0000;
+/// An argument of `call_byte`: the address of the function called, in
+/// its DLL's code, which the program can read and not write.
+const CALL_CODE: u32 = 0xC0DE_0000;
 
-/// What a TAPI32 function gives back on a machine with no modem: a
-/// program calls `function` with `args`, pushed last first, where
-/// `TAPI_DATA` and `TAPI_CODE` stand for the addresses they name, and
-/// ends with the low byte of the result, or with the first byte of the
-/// data when `byte` is set.
-fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
-    let imports: &[(&str, &[&str])] = &[("TAPI32.DLL", &[function])];
-    let exe = program(BASE, false, imports, &[0xCC; 8], |a, l| {
+/// A program calls `function` of `dll` with `args`, pushed last first,
+/// where `CALL_DATA` and `CALL_CODE` stand for the addresses they name,
+/// and ends with the low byte of the result, or with the byte at `byte`
+/// in the data when it is given.
+fn call_byte(test: &str, dll: &str, function: &str, args: &[u32], byte: Option<u32>) -> u8 {
+    let imports: &[(&str, &[&str])] = &[(dll, &[function])];
+    let exe = program(BASE, false, imports, &[0xCC; 1024], |a, l| {
         for &arg in args.iter().rev() {
             match arg {
-                TAPI_DATA => a.push(l.at(0) as i32)?,
-                TAPI_CODE => {
+                CALL_DATA => a.push(l.at(0) as i32)?,
+                CALL_CODE => {
                     a.mov(eax, l.import(0))?;
                     a.push(eax)?;
                 }
@@ -10336,43 +10588,142 @@ fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
             }
         }
         a.call(l.import(0))?;
-        if byte {
-            a.movzx(eax, byte_ptr(l.at(0)))?;
+        if let Some(at) = byte {
+            a.movzx(eax, byte_ptr(l.at(at)))?;
         }
         a.ret()
     });
     run(test, exe).0
 }
 
+/// What a TAPI32 function gives back on a machine with no modem: the
+/// low byte of the result of `call_byte`, or the first byte of the data
+/// when `byte` is set.
+fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
+    call_byte(test, "TAPI32.DLL", function, args, byte.then_some(0))
+}
+
 #[test]
 fn tapi_has_no_line_device() {
-    let init = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_DATA];
+    let init = [CALL_DATA, 0, 0x40_1000, 0, CALL_DATA];
     // LINEERR_NODEVICE, and no handle written.
     assert_eq!(tapi("tapi_init", "lineInitialize", &init, false), 0x42);
     assert_eq!(tapi("tapi_init_handle", "lineInitialize", &init, true), 0xCC);
     // LINEERR_INVALPOINTER without a callback or a place for the count.
-    let no_callback = [TAPI_DATA, 0, 0, 0, TAPI_DATA];
+    let no_callback = [CALL_DATA, 0, 0, 0, CALL_DATA];
     assert_eq!(tapi("tapi_init_cb", "lineInitialize", &no_callback, false), 0x35);
-    let no_count = [TAPI_DATA, 0, 0x40_1000, 0, 0];
+    let no_count = [CALL_DATA, 0, 0x40_1000, 0, 0];
     assert_eq!(tapi("tapi_init_count", "lineInitialize", &no_count, false), 0x35);
     // LINEERR_INVALPOINTER for a handle or a count the program can't
     // write, as IsBadWritePtr sees it, with no page fault in the program.
-    let read_only_handle = [TAPI_CODE, 0, 0x40_1000, 0, TAPI_DATA];
+    let read_only_handle = [CALL_CODE, 0, 0x40_1000, 0, CALL_DATA];
     assert_eq!(tapi("tapi_init_ro_app", "lineInitialize", &read_only_handle, false), 0x35);
-    let read_only_count = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_CODE];
+    let read_only_count = [CALL_DATA, 0, 0x40_1000, 0, CALL_CODE];
     assert_eq!(tapi("tapi_init_ro_count", "lineInitialize", &read_only_count, false), 0x35);
     // LINEERR_INVALAPPHANDLE, LINEERR_BADDEVICEID, LINEERR_INVALLINEHANDLE
     // and LINEERR_INVALCALLHANDLE.
     assert_eq!(tapi("tapi_shutdown", "lineShutdown", &[1], false), 0x14);
-    let config = [0, TAPI_DATA, 0];
+    let config = [0, CALL_DATA, 0];
     assert_eq!(tapi("tapi_devconfig", "lineGetDevConfig", &config, false), 0x02);
-    let open = [1, 0, TAPI_DATA, 0x10004, 0, 0, 1, 0x10, 0];
+    let open = [1, 0, CALL_DATA, 0x10004, 0, 0, 1, 0x10, 0];
     assert_eq!(tapi("tapi_open", "lineOpen", &open, false), 0x14);
-    let call_id = [0, 0, 1, 4, TAPI_DATA, 0];
+    let call_id = [0, 0, 1, 4, CALL_DATA, 0];
     assert_eq!(tapi("tapi_id_call", "lineGetID", &call_id, false), 0x18);
-    let line_id = [1, 0, 0, 1, TAPI_DATA, 0];
+    let line_id = [1, 0, 0, 1, CALL_DATA, 0];
     assert_eq!(tapi("tapi_id_line", "lineGetID", &line_id, false), 0x2B);
     // LINEERR_INIFILECORRUPT: no dialing location was set up.
-    let caps = [0, 0x10004, TAPI_DATA];
+    let caps = [0, 0x10004, CALL_DATA];
     assert_eq!(tapi("tapi_caps", "lineGetTranslateCaps", &caps, false), 0x0E);
+}
+
+/// IMM32 is Windows 98's outside East Asia, with no input method: no
+/// context, IMM_ERROR_GENERAL for a composition string and VK_PROCESSKEY
+/// for a virtual key, as its stub code returns.
+#[test]
+fn imm32_has_no_input_method() {
+    let context = call_byte("imm_context", "IMM32.DLL", "ImmGetContext", &[0x404], None);
+    assert_eq!(context, 0);
+    let associate = [0x404, 0];
+    let old = call_byte("imm_assoc", "IMM32.DLL", "ImmAssociateContext", &associate, None);
+    assert_eq!(old, 0);
+    let composition = [0, 8, CALL_DATA, 16];
+    let string = "ImmGetCompositionStringA";
+    assert_eq!(call_byte("imm_comp", "IMM32.DLL", string, &composition, None), 0xFF);
+    assert_eq!(call_byte("imm_comp_buf", "IMM32.DLL", string, &composition, Some(0)), 0xCC);
+    let key = call_byte("imm_vkey", "IMM32.DLL", "ImmGetVirtualKey", &[0x404], None);
+    assert_eq!(key, 0xE5);
+}
+
+/// ICInfo finds the codecs Windows 98 SE installs, by FourCC in either
+/// case or by index, and fills ICINFO with the type, the handler and the
+/// driver's file; it finds no other codec and no other type.
+#[test]
+fn icinfo_lists_the_installed_codecs() {
+    let vidc = u32::from_le_bytes(*b"vidc");
+    let iv41 = u32::from_le_bytes(*b"iv41");
+    let info = |test, kind, handler, byte| {
+        call_byte(test, "MSVFW32.DLL", "ICInfo", &[kind, handler, CALL_DATA], byte)
+    };
+    assert_eq!(info("icinfo_iv41", vidc, iv41, None), 1);
+    // dwSize, 568, fccHandler 'iv41', and szDriver "ir41_32.ax".
+    assert_eq!(info("icinfo_size", vidc, iv41, Some(1)), 0x02);
+    assert_eq!(info("icinfo_handler", vidc, iv41, Some(8)), b'i');
+    assert_eq!(info("icinfo_driver", vidc, iv41, Some(312)), b'i');
+    assert_eq!(info("icinfo_driver_end", vidc, iv41, Some(312 + 20)), 0);
+    let upper = u32::from_le_bytes(*b"CVID");
+    assert_eq!(info("icinfo_cvid", vidc, upper, None), 1);
+    assert_eq!(info("icinfo_index", vidc, 0, Some(8)), b'c');
+    assert_eq!(info("icinfo_past", vidc, 5, None), 0);
+    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
+    assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
+}
+
+/// What `ICOpen(kind, handler, mode)` and two ICCloses of its handle give
+/// back: 0xEE for no handle, else the low byte of the two results added,
+/// ICERR_OK for the first and ICERR_BADHANDLE (-8) for the second.
+fn ic_open(test: &str, kind: &[u8; 4], handler: &[u8; 4], mode: i32) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICOpen", "ICClose"])];
+    let exe = program(BASE, false, imports, &[0xCC; 16], |a, l| {
+        let mut none = a.create_label();
+        a.push(mode)?;
+        a.push(i32::from_le_bytes(*handler))?;
+        a.push(i32::from_le_bytes(*kind))?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jz(none)?;
+        a.mov(ebx, eax)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.mov(edi, eax)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.add(eax, edi)?;
+        a.ret()?;
+        a.set_label(&mut none)?;
+        a.mov(eax, 0xEE)?;
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+/// ICOpen opens an installed codec to decompress, by its type and FourCC
+/// in either case, as Rent-A-Hero opens Indeo 5 before it starts; ICClose
+/// closes the handle once. A codec that isn't installed, a type other than
+/// `vidc`, and a mode that compresses or draws, which no codec here does,
+/// give no handle.
+#[test]
+fn icopen_opens_installed_decompressors() {
+    const ICMODE_COMPRESS: i32 = 1;
+    const ICMODE_DECOMPRESS: i32 = 2;
+    const ICMODE_FASTDECOMPRESS: i32 = 3;
+    const ICMODE_QUERY: i32 = 4;
+    const ICMODE_DRAW: i32 = 8;
+    let vidc = b"vidc";
+    assert_eq!(ic_open("icopen_iv50", vidc, b"IV50", ICMODE_DECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_cvid", vidc, b"cvid", ICMODE_QUERY), 0xF8);
+    assert_eq!(ic_open("icopen_vidc_upper", b"VIDC", b"iv41", ICMODE_FASTDECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_vids", b"vids", b"IV50", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_compress", vidc, b"IV50", ICMODE_COMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
 }

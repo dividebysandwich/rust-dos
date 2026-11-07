@@ -353,6 +353,13 @@ impl Bus {
     /// Power-on state of the PIT channel 0 and the PIC, so a program that
     /// exits (or is killed) with a fast timer or masked IRQs doesn't leave
     /// them behind for the shell and the next program.
+    ///
+    /// A byte the keyboard controller holds for the CPU keeps its request:
+    /// a program that ends with interrupts off before IRQ 1 came (SETUP of
+    /// ShadowCaster takes its last key from the BIOS queue and exits) would
+    /// otherwise leave the byte unread for good, and the controller sends
+    /// no other, so no program after it gets a key through IRQ 1. On a PC
+    /// the request waits in the PIC until the BIOS takes it at the prompt.
     pub fn reset_timers(&mut self) {
         // Mode 3, count 65536, counting from now.
         let now = self.clock.now_ticks();
@@ -364,6 +371,10 @@ impl Bus {
         self.pit0_access = 3;
         self.pit0_latched_active = false;
         self.pic = crate::pic::Pic::new();
+        if let Some(irq) = self.kbc.output_irq() {
+            self.pic.raise(irq);
+        }
+        self.refresh_irq();
         self.clock.schedule(self.next_event());
     }
 }

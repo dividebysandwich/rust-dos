@@ -359,13 +359,13 @@ fn code_at(cpu: &Cpu, eip: u32, len: usize) -> Option<Vec<u8>> {
 }
 
 /// Whether the instruction at `eip`, which faulted, is one only the
-/// system may run: HLT, CLI, STI, IN or OUT, or a move to or from a
-/// control register.
+/// system may run: HLT, IN or OUT, or a move to or from a control
+/// register. CLI and STI go on (`is_interrupt_flag_change`).
 fn privileged(cpu: &Cpu, eip: u32) -> bool {
     let byte = |at: u32| code_at(cpu, at, 1).map(|b| b[0]);
     match byte(eip) {
         Some(0x0F) => matches!(byte(eip.wrapping_add(1)), Some(0x20 | 0x22)),
-        Some(b) => matches!(b, 0xF4 | 0xFA | 0xFB | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F),
+        Some(b) => matches!(b, 0xF4 | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F),
         None => false,
     }
 }
@@ -401,6 +401,30 @@ fn is_debugger_int(cpu: &Cpu, eip: u32) -> bool {
     code_at(cpu, eip, 2).as_deref() == Some(&[0xCD, 0x68])
 }
 
+/// Whether the instruction at `eip` is CLI or STI. The program runs at
+/// level 3 with IOPL 0, so either is a #GP, which Windows 98's VMM takes
+/// and simulates on the system VM's virtual interrupt flag, as it does
+/// for Win16 code in the same VM: the program goes on after it, with no
+/// exception. SafeDisc 2.30's Windows 9x path (Anachronox) brackets its
+/// writes to the IDT with CLI and STI, and fails its checks when they
+/// raise one. The virtual flag isn't kept here: hardware interrupts
+/// reach the program's process as before.
+fn is_interrupt_flag_change(cpu: &Cpu, eip: u32) -> bool {
+    matches!(code_at(cpu, eip, 1).as_deref(), Some([0xFA | 0xFB]))
+}
+
+/// The length of the instruction at `eip` whose #GP, with the error code
+/// `error`, Windows 98's VMM takes without an exception for the program,
+/// which goes on after it: INT 68h (`is_debugger_int`), CLI or STI
+/// (`is_interrupt_flag_change`).
+fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
+    match error? {
+        DEBUGGER_INT_ERROR if is_debugger_int(cpu, eip) => Some(2),
+        0 if is_interrupt_flag_change(cpu, eip) => Some(1),
+        _ => None,
+    }
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
@@ -412,8 +436,10 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    if vector == 13 && error == Some(DEBUGGER_INT_ERROR) && is_debugger_int(cpu, ctx.eip) {
-        ctx.eip = ctx.eip.wrapping_add(2);
+    if vector == 13
+        && let Some(len) = simulated(cpu, error, ctx.eip)
+    {
+        ctx.eip = ctx.eip.wrapping_add(len);
         super::system::enter_user(cpu, &ctx);
         return;
     }
