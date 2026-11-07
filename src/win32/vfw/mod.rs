@@ -13,16 +13,19 @@ pub mod indeo4;
 pub mod msvfw32;
 
 /// What a process has open of the two: its AVI files, their
-/// IGetFrames and its DrawDib handles.
+/// IGetFrames, its DrawDib handles, and the codecs it opened with ICOpen,
+/// each by its FourCC in capitals.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     pub files: Vec<Option<avifil32::AviFile>>,
     pub frames: Vec<Option<avifil32::GetFrame>>,
     pub drawdibs: Vec<Option<msvfw32::DrawDib>>,
+    pub codecs: Vec<Option<u32>>,
 }
 
 crate::state_fields!(State {
     files,
     frames,
-    drawdibs
+    drawdibs,
+    codecs
 });

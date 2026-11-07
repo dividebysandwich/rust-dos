@@ -1,7 +1,8 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
-//! decompress it first when it is compressed, and ICInfo, which lists
-//! the decompressors codec.rs has. The DrawDib functions' behaviour
-//! follows Wine's drawdib.c (LGPL 2.1 or later):
+//! decompress it first when it is compressed, and ICInfo, ICOpen and
+//! ICClose, which find and open the decompressors codec.rs has. The
+//! DrawDib functions' behaviour follows Wine's drawdib.c (LGPL 2.1 or
+//! later):
 //!
 //! Copyright 2000 Bradley Baetz
 //!
@@ -56,6 +57,8 @@ static APIS: &[Api] = &[
     stdcall("DrawDibTime", 16, 2, zero),
     stdcall("DrawDibProfileDisplay", 11, 1, profile_display),
     stdcall("ICInfo", 33, 3, ic_info),
+    stdcall("ICOpen", 37, 3, ic_open),
+    stdcall("ICClose", 22, 1, ic_close),
 ];
 
 /// ICINFO's size: six DWORDs, then szName[16], szDescription[128] and
@@ -104,6 +107,71 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     bytes.resize(ICINFO as usize, 0);
     cpu.bus.guest_write_bytes(info, &bytes);
     Some(1)
+}
+
+/// The installed codec of the type and FourCC `handler`, compared
+/// without regard to case: the FourCC in capitals.
+fn installed(kind: u32, handler: u32) -> Option<u32> {
+    if codec::upper(kind) != codec::upper(ICTYPE_VIDEO) {
+        return None;
+    }
+    let handler = codec::upper(handler);
+    codec::INSTALLED
+        .iter()
+        .map(|(fourcc, _)| codec::upper(u32::from_le_bytes(**fourcc)))
+        .find(|&fourcc| fourcc == handler)
+}
+
+/// ICOpen's modes a decompressor takes: ICMODE_DECOMPRESS,
+/// ICMODE_FASTDECOMPRESS and ICMODE_QUERY.
+const ICMODE_DECOMPRESS: u32 = 2;
+const ICMODE_FASTDECOMPRESS: u32 = 3;
+const ICMODE_QUERY: u32 = 4;
+/// ICClose's ICERR_OK and ICERR_BADHANDLE.
+const ICERR_OK: u32 = 0;
+const ICERR_BADHANDLE: u32 = -8i32 as u32;
+
+/// ICOpen(fccType, fccHandler, wMode): a handle to the installed codec,
+/// or 0 when there is none. The codecs here only decompress, so a mode
+/// that compresses or draws (ICMODE_COMPRESS, ICMODE_FASTCOMPRESS,
+/// ICMODE_DRAW) finds none, as a decompressor's driver refuses to open
+/// for one. Rent-A-Hero opens `vidc`/`IV50` to see that Indeo 5 is
+/// there before it starts, and stops when it isn't.
+fn ic_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[kind, handler, mode] = args else {
+        unreachable!()
+    };
+    if !matches!(
+        mode,
+        ICMODE_DECOMPRESS | ICMODE_FASTDECOMPRESS | ICMODE_QUERY
+    ) {
+        return Some(0);
+    }
+    let Some(fourcc) = installed(kind, handler) else {
+        return Some(0);
+    };
+    let list = &mut crate::win32::process(cpu).vfw.codecs;
+    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
+    if slot == list.len() {
+        list.push(None);
+    }
+    list[slot] = Some(fourcc);
+    Some(slot as u32 + 1)
+}
+
+/// ICClose(hic): ICERR_OK, or ICERR_BADHANDLE for a handle that isn't
+/// open.
+fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let list = &mut crate::win32::process(cpu).vfw.codecs;
+    let open = (args[0] as usize)
+        .checked_sub(1)
+        .and_then(|slot| list.get_mut(slot))
+        .and_then(Option::take);
+    Some(if open.is_some() {
+        ICERR_OK
+    } else {
+        ICERR_BADHANDLE
+    })
 }
 
 /// DrawDibDraw's flags.

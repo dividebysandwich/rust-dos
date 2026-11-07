@@ -402,6 +402,9 @@ exactly, every tenth frame of Wages of War's two Cinepak movies.
 ICInfo lists the four as installed `vidc` codecs, under the drivers
 Windows 98 SE's SYSTEM.INI names, so a program that asks whether Indeo
 4 is there before it plays a movie, as Age of Empires does, finds it.
+ICOpen opens them to decompress, and ICClose closes the handle; a mode
+that compresses or draws finds no codec. Rent-A-Hero opens Indeo 5
+before it starts, to see that it is there.
 
 ## Sound and input
 
