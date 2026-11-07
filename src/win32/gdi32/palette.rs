@@ -356,14 +356,26 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// CreateHalftonePalette(hdc).
 pub fn create_halftone_palette(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
+    Some(add(cpu, palette_of(&halftone_colors())))
+}
+
+/// A palette of the colors `colors` (as COLORREFs), with no flags.
+fn palette_of(colors: &[u32]) -> Kind {
     let palette = Palette {
-        entries: halftone_colors()
-            .into_iter()
-            .map(|c| [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0])
+        entries: colors
+            .iter()
+            .map(|&c| [c as u8, (c >> 8) as u8, (c >> 16) as u8, 0])
             .collect(),
         mapping: Vec::new(),
     };
-    Some(add(cpu, Kind::Palette { palette }))
+    Kind::Palette { palette }
+}
+
+/// A new palette of the colors `colors` for the system's own drawing
+/// (`gdi32::add_system`): the end of the process running when it is
+/// made leaves it, and its maker deletes it.
+pub fn system_palette_of(cpu: &mut Cpu, colors: &[u32]) -> u32 {
+    super::add_system(cpu, palette_of(colors))
 }
 
 /// GetPaletteEntries(hpal, start, count, entries): how many it copied,
@@ -693,6 +705,23 @@ pub fn realize_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let vars = vec![super::CB_PALETTE_CHANGED, changed, hwnd, 0];
     crate::win32::task::start(cpu, super::TASK_CALLBACK, vars, 0)
+}
+
+/// RealizePalette for the system's own drawing, which runs outside any
+/// call of the program's (as MCIAVI's drawing runs in a thread of its
+/// own): the top-level windows get WM_PALETTECHANGED in their queues.
+pub fn realize_posted(cpu: &mut Cpu, hdc: u32) {
+    let Some(hwnd) = gdi(cpu).dc(hdc).map(|d| d.hwnd) else {
+        return;
+    };
+    if !palette_device(cpu) {
+        return;
+    }
+    let (changed, primary) = realize(cpu, hdc);
+    if changed != 0 && primary && hwnd != 0 {
+        use crate::win32::user32::message::{HWND_BROADCAST, WM_PALETTECHANGED, post_message};
+        post_message(cpu, &[HWND_BROADCAST, WM_PALETTECHANGED, hwnd, 0]);
+    }
 }
 
 /// GetSystemPaletteEntries(hdc, start, count, entries).

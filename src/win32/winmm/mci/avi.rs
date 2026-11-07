@@ -42,6 +42,13 @@ impl Video {
     pub fn bytes(&self) -> usize {
         self.chunks.iter().map(|c| c.size as usize).sum()
     }
+
+    /// An 8-bit picture's colours, as COLORREFs; none for a picture of
+    /// more bits.
+    pub fn colors(&self) -> Vec<u32> {
+        let rgb = |q: &[u8; 3]| q[2] as u32 | (q[1] as u32) << 8 | (q[0] as u32) << 16;
+        self.palette.iter().map(rgb).collect()
+    }
 }
 
 fn le16(b: &[u8], at: usize) -> Option<u16> {
