@@ -472,7 +472,10 @@ fn a_context_draws_a_shaded_triangle_and_reads_it_back() {
     assert_eq!(r[5], 1, "wglMakeCurrent");
     assert_eq!(peek_string(&cpu, r[6]), "3Dfx Interactive Inc.");
     assert!(peek_string(&cpu, r[7]).starts_with("3Dfx/Voodoo3"));
-    assert!(peek_string(&cpu, r[8]).contains("GL_ARB_multitexture"));
+    let extensions = peek_string(&cpu, r[8]);
+    assert!(extensions.contains("GL_ARB_multitexture"));
+    // As 3dfx's Voodoo3 ICD has it; Myth II 1.8.3 needs it of OpenGL 1.1.
+    assert!(extensions.split(' ').any(|e| e == "GL_EXT_bgra"));
     assert_ne!(r[9], 0, "glActiveTextureARB");
     // SwapBuffers, and no error.
     assert_eq!(r[19], 1, "SwapBuffers");
