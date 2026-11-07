@@ -30,7 +30,7 @@ mod lz;
 mod message;
 mod misc;
 mod module;
-mod resource;
+pub mod resource;
 pub mod task;
 pub(crate) mod thunk;
 mod user;
@@ -150,6 +150,9 @@ pub struct Module16 {
     /// The base of the image of its resources the 32-bit functions read
     /// (resource.rs), or 0 before one is made.
     pub resources32: u32,
+    /// That image's bytes, which its pages are filled from as they are
+    /// needed; None until it is made, and after a saved state is loaded.
+    pub image32: Option<std::sync::Arc<[u8]>>,
     /// The module handles of the modules it imports from, which it holds.
     pub deps: Vec<u16>,
     /// The header's flags, and the version of Windows it expects.
@@ -620,6 +623,8 @@ crate::state_fields!(Module16 {
     expected_version,
     loaded,
     unbooted
+} skip {
+    image32
 });
 crate::state_fields!(Segment16 {
     handle,

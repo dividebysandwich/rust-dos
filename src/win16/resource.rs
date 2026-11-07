@@ -258,8 +258,9 @@ fn convert(kind: &Key, data: &[u8]) -> Vec<u8> {
 }
 
 /// The resource section of the resources `resources` (type, name, data)
-/// at the RVA `rva`.
-fn section(resources: &[(Key, Key, Vec<u8>)], rva: u32) -> Vec<u8> {
+/// at the RVA `rva`, and the length of its directories, data entries and
+/// names, which come before the resources' data.
+fn section(resources: &[(Key, Key, Vec<u8>)], rva: u32) -> (Vec<u8>, usize) {
     use std::collections::BTreeMap;
     let mut tree: BTreeMap<&Key, BTreeMap<&Key, &[u8]>> = BTreeMap::new();
     for (kind, name, data) in resources {
@@ -302,6 +303,7 @@ fn section(resources: &[(Key, Key, Vec<u8>)], rva: u32) -> Vec<u8> {
     }
     let mut out = vec![0u8; at];
     out.extend_from_slice(&string_bytes);
+    let directory_len = out.len();
     let put32 = |out: &mut Vec<u8>, at: usize, v: u32| {
         out[at..at + 4].copy_from_slice(&v.to_le_bytes());
     };
@@ -348,33 +350,61 @@ fn section(resources: &[(Key, Key, Vec<u8>)], rva: u32) -> Vec<u8> {
             leaf += 1;
         }
     }
-    out
+    (out, directory_len)
+}
+
+/// Where the resource section of a 32-bit image of resources starts.
+const RSRC_RVA: u32 = 0x1000;
+
+/// The 32-bit image named `name` of the resource section `rsrc`, with
+/// its base at `base`.
+fn build_image32(name: &str, rsrc: &[u8], base: u32) -> Vec<u8> {
+    let mut b = pe::Builder::dll(base, name);
+    let rva = b.section(".rsrc", rsrc, pe::SCN_INITIALIZED_DATA | pe::SCN_READ);
+    debug_assert_eq!(rva, RSRC_RVA);
+    b.directory(pe::DIR_RESOURCE, rva, rsrc.len() as u32);
+    b.build()
+}
+
+/// The resource section of the module's 32-bit image, and how much of
+/// the image, from its start, comes before the resources' data.
+fn section_of(module: &Module16) -> (Vec<u8>, u32) {
+    let (rsrc, directory_len) = section(&resources_of(module), RSRC_RVA);
+    (rsrc, RSRC_RVA + directory_len as u32)
 }
 
 /// The base of the 32-bit image of the resources of the module at
 /// `index`, made now if it has none yet. 0 if there is no memory for it.
+///
+/// Only the image's headers and resource directory get pages now. The
+/// pages of a resource's data come in when a resource function first
+/// asks for it (`page_in`), as Windows reads the pages of an image from
+/// its file when they are first touched. A module's resources can be
+/// much larger than what a program uses at once, as the 28 MB of sounds
+/// of Metal Marines' METALENG.DLL, and they would otherwise take that
+/// much of the machine's memory.
 pub fn image32(cpu: &mut Cpu, index: usize) -> u32 {
     let module = &cpu.bus.win32.win16.modules[index];
     if module.resources32 != 0 {
         return module.resources32;
     }
-    let resources = resources_of(module);
     let name = format!("{}.16", module.name);
-    let rsrc = section(&resources, 0x1000);
+    let (rsrc, eager) = section_of(module);
     // The image's size, its base not known yet: build it once to learn it.
-    let build = |base: u32| {
-        let mut b = pe::Builder::dll(base, &name);
-        let rva = b.section(".rsrc", &rsrc, pe::SCN_INITIALIZED_DATA | pe::SCN_READ);
-        b.directory(pe::DIR_RESOURCE, rva, rsrc.len() as u32);
-        b.build()
-    };
-    let size = (build(0).len() as u32).next_multiple_of(PAGE);
+    let size = (build_image32(&name, &rsrc, 0).len() as u32).next_multiple_of(PAGE);
+    let eager = eager.next_multiple_of(PAGE).min(size);
     let pid = cpu.bus.win32.win16.pid;
     let made = super::with_win16(cpu, pid, |p, bus| {
         let base = p.memory.reserve_image(None, size, PRIVATE, SHARED)?;
-        let file = build(base);
-        p.memory.commit(bus, base, size, USER)?;
-        p.memory.write(bus, base, &file)?;
+        let file = build_image32(&name, &rsrc, base);
+        let written = p.memory.commit(bus, base, eager, USER).and_then(|()| {
+            let end = (eager as usize).min(file.len());
+            p.memory.write(bus, base, &file[..end])
+        });
+        if written.is_none() {
+            p.memory.release_region(bus, base);
+            return None;
+        }
         p.modules.push(Module {
             name: name.clone(),
             path: String::new(),
@@ -385,12 +415,75 @@ pub fn image32(cpu: &mut Cpu, index: usize) -> u32 {
             flags: crate::win32::loader::BUILTIN | crate::win32::loader::DATAFILE,
             deps: Vec::new(),
         });
-        Some(base)
+        Some((base, file))
+    })
+    .flatten();
+    let module = &mut cpu.bus.win32.win16.modules[index];
+    match made {
+        Some((base, file)) => {
+            module.resources32 = base;
+            module.image32 = Some(file.into());
+            base
+        }
+        None => 0,
+    }
+}
+
+/// Give pages to the part of the 32-bit image of resources at `base`
+/// that the `len` bytes at `at` are in, and fill them from the image,
+/// before a resource function hands out the address of a resource's
+/// data. True when they have pages, or `base` isn't such an image; false
+/// when there is no memory for them.
+pub fn page_in(cpu: &mut Cpu, base: u32, at: u32, len: u32) -> bool {
+    let win16 = &cpu.bus.win32.win16;
+    let pid = win16.pid;
+    if pid == 0 || crate::win32::running(cpu).is_none_or(|p| p.id != pid) {
+        return true;
+    }
+    let Some(index) = win16.modules.iter().position(|m| m.resources32 == base) else {
+        return true;
+    };
+    let Some(Some(size)) = super::with_win16(cpu, pid, |p, _| {
+        p.modules.iter().find(|m| m.base == base).map(|m| m.size)
+    }) else {
+        return true;
+    };
+    let first = at.saturating_sub(base) / PAGE * PAGE;
+    let end = (at.saturating_sub(base) as u64 + len.max(1) as u64).min(size as u64) as u32;
+    let missing: Vec<u32> = super::with_win16(cpu, pid, |p, bus| {
+        (first..end)
+            .step_by(PAGE as usize)
+            .filter(|&offset| p.memory.translate(bus, base + offset).is_none())
+            .collect()
+    })
+    .unwrap_or_default();
+    if missing.is_empty() {
+        return true;
+    }
+    // The image's bytes, built again after a saved state was loaded,
+    // which doesn't keep them.
+    let module = &cpu.bus.win32.win16.modules[index];
+    let file = match &module.image32 {
+        Some(file) => file.clone(),
+        None => {
+            let (rsrc, _) = section_of(module);
+            let name = format!("{}.16", module.name);
+            let file: std::sync::Arc<[u8]> = build_image32(&name, &rsrc, base).into();
+            cpu.bus.win32.win16.modules[index].image32 = Some(file.clone());
+            file
+        }
+    };
+    super::with_win16(cpu, pid, |p, bus| {
+        for offset in missing {
+            p.memory.commit(bus, base + offset, PAGE, USER)?;
+            let from = (offset as usize).min(file.len());
+            let to = (offset as usize + PAGE as usize).min(file.len());
+            p.memory.write(bus, base + offset, &file[from..to])?;
+        }
+        Some(())
     })
     .flatten()
-    .unwrap_or(0);
-    cpu.bus.win32.win16.modules[index].resources32 = made;
-    made
+    .is_some()
 }
 
 /// The module's resources, in their 32-bit forms.
