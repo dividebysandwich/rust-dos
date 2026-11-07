@@ -681,7 +681,7 @@ fn main() -> Result<ExitCode, String> {
                         // The machine goes on from where rewinding got to,
                         // as when F11 is released.
                         dbg.state_loaded_elsewhere(&cpu, "rewind");
-                        pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
+                        pacer.rebase(&mut cpu.bus, std::time::Instant::now());
                         osd.clear_lasting();
                     }
                 }
@@ -1060,7 +1060,7 @@ fn main() -> Result<ExitCode, String> {
                         // The game's achievements wait for their conditions
                         // to be false again.
                         achievements.reset();
-                        pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
+                        pacer.rebase(&mut cpu.bus, std::time::Instant::now());
                         osd.clear_lasting();
                         next_capture = (cpu.bus.clock.now_ns() + REWIND_INTERVAL_NS, std::time::Instant::now());
                         continue;
@@ -1670,7 +1670,12 @@ fn main() -> Result<ExitCode, String> {
         } else if achievements.checking() && !waiting {
             // A game's achievements are checked every 1/60 s of emulated
             // time, as in the emulators the sets are made with, fast
-            // forwarding or not: the batch runs to each check.
+            // forwarding or not: the batch runs to each check. The frame
+            // still ends at the emulated time it was to end at if the speed
+            // drops in it (`Bus::end_work_boost`), as a batch does.
+            let mut speed = cpu.bus.clock.cycles_per_ms();
+            let end_ticks = cpu.bus.clock.ticks_at(batch_end);
+            let mut batch_end = batch_end;
             loop {
                 cpu.bus.start_batch(batch_end.min(cpu.bus.clock.icount_at(next_check)));
                 let reason = exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
@@ -1679,6 +1684,10 @@ fn main() -> Result<ExitCode, String> {
                     achievements.do_frame(cpu.bus.ram(), cpu.bus.boot.is_some());
                     let frame = timer::frame_ticks();
                     next_check = if next_check + frame <= now { now + frame } else { next_check + frame };
+                }
+                if cpu.bus.clock.cycles_per_ms() != speed {
+                    speed = cpu.bus.clock.cycles_per_ms();
+                    batch_end = cpu.bus.clock.icount_at(end_ticks);
                 }
                 if reason != exec::StopReason::BatchEnd || cpu.bus.clock.icount >= batch_end {
                     break;
