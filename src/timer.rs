@@ -987,14 +987,15 @@ impl HostSample {
 /// `Auto`'s estimate of as fast as the host keeps up with, after a sample
 /// that says `ideal`, taken at the speed `current`, from the estimate
 /// `max` before it. It moves a tenth of the way to each sample, so that a
-/// moment's hitch of the host or a light stretch of the program moves it
-/// little. A sample that says the host can't run the speed it runs at
-/// moves it half the way down: the program went from work the host runs
-/// fast (a loading loop) to work it runs slowly (drawing in a banked VESA
-/// window), and the speed, which follows the estimate down, would
-/// otherwise stay above what the host keeps up with for a dozen slow
-/// frames or more, a second at a third of real time (Shannara's scene
-/// changes).
+/// light stretch of the program moves it little. A sample that says the
+/// host can't run the speed it runs at moves it half the way down: the
+/// program went from work the host runs fast (a loading loop) to work it
+/// runs slowly (drawing in a banked VESA window), and the speed, which
+/// follows the estimate down, would otherwise stay above what the host
+/// keeps up with for a dozen slow frames or more, a second at a third of
+/// real time (Shannara's scene changes). A stall of the host that makes
+/// a sample fall below the speed costs half the way down too, and the
+/// estimate climbs back a tenth of the way a sample after it.
 fn next_host_max(max: Option<f64>, ideal: f64, current: u32) -> f64 {
     let Some(max) = max else {
         return ideal;
