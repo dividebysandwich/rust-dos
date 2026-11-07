@@ -1744,3 +1744,80 @@ fn a_popup_that_saves_bits_gives_them_back_as_it_hides() {
         }
     }
 }
+
+/// A popup of a class with CS_SAVEBITS gives back only what didn't
+/// change under it while it showed: the window under it paints the part
+/// it had yet to paint as the popup showed, and the part invalidated
+/// while the popup covered it, as real Windows invalidates the stale
+/// part of a window's saved bits. A child of the popup moving changes
+/// nothing under it.
+#[test]
+fn a_popup_that_saves_bits_has_what_changed_under_it_painted() {
+    use Arg::*;
+    const S_DIALOG: u32 = 0x280;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const SW_HIDE: u32 = 0;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const RECT: u32 = FREE + 0x80;
+    #[derive(PartialEq)]
+    enum Change {
+        Before,
+        While,
+        Child,
+    }
+    let window = |class: u32, style: u32, at: i32, size: i32, owner: Arg| {
+        let (at, size) = (at as u32, size as u32);
+        let place = [I(at), I(at), I(size), I(size * 4 / 5)];
+        let mut args = vec![I(0), At(class), I(0), I(style)];
+        args.extend(place);
+        args.extend([owner, I(0), I(0), I(0)]);
+        call("CreateWindowExA", &args)
+    };
+    for (change, painted) in [
+        (Change::Before, true),
+        (Change::While, true),
+        (Change::Child, false),
+    ] {
+        let mut calls = vec![parent(), call("ValidateRect", &[Res(0), I(0)])];
+        if change == Change::Before {
+            calls.push(call("InvalidateRect", &[Res(0), I(0), I(0)]));
+        }
+        let popup = calls.len();
+        calls.push(window(S_DIALOG, WS_POPUP | WS_VISIBLE, 20, 100, Res(0)));
+        calls.push(call("UpdateWindow", &[Res(popup)]));
+        match change {
+            Change::Before => calls.push(call("UpdateWindow", &[Res(0)])),
+            Change::While => {
+                calls.push(call("InvalidateRect", &[Res(0), I(0), I(0)]));
+                calls.push(call("UpdateWindow", &[Res(0)]));
+            }
+            Change::Child => {
+                let child = calls.len();
+                calls.push(window(S_STATIC, WS_CHILD | WS_VISIBLE, 10, 20, Res(popup)));
+                let flags = SWP_NOSIZE | SWP_NOZORDER;
+                let to = [I(30), I(30), I(0), I(0), I(flags)];
+                let mut args = vec![Res(child), I(0)];
+                args.extend(to);
+                calls.push(call("SetWindowPos", &args));
+            }
+        }
+        let hide = calls.len();
+        calls.push(call("ShowWindow", &[Res(popup), I(SW_HIDE)]));
+        calls.push(call("GetUpdateRect", &[Res(0), At(RECT), I(0)]));
+        let mut d = data();
+        strings(&mut d);
+        put(&mut d, S_DIALOG, b"#32770\0");
+        let (cpu, at) = run("save_bits_stale", &d, &calls);
+        let r = results(&cpu, at, calls.len());
+        assert_ne!(r[popup], 0, "the popup is made");
+        assert_ne!(r[hide], 0, "it was visible");
+        if painted {
+            assert_ne!(r[hide + 1], 0, "the window under it paints what changed");
+            let width = peek(&cpu, at + RECT + 8) as i32 - peek(&cpu, at + RECT) as i32;
+            assert_eq!(width, 100, "only under the popup");
+        } else {
+            assert_eq!(r[hide + 1], 0, "the window under it has nothing to paint");
+        }
+    }
+}

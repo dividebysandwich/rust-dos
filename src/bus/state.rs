@@ -800,6 +800,7 @@ mod tests {
         (34, 0x2A81_5B37_A1B7_C90B), // DirectShow's program filters, allocators and clocks
         (35, 0xF4AA_E5DA_D534_7E8F), // which Win16 modules' own loaders are yet to run
         (36, 0xFB13_32FF_2A2F_4AC7), // each thread's debug registers
+        (37, 0x8401_C2BE_B518_A93D), // the screens kept under CS_SAVEBITS windows
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
