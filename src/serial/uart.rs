@@ -402,6 +402,18 @@ impl Uart {
         (!self.rx.is_empty()).then(|| self.read_rbr(now))
     }
 
+    /// The characters the transmitter holds: those in its FIFO, and the
+    /// one in the shift register.
+    pub fn sending(&self) -> usize {
+        self.tx.len() + self.shifting.is_some() as usize
+    }
+
+    /// Drop the characters waiting in the transmit FIFO; the one in the
+    /// shift register goes on out.
+    pub fn clear_tx(&mut self) {
+        self.tx.clear();
+    }
+
     /// The next received character, left in the FIFO.
     pub fn next_received(&self) -> Option<u8> {
         self.rx.front().copied()

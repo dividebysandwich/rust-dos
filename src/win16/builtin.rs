@@ -450,6 +450,9 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         }
         Run::Value(f) => Some(f(cpu) as u32),
     };
+    if !cpu.bus.win32.win16.comm.is_empty() {
+        super::comm::service(cpu);
+    }
     crate::win32::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
         return;

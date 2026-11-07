@@ -299,6 +299,52 @@ impl Bus {
         self.serial.ports.get(n)?.as_ref()?.uart.next_received()
     }
 
+    /// Read the register `offset` of port `n`'s UART the way the system's
+    /// own serial driver does (Windows 3.1's COMM.DRV, win16/comm.rs):
+    /// as a program's IN reads it, without the bus cycle.
+    pub fn serial_get(&mut self, n: usize, offset: u16) -> Option<u8> {
+        let now = self.clock.now_ticks();
+        let p = self.serial.ports.get_mut(n)?.as_mut()?;
+        let value = p.uart.read(offset & 7, now);
+        p.sync(now);
+        self.sync_serial(n);
+        Some(value)
+    }
+
+    /// Write the register `offset` of port `n`'s UART the way the system's
+    /// own serial driver does. False without the port.
+    pub fn serial_set(&mut self, n: usize, offset: u16, value: u8) -> bool {
+        let now = self.clock.now_ticks();
+        let Some(p) = self.serial.ports.get_mut(n).and_then(|p| p.as_mut()) else { return false };
+        p.uart.write(offset & 7, value, now);
+        p.sync(now);
+        self.sync_serial(n);
+        true
+    }
+
+    /// The characters port `n` has yet to send, in its transmit FIFO and
+    /// shift register.
+    pub fn serial_sending(&mut self, n: usize) -> Option<usize> {
+        let now = self.clock.now_ticks();
+        let p = self.serial.ports.get_mut(n)?.as_mut()?;
+        p.advance(now);
+        let sending = p.uart.sending();
+        self.sync_serial(n);
+        Some(sending)
+    }
+
+    /// Drop the characters port `n` has yet to send, but for the one
+    /// going out.
+    pub fn serial_clear_tx(&mut self, n: usize) {
+        let now = self.clock.now_ticks();
+        if let Some(p) = self.serial.ports.get_mut(n).and_then(|p| p.as_mut()) {
+            p.uart.advance(now);
+            p.uart.clear_tx();
+            p.sync(now);
+            self.sync_serial(n);
+        }
+    }
+
     /// Set port `n` up the way INT 14h AH=00h does: `params` has the baud
     /// rate in bits 5-7, the parity in 3-4, the stop bits in 2 and the
     /// word length in 0-1.
