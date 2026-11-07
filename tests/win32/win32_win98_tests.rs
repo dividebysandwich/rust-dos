@@ -1232,13 +1232,13 @@ fn msimg32_dll_comes_with_windows_98() {
     assert_eq!(run(Win98Se, "msimg32", finds()).0, 7);
 }
 
-/// Windows 98 has an NTDLL.DLL with RtlUnwind, which Microsoft's
-/// D3DRM.DLL imports (Submarine Titans ships it beside the game);
-/// Windows 95 has none.
+/// Windows 95 and 98 both have an NTDLL.DLL with RtlUnwind, which
+/// Microsoft's D3DRM.DLL imports (Submarine Titans ships it beside the
+/// game), as does DirectX 6.1a's ADVPACK.DLL.
 #[test]
-fn ntdll_dll_comes_with_windows_98() {
+fn ntdll_dll_is_there_under_windows_95_and_98() {
     let finds = || finds_system_dll("NTDLL.DLL", "RtlUnwind");
-    assert_eq!(run(Win95, "ntdll", finds()).0, 0);
+    assert_eq!(run(Win95, "ntdll", finds()).0, 7);
     assert_eq!(run(Win98, "ntdll", finds()).0, 7);
     assert_eq!(run(Win98Se, "ntdll", finds()).0, 7);
 }

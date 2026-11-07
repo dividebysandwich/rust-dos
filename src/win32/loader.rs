@@ -1024,22 +1024,18 @@ fn bind_imports(
 }
 
 /// The built-in DLL the module `file` (as `module_file_name` gives it)
-/// names. NTDLL.DLL is one from Windows 98 on, or with the `win32_dlls`
-/// setting, under which UCRT's ucrtbase.dll and api-ms-win-crt-*.dll are
-/// MSVCRT.DLL and KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs
-/// import; a DLL the setting replaces, which the folder has, isn't.
-/// GLIDE2X.DLL and GLIDE3X.DLL are there with a 3dfx card alone, as
-/// 3dfx's driver brings them. The system directory shows the same DLLs
-/// as files (dll_files.rs).
+/// names. With the `win32_dlls` setting, UCRT's ucrtbase.dll and
+/// api-ms-win-crt-*.dll are MSVCRT.DLL and KERNELBASE.DLL is
+/// KERNEL32.DLL, which Wine's DLLs import; a DLL the setting replaces,
+/// which the folder has, isn't. GLIDE2X.DLL and GLIDE3X.DLL are there
+/// with a 3dfx card alone, as 3dfx's driver brings them, and MSIMG32.DLL
+/// from Windows 98 on. The system directory shows the same DLLs as files
+/// (dll_files.rs).
 pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;
-    // MSIMG32.DLL and NTDLL.DLL came with Windows 98.
-    let version = super::version::shown(win32);
     let found = if win32.guest_dlls.is_none() {
-        index.filter(|&i| {
-            stubs::DLLS[i].name != super::ntdll::DLL.name || super::ntdll::present(version)
-        })
+        index
     } else {
         let stem = file.strip_suffix(".DLL").unwrap_or(file).to_ascii_lowercase();
         if win32.guest_replace.contains(&stem) && guest_file(bus, file).is_some() {
@@ -1052,6 +1048,8 @@ pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
             _ => index,
         }
     };
+    // MSIMG32.DLL came with Windows 98.
+    let version = super::version::shown(win32);
     found
         .filter(|&i| !super::glide::is_glide(stubs::DLLS[i].name) || bus.voodoo.is_some())
         .filter(|&i| {
