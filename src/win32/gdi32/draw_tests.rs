@@ -277,3 +277,59 @@ fn blits_take_the_time_a_period_pc_took() {
     });
     assert!(within.abs_diff(12_500) < 200, "{within} ns");
 }
+
+/// On a desktop of 16 bits a pixel, whose rows GDI works on at 32, a
+/// copy from memory takes the time of the mode's 2 bytes a pixel.
+#[test]
+fn a_blit_to_a_high_color_screen_takes_the_modes_bytes() {
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::HighColor, &colors);
+    let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+    let to_screen = emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, screen, (0, 0, 344, 209), mem, 0, 0)
+    });
+    let want = 12_500 + 344 * 209 * 2 * 18;
+    assert!(
+        to_screen.abs_diff(want) < want / 100,
+        "{to_screen} ns, {want} wanted"
+    );
+}
+
+/// A blit that draws nothing, its rectangle empty or all of it off the
+/// screen, still takes the call's time.
+#[test]
+fn a_blit_that_draws_nothing_takes_the_calls_time() {
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+    let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+    let off = emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, screen, (2000, 2000, 344, 209), mem, 0, 0)
+    });
+    assert!(off.abs_diff(12_500) < 200, "{off} ns");
+    let empty = emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, screen, (0, 0, 0, 209), mem, 0, 0)
+    });
+    assert!(empty.abs_diff(12_500) < 200, "{empty} ns");
+}
+
+/// SetDIBitsToDevice given a band of a DIB's scan lines draws those
+/// only, and takes their time, not the whole rectangle's.
+#[test]
+fn a_band_of_scan_lines_takes_the_bands_time() {
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+    // A 64x64 bottom-up DIB of 24 bits a pixel.
+    let info = SCRATCH + 0x1000;
+    let header = [40, 64, 64, 1 | 24 << 16, 0, 0, 0, 0, 0, 0];
+    for (i, &w) in header.iter().enumerate() {
+        cpu.bus.guest_write_32(info + 4 * i as u32, w);
+    }
+    let bits = BITS + 0xA_0000;
+    let band = emulated_ns(&mut cpu, |cpu| {
+        // Scan lines 0 to 15 of the 64 the rectangle has.
+        let args = [screen, 0, 0, 64, 64, 0, 0, 0, 16, bits, info, 0];
+        assert_eq!(bitmap::set_di_bits_to_device(cpu, &args), Some(16));
+    });
+    let want = 12_500 + 64 * 16 * 18;
+    assert!(band.abs_diff(want) < want / 100, "{band} ns, {want} wanted");
+}

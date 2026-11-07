@@ -1481,6 +1481,21 @@ pub fn take_blit_time(cpu: &mut Cpu, surface: &Surface, pixels: u64, from: Optio
     cpu.bus.clock.stall(call_ns + bytes * byte_ps / 1000);
 }
 
+/// Let the emulated time pass that a blit to `dc` takes when it draws
+/// nothing: its rectangle is empty, or the clip region hides all of it
+/// (a window not shown yet, or covered). The call's time is the 1x1
+/// blit's, which is almost all GDI's checks and thunks; Windows goes
+/// through those before it finds nothing to draw, so a loop of such
+/// blits doesn't run as many as the host can do either.
+pub fn take_call_time(cpu: &mut Cpu, dc: &Dc) {
+    let call_ns = if dc.kind == dc::MEMORY {
+        MEMORY_BLIT_NS
+    } else {
+        SCREEN_BLIT_NS
+    };
+    cpu.bus.clock.stall(call_ns);
+}
+
 /// A blit to the device rectangle from (`x0`, `y0`) to (`x1`, `y1`) of
 /// `hdst` (mirrored where they run backwards) from `source`, whose
 /// rectangle is in its device coordinates.
@@ -1498,9 +1513,11 @@ pub fn blit_from(
     let ((left, right), (top, bottom)) = (span(x0, x1), span(y0, y1));
     let r = Rect::new(left, top, right, bottom);
     if r.is_empty() {
+        take_call_time(cpu, &ddc);
         return true;
     }
     let Some(mut c) = Canvas::open_columns(cpu, hdst, r) else {
+        take_call_time(cpu, &ddc);
         return true;
     };
     let map = c
@@ -1534,13 +1551,9 @@ pub fn blit_from(
     let (ox, oy) = c.origin;
     let rects = std::mem::take(&mut c.rects);
     let dst_rect = r.offset(ox, oy);
-    let pixels = rects
-        .iter()
-        .map(|clip| {
-            let a = clip.intersect(&dst_rect);
-            a.width().max(0) as u64 * a.height().max(0) as u64
-        })
-        .sum();
+    // The pixels it draws, for the time it takes: those of a source's
+    // band (SetDIBitsToDevice's scan lines) only.
+    let mut pixels = 0;
     // A blit whose source and destination have the same size and run
     // the same way (one mirrored on both sides included) reads the
     // source pixel at the destination's place moved by this.
@@ -1557,6 +1570,7 @@ pub fn blit_from(
             if area.is_empty() {
                 continue;
             }
+            pixels += area.width() as u64 * area.height() as u64;
             values.resize((area.right - area.left) as usize, 0);
             for y in area.top..area.bottom {
                 src.surface.get_row(area.left + dx, y + dy, &mut values);
@@ -1579,6 +1593,7 @@ pub fn blit_from(
             }
             continue;
         }
+        pixels += area.width().max(0) as u64 * area.height().max(0) as u64;
         for y in area.top..area.bottom {
             let sy = source.as_ref().map_or(0, |(src, (_, sy0, _, sy1))| {
                 scale(y - oy, y0, y1, *sy0, *sy1) + src.origin.1
