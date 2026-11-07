@@ -35,12 +35,15 @@ impl DriveKind {
     }
 
     /// (sectors per cluster, bytes per sector, total clusters) as reported by
-    /// INT 21h AH=1Ch/36h. Hard disks keep the long-standing fake 80 MB and
-    /// CD-ROMs report what MSCDEX-style redirectors typically do.
+    /// INT 21h AH=1Ch/36h. Hard disks are a fake 320 MB in 16 KB clusters,
+    /// as FAT16 has on disks of 512 MB to 1 GB, the size of a CD-ROM
+    /// game's PC: the largest clusters under 32 KB (`old_space`), and room
+    /// for 160 MB or more (`hard_disk_free`). CD-ROMs report what
+    /// MSCDEX-style redirectors typically do.
     pub fn geometry(self) -> (u16, u16, u16) {
         match self {
             DriveKind::Floppy => (1, 512, FLOPPY_CLUSTERS),
-            DriveKind::HardDisk => (8, 512, 20000),
+            DriveKind::HardDisk => (32, 512, 20000),
             DriveKind::CdRom => (1, 2048, 0xFFFF),
             DriveKind::Virtual => (1, 512, 2000),
         }
