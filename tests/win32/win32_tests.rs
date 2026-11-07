@@ -10272,3 +10272,67 @@ fn tapi_has_no_line_device() {
     let caps = [0, 0x10004, TAPI_DATA];
     assert_eq!(tapi("tapi_caps", "lineGetTranslateCaps", &caps, false), 0x0E);
 }
+
+/// A program calls `function` of `dll` with `args`, pushed last first,
+/// where `TAPI_DATA` stands for the address of 1024 bytes of CCh, and
+/// ends with the low byte of the result, or with the byte at `byte` in
+/// the data when it is given.
+fn call_byte(test: &str, dll: &str, function: &str, args: &[u32], byte: Option<u32>) -> u8 {
+    let imports: &[(&str, &[&str])] = &[(dll, &[function])];
+    let exe = program(BASE, false, imports, &[0xCC; 1024], |a, l| {
+        for &arg in args.iter().rev() {
+            match arg {
+                TAPI_DATA => a.push(l.at(0) as i32)?,
+                _ => a.push(arg as i32)?,
+            }
+        }
+        a.call(l.import(0))?;
+        if let Some(at) = byte {
+            a.movzx(eax, byte_ptr(l.at(at)))?;
+        }
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+/// IMM32 is Windows 98's outside East Asia, with no input method: no
+/// context, IMM_ERROR_GENERAL for a composition string and VK_PROCESSKEY
+/// for a virtual key, as its stub code returns.
+#[test]
+fn imm32_has_no_input_method() {
+    let context = call_byte("imm_context", "IMM32.DLL", "ImmGetContext", &[0x404], None);
+    assert_eq!(context, 0);
+    let associate = [0x404, 0];
+    let old = call_byte("imm_assoc", "IMM32.DLL", "ImmAssociateContext", &associate, None);
+    assert_eq!(old, 0);
+    let composition = [0, 8, TAPI_DATA, 16];
+    let string = "ImmGetCompositionStringA";
+    assert_eq!(call_byte("imm_comp", "IMM32.DLL", string, &composition, None), 0xFF);
+    assert_eq!(call_byte("imm_comp_buf", "IMM32.DLL", string, &composition, Some(0)), 0xCC);
+    let key = call_byte("imm_vkey", "IMM32.DLL", "ImmGetVirtualKey", &[0x404], None);
+    assert_eq!(key, 0xE5);
+}
+
+/// ICInfo finds the codecs Windows 98 SE installs, by FourCC in either
+/// case or by index, and fills ICINFO with the type, the handler and the
+/// driver's file; it finds no other codec and no other type.
+#[test]
+fn icinfo_lists_the_installed_codecs() {
+    let vidc = u32::from_le_bytes(*b"vidc");
+    let iv41 = u32::from_le_bytes(*b"iv41");
+    let info = |test, kind, handler, byte| {
+        call_byte(test, "MSVFW32.DLL", "ICInfo", &[kind, handler, TAPI_DATA], byte)
+    };
+    assert_eq!(info("icinfo_iv41", vidc, iv41, None), 1);
+    // dwSize, 568, fccHandler 'iv41', and szDriver "ir41_32.ax".
+    assert_eq!(info("icinfo_size", vidc, iv41, Some(1)), 0x02);
+    assert_eq!(info("icinfo_handler", vidc, iv41, Some(8)), b'i');
+    assert_eq!(info("icinfo_driver", vidc, iv41, Some(312)), b'i');
+    assert_eq!(info("icinfo_driver_end", vidc, iv41, Some(312 + 20)), 0);
+    let upper = u32::from_le_bytes(*b"CVID");
+    assert_eq!(info("icinfo_cvid", vidc, upper, None), 1);
+    assert_eq!(info("icinfo_index", vidc, 0, Some(8)), b'c');
+    assert_eq!(info("icinfo_past", vidc, 5, None), 0);
+    assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
+    assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
+}
