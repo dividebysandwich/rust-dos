@@ -707,7 +707,8 @@ fn windows_counts_a_cd_in_32_kb_clusters() {
 
 /// A file on a CD image can't have its attributes changed: access
 /// denied, which Drakan's CD check asks of its icon on the disc. A name
-/// the disc hasn't is not found.
+/// the disc hasn't is not found, and one in a directory the disc hasn't
+/// is path not found, to getting attributes and setting them alike.
 #[test]
 fn a_cd_image_file_denies_new_attributes() {
     let mut disk = DiskController::new(scratch("cd_attributes"));
@@ -717,6 +718,9 @@ fn a_cd_image_file_denies_new_attributes() {
     assert_eq!(disk.set_file_attribute("D:\\README.TXT", 0), Err(0x05));
     assert_eq!(disk.set_file_attribute("D:\\PROGRAM_", 0), Err(0x05));
     assert_eq!(disk.set_file_attribute("D:\\NONE.TXT", 0), Err(0x02));
+    assert_eq!(disk.set_file_attribute("D:\\NODIR\\A.TXT", 0), Err(0x03));
+    assert_eq!(disk.get_file_attribute("D:\\NONE.TXT"), Err(0x02));
+    assert_eq!(disk.get_file_attribute("D:\\NODIR\\A.TXT"), Err(0x03));
 }
 
 /// The built-in Windows's free space of a folder hard disk stays between

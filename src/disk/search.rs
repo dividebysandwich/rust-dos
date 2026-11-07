@@ -111,10 +111,9 @@ impl DiskController {
             // sectors of 2048 bytes and none free. A folder's disc is as
             // large as its files. DOS keeps MSCDEX's single sectors.
             DriveKind::CdRom if windows => {
-                let sectors = match d.image() {
-                    Some(image) => crate::cdrom::iso9660::volume_sectors(image).unwrap_or(0),
-                    None => used(u64::MAX).min(u32::MAX as u64) as u32,
-                };
+                let sectors = d
+                    .image_sectors()
+                    .unwrap_or_else(|| used(u64::MAX).min(u32::MAX as u64) as u32);
                 let spc = CDFS_SECTORS_PER_CLUSTER;
                 (spc, 0, bps, sectors / spc)
             }
@@ -182,7 +181,7 @@ impl DiskController {
             return match files.file(&path) {
                 Some(node) => Ok(Self::tree_attr(Some(node), None) as u16),
                 None if files.is_dir(&path) => Ok(Self::tree_attr(None, files.dir_record(&path)) as u16),
-                None => Err(0x02),
+                None => Err(Self::memory_missing(files, &path)),
             };
         }
         if let Some(found) = self.find_fat(filename) {
@@ -233,12 +232,10 @@ impl DiskController {
         // A file on a CD image is there and can't be changed: access
         // denied (05h), as MSCDEX and Windows 98's CDFS answer, which
         // Drakan's CD check asks for. The drives held in memory keep no
-        // attributes.
-        if let Some((drive, d, path)) = self.locate_in_memory(filename) {
-            let files = d.tree().ok_or(0x03u8)?;
-            if files.file(&path).is_none() && !files.is_dir(&path) {
-                return Err(0x02);
-            }
+        // attributes. A name they haven't is not found as to
+        // `get_file_attribute`: 02h, or 03h in a directory they haven't.
+        if let Some((drive, ..)) = self.locate_in_memory(filename) {
+            self.get_file_attribute(filename)?;
             return self.check_writable(drive);
         }
         // A name its folder's entries lack is no file (`locate_found`), as
