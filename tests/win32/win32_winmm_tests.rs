@@ -550,7 +550,10 @@ fn cd_program(commands: &[&str]) -> Vec<u8> {
     const CRLF: u32 = 0x340;
     const WRITTEN: u32 = 0x348;
     let mut data = vec![0u8; 0x350];
-    assert!(commands.len() <= 12, "the strings would reach the return buffer");
+    assert!(
+        commands.len() <= 12,
+        "the strings would reach the return buffer"
+    );
     for (i, command) in commands.iter().enumerate() {
         put(&mut data, i * 0x40, command.as_bytes());
     }
@@ -650,17 +653,26 @@ fn mci_track_lengths_are_windows_98s() {
         let data = (iso.len() / 2048) as u32;
         // Five seconds of audio in track 2, after a 2-second pregap.
         let cue = cdimage::mixed_disc(&dir, &iso, 375);
-        let mut cpu = machine("cd_length", core, &[("T.EXE", cd_program(&COMMANDS))], |cpu| {
-            let options = MountOptions::default();
-            cpu.bus.mount_drive(3, &cue, options, false).unwrap();
-        });
+        let mut cpu = machine(
+            "cd_length",
+            core,
+            &[("T.EXE", cd_program(&COMMANDS))],
+            |cpu| {
+                let options = MountOptions::default();
+                cpu.bus.mount_drive(3, &cue, options, false).unwrap();
+            },
+        );
         run_to_exit(&mut cpu, 20_000, |_| {});
         let text = printed(&cpu);
         assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {text:?}");
         let msf = |s: u32| format!("{:02}:{:02}:{:02}", s / 4500, s / 75 % 60, s % 75);
         let lines: Vec<&str> = text.lines().collect();
         let want = [msf(data + 150), msf(374), msf(data + 150 + 374)];
-        assert_eq!(lines, want.iter().map(String::as_str).collect::<Vec<_>>(), "{core:?}");
+        assert_eq!(
+            lines,
+            want.iter().map(String::as_str).collect::<Vec<_>>(),
+            "{core:?}"
+        );
     }
 }
 
