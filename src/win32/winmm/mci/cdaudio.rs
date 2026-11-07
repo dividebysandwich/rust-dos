@@ -138,6 +138,13 @@ fn from_sector(img: &CdImage, format: u32, lba: u32) -> (u32, Ret) {
     }
 }
 
+/// Where the disc ends as Windows 98 measures it from the table of
+/// contents: a frame before the lead-out. The last track's length and
+/// the disc's run to it.
+fn disc_end(img: &CdImage) -> u32 {
+    img.leadout().saturating_sub(1)
+}
+
 /// A length of `sectors` in the time format: MSF for MSF and TMSF.
 fn length(format: u32, sectors: u32) -> (u32, Ret) {
     match format {
@@ -191,10 +198,14 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
             let Some(img) = image(cpu, i) else {
                 return MCIERR_DEVICE_NOT_READY;
             };
+            let start = img.tracks().first().map_or(0, |t| t.start);
             let to = if flags & MCI_SEEK_TO_START != 0 {
-                img.tracks().first().map_or(0, |t| t.start)
+                start
             } else if flags & MCI_SEEK_TO_END != 0 {
-                img.leadout()
+                // The last frame of the length Windows 98 gives the disc,
+                // two before the lead-out: where it reports the position
+                // after this seek.
+                disc_end(&img).saturating_sub(1).max(start)
             } else if flags & MCI_TO != 0 {
                 match to_sector(&img, format, p.to) {
                     Ok(s) if s <= img.leadout() => s,
@@ -358,14 +369,20 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
                     .ok_or(MCIERR_OUTOFRANGE)
             };
             match item {
+                // Windows 98 measures from the table of contents: a track
+                // runs to the next one's start, the pregap between them
+                // included, and the last one, and so the disc, to a frame
+                // before the lead-out. Drakan's CD check compares these.
                 MCI_STATUS_LENGTH => {
                     let sectors = if flags & MCI_TRACK != 0 {
-                        match track() {
-                            Ok(t) => t.end - t.start,
-                            Err(e) => return e,
-                        }
+                        let Some(at) = tracks.iter().position(|t| t.number as u32 == p.track)
+                        else {
+                            return MCIERR_OUTOFRANGE;
+                        };
+                        let end = tracks.get(at + 1).map_or(disc_end(&img), |next| next.start);
+                        end.saturating_sub(tracks[at].start)
                     } else {
-                        img.leadout() - tracks.first().map_or(0, |t| t.start)
+                        disc_end(&img).saturating_sub(tracks.first().map_or(0, |t| t.start))
                     };
                     length(format, sectors)
                 }
