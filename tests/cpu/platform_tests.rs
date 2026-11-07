@@ -145,6 +145,53 @@ fn keys_the_bios_never_handled_go_when_the_shell_takes_over() {
     assert_eq!(bus.keyboard_buffer.iter().copied().collect::<Vec<_>>(), [0x1E61]);
 }
 
+/// A state keeps which queued keys the BIOS never saw: loaded in another
+/// run, the keys typed into a program that reads the keyboard itself still
+/// go when the program ends, the ones typed ahead stay, and the BIOS's
+/// keyboard interrupt still moves each make code's keystroke into its
+/// buffer. A state saved before the KEYQ section has its queued keys all
+/// typed ahead, whatever the machine loading it had queued.
+#[test]
+fn a_state_keeps_the_keys_the_bios_never_handled() {
+    use rust_dos::keyboard::{BiosBuffer, bios_saw_keys, bios_took_scan, drop_unseen_keys, key_event};
+    use rust_dos::savestate::machine;
+    let queue = |cpu: &Cpu| cpu.bus.keyboard_buffer.iter().copied().collect::<Vec<_>>();
+    let mut cpu = cpu();
+    key_event(&mut cpu.bus, 0x1E, false, true, None);
+    key_event(&mut cpu.bus, 0x1E, false, false, None);
+    bios_saw_keys(&mut cpu.bus);
+    key_event(&mut cpu.bus, 0x1F, false, true, None);
+    key_event(&mut cpu.bus, 0x1F, false, false, None);
+    let (state, parts) = machine::save_parts(&cpu);
+
+    let mut loaded = Cpu::new(PathBuf::from("."));
+    machine::load(&mut loaded, &state).unwrap();
+    assert_eq!(queue(&loaded), [0x1E61, 0x1F73]);
+    drop_unseen_keys(&mut loaded.bus);
+    assert_eq!(queue(&loaded), [0x1E61]);
+
+    // A's make code reaches the BIOS's INT 09h: A goes into its buffer.
+    let mut loaded = Cpu::new(PathBuf::from("."));
+    machine::load(&mut loaded, &state).unwrap();
+    bios_took_scan(&mut loaded.bus, 0x1E);
+    assert_eq!(BiosBuffer::keys(&mut loaded.bus), [0x1E61]);
+    assert_eq!(queue(&loaded), [0x1F73]);
+
+    // The same state without its KEYQ section, loaded into a machine that
+    // has D typed into a program that reads the keyboard itself.
+    let keyq = parts.iter().find(|(name, _)| name == "KEYQ").expect("the section").1.clone();
+    let mut old = state[..keyq.start].to_vec();
+    old.extend_from_slice(&state[keyq.end..]);
+    let mut loaded = Cpu::new(PathBuf::from("."));
+    key_event(&mut loaded.bus, 0x20, false, true, None);
+    key_event(&mut loaded.bus, 0x20, false, false, None);
+    machine::load(&mut loaded, &old).unwrap();
+    bios_took_scan(&mut loaded.bus, 0x1E);
+    assert!(BiosBuffer::keys(&mut loaded.bus).is_empty());
+    drop_unseen_keys(&mut loaded.bus);
+    assert_eq!(queue(&loaded), [0x1E61, 0x1F73]);
+}
+
 #[test]
 fn keyboard_acknowledges_commands() {
     let mut bus = Bus::new(PathBuf::from("."));
@@ -306,6 +353,49 @@ fn bios_translates_shift_ctrl_and_alt_combinations() {
     deliver_key_down(&mut bus, 0x3F00, false);
     assert_eq!(bus.keyboard_buffer.pop_front(), Some(0x6C00));
     assert_eq!(bus.kbc.read_data(), 0x3F, "the controller gets the plain make code");
+}
+
+#[test]
+fn a_key_byte_still_unread_when_a_program_ends_keeps_its_irq() {
+    use rust_dos::keyboard::deliver_key_down;
+    // A program ends with interrupts off after taking Enter from the BIOS
+    // queue, before IRQ 1 for its make code came (ShadowCaster's SETUP).
+    let mut cpu = cpu();
+    cpu.load_shell();
+    deliver_key_down(&mut cpu.bus, 0x1C0D, false);
+    assert_eq!(cpu.bus.pic.pending(), Some(1));
+    cpu.load_shell();
+    // The shell puts the PIC back as the BIOS left it, and the byte the
+    // controller holds still asks for IRQ 1, which the BIOS takes at the
+    // prompt; without it no later byte would come.
+    assert_eq!(cpu.bus.pic.master.imr, 0);
+    assert_eq!(cpu.bus.pic.pending(), Some(1));
+    assert_eq!(cpu.bus.kbc.read_data(), 0x1C);
+    cpu.bus.kbc.release();
+    deliver_key_down(&mut cpu.bus, 0x1E61, false);
+    assert_eq!(cpu.bus.kbc.read_data(), 0x1E, "the next key reaches port 60h");
+
+    // With nothing in the controller, nothing is requested.
+    cpu.load_shell();
+    assert_eq!(cpu.bus.pic.pending(), None);
+}
+
+#[test]
+fn a_mouse_byte_still_unread_when_a_program_ends_lets_the_keys_through() {
+    use rust_dos::keyboard::deliver_key_down;
+    // A program that read the PS/2 mouse itself ends with a packet in the
+    // controller and a key behind it. The shell resets the mouse and masks
+    // IRQ 12, so nothing would read the mouse's byte, which keeps the
+    // key's out of the output buffer.
+    let mut cpu = cpu();
+    cpu.load_shell();
+    cpu.bus.kbc.push_aux(&[0x08, 0x01, 0x02]);
+    cpu.bus.sync_keyboard_irq();
+    deliver_key_down(&mut cpu.bus, 0x1C0D, false);
+    cpu.load_shell();
+    assert!(cpu.bus.kbc.aux_idle(), "the mouse's bytes are gone");
+    assert_eq!(cpu.bus.pic.pending(), Some(1));
+    assert_eq!(cpu.bus.kbc.read_data(), 0x1C, "the key's make code is at port 60h");
 }
 
 #[test]

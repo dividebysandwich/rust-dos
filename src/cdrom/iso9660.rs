@@ -24,6 +24,9 @@ pub struct IsoVolume {
     /// The volume identifier, the drive's label.
     pub label: String,
     pub files: MemFs,
+    /// The volume space size of the primary descriptor: the sectors of
+    /// the file system, which Windows 98's CDFS counts the disc in.
+    pub sectors: u32,
     /// The Primary Volume Descriptor, in the disc's format: a High Sierra
     /// one has its fields where `Format::HighSierra` says.
     pub descriptor: Box<[u8; DATA_SECTOR]>,
@@ -137,6 +140,12 @@ impl Format {
     /// The volume identifier in a primary descriptor.
     fn label(self, descriptor: &[u8]) -> &[u8] {
         &descriptor[40 + self.shift()..72 + self.shift()]
+    }
+
+    /// The volume space size in a primary descriptor: the sectors of the
+    /// file system, from its little-endian copy.
+    fn volume_sectors(self, descriptor: &[u8]) -> u32 {
+        le32(descriptor, 80 + self.shift())
     }
 
     /// The copyright, abstract and bibliographic file identifiers in a
@@ -555,6 +564,7 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
     let label = String::from_utf8_lossy(descriptors.format.label(&descriptor[..]))
         .trim_matches([' ', '\0'])
         .to_string();
+    let sectors = descriptors.format.volume_sectors(&descriptor[..]);
     let tree = descriptors.primary_tree();
     let mut files = MemFs::new();
     let root = descriptors.root()?;
@@ -587,7 +597,7 @@ pub fn read_volume(image: &CdImage) -> Result<IsoVolume, String> {
             }
         }
     }
-    Ok(IsoVolume { label, files, descriptor })
+    Ok(IsoVolume { label, files, sectors, descriptor })
 }
 
 /// The directory record of the file or directory at a DOS path on the disc

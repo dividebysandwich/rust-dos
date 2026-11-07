@@ -259,8 +259,8 @@ top of that.
   `GetDiskFreeSpaceExA` (`kernel32/win98.rs`), and at most just under 2
   GB through `GetDiskFreeSpaceA` (`kernel32/disk.rs`), as Windows 95 and
   98 give a real disk's space. It drops as files are written. DOS's own
-  answer for such a drive is 80 MB, too little for a setup that checks
-  the space it needs.
+  answer for such a drive is 160 to 480 MB, too little for some setups
+  that check the space they need.
 - `GetVersion` and `GetVersionEx` say Windows 95 (4.0.950, platform 1),
   or with `win32_version=98` Windows 98 (4.10.1998) and with
   `win32_version=98se` Windows 98 SE (4.10.2222, " A "), as do the

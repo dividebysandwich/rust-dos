@@ -663,7 +663,8 @@ fn floppy_free_space_tracks_usage() {
 }
 
 /// The built-in Windows sees 3.75 GB free on an empty folder hard disk,
-/// which drops as files are written, while DOS keeps its 80 MB disk.
+/// in 4 KB clusters, which drops as files are written, while DOS keeps
+/// its 320 MB disk of 16 KB clusters.
 #[test]
 fn windows_sees_a_larger_hard_disk() {
     let base = scratch("windows_hd");
@@ -676,8 +677,51 @@ fn windows_sees_a_larger_hard_disk() {
         disk.windows_free_space(3),
         Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
     );
-    assert_eq!(disk.get_disk_free_space32(3), Ok((8, 19996, 512, 20000)));
+    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 19999, 512, 20000)));
     assert_eq!(disk.windows_free_space(5), Err(0x0F));
+}
+
+/// The built-in Windows counts a CD in clusters of 16 sectors, as many
+/// as fill the volume its primary descriptor gives, none of them free:
+/// Windows 98 SE gives Drakan's disc of 199641 sectors as 16 sectors of
+/// 2048 bytes, 0 free and 12477 in all. DOS keeps single sectors.
+#[test]
+fn windows_counts_a_cd_in_32_kb_clusters() {
+    let base = scratch("windows_cd");
+    let mut disk = DiskController::new(base.clone());
+    let mut disc = crate::cdrom::iso9660::joliet_disc();
+    let pvd = 16 * 2048;
+    disc[pvd + 80..pvd + 84].copy_from_slice(&199_641u32.to_le_bytes());
+    disk.mount_memory_image(3, "DRAKAN.ISO", disc.into(), cdrom())
+        .unwrap();
+    assert_eq!(disk.windows_free_space(4), Ok((16, 0, 2048, 12477)));
+    assert_eq!(disk.get_disk_free_space32(4), Ok((1, 0, 2048, 0xFFFF)));
+
+    // A folder's disc holds its files.
+    fs::create_dir_all(base.join("e")).unwrap();
+    fs::write(base.join("e/DATA.BIN"), vec![0u8; 64 * 2048]).unwrap();
+    disk.mount(4, &base.join("e"), cdrom(), false).unwrap();
+    let (spc, free, bps, total) = disk.windows_free_space(5).unwrap();
+    assert_eq!((spc, free, bps), (16, 0, 2048));
+    assert!((4..=5).contains(&total), "{total}");
+}
+
+/// A file on a CD image can't have its attributes changed: access
+/// denied, which Drakan's CD check asks of its icon on the disc. A name
+/// the disc hasn't is not found, and one in a directory the disc hasn't
+/// is path not found, to getting attributes and setting them alike.
+#[test]
+fn a_cd_image_file_denies_new_attributes() {
+    let mut disk = DiskController::new(scratch("cd_attributes"));
+    let disc = crate::cdrom::iso9660::joliet_disc();
+    disk.mount_memory_image(3, "JOLIET.ISO", disc.into(), cdrom())
+        .unwrap();
+    assert_eq!(disk.set_file_attribute("D:\\README.TXT", 0), Err(0x05));
+    assert_eq!(disk.set_file_attribute("D:\\PROGRAM_", 0), Err(0x05));
+    assert_eq!(disk.set_file_attribute("D:\\NONE.TXT", 0), Err(0x02));
+    assert_eq!(disk.set_file_attribute("D:\\NODIR\\A.TXT", 0), Err(0x03));
+    assert_eq!(disk.get_file_attribute("D:\\NONE.TXT"), Err(0x02));
+    assert_eq!(disk.get_file_attribute("D:\\NODIR\\A.TXT"), Err(0x03));
 }
 
 /// The built-in Windows's free space of a folder hard disk stays between
@@ -743,7 +787,7 @@ fn floppies_have_a_1_44_mb_diskette_layout() {
 
     let hdd = DriveKind::HardDisk.layout();
     assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (79, b"FAT16   "));
-    assert_eq!(hdd.total_sectors(), 191 + 8 * 20000);
+    assert_eq!(hdd.total_sectors(), 191 + 32 * 20000);
     let bpb = hdd.bpb();
     assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
     assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());
@@ -1733,4 +1777,55 @@ fn a_created_long_name_keeps_its_case_and_a_short_one_is_uppercased() {
     assert_eq!(names, ["Read Me First.txt", "level0_Final.dat"]);
     // Opening it again in another case finds it, as on Windows.
     assert!(disk.is_file(r"C:\LEVEL0_FINAL.DAT"));
+}
+
+/// Where the host's own file pointer of the host file open at `sft` is,
+/// asked of the host.
+fn host_pointer(disk: &DiskController, sft: u16) -> u64 {
+    let OpenData::Host(file, _) = &disk.open_files[&sft].data else {
+        panic!("not a host file")
+    };
+    (&file.file).stream_position().unwrap()
+}
+
+#[test]
+fn a_host_file_position_kept_without_asking_the_host_follows_its_pointer() {
+    let base = scratch("host_position");
+    fs::write(base.join("DATA.PAK"), b"0123456789").unwrap();
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.open_file(r"C:\DATA.PAK", 0x02, PSP).unwrap();
+    let other = disk.open_file(r"C:\DATA.PAK", 0x00, PSP).unwrap();
+    let check = |disk: &DiskController, sft: u16, at: u64| {
+        assert_eq!(disk.position(sft), Some(at));
+        assert_eq!(host_pointer(disk, sft), at);
+    };
+    check(&disk, h, 0);
+    assert_eq!(disk.read_file(h, 4).unwrap(), b"0123");
+    check(&disk, h, 4);
+    // A seek to where the pointer is, as a program that saves and
+    // restores the position does, and one from there by nothing.
+    assert_eq!(disk.seek_file(h, 4, 0), Ok(4));
+    assert_eq!(disk.seek_file(h, 0, 1), Ok(4));
+    check(&disk, h, 4);
+    assert_eq!(disk.write_file(h, b"ab"), Ok(2));
+    check(&disk, h, 6);
+    // Each handle has a pointer of its own.
+    check(&disk, other, 0);
+    assert_eq!(disk.read_file(other, 6).unwrap(), b"0123ab");
+    check(&disk, other, 6);
+    check(&disk, h, 6);
+    assert_eq!(disk.seek_file(h, -1, 2), Ok(9));
+    check(&disk, h, 9);
+    // Cutting the file leaves the pointer past its end, and a read there
+    // reads nothing and moves nothing.
+    assert_eq!(disk.set_file_size(h, 3), Ok(()));
+    check(&disk, h, 9);
+    assert_eq!(disk.read_file(h, 4).unwrap(), b"");
+    check(&disk, h, 9);
+    // A seek before the start fails and leaves the pointer.
+    assert_eq!(disk.seek_file(h, -20, 1), Err(0x19));
+    check(&disk, h, 9);
+    assert_eq!(disk.seek_file(h, 1, 0), Ok(1));
+    assert_eq!(disk.read_file(h, 4).unwrap(), b"12");
+    check(&disk, h, 3);
 }
