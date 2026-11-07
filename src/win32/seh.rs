@@ -401,6 +401,18 @@ fn is_debugger_int(cpu: &Cpu, eip: u32) -> bool {
     code_at(cpu, eip, 2).as_deref() == Some(&[0xCD, 0x68])
 }
 
+/// Whether the instruction at `eip` is CLI or STI. The program runs at
+/// level 3 with IOPL 0, so either is a #GP, which Windows 98's VMM takes
+/// and simulates on the system VM's virtual interrupt flag, as it does
+/// for Win16 code in the same VM: the program goes on after it, with no
+/// exception. SafeDisc 2.30's Windows 9x path (Anachronox) brackets its
+/// writes to the IDT with CLI and STI, and fails its checks when they
+/// raise one. The virtual flag isn't kept here: hardware interrupts
+/// reach the program's process as before.
+fn is_interrupt_flag_change(cpu: &Cpu, eip: u32) -> bool {
+    matches!(code_at(cpu, eip, 1).as_deref(), Some([0xFA | 0xFB]))
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
@@ -414,6 +426,11 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     }
     if vector == 13 && error == Some(DEBUGGER_INT_ERROR) && is_debugger_int(cpu, ctx.eip) {
         ctx.eip = ctx.eip.wrapping_add(2);
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    if vector == 13 && error == Some(0) && is_interrupt_flag_change(cpu, ctx.eip) {
+        ctx.eip = ctx.eip.wrapping_add(1);
         super::system::enter_user(cpu, &ctx);
         return;
     }

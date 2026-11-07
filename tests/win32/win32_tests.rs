@@ -1859,7 +1859,7 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
 
 /// SafeDisc 1's loader (Omikron's RUNTIME.EXE) goes on at level 0 with
 /// interrupts on: its divide error's handler returns to the program's code
-/// with CS 0008, leaving the user's EFLAGS (IF set), and that code divides
+/// with CS 0028, leaving the user's EFLAGS (IF set), and that code divides
 /// by zero again, through a handler that returns to level 3. A timer
 /// interrupt between the two comes from level 0, on the level 0 stack 8
 /// bytes below the top, so its frame lies where one from level 3 would.
@@ -1915,7 +1915,7 @@ fn a_timer_interrupt_in_level_0_code_returns_to_it() {
             a.div(ecx)?;
             // Level 0, interrupts on, ESP 8 bytes below the stack's top, or
             // 12 with a dword pushed: wait for an interrupt's frame (CS
-            // 0008) to appear below ESP.
+            // 0028) to appear below ESP.
             a.set_label(&mut level0)?;
             if pushed {
                 a.push(eax)?;
@@ -1923,7 +1923,7 @@ fn a_timer_interrupt_in_level_0_code_returns_to_it() {
             a.mov(dword_ptr(esp - 8), 0)?;
             a.mov(edx, 1_000_000)?;
             a.set_label(&mut spin)?;
-            a.cmp(dword_ptr(esp - 8), 8)?;
+            a.cmp(dword_ptr(esp - 8), 0x28)?;
             a.je(served)?;
             a.dec(edx)?;
             a.jnz(spin)?;
@@ -3506,6 +3506,84 @@ fn hlt_raises_a_privileged_instruction_exception() {
             a.mov(dword_ptr(0u64).fs(), esp)?;
             a.hlt()?;
             a.ret()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// CLI and STI at level 3 go on with no exception, as Windows 98's VMM
+/// simulates them for the system VM. SafeDisc 2.30 brackets its writes
+/// to the IDT with them. A handler would end the program with 2.
+#[test]
+fn cli_and_sti_go_on_as_on_windows_98() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let (code, text) = run(
+        "cli_sti",
+        program(BASE, false, imports, &[0; 4], |a, l| {
+            let mut setup = a.create_label();
+            a.call(setup)?;
+            a.push(2)?;
+            a.call(l.import(0))?;
+            a.int3()?;
+            a.set_label(&mut setup)?;
+            a.push(dword_ptr(0u64).fs())?;
+            a.mov(dword_ptr(0u64).fs(), esp)?;
+            a.cli()?;
+            a.sti()?;
+            a.cli()?;
+            a.sti()?;
+            a.push(1)?;
+            a.call(l.import(0))?;
+            a.int3()
+        }),
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// The GDT has Windows 98's level 0 flat code segment at 28h. SafeDisc
+/// 2.30 writes a gate of its own into the IDT with that selector and
+/// raises its vector from level 3 (INT 5, through a gate of level 3) to
+/// run its code at level 0. The code puts CR0 in EBX and returns, and
+/// the program ends with CR0's PE bit, 1.
+#[test]
+fn a_gate_to_selector_28h_runs_level_0_code() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let mut data = vec![0u8; 0x40];
+    data[0x30..0x34].copy_from_slice(&[
+        0x0F, 0x20, 0xC3, // mov ebx, cr0
+        0xCF, // iretd
+    ]);
+    let (code, text) = run(
+        "gate_28h",
+        program(BASE, false, imports, &data, |a, l| {
+            // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
+            // gate, kept at 10h.
+            a.sidt(ptr(l.at(0)))?;
+            a.mov(esi, dword_ptr(l.at(2)))?;
+            a.add(esi, 5 * 8)?;
+            a.mov(eax, dword_ptr(esi))?;
+            a.mov(dword_ptr(l.at(0x10)), eax)?;
+            a.mov(eax, dword_ptr(esi + 4))?;
+            a.mov(dword_ptr(l.at(0x14)), eax)?;
+            // A 32-bit interrupt gate of level 3 to the code at 30h,
+            // selector 28h.
+            a.mov(eax, l.at(0x30) as u32)?;
+            a.mov(word_ptr(esi), ax)?;
+            a.mov(word_ptr(esi + 2), 0x28)?;
+            a.mov(word_ptr(esi + 4), 0xEE00)?;
+            a.shr(eax, 16)?;
+            a.mov(word_ptr(esi + 6), ax)?;
+            a.xor(ebx, ebx)?;
+            a.int(5)?;
+            // Put the gate back.
+            a.mov(eax, dword_ptr(l.at(0x10)))?;
+            a.mov(dword_ptr(esi), eax)?;
+            a.mov(eax, dword_ptr(l.at(0x14)))?;
+            a.mov(dword_ptr(esi + 4), eax)?;
+            a.and(ebx, 1)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
         }),
     );
     assert_eq!(code, 1, "{}", text);
