@@ -63,6 +63,8 @@ pub const TIB3: u16 = 0x0147;
 
 /// Descriptor access bytes and the flags (G, D/B) in `SegCache::attr`'s
 /// form.
+const ACCESS_CODE0: u8 = 0x9B;
+const ACCESS_DATA0: u8 = 0x93;
 const ACCESS_CODE3: u8 = 0xFB;
 const ACCESS_DATA3: u8 = 0xF3;
 const FLAT: u8 = 0xC;
@@ -91,8 +93,8 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
         )?;
     }
     let gdt = [
-        (CODE0, descriptor(0, 0xFFFF_FFFF, 0x9B, FLAT)),
-        (DATA0, descriptor(0, 0xFFFF_FFFF, 0x93, FLAT)),
+        (CODE0, descriptor(0, 0xFFFF_FFFF, ACCESS_CODE0, FLAT)),
+        (DATA0, descriptor(0, 0xFFFF_FFFF, ACCESS_DATA0, FLAT)),
         (TSS_SEL, descriptor(SYSTEM + TSS, IOPB_END - TSS, 0x8B, 0)),
         (
             LDT_SEL,
@@ -238,10 +240,10 @@ fn load_segments(cpu: &mut Cpu, ctx: &Context, tibs: &[(u16, u32)], system: u32)
             DATA3 => data,
             // The system's segments, for a program's level 0 code only.
             CODE0 if system_ctx => {
-                SegCache::from_descriptor(CODE0, 0, 0xFFFF_FFFF, attr(0x9B, FLAT))
+                SegCache::from_descriptor(CODE0, 0, 0xFFFF_FFFF, attr(ACCESS_CODE0, FLAT))
             }
             DATA0 if system_ctx => {
-                SegCache::from_descriptor(DATA0, 0, 0xFFFF_FFFF, attr(0x93, FLAT))
+                SegCache::from_descriptor(DATA0, 0, 0xFFFF_FFFF, attr(ACCESS_DATA0, FLAT))
             }
             selector => match tibs.iter().find(|&&(s, _)| s == selector) {
                 Some(&(_, tib)) => {
@@ -359,26 +361,29 @@ enum Entry {
 /// The frame's CS tells them apart. A program's level 0 code that SafeDisc
 /// runs uses the level 0 stack right below the frame of the exception it
 /// came in by, so an interrupt there can push its frame where one from
-/// level 3 would be.
+/// level 3 would be, with or without an error code. Such a frame's second
+/// dword is its CS, 8, pushed with the upper half 0. A frame from level 3
+/// has its CS there, with RPL 3, or the EIP of an exception with an error
+/// code, never 8: no program's code is in the first page. The CS is
+/// checked first, since the third dword of a frame from level 0, its
+/// EFLAGS, reads as a CS with RPL 3 when CF is set.
 fn gate_entry(cpu: &mut Cpu) -> Option<Entry> {
     let top = SYSTEM + RING0_STACK_TOP;
     let sp = cpu.esp();
     let read = |cpu: &mut Cpu, at: u32| cpu.bus.guest_read_32(at);
+    if read(cpu, sp + 4) == CODE0 as u32 {
+        let mut ctx = Context::of(cpu);
+        ctx.eip = read(cpu, sp);
+        ctx.seg[Seg::CS as usize] = CODE0;
+        ctx.eflags = read(cpu, sp + 8);
+        ctx.gpr[ESP] = sp.wrapping_add(12);
+        return Some(Entry::System(ctx));
+    }
     let user = |cpu: &mut Cpu, frame: u32| read(cpu, frame + 4) & 3 == 3;
     let (error, frame) = match top.wrapping_sub(sp) {
         20 if user(cpu, sp) => (None, sp),
         24 if user(cpu, sp + 4) => (Some(read(cpu, sp)), sp + 4),
-        _ => {
-            if read(cpu, sp + 4) as u16 != CODE0 {
-                return None;
-            }
-            let mut ctx = Context::of(cpu);
-            ctx.eip = read(cpu, sp);
-            ctx.seg[Seg::CS as usize] = CODE0;
-            ctx.eflags = read(cpu, sp + 8);
-            ctx.gpr[ESP] = sp + 12;
-            return Some(Entry::System(ctx));
-        }
+        _ => return None,
     };
     let mut ctx = Context::of(cpu);
     ctx.eip = read(cpu, frame);
