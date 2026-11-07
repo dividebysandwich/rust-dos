@@ -10272,3 +10272,66 @@ fn tapi_has_no_line_device() {
     let caps = [0, 0x10004, TAPI_DATA];
     assert_eq!(tapi("tapi_caps", "lineGetTranslateCaps", &caps, false), 0x0E);
 }
+
+/// A program linked with MFC's OLE support imports OLEDLG.DLL's
+/// OleUIBusyA and OLEPRO32.DLL's OleCreateFontIndirect by ordinal (8 and
+/// 253), as Discworld Noir's setup does. It loads, and OleTranslateColor
+/// translates: an RGB colour to itself, a system colour to
+/// GetSysColor's, and a system colour past the last or an unknown kind
+/// to E_INVALIDARG. The program ends with a bit for each answer that is
+/// right.
+#[test]
+fn mfc_ole_imports_load_and_ole_translate_color_translates() {
+    const OUT: u32 = 0;
+    let imports: &[(&str, &[&str])] = &[
+        ("OLEDLG.DLL", &["#8"]),
+        ("OLEPRO32.DLL", &["#253", "OleTranslateColor"]),
+    ];
+    let exe = program(BASE, false, imports, &[0; 8], |a, l| {
+        // (colour, the result wanted, the colour written or None).
+        let checks: [(u32, u32, Option<u32>); 4] = [
+            (0x0012_3456, 0, Some(0x0012_3456)),
+            // COLOR_WINDOW, which is white.
+            (0x8000_0005, 0, Some(0x00FF_FFFF)),
+            (0x8000_0020, 0x8007_0057, None),
+            (0x0300_0000, 0x8007_0057, None),
+        ];
+        a.xor(ebx, ebx)?;
+        for (bit, (color, result, written)) in checks.into_iter().enumerate() {
+            let mut wrong = a.create_label();
+            a.mov(dword_ptr(l.at(OUT)), 0xCCCC_CCCCu32 as i32)?;
+            a.push(l.at(OUT) as i32)?;
+            a.push(0)?;
+            a.push(color as i32)?;
+            a.call(l.import(2))?;
+            a.cmp(eax, result as i32)?;
+            a.jne(wrong)?;
+            let written = written.unwrap_or(0xCCCC_CCCC);
+            a.cmp(dword_ptr(l.at(OUT)), written as i32)?;
+            a.jne(wrong)?;
+            a.or(ebx, 1 << bit)?;
+            a.set_label(&mut wrong)?;
+            a.nop()?;
+        }
+        a.mov(eax, ebx)?;
+        a.ret()
+    });
+    let (code, out) = run("ole_translate_color", exe);
+    assert_eq!(code, 0xF, "the checks that failed: {:04b} {out}", !code & 0xF);
+}
+
+/// A function of OLEDLG.DLL that isn't written yet ends the program that
+/// calls it, saying which it was, as a missing function does.
+#[test]
+fn an_oledlg_function_not_written_ends_the_program_naming_it() {
+    let imports: &[(&str, &[&str])] = &[("OLEDLG.DLL", &["#8"])];
+    let exe = program(BASE, false, imports, &[0; 4], |a, l| {
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.xor(eax, eax)?;
+        a.ret()
+    });
+    let (code, out) = run("oledlg_not_written", exe);
+    assert_eq!(code, 0xFF, "{out}");
+    assert!(out.contains("OLEDLG.DLL's function OleUIBusyA"), "{out}");
+}

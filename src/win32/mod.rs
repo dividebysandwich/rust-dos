@@ -49,6 +49,8 @@ pub(crate) mod object;
 mod ordinals;
 mod ole32;
 mod oleaut32;
+mod oledlg;
+mod olepro32;
 mod opengl32;
 mod advpack;
 pub(crate) mod realmode;
@@ -1245,12 +1247,26 @@ fn guest_caller(cpu: &Cpu) -> Option<String> {
 /// guest code (`loader::GUEST`) calls it, the call fails: it returns 0
 /// with ERROR_CALL_NOT_IMPLEMENTED, and its stub pops the arguments.
 fn missing(cpu: &mut Cpu, index: u16) {
-    let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     let (dll, function) = process(cpu)
         .missing
         .get(index as usize)
         .cloned()
         .unwrap_or_default();
+    if not_written(cpu, &dll, &function).is_some() {
+        cpu.set_eax(0);
+        cpu.set_eip(cpu.eip().wrapping_add(4));
+    }
+}
+
+/// A call of `function`, which the built-in DLL `dll` exports but has
+/// no code for yet: what a call of a missing function does (`missing`).
+/// From guest code the call fails with ERROR_CALL_NOT_IMPLEMENTED and
+/// the result is `Some(0)`; otherwise the program ends, saying what it
+/// needed, and the result is None. For the handler of such a function
+/// in a DLL's table, where it has to be for programs that import it by
+/// ordinal.
+fn not_written(cpu: &mut Cpu, dll: &str, function: &str) -> Option<u32> {
+    let caller = peek_32(cpu, cpu.esp()).unwrap_or(0);
     if let Some(module) = guest_caller(cpu) {
         let message = format!(
             "[W32] {} called {}'s function {} (from {:08X}), which the built-in \
@@ -1259,9 +1275,7 @@ fn missing(cpu: &mut Cpu, index: u16) {
         );
         cpu.bus.log_string(&message);
         process(cpu).last_error = ERROR_CALL_NOT_IMPLEMENTED;
-        cpu.set_eax(0);
-        cpu.set_eip(cpu.eip().wrapping_add(4));
-        return;
+        return Some(0);
     }
     let message = format!(
         "{} needs {}'s function {} (called from {:08X}), which the built-in Windows doesn't have yet.",
@@ -1273,6 +1287,7 @@ fn missing(cpu: &mut Cpu, index: u16) {
     cpu.bus.log_string(&format!("[W32] {}", message));
     say(cpu, &message);
     exit(cpu, FAILED);
+    None
 }
 
 /// Say `message` on standard error (DOS's handle 2).
