@@ -217,8 +217,9 @@ pub struct Filter {
 
 /// A connection the graph made between two of the program's filters,
 /// from the output pin `out` of the filter `from` to the input pin
-/// `input` of the filter `to`. Their pins are the filters', which the
-/// graph holds references on.
+/// `input` of the filter `to`. The graph holds a reference on each pin
+/// until it undoes the connection: a pin may be an object of its own,
+/// which its filter can let go of while the graph still names it.
 #[derive(Clone, Debug, Default)]
 pub struct Joint {
     pub from: u32,
@@ -599,7 +600,7 @@ fn disconnect_calls(cpu: &mut Cpu, list: &mut List, id: u32) {
 
 /// The calls that undo the graph `id`'s joints with the filter `filter`,
 /// or all of them for None: each input pin disconnects, then its output
-/// pin (Wine's RemoveFilter).
+/// pin (Wine's RemoveFilter), and the graph lets go of both.
 fn unjoin_calls(cpu: &mut Cpu, list: &mut List, id: u32, filter: Option<u32>) {
     let Some(g) = graph(cpu, id) else {
         return;
@@ -610,6 +611,8 @@ fn unjoin_calls(cpu: &mut Cpu, list: &mut List, id: u32, filter: Option<u32>) {
     for j in undone {
         list.call(cpu, j.input, PIN_DISCONNECT, &[], 0);
         list.call(cpu, j.out, PIN_DISCONNECT, &[], 0);
+        list.release(cpu, j.input);
+        list.release(cpu, j.out);
     }
 }
 
@@ -663,12 +666,14 @@ pub fn close(cpu: &mut Cpu, id: u32) -> Option<u32> {
     let Some(g) = graph(cpu, id) else {
         return Some(0);
     };
+    // They stop from the renderers up, as IMediaControl::Stop stops them.
+    let order = downstream_first(g);
     let filters = std::mem::take(&mut g.filters);
     let running = g.state != STATE_STOPPED;
     let mut list = List::new(0, THEN_CLOSED, id, 0, 0);
     if running {
-        for f in &filters {
-            list.call(cpu, f.iface, FILTER_STOP, &[], 0);
+        for &f in &order {
+            list.call(cpu, f, FILTER_STOP, &[], 0);
         }
     }
     if linked(cpu, id) {
@@ -958,19 +963,28 @@ fn read_media(cpu: &mut Cpu, path: &str) -> Option<Media> {
 /// or a wait until there is something.
 pub fn stream_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let tid = crate::win32::user32::current_tid(cpu);
+    // Reconnect moves the link to `connecting` while it connects again,
+    // and the thread goes on with it after.
     let found = super::state(cpu)
         .objects
         .iter()
         .find_map(|o| match &o.kind {
-            Kind::Graph { g } => g.link.as_ref().filter(|l| l.tid == tid).map(|_| o.id),
+            Kind::Graph { g } => [g.link.as_ref(), g.connecting.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|l| l.tid == tid)
+                .map(|l| (o.id, l.wake)),
             _ => None,
         });
-    let Some(id) = found else {
+    let Some((id, wake)) = found else {
         // Its link is gone, or a program called the stub.
         thread::exit_current(cpu, 0);
         return None;
     };
-    let l = link(cpu, id)?.clone_shallow();
+    let Some(l) = link(cpu, id).map(|l| l.clone_shallow()) else {
+        // Reconnect is making the link again.
+        return wait(cpu, vec![wake]);
+    };
     if !l.active || l.ended || l.refused {
         return wait(cpu, vec![l.wake]);
     }
@@ -1424,7 +1438,9 @@ const V_TARGET_ENUM: usize = 19;
 const V_IN: usize = 20;
 /// 1 when Reconnect makes the connection again (`reconnect`).
 const V_AGAIN: usize = 21;
-const V_QUEUE: usize = 22;
+/// The filter tried for the output pin (`V_TARGET`), by its interface.
+const V_TARGET_FILTER: usize = 22;
+const V_QUEUE: usize = 23;
 
 /// The connection's steps.
 const S_START: u16 = 0;
@@ -1584,6 +1600,12 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let Some(f) = newest(cpu, id, k) else {
                 return goto(S_FINISH);
             };
+            // The filter the link goes to if one of its pins takes the
+            // pictures, kept as it is chosen: the program's calls may add
+            // filters, which moves the places `newest` counts.
+            if let Some(l) = graph(cpu, id).and_then(|g| g.connecting.as_mut()) {
+                l.filter = f;
+            }
             clear_out(cpu, t);
             call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_PINS)
         }
@@ -1821,14 +1843,12 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let mut format = vec![0u8; n];
             cpu.bus.guest_read_bytes(s + C_FORMAT, &mut format);
             head[68..72].fill(0);
-            let k = newest(cpu, id, t.var(V_FILTER) as usize);
             let Some(g) = graph(cpu, id) else {
                 return goto(S_FINISH);
             };
             let Some(mut l) = g.connecting.take() else {
                 return goto(S_FINISH);
             };
-            l.filter = k.unwrap_or(0);
             l.pin = t.var(V_PIN);
             l.input = t.var(V_INPUT);
             l.allocator = t.var(V_ALLOC);
@@ -1984,6 +2004,7 @@ fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(V_TARGET, k as u32 + 1);
                 return goto(S_TARGET);
             }
+            t.set(V_TARGET_FILTER, f);
             clear_out(cpu, t);
             call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_TARGET_PINS)
         }
@@ -2040,8 +2061,9 @@ fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if failed(value) {
                 return goto(S_TARGET_SKIP);
             }
-            let k = t.var(V_TARGET) as usize;
-            let to = newest(cpu, id, k).unwrap_or(0);
+            // The filter chosen at S_TARGET: the program's Connect may
+            // have added filters, which moves the places `newest` counts.
+            let to = t.var(V_TARGET_FILTER);
             let joint = Joint {
                 from: t.var(V_SOURCE),
                 out: t.var(V_OUT),
@@ -2052,11 +2074,12 @@ fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 g.joints.push(joint);
             }
             t.vars.push(to);
-            let pin = t.var(V_IN);
+            // The references on both pins go to the joint. The target's
+            // enumerator goes (S_DOWN_DONE), and the next output pin is
+            // rendered.
             t.set(V_IN, 0);
-            // The target's enumerator goes too (S_DOWN_DONE), then the
-            // output pin, and the next output pin is rendered.
-            release_then(t, pin, S_DOWN_DONE)
+            t.set(V_OUT, 0);
+            goto(S_DOWN_DONE)
         }
         S_TARGET_DONE => {
             let e = t.var(V_TARGET_ENUM);
@@ -2089,8 +2112,12 @@ fn put_type(cpu: &mut Cpu, s: u32, head: &[u8], format: &[u8]) {
 /// again, as Wine's ReconnectEx does it: both ends disconnect, and the
 /// decoder's output pin connects to the pin again as RenderFile does,
 /// the pin's own types first. The streaming thread, if there is one,
-/// goes on with the new connection. VFW_E_NOT_CONNECTED for a pin the
-/// decoder isn't connected to, VFW_E_NOT_STOPPED while the graph plays.
+/// goes on with the new connection. A pin of a connection the graph
+/// made between two of the program's filters (`Joint`) is connected
+/// again the same way, with the output pin's own IPin::Connect, so that
+/// a second transform-in-place filter's ReconnectPin works too.
+/// VFW_E_NOT_CONNECTED for a pin of neither, VFW_E_NOT_STOPPED while the
+/// graph plays.
 pub fn reconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, pin] = args[..] else {
         return Some(super::E_INVALIDARG);
@@ -2106,6 +2133,21 @@ pub fn reconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if g.state != STATE_STOPPED {
         return Some(VFW_E_NOT_STOPPED);
     }
+    let joint = g
+        .joints
+        .iter()
+        .find(|j| j.out == pin || j.input == pin)
+        .cloned();
+    if let Some(j) = joint {
+        // The joint keeps its references on both pins, and stays when the
+        // connection isn't made again: undoing it then disconnects pins
+        // already free, which tells them nothing.
+        let mut list = List::new(S_OK, THEN_DONE, id, 0, 0);
+        list.call(cpu, j.input, PIN_DISCONNECT, &[], 0);
+        list.call(cpu, j.out, PIN_DISCONNECT, &[], 0);
+        list.call(cpu, j.out, PIN_CONNECT, &[j.input, 0], TAKE_RESULT);
+        return list.start(cpu, 0);
+    }
     let found = g
         .link
         .as_ref()
@@ -2116,7 +2158,6 @@ pub fn reconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(l) = g.link.take() else {
         return Some(VFW_E_NOT_CONNECTED);
     };
-    let k = g.filters.iter().rev().position(|f| f.iface == l.filter);
     sample::decommit_now(cpu, l.allocator);
     if l.allocator != 0 {
         super::drop_ref(cpu, l.allocator);
@@ -2135,7 +2176,6 @@ pub fn reconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let mut vars = vec![0u32; V_QUEUE];
     vars[0] = JOB_CONNECT;
     vars[V_GRAPH] = id;
-    vars[V_FILTER] = k.unwrap_or(0) as u32;
     // The link's references on the pin and its IMemInputPin go to the
     // connection, which lets go of them as RenderFile's does.
     vars[V_PIN] = program_pin;
@@ -2371,18 +2411,7 @@ pub fn pin_enum_media_types(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             },
         },
     );
-    give_enum(cpu, e, args[1])
-}
-
-/// The new enumerator `e`'s interface to `out`, with the one reference
-/// it was made with.
-fn give_enum(cpu: &mut Cpu, e: u32, out: u32) -> Option<u32> {
-    let Some(at) = super::block(cpu, e, super::TYPE_ENUM) else {
-        super::drop_ref(cpu, e);
-        return Some(E_OUTOFMEMORY);
-    };
-    cpu.bus.guest_write_32(out, at);
-    Some(S_OK)
+    Some(super::give_new(cpu, e, &super::IID_IENUM_MEDIA_TYPES, args[1]))
 }
 
 /// The enumerator `this`.
@@ -2396,13 +2425,15 @@ fn type_enum(cpu: &mut Cpu, this: u32) -> Result<&mut TypeEnum, u32> {
 
 /// IEnumMediaTypes::Next(this, count, types, fetched): up to `count` of
 /// the decoder's types, each a new AM_MEDIA_TYPE of the task heap, which
-/// the caller frees; S_FALSE when fewer were left.
+/// the caller frees; S_FALSE when fewer were left. E_POINTER for more
+/// than one without `fetched`, which COM's IEnum methods allow only for
+/// one, and E_OUTOFMEMORY when the heap has no room for the first.
 pub fn type_enum_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, count, out, fetched] = args[..] else {
         return Some(super::E_INVALIDARG);
     };
     let e = hr!(type_enum(cpu, this)).clone();
-    if out == 0 {
+    if out == 0 || (count > 1 && fetched == 0) {
         return Some(E_POINTER);
     }
     let media = pin_media(cpu, e.graph, e.pin);
@@ -2415,6 +2446,9 @@ pub fn type_enum_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (head, format) = own_type(m, next as usize);
         let at = new_media_type(cpu, &MediaType { head, format });
         if at == 0 {
+            if given == 0 {
+                return Some(E_OUTOFMEMORY);
+            }
             break;
         }
         cpu.bus.guest_write_32(out + 4 * given, at);
@@ -2455,7 +2489,7 @@ pub fn type_enum_clone(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_POINTER);
     }
     let copy = super::add(cpu, Kind::TypeEnum { e });
-    give_enum(cpu, copy, args[1])
+    Some(super::give_new(cpu, copy, &super::IID_IENUM_MEDIA_TYPES, args[1]))
 }
 
 /// IPin::QueryAccept(this, type): whether the decoder can give it.

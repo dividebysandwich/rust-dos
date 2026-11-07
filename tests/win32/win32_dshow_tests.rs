@@ -1148,9 +1148,10 @@ const PIN_ENUM_MEDIA_TYPES: i32 = 48;
 /// input (Wine's test_graph_builder_render, run on Windows, finds both).
 /// The decoder's output pin enumerates its types, YV12 first, and
 /// Reconnect connects it to the transform again, as a transform-in-place
-/// filter's ReconnectPin asks. The graph pauses the renderer before the
-/// transform, and as it goes it disconnects both ends of each connection
-/// and takes both filters out of it.
+/// filter's ReconnectPin asks, and the transform's output pin to the
+/// renderer again. The graph pauses the renderer before the transform,
+/// and as it goes it disconnects both ends of each connection and takes
+/// both filters out of it.
 #[test]
 fn a_programs_transform_filter_gets_its_renderer_connected() {
     let mut data = vec![0u8; T_SIZE];
@@ -1445,6 +1446,18 @@ fn a_programs_transform_filter_gets_its_renderer_connected() {
         a.mov(ebx, 28)?;
         a.cmp(dword_ptr(l.at(T_IN + PIN_PEER)), 0)?;
         a.je(fail)?;
+        // Reconnect of the renderer's input pin: both ends of the
+        // transform's connection to it disconnect, and the transform's
+        // output pin connects to it again.
+        push(a, l, &[Ptr(T_RENDERER_IN)])?;
+        a.mov(eax, dword_ptr(l.at(GRAPH)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + GRAPH_RECONNECT))?;
+        expect(a, fail, 29, S_OK)?;
+        check(a, l, fail, 30, T_OUT + PIN_CONNECTS, 2)?;
+        check(a, l, fail, 31, T_OUT + PIN_PEER, at(T_RENDERER_IN))?;
+        check(a, l, fail, 32, T_RENDERER_IN + PIN_DISCONNECTS, 1)?;
         // The renderer pauses first.
         method(a, l, fail, 11, (CONTROL, CONTROL_PAUSE), &[], S_OK)?;
         check(a, l, fail, 12, T_RENDERER + FILTER_PAUSED, 1)?;
@@ -1455,8 +1468,8 @@ fn a_programs_transform_filter_gets_its_renderer_connected() {
         // Both ends of each connection disconnected, and both filters
         // left the graph.
         check(a, l, fail, 17, T_IN + PIN_DISCONNECTS, 2)?;
-        check(a, l, fail, 18, T_OUT + PIN_DISCONNECTS, 1)?;
-        check(a, l, fail, 19, T_RENDERER_IN + PIN_DISCONNECTS, 1)?;
+        check(a, l, fail, 18, T_OUT + PIN_DISCONNECTS, 2)?;
+        check(a, l, fail, 19, T_RENDERER_IN + PIN_DISCONNECTS, 2)?;
         check(a, l, fail, 20, T_TRANSFORM + FILTER_JOINED, 0)?;
         check(a, l, fail, 21, T_RENDERER + FILTER_JOINED, 0)?;
         exit(a, l, &mut fail, Imm(0))
