@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 /// The folder's name.
 pub const FOLDER: &str = "automount";
 
-const CD_EXTENSIONS: [&str; 10] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t", "mds"];
+const CD_EXTENSIONS: [&str; 10] = [
+    "cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t", "mds",
+];
 /// The CUE sheets' extensions, GOG's among them.
 const SHEET_EXTENSIONS: [&str; 4] = ["cue", "ins", "inst", "bdn"];
 /// The extensions of BlindWrite's descriptors, which name data files as
@@ -265,7 +267,9 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             tracks.push(format!("{}.bwa", stem.to_ascii_lowercase()));
         } else if named(&entry.name, &[MDS_EXTENSION]) {
             let disc = crate::cdrom::mds::parse(&read(entry)).unwrap_or_default();
-            for file in disc.files() {
+            // Alcohol's own name for the data file counts even when the
+            // descriptor can't be read, as `.bwa` does for BlindWrite.
+            for file in disc.files().into_iter().chain(["*.mdf"]) {
                 let file = crate::cdrom::mds::data_file(&entry.name, file);
                 let file = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_ascii_lowercase();
                 tracks.push(file);
@@ -436,6 +440,11 @@ mod tests {
         let descriptor = crate::cdrom::mds::build(&[&tracks], "*.mdf", &[]);
         std::fs::write(folder.join("D.MDS"), descriptor).unwrap();
         std::fs::write(folder.join("D.MDF"), [0u8; 16]).unwrap();
+        // A descriptor rust-dos refuses still has its data file.
+        let mut refused = crate::cdrom::mds::build(&[&tracks], "*.mdf", &[]);
+        refused[16] = 2;
+        std::fs::write(folder.join("e.mds"), refused).unwrap();
+        std::fs::write(folder.join("e.mdf"), [0u8; 16]).unwrap();
         let scan = scan(&package);
         assert_eq!(names(scan.mount(3).unwrap()), ["D.MDS"]);
         assert!(scan.systems.is_empty(), "{:?}", scan.systems);

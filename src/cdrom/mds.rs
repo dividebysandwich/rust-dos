@@ -56,7 +56,8 @@ const SUBCHANNEL: u64 = 96;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Descriptor {
     pub sessions: Vec<Session>,
-    /// The first DPM block of the descriptor's DPM table.
+    /// The first valid block of DPM data (type 1) of the descriptor's
+    /// DPM table.
     pub dpm: Option<Dpm>,
 }
 
@@ -261,7 +262,7 @@ fn parse_track(r: &Reader, at: usize) -> Result<Option<Track>, String> {
         _ => {
             return Err(format!(
                 "track {} is of mode {:#04x} in sectors of {} bytes, which isn't read",
-                number, block[0], stride
+                number, block[0], size
             ));
         }
     };

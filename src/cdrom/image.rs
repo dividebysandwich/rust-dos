@@ -449,15 +449,12 @@ impl CdImage {
                     .start
                     .checked_add(t.sectors)
                     .ok_or_else(|| error(format!("track {} ends past the disc", t.number)))?;
-                let end = match session.tracks.get(i + 1) {
-                    Some(next) => next.start.saturating_sub(next.pregap),
-                    None => own_end,
-                };
-                if end < t.start {
+                let next = session.tracks.get(i + 1);
+                let end = next.map_or(own_end, |n| n.start.saturating_sub(n.pregap));
+                if let Some(next) = next.filter(|_| end < t.start) {
                     return Err(error(format!(
-                        "track {} starts before track {} does",
-                        t.number + 1,
-                        t.number
+                        "track {}'s pregap starts before track {} does",
+                        next.number, t.number
                     )));
                 }
                 let data_end = own_end.min(end);
@@ -472,7 +469,12 @@ impl CdImage {
                 if t.subchannel {
                     span.subcode = Subcode::Interleaved;
                 }
-                stored[file] = stored[file].max(offset + (data_end - first) as u64 * t.stride);
+                // A descriptor that puts the track past the largest offset
+                // would overflow every read of it.
+                let file_end = offset
+                    .checked_add((data_end - first) as u64 * t.stride)
+                    .ok_or_else(|| error(format!("track {} is past any file's end", t.number)))?;
+                stored[file] = stored[file].max(file_end);
                 image.tracks.push(Track {
                     number: t.number,
                     mode: t.mode,
@@ -1075,29 +1077,25 @@ fn is_chd(path: &Path) -> bool {
 /// Whether `path` is a BlindWrite descriptor: named .b5t or .b6t, or
 /// starting as one does.
 fn is_b6t(path: &Path) -> bool {
-    if path
-        .extension()
-        .is_some_and(|e| ["b5t", "b6t"].iter().any(|x| e.eq_ignore_ascii_case(x)))
-    {
-        return true;
-    }
-    let mut magic = [0u8; 16];
-    File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
-        && &magic == super::b6t::SIGNATURE
+    is_descriptor(path, &["b5t", "b6t"], super::b6t::SIGNATURE)
 }
 
 /// Whether `path` is an Alcohol 120% descriptor: named .mds, or starting
 /// as one does.
 fn is_mds(path: &Path) -> bool {
+    is_descriptor(path, &["mds"], super::mds::SIGNATURE)
+}
+
+/// Whether `path` has one of `extensions`, or starts with `signature`.
+fn is_descriptor(path: &Path, extensions: &[&str], signature: &[u8; 16]) -> bool {
     if path
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mds"))
+        .is_some_and(|e| extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
     {
         return true;
     }
     let mut magic = [0u8; 16];
-    File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
-        && &magic == super::mds::SIGNATURE
+    File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok()) && &magic == signature
 }
 
 /// The data files the Alcohol 120% descriptor at `path` names, each found
@@ -2122,6 +2120,12 @@ mod tests {
         assert_eq!(read(50, &mut raw), 41, "track 3's pregap is stored");
         assert_eq!(read(55, &mut raw), 46);
         assert_eq!(read(69, &mut raw), 60);
+
+        // A track past the largest offset a file can have is refused.
+        let past = [(0xA9, 0, 1, 0, u64::MAX - 2352, 150, 20)];
+        fs::write(dir.join("past.mds"), mds::build(&[&past], "disc.mdf", &[])).unwrap();
+        let error = CdImage::open(&dir.join("past.mds")).err().unwrap();
+        assert!(error.contains("past any file's end"), "{}", error);
     }
 
     #[test]
