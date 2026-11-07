@@ -1025,12 +1025,14 @@ fn bind_imports(
 
 /// The built-in DLL the module `file` (as `module_file_name` gives it)
 /// names. With the `win32_dlls` setting, UCRT's ucrtbase.dll and
-/// api-ms-win-crt-*.dll are MSVCRT.DLL and KERNELBASE.DLL is
-/// KERNEL32.DLL, which Wine's DLLs import; a DLL the setting replaces,
-/// which the folder has, isn't. GLIDE2X.DLL and GLIDE3X.DLL are there
-/// with a 3dfx card alone, as 3dfx's driver brings them, and MSIMG32.DLL
-/// from Windows 98 on. The system directory shows the same DLLs as files
-/// (dll_files.rs).
+/// api-ms-win-crt-*.dll are MSVCRT.DLL and KERNELBASE.DLL is KERNEL32.DLL,
+/// which Wine's DLLs import; a DLL the setting replaces, which the folder
+/// has, isn't. Nor is GLU32.DLL when the folder has one and the setting
+/// replaces OPENGL32.DLL: the built-in GLU32 draws through the built-in
+/// OPENGL32's contexts, which a program on another OpenGL32 doesn't have.
+/// GLIDE2X.DLL and GLIDE3X.DLL are there with a 3dfx card alone, as 3dfx's
+/// driver brings them, and MSIMG32.DLL from Windows 98 on. The system
+/// directory shows the same DLLs as files (dll_files.rs).
 pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;
@@ -1038,7 +1040,10 @@ pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
         index
     } else {
         let stem = file.strip_suffix(".DLL").unwrap_or(file).to_ascii_lowercase();
-        if win32.guest_replace.contains(&stem) && guest_file(bus, file).is_some() {
+        let replaced = |stem: &str| win32.guest_replace.iter().any(|s| s == stem);
+        let on_guest_gl =
+            stem == "glu32" && replaced("opengl32") && guest_file(bus, "OPENGL32.DLL").is_some();
+        if (replaced(&stem) || on_guest_gl) && guest_file(bus, file).is_some() {
             return None;
         }
         match stem.as_str() {
@@ -1355,7 +1360,8 @@ pub(super) fn roll_back(
 
 #[cfg(test)]
 mod tests {
-    use super::directory_of;
+    use super::{builtin_for, directory_of, stubs};
+    use crate::cpu::Cpu;
 
     #[test]
     fn a_directory_ends_at_the_last_separator_of_either_kind() {
@@ -1363,5 +1369,28 @@ mod tests {
         assert_eq!(directory_of("D:/METAL.EXE"), "D:");
         assert_eq!(directory_of(r"C:/WINDOWS\SYSTEM/X.DLL"), r"C:\WINDOWS\SYSTEM");
         assert_eq!(directory_of("X.DLL"), "");
+    }
+
+    /// The built-in GLU32 draws through the built-in OPENGL32, so an
+    /// OPENGL32 from the `win32_dlls` folder takes the folder's GLU32
+    /// with it, when the folder has one.
+    #[test]
+    fn glu32_follows_a_replaced_opengl32() {
+        let dir = std::env::temp_dir().join(format!("rust-dos-glu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.win32.guest_dlls = Some(dir.clone());
+        cpu.bus.win32.guest_replace = vec!["opengl32".to_string()];
+        let glu = stubs::find_dll("GLU32.DLL");
+        // No OPENGL32 in the folder: both are built in.
+        assert_eq!(builtin_for(&cpu.bus, "GLU32.DLL"), glu);
+        std::fs::write(dir.join("opengl32.dll"), b"MZ").unwrap();
+        // The folder's OPENGL32 but no GLU32: the built-in one is all
+        // there is.
+        assert_eq!(builtin_for(&cpu.bus, "OPENGL32.DLL"), None);
+        assert_eq!(builtin_for(&cpu.bus, "GLU32.DLL"), glu);
+        std::fs::write(dir.join("glu32.dll"), b"MZ").unwrap();
+        assert_eq!(builtin_for(&cpu.bus, "GLU32.DLL"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
