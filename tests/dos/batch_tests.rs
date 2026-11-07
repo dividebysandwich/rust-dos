@@ -605,7 +605,11 @@ fn a_command_that_is_not_found_still_makes_its_output_file() {
     // and opens the file whether POWER.EXE is there or not.
     let dir = scratch("redirect_not_found", &[("KEPT.TXT", b"kept")]);
     let mut cpu = machine(&dir);
-    cpu.queue_batch_lines(["@NOSUCH > C:MADE.TXT", "@NOSUCH >> KEPT.TXT", "@NOSUCH > NUL"]);
+    cpu.queue_batch_lines([
+        "@NOSUCH > C:MADE.TXT",
+        "@NOSUCH >> KEPT.TXT",
+        "@NOSUCH > NUL",
+    ]);
     run_batch_files(&mut cpu);
     assert_eq!(fs::read(dir.join("MADE.TXT")).unwrap(), b"");
     assert_eq!(fs::read(dir.join("KEPT.TXT")).unwrap(), b"kept");
