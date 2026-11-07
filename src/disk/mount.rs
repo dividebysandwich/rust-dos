@@ -360,15 +360,20 @@ impl DiskController {
     /// `image` in it.
     fn cd_storage(image: CdImage) -> Result<(DriveKind, Storage, String, bool), String> {
         // A disc of only audio tracks has no file system.
-        let (files, volume_label) = match image.data_track() {
+        let (files, volume_label, sectors) = match image.data_track() {
             Some(_) => {
                 let volume = crate::cdrom::iso9660::read_volume(&image)?;
-                (volume.files, volume.label)
+                (volume.files, volume.label, volume.sectors)
             }
-            None => (MemFs::new(), "AUDIO_CD".to_string()),
+            None => (MemFs::new(), "AUDIO_CD".to_string(), 0),
         };
         let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
-        Ok((DriveKind::CdRom, Storage::Tree { files, image: Some(Rc::new(image)) }, volume_label, false))
+        let storage = Storage::Tree {
+            files,
+            image: Some(Rc::new(image)),
+            sectors,
+        };
+        Ok((DriveKind::CdRom, storage, volume_label, false))
     }
 
     /// The type, storage, volume label and writability of `drive` with the

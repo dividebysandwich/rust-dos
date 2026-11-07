@@ -49,7 +49,8 @@ const START_RADIUS: f64 = 0.025;
 /// The outer edge of the program area, in m.
 const OUTER_RADIUS: f64 = 0.058;
 /// The drive's speed at the outer edge, as a multiple of 1x (75 sectors
-/// a second), a 40x drive of 2000: it spins at about 8600 rpm.
+/// a second), a 40x drive of 2000: it spins at about 8600 rpm (Plextor
+/// lists 8590 for the PX-40TS).
 const SPEED: f64 = 40.0;
 /// Sectors the drive reads ahead into its buffer after a read: 128 KB.
 const READ_AHEAD: i64 = 64;
@@ -57,7 +58,11 @@ const READ_AHEAD: i64 = 64;
 /// 16.6 MB/s of ATA PIO mode 4.
 const SEND_MS: f64 = 0.125;
 /// A seek's time, in ms: settling on the track, and the move across the
-/// whole program area, which grows with the root of the distance.
+/// whole program area, which grows with the root of the distance. A seek
+/// over a third of the area then takes 70 ms, about 74 ms with half a
+/// turn's wait, where 40x drives list 70 to 85 ms of random access
+/// (Pioneer DR-944 70 ms, Plextor PX-40TS 85 ms). Their full-stroke
+/// figures (Pioneer: 160 ms and up) are longer than this curve's 121 ms.
 const SEEK_SETTLE_MS: f64 = 1.0;
 const FULL_STROKE_MS: f64 = 120.0;
 /// How much a read's time varies, either way, as a fraction of it.

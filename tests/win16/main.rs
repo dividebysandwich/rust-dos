@@ -8,10 +8,12 @@
 #[path = "../common/win16/mod.rs"]
 mod win16;
 
+mod win16_comm_tests;
 mod win16_conformance_tests;
 mod win16_drive_tests;
 mod win16_exec_tests;
 mod win16_hook_tests;
 mod win16_mmsystem_tests;
+mod win16_resource_tests;
 mod win16_tests;
 mod win16_user_tests;

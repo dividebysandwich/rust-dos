@@ -1,8 +1,9 @@
 //! The video decompressors Video for Windows has: Indeo Video 3 (IV31,
 //! IV32) and Indeo Video 5 (IV50), decoded by the `oxideav-indeo` crate,
-//! and Indeo Video Interactive 4 (IV41, indeo4/). Windows 98 installs
-//! codecs for the three. A picture comes out as what ICDecompress gives
-//! for a BI_RGB output of 24 bits: a bottom-up DIB.
+//! Indeo Video Interactive 4 (IV41, indeo4/), and Cinepak (CVID,
+//! `iccvid.dll`, cinepak.rs). Windows 98 installs codecs for the four.
+//! A picture comes out as what ICDecompress gives for a BI_RGB output of
+//! 24 bits: a bottom-up DIB.
 //!
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
@@ -15,12 +16,33 @@ const IV31: u32 = u32::from_le_bytes(*b"IV31");
 const IV32: u32 = u32::from_le_bytes(*b"IV32");
 const IV50: u32 = u32::from_le_bytes(*b"IV50");
 const IV41: u32 = u32::from_le_bytes(*b"IV41");
+const CVID: u32 = u32::from_le_bytes(*b"CVID");
 
 /// The largest picture Indeo 3's decoder takes.
 const INDEO3_MAX: (u32, u32) = (640, 480);
 
+/// The widest and tallest Cinepak picture decoded. A frame's header gives
+/// its size in 16 bits, and the decoder makes a picture of that size, so
+/// a damaged header could ask for gigabytes.
+const CINEPAK_MAX: u32 = 4096;
+
+/// The decompressors installed: those of Windows 98 SE's SYSTEM.INI
+/// [drivers32] (`VIDC.<FourCC>=<driver>`, from its INFs, and IV41's and
+/// IV50's from the registration of IR41_32.AX and IR50_32.DLL) that this
+/// module decodes, with the FourCC in lower case as programs write it
+/// and the driver's file. Windows 98 SE also lists MSVC, MRLE and IYUV,
+/// which no decoder here takes, so a program that finds a codec in this
+/// list can play it. `Codec::new` and `supported` take each of them.
+pub const INSTALLED: &[(&[u8; 4], &str)] = &[
+    (b"cvid", "iccvid.dll"),
+    (b"iv31", "ir32_32.dll"),
+    (b"iv32", "ir32_32.dll"),
+    (b"iv41", "ir41_32.ax"),
+    (b"iv50", "ir50_32.dll"),
+];
+
 /// The FourCC `compression` in capitals, as ICOpen compares them.
-fn upper(compression: u32) -> u32 {
+pub fn upper(compression: u32) -> u32 {
     u32::from_le_bytes(compression.to_le_bytes().map(|b| b.to_ascii_uppercase()))
 }
 
@@ -30,6 +52,7 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
         IV31 | IV32 => (1..=INDEO3_MAX.0).contains(&width) && (1..=INDEO3_MAX.1).contains(&height),
         IV50 => width >= 1 && height >= 1,
         IV41 => (1..=4096).contains(&width) && (1..=4096).contains(&height),
+        CVID => (1..=CINEPAK_MAX).contains(&width) && (1..=CINEPAK_MAX).contains(&height),
         _ => false,
     }
 }
@@ -40,6 +63,7 @@ enum Decoder {
     /// to decode leaves as it is.
     Indeo5(Box<Indeo5Decoder>, Option<(HostBuffer, (u32, u32))>),
     Indeo4(Box<super::indeo4::Decoder>),
+    Cinepak(Box<super::cinepak::Decoder>),
 }
 
 /// A decompressor, or none yet.
@@ -58,6 +82,7 @@ impl std::fmt::Debug for Codec {
             Some(Decoder::Indeo3(_)) => "Codec(Indeo 3)",
             Some(Decoder::Indeo5(..)) => "Codec(Indeo 5)",
             Some(Decoder::Indeo4(_)) => "Codec(Indeo 4)",
+            Some(Decoder::Cinepak(_)) => "Codec(Cinepak)",
             None => "Codec(None)",
         })
     }
@@ -70,6 +95,7 @@ impl Codec {
             IV31 | IV32 => Some(Decoder::Indeo3(Box::default())),
             IV50 => Some(Decoder::Indeo5(Box::default(), None)),
             IV41 => Some(Decoder::Indeo4(Box::new(super::indeo4::Decoder::new()))),
+            CVID => Some(Decoder::Cinepak(Box::default())),
             _ => None,
         })
     }
@@ -79,7 +105,8 @@ impl Codec {
     }
 
     /// Decompress one frame. After an error the picture stays the one
-    /// before.
+    /// before, but for Cinepak's: a Cinepak frame that fails partway
+    /// keeps the blocks it drew, as FFmpeg's decoder does.
     pub fn decode(&mut self, frame: &[u8]) -> Result<(), String> {
         match &mut self.0 {
             Some(Decoder::Indeo3(d)) => {
@@ -99,6 +126,7 @@ impl Codec {
                 Ok(())
             }
             Some(Decoder::Indeo4(d)) => d.decode(frame),
+            Some(Decoder::Cinepak(d)) => d.decode(frame, CINEPAK_MAX as usize),
             None => Err("no decoder".to_string()),
         }
     }
@@ -125,8 +153,30 @@ impl Codec {
                     yvu9_dib(&p.y, &p.u, &p.v, (p.width, p.height), p.chroma_width())
                 })
             }
+            Decoder::Cinepak(d) => {
+                // A frame is coded in blocks of 4 by 4 pixels, so a movie
+                // whose size isn't a multiple of 4 is coded larger. The
+                // picture is the top left of it, as FFmpeg's decoder
+                // gives, which goes by the stream's size too.
+                let (w, h) = d.size();
+                (w >= width as usize && h >= height as usize).then(|| cinepak_dib(d, width, height))
+            }
         }
     }
+}
+
+/// The top left `width` by `height` of a Cinepak picture, as a DIB.
+fn cinepak_dib(d: &super::cinepak::Decoder, width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let stride = dib_stride(width as i32, 24);
+    let mut out = vec![0; stride * h];
+    for y in 0..h {
+        let row = out[(h - 1 - y) * stride..][..w * 3].as_chunks_mut::<3>().0;
+        for (o, &[r, g, b]) in row.iter_mut().zip(d.row(y)) {
+            *o = [b, g, r];
+        }
+    }
+    out
 }
 
 /// The bytes of the rows of a DIB, which a file or a program can size so
@@ -259,12 +309,135 @@ mod tests {
     }
 
     #[test]
+    fn cinepak_pictures_come_out_as_bottom_up_dibs() {
+        // A key frame of 8 by 8 pixels, four macroblocks, coded by the
+        // crate's encoder: the top four rows red, the bottom four blue.
+        let mut rgb = Vec::new();
+        for y in 0..8 {
+            for _ in 0..8 {
+                rgb.extend_from_slice(if y < 4 { &[255, 0, 0] } else { &[0, 0, 255] });
+            }
+        }
+        let frame = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(u32::from_le_bytes(*b"cvid"));
+        codec.decode(&frame).unwrap();
+        assert!(codec.picture(16, 8).is_none());
+        assert!(codec.picture(8, 12).is_none());
+        let dib = codec.picture(8, 8).unwrap();
+        let stride = dib_stride(8, 24);
+        // The DIB's first row is the picture's bottom one: blue, as blue,
+        // green and red.
+        let px = |row: usize| -> [u8; 3] { dib[row * stride..][..3].try_into().unwrap() };
+        let (bottom, top) = (px(0), px(7));
+        assert!(bottom[0] > 200 && bottom[2] < 60, "bottom {bottom:?}");
+        assert!(top[2] > 200 && top[0] < 60, "top {top:?}");
+    }
+
+    /// An 8 by 8 picture, `top` above `bottom`, as rows of `n` bytes a
+    /// pixel.
+    fn halves(n: usize, top: &[u8], bottom: &[u8]) -> Vec<u8> {
+        (0..64)
+            .flat_map(|i| if i < 32 { &top[..n] } else { &bottom[..n] })
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn a_cinepak_movie_of_a_size_not_a_multiple_of_4_is_the_top_left() {
+        let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
+        let frame = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&frame).unwrap();
+        // A 6 by 6 movie is coded as 8 by 8: its rows 4 and 5 are blue.
+        let dib = codec.picture(6, 6).unwrap();
+        let stride = dib_stride(6, 24);
+        assert_eq!(dib.len(), stride * 6);
+        let px = |row: usize| -> [u8; 3] { dib[row * stride + 15..][..3].try_into().unwrap() };
+        let (bottom, top) = (px(0), px(5));
+        assert!(bottom[0] > 200 && bottom[2] < 60, "bottom {bottom:?}");
+        assert!(top[2] > 200 && top[0] < 60, "top {top:?}");
+    }
+
+    #[test]
+    fn grey_cinepak_pictures_come_out_grey() {
+        let grey = halves(1, &[230], &[20]);
+        let frame = oxideav_cinepak::encode_gray8(&grey, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&frame).unwrap();
+        let dib = codec.picture(8, 8).unwrap();
+        let stride = dib_stride(8, 24);
+        let (bottom, top) = (&dib[..3], &dib[7 * stride..][..3]);
+        assert!(
+            bottom.iter().all(|&c| c == bottom[0] && c < 60),
+            "bottom {bottom:?}"
+        );
+        assert!(top.iter().all(|&c| c == top[0] && c > 200), "top {top:?}");
+    }
+
+    #[test]
+    fn a_cinepak_frame_too_large_is_refused_before_it_is_decoded() {
+        let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
+        let frame = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&frame).unwrap();
+        // 65532 by 65532, which would be 12 GB of pixels.
+        let huge = [0, 0, 0, 10, 0xFF, 0xFC, 0xFF, 0xFC, 0, 1];
+        assert!(codec.decode(&huge).is_err());
+        assert!(codec.picture(8, 8).is_some());
+        assert!(!supported(CVID, 8192, 8));
+    }
+
+    #[test]
+    fn a_cinepak_frame_with_no_strip_leaves_the_decoder_as_it_was() {
+        let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
+        let key = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        // A frame that keeps the codebooks: one inter strip with no
+        // codebook chunk, whose four blocks are the V1 codebook's entry 0.
+        #[rustfmt::skip]
+        let next = [
+            1, 0, 0, 30, 0, 8, 0, 8, 0, 1,
+            0x11, 0x00, 0, 20, 0, 0, 0, 0, 0, 8, 0, 8,
+            0x32, 0x00, 0, 8, 0, 0, 0, 0,
+        ];
+        let mut reference = Codec::new(CVID);
+        reference.decode(&key).unwrap();
+        reference.decode(&next).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&key).unwrap();
+        // A header of one strip, and no strip.
+        assert!(codec.decode(&[0, 0, 0, 10, 0, 8, 0, 8, 0, 1]).is_err());
+        codec.decode(&next).unwrap();
+        let picture = reference.picture(8, 8).unwrap();
+        // The entry the key frame gave isn't an empty one's black.
+        assert!(picture.iter().any(|&c| c > 100), "{picture:?}");
+        assert_eq!(codec.picture(8, 8).unwrap(), picture);
+    }
+
+    #[test]
     fn codecs_go_by_fourcc_in_either_case() {
         let iv50 = u32::from_le_bytes(*b"iv50");
         assert!(supported(iv50, 640, 480));
-        assert!(!supported(u32::from_le_bytes(*b"cvid"), 320, 240));
+        assert!(supported(u32::from_le_bytes(*b"cvid"), 320, 240));
+        assert!(!supported(u32::from_le_bytes(*b"MSVC"), 320, 240));
         assert!(!supported(IV32, 800, 600));
         assert!(!Codec::new(iv50).is_empty());
         assert!(Codec::new(0).is_empty());
+    }
+
+    /// What ICInfo says is installed is what the decoders take, and the
+    /// other way round.
+    #[test]
+    fn installed_codecs_are_the_decoded_ones() {
+        for (fourcc, _) in INSTALLED {
+            let fourcc = u32::from_le_bytes(**fourcc);
+            assert!(!Codec::new(fourcc).is_empty());
+            assert!(supported(fourcc, 320, 240));
+        }
+        for fourcc in [IV31, IV32, IV41, IV50, CVID] {
+            let listed = INSTALLED
+                .iter()
+                .any(|(f, _)| upper(u32::from_le_bytes(**f)) == fourcc);
+            assert!(listed);
+        }
     }
 }

@@ -7,7 +7,7 @@
 use super::builtin::{Api16, Def, cdecl, rust, win32};
 use super::handles::{accel32, icon16, icon32, instance16, instance32, menu32};
 use super::thunk::{self, KIND_DLGPROC, KIND_PLAIN, KIND_WNDPROC};
-use super::{hook, kernel, message};
+use super::{comm, hook, kernel, message};
 use crate::cpu::{Cpu, Seg};
 use crate::dpmi::Context;
 use crate::win32::user32::text::ansi_case;
@@ -302,8 +302,8 @@ static APIS: &[Api16] = &[
     ),
     rust("TabbedTextOut", 196, "wsspssps", tabbed_text_out),
     rust("GetTabbedTextExtent", 197, "wpwwp", get_tabbed_text_extent),
-    rust("OpenComm", 200, "pww", minus_one),
-    rust("CloseComm", 207, "w", minus_one),
+    rust("OpenComm", 200, "pww", comm::open_comm),
+    rust("CloseComm", 207, "w", comm::close_comm),
     rust("DialogBoxIndirect", 218, "nwwS", dialog_box_indirect),
     rust("CreateDialogIndirect", 219, "nSwS", create_dialog_indirect),
     win32("ScrollDC", 221, "wssRRwR", U, "ScrollDC", b'b'),
@@ -456,6 +456,20 @@ static APIS: &[Api16] = &[
     win32("CopyCursor", 369, "ni", U, "CopyIcon", b'i'),
     win32("GetInputState", 335, "", U, "GetInputState", b'b'),
     win32("GetQueueStatus", 334, "w", U, "GetQueueStatus", b'w'),
+    rust("SetCommState", 201, "p", comm::set_comm_state),
+    rust("GetCommState", 202, "wp", comm::get_comm_state),
+    rust("GetCommError", 203, "wp", comm::get_comm_error),
+    rust("ReadComm", 204, "wpw", comm::read_comm),
+    rust("WriteComm", 205, "wpw", comm::write_comm),
+    rust("TransmitCommChar", 206, "ww", comm::transmit_comm_char),
+    rust("SetCommEventMask", 208, "ww", comm::set_comm_event_mask),
+    rust("GetCommEventMask", 209, "ww", comm::get_comm_event_mask),
+    rust("SetCommBreak", 210, "w", comm::set_comm_break),
+    rust("ClearCommBreak", 211, "w", comm::clear_comm_break),
+    rust("UngetCommChar", 212, "ww", comm::unget_comm_char),
+    rust("BuildCommDCB", 213, "pp", comm::build_comm_dcb),
+    rust("EscapeCommFunction", 214, "ww", comm::escape_comm_function),
+    rust("FlushComm", 215, "ww", comm::flush_comm),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -479,10 +493,6 @@ fn get_active_window(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         0 => Some(crate::win32::user32::progman::server(cpu)),
         active => Some(active),
     }
-}
-
-fn minus_one(_: &mut Cpu, _: &[u32]) -> Option<u32> {
-    Some(0xFFFF)
 }
 
 /// GetTimerResolution: 1000, as Wine says.
@@ -1383,10 +1393,8 @@ fn create_dialog_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let proc = proc32_of(cpu, args[3], KIND_DLGPROC, instance);
     let instance32 = instance32(cpu, instance);
     // The template goes to the end of its segment at most.
-    let (at, offset) = (super::linear(cpu, args[1]), args[1] & 0xFFFF);
-    let size = super::selector_base(cpu, (args[1] >> 16) as u16)
-        .map_or(0, |(_, limit, _)| (limit + 1).saturating_sub(offset))
-        .min(0x8000);
+    let at = super::linear(cpu, args[1]);
+    let size = super::segment_room(cpu, args[1]).min(0x8000);
     let template = template32(cpu, at, size);
     let param = args.get(4).copied().unwrap_or(0);
     go_at(

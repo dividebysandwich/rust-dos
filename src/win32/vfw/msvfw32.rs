@@ -1,6 +1,8 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
-//! decompress it first when it is compressed. The behaviour follows
-//! Wine's drawdib.c (LGPL 2.1 or later):
+//! decompress it first when it is compressed, and ICInfo, ICOpen and
+//! ICClose, which find and open the decompressors codec.rs has. The
+//! DrawDib functions' behaviour follows Wine's drawdib.c (LGPL 2.1 or
+//! later):
 //!
 //! Copyright 2000 Bradley Baetz
 //!
@@ -40,21 +42,137 @@ const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: stubs::Han
 
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("DrawDibOpen", 1, 0, draw_dib_open),
-    stdcall("DrawDibClose", 2, 1, draw_dib_close),
+    stdcall("DrawDibOpen", 10, 0, draw_dib_open),
+    stdcall("DrawDibClose", 5, 1, draw_dib_close),
     stdcall("DrawDibBegin", 3, 8, draw_dib_begin),
-    stdcall("DrawDibEnd", 4, 1, draw_dib_end),
-    stdcall("DrawDibDraw", 5, 13, draw_dib_draw),
-    stdcall("DrawDibStart", 6, 2, known),
-    stdcall("DrawDibStop", 7, 1, known),
-    stdcall("DrawDibRealize", 8, 3, zero),
-    stdcall("DrawDibSetPalette", 9, 2, known),
-    stdcall("DrawDibGetPalette", 10, 1, zero),
-    stdcall("DrawDibChangePalette", 11, 4, known),
-    stdcall("DrawDibGetBuffer", 12, 4, zero),
-    stdcall("DrawDibTime", 13, 2, zero),
-    stdcall("DrawDibProfileDisplay", 14, 1, profile_display),
+    stdcall("DrawDibEnd", 7, 1, draw_dib_end),
+    stdcall("DrawDibDraw", 6, 13, draw_dib_draw),
+    stdcall("DrawDibStart", 14, 2, known),
+    stdcall("DrawDibStop", 15, 1, known),
+    stdcall("DrawDibRealize", 12, 3, zero),
+    stdcall("DrawDibSetPalette", 13, 2, known),
+    stdcall("DrawDibGetPalette", 9, 1, zero),
+    stdcall("DrawDibChangePalette", 4, 4, known),
+    stdcall("DrawDibGetBuffer", 8, 4, zero),
+    stdcall("DrawDibTime", 16, 2, zero),
+    stdcall("DrawDibProfileDisplay", 11, 1, profile_display),
+    stdcall("ICInfo", 33, 3, ic_info),
+    stdcall("ICOpen", 37, 3, ic_open),
+    stdcall("ICClose", 22, 1, ic_close),
 ];
+
+/// ICINFO's size: six DWORDs, then szName[16], szDescription[128] and
+/// szDriver[128] in UTF-16.
+const ICINFO: u32 = 24 + 2 * (16 + 128 + 128);
+const ICTYPE_VIDEO: u32 = u32::from_le_bytes(*b"vidc");
+/// ICINFO's dwVersionICM: the ICM version, 1.04.
+const ICVERSION: u32 = 0x0104;
+
+/// ICInfo(fccType, fccHandler, lpicinfo): whether a codec of the type
+/// (`vidc`, or any with 0) is installed. A handler under 256 is an index
+/// into the type's codecs, which a program counts up from 0 until the
+/// call fails; any other is the codec's FourCC, compared without regard
+/// to case. The ICINFO filled is as Wine's ICInfo fills it: the type and
+/// handler, dwVersionICM and the driver's file, with no name or
+/// description (ICGetInfo's). Age of Empires asks for `iv41`, Indeo 4,
+/// before it plays its films.
+fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[kind, handler, info] = args else {
+        unreachable!()
+    };
+    if info == 0 || !allows(cpu, info, ICINFO, true) {
+        return Some(0);
+    }
+    if kind != 0 && !video(kind) {
+        return Some(0);
+    }
+    let found = if handler < 256 {
+        codec::INSTALLED.get(handler as usize)
+    } else {
+        installed(handler)
+    };
+    let Some(&(fourcc, driver)) = found else {
+        return Some(0);
+    };
+    let mut bytes = Vec::with_capacity(ICINFO as usize);
+    for value in [ICINFO, ICTYPE_VIDEO, u32::from_le_bytes(*fourcc), 0, 0, ICVERSION] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.resize(24 + 2 * (16 + 128), 0);
+    for unit in driver.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.resize(ICINFO as usize, 0);
+    cpu.bus.guest_write_bytes(info, &bytes);
+    Some(1)
+}
+
+/// Whether `kind` is `vidc`, the type of the codecs here, in either case.
+fn video(kind: u32) -> bool {
+    codec::upper(kind) == codec::upper(ICTYPE_VIDEO)
+}
+
+/// The installed codec of FourCC `handler`, compared without regard to
+/// case, as Windows finds `vidc.<FourCC>` among SYSTEM.INI's [drivers32]
+/// keys.
+fn installed(handler: u32) -> Option<&'static (&'static [u8; 4], &'static str)> {
+    let handler = codec::upper(handler);
+    codec::INSTALLED
+        .iter()
+        .find(|(fourcc, _)| codec::upper(u32::from_le_bytes(**fourcc)) == handler)
+}
+
+/// ICOpen's modes a decompressor takes: ICMODE_DECOMPRESS,
+/// ICMODE_FASTDECOMPRESS and ICMODE_QUERY.
+const ICMODE_DECOMPRESS: u32 = 2;
+const ICMODE_FASTDECOMPRESS: u32 = 3;
+const ICMODE_QUERY: u32 = 4;
+/// ICClose's ICERR_OK and ICERR_BADHANDLE.
+const ICERR_OK: u32 = 0;
+const ICERR_BADHANDLE: u32 = -8i32 as u32;
+
+/// ICOpen(fccType, fccHandler, wMode): a handle to the installed codec,
+/// or 0 when there is none. A mode that compresses or draws
+/// (ICMODE_COMPRESS, ICMODE_FASTCOMPRESS, ICMODE_DRAW) gets 0 as well.
+/// That is this module's choice: Windows 98 SE's Cinepak driver
+/// compresses, and Wine's decoders open whatever the mode. But the
+/// codecs here only decompress and there is no ICCompress or ICDraw, so
+/// a handle would stop the program at its next call, where 0 tells it
+/// that no codec does the job. Rent-A-Hero opens `vidc`/`IV50` to see
+/// that Indeo 5 is there before it starts, and stops when it isn't.
+fn ic_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let &[kind, handler, mode] = args else {
+        unreachable!()
+    };
+    if !matches!(
+        mode,
+        ICMODE_DECOMPRESS | ICMODE_FASTDECOMPRESS | ICMODE_QUERY
+    ) {
+        return Some(0);
+    }
+    let Some((fourcc, _)) = installed(handler).filter(|_| video(kind)) else {
+        return Some(0);
+    };
+    let list = &mut crate::win32::process(cpu).vfw.codecs;
+    let slot = super::free_slot(list);
+    list[slot] = Some(codec::upper(u32::from_le_bytes(**fourcc)));
+    Some(slot as u32 + 1)
+}
+
+/// ICClose(hic): ICERR_OK, or ICERR_BADHANDLE for a handle that isn't
+/// open.
+fn ic_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let list = &mut crate::win32::process(cpu).vfw.codecs;
+    let open = (args[0] as usize)
+        .checked_sub(1)
+        .and_then(|slot| list.get_mut(slot))
+        .and_then(Option::take);
+    Some(if open.is_some() {
+        ICERR_OK
+    } else {
+        ICERR_BADHANDLE
+    })
+}
 
 /// DrawDibDraw's flags.
 const DDF_UPDATE: u32 = 0x0002;
@@ -177,10 +295,7 @@ fn profile_display(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// DrawDibOpen(): a new handle.
 fn draw_dib_open(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let list = drawdibs(cpu);
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
+    let slot = super::free_slot(list);
     list[slot] = Some(DrawDib::default());
     Some(slot as u32 + 1)
 }

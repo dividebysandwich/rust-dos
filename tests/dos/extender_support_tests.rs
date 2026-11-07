@@ -197,6 +197,8 @@ fn exec_gives_the_child_its_own_environment() {
     assert!(cpu.load_executable("PARENT.COM", None));
     let parent = cpu.current_psp;
     let parent_base = parent as usize * 16;
+    // The COM program shrinks its block, which holds all of memory.
+    rust_dos::mcb::resize(&mut cpu.bus, parent, 0x1000).unwrap();
 
     // Name at PSP:0200, empty command tail at PSP:0210, parameter block
     // at PSP:0220 (environment 0: a copy of the parent's).

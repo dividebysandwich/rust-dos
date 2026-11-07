@@ -47,28 +47,28 @@ const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: stubs::Han
 /// The functions, then the interfaces' methods. Append only (see
 /// `stubs`).
 static APIS: &[Api] = &[
-    stdcall("AVIFileInit", 1, 0, nothing),
-    stdcall("AVIFileExit", 2, 0, nothing),
-    stdcall("AVIFileOpenA", 3, 4, avi_file_open),
-    stdcall("AVIFileOpen", 4, 4, avi_file_open),
+    stdcall("AVIFileInit", 15, 0, nothing),
+    stdcall("AVIFileExit", 10, 0, nothing),
+    stdcall("AVIFileOpenA", 17, 4, avi_file_open),
+    stdcall("AVIFileOpen", 16, 4, avi_file_open),
     stdcall("AVIFileAddRef", 5, 1, file_add_ref),
-    stdcall("AVIFileRelease", 6, 1, file_release),
-    stdcall("AVIFileGetStream", 7, 4, file_get_stream),
-    stdcall("AVIFileInfoA", 8, 3, avi_file_info_a),
-    stdcall("AVIFileInfo", 9, 3, avi_file_info_a),
-    stdcall("AVIStreamAddRef", 10, 1, stream_add_ref),
-    stdcall("AVIStreamRelease", 11, 1, stream_release),
-    stdcall("AVIStreamInfoA", 12, 3, avi_stream_info_a),
-    stdcall("AVIStreamInfo", 13, 3, avi_stream_info_a),
-    stdcall("AVIStreamReadFormat", 14, 4, stream_read_format),
-    stdcall("AVIStreamRead", 15, 7, stream_read),
-    stdcall("AVIStreamStart", 16, 1, avi_stream_start),
-    stdcall("AVIStreamLength", 17, 1, avi_stream_length),
-    stdcall("AVIStreamBeginStreaming", 18, 4, nothing),
-    stdcall("AVIStreamEndStreaming", 19, 1, nothing),
-    stdcall("AVIStreamSampleToTime", 20, 2, avi_stream_sample_to_time),
-    stdcall("AVIStreamTimeToSample", 21, 2, avi_stream_time_to_sample),
-    stdcall("AVIStreamFindSample", 22, 3, stream_find_sample),
+    stdcall("AVIFileRelease", 20, 1, file_release),
+    stdcall("AVIFileGetStream", 11, 4, file_get_stream),
+    stdcall("AVIFileInfoA", 13, 3, avi_file_info_a),
+    stdcall("AVIFileInfo", 12, 3, avi_file_info_a),
+    stdcall("AVIStreamAddRef", 35, 1, stream_add_ref),
+    stdcall("AVIStreamRelease", 53, 1, stream_release),
+    stdcall("AVIStreamInfoA", 44, 3, avi_stream_info_a),
+    stdcall("AVIStreamInfo", 43, 3, avi_stream_info_a),
+    stdcall("AVIStreamReadFormat", 52, 4, stream_read_format),
+    stdcall("AVIStreamRead", 50, 7, stream_read),
+    stdcall("AVIStreamStart", 56, 1, avi_stream_start),
+    stdcall("AVIStreamLength", 46, 1, avi_stream_length),
+    stdcall("AVIStreamBeginStreaming", 36, 4, nothing),
+    stdcall("AVIStreamEndStreaming", 38, 1, nothing),
+    stdcall("AVIStreamSampleToTime", 54, 2, avi_stream_sample_to_time),
+    stdcall("AVIStreamTimeToSample", 57, 2, avi_stream_time_to_sample),
+    stdcall("AVIStreamFindSample", 39, 3, stream_find_sample),
     stdcall("IAVIFile_QueryInterface", 0, 3, file_query_interface),
     stdcall("IAVIFile_AddRef", 0, 1, file_add_ref),
     stdcall("IAVIFile_Release", 0, 1, file_release),
@@ -93,9 +93,9 @@ static APIS: &[Api] = &[
     stdcall("IAVIStream_ReadData", 0, 4, no_data),
     stdcall("IAVIStream_WriteData", 0, 4, read_only),
     stdcall("IAVIStream_SetInfo", 0, 3, read_only),
-    stdcall("AVIStreamGetFrameOpen", 23, 2, avi_stream_get_frame_open),
-    stdcall("AVIStreamGetFrame", 24, 2, get_frame_get),
-    stdcall("AVIStreamGetFrameClose", 25, 1, get_frame_release),
+    stdcall("AVIStreamGetFrameOpen", 42, 2, avi_stream_get_frame_open),
+    stdcall("AVIStreamGetFrame", 40, 2, get_frame_get),
+    stdcall("AVIStreamGetFrameClose", 41, 1, get_frame_release),
     stdcall("IGetFrame_QueryInterface", 0, 3, get_frame_query_interface),
     stdcall("IGetFrame_AddRef", 0, 1, get_frame_add_ref),
     stdcall("IGetFrame_Release", 0, 1, get_frame_release),
@@ -392,11 +392,7 @@ fn avi_file_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let streams = vec![0; avi.streams.len()];
     let file_name = path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-    let list = files(cpu);
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
+    let slot = super::free_slot(files(cpu));
     let Some(iface) = com::new_interface(cpu, dll_index(), IAVIFILE, slot as u32 + 1, 0) else {
         kernel32::files::close(cpu, handle);
         return Some(AVIERR_MEMORY);
@@ -1072,11 +1068,7 @@ fn avi_stream_get_frame_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if file(cpu, file_slot).avi.streams[stream_index].kind() != STREAMTYPE_VIDEO {
         return Some(0);
     }
-    let list = frames(cpu);
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
+    let slot = super::free_slot(frames(cpu));
     let Some(iface) = com::new_interface(cpu, dll_index(), IGETFRAME, slot as u32 + 1, 0) else {
         return Some(0);
     };

@@ -32,8 +32,8 @@
 //! lighting and the accumulation buffer, do nothing and say so in the
 //! log. The extensions are GL_ARB_multitexture (on a Voodoo3, with its
 //! two texture units; a Banshee has one and not the extension),
-//! GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
-//! WGL_EXT_swap_control.
+//! GL_EXT_bgra, GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add
+//! and WGL_EXT_swap_control.
 //!
 //! On a machine with a Voodoo2 beside the display adapter, the DLL is
 //! 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL), which games of the time
@@ -65,6 +65,10 @@ mod matrix;
 mod state;
 mod texture;
 pub mod wgl;
+
+pub use matrix::{mult as mult_matrix, ortho};
+pub use state::get_string;
+pub use texture::{GL_TEXTURE_2D, rgba_of, tex_image_rgba};
 
 use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::stubs::{Api, Conv, Dll};
@@ -265,6 +269,9 @@ pub struct State {
     pub formats: Vec<(u32, u32)>,
     /// The functions that do nothing whose first call was logged.
     pub logged: Vec<u16>,
+    /// The same for GLU32.DLL (glu32/), which works on OPENGL32's
+    /// contexts.
+    pub glu_logged: Vec<u16>,
 }
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
@@ -553,4 +560,4 @@ crate::state_fields!(State {
     contexts,
     current,
     formats
-} skip { logged });
+} skip { logged, glu_logged });

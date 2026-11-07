@@ -16,6 +16,7 @@
 //! processes' threads go on around them.
 
 mod builtin;
+mod comm;
 pub mod dos;
 pub(crate) mod dpmi;
 pub(crate) mod flat;
@@ -30,7 +31,7 @@ mod lz;
 mod message;
 mod misc;
 mod module;
-mod resource;
+pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
 mod user;
@@ -57,6 +58,11 @@ pub struct State {
     /// The thread id of the task that holds the Win16 lock, or 0: while
     /// it can run, no other task does.
     pub lock: u32,
+    /// The thread id of the task the last message between two tasks went
+    /// to (a sent message, or a reply), or 0. When the lock is free and
+    /// that task can run, it runs before the other tasks (`hand_turn` in
+    /// task.rs). It is cleared when it runs.
+    pub directed: u32,
     /// The LDT's entries given out, and the global heap's blocks by
     /// their first selector's index.
     pub ldt: Ldt,
@@ -121,6 +127,8 @@ pub struct State {
     pub clients: Vec<flat::Client>,
     pub aliases: Vec<flat::Alias>,
     pub links: Vec<flat::Link>,
+    /// The serial ports open (comm.rs).
+    pub comm: Vec<comm::Port>,
     /// The exit code of the last task that ended other than a client's,
     /// which the Win16 process ends with when a client outlived it.
     pub exit_code: u16,
@@ -150,6 +158,9 @@ pub struct Module16 {
     /// The base of the image of its resources the 32-bit functions read
     /// (resource.rs), or 0 before one is made.
     pub resources32: u32,
+    /// That image's bytes, which its pages are filled from as they are
+    /// needed; None until it is made, and after a saved state is loaded.
+    pub image32: Option<std::sync::Arc<[u8]>>,
     /// The module handles of the modules it imports from, which it holds.
     pub deps: Vec<u16>,
     /// The header's flags, and the version of Windows it expects.
@@ -450,6 +461,17 @@ pub fn linear(cpu: &Cpu, segptr: u32) -> u32 {
     }
 }
 
+/// How many bytes there are from the 16:16 pointer `segptr` to the end
+/// of its segment: 0 when the selector isn't there. A segment of 4 GB
+/// (a limit of FFFFFFFFh) has as many as a u32 can count.
+pub fn segment_room(cpu: &Cpu, segptr: u32) -> u32 {
+    selector_base(cpu, (segptr >> 16) as u16).map_or(0, |(_, limit, _)| {
+        (limit as u64 + 1)
+            .saturating_sub((segptr & 0xFFFF) as u64)
+            .min(u32::MAX as u64) as u32
+    })
+}
+
 /// The linear address of `sel:off`.
 pub fn lin(cpu: &Cpu, sel: u16, off: u16) -> u32 {
     linear(cpu, (sel as u32) << 16 | off as u32)
@@ -575,6 +597,7 @@ pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
 crate::state_fields!(State {
     pid,
     lock,
+    directed,
     ldt,
     arena,
     heap,
@@ -603,7 +626,8 @@ crate::state_fields!(State {
     clients,
     aliases,
     links,
-    exit_code
+    exit_code,
+    comm
 });
 crate::state_fields!(Module16 {
     name,
@@ -620,6 +644,8 @@ crate::state_fields!(Module16 {
     expected_version,
     loaded,
     unbooted
+} skip {
+    image32
 });
 crate::state_fields!(Segment16 {
     handle,

@@ -56,14 +56,14 @@ static APIS: &[Api] = &[
     stdcall("GetFileVersionInfoSizeA", 2, 2, get_file_version_info_size),
     stdcall("GetFileVersionInfoSizeW", 3, 2, not_implemented),
     stdcall("GetFileVersionInfoW", 4, 4, not_implemented),
-    stdcall("VerFindFileA", 5, 8, ver_find_file),
-    stdcall("VerFindFileW", 6, 8, not_implemented),
-    stdcall("VerInstallFileA", 7, 8, ver_install_file),
-    stdcall("VerInstallFileW", 8, 8, not_implemented),
-    stdcall("VerLanguageNameA", 9, 3, ver_language_name),
-    stdcall("VerLanguageNameW", 10, 3, not_implemented),
-    stdcall("VerQueryValueA", 11, 4, ver_query_value),
-    stdcall("VerQueryValueW", 12, 4, not_implemented),
+    stdcall("VerFindFileA", 6, 8, ver_find_file),
+    stdcall("VerFindFileW", 7, 8, not_implemented),
+    stdcall("VerInstallFileA", 8, 8, ver_install_file),
+    stdcall("VerInstallFileW", 9, 8, not_implemented),
+    stdcall("VerLanguageNameA", 10, 3, ver_language_name),
+    stdcall("VerLanguageNameW", 11, 3, not_implemented),
+    stdcall("VerQueryValueA", 12, 4, ver_query_value),
+    stdcall("VerQueryValueW", 13, 4, not_implemented),
 ];
 
 const TRUE: u32 = 1;
@@ -423,6 +423,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
         "MSACM32" | "DCIMAN32" if windows.is_98() => [4, 3, 0, 1998],
+        "IMM32" | "NTDLL" if windows.is_98() => [4, 10, 0, 1998],
         // DirectX 6.1's DirectShow, as Windows 98 SE has it.
         "QUARTZ" => [6, 1, 5, 319],
         "AMSTREAM" => [6, 1, 5, 217],
@@ -432,6 +433,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         [4, 0, 0, 950] => "4.00.950".to_string(),
         [5, 0, 1693, 1] => "5.00.1693.1".to_string(),
         [4, 3, 0, 1998] => "4.03.1998".to_string(),
+        [4, 10, 0, 1998] => "4.10.1998".to_string(),
         [a, b, c, d] => format!("{}.{:02}.{:02}.{:04}", a, b, c, d),
     };
     let ms = (version[0] as u32) << 16 | version[1] as u32;
@@ -532,7 +534,7 @@ fn file_resource(cpu: &mut Cpu, name: &str) -> Result<Resource, u32> {
             let system = dir.is_empty()
                 || dir.eq_ignore_ascii_case(super::loader::SYSTEM_DIR)
                 || dir.eq_ignore_ascii_case(super::loader::WINDOWS_DIR);
-            // As LoadLibrary finds it: NTDLL.DLL only with `win32_dlls`.
+            // As LoadLibrary finds it (MSIMG32.DLL from Windows 98 on).
             let file_name = super::loader::module_file_name(file);
             match super::loader::builtin_for(&cpu.bus, &file_name) {
                 Some(i) if system && !file.is_empty() => {
@@ -1200,6 +1202,20 @@ mod tests {
         assert_eq!(file_version(WindowsVersion::Win95), b"4.00.950\0");
         assert_eq!(file_version(WindowsVersion::Win98), b"4.03.1998\0");
         assert_eq!(file_version(WindowsVersion::Win98Se), b"4.03.1998\0");
+    }
+
+    #[test]
+    fn ntdlls_file_is_that_of_its_windows() {
+        // Windows 95 OSR2.5's NTDLL.DLL is 4.00.950, Windows 98's and 98
+        // SE's 4.10.1998.
+        let file_version = |windows| {
+            let resource = builtin_resource("NTDLL.DLL", windows);
+            let key = b"\\StringFileInfo\\040904E4\\FileVersion";
+            query(resource.bytes(), key, true).unwrap().text.unwrap()
+        };
+        assert_eq!(file_version(WindowsVersion::Win95), b"4.00.950\0");
+        assert_eq!(file_version(WindowsVersion::Win98), b"4.10.1998\0");
+        assert_eq!(file_version(WindowsVersion::Win98Se), b"4.10.1998\0");
     }
 
     #[test]
