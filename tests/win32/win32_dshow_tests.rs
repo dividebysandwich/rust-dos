@@ -1134,15 +1134,16 @@ const PIN_CONNECTS: u32 = 12;
 const PIN_DISCONNECTS: u32 = 16;
 const CONTROL_PAUSE: i32 = 32;
 
-/// A program's transform filter and renderer, added in that order, as
-/// Submarine Titans adds its pair. The transform's input pin takes the
-/// decoder's first type and its output pin connects with its own
-/// IPin::Connect; the renderer has one input pin. RenderFile connects
-/// the decoder to the transform, then the transform's output pin to the
-/// renderer's input pin, as Windows' graph builder renders a filter's
-/// outputs after its input. The graph pauses the renderer before the
-/// transform, and as it goes it disconnects both ends of that
-/// connection and takes both filters out of it.
+/// A program's renderer and transform filter, added in that order. Both
+/// input pins take the decoder's first type; the transform's output pin
+/// connects with its own IPin::Connect. RenderFile tries the filter
+/// added last first, as Windows' graph does: it connects the decoder to
+/// the transform, then the transform's output pin to the renderer's
+/// input pin, as the graph builder renders a filter's outputs after its
+/// input (Wine's test_graph_builder_render, run on Windows, finds both).
+/// The graph pauses the renderer before the transform, and as it goes
+/// it disconnects both ends of that connection and takes both filters
+/// out of it.
 #[test]
 fn a_programs_transform_filter_gets_its_renderer_connected() {
     let mut data = vec![0u8; T_SIZE];
@@ -1397,7 +1398,7 @@ fn a_programs_transform_filter_gets_its_renderer_connected() {
             Ptr(GRAPH),
         ];
         call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
-        for (step, filter) in [(3, T_TRANSFORM), (4, T_RENDERER)] {
+        for (step, filter) in [(3, T_RENDERER), (4, T_TRANSFORM)] {
             let args = [Ptr(filter), Imm(0)];
             method(a, l, fail, step, (GRAPH, GRAPH_ADD_FILTER), &args, S_OK)?;
         }

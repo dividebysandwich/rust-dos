@@ -9,6 +9,8 @@
 //!
 //! How it is done follows Wine's quartz and strmbase (filtergraph.c,
 //! strmbase's pin.c, quartz_transform.c), which follow Windows'. The
+//! filters are tried from the one added last, as Windows' graph keeps
+//! them (`newest`), and their pins in the order they give them. The
 //! decoder's output pin tries the input pin's own media types first,
 //! then its own, in the MPEG video decoder's order: YV12, YUY2, UYVY,
 //! RGB24, RGB32, RGB565 and RGB555. A type is tried with
@@ -742,9 +744,9 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
 
 /// The graph's filters in the order their states change: each after the
 /// filters its output pins connect to, so the renderers come first (Wine's
-/// `sort_filters`), and otherwise in the order they were added.
+/// `sort_filters`), and otherwise from the one added last.
 fn downstream_first(g: &super::graph::Graph) -> Vec<u32> {
-    let mut left: Vec<u32> = g.filters.iter().map(|f| f.iface).collect();
+    let mut left: Vec<u32> = g.filters.iter().rev().map(|f| f.iface).collect();
     let mut order = Vec::with_capacity(left.len());
     while !left.is_empty() {
         // One whose downstream filters are all placed; the first left when
@@ -1461,6 +1463,16 @@ pub fn connect(cpu: &mut Cpu, id: u32, file: u32) -> Option<u32> {
     task::start(cpu, task::DSHOW, vars, C_SCRATCH)
 }
 
+/// The program's filter `k` of the graph `id`, counted from the one
+/// added last: the order Windows' graph keeps its filters in, which
+/// EnumFilters gives and Render tries them in (Wine's AddFilter puts a
+/// filter at the head of its list, and its tests, run on Windows, find
+/// a pin rendered to the filter added last).
+fn newest(cpu: &mut Cpu, id: u32, k: usize) -> Option<u32> {
+    let g = graph(cpu, id)?;
+    g.filters.iter().rev().nth(k).map(|f| f.iface)
+}
+
 /// Go on at `step` at once.
 fn goto(step: u16) -> Next {
     Next::call(0, &[], step)
@@ -1538,10 +1550,7 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         }
         S_FILTER => {
             let k = t.var(V_FILTER) as usize;
-            let Some(f) = graph(cpu, id)
-                .and_then(|g| g.filters.get(k))
-                .map(|f| f.iface)
-            else {
+            let Some(f) = newest(cpu, id, k) else {
                 return goto(S_FINISH);
             };
             clear_out(cpu, t);
@@ -1775,14 +1784,14 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let mut format = vec![0u8; n];
             cpu.bus.guest_read_bytes(s + C_FORMAT, &mut format);
             head[68..72].fill(0);
-            let k = graph(cpu, id).and_then(|g| g.filters.get(t.var(V_FILTER) as usize).cloned());
+            let k = newest(cpu, id, t.var(V_FILTER) as usize);
             let Some(g) = graph(cpu, id) else {
                 return goto(S_FINISH);
             };
             let Some(mut l) = g.connecting.take() else {
                 return goto(S_FINISH);
             };
-            l.filter = k.map_or(0, |f| f.iface);
+            l.filter = k.unwrap_or(0);
             l.pin = t.var(V_PIN);
             l.input = t.var(V_INPUT);
             l.allocator = t.var(V_ALLOC);
@@ -1842,7 +1851,7 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 
 /// The steps that render the output pins of the filters in the queue
 /// (`V_QUEUE`): each output pin not yet connected tries the free input
-/// pins of the program's other filters, in the order they were added,
+/// pins of the program's other filters, from the one added last,
 /// with its own IPin::Connect, and the filter of the one that takes it
 /// joins the queue. An output pin none takes stays free, as a partial
 /// render leaves it on Windows.
@@ -1908,10 +1917,7 @@ fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         S_TARGET => {
             let k = t.var(V_TARGET) as usize;
             let source = t.var(V_SOURCE);
-            let Some(f) = graph(cpu, id)
-                .and_then(|g| g.filters.get(k))
-                .map(|f| f.iface)
-            else {
+            let Some(f) = newest(cpu, id, k) else {
                 // No filter takes this output.
                 return goto(S_DOWN_SKIP);
             };
@@ -1976,9 +1982,7 @@ fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return goto(S_TARGET_SKIP);
             }
             let k = t.var(V_TARGET) as usize;
-            let to = graph(cpu, id)
-                .and_then(|g| g.filters.get(k))
-                .map_or(0, |f| f.iface);
+            let to = newest(cpu, id, k).unwrap_or(0);
             let joint = Joint {
                 from: t.var(V_SOURCE),
                 out: t.var(V_OUT),
