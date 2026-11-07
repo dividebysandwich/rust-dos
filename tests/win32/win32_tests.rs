@@ -10436,3 +10436,53 @@ fn icinfo_lists_the_installed_codecs() {
     assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
     assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
 }
+
+/// What `ICOpen(kind, handler, mode)` and two ICCloses of its handle give
+/// back: 0xEE for no handle, else the low byte of the two results added,
+/// ICERR_OK for the first and ICERR_BADHANDLE (-8) for the second.
+fn ic_open(test: &str, kind: &[u8; 4], handler: &[u8; 4], mode: i32) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICOpen", "ICClose"])];
+    let exe = program(BASE, false, imports, &[0xCC; 16], |a, l| {
+        let mut none = a.create_label();
+        a.push(mode)?;
+        a.push(i32::from_le_bytes(*handler))?;
+        a.push(i32::from_le_bytes(*kind))?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jz(none)?;
+        a.mov(ebx, eax)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.mov(edi, eax)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.add(eax, edi)?;
+        a.ret()?;
+        a.set_label(&mut none)?;
+        a.mov(eax, 0xEE)?;
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+/// ICOpen opens an installed codec to decompress, by its type and FourCC
+/// in either case, as Rent-A-Hero opens Indeo 5 before it starts; ICClose
+/// closes the handle once. A codec that isn't installed, a type other than
+/// `vidc`, and a mode that compresses or draws, which no codec here does,
+/// give no handle.
+#[test]
+fn icopen_opens_installed_decompressors() {
+    const ICMODE_COMPRESS: i32 = 1;
+    const ICMODE_DECOMPRESS: i32 = 2;
+    const ICMODE_FASTDECOMPRESS: i32 = 3;
+    const ICMODE_QUERY: i32 = 4;
+    const ICMODE_DRAW: i32 = 8;
+    let vidc = b"vidc";
+    assert_eq!(ic_open("icopen_iv50", vidc, b"IV50", ICMODE_DECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_cvid", vidc, b"cvid", ICMODE_QUERY), 0xF8);
+    assert_eq!(ic_open("icopen_vidc_upper", b"VIDC", b"iv41", ICMODE_FASTDECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_vids", b"vids", b"IV50", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_compress", vidc, b"IV50", ICMODE_COMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
+}
