@@ -75,7 +75,13 @@ pub const EMM_IMPORT: u16 = 0x1D00;
 /// The XMS driver's entry point (`xms::install_entry`), in low memory as
 /// HIMEM's is, where programs can hook it.
 pub const XMS_ENTRY: u16 = EMM_IMPORT + 0x200;
-const END: u16 = XMS_ENTRY + 0x10;
+/// The lead byte table of double-byte character sets (INT 21h AX=6300h
+/// and AX=6507h): a length word and the ranges, start and end byte each,
+/// ending with a zero word. Code page 437 has none, so the length is 0
+/// and the list is only its end, as in MS-DOS.
+pub const DBCS_TABLE: u16 = XMS_ENTRY + 0x10;
+const DBCS_TABLE_SIZE: u16 = 4;
+const END: u16 = DBCS_TABLE + DBCS_TABLE_SIZE;
 
 const _: () = assert!(DISK_BUFFER + 0x14 + 0x200 <= EMM_IMPORT);
 
@@ -209,6 +215,8 @@ pub fn write(bus: &mut Bus) {
     }
     bus.write_8(address(SDA_FORMAT), 0x01);
     bus.write_16(address(CRIT_PATCHES), 0);
+    let dbcs = address(DBCS_TABLE);
+    bus.fill_ram(dbcs..dbcs + DBCS_TABLE_SIZE as usize, 0);
     write_dosmgr_patches(bus);
     // What the last DOS call wrote into the SDA may be gone (the shell
     // clears low memory before it starts a program): until the next call

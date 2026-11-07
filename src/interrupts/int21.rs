@@ -2314,6 +2314,20 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             }
         }
 
+        // AX = 6300h: The lead byte table of double-byte character sets in
+        // DS:SI, the ranges after its length word (empty for code page
+        // 437). AL=01h and 02h, the interim console flag of Far East DOS,
+        // aren't in MS-DOS: AL=FFh, as DOSBox answers.
+        0x63 => {
+            if cpu.get_al() == 0x00 {
+                cpu.set_ds(dos_data::SEGMENT);
+                cpu.set_si(dos_data::DBCS_TABLE + 2);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            } else {
+                cpu.set_reg8(Register::AL, 0xFF);
+            }
+        }
+
         // AH = 65h: Extended country information and character case
         // conversion.
         0x65 => match cpu.get_al() {
@@ -2328,6 +2342,15 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.bus.guest_write_16(at + 5, 437);
                 write_country_info(cpu, dest + 7, 34);
                 cpu.set_cx(41);
+                cpu.set_cpu_flag(CpuFlags::CF, false);
+            }
+            0x07 => {
+                // Info ID 7 and a far pointer to the DBCS table, with its
+                // length word.
+                let at = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
+                cpu.bus.guest_write_8(at, 0x07);
+                cpu.bus.guest_write_32(at + 1, dos_data::far(dos_data::DBCS_TABLE));
+                cpu.set_cx(5);
                 cpu.set_cpu_flag(CpuFlags::CF, false);
             }
             0x20 => {

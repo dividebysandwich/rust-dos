@@ -539,6 +539,42 @@ fn country_date_and_indos() {
     assert_eq!(cpu.bus.read_8(flag), 0);
 }
 
+/// The DBCS lead byte table, which Watcom's C runtime and DOS/4GW read at
+/// startup: empty for code page 437, so no byte starts a two-byte
+/// character. Birthright's DOS/4GW asks with DS:SI = 0000:0000, which
+/// left alone would make the interrupt vectors the table.
+#[test]
+fn dbcs_lead_byte_table_is_empty() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.load_bytes(0, &[0x8B, 0x01, 0xBA, 0x05]);
+    cpu.set_ds(0);
+    cpu.set_si(0);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    int21(&mut cpu, 0x6300);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.get_al(), 0);
+    let ranges = cpu.get_physical_addr(cpu.ds(), cpu.si());
+    assert_ne!(ranges, 0);
+    assert_eq!(cpu.bus.read_16(ranges), 0, "the list ends at once");
+
+    // AX=6507h: info ID 7 and a far pointer to the same table, with its
+    // length word in front.
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.set_cx(5);
+    int21(&mut cpu, 0x6507);
+    assert!(!cf(&cpu));
+    assert_eq!((cpu.bus.read_8(0x30000), cpu.cx()), (7, 5));
+    let (offset, segment) = (cpu.bus.read_16(0x30001), cpu.bus.read_16(0x30003));
+    let table = cpu.get_physical_addr(segment, offset);
+    assert_eq!(cpu.bus.read_16(table), 0, "length");
+    assert_eq!(table + 2, ranges);
+
+    // The interim console flag is Far East DOS's only.
+    int21(&mut cpu, 0x6301);
+    assert_eq!(cpu.get_al(), 0xFF);
+}
+
 #[test]
 fn the_shell_starts_in_real_mode_with_extended_memory_free() {
     let mut cpu = Cpu::new(PathBuf::from("."));
