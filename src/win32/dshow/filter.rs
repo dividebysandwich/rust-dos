@@ -1167,6 +1167,15 @@ fn stream_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     // The sample comes back to the allocator when the pin has let go of
     // it too.
     super::drop_ref(cpu, s);
+    received(cpu, id, generation, value);
+    Next::Done(0)
+}
+
+/// The program's Receive returned `value` for the picture of the stream
+/// `generation`: the next picture goes after S_OK. S_FALSE or an error
+/// says the pin wants no more (strmbase's source pins stop their
+/// thread).
+fn received(cpu: &mut Cpu, id: u32, generation: u32, value: u32) {
     if let Some(l) = link(cpu, id)
         && l.generation == generation
     {
@@ -1174,12 +1183,9 @@ fn stream_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             l.next += 1;
             l.discontinuity = false;
         } else {
-            // S_FALSE or an error: the pin wants no more (strmbase's
-            // source pins stop their thread).
             l.refused = true;
         }
     }
-    Next::Done(0)
 }
 
 /// The link's next picture in the connection's format (None when it
@@ -1404,17 +1410,7 @@ fn sample_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             call_method(cpu, input, INPUT_RECEIVE, &[the_sample], P_RECEIVED)
         }
         P_RECEIVED => {
-            if let Some(l) = link(cpu, id)
-                && l.generation == generation
-            {
-                if value == S_OK {
-                    l.next += 1;
-                    l.discontinuity = false;
-                } else {
-                    // S_FALSE or an error: the pin wants no more.
-                    l.refused = true;
-                }
-            }
+            received(cpu, id, generation, value);
             call_method(cpu, the_sample, RELEASE, &[], P_RELEASED)
         }
         _ => Next::Done(0),
@@ -1703,9 +1699,10 @@ const V_IN: usize = 20;
 const V_AGAIN: usize = 21;
 /// The filter tried for the output pin (`V_TARGET`), by its interface.
 const V_TARGET_FILTER: usize = 22;
-/// The program's allocator the input pin gave (GetAllocator), while the
-/// connection tries it; for Reconnect, the one the link had, until it
-/// is let go of.
+/// The allocator the input pin gave (GetAllocator), a memory allocator
+/// of the graph's or one of the program's own, while the connection
+/// tries it; for Reconnect, the program's allocator the link had, until
+/// it is let go of.
 const V_GIVEN: usize = 23;
 const V_QUEUE: usize = 24;
 
@@ -1759,6 +1756,7 @@ const S_AGAIN: u16 = 45;
 const S_GIVEN_SIZED: u16 = 46;
 const S_GIVEN_FAILED: u16 = 47;
 const S_AGAIN_UNGIVEN: u16 = 48;
+const S_AGAIN_DECOMMITTED: u16 = 49;
 
 /// Connect the decoder of the file named by the wide string at `file`
 /// to an input pin of the program's filters in the graph `id`, before
@@ -2062,15 +2060,9 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             if failed(value) || given == 0 {
                 return goto(S_GIVEN_FAILED);
             }
-            match sample::allocator_of(cpu, given) {
-                // The pin's allocator is the memory allocator the
-                // program made (CLSID_MemoryAllocator): the reference
-                // GetAllocator gave is the link's.
-                Some(a) => t.set(V_ALLOC, a),
-                // One of the program's own, which the samples come from
-                // if it takes the properties and the pin takes it back.
-                None => t.set(V_GIVEN, given),
-            }
+            // The pin's allocator is tried first, and the reference
+            // GetAllocator gave is the connection's.
+            t.set(V_GIVEN, given);
             goto(S_DECIDE)
         }
         S_DECIDE => {
@@ -2082,7 +2074,16 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             // least, an alignment of 1 at least (quartz_transform.c).
             let props = [req[0].max(1), req[1].max(size), req[2].max(1), req[3]];
             let given = t.var(V_GIVEN);
-            if given != 0 {
+            // The memory allocator the pin gave, one the program made
+            // (CLSID_MemoryAllocator), or the decoder's own without one.
+            let ours = if given != 0 {
+                sample::allocator_of(cpu, given)
+            } else {
+                Some(t.var(V_ALLOC))
+            };
+            let Some(a) = ours else {
+                // One of the program's own, which the samples come from
+                // if it takes the properties and the pin takes it back.
                 for (j, v) in props.into_iter().enumerate() {
                     cpu.bus.guest_write_32(s + C_PROPS + 4 * j as u32, v);
                 }
@@ -2092,20 +2093,22 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 let args = [s + C_PROPS, s + C_ACTUAL];
                 return call_method(cpu, given, ALLOCATOR_SET_PROPERTIES, &args, S_GIVEN_SIZED);
-            }
-            let a = t.var(V_ALLOC);
+            };
+            // The pin's allocator refused: the decoder's own is tried
+            // next (S_GIVEN_FAILED), as for one of the program's.
+            let refused = if given != 0 { S_GIVEN_FAILED } else { S_FAILED };
             if sample::set_props(cpu, a, props).is_err() {
-                return goto(S_FAILED);
+                return goto(refused);
             }
             let Some(at) = super::block(cpu, a, super::ALLOCATOR) else {
-                return goto(S_FAILED);
+                return goto(refused);
             };
             let input = t.var(V_INPUT);
             call_method(cpu, input, INPUT_NOTIFY_ALLOCATOR, &[at, 0], S_NOTIFIED)
         }
         S_NOTIFIED => {
             if failed(value) {
-                // The program's allocator, refused: the decoder's own is
+                // The pin's allocator, refused: the decoder's own is
                 // tried next, as the base classes' DecideAllocator does.
                 return goto(if t.var(V_GIVEN) != 0 {
                     S_GIVEN_FAILED
@@ -2119,6 +2122,13 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let mut format = vec![0u8; n];
             cpu.bus.guest_read_bytes(s + C_FORMAT, &mut format);
             head[68..72].fill(0);
+            // The link keeps the pin's allocator: by its object when it
+            // is a memory allocator of the graph's.
+            let given = t.var(V_GIVEN);
+            let (allocator, given) = match sample::allocator_of(cpu, given) {
+                Some(a) if given != 0 => (a, 0),
+                _ => (t.var(V_ALLOC), given),
+            };
             let Some(g) = graph(cpu, id) else {
                 return goto(S_FINISH);
             };
@@ -2127,8 +2137,8 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             };
             l.pin = t.var(V_PIN);
             l.input = t.var(V_INPUT);
-            l.allocator = t.var(V_ALLOC);
-            l.given = t.var(V_GIVEN);
+            l.allocator = allocator;
+            l.given = given;
             t.set(V_GIVEN, 0);
             l.head = head;
             l.format = format;
@@ -2190,8 +2200,16 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             release_then(t, given, S_DECIDE)
         }
         S_AGAIN_UNGIVEN => {
-            // Reconnect: the link's reference on the program's allocator
-            // goes, as the output pin's Disconnect lets go of it.
+            // Reconnect: the output pin's Disconnect decommits the
+            // program's allocator, then lets go of the link's reference
+            // on it (`let_go_of_given`).
+            let given = t.var(V_GIVEN);
+            if given == 0 {
+                return goto(S_AGAIN);
+            }
+            call_method(cpu, given, ALLOCATOR_DECOMMIT, &[], S_AGAIN_DECOMMITTED)
+        }
+        S_AGAIN_DECOMMITTED => {
             let given = t.var(V_GIVEN);
             t.set(V_GIVEN, 0);
             release_then(t, given, S_AGAIN)

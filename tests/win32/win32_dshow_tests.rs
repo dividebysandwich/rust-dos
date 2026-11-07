@@ -806,8 +806,9 @@ fn a_programs_renderer_filter_gets_the_movies_pictures() {
 /// GetBuffer, writes the picture at GetPointer's buffer, sets the
 /// sample's times, length, sync point and discontinuity (the first
 /// alone), hands it over with Receive and releases it. The decoder
-/// decommits it when the graph stops, and again as it disconnects, and
-/// lets go of the reference GetAllocator gave.
+/// decommits it when the graph stops, and again each time it
+/// disconnects (Reconnect, then the graph's last Release), each time
+/// letting go of the reference GetAllocator gave.
 #[test]
 fn a_renderer_with_its_own_allocator_gets_the_pictures_in_its_samples() {
     let mut cpu = machine(
@@ -1310,6 +1311,19 @@ fn renderer_program(given: bool) -> Vec<u8> {
             check(a, l, fail, 46, A_SYNCS, 12)?;
             check(a, l, fail, 47, A_DISCONTINUITIES, 1)?;
             check(a, l, fail, 48, A_DECOMMITS, 1)?;
+            // Reconnect: the decoder's pin decommits the allocator and
+            // lets go of it as it disconnects, then takes it again from
+            // GetAllocator.
+            a.mov(dword_ptr(l.at(R_ALLOCATOR)), 0)?;
+            push(a, l, &[Ptr(R_PIN)])?;
+            a.mov(eax, dword_ptr(l.at(GRAPH)))?;
+            a.push(eax)?;
+            a.mov(eax, dword_ptr(eax))?;
+            a.call(dword_ptr(eax + GRAPH_RECONNECT))?;
+            expect(a, fail, 51, S_OK)?;
+            check(a, l, fail, 52, A_DECOMMITS, 2)?;
+            check(a, l, fail, 53, A_REFS, 1)?;
+            check(a, l, fail, 54, R_ALLOCATOR, l.at(A_ALLOC) as u32)?;
         }
         method(a, l, fail, 35, (EVENT, RELEASE), &[], 2)?;
         method(a, l, fail, 36, (CONTROL, RELEASE), &[], 1)?;
@@ -1319,7 +1333,7 @@ fn renderer_program(given: bool) -> Vec<u8> {
         if given {
             // Decommitted again as the decoder's pin disconnected, and
             // the reference GetAllocator gave let go of.
-            check(a, l, fail, 49, A_DECOMMITS, 2)?;
+            check(a, l, fail, 49, A_DECOMMITS, 3)?;
             check(a, l, fail, 50, A_REFS, 0)?;
         }
         exit(a, l, &mut fail, Imm(0))
