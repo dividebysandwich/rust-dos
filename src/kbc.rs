@@ -204,6 +204,17 @@ impl Kbc {
         std::mem::take(&mut self.aux_irq)
     }
 
+    /// The IRQ the byte in the output buffer requested, while the CPU
+    /// hasn't read it: 1 for a keyboard byte, 12 for a mouse byte, if the
+    /// command byte enables that interrupt. The controller asks once, as
+    /// the byte enters the buffer, and loads no other byte until this one
+    /// is read, so a request lost on the way leaves the keyboard silent.
+    pub fn output_irq(&self) -> Option<u8> {
+        self.output?;
+        let (irq, enable) = if self.output_aux { (12, CMD_AUX_IRQ) } else { (1, CMD_KBD_IRQ) };
+        (self.command_byte & enable != 0).then_some(irq)
+    }
+
     /// Bytes not yet read by the CPU, including the output buffer.
     pub fn pending(&self) -> usize {
         self.queue.len() + (self.output.is_some() && !self.output_aux) as usize
