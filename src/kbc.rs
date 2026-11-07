@@ -211,8 +211,26 @@ impl Kbc {
     /// is read, so a request lost on the way leaves the keyboard silent.
     pub fn output_irq(&self) -> Option<u8> {
         self.output?;
-        let (irq, enable) = if self.output_aux { (12, CMD_AUX_IRQ) } else { (1, CMD_KBD_IRQ) };
+        let (irq, enable) = if self.output_aux {
+            (12, CMD_AUX_IRQ)
+        } else {
+            (1, CMD_KBD_IRQ)
+        };
         (self.command_byte & enable != 0).then_some(irq)
+    }
+
+    /// Drop the mouse's bytes, the one in the output buffer too, and let
+    /// the keyboard's next byte in: the mouse was reset, so nothing reads
+    /// what it sent before, and a byte of it left in the output buffer
+    /// would keep every keyboard byte out.
+    pub fn drop_aux(&mut self) {
+        self.aux.clear();
+        if self.output.is_some() && self.output_aux {
+            self.output = None;
+            self.output_aux = false;
+            self.aux_irq = false;
+            self.refill();
+        }
     }
 
     /// Bytes not yet read by the CPU, including the output buffer.

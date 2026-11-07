@@ -334,6 +334,24 @@ fn a_key_byte_still_unread_when_a_program_ends_keeps_its_irq() {
 }
 
 #[test]
+fn a_mouse_byte_still_unread_when_a_program_ends_lets_the_keys_through() {
+    use rust_dos::keyboard::deliver_key_down;
+    // A program that read the PS/2 mouse itself ends with a packet in the
+    // controller and a key behind it. The shell resets the mouse and masks
+    // IRQ 12, so nothing would read the mouse's byte, which keeps the
+    // key's out of the output buffer.
+    let mut cpu = cpu();
+    cpu.load_shell();
+    cpu.bus.kbc.push_aux(&[0x08, 0x01, 0x02]);
+    cpu.bus.sync_keyboard_irq();
+    deliver_key_down(&mut cpu.bus, 0x1C0D, false);
+    cpu.load_shell();
+    assert!(cpu.bus.kbc.aux_idle(), "the mouse's bytes are gone");
+    assert_eq!(cpu.bus.pic.pending(), Some(1));
+    assert_eq!(cpu.bus.kbc.read_data(), 0x1C, "the key's make code is at port 60h");
+}
+
+#[test]
 fn f11_and_f12_send_their_make_codes_and_only_the_enhanced_reads_return_them() {
     use rust_dos::keyboard::{apply_key, lookup};
     let mut cpu = cpu();
