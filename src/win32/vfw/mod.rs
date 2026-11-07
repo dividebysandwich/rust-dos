@@ -29,3 +29,13 @@ crate::state_fields!(State {
     drawdibs,
     codecs
 });
+
+/// The index of the first empty entry of `list`, which a new handle takes
+/// as `index + 1`: a closed handle's, or a new one pushed at the end.
+fn free_slot<T>(list: &mut Vec<Option<T>>) -> usize {
+    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
+    if slot == list.len() {
+        list.push(None);
+    }
+    slot
+}

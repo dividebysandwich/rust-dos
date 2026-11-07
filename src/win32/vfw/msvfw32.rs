@@ -83,15 +83,13 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if info == 0 || !allows(cpu, info, ICINFO, true) {
         return Some(0);
     }
-    if kind != 0 && codec::upper(kind) != codec::upper(ICTYPE_VIDEO) {
+    if kind != 0 && !video(kind) {
         return Some(0);
     }
     let found = if handler < 256 {
         codec::INSTALLED.get(handler as usize)
     } else {
-        codec::INSTALLED
-            .iter()
-            .find(|(fourcc, _)| codec::upper(u32::from_le_bytes(**fourcc)) == codec::upper(handler))
+        installed(handler)
     };
     let Some(&(fourcc, driver)) = found else {
         return Some(0);
@@ -109,17 +107,19 @@ fn ic_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(1)
 }
 
-/// The installed codec of the type and FourCC `handler`, compared
-/// without regard to case: the FourCC in capitals.
-fn installed(kind: u32, handler: u32) -> Option<u32> {
-    if codec::upper(kind) != codec::upper(ICTYPE_VIDEO) {
-        return None;
-    }
+/// Whether `kind` is `vidc`, the type of the codecs here, in either case.
+fn video(kind: u32) -> bool {
+    codec::upper(kind) == codec::upper(ICTYPE_VIDEO)
+}
+
+/// The installed codec of FourCC `handler`, compared without regard to
+/// case, as Windows finds `vidc.<FourCC>` among SYSTEM.INI's [drivers32]
+/// keys.
+fn installed(handler: u32) -> Option<&'static (&'static [u8; 4], &'static str)> {
     let handler = codec::upper(handler);
     codec::INSTALLED
         .iter()
-        .map(|(fourcc, _)| codec::upper(u32::from_le_bytes(**fourcc)))
-        .find(|&fourcc| fourcc == handler)
+        .find(|(fourcc, _)| codec::upper(u32::from_le_bytes(**fourcc)) == handler)
 }
 
 /// ICOpen's modes a decompressor takes: ICMODE_DECOMPRESS,
@@ -132,11 +132,14 @@ const ICERR_OK: u32 = 0;
 const ICERR_BADHANDLE: u32 = -8i32 as u32;
 
 /// ICOpen(fccType, fccHandler, wMode): a handle to the installed codec,
-/// or 0 when there is none. The codecs here only decompress, so a mode
-/// that compresses or draws (ICMODE_COMPRESS, ICMODE_FASTCOMPRESS,
-/// ICMODE_DRAW) finds none, as a decompressor's driver refuses to open
-/// for one. Rent-A-Hero opens `vidc`/`IV50` to see that Indeo 5 is
-/// there before it starts, and stops when it isn't.
+/// or 0 when there is none. A mode that compresses or draws
+/// (ICMODE_COMPRESS, ICMODE_FASTCOMPRESS, ICMODE_DRAW) gets 0 as well.
+/// That is this module's choice: Windows 98 SE's Cinepak driver
+/// compresses, and Wine's decoders open whatever the mode. But the
+/// codecs here only decompress and there is no ICCompress or ICDraw, so
+/// a handle would stop the program at its next call, where 0 tells it
+/// that no codec does the job. Rent-A-Hero opens `vidc`/`IV50` to see
+/// that Indeo 5 is there before it starts, and stops when it isn't.
 fn ic_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[kind, handler, mode] = args else {
         unreachable!()
@@ -147,15 +150,12 @@ fn ic_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     ) {
         return Some(0);
     }
-    let Some(fourcc) = installed(kind, handler) else {
+    let Some((fourcc, _)) = installed(handler).filter(|_| video(kind)) else {
         return Some(0);
     };
     let list = &mut crate::win32::process(cpu).vfw.codecs;
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
-    list[slot] = Some(fourcc);
+    let slot = super::free_slot(list);
+    list[slot] = Some(codec::upper(u32::from_le_bytes(**fourcc)));
     Some(slot as u32 + 1)
 }
 
@@ -295,10 +295,7 @@ fn profile_display(_: &mut Cpu, _: &[u32]) -> Option<u32> {
 /// DrawDibOpen(): a new handle.
 fn draw_dib_open(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let list = drawdibs(cpu);
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
+    let slot = super::free_slot(list);
     list[slot] = Some(DrawDib::default());
     Some(slot as u32 + 1)
 }

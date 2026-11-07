@@ -805,6 +805,7 @@ mod tests {
         (37, 0x9341_EE06_0BDB_0188), // an AVIVideo device's palette and MCI_REALIZE's background
         (38, 0xEED4_AAD5_91F9_E9C2), // Win16's open serial ports
         (39, 0xEC3D_4AFA_6107_B768), // the screens kept under CS_SAVEBITS windows
+        (40, 0x96F4_FD65_8D1F_5541), // the codecs a process opened with ICOpen
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
