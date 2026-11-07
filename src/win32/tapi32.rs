@@ -13,6 +13,7 @@
 //! functions that take a device ID alone fail with LINEERR_BADDEVICEID,
 //! there being no device of any number.
 
+use super::kernel32::virtual_memory::allows;
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
 
@@ -87,14 +88,18 @@ const LINECALLSELECT_CALL: u32 = 4;
 
 /// lineInitialize(lphLineApp, hInstance, lpfnCallback, lpszAppName,
 /// lpdwNumDevs): with no line device installed, LINEERR_NODEVICE, and
-/// neither the handle nor the count is written. The places for them and
-/// the callback have to be there first: LINEERR_INVALPOINTER.
+/// neither the handle nor the count is written. The places for them have
+/// to be writable and the callback readable first, as IsBadWritePtr and
+/// IsBadCodePtr see them, or the call fails with LINEERR_INVALPOINTER.
+/// `allows` reads the pages' entries without recording a page fault, so
+/// a program that passes a pointer it can't use gets the error back and
+/// goes on.
 fn line_initialize(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[app, _, callback, _, devices] = args else {
         unreachable!()
     };
-    let room = |cpu: &mut Cpu, at: u32| at != 0 && cpu.bus.guest_probe(at, 4, true);
-    if !room(cpu, app) || !room(cpu, devices) || callback == 0 {
+    let room = |cpu: &mut Cpu, at: u32| at != 0 && allows(cpu, at, 4, true);
+    if !room(cpu, app) || !room(cpu, devices) || callback == 0 || !allows(cpu, callback, 1, false) {
         return Some(LINEERR_INVALPOINTER);
     }
     Some(LINEERR_NODEVICE)
@@ -159,9 +164,13 @@ fn translate(_: &mut Cpu, args: &[u32]) -> Option<u32> {
     })
 }
 
-/// lineGetCountry(dwCountryID, dwAPIVersion, lpLineCountryList): the
-/// country list, which TAPI gives without a modem. The built-in Windows
-/// has none yet; no program reaches it without a line device.
+/// lineGetCountry(dwCountryID, dwAPIVersion, lpLineCountryList): Windows
+/// gives the country list from the registry, modem or not, and takes no
+/// line application handle, so a program may ask for it before it
+/// initializes TAPI. The built-in Windows has no country table yet, and
+/// fails the call (issue #664). Chaos Overlords asks only from TAPICOMM's
+/// dialing dialog, which it opens once lineInitialize has succeeded, so
+/// it never gets here.
 fn line_get_country(_: &mut Cpu, _: &[u32]) -> Option<u32> {
     Some(LINEERR_OPERATIONUNAVAIL)
 }
