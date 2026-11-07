@@ -142,8 +142,7 @@ impl Format {
     /// The volume space size in a primary descriptor: the sectors of the
     /// file system, from its little-endian copy.
     fn volume_sectors(self, descriptor: &[u8]) -> u32 {
-        let at = 80 + self.shift();
-        u32::from_le_bytes(descriptor[at..at + 4].try_into().unwrap())
+        le32(descriptor, 80 + self.shift())
     }
 
     /// The copyright, abstract and bibliographic file identifiers in a
