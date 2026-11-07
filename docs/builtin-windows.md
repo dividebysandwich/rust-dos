@@ -157,7 +157,9 @@ both the IPX and the TCP/IP connection
 DirectPlay's protocol here is rust-dos's own, so a game on a Windows 95
 or 98 image in another instance doesn't see these sessions. Lobby
 programs, such as the Zone's, aren't there, and WinSock (WS2_32 and
-WSOCK32) has no network yet.
+WSOCK32) has no network yet. TAPI32 is there as on a machine with no
+modem installed: lineInitialize fails with LINEERR_NODEVICE, so a game
+that imports it starts, and its modem play says no modem is there.
 
 ### Copy protection
 

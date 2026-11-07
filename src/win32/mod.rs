@@ -59,6 +59,7 @@ mod shell32;
 pub mod snapshot;
 pub(crate) mod stubs;
 pub(crate) mod system;
+mod tapi32;
 mod task;
 pub(crate) mod thread;
 pub mod trace;
