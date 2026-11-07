@@ -14,7 +14,7 @@
 //! here.
 
 use super::super::opengl32::{self as gl, MAX_TEXTURE_SIZE};
-use super::{GLU_INVALID_ENUM, GLU_INVALID_VALUE, log_once};
+use super::{GLU_INVALID_ENUM, GLU_INVALID_VALUE, GLU_OUT_OF_MEMORY, log_once};
 use crate::cpu::Cpu;
 
 // Formats.
@@ -65,6 +65,17 @@ pub fn elements(format: u32) -> u32 {
 /// values instead of being taken to the range of 16 bits.
 fn is_index(format: u32) -> bool {
     matches!(format, GL_COLOR_INDEX | GL_STENCIL_INDEX)
+}
+
+/// The most components an image GLU scales may have. Windows' GLU
+/// allocates two bytes for each component of the image it reads and of
+/// the one it makes, and returns GLU_OUT_OF_MEMORY when it can't.
+const MAX_COMPONENTS: u64 = 0x400_0000;
+
+/// Whether an image of `w` by `h` of `format` has more components than
+/// GLU allocates (`MAX_COMPONENTS`).
+fn too_big(w: u32, h: u32, format: u32) -> bool {
+    u64::from(w) * u64::from(h) * u64::from(elements(format)) > MAX_COMPONENTS
 }
 
 /// The bytes of a component of `kind` (GL_BITMAP has bits).
@@ -436,6 +447,9 @@ pub fn build_2d_mipmaps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if let Some(e) = check(width as i32, height as i32, format, kind) {
         return Some(e);
     }
+    if too_big(width, height, format) {
+        return Some(GLU_OUT_OF_MEMORY);
+    }
     let Some(store) = gl::ctx(cpu).map(|c| c.unpack) else {
         // Without a context OpenGL's functions do nothing.
         return Some(0);
@@ -508,6 +522,9 @@ pub fn scale_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     if !legal_format(format) || !legal_type(kind_in) || !legal_type(kind_out) {
         return Some(GLU_INVALID_ENUM);
+    }
+    if too_big(win, hin, format) || too_big(wout, hout, format) {
+        return Some(GLU_OUT_OF_MEMORY);
     }
     let (unpack, pack) = gl::ctx(cpu).map_or(([4, 0, 0, 0], [4, 0, 0, 0]), |c| (c.unpack, c.pack));
     let Some(data) = read(cpu, unpack, (win, hin, format, kind_in), at_in) else {
@@ -671,5 +688,14 @@ mod tests {
             Some(GLU_INVALID_ENUM)
         );
         assert_eq!(check(4, 4, GL_BGRA_EXT, GL_BITMAP), None);
+    }
+
+    #[test]
+    fn an_image_too_big_to_allocate_is_refused_before_it_is_read() {
+        assert!(!too_big(4096, 4096, GL_RGBA));
+        assert!(too_big(4097, 4096, GL_RGBA));
+        // A row length shorter than the width keeps the bytes few, but
+        // not the components.
+        assert!(too_big(65536, 65536, GL_LUMINANCE));
     }
 }

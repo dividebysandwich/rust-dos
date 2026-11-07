@@ -267,9 +267,10 @@ pub struct State {
     pub current: Vec<(u32, u32, u32)>,
     /// The pixel format of each window that has one (window, format).
     pub formats: Vec<(u32, u32)>,
-    /// The functions that do nothing whose first call was logged, and
-    /// GLU32's (glu32/).
+    /// The functions that do nothing whose first call was logged.
     pub logged: Vec<u16>,
+    /// The same for GLU32.DLL (glu32/), which works on OPENGL32's
+    /// contexts.
     pub glu_logged: Vec<u16>,
 }
 

@@ -261,31 +261,25 @@ fn error_unicode_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// gluGetString(name): the version, or the extensions, GL_EXT_bgra
-/// where OpenGL has it, which the built-in OPENGL32 doesn't; NULL for
-/// another name.
+/// where the current context's OpenGL lists it (the built-in OPENGL32
+/// does on a Voodoo2, not on a Banshee or Voodoo3); NULL for another
+/// name.
 fn get_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(match args[0] {
         GLU_VERSION => text(cpu, T_VERSION, false),
         GLU_EXTENSIONS => {
+            const BGRA: &[u8] = b"GL_EXT_bgra";
             let ext = super::opengl32::get_string(cpu, &[GL_EXTENSIONS]).unwrap_or(0);
-            let has = ext != 0 && read_c_string(cpu, ext).contains("GL_EXT_bgra");
+            let has = ext != 0
+                && cpu
+                    .bus
+                    .guest_read_asciiz(ext, 4096)
+                    .windows(BGRA.len())
+                    .any(|w| w == BGRA);
             text(cpu, if has { T_BGRA } else { T_NONE }, false)
         }
         _ => 0,
     })
-}
-
-/// The zero-ended string at `at`, at most 4 KB of it.
-fn read_c_string(cpu: &mut Cpu, at: u32) -> String {
-    let mut out = Vec::new();
-    for i in 0..4096 {
-        let b = cpu.bus.guest_read_8(at + i);
-        if b == 0 {
-            break;
-        }
-        out.push(b);
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Log the first time `id` says `what`.
