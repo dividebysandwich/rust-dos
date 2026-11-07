@@ -548,8 +548,8 @@ impl CdImage {
         self.mcn.as_deref()
     }
 
-    /// The data position measurement of the disc, if the image keeps it.
-    /// Nothing times reads by it yet.
+    /// The data position measurement of the disc, if the image keeps it:
+    /// where reads find their sectors (`timing::Geometry`).
     pub fn dpm(&self) -> Option<&super::b6t::Dpm> {
         self.dpm.as_ref()
     }
