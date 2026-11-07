@@ -1857,6 +1857,119 @@ fn a_program_runs_level_0_code_through_the_idt_as_on_windows_98() {
     assert_eq!(code, 42, "{}", out);
 }
 
+/// SafeDisc 1's loader (Omikron's RUNTIME.EXE) goes on at level 0 with
+/// interrupts on: its divide error's handler returns to the program's code
+/// with CS 0008, leaving the user's EFLAGS (IF set), and that code divides
+/// by zero again, through a handler that returns to level 3. A timer
+/// interrupt between the two comes from level 0, on the level 0 stack 8
+/// bytes below the top, so its frame lies where one from level 3 would.
+/// With a dword pushed there, the frame lies where one from level 3 with
+/// an error code would, and its EFLAGS (CF set, by the wait's CMP) where
+/// that frame's CS would. As on Windows 98 the interrupt is served and the
+/// level 0 code goes on.
+#[test]
+fn a_timer_interrupt_in_level_0_code_returns_to_it() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
+    let mut data = vec![0u8; 0x40];
+    // SafeDisc's first handler, at 30h: drop the frame's EIP and CS and
+    // return at level 0 to EBX.
+    data[0x30..0x35].copy_from_slice(&[
+        0x58, // pop eax
+        0x58, // pop eax
+        0x0E, // push cs
+        0x53, // push ebx
+        0xCF, // iretd
+    ]);
+    let build = |pushed: bool| {
+        program(BASE, false, imports, &data, |a, l| {
+            let mut level0 = a.create_label();
+            let mut spin = a.create_label();
+            let mut served = a.create_label();
+            let mut back = a.create_label();
+            let mut fail = a.create_label();
+            // The divide error's handler, from the IDT's gate, in EDI; its
+            // first 16 bytes kept at 10h and the first handler written
+            // there.
+            a.sidt(ptr(l.at(0)))?;
+            a.mov(esi, dword_ptr(l.at(2)))?;
+            a.movzx(edi, word_ptr(esi + 6))?;
+            a.shl(edi, 16)?;
+            a.mov(di, word_ptr(esi))?;
+            a.mov(esi, edi)?;
+            a.push(edi)?;
+            a.mov(edi, l.at(0x10) as u32)?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            a.mov(edi, dword_ptr(esp))?;
+            a.mov(esi, l.at(0x30) as u32)?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            a.pop(edi)?;
+            // The program's code segment, for the way back.
+            a.mov(word_ptr(l.at(8)), cs)?;
+            push_label(a, level0)?;
+            a.pop(ebx)?;
+            a.xor(edx, edx)?;
+            a.xor(ecx, ecx)?;
+            a.mov(eax, 1)?;
+            a.div(ecx)?;
+            // Level 0, interrupts on, ESP 8 bytes below the stack's top, or
+            // 12 with a dword pushed: wait for an interrupt's frame (CS
+            // 0008) to appear below ESP.
+            a.set_label(&mut level0)?;
+            if pushed {
+                a.push(eax)?;
+            }
+            a.mov(dword_ptr(esp - 8), 0)?;
+            a.mov(edx, 1_000_000)?;
+            a.set_label(&mut spin)?;
+            a.cmp(dword_ptr(esp - 8), 8)?;
+            a.je(served)?;
+            a.dec(edx)?;
+            a.jnz(spin)?;
+            a.set_label(&mut served)?;
+            if pushed {
+                a.pop(eax)?;
+            }
+            // The second handler: pop eax, pop eax, push ecx, push ebx,
+            // iretd, back to level 3 at `back` with the first frame's ESP
+            // and SS.
+            a.mov(dword_ptr(edi + 1), 0xCF53_5158u32)?;
+            a.mov(byte_ptr(edi), 0x58)?;
+            a.movzx(ecx, word_ptr(l.at(8)))?;
+            push_label(a, back)?;
+            a.pop(ebx)?;
+            a.xor(eax, eax)?;
+            a.div(eax)?;
+            a.set_label(&mut back)?;
+            // Put the handler back; 42 if an interrupt came at level 0.
+            a.mov(esi, l.at(0x10) as u32)?;
+            a.mov(ecx, 16)?;
+            a.rep().movsb()?;
+            a.mov(ebx, 2)?;
+            a.test(edx, edx)?;
+            a.je(fail)?;
+            a.mov(ebx, 42)?;
+            a.set_label(&mut fail)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
+        })
+    };
+    for pushed in [false, true] {
+        let exe = build(pushed);
+        for core in [CoreMode::Normal, CoreMode::Dynamic] {
+            let mut cpu = machine("idt_ring0_irq", exe.clone());
+            cpu.core = core;
+            // 55 ms between timer interrupts is 165,000 cycles.
+            cpu.bus.set_cycles_per_ms(3000);
+            let what = format!("{:?}, pushed {}", core, pushed);
+            assert!(run_to_exit(&mut cpu, 200), "{}: {}", what, printed(&cpu));
+            assert_eq!(cpu.errorlevel, 42, "{}: {}", what, printed(&cpu));
+        }
+    }
+}
+
 /// What a debugger sees of a program whose main thread spins while a
 /// second thread waits for an event and a third was made suspended.
 #[test]
@@ -8623,6 +8736,86 @@ fn kernel32_has_windows_98s_ordinals_and_loads_16_bit_dlls() {
 }
 
 #[test]
+fn built_in_dlls_export_windows_98_ses_ordinals() {
+    // GetProcAddress by Windows 98 SE's ordinal finds the function it
+    // finds by name: KERNEL32's GetStartupInfoA (441), GetStartupInfoW
+    // (442), FT_Thunk (268) and FT_Exit8 (266, the FT_Exits go in the
+    // order of their names), DirectX 6.1's DDRAW and DINPUT, and
+    // SHELL32's #179, which Windows 98 exports by ordinal only. Imports
+    // by ordinal bind to the same functions.
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["LoadLibraryA", "GetProcAddress", "ExitProcess", "#441", "#268"],
+        ),
+        ("DDRAW.DLL", &["#8"]),
+    ];
+    let strings: &[(u32, &[u8])] = &[
+        (0x00, b"KERNEL32.DLL"),
+        (0x10, b"DDRAW.DLL"),
+        (0x20, b"DINPUT.DLL"),
+        (0x30, b"SHELL32.DLL"),
+        (0x40, b"GetStartupInfoA"),
+        (0x60, b"GetStartupInfoW"),
+        (0x80, b"DirectDrawCreate"),
+        (0xA0, b"DirectDrawEnumerateA"),
+        (0xC0, b"DllCanUnloadNow"),
+        (0xE0, b"SHGetNewLinkInfoA"),
+        (0x100, b"FT_Thunk"),
+        (0x110, b"FT_Exit8"),
+    ];
+    let mut data = vec![0u8; 0x120];
+    for (at, s) in strings {
+        data[*at as usize..*at as usize + s.len()].copy_from_slice(s);
+    }
+    // The DLL, the ordinal and the name, and an import that is the same
+    // function.
+    let checks: &[(u32, i32, u32, Option<usize>)] = &[
+        (0x00, 441, 0x40, Some(3)),
+        (0x00, 442, 0x60, None),
+        (0x00, 268, 0x100, Some(4)),
+        (0x00, 266, 0x110, None),
+        (0x10, 8, 0x80, Some(5)),
+        (0x10, 10, 0xA0, None),
+        (0x10, 14, 0xC0, None),
+        (0x20, 3, 0xC0, None),
+        (0x30, 179, 0xE0, None),
+    ];
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (step, &(dll, ordinal, name, import)) in checks.iter().enumerate() {
+            a.push(l.at(dll) as i32)?;
+            a.call(l.import(0))?;
+            a.mov(esi, eax)?;
+            a.push(ordinal)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.mov(edi, eax)?;
+            a.push(l.at(name) as i32)?;
+            a.push(esi)?;
+            a.call(l.import(1))?;
+            a.mov(ebx, 2 * step as i32 + 1)?;
+            a.test(edi, edi)?;
+            a.je(fail)?;
+            a.cmp(eax, edi)?;
+            a.jne(fail)?;
+            if let Some(slot) = import {
+                a.mov(ebx, 2 * step as i32 + 2)?;
+                a.cmp(eax, l.import(slot))?;
+                a.jne(fail)?;
+            }
+        }
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let (code, text) = run("win98_ordinals", exe);
+    assert_eq!(code, 0, "{}", text);
+}
+
+#[test]
 fn wow32_calls_16_bit_functions_and_maps_their_pointers() {
     // KRNL386's GetVersion, called with WOWCallback16 and
     // WOWCallback16Ex, as SafeDisc's loader calls into KRNL386, and its
@@ -10115,4 +10308,71 @@ fn gdi32_doesnt_call_an_opengl32_mapped_as_data() {
     let exe = module_image(BASE, None, imports, b"OPENGL32.DLL\0", &[("", &main)], &[]);
     let (code, out) = run_with_guest_opengl32("gdi_datafile_wgl", exe);
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
+}
+
+/// An argument of `tapi`: the address of the program's data, eight bytes
+/// of CCh.
+const TAPI_DATA: u32 = 0xDA7A_0000;
+/// An argument of `tapi`: the address of the function called, in
+/// TAPI32's code, which the program can read and not write.
+const TAPI_CODE: u32 = 0xC0DE_0000;
+
+/// What a TAPI32 function gives back on a machine with no modem: a
+/// program calls `function` with `args`, pushed last first, where
+/// `TAPI_DATA` and `TAPI_CODE` stand for the addresses they name, and
+/// ends with the low byte of the result, or with the first byte of the
+/// data when `byte` is set.
+fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("TAPI32.DLL", &[function])];
+    let exe = program(BASE, false, imports, &[0xCC; 8], |a, l| {
+        for &arg in args.iter().rev() {
+            match arg {
+                TAPI_DATA => a.push(l.at(0) as i32)?,
+                TAPI_CODE => {
+                    a.mov(eax, l.import(0))?;
+                    a.push(eax)?;
+                }
+                _ => a.push(arg as i32)?,
+            }
+        }
+        a.call(l.import(0))?;
+        if byte {
+            a.movzx(eax, byte_ptr(l.at(0)))?;
+        }
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+#[test]
+fn tapi_has_no_line_device() {
+    let init = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_DATA];
+    // LINEERR_NODEVICE, and no handle written.
+    assert_eq!(tapi("tapi_init", "lineInitialize", &init, false), 0x42);
+    assert_eq!(tapi("tapi_init_handle", "lineInitialize", &init, true), 0xCC);
+    // LINEERR_INVALPOINTER without a callback or a place for the count.
+    let no_callback = [TAPI_DATA, 0, 0, 0, TAPI_DATA];
+    assert_eq!(tapi("tapi_init_cb", "lineInitialize", &no_callback, false), 0x35);
+    let no_count = [TAPI_DATA, 0, 0x40_1000, 0, 0];
+    assert_eq!(tapi("tapi_init_count", "lineInitialize", &no_count, false), 0x35);
+    // LINEERR_INVALPOINTER for a handle or a count the program can't
+    // write, as IsBadWritePtr sees it, with no page fault in the program.
+    let read_only_handle = [TAPI_CODE, 0, 0x40_1000, 0, TAPI_DATA];
+    assert_eq!(tapi("tapi_init_ro_app", "lineInitialize", &read_only_handle, false), 0x35);
+    let read_only_count = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_CODE];
+    assert_eq!(tapi("tapi_init_ro_count", "lineInitialize", &read_only_count, false), 0x35);
+    // LINEERR_INVALAPPHANDLE, LINEERR_BADDEVICEID, LINEERR_INVALLINEHANDLE
+    // and LINEERR_INVALCALLHANDLE.
+    assert_eq!(tapi("tapi_shutdown", "lineShutdown", &[1], false), 0x14);
+    let config = [0, TAPI_DATA, 0];
+    assert_eq!(tapi("tapi_devconfig", "lineGetDevConfig", &config, false), 0x02);
+    let open = [1, 0, TAPI_DATA, 0x10004, 0, 0, 1, 0x10, 0];
+    assert_eq!(tapi("tapi_open", "lineOpen", &open, false), 0x14);
+    let call_id = [0, 0, 1, 4, TAPI_DATA, 0];
+    assert_eq!(tapi("tapi_id_call", "lineGetID", &call_id, false), 0x18);
+    let line_id = [1, 0, 0, 1, TAPI_DATA, 0];
+    assert_eq!(tapi("tapi_id_line", "lineGetID", &line_id, false), 0x2B);
+    // LINEERR_INIFILECORRUPT: no dialing location was set up.
+    let caps = [0, 0x10004, TAPI_DATA];
+    assert_eq!(tapi("tapi_caps", "lineGetTranslateCaps", &caps, false), 0x0E);
 }

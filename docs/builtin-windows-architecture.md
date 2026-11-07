@@ -78,7 +78,7 @@ The main files of `src/win32/`:
 mod.rs        the state, starting a process, the ROM's traps
 loader.rs     processes and DLLs: mapping, relocations, imports, TLS
 stubs.rs      the built-in DLLs' images and their function tables
-ordinals.rs   Windows 98 SE's export ordinals
+ordinals.rs   tests: the tables have Windows 98 SE's ordinals
 trace.rs      the API trace
 memory.rs     physical pages, page tables, the arenas
 heap.rs       heaps
@@ -152,23 +152,27 @@ break exactly these; its code is Apache-2.0 and isn't used, only that
 finding. DirectX objects are COM objects whose vtables are data in the
 stub images, pointing at stubs (`com.rs`).
 
-The export directories number the functions as Windows 98 SE's DLLs do
-(`src/win32/ordinals.rs`, from lists `tools/win98_ordinals.py` made from
-the real DLLs), so a program that imports a function by its ordinal gets
-the one it would on Windows 98. KERNEL32 also has, under their ordinals,
-functions Windows 98 exports by ordinal only: VxDCall0 to VxDCall8 (1
-to 9) and LoadLibrary16, FreeLibrary16 and GetProcAddress16 (35 to 37),
-which SafeDisc's loader imports that way. A function the built-in DLL
-doesn't have keeps no ordinal of Windows': an import of it by ordinal
-binds to the missing-function stub below, as an import by name does.
-
 Functions are declared in Rust tables, one entry each: name, ordinal,
-argument count, calling convention, handler. A function's id is its
-DLL's place in `DLLS` and its own in the DLL's table; saved states keep
-the stubs in memory, so tables are only added to at their ends. A
-missing function is bound to a stub that logs `dll!name` with its
-arguments and ends the program with a message saying which function it
-needed, so the log of a game that fails says what to write next. The
+argument count, calling convention, handler. The ordinal is the one the
+export directory gives the function, and it is Windows 98 SE's, so a
+program that imports a function by its ordinal gets the one it would on
+Windows 98. The tests in `src/win32/ordinals.rs` hold the tables to
+lists `tools/win98_ordinals.py` made from the DLLs on the Windows 98 SE
+CD (DirectX 6.1's DDRAW, DSOUND and DINPUT among them). KERNEL32 also
+has, under their ordinals, functions Windows 98 exports by ordinal only:
+VxDCall0 to VxDCall8 (1 to 9) and LoadLibrary16, FreeLibrary16 and
+GetProcAddress16 (35 to 37), which SafeDisc's loader imports that way.
+A function Windows 98 doesn't have is numbered after Windows' last
+ordinal, and a function the built-in DLL doesn't have keeps no ordinal
+of Windows': an import of it by ordinal binds to the missing-function
+stub below, as an import by name does.
+
+A function's id, which its stub's trap carries, is its DLL's place in
+`DLLS` and its own in the DLL's table, apart from its ordinal; saved
+states keep the stubs in memory, so tables are only added to at their
+ends. A missing function is bound to a stub that logs `dll!name` with
+its arguments and ends the program with a message saying which function
+it needed, so the log of a game that fails says what to write next. The
 trace of every call (`trace.rs`, like Wine's `+relay`) goes to the log
 and to the debug server.
 
@@ -388,11 +392,13 @@ what its region cuts off. No probe has compared that crop with Windows.
 AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions
 decompress and draw their frames (`vfw/`). AVIStreamGetFrame decompresses
 a video stream's frames to a DIB of the program's choice, 24 bits a pixel
-by default, from the last key frame on. The codecs are Indeo Video 3 and
-5, which Windows 98 installs, decoded by the `oxideav-indeo` crate. Indeo
-5 key frames match FFmpeg's, but for frames that both decoders refuse as
-damaged, where the picture before stays. Indeo 5's frames that depend on
-earlier ones have not been compared with a reference.
+by default, from the last key frame on. The codecs are four of those
+Windows 98 installs: Indeo Video 3 and 5, decoded by the `oxideav-indeo`
+crate, Indeo Video Interactive 4, and Cinepak. Indeo 5 key frames match
+FFmpeg's, but for frames that both decoders refuse as damaged, where the
+picture before stays. Indeo 5's frames that depend on earlier ones have
+not been compared with a reference. Cinepak's pictures match FFmpeg's
+exactly, every tenth frame of Wages of War's two Cinepak movies.
 
 ## Sound and input
 

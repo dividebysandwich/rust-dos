@@ -548,3 +548,49 @@ fn a_font_load_that_changes_the_rows_gives_the_new_range() {
     let m = &cpu.bus.mouse;
     assert_eq!((m.min_x, m.max_x, m.min_y, m.max_y), (0, 639, 0, 399));
 }
+
+/// Mickeys (AX=000Bh) count the motion on the picture, the same on both
+/// axes, as a mouse counts the same distance either way. Birthright's DOS
+/// version moves its own cursor a pixel a mickey in VESA mode 101h, so a
+/// 2:1 vertical count made it run twice as fast down as across.
+#[test]
+fn mickeys_count_the_same_across_and_down_on_the_picture() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    call(&mut cpu, 0x0000);
+    cpu.bus.mouse.move_by(30.0, 30.0);
+    call(&mut cpu, 0x000B);
+    assert_eq!((cpu.cx(), cpu.dx()), (20, 20), "640x480: a virtual pixel is a picture pixel");
+
+    // Mode 13h: a virtual pixel down is two lines of the 400-line
+    // picture, so it counts twice, as Carrier Command needs.
+    int10(&mut cpu, 0x0013, 0);
+    call(&mut cpu, 0x0000);
+    cpu.bus.mouse.move_by(30.0, 30.0);
+    call(&mut cpu, 0x000B);
+    assert_eq!((cpu.cx(), cpu.dx()), (20, 40));
+
+    // A program that counts in half pixels with a wider range doesn't
+    // make the mouse count more: the pointer crosses the same picture.
+    range(&mut cpu, 0x0007, 0, 1279);
+    cpu.bus.mouse.move_by(60.0, 0.0);
+    call(&mut cpu, 0x000B);
+    assert_eq!(cpu.cx(), 20);
+}
+
+/// A state doesn't hold the mickeys' scale, which comes from its picture
+/// and range: a machine that loads a state of mode 101h counts the same
+/// across and down before the program calls the driver again.
+#[test]
+fn a_loaded_state_counts_mickeys_for_its_picture() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    call(&mut cpu, 0x0000);
+    let state = rust_dos::savestate::machine::save(&cpu);
+
+    let mut other = Cpu::new(PathBuf::from("."));
+    rust_dos::savestate::machine::load(&mut other, &state).unwrap();
+    other.bus.mouse.move_by(30.0, 30.0);
+    let m = &other.bus.mouse;
+    assert_eq!((m.mickey_x, m.mickey_y), (20, 20));
+}

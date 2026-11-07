@@ -40,20 +40,20 @@ const fn stdcall(name: &'static str, ordinal: u16, args: u8, handler: stubs::Han
 
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("DrawDibOpen", 1, 0, draw_dib_open),
-    stdcall("DrawDibClose", 2, 1, draw_dib_close),
+    stdcall("DrawDibOpen", 10, 0, draw_dib_open),
+    stdcall("DrawDibClose", 5, 1, draw_dib_close),
     stdcall("DrawDibBegin", 3, 8, draw_dib_begin),
-    stdcall("DrawDibEnd", 4, 1, draw_dib_end),
-    stdcall("DrawDibDraw", 5, 13, draw_dib_draw),
-    stdcall("DrawDibStart", 6, 2, known),
-    stdcall("DrawDibStop", 7, 1, known),
-    stdcall("DrawDibRealize", 8, 3, zero),
-    stdcall("DrawDibSetPalette", 9, 2, known),
-    stdcall("DrawDibGetPalette", 10, 1, zero),
-    stdcall("DrawDibChangePalette", 11, 4, known),
-    stdcall("DrawDibGetBuffer", 12, 4, zero),
-    stdcall("DrawDibTime", 13, 2, zero),
-    stdcall("DrawDibProfileDisplay", 14, 1, profile_display),
+    stdcall("DrawDibEnd", 7, 1, draw_dib_end),
+    stdcall("DrawDibDraw", 6, 13, draw_dib_draw),
+    stdcall("DrawDibStart", 14, 2, known),
+    stdcall("DrawDibStop", 15, 1, known),
+    stdcall("DrawDibRealize", 12, 3, zero),
+    stdcall("DrawDibSetPalette", 13, 2, known),
+    stdcall("DrawDibGetPalette", 9, 1, zero),
+    stdcall("DrawDibChangePalette", 4, 4, known),
+    stdcall("DrawDibGetBuffer", 8, 4, zero),
+    stdcall("DrawDibTime", 16, 2, zero),
+    stdcall("DrawDibProfileDisplay", 11, 1, profile_display),
 ];
 
 /// DrawDibDraw's flags.

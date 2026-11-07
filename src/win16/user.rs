@@ -1383,10 +1383,8 @@ fn create_dialog_indirect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let proc = proc32_of(cpu, args[3], KIND_DLGPROC, instance);
     let instance32 = instance32(cpu, instance);
     // The template goes to the end of its segment at most.
-    let (at, offset) = (super::linear(cpu, args[1]), args[1] & 0xFFFF);
-    let size = super::selector_base(cpu, (args[1] >> 16) as u16)
-        .map_or(0, |(_, limit, _)| (limit + 1).saturating_sub(offset))
-        .min(0x8000);
+    let at = super::linear(cpu, args[1]);
+    let size = super::segment_room(cpu, args[1]).min(0x8000);
     let template = template32(cpu, at, size);
     let param = args.get(4).copied().unwrap_or(0);
     go_at(

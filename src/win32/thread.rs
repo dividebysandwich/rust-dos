@@ -361,6 +361,13 @@ pub fn idle_trap(cpu: &mut Cpu) {
 /// another that is ready once its turn is over.
 pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
     wake(cpu);
+    // A program's level 0 code, as SafeDisc's, goes on without a switch:
+    // its frame is on the level 0 stack, which every thread's entry from
+    // level 3 uses. Windows 98 switches threads on the way back to level 3.
+    if super::system::is_system(&ctx) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     match current(win32) {

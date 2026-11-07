@@ -212,6 +212,123 @@ fn com_program_returning_to_psp_offset_0_terminates() {
     assert_eq!(cpu.state, CpuState::RebootShell);
 }
 
+/// Run from CS:IP until the next HLT reached in a state `stop` accepts.
+fn run_to_hlt_where(cpu: &mut Cpu, stop: impl Fn(&Cpu) -> bool) {
+    for _ in 0..1000 {
+        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
+        if cpu.bus.read_8(at) == 0xF4 && stop(cpu) {
+            return;
+        }
+        cpu.step();
+    }
+    panic!("no HLT reached");
+}
+
+/// Point the EXEC parameter block at PSP:0200 of the program `psp` at
+/// an empty command tail and at `CHILD.COM`, for a parent that calls
+/// AX=4B00h with BX=0200h and DX=0300h.
+fn exec_child_com(cpu: &mut Cpu, psp: u16) {
+    let base = psp as usize * 16;
+    cpu.bus.write_16(base + 0x202, 0x0280);
+    cpu.bus.write_16(base + 0x204, psp);
+    cpu.bus.load_bytes(base + 0x280, &[0x00, 0x0D]);
+    cpu.bus.load_bytes(base + 0x300, b"CHILD.COM\0");
+}
+
+#[test]
+fn a_com_program_the_shell_starts_owns_all_of_conventional_memory() {
+    // Titus's CD loader (CDRUN.COM) unpacks the game above its first
+    // 64 KB, then sets its block's size with AH=4Ah.
+    #[rustfmt::skip]
+    let code = [
+        0x8C, 0xC8,             // MOV AX,CS
+        0x05, 0x00, 0x10,       // ADD AX,1000h
+        0x8E, 0xC0,             // MOV ES,AX
+        0x31, 0xFF,             // XOR DI,DI
+        0xB8, 0x55, 0x55,       // MOV AX,5555h
+        0xB9, 0x08, 0x00,       // MOV CX,8
+        0xF3, 0xAB,             // REP STOSW: over CS+1000h:0000
+        0x0E, 0x07,             // PUSH CS; POP ES
+        0xB4, 0x4A,             // MOV AH,4Ah: set the block to 2000h
+        0xBB, 0x00, 0x20,       // MOV BX,2000h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    let dir = scratch("com_all_memory", &[("UNPACK.COM", &code)]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("UNPACK.COM", None));
+    let psp = cpu.current_psp;
+    let end = rust_dos::mcb::low_end(&cpu.bus);
+    let block = rust_dos::mcb::read_mcb(&mut cpu.bus, psp - 1);
+    assert_eq!((block.signature, block.owner, block.size), (rust_dos::mcb::MCB_Z, psp, end - psp));
+    assert_eq!(cpu.bus.read_16(psp as usize * 16 + 2), end, "the PSP's top of memory");
+
+    run_to_hlt(&mut cpu);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "AH=4Ah failed, AX={:04X}", cpu.ax());
+    let block = rust_dos::mcb::read_mcb(&mut cpu.bus, psp - 1);
+    assert_eq!(block.size, 0x2000);
+    let free = rust_dos::mcb::read_mcb(&mut cpu.bus, psp + 0x2000);
+    assert!(free.is_valid() && free.is_free() && free.is_last(), "{free:?}");
+    assert_eq!(free.size, end - psp - 0x2001);
+}
+
+#[test]
+fn exec_leaves_a_com_program_the_whole_block_it_allocated() {
+    #[rustfmt::skip]
+    let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
+        0xB8, 0x00, 0x4B,       // MOV AX,4B00h
+        0xBB, 0x00, 0x02,       // MOV BX,0200h
+        0xBA, 0x00, 0x03,       // MOV DX,0300h
+        0xCD, 0x21,             // INT 21h
+        0xF4,                   // HLT
+    ];
+    let dir = scratch("exec_com_block", &[("PARENT.COM", &parent), ("CHILD.COM", &[0xF4])]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    exec_child_com(&mut cpu, psp);
+
+    run_to_hlt_where(&mut cpu, |cpu| cpu.current_psp != psp);
+    let child = cpu.current_psp;
+    // The free memory after the parent's block, all of it.
+    let end = rust_dos::mcb::low_end(&cpu.bus);
+    let block = rust_dos::mcb::read_mcb(&mut cpu.bus, child - 1);
+    assert_eq!((block.owner, block.size), (child, end - child));
+    assert!(block.is_last());
+    assert_eq!(cpu.bus.read_16(child as usize * 16 + 2), end, "the PSP's top of memory");
+}
+
+#[test]
+fn a_com_child_in_a_block_under_64_kb_stays_in_it() {
+    // MOV AX,4B00h; MOV BX,0200h; MOV DX,0300h; INT 21h; HLT
+    let parent = [0xB8, 0x00, 0x4B, 0xBB, 0x00, 0x02, 0xBA, 0x00, 0x03, 0xCD, 0x21, 0xF4];
+    let dir = scratch("exec_com_small_block", &[("PARENT.COM", &parent), ("CHILD.COM", &[0xF4])]);
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("PARENT.COM", None));
+    let psp = cpu.current_psp;
+    exec_child_com(&mut cpu, psp);
+    // The largest free block is a hole of 800h paragraphs between the
+    // parent's block and one it owns above.
+    use rust_dos::mcb;
+    mcb::resize(&mut cpu.bus, psp, 0x1000).unwrap();
+    let hole = mcb::alloc(&mut cpu.bus, psp, 0x800).unwrap();
+    let rest = mcb::alloc(&mut cpu.bus, psp, 0xFFFF).unwrap_err();
+    let above = mcb::alloc(&mut cpu.bus, psp, rest).unwrap();
+    mcb::free(&mut cpu.bus, hole).unwrap();
+
+    run_to_hlt_where(&mut cpu, |cpu| cpu.current_psp != psp);
+    let child = cpu.current_psp;
+    let block = mcb::read_mcb(&mut cpu.bus, child - 1);
+    assert_eq!(child + block.size, above - 1, "the child has the rest of the hole");
+    assert_eq!(cpu.bus.read_16(child as usize * 16 + 2), above - 1, "the PSP's top of memory");
+    assert_eq!((cpu.ss(), cpu.sp()), (child, block.size * 16 - 2), "the stack, in the block");
+    let next = mcb::read_mcb(&mut cpu.bus, above - 1);
+    assert!(next.is_valid() && next.owner == psp && next.size == rest, "{next:?}");
+}
+
 /// The `Restore Failed` lines `cpu` logs from now on.
 fn restore_failures(cpu: &mut Cpu) -> Rc<RefCell<Vec<String>>> {
     let failures = Rc::new(RefCell::new(Vec::new()));
@@ -259,6 +376,9 @@ fn a_program_the_shell_started_ends_without_a_restore_failure() {
 fn a_debugger_the_shell_started_quits_without_running_its_child_and_without_a_restore_failure() {
     #[rustfmt::skip]
     let parent = [
+        0xB4, 0x4A,             // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10,       // MOV BX,1000h
+        0xCD, 0x21,             // INT 21h
         0xB8, 0x01, 0x4B,       // MOV AX,4B01h: load the child, don't run it
         0xBB, 0x00, 0x02,       // MOV BX,0200h
         0xBA, 0x00, 0x03,       // MOV DX,0300h
@@ -290,25 +410,21 @@ fn a_debugger_the_shell_started_quits_without_running_its_child_and_without_a_re
 
 /// Run from CS:IP until the next HLT.
 fn run_to_hlt(cpu: &mut Cpu) {
-    for _ in 0..1000 {
-        let at = cpu.get_physical_addr(cpu.cs(), cpu.ip());
-        if cpu.bus.read_8(at) == 0xF4 {
-            return;
-        }
-        cpu.step();
-    }
-    panic!("no HLT reached");
+    run_to_hlt_where(cpu, |_| true);
 }
 
 #[test]
 fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
     let parent = [
+        0xB4, 0x4A, // MOV AH,4Ah: shrink to 1000h paragraphs
+        0xBB, 0x00, 0x10, // MOV BX,1000h
+        0xCD, 0x21, // INT 21h
         0xB8, 0x01, 0x4B, // MOV AX,4B01h
         0xBB, 0x00, 0x02, // MOV BX,0200h
         0xBA, 0x00, 0x03, // MOV DX,0300h
         0xCD, 0x21, // INT 21h
-        0xF4, // 010B: HLT, after loading
-        0xF4, // 010C: HLT, the debugger's terminate handler
+        0xF4, // 0112: HLT, after loading
+        0xF4, // 0113: HLT, the debugger's terminate handler
     ];
     let child = [0xB8, 0x07, 0x4C, 0xCD, 0x21]; // MOV AX,4C07h; INT 21h
     let dir = scratch("exec_load", &[("PARENT.COM", &parent), ("CHILD.COM", &child)]);
@@ -329,7 +445,7 @@ fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
     let parent_sp = cpu.sp();
 
     run_to_hlt(&mut cpu);
-    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (psp, 0x010B, parent_sp));
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (psp, 0x0112, parent_sp));
     assert!(!cpu.get_cpu_flag(CpuFlags::CF));
     let child_psp = cpu.current_psp;
     assert_ne!(child_psp, psp, "the child's PSP is current");
@@ -343,14 +459,14 @@ fn exec_loads_a_program_for_a_debugger_and_ends_it_at_its_terminate_address() {
 
     // The debugger takes over termination and runs the child.
     let child_base = child_psp as usize * 16;
-    cpu.bus.write_16(child_base + 0x0A, 0x010C);
+    cpu.bus.write_16(child_base + 0x0A, 0x0113);
     cpu.bus.write_16(child_base + 0x0C, psp);
     cpu.set_cs(cs);
     cpu.set_ip(ip);
     cpu.set_ss(ss);
     cpu.set_sp(sp + 2);
     run_to_hlt(&mut cpu);
-    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (psp, 0x010C, parent_sp));
+    assert_eq!((cpu.cs(), cpu.ip(), cpu.sp()), (psp, 0x0113, parent_sp));
     assert_eq!(cpu.current_psp, psp);
     assert_eq!(cpu.last_child_exit, 7);
 }

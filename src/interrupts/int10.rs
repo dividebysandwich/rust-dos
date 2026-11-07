@@ -447,6 +447,7 @@ fn mode_set_for_mouse(cpu: &mut Cpu, before: MouseScreen, vesa: bool) {
         (false, false) => ModeSet::Standard,
     };
     cpu.bus.mouse.video_mode_set(after.2, change);
+    crate::mouse::update_mickey_scale(&mut cpu.bus);
 }
 
 /// INT 10h AH=00h: set the standard video mode AL (bit 7: keep the

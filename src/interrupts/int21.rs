@@ -1137,12 +1137,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 } else {
                     // Load failed — release the MCBs we allocated, pop the
                     // context we just saved, and return an error to the parent.
-                    // An EXE file whose MINALLOC doesn't fit in the largest
-                    // free block is short of memory (08h), not missing.
+                    // A program that doesn't fit in the largest free block
+                    // (an EXE file with its MINALLOC, a COM file with its
+                    // stack) is short of memory (08h), not missing.
                     let block = crate::mcb::read_mcb(&mut cpu.bus, load_segment - 1).size;
-                    let short = program.as_deref().is_some_and(|bytes| {
-                        bytes.starts_with(b"MZ") && block < crate::cpu::program_paras(bytes)
-                    });
+                    let short = program
+                        .as_deref()
+                        .is_some_and(|bytes| block < crate::cpu::program_paras(bytes));
                     let _ = crate::mcb::free(&mut cpu.bus, load_segment);
                     let _ = crate::mcb::free(&mut cpu.bus, env_seg);
                     cpu.restore_process_context();

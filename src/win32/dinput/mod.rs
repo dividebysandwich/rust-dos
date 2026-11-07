@@ -80,10 +80,10 @@ const fn method(name: &'static str, args: u8, handler: super::stubs::Handler) ->
 /// The functions. Append only (see `stubs`). The methods have ordinal
 /// 0: they aren't exported.
 static APIS: &[Api] = &[
-    stdcall("DllCanUnloadNow", 1, 0, dll_can_unload_now),
-    stdcall("DllGetClassObject", 2, 3, dll_get_class_object),
-    stdcall("DirectInputCreateA", 3, 4, direct_input_create),
-    stdcall("DirectInputCreateEx", 4, 5, direct_input_create_ex),
+    stdcall("DllCanUnloadNow", 3, 0, dll_can_unload_now),
+    stdcall("DllGetClassObject", 4, 3, dll_get_class_object),
+    stdcall("DirectInputCreateA", 1, 4, direct_input_create),
+    stdcall("DirectInputCreateEx", 7, 5, direct_input_create_ex),
     method("DI_QueryInterface", 3, di_query_interface),
     method("DI_AddRef", 1, di_add_ref),
     method("DI_Release", 1, di_release),

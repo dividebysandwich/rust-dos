@@ -201,8 +201,8 @@ const UPDATE: &[Keyword] = &[
 ];
 
 const REALIZE: &[Keyword] = &[
-    (&["normal"], 0x0001_0000, Arg::None),
-    (&["background"], 0x0002_0000, Arg::None),
+    (&["normal"], video::MCI_DGV_REALIZE_NORM, Arg::None),
+    (&["background"], video::MCI_DGV_REALIZE_BKGD, Arg::None),
 ];
 
 /// digitalvideo's MCI_STEP.
