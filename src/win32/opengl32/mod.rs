@@ -66,6 +66,10 @@ mod state;
 mod texture;
 pub mod wgl;
 
+pub use matrix::{mult as mult_matrix, ortho};
+pub use state::get_string;
+pub use texture::{GL_TEXTURE_2D, rgba_of, tex_image_rgba};
+
 use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -263,8 +267,10 @@ pub struct State {
     pub current: Vec<(u32, u32, u32)>,
     /// The pixel format of each window that has one (window, format).
     pub formats: Vec<(u32, u32)>,
-    /// The functions that do nothing whose first call was logged.
+    /// The functions that do nothing whose first call was logged, and
+    /// GLU32's (glu32/).
     pub logged: Vec<u16>,
+    pub glu_logged: Vec<u16>,
 }
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
@@ -553,4 +559,4 @@ crate::state_fields!(State {
     contexts,
     current,
     formats
-} skip { logged });
+} skip { logged, glu_logged });
