@@ -8,7 +8,7 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
-use crate::bus::GEN_SHIFT;
+use crate::bus::{Bus, GEN_SHIFT};
 use crate::command::{CommandDispatcher, split_command};
 use crate::cpu::{ATTR_DB, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
 use crate::dynrec::{DynState, Run};
@@ -610,7 +610,16 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
         return;
     }
     match start(cpu, command, args.trim(), false, false) {
-        None => bad_command(cpu),
+        // The output file is made before the program is looked for, as in
+        // DOSBox: Wolf runs `POWER.EXE > C:POWERFL` through COMMAND.COM and
+        // opens the file whether POWER.EXE was there or not. The message
+        // stays on the screen.
+        None => {
+            if let Some((path, append)) = &redirect.output {
+                create_output(&mut cpu.bus, path, *append);
+            }
+            bad_command(cpu)
+        }
         Some(Started::Program) => redirect_program(cpu, &redirect),
         Some(Started::Batch) => {}
     }
@@ -784,16 +793,22 @@ fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
     }
 }
 
+/// The file a `>` redirection writes to, made empty, or a `>>` one's,
+/// made if it isn't there. A device (NUL, CON) is left alone.
+fn create_output(bus: &mut Bus, path: &str, append: bool) {
+    let is_device = crate::disk::char_device(path).is_some();
+    if !is_device && (!append || !bus.disk.exists(path)) {
+        let _ = bus.disk.write_whole_file(path, &[], None);
+    }
+}
+
 /// Give a program started from the shell the files its command line
 /// redirected: its handle 1 (standard output) and 0 (standard input).
 fn redirect_program(cpu: &mut Cpu, redirect: &Redirections) {
     let psp = cpu.current_psp;
     let bus = &mut cpu.bus;
     if let Some((path, append)) = &redirect.output {
-        let is_device = crate::disk::char_device(path).is_some();
-        if !is_device && (!append || !bus.disk.exists(path)) {
-            let _ = bus.disk.write_whole_file(path, &[], None);
-        }
+        create_output(bus, path, *append);
         if let Ok(sft) = bus.disk.open_file(path, 0x01, psp) {
             if *append {
                 let _ = bus.disk.seek_file(sft, 0, 2);
