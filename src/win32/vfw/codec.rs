@@ -1,13 +1,15 @@
 //! The video decompressors Video for Windows has: Indeo Video 3 (IV31,
 //! IV32) and Indeo Video 5 (IV50), decoded by the `oxideav-indeo` crate,
-//! and Indeo Video Interactive 4 (IV41, indeo4/). Windows 98 installs
-//! codecs for the three. A picture comes out as what ICDecompress gives
-//! for a BI_RGB output of 24 bits: a bottom-up DIB.
+//! Indeo Video Interactive 4 (IV41, indeo4/), and Cinepak (CVID,
+//! `iccvid.dll`), decoded by the `oxideav-cinepak` crate. Windows 98
+//! installs codecs for the four. A picture comes out as what
+//! ICDecompress gives for a BI_RGB output of 24 bits: a bottom-up DIB.
 //!
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
 
 use crate::win32::gdi32::surface::dib_stride;
+use oxideav_cinepak::{CinepakDecoder, CinepakFrame, CinepakPixelFormat};
 use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
 use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
 
@@ -15,6 +17,7 @@ const IV31: u32 = u32::from_le_bytes(*b"IV31");
 const IV32: u32 = u32::from_le_bytes(*b"IV32");
 const IV50: u32 = u32::from_le_bytes(*b"IV50");
 const IV41: u32 = u32::from_le_bytes(*b"IV41");
+const CVID: u32 = u32::from_le_bytes(*b"CVID");
 
 /// The largest picture Indeo 3's decoder takes.
 const INDEO3_MAX: (u32, u32) = (640, 480);
@@ -30,6 +33,8 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
         IV31 | IV32 => (1..=INDEO3_MAX.0).contains(&width) && (1..=INDEO3_MAX.1).contains(&height),
         IV50 => width >= 1 && height >= 1,
         IV41 => (1..=4096).contains(&width) && (1..=4096).contains(&height),
+        // A frame's header gives its size in 16 bits.
+        CVID => (1..=0xFFFF).contains(&width) && (1..=0xFFFF).contains(&height),
         _ => false,
     }
 }
@@ -40,6 +45,9 @@ enum Decoder {
     /// to decode leaves as it is.
     Indeo5(Box<Indeo5Decoder>, Option<(HostBuffer, (u32, u32))>),
     Indeo4(Box<super::indeo4::Decoder>),
+    /// With the last frame it decoded, which a frame that fails to decode
+    /// leaves as it is.
+    Cinepak(Box<CinepakDecoder>, Option<CinepakFrame>),
 }
 
 /// A decompressor, or none yet.
@@ -58,6 +66,7 @@ impl std::fmt::Debug for Codec {
             Some(Decoder::Indeo3(_)) => "Codec(Indeo 3)",
             Some(Decoder::Indeo5(..)) => "Codec(Indeo 5)",
             Some(Decoder::Indeo4(_)) => "Codec(Indeo 4)",
+            Some(Decoder::Cinepak(..)) => "Codec(Cinepak)",
             None => "Codec(None)",
         })
     }
@@ -70,6 +79,7 @@ impl Codec {
             IV31 | IV32 => Some(Decoder::Indeo3(Box::default())),
             IV50 => Some(Decoder::Indeo5(Box::default(), None)),
             IV41 => Some(Decoder::Indeo4(Box::new(super::indeo4::Decoder::new()))),
+            CVID => Some(Decoder::Cinepak(Box::default(), None)),
             _ => None,
         })
     }
@@ -99,6 +109,10 @@ impl Codec {
                 Ok(())
             }
             Some(Decoder::Indeo4(d)) => d.decode(frame),
+            Some(Decoder::Cinepak(d, last)) => {
+                *last = Some(d.decode_frame(frame, None).map_err(|e| e.to_string())?);
+                Ok(())
+            }
             None => Err("no decoder".to_string()),
         }
     }
@@ -125,8 +139,33 @@ impl Codec {
                     yvu9_dib(&p.y, &p.u, &p.v, (p.width, p.height), p.chroma_width())
                 })
             }
+            Decoder::Cinepak(_, last) => {
+                let f = last.as_ref()?;
+                (f.width == width && f.height == height).then(|| cinepak_dib(f))
+            }
         }
     }
+}
+
+/// A Cinepak picture, rows of red, green and blue (or of grey) from the
+/// top, as a DIB.
+fn cinepak_dib(f: &CinepakFrame) -> Vec<u8> {
+    let (w, h) = (f.width as usize, f.height as usize);
+    let stride = dib_stride(w as i32, 24);
+    let mut out = vec![0; stride * h];
+    for (y, line) in f.pixels().chunks(f.stride()).take(h).enumerate() {
+        let row = &mut out[(h - 1 - y) * stride..][..w * 3];
+        for (x, d) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            *d = match f.pixel_format {
+                CinepakPixelFormat::Rgb24 => {
+                    let p = line.get(x * 3..x * 3 + 3).unwrap_or(&[0; 3]);
+                    [p[2], p[1], p[0]]
+                }
+                CinepakPixelFormat::Gray8 => [line.get(x).copied().unwrap_or(0); 3],
+            };
+        }
+    }
+    out
 }
 
 /// The bytes of the rows of a DIB, which a file or a program can size so
@@ -259,10 +298,35 @@ mod tests {
     }
 
     #[test]
+    fn cinepak_pictures_come_out_as_bottom_up_dibs() {
+        // A key frame of 8 by 8 pixels, four macroblocks, coded by the
+        // crate's encoder: the top four rows red, the bottom four blue.
+        let mut rgb = Vec::new();
+        for y in 0..8 {
+            for _ in 0..8 {
+                rgb.extend_from_slice(if y < 4 { &[255, 0, 0] } else { &[0, 0, 255] });
+            }
+        }
+        let frame = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(u32::from_le_bytes(*b"cvid"));
+        codec.decode(&frame).unwrap();
+        assert!(codec.picture(16, 8).is_none());
+        let dib = codec.picture(8, 8).unwrap();
+        let stride = dib_stride(8, 24);
+        // The DIB's first row is the picture's bottom one: blue, as blue,
+        // green and red.
+        let px = |row: usize| -> [u8; 3] { dib[row * stride..][..3].try_into().unwrap() };
+        let (bottom, top) = (px(0), px(7));
+        assert!(bottom[0] > 200 && bottom[2] < 60, "bottom {bottom:?}");
+        assert!(top[2] > 200 && top[0] < 60, "top {top:?}");
+    }
+
+    #[test]
     fn codecs_go_by_fourcc_in_either_case() {
         let iv50 = u32::from_le_bytes(*b"iv50");
         assert!(supported(iv50, 640, 480));
-        assert!(!supported(u32::from_le_bytes(*b"cvid"), 320, 240));
+        assert!(supported(u32::from_le_bytes(*b"cvid"), 320, 240));
+        assert!(!supported(u32::from_le_bytes(*b"MSVC"), 320, 240));
         assert!(!supported(IV32, 800, 600));
         assert!(!Codec::new(iv50).is_empty());
         assert!(Codec::new(0).is_empty());

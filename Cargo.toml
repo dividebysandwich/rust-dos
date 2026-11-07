@@ -98,6 +98,9 @@ oxideav-indeo = "=0.0.2"
 oxideav-mpeg12video = "=0.0.13"
 oxideav-mp2 = "=0.0.10"
 oxideav-core = "=0.1.42"
+# Cinepak, the most common codec of CD games' AVI files (vfw::codec).
+# Pinned as oxideav-indeo is.
+oxideav-cinepak = { version = "=0.0.3", default-features = false }
 # The sound cards, each a crate of its own (crates/).
 rust-dos-opl = { path = "crates/opl" }
 rust-dos-tandy = { path = "crates/tandy" }

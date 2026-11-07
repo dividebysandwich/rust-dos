@@ -392,11 +392,13 @@ what its region cuts off. No probe has compared that crop with Windows.
 AVIFIL32.DLL reads AVI files, and MSVFW32.DLL's DrawDib functions
 decompress and draw their frames (`vfw/`). AVIStreamGetFrame decompresses
 a video stream's frames to a DIB of the program's choice, 24 bits a pixel
-by default, from the last key frame on. The codecs are Indeo Video 3 and
-5, which Windows 98 installs, decoded by the `oxideav-indeo` crate. Indeo
-5 key frames match FFmpeg's, but for frames that both decoders refuse as
-damaged, where the picture before stays. Indeo 5's frames that depend on
-earlier ones have not been compared with a reference.
+by default, from the last key frame on. The codecs are the ones Windows
+98 installs: Indeo Video 3 and 5, decoded by the `oxideav-indeo` crate,
+Indeo Video Interactive 4, and Cinepak, decoded by the `oxideav-cinepak`
+crate. Indeo 5 key frames match FFmpeg's, but for frames that both
+decoders refuse as damaged, where the picture before stays. Indeo 5's
+frames that depend on earlier ones have not been compared with a
+reference.
 
 ## Sound and input
 
