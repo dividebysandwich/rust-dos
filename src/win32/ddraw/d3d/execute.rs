@@ -239,14 +239,23 @@ const PV_TRANSFORMLIGHT: u32 = 0;
 const PV_TRANSFORM: u32 = 1;
 const PV_UPDATEEXTENTS: u32 = 0x8;
 
+// Execute's flags.
+const D3DEXECUTE_CLIPPED: u32 = 0x1;
+const D3DEXECUTE_UNCLIPPED: u32 = 0x2;
+
 /// The most instructions an Execute runs: a branch can't go back, so
 /// a buffer's run ends; this bounds one that is all empty instructions.
 const MAX_INSTRUCTIONS: u32 = 0x10_0000;
 
 /// Execute(this, buffer, viewport, flags): run the buffer's
-/// instructions, drawing in the viewport.
+/// instructions, drawing in the viewport. With D3DEXECUTE_UNCLIPPED the
+/// program says every primitive is inside the viewport, and Direct3D
+/// hands them to the driver without clipping them, as
+/// D3DDP_DONOTCLIP does: WarGames' transformed vertices have depths of
+/// 4 to 33, which it draws with depth testing off, and they would all
+/// be clipped at z 1.
 pub fn execute(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [this, buffer, viewport, _] = args[..] else {
+    let [this, buffer, viewport, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
@@ -272,6 +281,7 @@ pub fn execute(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         vertices: vec![Processed::default(); e.data[1].min(0x1_0000) as usize],
         data: e.data,
         setup: None,
+        clip: flags & D3DEXECUTE_UNCLIPPED == 0 || flags & D3DEXECUTE_CLIPPED != 0,
     };
     run.go(cpu);
     if let Some(e) = get_buffer(cpu, bid) {
@@ -292,6 +302,8 @@ struct Run {
     setup: Option<pipeline::Setup>,
     /// D3DEXECUTEDATA's words after the size.
     data: [u32; 11],
+    /// Whether primitives are clipped: false with D3DEXECUTE_UNCLIPPED.
+    clip: bool,
 }
 
 impl Run {
@@ -479,6 +491,7 @@ impl Run {
         if !lit {
             setup.lighting = None;
         }
+        setup.clip &= self.clip;
         let first = self.data[0] as usize + start as usize * layout.size as usize;
         let mut input = Vec::new();
         for i in 0..count as usize {
@@ -533,7 +546,7 @@ impl Run {
                 }
             }
         }
-        let setup = match &self.setup {
+        let mut setup = match &self.setup {
             Some(s) => s.clone(),
             None => {
                 let layout = Layout::of(pipeline::FVF_TLVERTEX).unwrap_or_default();
@@ -543,6 +556,7 @@ impl Run {
                 }
             }
         };
+        setup.clip &= self.clip;
         super::draw::draw_processed(cpu, self.id, &setup, &self.vertices, &prims);
     }
 }

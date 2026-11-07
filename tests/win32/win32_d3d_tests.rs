@@ -869,10 +869,19 @@ const D3DOP_PROCESSVERTICES: u8 = 9;
 const D3DOP_EXIT: u8 = 11;
 const D3DPROCESSVERTICES_COPY: u32 = 2;
 
+// Execute's flags.
+const D3DEXECUTE_UNCLIPPED: u32 = 0x2;
+
 /// Direct3D 5: a device on a 64x64 surface with a viewport, an execute
 /// buffer that copies three screen vertices and draws a triangle of
 /// them, and DrawPrimitive with the same vertices; then GetStats.
 fn execute_program() -> (Vec<u8>, u32) {
+    execute_program_with(0.5, 0)
+}
+
+/// `execute_program` with the vertices at depth `z`, and `flags` for
+/// Execute.
+fn execute_program_with(z: f32, flags: u32) -> (Vec<u8>, u32) {
     let mut d = data();
     target_desc(&mut d, DESC, 108, 64, 64);
     // D3DVIEWPORT2: all of the surface.
@@ -884,7 +893,7 @@ fn execute_program() -> (Vec<u8>, u32) {
     let tl = [(8.0, 8.0), (56.0, 8.0), (32.0, 56.0)];
     for (i, (x, y)) in tl.iter().enumerate() {
         let v = VERTICES + 32 * i as u32;
-        put_f32s(&mut d, v, &[*x, *y, 0.5, 1.0]);
+        put_f32s(&mut d, v, &[*x, *y, z, 1.0]);
         put32(&mut d, v + 16, 0xFFFF_FFFF);
     }
     let code = VERTICES + 96;
@@ -969,7 +978,7 @@ fn execute_program() -> (Vec<u8>, u32) {
             l,
             DEVICE1,
             DEV1_EXECUTE,
-            &[Arg::Val(BUFFER), Arg::Val(VIEWPORT), Arg::I(0)],
+            &[Arg::Val(BUFFER), Arg::Val(VIEWPORT), Arg::I(flags)],
         )?;
         c.com(
             a,
@@ -1021,6 +1030,29 @@ fn an_execute_buffer_and_draw_primitive_draw_and_count_in_get_stats() {
     };
     assert_eq!(pixel(32, 20), 0xFFFF);
     assert_eq!(pixel(32, 60), 0);
+}
+
+/// The pixel at (`x`, `y`) of the 16-bit target the program locked.
+fn locked_pixel(cpu: &Cpu, data: u32, x: u32, y: u32) -> u16 {
+    let bits = peek(cpu, data + LOCK_DESC + 0x24);
+    let pitch = peek(cpu, data + LOCK_DESC + 0x10);
+    let at = bits + y * pitch + 2 * x;
+    (peek(cpu, at & !3) >> (8 * (at & 2))) as u16
+}
+
+#[test]
+fn an_unclipped_execute_draws_screen_vertices_past_z_1() {
+    // WarGames draws its screen vertices at depths of 4 to 33 with depth
+    // testing off, through Execute with D3DEXECUTE_UNCLIPPED: Direct3D
+    // doesn't clip them, and the triangle shows. DrawPrimitive's copy of
+    // it is clipped at z 1 and draws nothing.
+    let (exe, data) = execute_program_with(4.0, D3DEXECUTE_UNCLIPPED);
+    let mut cpu = machine("execute_unclipped", exe);
+    run_until_done(&mut cpu, data);
+    let r = results(&cpu, data, 22);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(locked_pixel(&cpu, data, 32, 20), 0xFFFF);
+    assert_eq!(locked_pixel(&cpu, data, 32, 60), 0);
 }
 
 // Drawing: scenes of screen vertices drawn on a 64x64 target, which the
