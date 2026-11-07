@@ -1214,6 +1214,26 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
     reflect_to(cpu, vector, ctx, target);
 }
 
+/// Whether a hardware interrupt that comes now, at the processor's
+/// instruction boundary, can go down to real mode for a client: the
+/// processor runs a client of this host at its level, not the host's own
+/// code at level 0 nor virtual 8086 mode.
+pub fn can_reflect_interrupt(cpu: &Cpu) -> bool {
+    cpu.pm() && cpu.cpl == 3 && cpu.bus.dpmi.active() && cpu.bus.dpmi.host.is_some()
+}
+
+/// A device's interrupt `irq` that the host has no protected-mode handler
+/// for, come in the running client's protected mode
+/// (`can_reflect_interrupt`): run the device's real-mode handler at
+/// `segment`:`offset` as the host reflects a hardware interrupt, on the
+/// client's real-mode stack, and go on with the client as it was when the
+/// handler IRETs.
+pub fn reflect_interrupt(cpu: &mut Cpu, irq: u8, segment: u16, offset: u16) {
+    let ctx = Context::of(cpu);
+    let vector = cpu.bus.pic.vector(irq);
+    reflect_to(cpu, vector, ctx, (segment as u32) << 16 | offset as u32);
+}
+
 /// Reflect interrupt `vector` to the real-mode handler at `target`.
 fn reflect_to(cpu: &mut Cpu, vector: u8, ctx: Context, target: u32) {
     if target == 0 {

@@ -509,6 +509,9 @@ fn driver_extent((w, h): (usize, usize)) -> (i32, i32) {
 /// event registers, CALL FAR the handler (which returns with RETF), restore
 /// the registers and IRET to the interrupted code.
 pub const CALLBACK_STUB: usize = 0xFF200;
+/// The IRQ a PS/2 mouse driver's handler runs from, the one the stub's
+/// call stands for when the DPMI host reflects it from protected mode.
+const MOUSE_IRQ: u8 = 12;
 /// The stub's data: AX, BX, CX, DX, SI, DI for the handler, the handler's
 /// far address, then a busy byte the stub has cleared when the handler
 /// returns (`bios::SERVICE_MOUSE_CALLBACK_DONE`).
@@ -550,12 +553,20 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// "driver" invokes on the events in its mask. Many Microsoft-mouse
 /// compatible games expect button presses to arrive this way rather than
 /// via polling AH=03 or AH=05. When an event in the mask is pending, a
-/// handler is installed and not still running, enter the ROM stub in real
-/// mode only: it saves the registers and CALL FARs the handler, which
-/// returns with RETF. The caller controls IF gating. Returns true when
-/// the handler was entered.
+/// handler is installed and not still running, enter the ROM stub: it
+/// saves the registers and CALL FARs the handler, which returns with
+/// RETF. The caller controls IF gating. Returns true when the handler was
+/// entered.
+///
+/// The handler is real-mode code. In real mode the stub runs on the
+/// program's stack, as an interrupt would. In protected mode it runs only
+/// for a client of the built-in DPMI host, which reflects it to real mode
+/// as it does the hardware interrupt a mouse driver's handler runs from
+/// (IRQ 12), and the client goes on afterwards as it was. ShadowCaster's
+/// DOS/4GW code stays in protected mode and reads the mouse only through
+/// the handler it installs. Other protected-mode systems get no call.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
-    if cpu.pe() {
+    if cpu.pe() && !crate::dpmi::can_reflect_interrupt(cpu) {
         return false;
     }
     let mouse = &cpu.bus.mouse;
@@ -588,6 +599,11 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     data.push(1); // busy
     cpu.bus.write_rom(CALLBACK_DATA, &data);
 
+    if cpu.pe() {
+        let stub = (CALLBACK_STUB - 0xF0000) as u16;
+        crate::dpmi::reflect_interrupt(cpu, MOUSE_IRQ, 0xF000, stub);
+        return true;
+    }
     cpu.push(cpu.flags16());
     cpu.push(cpu.cs());
     cpu.push(cpu.ip());
