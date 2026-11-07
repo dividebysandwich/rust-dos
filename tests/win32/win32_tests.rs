@@ -3558,21 +3558,21 @@ fn a_gate_to_selector_28h_runs_level_0_code() {
 }
 
 /// A VxD service call at level 0, INT 20h and the service's dword, as
-/// SafeDisc 2.30's level 0 code makes one: the built-in Windows has no
-/// VxDs, so the program ends, naming the service and the INT's address.
-/// Bit 15 of the service's word marks a VxDJmp and isn't part of its
-/// number.
+/// SafeDisc 2.30's level 0 code makes one, of a service the built-in
+/// Windows doesn't have: there being no VxDs, the program ends, naming
+/// the service and the INT's address. Bit 15 of the service's word marks
+/// a VxDJmp and isn't part of its number.
 #[test]
 fn a_vxd_call_at_level_0_names_the_service() {
     let (code, text) = run_through_gate_28h(
         "vxd_level0",
         &[
             0xCD, 0x20, // int 20h
-            0x3E, 0x81, 0x01, 0x00, // VMM's service 013Eh, as a VxDJmp
+            0x02, 0x80, 0x27, 0x00, // VXDLDR's service 0002h, as a VxDJmp
         ],
     );
     assert_eq!(code, 0xFF, "{}", text);
-    assert!(text.contains("VxD 0001h's service 013Eh"), "{}", text);
+    assert!(text.contains("VxD 0027h's service 0002h"), "{}", text);
     // The INT, at 30h of the data section, which starts at a page.
     let at = text
         .split_once("doesn't have at 0028:")
@@ -3580,12 +3580,59 @@ fn a_vxd_call_at_level_0_names_the_service() {
     assert_eq!(at.map(|at| at & 0xFFF), Some(0x30), "{}", text);
 }
 
+/// VMM_GetVxDLocationList from level 0, as SafeDisc 2.30 (Anachronox)
+/// calls it: as on Windows 98 SE, EAX has the list, EDX the number of
+/// VxDs and ECX the list's size. The built-in Windows lists VMM alone: a
+/// record of its DDB, whose name is "VMM     ", and one object, 14 bytes.
+/// The code sets EBX to 1 when all of that holds.
+#[test]
+fn vmm_get_vxd_location_list_lists_vmm() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_location_list",
+        &[
+            0xCD, 0x20, 0x3E, 0x01, 0x01, 0x00, // VMMCall GetVxDLocationList
+            0x83, 0xFA, 0x01, // cmp edx, 1
+            0x75, 0x1B, // jne done
+            0x83, 0xF9, 0x0E, // cmp ecx, 14
+            0x75, 0x16, // jne done
+            0x8B, 0x30, // mov esi, [eax]: the DDB
+            0x81, 0x7E, 0x0C, 0x56, 0x4D, 0x4D, 0x20, // cmp [esi+0Ch], "VMM "
+            0x75, 0x0B, // jne done
+            0x80, 0x78, 0x04, 0x01, // cmp byte [eax+4], 1: one object
+            0x75, 0x05, // jne done
+            0xBB, 0x01, 0x00, 0x00, 0x00, // mov ebx, 1
+            0xCF, // done: iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// VXDLDR_GetDeviceList from level 0 through VxDJmp, which returns to the
+/// caller's caller: the built-in Windows has loaded no VxDs since its
+/// start, so the list is empty and EAX 0, and the code goes on after the
+/// CALL that led to the VxDJmp.
+#[test]
+fn vxdldr_get_device_list_is_empty() {
+    let (code, text) = run_through_gate_28h(
+        "vxdldr_device_list",
+        &[
+            0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
+            0xE8, 0x06, 0x00, 0x00, 0x00, // call jump
+            0x85, 0xC0, // test eax, eax
+            0x0F, 0x94, 0xC3, // sete bl
+            0xCF, // iretd
+            0xCD, 0x20, 0x05, 0x80, 0x27, 0x00, // jump: VxDJmp GetDeviceList
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
 /// section, through a gate of level 3 for vector 5 with selector 28h. The
 /// program ends with EBX's bit 0 after it returns.
 fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
-    let mut data = vec![0u8; 0x40];
+    let mut data = vec![0u8; 0x30 + level0.len().max(0x10)];
     data[0x30..0x30 + level0.len()].copy_from_slice(level0);
     run(
         name,

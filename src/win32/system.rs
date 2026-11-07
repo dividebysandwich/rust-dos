@@ -45,7 +45,14 @@ const RING0_STACK_TOP: u32 = RING0_STACK + 2 * PAGE;
 /// code in its place.
 const HANDLERS: u32 = RING0_STACK_TOP;
 const HANDLER_SIZE: u32 = 32;
-pub const SYSTEM_BLOCK_PAGES: u32 = (HANDLERS + 256 * HANDLER_SIZE) / PAGE;
+/// VMM's data for the services a program's level 0 code may call through
+/// INT 20h (`vxd_service`): VMM's DDB and the list of where the VxDs are
+/// in memory, which VMM_GetVxDLocationList returns.
+const VMM_DATA: u32 = HANDLERS + 256 * HANDLER_SIZE;
+const VMM_DDB: u32 = VMM_DATA;
+const DDB_SIZE: u32 = 0x50;
+const VXD_LOCATIONS: u32 = VMM_DDB + DDB_SIZE;
+pub const SYSTEM_BLOCK_PAGES: u32 = (VMM_DATA + PAGE) / PAGE;
 
 /// The GDT's selectors: the TSS, the LDT, and level 0 code and data
 /// covering everything at 28h and 30h, where Windows 98's VMM has its
@@ -131,6 +138,7 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
     cpu.bus.write_32(tss + 8, DATA0 as u32);
     cpu.bus.write_16(tss + 0x66, (IOPB - TSS) as u16);
     cpu.bus.write_8((phys + IOPB_END) as usize, 0xFF);
+    write_vmm_data(cpu, phys);
     let ldt = phys + LDT;
     let ldt_desc = |selector: u16| ldt + (selector & !7) as u32;
     write_descriptor(
@@ -149,6 +157,115 @@ pub fn build_tables(cpu: &mut Cpu, memory: &mut Memory, phys: u32, tib: u32) -> 
         descriptor(tib, PAGE - 1, ACCESS_DATA3, BIG),
     );
     Some(())
+}
+
+/// VMM's DDB and the VxD location list, in the system block at `phys`.
+///
+/// The DDB has the fields of Windows 98 SE's VMM that say what it is:
+/// the name, the id 0001h, version 4.10 for both the DDK and VMM, its
+/// size and the three reserved signatures. It has no procedures and no
+/// service table: the built-in Windows runs VMM's services itself.
+///
+/// The list is packed records, one for each VxD in load order: the DDB's
+/// address, a byte with the number of objects, and for each object its
+/// address, its size and a byte with its type (01h locked code, 03h
+/// pageable code, 04h pageable data and so on, VXDLDR's object types).
+/// Windows 98 SE lists some 50 VxDs there, VMM first. The built-in
+/// Windows has VMM alone, whose locked code is this block: the IDT's
+/// gates lead to its handlers, as Windows 98's lead into VMM's objects.
+fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
+    let ddb = (phys + VMM_DDB) as usize;
+    cpu.bus.write_16(ddb + 0x04, 0x040A);
+    cpu.bus.write_16(ddb + 0x06, 0x0001);
+    cpu.bus.write_8(ddb + 0x08, 4);
+    cpu.bus.write_8(ddb + 0x09, 10);
+    cpu.bus.load_bytes(ddb + 0x0C, b"VMM     ");
+    cpu.bus.write_32(ddb + 0x40, DDB_SIZE);
+    cpu.bus.load_bytes(ddb + 0x44, b"Rsv1Rsv2Rsv3");
+    let mut list = Vec::with_capacity(VXD_LOCATIONS_LEN as usize);
+    list.extend_from_slice(&(SYSTEM + VMM_DDB).to_le_bytes());
+    list.push(1);
+    list.extend_from_slice(&SYSTEM.to_le_bytes());
+    list.extend_from_slice(&(SYSTEM_BLOCK_PAGES * PAGE).to_le_bytes());
+    list.push(OBJECT_LOCKED_CODE);
+    debug_assert_eq!(list.len(), VXD_LOCATIONS_LEN as usize);
+    cpu.bus.load_bytes((phys + VXD_LOCATIONS) as usize, &list);
+}
+
+/// The VxD location list's length: VMM's record with one object.
+const VXD_LOCATIONS_LEN: u32 = 5 + 9;
+/// VXDLDR's object type of locked code (LCODE).
+const OBJECT_LOCKED_CODE: u8 = 0x01;
+
+/// The indexes of EAX, ECX and EDX in `Context::gpr`.
+const EAX: usize = 0;
+const ECX: usize = 1;
+const EDX: usize = 2;
+
+/// The VxD services that a program's level 0 code calls through INT 20h,
+/// the VxD's id in the high word and the service in the low one.
+const VMM_GET_VXD_LOCATION_LIST: u32 = 0x0001_013E;
+const VXDLDR_GET_DEVICE_LIST: u32 = 0x0027_0005;
+
+/// Run the VxD service `service` for a program's level 0 code, in its
+/// context `ctx`, if the built-in Windows has it. SafeDisc 2.30
+/// (Anachronox) calls these from its level 0 code, and walks the lists
+/// they return.
+///
+/// VMM_GetVxDLocationList returns the list's address in EAX, the number
+/// of VxDs in EDX and the list's size in bytes in ECX, and leaves the
+/// other registers. Windows 98 SE's VMM keeps the three from its start
+/// and loads them, and its flags are those of a test of EAX.
+///
+/// VXDLDR_GetDeviceList returns in EAX the first of the DeviceInfo
+/// blocks of the VxDs loaded since the start (dynamically loaded), each
+/// linked to the next, and changes nothing else, flags included: Windows
+/// 98 SE's VXDLDR loads the head of the list. The built-in Windows has
+/// loaded none, so the list is empty and EAX 0.
+///
+/// Windows 98's VMM also rewrites the INT 20h and its dword into a call
+/// through the VxD's service table, so that the next call goes there
+/// directly. The built-in Windows has no service tables and leaves the
+/// code as it is: each call comes back here.
+fn vxd_service(service: u32, ctx: &mut Context) -> bool {
+    match service {
+        VMM_GET_VXD_LOCATION_LIST => {
+            let list = SYSTEM + VXD_LOCATIONS;
+            ctx.gpr[EAX] = list;
+            ctx.gpr[ECX] = VXD_LOCATIONS_LEN;
+            ctx.gpr[EDX] = 1;
+            ctx.eflags = test_flags(ctx.eflags, list);
+            true
+        }
+        VXDLDR_GET_DEVICE_LIST => {
+            ctx.gpr[EAX] = 0;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `eflags` after a TEST or OR of `value` with itself: CF and OF clear,
+/// ZF, SF and PF from the value. AF, which those leave undefined, clear.
+fn test_flags(eflags: u32, value: u32) -> u32 {
+    let mut flags = eflags
+        & !(CpuFlags::CF
+            | CpuFlags::PF
+            | CpuFlags::AF
+            | CpuFlags::ZF
+            | CpuFlags::SF
+            | CpuFlags::OF)
+            .bits();
+    if value == 0 {
+        flags |= CpuFlags::ZF.bits();
+    }
+    if value & 0x8000_0000 != 0 {
+        flags |= CpuFlags::SF.bits();
+    }
+    if (value as u8).count_ones().is_multiple_of(2) {
+        flags |= CpuFlags::PF.bits();
+    }
+    flags
 }
 
 /// Let level 3 use INT n for the vectors from 10h on, in the IDT of the
@@ -424,12 +541,28 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         }
         // INT 20h at level 0 is a VxD's call of a VMM or VxD service, its
         // number in the dword after the INT, as SafeDisc 2.30's level 0
-        // code makes it. The built-in Windows has no VxDs, so it ends the
-        // program, naming the service, as for VxDCall from level 3, and
-        // the INT, 2 bytes before the dword. The service's bit 15 marks a
-        // VxDJmp, which doesn't come back; the number is in bits 0-14.
+        // code makes it. The service's bit 15 marks a VxDJmp, which
+        // doesn't come back; the number is in bits 0-14. The services the
+        // built-in Windows has run (`vxd_service`), and the code goes on
+        // after the dword, or for a VxDJmp at the return address on the
+        // stack. For any other, there being no VxDs, it ends the program,
+        // naming the service, as for VxDCall from level 3, and the INT, 2
+        // bytes before the dword.
         Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
+            if vxd_service(service & !0x8000, &mut ctx) {
+                if service & 0x8000 != 0 {
+                    // VxDJmp: the service returns to the caller's caller,
+                    // through the address at the top of the stack.
+                    let esp = ctx.gpr[ESP];
+                    ctx.eip = cpu.bus.guest_read_32(esp);
+                    ctx.gpr[ESP] = esp.wrapping_add(4);
+                } else {
+                    ctx.eip = ctx.eip.wrapping_add(4);
+                }
+                enter_user(cpu, &ctx);
+                return;
+            }
             ctx.eip = ctx.eip.wrapping_sub(2);
             super::fatal(
                 cpu,
