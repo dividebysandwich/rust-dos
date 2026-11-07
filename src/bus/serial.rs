@@ -290,6 +290,7 @@ impl Bus {
         let p = self.serial.ports.get_mut(n)?.as_mut()?;
         let lsr = p.uart.read(5, now);
         let msr = p.uart.read(6, now);
+        p.sync(now);
         self.sync_serial(n);
         Some((lsr, msr))
     }
@@ -315,11 +316,24 @@ impl Bus {
     /// own serial driver does. False without the port.
     pub fn serial_set(&mut self, n: usize, offset: u16, value: u8) -> bool {
         let now = self.clock.now_ticks();
-        let Some(p) = self.serial.ports.get_mut(n).and_then(|p| p.as_mut()) else { return false };
+        let Some(p) = self.serial.ports.get_mut(n).and_then(|p| p.as_mut()) else {
+            return false;
+        };
         p.uart.write(offset & 7, value, now);
         p.sync(now);
         self.sync_serial(n);
         true
+    }
+
+    /// Turn port `n`'s modem control lines `bits` off once its transmitter
+    /// has sent what it holds, as a serial driver's close does.
+    pub fn serial_lines_off_when_sent(&mut self, n: usize, bits: u8) {
+        let now = self.clock.now_ticks();
+        if let Some(p) = self.serial.ports.get_mut(n).and_then(|p| p.as_mut()) {
+            p.uart.lines_off_when_sent(bits, now);
+            p.sync(now);
+            self.sync_serial(n);
+        }
     }
 
     /// The characters port `n` has yet to send, in its transmit FIFO and

@@ -103,6 +103,9 @@ pub struct Uart {
     pub outgoing: Vec<u8>,
     /// Whether the port holds its IRQ line up, as the bus last saw it.
     pub pic_line: bool,
+    /// The modem control lines to turn off once the transmitter is empty
+    /// (`lines_off_when_sent`), until the program sets MCR again.
+    lines_off_when_sent: u8,
 }
 
 impl Default for Uart {
@@ -113,7 +116,7 @@ impl Default for Uart {
 
 crate::state_fields!(Uart {
     base, irq, chip, divisor, ier, lcr, mcr, scr, fifo_on, trigger, lsr_errors, lines, msr_delta, rx, waiting,
-    rx_due, timeout_due, timeout, tx, shifting, thre_pending, pic_line
+    rx_due, timeout_due, timeout, tx, shifting, thre_pending, pic_line, lines_off_when_sent
 } skip { outgoing });
 
 impl Uart {
@@ -142,6 +145,7 @@ impl Uart {
             thre_pending: false,
             outgoing: Vec::new(),
             pic_line: false,
+            lines_off_when_sent: 0,
         };
         uart.reset();
         uart
@@ -164,6 +168,7 @@ impl Uart {
         self.tx.clear();
         self.shifting = None;
         self.thre_pending = false;
+        self.lines_off_when_sent = 0;
         if !self.waiting.is_empty() {
             self.rx_due = Some(0);
         }
@@ -315,15 +320,38 @@ impl Uart {
             2 => self.write_fcr(value),
             3 => self.lcr = value,
             4 => {
-                let (old, loop_old) = (self.msr_lines(), self.mcr & MCR_LOOP != 0);
-                self.mcr = value & 0x1F;
-                let loop_now = self.mcr & MCR_LOOP != 0;
-                if loop_old || loop_now {
-                    self.note_msr_change(old, self.msr_lines());
-                }
+                self.lines_off_when_sent = 0;
+                self.set_mcr(value);
             }
             5 | 6 => {}
             _ => self.scr = value,
+        }
+    }
+
+    fn set_mcr(&mut self, value: u8) {
+        let (old, loop_old) = (self.msr_lines(), self.mcr & MCR_LOOP != 0);
+        self.mcr = value & 0x1F;
+        let loop_now = self.mcr & MCR_LOOP != 0;
+        if loop_old || loop_now {
+            self.note_msr_change(old, self.msr_lines());
+        }
+    }
+
+    /// Turn the modem control lines `bits` off once the transmitter has
+    /// sent what it holds, as a driver's close does after waiting for its
+    /// queue to go out: a modem that drops the call on DTR gets the last
+    /// characters first. A write to MCR before then takes over.
+    pub fn lines_off_when_sent(&mut self, bits: u8, now: u64) {
+        self.advance(now);
+        self.lines_off_when_sent |= bits;
+        self.release_lines();
+    }
+
+    fn release_lines(&mut self) {
+        if self.lines_off_when_sent != 0 && self.shifting.is_none() && self.tx.is_empty() {
+            let mcr = self.mcr & !self.lines_off_when_sent;
+            self.lines_off_when_sent = 0;
+            self.set_mcr(mcr);
         }
     }
 
@@ -543,6 +571,7 @@ impl Uart {
             self.timeout_due = None;
             self.timeout = !self.rx.is_empty() && !self.rx_ready();
         }
+        self.release_lines();
     }
 }
 
@@ -596,6 +625,32 @@ mod tests {
         u.advance(208);
         assert_eq!(u.outgoing, b"AB");
         assert_eq!(u.read(5, 208) & LSR_TEMT, LSR_TEMT);
+    }
+
+    #[test]
+    fn lines_go_off_once_the_transmitter_is_empty() {
+        let mut u = uart();
+        u.write(4, MCR_DTR | MCR_RTS | MCR_OUT2, 0);
+        u.send(b'A', 0);
+        u.send(b'B', 0);
+        u.lines_off_when_sent(MCR_DTR | MCR_RTS, 0);
+        u.advance(207);
+        assert_eq!(u.outgoing, b"A");
+        assert_eq!(u.mcr_out(), MCR_DTR | MCR_RTS | MCR_OUT2);
+        u.advance(208);
+        assert_eq!(u.outgoing, b"AB");
+        assert_eq!(u.mcr_out(), MCR_OUT2);
+        // With nothing to send they go at once; a write to MCR before the
+        // transmitter empties keeps the lines it sets.
+        u.write(4, MCR_DTR, 300);
+        u.lines_off_when_sent(MCR_DTR, 300);
+        assert_eq!(u.mcr_out(), 0);
+        u.write(4, MCR_DTR, 400);
+        u.send(b'C', 400);
+        u.lines_off_when_sent(MCR_DTR, 400);
+        u.write(4, MCR_DTR | MCR_RTS, 401);
+        u.advance(1000);
+        assert_eq!(u.mcr_out(), MCR_DTR | MCR_RTS);
     }
 
     #[test]

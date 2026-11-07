@@ -106,6 +106,7 @@ const F_OUTX_DSR_FLOW: u16 = 0x0010;
 const F_DTR_DISABLE: u16 = 0x0080;
 const F_OUTX: u16 = 0x0100;
 const F_INX: u16 = 0x0200;
+const F_CHEVT: u16 = 0x1000;
 const F_DTRFLOW: u16 = 0x2000;
 const F_RTSFLOW: u16 = 0x4000;
 
@@ -119,14 +120,14 @@ const EVENT_BLOCK: u32 = 40;
 const MSR_OFFSET: u32 = 35;
 
 /// The UART's registers and bits the driver uses.
+const UART_IER: u16 = 1;
 const UART_LCR: u16 = 3;
 const UART_MCR: u16 = 4;
-const UART_LSR: u16 = 5;
-const UART_MSR: u16 = 6;
 const LCR_BREAK: u8 = 0x40;
 const LCR_DLAB: u8 = 0x80;
 const MCR_DTR: u8 = 0x01;
 const MCR_RTS: u8 = 0x02;
+const MCR_LOOP: u8 = 0x10;
 
 /// An open port.
 #[derive(Clone, Debug, Default)]
@@ -290,10 +291,12 @@ fn dcb_word(dcb: &[u8], at: usize) -> u16 {
 }
 
 /// The UART's divisor for the DCB's BaudRate (a rate, or a CBR_ code; a
-/// rate above 57600 is 115200), or its error.
+/// rate above 57600 is 115200), or its error, which a CBR_ code the
+/// table doesn't have gets too.
 fn divisor(baud: u16) -> Result<u16, i16> {
     let rate = match CBR.iter().find(|&&(code, _)| code == baud) {
         Some(&(_, rate)) => rate,
+        None if baud >= CBR[0].0 => return Err(IE_BAUDRATE),
         None if baud > 57600 => 115200,
         None => baud as u32,
     };
@@ -359,7 +362,11 @@ fn pump(cpu: &mut Cpu, i: usize) -> bool {
     let port = &cpu.bus.win32.win16.comm[i];
     let n = port.id as usize;
     let room = (port.in_size as usize).saturating_sub(port.input.len());
-    let evt_char = port.dcb.get(DCB_EVTCHAR).copied().unwrap_or(0);
+    // EvtChar counts only while the DCB's fChEvt asks for it.
+    let evt_char = match port.dcb.get(..DCB_SIZE) {
+        Some(dcb) if dcb_word(dcb, DCB_FLAGS) & F_CHEVT != 0 => Some(dcb[DCB_EVTCHAR]),
+        _ => None,
+    };
     let mut received = Vec::new();
     while received.len() < room {
         match cpu.bus.serial_receive(n) {
@@ -370,12 +377,11 @@ fn pump(cpu: &mut Cpu, i: usize) -> bool {
     let mut events = 0;
     if !received.is_empty() {
         events |= EV_RXCHAR;
-        if received.contains(&evt_char) {
+        if evt_char.is_some_and(|c| received.contains(&c)) {
             events |= EV_RXFLAG;
         }
     }
-    let lsr = cpu.bus.serial_get(n, UART_LSR).unwrap_or(0);
-    let msr = cpu.bus.serial_get(n, UART_MSR).unwrap_or(0);
+    let (lsr, msr) = cpu.bus.serial_status(n).unwrap_or((0, 0));
     let mut errors = 0;
     for (bit, error) in [(0x02, CE_OVERRUN), (0x04, CE_RXPARITY), (0x08, CE_FRAME)] {
         if lsr & bit != 0 {
@@ -456,7 +462,7 @@ pub fn service(cpu: &mut Cpu) {
         changed |= pump(cpu, i);
     }
     if changed {
-        crate::idle::before_service(cpu);
+        crate::idle::not_pure(cpu);
     }
 }
 
@@ -508,10 +514,14 @@ pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         global::free(cpu, block);
         return ret(IE_DEFAULT);
     }
+    // The driver takes the chip over: no interrupts (none are serviced
+    // here) and no loopback left by a program before.
+    cpu.bus.serial_set(n, UART_IER, 0);
+    set_bits(cpu, n, UART_MCR, MCR_LOOP, false);
     // What the UART received before goes, as the driver's start reads it
-    // out.
+    // out, and so do the line errors and changes it noted.
     while cpu.bus.serial_receive(n).is_some() {}
-    let lines = cpu.bus.serial_get(n, UART_MSR).unwrap_or(0) & 0xF0;
+    let lines = cpu.bus.serial_status(n).map_or(0, |(_, msr)| msr & 0xF0);
     cpu.bus.win32.win16.comm.push(Port {
         id: n as u8,
         task,
@@ -525,14 +535,16 @@ pub fn open_comm(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     ret(n as i16)
 }
 
-/// Close the open port `i`: DTR and RTS off, no break, its event word
-/// gone. What it was sending goes on out; what transmission held is
-/// dropped.
+/// Close the open port `i`: no break, its event word gone, and DTR and
+/// RTS off once what it was sending is out (COMM.DRV's close waits for
+/// its transmit queue to empty before it drops them, so a modem that
+/// hangs up on DTR still sends the last characters). What transmission
+/// held is dropped.
 fn close(cpu: &mut Cpu, i: usize) {
     let port = cpu.bus.win32.win16.comm.remove(i);
     let n = port.id as usize;
     set_bits(cpu, n, UART_LCR, LCR_BREAK, false);
-    set_bits(cpu, n, UART_MCR, MCR_DTR | MCR_RTS, false);
+    cpu.bus.serial_lines_off_when_sent(n, MCR_DTR | MCR_RTS);
     global::free(cpu, port.block);
 }
 
@@ -873,6 +885,9 @@ mod tests {
         assert_eq!(divisor(57601), Ok(1));
         assert_eq!(divisor(0), Err(IE_BAUDRATE));
         assert_eq!(divisor(0xFF27), Err(IE_BAUDRATE));
+        // A CBR_ code Windows doesn't have.
+        assert_eq!(divisor(0xFF19), Err(IE_BAUDRATE));
+        assert_eq!(divisor(60000), Ok(1));
     }
 
     #[test]
