@@ -33,7 +33,7 @@ const fn stdcall(
 }
 
 /// The functions. Append only (see `stubs`).
-static APIS: &[Api] = &[stdcall("EnumPortsA", 1, 6, enum_ports_a)];
+static APIS: &[Api] = &[stdcall("EnumPortsA", 155, 6, enum_ports_a)];
 
 const ERROR_INVALID_LEVEL: u32 = 124;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;

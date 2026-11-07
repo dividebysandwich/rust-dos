@@ -2,19 +2,22 @@
 
     python -I tools/win98_ordinals.py <folder with the DLLs> src/win32/ordinals
 
-reads the export directory of each DLL the built-in Windows has (copied
-out of a Windows 98 SE installation's WINDOWS\\SYSTEM) and writes
-<name>.txt into the output folder: one export a line, its ordinal and its
-name, or "-" for one Windows exports by ordinal only. src/win32/ordinals.rs
-reads them. The DLLs themselves stay out of the repository.
+reads the export directory of each DLL the built-in Windows has and
+writes <name>.txt into the output folder: one export a line, its ordinal
+and its name, or "-" for one Windows exports by ordinal only. The DLLs
+come from the Windows 98 SE CD, unpacked from its WIN98\\*.CAB (7-Zip or
+`expand -F:* <cab> <folder>` opens them), so DDRAW, DSOUND, DINPUT and
+DirectMusic are DirectX 6.1's. The tests in src/win32/ordinals.rs hold
+the built-in DLLs' tables to the lists. The DLLs themselves stay out of
+the repository.
 """
 
 import os
 import struct
 import sys
 
-# The built-in DLLs Windows 98 SE has. GLIDE2X (3dfx's) and D3D8
-# (DirectX 8) aren't part of it.
+# The built-in DLLs Windows 98 SE has. GLIDE2X and GLIDE3X (3dfx's),
+# and D3D8 and DINPUT8 (DirectX 8) aren't part of it.
 DLLS = [
     "ADVAPI32.DLL", "ADVPACK.DLL", "AMSTREAM.DLL", "AVIFIL32.DLL",
     "COMCTL32.DLL", "COMDLG32.DLL", "DCIMAN32.DLL", "DDRAW.DLL",

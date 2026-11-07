@@ -45,6 +45,7 @@ mod msimg32;
 mod msvcrt;
 mod ntdll;
 pub(crate) mod object;
+#[cfg(test)]
 mod ordinals;
 mod ole32;
 mod oleaut32;

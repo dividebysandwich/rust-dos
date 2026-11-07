@@ -32,16 +32,16 @@ const fn stdcall(
 
 /// The functions, by LZ32's ordinals. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("CopyLZFile", 1, 2, lz::lz_copy),
-    stdcall("GetExpandedNameA", 2, 2, lz::get_expanded_name_a),
-    stdcall("GetExpandedNameW", 3, 2, lz::lz_open_file_w),
-    stdcall("LZClose", 4, 1, lz::lz_close),
-    stdcall("LZCopy", 5, 2, lz::lz_copy),
-    stdcall("LZDone", 6, 0, lz::lz_done),
-    stdcall("LZInit", 7, 1, lz::lz_init),
-    stdcall("LZOpenFileA", 8, 3, lz::lz_open_file_a),
-    stdcall("LZOpenFileW", 9, 3, lz::lz_open_file_w),
-    stdcall("LZRead", 10, 3, lz::lz_read),
-    stdcall("LZSeek", 11, 3, lz::lz_seek),
-    stdcall("LZStart", 12, 0, lz::lz_start),
+    stdcall("CopyLZFile", 8, 2, lz::lz_copy),
+    stdcall("GetExpandedNameA", 10, 2, lz::get_expanded_name_a),
+    stdcall("GetExpandedNameW", 12, 2, lz::lz_open_file_w),
+    stdcall("LZClose", 6, 1, lz::lz_close),
+    stdcall("LZCopy", 1, 2, lz::lz_copy),
+    stdcall("LZDone", 9, 0, lz::lz_done),
+    stdcall("LZInit", 3, 1, lz::lz_init),
+    stdcall("LZOpenFileA", 2, 3, lz::lz_open_file_a),
+    stdcall("LZOpenFileW", 11, 3, lz::lz_open_file_w),
+    stdcall("LZRead", 5, 3, lz::lz_read),
+    stdcall("LZSeek", 4, 3, lz::lz_seek),
+    stdcall("LZStart", 7, 0, lz::lz_start),
 ];

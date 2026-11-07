@@ -576,3 +576,44 @@ pub fn post_auto(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Op
         _ => value,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_two_exports_of_a_module_share_an_ordinal_or_a_name() {
+        for def in MODULES {
+            let exported = def.apis.iter().filter(|a| a.ordinal != 0);
+            let mut ordinals = std::collections::HashMap::new();
+            let mut names = std::collections::HashMap::new();
+            for api in exported {
+                if let Some(other) = ordinals.insert(api.ordinal, api.name) {
+                    panic!("{}: {} and {} are both #{}", def.name, other, api.name, api.ordinal);
+                }
+                if names.insert(api.name.to_ascii_uppercase(), api.ordinal).is_some() {
+                    panic!("{}: {} is exported twice", def.name, api.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn names_are_windows_98s() {
+        // GetProcAddress finds a name as Windows 98 SE's modules have it:
+        // GDI's RECTVISIBLE is #104 and #465 RECTVISIBLE_EHH, and
+        // WIN87EM's functions are __WIN87EMINFO and the like.
+        let ordinal = |module: &str, name: &str| {
+            let def = MODULES[find(module).unwrap()];
+            let api = def.apis.iter().find(|a| a.name.eq_ignore_ascii_case(name));
+            api.map(|a| a.ordinal)
+        };
+        assert_eq!(ordinal("GDI", "RECTVISIBLE"), Some(104));
+        assert_eq!(ordinal("GDI", "RECTINREGION"), Some(181));
+        assert_eq!(ordinal("GDI", "RECTVISIBLE_EHH"), Some(465));
+        assert_eq!(ordinal("GDI", "RECTINREGION_EHH"), Some(466));
+        assert_eq!(ordinal("WIN87EM", "__WIN87EMINFO"), Some(3));
+        assert_eq!(ordinal("WIN87EM", "__WIN87EMRESTORE"), Some(4));
+        assert_eq!(ordinal("WIN87EM", "__WIN87EMSAVE"), Some(5));
+    }
+}

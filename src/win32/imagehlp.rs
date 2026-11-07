@@ -37,21 +37,21 @@ const fn stdcall(
 
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("ImagehlpApiVersion", 1, 0, imagehlp_api_version),
-    stdcall("StackWalk", 2, 9, stack_walk),
-    stdcall("SymCleanup", 3, 1, true_),
-    stdcall("SymFunctionTableAccess", 4, 2, null),
-    stdcall("SymGetModuleBase", 5, 2, sym_get_module_base),
-    stdcall("SymGetModuleInfo", 6, 3, sym_get_module_info),
-    stdcall("SymGetOptions", 7, 0, sym_get_options),
-    stdcall("SymGetSymFromAddr", 8, 4, sym_get_sym_from_addr),
-    stdcall("SymInitialize", 9, 3, true_),
-    stdcall("SymLoadModule", 10, 6, sym_load_module),
-    stdcall("SymSetOptions", 11, 1, sym_set_options),
-    stdcall("SymUnDName", 12, 3, sym_und_name),
-    stdcall("SymUnloadModule", 13, 2, true_),
-    stdcall("UnDecorateSymbolName", 14, 4, undecorate_symbol_name),
-    stdcall("ImageNtHeader", 15, 1, image_nt_header),
+    stdcall("ImagehlpApiVersion", 22, 0, imagehlp_api_version),
+    stdcall("StackWalk", 36, 9, stack_walk),
+    stdcall("SymCleanup", 37, 1, true_),
+    stdcall("SymFunctionTableAccess", 40, 2, null),
+    stdcall("SymGetModuleBase", 41, 2, sym_get_module_base),
+    stdcall("SymGetModuleInfo", 42, 3, sym_get_module_info),
+    stdcall("SymGetOptions", 43, 0, sym_get_options),
+    stdcall("SymGetSymFromAddr", 45, 4, sym_get_sym_from_addr),
+    stdcall("SymInitialize", 49, 3, true_),
+    stdcall("SymLoadModule", 50, 6, sym_load_module),
+    stdcall("SymSetOptions", 52, 1, sym_set_options),
+    stdcall("SymUnDName", 54, 3, sym_und_name),
+    stdcall("SymUnloadModule", 55, 2, true_),
+    stdcall("UnDecorateSymbolName", 57, 4, undecorate_symbol_name),
+    stdcall("ImageNtHeader", 17, 1, image_nt_header),
 ];
 
 const TRUE: u32 = 1;
