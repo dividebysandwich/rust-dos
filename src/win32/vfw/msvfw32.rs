@@ -1,7 +1,7 @@
 //! MSVFW32.DLL: the DrawDib functions, which draw a DIB to a DC and
 //! decompress it first when it is compressed, and ICInfo, which lists
-//! the decompressors codec.rs has. The behaviour follows
-//! Wine's drawdib.c (LGPL 2.1 or later):
+//! the decompressors codec.rs has. The DrawDib functions' behaviour
+//! follows Wine's drawdib.c (LGPL 2.1 or later):
 //!
 //! Copyright 2000 Bradley Baetz
 //!
