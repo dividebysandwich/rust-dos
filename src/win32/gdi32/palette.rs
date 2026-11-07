@@ -274,7 +274,7 @@ const BAYER: [[u8; 8]; 8] = [
 /// the bright pixels. Measured on Windows 95 OSR2 with a Voodoo 3's
 /// driver: this reproduces every pixel of 1075 brushes, among them all
 /// 256 levels of red, green, blue and grey.
-pub fn dither_levels(color: u32) -> [[u8; 3]; 64] {
+fn dither_levels(color: u32) -> [[u8; 3]; 64] {
     let h = [0, 8, 16].map(|s| (((color >> s) & 0xFF) + 1) / 4 * 2);
     let k = h.iter().max().unwrap().saturating_sub(64);
     let dark = h.map(|v| v.min(64 - k));
