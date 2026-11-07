@@ -1640,6 +1640,7 @@ static APIS: &[Api] = &[
     stdcall("GetMetaFileBitsEx", 276, 3, metafile::get_meta_file_bits_ex),
     stdcall("DeleteMetaFile", 175, 1, metafile::delete_meta_file),
     stdcall("PlayMetaFile", 340, 2, metafile::play_meta_file),
+    stdcall("GetAspectRatioFilterEx", 222, 2, dc::get_aspect_ratio_filter_ex),
 ];
 
 crate::state_fields!(Pen {

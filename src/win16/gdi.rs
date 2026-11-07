@@ -394,6 +394,15 @@ static APIS: &[Api16] = &[
     win32("WidenPath", 522, "w", G, "WidenPath", b'b'),
     win32("GetArcDirection", 524, "w", G, "GetArcDirection", b'w'),
     win32("SetArcDirection", 525, "ww", G, "SetArcDirection", b'w'),
+    rust("GetAspectRatioFilter", 353, "w", get_aspect_ratio_filter),
+    win32(
+        "GetAspectRatioFilterEx",
+        486,
+        "wP",
+        G,
+        "GetAspectRatioFilterEx",
+        b'b',
+    ),
 ];
 
 fn zero(_: &mut Cpu, _: &[u32]) -> Option<u32> {
@@ -553,6 +562,12 @@ fn get_window_org(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 fn set_brush_org(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     point_dword(cpu, "SetBrushOrgEx", args)
+}
+
+/// GetAspectRatioFilter(hdc): GetAspectRatioFilterEx's size, x in the
+/// low word.
+fn get_aspect_ratio_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    point_dword(cpu, "GetAspectRatioFilterEx", args)
 }
 
 fn get_brush_org(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
