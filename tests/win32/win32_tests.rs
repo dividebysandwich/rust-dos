@@ -3459,6 +3459,59 @@ fn get_startup_info_w_is_a_stub_that_fails() {
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
 }
 
+/// SystemTimeToTzSpecificLocalTime, which Myth II 1.8.3 imports, is
+/// there as Windows 98 SE's stub: it takes its three arguments, fails
+/// with ERROR_CALL_NOT_IMPLEMENTED and leaves the SYSTEMTIME it was to
+/// fill as it was.
+#[test]
+fn system_time_to_tz_specific_local_time_is_a_stub_that_fails() {
+    let names: &[&str] = &["GetModuleHandleA", "GetProcAddress", "GetLastError"];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = b"KERNEL32.DLL\0SystemTimeToTzSpecificLocalTime\0".to_vec();
+    // The SYSTEMTIME given at 0x40, the one to fill at 0x50.
+    data.resize(0x50, 0);
+    data.resize(0x60, 0x5A);
+    let main = |a: &mut CodeAssembler, l: &Layout| {
+        let mut end = a.create_label();
+        a.xor(ebx, ebx)?;
+        a.push(l.at(0) as i32)?;
+        a.call(l.import(0))?;
+        a.push(l.at(13) as i32)?;
+        a.push(eax)?;
+        a.call(l.import(1))?;
+        a.mov(esi, eax)?;
+        a.test(esi, esi)?;
+        check(a, true, 0)?;
+        a.test(esi, esi)?;
+        a.je(end)?;
+        a.mov(edi, esp)?;
+        a.push(l.at(0x50) as i32)?;
+        a.push(l.at(0x40) as i32)?;
+        a.push(0)?;
+        a.call(esi)?;
+        a.test(eax, eax)?;
+        check(a, false, 1)?;
+        a.cmp(esp, edi)?;
+        check(a, false, 2)?;
+        a.call(l.import(2))?;
+        a.cmp(eax, 120)?;
+        check(a, false, 3)?;
+        // All 16 bytes of the SYSTEMTIME to fill are as they were.
+        a.cld()?;
+        a.mov(edi, l.at(0x50) as u32)?;
+        a.mov(ecx, 4)?;
+        a.mov(eax, 0x5A5A_5A5A)?;
+        a.repe().scasd()?;
+        check(a, false, 4)?;
+        a.set_label(&mut end)?;
+        a.mov(eax, ebx)?;
+        a.ret()
+    };
+    let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
+    let (code, _) = run("tz_specific_local_time", exe);
+    assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
 /// INT 68h, WDEB386's interface, as Windows 98 has it without the
 /// debugger: the program goes on after it with its registers as they
 /// were. SafeDisc 1's loader asks it with AX=4300h for a debugger.
