@@ -7907,6 +7907,97 @@ fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
 }
 
 #[test]
+fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
+    // SetWindowPos with SWP_NOSENDCHANGING sends no WM_WINDOWPOSCHANGING
+    // but still sends WM_WINDOWPOSCHANGED, whose WINDOWPOS has the place
+    // and size the window has now, also where SWP_NOMOVE kept the place
+    // the call gave from being used, as Wine's win.c checks on Windows.
+    // (Myth II's window learns it is active only from this message.)
+    const WM_WINDOWPOSCHANGING: i32 = 0x0046;
+    const WM_WINDOWPOSCHANGED: i32 = 0x0047;
+    const SWP_NOMOVE: i32 = 0x0002;
+    const SWP_NOZORDER: i32 = 0x0004;
+    const SWP_NOACTIVATE: i32 = 0x0010;
+    const SWP_NOSENDCHANGING: i32 = 0x0400;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+    ];
+    // What the window procedure saw: WM_WINDOWPOSCHANGING's count at
+    // 0xA0, WM_WINDOWPOSCHANGED's at 0xA4 and the last one's x, y and cx
+    // at 0xA8, 0xAC and 0xB0. A WNDCLASSA at 0xE0, its procedure put in
+    // by the code.
+    let mut data = child_data(&[(0x10, "Frame")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_WINDOWPOSCHANGING)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_WINDOWPOSCHANGED)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA4)))?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        for (field, at) in [(8, 0xA8), (12, 0xAC), (16, 0xB0)] {
+            a.mov(ecx, dword_ptr(eax + field))?;
+            a.mov(dword_ptr(l.at(at)), ecx)?;
+        }
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 50, 50, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(0xA0)), 0)?;
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        // Moved and resized.
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+        push_args(a, &[0, 10, 20, 60, 70, flags])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        for (at, value, bit) in [(0xA0, 0, 0), (0xA4, 1, 1), (0xA8, 10, 2), (0xB0, 60, 3)] {
+            a.cmp(dword_ptr(l.at(at)), value)?;
+            bit_if(a, eq, bit)?;
+        }
+        // Resized only: the place in the WINDOWPOS is the window's.
+        push_args(a, &[0, 999, 999, 80, 90, flags | SWP_NOMOVE])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        let checks = [(0xA4, 2, 4), (0xA8, 10, 5), (0xAC, 20, 6), (0xB0, 80, 7)];
+        for (at, value, bit) in checks {
+            a.cmp(dword_ptr(l.at(at)), value)?;
+            bit_if(a, eq, bit)?;
+        }
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("swp_nosendchanging", program);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then
     // gets messages. The state is saved once C0.DAT is there, while the

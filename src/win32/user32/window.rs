@@ -1892,7 +1892,20 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     | SWP_NOCLIENTMOVE;
                 let nothing =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
-                if flags & AGG != nothing && flags & SWP_NOSENDCHANGING == 0 {
+                // SWP_NOSENDCHANGING leaves out WM_WINDOWPOSCHANGING
+                // only: WM_WINDOWPOSCHANGED still comes, with the place
+                // and size the window has now, relative to its parent,
+                // whatever the flags kept from changing (Wine's win.c
+                // checks the place on Windows). Myth II's window thread
+                // learns that its window is active only from this
+                // message, after its main thread resizes the window with
+                // that flag.
+                if flags & AGG != nothing {
+                    if let Some(w) = user(cpu).window(hwnd) {
+                        let r = w.rect;
+                        let place = [r.left, r.top, r.width(), r.height()];
+                        write_words(cpu, winpos + 8, &place.map(|v| v as u32));
+                    }
                     return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
                 }
                 return Next::Done(TRUE);
