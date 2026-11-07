@@ -16,9 +16,10 @@
 //!
 //! The graph's own filters aren't seen by the program. A program adds
 //! filters of its own with AddFilter, and RenderFile connects the
-//! movie's pictures to one of their input pins when one takes them
-//! (filter.rs): the device then opens without a window and plays the
-//! sound. The methods that connect or list filters themselves return
+//! movie's pictures, and then its sound, to their input pins when they
+//! take them (filter.rs): the device then opens without a window when
+//! the pictures are connected, and leaves the sound silent when the
+//! sound is. The methods that connect or list filters themselves return
 //! E_NOTIMPL, and so do IDispatch's, but for GetTypeInfoCount, which
 //! counts no type information.
 //! Positions are in milliseconds within, in 100-nanosecond units
@@ -114,12 +115,13 @@ pub struct Graph {
     /// Whether a wait (GetEvent, WaitForCompletion) took the play's
     /// EC_COMPLETE before the play's end could queue it.
     pub complete_taken: bool,
-    /// The program's filters (filter.rs), the connection of the movie's
-    /// pictures to one of them, and the one being made while RenderFile
-    /// connects; whether RenderFile tried to connect, so that it opens
-    /// its device when it runs again.
+    /// The program's filters (filter.rs), the connections of the movie's
+    /// pictures and of its sound to them, and the one being made while
+    /// RenderFile connects; whether RenderFile tried to connect, so that
+    /// it opens its device when it runs again.
     pub filters: Vec<filter::Filter>,
     pub link: Option<filter::Link>,
+    pub sound: Option<filter::Link>,
     pub connecting: Option<filter::Link>,
     pub connect_tried: bool,
     /// The number the next filter's made name has.
@@ -259,14 +261,14 @@ fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, from: u32, to: u32) ->
 // IGraphBuilder.
 
 /// IGraphBuilder::RenderFile(this, file, play list). With filters of the
-/// program's in the graph, the decoder connects to one of them first.
+/// program's in the graph, the file's streams connect to them first.
 pub fn render_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (this, file) = (args[0], args[1]);
     if let Ok(id) = graph_of(cpu, this)
         && file != 0
         && graph(cpu, id).is_some_and(|g| !g.connect_tried && g.state == STATE_STOPPED)
         && filter::has_filters(cpu, id)
-        && !filter::linked(cpu, id)
+        && filter::links(cpu, id) == 0
     {
         return filter::connect(cpu, id, file);
     }
@@ -318,9 +320,12 @@ fn render(cpu: &mut Cpu, this: u32, file: u32) -> Result<u32, u32> {
     let i = mci::give_to_graph(cpu, p.ret, id).ok_or(E_FAIL)?;
     let length = video::media(cpu, i).map_or(0, |m| m.length_ms());
     let manual = graph(cpu, id).is_some_and(|g| g.manual_show);
+    // The sound a program's filter takes doesn't play here too.
+    let silent = filter::sound_linked(cpu, id);
     let v = &mut mci::device(cpu, i).video;
     v.to = length;
     v.manual_show = manual;
+    v.muted = silent;
     if let Some(g) = graph(cpu, id) {
         g.file = path;
         g.complete_taken = false;
@@ -353,12 +358,12 @@ pub fn run(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         let (pos, to) = positions(cpu, i);
         if pos >= to {
             set_state(cpu, id, STATE_RUNNING);
-            // The program's renderer tells its own end, after the
-            // stream's; the sound's, already at its end, counts now, as
+            // The program's renderers tell their own ends, after their
+            // streams'; the device's, already at its end, counts now, as
             // this Run counts the renderers again.
-            if !filter::linked(cpu, id) {
+            if filter::links(cpu, id) == 0 {
                 queue(cpu, id, EC_COMPLETE, S_OK, 0);
-            } else if sound_renders(cpu, id) {
+            } else if device_renders(cpu, id) {
                 complete(cpu, id, S_OK, 0);
             }
             return Ok(S_OK);
@@ -485,11 +490,12 @@ fn queue(cpu: &mut Cpu, id: u32, code: u32, p1: u32, p2: u32) {
 }
 
 /// The play of the graph `id` reached its end (winmm/mci): EC_COMPLETE,
-/// unless a wait has taken it already. When the pictures go to the
-/// program's filter, the device is the sound's renderer, one of two.
+/// unless a wait has taken it already. When a stream goes to the
+/// program's filter, the device renders the others, a renderer of
+/// several.
 pub fn play_ended(cpu: &mut Cpu, id: u32) {
-    if filter::linked(cpu, id) {
-        if sound_renders(cpu, id) {
+    if filter::links(cpu, id) != 0 {
+        if device_renders(cpu, id) {
             complete(cpu, id, S_OK, 0);
         }
         return;
@@ -503,19 +509,23 @@ pub fn play_ended(cpu: &mut Cpu, id: u32) {
     queue(cpu, id, EC_COMPLETE, S_OK, 0);
 }
 
-/// Whether the device of the graph `id` plays sound: whether it is a
-/// renderer of a graph whose pictures go to the program's filter.
-fn sound_renders(cpu: &mut Cpu, id: u32) -> bool {
-    mci::graph_device(cpu, id)
-        .and_then(|i| video::media(cpu, i))
-        .is_some_and(|m| m.audio.is_some())
+/// Whether the device of the graph `id` renders a stream that doesn't
+/// go to the program's filters: the pictures in its window, or the
+/// sound. With both on the device it is one renderer here, which tells
+/// one end.
+fn device_renders(cpu: &mut Cpu, id: u32) -> bool {
+    let Some(m) = mci::graph_device(cpu, id).and_then(|i| video::media(cpu, i)) else {
+        return false;
+    };
+    (m.frames > 0 && !filter::linked(cpu, id))
+        || (m.audio.is_some() && !filter::sound_linked(cpu, id))
 }
 
 /// A renderer of the graph `id` reached its stream's end: EC_COMPLETE
 /// when all have (Wine's filtergraph.c counts them), or each one's when
 /// the program cancelled the default handling.
 fn complete(cpu: &mut Cpu, id: u32, p1: u32, p2: u32) {
-    let renderers = 1 + sound_renders(cpu, id) as u32;
+    let renderers = filter::links(cpu, id) + device_renders(cpu, id) as u32;
     let Some(g) = graph(cpu, id) else {
         return;
     };
@@ -633,7 +643,7 @@ fn wait_for(cpu: &mut Cpu, id: u32, timeout: u32, took: impl FnOnce(&mut Cpu)) -
     if timeout == 0 {
         return Some(E_ABORT);
     }
-    if filter::linked(cpu, id) {
+    if filter::links(cpu, id) != 0 {
         return wait_event(cpu, id, timeout);
     }
     let now = cpu.bus.clock.now_micros();
@@ -719,7 +729,7 @@ fn wait_completion(cpu: &mut Cpu, id: u32, args: &[u32]) -> Option<u32> {
         return Some(E_INVALIDARG);
     };
     hr!(put32(cpu, code, 0));
-    let linked = filter::linked(cpu, id);
+    let linked = filter::links(cpu, id) != 0;
     let Some(g) = graph(cpu, id) else {
         return Some(E_POINTER);
     };
@@ -1679,11 +1689,12 @@ const E_OUTOFMEMORY_IMAGE: u32 = super::E_OUTOFMEMORY;
 
 // IBasicAudio.
 
-/// The graph `this` and its device, if its file has sound: IBasicAudio
-/// is the audio renderer's, which a file without sound doesn't have.
+/// The graph `this` and its device, if its file has sound the device
+/// plays: IBasicAudio is the audio renderer's, which a file without
+/// sound doesn't have, nor one whose sound goes to the program's filter.
 fn audio(cpu: &mut Cpu, this: u32) -> Result<usize, u32> {
-    let (_, i) = player(cpu, this)?;
-    if media(cpu, i)?.audio.is_none() {
+    let (id, i) = player(cpu, this)?;
+    if media(cpu, i)?.audio.is_none() || filter::sound_linked(cpu, id) {
         return Err(E_NOINTERFACE);
     }
     Ok(i)
@@ -1829,6 +1840,7 @@ crate::state_fields!(Graph {
     complete_taken,
     filters,
     link,
+    sound,
     connecting,
     connect_tried,
     name_index,

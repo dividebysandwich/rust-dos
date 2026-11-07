@@ -1,33 +1,41 @@
 //! The program's own filters in a filter graph (graph.rs): AddFilter
-//! joins one to the graph, and RenderFile connects the MPEG video
-//! decoder's output pin to one of their input pins, which then takes the
-//! movie's pictures in media samples through IMemInputPin::Receive, as
-//! a program's video renderer does on Windows. The graph moves them
+//! joins one to the graph, and RenderFile connects the file's streams to
+//! their input pins, as DirectShow's graph builder renders each output
+//! pin of the source with a filter already in the graph before it adds
+//! one of its own. The MPEG video decoder's output pin gives the movie's
+//! pictures, and the sound's output pin gives its PCM, each in media
+//! samples through IMemInputPin::Receive, as a program's video and sound
+//! renderers take them on Windows. The graph moves the program's filters
 //! through Pause, Run and Stop with itself, gives them its reference
 //! clock (sample.rs), and passes on the events they tell it through
 //! IMediaEventSink.
 //!
 //! How it is done follows Wine's quartz and strmbase (filtergraph.c,
-//! strmbase's pin.c, quartz_transform.c), which follow Windows'. The
-//! decoder's output pin tries the input pin's own media types first,
-//! then its own, in the MPEG video decoder's order: YV12, YUY2, UYVY,
-//! RGB24, RGB32, RGB565 and RGB555. A type is tried with
-//! ReceiveConnection; the pin that takes it gives its IMemInputPin and
-//! its allocator (GetAllocator, or the graph's own memory allocator),
-//! whose buffers are sized for a picture with GetAllocatorRequirements,
-//! and NotifyAllocator ends it. The sound, if the file has any, plays
-//! through the graph's MPEGVideo device, opened without a window.
+//! strmbase's pin.c, quartz_transform.c), which follow Windows'. An
+//! output pin tries the input pin's own media types first, then its own:
+//! the video decoder's in its order, YV12, YUY2, UYVY, RGB24, RGB32,
+//! RGB565 and RGB555, and the sound's one PCM type with the file's
+//! WAVEFORMATEX. A type is tried with ReceiveConnection; the pin that
+//! takes it gives its IMemInputPin and its allocator (GetAllocator, or
+//! the graph's own memory allocator), whose buffers are sized for a
+//! picture, or for a piece of the sound, with GetAllocatorRequirements,
+//! and NotifyAllocator ends it. The pictures connect first, then the
+//! sound. A stream no filter of the program's takes plays through the
+//! graph's MPEGVideo device: the pictures in its window, which it opens
+//! without when they are connected, and the sound on the sound device,
+//! which it leaves silent when the sound is connected.
 //!
 //! Every call into the program goes through a task (task.rs): the
 //! connection's steps (`connect_step`), lists of calls the graph's
-//! methods make (`list_step`), and each call of the decoder's streaming
+//! methods make (`list_step`), and each call of a stream's streaming
 //! thread (`stream_thread`), a thread of the process's own that delivers
-//! the pictures one after another while the graph is paused or runs.
-//! It waits for a free sample of the allocator, fills it with the next
-//! picture, timed from the segment's start, and hands it over; the
-//! renderer holds it until its time on the clock comes. After the last
-//! picture it calls EndOfStream, and the renderer then tells the graph
-//! EC_COMPLETE.
+//! the stream's samples one after another while the graph is paused or
+//! runs, as each output pin of Windows' splitters has one. It waits for
+//! a free sample of the allocator, fills it with the next picture or the
+//! next piece of the sound, timed from the segment's start, and hands it
+//! over; the renderer holds it until its time on the clock comes. After
+//! the last one it calls EndOfStream, and the renderer then tells the
+//! graph EC_COMPLETE.
 //!
 //! Wine's quartz is under the LGPL 2.1 or later; what is taken from it
 //! here is its behaviour, with credit to its authors.
@@ -97,6 +105,28 @@ const FORMAT_VIDEO_INFO: Guid = Guid::new(
     0x11CE,
     [0xBF, 0x01, 0x00, 0xAA, 0x00, 0x55, 0x59, 0x5A],
 );
+
+/// MEDIATYPE_Audio, MEDIASUBTYPE_PCM and FORMAT_WaveFormatEx.
+const MEDIATYPE_AUDIO: Guid = fourcc_subtype(0x7364_7561);
+const MEDIASUBTYPE_PCM: Guid = fourcc_subtype(1);
+const FORMAT_WAVE_FORMAT_EX: Guid = Guid::new(
+    0x0558_9F81,
+    0xC356,
+    0x11CE,
+    [0xBF, 0x01, 0x00, 0xAA, 0x00, 0x55, 0x59, 0x5A],
+);
+
+/// The filter whose output pin gives the sound, and the pin's name, as
+/// Windows has them: the AVI splitter's second stream for an AVI file
+/// (its PCM, or the ACM wrapper's from its ADPCM, under the splitter's
+/// name here), the MPEG audio decoder's output for an MPEG one.
+const AVI_SPLITTER: (&str, &str) = ("AVI Splitter", "Stream 01");
+const MPEG_AUDIO: (&str, &str) = ("MPEG Audio Decoder", "XForm Out");
+
+/// A sample of the sound holds a picture's time of it, as an AVI file
+/// interleaves a chunk of sound a picture and the splitter gives each
+/// chunk as a sample; this long in a file without pictures.
+const AUDIO_SAMPLE_MS: u32 = 100;
 
 /// The subtype {fourcc-0000-0010-8000-00AA00389B71} of a FOURCC.
 const fn fourcc_subtype(fourcc: u32) -> Guid {
@@ -193,22 +223,43 @@ pub struct Filter {
     pub name: String,
 }
 
-/// The decoder's connection to a program's input pin, and its stream.
+/// A stream of the file that a link carries: the pictures or the sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stream {
+    Video,
+    Audio,
+}
+
+const STREAMS: [Stream; 2] = [Stream::Video, Stream::Audio];
+
+impl Stream {
+    /// Its bit in a mask of streams.
+    fn bit(self) -> u32 {
+        match self {
+            Stream::Video => 1,
+            Stream::Audio => 2,
+        }
+    }
+}
+
+/// An output pin's connection to a program's input pin, and its stream.
 #[derive(Clone, Debug, Default)]
 pub struct Link {
+    /// Whether it carries the sound rather than the pictures.
+    pub audio: bool,
     /// The program's filter (its IBaseFilter), its input pin and the
     /// pin's IMemInputPin, which the link holds references on.
     pub filter: u32,
     pub pin: u32,
     pub input: u32,
-    /// The allocator (by its object), the decoder and its output pin,
-    /// which the link holds references on.
+    /// The allocator (by its object), the filter that gives the stream
+    /// and its output pin, which the link holds references on.
     pub allocator: u32,
     pub decoder: u32,
     pub out_pin: u32,
     /// The connection's media type: AM_MEDIA_TYPE without its format
-    /// block's pointer, and the block. Its place in `FORMATS`, and
-    /// whether its RGB rows go from the bottom up.
+    /// block's pointer, and the block. The pictures' place in `FORMATS`,
+    /// and whether their RGB rows go from the bottom up.
     pub head: Vec<u8>,
     pub format: Vec<u8>,
     pub kind: u32,
@@ -219,8 +270,8 @@ pub struct Link {
     /// its object; 0 until the graph first pauses.
     pub tid: u32,
     pub wake: u32,
-    /// The next picture, and the segment the stream plays: where it
-    /// starts and stops, in milliseconds.
+    /// The next picture, or the next byte of the sound, and the segment
+    /// the stream plays: where it starts and stops, in milliseconds.
     pub next: u32,
     pub from_ms: u32,
     pub to_ms: u32,
@@ -242,14 +293,24 @@ pub struct Link {
     pub pictures: Pictures,
 }
 
-/// The MPEG video decoder's filter, which is only seen through its pin:
-/// its graph.
+impl Link {
+    pub fn stream(&self) -> Stream {
+        if self.audio {
+            Stream::Audio
+        } else {
+            Stream::Video
+        }
+    }
+}
+
+/// The filter that gives a stream (the MPEG video decoder, or the sound's
+/// splitter or decoder), which is only seen through its pin: its graph.
 #[derive(Clone, Debug, Default)]
 pub struct Decoder {
     pub graph: u32,
 }
 
-/// The decoder's output pin: its graph.
+/// That filter's output pin: its graph.
 #[derive(Clone, Debug, Default)]
 pub struct Pin {
     pub graph: u32,
@@ -265,18 +326,53 @@ fn owner_of(cpu: &mut Cpu, this: u32) -> Result<u32, u32> {
     }
 }
 
-fn link(cpu: &mut Cpu, id: u32) -> Option<&mut Link> {
-    slot(cpu, id, false)
+/// The graph `id`'s link of the stream `s`.
+fn link(cpu: &mut Cpu, id: u32, s: Stream) -> Option<&mut Link> {
+    let g = graph(cpu, id)?;
+    match s {
+        Stream::Video => g.link.as_mut(),
+        Stream::Audio => g.sound.as_mut(),
+    }
+}
+
+/// The link, made or being made, whose decoder or output pin is the
+/// object `object` of the graph `id`.
+fn link_of(cpu: &mut Cpu, id: u32, object: u32) -> Option<&mut Link> {
+    let g = graph(cpu, id)?;
+    [&mut g.link, &mut g.sound, &mut g.connecting]
+        .into_iter()
+        .filter_map(|l| l.as_mut())
+        .find(|l| l.out_pin == object || l.decoder == object)
 }
 
 /// Whether the graph `id` has filters of the program's in it.
 pub fn has_filters(cpu: &mut Cpu, id: u32) -> bool {
-    graph(cpu, id).is_some_and(|g| !g.filters.is_empty() || g.link.is_some())
+    graph(cpu, id)
+        .is_some_and(|g| !g.filters.is_empty() || g.link.is_some() || g.sound.is_some())
 }
 
 /// Whether the graph `id`'s pictures go to a program's filter.
 pub fn linked(cpu: &mut Cpu, id: u32) -> bool {
     graph(cpu, id).is_some_and(|g| g.link.is_some())
+}
+
+/// Whether the graph `id`'s sound goes to a program's filter.
+pub fn sound_linked(cpu: &mut Cpu, id: u32) -> bool {
+    graph(cpu, id).is_some_and(|g| g.sound.is_some())
+}
+
+/// How many of the graph `id`'s streams go to a program's filter.
+pub fn links(cpu: &mut Cpu, id: u32) -> u32 {
+    linked(cpu, id) as u32 + sound_linked(cpu, id) as u32
+}
+
+/// The streams of the graph `id` whose link has the program's filter
+/// `filter`, as a mask.
+fn links_to(cpu: &mut Cpu, id: u32, filter: u32) -> u32 {
+    STREAMS
+        .into_iter()
+        .filter(|&s| link(cpu, id, s).is_some_and(|l| l.filter == filter))
+        .fold(0, |mask, s| mask | s.bit())
 }
 
 // The calls into the program.
@@ -302,6 +398,9 @@ const THEN_STATE: u32 = 1;
 const THEN_ADDED: u32 = 2;
 const THEN_CLOSED: u32 = 3;
 const THEN_UNLINKED: u32 = 4;
+
+/// Both streams, as a mask (`Stream::bit`).
+const ALL_STREAMS: u32 = 3;
 
 /// A call's flags in a list: the list stops when it fails, with its
 /// HRESULT; the list's result is what it returns.
@@ -392,11 +491,11 @@ fn then(cpu: &mut Cpu, t: &mut Task, failed: bool) -> Next {
             Next::Done(result)
         }
         THEN_CLOSED => {
-            unlink(cpu, arg);
+            unlink(cpu, arg, ALL_STREAMS);
             Next::Done(super::drop_ref(cpu, arg))
         }
         THEN_UNLINKED => {
-            unlink(cpu, arg);
+            unlink(cpu, arg, arg2);
             Next::Done(result)
         }
         _ => Next::Done(result),
@@ -482,7 +581,7 @@ pub fn add_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// IFilterGraph::RemoveFilter(this, filter): the filter leaves the
-/// graph, its connection with the decoder undone. A filter of a graph
+/// graph, its connections with the streams undone. A filter of a graph
 /// that isn't stopped is stopped first (paused first when it runs), as
 /// Wine's filtergraph.c does, so that its pins can disconnect. E_FAIL
 /// for one that isn't in it.
@@ -497,18 +596,16 @@ pub fn remove_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     g.filters.remove(k);
     let state = g.state;
-    let linked = g.link.as_ref().is_some_and(|l| l.filter == filter);
-    let then = if linked { THEN_UNLINKED } else { THEN_DONE };
-    let mut list = List::new(S_OK, then, id, 0, 0);
+    let linked = links_to(cpu, id, filter);
+    let then = if linked != 0 { THEN_UNLINKED } else { THEN_DONE };
+    let mut list = List::new(S_OK, then, id, linked, 0);
     if state == STATE_RUNNING {
         list.call(cpu, filter, FILTER_PAUSE, &[], 0);
     }
     if state != STATE_STOPPED {
         list.call(cpu, filter, FILTER_STOP, &[], 0);
     }
-    if linked {
-        disconnect_calls(cpu, &mut list, id);
-    }
+    disconnect_calls(cpu, &mut list, id, linked);
     list.call(cpu, filter, FILTER_JOIN_FILTER_GRAPH, &[0, 0], 0);
     list.release(cpu, filter);
     list.start(cpu, 0)
@@ -537,25 +634,31 @@ pub fn find_filter_by_name(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     list.start(cpu, 0)
 }
 
-/// The calls that undo the graph `id`'s link: its stream stops, the
-/// program's pin disconnects, and the link lets go of its references on
-/// the pin. The link itself goes after the calls (`unlink`): the pin
-/// lets go of the decoder's pin as it disconnects.
-fn disconnect_calls(cpu: &mut Cpu, list: &mut List, id: u32) {
-    halt(cpu, id);
-    let Some(l) = link(cpu, id) else {
-        return;
-    };
-    let (pin, input) = (std::mem::take(&mut l.pin), std::mem::take(&mut l.input));
-    list.call(cpu, pin, PIN_DISCONNECT, &[], 0);
-    list.release(cpu, input);
-    list.release(cpu, pin);
+/// The calls that undo the graph `id`'s links of the streams `mask`:
+/// their streams stop, the program's pins disconnect, and the links let
+/// go of their references on the pins. The links themselves go after
+/// the calls (`unlink`): each pin lets go of the output pin as it
+/// disconnects.
+fn disconnect_calls(cpu: &mut Cpu, list: &mut List, id: u32, mask: u32) {
+    for s in STREAMS {
+        if mask & s.bit() == 0 {
+            continue;
+        }
+        halt(cpu, id, s);
+        let Some(l) = link(cpu, id, s) else {
+            continue;
+        };
+        let (pin, input) = (std::mem::take(&mut l.pin), std::mem::take(&mut l.input));
+        list.call(cpu, pin, PIN_DISCONNECT, &[], 0);
+        list.release(cpu, input);
+        list.release(cpu, pin);
+    }
 }
 
-/// The graph `id`'s stream stops: the decoder's output pin decommits
-/// the allocator, and the streaming thread waits.
-fn halt(cpu: &mut Cpu, id: u32) {
-    let Some(l) = link(cpu, id) else {
+/// The graph `id`'s stream `s` stops: its output pin decommits the
+/// allocator, and the streaming thread waits.
+fn halt(cpu: &mut Cpu, id: u32, s: Stream) {
+    let Some(l) = link(cpu, id, s) else {
         return;
     };
     l.active = false;
@@ -563,13 +666,6 @@ fn halt(cpu: &mut Cpu, id: u32) {
     let (a, wake) = (l.allocator, l.wake);
     sample::decommit_now(cpu, a);
     super::set_event(cpu, wake);
-}
-
-/// Take the graph `id`'s link out of it.
-fn take_link(cpu: &mut Cpu, id: u32) -> Link {
-    graph(cpu, id)
-        .and_then(|g| g.link.take())
-        .unwrap_or_default()
 }
 
 /// The link `l` is gone: its streaming thread ends (it finds no link
@@ -588,10 +684,21 @@ fn drop_link(cpu: &mut Cpu, l: Link) {
     }
 }
 
-/// The graph `id` lets go of its link, after the calls that undo it.
-fn unlink(cpu: &mut Cpu, id: u32) {
-    let l = take_link(cpu, id);
-    drop_link(cpu, l);
+/// The graph `id` lets go of its links of the streams `mask`, after the
+/// calls that undo them.
+fn unlink(cpu: &mut Cpu, id: u32, mask: u32) {
+    for s in STREAMS {
+        if mask & s.bit() == 0 {
+            continue;
+        }
+        let taken = graph(cpu, id).and_then(|g| match s {
+            Stream::Video => g.link.take(),
+            Stream::Audio => g.sound.take(),
+        });
+        if let Some(l) = taken {
+            drop_link(cpu, l);
+        }
+    }
 }
 
 /// The graph's last reference goes, with filters of the program's in
@@ -610,9 +717,7 @@ pub fn close(cpu: &mut Cpu, id: u32) -> Option<u32> {
             list.call(cpu, f.iface, FILTER_STOP, &[], 0);
         }
     }
-    if linked(cpu, id) {
-        disconnect_calls(cpu, &mut list, id);
-    }
+    disconnect_calls(cpu, &mut list, id, ALL_STREAMS);
     for f in &filters {
         list.call(cpu, f.iface, FILTER_JOIN_FILTER_GRAPH, &[0, 0], 0);
         list.release(cpu, f.iface);
@@ -621,9 +726,9 @@ pub fn close(cpu: &mut Cpu, id: u32) -> Option<u32> {
 }
 
 /// The graph `id` is gone without the calls (its process ended, or its
-/// count reached 0 on the system's side): its link goes.
+/// count reached 0 on the system's side): its links go.
 pub fn forget(cpu: &mut Cpu, id: u32) {
-    unlink(cpu, id);
+    unlink(cpu, id, ALL_STREAMS);
     let clock = graph(cpu, id).map_or(0, |g| std::mem::take(&mut g.clock));
     if clock != 0 {
         super::drop_ref(cpu, clock);
@@ -725,16 +830,16 @@ fn give_clock(cpu: &mut Cpu, id: u32, list: &mut List, filters: &[u32]) {
 }
 
 /// The program's filters in the graph `id` moved to `state`: the
-/// decoder does too, after them. Its output pin commits the allocator
-/// and the stream starts where the graph's device is when it leaves
-/// Stopped, and they stop when it stops.
+/// output pins do too, after them. Each commits its allocator and its
+/// stream starts where the graph's device is when it leaves Stopped,
+/// and they stop when it stops.
 fn moved(cpu: &mut Cpu, id: u32, state: u32) {
     let Some(g) = graph(cpu, id) else {
         return;
     };
     g.filters_state = Some(state);
     let from = g.state;
-    if g.link.is_none() || (from == STATE_STOPPED) == (state == STATE_STOPPED) {
+    if (from == STATE_STOPPED) == (state == STATE_STOPPED) {
         return;
     }
     let (pos, to) = match crate::win32::winmm::mci::graph_device(cpu, id) {
@@ -744,60 +849,99 @@ fn moved(cpu: &mut Cpu, id: u32, state: u32) {
         ),
         None => (0, 0),
     };
-    if state == STATE_STOPPED {
-        halt(cpu, id);
-        return;
+    for s in STREAMS {
+        if link(cpu, id, s).is_none() {
+            continue;
+        }
+        if state == STATE_STOPPED {
+            halt(cpu, id, s);
+            continue;
+        }
+        let a = link(cpu, id, s).map_or(0, |l| l.allocator);
+        if sample::commit_now(cpu, a) != S_OK {
+            continue;
+        }
+        let media = stream_media(cpu, id, s);
+        let Some(l) = link(cpu, id, s) else {
+            continue;
+        };
+        l.next = media.as_ref().map_or(0, |m| first_sample(m, s, pos));
+        l.from_ms = pos;
+        l.to_ms = to;
+        l.active = true;
+        l.ended = false;
+        l.refused = false;
+        l.segment = true;
+        l.discontinuity = true;
+        l.generation = l.generation.wrapping_add(1);
+        if l.tid == 0 {
+            start_thread(cpu, id, s);
+        }
+        let wake = link(cpu, id, s).map_or(0, |l| l.wake);
+        super::set_event(cpu, wake);
     }
-    let a = link(cpu, id).map_or(0, |l| l.allocator);
-    if sample::commit_now(cpu, a) != S_OK {
-        return;
-    }
-    let media = stream_media(cpu, id);
-    let Some(l) = link(cpu, id) else {
-        return;
-    };
-    l.next = media.as_ref().map_or(0, |m| first_frame(m, pos));
-    l.from_ms = pos;
-    l.to_ms = to;
-    l.active = true;
-    l.ended = false;
-    l.refused = false;
-    l.segment = true;
-    l.discontinuity = true;
-    l.generation = l.generation.wrapping_add(1);
-    if l.tid == 0 {
-        start_thread(cpu, id);
-    }
-    let wake = link(cpu, id).map_or(0, |l| l.wake);
-    super::set_event(cpu, wake);
 }
 
-/// The graph `id`'s play moved to `ms` (IMediaSeeking): the stream
-/// goes on from there, as a new segment.
+/// The graph `id`'s play moved to `ms` (IMediaSeeking): the streams go
+/// on from there, as a new segment.
 pub fn seeked(cpu: &mut Cpu, id: u32, ms: u32, to: u32) {
-    let media = stream_media(cpu, id);
-    let Some(l) = link(cpu, id) else {
-        return;
+    for s in STREAMS {
+        let media = stream_media(cpu, id, s);
+        let Some(l) = link(cpu, id, s) else {
+            continue;
+        };
+        l.next = media.as_ref().map_or(0, |m| first_sample(m, s, ms));
+        l.from_ms = ms;
+        l.to_ms = to;
+        l.ended = false;
+        l.refused = false;
+        l.segment = true;
+        l.discontinuity = true;
+        l.generation = l.generation.wrapping_add(1);
+        let wake = l.wake;
+        super::set_event(cpu, wake);
+    }
+}
+
+/// Where the stream `s` of a segment from `ms` starts: the picture shown
+/// there, or the byte of the sound.
+fn first_sample(m: &Media, s: Stream, ms: u32) -> u32 {
+    match s {
+        Stream::Video if ms == 0 => 0,
+        Stream::Video => m.frame_at(ms as u64),
+        Stream::Audio => sound_byte(m, ms),
+    }
+}
+
+/// The byte of the sound of `m` played at `ms`, at a block's start.
+fn sound_byte(m: &Media, ms: u32) -> u32 {
+    let Some((f, data)) = &m.audio else {
+        return 0;
     };
-    l.next = media.as_ref().map_or(0, |m| first_frame(m, ms));
-    l.from_ms = ms;
-    l.to_ms = to;
-    l.ended = false;
-    l.refused = false;
-    l.segment = true;
-    l.discontinuity = true;
-    l.generation = l.generation.wrapping_add(1);
-    let wake = l.wake;
-    super::set_event(cpu, wake);
+    let block = f.block() as u64;
+    let at = ms as u64 * f.bytes_per_second() as u64 / 1000 / block * block;
+    at.min(data.len() as u64) as u32
 }
 
-/// The first picture of a segment from `ms`: the one shown there.
-fn first_frame(m: &Media, ms: u32) -> u32 {
-    if ms == 0 { 0 } else { m.frame_at(ms as u64) }
+/// The bytes of the sound a sample holds (`AUDIO_SAMPLE_MS`), whole
+/// blocks, at least one.
+fn sound_sample_bytes(m: &Media) -> u32 {
+    let Some((f, _)) = &m.audio else {
+        return 0;
+    };
+    let (num, den) = if m.frames > 0 {
+        (m.rate.0.max(1) as u64, m.rate.1 as u64)
+    } else {
+        (1000, AUDIO_SAMPLE_MS as u64)
+    };
+    let block = f.block() as u64;
+    let bytes = f.bytes_per_second() as u64 * den / num / block * block;
+    bytes.max(block) as u32
 }
 
-/// Start the link's streaming thread, with the event that wakes it.
-fn start_thread(cpu: &mut Cpu, id: u32) {
+/// Start the stream `s`'s streaming thread, with the event that wakes
+/// it.
+fn start_thread(cpu: &mut Cpu, id: u32, s: Stream) {
     let Some(dll) = crate::win32::stubs::find_dll(super::QUARTZ.name) else {
         return;
     };
@@ -817,7 +961,7 @@ fn start_thread(cpu: &mut Cpu, id: u32) {
         None,
     );
     let tid = crate::win32::kernel32::create_system_thread(cpu, start).unwrap_or(0);
-    match link(cpu, id) {
+    match link(cpu, id, s) {
         Some(l) if tid != 0 => {
             l.tid = tid;
             l.wake = wake;
@@ -826,39 +970,45 @@ fn start_thread(cpu: &mut Cpu, id: u32) {
     }
 }
 
-/// The file the link of the graph `id` streams, read again after a
-/// restore.
-fn stream_media(cpu: &mut Cpu, id: u32) -> Option<Arc<Media>> {
-    media_of(cpu, id, false)
+/// The file the graph `id`'s link of the stream `s` streams, read again
+/// after a restore.
+fn stream_media(cpu: &mut Cpu, id: u32, s: Stream) -> Option<Arc<Media>> {
+    media_of(cpu, id, Some(s))
 }
 
-/// The file of the connection RenderFile is making in the graph `id`,
-/// read again after a restore.
+/// The file of the connection RenderFile is making in the graph `id`.
 fn connecting_media(cpu: &mut Cpu, id: u32) -> Option<Arc<Media>> {
-    media_of(cpu, id, true)
+    media_of(cpu, id, None)
 }
 
-/// The graph `id`'s link, or the one being made while RenderFile
-/// connects.
-fn slot(cpu: &mut Cpu, id: u32, connecting: bool) -> Option<&mut Link> {
-    let g = graph(cpu, id)?;
-    if connecting {
-        g.connecting.as_mut()
-    } else {
-        g.link.as_mut()
+/// The graph `id`'s link of the stream `s`, or for None the one being
+/// made while RenderFile connects.
+fn slot(cpu: &mut Cpu, id: u32, s: Option<Stream>) -> Option<&mut Link> {
+    match s {
+        Some(s) => link(cpu, id, s),
+        None => graph(cpu, id)?.connecting.as_mut(),
     }
 }
 
 /// The file of a link (`slot`), which a save state doesn't keep: read
-/// again when it isn't there.
-fn media_of(cpu: &mut Cpu, id: u32, connecting: bool) -> Option<Arc<Media>> {
-    let l = slot(cpu, id, connecting)?;
+/// again when it isn't there, unless another link of the graph's has it.
+fn media_of(cpu: &mut Cpu, id: u32, s: Option<Stream>) -> Option<Arc<Media>> {
+    let l = slot(cpu, id, s)?;
     if let Some(m) = &l.media {
         return Some(m.clone());
     }
     let file = l.file.clone();
-    let m = Arc::new(read_media(cpu, &file)?);
-    slot(cpu, id, connecting)?.media = Some(m.clone());
+    let g = graph(cpu, id)?;
+    let shared = [&g.link, &g.sound, &g.connecting]
+        .into_iter()
+        .flatten()
+        .find(|l| l.file == file && l.media.is_some())
+        .and_then(|l| l.media.clone());
+    let m = match shared {
+        Some(m) => m,
+        None => Arc::new(read_media(cpu, &file)?),
+    };
+    slot(cpu, id, s)?.media = Some(m.clone());
     Some(m)
 }
 
@@ -867,31 +1017,35 @@ fn read_media(cpu: &mut Cpu, path: &str) -> Option<Media> {
     Media::parse(&bytes, true)
 }
 
-// The streaming thread.
+// The streaming threads.
 
-/// The streaming thread's loop (a stub that jumps back to its trap):
-/// what the stream has to do next, a call of the program's input pin,
-/// or a wait until there is something.
+/// A streaming thread's loop (a stub that jumps back to its trap): what
+/// its stream has to do next, a call of the program's input pin, or a
+/// wait until there is something.
 pub fn stream_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let tid = crate::win32::user32::current_tid(cpu);
     let found = super::state(cpu)
         .objects
         .iter()
         .find_map(|o| match &o.kind {
-            Kind::Graph { g } => g.link.as_ref().filter(|l| l.tid == tid).map(|_| o.id),
+            Kind::Graph { g } => [&g.link, &g.sound]
+                .into_iter()
+                .flatten()
+                .find(|l| l.tid == tid)
+                .map(|l| (o.id, l.stream())),
             _ => None,
         });
-    let Some(id) = found else {
+    let Some((id, stream)) = found else {
         // Its link is gone, or a program called the stub.
         thread::exit_current(cpu, 0);
         return None;
     };
-    let l = link(cpu, id)?.clone_shallow();
+    let l = link(cpu, id, stream)?.clone_shallow();
     if !l.active || l.ended || l.refused {
         return wait(cpu, vec![l.wake]);
     }
     if l.segment {
-        if let Some(l) = link(cpu, id) {
+        if let Some(l) = link(cpu, id, stream) {
             l.segment = false;
         }
         let start = l.from_ms as u64 * 10_000;
@@ -905,19 +1059,12 @@ pub fn stream_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
             rate as u32,
             (rate >> 32) as u32,
         ];
-        return stream_call(cpu, id, l.generation, 0, l.pin, PIN_NEW_SEGMENT, &args);
+        return stream_call(cpu, (id, &l), (0, 0), l.pin, PIN_NEW_SEGMENT, &args);
     }
-    let Some(m) = stream_media(cpu, id) else {
+    let Some(m) = stream_media(cpu, id, stream) else {
         return end_stream(cpu, id, &l);
     };
-    let last = if l.to_ms >= m.length_ms() {
-        m.frames
-    } else {
-        (0..m.frames)
-            .find(|&n| m.frame_ms(n) >= l.to_ms)
-            .unwrap_or(m.frames)
-    };
-    if l.next >= last {
+    if l.next >= last_sample(&m, &l) {
         return end_stream(cpu, id, &l);
     }
     let s = match sample::take_buffer(cpu, l.allocator) {
@@ -929,12 +1076,39 @@ pub fn stream_thread(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         // Decommitted: the graph stopped.
         Err(_) => return wait(cpu, vec![l.wake]),
     };
-    fill(cpu, id, &l, &m, s);
+    let advance = match stream {
+        Stream::Video => {
+            fill(cpu, id, &l, &m, s);
+            1
+        }
+        Stream::Audio => fill_sound(cpu, &l, &m, s),
+    };
+    if advance == 0 {
+        // A buffer too small for a block of the sound.
+        super::drop_ref(cpu, s);
+        return end_stream(cpu, id, &l);
+    }
     let Some(at) = super::block(cpu, s, super::MEDIA_SAMPLE) else {
         super::drop_ref(cpu, s);
         return wait(cpu, vec![l.wake]);
     };
-    stream_call(cpu, id, l.generation, s, l.input, INPUT_RECEIVE, &[at])
+    stream_call(cpu, (id, &l), (s, advance), l.input, INPUT_RECEIVE, &[at])
+}
+
+/// Where the link `l`'s segment of `m` ends: the first picture shown at
+/// its stop or after, or the byte of the sound there.
+fn last_sample(m: &Media, l: &Link) -> u32 {
+    let whole = l.to_ms >= m.length_ms();
+    match l.stream() {
+        Stream::Video if whole => m.frames,
+        Stream::Video => (0..m.frames)
+            .find(|&n| m.frame_ms(n) >= l.to_ms)
+            .unwrap_or(m.frames),
+        Stream::Audio => {
+            let len = m.audio.as_ref().map_or(0, |(_, d)| d.len() as u32);
+            if whole { len } else { sound_byte(m, l.to_ms) }
+        }
+    }
 }
 
 impl Link {
@@ -966,55 +1140,70 @@ fn wait(cpu: &mut Cpu, objects: Vec<u32>) -> Option<u32> {
     None
 }
 
-/// The stream's last picture went: EndOfStream.
+/// The stream's last sample went: EndOfStream.
 fn end_stream(cpu: &mut Cpu, id: u32, l: &Link) -> Option<u32> {
-    if let Some(l) = link(cpu, id) {
+    if let Some(l) = link(cpu, id, l.stream()) {
         l.ended = true;
     }
-    stream_call(cpu, id, l.generation, 0, l.pin, PIN_END_OF_STREAM, &[])
+    stream_call(cpu, (id, l), (0, 0), l.pin, PIN_END_OF_STREAM, &[])
 }
 
-/// The streaming thread calls the method `index` of `this` with `args`,
-/// for the sample `s` (0 for none).
+/// The streaming thread of the graph `id`'s link `l` calls the method
+/// `index` of `this` with `args`, for the sample `s` (0 for none), which
+/// moves the stream on by `advance` when the pin takes it.
 fn stream_call(
     cpu: &mut Cpu,
-    id: u32,
-    generation: u32,
-    s: u32,
+    (id, l): (u32, &Link),
+    (s, advance): (u32, u32),
     this: u32,
     index: u32,
     args: &[u32],
 ) -> Option<u32> {
+    let stream = l.stream();
     let Some(target) = method(cpu, this, index) else {
         if s != 0 {
             super::drop_ref(cpu, s);
         }
-        if let Some(l) = link(cpu, id) {
+        if let Some(l) = link(cpu, id, stream) {
             l.refused = true;
         }
         return Some(0);
     };
-    let mut vars = vec![JOB_STREAM, id, generation, s, target, this];
+    let mut vars = vec![
+        JOB_STREAM,
+        id,
+        l.audio as u32,
+        l.generation,
+        s,
+        advance,
+        target,
+        this,
+    ];
     vars.extend_from_slice(args);
     task::start(cpu, task::DSHOW, vars, 0)
 }
 
 fn stream_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     if t.step == 0 {
-        return Next::call(t.var(4), &t.vars[5..], 1);
+        return Next::call(t.var(6), &t.vars[7..], 1);
     }
-    let (id, generation, s) = (t.var(1), t.var(2), t.var(3));
+    let (id, generation, s, advance) = (t.var(1), t.var(3), t.var(4), t.var(5));
+    let stream = if t.var(2) != 0 {
+        Stream::Audio
+    } else {
+        Stream::Video
+    };
     if s == 0 {
         return Next::Done(0);
     }
     // The sample comes back to the allocator when the pin has let go of
     // it too.
     super::drop_ref(cpu, s);
-    if let Some(l) = link(cpu, id)
+    if let Some(l) = link(cpu, id, stream)
         && l.generation == generation
     {
         if value == S_OK {
-            l.next += 1;
+            l.next += advance;
             l.discontinuity = false;
         } else {
             // S_FALSE or an error: the pin wants no more (strmbase's
@@ -1025,15 +1214,26 @@ fn stream_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     Next::Done(0)
 }
 
+/// The flags of a sample of the link `l`: its times are valid, and it
+/// starts a picture or a piece of the sound that stands alone.
+fn sample_flags(l: &Link) -> u32 {
+    let mut flags =
+        sample::AM_SAMPLE_TIMEVALID | sample::AM_SAMPLE_STOPVALID | sample::AM_SAMPLE_SPLICEPOINT;
+    if l.discontinuity {
+        flags |= sample::AM_SAMPLE_DATADISCONTINUITY;
+    }
+    flags
+}
+
 /// Fill the sample `s` with the link's next picture, timed from the
 /// segment's start.
 fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
     let (w, h) = (m.width, m.height);
     let stride = dib_stride(w as i32, 24);
-    let mut pictures =
-        link(cpu, id).map_or_else(Pictures::default, |l| std::mem::take(&mut l.pictures));
+    let mut pictures = link(cpu, id, Stream::Video)
+        .map_or_else(Pictures::default, |l| std::mem::take(&mut l.pictures));
     let rows = pictures.rows(m, l.next, stride);
-    if let Some(lk) = link(cpu, id) {
+    if let Some(lk) = link(cpu, id, Stream::Video) {
         lk.pictures = pictures;
     }
     let data = rows.map(|rows| convert(l.kind as usize, &rows, w, h, stride, l.bottom_up));
@@ -1043,12 +1243,7 @@ fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
     let Some(Kind::MediaSample { s: ms }) = super::kind(cpu, s) else {
         return;
     };
-    let mut flags =
-        sample::AM_SAMPLE_TIMEVALID | sample::AM_SAMPLE_STOPVALID | sample::AM_SAMPLE_SPLICEPOINT;
-    if l.discontinuity {
-        flags |= sample::AM_SAMPLE_DATADISCONTINUITY;
-    }
-    ms.flags = flags;
+    ms.flags = sample_flags(l);
     ms.start = start;
     ms.stop = stop;
     ms.media_time = Some((l.next as i64, l.next as i64 + 1));
@@ -1059,6 +1254,38 @@ fn fill(cpu: &mut Cpu, id: u32, l: &Link, m: &Media, s: u32) {
         let n = data.len().min(len as usize);
         cpu.bus.guest_write_bytes(buffer, &data[..n]);
     }
+}
+
+/// Fill the sample `s` with the link's next piece of the sound, as much
+/// as a sample holds (`sound_sample_bytes`) in whole blocks, timed from
+/// the segment's start, with media times in the sound's sample frames
+/// as the AVI splitter gives them: the bytes it holds.
+fn fill_sound(cpu: &mut Cpu, l: &Link, m: &Media, s: u32) -> u32 {
+    let Some((f, data)) = &m.audio else {
+        return 0;
+    };
+    let (bps, block) = (f.bytes_per_second() as i64, f.block());
+    let last = last_sample(m, l).min(data.len() as u32);
+    let Some(Kind::MediaSample { s: ms }) = super::kind(cpu, s) else {
+        return 0;
+    };
+    let room = ms.size / block * block;
+    let len = sound_sample_bytes(m)
+        .min(room)
+        .min(last.saturating_sub(l.next));
+    let time = |byte: u32| byte as i64 * 10_000_000 / bps.max(1);
+    let from = l.from_ms as i64 * 10_000;
+    ms.flags = sample_flags(l);
+    ms.start = (time(l.next) - from).max(0);
+    ms.stop = (time(l.next + len) - from).max(0);
+    let frames = |byte: u32| (byte / block) as i64;
+    ms.media_time = Some((frames(l.next), frames(l.next + len)));
+    ms.actual = len;
+    let buffer = ms.buffer;
+    let at = l.next as usize;
+    cpu.bus
+        .guest_write_bytes(buffer, &data[at..at + len as usize]);
+    len
 }
 
 // The pictures' formats.
@@ -1298,6 +1525,36 @@ fn accepts(m: &Media, mt: &MediaType) -> Option<(usize, bool)> {
     Some((k, rgb && height > 0))
 }
 
+/// The sound's media type for `m`: AM_MEDIA_TYPE with no format
+/// pointer, and its WAVEFORMATEX, as the AVI splitter gives a PCM stream
+/// (fixed-size samples of a block each, cbSize 0).
+fn own_sound_type(m: &Media) -> (Vec<u8>, Vec<u8>) {
+    let f = m.audio.as_ref().map(|(f, _)| *f).unwrap_or_default();
+    let format = f.to_bytes().to_vec();
+    let put = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let mut head = vec![0u8; MEDIA_TYPE];
+    head[0..16].copy_from_slice(&MEDIATYPE_AUDIO.0);
+    head[16..32].copy_from_slice(&MEDIASUBTYPE_PCM.0);
+    put(&mut head, 32, 1);
+    put(&mut head, 40, f.block());
+    head[44..60].copy_from_slice(&FORMAT_WAVE_FORMAT_EX.0);
+    put(&mut head, 64, format.len() as u32);
+    (head, format)
+}
+
+/// Whether the sound's output pin can give the type `mt` for `m`: PCM
+/// of FORMAT_WaveFormatEx whose WAVEFORMATEX is the sound's, but for
+/// what follows its first 16 bytes.
+fn accepts_sound(m: &Media, mt: &MediaType) -> bool {
+    let (head, f) = (&mt.head, &mt.format);
+    let (_, own) = own_sound_type(m);
+    head[0..16] == MEDIATYPE_AUDIO.0
+        && head[16..32] == MEDIASUBTYPE_PCM.0
+        && head[44..60] == FORMAT_WAVE_FORMAT_EX.0
+        && f.len() >= 16
+        && f[..16] == own[..16]
+}
+
 // The connection (RenderFile).
 
 /// The scratch space of the connection's calls: the pointer a call
@@ -1328,6 +1585,8 @@ const V_RELEASE: usize = 11;
 const V_FILE: usize = 12;
 const V_KIND: usize = 13;
 const V_BOTTOM_UP: usize = 14;
+/// The stream connecting: 1 for the sound.
+const V_AUDIO: usize = 15;
 
 /// The connection's steps.
 const S_START: u16 = 0;
@@ -1358,12 +1617,13 @@ const S_DONE: u16 = 24;
 const S_RELEASE: u16 = 25;
 const S_FINISH: u16 = 26;
 
-/// Connect the decoder of the file named by the wide string at `file`
-/// to an input pin of the program's filters in the graph `id`, before
-/// RenderFile opens its device: None while the calls are made, after
-/// which RenderFile runs again with `connect_tried` set.
+/// Connect the streams of the file named by the wide string at `file`,
+/// its pictures and then its sound, each to an input pin of the
+/// program's filters in the graph `id` that takes it, before RenderFile
+/// opens its device: None while the calls are made, after which
+/// RenderFile runs again with `connect_tried` set.
 pub fn connect(cpu: &mut Cpu, id: u32, file: u32) -> Option<u32> {
-    let mut vars = vec![0u32; V_BOTTOM_UP + 1];
+    let mut vars = vec![0u32; V_AUDIO + 1];
     vars[0] = JOB_CONNECT;
     vars[V_GRAPH] = id;
     vars[V_FILE] = file;
@@ -1417,33 +1677,17 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.step {
         S_START => {
             let path = crate::win32::dmusic::read_wide(cpu, t.var(V_FILE), 260);
-            let Some(m) = read_media(cpu, &path).filter(|m| m.frames > 0) else {
+            let Some(m) = read_media(cpu, &path) else {
                 return goto(S_FINISH);
             };
-            let decoder = super::add(
-                cpu,
-                Kind::Decoder {
-                    d: Decoder { graph: id },
-                },
-            );
-            let out_pin = super::add(
-                cpu,
-                Kind::Pin {
-                    p: Pin { graph: id },
-                },
-            );
-            let Some(g) = graph(cpu, id) else {
-                return goto(S_FINISH);
-            };
-            g.connecting = Some(Link {
-                decoder,
-                out_pin,
-                file: path,
-                media: Some(Arc::new(m)),
-                ..Link::default()
-            });
             super::IID_IMEM_INPUT_PIN.write(cpu, s + C_IID);
-            goto(S_FILTER)
+            let m = Arc::new(m);
+            let stream = if m.frames > 0 {
+                Stream::Video
+            } else {
+                Stream::Audio
+            };
+            begin(cpu, t, path, m, stream)
         }
         S_FILTER => {
             let k = t.var(V_FILTER) as usize;
@@ -1533,10 +1777,14 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let mt = read_media_type(cpu, at);
             sample::free_media_type(cpu, at);
             let media = connecting_media(cpu, id);
-            let found = mt
-                .as_ref()
-                .zip(media)
-                .and_then(|(mt, m)| accepts(&m, mt).map(|k| (mt, k)));
+            let audio = t.var(V_AUDIO) != 0;
+            let found = mt.as_ref().zip(media).and_then(|(mt, m)| {
+                if audio {
+                    accepts_sound(&m, mt).then_some((mt, (0, false)))
+                } else {
+                    accepts(&m, mt).map(|k| (mt, k))
+                }
+            });
             let Some((mt, (k, bottom_up))) = found else {
                 return goto(S_NEXT_TYPE);
             };
@@ -1553,14 +1801,20 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         S_OWN => {
             let k = t.var(V_OWN) as usize;
             let media = connecting_media(cpu, id);
-            let (Some(m), true) = (media, k < FORMATS.len()) else {
+            let audio = t.var(V_AUDIO) != 0;
+            let types = if audio { 1 } else { FORMATS.len() };
+            let (Some(m), true) = (media, k < types) else {
                 return goto(S_SKIP_PIN);
             };
-            let (head, format) = own_type(&m, k);
+            let (head, format) = if audio {
+                own_sound_type(&m)
+            } else {
+                own_type(&m, k)
+            };
             put_type(cpu, s, &head, &format);
             t.set(V_PEER, 0);
             t.set(V_KIND, k as u32);
-            t.set(V_BOTTOM_UP, (k >= RGB24) as u32);
+            t.set(V_BOTTOM_UP, (!audio && k >= RGB24) as u32);
             goto(S_ATTEMPT)
         }
         S_ATTEMPT => {
@@ -1660,9 +1914,17 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             // The requirements, zero when the pin gave none (S_REQUIRED).
             let req = sample::read_props(cpu, s + C_PROPS);
             let k = t.var(V_KIND) as usize;
-            let size = connecting_media(cpu, id).map_or(0, |m| image_size(k, m.width, m.height));
-            // DecideBufferSize: a buffer at least, a picture's size at
-            // least, an alignment of 1 at least (quartz_transform.c).
+            let audio = t.var(V_AUDIO) != 0;
+            let size = connecting_media(cpu, id).map_or(0, |m| {
+                if audio {
+                    sound_sample_bytes(&m)
+                } else {
+                    image_size(k, m.width, m.height)
+                }
+            });
+            // DecideBufferSize: a buffer at least, a picture's or a
+            // sample of the sound's size at least, an alignment of 1 at
+            // least (quartz_transform.c).
             let props = [req[0].max(1), req[1].max(size), req[2].max(1), req[3]];
             let a = t.var(V_ALLOC);
             if sample::set_props(cpu, a, props).is_err() {
@@ -1699,7 +1961,11 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             l.format = format;
             l.kind = t.var(V_KIND);
             l.bottom_up = t.var(V_BOTTOM_UP) != 0;
-            g.link = Some(l);
+            if l.audio {
+                g.sound = Some(l);
+            } else {
+                g.link = Some(l);
+            }
             t.set(V_PIN, 0);
             let e = t.var(V_TYPES);
             t.set(V_TYPES, 0);
@@ -1730,11 +1996,24 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             call_method(cpu, this, RELEASE, &[], then)
         }
         _ => {
-            // S_FINISH: without a connection, the decoder and its pin go.
-            if let Some(l) = graph(cpu, id).and_then(|g| g.connecting.take()) {
+            // S_FINISH: without a connection, the stream's filter and its
+            // pin go. The sound connects after the pictures.
+            let left = graph(cpu, id).and_then(|g| g.connecting.take());
+            let media = left.as_ref().and_then(|l| l.media.clone()).or_else(|| {
+                graph(cpu, id)
+                    .and_then(|g| g.link.as_ref())
+                    .and_then(|l| l.media.clone())
+            });
+            if let Some(l) = left {
                 for o in [l.out_pin, l.decoder] {
                     super::drop_ref(cpu, o);
                 }
+            }
+            if t.var(V_AUDIO) == 0
+                && let Some(m) = media.filter(|m| m.audio.is_some())
+            {
+                let path = crate::win32::dmusic::read_wide(cpu, t.var(V_FILE), 260);
+                return begin(cpu, t, path, m, Stream::Audio);
             }
             if let Some(g) = graph(cpu, id) {
                 g.connect_tried = true;
@@ -1743,6 +2022,41 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             Next::Stop
         }
     }
+}
+
+/// Start connecting the stream `stream` of the file `path`, `m`: its
+/// filter and output pin are made, and the program's filters are tried
+/// from the first.
+fn begin(cpu: &mut Cpu, t: &mut Task, path: String, m: Arc<Media>, stream: Stream) -> Next {
+    let id = t.var(V_GRAPH);
+    let decoder = super::add(
+        cpu,
+        Kind::Decoder {
+            d: Decoder { graph: id },
+        },
+    );
+    let out_pin = super::add(
+        cpu,
+        Kind::Pin {
+            p: Pin { graph: id },
+        },
+    );
+    let Some(g) = graph(cpu, id) else {
+        return goto(S_FINISH);
+    };
+    g.connecting = Some(Link {
+        audio: stream == Stream::Audio,
+        decoder,
+        out_pin,
+        file: path,
+        media: Some(m),
+        ..Link::default()
+    });
+    for v in [V_FILTER, V_ENUM, V_PIN, V_TYPES, V_OWN, V_INPUT, V_ALLOC, V_PEER] {
+        t.set(v, 0);
+    }
+    t.set(V_AUDIO, (stream == Stream::Audio) as u32);
+    goto(S_FILTER)
 }
 
 /// Put the media type `head` with the format block `format` in the
@@ -1756,12 +2070,39 @@ fn put_type(cpu: &mut Cpu, s: u32, head: &[u8], format: &[u8]) {
     cpu.bus.guest_write_bytes(s + C_FORMAT, &format[..n]);
 }
 
-// The decoder's IBaseFilter.
+// The IBaseFilter of the filter that gives a stream.
 
-/// IPersist::GetClassID(this, out): CLSID_CMpegVideoCodec.
+/// The names of the filter that gives the stream of the link `l` and of
+/// its output pin, and the filter's class.
+fn names(l: &Link) -> (&'static str, &'static str, Guid) {
+    if !l.audio {
+        return (DECODER_NAME, PIN_NAME, super::CLSID_MPEG_VIDEO_CODEC);
+    }
+    let mpeg = l
+        .media
+        .as_ref()
+        .is_some_and(|m| matches!(m.video, media::Kind::Mpeg(_)));
+    if mpeg {
+        (MPEG_AUDIO.0, MPEG_AUDIO.1, super::CLSID_MPEG_AUDIO_CODEC)
+    } else {
+        (AVI_SPLITTER.0, AVI_SPLITTER.1, super::CLSID_AVI_SPLITTER)
+    }
+}
+
+/// The graph of the filter or pin `this`, and the names and class of
+/// its link's stream (`names`), the pictures' when it has none.
+fn identity(cpu: &mut Cpu, this: u32) -> Result<(u32, (&'static str, &'static str, Guid)), u32> {
+    let id = owner_of(cpu, this)?;
+    let object = super::object_of(cpu, this).ok_or(E_POINTER)?;
+    let found = link_of(cpu, id, object).map(|l| names(l));
+    Ok((id, found.unwrap_or((DECODER_NAME, PIN_NAME, super::CLSID_MPEG_VIDEO_CODEC))))
+}
+
+/// IPersist::GetClassID(this, out): CLSID_CMpegVideoCodec, or the
+/// sound's filter's.
 pub fn decoder_get_class_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(owner_of(cpu, args[0]));
-    if args[1] == 0 || !super::CLSID_MPEG_VIDEO_CODEC.write(cpu, args[1]) {
+    let (_, (_, _, class)) = hr!(identity(cpu, args[0]));
+    if args[1] == 0 || !class.write(cpu, args[1]) {
         return Some(E_POINTER);
     }
     Some(S_OK)
@@ -1789,8 +2130,8 @@ pub fn decoder_get_sync_source(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(put32(cpu, args[1], at).map_or_else(|e| e, |_| S_OK))
 }
 
-/// IBaseFilter::FindPin(this, id, out): "Output", the pin the program
-/// sees. Its input pin is the graph's own.
+/// IBaseFilter::FindPin(this, id, out): its output pin, the one the
+/// program sees, by its name. Its input pin is the graph's own.
 pub fn decoder_find_pin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let id = hr!(owner_of(cpu, args[0]));
     hr!(put32(cpu, args[2], 0));
@@ -1798,10 +2139,15 @@ pub fn decoder_find_pin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(E_POINTER);
     }
     let name = crate::win32::dmusic::read_wide(cpu, args[1], 128);
-    let pin = link(cpu, id).map_or(0, |l| l.out_pin);
-    if name != PIN_NAME || pin == 0 {
+    let object = hr!(super::object_of(cpu, args[0]).ok_or(E_POINTER));
+    let found = STREAMS.into_iter().find_map(|s| {
+        link(cpu, id, s)
+            .filter(|l| l.decoder == object && names(l).1 == name)
+            .map(|l| l.out_pin)
+    });
+    let Some(pin) = found else {
         return Some(VFW_E_NOT_FOUND);
-    }
+    };
     let at = super::pointer(cpu, pin);
     cpu.bus.guest_write_32(args[2], at);
     Some(S_OK)
@@ -1810,18 +2156,18 @@ pub fn decoder_find_pin(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// IBaseFilter::QueryFilterInfo(this, info): its name and its graph,
 /// with a reference taken.
 pub fn decoder_query_filter_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let id = hr!(owner_of(cpu, args[0]));
+    let (id, (name, _, _)) = hr!(identity(cpu, args[0]));
     let info = args[1];
     if info == 0 || !cpu.bus.guest_probe(info, 260, true) {
         return Some(E_POINTER);
     }
-    crate::win32::dmusic::write_wide(cpu, info, DECODER_NAME, 128);
+    crate::win32::dmusic::write_wide(cpu, info, name, 128);
     let at = super::pointer(cpu, id);
     cpu.bus.guest_write_32(info + 256, at);
     Some(S_OK)
 }
 
-// The decoder's output pin.
+// The output pins.
 
 /// The graph of the pin `this`, and its link if it is connected.
 fn pin_link(cpu: &mut Cpu, this: u32) -> Result<(u32, Option<Link>), u32> {
@@ -1830,13 +2176,15 @@ fn pin_link(cpu: &mut Cpu, this: u32) -> Result<(u32, Option<Link>), u32> {
         return Err(E_POINTER);
     };
     let graph_id = p.graph;
-    let l = link(cpu, graph_id)
-        .filter(|l| l.out_pin == id)
-        .map(|l| Link {
-            head: l.head.clone(),
-            format: l.format.clone(),
-            ..l.clone_shallow()
-        });
+    let l = STREAMS.into_iter().find_map(|s| {
+        link(cpu, graph_id, s)
+            .filter(|l| l.out_pin == id)
+            .map(|l| Link {
+                head: l.head.clone(),
+                format: l.format.clone(),
+                ..l.clone_shallow()
+            })
+    });
     Ok((graph_id, l))
 }
 
@@ -1861,10 +2209,11 @@ pub fn pin_disconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if graph(cpu, id).is_some_and(|g| g.state != STATE_STOPPED) {
         return Some(VFW_E_NOT_STOPPED);
     }
-    let mut list = List::new(S_OK, THEN_UNLINKED, id, 0, 0);
+    let stream = l.stream();
+    let mut list = List::new(S_OK, THEN_UNLINKED, id, stream.bit(), 0);
     list.release(cpu, l.input);
     list.release(cpu, l.pin);
-    if let Some(l) = link(cpu, id) {
+    if let Some(l) = link(cpu, id, stream) {
         // Its pin, which has let go of this one, isn't told again.
         l.pin = 0;
         l.input = 0;
@@ -1911,17 +2260,8 @@ pub fn pin_query_pin_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if info == 0 || !cpu.bus.guest_probe(info, 264, true) {
         return Some(E_POINTER);
     }
-    let graph_id = hr!(owner_of(cpu, args[0]));
-    let decoder = link(cpu, graph_id)
-        .filter(|l| l.out_pin == id)
-        .map(|l| l.decoder)
-        .or_else(|| {
-            graph(cpu, graph_id)
-                .and_then(|g| g.connecting.as_ref())
-                .filter(|l| l.out_pin == id)
-                .map(|l| l.decoder)
-        })
-        .unwrap_or(0);
+    let (graph_id, (_, name, _)) = hr!(identity(cpu, args[0]));
+    let decoder = link_of(cpu, graph_id, id).map_or(0, |l| l.decoder);
     let at = if decoder != 0 {
         super::pointer(cpu, decoder)
     } else {
@@ -1929,7 +2269,7 @@ pub fn pin_query_pin_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     cpu.bus.guest_write_32(info, at);
     cpu.bus.guest_write_32(info + 4, PINDIR_OUTPUT);
-    crate::win32::dmusic::write_wide(cpu, info + 8, PIN_NAME, 128);
+    crate::win32::dmusic::write_wide(cpu, info + 8, name, 128);
     Some(S_OK)
 }
 
@@ -1941,32 +2281,46 @@ pub fn pin_query_direction(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// IPin::QueryId(this, out): its name, in a block of the task heap.
 pub fn pin_query_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    hr!(owner_of(cpu, args[0]));
+    let (_, (_, name, _)) = hr!(identity(cpu, args[0]));
     if args[1] == 0 {
         return Some(E_POINTER);
     }
-    let n = (PIN_NAME.len() as u32 + 1) * 2;
+    let n = (name.len() as u32 + 1) * 2;
     let at = crate::win32::ole32::task_alloc(cpu, n);
     if at == 0 {
         return Some(E_OUTOFMEMORY);
     }
-    crate::win32::dmusic::write_wide(cpu, at, PIN_NAME, PIN_NAME.len() + 1);
+    crate::win32::dmusic::write_wide(cpu, at, name, name.len() + 1);
     Some(put32(cpu, args[1], at).map_or_else(|e| e, |_| S_OK))
 }
 
-/// IPin::QueryAccept(this, type): whether the decoder can give it.
+/// IPin::QueryAccept(this, type): whether the pin can give it.
 pub fn pin_query_accept(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let (id, _) = hr!(pin_link(cpu, args[0]));
+    let id = hr!(owner_of(cpu, args[0]));
+    let object = hr!(super::object_of(cpu, args[0]).ok_or(E_POINTER));
     let Some(mt) = read_media_type(cpu, args[1]) else {
         return Some(E_POINTER);
     };
-    let media = stream_media(cpu, id).or_else(|| connecting_media(cpu, id));
-    let ok = media.is_some_and(|m| accepts(&m, &mt).is_some());
+    let found = [Some(Stream::Video), Some(Stream::Audio), None]
+        .into_iter()
+        .find(|&s| slot(cpu, id, s).is_some_and(|l| l.out_pin == object));
+    let Some(which) = found else {
+        return Some(S_FALSE);
+    };
+    let audio = slot(cpu, id, which).is_some_and(|l| l.audio);
+    let ok = media_of(cpu, id, which).is_some_and(|m| {
+        if audio {
+            accepts_sound(&m, &mt)
+        } else {
+            accepts(&m, &mt).is_some()
+        }
+    });
     Some(if ok { S_OK } else { S_FALSE })
 }
 
 crate::state_fields!(Filter { iface, name });
 crate::state_fields!(Link {
+    audio,
     filter,
     pin,
     input,

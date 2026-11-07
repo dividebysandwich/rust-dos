@@ -157,6 +157,18 @@ pub const CLSID_MPEG_VIDEO_CODEC: Guid = guid(
     0x11CE,
     [0x9B, 0xD9, 0x00, 0x00, 0xE2, 0x02, 0x59, 0x9C],
 );
+pub const CLSID_MPEG_AUDIO_CODEC: Guid = guid(
+    0x4A22_86E0,
+    0x7BEF,
+    0x11CE,
+    [0x9B, 0xD9, 0x00, 0x00, 0xE2, 0x02, 0x59, 0x9C],
+);
+pub const CLSID_AVI_SPLITTER: Guid = guid(
+    0x1B54_4C20,
+    0xFD0B,
+    0x11CE,
+    [0x8C, 0x63, 0x00, 0xAA, 0x00, 0x44, 0xB5, 0x1E],
+);
 pub const TIME_FORMAT_MEDIA_TIME: Guid = guid(
     0x7B78_5574,
     0x8C82,
@@ -1390,7 +1402,7 @@ pub fn process_ended(cpu: &mut Cpu, pid: u32) {
         .flat_map(|o| match &o.kind {
             Kind::Graph { g } => {
                 let mut held = vec![g.event.1];
-                held.extend(g.link.as_ref().map(|l| l.wake));
+                held.extend([&g.link, &g.sound].into_iter().flatten().map(|l| l.wake));
                 held
             }
             Kind::Multi { m } => vec![m.end_event.1],
