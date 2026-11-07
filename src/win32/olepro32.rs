@@ -57,8 +57,13 @@ macro_rules! not_written {
 /// `stubs`).
 static APIS: &[Api] = &[
     stdcall("OleIconToCursor", 248, 2, icon_to_cursor),
-    stdcall("OleCreatePropertyFrameIndirect", 249, 1, create_property_frame_indirect),
-    stdcall("OleCreatePropertyFrame", 250, 11, create_property_frame),
+    stdcall(
+        "OleCreatePropertyFrameIndirect",
+        249,
+        1,
+        property_frame_indirect,
+    ),
+    stdcall("OleCreatePropertyFrame", 250, 11, property_frame),
     stdcall("OleLoadPicture", 251, 5, load_picture),
     stdcall("OleCreatePictureIndirect", 252, 4, create_picture_indirect),
     stdcall("OleCreateFontIndirect", 253, 3, create_font_indirect),
@@ -71,8 +76,8 @@ static APIS: &[Api] = &[
 
 not_written! {
     icon_to_cursor: "OleIconToCursor",
-    create_property_frame_indirect: "OleCreatePropertyFrameIndirect",
-    create_property_frame: "OleCreatePropertyFrame",
+    property_frame_indirect: "OleCreatePropertyFrameIndirect",
+    property_frame: "OleCreatePropertyFrame",
     load_picture: "OleLoadPicture",
     create_picture_indirect: "OleCreatePictureIndirect",
     create_font_indirect: "OleCreateFontIndirect",

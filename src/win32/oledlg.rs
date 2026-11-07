@@ -56,7 +56,7 @@ macro_rules! not_written {
 /// `stubs`).
 static APIS: &[Api] = &[
     stdcall("OleUIAddVerbMenuA", 1, 9, add_verb_menu_a),
-    stdcall("OleUICanConvertOrActivateAs", 2, 3, can_convert_or_activate_as),
+    stdcall("OleUICanConvertOrActivateAs", 2, 3, can_convert),
     stdcall("OleUIInsertObjectA", 3, 1, insert_object_a),
     stdcall("OleUIPasteSpecialA", 4, 1, paste_special_a),
     stdcall("OleUIEditLinksA", 5, 1, edit_links_a),
@@ -94,7 +94,7 @@ static APIS: &[Api] = &[
 
 not_written! {
     add_verb_menu_a: "OleUIAddVerbMenuA",
-    can_convert_or_activate_as: "OleUICanConvertOrActivateAs",
+    can_convert: "OleUICanConvertOrActivateAs",
     insert_object_a: "OleUIInsertObjectA",
     paste_special_a: "OleUIPasteSpecialA",
     edit_links_a: "OleUIEditLinksA",
