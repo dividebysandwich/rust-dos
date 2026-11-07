@@ -683,6 +683,11 @@ static APIS: &[Api] = &[
     // with the process functions it uses and exits with -1 where
     // GetProcAddress finds it missing.
     stdcall("GetStartupInfoW", 442, 1, not_implemented),
+    // Another of Windows 98 SE's stubs: it fails with
+    // ERROR_CALL_NOT_IMPLEMENTED and returns FALSE, and the SYSTEMTIME
+    // it was to fill stays as it was. Myth II 1.8.3 imports it and
+    // calls it for the date of each saved game it lists.
+    stdcall("SystemTimeToTzSpecificLocalTime", 764, 3, not_implemented),
     stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
     stdcall("FindNextChangeNotification", 288, 1, change::find_next),
     stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
