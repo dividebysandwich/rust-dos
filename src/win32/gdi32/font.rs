@@ -875,16 +875,16 @@ pub fn metrics(cpu: &mut Cpu, hdc: u32) -> Option<Metrics> {
     })
 }
 
-/// The bytes of TEXTMETRICA's fields, without the 3 bytes of padding
-/// that round its size up to 56.
-const TEXTMETRICA_FIELDS: usize = 53;
+/// sizeof(TEXTMETRICA): its fields end at tmCharSet, 53 bytes in, and 3
+/// bytes of padding round it up to 56.
+const TEXTMETRICA_SIZE: usize = 56;
 
-/// TEXTMETRICA's bytes for the font, padding included, as NEWTEXTMETRICA
-/// starts.
+/// The bytes of TEXTMETRICA's fields for the font, the 53 up to
+/// tmCharSet, without the padding after them.
 fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
     let lw = |w: i32| to_logical_width(dc, w);
     let lh = |h: i32| to_logical_height(dc, h);
-    let mut b = Vec::with_capacity(56);
+    let mut b = Vec::with_capacity(TEXTMETRICA_SIZE);
     for v in [
         lh(f.height),
         lh(f.ascent),
@@ -914,7 +914,6 @@ fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
         pitch,
         f.charset,
     ]);
-    b.resize(56, 0);
     b
 }
 
@@ -997,13 +996,12 @@ pub fn get_text_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some((dc, f)) = font_of(cpu, args[0]) else {
         return Some(FALSE);
     };
+    // Windows writes TEXTMETRICA's fields and leaves the structure's
+    // padding as it was. A program whose structures are packed keeps a
+    // field there: Submarine Titans keeps its font's DC right after
+    // tmCharSet, and lost it when the padding was written too.
     let tm = text_metric(&dc, &f);
-    // Windows writes TEXTMETRICA's fields, the 53 bytes up to tmCharSet,
-    // and leaves the structure's padding as it was. A program whose
-    // structures are packed keeps a field there: Submarine Titans keeps
-    // its font's DC right after tmCharSet, and lost it when the padding
-    // was written too.
-    cpu.bus.guest_write_bytes(args[1], &tm[..TEXTMETRICA_FIELDS]);
+    cpu.bus.guest_write_bytes(args[1], &tm);
     Some(TRUE)
 }
 
@@ -1572,6 +1570,9 @@ pub fn enum_callback(cpu: &mut Cpu, t: &mut Task, at: usize) -> Next {
     elf.extend_from_slice(&script);
     let identity = Dc::new(dc::DISPLAY);
     let mut ntm = text_metric(&identity, &f);
+    // NEWTEXTMETRICA starts with a TEXTMETRICA, padding included, so
+    // ntmFlags is at 56.
+    ntm.resize(TEXTMETRICA_SIZE, 0);
     // ntmFlags (NTM_REGULAR or NTM_BOLD), ntmSizeEM, ntmCellHeight,
     // ntmAvgWidth, then the FONTSIGNATURE.
     let flags: u32 = if face.weight >= 600 { 0x20 } else { 0x40 };
