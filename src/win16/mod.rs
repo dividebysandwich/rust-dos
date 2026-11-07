@@ -57,6 +57,11 @@ pub struct State {
     /// The thread id of the task that holds the Win16 lock, or 0: while
     /// it can run, no other task does.
     pub lock: u32,
+    /// The thread id of the task the last message between two tasks went
+    /// to (a sent message, or a reply), or 0. When the lock is free and
+    /// that task can run, it runs before the other tasks (`hand_turn` in
+    /// task.rs). It is cleared when it runs.
+    pub directed: u32,
     /// The LDT's entries given out, and the global heap's blocks by
     /// their first selector's index.
     pub ldt: Ldt,
@@ -575,6 +580,7 @@ pub fn expects_win3(cpu: &Cpu, pid: u32, instance: u32) -> bool {
 crate::state_fields!(State {
     pid,
     lock,
+    directed,
     ldt,
     arena,
     heap,
