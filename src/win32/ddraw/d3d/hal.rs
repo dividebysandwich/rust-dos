@@ -1514,9 +1514,16 @@ impl Raster<'_> {
                 t.oow = rhw;
             }
         }
+        // Direct3D puts a pixel's centre at its integer coordinates, the
+        // card (with the subpixel adjustment Glide turns on) half a pixel
+        // to the right of and below them: half a pixel more is where
+        // Direct3D samples. Edges at whole pixels cover the same pixels
+        // either way. Without it, the last column of a texture mapped
+        // a texel's centre to a pixel's (Drakan's menu sky, its tiles 256
+        // pixels wide) samples the texture's edge, and wraps to its first.
         Vertex {
-            x: v.x,
-            y: v.y,
+            x: v.x + 0.5,
+            y: v.y + 0.5,
             z: v.z,
             r,
             g,
