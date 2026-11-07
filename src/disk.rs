@@ -346,7 +346,13 @@ enum Storage {
     Host(PathBuf),
     /// A tree held in memory, whose files are either in memory too or on
     /// the CD image.
-    Tree { files: MemFs, image: Option<Rc<CdImage>> },
+    Tree {
+        files: MemFs,
+        image: Option<Rc<CdImage>>,
+        /// The sectors of the CD's file system (`IsoVolume::sectors`): 0
+        /// for a disc without one, or without a disc.
+        sectors: u32,
+    },
     /// The FAT file system of a floppy or hard disk image.
     Fat(Rc<FatVolume>),
     /// A disk mounted by number: its sectors for the BIOS, and no files.
@@ -437,6 +443,20 @@ impl Drive {
         }
     }
 
+    /// The sectors of the file system on the drive's CD image, read from
+    /// its primary volume descriptor when it went in: None without an
+    /// image, 0 for a disc of audio tracks alone.
+    fn image_sectors(&self) -> Option<u32> {
+        match &self.storage {
+            Storage::Tree {
+                image: Some(_),
+                sectors,
+                ..
+            } => Some(*sectors),
+            _ => None,
+        }
+    }
+
     /// The file system of a drive mounted from a disk image.
     fn fat(&self) -> Option<&Rc<FatVolume>> {
         match &self.storage {
@@ -521,7 +541,7 @@ fn empty_created(open: &OpenFile) {
 enum OpenData {
     /// A host file, and its host path when it was opened for writing:
     /// writes drop the searches of its folder (`HostDirCache::touched`).
-    Host(File, Option<PathBuf>),
+    Host(HostFile, Option<PathBuf>),
     /// A file held in memory, and the position, which the handles
     /// duplicated from this one share.
     Memory(Bytes, Rc<Cell<u64>>),
@@ -532,6 +552,106 @@ enum OpenData {
     Fat { volume: Rc<FatVolume>, at: EntryRef, pos: Rc<Cell<u64>>, write: bool },
     /// A character device opened by name (NUL, CON, PRN...).
     Device(CharDevice),
+}
+
+/// An open host file, and its position as the last read, write or seek
+/// left it. Only these calls move the host's file pointer (`set_len`
+/// forgets it), so asking for the position, or seeking to where the
+/// pointer is, needs no system call of the host's. A program may do that
+/// hundreds of thousands of times a second: Railroad Tycoon II keeps a
+/// file's position on a stack in its main loop (#685).
+///
+/// A libretro frontend keeps its files as C streams, which need a seek
+/// between a read and a write that follows it, or the other way round.
+/// The seeks this leaves out are the ones that move nothing, so the
+/// frontend's handle (`VfsFile` in the libretro crate) makes that seek
+/// itself.
+struct HostFile {
+    file: File,
+    /// None until it is asked for, and after a call that failed, which
+    /// may have left the pointer anywhere.
+    pos: Cell<Option<u64>>,
+}
+
+impl HostFile {
+    fn new(file: File) -> Self {
+        HostFile {
+            file,
+            pos: Cell::new(None),
+        }
+    }
+
+    /// Where the next read or write goes.
+    fn position(&self) -> std::io::Result<u64> {
+        if let Some(pos) = self.pos.get() {
+            return Ok(pos);
+        }
+        let pos = (&self.file).stream_position()?;
+        self.pos.set(Some(pos));
+        Ok(pos)
+    }
+
+    /// Move the position on by the bytes a read or write `result` says it
+    /// moved, or forget it after one that failed.
+    fn moved(&self, result: std::io::Result<usize>) -> std::io::Result<usize> {
+        let pos = match &result {
+            Ok(n) => self.pos.get().map(|p| p + *n as u64),
+            Err(_) => None,
+        };
+        self.pos.set(pos);
+        result
+    }
+
+    fn len(&self) -> std::io::Result<u64> {
+        self.file.len()
+    }
+
+    /// The host's own file systems leave the pointer where it was, even
+    /// past the new end, but a libretro frontend cuts the file its own
+    /// way: the position is asked of the host again after it. Programs
+    /// seldom cut a file, so that costs nothing that matters.
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.pos.set(None);
+        self.file.set_len(len)
+    }
+
+    fn modified(&self) -> Option<std::time::SystemTime> {
+        self.file.modified()
+    }
+}
+
+impl Read for HostFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.moved((&self.file).read(buf))
+    }
+}
+
+impl Write for HostFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.moved((&self.file).write(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&self.file).flush()
+    }
+}
+
+impl Seek for HostFile {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let here = self.pos.get();
+        match to {
+            SeekFrom::Start(to) if here == Some(to) => return Ok(to),
+            SeekFrom::Current(0) => return self.position(),
+            _ => {}
+        }
+        let result = (&self.file).seek(to);
+        self.pos.set(result.as_ref().ok().copied());
+        result
+    }
+
+    fn stream_position(&mut self) -> std::io::Result<u64> {
+        self.position()
+    }
 }
 
 /// Where the contents of a file are.
@@ -783,7 +903,11 @@ impl DiskController {
     fn memory_drive(files: MemFs, label: &str) -> Drive {
         Drive {
             kind: DriveKind::Virtual,
-            storage: Storage::Tree { files, image: None },
+            storage: Storage::Tree {
+                files,
+                image: None,
+                sectors: 0,
+            },
             current_dir: String::new(),
             label: normalize_label(label),
             read_only: true,
