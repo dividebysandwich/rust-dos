@@ -261,6 +261,7 @@ const GL_RENDERER: u32 = 0x1F01;
 const GL_EXTENSIONS: u32 = 0x1F03;
 const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 const GL_DEPTH_BUFFER_BIT: u32 = 0x100;
+const GL_POINTS: u32 = 0;
 const GL_TRIANGLES: u32 = 4;
 const GL_TRIANGLE_FAN: u32 = 6;
 const GL_FLAT: u32 = 0x1D00;
@@ -733,6 +734,33 @@ fn flat_shading_takes_the_color_of_the_vertex_opengl_gives() {
     assert_eq!(peek(&cpu, data + RESULTS + 4 * 27), 0, "glGetError");
     assert_eq!(pixel(&cpu, data, 4, 4), [0, 0, 255]);
     assert_eq!(pixel(&cpu, data, 60, 60), [255, 255, 255]);
+}
+
+#[test]
+fn a_point_on_a_pixels_centre_lights_that_pixel() {
+    // OpenGL puts a pixel's centre half a pixel right of and above its
+    // window coordinates, where the card has it too: a point at window
+    // (10.5, 10.5) is pixel (10, 10). Moved the half pixel Direct3D's
+    // vertices move by, it would light the pixel right of and below it.
+    let (exe, data) = program(&data(), |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let black = [Arg::F(0.0), Arg::F(0.0), Arg::F(0.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &black)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        c.api(a, l, BEGIN, &[Arg::I(GL_POINTS)])?;
+        c.api(a, l, COLOR3F, &[Arg::F(1.0), Arg::F(0.0), Arg::F(0.0)])?;
+        // 10.5 of the 64 pixels: -1 + 10.5 / 32.
+        let at = Arg::F(-0.671875);
+        c.api(a, l, VERTEX2F, &[at, at])?;
+        c.api(a, l, END, &[])?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("point_centre", true, exe);
+    run_until_done(&mut cpu, data);
+    assert_eq!(pixel(&cpu, data, 10, 10), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 11, 9), [0, 0, 0]);
 }
 
 #[test]

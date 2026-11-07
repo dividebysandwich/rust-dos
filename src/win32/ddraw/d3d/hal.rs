@@ -186,14 +186,16 @@ const HEAP_MIN: u32 = 256 << 10;
 /// How a batch of primitives is drawn: for each of the card's texture
 /// units, the factors that turn a texture coordinate into Glide's (its
 /// texture's size in Glide's 256 units) and the stage whose coordinates
-/// it takes; whether Z or W carries the vertex fog; and how the
-/// specular color is added.
+/// it takes; whether Z or W carries the vertex fog; how the specular
+/// color is added; and how far the vertices move to put a pixel's centre
+/// where the card has it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Card {
     tmus: [Option<(usize, [f32; 2])>; 2],
     fog_z: bool,
     fog_w: bool,
     specular: Specular,
+    centre: f32,
 }
 
 /// How the specular color is added (D3DRENDERSTATE_SPECULARENABLE).
@@ -426,9 +428,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     } else {
         None
     };
+    // The card, with the subpixel adjustment Glide turns on, evaluates a
+    // pixel at its integer coordinates plus half a pixel. OpenGL's
+    // window coordinates put the centre there too; Direct3D's put it on
+    // them, so its vertices move half a pixel right and down.
+    let centre = if d.gl_pixel_centres { 0.0 } else { 0.5 };
     let mut card = Card {
         fog_z,
         fog_w,
+        centre,
         ..Card::default()
     };
     let mut keyed = false;
@@ -1463,9 +1471,11 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 /// left, top, right and bottom. The card's vertex registers hold 12.4
 /// fixed point, -2048 to 2047.9375, and a coordinate past either end
 /// wraps round to the other, so a triangle clipped at 2048 would have
-/// its vertices there drawn at -2048. A pixel in from those ends
-/// leaves room for the half pixel lines are drawn out by.
-pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2047.0, 2047.0];
+/// its vertices there drawn at -2048. A pixel in from the low end
+/// leaves room for the half pixel lines are drawn out by, two from the
+/// high end for that and the half pixel Direct3D's vertices move by
+/// (`Card::centre`).
+pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2046.0, 2046.0];
 
 /// The card as the pipeline's rasterizer.
 pub struct Raster<'a> {
@@ -1514,9 +1524,14 @@ impl Raster<'_> {
                 t.oow = rhw;
             }
         }
+        // Moved to where the card has a pixel's centre (`Card::centre`).
+        // Edges at whole pixels cover the same pixels either way. Left
+        // where Direct3D has them, the last column of a texture mapped a
+        // texel's centre to a pixel's (Drakan's menu sky, its tiles 256
+        // pixels wide) samples the texture's edge, and wraps to its first.
         Vertex {
-            x: v.x,
-            y: v.y,
+            x: v.x + self.card.centre,
+            y: v.y + self.card.centre,
             z: v.z,
             r,
             g,

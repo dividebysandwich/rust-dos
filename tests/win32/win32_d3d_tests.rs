@@ -1875,6 +1875,45 @@ fn a_textured_quad_shows_its_texels() {
 }
 
 #[test]
+fn a_texel_centred_on_each_pixel_is_the_one_the_pixel_samples() {
+    // Direct3D puts a pixel's centre on its integer coordinates. The 8x8
+    // texture over 8x8 pixels, u and v from 0.5/8 to 8.5/8, puts each
+    // texel's centre on a pixel's, as Drakan's menu sky does: the last
+    // column and row sample the last texels. Sampled half a pixel
+    // further on, where the card has a pixel's centre, they would sample
+    // 1, which wraps to the first texels.
+    let texels = std::array::from_fn(|i| match (i % 8, i / 8) {
+        (0, _) | (_, 0) => 0xF800,
+        _ => 0x07E0,
+    });
+    let at = |x: f32, y: f32| Tl {
+        u: (x + 0.5) / 8.0,
+        v: (y + 0.5) / 8.0,
+        ..tl(x, y, 0.5, WHITE)
+    };
+    let (a, b) = (at(0.0, 0.0), at(8.0, 0.0));
+    let (c, d) = (at(0.0, 8.0), at(8.0, 8.0));
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: Some(texels),
+        texture_alpha: false,
+        steps: vec![Step::Draw(vec![a, b, c, b, d, c])],
+    };
+    let p = draw_scene("texel_centres", &scene);
+    assert_rgb(&p, 0, 4, [255, 0, 0], 8);
+    assert_rgb(&p, 4, 0, [255, 0, 0], 8);
+    for (x, y) in [(1, 1), (7, 4), (4, 7), (7, 7)] {
+        assert_rgb(&p, x, y, [0, 255, 0], 8);
+    }
+    // Nothing past the quad.
+    assert_rgb(&p, 8, 4, [0, 0, 0], 8);
+    assert_rgb(&p, 4, 8, [0, 0, 0], 8);
+}
+
+#[test]
 fn blending_by_the_current_alpha_on_stage_0_blends_by_the_diffuse_alpha() {
     // White and blue halves, on a red quad with a diffuse alpha of 0x40:
     // a quarter of the texture and three quarters of the red, with
