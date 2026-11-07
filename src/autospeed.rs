@@ -2629,7 +2629,13 @@ mod tests {
 
     #[test]
     fn a_real_mode_program_loads_on_its_drives_only() {
-        let doing = |output, io| move |_| Measurement { output, io, ..STILL };
+        let doing = |output, io| {
+            move |_| Measurement {
+                output,
+                io,
+                ..STILL
+            }
+        };
         // Drawing piecemeal, as the games of the 1980s do, it keeps the
         // real-mode speed; moving data on its drives, as Wolf does for 25
         // seconds at 3000, it loads.
