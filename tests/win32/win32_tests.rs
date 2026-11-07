@@ -7910,9 +7910,11 @@ fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
 fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
     // SetWindowPos with SWP_NOSENDCHANGING sends no WM_WINDOWPOSCHANGING
     // but still sends WM_WINDOWPOSCHANGED, whose WINDOWPOS has the place
-    // and size the window has now, also where SWP_NOMOVE kept the place
-    // the call gave from being used, as Wine's win.c checks on Windows.
-    // (Myth II's window learns it is active only from this message.)
+    // and size the call gave the window, also where SWP_NOMOVE kept the
+    // place the call passed from being used, as Wine's win.c checks on
+    // Windows. A call without the flag sends both, and its
+    // WM_WINDOWPOSCHANGED has the window's place too. (Myth II's window
+    // learns it is active only from this message.)
     const WM_WINDOWPOSCHANGING: i32 = 0x0046;
     const WM_WINDOWPOSCHANGED: i32 = 0x0047;
     const SWP_NOMOVE: i32 = 0x0002;
@@ -7976,25 +7978,48 @@ fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
         push_args(a, &[0, 10, 20, 60, 70, flags])?;
         a.push(esi)?;
         a.call(f("SetWindowPos"))?;
-        for (at, value, bit) in [(0xA0, 0, 0), (0xA4, 1, 1), (0xA8, 10, 2), (0xB0, 60, 3)] {
-            a.cmp(dword_ptr(l.at(at)), value)?;
-            bit_if(a, eq, bit)?;
-        }
+        let moved = [(0xA0, 0), (0xA4, 1), (0xA8, 10), (0xAC, 20), (0xB0, 60)];
+        all_equal(a, l, &moved, 0)?;
         // Resized only: the place in the WINDOWPOS is the window's.
         push_args(a, &[0, 999, 999, 80, 90, flags | SWP_NOMOVE])?;
         a.push(esi)?;
         a.call(f("SetWindowPos"))?;
-        let checks = [(0xA4, 2, 4), (0xA8, 10, 5), (0xAC, 20, 6), (0xB0, 80, 7)];
-        for (at, value, bit) in checks {
-            a.cmp(dword_ptr(l.at(at)), value)?;
-            bit_if(a, eq, bit)?;
-        }
+        all_equal(a, l, &[(0xA0, 0), (0xA4, 2)], 1)?;
+        all_equal(a, l, &[(0xA8, 10), (0xAC, 20)], 2)?;
+        all_equal(a, l, &[(0xB0, 80)], 3)?;
+        // The same without SWP_NOSENDCHANGING: both messages, and the
+        // place in WM_WINDOWPOSCHANGED's WINDOWPOS is the window's.
+        let flags = flags & !SWP_NOSENDCHANGING;
+        push_args(a, &[0, 999, 999, 100, 110, flags | SWP_NOMOVE])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 1), (0xA4, 3)], 4)?;
+        all_equal(a, l, &[(0xA8, 10), (0xAC, 20)], 5)?;
+        all_equal(a, l, &[(0xB0, 100)], 6)?;
         a.push(ebx)?;
         a.call(f("ExitProcess"))?;
         a.int3()
     });
     let (code, _) = run("swp_nosendchanging", program);
-    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
+}
+
+/// Set bit `bit` of EBX if every dword at the data offsets in `checks`
+/// holds its value.
+fn all_equal(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    checks: &[(u32, i32)],
+    bit: u32,
+) -> Result<(), IcedError> {
+    a.xor(edx, edx)?;
+    for &(at, value) in checks {
+        a.mov(eax, dword_ptr(l.at(at)))?;
+        a.xor(eax, value)?;
+        a.or(edx, eax)?;
+    }
+    a.test(edx, edx)?;
+    bit_if(a, eq, bit)
 }
 
 #[test]
