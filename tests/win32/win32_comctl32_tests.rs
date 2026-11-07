@@ -1474,6 +1474,28 @@ fn ms_sans_serif_8_and_system_have_windows_98s_metrics() {
     assert_eq!(r[9], 0x0010_0008, "the dialog base units");
 }
 
+/// GetTextMetricsA writes TEXTMETRICA's 53 bytes of fields and leaves
+/// the 3 bytes of padding after tmCharSet alone, as a program with packed
+/// structures (Submarine Titans) keeps a field there.
+#[test]
+fn get_text_metrics_leaves_the_padding_alone() {
+    use Arg::*;
+    const TM: u32 = FREE;
+    let calls = [
+        call("CreateCompatibleDC", &[I(0)]),
+        call("GetTextMetricsA", &[Res(0), At(TM)]),
+    ];
+    let mut d = data();
+    put(&mut d, TM, &[0xAB; 56]);
+    let (cpu, at) = run("font_metrics_padding", &d, &calls);
+    let r = results(&cpu, at, calls.len());
+    assert_eq!(r[1], 1);
+    assert_eq!(text_metric(&cpu, at + TM)[0], 16, "the System font's height");
+    let byte = |o: u32| peek(&cpu, at + TM + o) as u8;
+    assert_eq!(byte(52), 0, "tmCharSet: ANSI_CHARSET");
+    assert_eq!([byte(53), byte(54), byte(55)], [0xAB; 3]);
+}
+
 #[test]
 fn a_dialog_in_ms_sans_serif_8_is_6_by_13_units() {
     use Arg::*;

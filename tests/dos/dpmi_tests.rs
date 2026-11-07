@@ -1352,6 +1352,98 @@ fn sse_program() -> Vec<u8> {
     com(&[(0x100, main)])
 }
 
+/// The mouse event handler of `mouse_program`, real-mode code: it counts
+/// its calls and keeps the event mask and the position it was given.
+const MOUSE_HANDLER: u16 = 0x1200;
+
+/// A program that installs a real-mode mouse event handler, as
+/// ShadowCaster's does, enters protected mode and waits there with
+/// interrupts on for the handler to run, without calling the driver. Its
+/// timer handler doesn't chain, so nothing else takes the machine down to
+/// real mode meanwhile.
+/// Exit code 2Ah once it ran and EBX, ESI and EBP are as they were, EDh if
+/// a register changed, EEh if it never ran.
+fn mouse_program() -> Vec<u8> {
+    let main = asm16(0x100, |a| {
+        let mut fail = a.create_label();
+        let mut wait = a.create_label();
+        let mut called = a.create_label();
+        let mut changed = a.create_label();
+        a.xor(ax, ax)?;
+        a.int(0x33)?;
+        a.push(cs)?;
+        a.pop(es)?;
+        a.mov(ax, 0x000C)?;
+        a.mov(cx, 0x0001)?;
+        a.mov(dx, MOUSE_HANDLER as u32)?;
+        a.int(0x33)?;
+        enter(a, false, fail)?;
+        set_pm_tick_handler(a, fail)?;
+        step(a, 4)?;
+        a.mov(ebx, 0x1234_5678)?;
+        a.mov(esi, 0x9ABC_DEF0u32)?;
+        a.mov(ebp, 0x0F1E_2D3C)?;
+        a.mov(edi, 5_000_000)?;
+        a.sti()?;
+        a.set_label(&mut wait)?;
+        a.cmp(word_ptr(R), 0)?;
+        a.jne(called)?;
+        a.dec(edi)?;
+        a.jnz(wait)?;
+        exit(a, 0xEE)?;
+        a.set_label(&mut called)?;
+        a.cmp(ebx, 0x1234_5678)?;
+        a.jne(changed)?;
+        a.cmp(esi, 0x9ABC_DEF0u32 as i32)?;
+        a.jne(changed)?;
+        a.cmp(ebp, 0x0F1E_2D3C)?;
+        a.jne(changed)?;
+        exit(a, 0x2A)?;
+        a.set_label(&mut changed)?;
+        exit(a, 0xED)?;
+        a.set_label(&mut fail)?;
+        exit(a, 0xEF)
+    });
+    let handler = asm16(MOUSE_HANDLER, |a| {
+        a.inc(word_ptr(R).cs())?;
+        a.mov(word_ptr(R + 2).cs(), ax)?;
+        a.mov(word_ptr(R + 4).cs(), cx)?;
+        a.xor(bx, bx)?;
+        a.xor(bp, bp)?;
+        a.retf()
+    });
+    let tick = asm16(TICK_HANDLER, |a| {
+        a.push(ax)?;
+        a.mov(al, 0x20)?;
+        a.out(0x20, al)?;
+        a.pop(ax)?;
+        a.iret()
+    });
+    com(&[(0x100, main), (MOUSE_HANDLER, handler), (TICK_HANDLER, tick)])
+}
+
+#[test]
+fn a_real_mode_mouse_handler_runs_while_the_client_is_in_protected_mode() {
+    let (mut cpu, psp) = machine("mouse", &[("T.COM", mouse_program())], "T.COM");
+    let mut batches = 0;
+    while word(&cpu, psp, STEP) != 4 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(&mut cpu, &mut NoHook, false);
+        batches += 1;
+        assert!(batches < 200, "the program didn't reach protected mode");
+    }
+    assert!(cpu.pm());
+    let x = cpu.bus.mouse.x;
+    cpu.bus.mouse.set_position(x + 16, cpu.bus.mouse.y);
+    cpu.bus.refresh_irq();
+    assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
+    assert_eq!(cpu.errorlevel, 0x2A, "handler calls: {}", word(&cpu, psp, R));
+    assert_eq!(word(&cpu, psp, R), 1);
+    // The motion event, at the new position.
+    assert_eq!(word(&cpu, psp, R + 2), 0x0001);
+    assert_eq!(word(&cpu, psp, R + 4) as i32, x + 16);
+}
+
 #[test]
 fn a_client_runs_sse_on_a_pentium_iii() {
     let (mut cpu, psp) = machine("sse", &[("T.COM", sse_program())], "T.COM");
