@@ -32,8 +32,8 @@
 //! lighting and the accumulation buffer, do nothing and say so in the
 //! log. The extensions are GL_ARB_multitexture (on a Voodoo3, with its
 //! two texture units; a Banshee has one and not the extension),
-//! GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
-//! WGL_EXT_swap_control.
+//! GL_EXT_bgra, GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add
+//! and WGL_EXT_swap_control.
 //!
 //! On a machine with a Voodoo2 beside the display adapter, the DLL is
 //! 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL), which games of the time
