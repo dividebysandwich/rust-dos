@@ -2266,14 +2266,20 @@ impl Cpu {
             Placement::Child(segment) | Placement::High(segment) => segment,
         };
         let start_offset = 0x100; // COM files always start at 100h
-        // A program loaded high has its block, up to 64 KB.
+        // The program's segment is its block, up to 64 KB: EXEC may have
+        // given a COM child a smaller one with another block's MCB right
+        // after it, which the clearing below and the stack mustn't reach.
         let top = self.memory_top(placement, load_segment);
-        let segment_bytes = match placement {
-            Placement::High(_) => ((top - load_segment) as usize * 16).min(0x10000),
-            _ => 0x10000,
-        };
+        let segment_bytes = ((top - load_segment) as usize * 16).min(0x10000);
+        if top - load_segment < program_paras(bytes) {
+            self.bus.log_string(&format!(
+                "[DOS] The COM file doesn't fit in {:04X} paragraphs",
+                top - load_segment
+            ));
+            return false;
+        }
 
-        // Clear 64KB of RAM segment for safety (simulating clean load)
+        // Clear the program's segment (simulating clean load)
         let phys_start_seg = self.get_physical_addr(load_segment, 0) as u32;
         self.bus.guest_fill(phys_start_seg, segment_bytes, 0);
 
@@ -2298,7 +2304,7 @@ impl Cpu {
         self.set_es(load_segment);
         self.set_ss(load_segment); // Stack is in the same segment
         self.set_ip(0x100); // Entry Point
-        self.set_sp((segment_bytes - 2) as u16); // End of segment (64KB - 2)
+        self.set_sp((segment_bytes - 2) as u16); // End of the segment
 
         // Setup PSP (Program Segment Prefix) at CS:0000
         let psp_phys = self.get_physical_addr(load_segment, 0) as u32;
