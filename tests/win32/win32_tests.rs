@@ -3409,23 +3409,27 @@ fn get_thread_context_of_a_new_thread_gives_its_starting_fpu() {
     assert_eq!(code, 7, "the checks that failed: {:03b} {text}", !code & 7);
 }
 
-/// GetStartupInfoW, which SafeDisc 1's loader looks up with
-/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
-/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
-/// structure as it was.
-#[test]
-fn get_startup_info_w_is_a_stub_that_fails() {
+/// Check that KERNEL32's `name` is one of Windows 98 SE's stubs that
+/// fail: GetProcAddress finds it, and the call with `args` (pushed last
+/// first: `Some(offset)` the address of the data at `offset`, `None`
+/// NULL) returns 0 with the stack balanced, GetLastError gives
+/// ERROR_CALL_NOT_IMPLEMENTED (120), and the `len` bytes the call was to
+/// fill at offset `out` of the data, a multiple of 4, are as they were.
+fn check_failing_stub(test: &str, name: &str, args: &[Option<u32>], out: u32, len: u32) {
+    const NAME: u32 = 13;
+    assert!(NAME as usize + name.len() < 0x40 && out >= 0x40 && len.is_multiple_of(4));
     let names: &[&str] = &["GetModuleHandleA", "GetProcAddress", "GetLastError"];
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
-    let mut data = b"KERNEL32.DLL\0GetStartupInfoW\0".to_vec();
-    data.resize(0x40, 0);
-    data.resize(0x84, 0x5A);
+    let mut data = b"KERNEL32.DLL\0".to_vec();
+    data.extend_from_slice(name.as_bytes());
+    data.resize(out as usize, 0);
+    data.resize((out + len) as usize, 0x5A);
     let main = |a: &mut CodeAssembler, l: &Layout| {
         let mut end = a.create_label();
         a.xor(ebx, ebx)?;
         a.push(l.at(0) as i32)?;
         a.call(l.import(0))?;
-        a.push(l.at(13) as i32)?;
+        a.push(l.at(NAME) as i32)?;
         a.push(eax)?;
         a.call(l.import(1))?;
         a.mov(esi, eax)?;
@@ -3434,7 +3438,9 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.test(esi, esi)?;
         a.je(end)?;
         a.mov(edi, esp)?;
-        a.push(l.at(0x40) as i32)?;
+        for arg in args.iter().rev() {
+            a.push(arg.map_or(0, |offset| l.at(offset) as i32))?;
+        }
         a.call(esi)?;
         a.test(eax, eax)?;
         check(a, false, 1)?;
@@ -3443,10 +3449,9 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.call(l.import(2))?;
         a.cmp(eax, 120)?;
         check(a, false, 3)?;
-        // All 68 bytes of the structure are as they were.
         a.cld()?;
-        a.mov(edi, l.at(0x40) as u32)?;
-        a.mov(ecx, 17)?;
+        a.mov(edi, l.at(out) as u32)?;
+        a.mov(ecx, len / 4)?;
         a.mov(eax, 0x5A5A_5A5A)?;
         a.repe().scasd()?;
         check(a, false, 4)?;
@@ -3455,8 +3460,29 @@ fn get_startup_info_w_is_a_stub_that_fails() {
         a.ret()
     };
     let exe = module_image(BASE, None, imports, &data, &[("", &main)], &[]);
-    let (code, _) = run("startup_info_w", exe);
+    let (code, _) = run(test, exe);
     assert_eq!(code, 0x1F, "the checks that failed: {:05b}", !code & 0x1F);
+}
+
+/// GetStartupInfoW, which SafeDisc 1's loader looks up with
+/// GetProcAddress, is there as Windows 98 SE's stub: it takes its one
+/// argument, fails with ERROR_CALL_NOT_IMPLEMENTED and leaves the
+/// 68-byte structure as it was.
+#[test]
+fn get_startup_info_w_is_a_stub_that_fails() {
+    check_failing_stub("startup_info_w", "GetStartupInfoW", &[Some(0x40)], 0x40, 68);
+}
+
+/// SystemTimeToTzSpecificLocalTime, which Myth II 1.8.3 imports, is
+/// there as Windows 98 SE's stub: it takes its three arguments, fails
+/// with ERROR_CALL_NOT_IMPLEMENTED and leaves the SYSTEMTIME it was to
+/// fill as it was.
+#[test]
+fn system_time_to_tz_specific_local_time_is_a_stub_that_fails() {
+    let name = "SystemTimeToTzSpecificLocalTime";
+    // No time zone, the SYSTEMTIME given at 0x40, the one to fill at 0x50.
+    let args = &[None, Some(0x40), Some(0x50)];
+    check_failing_stub("tz_specific_local_time", name, args, 0x50, 16);
 }
 
 /// INT 68h, WDEB386's interface, as Windows 98 has it without the
