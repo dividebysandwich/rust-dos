@@ -139,6 +139,13 @@ impl Format {
         &descriptor[40 + self.shift()..72 + self.shift()]
     }
 
+    /// The volume space size in a primary descriptor: the sectors of the
+    /// file system, from its little-endian copy.
+    fn volume_sectors(self, descriptor: &[u8]) -> u32 {
+        let at = 80 + self.shift();
+        u32::from_le_bytes(descriptor[at..at + 4].try_into().unwrap())
+    }
+
     /// The copyright, abstract and bibliographic file identifiers in a
     /// primary descriptor: 37 bytes each in ISO 9660, 32 in High Sierra,
     /// which has no bibliographic file.
@@ -545,6 +552,15 @@ fn entries(
 fn root(record: &[u8]) -> Extent {
     let (time, date) = dos_time(&record[18..24]);
     Extent { lba: le32(record, 2) + record[1] as u32, size: le32(record, 10), time, date, hidden: false }
+}
+
+/// The size of the file system on a disc's data track, in 2048-byte
+/// sectors, as its primary volume descriptor gives it, or None for a disc
+/// without one.
+pub fn volume_sectors(image: &CdImage) -> Option<u32> {
+    let descriptors = Descriptors::read(image).ok()?;
+    let primary = descriptors.primary().ok()?;
+    Some(descriptors.format.volume_sectors(&primary[..]))
 }
 
 /// Read the file system of a disc's data track.
