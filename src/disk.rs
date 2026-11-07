@@ -614,12 +614,20 @@ impl CharDevice {
     }
 }
 
-/// The character device a file name names. DOS finds devices by name in
-/// any directory, with any extension: "C:\GAME\NUL.TXT" is NUL.
+/// The name of the device `filename` would open, in upper case: the last
+/// part of the path, without its extension. DOS finds devices by name in
+/// any directory, with any extension: "C:\GAME\NUL.TXT" is NUL. A colon
+/// may end the name, as in `DIR >NUL:` or `COPY FILE.TXT PRN:`.
+pub fn device_name(filename: &str) -> Option<String> {
+    let name = filename.trim_end();
+    let name = name.strip_suffix(':').unwrap_or(name);
+    let last = name.rsplit(['\\', '/', ':']).next()?;
+    Some(last.split('.').next()?.trim().to_ascii_uppercase())
+}
+
+/// The character device a file name names (see `device_name`).
 pub fn char_device(filename: &str) -> Option<CharDevice> {
-    let last = filename.rsplit(['\\', '/', ':']).next()?;
-    let stem = last.split('.').next()?.trim().to_ascii_uppercase();
-    match stem.as_str() {
+    match device_name(filename)?.as_str() {
         "CON" => Some(CharDevice::Con),
         "COM1" => Some(CharDevice::Com1),
         "COM2" => Some(CharDevice::Com2),
