@@ -305,14 +305,42 @@ const WINDOW_FULLSCREEN: u32 = 1;
 /// screen (`WINDOW_FULLSCREEN`, the window, the screen's width and
 /// height), as DirectDraw's MakeFullscreen does on Windows 98 when the
 /// mode changes.
-pub fn activate_step(_: &mut Cpu, t: &mut Task, _: u32) -> Next {
+///
+/// After the resize, Windows 98 SE's MakeFullscreen goes on only while
+/// the window is the foreground one: it shows the window if it is hidden
+/// (ShowWindow with SW_SHOW), makes it topmost (SetWindowPos with
+/// HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE and SWP_NOACTIVATE), and restores
+/// it if it is maximized (SW_RESTORE). WarGames never shows its window
+/// itself: hidden, the window isn't under the cursor, so the mouse's
+/// clicks went to the desktop and the game's menus didn't answer them.
+pub fn activate_step(cpu: &mut Cpu, t: &mut Task, _: u32) -> Next {
+    use user32::window::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_MAXIMIZE, WS_VISIBLE,
+    };
+    const SW_SHOW: u32 = 5;
+    const SW_RESTORE: u32 = 9;
     let hwnd = t.var(1);
+    let user = &cpu.bus.win32.user;
+    let style = user.window(hwnd).map_or(0, |w| w.style);
+    let foreground = user.foreground_window() == hwnd;
     match (t.step, t.var(0)) {
         (0, WINDOW_ACTIVATE) => Next::call(user32::address_of("SetActiveWindow"), &[hwnd], 1),
+        (_, WINDOW_ACTIVATE) => Next::Done(DD_OK),
         (0, _) => {
-            let flags = user32::window::SWP_NOZORDER | user32::window::SWP_NOACTIVATE;
+            let flags = SWP_NOZORDER | SWP_NOACTIVATE;
             let args = [hwnd, 0, 0, 0, t.var(2), t.var(3), flags];
             Next::call(user32::address_of("SetWindowPos"), &args, 1)
+        }
+        (1, _) if foreground && style & WS_VISIBLE == 0 => {
+            Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_SHOW], 2)
+        }
+        (1 | 2, _) if foreground => {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            let args = [hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags];
+            Next::call(user32::address_of("SetWindowPos"), &args, 3)
+        }
+        (3, _) if style & WS_MAXIMIZE != 0 => {
+            Next::call(user32::address_of("ShowWindow"), &[hwnd, SW_RESTORE], 9)
         }
         _ => Next::Done(DD_OK),
     }
@@ -449,9 +477,11 @@ pub fn set_display_mode(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The display's mode changed for the object `id`: its window of
-/// exclusive mode is made to cover the screen, unless it was set with
-/// DDSCL_NOWINDOWCHANGES. DD_OK.
+/// exclusive mode is made to cover the screen, and while it is the
+/// foreground window shown, topmost and not maximized (`activate_step`),
+/// unless it was set with DDSCL_NOWINDOWCHANGES. DD_OK.
 fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
+    use user32::window::{WS_EX_TOPMOST, WS_MAXIMIZE, WS_VISIBLE};
     let Some(d) = ddraw(cpu, id) else {
         return Some(DD_OK);
     };
@@ -460,8 +490,12 @@ fn cover_screen(cpu: &mut Cpu, id: u32) -> Option<u32> {
     let user = &cpu.bus.win32.user;
     let top = user.top_level(hwnd);
     let screen = crate::win32::gdi32::Rect::new(0, 0, w, h);
-    let fits = user.window(top).is_none_or(|win| win.rect == screen);
-    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || fits {
+    let done = user.window(top).is_none_or(|win| {
+        let placed = win.style & (WS_VISIBLE | WS_MAXIMIZE) == WS_VISIBLE
+            && win.ex_style & WS_EX_TOPMOST != 0;
+        win.rect == screen && (placed || user.foreground_window() != top)
+    });
+    if level & DDSCL_EXCLUSIVE == 0 || level & DDSCL_NOWINDOWCHANGES != 0 || done {
         return Some(DD_OK);
     }
     let vars = vec![WINDOW_FULLSCREEN, top, w as u32, h as u32];

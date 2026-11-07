@@ -303,6 +303,7 @@ const DDPCAPS_8BIT: u32 = 0x4;
 const DDPCAPS_ALLOW256: u32 = 0x40;
 const WS_POPUP: u32 = 0x8000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_EX_TOPMOST: u32 = 0x8;
 
 /// A DDSURFACEDESC at `offset` with `flags`, `caps` and the rest given.
 fn desc(data: &mut [u8], offset: u32, flags: u32, caps: u32, w: u32, h: u32, backbuffers: u32) {
@@ -1333,6 +1334,8 @@ const SCREEN_USER32: (&str, &[&str]) = (
         "EnumDisplaySettingsA",
         "GetDesktopWindow",
         "GetWindowRect",
+        "IsWindowVisible",
+        "GetWindowLongA",
     ],
 );
 const S_CREATE_WINDOW: usize = 0;
@@ -1344,8 +1347,10 @@ const S_CHANGE_DISPLAY_SETTINGS: usize = 5;
 const S_ENUM_DISPLAY_SETTINGS: usize = 6;
 const S_GET_DESKTOP_WINDOW: usize = 7;
 const S_GET_WINDOW_RECT: usize = 8;
+const S_IS_WINDOW_VISIBLE: usize = 9;
+const S_GET_WINDOW_LONG: usize = 10;
 /// DirectDrawCreate, after SCREEN_USER32's.
-const S_DIRECT_DRAW_CREATE: usize = 9;
+const S_DIRECT_DRAW_CREATE: usize = 11;
 
 const DD_RESTORE_DISPLAY_MODE: u32 = 19;
 const WM_DISPLAYCHANGE: u32 = 0x7E;
@@ -1373,7 +1378,18 @@ fn screen_window(
     a: &mut CodeAssembler,
     l: &Layout,
     c: &mut Calls,
+    size: (u32, u32),
+) -> Result<(), IcedError> {
+    styled_window(a, l, c, size, WS_POPUP | WS_VISIBLE)
+}
+
+/// A window of `style`, `w` x `h` at the screen's corner.
+fn styled_window(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    c: &mut Calls,
     (w, h): (u32, u32),
+    style: u32,
 ) -> Result<(), IcedError> {
     c.api(
         a,
@@ -1383,7 +1399,7 @@ fn screen_window(
             Arg::I(0),
             Arg::At(CLASS),
             Arg::At(CLASS),
-            Arg::I(WS_POPUP | WS_VISIBLE),
+            Arg::I(style),
             Arg::I(0),
             Arg::I(0),
             Arg::I(w),
@@ -1472,6 +1488,45 @@ fn the_screen_takes_the_size_of_the_mode_directdraw_sets() {
     assert_eq!(point, (639, 479));
     let mouse = &cpu.bus.mouse;
     assert_eq!((mouse.max_x, mouse.max_y), (639, 479));
+}
+
+/// Full screen at 640x480 from a hidden popup window of that size that
+/// the program never shows, as WarGames makes it: whether the window is
+/// visible after SetDisplayMode, and its extended style.
+fn hidden_window_program() -> (Vec<u8>, u32) {
+    program(
+        &[SCREEN_USER32, ("DDRAW.DLL", &["DirectDrawCreate"])],
+        &screen_data(),
+        |a, l| {
+            let mut c = Calls { next: 0 };
+            styled_window(a, l, &mut c, (640, 480), WS_POPUP)?;
+            let create = [Arg::I(0), Arg::At(DD), Arg::I(0)];
+            c.api(a, l, S_DIRECT_DRAW_CREATE, &create)?;
+            let level = Arg::I(DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+            c.com(a, l, DD, DD_SET_COOPERATIVE_LEVEL, &[Arg::Val(HWND), level])?;
+            let mode = [Arg::I(640), Arg::I(480), Arg::I(8)];
+            c.com(a, l, DD, DD_SET_DISPLAY_MODE, &mode)?;
+            c.api(a, l, S_IS_WINDOW_VISIBLE, &[Arg::Val(HWND)])?;
+            let gwl_exstyle = -20i32 as u32;
+            let ex_style = [Arg::Val(HWND), Arg::I(gwl_exstyle)];
+            c.api(a, l, S_GET_WINDOW_LONG, &ex_style)?;
+            finish(a, l)
+        },
+    )
+}
+
+#[test]
+fn the_hidden_window_of_exclusive_mode_is_shown_and_topmost() {
+    let (program, data) = hidden_window_program();
+    let mut cpu = machine("hidden_window", program);
+    run_until_done(&mut cpu, data);
+    let r = results(&mut cpu, data, 6);
+    assert_eq!(r[1..4], [0; 3]);
+    // Windows 98's DirectDraw shows the window of exclusive mode when the
+    // mode is set, and makes it topmost, while it is the foreground
+    // window: the mouse's clicks then reach it.
+    assert_eq!(r[4], 1);
+    assert_eq!(r[5] & WS_EX_TOPMOST, WS_EX_TOPMOST);
 }
 
 /// A DEVMODEA at `offset` with `fields` and the size and depth given.
