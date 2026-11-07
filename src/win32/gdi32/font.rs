@@ -875,7 +875,12 @@ pub fn metrics(cpu: &mut Cpu, hdc: u32) -> Option<Metrics> {
     })
 }
 
-/// TEXTMETRICA's bytes for the font.
+/// The bytes of TEXTMETRICA's fields, without the 3 bytes of padding
+/// that round its size up to 56.
+const TEXTMETRICA_FIELDS: usize = 53;
+
+/// TEXTMETRICA's bytes for the font, padding included, as NEWTEXTMETRICA
+/// starts.
 fn text_metric(dc: &Dc, f: &Realized) -> Vec<u8> {
     let lw = |w: i32| to_logical_width(dc, w);
     let lh = |h: i32| to_logical_height(dc, h);
@@ -993,7 +998,12 @@ pub fn get_text_metrics(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(FALSE);
     };
     let tm = text_metric(&dc, &f);
-    cpu.bus.guest_write_bytes(args[1], &tm);
+    // Windows writes TEXTMETRICA's fields, the 53 bytes up to tmCharSet,
+    // and leaves the structure's padding as it was. A program whose
+    // structures are packed keeps a field there: Submarine Titans keeps
+    // its font's DC right after tmCharSet, and lost it when the padding
+    // was written too.
+    cpu.bus.guest_write_bytes(args[1], &tm[..TEXTMETRICA_FIELDS]);
     Some(TRUE)
 }
 
