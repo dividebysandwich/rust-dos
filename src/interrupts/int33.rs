@@ -239,8 +239,9 @@ pub fn handle(cpu: &mut Cpu) {
     // The mickeys count the motion on the picture, which a reset, a range
     // or another screen of the built-in Windows changes against the
     // virtual screen. A program that reads them, itself or through its
-    // event handler, calls one of these.
-    if matches!(func, 0x0000 | 0x0007 | 0x0008 | 0x000B | 0x000C | 0x0021) {
+    // event handler (set with AX=000Ch or swapped in with AX=0014h),
+    // calls one of these.
+    if matches!(func, 0x0000 | 0x0007 | 0x0008 | 0x000B | 0x000C | 0x0014 | 0x0021) {
         crate::mouse::update_mickey_scale(&mut cpu.bus);
     }
 

@@ -577,3 +577,20 @@ fn mickeys_count_the_same_across_and_down_on_the_picture() {
     call(&mut cpu, 0x000B);
     assert_eq!(cpu.cx(), 20);
 }
+
+/// A state doesn't hold the mickeys' scale, which comes from its picture
+/// and range: a machine that loads a state of mode 101h counts the same
+/// across and down before the program calls the driver again.
+#[test]
+fn a_loaded_state_counts_mickeys_for_its_picture() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    int10(&mut cpu, 0x4F02, 0x0101);
+    call(&mut cpu, 0x0000);
+    let state = rust_dos::savestate::machine::save(&cpu);
+
+    let mut other = Cpu::new(PathBuf::from("."));
+    rust_dos::savestate::machine::load(&mut other, &state).unwrap();
+    other.bus.mouse.move_by(30.0, 30.0);
+    let m = &other.bus.mouse;
+    assert_eq!((m.mickey_x, m.mickey_y), (20, 20));
+}

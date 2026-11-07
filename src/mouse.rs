@@ -426,7 +426,7 @@ impl MouseState {
     }
 
     /// Count the mickeys of a motion of (`dx`, `dy`) virtual pixels at
-    /// `mickey_scale` (see `set_position`).
+    /// `mickey_scale` (see `mickeys_per_unit`).
     fn add_mickeys(&mut self, dx: i32, dy: i32) {
         let steps = |d: i32, scale: f64| (d as f64 * scale * MICKEY_FRACTION as f64).round() as i32;
         self.mickey_accum_x = self.mickey_accum_x.saturating_add(steps(dx, self.mickey_scale.0));
@@ -563,6 +563,10 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     if fire == 0 || (mouse.callback_cs == 0 && mouse.callback_ip == 0) || callback_busy(&cpu.bus) {
         return false;
     }
+    // The motion after this call counts for the picture shown now, which
+    // a program may have changed without telling the driver: a mode X
+    // set through the CRTC's ports, or a 3dfx card's picture turned on.
+    update_mickey_scale(&mut cpu.bus);
     let mouse = &mut cpu.bus.mouse;
     // Snapshot and consume the bits we're about to handle.
     mouse.pending_callback_events &= !fire;
@@ -842,13 +846,17 @@ const TEXT_MICKEY_SCALE: (f64, f64) = (MICKEYS_PER_PICTURE_PIXEL, MICKEYS_PER_PI
 /// mickey down and 2/3 across; in a 480-line mode it is one line, 2/3
 /// each way.
 pub fn mickeys_per_unit(virt: (i32, i32), picture: (u32, u32)) -> (f64, f64) {
-    let per = |picture: u32, virt: i32| MICKEYS_PER_PICTURE_PIXEL * picture.max(1) as f64 / virt.max(1) as f64;
+    let per = |picture: u32, virt: i32| {
+        MICKEYS_PER_PICTURE_PIXEL * picture.max(1) as f64 / virt.max(1) as f64
+    };
     (per(picture.0, virt.0), per(picture.1, virt.1))
 }
 
 /// Count mickeys for the picture the machine shows now and the virtual
-/// screen the driver has (see `mickeys_per_unit`): after a mode set, and
-/// when a program calls the driver, which may have set a range.
+/// screen the driver has (see `mickeys_per_unit`): after a mode set, when
+/// a program calls the driver, which may have set a range, before its
+/// event handler runs, and after a state is loaded, which doesn't hold
+/// the scale.
 pub fn update_mickey_scale(bus: &mut crate::bus::Bus) {
     let virt = bus.mouse.virtual_screen(bus);
     let picture = crate::video::frame_size(bus);
