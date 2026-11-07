@@ -9,6 +9,7 @@
 //! is empty, as one after a restore is, and its owner starts it again.
 
 use crate::win32::gdi32::surface::dib_stride;
+use oxideav_cinepak::header::FrameHeader as CinepakHeader;
 use oxideav_cinepak::{CinepakDecoder, CinepakFrame, CinepakPixelFormat};
 use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
 use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
@@ -22,6 +23,11 @@ const CVID: u32 = u32::from_le_bytes(*b"CVID");
 /// The largest picture Indeo 3's decoder takes.
 const INDEO3_MAX: (u32, u32) = (640, 480);
 
+/// The widest and tallest Cinepak picture decoded. A frame's header gives
+/// its size in 16 bits, and the crate allocates a picture of that size
+/// before it reads a strip, so a damaged header could ask for gigabytes.
+const CINEPAK_MAX: u32 = 4096;
+
 /// The FourCC `compression` in capitals, as ICOpen compares them.
 fn upper(compression: u32) -> u32 {
     u32::from_le_bytes(compression.to_le_bytes().map(|b| b.to_ascii_uppercase()))
@@ -33,8 +39,7 @@ pub fn supported(compression: u32, width: u32, height: u32) -> bool {
         IV31 | IV32 => (1..=INDEO3_MAX.0).contains(&width) && (1..=INDEO3_MAX.1).contains(&height),
         IV50 => width >= 1 && height >= 1,
         IV41 => (1..=4096).contains(&width) && (1..=4096).contains(&height),
-        // A frame's header gives its size in 16 bits.
-        CVID => (1..=0xFFFF).contains(&width) && (1..=0xFFFF).contains(&height),
+        CVID => (1..=CINEPAK_MAX).contains(&width) && (1..=CINEPAK_MAX).contains(&height),
         _ => false,
     }
 }
@@ -110,8 +115,25 @@ impl Codec {
             }
             Some(Decoder::Indeo4(d)) => d.decode(frame),
             Some(Decoder::Cinepak(d, last)) => {
-                *last = Some(d.decode_frame(frame, None).map_err(|e| e.to_string())?);
-                Ok(())
+                let header = CinepakHeader::parse(frame).map_err(|e| e.to_string())?;
+                if u32::from(header.width.max(header.height)) > CINEPAK_MAX {
+                    return Err(format!("a {}x{} frame", header.width, header.height));
+                }
+                // The crate takes its codebooks out for a frame and puts
+                // them back only when the frame decodes: after one that
+                // fails, the frames that inherit them would decode with
+                // empty ones. The decoder goes back to where it was.
+                let before = d.clone();
+                match d.decode_frame(frame, None) {
+                    Ok(f) => {
+                        *last = Some(f);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        *d = before;
+                        Err(e.to_string())
+                    }
+                }
             }
             None => Err("no decoder".to_string()),
         }
@@ -140,29 +162,36 @@ impl Codec {
                 })
             }
             Decoder::Cinepak(_, last) => {
+                // A frame is coded in blocks of 4 by 4 pixels, so a movie
+                // whose size isn't a multiple of 4 is coded larger. The
+                // picture is the top left of it, as FFmpeg's decoder
+                // gives, which goes by the stream's size too.
                 let f = last.as_ref()?;
-                (f.width == width && f.height == height).then(|| cinepak_dib(f))
+                (f.width >= width && f.height >= height).then(|| cinepak_dib(f, width, height))
             }
         }
     }
 }
 
-/// A Cinepak picture, rows of red, green and blue (or of grey) from the
-/// top, as a DIB.
-fn cinepak_dib(f: &CinepakFrame) -> Vec<u8> {
-    let (w, h) = (f.width as usize, f.height as usize);
-    let stride = dib_stride(w as i32, 24);
+/// The top left `width` by `height` of a Cinepak picture, rows of red,
+/// green and blue (or of grey) from the top, as a DIB.
+fn cinepak_dib(f: &CinepakFrame, width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let stride = dib_stride(width as i32, 24);
     let mut out = vec![0; stride * h];
-    for (y, line) in f.pixels().chunks(f.stride()).take(h).enumerate() {
-        let row = &mut out[(h - 1 - y) * stride..][..w * 3];
-        for (x, d) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            *d = match f.pixel_format {
-                CinepakPixelFormat::Rgb24 => {
-                    let p = line.get(x * 3..x * 3 + 3).unwrap_or(&[0; 3]);
-                    [p[2], p[1], p[0]]
+    for (y, line) in f.pixels().chunks_exact(f.stride()).take(h).enumerate() {
+        let row = out[(h - 1 - y) * stride..][..w * 3].as_chunks_mut::<3>().0;
+        match f.pixel_format {
+            CinepakPixelFormat::Rgb24 => {
+                for (d, &[r, g, b]) in row.iter_mut().zip(line.as_chunks::<3>().0) {
+                    *d = [b, g, r];
                 }
-                CinepakPixelFormat::Gray8 => [line.get(x).copied().unwrap_or(0); 3],
-            };
+            }
+            CinepakPixelFormat::Gray8 => {
+                for (d, &v) in row.iter_mut().zip(line) {
+                    *d = [v; 3];
+                }
+            }
         }
     }
     out
@@ -311,6 +340,7 @@ mod tests {
         let mut codec = Codec::new(u32::from_le_bytes(*b"cvid"));
         codec.decode(&frame).unwrap();
         assert!(codec.picture(16, 8).is_none());
+        assert!(codec.picture(8, 12).is_none());
         let dib = codec.picture(8, 8).unwrap();
         let stride = dib_stride(8, 24);
         // The DIB's first row is the picture's bottom one: blue, as blue,
@@ -319,6 +349,86 @@ mod tests {
         let (bottom, top) = (px(0), px(7));
         assert!(bottom[0] > 200 && bottom[2] < 60, "bottom {bottom:?}");
         assert!(top[2] > 200 && top[0] < 60, "top {top:?}");
+    }
+
+    /// An 8 by 8 picture, `top` above `bottom`, as rows of `n` bytes a
+    /// pixel.
+    fn halves(n: usize, top: &[u8], bottom: &[u8]) -> Vec<u8> {
+        (0..64)
+            .flat_map(|i| if i < 32 { &top[..n] } else { &bottom[..n] })
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn a_cinepak_movie_of_a_size_not_a_multiple_of_4_is_the_top_left() {
+        let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
+        let frame = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&frame).unwrap();
+        // A 6 by 6 movie is coded as 8 by 8: its rows 4 and 5 are blue.
+        let dib = codec.picture(6, 6).unwrap();
+        let stride = dib_stride(6, 24);
+        assert_eq!(dib.len(), stride * 6);
+        let px = |row: usize| -> [u8; 3] { dib[row * stride + 15..][..3].try_into().unwrap() };
+        let (bottom, top) = (px(0), px(5));
+        assert!(bottom[0] > 200 && bottom[2] < 60, "bottom {bottom:?}");
+        assert!(top[2] > 200 && top[0] < 60, "top {top:?}");
+    }
+
+    #[test]
+    fn grey_cinepak_pictures_come_out_grey() {
+        let grey = halves(1, &[230], &[20]);
+        let frame = oxideav_cinepak::encode_gray8(&grey, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&frame).unwrap();
+        let dib = codec.picture(8, 8).unwrap();
+        let stride = dib_stride(8, 24);
+        let (bottom, top) = (&dib[..3], &dib[7 * stride..][..3]);
+        assert!(
+            bottom.iter().all(|&c| c == bottom[0] && c < 60),
+            "bottom {bottom:?}"
+        );
+        assert!(top.iter().all(|&c| c == top[0] && c > 200), "top {top:?}");
+    }
+
+    #[test]
+    fn a_cinepak_frame_too_large_is_refused_before_it_is_decoded() {
+        let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
+        let frame = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&frame).unwrap();
+        // 65532 by 65532, which would be 12 GB of pixels.
+        let huge = [0, 0, 0, 10, 0xFF, 0xFC, 0xFF, 0xFC, 0, 1];
+        assert!(codec.decode(&huge).is_err());
+        assert!(codec.picture(8, 8).is_some());
+        assert!(!supported(CVID, 8192, 8));
+    }
+
+    #[test]
+    fn a_cinepak_frame_that_fails_leaves_the_decoder_as_it_was() {
+        let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
+        let key = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
+        // A frame that keeps the codebooks: one inter strip with no
+        // codebook chunk, whose four blocks are the V1 codebook's entry 0.
+        #[rustfmt::skip]
+        let next = [
+            1, 0, 0, 30, 0, 8, 0, 8, 0, 1,
+            0x11, 0x00, 0, 20, 0, 0, 0, 0, 0, 8, 0, 8,
+            0x32, 0x00, 0, 8, 0, 0, 0, 0,
+        ];
+        let mut reference = Codec::new(CVID);
+        reference.decode(&key).unwrap();
+        reference.decode(&next).unwrap();
+        let mut codec = Codec::new(CVID);
+        codec.decode(&key).unwrap();
+        // A header of one strip, and no strip.
+        assert!(codec.decode(&[0, 0, 0, 10, 0, 8, 0, 8, 0, 1]).is_err());
+        codec.decode(&next).unwrap();
+        let picture = reference.picture(8, 8).unwrap();
+        // The entry the key frame gave isn't an empty one's black.
+        assert!(picture.iter().any(|&c| c > 100), "{picture:?}");
+        assert_eq!(codec.picture(8, 8).unwrap(), picture);
     }
 
     #[test]
