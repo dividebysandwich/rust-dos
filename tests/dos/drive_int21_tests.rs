@@ -258,8 +258,8 @@ fn hard_disk_grows_past_what_its_folder_holds() {
     assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 25000, 40000));
 }
 
-/// Past 65,535 clusters AH=36h would count clusters of 32 KB or more,
-/// where a 16 KB write may not show: the total stops there instead.
+/// Past 65,535 clusters AH=36h would count clusters of 32 KB, where a
+/// 16 KB write may not show: the total stops there instead.
 #[test]
 fn a_full_folder_still_shows_each_cluster_written() {
     let base = scratch("hd_full", &["c/GAMES"]);

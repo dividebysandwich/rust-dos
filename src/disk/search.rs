@@ -78,16 +78,15 @@ impl DiskController {
         }
         let (spc, bps, total) = d.kind.geometry();
         let (spc, bps, total) = (spc as u32, bps as u32, total as u32);
-        let cluster_bytes = spc as u64 * bps as u64;
-        let used_in = |cluster_bytes: u64, cap: u64| {
-            let count = |root: &Path| self.used_clusters(root, cluster_bytes, cap);
+        // Clusters of `spc` sectors the folder's files take, up to `cap`.
+        let used = |spc: u32, cap: u64| {
+            let count = |root: &Path| self.used_clusters(root, spc as u64 * bps as u64, cap);
             d.host_root().map_or(0, count)
         };
-        let used = |cap: u64| used_in(cluster_bytes, cap);
         Ok(match d.kind {
             // What is on a floppy counts, so programs can tell whether a
             // save will fit.
-            DriveKind::Floppy => (spc, total - used(total as u64) as u32, bps, total),
+            DriveKind::Floppy => (spc, total - used(spc, total as u64) as u32, bps, total),
             // A hard disk counts it too, so the free space drops as files
             // are written: Sierra's installer takes a disk whose free space
             // doesn't for a compressed one. DOS sees a fake disk of 16 KB
@@ -98,13 +97,13 @@ impl DiskController {
             // free in 4 KB clusters (`windows_hard_disk_free`).
             DriveKind::HardDisk if windows => {
                 let spc = WINDOWS_SECTORS_PER_CLUSTER;
-                let used = used_in(spc as u64 * bps as u64, u64::MAX);
+                let used = used(spc, u64::MAX);
                 let free = windows_hard_disk_free(used);
                 let total = (used + free as u64).min(u32::MAX as u64) as u32;
                 (spc, free, bps, total)
             }
             DriveKind::HardDisk => {
-                let used = used(u64::MAX);
+                let used = used(spc, u64::MAX);
                 let free = hard_disk_free(total, used);
                 let total = (used + free as u64).min(0xFFFF) as u32;
                 (spc, free, bps, total)
