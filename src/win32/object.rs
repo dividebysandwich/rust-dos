@@ -72,6 +72,18 @@ pub enum Kind {
     Find {
         entries: Vec<FindEntry>,
     },
+    /// A change notification of FindFirstChangeNotificationA: the full
+    /// path of the directory it watches, whether it watches the ones
+    /// below too, its FILE_NOTIFY_CHANGE_* filter, the fingerprint of what
+    /// that watches as it last looked, and whether a change signaled it
+    /// (kernel32/change.rs).
+    Change {
+        dir: String,
+        subtree: bool,
+        filter: u32,
+        seen: u64,
+        signaled: bool,
+    },
 }
 
 /// A file or directory a search found, as WIN32_FIND_DATA has it.
@@ -342,6 +354,13 @@ crate::win32::state_variants!(Kind {
         locks
     },
     Find { entries },
+    Change {
+        dir,
+        subtree,
+        filter,
+        seen,
+        signaled
+    },
 });
 crate::state_fields!(FindEntry {
     attributes,

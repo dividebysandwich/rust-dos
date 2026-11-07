@@ -2,6 +2,7 @@
 //! the other parts in the modules below.
 
 pub(super) mod atom;
+pub(super) mod change;
 mod console;
 mod disk;
 mod env;
@@ -682,6 +683,9 @@ static APIS: &[Api] = &[
     // with the process functions it uses and exits with -1 where
     // GetProcAddress finds it missing.
     stdcall("GetStartupInfoW", 442, 1, not_implemented),
+    stdcall("FindFirstChangeNotificationA", 282, 3, change::find_first),
+    stdcall("FindNextChangeNotification", 288, 1, change::find_next),
+    stdcall("FindCloseChangeNotification", 281, 1, change::find_close),
 ];
 
 /// The places in `APIS` of the system's own stubs.
