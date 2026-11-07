@@ -876,7 +876,7 @@ impl Pacer {
             }
             CpuSpeed::Auto(_) => {
                 if let Some(ideal) = ideal {
-                    self.host_max = Some(self.host_max.map_or(ideal, |max| max * 0.9 + ideal * 0.1));
+                    self.host_max = Some(next_host_max(self.host_max, ideal, current));
                 }
                 // No lower than frames can be timed at, or a busy host could
                 // cap the speed where nothing measures it again (with a base
@@ -983,6 +983,35 @@ impl HostSample {
         ))
     }
 }
+
+/// `Auto`'s estimate of as fast as the host keeps up with, after a sample
+/// that says `ideal`, taken at the speed `current`, from the estimate
+/// `max` before it. It moves a tenth of the way to each sample, so that a
+/// moment's hitch of the host or a light stretch of the program moves it
+/// little. A sample that says the host can't run the speed it runs at
+/// moves it half the way down: the program went from work the host runs
+/// fast (a loading loop) to work it runs slowly (drawing in a banked VESA
+/// window), and the speed, which follows the estimate down, would
+/// otherwise stay above what the host keeps up with for a dozen slow
+/// frames or more, a second at a third of real time (Shannara's scene
+/// changes).
+fn next_host_max(max: Option<f64>, ideal: f64, current: u32) -> f64 {
+    let Some(max) = max else {
+        return ideal;
+    };
+    let share = if ideal < current as f64 && ideal < max {
+        HOST_FALL
+    } else {
+        HOST_DRIFT
+    };
+    max + (ideal - max) * share
+}
+
+/// The share of the way to a sample of the host's speed `Auto`'s estimate
+/// of it moves (`next_host_max`), and the share when the sample says the
+/// host can't run the speed it runs at.
+const HOST_DRIFT: f64 = 0.1;
+const HOST_FALL: f64 = 0.5;
 
 /// PIT channel 2's counter, as programs read it: the count on port 42h
 /// and the output on port 61h bit 5. Its gate is port 61h bit 0. Programs
@@ -1195,6 +1224,41 @@ crate::state_fields!(Tsc { base, icount, hz });
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_estimate_falls_fast_when_the_host_cannot_run_the_speed() {
+        // Shannara: a loading loop takes the estimate and the speed to
+        // 1,135,918, then the drawing that follows runs at 250,000.
+        let (mut max, mut speed) = (1_135_918.0, 1_135_918);
+        let mut frames = 0;
+        while max > 250_000.0 * 1.25 {
+            max = next_host_max(Some(max), 250_000.0, speed);
+            speed = max as u32;
+            frames += 1;
+        }
+        // A tenth of the way each frame took 26.
+        assert_eq!(frames, 4);
+    }
+
+    #[test]
+    fn the_host_estimate_drifts_where_the_host_keeps_up() {
+        // A sample below the estimate at a speed the host still runs
+        // moves it a tenth of the way, as one above it does.
+        assert_eq!(
+            next_host_max(Some(400_000.0), 300_000.0, 200_000),
+            390_000.0
+        );
+        assert_eq!(
+            next_host_max(Some(400_000.0), 500_000.0, 450_000),
+            410_000.0
+        );
+        assert_eq!(next_host_max(None, 500_000.0, 3000), 500_000.0);
+        // Below the speed it runs at: half the way.
+        assert_eq!(
+            next_host_max(Some(400_000.0), 200_000.0, 400_000),
+            300_000.0
+        );
+    }
 
     #[test]
     fn a_coarse_clock_never_makes_the_host_infinitely_fast() {
