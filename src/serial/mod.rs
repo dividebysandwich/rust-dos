@@ -319,9 +319,19 @@ impl SerialPort {
         }
     }
 
-    /// After the UART did something: hand the backend what it sent and
-    /// the lines it changed.
+    /// After the UART did something: hand the backend what it sent, then
+    /// the lines it changed. The characters left the shift register before
+    /// the lines changed, or as they did, so a modem that hangs up on DTR
+    /// passes them on first.
     pub fn sync(&mut self, now: u64) {
+        if !self.uart.outgoing.is_empty() {
+            let bytes = std::mem::take(&mut self.uart.outgoing);
+            match &mut self.backend {
+                Backend::Empty | Backend::Mouse(_) => {}
+                Backend::Modem(m) => m.transmit(&mut self.uart, &bytes, now, &mut self.link),
+                Backend::NullModem(m) => m.transmit(&bytes, &mut self.link),
+            }
+        }
         let mcr = self.uart.mcr_out();
         if mcr != self.mcr {
             self.mcr = mcr;
@@ -330,14 +340,6 @@ impl SerialPort {
                 Backend::Mouse(m) => m.control(&mut self.uart, mcr, now),
                 Backend::Modem(m) => m.control(&mut self.uart, mcr, now, &mut self.link),
                 Backend::NullModem(m) => m.control(mcr, &mut self.link),
-            }
-        }
-        if !self.uart.outgoing.is_empty() {
-            let bytes = std::mem::take(&mut self.uart.outgoing);
-            match &mut self.backend {
-                Backend::Empty | Backend::Mouse(_) => {}
-                Backend::Modem(m) => m.transmit(&mut self.uart, &bytes, now, &mut self.link),
-                Backend::NullModem(m) => m.transmit(&bytes, &mut self.link),
             }
         }
     }

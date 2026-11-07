@@ -556,6 +556,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
         crate::win32::thread::end(&mut cpu.bus.win32, p, i, 0);
     }
     crate::win32::user32::destroy_thread_windows(cpu, tid);
+    super::comm::task_ended(cpu, task.handle);
     global::free_owned(cpu, task.handle);
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);
@@ -1030,6 +1031,9 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     }
     // A Win32 process's client: the threads that wait for it go on.
     super::flat::task_ending(cpu, task.tid);
+    // The serial ports it left open close, the last task's too, so that
+    // their lines drop.
+    super::comm::task_ended(cpu, task.handle);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)
