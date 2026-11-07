@@ -542,15 +542,16 @@ const CD_COMMANDS: [&str; 8] = [
     "close cd",
 ];
 
-/// The MCI strings of CD_COMMANDS sent in turn, with 200 ms between the
-/// play and the position. What each status returns is printed on a line
-/// of its own; the exit code has a bit for each string that worked.
-fn cd_program() -> Vec<u8> {
+/// The MCI strings `commands` sent in turn, with 200 ms before a status
+/// of the position. What each status returns is printed on a line of its
+/// own; the exit code has a bit for each string that worked.
+fn cd_program(commands: &[&str]) -> Vec<u8> {
     const RET: u32 = 0x300;
     const CRLF: u32 = 0x340;
     const WRITTEN: u32 = 0x348;
     let mut data = vec![0u8; 0x350];
-    for (i, command) in CD_COMMANDS.iter().enumerate() {
+    assert!(commands.len() <= 12, "the strings would reach the return buffer");
+    for (i, command) in commands.iter().enumerate() {
         put(&mut data, i * 0x40, command.as_bytes());
     }
     put(&mut data, CRLF as usize, b"\r\n");
@@ -571,7 +572,7 @@ fn cd_program() -> Vec<u8> {
         a.xor(ebx, ebx)?;
         call(a, l.import(2), &[STD_OUTPUT_HANDLE])?;
         a.mov(edi, eax)?;
-        for (i, command) in CD_COMMANDS.iter().enumerate() {
+        for (i, command) in commands.iter().enumerate() {
             if command.starts_with("status cd position") {
                 call(a, l.import(0), &[200])?;
             }
@@ -607,7 +608,7 @@ fn mci_plays_an_audio_track_of_a_cd_image() {
         let iso = cdimage::iso("TESTDISC", &[cdimage::file("A.TXT", b"a")]);
         // Five seconds of audio in track 2.
         let cue = cdimage::mixed_disc(&dir, &iso, 375);
-        let mut cpu = machine("cd", core, &[("T.EXE", cd_program())], |cpu| {
+        let mut cpu = machine("cd", core, &[("T.EXE", cd_program(&CD_COMMANDS))], |cpu| {
             let options = MountOptions::default();
             cpu.bus.mount_drive(3, &cue, options, false).unwrap();
         });
@@ -626,6 +627,100 @@ fn mci_plays_an_audio_track_of_a_cd_image() {
         assert_eq!(lines[1], "02:00:00:15");
         assert_eq!(lines[2], "stopped");
         assert_eq!(cpu.bus.cdaudio.state(), PlayState::Stopped, "{core:?}");
+    }
+}
+
+/// A track's length runs to the next track's start, the pregap between
+/// them included, and the last track's and the disc's stop a frame short
+/// of the lead-out, as Windows 98 SE gives them from the table of
+/// contents. Drakan's CD check compares them with the disc's.
+#[test]
+fn mci_track_lengths_are_windows_98s() {
+    const COMMANDS: [&str; 6] = [
+        "open cdaudio alias cd",
+        "set cd time format msf",
+        "status cd length track 1",
+        "status cd length track 2",
+        "status cd length",
+        "close cd",
+    ];
+    for core in CORES {
+        let dir = cdimage::scratch("winmm_cd_length");
+        let iso = cdimage::iso("TESTDISC", &[cdimage::file("A.TXT", b"a")]);
+        let data = (iso.len() / 2048) as u32;
+        // Five seconds of audio in track 2, after a 2-second pregap.
+        let cue = cdimage::mixed_disc(&dir, &iso, 375);
+        let mut cpu = machine("cd_length", core, &[("T.EXE", cd_program(&COMMANDS))], |cpu| {
+            let options = MountOptions::default();
+            cpu.bus.mount_drive(3, &cue, options, false).unwrap();
+        });
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        let text = printed(&cpu);
+        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {text:?}");
+        let msf = |s: u32| format!("{:02}:{:02}:{:02}", s / 4500, s / 75 % 60, s % 75);
+        let lines: Vec<&str> = text.lines().collect();
+        let want = [msf(data + 150), msf(374), msf(data + 150 + 374)];
+        assert_eq!(lines, want.iter().map(String::as_str).collect::<Vec<_>>(), "{core:?}");
+    }
+}
+
+/// A play or a seek whose flags name no parameter runs without the
+/// parameter block, as on Windows 98 SE: Drakan seeks to the end of its
+/// disc so. One that names one still needs the block.
+#[test]
+fn mci_seeks_and_plays_a_cd_without_parameters() {
+    const MCI_PLAY: i32 = 0x806;
+    const MCI_SEEK: i32 = 0x807;
+    const MCI_STOP: i32 = 0x808;
+    const MCI_TO: i32 = 0x8;
+    const MCI_SEEK_TO_START: i32 = 0x100;
+    const MCI_SEEK_TO_END: i32 = 0x200;
+    const MCIERR_NULL_PARAMETER_BLOCK: i32 = 297;
+    let mut data = vec![0u8; 0x40];
+    put(&mut data, 0x00, b"open cdaudio alias cd");
+    put(&mut data, 0x20, b"cd");
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        (
+            "WINMM.dll",
+            &["mciSendStringA", "mciGetDeviceIDA", "mciSendCommandA"],
+        ),
+    ];
+    let exe = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(1), &[l.at(0) as i32, 0, 0, 0])?;
+        check_eax(a, 0, 0)?;
+        call(a, l.import(2), &[l.at(0x20) as i32])?;
+        a.mov(esi, eax)?;
+        let commands = [
+            (MCI_SEEK, MCI_SEEK_TO_END, 0),
+            (MCI_SEEK, MCI_SEEK_TO_START, 0),
+            (MCI_PLAY, 0, 0),
+            (MCI_STOP, 0, 0),
+            (MCI_SEEK, MCI_TO, MCIERR_NULL_PARAMETER_BLOCK),
+        ];
+        for (bit, (msg, flags, result)) in commands.into_iter().enumerate() {
+            for arg in [0, flags, msg] {
+                a.push(arg)?;
+            }
+            a.push(esi)?;
+            a.call(l.import(3))?;
+            check_eax(a, result, bit as u32 + 1)?;
+        }
+        a.push(ebx)?;
+        a.call(l.import(0))?;
+        a.int3()
+    });
+    for core in CORES {
+        let dir = cdimage::scratch("winmm_cd_null");
+        let iso = cdimage::iso("TESTDISC", &[cdimage::file("A.TXT", b"a")]);
+        let cue = cdimage::mixed_disc(&dir, &iso, 375);
+        let mut cpu = machine("cd_null", core, &[("T.EXE", exe.clone())], |cpu| {
+            let options = MountOptions::default();
+            cpu.bus.mount_drive(3, &cue, options, false).unwrap();
+        });
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {:?}", printed(&cpu));
     }
 }
 

@@ -358,14 +358,23 @@ fn status(cpu: &mut Cpu, i: usize, flags: u32, p: &mut Parms) -> u32 {
                     .ok_or(MCIERR_OUTOFRANGE)
             };
             match item {
+                // Windows 98 measures from the table of contents: a track
+                // runs to the next one's start, the pregap between them
+                // included, and the last one, and so the disc, to a frame
+                // before the lead-out. Drakan's CD check compares these.
                 MCI_STATUS_LENGTH => {
+                    let first = tracks.first().map_or(0, |t| t.start);
                     let sectors = if flags & MCI_TRACK != 0 {
-                        match track() {
-                            Ok(t) => t.end - t.start,
-                            Err(e) => return e,
+                        let Some(at) = tracks.iter().position(|t| t.number as u32 == p.track)
+                        else {
+                            return MCIERR_OUTOFRANGE;
+                        };
+                        match tracks.get(at + 1) {
+                            Some(next) => next.start - tracks[at].start,
+                            None => (img.leadout() - tracks[at].start).saturating_sub(1),
                         }
                     } else {
-                        img.leadout() - tracks.first().map_or(0, |t| t.start)
+                        (img.leadout() - first).saturating_sub(1)
                     };
                     length(format, sectors)
                 }
