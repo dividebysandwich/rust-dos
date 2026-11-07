@@ -201,7 +201,8 @@ impl DiskController {
             Ok(file) => {
                 let key = self.file_key(filename);
                 let written = (writable && mode & 0x03 != 0).then_some(path);
-                let file = self.opened(OpenData::Host(file, written), drive, owner, key, filename, mode);
+                let data = OpenData::Host(HostFile::new(file), written);
+                let file = self.opened(data, drive, owner, key, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
