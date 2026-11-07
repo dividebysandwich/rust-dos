@@ -2334,6 +2334,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x65 => match cpu.get_al() {
             // The information functions need CX >= 5 bytes of room at
             // ES:DI, or fail with error 1 as MS-DOS's $GetExtCntry does.
+            // When they succeed, AX is the active code page (437), as
+            // MS-DOS 6.22 and 7.10 return it.
             0x01..=0x1F if cpu.cx() < 5 => set_result(cpu, Err(0x01)),
             0x01 => {
                 // Info ID 1, length, country 1, code page 437, then the
@@ -2350,7 +2352,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 let at = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
                 cpu.bus.guest_write_bytes(at, &data[..3 + len as usize]);
                 cpu.set_cx(3 + len);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
+                set_result(cpu, Ok(437));
             }
             0x07 => {
                 // Info ID 7 and a far pointer to the DBCS table, with its
@@ -2359,7 +2361,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 cpu.bus.guest_write_8(at, 0x07);
                 cpu.bus.guest_write_32(at + 1, dos_data::far(dos_data::DBCS_TABLE));
                 cpu.set_cx(5);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
+                set_result(cpu, Ok(437));
             }
             0x20 => {
                 let upper = cpu.get_dl().to_ascii_uppercase();

@@ -565,6 +565,7 @@ fn dbcs_lead_byte_table_is_empty() {
     int21(&mut cpu, 0x6507);
     assert!(!cf(&cpu));
     assert_eq!((cpu.bus.read_8(0x30000), cpu.cx()), (7, 5));
+    assert_eq!(cpu.ax(), 437, "the active code page, as MS-DOS 6.22 returns");
     let (offset, segment) = (cpu.bus.read_16(0x30001), cpu.bus.read_16(0x30003));
     let table = cpu.get_physical_addr(segment, offset);
     assert_eq!(cpu.bus.read_16(table), 0, "length");
@@ -587,7 +588,9 @@ fn dbcs_lead_byte_table_is_empty() {
 }
 
 /// AX=6501h copies as much of the country information as CX has room for,
-/// and the length word after the info ID says how much.
+/// and the length word after the info ID says how much. The bytes are
+/// what MS-DOS 6.22 wrote for CX=40 and 41 in 86Box, the case map
+/// pointer apart, and AX is the active code page there.
 #[test]
 fn extended_country_info_fits_the_buffer() {
     let mut cpu = Cpu::new(PathBuf::from("."));
@@ -597,7 +600,7 @@ fn extended_country_info_fits_the_buffer() {
     cpu.set_cx(9);
     int21(&mut cpu, 0x6501);
     assert!(!cf(&cpu));
-    assert_eq!(cpu.cx(), 9);
+    assert_eq!((cpu.ax(), cpu.cx()), (437, 9));
     assert_eq!((cpu.bus.read_8(0x30000), cpu.bus.read_16(0x30001)), (1, 6));
     assert_eq!((cpu.bus.read_16(0x30003), cpu.bus.read_16(0x30005)), (1, 437));
     assert_eq!(cpu.bus.read_16(0x30007), 0, "date format: USA");
@@ -608,6 +611,28 @@ fn extended_country_info_fits_the_buffer() {
     assert_eq!((cpu.cx(), cpu.bus.read_16(0x30001)), (41, 38));
     assert_eq!(cpu.bus.read_8(0x30009), b'$');
     assert_eq!(cpu.bus.read_8(0x30029), 0xAA);
+
+    #[rustfmt::skip]
+    let msdos: [u8; 41] = [
+        0x01, 0x26, 0x00, 0x01, 0x00, 0xB5, 0x01, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00,
+        0x00, 0x2C, 0x00, 0x2E, 0x00, 0x2D, 0x00, 0x3A, 0x00, 0x00, 0x02, 0x00, 0, 0,
+        0, 0, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    for cx in [40u16, 41] {
+        cpu.bus.load_bytes(0x30000, &[0xAA; 48]);
+        cpu.set_cx(cx);
+        int21(&mut cpu, 0x6501);
+        let mut got = [0u8; 42];
+        for (i, b) in got.iter_mut().enumerate() {
+            *b = cpu.bus.read_8(0x30000 + i);
+        }
+        got[25..29].fill(0); // the case map routine's far pointer
+        let mut want = msdos;
+        want[1] = (cx - 3) as u8;
+        assert_eq!(&got[..cx as usize], &want[..cx as usize], "CX={cx}");
+        assert_eq!(got[cx as usize], 0xAA, "CX={cx}: nothing past the buffer");
+        assert_eq!((cpu.ax(), cpu.cx()), (437, cx));
+    }
 }
 
 #[test]
