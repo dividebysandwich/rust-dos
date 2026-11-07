@@ -202,13 +202,11 @@ pub fn has_thin_frame(style: u32) -> bool {
     style & WS_BORDER != 0
 }
 
-/// The window rectangle around the client rectangle `r` for the style,
-/// as AdjustWindowRectEx makes it.
-pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+/// The outer frame's width and height for the style, as
+/// AdjustWindowRectEx counts them: thick, dialog, thin or none.
+pub fn frame_size(style: u32, ex: u32) -> (i32, i32) {
     let m = super::sysparams::metric;
-    let mut r = r;
-    // The outer frame and caption.
-    let (dx, dy) = if has_thick_frame(style, ex) {
+    if has_thick_frame(style, ex) {
         (m(32), m(33))
     } else if has_dlg_frame(style, ex) {
         (m(7), m(8))
@@ -216,8 +214,16 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
         (m(5), m(6))
     } else {
         (0, 0)
-    };
-    r = r.inflate(dx, dy);
+    }
+}
+
+/// The window rectangle around the client rectangle `r` for the style,
+/// as AdjustWindowRectEx makes it.
+pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+    let m = super::sysparams::metric;
+    // The outer frame and caption.
+    let (dx, dy) = frame_size(style, ex);
+    let mut r = r.inflate(dx, dy);
     if style & WS_CAPTION == WS_CAPTION {
         r.top -= if ex & WS_EX_TOOLWINDOW != 0 {
             m(51)
@@ -3261,7 +3267,8 @@ mod tests {
     /// no frame: its client area is the whole window, and the screen's
     /// corner is in it. Windows 11 gives a 640x480 client area and
     /// HTCLIENT at (0, 0) for such a window, and AdjustWindowRectEx adds
-    /// nothing for style 0 and one pixel for WS_BORDER.
+    /// nothing for style 0 and one pixel for WS_BORDER. The client area
+    /// the hit test sees is WM_NCCALCSIZE's, as SWP_FRAMECHANGED sets it.
     #[test]
     fn a_frameless_top_level_window_is_all_client_area() {
         let mut cpu = Cpu::new(std::path::PathBuf::from("."));
@@ -3272,11 +3279,12 @@ mod tests {
         let w = Window {
             style,
             rect: r,
-            client: r,
             ..Window::default()
         };
         let hwnd = user(&mut cpu).new_window(w).expect("a window");
-        assert_eq!(client_for(user(&mut cpu), hwnd, r), r);
+        let client = client_for(user(&mut cpu), hwnd, r);
+        assert_eq!(client, r);
+        user(&mut cpu).window_mut(hwnd).expect("the window").client = client;
         let hit = super::super::input::hit_test(user(&mut cpu), hwnd, 0, 0);
         assert_eq!(hit, super::super::input::HTCLIENT);
     }
