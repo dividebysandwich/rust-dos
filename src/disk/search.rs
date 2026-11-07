@@ -117,7 +117,7 @@ impl DiskController {
             DriveKind::CdRom if windows => {
                 let sectors = d
                     .image_sectors()
-                    .unwrap_or_else(|| used(u64::MAX).min(u32::MAX as u64) as u32);
+                    .unwrap_or_else(|| used(spc, u64::MAX).min(u32::MAX as u64) as u32);
                 let spc = CDFS_SECTORS_PER_CLUSTER;
                 (spc, 0, bps, sectors / spc)
             }
