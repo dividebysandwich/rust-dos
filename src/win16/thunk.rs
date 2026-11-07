@@ -204,8 +204,19 @@ pub fn enter32(cpu: &mut Cpu, ctx: Context, target: u32, args: &[u32], post: u16
 /// 32-bit code to come (scratch for the structures it is passed): its
 /// address. The call made next with `enter32_at` and the address as its
 /// top doesn't overwrite it.
+///
+/// For 16-bit code's calls, while all of the task's 32-bit code waits in
+/// its frames. A `Then` runs as 32-bit code goes on, whose frame is off
+/// the list by then: this space would be below an older frame, inside
+/// the stack of the code going on. A `Then` uses `scratch32_below` with
+/// its context's ESP instead.
 pub fn scratch32(cpu: &mut Cpu, len: u32) -> u32 {
-    (stack32(cpu) - len.next_multiple_of(4)) & !0xF
+    scratch32_below(stack32(cpu), len)
+}
+
+/// Space of `len` bytes on a 32-bit stack whose top is `top`.
+pub fn scratch32_below(top: u32, len: u32) -> u32 {
+    (top - len.next_multiple_of(4)) & !0xF
 }
 
 /// `enter32` on the 32-bit stack below `top`.
