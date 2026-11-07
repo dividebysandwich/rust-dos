@@ -20,6 +20,21 @@ pub const EXT: u32 = 1;
 /// DR6.BS: the debug exception was the single-step trap.
 pub const DR6_BS: u32 = 0x4000;
 
+/// The instruction breakpoints DR7 `dr7` enables, a bit for each of DR0-DR3:
+/// L or G set, R/W 00 (break on execution) and LEN 00, as an instruction
+/// breakpoint must have.
+pub const fn code_breakpoint_mask(dr7: u32) -> u32 {
+    let mut mask = 0;
+    let mut n = 0;
+    while n < 4 {
+        if dr7 >> (2 * n) & 3 != 0 && dr7 >> (16 + 4 * n) & 0xF == 0 {
+            mask |= 1 << n;
+        }
+        n += 1;
+    }
+    mask
+}
+
 /// An exception: its vector and, for the exceptions that have one, the error
 /// code pushed with it (protected mode only). Eight bytes, whose `kind` is
 /// never 0, so a `CpuResult<()>` fits in a register and is 0 when it is
@@ -448,16 +463,69 @@ impl Cpu {
 
     /// The single-step trap after an instruction that began with TF set:
     /// DR6.BS, and the debug exception's handler entered with EIP at the
-    /// next instruction. It stays out of the exception log, as a program
-    /// that traces itself raises one for every instruction it runs.
+    /// next instruction. An instruction breakpoint on that instruction
+    /// comes with the trap, one exception for both, its B bit set in DR6
+    /// with BS. It stays out of the exception log, as a program that
+    /// traces itself raises one for every instruction it runs.
     pub fn single_step_trap(&mut self) {
-        self.dr[6] |= DR6_BS;
+        let next = self.seg_cache(Seg::CS).base.wrapping_add(self.eip);
+        let hits = if self.code_breakpoints() && !self.flags.contains(CpuFlags::RF) {
+            self.code_breakpoint_hits(next)
+        } else {
+            0
+        };
+        if hits != 0 {
+            self.dr[6] &= !0xF;
+        }
+        self.dr[6] |= DR6_BS | hits;
         let (eip, esp) = (self.eip, self.esp());
         if let Err(fault) = self.deliver_interrupt(Fault::DB.vector, IntSource::Exception, None) {
             self.eip = eip;
             self.set_esp(esp);
             self.raise(fault);
         }
+    }
+
+    /// Whether DR7 enables an instruction breakpoint: one of DR0-DR3 with
+    /// its L or G bit set and its R/W field 00.
+    #[inline(always)]
+    pub fn code_breakpoints(&self) -> bool {
+        self.dr[7] & 0xFF != 0 && code_breakpoint_mask(self.dr[7]) != 0
+    }
+
+    /// Before the instruction at the linear address `lin`: the debug
+    /// exception of the instruction breakpoints set there, a fault with
+    /// EIP still on the instruction and DR6's B0-B3 saying which ones
+    /// matched. RF set skips them for this one instruction, as the
+    /// instruction after an IRET that set it runs, and clears RF. True
+    /// if the exception was raised.
+    #[cold]
+    pub fn instruction_breakpoint(&mut self, lin: u32) -> bool {
+        if self.flags.contains(CpuFlags::RF) {
+            self.flags.remove(CpuFlags::RF);
+            return false;
+        }
+        let hits = self.code_breakpoint_hits(lin);
+        if hits == 0 {
+            return false;
+        }
+        self.dr[6] = self.dr[6] & !0xF | hits;
+        let (eip, esp) = (self.eip, self.esp());
+        if let Err(fault) = self.deliver_interrupt(Fault::DB.vector, IntSource::Exception, None) {
+            self.eip = eip;
+            self.set_esp(esp);
+            self.raise(fault);
+        }
+        true
+    }
+
+    /// The enabled instruction breakpoints at the linear address `lin`, a
+    /// bit for each of DR0-DR3.
+    fn code_breakpoint_hits(&self, lin: u32) -> u32 {
+        let mask = code_breakpoint_mask(self.dr[7]);
+        (0..4)
+            .filter(|&n| mask >> n & 1 != 0 && self.dr[n] == lin)
+            .fold(0, |hits, n| hits | 1 << n)
     }
 
     /// Deliver the exception raised by an instruction. When its delivery

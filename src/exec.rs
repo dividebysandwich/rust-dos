@@ -283,7 +283,8 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
 
         // An instruction in an interrupt shadow runs on its own, as the
         // loop checks for interrupts again after it, and traced code (TF)
-        // on the interpreter, which raises the single-step traps. (IRET,
+        // and code under instruction breakpoints (DR7) on the
+        // interpreter, which raises their debug exceptions. (IRET,
         // which can set TF, ends translated blocks, and POPF stops one
         // where it sets TF.)
         let watching = !HOT && cpu.bus.observe.watching();
@@ -309,7 +310,12 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
                 continue;
             }
             instruction::<false, false, PROF>(cpu, fetch, hook)
-        } else if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
+        } else if DYN
+            && !cpu.irq_shadow
+            && !cpu.get_cpu_flag(CpuFlags::TF)
+            && !cpu.code_breakpoints()
+            && cpu.dynamic_active()
+        {
             dynamic::<HOT, PROF>(cpu, fetch, hook, false)
         } else if !HOT && !DYN {
             instruction::<HOT, true, PROF>(cpu, fetch, hook)
@@ -371,7 +377,10 @@ impl Cpu {
             return;
         }
         let mut fetch = Fetch::new(self);
-        let translated = self.dynamic_active() && !self.irq_shadow && !self.get_cpu_flag(CpuFlags::TF);
+        let translated = self.dynamic_active()
+            && !self.irq_shadow
+            && !self.get_cpu_flag(CpuFlags::TF)
+            && !self.code_breakpoints();
         match (translated, self.bus.profile.is_some()) {
             (true, false) => dynamic::<false, false>(self, &mut fetch, &mut NoHook, true),
             (true, true) => dynamic::<false, true>(self, &mut fetch, &mut NoHook, true),
@@ -1054,6 +1063,10 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
     if HOOK && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
+    let breakpoints = cpu.code_breakpoints();
+    if breakpoints && cpu.instruction_breakpoint(lin_ip) {
+        return None;
+    }
     if PROF {
         note_instruction(cpu, eip, code32);
     }
@@ -1119,7 +1132,7 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
     // TF as the instruction begins: the single-step trap follows it.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     cpu.set_eip(next_eip);
-    let mut chains = CHAIN && simple && !traced;
+    let mut chains = CHAIN && simple && !traced && !breakpoints;
     match handler(cpu, instr) {
         Ok(()) => {
             if traced {

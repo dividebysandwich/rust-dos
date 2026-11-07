@@ -1923,14 +1923,24 @@ The IDE drive also reads each sector's subchannel: READ CD returns it after
 the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
 Q at the head (where audio plays, or else the last sector read or sought)
 and the disc's catalog number. A BlindWrite image read with subchannel
-(2448-byte sectors) keeps what the disc had, deliberately bad Q included;
-for other images and sectors the drive makes P and Q from the disc's
-layout, with R-W empty. A Q whose CRC is bad reads back as it is through
-READ CD, and READ SUB-CHANNEL reports the layout's position in its place,
-as a drive keeps the last good one. MSCDEX's Q channel reports the same
-position. The catalog number and the tracks' copy and pre-emphasis flags
-come from a BlindWrite descriptor, or from a CUE sheet's CATALOG and FLAGS,
-and both the IDE drive and MSCDEX report them. BlindWrite's data position
+(2448-byte sectors) keeps what the disc had, deliberately bad Q included,
+and so does a subchannel file beside a CUE sheet or bare image: a file
+named as the sheet or one of its data files, with the extension `.sub`
+(CloneCD's and DiscImageCreator's, each channel's 12 bytes after the one
+before, from sector 0) or `.subcode` (redumper's, raw and interleaved, from
+the lead-in on), 96 bytes a sector. Which of the two layouts a file has,
+and where it starts, is found from the Q positions in it, whatever its
+extension; a file whose size isn't whole sectors, or whose Qs agree on
+neither layout, is left alone, and the next one named so is looked for.
+Redump's downloads leave the subchannel out, but their dump logs have it
+(`<name>.sub`): put it beside the CUE sheet under the sheet's name. For
+other images and sectors the drive makes P and Q from the disc's layout,
+with R-W empty. A Q whose CRC is bad reads back as it is through READ CD,
+and READ SUB-CHANNEL reports the layout's position in its place, as a drive
+keeps the last good one. MSCDEX's Q channel reports the same position. The
+catalog number and the tracks' copy and pre-emphasis flags come from a
+BlindWrite descriptor, or from a CUE sheet's CATALOG and FLAGS, and both
+the IDE drive and MSCDEX report them. BlindWrite's data position
 measurement (DPM, in the descriptor or a `.bwa` file) is read, but the
 drive doesn't time its reads by it yet
 ([#591](https://github.com/dividebysandwich/rust-dos/issues/591)), so a
