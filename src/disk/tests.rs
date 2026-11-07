@@ -39,6 +39,18 @@ fn a_device_name_may_end_in_a_colon() {
     assert_eq!(char_device("C:"), None);
     assert_eq!(char_device("NULL:"), None);
     assert_eq!(char_device("NUL::"), None);
+
+    // INT 21h opens the device, and its file table entry is named for it
+    // alone, as when it is opened as "NUL".
+    let mut disk = DiskController::new(scratch("device_colon"));
+    let h = disk.open_file("nul:", 1, PSP).unwrap();
+    assert_eq!(disk.handle_device(h), Some(CharDevice::Nul));
+    assert_eq!(&disk.sft_entry(h).unwrap().name, b"NUL        ");
+    assert!(disk.open_file("EMMXXXX0:", 0, PSP).is_err());
+    disk.emm_device = true;
+    let h = disk.open_file("EMMXXXX0:", 0, PSP).unwrap();
+    assert_eq!(disk.handle_device(h), Some(CharDevice::Emm));
+    assert_eq!(&disk.sft_entry(h).unwrap().name, b"EMMXXXX0   ");
 }
 
 #[test]
