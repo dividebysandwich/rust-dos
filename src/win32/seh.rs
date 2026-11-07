@@ -413,6 +413,18 @@ fn is_interrupt_flag_change(cpu: &Cpu, eip: u32) -> bool {
     matches!(code_at(cpu, eip, 1).as_deref(), Some([0xFA | 0xFB]))
 }
 
+/// The length of the instruction at `eip` whose #GP, with the error code
+/// `error`, Windows 98's VMM takes without an exception for the program,
+/// which goes on after it: INT 68h (`is_debugger_int`), CLI or STI
+/// (`is_interrupt_flag_change`).
+fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
+    match error? {
+        DEBUGGER_INT_ERROR if is_debugger_int(cpu, eip) => Some(2),
+        0 if is_interrupt_flag_change(cpu, eip) => Some(1),
+        _ => None,
+    }
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
 pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
@@ -424,13 +436,10 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    if vector == 13 && error == Some(DEBUGGER_INT_ERROR) && is_debugger_int(cpu, ctx.eip) {
-        ctx.eip = ctx.eip.wrapping_add(2);
-        super::system::enter_user(cpu, &ctx);
-        return;
-    }
-    if vector == 13 && error == Some(0) && is_interrupt_flag_change(cpu, ctx.eip) {
-        ctx.eip = ctx.eip.wrapping_add(1);
+    if vector == 13
+        && let Some(len) = simulated(cpu, error, ctx.eip)
+    {
+        ctx.eip = ctx.eip.wrapping_add(len);
         super::system::enter_user(cpu, &ctx);
         return;
     }
