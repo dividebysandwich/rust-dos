@@ -250,10 +250,10 @@ const MAX_INSTRUCTIONS: u32 = 0x10_0000;
 /// Execute(this, buffer, viewport, flags): run the buffer's
 /// instructions, drawing in the viewport. With D3DEXECUTE_UNCLIPPED the
 /// program says every primitive is inside the viewport, and Direct3D
-/// hands them to the driver without clipping them, as
-/// D3DDP_DONOTCLIP does: WarGames' transformed vertices have depths of
-/// 4 to 33, which it draws with depth testing off, and they would all
-/// be clipped at z 1.
+/// hands them to the driver without clipping them, as D3DDP_DONOTCLIP
+/// does: WarGames' transformed vertices have depths of 4 to 33, which
+/// it draws with depth testing off, and they would all be clipped at
+/// z 1.
 pub fn execute(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, buffer, viewport, flags] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -280,8 +280,11 @@ pub fn execute(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         bytes,
         vertices: vec![Processed::default(); e.data[1].min(0x1_0000) as usize],
         data: e.data,
-        setup: None,
-        clip: flags & D3DEXECUTE_UNCLIPPED == 0 || flags & D3DEXECUTE_CLIPPED != 0,
+        flags: if flags & D3DEXECUTE_UNCLIPPED != 0 && flags & D3DEXECUTE_CLIPPED == 0 {
+            super::draw::D3DDP_DONOTCLIP
+        } else {
+            0
+        },
     };
     run.go(cpu);
     if let Some(e) = get_buffer(cpu, bid) {
@@ -297,13 +300,13 @@ struct Run {
     viewport: u32,
     /// The buffer's bytes.
     bytes: Vec<u8>,
-    /// The vertex array, and the setup its vertices were processed with.
+    /// The vertex array.
     vertices: Vec<Processed>,
-    setup: Option<pipeline::Setup>,
     /// D3DEXECUTEDATA's words after the size.
     data: [u32; 11],
-    /// Whether primitives are clipped: false with D3DEXECUTE_UNCLIPPED.
-    clip: bool,
+    /// The D3DDP_ flags the instructions process and draw with:
+    /// D3DDP_DONOTCLIP for D3DEXECUTE_UNCLIPPED.
+    flags: u32,
 }
 
 impl Run {
@@ -483,15 +486,14 @@ impl Run {
         } else {
             super::draw::D3DDP_DONOTLIGHT
         };
-        let Some(mut setup) =
-            setup_in(cpu, self.id, self.version, &layout, lighting, self.viewport)
+        let flags = lighting | self.flags;
+        let Some(mut setup) = setup_in(cpu, self.id, self.version, &layout, flags, self.viewport)
         else {
             return;
         };
         if !lit {
             setup.lighting = None;
         }
-        setup.clip &= self.clip;
         let first = self.data[0] as usize + start as usize * layout.size as usize;
         let mut input = Vec::new();
         for i in 0..count as usize {
@@ -521,7 +523,6 @@ impl Run {
                 *slot = v;
             }
         }
-        self.setup = Some(setup);
     }
 
     /// POINT, LINE or TRIANGLE: `count` of them, `size` bytes each.
@@ -546,17 +547,16 @@ impl Run {
                 }
             }
         }
-        let mut setup = match &self.setup {
-            Some(s) => s.clone(),
-            None => {
-                let layout = Layout::of(pipeline::FVF_TLVERTEX).unwrap_or_default();
-                match setup_in(cpu, self.id, self.version, &layout, 0, self.viewport) {
-                    Some(s) => s,
-                    None => return,
-                }
-            }
+        // The vertices are processed already: the draw takes the states it
+        // rasterizes with (culling, fill and shade modes, clipping) as
+        // they are now, after the STATERENDER instructions since the
+        // PROCESSVERTICES, as Wine's execute buffer draws with the
+        // device's current states.
+        let layout = Layout::of(pipeline::FVF_TLVERTEX).unwrap_or_default();
+        let (id, version, flags, viewport) = (self.id, self.version, self.flags, self.viewport);
+        let Some(setup) = setup_in(cpu, id, version, &layout, flags, viewport) else {
+            return;
         };
-        setup.clip &= self.clip;
         super::draw::draw_processed(cpu, self.id, &setup, &self.vertices, &prims);
     }
 }
