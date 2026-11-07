@@ -153,20 +153,45 @@ fn reprogramming_the_same_rate_logs_it_once() {
     }
     program_pit0(&mut bus, 0x36, 0);
     program_pit0(&mut bus, 0x36, 17045);
-    let rates: Vec<String> = bus
-        .take_log_backlog()
-        .into_iter()
-        .map(|(_, line)| line)
-        .filter(|line| line.starts_with("[PIT] Channel 0"))
-        .collect();
     assert_eq!(
-        rates,
+        pit0_rates_logged(&mut bus),
         [
             "[PIT] Channel 0 Frequency set to 70 Hz",
             "[PIT] Channel 0 Frequency set to 18 Hz",
             "[PIT] Channel 0 Frequency set to 70 Hz",
         ]
     );
+}
+
+#[test]
+fn a_rate_set_back_after_a_count_rewrite_is_logged() {
+    // A count written without a control word isn't logged, but it still
+    // changes the rate at the end of the period: setting the old rate
+    // again after that is a change, and the log shows it.
+    let mut bus = bus_at(1000);
+    bus.log_backlog = Some(Vec::new());
+    program_pit0(&mut bus, 0x36, 17045);
+    bus.io_write(0x40, 0);
+    bus.io_write(0x40, 0);
+    run_timer(&mut bus, 30_000);
+    assert_eq!(bus.pit0.reload(), 0x10000);
+    program_pit0(&mut bus, 0x36, 17045);
+    assert_eq!(
+        pit0_rates_logged(&mut bus),
+        [
+            "[PIT] Channel 0 Frequency set to 70 Hz",
+            "[PIT] Channel 0 Frequency set to 70 Hz",
+        ]
+    );
+}
+
+/// The channel 0 rates logged since the backlog was last taken.
+fn pit0_rates_logged(bus: &mut Bus) -> Vec<String> {
+    bus.take_log_backlog()
+        .into_iter()
+        .map(|(_, line)| line)
+        .filter(|line| line.starts_with("[PIT] Channel 0"))
+        .collect()
 }
 
 #[test]
