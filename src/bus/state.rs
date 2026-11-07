@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 38;
+const WIN32_VERSION: u16 = 39;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -804,6 +804,7 @@ mod tests {
         (36, 0xFB13_32FF_2A2F_4AC7), // each thread's debug registers
         (37, 0x9341_EE06_0BDB_0188), // an AVIVideo device's palette and MCI_REALIZE's background
         (38, 0xEED4_AAD5_91F9_E9C2), // Win16's open serial ports
+        (39, 0xEC3D_4AFA_6107_B768), // the screens kept under CS_SAVEBITS windows
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
