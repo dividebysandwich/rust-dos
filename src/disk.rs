@@ -535,11 +535,17 @@ enum OpenData {
 }
 
 /// An open host file, and its position as the last read, write or seek
-/// left it. Only these calls move the host's file pointer, so asking for
-/// the position, or seeking to where the pointer is, needs no system call
-/// of the host's. A program may do that hundreds of thousands of times a
-/// second: Railroad Tycoon II keeps a file's position on a stack in its
-/// main loop (#685).
+/// left it. Only these calls move the host's file pointer (`set_len`
+/// forgets it), so asking for the position, or seeking to where the
+/// pointer is, needs no system call of the host's. A program may do that
+/// hundreds of thousands of times a second: Railroad Tycoon II keeps a
+/// file's position on a stack in its main loop (#685).
+///
+/// A libretro frontend keeps its files as C streams, which need a seek
+/// between a read and a write that follows it, or the other way round.
+/// The seeks this leaves out are the ones that move nothing, so the
+/// frontend's handle (`VfsFile` in the libretro crate) makes that seek
+/// itself.
 struct HostFile {
     file: File,
     /// None until it is asked for, and after a call that failed, which
@@ -567,9 +573,9 @@ impl HostFile {
 
     /// Move the position on by the bytes a read or write `result` says it
     /// moved, or forget it after one that failed.
-    fn moved(&self, result: std::io::Result<u64>) -> std::io::Result<u64> {
+    fn moved(&self, result: std::io::Result<usize>) -> std::io::Result<usize> {
         let pos = match &result {
-            Ok(n) => self.pos.get().map(|p| p + n),
+            Ok(n) => self.pos.get().map(|p| p + *n as u64),
             Err(_) => None,
         };
         self.pos.set(pos);
@@ -580,8 +586,12 @@ impl HostFile {
         self.file.len()
     }
 
-    /// The pointer stays where it was, even past the new end.
+    /// The host's own file systems leave the pointer where it was, even
+    /// past the new end, but a libretro frontend cuts the file its own
+    /// way: the position is asked of the host again after it. Programs
+    /// seldom cut a file, so that costs nothing that matters.
     fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.pos.set(None);
         self.file.set_len(len)
     }
 
@@ -592,15 +602,13 @@ impl HostFile {
 
 impl Read for HostFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let result = (&self.file).read(buf).map(|n| n as u64);
-        self.moved(result).map(|n| n as usize)
+        self.moved((&self.file).read(buf))
     }
 }
 
 impl Write for HostFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let result = (&self.file).write(buf).map(|n| n as u64);
-        self.moved(result).map(|n| n as usize)
+        self.moved((&self.file).write(buf))
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
