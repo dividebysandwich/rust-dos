@@ -15,7 +15,7 @@
 //! Wine's MSACM32.DLL and its codecs convert too, as guest code:
 //! `win32_dlls_replace=msacm32` puts them in place of this one.
 
-mod adpcm;
+pub mod adpcm;
 
 use super::kernel32::virtual_memory::allows;
 use super::stubs::{Api, Conv, Dll, Handler};
@@ -25,7 +25,7 @@ use super::winmm::{
     MMSYSERR_NOERROR, MMSYSERR_NOTSUPPORTED,
 };
 use crate::cpu::Cpu;
-use adpcm::{IMA_ADPCM, MS_ADPCM};
+use adpcm::MS_ADPCM;
 use std::collections::BTreeMap;
 
 pub static DLL: Dll = Dll {
@@ -315,39 +315,21 @@ fn driver_priority(_: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// second number.
 fn adpcm_format(cpu: &mut Cpu, at: u32) -> Option<(adpcm::Format, u32)> {
     let tag = cpu.bus.guest_read_16(at);
-    let extra = match tag {
-        MS_ADPCM => 4,
-        IMA_ADPCM => 2,
-        _ => return None,
-    };
-    if !allows(cpu, at, 18 + extra, false) || cpu.bus.guest_read_16(at + 14) != 4 {
+    let mut len = adpcm::WAVEFORMATEX_SIZE + adpcm::extra_fields(tag)?;
+    if !allows(cpu, at, len as u32, false) {
         return None;
     }
-    let size = cpu.bus.guest_read_16(at + 16) as u32;
-    let mut f = adpcm::Format {
-        tag,
-        channels: cpu.bus.guest_read_16(at + 2),
-        block_align: cpu.bus.guest_read_16(at + 12),
-        samples_per_block: cpu.bus.guest_read_16(at + 18),
-        coefficients: Vec::new(),
-    };
     if tag == MS_ADPCM {
-        let count = cpu.bus.guest_read_16(at + 20) as u32;
-        if size < extra + 4 * count || !allows(cpu, at + 22, 4 * count, false) {
+        // The coefficients, as many as wNumCoef says.
+        let count = cpu.bus.guest_read_16(at + 20) as usize;
+        if !allows(cpu, at + len as u32, 4 * count as u32, false) {
             return None;
         }
-        f.coefficients = (0..count)
-            .map(|i| {
-                let pair = at + 22 + 4 * i;
-                let first = cpu.bus.guest_read_16(pair) as i16;
-                (first, cpu.bus.guest_read_16(pair + 2) as i16)
-            })
-            .collect();
-    } else if size < extra {
-        return None;
+        len += 4 * count;
     }
-    let rate = cpu.bus.guest_read_32(at + 4);
-    (f.valid() && rate != 0).then_some((f, rate))
+    let mut wfx = vec![0; len];
+    cpu.bus.guest_read_bytes(at, &mut wfx);
+    adpcm::Format::from_wave_format(&wfx)
 }
 
 /// Write PCM of `channels`, `rate` and `bits` at `at`, as WAVEFORMATEX
