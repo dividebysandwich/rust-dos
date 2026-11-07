@@ -636,15 +636,19 @@ fn mci_plays_an_audio_track_of_a_cd_image() {
 /// A track's length runs to the next track's start, the pregap between
 /// them included, and the last track's and the disc's stop a frame short
 /// of the lead-out, as Windows 98 SE gives them from the table of
-/// contents. Drakan's CD check compares them with the disc's.
+/// contents. Drakan's CD check compares them with the disc's. A seek to
+/// the end goes to the last frame of that length, two before the
+/// lead-out, as Windows 98 SE reports the position after it.
 #[test]
 fn mci_track_lengths_are_windows_98s() {
-    const COMMANDS: [&str; 6] = [
+    const COMMANDS: [&str; 8] = [
         "open cdaudio alias cd",
         "set cd time format msf",
         "status cd length track 1",
         "status cd length track 2",
         "status cd length",
+        "seek cd to end",
+        "status cd position",
         "close cd",
     ];
     for core in CORES {
@@ -664,10 +668,16 @@ fn mci_track_lengths_are_windows_98s() {
         );
         run_to_exit(&mut cpu, 20_000, |_| {});
         let text = printed(&cpu);
-        assert_eq!(cpu.errorlevel, 0x3F, "{core:?}: {text:?}");
+        assert_eq!(cpu.errorlevel, 0xFF, "{core:?}: {text:?}");
         let msf = |s: u32| format!("{:02}:{:02}:{:02}", s / 4500, s / 75 % 60, s % 75);
         let lines: Vec<&str> = text.lines().collect();
-        let want = [msf(data + 150), msf(374), msf(data + 150 + 374)];
+        // The lead-out is at data + 150 + 375; positions count 150 more.
+        let want = [
+            msf(data + 150),
+            msf(374),
+            msf(data + 150 + 374),
+            msf(data + 150 + 373 + 150),
+        ];
         assert_eq!(
             lines,
             want.iter().map(String::as_str).collect::<Vec<_>>(),
