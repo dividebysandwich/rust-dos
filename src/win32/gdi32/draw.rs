@@ -1592,6 +1592,8 @@ pub struct Translate {
     table: Vec<Option<u32>>,
     cache: Option<std::collections::HashMap<u32, u32>>,
     map: Option<super::palette::DeviceMap>,
+    /// The source DC's background color as the source's value
+    /// (`bk_value`).
     src_bk: u32,
     text: u32,
     bk: u32,
@@ -1601,8 +1603,9 @@ pub struct Translate {
 
 impl Translate {
     /// The translation from `src`, `map` the destination DC's if the
-    /// destination is a palette device; the DCs' colors as `convert`
-    /// takes them.
+    /// destination is a palette device: `src_bk` the source DC's
+    /// background color (a COLORREF), `text` and `bk` the destination
+    /// DC's colors as its values.
     pub fn new(
         src: &Surface,
         map: Option<super::palette::DeviceMap>,
@@ -1634,7 +1637,7 @@ impl Translate {
             table,
             cache,
             map,
-            src_bk,
+            src_bk: bk_value(src, src_bk),
             text,
             bk,
             key: None,
@@ -1761,10 +1764,22 @@ pub struct KeptTable {
     table: Vec<Option<u32>>,
 }
 
+/// The source DC's background color `color` as a value of `src`, which
+/// a blit from color to monochrome compares the pixels with: Windows
+/// turns the color into the source's format first, as a pixel drawn in
+/// it would be stored. On a bitmap of 16 bits RGB(255, 252, 255) is
+/// white, and white pixels match it (Chaos Overlords' transparent
+/// blits); with a color table it is the index of the nearest color, and
+/// other entries of the same color don't match. A monochrome source
+/// doesn't use it.
+pub fn bk_value(src: &Surface, color: u32) -> u32 {
+    if src.mono { 0 } else { src.value_of(color) }
+}
+
 /// A source pixel's value `v` as the destination's: a monochrome
 /// bitmap's 0 and 1 are the destination DC's text and background
-/// colors; a color becomes 1 on a monochrome bitmap when it is the source
-/// DC's background color.
+/// colors; a color becomes 1 on a monochrome bitmap when its value is
+/// `src_bk`, the source DC's background color (`bk_value`).
 #[inline]
 pub fn convert(src: &Surface, v: u32, dst: &Surface, src_bk: u32, text: u32, bk: u32) -> u32 {
     if src.mono && dst.mono {
@@ -1774,7 +1789,14 @@ pub fn convert(src: &Surface, v: u32, dst: &Surface, src_bk: u32, text: u32, bk:
         return if v != 0 { bk } else { text };
     }
     if dst.mono {
-        return (src.color_of(v) & 0xFFFFFF == src_bk & 0xFFFFFF) as u32;
+        // Bits outside the masks (a 32-bit pixel's top byte) aren't
+        // part of the color.
+        let v = if src.bpp > 8 {
+            v & (src.masks[0] | src.masks[1] | src.masks[2])
+        } else {
+            v
+        };
+        return (v == src_bk) as u32;
     }
     if src.bpp == dst.bpp && src.bpp > 8 && src.masks == dst.masks {
         return v;
