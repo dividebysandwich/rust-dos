@@ -152,7 +152,10 @@ const TEXTS: &[(Option<u32>, &str)] = &[
     (Some(100_252), "too few knots"),
     (Some(100_253), "valid knot range is empty"),
     (Some(100_254), "decreasing knot sequence knot"),
-    (Some(100_255), "knot multiplicity greater than order of spline"),
+    (
+        Some(100_255),
+        "knot multiplicity greater than order of spline",
+    ),
     (Some(100_256), "endcurve() must follow bgncurve()"),
     (Some(100_257), "bgncurve() must precede endcurve()"),
     (Some(100_258), "missing or extra geometric data"),
@@ -300,6 +303,10 @@ fn missing(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
     let base = DLL.base + 0x1000;
     let stub = cpu.eip().wrapping_sub(4).wrapping_sub(base) / super::stubs::STUB;
     let name = APIS.get(stub as usize).map_or("?", |a| a.name);
-    log_once(cpu, stub as u16, &format!("{name}: not implemented, ignored"));
+    log_once(
+        cpu,
+        stub as u16,
+        &format!("{name}: not implemented, ignored"),
+    );
     Some(0)
 }

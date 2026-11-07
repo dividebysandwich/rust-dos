@@ -40,7 +40,10 @@ const GL_BITMAP: u32 = 0x1A00;
 /// Whether GLU takes `format`: the formats from GL_COLOR_INDEX to
 /// GL_LUMINANCE_ALPHA, and GL_BGR_EXT and GL_BGRA_EXT.
 fn legal_format(format: u32) -> bool {
-    matches!(format, GL_COLOR_INDEX..=GL_LUMINANCE_ALPHA | GL_BGR_EXT | GL_BGRA_EXT)
+    matches!(
+        format,
+        GL_COLOR_INDEX..=GL_LUMINANCE_ALPHA | GL_BGR_EXT | GL_BGRA_EXT
+    )
 }
 
 /// Whether GLU takes `kind`: GL_BYTE to GL_FLOAT, and GL_BITMAP.
@@ -482,7 +485,18 @@ pub fn build_1d_mipmaps(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// heightout, typeout, dataout): 0, or a GLU error. An image of no
 /// size scales to nothing.
 pub fn scale_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let [format, win, hin, kind_in, at_in, wout, hout, kind_out, at_out] = args[..9] else {
+    let [
+        format,
+        win,
+        hin,
+        kind_in,
+        at_in,
+        wout,
+        hout,
+        kind_out,
+        at_out,
+    ] = args[..9]
+    else {
         return Some(0);
     };
     let sizes = [win, hin, wout, hout].map(|v| v as i32);
@@ -500,7 +514,14 @@ pub fn scale_image(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(GLU_INVALID_VALUE);
     };
     let n = elements(format) as usize;
-    let out = scale(n, win as usize, hin as usize, &data, wout as usize, hout as usize);
+    let out = scale(
+        n,
+        win as usize,
+        hin as usize,
+        &data,
+        wout as usize,
+        hout as usize,
+    );
     if !write(cpu, pack, (wout, hout, format, kind_out), at_out, &out) {
         return Some(GLU_INVALID_VALUE);
     }
@@ -583,13 +604,37 @@ mod tests {
     fn rows_are_padded_to_the_alignment_and_skips_count() {
         // 3 RGB bytes a pixel, 5 pixels: 15 bytes padded to 16.
         let l = layout([4, 0, 0, 0], 5, 2, GL_RGB, GL_UNSIGNED_BYTE).unwrap();
-        assert_eq!(l, Layout { start: 0, bit: 0, row: 16, len: 31 });
+        assert_eq!(
+            l,
+            Layout {
+                start: 0,
+                bit: 0,
+                row: 16,
+                len: 31
+            }
+        );
         // A row length of 8 pixels, a row and two pixels skipped.
         let l = layout([1, 8, 1, 2], 4, 2, GL_LUMINANCE, GL_UNSIGNED_BYTE).unwrap();
-        assert_eq!(l, Layout { start: 10, bit: 0, row: 8, len: 22 });
+        assert_eq!(
+            l,
+            Layout {
+                start: 10,
+                bit: 0,
+                row: 8,
+                len: 22
+            }
+        );
         // A bitmap of 10 bits a row is two bytes.
         let l = layout([1, 0, 0, 3], 10, 1, GL_COLOR_INDEX, GL_BITMAP).unwrap();
-        assert_eq!(l, Layout { start: 0, bit: 3, row: 2, len: 2 });
+        assert_eq!(
+            l,
+            Layout {
+                start: 0,
+                bit: 3,
+                row: 2,
+                len: 2
+            }
+        );
     }
 
     #[test]
@@ -606,14 +651,20 @@ mod tests {
     #[test]
     fn texels_take_the_components_of_their_format() {
         assert_eq!(texels(&[65535, 0, 0], GL_RGB), [[255, 0, 0, 255]]);
-        assert_eq!(texels(&[0, 0, 65535, 32768], GL_BGRA_EXT), [[255, 0, 0, 128]]);
+        assert_eq!(
+            texels(&[0, 0, 65535, 32768], GL_BGRA_EXT),
+            [[255, 0, 0, 128]]
+        );
         assert_eq!(texels(&[32768], GL_LUMINANCE), [[128, 128, 128, 255]]);
     }
 
     #[test]
     fn the_checks_are_windows_order() {
         assert_eq!(check(0, 4, 0, 0), Some(GLU_INVALID_VALUE));
-        assert_eq!(check(4, 4, 0x1234, GL_UNSIGNED_BYTE), Some(GLU_INVALID_ENUM));
+        assert_eq!(
+            check(4, 4, 0x1234, GL_UNSIGNED_BYTE),
+            Some(GLU_INVALID_ENUM)
+        );
         assert_eq!(check(4, 4, GL_RGB, 0x1234), Some(GLU_INVALID_ENUM));
         assert_eq!(
             check(4, 4, GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE),

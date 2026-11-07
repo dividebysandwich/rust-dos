@@ -137,8 +137,9 @@ fn invert(m: &M) -> Option<M> {
             if r != col {
                 let f = a[r][col];
                 if f != 0.0 {
-                    for c in 0..8 {
-                        a[r][c] -= f * a[col][c];
+                    let pivot_row = a[col];
+                    for (v, p) in a[r].iter_mut().zip(pivot_row) {
+                        *v -= f * p;
                     }
                 }
             }
@@ -244,7 +245,10 @@ pub fn pick_matrix_api(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// Write `v` as three doubles at the addresses `at`.
 fn write_doubles(cpu: &mut Cpu, at: [u32; 3], v: [f64; 3]) -> bool {
-    if at.iter().any(|&a| a == 0 || !cpu.bus.guest_probe(a, 8, true)) {
+    if at
+        .iter()
+        .any(|&a| a == 0 || !cpu.bus.guest_probe(a, 8, true))
+    {
         return false;
     }
     for (a, x) in at.into_iter().zip(v) {
@@ -255,14 +259,14 @@ fn write_doubles(cpu: &mut Cpu, at: [u32; 3], v: [f64; 3]) -> bool {
     true
 }
 
+/// gluProject's or gluUnProject's arithmetic: a point, the modelview
+/// and projection matrices and the viewport to the point mapped.
+type MapFn = fn([f64; 3], &M, &M, [i32; 4]) -> Option<[f64; 3]>;
+
 /// gluProject and gluUnProject: three doubles, the modelview and
 /// projection matrices and the viewport, and where the three results
 /// go. GL_TRUE when they were written.
-fn map_point(
-    cpu: &mut Cpu,
-    args: &[u32],
-    f: fn([f64; 3], &M, &M, [i32; 4]) -> Option<[f64; 3]>,
-) -> Option<u32> {
+fn map_point(cpu: &mut Cpu, args: &[u32], f: MapFn) -> Option<u32> {
     let p: [f64; 3] = doubles(args, 0);
     let (Some(model), Some(proj), Some(vp)) = (
         matrix_at(cpu, args[6]),
@@ -307,7 +311,10 @@ mod tests {
         // 90 degrees: the top edge at the near plane is y = 1, and the
         // aspect of 2 puts the right edge at x = 2.
         let corner = apply(&m, [2.0, 1.0, -1.0, 1.0]);
-        assert!(close(&[corner[0] / corner[3], corner[1] / corner[3]], &[1.0, 1.0]));
+        assert!(close(
+            &[corner[0] / corner[3], corner[1] / corner[3]],
+            &[1.0, 1.0]
+        ));
         assert!(perspective_matrix(90.0, 0.0, 1.0, 10.0).is_none());
         assert!(perspective_matrix(0.0, 1.0, 1.0, 10.0).is_none());
         assert!(perspective_matrix(60.0, 1.0, 5.0, 5.0).is_none());
@@ -316,12 +323,21 @@ mod tests {
     #[test]
     fn look_at_takes_the_eye_to_the_origin_looking_down_minus_z() {
         let m = look_at_matrix([1.0, 2.0, 3.0], [1.0, 2.0, -7.0], [0.0, 1.0, 0.0]);
-        assert!(close(&apply(&m, [1.0, 2.0, 3.0, 1.0]), &[0.0, 0.0, 0.0, 1.0]));
-        assert!(close(&apply(&m, [1.0, 2.0, -7.0, 1.0]), &[0.0, 0.0, -10.0, 1.0]));
+        assert!(close(
+            &apply(&m, [1.0, 2.0, 3.0, 1.0]),
+            &[0.0, 0.0, 0.0, 1.0]
+        ));
+        assert!(close(
+            &apply(&m, [1.0, 2.0, -7.0, 1.0]),
+            &[0.0, 0.0, -10.0, 1.0]
+        ));
         // For an eye at the origin looking down -x with y up, +z is on
         // its left: the point (0, 0, 1) is at x = -1.
         let m = look_at_matrix([0.0; 3], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        assert!(close(&apply(&m, [0.0, 0.0, 1.0, 1.0]), &[-1.0, 0.0, 0.0, 1.0]));
+        assert!(close(
+            &apply(&m, [0.0, 0.0, 1.0, 1.0]),
+            &[-1.0, 0.0, 0.0, 1.0]
+        ));
     }
 
     #[test]
