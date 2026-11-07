@@ -1,16 +1,13 @@
 //! The video decompressors Video for Windows has: Indeo Video 3 (IV31,
 //! IV32) and Indeo Video 5 (IV50), decoded by the `oxideav-indeo` crate,
 //! Indeo Video Interactive 4 (IV41, indeo4/), and Cinepak (CVID,
-//! `iccvid.dll`), decoded by the `oxideav-cinepak` crate. Windows 98
-//! installs codecs for the four. A picture comes out as what
+//! `iccvid.dll`, cinepak.rs). Windows 98 installs codecs for the four. A picture comes out as what
 //! ICDecompress gives for a BI_RGB output of 24 bits: a bottom-up DIB.
 //!
 //! A save state doesn't keep a decoder's picture: a copy of a decoder
 //! is empty, as one after a restore is, and its owner starts it again.
 
 use crate::win32::gdi32::surface::dib_stride;
-use oxideav_cinepak::header::FrameHeader as CinepakHeader;
-use oxideav_cinepak::{CinepakDecoder, CinepakFrame, CinepakPixelFormat};
 use oxideav_indeo::indeo3::{DecodedPicture, FrameHeader, Indeo3PictureDecoder};
 use oxideav_indeo::indeo5::{HostBuffer, Indeo5Decoder, pack_yuy2};
 
@@ -24,8 +21,8 @@ const CVID: u32 = u32::from_le_bytes(*b"CVID");
 const INDEO3_MAX: (u32, u32) = (640, 480);
 
 /// The widest and tallest Cinepak picture decoded. A frame's header gives
-/// its size in 16 bits, and the crate allocates a picture of that size
-/// before it reads a strip, so a damaged header could ask for gigabytes.
+/// its size in 16 bits, and the decoder makes a picture of that size, so
+/// a damaged header could ask for gigabytes.
 const CINEPAK_MAX: u32 = 4096;
 
 /// The FourCC `compression` in capitals, as ICOpen compares them.
@@ -50,9 +47,7 @@ enum Decoder {
     /// to decode leaves as it is.
     Indeo5(Box<Indeo5Decoder>, Option<(HostBuffer, (u32, u32))>),
     Indeo4(Box<super::indeo4::Decoder>),
-    /// With the last frame it decoded, which a frame that fails to decode
-    /// leaves as it is.
-    Cinepak(Box<CinepakDecoder>, Option<CinepakFrame>),
+    Cinepak(Box<super::cinepak::Decoder>),
 }
 
 /// A decompressor, or none yet.
@@ -71,7 +66,7 @@ impl std::fmt::Debug for Codec {
             Some(Decoder::Indeo3(_)) => "Codec(Indeo 3)",
             Some(Decoder::Indeo5(..)) => "Codec(Indeo 5)",
             Some(Decoder::Indeo4(_)) => "Codec(Indeo 4)",
-            Some(Decoder::Cinepak(..)) => "Codec(Cinepak)",
+            Some(Decoder::Cinepak(_)) => "Codec(Cinepak)",
             None => "Codec(None)",
         })
     }
@@ -84,7 +79,7 @@ impl Codec {
             IV31 | IV32 => Some(Decoder::Indeo3(Box::default())),
             IV50 => Some(Decoder::Indeo5(Box::default(), None)),
             IV41 => Some(Decoder::Indeo4(Box::new(super::indeo4::Decoder::new()))),
-            CVID => Some(Decoder::Cinepak(Box::default(), None)),
+            CVID => Some(Decoder::Cinepak(Box::default())),
             _ => None,
         })
     }
@@ -114,27 +109,7 @@ impl Codec {
                 Ok(())
             }
             Some(Decoder::Indeo4(d)) => d.decode(frame),
-            Some(Decoder::Cinepak(d, last)) => {
-                let header = CinepakHeader::parse(frame).map_err(|e| e.to_string())?;
-                if u32::from(header.width.max(header.height)) > CINEPAK_MAX {
-                    return Err(format!("a {}x{} frame", header.width, header.height));
-                }
-                // The crate takes its codebooks out for a frame and puts
-                // them back only when the frame decodes: after one that
-                // fails, the frames that inherit them would decode with
-                // empty ones. The decoder goes back to where it was.
-                let before = d.clone();
-                match d.decode_frame(frame, None) {
-                    Ok(f) => {
-                        *last = Some(f);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        *d = before;
-                        Err(e.to_string())
-                    }
-                }
-            }
+            Some(Decoder::Cinepak(d)) => d.decode(frame, CINEPAK_MAX as usize),
             None => Err("no decoder".to_string()),
         }
     }
@@ -161,37 +136,27 @@ impl Codec {
                     yvu9_dib(&p.y, &p.u, &p.v, (p.width, p.height), p.chroma_width())
                 })
             }
-            Decoder::Cinepak(_, last) => {
+            Decoder::Cinepak(d) => {
                 // A frame is coded in blocks of 4 by 4 pixels, so a movie
                 // whose size isn't a multiple of 4 is coded larger. The
                 // picture is the top left of it, as FFmpeg's decoder
                 // gives, which goes by the stream's size too.
-                let f = last.as_ref()?;
-                (f.width >= width && f.height >= height).then(|| cinepak_dib(f, width, height))
+                let (w, h) = d.size();
+                (w >= width as usize && h >= height as usize).then(|| cinepak_dib(d, width, height))
             }
         }
     }
 }
 
-/// The top left `width` by `height` of a Cinepak picture, rows of red,
-/// green and blue (or of grey) from the top, as a DIB.
-fn cinepak_dib(f: &CinepakFrame, width: u32, height: u32) -> Vec<u8> {
+/// The top left `width` by `height` of a Cinepak picture, as a DIB.
+fn cinepak_dib(d: &super::cinepak::Decoder, width: u32, height: u32) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let stride = dib_stride(width as i32, 24);
     let mut out = vec![0; stride * h];
-    for (y, line) in f.pixels().chunks_exact(f.stride()).take(h).enumerate() {
+    for y in 0..h {
         let row = out[(h - 1 - y) * stride..][..w * 3].as_chunks_mut::<3>().0;
-        match f.pixel_format {
-            CinepakPixelFormat::Rgb24 => {
-                for (d, &[r, g, b]) in row.iter_mut().zip(line.as_chunks::<3>().0) {
-                    *d = [b, g, r];
-                }
-            }
-            CinepakPixelFormat::Gray8 => {
-                for (d, &v) in row.iter_mut().zip(line) {
-                    *d = [v; 3];
-                }
-            }
+        for (o, &[r, g, b]) in row.iter_mut().zip(d.row(y)) {
+            *o = [b, g, r];
         }
     }
     out
@@ -406,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cinepak_frame_that_fails_leaves_the_decoder_as_it_was() {
+    fn a_cinepak_frame_cut_short_leaves_the_decoder_as_it_was() {
         let rgb = halves(3, &[255, 0, 0], &[0, 0, 255]);
         let key = oxideav_cinepak::encode_rgb24(&rgb, 8, 8, Default::default()).unwrap();
         // A frame that keeps the codebooks: one inter strip with no

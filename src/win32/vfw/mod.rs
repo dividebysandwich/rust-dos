@@ -7,6 +7,7 @@
 
 pub mod avi;
 pub mod avifil32;
+pub mod cinepak;
 pub mod codec;
 pub mod indeo4;
 pub mod msvfw32;
