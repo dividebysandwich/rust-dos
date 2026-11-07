@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 40;
+const WIN32_VERSION: u16 = 41;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -806,6 +806,7 @@ mod tests {
         (38, 0xEED4_AAD5_91F9_E9C2), // Win16's open serial ports
         (39, 0xEC3D_4AFA_6107_B768), // the screens kept under CS_SAVEBITS windows
         (40, 0xA3F7_D949_F091_BCF7), // DirectShow's joints and media type enumerators
+        (41, 0x85E3_E916_A675_5C54), // the program's allocator a DirectShow link uses
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.
