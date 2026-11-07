@@ -793,6 +793,34 @@ impl crate::savestate::State for KeyboardState {
     }
 }
 
+/// What the machine knows of the keystrokes queued in `Bus::keyboard_buffer`
+/// beyond the queue itself: how many the BIOS's keyboard interrupt hasn't
+/// run for (`drop_unseen_keys` throws those away when a program ends), and
+/// how many each make code queued (`bios_took_scan`). A state saves them
+/// with the queue, in a section of their own so states saved before it
+/// load.
+impl KeyboardState {
+    pub fn save_queue(&self, w: &mut crate::savestate::Writer) {
+        use crate::savestate::State;
+        self.unseen.save(w);
+        self.made.save(w);
+    }
+
+    pub fn load_queue(&mut self, r: &mut crate::savestate::Reader) -> crate::savestate::Result<()> {
+        use crate::savestate::State;
+        self.unseen.load(r)?;
+        self.made.load(r)
+    }
+
+    /// For a state from before `save_queue`: its queued keystrokes count
+    /// as typed ahead, whatever the machine running before the load had
+    /// queued.
+    pub fn forget_queue(&mut self) {
+        self.unseen = 0;
+        self.made.clear();
+    }
+}
+
 /// BDA 40:19h: the character code typed so far with Alt and the keypad.
 const ALT_KEYPAD: u32 = 0x0419;
 /// BDA 40:71h: bit 7 set by Ctrl+Break.

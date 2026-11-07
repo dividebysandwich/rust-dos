@@ -145,6 +145,27 @@ fn keys_the_bios_never_handled_go_when_the_shell_takes_over() {
     assert_eq!(bus.keyboard_buffer.iter().copied().collect::<Vec<_>>(), [0x1E61]);
 }
 
+/// A state keeps which queued keys the BIOS never saw: loaded in another
+/// run, the keys typed into a program that reads the keyboard itself still
+/// go when the program ends, and the ones typed ahead stay.
+#[test]
+fn a_state_keeps_the_keys_the_bios_never_handled() {
+    use rust_dos::keyboard::{bios_saw_keys, drop_unseen_keys, key_event};
+    let mut cpu = cpu();
+    key_event(&mut cpu.bus, 0x1E, false, true, None);
+    key_event(&mut cpu.bus, 0x1E, false, false, None);
+    bios_saw_keys(&mut cpu.bus);
+    key_event(&mut cpu.bus, 0x1F, false, true, None);
+    key_event(&mut cpu.bus, 0x1F, false, false, None);
+    let state = rust_dos::savestate::machine::save(&cpu);
+
+    let mut loaded = Cpu::new(PathBuf::from("."));
+    rust_dos::savestate::machine::load(&mut loaded, &state).unwrap();
+    assert_eq!(loaded.bus.keyboard_buffer.len(), 2);
+    drop_unseen_keys(&mut loaded.bus);
+    assert_eq!(loaded.bus.keyboard_buffer.iter().copied().collect::<Vec<_>>(), [0x1E61]);
+}
+
 #[test]
 fn keyboard_acknowledges_commands() {
     let mut bus = Bus::new(PathBuf::from("."));
