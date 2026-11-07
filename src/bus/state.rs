@@ -14,10 +14,10 @@ const SOUND_VERSION: u16 = 4;
 const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
-const IDE_VERSION: u16 = 2;
+const IDE_VERSION: u16 = 3;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 36;
+const WIN32_VERSION: u16 = 37;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -800,6 +800,7 @@ mod tests {
         (34, 0x2A81_5B37_A1B7_C90B), // DirectShow's program filters, allocators and clocks
         (35, 0xF4AA_E5DA_D534_7E8F), // which Win16 modules' own loaders are yet to run
         (36, 0xFB13_32FF_2A2F_4AC7), // each thread's debug registers
+        (37, 0x1F46_845D_9CC1_022D), // ASPI requests' due times, the drive's head
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

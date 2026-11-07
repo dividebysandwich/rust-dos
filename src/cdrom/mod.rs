@@ -12,6 +12,7 @@ pub mod decoded;
 pub mod folder;
 pub mod image;
 pub mod iso9660;
+pub mod timing;
 
 /// Bytes of user data in a data sector.
 pub const DATA_SECTOR: usize = 2048;

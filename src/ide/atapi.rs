@@ -6,16 +6,19 @@
 //! A port of the ATAPI half of DOSBox-X's ide.cpp: the task file and its
 //! status bits, the packet protocol with its data blocks and interrupts,
 //! the timing of commands (0.25 ms to take a packet, 1 ms for most
-//! commands, 3 ms a read), the disc's spin-up and a new disc's insertion,
-//! and the packet commands Windows 95 uses. Beyond DOSBox-X: the ATAPI
+//! commands), the disc's spin-up and a new disc's insertion, and the
+//! packet commands Windows 95 uses. Beyond DOSBox-X: the ATAPI
 //! signature after a soft reset, READ CAPACITY's last sector (not the
 //! lead-out), sense data for unknown commands, the relative address of
 //! READ SUB-CHANNEL, the subchannel of READ CD and READ SUB-CHANNEL from
-//! the image where it keeps it, and the sessions of READ TOC.
+//! the image where it keeps it, the sessions of READ TOC, and reads that
+//! take as long as the head and the disc take to reach and read their
+//! sectors (`cdrom::timing`), where DOSBox-X waits 3 ms for any read.
 
 use super::{BSY, DRDY, DRQ, DSC, ERR, Env, ticks};
 use crate::cdrom::audio::PlayState;
 use crate::cdrom::image::QPosition;
+use crate::cdrom::timing::{Geometry, Head};
 use crate::cdrom::{DATA_SECTOR, LBA_OFFSET, RAW_SECTOR, lba_to_msf};
 
 /// The largest data block, as DOSBox-X's buffer.
@@ -27,7 +30,6 @@ const SECTORS_PER_BLOCK: u32 = 16;
 const PACKET_DELAY: f64 = 0.25;
 const IDENTIFY_DELAY: f64 = 0.01;
 const COMMAND_DELAY: f64 = 1.0;
-const READ_DELAY: f64 = 3.0;
 const SPINUP_RETRY: f64 = 100.0;
 const INSERTION: f64 = 4000.0;
 const SPINUP: f64 = 1000.0;
@@ -138,6 +140,8 @@ pub struct Atapi {
     /// The disc's next change of state (insertion done, spun up, spun
     /// down).
     loading_at: Option<u64>,
+    /// Where the head is on the disc, for the time of the next read.
+    head: Head,
     /// Messages for the log.
     pub log: Vec<String>,
 }
@@ -147,7 +151,7 @@ crate::state_fields!(Atapi {
     feature, count, lba, drivehead, command, status, state, allow_writing, irq_signal,
     cdb, cdb_len, max_bytes, buf, buf_pos, buf_len,
     lba_next, remaining, xfer, sector_size, sense, loading, has_changed,
-    delayed, delayed_at, loading_at,
+    delayed, delayed_at, loading_at, head,
 } skip { log });
 
 impl Default for Atapi {
@@ -234,6 +238,7 @@ impl Atapi {
             delayed: Delayed::None,
             delayed_at: 0,
             loading_at: None,
+            head: Head::default(),
             log: Vec::new(),
         };
         ide.set_sense(0, 0, 0);
@@ -589,7 +594,8 @@ impl Atapi {
                 self.count = 0x02;
                 self.state = State::AtapiBusy;
                 self.status = BSY;
-                self.schedule(Delayed::Busy, READ_DELAY, env.now);
+                let ms = self.read_ms(env);
+                self.schedule(Delayed::Busy, ms, env.now);
                 return;
             }
         }
@@ -682,7 +688,7 @@ impl Atapi {
                 let delay = match op {
                     0x28 | 0xA8 | 0xBE => {
                         self.start_read();
-                        READ_DELAY
+                        self.read_ms(env)
                     }
                     _ => COMMAND_DELAY,
                 };
@@ -737,6 +743,18 @@ impl Atapi {
         self.remaining = if size == 0 { 0 } else { count };
         self.xfer = self.remaining.min(SECTORS_PER_BLOCK).min(BUFFER as u32 / size.max(1)).min(limit / size.max(1));
         self.remaining -= self.xfer;
+    }
+
+    /// How long, in ms, the block of a read the drive is to read next
+    /// (`xfer` sectors from `lba_next`) takes to reach and read, from now
+    /// (`cdrom::timing`). The head moves to the block's end.
+    fn read_ms(&mut self, env: &Env) -> f64 {
+        let Some(image) = env.cd(self.drive) else {
+            return COMMAND_DELAY;
+        };
+        let disc = Geometry::new(image.dpm());
+        let now = env.now as f64 / crate::timer::PIT_HZ as f64;
+        self.head.read(&disc, now, self.lba_next as i64, self.xfer)
     }
 
     /// A packet command's work, after its delay (`on_atapi_busy_time`).
@@ -831,6 +849,8 @@ impl Atapi {
                     env.player.reset();
                 }
                 self.lba_next = be32(&cdb[2..6]).saturating_add(1);
+                let now = env.now as f64 / crate::timer::PIT_HZ as f64;
+                self.head = Head::at(be32(&cdb[2..6]) as i64, now);
             }
             0x45 | 0xA5 | 0x47 => {
                 let (start, end) = match cdb[0] {

@@ -530,15 +530,18 @@ pub fn block(cpu: &mut Cpu, wait: Wait) {
 }
 
 /// When the first of the threads' timed waits that are still to come
-/// ends, by the clock's microseconds. A wait whose time has passed but
-/// that hasn't ended, while the system runs code of its own, ends at the
-/// next interrupt and gets no event of its own.
+/// ends, or an ASPI request the drive is still working on is done, by
+/// the clock's microseconds. A wait whose time has passed but that
+/// hasn't ended, while the system runs code of its own, ends at the next
+/// interrupt and gets no event of its own.
 pub(crate) fn wait_due(win32: &Win32, now: u64) -> Option<u64> {
     win32
         .processes
         .iter()
         .flat_map(|p| &p.threads)
         .filter_map(|t| t.wait.as_ref()?.deadline)
+        // An ASPI request ends a wait on its event when the drive is done.
+        .chain(super::wnaspi32::due(&win32.wnaspi32))
         .filter(|&d| d > now)
         .min()
 }
