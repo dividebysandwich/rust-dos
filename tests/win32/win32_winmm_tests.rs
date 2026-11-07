@@ -1252,6 +1252,123 @@ fn avivideo_realizes_the_movies_palette_on_a_256_colour_desktop() {
     }
 }
 
+/// On a desktop of 256 colours, MCI_REALIZE realizes the movie's palette
+/// in its window at once, before a frame is drawn. The program realizes
+/// a palette of its own first, which takes every free entry of the
+/// system palette. A normal MCI_REALIZE makes the movie's palette the
+/// foreground one, which takes them back, so the system palette's entry
+/// 10 is the movie's first color. MCI_DGV_REALIZE_BKGD realizes it in
+/// the background, where no entry is free, and the entry keeps the
+/// program's color. The program then ends without MCI_CLOSE, and its
+/// device closes after its GDI objects went.
+#[test]
+fn avivideo_realize_takes_the_foreground_or_the_background() {
+    const WS_POPUP_VISIBLE: i32 = 0x9000_0000_u32 as i32;
+    const MCI_OPEN: i32 = 0x803;
+    const MCI_REALIZE: i32 = 0x840;
+    const OPEN_FLAGS: i32 = 0x0200 | 0x1_0000 | 0x2_0000;
+    const GENERIC_PARMS: u32 = 0xC0;
+    const ENTRY: u32 = 0xD0;
+    const LOGPALETTE: u32 = 0x100;
+    // Blue, green and red: (200, 100, 50) in RGB first.
+    let own = [[50, 100, 200], [90, 160, 30]];
+    let mut data = vec![0u8; LOGPALETTE as usize + 4 + 236 * 4];
+    put(&mut data, CLIP_NAME as usize, b"C:\\CLIP.AVI\0");
+    put(&mut data, STATIC as usize, b"Static\0");
+    put(
+        &mut data,
+        OPEN_PARMS as usize + 20,
+        &0x5000_0000u32.to_le_bytes(),
+    );
+    // The program's palette: 236 colors of red 1, green 2 and blue 0 to
+    // 235, none of them a static color.
+    put(&mut data, LOGPALETTE as usize, &[0, 3, 236, 0]);
+    for i in 0..236 {
+        put(
+            &mut data,
+            LOGPALETTE as usize + 4 + i * 4,
+            &[1, 2, i as u8, 0],
+        );
+    }
+    let imports: &[(&str, &[&str])] = &[
+        ("KERNEL32.dll", &["ExitProcess"]),
+        ("WINMM.dll", &["mciSendCommandA"]),
+        ("USER32.dll", &["CreateWindowExA", "GetDC"]),
+        (
+            "GDI32.dll",
+            &[
+                "CreatePalette",
+                "SelectPalette",
+                "RealizePalette",
+                "GetSystemPaletteEntries",
+            ],
+        ),
+    ];
+    let cases = [
+        ("realize_normal", 0x1_0000, 200 | 100 << 8 | 50 << 16),
+        ("realize_background", 0x2_0000, 0x0201),
+    ];
+    for (test, flags, entry) in cases {
+        let exe = program(imports, &data, |a, l| {
+            a.xor(ebx, ebx)?;
+            a.mov(dword_ptr(l.at(OPEN_PARMS + 12)), l.at(CLIP_NAME) as i32)?;
+            let args = [
+                0,
+                l.at(STATIC) as i32,
+                0,
+                WS_POPUP_VISIBLE,
+                0,
+                0,
+                64,
+                64,
+                0,
+                0,
+                0,
+                0,
+            ];
+            call(a, l.import(2), &args)?;
+            a.mov(dword_ptr(l.at(OPEN_PARMS + 24)), eax)?;
+            a.push(eax)?;
+            a.call(l.import(3))?;
+            a.mov(ebp, eax)?;
+            call(a, l.import(4), &[l.at(LOGPALETTE) as i32])?;
+            a.push(0)?;
+            a.push(eax)?;
+            a.push(ebp)?;
+            a.call(l.import(5))?;
+            a.push(ebp)?;
+            a.call(l.import(6))?;
+            let open = [0, MCI_OPEN, OPEN_FLAGS, l.at(OPEN_PARMS) as i32];
+            call(a, l.import(1), &open)?;
+            check_eax(a, 0, 0)?;
+            a.push(l.at(GENERIC_PARMS) as i32)?;
+            a.push(flags)?;
+            a.push(MCI_REALIZE)?;
+            a.push(dword_ptr(l.at(OPEN_PARMS + 4)))?;
+            a.call(l.import(1))?;
+            check_eax(a, 0, 1)?;
+            a.push(l.at(ENTRY) as i32)?;
+            a.push(1)?;
+            a.push(10)?;
+            a.push(ebp)?;
+            a.call(l.import(7))?;
+            a.mov(eax, dword_ptr(l.at(ENTRY)))?;
+            check_eax(a, entry, 2)?;
+            a.push(ebx)?;
+            a.call(l.import(0))?;
+            a.int3()
+        });
+        let files = [
+            ("T.EXE", exe),
+            ("CLIP.AVI", avi_clip_of(&[[0; 3]; 2], &own)),
+        ];
+        let mut cpu = machine(test, CoreMode::Normal, &files, |cpu| {
+            cpu.bus.win32.depth = rust_dos::config::DesktopDepth::Palette;
+        });
+        run_to_exit(&mut cpu, 20_000, |_| {});
+        assert_eq!(cpu.errorlevel, 0b111, "{test}: {:?}", printed(&cpu));
+    }
+}
 /// A WAV file of 100 ms of 8-bit mono silence at 11025 Hz.
 fn short_wav() -> Vec<u8> {
     let samples = vec![0x80u8; 1102];

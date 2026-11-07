@@ -288,12 +288,11 @@ pub fn create_palette(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// CreateHalftonePalette(hdc).
 pub fn create_halftone_palette(cpu: &mut Cpu, _args: &[u32]) -> Option<u32> {
-    Some(palette_of(cpu, &halftone_colors()))
+    Some(add(cpu, palette_of(&halftone_colors())))
 }
 
-/// A new palette of the colors `colors` (as COLORREFs), with no flags,
-/// for the system's own use.
-pub fn palette_of(cpu: &mut Cpu, colors: &[u32]) -> u32 {
+/// A palette of the colors `colors` (as COLORREFs), with no flags.
+fn palette_of(colors: &[u32]) -> Kind {
     let palette = Palette {
         entries: colors
             .iter()
@@ -301,7 +300,14 @@ pub fn palette_of(cpu: &mut Cpu, colors: &[u32]) -> u32 {
             .collect(),
         mapping: Vec::new(),
     };
-    add(cpu, Kind::Palette { palette })
+    Kind::Palette { palette }
+}
+
+/// A new palette of the colors `colors` for the system's own drawing
+/// (`gdi32::add_system`): the end of the process running when it is
+/// made leaves it, and its maker deletes it.
+pub fn system_palette_of(cpu: &mut Cpu, colors: &[u32]) -> u32 {
+    super::add_system(cpu, palette_of(colors))
 }
 
 /// GetPaletteEntries(hpal, start, count, entries): how many it copied,

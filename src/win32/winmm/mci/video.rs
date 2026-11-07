@@ -67,6 +67,10 @@ pub const MCI_DGV_WINDOW_STATE: u32 = 0x0004_0000;
 pub const MCI_DGV_WINDOW_TEXT: u32 = 0x0008_0000;
 const MCI_DGV_WINDOW_DEFAULT: u32 = 0;
 
+/// MCI_REALIZE's.
+pub const MCI_DGV_REALIZE_NORM: u32 = 0x0001_0000;
+pub const MCI_DGV_REALIZE_BKGD: u32 = 0x0002_0000;
+
 /// MCI_PUT's and MCI_WHERE's, and MCI_UPDATE's.
 pub const MCI_DGV_RECT: u32 = 0x0001_0000;
 pub const MCI_DGV_PUT_SOURCE: u32 = 0x0002_0000;
@@ -147,6 +151,9 @@ pub struct Video {
     /// On a palette device, the palette the pictures are drawn with,
     /// once one was drawn; 0 before.
     pub palette: u32,
+    /// Whether the palette is realized as a background palette: the
+    /// last MCI_REALIZE had MCI_DGV_REALIZE_BKGD.
+    pub background: bool,
 }
 
 /// A call into USER32: the function, its arguments, and the strings it
@@ -287,8 +294,12 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
         MCI_OPEN => open(cpu, i, flags, p),
         MCI_CLOSE => {
             halt(cpu, i);
+            // The device's palette is the system's (`add_system`), so it
+            // is still there when a process that ended closes its
+            // devices. Only a palette is deleted: DeleteObject of another
+            // handle sets the last error, of a process that may be gone.
             let palette = std::mem::take(&mut video(cpu, i).palette);
-            if palette != 0 {
+            if crate::win32::gdi32::gdi(cpu).palette(palette).is_some() {
                 crate::win32::gdi32::delete_object(cpu, &[palette]);
             }
             // A process that ended has no windows left, and no process
@@ -341,7 +352,7 @@ pub fn command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Parms) -> 
             p.ret_kind = Ret::Text;
             0
         }
-        MCI_REALIZE => 0,
+        MCI_REALIZE => realize(cpu, i, flags),
         MCI_WINDOW => set_window(cpu, i, flags, p),
         MCI_PUT => put(cpu, i, flags, p),
         MCI_WHERE => place(cpu, i, flags, p),
@@ -1001,27 +1012,57 @@ fn draw(cpu: &mut Cpu, i: usize, to: Option<(u32, Option<[i32; 4]>)>) {
     }
 }
 
+/// MCI_REALIZE: the movie's palette is realized in the device's window
+/// now, as a program does when its window gets WM_QUERYNEWPALETTE or
+/// WM_PALETTECHANGED. With MCI_DGV_REALIZE_BKGD it is a background
+/// palette, for this and the frames drawn after it, until an
+/// MCI_REALIZE without it.
+fn realize(cpu: &mut Cpu, i: usize, flags: u32) -> u32 {
+    if flags & MCI_TEST != 0 {
+        return 0;
+    }
+    video(cpu, i).background = flags & MCI_DGV_REALIZE_BKGD != 0;
+    let hwnd = video(cpu, i).hwnd;
+    if !palette::palette_device(cpu) || !user32::user(cpu).is_window(hwnd) {
+        return 0;
+    }
+    let Some(m) = media(cpu, i) else {
+        return 0;
+    };
+    let flags = crate::win32::gdi32::dc::DCX_USESTYLE | crate::win32::gdi32::dc::DCX_CACHE;
+    let hdc = user32::paint::window_dc(cpu, hwnd, flags, None);
+    if let Some(old) = select_movie_palette(cpu, i, &m, hdc) {
+        palette::select_palette(cpu, &[hdc, old, 1]);
+    }
+    user32::paint::release_dc(cpu, &[hwnd, hdc]);
+    0
+}
+
 /// On a palette device, select the movie's palette into `hdc` and
 /// realize it, as MCIAVI's DrawDib does before it draws: the movie's own
 /// colours for an 8-bit movie, the halftone palette for one of more
-/// bits. It is selected as a foreground palette, so in the foreground
-/// window or a child of it, its colours take the system palette's free
-/// entries. Returns the palette it replaced, which goes back in after
-/// the picture is drawn.
+/// bits. Unless MCI_REALIZE asked for the background, it is selected as
+/// a foreground palette, so in the foreground window or a child of it,
+/// its colours take the system palette's free entries. Returns the
+/// palette it replaced, which goes back in after the picture is drawn.
 fn select_movie_palette(cpu: &mut Cpu, i: usize, m: &Media, hdc: u32) -> Option<u32> {
     if !palette::palette_device(cpu) {
         return None;
     }
     let mut hpal = video(cpu, i).palette;
     if crate::win32::gdi32::gdi(cpu).palette(hpal).is_none() {
-        let colors = match &m.video {
-            MediaKind::Avi(v) if !v.colors().is_empty() => v.colors(),
-            _ => palette::halftone_colors(),
+        let mut colors = match &m.video {
+            MediaKind::Avi(v) => v.colors(),
+            _ => Vec::new(),
         };
-        hpal = palette::palette_of(cpu, &colors);
+        if colors.is_empty() {
+            colors = palette::halftone_colors();
+        }
+        hpal = palette::system_palette_of(cpu, &colors);
         video(cpu, i).palette = hpal;
     }
-    let old = palette::select_palette(cpu, &[hdc, hpal, 0]).filter(|&o| o != 0)?;
+    let background = video(cpu, i).background as u32;
+    let old = palette::select_palette(cpu, &[hdc, hpal, background]).filter(|&o| o != 0)?;
     palette::realize_posted(cpu, hdc);
     Some(old)
 }
@@ -1065,7 +1106,8 @@ crate::state_fields!(Video {
     balance,
     manual_show,
     drawn,
-    palette
+    palette,
+    background
 } skip {
     media,
     pictures
