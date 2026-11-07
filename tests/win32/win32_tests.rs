@@ -3547,14 +3547,48 @@ fn cli_and_sti_go_on_as_on_windows_98() {
 /// the program ends with CR0's PE bit, 1.
 #[test]
 fn a_gate_to_selector_28h_runs_level_0_code() {
+    let (code, text) = run_through_gate_28h(
+        "gate_28h",
+        &[
+            0x0F, 0x20, 0xC3, // mov ebx, cr0
+            0xCF, // iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A VxD service call at level 0, INT 20h and the service's dword, as
+/// SafeDisc 2.30's level 0 code makes one: the built-in Windows has no
+/// VxDs, so the program ends, naming the service and the INT's address.
+/// Bit 15 of the service's word marks a VxDJmp and isn't part of its
+/// number.
+#[test]
+fn a_vxd_call_at_level_0_names_the_service() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_level0",
+        &[
+            0xCD, 0x20, // int 20h
+            0x3E, 0x81, 0x01, 0x00, // VMM's service 013Eh, as a VxDJmp
+        ],
+    );
+    assert_eq!(code, 0xFF, "{}", text);
+    assert!(text.contains("VxD 0001h's service 013Eh"), "{}", text);
+    // The INT, at 30h of the data section, which starts at a page.
+    let at = text
+        .split_once("doesn't have at 0028:")
+        .and_then(|(_, rest)| u32::from_str_radix(rest.get(..8)?, 16).ok());
+    assert_eq!(at.map(|at| at & 0xFFF), Some(0x30), "{}", text);
+}
+
+/// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
+/// section, through a gate of level 3 for vector 5 with selector 28h. The
+/// program ends with EBX's bit 0 after it returns.
+fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
     let mut data = vec![0u8; 0x40];
-    data[0x30..0x34].copy_from_slice(&[
-        0x0F, 0x20, 0xC3, // mov ebx, cr0
-        0xCF, // iretd
-    ]);
-    let (code, text) = run(
-        "gate_28h",
+    data[0x30..0x30 + level0.len()].copy_from_slice(level0);
+    run(
+        name,
         program(BASE, false, imports, &data, |a, l| {
             // The IDT's base, from SIDT's 6 bytes at 0, and vector 5's
             // gate, kept at 10h.
@@ -3585,8 +3619,7 @@ fn a_gate_to_selector_28h_runs_level_0_code() {
             a.call(l.import(0))?;
             a.int3()
         }),
-    );
-    assert_eq!(code, 1, "{}", text);
+    )
 }
 
 /// C.DLL, whose entry point returns FALSE, and exports F.

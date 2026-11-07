@@ -365,16 +365,19 @@ enum Entry {
 /// runs uses the level 0 stack right below the frame of the exception it
 /// came in by, so an interrupt there can push its frame where one from
 /// level 3 would be, with or without an error code. Such a frame's second
-/// dword is its CS, 28h, pushed with the upper half 0. A frame from level
-/// 3 has its CS there, with RPL 3, or the EIP of an exception with an
-/// error code, never 28h: no program's code is in the first page. The CS is
-/// checked first, since the third dword of a frame from level 0, its
-/// EFLAGS, reads as a CS with RPL 3 when CF is set.
+/// dword is its CS, 28h, pushed with the upper half 0, and its first its
+/// EIP, in a module's image or the system arena, above the first 64K. A
+/// frame from level 3 has its CS there, with RPL 3, or the EIP of an
+/// exception with an error code. That EIP is 28h when a Win16 task faults
+/// at offset 28h of its segment, but the frame's first dword is then the
+/// error code, which has its upper half 0. The CS is checked first, since
+/// the third dword of a frame from level 0, its EFLAGS, reads as a CS with
+/// RPL 3 when CF is set.
 fn gate_entry(cpu: &mut Cpu) -> Option<Entry> {
     let top = SYSTEM + RING0_STACK_TOP;
     let sp = cpu.esp();
     let read = |cpu: &mut Cpu, at: u32| cpu.bus.guest_read_32(at);
-    if read(cpu, sp + 4) == CODE0 as u32 {
+    if read(cpu, sp + 4) == CODE0 as u32 && read(cpu, sp) > 0xFFFF {
         let mut ctx = Context::of(cpu);
         ctx.eip = read(cpu, sp);
         ctx.seg[Seg::CS as usize] = CODE0;
@@ -422,16 +425,19 @@ pub fn idt(cpu: &mut Cpu, vector: u8) {
         // INT 20h at level 0 is a VxD's call of a VMM or VxD service, its
         // number in the dword after the INT, as SafeDisc 2.30's level 0
         // code makes it. The built-in Windows has no VxDs, so it ends the
-        // program, naming the service, as for VxDCall from level 3.
-        Some(Entry::System(ctx)) if vector == 0x20 => {
+        // program, naming the service, as for VxDCall from level 3, and
+        // the INT, 2 bytes before the dword. The service's bit 15 marks a
+        // VxDJmp, which doesn't come back; the number is in bits 0-14.
+        Some(Entry::System(mut ctx)) if vector == 0x20 => {
             let service = cpu.bus.guest_read_32(ctx.eip);
+            ctx.eip = ctx.eip.wrapping_sub(2);
             super::fatal(
                 cpu,
                 &format!(
                     "an invalid VxD call at level 0: VxD {:04X}h's service {:04X}h, \
                      which the built-in Windows doesn't have",
                     service >> 16,
-                    service & 0xFFFF
+                    service & 0x7FFF
                 ),
                 Some(&ctx),
             );

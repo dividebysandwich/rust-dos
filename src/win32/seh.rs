@@ -359,13 +359,13 @@ fn code_at(cpu: &Cpu, eip: u32, len: usize) -> Option<Vec<u8>> {
 }
 
 /// Whether the instruction at `eip`, which faulted, is one only the
-/// system may run: HLT, CLI, STI, IN or OUT, or a move to or from a
-/// control register.
+/// system may run: HLT, IN or OUT, or a move to or from a control
+/// register. CLI and STI go on (`is_interrupt_flag_change`).
 fn privileged(cpu: &Cpu, eip: u32) -> bool {
     let byte = |at: u32| code_at(cpu, at, 1).map(|b| b[0]);
     match byte(eip) {
         Some(0x0F) => matches!(byte(eip.wrapping_add(1)), Some(0x20 | 0x22)),
-        Some(b) => matches!(b, 0xF4 | 0xFA | 0xFB | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F),
+        Some(b) => matches!(b, 0xF4 | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F),
         None => false,
     }
 }
