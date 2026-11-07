@@ -7,8 +7,11 @@ use crate::win16;
 use win16::{CODE, Code, program, run};
 
 /// USER's ordinals.
+const MESSAGE_BOX: u16 = 1;
 const GET_WINDOW_RECT: u16 = 32;
 const CREATE_WINDOW: u16 = 41;
+const GET_ACTIVE_WINDOW: u16 = 60;
+const END_DIALOG: u16 = 88;
 const SET_WINDOWS_HOOK: u16 = 121;
 const CALL_MSG_FILTER: u16 = 123;
 const DEF_HOOK_PROC: u16 = 235;
@@ -431,4 +434,47 @@ fn what_a_filter_hook_changes_reaches_call_msg_filters_caller() {
     }
     let (exit, log) = run("msg_filter", program(&code, CODE));
     assert_eq!(exit, 5, "{log}");
+}
+
+#[test]
+fn a_filter_hook_leaves_the_message_box_that_calls_it_intact() {
+    // A WH_MSGFILTER hook is called from the modal loop of a message box
+    // (USER32's MessageBoxA, which the program's MessageBox calls) for
+    // each of its messages, and ends the box. What the hook may have
+    // changed goes back to the message box's MSG on 32-bit code's stack:
+    // the message box's own frame, its return address included, stays
+    // as it was. The program ends with what MessageBox returned: IDOK.
+    let mut code = start();
+    let mut hooks = Hooks::default();
+    set_hook_ex(&mut code, &mut hooks, WH_MSGFILTER, 0, HOOK);
+    code.push(0); // no owner
+    let text_at = code.here() + 2;
+    code.push_far(0);
+    let caption_at = code.here() + 2;
+    code.push_far(0)
+        .push(0) // MB_OK
+        .call("USER", MESSAGE_BOX)
+        .exit_al();
+    // The hook (code, wParam, lParam): ends the active window's dialog,
+    // the message box, and leaves the message to it.
+    let filter = code.here();
+    code.emit(&[0x55, 0x8B, 0xEC]) // push bp; mov bp,sp
+        .call("USER", GET_ACTIVE_WINDOW)
+        .emit(&[0x50]) // push ax
+        .push(1) // IDOK
+        .call("USER", END_DIALOG)
+        .emit(&[
+            0x33, 0xC0, // xor ax,ax
+            0x5D, // pop bp
+            0xCA, 0x08, 0x00, // retf 8
+        ]);
+    let text = code.here();
+    code.emit(b"Unable to make a connection.\0");
+    code.patch(text_at, text);
+    code.patch(caption_at, text);
+    for &(place, _) in &hooks.0 {
+        code.patch(place, filter);
+    }
+    let (exit, log) = run("msg_filter_message_box", program(&code, CODE));
+    assert_eq!(exit, 1, "{log}");
 }

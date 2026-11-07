@@ -161,7 +161,10 @@ fn call_next(cpu: &mut Cpu, hook: u32, code: u32, wp: u32, lp: u32) -> Option<u3
         thunk::call32(cpu, next, &[hook, code, wp, lp], thunk::POST_PLAIN, Vec::new());
         return None;
     };
-    to32(cpu, &call);
+    // The 32-bit code that called the hook waits in its frame: scratch
+    // space goes below it.
+    let top = thunk::scratch32(cpu, 0);
+    to32(cpu, &call, top);
     let args = [hook, code, call.wp, call.lp];
     thunk::call32(cpu, next, &args, thunk::POST_HOOK, call.data());
     None
@@ -286,11 +289,14 @@ pub fn call_hook16(cpu: &mut Cpu, thunk: &Thunk) {
 /// structure. USER32 gets AX, the BOOL hooks of Windows 3.1 answer with
 /// (they may leave anything in DX), or the whole of DX:AX for a journal
 /// playback hook, which gives a time to wait.
-pub fn then(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Option<u32> {
+pub fn then(cpu: &mut Cpu, value: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     let Some(call) = Call::of(data) else {
         return Some(value);
     };
-    to32(cpu, &call);
+    // USER32's code that called the hook goes on, with `ctx`; its frame
+    // is off the list, so its stack starts at the context's ESP, and
+    // scratch space goes below that.
+    to32(cpu, &call, ctx.gpr[ESP]);
     if call.kind == WH_JOURNALPLAYBACK {
         Some(value)
     } else {
@@ -478,8 +484,9 @@ fn fill16(cpu: &mut Cpu, call: &Call) {
 /// Write what a 16-bit hook may change in its copy back to the 32-bit
 /// structure of `call`: the window being made, and the window to go
 /// after; the message a filter or GetMessage hook gets; the event a
-/// journal gives back.
-fn to32(cpu: &mut Cpu, call: &Call) {
+/// journal gives back. Scratch space for the conversion goes below `top`,
+/// the top of the free part of the 32-bit stack.
+fn to32(cpu: &mut Cpu, call: &Call, top: u32) {
     let (lp, at) = (call.lp, call.at16);
     if at == 0 {
         return;
@@ -497,10 +504,10 @@ fn to32(cpu: &mut Cpu, call: &Call) {
             // The message again from the copy if the hook changed it, so
             // that one whose parameters a MSG16 packs differently keeps
             // its own when it didn't.
-            let m16 = thunk::scratch32(cpu, 18);
+            let m16 = thunk::scratch32_below(top, 18);
             message::msg16(cpu, lp, m16);
             if super::peek(cpu, m16, 18) != super::peek(cpu, at, 18) {
-                let m = thunk::scratch32(cpu, 28);
+                let m = thunk::scratch32_below(top, 28);
                 message::msg32(cpu, at, m);
                 for i in 0..7 {
                     let v = read_32(cpu, m + 4 * i);
