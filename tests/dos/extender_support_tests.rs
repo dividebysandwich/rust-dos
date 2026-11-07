@@ -570,9 +570,44 @@ fn dbcs_lead_byte_table_is_empty() {
     assert_eq!(cpu.bus.read_16(table), 0, "length");
     assert_eq!(table + 2, ranges);
 
-    // The interim console flag is Far East DOS's only.
-    int21(&mut cpu, 0x6301);
-    assert_eq!(cpu.get_al(), 0xFF);
+    // Less than 5 bytes of room: error 1, and nothing written.
+    cpu.bus.write_8(0x30000, 0xAA);
+    cpu.set_cx(4);
+    int21(&mut cpu, 0x6507);
+    assert!(cf(&cpu));
+    assert_eq!((cpu.ax(), cpu.bus.read_8(0x30000)), (1, 0xAA));
+
+    // The interim console flag of Far East DOS: MS-DOS without DBCS
+    // support does nothing and succeeds.
+    cpu.set_dx(0x1234);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    int21(&mut cpu, 0x6302);
+    assert!(!cf(&cpu));
+    assert_eq!((cpu.ax(), cpu.dx()), (0x6302, 0x1234));
+}
+
+/// AX=6501h copies as much of the country information as CX has room for,
+/// and the length word after the info ID says how much.
+#[test]
+fn extended_country_info_fits_the_buffer() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.bus.load_bytes(0x30000, &[0xAA; 48]);
+    cpu.set_cx(9);
+    int21(&mut cpu, 0x6501);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.cx(), 9);
+    assert_eq!((cpu.bus.read_8(0x30000), cpu.bus.read_16(0x30001)), (1, 6));
+    assert_eq!((cpu.bus.read_16(0x30003), cpu.bus.read_16(0x30005)), (1, 437));
+    assert_eq!(cpu.bus.read_16(0x30007), 0, "date format: USA");
+    assert_eq!(cpu.bus.read_8(0x30009), 0xAA);
+
+    cpu.set_cx(64);
+    int21(&mut cpu, 0x6501);
+    assert_eq!((cpu.cx(), cpu.bus.read_16(0x30001)), (41, 38));
+    assert_eq!(cpu.bus.read_8(0x30009), b'$');
+    assert_eq!(cpu.bus.read_8(0x30029), 0xAA);
 }
 
 #[test]
