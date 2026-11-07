@@ -774,7 +774,10 @@ pub fn names() -> Vec<&'static str> {
 }
 
 /// The layout is saved by its code; the keys held, the dead key's accent
-/// and whether Windows runs as they are.
+/// and whether Windows runs as they are. The keys pressed since
+/// `take_pressed` start empty. What the machine knows of the queued
+/// keystrokes (`unseen`, `made`) goes in a section of its own
+/// (`save_queue`).
 impl crate::savestate::State for KeyboardState {
     fn save(&self, w: &mut crate::savestate::Writer) {
         self.layout.code.to_string().save(w);
@@ -793,12 +796,12 @@ impl crate::savestate::State for KeyboardState {
     }
 }
 
-/// What the machine knows of the keystrokes queued in `Bus::keyboard_buffer`
-/// beyond the queue itself: how many the BIOS's keyboard interrupt hasn't
-/// run for (`drop_unseen_keys` throws those away when a program ends), and
-/// how many each make code queued (`bios_took_scan`). A state saves them
-/// with the queue, in a section of their own so states saved before it
-/// load.
+/// What the machine knows of the keystrokes queued in
+/// `Bus::keyboard_buffer` beyond the queue itself: how many the BIOS's
+/// keyboard interrupt hasn't run for (`drop_unseen_keys` throws those away
+/// when a program ends), and how many each make code queued
+/// (`bios_took_scan`). A state saves them in a section of their own, KEYQ,
+/// so states saved before it load.
 impl KeyboardState {
     pub fn save_queue(&self, w: &mut crate::savestate::Writer) {
         use crate::savestate::State;

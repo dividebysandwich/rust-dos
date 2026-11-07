@@ -147,23 +147,49 @@ fn keys_the_bios_never_handled_go_when_the_shell_takes_over() {
 
 /// A state keeps which queued keys the BIOS never saw: loaded in another
 /// run, the keys typed into a program that reads the keyboard itself still
-/// go when the program ends, and the ones typed ahead stay.
+/// go when the program ends, the ones typed ahead stay, and the BIOS's
+/// keyboard interrupt still moves each make code's keystroke into its
+/// buffer. A state saved before the KEYQ section has its queued keys all
+/// typed ahead, whatever the machine loading it had queued.
 #[test]
 fn a_state_keeps_the_keys_the_bios_never_handled() {
-    use rust_dos::keyboard::{bios_saw_keys, drop_unseen_keys, key_event};
+    use rust_dos::keyboard::{BiosBuffer, bios_saw_keys, bios_took_scan, drop_unseen_keys, key_event};
+    use rust_dos::savestate::machine;
+    let queue = |cpu: &Cpu| cpu.bus.keyboard_buffer.iter().copied().collect::<Vec<_>>();
     let mut cpu = cpu();
     key_event(&mut cpu.bus, 0x1E, false, true, None);
     key_event(&mut cpu.bus, 0x1E, false, false, None);
     bios_saw_keys(&mut cpu.bus);
     key_event(&mut cpu.bus, 0x1F, false, true, None);
     key_event(&mut cpu.bus, 0x1F, false, false, None);
-    let state = rust_dos::savestate::machine::save(&cpu);
+    let (state, parts) = machine::save_parts(&cpu);
 
     let mut loaded = Cpu::new(PathBuf::from("."));
-    rust_dos::savestate::machine::load(&mut loaded, &state).unwrap();
-    assert_eq!(loaded.bus.keyboard_buffer.len(), 2);
+    machine::load(&mut loaded, &state).unwrap();
+    assert_eq!(queue(&loaded), [0x1E61, 0x1F73]);
     drop_unseen_keys(&mut loaded.bus);
-    assert_eq!(loaded.bus.keyboard_buffer.iter().copied().collect::<Vec<_>>(), [0x1E61]);
+    assert_eq!(queue(&loaded), [0x1E61]);
+
+    // A's make code reaches the BIOS's INT 09h: A goes into its buffer.
+    let mut loaded = Cpu::new(PathBuf::from("."));
+    machine::load(&mut loaded, &state).unwrap();
+    bios_took_scan(&mut loaded.bus, 0x1E);
+    assert_eq!(BiosBuffer::keys(&mut loaded.bus), [0x1E61]);
+    assert_eq!(queue(&loaded), [0x1F73]);
+
+    // The same state without its KEYQ section, loaded into a machine that
+    // has D typed into a program that reads the keyboard itself.
+    let keyq = parts.iter().find(|(name, _)| name == "KEYQ").expect("the section").1.clone();
+    let mut old = state[..keyq.start].to_vec();
+    old.extend_from_slice(&state[keyq.end..]);
+    let mut loaded = Cpu::new(PathBuf::from("."));
+    key_event(&mut loaded.bus, 0x20, false, true, None);
+    key_event(&mut loaded.bus, 0x20, false, false, None);
+    machine::load(&mut loaded, &old).unwrap();
+    bios_took_scan(&mut loaded.bus, 0x1E);
+    assert!(BiosBuffer::keys(&mut loaded.bus).is_empty());
+    drop_unseen_keys(&mut loaded.bus);
+    assert_eq!(queue(&loaded), [0x1E61, 0x1F73]);
 }
 
 #[test]
