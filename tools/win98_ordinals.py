@@ -16,8 +16,8 @@ import os
 import struct
 import sys
 
-# The built-in DLLs Windows 98 SE has. GLIDE2X (3dfx's) and D3D8
-# (DirectX 8) aren't part of it.
+# The built-in DLLs Windows 98 SE has. GLIDE2X and GLIDE3X (3dfx's),
+# and D3D8 and DINPUT8 (DirectX 8) aren't part of it.
 DLLS = [
     "ADVAPI32.DLL", "ADVPACK.DLL", "AMSTREAM.DLL", "AVIFIL32.DLL",
     "COMCTL32.DLL", "COMDLG32.DLL", "DCIMAN32.DLL", "DDRAW.DLL",

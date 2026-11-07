@@ -18,7 +18,9 @@
 //! - One Windows exports by ordinal only has that ordinal, and its name
 //!   too, so a program that asks for it by name still finds it:
 //!   COMCTL32's DPA functions, SHELL32's ID list ones and KERNEL32's
-//!   VxDCall0 are numbered as Windows numbers them.
+//!   VxDCall0 are numbered as Windows numbers them. The lists don't say
+//!   which function such an ordinal is, so `BY_ORDINAL_ONLY` names each
+//!   one the built-in DLLs have.
 //! - Any other, a function Windows 98 doesn't have, goes after the last
 //!   of Windows' ordinals, where no program expects one of Windows'.
 //!
@@ -137,7 +139,13 @@ fn every_export_has_windows_98s_ordinal_or_one_after_them() {
                     dll.name, name, real, ordinal
                 )),
                 Some(_) => {}
-                None if win98.unnamed.contains(&ordinal) || ordinal > win98.last => {}
+                None if ordinal > win98.last => {}
+                None if BY_ORDINAL_ONLY.contains(&(dll.name, name, ordinal)) => {}
+                None if win98.unnamed.contains(&ordinal) => wrong.push(format!(
+                    "{}: {} is on #{}, which Windows exports without a name: \
+                     list it in BY_ORDINAL_ONLY if it is that function",
+                    dll.name, name, ordinal
+                )),
                 None => wrong.push(format!(
                     "{}: {} isn't Windows 98's, so goes after #{}, not at #{}",
                     dll.name, name, win98.last, ordinal
@@ -171,25 +179,101 @@ fn every_built_in_dll_windows_98_has_has_its_list() {
     }
 }
 
+/// Every built-in export on an ordinal Windows 98 SE exports without a
+/// name: the DLL, the function's name (Wine's, or Windows NT's) and the
+/// ordinal. The lists can't tell which function an unnamed ordinal is, so
+/// a function goes on one only by being listed here, and a program that
+/// imports an ordinal the built-in DLL doesn't have fails to load rather
+/// than binding to another function.
+const BY_ORDINAL_ONLY: &[(&str, &str, u16)] = &[
+    ("KERNEL32.DLL", "VxDCall0", 1),
+    ("KERNEL32.DLL", "VxDCall1", 2),
+    ("KERNEL32.DLL", "VxDCall2", 3),
+    ("KERNEL32.DLL", "VxDCall3", 4),
+    ("KERNEL32.DLL", "VxDCall4", 5),
+    ("KERNEL32.DLL", "VxDCall5", 6),
+    ("KERNEL32.DLL", "VxDCall6", 7),
+    ("KERNEL32.DLL", "VxDCall7", 8),
+    ("KERNEL32.DLL", "VxDCall8", 9),
+    ("KERNEL32.DLL", "LoadLibrary16", 35),
+    ("KERNEL32.DLL", "FreeLibrary16", 36),
+    ("KERNEL32.DLL", "GetProcAddress16", 37),
+    ("SHELL32.DLL", "ILFindLastID", 16),
+    ("SHELL32.DLL", "ILRemoveLastID", 17),
+    ("SHELL32.DLL", "ILClone", 18),
+    ("SHELL32.DLL", "ILCloneFirst", 19),
+    ("SHELL32.DLL", "ILIsEqual", 21),
+    ("SHELL32.DLL", "ILIsParent", 23),
+    ("SHELL32.DLL", "ILFindChild", 24),
+    ("SHELL32.DLL", "ILCombine", 25),
+    ("SHELL32.DLL", "SHILCreateFromPath", 28),
+    ("SHELL32.DLL", "Shell_MergeMenus", 67),
+    ("SHELL32.DLL", "StrRetToStrN", 96),
+    ("SHELL32.DLL", "ILGetSize", 152),
+    ("SHELL32.DLL", "ILGetNext", 153),
+    ("SHELL32.DLL", "ILAppendID", 154),
+    ("SHELL32.DLL", "ILFree", 155),
+    ("SHELL32.DLL", "ILCreateFromPath", 157),
+    ("SHELL32.DLL", "SHSimpleIDListFromPath", 162),
+    ("SHELL32.DLL", "SHCreateDirectory", 165),
+    ("SHELL32.DLL", "SHGetSpecialFolderPath", 175),
+    ("SHELL32.DLL", "SHGetNewLinkInfoA", 179),
+    ("SHELL32.DLL", "SHFree", 195),
+    ("SHELL32.DLL", "SHAlloc", 196),
+    ("COMCTL32.DLL", "Alloc", 71),
+    ("COMCTL32.DLL", "ReAlloc", 72),
+    ("COMCTL32.DLL", "Free", 73),
+    ("COMCTL32.DLL", "GetSize", 74),
+    ("COMCTL32.DLL", "CreateMRUListA", 151),
+    ("COMCTL32.DLL", "FreeMRUList", 152),
+    ("COMCTL32.DLL", "AddMRUStringA", 153),
+    ("COMCTL32.DLL", "EnumMRUListA", 154),
+    ("COMCTL32.DLL", "FindMRUStringA", 155),
+    ("COMCTL32.DLL", "DelMRUString", 156),
+    ("COMCTL32.DLL", "CreateMRUListLazyA", 157),
+    ("COMCTL32.DLL", "AddMRUData", 167),
+    ("COMCTL32.DLL", "FindMRUData", 169),
+    ("COMCTL32.DLL", "Str_GetPtrA", 233),
+    ("COMCTL32.DLL", "Str_SetPtrA", 234),
+    ("COMCTL32.DLL", "DSA_Create", 320),
+    ("COMCTL32.DLL", "DSA_Destroy", 321),
+    ("COMCTL32.DLL", "DSA_GetItem", 322),
+    ("COMCTL32.DLL", "DSA_GetItemPtr", 323),
+    ("COMCTL32.DLL", "DSA_InsertItem", 324),
+    ("COMCTL32.DLL", "DSA_SetItem", 325),
+    ("COMCTL32.DLL", "DSA_DeleteItem", 326),
+    ("COMCTL32.DLL", "DSA_DeleteAllItems", 327),
+    ("COMCTL32.DLL", "DPA_Create", 328),
+    ("COMCTL32.DLL", "DPA_Destroy", 329),
+    ("COMCTL32.DLL", "DPA_Grow", 330),
+    ("COMCTL32.DLL", "DPA_Clone", 331),
+    ("COMCTL32.DLL", "DPA_GetPtr", 332),
+    ("COMCTL32.DLL", "DPA_GetPtrIndex", 333),
+    ("COMCTL32.DLL", "DPA_InsertPtr", 334),
+    ("COMCTL32.DLL", "DPA_SetPtr", 335),
+    ("COMCTL32.DLL", "DPA_DeletePtr", 336),
+    ("COMCTL32.DLL", "DPA_DeleteAllPtrs", 337),
+    ("COMCTL32.DLL", "DPA_Sort", 338),
+    ("COMCTL32.DLL", "DPA_Search", 339),
+    ("COMCTL32.DLL", "DPA_CreateEx", 340),
+    ("COMCTL32.DLL", "DPA_EnumCallback", 385),
+    ("COMCTL32.DLL", "DPA_DestroyCallback", 386),
+    ("COMCTL32.DLL", "DSA_EnumCallback", 387),
+    ("COMCTL32.DLL", "DSA_DestroyCallback", 388),
+];
+
 #[test]
 fn functions_windows_exports_by_ordinal_only_have_its_ordinals() {
-    let ordinal = |dll: &str, name: &str| {
-        let dll = DLLS.iter().find(|d| d.name == dll).unwrap();
-        dll.apis.iter().find(|a| a.name == name).unwrap().ordinal
-    };
-    let kernel32 = win98("KERNEL32.DLL").unwrap();
-    for (name, real) in [
-        ("VxDCall0", 1),
-        ("VxDCall8", 9),
-        ("LoadLibrary16", 35),
-        ("FreeLibrary16", 36),
-        ("GetProcAddress16", 37),
-    ] {
-        assert_eq!(ordinal("KERNEL32.DLL", name), real, "{}", name);
-        assert!(kernel32.unnamed.contains(&real));
+    for &(dll_name, name, ordinal) in BY_ORDINAL_ONLY {
+        let dll = DLLS.iter().find(|d| d.name == dll_name).unwrap();
+        let win98 = win98(dll_name).unwrap();
+        assert!(
+            exports(dll).any(|e| e == (name, ordinal)),
+            "{dll_name}: {name} isn't exported as #{ordinal}"
+        );
+        assert!(
+            win98.unnamed.contains(&ordinal) && !win98.named.contains_key(name),
+            "{dll_name}: Windows doesn't export #{ordinal} by ordinal only"
+        );
     }
-    // SHGetNewLinkInfo's code on Windows 98 SE is also #179's, which
-    // Windows NT names SHGetNewLinkInfoA.
-    assert_eq!(ordinal("SHELL32.DLL", "SHGetNewLinkInfoA"), 179);
-    assert_eq!(ordinal("COMCTL32.DLL", "DPA_Create"), 328);
 }
