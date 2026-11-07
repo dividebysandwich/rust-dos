@@ -83,6 +83,7 @@ impl Bus {
             pit2_gate_at_start: false,
             pit0_divisor: 0xFFFF,
             pit0_write_msb: false,
+            pit0_logged_reload: None,
             pit0_read_msb: false,
             pit0_access: 3,
             pit0_latched: 0,
@@ -360,6 +361,7 @@ impl Bus {
         self.pit0.write_count(0, now);
         self.pit0_divisor = 0;
         self.pit0_write_msb = false;
+        self.pit0_logged_reload = None;
         self.pit0_read_msb = false;
         self.pit0_access = 3;
         self.pit0_latched_active = false;

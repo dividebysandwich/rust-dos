@@ -143,6 +143,33 @@ fn mode_0_count_runs_on_through_zero() {
 }
 
 #[test]
+fn reprogramming_the_same_rate_logs_it_once() {
+    // Civilization's sound drivers write the 70 Hz rate again, control
+    // word and count, about twice a second.
+    let mut bus = bus_at(1000);
+    bus.log_backlog = Some(Vec::new());
+    for _ in 0..5 {
+        program_pit0(&mut bus, 0x36, 17045);
+    }
+    program_pit0(&mut bus, 0x36, 0);
+    program_pit0(&mut bus, 0x36, 17045);
+    let rates: Vec<String> = bus
+        .take_log_backlog()
+        .into_iter()
+        .map(|(_, line)| line)
+        .filter(|line| line.starts_with("[PIT] Channel 0"))
+        .collect();
+    assert_eq!(
+        rates,
+        [
+            "[PIT] Channel 0 Frequency set to 70 Hz",
+            "[PIT] Channel 0 Frequency set to 18 Hz",
+            "[PIT] Channel 0 Frequency set to 70 Hz",
+        ]
+    );
+}
+
+#[test]
 fn control_word_stops_the_timer_until_a_count_is_written() {
     let mut bus = bus_at(1000);
     bus.io_write(0x43, 0x34);

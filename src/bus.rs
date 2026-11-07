@@ -242,6 +242,10 @@ pub struct Bus {
     /// complete count is handed to `pit0`.
     pub pit0_divisor: u16,
     pub pit0_write_msb: bool,
+    /// The channel 0 reload value the log last reported, so a program
+    /// that sets the same rate again and again logs it once. Only the
+    /// log reads it, so states don't save it.
+    pub pit0_logged_reload: Option<u32>,
     /// Toggle for alternating LSB/MSB when reading port 0x40 in 2-byte mode.
     pub pit0_read_msb: bool,
     /// Channel 0 access mode from the last control word: 1 = LSB only,
@@ -2275,10 +2279,15 @@ impl Bus {
                     self.pit0
                         .write_count(self.pit0_divisor, self.clock.now_ticks());
                     self.clock.schedule(self.next_event());
-                    if !was_counting {
+                    // Some reprogram the same rate many times a second
+                    // (Civilization's sound drivers), so only a new rate
+                    // is logged.
+                    let reload = self.pit0.reload();
+                    if !was_counting && self.pit0_logged_reload != Some(reload) {
+                        self.pit0_logged_reload = Some(reload);
                         self.log_string(&format!(
                             "[PIT] Channel 0 Frequency set to {} Hz",
-                            1_193_182 / self.pit0.reload()
+                            1_193_182 / reload
                         ));
                     }
                 }
