@@ -242,6 +242,26 @@ fn a_blit_to_monochrome_matches_the_background_color_as_stored() {
     assert_eq!(got, [0xFF_FFFF, 0, 0xFF_FFFF, 0]);
 }
 
+/// From a bitmap with a color table, the background color is the index
+/// of its nearest color, and only pixels of that index match it: the
+/// table's second white doesn't, nor does a color near the background.
+#[test]
+fn a_blit_to_monochrome_matches_the_background_colors_index() {
+    let (mut cpu, screen) = machine(DesktopDepth::Adapter, &game_colors());
+    let cpu = &mut cpu;
+    let colors = [0x00_00FF, 0xFF_FFFF, 0xFF_FFFF, 0xF0_F0F0];
+    let color = dib_dc(cpu, BITS, &colors, true, |x, _| (x % 4) as u8);
+    let mono = dc::create_compatible_dc(cpu, &[screen]).unwrap();
+    let mask = bitmap::create_bitmap(cpu, &[4, 1, 1, 1, 0]).unwrap();
+    dc::select_object(cpu, &[mono, mask]);
+    dc::set_bk_color(cpu, &[color, 0xFF_FCFF]);
+    bit_blt(cpu, mono, (0, 0, 4, 1), color, 0, 0);
+    let got: Vec<u32> = (0..4)
+        .map(|x| draw::get_pixel(cpu, &[mono, x, 0]).unwrap())
+        .collect();
+    assert_eq!(got, [0, 0xFF_FFFF, 0, 0]);
+}
+
 /// How long the game's blits take: a 32x32 tile and the whole screen.
 /// `cargo test --release --lib gdi32::draw_tests::bench -- --ignored
 /// --nocapture`.
