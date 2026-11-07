@@ -399,6 +399,9 @@ FFmpeg's, but for frames that both decoders refuse as damaged, where the
 picture before stays. Indeo 5's frames that depend on earlier ones have
 not been compared with a reference. Cinepak's pictures match FFmpeg's
 exactly, every tenth frame of Wages of War's two Cinepak movies.
+ICInfo lists the four as installed `vidc` codecs, under the drivers
+Windows 98 SE's SYSTEM.INI names, so a program that asks whether Indeo
+4 is there before it plays a movie, as Age of Empires does, finds it.
 
 ## Sound and input
 

@@ -26,8 +26,20 @@ const INDEO3_MAX: (u32, u32) = (640, 480);
 /// a damaged header could ask for gigabytes.
 const CINEPAK_MAX: u32 = 4096;
 
+/// The decompressors installed, as Windows 98 SE's SYSTEM.INI
+/// [drivers32] lists them (`VIDC.<FourCC>=<driver>`, from its INFs and
+/// IR41_32.AX's registration): the FourCC, in lower case as programs
+/// write it, and the driver's file.
+pub const INSTALLED: &[(&[u8; 4], &str)] = &[
+    (b"cvid", "iccvid.dll"),
+    (b"iv31", "ir32_32.dll"),
+    (b"iv32", "ir32_32.dll"),
+    (b"iv41", "ir41_32.ax"),
+    (b"iv50", "ir50_32.dll"),
+];
+
 /// The FourCC `compression` in capitals, as ICOpen compares them.
-fn upper(compression: u32) -> u32 {
+pub fn upper(compression: u32) -> u32 {
     u32::from_le_bytes(compression.to_le_bytes().map(|b| b.to_ascii_uppercase()))
 }
 
