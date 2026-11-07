@@ -1437,7 +1437,7 @@ fn a_real_mode_mouse_handler_runs_while_the_client_is_in_protected_mode() {
     cpu.bus.mouse.set_position(x + 16, cpu.bus.mouse.y);
     cpu.bus.refresh_irq();
     assert!(run_to_exit(&mut cpu, 2000), "the program didn't end (step {})", word(&cpu, psp, STEP));
-    assert_eq!(cpu.errorlevel, 0x2A, "the handler ran: {}", word(&cpu, psp, R));
+    assert_eq!(cpu.errorlevel, 0x2A, "handler calls: {}", word(&cpu, psp, R));
     assert_eq!(word(&cpu, psp, R), 1);
     // The motion event, at the new position.
     assert_eq!(word(&cpu, psp, R + 2), 0x0001);
