@@ -56,7 +56,8 @@ impl DiskController {
     /// (`windows_hard_disk_free`): Windows 95 and 98 report a real disk's
     /// space, up to 2 GB through GetDiskFreeSpaceA and all of it through
     /// GetDiskFreeSpaceExA, and their setup programs check whole installs
-    /// of more than 1 GB against it.
+    /// of more than 1 GB against it. A CD has 32 KB clusters here, as
+    /// their CDFS gives them.
     pub fn windows_free_space(&self, drive: u8) -> Result<(u32, u32, u32, u32), u16> {
         self.free_space(drive, true)
     }
@@ -103,6 +104,18 @@ impl DiskController {
                 };
                 let total = (used + free as u64).min(max_total as u64) as u32;
                 (spc, free, bps, total)
+            }
+            // Windows 95 and 98's CDFS counts a disc in 32 KB clusters of
+            // 16 sectors, as many as fill the volume space its primary
+            // descriptor gives, and Drakan's CD check wants just that: 16
+            // sectors of 2048 bytes and none free. A folder's disc is as
+            // large as its files. DOS keeps MSCDEX's single sectors.
+            DriveKind::CdRom if windows => {
+                let sectors = d
+                    .image_sectors()
+                    .unwrap_or_else(|| used(u64::MAX).min(u32::MAX as u64) as u32);
+                let spc = CDFS_SECTORS_PER_CLUSTER;
+                (spc, 0, bps, sectors / spc)
             }
             DriveKind::CdRom => (spc, 0, bps, total),
             DriveKind::Virtual => (spc, 1000, bps, total),
@@ -168,7 +181,7 @@ impl DiskController {
             return match files.file(&path) {
                 Some(node) => Ok(Self::tree_attr(Some(node), None) as u16),
                 None if files.is_dir(&path) => Ok(Self::tree_attr(None, files.dir_record(&path)) as u16),
-                None => Err(0x02),
+                None => Err(Self::memory_missing(files, &path)),
             };
         }
         if let Some(found) = self.find_fat(filename) {
@@ -215,6 +228,15 @@ impl DiskController {
             volume.find(&parts)?;
             self.check_writable(drive)?;
             return volume.set_attr(&parts, attr as u8);
+        }
+        // A file on a CD image is there and can't be changed: access
+        // denied (05h), as MSCDEX and Windows 98's CDFS answer, which
+        // Drakan's CD check asks for. The drives held in memory keep no
+        // attributes. A name they haven't is not found as to
+        // `get_file_attribute`: 02h, or 03h in a directory they haven't.
+        if let Some((drive, ..)) = self.locate_in_memory(filename) {
+            self.get_file_attribute(filename)?;
+            return self.check_writable(drive);
         }
         // A name its folder's entries lack is no file (`locate_found`), as
         // to `is_file` and opens.
@@ -808,6 +830,10 @@ const WINDOWS_FREE_MOST: u64 = 0xF_0000;
 /// How far that free space drops before it goes back up, 2 GB in 4 KB
 /// clusters (`windows_hard_disk_free`).
 const WINDOWS_FREE_DROP: u64 = 0x8_0000;
+
+/// The sectors in a CD's cluster as Windows 95 and 98 report them, 32 KB
+/// of 2048-byte sectors (`windows_free_space`).
+const CDFS_SECTORS_PER_CLUSTER: u32 = 16;
 
 /// The first slot a FAT disk's search gives the system entries listed
 /// after its own (`DiskController::fat_slots`): past any directory short
