@@ -343,8 +343,10 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (ox, oy) = c.origin;
     let (sx0, sy0, sx1, sy1) = src.rect;
     let area = Rect::new(r.0, r.1, r.2, r.3).offset(ox, oy);
+    let mut pixels = 0;
     for clip in c.rects.clone() {
         let a = clip.intersect(&area);
+        pixels += a.width().max(0) as u64 * a.height().max(0) as u64;
         for py in a.top..a.bottom {
             let sy = stretch(py - oy, (r.1, r.3), (sy0, sy1));
             for px in a.left..a.right {
@@ -360,6 +362,7 @@ fn transparent_blt(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         c.drew(a);
     }
     xlat.keep(cpu);
+    draw::take_blit_time(cpu, &c.surface, pixels, Some(src.surface.target));
     c.close(cpu);
     Some(TRUE)
 }

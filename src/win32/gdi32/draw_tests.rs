@@ -237,3 +237,43 @@ fn bench_bit_blt_dib_to_palette_screen() {
     let full = time(&mut cpu, (0, 0, 640, 480), 200);
     println!("32x32: {tile:.2} us a blit, 640x480: {full:.1} us a blit");
 }
+
+/// The emulated nanoseconds `f` takes.
+fn emulated_ns(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu)) -> u64 {
+    let start = cpu.bus.clock.now_ns();
+    f(cpu);
+    cpu.bus.clock.now_ns() - start
+}
+
+/// Blits take the emulated time a Pentium II 350 with a Voodoo3 took
+/// for them: a copy from memory to the screen the call's 12.5 us and
+/// 18 ns a byte the mode's pixels take, one from memory to memory
+/// 10.7 us and 2.2 ns a byte, and a copy within the screen, which the
+/// card's blitter does, the call's time only.
+#[test]
+fn blits_take_the_time_a_period_pc_took() {
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+    let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+    let to_screen = emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, screen, (0, 0, 344, 209), mem, 0, 0)
+    });
+    let want = 12_500 + 344 * 209 * 18;
+    assert!(
+        to_screen.abs_diff(want) < want / 100,
+        "{to_screen} ns, {want} wanted"
+    );
+    let other = dib_dc(&mut cpu, BITS + 0x5_0000, &colors, false, tile_pixel);
+    let to_memory = emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, other, (0, 0, 344, 209), mem, 0, 0)
+    });
+    let want = 10_700 + 344 * 209 * 22 / 10;
+    assert!(
+        to_memory.abs_diff(want) < want / 100,
+        "{to_memory} ns, {want} wanted"
+    );
+    let within = emulated_ns(&mut cpu, |cpu| {
+        bit_blt(cpu, screen, (0, 0, 344, 209), screen, 10, 10)
+    });
+    assert!(within.abs_diff(12_500) < 200, "{within} ns");
+}

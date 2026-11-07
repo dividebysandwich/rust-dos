@@ -16,7 +16,7 @@
 //! ones.
 
 use super::dc::{self, Dc, OPAQUE};
-use super::surface::Surface;
+use super::surface::{Surface, Target};
 use super::{
     BS_HATCHED, BS_NULL, BS_SOLID, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE,
     PS_ALTERNATE, PS_DASH, PS_DASHDOT, PS_DASHDOTDOT, PS_DOT, PS_INSIDEFRAME, PS_NULL,
@@ -1444,6 +1444,43 @@ impl Rop {
     }
 }
 
+/// How long a blit takes on a period PC: a Pentium II 350 with a
+/// Voodoo3 under Windows 95, in 86Box, at 640x480 and 16 bits a pixel.
+/// Blits of a memory DC to a window: 1x1 79720 a second, 64x64 5660,
+/// 344x209 339, 640x480 90; that is about 12.5 us a call and 18 ns a
+/// byte written, 55 MB a second over the bus. Blits of a memory DC to
+/// another: 1x1 93287 a second, 344x209 3065, 640x480 744; about
+/// 10.7 us a call and 2.2 ns a byte. Programs that count their blits
+/// for a while to size their work (Chaos Overlords' start) count about
+/// what that PC did.
+const SCREEN_BLIT_NS: u64 = 12_500;
+const SCREEN_BYTE_PS: u64 = 18_000;
+const MEMORY_BLIT_NS: u64 = 10_700;
+const MEMORY_BYTE_PS: u64 = 2_200;
+
+/// Let the emulated time pass that a blit of `pixels` pixels to
+/// `surface` takes, `from` the target of its source if it has one. The
+/// built-in GDI's blits run outside the emulated CPU, so without this
+/// they take no time at all, and a loop that blits until a second has
+/// passed runs as many as the host can do. On the screen, a fill and a
+/// copy within it are the card's blitter's work, at hundreds of
+/// megabytes a second: they take the call's time only.
+pub fn take_blit_time(cpu: &mut Cpu, surface: &Surface, pixels: u64, from: Option<Target>) {
+    let (call_ns, byte_ps, bpp) = match surface.target {
+        // The screen's surface is 32 bits a pixel whatever the mode's
+        // depth is: the bytes moved are the mode's.
+        Target::Screen if from.is_some_and(|t| t != Target::Screen) => (
+            SCREEN_BLIT_NS,
+            SCREEN_BYTE_PS,
+            super::surface::screen_mode(cpu).bpp,
+        ),
+        Target::Screen => (SCREEN_BLIT_NS, 0, 0),
+        Target::Bitmap(_) | Target::Memory => (MEMORY_BLIT_NS, MEMORY_BYTE_PS, surface.bpp),
+    };
+    let bytes = (pixels * bpp as u64).div_ceil(8);
+    cpu.bus.clock.stall(call_ns + bytes * byte_ps / 1000);
+}
+
 /// A blit to the device rectangle from (`x0`, `y0`) to (`x1`, `y1`) of
 /// `hdst` (mirrored where they run backwards) from `source`, whose
 /// rectangle is in its device coordinates.
@@ -1497,6 +1534,13 @@ pub fn blit_from(
     let (ox, oy) = c.origin;
     let rects = std::mem::take(&mut c.rects);
     let dst_rect = r.offset(ox, oy);
+    let pixels = rects
+        .iter()
+        .map(|clip| {
+            let a = clip.intersect(&dst_rect);
+            a.width().max(0) as u64 * a.height().max(0) as u64
+        })
+        .sum();
     // A blit whose source and destination have the same size and run
     // the same way (one mirrored on both sides included) reads the
     // source pixel at the destination's place moved by this.
@@ -1563,6 +1607,8 @@ pub fn blit_from(
     if let Some(t) = xlat {
         t.keep(cpu);
     }
+    let from = source.as_ref().map(|(src, _)| src.surface.target);
+    take_blit_time(cpu, &c.surface, pixels, from);
     c.drawn = dst_rect;
     c.close(cpu);
     true
