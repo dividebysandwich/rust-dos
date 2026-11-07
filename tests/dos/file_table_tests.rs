@@ -17,6 +17,9 @@ fn machine(name: &str) -> Cpu {
     fs::write(dir.join("DATA.TXT"), b"0123456789").unwrap();
     let mut cpu = Cpu::new(dir);
     assert!(cpu.load_executable("P.COM", None));
+    // A COM program has all of memory: give back what it doesn't use, as
+    // programs that allocate do first.
+    rust_dos::mcb::resize(&mut cpu.bus, cpu.current_psp, 0x1000).unwrap();
     cpu
 }
 

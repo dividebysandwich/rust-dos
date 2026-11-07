@@ -86,6 +86,9 @@ fn step(a: &mut CodeAssembler, n: u16) -> Result<(), IcedError> {
 /// client, keeping the selectors and the real-mode segment.
 fn enter(a: &mut CodeAssembler, bits32: bool, fail: CodeLabel) -> Result<(), IcedError> {
     a.mov(word_ptr(RMSEG), cs)?;
+    // AH=4Ah resizes the block at ES, the PSP.
+    a.push(cs)?;
+    a.pop(es)?;
     a.mov(bx, 0x1000)?;
     a.mov(ah, 0x4A)?;
     a.int(0x21)?;

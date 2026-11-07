@@ -2328,11 +2328,14 @@ impl Cpu {
             "[DOS] Loaded COM file at {:04X}:{:04X}",
             self.cs(), self.ip()
         ));
-        // COM files are allocated the full 64KB segment by DOS convention.
-        self.heap_pointer = load_segment + 0x1000;
-        // Loaded high, it has its upper memory block already.
-        if !matches!(placement, Placement::High(_)) {
-            crate::mcb::init_for_program(&mut self.bus, load_segment, 0x1000);
+        // DOS gives a COM program the largest free block, up to `top`, and
+        // the program owns it until it shrinks it with AH=4Ah. Loaders such
+        // as Titus's CD loader unpack above their first 64 KB before they
+        // resize, so a free block's MCB there would be overwritten. EXEC
+        // and LOADHIGH allocated the block already: it stays as it is.
+        self.heap_pointer = top;
+        if placement == Placement::Shell {
+            crate::mcb::init_for_program(&mut self.bus, load_segment, top - load_segment);
         }
         true
     }
