@@ -1061,9 +1061,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
                     // Update PSP offset 0x16 (Parent PSP Segment)
                     cpu.bus.guest_write_16(psp_phys + 0x16, parent_psp_before);
-                    // Terminate address (INT 22h).
-                    cpu.bus.guest_write_16(psp_phys + 0x0A, return_address.0);
-                    cpu.bus.guest_write_16(psp_phys + 0x0C, return_address.1);
+                    // Terminate address: DOS points the INT 22h vector at
+                    // the parent's return address and keeps it in the PSP
+                    // (0Ah). Bureau 13's SETUP reckons the memory free for
+                    // the game from that vector's segment.
+                    let terminate = (return_address.1 as u32) << 16 | return_address.0 as u32;
+                    cpu.bus.guest_write_32(0x22 * 4, terminate);
+                    cpu.bus.guest_write_32(psp_phys + 0x0A, terminate);
 
                     // The two FCBs, and the AX the child starts with: AL
                     // (AH) FFh if the first (second) names a drive that

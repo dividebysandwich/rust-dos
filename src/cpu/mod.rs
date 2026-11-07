@@ -1153,13 +1153,18 @@ impl Cpu {
     }
 
     /// Whether the process `psp` is a PSP a program made that has a
-    /// terminate address to end at. EXEC here leaves INT 22h alone, so a
-    /// PSP made from the vector and never given an address of its own
-    /// holds the BIOS's IRET, which leads nowhere: such a process ends as
-    /// one with no context kept, back at the shell.
+    /// terminate address to end at. A PSP made from the INT 22h vector and
+    /// never given an address of its own holds the BIOS's IRET (under a
+    /// program the shell started) or the address its maker returns to when
+    /// it ends (under one EXEC started, which set the vector). Neither
+    /// leads back into the maker: such a process ends as one with no
+    /// context kept, back at the shell.
     pub fn ends_in_its_maker(&mut self, psp: u16) -> bool {
-        let terminate = self.bus.guest_read_32(psp as u32 * 16 + 0x0A);
-        !self.started_by_exec(psp) && terminate != crate::bios::default_ivt()[0x22]
+        let base = psp as u32 * 16;
+        let terminate = self.bus.guest_read_32(base + 0x0A);
+        let maker = self.bus.guest_read_16(base + 0x16);
+        let inherited = maker != 0 && terminate == self.bus.guest_read_32(maker as u32 * 16 + 0x0A);
+        !self.started_by_exec(psp) && terminate != crate::bios::default_ivt()[0x22] && !inherited
     }
 
     /// Hand the process `psp`, a PSP a program made and whose files and
@@ -1172,10 +1177,7 @@ impl Cpu {
     /// its DOS extender, and Drakkhen's driver into its loader.
     pub fn end_made_process(&mut self, psp: u16) {
         let base = psp as u32 * 16;
-        for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
-            let handler = self.bus.guest_read_32(base + 0x0A + 4 * i as u32);
-            self.bus.guest_write_32(vector * 4, handler);
-        }
+        crate::dos_files::restore_vectors(&mut self.bus, psp);
         let (terminate_ip, terminate_cs) = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
         let parent = self.bus.guest_read_16(base + 0x16);
         self.current_psp = parent;
@@ -1212,6 +1214,7 @@ impl Cpu {
     /// End the current process: back to the parent's context, returning
     /// through the terminate address in the process's PSP (0Ah), which
     /// EXEC set to the parent's return address and debuggers change. The
+    /// INT 22h, 23h and 24h vectors are set from the PSP, as DOS does. The
     /// parent's stack holds the interrupt frame the return pops. Returns
     /// false when no parent's context is kept, as for a process the shell
     /// started, which the caller ends by loading the shell again.
@@ -1232,6 +1235,7 @@ impl Cpu {
         // Contexts kept after it are those of other virtual machines'
         // processes, which go on.
         let context = self.process_stack.remove(index);
+        crate::dos_files::restore_vectors(&mut self.bus, psp);
         self.restore_context(context);
         if terminate != (0, 0) {
             let frame = self.get_physical_addr(self.ss(), self.sp()) as u32;
