@@ -1114,6 +1114,9 @@ fn a_programs_renderer_filter_gets_the_movies_pictures() {
 // ending with 0; a pin its vtable, its direction, its peer, how often
 // Connect and Disconnect were called, and its IMemInputPin (0 for none).
 const T_COUNTER: u32 = 0x110;
+const T_TYPES: u32 = 0x114;
+const T_TYPE: u32 = 0x118;
+const T_FETCHED: u32 = 0x11C;
 const T_TRANSFORM: u32 = 0x200;
 const T_RENDERER: u32 = 0x220;
 const T_TRANSFORM_ENUM: u32 = 0x240;
@@ -1133,6 +1136,8 @@ const PIN_PEER: u32 = 8;
 const PIN_CONNECTS: u32 = 12;
 const PIN_DISCONNECTS: u32 = 16;
 const CONTROL_PAUSE: i32 = 32;
+const GRAPH_RECONNECT: i32 = 32;
+const PIN_ENUM_MEDIA_TYPES: i32 = 48;
 
 /// A program's renderer and transform filter, added in that order. Both
 /// input pins take the decoder's first type; the transform's output pin
@@ -1141,9 +1146,11 @@ const CONTROL_PAUSE: i32 = 32;
 /// the transform, then the transform's output pin to the renderer's
 /// input pin, as the graph builder renders a filter's outputs after its
 /// input (Wine's test_graph_builder_render, run on Windows, finds both).
-/// The graph pauses the renderer before the transform, and as it goes
-/// it disconnects both ends of that connection and takes both filters
-/// out of it.
+/// The decoder's output pin enumerates its types, YV12 first, and
+/// Reconnect connects it to the transform again, as a transform-in-place
+/// filter's ReconnectPin asks. The graph pauses the renderer before the
+/// transform, and as it goes it disconnects both ends of each connection
+/// and takes both filters out of it.
 #[test]
 fn a_programs_transform_filter_gets_its_renderer_connected() {
     let mut data = vec![0u8; T_SIZE];
@@ -1414,6 +1421,30 @@ fn a_programs_transform_filter_gets_its_renderer_connected() {
         check(a, l, fail, 8, T_OUT + PIN_PEER, at(T_RENDERER_IN))?;
         check(a, l, fail, 9, T_OUT + PIN_CONNECTS, 1)?;
         check(a, l, fail, 10, T_RENDERER_IN + PIN_CONNECTS, 0)?;
+        // The decoder's types: YV12 first.
+        push(a, l, &[Ptr(T_TYPES)])?;
+        call_on(a, dword_ptr(l.at(T_IN + PIN_PEER)), PIN_ENUM_MEDIA_TYPES)?;
+        expect(a, fail, 22, S_OK)?;
+        push(a, l, &[Imm(1), Ptr(T_TYPE), Ptr(T_FETCHED)])?;
+        call_on(a, dword_ptr(l.at(T_TYPES)), 12)?;
+        expect(a, fail, 23, S_OK)?;
+        check(a, l, fail, 24, T_FETCHED, 1)?;
+        a.mov(eax, dword_ptr(l.at(T_TYPE)))?;
+        a.mov(eax, dword_ptr(eax + 16))?;
+        expect(a, fail, 25, 0x3231_5659)?;
+        call_on(a, dword_ptr(l.at(T_TYPES)), RELEASE)?;
+        // Reconnect: the transform's input disconnects and connects
+        // again.
+        push(a, l, &[Ptr(T_IN)])?;
+        a.mov(eax, dword_ptr(l.at(GRAPH)))?;
+        a.push(eax)?;
+        a.mov(eax, dword_ptr(eax))?;
+        a.call(dword_ptr(eax + GRAPH_RECONNECT))?;
+        expect(a, fail, 26, S_OK)?;
+        check(a, l, fail, 27, T_IN + PIN_DISCONNECTS, 1)?;
+        a.mov(ebx, 28)?;
+        a.cmp(dword_ptr(l.at(T_IN + PIN_PEER)), 0)?;
+        a.je(fail)?;
         // The renderer pauses first.
         method(a, l, fail, 11, (CONTROL, CONTROL_PAUSE), &[], S_OK)?;
         check(a, l, fail, 12, T_RENDERER + FILTER_PAUSED, 1)?;
@@ -1423,7 +1454,7 @@ fn a_programs_transform_filter_gets_its_renderer_connected() {
         method(a, l, fail, 16, (GRAPH, RELEASE), &[], 0)?;
         // Both ends of each connection disconnected, and both filters
         // left the graph.
-        check(a, l, fail, 17, T_IN + PIN_DISCONNECTS, 1)?;
+        check(a, l, fail, 17, T_IN + PIN_DISCONNECTS, 2)?;
         check(a, l, fail, 18, T_OUT + PIN_DISCONNECTS, 1)?;
         check(a, l, fail, 19, T_RENDERER_IN + PIN_DISCONNECTS, 1)?;
         check(a, l, fail, 20, T_TRANSFORM + FILTER_JOINED, 0)?;

@@ -30,6 +30,14 @@
 //! connections (`Joint`) to undo them when a filter leaves it, and moves
 //! the filters through the states from the renderers up.
 //!
+//! The decoder's output pin enumerates its types (EnumMediaTypes), which
+//! a program's transform-in-place filter passes on as its own, and
+//! IFilterGraph::Reconnect connects the decoder to the program's pin
+//! again, as Wine's ReconnectEx does for a stopped graph: both ends
+//! disconnect and the connection is made as RenderFile makes it, the
+//! pin's own types first. The base classes' ReconnectPin calls it when
+//! an in-place filter's output takes another type than its input has.
+//!
 //! Every call into the program goes through a task (task.rs): the
 //! connection's steps (`connect_step`), lists of calls the graph's
 //! methods make (`list_step`), and each call of the decoder's streaming
@@ -48,7 +56,8 @@ use super::graph::{graph, graph_of};
 use super::sample;
 use super::{
     E_FAIL, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, Kind, S_FALSE, S_OK, VFW_E_ALREADY_CONNECTED,
-    VFW_E_NOT_CONNECTED, VFW_E_NOT_FOUND, VFW_E_NOT_STOPPED, VFW_S_DUPLICATE_NAME, put32,
+    VFW_E_NO_ACCEPTABLE_TYPES, VFW_E_NOT_CONNECTED, VFW_E_NOT_FOUND, VFW_E_NOT_STOPPED,
+    VFW_S_DUPLICATE_NAME, put32,
 };
 use crate::cpu::Cpu;
 use crate::win32::com::Guid;
@@ -278,6 +287,16 @@ pub struct Decoder {
 #[derive(Clone, Debug, Default)]
 pub struct Pin {
     pub graph: u32,
+}
+
+/// An enumerator of the decoder's output types (IEnumMediaTypes): its
+/// graph, its pin (by its object) and the place in `FORMATS` of the next
+/// type it gives.
+#[derive(Clone, Debug, Default)]
+pub struct TypeEnum {
+    pub graph: u32,
+    pub pin: u32,
+    pub next: u32,
 }
 
 /// The graph of the decoder or pin `this`.
@@ -1403,7 +1422,9 @@ const V_OUT: usize = 17;
 const V_TARGET: usize = 18;
 const V_TARGET_ENUM: usize = 19;
 const V_IN: usize = 20;
-const V_QUEUE: usize = 21;
+/// 1 when Reconnect makes the connection again (`reconnect`).
+const V_AGAIN: usize = 21;
+const V_QUEUE: usize = 22;
 
 /// The connection's steps.
 const S_START: u16 = 0;
@@ -1450,6 +1471,8 @@ const S_TARGET_SKIP: u16 = 40;
 const S_JOINED: u16 = 41;
 const S_TARGET_DONE: u16 = 42;
 const S_DOWN_DONE: u16 = 43;
+const S_AGAIN_DISCONNECTED: u16 = 44;
+const S_AGAIN: u16 = 45;
 
 /// Connect the decoder of the file named by the wide string at `file`
 /// to an input pin of the program's filters in the graph `id`, before
@@ -1518,6 +1541,14 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     // which reads as S_OK: the steps that check results treat a missing
     // method by what it leaves in the scratch space.
     match t.step {
+        S_START if t.var(V_AGAIN) != 0 => {
+            // Reconnect: the program's pin disconnects, the link's
+            // reference on its IMemInputPin goes, and the pin is tried
+            // again.
+            super::IID_IMEM_INPUT_PIN.write(cpu, s + C_IID);
+            let pin = t.var(V_PIN);
+            call_method(cpu, pin, PIN_DISCONNECT, &[], S_AGAIN_DISCONNECTED)
+        }
         S_START => {
             let path = crate::win32::dmusic::read_wide(cpu, t.var(V_FILE), 260);
             let Some(m) = read_media(cpu, &path).filter(|m| m.frames > 0) else {
@@ -1606,7 +1637,13 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         S_SKIP_PIN => {
             let pin = t.var(V_PIN);
             t.set(V_PIN, 0);
-            release_then(t, pin, S_NEXT_PIN)
+            // Reconnect tries its pin alone.
+            let then = if t.var(V_AGAIN) != 0 {
+                S_FINISH
+            } else {
+                S_NEXT_PIN
+            };
+            release_then(t, pin, then)
         }
         S_TYPES => {
             let e = out(cpu, t);
@@ -1801,8 +1838,11 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             l.bottom_up = t.var(V_BOTTOM_UP) != 0;
             let filter = l.filter;
             g.link = Some(l);
-            // Its outputs are rendered next.
-            t.vars.push(filter);
+            // Its outputs are rendered next, but after Reconnect, whose
+            // filter's outputs are connected already.
+            if t.var(V_AGAIN) == 0 {
+                t.vars.push(filter);
+            }
             t.set(V_PIN, 0);
             let e = t.var(V_TYPES);
             t.set(V_TYPES, 0);
@@ -1839,6 +1879,14 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 for o in [l.out_pin, l.decoder] {
                     super::drop_ref(cpu, o);
                 }
+                if l.wake != 0 {
+                    super::set_event(cpu, l.wake);
+                    crate::win32::object::objects(cpu).release(l.wake);
+                }
+            }
+            if t.var(V_AGAIN) != 0 {
+                let made = linked(cpu, id);
+                return Next::Done(if made { S_OK } else { VFW_E_NO_ACCEPTABLE_TYPES });
             }
             if let Some(g) = graph(cpu, id) {
                 g.connect_tried = true;
@@ -1859,6 +1907,17 @@ fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let id = t.var(V_GRAPH);
     let s = t.scratch;
     match t.step {
+        S_AGAIN_DISCONNECTED => {
+            let input = t.var(V_INPUT);
+            t.set(V_INPUT, 0);
+            release_then(t, input, S_AGAIN)
+        }
+        S_AGAIN => {
+            // As if ConnectedTo found the pin free (S_CONNECTED).
+            clear_out(cpu, t);
+            t.step = S_CONNECTED;
+            connect_step(cpu, t, S_OK)
+        }
         S_DOWN => {
             if t.vars.len() <= V_QUEUE {
                 return goto(S_FINISH);
@@ -2023,6 +2082,66 @@ fn put_type(cpu: &mut Cpu, s: u32, head: &[u8], format: &[u8]) {
     head[68..72].copy_from_slice(&(s + C_FORMAT).to_le_bytes());
     cpu.bus.guest_write_bytes(s + C_TYPE, &head);
     cpu.bus.guest_write_bytes(s + C_FORMAT, &format[..n]);
+}
+
+/// IFilterGraph::Reconnect(this, pin): the decoder's connection to the
+/// program's pin `pin`, or the one of the decoder's own pin, is made
+/// again, as Wine's ReconnectEx does it: both ends disconnect, and the
+/// decoder's output pin connects to the pin again as RenderFile does,
+/// the pin's own types first. The streaming thread, if there is one,
+/// goes on with the new connection. VFW_E_NOT_CONNECTED for a pin the
+/// decoder isn't connected to, VFW_E_NOT_STOPPED while the graph plays.
+pub fn reconnect(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, pin] = args[..] else {
+        return Some(super::E_INVALIDARG);
+    };
+    let id = hr!(graph_of(cpu, this));
+    if pin == 0 {
+        return Some(E_POINTER);
+    }
+    let own = super::object_of(cpu, pin);
+    let Some(g) = graph(cpu, id) else {
+        return Some(E_POINTER);
+    };
+    if g.state != STATE_STOPPED {
+        return Some(VFW_E_NOT_STOPPED);
+    }
+    let found = g
+        .link
+        .as_ref()
+        .is_some_and(|l| l.pin == pin || Some(l.out_pin) == own);
+    if !found {
+        return Some(VFW_E_NOT_CONNECTED);
+    }
+    let Some(l) = g.link.take() else {
+        return Some(VFW_E_NOT_CONNECTED);
+    };
+    let k = g.filters.iter().rev().position(|f| f.iface == l.filter);
+    sample::decommit_now(cpu, l.allocator);
+    if l.allocator != 0 {
+        super::drop_ref(cpu, l.allocator);
+    }
+    let (program_pin, input) = (l.pin, l.input);
+    if let Some(g) = graph(cpu, id) {
+        g.connecting = Some(Link {
+            pin: 0,
+            input: 0,
+            allocator: 0,
+            head: Vec::new(),
+            format: Vec::new(),
+            ..l
+        });
+    }
+    let mut vars = vec![0u32; V_QUEUE];
+    vars[0] = JOB_CONNECT;
+    vars[V_GRAPH] = id;
+    vars[V_FILTER] = k.unwrap_or(0) as u32;
+    // The link's references on the pin and its IMemInputPin go to the
+    // connection, which lets go of them as RenderFile's does.
+    vars[V_PIN] = program_pin;
+    vars[V_INPUT] = input;
+    vars[V_AGAIN] = 1;
+    task::start(cpu, task::DSHOW, vars, C_SCRATCH)
 }
 
 // The decoder's IBaseFilter.
@@ -2223,6 +2342,122 @@ pub fn pin_query_id(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(put32(cpu, args[1], at).map_or_else(|e| e, |_| S_OK))
 }
 
+/// The file of the decoder whose output pin is the object `pin`, of the
+/// graph `id`: its link's, or the one RenderFile is connecting's.
+fn pin_media(cpu: &mut Cpu, id: u32, pin: u32) -> Option<Arc<Media>> {
+    let g = graph(cpu, id)?;
+    if g.link.as_ref().is_some_and(|l| l.out_pin == pin) {
+        stream_media(cpu, id)
+    } else if g.connecting.as_ref().is_some_and(|l| l.out_pin == pin) {
+        connecting_media(cpu, id)
+    } else {
+        None
+    }
+}
+
+/// IPin::EnumMediaTypes(this, out): an enumerator of the decoder's
+/// types, in the order it offers them (`FORMATS`).
+pub fn pin_enum_media_types(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let id = hr!(owner_of(cpu, args[0]));
+    let pin = hr!(super::object_of(cpu, args[0]).ok_or(E_POINTER));
+    hr!(put32(cpu, args[1], 0));
+    let e = super::add(
+        cpu,
+        Kind::TypeEnum {
+            e: TypeEnum {
+                graph: id,
+                pin,
+                next: 0,
+            },
+        },
+    );
+    give_enum(cpu, e, args[1])
+}
+
+/// The new enumerator `e`'s interface to `out`, with the one reference
+/// it was made with.
+fn give_enum(cpu: &mut Cpu, e: u32, out: u32) -> Option<u32> {
+    let Some(at) = super::block(cpu, e, super::TYPE_ENUM) else {
+        super::drop_ref(cpu, e);
+        return Some(E_OUTOFMEMORY);
+    };
+    cpu.bus.guest_write_32(out, at);
+    Some(S_OK)
+}
+
+/// The enumerator `this`.
+fn type_enum(cpu: &mut Cpu, this: u32) -> Result<&mut TypeEnum, u32> {
+    let id = super::object_of(cpu, this).ok_or(E_POINTER)?;
+    match super::kind(cpu, id) {
+        Some(Kind::TypeEnum { e }) => Ok(e),
+        _ => Err(E_POINTER),
+    }
+}
+
+/// IEnumMediaTypes::Next(this, count, types, fetched): up to `count` of
+/// the decoder's types, each a new AM_MEDIA_TYPE of the task heap, which
+/// the caller frees; S_FALSE when fewer were left.
+pub fn type_enum_next(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let [this, count, out, fetched] = args[..] else {
+        return Some(super::E_INVALIDARG);
+    };
+    let e = hr!(type_enum(cpu, this)).clone();
+    if out == 0 {
+        return Some(E_POINTER);
+    }
+    let media = pin_media(cpu, e.graph, e.pin);
+    let mut given = 0;
+    let mut next = e.next;
+    while given < count && (next as usize) < FORMATS.len() {
+        let Some(m) = &media else {
+            break;
+        };
+        let (head, format) = own_type(m, next as usize);
+        let at = new_media_type(cpu, &MediaType { head, format });
+        if at == 0 {
+            break;
+        }
+        cpu.bus.guest_write_32(out + 4 * given, at);
+        given += 1;
+        next += 1;
+    }
+    if let Ok(e) = type_enum(cpu, this) {
+        e.next = next;
+    }
+    if fetched != 0 {
+        cpu.bus.guest_write_32(fetched, given);
+    }
+    Some(if given == count { S_OK } else { S_FALSE })
+}
+
+/// IEnumMediaTypes::Skip(this, count).
+pub fn type_enum_skip(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let e = hr!(type_enum(cpu, args[0]));
+    let next = e.next.saturating_add(args[1]);
+    e.next = next.min(FORMATS.len() as u32);
+    Some(if next as usize <= FORMATS.len() {
+        S_OK
+    } else {
+        S_FALSE
+    })
+}
+
+/// IEnumMediaTypes::Reset(this).
+pub fn type_enum_reset(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    hr!(type_enum(cpu, args[0])).next = 0;
+    Some(S_OK)
+}
+
+/// IEnumMediaTypes::Clone(this, out): a new enumerator at the same place.
+pub fn type_enum_clone(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let e = hr!(type_enum(cpu, args[0])).clone();
+    if args[1] == 0 {
+        return Some(E_POINTER);
+    }
+    let copy = super::add(cpu, Kind::TypeEnum { e });
+    give_enum(cpu, copy, args[1])
+}
+
 /// IPin::QueryAccept(this, type): whether the decoder can give it.
 pub fn pin_query_accept(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (id, _) = hr!(pin_link(cpu, args[0]));
@@ -2270,3 +2505,4 @@ crate::state_fields!(Link {
 });
 crate::state_fields!(Decoder { graph });
 crate::state_fields!(Pin { graph });
+crate::state_fields!(TypeEnum { graph, pin, next });
