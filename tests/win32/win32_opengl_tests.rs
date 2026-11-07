@@ -4,7 +4,8 @@
 //! depth tested), read the pixels back with glReadPixels and swap the
 //! buffers with GDI's SwapBuffers; one that draws full screen on a
 //! Voodoo2 beside the VGA; and one on a machine without a 3dfx card,
-//! which loads the DLL but has no pixel format. The programs are PE
+//! which loads the DLL but has no pixel format; and GLU32.DLL's
+//! mipmaps, matrices and texts on top of it. The programs are PE
 //! files made with rust-dos-pe's builder, their code assembled with
 //! iced, as in win32_d3d_tests.rs. Each leaves its results in its data
 //! and spins, and the test looks at them while the program is still
@@ -71,6 +72,12 @@ const OPENGL32: &[&str] = &[
     "glDepthRange",
     "glShadeModel",
 ];
+const GLU32: &[&str] = &[
+    "gluBuild2DMipmaps",
+    "gluOrtho2D",
+    "gluErrorString",
+    "gluGetString",
+];
 const CREATE_WINDOW: usize = 0;
 const GET_DC: usize = 1;
 const CHOOSE_PIXEL_FORMAT: usize = 2;
@@ -109,6 +116,11 @@ const ORTHO: usize = GL + 28;
 const FRUSTUM: usize = GL + 29;
 const DEPTH_RANGE: usize = GL + 30;
 const SHADE_MODEL: usize = GL + 31;
+const GLU: usize = GL + OPENGL32.len();
+const BUILD_2D_MIPMAPS: usize = GLU;
+const ORTHO_2D: usize = GLU + 1;
+const ERROR_STRING: usize = GLU + 2;
+const GLU_GET_STRING: usize = GLU + 3;
 
 /// A program importing the functions above, with `data` and the code
 /// `f` makes, and where its data is.
@@ -119,12 +131,13 @@ fn program(
     let mut b = Builder::exe(BASE);
     let list =
         |names: &[&'static str]| -> Vec<Imp> { names.iter().map(|n| Imp::Name(n)).collect() };
-    let (user, gdi, gl) = (list(USER32), list(GDI32), list(OPENGL32));
+    let (user, gdi, gl, glu) = (list(USER32), list(GDI32), list(OPENGL32), list(GLU32));
     let iat = b
         .imports(&[
             ("USER32.DLL", &user),
             ("GDI32.DLL", &gdi),
             ("OPENGL32.DLL", &gl),
+            ("GLU32.DLL", &glu),
         ])
         .concat();
     let data_rva = b.section(
@@ -1215,4 +1228,109 @@ fn a_viewport_hanging_off_the_window_keeps_its_center_where_opengl_puts_it() {
     for (x, y) in [(20, 40), (32, 40), (8, 28), (8, 52)] {
         assert_eq!(pixel(&cpu, data, x, y), [0, 0, 0], "({x}, {y})");
     }
+}
+
+const GLU_VERSION: u32 = 100_800;
+const GLU_EXTENSIONS: u32 = 100_801;
+const GLU_INVALID_ENUM: u32 = 100_900;
+const GL_DEPTH_COMPONENT: u32 = 0x1902;
+
+#[test]
+fn glu_builds_mipmaps_of_an_image_of_no_power_of_two_and_sets_up_2d() {
+    let mut d = data();
+    // A 6x6 red image of RGB bytes, its rows of 18 bytes padded to 20
+    // by the unpack alignment. glTexImage2D refuses a size that isn't
+    // a power of two; gluBuild2DMipmaps scales it to 8x8 first.
+    for y in 0..6 {
+        for x in 0..6 {
+            put(&mut d, TEXELS + 20 * y + 3 * x, &[255, 0, 0]);
+        }
+    }
+    // A quad from (0, 0) to (1, 1), which gluOrtho2D(0, 2, 0, 2) puts
+    // over the bottom left quarter of the window.
+    put_f32s(
+        &mut d,
+        VERTICES,
+        &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+    );
+    put_f32s(
+        &mut d,
+        TEX_COORDS,
+        &[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+    );
+    for (i, v) in [0u16, 1, 2, 3].iter().enumerate() {
+        put(&mut d, INDICES + 2 * i as u32, &v.to_le_bytes());
+    }
+    let (exe, data) = program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        start(a, l, &mut c)?;
+        let blue = [Arg::F(0.0), Arg::F(0.0), Arg::F(1.0), Arg::F(1.0)];
+        c.api(a, l, CLEAR_COLOR, &blue)?;
+        c.api(a, l, CLEAR, &[Arg::I(GL_COLOR_BUFFER_BIT)])?;
+        c.api(a, l, GEN_TEXTURES, &[Arg::I(1), Arg::At(TEXTURE)])?;
+        let bind = [Arg::I(GL_TEXTURE_2D), Arg::Val(TEXTURE)];
+        c.api(a, l, BIND_TEXTURE, &bind)?;
+        // 10: the mipmaps, 0.
+        let image = |format| {
+            [
+                Arg::I(GL_TEXTURE_2D),
+                Arg::I(3),
+                Arg::I(6),
+                Arg::I(6),
+                Arg::I(format),
+                Arg::I(GL_UNSIGNED_BYTE),
+                Arg::At(TEXELS),
+            ]
+        };
+        c.api(a, l, BUILD_2D_MIPMAPS, &image(GL_RGB))?;
+        // 11: a format GLU refuses, GLU_INVALID_ENUM.
+        c.api(a, l, BUILD_2D_MIPMAPS, &image(GL_DEPTH_COMPONENT))?;
+        // 12 to 14: the texts.
+        c.api(a, l, ERROR_STRING, &[Arg::I(GLU_INVALID_ENUM)])?;
+        c.api(a, l, GLU_GET_STRING, &[Arg::I(GLU_VERSION)])?;
+        c.api(a, l, GLU_GET_STRING, &[Arg::I(GLU_EXTENSIONS)])?;
+        let mut ortho = Vec::new();
+        for v in [0.0, 2.0, 0.0, 2.0] {
+            ortho.extend(double(v));
+        }
+        c.api(a, l, ORTHO_2D, &ortho)?;
+        let env = [
+            Arg::I(GL_TEXTURE_ENV),
+            Arg::I(GL_TEXTURE_ENV_MODE),
+            Arg::I(GL_REPLACE),
+        ];
+        c.api(a, l, TEX_ENVI, &env)?;
+        c.api(a, l, ENABLE, &[Arg::I(GL_TEXTURE_2D)])?;
+        c.api(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_VERTEX_ARRAY)])?;
+        c.api(a, l, ENABLE_CLIENT_STATE, &[Arg::I(GL_TEXTURE_COORD_ARRAY)])?;
+        let vertices = [Arg::I(3), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(VERTICES)];
+        c.api(a, l, VERTEX_POINTER, &vertices)?;
+        let coords = [Arg::I(2), Arg::I(GL_FLOAT), Arg::I(0), Arg::At(TEX_COORDS)];
+        c.api(a, l, TEX_COORD_POINTER, &coords)?;
+        let quad = [
+            Arg::I(GL_QUADS),
+            Arg::I(4),
+            Arg::I(GL_UNSIGNED_SHORT),
+            Arg::At(INDICES),
+        ];
+        c.api(a, l, DRAW_ELEMENTS, &quad)?;
+        read_back(a, l, &mut c)?;
+        finish(a, l)
+    });
+    let mut cpu = machine("glu", true, exe);
+    run_until_done(&mut cpu, data);
+    let r = |i: u32| peek(&cpu, data + RESULTS + 4 * i);
+    assert_eq!(r(10), 0, "gluBuild2DMipmaps");
+    assert_eq!(r(11), GLU_INVALID_ENUM, "a depth image");
+    assert_eq!(peek_string(&cpu, r(12)), "invalid enumerant");
+    assert_eq!(peek_string(&cpu, r(13)), "1.2.2.0 Microsoft Corporation");
+    // The built-in OpenGL has no GL_EXT_bgra.
+    assert_eq!(peek_string(&cpu, r(14)), "");
+    assert_eq!(r(25), 0, "glGetError");
+    // The red texture in the bottom left quarter, the clear color
+    // elsewhere.
+    assert_eq!(pixel(&cpu, data, 8, 8), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 24, 24), [255, 0, 0]);
+    assert_eq!(pixel(&cpu, data, 48, 48), [0, 0, 255]);
+    assert_eq!(pixel(&cpu, data, 48, 8), [0, 0, 255]);
 }
