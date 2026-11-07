@@ -15,6 +15,9 @@
 //! memory, the bursts of writes that copy it. A protected-mode program may
 //! copy only what changed since the frame before (Alien Legacy): a burst
 //! too small to be a frame that reaches across the screen is one too.
+//! Where the bus knows which video memory the display shows (in VESA
+//! modes), only writes there count: Gender Wars copies each frame a second
+//! time, to a copy of the screen out of sight.
 //! Under the built-in Windows, a program's blits to the primary surface
 //! and GDI's drawing on the screen copy the picture in the emulator's own
 //! code (Magic & Mayhem blits each frame from system memory): the bursts
@@ -236,9 +239,11 @@ pub struct Activity {
     /// The burst going on: its bytes, and the instruction of its last write.
     burst: u64,
     last_write: u64,
-    /// The lowest and highest place in video memory it wrote, past its
+    /// Of its writes in the picture shown (`picture`), the bytes, and the
+    /// lowest and highest place in video memory they wrote, past their
     /// last byte. (The recompiler's own writes to the VGA's planes, which
     /// go on a burst without coming here, leave them out.)
+    shown_bytes: u64,
     low: u64,
     high: u64,
     /// A burst's bytes to count as a frame, and its reach and bytes to
@@ -246,6 +251,11 @@ pub struct Activity {
     burst_min: u64,
     span_min: u64,
     copy_min: u64,
+    /// Where the picture shown lies among the offsets writes come with,
+    /// from its first byte to past its last (`picture`), and whether that
+    /// is known.
+    picture: (u64, u64),
+    picture_known: bool,
     /// The display start, and the instruction it last changed at.
     start: u32,
     last_flip: u64,
@@ -287,6 +297,7 @@ impl Activity {
             span_min: u64::MAX,
             copy_min: u64::MAX,
             low: u64::MAX,
+            picture: (0, u64::MAX),
             ..Self::default()
         }
     }
@@ -299,17 +310,27 @@ impl Activity {
     pub fn video_write(&mut self, at: u64, offset: u64, bytes: u64) {
         self.video_bytes += bytes;
         if at.saturating_sub(self.last_write) > BURST_GAP {
-            if self.burst >= self.burst_min {
+            // Only what lands in the picture shown makes a frame: Gender
+            // Wars writes each frame a second time to a copy of the screen
+            // out of sight. Where the picture isn't known, all of a burst
+            // counts, the recompiler's plane writes too.
+            let shown = if self.picture_known { self.shown_bytes } else { self.burst };
+            if shown >= self.burst_min {
                 self.bursts += 1;
-            } else if self.is_copy(self.burst, self.low, self.high) {
+            } else if self.is_copy(shown, self.low, self.high) {
                 self.copies += 1;
             }
             self.burst = 0;
+            self.shown_bytes = 0;
             (self.low, self.high) = (u64::MAX, 0);
         }
         self.burst += bytes;
-        self.low = self.low.min(offset);
-        self.high = self.high.max(offset + bytes);
+        let (first, end) = self.picture;
+        if offset < end && offset + bytes > first {
+            self.shown_bytes += bytes;
+            self.low = self.low.min(offset);
+            self.high = self.high.max(offset + bytes);
+        }
         self.last_write = at;
     }
 
@@ -378,6 +399,26 @@ impl Activity {
         (self.span_min, self.copy_min) =
             if linear { (bytes / 2, bytes / 128) } else { (u64::MAX, u64::MAX) };
     }
+
+    /// Where the picture shown lies among the offsets `video_write` gets,
+    /// from its first byte to past its last, where that is known
+    /// (`picture`); None takes all of them for the picture.
+    pub fn set_picture(&mut self, picture: Option<(u64, u64)>) {
+        self.picture = picture.unwrap_or((0, u64::MAX));
+        self.picture_known = picture.is_some();
+    }
+}
+
+/// Where the picture shown lies among the offsets of the program's writes
+/// to video memory, where that is known: in a VESA mode, the offsets are
+/// video memory's own, and the picture starts at the display start.
+/// Elsewhere they are the window's the program wrote through, and the
+/// whole window counts.
+pub fn picture(bus: &Bus) -> Option<(u64, u64)> {
+    if bus.video_mode != VideoMode::Vesa || bus.banshee().is_some_and(|b| b.extended()) {
+        return None;
+    }
+    bus.vbe.picture()
 }
 
 /// Whether the screen's rows lie one after the other in video memory in
@@ -2973,6 +3014,68 @@ mod tests {
             panic!("{:?}", auto.step);
         };
         assert!((27.0..=32.0).contains(&fps), "{fps}");
+    }
+
+    #[test]
+    fn a_copy_out_of_sight_is_no_frame() {
+        // Gender Wars' missions in VESA mode 101h (640x480, 256 colours):
+        // each frame copies what changed to the picture shown, and the
+        // same to a second copy of the screen just after it, out of sight.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let mode = crate::video::vbe::find_mode(0x101, false).unwrap();
+        bus.vbe.set_mode(&mode, false, false);
+        bus.video_mode = VideoMode::Vesa;
+        bus.set_cycles_per_ms(25_000);
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        // 30 frames a second, 38,000 bytes of each copied to both.
+        let page = 640 * 480;
+        let half_frame = 25_000_000 / 60;
+        while auto.update(bus, true, HOST, 0).is_none() {
+            for base in [0, page] {
+                bus.clock.icount += half_frame;
+                for row in (0..480).step_by(4) {
+                    bus.clock.icount += 10;
+                    let at = bus.clock.icount;
+                    bus.activity.video_write(at, base + row * 640 + 200, 320);
+                }
+                bus.sync_display();
+            }
+        }
+        // The copies out of sight count for nothing: about 30 frames a
+        // second, where both would be 60, the display's refresh rate.
+        assert_eq!(bus.activity.bursts, 0);
+        let Step::Raised { fps, .. } = auto.step else {
+            panic!("{:?}", auto.step);
+        };
+        assert!((27.0..=32.0).contains(&fps), "{fps}");
+    }
+
+    #[test]
+    fn writes_out_of_sight_make_no_copy() {
+        // Gender Wars with its view scrolled: the picture starts three
+        // rows into video memory, and the copy out of sight, a screen
+        // further on, writes a little before the picture and in its first
+        // rows as well.
+        let page = 640 * 480;
+        let mut a = Activity::new();
+        a.set_screen(page, true);
+        a.set_picture(Some((1932, 1932 + page)));
+        let mut at = 0;
+        for _ in 0..5 {
+            for base in [1932, page] {
+                at += 100_000;
+                a.video_write(at, 368, 64);
+                for row in (0..480).step_by(4) {
+                    at += 10;
+                    a.video_write(at, base + row * 640, 320);
+                }
+            }
+        }
+        // The last one ends with the next write.
+        a.video_write(at + 100_000, 1932, 1);
+        assert_eq!((a.bursts, a.copies), (0, 5));
     }
 
     #[test]
