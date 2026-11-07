@@ -1,6 +1,6 @@
 //! A CD image: its tracks laid out on the disc the way the CUE sheet,
-//! CHD file or BlindWrite descriptor describes them, and sector and
-//! subchannel reads from the files behind them.
+//! CHD file, BlindWrite descriptor or Alcohol 120% descriptor describes
+//! them, and sector and subchannel reads from the files behind them.
 
 use super::cue::{parse_cue, CueSheet, FileFormat, TrackMode};
 use super::{DATA_SECTOR, Extent, RAW_SECTOR, SYNC};
@@ -67,6 +67,8 @@ enum Subcode {
     None,
     /// 96 bytes of P-W, each channel's 12 after the one before.
     Linear,
+    /// 96 bytes of P-W, interleaved as a drive reads them raw.
+    Interleaved,
     /// 16 bytes: the 12 of Q, then 4 more.
     Q,
 }
@@ -75,7 +77,7 @@ impl Subcode {
     fn bytes(self) -> u64 {
         match self {
             Subcode::None => 0,
-            Subcode::Linear => 96,
+            Subcode::Linear | Subcode::Interleaved => 96,
             Subcode::Q => 16,
         }
     }
@@ -164,7 +166,7 @@ pub struct CdImage {
     /// The media catalog number, where the image keeps it.
     mcn: Option<String>,
     /// The data position measurement the image keeps.
-    dpm: Option<super::b6t::Dpm>,
+    dpm: Option<super::dpm::Dpm>,
     /// The subchannel file beside the image, for the sectors whose own
     /// files keep none.
     sub_file: Option<SubFile>,
@@ -205,13 +207,15 @@ fn check_readable(lba: u32, raw: &[u8; RAW_SECTOR]) -> io::Result<()> {
 }
 
 impl CdImage {
-    /// Open a CD image: a CUE sheet, a CHD file, a BlindWrite descriptor,
-    /// or a bare image of one data track (.iso, .bin, .img), whose sector
-    /// format is found from where the ISO 9660 or High Sierra volume
-    /// descriptor is.
+    /// Open a CD image: a CUE sheet, a CHD file, a BlindWrite or Alcohol
+    /// 120% descriptor, or a bare image of one data track (.iso, .bin,
+    /// .img), whose sector format is found from where the ISO 9660 or High
+    /// Sierra volume descriptor is.
     pub fn open(path: &Path) -> Result<Self, String> {
         if is_b6t(path) {
             Self::open_b6t(path)
+        } else if is_mds(path) {
+            Self::open_mds(path)
         } else if let Some(sheet) = sheet(path) {
             Self::open_cue(path, sheet?)
         } else if is_chd(path) {
@@ -401,6 +405,94 @@ impl CdImage {
         Ok(image)
     }
 
+    /// The sessions and tracks an Alcohol 120% descriptor lists, their
+    /// sectors in its data file, with the subchannel that keeps and the
+    /// descriptor's DPM data.
+    ///
+    /// A track's block gives its INDEX 01 and where that sector is in the
+    /// data file. Alcohol stores a pregap after the track before it, and
+    /// Aaru reads it from there; libMirage reads every pregap as silence.
+    /// A pregap is read from the file where the file has room for it after
+    /// the sectors of the track before, and is silence otherwise, so
+    /// images laid out either way read.
+    fn open_mds(path: &Path) -> Result<Self, String> {
+        use super::mds;
+        let error = |e: String| format!("{}: {}", path.display(), e);
+        let data = hostfs::read(path).map_err(|e| error(e.to_string()))?;
+        let disc = mds::parse(&data).map_err(error)?;
+        let dir = dir_of(path);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        let mut image = CdImage::new(path, Vec::new(), Vec::new());
+        // Each data file opened once, and where the sectors read from it
+        // so far end.
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut stored: Vec<u64> = Vec::new();
+        for session in &disc.sessions {
+            for (i, t) in session.tracks.iter().enumerate() {
+                let found = find_file(dir, &mds::data_file(&name, &t.file))?;
+                let file = match paths.iter().position(|p| *p == found) {
+                    Some(file) => file,
+                    None => {
+                        image.files.push(Backing::open(&found, FileFormat::Binary)?);
+                        paths.push(found);
+                        stored.push(0);
+                        paths.len() - 1
+                    }
+                };
+                // A track ends where the next one's pregap starts, which
+                // is inside its length where Alcohol counted the pregap
+                // in it.
+                let own_end = t
+                    .start
+                    .checked_add(t.sectors)
+                    .ok_or_else(|| error(format!("track {} ends past the disc", t.number)))?;
+                let end = match session.tracks.get(i + 1) {
+                    Some(next) => next.start.saturating_sub(next.pregap),
+                    None => own_end,
+                };
+                if end < t.start {
+                    return Err(error(format!(
+                        "track {} starts before track {} does",
+                        t.number + 1,
+                        t.number
+                    )));
+                }
+                let data_end = own_end.min(end);
+                let pregap_start = t.start.saturating_sub(t.pregap);
+                let pregap_bytes = (t.start - pregap_start) as u64 * t.stride;
+                let first = match t.offset.checked_sub(pregap_bytes) {
+                    Some(at) if at >= stored[file] => pregap_start,
+                    _ => t.start,
+                };
+                let offset = t.offset - (t.start - first) as u64 * t.stride;
+                let mut span = Span::new(first, data_end, file, offset, t.stride);
+                if t.subchannel {
+                    span.subcode = Subcode::Interleaved;
+                }
+                stored[file] = stored[file].max(offset + (data_end - first) as u64 * t.stride);
+                image.tracks.push(Track {
+                    number: t.number,
+                    mode: t.mode,
+                    session: session.number as u8,
+                    control: t.control,
+                    pregap_start,
+                    start: t.start,
+                    end,
+                    spans: vec![span],
+                });
+            }
+        }
+        image.tracks.sort_by_key(|t| t.number);
+        if image.tracks.is_empty() {
+            return Err(error("it has no tracks".into()));
+        }
+        image.dpm = disc.dpm;
+        Ok(image)
+    }
+
     fn open_bare(path: &Path) -> Result<Self, String> {
         let mut image = Self::bare(path, Backing::open(path, FileFormat::Binary)?)?;
         image.sub_file = sub_file(path, std::iter::empty()).map(|(_, sub)| sub);
@@ -550,7 +642,7 @@ impl CdImage {
 
     /// The data position measurement of the disc, if the image keeps it:
     /// where reads find their sectors (`timing::Geometry`).
-    pub fn dpm(&self) -> Option<&super::b6t::Dpm> {
+    pub fn dpm(&self) -> Option<&super::dpm::Dpm> {
         self.dpm.as_ref()
     }
 
@@ -670,6 +762,12 @@ impl CdImage {
             match span.subcode {
                 Subcode::None => {}
                 Subcode::Linear => return self.files[span.file].read_at(at, out),
+                Subcode::Interleaved => {
+                    let mut raw = [0u8; 96];
+                    self.files[span.file].read_at(at, &mut raw)?;
+                    *out = super::deinterleave_subchannel(&raw);
+                    return Ok(());
+                }
                 Subcode::Q => return self.files[span.file].read_at(at, &mut out[12..24]),
             }
         }
@@ -988,6 +1086,43 @@ fn is_b6t(path: &Path) -> bool {
         && &magic == super::b6t::SIGNATURE
 }
 
+/// Whether `path` is an Alcohol 120% descriptor: named .mds, or starting
+/// as one does.
+fn is_mds(path: &Path) -> bool {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mds"))
+    {
+        return true;
+    }
+    let mut magic = [0u8; 16];
+    File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
+        && &magic == super::mds::SIGNATURE
+}
+
+/// The data files the Alcohol 120% descriptor at `path` names, each found
+/// or why not; none if it can't be read.
+fn mds_files(path: &Path) -> Vec<Result<PathBuf, String>> {
+    let Some(disc) = hostfs::read(path)
+        .ok()
+        .and_then(|d| super::mds::parse(&d).ok())
+    else {
+        return Vec::new();
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let mut files: Vec<Result<PathBuf, String>> = Vec::new();
+    for file in disc.files() {
+        let file = find_file(dir_of(path), &super::mds::data_file(&name, file));
+        if !files.contains(&file) {
+            files.push(file);
+        }
+    }
+    files
+}
+
 /// The `.bwa` file of DPM data beside the BlindWrite descriptor at `path`,
 /// if there is one.
 fn bwa_file(path: &Path) -> Option<PathBuf> {
@@ -1137,12 +1272,16 @@ fn sheet(path: &Path) -> Option<Result<CueSheet, String>> {
     (named || sheet.is_ok()).then_some(sheet)
 }
 
-/// The files a CUE sheet or BlindWrite descriptor at `path` keeps its
-/// tracks in, those that are there, with the subchannel or DPM file
-/// beside it; none if `path` isn't one that `CdImage::open` reads as one.
+/// The files a CUE sheet, BlindWrite or Alcohol 120% descriptor at
+/// `path` keeps its tracks in, those that are there, with the subchannel
+/// or DPM file beside it; none if `path` isn't one that `CdImage::open`
+/// reads as one.
 pub fn track_files(path: &Path) -> Vec<PathBuf> {
     if is_b6t(path) {
         return b6t_files(path).into_iter().filter_map(Result::ok).collect();
+    }
+    if is_mds(path) {
+        return mds_files(path).into_iter().filter_map(Result::ok).collect();
     }
     let Some(Ok(sheet)) = sheet(path) else {
         return Vec::new();
@@ -1156,11 +1295,14 @@ pub fn track_files(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether `path` is a CUE sheet or BlindWrite descriptor `CdImage::open`
-/// reads as one that names a track file that isn't there.
+/// Whether `path` is a CUE sheet, BlindWrite or Alcohol 120% descriptor
+/// `CdImage::open` reads as one that names a track file that isn't there.
 pub fn lacks_a_track_file(path: &Path) -> bool {
     if is_b6t(path) {
         return b6t_files(path).iter().any(Result::is_err);
+    }
+    if is_mds(path) {
+        return mds_files(path).iter().any(Result::is_err);
     }
     let Some(Ok(sheet)) = sheet(path) else {
         return false;
@@ -1462,7 +1604,7 @@ mod tests {
 
     #[test]
     fn blindwrite_images() {
-        use crate::cdrom::b6t::{self, Dpm};
+        use crate::cdrom::{b6t, dpm::Dpm};
         let dir = scratch("blindwrite");
         // Track 1, Mode 1 with subchannel, its pregap stored from sector
         // -150 on: sector 5's Q names track 9 (as a protection might
@@ -1826,5 +1968,328 @@ mod tests {
         assert_eq!(sub, linear_sub(&track, 100, true));
         let files = track_files(&dir.join("game.cue"));
         assert!(files.iter().any(named), "{:?}", files);
+    }
+
+    /// Raw sector `lba` of an Alcohol data file: a Mode 1 sector whose
+    /// data is all `lba` where `data`, else 2352 bytes of `lba`, and 96
+    /// bytes of interleaved subchannel holding `q` as Q if `sub`.
+    fn mdf_sector(lba: u32, data: bool, sub: Option<[u8; 12]>) -> Vec<u8> {
+        let mut sector = match data {
+            true => crate::cdrom::mode1_sector(lba, lba as u8).to_vec(),
+            false => vec![lba as u8; RAW_SECTOR],
+        };
+        if let Some(q) = sub {
+            let mut linear = [0u8; 96];
+            linear[12..24].copy_from_slice(&q);
+            sector.extend(crate::cdrom::interleave_subchannel(&linear));
+        }
+        sector
+    }
+
+    fn layout(image: &CdImage) -> Vec<(u8, TrackMode, u8, u8, u32, u32, u32)> {
+        let tracks = image.tracks().iter();
+        tracks
+            .map(|t| {
+                (
+                    t.number,
+                    t.mode,
+                    t.session,
+                    t.control,
+                    t.pregap_start,
+                    t.start,
+                    t.end,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alcohol_images() {
+        use crate::cdrom::{dpm::Dpm, mds};
+        let dir = scratch("alcohol");
+        // Track 1, Mode 1 with interleaved subchannel: sector 5's Q names
+        // track 9. Track 2, audio with subchannel, its pregap of 150
+        // stored after track 1 as Alcohol stores it.
+        let mut q5 = [0x41, 0x09, 0x01, 0, 0, 0, 0, 0x00, 0x02, 0x05, 0, 0];
+        let crc = q_crc(&q5);
+        q5[10..12].copy_from_slice(&crc.to_be_bytes());
+        let mut data = Vec::new();
+        for lba in 0..20 {
+            data.extend(mdf_sector(
+                lba,
+                true,
+                Some(if lba == 5 { q5 } else { [0; 12] }),
+            ));
+        }
+        for lba in 20..200 {
+            data.extend(mdf_sector(lba, false, Some([0; 12])));
+        }
+        fs::write(dir.join("Game.MDF"), data).unwrap();
+        let tracks = [
+            (0xAA, 8, 1, 0, 0, 150, 20),
+            (0xA9, 8, 2, 170, 170 * 2448, 150, 30),
+        ];
+        let words: &[u32] = &[0, 10, 2, 10, 20];
+        fs::write(
+            dir.join("Game.mds"),
+            mds::build(&[&tracks], "*.mdf", &[(1, words)]),
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("Game.mds")).unwrap();
+        assert_eq!(
+            layout(&image),
+            [
+                (1, TrackMode::Mode1_2352, 1, 4, 0, 0, 20),
+                (2, TrackMode::Audio, 1, 0, 20, 170, 200)
+            ]
+        );
+        assert_eq!(
+            image.dpm(),
+            Some(&Dpm {
+                start: 0,
+                resolution: 10,
+                angles: vec![10, 20]
+            })
+        );
+        let mut sector = [0u8; DATA_SECTOR];
+        image.read_data(4, &mut sector).unwrap();
+        assert!(sector.iter().all(|&b| b == 4));
+        let mut raw = [0u8; RAW_SECTOR];
+        for lba in [20, 100, 170, 199] {
+            image.read_raw(lba, &mut raw).unwrap();
+            assert!(raw.iter().all(|&b| b == lba as u8), "sector {}", lba);
+        }
+        // The subchannel reads back deinterleaved.
+        let mut sub = [0u8; 96];
+        image.read_subchannel(5, &mut sub).unwrap();
+        assert_eq!(sub[12..24], q5);
+        assert_eq!(image.q_position(5).unwrap().track, 9);
+        assert_eq!(image.q_position(6).unwrap().track, 1);
+
+        let files = track_files(&dir.join("Game.mds"));
+        assert_eq!(files.len(), 1);
+        assert!(
+            files[0].to_string_lossy().to_ascii_lowercase().ends_with("game.mdf"),
+            "{:?}",
+            files
+        );
+        assert!(!lacks_a_track_file(&dir.join("Game.mds")));
+        fs::remove_file(dir.join("Game.MDF")).unwrap();
+        assert!(lacks_a_track_file(&dir.join("Game.mds")));
+        assert!(CdImage::open(&dir.join("Game.mds")).is_err());
+    }
+
+    #[test]
+    fn alcohol_pregaps_in_the_file_or_not() {
+        use crate::cdrom::mds;
+        let dir = scratch("alcohol_pregaps");
+        let data: Vec<u8> = (0..60)
+            .flat_map(|i| vec![i as u8 + 1; RAW_SECTOR])
+            .collect();
+        fs::write(dir.join("disc.mdf"), data).unwrap();
+        // Track 2's INDEX 01 right after track 1's sectors in the file:
+        // its pregap isn't stored (as libMirage reads every pregap), and
+        // reads as silence. Track 3's pregap is stored after track 2,
+        // which counts it in its length.
+        let tracks = [
+            (0xA9, 0, 1, 0, 0, 150, 20),
+            (0xA9, 0, 2, 30, 20 * 2352, 10, 25),
+            (0xA9, 0, 3, 55, 45 * 2352, 5, 15),
+        ];
+        fs::write(dir.join("disc.mds"), mds::build(&[&tracks], "*.mdf", &[])).unwrap();
+        let image = CdImage::open(&dir.join("disc.mds")).unwrap();
+        assert_eq!(
+            layout(&image),
+            [
+                (1, TrackMode::Audio, 1, 0, 0, 0, 20),
+                (2, TrackMode::Audio, 1, 0, 20, 30, 50),
+                (3, TrackMode::Audio, 1, 0, 50, 55, 70),
+            ]
+        );
+        let mut raw = [0u8; RAW_SECTOR];
+        let read = |lba: u32, raw: &mut [u8; RAW_SECTOR]| {
+            image.read_raw(lba, raw).unwrap();
+            raw[0]
+        };
+        assert_eq!(read(19, &mut raw), 20);
+        assert_eq!(read(25, &mut raw), 0, "track 2's pregap isn't stored");
+        assert_eq!(read(30, &mut raw), 21);
+        assert_eq!(
+            read(49, &mut raw),
+            40,
+            "track 2 ends where track 3's pregap starts"
+        );
+        assert_eq!(read(50, &mut raw), 41, "track 3's pregap is stored");
+        assert_eq!(read(55, &mut raw), 46);
+        assert_eq!(read(69, &mut raw), 60);
+    }
+
+    #[test]
+    fn alcohol_sessions() {
+        use crate::cdrom::mds;
+        let dir = scratch("alcohol_sessions");
+        fs::write(dir.join("cd.mdf"), vec![0x11u8; 30 * 2352]).unwrap();
+        let first = [(0xAA, 0, 1, 0, 0, 150, 20)];
+        let second = [(0xEC, 0, 2, 11400, 20 * 2352, 150, 10)];
+        fs::write(
+            dir.join("cd.mds"),
+            mds::build(&[&first, &second], "cd.mdf", &[]),
+        )
+        .unwrap();
+        let image = CdImage::open(&dir.join("cd.mds")).unwrap();
+        assert_eq!(
+            layout(&image),
+            [
+                (1, TrackMode::Mode1_2352, 1, 4, 0, 0, 20),
+                (2, TrackMode::Mode2_2352, 2, 4, 11250, 11400, 11410),
+            ]
+        );
+        assert_eq!(image.data_track().unwrap().number, 2);
+        let mut raw = [0u8; RAW_SECTOR];
+        image.read_raw(11405, &mut raw).unwrap();
+        assert_eq!(raw[100], 0x11);
+    }
+
+    /// The MDS descriptors refurbished-dinosaurs-toolkit's disc archiver
+    /// wrote (`testdata/make_mds.py`): its data track and audio track,
+    /// and the DPM data it measured on its simulated drive.
+    #[test]
+    fn toolkit_mds_images() {
+        use crate::cdrom::dpm::Dpm;
+        let dir = scratch("toolkit_mds");
+        // The archiver writes every sector from track 1's INDEX 01 on,
+        // track 2's pregap among them.
+        let data: Vec<u8> = (0..481)
+            .flat_map(|lba| mdf_sector(lba, lba < 31, None))
+            .collect();
+        fs::write(dir.join("dpm.mdf"), &data).unwrap();
+        fs::write(dir.join("plain.mdf"), &data).unwrap();
+        fs::write(
+            dir.join("dpm.mds"),
+            include_bytes!("testdata/toolkit-dpm.mds"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("plain.mds"),
+            include_bytes!("testdata/toolkit-plain.mds"),
+        )
+        .unwrap();
+        let measured = Dpm {
+            start: 0,
+            resolution: 10,
+            angles: vec![
+                283, 566, 849, 1132, 1414, 1697, 1980, 2263, 2546, 2828, 3111, 3394, 3676, 3959,
+                4242, 4524, 4807, 5090, 5372, 5655, 5946, 6237, 6528, 6818, 7109, 7400, 7691, 7982,
+                8273, 8563, 8854, 9145, 9436, 9726, 10017, 10308, 10598, 10889, 11180, 11469,
+                11752, 12034, 12316, 12598, 12880, 13163, 13445, 13726,
+            ],
+        };
+        for (name, dpm) in [("dpm.mds", Some(&measured)), ("plain.mds", None)] {
+            let image = CdImage::open(&dir.join(name)).unwrap();
+            assert_eq!(
+                layout(&image),
+                [
+                    (1, TrackMode::Mode1_2352, 1, 4, 0, 0, 31),
+                    (2, TrackMode::Audio, 1, 0, 31, 181, 481)
+                ],
+                "{}",
+                name
+            );
+            assert_eq!(image.dpm(), dpm, "{}", name);
+            let mut raw = [0u8; RAW_SECTOR];
+            for lba in [0, 16, 30, 31, 180, 181, 480] {
+                image.read_raw(lba, &mut raw).unwrap();
+                assert_eq!(
+                    raw[..],
+                    mdf_sector(lba, lba < 31, None)[..],
+                    "{} sector {}",
+                    name,
+                    lba
+                );
+            }
+        }
+    }
+
+    /// `mirage_disc_get_dpm_data_for_sector`'s angle of sector `lba`, in
+    /// turns from the data's start sector: the angles of the entries
+    /// either side of it, interpolated.
+    fn libmirage_angle(dpm: &crate::cdrom::dpm::Dpm, lba: u32) -> f64 {
+        let relative = lba - dpm.start;
+        let bottom = (relative / dpm.resolution) as usize;
+        let at = |i: usize| {
+            if i == 0 {
+                0.0
+            } else {
+                dpm.angles[i - 1] as f64
+            }
+        };
+        let density = match bottom {
+            b if b == dpm.angles.len() => at(b) - at(b - 1),
+            b => at(b + 1) - at(b),
+        } / 256.0
+            / dpm.resolution as f64;
+        at(bottom) / 256.0 + (relative - bottom as u32 * dpm.resolution) as f64 * density
+    }
+
+    /// The drive's timing model places an Alcohol image's sectors by its
+    /// DPM data as it places a BlindWrite image's by the same data, and
+    /// the angles between entries are libMirage's.
+    #[test]
+    fn mds_and_b6t_dpm_place_sectors_alike() {
+        use crate::cdrom::{b6t, dpm::Dpm, mds, timing::Geometry};
+        let dir = scratch("dpm_formats");
+        fs::write(dir.join("disc.mdf"), vec![0u8; 400 * 2352]).unwrap();
+        fs::write(dir.join("disc.b6i"), vec![0u8; 550 * 2352]).unwrap();
+        // Uneven steps, as a pressing whose sectors a protection checks.
+        let dpm = Dpm {
+            start: 40,
+            resolution: 25,
+            angles: vec![600, 1150, 1800, 2300, 3000, 3500, 4200, 4900],
+        };
+        let words: Vec<u32> = [dpm.start, dpm.resolution, dpm.angles.len() as u32]
+            .into_iter()
+            .chain(dpm.angles.iter().copied())
+            .collect();
+        let tracks = [(0xAA, 0, 1, 0, 0, 150, 400)];
+        fs::write(
+            dir.join("disc.mds"),
+            mds::build(&[&tracks], "*.mdf", &[(1, &words)]),
+        )
+        .unwrap();
+        let blocks = [("disc.b6i", 0, -150, 550, 2352)];
+        let tracks = [(2, 4, 1, -150, 150, 550)];
+        fs::write(
+            dir.join("disc.b6t"),
+            b6t::build(None, &blocks, &[&tracks], Some(&dpm)),
+        )
+        .unwrap();
+        let alcohol = CdImage::open(&dir.join("disc.mds")).unwrap();
+        let blindwrite = CdImage::open(&dir.join("disc.b6t")).unwrap();
+        assert_eq!(alcohol.dpm(), Some(&dpm));
+        assert_eq!(alcohol.dpm(), blindwrite.dpm());
+
+        let (a, b) = (
+            Geometry::new(alcohol.dpm()),
+            Geometry::new(blindwrite.dpm()),
+        );
+        let plain = Geometry::new(None);
+        let end = dpm.start + dpm.resolution * dpm.angles.len() as u32;
+        for lba in 0..400 {
+            assert_eq!(a.turns(lba as i64), b.turns(lba as i64), "sector {}", lba);
+            if (dpm.start..=end).contains(&lba) {
+                let turns = a.turns(lba as i64) - a.turns(dpm.start as i64);
+                let mirage = libmirage_angle(&dpm, lba);
+                assert!(
+                    (turns - mirage).abs() < 1e-9,
+                    "sector {}: {} {}",
+                    lba,
+                    turns,
+                    mirage
+                );
+            }
+        }
+        // The data moves the sectors from where the uniform spiral has
+        // them.
+        assert!((a.turns(100) - plain.turns(100)).abs() > 0.5);
     }
 }

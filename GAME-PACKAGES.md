@@ -389,7 +389,7 @@ the entries at its top count:
 |---|---|
 | `c.vhd`, `c.img` | C:, a hard disk image. With `os=`, the changes to that system ([above](#an-operating-system)) |
 | `d.vhd`, `e.img` | A hard disk image on that letter |
-| `d.cue`, `d.iso`, `d.bin`, `d.chd`, `d.b6t` | A CD-ROM drive with that disc |
+| `d.cue`, `d.iso`, `d.bin`, `d.chd`, `d.b6t`, `d.mds` | A CD-ROM drive with that disc |
 | `d1.iso`, `d2.cue` | More discs in the same drive, in order of the number; Ctrl+F4 changes the disc |
 | `d/`, `e1/` | A folder as a CD |
 | `e.hd/` | A folder as a hard drive |
