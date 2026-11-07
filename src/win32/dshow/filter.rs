@@ -18,6 +18,16 @@
 //! and NotifyAllocator ends it. The sound, if the file has any, plays
 //! through the graph's MPEGVideo device, opened without a window.
 //!
+//! The graph then renders the output pins of the filter that took the
+//! pictures, as Windows' graph builder renders a filter's outputs after
+//! it connects the filter's input (Wine's `autoplug_through`): each one
+//! not yet connected is connected with its own IPin::Connect to a free
+//! input pin of another of the program's filters, which renders that
+//! filter's outputs in turn. A program's transform filter between the
+//! decoder and its renderer gets its renderer so. The graph keeps those
+//! connections (`Joint`) to undo them when a filter leaves it, and moves
+//! the filters through the states from the renderers up.
+//!
 //! Every call into the program goes through a task (task.rs): the
 //! connection's steps (`connect_step`), lists of calls the graph's
 //! methods make (`list_step`), and each call of the decoder's streaming
@@ -67,6 +77,7 @@ const FILTER_SET_SYNC_SOURCE: u32 = 8;
 const FILTER_ENUM_PINS: u32 = 10;
 const FILTER_JOIN_FILTER_GRAPH: u32 = 13;
 const ENUM_NEXT: u32 = 3;
+const PIN_CONNECT: u32 = 3;
 const PIN_RECEIVE_CONNECTION: u32 = 4;
 const PIN_DISCONNECT: u32 = 5;
 const PIN_CONNECTED_TO: u32 = 6;
@@ -191,6 +202,18 @@ const RGB565: usize = 5;
 pub struct Filter {
     pub iface: u32,
     pub name: String,
+}
+
+/// A connection the graph made between two of the program's filters,
+/// from the output pin `out` of the filter `from` to the input pin
+/// `input` of the filter `to`. Their pins are the filters', which the
+/// graph holds references on.
+#[derive(Clone, Debug, Default)]
+pub struct Joint {
+    pub from: u32,
+    pub out: u32,
+    pub to: u32,
+    pub input: u32,
 }
 
 /// The decoder's connection to a program's input pin, and its stream.
@@ -509,6 +532,7 @@ pub fn remove_filter(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if linked {
         disconnect_calls(cpu, &mut list, id);
     }
+    unjoin_calls(cpu, &mut list, id, Some(filter));
     list.call(cpu, filter, FILTER_JOIN_FILTER_GRAPH, &[0, 0], 0);
     list.release(cpu, filter);
     list.start(cpu, 0)
@@ -550,6 +574,22 @@ fn disconnect_calls(cpu: &mut Cpu, list: &mut List, id: u32) {
     list.call(cpu, pin, PIN_DISCONNECT, &[], 0);
     list.release(cpu, input);
     list.release(cpu, pin);
+}
+
+/// The calls that undo the graph `id`'s joints with the filter `filter`,
+/// or all of them for None: each input pin disconnects, then its output
+/// pin (Wine's RemoveFilter).
+fn unjoin_calls(cpu: &mut Cpu, list: &mut List, id: u32, filter: Option<u32>) {
+    let Some(g) = graph(cpu, id) else {
+        return;
+    };
+    let touches = |j: &Joint| filter.is_none_or(|f| j.from == f || j.to == f);
+    let undone: Vec<Joint> = g.joints.iter().filter(|j| touches(j)).cloned().collect();
+    g.joints.retain(|j| !touches(j));
+    for j in undone {
+        list.call(cpu, j.input, PIN_DISCONNECT, &[], 0);
+        list.call(cpu, j.out, PIN_DISCONNECT, &[], 0);
+    }
 }
 
 /// The graph `id`'s stream stops: the decoder's output pin decommits
@@ -613,6 +653,7 @@ pub fn close(cpu: &mut Cpu, id: u32) -> Option<u32> {
     if linked(cpu, id) {
         disconnect_calls(cpu, &mut list, id);
     }
+    unjoin_calls(cpu, &mut list, id, None);
     for f in &filters {
         list.call(cpu, f.iface, FILTER_JOIN_FILTER_GRAPH, &[0, 0], 0);
         list.release(cpu, f.iface);
@@ -647,7 +688,7 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
     }
     let g = graph(cpu, id)?;
     let from = g.state;
-    let filters: Vec<u32> = g.filters.iter().map(|f| f.iface).collect();
+    let filters = downstream_first(g);
     let mut list = List::new(S_OK, THEN_STATE, id, state, 0);
     if from == STATE_STOPPED && state != STATE_STOPPED {
         give_clock(cpu, id, &mut list, &filters);
@@ -697,6 +738,28 @@ pub fn change_state(cpu: &mut Cpu, id: u32, state: u32) -> Option<()> {
         cpu.set_eax(v);
     }
     None
+}
+
+/// The graph's filters in the order their states change: each after the
+/// filters its output pins connect to, so the renderers come first (Wine's
+/// `sort_filters`), and otherwise in the order they were added.
+fn downstream_first(g: &super::graph::Graph) -> Vec<u32> {
+    let mut left: Vec<u32> = g.filters.iter().map(|f| f.iface).collect();
+    let mut order = Vec::with_capacity(left.len());
+    while !left.is_empty() {
+        // One whose downstream filters are all placed; the first left when
+        // the joints make a loop.
+        let k = left
+            .iter()
+            .position(|&f| {
+                g.joints
+                    .iter()
+                    .all(|j| j.from != f || !left.contains(&j.to) || j.to == f)
+            })
+            .unwrap_or(0);
+        order.push(left.remove(k));
+    }
+    order
 }
 
 /// The graph's clock goes to its filters (SetSyncSource) the first time
@@ -1328,6 +1391,17 @@ const V_RELEASE: usize = 11;
 const V_FILE: usize = 12;
 const V_KIND: usize = 13;
 const V_BOTTOM_UP: usize = 14;
+/// Rendering a filter's outputs: the filter and its pins' enumerator,
+/// its output pin, the place in the graph's filters of the filter tried
+/// for it, that filter's enumerator and its input pin. The filters whose
+/// outputs are still to render follow, from `V_QUEUE`.
+const V_SOURCE: usize = 15;
+const V_SOURCE_ENUM: usize = 16;
+const V_OUT: usize = 17;
+const V_TARGET: usize = 18;
+const V_TARGET_ENUM: usize = 19;
+const V_IN: usize = 20;
+const V_QUEUE: usize = 21;
 
 /// The connection's steps.
 const S_START: u16 = 0;
@@ -1357,13 +1431,30 @@ const S_DISCONNECT: u16 = 23;
 const S_DONE: u16 = 24;
 const S_RELEASE: u16 = 25;
 const S_FINISH: u16 = 26;
+const S_DOWN: u16 = 27;
+const S_DOWN_PINS: u16 = 28;
+const S_DOWN_NEXT: u16 = 29;
+const S_DOWN_PIN: u16 = 30;
+const S_DOWN_DIRECTION: u16 = 31;
+const S_DOWN_CONNECTED: u16 = 32;
+const S_DOWN_SKIP: u16 = 33;
+const S_TARGET: u16 = 34;
+const S_TARGET_PINS: u16 = 35;
+const S_TARGET_NEXT: u16 = 36;
+const S_TARGET_PIN: u16 = 37;
+const S_TARGET_DIRECTION: u16 = 38;
+const S_TARGET_CONNECTED: u16 = 39;
+const S_TARGET_SKIP: u16 = 40;
+const S_JOINED: u16 = 41;
+const S_TARGET_DONE: u16 = 42;
+const S_DOWN_DONE: u16 = 43;
 
 /// Connect the decoder of the file named by the wide string at `file`
 /// to an input pin of the program's filters in the graph `id`, before
 /// RenderFile opens its device: None while the calls are made, after
 /// which RenderFile runs again with `connect_tried` set.
 pub fn connect(cpu: &mut Cpu, id: u32, file: u32) -> Option<u32> {
-    let mut vars = vec![0u32; V_BOTTOM_UP + 1];
+    let mut vars = vec![0u32; V_QUEUE];
     vars[0] = JOB_CONNECT;
     vars[V_GRAPH] = id;
     vars[V_FILE] = file;
@@ -1699,7 +1790,10 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             l.format = format;
             l.kind = t.var(V_KIND);
             l.bottom_up = t.var(V_BOTTOM_UP) != 0;
+            let filter = l.filter;
             g.link = Some(l);
+            // Its outputs are rendered next.
+            t.vars.push(filter);
             t.set(V_PIN, 0);
             let e = t.var(V_TYPES);
             t.set(V_TYPES, 0);
@@ -1722,13 +1816,14 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         S_DONE => {
             let e = t.var(V_ENUM);
             t.set(V_ENUM, 0);
-            release_then(t, e, S_FINISH)
+            release_then(t, e, S_DOWN)
         }
         S_RELEASE => {
             let this = t.var(V_RELEASE);
             let then = t.var(V_THEN) as u16;
             call_method(cpu, this, RELEASE, &[], then)
         }
+        S_DOWN.. => down_step(cpu, t, value),
         _ => {
             // S_FINISH: without a connection, the decoder and its pin go.
             if let Some(l) = graph(cpu, id).and_then(|g| g.connecting.take()) {
@@ -1741,6 +1836,176 @@ fn connect_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             t.retry(cpu);
             Next::Stop
+        }
+    }
+}
+
+/// The steps that render the output pins of the filters in the queue
+/// (`V_QUEUE`): each output pin not yet connected tries the free input
+/// pins of the program's other filters, in the order they were added,
+/// with its own IPin::Connect, and the filter of the one that takes it
+/// joins the queue. An output pin none takes stays free, as a partial
+/// render leaves it on Windows.
+fn down_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
+    let id = t.var(V_GRAPH);
+    let s = t.scratch;
+    match t.step {
+        S_DOWN => {
+            if t.vars.len() <= V_QUEUE {
+                return goto(S_FINISH);
+            }
+            let f = t.vars.pop().unwrap_or(0);
+            t.set(V_SOURCE, f);
+            clear_out(cpu, t);
+            call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_DOWN_PINS)
+        }
+        S_DOWN_PINS => {
+            let e = out(cpu, t);
+            if failed(value) || e == 0 {
+                return goto(S_DOWN);
+            }
+            t.set(V_SOURCE_ENUM, e);
+            goto(S_DOWN_NEXT)
+        }
+        S_DOWN_NEXT => {
+            clear_out(cpu, t);
+            let e = t.var(V_SOURCE_ENUM);
+            call_method(cpu, e, ENUM_NEXT, &[1, s + C_OUT, s + C_FETCHED], S_DOWN_PIN)
+        }
+        S_DOWN_PIN => {
+            let pin = out(cpu, t);
+            if value != S_OK || pin == 0 {
+                let e = t.var(V_SOURCE_ENUM);
+                t.set(V_SOURCE_ENUM, 0);
+                return release_then(t, e, S_DOWN);
+            }
+            t.set(V_OUT, pin);
+            cpu.bus.guest_write_32(s + C_DIR, 0xFFFF_FFFF);
+            call_method(cpu, pin, PIN_QUERY_DIRECTION, &[s + C_DIR], S_DOWN_DIRECTION)
+        }
+        S_DOWN_DIRECTION => {
+            let dir = cpu.bus.guest_read_32(s + C_DIR);
+            if failed(value) || dir != PINDIR_OUTPUT {
+                return goto(S_DOWN_SKIP);
+            }
+            clear_out(cpu, t);
+            let pin = t.var(V_OUT);
+            call_method(cpu, pin, PIN_CONNECTED_TO, &[s + C_OUT], S_DOWN_CONNECTED)
+        }
+        S_DOWN_CONNECTED => {
+            let other = out(cpu, t);
+            if other != 0 {
+                return release_then(t, other, S_DOWN_SKIP);
+            }
+            t.set(V_TARGET, 0);
+            goto(S_TARGET)
+        }
+        S_DOWN_SKIP => {
+            let pin = t.var(V_OUT);
+            t.set(V_OUT, 0);
+            release_then(t, pin, S_DOWN_NEXT)
+        }
+        S_TARGET => {
+            let k = t.var(V_TARGET) as usize;
+            let source = t.var(V_SOURCE);
+            let Some(f) = graph(cpu, id)
+                .and_then(|g| g.filters.get(k))
+                .map(|f| f.iface)
+            else {
+                // No filter takes this output.
+                return goto(S_DOWN_SKIP);
+            };
+            if f == source {
+                t.set(V_TARGET, k as u32 + 1);
+                return goto(S_TARGET);
+            }
+            clear_out(cpu, t);
+            call_method(cpu, f, FILTER_ENUM_PINS, &[s + C_OUT], S_TARGET_PINS)
+        }
+        S_TARGET_PINS => {
+            let e = out(cpu, t);
+            if failed(value) || e == 0 {
+                t.set(V_TARGET, t.var(V_TARGET) + 1);
+                return goto(S_TARGET);
+            }
+            t.set(V_TARGET_ENUM, e);
+            goto(S_TARGET_NEXT)
+        }
+        S_TARGET_NEXT => {
+            clear_out(cpu, t);
+            let e = t.var(V_TARGET_ENUM);
+            call_method(cpu, e, ENUM_NEXT, &[1, s + C_OUT, s + C_FETCHED], S_TARGET_PIN)
+        }
+        S_TARGET_PIN => {
+            let pin = out(cpu, t);
+            if value != S_OK || pin == 0 {
+                return goto(S_TARGET_DONE);
+            }
+            t.set(V_IN, pin);
+            cpu.bus.guest_write_32(s + C_DIR, 0xFFFF_FFFF);
+            call_method(cpu, pin, PIN_QUERY_DIRECTION, &[s + C_DIR], S_TARGET_DIRECTION)
+        }
+        S_TARGET_DIRECTION => {
+            let dir = cpu.bus.guest_read_32(s + C_DIR);
+            if failed(value) || dir != PINDIR_INPUT {
+                return goto(S_TARGET_SKIP);
+            }
+            clear_out(cpu, t);
+            let pin = t.var(V_IN);
+            call_method(cpu, pin, PIN_CONNECTED_TO, &[s + C_OUT], S_TARGET_CONNECTED)
+        }
+        S_TARGET_CONNECTED => {
+            let other = out(cpu, t);
+            if other != 0 {
+                return release_then(t, other, S_TARGET_SKIP);
+            }
+            let (pin, input) = (t.var(V_OUT), t.var(V_IN));
+            // A missing method fails the attempt.
+            if method(cpu, pin, PIN_CONNECT).is_none() {
+                return goto(S_TARGET_SKIP);
+            }
+            call_method(cpu, pin, PIN_CONNECT, &[input, 0], S_JOINED)
+        }
+        S_TARGET_SKIP => {
+            let pin = t.var(V_IN);
+            t.set(V_IN, 0);
+            release_then(t, pin, S_TARGET_NEXT)
+        }
+        S_JOINED => {
+            if failed(value) {
+                return goto(S_TARGET_SKIP);
+            }
+            let k = t.var(V_TARGET) as usize;
+            let to = graph(cpu, id)
+                .and_then(|g| g.filters.get(k))
+                .map_or(0, |f| f.iface);
+            let joint = Joint {
+                from: t.var(V_SOURCE),
+                out: t.var(V_OUT),
+                to,
+                input: t.var(V_IN),
+            };
+            if let Some(g) = graph(cpu, id) {
+                g.joints.push(joint);
+            }
+            t.vars.push(to);
+            let pin = t.var(V_IN);
+            t.set(V_IN, 0);
+            // The target's enumerator goes too (S_DOWN_DONE), then the
+            // output pin, and the next output pin is rendered.
+            release_then(t, pin, S_DOWN_DONE)
+        }
+        S_TARGET_DONE => {
+            let e = t.var(V_TARGET_ENUM);
+            t.set(V_TARGET_ENUM, 0);
+            t.set(V_TARGET, t.var(V_TARGET) + 1);
+            release_then(t, e, S_TARGET)
+        }
+        _ => {
+            // S_DOWN_DONE.
+            let e = t.var(V_TARGET_ENUM);
+            t.set(V_TARGET_ENUM, 0);
+            release_then(t, e, S_DOWN_SKIP)
         }
     }
 }
@@ -1966,6 +2231,12 @@ pub fn pin_query_accept(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 crate::state_fields!(Filter { iface, name });
+crate::state_fields!(Joint {
+    from,
+    out,
+    to,
+    input
+});
 crate::state_fields!(Link {
     filter,
     pin,
