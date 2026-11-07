@@ -1473,11 +1473,26 @@ fn iconic(state: &State, hwnd: u32) -> u32 {
 }
 
 /// An activation message for `hwnd`: sent, or to another thread's window
-/// (a Win16 task's, in the queue the tasks share) queued without waiting
-/// for it, as that thread may be waiting for this one.
+/// queued without waiting for it, as that thread may be waiting for this
+/// one. Between two Win16 tasks, which share a queue, it is sent: Windows
+/// 3.1 sends a task's window its WM_NCACTIVATE, WM_ACTIVATE and
+/// WM_ACTIVATEAPP before the activation goes on, and a task that waits
+/// for a message or a reply takes a message sent to it meanwhile. Queued,
+/// the messages came after the activation and could be overtaken by the
+/// next: the Metal Marines CD's launcher handled the WM_ACTIVATE of its
+/// own activation after the Video for Windows setup's dialog had been
+/// activated, and the SetFocus to its child window that it answers with
+/// took the activation back from the dialog. A client task's window (one
+/// that 16-bit code a Win32 process called made, flat.rs) still gets them
+/// queued: between calls its thread waits in Win16Serve, which takes no
+/// message sent to it, and the activation would wait for ever.
 fn activate_send(cpu: &mut Cpu, hwnd: u32, msg: u32, wp: u32, lp: u32, step: u16) -> Next {
     let tid = user(cpu).window(hwnd).map_or(0, |w| w.tid);
-    if tid != current_tid(cpu) {
+    let me = current_tid(cpu);
+    let win32 = &cpu.bus.win32;
+    let waits = crate::win16::task::both_tasks(win32, me, tid)
+        && !crate::win16::flat::is_client(win32, tid);
+    if tid != me && !waits {
         let args = [hwnd, msg, wp, lp];
         return Next::call(address_of("SendNotifyMessageA"), &args, step);
     }
@@ -2821,6 +2836,41 @@ crate::state_fields!(Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The function an activation message for `hwnd` calls.
+    fn activation_call(cpu: &mut Cpu, hwnd: u32) -> u32 {
+        match activate_send(cpu, hwnd, WM_ACTIVATE, WA_INACTIVE, 0, 1) {
+            Next::Call { target, .. } => target,
+            _ => 0,
+        }
+    }
+
+    /// An activation message to a window of another Win16 task is sent,
+    /// and the task that activates waits for it, as Windows 3.1's
+    /// activation does; to a window of a thread that isn't a task, or of
+    /// a client task, which takes no sent message between its calls, it
+    /// is queued.
+    #[test]
+    fn activation_messages_between_tasks_are_sent() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        super::super::message::tests::win16_process(&mut cpu, &[1, 2, 4]);
+        cpu.bus.win32.win16.clients.push(crate::win16::flat::Client {
+            tid: 4,
+            ..Default::default()
+        });
+        let window = |tid| window::Window {
+            tid,
+            ..Default::default()
+        };
+        let task = user(&mut cpu).new_window(window(2)).expect("a window");
+        let other = user(&mut cpu).new_window(window(3)).expect("a window");
+        let client = user(&mut cpu).new_window(window(4)).expect("a window");
+        let send = address_of("SendMessageA");
+        assert_eq!(activation_call(&mut cpu, task), send);
+        let notify = address_of("SendNotifyMessageA");
+        assert_eq!(activation_call(&mut cpu, other), notify);
+        assert_eq!(activation_call(&mut cpu, client), notify);
+    }
 
     /// A program that hid the cursor and took the capture steers with
     /// the mouse: the host's mouse then counts as in use and moving by

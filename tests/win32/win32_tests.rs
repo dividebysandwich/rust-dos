@@ -7907,6 +7907,122 @@ fn a_window_made_active_behind_comes_to_the_foreground_when_shown() {
 }
 
 #[test]
+fn set_window_pos_without_changing_still_sends_changed_with_the_new_place() {
+    // SetWindowPos with SWP_NOSENDCHANGING sends no WM_WINDOWPOSCHANGING
+    // but still sends WM_WINDOWPOSCHANGED, whose WINDOWPOS has the place
+    // and size the call gave the window, also where SWP_NOMOVE kept the
+    // place the call passed from being used, as Wine's win.c checks on
+    // Windows. A call without the flag sends both, and its
+    // WM_WINDOWPOSCHANGED has the window's place too. (Myth II's window
+    // learns it is active only from this message.)
+    const WM_WINDOWPOSCHANGING: i32 = 0x0046;
+    const WM_WINDOWPOSCHANGED: i32 = 0x0047;
+    const SWP_NOMOVE: i32 = 0x0002;
+    const SWP_NOZORDER: i32 = 0x0004;
+    const SWP_NOACTIVATE: i32 = 0x0010;
+    const SWP_NOSENDCHANGING: i32 = 0x0400;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "RegisterClassA",
+        "CreateWindowExA",
+        "DefWindowProcA",
+        "SetWindowPos",
+    ];
+    // What the window procedure saw: WM_WINDOWPOSCHANGING's count at
+    // 0xA0, WM_WINDOWPOSCHANGED's at 0xA4 and the last one's x, y and cx
+    // at 0xA8, 0xAC and 0xB0. A WNDCLASSA at 0xE0, its procedure put in
+    // by the code.
+    let mut data = child_data(&[(0x10, "Frame")]);
+    data.resize(0x110, 0);
+    data[0xF0..0xF4].copy_from_slice(&BASE.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut start = a.create_label();
+        a.call(start)?;
+        // The window procedure.
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_WINDOWPOSCHANGING)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA0)))?;
+        a.set_label(&mut other)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_WINDOWPOSCHANGED)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0xA4)))?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        for (field, at) in [(8, 0xA8), (12, 0xAC), (16, 0xB0)] {
+            a.mov(ecx, dword_ptr(eax + field))?;
+            a.mov(dword_ptr(l.at(at)), ecx)?;
+        }
+        a.set_label(&mut other)?;
+        a.jmp(f("DefWindowProcA"))?;
+        a.set_label(&mut start)?;
+        a.pop(eax)?;
+        a.mov(dword_ptr(l.at(0xE4)), eax)?;
+        a.mov(dword_ptr(l.at(0xE0 + 36)), l.at(0x10) as i32)?;
+        a.push(l.at(0xE0) as i32)?;
+        a.call(f("RegisterClassA"))?;
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        let instance = BASE as i32;
+        push_args(
+            a,
+            &[0, class, class, style, 0, 0, 50, 50, 0, 0, instance, 0],
+        )?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.xor(ebx, ebx)?;
+        a.mov(dword_ptr(l.at(0xA0)), 0)?;
+        a.mov(dword_ptr(l.at(0xA4)), 0)?;
+        // Moved and resized.
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+        push_args(a, &[0, 10, 20, 60, 70, flags])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        let moved = [(0xA0, 0), (0xA4, 1), (0xA8, 10), (0xAC, 20), (0xB0, 60)];
+        all_equal(a, l, &moved, 0)?;
+        // Resized only: the place in the WINDOWPOS is the window's.
+        push_args(a, &[0, 999, 999, 80, 90, flags | SWP_NOMOVE])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 0), (0xA4, 2)], 1)?;
+        all_equal(a, l, &[(0xA8, 10), (0xAC, 20)], 2)?;
+        all_equal(a, l, &[(0xB0, 80)], 3)?;
+        // The same without SWP_NOSENDCHANGING: both messages, and the
+        // place in WM_WINDOWPOSCHANGED's WINDOWPOS is the window's.
+        let flags = flags & !SWP_NOSENDCHANGING;
+        push_args(a, &[0, 999, 999, 100, 110, flags | SWP_NOMOVE])?;
+        a.push(esi)?;
+        a.call(f("SetWindowPos"))?;
+        all_equal(a, l, &[(0xA0, 1), (0xA4, 3)], 4)?;
+        all_equal(a, l, &[(0xA8, 10), (0xAC, 20)], 5)?;
+        all_equal(a, l, &[(0xB0, 100)], 6)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("swp_nosendchanging", program);
+    assert_eq!(code, 0x7F, "the checks that failed: {:07b}", !code & 0x7F);
+}
+
+/// Set bit `bit` of EBX if every dword at the data offsets in `checks`
+/// holds its value.
+fn all_equal(
+    a: &mut CodeAssembler,
+    l: &Layout,
+    checks: &[(u32, i32)],
+    bit: u32,
+) -> Result<(), IcedError> {
+    a.xor(edx, edx)?;
+    for &(at, value) in checks {
+        a.mov(eax, dword_ptr(l.at(at)))?;
+        a.xor(eax, value)?;
+        a.or(edx, eax)?;
+    }
+    a.test(edx, edx)?;
+    bit_if(a, eq, bit)
+}
+
+#[test]
 fn a_state_saved_while_win_exec_waits_resumes_the_wait() {
     // C.EXE writes C0.DAT, works for 300 ms, writes C.DAT and only then
     // gets messages. The state is saved once C0.DAT is there, while the
@@ -10335,6 +10451,56 @@ fn icinfo_lists_the_installed_codecs() {
     assert_eq!(info("icinfo_past", vidc, 5, None), 0);
     assert_eq!(info("icinfo_msvc", vidc, u32::from_le_bytes(*b"msvc"), None), 0);
     assert_eq!(info("icinfo_vids", u32::from_le_bytes(*b"vids"), iv41, None), 0);
+}
+
+/// What `ICOpen(kind, handler, mode)` and two ICCloses of its handle give
+/// back: 0xEE for no handle, else the low byte of the two results added,
+/// ICERR_OK for the first and ICERR_BADHANDLE (-8) for the second.
+fn ic_open(test: &str, kind: &[u8; 4], handler: &[u8; 4], mode: i32) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("MSVFW32.DLL", &["ICOpen", "ICClose"])];
+    let exe = program(BASE, false, imports, &[0xCC; 16], |a, l| {
+        let mut none = a.create_label();
+        a.push(mode)?;
+        a.push(i32::from_le_bytes(*handler))?;
+        a.push(i32::from_le_bytes(*kind))?;
+        a.call(l.import(0))?;
+        a.test(eax, eax)?;
+        a.jz(none)?;
+        a.mov(ebx, eax)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.mov(edi, eax)?;
+        a.push(ebx)?;
+        a.call(l.import(1))?;
+        a.add(eax, edi)?;
+        a.ret()?;
+        a.set_label(&mut none)?;
+        a.mov(eax, 0xEE)?;
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+/// ICOpen opens an installed codec to decompress, by its type and FourCC
+/// in either case, as Rent-A-Hero opens Indeo 5 before it starts; ICClose
+/// closes the handle once. A codec that isn't installed, a type other than
+/// `vidc`, and a mode that compresses or draws, which no codec here does,
+/// give no handle.
+#[test]
+fn icopen_opens_installed_decompressors() {
+    const ICMODE_COMPRESS: i32 = 1;
+    const ICMODE_DECOMPRESS: i32 = 2;
+    const ICMODE_FASTDECOMPRESS: i32 = 3;
+    const ICMODE_QUERY: i32 = 4;
+    const ICMODE_DRAW: i32 = 8;
+    let vidc = b"vidc";
+    assert_eq!(ic_open("icopen_iv50", vidc, b"IV50", ICMODE_DECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_cvid", vidc, b"cvid", ICMODE_QUERY), 0xF8);
+    assert_eq!(ic_open("icopen_vidc_upper", b"VIDC", b"iv41", ICMODE_FASTDECOMPRESS), 0xF8);
+    assert_eq!(ic_open("icopen_msvc", vidc, b"MSVC", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_vids", b"vids", b"IV50", ICMODE_DECOMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_compress", vidc, b"IV50", ICMODE_COMPRESS), 0xEE);
+    assert_eq!(ic_open("icopen_draw", vidc, b"IV50", ICMODE_DRAW), 0xEE);
 }
 
 /// A program linked with MFC's OLE support imports OLEDLG.DLL's

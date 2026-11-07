@@ -502,7 +502,7 @@ fn get_disk_free_space_ex_gives_bytes() {
 
 /// A setup checks a whole install against the free space, so a folder
 /// hard disk has more room under the built-in Windows than DOS's fake
-/// 80 MB: about 3.75 GB when empty. GetDiskFreeSpaceExA gives it all.
+/// 320 MB: about 3.75 GB when empty. GetDiskFreeSpaceExA gives it all.
 /// GetDiskFreeSpaceA gives it as Windows 95 and 98 do, through INT 21h
 /// AH=36h's 16-bit numbers: 65535 clusters of 32 KB, just under 2 GB.
 #[test]
