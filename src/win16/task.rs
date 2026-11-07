@@ -739,9 +739,7 @@ pub fn hand_turn(win32: &mut crate::win32::Win32, from: u32, to: u32) {
 
 /// Whether the threads `a` and `b` both run tasks.
 pub fn both_tasks(win32: &crate::win32::Win32, a: u32, b: u32) -> bool {
-    let win16 = &win32.win16;
-    let is_task = |tid: u32| win16.tasks.iter().any(|k| k.tid == tid);
-    win16.pid != 0 && is_task(a) && is_task(b)
+    super::is_task(win32, a) && super::is_task(win32, b)
 }
 
 /// The thread `tid` runs: if it is a task's, it takes the Win16 lock,
@@ -750,7 +748,7 @@ pub fn entered(win32: &mut crate::win32::Win32, tid: u32) {
     if win32.win16.directed == tid {
         win32.win16.directed = 0;
     }
-    if win32.win16.pid != 0 && win32.win16.tasks.iter().any(|t| t.tid == tid) {
+    if super::is_task(win32, tid) {
         win32.win16.lock = tid;
     }
 }
