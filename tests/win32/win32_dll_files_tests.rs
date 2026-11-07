@@ -366,14 +366,15 @@ fn ddraw_dll_is_a_pe_file_whose_exports_are_the_loaded_dlls() {
 
 /// Looks for DDRAW.DLL with GetFileAttributes, FindFirstFile and
 /// OpenFile, lists the system directory, and looks for GLIDE2X.DLL and
-/// NTDLL.DLL, which the machine doesn't have.
+/// MSIMG32.DLL, which the machine, a Windows 95 one without a 3dfx card,
+/// doesn't have.
 fn finds_ddraw() -> Vec<u8> {
     let mut data = vec![0; 0x800];
     put(&mut data, 0, DDRAW);
     put(&mut data, 0x40, b"C:\\WINDOWS\\SYSTEM\0");
     put(&mut data, 0x60, b"C:\\WINDOWS\\SYSTEM\\*.DLL\0");
     put(&mut data, 0x80, b"C:\\WINDOWS\\SYSTEM\\GLIDE2X.DLL\0");
-    put(&mut data, 0xA0, b"C:\\WINDOWS\\SYSTEM\\NTDLL.DLL\0");
+    put(&mut data, 0xA0, b"C:\\WINDOWS\\SYSTEM\\MSIMG32.DLL\0");
     put(&mut data, 0xC0, b"C:\\WINDOWS\\*.*\0");
     // WIN32_FIND_DATA at 200h, an OFSTRUCT at 400h, a count at 600h.
     program(&[("KERNEL32.DLL", KERNEL32)], &data, |a, l| {
