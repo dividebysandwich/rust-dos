@@ -193,8 +193,13 @@ pub fn has_thick_frame(style: u32, _ex: u32) -> bool {
     style & WS_THICKFRAME != 0 && style & (WS_DLGFRAME | WS_BORDER) != WS_DLGFRAME
 }
 
+/// The thin frame is WS_BORDER's, which WS_CAPTION includes. A top-level
+/// window whose caption and frame were taken away with SetWindowLong has
+/// none, as on Windows 95 and later: its client area is the whole window,
+/// which full-screen games such as Railroad Tycoon II draw to. Only
+/// Windows 3.x gave every overlapped window a thin frame.
 pub fn has_thin_frame(style: u32) -> bool {
-    style & WS_BORDER != 0 || style & (WS_CHILD | WS_POPUP) == 0
+    style & WS_BORDER != 0
 }
 
 /// The window rectangle around the client rectangle `r` for the style,
@@ -3249,6 +3254,31 @@ mod tests {
         );
         let c = client_for(user(&mut cpu), hwnd, Rect::new(-4, -4, 644, 484));
         assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
+    }
+
+    /// A top-level window whose style SetWindowLong set to WS_VISIBLE |
+    /// WS_CLIPSIBLINGS, as Railroad Tycoon II's full-screen window, has
+    /// no frame: its client area is the whole window, and the screen's
+    /// corner is in it. Windows 11 gives a 640x480 client area and
+    /// HTCLIENT at (0, 0) for such a window, and AdjustWindowRectEx adds
+    /// nothing for style 0 and one pixel for WS_BORDER.
+    #[test]
+    fn a_frameless_top_level_window_is_all_client_area() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let style = WS_VISIBLE | WS_CLIPSIBLINGS;
+        let r = Rect::new(0, 0, 640, 480);
+        assert_eq!(adjust(r, style, 0, false), r);
+        assert_eq!(adjust(r, WS_BORDER, 0, false), Rect::new(-1, -1, 641, 481));
+        let w = Window {
+            style,
+            rect: r,
+            client: r,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        assert_eq!(client_for(user(&mut cpu), hwnd, r), r);
+        let hit = super::super::input::hit_test(user(&mut cpu), hwnd, 0, 0);
+        assert_eq!(hit, super::super::input::HTCLIENT);
     }
 
     /// A caption without a thick frame keeps its 3-pixel dialog frame
