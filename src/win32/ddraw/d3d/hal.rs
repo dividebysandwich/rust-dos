@@ -1179,7 +1179,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
 fn heap(cpu: &mut Cpu) -> bool {
     // Only these: a copy of all of it would copy the texture list, at
     // every draw that samples a texture from the heap.
-    let (heap, heap_len, owner) = {
+    let (at, heap_len, owner) = {
         let h = hal(cpu);
         (h.heap, h.heap_len, h.pid)
     };
@@ -1189,12 +1189,12 @@ fn heap(cpu: &mut Cpu) -> bool {
             .display
             .blocks
             .iter()
-            .any(|&(at, len)| at == heap && len >= heap_len);
+            .any(|&(block, len)| block == at && len >= heap_len);
         if there && owner == pid {
             return true;
         }
         if there {
-            display::free(cpu, heap);
+            display::free(cpu, at);
         }
     }
     let (_, free) = display::video_memory(cpu);
