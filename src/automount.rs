@@ -15,12 +15,17 @@ use std::path::{Path, PathBuf};
 /// The folder's name.
 pub const FOLDER: &str = "automount";
 
-const CD_EXTENSIONS: [&str; 9] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t"];
+const CD_EXTENSIONS: [&str; 10] = [
+    "cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t", "mds",
+];
 /// The CUE sheets' extensions, GOG's among them.
 const SHEET_EXTENSIONS: [&str; 4] = ["cue", "ins", "inst", "bdn"];
 /// The extensions of BlindWrite's descriptors, which name data files as
 /// CUE sheets name tracks.
 const DESCRIPTOR_EXTENSIONS: [&str; 2] = ["b5t", "b6t"];
+/// The extension of Alcohol 120%'s descriptors, which name their data
+/// file.
+const MDS_EXTENSION: &str = "mds";
 const DISK_EXTENSIONS: [&str; 7] = ["vhd", "img", "ima", "dsk", "vfd", "flp", "86f"];
 /// A system's, in the order `os_images` looks for a name.
 const SYSTEM_EXTENSIONS: [&str; 6] = ["img", "vhd", "ima", "dosz", "zip", "7z"];
@@ -231,8 +236,8 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
     let mut scan = Scan::default();
     let mut entries: Vec<&Entry> = entries.iter().collect();
     entries.sort_by_key(|e| e.name.to_ascii_lowercase());
-    // The tracks a CUE sheet or BlindWrite descriptor names are its
-    // disc's, not discs of their own.
+    // The tracks a CUE sheet, BlindWrite or Alcohol 120% descriptor
+    // names are its disc's, not discs of their own.
     let mut tracks: Vec<String> = Vec::new();
     let named = |name: &str, extensions: &[&str]| {
         Path::new(name)
@@ -260,6 +265,15 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             // And DPM data beside it.
             let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
             tracks.push(format!("{}.bwa", stem.to_ascii_lowercase()));
+        } else if named(&entry.name, &[MDS_EXTENSION]) {
+            let disc = crate::cdrom::mds::parse(&read(entry)).unwrap_or_default();
+            // Alcohol's own name for the data file counts even when the
+            // descriptor can't be read, as `.bwa` does for BlindWrite.
+            for file in disc.files().into_iter().chain(["*.mdf"]) {
+                let file = crate::cdrom::mds::data_file(&entry.name, file);
+                let file = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_ascii_lowercase();
+                tracks.push(file);
+            }
         }
     }
     let mut found: Vec<(u8, u32, Option<String>, Kind, &Entry)> = Vec::new();
@@ -411,6 +425,28 @@ mod tests {
         }
         let scan = scan(&package);
         assert_eq!(names(scan.mount(3).unwrap()), ["d.b6t"]);
+        assert!(scan.systems.is_empty(), "{:?}", scan.systems);
+        assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+        let _ = std::fs::remove_dir_all(&package);
+    }
+
+    #[test]
+    fn alcohol_data_files_are_the_descriptors() {
+        let package = crate::test_dir::path("automount_mds");
+        let _ = std::fs::remove_dir_all(&package);
+        let folder = package.join("automount");
+        std::fs::create_dir_all(&folder).unwrap();
+        let tracks = [(0xAA, 0, 1, 0, 0, 150, 20)];
+        let descriptor = crate::cdrom::mds::build(&[&tracks], "*.mdf", &[]);
+        std::fs::write(folder.join("D.MDS"), descriptor).unwrap();
+        std::fs::write(folder.join("D.MDF"), [0u8; 16]).unwrap();
+        // A descriptor rust-dos refuses still has its data file.
+        let mut refused = crate::cdrom::mds::build(&[&tracks], "*.mdf", &[]);
+        refused[16] = 2;
+        std::fs::write(folder.join("e.mds"), refused).unwrap();
+        std::fs::write(folder.join("e.mdf"), [0u8; 16]).unwrap();
+        let scan = scan(&package);
+        assert_eq!(names(scan.mount(3).unwrap()), ["D.MDS"]);
         assert!(scan.systems.is_empty(), "{:?}", scan.systems);
         assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
         let _ = std::fs::remove_dir_all(&package);

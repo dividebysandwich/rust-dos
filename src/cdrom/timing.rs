@@ -31,14 +31,14 @@
 //! emulated time of the read, so a run with `--deterministic` takes the
 //! same times every time.
 //!
-//! An image with DPM data (BlindWrite's, `b6t::Dpm`) says where the
-//! sectors of the disc it was made from are: the angles a drive measured.
-//! Where it has them, they take the place of `turns` (#591). SecuROM 4.8
-//! and StarForce compare read times with those of the pressed disc, whose
-//! sectors are where its mastering put them, not where a uniform spiral
-//! has them.
+//! An image with DPM data (`dpm::Dpm`, BlindWrite's or Alcohol 120%'s)
+//! says where the sectors of the disc it was made from are: the angles a
+//! drive measured. Where it has them, they take the place of `turns`
+//! (#591). SecuROM 4.8 and StarForce compare read times with those of the
+//! pressed disc, whose sectors are where its mastering put them, not where
+//! a uniform spiral has them.
 
-use super::b6t::Dpm;
+use super::dpm::Dpm;
 
 /// Linear velocity of the spiral, in m/s: the Red Book allows 1.2 to 1.4.
 const VELOCITY: f64 = 1.3;
