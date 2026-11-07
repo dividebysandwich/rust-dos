@@ -103,10 +103,7 @@ impl DiskController {
                 Some(FileData::Memory(data)) => OpenData::Memory(data, Rc::new(Cell::new(0))),
                 Some(FileData::Image(image, extent)) => OpenData::Image(image, extent, Rc::new(Cell::new(0))),
                 _ if files.is_dir(&path) => return Err(0x05),
-                _ => {
-                    let parent = path.rsplit_once('\\').map_or("", |(p, _)| p);
-                    return Err(if files.is_dir(parent) { 0x02 } else { 0x03 });
-                }
+                _ => return Err(Self::memory_missing(files, &path)),
             };
             match mode & 0x03 {
                 0 | 2 => {}
