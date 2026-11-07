@@ -477,7 +477,7 @@ impl DiskController {
     /// Where in the open file `sft` the next read or write goes.
     pub fn position(&self, sft: u16) -> Option<u64> {
         match &self.open_files.get(&sft)?.data {
-            OpenData::Host(file, _) => (&*file).stream_position().ok(),
+            OpenData::Host(file, _) => file.position().ok(),
             OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => Some(pos.get()),
             OpenData::Device(_) => Some(0),
         }

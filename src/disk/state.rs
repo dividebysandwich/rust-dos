@@ -14,7 +14,6 @@ use super::{
 use crate::diskimage::SavedDisk;
 use crate::mount::{MountSpec, mount_spec_value, parse_mount_spec, tokenize};
 use crate::savestate::{Reader, Result, State, StateError, Writer};
-use std::io::Seek;
 use std::path::PathBuf;
 
 crate::state_enum!(CharDevice {
@@ -83,7 +82,7 @@ impl DiskController {
             let OpenFile { data, drive, owner, key, path, mode, refs, fcb, empty_on_use, raw } =
                 &open_files[&sft];
             let (device, position) = match data {
-                OpenData::Host(file, _) => (None, (&*file).stream_position().unwrap_or(0)),
+                OpenData::Host(file, _) => (None, file.position().unwrap_or(0)),
                 OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => (None, pos.get()),
                 OpenData::Device(device) => (Some(*device), 0),
             };

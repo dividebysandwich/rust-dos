@@ -53,7 +53,7 @@ fn top(c: &mut Context) -> &mut Matrix {
 }
 
 /// Multiply the current matrix by `m` on its right.
-fn mult(cpu: &mut Cpu, m: &Matrix) {
+pub fn mult(cpu: &mut Cpu, m: &Matrix) {
     if let Some(c) = ctx(cpu) {
         let t = top(c);
         *t = mul(t, m);
