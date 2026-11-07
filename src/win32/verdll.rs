@@ -534,7 +534,7 @@ fn file_resource(cpu: &mut Cpu, name: &str) -> Result<Resource, u32> {
             let system = dir.is_empty()
                 || dir.eq_ignore_ascii_case(super::loader::SYSTEM_DIR)
                 || dir.eq_ignore_ascii_case(super::loader::WINDOWS_DIR);
-            // As LoadLibrary finds it: NTDLL.DLL only with `win32_dlls`.
+            // As LoadLibrary finds it (NTDLL.DLL from Windows 98 on).
             let file_name = super::loader::module_file_name(file);
             match super::loader::builtin_for(&cpu.bus, &file_name) {
                 Some(i) if system && !file.is_empty() => {

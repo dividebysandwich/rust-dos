@@ -284,7 +284,7 @@ top of that.
   for it. They are there while the built-in Windows is on, and follow
   the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
   alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
-  `NTDLL.DLL` with `win32_dlls` alone, and a DLL that
+  `NTDLL.DLL` from Windows 98 on or with `win32_dlls`, and a DLL that
   `win32_dlls_replace` replaces with one of the folder's not at all.
 
   The files are read-only: they open for reading alone, show as
@@ -580,7 +580,9 @@ isn't on the search path, and reads it as if it were in
 a built-in one of the same name. With the setting, `ucrtbase.dll` and
 `api-ms-win-crt-*.dll` are the built-in MSVCRT, `kernelbase.dll` is
 KERNEL32, and there is a built-in NTDLL.DLL at BFE40000h with
-`_vsnprintf`; without it there is no NTDLL, as programs looking for
+`_vsnprintf`. Without the setting there is an NTDLL.DLL from Windows 98
+on, as Windows 98 has one with `RtlUnwind` (Microsoft's D3DRM.DLL
+imports it), and none under Windows 95, as programs looking for
 Windows NT expect.
 
 A DLL from the folder is guest code (the module flag `GUEST`). A

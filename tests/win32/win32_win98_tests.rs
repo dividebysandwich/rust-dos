@@ -954,18 +954,18 @@ fn a_shutdown_leaves_the_work_for_the_next_session() {
     assert_eq!(lines[0], "C:\\R.EXE later");
 }
 
-/// A program that ends with 7 when MSIMG32.DLL is a file of the system
-/// directory (1), loads (2) and has GradientFill (4).
-fn finds_msimg32() -> Vec<u8> {
+/// A program that ends with 7 when the DLL `dll` is a file of the system
+/// directory (1), loads (2) and has `function` (4).
+fn finds_system_dll(dll: &str, function: &str) -> Vec<u8> {
     let imports: &[(&str, &[&str])] = &[(
         "KERNEL32.DLL",
         &["GetFileAttributesA", "LoadLibraryA", "GetProcAddress"],
     )];
-    let mut data = b"C:\\WINDOWS\\SYSTEM\\MSIMG32.DLL\0".to_vec();
+    let mut data = format!("C:\\WINDOWS\\SYSTEM\\{}\0", dll).into_bytes();
     data.resize(0x40, 0);
-    data.extend_from_slice(b"MSIMG32.DLL\0");
+    data.extend_from_slice(format!("{}\0", dll).as_bytes());
     data.resize(0x60, 0);
-    data.extend_from_slice(b"GradientFill\0");
+    data.extend_from_slice(format!("{}\0", function).as_bytes());
     program(imports, &data, |a, l| {
         a.xor(ebx, ebx)?;
         a.push(l.at(0) as i32)?;
@@ -1226,7 +1226,19 @@ fn dciman32_has_no_provider_and_gives_visible_regions() {
 
 #[test]
 fn msimg32_dll_comes_with_windows_98() {
-    assert_eq!(run(Win95, "msimg32", finds_msimg32()).0, 0);
-    assert_eq!(run(Win98, "msimg32", finds_msimg32()).0, 7);
-    assert_eq!(run(Win98Se, "msimg32", finds_msimg32()).0, 7);
+    let finds = || finds_system_dll("MSIMG32.DLL", "GradientFill");
+    assert_eq!(run(Win95, "msimg32", finds()).0, 0);
+    assert_eq!(run(Win98, "msimg32", finds()).0, 7);
+    assert_eq!(run(Win98Se, "msimg32", finds()).0, 7);
+}
+
+/// Windows 98 has an NTDLL.DLL with RtlUnwind, which Microsoft's
+/// D3DRM.DLL imports (Submarine Titans ships it beside the game);
+/// Windows 95 has none.
+#[test]
+fn ntdll_dll_comes_with_windows_98() {
+    let finds = || finds_system_dll("NTDLL.DLL", "RtlUnwind");
+    assert_eq!(run(Win95, "ntdll", finds()).0, 0);
+    assert_eq!(run(Win98, "ntdll", finds()).0, 7);
+    assert_eq!(run(Win98Se, "ntdll", finds()).0, 7);
 }
