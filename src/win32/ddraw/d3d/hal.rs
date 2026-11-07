@@ -35,7 +35,7 @@
 //! out.
 
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
-use super::super::{current_pid, display, state, voodoo};
+use super::super::{Format, current_pid, display, state, voodoo};
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
     RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDCURRENTALPHA,
@@ -982,15 +982,24 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
         return None;
     }
     let (_, pitch) = surface::card_memory(cpu, id)?;
-    let s = state(cpu).surface(id)?.clone();
-    let (w, h) = (s.width, s.height);
+    // The fields it needs, without a copy of the surface's lists: this
+    // runs at every draw that samples a texture on these cards.
+    let (w, h, f, key_set, key_low) = {
+        let s = state(cpu).surface(id)?;
+        (
+            s.width,
+            s.height,
+            s.format,
+            s.key_set,
+            s.keys[KEY_SRC_BLT].0,
+        )
+    };
     if !w.is_power_of_two() || !h.is_power_of_two() || w.max(h) > 256 || w.max(h) < 2 {
         return None;
     }
     if w > 8 * h || h > 8 * w {
         return None;
     }
-    let f = &s.format;
     let paletted = f.flags & DDPF_PALETTEINDEXED8 != 0;
     let format = match (paletted, f.bits, f.r, f.a) {
         (true, 8, _, _) => api::TEXFMT_P_8,
@@ -1034,13 +1043,12 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
             None => break,
         }
     }
-    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
+    let keyed = key && key_set & 1 << KEY_SRC_BLT != 0;
     let key = keyed.then(|| {
-        let raw = s.keys[KEY_SRC_BLT].0;
         if paletted {
-            palette(cpu, id)[(raw & 0xFF) as usize]
+            palette(cpu, id)[(key_low & 0xFF) as usize]
         } else {
-            expanded(raw, &s)
+            expanded(key_low, &f)
         }
     });
     Some(InPlace {
@@ -1058,7 +1066,7 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
 
 /// A 16-bit texel as the texture unit makes it 8 bits a channel: each
 /// channel's bits again below them. 0RGB.
-fn expanded(raw: u32, s: &Surface) -> u32 {
+fn expanded(raw: u32, f: &Format) -> u32 {
     let channel = |mask: u32| {
         // A mask past the texel's 16 bits is the program's mistake.
         let mask = mask & 0xFFFF;
@@ -1075,7 +1083,6 @@ fn expanded(raw: u32, s: &Surface) -> u32 {
         }
         out >> (have - 8)
     };
-    let f = &s.format;
     channel(f.r) << 16 | channel(f.g) << 8 | channel(f.b)
 }
 
