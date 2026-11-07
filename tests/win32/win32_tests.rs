@@ -2887,6 +2887,64 @@ fn a_change_notification_is_signaled_by_a_new_file() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
 }
 
+/// A change notification for C:\ and the directories below it with
+/// FILE_NOTIFY_CHANGE_FILE_NAME isn't signaled by an empty directory made
+/// below (bit 0), which is a directory's name, and is by a file made in it
+/// (1). One for a directory in a directory that isn't there isn't made
+/// (2), with ERROR_PATH_NOT_FOUND (3).
+#[test]
+fn a_subtree_change_notification_watches_the_files_below() {
+    use Arg::{Esi, I};
+    const WAIT_TIMEOUT: i32 = 0x102;
+    let names: &[&str] = &[
+        "FindFirstChangeNotificationA",
+        "FindCloseChangeNotification",
+        "WaitForSingleObject",
+        "CreateDirectoryA",
+        "CreateFileA",
+        "CloseHandle",
+        "GetLastError",
+    ];
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", names)];
+    let mut data = vec![0; 0x100];
+    put(&mut data, 0, b"C:\\\0");
+    put(&mut data, 0x10, b"C:\\SUB\0");
+    put(&mut data, 0x20, b"C:\\SUB\\A.TXT\0");
+    put(&mut data, 0x40, b"C:\\NO\\WHERE\0");
+    let (code, text) = run(
+        "change_subtree",
+        program(BASE, false, imports, &data, |a, l| {
+            let f = |name: &str| l.import(names.iter().position(|n| *n == name).unwrap());
+            let at = |offset: u32| I(l.at(offset) as u32);
+            a.xor(ebx, ebx)?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0), I(1), I(1)])?;
+            a.mov(esi, eax)?;
+            call_with(a, f("CreateDirectoryA"), &[at(0x10), I(0)])?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.cmp(eax, WAIT_TIMEOUT)?;
+            check(a, false, 0)?;
+            let new = [at(0x20), I(0x4000_0000), I(0), I(0), I(2), I(0x80), I(0)];
+            call_with(a, f("CreateFileA"), &new)?;
+            a.push(eax)?;
+            a.call(f("CloseHandle"))?;
+            call_with(a, f("WaitForSingleObject"), &[Esi, I(0)])?;
+            a.test(eax, eax)?;
+            check(a, false, 1)?;
+            call_with(a, f("FindCloseChangeNotification"), &[Esi])?;
+            call_with(a, f("FindFirstChangeNotificationA"), &[at(0x40), I(0), I(1)])?;
+            a.cmp(eax, -1)?;
+            check(a, false, 2)?;
+            a.call(f("GetLastError"))?;
+            a.cmp(eax, 3)?;
+            check(a, false, 3)?;
+            a.mov(eax, ebx)?;
+            a.or(eax, 0xF0)?;
+            a.ret()
+        }),
+    );
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b} {}", !code, text);
+}
+
 /// A thread that waits for a change notification with no timeout goes on
 /// when the directory changes, here by a file another program (the host)
 /// puts there.

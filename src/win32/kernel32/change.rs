@@ -11,8 +11,15 @@
 //! with `subtree`), and a wait that includes the handle lists the
 //! directory again and compares (`poll`). The change is seen at the next
 //! wait for it, which is when a program can see it on Windows too.
+//!
+//! A thread blocked on the handle is looked for at every interrupt
+//! (`thread::wake`), and a listing reads the host folder and stats each
+//! entry, so those looks are `BLOCKED_LOOK` apart at least: a blocked
+//! thread goes on that much after the change at most. A wait that tests
+//! the handle at once looks every time, so that a program sees its own
+//! change at its next wait as it does on Windows.
 
-use super::path::{ERROR_FILE_NOT_FOUND, path_arg};
+use super::path::{not_found, path_arg};
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, TRUE, set_error};
 use super::{INVALID_HANDLE_VALUE, find_entries, full_path};
 use crate::cpu::Cpu;
@@ -43,6 +50,9 @@ fn fingerprint(cpu: &Cpu, dir: &str, subtree: bool, filter: u32) -> Option<u64> 
     let mut dirs = vec![(dir.trim_end_matches('\\').to_string(), 0)];
     let mut seen = 0;
     while let Some((at, depth)) = dirs.pop() {
+        if seen >= MAX_ENTRIES {
+            break;
+        }
         // A drive's root keeps its backslash ("C:\").
         let list = if at.ends_with(':') {
             format!("{}\\", at)
@@ -58,7 +68,19 @@ fn fingerprint(cpu: &Cpu, dir: &str, subtree: bool, filter: u32) -> Option<u64> 
         };
         entries.retain(|e| e.name != "." && e.name != "..");
         entries.sort_by(|a, b| a.name.cmp(&b.name));
-        hash.write(at.as_bytes());
+        // The directory's path goes in before the first of its entries
+        // that the filter watches, so that a file moved to another
+        // directory changes the fingerprint, and a directory made or
+        // renamed below with nothing watched in it doesn't (that is
+        // DIR_NAME's to watch, in its parent's listing).
+        let mut named = false;
+        let mut put = |hash: &mut Fnv, bytes: &[u8]| {
+            if !named {
+                hash.write(at.as_bytes());
+                named = true;
+            }
+            hash.write(bytes);
+        };
         for entry in entries.iter().take(MAX_ENTRIES.saturating_sub(seen)) {
             seen += 1;
             let directory = entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
@@ -68,18 +90,18 @@ fn fingerprint(cpu: &Cpu, dir: &str, subtree: bool, filter: u32) -> Option<u64> 
                 FILE_NOTIFY_CHANGE_FILE_NAME
             };
             if filter & name_kind != 0 {
-                hash.write(&[directory as u8]);
-                hash.write(entry.name.to_ascii_uppercase().as_bytes());
+                put(&mut hash, &[directory as u8]);
+                put(&mut hash, entry.name.to_ascii_uppercase().as_bytes());
             }
             if filter & FILE_NOTIFY_CHANGE_ATTRIBUTES != 0 {
-                hash.write(&entry.attributes.to_le_bytes());
+                put(&mut hash, &entry.attributes.to_le_bytes());
             }
             if filter & FILE_NOTIFY_CHANGE_SIZE != 0 && !directory {
-                hash.write(&entry.size.to_le_bytes());
+                put(&mut hash, &entry.size.to_le_bytes());
             }
             if filter & FILE_NOTIFY_CHANGE_LAST_WRITE != 0 {
-                hash.write(&entry.date.to_le_bytes());
-                hash.write(&entry.time.to_le_bytes());
+                put(&mut hash, &entry.date.to_le_bytes());
+                put(&mut hash, &entry.time.to_le_bytes());
             }
             if subtree && directory && depth < MAX_DEPTH {
                 dirs.push((format!("{}\\{}", at, entry.name), depth + 1));
@@ -116,8 +138,9 @@ const GONE: u64 = 0;
 /// signaled once the directory `path` changes as `filter` says, or with
 /// `subtree` a directory below it does. INVALID_HANDLE_VALUE with
 /// ERROR_PATH_NOT_FOUND for no path, ERROR_INVALID_PARAMETER for a filter
-/// with no change or one Windows doesn't know, and ERROR_FILE_NOT_FOUND
-/// for a directory that isn't there.
+/// with no change or one Windows doesn't know, and for a directory that
+/// isn't there ERROR_FILE_NOT_FOUND, or ERROR_PATH_NOT_FOUND when the one
+/// it would be in isn't either (`not_found`).
 pub(super) fn find_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (subtree, filter) = (args[1] != 0, args[2]);
     let Some(path) = path_arg(cpu, args[0])? else {
@@ -129,7 +152,8 @@ pub(super) fn find_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let dir = full_path(cpu, &path);
     if !cpu.bus.disk.is_directory(&dir) {
-        set_error(cpu, ERROR_FILE_NOT_FOUND);
+        let error = not_found(cpu, &dir);
+        set_error(cpu, error);
         return Some(INVALID_HANDLE_VALUE);
     }
     let seen = fingerprint(cpu, &dir, subtree, filter).unwrap_or(GONE);
@@ -138,6 +162,7 @@ pub(super) fn find_first(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         subtree,
         filter,
         seen,
+        looked: cpu.bus.clock.now_micros(),
         signaled: false,
     };
     Some(object::create(cpu, kind, None))
@@ -172,33 +197,80 @@ pub(super) fn find_close(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(TRUE)
 }
 
+/// How long apart, in the clock's microseconds, the looks for a blocked
+/// thread's wait are at least.
+const BLOCKED_LOOK: u64 = 50_000;
+
 /// Look again at the directories of the change notifications among the
 /// objects `ids`, which a wait is about to test, and signal the ones
 /// whose directory has changed since they last looked.
 pub fn poll(cpu: &mut Cpu, ids: &[u32]) {
+    poll_older(cpu, ids, 0);
+}
+
+/// `poll` for the waits of the blocked threads, which `thread::wake`
+/// tests at every interrupt: only the notifications that last looked
+/// `BLOCKED_LOOK` ago or longer look again.
+pub fn poll_blocked(cpu: &mut Cpu) {
+    let time = cpu.bus.clock.now_micros();
+    let win32 = &cpu.bus.win32;
+    let due = |id: &u32| match win32.objects.get(*id).map(|o| &o.kind) {
+        Some(Kind::Change {
+            looked,
+            signaled: false,
+            ..
+        }) => time.saturating_sub(*looked) >= BLOCKED_LOOK,
+        _ => false,
+    };
+    // Empty, and so not allocated, unless a notification is due.
+    let waited: Vec<u32> = win32
+        .processes
+        .iter()
+        .flat_map(|p| &p.threads)
+        .filter_map(|t| t.wait.as_ref())
+        .flat_map(|w| w.objects.iter().copied())
+        .filter(due)
+        .collect();
+    poll_older(cpu, &waited, BLOCKED_LOOK);
+}
+
+/// `poll` for the notifications among `ids` that last looked `age`
+/// microseconds ago or longer.
+fn poll_older(cpu: &mut Cpu, ids: &[u32], age: u64) {
+    let time = cpu.bus.clock.now_micros();
     for &id in ids {
         let Some(Kind::Change {
             dir,
             subtree,
             filter,
             seen,
+            looked,
             signaled: false,
         }) = cpu.bus.win32.objects.get(id).map(|o| &o.kind)
         else {
             continue;
         };
-        let (dir, subtree, filter, seen) = (dir.clone(), *subtree, *filter, *seen);
-        let now = fingerprint(cpu, &dir, subtree, filter).unwrap_or(GONE);
-        if now == seen {
+        if time.saturating_sub(*looked) < age {
             continue;
         }
+        let (dir, subtree, filter, seen) = (dir.clone(), *subtree, *filter, *seen);
+        let now = fingerprint(cpu, &dir, subtree, filter).unwrap_or(GONE);
         if let Some(object::Object {
-            kind: Kind::Change { seen, signaled, .. },
+            kind:
+                Kind::Change {
+                    seen: kept,
+                    looked,
+                    signaled,
+                    ..
+                },
             ..
         }) = cpu.bus.win32.objects.get_mut(id)
         {
-            *seen = now;
-            *signaled = true;
+            *looked = time;
+            if now != seen {
+                *kept = now;
+                *signaled = true;
+            }
         }
     }
 }

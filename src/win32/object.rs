@@ -75,13 +75,15 @@ pub enum Kind {
     /// A change notification of FindFirstChangeNotificationA: the full
     /// path of the directory it watches, whether it watches the ones
     /// below too, its FILE_NOTIFY_CHANGE_* filter, the fingerprint of what
-    /// that watches as it last looked, and whether a change signaled it
+    /// that watches as it last looked, when it looked (the clock's
+    /// microseconds), and whether a change signaled it
     /// (kernel32/change.rs).
     Change {
         dir: String,
         subtree: bool,
         filter: u32,
         seen: u64,
+        looked: u64,
         signaled: bool,
     },
 }
@@ -359,6 +361,7 @@ crate::win32::state_variants!(Kind {
         subtree,
         filter,
         seen,
+        looked,
         signaled
     },
 });

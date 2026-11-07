@@ -581,16 +581,7 @@ pub fn wake(cpu: &mut Cpu) -> Vec<At> {
     super::dplayx::poll(cpu);
     // The change notifications the waiting threads wait for look at
     // their directories again.
-    let waited: Vec<u32> = cpu
-        .bus
-        .win32
-        .processes
-        .iter()
-        .flat_map(|p| &p.threads)
-        .filter_map(|t| t.wait.as_ref())
-        .flat_map(|w| w.objects.iter().copied())
-        .collect();
-    super::kernel32::change::poll(cpu, &waited);
+    super::kernel32::change::poll_blocked(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);
