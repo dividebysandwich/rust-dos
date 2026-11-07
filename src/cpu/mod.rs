@@ -1158,7 +1158,10 @@ impl Cpu {
     /// program the shell started) or the address its maker returns to when
     /// it ends (under one EXEC started, which set the vector). Neither
     /// leads back into the maker: such a process ends as one with no
-    /// context kept, back at the shell.
+    /// context kept, back at the shell. Once a child the maker started
+    /// through EXEC has ended, the vector holds the address that EXEC
+    /// returned to in the maker, as on DOS, and a PSP made from it then
+    /// ends there.
     pub fn ends_in_its_maker(&mut self, psp: u16) -> bool {
         let base = psp as u32 * 16;
         let terminate = self.bus.guest_read_32(base + 0x0A);
@@ -1222,6 +1225,11 @@ impl Cpu {
         let psp = self.current_psp;
         let base = psp as u32 * 16;
         let terminate = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
+        // Also for a process that goes back to the shell: one that stays
+        // resident (AH=31h, INT 27h) keeps its memory, and a Ctrl-Break or
+        // critical-error handler it installed there would otherwise stay
+        // hooked under the programs started after it.
+        crate::dos_files::restore_vectors(&mut self.bus, psp);
         let Some(index) = self.exec_context(psp) else {
             // A process the shell started has none, and the caller loads
             // the shell again for it (`terminate`, INT 21h AH=31h), even
@@ -1235,7 +1243,6 @@ impl Cpu {
         // Contexts kept after it are those of other virtual machines'
         // processes, which go on.
         let context = self.process_stack.remove(index);
-        crate::dos_files::restore_vectors(&mut self.bus, psp);
         self.restore_context(context);
         if terminate != (0, 0) {
             let frame = self.get_physical_addr(self.ss(), self.sp()) as u32;
