@@ -381,7 +381,23 @@ fn brush_fill_through(
         c.origin.1 + dc.attrs.brush_org.1,
     );
     match brush.style {
-        BS_SOLID => Fill::Solid(value_through(cpu, dc, &c.surface, brush.color, map)),
+        BS_SOLID => {
+            // On a palette device an RGB color that isn't a static one
+            // is dithered (`DeviceMap::dither`); PALETTEINDEX and
+            // PALETTERGB colors aren't, nor pens, text and SetPixel.
+            let dither = map
+                .filter(|_| brush.color >> 24 == 0)
+                .and_then(|map| map.dither(brush.color));
+            match dither {
+                Some(values) => Fill::Pattern {
+                    width: 8,
+                    height: 8,
+                    org,
+                    values: values.into_iter().map(Some).collect(),
+                },
+                None => Fill::Solid(value_through(cpu, dc, &c.surface, brush.color, map)),
+            }
+        }
         _ => {
             let Some(pattern) = brush.pattern else {
                 return Fill::Solid(value_through(cpu, dc, &c.surface, brush.color, map));

@@ -30,6 +30,16 @@
 //! WM_PALETTECHANGED to the top-level windows (as Wine's
 //! UserRealizePalette does). Realizing the palette realized last again
 //! does nothing until its entries change.
+//!
+//! On such a device an RGB color takes the nearest static color, with
+//! one exception: a solid brush of a color that isn't one of the 20
+//! static ones fills with an 8x8 ordered dither of the 16 VGA colors
+//! (`dither_levels`), even when the realized palette has the color. So
+//! FillRect, PatBlt and the inside of Rectangle dither, on the screen
+//! and in a DDB. Pens, text and its opaque background, SetPixel, and
+//! PALETTEINDEX and PALETTERGB colors don't, nor anything drawn in a
+//! DIB section. The pattern's origin is the DC's (the window's), moved
+//! by the brush origin.
 
 use super::{
     DEFAULT_PALETTE, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FALSE, Kind, Palette, TRUE,
@@ -184,6 +194,20 @@ impl DeviceMap {
         nearest_of(&self.statics, color) as u32
     }
 
+    /// A solid brush of the RGB color `color`, as Windows 95's display
+    /// drivers realize one on a palette device: one of the 20 static
+    /// colors is solid (None), any other an 8x8 pattern of the 16 VGA
+    /// colors (`dither_levels`), each as its static entry, rows from the
+    /// top.
+    pub fn dither(&self, color: u32) -> Option<Vec<u32>> {
+        if static_colors().contains(&color) {
+            return None;
+        }
+        let level = |l: u8| [0u32, 0x80, 0xFF][l as usize];
+        let rgb = |l: [u8; 3]| level(l[0]) | level(l[1]) << 8 | level(l[2]) << 16;
+        Some(dither_levels(color).iter().map(|&l| self.solid(rgb(l))).collect())
+    }
+
     /// PALETTERGB: the logical palette's nearest entry.
     pub fn palette_rgb(&self, color: u32) -> u32 {
         if self.logical.is_empty() {
@@ -221,6 +245,50 @@ impl DeviceMap {
         }
         best.1
     }
+}
+
+/// The ordered dither's thresholds, 0 to 63, rows from the top.
+const BAYER: [[u8; 8]; 8] = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+];
+
+/// The 8x8 pattern Windows 95's display drivers make of a solid brush of
+/// `color` on a palette device: for each pixel, rows from the top, its
+/// red, green and blue as levels 0, 1 and 2 (0, 0x80 and 0xFF), which
+/// make one of the 16 VGA colors.
+///
+/// A channel `v` counts as `h` = 2 * ((v + 1) / 4) sixty-fourths of
+/// 0x80, so 0 to 128. A color with no channel above 64 mixes the dark
+/// colors: a pixel's channel is 1 where its threshold is at least
+/// 64 - h. Otherwise the brightest channel's excess, k = h - 64, is how
+/// many pixels take bright colors (thresholds from 64 - k): each channel
+/// gives the dark pixels as much of it as they hold, min(h, 64 - k),
+/// and the rest, at half weight (a bright level is two dark ones), to
+/// the bright pixels. Measured on Windows 95 OSR2 with a Voodoo 3's
+/// driver: this reproduces every pixel of 1075 brushes, among them all
+/// 256 levels of red, green, blue and grey.
+fn dither_levels(color: u32) -> [[u8; 3]; 64] {
+    let h = [0, 8, 16].map(|s| (((color >> s) & 0xFF) + 1) / 4 * 2);
+    let k = h.iter().max().unwrap().saturating_sub(64);
+    let dark = h.map(|v| v.min(64 - k));
+    let bright = [0, 1, 2].map(|c| (h[c] - dark[c]) / 2);
+    let mut out = [[0u8; 3]; 64];
+    for (i, px) in out.iter_mut().enumerate() {
+        let m = BAYER[i / 8][i % 8] as u32;
+        *px = if m >= 64 - k {
+            bright.map(|b| if m >= 64 - b { 2 } else { 0 })
+        } else {
+            dark.map(|d| (m >= 64 - k - d) as u8)
+        };
+    }
+    out
 }
 
 fn distance(a: u32, b: u32) -> u32 {
@@ -808,5 +876,61 @@ mod tests {
         );
         let u = static_uses(SYSPAL_NOSTATIC);
         assert_eq!(u.iter().filter(|&&x| x == USE_STATIC).count(), 2);
+    }
+
+    /// The system palette's indices Windows 95 (OSR2, a Voodoo 3's
+    /// driver, 640x480 in 256 colours) filled an 8x8 cell with, from a
+    /// FillRect with a solid brush, read back with GetDIBits.
+    const MEASURED_0_0_200: [[u8; 8]; 4] = [
+        [4, 252, 4, 252, 4, 252, 4, 252],
+        [252, 4, 252, 4, 252, 4, 252, 4],
+        [4, 252, 4, 252, 4, 252, 4, 252],
+        [252, 252, 252, 4, 252, 252, 252, 4],
+    ];
+    const MEASURED_200_100_50: [[u8; 8]; 8] = [
+        [3, 249, 248, 249, 3, 249, 248, 249],
+        [249, 248, 251, 248, 249, 248, 251, 248],
+        [248, 249, 248, 249, 248, 249, 248, 249],
+        [251, 249, 249, 248, 251, 249, 251, 248],
+        [3, 249, 248, 249, 3, 249, 248, 249],
+        [249, 248, 251, 248, 249, 248, 251, 248],
+        [248, 249, 248, 249, 248, 249, 248, 249],
+        [251, 249, 251, 248, 251, 249, 251, 248],
+    ];
+
+    #[test]
+    fn a_brush_dithers_as_windows_95_draws_it() {
+        let (mut cpu, _) = palette_machine();
+        let map = DeviceMap::new(&mut cpu, 0);
+        let blue = map.dither(0xC8_0000).unwrap();
+        for (i, &v) in blue.iter().enumerate() {
+            assert_eq!(v, MEASURED_0_0_200[i / 8 % 4][i % 8] as u32, "(0,0,200) at {i}");
+        }
+        let brown = map.dither(0x32_64C8).unwrap();
+        for (i, &v) in brown.iter().enumerate() {
+            assert_eq!(v, MEASURED_200_100_50[i / 8][i % 8] as u32, "(200,100,50) at {i}");
+        }
+    }
+
+    #[test]
+    fn the_static_colors_and_the_extremes_are_solid() {
+        let (mut cpu, _) = palette_machine();
+        let map = DeviceMap::new(&mut cpu, 0);
+        for &c in static_colors() {
+            assert_eq!(map.dither(c), None, "{c:06X}");
+        }
+        // A grey of 254 isn't static: 62 pixels white, the 2 of the
+        // lowest thresholds grey.
+        let near_white = map.dither(0xFE_FEFE).unwrap();
+        assert_eq!(near_white.iter().filter(|&&v| v == 255).count(), 62);
+        assert_eq!(near_white.iter().filter(|&&v| v == 248).count(), 2);
+        assert_eq!(dither_levels(0x01_0101), [[0, 0, 0]; 64]);
+    }
+
+    #[test]
+    fn a_dark_grey_lights_its_share_of_pixels() {
+        // (64, 64, 64): h = 32 of 64, so half the pixels are 0x80 grey.
+        let lit = dither_levels(0x40_4040).iter().filter(|&&l| l == [1, 1, 1]).count();
+        assert_eq!(lit, 32);
     }
 }
