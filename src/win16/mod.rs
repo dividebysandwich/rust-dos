@@ -30,7 +30,7 @@ mod lz;
 mod message;
 mod misc;
 mod module;
-pub mod resource;
+pub(crate) mod resource;
 pub mod task;
 pub(crate) mod thunk;
 mod user;

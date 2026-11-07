@@ -390,13 +390,15 @@ pub fn image32(cpu: &mut Cpu, index: usize) -> u32 {
     }
     let name = format!("{}.16", module.name);
     let (rsrc, eager) = section_of(module);
-    // The image's size, its base not known yet: build it once to learn it.
-    let size = (build_image32(&name, &rsrc, 0).len() as u32).next_multiple_of(PAGE);
+    // The headers' page and the resource section: the image is built
+    // only once its base is known.
+    let size = (RSRC_RVA + rsrc.len() as u32).next_multiple_of(PAGE);
     let eager = eager.next_multiple_of(PAGE).min(size);
     let pid = cpu.bus.win32.win16.pid;
     let made = super::with_win16(cpu, pid, |p, bus| {
         let base = p.memory.reserve_image(None, size, PRIVATE, SHARED)?;
         let file = build_image32(&name, &rsrc, base);
+        debug_assert_eq!(file.len() as u32, size);
         let written = p.memory.commit(bus, base, eager, USER).and_then(|()| {
             let end = (eager as usize).min(file.len());
             p.memory.write(bus, base, &file[..end])
@@ -435,11 +437,11 @@ pub fn image32(cpu: &mut Cpu, index: usize) -> u32 {
 /// data. True when they have pages, or `base` isn't such an image; false
 /// when there is no memory for them.
 pub fn page_in(cpu: &mut Cpu, base: u32, at: u32, len: u32) -> bool {
-    let win16 = &cpu.bus.win32.win16;
-    let pid = win16.pid;
-    if pid == 0 || crate::win32::running(cpu).is_none_or(|p| p.id != pid) {
+    if !super::in_win16(cpu) {
         return true;
     }
+    let win16 = &cpu.bus.win32.win16;
+    let pid = win16.pid;
     let Some(index) = win16.modules.iter().position(|m| m.resources32 == base) else {
         return true;
     };

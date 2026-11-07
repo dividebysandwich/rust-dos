@@ -332,8 +332,8 @@ impl Memory {
         for page in (lin..lin + len).step_by(PAGE as usize) {
             let mapped = self.page(bus).is_some_and(|phys| {
                 let mapped = self.map(bus, page, phys, flags).is_some();
-                if !mapped && let Some(pool) = bus.win32.pool.as_mut() {
-                    pool.free.push(phys);
+                if !mapped {
+                    free_page(bus, phys);
                 }
                 mapped
             });
