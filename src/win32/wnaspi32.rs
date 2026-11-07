@@ -122,8 +122,9 @@ const TARGETS: u8 = 2;
 /// The most a command transfers, a data block of the drive's.
 const MAX_TRANSFER: u32 = 0x1_0000;
 
-/// The state: the drive the commands go to, and the time of the last
-/// command (PIT ticks), which its delays moved on from the machine's.
+/// The state: the drive the commands go to, and when the last event
+/// request is done with it (PIT ticks), which its delays moved on from
+/// the machine's.
 #[derive(Clone, Debug, Default)]
 pub struct State {
     drive: Option<Atapi>,
@@ -486,7 +487,16 @@ fn exec_scsi_cmd(cpu: &mut Cpu, srb: u32, flags: u8, cd: u8) -> Result<Finished,
     };
     let cd = state.drive.as_mut().expect("the drive was made");
     let outcome = cd.run_packet(&cdb[..cdb_len], &out, &mut env);
-    state.clock = env.now;
+    // An event request keeps the drive busy until it is done, and the
+    // requests after it queue behind it. Any other request is finished
+    // before SendASPI32Command returns, in no emulated time, so it leaves
+    // the drive's clock where it was: otherwise a run of such reads would
+    // put the drive further ahead of the machine with each, and an event
+    // request after them would wait for all of their time. On Windows
+    // they too end when the drive is done (#636).
+    if flags & SRB_EVENT_NOTIFY != 0 {
+        state.clock = env.now;
+    }
     let due = env.now;
     let moved = env.moved;
     let log = std::mem::take(&mut cd.log);

@@ -111,7 +111,13 @@ impl<'a> Geometry<'a> {
         let base = self.spiral_turns(start);
         // The measured angle of sector `start + i * res`, in turns from
         // `start`: entry i - 1 of the data.
-        let at = |i: usize| if i == 0 { 0.0 } else { dpm.angles[i - 1] as f64 / 256.0 };
+        let at = |i: usize| {
+            if i == 0 {
+                0.0
+            } else {
+                dpm.angles[i - 1] as f64 / 256.0
+            }
+        };
         let last = dpm.angles.len();
         if lba <= start {
             return self.spiral_turns(lba);
@@ -184,14 +190,27 @@ impl Default for Head {
 }
 
 impl Head {
-    /// The head at sector `lba`, there at `now`, with nothing buffered:
-    /// where a SEEK leaves it.
-    pub fn at(lba: i64, now: f64) -> Self {
-        Self {
+    /// Sectors the drive has read on from `next` by `now`, at most
+    /// `READ_AHEAD`: how far reading ahead has taken the head.
+    fn ahead(&self, disc: &Geometry, now: f64) -> i64 {
+        let turns = (now - self.since).max(0.0) * turns_per_second();
+        ((turns * disc.sectors_per_turn(self.next)) as i64).min(READ_AHEAD)
+    }
+
+    /// How long, in ms, a SEEK to sector `lba` that starts at `now` takes:
+    /// the head moves to the sector's track. The buffer is emptied, and
+    /// the drive reads on from the sector once it comes round.
+    pub fn seek(&mut self, disc: &Geometry, now: f64, lba: i64) -> f64 {
+        let rps = turns_per_second();
+        let head = self.next + self.ahead(disc, now);
+        let seek = seek_ms(disc.radius(head), disc.radius(lba)) / 1000.0;
+        let wait = wrap(disc.turns(lba) - rps * (now + seek)) / rps;
+        *self = Self {
             start: lba,
             next: lba,
-            since: now,
-        }
+            since: now + seek + wait,
+        };
+        seek * 1000.0
     }
 
     /// How long, in ms, a read of `count` sectors from `lba` takes when it
@@ -201,7 +220,11 @@ impl Head {
         let rps = turns_per_second();
         let end = lba + count as i64;
         let send = count as f64 * SEND_MS / 1000.0;
-        let (ready, seconds) = if lba >= self.start && end <= self.next + READ_AHEAD {
+        // The buffer holds the last READ_AHEAD sectors read: reading ahead
+        // pushes the oldest out.
+        let ahead = self.ahead(disc, now);
+        let held = self.start.max(self.next + ahead - READ_AHEAD);
+        let (ready, seconds) = if lba >= held && end <= self.next + READ_AHEAD {
             // The buffer has the sectors, or will have them as the disc
             // turns on from `next`: wait for the last one, then send them.
             let ready = self.since + (disc.turns(end) - disc.turns(self.next)).max(0.0) / rps;
@@ -209,8 +232,7 @@ impl Head {
         } else {
             // Move the head from where reading ahead took it, wait for
             // the sector to come round, and read on.
-            let ahead = (now - self.since).max(0.0) * rps * disc.sectors_per_turn(self.next);
-            let head = self.next + (ahead as i64).min(READ_AHEAD);
+            let head = self.next + ahead;
             let seek = seek_ms(disc.radius(head), disc.radius(lba)) / 1000.0;
             let target = disc.turns(lba);
             let wait = wrap(target - rps * (now + seek)) / rps;
@@ -290,11 +312,46 @@ mod tests {
         let turning = (disc.turns(1017) - disc.turns(1001)) / rps * 1000.0;
         let send = 16.0 * SEND_MS;
         let early = (then - head_ready(first, 0.5)) * 1000.0;
-        assert!((next - (turning - early + send)).abs() < 1e-6, "{next} {turning} {send}");
+        assert!(
+            (next - (turning - early + send)).abs() < 1e-6,
+            "{next} {turning} {send}"
+        );
         // A second later the drive has read them all ahead: 16 more are
         // only sent.
         let later = exact(&mut head, &disc, then + 1.0, 1017, 16);
         assert!((later - send).abs() < 1e-9, "{later}");
+    }
+
+    #[test]
+    fn reading_ahead_pushes_the_oldest_sectors_out_of_the_buffer() {
+        let disc = Geometry::new(None);
+        let mut head = Head::default();
+        exact(&mut head, &disc, 0.5, 1000, 16);
+        // A second later the drive has read 64 sectors on from 1016, which
+        // is all the buffer holds: 1016 is still there, 1015 is gone.
+        let kept = exact(&mut head, &disc, 1.5, 1016, 1);
+        assert!((kept - SEND_MS).abs() < 1e-9, "{kept}");
+        let mut head = Head::default();
+        exact(&mut head, &disc, 0.5, 1000, 16);
+        let gone = exact(&mut head, &disc, 1.5, 1015, 1);
+        assert!(gone > SEEK_SETTLE_MS + SEND_MS, "{gone}");
+    }
+
+    #[test]
+    fn a_seek_moves_the_head_and_the_read_after_it_waits_for_its_sector() {
+        let disc = Geometry::new(None);
+        let rps = turns_per_second();
+        let mut head = Head::default();
+        exact(&mut head, &disc, 1.0, 1000, 1);
+        let near = { head }.seek(&disc, 1.01, 1100);
+        let far = head.seek(&disc, 1.01, 300_000);
+        assert!(near < far && far > 100.0, "{near} {far}");
+        // The read waits for the sector to come round after the seek.
+        let now = 1.01 + far / 1000.0;
+        let ms = exact(&mut head, &disc, now, 300_000, 1);
+        let wait = wrap(disc.turns(300_000) - rps * now) / rps * 1000.0;
+        let read = (disc.turns(300_001) - disc.turns(300_000)) / rps * 1000.0;
+        assert!((ms - (wait + read + SEND_MS)).abs() < 1e-6, "{ms} {wait}");
     }
 
     /// When the first read of a test had its sector: it ended at `ms` less
