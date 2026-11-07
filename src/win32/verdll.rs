@@ -423,6 +423,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         // Windows 98 SE's.
         "MSIMG32" => [5, 0, 1693, 1],
         "MSACM32" | "DCIMAN32" if windows.is_98() => [4, 3, 0, 1998],
+        "IMM32" if windows.is_98() => [4, 10, 0, 1998],
         // DirectX 6.1's DirectShow, as Windows 98 SE has it.
         "QUARTZ" => [6, 1, 5, 319],
         "AMSTREAM" => [6, 1, 5, 217],
@@ -432,6 +433,7 @@ fn builtin_resource(name: &str, windows: WindowsVersion) -> Resource {
         [4, 0, 0, 950] => "4.00.950".to_string(),
         [5, 0, 1693, 1] => "5.00.1693.1".to_string(),
         [4, 3, 0, 1998] => "4.03.1998".to_string(),
+        [4, 10, 0, 1998] => "4.10.1998".to_string(),
         [a, b, c, d] => format!("{}.{:02}.{:02}.{:04}", a, b, c, d),
     };
     let ms = (version[0] as u32) << 16 | version[1] as u32;

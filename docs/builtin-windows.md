@@ -160,6 +160,11 @@ programs, such as the Zone's, aren't there, and WinSock (WS2_32 and
 WSOCK32) has no network yet. TAPI32 is there as on a machine with no
 modem installed: lineInitialize fails with LINEERR_NODEVICE, so a game
 that imports it starts, and its modem play says no modem is there.
+IMM32 is there as Windows 95 and 98 have it outside their Chinese,
+Japanese and Korean editions, with no input methods: every function
+returns 0, but ImmGetCompositionString, which returns -1, and
+ImmGetVirtualKey, which returns VK_PROCESSKEY, so a game that turns the
+IME off for its window, such as Age of Empires, starts.
 
 ### Copy protection
 

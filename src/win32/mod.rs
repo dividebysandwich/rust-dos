@@ -33,6 +33,7 @@ pub mod gdi32;
 mod glide;
 pub(crate) mod heap;
 mod imagehlp;
+mod imm32;
 pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
