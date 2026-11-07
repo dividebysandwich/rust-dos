@@ -23,7 +23,7 @@ use super::{
 use crate::cpu::Cpu;
 
 pub const GL_TEXTURE0: u32 = 0x84C0;
-const GL_TEXTURE_2D: u32 = 0x0DE1;
+pub const GL_TEXTURE_2D: u32 = 0x0DE1;
 
 // Parameters.
 const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
@@ -182,22 +182,27 @@ fn unpack(cpu: &mut Cpu, unpack: [u32; 4], src: &Source) -> Option<Vec<[u8; 4]>>
                 let at = (i * size) as usize;
                 (component(&p[at..at + size as usize], src.kind) * 255.0 + 0.5) as u8
             };
-            let rgba = match src.format {
-                GL_RGB => [c(0), c(1), c(2), 255],
-                GL_RGBA => [c(0), c(1), c(2), c(3)],
-                GL_BGR_EXT => [c(2), c(1), c(0), 255],
-                GL_BGRA_EXT => [c(2), c(1), c(0), c(3)],
-                GL_LUMINANCE | GL_COLOR_INDEX => [c(0), c(0), c(0), 255],
-                GL_LUMINANCE_ALPHA => [c(0), c(0), c(0), c(1)],
-                GL_ALPHA => [0, 0, 0, c(0)],
-                GL_RED => [c(0), 0, 0, 255],
-                GL_GREEN => [0, c(0), 0, 255],
-                _ => [0, 0, c(0), 255],
-            };
-            out.push(rgba);
+            out.push(rgba_of(src.format, c));
         }
     }
     Some(out)
+}
+
+/// A texel of `format` as red, green, blue and alpha, from its
+/// components as bytes, `c(i)` the `i`th.
+pub fn rgba_of(format: u32, c: impl Fn(u32) -> u8) -> [u8; 4] {
+    match format {
+        GL_RGB => [c(0), c(1), c(2), 255],
+        GL_RGBA => [c(0), c(1), c(2), c(3)],
+        GL_BGR_EXT => [c(2), c(1), c(0), 255],
+        GL_BGRA_EXT => [c(2), c(1), c(0), c(3)],
+        GL_LUMINANCE | GL_COLOR_INDEX => [c(0), c(0), c(0), 255],
+        GL_LUMINANCE_ALPHA => [c(0), c(0), c(0), c(1)],
+        GL_ALPHA => [0, 0, 0, c(0)],
+        GL_RED => [c(0), 0, 0, 255],
+        GL_GREEN => [0, c(0), 0, 255],
+        _ => [0, 0, c(0), 255],
+    }
 }
 
 /// A texel as the texture keeps it: the components of `base` taken
@@ -603,6 +608,34 @@ pub fn tex_image_2d(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     define(cpu, &img, None);
     Some(0)
+}
+
+/// glTexImage2D of the level `level` of the bound 2D texture, with
+/// texels already red, green, blue and alpha bytes, `width` by
+/// `height` from the first row the program gave: GLU32's
+/// gluBuild2DMipmaps gives its levels this way.
+pub fn tex_image_rgba(
+    cpu: &mut Cpu,
+    level: u32,
+    internal: u32,
+    width: u32,
+    height: u32,
+    texels: Vec<[u8; 4]>,
+) {
+    if ctx(cpu).is_none() {
+        return;
+    }
+    let img = Image {
+        level,
+        internal,
+        width,
+        height,
+        border: 0,
+        format: GL_RGBA,
+        kind: GL_UNSIGNED_BYTE,
+        at: 0,
+    };
+    define(cpu, &img, Some(texels));
 }
 
 /// glTexSubImage2D(target, level, x, y, width, height, format, type,

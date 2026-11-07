@@ -392,11 +392,7 @@ fn avi_file_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     };
     let streams = vec![0; avi.streams.len()];
     let file_name = path.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-    let list = files(cpu);
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
+    let slot = super::free_slot(files(cpu));
     let Some(iface) = com::new_interface(cpu, dll_index(), IAVIFILE, slot as u32 + 1, 0) else {
         kernel32::files::close(cpu, handle);
         return Some(AVIERR_MEMORY);
@@ -1072,11 +1068,7 @@ fn avi_stream_get_frame_open(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if file(cpu, file_slot).avi.streams[stream_index].kind() != STREAMTYPE_VIDEO {
         return Some(0);
     }
-    let list = frames(cpu);
-    let slot = list.iter().position(Option::is_none).unwrap_or(list.len());
-    if slot == list.len() {
-        list.push(None);
-    }
+    let slot = super::free_slot(frames(cpu));
     let Some(iface) = com::new_interface(cpu, dll_index(), IGETFRAME, slot as u32 + 1, 0) else {
         return Some(0);
     };

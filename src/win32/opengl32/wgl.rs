@@ -291,9 +291,13 @@ pub const VERSION_AT: u32 = 0xC0;
 pub const EXTENSIONS_AT: u32 = 0x100;
 pub const WGL_EXTENSIONS_AT: u32 = 0x300;
 
-/// The extensions, as glGetString(GL_EXTENSIONS) gives them.
-pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_compiled_vertex_array \
-    GL_EXT_texture_env_add WGL_EXT_swap_control";
+/// The extensions, as glGetString(GL_EXTENSIONS) gives them: those of
+/// 3dfx's Banshee and Voodoo3 ICD (3DFXOGL.DLL) that are here. Its own
+/// list has more (paletted textures, texture compression, point
+/// parameters and others), which aren't. GL_EXT_bgra is in it, and
+/// Myth II 1.8.3 takes an OpenGL 1.1 device only with it.
+pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
+    GL_EXT_compiled_vertex_array GL_EXT_texture_env_add WGL_EXT_swap_control";
 /// The WGL extensions, as wglGetExtensionsStringEXT gives them.
 pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control";
 
@@ -302,6 +306,19 @@ pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control
 /// aren't.
 pub const VOODOO2_EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
     GL_EXT_compiled_vertex_array WGL_EXT_swap_control";
+
+/// The extensions of a Banshee or Voodoo3 with `tmus` texture units. A
+/// Banshee's one unit has no multitexture, as Mesa's driver leaves it
+/// out with one.
+fn icd_extensions(tmus: u32) -> &'static str {
+    if tmus > 1 {
+        EXTENSIONS
+    } else {
+        EXTENSIONS
+            .strip_prefix("GL_ARB_multitexture ")
+            .expect("EXTENSIONS starts with GL_ARB_multitexture")
+    }
+}
 
 /// Write the strings into a new page of the process: its address.
 fn write_strings(cpu: &mut Cpu) -> Option<u32> {
@@ -331,14 +348,7 @@ fn write_strings(cpu: &mut Cpu) -> Option<u32> {
             board.tmus,
             board.fb_bytes >> 20
         );
-        // A Banshee's one texture unit has no multitexture, as Mesa's
-        // driver leaves it out with one.
-        let extensions = if board.tmus > 1 {
-            EXTENSIONS
-        } else {
-            EXTENSIONS.trim_start_matches("GL_ARB_multitexture ")
-        };
-        (renderer, "1.1.0", extensions)
+        (renderer, "1.1.0", icd_extensions(board.tmus))
     };
     let strings = [
         (VENDOR_AT, "3Dfx Interactive Inc."),
@@ -999,4 +1009,22 @@ pub fn inner_viewport(c: &Context) -> Option<(Viewport7, Matrix)> {
         max_z: c.depth_range[1],
     };
     Some((viewport, fit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_banshee_has_the_voodoo3s_extensions_but_multitexture() {
+        let names = |s: &'static str| s.split(' ').collect::<Vec<_>>();
+        let voodoo3 = names(icd_extensions(2));
+        let banshee = names(icd_extensions(1));
+        assert!(voodoo3.contains(&"GL_ARB_multitexture"));
+        assert!(!banshee.contains(&"GL_ARB_multitexture"));
+        // Myth II 1.8.3 takes an OpenGL 1.1 device only with GL_EXT_bgra.
+        assert!(voodoo3.contains(&"GL_EXT_bgra"));
+        assert!(banshee.contains(&"GL_EXT_bgra"));
+        assert_eq!(banshee.len() + 1, voodoo3.len());
+    }
 }

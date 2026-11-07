@@ -108,7 +108,11 @@ impl Vfs {
     fn open_raw(&self, path: &CStr, mode: u32) -> Option<VfsFile> {
         // SAFETY: a C string and the access flags.
         let handle = unsafe { (self.0.open)(path.as_ptr(), mode, RETRO_VFS_FILE_ACCESS_HINT_NONE) };
-        (!handle.is_null()).then_some(VfsFile { fns: self.0, handle })
+        (!handle.is_null()).then_some(VfsFile {
+            fns: self.0,
+            handle,
+            last: None,
+        })
     }
 }
 
@@ -222,6 +226,35 @@ impl Backend for Vfs {
 struct VfsFile {
     fns: Fns,
     handle: *mut retro_vfs_file_handle,
+    /// Whether the last call was a read or a write, None after a seek.
+    last: Option<Access>,
+}
+
+/// A read or a write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+}
+
+impl VfsFile {
+    /// Get the file ready for an `access` after the last one. Frontends
+    /// keep their files as C streams (RetroArch's are `FILE`s), and C
+    /// wants a seek between a write and a read that follows it, or the
+    /// other way round. Without one, Microsoft's C library fails the
+    /// read, and BSD's and Android's write where the stream read ahead
+    /// to. rust-dos leaves out a program's seeks that move nothing
+    /// (`HostFile` in rust-dos's `disk`), and DOS needs none there.
+    fn turn(&mut self, access: Access) -> io::Result<()> {
+        if self.last.is_some_and(|last| last != access) {
+            // SAFETY: the handle is open.
+            if unsafe { (self.fns.seek)(self.handle, 0, RETRO_VFS_SEEK_POSITION_CURRENT) } < 0 {
+                return Err(failed("seek there"));
+            }
+        }
+        self.last = Some(access);
+        Ok(())
+    }
 }
 
 // SAFETY: the handle is the frontend's, used through `&mut self` alone
@@ -243,6 +276,7 @@ fn failed(what: &str) -> io::Error {
 
 impl Read for VfsFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.turn(Access::Read)?;
         // SAFETY: the handle is open, and `buf` takes `buf.len()` bytes.
         let n = unsafe { (self.fns.read)(self.handle, buf.as_mut_ptr() as *mut c_void, buf.len() as u64) };
         if n < 0 { Err(failed("be read")) } else { Ok(n as usize) }
@@ -251,6 +285,7 @@ impl Read for VfsFile {
 
 impl Write for VfsFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.turn(Access::Write)?;
         // SAFETY: the handle is open, and `buf` holds `buf.len()` bytes.
         let n = unsafe { (self.fns.write)(self.handle, buf.as_ptr() as *const c_void, buf.len() as u64) };
         if n < 0 { Err(failed("be written")) } else { Ok(n as usize) }
@@ -281,6 +316,7 @@ impl Seek for VfsFile {
             }
             (self.fns.tell)(self.handle)
         };
+        self.last = None;
         if at < 0 { Err(failed("tell where it is")) } else { Ok(at as u64) }
     }
 }
@@ -298,5 +334,165 @@ impl Handle for VfsFile {
             0 => Ok(()),
             _ => Err(failed("change its size")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file as a C stream of Microsoft's C library has it: a read
+    /// straight after a write fails, and a seek between them is needed.
+    struct Stream {
+        data: Vec<u8>,
+        pos: usize,
+        wrote: bool,
+        seeks: usize,
+    }
+
+    unsafe fn stream<'a>(handle: *mut retro_vfs_file_handle) -> &'a mut Stream {
+        unsafe { &mut *(handle as *mut Stream) }
+    }
+
+    unsafe extern "C" fn seek(handle: *mut retro_vfs_file_handle, offset: i64, whence: i32) -> i64 {
+        let s = unsafe { stream(handle) };
+        let base = match whence {
+            RETRO_VFS_SEEK_POSITION_START => 0,
+            RETRO_VFS_SEEK_POSITION_CURRENT => s.pos as i64,
+            _ => s.data.len() as i64,
+        };
+        s.pos = (base + offset) as usize;
+        s.wrote = false;
+        s.seeks += 1;
+        0
+    }
+
+    unsafe extern "C" fn tell(handle: *mut retro_vfs_file_handle) -> i64 {
+        unsafe { stream(handle) }.pos as i64
+    }
+
+    unsafe extern "C" fn read(
+        handle: *mut retro_vfs_file_handle,
+        buf: *mut c_void,
+        len: u64,
+    ) -> i64 {
+        let s = unsafe { stream(handle) };
+        if s.wrote {
+            return -1;
+        }
+        let n = (len as usize).min(s.data.len().saturating_sub(s.pos));
+        unsafe { std::ptr::copy_nonoverlapping(s.data[s.pos..].as_ptr(), buf as *mut u8, n) };
+        s.pos += n;
+        n as i64
+    }
+
+    unsafe extern "C" fn write(
+        handle: *mut retro_vfs_file_handle,
+        buf: *const c_void,
+        len: u64,
+    ) -> i64 {
+        let s = unsafe { stream(handle) };
+        let bytes = unsafe { std::slice::from_raw_parts(buf as *const u8, len as usize) };
+        let end = s.pos + bytes.len();
+        if s.data.len() < end {
+            s.data.resize(end, 0);
+        }
+        s.data[s.pos..end].copy_from_slice(bytes);
+        s.pos = end;
+        s.wrote = true;
+        len as i64
+    }
+
+    unsafe extern "C" fn close(_: *mut retro_vfs_file_handle) -> i32 {
+        0
+    }
+    unsafe extern "C" fn size(handle: *mut retro_vfs_file_handle) -> i64 {
+        unsafe { stream(handle) }.data.len() as i64
+    }
+    unsafe extern "C" fn flush(_: *mut retro_vfs_file_handle) -> i32 {
+        0
+    }
+    unsafe extern "C" fn truncate(_: *mut retro_vfs_file_handle, _: i64) -> i64 {
+        -1
+    }
+    unsafe extern "C" fn open(
+        _: *const std::ffi::c_char,
+        _: u32,
+        _: u32,
+    ) -> *mut retro_vfs_file_handle {
+        std::ptr::null_mut()
+    }
+    unsafe extern "C" fn by_path(_: *const std::ffi::c_char) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn rename(_: *const std::ffi::c_char, _: *const std::ffi::c_char) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn stat(_: *const std::ffi::c_char, _: *mut i32) -> i32 {
+        0
+    }
+    unsafe extern "C" fn opendir(_: *const std::ffi::c_char, _: bool) -> *mut retro_vfs_dir_handle {
+        std::ptr::null_mut()
+    }
+    unsafe extern "C" fn dir_bool(_: *mut retro_vfs_dir_handle) -> bool {
+        false
+    }
+    unsafe extern "C" fn dirent_get_name(_: *mut retro_vfs_dir_handle) -> *const std::ffi::c_char {
+        std::ptr::null()
+    }
+    unsafe extern "C" fn closedir(_: *mut retro_vfs_dir_handle) -> i32 {
+        0
+    }
+
+    const FNS: Fns = Fns {
+        open,
+        close,
+        size,
+        tell,
+        seek,
+        read,
+        write,
+        flush,
+        remove: by_path,
+        rename,
+        truncate,
+        stat,
+        mkdir: by_path,
+        opendir,
+        readdir: dir_bool,
+        dirent_get_name,
+        dirent_is_dir: dir_bool,
+        closedir,
+    };
+
+    #[test]
+    fn a_read_after_a_write_and_a_write_after_a_read_seek_in_between() {
+        let mut s = Stream {
+            data: b"0123456789".to_vec(),
+            pos: 0,
+            wrote: false,
+            seeks: 0,
+        };
+        let handle = &mut s as *mut Stream as *mut retro_vfs_file_handle;
+        let mut file = VfsFile {
+            fns: FNS,
+            handle,
+            last: None,
+        };
+        let mut buf = [0u8; 4];
+        assert_eq!(file.read(&mut buf).unwrap(), 4);
+        assert_eq!(file.read(&mut buf).unwrap(), 4);
+        assert_eq!(file.write(b"ab").unwrap(), 2);
+        assert_eq!(file.write(b"c").unwrap(), 1);
+        assert_eq!(file.read(&mut buf[..1]).unwrap(), 0);
+        // A seek of the program's own, then a read, needs no other.
+        assert_eq!(file.seek(SeekFrom::Start(1)).unwrap(), 1);
+        assert_eq!(file.read(&mut buf[..2]).unwrap(), 2);
+        assert_eq!(&buf[..2], b"12");
+        drop(file);
+        // One seek before the first write, one before the read after the
+        // writes, and the program's.
+        assert_eq!(s.seeks, 3);
+        assert_eq!(s.data, b"01234567abc");
     }
 }
