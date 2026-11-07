@@ -22,8 +22,8 @@
 //! there: the timer's (vector 8) is a few after the exceptions'.
 
 use super::memory::{Memory, PAGE, SYSTEM, USER, WRITABLE};
-use super::{Context, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
-use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache};
+use super::{Context, EAX, ECX, EDX, ESP, ID_IDT, IDT_TRAPS, ROM_BASE, realmode};
+use crate::cpu::{CR0_PE, CR0_PG, CR4_OSFXSR, Cpu, CpuFlags, DescTable, Seg, SegCache, alu};
 use crate::dpmi::descriptor;
 
 /// The system block's parts, as offsets from where it is mapped.
@@ -52,7 +52,9 @@ const VMM_DATA: u32 = HANDLERS + 256 * HANDLER_SIZE;
 const VMM_DDB: u32 = VMM_DATA;
 const DDB_SIZE: u32 = 0x50;
 const VXD_LOCATIONS: u32 = VMM_DDB + DDB_SIZE;
-pub const SYSTEM_BLOCK_PAGES: u32 = (VMM_DATA + PAGE) / PAGE;
+/// The VxD location list's length: VMM's record with one object.
+const VXD_LOCATIONS_LEN: u32 = 5 + 9;
+pub const SYSTEM_BLOCK_PAGES: u32 = (VXD_LOCATIONS + VXD_LOCATIONS_LEN).div_ceil(PAGE);
 
 /// The GDT's selectors: the TSS, the LDT, and level 0 code and data
 /// covering everything at 28h and 30h, where Windows 98's VMM has its
@@ -192,15 +194,8 @@ fn write_vmm_data(cpu: &mut Cpu, phys: u32) {
     cpu.bus.load_bytes((phys + VXD_LOCATIONS) as usize, &list);
 }
 
-/// The VxD location list's length: VMM's record with one object.
-const VXD_LOCATIONS_LEN: u32 = 5 + 9;
 /// VXDLDR's object type of locked code (LCODE).
 const OBJECT_LOCKED_CODE: u8 = 0x01;
-
-/// The indexes of EAX, ECX and EDX in `Context::gpr`.
-const EAX: usize = 0;
-const ECX: usize = 1;
-const EDX: usize = 2;
 
 /// The VxD services that a program's level 0 code calls through INT 20h,
 /// the VxD's id in the high word and the service in the low one.
@@ -234,7 +229,9 @@ fn vxd_service(service: u32, ctx: &mut Context) -> bool {
             ctx.gpr[EAX] = list;
             ctx.gpr[ECX] = VXD_LOCATIONS_LEN;
             ctx.gpr[EDX] = 1;
-            ctx.eflags = test_flags(ctx.eflags, list);
+            // The flags of its `or eax, eax`. AF, which OR leaves
+            // undefined, is clear, as the processors leave it.
+            ctx.eflags = (ctx.eflags & !alu::ARITH) | alu::logic(4, list);
             true
         }
         VXDLDR_GET_DEVICE_LIST => {
@@ -243,29 +240,6 @@ fn vxd_service(service: u32, ctx: &mut Context) -> bool {
         }
         _ => false,
     }
-}
-
-/// `eflags` after a TEST or OR of `value` with itself: CF and OF clear,
-/// ZF, SF and PF from the value. AF, which those leave undefined, clear.
-fn test_flags(eflags: u32, value: u32) -> u32 {
-    let mut flags = eflags
-        & !(CpuFlags::CF
-            | CpuFlags::PF
-            | CpuFlags::AF
-            | CpuFlags::ZF
-            | CpuFlags::SF
-            | CpuFlags::OF)
-            .bits();
-    if value == 0 {
-        flags |= CpuFlags::ZF.bits();
-    }
-    if value & 0x8000_0000 != 0 {
-        flags |= CpuFlags::SF.bits();
-    }
-    if (value as u8).count_ones().is_multiple_of(2) {
-        flags |= CpuFlags::PF.bits();
-    }
-    flags
 }
 
 /// Let level 3 use INT n for the vectors from 10h on, in the IDT of the
@@ -410,9 +384,16 @@ fn load_registers(cpu: &mut Cpu, ctx: &Context) {
     snapshot.gpr = ctx.gpr;
     cpu.restore(&snapshot);
     cpu.set_eip(ctx.eip);
-    // IOPL 0: CLI, STI and the like are the system's.
-    let flags = ctx.eflags & !(CpuFlags::VM | CpuFlags::NT | CpuFlags::RF | CpuFlags::IOPL).bits();
-    cpu.load_eflags(flags | CpuFlags::IF.bits());
+    // IOPL 0: CLI, STI and the like are the system's. The program's code
+    // at level 3 runs with interrupts on, its CLI and STI simulated
+    // (seh.rs). Its level 0 code keeps the flag it had: there CLI and STI
+    // change it, and Windows 98's VMM services called by INT 20h don't.
+    let mut flags =
+        ctx.eflags & !(CpuFlags::VM | CpuFlags::NT | CpuFlags::RF | CpuFlags::IOPL).bits();
+    if !is_system(ctx) {
+        flags |= CpuFlags::IF.bits();
+    }
+    cpu.load_eflags(flags);
     // RF, which a handler sets in a context to go on past the instruction
     // breakpoint it was called for, skips that breakpoint once. With no
     // instruction breakpoint enabled it has nothing to skip, and is left

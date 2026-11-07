@@ -3582,21 +3582,29 @@ fn a_vxd_call_at_level_0_names_the_service() {
 
 /// VMM_GetVxDLocationList from level 0, as SafeDisc 2.30 (Anachronox)
 /// calls it: as on Windows 98 SE, EAX has the list, EDX the number of
-/// VxDs and ECX the list's size. The built-in Windows lists VMM alone: a
-/// record of its DDB, whose name is "VMM     ", and one object, 14 bytes.
-/// The code sets EBX to 1 when all of that holds.
+/// VxDs and ECX the list's size, the flags are those of `or eax, eax`
+/// (SF set: the list is above 2 GB) and the other registers stay as they
+/// were (EDI here). The built-in Windows lists VMM alone: a record of its
+/// DDB, whose name is "VMM     ", and one object, 14 bytes. The code sets
+/// EBX to 1 when all of that holds.
 #[test]
 fn vmm_get_vxd_location_list_lists_vmm() {
     let (code, text) = run_through_gate_28h(
         "vxd_location_list",
         &[
+            0xBF, 0x78, 0x56, 0x34, 0x12, // mov edi, 12345678h
             0xCD, 0x20, 0x3E, 0x01, 0x01, 0x00, // VMMCall GetVxDLocationList
+            0x79, 0x31, // jns done
+            0x81, 0xFF, 0x78, 0x56, 0x34, 0x12, // cmp edi, 12345678h
+            0x75, 0x29, // jne done
             0x83, 0xFA, 0x01, // cmp edx, 1
-            0x75, 0x1B, // jne done
+            0x75, 0x24, // jne done
             0x83, 0xF9, 0x0E, // cmp ecx, 14
-            0x75, 0x16, // jne done
+            0x75, 0x1F, // jne done
             0x8B, 0x30, // mov esi, [eax]: the DDB
             0x81, 0x7E, 0x0C, 0x56, 0x4D, 0x4D, 0x20, // cmp [esi+0Ch], "VMM "
+            0x75, 0x14, // jne done
+            0x81, 0x7E, 0x10, 0x20, 0x20, 0x20, 0x20, // cmp [esi+10h], "    "
             0x75, 0x0B, // jne done
             0x80, 0x78, 0x04, 0x01, // cmp byte [eax+4], 1: one object
             0x75, 0x05, // jne done
@@ -3607,19 +3615,43 @@ fn vmm_get_vxd_location_list_lists_vmm() {
     assert_eq!(code, 1, "{}", text);
 }
 
+/// A VxD service called by INT 20h leaves the interrupt flag of the level
+/// 0 code that calls it as it was, as Windows 98's do: off here, after
+/// CLI. The code sets EBX to 1 when the flag is still off after the call.
+#[test]
+fn a_vxd_service_at_level_0_keeps_interrupts_off() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_interrupt_flag",
+        &[
+            0xFA, // cli
+            0xCD, 0x20, 0x3E, 0x01, 0x01, 0x00, // VMMCall GetVxDLocationList
+            0x9C, // pushfd
+            0x58, // pop eax
+            0xF6, 0xC4, 0x02, // test ah, 2: IF
+            0x0F, 0x94, 0xC3, // sete bl
+            0xCF, // iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// VXDLDR_GetDeviceList from level 0 through VxDJmp, which returns to the
 /// caller's caller: the built-in Windows has loaded no VxDs since its
 /// start, so the list is empty and EAX 0, and the code goes on after the
-/// CALL that led to the VxDJmp.
+/// CALL that led to the VxDJmp. The service leaves the flags as they
+/// were: CF, set before the CALL, is still set.
 #[test]
 fn vxdldr_get_device_list_is_empty() {
     let (code, text) = run_through_gate_28h(
         "vxdldr_device_list",
         &[
             0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
-            0xE8, 0x06, 0x00, 0x00, 0x00, // call jump
+            0xF9, // stc
+            0xE8, 0x0B, 0x00, 0x00, 0x00, // call jump
+            0x0F, 0x92, 0xC1, // setc cl
             0x85, 0xC0, // test eax, eax
             0x0F, 0x94, 0xC3, // sete bl
+            0x20, 0xCB, // and bl, cl
             0xCF, // iretd
             0xCD, 0x20, 0x05, 0x80, 0x27, 0x00, // jump: VxDJmp GetDeviceList
         ],
