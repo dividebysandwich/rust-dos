@@ -1024,21 +1024,20 @@ fn bind_imports(
 }
 
 /// The built-in DLL the module `file` (as `module_file_name` gives it)
-/// names. With the `win32_dlls` setting, NTDLL.DLL is one, UCRT's
-/// ucrtbase.dll and api-ms-win-crt-*.dll are MSVCRT.DLL and
-/// KERNELBASE.DLL is KERNEL32.DLL, which Wine's DLLs import; a DLL the
-/// setting replaces, which the folder has, isn't. Nor is GLU32.DLL when
-/// the folder has one and the setting replaces OPENGL32.DLL: the
-/// built-in GLU32 draws through the built-in OPENGL32's contexts, which
-/// a program on another OpenGL32 doesn't have. GLIDE2X.DLL and
-/// GLIDE3X.DLL are there with a 3dfx card alone, as 3dfx's driver
-/// brings them. The system directory shows the same DLLs as files
-/// (dll_files.rs).
+/// names. With the `win32_dlls` setting, UCRT's ucrtbase.dll and
+/// api-ms-win-crt-*.dll are MSVCRT.DLL and KERNELBASE.DLL is KERNEL32.DLL,
+/// which Wine's DLLs import; a DLL the setting replaces, which the folder
+/// has, isn't. Nor is GLU32.DLL when the folder has one and the setting
+/// replaces OPENGL32.DLL: the built-in GLU32 draws through the built-in
+/// OPENGL32's contexts, which a program on another OpenGL32 doesn't have.
+/// GLIDE2X.DLL and GLIDE3X.DLL are there with a 3dfx card alone, as 3dfx's
+/// driver brings them, and MSIMG32.DLL from Windows 98 on. The system
+/// directory shows the same DLLs as files (dll_files.rs).
 pub(super) fn builtin_for(bus: &Bus, file: &str) -> Option<usize> {
     let index = stubs::find_dll(file);
     let win32 = &bus.win32;
     let found = if win32.guest_dlls.is_none() {
-        index.filter(|&i| stubs::DLLS[i].name != super::ntdll::DLL.name)
+        index
     } else {
         let stem = file.strip_suffix(".DLL").unwrap_or(file).to_ascii_lowercase();
         let replaced = |stem: &str| win32.guest_replace.iter().any(|s| s == stem);

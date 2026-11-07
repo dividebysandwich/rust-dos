@@ -284,8 +284,8 @@ top of that.
   for it. They are there while the built-in Windows is on, and follow
   the loader's rules: `GLIDE2X.DLL` and `GLIDE3X.DLL` with a 3dfx card
   alone (`voodoo=true`, or a Banshee or Voodoo3 as the display adapter),
-  `NTDLL.DLL` with `win32_dlls` alone, and a DLL that
-  `win32_dlls_replace` replaces with one of the folder's not at all.
+  `MSIMG32.DLL` from Windows 98 on, and a DLL that `win32_dlls_replace`
+  replaces with one of the folder's not at all.
 
   The files are read-only: they open for reading alone, show as
   read-only (FILE_ATTRIBUTE_READONLY and ARCHIVE), and opening one for
@@ -582,9 +582,10 @@ isn't on the search path, and reads it as if it were in
 `C:\WINDOWS\SYSTEM`; `win32_dlls_replace` lets the folder's DLL replace
 a built-in one of the same name. With the setting, `ucrtbase.dll` and
 `api-ms-win-crt-*.dll` are the built-in MSVCRT, `kernelbase.dll` is
-KERNEL32, and there is a built-in NTDLL.DLL at BFE40000h with
-`_vsnprintf`; without it there is no NTDLL, as programs looking for
-Windows NT expect.
+KERNEL32. The built-in NTDLL.DLL, at BFE40000h, is there with or
+without the setting, as Windows 95 and 98 both have one with
+`RtlUnwind` (Microsoft's D3DRM.DLL and DirectX 6.1a's ADVPACK.DLL
+import it); it has `_vsnprintf` for Wine's DLLs too.
 
 A DLL from the folder is guest code (the module flag `GUEST`). A
 function it imports that no built-in DLL has gets the stub that ends a
