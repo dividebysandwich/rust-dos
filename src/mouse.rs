@@ -550,12 +550,21 @@ pub fn clear_callback_busy(bus: &mut crate::bus::Bus) {
 /// "driver" invokes on the events in its mask. Many Microsoft-mouse
 /// compatible games expect button presses to arrive this way rather than
 /// via polling AH=03 or AH=05. When an event in the mask is pending, a
-/// handler is installed and not still running, enter the ROM stub in real
-/// mode only: it saves the registers and CALL FARs the handler, which
-/// returns with RETF. The caller controls IF gating. Returns true when
-/// the handler was entered.
+/// handler is installed and not still running, enter the ROM stub: it
+/// saves the registers and CALL FARs the handler, which returns with
+/// RETF. The caller controls IF gating. Returns true when the handler was
+/// entered.
+///
+/// The handler is real-mode code. In real mode the stub runs on the
+/// program's stack, as an interrupt would. In protected mode it runs only
+/// for a client of the built-in DPMI host, which runs it in real mode as
+/// it runs the real-mode handler of a hardware interrupt, such as the IRQ
+/// a mouse driver's handler runs from, and the client goes on afterwards
+/// as it was. ShadowCaster's DOS/4GW code stays in protected mode and
+/// reads the mouse only through the handler it installs. Other
+/// protected-mode systems get no call.
 pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
-    if cpu.pe() {
+    if cpu.pe() && !crate::dpmi::can_reflect_interrupt(cpu) {
         return false;
     }
     let mouse = &cpu.bus.mouse;
@@ -588,6 +597,11 @@ pub fn deliver_callback(cpu: &mut crate::cpu::Cpu) -> bool {
     data.push(1); // busy
     cpu.bus.write_rom(CALLBACK_DATA, &data);
 
+    if cpu.pe() {
+        let stub = (CALLBACK_STUB - 0xF0000) as u16;
+        crate::dpmi::call_device_code(cpu, 0xF000, stub);
+        return true;
+    }
     cpu.push(cpu.flags16());
     cpu.push(cpu.cs());
     cpu.push(cpu.ip());

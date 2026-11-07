@@ -463,9 +463,9 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
         return true;
     }
 
-    // Mouse event handler installed with INT 33h AX=000C, called the
-    // real-mode way.
-    let called = !cpu.pe() && crate::mouse::deliver_callback(cpu);
+    // Mouse event handler installed with INT 33h AX=000C, called in real
+    // mode (reflected there for a DPMI client in protected mode).
+    let called = crate::mouse::deliver_callback(cpu);
     cpu.bus.refresh_irq();
     called
 }
