@@ -262,8 +262,7 @@ fn error_unicode_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// gluGetString(name): the version, or the extensions, GL_EXT_bgra
 /// where the current context's OpenGL lists it (the built-in OPENGL32
-/// does on a Voodoo2, not on a Banshee or Voodoo3); NULL for another
-/// name.
+/// does on a Voodoo2, a Banshee and a Voodoo3); NULL for another name.
 fn get_string(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     Some(match args[0] {
         GLU_VERSION => text(cpu, T_VERSION, false),
