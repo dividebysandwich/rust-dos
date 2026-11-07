@@ -44,7 +44,60 @@ crate::state_fields!(Format {
     coefficients
 });
 
+/// The bytes of WAVEFORMATEX before its extra bytes.
+pub const WAVEFORMATEX_SIZE: usize = 18;
+
+fn le16(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
+}
+
+/// The bytes of the format `tag`'s own fields after WAVEFORMATEX:
+/// wSamplesPerBlock, and for MS ADPCM wNumCoef. None for another tag.
+pub fn extra_fields(tag: u16) -> Option<usize> {
+    match tag {
+        MS_ADPCM => Some(4),
+        IMA_ADPCM => Some(2),
+        _ => None,
+    }
+}
+
 impl Format {
+    /// The ADPCM format of the WAVEFORMATEX `wfx`, and its rate, if it is
+    /// one the decoders take: MS ADPCM with all the coefficients its
+    /// cbSize says it has, or IMA ADPCM, 4 bits a sample.
+    pub fn from_wave_format(wfx: &[u8]) -> Option<(Format, u32)> {
+        let tag = le16(wfx, 0)?;
+        let extra = extra_fields(tag)?;
+        if le16(wfx, 14)? != 4 {
+            return None;
+        }
+        let size = le16(wfx, 16)? as usize;
+        if size < extra {
+            return None;
+        }
+        let mut f = Format {
+            tag,
+            channels: le16(wfx, 2)?,
+            block_align: le16(wfx, 12)?,
+            samples_per_block: le16(wfx, 18)?,
+            coefficients: Vec::new(),
+        };
+        if tag == MS_ADPCM {
+            let count = le16(wfx, 20)? as usize;
+            if size < extra + 4 * count {
+                return None;
+            }
+            f.coefficients = (0..count)
+                .map(|i| {
+                    let pair = 22 + 4 * i;
+                    Some((le16(wfx, pair)? as i16, le16(wfx, pair + 2)? as i16))
+                })
+                .collect::<Option<_>>()?;
+        }
+        let rate = u32::from_le_bytes(wfx.get(4..8)?.try_into().ok()?);
+        (f.valid() && rate != 0).then_some((f, rate))
+    }
+
     /// The bytes of a block's headers, all channels'.
     fn header(&self) -> usize {
         self.channels as usize * if self.tag == MS_ADPCM { 7 } else { 4 }
@@ -224,7 +277,7 @@ impl Format {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /// The coefficient pairs of an MS ADPCM format with the standard

@@ -57,9 +57,7 @@ impl DiskController {
         if device.is_some() || !self.emm_device {
             return device;
         }
-        let last = filename.rsplit(['\\', '/', ':']).next()?;
-        let stem = last.split('.').next()?.trim();
-        stem.eq_ignore_ascii_case("EMMXXXX0").then_some(CharDevice::Emm)
+        (device_name(filename)? == "EMMXXXX0").then_some(CharDevice::Emm)
     }
 
     // INT 21h, AH=3Dh: Open File. `owner` is the PSP of the calling process.

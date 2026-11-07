@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 37;
+const WIN32_VERSION: u16 = 38;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 1;
 const VFX1_VERSION: u16 = 1;
@@ -750,6 +750,8 @@ impl Bus {
             awe.after_load();
         }
         self.verite_after_load();
+        // The mouse's mickeys count for the state's picture and range.
+        crate::mouse::update_mickey_scale(self);
         // The built-in DLLs' files are of the version of Windows the
         // state's programs run under, which may not be the settings'.
         crate::win32::dll_files::sync(self);
@@ -800,7 +802,8 @@ mod tests {
         (34, 0x2A81_5B37_A1B7_C90B), // DirectShow's program filters, allocators and clocks
         (35, 0xF4AA_E5DA_D534_7E8F), // which Win16 modules' own loaders are yet to run
         (36, 0xFB13_32FF_2A2F_4AC7), // each thread's debug registers
-        (37, 0x8401_C2BE_B518_A93D), // the screens kept under CS_SAVEBITS windows
+        (37, 0x9341_EE06_0BDB_0188), // an AVIVideo device's palette and MCI_REALIZE's background
+        (38, 0x533C_5FB1_33A8_581E), // the screens kept under CS_SAVEBITS windows
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

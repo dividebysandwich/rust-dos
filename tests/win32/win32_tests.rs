@@ -10205,3 +10205,70 @@ fn gdi32_doesnt_call_an_opengl32_mapped_as_data() {
     let (code, out) = run_with_guest_opengl32("gdi_datafile_wgl", exe);
     assert_eq!(code, 3, "the checks that failed: {:02b} {out}", !code & 3);
 }
+
+/// An argument of `tapi`: the address of the program's data, eight bytes
+/// of CCh.
+const TAPI_DATA: u32 = 0xDA7A_0000;
+/// An argument of `tapi`: the address of the function called, in
+/// TAPI32's code, which the program can read and not write.
+const TAPI_CODE: u32 = 0xC0DE_0000;
+
+/// What a TAPI32 function gives back on a machine with no modem: a
+/// program calls `function` with `args`, pushed last first, where
+/// `TAPI_DATA` and `TAPI_CODE` stand for the addresses they name, and
+/// ends with the low byte of the result, or with the first byte of the
+/// data when `byte` is set.
+fn tapi(test: &str, function: &str, args: &[u32], byte: bool) -> u8 {
+    let imports: &[(&str, &[&str])] = &[("TAPI32.DLL", &[function])];
+    let exe = program(BASE, false, imports, &[0xCC; 8], |a, l| {
+        for &arg in args.iter().rev() {
+            match arg {
+                TAPI_DATA => a.push(l.at(0) as i32)?,
+                TAPI_CODE => {
+                    a.mov(eax, l.import(0))?;
+                    a.push(eax)?;
+                }
+                _ => a.push(arg as i32)?,
+            }
+        }
+        a.call(l.import(0))?;
+        if byte {
+            a.movzx(eax, byte_ptr(l.at(0)))?;
+        }
+        a.ret()
+    });
+    run(test, exe).0
+}
+
+#[test]
+fn tapi_has_no_line_device() {
+    let init = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_DATA];
+    // LINEERR_NODEVICE, and no handle written.
+    assert_eq!(tapi("tapi_init", "lineInitialize", &init, false), 0x42);
+    assert_eq!(tapi("tapi_init_handle", "lineInitialize", &init, true), 0xCC);
+    // LINEERR_INVALPOINTER without a callback or a place for the count.
+    let no_callback = [TAPI_DATA, 0, 0, 0, TAPI_DATA];
+    assert_eq!(tapi("tapi_init_cb", "lineInitialize", &no_callback, false), 0x35);
+    let no_count = [TAPI_DATA, 0, 0x40_1000, 0, 0];
+    assert_eq!(tapi("tapi_init_count", "lineInitialize", &no_count, false), 0x35);
+    // LINEERR_INVALPOINTER for a handle or a count the program can't
+    // write, as IsBadWritePtr sees it, with no page fault in the program.
+    let read_only_handle = [TAPI_CODE, 0, 0x40_1000, 0, TAPI_DATA];
+    assert_eq!(tapi("tapi_init_ro_app", "lineInitialize", &read_only_handle, false), 0x35);
+    let read_only_count = [TAPI_DATA, 0, 0x40_1000, 0, TAPI_CODE];
+    assert_eq!(tapi("tapi_init_ro_count", "lineInitialize", &read_only_count, false), 0x35);
+    // LINEERR_INVALAPPHANDLE, LINEERR_BADDEVICEID, LINEERR_INVALLINEHANDLE
+    // and LINEERR_INVALCALLHANDLE.
+    assert_eq!(tapi("tapi_shutdown", "lineShutdown", &[1], false), 0x14);
+    let config = [0, TAPI_DATA, 0];
+    assert_eq!(tapi("tapi_devconfig", "lineGetDevConfig", &config, false), 0x02);
+    let open = [1, 0, TAPI_DATA, 0x10004, 0, 0, 1, 0x10, 0];
+    assert_eq!(tapi("tapi_open", "lineOpen", &open, false), 0x14);
+    let call_id = [0, 0, 1, 4, TAPI_DATA, 0];
+    assert_eq!(tapi("tapi_id_call", "lineGetID", &call_id, false), 0x18);
+    let line_id = [1, 0, 0, 1, TAPI_DATA, 0];
+    assert_eq!(tapi("tapi_id_line", "lineGetID", &line_id, false), 0x2B);
+    // LINEERR_INIFILECORRUPT: no dialing location was set up.
+    let caps = [0, 0x10004, TAPI_DATA];
+    assert_eq!(tapi("tapi_caps", "lineGetTranslateCaps", &caps, false), 0x0E);
+}
