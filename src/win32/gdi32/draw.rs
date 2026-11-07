@@ -1382,7 +1382,17 @@ pub fn blit(
             let Some(surface) = Surface::load_area(cpu, place.target, area) else {
                 return false;
             };
+            // A blit to monochrome compares the source's pixels with its
+            // background color as the source stores it, the color a
+            // pixel drawn in it would have: on a bitmap of 16 bits a
+            // pixel RGB(255, 252, 255) is white, and white pixels match
+            // it (Chaos Overlords' transparent blits).
             let bk_color = dc::resolve_color(cpu, &sdc, sdc.attrs.bk_color);
+            let bk_color = if surface.mono {
+                bk_color
+            } else {
+                surface.color_of(surface.value_of(bk_color))
+            };
             Some((
                 Source {
                     surface,
