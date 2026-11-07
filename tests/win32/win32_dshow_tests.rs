@@ -1107,3 +1107,333 @@ fn a_programs_renderer_filter_gets_the_movies_pictures() {
     let code = run(&mut cpu);
     assert_eq!(code, 0, "{}", printed(&cpu));
 }
+
+// "Transform and renderer": the places in its program's data. A filter
+// is its vtable, its pins' enumerator, the count Pause found, and the
+// graph it joined; an enumerator its vtable, how far it got and its pins,
+// ending with 0; a pin its vtable, its direction, its peer, how often
+// Connect and Disconnect were called, and its IMemInputPin (0 for none).
+const T_COUNTER: u32 = 0x110;
+const T_TRANSFORM: u32 = 0x200;
+const T_RENDERER: u32 = 0x220;
+const T_TRANSFORM_ENUM: u32 = 0x240;
+const T_RENDERER_ENUM: u32 = 0x260;
+const T_IN: u32 = 0x280;
+const T_OUT: u32 = 0x2A0;
+const T_RENDERER_IN: u32 = 0x2C0;
+const T_INPUT: u32 = 0x2E0;
+const T_VT_FILTER: u32 = 0x400;
+const T_VT_ENUM: u32 = 0x440;
+const T_VT_PIN: u32 = 0x460;
+const T_VT_INPUT: u32 = 0x4B0;
+const T_SIZE: usize = 0x500;
+const FILTER_PAUSED: u32 = 8;
+const FILTER_JOINED: u32 = 16;
+const PIN_PEER: u32 = 8;
+const PIN_CONNECTS: u32 = 12;
+const PIN_DISCONNECTS: u32 = 16;
+const CONTROL_PAUSE: i32 = 32;
+
+/// A program's transform filter and renderer, added in that order, as
+/// Submarine Titans adds its pair. The transform's input pin takes the
+/// decoder's first type and its output pin connects with its own
+/// IPin::Connect; the renderer has one input pin. RenderFile connects
+/// the decoder to the transform, then the transform's output pin to the
+/// renderer's input pin, as Windows' graph builder renders a filter's
+/// outputs after its input. The graph pauses the renderer before the
+/// transform, and as it goes it disconnects both ends of that
+/// connection and takes both filters out of it.
+#[test]
+fn a_programs_transform_filter_gets_its_renderer_connected() {
+    let mut data = vec![0u8; T_SIZE];
+    let mut put = |at: u32, bytes: &[u8]| {
+        data[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    };
+    put(G_CLSID_GRAPH, &CLSID_FILTER_GRAPH);
+    put(G_IID_GRAPH, &IID_IGRAPH_BUILDER);
+    put(G_IID_CONTROL, &IID_IMEDIA_CONTROL);
+    let file: Vec<u8> = "CLIP.MPG\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    put(R_FILE, &file);
+    // The output pin's direction.
+    put(T_OUT + 4, &1u32.to_le_bytes());
+    let exe = program(IMPORTS, &data, |a, l| {
+        let mut fail = a.create_label();
+        let mut start = a.create_label();
+        a.jmp(start)?;
+        let at = |o: u32| l.at(o) as u32;
+
+        let mut not_impl = [(); 3].map(|_| a.create_label());
+        for (k, label) in not_impl.iter_mut().enumerate() {
+            returns(a, label, E_NOTIMPL, k as u32)?;
+        }
+        let [_, n1, n2] = not_impl;
+        let mut ok = [(); 3].map(|_| a.create_label());
+        for (k, label) in ok.iter_mut().enumerate() {
+            returns(a, label, S_OK, k as u32)?;
+        }
+        let [ok0, ok1, ok2] = ok;
+        let mut ok_segment = a.create_label();
+        returns(a, &mut ok_segment, S_OK, 6)?;
+        let mut one = a.create_label();
+        returns(a, &mut one, 1, 0)?;
+        let mut no_interface = a.create_label();
+        a.set_label(&mut no_interface)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax), 0)?;
+        a.mov(eax, E_NOINTERFACE)?;
+        a.ret_1(12)?;
+
+        // IBaseFilter.
+        let mut pause = a.create_label();
+        a.set_label(&mut pause)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.inc(dword_ptr(l.at(T_COUNTER)))?;
+        a.mov(ecx, dword_ptr(l.at(T_COUNTER)))?;
+        a.mov(dword_ptr(eax + FILTER_PAUSED as i32), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        let mut enum_pins = a.create_label();
+        a.set_label(&mut enum_pins)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 4))?;
+        a.mov(dword_ptr(ecx + 4), 0)?;
+        a.mov(edx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        let mut join = a.create_label();
+        a.set_label(&mut join)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax + FILTER_JOINED as i32), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+
+        // IEnumPins::Next: the enumerator's pins, one at a time.
+        let mut next = a.create_label();
+        let mut none = a.create_label();
+        let mut counted = a.create_label();
+        a.set_label(&mut next)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 4))?;
+        a.mov(edx, dword_ptr(eax + ecx * 4 + 8))?;
+        a.test(edx, edx)?;
+        a.jz(none)?;
+        a.inc(dword_ptr(eax + 4))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax), edx)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.test(eax, eax)?;
+        a.jz(counted)?;
+        a.mov(dword_ptr(eax), 1)?;
+        a.set_label(&mut counted)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut none)?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(eax), 0)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+
+        // IPin.
+        let mut pin_qi = a.create_label();
+        let mut pin_qi_none = a.create_label();
+        a.set_label(&mut pin_qi)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 20))?;
+        a.mov(edx, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.test(ecx, ecx)?;
+        a.jz(pin_qi_none)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        a.set_label(&mut pin_qi_none)?;
+        a.mov(eax, E_NOINTERFACE)?;
+        a.ret_1(12)?;
+        let mut connect = a.create_label();
+        a.set_label(&mut connect)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax + PIN_PEER as i32), ecx)?;
+        a.inc(dword_ptr(eax + PIN_CONNECTS as i32))?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        let mut receive_connection = a.create_label();
+        a.set_label(&mut receive_connection)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax + PIN_PEER as i32), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(12)?;
+        let mut disconnect = a.create_label();
+        a.set_label(&mut disconnect)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(dword_ptr(eax + PIN_PEER as i32), 0)?;
+        a.inc(dword_ptr(eax + PIN_DISCONNECTS as i32))?;
+        a.xor(eax, eax)?;
+        a.ret_1(4)?;
+        let mut connected_to = a.create_label();
+        let mut not_connected = a.create_label();
+        a.set_label(&mut connected_to)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + PIN_PEER as i32))?;
+        a.mov(edx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.test(ecx, ecx)?;
+        a.jz(not_connected)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+        a.set_label(&mut not_connected)?;
+        a.mov(eax, VFW_E_NOT_CONNECTED)?;
+        a.ret_1(8)?;
+        let mut direction = a.create_label();
+        a.set_label(&mut direction)?;
+        a.mov(eax, dword_ptr(esp + 4))?;
+        a.mov(ecx, dword_ptr(eax + 4))?;
+        a.mov(edx, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(edx), ecx)?;
+        a.xor(eax, eax)?;
+        a.ret_1(8)?;
+
+        // IMemInputPin: the decoder's own allocator, and every sample
+        // taken.
+        let mut get_allocator = a.create_label();
+        a.set_label(&mut get_allocator)?;
+        a.mov(eax, dword_ptr(esp + 8))?;
+        a.mov(dword_ptr(eax), 0)?;
+        a.mov(eax, VFW_E_NO_ALLOCATOR)?;
+        a.ret_1(8)?;
+
+        a.set_label(&mut start)?;
+        vtable(
+            a,
+            l,
+            T_VT_FILTER,
+            &[
+                no_interface,
+                one,
+                one,
+                n1,
+                ok0,
+                pause,
+                ok2,
+                n2,
+                ok1,
+                n1,
+                enum_pins,
+                n2,
+                n1,
+                join,
+                n1,
+            ],
+        )?;
+        for (filter, e) in [(T_TRANSFORM, T_TRANSFORM_ENUM), (T_RENDERER, T_RENDERER_ENUM)] {
+            a.mov(dword_ptr(l.at(filter)), eax)?;
+            a.mov(dword_ptr(l.at(filter + 4)), at(e))?;
+        }
+        vtable(a, l, T_VT_ENUM, &[no_interface, one, one, next, n1, ok0, n1])?;
+        a.mov(dword_ptr(l.at(T_TRANSFORM_ENUM)), eax)?;
+        a.mov(dword_ptr(l.at(T_RENDERER_ENUM)), eax)?;
+        a.mov(dword_ptr(l.at(T_TRANSFORM_ENUM + 8)), at(T_IN))?;
+        a.mov(dword_ptr(l.at(T_TRANSFORM_ENUM + 12)), at(T_OUT))?;
+        a.mov(dword_ptr(l.at(T_RENDERER_ENUM + 8)), at(T_RENDERER_IN))?;
+        vtable(
+            a,
+            l,
+            T_VT_PIN,
+            &[
+                pin_qi,
+                one,
+                one,
+                connect,
+                receive_connection,
+                disconnect,
+                connected_to,
+                n1,
+                n1,
+                direction,
+                n1,
+                ok1,
+                n1,
+                n2,
+                ok0,
+                ok0,
+                ok0,
+                ok_segment,
+            ],
+        )?;
+        for pin in [T_IN, T_OUT, T_RENDERER_IN] {
+            a.mov(dword_ptr(l.at(pin)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(T_IN + 20)), at(T_INPUT))?;
+        vtable(
+            a,
+            l,
+            T_VT_INPUT,
+            &[
+                no_interface,
+                one,
+                one,
+                get_allocator,
+                ok2,
+                n1,
+                ok1,
+                n2,
+                ok0,
+            ],
+        )?;
+        a.mov(dword_ptr(l.at(T_INPUT)), eax)?;
+
+        // The program.
+        call(a, l, fail, 1, CO_INITIALIZE, &[Imm(0)], S_OK)?;
+        let args = [
+            Ptr(G_CLSID_GRAPH),
+            Imm(0),
+            Imm(1),
+            Ptr(G_IID_GRAPH),
+            Ptr(GRAPH),
+        ];
+        call(a, l, fail, 2, CO_CREATE, &args, S_OK)?;
+        for (step, filter) in [(3, T_TRANSFORM), (4, T_RENDERER)] {
+            let args = [Ptr(filter), Imm(0)];
+            method(a, l, fail, step, (GRAPH, GRAPH_ADD_FILTER), &args, S_OK)?;
+        }
+        let args = [Ptr(G_IID_CONTROL), Ptr(CONTROL)];
+        method(a, l, fail, 5, (GRAPH, QUERY_INTERFACE), &args, S_OK)?;
+        let args = [Ptr(R_FILE), Imm(0)];
+        method(a, l, fail, 6, (GRAPH, GRAPH_RENDER_FILE), &args, S_OK)?;
+        // The decoder took the transform's input, whose output pin
+        // connected to the renderer's input pin once.
+        a.mov(ebx, 7)?;
+        a.cmp(dword_ptr(l.at(T_IN + PIN_PEER)), 0)?;
+        a.je(fail)?;
+        check(a, l, fail, 8, T_OUT + PIN_PEER, at(T_RENDERER_IN))?;
+        check(a, l, fail, 9, T_OUT + PIN_CONNECTS, 1)?;
+        check(a, l, fail, 10, T_RENDERER_IN + PIN_CONNECTS, 0)?;
+        // The renderer pauses first.
+        method(a, l, fail, 11, (CONTROL, CONTROL_PAUSE), &[], S_OK)?;
+        check(a, l, fail, 12, T_RENDERER + FILTER_PAUSED, 1)?;
+        check(a, l, fail, 13, T_TRANSFORM + FILTER_PAUSED, 2)?;
+        method(a, l, fail, 14, (CONTROL, CONTROL_STOP), &[], S_OK)?;
+        method(a, l, fail, 15, (CONTROL, RELEASE), &[], 1)?;
+        method(a, l, fail, 16, (GRAPH, RELEASE), &[], 0)?;
+        // Both ends of each connection disconnected, and both filters
+        // left the graph.
+        check(a, l, fail, 17, T_IN + PIN_DISCONNECTS, 1)?;
+        check(a, l, fail, 18, T_OUT + PIN_DISCONNECTS, 1)?;
+        check(a, l, fail, 19, T_RENDERER_IN + PIN_DISCONNECTS, 1)?;
+        check(a, l, fail, 20, T_TRANSFORM + FILTER_JOINED, 0)?;
+        check(a, l, fail, 21, T_RENDERER + FILTER_JOINED, 0)?;
+        exit(a, l, &mut fail, Imm(0))
+    });
+    let mut cpu = machine(
+        "transform",
+        exe,
+        &[("CLIP.MPG", super::win32_winmm_tests::clip())],
+    );
+    let code = run(&mut cpu);
+    assert_eq!(code, 0, "{}", printed(&cpu));
+}
