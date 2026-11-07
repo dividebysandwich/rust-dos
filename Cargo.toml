@@ -244,6 +244,8 @@ skip-host-network-tests = []
 embed-resource = "3"
 
 [dev-dependencies]
+# Codes the Cinepak frames that the tests of vfw::codec decode.
+oxideav-cinepak = { version = "=0.0.3", default-features = false }
 # Writes the zip archives of the tests.
 rust-dos-zip = { path = "crates/zip", features = ["test-util"] }
 # Writes the InstallShield archives of the install tests.

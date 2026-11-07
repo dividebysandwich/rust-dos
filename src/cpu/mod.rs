@@ -1753,6 +1753,13 @@ impl Cpu {
         self.bus.mouse.remove_callback();
         crate::mouse::clear_callback_busy(&mut self.bus);
         self.bus.mouse.ps2 = crate::mouse::Ps2Mouse::default();
+        // With it go the bytes the mouse sent: one left unread in the
+        // keyboard controller would block the keyboard, its IRQ 12 masked
+        // at the prompt. `reset_timers` raises the keyboard byte's IRQ 1
+        // again; taking the one-shot request here keeps it from coming a
+        // second time after the BIOS read the byte.
+        self.bus.kbc.drop_aux();
+        self.bus.sync_keyboard_irq();
         self.bus.port_accesses.clear();
         crate::keyboard::drop_unseen_keys(&mut self.bus);
         match kept_cursor {

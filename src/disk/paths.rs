@@ -239,6 +239,14 @@ impl DiskController {
         Some((drive_num, drive, path))
     }
 
+    /// The error for a path a drive held in memory hasn't: file not found
+    /// (02h) in a directory it has, path not found (03h) in one it
+    /// hasn't.
+    pub(super) fn memory_missing(files: &MemFs, path: &str) -> u8 {
+        let parent = path.rsplit_once('\\').map_or("", |(p, _)| p);
+        if files.is_dir(parent) { 0x02 } else { 0x03 }
+    }
+
     /// The drive a DOS path is on and the path there, if that drive is
     /// mounted from a disk image.
     pub(super) fn locate_fat(&self, dos_path: &str) -> Option<(u8, Rc<FatVolume>, Vec<String>)> {
