@@ -580,8 +580,8 @@ pub struct Pacer {
     /// to protected mode.
     auto: AutoSpeed,
     protected: bool,
-    /// As fast as the host keeps up with, averaged over frames.
-    host_max: Option<f64>,
+    /// As fast as the host keeps up with, estimated from its frames.
+    host: HostEstimate,
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
@@ -619,7 +619,7 @@ impl Pacer {
             speed,
             auto: AutoSpeed::new(speed.initial_cycles(), auto_fps),
             protected: false,
-            host_max: None,
+            host: HostEstimate::default(),
             sample: HostSample::default(),
             lost_ns: 0,
             last_ns: 0,
@@ -876,14 +876,15 @@ impl Pacer {
             }
             CpuSpeed::Auto(_) => {
                 if let Some(ideal) = ideal {
-                    self.host_max = Some(next_host_max(self.host_max, ideal, current));
+                    self.host.add(ideal, current);
                 }
                 // No lower than frames can be timed at, or a busy host could
                 // cap the speed where nothing measures it again (with a base
                 // speed below that, as `auto 300` has in real mode).
                 let least = self.least_timed();
                 let host_max = self
-                    .host_max
+                    .host
+                    .max
                     .map_or(MAX_CYCLES, |max| (max as u32).clamp(least, MAX_CYCLES));
                 if protected != self.protected {
                     self.protected = protected;
@@ -984,35 +985,67 @@ impl HostSample {
     }
 }
 
-/// `Auto`'s estimate of as fast as the host keeps up with, after a sample
-/// that says `ideal`, taken at the speed `current`, from the estimate
-/// `max` before it. It moves a tenth of the way to each sample, so that a
-/// light stretch of the program moves it little. A sample that says the
-/// host can't run the speed it runs at moves it half the way down: the
-/// program went from work the host runs fast (a loading loop) to work it
-/// runs slowly (drawing in a banked VESA window), and the speed, which
-/// follows the estimate down, would otherwise stay above what the host
-/// keeps up with for a dozen slow frames or more, a second at a third of
-/// real time (Shannara's scene changes). A stall of the host that makes
-/// a sample fall below the speed costs half the way down too, and the
-/// estimate climbs back a tenth of the way a sample after it.
-fn next_host_max(max: Option<f64>, ideal: f64, current: u32) -> f64 {
-    let Some(max) = max else {
-        return ideal;
-    };
-    let share = if ideal < current as f64 && ideal < max {
-        HOST_FALL
-    } else {
-        HOST_DRIFT
-    };
-    max + (ideal - max) * share
+/// `Auto`'s estimate of as fast as the host keeps up with, from the
+/// samples of its speed (`HostSample`).
+#[derive(Default)]
+struct HostEstimate {
+    max: Option<f64>,
+    /// Whether the last sample said the host can't run the speed it was
+    /// taken at.
+    short: bool,
 }
 
-/// The share of the way to a sample of the host's speed `Auto`'s estimate
-/// of it moves (`next_host_max`), and the share when the sample says the
-/// host can't run the speed it runs at.
+impl HostEstimate {
+    /// Add a sample that says `ideal`, taken at the speed `current`. The
+    /// estimate moves a tenth of the way to each sample, so that a light
+    /// stretch of the program moves it little. Two samples in a row that
+    /// say the host can't run the speed it runs at move it half the way
+    /// down: the program went from work the host runs fast (a loading
+    /// loop) to work it runs slowly (drawing in a banked VESA window), and
+    /// the speed, which follows the estimate down, would otherwise stay
+    /// above what the host keeps up with for a dozen slow frames or more, a
+    /// second at a third of real time (Shannara's scene changes).
+    ///
+    /// A sample says that only below `HOST_SHORT` of the speed. A program
+    /// that runs flat out runs at the estimate, and samples scatter around
+    /// it: half of them fall below it, and half the way down to those
+    /// against a tenth up to the others would hold the estimate under what
+    /// the host has, by two thirds of the scatter.
+    ///
+    /// One such sample alone moves it a tenth. A stall of the host, or a
+    /// frame whose other work took long (a present, a shader compiled),
+    /// shrinks the time a sample's instructions had (`MAX_BUSY_SHARE`, down
+    /// to a tenth of a frame), and drops one sample below the speed of any
+    /// program running at more than a tenth of what the host has. Half the
+    /// way down from there would cut the speed of every program above half
+    /// the estimate, for a moment that says nothing of its work.
+    fn add(&mut self, ideal: f64, current: u32) {
+        let short = ideal < current as f64 * HOST_SHORT;
+        let was_short = std::mem::replace(&mut self.short, short);
+        self.max = Some(match self.max {
+            None => ideal,
+            Some(max) => {
+                let share = if short && was_short && ideal < max {
+                    HOST_FALL
+                } else {
+                    HOST_DRIFT
+                };
+                max + (ideal - max) * share
+            }
+        });
+    }
+}
+
+/// The share of the way to a sample of the host's speed that `Auto`'s
+/// estimate of it moves (`HostEstimate::add`).
 const HOST_DRIFT: f64 = 0.1;
+/// The share it moves down when two samples in a row say the host can't
+/// run the speed it runs at.
 const HOST_FALL: f64 = 0.5;
+/// The share of the speed below which a sample says the host can't run
+/// it: too far under the speed to be the scatter of samples taken at the
+/// estimate.
+const HOST_SHORT: f64 = 0.8;
 
 /// PIT channel 2's counter, as programs read it: the count on port 42h
 /// and the output on port 61h bit 5. Its gate is port 61h bit 0. Programs
@@ -1230,35 +1263,82 @@ mod tests {
     fn the_host_estimate_falls_fast_when_the_host_cannot_run_the_speed() {
         // Shannara: a loading loop takes the estimate and the speed to
         // 1,135,918, then the drawing that follows runs at 250,000.
-        let (mut max, mut speed) = (1_135_918.0, 1_135_918);
+        let mut host = HostEstimate {
+            max: Some(1_135_918.0),
+            short: false,
+        };
         let mut frames = 0;
-        while max > 250_000.0 * 1.25 {
-            max = next_host_max(Some(max), 250_000.0, speed);
-            speed = max as u32;
+        while let Some(max) = host.max.filter(|&max| max > 250_000.0 * 1.25) {
+            host.add(250_000.0, max as u32);
             frames += 1;
         }
-        // A tenth of the way each frame took 26.
-        assert_eq!(frames, 4);
+        // A tenth of the way each frame took 26. The first sample below
+        // the speed moves it a tenth, the ones after it half the way.
+        assert_eq!(frames, 5);
     }
 
     #[test]
     fn the_host_estimate_drifts_where_the_host_keeps_up() {
+        let estimate = |max: Option<f64>, short: bool, ideal: f64, current: u32| {
+            let mut host = HostEstimate { max, short };
+            host.add(ideal, current);
+            host.max.unwrap()
+        };
         // A sample below the estimate at a speed the host still runs
         // moves it a tenth of the way, as one above it does.
         assert_eq!(
-            next_host_max(Some(400_000.0), 300_000.0, 200_000),
+            estimate(Some(400_000.0), true, 300_000.0, 200_000),
             390_000.0
         );
         assert_eq!(
-            next_host_max(Some(400_000.0), 500_000.0, 450_000),
+            estimate(Some(400_000.0), true, 500_000.0, 450_000),
             410_000.0
         );
-        assert_eq!(next_host_max(None, 500_000.0, 3000), 500_000.0);
-        // Below the speed it runs at: half the way.
+        assert_eq!(estimate(None, false, 500_000.0, 3000), 500_000.0);
+        // One sample below the speed it runs at, a stall of the host or a
+        // long present: a tenth of the way.
         assert_eq!(
-            next_host_max(Some(400_000.0), 200_000.0, 400_000),
+            estimate(Some(400_000.0), false, 200_000.0, 400_000),
+            380_000.0
+        );
+        // The second in a row: half the way.
+        assert_eq!(
+            estimate(Some(400_000.0), true, 200_000.0, 400_000),
             300_000.0
         );
+    }
+
+    #[test]
+    fn a_stall_moves_the_host_estimate_a_tenth() {
+        // A program at 300,000 under an estimate of 400,000; one sample
+        // of a frame that stalled says 50,000, and the next ones the
+        // host's speed again.
+        let mut host = HostEstimate::default();
+        host.add(400_000.0, 300_000);
+        host.add(50_000.0, 300_000);
+        assert_eq!(host.max, Some(365_000.0));
+        host.add(400_000.0, 300_000);
+        assert!(!host.short);
+        assert_eq!(host.max, Some(368_500.0));
+    }
+
+    #[test]
+    fn the_scatter_of_a_flat_out_program_keeps_the_host_estimate() {
+        // A program that runs at the estimate, with samples a tenth above
+        // and below the host's 400,000 in turn and in pairs: the estimate
+        // stays within a fiftieth of it.
+        for pattern in [[1.1, 0.9, 1.1, 0.9], [1.1, 1.1, 0.9, 0.9]] {
+            let mut host = HostEstimate::default();
+            host.add(400_000.0, 400_000);
+            for _ in 0..100 {
+                for share in pattern {
+                    let speed = host.max.unwrap() as u32;
+                    host.add(400_000.0 * share, speed);
+                }
+            }
+            let max = host.max.unwrap();
+            assert!((max / 400_000.0 - 1.0).abs() < 0.02, "{max}");
+        }
     }
 
     #[test]
