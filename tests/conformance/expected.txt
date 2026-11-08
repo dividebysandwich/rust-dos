@@ -199,7 +199,7 @@ kernel32/environ: skipped environ.c:387
 kernel32/environ: skipped environ.c:468
 kernel32/fiber: fiber: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/fiber: skipped fiber.c:190
-kernel32/file: file: 489791 tests executed (0 marked as todo, 1 failure), 16 skipped.
+kernel32/file: file: 489792 tests executed (0 marked as todo, 1 failure), 16 skipped.
 kernel32/file: failed file.c:350
 kernel32/file: skipped file.c:757
 kernel32/file: skipped file.c:924 (x2)
@@ -338,7 +338,7 @@ shell32/shelllink: skipped shelllink.c:854
 shell32/shellpath: shellpath: 116 tests executed (0 marked as todo, 0 failures), 1 skipped.
 shell32/shellpath: skipped shellpath.c:849
 shell32/shlexec: shlexec: 240 tests executed (0 marked as todo, 0 failures), 0 skipped.
-shell32/shlfileop: shlfileop: 540 tests executed (0 marked as todo, 1 failure), 5 skipped.
+shell32/shlfileop: shlfileop: 544 tests executed (0 marked as todo, 1 failure), 5 skipped.
 shell32/shlfileop: skipped shlfileop.c:220
 shell32/shlfileop: failed shlfileop.c:336
 shell32/shlfileop: skipped shlfileop.c:348
