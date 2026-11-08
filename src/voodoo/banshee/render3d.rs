@@ -177,13 +177,7 @@ impl Voodoo {
     /// desktop's buffer twice. The card has no register for their height.
     pub(crate) fn banshee_mirror_key(&self, old: Option<&LayoutKey>) -> LayoutKey {
         let fbi = &self.fbi;
-        let height = self.banshee.as_ref().map_or(1, |b| {
-            let cfg = b.reg(VID_PROC_CFG);
-            let rows = b.desktop_size().1;
-            let half = cfg & (VIDPROC_HALF_MODE | VIDPROC_OVERLAY_ENABLE) == VIDPROC_HALF_MODE;
-            if half { rows.div_ceil(2) } else { rows }
-        });
-        let height = height.clamp(1, 2048);
+        let height = self.banshee_mirror_height();
         let buffer = |at: u32, stride: Stride| {
             BufferKey::new(at, stride, (stride.pixels() as u32).clamp(1, 2048))
         };
@@ -215,6 +209,21 @@ impl Voodoo {
         }
         color[n] = col;
         LayoutKey::new(height, color, aux)
+    }
+
+    /// The rows of the recording's buffers (`banshee_mirror_key`): the
+    /// desktop's, or half of them in half mode with the overlay off. They
+    /// come from the CRTC and vidProcCfg, which are written outside
+    /// `register_to` and don't drop `blt_queue`, unlike the rest of the
+    /// layout.
+    pub(crate) fn banshee_mirror_height(&self) -> u32 {
+        let height = self.banshee.as_ref().map_or(1, |b| {
+            let cfg = b.reg(VID_PROC_CFG);
+            let rows = b.desktop_size().1;
+            let half = cfg & (VIDPROC_HALF_MODE | VIDPROC_OVERLAY_ENABLE) == VIDPROC_HALF_MODE;
+            if half { rows.div_ceil(2) } else { rows }
+        });
+        height.clamp(1, 2048)
     }
 
     /// The colour buffer of the recording (its word offset) the video
