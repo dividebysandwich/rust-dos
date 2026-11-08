@@ -510,6 +510,14 @@ pub(super) fn set_file_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(0xFFFF_FFFF);
     }
     let disk = &mut cpu.bus.disk;
+    // A seek that leaves the pointer where it was (a query of it, or a seek
+    // to where it is) changes nothing but the last error, which an idle
+    // proof can follow (`idle::pure_call`), unless it empties a file a
+    // create call left for its first use. Without `high` it reads nothing
+    // but its arguments (`idle::reads_arguments`).
+    let from = (cpu.bus.observe.on && !disk.settles(open.sft))
+        .then(|| disk.position(open.sft))
+        .flatten();
     let base = match method {
         0 => 0,
         1 => disk.position(open.sft).unwrap_or(0) as i64,
@@ -525,6 +533,12 @@ pub(super) fn set_file_pointer(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
                 cpu.bus.guest_write_32(high, (at >> 32) as u32);
             }
             set_error(cpu, 0);
+            if from == Some(at) {
+                crate::idle::pure_call(cpu, None);
+                if high == 0 {
+                    crate::idle::reads_arguments(cpu);
+                }
+            }
             Some(at as u32)
         }
         Err(code) => {

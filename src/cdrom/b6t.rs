@@ -28,6 +28,8 @@
 //! each sector. A track's sectors can be in several blocks, and a block
 //! can hold several tracks.
 
+use super::dpm::{self, Dpm};
+
 /// A descriptor starts with this, and ends with `FOOTER`.
 pub const SIGNATURE: &[u8; 16] = b"BWT5 STREAM SIGN";
 const FOOTER: &[u8; 16] = b"BWT5 STREAM FOOT";
@@ -101,19 +103,6 @@ pub struct Track {
     /// Sectors of the pregap, then of the track.
     pub pregap: u32,
     pub sectors: u32,
-}
-
-/// Data position measurement: the angle of every `resolution`th sector
-/// from `start` on, as the drive that made the image measured them. Copy
-/// protections such as StarForce and SecuROM time reads to check that
-/// sectors are where the pressed disc has them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Dpm {
-    pub start: u32,
-    pub resolution: u32,
-    /// Angles of sectors `start + resolution`, `start + 2 * resolution`
-    /// and on, in 256ths of a rotation from sector `start`.
-    pub angles: Vec<u32>,
 }
 
 /// Reads the descriptor's fields in order.
@@ -273,7 +262,7 @@ pub fn parse(data: &[u8]) -> Result<Descriptor, String> {
         list.push(Session { number, tracks });
     }
 
-    let dpm = parse_dpm(c.take(dpm_len as usize)?, 32);
+    let dpm = dpm::parse_block(c.take(dpm_len as usize)?, 32);
     c.skip(4)?;
     if c.take(16)? != FOOTER {
         return Err("the descriptor doesn't end where its blocks say".into());
@@ -329,30 +318,9 @@ fn parse_track(c: &mut Cursor) -> Result<Option<Track>, String> {
     }))
 }
 
-/// DPM data from byte `at` of `data` on: the start sector, resolution,
-/// count and angles.
-fn parse_dpm(data: &[u8], at: usize) -> Option<Dpm> {
-    let word = |i: usize| {
-        data.get(at + i * 4..at + i * 4 + 4)
-            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
-    };
-    let (start, resolution, count) = (word(0)?, word(1)?, word(2)?);
-    if resolution == 0 || count == 0 {
-        return None;
-    }
-    let angles = (0..count as usize)
-        .map(|i| word(3 + i))
-        .collect::<Option<Vec<_>>>()?;
-    Some(Dpm {
-        start,
-        resolution,
-        angles,
-    })
-}
-
 /// The DPM data of a `.bwa` file.
 pub fn parse_bwa(data: &[u8]) -> Option<Dpm> {
-    parse_dpm(data, 12)
+    dpm::parse_block(data, 12)
 }
 
 /// A data block for `build`: file, offset, first sector, sectors, and

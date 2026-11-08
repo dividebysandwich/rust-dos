@@ -675,6 +675,146 @@ fn a_wait_on_the_clock_is_skipped_exactly() {
     }
 }
 
+/// Run `image` on a machine that skips passes (on the recompiler) and one
+/// that runs them all (on the interpreter), in lockstep: they must come
+/// out the same after every batch, and the program must end with 2Ah.
+/// What the skipping one skipped, which ran with paging on.
+fn idle_lockstep(test: &str, image: Vec<u8>) -> rust_dos::idle::IdleStats {
+    let start = |name: &str, core: CoreMode, skip: bool| {
+        let mut cpu = machine(name, image.clone());
+        cpu.core = core;
+        cpu.bus.observe.enabled = skip;
+        cpu
+    };
+    rust_dos::hosttime::fix(
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25)
+            .unwrap()
+            .and_hms_opt(14, 3, 5),
+    );
+    let mut plain = start(&format!("{test}_plain"), CoreMode::Normal, false);
+    let mut skipping = start(&format!("{test}_skipping"), CoreMode::Dynamic, true);
+    let mut paged = false;
+    let run = dyndiff::lockstep(&mut plain, &mut skipping, 300, 10_000, |_, cpu| {
+        paged |= cpu.cr0 & rust_dos::cpu::CR0_PG != 0;
+    });
+    if let Err(e) = run {
+        panic!("{e}\n  {:?}", skipping.bus.observe.stats);
+    }
+    assert!(paged, "the program ran with paging on");
+    assert_eq!(plain.errorlevel, 0x2A, "the wait ended");
+    assert_eq!(
+        skipping.errorlevel, 0x2A,
+        "{:?}",
+        skipping.bus.observe.stats
+    );
+    skipping.bus.observe.stats
+}
+
+/// The number of proofs that failed for `why`.
+fn failed_by(stats: &rust_dos::idle::IdleStats, why: &str) -> u64 {
+    stats
+        .failed_by
+        .iter()
+        .find(|(w, _)| *w == why)
+        .map_or(0, |&(_, n)| n)
+}
+
+/// A wait on the clock that counts its passes in memory, as a frame
+/// limiter counts the passes it waited: with paging on, as the built-in
+/// Windows runs, the passes are skipped as long as the counts let them
+/// run the same, and the counts come out as the passes would leave them.
+#[test]
+fn a_wait_on_the_clock_that_counts_its_passes_is_skipped() {
+    let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["GetTickCount"])];
+    let image = program(BASE, false, imports, &[0; 8], |a, l| {
+        let mut wait = a.create_label();
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.inc(dword_ptr(l.data))?;
+        a.add(dword_ptr(l.at(4)), 3)?;
+        a.cmp(eax, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    });
+    let stats = idle_lockstep("counting_clock_wait", image);
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// The program, waiting on the clock, asks where a file is and seeks to
+/// there with SetFilePointer, and asks for an accelerator table it doesn't
+/// have, as Railroad Tycoon II's main loop does, and with `count` counts
+/// its passes in memory.
+fn file_and_table_wait(table: bool, count: bool) -> Vec<u8> {
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.DLL",
+            &["GetTickCount", "CreateFileA", "SetFilePointer"],
+        ),
+        ("USER32.DLL", &["LoadAcceleratorsA"]),
+    ];
+    let mut data = vec![0; 0x20];
+    put(&mut data, 0x10, b"T.EXE\0");
+    put(&mut data, 0x18, b"Accel\0");
+    program(BASE, false, imports, &data, |a, l| {
+        use Arg::{Esi, I};
+        let mut wait = a.create_label();
+        let at = |offset: u32| I(l.at(offset) as u32);
+        let open = [at(0x10), I(0x8000_0000), I(1), I(0), I(3), I(0x80), I(0)];
+        call_with(a, l.import(1), &open)?;
+        a.mov(esi, eax)?;
+        a.call(l.import(0))?;
+        a.lea(ebx, dword_ptr(eax + 20))?;
+        a.set_label(&mut wait)?;
+        a.call(l.import(0))?;
+        a.mov(edi, eax)?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(1)])?;
+        call_with(a, l.import(2), &[Esi, I(0), I(0), I(0)])?;
+        if table {
+            call_with(a, l.import(3), &[I(0), at(0x18)])?;
+        }
+        if count {
+            a.inc(dword_ptr(l.data))?;
+        }
+        a.cmp(edi, ebx)?;
+        a.jb(wait)?;
+        a.mov(eax, 0x2A)?;
+        a.ret()
+    })
+}
+
+/// Neither the query of a file's place, nor a seek to where it is, nor a
+/// look for an accelerator table that isn't there changes anything: a
+/// wait that calls them is skipped.
+#[test]
+fn a_wait_that_asks_where_a_file_is_and_for_a_missing_table_is_skipped() {
+    let stats = idle_lockstep("file_table_wait", file_and_table_wait(true, false));
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// SetFilePointer reads nothing but its arguments: a wait that calls it
+/// and counts its passes is skipped too.
+#[test]
+fn a_wait_that_asks_where_a_file_is_and_counts_its_passes_is_skipped() {
+    let stats = idle_lockstep("file_count_wait", file_and_table_wait(false, true));
+    assert!(stats.proofs >= 10, "{stats:?}");
+    assert!(stats.skipped > 0, "{stats:?}");
+}
+
+/// LoadAcceleratorsA reads the table's name and the program's resources,
+/// which a count could be in: a wait that calls it and counts its passes
+/// isn't skipped.
+#[test]
+fn a_wait_that_counts_its_passes_and_reads_more_than_its_arguments_is_not_skipped() {
+    let stats = idle_lockstep("table_count_wait", file_and_table_wait(true, true));
+    assert_eq!(stats.proofs, 0, "{stats:?}");
+    assert!(failed_by(&stats, "count service") > 0, "{stats:?}");
+}
+
 /// KERNEL's LocalLock has the trap id KERNEL32's GetTickCount has, in the
 /// numbering of the 16-bit modules, and reads no clock: calls of it in a
 /// row don't arm their stub.
@@ -3947,21 +4087,21 @@ fn a_gate_to_selector_28h_runs_level_0_code() {
 }
 
 /// A VxD service call at level 0, INT 20h and the service's dword, as
-/// SafeDisc 2.30's level 0 code makes one: the built-in Windows has no
-/// VxDs, so the program ends, naming the service and the INT's address.
-/// Bit 15 of the service's word marks a VxDJmp and isn't part of its
-/// number.
+/// SafeDisc 2.30's level 0 code makes one, of a service the built-in
+/// Windows doesn't have: there being no VxDs, the program ends, naming
+/// the service and the INT's address. Bit 15 of the service's word marks
+/// a VxDJmp and isn't part of its number.
 #[test]
 fn a_vxd_call_at_level_0_names_the_service() {
     let (code, text) = run_through_gate_28h(
         "vxd_level0",
         &[
             0xCD, 0x20, // int 20h
-            0x3E, 0x81, 0x01, 0x00, // VMM's service 013Eh, as a VxDJmp
+            0x02, 0x80, 0x27, 0x00, // VXDLDR's service 0002h, as a VxDJmp
         ],
     );
     assert_eq!(code, 0xFF, "{}", text);
-    assert!(text.contains("VxD 0001h's service 013Eh"), "{}", text);
+    assert!(text.contains("VxD 0027h's service 0002h"), "{}", text);
     // The INT, at 30h of the data section, which starts at a page.
     let at = text
         .split_once("doesn't have at 0028:")
@@ -3969,12 +4109,91 @@ fn a_vxd_call_at_level_0_names_the_service() {
     assert_eq!(at.map(|at| at & 0xFFF), Some(0x30), "{}", text);
 }
 
+/// VMM_GetVxDLocationList from level 0, as SafeDisc 2.30 (Anachronox)
+/// calls it: as on Windows 98 SE, EAX has the list, EDX the number of
+/// VxDs and ECX the list's size, the flags are those of `or eax, eax`
+/// (SF set: the list is above 2 GB) and the other registers stay as they
+/// were (EDI here). The built-in Windows lists VMM alone: a record of its
+/// DDB, whose name is "VMM     ", and one object, 14 bytes. The code sets
+/// EBX to 1 when all of that holds.
+#[test]
+fn vmm_get_vxd_location_list_lists_vmm() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_location_list",
+        &[
+            0xBF, 0x78, 0x56, 0x34, 0x12, // mov edi, 12345678h
+            0xCD, 0x20, 0x3E, 0x01, 0x01, 0x00, // VMMCall GetVxDLocationList
+            0x79, 0x31, // jns done
+            0x81, 0xFF, 0x78, 0x56, 0x34, 0x12, // cmp edi, 12345678h
+            0x75, 0x29, // jne done
+            0x83, 0xFA, 0x01, // cmp edx, 1
+            0x75, 0x24, // jne done
+            0x83, 0xF9, 0x0E, // cmp ecx, 14
+            0x75, 0x1F, // jne done
+            0x8B, 0x30, // mov esi, [eax]: the DDB
+            0x81, 0x7E, 0x0C, 0x56, 0x4D, 0x4D, 0x20, // cmp [esi+0Ch], "VMM "
+            0x75, 0x14, // jne done
+            0x81, 0x7E, 0x10, 0x20, 0x20, 0x20, 0x20, // cmp [esi+10h], "    "
+            0x75, 0x0B, // jne done
+            0x80, 0x78, 0x04, 0x01, // cmp byte [eax+4], 1: one object
+            0x75, 0x05, // jne done
+            0xBB, 0x01, 0x00, 0x00, 0x00, // mov ebx, 1
+            0xCF, // done: iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// A VxD service called by INT 20h leaves the interrupt flag of the level
+/// 0 code that calls it as it was, as Windows 98's do: off here, after
+/// CLI. The code sets EBX to 1 when the flag is still off after the call.
+#[test]
+fn a_vxd_service_at_level_0_keeps_interrupts_off() {
+    let (code, text) = run_through_gate_28h(
+        "vxd_interrupt_flag",
+        &[
+            0xFA, // cli
+            0xCD, 0x20, 0x3E, 0x01, 0x01, 0x00, // VMMCall GetVxDLocationList
+            0x9C, // pushfd
+            0x58, // pop eax
+            0xF6, 0xC4, 0x02, // test ah, 2: IF
+            0x0F, 0x94, 0xC3, // sete bl
+            0xCF, // iretd
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
+/// VXDLDR_GetDeviceList from level 0 through VxDJmp, which returns to the
+/// caller's caller: the built-in Windows has loaded no VxDs since its
+/// start, so the list is empty and EAX 0, and the code goes on after the
+/// CALL that led to the VxDJmp. The service leaves the flags as they
+/// were: CF, set before the CALL, is still set.
+#[test]
+fn vxdldr_get_device_list_is_empty() {
+    let (code, text) = run_through_gate_28h(
+        "vxdldr_device_list",
+        &[
+            0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax, -1
+            0xF9, // stc
+            0xE8, 0x0B, 0x00, 0x00, 0x00, // call jump
+            0x0F, 0x92, 0xC1, // setc cl
+            0x85, 0xC0, // test eax, eax
+            0x0F, 0x94, 0xC3, // sete bl
+            0x20, 0xCB, // and bl, cl
+            0xCF, // iretd
+            0xCD, 0x20, 0x05, 0x80, 0x27, 0x00, // jump: VxDJmp GetDeviceList
+        ],
+    );
+    assert_eq!(code, 1, "{}", text);
+}
+
 /// Run `level0` at level 0, as SafeDisc 2.30 does: at 30h of the data
 /// section, through a gate of level 3 for vector 5 with selector 28h. The
 /// program ends with EBX's bit 0 after it returns.
 fn run_through_gate_28h(name: &str, level0: &[u8]) -> (u8, String) {
     let imports: &[(&str, &[&str])] = &[("KERNEL32.DLL", &["ExitProcess"])];
-    let mut data = vec![0u8; 0x40];
+    let mut data = vec![0u8; 0x30 + level0.len().max(0x10)];
     data[0x30..0x30 + level0.len()].copy_from_slice(level0);
     run(
         name,
@@ -7898,6 +8117,217 @@ fn a_program_started_from_the_foreground_comes_to_it_and_stays() {
     assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
 }
 
+/// SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE.
+const SWP_HIDE_ONLY: i32 = 0x0097;
+const SW_HIDE: i32 = 0;
+
+#[test]
+fn a_hidden_window_stays_active_until_it_goes_and_end_dialog_activates_the_owner() {
+    // As Wine's test_SetActiveWindow and test_EndDialog check on
+    // Windows: a popup hidden by SetWindowPos(SWP_HIDEWINDOW) stays the
+    // active window, and its owner becomes active when it is destroyed.
+    // EndDialog enables the owner, even one the program disabled itself,
+    // and activates it; ShowWindow(SW_HIDE) of the last window leaves
+    // none active. (Discworld Noir's setup, whose MFC dialog loop
+    // disables the owner itself, had no active window after its Change
+    // CD dialog, dividebysandwich/rust-dos#714.)
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "CreateDialogIndirectParamA",
+        "SetWindowPos",
+        "DestroyWindow",
+        "EnableWindow",
+        "IsWindowEnabled",
+        "EndDialog",
+        "ShowWindow",
+        "GetActiveWindow",
+    ];
+    // The class at 0x10, and a DLGTEMPLATE at 0x100: a visible popup
+    // with a caption, no controls, no menu, class or title.
+    let mut data = child_data(&[(0x10, "Static")]);
+    data.resize(0x120, 0);
+    let style = WS_POPUP | WS_VISIBLE | 0x00C0_0000;
+    data[0x100..0x104].copy_from_slice(&style.to_le_bytes());
+    data[0x10E..0x110].copy_from_slice(&100u16.to_le_bytes());
+    data[0x110..0x112].copy_from_slice(&50u16.to_le_bytes());
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        a.xor(ebx, ebx)?;
+        push_args(a, &[0, class, 0, style, 0, 0, 100, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 0)?;
+        // A popup the first one owns, hidden and then destroyed.
+        push_args(a, &[0, class, 0, style, 10, 10, 50, 50, 0, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 32), esi)?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(edi, eax)?;
+        push_args(a, &[0, 0, 0, 0, 0, 0, SWP_HIDE_ONLY])?;
+        a.mov(dword_ptr(esp), edi)?;
+        a.call(f("SetWindowPos"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 1)?;
+        a.push(edi)?;
+        a.call(f("DestroyWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 2)?;
+        // A dialog whose owner the program disabled, ended.
+        a.push(0)?;
+        a.push(esi)?;
+        a.call(f("EnableWindow"))?;
+        push_args(a, &[BASE as i32, l.at(0x100) as i32, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 8), esi)?;
+        a.call(f("CreateDialogIndirectParamA"))?;
+        a.mov(edi, eax)?;
+        a.test(edi, edi)?;
+        bit_if(a, ne, 3)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, edi)?;
+        bit_if(a, eq, 4)?;
+        a.push(0)?;
+        a.push(edi)?;
+        a.call(f("EndDialog"))?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, ne, 5)?;
+        a.call(f("GetActiveWindow"))?;
+        a.cmp(eax, esi)?;
+        bit_if(a, eq, 6)?;
+        // The last visible window hidden by ShowWindow: none is active.
+        a.push(SW_HIDE)?;
+        a.push(esi)?;
+        a.call(f("ShowWindow"))?;
+        a.call(f("GetActiveWindow"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 7)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("hidden_stays_active", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
+#[test]
+fn a_dialog_box_has_its_owner_enabled_by_end_dialog_only() {
+    // As Wine's test_dialog_parent checks on Windows: EndDialog enables
+    // the owner DialogBox disabled, and DialogBox doesn't enable it
+    // again as it returns, so an owner the dialog procedure disabled
+    // after EndDialog stays disabled. A WS_CHILD dialog whose owner is
+    // a child window is made the child of the first ancestor that isn't
+    // one, the window disabled and enabled.
+    const WS_CHILD: i32 = 0x4000_0000;
+    const WM_INITDIALOG: i32 = 0x0110;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateWindowExA",
+        "DialogBoxIndirectParamA",
+        "EndDialog",
+        "EnableWindow",
+        "IsWindowEnabled",
+        "GetParent",
+    ];
+    // The class at 0x10; DLGTEMPLATEs at 0x100 (a popup) and 0x140 (a
+    // child), no controls, menu, class or title; at 0x180 the owner the
+    // procedure disables, at 0x184 whether it was enabled, at 0x188 the
+    // dialog's parent.
+    let mut data = child_data(&[(0x10, "Static")]);
+    data.resize(0x190, 0);
+    for (at, style) in [(0x100, WS_POPUP | 0x00C0_0000), (0x140, WS_CHILD)] {
+        data[at..at + 4].copy_from_slice(&style.to_le_bytes());
+        data[at + 0x0E..at + 0x10].copy_from_slice(&100u16.to_le_bytes());
+        data[at + 0x10..at + 0x12].copy_from_slice(&50u16.to_le_bytes());
+    }
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let (owner, was_enabled, parent) = (l.at(0x180), l.at(0x184), l.at(0x188));
+        let mut start = a.create_label();
+        let mut other = a.create_label();
+        let mut done = a.create_label();
+        a.call(start)?;
+        // The dialog procedure: in WM_INITDIALOG, EndDialog with the
+        // lParam as the result, then the owner's state, and the owner
+        // disabled again.
+        a.cmp(dword_ptr(esp + 8), WM_INITDIALOG)?;
+        a.jne(other)?;
+        a.push(dword_ptr(esp + 4))?;
+        a.call(f("GetParent"))?;
+        a.mov(dword_ptr(parent), eax)?;
+        a.push(dword_ptr(esp + 16))?;
+        a.push(dword_ptr(esp + 8))?;
+        a.call(f("EndDialog"))?;
+        a.mov(eax, dword_ptr(owner))?;
+        a.test(eax, eax)?;
+        a.jz(done)?;
+        a.push(eax)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.mov(dword_ptr(was_enabled), eax)?;
+        a.push(0)?;
+        a.push(dword_ptr(owner))?;
+        a.call(f("EnableWindow"))?;
+        a.set_label(&mut done)?;
+        a.mov(eax, 1)?;
+        a.ret_1(16)?;
+        a.set_label(&mut other)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+        a.set_label(&mut start)?;
+        a.pop(edi)?;
+        let class = l.at(0x10) as i32;
+        a.xor(ebx, ebx)?;
+        let popup = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, 0, popup, 0, 0, 100, 100, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(esi, eax)?;
+        a.mov(dword_ptr(owner), esi)?;
+        push_args(a, &[BASE as i32, l.at(0x100) as i32, 0, 0, 2])?;
+        a.mov(dword_ptr(esp + 8), esi)?;
+        a.mov(dword_ptr(esp + 12), edi)?;
+        a.call(f("DialogBoxIndirectParamA"))?;
+        a.cmp(eax, 2)?;
+        bit_if(a, eq, 0)?;
+        a.cmp(dword_ptr(was_enabled), 0)?;
+        bit_if(a, ne, 1)?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, eq, 2)?;
+        a.push(1)?;
+        a.push(esi)?;
+        a.call(f("EnableWindow"))?;
+        // A child dialog with a child window of the first as its owner.
+        a.mov(dword_ptr(owner), 0)?;
+        let child = WS_CHILD | WS_VISIBLE;
+        push_args(a, &[0, class, 0, child, 0, 0, 10, 10, 0, 0, 0, 0])?;
+        a.mov(dword_ptr(esp + 32), esi)?;
+        a.call(f("CreateWindowExA"))?;
+        push_args(a, &[BASE as i32, l.at(0x140) as i32, 0, 0, 3])?;
+        a.mov(dword_ptr(esp + 8), eax)?;
+        a.mov(dword_ptr(esp + 12), edi)?;
+        a.call(f("DialogBoxIndirectParamA"))?;
+        a.cmp(eax, 3)?;
+        bit_if(a, eq, 3)?;
+        a.cmp(dword_ptr(parent), esi)?;
+        bit_if(a, eq, 4)?;
+        a.push(esi)?;
+        a.call(f("IsWindowEnabled"))?;
+        a.test(eax, eax)?;
+        bit_if(a, ne, 5)?;
+        a.or(ebx, 0xC0)?;
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let code = run_family("dialog_box_owner", &[("T.EXE", program)]);
+    assert_eq!(code, 0xFF, "the checks that failed: {:08b}", !code);
+}
+
 const WM_QUERYENDSESSION: i32 = 0x0011;
 const WM_ENDSESSION: i32 = 0x0016;
 const EWX_REBOOT: i32 = 2;
@@ -8520,6 +8950,237 @@ fn all_equal(
     }
     a.test(edx, edx)?;
     bit_if(a, eq, bit)
+}
+
+/// A dialog template: an edit control (id 100) and an OK button, in that
+/// order, both with WS_TABSTOP, in a visible popup dialog.
+fn edit_dialog_template() -> Vec<u8> {
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_TABSTOP: u32 = 0x0001_0000;
+    const WS_BORDER: u32 = 0x0080_0000;
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const DS_MODALFRAME: u32 = 0x80;
+    const ES_AUTOHSCROLL: u32 = 0x80;
+    const BS_DEFPUSHBUTTON: u32 = 1;
+    let mut t = Vec::new();
+    let style = WS_POPUP as u32 | WS_VISIBLE as u32 | WS_CAPTION | DS_MODALFRAME;
+    t.extend(style.to_le_bytes());
+    t.extend(0u32.to_le_bytes());
+    // Two items at 20,20, 160 by 60; no menu, class or title.
+    for word in [2u16, 20, 20, 160, 60, 0, 0, 0] {
+        t.extend(word.to_le_bytes());
+    }
+    let items = [
+        (ES_AUTOHSCROLL | WS_BORDER, [10, 10, 140, 12], 100, 0x81),
+        (BS_DEFPUSHBUTTON, [50, 35, 50, 14], 1, 0x80),
+    ];
+    for (style, place, id, atom) in items {
+        t.resize(t.len().next_multiple_of(4), 0);
+        t.extend((style | WS_CHILD | WS_VISIBLE as u32 | WS_TABSTOP).to_le_bytes());
+        t.extend(0u32.to_le_bytes());
+        // Place, id, class atom, an empty title, no creation data.
+        for word in place.into_iter().chain([id, 0xFFFF, atom, 0, 0]) {
+            t.extend((word as u16).to_le_bytes());
+        }
+    }
+    t
+}
+
+#[test]
+fn a_dialog_selects_the_edit_text_it_gives_the_focus_as_windows_98_does() {
+    // Windows 98 SE (measured on an 86Box machine): when WM_INITDIALOG
+    // returns TRUE, the dialog manager sends EM_SETSEL(0, -2) to the edit
+    // control it gives the focus, so text WM_INITDIALOG put there starts
+    // selected; Rent-A-Hero's save dialog relies on it. A SetFocus of the
+    // dialog procedure's own, which returns FALSE, selects nothing.
+    // Activating the dialog again gives the saved control the focus with
+    // its selection as it was, while WM_SETFOCUS on the dialog selects
+    // the text again; activation with no control saved selects the first
+    // one's text too.
+    const WM_INITDIALOG: i32 = 0x0110;
+    const EM_GETSEL: i32 = 0x00B0;
+    const EM_SETSEL: i32 = 0x00B1;
+    const GWL_WNDPROC: i32 = -4;
+    let kernel32 = ["ExitProcess"];
+    let user32 = [
+        "CreateDialogIndirectParamA",
+        "CreateWindowExA",
+        "DestroyWindow",
+        "GetDlgItem",
+        "SetDlgItemTextA",
+        "SetFocus",
+        "GetFocus",
+        "SetActiveWindow",
+        "SendMessageA",
+        "SetWindowLongA",
+        "CallWindowProcA",
+    ];
+    // The text at 0, the class "Static" at 0x10; the dialog procedure's
+    // mode at 0x20 (0: TRUE, 1: SetFocus and FALSE, 2: FALSE), the edit
+    // control's procedure at 0x24, and the count of EM_SETSELs it got at
+    // 0x28 with the last one's wParam and lParam at 0x2C and 0x30. The
+    // results at 0x40 on, the template at 0x100.
+    let mut data = vec![0; 0x100];
+    data[..8].copy_from_slice(b"Empty...");
+    data[0x10..0x16].copy_from_slice(b"Static");
+    data.extend(edit_dialog_template());
+    // The results: selection and focus after each step.
+    const SEL: u32 = 0x40;
+    const FOCUS: u32 = 0x44;
+    let program = win_program(pe::SUBSYSTEM_GUI, &kernel32, &user32, &data, |a, l, f| {
+        let mut dialog_proc = a.create_label();
+        let mut edit_proc = a.create_label();
+        let mut main = a.create_label();
+        a.jmp(main)?;
+
+        // The edit control's procedure: counts EM_SETSEL, then calls the
+        // control's own.
+        a.set_label(&mut edit_proc)?;
+        let mut other = a.create_label();
+        a.cmp(dword_ptr(esp + 8), EM_SETSEL)?;
+        a.jne(other)?;
+        a.inc(dword_ptr(l.at(0x28)))?;
+        a.mov(eax, dword_ptr(esp + 12))?;
+        a.mov(dword_ptr(l.at(0x2C)), eax)?;
+        a.mov(eax, dword_ptr(esp + 16))?;
+        a.mov(dword_ptr(l.at(0x30)), eax)?;
+        a.set_label(&mut other)?;
+        a.pop(ecx)?;
+        a.push(dword_ptr(l.at(0x24)))?;
+        a.push(ecx)?;
+        a.jmp(f("CallWindowProcA"))?;
+
+        // The dialog procedure.
+        a.set_label(&mut dialog_proc)?;
+        let mut not_init = a.create_label();
+        a.cmp(dword_ptr(esp + 8), WM_INITDIALOG)?;
+        a.jne(not_init)?;
+        a.push(esi)?;
+        a.mov(esi, dword_ptr(esp + 8))?;
+        a.push(100)?;
+        a.push(esi)?;
+        a.call(f("GetDlgItem"))?;
+        a.push(eax)?;
+        push_label(a, edit_proc)?;
+        a.push(GWL_WNDPROC)?;
+        a.push(eax)?;
+        a.call(f("SetWindowLongA"))?;
+        a.mov(dword_ptr(l.at(0x24)), eax)?;
+        a.push(l.at(0) as i32)?;
+        a.push(100)?;
+        a.push(esi)?;
+        a.call(f("SetDlgItemTextA"))?;
+        // The edit control, pushed above.
+        a.pop(eax)?;
+        let mut no_focus = a.create_label();
+        a.cmp(dword_ptr(l.at(0x20)), 1)?;
+        a.jne(no_focus)?;
+        a.push(eax)?;
+        a.call(f("SetFocus"))?;
+        a.set_label(&mut no_focus)?;
+        a.pop(esi)?;
+        a.xor(eax, eax)?;
+        a.cmp(dword_ptr(l.at(0x20)), 0)?;
+        a.sete(al)?;
+        a.ret_1(16)?;
+        a.set_label(&mut not_init)?;
+        a.xor(eax, eax)?;
+        a.ret_1(16)?;
+
+        a.set_label(&mut main)?;
+        a.xor(ebx, ebx)?;
+        // The other window, which takes the activation from the dialogs.
+        let class = l.at(0x10) as i32;
+        let style = WS_POPUP | WS_VISIBLE;
+        push_args(a, &[0, class, class, style, 300, 300, 50, 50, 0, 0, 0, 0])?;
+        a.call(f("CreateWindowExA"))?;
+        a.mov(ebp, eax)?;
+        // A dialog in the mode at 0x20, in ESI, its edit control in EDI.
+        let dialog = |a: &mut CodeAssembler, mode: i32| -> Result<(), IcedError> {
+            a.mov(dword_ptr(l.at(0x20)), mode)?;
+            a.mov(dword_ptr(l.at(0x28)), 0)?;
+            a.mov(dword_ptr(l.at(0x30)), 0)?;
+            a.push(0)?;
+            push_label(a, dialog_proc)?;
+            a.push(0)?;
+            a.push(l.at(0x100) as i32)?;
+            a.push(BASE as i32)?;
+            a.call(f("CreateDialogIndirectParamA"))?;
+            a.mov(esi, eax)?;
+            a.push(100)?;
+            a.push(esi)?;
+            a.call(f("GetDlgItem"))?;
+            a.mov(edi, eax)
+        };
+        // The edit control's selection at SEL, as EM_GETSEL returns it,
+        // and whether it has the focus at FOCUS.
+        let check = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            push_args(a, &[EM_GETSEL, 0, 0])?;
+            a.push(edi)?;
+            a.call(f("SendMessageA"))?;
+            a.mov(dword_ptr(l.at(SEL)), eax)?;
+            a.call(f("GetFocus"))?;
+            a.cmp(eax, edi)?;
+            a.sete(al)?;
+            a.movzx(eax, al)?;
+            a.mov(dword_ptr(l.at(FOCUS)), eax)
+        };
+        let set_sel = |a: &mut CodeAssembler, at: i32| -> Result<(), IcedError> {
+            push_args(a, &[EM_SETSEL, at, at])?;
+            a.push(edi)?;
+            a.call(f("SendMessageA"))
+        };
+        // Deactivated and activated again.
+        let reactivate = |a: &mut CodeAssembler| -> Result<(), IcedError> {
+            a.push(ebp)?;
+            a.call(f("SetActiveWindow"))?;
+            a.push(esi)?;
+            a.call(f("SetActiveWindow"))
+        };
+        let all = 8 << 16;
+        let none = 0;
+
+        // TRUE: the text is selected, by one EM_SETSEL(0, -2).
+        dialog(a, 0)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, all), (FOCUS, 1)], 0)?;
+        all_equal(a, l, &[(0x28, 1), (0x2C, 0), (0x30, -2)], 1)?;
+        // Activated again: the caret stays where it was put.
+        set_sel(a, 2)?;
+        reactivate(a)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, 2 << 16 | 2), (FOCUS, 1), (0x28, 2)], 2)?;
+        // WM_SETFOCUS on the dialog selects the text again.
+        set_sel(a, 2)?;
+        a.push(esi)?;
+        a.call(f("SetFocus"))?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, all), (FOCUS, 1), (0x28, 4)], 3)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+
+        // SetFocus in WM_INITDIALOG and FALSE: nothing is selected.
+        dialog(a, 1)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, none), (FOCUS, 1), (0x28, 0)], 4)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+
+        // FALSE alone: the activation gives the first control the focus,
+        // with its text selected.
+        dialog(a, 2)?;
+        reactivate(a)?;
+        check(a)?;
+        all_equal(a, l, &[(SEL, all), (FOCUS, 1)], 5)?;
+        a.push(esi)?;
+        a.call(f("DestroyWindow"))?;
+
+        a.push(ebx)?;
+        a.call(f("ExitProcess"))?;
+        a.int3()
+    });
+    let (code, _) = run("dialog_edit_selection", program);
+    assert_eq!(code, 0x3F, "the checks that failed: {:06b}", !code & 0x3F);
 }
 
 #[test]
@@ -9747,8 +10408,91 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
     assert!(
-        run_to_exit(&mut cpu, 200),
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_finishes_event_requests_in_the_order_they_came() {
+    // An event READ(10), which waits a second for the drive to spin up,
+    // then at once an event request to target 1, which has no device. One
+    // thread takes the requests in turn, so when the second one's event
+    // is set, the read before it is done.
+    let dir = cdimage::scratch("wnaspi32_order");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &["ExitProcess", "CreateEventA", "WaitForSingleObject"],
+        ),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    let mut read = read10_srb(16);
+    read[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&read);
+    let mut rejected = read10_srb(16);
+    rejected[3] |= 0x40;
+    rejected[8] = 1;
+    data[0x100..0x150].copy_from_slice(&rejected);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (srb, keep) in [(0x40, 0x180), (0x100, 0x184)] {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(srb + 24)), eax)?;
+            a.mov(dword_ptr(l.at(keep)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        for srb in [0x40, 0x100] {
+            a.push(l.at(srb) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 1)?;
+            a.test(eax, eax)?;
+            a.jne(fail)?;
+        }
+        // The rejected request's event: by then the read is done.
+        a.mov(eax, dword_ptr(l.at(0x184)))?;
+        a.push(-1i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(0x101)), 0x82)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_order", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
         printed(&cpu)
     );
@@ -9826,8 +10570,225 @@ fn wnaspi32_finishes_an_event_request_while_the_program_polls() {
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
     assert!(
-        run_to_exit(&mut cpu, 200),
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_reads_take_the_time_the_drive_takes_to_reach_their_sectors() {
+    // Three event READ(10)s, each timed with QueryPerformanceCounter
+    // around SendASPI32Command and the wait on its event: sector 16, then
+    // 17, then 300. The drive has 17 in its buffer, read ahead as the disc
+    // turned on from 16, and sends it in under 2 ms. 300 is past what it
+    // reads ahead: it moves the head and waits for the sector to come
+    // round, which takes more than the millisecond the head takes to
+    // settle on its own.
+    let dir = cdimage::scratch("wnaspi32_timing");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    image.resize(400 * 2048, 0);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        ("WNASPI32.DLL", &["GetASPI32SupportInfo", "SendASPI32Command"]),
+        (
+            "KERNEL32.DLL",
+            &[
+                "ExitProcess",
+                "CreateEventA",
+                "WaitForSingleObject",
+                "QueryPerformanceCounter",
+            ],
+        ),
+    ];
+    let mut data = vec![0u8; 0x1000];
+    let srbs = [(0x40, 16), (0x100, 17), (0x1C0, 300)];
+    for (at, lba) in srbs {
+        let mut srb = read10_srb(lba);
+        srb[3] |= 0x40;
+        data[at..at + 0x50].copy_from_slice(&srb);
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (i, (at, _)) in srbs.into_iter().enumerate() {
+            let at = at as u32;
+            let times = 0x300 + i as u32 * 16;
+            // A manual-reset event, not signaled, in the PostProc field;
+            // the buffer.
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(at + 24)), eax)?;
+            a.mov(dword_ptr(l.at(at + 16)), l.at(0x800) as i32)?;
+            a.push(l.at(times) as i32)?;
+            a.call(l.import(5))?;
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(eax, dword_ptr(l.at(at + 24)))?;
+            a.push(-1i32)?;
+            a.push(eax)?;
+            a.call(l.import(4))?;
+            a.push(l.at(times + 8) as i32)?;
+            a.call(l.import(5))?;
+            a.mov(ebx, 1 + i as i32)?;
+            a.cmp(byte_ptr(l.at(at + 1)), 1)?;
+            a.jne(fail)?;
+        }
+        // The counts each read took: 17's in ecx, 300's in edx.
+        a.mov(ecx, dword_ptr(l.at(0x318)))?;
+        a.sub(ecx, dword_ptr(l.at(0x310)))?;
+        a.mov(edx, dword_ptr(l.at(0x328)))?;
+        a.sub(edx, dword_ptr(l.at(0x320)))?;
+        // Sector 17 took time, but less than 2 ms (1193 counts of the
+        // 1.193182 MHz counter a millisecond).
+        a.mov(ebx, 4)?;
+        a.cmp(ecx, 0)?;
+        a.je(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(ecx, 2 * 1193)?;
+        a.jae(fail)?;
+        // Sector 300 took more than a millisecond longer.
+        a.mov(ebx, 6)?;
+        a.sub(edx, ecx)?;
+        a.cmp(edx, 1193)?;
+        a.jbe(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_timing", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_plain_reads_leave_no_drive_time_for_the_event_read_after_them() {
+    // An event READ(10) of sector 16, which waits for the drive to spin
+    // up, then twenty plain ones of 17 to 36, finished inside
+    // SendASPI32Command in no emulated time, then an event read of 37,
+    // timed with QueryPerformanceCounter. The drive read 17 to 36 as it
+    // got each request: 37 is the next sector to come round, and the
+    // event read waits for it alone, not for the time of the twenty.
+    let dir = cdimage::scratch("wnaspi32_plain_reads");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    image.resize(100 * 2048, 0);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &[
+                "ExitProcess",
+                "CreateEventA",
+                "WaitForSingleObject",
+                "QueryPerformanceCounter",
+            ],
+        ),
+    ];
+    let (first, last, times, buffer) = (0x40u32, 0x780u32, 0x900u32, 0xA00u32);
+    let plain = |i: u32| 0x100 + i * 0x50;
+    let mut data = vec![0u8; 0x1400];
+    let mut put = |at: u32, srb: [u8; 0x50]| {
+        data[at as usize..at as usize + 0x50].copy_from_slice(&srb);
+    };
+    for (at, lba) in [(first, 16), (last, 37)] {
+        let mut srb = read10_srb(lba);
+        srb[3] |= 0x40;
+        put(at, srb);
+    }
+    for i in 0..20 {
+        put(plain(i), read10_srb(17 + i));
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Each event request: a manual-reset event, not signaled, in its
+        // PostProc field, sent, and waited for.
+        let event_read = |a: &mut CodeAssembler, at: u32, timed: bool| {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(at + 24)), eax)?;
+            a.mov(dword_ptr(l.at(at + 16)), l.at(buffer) as i32)?;
+            if timed {
+                a.push(l.at(times) as i32)?;
+                a.call(l.import(5))?;
+            }
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(eax, dword_ptr(l.at(at + 24)))?;
+            a.push(-1i32)?;
+            a.push(eax)?;
+            a.call(l.import(4))?;
+            if timed {
+                a.push(l.at(times + 8) as i32)?;
+                a.call(l.import(5))?;
+            }
+            a.mov(ebx, 1)?;
+            a.cmp(byte_ptr(l.at(at + 1)), 1)?;
+            a.jne(fail)
+        };
+        event_read(a, first, false)?;
+        for i in 0..20 {
+            a.mov(dword_ptr(l.at(plain(i) + 16)), l.at(buffer) as i32)?;
+            a.push(l.at(plain(i)) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 2)?;
+            a.cmp(byte_ptr(l.at(plain(i) + 1)), 1)?;
+            a.jne(fail)?;
+        }
+        event_read(a, last, true)?;
+        // Sector 37 took less than 2 ms (1193 counts of the 1.193182 MHz
+        // counter a millisecond), where the twenty before it took about
+        // 15 ms of the drive's time.
+        a.mov(ecx, dword_ptr(l.at(times + 8)))?;
+        a.sub(ecx, dword_ptr(l.at(times)))?;
+        a.mov(ebx, 3)?;
+        a.cmp(ecx, 2 * 1193)?;
+        a.jae(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_plain_reads", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
         printed(&cpu)
     );

@@ -15,8 +15,12 @@
 //! LoadLibrary and the files agree. They follow the settings: `sync` runs
 //! when the settings are applied, as a program starts and after a save
 //! state loads.
+//!
+//! The Windows directory, C:\WINDOWS, has the programs of Windows that
+//! are built in the same way: NOTEPAD.EXE (user32/notepad.rs), which
+//! setups run to show a readme.
 
-use super::loader::{self, SYSTEM_DIR};
+use super::loader::{self, SYSTEM_DIR, WINDOWS_DIR};
 use super::stubs::{self, DLLS};
 use super::version::WindowsVersion;
 use crate::bus::Bus;
@@ -32,8 +36,8 @@ fn present(bus: &Bus) -> Vec<usize> {
 }
 
 /// Show the built-in DLLs there are in the system directory, of the
-/// version of Windows the programs see; none while the built-in Windows
-/// is off.
+/// version of Windows the programs see, and the built-in programs in the
+/// Windows directory; none while the built-in Windows is off.
 pub fn sync(bus: &mut Bus) {
     let version = super::version::shown(&bus.win32);
     let wanted = (version, present(bus));
@@ -46,6 +50,15 @@ pub fn sync(bus: &mut Bus) {
         .map(|&i| (DLLS[i].name.to_string(), stubs::file(i, version).into()))
         .collect();
     bus.disk.set_system_files(SYSTEM_DIR, files);
+    let programs = if bus.win32.enabled {
+        vec![(
+            "NOTEPAD.EXE".to_string(),
+            super::user32::notepad::file().into(),
+        )]
+    } else {
+        Vec::new()
+    };
+    bus.disk.set_system_files(WINDOWS_DIR, programs);
     bus.win32.dll_files = Some(wanted);
 }
 

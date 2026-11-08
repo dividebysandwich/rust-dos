@@ -782,12 +782,17 @@ pub fn expose(cpu: &mut Cpu, area: &Region) {
 /// What of the window `hwnd` the visible siblings above it cover, on the
 /// screen.
 pub fn covered(state: &State, hwnd: u32) -> Region {
+    covered_but(state, hwnd, 0)
+}
+
+/// `covered`, leaving the sibling `but` out.
+pub fn covered_but(state: &State, hwnd: u32, but: u32) -> Region {
     let siblings = state
         .window(state.parent(hwnd))
         .map_or(&[][..], |p| &p.children[..]);
     let mut area = Region::new();
     for &h in siblings.iter().take_while(|&&h| h != hwnd) {
-        if state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
+        if h != but && state.window(h).is_some_and(|w| w.style & WS_VISIBLE != 0) {
             area = area.or(&shape(state, h));
         }
     }
@@ -797,8 +802,15 @@ pub fn covered(state: &State, hwnd: u32) -> Region {
 /// SetWindowPos brought `hwnd` above siblings that covered `before` of
 /// it: what they no longer cover needs painting.
 pub fn raised(cpu: &mut Cpu, hwnd: u32, before: &Region) {
+    raised_but(cpu, hwnd, before, 0);
+}
+
+/// `raised`, for `before` from `covered_but` with the sibling `but` left
+/// out: what `but` uncovers is left to its own move, which knows whether
+/// it gives back saved bits.
+pub fn raised_but(cpu: &mut Cpu, hwnd: u32, before: &Region, but: u32) {
     let state = user(cpu);
-    let shown = before.diff(&covered(state, hwnd));
+    let shown = before.diff(&covered_but(state, hwnd, but));
     if !shown.is_empty() {
         invalidate_screen(state, hwnd, &shown);
         thread::wake(cpu);
