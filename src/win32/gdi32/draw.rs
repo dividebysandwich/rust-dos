@@ -1491,6 +1491,11 @@ pub const PERIOD_CYCLES: u64 = 141_500;
 /// its time on its blits as it did on that PC, instead of having a
 /// faster CPU wait as long as a slow one for them. At or below it the
 /// blit takes the period PC's time.
+///
+/// The bytes of a copy to the screen went over the bus, whose speed
+/// rose with later PCs (AGP, write combining) but not in step with the
+/// CPU's. Scaling them with the CPU too is a simplification, kept until
+/// a faster period machine is measured (#832).
 fn stall_period(cpu: &mut Cpu, ns: u64) {
     let cycles = cpu.bus.clock.cycles_per_ms() as u64;
     let ns = if cycles > PERIOD_CYCLES {
