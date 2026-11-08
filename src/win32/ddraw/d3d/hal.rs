@@ -1652,12 +1652,16 @@ impl Rasterizer for Raster<'_> {
 /// the device's drawing with the depth test on gives the card as well,
 /// but a game that clears it every frame and draws with the test off,
 /// as Oni's menus do, never gives the card it, or leaves the card one it
-/// had before (another device's, or a released one's). Pointing the
-/// card at the buffer for each fill and back would move it in the OpenGL
-/// renderer's layout, which reads the buffer back each time. False,
-/// with nothing done, while the card isn't set up for the HAL's drawing
-/// (Glide closed or another process's, or for a render target, none of
-/// the HAL's given to it yet) or the surface isn't in its memory.
+/// had before (another device's, or a released one's). A Blt's fill
+/// (`blt::depth_fill`) may be of a depth buffer that isn't the device's;
+/// `bind` points the card back at the device's at its next draw with the
+/// depth test on, and with the test off the card neither reads nor
+/// writes the depth. Pointing the card at the buffer for each fill and
+/// back would move it in the OpenGL renderer's layout, which reads the
+/// buffer back each time. False, with nothing done, while the card
+/// isn't set up for the HAL's drawing (Glide closed or another
+/// process's, or for a render target, none of the HAL's given to it
+/// yet) or the surface isn't in its memory.
 pub(in crate::win32::ddraw) fn card_fill(
     cpu: &mut Cpu,
     s: &Surface,

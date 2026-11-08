@@ -3,8 +3,10 @@
 //! A destination with a clipper is drawn on only where its clip list
 //! says; BltFast takes no clipper. On the 3dfx device's card, fills
 //! are the card's fastfills, and copies go through its linear frame
-//! buffer. While the OpenGL renderer draws a Voodoo3, blits within its
-//! memory are the renderer's (`gpu_blt`).
+//! buffer. On a Banshee or Voodoo3, a fill of a 16-bit depth buffer is
+//! the 3D engine's fastfill, as the HAL's Clear. While the OpenGL
+//! renderer draws a Voodoo3, other blits within its memory are the
+//! renderer's (`gpu_blt`).
 
 use std::borrow::Cow;
 
@@ -200,16 +202,18 @@ fn store(cpu: &mut Cpu, s: &Surface, r: &Rect, data: &[u8]) {
     surface::write_rows(cpu, s, offset(s, r.left, r.top), len, data);
 }
 
-/// A fill (DDBLT_DEPTHFILL) of a 16-bit depth buffer in a Banshee's or
-/// Voodoo3's memory, done as the 3D engine's fastfill of the depth, as
-/// the HAL's Clear does it (`hal::card_fill`): true if it was. The card
-/// fills the memory with its own engine, and so does the emulated one,
-/// in the order of the 3D drawing queued before it. Written by the CPU
-/// instead, the rows of a depth buffer the OpenGL renderer draws are
-/// read back from the GPU first, and stay hot: every triangle that tests
-/// depth there is then drawn in software until they cool, which a game
-/// that fills its depth buffer this way every frame (Omikron) never
-/// lets them do.
+/// A fill of a 16-bit depth buffer in a Banshee's or Voodoo3's memory,
+/// done as the 3D engine's fastfill of the depth, as the HAL's Clear
+/// does it (`hal::card_fill`): true if it was. The fill is usually
+/// DDBLT_DEPTHFILL's, but a color fill or a BLACKNESS or WHITENESS
+/// raster operation of a depth buffer writes its value the same way, so
+/// they come here too. The card fills the memory with its own engine,
+/// and so does the emulated one, in the order of the 3D drawing queued
+/// before it. Written by the CPU instead, the rows of a depth buffer the
+/// OpenGL renderer draws are read back from the GPU first, and stay hot:
+/// every triangle that tests depth there is then drawn in software until
+/// they cool, which a game that fills its depth buffer this way every
+/// frame (Omikron) never lets them do.
 fn depth_fill(cpu: &mut Cpu, id: u32, d: &Surface, rects: &[Rect], op: &Op) -> bool {
     if d.memory != surface::MEM_VIDEO
         || d.format.flags & surface::DDPF_ZBUFFER == 0
@@ -219,10 +223,7 @@ fn depth_fill(cpu: &mut Cpu, id: u32, d: &Surface, rects: &[Rect], op: &Op) -> b
     {
         return false;
     }
-    let rects: Vec<[i32; 4]> = rects
-        .iter()
-        .map(|r| [r.left, r.top, r.right, r.bottom])
-        .collect();
+    let rects: Vec<[i32; 4]> = rects.iter().map(super::gpu_blt::corners).collect();
     super::d3d::hal::card_fill(cpu, d, id, &rects, op.fill as u16)
 }
 
