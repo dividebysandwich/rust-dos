@@ -1363,7 +1363,7 @@ mod tests {
             let ms = Duration::from_millis;
             pacer.end_cpu_frame(&mut cpu, executed, ms(8), Duration::ZERO);
         }
-        pacer.host_max.unwrap()
+        pacer.host.max.unwrap()
     }
 
     fn host_estimate(executed: u64, offloaded: u64, halted: u64) -> f64 {
