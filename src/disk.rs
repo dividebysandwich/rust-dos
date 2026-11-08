@@ -118,8 +118,9 @@ pub fn archive_hard_disk(path: &Path) -> Option<String> {
 }
 
 /// The disk or CD image an archive holds, of its files (paths from its
-/// root), to mount instead of the files: its one CUE sheet, or its one
-/// image. None if there are programs beside it.
+/// root), to mount instead of the files: its one CUE sheet, else its one
+/// CloneCD descriptor (whose `.img` would count as a second image), else
+/// its one image. None if there are programs beside it.
 fn archive_image(files: &[String]) -> Option<String> {
     let extension = |f: &str| f.rsplit_once('.').map(|(_, x)| x.to_ascii_lowercase()).unwrap_or_default();
     if files.iter().any(|f| matches!(extension(f).as_str(), "exe" | "com" | "bat")) {
@@ -133,6 +134,7 @@ fn archive_image(files: &[String]) -> Option<String> {
         }
     };
     one(&|f| matches!(extension(f).as_str(), "cue" | "ins" | "inst" | "bdn"))
+        .or_else(|| one(&|f| extension(f) == "ccd"))
         .or_else(|| one(&|f| crate::mount::is_image_name(Path::new(f))))
 }
 

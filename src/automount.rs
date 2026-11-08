@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 /// The folder's name.
 pub const FOLDER: &str = "automount";
 
-const CD_EXTENSIONS: [&str; 9] = ["cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t"];
+const CD_EXTENSIONS: [&str; 10] = [
+    "cue", "iso", "bin", "ins", "inst", "bdn", "chd", "b5t", "b6t", "ccd",
+];
 /// The CUE sheets' extensions, GOG's among them.
 const SHEET_EXTENSIONS: [&str; 4] = ["cue", "ins", "inst", "bdn"];
 /// The extensions of BlindWrite's descriptors, which name data files as
@@ -245,6 +247,11 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             .unwrap_or_default()
     };
     for entry in entries.iter().filter(|e| !e.is_dir) {
+        let stem = entry
+            .name
+            .rsplit_once('.')
+            .map_or(entry.name.as_str(), |(stem, _)| stem);
+        let stem = stem.to_ascii_lowercase();
         if named(&entry.name, &SHEET_EXTENSIONS) {
             let text = String::from_utf8_lossy(&read(entry)).into_owned();
             tracks.extend(cue_files(&text).into_iter().map(|t| t.to_ascii_lowercase()));
@@ -258,8 +265,10 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             };
             tracks.extend(disc.blocks.iter().map(|b| name(&b.file)));
             // And DPM data beside it.
-            let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
-            tracks.push(format!("{}.bwa", stem.to_ascii_lowercase()));
+            tracks.push(format!("{}.bwa", stem));
+        } else if named(&entry.name, &["ccd"]) {
+            // A CloneCD descriptor's image and subchannel are named as it.
+            tracks.extend(["img", "sub"].map(|ext| format!("{}.{}", stem, ext)));
         }
     }
     let mut found: Vec<(u8, u32, Option<String>, Kind, &Entry)> = Vec::new();
@@ -414,6 +423,16 @@ mod tests {
         assert!(scan.systems.is_empty(), "{:?}", scan.systems);
         assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
         let _ = std::fs::remove_dir_all(&package);
+    }
+
+    #[test]
+    fn clonecd_images_are_the_descriptors() {
+        let folder = Path::new("/nowhere/automount");
+        let scan = scan_entries(folder, &[file("D.CCD"), file("d.img"), file("D.sub")]);
+        assert_eq!(names(scan.mount(3).unwrap()), ["D.CCD"]);
+        assert_eq!(scan.mount(3).unwrap().kind, Kind::Cd);
+        assert!(scan.systems.is_empty(), "{:?}", scan.systems);
+        assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
     }
 
     #[test]

@@ -222,6 +222,60 @@ fn a_count_compared_each_pass_is_skipped_until_it_reaches_the_value() {
 }
 
 #[test]
+fn a_count_with_string_stores_each_pass_is_skipped() {
+    // The loop above, with a REP STOSB up and a REP MOVSW down in each
+    // pass, whose bytes aren't the counts.
+    let stats = compare("count_rep", |a| {
+        let (mut wait, mut below) = (a.create_label(), a.create_label());
+        a.set_label(&mut wait)?;
+        a.cmp(byte_ptr(DATA + 6), 0xFF)?;
+        a.jne(below)?;
+        a.inc(word_ptr(DATA + 8))?;
+        a.set_label(&mut below)?;
+        a.inc(word_ptr(DATA + 6))?;
+        a.mov(di, (DATA + 0x20) as i32)?;
+        a.mov(cx, 16)?;
+        a.mov(al, 0x55)?;
+        a.rep().stosb()?;
+        a.std()?;
+        a.mov(si, (DATA + 0x2E) as i32)?;
+        a.mov(di, (DATA + 0x4E) as i32)?;
+        a.mov(cx, 8)?;
+        a.rep().movsw()?;
+        a.cld()?;
+        a.mov(al, 0)?;
+        a.cmp(al, 2)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert!(stats.proofs > 0 && stats.skipped > 0, "{:?}", stats);
+}
+
+#[test]
+fn a_count_a_string_copy_reads_is_not_skipped() {
+    // A REP MOVSB that copies the count elsewhere in each pass: the copy
+    // changes with it, but isn't a counting instruction.
+    let stats = compare("count_rep_read", |a| {
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.inc(word_ptr(DATA + 6))?;
+        a.mov(si, (DATA + 6) as i32)?;
+        a.mov(di, (DATA + 0x40) as i32)?;
+        a.mov(cx, 2)?;
+        a.rep().movsb()?;
+        a.mov(al, 0)?;
+        a.cmp(al, 2)?;
+        a.mov(ah, 1)?;
+        a.int(0x16)?;
+        a.jz(wait)?;
+        finish(a)
+    });
+    assert_eq!(stats.proofs, 0, "{:?}", stats);
+}
+
+#[test]
 fn a_count_read_into_a_register_is_not_skipped() {
     let stats = compare("count_read", |a| {
         let mut wait = a.create_label();

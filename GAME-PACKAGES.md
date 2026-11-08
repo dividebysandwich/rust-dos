@@ -389,7 +389,7 @@ the entries at its top count:
 |---|---|
 | `c.vhd`, `c.img` | C:, a hard disk image. With `os=`, the changes to that system ([above](#an-operating-system)) |
 | `d.vhd`, `e.img` | A hard disk image on that letter |
-| `d.cue`, `d.iso`, `d.bin`, `d.chd`, `d.b6t` | A CD-ROM drive with that disc |
+| `d.cue`, `d.iso`, `d.bin`, `d.chd`, `d.b6t`, `d.ccd` | A CD-ROM drive with that disc |
 | `d1.iso`, `d2.cue` | More discs in the same drive, in order of the number; Ctrl+F4 changes the disc |
 | `d/`, `e1/` | A folder as a CD |
 | `e.hd/` | A folder as a hard drive |
@@ -397,10 +397,11 @@ the entries at its top count:
 | `d[GAME CD].iso` | A label in brackets is the drive's volume label |
 
 The number can also follow the extension, as in `d.iso1`. A CUE sheet's
-track files (`d.bin` beside `d.cue`) belong to its disc. Everything else
-in the folder (`win98se.vhd`, a `win311` folder, a `.dosz`) is a system
-that `os=` can name; the package's own system comes before one of that
-name in the OS images folder.
+track files (`d.bin` beside `d.cue`) belong to its disc, and so do the
+`.img` and `.sub` named as a CloneCD descriptor (`d.img` beside
+`d.ccd`). Everything else in the folder (`win98se.vhd`, a `win311`
+folder, a `.dosz`) is a system that `os=` can name; the package's own
+system comes before one of that name in the OS images folder.
 
 - With a C: in the folder, the package itself is no drive: it only holds
   the folder. Without one, the package is C:, as always.
