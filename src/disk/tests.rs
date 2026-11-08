@@ -420,6 +420,16 @@ fn a_cue_sheet_in_an_archive_mounts_its_disc() {
 }
 
 #[test]
+fn an_archive_of_a_clonecd_image_mounts_its_descriptor() {
+    let names = |files: &[&str]| files.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+    let clonecd = names(&["CD/GAME.CCD", "CD/GAME.IMG", "CD/GAME.SUB"]);
+    assert_eq!(archive_image(&clonecd).as_deref(), Some("CD/GAME.CCD"));
+    // DiscImageCreator writes a CUE sheet of the tracks beside it.
+    let both = names(&["game.ccd", "game.cue", "game.img", "game (Track 1).bin"]);
+    assert_eq!(archive_image(&both).as_deref(), Some("game.cue"));
+}
+
+#[test]
 fn an_archive_of_a_disk_image_mounts_the_image() {
     let base = scratch("archive_image");
     fs::create_dir_all(base.join("c")).unwrap();
