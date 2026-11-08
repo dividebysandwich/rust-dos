@@ -364,6 +364,10 @@ pub fn blt_words(c: &mut Criterion) {
                 }
             };
             copy(&mut v);
+            // The copy draws, or the bench times words the card drops:
+            // the second word's first pixel.
+            let second = v.frame_buffer().get(base as usize / 2 + 2);
+            assert_eq!(second, 0x79B9, "{card} {name}: the copy didn't draw");
             group.bench_function(BenchmarkId::new(card, name), |b| b.iter(|| copy(&mut v)));
         }
     }
