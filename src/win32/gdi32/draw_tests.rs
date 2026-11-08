@@ -450,3 +450,20 @@ fn blits_in_a_while_count_the_same_at_a_fixed_speed() {
     let want = 100_000_000 / period;
     assert!(slow.abs_diff(want) <= 1, "{slow} blits, {want} wanted");
 }
+
+/// The time a blit takes is work the host does in its own code, which
+/// the host's speed counts as run (`Clock::offloaded`); a fill within
+/// the screen and a blit that draws nothing too.
+#[test]
+fn a_blits_time_is_the_hosts_work() {
+    let colors = game_colors();
+    let (mut cpu, screen) = machine(DesktopDepth::Palette, &colors);
+    let mem = dib_dc(&mut cpu, BITS, &colors, false, tile_pixel);
+    for rect in [(0, 0, 344, 209), (2000, 2000, 344, 209)] {
+        let (stalled, offloaded) = (cpu.bus.clock.stalled, cpu.bus.clock.offloaded);
+        bit_blt(&mut cpu, screen, rect, mem, 0, 0);
+        let stalled = cpu.bus.clock.stalled - stalled;
+        assert!(stalled > 0);
+        assert_eq!(cpu.bus.clock.offloaded - offloaded, stalled);
+    }
+}

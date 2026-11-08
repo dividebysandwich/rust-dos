@@ -1498,7 +1498,9 @@ fn stall_period(cpu: &mut Cpu, ns: u64) {
     } else {
         ns
     };
-    cpu.bus.clock.stall(ns);
+    // The host does the blit in its own code meanwhile: its time is the
+    // host's work, as an instruction's is.
+    cpu.bus.clock.stall_offloaded(ns);
 }
 
 /// Let the emulated time pass that a blit of `pixels` pixels to

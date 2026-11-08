@@ -117,6 +117,11 @@ pub struct Clock {
     pub stalled: u64,
     /// Instruction counts skipped while the CPU waited for an interrupt.
     pub idle: u64,
+    /// Of `stalled`, the counts charged for work the emulator does in its
+    /// own code for the emulated machine (the built-in GDI's blits): the
+    /// host spends its time on it, as on instructions, so the host's speed
+    /// counts them as run (`Pacer::end_cpu_frame`).
+    pub offloaded: u64,
     batch_end: u64,
     cycles_per_ms: u32,
     base_icount: u64,
@@ -149,6 +154,7 @@ impl Clock {
             deadline: u64::MAX,
             stalled: 0,
             idle: 0,
+            offloaded: 0,
             batch_end: u64::MAX,
             cycles_per_ms: cycles_per_ms.clamp(MIN_CYCLES, MAX_CYCLES),
             base_icount: 0,
@@ -307,6 +313,15 @@ impl Clock {
         let n = self.stall_count(ns) * times;
         self.icount += n;
         self.stalled += n;
+    }
+
+    /// `stall` for `ns` nanoseconds of work done in the emulator's own code
+    /// (`offloaded`).
+    pub fn stall_offloaded(&mut self, ns: u64) {
+        let n = self.stall_count(ns);
+        self.icount += n;
+        self.stalled += n;
+        self.offloaded += n;
     }
 
     /// The instruction count `stall` adds for `ns` nanoseconds.
@@ -585,6 +600,8 @@ pub struct Pacer {
     /// The frames measured for the host's speed so far: the instructions
     /// they ran, the time those took and the rest of their work.
     sample: HostSample,
+    /// `Clock::offloaded` as the last frame left it.
+    offloaded: u64,
     /// The emulated time dropped behind the wall clock so far
     /// (`MAX_LAG`): whether the host keeps up with the speed, for `Auto`.
     /// And the emulated time the last frame ended at, and whether it ran
@@ -621,6 +638,7 @@ impl Pacer {
             protected: false,
             host_max: None,
             sample: HostSample::default(),
+            offloaded: 0,
             lost_ns: 0,
             last_ns: 0,
             ran: false,
@@ -727,6 +745,16 @@ impl Pacer {
         let watched = watched.min(exec);
         let (executed, exec, overhead) =
             (executed.saturating_sub(run), exec - watched, overhead + watched);
+        // The emulated time the built-in GDI's blits took (`Clock::offloaded`)
+        // is work the host did in `exec`, in its own code: it runs as many
+        // of those counts in that time as of instructions. Left out, the
+        // host would look as much slower as the program blits, and a speed
+        // it has the time for would never be tried: a game that draws its
+        // frames through GDI would leave the host idle the blits' share of
+        // the time, at a speed whose blits take longer than the host's.
+        let offloaded = cpu.bus.clock.offloaded.saturating_sub(self.offloaded);
+        self.offloaded = cpu.bus.clock.offloaded;
+        let executed = executed + offloaded;
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
         // What a device may go back to in the middle of the next frame
@@ -1197,12 +1225,40 @@ impl Pit2 {
 
 crate::state_fields!(Pit0 { mode, reload, pending_reload, counting, stopped, armed, period_start, next_tc });
 crate::state_fields!(Pit2 { mode, reload, pending, gate, start, from, held, access, latched } skip { count_due });
-crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc });
+crate::state_fields!(Clock { icount, deadline, stalled, idle, batch_end, cycles_per_ms, base_icount, base_ticks, base_ns } skip { tsc, offloaded });
 crate::state_fields!(Tsc { base, icount, hz });
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host estimate `Auto` keeps to, after frames of `executed`
+    /// instructions and `offloaded` counts of GDI's blits, each 8 ms of
+    /// the host's time.
+    fn host_estimate(executed: u64, offloaded: u64) -> f64 {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let mut pacer = Pacer::new(CpuSpeed::Auto(3000), None, Instant::now());
+        for _ in 0..4 {
+            let cycles = cpu.bus.clock.cycles_per_ms() as u64;
+            cpu.bus.clock.stall_offloaded(offloaded * 1_000_000 / cycles);
+            let ms = Duration::from_millis;
+            pacer.end_cpu_frame(&mut cpu, executed, ms(8), Duration::ZERO);
+        }
+        pacer.host_max.unwrap()
+    }
+
+    /// A blit's emulated time is work the host did, in its own code, in
+    /// the frame's time: a host that runs half the instructions and blits
+    /// the rest in the same time keeps up with the same speed, where
+    /// leaving the blits out would halve it.
+    #[test]
+    fn the_hosts_speed_counts_blits_as_work() {
+        let all = host_estimate(200_000, 0);
+        let half = host_estimate(100_000, 0);
+        let blitting = host_estimate(100_000, 100_000);
+        assert!((half / all - 0.5).abs() < 0.01, "{half} against {all}");
+        assert!((blitting / all - 1.0).abs() < 0.01, "{blitting} against {all}");
+    }
 
     #[test]
     fn a_coarse_clock_never_makes_the_host_infinitely_fast() {
