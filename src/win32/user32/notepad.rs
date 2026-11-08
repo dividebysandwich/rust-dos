@@ -3,13 +3,15 @@
 //! WarGames' InstallShield setup gives WinExec for "View readme file
 //! now").
 //!
-//! Windows 98 has Notepad in the Windows directory. Here the file is a
-//! PE image the emulator builds (`file`), shown in C:\WINDOWS with the
-//! built-in DLLs (dll_files.rs), so a program that looks for it finds it
-//! and one that starts it gets a process of its own, which goes on after
-//! the program that started it ends, as on Windows. Its code is the
-//! message loop of a Windows program; what Notepad itself does is here,
-//! in two functions of USER32 that USER32 doesn't export:
+//! Windows 98 has Notepad in the Windows directory, and its registry
+//! opens text files with it (registry.rs: txtfile), so ShellExecute of a
+//! readme starts it too. Here the file is a PE image the emulator builds
+//! (`file`), shown in C:\WINDOWS with the built-in DLLs (dll_files.rs),
+//! so a program that looks for it finds it and one that starts it gets a
+//! process of its own, which goes on after the program that started it
+//! ends, as on Windows. Its code is the message loop of a Windows
+//! program; what Notepad itself does is here, in two functions of USER32
+//! that USER32 doesn't export:
 //!
 //! - NotepadMain reads the file the command line names, registers the
 //!   window class "Notepad", makes the window, titled "readme.txt -
@@ -52,7 +54,6 @@ const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const COLOR_WINDOW: u32 = 5;
 const SW_SHOWNORMAL: u32 = 1;
-const STARTF_USESHOWWINDOW: u32 = 1;
 
 const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
@@ -65,19 +66,18 @@ const K_SIZE: u32 = 1;
 const K_FOCUS: u32 = 2;
 
 /// The open task's variables after its kind: the show command, the
-/// address of the text, the window and the edit control.
+/// address of the text (with the title after it, in the same block),
+/// the window, the edit control and the address of the title.
 const V_SHOW: usize = 1;
 const V_TEXT: usize = 2;
 const V_FRAME: usize = 3;
 const V_EDIT: usize = 4;
+const V_TITLE: usize = 5;
 
-/// The open task's scratch space: the WNDCLASSA, the class names and the
-/// title.
-const SCRATCH: u32 = 256;
+/// The open task's scratch space: the WNDCLASSA and the class names.
+const SCRATCH: u32 = 80;
 const S_CLASS: u32 = 48;
 const S_EDIT_CLASS: u32 = 64;
-const S_TITLE: u32 = 80;
-const TITLE_MAX: usize = (SCRATCH - S_TITLE) as usize;
 
 /// The file of NOTEPAD.EXE: a program for the GUI subsystem whose code
 /// is NotepadMain and then the message loop, which ends the process
@@ -175,18 +175,7 @@ fn text_of(cpu: &mut Cpu, name: &str) -> Vec<u8> {
 /// says, or normally, as the C runtime gives WinMain its nCmdShow.
 fn show_command(cpu: &mut Cpu) -> u32 {
     let startup = &crate::win32::process(cpu).startup;
-    let field = |at: usize, len: usize| {
-        let mut b = [0u8; 4];
-        if let Some(s) = startup.get(at..at + len) {
-            b[..len].copy_from_slice(s);
-        }
-        u32::from_le_bytes(b)
-    };
-    if field(44, 4) & STARTF_USESHOWWINDOW != 0 {
-        field(48, 2)
-    } else {
-        SW_SHOWNORMAL
-    }
+    kernel32::startup_show(startup).map_or(SW_SHOWNORMAL, u32::from)
 }
 
 fn write_str(cpu: &mut Cpu, at: u32, s: &str, max: usize) {
@@ -208,24 +197,19 @@ pub fn main(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         Some(name) => text_of(cpu, name),
         None => Vec::new(),
     };
-    let Some(at) = kernel32::alloc_pages(cpu, text.len() as u32 + 1) else {
+    // The text and the title, each ended by a zero, in one block that
+    // the task frees when it ends.
+    let mut block = text;
+    block.push(0);
+    let title_offset = block.len() as u32;
+    block.extend(crate::dosstr::to_bytes(&title(name.as_deref())));
+    block.push(0);
+    let Some(at) = kernel32::alloc_pages(cpu, block.len() as u32) else {
         return Some(0);
     };
-    cpu.bus.guest_write_bytes(at, &text);
-    cpu.bus.guest_write_8(at + text.len() as u32, 0);
+    cpu.bus.guest_write_bytes(at, &block);
     let show = show_command(cpu);
-    let title = title(name.as_deref());
-    // The title rides in the variables until the task has its scratch
-    // space.
-    let mut vars = vec![K_OPEN, show, at, 0, 0];
-    let mut bytes = crate::dosstr::to_bytes(&title);
-    bytes.truncate(TITLE_MAX - 1);
-    bytes.push(0);
-    vars.extend(bytes.chunks(4).map(|c| {
-        let mut w = [0u8; 4];
-        w[..c.len()].copy_from_slice(c);
-        u32::from_le_bytes(w)
-    }));
+    let vars = vec![K_OPEN, show, at, 0, 0, at + title_offset];
     task::start(cpu, task::NOTEPAD, vars, SCRATCH)
 }
 
@@ -282,11 +266,6 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let s = t.scratch;
     match t.step {
         0 => {
-            let title: Vec<u8> = t.vars[V_EDIT + 1..]
-                .iter()
-                .flat_map(|w| w.to_le_bytes())
-                .collect();
-            cpu.bus.guest_write_bytes(s + S_TITLE, &title);
             write_str(cpu, s + S_CLASS, CLASS, 16);
             write_str(cpu, s + S_EDIT_CLASS, "Edit", 16);
             let class = [
@@ -311,7 +290,7 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             let args = [
                 0,
                 s + S_CLASS,
-                s + S_TITLE,
+                t.var(V_TITLE),
                 WS_OVERLAPPEDWINDOW,
                 d,
                 0,
@@ -383,7 +362,8 @@ fn open_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     }
 }
 
-/// The open task ends with `result`, the text given back.
+/// The open task ends with `result`, the block of the text and the title
+/// given back.
 fn done(cpu: &mut Cpu, t: &mut Task, result: u32) -> Next {
     let text = std::mem::take(&mut t.vars[V_TEXT]);
     if text != 0 {

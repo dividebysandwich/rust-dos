@@ -350,13 +350,7 @@ fn spawn_win16(
             .log_string(&format!("[W32] {} isn't a Windows program", path));
         return Err(ERROR_BAD_EXE_FORMAT);
     }
-    let field = |i: u32| &startup[i as usize..];
-    let flags = u32::from_le_bytes(field(SI_FLAGS)[..4].try_into().unwrap());
-    let show = if flags & STARTF_USESHOWWINDOW != 0 {
-        u16::from_le_bytes(field(SI_SHOW_WINDOW)[..2].try_into().unwrap())
-    } else {
-        SW_SHOWNORMAL
-    };
+    let show = startup_show(startup).unwrap_or(SW_SHOWNORMAL);
     let arguments = arguments.trim_start();
     let parent = process(cpu).id;
     let spawned = match crate::win16::task::spawn(cpu, path, arguments, show, 0, environment) {
@@ -385,6 +379,15 @@ pub(crate) fn startup_showing(show: u16) -> Vec<u8> {
     startup[SI_FLAGS as usize..][..4].copy_from_slice(&STARTF_USESHOWWINDOW.to_le_bytes());
     startup[SI_SHOW_WINDOW as usize..][..2].copy_from_slice(&show.to_le_bytes());
     startup
+}
+
+/// The show command the STARTUPINFOA `startup` gives the program's first
+/// window, if it gives one (STARTF_USESHOWWINDOW).
+pub(crate) fn startup_show(startup: &[u8]) -> Option<u16> {
+    let field = |at: u32, len: usize| startup.get(at as usize..)?.get(..len);
+    let flags = u32::from_le_bytes(field(SI_FLAGS, 4)?.try_into().unwrap());
+    let show = u16::from_le_bytes(field(SI_SHOW_WINDOW, 2)?.try_into().unwrap());
+    (flags & STARTF_USESHOWWINDOW != 0).then_some(show)
 }
 
 /// How long WinExec waits for the program it started to be idle, in

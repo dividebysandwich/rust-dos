@@ -647,6 +647,44 @@ fn findexecutable_follows_the_registry_association() {
     }
 }
 
+/// A text file opens in Notepad, as the registry of a fresh Windows 98
+/// has it, so a setup that ShellExecutes its readme starts Notepad.
+#[test]
+fn a_text_file_opens_in_notepad() {
+    let mut data = vec![0u8; 0x200];
+    put(&mut data, 0x00, b"C:\\README.TXT\0");
+    // 0x100: the program FindExecutableA finds; 0x1F0: bytes written.
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "KERNEL32.dll",
+            &["ExitProcess", "GetStdHandle", "WriteFile", "lstrlenA"],
+        ),
+        ("SHELL32.dll", &["FindExecutableA"]),
+    ];
+    let code = program(imports, &data, |a, l| {
+        a.xor(ebx, ebx)?;
+        call(a, l.import(4), &[l.at(0), 0, l.at(0x100)])?;
+        check_eax(a, 33, 0)?;
+        call(a, l.import(3), &[l.at(0x100)])?;
+        a.mov(esi, eax)?;
+        call(a, l.import(1), &[-11])?;
+        a.push(0)?;
+        a.push(l.at(0x1F0))?;
+        a.push(esi)?;
+        a.push(l.at(0x100))?;
+        a.push(eax)?;
+        a.call(l.import(2))?;
+        exit(a, l.import(0))
+    });
+    for core in CORES {
+        let files = [("T.EXE", code.clone()), ("README.TXT", b"x".to_vec())];
+        let mut cpu = machine("txtfile", core, &files);
+        run_to_exit(&mut cpu);
+        assert_eq!(cpu.errorlevel, 1, "{core:?}: {}", printed(&cpu));
+        assert_eq!(printed(&cpu), "C:\\WINDOWS\\NOTEPAD.EXE", "{core:?}");
+    }
+}
+
 #[test]
 fn notepad_shows_a_readme_that_winexec_opens() {
     const WM_CLOSE: i32 = 0x10;
