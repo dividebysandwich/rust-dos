@@ -27,7 +27,14 @@
 //! keeps the sectors as the drive read them, so a sector the drive
 //! couldn't read keeps the data and EDC it came with.
 
-use super::cue::{CueFile, CueSheet, CueTrack, FileFormat, TrackMode};
+use super::cue::{CueFile, CueSheet, CueTrack, FileFormat, TrackMode, is_catalog};
+
+/// An entry of the table of contents a descriptor lists.
+struct TocEntry {
+    session: i64,
+    point: i64,
+    control: i64,
+}
 
 /// A track a descriptor lists.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -77,8 +84,7 @@ pub fn parse(text: &str, image: &str) -> Result<CueSheet, String> {
     }
     let mut section = String::new();
     let mut tracks: Vec<CcdTrack> = Vec::new();
-    // Each entry's session, point and control bits, by the entry.
-    let mut entries: Vec<(i64, i64, i64)> = Vec::new();
+    let mut entries: Vec<TocEntry> = Vec::new();
     let mut catalog = None;
     for (n, line) in text.lines().enumerate() {
         let error = |msg: String| format!("line {}: {}", n + 1, msg);
@@ -98,7 +104,12 @@ pub fn parse(text: &str, image: &str) -> Result<CueSheet, String> {
                     ..CcdTrack::default()
                 });
             } else if section.starts_with("ENTRY ") {
-                entries.push((1, -1, 0));
+                // An entry that names no session is of the first.
+                entries.push(TocEntry {
+                    session: 1,
+                    point: -1,
+                    control: 0,
+                });
             }
             continue;
         }
@@ -118,15 +129,17 @@ pub fn parse(text: &str, image: &str) -> Result<CueSheet, String> {
                 "DATATRACKSSCRAMBLED" if num()? != 0 => {
                     return Err("images of scrambled data tracks aren't supported".into());
                 }
-                "CATALOG" if !value.is_empty() => catalog = Some(value.to_string()),
+                // The drive and MSCDEX report 13 digits; any other value
+                // is no catalog number.
+                "CATALOG" if is_catalog(value) => catalog = Some(value.to_string()),
                 _ => {}
             },
             s if s.starts_with("ENTRY ") => {
                 let entry = entries.last_mut().expect("an entry section was opened");
                 match key.as_str() {
-                    "SESSION" => entry.0 = num()?,
-                    "POINT" => entry.1 = num()?,
-                    "CONTROL" => entry.2 = num()?,
+                    "SESSION" => entry.session = num()?,
+                    "POINT" => entry.point = num()?,
+                    "CONTROL" => entry.control = num()?,
                     _ => {}
                 }
             }
@@ -150,7 +163,7 @@ pub fn parse(text: &str, image: &str) -> Result<CueSheet, String> {
             _ => {}
         }
     }
-    if entries.iter().any(|e| e.0 != 1) {
+    if entries.iter().any(|e| e.session != 1) {
         return Err("discs of several sessions aren't supported".into());
     }
     if tracks.is_empty() {
@@ -168,9 +181,11 @@ pub fn parse(text: &str, image: &str) -> Result<CueSheet, String> {
         let index1 = t
             .index1
             .ok_or_else(|| format!("track {} has no INDEX 1", t.number))?;
+        // An INDEX 0 at or after INDEX 1 marks no pregap.
+        let index0 = t.index0.filter(|&i| i < index1);
         if cue_tracks
             .last()
-            .is_some_and(|p| p.index1 >= t.index0.unwrap_or(index1))
+            .is_some_and(|p| p.index1 >= index0.unwrap_or(index1))
         {
             return Err(format!(
                 "track {} starts before the one before it",
@@ -182,12 +197,12 @@ pub fn parse(text: &str, image: &str) -> Result<CueSheet, String> {
         // pre-emphasis; the data bit comes from the mode.
         let control = entries
             .iter()
-            .find(|e| e.1 == t.number as i64)
-            .map_or(0, |e| e.2 as u8);
+            .find(|e| e.point == t.number as i64)
+            .map_or(0, |e| e.control as u8);
         cue_tracks.push(CueTrack {
             number: t.number,
             mode,
-            index0: t.index0.filter(|&i| i < index1),
+            index0,
             index1,
             pregap: 0,
             postgap: 0,
@@ -246,6 +261,10 @@ mod tests {
             [TRACK 3]\nMODE=0\nINDEX 1=2000\n";
         let sheet = parse(text, "music.img").unwrap();
         assert_eq!(sheet.catalog.as_deref(), Some("0724384512345"));
+        for bad in ["0", "072438451234X", "07243845123456"] {
+            let other = text.replace("0724384512345", bad);
+            assert_eq!(parse(&other, "music.img").unwrap().catalog, None, "{}", bad);
+        }
         let tracks = &sheet.files[0].tracks;
         let got: Vec<_> = tracks
             .iter()

@@ -1865,7 +1865,9 @@ mod tests {
         fs::write(dir.join("game.ccd"), ccd).unwrap();
         let span = Span::new(0, 300, 0, 0, 2352);
         let data = Track::stored(1, TrackMode::Mode1_2352, 0, 0, 300, span);
-        let sub: Vec<u8> = (0..300).flat_map(|lba| linear_sub(&data, lba, lba == 120)).collect();
+        let sub: Vec<u8> = (0..300)
+            .flat_map(|lba| linear_sub(&data, lba, lba == 120))
+            .collect();
         fs::write(dir.join("game.sub"), &sub).unwrap();
 
         let image = CdImage::open(&dir.join("game.ccd")).unwrap();
@@ -1897,7 +1899,12 @@ mod tests {
         assert_eq!(got, linear_sub(&data, 120, true));
         let mut files: Vec<String> = track_files(&dir.join("game.ccd"))
             .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().to_ascii_lowercase())
+            .map(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+            })
             .collect();
         files.sort();
         assert_eq!(files, ["game.img", "game.sub"]);
@@ -1912,6 +1919,10 @@ mod tests {
         assert!(lacks_a_track_file(&dir.join("game.ccd")));
         fs::write(dir.join("two.ccd"), ccd.replace("Sessions=1", "Sessions=2")).unwrap();
         let error = CdImage::open(&dir.join("two.ccd")).unwrap_err();
-        assert!(error.contains("two.ccd") && error.contains("several sessions"), "{}", error);
+        assert!(
+            error.contains("two.ccd") && error.contains("several sessions"),
+            "{}",
+            error
+        );
     }
 }
