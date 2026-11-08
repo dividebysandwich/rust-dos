@@ -34,6 +34,7 @@
 use super::hw::{self, ALL, Card, FBI, tmu_chip};
 use super::state;
 use crate::cpu::Cpu;
+use crate::fixed_vec::FixedVec;
 use crate::voodoo::banshee::render3d;
 use crate::voodoo::regs::*;
 
@@ -404,6 +405,21 @@ impl Vertex {
     }
 }
 
+crate::state_fields!(TmuVertex { sow, tow, oow });
+
+crate::state_fields!(Vertex {
+    x,
+    y,
+    z,
+    r,
+    g,
+    b,
+    ooz,
+    a,
+    oow,
+    tmu
+});
+
 #[derive(Clone, Copy, Debug)]
 enum Param {
     R,
@@ -658,6 +674,9 @@ pub fn open(
     state(cpu).owner = pid;
     super::gu::tex_mem_reset(cpu);
     init_state(cpu, width, height, color_format, origin);
+    if let Some(card) = card(cpu) {
+        gamma_correction_value(cpu, open_gamma(card));
+    }
     // A clean picture to start from.
     for buffer in [BUFFER_FRONTBUFFER, BUFFER_BACKBUFFER] {
         render_buffer(cpu, buffer);
@@ -678,7 +697,24 @@ pub fn attach(cpu: &mut Cpu, width: u32, height: u32) -> bool {
         return false;
     }
     init_state(cpu, width, height, COLORFORMAT_ARGB, ORIGIN_UPPER_LEFT);
+    // The table stays linear, without grSstWinOpen's 1.3. It is the
+    // overlay's, which only Glide's own display shows: Direct3D's
+    // picture is DirectDraw's desktop, which bypasses it or goes through
+    // the first table, SetDeviceGammaRamp's.
+    gamma_correction_value(cpu, 1.0);
     true
+}
+
+/// The gamma grSstWinOpen loads on `card`, as 3dfx's Glide 2 does: 1.7
+/// on a Voodoo Graphics, 1.3 on a Voodoo2 (GLIDE_DEFAULT_GAMMA in its
+/// makefile), a Banshee and a Voodoo3. The Voodoo2's Direct3D driver
+/// loads 1.3 as well, so the DirectDraw device that opens the card
+/// through `open` shows the same.
+fn open_gamma(card: Card) -> f32 {
+    match card {
+        Card::Voodoo1 => 1.7,
+        Card::Voodoo2 | Card::Banshee => 1.3,
+    }
 }
 
 /// The state grSstWinOpen leaves.
@@ -730,8 +766,6 @@ fn init_state(cpu: &mut Cpu, width: u32, height: u32, color_format: u32, origin:
     dither_mode(cpu, DITHER_4X4);
     fog_mode(cpu, FOG_DISABLE);
     fog_color_value(cpu, 0);
-    let gamma = if hw::banshee(cpu) { 1.0 } else { 1.7 };
-    gamma_correction_value(cpu, gamma);
     for tmu in 0..tmus {
         // A Voodoo Graphics' first texture units can't download 8-bit
         // texels in sequence; Glide uses it where it can, this library
@@ -1804,10 +1838,14 @@ fn params(g: &Context) -> u32 {
     p
 }
 
+/// The parameter registers a triangle writes (`param_list`), kept in
+/// place: 12 at most, when every one of `params` is on.
+type ParamList = FixedVec<(Param, usize, u32), 12>;
+
 /// The parameter registers a triangle writes, each with the chips it
 /// goes to: (parameter, start register, chips).
-fn param_list(p: u32) -> Vec<(Param, usize, u32)> {
-    let mut list = Vec::with_capacity(12);
+fn param_list(p: u32) -> ParamList {
+    let mut list = ParamList::new((Param::R, 0, 0));
     if p & P_RGB != 0 {
         list.push((Param::R, FSTART_R, ALL));
         list.push((Param::G, FSTART_G, ALL));
@@ -1911,7 +1949,7 @@ pub fn draw_triangle(cpu: &mut Cpu, a: &Vertex, b: &Vertex, c: &Vertex) -> bool 
     }
     let (dx_bc, dy_ab, dx_ab, dy_bc) = (dx_bc * ooa, dy_ab * ooa, dx_ab * ooa, dy_bc * ooa);
     let p = params(gc(cpu));
-    for (param, reg, chips) in param_list(p) {
+    for &(param, reg, chips) in param_list(p).iter() {
         let (pa, pb, pc) = (va.param(param), vb.param(param), vc.param(param));
         let d_ab = pa - pb;
         let d_bc = pb - pc;
@@ -1946,7 +1984,7 @@ pub fn draw_line(cpu: &mut Cpu, a: &Vertex, b: &Vertex) {
         hw::write_f(cpu, ALL, FVERTEX_AY, a.y - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_BY, b.y - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_CY, b.y + 0.5);
-        for &(param, reg, chips) in &list {
+        for &(param, reg, chips) in list.iter() {
             let pa = a.param(param);
             hw::write_f(cpu, chips, reg, pa);
             hw::write_f(cpu, chips, reg + DX, (b.param(param) - pa) * m);
@@ -1964,7 +2002,7 @@ pub fn draw_line(cpu: &mut Cpu, a: &Vertex, b: &Vertex) {
         hw::write_f(cpu, ALL, FVERTEX_AX, a.x - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_BX, b.x - 0.5);
         hw::write_f(cpu, ALL, FVERTEX_CX, b.x + 0.5);
-        for &(param, reg, chips) in &list {
+        for &(param, reg, chips) in list.iter() {
             let pa = a.param(param);
             hw::write_f(cpu, chips, reg, pa);
             hw::write_f(cpu, chips, reg + DX, 0.0);
@@ -2002,7 +2040,7 @@ pub fn draw_point(cpu: &mut Cpu, p: &Vertex) {
     hw::write(cpu, ALL, VERTEX_BY, y);
     hw::write(cpu, ALL, VERTEX_CY, (y + 8) & 0xFFFF);
     hw::write(cpu, ALL, VERTEX_CX, (x + 8) & 0xFFFF);
-    for (param, reg, chips) in param_list(params(gc(cpu))) {
+    for &(param, reg, chips) in param_list(params(gc(cpu))).iter() {
         hw::write_f(cpu, chips, reg, p.param(param));
     }
     hw::write(cpu, ALL, TRIANGLE_CMD, 1);

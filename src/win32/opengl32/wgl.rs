@@ -1,7 +1,10 @@
 //! WGL: pixel formats, rendering contexts and swapping buffers, and the
 //! ICD's side of GDI's ChoosePixelFormat, DescribePixelFormat,
 //! SetPixelFormat, GetPixelFormat and SwapBuffers, which on Windows go
-//! to the ICD of the DC's device.
+//! to the loaded OpenGL32's wgl functions and through them to the ICD
+//! of the DC's device. When the program's own OPENGL32.DLL replaces
+//! this one, GDI32 calls that DLL's functions instead (gdi32's
+//! `guest_wgl`).
 //!
 //! The ICD has the pixel formats 3dfx's driver had on a Banshee or
 //! Voodoo3, which draw only in 16 bits: 5-6-5 color, single or double
@@ -44,6 +47,7 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INVALID_PIXEL_FORMAT: u32 = 2000;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+const ERROR_INVALID_DATA: u32 = 13;
 
 // PIXELFORMATDESCRIPTOR's flags.
 const PFD_DOUBLEBUFFER: u32 = 0x1;
@@ -287,9 +291,13 @@ pub const VERSION_AT: u32 = 0xC0;
 pub const EXTENSIONS_AT: u32 = 0x100;
 pub const WGL_EXTENSIONS_AT: u32 = 0x300;
 
-/// The extensions, as glGetString(GL_EXTENSIONS) gives them.
-pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_compiled_vertex_array \
-    GL_EXT_texture_env_add WGL_EXT_swap_control";
+/// The extensions, as glGetString(GL_EXTENSIONS) gives them: those of
+/// 3dfx's Banshee and Voodoo3 ICD (3DFXOGL.DLL) that are here. Its own
+/// list has more (paletted textures, texture compression, point
+/// parameters and others), which aren't. GL_EXT_bgra is in it, and
+/// Myth II 1.8.3 takes an OpenGL 1.1 device only with it.
+pub const EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
+    GL_EXT_compiled_vertex_array GL_EXT_texture_env_add WGL_EXT_swap_control";
 /// The WGL extensions, as wglGetExtensionsStringEXT gives them.
 pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control";
 
@@ -298,6 +306,19 @@ pub const WGL_EXTENSIONS: &str = "WGL_EXT_extensions_string WGL_EXT_swap_control
 /// aren't.
 pub const VOODOO2_EXTENSIONS: &str = "GL_ARB_multitexture GL_EXT_bgra \
     GL_EXT_compiled_vertex_array WGL_EXT_swap_control";
+
+/// The extensions of a Banshee or Voodoo3 with `tmus` texture units. A
+/// Banshee's one unit has no multitexture, as Mesa's driver leaves it
+/// out with one.
+fn icd_extensions(tmus: u32) -> &'static str {
+    if tmus > 1 {
+        EXTENSIONS
+    } else {
+        EXTENSIONS
+            .strip_prefix("GL_ARB_multitexture ")
+            .expect("EXTENSIONS starts with GL_ARB_multitexture")
+    }
+}
 
 /// Write the strings into a new page of the process: its address.
 fn write_strings(cpu: &mut Cpu) -> Option<u32> {
@@ -327,14 +348,7 @@ fn write_strings(cpu: &mut Cpu) -> Option<u32> {
             board.tmus,
             board.fb_bytes >> 20
         );
-        // A Banshee's one texture unit has no multitexture, as Mesa's
-        // driver leaves it out with one.
-        let extensions = if board.tmus > 1 {
-            EXTENSIONS
-        } else {
-            EXTENSIONS.trim_start_matches("GL_ARB_multitexture ")
-        };
-        (renderer, "1.1.0", extensions)
+        (renderer, "1.1.0", icd_extensions(board.tmus))
     };
     let strings = [
         (VENDOR_AT, "3Dfx Interactive Inc."),
@@ -809,14 +823,52 @@ pub fn share_lists(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// SwapBuffers(hdc): show what the context drawing to the DC's window
 /// drew. For GDI's SwapBuffers and wglSwapBuffers.
-pub fn swap_dc(cpu: &mut Cpu, hdc: u32) -> bool {
+///
+/// A double-buffered context in a window swaps as 3dfx's ICD does with
+/// its swap interval (1 unless the program set another): no more than
+/// once in that many frames of the display. The swap shows at once, and
+/// a later one called before the next frame's picture begins (that
+/// many frames on) waits for it, the call coming back then. The card's
+/// own swaps on the Voodoo2 wait for the retrace in the card
+/// (`swap_card`). Without it a game that draws a frame in less than a
+/// frame's time, as Oni's menus do, swapped hundreds of times a second
+/// of emulated time, and each swap's drawing cost the host as much as
+/// one at the display's rate.
+fn swap_paced(cpu: &mut Cpu, hdc: u32) -> Option<u32> {
+    let Some(index) = dc_context(cpu, hdc) else {
+        return Some(FALSE);
+    };
+    let paced = state(cpu).contexts[index]
+        .as_ref()
+        .filter(|c| c.swap_interval > 0 && double_buffered(c.format))
+        .map(|c| (c.swap_interval, c.swap_at));
+    let paced = paced.filter(|_| !full_screen(cpu, index));
+    if let Some((_, at)) = paced
+        && at.div_ceil(1000) > cpu.bus.clock.now_micros()
+    {
+        // The call runs again when the retrace comes.
+        cpu.set_eip(cpu.eip().wrapping_sub(4));
+        return directdraw::wait_until(cpu, at, TRUE);
+    }
+    present(cpu, index);
+    if let Some((interval, _)) = paced {
+        let (timing, now) = ddraw::display::timing(cpu);
+        let at = timing.next_display(now) + u64::from(interval - 1) * timing.frame_ns();
+        if let Some(Some(c)) = state(cpu).contexts.get_mut(index) {
+            c.swap_at = at;
+        }
+    }
+    Some(TRUE)
+}
+
+/// The context whose drawing the DC `hdc`'s window shows: the running
+/// thread's, or another of the window's.
+fn dc_context(cpu: &mut Cpu, hdc: u32) -> Option<usize> {
     let hwnd = window_of(cpu, hdc);
     let tid = super::super::user32::current_tid(cpu);
     let s = state(cpu);
-    // The thread's context, or another of the window's.
     let mine = s.current.iter().find(|c| c.0 == tid).map(|c| c.1);
-    let index = mine
-        .and_then(|h| h.checked_sub(hglrc(0)))
+    mine.and_then(|h| h.checked_sub(hglrc(0)))
         .map(|i| i as usize)
         .filter(|&i| {
             s.contexts
@@ -828,12 +880,7 @@ pub fn swap_dc(cpu: &mut Cpu, hdc: u32) -> bool {
             s.contexts
                 .iter()
                 .position(|c| c.as_ref().is_some_and(|c| c.window == hwnd))
-        });
-    let Some(index) = index else {
-        return false;
-    };
-    present(cpu, index);
-    true
+        })
 }
 
 /// Copy the context's color buffer into its window's client area,
@@ -893,7 +940,7 @@ fn swap_card(cpu: &mut Cpu, index: usize) {
 
 /// wglSwapBuffers(hdc).
 pub fn swap_buffers(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    Some(swap_dc(cpu, args[0]) as u32)
+    swap_paced(cpu, args[0])
 }
 
 /// wglSwapLayerBuffers(hdc, planes): the main plane's.
@@ -902,12 +949,19 @@ pub fn swap_layer_buffers(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if args[1] & 1 == 0 {
         return Some(FALSE);
     }
-    Some(swap_dc(cpu, args[0]) as u32)
+    swap_paced(cpu, args[0])
 }
 
-/// wglSwapIntervalEXT(interval): kept. Frames are shown as they are
-/// swapped.
+/// wglSwapIntervalEXT(interval): the frames of the display a swap of
+/// the current context waits for (`swap_paced`, `swap_card`), 0 for
+/// none. A negative interval fails with ERROR_INVALID_DATA, as
+/// WGL_EXT_swap_control has it: kept, it would put a window's next swap
+/// years ahead.
 pub fn swap_interval(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    if args[0] > i32::MAX as u32 {
+        super::super::gdi32::set_error(cpu, ERROR_INVALID_DATA);
+        return Some(FALSE);
+    }
     let Some(c) = super::ctx(cpu) else {
         return Some(FALSE);
     };
@@ -955,4 +1009,22 @@ pub fn inner_viewport(c: &Context) -> Option<(Viewport7, Matrix)> {
         max_z: c.depth_range[1],
     };
     Some((viewport, fit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_banshee_has_the_voodoo3s_extensions_but_multitexture() {
+        let names = |s: &'static str| s.split(' ').collect::<Vec<_>>();
+        let voodoo3 = names(icd_extensions(2));
+        let banshee = names(icd_extensions(1));
+        assert!(voodoo3.contains(&"GL_ARB_multitexture"));
+        assert!(!banshee.contains(&"GL_ARB_multitexture"));
+        // Myth II 1.8.3 takes an OpenGL 1.1 device only with GL_EXT_bgra.
+        assert!(voodoo3.contains(&"GL_EXT_bgra"));
+        assert!(banshee.contains(&"GL_EXT_bgra"));
+        assert_eq!(banshee.len() + 1, voodoo3.len());
+    }
 }

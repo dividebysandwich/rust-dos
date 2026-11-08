@@ -11,6 +11,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -31,9 +32,9 @@ const fn stdcall(
 
 /// The functions. Append only (see `stubs`).
 static APIS: &[Api] = &[
-    stdcall("IsNTAdmin", 1, 2, is_nt_admin),
-    stdcall("NeedReboot", 2, 1, false_),
-    stdcall("NeedRebootInit", 3, 0, false_),
+    stdcall("IsNTAdmin", 15, 2, is_nt_admin),
+    stdcall("NeedReboot", 18, 1, false_),
+    stdcall("NeedRebootInit", 19, 0, false_),
 ];
 
 /// IsNTAdmin(reserved, reserved): FALSE, as on Windows 9x.

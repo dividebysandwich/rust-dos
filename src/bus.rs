@@ -261,6 +261,12 @@ pub struct Bus {
     pub audio_phase: f32, // Track wave position to prevent clicking
     pub dta_segment: u16,
     pub dta_offset: u16,
+    /// The state of DOS last written to the SDA (`dos_data::ProcessState`),
+    /// so that a DOS call can tell what a program changed there itself.
+    /// None while the SDA holds nothing a program wrote: before the first
+    /// DOS call, after the DOS data segment is written afresh (the shell
+    /// clears it when it starts a program) and after a state is loaded.
+    pub sda_written: Option<crate::dos_data::ProcessState>,
     /// The log file `log_string` writes to, if the emulator opened one.
     pub log_file: Option<crate::log::LogFile>,
 
@@ -372,8 +378,7 @@ pub struct Bus {
     audio_settled: bool,
     /// How `pump_audio` holds the output device's queue at its target.
     pub audio_feed: crate::audio::Feed,
-    /// Resampling position and last frame of the Sound Blaster's output.
-    sb_phase: f64,
+    /// The Sound Blaster's last frame, kept for a frame it has none for.
     sb_frame: (i16, i16),
     /// Frames left of a BEL beep.
     pub beep_frames: u32,
@@ -687,6 +692,24 @@ impl Bus {
         true
     }
 
+    /// Write `bytes` into the VESA linear frame buffer at `dst`, as the
+    /// dwords of `write_32` from the first to the last would, in one call:
+    /// an MMX or SSE store of 8 or 16 bytes (a DirectDraw blit's). False,
+    /// having written nothing, where they aren't all in the frame buffer.
+    pub(crate) fn write_to_lfb(&mut self, dst: usize, bytes: &[u8]) -> bool {
+        let len = bytes.len();
+        let Some(offset) = self.lfb_run(dst, len) else {
+            return false;
+        };
+        let _profile = self
+            .profile
+            .as_deref()
+            .map(|p| p.mem_run(dst, true, (len / 4) as u64));
+        self.vbe.vram[offset..offset + len].copy_from_slice(bytes);
+        self.lfb_written(dst, offset, len);
+        true
+    }
+
     /// Fill the VESA linear frame buffer at `dst` with `count` elements of
     /// `size` bytes of `value`, as a string store's writes do (see
     /// `move_to_lfb`).
@@ -742,6 +765,7 @@ impl Bus {
             && vga.latched_start_addr == 0
             && vga.split_row() >= 200
             && vga.pixel_panning() == 0
+            && vga.display_address_mask() == vga.plane_size() - 1
     }
 
     fn mode13_dirty_rows(&self, offset: usize) -> Option<(u32, u32)> {
@@ -1120,10 +1144,14 @@ impl Bus {
         false
     }
 
-    /// The program set the display start (CRTC registers 0Ch and 0Dh, or
-    /// the VESA BIOS's): a page flip, for `cycles=auto`.
+    /// The program set the display start (CRTC registers 0Ch and 0Dh, the
+    /// VESA BIOS's, or a Banshee's or Voodoo3's vidDesktopStartAddr in
+    /// the card's own modes): a page flip, for `cycles=auto`.
     pub fn note_display_start(&mut self) {
-        let start = if self.video_mode == VideoMode::Vesa {
+        let card = self.banshee().filter(|b| b.extended());
+        let start = if let Some(b) = card {
+            b.reg(crate::voodoo::banshee::VID_DESKTOP_START_ADDR)
+        } else if self.video_mode == VideoMode::Vesa {
             self.vbe.start
         } else {
             (self.vga.crtc_regs[0x0C] as u32) << 8 | self.vga.crtc_regs[0x0D] as u32
@@ -1409,6 +1437,34 @@ impl Bus {
         self.clock.schedule(self.next_event());
     }
 
+    /// The program resets hardware it times with delay loops, as a sound
+    /// driver does before it plays a short block to find the card's IRQ.
+    /// If `cycles=auto` gives it all the host has for its reads and writes
+    /// (`Activity::work_return`), it goes back to its speed from this
+    /// instruction on, without waiting for the end of the frame: drivers
+    /// set up in the middle of the loading, and a loop counted for the
+    /// machines of the time ends too soon at the host's speed (Kingdom O'
+    /// Magic's HMI driver waits about a million instructions for a 2.65 ms
+    /// block, and finds no IRQ at 500,000 instructions per ms or more).
+    /// The batch still ends at the emulated time it was to end at, and
+    /// `AutoSpeed` measures afresh from there (`Activity::work_cuts`).
+    pub fn end_work_boost(&mut self) {
+        let Some(speed) = self.activity.work_return.take() else {
+            return;
+        };
+        if speed >= self.clock.cycles_per_ms() {
+            return;
+        }
+        let end = self.clock.batch_end();
+        let end_ticks = (end != u64::MAX).then(|| self.clock.ticks_at(end));
+        self.clock.set_cycles_per_ms(speed);
+        if let Some(ticks) = end_ticks {
+            self.clock.set_batch_end(self.clock.icount_at(ticks));
+        }
+        self.clock.schedule(self.next_event());
+        self.activity.work_cuts += 1;
+    }
+
     /// The next time (PIT ticks) a device needs attention: the timer's
     /// next IRQ 0, the end of the Sound Blaster's current block, the
     /// Ultrasound's next timer, DMA or voice interrupt, the retrace a
@@ -1619,6 +1675,12 @@ impl Bus {
             return;
         }
         self.audio_frames = target;
+        // The Sound Blaster made its frames up to `target` too: those
+        // before the span mixed now (skipped above) go.
+        if let Some(sb) = &mut self.sb {
+            let extra = sb.out.len().saturating_sub(frames);
+            sb.out.drain(..extra);
+        }
         // Silence from every source, with the filters and effects run out
         // to exact zeros (the last frames mixed were): the frames are those
         // zeros, without mixing them one by one.
@@ -1626,6 +1688,9 @@ impl Bus {
         if quiet && self.audio_settled {
             if let Some(gus) = &mut self.gus {
                 gus.skip_idle(frames, crate::opl::RATE);
+            }
+            if let Some(sb) = &mut self.sb {
+                sb.out.clear();
             }
             self.audio_out.extend(std::iter::repeat_n(0, 2 * frames));
             self.trim_audio();
@@ -1645,14 +1710,7 @@ impl Bus {
             let (wl, wr) = self.win32.cd_gain();
             (cl * wl, cr * wr)
         };
-        let (sb_on, sb_step, dac) = match &self.sb {
-            Some(sb) => (
-                sb.speaker_on || sb.config.model.is_sb16(),
-                sb.out_rate as f64 / rate as f64,
-                sb.dac,
-            ),
-            None => (false, 0.0, 0),
-        };
+        let sb_on = self.sb.as_ref().is_some_and(|sb| sb.output_on());
         const SPEAKER: f32 = 3000.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its
@@ -1701,22 +1759,18 @@ impl Bus {
             let (ol, or) = self.opl.render();
             self.mixer.add(&mut mix, &mut peaks, Channel::Fm, (ol as f32 * fl, or as f32 * fr));
             if let Some(sb) = &mut self.sb {
-                if sb.out.is_empty() && self.sb_phase < 1.0 {
-                    self.sb_frame = (dac, dac);
-                }
-                self.sb_phase += sb_step;
-                while self.sb_phase >= 1.0 {
-                    self.sb_phase -= 1.0;
-                    match sb.out.pop_front() {
-                        Some(f) => self.sb_frame = f,
-                        None => {
-                            self.sb_phase = 0.0;
-                            break;
-                        }
-                    }
+                // The DAC's level at this frame's time, as the card worked
+                // it out from its own clock (`SoundBlaster::advance`).
+                if let Some(f) = sb.out.pop_front() {
+                    self.sb_frame = f;
                 }
                 if sb_on {
-                    let mut frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    // The capacitor on the card's output takes the level
+                    // the DAC holds out. It goes first, before the
+                    // low-pass, so that when it starts settled (after a
+                    // state load) the low-pass gets silence, not a step.
+                    let mut frame = self.mixer.sb_coupling(held);
                     if let Some((cutoff, order)) = sb_filter {
                         frame = self.mixer.sb_filter(frame, cutoff, order);
                     }
@@ -1767,6 +1821,25 @@ impl Bus {
         self.trim_audio();
     }
 
+    /// Whether the Sound Blaster adds nothing to the mix and nothing it
+    /// holds would change: it is idle, or its DAC holds a level that the
+    /// capacitor on its output has already taken out of the sound (a
+    /// program left it off the centre, as ShadowCaster's driver does).
+    fn sb_quiet(&self) -> bool {
+        let Some(sb) = &self.sb else {
+            return true;
+        };
+        if sb.is_idle() {
+            return true;
+        }
+        if sb.held_level() != Some(self.sb_frame) {
+            return false;
+        }
+        let ((vl, vr), _) = sb.volumes();
+        let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+        !sb.output_on() || self.mixer.sb_coupling_rests_on(held)
+    }
+
     /// Whether no source makes a sound, or would move on in a way the
     /// sound coming later depends on, as the frames to mix start (see
     /// `audio_settled`).
@@ -1778,7 +1851,7 @@ impl Bus {
         !speaker
             && self.beep_frames == 0
             && self.opl.is_idle()
-            && self.sb.as_ref().is_none_or(|sb| sb.out.is_empty() && sb.dac == 0)
+            && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
@@ -1799,15 +1872,6 @@ impl Bus {
         if self.audio_out.len() > max {
             let extra = self.audio_out.len() - max;
             self.audio_out.drain(..extra);
-        }
-        // The DSP's output gets ahead when its rate and ours round
-        // differently; keep at most a tenth of a second queued.
-        if let Some(sb) = &mut self.sb {
-            let keep = (sb.out_rate / 10).max(64) as usize;
-            if sb.out.len() > keep {
-                let extra = sb.out.len() - keep;
-                sb.out.drain(..extra);
-            }
         }
         if let Some(gus) = &mut self.gus {
             gus.trim_output();
@@ -1878,8 +1942,11 @@ impl Bus {
             _ => {
                 // Once, as the reset starts (bit 0 set), not again as it
                 // ends.
-                if offset == 0x6 && value & 1 != 0 && self.game_fixes {
-                    self.apply_code_fixes();
+                if offset == 0x6 && value & 1 != 0 {
+                    if self.game_fixes {
+                        self.apply_code_fixes();
+                    }
+                    self.end_work_boost();
                 }
                 self.audio_catch_up();
                 // The DSP's time up to the command, so what it starts counts
@@ -2168,8 +2235,14 @@ impl Bus {
             // A booted system's floppy disk controller, ahead of the IDE
             // channel that would have 3F7h.
             p if self.fdc_claims(p) => self.fdc_write(p, value),
-            // A booted system's IDE channels.
+            // A booted system's IDE channels. Their drive address port is
+            // 3F7h, so this comes before the no-controller arm below.
             p if self.ide_claims(p) => self.ide_write(p, value),
+            // No controller: its ports belong to no device on a PC, so the
+            // write goes nowhere. Fdc::claims leaves out 3F6h, the IDE
+            // channel's control port, which still logs when no channel is
+            // attached.
+            p if self.fdc.is_none() && crate::fdc::Fdc::claims(p) => {}
             p if self.ne2000_claims(p) => self.ne2000_write(p, value),
             p if self.serial_claims(p) => self.serial_write(p, value),
             // The ET4000's KEY, segment select, extended sequencer
@@ -2250,16 +2323,22 @@ impl Bus {
                 };
                 if complete {
                     // Programs that play sound through the timer rewrite the
-                    // count on every tick. Only log the first count after a
-                    // control word, which is how programs set a new rate.
+                    // count on every tick, so only the first count after a
+                    // control word is logged, which is how programs set a
+                    // new rate. Some send the control word and the same
+                    // count many times a second (Civilization's sound
+                    // drivers), so the count is logged only when it differs
+                    // from the rate in force, which a control word keeps.
                     let was_counting = self.pit0.is_counting();
+                    let previous = self.pit0.reload();
                     self.pit0
                         .write_count(self.pit0_divisor, self.clock.now_ticks());
                     self.clock.schedule(self.next_event());
-                    if !was_counting {
+                    let reload = self.pit0.reload();
+                    if !was_counting && reload != previous {
                         self.log_string(&format!(
                             "[PIT] Channel 0 Frequency set to {} Hz",
-                            1_193_182 / self.pit0.reload()
+                            1_193_182 / reload
                         ));
                     }
                 }
@@ -2760,6 +2839,12 @@ impl Bus {
         }
     }
 
+    /// `Clock::past_blanking` for the picture the monitor shows.
+    pub fn past_blanking(&mut self, end: u64) -> u64 {
+        let refresh = self.refresh_timing();
+        self.clock.past_blanking(end, &refresh)
+    }
+
     /// Latch the display Start Address if emulated time has passed the
     /// start of a vertical retrace since it was last latched, as the CRTC
     /// does at every retrace.
@@ -2795,6 +2880,8 @@ impl Bus {
                 self.vga.mark_dirty_full();
                 self.vga.flipped = true;
             }
+            // After the latch: the picture the display shows from now on.
+            self.activity.set_picture(crate::autospeed::picture(self));
             if self.vga.adapter.gate_array() {
                 self.compare_gate_array();
             }
@@ -2964,6 +3051,24 @@ impl Bus {
             && v.output()
         {
             let (w, h) = v.size();
+            return (w as usize, h as usize);
+        }
+        self.adapter_display_size()
+    }
+
+    /// The size of the screen of the mode the display adapter is in:
+    /// `display_size`, but a Voodoo Graphics or Voodoo2 showing its
+    /// picture instead of the VGA's doesn't count. That card is a second
+    /// one on the bus, which no BIOS call or mouse driver knows of. A
+    /// Banshee or Voodoo3 is the adapter, and its desktop counts while
+    /// its own modes are on. A driver turns them on through the card's
+    /// registers, as 3dfx's Windows 98 driver does, and a BIOS mode set
+    /// turns them off (`banshee_mode_set`).
+    pub fn adapter_display_size(&self) -> (usize, usize) {
+        if let Some(b) = self.banshee()
+            && b.extended()
+        {
+            let (w, h) = b.desktop_size();
             return (w as usize, h as usize);
         }
         match (self.video_mode, self.vbe.mode) {

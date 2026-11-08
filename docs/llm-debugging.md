@@ -9,18 +9,44 @@ This file covers how to use the endpoints well.
 
 ```sh
 cargo build --release
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+SDL_VIDEO_DRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/dos/files --debug-server &
 until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
 ```
 
+- **Never use SDL's dummy audio driver (`SDL_AUDIO_DRIVER=dummy`) for a
+  measurement of any kind.** It doesn't keep real time and its rate
+  changes from run to run, so underrun counts and everything else read
+  from the sound queue say nothing about the emulator, high or low (see
+  `/api/underruns` below). The emulator warns on stderr and in the log
+  when it is active. Use one of these:
+
+  | The run | What to use |
+  |---|---|
+  | A timing measurement, or underrun counts | A real device, muted: `SDL_AUDIO_DRIVER=wasapi` (on Windows; `pipewire`, `pulseaudio` or `alsa` on Linux, `coreaudio` on macOS) and `--mute` |
+  | The same on a machine with no sound device | The null output: `--audio-output null` |
+  | Anything else with no window | Nothing to set: `SDL_VIDEO_DRIVER=dummy` or `--hidden` takes the null output |
+
+  Before quoting a result, check that `audio_driver` in `/api/underruns`
+  or `/api/stats` says what you meant to run on.
+- **The run lock:** every run takes the machine-wide run lock shared, so
+  a timing measurement started with `--run-lock-exclusive` (or wrapped
+  in `rust-dos-lock exclusive -- CMD`) runs alone; see "The run lock" in
+  CONFIGURATION.md. A run that waits for it has no debug server yet and
+  says `run-lock: waiting for ...` on stderr, so a script that polls
+  `/api/status` should watch stderr too. `rust-dos-lock status` lists
+  the runs holding it with their debug servers.
 - **Build mode:** use a release build. A debug build runs about 5x slower,
   which changes timing-sensitive behaviour.
-- **Dummy drivers:** they need no window or sound device. Audio is still
-  mixed and streamed.
+- **No window:** `SDL_VIDEO_DRIVER=dummy` needs no window, and without a
+  window `audio_output=auto` plays on the null output unless
+  `SDL_AUDIO_DRIVER` names a driver. Nothing reaches the speakers, the
+  output's queue empties at exactly 44,100 frames a second, and audio is
+  still mixed and streamed. A run on a machine with no sound device
+  plays on the null output too, with a window or without.
 - **OpenGL without a window:** the dummy video driver has no OpenGL, so
   `voodoo_renderer=opengl` falls back to the software rasterizer. To run
-  the OpenGL renderer on the host's GPU, leave `SDL_VIDEODRIVER` unset
+  the OpenGL renderer on the host's GPU, leave `SDL_VIDEO_DRIVER` unset
   and pass `--hidden`: the window is made with its OpenGL context but
   never shown.
 - **A smaller OpenGL:** `RUST_DOS_GL_MAX_TEXTURE_SIZE=1024` makes the
@@ -46,11 +72,11 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   run several instances side by side, or when 8086 may be taken:
 
   ```sh
-  : > rust-dos.out
-  SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  OUT=$(mktemp)
+  SDL_VIDEO_DRIVER=dummy \
     ./target/release/rust-dos --no-config -d /path/to/dos/files \
-    --debug-server 127.0.0.1:0 > rust-dos.out &
-  until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' rust-dos.out) &&
+    --debug-server 127.0.0.1:0 > "$OUT" &
+  until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' "$OUT") &&
         curl -sf $H/api/status >/dev/null; do
     kill -0 $! 2>/dev/null || { echo 'rust-dos exited'; break; }
     sleep 0.2
@@ -58,8 +84,9 @@ until curl -sf localhost:8086/api/status >/dev/null; do sleep 0.2; done
   ```
 
   The address line prints before the emulator starts answering requests,
-  so the loop also waits for `/api/status`. Emptying `rust-dos.out` first
-  keeps the loop from reading a port left there by an earlier run, and
+  so the loop also waits for `/api/status`. A new, empty file from
+  `mktemp` for every run keeps the loop from reading a port left there by
+  an earlier run, or one written by another run of the same script, and
   from failing to find the file before the shell creates it.
 - **Output:** the emulator log doesn't go to stdout. It goes to
   `rust-dos.log` in the per-user config directory, replaced on every start.
@@ -143,14 +170,16 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   (GL_RENDERER) and its vendor (GL_VENDOR), which on a laptop with two
   chips says which one the driver gave the program; otherwise SDL's
   renderer and why OpenGL 3 wasn't there.
-- **Check sound with `/api/status` → `audio`.** `peak` is the loudest
-  sample since the previous status request (0 means silence), `underruns`
-  counts the video frames that found the output device's queue empty (see
-  `/api/underruns` below), and `sound_blaster` is the card's BLASTER string
-  for where it answers now, after a driver or a Plug and Play configuration
-  moved it (null without a card, or while a ViBRA16C's audio device is
-  inactive). To listen or analyse, record `/ws/audio`: a JSON format
-  header, then s16le stereo PCM at 44.1 kHz
+- **Check sound with `/api/status` → `audio`.** `driver` says what plays
+  the sound (`wasapi`, `null`, `dummy`...), `muted` whether the mixer's
+  mute (`--mute`, Ctrl+F8) is on, `peak` is the loudest sample since the
+  previous status request (0 means silence), `underruns` counts the video
+  frames that found the output device's queue empty (see `/api/underruns`
+  below), and `sound_blaster` is the card's BLASTER string for where it
+  answers now, after a driver or a Plug and Play configuration moved it
+  (null without a card, or while a ViBRA16C's audio device is inactive).
+  To listen or analyse, record `/ws/audio`: a JSON format header, then
+  s16le stereo PCM at 44.1 kHz
   (`curl -s --max-time 3 ws://localhost:8086/ws/audio -o audio.bin`).
   `ultrasound` is the ULTRASND string, and `midi_synth` says what plays the
   MPU-401 (`soundfont`, `gus` or `none`), with its active voices and any
@@ -169,17 +198,38 @@ curl -s "$H/api/screen/text?format=text"                    # read the screen
   window counts as neither and ends a stretch. The first check after the
   start finds the queue empty, so `events` starts at 1.
 
-  Measure underruns on a real sound device (on Windows,
-  `SDL_AUDIODRIVER=wasapi`). SDL's `dummy` driver, which headless runs
-  often use, plays nothing and runs faster than real time: on Windows 11
-  it took 512 frames about every 11.4 ms, 44,940 frames a second where
-  WASAPI took 44,120. The resampling that holds the queue at its target
-  makes up 0.5% at most, so the queue runs out every few seconds however
-  well the host keeps up. Myth: The Fallen Lords gave 10 to 13 dry checks
-  a minute on `dummy` with no frame over 18 ms, and under 1 a minute on
-  WASAPI. Such events have a `gap_ms` shorter than `queued_after_ms`. On
-  `dummy`, compare counts only for what a slow frame adds to that steady
-  rate, and don't read a few a minute as a problem.
+  The first check of a stretch after the device played sound keeps the
+  queue 10 ms longer from then on, up to 60 ms over `blocksize` and
+  `prebuffer`, and a minute without a dry check takes 10 ms of that off
+  again. `queue_growth_ms` is what it keeps on top now (in `/api/status`,
+  `audio.queue_growth_frames`), and each record's `target_ms` includes
+  it. So stalls of the host come with fewer gaps after the first, and a
+  count of dry checks over a run reads a little lower than it did with a
+  fixed queue; compare counts of runs of one build only.
+
+  `audio_driver` says what the counts ran on. Measure underruns on a real
+  sound device, muted (on Windows, `SDL_AUDIO_DRIVER=wasapi` and `--mute`),
+  or on the null output (`--audio-output null`) on a machine without one.
+  Never on SDL's `dummy` driver: it plays nothing, doesn't keep real time,
+  and its dry checks can't be predicted. The resampling that holds the
+  queue at its target makes up 0.5% at most, and one series on Windows 11
+  saw it take 512 frames about every 11.4 ms, 44,940 frames a second
+  where WASAPI took 44,120, so Myth: The Fallen Lords gave 10 to 13 dry
+  checks a minute with no frame over 18 ms. Later, on a quiet machine, the
+  same game gave 0 to 2.3 a minute over six 3-minute runs, on one scene
+  where the null output gave 0 in all six and muted WASAPI 0 to 0.33.
+  Why the rate moves that much isn't known. So a low count from `dummy`
+  doesn't show the host kept up, and a high one doesn't show it fell
+  behind. Its events have a `gap_ms` shorter than `queued_after_ms`. A
+  count from `dummy` can't be corrected afterwards: run it again.
+
+  `--mute` is Ctrl+F8 from the start: `pump_audio` hands the device
+  silence and it plays on at its own rate, so the queue behaves as with
+  the sound on, while `/ws/audio`, recordings and `peak` keep the sound.
+  `master=0` in `[mixer]` would silence those too. The null output takes
+  blocks at the device's `blocksize`, as SDL's device does, but its clock
+  is exact and it has no host driver to run late, so it shows what the
+  emulator's own frames add and nothing from a sound driver.
 
   `log` has the last 32 events, oldest first, each described at the check
   that started it: `event` (its number), `at_ms` (host time since the frame
@@ -497,6 +547,20 @@ curl -s "$H/api/journal?after=$S&type=paused&wait=30000"   # long poll for the n
 - **Quit:** `POST /api/control/quit` turns the emulator off. The journal
   ends with `shutdown`, which long polls and streams get before the
   connection closes, and the process exits with code 0.
+- **Quit with the script:** `--exit-with-parent` turns the emulator off
+  when the process that started it ends, and `--exit-with-parent PID`
+  when that process does, so a script that dies before it sends the quit
+  leaves no emulator behind. It shuts down as the quit does, but the
+  `shutdown` entry has `"reason": "parent"`, a `[EXIT]` line in the log
+  names the process, and the exit code is 4. rust-dos takes a handle on
+  the process at start (a process handle on Windows, a pidfd on Linux, a
+  kqueue event on macOS), so another process that gets the ID later
+  doesn't keep it running; other Unix systems, and Linux before 5.3 or
+  in a container whose seccomp filter refuses `pidfd_open`, look at the
+  process every three seconds instead, so they quit up to three seconds
+  after it ends. A process that has ended already ends rust-dos at once,
+  with the same code. A PID rust-dos may not watch is an error at start,
+  and so is the option with `--relay`.
 
 ### Inspect or patch state
 
@@ -609,19 +673,22 @@ A plain save or load is carried out at the end of the frame, whether the
 machine runs or is paused (in deterministic mode a load waits for a pause,
 see "Deterministic runs"). A load puts in the hardware settings the state
 was saved with, then the machine, which mounts the drives as the state had
-them and unmounts the others; a state of another `memsize` brings its
-memory size as well. A booted system's disk image comes back from the
-copy beside the state file into the image the running machine has in
-that drive, which keeps it: a load never writes the image the state was
-saved with when this machine mounts another (see CONFIGURATION.md's
-"Booting a disk image"). The speed isn't one of the hardware settings: the
-machine goes on at the speed it runs at (`--cycles`, the configuration's,
-or the last `/api/speed`), whatever the state was saved at. A fixed speed
-and `max` keep their rate, and `auto` starts its search from the state's.
-In deterministic mode the machine takes the state's speed instead (see
-"Deterministic runs").
-Breakpoints, watchpoints and `break_on` stops stay, and keys held down
-through `/api/input` or the window go up.
+them and unmounts the others; a state of another `memsize` brings its memory
+size as well. A booted system's disk comes back from what the state file
+keeps beside it. The changes of a disk with a delta file (a hard disk
+image's, by default; `a.C.rdelta`) go back only over the image they were
+made over, into its delta file; a load over an image that is gone or changed
+is refused. A copy of a whole disk (`a.C.img`, from `-inplace`) goes into
+the image the running machine has in that drive, which keeps it: a load
+never writes the image the state was saved with when this machine mounts
+another (see CONFIGURATION.md's "Booting a disk image"). The speed isn't one
+of the hardware settings: the machine goes on at the speed it runs at
+(`--cycles`, the configuration's, or the last `/api/speed`), whatever the
+state was saved at. A fixed speed and `max` keep their rate, and `auto`
+starts its search from the state's. In deterministic mode the machine takes
+the state's speed instead (see "Deterministic runs"). Breakpoints,
+watchpoints and `break_on` stops stay, and keys held down through
+`/api/input` or the window go up.
 
 When the state's hardware settings, media or deterministic start time
 differ from the running machine's, the state is loaded all the same and
@@ -819,14 +886,14 @@ is loaded with `check_files`, these are compared as well:
 - the SHA-256 of each writable image, the whole file, and of a writable
   image's delta file.
 
-A booted system's disks are left out, as the state keeps a copy of them
-that the load puts back (see "Booted systems"). A state saved on a
-writable drive leaves its own files out (`a.state`, and `a.C.img` and the
-like beside it), but another state file there is a file like any other:
-keep states outside the drives' folders, or the next save to them
-counts as a change. Labels, the files' times
-and read-only folders' contents aren't compared. Z: and X:, which the
-machine makes itself, aren't listed.
+A booted system's disks are left out, as the state keeps them beside it
+and the load puts them back (see "Booted systems"). A state saved on a
+writable drive leaves its own files out (`a.state`, and `a.C.img`,
+`a.C.rdelta` and the like beside it), but another state file there is a
+file like any other: keep states outside the drives' folders, or the next
+save to them counts as a change. Labels, the files' times and read-only
+folders' contents aren't compared. Z: and X:, which the machine makes
+itself, aren't listed.
 
 #### Loading a state in another run
 
@@ -919,7 +986,7 @@ come out the same: the same instructions, memory and pictures at the same
 emulated time, however fast the host is.
 
 ```sh
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+SDL_VIDEO_DRIVER=dummy \
   ./target/release/rust-dos --no-config -d /path/to/game --debug-server \
   --deterministic --cycles 10000 --start-time "1995-04-11 12:34:56" &
 OP=$(curl -s $J -XPOST -d '{"until_ms":5000}' $H/api/control/resume | jq .op)
@@ -994,9 +1061,12 @@ curl -s $J -XPOST -d '{"until_ms":8000}' $H/api/control/resume
 
 ### Booted systems (Windows 95)
 
-`IMGMOUNT C /abs/copy.img` then `BOOT -l C` starts the system on the
-image (see CONFIGURATION.md's "Booting a disk image"). Work on a copy:
-the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
+`IMGMOUNT C /abs/win95.img` then `BOOT -l C` starts the system on the
+image (see CONFIGURATION.md's "Booting a disk image"). What the system
+writes goes to `/abs/win95.img.rdelta`, and the image stays as it is:
+delete the delta file to start again from the image, or `COMMIT C:` at
+the DOS prompt to write the changes into it. The log's `[DISK]` line at
+the mount names the delta file. `-inplace` writes the image itself.
 
 - **Status:** `/api/status` has `cpu_mode` `v86` while a DOS box or the
   BIOS runs under Windows, `video.s3` with the S3's extended CRTC
@@ -1025,8 +1095,10 @@ the system writes its disk (`cp --reflink=auto` on btrfs takes no room).
   context. Watchpoints on physical addresses find who writes a page table
   entry or descriptor.
 - **Save states** of a booted system bring its disks back with it: in a
-  run through a journal of the writes, and from the `.C.img` copies
-  beside a state file in another.
+  run through a journal of the writes, and in another from what is beside
+  the state file: `.C.rdelta`, the changes of a disk with a delta file,
+  which needs the same image, or `.C.img`, a whole copy of one mounted
+  with `-inplace`.
 - **IDE:** the log's `[IDE]` lines at the boot say which hard disk and
   CD-ROM drive are on which channel, and name unknown commands. The
   system's own driver's traffic shows in the port log
@@ -1067,6 +1139,30 @@ usually left `fbiInit` at their power-on values (`00000410 00201102
   last read of that buffer) and `gpu_read_rows_undrawn` (not drawn
   since, which a cache of the rows read would have had). A game with many
   undrawn rows would gain from such a cache; one with few wouldn't.
+  `gpu_alpha` turns true once a triangle read alpha planes OpenGL doesn't
+  have: alpha written with another colour buffer, by the CPU or by the
+  blitter, or a depth test against them. From then on every job is drawn
+  in software too, and `released_jobs` grows with `triangles`.
+- **2D on the GPU:** on a Banshee or Voodoo3, `gpu_2d` counts the 2D
+  operations done in OpenGL's copy of the memory (`blits`), the pages
+  read back for the CPU (`pages_read_back`), and the operations left to
+  the CPU because the program reads or writes where they draw
+  (`left_to_cpu`). Of the 2D engine's commands whose bytes were newer on
+  the GPU, `engine_commands` counts those drawn there, `engine_drawn`
+  says how: `fill_buffer`, `fill_depth` and `copy_buffer` into OpenGL's
+  pictures of the 3D buffers, `blit_fill`, `blit_from_buffer` and
+  `blit_from_memory` into other memory. `engine_formats` counts them by
+  the destination's format (`16 bpp tiled`), and `engine_left_to_cpu`
+  counts those drawn on the CPU after a read back, by why: `hot` bytes,
+  a `rop` that reads the destination or the pattern (or a copy's other
+  than CCh), a `colour_key`, a transparent mono `pattern`, a `format`
+  (two of them, a tiled one of 24 bits), an `overlap` of source and
+  destination, a `negative_source`, `bounds` past the stride or the
+  memory, another `command` (lines, polygons, host to screen), a
+  `copy_into_buffer` from other memory, a `depth_copy` or
+  `copy_from_depth`, a depth fill for a `colour_hot` buffer, and
+  `no_layout`, `no_colour_buffer`, `renderer` or `blit_refused` where
+  OpenGL couldn't take it.
 - **Memory:** `/api/mem` reads the card's window (`phys:D0000000`, 16 MB):
   registers at +0, the frame buffer at +400000h (2048 bytes a row of
   16-bit pixels), texture memory at +800000h (write-only; reads give FFh).
@@ -1089,7 +1185,7 @@ the card into `<dir>/trace.txt`, and the registers, texture memory and
 the machine's RAM at the first four renders and every thousandth (every
 `RUST_DOS_POWERVR_TRACE_EVERY`th) as
 `render-N.regs`, `.tex` and `.ram`. `RUST_DOS_POWERVR_SNAPSHOT=<dir>/render-N
-cargo test --release --test powervr_tests -- --ignored renders_a_snapshot`
+cargo test --release --test video powervr_tests::renders_a_snapshot -- --ignored`
 renders one into `render-N.png`, and prints the time it took.
 
 ### Rendition Vérité games
@@ -1130,22 +1226,26 @@ the ROM's entry at C000:0064h) to `<dir>/trace.txt`.
 
 ### CPU speed (`cycles=auto`)
 
-`POST /api/speed {"cycles":"auto"}` changes the speed as the settings
-window does (`auto`, `auto 5000`, `max` or a number); `/api/status` has
+`POST /api/speed {"cycles":"auto"}` changes the speed as the settings window
+does (`auto`, `auto 5000`, `max` or a number); `/api/status` has
 `cycles_per_ms`, the speed now. `auto` (the default) picks the speed from
 what the program does, and `/api/status` → `activity` has its counts since
 start: `bursts` (writes to video memory the size of a frame, the frames a
-program copies there), `copies` (smaller bursts that reach across at
-least half the screen, frames copied as what changed; counted as frames
-for protected-mode programs only), `flips` (display start changes),
-`polls` (key checks that found nothing, idle calls) and `status_reads`
-(port 3DAh), with `emulated_ns` to make rates of them. Sample it twice
-and divide: a game's frame rate at a few fixed speeds shows where it
-stops growing.
-Start the emulator with `RUST_DOS_AUTO_TRACE=1` to have every measurement
-and the speed it chose printed to stderr, with `longest_frame`, the longest
-host frame during the measurement (`none` in a frontend that doesn't time
-its frames).
+program copies there), `copies` (smaller bursts that reach across at least
+half the screen, frames copied as what changed; counted as frames for
+protected-mode programs only), `flips` (display start changes), `presents`
+(what the built-in Windows drew on the screen for the program, its blits to
+the primary surface and GDI's drawing, in bursts that are a frame or a copy
+by the same rules), `polls` (key checks that found nothing, idle calls) and
+`status_reads` (port 3DAh), with `emulated_ns` to make rates of them. Sample
+it twice and divide: a game's frame rate at a few fixed speeds shows where
+it stops growing. `presents` count only what lands in the picture shown, not
+the copies to surfaces out of sight, and where there are any, they are the
+frames instead of the program's own bursts and copies, which may be the same
+frames drawn in video memory before they were shown. Start the emulator with
+`RUST_DOS_AUTO_TRACE=1` to have every measurement and the speed it chose
+printed to stderr, with `longest_frame`, the longest host frame during the
+measurement (`none` in a frontend that doesn't time its frames).
 
 ### Where the emulator's time goes (profiling)
 
@@ -1234,7 +1334,7 @@ access rights.
 ### Win32 programs (the built-in Windows)
 
 With `win32` on, a Win32 console program runs on the built-in Windows
-(`docs/native-windows.md`). `GET /api/win32` shows it:
+(`docs/builtin-windows-architecture.md`). `GET /api/win32` shows it:
 
 - `enabled`, `active` (a Win32 program runs) and `pending` (DOS loaded
   one that hasn't started yet).
@@ -1326,6 +1426,14 @@ address mapped to when it was set.
   while paused. Pausing, stepping and tracing don't change when a program
   sees its timer interrupts (`HLE service 08h` or its own handler) in
   instruction terms, but a timer interrupt can arrive between any two steps.
+- **Sound in a timing run.** The audio output is part of the setup: run
+  every side of a comparison on the same one, and quote `audio_driver`
+  from `/api/stats` with the result. Use a real device with `--mute`
+  (`SDL_AUDIO_DRIVER=wasapi` on Windows), or `--audio-output null` where
+  there is no device, and never `SDL_AUDIO_DRIVER=dummy` (see
+  [Start the emulator](#1-start-the-emulator)). `SDL_VIDEO_DRIVER=dummy`
+  and `--hidden` alone take the null output, so a timing run on a real
+  device has to set `SDL_AUDIO_DRIVER` as well.
 - **Measuring speed.** `/api/stats` reports `mips` (host speed while
   executing guest code), `emulated_mips` (guest instructions per wall-clock
   second) and the decode-cache hit rate, averaged over about a second. Its
@@ -1336,10 +1444,11 @@ address mapped to when it was set.
   counts the window's frames), and `cpu_use` is the percent of the wall
   time the emulator's main thread works (running the machine and drawing
   the picture), so 100 minus it is that thread's time to spare, on one host
-  core. Its `frame_times` object covers the host's last 1024 frames while
-  the machine runs (about 17 s at 60 frames a second), from one start of
-  the main loop to the next, waiting included: `frames` and `seconds`
-  (how many so far, and how long they took), `longest_ms`, and the
+  core. `audio_driver` is what played the sound during the run. Its
+  `frame_times` object covers the host's last 1024 frames while the
+  machine runs (about 17 s at 60 frames a second), from one start of the
+  main loop to the next, waiting included: `frames` and `seconds` (how
+  many so far, and how long they took), `longest_ms`, and the
   nearest-rank percentiles `p50_ms`, `p90_ms` and `p99_ms`. Use a release
   build and a CPU-bound scene, such as the Stunts intro, when comparing
   emulator changes.

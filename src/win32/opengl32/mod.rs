@@ -32,8 +32,8 @@
 //! lighting and the accumulation buffer, do nothing and say so in the
 //! log. The extensions are GL_ARB_multitexture (on a Voodoo3, with its
 //! two texture units; a Banshee has one and not the extension),
-//! GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add and
-//! WGL_EXT_swap_control.
+//! GL_EXT_bgra, GL_EXT_compiled_vertex_array, GL_EXT_texture_env_add
+//! and WGL_EXT_swap_control.
 //!
 //! On a machine with a Voodoo2 beside the display adapter, the DLL is
 //! 3dfx's Voodoo2 OpenGL driver (3DFXVGL.DLL), which games of the time
@@ -66,6 +66,10 @@ mod state;
 mod texture;
 pub mod wgl;
 
+pub use matrix::{mult as mult_matrix, ortho};
+pub use state::get_string;
+pub use texture::{GL_TEXTURE_2D, rgba_of, tex_image_rgba};
+
 use super::ddraw::d3d::pipeline::{IDENTITY, Matrix};
 use super::stubs::{Api, Conv, Dll};
 use crate::cpu::Cpu;
@@ -76,6 +80,7 @@ pub static DLL: Dll = Dll {
     apis: exports::APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -245,6 +250,9 @@ pub struct Context {
     pub begin: Option<u32>,
     pub vertices: Vec<ImmVertex>,
     pub swap_interval: u32,
+    /// The time (ns) a window's next swap waits for: the start of the
+    /// frame's picture the swap interval's frames after the last swap.
+    pub swap_at: u64,
     /// Whether it drew since the buffers were last swapped or flushed.
     pub drawn: bool,
 }
@@ -261,6 +269,9 @@ pub struct State {
     pub formats: Vec<(u32, u32)>,
     /// The functions that do nothing whose first call was logged.
     pub logged: Vec<u16>,
+    /// The same for GLU32.DLL (glu32/), which works on OPENGL32's
+    /// contexts.
+    pub glu_logged: Vec<u16>,
 }
 
 pub fn state(cpu: &mut Cpu) -> &mut State {
@@ -542,10 +553,11 @@ crate::state_fields!(Context {
     begin,
     vertices,
     swap_interval,
+    swap_at,
     drawn
 });
 crate::state_fields!(State {
     contexts,
     current,
     formats
-} skip { logged });
+} skip { logged, glu_logged });

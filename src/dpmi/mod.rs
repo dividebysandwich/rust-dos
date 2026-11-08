@@ -339,7 +339,8 @@ pub struct Frame {
 
 /// Frame kinds. In real mode: an interrupt reflected there, a real-mode
 /// call for INT 31h AX=0300h-0302h, and a DOS or video BIOS call
-/// translated (dos.rs, video.rs). In
+/// translated (dos.rs, video.rs), and a device's code that runs as a
+/// hardware interrupt's handler would (`call_device_code`). In
 /// protected mode: a handler called for an interrupt in real mode, and a
 /// callback's procedure.
 const F_REFLECT: u8 = 0;
@@ -348,6 +349,7 @@ const F_HWINT: u8 = 2;
 const F_CALLBACK: u8 = 3;
 const F_DOS: u8 = 4;
 const F_VIDEO: u8 = 5;
+const F_DEVICE: u8 = 6;
 
 /// The host's state.
 #[derive(Debug)]
@@ -1011,7 +1013,8 @@ fn idt(cpu: &mut Cpu, vector: u8) {
 /// client before its exception handler sees the #GP, as Windows does.
 /// Clients read the control registers as they are and can't change them;
 /// the debug registers are theirs to set (DOS/4GW Professional's NULLP
-/// option sets DR0-DR3 and DR7 itself), with no breakpoints behind them.
+/// option sets DR0-DR3 and DR7 itself). Instruction breakpoints raise
+/// debug exceptions; data breakpoints, which NULLP sets, do nothing.
 /// Returns whether the instruction was one.
 fn emulate_mov_system(cpu: &mut Cpu, ctx: &mut Context) -> bool {
     let Some(base) = selector_base(cpu, ctx.sel(Seg::CS)) else { return false };
@@ -1213,6 +1216,35 @@ fn reflect(cpu: &mut Cpu, vector: u8, ctx: Context) {
     reflect_to(cpu, vector, ctx, target);
 }
 
+/// Whether a hardware interrupt that comes now, at the processor's
+/// instruction boundary, can go down to real mode for a client: the
+/// processor runs a client of this host at its level, on the host's
+/// interrupt table. Not the host's own code at level 0, virtual 8086 mode,
+/// nor protected mode that a program set up itself, as a child of a client
+/// that brings its own extender does.
+pub fn can_reflect_interrupt(cpu: &Cpu) -> bool {
+    let dpmi = &cpu.bus.dpmi;
+    let host_idt = dpmi.host.map(|host| host + HOST_IDT);
+    cpu.pm() && cpu.cpl == 3 && dpmi.active() && host_idt == Some(cpu.idtr.base)
+}
+
+/// Run a device's real-mode code at `segment`:`offset` for the running
+/// client in protected mode (`can_reflect_interrupt`) as the host runs a
+/// hardware interrupt's real-mode handler: on the client's real-mode stack
+/// with interrupts off, and back to the client as it was when the code
+/// IRETs. The mouse driver's event handler call comes so, as it would from
+/// the driver's IRQ handler. The frame (`F_DEVICE`) reflects no interrupt,
+/// so a hardware interrupt that comes meanwhile still goes to the client's
+/// protected-mode handler for it (`rm_interrupt`).
+pub fn call_device_code(cpu: &mut Cpu, segment: u16, offset: u16) {
+    let frame = Frame {
+        kind: F_DEVICE,
+        ctx: Context::of(cpu),
+        ..Frame::default()
+    };
+    call_real_handler(cpu, frame, (segment as u32) << 16 | offset as u32);
+}
+
 /// Reflect interrupt `vector` to the real-mode handler at `target`.
 fn reflect_to(cpu: &mut Cpu, vector: u8, ctx: Context, target: u32) {
     if target == 0 {
@@ -1221,10 +1253,22 @@ fn reflect_to(cpu: &mut Cpu, vector: u8, ctx: Context, target: u32) {
         resume(cpu, &ctx);
         return;
     }
+    let frame = Frame {
+        kind: F_REFLECT,
+        ctx,
+        vector,
+        ..Frame::default()
+    };
+    call_real_handler(cpu, frame, target);
+}
+
+/// Call the real-mode handler at `target` for `frame` with the registers
+/// of `frame.ctx`, and the client's real-mode stack in SS, DS and ES.
+fn call_real_handler(cpu: &mut Cpu, frame: Frame, target: u32) {
     let ss = client(cpu).rm_stack;
-    let mut rm = ctx;
+    let mut rm = frame.ctx;
     rm.seg = [ss, 0, ss, ss, 0, 0];
-    call_real(cpu, Frame { kind: F_REFLECT, ctx, vector, ..Frame::default() }, target, rm);
+    call_real(cpu, frame, target, rm);
 }
 
 /// Call the real-mode interrupt handler at `target` for the running client
@@ -1262,7 +1306,10 @@ fn push_real(cpu: &mut Cpu, ss: u16, sp: u32, values: &[u16]) -> u32 {
 
 /// Real-mode code the host called for a client returned (to `RM_RETURN`).
 fn rm_return(cpu: &mut Cpu) {
-    let Some(frame) = take_frame(cpu, &[F_REFLECT, F_TRANSLATE, F_DOS, F_VIDEO]) else { return };
+    let kinds = [F_REFLECT, F_TRANSLATE, F_DOS, F_VIDEO, F_DEVICE];
+    let Some(frame) = take_frame(cpu, &kinds) else {
+        return;
+    };
     let rm = Context::of(cpu);
     let mut ctx = frame.ctx;
     if frame.kind == F_DOS {
@@ -1272,7 +1319,10 @@ fn rm_return(cpu: &mut Cpu) {
     } else if frame.kind == F_TRANSLATE {
         int31::store_call_structure(cpu, frame.sel, frame.off, &rm);
         ctx.set_cf(false);
-    } else if !is_irq(cpu, frame.vector) {
+    } else if frame.kind == F_REFLECT && !is_irq(cpu, frame.vector) {
+        // A software interrupt's results. A hardware interrupt and a
+        // device's code stopped the client anywhere, and it goes on as it
+        // was.
         let esp = ctx.gpr[ESP];
         ctx.gpr = rm.gpr;
         ctx.gpr[ESP] = esp;

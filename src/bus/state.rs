@@ -8,18 +8,18 @@ use crate::savestate::{Reader, Result, State, StateError, Writer, load_device, s
 
 /// The sections' versions, changed with what a section holds.
 const RAM_VERSION: u16 = 2;
-const CORE_VERSION: u16 = 8;
+const CORE_VERSION: u16 = 9;
 const VIDEO_VERSION: u16 = 2;
-const SOUND_VERSION: u16 = 3;
+const SOUND_VERSION: u16 = 4;
 const DOS_VERSION: u16 = 6;
 const VOODOO_VERSION: u16 = 1;
 const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 17;
+const WIN32_VERSION: u16 = 45;
 const NET_VERSION: u16 = 2;
-const SERIAL_VERSION: u16 = 1;
+const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
 const AWE_VERSION: u16 = 1;
 const VIRGE_VERSION: u16 = 1;
@@ -31,6 +31,7 @@ const SB_HIGH_SPEED_VERSION: u16 = 1;
 const ISAPNP_VERSION: u16 = 1;
 const PIT2_VERSION: u16 = 1;
 const TSC_VERSION: u16 = 1;
+const KEY_QUEUE_VERSION: u16 = 1;
 
 /// Save or load each of a list of fields.
 /// Each field is labelled with its name, for comparing states part by
@@ -88,6 +89,7 @@ impl Bus {
             vfx1,
             dta_segment,
             dta_offset,
+            sda_written: _,
             search_handles,
             search_serial,
             cursor_x,
@@ -97,7 +99,6 @@ impl Bus {
             speaker_on,
             audio_phase,
             audio_frames,
-            sb_phase,
             sb_frame,
             beep_frames,
             video_mode,
@@ -208,7 +209,7 @@ impl Bus {
                 pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
                 pit0, clock, pic, dma, joystick,
                 dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-                post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
+                post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
                 boot, pci,
             );
         });
@@ -222,6 +223,9 @@ impl Bus {
         // The time stamp counter's clock, in a section of its own so states
         // saved before it load (counting instructions, as it did then).
         w.section(b"TSC ", TSC_VERSION, |w| clock.tsc.save(w));
+        // Which queued keystrokes the BIOS never saw, in a section of its
+        // own so states saved before it load.
+        w.section(b"KEYQ", KEY_QUEUE_VERSION, |w| kbd.save_queue(w));
         w.section(b"VIDE", VIDEO_VERSION, |w| {
             save_all!(w; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
         });
@@ -392,6 +396,7 @@ impl Bus {
             vfx1,
             dta_segment,
             dta_offset,
+            sda_written: _,
             search_handles,
             search_serial,
             cursor_x,
@@ -401,7 +406,6 @@ impl Bus {
             speaker_on,
             audio_phase,
             audio_frames,
-            sb_phase,
             sb_frame,
             beep_frames,
             video_mode,
@@ -513,7 +517,7 @@ impl Bus {
             pit0_divisor, pit0_write_msb, pit0_read_msb, pit0_access, pit0_latched, pit0_latched_active,
             pit0, clock, pic, dma, joystick,
             dta_segment, dta_offset, search_handles, search_serial, cursor_x, cursor_y,
-            post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_phase, sb_frame, beep_frames,
+            post_code, refresh_toggle, speaker_on, audio_phase, audio_frames, sb_frame, beep_frames,
                 boot, pci,
         );
         if r.next_is(b"PIT2") {
@@ -537,6 +541,11 @@ impl Bus {
         clock.tsc = Default::default();
         if r.next_is(b"TSC ") {
             clock.tsc.load(&mut r.section(b"TSC ", TSC_VERSION)?)?;
+        }
+        if r.next_is(b"KEYQ") {
+            kbd.load_queue(&mut r.section(b"KEYQ", KEY_QUEUE_VERSION)?)?;
+        } else {
+            kbd.forget_queue();
         }
         let mut section = r.section(b"VIDE", VIDEO_VERSION)?;
         load_all!(&mut section; video_mode, vga, vbe, s3_engine, retraces, last_flip, gate_array_shadow, gate_array_shadow_at);
@@ -703,12 +712,18 @@ impl Bus {
         self.kbc_release_at = None;
         self.kbc.release();
         self.net.nic_changed();
+        // What the machine last wrote into its SDA isn't what the state's
+        // SDA holds: until the next DOS call writes it, nothing in it
+        // counts as the program's.
+        self.sda_written = None;
     }
 
     /// `after_load` for a state loaded into the machine that saved it,
     /// whose FM chip, synthesizer and sound output are still those of the
     /// state.
     pub(crate) fn after_reload(&mut self) {
+        // The drives the state mounted as it had them.
+        self.log_disk_notes();
         for failed in self.disk.revert_disks() {
             self.log_string(&format!("[STATE] The disk can't go back with the state: {}", failed));
         }
@@ -744,9 +759,14 @@ impl Bus {
             awe.after_load();
         }
         self.verite_after_load();
+        // The mouse's mickeys count for the state's picture and range.
+        crate::mouse::update_mickey_scale(self);
         // The built-in DLLs' files are of the version of Windows the
         // state's programs run under, which may not be the settings'.
         crate::win32::dll_files::sync(self);
+        // The system's time starts from the machine's clock again, which
+        // isn't in the state (`kernel32::time::now`).
+        self.win32.system_clock = None;
         // When the first of the state's threads' timeouts ends, which
         // isn't in the state either. The clock's deadline is in the state,
         // so it is worked out again only when a thread has such a wait:
@@ -756,5 +776,153 @@ impl Bus {
         if self.win32.wait_due.is_some() {
             self.reschedule_timers();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WIN32_VERSION;
+    use std::path::Path;
+
+    /// The layouts the W32 section has had, oldest first: its version and
+    /// `win32_layout()` of that version's code. Changing a saved list
+    /// means raising WIN32_VERSION and adding a line here. A version
+    /// raised for something the hash doesn't see adds a line with the
+    /// same hash as the one before it. Keep the old lines: two branches
+    /// that each take the same next version then add different lines at
+    /// the same place, and git stops the second merge, where the two
+    /// equal changes to WIN32_VERSION alone merge without a word. The
+    /// comment on a line says what the version changed, which keeps two
+    /// lines with an unchanged hash different as well.
+    const WIN32_LAYOUTS: &[(u16, u64)] = &[
+        (21, 0x4413_3346_5643_A054), // Video for Windows, last of three
+        (22, 0x1329_1DAD_33BC_DC4A), // dinput's app_data
+        (23, 0x1329_1DAD_33BC_DC4A), // the mixer's seven lines
+        (24, 0xF61B_D786_C674_4FD3), // WNASPI32 and its pending requests
+        (25, 0xABF4_8D5F_2FB4_2680), // OLEAUT32's type libraries and error objects
+        (26, 0xEFE8_9E7A_456D_99B4), // the boot's work and the program pending
+        (27, 0x48DE_57AA_C42E_36F2), // the MPEGVideo and AVIVideo devices
+        (28, 0x8D14_5D81_BEAF_AC09), // DirectShow's objects and graph devices
+        (29, 0x6A10_30CA_74D4_A5B0), // DirectPlay's connections and sessions
+        (30, 0xC6E5_70EA_CFE3_C03E), // Glide 3's vertex layout, viewport and strips
+        (31, 0xA966_371F_B41A_E64E), // MSACM32's streams
+        (32, 0xC2B1_4444_B41A_6AA5), // when an OpenGL window's next swap may show
+        (33, 0xC498_7C01_FF00_3137), // the threads higher ones preempted
+        (34, 0x2A81_5B37_A1B7_C90B), // DirectShow's program filters, allocators and clocks
+        (35, 0xF4AA_E5DA_D534_7E8F), // which Win16 modules' own loaders are yet to run
+        (36, 0xFB13_32FF_2A2F_4AC7), // each thread's debug registers
+        (37, 0x9341_EE06_0BDB_0188), // an AVIVideo device's palette and MCI_REALIZE's background
+        (38, 0xEED4_AAD5_91F9_E9C2), // Win16's open serial ports
+        (39, 0xEC3D_4AFA_6107_B768), // the screens kept under CS_SAVEBITS windows
+        (40, 0x7030_77A9_A34C_1A60), // the Win16 task a message handed the turn to
+        (41, 0x6147_C450_7D40_D8CF), // the codecs a process opened with ICOpen
+        (42, 0x7540_74DC_C874_40DC), // change notification handles
+        (43, 0x1974_9F8E_624E_4E47), // DirectShow's joints and media type enumerators
+        (44, 0xBE96_CD5A_0B06_51EC), // the program's allocator a DirectShow link uses
+        (45, 0xBE96_CD5A_0B06_51EC), // a file mapping's views keep their protection
+    ];
+
+    /// The text between the parentheses of `macro_name!(...)` at `from`.
+    fn macro_body(source: &str, from: usize) -> Option<&str> {
+        let start = from + source[from..].find('(')? + 1;
+        let mut depth = 1;
+        for (i, c) in source[start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                return Some(&source[start..start + i]);
+            }
+        }
+        None
+    }
+
+    /// The lists of saved fields in the Rust source `source`: what each
+    /// `state_fields!` saves and each `state_enum!` or `state_variants!`
+    /// numbers, without comments, spaces or the fields it skips.
+    fn saved_lists(source: &str) -> Vec<String> {
+        let code: String = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut lists = Vec::new();
+        for name in ["state_fields!", "state_enum!", "state_variants!"] {
+            for (at, _) in code.match_indices(name) {
+                let Some(body) = macro_body(&code, at) else {
+                    continue;
+                };
+                let body: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+                let saved = body.find("}skip{").map_or(&body[..], |end| &body[..=end]);
+                lists.push(saved.to_string());
+            }
+        }
+        lists
+    }
+
+    fn collect(dir: &Path, lists: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, lists);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                lists.extend(saved_lists(&std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+
+    /// FNV-1a of the saved lists of `src/win32` and of `src/win16`, which
+    /// the W32 section holds as `Win32::win16`, in sorted order, so moving
+    /// a type to another file doesn't change it. It doesn't see a field
+    /// that changes its type, `dinput::poll::MouseSeen`'s hand-written
+    /// `State`, or what the section saves from elsewhere, such as
+    /// `dpmi::Context`.
+    fn win32_layout() -> u64 {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut lists = Vec::new();
+        collect(&src.join("win32"), &mut lists);
+        collect(&src.join("win16"), &mut lists);
+        lists.sort();
+        lists
+            .join("\n")
+            .bytes()
+            .fold(0xCBF2_9CE4_8422_2325, |hash: u64, byte| {
+                (hash ^ byte as u64).wrapping_mul(0x100_0000_01B3)
+            })
+    }
+
+    #[test]
+    fn a_changed_win32_layout_has_its_own_version() {
+        for pair in WIN32_LAYOUTS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "two layouts of the W32 section can't share version {}: take the next one",
+                pair[1].0
+            );
+        }
+        let &(version, layout) = WIN32_LAYOUTS.last().unwrap();
+        let now = win32_layout();
+        assert_eq!(
+            (version, layout),
+            (WIN32_VERSION, now),
+            "WIN32_LAYOUTS doesn't end with the W32 section as it is: raise WIN32_VERSION \
+             past {version} if it is still there, and add its version with {now:#X} to \
+             WIN32_LAYOUTS, leaving the lines above it",
+        );
+    }
+
+    #[test]
+    fn saved_lists_leave_out_comments_and_skipped_fields() {
+        let source = "// state_fields!(Old { a });\n\
+                      crate::state_fields!(Thing {\n    a, // first\n    b,\n} \
+                      skip {\n    c,\n});\n\
+                      crate::state_fields!(Other { d }\nskip { e });\n\
+                      crate::win32::state_variants!(Kind {\n    A { x },\n    B {},\n});\n";
+        assert_eq!(
+            saved_lists(source),
+            ["Thing{a,b,}", "Other{d}", "Kind{A{x},B{},}"]
+        );
     }
 }

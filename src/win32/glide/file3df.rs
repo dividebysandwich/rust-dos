@@ -14,6 +14,7 @@
 //! they take.
 
 use super::api::{self, TEXFMT_16BIT, TEXFMT_AYIQ_8422, TEXFMT_P_8, TEXFMT_YIQ_422};
+use super::glide3;
 use crate::cpu::Cpu;
 use crate::win32::kernel32;
 
@@ -45,6 +46,42 @@ const FORMATS: &[(&str, u32)] = &[
     ("AI88", 0xD),
     ("AP88", TEXFMT_AP_88),
 ];
+
+/// How Gu3dfInfo's header numbers the levels and the aspect ratio:
+/// Glide 2's GR_LOD_* and GR_ASPECT_*, or Glide 3's log2 of the sizes.
+#[derive(Clone, Copy)]
+enum Lods {
+    Glide2,
+    Log2,
+}
+
+impl Lods {
+    /// The smallest and largest LOD and the aspect, in these numbers,
+    /// of Glide 2's.
+    fn of_glide2(self, small: u32, large: u32, aspect: u32) -> (u32, u32, u32) {
+        match self {
+            Lods::Glide2 => (small, large, aspect),
+            Lods::Log2 => (
+                glide3::lod_log2(small),
+                glide3::lod_log2(large),
+                glide3::aspect_log2(aspect),
+            ),
+        }
+    }
+
+    /// The smallest and largest LOD and the aspect as Glide 2 numbers
+    /// them, or None for a value neither has.
+    fn to_glide2(self, small: u32, large: u32, aspect: u32) -> Option<(u32, u32, u32)> {
+        match self {
+            Lods::Glide2 => Some((small, large, aspect)),
+            Lods::Log2 => Some((
+                glide3::lod_glide2(small)?,
+                glide3::lod_glide2(large)?,
+                glide3::aspect_glide2(aspect)?,
+            )),
+        }
+    }
+}
 
 /// What a file's header says, as Gu3dfHeader has it.
 #[derive(Debug, PartialEq)]
@@ -145,6 +182,15 @@ fn read_file(cpu: &mut Cpu, name: u32) -> Option<Option<Vec<u8>>> {
 /// texels take, in `info`. FALSE if the file can't be read or its header
 /// isn't a 3DF file's.
 pub fn get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    get_info_in(cpu, args, Lods::Glide2)
+}
+
+/// Glide 3's gu3dfGetInfo, whose header has log2 LODs and aspect.
+pub fn get_info3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    get_info_in(cpu, args, Lods::Log2)
+}
+
+fn get_info_in(cpu: &mut Cpu, args: &[u32], lods: Lods) -> Option<u32> {
     let [name, info] = args[..] else {
         return Some(FALSE);
     };
@@ -160,14 +206,8 @@ pub fn get_info(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(h) = parse_header(&file) else {
         return Some(FALSE);
     };
-    let words = [
-        h.width,
-        h.height,
-        h.small_lod,
-        h.large_lod,
-        h.aspect,
-        h.format,
-    ];
+    let (small_lod, large_lod, aspect) = lods.of_glide2(h.small_lod, h.large_lod, h.aspect);
+    let words = [h.width, h.height, small_lod, large_lod, aspect, h.format];
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     cpu.bus.guest_write_bytes(info, &bytes);
     let size = mipmap_bytes(h.aspect, h.large_lod, h.small_lod, h.format);
@@ -202,6 +242,15 @@ fn ncc_table(file: &[u8], at: usize) -> Vec<u8> {
 /// texels into the memory at info's data address, by the header
 /// gu3dfGetInfo put in `info`. What the file lacks reads as zeros.
 pub fn load(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    load_in(cpu, args, Lods::Glide2)
+}
+
+/// Glide 3's gu3dfLoad, whose header has log2 LODs and aspect.
+pub fn load3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    load_in(cpu, args, Lods::Log2)
+}
+
+fn load_in(cpu: &mut Cpu, args: &[u32], lods: Lods) -> Option<u32> {
     let [name, info] = args[..] else {
         return Some(FALSE);
     };
@@ -211,7 +260,10 @@ pub fn load(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return None;
     }
     let word = |i: usize| u32::from_le_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
-    let (small_lod, large_lod, aspect, format) = (word(8), word(12), word(16), word(20));
+    let format = word(20);
+    let Some((small_lod, large_lod, aspect)) = lods.to_glide2(word(8), word(12), word(16)) else {
+        return Some(FALSE);
+    };
     let data = word(INFO_DATA as usize);
     let known = format <= TEXFMT_P_8 || (TEXFMT_16BIT..=TEXFMT_AP_88).contains(&format);
     if !known || large_lod > small_lod || small_lod > api::LOD_1 || aspect > api::ASPECT_1X8 {

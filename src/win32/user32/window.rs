@@ -193,17 +193,20 @@ pub fn has_thick_frame(style: u32, _ex: u32) -> bool {
     style & WS_THICKFRAME != 0 && style & (WS_DLGFRAME | WS_BORDER) != WS_DLGFRAME
 }
 
+/// The thin frame is WS_BORDER's, which WS_CAPTION includes. A top-level
+/// window whose caption and frame were taken away with SetWindowLong has
+/// none, as on Windows 95 and later: its client area is the whole window,
+/// which full-screen games such as Railroad Tycoon II draw to. Only
+/// Windows 3.x gave every overlapped window a thin frame.
 pub fn has_thin_frame(style: u32) -> bool {
-    style & WS_BORDER != 0 || style & (WS_CHILD | WS_POPUP) == 0
+    style & WS_BORDER != 0
 }
 
-/// The window rectangle around the client rectangle `r` for the style,
-/// as AdjustWindowRectEx makes it.
-pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+/// The outer frame's width and height for the style, as
+/// AdjustWindowRectEx counts them: thick, dialog, thin or none.
+pub fn frame_size(style: u32, ex: u32) -> (i32, i32) {
     let m = super::sysparams::metric;
-    let mut r = r;
-    // The outer frame and caption.
-    let (dx, dy) = if has_thick_frame(style, ex) {
+    if has_thick_frame(style, ex) {
         (m(32), m(33))
     } else if has_dlg_frame(style, ex) {
         (m(7), m(8))
@@ -211,8 +214,16 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
         (m(5), m(6))
     } else {
         (0, 0)
-    };
-    r = r.inflate(dx, dy);
+    }
+}
+
+/// The window rectangle around the client rectangle `r` for the style,
+/// as AdjustWindowRectEx makes it.
+pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+    let m = super::sysparams::metric;
+    // The outer frame and caption.
+    let (dx, dy) = frame_size(style, ex);
+    let mut r = r.inflate(dx, dy);
     if style & WS_CAPTION == WS_CAPTION {
         r.top -= if ex & WS_EX_TOOLWINDOW != 0 {
             m(51)
@@ -1022,6 +1033,7 @@ pub fn free_window(cpu: &mut Cpu, hwnd: u32) {
         c.windows = c.windows.saturating_sub(1);
     }
     state.forget_activation(|h| h == hwnd);
+    state.saved_bits.retain(|s| s.hwnd != hwnd);
     let input = &mut state.input;
     if input.capture == hwnd {
         input.capture = 0;
@@ -1724,11 +1736,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let after = p[1];
                 let new = rect_var(t, P_WAS_VISIBLE + 1);
                 let client = rect_var(t, P_WAS_VISIBLE + 5);
-                let old = rect_var(t, P_OLD);
                 let old_client = rect_var(t, P_OLD_CLIENT);
                 let old_screen = user(cpu).screen_rect(hwnd);
                 let was_visible = user(cpu).is_visible(hwnd);
                 let state = user(cpu);
+                let under = super::input::under_cursor(state);
                 // What siblings above it cover, which a raise shows.
                 let was_covered = if was_visible && flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0 {
                     super::paint::covered(state, hwnd)
@@ -1761,10 +1773,10 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 if client.width() == old_client.width() && client.height() == old_client.height() {
                     flags |= SWP_NOCLIENTSIZE;
                 }
-                if client.left == old_client.left && client.top == old_client.top {
+                let client_moved = client.left != old_client.left || client.top != old_client.top;
+                if !client_moved {
                     flags |= SWP_NOCLIENTMOVE;
                 }
-                let _ = old;
                 super::paint::tree_changed(cpu);
                 // What it uncovered and what it shows now need painting.
                 let now_visible = user(cpu).is_visible(hwnd);
@@ -1787,6 +1799,24 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                         state.input.capture = 0;
                     }
                 }
+                // The window under the cursor gets a move if the window
+                // moved, resized, showed or hid (`input::window_moved`
+                // says which changes count). After paint::moved, which
+                // puts the desktop on the screen as a program's first
+                // window shows (`under` is 0 then, as nothing was under
+                // the cursor), and after a hidden window lost the
+                // capture, so the move goes to the window under the
+                // cursor and not to the one hidden.
+                // Its place counts as changed if its place on the screen
+                // or its client area's did, not because the flags asked
+                // for a move: a WM_WINDOWPOSCHANGING that keeps the window
+                // where it is gives no move, which a program answering
+                // the move by moving the window again would otherwise get
+                // forever.
+                let changed = user(cpu).screen_rect(hwnd) != old_screen
+                    || client_moved
+                    || was_visible != now_visible;
+                super::input::window_moved(cpu, hwnd, under, changed);
                 cpu.bus.guest_write_32(winpos + 24, flags);
                 // Activate it.
                 let child = user(cpu)
@@ -1805,6 +1835,35 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 t.step = 4;
             }
             4 => {
+                if !user(cpu).is_window(hwnd) {
+                    return Next::Done(TRUE);
+                }
+                // A child window hidden has its parent erase now what it
+                // uncovered (WM_ERASEBKGND before WM_WINDOWPOSCHANGED, as
+                // in the sequence Wine's msg.c recorded from Windows for
+                // ShowWindow(SW_HIDE) of a child), unless SWP_DEFERERASE
+                // says not to. The parent's WM_PAINT that comes later has
+                // nothing left to erase, so a page shown in the place of
+                // the one hidden, as a tab control's pages are, keeps what
+                // it drew. Only the parent erases: the siblings wait for
+                // their BeginPaint. A move, a resize or a frame change
+                // erases nothing here: Windows sends no WM_NCPAINT or
+                // WM_ERASEBKGND within SetWindowPos then (msg.c's
+                // SetScrollRange sequence, updown.c's buddy resized), and
+                // Windows 98 keeps a pending frame through a resize.
+                let flags = cpu.bus.guest_read_32(winpos + 24);
+                t.step = 7;
+                let parent = user(cpu).parent(hwnd);
+                if flags & SWP_HIDEWINDOW != 0
+                    && flags & SWP_DEFERERASE == 0
+                    && parent != 0
+                    && parent != DESKTOP
+                {
+                    let erase = super::paint::RDW_ERASENOW | super::paint::RDW_NOCHILDREN;
+                    return Next::call(address_of("RedrawWindow"), &[parent, 0, 0, erase], 7);
+                }
+            }
+            7 => {
                 if !user(cpu).is_window(hwnd) {
                     return Next::Done(TRUE);
                 }
@@ -1844,7 +1903,22 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     | SWP_NOCLIENTMOVE;
                 let nothing =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
-                if flags & AGG != nothing && flags & SWP_NOSENDCHANGING == 0 {
+                // SWP_NOSENDCHANGING leaves out WM_WINDOWPOSCHANGING
+                // only: WM_WINDOWPOSCHANGED still comes. Its WINDOWPOS
+                // holds the place and size this call gave the window,
+                // relative to its parent, whatever the flags kept from
+                // changing (Wine's win.c checks the place on Windows).
+                // That is the call's own rectangle, as in Wine's
+                // set_window_pos and ReactOS's co_WinPosSetWindowPos, so
+                // a SetWindowPos that the window's WM_ACTIVATE made on
+                // the way doesn't change what this message says. Myth
+                // II's window thread learns that its window is active
+                // only from this message, after its main thread resizes
+                // the window with that flag.
+                if flags & AGG != nothing {
+                    let r = rect_var(t, P_WAS_VISIBLE + 1);
+                    let place = [r.left, r.top, r.width(), r.height()];
+                    write_words(cpu, winpos + 8, &place.map(|v| v as u32));
                     return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
                 }
                 return Next::Done(TRUE);
@@ -2446,6 +2520,11 @@ pub fn map_window_points(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 /// through WM_GETTEXT, another's from where USER keeps it.
 pub fn get_window_text(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (hwnd, buffer, size) = (args[0], args[1], args[2]);
+    // Sent to another thread's window, the function runs again when the
+    // reply comes, with the text in the buffer. It only takes the reply.
+    if super::message::waiting_for_reply(cpu) {
+        return send_message_now(cpu, hwnd, WM_GETTEXT, size, buffer);
+    }
     let Some(w) = get(cpu, hwnd).cloned() else {
         if size > 0 && buffer != 0 {
             cpu.bus.guest_write_8(buffer, 0);
@@ -3196,6 +3275,33 @@ mod tests {
         );
         let c = client_for(user(&mut cpu), hwnd, Rect::new(-4, -4, 644, 484));
         assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
+    }
+
+    /// A top-level window whose style SetWindowLong set to WS_VISIBLE |
+    /// WS_CLIPSIBLINGS, as Railroad Tycoon II's full-screen window, has
+    /// no frame: its client area is the whole window, and the screen's
+    /// corner is in it. Windows 11 gives a 640x480 client area and
+    /// HTCLIENT at (0, 0) for such a window, and AdjustWindowRectEx adds
+    /// nothing for style 0 and one pixel for WS_BORDER. The client area
+    /// the hit test sees is WM_NCCALCSIZE's, as SWP_FRAMECHANGED sets it.
+    #[test]
+    fn a_frameless_top_level_window_is_all_client_area() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let style = WS_VISIBLE | WS_CLIPSIBLINGS;
+        let r = Rect::new(0, 0, 640, 480);
+        assert_eq!(adjust(r, style, 0, false), r);
+        assert_eq!(adjust(r, WS_BORDER, 0, false), Rect::new(-1, -1, 641, 481));
+        let w = Window {
+            style,
+            rect: r,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let client = client_for(user(&mut cpu), hwnd, r);
+        assert_eq!(client, r);
+        user(&mut cpu).window_mut(hwnd).expect("the window").client = client;
+        let hit = super::super::input::hit_test(user(&mut cpu), hwnd, 0, 0);
+        assert_eq!(hit, super::super::input::HTCLIENT);
     }
 
     /// A caption without a thick frame keeps its 3-pixel dialog frame

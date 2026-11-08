@@ -57,6 +57,15 @@ pub fn random_u64() -> u64 {
     u64::from_le_bytes(bytes)
 }
 
+/// Fill `buf` with random bytes a program can see (a node address, a
+/// session's GUID): in deterministic mode from its generator, so that two
+/// runs make the same, else as `fill_random` does.
+pub fn fill_machine_random(buf: &mut [u8]) {
+    if !crate::deterministic::random_bytes(buf) {
+        fill_random(buf);
+    }
+}
+
 /// Whether the built-in DOS has the IPX driver (`ipx`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum IpxMode {
@@ -675,6 +684,21 @@ const NO_NETWORK: &str = "the browser version of rust-dos has no network";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a program sees that the machine makes up at random
+    /// (DirectPlay's endpoints, session GUIDs and keys) is the same in two
+    /// deterministic runs from the same start.
+    #[test]
+    fn machine_random_bytes_repeat_in_deterministic_mode() {
+        let start = crate::deterministic::default_start();
+        let run = || {
+            let _mode = crate::deterministic::Deterministic::new(start);
+            let mut bytes = [0; 16];
+            fill_machine_random(&mut bytes);
+            bytes
+        };
+        assert_eq!(run(), run());
+    }
 
     #[test]
     fn network_settings_parse_and_print() {

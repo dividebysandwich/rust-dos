@@ -30,6 +30,7 @@ use crate::cpu::Cpu;
 use crate::video::crt::CrtTiming;
 use crate::video::vbe::{self, LFB_BASE, VRAM_SIZE, VbeMode};
 use crate::voodoo::banshee as card;
+use crate::win32::gdi32::Rect;
 
 /// A display mode: its size, bits a pixel and bytes a row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -130,23 +131,11 @@ pub fn mode(cpu: &Cpu) -> Option<Mode> {
         if !b.extended() {
             return None;
         }
-        let cfg = b.reg(card::VID_PROC_CFG);
-        let (width, mut height) = b.desktop_size();
-        if cfg & card::VIDPROC_HALF_MODE != 0 {
-            height /= 2;
-        }
-        let bpp = match (cfg >> 18) & 7 {
-            0 => 8,
-            1 => 16,
-            2 => 24,
-            _ => 32,
-        };
-        let pitch = b.reg(card::VID_DESKTOP_OVERLAY_STRIDE) & 0x3FFF;
         return Some(Mode {
-            width,
-            height,
-            bpp,
-            pitch,
+            width: b.desktop_size().0,
+            height: b.desktop_rows(),
+            bpp: b.desktop_bytes_per_pixel() * 8,
+            pitch: b.reg(card::VID_DESKTOP_OVERLAY_STRIDE) & 0x3FFF,
         });
     }
     if cpu.bus.video_mode != crate::video::VideoMode::Vesa {
@@ -217,15 +206,12 @@ fn vbe_mode(cpu: &Cpu, w: u32, h: u32, bpp: u32) -> Option<VbeMode> {
     if ![8, 16, truecolor].contains(&bpp) {
         return None;
     }
-    let listed = vbe::MODES.iter().find(|m| {
-        let depth = match m.bpp {
-            32 if packed => 24,
-            d => d as u32,
-        };
-        m.width as u32 == w && m.height as u32 == h && depth == bpp
-    });
-    if let Some(m) = listed {
-        return vbe::find_mode(m.number, packed);
+    let adapter = cpu.bus.vga.adapter;
+    let listed = vbe::modes(adapter)
+        .filter_map(|m| vbe::adapter_mode(m.number, adapter))
+        .find(|m| (m.width as u32, m.height as u32, m.bpp as u32) == (w, h, bpp));
+    if listed.is_some() {
+        return listed;
     }
     let index = SIZES.iter().position(|&s| s == (w, h))?;
     // Small modes are shown doubled, at the timing of the doubled lines.
@@ -275,6 +261,7 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
         return;
     }
     let data = &data[..end - start];
+    drew(cpu, start as u32, end as u32, data.len() as u64);
     if let Some(v) = &mut cpu.bus.voodoo
         && v.banshee().is_some()
     {
@@ -289,6 +276,51 @@ pub fn write(cpu: &mut Cpu, offset: u32, data: &[u8]) {
     }
 }
 
+/// The bytes of video memory the picture the display shows takes: from
+/// the display start, the mode's rows. None while the adapter shows
+/// none of its own modes.
+fn shown_bytes(cpu: &Cpu) -> Option<std::ops::Range<u32>> {
+    let m = mode(cpu)?;
+    let start = match cpu.bus.banshee() {
+        Some(b) => b.reg(card::VID_DESKTOP_START_ADDR),
+        None => cpu.bus.vbe.start,
+    };
+    Some(start..start + m.pitch * m.height)
+}
+
+/// The built-in Windows wrote `bytes` bytes of video memory from byte
+/// `low` to before byte `high`, for the program: count those in the
+/// picture shown as its writes to video memory (`Activity`), which is
+/// how `cycles=auto` sees its frames. A blit to the primary surface or
+/// GDI's drawing on the screen shows the frame; the copies into
+/// surfaces out of sight that make it don't, as a flip of them does.
+fn drew(cpu: &mut Cpu, low: u32, high: u32, bytes: u64) {
+    let Some(shown) = shown_bytes(cpu) else {
+        return;
+    };
+    let (low, high) = (low.max(shown.start), high.min(shown.end));
+    if low >= high {
+        return;
+    }
+    let bytes = bytes.min((high - low) as u64);
+    let at = cpu.bus.clock.icount;
+    cpu.bus
+        .activity
+        .shown_write(at, low as u64, high as u64, bytes);
+}
+
+/// `drew` for the rectangles `rects` of a picture from byte `at` of
+/// video memory, `pitch` bytes a row and `bytes` a pixel: what the
+/// OpenGL renderer copied in its own copy of the card's memory, which
+/// doesn't come through `write`.
+pub fn drew_rects(cpu: &mut Cpu, at: u32, pitch: u32, bytes: u32, rects: &[Rect]) {
+    for r in rects.iter().filter(|r| !r.is_empty()) {
+        let row = |y: i32, x: i32| at + y as u32 * pitch + x as u32 * bytes;
+        let len = r.width() as u64 * bytes as u64 * r.height() as u64;
+        drew(cpu, row(r.top, r.left), row(r.bottom - 1, r.right), len);
+    }
+}
+
 // What the picture is.
 
 /// Show the picture at byte `offset` of video memory, from the next
@@ -297,6 +329,7 @@ pub fn show(cpu: &mut Cpu, offset: u32) {
     if is_card(cpu) {
         cpu.bus
             .voodoo_write_32(card::VID_DESKTOP_START_ADDR, offset);
+        cpu.bus.note_display_start();
         return;
     }
     cpu.bus.vbe.start = offset;

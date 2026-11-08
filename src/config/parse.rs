@@ -2,8 +2,8 @@
 
 use super::types::parse_bool;
 use super::{
-    AspectRatio, Config, DesktopDepth, DosVersion, Filter, Section, Settings, Win32Trace,
-    WindowsVersion, parse_mouse_sensitivity,
+    AspectRatio, Config, DesktopDepth, DosVersion, Filter, RunLockSetting, Section, Settings,
+    Win32Trace, WindowsVersion, parse_mouse_sensitivity,
 };
 use crate::cpu::{CoreMode, CpuModel};
 use crate::disk::DRIVE_Z;
@@ -23,6 +23,34 @@ use std::path::{Path, PathBuf};
 /// the CPU that takes the most (`CpuModel::max_memsize`).
 pub const MIN_MEMSIZE: usize = 2;
 pub const MAX_MEMSIZE: usize = 512;
+
+/// `version_check`: a switch's words, or `never`.
+fn parse_version_check(value: &str) -> Option<crate::version_check::Setting> {
+    use crate::version_check::Setting;
+    if value.trim().eq_ignore_ascii_case("never") {
+        return Some(Setting::Never);
+    }
+    parse_bool(value).map(|on| if on { Setting::On } else { Setting::Off })
+}
+
+/// `run_lock`: off, on (the default) or the lock's directory, relative
+/// to the configuration file's.
+fn parse_run_lock(
+    value: &str,
+    base_dir: &Path,
+    home: Option<&Path>,
+) -> Result<Option<RunLockSetting>, String> {
+    let value = value.trim_matches('"');
+    Ok(match value.to_ascii_lowercase().as_str() {
+        "" => return Err("invalid run_lock '' (off, on or a directory)".to_string()),
+        "off" | "false" | "no" => Some(RunLockSetting::Off),
+        "on" | "true" | "yes" => None,
+        _ => Some(RunLockSetting::Dir(match (value.strip_prefix("~/"), home) {
+            (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
+            _ => base_dir.join(value),
+        })),
+    })
+}
 
 /// A memory size as written: a number of MB, with or without the MB.
 pub fn parse_memsize(value: &str) -> Result<usize, String> {
@@ -123,7 +151,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "capture_dir" => {
                             let value = value.trim_matches('"');
                             config.capture_dir = Some(match (value.strip_prefix("~/"), home) {
-                                (Some(rest), Some(h)) => h.join(rest),
+                                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
                                 _ => PathBuf::from(value),
                             });
                         }
@@ -158,7 +186,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "verite_rom" => {
                             let value = value.trim_matches('"');
                             let path = match (value.strip_prefix("~/"), home) {
-                                (Some(rest), Some(h)) => h.join(rest),
+                                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
                                 _ => PathBuf::from(value),
                             };
                             config.verite_rom = (!value.is_empty()).then_some(path);
@@ -291,7 +319,7 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                         "win32_dlls" => {
                             let value = value.trim_matches('"');
                             let path = match (value.strip_prefix("~/"), home) {
-                                (Some(rest), Some(h)) => h.join(rest),
+                                (Some(rest), Some(h)) => crate::mount::home_join(h, rest),
                                 _ => PathBuf::from(value),
                             };
                             config.win32_dlls = (!value.is_empty()).then_some(path);
@@ -354,9 +382,16 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(on) => config.pause_in_settings = Some(on),
                             None => warn(format!("invalid pause_in_settings '{}' (true or false)", value)),
                         },
-                        "version_check" => match parse_bool(value) {
-                            Some(on) => config.version_check = Some(on),
-                            None => warn(format!("invalid version_check '{}' (true or false)", value)),
+                        "version_check" => match parse_version_check(value) {
+                            Some(setting) => config.version_check = Some(setting),
+                            None => warn(format!(
+                                "invalid version_check '{}' (true, false or never)",
+                                value
+                            )),
+                        },
+                        "run_lock" => match parse_run_lock(value, base_dir, home) {
+                            Ok(setting) => config.run_lock = setting,
+                            Err(e) => warn(e),
                         },
                         "almanac_auto" => match parse_bool(value) {
                             Some(on) => config.almanac_auto = Some(on),
@@ -450,6 +485,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(filter) => mixer.sb_filter = filter,
                             None => warn(format!("invalid sb_filter '{}' (auto or off)", value)),
                         },
+                        "sb_coupling" => match parse_bool(value) {
+                            Some(on) => mixer.sb_coupling = on,
+                            None => warn(format!("invalid sb_coupling '{}' (on or off)", value)),
+                        },
                         "reverb" => match ReverbPreset::parse(value) {
                             Some(preset) => mixer.reverb = preset,
                             None => warn(format!("invalid reverb '{}' (off, tiny, small, medium, large or huge)", value)),
@@ -462,6 +501,13 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Ok(mix) if key.eq_ignore_ascii_case("reverb_mix") => mixer.reverb_mix = mix,
                             Ok(mix) => mixer.chorus_mix = mix,
                             Err(e) => warn(format!("{}: {}", key.to_ascii_lowercase(), e)),
+                        },
+                        "audio_output" => match crate::audio::OutputChoice::parse(value) {
+                            Some(output) => config.audio_output = output,
+                            None => warn(format!(
+                                "invalid audio_output '{}' (auto, sdl or null)",
+                                value
+                            )),
                         },
                         "blocksize" => match crate::audio::parse_blocksize(value) {
                             Ok(frames) => config.audio_buffer.blocksize = frames,

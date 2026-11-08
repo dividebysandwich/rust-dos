@@ -59,6 +59,7 @@ macro_rules! vector {
 vector!([f32; 2], uniform_2_f32, [0, 1]);
 vector!([f32; 3], uniform_3_f32, [0, 1, 2]);
 vector!([f32; 4], uniform_4_f32, [0, 1, 2, 3]);
+vector!([i32; 2], uniform_2_i32, [0, 1]);
 vector!([i32; 3], uniform_3_i32, [0, 1, 2]);
 vector!([i32; 4], uniform_4_i32, [0, 1, 2, 3]);
 
@@ -119,23 +120,33 @@ locations!(Triangle {
     u_fogblend: [u8; 64],
     u_fogdelta: [i16; 64],
     u_scale: f32,
+    u_level_scale: f32,
     u_units: i32,
     u_config: i32,
     u_tmode0: i32,
     u_tmode1: i32,
-    u_tsize0: [f32; 3],
-    u_tsize1: [f32; 3],
+    u_tsize0: [f32; 2],
+    u_tsize1: [f32; 2],
     u_tlod0: [i32; 3],
     u_tlod1: [i32; 3],
+    u_tlevels0: [i32; 3],
+    u_tlevels1: [i32; 3],
+    u_gl_sampling: i32,
     u_tdetail0: [i32; 3],
     u_tdetail1: [i32; 3],
     u_constant_depth: i32,
-    u_dither: i32
+    u_dither: i32,
+    u_card_blend: i32
 });
 locations!(Quad {
     u_rect: [f32; 4],
     u_size: [f32; 2],
     u_scale: f32
+});
+locations!(CopyQuad {
+    u_rect: [f32; 4],
+    u_size: [f32; 2],
+    u_offset: [i32; 2]
 });
 locations!(FillQuad {
     u_rect: [f32; 4],
@@ -149,6 +160,7 @@ locations!(Blit2d {
     u_mem_layout: [i32; 3],
     u_layer: i32,
     u_dst: [i32; 3],
+    u_tiled: [i32; 2],
     u_clip: [i32; 4],
     u_area: [i32; 4],
     u_src: [i32; 4],

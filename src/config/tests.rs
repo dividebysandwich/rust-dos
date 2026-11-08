@@ -17,6 +17,21 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
+fn run_lock_is_off_on_or_a_directory() {
+    let home = Path::new("/home/u");
+    let get = |value: &str| {
+        parse(&format!("[emulator]\nrun_lock={}\n", value), Path::new("/cfg"), Some(home))
+    };
+    assert_eq!(get("off").run_lock, Some(RunLockSetting::Off));
+    assert_eq!(get("on").run_lock, None);
+    assert_eq!(get("~/locks").run_lock, Some(RunLockSetting::Dir(home.join("locks"))));
+    let relative = Some(RunLockSetting::Dir(Path::new("/cfg").join("locks")));
+    assert_eq!(get("\"locks\"").run_lock, relative);
+    assert!(get("off").warnings.is_empty());
+    assert!(get("\"\"").warnings.iter().any(|w| w.contains("invalid run_lock")));
+}
+
+#[test]
 fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
     let config = parse("[emulator]\nshader=xbrz\n", Path::new("/cfg"), None);
     assert_eq!(config.shader, Some(crate::video::shader::Shader::Xbrz));
@@ -24,6 +39,37 @@ fn xbrz_config_parses_and_invalid_shader_help_lists_it() {
     let invalid = parse("[emulator]\nshader=unknown\n", Path::new("/cfg"), None);
     assert_eq!(invalid.shader, None);
     assert!(invalid.warnings.iter().any(|w| w.contains("invalid shader") && w.contains("xbrz")));
+}
+
+#[test]
+fn version_check_never_is_off_for_good_and_saving_keeps_it() {
+    use crate::version_check::Setting;
+    let text = "[emulator]\nversion_check=never\n";
+    let config = parse(text, Path::new("/cfg"), None);
+    assert_eq!(config.version_check, Some(Setting::Never));
+    assert!(config.warnings.is_empty());
+    let settings = Settings::from_config(&config);
+    assert_eq!(settings.version_check, Setting::Never);
+    assert!(!settings.version_check.is_on());
+    // Saving another change, or every setting, leaves the line as it is.
+    let mut changed = settings.clone();
+    changed.scale = 3;
+    assert!(update_text(text, &settings, &changed, &[], None).contains("version_check=never"));
+    let all = complete_text(text, Path::new("/cfg"), &settings, &changed, &[], None);
+    assert!(all.contains("version_check=never"));
+    // Settings written out from scratch, as a game profile is layered
+    // over them, say never too.
+    let from_scratch = update_text("", &Settings::default(), &settings, &[], None);
+    assert!(from_scratch.contains("version_check=never"));
+    // A later line wins, as with every key.
+    let twice = "[emulator]\nversion_check=never\nversion_check=true\n";
+    let later = parse(twice, Path::new("/cfg"), None);
+    assert_eq!(later.version_check, Some(Setting::On));
+    let off = parse("[emulator]\nversion_check=false\n", Path::new("/cfg"), None);
+    assert_eq!(off.version_check, Some(Setting::Off));
+    let invalid = parse("[emulator]\nversion_check=maybe\n", Path::new("/cfg"), None);
+    let warned = |w: &String| w.contains("invalid version_check") && w.contains("never");
+    assert!(invalid.warnings.iter().any(warned));
 }
 
 #[test]
@@ -550,16 +596,16 @@ fn mixer_settings() {
     let mixer = Settings::from_config(&config).mixer;
     let levels = Channel::ALL.map(|channel| mixer.level(channel));
     assert_eq!(levels, [80, 100, 100, 150, 100, 100, 0, 100, 100, 100, 100, 100, 100, 100]);
-    assert!(mixer.speaker_filter);
+    assert!(mixer.speaker_filter && mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Auto, ReverbPreset::Off, ChorusPreset::Off));
 
     assert_eq!((mixer.reverb_mix, mixer.chorus_mix), (50, 50));
 
-    let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nreverb=Large\nchorus=light\nreverb_mix=80%\nChorus_Mix=0\n";
+    let text = "[mixer]\nspeaker_filter=off\nsb_filter=OFF\nsb_coupling=off\nreverb=Large\nchorus=light\nreverb_mix=80%\nChorus_Mix=0\n";
     let config = parse(text, Path::new("/cfg"), None);
     assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     let mixer = config.mixer;
-    assert!(!mixer.speaker_filter);
+    assert!(!mixer.speaker_filter && !mixer.sb_coupling);
     assert_eq!((mixer.sb_filter, mixer.reverb, mixer.chorus), (SbFilter::Off, ReverbPreset::Large, ChorusPreset::Light));
     assert_eq!((mixer.reverb_mix, mixer.chorus_mix), (80, 0));
     let text = "[mixer]\nspeaker_filter=maybe\nsb_filter=sb1\nreverb=hall\nchorus=heavy\nreverb_mix=150\nchorus_mix=wet\n";
@@ -578,6 +624,26 @@ fn joystick_settings() {
     let config = parse(text, Path::new("/cfg"), None);
     assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
     assert_eq!(config.joystick, JoystickSettings::default());
+}
+
+#[test]
+fn audio_output_parses_and_saves() {
+    use crate::audio::OutputChoice;
+    let parsed = |text: &str| Settings::from_config(&parse(text, Path::new("."), None));
+    assert_eq!(parsed("").audio_output, OutputChoice::Auto);
+    let config = parse("[mixer]\naudio_output=null\n", Path::new("."), None);
+    assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    let settings = Settings::from_config(&config);
+    assert_eq!(settings.audio_output, OutputChoice::Null);
+    let saved = update_text("", &Settings::default(), &settings, &[], None);
+    assert!(saved.contains("audio_output=null"), "{}", saved);
+    assert_eq!(parsed(&saved).audio_output, OutputChoice::Null);
+    let config = parse("[mixer]\naudio_output=dummy\n", Path::new("."), None);
+    assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+    assert_eq!(
+        Settings::from_config(&config).audio_output,
+        OutputChoice::Auto
+    );
 }
 
 #[test]
@@ -726,7 +792,7 @@ fn changed_settings() -> Settings {
         mouse_capture_messages: false,
         mouse_menu_hold: false,
         pause_in_settings: false,
-        version_check: false,
+        version_check: crate::version_check::Setting::Off,
         almanac_auto: true,
         rewind: true,
         rewind_memory: 512,
@@ -754,6 +820,7 @@ fn changed_settings() -> Settings {
             mixer.chorus_mix = 20;
             mixer
         },
+        audio_output: crate::audio::OutputChoice::Null,
         audio_buffer: crate::audio::AudioBuffer { blocksize: 256, prebuffer: 10 },
         joystick: JoystickSettings { kind: JoystickType::TwoAxis, deadzone: 20 },
         network: crate::net::NetSettings {

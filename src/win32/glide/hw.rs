@@ -18,8 +18,9 @@
 //! Glide has it. The 3D engine's colour buffers and depth buffer are at
 //! the top, tiled, and the video processor's overlay shows the front
 //! one, which a swap moves to the next one (leftOverlayBuf). Textures
-//! take the memory below the buffers. Closing gives the display back
-//! (`display::give_back`): the desktop's mode, repainted, or text mode.
+//! take the memory below the buffers, above where the desktop's picture
+//! ends. Closing gives the display back (`display::give_back`): the
+//! desktop's mode, repainted, or text mode.
 //! The linear frame buffer is the tiled aperture of BAR1 from the
 //! buffers' start (lfbMemoryConfig), rows of 4096 bytes, as 3dfx's
 //! library had it; writes through the pixel pipeline and in other
@@ -32,6 +33,7 @@ use crate::voodoo::banshee::{self as b, render3d};
 use crate::voodoo::regs::*;
 use crate::win32::ddraw::display;
 use crate::win32::memory::{MEM_MAPPED, PAGE, PAGE_READWRITE, SHARED, SYSTEM, USER, WRITABLE};
+use crate::win32::screen;
 
 /// Which chip the board has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,6 +287,10 @@ fn banshee_layout(
     auxes: u32,
     floor: u32,
 ) -> Option<BansheeLayout> {
+    // The largest display Glide opens on a Banshee or Voodoo3.
+    if width > 1600 || height > 1200 {
+        return None;
+    }
     let tiles = (width * 2).div_ceil(128);
     let bytes = tiles * 4096 * height.div_ceil(32);
     let total = bytes * (colors + auxes);
@@ -320,7 +326,7 @@ pub fn open_display(
     let Some(board) = board(cpu) else {
         return false;
     };
-    if width == 0 || height == 0 || !(2..=3).contains(&colors) || auxes > 1 {
+    if !buffers_ok(width, height, colors, auxes) {
         return false;
     }
     let ok = match board.card {
@@ -339,6 +345,38 @@ pub fn open_display(
     true
 }
 
+/// Give the monitor to the card (`on`) or back to the 2D picture, as
+/// grSstControl does, with the display staying open, and the card going
+/// on drawing unseen while it is away. A Voodoo Graphics or Voodoo2
+/// turns its pass-through. A Banshee or Voodoo3 has one picture: going
+/// off ends the overlay and gives the display back
+/// (`display::give_back`), and coming on takes it again in the size the
+/// display was opened, from the desktop or a mode DirectDraw set,
+/// whichever ended Glide's. False if the card can't take it back.
+pub fn set_active(cpu: &mut Cpu, on: bool) -> bool {
+    let Some(board) = board(cpu) else {
+        return false;
+    };
+    if !state(cpu).screen.open {
+        return true;
+    }
+    if board.card != Card::Banshee {
+        let init0 = read_init(cpu, FBI_INIT0) & !1;
+        write(cpu, FBI, FBI_INIT0, init0 | on as u32);
+        return true;
+    }
+    if display::glide_has_display(cpu) == on {
+        return true;
+    }
+    if on {
+        return reopen_banshee(cpu);
+    }
+    let cfg = ext(cpu, b::VID_PROC_CFG);
+    set_ext(cpu, b::VID_PROC_CFG, cfg & !b::VIDPROC_OVERLAY_ENABLE);
+    display::give_back(cpu);
+    true
+}
+
 /// A Voodoo Graphics or Voodoo2: the frame buffer's layout and the video
 /// timing in the fbiInit and video registers, and the pass-through off.
 fn open_voodoo(
@@ -350,23 +388,9 @@ fn open_voodoo(
     auxes: u32,
 ) -> bool {
     let v2 = board.card == Card::Voodoo2;
-    // A Voodoo Graphics' library can't triple buffer; its dimensions are
-    // 10 bits, a Voodoo2's 11.
-    let max = if v2 { 2047 } else { 1023 };
-    if (!v2 && colors == 3) || width > max || height > max {
+    let Some((tiles, pages)) = voodoo_layout(board, width, height, colors, auxes) else {
         return false;
-    }
-    // Rows of tiles: 64 pixels wide on a Voodoo Graphics, 32 on a
-    // Voodoo2; buffers of whole 4 KB pages.
-    let tile = if v2 { 32 } else { 64 };
-    let tiles = width.div_ceil(tile);
-    if (!v2 && tiles > 15) || tiles > 63 {
-        return false;
-    }
-    let pages = (tiles * tile * height * 2).div_ceil(4096);
-    if pages > 0x1FF || pages * 4096 * (colors + auxes) > board.fb_bytes {
-        return false;
-    }
+    };
     let saved = pci_read_32(cpu, 0x40);
     state(cpu).screen.saved.init_enable = saved;
     pci_write(cpu, 0x40, (saved as u8) | 1);
@@ -425,6 +449,76 @@ fn open_voodoo(
     true
 }
 
+/// A Voodoo Graphics' or Voodoo2's frame buffer for a display of
+/// `width` x `height` with `colors` and `auxes` buffers: its rows of
+/// tiles and each buffer's 4 KB pages, or None if the board can't.
+fn voodoo_layout(
+    board: Board,
+    width: u32,
+    height: u32,
+    colors: u32,
+    auxes: u32,
+) -> Option<(u32, u32)> {
+    let v2 = board.card == Card::Voodoo2;
+    // A Voodoo Graphics' library can't triple buffer; its dimensions are
+    // 10 bits, a Voodoo2's 11.
+    let max = if v2 { 2047 } else { 1023 };
+    if (!v2 && colors == 3) || width > max || height > max {
+        return None;
+    }
+    // Rows of tiles: 64 pixels wide on a Voodoo Graphics, 32 on a
+    // Voodoo2; buffers of whole 4 KB pages.
+    let tile = if v2 { 32 } else { 64 };
+    let tiles = width.div_ceil(tile);
+    if (!v2 && tiles > 15) || tiles > 63 {
+        return None;
+    }
+    let pages = (tiles * tile * height * 2).div_ceil(4096);
+    if pages > 0x1FF || pages * 4096 * (colors + auxes) > board.fb_bytes {
+        return None;
+    }
+    Some((tiles, pages))
+}
+
+/// The lowest address of a Banshee's memory Glide's buffers may start
+/// above, for a display of `width` x `height`: the picture of the mode it
+/// will show, or the desktop's, which grSstControl can bring back while
+/// the textures stay.
+fn banshee_floor(cpu: &mut Cpu, width: u32, height: u32) -> u32 {
+    let (dw, dh) = banshee_shown(width, height);
+    let desktop = screen::desktop(cpu);
+    (dw * 2 * dh)
+        .max(desktop.pitch * desktop.height)
+        .next_multiple_of(0x1000)
+}
+
+/// Whether the board could open a display of `width` x `height` with
+/// `colors` colour buffers and `auxes` auxiliary buffers, as
+/// `open_display` checks before it changes anything (Glide 3's
+/// grQueryResolutions).
+pub fn fits(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32) -> bool {
+    let Some(board) = board(cpu) else {
+        return false;
+    };
+    if !buffers_ok(width, height, colors, auxes) {
+        return false;
+    }
+    match board.card {
+        Card::Banshee => {
+            let floor = banshee_floor(cpu, width, height);
+            banshee_layout(width, height, colors, auxes, floor).is_some()
+        }
+        _ => voodoo_layout(board, width, height, colors, auxes).is_some(),
+    }
+}
+
+/// Whether any board takes a display of `width` x `height` with
+/// `colors` colour buffers and `auxes` auxiliary buffers: double or
+/// triple buffered, with one depth or alpha buffer at most.
+fn buffers_ok(width: u32, height: u32, colors: u32, auxes: u32) -> bool {
+    width != 0 && height != 0 && (2..=3).contains(&colors) && auxes <= 1
+}
+
 /// An fbiInit register as the card has it.
 fn read_init(cpu: &Cpu, reg: usize) -> u32 {
     cpu.bus.voodoo.as_ref().map_or(0, |v| v.reg[reg])
@@ -437,38 +531,96 @@ fn read_init(cpu: &Cpu, reg: usize) -> u32 {
 /// its top, tiled, and the overlay shows the front one over the mode's
 /// picture; the textures have the memory below them.
 fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32) -> bool {
-    if width > 1600 || height > 1200 {
-        return false;
-    }
-    // Small modes are shown doubled, as the card's library did.
-    let doubled = width <= 400;
-    let (dw, dh) = if doubled {
-        (width * 2, height * 2)
-    } else {
-        (width, height)
-    };
-    // What the picture of the mode will take, and whether the buffers
-    // fit above it, before anything changes.
-    let floor = (dw * 2 * dh).next_multiple_of(0x1000);
+    let (dw, dh) = banshee_shown(width, height);
+    // Whether the buffers fit above the picture, before anything
+    // changes.
+    let floor = banshee_floor(cpu, width, height);
     let Some(layout) = banshee_layout(width, height, colors, auxes, floor) else {
         return false;
     };
     let Some(mode) = display::take(cpu, dw, dh, 16) else {
         return false;
     };
-    let Ok(block) = display::alloc(cpu, b::MEMORY as u32 - floor) else {
+    if display::alloc_rest(cpu).is_err() {
         display::give_back(cpu);
         return false;
-    };
+    }
 
     let tiles = layout.tiles;
-    let stride = tiles << 16 | (mode.pitch & 0x7FFF);
+    let s = &mut state(cpu).screen;
+    (s.width, s.height) = (width, height);
+    s.color = layout.color;
+    s.aux = layout.aux;
+    s.tiles = tiles;
+    s.buffer_bytes = layout.bytes;
+    s.front = 0;
+    s.back = 1;
+    show_banshee(cpu, mode.pitch);
+
+    // The 3D engine's buffers.
+    let tiled = 1 << 15 | tiles;
+    write(cpu, ALL, render3d::COL_BUFFER_STRIDE, tiled);
+    write(cpu, ALL, render3d::AUX_BUFFER_STRIDE, tiled);
+    write(cpu, ALL, render3d::AUX_BUFFER_ADDR, layout.aux);
+    write(cpu, ALL, render3d::COL_BUFFER_ADDR, layout.color[1]);
+
+    // The textures from the floor; the two units share it, a half each.
+    let room = layout.start - floor;
+    let tmus = board(cpu).map_or(1, |b| b.tmus);
+    let s = &mut state(cpu).screen;
+    if tmus > 1 {
+        let half = (room / 2) & !0xFFF;
+        s.tex_base = [floor, floor + half];
+        s.tex_size = [half, room - half];
+    } else {
+        s.tex_base = [floor, floor];
+        s.tex_size = [room, 0];
+    }
+    true
+}
+
+/// The size of the mode that shows Glide's `width` x `height`: small
+/// ones are shown doubled, as the card's library did.
+fn banshee_shown(width: u32, height: u32) -> (u32, u32) {
+    if width <= 400 {
+        (width * 2, height * 2)
+    } else {
+        (width, height)
+    }
+}
+
+/// Take the display back for the open buffers (grSstControl): the same
+/// mode, and the memory above it Glide's again, with the textures and
+/// buffers where they were.
+fn reopen_banshee(cpu: &mut Cpu) -> bool {
+    let s = &state(cpu).screen;
+    let (dw, dh) = banshee_shown(s.width, s.height);
+    let Some(mode) = display::take(cpu, dw, dh, 16) else {
+        return false;
+    };
+    if display::alloc_rest(cpu).is_err() {
+        display::give_back(cpu);
+        return false;
+    }
+    show_banshee(cpu, mode.pitch);
+    true
+}
+
+/// Point the overlay at the front buffer of the open display, over the
+/// picture of a mode with `pitch` bytes a row, and the aperture at the
+/// buffers (`set_aperture`).
+fn show_banshee(cpu: &mut Cpu, pitch: u32) {
+    let s = &state(cpu).screen;
+    let (width, height, tiles) = (s.width, s.height, s.tiles);
+    let (dw, dh) = banshee_shown(width, height);
+    let front = s.color[s.front as usize];
+    let stride = tiles << 16 | (pitch & 0x7FFF);
     let mut cfg = ext(cpu, b::VID_PROC_CFG)
         | 1 << 21
         | b::VIDPROC_OVERLAY_TILED
         | b::VIDPROC_OVERLAY_ENABLE
         | b::VIDPROC_OVERLAY_CLUT_SEL;
-    if doubled {
+    if dw != width {
         cfg |= b::VIDPROC_H_SCALE | b::VIDPROC_V_SCALE;
     }
     set_ext(cpu, b::VID_DESKTOP_OVERLAY_STRIDE, stride);
@@ -482,45 +634,25 @@ fn open_banshee(cpu: &mut Cpu, width: u32, height: u32, colors: u32, auxes: u32)
     set_ext(cpu, b::VID_OVERLAY_DVDY, (height << 20) / dh);
     set_ext(cpu, b::VID_OVERLAY_DVDY_OFFSET, 0);
     set_ext(cpu, b::VID_PROC_CFG, cfg);
-    // The aperture: tiled from the buffers on, rows of 4096 bytes; linear
-    // below them.
-    set_ext(
-        cpu,
-        b::LFB_MEMORY_CONFIG,
-        (layout.start >> 12) & 0x1FFF | 2 << 13 | tiles << 16,
-    );
+    set_aperture(cpu);
     let misc = ext(cpu, b::MISC_INIT0) & !(0xFFF << 18);
     set_ext(cpu, b::MISC_INIT0, misc | (height - 1) << 18);
 
-    // The 3D engine's buffers, the front one shown.
-    let tiled = 1 << 15 | tiles;
-    write(cpu, ALL, render3d::COL_BUFFER_STRIDE, tiled);
-    write(cpu, ALL, render3d::AUX_BUFFER_STRIDE, tiled);
-    write(cpu, ALL, render3d::AUX_BUFFER_ADDR, layout.aux);
-    write(cpu, ALL, render3d::COL_BUFFER_ADDR, layout.color[1]);
-    write(cpu, ALL, render3d::LEFT_OVERLAY_BUF, layout.color[0]);
+    write(cpu, ALL, render3d::LEFT_OVERLAY_BUF, front);
     write(cpu, ALL, render3d::SWAP_PENDING, 1);
     write(cpu, ALL, SWAPBUFFER_CMD, 0);
+}
 
-    let s = &mut state(cpu).screen;
-    s.color = layout.color;
-    s.aux = layout.aux;
-    s.tiles = tiles;
-    s.buffer_bytes = layout.bytes;
-    // The textures from the block's start; the two units share it, a half
-    // each.
-    let room = layout.start - block;
-    let tmus = board(cpu).map_or(1, |b| b.tmus);
-    let s = &mut state(cpu).screen;
-    if tmus > 1 {
-        let half = (room / 2) & !0xFFF;
-        s.tex_base = [block, block + half];
-        s.tex_size = [half, room - half];
-    } else {
-        s.tex_base = [block, block];
-        s.tex_size = [room, 0];
-    }
-    true
+/// The aperture of the open display: tiled from the buffers on, rows of
+/// 4096 bytes; linear below them.
+fn set_aperture(cpu: &mut Cpu) {
+    let s = &state(cpu).screen;
+    let (start, tiles) = (s.color[0], s.tiles);
+    set_ext(
+        cpu,
+        b::LFB_MEMORY_CONFIG,
+        (start >> 12) & 0x1FFF | 2 << 13 | tiles << 16,
+    );
 }
 
 /// Close the card's display and give the screen back.
@@ -554,28 +686,60 @@ fn close_banshee(cpu: &mut Cpu) {
 
 /// Set the gamma table: `gamma` 1.0 is linear.
 pub fn set_gamma(cpu: &mut Cpu, gamma: f32) {
+    set_gamma_rgb(cpu, [gamma; 3]);
+}
+
+/// The gamma of red, green and blue each (Glide 3's
+/// guGammaCorrectionRGB).
+pub fn set_gamma_rgb(cpu: &mut Cpu, gamma: [f32; 3]) {
     let Some(board) = board(cpu) else { return };
-    let gamma = if gamma.is_finite() && gamma > 0.0 {
-        gamma as f64
-    } else {
-        1.0
-    };
-    let level = |i: u32, n: u32| -> u32 {
-        let v = (i as f64 / n as f64).powf(1.0 / gamma) * 255.0 + 0.5;
-        (v as u32).min(255)
-    };
-    if board.card == Card::Banshee {
-        // The overlay's lookup table, the card's second.
-        for i in 0..256 {
-            let v = level(i, 255);
-            set_ext(cpu, b::DAC_ADDR, 256 + i);
-            set_ext(cpu, b::DAC_DATA, v << 16 | v << 8 | v);
+    let gamma = gamma.map(|g| {
+        if g.is_finite() && g > 0.0 {
+            g as f64
+        } else {
+            1.0
         }
-        return;
-    }
-    for i in 0..=32 {
-        let v = level(i, 32);
-        write(cpu, FBI, CLUT_DATA, i << 24 | v << 16 | v << 8 | v);
+    });
+    let n = gamma_levels(board) - 1;
+    let level = |i: u32, gamma: f64| -> u8 {
+        let v = (i as f64 / n as f64).powf(1.0 / gamma) * 255.0 + 0.5;
+        (v as u32).min(255) as u8
+    };
+    let table: Vec<[u8; 3]> = (0..=n).map(|i| gamma.map(|g| level(i, g))).collect();
+    load_gamma(cpu, &table);
+}
+
+/// The entries of the board's gamma lookup table: 256 on a Banshee or
+/// Voodoo3; 33 on a Voodoo Graphics or Voodoo2, the last of them the
+/// level of full intensity.
+pub fn gamma_levels(board: Board) -> u32 {
+    if board.card == Card::Banshee { 256 } else { 33 }
+}
+
+/// Load the gamma lookup table: red, green and blue of each entry, as
+/// many as `gamma_levels`; a shorter table's last entry goes on to the
+/// end. A Voodoo Graphics' or Voodoo2's 33rd entry is full intensity
+/// unless the table gives it: Glide 3 tells programs the table has 32
+/// (GR_GAMMA_TABLE_ENTRIES), and the card blends the 32nd towards the
+/// 33rd for the brightest levels.
+pub fn load_gamma(cpu: &mut Cpu, table: &[[u8; 3]]) {
+    let Some(board) = board(cpu) else { return };
+    let Some(&last) = table.last() else { return };
+    let levels = gamma_levels(board);
+    for i in 0..levels {
+        let past = if board.card != Card::Banshee && i == levels - 1 {
+            [0xFF; 3]
+        } else {
+            last
+        };
+        let [r, g, bl] = table.get(i as usize).copied().unwrap_or(past).map(u32::from);
+        if board.card == Card::Banshee {
+            // The overlay's lookup table, the card's second.
+            set_ext(cpu, b::DAC_ADDR, 256 + i);
+            set_ext(cpu, b::DAC_DATA, r << 16 | g << 8 | bl);
+        } else {
+            write(cpu, FBI, CLUT_DATA, i << 24 | r << 16 | g << 8 | bl);
+        }
     }
 }
 
@@ -630,6 +794,10 @@ fn unmap_views(cpu: &mut Cpu) {
 /// yet: a Voodoo Graphics' or Voodoo2's 4 MB, a Banshee's aperture over
 /// Glide's buffers.
 pub fn view(cpu: &mut Cpu) -> Option<u32> {
+    // A mode set while the display is given back makes BAR1 linear.
+    if banshee(cpu) && !display::glide_has_display(cpu) {
+        set_aperture(cpu);
+    }
     let s = &state(cpu).screen;
     if s.view.at != 0 {
         return Some(s.view.at);

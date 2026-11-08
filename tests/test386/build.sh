@@ -1,6 +1,6 @@
 #!/bin/sh
 # Fetch and assemble test386.asm (github.com/barotto/test386.asm) into
-# target/test386/ for the conformance harness in tests/test386.rs (see
+# target/test386/ for the conformance harness in tests/cpu/test386.rs (see
 # docs/cpu-tests.md). Needs git and nasm.
 #
 # The ROM is configured for the emulator: POST codes on port 190h, text
@@ -36,4 +36,4 @@ sed -i \
 (cd "$DEST" && nasm -i./src/ -f bin src/test386.asm -w-all -l test386.lst -o test386.bin)
 
 echo "Built $DEST/test386.bin ($(wc -c < "$DEST/test386.bin") bytes)"
-echo "Run: TEST386_DIR=$DEST cargo test --release --test test386 -- --ignored --nocapture"
+echo "Run: TEST386_DIR=$DEST cargo test --release --test cpu test386:: -- --ignored --nocapture"

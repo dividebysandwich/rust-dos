@@ -291,7 +291,10 @@ impl Item {
             ShellSuggestions => on_off(|s, on| s.shell.autosuggest = on),
             ShellColors => on_off(|s, on| s.shell.colors = on),
             SaveShellHistory => on_off(|s, on| s.shell.save_history = on),
-            VersionCheck => on_off(|s, on| s.version_check = on),
+            VersionCheck => on_off(|s, on| {
+                use crate::version_check::Setting;
+                s.version_check = if on { Setting::On } else { Setting::Off };
+            }),
             AlmanacAuto => on_off(|s, on| s.almanac_auto = on),
             GameFixes => on_off(|s, on| s.game_fixes = on),
             Rewind => on_off(|s, on| s.rewind = on),
@@ -361,6 +364,7 @@ impl Item {
                 use crate::mixer::SbFilter as Filter;
                 each(s, [Filter::Auto, Filter::Off], |s, filter| s.mixer.sb_filter = filter)
             }
+            SbCoupling => on_off(|s, on| s.mixer.sb_coupling = on),
             Reverb => each(s, ReverbPreset::ALL, |s, preset| s.mixer.reverb = preset),
             Chorus => each(s, ChorusPreset::ALL, |s, preset| s.mixer.chorus = preset),
             AudioBlocksize => each(s, crate::audio::BLOCKSIZES, |s, frames| s.audio_buffer.blocksize = frames),

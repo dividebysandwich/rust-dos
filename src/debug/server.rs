@@ -2169,9 +2169,10 @@ STATUS / SCREEN
                                            frame, per 1/4 s: the Stats page's numbers and emulated_speed
                                            (emulated s per wall s, full speed while near 1); fps the
                                            program draws; cpu_use is the percent of one host core the
-                                           main thread is busy; frame_times: longest frame and
-                                           percentiles over the last 1024 frames, in ms
-  GET  /api/underruns                      the sound device's underruns: events (stretches of dry
+                                           main thread is busy; audio_driver; frame_times: longest
+                                           frame and percentiles over the last 1024 frames, in ms
+  GET  /api/underruns                      the sound device's underruns: audio_driver (what played:
+                                           never measure on dummy), events (stretches of dry
                                            checks), dry_checks, and the last 32 with the time since
                                            the last pump, the queue then, the speed, and that time
                                            by cpu, video, present, wait and other

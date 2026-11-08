@@ -1,0 +1,1578 @@
+//! The built-in Windows' Glide (GLIDE2X.DLL): Win32 programs that open
+//! the 3dfx card, draw shaded, textured, depth-tested, blended and fogged
+//! triangles, swap and read the pixels back, on a Voodoo Graphics, a
+//! Voodoo2 and a Voodoo3; one without a 3dfx card; and one that ends
+//! without closing Glide. Glide 3 (GLIDE3X.DLL) draws a program's own
+//! vertices, in arrays, strips and fans, and in clip coordinates. The
+//! programs are PE files made with rust-dos-pe's builder, their code
+//! assembled with iced, as in win32_ddraw_tests.rs.
+
+use iced_x86::code_asm::*;
+use rust_dos::cpu::{Cpu, HostConsole};
+use rust_dos::exec::{NoHook, StopReason, run_batch};
+use rust_dos::voodoo::Board;
+use rust_dos_pe::{self as pe, Builder, Imp};
+use std::fs;
+use std::path::PathBuf;
+
+const BASE: u32 = 0x40_0000;
+
+/// Where a test program's data and imports are, for its code.
+struct Layout {
+    data: u32,
+    iat: Vec<u32>,
+    /// The Glide functions it imports, the first of `iat`.
+    names: &'static [&'static str],
+}
+
+impl Layout {
+    fn at(&self, offset: u32) -> u64 {
+        (self.data + offset) as u64
+    }
+
+    /// The place in `iat` of the Glide function `name`.
+    fn import(&self, name: &str) -> usize {
+        self.names.iter().position(|n| *n == name).unwrap()
+    }
+}
+
+/// A program importing GLIDE2X.DLL's `GLIDE`, KERNEL32.DLL's ExitProcess
+/// and DDRAW.DLL's DirectDrawCreate, with `data` and the code `f` makes,
+/// and where its data is.
+fn program(
+    data: &[u8],
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
+    program_of("GLIDE2X.DLL", GLIDE, data, f)
+}
+
+/// A program importing `names` of the Glide DLL `dll`, and the others
+/// `program` imports.
+fn program_of(
+    dll: &str,
+    names: &'static [&'static str],
+    data: &[u8],
+    f: impl FnOnce(&mut CodeAssembler, &Layout) -> Result<(), IcedError>,
+) -> (Vec<u8>, u32) {
+    let mut b = Builder::exe(BASE);
+    let glide: Vec<Imp> = names.iter().map(|n| Imp::Name(n)).collect();
+    let kernel = [Imp::Name("ExitProcess")];
+    let ddraw = [Imp::Name("DirectDrawCreate")];
+    let iat = b
+        .imports(&[
+            (dll, &glide),
+            ("KERNEL32.DLL", &kernel),
+            ("DDRAW.DLL", &ddraw),
+        ])
+        .concat();
+    let data_rva = b.section(
+        ".data",
+        data,
+        pe::SCN_INITIALIZED_DATA | pe::SCN_READ | pe::SCN_WRITE,
+    );
+    let layout = Layout {
+        data: BASE + data_rva,
+        iat,
+        names,
+    };
+    let code_rva = b.next_rva();
+    let mut a = CodeAssembler::new(32).unwrap();
+    f(&mut a, &layout).unwrap();
+    let code = a.assemble((BASE + code_rva) as u64).unwrap();
+    assert_eq!(
+        b.section(
+            ".text",
+            &code,
+            pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ
+        ),
+        code_rva
+    );
+    b.entry(code_rva);
+    (b.build(), layout.data)
+}
+
+/// A machine with the built-in Windows on, the 3dfx card `board` and
+/// `program` loaded from the shell as T.EXE.
+fn machine(test: &str, board: Option<Board>, program: Vec<u8>) -> Cpu {
+    let base = PathBuf::from("target/test_win32_glide").join(test);
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("T.EXE"), program).unwrap();
+    let mut cpu = Cpu::new(base);
+    cpu.bus.configure_voodoo(board);
+    cpu.bus.win32.enabled = true;
+    cpu.host_console = Some(HostConsole::default());
+    cpu.load_shell();
+    assert!(cpu.load_executable("T.EXE", None));
+    cpu
+}
+
+fn printed(cpu: &Cpu) -> String {
+    let console = cpu.host_console.as_ref().unwrap();
+    let mut text = console.stdout.clone();
+    text.extend(&console.stderr);
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+/// The program's dword at `lin`, through its page tables.
+fn peek(cpu: &Cpu, lin: u32) -> u32 {
+    let pde = cpu
+        .bus
+        .read_32((cpu.cr3 & !0xFFF) as usize + 4 * (lin >> 22) as usize);
+    assert!(pde & 1 != 0, "no page table for {lin:X}");
+    let pte = cpu
+        .bus
+        .read_32((pde & !0xFFF) as usize + 4 * ((lin >> 12) & 0x3FF) as usize);
+    assert!(pte & 1 != 0, "no page at {lin:X}");
+    cpu.bus
+        .read_32((pte & !0xFFF) as usize + (lin & 0xFFF) as usize)
+}
+
+/// Run the program until it says it is done (DONE in its data).
+fn run_until_done(cpu: &mut Cpu, data: u32) {
+    for _ in 0..600 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        run_batch(cpu, &mut NoHook, false);
+        let paged = cpu.cr0 & 0x8000_0001 == 0x8000_0001;
+        if paged && peek(cpu, data + DONE) == 1 {
+            return;
+        }
+    }
+    panic!(
+        "the program didn't finish: {:?}, at {:X}",
+        printed(cpu),
+        cpu.eip()
+    );
+}
+
+/// Run the program to its end.
+fn run_to_exit(cpu: &mut Cpu) {
+    for _ in 0..600 {
+        cpu.bus.start_batch(cpu.bus.clock.icount + 100_000);
+        if run_batch(cpu, &mut NoHook, false) == StopReason::ShellReloaded {
+            return;
+        }
+    }
+    panic!("the program didn't end: {:?}", printed(cpu));
+}
+
+// The functions the programs import, and their places.
+const GLIDE: &[&str] = &[
+    "_grGlideInit@0",
+    "_grSstQueryHardware@4",
+    "_grSstSelect@4",
+    "_grSstWinOpen@28",
+    "_grBufferClear@12",
+    "_guColorCombineFunction@4",
+    "_grDrawTriangle@12",
+    "_grDepthBufferMode@4",
+    "_grDepthBufferFunction@4",
+    "_grDepthMask@4",
+    "_grAlphaBlendFunction@16",
+    "_guAlphaSource@4",
+    "_grTexMinAddress@4",
+    "_grTexDownloadMipMap@16",
+    "_grTexSource@16",
+    "_guTexCombineFunction@8",
+    "_grFogColorValue@4",
+    "_grFogMode@4",
+    "_grFogTable@4",
+    "_grLfbReadRegion@28",
+    "_grBufferSwap@4",
+    "_grBufferNumPending@0",
+    "_grLfbLock@24",
+    "_grLfbUnlock@8",
+    "_grGlideShutdown@0",
+    "_grSstScreenWidth@0",
+    "_grTexFilterMode@12",
+    "_grDitherMode@4",
+    "_grSstControl@4",
+];
+
+/// The functions' values the programs use.
+const GR_RESOLUTION_512X384: u32 = 3;
+const GR_RESOLUTION_640X480: u32 = 7;
+const GR_REFRESH_60HZ: u32 = 0;
+const GR_COLORFORMAT_ARGB: u32 = 0;
+const GR_ORIGIN_UPPER_LEFT: u32 = 0;
+const GR_COLORCOMBINE_ITRGB: u32 = 2;
+const GR_COLORCOMBINE_DECAL_TEXTURE: u32 = 4;
+const GR_ALPHASOURCE_ITERATED_ALPHA: u32 = 1;
+const GR_TEXTURECOMBINE_DECAL: u32 = 1;
+const GR_DEPTHBUFFER_DISABLE: u32 = 0;
+const GR_DITHER_DISABLE: u32 = 0;
+const GR_DEPTHBUFFER_ZBUFFER: u32 = 1;
+const GR_CMP_LESS: u32 = 1;
+const GR_BLEND_ZERO: u32 = 0;
+const GR_BLEND_SRC_ALPHA: u32 = 1;
+const GR_BLEND_ONE: u32 = 4;
+const GR_BLEND_ONE_MINUS_SRC_ALPHA: u32 = 5;
+const GR_FOG_DISABLE: u32 = 0;
+const GR_FOG_WITH_TABLE: u32 = 2;
+const GR_BUFFER_FRONTBUFFER: u32 = 0;
+const GR_BUFFER_BACKBUFFER: u32 = 1;
+const GR_LFB_READ_ONLY: u32 = 0;
+const GR_LFBWRITEMODE_ANY: u32 = 0xFF;
+const GR_MIPMAPLEVELMASK_BOTH: u32 = 3;
+
+// The data's layout.
+
+const RESULTS: u32 = 0x40;
+const DONE: u32 = 0x140;
+const HWCONFIG: u32 = 0x200;
+const LFB_INFO: u32 = 0x300;
+const TEX_INFO: u32 = 0x320;
+const FOG_TABLE: u32 = 0x340;
+/// The pixels read back, 16 bits each.
+const PIXELS: u32 = 0x400;
+/// A dword read through the locked frame buffer.
+const LOCK_READ: u32 = 0x480;
+/// The DirectDraw object's pointer.
+const DDRAW: u32 = 0x490;
+/// An 8x8 texture of 5-6-5 texels: blue on the left, red on the right.
+const TEXELS: u32 = 0x500;
+const VERTICES: u32 = 0x600;
+const DATA_SIZE: usize = 0x1000;
+
+fn put(data: &mut [u8], offset: u32, bytes: &[u8]) {
+    data[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+}
+
+fn put32(data: &mut [u8], offset: u32, value: u32) {
+    put(data, offset, &value.to_le_bytes());
+}
+
+/// A GrVertex: x, y, z, r, g, b, ooz, a, oow, then texture unit 0's
+/// sow, tow and oow and unit 1's.
+#[derive(Clone, Copy, Default)]
+struct V {
+    x: f32,
+    y: f32,
+    rgb: [f32; 3],
+    a: f32,
+    ooz: f32,
+    st: [f32; 2],
+}
+
+const VERTEX: u32 = 60;
+
+fn put_vertex(data: &mut [u8], index: u32, v: V) {
+    let floats = [
+        v.x, v.y, 0.0, v.rgb[0], v.rgb[1], v.rgb[2], v.ooz, v.a, 1.0, v.st[0], v.st[1], 1.0,
+        v.st[0], v.st[1], 1.0,
+    ];
+    for (i, f) in floats.iter().enumerate() {
+        put32(data, VERTICES + VERTEX * index + 4 * i as u32, f.to_bits());
+    }
+}
+
+/// An argument a program passes.
+#[derive(Clone, Copy)]
+enum Arg {
+    I(u32),
+    At(u32),
+    /// Vertex `n`'s address.
+    Vtx(u32),
+}
+
+struct Calls {
+    next: u32,
+}
+
+impl Calls {
+    /// Call `name` with `args`, its result kept; the result's place.
+    fn call(
+        &mut self,
+        a: &mut CodeAssembler,
+        l: &Layout,
+        name: &str,
+        args: &[Arg],
+    ) -> Result<u32, IcedError> {
+        for arg in args.iter().rev() {
+            match *arg {
+                Arg::I(v) => a.push(v as i32)?,
+                Arg::At(o) => a.push(l.at(o) as i32)?,
+                Arg::Vtx(n) => a.push(l.at(VERTICES + VERTEX * n) as i32)?,
+            }
+        }
+        a.call(dword_ptr(l.iat[l.import(name)] as u64))?;
+        a.mov(dword_ptr(l.at(RESULTS + 4 * self.next)), eax)?;
+        self.next += 1;
+        Ok(self.next - 1)
+    }
+
+    fn triangle(
+        &mut self,
+        a: &mut CodeAssembler,
+        l: &Layout,
+        first: u32,
+    ) -> Result<u32, IcedError> {
+        self.call(
+            a,
+            l,
+            "_grDrawTriangle@12",
+            &[Arg::Vtx(first), Arg::Vtx(first + 1), Arg::Vtx(first + 2)],
+        )
+    }
+
+    /// Read pixel (x, y) of `buffer` into PIXELS slot `slot`.
+    fn pixel(
+        &mut self,
+        a: &mut CodeAssembler,
+        l: &Layout,
+        buffer: u32,
+        (x, y): (u32, u32),
+        slot: u32,
+    ) -> Result<u32, IcedError> {
+        self.call(
+            a,
+            l,
+            "_grLfbReadRegion@28",
+            &[
+                Arg::I(buffer),
+                Arg::I(x),
+                Arg::I(y),
+                Arg::I(1),
+                Arg::I(1),
+                Arg::I(2),
+                Arg::At(PIXELS + 2 * slot),
+            ],
+        )
+    }
+}
+
+/// The end of a program: DONE set, and it spins.
+fn finish(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    a.mov(dword_ptr(l.at(DONE)), 1)?;
+    let mut again = a.create_label();
+    a.set_label(&mut again)?;
+    a.jmp(again)
+}
+
+fn result(cpu: &Cpu, data: u32, index: u32) -> u32 {
+    peek(cpu, data + RESULTS + 4 * index)
+}
+
+fn pixel(cpu: &Cpu, data: u32, slot: u32) -> u16 {
+    let dword = peek(cpu, data + PIXELS + 2 * (slot & !1));
+    (dword >> (16 * (slot & 1))) as u16
+}
+
+/// A triangle `size` wide and high, its right angle at (x0, y0), the top
+/// left.
+fn tri(data: &mut [u8], first: u32, (x0, y0): (f32, f32), size: f32, v: V) {
+    put_vertex(data, first, V { x: x0, y: y0, ..v });
+    put_vertex(
+        data,
+        first + 1,
+        V {
+            x: x0 + size,
+            y: y0,
+            ..v
+        },
+    );
+    put_vertex(
+        data,
+        first + 2,
+        V {
+            x: x0,
+            y: y0 + size,
+            ..v
+        },
+    );
+}
+
+const RED: [f32; 3] = [255.0, 0.0, 0.0];
+const GREEN: [f32; 3] = [0.0, 255.0, 0.0];
+const BLUE: [f32; 3] = [0.0, 0.0, 255.0];
+
+// Where each test draws, and the pixel it reads there.
+const SHADED: (u32, u32) = (20, 20);
+const GOURAUD: (u32, u32) = (120, 30);
+const DEPTH: (u32, u32) = (220, 20);
+const BLENDED: (u32, u32) = (320, 20);
+const TEXTURED_LEFT: (u32, u32) = (410, 30);
+const TEXTURED_RIGHT: (u32, u32) = (450, 30);
+const FOGGED: (u32, u32) = (520, 20);
+const CLEARED: (u32, u32) = (600, 400);
+
+/// The program the drawing tests run: it opens a 640x480 display and
+/// draws a flat triangle, a Gouraud-shaded one, three overlapping ones
+/// with the depth test, a blended one, a textured square and a fogged
+/// triangle, reads pixels of the back buffer, swaps, reads one of the
+/// front buffer and one through the locked frame buffer.
+fn drawing_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    // Vertices 0-2: red.
+    let flat = V {
+        rgb: RED,
+        a: 255.0,
+        ..V::default()
+    };
+    tri(&mut d, 0, (10.0, 10.0), 60.0, flat);
+    // 3-5: red, green and blue corners.
+    put_vertex(
+        &mut d,
+        3,
+        V {
+            x: 100.0,
+            y: 10.0,
+            rgb: RED,
+            ..V::default()
+        },
+    );
+    put_vertex(
+        &mut d,
+        4,
+        V {
+            x: 180.0,
+            y: 10.0,
+            rgb: GREEN,
+            ..V::default()
+        },
+    );
+    put_vertex(
+        &mut d,
+        5,
+        V {
+            x: 100.0,
+            y: 90.0,
+            rgb: BLUE,
+            ..V::default()
+        },
+    );
+    // 6-14: blue far, green near, red between.
+    tri(
+        &mut d,
+        6,
+        (210.0, 10.0),
+        60.0,
+        V {
+            rgb: BLUE,
+            ooz: 40000.0,
+            ..V::default()
+        },
+    );
+    tri(
+        &mut d,
+        9,
+        (210.0, 10.0),
+        60.0,
+        V {
+            rgb: GREEN,
+            ooz: 20000.0,
+            ..V::default()
+        },
+    );
+    tri(
+        &mut d,
+        12,
+        (210.0, 10.0),
+        60.0,
+        V {
+            rgb: RED,
+            ooz: 30000.0,
+            ..V::default()
+        },
+    );
+    // 15-20: red, then white at half alpha over it.
+    tri(&mut d, 15, (310.0, 10.0), 60.0, flat);
+    tri(
+        &mut d,
+        18,
+        (310.0, 10.0),
+        60.0,
+        V {
+            rgb: [255.0; 3],
+            a: 128.0,
+            ..V::default()
+        },
+    );
+    // 21-26: a 64-pixel square, the texture's 256 by 256 over it.
+    let corner = |x: f32, y: f32| V {
+        x: 400.0 + x * 64.0,
+        y: 10.0 + y * 64.0,
+        st: [x * 256.0, y * 256.0],
+        ..V::default()
+    };
+    for (i, (x, y)) in [(0., 0.), (1., 0.), (1., 1.), (0., 0.), (1., 1.), (0., 1.)]
+        .into_iter()
+        .enumerate()
+    {
+        put_vertex(&mut d, 21 + i as u32, corner(x, y));
+    }
+    // 27-29: red under blue fog.
+    tri(&mut d, 27, (510.0, 10.0), 60.0, flat);
+    for i in 0..64 {
+        d[(FOG_TABLE + i) as usize] = 255;
+    }
+    // The texture: an 8x8 level (GR_LOD_8), square, 5-6-5.
+    for t in 0..8u32 {
+        for s in 0..8u32 {
+            let texel: u16 = if s < 4 { 0x001F } else { 0xF800 };
+            put(&mut d, TEXELS + 2 * (t * 8 + s), &texel.to_le_bytes());
+        }
+    }
+    for (i, v) in [5u32, 5, 3, 0xA].iter().enumerate() {
+        put32(&mut d, TEX_INFO + 4 * i as u32, *v);
+    }
+    put32(&mut d, LFB_INFO, 20);
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+        c.call(a, l, "_grSstSelect@4", &[Arg::I(0)])?;
+        c.call(
+            a,
+            l,
+            "_grSstWinOpen@28",
+            &[
+                Arg::I(0),
+                Arg::I(GR_RESOLUTION_640X480),
+                Arg::I(GR_REFRESH_60HZ),
+                Arg::I(GR_COLORFORMAT_ARGB),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(2),
+                Arg::I(1),
+            ],
+        )?;
+        c.call(a, l, "_grSstScreenWidth@0", &[])?;
+        // Exact colours, and depth buffering on until the depth test is
+        // done, so the clear clears the depth buffer.
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        c.call(
+            a,
+            l,
+            "_grDepthBufferMode@4",
+            &[Arg::I(GR_DEPTHBUFFER_ZBUFFER)],
+        )?;
+        c.call(a, l, "_grDepthBufferFunction@4", &[Arg::I(GR_CMP_LESS)])?;
+        c.call(a, l, "_grDepthMask@4", &[Arg::I(1)])?;
+        // Grey everywhere.
+        c.call(
+            a,
+            l,
+            "_grBufferClear@12",
+            &[Arg::I(0x0080_8080), Arg::I(0), Arg::I(0xFFFF)],
+        )?;
+        c.call(
+            a,
+            l,
+            "_guColorCombineFunction@4",
+            &[Arg::I(GR_COLORCOMBINE_ITRGB)],
+        )?;
+        c.triangle(a, l, 0)?;
+        c.triangle(a, l, 3)?;
+        // The depth test.
+        c.triangle(a, l, 6)?;
+        c.triangle(a, l, 9)?;
+        c.triangle(a, l, 12)?;
+        c.call(a, l, "_grDepthMask@4", &[Arg::I(0)])?;
+        c.call(
+            a,
+            l,
+            "_grDepthBufferMode@4",
+            &[Arg::I(GR_DEPTHBUFFER_DISABLE)],
+        )?;
+        // Blending.
+        c.triangle(a, l, 15)?;
+        c.call(
+            a,
+            l,
+            "_guAlphaSource@4",
+            &[Arg::I(GR_ALPHASOURCE_ITERATED_ALPHA)],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grAlphaBlendFunction@16",
+            &[
+                Arg::I(GR_BLEND_SRC_ALPHA),
+                Arg::I(GR_BLEND_ONE_MINUS_SRC_ALPHA),
+                Arg::I(GR_BLEND_ONE),
+                Arg::I(GR_BLEND_ZERO),
+            ],
+        )?;
+        c.triangle(a, l, 18)?;
+        c.call(
+            a,
+            l,
+            "_grAlphaBlendFunction@16",
+            &[
+                Arg::I(GR_BLEND_ONE),
+                Arg::I(GR_BLEND_ZERO),
+                Arg::I(GR_BLEND_ONE),
+                Arg::I(GR_BLEND_ZERO),
+            ],
+        )?;
+        // The texture, at the start of texture unit 0's memory.
+        let start = c.call(a, l, "_grTexMinAddress@4", &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(TEX_INFO + 16)), l.at(TEXELS) as i32)?;
+        a.mov(eax, dword_ptr(l.at(RESULTS + 4 * start)))?;
+        a.push(l.at(TEX_INFO) as i32)?;
+        a.push(GR_MIPMAPLEVELMASK_BOTH as i32)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[l.import("_grTexDownloadMipMap@16")] as u64))?;
+        a.mov(eax, dword_ptr(l.at(RESULTS + 4 * start)))?;
+        a.push(l.at(TEX_INFO) as i32)?;
+        a.push(GR_MIPMAPLEVELMASK_BOTH as i32)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[l.import("_grTexSource@16")] as u64))?;
+        c.call(
+            a,
+            l,
+            "_grTexFilterMode@12",
+            &[Arg::I(0), Arg::I(0), Arg::I(0)],
+        )?;
+        c.call(
+            a,
+            l,
+            "_guTexCombineFunction@8",
+            &[Arg::I(0), Arg::I(GR_TEXTURECOMBINE_DECAL)],
+        )?;
+        c.call(
+            a,
+            l,
+            "_guColorCombineFunction@4",
+            &[Arg::I(GR_COLORCOMBINE_DECAL_TEXTURE)],
+        )?;
+        c.triangle(a, l, 21)?;
+        c.triangle(a, l, 24)?;
+        c.call(
+            a,
+            l,
+            "_guColorCombineFunction@4",
+            &[Arg::I(GR_COLORCOMBINE_ITRGB)],
+        )?;
+        // Fog.
+        c.call(a, l, "_grFogColorValue@4", &[Arg::I(0x0000_00FF)])?;
+        c.call(a, l, "_grFogTable@4", &[Arg::At(FOG_TABLE)])?;
+        c.call(a, l, "_grFogMode@4", &[Arg::I(GR_FOG_WITH_TABLE)])?;
+        c.triangle(a, l, 27)?;
+        c.call(a, l, "_grFogMode@4", &[Arg::I(GR_FOG_DISABLE)])?;
+        // The pixels, from the back buffer.
+        let points = [
+            SHADED,
+            GOURAUD,
+            DEPTH,
+            BLENDED,
+            TEXTURED_LEFT,
+            TEXTURED_RIGHT,
+            FOGGED,
+            CLEARED,
+        ];
+        for (slot, p) in points.into_iter().enumerate() {
+            c.pixel(a, l, GR_BUFFER_BACKBUFFER, p, slot as u32)?;
+        }
+        // Swap, wait for it, and read the front buffer.
+        c.call(a, l, "_grBufferSwap@4", &[Arg::I(1)])?;
+        let mut wait = a.create_label();
+        a.set_label(&mut wait)?;
+        a.call(dword_ptr(l.iat[l.import("_grBufferNumPending@0")] as u64))?;
+        a.test(eax, eax)?;
+        a.jnz(wait)?;
+        c.pixel(a, l, GR_BUFFER_FRONTBUFFER, SHADED, 8)?;
+        // The front buffer through a lock: the dword at the shaded pixel.
+        c.call(
+            a,
+            l,
+            "_grLfbLock@24",
+            &[
+                Arg::I(GR_LFB_READ_ONLY),
+                Arg::I(GR_BUFFER_FRONTBUFFER),
+                Arg::I(GR_LFBWRITEMODE_ANY),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(0),
+                Arg::At(LFB_INFO),
+            ],
+        )?;
+        a.mov(eax, dword_ptr(l.at(LFB_INFO + 8)))?;
+        a.imul_3(eax, eax, SHADED.1 as i32)?;
+        a.add(eax, dword_ptr(l.at(LFB_INFO + 4)))?;
+        a.mov(eax, dword_ptr(eax + 2 * SHADED.0))?;
+        a.mov(dword_ptr(l.at(LOCK_READ)), eax)?;
+        c.call(
+            a,
+            l,
+            "_grLfbUnlock@8",
+            &[Arg::I(GR_LFB_READ_ONLY), Arg::I(GR_BUFFER_FRONTBUFFER)],
+        )?;
+        finish(a, l)
+    })
+}
+
+// The places of the results the tests look at.
+const R_QUERY: u32 = 1;
+const R_OPEN: u32 = 3;
+const R_WIDTH: u32 = 4;
+
+/// A 5-6-5 pixel's red, green and blue.
+fn rgb(p: u16) -> (u16, u16, u16) {
+    (p >> 11, (p >> 5) & 0x3F, p & 0x1F)
+}
+
+/// `memory`: the frame buffer and texture unit megabytes the board
+/// reports.
+fn draws(test: &str, board: Board, memory: (u32, u32)) {
+    let (program, data) = drawing_program();
+    let mut cpu = machine(test, Some(board), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(result(&cpu, data, R_QUERY), 1, "grSstQueryHardware");
+    assert_eq!(peek(&cpu, data + HWCONFIG), 1, "one board");
+    let config = |i: u32| peek(&cpu, data + HWCONFIG + 4 * i);
+    assert_eq!(config(1), 0, "shows as a Voodoo Graphics, as in Glide 2");
+    assert_eq!((config(2), config(7)), memory, "fbRam and tmuRam");
+    assert_eq!(result(&cpu, data, R_OPEN), 1, "grSstWinOpen");
+    assert_eq!(result(&cpu, data, R_WIDTH), 640);
+    let p = |slot| pixel(&cpu, data, slot);
+    assert_eq!(p(0), 0xF800, "the flat triangle");
+    let (r, g, b) = rgb(p(1));
+    assert!(r > 0 && g > 0 && b > 0, "Gouraud shading: {:04X}", p(1));
+    assert_eq!(p(2), 0x07E0, "the depth test keeps the nearest");
+    let (r, g, b) = rgb(p(3));
+    assert!(
+        r == 31 && (28..=36).contains(&g) && (14..=18).contains(&b),
+        "blending: {:04X}",
+        p(3)
+    );
+    assert_eq!(p(4), 0x001F, "the texture's left half");
+    assert_eq!(p(5), 0xF800, "the texture's right half");
+    assert_eq!(p(6), 0x001F, "fog");
+    assert_eq!(p(7), 0x8410, "the clear");
+    assert_eq!(p(8), 0xF800, "after the swap, in the front buffer");
+    let locked = peek(&cpu, data + LOCK_READ) as u16;
+    assert_eq!(locked, 0xF800, "through the locked frame buffer");
+}
+
+#[test]
+fn glide_draws_on_a_voodoo_graphics() {
+    draws("voodoo1", Board::Standard, (2, 2));
+}
+
+#[test]
+fn glide_draws_on_a_voodoo2() {
+    draws("voodoo2", Board::Voodoo2, (4, 2));
+}
+
+#[test]
+fn glide_draws_on_a_voodoo3() {
+    draws("voodoo3", Board::Voodoo3, (12, 2));
+}
+
+/// A program that asks for the card and tries to open it.
+fn query_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    tri(&mut d, 0, (10.0, 10.0), 60.0, V::default());
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+        c.call(a, l, "_grSstSelect@4", &[Arg::I(0)])?;
+        c.call(
+            a,
+            l,
+            "_grSstWinOpen@28",
+            &[
+                Arg::I(0),
+                Arg::I(GR_RESOLUTION_640X480),
+                Arg::I(GR_REFRESH_60HZ),
+                Arg::I(GR_COLORFORMAT_ARGB),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(2),
+                Arg::I(1),
+            ],
+        )?;
+        c.triangle(a, l, 0)?;
+        c.call(a, l, "_grGlideShutdown@0", &[])?;
+        finish(a, l)
+    })
+}
+
+#[test]
+fn without_a_3dfx_card_there_is_no_glide() {
+    // As on Windows without 3dfx's driver: no GLIDE2X.DLL, and a program
+    // that imports it doesn't start.
+    let (program, _) = query_program();
+    let mut cpu = machine("none", None, program);
+    run_to_exit(&mut cpu);
+    assert_eq!(cpu.errorlevel, 1);
+    assert!(printed(&cpu).contains("GLIDE2X.DLL"), "{}", printed(&cpu));
+}
+
+/// A program that opens the card, clears and swaps, and ends without
+/// grSstWinClose or grGlideShutdown.
+fn leaving_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+        c.call(
+            a,
+            l,
+            "_grSstWinOpen@28",
+            &[
+                Arg::I(0),
+                Arg::I(GR_RESOLUTION_640X480),
+                Arg::I(GR_REFRESH_60HZ),
+                Arg::I(GR_COLORFORMAT_ARGB),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(2),
+                Arg::I(1),
+            ],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grBufferClear@12",
+            &[Arg::I(0x00FF_0000), Arg::I(0), Arg::I(0)],
+        )?;
+        c.call(a, l, "_grBufferSwap@4", &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(DONE)), 1)?;
+        // A while for the test to see the card open.
+        a.mov(ecx, 2_000_000)?;
+        let mut spin = a.create_label();
+        a.set_label(&mut spin)?;
+        a.dec(ecx)?;
+        a.jnz(spin)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[GLIDE.len()] as u64))?;
+        a.int3()
+    })
+}
+
+/// The start of the grSstControl programs: the card open at
+/// `resolution`.
+fn open_card(
+    c: &mut Calls,
+    a: &mut CodeAssembler,
+    l: &Layout,
+    resolution: u32,
+) -> Result<(), IcedError> {
+    c.call(a, l, "_grGlideInit@0", &[])?;
+    c.call(a, l, "_grSstQueryHardware@4", &[Arg::At(HWCONFIG)])?;
+    c.call(
+        a,
+        l,
+        "_grSstWinOpen@28",
+        &[
+            Arg::I(0),
+            Arg::I(resolution),
+            Arg::I(GR_REFRESH_60HZ),
+            Arg::I(GR_COLORFORMAT_ARGB),
+            Arg::I(GR_ORIGIN_UPPER_LEFT),
+            Arg::I(2),
+            Arg::I(1),
+        ],
+    )?;
+    Ok(())
+}
+
+/// SetDisplayMode to 320x240x8, through a new DirectDraw object.
+fn directdraw_mode(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    const SET_DISPLAY_MODE: i32 = 21;
+    a.push(0)?;
+    a.push(l.at(DDRAW) as i32)?;
+    a.push(0)?;
+    a.call(dword_ptr(l.iat[GLIDE.len() + 1] as u64))?;
+    a.push(8)?;
+    a.push(240)?;
+    a.push(320)?;
+    a.mov(eax, dword_ptr(l.at(DDRAW)))?;
+    a.push(eax)?;
+    a.mov(eax, dword_ptr(eax))?;
+    a.call(dword_ptr(eax + 4 * SET_DISPLAY_MODE))
+}
+
+/// The end of a grSstControl program: DONE set, and it stays, with the
+/// card open, until the test is done with it.
+fn stay(a: &mut CodeAssembler, l: &Layout) -> Result<(), IcedError> {
+    a.mov(dword_ptr(l.at(DONE)), 1)?;
+    let mut spin = a.create_label();
+    a.set_label(&mut spin)?;
+    a.jmp(spin)
+}
+
+/// A program that opens the card and calls grSstControl with each of
+/// `codes`.
+fn control_program(codes: &'static [u32]) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        for &code in codes {
+            c.call(a, l, "_grSstControl@4", &[Arg::I(code)])?;
+        }
+        stay(a, l)
+    })
+}
+
+/// A program that opens the card, sets a DirectDraw mode, which ends
+/// Glide's, and calls grSstControl with each of `codes`.
+fn mode_then_control_program(codes: &'static [u32]) -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        directdraw_mode(a, l)?;
+        for &code in codes {
+            c.call(a, l, "_grSstControl@4", &[Arg::I(code)])?;
+        }
+        stay(a, l)
+    })
+}
+
+/// Where `deactivated_lock_program` reads the back buffer.
+const LOCK_AT: (i32, i32) = (100, 450);
+
+/// A program that clears the card grey, deactivates it, sets a DirectDraw
+/// mode, and reads the back buffer through a lock into LOCK_READ.
+fn deactivated_lock_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        c.call(
+            a,
+            l,
+            "_grBufferClear@12",
+            &[Arg::I(0x0080_8080), Arg::I(0), Arg::I(0)],
+        )?;
+        let deactivate = Arg::I(GR_CONTROL_DEACTIVATE);
+        c.call(a, l, "_grSstControl@4", &[deactivate])?;
+        directdraw_mode(a, l)?;
+        a.mov(dword_ptr(l.at(LFB_INFO)), 20)?;
+        c.call(
+            a,
+            l,
+            "_grLfbLock@24",
+            &[
+                Arg::I(GR_LFB_READ_ONLY),
+                Arg::I(GR_BUFFER_BACKBUFFER),
+                Arg::I(GR_LFBWRITEMODE_ANY),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(0),
+                Arg::At(LFB_INFO),
+            ],
+        )?;
+        a.mov(eax, dword_ptr(l.at(LFB_INFO + 8)))?;
+        a.imul_3(eax, eax, LOCK_AT.1)?;
+        a.add(eax, dword_ptr(l.at(LFB_INFO + 4)))?;
+        a.mov(eax, dword_ptr(eax + 2 * LOCK_AT.0))?;
+        a.mov(dword_ptr(l.at(LOCK_READ)), eax)?;
+        stay(a, l)
+    })
+}
+
+/// A program that opens the card at 512x384 and downloads an 8x8
+/// texture to the start of texture unit 0's memory.
+fn small_mode_texture_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    for offset in (0..64 * 2).step_by(2) {
+        put(&mut d, TEXELS + offset, &0xF800u16.to_le_bytes());
+    }
+    for (i, v) in [5u32, 5, 3, 0xA].iter().enumerate() {
+        put32(&mut d, TEX_INFO + 4 * i as u32, *v);
+    }
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_512X384)?;
+        let start = c.call(a, l, "_grTexMinAddress@4", &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(TEX_INFO + 16)), l.at(TEXELS) as i32)?;
+        a.mov(eax, dword_ptr(l.at(RESULTS + 4 * start)))?;
+        a.push(l.at(TEX_INFO) as i32)?;
+        a.push(GR_MIPMAPLEVELMASK_BOTH as i32)?;
+        a.push(eax)?;
+        a.push(0)?;
+        a.call(dword_ptr(l.iat[l.import("_grTexDownloadMipMap@16")] as u64))?;
+        stay(a, l)
+    })
+}
+
+const GR_CONTROL_ACTIVATE: u32 = 1;
+const GR_CONTROL_DEACTIVATE: u32 = 2;
+
+/// The bit of a Banshee's vidProcCfg that shows the overlay, Glide's
+/// picture.
+const OVERLAY_ENABLE: u32 = 1 << 8;
+
+fn overlay_shown(cpu: &Cpu) -> bool {
+    let card = cpu.bus.voodoo.as_ref().unwrap().banshee().unwrap();
+    let cfg = card.reg(rust_dos::voodoo::banshee::VID_PROC_CFG);
+    cfg & OVERLAY_ENABLE != 0
+}
+
+#[test]
+fn gr_sst_control_turns_a_voodoo2s_pass_through() {
+    let (program, data) = control_program(&[GR_CONTROL_DEACTIVATE]);
+    let mut cpu = machine("control_off", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor");
+
+    let codes = &[GR_CONTROL_DEACTIVATE, GR_CONTROL_ACTIVATE];
+    let (program, data) = control_program(codes);
+    let mut cpu = machine("control_on", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor again");
+}
+
+#[test]
+fn gr_sst_control_gives_a_voodoo3s_display_away_and_takes_it_back() {
+    let (program, data) = control_program(&[GR_CONTROL_DEACTIVATE]);
+    let mut cpu = machine("control_off_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert!(!overlay_shown(&cpu), "Glide's picture is gone");
+    assert_eq!(cpu.bus.vga.crtc_regs, before, "the mode the screen was in");
+
+    let codes = &[GR_CONTROL_DEACTIVATE, GR_CONTROL_ACTIVATE];
+    let (program, data) = control_program(codes);
+    let mut cpu = machine("control_on_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert!(overlay_shown(&cpu), "Glide's picture is back");
+    assert_ne!(cpu.bus.vga.crtc_regs, before, "Glide's mode");
+}
+
+#[test]
+fn gr_sst_control_takes_the_display_back_from_a_directdraw_mode() {
+    let (program, data) = mode_then_control_program(&[]);
+    let mut cpu = machine("control_mode", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    assert!(!overlay_shown(&cpu), "DirectDraw's mode ended Glide's picture");
+
+    let (program, data) = mode_then_control_program(&[GR_CONTROL_ACTIVATE]);
+    let mut cpu = machine("control_mode_on", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    assert!(overlay_shown(&cpu), "Glide's picture is back");
+}
+
+#[test]
+fn gr_lfb_lock_reads_the_buffers_of_a_deactivated_card() {
+    let (program, data) = deactivated_lock_program();
+    let mut cpu = machine("control_lock", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(peek(&cpu, data + LOCK_READ) as u16, 0x8410, "the clear");
+}
+
+/// The desktop's picture, 640x480 at 16 bits a pixel, comes back when the
+/// card is deactivated, so the textures of a smaller mode start after it.
+#[test]
+fn a_small_modes_textures_are_above_the_desktops_picture() {
+    const DESKTOP_END: u32 = 640 * 480 * 2;
+    let (program, data) = small_mode_texture_program();
+    let mut cpu = machine("small_textures", Some(Board::Voodoo3), program);
+    run_until_done(&mut cpu, data);
+    let card = cpu.bus.voodoo.as_ref().unwrap();
+    let mut below = vec![0xFFu8; 0x1000];
+    card.banshee_memory_read(DESKTOP_END - 0x1000, &mut below);
+    assert!(below.iter().all(|&b| b == 0), "under the desktop's end");
+    let mut texel = [0u8; 2];
+    card.banshee_memory_read(DESKTOP_END, &mut texel);
+    assert_eq!(u16::from_le_bytes(texel), 0xF800, "the first texel");
+}
+
+/// The card's fbiInit0 (Voodoo Graphics and Voodoo2): bit 0 takes the
+/// monitor from the VGA.
+fn fbi_init0(cpu: &Cpu) -> u32 {
+    cpu.bus.voodoo.as_ref().unwrap().reg[0x210 / 4]
+}
+
+#[test]
+fn a_program_ending_without_closing_glide_gives_the_screen_back() {
+    let (program, data) = leaving_program();
+    let mut cpu = machine("leaving", Some(Board::Voodoo2), program);
+    run_until_done(&mut cpu, data);
+    assert_eq!(fbi_init0(&cpu) & 1, 1, "the card has the monitor");
+    run_to_exit(&mut cpu);
+    assert_eq!(fbi_init0(&cpu) & 1, 0, "the VGA has the monitor back");
+}
+
+#[test]
+fn a_program_ending_without_closing_glide_gives_a_voodoo3_its_mode_back() {
+    let (program, data) = leaving_program();
+    let mut cpu = machine("leaving_v3", Some(Board::Voodoo3), program);
+    let before = cpu.bus.vga.crtc_regs;
+    run_until_done(&mut cpu, data);
+    assert_ne!(cpu.bus.vga.crtc_regs, before, "Glide's mode");
+    run_to_exit(&mut cpu);
+    assert_eq!(cpu.bus.vga.crtc_regs, before, "the mode the screen was in");
+}
+
+/// A program that opens the card, clears the back buffer to grey
+/// 0x808080 undithered and swaps it to the screen.
+fn grey_program() -> (Vec<u8>, u32) {
+    let d = vec![0u8; DATA_SIZE];
+    program(&d, |a, l| {
+        let mut c = Calls { next: 0 };
+        open_card(&mut c, a, l, GR_RESOLUTION_640X480)?;
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        let grey = [Arg::I(0x0080_8080), Arg::I(0), Arg::I(0)];
+        c.call(a, l, "_grBufferClear@12", &grey)?;
+        c.call(a, l, "_grBufferSwap@4", &[Arg::I(0)])?;
+        stay(a, l)
+    })
+}
+
+/// The red of the middle of the screen after `grey_program` on `board`.
+fn grey_shown(test: &str, board: Board) -> u8 {
+    let (program, data) = grey_program();
+    let mut cpu = machine(test, Some(board), program);
+    run_until_done(&mut cpu, data);
+    cpu.bus.sync_display();
+    let (w, h) = rust_dos::video::frame_size(&cpu.bus);
+    assert_eq!((w, h), (640, 480), "Glide's mode is shown");
+    let mut frame = rust_dos::video::Frame::new(w, h);
+    rust_dos::video::render_screen(&mut frame, &cpu.bus);
+    frame.rgba[4 * (240 * 640 + 320)]
+}
+
+/// The 5-bit level 16 (0x84 in 8 bits) through a gamma table of `gamma`.
+fn grey_through(gamma: f64) -> u8 {
+    ((0x84 as f64 / 255.0).powf(1.0 / gamma) * 255.0 + 0.5) as u8
+}
+
+/// grSstWinOpen loads the gamma table 3dfx's Glide 2 loads: 1.3 on a
+/// Voodoo2 and a Voodoo3, 1.7 on a Voodoo Graphics. A Voodoo Graphics'
+/// or Voodoo2's table has 33 entries the card interpolates between, so
+/// their levels come within a few of the formula's.
+#[test]
+fn gr_sst_win_open_loads_glides_gamma_table() {
+    let near = |got: u8, want: u8| got.abs_diff(want) <= 2;
+    let v3 = grey_shown("gamma_v3", Board::Voodoo3);
+    assert_eq!(v3, grey_through(1.3), "Voodoo3");
+    let v2 = grey_shown("gamma_v2", Board::Voodoo2);
+    assert!(near(v2, grey_through(1.3)), "Voodoo2: {v2}");
+    let v1 = grey_shown("gamma_v1", Board::Standard);
+    assert!(near(v1, grey_through(1.7)), "Voodoo Graphics: {v1}");
+}
+
+// --- Glide 3 (GLIDE3X.DLL) ---
+
+const GLIDE3: &[&str] = &[
+    "_grGlideInit@0",
+    "_grSstSelect@4",
+    "_grSstWinOpen@28",
+    "_grGet@12",
+    "_grGetString@4",
+    "_grQueryResolutions@8",
+    "_grVertexLayout@12",
+    "_grCoordinateSpace@4",
+    "_grViewport@16",
+    "_grColorCombine@20",
+    "_grDitherMode@4",
+    "_grBufferClear@12",
+    "_grDrawTriangle@12",
+    "_grDrawVertexArray@12",
+    "_grDrawVertexArrayContiguous@16",
+    "_grTexMinAddress@4",
+    "_grTexDownloadMipMap@16",
+    "_grTexSource@16",
+    "_grTexCombine@28",
+    "_grTexFilterMode@12",
+    "_grLfbReadRegion@28",
+    "_grSstWinClose@4",
+    "_grGlideShutdown@0",
+];
+
+// Glide 3's values the program uses.
+const GR_NUM_TMU: u32 = 0x13;
+const GR_MEMORY_FB: u32 = 0x0C;
+const GR_HARDWARE: u32 = 0xA1;
+const GR_VERSION: u32 = 0xA4;
+const GR_QUERY_ANY: u32 = u32::MAX;
+const GR_PARAM_XY: u32 = 0x01;
+const GR_PARAM_W: u32 = 0x03;
+const GR_PARAM_Q: u32 = 0x04;
+const GR_PARAM_PARGB: u32 = 0x30;
+const GR_PARAM_ST0: u32 = 0x40;
+const GR_PARAM_DISABLE: u32 = 0;
+const GR_PARAM_ENABLE: u32 = 1;
+const GR_WINDOW_COORDS: u32 = 0;
+const GR_CLIP_COORDS: u32 = 1;
+const GR_TRIANGLE_STRIP: u32 = 4;
+const GR_TRIANGLE_FAN: u32 = 5;
+const GR_TRIANGLE_STRIP_CONTINUE: u32 = 7;
+const GR_COMBINE_FUNCTION_LOCAL: u32 = 1;
+const GR_COMBINE_FUNCTION_SCALE_OTHER: u32 = 3;
+const GR_COMBINE_FACTOR_NONE: u32 = 0;
+const GR_COMBINE_FACTOR_ONE: u32 = 8;
+const GR_COMBINE_LOCAL_ITERATED: u32 = 0;
+const GR_COMBINE_LOCAL_NONE: u32 = 1;
+const GR_COMBINE_OTHER_ITERATED: u32 = 0;
+const GR_COMBINE_OTHER_TEXTURE: u32 = 1;
+const GR_TEXFMT_RGB_565: u32 = 0xA;
+
+/// The bytes of the program's vertices: X, Y, a packed ARGB colour, Q
+/// (W in clip coordinates), S and T.
+const VERTEX3: u32 = 24;
+/// The answers grGet and grGetString write, and the pointers
+/// grDrawVertexArray takes.
+const ANSWERS: u32 = 0x180;
+const QUERY: u32 = 0x1C0;
+const POINTERS: u32 = 0x1E0;
+
+fn put_vertex3(data: &mut [u8], index: u32, (x, y): (f32, f32), argb: u32, q: f32, st: [f32; 2]) {
+    let at = VERTICES + VERTEX3 * index;
+    let words = [
+        x.to_bits(),
+        y.to_bits(),
+        argb,
+        q.to_bits(),
+        st[0].to_bits(),
+        st[1].to_bits(),
+    ];
+    for (i, w) in words.iter().enumerate() {
+        put32(data, at + 4 * i as u32, *w);
+    }
+}
+
+/// Four vertices of the square `size` wide at (x0, y0) in `argb`: top
+/// left, top right, bottom left, bottom right.
+fn square3(data: &mut [u8], first: u32, (x0, y0): (f32, f32), size: f32, argb: u32) {
+    let corners = [(0., 0.), (1., 0.), (0., 1.), (1., 1.)];
+    for (i, (x, y)) in corners.into_iter().enumerate() {
+        let at = (x0 + x * size, y0 + y * size);
+        put_vertex3(data, first + i as u32, at, argb, 1.0, [0.0; 2]);
+    }
+}
+
+fn vtx3(n: u32) -> Arg {
+    Arg::At(VERTICES + VERTEX3 * n)
+}
+
+// Where the Glide 3 program draws, and the pixel it reads there.
+const G3_TRIANGLE: (u32, u32) = (20, 20);
+const G3_STRIP: (u32, u32) = (150, 60);
+const G3_FAN: (u32, u32) = (210, 60);
+const G3_CONTINUED: (u32, u32) = (350, 60);
+const G3_TEXTURED_LEFT: (u32, u32) = (410, 30);
+const G3_TEXTURED_RIGHT: (u32, u32) = (450, 30);
+const G3_CLIPPED: (u32, u32) = (490, 34);
+const G3_CLEARED: (u32, u32) = (600, 400);
+
+/// The program the Glide 3 tests run: it opens a 640x480 display, asks
+/// grGet and grGetString about the board and grQueryResolutions about
+/// 640x480, and draws with vertices of its own layout: a triangle, a
+/// strip, a fan, a strip that goes on in a second call, a textured
+/// square, and a triangle in clip coordinates. It reads pixels of the
+/// back buffer.
+fn glide3_program() -> (Vec<u8>, u32) {
+    let mut d = vec![0u8; DATA_SIZE];
+    // 0-2: a red triangle.
+    for (i, at) in [(10.0, 10.0), (70.0, 10.0), (10.0, 70.0)]
+        .into_iter()
+        .enumerate()
+    {
+        put_vertex3(&mut d, i as u32, at, 0xFFFF_0000, 1.0, [0.0; 2]);
+    }
+    // 3-6: a green square as a strip; 7-10: a blue one as a fan, which
+    // the program's code points to corner by corner.
+    square3(&mut d, 3, (100.0, 10.0), 60.0, 0xFF00_FF00);
+    square3(&mut d, 7, (200.0, 10.0), 60.0, 0xFF00_00FF);
+    // 11-14: a white square, as a strip of three and one more vertex.
+    square3(&mut d, 11, (300.0, 10.0), 60.0, 0xFFFF_FFFF);
+    // 15-20: a 64-pixel square, the texture's 256 by 256 over it.
+    let corner = |x: f32, y: f32| ((400.0 + x * 64.0, 10.0 + y * 64.0), [x * 256.0, y * 256.0]);
+    for (i, (x, y)) in [(0., 0.), (1., 0.), (1., 1.), (0., 0.), (1., 1.), (0., 1.)]
+        .into_iter()
+        .enumerate()
+    {
+        let (at, st) = corner(x, y);
+        put_vertex3(&mut d, 15 + i as u32, at, 0, 1.0, st);
+    }
+    // 21-23: yellow, in clip coordinates with a W of 2: (480, 24),
+    // (560, 24) and (480, 96) on the screen.
+    for (i, (x, y)) in [(0.5f32, -0.9f32), (0.75, -0.9), (0.5, -0.6)]
+        .into_iter()
+        .enumerate()
+    {
+        put_vertex3(
+            &mut d,
+            21 + i as u32,
+            (2.0 * x, 2.0 * y),
+            0xFFFF_FF00,
+            2.0,
+            [0.0; 2],
+        );
+    }
+    // The texture: an 8x8 level (GR_LOD_LOG2_8), square, 5-6-5.
+    for t in 0..8u32 {
+        for s in 0..8u32 {
+            let texel: u16 = if s < 4 { 0x001F } else { 0xF800 };
+            put(&mut d, TEXELS + 2 * (t * 8 + s), &texel.to_le_bytes());
+        }
+    }
+    for (i, v) in [3u32, 3, 0, GR_TEXFMT_RGB_565].iter().enumerate() {
+        put32(&mut d, TEX_INFO + 4 * i as u32, *v);
+    }
+    // grQueryResolutions' template: 640x480, anything else.
+    for (i, v) in [
+        GR_RESOLUTION_640X480,
+        GR_QUERY_ANY,
+        GR_QUERY_ANY,
+        GR_QUERY_ANY,
+    ]
+    .iter()
+    .enumerate()
+    {
+        put32(&mut d, QUERY + 4 * i as u32, *v);
+    }
+    program_of("GLIDE3X.DLL", GLIDE3, &d, |a, l| {
+        // The fan's vertices by their pointers.
+        for (i, n) in [7u32, 8, 10, 9].into_iter().enumerate() {
+            let at = l.at(VERTICES + VERTEX3 * n) as i32;
+            a.mov(dword_ptr(l.at(POINTERS + 4 * i as u32)), at)?;
+        }
+        let mut c = Calls { next: 0 };
+        c.call(a, l, "_grGlideInit@0", &[])?;
+        c.call(a, l, "_grSstSelect@4", &[Arg::I(0)])?;
+        c.call(
+            a,
+            l,
+            "_grSstWinOpen@28",
+            &[
+                Arg::I(0),
+                Arg::I(GR_RESOLUTION_640X480),
+                Arg::I(GR_REFRESH_60HZ),
+                Arg::I(GR_COLORFORMAT_ARGB),
+                Arg::I(GR_ORIGIN_UPPER_LEFT),
+                Arg::I(2),
+                Arg::I(1),
+            ],
+        )?;
+        let get = |c: &mut Calls, a: &mut CodeAssembler, what: u32, slot: u32| {
+            c.call(
+                a,
+                l,
+                "_grGet@12",
+                &[Arg::I(what), Arg::I(4), Arg::At(ANSWERS + 4 * slot)],
+            )
+        };
+        get(&mut c, a, GR_NUM_TMU, 0)?;
+        get(&mut c, a, GR_MEMORY_FB, 1)?;
+        c.call(a, l, "_grGetString@4", &[Arg::I(GR_HARDWARE)])?;
+        c.call(a, l, "_grGetString@4", &[Arg::I(GR_VERSION)])?;
+        c.call(a, l, "_grQueryResolutions@8", &[Arg::At(QUERY), Arg::I(0)])?;
+        // The layout: X and Y, the colour, Q, and S and T.
+        let layout = [
+            (GR_PARAM_XY, 0),
+            (GR_PARAM_PARGB, 8),
+            (GR_PARAM_Q, 12),
+            (GR_PARAM_ST0, 16),
+        ];
+        for (param, offset) in layout {
+            c.call(
+                a,
+                l,
+                "_grVertexLayout@12",
+                &[Arg::I(param), Arg::I(offset), Arg::I(GR_PARAM_ENABLE)],
+            )?;
+        }
+        c.call(a, l, "_grDitherMode@4", &[Arg::I(GR_DITHER_DISABLE)])?;
+        c.call(
+            a,
+            l,
+            "_grBufferClear@12",
+            &[Arg::I(0x0080_8080), Arg::I(0), Arg::I(0xFFFF)],
+        )?;
+        let iterated = [
+            Arg::I(GR_COMBINE_FUNCTION_LOCAL),
+            Arg::I(GR_COMBINE_FACTOR_NONE),
+            Arg::I(GR_COMBINE_LOCAL_ITERATED),
+            Arg::I(GR_COMBINE_OTHER_ITERATED),
+            Arg::I(0),
+        ];
+        c.call(a, l, "_grColorCombine@20", &iterated)?;
+        c.call(a, l, "_grDrawTriangle@12", &[vtx3(0), vtx3(1), vtx3(2)])?;
+        c.call(
+            a,
+            l,
+            "_grDrawVertexArrayContiguous@16",
+            &[
+                Arg::I(GR_TRIANGLE_STRIP),
+                Arg::I(4),
+                vtx3(3),
+                Arg::I(VERTEX3),
+            ],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grDrawVertexArray@12",
+            &[Arg::I(GR_TRIANGLE_FAN), Arg::I(4), Arg::At(POINTERS)],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grDrawVertexArrayContiguous@16",
+            &[
+                Arg::I(GR_TRIANGLE_STRIP),
+                Arg::I(3),
+                vtx3(11),
+                Arg::I(VERTEX3),
+            ],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grDrawVertexArrayContiguous@16",
+            &[
+                Arg::I(GR_TRIANGLE_STRIP_CONTINUE),
+                Arg::I(1),
+                vtx3(14),
+                Arg::I(VERTEX3),
+            ],
+        )?;
+        // The texture, at the start of texture unit 0's memory.
+        let start = c.call(a, l, "_grTexMinAddress@4", &[Arg::I(0)])?;
+        a.mov(dword_ptr(l.at(TEX_INFO + 16)), l.at(TEXELS) as i32)?;
+        for name in ["_grTexDownloadMipMap@16", "_grTexSource@16"] {
+            a.mov(eax, dword_ptr(l.at(RESULTS + 4 * start)))?;
+            a.push(l.at(TEX_INFO) as i32)?;
+            a.push(GR_MIPMAPLEVELMASK_BOTH as i32)?;
+            a.push(eax)?;
+            a.push(0)?;
+            a.call(dword_ptr(l.iat[l.import(name)] as u64))?;
+        }
+        c.call(
+            a,
+            l,
+            "_grTexFilterMode@12",
+            &[Arg::I(0), Arg::I(0), Arg::I(0)],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grTexCombine@28",
+            &[
+                Arg::I(0),
+                Arg::I(GR_COMBINE_FUNCTION_LOCAL),
+                Arg::I(GR_COMBINE_FACTOR_NONE),
+                Arg::I(GR_COMBINE_FUNCTION_LOCAL),
+                Arg::I(GR_COMBINE_FACTOR_NONE),
+                Arg::I(0),
+                Arg::I(0),
+            ],
+        )?;
+        c.call(
+            a,
+            l,
+            "_grColorCombine@20",
+            &[
+                Arg::I(GR_COMBINE_FUNCTION_SCALE_OTHER),
+                Arg::I(GR_COMBINE_FACTOR_ONE),
+                Arg::I(GR_COMBINE_LOCAL_NONE),
+                Arg::I(GR_COMBINE_OTHER_TEXTURE),
+                Arg::I(0),
+            ],
+        )?;
+        c.call(a, l, "_grDrawTriangle@12", &[vtx3(15), vtx3(16), vtx3(17)])?;
+        c.call(a, l, "_grDrawTriangle@12", &[vtx3(18), vtx3(19), vtx3(20)])?;
+        // Clip coordinates: W in place of Q.
+        c.call(a, l, "_grColorCombine@20", &iterated)?;
+        c.call(a, l, "_grCoordinateSpace@4", &[Arg::I(GR_CLIP_COORDS)])?;
+        c.call(
+            a,
+            l,
+            "_grViewport@16",
+            &[Arg::I(0), Arg::I(0), Arg::I(640), Arg::I(480)],
+        )?;
+        let w_for_q = [
+            (GR_PARAM_Q, 12, GR_PARAM_DISABLE),
+            (GR_PARAM_W, 12, GR_PARAM_ENABLE),
+        ];
+        for (param, offset, mode) in w_for_q {
+            c.call(
+                a,
+                l,
+                "_grVertexLayout@12",
+                &[Arg::I(param), Arg::I(offset), Arg::I(mode)],
+            )?;
+        }
+        c.call(a, l, "_grDrawTriangle@12", &[vtx3(21), vtx3(22), vtx3(23)])?;
+        c.call(a, l, "_grCoordinateSpace@4", &[Arg::I(GR_WINDOW_COORDS)])?;
+        let points = [
+            G3_TRIANGLE,
+            G3_STRIP,
+            G3_FAN,
+            G3_CONTINUED,
+            G3_TEXTURED_LEFT,
+            G3_TEXTURED_RIGHT,
+            G3_CLIPPED,
+            G3_CLEARED,
+        ];
+        for (slot, p) in points.into_iter().enumerate() {
+            c.pixel(a, l, GR_BUFFER_BACKBUFFER, p, slot as u32)?;
+        }
+        let context = 2;
+        a.mov(eax, dword_ptr(l.at(RESULTS + 4 * context)))?;
+        a.push(eax)?;
+        a.call(dword_ptr(l.iat[l.import("_grSstWinClose@4")] as u64))?;
+        c.call(a, l, "_grGlideShutdown@0", &[])?;
+        finish(a, l)
+    })
+}
+
+/// The NUL-terminated string at `lin` in the program's memory.
+fn peek_string(cpu: &Cpu, lin: u32) -> String {
+    let mut text = Vec::new();
+    for i in 0..64 {
+        let byte = (peek(cpu, (lin + i) & !3) >> (8 * ((lin + i) & 3))) as u8;
+        if byte == 0 {
+            break;
+        }
+        text.push(byte);
+    }
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+/// `hardware` and `tmus`: what grGetString and grGet say of `board`.
+fn glide3_draws(test: &str, board: Board, hardware: &str, tmus: u32) {
+    let (program, data) = glide3_program();
+    let mut cpu = machine(test, Some(board), program);
+    run_until_done(&mut cpu, data);
+    assert!(printed(&cpu).is_empty(), "{}", printed(&cpu));
+    assert_ne!(result(&cpu, data, 2), 0, "grSstWinOpen's context");
+    assert_eq!(result(&cpu, data, 3), 4, "grGet's bytes");
+    assert_eq!(peek(&cpu, data + ANSWERS), tmus, "GR_NUM_TMU");
+    assert!(peek(&cpu, data + ANSWERS + 4) >= 4 << 20, "GR_MEMORY_FB");
+    assert_eq!(peek_string(&cpu, result(&cpu, data, 5)), hardware);
+    assert!(peek_string(&cpu, result(&cpu, data, 6)).starts_with("3."));
+    let resolutions = result(&cpu, data, 7);
+    assert!(
+        resolutions > 0 && resolutions.is_multiple_of(16),
+        "grQueryResolutions: {resolutions}"
+    );
+    let p = |slot| pixel(&cpu, data, slot);
+    assert_eq!(p(0), 0xF800, "the triangle");
+    assert_eq!(p(1), 0x07E0, "the strip's second triangle");
+    assert_eq!(p(2), 0x001F, "the fan's second triangle");
+    assert_eq!(p(3), 0xFFFF, "the strip that went on");
+    assert_eq!(p(4), 0x001F, "the texture's left half");
+    assert_eq!(p(5), 0xF800, "the texture's right half");
+    assert_eq!(p(6), 0xFFE0, "the triangle in clip coordinates");
+    assert_eq!(p(7), 0x8410, "the clear");
+}
+
+#[test]
+fn glide3_draws_on_a_voodoo2() {
+    glide3_draws("glide3_voodoo2", Board::Voodoo2, "Voodoo2", 2);
+}
+
+#[test]
+fn glide3_draws_on_a_voodoo3() {
+    glide3_draws("glide3_voodoo3", Board::Voodoo3, "Voodoo3", 2);
+}
+
+#[test]
+fn without_a_3dfx_card_there_is_no_glide3() {
+    let (program, _) = glide3_program();
+    let mut cpu = machine("glide3_none", None, program);
+    run_to_exit(&mut cpu);
+    assert_eq!(cpu.errorlevel, 1);
+    assert!(printed(&cpu).contains("GLIDE3X.DLL"), "{}", printed(&cpu));
+}

@@ -314,7 +314,13 @@ pub fn present_window(cpu: &mut Cpu, back: u32, src: Option<Rect>, dst: Option<R
         .map(|r| r.intersect(&dst).intersect(&screen_rect))
         .filter(|r| r.left < r.right && r.top < r.bottom)
         .collect();
-    if rects.is_empty() || present_on_gpu(cpu, back, &src, &dst, &rects, pitch, bytes) {
+    if rects.is_empty() {
+        return;
+    }
+    if present_on_gpu(cpu, back, &src, &dst, &rects, pitch, bytes) {
+        // The renderer drew the desktop in its own copy of the card's
+        // memory, not through `screen::write`, which counts it.
+        screen::drew_rects(cpu, 0, pitch, bytes, &rects);
         return;
     }
     let pixels = read_argb(cpu, &s, &src);
@@ -391,7 +397,7 @@ fn present_on_gpu(
             (BlitSource::Buffer { buffer, rect }, convert)
         }
         _ => {
-            let plane = Plane { start: at, stride, bpp: format.bits / 8 };
+            let plane = Plane { start: at, stride, bpp: format.bits / 8, tiled: false };
             let convert = match (rgb565, rgb888, bytes) {
                 (true, _, 2) => Convert::None,
                 (true, _, _) => Convert::Widen,
@@ -405,7 +411,7 @@ fn present_on_gpu(
         }
     };
     card.gpu_blit(Blit {
-        dst: Plane { start: 0, stride: pitch, bpp: bytes },
+        dst: Plane { start: 0, stride: pitch, bpp: bytes, tiled: false },
         area: [dst.left, dst.top, dst.right, dst.bottom],
         rects: rects.iter().map(|r| [r.left, r.top, r.right, r.bottom]).collect(),
         src: source,

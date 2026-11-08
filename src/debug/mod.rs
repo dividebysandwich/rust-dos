@@ -456,6 +456,18 @@ pub enum ShutdownReason {
     Exit,
     /// The window was closed.
     Window,
+    /// The process `--exit-with-parent` watches ended.
+    Parent,
+}
+
+impl ShutdownReason {
+    /// The exit code rust-dos exits with.
+    pub fn exit_code(self) -> u8 {
+        match self {
+            ShutdownReason::Parent => crate::parent_watch::EXIT_CODE,
+            ShutdownReason::Quit | ShutdownReason::Exit | ShutdownReason::Window => 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +716,8 @@ pub struct DebugHub {
     /// What draws the window, as the `[DISPLAY]` log line says: OpenGL's
     /// version, graphics chip and vendor, or SDL's renderer.
     pub display: String,
+    /// The address the server listens on, port 0 resolved.
+    addr: Option<SocketAddr>,
     input_wait_ns: Option<u64>,
     /// Pause once emulated time reaches this (`until_ms`).
     stop_at_ns: Option<u64>,
@@ -852,6 +866,7 @@ impl DebugHub {
             heat: None,
             profile: None,
             display: String::new(),
+            addr: None,
         }
     }
 
@@ -893,9 +908,16 @@ impl DebugHub {
 
         println!("[DEBUG] Debug server listening on http://{}/", addr);
         let mut hub = Self::new(Some(rx), Some(shared), trace_capacity);
+        hub.addr = Some(addr);
         hub.deterministic = deterministic;
         hub.announce(cpu);
         Ok(hub)
+    }
+
+    /// The server's instance (as `/api/version` gives it) and address,
+    /// when it runs.
+    pub fn server(&self) -> Option<(String, SocketAddr)> {
+        Some((self.shared.as_ref()?.instance_hex(), self.addr?))
     }
 
     /// Append the journal's first entry, `started`, and take the program

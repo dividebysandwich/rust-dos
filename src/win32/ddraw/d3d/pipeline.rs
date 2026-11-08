@@ -12,6 +12,8 @@
 //! `Rasterizer`. The matrices are Direct3D's: row-major, and a row
 //! vector is transformed by multiplying it on their left.
 
+use crate::fixed_vec::FixedVec;
+
 /// A 4x4 matrix, row by row (D3DMATRIX's _11 to _44).
 pub type Matrix = [f32; 16];
 
@@ -333,6 +335,22 @@ impl ViewMap {
         ]
     }
 
+    /// The clip coordinates `screen` puts at `s` (x, y, z and rhw), if
+    /// any do: an rhw of 0, infinite or not a number has none, and nor
+    /// does a viewport with no width, height or depth.
+    fn clip(&self, s: [f32; 4]) -> Option<[f32; 4]> {
+        let w = 1.0 / s[3];
+        if !w.is_finite() || w == 0.0 || self.sx == 0.0 || self.sy == 0.0 || self.sz == 0.0 {
+            return None;
+        }
+        Some([
+            (s[0] - self.ox) / self.sx * w,
+            (self.oy - s[1]) / self.sy * w,
+            (s[2] - self.oz) / self.sz * w,
+            w,
+        ])
+    }
+
     /// The guard band (left, top, right, bottom on the screen) as bounds
     /// of x/w and y/w: from, to for each.
     fn guard(&self, band: [f32; 4]) -> [f32; 4] {
@@ -471,8 +489,8 @@ pub struct Setup {
     /// can't take coordinates.
     pub clip: bool,
     /// The band primitives are always clipped to: left, top, right,
-    /// bottom. The card's is `hal::VERTEX_BAND`, a pixel inside the
-    /// guard band the device reports.
+    /// bottom. The card's is `hal::VERTEX_BAND`, a pixel or two inside
+    /// the guard band the device reports.
     pub guard_band: [f32; 4],
     pub cull: u32,
     pub fill: u32,
@@ -683,6 +701,28 @@ pub fn process(setup: &Setup, input: &[Vertex], layout: &Layout) -> Vec<Processe
             out
         })
         .collect()
+}
+
+/// The transformed vertex `p` at the clip coordinates `clip` it was
+/// transformed from, `planes` its distances from the user's clip planes,
+/// so that it is clipped as a vertex the pipeline transforms is: one of
+/// a vertex buffer that ProcessVertices clipped. Its colors and texture
+/// coordinates stay the buffer's.
+pub fn at_clip_coordinates(
+    setup: &Setup,
+    p: &Processed,
+    clip: [f32; 4],
+    planes: [f32; 6],
+) -> Processed {
+    let mut out = Processed {
+        clip,
+        planes,
+        rhw: 0.0,
+        tl: false,
+        ..*p
+    };
+    out.code = codes(setup, &out);
+    out
 }
 
 /// A transformed vertex, as it is.
@@ -921,54 +961,161 @@ pub struct Drawn {
     pub points: u32,
 }
 
-/// A plane of homogeneous clipping: how far inside a vertex is.
-type Plane = Box<dyn Fn(&Processed) -> f32>;
+/// A plane of homogeneous clipping, as how far inside it a vertex is
+/// (`Plane::distance`). Each kind is one expression of the clip
+/// coordinates, `c` a coordinate's index and `k` a constant.
+#[derive(Clone, Copy, Debug)]
+enum Plane {
+    /// clip[c] - k
+    Above(usize, f32),
+    /// k - clip[c]
+    Below(usize, f32),
+    /// clip[c] - k * w
+    AboveW(usize, f32),
+    /// k * w - clip[c]
+    BelowW(usize, f32),
+    /// The vertex's distance from user clip plane `i`.
+    User(usize),
+}
+
+impl Plane {
+    fn distance(self, p: &Processed) -> f32 {
+        match self {
+            Plane::Above(c, k) => p.clip[c] - k,
+            Plane::Below(c, k) => k - p.clip[c],
+            Plane::AboveW(c, k) => p.clip[c] - k * p.clip[3],
+            Plane::BelowW(c, k) => k * p.clip[3] - p.clip[c],
+            Plane::User(i) => p.planes[i],
+        }
+    }
+}
+
+/// The most clip planes: near, far, the 6 user planes and the guard
+/// band's 4.
+const MAX_PLANES: usize = 12;
+
+/// The planes a draw clips at (`clip_planes`), kept in place.
+type Planes = FixedVec<Plane, MAX_PLANES>;
 
 /// The planes primitives are clipped at: the near and far planes and
 /// the user's when the setup clips, and the guard band always. A
 /// transformed vertex's near and far planes are z 0 and 1, as Wine's
 /// depth_clamp_test has them on Windows.
-fn clip_planes(setup: &Setup, tl: bool) -> Vec<Plane> {
-    let mut planes: Vec<Plane> = Vec::new();
+fn clip_planes(setup: &Setup, tl: bool) -> Planes {
+    let mut planes = Planes::new(Plane::User(0));
     let band = setup.guard_band;
     if tl {
         if setup.clip {
-            planes.push(Box::new(|p: &Processed| p.clip[2]));
-            planes.push(Box::new(|p: &Processed| 1.0 - p.clip[2]));
+            planes.push(Plane::Above(2, 0.0));
+            planes.push(Plane::Below(2, 1.0));
         }
-        planes.push(Box::new(move |p: &Processed| p.clip[0] - band[0]));
-        planes.push(Box::new(move |p: &Processed| band[2] - p.clip[0]));
-        planes.push(Box::new(move |p: &Processed| p.clip[1] - band[1]));
-        planes.push(Box::new(move |p: &Processed| band[3] - p.clip[1]));
+        planes.push(Plane::Above(0, band[0]));
+        planes.push(Plane::Below(0, band[2]));
+        planes.push(Plane::Above(1, band[1]));
+        planes.push(Plane::Below(1, band[3]));
         return planes;
     }
     let b = setup.view_map.bounds;
     if setup.clip {
-        planes.push(Box::new(move |p: &Processed| p.clip[2] - b[4] * p.clip[3]));
-        planes.push(Box::new(move |p: &Processed| b[5] * p.clip[3] - p.clip[2]));
+        planes.push(Plane::AboveW(2, b[4]));
+        planes.push(Plane::BelowW(2, b[5]));
         for i in 0..setup.planes.len().min(6) {
-            planes.push(Box::new(move |p: &Processed| p.planes[i]));
+            planes.push(Plane::User(i));
         }
     } else {
         // Nothing behind the eye can be divided by its w.
-        planes.push(Box::new(|p: &Processed| p.clip[3] - 1e-6));
+        planes.push(Plane::Above(3, 1e-6));
     }
     let g = setup.view_map.guard(band);
-    planes.push(Box::new(move |p: &Processed| p.clip[0] - g[0] * p.clip[3]));
-    planes.push(Box::new(move |p: &Processed| g[1] * p.clip[3] - p.clip[0]));
-    planes.push(Box::new(move |p: &Processed| p.clip[1] - g[2] * p.clip[3]));
-    planes.push(Box::new(move |p: &Processed| g[3] * p.clip[3] - p.clip[1]));
+    planes.push(Plane::AboveW(0, g[0]));
+    planes.push(Plane::BelowW(0, g[1]));
+    planes.push(Plane::AboveW(1, g[2]));
+    planes.push(Plane::BelowW(1, g[3]));
     planes
 }
 
-/// Clip a polygon, each vertex with whether the edge from it to the
-/// next is to be drawn in wireframe, at `planes`.
-fn clip_polygon(mut poly: Vec<(Processed, bool)>, planes: &[Plane]) -> Vec<(Processed, bool)> {
-    for plane in planes {
+/// The most vertices a clipped triangle keeps in place: each plane cuts
+/// off a corner, adding one vertex at most, as long as the rounding of
+/// the distances doesn't make the polygon cross a plane more than twice
+/// (`clip_polygon` falls back to `clip_spilled` then).
+const MAX_POLYGON: usize = 3 + MAX_PLANES;
+
+/// A convex polygon, each vertex with whether the edge from it to the
+/// next is to be drawn in wireframe, kept in place.
+type Polygon = FixedVec<(Processed, bool), MAX_POLYGON>;
+
+/// The two polygons a draw clips its triangles between
+/// (`clip_polygon`), made once for all of them: each is a few kilobytes.
+fn clip_scratch() -> [Polygon; 2] {
+    [Polygon::new((Processed::default(), false)); 2]
+}
+
+/// Clip the triangle `tri` at `planes`, from one polygon of `scratch`
+/// into the other and back: the polygon left. None if a plane would
+/// leave more vertices than a polygon has room for: the caller clips
+/// the triangle again with `clip_spilled`, which gives the same polygon.
+fn clip_polygon<'a>(
+    tri: &[(Processed, bool); 3],
+    planes: &[Plane],
+    scratch: &'a mut [Polygon; 2],
+) -> Option<&'a Polygon> {
+    let [poly, out] = scratch;
+    let (mut poly, mut out) = (poly, out);
+    poly.clear();
+    poly.extend_from_slice(tri);
+    for &plane in planes {
         if poly.is_empty() {
             break;
         }
-        let d: Vec<f32> = poly.iter().map(|(v, _)| plane(v)).collect();
+        let mut d = [0.0f32; MAX_POLYGON];
+        for (slot, (v, _)) in d.iter_mut().zip(poly.iter()) {
+            *slot = plane.distance(v);
+        }
+        let d = &d[..poly.len()];
+        if d.iter().all(|&d| d >= 0.0) {
+            continue;
+        }
+        // Each vertex inside stays, and each edge across the plane adds
+        // the point where it crosses.
+        let kept = (0..poly.len())
+            .map(|i| {
+                let (inside, next) = (d[i] >= 0.0, d[(i + 1) % poly.len()] >= 0.0);
+                inside as usize + (inside != next) as usize
+            })
+            .sum::<usize>();
+        if kept > MAX_POLYGON {
+            return None;
+        }
+        out.clear();
+        for i in 0..poly.len() {
+            let j = (i + 1) % poly.len();
+            let (a, edge) = poly[i];
+            let (b, _) = poly[j];
+            let (da, db) = (d[i], d[j]);
+            if da >= 0.0 {
+                out.push((a, edge));
+                if db < 0.0 {
+                    out.push((a.lerp(&b, da / (da - db)), false));
+                }
+            } else if db >= 0.0 {
+                out.push((a.lerp(&b, da / (da - db)), edge));
+            }
+        }
+        // The references swap, not the polygons.
+        std::mem::swap(&mut poly, &mut out);
+    }
+    Some(poly)
+}
+
+/// `clip_polygon` with no limit on the vertices, for a triangle that
+/// rounding makes cross a plane more than twice.
+#[cold]
+fn clip_spilled(mut poly: Vec<(Processed, bool)>, planes: &[Plane]) -> Vec<(Processed, bool)> {
+    for &plane in planes {
+        if poly.is_empty() {
+            break;
+        }
+        let d: Vec<f32> = poly.iter().map(|(v, _)| plane.distance(v)).collect();
         if d.iter().all(|&d| d >= 0.0) {
             continue;
         }
@@ -1029,6 +1176,7 @@ pub fn draw(
     let mut drawn = Drawn::default();
     let planes = clip_planes(setup, false);
     let tl_planes = clip_planes(setup, true);
+    let mut scratch = clip_scratch();
     let flat = setup.shade == SHADE_FLAT;
     for prim in prims {
         match *prim {
@@ -1037,7 +1185,7 @@ pub fn draw(
                     continue;
                 };
                 let planes = if v.tl { &tl_planes } else { &planes };
-                if !finite(v) || planes.iter().any(|p| p(v) < 0.0) {
+                if !finite(v) || planes.iter().any(|p| p.distance(v) < 0.0) {
                     continue;
                 }
                 raster.point(&screen(setup, v));
@@ -1066,7 +1214,8 @@ pub fn draw(
                         t.take_flat_colors(p);
                     }
                 }
-                triangle(setup, tri, edges, &planes, &tl_planes, raster, &mut drawn);
+                let planes = [&planes[..], &tl_planes[..]];
+                triangle(setup, tri, edges, planes, &mut scratch, raster, &mut drawn);
             }
         }
     }
@@ -1085,16 +1234,11 @@ fn line(
     if !finite(a) || !finite(b) {
         return false;
     }
-    let tl = a.tl || b.tl;
-    let (a, b) = if tl {
-        (as_tl(setup, a), as_tl(setup, b))
-    } else {
-        (*a, *b)
-    };
+    let ([a, b], tl) = one_kind(setup, [*a, *b]);
     let planes = if tl { tl_planes } else { planes };
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
     for plane in planes {
-        let (da, db) = (plane(&a), plane(&b));
+        let (da, db) = (plane.distance(&a), plane.distance(&b));
         if da < 0.0 && db < 0.0 {
             return false;
         }
@@ -1112,7 +1256,45 @@ fn line(
     true
 }
 
-/// A vertex as a transformed one, for a primitive that mixes them.
+/// The vertices of a primitive as all of one kind, and whether they are
+/// transformed ones. A primitive that mixes transformed vertices with
+/// vertices at clip coordinates (an execute buffer's, or a vertex
+/// buffer's that ProcessVertices kept) is clipped at the view volume,
+/// its transformed vertices taken back to the clip coordinates the
+/// viewport puts where they are: a vertex behind the eye has no screen
+/// position it could be clipped on the screen from. Only when a
+/// transformed vertex has no such coordinates (`ViewMap::clip`) is the
+/// primitive clipped on the screen.
+fn one_kind<const N: usize>(setup: &Setup, verts: [Processed; N]) -> ([Processed; N], bool) {
+    let tl = verts.iter().filter(|v| v.tl).count();
+    if tl == 0 || tl == N {
+        return (verts, tl != 0);
+    }
+    let clip = verts.map(|v| as_clip(setup, &v));
+    if clip.iter().all(Option::is_some) {
+        return (clip.map(Option::unwrap_or_default), false);
+    }
+    (verts.map(|v| as_tl(setup, &v)), true)
+}
+
+/// A transformed vertex at the clip coordinates that the viewport puts
+/// where it is, if it has them. Its rhw is 1/w, so the screen position
+/// gives w back with its sign: a vertex behind the eye has a negative w,
+/// and its clip coordinates clip like any other. It is on the user's
+/// clip planes, not outside them: transformed vertices aren't clipped at
+/// them.
+fn as_clip(setup: &Setup, p: &Processed) -> Option<Processed> {
+    if !p.tl {
+        return Some(*p);
+    }
+    let [x, y, z, _] = p.clip;
+    let clip = setup.view_map.clip([x, y, z, p.rhw])?;
+    let out = at_clip_coordinates(setup, p, clip, [0.0; 6]);
+    finite(&out).then_some(out)
+}
+
+/// A vertex as a transformed one, for a primitive that mixes them and
+/// can't be clipped at the view volume.
 fn as_tl(setup: &Setup, p: &Processed) -> Processed {
     if p.tl {
         return *p;
@@ -1126,24 +1308,22 @@ fn as_tl(setup: &Setup, p: &Processed) -> Processed {
     }
 }
 
+/// Draw the triangle `tri`, clipped at `planes` (those of vertices at
+/// clip coordinates, and those of transformed ones) between the
+/// polygons of `scratch`.
 fn triangle(
     setup: &Setup,
     tri: [Processed; 3],
     edges: u8,
-    planes: &[Plane],
-    tl_planes: &[Plane],
+    [planes, tl_planes]: [&[Plane]; 2],
+    scratch: &mut [Polygon; 2],
     raster: &mut dyn Rasterizer,
     drawn: &mut Drawn,
 ) {
     if !tri.iter().all(finite) {
         return;
     }
-    let tl = tri.iter().any(|v| v.tl);
-    let tri = if tl {
-        tri.map(|v| as_tl(setup, &v))
-    } else {
-        tri
-    };
+    let (tri, tl) = one_kind(setup, tri);
     // All outside one plane of the view volume: nothing to draw. With
     // no clipping, depth past the near and far planes is clamped, and
     // only the sides count.
@@ -1152,16 +1332,52 @@ fn triangle(
     if !tl && tri[0].code & tri[1].code & tri[2].code & mask != 0 {
         return;
     }
-    let poly = vec![
+    let corners = [
         (tri[0], edges & 1 != 0),
         (tri[1], edges & 2 != 0),
         (tri[2], edges & 4 != 0),
     ];
-    let poly = clip_polygon(poly, if tl { tl_planes } else { planes });
+    let planes = if tl { tl_planes } else { planes };
+    // Most triangles are inside every plane, which leaves them whole.
+    // The planes before the first with a corner outside it leave the
+    // triangle as it is, so clipping starts at that one.
+    let inside = |p: &Plane| corners.iter().all(|(v, _)| p.distance(v) >= 0.0);
+    let Some(first) = planes.iter().position(|p| !inside(p)) else {
+        polygon(setup, &corners, raster, drawn);
+        return;
+    };
+    let planes = &planes[first..];
+    match clip_polygon(&corners, planes, scratch) {
+        Some(poly) => polygon(setup, poly, raster, drawn),
+        None => {
+            let spilled = clip_spilled(corners.to_vec(), planes);
+            polygon(setup, &spilled, raster, drawn)
+        }
+    }
+}
+
+/// Draw the clipped polygon `poly` of a triangle, as the fill mode says,
+/// unless it is culled.
+fn polygon(
+    setup: &Setup,
+    poly: &[(Processed, bool)],
+    raster: &mut dyn Rasterizer,
+    drawn: &mut Drawn,
+) {
     if poly.len() < 3 {
         return;
     }
-    let screens: Vec<ScreenVertex> = poly.iter().map(|(v, _)| screen(setup, v)).collect();
+    let mut kept = [ScreenVertex::default(); MAX_POLYGON];
+    let spilled: Vec<ScreenVertex>;
+    let screens = if poly.len() <= MAX_POLYGON {
+        for (s, (v, _)) in kept.iter_mut().zip(poly) {
+            *s = screen(setup, v);
+        }
+        &kept[..poly.len()]
+    } else {
+        spilled = poly.iter().map(|(v, _)| screen(setup, v)).collect();
+        &spilled[..]
+    };
     let mut area = 0.0;
     for i in 0..screens.len() {
         let (a, b) = (&screens[i], &screens[(i + 1) % screens.len()]);
@@ -1177,7 +1393,7 @@ fn triangle(
     }
     match setup.fill {
         FILL_POINT => {
-            for v in &screens {
+            for v in screens {
                 raster.point(v);
                 drawn.points += 1;
             }
@@ -1297,6 +1513,18 @@ mod tests {
     }
 
     #[test]
+    fn a_screen_position_gives_its_clip_coordinates_back() {
+        let m = ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0);
+        for c in [[0.5, -0.25, 1.0, 2.0], [0.5, -0.25, -1.0, -2.0]] {
+            let back = m.clip(m.screen(c)).unwrap();
+            assert!((0..4).all(|i| near(back[i], c[i])), "{c:?} {back:?}");
+        }
+        for rhw in [0.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(m.clip([1.0, 2.0, 0.5, rhw]), None, "rhw {rhw}");
+        }
+    }
+
+    #[test]
     fn a_triangle_through_the_near_plane_is_clipped() {
         let setup = Setup {
             view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
@@ -1320,6 +1548,115 @@ mod tests {
         // A quadrilateral: two triangles, none of their z below 0.
         assert_eq!(r.triangles.len(), 2);
         assert!(r.triangles.iter().flatten().all(|v| v.z >= -1e-6));
+    }
+
+    /// A perspective projection, near plane 1 and far plane 10, and a
+    /// triangle with a corner behind the eye: its vertices through the
+    /// pipeline, and the screen vertices ProcessVertices writes of them,
+    /// the last one's from a negative w.
+    fn behind_the_eye() -> (Setup, Vec<Processed>, Vec<Processed>) {
+        let q = 10.0 / 9.0;
+        let setup = Setup {
+            view_map: ViewMap::dx7(0, 0, 100, 100, 0.0, 1.0),
+            projection: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, q, 1.0, 0.0, 0.0, -q, 0.0,
+            ],
+            cull: CULL_NONE,
+            ..Setup::default()
+        };
+        let input = [
+            vertex(-1.0, -1.0, 2.0),
+            vertex(1.0, -1.0, 2.0),
+            vertex(0.0, 1.0, -2.0),
+        ];
+        let direct = process(&setup, &input, &Layout::of(FVF_XYZ).unwrap());
+        let written: Vec<Vertex> = direct
+            .iter()
+            .map(|p| Vertex {
+                position: setup.view_map.screen(p.clip),
+                ..Vertex::default()
+            })
+            .collect();
+        let tl = process(&setup, &written, &Layout::of(FVF_XYZRHW).unwrap());
+        (setup, direct, tl)
+    }
+
+    fn in_front(v: &ScreenVertex) -> bool {
+        v.z >= -1e-6 && v.rhw > 0.0
+    }
+
+    #[test]
+    fn processed_vertices_are_clipped_at_their_clip_coordinates() {
+        let (setup, direct, tl) = behind_the_eye();
+        let kept: Vec<Processed> = tl
+            .iter()
+            .zip(&direct)
+            .map(|(p, d)| at_clip_coordinates(&setup, p, d.clip, d.planes))
+            .collect();
+        let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        draw(&setup, &direct, &prims, &mut a);
+        draw(&setup, &kept, &prims, &mut b);
+        // Clipped at the near plane: the part in front of the eye, as
+        // the untransformed vertices draw it.
+        assert!(!a.triangles.is_empty());
+        assert_eq!(a.triangles, b.triangles);
+        assert!(b.triangles.iter().flatten().all(in_front));
+    }
+
+    /// The triangles of `b` are those of `a`, with their vertices close,
+    /// and all in front of the eye.
+    fn same_triangles(a: &Recorder, b: &Recorder) {
+        assert!(!a.triangles.is_empty());
+        assert_eq!(a.triangles.len(), b.triangles.len());
+        let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * (1.0 + a.abs());
+        for (va, vb) in a
+            .triangles
+            .iter()
+            .flatten()
+            .zip(b.triangles.iter().flatten())
+        {
+            assert!(close(va.x, vb.x) && close(va.y, vb.y), "{va:?} {vb:?}");
+            assert!(close(va.z, vb.z) && close(va.rhw, vb.rhw), "{va:?} {vb:?}");
+        }
+        assert!(b.triangles.iter().flatten().all(in_front));
+    }
+
+    #[test]
+    fn a_triangle_mixing_screen_and_clip_vertices_is_clipped_at_the_near_plane() {
+        // The first corner drawn from its screen position alone, as one
+        // the program wrote over: the triangle is still clipped at the
+        // near plane, as the untransformed vertices draw it.
+        let (setup, direct, tl) = behind_the_eye();
+        let mut mixed = vec![tl[0]];
+        for (p, d) in tl.iter().zip(&direct).skip(1) {
+            mixed.push(at_clip_coordinates(&setup, p, d.clip, d.planes));
+        }
+        let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        draw(&setup, &direct, &prims, &mut a);
+        draw(&setup, &mixed, &prims, &mut b);
+        same_triangles(&a, &b);
+    }
+
+    #[test]
+    fn a_corner_behind_the_eye_from_its_screen_position_is_clipped_at_the_near_plane() {
+        // The corner behind the eye, drawn from its screen position alone
+        // (its rhw is negative), beside two kept at clip coordinates. Its
+        // clip coordinates are the ones the viewport maps it from, so the
+        // triangle is clipped at the near plane as well.
+        let (setup, direct, tl) = behind_the_eye();
+        assert!(tl[2].rhw < 0.0);
+        let mixed = [
+            at_clip_coordinates(&setup, &tl[0], direct[0].clip, direct[0].planes),
+            at_clip_coordinates(&setup, &tl[1], direct[1].clip, direct[1].planes),
+            tl[2],
+        ];
+        let prims = assemble(TRIANGLELIST, &[0, 1, 2]).unwrap();
+        let (mut a, mut b) = (Recorder::default(), Recorder::default());
+        draw(&setup, &direct, &prims, &mut a);
+        draw(&setup, &mixed, &prims, &mut b);
+        same_triangles(&a, &b);
     }
 
     #[test]
@@ -1453,5 +1790,52 @@ mod tests {
             colors(&r.lines[0]),
             [(0xFFFF_0000, 0x0010_2030), (0xFFFF_0000, 0xFF10_2030)]
         );
+    }
+
+    #[test]
+    fn clipping_in_place_gives_the_polygons_clipping_into_vectors_gave() {
+        // The guard band's planes, a near and far plane, and two user
+        // planes, against random triangles, most of them across some:
+        // `clip_polygon` leaves the same vertices, to the bit, as
+        // `clip_spilled`, the version that clips into vectors.
+        let mut planes = Planes::new(Plane::User(0));
+        for plane in [
+            Plane::AboveW(2, 0.0),
+            Plane::BelowW(2, 1.0),
+            Plane::User(0),
+            Plane::User(1),
+            Plane::AboveW(0, -1.5),
+            Plane::BelowW(0, 1.5),
+            Plane::AboveW(1, -1.25),
+            Plane::BelowW(1, 1.25),
+        ] {
+            planes.push(plane);
+        }
+        let mut seed = 0x2545_F491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32 * 6.0 - 3.0
+        };
+        let mut cut = 0;
+        let mut scratch = clip_scratch();
+        for _ in 0..20_000 {
+            let mut vertex = || Processed {
+                clip: [next(), next(), next(), next().abs() + 0.1],
+                planes: [next(), next(), 0.0, 0.0, 0.0, 0.0],
+                diffuse: [next(), next(), next(), next()],
+                tex: [[next(), next(), 0.0, 0.0]; 8],
+                ..Processed::default()
+            };
+            let corners = [(vertex(), true), (vertex(), false), (vertex(), true)];
+            let spilled = clip_spilled(corners.to_vec(), &planes);
+            let poly = clip_polygon(&corners, &planes, &mut scratch).expect("room");
+            assert_eq!(format!("{:?}", &poly[..]), format!("{spilled:?}"));
+            if format!("{spilled:?}") != format!("{:?}", &corners[..]) {
+                cut += 1;
+            }
+        }
+        assert!(cut > 1000, "{cut} cut");
     }
 }

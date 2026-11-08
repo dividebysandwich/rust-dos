@@ -3,7 +3,6 @@
 //! among the timer events, and discs changing.
 
 use super::Bus;
-use crate::disk::DriveKind;
 use crate::ide::{Ata, Atapi, Channel, ChannelId, Device, Env, IdeSlot};
 
 /// A data port access takes a PIO mode 4 cycle.
@@ -27,8 +26,7 @@ impl Bus {
         }
         // The devices, with the slots they ask for.
         let mut wanted: Vec<(Option<IdeSlot>, &[IdeSlot; 4], Device, String)> = Vec::new();
-        let cds = self.disk.drives_of_kind(DriveKind::CdRom);
-        let cd = cds.iter().copied().find(|&d| self.disk.boot_cd_image(d).is_some()).or(cds.first().copied()).or_else(|| {
+        let cd = self.disk.cd_to_show(None).or_else(|| {
             self.boot_cdrom.then(|| (3..crate::disk::DRIVE_Z).find(|&d| !self.disk.is_mounted(d))).flatten()
         });
         if let Some(drive) = cd {

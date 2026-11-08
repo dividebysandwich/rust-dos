@@ -180,7 +180,8 @@ fn apply(imported: &mut Imported, key: &str, value: &str, package: &Path) {
         }
         "run_mount" => {
             let path = super::host_path(package, value);
-            let cd = ["iso", "cue", "chd", "ins", "inst", "bdn"].iter().any(|e| lower.ends_with(&format!(".{}", e)));
+            let cd = ["iso", "cue", "chd", "ins", "inst", "bdn", "b5t", "b6t"];
+            let cd = cd.iter().any(|e| lower.ends_with(&format!(".{}", e)));
             let (drive, kind) = if cd { (3, DriveKind::CdRom) } else { (0, DriveKind::Floppy) };
             imported.drives.retain(|d| d.drive != drive);
             imported.drives.push(MountSpec { drive, path, opts: MountOptions { kind, ..MountOptions::default() } });
@@ -227,10 +228,20 @@ mod tests {
 
     #[test]
     fn images_are_mounted_and_booted_from_the_package() {
-        let imported = import(&["run_mount: CD\\GAME.CUE\nrun_boot: DISKS\\DISK1.IMG\n".to_string()], Path::new("/g/game.dosz"), "G");
+        // The package's path as the host writes it (`\g\game.dosz` on
+        // Windows), which the paths in it go on with the same separator.
+        let package = Path::new(std::path::MAIN_SEPARATOR_STR)
+            .join("g")
+            .join("game.dosz");
+        let imported = import(
+            &["run_mount: CD\\GAME.CUE\nrun_boot: DISKS\\DISK1.IMG\n".to_string()],
+            &package,
+            "G",
+        );
         assert_eq!(imported.drives[0].drive, 3);
-        assert_eq!(imported.drives[0].path, Path::new("/g/game.dosz/CD/GAME.CUE"));
+        assert_eq!(imported.drives[0].path, package.join("CD").join("GAME.CUE"));
         assert_eq!(imported.drives[0].opts.kind, DriveKind::CdRom);
-        assert_eq!(imported.autoexec, ["BOOT \"/g/game.dosz/DISKS/DISK1.IMG\""]);
+        let image = package.join("DISKS").join("DISK1.IMG");
+        assert_eq!(imported.autoexec, [format!("BOOT \"{}\"", image.display())]);
     }
 }

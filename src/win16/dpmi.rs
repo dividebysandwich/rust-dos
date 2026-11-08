@@ -212,6 +212,10 @@ fn function(cpu: &mut Cpu, ctx: &mut Context) -> Result<(), u16> {
             set_w(ctx, EAX, sel);
         }
         0x0001 => {
+            // The segment registers that hold it are zeroed by
+            // `free_selector` (`ldt::write`) right away. A context saved
+            // before the call gets the same zeroing when it is loaded
+            // again (`win32::system::load_context`).
             if !free_selector(cpu, bx) {
                 return Err(BAD_SELECTOR);
             }

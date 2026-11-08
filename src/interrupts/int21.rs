@@ -24,10 +24,11 @@ pub const VOLUME_SERIAL: u32 = 0x1234_0000;
 /// million, which a call costing nothing reaches at 50000 cycles.
 const GET_TIME_NS: u64 = 10_000;
 
-/// What DOS does on entry to INT 21h: save the caller's registers on its
-/// stack (AX, BX, CX, DX, SI, DI, BP, DS, ES, below the interrupt's return
-/// frame) and SS:SP in the running process's PSP (2Eh), where they are
-/// when the process a program makes from it ends (`Cpu::terminate`).
+/// What DOS does on entry to INT 21h, but for the calls `handle` leaves
+/// out: save the caller's registers on its stack (AX, BX, CX, DX, SI, DI,
+/// BP, DS, ES, below the interrupt's return frame) and SS:SP in the running
+/// process's PSP (2Eh), where they are when the process a program makes
+/// from it ends (`Cpu::terminate`).
 fn save_caller(cpu: &mut Cpu) {
     let psp = cpu.current_psp;
     if psp == 0 || cpu.pm() {
@@ -42,6 +43,13 @@ fn save_caller(cpu: &mut Cpu) {
     let base = psp as u32 * 16;
     cpu.bus.guest_write_16(base + 0x2E, sp);
     cpu.bus.guest_write_16(base + 0x30, ss);
+}
+
+/// The owner of a block AH=48h or 4Ah gives the running process. Before
+/// any program is running (shell), DOS owns it, so that it isn't confused
+/// with a free block.
+fn block_owner(cpu: &Cpu) -> u16 {
+    if cpu.current_psp != 0 { cpu.current_psp } else { crate::mcb::DOS_OWNER }
 }
 
 /// The open file (its System File Table entry) handle `handle` of the
@@ -92,6 +100,27 @@ pub(crate) fn read_open_file(cpu: &mut Cpu, sft: u16, count: usize) -> Result<Ve
     let bytes = cpu.bus.disk.read_file(sft, count)?;
     file_io(cpu, sft, bytes.len() as u32, Some(false));
     Ok(bytes)
+}
+
+/// Read up to `count` bytes of the open file `sft` from `offset`, charging
+/// the drive as `read_open_file` does, and leave the file's position where
+/// it was: a page of a file mapping, which Windows reads from the file
+/// when the page is first touched.
+pub(crate) fn read_file_at(
+    bus: &mut crate::bus::Bus,
+    sft: u16,
+    offset: u32,
+    count: usize,
+) -> Option<Vec<u8>> {
+    let position = bus.disk.seek_file(sft, 0, 1).ok()?;
+    let read = bus
+        .disk
+        .seek_file(sft, offset as i64, 0)
+        .and_then(|_| bus.disk.read_file(sft, count));
+    let _ = bus.disk.seek_file(sft, position as i64, 0);
+    let bytes = read.ok()?;
+    bus_file_io(bus, sft, bytes.len() as u32, Some(false));
+    Some(bytes)
 }
 
 /// Write `data` to the open file `sft`, handle `handle` of the running
@@ -156,10 +185,10 @@ pub(crate) fn write_open_file(cpu: &mut Cpu, handle: u16, sft: u16, data: &[u8])
 }
 
 /// The country information for the USA: m/d/y dates, "$" currency, ","
-/// thousands, "." decimals, 12-hour clock. Its first `len` bytes of 34:
-/// AH=38h copies the 24 before the 10 reserved ones, as MS-DOS does, so a
-/// program with a 32-byte buffer, as for DOS 2.0's, keeps what follows it.
-fn write_country_info(cpu: &mut Cpu, addr: usize, len: usize) {
+/// thousands, "." decimals, 12-hour clock, all 34 bytes. AH=38h copies
+/// the 24 before the 10 reserved ones, as MS-DOS does, so a program with
+/// a 32-byte buffer, as for DOS 2.0's, keeps what follows it.
+fn country_info(cpu: &mut Cpu) -> [u8; 34] {
     let mut info = [0u8; 34];
     info[0] = 0; // date format: USA
     info[2] = b'$';
@@ -175,7 +204,7 @@ fn write_country_info(cpu: &mut Cpu, addr: usize, len: usize) {
     let case_map = ((CASE_MAP_ROUTINE - 0xF0000) as u32) | 0xF000_0000;
     info[18..22].copy_from_slice(&case_map.to_le_bytes());
     info[22] = b',';
-    cpu.bus.guest_write_bytes(addr as u32, &info[..len]);
+    info
 }
 
 /// Allocate a block for a child process about to be loaded via EXEC: the
@@ -274,16 +303,24 @@ fn generic_block_ioctl(cpu: &mut Cpu) {
 /// from a write), or a call that moves none. It takes the time the drive's
 /// speed says and makes its noise (see `diskio`); devices take none.
 fn file_io(cpu: &mut Cpu, handle: u16, bytes: u32, data: Option<bool>) {
-    let disk = &cpu.bus.disk;
-    let (Some(drive), None, Some(key)) = (disk.handle_drive(handle), disk.handle_device(handle), disk.handle_key(handle))
-    else {
+    bus_file_io(&mut cpu.bus, handle, bytes, data);
+}
+
+/// `file_io`, for work that has only the bus.
+fn bus_file_io(bus: &mut crate::bus::Bus, handle: u16, bytes: u32, data: Option<bool>) {
+    let disk = &bus.disk;
+    let (Some(drive), None, Some(key)) = (
+        disk.handle_drive(handle),
+        disk.handle_device(handle),
+        disk.handle_key(handle),
+    ) else {
         return;
     };
     let access = match data {
         Some(write) => Access::File { write, key },
         None => Access::Other,
     };
-    cpu.bus.drive_activity(drive, bytes, access);
+    bus.drive_activity(drive, bytes, access);
 }
 
 /// A character from the keyboard the way DOS's console driver reads it: an
@@ -460,7 +497,10 @@ pub fn handle(cpu: &mut Cpu) {
     if writes_console(cpu, ah) && !crate::video::console_ready(cpu) {
         return;
     }
-    save_caller(cpu);
+    // These DOS runs on the caller's stack, without saving anything.
+    if !matches!(ah, 0x33 | 0x50 | 0x51 | 0x62 | 0x64) {
+        save_caller(cpu);
+    }
     dispatch(cpu, ah);
     // Remember the error of a failed handle or file call for AH=59h. The
     // calls in this range that don't report through CF leave it as the
@@ -1050,9 +1090,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
 
                     // Update PSP offset 0x16 (Parent PSP Segment)
                     cpu.bus.guest_write_16(psp_phys + 0x16, parent_psp_before);
-                    // Terminate address (INT 22h).
-                    cpu.bus.guest_write_16(psp_phys + 0x0A, return_address.0);
-                    cpu.bus.guest_write_16(psp_phys + 0x0C, return_address.1);
+                    // Terminate address: DOS points the INT 22h vector at
+                    // the parent's return address and keeps it in the PSP
+                    // (0Ah). Bureau 13's SETUP reckons the memory free for
+                    // the game from that vector's segment.
+                    let terminate = (return_address.1 as u32) << 16 | return_address.0 as u32;
+                    cpu.bus.guest_write_32(0x22 * 4, terminate);
+                    cpu.bus.guest_write_32(psp_phys + 0x0A, terminate);
 
                     // The two FCBs, and the AX the child starts with: AL
                     // (AH) FFh if the first (second) names a drive that
@@ -1126,12 +1170,13 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 } else {
                     // Load failed — release the MCBs we allocated, pop the
                     // context we just saved, and return an error to the parent.
-                    // An EXE file whose MINALLOC doesn't fit in the largest
-                    // free block is short of memory (08h), not missing.
+                    // A program that doesn't fit in the largest free block
+                    // (an EXE file with its MINALLOC, a COM file with its
+                    // stack) is short of memory (08h), not missing.
                     let block = crate::mcb::read_mcb(&mut cpu.bus, load_segment - 1).size;
-                    let short = program.as_deref().is_some_and(|bytes| {
-                        bytes.starts_with(b"MZ") && block < crate::cpu::program_paras(bytes)
-                    });
+                    let short = program
+                        .as_deref()
+                        .is_some_and(|bytes| block < crate::cpu::program_paras(bytes));
                     let _ = crate::mcb::free(&mut cpu.bus, load_segment);
                     let _ = crate::mcb::free(&mut cpu.bus, env_seg);
                     cpu.restore_process_context();
@@ -1251,6 +1296,16 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 return_code, paras_to_keep, tsr_psp
             ));
 
+            // A PSP a program made (AH=26h, 55h) is no program EXEC
+            // started: the one that made it goes on from the terminate
+            // address, as Drakkhen's loader does after its driver.
+            if cpu.ends_in_its_maker(tsr_psp) {
+                cpu.shrink_resident(tsr_psp, paras_to_keep);
+                cpu.end_made_process(tsr_psp);
+                cpu.last_child_exit = 0x0300 | return_code as u16;
+                return;
+            }
+
             cpu.note_exit(return_code, true);
             // Calculate where the resident block ends
             let resident_end = tsr_psp.wrapping_add(paras_to_keep);
@@ -1259,7 +1314,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
                 // The program keeps DX paragraphs (at least its PSP); the
                 // rest of its block goes back to the parent, which loaded
                 // it (a game loading its sound driver, for one).
-                let _ = crate::mcb::resize(&mut cpu.bus, tsr_psp, paras_to_keep.max(6));
+                cpu.shrink_resident(tsr_psp, paras_to_keep);
             }
             if cpu.return_to_parent() {
                 cpu.bus.log_string(&format!(
@@ -1768,14 +1823,7 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         //     largest available block, CF = 1.
         0x48 => {
             let requested = cpu.bx();
-            let owner = if cpu.current_psp != 0 {
-                cpu.current_psp
-            } else {
-                // Before any program is running (shell), give blocks an
-                // "owner" equal to the allocating segment so they aren't
-                // confused with free blocks.
-                0x0008
-            };
+            let owner = block_owner(cpu);
             match crate::mcb::alloc_strategy(&mut cpu.bus, owner, requested, cpu.alloc_strategy) {
                 Ok(segment) => {
                     cpu.set_ax(segment);
@@ -1820,7 +1868,8 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         0x4A => {
             let segment = cpu.es();
             let requested_size = cpu.get_reg16(Register::BX);
-            match crate::mcb::resize(&mut cpu.bus, segment, requested_size) {
+            let owner = block_owner(cpu);
+            match crate::mcb::set_block(&mut cpu.bus, owner, segment, requested_size) {
                 Ok(()) => cpu.set_cpu_flag(CpuFlags::CF, false),
                 Err(err) => {
                     if let crate::mcb::ResizeError::Insufficient(max) = err {
@@ -2128,8 +2177,9 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
         // AH = 38h: Get (or with DX=FFFFh set) country information.
         0x38 => {
             if cpu.dx() != 0xFFFF {
-                let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx());
-                write_country_info(cpu, addr, 24);
+                let addr = cpu.get_physical_addr(cpu.ds(), cpu.dx()) as u32;
+                let info = country_info(cpu);
+                cpu.bus.guest_write_bytes(addr, &info[..24]);
             }
             cpu.set_ax(1); // country code: USA, in AX and BX
             cpu.set_bx(1);
@@ -2298,21 +2348,53 @@ fn dispatch(cpu: &mut Cpu, ah: u8) {
             }
         }
 
+        // AX = 6300h: The lead byte table of double-byte character sets in
+        // DS:SI, the ranges after its length word (empty for code page
+        // 437). The other subfunctions, the interim console flag of Far
+        // East DOS, do nothing in MS-DOS built without DBCS support
+        // ($ECS_call in MS-DOS 4's GETSET.ASM): CF clear, AX and DL as
+        // they came.
+        0x63 => {
+            if cpu.get_al() == 0x00 {
+                cpu.set_ds(dos_data::SEGMENT);
+                cpu.set_si(dos_data::DBCS_TABLE + 2);
+            }
+            cpu.set_cpu_flag(CpuFlags::CF, false);
+        }
+
         // AH = 65h: Extended country information and character case
         // conversion.
         0x65 => match cpu.get_al() {
+            // The information functions need CX >= 5 bytes of room at
+            // ES:DI, or fail with error 1 as MS-DOS's $GetExtCntry does.
+            // When they succeed, AX is the active code page (437), as
+            // MS-DOS 6.22 and 7.10 return it.
+            0x01..=0x1F if cpu.cx() < 5 => set_result(cpu, Err(0x01)),
             0x01 => {
                 // Info ID 1, length, country 1, code page 437, then the
-                // country information of AH=38h.
-                let dest = cpu.get_physical_addr(cpu.es(), cpu.di());
-                let at = dest as u32;
-                cpu.bus.guest_write_8(at, 0x01);
-                cpu.bus.guest_write_16(at + 1, 38);
-                cpu.bus.guest_write_16(at + 3, 1);
-                cpu.bus.guest_write_16(at + 5, 437);
-                write_country_info(cpu, dest + 7, 34);
-                cpu.set_cx(41);
-                cpu.set_cpu_flag(CpuFlags::CF, false);
+                // country information of AH=38h: as much of the 38 bytes
+                // after the length word as CX leaves room for, with the
+                // length word saying how many.
+                let len = (cpu.cx() - 3).min(38);
+                let mut data = [0u8; 41];
+                data[0] = 0x01;
+                data[1..3].copy_from_slice(&len.to_le_bytes());
+                data[3..5].copy_from_slice(&1u16.to_le_bytes());
+                data[5..7].copy_from_slice(&437u16.to_le_bytes());
+                data[7..].copy_from_slice(&country_info(cpu));
+                let at = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
+                cpu.bus.guest_write_bytes(at, &data[..3 + len as usize]);
+                cpu.set_cx(3 + len);
+                set_result(cpu, Ok(437));
+            }
+            0x07 => {
+                // Info ID 7 and a far pointer to the DBCS table, with its
+                // length word.
+                let at = cpu.get_physical_addr(cpu.es(), cpu.di()) as u32;
+                cpu.bus.guest_write_8(at, 0x07);
+                cpu.bus.guest_write_32(at + 1, dos_data::far(dos_data::DBCS_TABLE));
+                cpu.set_cx(5);
+                set_result(cpu, Ok(437));
             }
             0x20 => {
                 let upper = cpu.get_dl().to_ascii_uppercase();

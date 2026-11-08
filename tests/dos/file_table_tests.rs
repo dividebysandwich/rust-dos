@@ -1,0 +1,616 @@
+//! DOS's file tables in memory: each process's handles in the job file
+//! table of its PSP, and the System File Table they refer to, which the List
+//! of Lists points to and Windows reads.
+
+use rust_dos::cpu::{Cpu, CpuFlags, CpuState};
+use rust_dos::interrupts::handle_hle;
+use std::fs;
+use std::path::PathBuf;
+
+/// A machine that runs a COM program (RET) from `dir`, with DATA.TXT
+/// holding "0123456789" there.
+fn machine(name: &str) -> Cpu {
+    let dir = PathBuf::from("target/test_file_tables").join(name);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("P.COM"), [0xC3]).unwrap();
+    fs::write(dir.join("DATA.TXT"), b"0123456789").unwrap();
+    let mut cpu = Cpu::new(dir);
+    assert!(cpu.load_executable("P.COM", None));
+    // A COM program has all of memory: give back what it doesn't use, as
+    // programs that allocate do first.
+    rust_dos::mcb::resize(&mut cpu.bus, cpu.current_psp, 0x1000).unwrap();
+    cpu
+}
+
+/// INT 21h with AX, BX, CX and DX, the strings and buffers in the running
+/// program's segment: AX, or the error code with CF set.
+fn dos(cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) -> Result<u16, u16> {
+    let psp = cpu.current_psp;
+    cpu.set_ds(psp);
+    cpu.set_ax(ax);
+    cpu.set_bx(bx);
+    cpu.set_cx(cx);
+    cpu.set_dx(dx);
+    handle_hle(cpu, 0x21);
+    if cpu.get_cpu_flag(CpuFlags::CF) { Err(cpu.ax()) } else { Ok(cpu.ax()) }
+}
+
+/// Open `name` with access `mode`: the handle.
+fn open(cpu: &mut Cpu, name: &str, mode: u8) -> Result<u16, u16> {
+    let at = cpu.current_psp as usize * 16 + 0x200;
+    cpu.bus.load_bytes(at, format!("{}\0", name).as_bytes());
+    dos(cpu, 0x3D00 | mode as u16, 0, 0, 0x200)
+}
+
+/// Read `count` bytes from `handle` into the program's segment at 300h.
+fn read(cpu: &mut Cpu, handle: u16, count: u16) -> Result<Vec<u8>, u16> {
+    let n = dos(cpu, 0x3F00, handle, count, 0x300)?;
+    let at = cpu.current_psp as usize * 16 + 0x300;
+    Ok((0..n as usize).map(|i| cpu.bus.read_8(at + i)).collect())
+}
+
+/// The job file table slot of `handle` in the PSP `psp`.
+fn slot(cpu: &Cpu, psp: u16, handle: u16) -> u8 {
+    let base = psp as usize * 16;
+    let at = cpu.bus.read_16(base + 0x36) as usize * 16 + cpu.bus.read_16(base + 0x34) as usize;
+    cpu.bus.read_8(at + handle as usize)
+}
+
+/// The linear address of a far pointer's target.
+fn far(cpu: &Cpu, at: usize) -> usize {
+    cpu.bus.read_16(at + 2) as usize * 16 + cpu.bus.read_16(at) as usize
+}
+
+/// The blocks of the System File Table, from the List of Lists: where each
+/// is and how many entries it has.
+fn sft_blocks(cpu: &mut Cpu) -> Vec<(usize, u16)> {
+    dos(cpu, 0x5200, 0, 0, 0).unwrap();
+    let lol = cpu.es() as usize * 16 + cpu.bx() as usize;
+    let mut block = far(cpu, lol + 4);
+    let mut blocks = vec![(block, cpu.bus.read_16(block + 4))];
+    while cpu.bus.read_16(block) != 0xFFFF {
+        block = far(cpu, block);
+        blocks.push((block, cpu.bus.read_16(block + 4)));
+        assert!(blocks.len() < 10, "the chain ends");
+    }
+    blocks
+}
+
+/// The linear address of SFT entry `sft`, as DOS finds it in its blocks.
+fn sft_entry(cpu: &mut Cpu, sft: u8) -> usize {
+    let mut n = sft as usize;
+    for (block, count) in sft_blocks(cpu) {
+        if n < count as usize {
+            return block + 6 + n * 0x3B;
+        }
+        n -= count as usize;
+    }
+    panic!("no entry {sft}");
+}
+
+/// The number of handles referring to SFT entry `sft`.
+fn refs(cpu: &mut Cpu, sft: u8) -> u16 {
+    let entry = sft_entry(cpu, sft);
+    cpu.bus.read_16(entry)
+}
+
+#[test]
+fn a_program_starts_with_the_standard_handles() {
+    let mut cpu = machine("standard");
+    let psp = cpu.current_psp;
+    let base = psp as usize * 16;
+    assert_eq!(cpu.bus.read_16(base + 0x32), 20);
+    assert_eq!((cpu.bus.read_16(base + 0x34), cpu.bus.read_16(base + 0x36)), (0x18, psp));
+    // stdin, stdout and stderr on CON, then AUX and PRN.
+    let slots: Vec<u8> = (0..6).map(|h| slot(&cpu, psp, h)).collect();
+    assert_eq!(slots, [1, 1, 1, 0, 2, 0xFF]);
+    assert_eq!(open(&mut cpu, "DATA.TXT", 0), Ok(5));
+}
+
+#[test]
+fn windows_finds_the_size_of_an_entry_from_the_names_of_con() {
+    // KRNL386 opens CON five times and looks for three of its names in a
+    // row at the same distance, in the first 512 KB.
+    let mut cpu = machine("con_scan");
+    for expected in 5..10 {
+        assert_eq!(open(&mut cpu, "CON", 0), Ok(expected));
+    }
+    let names: Vec<usize> = (0..0x80000 - 11)
+        .filter(|&at| (0..11).all(|i| cpu.bus.read_8(at + i) == b"CON        "[i]))
+        .collect();
+    assert_eq!(names.len(), 6, "the standard CON and the five opened");
+    let size = names.windows(3).find(|w| w[1] - w[0] == w[2] - w[1]).map(|w| w[1] - w[0]);
+    assert_eq!(size, Some(0x3B));
+    // Their entries: one handle each, a character device, the owner.
+    let entry = names[5] - 0x20;
+    assert_eq!(cpu.bus.read_16(entry), 1);
+    assert_eq!(cpu.bus.read_16(entry + 0x05), 0x80D3);
+    assert_eq!(cpu.bus.read_16(entry + 0x31), cpu.current_psp);
+}
+
+#[test]
+fn the_table_is_in_two_blocks_as_in_dos() {
+    // DOS's own five entries and the rest of FILES= after them, below
+    // 512 KB. VSHARE.386 stops walking at the block before the last.
+    let mut cpu = machine("blocks");
+    let blocks = sft_blocks(&mut cpu);
+    let counts: Vec<u16> = blocks.iter().map(|&(_, count)| count).collect();
+    assert_eq!(counts, [5, 122]);
+    let (last, count) = blocks[1];
+    assert_eq!(cpu.bus.read_32(last), 0xFFFF_FFFF);
+    assert!(last + 6 + count as usize * 0x3B < 0x80000);
+    // The entries of the second block are where DOS finds them.
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    for _ in 0..3 {
+        dos(&mut cpu, 0x4500, h, 0, 0).unwrap();
+        open(&mut cpu, "DATA.TXT", 0).unwrap();
+    }
+    let sft = slot(&cpu, cpu.current_psp, 11);
+    assert!(sft >= 5, "an entry in the second block");
+    let entry = sft_entry(&mut cpu, sft);
+    assert_eq!(cpu.bus.read_16(entry), 1);
+    assert_eq!(&(0..11).map(|i| cpu.bus.read_8(entry + 0x20 + i)).collect::<Vec<u8>>(), b"DATA    TXT");
+    // INT 2Fh AX=1216h gives the same address.
+    cpu.set_ax(0x1216);
+    cpu.set_bx(sft as u16);
+    handle_hle(&mut cpu, 0x2F);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!(cpu.es() as usize * 16 + cpu.di() as usize, entry);
+}
+
+#[test]
+fn duplicated_handles_share_the_file_until_the_last_closes() {
+    let mut cpu = machine("dup");
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    let sft = slot(&cpu, cpu.current_psp, h);
+    let dup = dos(&mut cpu, 0x4500, h, 0, 0).unwrap();
+    assert_eq!(slot(&cpu, cpu.current_psp, dup), sft);
+    assert_eq!(refs(&mut cpu, sft), 2);
+    // One position for both.
+    assert_eq!(read(&mut cpu, h, 4).unwrap(), b"0123");
+    assert_eq!(read(&mut cpu, dup, 2).unwrap(), b"45");
+    let entry = sft_entry(&mut cpu, sft);
+    assert_eq!(cpu.bus.read_32(entry + 0x15), 6, "the position in the entry");
+    assert_eq!(dos(&mut cpu, 0x3E00, h, 0, 0), Ok(0x3E00));
+    assert_eq!(slot(&cpu, cpu.current_psp, h), 0xFF);
+    assert_eq!(read(&mut cpu, h, 1), Err(0x06));
+    assert_eq!(read(&mut cpu, dup, 10).unwrap(), b"6789");
+    dos(&mut cpu, 0x3E00, dup, 0, 0).unwrap();
+    assert_eq!(refs(&mut cpu, sft), 0, "the entry is free");
+    assert_eq!(read(&mut cpu, dup, 1), Err(0x06));
+}
+
+#[test]
+fn force_duplicate_points_standard_output_at_a_file() {
+    let mut cpu = machine("force_dup");
+    let at = cpu.current_psp as usize * 16 + 0x200;
+    cpu.bus.load_bytes(at, b"OUT.TXT\0");
+    let h = dos(&mut cpu, 0x3C00, 0, 0, 0x200).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4600, h, 1, 0), Ok(0x4600));
+    dos(&mut cpu, 0x3E00, h, 0, 0).unwrap();
+    // Standard output keeps the file open.
+    let at = cpu.current_psp as usize * 16 + 0x300;
+    cpu.bus.load_bytes(at, b"hi");
+    assert_eq!(dos(&mut cpu, 0x4000, 1, 2, 0x300), Ok(2));
+    dos(&mut cpu, 0x3E00, 1, 0, 0).unwrap();
+    let dir = PathBuf::from("target/test_file_tables/force_dup");
+    assert_eq!(fs::read(dir.join("OUT.TXT")).unwrap(), b"hi");
+}
+
+/// The tests below hold what MS-DOS 7.10 answers, from a test program run
+/// on Windows 98's DOS booted from a floppy.
+#[test]
+fn ioctl_status_of_a_file_reads_ahead_and_keeps_the_position() {
+    let mut cpu = machine("ioctl_status");
+    let h = open(&mut cpu, "DATA.TXT", 2).unwrap();
+    // AL=FFh with the next byte in AH, until the end, and at or past it
+    // AL=00h and AH=1Ah.
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x30FF));
+    assert_eq!(dos(&mut cpu, 0x4201, h, 0, 0), Ok(0), "the position stays");
+    dos(&mut cpu, 0x4200, h, 0, 5).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x35FF));
+    assert_eq!(read(&mut cpu, h, 5).unwrap(), b"56789");
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x1A00));
+    dos(&mut cpu, 0x4200, h, 0, 20).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, h, 0, 0), Ok(0x1A00));
+    assert_eq!(dos(&mut cpu, 0x4201, h, 0, 0), Ok(20), "the position stays");
+    // A file is always ready for output.
+    assert_eq!(dos(&mut cpu, 0x4407, h, 0, 0), Ok(0x01FF));
+    // A handle open for writing only has nothing to read.
+    let w = open(&mut cpu, "DATA.TXT", 1).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, w, 0, 0), Ok(0x1A00));
+    assert_eq!(dos(&mut cpu, 0x4407, w, 0, 0), Ok(0x01FF));
+    // No such handle.
+    assert_eq!(dos(&mut cpu, 0x4406, 0x77, 0, 0), Err(6));
+    assert_eq!(dos(&mut cpu, 0x4407, 0x77, 0, 0), Err(6));
+}
+
+#[test]
+fn ioctl_status_of_the_console_is_the_keyboards() {
+    let mut cpu = machine("ioctl_status_console");
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+    assert_eq!(dos(&mut cpu, 0x4407, 1, 0, 0), Ok(0x01FF));
+    rust_dos::keyboard::queue_keystroke(&mut cpu.bus, 0x1071);
+    // Any handle on the console: the key stays where it was.
+    assert_eq!(dos(&mut cpu, 0x4406, 1, 0, 0), Ok(0x71FF));
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x71FF));
+    assert_eq!(dos(&mut cpu, 0x0700, 0, 0, 0).map(|ax| ax & 0xFF), Ok(0x71));
+    // The rest of a line a cooked read took doesn't count.
+    cpu.con_pending.extend(b"cde\r\n");
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+    // An extended key is the 00h a read gets, on the grey keys too.
+    for key in [0x4800, 0x48E0] {
+        rust_dos::keyboard::queue_keystroke(&mut cpu.bus, key);
+        assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x00FF));
+        assert_eq!(dos(&mut cpu, 0x0700, 0, 0, 0).map(|ax| ax & 0xFF), Ok(0x00));
+        assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x48FF));
+        assert_eq!(dos(&mut cpu, 0x0700, 0, 0, 0).map(|ax| ax & 0xFF), Ok(0x48));
+    }
+}
+
+#[test]
+fn ioctl_status_of_the_console_after_the_hosts_input_ended() {
+    let mut cpu = machine("ioctl_status_console_end");
+    cpu.host_console = Some(rust_dos::cpu::HostConsole::default());
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x0000));
+    // Ready, so that a program polling it reads the end of the file.
+    cpu.host_console.as_mut().unwrap().input_ended = true;
+    assert_eq!(dos(&mut cpu, 0x4406, 0, 0, 0), Ok(0x1AFF));
+    assert_eq!(read(&mut cpu, 0, 8).unwrap(), b"");
+}
+
+#[test]
+fn ioctl_status_of_nul_aux_and_a_serial_port() {
+    use rust_dos::serial::{PortType, SerialSettings};
+    let mut cpu = machine("ioctl_status_devices");
+    let nul = open(&mut cpu, "NUL", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, nul, 0, 0), Ok(0x00FF));
+    assert_eq!(dos(&mut cpu, 0x4407, nul, 0, 0), Ok(0x01FF));
+    // AUX, the standard one or by name, with nothing on it.
+    let aux = open(&mut cpu, "AUX", 2).unwrap();
+    for handle in [3, aux] {
+        assert_eq!(dos(&mut cpu, 0x4406, handle, 0, 0), Ok(0x0000));
+        assert_eq!(dos(&mut cpu, 0x4407, handle, 0, 0), Ok(0x0100));
+    }
+    // A COM port with no hardware.
+    let com3 = open(&mut cpu, "COM3", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, com3, 0, 0), Ok(0x0000));
+    assert_eq!(dos(&mut cpu, 0x4407, com3, 0, 0), Ok(0x0100));
+    // A modem on COM1, which raises DSR once the program raises DTR:
+    // ready for output, nothing to read yet.
+    let modem = [
+        PortType::Modem,
+        PortType::Empty,
+        PortType::Off,
+        PortType::Off,
+    ];
+    cpu.bus.configure_serial(&SerialSettings {
+        ports: modem,
+        ..Default::default()
+    });
+    cpu.bus.io_write(0x3FC, 0x03);
+    let com1 = open(&mut cpu, "COM1", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4407, com1, 0, 0), Ok(0x01FF));
+    assert_eq!(dos(&mut cpu, 0x4406, com1, 0, 0), Ok(0x0000));
+    // Nothing on COM2, so no DSR: busy both ways.
+    let com2 = open(&mut cpu, "COM2", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4407, com2, 0, 0), Ok(0x0100));
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
+    // No printer.
+    let prn = open(&mut cpu, "PRN", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4407, prn, 0, 0), Ok(0x0100));
+}
+
+#[test]
+fn ioctl_input_status_of_a_serial_port_shows_what_came() {
+    use rust_dos::serial::{PortType, SerialSettings};
+    let mut cpu = machine("ioctl_status_serial");
+    cpu.bus.set_cycles_per_ms(1000);
+    let ports = [
+        PortType::Empty,
+        PortType::Empty,
+        PortType::Off,
+        PortType::Off,
+    ];
+    cpu.bus.configure_serial(&SerialSettings {
+        ports,
+        ..Default::default()
+    });
+    // COM2 looped back on itself, with DTR for DSR.
+    cpu.bus.io_write(0x2FB, 0x80);
+    cpu.bus.io_write(0x2F8, 1);
+    cpu.bus.io_write(0x2F9, 0);
+    cpu.bus.io_write(0x2FB, 0x03);
+    cpu.bus.io_write(0x2FC, 0x11);
+    let com2 = open(&mut cpu, "COM2", 2).unwrap();
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
+    cpu.bus.io_write(0x2F8, b'x');
+    for _ in 0..10 {
+        cpu.bus.clock.icount += 1000;
+        cpu.bus.start_batch(cpu.bus.clock.icount + 1000);
+        cpu.bus.service_timers();
+    }
+    // The character stays there to be read.
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x78FF));
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x78FF));
+    assert_eq!(cpu.bus.io_read(0x2F8), b'x');
+    assert_eq!(dos(&mut cpu, 0x4406, com2, 0, 0), Ok(0x0000));
+}
+
+#[test]
+fn ioctl_440a_gives_the_sft_flags_and_keeps_ax() {
+    let mut cpu = machine("ioctl_remote");
+    let h = open(&mut cpu, "DATA.TXT", 2).unwrap();
+    let drive = cpu.bus.disk.get_current_drive() as u16;
+    // Bit 15, remote, clear; bit 6, not written, set.
+    assert_eq!(dos(&mut cpu, 0x440A, h, 0, 0xFFFF), Ok(0x440A));
+    assert_eq!(cpu.dx(), 0x0040 | drive);
+    // AX=4400h gives a file the same word.
+    dos(&mut cpu, 0x4400, h, 0, 0).unwrap();
+    assert_eq!(cpu.dx(), 0x0040 | drive);
+    // A device has no driver attributes in the high byte, unlike AX=4400h.
+    dos(&mut cpu, 0x4400, 1, 0, 0).unwrap();
+    assert_eq!(cpu.dx(), 0x80D3);
+    assert_eq!(dos(&mut cpu, 0x440A, 1, 0, 0xFFFF), Ok(0x440A));
+    assert_eq!(cpu.dx(), 0x00D3);
+    let nul = open(&mut cpu, "NUL", 2).unwrap();
+    dos(&mut cpu, 0x4400, nul, 0, 0).unwrap();
+    assert_eq!(cpu.dx(), 0x80C4);
+    dos(&mut cpu, 0x440A, nul, 0, 0xFFFF).unwrap();
+    assert_eq!(cpu.dx(), 0x00C4);
+    // The printer, by its handle and by its names.
+    let prn = open(&mut cpu, "PRN", 2).unwrap();
+    let lpt1 = open(&mut cpu, "LPT1", 2).unwrap();
+    for handle in [4, prn, lpt1] {
+        dos(&mut cpu, 0x4400, handle, 0, 0).unwrap();
+        assert_eq!(cpu.dx(), 0xA0C0);
+        dos(&mut cpu, 0x440A, handle, 0, 0xFFFF).unwrap();
+        assert_eq!(cpu.dx(), 0x00C0);
+    }
+    // Raw mode shows, as in AX=4400h.
+    dos(&mut cpu, 0x4401, 1, 0, 0xF3).unwrap();
+    dos(&mut cpu, 0x440A, 1, 0, 0xFFFF).unwrap();
+    assert_eq!(cpu.dx(), 0x00F3);
+    // No such handle: error 6, DX as it was.
+    assert_eq!(dos(&mut cpu, 0x440A, 0x77, 0, 0x1234), Err(6));
+    assert_eq!(cpu.dx(), 0x1234);
+}
+
+#[test]
+fn a_console_write_clears_a_carry_the_caller_had_set() {
+    let mut cpu = machine("console_write_carry");
+    let con = open(&mut cpu, "CON", 2).unwrap();
+    for handle in [1, 2, con] {
+        for count in [2, 0] {
+            cpu.set_cpu_flag(CpuFlags::CF, true);
+            assert_eq!(dos(&mut cpu, 0x4000, handle, count, 0x200), Ok(count));
+        }
+    }
+}
+
+#[test]
+fn a_child_psp_inherits_handles_but_not_those_opened_not_to_be() {
+    let mut cpu = machine("child_psp");
+    let parent = cpu.current_psp;
+    let shared = open(&mut cpu, "DATA.TXT", 0x00).unwrap();
+    let private = open(&mut cpu, "DATA.TXT", 0x80).unwrap();
+    let sft = slot(&cpu, parent, shared);
+    // AH=55h: the child's PSP at DX, its memory ending at SI, and it runs
+    // now.
+    let child = parent + 0x100;
+    cpu.set_si(child + 0x10);
+    dos(&mut cpu, 0x5500, 0, 0, child).unwrap();
+    assert_eq!(cpu.current_psp, child);
+    let base = child as usize * 16;
+    assert_eq!(cpu.bus.read_16(base + 0x16), parent);
+    assert_eq!(cpu.bus.read_16(base + 0x02), child + 0x10, "the end of its memory, as SI says");
+    assert_eq!(slot(&cpu, child, shared), sft);
+    assert_eq!(slot(&cpu, child, private), 0xFF);
+    assert_eq!(slot(&cpu, child, 1), 1, "standard output");
+    assert_eq!(refs(&mut cpu, sft), 2);
+    assert_eq!(read(&mut cpu, shared, 3).unwrap(), b"012");
+    dos(&mut cpu, 0x3E00, shared, 0, 0).unwrap();
+    // The parent's handle is still open, and at the child's position.
+    dos(&mut cpu, 0x5000, parent, 0, 0).unwrap();
+    assert_eq!(read(&mut cpu, shared, 3).unwrap(), b"345");
+}
+
+#[test]
+fn a_bigger_handle_table_moves_out_of_the_psp() {
+    let mut cpu = machine("handle_count");
+    let psp = cpu.current_psp;
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    assert!(dos(&mut cpu, 0x6700, 40, 0, 0).is_ok());
+    let base = psp as usize * 16;
+    assert_eq!(cpu.bus.read_16(base + 0x32), 40);
+    assert_ne!(cpu.bus.read_16(base + 0x36), psp);
+    assert_eq!(read(&mut cpu, h, 2).unwrap(), b"01");
+    // Room for more than 20 handles now.
+    let handles: Vec<u16> = (0..30).map(|_| open(&mut cpu, "DATA.TXT", 0).unwrap()).collect();
+    assert_eq!(handles.last(), Some(&35));
+}
+
+#[test]
+fn a_psp_a_program_writes_into_the_sda_is_the_running_process() {
+    // DOS/4GW's virtual memory manager, as Lands of Lore: Guardians of
+    // Destiny runs it: it finds the current PSP's word in the SDA by
+    // setting the PSP to its complement and looking for that, then writes
+    // its own PSP there and creates its swap file. DOS keeps the running
+    // process in the SDA alone, so the file is the program's.
+    let mut cpu = machine("sda_psp");
+    let psp = dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()).unwrap();
+    dos(&mut cpu, 0x5D06, 0, 0, 0).unwrap();
+    let sda = cpu.ds() as usize * 16 + cpu.si() as usize;
+    let size = cpu.cx() as usize;
+    dos(&mut cpu, 0x5000, !psp, 0, 0).unwrap();
+    let field = (0..size)
+        .step_by(2)
+        .map(|i| sda + i)
+        .find(|&at| cpu.bus.read_16(at) == !psp)
+        .expect("the PSP's word in the SDA");
+    cpu.bus.write_16(field, psp);
+    let at = psp as usize * 16 + 0x200;
+    cpu.bus.load_bytes(at, b"SWAP.SWP\0");
+    cpu.set_ds(psp);
+    cpu.set_ax(0x3C00);
+    cpu.set_cx(0);
+    cpu.set_dx(0x200);
+    handle_hle(&mut cpu, 0x21);
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF), "create failed with error {:02X}", cpu.ax());
+    assert_eq!(cpu.ax(), 5, "the program's first free handle");
+    assert_ne!(slot(&cpu, psp, 5), 0xFF);
+    assert_eq!(dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()), Ok(psp));
+}
+
+#[test]
+fn a_process_the_emulator_switches_to_stays_when_the_sda_is_untouched() {
+    // The shell starts programs without a DOS call: the SDA still has the
+    // process of the last call, which the program didn't change.
+    let mut cpu = machine("sda_untouched");
+    let psp = cpu.current_psp;
+    dos(&mut cpu, 0x6200, 0, 0, 0).unwrap();
+    let other = psp + 0x100;
+    cpu.current_psp = other;
+    assert_eq!(dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()), Ok(other));
+}
+
+#[test]
+fn a_program_the_shell_starts_after_another_runs_as_itself() {
+    // Starting a program from the shell clears conventional memory below
+    // the first MCB, the SDA with it: what the last DOS call wrote there
+    // is gone, and the program runs as the process the shell made.
+    let mut cpu = machine("sda_next_program");
+    let drive = dos(&mut cpu, 0x1900, 0, 0, 0).unwrap() & 0xFF;
+    // An EXE (which the shell loads over cleared memory) of one RET.
+    let mut exe = vec![0u8; 0x21];
+    exe[..2].copy_from_slice(b"MZ");
+    exe[2] = 0x21; // bytes in the last page
+    exe[4] = 1; // pages
+    exe[8] = 2; // header paragraphs
+    exe[12..14].copy_from_slice(&0xFFFFu16.to_le_bytes()); // MAXALLOC
+    exe[16] = 0xFE; // SP
+    exe[0x20] = 0xC3;
+    fs::write(PathBuf::from("target/test_file_tables/sda_next_program/E.EXE"), exe).unwrap();
+    assert!(cpu.load_executable("E.EXE", None));
+    let psp = cpu.current_psp;
+    assert_eq!(dos(&mut cpu, 0x6200, 0, 0, 0).map(|_| cpu.bx()), Ok(psp));
+    assert_eq!(dos(&mut cpu, 0x1900, 0, 0, 0).map(|ax| ax & 0xFF), Ok(drive));
+    dos(&mut cpu, 0x2F00, 0, 0, 0).unwrap();
+    assert_eq!((cpu.es(), cpu.bx()), (psp, 0x80));
+}
+
+#[test]
+fn a_psp_a_program_made_ends_back_in_its_parent_at_its_terminate_address() {
+    // As Windows ends a task: its PSP made with AH=55h, then AH=4Ch with
+    // it current.
+    let mut cpu = machine("made_psp_exit");
+    let parent = cpu.current_psp;
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    let sft = slot(&cpu, parent, h);
+    cpu.set_sp(0xF000);
+    let (ss, sp) = (cpu.ss(), cpu.sp());
+    // The parent's last INT 21h call leaves its registers on its stack.
+    let child = parent + 0x100;
+    cpu.set_si(child + 0x10);
+    cpu.set_bp(0x1234);
+    dos(&mut cpu, 0x5500, 0xABCD, 0, child).unwrap();
+    // Where the child returns to when it ends.
+    let base = child as usize * 16;
+    cpu.bus.write_16(base + 0x0A, 0x0300);
+    cpu.bus.write_16(base + 0x0C, 0x5000);
+
+    // The child runs on a stack of its own, and ends.
+    cpu.set_sp(sp - 0x40);
+    cpu.set_bp(0);
+    assert_eq!(refs(&mut cpu, sft), 2);
+    let _ = dos(&mut cpu, 0x4C00, 0, 0, 0);
+    assert_eq!(cpu.current_psp, parent);
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.dx(), cpu.bp()), (0x5500, 0xABCD, child, 0x1234), "the parent's registers");
+    assert_eq!((cpu.ss(), cpu.sp()), (ss, sp), "on the parent's stack");
+    let frame = ss as usize * 16 + sp as usize;
+    assert_eq!((cpu.bus.read_16(frame), cpu.bus.read_16(frame + 2)), (0x0300, 0x5000), "returning to the terminate address");
+    assert_eq!(cpu.bus.read_32(0x22 * 4), 0x5000_0300, "INT 22h as the child had it");
+    assert_eq!(refs(&mut cpu, sft), 1, "the child's handle closed, the parent's open");
+    assert_eq!(read(&mut cpu, h, 2).unwrap(), b"01");
+}
+
+#[test]
+fn a_psp_a_program_made_stays_resident_and_its_maker_goes_on() {
+    // As Drakkhen's loader runs its driver: a block of free memory, a PSP
+    // in it with AH=26h and the terminate address set by hand, then the
+    // driver current. It resizes its block with BX left 0 and stays
+    // resident with AH=31h.
+    let mut cpu = machine("made_psp_tsr");
+    let parent = cpu.current_psp;
+    let h = open(&mut cpu, "DATA.TXT", 0).unwrap();
+    let sft = slot(&cpu, parent, h);
+    cpu.set_sp(0xF000);
+    let (ss, sp) = (cpu.ss(), cpu.sp());
+    let driver = rust_dos::mcb::alloc(&mut cpu.bus, parent, 0x1000).unwrap();
+    let ended = cpu.programs.ended;
+    cpu.set_bp(0x1234);
+    dos(&mut cpu, 0x2600, 0xABCD, 0, driver).unwrap();
+    let base = driver as usize * 16;
+    cpu.bus.write_16(base + 0x0A, 0x0300);
+    cpu.bus.write_16(base + 0x0C, 0x5000);
+    // AH=50h saves nothing: DOS runs it on the caller's stack.
+    dos(&mut cpu, 0x5000, driver, 0, 0).unwrap();
+    assert_eq!(cpu.current_psp, driver);
+
+    cpu.set_sp(sp - 0x40);
+    cpu.set_bp(0);
+    cpu.set_es(driver);
+    dos(&mut cpu, 0x4A00, 0, 0, 0x107).unwrap();
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    let _ = dos(&mut cpu, 0x3100, 0, 0, 0xF9);
+
+    assert_eq!(cpu.current_psp, parent);
+    assert_eq!(
+        (cpu.ax(), cpu.bx(), cpu.dx(), cpu.bp()),
+        (0x2600, 0xABCD, driver, 0x1234),
+        "the parent's registers"
+    );
+    assert!(!cpu.get_cpu_flag(CpuFlags::CF));
+    assert_eq!((cpu.ss(), cpu.sp()), (ss, sp), "on the parent's stack");
+    let frame = ss as usize * 16 + sp as usize;
+    assert_eq!(
+        (cpu.bus.read_16(frame), cpu.bus.read_16(frame + 2)),
+        (0x0300, 0x5000),
+        "returning to the terminate address"
+    );
+    assert_eq!(cpu.bus.read_16(frame + 4) & 0x0FFF, 0x0202, "flags as DOS leaves them");
+    assert_eq!(cpu.bus.read_32(0x22 * 4), 0x5000_0300, "INT 22h as the driver had it");
+
+    let block = rust_dos::mcb::read_mcb(&mut cpu.bus, driver - 1);
+    assert_eq!(block.size, 0xF9, "the paragraphs it keeps");
+    assert_eq!(block.owner, driver, "resizing it made it the driver's");
+    assert_eq!(cpu.bus.read_16(base + 2), driver + 0xF9, "PSP 02h: where it ends");
+    assert!(rust_dos::mcb::read_mcb(&mut cpu.bus, driver + 0xF9).is_free(), "the rest is free");
+    // AH=26h's copy of the table takes no reference; closing it would drop
+    // the parent's.
+    assert_eq!(refs(&mut cpu, sft), 1, "a resident process keeps its files");
+    assert_eq!(dos(&mut cpu, 0x4D00, 0, 0, 0).unwrap(), 0x0300, "AH=4Dh: stayed resident");
+    assert_eq!(cpu.programs.ended, ended, "the program that runs didn't end");
+
+    // Its memory outlives the process that made it.
+    rust_dos::mcb::free_owned_by(&mut cpu.bus, parent);
+    assert_eq!(rust_dos::mcb::read_mcb(&mut cpu.bus, driver - 1).owner, driver);
+}
+
+#[test]
+fn a_made_psp_without_a_terminate_address_stays_resident_under_the_shell() {
+    // A program that moves itself: a PSP elsewhere, made current, and
+    // AH=31h. INT 22h holds no way back here, so it ends as the shell's
+    // programs do, and stays resident under the next ones.
+    let mut cpu = machine("made_psp_shell_tsr");
+    let parent = cpu.current_psp;
+    let block = rust_dos::mcb::alloc(&mut cpu.bus, parent, 0x1000).unwrap();
+    dos(&mut cpu, 0x2600, 0, 0, block).unwrap();
+    dos(&mut cpu, 0x5000, block, 0, 0).unwrap();
+    let _ = dos(&mut cpu, 0x3107, 0, 0, 0xF9);
+
+    assert_eq!(cpu.state, CpuState::RebootShell);
+    assert_eq!(cpu.errorlevel, 7);
+    assert_eq!(rust_dos::mcb::read_mcb(&mut cpu.bus, block - 1).size, 0xF9);
+}

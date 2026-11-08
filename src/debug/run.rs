@@ -23,6 +23,14 @@ fn millis(time: Duration) -> f64 {
     (time.as_secs_f64() * 1e5).round() / 100.0
 }
 
+/// What plays the sound: the name to read before trusting a measurement.
+pub(super) fn audio_driver(cpu: &Cpu) -> Option<String> {
+    cpu.bus
+        .audio_device
+        .as_ref()
+        .map(|device| device.name().to_string())
+}
+
 /// `/api/underruns`: `hostframes` says what the numbers are.
 pub(super) fn underruns_json(cpu: &Cpu) -> Value {
     let queue_ms = |frames| (rust_dos::audio::AudioBuffer::millis(frames) * 100.0).round() / 100.0;
@@ -53,8 +61,12 @@ pub(super) fn underruns_json(cpu: &Cpu) -> Value {
         })
         .collect();
     json!({
+        "audio_driver": audio_driver(cpu),
         "events": host.underrun_events(),
         "dry_checks": cpu.bus.audio_underruns,
+        // What the queue keeps on top of its target since the host ran it
+        // dry (`audio::Feed`); each record's `target_ms` includes it.
+        "queue_growth_ms": queue_ms(cpu.bus.audio_feed.extra_frames()),
         "log": log,
     })
 }
@@ -436,6 +448,7 @@ impl DebugHub {
                 "recompiled": round(v.recompiled, 10.0),
                 "render_ms": round(v.render_ms, 100.0),
             })),
+            "audio_driver": audio_driver(cpu),
             // The host's frames, from one start of the frame loop to the
             // next, while the machine runs: the last `FRAME_WINDOW` of
             // them, how long they took together in seconds, and in ms the

@@ -86,10 +86,9 @@ fn write_tm(cpu: &mut Cpu, at: u32, tm: &Tm) -> Option<()> {
     put(cpu, at, &data)
 }
 
-/// Seconds since 1970 by the machine's clock.
-fn now(cpu: &Cpu) -> i64 {
-    let at = cpu.bus.cmos.now();
-    at.and_utc().timestamp()
+/// Seconds since 1970 by the system's time (`kernel32::time::now`).
+fn now(cpu: &mut Cpu) -> i64 {
+    crate::win32::kernel32::time::now(cpu).and_utc().timestamp()
 }
 
 /// time(t): the time, also in `*t` when t isn't NULL.
@@ -335,8 +334,9 @@ pub fn wcsftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// _ftime(timeb): the time, its milliseconds, and no time zone.
 pub fn ftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
-    let t = now(cpu) as u32;
-    let millis = (cpu.bus.cmos.now().and_utc().timestamp_subsec_millis()) as u16;
+    let at = crate::win32::kernel32::time::now(cpu).and_utc();
+    let t = at.timestamp() as u32;
+    let millis = at.timestamp_subsec_millis() as u16;
     let mut out = [0u8; 12];
     out[0..4].copy_from_slice(&t.to_le_bytes());
     out[4..6].copy_from_slice(&millis.to_le_bytes());
@@ -345,7 +345,7 @@ pub fn ftime(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The date and time now as `struct tm`.
-fn now_tm(cpu: &Cpu) -> Tm {
+fn now_tm(cpu: &mut Cpu) -> Tm {
     tm_of(now(cpu))
 }
 

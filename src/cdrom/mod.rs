@@ -1,8 +1,9 @@
-//! CD-ROM images: CUE sheets with their BIN and WAV tracks, CHD files, and
-//! bare ISO, BIN or IMG images of a data track; the ISO 9660 file system on
-//! them.
+//! CD-ROM images: CUE sheets with their BIN and WAV tracks, CHD files,
+//! BlindWrite images, and bare ISO, BIN or IMG images of a data track; the
+//! ISO 9660 file system on them.
 
 pub mod audio;
+pub mod b6t;
 #[cfg(feature = "chd")]
 pub mod chd;
 pub mod cue;
@@ -82,6 +83,33 @@ pub fn edc_fails(raw: &[u8; RAW_SECTOR]) -> bool {
     }
 }
 
+/// Subchannel as a drive reads it raw, from `linear`, which has each of
+/// P to W's 12 bytes after the one before: byte i holds bit i of every
+/// channel, P's in bit 7.
+pub fn interleave_subchannel(linear: &[u8; 96]) -> [u8; 96] {
+    let mut raw = [0u8; 96];
+    for (i, byte) in raw.iter_mut().enumerate() {
+        for channel in 0..8 {
+            let bit = linear[channel * 12 + i / 8] >> (7 - i % 8) & 1;
+            *byte |= bit << (7 - channel);
+        }
+    }
+    raw
+}
+
+/// The subchannel `interleave_subchannel` made `raw` from: each of P to
+/// W's 12 bytes after the one before.
+pub fn deinterleave_subchannel(raw: &[u8; 96]) -> [u8; 96] {
+    let mut linear = [0u8; 96];
+    for (i, byte) in raw.iter().enumerate() {
+        for channel in 0..8 {
+            let bit = byte >> (7 - channel) & 1;
+            linear[channel * 12 + i / 8] |= bit << (7 - i % 8);
+        }
+    }
+    linear
+}
+
 /// Minute, second and frame of a sector.
 pub fn lba_to_msf(lba: u32) -> (u8, u8, u8) {
     let frames = lba + LBA_OFFSET;
@@ -151,6 +179,22 @@ mod tests {
     /// EDC.
     fn mode1(fill: u8) -> [u8; RAW_SECTOR] {
         mode1_sector(16, fill)
+    }
+
+    #[test]
+    fn subchannel_interleaved() {
+        let mut linear = [0u8; 96];
+        // P all set; Q's first bit; W's last.
+        linear[..12].fill(0xFF);
+        linear[12] = 0x80;
+        linear[95] = 0x01;
+        let raw = interleave_subchannel(&linear);
+        assert_eq!(raw[0], 0xC0);
+        assert!(raw[1..95].iter().all(|&b| b == 0x80));
+        assert_eq!(raw[95], 0x81);
+        assert_eq!(deinterleave_subchannel(&raw), linear);
+        let any: [u8; 96] = std::array::from_fn(|i| (i * 37 + 11) as u8);
+        assert_eq!(deinterleave_subchannel(&interleave_subchannel(&any)), any);
     }
 
     #[test]

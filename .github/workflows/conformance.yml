@@ -1,12 +1,16 @@
 name: Conformance
 
 # Wine's conformance tests under the built-in Windows
-# (tests/conformance_tests.rs), and those ported to Windows 3.1 programs
-# (tests/win16_conformance_tests.rs). They need MinGW and OpenWatcom, so
-# they run in jobs of their own: on changes to what they test, every
-# night, and by hand.
+# (tests/win32/conformance_tests.rs), and those ported to Windows 3.1
+# programs (tests/win16/win16_conformance_tests.rs). They need MinGW and
+# OpenWatcom, so they run in jobs of their own: on changes to what they
+# test, every night, and by hand.
 on:
+  # Pushes to main and tags only: a branch with a pull request runs through
+  # `pull_request`, whose runs a newer push cancels.
   push:
+    branches: [main]
+    tags: ["*"]
     paths: &paths
       - "src/win32/**"
       - "crates/pe/**"
@@ -27,11 +31,12 @@ on:
       - "src/win16/**"
       - "crates/ne/**"
       - "tests/conformance/**"
-      - "tests/conformance_tests.rs"
+      - "tests/win32/conformance_tests.rs"
       - "tests/conformance16/**"
-      - "tests/win16_conformance_tests.rs"
+      - "tests/win16/win16_conformance_tests.rs"
       - ".github/workflows/conformance.yml"
       - ".github/actions/apt-install/**"
+      - ".github/actions/sdl3/**"
   pull_request:
     paths: *paths
   schedule:
@@ -66,9 +71,15 @@ jobs:
         uses: $/.github/actions/apt-install
         with:
           packages: >-
-            git ca-certificates curl zstd build-essential pkg-config libsdl2-dev libasound2-dev
+            git ca-certificates curl zstd build-essential pkg-config libasound2-dev
             gcc-mingw-w64-i686-win32
           update: true
+
+      - name: Build SDL3
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ubuntu:22.04
+          update: "true"
 
       - name: Trust the workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -93,7 +104,7 @@ jobs:
         env:
           CONFORMANCE_CC: i686-w64-mingw32-gcc-win32
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --release --test conformance_tests
+        run: "cargo test --locked --release --test win32 conformance_tests::"
 
       # What each test program printed, to look at when they fail.
       - name: Keep the test programs' output
@@ -114,8 +125,13 @@ jobs:
       - name: Install build environment
         uses: $/.github/actions/apt-install
         with:
-          packages: libsdl2-dev libasound2-dev
+          packages: libasound2-dev
           update: false
+
+      - name: Build SDL3
+        uses: $/.github/actions/sdl3
+        with:
+          flavor: ubuntu-latest
 
       - name: Install OpenWatcom
         run: |
@@ -142,7 +158,7 @@ jobs:
       - name: Run the Win16 conformance tests
         env:
           CONFORMANCE_REQUIRED: "1"
-        run: cargo test --locked --release --test win16_conformance_tests
+        run: "cargo test --locked --release --test win16 win16_conformance_tests::"
 
       - name: Keep the test programs' output
         if: failure()

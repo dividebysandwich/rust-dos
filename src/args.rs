@@ -20,10 +20,21 @@ pub(crate) struct Args {
 
     /// Keep the window hidden, for runs driven through the debug server:
     /// the 3dfx card is still drawn with OpenGL (voodoo_renderer=opengl),
-    /// on the host's GPU, where SDL_VIDEODRIVER=dummy has no OpenGL. A
+    /// on the host's GPU, where SDL_VIDEO_DRIVER=dummy has no OpenGL. A
     /// host without OpenGL 3 gets SDL's renderer and the software card
     #[arg(long)]
     pub(crate) hidden: bool,
+
+    /// What plays the sound: auto, sdl (SDL's sound device) or null (the
+    /// null output: nothing plays, and its queue empties at exactly the
+    /// output's rate) [default: the config file's audio_output]
+    #[arg(long, value_name = "OUTPUT", value_parser = parse_audio_output)]
+    pub(crate) audio_output: Option<rust_dos::audio::OutputChoice>,
+
+    /// Start with the sound off, as Ctrl+F8 does: the sound device gets
+    /// silence, and the debug server's stream and recordings keep the sound
+    #[arg(long)]
+    pub(crate) mute: bool,
 
     /// Show the picture on a screen in a 3D scene in a VR headset, through
     /// OpenXR (SteamVR, Monado) [default: the config file's [vr] mode]
@@ -85,6 +96,18 @@ pub(crate) struct Args {
     /// free port, and the "Debug server listening on" line gives it.
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:8086")]
     pub(crate) debug_server: Option<std::net::SocketAddr>,
+
+    /// Quit when the process that started rust-dos ends, or the process
+    /// PID: as POST /api/control/quit does, with exit code 4. If the
+    /// process has ended already, rust-dos exits at once
+    #[arg(
+        long,
+        value_name = "PID",
+        num_args = 0..=1,
+        value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64),
+        conflicts_with = "relay"
+    )]
+    pub(crate) exit_with_parent: Option<Option<u32>>,
 
     /// Instruction trace ring buffer capacity (entries, ~64 bytes each).
     /// Allocated only once tracing is enabled via the debug server.
@@ -148,6 +171,28 @@ pub(crate) struct Args {
     #[arg(long, value_name = "PASSWORD", requires = "relay")]
     pub(crate) relay_password: Option<String>,
 
+    /// Take no machine-wide run lock. Every emulator run takes it shared
+    /// unless told not to (`run_lock=off` in the config file)
+    #[arg(long, conflicts_with_all = ["run_lock", "run_lock_exclusive", "run_lock_wait"])]
+    pub(crate) no_run_lock: bool,
+
+    /// The machine-wide run lock's directory, and fail instead of running
+    /// without the lock when it can't be taken [default: the config
+    /// file's run_lock, $RUST_DOS_RUN_LOCK_DIR, or run-lock in the profile
+    /// directory]
+    #[arg(long, value_name = "DIR")]
+    pub(crate) run_lock: Option<std::path::PathBuf>,
+
+    /// Take the run lock exclusive, for a measurement: wait for every
+    /// other run to end, and keep new ones out until this one ends
+    #[arg(long)]
+    pub(crate) run_lock_exclusive: bool,
+
+    /// Wait at most this long for the run lock, then exit with code 3
+    /// before opening a window [default: 0, no limit]
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) run_lock_wait: Option<u64>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -162,6 +207,32 @@ pub(crate) enum Command {
     /// by its header (data1.hdr, or a data1.cab holding one) or an
     /// InstallShield 3 archive (_SETUP.1, a .Z file)
     Unpack(UnpackArgs),
+    /// Write a disk image's changes into the image: the delta file beside
+    /// it (IMAGE.rdelta), or the one --delta names, which is deleted after
+    Commit(CommitArgs),
+    /// Hold the machine-wide run lock around a command, or list who holds
+    /// it: `lock shared|exclusive -- CMD`, `lock status`, as rust-dos-lock
+    /// does (`lock --help`)
+    #[command(disable_help_flag = true)]
+    Lock(LockArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct LockArgs {
+    /// shared|exclusive [--dir DIR] [--wait SECONDS] [--name NAME] -- CMD,
+    /// or status [--dir DIR] [--json]
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<std::ffi::OsString>,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CommitArgs {
+    /// The disk image
+    pub(crate) image: std::path::PathBuf,
+
+    /// The delta file [default: IMAGE.rdelta beside the image]
+    #[arg(long, value_name = "FILE")]
+    pub(crate) delta: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -215,6 +286,11 @@ pub(crate) struct RunArgs {
     /// The command line, as typed at the DOS prompt
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) command: Vec<String>,
+}
+
+/// `--audio-output`'s value.
+fn parse_audio_output(value: &str) -> Result<rust_dos::audio::OutputChoice, String> {
+    rust_dos::audio::OutputChoice::parse(value).ok_or_else(|| "auto, sdl or null".to_string())
 }
 
 /// `--vr-graphics`'s value.

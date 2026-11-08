@@ -131,7 +131,7 @@ The JSON's sections:
 | `dynrec` | `dynrec.dispatch` (between translated blocks), `dynrec.translate`, `dynrec.fallback` (an instruction translated code hands to the interpreter), `dynrec.slow_mem` (translated code's memory operands checked in Rust, where its TLB or segment checks miss, and its accesses across a page or outside plain RAM) |
 | `timers`, `irq`, `shell`, `idle` | Timer events, delivering hardware interrupts, the built-in shell, `idle.proof` (proving a loop only waits) |
 | `mem` | `mem.video`, `mem.upper`, `mem.device` |
-| `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `powervr` |
+| `sb`, `gus`, `voodoo`, `powervr` | `sb.dma` (the Sound Blaster's DMA), `gus.advance` (the Ultrasound), `voodoo` and `voodoo.frame` (the 3dfx card's work on the emulation thread, and its frame), `voodoo.wait` (waiting for the worker threads to draw what was queued, as something reads the card's memory), `voodoo.readback` (reading the 3D buffers or the 2D engine's pages back from the OpenGL renderer, waiting for the GPU), `powervr` |
 | `hle` | `hle.int08` ... `hle.int67`, `hle.other`, `hle.inline`, `hle.far`, `hle.dpmi` |
 | `io` | One zone per device: `io.vga`, `io.pic`, `io.pit`, `io.sb`, `io.opl`, `io.ide`, `io.s3`, ... and `io.unhandled` |
 
@@ -354,7 +354,7 @@ and require the same machine: `a_profile_leaves_the_machine_as_it_would_be`
 in `src/debug/determinism_tests.rs` starts a profile partway through the
 program that uses every device and compares the whole save state, the
 picture, the sound and the instruction count at each stop;
-`a_profile_leaves_ring_changes_as_they_would_be` in `tests/pm_tests.rs`
+`a_profile_leaves_ring_changes_as_they_would_be` in `tests/cpu/pm_tests.rs`
 does the same for the ring changes, call gates and thunks the profile
 notes in protected mode.
 
@@ -421,10 +421,18 @@ from normal builds. Use an optimized test build; emulating a saved
 Windows scene in an unoptimized build can take hours.
 
 Set `RUST_DOS_VOODOO_STATE` to the saved state. Create a separate output
-directory and copy its C-drive sidecar there as `run.C.img`. Set
-`RUST_DOS_VOODOO_PROFILE_DIR` to that directory. The test restores and
-writes the scratch image, so keep it separate from the original. The
-original state and its sidecars must remain available for restoration.
+directory and copy its C-drive sidecar there as `run.C.img`. A state
+with a game on a second disk image, mounted as D:, needs a scratch copy
+of that one too, as `run.D.img`: the test stops if D: is an image other
+than that copy. Set `RUST_DOS_VOODOO_PROFILE_DIR` to that directory. The
+test restores and writes the scratch images, so keep them separate from
+the originals. The original state and its sidecars must remain available
+for restoration. A state of a disk with a delta file (a hard disk image
+mounted without `-inplace`) has its changes beside it (`.C.rdelta`)
+instead of a whole copy: copy the image they were made over as
+`run.C.img`, keeping its modification time (`cp -p`), and the changes go
+into a delta file over it, `run.C.img.rdelta` beside it or in the overlay
+folder the state names.
 
 ```sh
 cargo test --release --no-default-features --features sdl --lib \

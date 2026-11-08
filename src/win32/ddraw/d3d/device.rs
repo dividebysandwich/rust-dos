@@ -143,6 +143,11 @@ pub struct Device {
     pub scissor: Option<[u32; 4]>,
     pub depth_bias: i16,
     pub color_off: bool,
+    /// Whether the vertices put a pixel's centre half a pixel right of
+    /// and below its integer coordinates, as OpenGL's window
+    /// coordinates do, where Direct3D's are on them. OpenGL sets it for
+    /// each draw, so a save state leaves it out.
+    pub gl_pixel_centres: bool,
 }
 
 crate::state_fields!(Handle {
@@ -203,6 +208,8 @@ crate::state_fields!(Device {
     scissor,
     depth_bias,
     color_off
+} skip {
+    gl_pixel_centres
 });
 
 /// The version of IDirect3DDevice a vtable is.
@@ -224,6 +231,21 @@ pub fn device_of(cpu: &mut Cpu, this: u32) -> Result<(usize, u32), u32> {
 
 pub fn get(cpu: &mut Cpu, id: u32) -> Option<&mut Device> {
     super::object(cpu, id)?.device.as_mut()
+}
+
+/// Call `f` with the device `id` lent out of its object, for code that
+/// reads the device while it works on the machine, as every draw does:
+/// a copy of the device would copy its states, transforms and lights
+/// each time. None if there is no such device. While `f` runs the
+/// object has no device, so nothing `f` calls may look this one up by
+/// its id (`get`); the draw's setup and the card's binding don't.
+pub fn lend<T>(cpu: &mut Cpu, id: u32, f: impl FnOnce(&mut Cpu, &Device) -> T) -> Option<T> {
+    let d = super::object(cpu, id)?.device.take()?;
+    let out = f(cpu, &d);
+    if let Some(o) = super::object(cpu, id) {
+        o.device = Some(d);
+    }
+    Some(out)
 }
 
 // Render states the device starts with.
@@ -294,7 +316,10 @@ pub const TOP_SELECTARG1: u32 = 2;
 pub const TOP_SELECTARG2: u32 = 3;
 pub const TOP_MODULATE: u32 = 4;
 pub const TOP_ADD: u32 = 7;
+pub const TOP_SUBTRACT: u32 = 10;
+pub const TOP_BLENDDIFFUSEALPHA: u32 = 12;
 pub const TOP_BLENDTEXTUREALPHA: u32 = 13;
+pub const TOP_BLENDCURRENTALPHA: u32 = 16;
 pub const TA_DIFFUSE: u32 = 0;
 pub const TA_CURRENT: u32 = 1;
 pub const TA_TEXTURE: u32 = 2;
@@ -999,8 +1024,9 @@ pub const CLEAR_TARGET: u32 = 1;
 pub const CLEAR_ZBUFFER: u32 = 2;
 pub const CLEAR_STENCIL: u32 = 4;
 
-/// Clear(this, count, rects, flags, color, z, stencil). The depth
-/// buffer is cleared only if there is one, and there is no stencil.
+/// Clear(this, count, rects, flags, color, z, stencil). A clear of a
+/// buffer the target doesn't have fails as `missing_buffer` says, and
+/// clears nothing.
 pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, count, rects, flags, color, z, _] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -1012,11 +1038,8 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(d) = get(cpu, id).cloned() else {
         return Some(DDERR_INVALIDOBJECT);
     };
-    if flags & CLEAR_ZBUFFER != 0 && z_buffer(cpu, d.target).is_none() {
-        return Some(D3DERR_ZBUFFER_NOTPRESENT);
-    }
-    if flags & CLEAR_STENCIL != 0 {
-        return Some(D3DERR_STENCILBUFFER_NOTPRESENT);
+    if let Some(hr) = missing_buffer(cpu, &d, flags) {
+        return Some(hr);
     }
     let v = &d.viewport;
     let list = clip_rects(read_rects(cpu, rects, count), [v.x, v.y, v.width, v.height]);
@@ -1027,6 +1050,25 @@ pub fn clear(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let depth = (flags & CLEAR_ZBUFFER != 0).then_some(f32::from_bits(z));
     super::hal::clear(cpu, &d, &list, target, depth);
     Some(D3D_OK)
+}
+
+/// The error of a Clear (IDirect3DDevice7) or Clear2
+/// (IDirect3DViewport3) of `flags` on the device `d` that asks for a
+/// buffer its target doesn't have. D3DCLEAR_ZBUFFER or D3DCLEAR_STENCIL
+/// without a depth buffer attached fails with D3DERR_ZBUFFER_NOTPRESENT,
+/// D3DCLEAR_STENCIL with one fails with D3DERR_STENCILBUFFER_NOTPRESENT,
+/// as none of the depth buffers here has stencil bits. The call then
+/// clears nothing, the target included. DirectX 7 does this on Windows
+/// 95 with a Voodoo3, with the HAL and the RGB device alike, and so does
+/// Windows 11.
+pub fn missing_buffer(cpu: &mut Cpu, d: &Device, flags: u32) -> Option<u32> {
+    if flags & (CLEAR_ZBUFFER | CLEAR_STENCIL) == 0 {
+        return None;
+    }
+    if depth_buffer(cpu, d).is_none() {
+        return Some(D3DERR_ZBUFFER_NOTPRESENT);
+    }
+    (flags & CLEAR_STENCIL != 0).then_some(D3DERR_STENCILBUFFER_NOTPRESENT)
 }
 
 /// Clear keeps to the viewport (x, y, width, height): the rectangles

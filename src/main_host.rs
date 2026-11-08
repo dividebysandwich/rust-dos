@@ -49,7 +49,7 @@ pub(crate) struct MainHost<'m, 'd> {
     /// Deterministic mode: the date and time its clock started at. The
     /// speed stays fixed, and save states record the start.
     pub(crate) deterministic: Option<chrono::NaiveDateTime>,
-    pub(crate) clipboard: &'m sdl2::clipboard::ClipboardUtil,
+    pub(crate) clipboard: &'m sdl3::clipboard::ClipboardUtil,
 }
 
 impl MainHost<'_, '_> {
@@ -221,7 +221,9 @@ impl MainHost<'_, '_> {
         let (header, picture, state) = self.capture_state();
         // A booted system's disks as they are, beside its state.
         savestate::disks::delete_copies(&path);
-        savestate::disks::save_copies(self.cpu, &path)?;
+        for note in savestate::disks::save_copies(self.cpu, &path)? {
+            self.cpu.bus.log_string(&format!("[STATE] {}", note));
+        }
         let done = self.state_done.clone();
         self.cpu.bus.log_string(&format!("[STATE] Saving to {}", path.display()));
         std::thread::spawn(move || {
@@ -238,7 +240,9 @@ impl MainHost<'_, '_> {
     pub(crate) fn save_file(&mut self, path: &std::path::Path, contents: bool) -> Result<slots::Header, String> {
         let (mut header, picture, state) = self.capture_state();
         savestate::disks::delete_copies(path);
-        savestate::disks::save_copies(self.cpu, path)?;
+        for note in savestate::disks::save_copies(self.cpu, path)? {
+            self.cpu.bus.log_string(&format!("[STATE] {}", note));
+        }
         // After the copies, which make the state's folder.
         if contents && let Some(media) = header.media.as_mut() {
             savestate::media::add_contents(self.cpu, media, path, |_| true);
@@ -320,7 +324,7 @@ impl MainHost<'_, '_> {
                 // their files, so the state's isn't compared.
                 differences.extend(savestate::media::differences(media, &now));
                 if check_files {
-                    let copied = |key: &str| savestate::disks::copy_path_of(path, key).exists();
+                    let copied = |key: &str| savestate::disks::saved_of(path, key).is_some();
                     unchecked = savestate::media::unrecorded(media, copied);
                 }
             }
@@ -383,8 +387,8 @@ impl MainHost<'_, '_> {
                 config_warning(self.cpu, &warning);
             }
         }
-        // A booted system's disks come back from their copies, if the
-        // journals don't reach back to the state.
+        // A booted system's disks come back from what the state file keeps
+        // of them, if the journals don't reach back to the state.
         savestate::disks::offer_copies(self.cpu, path);
         let loaded = savestate::machine::load(self.cpu, state).map_err(|e| e.to_string());
         savestate::disks::withdraw(self.cpu);
@@ -420,7 +424,7 @@ impl MainHost<'_, '_> {
         }
         // The state's time stamp counter goes on at this machine's speed.
         self.cpu.set_tsc_speed(self.settings.cycles);
-        self.pacer.rebase(&self.cpu.bus.clock, std::time::Instant::now());
+        self.pacer.rebase(&mut self.cpu.bus, std::time::Instant::now());
         *self.state_loaded = true;
         self.cpu.bus.log_string(&format!("[STATE] Loaded {} (saved {})", path.display(), header.saved));
         Ok(header)
@@ -520,6 +524,8 @@ impl Host for MainHost<'_, '_> {
         if new.cycles != old.cycles {
             self.pacer.set_speed(new.cycles);
             self.cpu.set_tsc_speed(new.cycles);
+            // A speed `auto` found to go back to isn't the new setting's.
+            self.cpu.bus.activity.work_return = None;
             // At max, the pacer tunes the speed from the current one, and
             // at auto, it picks the speed at the end of the frame.
             if let CpuSpeed::Fixed(n) = new.cycles {
@@ -569,6 +575,10 @@ impl Host for MainHost<'_, '_> {
             && let Some(device) = &mut self.cpu.bus.audio_device
         {
             device.set_buffer(new.audio_buffer)?;
+            // A new block size empties the device's queue: no stall of the
+            // host to keep the queue longer for, whatever the machine is
+            // doing (a game's own settings come in while it runs).
+            self.cpu.bus.audio_feed.restart();
         }
         if new.joystick != old.joystick {
             self.cpu.bus.set_joystick(new.joystick);
@@ -627,7 +637,7 @@ impl Host for MainHost<'_, '_> {
     }
 
     fn copy_text(&mut self, text: &str) -> Result<(), String> {
-        self.clipboard.set_clipboard_text(text)
+        self.clipboard.set_clipboard_text(text).map_err(|e| e.to_string())
     }
 
     fn sync_shared(&mut self, drive: u8) -> Result<String, String> {

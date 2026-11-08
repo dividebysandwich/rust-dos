@@ -9,7 +9,7 @@
 //! whole when the display asks, not a line at a time as 86Box does.
 
 use super::super::mem::Vram;
-use super::super::mirror::{Cursor, LayoutKey, Overlay, Scanout, Surface};
+use super::super::mirror::{BufferKey, Cursor, LayoutKey, Overlay, Scanout, Surface};
 use super::*;
 
 /// One tile: 128 bytes by 32 rows.
@@ -105,6 +105,12 @@ impl Banshee {
     /// Whether a surface from byte `addr` on, as big as the desktop, is
     /// in memory the picture shows: the desktop's or the overlay's.
     pub fn shows(&self, addr: u32) -> bool {
+        self.shows_bytes(addr, None)
+    }
+
+    /// Whether any of the `len` bytes from byte `addr` on (with None, a
+    /// surface as big as the desktop) is in memory the picture shows.
+    pub fn shows_bytes(&self, addr: u32, len: Option<u64>) -> bool {
         let f = self.frame();
         // A surface's bytes: its stride times its rows, or its rows of
         // tiles, each counted as the surface itself is laid out.
@@ -124,7 +130,7 @@ impl Banshee {
             (self.overlay_addr, span(stride, tiled))
         });
         // The surface drawn, as big as the bigger of the two.
-        let drawn = overlay.map_or(desktop.1, |o| o.1.max(desktop.1));
+        let drawn = len.unwrap_or_else(|| overlay.map_or(desktop.1, |o| o.1.max(desktop.1)));
         let a = addr as u64;
         [Some(desktop), overlay]
             .into_iter()
@@ -365,9 +371,8 @@ impl Voodoo {
     /// one of them, in 5-6-5 and with its stride, comes from its drawing.
     /// The other surfaces come from the renderer's copy of the card's
     /// memory, which gets the pages shown that were written since it last
-    /// had them (`pages`), first in the recording.
+    /// had them (`tracker`), first in the recording.
     pub(crate) fn banshee_scanout(&mut self, key: &LayoutKey) -> Option<Box<Scanout>> {
-        self.gpu_frame();
         let b = self.banshee.as_deref_mut()?;
         let dirty = std::mem::take(&mut b.dirty)
             | std::mem::take(&mut self.display_dirty)
@@ -375,8 +380,10 @@ impl Voodoo {
         let b = self.banshee.as_deref()?;
         let f = b.frame();
         let buffer = |start: u32, stride: u32, tiled: bool| {
-            let same = key.stride.tiled == tiled && key.stride.words as u64 * 2 == stride as u64;
-            (same && key.color.contains(&start)).then_some(start / 2)
+            let same = |b: &&BufferKey| {
+                b.stride.tiled == tiled && b.stride.words as u64 * 2 == stride as u64
+            };
+            key.color_at(start).filter(same).map(|_| start / 2)
         };
         let clut_half = |select: u32| if f.cfg & select != 0 { 256 } else { 0 };
         let format = (f.cfg >> 18) & 7;
@@ -483,6 +490,12 @@ impl Voodoo {
         // The 3D engine draws into its buffers without marking the pages
         // it changes: memory shown that shares pages with them goes again
         // whenever the picture may have changed, after the drawing queued.
+        // The rows of the 3D buffers read back for it turn hot, as for a
+        // program's read: the scanout reads them again every frame the
+        // picture changes, which costs a read back from the GPU each
+        // time, while the software rasterizer leaves them in the memory.
+        // `gpu_takes` refuses the GPU while the software picture is
+        // wanted for the same reason.
         let shared: Vec<(u32, u32)> = spans
             .iter()
             .flatten()
@@ -491,11 +504,11 @@ impl Voodoo {
             .collect();
         if dirty && !shared.is_empty() {
             if self.writes_queue() {
-                self.flush();
+                self.flush_in(&shared);
             }
             for &(start, end) in &shared {
                 self.gpu_sync(start, end);
-                self.gpu.get_mut().pages.mark(start, end);
+                self.gpu.get_mut().tracker.mark(start, end);
             }
         }
         // The pages shown that the renderer lacks.
@@ -543,6 +556,20 @@ mod tests {
         let at = (2 * 1024 + 3) * 4;
         assert_eq!(&out[at..at + 3], &[0xFF, 0, 0]);
         assert_eq!(&out[at + 4..at + 7], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn the_bytes_of_the_desktops_picture() {
+        // 1024x768 at 16 bits a pixel: 1.5 MB, its rows one after another.
+        let b = card_1024x768(1 << 18);
+        assert_eq!(b.desktop_bytes_per_pixel(), 2);
+        assert_eq!(b.desktop_bytes(), 1024 * 768 * 2);
+        assert!(b.desktop_linear());
+        // At 32 bits, 3 MB; half mode shows each of its 384 rows twice.
+        let b = card_1024x768(3 << 18 | VIDPROC_HALF_MODE);
+        assert_eq!(b.desktop_bytes(), 1024 * 384 * 4);
+        // Tiled, its rows aren't one after another.
+        assert!(!card_1024x768(1 << 18 | VIDPROC_DESKTOP_TILED).desktop_linear());
     }
 
     #[test]

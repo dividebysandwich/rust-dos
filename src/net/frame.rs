@@ -36,9 +36,7 @@ impl Mac {
     /// mode's generator, the same in every run with the same start time.
     pub fn random_local() -> Mac {
         let mut bytes = [0; 6];
-        if !crate::deterministic::random_bytes(&mut bytes) {
-            super::fill_random(&mut bytes);
-        }
+        super::fill_machine_random(&mut bytes);
         bytes[0] = (bytes[0] & 0xFC) | 0x02;
         Mac(bytes)
     }

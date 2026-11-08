@@ -10,7 +10,7 @@ use crate::instructions::fpu::control;
 use crate::win32::loader::{TLS_ARRAY, TLS_SLOTS};
 use crate::win32::memory::{GRANULARITY, PAGE, PRIVATE, SHARED, SYSTEM, USER, WRITABLE};
 use crate::win32::object::{self, CURRENT_PROCESS, Kind};
-use crate::win32::seh::{self, CONTEXT_SIZE};
+use crate::win32::seh::{self, CONTEXT_BASE_SIZE};
 use crate::win32::thread::{self, Thread};
 use crate::win32::{Context, Process, process, with_process};
 
@@ -359,24 +359,26 @@ pub(super) fn set_thread_priority(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// GetThreadContext(handle, context): the thread's registers, as it was
-/// when it last stopped, or for the running thread, as it calls.
+/// when it last stopped, or for the running thread, as it calls. Only the
+/// parts the context's flags name are written: programs built with
+/// Windows 98's headers keep their CONTEXT in 0CCh bytes, with their own
+/// data after it.
 pub(super) fn get_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let Some(which) = thread_of(cpu, args[0]) else {
         return Some(FALSE);
     };
     let at = args[1];
     let flags = cpu.bus.guest_read_32(at);
-    if !cpu.bus.guest_probe(at, CONTEXT_SIZE as usize, true) {
+    if !cpu.bus.guest_probe(at, CONTEXT_BASE_SIZE as usize, true) {
         return None;
     }
-    let (ctx, fpu) = if is_running(cpu, which) {
-        (Context::of(cpu), control::save_image(cpu))
+    let (ctx, fpu, dr) = if is_running(cpu, which) {
+        (Context::of(cpu), control::save_image(cpu), seh::debug_registers(cpu))
     } else {
         let thread = thread_at(cpu, which);
-        let fpu = <[u8; 108]>::try_from(thread.fpu.as_slice()).unwrap_or([0; 108]);
-        (thread.ctx, fpu)
+        (thread.ctx, thread.fpu_image(), thread.dr)
     };
-    seh::write_context(cpu, at, &ctx, &fpu, flags);
+    seh::write_context_parts(cpu, at, &ctx, &fpu, &dr, flags);
     Some(TRUE)
 }
 
@@ -392,15 +394,17 @@ pub(super) fn set_thread_context(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let thread = thread_at(cpu, which);
     let mut ctx = thread.ctx;
-    let mut fpu = <[u8; 108]>::try_from(thread.fpu.as_slice()).unwrap_or([0; 108]);
+    let mut fpu = thread.fpu_image();
+    let mut dr = thread.dr;
     let had_fpu = !thread.fpu.is_empty();
-    seh::read_context(cpu, args[1], &mut ctx, &mut fpu);
+    seh::read_context(cpu, args[1], &mut ctx, &mut fpu, &mut dr);
     if cpu.bus.guest_faulted() {
         return None;
     }
     let thread = thread_at(cpu, which);
     thread.ctx = ctx;
-    if had_fpu || fpu != [0; 108] {
+    thread.dr = seh::settable(&dr);
+    if had_fpu || fpu != thread::INITIAL_FPU {
         thread.fpu = fpu.to_vec();
     }
     Some(TRUE)

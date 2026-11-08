@@ -94,6 +94,7 @@ impl Bus {
             log_file: None,
             dta_segment: 0x1000,
             dta_offset: 0x0000,
+            sda_written: None,
             vga: crate::video::vga::VgaCard::new(),
             vbe: crate::video::vbe::Vbe::new(),
             s3_engine: crate::video::s3::engine::Engine::new(),
@@ -115,7 +116,7 @@ impl Bus {
             search_serial: 0,
             mouse: crate::mouse::MouseState::new(),
             opl: crate::opl::Opl::new(true),
-            sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default())),
+            sb: Some(crate::sb::SoundBlaster::new(crate::sb::SbConfig::default(), 0)),
             game_fixes: true,
             game_fixes_off: Vec::new(),
             isapnp: None,
@@ -141,7 +142,6 @@ impl Bus {
             audio_feed: crate::audio::Feed::default(),
             audio_frames: 0,
             audio_settled: false,
-            sb_phase: 0.0,
             sb_frame: (0, 0),
             beep_frames: 0,
             mixer: crate::mixer::Mixer::default(),
@@ -353,6 +353,13 @@ impl Bus {
     /// Power-on state of the PIT channel 0 and the PIC, so a program that
     /// exits (or is killed) with a fast timer or masked IRQs doesn't leave
     /// them behind for the shell and the next program.
+    ///
+    /// A byte the keyboard controller holds for the CPU keeps its request:
+    /// a program that ends with interrupts off before IRQ 1 came (SETUP of
+    /// ShadowCaster takes its last key from the BIOS queue and exits) would
+    /// otherwise leave the byte unread for good, and the controller sends
+    /// no other, so no program after it gets a key through IRQ 1. On a PC
+    /// the request waits in the PIC until the BIOS takes it at the prompt.
     pub fn reset_timers(&mut self) {
         // Mode 3, count 65536, counting from now.
         let now = self.clock.now_ticks();
@@ -364,6 +371,10 @@ impl Bus {
         self.pit0_access = 3;
         self.pit0_latched_active = false;
         self.pic = crate::pic::Pic::new();
+        if let Some(irq) = self.kbc.output_irq() {
+            self.pic.raise(irq);
+        }
+        self.refresh_irq();
         self.clock.schedule(self.next_event());
     }
 }

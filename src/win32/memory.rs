@@ -286,9 +286,14 @@ impl Memory {
 
     /// The page table entry of `lin`, if its page table is there.
     pub fn entry(&self, bus: &Bus, lin: u32) -> Option<u32> {
+        self.entry_at(bus, lin).map(|at| bus.read_32(at))
+    }
+
+    /// The physical address of the page table entry of `lin`, if its page
+    /// table is there.
+    pub fn entry_at(&self, bus: &Bus, lin: u32) -> Option<usize> {
         let table = bus.read_32((self.cr3 + 4 * (lin >> 22)) as usize);
-        (table & PRESENT != 0)
-            .then(|| bus.read_32(((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize))
+        (table & PRESENT != 0).then(|| ((table & !0xFFF) + 4 * ((lin >> 12) & 0x3FF)) as usize)
     }
 
     /// The reserved ranges, in order.
@@ -325,11 +330,24 @@ impl Memory {
         (entry & PRESENT != 0).then_some(entry & !0xFFF | lin & 0xFFF)
     }
 
-    /// Back `len` bytes at `lin` (page aligned) with zeroed pages.
+    /// Back `len` bytes at `lin` (page aligned) with zeroed pages. When
+    /// there aren't pages for all of them, the pages it took go back to
+    /// the pool and none of the range is backed.
     pub fn commit(&mut self, bus: &mut Bus, lin: u32, len: u32, flags: u32) -> Option<()> {
         for page in (lin..lin + len).step_by(PAGE as usize) {
-            let phys = self.page(bus)?;
-            self.map(bus, page, phys, flags)?;
+            let mapped = self.page(bus).is_some_and(|phys| {
+                let mapped = self.map(bus, page, phys, flags).is_some();
+                if !mapped {
+                    free_page(bus, phys);
+                }
+                mapped
+            });
+            if !mapped {
+                for done in (lin..page).step_by(PAGE as usize) {
+                    self.unmap(bus, done);
+                }
+                return None;
+            }
         }
         Some(())
     }
@@ -450,6 +468,27 @@ pub fn free_page(bus: &mut Bus, phys: u32) {
         && pool.has(phys)
     {
         pool.free.push(phys);
+    }
+}
+
+/// Write `data` at `lin` in the memory of the process `pid`, through its
+/// own page tables, whichever process runs and whether or not a service
+/// is running: for work the system finishes later, outside the call that
+/// asked for it. Bytes on pages the process hasn't mapped are left out.
+pub fn write_process_bytes(bus: &mut Bus, pid: u32, lin: u32, data: &[u8]) {
+    let Some(p) = bus.win32.processes.iter().position(|p| p.id == pid) else {
+        return;
+    };
+    let mut done = 0;
+    while done < data.len() {
+        let at = lin.wrapping_add(done as u32);
+        let run = ((PAGE - (at & (PAGE - 1))) as usize).min(data.len() - done);
+        if let Some(phys) = bus.win32.processes[p].memory.translate(bus, at) {
+            for (i, &byte) in data[done..done + run].iter().enumerate() {
+                bus.write_8(phys as usize + i, byte);
+            }
+        }
+        done += run;
     }
 }
 

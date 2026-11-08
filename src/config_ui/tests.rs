@@ -714,7 +714,13 @@ fn images_mount_as_bios_disks() {
     let disk = crate::disk::numbered_drive(2);
     let (spec, _) = host.mounts.last().unwrap().clone();
     assert_eq!((spec.drive, spec.opts.kind), (disk, DriveKind::HardDisk));
-    assert_eq!(status(&ui).0, "BIOS disk 2 (80h) is mounted as hdd /os/win98.vhd");
+    // The path is absolute as the host has it: `C:\os\win98.vhd` on
+    // Windows, where it is on the current folder's drive.
+    let image = std::path::absolute("/os/win98.vhd").unwrap();
+    assert_eq!(
+        status(&ui).0,
+        format!("BIOS disk 2 (80h) is mounted as hdd {}", image.display())
+    );
     // Listed after the lettered drives, by number, with its unit.
     assert_eq!(ui.drives.last().map(|d| d.drive), Some(disk));
     assert_eq!(ui.drives[ui.row].drive, disk, "the new disk is selected");
@@ -735,7 +741,10 @@ fn images_mount_as_bios_disks() {
 fn the_file_picker_has_a_button_for_each_drive() {
     let dir = std::path::absolute("target/test_config_ui/drive_buttons").unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    for d in ["C:/GAMES", "D:"] {
+    // Folders stand for the drives' roots, named by their letters alone:
+    // a name can't have a colon on Windows, where `dir.join("C:")` is the
+    // drive C: itself.
+    for d in ["C/GAMES", "D"] {
         std::fs::create_dir_all(dir.join(d)).unwrap();
     }
     let mut host = FakeHost::new();
@@ -743,11 +752,11 @@ fn the_file_picker_has_a_button_for_each_drive() {
     ui.show_page(Page::Drives);
     use UiKey::*;
     ui.key(Insert, &mut host);
-    ui.text(&dir.join("C:/GAMES").display().to_string(), &mut host);
+    ui.text(&dir.join("C/GAMES").display().to_string(), &mut host);
     ui.open_browser(Pick::MountPath);
     let (browser, _) = ui.browser.as_mut().unwrap();
     // As Windows has them, which the picker only lists there.
-    browser.drives = vec![dir.join("C:"), dir.join("D:"), dir.join("E:")];
+    browser.drives = vec![dir.join("C"), dir.join("D"), dir.join("E")];
     assert_eq!(browser.drive(), Some(0));
 
     // A click on D: lists its root, and Left goes back to C:.
@@ -757,23 +766,25 @@ fn the_file_picker_has_a_button_for_each_drive() {
     let layout = ui.layout.unwrap();
     let (x, y) = ((layout.x + button.col * 8 + 4) as i32, (layout.y + button.row * layout.cell_h + 4) as i32);
     ui.click(x, y, &mut host);
-    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("D:"));
+    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("D"));
     // Right skips E:, which can't be listed (a CD drive without a disc).
     ui.key(Right, &mut host);
-    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("C:"));
+    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("C"));
     ui.key(Left, &mut host);
-    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("D:"));
+    assert_eq!(ui.browser.as_ref().unwrap().0.dir, dir.join("D"));
     ui.draw(&mut frame);
     let row = |g: &Grid, r: usize| (0..g.cols).map(|c| g.cell(c, r) as char).collect::<String>();
     let mut g = Grid::new(76, 23);
     ui.draw_browser(&mut g, 3..19);
-    assert!(row(&g, 4).contains("[C:] [D:] [E:]"), "{}", row(&g, 4));
+    assert!(row(&g, 4).contains("[C] [D] [E]"), "{}", row(&g, 4));
+    // A button is named by its drive's root, as Windows gives them.
+    assert_eq!(browser::Browser::drive_name(Path::new("C:\\")), "C:");
 
     // Elsewhere there are no drive letters, and no buttons.
     ui.browser.as_mut().unwrap().0.drives.clear();
     let mut g = Grid::new(76, 23);
     ui.draw_browser(&mut g, 3..19);
-    assert!(!row(&g, 4).contains("[C:]"));
+    assert!(!row(&g, 4).contains("[C]"));
     ui.key(Esc, &mut host);
     assert!(ui.browser.is_none() && ui.dialog.is_some());
 
@@ -1235,6 +1246,10 @@ fn the_mixer_page_switches_filters_and_effects() {
     ui.key(Down, &mut host);
     pick(&mut ui, &mut host, "off");
     assert_eq!(host.applied.last().unwrap().mixer.sb_filter, SbFilter::Off);
+    ui.key(Down, &mut host);
+    assert_eq!(ui.item(), Some(Item::SbCoupling));
+    pick(&mut ui, &mut host, "off");
+    assert!(!host.applied.last().unwrap().mixer.sb_coupling);
     // The effects' mixes show while they are on.
     assert!(!ui.items().contains(&Item::ReverbMix) && !ui.items().contains(&Item::ChorusMix));
     ui.key(Down, &mut host);
@@ -1440,6 +1455,28 @@ fn mouse_sensitivity_is_live_typed_and_resettable() {
 }
 
 #[test]
+fn version_check_never_leaves_the_window_and_the_switch_toggles_on_and_off() {
+    use crate::version_check::Setting;
+    let item = Item::VersionCheck;
+    let mut s = Settings::default();
+    assert!(item.shown(&s));
+    item.step(&mut s, 1, &[], Frontend::DESKTOP);
+    assert_eq!(s.version_check, Setting::Off);
+    item.step(&mut s, 1, &[], Frontend::DESKTOP);
+    assert_eq!(s.version_check, Setting::On);
+    s.version_check = Setting::Never;
+    assert!(!item.shown(&s));
+    let host = FakeHost::new();
+    let mut ui = ConfigUi::new();
+    ui.open(&Settings::default(), None, &host);
+    ui.page = Page::Emulator;
+    assert!(ui.items().contains(&item));
+    ui.open(&s, None, &host);
+    ui.page = Page::Emulator;
+    assert!(!ui.items().contains(&item));
+}
+
+#[test]
 fn mouse_sensitivity_steps_through_tenths_from_one_tenth_to_ten() {
     let item = Item::MouseSensitivity;
     let mut s = Settings::default();
@@ -1619,6 +1656,8 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut host = FakeHost::new();
     let mut ui = opened(&host);
+    // The home folder is the one above, wherever the user's is.
+    ui.home = dir.parent().map(Path::to_path_buf);
     ui.show_page(Page::Drives);
     use UiKey::*;
     // The last row, after "+ Mount a drive...".
@@ -1649,7 +1688,13 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     let dialog = ui.image_dialog.as_mut().unwrap();
     dialog.path = TextField::new(&path.display().to_string());
     keys(&mut ui, &mut host, &[Enter]);
-    assert_eq!(status(&ui), (format!("{} already exists: pick another name", path.display()).as_str(), true));
+    assert_eq!(
+        status(&ui),
+        (
+            "~/ui-makeimg/disk1.img already exists: pick another name",
+            true
+        )
+    );
     let dialog = ui.image_dialog.as_mut().unwrap();
     dialog.path = TextField::new(&dir.join("big.img").display().to_string());
     dialog.kind = crate::makeimg::PRESETS.len();
@@ -1670,7 +1715,10 @@ fn the_drives_page_makes_and_mounts_new_disk_images() {
     keys(&mut ui, &mut host, &[Right]);
     let dialog = ui.image_dialog.as_mut().unwrap();
     let vhd = dir.join("hdd.vhd");
-    assert_eq!((dialog.format_name(), dialog.path.text()), ("Dynamic VHD (.vhd, grows)", vhd.display().to_string()));
+    assert_eq!(
+        (dialog.format_name(), dialog.path.text()),
+        ("Dynamic VHD (.vhd, grows)", "~/ui-makeimg/hdd.vhd".into())
+    );
     dialog.mount = Some(4);
     ui.draw(&mut frame);
     keys(&mut ui, &mut host, &[Enter]);

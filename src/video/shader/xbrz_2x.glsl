@@ -211,7 +211,7 @@ int block_index(int i, int j, int rot) {
 #ifdef XBRZ_REFERENCE
 // The former full-block path remains a test and benchmark reference.
 #define BLOCK_ARGS blk
-void mix(inout vec4 blk[4], int rot, int i, int j, vec4 col, float m, float n) {
+void blend_cell(inout vec4 blk[4], int rot, int i, int j, vec4 col, float m, float n) {
     int k = block_index(i, j, rot);
     blk[k] = gradient(col, blk[k], m, n);
 }
@@ -220,7 +220,7 @@ void mix(inout vec4 blk[4], int rot, int i, int j, vec4 col, float m, float n) {
 void blend_rotation(vec4 n[9], ivec4 blend, int rot, inout vec4 blk[4]) {
 #else
 #define BLOCK_ARGS target, pixel
-void mix(int target, inout vec4 pixel, int rot, int i, int j, vec4 col, float m, float n) {
+void blend_cell(int target, inout vec4 pixel, int rot, int i, int j, vec4 col, float m, float n) {
     if (block_index(i, j, rot) == target) {
         pixel = gradient(col, pixel, m, n);
     }
@@ -262,7 +262,7 @@ void blend_rotation(vec4 n[9], ivec4 blend, int rot, int target, inout vec4 pixe
     vec4 col = dist(e, f) <= dist(e, h) ? f : h;
 
     if (!line) {
-        mix(BLOCK_ARGS, rot, 1, 1, col, 21.0, 100.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 1, col, 21.0, 100.0);
         return;
     }
 
@@ -273,17 +273,17 @@ void blend_rotation(vec4 n[9], ivec4 blend, int rot, int target, inout vec4 pixe
     bool steep = STEEP_THRESHOLD * hc <= fg && any(notEqual(e, c)) && any(notEqual(b, c));
 
     if (shallow && steep) {
-        mix(BLOCK_ARGS, rot, 1, 0, col, 1.0, 4.0);
-        mix(BLOCK_ARGS, rot, 0, 1, col, 1.0, 4.0);
-        mix(BLOCK_ARGS, rot, 1, 1, col, 5.0, 6.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 0, col, 1.0, 4.0);
+        blend_cell(BLOCK_ARGS, rot, 0, 1, col, 1.0, 4.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 1, col, 5.0, 6.0);
     } else if (shallow) {
-        mix(BLOCK_ARGS, rot, 1, 0, col, 1.0, 4.0);
-        mix(BLOCK_ARGS, rot, 1, 1, col, 3.0, 4.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 0, col, 1.0, 4.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 1, col, 3.0, 4.0);
     } else if (steep) {
-        mix(BLOCK_ARGS, rot, 0, 1, col, 1.0, 4.0);
-        mix(BLOCK_ARGS, rot, 1, 1, col, 3.0, 4.0);
+        blend_cell(BLOCK_ARGS, rot, 0, 1, col, 1.0, 4.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 1, col, 3.0, 4.0);
     } else {
-        mix(BLOCK_ARGS, rot, 1, 1, col, 1.0, 2.0);
+        blend_cell(BLOCK_ARGS, rot, 1, 1, col, 1.0, 2.0);
     }
 }
 

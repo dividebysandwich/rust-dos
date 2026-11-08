@@ -147,13 +147,15 @@ CD. At the first start with `machine=svga_voodoo3`, Windows finds a
    it from its own files. The desktop comes up at 1024x768.
 
 The driver brings Glide 2 and 3 (`glide2x.dll`, `glide3x.dll`), the
-OpenGL ICD (`3dfxOGL.dll`) and Direct3D.
+OpenGL ICD (`3dfxOGL.dll`) and Direct3D. Glover draws wrongly with
+1.07.00 and needs an earlier driver; [compatibility.md](compatibility.md)
+names the games that need another driver.
 
 ### DirectX
 
-The Voodoo3's Direct3D needs DirectX 7 or later; 98 SE comes with 6.1.
-Install DirectX 7.0 (`dx70eng.exe`, which unpacks with 7-Zip; run its
-`DXSETUP.EXE`) or later. Check first: an image that has had other
+The 1.07.00 driver's Direct3D needs DirectX 7 or later; 98 SE comes with
+6.1. Install DirectX 7.0 (`dx70eng.exe`, which unpacks with 7-Zip; run
+its `DXSETUP.EXE`) or later. Check first: an image that has had other
 software installed may already have 9.0c, and DirectX setup says so and
 stops.
 
@@ -361,16 +363,12 @@ memory when the game starts.
 
 ### Game notes
 
+[compatibility.md](compatibility.md) lists what particular games need,
+on an image and on the built-in Windows.
+
 * **OpenGL games** get the Voodoo3's ICD through Windows'
   `opengl32.dll`. A game that brings 3dfx's MiniGL as `opengl32.dll` in
   its own folder (for a Voodoo1 or 2) should have it taken away; Quake
   II's `3dfxgl.dll` is only used when chosen in its video menu.
-* **GLQuake with the shareware data** can't read the files it caches in
-  `id1\glquake`: shareware Quake reads no files from subfolders outside
-  its pak. So it rebuilds its palette table at every start, behind a
-  progress window that takes the focus from the full-screen game, which
-  then stays minimised on the taskbar (Alt+Tab brings it back). Adding
-  a pak with the table doesn't help either: shareware Quake refuses
-  "modified games". The registered data has neither problem.
 * **Glide games** use the Voodoo3's `glide2x.dll` or `glide3x.dll`.
   Choose the Glide renderer in the game.

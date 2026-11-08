@@ -22,15 +22,21 @@ impl Bus {
             opts.kind = DriveKind::CdRom;
         }
         let mounted = self.mount_with(drive, |disk| disk.mount(drive, path, opts, replace));
-        for note in std::mem::take(&mut self.disk.notes).into_iter().chain(crate::diskdelta::take_notes()) {
-            self.log_string(&format!("[DISK] {}", note));
-        }
+        self.log_disk_notes();
         let mounted = mounted?;
         // One drive boots at startup.
         if boot {
             self.disk.set_boot_drive(Some(drive));
         }
         Ok(mounted)
+    }
+
+    /// Log what opening the drives' disks had to tell (where their changes
+    /// go, delta files set aside), so that it is told when it happened.
+    pub(crate) fn log_disk_notes(&mut self) {
+        for note in std::mem::take(&mut self.disk.notes).into_iter().chain(crate::diskdelta::take_notes()) {
+            self.log_string(&format!("[DISK] {}", note));
+        }
     }
 
     /// Mount a disk or CD image held in memory as a DOS drive, replacing
@@ -161,6 +167,7 @@ impl Bus {
                 Err(e) => messages.push(e),
             }
         }
+        self.log_disk_notes();
         if !messages.is_empty() {
             self.sync_drive_bda();
         }
@@ -170,7 +177,9 @@ impl Bus {
     /// Put image `index` in a drive mounted from a list of images, as
     /// libretro's disk control does. Returns what changed, if anything.
     pub fn select_image(&mut self, drive: u8, index: usize) -> Result<Option<String>, String> {
-        let changed = self.disk.select_image(drive, index)?;
+        let changed = self.disk.select_image(drive, index);
+        self.log_disk_notes();
+        let changed = changed?;
         if changed.is_some() {
             self.image_changed(drive);
             self.sync_drive_bda();
@@ -204,6 +213,10 @@ impl Bus {
     fn booted_media_changed(&mut self, drive: u8) {
         self.ide_media_changed(drive);
         self.fdc_media_changed(drive);
+        // And the built-in Windows's ASPI drive.
+        let has_disc = self.disk.boot_cd_image(drive).is_some();
+        let now = self.clock.now_ticks();
+        self.win32.cd_changed(drive, has_disc, now);
     }
 
     /// Copy what the booted system changed on the disks made of shared

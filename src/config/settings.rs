@@ -71,8 +71,8 @@ pub struct Settings {
     pub umb: bool,
     /// The DPMI host for DOS extenders.
     pub dpmi: bool,
-    /// The built-in Windows runs Win32 console programs (`win32`), the
-    /// start of the work in docs/native-windows.md.
+    /// The built-in Windows runs Win32 and Win16 programs (`win32`); see
+    /// docs/builtin-windows.md.
     pub win32: bool,
     /// A host folder of Win32 DLLs (`win32_dlls`) that programs may load
     /// as guest code when no built-in DLL has the name, or when the
@@ -112,8 +112,9 @@ pub struct Settings {
     /// The machine waits while the settings window is open (but for the
     /// Mixer and Stats pages); never while in a LAN room.
     pub pause_in_settings: bool,
-    /// Ask rust-dos.com at startup whether there is a newer version.
-    pub version_check: bool,
+    /// Ask rust-dos.com at startup whether there is a newer version; never
+    /// in a copy shipped with a game, whose settings window leaves it out.
+    pub version_check: crate::version_check::Setting,
     /// Ask almanac.rust-dos.com for a program's settings as it starts from
     /// the prompt, and play it with them (almanac.rs).
     pub almanac_auto: bool,
@@ -131,6 +132,8 @@ pub struct Settings {
     pub sound: SoundConfig,
     pub disk: DiskSettings,
     pub mixer: MixerSettings,
+    /// What plays the sound (`audio_output`), read at startup.
+    pub audio_output: crate::audio::OutputChoice,
     /// The sound waiting for the host's sound device (`blocksize` and
     /// `prebuffer`).
     pub audio_buffer: crate::audio::AudioBuffer,
@@ -200,7 +203,7 @@ impl Default for Settings {
             mouse_capture_messages: true,
             mouse_menu_hold: true,
             pause_in_settings: true,
-            version_check: true,
+            version_check: crate::version_check::Setting::On,
             almanac_auto: false,
             rewind: false,
             rewind_memory: 256,
@@ -211,6 +214,7 @@ impl Default for Settings {
             sound: SoundConfig::default(),
             disk: DiskSettings::default(),
             mixer: MixerSettings::default(),
+            audio_output: crate::audio::OutputChoice::default(),
             audio_buffer: crate::audio::AudioBuffer::default(),
             joystick: JoystickSettings::default(),
             network: crate::net::NetSettings::default(),
@@ -360,6 +364,7 @@ impl Settings {
             sound: config.sound.clone(),
             disk: config.disk,
             mixer: config.mixer,
+            audio_output: config.audio_output,
             audio_buffer: config.audio_buffer,
             joystick: config.joystick,
             network: config.network.clone(),
@@ -478,7 +483,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
         (Emulator, "mouse_capture_messages", yes_no(settings.mouse_capture_messages)),
         (Emulator, "mouse_menu_hold", yes_no(settings.mouse_menu_hold)),
         (Emulator, "pause_in_settings", yes_no(settings.pause_in_settings)),
-        (Emulator, "version_check", yes_no(settings.version_check)),
+        (Emulator, "version_check", Some(settings.version_check.name().to_string())),
         (Emulator, "almanac_auto", yes_no(settings.almanac_auto)),
         (Emulator, "rewind", yes_no(settings.rewind)),
         (Emulator, "rewind_memory", Some(settings.rewind_memory.to_string())),
@@ -529,10 +534,12 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries.extend([
         (Section::Mixer, "speaker_filter", on_off(settings.mixer.speaker_filter)),
         (Section::Mixer, "sb_filter", Some(settings.mixer.sb_filter.name().to_string())),
+        (Section::Mixer, "sb_coupling", on_off(settings.mixer.sb_coupling)),
         (Section::Mixer, "reverb", Some(settings.mixer.reverb.name().to_string())),
         (Section::Mixer, "reverb_mix", Some(settings.mixer.reverb_mix.to_string())),
         (Section::Mixer, "chorus", Some(settings.mixer.chorus.name().to_string())),
         (Section::Mixer, "chorus_mix", Some(settings.mixer.chorus_mix.to_string())),
+        (Section::Mixer, "audio_output", Some(settings.audio_output.name().to_string())),
         (Section::Mixer, "blocksize", Some(settings.audio_buffer.blocksize.to_string())),
         (Section::Mixer, "prebuffer", Some(settings.audio_buffer.prebuffer.to_string())),
     ]);

@@ -306,6 +306,15 @@ pub fn visible(cpu: &mut Cpu, dc: &Dc) -> (Region, (i32, i32)) {
     }
 }
 
+/// The visible region of the DC `hdc` on its surface, which for a window
+/// DC is the screen: what Windows 9x keeps as the DC's visible region,
+/// and what GDI's InquireVisRgn gives. None if `hdc` isn't a DC.
+pub fn visible_on_surface(cpu: &mut Cpu, hdc: u32) -> Option<Region> {
+    let dc = gdi(cpu).dc(hdc)?.clone();
+    let (vis, (x, y)) = visible(cpu, &dc);
+    Some(vis.offset_by(x, y))
+}
+
 /// The region a DC may draw on, in device coordinates: its visible
 /// region, clip region and meta region.
 pub fn effective_clip(cpu: &mut Cpu, dc: &Dc) -> (Region, (i32, i32)) {
@@ -783,6 +792,21 @@ pub fn set_mapper_flags(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     set_attr(cpu, args[0], GDI_ERROR, |a| {
         std::mem::replace(&mut a.mapper, flags)
     })
+}
+
+/// GetAspectRatioFilterEx(hdc, size): the aspect ratio of the fonts the
+/// font mapper takes while SetMapperFlags' ASPECT_FILTERING (bit 0) is
+/// on, the device's pixels an inch across and down; 0 by 0 while it is
+/// off.
+pub fn get_aspect_ratio_filter_ex(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let Some(dc) = get(cpu, args[0]) else {
+        return Some(FALSE);
+    };
+    let size = if dc.attrs.mapper & 1 != 0 { DPI } else { 0 };
+    if args[1] != 0 {
+        write_words(cpu, args[1], &[size, size]);
+    }
+    Some(TRUE)
 }
 
 /// SetGraphicsMode(hdc, mode): Windows 95 has only GM_COMPATIBLE.

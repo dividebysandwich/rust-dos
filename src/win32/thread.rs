@@ -8,9 +8,11 @@
 //! its time comes (`schedule_waits`), and its thread runs at once, as the
 //! boost Windows gives a thread whose wait ends lets it: a game that
 //! sleeps out the rest of its frame while another of its threads spins
-//! gets its next frame on time, not at the next interrupt. When no thread
-//! can run, the processor runs the idle loop, a trap in KERNEL32 that
-//! lets time pass to the next interrupt or timeout.
+//! gets its next frame on time, not at the next interrupt. A thread that
+//! one of a higher priority took the processor from goes on with the rest
+//! of its turn when that one stops or its turn ends (`take_preempted`).
+//! When no thread can run, the processor runs the idle loop, a trap in
+//! KERNEL32 that lets time pass to the next interrupt or timeout.
 //!
 //! Waits are kept with the threads (`Wait`). Whatever may end one (an
 //! object signaled, a thread ended, time passing) calls `wake`, which
@@ -20,6 +22,7 @@
 use super::call::{self, THREAD_ATTACHED};
 use super::memory::{GRANULARITY, Memory, PRIVATE, SHARED, USER, WRITABLE};
 use super::object::{Kind, Objects};
+use super::seh;
 use super::{Context, ESP, Win32, process};
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -110,6 +113,9 @@ pub struct Thread {
     /// Its XMM registers and MXCSR while it doesn't run, on a processor
     /// with SSE; None for a thread that hasn't run yet.
     pub sse: Option<([u128; 8], u32)>,
+    /// Its debug registers while it doesn't run, as a CONTEXT has them:
+    /// each thread has its own breakpoints.
+    pub dr: seh::DebugRegs,
     pub last_error: u32,
     /// How many times it is suspended; it runs at 0.
     pub suspended: u32,
@@ -135,7 +141,32 @@ impl Thread {
     pub fn stack_bottom(&self) -> u32 {
         self.stack.0 + STACK_FLOOR
     }
+
+    /// Its FPU's state while it doesn't run, as FSAVE stores it: for a
+    /// thread that hasn't run yet, the state it starts with.
+    pub fn fpu_image(&self) -> [u8; 108] {
+        <[u8; 108]>::try_from(self.fpu.as_slice()).unwrap_or(INITIAL_FPU)
+    }
 }
+
+/// The FPU's state a thread starts with, as FSAVE stores it: FNINIT's,
+/// with the precision at 53 bits (control word 27Fh), the status word 0
+/// and every register empty (tag word FFFFh).
+pub const INITIAL_FPU: [u8; 108] = {
+    let mut image = [0u8; 108];
+    let words = [0xFFFF_027Fu32, 0xFFFF_0000, 0xFFFF_FFFF];
+    let mut i = 0;
+    while i < words.len() {
+        let bytes = words[i].to_le_bytes();
+        let mut b = 0;
+        while b < 4 {
+            image[4 * i + b] = bytes[b];
+            b += 1;
+        }
+        i += 1;
+    }
+    image
+};
 
 /// A thread by its process's place and its own in that process's list.
 type At = (usize, usize);
@@ -159,6 +190,7 @@ pub fn find(win32: &Win32, id: u32) -> Option<At> {
 fn save(cpu: &mut Cpu, ctx: Context) {
     let fpu = control::save_image(cpu).to_vec();
     let sse = cpu.model.has_sse().then_some((cpu.sse.xmm, cpu.sse.mxcsr));
+    let dr = seh::debug_registers(cpu);
     let win32 = &mut cpu.bus.win32;
     let Some(process) = win32.processes.get_mut(win32.running) else {
         return;
@@ -168,6 +200,7 @@ fn save(cpu: &mut Cpu, ctx: Context) {
         thread.ctx = ctx;
         thread.fpu = fpu;
         thread.sse = sse;
+        thread.dr = dr;
         thread.last_error = last_error;
     }
 }
@@ -182,33 +215,29 @@ fn enter(cpu: &mut Cpu, (p, t): At) {
     win32.running = p;
     win32.slice_start = now;
     let tid = win32.processes[p].threads[t].id;
+    win32.preempted.retain(|&(id, _)| id != tid);
     crate::win16::task::entered(win32, tid);
     let process = &mut win32.processes[p];
     process.current = Some(t);
     let thread = &process.threads[t];
-    let (ctx, fpu, sse, last_error, tib) = (
+    let (ctx, fpu, sse, dr, last_error, tib) = (
         thread.ctx,
-        thread.fpu.clone(),
+        thread.fpu_image(),
         thread.sse,
+        thread.dr,
         thread.last_error,
         thread.tib,
     );
     process.last_error = last_error;
     process.tib = tib;
-    match <&[u8; 108]>::try_from(fpu.as_slice()) {
-        Ok(image) => control::load_image(cpu, image),
-        Err(_) => {
-            // A thread starts with the FPU's precision at 53 bits.
-            control::fninit(cpu);
-            cpu.fpu_control = 0x027F;
-        }
-    }
+    control::load_image(cpu, &fpu);
     if cpu.model.has_sse() {
         // A thread starts with its XMM registers clear.
         let (xmm, mxcsr) = sse.unwrap_or(([0; 8], MXCSR_DEFAULT));
         cpu.sse.xmm = xmm;
         cpu.sse.mxcsr = mxcsr;
     }
+    seh::set_debug_registers(cpu, &dr);
     super::system::enter_user(cpu, &ctx);
 }
 
@@ -237,6 +266,10 @@ fn next_ready(win32: &Win32, after: Option<At>) -> Option<At> {
 pub fn reschedule(cpu: &mut Cpu) {
     let ctx = Context::of(cpu);
     save(cpu, ctx);
+    if let Some((at, used)) = take_preempted(&mut cpu.bus.win32) {
+        resume(cpu, at, used);
+        return;
+    }
     let win32 = &cpu.bus.win32;
     match next_ready(win32, current(win32)) {
         Some(at) => enter(cpu, at),
@@ -247,10 +280,49 @@ pub fn reschedule(cpu: &mut Cpu) {
 /// Run the first thread that can run, or else the idle loop, with nothing
 /// running to save (its process ended).
 pub fn run_next(cpu: &mut Cpu) {
+    if let Some((at, used)) = take_preempted(&mut cpu.bus.win32) {
+        resume(cpu, at, used);
+        return;
+    }
     match next_ready(&cpu.bus.win32, None) {
         Some(at) => enter(cpu, at),
         None => idle(cpu),
     }
+}
+
+/// The thread a thread of a higher priority took the processor from last
+/// that can still run, and how much of its turn it had used, taken from
+/// `preempted`, as Windows puts a preempted thread back at the head of
+/// its priority's queue with what is left of its quantum. Without that,
+/// the thread after the preempting one in turn ran with a new turn: a
+/// multimedia timer of 10 ms, whose thread preempts every period,
+/// started the main thread's turn over each time, and another thread of
+/// the main one's priority never ran (Bedlam's Windows version waits on
+/// its loader thread for ever). The last one taken from goes first: when
+/// a thread that preempted another is preempted in turn, it is the one
+/// that goes on once the third stops. Those that can't run any more
+/// (ended, suspended) are dropped and get a new turn when they run again.
+fn take_preempted(win32: &mut Win32) -> Option<(At, u64)> {
+    while let Some((tid, used)) = win32.preempted.pop() {
+        let Some((p, t)) = find(win32, tid) else {
+            continue;
+        };
+        if Some((p, t)) != current(win32)
+            && win32.processes[p].threads[t].ready()
+            && crate::win16::task::may_run(win32, p, t)
+        {
+            return Some(((p, t), used));
+        }
+    }
+    None
+}
+
+/// Run the thread `at`, a preempted one, with the rest of its turn, of
+/// which it had used `used` microseconds.
+fn resume(cpu: &mut Cpu, at: At, used: u64) {
+    enter(cpu, at);
+    let now = cpu.bus.clock.now_micros();
+    cpu.bus.win32.slice_start = now.saturating_sub(used);
 }
 
 /// Run the idle loop, in the running process: no thread runs.
@@ -289,6 +361,13 @@ pub fn idle_trap(cpu: &mut Cpu) {
 /// another that is ready once its turn is over.
 pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
     wake(cpu);
+    // A program's level 0 code, as SafeDisc's, goes on without a switch:
+    // its frame is on the level 0 stack, which every thread's entry from
+    // level 3 uses. Windows 98 switches threads on the way back to level 3.
+    if super::system::is_system(&ctx) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     match current(win32) {
@@ -298,6 +377,13 @@ pub fn after_interrupt(cpu: &mut Cpu, ctx: Context) {
         },
         Some(running) => {
             if now.saturating_sub(win32.slice_start) >= SLICE {
+                // A thread preempted while another ran is at the head of
+                // the queue: it goes on before the next one in turn.
+                if let Some((at, used)) = take_preempted(win32) {
+                    save(cpu, ctx);
+                    resume(cpu, at, used);
+                    return;
+                }
                 if let Some(next) = next_ready(win32, Some(running)).filter(|&n| n != running) {
                     save(cpu, ctx);
                     enter(cpu, next);
@@ -338,6 +424,13 @@ pub fn preempt(cpu: &mut Cpu) {
         })
     };
     if let Some(next) = higher.or_else(boosted).filter(|&n| n != (p, t)) {
+        // The thread taken from goes on when the other stops, or before
+        // the one taken from earlier if the other is preempted in turn.
+        let now = cpu.bus.clock.now_micros();
+        let win32 = &mut cpu.bus.win32;
+        let used = now.saturating_sub(win32.slice_start);
+        let id = win32.processes[p].threads[t].id;
+        win32.preempted.push((id, used));
         save(cpu, Context::of(cpu));
         enter(cpu, next);
     }
@@ -353,6 +446,7 @@ fn signaled(objects: &Objects, id: u32, tid: u32) -> bool {
             exit_code.is_some()
         }
         Some(Kind::Dos { .. } | Kind::File { .. }) => true,
+        Some(Kind::Change { signaled, .. }) => *signaled,
         Some(Kind::Mapping { .. } | Kind::Find { .. }) | None => false,
     }
 }
@@ -426,6 +520,7 @@ fn try_wait(objects: &mut Objects, tid: u32, wait: &Wait) -> Option<u32> {
 /// What a wait for `wait` returns at once, if the running thread doesn't
 /// have to wait.
 pub fn wait_now(cpu: &mut Cpu, wait: &Wait) -> Option<u32> {
+    super::kernel32::change::poll(cpu, &wait.objects);
     let tid = process(cpu).current_thread()?.id;
     try_wait(&mut cpu.bus.win32.objects, tid, wait)
 }
@@ -482,6 +577,11 @@ pub fn wake(cpu: &mut Cpu) -> Vec<At> {
     super::dinput::poll(cpu);
     super::winmm::tick(cpu);
     super::dsound::tick(cpu);
+    super::wnaspi32::tick(cpu);
+    super::dplayx::poll(cpu);
+    // The change notifications the waiting threads wait for look at
+    // their directories again.
+    super::kernel32::change::poll_blocked(cpu);
     let now = cpu.bus.clock.now_micros();
     let win32 = &mut cpu.bus.win32;
     let running = current(win32);
@@ -662,6 +762,7 @@ crate::state_fields!(Thread {
     ctx,
     fpu,
     sse,
+    dr,
     last_error,
     suspended,
     priority,

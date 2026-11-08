@@ -477,7 +477,9 @@ pub struct Cpu {
     pub sse: Sse,
     /// The K6-2's model-specific registers.
     pub k6: K6Msrs,
-    /// Debug registers; stored, but breakpoints are not implemented.
+    /// Debug registers. The instruction breakpoints DR7 enables raise
+    /// debug exceptions (`instruction_breakpoint`); data and I/O
+    /// breakpoints are stored, with nothing behind them.
     pub dr: [u32; 8],
     pub gdtr: DescTable,
     pub idtr: DescTable,
@@ -939,12 +941,23 @@ impl Cpu {
         self.resident_end + 1
     }
 
+    /// What AH=31h does to the memory of the process `psp`, as MS-DOS's
+    /// `$KEEP_PROCESS`: its block shrinks to `paras` paragraphs, at least
+    /// the 6 of the PSP itself, and is its own from then on, and PSP 02h
+    /// says where the block ends. If the block can't take that size, both
+    /// stay as they are and the process ends all the same.
+    pub fn shrink_resident(&mut self, psp: u16, paras: u16) {
+        let paras = paras.max(6);
+        if crate::mcb::set_block(&mut self.bus, psp, psp, paras).is_ok() {
+            self.bus.guest_write_16(psp as u32 * 16 + 2, psp.wrapping_add(paras));
+        }
+    }
+
     /// INT 21h AH=31h from a program started by the shell: shrink its PSP
     /// block to `paras` and keep it, plus any other block it owns, resident
     /// under the programs started afterwards.
     pub fn keep_resident(&mut self, psp: u16, paras: u16) {
-        // DOS keeps at least the 6 paragraphs of the PSP itself.
-        let _ = crate::mcb::resize(&mut self.bus, psp, paras.max(6));
+        self.shrink_resident(psp, paras);
         // Loaded high: it stays in its upper memory block.
         let cover = crate::mcb::umb_cover_seg(&self.bus);
         if psp > cover {
@@ -1051,12 +1064,13 @@ impl Cpu {
         if let Some(ipx) = &mut self.bus.net.ipx {
             ipx.program_ended(psp);
         }
-        if !self.started_by_exec(psp) {
+        let made = self.ends_in_its_maker(psp);
+        crate::dos_files::close_all(&mut self.bus, psp);
+        crate::mcb::free_owned_by(&mut self.bus, psp);
+        if made {
             self.end_made_process(psp);
             return true;
         }
-        crate::dos_files::close_all(&mut self.bus, psp);
-        crate::mcb::free_owned_by(&mut self.bus, psp);
         if self.return_to_parent() {
             return true;
         }
@@ -1138,21 +1152,35 @@ impl Cpu {
         psp == 0 || parent == 0 || parent == psp
     }
 
-    /// End the process `psp`, a PSP a program made, as DOS ends any: its
-    /// files closed and its memory freed, the INT 22h, 23h and 24h vectors
-    /// it keeps put back, and its parent (PSP 16h) the current process
-    /// again, back on the stack of the parent's last INT 21h call (PSP 2Eh)
-    /// with the registers it saved there, returning to the ended process's
-    /// terminate address (PSP 0Ah) with them. Windows' tasks end so, into
-    /// its DOS extender.
-    fn end_made_process(&mut self, psp: u16) {
+    /// Whether the process `psp` is a PSP a program made that has a
+    /// terminate address to end at. A PSP made from the INT 22h vector and
+    /// never given an address of its own holds the BIOS's IRET (under a
+    /// program the shell started) or the address its maker returns to when
+    /// it ends (under one EXEC started, which set the vector). Neither
+    /// leads back into the maker: such a process ends as one with no
+    /// context kept, back at the shell. Once a child the maker started
+    /// through EXEC has ended, the vector holds the address that EXEC
+    /// returned to in the maker, as on DOS, and a PSP made from it then
+    /// ends there.
+    pub fn ends_in_its_maker(&mut self, psp: u16) -> bool {
         let base = psp as u32 * 16;
-        crate::dos_files::close_all(&mut self.bus, psp);
-        crate::mcb::free_owned_by(&mut self.bus, psp);
-        for (i, vector) in [0x22u32, 0x23, 0x24].into_iter().enumerate() {
-            let handler = self.bus.guest_read_32(base + 0x0A + 4 * i as u32);
-            self.bus.guest_write_32(vector * 4, handler);
-        }
+        let terminate = self.bus.guest_read_32(base + 0x0A);
+        let maker = self.bus.guest_read_16(base + 0x16);
+        let inherited = maker != 0 && terminate == self.bus.guest_read_32(maker as u32 * 16 + 0x0A);
+        !self.started_by_exec(psp) && terminate != crate::bios::default_ivt()[0x22] && !inherited
+    }
+
+    /// Hand the process `psp`, a PSP a program made and whose files and
+    /// memory are dealt with, back to its parent as DOS does for any
+    /// process: the INT 22h, 23h and 24h vectors it keeps put back, and its
+    /// parent (PSP 16h) the current process again, back on the stack of the
+    /// parent's last INT 21h call (PSP 2Eh) with the registers it saved
+    /// there, returning to the ended process's terminate address (PSP 0Ah)
+    /// with them and the status flags clear. Windows' tasks end so, into
+    /// its DOS extender, and Drakkhen's driver into its loader.
+    pub fn end_made_process(&mut self, psp: u16) {
+        let base = psp as u32 * 16;
+        crate::dos_files::restore_vectors(&mut self.bus, psp);
         let (terminate_ip, terminate_cs) = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
         let parent = self.bus.guest_read_16(base + 0x16);
         self.current_psp = parent;
@@ -1174,6 +1202,12 @@ impl Cpu {
         // The INT 21h returns to the terminate address.
         self.bus.guest_write_16(at(9), terminate_ip);
         self.bus.guest_write_16(at(10), terminate_cs);
+        // With flags 0F202h (`reset_environment`): interrupts on, DF and
+        // the status flags clear.
+        let flags = self.bus.guest_read_16(at(11));
+        self.bus.guest_write_16(at(11), flags & 0xF000 | 0x0202);
+        self.set_cpu_flag(CpuFlags::CF, false);
+        self.set_cpu_flag(CpuFlags::ZF, false);
         self.bus.log_string(&format!(
             "[DOS] Process {:04X} ended: back to {:04X} at {:04X}:{:04X}",
             psp, parent, terminate_cs, terminate_ip
@@ -1183,6 +1217,7 @@ impl Cpu {
     /// End the current process: back to the parent's context, returning
     /// through the terminate address in the process's PSP (0Ah), which
     /// EXEC set to the parent's return address and debuggers change. The
+    /// INT 22h, 23h and 24h vectors are set from the PSP, as DOS does. The
     /// parent's stack holds the interrupt frame the return pops. Returns
     /// false when no parent's context is kept, as for a process the shell
     /// started, which the caller ends by loading the shell again.
@@ -1190,6 +1225,11 @@ impl Cpu {
         let psp = self.current_psp;
         let base = psp as u32 * 16;
         let terminate = (self.bus.guest_read_16(base + 0x0A), self.bus.guest_read_16(base + 0x0C));
+        // Also for a process that goes back to the shell: one that stays
+        // resident (AH=31h, INT 27h) keeps its memory, and a Ctrl-Break or
+        // critical-error handler it installed there would otherwise stay
+        // hooked under the programs started after it.
+        crate::dos_files::restore_vectors(&mut self.bus, psp);
         let Some(index) = self.exec_context(psp) else {
             // A process the shell started has none, and the caller loads
             // the shell again for it (`terminate`, INT 21h AH=31h), even
@@ -1266,8 +1306,9 @@ impl Cpu {
         self.flags = CpuFlags::from_bits_retain(upper | (value as u32 & FLAGS16_WRITABLE) | 0x0002);
     }
 
-    /// Load EFLAGS, as POPFD and IRETD do in real mode. VM and RF can't be
-    /// set this way; AC only exists from the 486 on, ID on a Pentium.
+    /// Load EFLAGS, as POPFD and IRETD do in real mode (IRETD loads RF
+    /// too). VM and RF can't be set this way; AC only exists from the 486
+    /// on, ID on a Pentium.
     pub fn load_eflags(&mut self, value: u32) {
         let writable = FLAGS16_WRITABLE | self.model.eflags_extra();
         let keep = self.flags.bits() & CpuFlags::VM.bits();
@@ -1723,6 +1764,13 @@ impl Cpu {
         self.bus.mouse.remove_callback();
         crate::mouse::clear_callback_busy(&mut self.bus);
         self.bus.mouse.ps2 = crate::mouse::Ps2Mouse::default();
+        // With it go the bytes the mouse sent: one left unread in the
+        // keyboard controller would block the keyboard, its IRQ 12 masked
+        // at the prompt. `reset_timers` raises the keyboard byte's IRQ 1
+        // again; taking the one-shot request here keeps it from coming a
+        // second time after the BIOS read the byte.
+        self.bus.kbc.drop_aux();
+        self.bus.sync_keyboard_irq();
         self.bus.port_accesses.clear();
         crate::keyboard::drop_unseen_keys(&mut self.bus);
         match kept_cursor {
@@ -1927,6 +1975,10 @@ impl Cpu {
             filename,
             bytes.len()
         ));
+        // A program whose file a game fix patches as it loads
+        // (`game_fixes`: Lands of Lore 2's launcher).
+        let patched = self.patch_at_load(filename, bytes);
+        let bytes = patched.as_deref().unwrap_or(bytes);
 
         // Check for EXE Signature ("MZ")
         let loaded = if bytes.len() > 2 && bytes[0] == 0x4D && bytes[1] == 0x5A {
@@ -1990,6 +2042,26 @@ impl Cpu {
             self.bus.dpmi.passed_over = own.then_some(self.current_psp);
         }
         loaded
+    }
+
+    /// The program file `bytes`, read from `filename`, as a game fix
+    /// patches it before it loads, or None when no fix applies.
+    fn patch_at_load(&mut self, filename: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+        if !self.bus.game_fixes {
+            return None;
+        }
+        let bus = &self.bus;
+        let (fix, patched) = crate::game_fixes::patch_at_load(
+            filename,
+            bytes,
+            |path| bus.disk.is_file(path),
+            |fix| bus.game_fix_enabled(fix),
+        )?;
+        self.bus.log_string(&format!(
+            "[game fix] {}: {} ({}): {} patched as it loads",
+            fix.name, fix.game, fix.reason, filename
+        ));
+        Some(patched)
     }
 
     /// A variable of the master environment.
@@ -2215,14 +2287,20 @@ impl Cpu {
             Placement::Child(segment) | Placement::High(segment) => segment,
         };
         let start_offset = 0x100; // COM files always start at 100h
-        // A program loaded high has its block, up to 64 KB.
+        // The program's segment is its block, up to 64 KB: EXEC may have
+        // given a COM child a smaller one with another block's MCB right
+        // after it, which the clearing below and the stack mustn't reach.
         let top = self.memory_top(placement, load_segment);
-        let segment_bytes = match placement {
-            Placement::High(_) => ((top - load_segment) as usize * 16).min(0x10000),
-            _ => 0x10000,
-        };
+        let segment_bytes = ((top - load_segment) as usize * 16).min(0x10000);
+        if top - load_segment < program_paras(bytes) {
+            self.bus.log_string(&format!(
+                "[DOS] The COM file doesn't fit in {:04X} paragraphs",
+                top - load_segment
+            ));
+            return false;
+        }
 
-        // Clear 64KB of RAM segment for safety (simulating clean load)
+        // Clear the program's segment (simulating clean load)
         let phys_start_seg = self.get_physical_addr(load_segment, 0) as u32;
         self.bus.guest_fill(phys_start_seg, segment_bytes, 0);
 
@@ -2247,7 +2325,7 @@ impl Cpu {
         self.set_es(load_segment);
         self.set_ss(load_segment); // Stack is in the same segment
         self.set_ip(0x100); // Entry Point
-        self.set_sp((segment_bytes - 2) as u16); // End of segment (64KB - 2)
+        self.set_sp((segment_bytes - 2) as u16); // End of the segment
 
         // Setup PSP (Program Segment Prefix) at CS:0000
         let psp_phys = self.get_physical_addr(load_segment, 0) as u32;
@@ -2277,11 +2355,14 @@ impl Cpu {
             "[DOS] Loaded COM file at {:04X}:{:04X}",
             self.cs(), self.ip()
         ));
-        // COM files are allocated the full 64KB segment by DOS convention.
-        self.heap_pointer = load_segment + 0x1000;
-        // Loaded high, it has its upper memory block already.
-        if !matches!(placement, Placement::High(_)) {
-            crate::mcb::init_for_program(&mut self.bus, load_segment, 0x1000);
+        // DOS gives a COM program the largest free block, up to `top`, and
+        // the program owns it until it shrinks it with AH=4Ah. Loaders such
+        // as Titus's CD loader unpack above their first 64 KB before they
+        // resize, so a free block's MCB there would be overwritten. EXEC
+        // and LOADHIGH allocated the block already: it stays as it is.
+        self.heap_pointer = top;
+        if placement == Placement::Shell {
+            crate::mcb::init_for_program(&mut self.bus, load_segment, top - load_segment);
         }
         true
     }

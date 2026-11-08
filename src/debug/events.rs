@@ -264,7 +264,7 @@ impl DebugHub {
     /// The emulator turns off: what is pending is cancelled, the journal
     /// ends with `shutdown`, requests still coming get 503, and the server
     /// gets a moment to send what it has.
-    pub fn shutdown(&mut self, cpu: &Cpu, reason: ShutdownReason, exit_code: i32) {
+    pub fn shutdown(&mut self, cpu: &Cpu, reason: ShutdownReason) {
         let Some(shared) = self.shared.clone() else { return };
         let by = self.quit.take();
         let cancelled = self.with_journal(|j| j.pending_ops(|_| true)).unwrap_or_default();
@@ -274,10 +274,11 @@ impl DebugHub {
                 ShutdownReason::Quit => "quit",
                 ShutdownReason::Exit => "exit",
                 ShutdownReason::Window => "window",
+                ShutdownReason::Parent => "parent",
             },
             "by": by.as_ref().map(|c| c.req),
             "cancelled": cancelled,
-            "exit_code": exit_code,
+            "exit_code": reason.exit_code(),
         });
         if let Some(ctx) = by {
             self.begin(ctx);

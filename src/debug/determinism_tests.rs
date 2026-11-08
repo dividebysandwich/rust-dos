@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
 
-#[path = "../../tests/cdimage/mod.rs"]
+#[path = "../../tests/common/cdimage/mod.rs"]
 mod cdimage;
 
 // ----- the program --------------------------------------------------------
@@ -1464,6 +1464,7 @@ const STILL: &[(&str, &str)] = &[
     ("K6", "the K6-2's MSRs, which only its WRMSR sets"),
     ("IDLE", "whether cycles=auto saw an idle loop: deterministic runs have a fixed speed"),
     ("RC", "RC waiting to come back after a command line it ran, which the run doesn't start"),
+    ("KEYQ", "queued keys INT 09h hasn't taken yet, none left at the stops"),
 ];
 
 /// The `Bus` fields saved as a section of their own (or in one with the

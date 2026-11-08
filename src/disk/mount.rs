@@ -205,11 +205,111 @@ impl DiskController {
     }
 
     /// The floppy or hard disk image at `path`, its changes in a delta
-    /// file in the mount's overlay folder if it has one (`diskdelta`).
+    /// file (`diskdelta`) in the mount's overlay folder if it has one, and
+    /// otherwise beside a hard disk image (`default_delta`).
     fn open_disk(path: &Path, floppy: bool, opts: &MountOptions) -> Result<DiskImage, String> {
-        match Self::delta_for(path, opts) {
-            Some(delta) => DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only),
+        if let Some(delta) = Self::delta_for(path, opts) {
+            return DiskImage::open_delta(path, &delta, floppy, opts.geometry, opts.read_only);
+        }
+        let beside = match floppy {
+            false => Self::default_delta(path, opts),
+            true => None,
+        };
+        match beside {
+            Some((delta, read_only)) => {
+                let disk = DiskImage::open_delta(path, &delta, floppy, opts.geometry, read_only)?;
+                let note = match read_only {
+                    false => Self::default_delta_note(path, &delta),
+                    true => format!(
+                        "{}: the drive is read-only, and shows the image with the changes in {} \
+                         beside it",
+                        crate::mount::display_host_path(path),
+                        crate::mount::display_host_path(&delta)
+                    ),
+                };
+                crate::diskdelta::note(note);
+                Ok(disk)
+            }
             None => DiskImage::open(path, floppy, opts.geometry, opts.read_only),
+        }
+    }
+
+    /// What to tell of the hard disk image at `path` whose changes go to
+    /// its default delta file `delta`: where they go, and how to get them
+    /// into the image or write the image itself.
+    pub fn default_delta_note(path: &Path, delta: &Path) -> String {
+        format!(
+            "{}: what is written to it goes to {} beside it, and the image stays as it is. \
+             `COMMIT drive` (or rust-dos commit IMAGE) writes the changes into the image; \
+             -inplace on the mount writes the image itself",
+            crate::mount::display_host_path(path),
+            crate::mount::display_host_path(delta)
+        )
+    }
+
+    /// Where the changes of the hard disk image at `path` are when the
+    /// mount has no overlay folder: `<image>.rdelta` beside it, the same
+    /// for every run and every configuration that mounts the image, as the
+    /// image itself would be, and whether the disk is read-only. A delta
+    /// file that is there is the disk's changes, so a read-only mount
+    /// (`-ro`, or an image that can't be written) shows them too, read
+    /// only. With none there, the image is written as it is (None) with
+    /// `-inplace`, for a mount that writes nothing, which stays
+    /// write-protected, for an image in an archive (read-only without an
+    /// overlay folder), and where no file can be made beside the image
+    /// (the note says so). `-inplace` over a delta file that is there
+    /// leaves it out, and the note says that too.
+    pub(crate) fn default_delta(path: &Path, opts: &MountOptions) -> Option<(PathBuf, bool)> {
+        if hostfs::is_layer(path) {
+            return None;
+        }
+        let delta = crate::diskdelta::beside(path);
+        let there = hostfs::is_file(&delta);
+        if opts.in_place {
+            if there {
+                crate::diskdelta::note(format!(
+                    "{}: -inplace leaves out the changes in {} beside it, and once the image \
+                     is written they no longer fit it: to keep them, mount it without -inplace \
+                     and COMMIT them first",
+                    crate::mount::display_host_path(path),
+                    crate::mount::display_host_path(&delta)
+                ));
+            }
+            return None;
+        }
+        let writable = !opts.read_only
+            && hostfs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .is_ok();
+        if there {
+            return Some((delta, !writable));
+        }
+        if !writable {
+            return None;
+        }
+        // hostfs has no `create_new`, and the delta file is a host path.
+        let probe = crate::diskdelta::with_suffix(&delta, ".probe");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                let _ = hostfs::remove_file(&probe);
+                Some((delta, false))
+            }
+            Err(e) => {
+                crate::diskdelta::note(format!(
+                    "{}: no delta file can be made beside it ({}), so what is written to it goes \
+                     into the image",
+                    crate::mount::display_host_path(path),
+                    e
+                ));
+                None
+            }
         }
     }
 
@@ -260,15 +360,20 @@ impl DiskController {
     /// `image` in it.
     fn cd_storage(image: CdImage) -> Result<(DriveKind, Storage, String, bool), String> {
         // A disc of only audio tracks has no file system.
-        let (files, volume_label) = match image.data_track() {
+        let (files, volume_label, sectors) = match image.data_track() {
             Some(_) => {
                 let volume = crate::cdrom::iso9660::read_volume(&image)?;
-                (volume.files, volume.label)
+                (volume.files, volume.label, volume.sectors)
             }
-            None => (MemFs::new(), "AUDIO_CD".to_string()),
+            None => (MemFs::new(), "AUDIO_CD".to_string(), 0),
         };
         let volume_label = if volume_label.is_empty() { "CDROM".to_string() } else { volume_label };
-        Ok((DriveKind::CdRom, Storage::Tree { files, image: Some(Rc::new(image)) }, volume_label, false))
+        let storage = Storage::Tree {
+            files,
+            image: Some(Rc::new(image)),
+            sectors,
+        };
+        Ok((DriveKind::CdRom, storage, volume_label, false))
     }
 
     /// The type, storage, volume label and writability of `drive` with the

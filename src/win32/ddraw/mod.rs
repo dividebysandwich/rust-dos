@@ -25,7 +25,7 @@
 //! full screen its primary surface, back buffer and Z buffer are the
 //! card's buffers.
 //!
-//! (Phase 3 of docs/native-windows.md.)
+//! ("Video" in docs/builtin-windows-architecture.md.)
 
 /// The value of a `Result` whose error is an HRESULT, or the method
 /// returns the error.
@@ -48,6 +48,7 @@ mod gamma;
 mod gpu_blt;
 pub(super) mod inspect;
 mod palette;
+pub mod picture;
 pub(super) mod surface;
 pub mod voodoo;
 
@@ -64,6 +65,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: VTABLES,
 };
 
@@ -90,29 +92,29 @@ const fn method(name: &'static str, args: u8, handler: super::stubs::Handler) ->
 /// The functions. Append only (see `stubs`). The methods of the objects'
 /// interfaces have ordinal 0: they aren't exported.
 static APIS: &[Api] = &[
-    stdcall("DllCanUnloadNow", 1, 0, dll_can_unload_now),
-    stdcall("DllGetClassObject", 2, 3, dll_get_class_object),
-    stdcall("DirectDrawCreate", 3, 3, directdraw::direct_draw_create),
+    stdcall("DllCanUnloadNow", 14, 0, dll_can_unload_now),
+    stdcall("DllGetClassObject", 15, 3, dll_get_class_object),
+    stdcall("DirectDrawCreate", 8, 3, directdraw::direct_draw_create),
     stdcall(
         "DirectDrawCreateEx",
-        4,
+        34,
         4,
         directdraw::direct_draw_create_ex,
     ),
     stdcall(
         "DirectDrawEnumerateA",
-        5,
+        10,
         2,
         enumerate::direct_draw_enumerate,
     ),
-    stdcall("DirectDrawEnumerateW", 6, 2, enumerate::unsupported),
+    stdcall("DirectDrawEnumerateW", 13, 2, enumerate::unsupported),
     stdcall(
         "DirectDrawEnumerateExA",
-        7,
+        11,
         3,
         enumerate::direct_draw_enumerate_ex,
     ),
-    stdcall("DirectDrawEnumerateExW", 8, 3, enumerate::unsupported),
+    stdcall("DirectDrawEnumerateExW", 12, 3, enumerate::unsupported),
     stdcall(
         "DirectDrawCreateClipper",
         9,

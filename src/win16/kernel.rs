@@ -8,6 +8,7 @@ use super::{Frame, dos, dpmi, global, ldt, local, module, resource, task};
 use crate::cpu::{Cpu, Seg};
 use crate::disk::LASTDRIVE;
 use crate::dpmi::Context;
+use rust_dos_ne as ne;
 
 pub static MODULE: Def = Def {
     name: "KERNEL",
@@ -263,7 +264,7 @@ static APIS: &[Api16] = &[
     rust("GetAppCompatFlags", 354, "w", zero),
     rust("GetWinDebugInfo", 355, "pw", zero),
     rust("SetWinDebugInfo", 356, "p", zero),
-    rust("FarSetOwner", 403, "ww", zero),
+    rust("FarSetOwner", 403, "ww", far_set_owner),
     rust("RegOpenKey", 217, "lpp", reg_fail),
     rust("RegCreateKey", 218, "lpp", reg_fail),
     rust("RegDeleteKey", 219, "lp", reg_fail),
@@ -278,9 +279,16 @@ static APIS: &[Api16] = &[
     rust("RegEnumKey", 216, "llpl", reg_fail),
     rust("GetSetKernelDOSProc", 311, "S", zero),
     rust("GetModuleName", 27, "wpw", get_module_name),
+    rust("GetCurrentDirectory", 411, "lp", get_current_directory),
+    rust("SetCurrentDirectory", 412, "p", set_current_directory),
     // Flat thunks (flat.rs).
     register("C16ThkSL01", 631, super::flat::c16_thk_sl01),
     rust("ThunkConnect16", 651, "SSwlSSw", super::flat::thunk_connect16),
+    // The functions a self-loading module's loader gets in its table
+    // (module.rs), and the one it patches its code segments with.
+    rust("MyAlloc", 668, "www", my_alloc),
+    rust("EntryAddrProc", 667, "ww", entry_addr_proc),
+    rust("PatchCodeHandle", 110, "w", patch_code_handle),
 ];
 
 /// GetWinFlags': protected mode, 386 enhanced mode, a 486 with a
@@ -863,6 +871,53 @@ fn throw(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
 
 // Modules.
 
+/// FarSetOwner(block, owner): the block is the owner's, a task's or a
+/// module's, and goes with it.
+fn far_set_owner(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    module::set_owner(cpu, args[0] as u16, args[1] as u16);
+    Some(0)
+}
+
+/// MyAlloc(segment flags, size, shift), which a self-loading module's
+/// loader allocates its segments with, as Wine's: a block of `size <<
+/// shift` bytes, moveable and discardable as the segment's flags say, a
+/// code segment unless the flags say data. DX:AX the selector and the
+/// handle, or for an empty block 0 and its handle.
+fn my_alloc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let (flags, size, shift) = (args[0] as u16, args[1], args[2]);
+    let bytes = (size << shift.min(16)).min(0x1_0000);
+    let moveable = flags & ne::SEG_MOVEABLE != 0
+        || flags & (ne::SEG_DATA | module::SEG_LOADED | module::SEG_ALLOCATED) == 0;
+    let mut mem = global::GMEM_ZEROINIT;
+    if flags & ne::SEG_DISCARDABLE != 0 {
+        mem |= global::GMEM_DISCARDABLE;
+    }
+    if moveable {
+        mem |= global::GMEM_MOVEABLE;
+    }
+    let code = !matches!(flags & 7, 1 | 7);
+    let handle = if size != 0 || flags & ne::SEG_MOVEABLE != 0 {
+        global::alloc(cpu, mem, bytes, current_handle(cpu), code)
+    } else {
+        0
+    };
+    Some(if bytes != 0 {
+        (global::handle_to_sel(handle) as u32) << 16 | handle as u32
+    } else {
+        (handle as u32) << 16
+    })
+}
+
+/// EntryAddrProc(module, ordinal): the 16:16 address of the module's
+/// entry point, which a self-loading module's loader relocates with.
+fn entry_addr_proc(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(module::entry_point(cpu, args[0] as u16, args[1] as u16))
+}
+
+fn patch_code_handle(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    Some(module::patch_code_handle(cpu, args[0] as u16))
+}
+
 /// The directory of the running task's program, for the libraries it
 /// loads.
 fn task_dir(cpu: &Cpu) -> String {
@@ -889,8 +944,7 @@ fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             return Some(e.code);
         }
     };
-    let instance = module::instance_of(cpu, index) as u32;
-    let mut data = vec![instance];
+    let mut data = vec![cpu.bus.win32.win16.modules[index].handle as u32];
     data.extend(
         inits
             .iter()
@@ -901,11 +955,16 @@ fn load_library(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 }
 
 /// The libraries `data[1..]` are to have their entry points run, then
-/// the context goes on with `data[0]` in AX. None when an entry point
-/// runs first (and this then again after it).
+/// the context goes on with the instance of the module `data[0]` in AX.
+/// The instance is known only then: a self-loading library's loader
+/// allocates its data segment. None when an entry point runs first (and
+/// this then again after it).
 pub fn then_libs(cpu: &mut Cpu, _: u32, data: &[u32], ctx: &mut Context) -> Option<u32> {
     if data.len() <= 1 {
-        return Some(data.first().copied().unwrap_or(0));
+        let module = data.first().copied().unwrap_or(0);
+        let instance = super::module_index(cpu, module as u16)
+            .map_or(module, |i| module::instance_of(cpu, i) as u32);
+        return Some(instance);
     }
     let mut rest = vec![data[0]];
     rest.extend_from_slice(&data[2..]);
@@ -1524,6 +1583,42 @@ pub fn lstrcmp(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
     })
+}
+
+/// GetCurrentDirectory(length, buffer), ordinal 411: the current drive's
+/// directory as "C:\DIR", or "C:\" at the root, with no trailing
+/// backslash. Like Win32's, it returns the length without the NUL when
+/// the buffer holds the path. When it doesn't, it writes nothing and
+/// returns the length needed, NUL included.
+fn get_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    // The length is 16 bits: Wine's GetCurrentDirectory16 takes a UINT16
+    // and ignores the high word.
+    let size = args[0] & 0xFFFF;
+    let drive = cpu.bus.disk.get_current_drive();
+    // The path Win32's GetCurrentDirectoryA gives, in DOS's bytes.
+    let path =
+        crate::dosstr::to_bytes(&crate::win32::kernel32::path::current_directory(cpu, drive));
+    let needed = path.len() as u32 + 1;
+    if size < needed {
+        return Some(needed);
+    }
+    copy_string(cpu, args[1], size, &path);
+    Some(path.len() as u32)
+}
+
+/// SetCurrentDirectory(path), ordinal 412: makes `path`'s directory the
+/// current one of its drive and that drive the current drive, as Win32's
+/// SetCurrentDirectory does (Wine's KERNEL.412 calls it). Returns TRUE, or
+/// FALSE when there is no path or the directory isn't there.
+fn set_current_directory(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    let name = name_of(cpu, args[0]);
+    if name.is_empty() {
+        return Some(0);
+    }
+    let name = crate::dosstr::from_bytes(&name);
+    Some(u32::from(
+        crate::win32::kernel32::path::change_directory(cpu, &name).is_ok(),
+    ))
 }
 
 fn lstrcpy(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {

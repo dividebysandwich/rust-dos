@@ -67,6 +67,41 @@ D:
 
 Mistakes in the file are printed as warnings; the emulator still starts.
 
+### Shipping Rust-DOS with a game
+
+A store or an installer that ships Rust-DOS with a game, and keeps it at
+the version it tested, sets it up like this:
+
+* Ship one configuration file for the machine, `rust-dos.conf`, next to
+  the executable or passed with `--config FILE`. Put
+  `version_check=never` in its `[emulator]` section: Rust-DOS then never
+  asks rust-dos.com for a newer version or says there is one, and the
+  setting is left out of the settings window. It has to be in this file:
+  a game profile's settings apply only when the game launches, after the
+  check would have started.
+* Put each way of starting the game (the game, its setup program, a
+  network game) in a [game profile](#game-profiles) in the `games` folder
+  beside that file, and give each its own shortcut:
+  `rust-dos --config rust-dos.conf --game "Setup"`. This is what GOG's
+  pairs of DOSBox files (`dosboxGame.conf` and `dosboxGame_single.conf`)
+  become; `--import` turns them into profiles. An imported profile's
+  `[drives]` paths are absolute, to the folders the game was imported
+  from: make them relative, to the `games` folder, before shipping it.
+
+Rust-DOS needs no internet connection. Nothing it does online is needed
+to run a game, and each request runs on a thread of its own with a time
+limit, so without a connection it goes on as it would with one:
+
+* The version check (off with `never`) waits at most a second at
+  startup, and a failure only goes to the console.
+* The sound ROM, Glide overlay and VR scene downloads, and the modem
+  phonebook's list of boards, are asked for only from the settings
+  window, and say there when they fail.
+* RetroAchievements asks the site only for a player who has logged in
+  (a saved login logs in again at startup), on its own thread.
+* `almanac_auto` is off by default. When it is on, a program started
+  from the prompt waits up to ten seconds for the almanac's answer.
+
 ### `[emulator]`
 
 * `scale` is the window scale factor. `-s/--scale` overrides it.
@@ -140,25 +175,26 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   stops where the frame rate stops following (a game that caps its own
   frame rate) or reaches the display's refresh rate (frames nobody sees,
   and some games, such as Descent, play badly at such rates), and goes
-  down while the program waits for a key or calls DOS's idle interrupt.
-  It then tries lower speeds, down to where they cost more than 3% of
-  the frame rate. A speed the host falls behind at is left for a lower
-  one, and the limit that sets rises again while the host keeps up. A
-  real-mode program with no frames to go by (most games of the 1980s,
-  which update the screen piecemeal) runs at 3000, about a 286, as in
-  DOSBox's `cycles=auto`. A protected-mode one runs at max while it
-  reads and writes (loading, computing), and otherwise goes down to
-  20000, a 486's speed, or a quarter of a faster `cpu` model's clock
-  (50000 on a Pentium, 112500 on a Pentium II), no more than the host
-  has. `auto 10000` makes that real-mode speed, and the least `auto`
-  goes down to, 10000. `max` runs everything as fast as the host keeps
-  up with in real time. Use a number such as `3000` for a fixed speed.
-  `--cycles` overrides it. Loading a [save state](README.md#save-states)
-  keeps the speed the machine runs at (this setting, `--cycles`, or the
-  last one the window, the speed keys or `/api/speed` set): a fixed
-  speed and `max` go on at the rate they had, and `auto` starts its
-  search from the rate the state was saved at. Only `--deterministic`
-  runs at the state's speed.
+  down while the program waits for a key or calls DOS's idle interrupt. It
+  then tries lower speeds, down to where they cost more than 3% of the
+  frame rate. A speed the host falls behind at is left for a lower one,
+  and the limit that sets rises again while the host keeps up. A real-mode
+  program with no frames to go by (most games of the 1980s, which update
+  the screen piecemeal) runs at 3000, about a 286, as in DOSBox's
+  `cycles=auto`. A protected-mode one runs at max while it reads and
+  writes (loading, computing), and otherwise goes down to 20000, a 486's
+  speed, or a quarter of a faster `cpu` model's clock (50000 on a Pentium,
+  112500 on a Pentium II), no more than the host has. Resetting the Sound
+  Blaster, as a sound driver does before it times the card with delay
+  loops, ends the loading speed at once. `auto 10000` makes that real-mode
+  speed, and the least `auto` goes down to, 10000. `max` runs everything
+  as fast as the host keeps up with in real time. Use a number such as
+  `3000` for a fixed speed. `--cycles` overrides it. Loading a [save
+  state](README.md#save-states) keeps the speed the machine runs at (this
+  setting, `--cycles`, or the last one the window, the speed keys or
+  `/api/speed` set): a fixed speed and `max` go on at the rate they had,
+  and `auto` starts its search from the rate the state was saved at. Only
+  `--deterministic` runs at the state's speed.
 * `auto_fps` is the frame rate `cycles=auto` aims for: `auto`, the
   default, is the display's refresh rate (the 3dfx card's while it
   shows), and a number from 10 to 240 takes its place. A lower one, such
@@ -244,38 +280,37 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   as Win32 programs built with MSVC do, gets close to what a 387
   gives). Loads, stores, integer conversions, compares and FRNDINT use
   all 80 bits.
-* `machine` is the display adapter programs find when they look for
-  one, and so the graphics they choose: `svga` (the default, a VGA with
-  VESA modes up to 1024x768), `svga_s3` (an S3 Trio64 on the PCI bus,
-  with its VESA modes, 2D accelerator and hardware cursor, for systems
-  [booted from disk images](#booting-a-disk-image) whose drivers program
-  it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX on
-  the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
+* `machine` is the display adapter programs find when they look for one, and
+  so the graphics they choose: `svga` (the default, a VGA with VESA modes up
+  to 1024x768, and 640x400 in truecolour as mode 213h, an OEM mode of S3
+  cards such as Diamond's Stealth64 Video), `svga_s3` (an S3 Trio64 on the
+  PCI bus, with its VESA modes, 2D accelerator and hardware cursor, for
+  systems [booted from disk images](#booting-a-disk-image) whose drivers
+  program it), `svga_s3virge` and `svga_s3virgevx` (an S3 ViRGE or ViRGE/VX
+  on the PCI bus: the Trio64's registers with the ViRGE's own 2D engine, 3D
   engine and streams processor, which Windows 95's Direct3D uses through
-  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite`
-  (a Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games'
-  Vérité versions; see [Rendition Vérité](#rendition-vérité)),
-  `svga_ati_3drage` and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE
-  II with 4 MB on the PCI bus, whose 2D and 3D engines ATI's Windows
-  drivers use; see [ATI 3D RAGE](#ati-3d-rage)),
-  `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3 3000 or Voodoo
-  Banshee with 16 MB on the PCI bus, which 3dfx's Windows drivers use for
-  the desktop, Direct3D and OpenGL; see
-  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000`
-  (a Tseng Labs ET4000AX with 1 MB and a Sierra HiColor DAC, see below),
-  `vga` (an IBM VGA, without VESA modes),
-  `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64 colours at
-  640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
+  S3's driver; see [Direct3D](#direct3d-on-an-s3-virge)), `svga_verite` (a
+  Rendition Vérité V1000 with 4 MB on the PCI bus, for DOS games' Vérité
+  versions; see [Rendition Vérité](#rendition-vérité)), `svga_ati_3drage`
+  and `svga_ati_3drage2` (an ATI 3D RAGE or 3D RAGE II with 4 MB on the PCI
+  bus, whose 2D and 3D engines ATI's Windows drivers use; see [ATI 3D
+  RAGE](#ati-3d-rage)), `svga_voodoo3` and `svga_banshee` (a 3dfx Voodoo3
+  3000 or Voodoo Banshee with 16 MB on the PCI bus, which 3dfx's Windows
+  drivers use for the desktop, Direct3D and OpenGL; see [3dfx
+  Voodoo3](#3dfx-voodoo3-and-banshee)), `svga_et4000` (a Tseng Labs ET4000AX
+  with 1 MB and a Sierra HiColor DAC, see below), `vga` (an IBM VGA, without
+  VESA modes), `ega` (an IBM EGA with an Enhanced Color Display: 16 of 64
+  colours at 640x350, 60 Hz), `cga` (an IBM CGA: 4 colours at 320x200, 2 at
   640x200, 60 Hz), `tandy` (a Tandy 1000), `pcjr` (an IBM PCjr) or
   `hercules` (a Hercules Graphics Card on a monochrome monitor: the MDA's
   text and 720x348 graphics, 50 Hz). A change takes effect at the DOS
-  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports
-  as `svga`, which is what DOS games get from it there; one that boots a
-  hard disk, or runs in a Windows of files (a package's `os=win311`),
-  keeps `svga_s3`, as that Windows was installed with the S3's driver
-  (unless the package's `os` boots another system in its place).
-  `machine=` in its `[rust-dos]` or `[emulator]` section goes over the
-  import's, as rust-dos's other settings there do (see
+  prompt. A DOSBox configuration's `svga_s3`, DOSBox's default, imports as
+  `svga`, which is what DOS games get from it there; one that boots a hard
+  disk, or runs in a Windows of files (a package's `os=win311`), keeps
+  `svga_s3`, as that Windows was installed with the S3's driver (unless the
+  package's `os` boots another system in its place). `machine=` in its
+  `[rust-dos]` or `[emulator]` section goes over the import's, as rust-dos's
+  other settings there do (see
   [GAME-PACKAGES.md](GAME-PACKAGES.md#packages-made-for-dosbox)).
 * With `svga_et4000` programs find a Tseng ET4000AX on the ISA bus, as
   DOS games and Windows 3.x drivers made for it detect it: its KEY
@@ -429,23 +464,28 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   games: DirectDraw in full screen on the card's VESA modes or in a window,
   DirectSound and wave audio in the `windows` mixer channel, MIDI to the
   MPU-401's synthesizer, CD audio and MIDI files through MCI, and the
-  keyboard, mouse and joystick through DirectInput; DMUSIC, DMIME, DMLOADER,
-  DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's DirectMusic on the same
-  synthesizer; D3D8 is DirectX 8.1's Direct3D on a Banshee or Voodoo3, and
-  OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it, with GDI32's pixel
-  formats, SwapBuffers and gamma ramp, and on a Voodoo2 full screen as
-  3dfx's Voodoo2 OpenGL driver had it. A program that calls a function they
-  don't have ends with a message naming it, and one that needs a DLL that is
-  neither among them nor beside it is refused. The registry is kept in
-  `C:\REGISTRY.REG`, which is made the first time a program uses it, so a
-  host folder mounted as C: gets that file. The built-in DLLs show as
+  keyboard, mouse and joystick through DirectInput, which DINPUT8 is for
+  DirectX 8 games; AVIFIL32 and MSVFW32 read AVI files and decompress and
+  draw their frames, with Indeo Video 3, 4 and 5 and Cinepak as codecs;
+  DMUSIC, DMIME, DMLOADER, DMSTYLE, DMBAND and DMCOMPOS play DirectX 6.1's
+  DirectMusic on the same synthesizer; D3D8 is DirectX 8.1's Direct3D on a
+  Banshee or Voodoo3, and OPENGL32 is OpenGL 1.1 there as 3dfx's ICD had it,
+  with GDI32's pixel formats, SwapBuffers and gamma ramp, and on a Voodoo2
+  full screen as 3dfx's Voodoo2 OpenGL driver had it. A program that calls a
+  function they don't have ends with a message naming it, and one that needs
+  a DLL that is neither among them nor beside it is refused. The registry is
+  kept in `C:\REGISTRY.REG`, which is made the first time a program uses it,
+  so a host folder mounted as C: gets that file. The built-in DLLs show as
   read-only files in `C:\WINDOWS\SYSTEM`, to DOS programs too, and
-  `GLIDE2X.DLL` is among them only with a 3dfx card. A Windows 3.1 program
-  (an NE .EXE) runs too, as Windows 95 runs it: its KERNEL, USER, GDI and
-  other 16-bit modules are written into the emulator as well and go on to
-  the 32-bit ones, and its own DLLs, such as Visual Basic's runtimes, load
-  from beside it. Off, such a program runs its DOS stub, which says it needs
-  Windows. The plan is in [docs/native-windows.md](docs/native-windows.md).
+  `GLIDE2X.DLL` and `GLIDE3X.DLL` are among them only with a 3dfx card. A
+  Windows 3.1 program (an NE .EXE) runs too, as Windows 95 runs it: its
+  KERNEL, USER, GDI and other 16-bit modules are written into the emulator
+  as well and go on to the 32-bit ones, and its own DLLs, such as Visual
+  Basic's runtimes, load from beside it. Off, such a program runs its DOS
+  stub, which says it needs Windows. How to use it and what differs from
+  Windows 98 is in [docs/builtin-windows.md](docs/builtin-windows.md), and
+  how it is built in
+  [docs/builtin-windows-architecture.md](docs/builtin-windows-architecture.md).
 * `win32_dlls` names a host folder of Win32 DLLs that programs under the
   built-in Windows may load as their own code, such as Wine's 32-bit
   `lib/wine/i386-windows` folder. A DLL a program needs that is neither
@@ -454,12 +494,20 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   DLLs don't have fails where it is called, returning 0, instead of
   ending the program; the folder's import libraries (`lib<name>.a`) say
   how many bytes of arguments each takes. Empty (the default), there is
-  no such folder. Wine's MSACM32.DLL with its ADPCM codecs runs this
-  way; see "Wine's DLLs as guest code" in
-  [docs/native-windows.md](docs/native-windows.md).
+  no such folder. Wine's MSACM32.DLL with its codecs runs this way, with
+  `win32_dlls_replace=msacm32`, for what the built-in MSACM32.DLL can't
+  convert: it only decodes MS ADPCM and IMA ADPCM. See
+  [Wine's DLLs as guest code](docs/builtin-windows-architecture.md#wines-dlls-as-guest-code).
 * `win32_dlls_replace` lists the built-in DLLs that the `win32_dlls`
   folder's DLLs of the same name replace, separated by commas, such as
-  `comctl32,comdlg32`. Empty (the default), the built-in ones are used.
+  `comctl32,comdlg32`. Empty (the default), the built-in ones are used. An
+  `opengl32.dll` that replaces the built-in one, such as 3dfx's Voodoo2
+  OpenGL driver (`3dfxVGL.dll`, which draws with `GLIDE3X.DLL`), gets
+  GDI32's `ChoosePixelFormat`, `SetPixelFormat`, `GetPixelFormat`,
+  `DescribePixelFormat` and `SwapBuffers`, as Windows' GDI32 calls the
+  loaded OpenGL32's. It takes the folder's `glu32.dll` with it, if
+  there is one, since the built-in GLU32.DLL draws only through the
+  built-in OpenGL32.
 * `win32_version` is the version of Windows the built-in Windows is:
   `95` (the default), `98` or `98se` (Windows 98 Second Edition). It is
   what GetVersion and GetVersionEx say (4.00.950, 4.10.1998 or 4.10.2222
@@ -548,8 +596,15 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   notification over the picture and in a line under the box above the
   first DOS prompt. When the answer is slow to come, the line names the
   version the last check found, and the notification follows once the
-  answer is in. `true` (the default) or `false`. Deterministic mode and
-  the debug server never check.
+  answer is in. `true` (the default), `false`, or `never`. Deterministic
+  mode and the debug server never check. `never` is for a copy shipped
+  with a game and kept at one version: the check is off, the setting
+  leaves the settings window so it can't be turned back on there, and
+  saving the settings keeps the line. See [Shipping Rust-DOS with a
+  game](#shipping-rust-dos-with-a-game).
+* `run_lock` is the machine-wide [run lock](#the-run-lock): `on` (the
+  default), `off`, or the directory to keep it in, relative to the
+  configuration file's directory.
 * `almanac_auto` asks almanac.rust-dos.com for the settings players
   found best for a program started from the prompt, by its file's name,
   size and checksums, and starts it with them; your own settings come
@@ -583,14 +638,17 @@ Mistakes in the file are printed as warnings; the emulator still starts.
   BIOS, waiting for the vertical retrace, for the timer's tick count to
   change, for a time it reads from the PIT's count, as Windows 98's
   QueryPerformanceCounter does, or for the next millisecond of the
-  built-in Windows's GetTickCount or timeGetTime. A loop is skipped only
-  after the emulator has seen one of its passes come back with the
-  registers and the memory it wrote as they were, or as the same
-  function of the PIT's count it read, and with nothing else to tell the
-  passes apart (it reads no device but the video card's status, whose
-  bits it looks at only through a mask, and the PIT's count, and calls
-  no service but those clocks), so programs see the same as without it.
-  `false` runs every pass.
+  built-in Windows's GetTickCount, timeGetTime or Windows 3.1's
+  GetCurrentTime, or for the next timer event of a PeekMessage that
+  finds nothing, as Johnny Castaway's animation loop does. A loop is
+  skipped only after the emulator has seen one of its passes come back
+  with the registers and the memory it wrote as they were, or as the
+  same function of the PIT's count it read, and with nothing else to
+  tell the passes apart (it reads no device but the video card's status,
+  whose bits it looks at only through a mask, and the PIT's count, and
+  calls no service of the built-in Windows but the clocks and
+  PeekMessage), so programs see the same as without it. `false` runs
+  every pass.
 * `idle_hint=true` lets Windows' own idle calls wait for the next timer
   event, as a halted CPU does: Windows 3.1's idle loop in 386 enhanced
   mode (its VMPOLL device calling out, and the kernel's idle call), which
@@ -742,6 +800,12 @@ programs set.
   filters as the model in `sbtype` does, at 4.8 kHz on an SB 2.0, 3.2 kHz
   on an SB Pro and half the sample rate on an SB16; `off` leaves the
   sound as the card makes it.
+* `sb_coupling` is the capacitor on the Sound Blaster's output, a
+  high-pass at 3 Hz: `on` (the default) or `off`. A card's DAC holds its
+  last sample until the next, and with the capacitor that level fades
+  out of the mix within a fraction of a second, as on the real card;
+  `off` mixes the DAC's level as it is, so a level a program leaves the
+  card at stays in the mix as a constant offset.
 * `reverb` adds a room to the music of the FM synthesizer, the Gravis
   Ultrasound and MIDI: `off` (the default), `tiny`, `small`, `medium`,
   `large` or `huge`. `chorus` thickens them: `off` (the default),
@@ -751,6 +815,20 @@ programs set.
   dry, without the effect, `100` the effect alone, and at `50` (the
   default) both play in full; below 50 the effect fades out, above it
   the dry music does.
+* `audio_output` (`--audio-output`) is what plays the sound. It is read
+  at startup.
+  * `auto` (the default) plays on SDL's sound device. A run with no window
+    (`--hidden`, or `SDL_VIDEO_DRIVER=dummy`) takes the null output
+    instead, unless `SDL_AUDIO_DRIVER` names a driver, so nothing that
+    runs unseen comes out of the speakers.
+  * `sdl` plays on SDL's sound device, with a window or without.
+  * `null` opens no SDL sound device at all. Nothing plays, and the queue
+    empties at exactly 44,100 frames a second by the host's clock.
+
+  With no sound device to open, `auto` and `sdl` run silent on the null
+  output too. `SDL_AUDIO_DRIVER=dummy` picks SDL's own dummy driver, which
+  doesn't keep real time: the log warns about it, and no measurement may
+  use it (see [docs/llm-debugging.md](docs/llm-debugging.md)).
 * `blocksize` and `prebuffer` set how much sound waits for the host's
   sound device, and so how late it is heard: `blocksize` is the device's
   buffer in frames, `128`, `256`, `512` (the default, about 12 ms),
@@ -759,7 +837,10 @@ programs set.
   (the default), `25`, `30`, `40` or `50`. Smaller values bring the
   sound sooner; if it crackles, the host can't keep up with them. Only
   the rust-dos program has them: the libretro core and the browser leave
-  the buffering to the frontend.
+  the buffering to the frontend. When the host holds the emulator up
+  long enough to run the device dry, the queue is kept 10 ms longer from
+  then on, up to 60 ms more, and it comes back down by 10 ms after each
+  minute without a gap.
 * The `MIXER` command shows the mixer and changes it at the prompt, or
   from `[autoexec]`, in DOSBox Staging's syntax:
   `MIXER [CHANNEL] COMMANDS [/NOSHOW]`. The channels are `MASTER`,
@@ -1103,7 +1184,7 @@ headset.
 
 ### `[drives]`
 
-Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR]`,
+Each line is `LETTER = PATH [more images] [floppy|hdd|cdrom] [-label NAME] [-ro] [-chs C,H,S] [-boot] [-overlay DIR] [-inplace]`,
 the options as `MOUNT` takes them. `-boot` boots the disk image when
 Rust-DOS starts (see [Booting at startup](#booting-at-startup)). A drive number 0 to 3 instead of the
 letter gives the BIOS a disk image without a DOS drive (see [Booting a disk
@@ -1319,7 +1400,7 @@ Windows. `windows=` in the profile's `[game]` picks which:
 |---|---|---|
 | What runs the game | rust-dos's own Windows: the system DLLs are written into the emulator, and the game starts from the DOS prompt | A real Windows 95 or 98, installed on a disk image that the profile's `[autoexec]` boots |
 | What you need besides the game | Nothing | A Windows CD, and the time to install Windows and its drivers on an image ([docs/win9x-howto.md](docs/win9x-howto.md)) |
-| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
+| What it runs | Games that use what the built-in DLLs have: GDI, DirectDraw, DirectSound, DirectInput, DirectPlay and DirectMusic of DirectX 3 to 6, Direct3D 5, 6 and 8, OpenGL and Glide 2 | What ran on that Windows with its drivers |
 | State | Experimental: not every game runs yet | Depends on how well the emulated display, sound and 3D cards run their Windows drivers |
 
 Start with `windows=builtin`. If the game doesn't run there, see
@@ -1334,7 +1415,9 @@ when its `[autoexec]` boots nothing (see
 [an operating system](GAME-PACKAGES.md#an-operating-system)). A GOG
 install whose launcher starts a Windows program gets a `windows=builtin`
 profile when it is [imported](#game-profiles). The rest of this section
-is about the built-in Windows.
+is about the built-in Windows, and
+[docs/builtin-windows.md](docs/builtin-windows.md) says what in it
+differs from Windows 98.
 
 #### A profile to start from
 
@@ -1369,7 +1452,7 @@ profile:
 
 | Setting | Set it to | Why |
 |---|---|---|
-| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too, and with the Banshee it is the only card Direct3D 8 and OpenGL run on. `GLIDE2X.DLL` is there only with a 3dfx card. GDI and DirectDraw games run on it too |
+| `machine` | `svga_voodoo3` | Direct3D, OpenGL and Glide games draw on an emulated 3dfx card. The Voodoo3 has 2D and 3D on one card, so 3D shows in a window too, and with the Banshee it is the only card Direct3D 8 and OpenGL run on. `GLIDE2X.DLL` and `GLIDE3X.DLL` are there only with a 3dfx card. GDI and DirectDraw games run on it too |
 | `cpu` | `pentium_ii` | The default 486 has no time stamp counter (RDTSC) or MMX, which many games of the time use: such a game stops with an invalid opcode. The Pentium II has both |
 | `memsize` | `64`, or `128` for a 3D game from 1998 on | The default 16 MB is less than most Windows 98 games asked for. The game's heaps and its DirectDraw surfaces come out of it, and it is what the game is told the machine has |
 | `win32_version` | `98se` | The setups and games tested with the built-in Windows were tested under Windows 98 SE. Under the default, `95`, a program that imports a function Windows 98 added doesn't start, and its message names this setting |
@@ -1432,12 +1515,13 @@ takes the install away and the next start runs the setup again.
 
 The settings of [the profile above](#a-profile-to-start-from) apply to
 the setup as well as the game, and `SET TEMP` matters most here. The
-setups listed in
-[docs/native-windows.md](docs/native-windows.md#setup-programs-that-ran)
-are known to run. For a game on more than one CD, list every image on
-the drive's `[drives]` line; when the setup asks for the next disc,
-Ctrl+F4 puts it in. Run `DIR` at the prompt after the setup to find the
-8.3 names of the folders it made.
+games whose setups are known to run are in
+[docs/compatibility.md](docs/compatibility.md#windows-games-on-the-built-in-windows),
+and [docs/builtin-windows.md](docs/builtin-windows.md#how-an-install-differs)
+says how an install differs from one on Windows 98. For a game on more
+than one CD, list every image on the drive's `[drives]` line; when the
+setup asks for the next disc, Ctrl+F4 puts it in. Run `DIR` at the
+prompt after the setup to find the 8.3 names of the folders it made.
 
 InstallShield's `SETUP.EXE` is a 16-bit launcher, which the built-in
 Windows doesn't run. When `_INST32I.EX_` is beside it, the built-in
@@ -1669,14 +1753,17 @@ the game shipped it. A fix that changes what the driver builds as it
 sets up, such as the mixing fixes, also waits for a driver that hasn't
 set itself up yet. The patch is part of the game's memory, so a save
 state keeps it, and a state saved without it stays unpatched until the
-game starts again. Others skip a program the game starts, with the exit
-code it would have given.
+game starts again. Some patch a program's file as DOS loads it, from
+the shell or by EXEC, when every piece the fix checks is as the game
+shipped it; the file on the disk doesn't change. Others skip a program
+the game starts, with the exit code it would have given.
 
 | Name | Game | What goes wrong | What the fix does |
 |------|------|-----------------|-------------------|
 | `prehistorik2-sb-mix` | Prehistorik 2 | Music and effects click at every note and sit far below the centre line, on a real Sound Blaster too | Patches the driver to mix around the centre |
 | `jukebox-sb-mix` | Blues Brothers: Jukebox Adventure | The same driver, with the same clicks | The same, for its build of the driver |
 | `jukebox-mod-hang` | Blues Brothers: Jukebox Adventure | The game hangs about 75 seconds into the title screen's music | Takes out the jump to itself in front of the music player's position jump |
+| `lol2-virtual-size` | Lands of Lore: Guardians of Destiny | In Huline's cantina, after Baccata speaks, the game stops with "Memory allocation of 1309694 bytes failed!!" | Patches its launchers, LOLG.EXE and SETUPG.EXE, when LOLG.DAT is beside them, to give DOS/4GW 32 MB of virtual memory instead of 24 MB |
 | `microprose-dswap` | F-117A, F-19, Gunship 2000, Covert Action | DSWAP.EXE wants the original install disk and waits for it | Skips DSWAP.EXE with exit code 1, as if the disk was there |
 | `microprose-player` | The same games | Their PLAYER.EXE, the title and cutscene player, loops forever without the copy protection's data | Skips PLAYER.EXE, when DSWAP.EXE is beside it, with exit code 0 |
 
@@ -1698,14 +1785,28 @@ game on a real PC too. The fix was made for BLUES.EXE of 25096 bytes,
 MD5 `4e4e60dbc63bdd867f7ff65725b7e8b4` (TOSEC's [h1] release), which is
 Razor 1911's version. Prehistorik 2's player, the same engine, has no such check.
 
+Lands of Lore 2's launchers, LOLG.EXE and SETUPG.EXE (which runs the
+setup program first), start the game (LOLG.DAT, with DOS/4GW bound in)
+with `DOS4GVM=...VirtualSize:24M...` in its environment, which holds
+DOS/4GW's virtual memory to 24 MB whatever the machine has. The game
+puts up to 16 MB in its heap as it starts and asks DOS/4GW for more as
+it needs it. The cantina scene needs more than the 24 MB allow, so
+DOS/4GW refuses the block (DPMI error 8016h) and the game exits. GOG's
+copy does the same in DOSBox, and the game's `-LOWMEM` switch avoids
+it. The fix changes the 24 to 32 in the launcher as it loads, which the
+20 MB swap file the same setting asks for covers with `memsize`'s
+default 16 MB. The fix was made for GOG's copy, version 1.30: LOLG.EXE
+of 2847 bytes, MD5 `1036beaf32bf4d25de4109d4a245d1a0`, and SETUPG.EXE
+of 2262 bytes, MD5 `6f4b513ea0dcd4af601446bfab178b38`.
+
 MicroProse's DSWAP.EXE checks the install disk with sector reads, and
 PLAYER.EXE checks a buffer the copy protection fills. Neither is needed
 for play. PLAYER.EXE is a common name (Millennia's intro player has it
 too), so only the one with DSWAP.EXE beside it is skipped.
 
-To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of
-its own, the game, the reason, and how to recognise it; a test that
-runs it (`tests/game_fixes_tests.rs`, or `tests/exec_tests.rs` for a
+To add a fix: an entry in `FIXES` in `src/game_fixes.rs` with a name of its
+own, the game, the reason, and how to recognise it; a test that runs it
+(`tests/program/game_fixes_tests.rs`, or `tests/dos/exec_tests.rs` for a
 program skipped as it starts); and a row in the table above.
 
 ## RetroAchievements
@@ -1800,29 +1901,59 @@ lists the options. Each drive keeps its own current directory, as in DOS.
 
 A CD image always makes a read-only CD-ROM drive, labelled with the disc's
 volume name unless `-label` says otherwise. It can be a CUE sheet (`.cue`,
-GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that
-is at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE
-files, any number of tracks and gaps), a CD image in MAME's compressed CHD
-format (`.chd`, as `chdman createcd` makes them; its data and audio
-tracks, decompressed as they are read), or a bare image of a data track
-in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
-`.gog`). The data track can be ISO 9660 or High Sierra, the format of
-discs mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or
-MP3 files (FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them),
-and WAVE files at other rates: they are decoded to CD audio as they play.
-Programs run from the image as from any other drive. DOS programs see the
-names of the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs
-on the built-in Windows see its Joliet long names where the disc has
-them, as on Windows 95.
+GOG's `.ins`, GOG's `.bdn` for BloodNet, or a file of any other name that is
+at most 64 KiB and reads as a sheet; with BINARY, MOTOROLA or WAVE files,
+any number of tracks and gaps), a CD image in MAME's compressed CHD format
+(`.chd`, as `chdman createcd` makes them; its data and audio tracks,
+decompressed as they are read), a BlindWrite 5 or 6 image (the `.b5t` or
+`.b6t` descriptor, with its `.b5i` or `.b6i` data files and the `.b00`,
+`.b01`... BlindWrite split them into, beside it), or a bare image of a data
+track in 2048, 2336 or 2352-byte sectors (`.iso`, `.bin`, `.img`, GOG's
+`.gog`). The data track can be ISO 9660 or High Sierra, the format of discs
+mastered before ISO 9660. Audio tracks can be Ogg Vorbis, FLAC or MP3 files
+(FILE ... MP3, OGG or FLAC, or WAVE as many sheets call them), and WAVE
+files at other rates: they are decoded to CD audio as they play. Programs
+run from the image as from any other drive. DOS programs see the names of
+the disc's ISO 9660 tree, as MSCDEX shows them; Windows programs on the
+built-in Windows see its Joliet long names where the disc has them, as on
+Windows 95.
 
-An image of whole 2352-byte sectors (a BIN, or a CHD) keeps each data
-sector's EDC, and a sector whose EDC doesn't match its data reads as a
-drive reads it: as an error (MEDIUM ERROR, unrecovered read error, on the
-IDE drive; a CRC error through MSCDEX, and a data error when DOS reads a
-file over it). Some copy protections master such sectors on purpose and
-refuse to run when reading them succeeds, so an image as Redump makes it
-passes their check. Sectors with an EDC of 0, which tools that turn an
-ISO into a BIN leave, aren't checked.
+An image of whole 2352-byte sectors (a BIN, a CHD, or a BlindWrite image
+read in raw mode) keeps each data sector's EDC, and a sector whose EDC
+doesn't match its data reads as a drive reads it: as an error (MEDIUM
+ERROR, unrecovered read error, on the IDE drive; a CRC error through
+MSCDEX, and a data error when DOS reads a file over it). Some copy
+protections master such sectors on purpose and refuse to run when reading
+them succeeds, so an image as Redump makes it passes their check. Sectors
+with an EDC of 0, which tools that turn an ISO into a BIN leave, aren't
+checked.
+
+The IDE drive also reads each sector's subchannel: READ CD returns it after
+the sector (raw P-W, formatted Q, or R-W), and READ SUB-CHANNEL reports the
+Q at the head (where audio plays, or else the last sector read or sought)
+and the disc's catalog number. A BlindWrite image read with subchannel
+(2448-byte sectors) keeps what the disc had, deliberately bad Q included,
+and so does a subchannel file beside a CUE sheet or bare image: a file
+named as the sheet or one of its data files, with the extension `.sub`
+(CloneCD's and DiscImageCreator's, each channel's 12 bytes after the one
+before, from sector 0) or `.subcode` (redumper's, raw and interleaved, from
+the lead-in on), 96 bytes a sector. Which of the two layouts a file has,
+and where it starts, is found from the Q positions in it, whatever its
+extension; a file whose size isn't whole sectors, or whose Qs agree on
+neither layout, is left alone, and the next one named so is looked for.
+Redump's downloads leave the subchannel out, but their dump logs have it
+(`<name>.sub`): put it beside the CUE sheet under the sheet's name. For
+other images and sectors the drive makes P and Q from the disc's layout,
+with R-W empty. A Q whose CRC is bad reads back as it is through READ CD,
+and READ SUB-CHANNEL reports the layout's position in its place, as a drive
+keeps the last good one. MSCDEX's Q channel reports the same position. The
+catalog number and the tracks' copy and pre-emphasis flags come from a
+BlindWrite descriptor, or from a CUE sheet's CATALOG and FLAGS, and both
+the IDE drive and MSCDEX report them. BlindWrite's data position
+measurement (DPM, in the descriptor or a `.bwa` file) is read, but the
+drive doesn't time its reads by it yet
+([#591](https://github.com/dividebysandwich/rust-dos/issues/591)), so a
+protection that measures sector angles may not pass.
 
 The type of a drive is the word after the path in `[drives]`, or `-t` at
 the prompt:
@@ -1861,21 +1992,19 @@ disks](#booting-a-disk-image) write their changes to the overlay too.
 `MOUNT` lists where each drive's changes go.
 
 A floppy or hard disk image with `-overlay DIR` is left as it is too: what
-is written to it goes to `DIR/<image name>.rdelta`, 64 KB at a time, and the
-rest is read from the image. That makes one image the base of many
-setups, a Windows 95 install with each game's changes in its own folder:
+is written to it goes to `DIR/<image name>.rdelta`, the same kind of delta
+file a hard disk image has beside it without `-overlay` (see [Disk
+images](#disk-images)). That makes one image the base of many setups, a
+Windows 95 install with each game's changes in its own folder:
 
 ```
 MOUNT 2 win95.img -overlay saves/carmageddon
 MOUNT 2 win95.img -overlay saves/fury3
 ```
 
-Deleting the `.rdelta` file takes the disk back to the image. The delta
-file is made for its image: if the image changes after, the delta file is
-refused. An image in an archive gets a delta file in the overlay folder in
-the same way (one copied there whole by an older Rust-DOS is still used).
-State files of a system booted from such a disk keep a copy of the whole
-disk, as they do of any other.
+An image in an archive gets a delta file in the overlay folder in the
+same way (one copied there whole by an older Rust-DOS is still used).
+`-inplace` and `-overlay` can't be given together.
 
 A: and B: are always floppy drives, whatever type the mount gives, and
 can't hold a CD or a partitioned hard disk image. Programs see them the way
@@ -1894,20 +2023,91 @@ long and the short name open the file.
 ### Disk images
 
 A floppy or hard disk image holds a FAT12, FAT16 or FAT32 file system that
-programs read and write like any other drive's; what they write goes into
-the image file. A FAT32 drive mounts at any `dos_version`, as programs
-reach its files through DOS; the functions of before FAT32 (INT 21h
-AH=36h, 1Ch) report no more than just under 2 GB of it, as MS-DOS 7.1
-does, and the FAT32 functions tell the rest (see `dos_version`). An image
-whose size is a floppy disk's (160 KB to 2.88 MB, as in DOSBox's table),
-or named `.vfd`, `.flp`, `.360`, `.720`, `.1200` or `.1440`, is a floppy,
-anything else a hard disk: an image of a whole disk with a partition
-table, whose first FAT12 or FAT16 partition (else its first FAT32 one) is
-the drive, or of a single volume. The hard disk's geometry comes from its
-partition table or boot sector; where it can't, `-chs C,H,S` (or DOSBox's
-`-size 512,S,H,C`) gives it. `-t floppy` or `-t hdd` overrides the choice,
-and an image file that can't be written, or `-ro`, makes a write-protected
-disk. `MOUNT C hdd.img` puts a hard disk image in place of C:'s directory.
+programs read and write like any other drive's; what they write to a hard
+disk image goes to a delta file beside it (below), and what they write to a
+floppy goes into the image. A FAT32 drive mounts at any `dos_version`, as
+programs reach its files through DOS; the functions of before FAT32 (INT 21h
+AH=36h, 1Ch) report no more than just under 2 GB of it, as MS-DOS 7.1 does,
+and the FAT32 functions tell the rest (see `dos_version`). An image whose
+size is a floppy disk's (160 KB to 2.88 MB, as in DOSBox's table), or named
+`.vfd`, `.flp`, `.360`, `.720`, `.1200` or `.1440`, is a floppy, anything
+else a hard disk: an image of a whole disk with a partition table, whose
+first FAT12 or FAT16 partition (else its first FAT32 one) is the drive, or
+of a single volume. The hard disk's geometry comes from its partition table
+or boot sector; where it can't, `-chs C,H,S` (or DOSBox's `-size 512,S,H,C`)
+gives it. `-t floppy` or `-t hdd` overrides the choice, and an image file
+that can't be written, or `-ro`, makes a write-protected disk. `MOUNT C
+hdd.img` puts a hard disk image in place of C:'s directory.
+
+A hard disk image mounted without `-overlay` is left as it is: what is
+written to it goes to `<image>.rdelta` beside it (`win98.img.rdelta` for
+`win98.img`), 64 KB at a time, and the rest is read from the image. Every
+run that mounts the image, from any configuration, takes up the same
+delta file, so the disk is as the last run left it, as an image written
+in place would be. State files of a system booted from it keep only its
+changes (see [Booting a disk image](#booting-a-disk-image)). The log, and
+the console at startup, name the delta file each image writes to.
+Deleting the delta file takes the disk back to the image.
+
+Other programs (an emulator, a disk tool, a loop mount) see the image
+without the changes. To write them into the image:
+
+```
+COMMIT C:
+rust-dos commit ~/images/win98.img
+```
+
+`COMMIT` takes a drive mounted from an image, by letter or disk number,
+while no booted system has it, and mounts it again over the image with
+the changes in it. `rust-dos commit IMAGE` does the same from the host's
+shell, for an image no running Rust-DOS has mounted; `--delta FILE` names
+a delta file elsewhere, such as one in an overlay folder. Both delete the
+delta file, and save states of the disk from before no longer load. A
+commit cut short (a crash, a power cut) leaves the delta file marked: a
+mount refuses it, and the next commit finishes it.
+
+The delta file is made for its image, and holds the image's size,
+modification time and a hash of its first MB and last 64 KB. If the image
+changes after (put in anew, or written by another program or with
+`-inplace`), the delta file no longer fits it: it is set aside as
+`<image>.rdelta.stale-<time>`, the log says so, and the disk is the image
+as it is now. An image that was written in place before simply gets a
+delta file over it on its next mount.
+
+What that means for the usual tasks:
+
+- To start a disk again from the image, delete its delta file
+  (`<image>.rdelta` beside the image, or in the `-overlay` folder).
+- To keep several setups over one image (a clean install, and a copy of
+  it for each game), mount it with `-overlay DIR`, a folder for each
+  setup: each gets its own delta file there. A new folder starts from the
+  image as it is; to start a setup from another one, copy that one's
+  delta file into the new folder, under the same name. Without
+  `-overlay`, every configuration that mounts the image shares the one
+  beside it. A `COMMIT` of one setup writes the image the others are
+  over, so their delta files no longer fit it and are set aside.
+- To back up a setup, copy its delta file while no run has the image
+  mounted; the image needs copying only once.
+- To move a setup to another folder or machine, copy the image and its
+  delta file together, with the image's modification time kept (`cp -p`,
+  Explorer, `robocopy`, and `rsync -t` from rsync 3.1 keep it; a plain
+  `cp` doesn't, and an older rsync keeps only the seconds). The time has
+  to match to the nanosecond, so a copy to a drive that keeps times less
+  exactly (FAT32, exFAT, or NTFS for an image from Linux or macOS)
+  doesn't fit, and neither do the save states of a system booted from
+  it. `COMMIT` the changes into the image before such a move; the save
+  states from before don't load after it either.
+- To give the disk to another program, or to share the image with its
+  changes in it, `COMMIT` it first.
+
+`-inplace` writes the image itself, and state files then keep a whole
+copy of the disk. It leaves out a delta file that is beside the image,
+which the log tells: once the image is written, those changes no longer
+fit it, so `COMMIT` them first to keep them. A floppy image and one in an
+archive (which takes `-overlay`) have no delta file either, nor does an
+image where no file can be made beside it, which the log tells. A
+read-only mount (`-ro`, or a file that can't be written) makes no delta
+file, and shows the changes of one that is there.
 
 86Box's 86F floppy images (`.86f`, found by their contents whatever their
 name) mount like the others. They hold each track's FM or MFM bit cells,
@@ -2185,20 +2385,41 @@ system booted from a floppy starts from the first hard disk when the floppy
 drive is empty by then, as a PC that boots from A: and then C: does.
 Changes to the hardware settings wait for the prompt.
 
-What the system writes goes into the image, so try things on a copy (on
-btrfs or XFS, `cp --reflink=auto` takes no room). [Save
-states](README.md#save-states) and rewind keep the disks in step with the
-system's memory: in a run, the disks go back with a state through a journal
-of what the system wrote over (the last 256 MB of it), and a state file has
-a copy of each disk beside it (`slot1.C.img` for `slot1.state`, or
-`slot1.2.img` for the disk mounted as 2, which takes no room where the
-filesystem shares data between files) that loading it puts back. The copy
-goes into the image the loading machine has in that drive, not the one
-the state was saved with, so a configuration that mounts a scratch copy
-of the image as C: can load states of the system without touching the
-original. The image must be the size of the copy, and a machine with no
-image in the drive (a folder as C:, or nothing) refuses the load. The
-browser's slots can't hold disks and refuse a booted system's state.
+What the system writes to a hard disk image goes to its delta file
+(`<image>.rdelta` beside it, or in the [`-overlay DIR`](#mounting-drives)
+folder), and the image stays as it is until `COMMIT` writes the changes
+into it (see [Disk images](#disk-images)); with `-inplace` it goes into
+the image. [Save states](README.md#save-states) and rewind keep the disks
+in step with the system's memory: in a run, the disks go back with a
+state through a journal of what the system wrote over (the last 256 MB of
+it), and a state file keeps each disk beside it, which loading it puts
+back:
+
+- A disk with a delta file keeps only its changes: a copy of its delta
+  file as it was at the state (`slot1.C.rdelta` for `slot1.state`, or
+  `slot1.2.rdelta` for the disk mounted as 2), a few MB to a few hundred
+  for a Windows session. Its header names the image, with the image's
+  size, modification time and a hash of its first MB and last 64 KB. The
+  changes go back only over that image, with its changes in a delta file
+  again: the delta file of the drive as the loading machine has it, or,
+  with no image in that drive (a folder as C:, or nothing), the drive
+  mounted as the state had it. A load over an image that is gone, has
+  changed (a `COMMIT` since changes it), or is mounted with `-inplace` or
+  read-only (`-ro`) is refused, and the message names the drive and the
+  image.
+- Any other disk (`-inplace`, a floppy) is copied whole (`slot1.C.img`,
+  which takes no room where the filesystem shares data between files),
+  and for an image of 64 MB or more the log says how big the copy is. The
+  copy goes into the image the loading machine has in that drive, not the
+  one the state was saved with, so a configuration that mounts a scratch
+  copy of the image as C: can load states of the system without touching
+  the original. The image must be the size of the copy, and a machine with
+  no image in the drive refuses the load. States saved so by older
+  versions load as they did. Over an image with a delta file, the copy's
+  differences from the disk go into the delta file, and the image stays
+  as it is.
+
+The browser's slots can't hold disks and refuse a booted system's state.
 
 ### Windows 95
 
@@ -2231,7 +2452,7 @@ other hardware may look for devices this machine hasn't.
 
 Windows 95, OSR2 included, is the system the booted machine was built and
 tried with, and Windows 98 SE runs too (see below). Windows 98 First Edition
-and ME have no recorded run, so try them on a copy of the image. The machine
+and ME have no recorded run. The machine
 has APM and no ACPI, and its Sound Blaster
 is a legacy card that Windows finds at the resources [`[sound]`](#sound)
 gives it (DOSBox-X's `sbtype=sb16vibra` is an ISA Plug and Play card).
@@ -2348,38 +2569,35 @@ card's gamma table, which games set brighter than DOSBox-X shows them.
 
 * **DOS games** bring Glide with them (linked in, or `GLIDE2X.OVL` beside
   the game) and run under a DOS extender such as DOS/4GW, which maps the
-  card's memory. Tomb Raider's 3dfx patch (`3DPATCH\3DFX\TOMB.EXE` on the
-  Tomb Raider Gold CD) runs with `voodoo=true` and `cpu=pentium`. Its
-  saved games don't load in the PowerVR version, nor that version's in
-  it (see the PowerVR card below).
-  Games made for the Voodoo Rush and later boards load Glide from
-  `GLIDE2X.OVL` (Tomb Raider's Rush patch, `3DPATCH\VOORUSH\TOMB.EXE`),
-  and the one of 3dfx's Voodoo Graphics driver drives this card whatever
-  board they were made for. It is 3dfx's and doesn't come with rust-dos:
-  the settings window's Emulator page downloads it, after asking, from the
-  driver (3.01.00) the Internet Archive keeps, into rust-dos's
-  configuration directory, and Z: has it from then on, where they find it
-  on the PATH (one beside the game comes first). A game that looks for it
-  while it is missing says so on the screen. Such a game runs without
-  rust-dos's DPMI host: the overlay is a DOS/4G DLL whose start-up only
-  works with DOS/4GW as its own host, at level 0. Its accesses to the
-  Pentium II's memory type range registers, which it marks for 3dfx's
-  Windows driver to catch, do nothing.
+  card's memory. Games made for the Voodoo Rush and later boards load
+  Glide from `GLIDE2X.OVL`, and the one of 3dfx's Voodoo Graphics driver
+  drives this card whatever board they were made for. It is 3dfx's and
+  doesn't come with rust-dos: the settings window's Emulator page
+  downloads it, after asking, from the driver (3.01.00) the Internet
+  Archive keeps, into rust-dos's configuration directory, and Z: has it
+  from then on, where they find it on the PATH (one beside the game
+  comes first). A game that looks for it while it is missing says so on
+  the screen. Such a game runs without rust-dos's DPMI host: the overlay
+  is a DOS/4G DLL whose start-up only works with DOS/4GW as its own
+  host, at level 0. Its accesses to the Pentium II's memory type range
+  registers, which it marks for 3dfx's Windows driver to catch, do
+  nothing.
 * **Windows 95** [booted from a disk image](#booting-a-disk-image) finds
   the card as a "PCI Multimedia Video Device", which needs no driver:
   games bring `glide2x.dll`, or install 3dfx's Glide runtime (and with it
-  `fxmemmap.vxd`). SubCulture's 3dfx version installs from its CD in the
-  [CD-ROM drive](#booting-a-disk-image) and plays with its CD music, with
-  `machine=svga_s3`, `memsize=64` and `cpu=pentium`.
+  `fxmemmap.vxd`).
 * **Windows 98 SE** finds the card at its next start as a "3Dfx Voodoo"
   and installs its own driver for it from the Windows 98 CD, asking for the
   CD's `WIN98` folder (give it the drive letter the CD has in this
-  machine), without a restart. The driver gives DirectDraw and Direct3D the
-  Voodoo as a second device beside the 2D card, and Direct3D games that let
-  you choose the 3D card draw on it: Expendable does with
-  `DisplayDriver [1]` in its `config.txt`, with `machine=svga_s3virge`,
-  `cpu=pentium_ii` and `memsize=128`. While a game draws on the card,
-  `video.voodoo.output` in the debug server's `/api/status` is true.
+  machine), without a restart. The driver gives DirectDraw and Direct3D
+  the Voodoo as a second device beside the 2D card, and Direct3D games
+  that let you choose the 3D card draw on it. While a game draws on the
+  card, `video.voodoo.output` in the debug server's `/api/status` is
+  true.
+
+[docs/compatibility.md](docs/compatibility.md) has the settings of the
+games tried on the card: Tomb Raider's 3dfx and Rush patches under DOS,
+SubCulture on Windows 95 and Expendable on Windows 98 SE.
 
 The card swaps its buffers at the vertical retrace a game asks it to wait
 for, and reports the swaps still waiting and its busy state as the real
@@ -2451,9 +2669,9 @@ none of this. An OpenGL game reaches the card in one of three ways:
   OpenGL in a window no longer can.
 
 The copy into the game's folder can be made by the game's configuration,
-which leaves the disk image as it is. With the image mounted with
-[`-overlay`](#mounting-drives), the built-in DOS copies the file before
-the system boots, and the copy goes into the overlay's `.rdelta` file:
+which leaves the disk image as it is: the built-in DOS copies the file
+before the system boots, and the copy goes into the image's delta file,
+here in an [`-overlay`](#mounting-drives) folder for the game:
 
 ```ini
 [drives]
@@ -2508,26 +2726,36 @@ draws into. What games write into the frame buffer themselves (menus,
 movies) stays at the card's resolution. `voodoo_anisotropy` sharpens
 textures viewed at an angle, where the OpenGL driver supports
 anisotropic filtering.
-With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's
-on a Voodoo Graphics or Voodoo2: the software rasterizer draws none of
-the triangles, and where something reads the card's memory (a game
-reading the frame buffer or blitting from it, a save state, a
+With `voodoo_readback=gpu`, the default, OpenGL's picture is the card's:
+the software rasterizer draws none of the triangles, and where something
+reads the card's memory (a game reading the frame buffer or blitting
+from it, a Banshee's or Voodoo3's 2D engine or GDI, a save state, a
 screenshot, the debugger) the rows it reads are read back from OpenGL,
 at the card's resolution and in its 16 bits a pixel. A read waits for
-the GPU, so a game that reads back every frame gains less. The pixels it
-reads differ in small ways from the card's: OpenGL draws a triangle's
-edges by its own rules, blends after the dither (see below) and keeps
-more depth precision. What a game writes itself, its frame buffer
-writes and the blitter's copies, reads back as it wrote it. A save state
-keeps OpenGL's pixels too, so states of the same scene saved on two
-GPUs differ slightly in the card's memory, and in what the game did with
-pixels it read back. Such a state loads on any machine. A game that
-needs the card's exact pixels, or states that match byte for byte, can
-have `voodoo_readback=exact`. Programs that use alpha planes, the
-Banshee and Voodoo3, and deterministic runs always get the exact pixels,
-as do the pixel counters: drawing left to OpenGL isn't counted, and once
-a game reads the counters everything after is drawn in software and
-counted.
+the GPU, so the triangles into a buffer a game read back in the last
+second or so are drawn in software instead, where the next read waits
+only for the worker threads (on a Banshee or Voodoo3 the rows the 2D
+engine reads or draws into, and those the card shows from outside its
+3D buffers, count as read), and a triangle that takes its texture from
+a buffer the 3D drew reads that buffer back first, so that it draws
+with OpenGL's picture at the card's resolution. The pixels a game reads
+differ in small ways from the card's: OpenGL draws a triangle's edges by
+its own rules and keeps more depth precision, and where nothing dithers
+(see below) a blended triangle blends with 8 bits a colour. What a game
+writes itself, its frame buffer writes and the blitter's copies, reads
+back as it wrote it. A save state keeps OpenGL's pixels too, so states
+of the same scene saved on two GPUs differ slightly in the card's
+memory, and in what the game did with pixels it read back. Such a state
+loads on any machine. A game that needs the card's exact pixels, or
+states that match byte for byte, can have `voodoo_readback=exact`.
+Deterministic runs always get the exact pixels, as do the pixel
+counters: drawing left to OpenGL isn't counted, and once a game reads the
+counters everything after is drawn in software and counted. OpenGL keeps
+the alpha planes in the alpha of the colour buffer drawn into, so a game
+that blends by the alpha it wrote into the same buffer (Lands of Lore 2)
+stays on the GPU. Once a game blends by alpha written with another
+colour buffer, by the CPU or by the blitter, or tests depth against the
+alpha planes, everything after is drawn in software too.
 
 With `voodoo_readback=exact` the software rasterizer keeps the card's
 memory, which games read back and save states keep, but it only draws
@@ -2544,6 +2772,19 @@ is drawn and counted (`RUST_DOS_VOODOO_PRUNE=0` in the environment draws
 everything from the start). The CRT shaders draw their scanlines over the
 bigger picture. The libretro core draws it with the frontend's OpenGL (see
 [its README](libretro/README.md#the-3dfx-voodoo-with-opengl)).
+
+The textures' mipmap levels are the ones the card would take at
+`voodoo_scale` times its resolution: a pixel's level comes from how fast
+the triangle's S/W and T/W change and from its W, as the software
+rasterizer works it out, so at 1x they are the card's and at 2x one
+level sharper. A Banshee or Voodoo3 game whose screen shows none of the
+3D buffers (Giants copies its 3D into a desktop of another format) sees
+them only through the card's memory, at the card's resolution, and gets
+the card's levels at any scale: a game whose smaller levels are other
+pictures than its larger ones would otherwise change its look whenever
+what OpenGL drew is read back. The shader reads and filters the card's
+texels as the card does. With `voodoo_anisotropy` OpenGL filters them
+itself, from the card's level.
 
 The card stores 16 bits a pixel (5-6-5), and where a game turns
 dithering on (fbzMode bit 8, which Glide sets by default) it adds a 4x4
@@ -2565,18 +2806,25 @@ from the card's memory (a new `voodoo_scale` or `voodoo_msaa`, a loaded
 state), it starts from the card's 16 bits, so with `voodoo_dither=false`
 the pattern shows until the game draws over it.
 
-Not all of the card's dithering is there. OpenGL blends after the shader,
-so a blended triangle is dithered before the blend instead of after it: it
-has the pattern, but its pixels aren't the card's, and fbzMode bit 19
-(taking the dither back out of the colour the blend reads) does nothing.
-Some games blend most of what they draw (Oni blends every triangle), so
-their pictures have the card's pattern but not its exact pixels. The
-texture units' dithered LOD isn't there either, as OpenGL picks the mipmap
-levels. Frame buffer writes and the Voodoo2's blitter show what the card's
-memory holds, dithered or not, whatever the setting. The Voodoo2's and
-Voodoo3's video output filter, which partly smooths the pattern on the
-card's own output, isn't modelled: with the setting on, the pattern shows
-as the card writes it.
+The card blends a triangle with the 5-6-5 pixels under it before it
+dithers, and with fbzMode bit 19 it takes the dither back out of those
+pixels first. OpenGL blends after the shader, so for a triangle that
+blends and dithers the shader does the blend itself, the card's way,
+with the pixels under the triangle. Where the driver has a texture
+barrier (OpenGL 4.5, `GL_ARB_texture_barrier` or
+`GL_NV_texture_barrier`) the shader reads them from the buffer it draws
+into, behind a barrier. Otherwise, and with `voodoo_msaa`, they are
+copied out of the buffer before the triangle is drawn, and the shader
+reads them from the copy, which with `voodoo_msaa` holds each pixel's
+samples averaged. At `voodoo_scale=1` such a triangle comes out as the
+software rasterizer draws it too. Triangles of one draw that overlap go
+after a barrier or over a copy each, so each blends with what the one
+before drew. The texture units' dithered level of detail
+(textureMode bit 4) follows the setting as well. Frame buffer writes and
+the Voodoo2's blitter show what the card's memory holds, dithered or not,
+whatever the setting. The Voodoo2's and Voodoo3's video output filter,
+which partly smooths the pattern on the card's own output, isn't
+modelled: with the setting on, the pattern shows as the card writes it.
 
 The dithering costs a few more instructions a pixel in the shader, and
 nothing on the host's CPU. On an Intel UHD Graphics 770 at the default
@@ -2588,6 +2836,14 @@ nothing but dithered triangles, 200 screen-sized rectangles a frame at
 2x, the graphics card took 7% longer with dithering on (1083 against
 1010 ms a frame, about 0.3 ns more for each of the 246 million pixels):
 the most it costs, where filling pixels is all a frame does.
+
+A dithered draw that blends costs more: the CPU sorts its triangles into
+groups that don't overlap, and each group is a draw of its own after a
+barrier or a copy. On an RTX 4080 with the barrier, Unreal's flyby
+(which blends its lightmaps, coronas and particles with dithering on)
+and 3DMark 2000 ran as fast as with OpenGL's blending; through the copy,
+which a driver without a barrier takes, they lost about 3% of their
+frame rate where the host held them back.
 
 ## 3dfx Voodoo3 and Banshee
 
@@ -2649,25 +2905,31 @@ were tried on Windows 98 SE with the 1.07.00 driver:
 * Direct3D: Incoming (the GOG release, run without GOG's wrapper DLLs),
   its menus and the first level of its arcade game.
 
-Direct3D needs DirectX 7, as the driver's readme says; Windows 98 SE
-comes with 6.1. With 6.1 the driver takes the structure DirectDraw gives
-it when a program starts Direct3D for the one DirectX 7 has, and faults:
-the program's window stays white and the card draws nothing. Install
-DirectX 7.0 (`dx70eng.exe`) or later first.
+The 1.07.00 driver's Direct3D needs DirectX 7, as its readme says;
+Windows 98 SE comes with 6.1. With 6.1 the driver takes the structure
+DirectDraw gives it when a program starts Direct3D for the one DirectX 7
+has, and faults: the program's window stays white and the card draws
+nothing. Install DirectX 7.0 (`dx70eng.exe`) or later first. Glover
+draws wrongly with 1.07.00 and needs the earlier 4.11.01.1151, which
+runs on 6.1 too; [docs/compatibility.md](docs/compatibility.md) names
+the games that need another driver.
 
 With `voodoo_renderer=opengl` the window's OpenGL draws the card's 3D
-again at `voodoo_scale` times its resolution, as for the Voodoo Graphics
-(see [3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
+at `voodoo_scale` times its resolution, as for the Voodoo Graphics (see
+[3dfx Voodoo Graphics](#3dfx-voodoo-graphics)), and puts the picture
 together as the card's video processor does: the desktop, the overlay
 (the window or screen a game shows its 3D through, scaled and in YUV
 too) and the cursor. A desktop or overlay that is a 16-bit buffer the 3D
 draws into, laid out as the 3D draws it, comes from the bigger picture;
 anything else (the Windows desktop, 8, 24 and 32-bit modes, YUV video)
 comes from the card's memory at its own resolution, with the drawing
-still queued for it done first. The software rasterizer keeps the
-memory, so programs read back what they would on the card, and
-screenshots and recordings show the software picture. The libretro core
-draws a Banshee or Voodoo3 in software whatever `voodoo_renderer` says.
+still queued for it done first. With `voodoo_readback=gpu`, the default,
+OpenGL alone draws the 3D, and what reads the card's memory reads back
+OpenGL's picture, as on the Voodoo2; with `voodoo_readback=exact` the
+software rasterizer keeps the memory as well, so programs read back what
+they would on the card. Screenshots and recordings show the software
+picture, which reads everything back. The libretro core draws a Banshee
+or Voodoo3 in software whatever `voodoo_renderer` says.
 
 The card is a port of 86Box's Banshee and Voodoo3 emulation
 (`vid_voodoo_banshee.c` and its 2D engine, by Sarah Walker, GPLv2, and
@@ -2714,18 +2976,11 @@ card through the BIOS (INT 10h AX=158Dh describes the board), load
 has these functions; its VESA modes are the card's own, shown by its
 CRTC, with the memory's byte order set for the PC to see it linear.
 
-* **Tomb Raider**'s Vérité patch (`3DPATCH\RENDVRT` on the Tomb Raider
-  Gold CD: `Tomb.exe` and `spd3d.uc`, copied into the game's folder, the
-  executable renamed so the 2D one stays) runs with `cpu=pentium` and
-  `memsize=32`.
-
-* **vQuake** (Rendition's port of Quake; 1.07 beta 5 with its `spd3d.uc`,
-  or 1.08 beta 1, copied into the Quake folder) runs with `dpmi=false`,
-  `cpu=pentium` and `memsize=32`, and `-nocdaudio` unless the CD is
-  mounted. It brings its own DPMI host, CWSDPMI, which it needs: its
-  copy of Rendition's library finds the physical addresses for DMA by
-  walking the processor's page tables, which the built-in host doesn't
-  use.
+Tomb Raider's Vérité patch and vQuake run this way;
+[docs/compatibility.md](docs/compatibility.md) has their files and
+settings. vQuake needs the DPMI host it brings, CWSDPMI: its copy of
+Rendition's library finds the physical addresses for DMA by walking the
+processor's page tables, which the built-in host doesn't use.
 
 ### 3D Blaster PCI games (CGL)
 
@@ -2866,27 +3121,9 @@ tiles are drawn on as many threads as the host has, and the picture is
 the same however many there are. Save states and rewind keep the card
 with its texture memory.
 
-* **Tomb Raider**'s PowerVR patch (`3DPATCH\PWRVR\TOMBPCX2.EXE` on the Tomb
-  Raider Gold CD, copied into the game's folder) runs with `cpu=pentium`
-  and `memsize=32` (it wants 20 MB free), under its DOS/4GW. It finds a
-  VESA 2.0 BIOS, so it doesn't run UniVBE. F1 and F2 change the
-  resolution, F3 shows it and the frame rate. F8 switches between double
-  and single buffering, going back to 640x480 as it does; single
-  buffering can be 4 or 5 frames a second faster, which counts while the
-  emulated card runs at 15 to 20 on a typical host. Keys this version has and the others
-  don't (or use differently): F4 shows or hides the PowerVR logo (in the
-  full game only), Z zooms the camera in and X out.
-  Its saved games and the 3dfx version's (and the other versions') share
-  the names `SAVEGAME.x` but don't work in each other: one way round the
-  game loads to a black screen, the other way it quits with an error
-  about GetHeight. The textures aren't harmed. [Issue #38](https://github.com/dividebysandwich/rust-dos/issues/38)
-  has TOMBPCX2.EXE (v2.1e and v2.0e) modified to save as `SAVEPCX2.x`
-  instead, so it lives peacefully beside the others in one folder, and
-  the same for Tomb Raider: Unfinished Business's PowerVR version, which
-  saves as `SVUBPX.x` instead of `SAVEUB.x`.
-* The same patch's `TOMBPCX1.EXE` is the version for the PCX1, and runs
-  the same way with `powervr=pcx1`. Each version tells you if the card is
-  the other one.
+Tomb Raider's PowerVR patch, with a version for each chip, runs on both
+under its DOS/4GW; [docs/compatibility.md](docs/compatibility.md) has
+its settings, its keys and what to know about its saved games.
 
 The PCX1 does without some of what the PCX2 added. It has no bilinear
 filtering: where a texture's two mip map levels meet, it blends a texel
@@ -2908,8 +3145,9 @@ need the first one:
 |---|---|---|
 | Play a DOS game in multiplayer (Doom, Duke Nukem 3D, Warcraft 2, Descent, C&C) | the **IPX driver** and a **room** | join a room, then pick the game's IPX option |
 | Play a serial or modem game with one other player | a **room** | join a room, then pick the game's null modem or modem option |
+| Play a DirectPlay game (Moto Racer, most Windows 9x games) on the built-in Windows | a **room** | join a room, then pick the game's IPX or TCP/IP connection |
 | Browse the web, telnet, FTP or IRC from DOS, Windows 3.x or Windows 9x | the **NE2000 network card** | `ne2000=true`, plus a driver in the guest |
-| Play a Windows 9x network game, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
+| Play a network game on a Windows 9x image, or share files between two Windows guests | the **NE2000 network card** and a **room** | both of the above |
 
 ### The words
 
@@ -3001,18 +3239,23 @@ public relay or `rust-dos-relay` on a server avoids that.
 | System | IPX games | Internet (TCP/IP) | LAN with other instances |
 |---|---|---|---|
 | Built-in DOS | built-in IPX driver | NE2000 + packet driver + mTCP or similar | IPX; TCP/IP over the NE2000 |
+| Windows games on the built-in Windows | DirectPlay's IPX and TCP/IP connections, both over the built-in IPX driver | not yet | DirectPlay sessions |
 | Windows 3.1 started from the built-in DOS | DOS games in a DOS box: no IPX (see below) | NE2000 + packet driver + WINPKT + Trumpet Winsock | TCP/IP over the NE2000 |
 | Windows for Workgroups 3.11 with its own network setup | its own IPX over the NE2000 | its own NE2000 driver and TCP/IP-32 | its own networking over the NE2000 |
 | Windows 95/98 booted from an image | its IPX/SPX protocol over the NE2000 | its NE2000 driver and TCP/IP | its networking over the NE2000 |
 
-The built-in IPX driver belongs to the built-in DOS: inside Windows, and
-in systems booted from a disk image, games need that system's own IPX
-over the NE2000. The steps for each system are under [Network
-card](#network-card).
+The built-in IPX driver belongs to the built-in DOS and to the built-in
+Windows's DirectPlay: inside Windows 3.x, and in systems booted from a
+disk image, games need that system's own IPX over the NE2000. The steps
+for each system are under [Network card](#network-card).
 
 Tested so far: IPX games between instances (Doom, Heretic, Descent);
-the internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock
-and Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
+DirectPlay on the built-in Windows between two instances (a race of
+Moto Racer's demo; and in a room of the public relay, one on IPX and one
+on TCP/IP, the demos of Age of Empires and Midtown Madness from finding
+the game to playing it, and Monster Truck Madness 2's lobby); the
+internet from DOS with mTCP, from Windows 3.11 with Trumpet Winsock and
+Netscape, and from Windows 95 with Internet Explorer. Not tested yet:
 Windows 95's IPX against the built-in IPX driver, two Windows guests on
 one LAN, and Windows for Workgroups' own TCP/IP-32. Reports are welcome.
 
@@ -3054,8 +3297,9 @@ the room, the members in it and the round trip to the relay.
   `ipx` in [`[network]`](#network) says otherwise. It works for DOS
   programs and for protected-mode games that call it through their DOS
   extender, such as Descent (Doom and Heretic reach it through
-  IPXSETUP); it is not there for systems booted from a disk image, nor
-  inside Windows.
+  IPXSETUP), and it carries the built-in Windows's DirectPlay (below).
+  It is not there for systems booted from a disk image, nor for programs
+  inside Windows 3.x.
 * **`LAN HOST [port]`** relays rooms on a UDP port (21213 unless given)
   and joins one. `LAN STOP` stops relaying. Over the internet, that port
   has to reach the host through its router.
@@ -3092,6 +3336,35 @@ the room, the members in it and the round trip to the relay.
   packets are on the same LAN as the network cards of other instances, in
   the frame type `ipxframe` sets (Ethernet II by default), where the IPX
   protocol of a system booted with a card can take them.
+
+### DirectPlay games on the built-in Windows
+
+Windows 9x games played with `windows=builtin` find each other through
+DirectPlay, Windows' own multiplayer library, which the built-in Windows
+has: its sessions go through the room like the IPX driver's packets do.
+Join a room, start the game on each computer, and pick its network play:
+
+* The game lists two connections, **IPX Connection For DirectPlay** and
+  **Internet TCP/IP Connection For DirectPlay**, as Windows 98 does with
+  both protocols installed. Either works, and players may pick different
+  ones: both are the room underneath. A host address the game asks for
+  with TCP/IP isn't needed, and isn't used.
+* One player makes the game (the game's *Create*, *Host* or *New game*);
+  the others see it in the game's list of sessions, with its players, and
+  join it. Every member of the room sees every session hosted in it.
+* When the player who made the game leaves, a game that asked for it
+  (DPSESSION_MIGRATEHOST) goes on with another host; otherwise the others
+  go on playing, and no one can join any more. A player whose instance
+  stops answering is taken out of the game after 20 seconds.
+* Before a room is joined, sessions are found in this instance only. The
+  first game that picks a connection installs the IPX driver; with
+  `ipx=false` there is none, and the sessions stay in the instance.
+* Messages a game sends as guaranteed arrive in order, whatever the
+  relay's UDP loses; the others are sent once, as on a real network.
+* DirectPlay's protocol here is rust-dos's own: a game on a Windows 95 or
+  98 image in another instance doesn't see these sessions, nor these
+  games its. The lobby (games started by a lobby program such as the
+  Zone) isn't there.
 
 ### Serial and modem games
 
@@ -3150,7 +3423,7 @@ up their routers, as the public one at `relay.rust-dos.com` does.
 `rust-dos-relay` is a small program of its own, in every release package
 beside rust-dos, that needs neither a display nor SDL or a sound library
 (to build it alone: `cargo build --release --no-default-features --bin
-rust-dos-relay`, which needs SDL2's development files but not ALSA's).
+rust-dos-relay`, which needs neither SDL's development files nor ALSA's).
 `rust-dos --relay [PORT]` does the same without starting the emulator.
 
 * `--port` is its UDP port (default 21213), which the server's firewall
@@ -3280,7 +3553,7 @@ in fullscreen on a large screen. At exactly 2x or 3x with `aspect=none`
 the scanlines are sharpest.
 
 The shaders need OpenGL 3 (WebGL 2 in the browser). Without it, as with
-`SDL_VIDEODRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
+`SDL_VIDEO_DRIVER=dummy`, rust-dos draws the picture with SDL's renderer as
 before and says why at startup; the log names what draws the picture.
 Screenshots and video recordings show the shader with `record_shader=true`
 (see `capture_dir` in [`[emulator]`](#emulator)); animations and
@@ -3529,6 +3802,8 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `-s, --scale N` | The window scale factor, 1 to 16 |
 | `--vrr` | Show frames at the machine's refresh rate, for a VRR display (`vrr`) |
 | `--hidden` | Keep the window hidden; the picture is still drawn with OpenGL, `voodoo_renderer=opengl` included, for runs driven through the debug server (on a host without OpenGL 3, SDL's renderer and the software rasterizer draw it, as with a visible window) |
+| `--audio-output OUTPUT` | What plays the sound: `auto`, `sdl` or `null` (`audio_output` in [`[mixer]`](#mixer)) |
+| `--mute` | Start with the sound off, as Ctrl+F8 does: the sound device plays silence, and the debug server's stream and recordings keep the sound |
 | `--vr` | Show the picture in a 3D scene in a VR headset ([`[vr]`](#vr) `mode=headset`) |
 | `--vr-desktop` | Show the picture in a 3D scene in the window (`mode=desktop`) |
 | `--vr-scene FILE` | The 3D scene, a glTF file from Blender (`scene`); on its own it means `--vr-desktop` |
@@ -3540,11 +3815,78 @@ that run; the settings window saves only what you change in it. `rust-dos
 | `--game NAME` | Launch a [game profile](#game-profiles) at startup, by its file name or its name |
 | `--import PATH` | Import a game set up for DOSBox as a game profile, and launch it |
 | `--debug-server [ADDR]` | Start the [debug server](README.md#debug--remote-control-server) (default `127.0.0.1:8086`; port 0 takes a free port, printed on stdout) |
+| `--exit-with-parent [PID]` | Quit when the process that started rust-dos ends, or the process `PID`, as `POST /api/control/quit` does, with exit code 4. A process that has ended already ends rust-dos at once (see [docs/llm-debugging.md](docs/llm-debugging.md#the-journal-what-happened-in-order)) |
 | `--trace-capacity N` | Entries in the debug server's instruction trace (default 1,000,000) |
 | `--deterministic` | Run on emulated time alone, so that the same input gives the same run every time: a fixed speed, a clock that starts at `--start-time`, and the debug server's input delivered at emulated times. With `--debug-server` the machine starts paused (see [docs/llm-debugging.md](docs/llm-debugging.md#deterministic-runs)) |
 | `--start-time "YYYY-MM-DD HH:MM:SS"` | The date and time the clock starts at with `--deterministic` (default 1995-04-11 12:34:56) |
 | `--relay [PORT]` | Relay [LAN](#playing-over-a-lan) rooms on this UDP port (default 21213) instead of starting the emulator |
 | `--relay-password TEXT` | One password for all the rooms of `--relay` (without it, whoever makes a room gives it one or none) |
+| `--no-run-lock` | Take no [run lock](#the-run-lock) (`run_lock=off`) |
+| `--run-lock DIR` | Keep the run lock in `DIR`, and exit instead of running without it when it can't be taken |
+| `--run-lock-exclusive` | Take the run lock exclusive, for a measurement: wait for the other runs to end, and keep new ones out while this one runs |
+| `--run-lock-wait SECONDS` | Wait at most this long for the run lock, then exit with code 3 before opening a window (default 0, no limit) |
+
+### The run lock
+
+Scripts and agents that drive rust-dos often run several jobs on one
+machine at once: emulator runs, builds, tests. Most of them can share it,
+but a timing measurement (a benchmark, a frame-time capture) can't: any
+other emulator or compiler beside it spoils the number. The run lock lets
+them share the machine: every rust-dos run takes it shared, a measurement
+takes it exclusive and runs alone, and a measurement that waits keeps new
+shared runs out until it has run.
+
+It costs a player nothing. A run that takes it shared locks two small files
+in a `run-lock` folder in the per-user configuration directory (the table
+in [Configuration file](#configuration-file)) and writes a record of a few
+hundred bytes; after that it does nothing until rust-dos ends. It waits
+only while a measurement runs or waits on the same machine. Where the
+folder can't be written, rust-dos says so in one line and runs without the
+lock; with `--run-lock`, `--run-lock-exclusive` or `--run-lock-wait` it
+exits instead, since the run asked for the lock.
+
+* `--no-run-lock` or `run_lock=off` takes no lock.
+* `RUST_DOS_RUN_LOCK_DIR`, `run_lock=DIR` or `--run-lock DIR` moves it.
+  Programs exclude each other only when they use the same folder, so a
+  machine that moves it does so in the environment, which every program
+  that takes the lock reads.
+* While it waits, rust-dos prints `run-lock: waiting for ...` on standard
+  error, naming the holders. A wait that `--run-lock-wait` ends exits
+  with code 3, before any window or sound device opens. With
+  `--exit-with-parent`, a run whose watched process ends while it waits
+  exits with code 4 and doesn't start.
+* `rust-dos run` takes it as the emulator does, but reads no
+  configuration file, so `run_lock` doesn't apply to it: give it
+  `--no-run-lock` or `--run-lock DIR` instead (`rust-dos --no-run-lock
+  run ...`). `rust-dos unpack` and `rust-dos commit` take no lock. The
+  libretro core and `rust-dos-relay` take no lock either.
+
+`rust-dos-lock` holds the lock around any command, so that builds and
+scripts count too, and lists who holds it. `rust-dos lock` does the same
+for a machine with only the emulator installed:
+
+```sh
+rust-dos-lock shared -- cargo build
+rust-dos-lock exclusive --wait 600 -- bash bench.sh
+rust-dos-lock status
+```
+
+It exits with the command's exit code, or with 3 and without running the
+command when `--wait SECONDS` runs out. `--name NAME` labels the hold in
+`status` (by default the command's name), `--dir DIR` picks the folder,
+and `status --json` prints the records. A program the wrapper starts, and
+rust-dos above all, inherits its hold through `RUST_DOS_RUN_LOCK_HELD`
+and `RUST_DOS_RUN_LOCK_DIR` and takes nothing, so a measurement script
+under `exclusive` starts emulators without waiting for itself; an
+exclusive take inside a shared hold exits with 3. On Windows the wrapper
+runs the command in a job object, so killing the wrapper ends the command
+and its children too; on Linux and macOS a process the command leaves
+running in the background isn't held.
+
+A hold is the OS's lock on a file, which ends with the process however it
+ends, so a killed run leaves nothing to clean up. The protocol, for
+programs that take the lock themselves, is in the module comment of
+[`crates/runlock`](crates/runlock/src/lib.rs).
 
 ### Running DOS tools from the host's shell
 

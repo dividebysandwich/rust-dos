@@ -250,6 +250,7 @@ pub(super) enum Item {
     /// The mixer's filters and effects.
     SpeakerFilter,
     SbFilter,
+    SbCoupling,
     Reverb,
     Chorus,
     /// The dry/wet mixes of the reverb and the chorus, shown while they
@@ -446,6 +447,7 @@ impl Item {
             Deadzone => "  Deadzone",
             SpeakerFilter => "PC speaker filter",
             SbFilter => "Sound Blaster filter",
+            SbCoupling => "Sound Blaster coupling",
             Reverb => "Reverb (FM, GUS, MIDI)",
             Chorus => "Chorus (FM, GUS, MIDI)",
             ReverbMix | ChorusMix => "  Dry/wet mix",
@@ -572,6 +574,9 @@ impl Item {
     pub(super) fn shown(self, s: &Settings) -> bool {
         match self {
             Item::CrtCurvature | Item::CrtGlow => s.shader == crate::video::shader::Shader::Crt,
+            // Off for good in a copy shipped with a game: a switch that
+            // does nothing would only puzzle.
+            Item::VersionCheck => s.version_check != crate::version_check::Setting::Never,
             Item::VrScene
             | Item::VrSpatialAudio
             | Item::VrScreenFit
@@ -658,7 +663,7 @@ impl Item {
             Post => Applies::NextStart,
             HardDiskSpeed | FloppyDiskSpeed | HardDiskNoise | FloppyDiskNoise | Volume(_) | CaptureDir | RecordUi
             | RecordShader => Applies::Now,
-            Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
+            Joystick | Deadzone | MouseSensitivity | SpeakerFilter | SbFilter | SbCoupling | Reverb | Chorus | ReverbMix | ChorusMix => Applies::Now,
             AudioBlocksize | AudioPrebuffer => Applies::Now,
             Rooms | Phonebook => Applies::Now,
             AlmanacAuto | AlmanacFetch | AlmanacReport => Applies::Now,
@@ -876,7 +881,7 @@ impl Item {
             ShellSuggestions => on_off(s.shell.autosuggest),
             ShellColors => on_off(s.shell.colors),
             SaveShellHistory => on_off(s.shell.save_history),
-            VersionCheck => on_off(s.version_check),
+            VersionCheck => on_off(s.version_check.is_on()),
             AlmanacAuto => on_off(s.almanac_auto),
             GameFixes => on_off(s.game_fixes),
             AlmanacFetch | AlmanacReport => String::new(),
@@ -966,6 +971,7 @@ impl Item {
                 crate::mixer::SbFilter::Off => "off",
             }
             .to_string(),
+            SbCoupling => on_off(s.mixer.sb_coupling),
             Reverb => s.mixer.reverb.name().to_string(),
             Chorus => s.mixer.chorus.name().to_string(),
             ReverbMix => percent_bar(s.mixer.reverb_mix, MAX_MIX),

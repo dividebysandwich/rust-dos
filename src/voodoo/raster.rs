@@ -70,6 +70,49 @@ pub struct TmuRaster {
     pub bilinear_mask: i32,
 }
 
+impl TmuRaster {
+    /// The levels the LOD range picks, first to last. The rasterizer
+    /// clamps the LOD to lodmin and then to lodmax (`texture`), so with
+    /// lodmin above lodmax it reads lodmax alone.
+    pub fn levels(&self) -> (i32, i32) {
+        let first = (self.lodmin.min(self.lodmax) >> 8).clamp(0, 8);
+        (first, (self.lodmax >> 8).clamp(first, 8))
+    }
+
+    /// The level whose texels level `level` takes: the next one where
+    /// the texture hasn't it (with the LOD split, `lodmask`).
+    #[inline(always)]
+    pub fn level_read(&self, level: i32) -> i32 {
+        let skipped = (self.lodmask >> level.clamp(0, 31)) & 1 == 0;
+        (level + skipped as i32).clamp(0, 8)
+    }
+
+    /// The bytes the texture may take texels from, first to past the
+    /// last: those of the levels its LOD range reads (`levels`, each as
+    /// `level_read` takes it), or all of the memory where one wraps
+    /// around. The other levels aren't read: Glide points texBaseAddr
+    /// below a texture whose largest level is smaller than 256x256, and
+    /// past its smallest level is the memory after it, so those lie in
+    /// other memory, a colour or depth buffer's among it.
+    pub fn texel_span(&self) -> (u64, u64) {
+        let wide = ((self.mode >> 8) & 0xF >= 8) as u32;
+        let memory = self.mask as u64 + 1;
+        let (first, last) = self.levels();
+        let (mut start, mut end) = (memory, 0);
+        for level in (first..=last).map(|level| self.level_read(level) as usize) {
+            let texels = ((self.wmask >> level) + 1) as u64 * ((self.hmask >> level) + 1) as u64;
+            let base = self.lodoffset[level] as u64;
+            let past = base + (texels << wide);
+            if past > memory {
+                return (0, memory);
+            }
+            start = start.min(base);
+            end = end.max(past);
+        }
+        (start, end)
+    }
+}
+
 /// The registers and memory layout a triangle, a fastfill or a pipelined
 /// frame buffer write draws with.
 #[derive(Clone)]
@@ -188,6 +231,7 @@ pub struct TmuParams {
     pub dsdy: i64,
     pub dtdy: i64,
     pub dwdy: i64,
+    /// The level of detail without perspective (`Tmu::prepare`).
     pub lodbase: i32,
 }
 
@@ -689,11 +733,109 @@ const fn uses_local(mode: u32) -> bool {
         || (mode >> 27) & 3 != 0
 }
 
+/// Whether the texture combine of textureMode `mode` reads the colour the
+/// unit before it passes on (c_other): as the value it starts from, or as
+/// the blend factor (a_other). TMU 0 under Glide's `grTexCombine` with
+/// `GR_COMBINE_FUNCTION_LOCAL`, as games with one texture set it on a
+/// card with two units, doesn't, and TMU 1's texel is then thrown away.
+const fn uses_other(mode: u32) -> bool {
+    !bit(mode, 12) || (mode >> 14) & 7 == 2 || !bit(mode, 21) || (mode >> 23) & 7 == 2
+}
+
+/// A pixel's level of detail in perspective (8.8), less 2 log2(1/W): its
+/// footprint, log2 of how many texels s and t move a pixel across or down,
+/// whichever is more, from S/W, T/W and W at the pixel and the
+/// triangle's gradients of them. 3dfx's specifications don't give the
+/// card's equation; Glide 2.4 says that "an LOD of n is calculated when a
+/// pixel covers approximately 2^2n texels".
+///
+/// s is (S/W) / W, so d(s)/dx = (W d(S/W)/dx - (S/W) dW/dx) / W^2, and
+/// the same for t and down the screen: this takes log2 of the numerators'
+/// length, and the caller adds 2 log2(1/W). MAME and DOSBox-X take only
+/// d(S/W)/dx / W, without the (S/W) dW/dx term; far from the texture's
+/// origin the two nearly cancel, and that level comes out several levels
+/// too coarse.
+///
+/// Along a scanline the numerators are affine in the pixel's position:
+/// a pixel to the right adds d/dx to S/W, T/W and W, which leaves the
+/// ones across as they are and adds the same amount to each one down at
+/// every pixel. So `new` works them out once a row, with the level of
+/// the ones across, and `at` only the two down at a pixel, from how far
+/// it is from the row's first: where they are no longer than the ones
+/// across, the pixel takes the row's level without a log of its own.
+pub(crate) struct Footprint {
+    /// The squared length of the numerators across.
+    across: f64,
+    /// The level of `across`.
+    across_lod: i32,
+    /// The numerators down for S/W and T/W at the row's first pixel.
+    down: [f64; 2],
+    /// What a pixel to the right adds to each of `down`.
+    step: [f64; 2],
+}
+
+impl Footprint {
+    /// The footprint of a row whose first pixel has `iters`, `itert` and
+    /// `iterw`.
+    pub(crate) fn new(q: &TmuParams, iters: i64, itert: i64, iterw: i64) -> Self {
+        let (s, t, w) = (iters as f64, itert as f64, iterw as f64);
+        let [dsdx, dtdx, dwdx] = [q.dsdx, q.dtdx, q.dwdx].map(|d| d as f64);
+        let [dsdy, dtdy, dwdy] = [q.dsdy, q.dtdy, q.dwdy].map(|d| d as f64);
+        let (a, b) = (w * dsdx - s * dwdx, w * dtdx - t * dwdx);
+        let across = a * a + b * b;
+        Self {
+            across,
+            across_lod: level(across),
+            down: [w * dsdy - s * dwdy, w * dtdy - t * dwdy],
+            step: [dwdx * dsdy - dsdx * dwdy, dwdx * dtdy - dtdx * dwdy],
+        }
+    }
+
+    /// The level, less 2 log2(1/W), of the pixel `n` to the right of the
+    /// row's first.
+    #[inline(always)]
+    fn at(&self, n: i32) -> i32 {
+        let n = n as f64;
+        let (a, b) = (self.down[0] + self.step[0] * n, self.down[1] + self.step[1] * n);
+        let down = a * a + b * b;
+        if down <= self.across { self.across_lod } else { level(down) }
+    }
+}
+
+/// The level of a squared length of the footprint's numerators.
+#[inline(always)]
+fn level(squared: f64) -> i32 {
+    if squared > 0.0 {
+        // The values have 32 fraction bits, the products 64: a square's
+        // log2 is 128 too high, half of it 64.
+        tables().half_log2(squared) - (64 << 8)
+    } else {
+        NO_FOOTPRINT
+    }
+}
+
+/// The footprint where s and t don't change: below every lodmin.
+const NO_FOOTPRINT: i32 = -(1000 << 8);
+
 /// A texture unit's colour for a pixel, combined with `cother`, the
-/// colour of the unit before it (`TEXTURE_PIPELINE`).
+/// colour of the unit before it (`TEXTURE_PIPELINE`). `foot` gives the
+/// pixel's footprint (`Footprint::at`), called only where the level
+/// takes it.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32, lodbase: i32, iters: i64, itert: i64, iterw: i64, rl: Option<(i64, i32)>) -> u32 {
+fn texture(
+    t: &TmuRaster,
+    mode: u32,
+    x: i32,
+    dither4: Option<&[u8]>,
+    cother: u32,
+    lodbase: i32,
+    foot: impl FnOnce() -> i32,
+    iters: i64,
+    itert: i64,
+    iterw: i64,
+    rl: Option<(i64, i32)>,
+) -> u32 {
     let (mut s, mut tc, mut lod);
     if bit(mode, 0) {
         // (`rl`: the reciprocal and log of `iterw`, where the other unit
@@ -701,7 +843,10 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
         let (oow, log) = rl.unwrap_or_else(|| tables().reciplog(iterw));
         s = (oow.wrapping_mul(iters) >> 29) as i32;
         tc = (oow.wrapping_mul(itert) >> 29) as i32;
-        lod = log + lodbase;
+        // With lodmin at or above lodmax (one level, as Glide sets up a
+        // texture without mipmaps) the clamps below make any level lodmax:
+        // the footprint isn't worked out for it.
+        lod = if t.lodmin < t.lodmax { foot() + 2 * log } else { t.lodmax };
     } else {
         s = (iters >> 14) as i32;
         tc = (itert >> 14) as i32;
@@ -725,11 +870,7 @@ fn texture(t: &TmuRaster, mode: u32, x: i32, dither4: Option<&[u8]>, cother: u32
         lod = t.lodmax;
     }
     // A level the texture hasn't (with the LOD split) takes the next.
-    let mut ilod = lod >> 8;
-    if (t.lodmask >> ilod.clamp(0, 31)) & 1 == 0 {
-        ilod += 1;
-    }
-    let ilod = ilod.clamp(0, 8);
+    let ilod = t.level_read(lod >> 8);
     let texbase = t.lodoffset[ilod as usize];
     let smax = t.wmask >> ilod;
     let tmax = t.hmask >> ilod;
@@ -1134,6 +1275,15 @@ macro_rules! variants {
 // with one texture, which it gives TMU 1 while TMU 0 passes its colour
 // on: the texture times the iterated colour, with the iterated alpha or
 // the texture's times it. Oni draws its menu and its levels with these.
+// V10-V15 and C2 are 3dfx's Direct3D driver for the Voodoo2, which also
+// gives the texture to TMU 1 and has TMU 0 pass it on, modulated by the
+// iterated colour. V10-V14 are its textured states in a saved Omikron
+// scene, most drawn area first: the frame darkened by the colour, opaque,
+// blended by alpha with fog, opaque with fog, and added. V15 darkens
+// without a texture, and C2 covers the driver's other blends, fog and
+// formats. C3 is Myth's Glide renderer on a Voodoo3: TMU 0's texel alone,
+// which it draws its terrain, units and lighting with, opaque or
+// blended, in its palettized, intensity and 16-bit formats.
 variants! {
     V0: 2, full[0x90110, 0x0D42_0009, 0x0004_0400, 0, 0x8C26_1A0F, 0x8422_1C0F];
     V1: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_1C0F];
@@ -1145,8 +1295,16 @@ variants! {
     V7: 2, full[0x90110, 0x0D42_0009, 0x0000_6010, 0, 0x8C26_130F, 0x8422_130F];
     V8: 2, full[0x80100, 0x0048_2405, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1C0F];
     V9: 2, full[0x80100, 0x0142_2409, 0x0000_5110, 0xC0, 0x8000_0006, 0x8C26_1ACF];
+    V10: 2, full[0x10910, 0x0000_2401, 0x0000_601E, 0, 0x0000_0507, 0x0824_1507];
+    V11: 2, full[0x10910, 0x0000_2401, 0x0000_040E, 0, 0x0000_0507, 0x0824_1507];
+    V12: 2, full[0x10910, 0x0000_2401, 0x0000_511E, 0x41, 0x0000_0507, 0x0824_1507];
+    V13: 2, full[0x10910, 0x0000_2401, 0x0000_040E, 0x41, 0x0000_0507, 0x0824_1507];
+    V14: 2, full[0x10910, 0x0000_2401, 0x0000_441E, 0, 0x0000_0507, 0x0824_1507];
+    V15: 0, full[0x10900, 0, 0x0000_601E, 0, 0, 0];
     C0: 2, combine_only[0x0D42_2409, 0x8000_0006, 0x8C26_1A0F];
     C1: 2, combine_only[0x0C48_2405, 0x8000_0006, 0x8C26_1C0F];
+    C2: 2, combine_only[0x0000_2401, 0x0000_0507, 0x0824_1507];
+    C3: 2, combine_only[0x0C00_0035, 0x0C26_150F, 0x0422_10C0];
 }
 
 /// The variant a triangle with `texcount` units and `st`'s registers can be
@@ -1229,6 +1387,10 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         let q = &p.tmu[i];
         *t = (at64(q.starts, q.dsdy, q.dsdx), at64(q.startt, q.dtdy, q.dtdx), at64(q.startw, q.dwdy, q.dwdx));
     }
+    let fp: [Footprint; 2] = std::array::from_fn(|i| {
+        let (s, tc, w) = tex[i];
+        Footprint::new(&p.tmu[i], s, tc, w)
+    });
     // Both units iterating the same W (as Glide sets them up) divide by it
     // once.
     let (w0, w1) = (&p.tmu[0], &p.tmu[1]);
@@ -1237,18 +1399,39 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
         && st.tmu[0].as_ref().is_some_and(|t| bit(m.tex[0], 0) && t.lodmin < 8 << 8)
         && st.tmu[1].as_ref().is_some_and(|t| bit(m.tex[1], 0) && t.lodmin < 8 << 8)
         && st.send_config.is_none();
+    // Both units iterating the same S/W, T/W and W (as Glide sets them up
+    // for two textures over the same coordinates) have the same footprint.
+    let stw = |q: &TmuParams| {
+        (q.starts, q.startt, q.startw, q.dsdx, q.dtdx, q.dwdx, q.dsdy, q.dtdy, q.dwdy)
+    };
+    let same_stw = TMUS >= 2 && stw(w0) == stw(w1);
+    // TMU 1's texel goes only to TMU 0: where TMU 0 draws and doesn't read
+    // it, or sends its configuration instead, nothing does.
+    let tmu1_read = TMUS >= 2
+        && !st.tmu[0].as_ref().is_some_and(|t| {
+            t.lodmin < 8 << 8 && (st.send_config.is_some() || !uses_other(m.tex[0]))
+        });
 
     for x in startx..stopx {
         if let Some(depthval) = row.begin(x, y, iterz, iterw, stipple, stats) {
             // TMU 1 first, whose output TMU 0 combines with.
             let mut texel = 0u32;
             let rl = same_w.then(|| tables().reciplog(tex[1].2));
-            if TMUS >= 2
+            let n = x - startx;
+            // TMU 1's footprint, where TMU 0's is the same.
+            let mut shared = None;
+            if tmu1_read
                 && let Some(t) = &st.tmu[1]
                 && t.lodmin < 8 << 8
             {
                 let (s, tc, w) = tex[1];
-                texel = texture(t, m.tex[1], x, row.dither4, texel, p.tmu[1].lodbase, s, tc, w, rl);
+                let foot = || {
+                    let f = fp[1].at(n);
+                    shared = same_stw.then_some(f);
+                    f
+                };
+                let lodbase = p.tmu[1].lodbase;
+                texel = texture(t, m.tex[1], x, row.dither4, texel, lodbase, foot, s, tc, w, rl);
             }
             if TMUS >= 1
                 && let Some(t) = &st.tmu[0]
@@ -1258,7 +1441,9 @@ pub fn scanline<const TMUS: usize, S: Spec>(st: &RasterState, p: &TriParams, y: 
                     Some(config) => config,
                     None => {
                         let (s, tc, w) = tex[0];
-                        texture(t, m.tex[0], x, row.dither4, texel, p.tmu[0].lodbase, s, tc, w, rl)
+                        let foot = || shared.unwrap_or_else(|| fp[0].at(n));
+                        let lodbase = p.tmu[0].lodbase;
+                        texture(t, m.tex[0], x, row.dither4, texel, lodbase, foot, s, tc, w, rl)
                     }
                 };
             }
@@ -1451,6 +1636,214 @@ pub(crate) mod tests {
         }
     }
 
+    /// A triangle's parameters with every iterator moving, so that depth,
+    /// fog, the texture's level of detail and the colours change along a
+    /// scanline and down the rows.
+    pub(crate) fn moving_parameters() -> TriParams {
+        let tp = TmuParams {
+            starts: 10 << 32,
+            startt: 20 << 32,
+            startw: 1 << 32,
+            dsdx: 3 << 28,
+            dtdx: 1 << 27,
+            dwdx: 1 << 20,
+            dsdy: 1 << 27,
+            dtdy: 3 << 28,
+            dwdy: 1 << 20,
+            lodbase: 0,
+        };
+        TriParams {
+            startr: 100 << 12,
+            startg: 50 << 12,
+            startb: 20 << 12,
+            starta: 200 << 12,
+            startz: 0x4000 << 12,
+            startw: 1 << 32,
+            drdx: 1 << 10,
+            dgdx: 1 << 9,
+            dbdx: 1 << 8,
+            dadx: -(1 << 10),
+            dzdx: 1 << 14,
+            dwdx: 1 << 20,
+            drdy: 1 << 9,
+            dzdy: -(1 << 13),
+            dwdy: 1 << 20,
+            tmu: [tp, tp],
+            ..Default::default()
+        }
+    }
+
+    /// 48 rows of `st` with `moving_parameters`, drawn with variant
+    /// `index` (None: the generic code) for `tmus` units: the stipple
+    /// and counters after them.
+    pub(crate) fn draw_rows(st: &RasterState, tmus: usize, index: Option<usize>) -> (u32, Stats) {
+        let p = moving_parameters();
+        let (mut stipple, mut stats) = (0x1234_5678, Stats::default());
+        for y in 0..48 {
+            scanline_as(index, tmus, st, &p, y, 0, 320, &mut stipple, &mut stats);
+        }
+        (stipple, stats)
+    }
+
+    /// The first word two states' colour and depth buffers differ in.
+    pub(crate) fn first_difference(a: &RasterState, b: &RasterState) -> Option<usize> {
+        (0..a.fb.len()).find(|&i| a.fb.get(i) != b.fb.get(i))
+    }
+
+    /// Draw `regs` with variant `index` and with the generic code, and
+    /// require the same memory, counters and stipple.
+    pub(crate) fn same_as_generic(regs: [u32; 6], tmus: usize, index: usize) {
+        let selected = two_unit_state(regs);
+        let generic = two_unit_state(regs);
+        let expected = draw_rows(&generic, tmus, None);
+        assert!(expected.1.pixels_out > 0, "{regs:08X?} writes nothing");
+        assert_eq!(
+            draw_rows(&selected, tmus, Some(index)),
+            expected,
+            "{regs:08X?}"
+        );
+        let differ = first_difference(&selected, &generic);
+        assert_eq!(differ, None, "{regs:08X?} drawn with variant {index}");
+    }
+
+    /// The level a pixel in perspective reads follows the texels it
+    /// covers: Glide 2.4 says that "an LOD of n is calculated when a pixel
+    /// covers approximately 2^2n texels". A floor whose W falls from 1 to
+    /// 0.6 down the screen, point sampled from a 256 by 256 texture whose
+    /// level n holds the value n, drawn near the texture's origin and 8000
+    /// texels from it, where a pixel covers as many texels.
+    #[test]
+    fn levels_follow_the_texels_a_pixel_covers() {
+        let mut t = two_unit_state([0; 6]).tmu[0].take().unwrap();
+        t.lookup = (0..0x10000u32).collect();
+        for level in 0..9 {
+            let start = t.lodoffset[level] as usize / 2;
+            for i in start..start + ((256 >> level) * (256 >> level)).max(4) {
+                t.ram.set(i, level as u16);
+            }
+        }
+        // In perspective, 5-6-5, and the combine passes the texel on.
+        let mode = 1 | (10 << 8) | (1 << 12) | (1 << 18) | (1 << 21) | (1 << 27);
+        let one = 4_294_967_296.0;
+        let fixed = |v: f64| (v * one) as i64;
+        let dwdy = -0.002;
+        for shift in [0.0, 8000.0] {
+            // s = (S/W) / W, 4 texels a pixel across and t 4 down where W
+            // is 1, both `shift` at pixel (0, 0).
+            let (dsdx, dsdy, dtdy) = (fixed(4.0), fixed(shift * dwdy), fixed(4.0 + shift * dwdy));
+            let q = TmuParams {
+                starts: fixed(shift),
+                startt: fixed(shift),
+                startw: fixed(1.0),
+                dsdx,
+                dtdx: 0,
+                dwdx: 0,
+                dsdy,
+                dtdy,
+                dwdy: fixed(dwdy),
+                lodbase: super::super::texture::lodbase([dsdx, 0, dsdy, dtdy]),
+            };
+            for y in (0..200i64).step_by(10) {
+                // The row's footprint from its pixel at x = 0, as the
+                // scanline works it out.
+                let first = |start: i64, ddy: i64| start + y * ddy;
+                let (s0, t0) = (first(q.starts, q.dsdy), first(q.startt, q.dtdy));
+                let fp = Footprint::new(&q, s0, t0, first(q.startw, q.dwdy));
+                for x in (0..40i64).step_by(10) {
+                    let at = |start: i64, ddx: i64, ddy: i64| start + x * ddx + y * ddy;
+                    let s = at(q.starts, q.dsdx, q.dsdy);
+                    let tc = at(q.startt, q.dtdx, q.dtdy);
+                    let w = at(q.startw, q.dwdx, q.dwdy);
+                    let n = || fp.at(x as i32);
+                    let level = texture(&t, mode, 0, None, 0, q.lodbase, n, s, tc, w, None) & 0xFF;
+                    // The texels the pixel covers: the area its image has
+                    // in the texture, from the derivatives of s and t: t
+                    // doesn't change across, so d(s)/dy doesn't count.
+                    let (tc, w) = (tc as f64 / one, w as f64 / one);
+                    let dsdx = 4.0 / w;
+                    let dtdy = ((4.0 + shift * dwdy) * w - tc * dwdy) / (w * w);
+                    let n = (dsdx * dtdy).abs().log2() / 2.0;
+                    // The card takes the level below the one it works out,
+                    // from the longer side of a footprint a little longer
+                    // than wide.
+                    assert!(
+                        level as f64 > n - 1.0 && level as f64 <= n + 0.5,
+                        "{shift} texels away, pixel ({x}, {y}): level {level}, 2^{:.2} texels",
+                        2.0 * n
+                    );
+                }
+            }
+        }
+    }
+
+    /// A row's footprint `n` pixels on is the one worked out at that
+    /// pixel, with every gradient in use, across a row as wide as the
+    /// screen and thousands of texels from the texture's origin.
+    #[test]
+    fn a_rows_footprint_is_each_pixels() {
+        let fixed = |v: f64| (v * 4_294_967_296.0) as i64;
+        let q = TmuParams {
+            starts: fixed(3000.0),
+            startt: fixed(-1700.0),
+            startw: fixed(0.9),
+            dsdx: fixed(1.3),
+            dtdx: fixed(-0.4),
+            dwdx: fixed(-0.0003),
+            dsdy: fixed(0.2),
+            dtdy: fixed(2.1),
+            dwdy: fixed(-0.0011),
+            lodbase: 0,
+        };
+        let row = Footprint::new(&q, q.starts, q.startt, q.startw);
+        for n in [0i64, 1, 7, 100, 639, 2047] {
+            let at = |start: i64, d: i64| start + n * d;
+            let (s, tc, w) = (at(q.starts, q.dsdx), at(q.startt, q.dtdx), at(q.startw, q.dwdx));
+            let pixel = Footprint::new(&q, s, tc, w);
+            assert_eq!(row.at(n as i32), pixel.at(0), "pixel {n}");
+        }
+    }
+
+    /// Time the software rasterizer drawing a floor in perspective with
+    /// both units bilinear from mipmaps, as Unreal draws its floors: W
+    /// from 1 to 0.28 down 640 by 480 pixels, S and T 3000 texels from 0,
+    /// 20 times a round. `cargo test --release --lib -- --ignored
+    /// benchmark_perspective_texturing --nocapture`.
+    #[test]
+    #[ignore = "a benchmark"]
+    fn benchmark_perspective_texturing() {
+        let mode = 1 | 2 | 4 | (10 << 8) | (1 << 12) | (1 << 18) | (1 << 21) | (1 << 27);
+        let st = two_unit_state([1 << 9, 1 | (1 << 27), 0, 0, mode, mode]);
+        let dwdy = -6_442_450i64;
+        let tp = TmuParams {
+            starts: 3000 << 32,
+            startt: 3000 << 32,
+            startw: 1 << 32,
+            dsdx: 4 << 32,
+            dtdx: 0,
+            dwdx: 0,
+            dsdy: 3000 * dwdy,
+            dtdy: (4 << 32) + 3000 * dwdy,
+            dwdy,
+            // What `Tmu::prepare` gives, log2 of 4.53 texels.
+            lodbase: 558,
+        };
+        let p = TriParams { tmu: [tp, tp], ..Default::default() };
+        let (mut stipple, mut stats) = (0, Stats::default());
+        let mut ms = Vec::new();
+        for _ in 0..8 {
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                for y in 0..480 {
+                    scanline::<2, Generic>(&st, &p, y, 0, 640, &mut stipple, &mut stats);
+                }
+            }
+            ms.push(start.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        }
+        ms.sort_by(f64::total_cmp);
+        println!("perspective texturing: median {:.2} ms a frame {ms:.2?}", ms[4]);
+        assert!(stats.pixels_out > 0);
+    }
+
     #[test]
     fn texture_combines_without_local_ignore_the_texel() {
         let t = TmuRaster {
@@ -1483,6 +1876,56 @@ pub(crate) mod tests {
                 assert_eq!(a, b, "textureMode {mode:08X} reads c_local");
             }
         }
+    }
+
+    #[test]
+    fn a_texels_span_is_the_levels_its_lod_range_reads() {
+        // A 5-6-5 texture of 256x256 levels, laid out as `Tmu` lays them
+        // out from texBaseAddr, the levels `lodmask` hasn't taking no
+        // room.
+        let unit = |lodmin: i32, lodmax: i32, lodmask: u32, base: u32| {
+            let mut lodoffset = [base; 9];
+            for level in 1..9 {
+                let texels = (256u32 >> (level - 1))
+                    .pow(2)
+                    .max(if level >= 4 { 4 } else { 0 });
+                let had = (lodmask >> (level - 1)) & 1;
+                lodoffset[level] = lodoffset[level - 1] + had * 2 * texels;
+            }
+            let t = TmuRaster {
+                ram: Vram::new(2),
+                mask: 0xFF_FFFF,
+                mode: 10 << 8,
+                unfiltered: false,
+                lodmin: lodmin << 8,
+                lodmax: lodmax << 8,
+                lodbias: 0,
+                lodmask,
+                lodoffset,
+                detailmax: 0,
+                detailbias: 0,
+                detailscale: 0,
+                wmask: 255,
+                hmask: 255,
+                lookup: Arc::new([0; 256]),
+                bilinear_mask: 0xFF,
+            };
+            (t.texel_span(), lodoffset.map(u64::from))
+        };
+        let level = |n: u32| 2 * (256u64 >> n).pow(2);
+        // Levels 2 to 5: not the ones below, nor level 6 past them.
+        let (span, at) = unit(2, 5, 0x1FF, 0x10_0000);
+        assert_eq!(span, (at[2], at[5] + level(5)));
+        // With lodmin above lodmax, lodmax alone.
+        let (span, at) = unit(6, 3, 0x1FF, 0x10_0000);
+        assert_eq!(span, (at[3], at[3] + level(3)));
+        // Only the odd levels (the LOD split): 2 reads 3, and 5 is the
+        // last read.
+        let (span, at) = unit(2, 5, 0xAA, 0x10_0000);
+        assert_eq!(span, (at[3], at[5] + level(5)));
+        // Levels that run past the end of the memory wrap around.
+        let (span, _) = unit(0, 8, 0x1FF, 0xFF_0000);
+        assert_eq!(span, (0, 0x100_0000));
     }
 
     #[test]
@@ -1568,3 +2011,11 @@ mod dispatch_output_tests;
 #[cfg(test)]
 #[path = "raster/oni_state_tests.rs"]
 mod oni_state_tests;
+
+#[cfg(test)]
+#[path = "raster/d3d_state_tests.rs"]
+mod d3d_state_tests;
+
+#[cfg(test)]
+#[path = "raster/myth_state_tests.rs"]
+mod myth_state_tests;

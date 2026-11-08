@@ -35,15 +35,17 @@
 //! out.
 
 use super::super::surface::{self, DDPF_PALETTEINDEXED8, KEY_SRC_BLT, MEM_CARD, Surface};
-use super::super::{current_pid, display, state, voodoo};
+use super::super::{Format, current_pid, display, state, voodoo};
 use super::device::{
     Device, RS_FOGENABLE, RS_FOGTABLEMODE, RS_SPECULARENABLE, RS_TEXTUREFACTOR, RS_TEXTUREMAPBLEND,
-    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDTEXTUREALPHA,
-    TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1, TOP_SELECTARG2, TSS_ADDRESSU, TSS_ADDRESSV,
-    TSS_ALPHAARG1, TSS_ALPHAARG2, TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP,
-    TSS_MAGFILTER, TSS_MINFILTER, TSS_MIPFILTER,
+    RS_ZENABLE, RS_ZFUNC, RS_ZWRITEENABLE, TA_TEXTURE, TA_TFACTOR, TOP_ADD, TOP_BLENDCURRENTALPHA,
+    TOP_BLENDDIFFUSEALPHA, TOP_BLENDTEXTUREALPHA, TOP_DISABLE, TOP_MODULATE, TOP_SELECTARG1,
+    TOP_SELECTARG2, TOP_SUBTRACT, TSS_ADDRESSU, TSS_ADDRESSV, TSS_ALPHAARG1, TSS_ALPHAARG2,
+    TSS_ALPHAOP, TSS_COLORARG1, TSS_COLORARG2, TSS_COLOROP, TSS_MAGFILTER, TSS_MINFILTER,
+    TSS_MIPFILTER,
 };
 use super::pipeline::{self, Rasterizer, ScreenVertex, Setup};
+use super::shadow::Unplaced;
 use crate::cpu::Cpu;
 use crate::win32::glide::api::{self, TexInfo, TmuVertex, Vertex};
 use crate::win32::glide::hw;
@@ -94,6 +96,8 @@ pub struct Hal {
     /// The 16-bit shadows of 24- and 32-bit render targets and depth
     /// buffers (`shadow.rs`).
     pub shadows: Vec<super::shadow::Shadow>,
+    /// The `Undrawn` reasons logged so far, one bit each.
+    pub logged: u32,
 }
 
 crate::state_fields!(Hal {
@@ -104,7 +108,58 @@ crate::state_fields!(Hal {
     clock,
     palettes,
     shadows
-});
+} skip { logged });
+
+/// Why the card leaves a draw, or a part of it, undone.
+#[derive(Clone, Copy, Debug)]
+enum Undrawn {
+    /// Another process has Glide open.
+    Glide,
+    /// The render target isn't one the card can draw into: gone, not
+    /// in its memory, or on an add-on card not a color buffer of the
+    /// mode this process set.
+    Target,
+    /// The 24 or 32-bit render target's shadow has no room.
+    TargetShadow,
+    /// The depth buffer isn't in the card's memory.
+    Depth,
+    /// The 24 or 32-bit depth buffer's shadow has no room.
+    DepthShadow,
+}
+
+/// Log, the first time for each reason, that the card can't draw into
+/// the surface `id` as the program asked.
+fn undrawn(cpu: &mut Cpu, why: Undrawn, id: u32) {
+    let bit = 1 << why as u32;
+    if hal(cpu).logged & bit != 0 {
+        return;
+    }
+    hal(cpu).logged |= bit;
+    let (w, h, bits) = state(cpu)
+        .surface(id)
+        .map_or((0, 0, 0), |s| (s.width, s.height, s.format.bits));
+    let what = match why {
+        Undrawn::Glide => "another process has Glide open: draws are not drawn".to_string(),
+        Undrawn::Target => format!(
+            "the render target ({w}x{h}, {bits} bits) isn't one the card can draw \
+             into: draws into it are not drawn"
+        ),
+        Undrawn::TargetShadow => format!(
+            "no video memory for the 16-bit shadow of a {w}x{h} {bits}-bit render \
+             target: draws into it are not drawn"
+        ),
+        Undrawn::Depth => format!(
+            "the depth buffer ({w}x{h}, {bits} bits) isn't in the card's memory: \
+             draws with it are drawn without the depth test"
+        ),
+        Undrawn::DepthShadow => format!(
+            "no video memory for the 16-bit shadow of a {w}x{h} {bits}-bit depth \
+             buffer: draws with it are drawn without the depth test"
+        ),
+    };
+    cpu.bus
+        .log_string(&format!("[W32] DDRAW: Direct3D HAL: {what}"));
+}
 
 fn hal(cpu: &mut Cpu) -> &mut Hal {
     &mut state(cpu).hal
@@ -131,14 +186,16 @@ const HEAP_MIN: u32 = 256 << 10;
 /// How a batch of primitives is drawn: for each of the card's texture
 /// units, the factors that turn a texture coordinate into Glide's (its
 /// texture's size in Glide's 256 units) and the stage whose coordinates
-/// it takes; whether Z or W carries the vertex fog; and how the
-/// specular color is added.
+/// it takes; whether Z or W carries the vertex fog; how the specular
+/// color is added; and how far the vertices move to put a pixel's centre
+/// where the card has it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Card {
     tmus: [Option<(usize, [f32; 2])>; 2],
     fog_z: bool,
     fog_w: bool,
     specular: Specular,
+    centre: f32,
 }
 
 /// How the specular color is added (D3DRENDERSTATE_SPECULARENABLE).
@@ -161,18 +218,33 @@ enum Specular {
 
 /// Whether the device `d` can be drawn by the card now, and the card's
 /// state for it: None draws nothing (no card, the render target isn't
-/// in its memory, or another process has Glide open).
+/// in its memory or its shadow has no room, or another process has
+/// Glide open), and `undrawn` logs why.
 pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     let banshee = hw::banshee(cpu);
     let pid = current_pid(cpu);
     let owner = crate::win32::glide::state(cpu).owner;
     if owner != 0 && owner != pid {
+        undrawn(cpu, Undrawn::Glide, d.target);
         return None;
     }
-    let (width, height) = state(cpu).surface(d.target).map(|s| (s.width, s.height))?;
+    let Some((width, height)) = state(cpu).surface(d.target).map(|s| (s.width, s.height)) else {
+        undrawn(cpu, Undrawn::Target, d.target);
+        return None;
+    };
     if banshee {
         // A 24- or 32-bit target is drawn in its 16-bit shadow.
-        let (target_at, target_pitch) = super::shadow::place(cpu, d.target)?;
+        let (target_at, target_pitch) = match super::shadow::place(cpu, d.target) {
+            Ok(place) => place,
+            Err(why) => {
+                let why = match why {
+                    Unplaced::Gone => Undrawn::Target,
+                    Unplaced::NoRoom => Undrawn::TargetShadow,
+                };
+                undrawn(cpu, why, d.target);
+                return None;
+            }
+        };
         super::shadow::drawn(cpu, d.target);
         if !crate::win32::glide::state(cpu).gc.active {
             api::attach(cpu, width, height);
@@ -180,13 +252,12 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         api::set_render_target(cpu, target_at, target_pitch, width, height);
     } else {
         // The add-on card, open for this process by SetDisplayMode.
-        let buffer = voodoo::card_buffer(cpu, d.target)?;
-        if buffer > api::BUFFER_BACKBUFFER || owner != pid {
+        let buffer = voodoo::card_buffer(cpu, d.target);
+        let open = owner == pid && crate::win32::glide::state(cpu).gc.active;
+        let Some(buffer) = buffer.filter(|&b| b <= api::BUFFER_BACKBUFFER && open) else {
+            undrawn(cpu, Undrawn::Target, d.target);
             return None;
-        }
-        if !crate::win32::glide::state(cpu).gc.active {
-            return None;
-        }
+        };
         if hal(cpu).pid != pid {
             *hal(cpu) = Hal {
                 pid,
@@ -264,15 +335,30 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     api::hints(cpu, api::HINT_STWHINT, hint);
 
     // Depth: the render target's depth buffer, Z or W. On an add-on card
-    // it is the auxiliary buffer.
+    // it is the auxiliary buffer. A shadow is ahead of its surface only
+    // when the card writes depth into it.
     let z = super::device::depth_buffer(cpu, d).and_then(|z| {
-        if banshee {
-            let place = super::shadow::place(cpu, z);
-            super::shadow::drawn(cpu, z);
-            place.map(Some)
+        let place = if banshee {
+            super::shadow::place(cpu, z).map(Some)
+        } else if voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER) {
+            Ok(None)
         } else {
-            (voodoo::card_buffer(cpu, z) == Some(api::BUFFER_AUXBUFFER)).then_some(None)
+            Err(Unplaced::Gone)
+        };
+        match place {
+            Ok(_) if zenable != 0 && d.state(RS_ZWRITEENABLE) != 0 => {
+                super::shadow::drawn(cpu, z);
+            }
+            Err(why) if zenable != 0 => {
+                let why = match why {
+                    Unplaced::Gone => Undrawn::Depth,
+                    Unplaced::NoRoom => Undrawn::DepthShadow,
+                };
+                undrawn(cpu, why, z);
+            }
+            _ => {}
         }
+        place.ok()
     });
     match z {
         Some(place) if zenable != 0 => {
@@ -342,9 +428,15 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
     } else {
         None
     };
+    // The card, with the subpixel adjustment Glide turns on, evaluates a
+    // pixel at its integer coordinates plus half a pixel. OpenGL's
+    // window coordinates put the centre there too; Direct3D's put it on
+    // them, so its vertices move half a pixel right and down.
+    let centre = if d.gl_pixel_centres { 0.0 } else { 0.5 };
     let mut card = Card {
         fog_z,
         fog_w,
+        centre,
         ..Card::default()
     };
     let mut keyed = false;
@@ -406,18 +498,6 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         && first
             .and_then(|id| state(cpu).surface(id))
             .is_some_and(|s| s.format.a == 0);
-    fbi_combine(cpu, d, textured, diffuse_alpha, keyed);
-    if d.state(RS_SPECULARENABLE) != 0 {
-        card.specular = if textured {
-            Specular::Pass {
-                source,
-                equal: depth_written,
-            }
-        } else {
-            Specular::Vertices
-        };
-    }
-
     // The alpha test, and the keyed texels it leaves out: the program's
     // test, unless it passes every alpha (ALWAYS, GREATEREQUAL 0,
     // LESSEQUAL 255). A test that passes alpha 0 and not every alpha
@@ -432,6 +512,18 @@ pub fn bind(cpu: &mut Cpu, d: &Device, setup: &Setup) -> Option<Card> {
         api::alpha_test_reference_value(cpu, 0);
     } else {
         api::alpha_test_function(cpu, api::CMP_ALWAYS);
+    }
+    let tested = keyed || (d.state(RS_ALPHATESTENABLE) != 0 && !passes_all);
+    fbi_combine(cpu, d, textured, diffuse_alpha, keyed, tested);
+    if d.state(RS_SPECULARENABLE) != 0 {
+        card.specular = if textured {
+            Specular::Pass {
+                source,
+                equal: depth_written,
+            }
+        } else {
+            Specular::Vertices
+        };
     }
     Some(card)
 }
@@ -518,6 +610,14 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
             api::COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
             api::COMBINE_FACTOR_ONE_MINUS_LOCAL_ALPHA,
         ),
+        // The texture by the upstream unit's alpha, and stage 0's color
+        // by the rest. That alpha is stage 0's texture's: the unit has
+        // no diffuse alpha, so a stage 0 whose alpha is the diffuse
+        // one's blends by the texture's alpha here (#491).
+        TOP_BLENDCURRENTALPHA => (
+            api::COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
+            api::COMBINE_FACTOR_ONE_MINUS_OTHER_ALPHA,
+        ),
         // MODULATE and the rest.
         _ => (api::COMBINE_FUNCTION_SCALE_OTHER, api::COMBINE_FACTOR_LOCAL),
     }
@@ -529,7 +629,16 @@ fn tmu_function(op: u32, d: &Device, stage: u32, alpha: bool) -> (u32, u32) {
 /// `keyed`: the texture is a keyed copy, whose keyed texels have alpha 0
 /// and the others their alpha's top bit (1 for a texture without
 /// alpha), and the alpha test leaves out what comes to 0.
-fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, keyed: bool) {
+/// `alpha_tested`: the alpha test can leave pixels out, for the keyed
+/// texels or the program's test.
+fn fbi_combine(
+    cpu: &mut Cpu,
+    d: &Device,
+    textured: bool,
+    diffuse_alpha: bool,
+    keyed: bool,
+    alpha_tested: bool,
+) {
     let it = api::COMBINE_LOCAL_ITERATED;
     let (other_tex, other_it) = (api::COMBINE_OTHER_TEXTURE, api::COMBINE_OTHER_ITERATED);
     let arg_is_texture = |arg: u32| textured && arg & 0xF == TA_TEXTURE;
@@ -561,7 +670,8 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
             return (scale, COMBINE_FACTOR_ONE, it, other_of(arg));
         }
         if !any_texture {
-            if (arg_is_factor(a1) || arg_is_factor(a2)) && matches!(op, TOP_MODULATE | TOP_ADD | 10)
+            if (arg_is_factor(a1) || arg_is_factor(a2))
+                && matches!(op, TOP_MODULATE | TOP_ADD | TOP_SUBTRACT)
             {
                 // The diffuse color and the texture factor, or the factor
                 // twice: the first argument is the other color and the
@@ -569,7 +679,7 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
                 // the second.
                 let (f, factor) = match op {
                     TOP_ADD => (COMBINE_FUNCTION_SCALE_OTHER_ADD_LOCAL, COMBINE_FACTOR_ONE),
-                    10 => (COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL, COMBINE_FACTOR_ONE),
+                    TOP_SUBTRACT => (COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL, COMBINE_FACTOR_ONE),
                     _ => (scale, COMBINE_FACTOR_LOCAL),
                 };
                 return (f, factor, local_of(a2), other_of(a1));
@@ -587,14 +697,15 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
                 other_tex,
             ),
             // SUBTRACT: the texture less the diffuse color.
-            10 => (
+            TOP_SUBTRACT => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL,
                 COMBINE_FACTOR_ONE,
                 local_of(rest),
                 other_tex,
             ),
-            // BLENDDIFFUSEALPHA.
-            12 => (
+            // BLENDDIFFUSEALPHA, and BLENDCURRENTALPHA, whose current
+            // color is the diffuse one on stage 0.
+            TOP_BLENDDIFFUSEALPHA | TOP_BLENDCURRENTALPHA => (
                 COMBINE_FUNCTION_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL,
                 COMBINE_FACTOR_LOCAL_ALPHA,
                 local_of(rest),
@@ -620,8 +731,7 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
     if [a1, a2, aa1, aa2].into_iter().any(arg_is_factor) {
         api::constant_color_value(cpu, d.state(RS_TEXTUREFACTOR));
     }
-    let (f, factor, local, other) = pick(d.stage(0, TSS_COLOROP), a1, a2);
-    api::color_combine(cpu, f, factor, local, other, false);
+    let color = pick(d.stage(0, TSS_COLOROP), a1, a2);
     let (f, factor, local, other) = pick(alpha_op, aa1, aa2);
     // The alpha unit's factor is alpha already.
     let factor = match factor {
@@ -665,12 +775,101 @@ fn fbi_combine(cpu: &mut Cpu, d: &Device, textured: bool, diffuse_alpha: bool, k
     } else {
         (f, factor, local, other)
     };
+    // BLENDDIFFUSEALPHA and BLENDCURRENTALPHA blend the color by the
+    // color unit's local alpha, which is the alpha unit's local one: it
+    // has to be the diffuse alpha, not the texture factor's (#492). When
+    // the alpha unit's other alpha is the diffuse one, the color unit
+    // blends by its other alpha, which is that one, and the alpha unit
+    // stays as it is. Otherwise the alpha unit takes the iterated alpha
+    // as its local one where it can (`iterated_local`), which changes
+    // its other alpha, and so not under an alpha test, which compares
+    // that one.
+    let (cf, mut cfactor, clocal, cother) = color;
+    let mut alpha = (f, factor, local, other);
+    if cfactor == api::COMBINE_FACTOR_LOCAL_ALPHA && local == api::COMBINE_LOCAL_CONSTANT {
+        if other == other_it {
+            cfactor = api::COMBINE_FACTOR_OTHER_ALPHA;
+        } else if !alpha_tested {
+            alpha = iterated_local(alpha).unwrap_or(alpha);
+        }
+    }
+    api::color_combine(cpu, cf, cfactor, clocal, cother, false);
+    let (f, factor, local, other) = alpha;
     api::alpha_combine(cpu, f, factor, local, other, false);
 }
 
+/// The alpha unit's function, factor, local and other alpha with the
+/// same result and the iterated alpha as the local one, for a local
+/// that is the texture factor's alpha (the constant color's) and an
+/// other alpha that isn't the iterated one, where the unit can have it.
+/// The texture factor moves to the other alpha: color1, which holds the
+/// same color as color0. A product can swap its operands, so MODULATE
+/// of the texture or the factor by the factor has one. ADD of the
+/// texture and the factor, SUBTRACT of the texture less the factor and
+/// the blends with a factor need it as the local alpha along with
+/// another alpha the unit can only take as its other one or its factor,
+/// and have none. ADD of the factor twice needs it as both.
+///
+/// The other alpha is the one the card's alpha test compares, so the
+/// caller leaves the units as they are under an alpha test. The card
+/// rounds a product by its factor plus one, so with the operands
+/// swapped the result can differ by one in 255.
+fn iterated_local(alpha: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+    use api::*;
+    let (f, factor, local, other) = alpha;
+    if local != COMBINE_LOCAL_CONSTANT {
+        return None;
+    }
+    let factor = match (f, factor, other) {
+        (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_TEXTURE) => {
+            COMBINE_FACTOR_TEXTURE_ALPHA
+        }
+        (COMBINE_FUNCTION_SCALE_OTHER, COMBINE_FACTOR_LOCAL_ALPHA, COMBINE_OTHER_CONSTANT) => {
+            COMBINE_FACTOR_OTHER_ALPHA
+        }
+        _ => return None,
+    };
+    Some((f, factor, COMBINE_LOCAL_ITERATED, COMBINE_OTHER_CONSTANT))
+}
+
+/// The stage operations (D3DTOP_) the HAL draws: the device
+/// descriptions' TextureOpCaps (`OP_CAPS`), and what ValidateDevice
+/// accepts. They are the ones of 3dfx's Voodoo3 driver (its
+/// TextureOpCaps are 0x1EFA5F) that `fbi_combine` has a function for.
+/// MODULATE2X and 4X aren't among them, though 3dfx's driver reports
+/// MODULATE2X: the card's combine units have no doubling, and the HAL
+/// draws them as MODULATE (#488). SUBTRACT and the blends take the
+/// texture as their first argument. On stage 1 `tmu_function` draws
+/// SUBTRACT and BLENDDIFFUSEALPHA as MODULATE: the texture unit can't
+/// take its texture less the other one, and has no diffuse alpha (#491).
+pub const OPS: [u32; 9] = [
+    TOP_DISABLE,
+    TOP_SELECTARG1,
+    TOP_SELECTARG2,
+    TOP_MODULATE,
+    TOP_ADD,
+    TOP_SUBTRACT,
+    TOP_BLENDDIFFUSEALPHA,
+    TOP_BLENDTEXTUREALPHA,
+    TOP_BLENDCURRENTALPHA,
+];
+
+/// `OPS` as D3DTEXTUREOPCAPS_ (Direct3D 6 and 7) and D3DTEXOPCAPS_
+/// (Direct3D 8), which have the same bits: D3DTOP_ value n is bit
+/// n - 1.
+pub const OP_CAPS: u32 = {
+    let mut caps = 0;
+    let mut i = 0;
+    while i < OPS.len() {
+        caps |= 1 << (OPS[i] - 1);
+        i += 1;
+    }
+    caps
+};
+
 /// Whether the card can do a stage's operation, for ValidateDevice.
 pub fn can_do(op: u32) -> bool {
-    matches!(op, 1..=7 | 10 | 12 | 13)
+    OPS.contains(&op)
 }
 
 /// The W of fog table entry `i`, as Glide's utility library has it.
@@ -791,15 +990,24 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
         return None;
     }
     let (_, pitch) = surface::card_memory(cpu, id)?;
-    let s = state(cpu).surface(id)?.clone();
-    let (w, h) = (s.width, s.height);
+    // The fields it needs, without a copy of the surface's lists: this
+    // runs at every draw that samples a texture on these cards.
+    let (w, h, f, key_set, key_low) = {
+        let s = state(cpu).surface(id)?;
+        (
+            s.width,
+            s.height,
+            s.format,
+            s.key_set,
+            s.keys[KEY_SRC_BLT].0,
+        )
+    };
     if !w.is_power_of_two() || !h.is_power_of_two() || w.max(h) > 256 || w.max(h) < 2 {
         return None;
     }
     if w > 8 * h || h > 8 * w {
         return None;
     }
-    let f = &s.format;
     let paletted = f.flags & DDPF_PALETTEINDEXED8 != 0;
     let format = match (paletted, f.bits, f.r, f.a) {
         (true, 8, _, _) => api::TEXFMT_P_8,
@@ -827,7 +1035,9 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
         let fits = state(cpu)
             .surface(level)
             .is_some_and(|l| (l.width, l.height) == (lw, lh));
-        if !fits || p != lw * bpp || addr != next {
+        // A level of one row has no padding to step over, whatever its
+        // pitch says: a 16-bit 1x1 level's is 4.
+        if !fits || (lh > 1 && p != lw * bpp) || addr != next {
             break;
         }
         // The card's level sizes, at least 4 texels.
@@ -841,13 +1051,12 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
             None => break,
         }
     }
-    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
+    let keyed = key && key_set & 1 << KEY_SRC_BLT != 0;
     let key = keyed.then(|| {
-        let raw = s.keys[KEY_SRC_BLT].0;
         if paletted {
-            palette(cpu, id)[(raw & 0xFF) as usize]
+            palette(cpu, id)[(key_low & 0xFF) as usize]
         } else {
-            expanded(raw, &s)
+            expanded(key_low, &f)
         }
     });
     Some(InPlace {
@@ -865,7 +1074,7 @@ fn in_place(cpu: &mut Cpu, id: u32, key: bool) -> Option<InPlace> {
 
 /// A 16-bit texel as the texture unit makes it 8 bits a channel: each
 /// channel's bits again below them. 0RGB.
-fn expanded(raw: u32, s: &Surface) -> u32 {
+fn expanded(raw: u32, f: &Format) -> u32 {
     let channel = |mask: u32| {
         // A mask past the texel's 16 bits is the program's mistake.
         let mask = mask & 0xFFFF;
@@ -882,7 +1091,6 @@ fn expanded(raw: u32, s: &Surface) -> u32 {
         }
         out >> (have - 8)
     };
-    let f = &s.format;
     channel(f.r) << 16 | channel(f.g) << 8 | channel(f.b)
 }
 
@@ -913,9 +1121,12 @@ fn palette(cpu: &mut Cpu, id: u32) -> [u32; 256] {
 /// The heap's copy of the surface `id`, made if it has none that is
 /// up to date.
 fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
-    let s = state(cpu).surface(id)?.clone();
-    let keyed = key && s.key_set & 1 << KEY_SRC_BLT != 0;
-    let paletted = s.format.flags & DDPF_PALETTEINDEXED8 != 0;
+    let (key_set, flags, uniqueness) = {
+        let s = state(cpu).surface(id)?;
+        (s.key_set, s.format.flags, s.uniqueness)
+    };
+    let keyed = key && key_set & 1 << KEY_SRC_BLT != 0;
+    let paletted = flags & DDPF_PALETTEINDEXED8 != 0;
     let variant = if paletted {
         hash_words(&palette(cpu, id)) ^ keyed as u32
     } else {
@@ -932,7 +1143,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     };
     let clock = hal(cpu).clock;
     if let Some(c) = hal(cpu).textures.iter_mut().find(|c| {
-        c.surface == id && c.tmu == unit && c.uniqueness == s.uniqueness && c.variant == variant
+        c.surface == id && c.tmu == unit && c.uniqueness == uniqueness && c.variant == variant
     }) {
         c.used = clock;
         return Some(c.clone());
@@ -954,7 +1165,7 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
     let c = Cached {
         surface: id,
         tmu: unit,
-        uniqueness: s.uniqueness,
+        uniqueness,
         variant,
         start,
         size,
@@ -974,19 +1185,24 @@ fn cached(cpu: &mut Cpu, id: u32, key: bool, tmu: u32) -> Option<Cached> {
 /// The heap there, taken from video memory if it isn't (or video
 /// memory was lost since).
 fn heap(cpu: &mut Cpu) -> bool {
-    let h = hal(cpu).clone();
+    // Only these: a copy of all of it would copy the texture list, at
+    // every draw that samples a texture from the heap.
+    let (at, heap_len, owner) = {
+        let h = hal(cpu);
+        (h.heap, h.heap_len, h.pid)
+    };
     let pid = current_pid(cpu);
-    if h.heap_len != 0 {
+    if heap_len != 0 {
         let there = state(cpu)
             .display
             .blocks
             .iter()
-            .any(|&(at, len)| at == h.heap && len >= h.heap_len);
-        if there && h.pid == pid {
+            .any(|&(block, len)| block == at && len >= heap_len);
+        if there && owner == pid {
             return true;
         }
         if there {
-            display::free(cpu, h.heap);
+            display::free(cpu, at);
         }
     }
     let (_, free) = display::video_memory(cpu);
@@ -1270,9 +1486,11 @@ fn encode(data: &mut Vec<u8>, format: u32, raw: u32, s: &Surface, pal: &[u32; 25
 /// left, top, right and bottom. The card's vertex registers hold 12.4
 /// fixed point, -2048 to 2047.9375, and a coordinate past either end
 /// wraps round to the other, so a triangle clipped at 2048 would have
-/// its vertices there drawn at -2048. A pixel in from those ends
-/// leaves room for the half pixel lines are drawn out by.
-pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2047.0, 2047.0];
+/// its vertices there drawn at -2048. A pixel in from the low end
+/// leaves room for the half pixel lines are drawn out by, two from the
+/// high end for that and the half pixel Direct3D's vertices move by
+/// (`Card::centre`).
+pub const VERTEX_BAND: [f32; 4] = [-2047.0, -2047.0, 2046.0, 2046.0];
 
 /// The card as the pipeline's rasterizer.
 pub struct Raster<'a> {
@@ -1321,9 +1539,14 @@ impl Raster<'_> {
                 t.oow = rhw;
             }
         }
+        // Moved to where the card has a pixel's centre (`Card::centre`).
+        // Edges at whole pixels cover the same pixels either way. Left
+        // where Direct3D has them, the last column of a texture mapped a
+        // texel's centre to a pixel's (Drakan's menu sky, its tiles 256
+        // pixels wide) samples the texture's edge, and wraps to its first.
         Vertex {
-            x: v.x,
-            y: v.y,
+            x: v.x + self.card.centre,
+            y: v.y + self.card.centre,
             z: v.z,
             r,
             g,
@@ -1399,7 +1622,18 @@ impl Rasterizer for Raster<'_> {
     }
 
     fn point(&mut self, v: &ScreenVertex) {
-        let p = self.vertex(v);
+        let mut p = self.vertex(v);
+        // A point lights the pixel whose centre is nearest. Glide's point
+        // lights the pixel the vertex is in, which for a Direct3D vertex
+        // moved half a pixel is that pixel, except half way between two,
+        // where 3dfx's Direct3D driver lights the left or upper one: 10.5
+        // lights 10 and 10.6 lights 11 (on a Voodoo 3 with its driver
+        // 4.12.01.0666). OpenGL's window coordinates take the pixel the
+        // vertex is in.
+        if self.card.centre != 0.0 {
+            p.x = (p.x - 1.0).ceil();
+            p.y = (p.y - 1.0).ceil();
+        }
         api::draw_point(self.cpu, &p);
     }
 }
@@ -1413,10 +1647,17 @@ impl Rasterizer for Raster<'_> {
 /// otherwise draw all that first to have the memory to write into. A
 /// depth buffer gets `value` as zaColor's depth, a render target as
 /// color1, the 5-6-5 value's channels widened and not dithered, which
-/// the fill takes back to `value`. False, with nothing done, while the
-/// card isn't set up for the HAL's drawing (Glide closed or another
-/// process's, or no render target or depth buffer of the HAL's given to
-/// it yet) or the surface isn't in its memory.
+/// the fill takes back to `value`. A depth buffer becomes the card's
+/// depth buffer and stays it. `clear` fills only the device's, which
+/// the device's drawing with the depth test on gives the card as well,
+/// but a game that clears it every frame and draws with the test off,
+/// as Oni's menus do, never gives the card it, or leaves the card one it
+/// had before (another device's, or a released one's). Pointing the
+/// card at the buffer for each fill and back would move it in the OpenGL
+/// renderer's layout, which reads the buffer back each time. False,
+/// with nothing done, while the card isn't set up for the HAL's drawing
+/// (Glide closed or another process's, or for a render target, none of
+/// the HAL's given to it yet) or the surface isn't in its memory.
 pub(in crate::win32::ddraw) fn card_fill(
     cpu: &mut Cpu,
     s: &Surface,
@@ -1424,9 +1665,7 @@ pub(in crate::win32::ddraw) fn card_fill(
     rects: &[[i32; 4]],
     value: u16,
 ) -> bool {
-    use crate::voodoo::banshee::render3d::{
-        AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, COL_BUFFER_ADDR, COL_BUFFER_STRIDE,
-    };
+    use crate::voodoo::banshee::render3d::{COL_BUFFER_ADDR, COL_BUFFER_STRIDE};
     use crate::voodoo::regs::{
         CLIP_LEFT_RIGHT, CLIP_LOW_Y_HIGH_Y, COLOR1, FASTFILL_CMD, FBZ_MODE, ZA_COLOR,
     };
@@ -1444,26 +1683,25 @@ pub(in crate::win32::ddraw) fn card_fill(
         return false;
     }
     let depth = s.format.flags & surface::DDPF_ZBUFFER != 0;
-    // The registers the fill takes the place of, put back after it.
-    let (at_reg, stride_reg, value_reg, saved) = if depth {
-        (AUX_BUFFER_ADDR, AUX_BUFFER_STRIDE, ZA_COLOR, (g.target[2], g.target[3], g.za_color))
-    } else {
-        (COL_BUFFER_ADDR, COL_BUFFER_STRIDE, COLOR1, (g.target[0], g.target[1], g.color1))
-    };
-    if saved.1 == 0 {
+    if !depth && g.target[1] == 0 {
         return false;
     }
     let Some((at, pitch)) = surface::card_memory(cpu, id) else {
         return false;
     };
-    let (fbz, fill) = if depth {
-        (ENRECTCLIP | ZAWRMASK, g.za_color & !0xFFFF | value as u32)
+    // The register the fill's value takes the place of, and its value,
+    // put back after it, as are the render target's buffer registers.
+    let (fbz, value_reg, fill, saved) = if depth {
+        api::set_depth_buffer(cpu, at, pitch);
+        let fill = g.za_color & !0xFFFF | value as u32;
+        (ENRECTCLIP | ZAWRMASK, ZA_COLOR, fill, g.za_color)
     } else {
+        hw::write(cpu, hw::ALL, COL_BUFFER_ADDR, at);
+        hw::write(cpu, hw::ALL, COL_BUFFER_STRIDE, pitch);
         let rgb = crate::win32::screen::from_565(value);
-        (ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER, rgb)
+        let fbz = ENRECTCLIP | RGBWRMASK | g.fbz_mode & DRAWBUFFER;
+        (fbz, COLOR1, rgb, g.color1)
     };
-    hw::write(cpu, hw::ALL, at_reg, at);
-    hw::write(cpu, hw::ALL, stride_reg, pitch);
     hw::write(cpu, hw::ALL, FBZ_MODE, fbz);
     hw::write(cpu, hw::ALL, value_reg, fill);
     let whole = [[0, 0, s.width as i32, s.height as i32]];
@@ -1478,10 +1716,12 @@ pub(in crate::win32::ddraw) fn card_fill(
         hw::write(cpu, hw::ALL, CLIP_LOW_Y_HIGH_Y, top << 16 | bottom);
         hw::write(cpu, hw::ALL, FASTFILL_CMD, 1);
     }
-    hw::write(cpu, hw::ALL, at_reg, saved.0);
-    hw::write(cpu, hw::ALL, stride_reg, saved.1);
+    if !depth {
+        hw::write(cpu, hw::ALL, COL_BUFFER_ADDR, g.target[0]);
+        hw::write(cpu, hw::ALL, COL_BUFFER_STRIDE, g.target[1]);
+    }
     hw::write(cpu, hw::ALL, FBZ_MODE, g.fbz_mode);
-    hw::write(cpu, hw::ALL, value_reg, saved.2);
+    hw::write(cpu, hw::ALL, value_reg, saved);
     hw::write(cpu, hw::ALL, CLIP_LEFT_RIGHT, g.clip_left_right);
     hw::write(cpu, hw::ALL, CLIP_LOW_Y_HIGH_Y, g.clip_bottom_top);
     true

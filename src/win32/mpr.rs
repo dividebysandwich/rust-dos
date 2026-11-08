@@ -12,6 +12,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: &[],
 };
 
@@ -31,7 +32,7 @@ const fn stdcall(
 }
 
 /// The functions. Append only (see `stubs`).
-static APIS: &[Api] = &[stdcall("WNetGetConnectionA", 1, 3, wnet_get_connection_a)];
+static APIS: &[Api] = &[stdcall("WNetGetConnectionA", 71, 3, wnet_get_connection_a)];
 
 /// The local device isn't redirected to a network resource.
 const ERROR_NOT_CONNECTED: u32 = 2250;

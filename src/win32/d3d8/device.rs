@@ -289,7 +289,11 @@ pub fn destroyed(cpu: &mut Cpu, id: u32, o: &Object) {
     if d.dd_iface != 0 {
         if d.params.get(PP_WINDOWED) == Some(&0) {
             directdraw::restore_display_mode(cpu, &[d.dd_iface]);
-            directdraw::set_cooperative_level(cpu, &[d.dd_iface, d.focus, DDSCL_NORMAL]);
+            // DDSCL_NOWINDOWCHANGES, as in `build_into`: the device never
+            // had DirectDraw change its window, so leaving exclusive mode
+            // doesn't either.
+            let flags = DDSCL_NORMAL | DDSCL_NOWINDOWCHANGES;
+            directdraw::set_cooperative_level(cpu, &[d.dd_iface, d.focus, flags]);
         }
         ddraw::release(cpu, d.dd_iface);
     }
@@ -433,10 +437,8 @@ fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<()
         } else {
             d.focus
         };
-        ok(directdraw::set_cooperative_level(
-            cpu,
-            &[d.dd_iface, window, DDSCL_NORMAL],
-        ))?;
+        let flags = DDSCL_NORMAL | DDSCL_NOWINDOWCHANGES;
+        ok(directdraw::set_cooperative_level(cpu, &[d.dd_iface, window, flags]))?;
         for _ in 0..p[PP_COUNT] {
             let (ids, root) = resource::make_dd(cpu, id, Role::Target, size, p[PP_FORMAT], 0)?;
             let s = resource::new_surface(
@@ -452,6 +454,10 @@ fn build_into(cpu: &mut Cpu, id: u32, p: &[u32], chain: &mut Chain) -> Result<()
             chain.backbuffers.push(s);
         }
     } else {
+        // The device sets every level with DDSCL_NOWINDOWCHANGES: on
+        // Windows, making and releasing a full-screen device sends the
+        // focus window's procedure no message of DirectDraw's window
+        // changes (Wine's d3d8 test_wndproc checks that none comes).
         let flags = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_NOWINDOWCHANGES;
         ok(directdraw::set_cooperative_level(
             cpu,

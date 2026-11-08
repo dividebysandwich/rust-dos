@@ -102,6 +102,15 @@ pub fn locate(
     }
 }
 
+/// The machine-wide run lock as the configuration file sets it
+/// (`run_lock`): taken in another directory than the default, or not at
+/// all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunLockSetting {
+    Off,
+    Dir(PathBuf),
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     /// The file the settings came from, if any.
@@ -238,7 +247,9 @@ pub struct Config {
     /// (`pause_in_settings`).
     pub pause_in_settings: Option<bool>,
     /// The check for a newer rust-dos at startup (`version_check`).
-    pub version_check: Option<bool>,
+    pub version_check: Option<crate::version_check::Setting>,
+    /// The machine-wide run lock (`run_lock`).
+    pub run_lock: Option<RunLockSetting>,
     /// Programs started from the prompt with the almanac's settings
     /// (`almanac_auto`, almanac.rs).
     pub almanac_auto: Option<bool>,
@@ -262,6 +273,8 @@ pub struct Config {
     pub disk: DiskSettings,
     /// `[mixer]`: the volumes of the sound sources.
     pub mixer: MixerSettings,
+    /// `[mixer]`'s `audio_output`: what plays the sound.
+    pub audio_output: crate::audio::OutputChoice,
     /// `[mixer]`'s `blocksize` and `prebuffer`: the sound waiting for the
     /// host's sound device.
     pub audio_buffer: crate::audio::AudioBuffer,

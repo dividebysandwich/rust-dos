@@ -235,10 +235,16 @@ pub fn take(cpu: &mut Cpu, w: u32, h: u32, bpp: u32) -> Option<Mode> {
     Some(mode)
 }
 
+/// Whether the display is the one Glide took (`take`), which a mode
+/// DirectDraw sets ends as well as `give_back`.
+pub fn glide_has_display(cpu: &mut Cpu) -> bool {
+    state(cpu).display.mode_owner == GLIDE
+}
+
 /// Give back the display Glide took: the desktop's mode again, repainted,
 /// or text mode when there is no desktop.
 pub fn give_back(cpu: &mut Cpu) {
-    if state(cpu).display.mode_owner == GLIDE {
+    if glide_has_display(cpu) {
         restore(cpu);
     }
 }
@@ -296,6 +302,13 @@ pub fn alloc(cpu: &mut Cpu, len: u32) -> Result<u32, u32> {
     }
     display.blocks.insert(index, (at, len));
     Ok(at)
+}
+
+/// Take all the video memory above the picture, up to its end, as a
+/// block, with no other block there (`take` emptied the list).
+pub fn alloc_rest(cpu: &mut Cpu) -> Result<u32, u32> {
+    let floor = screen_len(cpu).next_multiple_of(ALIGN);
+    alloc(cpu, screen::memory_size(cpu) - floor)
 }
 
 /// Give back the block at `offset`.

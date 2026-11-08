@@ -84,7 +84,7 @@ impl SgramTiles {
 type BufferRows = (usize, u32, u32);
 
 /// A 5-6-5 colour as 8-8-8.
-fn rgb888(color: u16) -> u32 {
+pub(crate) fn rgb888(color: u16) -> u32 {
     let (r, g, b) = (
         (color >> 11) as u32,
         ((color >> 5) & 0x3F) as u32,
@@ -389,13 +389,13 @@ impl Voodoo {
             let picture = access
                 .clone()
                 .map(|a| super::backlog::Access { kept: false, ..a });
-            let split = width < rowpixels
-                && access.as_ref().is_some_and(|a| a.kept && !a.pinned)
-                && picture
-                    .as_ref()
-                    .is_some_and(|a| self.gpu_takes(&job((0, width)), a));
-            if split {
-                self.gpu_left(&job((0, width)));
+            let split = width < rowpixels && access.as_ref().is_some_and(|a| a.kept && !a.pinned);
+            let taken = picture
+                .as_ref()
+                .filter(|_| split)
+                .and_then(|a| self.gpu_takes(&job((0, width)), a));
+            if let Some(bytes) = taken {
+                self.gpu_left(&job((0, width)), bytes);
                 let outside = super::backlog::Access {
                     kept: true,
                     ..Default::default()
@@ -1003,6 +1003,38 @@ mod tests {
         }
     }
 
+    /// On a Voodoo2 too, after a swap the picture waits for the jobs given
+    /// out before it and not for the next frame's, unless one of those
+    /// draws into the front buffer.
+    #[test]
+    fn the_picture_waits_for_the_frame_a_swap_shows() {
+        use crate::voodoo::banshee::render3d::tests::{
+            Gate, picture_comes_before, picture_waits_for_all,
+        };
+        use crate::voodoo::workers::{Job, Word};
+
+        let mut v = glide_card(2);
+        // The frame shown: a word of the back buffer, which the swap
+        // shows.
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize] as usize / 2;
+        let word = Word {
+            row: 0,
+            at: back as u32,
+            value: 0x1234,
+        };
+        let fb = v.fbi.ram.clone();
+        let words = vec![word];
+        v.submit_outside(Job::Pixels { fb, words }, None);
+        write(&mut v, SWAPBUFFER_CMD, 0);
+        // The next frame's jobs, held.
+        let gate = Gate::default();
+        v.submit_outside(Job::Hold(gate.clone()), None);
+        picture_comes_before(&mut v, &gate, "Voodoo2");
+        assert_eq!(v.fbi.ram.get(back), 0x1234);
+        v.mark_drawn(back);
+        picture_waits_for_all(&mut v, &gate, "Voodoo2 front drawn into");
+    }
+
     #[test]
     fn sgram_fills_of_whole_buffers_drop_what_they_cover() {
         // With the OpenGL renderer, a buffer cleared with an SGRAM fill
@@ -1320,37 +1352,7 @@ mod tests {
         }
     }
 
-    /// An OpenGL renderer that drew each colour buffer in one colour and
-    /// the depth buffer at one value, and notes what it is asked.
-    struct Renderer(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
-
-    impl crate::voodoo::gpu::GpuLink for Renderer {
-        fn ready(&self) -> bool {
-            false
-        }
-
-        fn run(&mut self, commands: Vec<crate::voodoo::mirror::Command>) {
-            self.0.borrow_mut().push(format!("run {}", commands.len()));
-        }
-
-        fn read(&mut self, _at: u32, _out: &mut [u8]) -> bool {
-            false
-        }
-
-        fn read_buffer(
-            &mut self,
-            dest: Option<u32>,
-            (top, bottom): (u32, u32),
-            out: &mut [u16],
-        ) -> bool {
-            assert_eq!(out.len(), 640 * (bottom - top) as usize);
-            out.fill(dest.map_or(0x7777, |d| 0x1234 ^ d as u16));
-            self.0
-                .borrow_mut()
-                .push(format!("read {dest:?} {top}..{bottom}"));
-            true
-        }
-    }
+    use crate::voodoo::gpu::TestRenderer as Renderer;
 
     #[test]
     fn gpu_reads_leave_the_drawing_to_the_renderer() {
@@ -1485,11 +1487,153 @@ mod tests {
     }
 
     #[test]
+    fn gpu_reads_of_the_lfb_leave_the_buffer_to_software_until_it_cools() {
+        // Test Drive 4 reads two pixels of the back buffer twice a frame
+        // to see whether the sun shows. The rows read turn hot: what is
+        // drawn into that buffer after is drawn in software, and the
+        // next read finds it in the memory without waiting for the GPU.
+        // After `HOT_FRAMES` frames of the picture the buffer goes back
+        // to the renderer.
+        use crate::voodoo::gpu::HOT_FRAMES;
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let gpu_only = |v: &Voodoo| {
+            v.describe(Now::default())["gpu_only_jobs"]
+                .as_u64()
+                .unwrap()
+        };
+        let fill = |v: &mut Voodoo, color: u32| {
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+            write(v, CLIP_LEFT_RIGHT, 300);
+            write(v, CLIP_LOW_Y_HIGH_Y, 200);
+            write(v, COLOR1, color);
+            write(v, FASTFILL_CMD, 0);
+        };
+        v.reg[crate::voodoo::regs::LFB_MODE] = 1 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        fill(&mut v, 0x00F8_0000);
+        assert_eq!(gpu_only(&v), before, "drawn in software");
+        log.borrow_mut().clear();
+        assert_eq!(v.lfb_read(100 << 9 | 5) & 0xFFFF, 0xF800);
+        let reads = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .count();
+        assert_eq!(reads, 0, "{:?}", log.borrow());
+        for _ in 0..HOT_FRAMES {
+            v.take_mirror();
+        }
+        fill(&mut v, 0x0000_00F8);
+        assert_eq!(gpu_only(&v), before + 1, "back on the GPU");
+    }
+
+    #[test]
+    fn gpu_reads_of_depth_rows_leave_the_rest_of_the_frame_on_the_gpu() {
+        // A read of one depth (3DMark 2000's lens flares) makes its band
+        // of depth rows hot, not the colour buffer: a fill over other
+        // rows stays on the GPU, and one that writes depth over the band
+        // is drawn in software after reading back only its own colour
+        // rows, not the whole memory, as the fills after it may go to the
+        // GPU again.
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(std::rc::Rc::clone(&log)))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let gpu_only = |v: &Voodoo| {
+            v.describe(Now::default())["gpu_only_jobs"]
+                .as_u64()
+                .unwrap()
+        };
+        let fill = |v: &mut Voodoo, (top, bottom): (u32, u32)| {
+            write(v, FBZ_MODE, 1 | 1 << 9 | 1 << 10 | 1 << 14);
+            write(v, CLIP_LEFT_RIGHT, 300);
+            write(v, CLIP_LOW_Y_HIGH_Y, top << 16 | bottom);
+            write(v, COLOR1, 0x00F8_0000);
+            write(v, FASTFILL_CMD, 0);
+        };
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        fill(&mut v, (0, 20));
+        assert_eq!(gpu_only(&v), before + 1, "outside the band, on the GPU");
+        log.borrow_mut().clear();
+        fill(&mut v, (100, 110));
+        assert_eq!(gpu_only(&v), before + 1, "over the band, in software");
+        let reads: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("read"))
+            .cloned()
+            .collect();
+        let back = v.fbi.rgboffs[v.fbi.backbuf as usize];
+        assert_eq!(reads, [format!("read {:?} 100..110", Some(back / 2))]);
+    }
+
+    /// A Voodoo2 with the renderer and reads of the buffers from it, two
+    /// frames drawn, and a count of the jobs left to the renderer.
+    fn hot_card() -> (Voodoo, impl Fn(&Voodoo) -> u64) {
+        let mut v = glide_card(2);
+        v.set_mirror(true);
+        v.set_software_picture(false);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+        v.set_gpu_link(Some(Box::new(Renderer(log))));
+        v.set_gpu_reads(true);
+        glide_frames(&mut v, 2);
+        let gpu_only = |v: &Voodoo| {
+            v.describe(Now::default())["gpu_only_jobs"]
+                .as_u64()
+                .unwrap()
+        };
+        (v, gpu_only)
+    }
+
+    #[test]
+    fn gpu_reads_of_depth_rows_leave_colour_fills_over_them_on_the_gpu() {
+        // A fill that writes colours alone doesn't touch the auxiliary
+        // buffer: hot depth rows under it leave it to the GPU.
+        let (mut v, gpu_only) = hot_card();
+        v.reg[crate::voodoo::regs::LFB_MODE] = 2 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        write(&mut v, FBZ_MODE, 1 | 1 << 9 | 1 << 14);
+        write(&mut v, CLIP_LEFT_RIGHT, 300);
+        write(&mut v, CLIP_LOW_Y_HIGH_Y, 100 << 16 | 110);
+        write(&mut v, FASTFILL_CMD, 0);
+        assert_eq!(gpu_only(&v), before + 1, "on the GPU");
+    }
+
+    #[test]
+    fn gpu_reads_of_the_back_buffer_take_its_depth_clears_to_software() {
+        // A fill of the depth alone has dest 0, the front buffer here, and
+        // goes with the colour buffer fbzMode selects: the back buffer,
+        // whose rows are hot, so it is drawn in software with it.
+        let (mut v, gpu_only) = hot_card();
+        v.reg[crate::voodoo::regs::LFB_MODE] = 1 << 6;
+        v.lfb_read(100 << 9 | 5);
+        let before = gpu_only(&v);
+        write(&mut v, FBZ_MODE, 1 | 1 << 10 | 1 << 14);
+        write(&mut v, CLIP_LEFT_RIGHT, 300);
+        write(&mut v, CLIP_LOW_Y_HIGH_Y, 200 << 16 | 210);
+        write(&mut v, FASTFILL_CMD, 0);
+        assert_eq!(gpu_only(&v), before, "in software");
+    }
+
+    #[test]
     fn gpu_reads_count_the_rows_not_drawn_since_the_last_read() {
-        // After a read of everything, a fastfill draws rows 20..40. A read
-        // of depth rows 96..160 then reads only rows nothing drew since:
-        // a cache would have had them. One of rows 0..64 reads the 20
-        // drawn among them.
+        // After a read of everything, a fastfill draws colour and depth
+        // rows 20..40. A read of depth rows 96..160 then reads nothing:
+        // the fill drew none of them, and they are in the memory. One of
+        // rows 0..64 reads the 20 drawn among them.
         let mut v = glide_card(2);
         v.set_mirror(true);
         v.set_software_picture(false);
@@ -1511,6 +1655,7 @@ mod tests {
         let [rows, partial, drawn, undrawn] = count(&v);
         assert!(rows >= 3 * 480 && rows == drawn + undrawn, "{rows} {drawn}");
         assert_eq!((partial, undrawn), (0, 0), "the first reads read what was drawn");
+        write(&mut v, FBZ_MODE, 1 | 1 << 9 | 1 << 10 | 1 << 14);
         write(&mut v, CLIP_LEFT_RIGHT, 10 << 16 | 300);
         write(&mut v, CLIP_LOW_Y_HIGH_Y, 20 << 16 | 40);
         write(&mut v, FASTFILL_CMD, 0);
@@ -1519,7 +1664,7 @@ mod tests {
         let now = count(&v);
         assert_eq!(
             [now[0] - rows, now[1] - partial, now[2] - drawn, now[3] - undrawn],
-            [64, 1, 0, 64]
+            [0, 0, 0, 0]
         );
         v.lfb_read(30 << 9 | 5);
         let last = count(&v);

@@ -3,6 +3,11 @@
 //! the first DOS prompt and as a notification over the picture. The answer
 //! is kept in rust-dos's directory, for the box of a start whose answer
 //! doesn't come in time.
+//!
+//! A copy shipped with a game and kept at one version turns the check off
+//! for good with `version_check=never` in its configuration file. The
+//! setting (`Setting::Never`) then leaves the settings window too, so it
+//! can't be turned back on there, and saving the settings writes `never`.
 
 /// What the website says the latest release is: `{"version": "1.6.0",
 /// "published": "..."}`.
@@ -14,6 +19,30 @@ pub const SITE: &str = "rust-dos.com";
 /// The file in rust-dos's directory with the version last answered.
 #[cfg(all(feature = "sdl", not(target_arch = "wasm32")))]
 const REMEMBERED: &str = "latest-version";
+
+/// The configuration file's `version_check`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setting {
+    On,
+    Off,
+    /// Off, and out of the settings window: for a copy shipped with a game.
+    Never,
+}
+
+impl Setting {
+    pub fn is_on(self) -> bool {
+        self == Setting::On
+    }
+
+    /// The value as the configuration file has it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Setting::On => "true",
+            Setting::Off => "false",
+            Setting::Never => "never",
+        }
+    }
+}
 
 /// The version in version.json's text.
 pub fn parse(text: &str) -> Result<String, String> {

@@ -57,9 +57,7 @@ impl DiskController {
         if device.is_some() || !self.emm_device {
             return device;
         }
-        let last = filename.rsplit(['\\', '/', ':']).next()?;
-        let stem = last.split('.').next()?.trim();
-        stem.eq_ignore_ascii_case("EMMXXXX0").then_some(CharDevice::Emm)
+        (device_name(filename)? == "EMMXXXX0").then_some(CharDevice::Emm)
     }
 
     // INT 21h, AH=3Dh: Open File. `owner` is the PSP of the calling process.
@@ -105,10 +103,7 @@ impl DiskController {
                 Some(FileData::Memory(data)) => OpenData::Memory(data, Rc::new(Cell::new(0))),
                 Some(FileData::Image(image, extent)) => OpenData::Image(image, extent, Rc::new(Cell::new(0))),
                 _ if files.is_dir(&path) => return Err(0x05),
-                _ => {
-                    let parent = path.rsplit_once('\\').map_or("", |(p, _)| p);
-                    return Err(if files.is_dir(parent) { 0x02 } else { 0x03 });
-                }
+                _ => return Err(Self::memory_missing(files, &path)),
             };
             match mode & 0x03 {
                 0 | 2 => {}
@@ -203,7 +198,8 @@ impl DiskController {
             Ok(file) => {
                 let key = self.file_key(filename);
                 let written = (writable && mode & 0x03 != 0).then_some(path);
-                let file = self.opened(OpenData::Host(file, written), drive, owner, key, filename, mode);
+                let data = OpenData::Host(HostFile::new(file), written);
+                let file = self.opened(data, drive, owner, key, filename, mode);
                 self.insert(handle, file);
                 Ok(handle)
             }
@@ -454,6 +450,8 @@ impl DiskController {
             Some((p, l)) => (p, l),
             None => (".", rest),
         };
+        // Renamed to "NEW.", the file is NEW, as opens name it.
+        let leaf = Self::dos_component(leaf);
         let parent = self.resolve_on(to_drive, parent_dos).ok_or(0x03)?;
         if leaf.is_empty() || !hostfs::is_dir(&parent) {
             return Err(0x03);
@@ -461,7 +459,7 @@ impl DiskController {
         if self.find_existing_child(&parent, leaf).is_some() {
             return Err(0x05); // Destination exists
         }
-        let target = parent.join(leaf.to_uppercase());
+        let target = parent.join(super::new_entry_name(leaf));
         let renamed = hostfs::rename(&source, &target);
         self.host_dirs.changed();
         self.host_dirs.touched(&source);

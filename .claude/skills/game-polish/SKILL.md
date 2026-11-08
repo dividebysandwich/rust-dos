@@ -19,8 +19,8 @@ skill covers what to do on top of that.
 
 - **game** (required): a directory with the game's files, a game package
   (a zip, a 7z archive or a folder, see `GAME-PACKAGES.md`), or the name
-  of a game in the game suite (`tests/gamesuite/catalog.rs`, for example
-  `doom` or `keen1`). If none is given, ask which game.
+  of a game in the game suite (`tests/program/gamesuite/catalog.rs`,
+  for example `doom` or `keen1`). If none is given, ask which game.
 - **minutes** (default 30): wall-clock time to spend playing. Setup,
   triage and fixing don't count toward it.
 - **`--no-fix`**: stop after filing the issues.
@@ -34,29 +34,37 @@ skill covers what to do on top of that.
    `/tmp/game-polish-<game>-<date>`. Call it `$W`. It holds the log,
    screenshots, save states, profiles and `findings.md`.
 2. **The game.**
-   - A suite game: `cargo test --release --test game_suite -- --ignored
-     fetch --nocapture` downloads and installs it into
-     `~/.cache/rust-dos/game-suite`; copy its installed tree into `$W/c`,
-     so the play session doesn't change the cached copy.
+   - A suite game: `cargo test --release --test program
+     game_suite::fetch -- --ignored --nocapture` downloads and installs
+     it into `~/.cache/rust-dos/game-suite`; copy its installed tree into
+     `$W/c`, so the play session doesn't change the cached copy.
    - A directory: copy it into `$W/c` for the same reason, unless it is
      large; then use it in place and say so in the report.
    - A package: unpack it into `$W/c`, and read its `rust-dos.conf` (or
      DOSBox configuration) for the machine it wants: pass those settings
      on the command line or with `--config $W/game.conf`.
 3. **Build** a release build of the current `HEAD` (`cargo build
-   --release`; on Linux it needs `libsdl2-dev` and `libasound2-dev`).
+   --release`; on Linux it needs SDL3's and ALSA's development files).
    Record `git rev-parse HEAD`: every finding is against this commit.
 4. **Launch** headless on a free port, with the log in `$W`:
 
    ```sh
    : > $W/rust-dos.out
-   SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+   SDL_VIDEO_DRIVER=dummy \
      ./target/release/rust-dos --no-config -d $W/c \
      --debug-server 127.0.0.1:0 > $W/rust-dos.out 2> $W/rust-dos.err &
    echo $! > $W/emu.pid
    until H=$(grep -om1 '127\.0\.0\.1:[0-9][0-9]*' $W/rust-dos.out); do
      sleep 0.2; done
    ```
+
+   With no window the sound goes to the null output. Never add
+   `SDL_AUDIO_DRIVER=dummy`: SDL's dummy audio driver doesn't keep real
+   time and must not be used for any measurement. To file a timing
+   or underrun finding, rerun it on a real device with `--mute`
+   (`SDL_AUDIO_DRIVER=wasapi` on Windows), or with `--audio-output null`
+   on a machine without one, and quote `audio_driver` from `/api/stats`
+   or `/api/underruns`.
 
    Use `--deterministic --cycles N` only if you need exact repeats; a
    player's session normally runs at `cycles=auto`, which is part of what
@@ -280,9 +288,9 @@ Fix the issues in rank order. For each one:
    - Play a few minutes around the place, to see the fix broke nothing
      nearby.
    - If the game is in the game suite, run its scenarios
-     (`GAME_SUITE=<game> cargo test --release --test game_suite --
-     --ignored --nocapture`); if the fix changes the hashes on purpose,
-     look at the new shots before blessing them.
+     (`GAME_SUITE=<game> cargo test --release --test program
+     game_suite:: -- --ignored --nocapture`); if the fix changes the
+     hashes on purpose, look at the new shots before blessing them.
 8. **Mark the pull request ready for review** once validation succeeds:
    write what step 7 did and found under manual testing, then take it out
    of draft. If validation fails, go back to step 2; the pull request

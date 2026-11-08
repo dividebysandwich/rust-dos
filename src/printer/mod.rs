@@ -165,7 +165,7 @@ impl PrinterSettings {
         let text = value.trim().trim_matches('"');
         let optional = |v: &str| (!v.is_empty()).then(|| v.to_string());
         let path = |v: &str| match (v.strip_prefix("~/"), home) {
-            (Some(rest), Some(home)) => home.join(rest),
+            (Some(rest), Some(home)) => crate::mount::home_join(home, rest),
             _ => PathBuf::from(v),
         };
         match key.as_str() {

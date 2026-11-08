@@ -161,6 +161,9 @@ pub struct MountDialog {
     /// Whether a host directory is shared with a booted system, which
     /// stays too.
     share: Option<bool>,
+    /// Whether a hard disk image is written as it is (`-inplace`), which
+    /// stays too unless the dialog gives it an overlay folder.
+    in_place: bool,
     /// The mount it changes.
     current: Option<MountSpec>,
 }
@@ -187,6 +190,7 @@ impl MountDialog {
             geometry: None,
             ide: None,
             share: None,
+            in_place: false,
             current: None,
         })
     }
@@ -217,6 +221,7 @@ impl MountDialog {
             geometry: opts.geometry,
             ide: opts.ide,
             share: opts.share,
+            in_place: opts.in_place,
             current: info.mount.clone(),
         }
     }
@@ -441,10 +446,11 @@ impl MountDialog {
                 read_only: self.read_only,
                 more_images: if unchanged { self.more_images.clone() } else { Vec::new() },
                 geometry: if unchanged { self.geometry } else { None },
-                overlay,
                 ide: self.ide.filter(|_| self.can_ide()),
                 boot,
                 share: self.share,
+                in_place: self.in_place && overlay.is_none(),
+                overlay,
                 variant: None,
             },
         })
@@ -561,6 +567,7 @@ mod tests {
             ide: None,
             boot: false,
             share: None,
+            in_place: false,
             variant: None,
         };
         let mut d = MountDialog::change(&info, None);

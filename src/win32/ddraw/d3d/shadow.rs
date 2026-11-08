@@ -62,18 +62,17 @@ fn shadowed(cpu: &mut Cpu, s: &Surface) -> bool {
 
 /// Where the card draws the surface `id`: its block of the card's
 /// memory and the bytes a row; its shadow's for a 24- or 32-bit one,
-/// loaded from it first if the program changed it. None if it isn't in
-/// the card's memory or there is no room for the shadow.
-pub fn place(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
-    let s = state(cpu).surface(id)?.clone();
+/// loaded from it first if the program changed it.
+pub fn place(cpu: &mut Cpu, id: u32) -> Result<(u32, u32), Unplaced> {
+    let s = state(cpu).surface(id).ok_or(Unplaced::Gone)?.clone();
     if !shadowed(cpu, &s) {
-        return surface::card_memory(cpu, id);
+        return surface::card_memory(cpu, id).ok_or(Unplaced::Gone);
     }
     let len = s.width * s.height * 2;
     let i = match find(cpu, id, len) {
         Some(i) => i,
         None => {
-            let at = display::alloc(cpu, len).ok()?;
+            let at = display::alloc(cpu, len).map_err(|_| Unplaced::NoRoom)?;
             shadows(cpu).push(Shadow {
                 surface: id,
                 at,
@@ -89,7 +88,16 @@ pub fn place(cpu: &mut Cpu, id: u32) -> Option<(u32, u32)> {
         load(cpu, &s, sh.at);
         shadows(cpu)[i].uniqueness = s.uniqueness;
     }
-    Some((sh.at, s.width * 2))
+    Ok((sh.at, s.width * 2))
+}
+
+/// Why the card can't draw a surface (`place`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Unplaced {
+    /// It isn't in the card's memory: gone, lost or in system memory.
+    Gone,
+    /// It is 24 or 32-bit, and video memory has no room for its shadow.
+    NoRoom,
 }
 
 /// The shadow of `id`, if it has one whose block is still there and
@@ -150,8 +158,9 @@ pub fn expose_all(cpu: &mut Cpu) {
 }
 
 /// Fill `rects` of the shadowed surface `id` (all of it with none):
-/// the surface with `exact`, its shadow with the 16-bit `value`. False
-/// if `id` has no shadow, and nothing was filled.
+/// the surface with `exact`, its shadow with the 16-bit `value`. With
+/// no room for the shadow, the surface alone. False if `id` isn't drawn
+/// through a shadow, and nothing was filled.
 pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) -> bool {
     let Some(s) = state(cpu).surface(id).cloned() else {
         return false;
@@ -161,9 +170,7 @@ pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) 
     }
     // What the card drew outside the rectangles stays.
     expose(cpu, id);
-    let Some((at, pitch)) = place(cpu, id) else {
-        return false;
-    };
+    let shadow = place(cpu, id).ok();
     let whole = [[0, 0, s.width as i32, s.height as i32]];
     let rects = if rects.is_empty() { &whole[..] } else { rects };
     let bpp = s.bytes_per_pixel();
@@ -187,7 +194,9 @@ pub fn fill(cpu: &mut Cpu, id: u32, rects: &[[i32; 4]], exact: u32, value: u16) 
                 put(px, old & mask | exact & !mask);
             }
             surface::write_bytes(cpu, &s, offset, &row);
-            screen::write(cpu, at + y * pitch + x0 * 2, &shadow_row);
+            if let Some((at, pitch)) = shadow {
+                screen::write(cpu, at + y * pitch + x0 * 2, &shadow_row);
+            }
         }
     }
     surface::changed(cpu, id);
@@ -227,39 +236,52 @@ fn keep_mask(s: &Surface) -> u32 {
 
 /// The surface into its shadow at `at`: each channel's top 5, 6 and 5
 /// bits, or depth's top 16.
+///
+/// The shadow is written, and read in `store`, in one go, and so is the
+/// surface where its rows are back to back. With `voodoo_readback=gpu`
+/// the shadow is a 3D buffer that the OpenGL renderer may have drawn
+/// alone, and each access to its rows waits for the renderer and reads
+/// back the rows it covers: the whole shadow at once waits once, where
+/// a row at a time would wait 600 times for Giants' frame.
 fn load(cpu: &mut Cpu, s: &Surface, at: u32) {
     let bpp = s.bytes_per_pixel() as usize;
-    let mut row = vec![0u8; s.width as usize * bpp];
-    let mut out = vec![0u8; s.width as usize * 2];
-    for y in 0..s.height {
-        surface::read_bytes(cpu, s, y * s.pitch, &mut row);
-        for (px, o) in row.chunks(bpp).zip(out.chunks_mut(2)) {
-            o.copy_from_slice(&narrow(s, get(px)).to_le_bytes());
-        }
-        screen::write(cpu, at + y * s.width * 2, &out);
+    let width = s.width as usize;
+    if width == 0 {
+        return;
     }
+    let height = s.height as usize;
+    let mut pixels = vec![0u8; width * bpp * height];
+    surface::read_rows(cpu, s, 0, width * bpp, &mut pixels);
+    let mut shadow = vec![0u8; width * 2 * height];
+    for (px, o) in pixels.chunks_exact(bpp).zip(shadow.as_chunks_mut::<2>().0) {
+        *o = narrow(s, get(px)).to_le_bytes();
+    }
+    screen::write(cpu, at, &shadow);
 }
 
 /// The shadow at `at` into the surface, its values widened.
 fn store(cpu: &mut Cpu, s: &Surface, at: u32) {
     let bpp = s.bytes_per_pixel() as usize;
     let mask = keep_mask(s);
-    let mut row = vec![0u8; s.width as usize * bpp];
-    let mut shadow_row = vec![0u8; s.width as usize * 2];
-    for y in 0..s.height {
-        screen::read(cpu, at + y * s.width * 2, &mut shadow_row);
-        surface::read_bytes(cpu, s, y * s.pitch, &mut row);
-        for (px, v) in row.chunks_mut(bpp).zip(shadow_row.chunks(2)) {
-            // A pixel whose 16 bits the card left as they were keeps its
-            // own, which may have more.
-            let v = u16::from_le_bytes([v[0], v[1]]);
-            let old = get(px);
-            if narrow(s, old) != v {
-                put(px, old & mask | widen(s, v) & !mask);
-            }
-        }
-        surface::write_bytes(cpu, s, y * s.pitch, &row);
+    let width = s.width as usize;
+    if width == 0 {
+        return;
     }
+    let height = s.height as usize;
+    let mut shadow = vec![0u8; width * 2 * height];
+    screen::read(cpu, at, &mut shadow);
+    let mut pixels = vec![0u8; width * bpp * height];
+    surface::read_rows(cpu, s, 0, width * bpp, &mut pixels);
+    for (px, v) in pixels.chunks_exact_mut(bpp).zip(shadow.as_chunks::<2>().0) {
+        // A pixel whose 16 bits the card left as they were keeps its
+        // own, which may have more.
+        let v = u16::from_le_bytes(*v);
+        let old = get(px);
+        if narrow(s, old) != v {
+            put(px, old & mask | widen(s, v) & !mask);
+        }
+    }
+    surface::write_rows(cpu, s, 0, width * bpp, &pixels);
 }
 
 /// A pixel of 1 to 4 bytes, little-endian.
@@ -367,5 +389,69 @@ mod tests {
         assert_eq!(widen_bits(0x10, 5, 8), 0x84);
         assert_eq!(widen_bits(0xFFFF, 16, 24), 0xFF_FFFF);
         assert_eq!(widen_bits(0x8000, 16, 24), 0x80_0080);
+    }
+
+    use crate::voodoo::banshee::render3d::tests::{A, gpu_frame_in_linear_buffer, reads};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A 32-bit render target of 640 by 64, `pitch` bytes a row, whose
+    /// shadow at `A` only the renderer drew, in 0x1234; and the log of
+    /// the renderer's reads.
+    fn renderer_drawn(pitch: u32) -> (Cpu, Surface, Rc<RefCell<Vec<String>>>) {
+        use crate::win32::ddraw::Format;
+        let log = Rc::default();
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        cpu.bus.voodoo = Some(gpu_frame_in_linear_buffer(&log));
+        let s = Surface {
+            width: 640,
+            height: 64,
+            pitch,
+            format: Format {
+                bits: 32,
+                r: 0xFF_0000,
+                g: 0xFF00,
+                b: 0xFF,
+                ..Format::default()
+            },
+            memory: MEM_VIDEO,
+            bits: 0x60_0000,
+            ..Surface::default()
+        };
+        (cpu, s, log)
+    }
+
+    #[test]
+    fn a_shadow_only_the_renderer_drew_is_read_back_at_once() {
+        // Giants draws into a 32-bit render target, so the card draws
+        // into its 16-bit shadow, which with `voodoo_readback=gpu` only
+        // the OpenGL renderer has. Storing it into the surface asks the
+        // renderer for all its rows in one read: a read for each row
+        // waited for the renderer 600 times a frame. The surface's rows
+        // may be back to back or have bytes between them.
+        for pitch in [640 * 4, 640 * 4 + 64] {
+            let (mut cpu, s, log) = renderer_drawn(pitch);
+            store(&mut cpu, &s, A);
+            let one = [format!("read Some({}) 0..64", A / 2)];
+            assert_eq!(reads(&log), one, "pitch {pitch}");
+            for y in [0, 63] {
+                let mut px = [0u8; 4];
+                surface::read_bytes(&mut cpu, &s, y * s.pitch + 4 * 639, &mut px);
+                let want = widen(&s, 0x1234);
+                assert_eq!(u32::from_le_bytes(px), want, "pitch {pitch}, row {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shadow_only_the_renderer_drew_is_loaded_at_once() {
+        // Loading writes all the shadow's rows in one go, so the rows the
+        // renderer is ahead on are caught up once.
+        let (mut cpu, s, log) = renderer_drawn(640 * 4);
+        load(&mut cpu, &s, A);
+        assert_eq!(reads(&log), [format!("read Some({}) 0..64", A / 2)]);
+        let mut shadow = [0xFFu8; 2];
+        screen::read(&cpu, A + 63 * 1280 + 2 * 639, &mut shadow);
+        assert_eq!(shadow, [0, 0], "the surface's pixels, narrowed");
     }
 }

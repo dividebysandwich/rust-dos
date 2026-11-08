@@ -498,6 +498,11 @@ impl D86f {
         Ok(())
     }
 
+    /// Have what was written to the file on the disk.
+    pub fn sync(&self) -> std::io::Result<()> {
+        self.file.as_ref().map_or(Ok(()), File::sync_all)
+    }
+
     pub fn write_at(&self, at: u64, data: &[u8]) -> std::io::Result<()> {
         if !at.is_multiple_of(SECTOR as u64) || !data.len().is_multiple_of(SECTOR) {
             let start = at / SECTOR as u64;

@@ -29,6 +29,31 @@ fn parse_drive_prefix_handles_letters_and_non_ascii() {
 }
 
 #[test]
+fn a_device_name_may_end_in_a_colon() {
+    assert_eq!(char_device("NUL"), Some(CharDevice::Nul));
+    assert_eq!(char_device("nul:"), Some(CharDevice::Nul));
+    assert_eq!(char_device("C:\\GAMES\\CON:"), Some(CharDevice::Con));
+    assert_eq!(char_device("lpt1:"), Some(CharDevice::Prn));
+    assert_eq!(char_device("COM2: "), Some(CharDevice::Com2));
+    assert_eq!(char_device("D:NUL"), Some(CharDevice::Nul));
+    assert_eq!(char_device("C:"), None);
+    assert_eq!(char_device("NULL:"), None);
+    assert_eq!(char_device("NUL::"), None);
+
+    // INT 21h opens the device, and its file table entry is named for it
+    // alone, as when it is opened as "NUL".
+    let mut disk = DiskController::new(scratch("device_colon"));
+    let h = disk.open_file("nul:", 1, PSP).unwrap();
+    assert_eq!(disk.handle_device(h), Some(CharDevice::Nul));
+    assert_eq!(&disk.sft_entry(h).unwrap().name, b"NUL        ");
+    assert!(disk.open_file("EMMXXXX0:", 0, PSP).is_err());
+    disk.emm_device = true;
+    let h = disk.open_file("EMMXXXX0:", 0, PSP).unwrap();
+    assert_eq!(disk.handle_device(h), Some(CharDevice::Emm));
+    assert_eq!(&disk.sft_entry(h).unwrap().name, b"EMMXXXX0   ");
+}
+
+#[test]
 fn long_names_get_dosbox_short_names() {
     let names = [
         "Day Of The Tentacle.BIN",
@@ -76,6 +101,62 @@ fn host_files_are_found_by_long_and_short_name() {
     let files: Vec<String> =
         disk.list_directory(r"C:\CD\*.*", 0).unwrap().into_iter().map(|e| e.filename).collect();
     assert_eq!(files, ["DAYOFT~1.BIN", "DAYOFT~2.CUE"]);
+}
+
+/// A dot that ends a name leaves its extension empty, as DOS packs it:
+/// Menzoberranzan opens its palette as "COLORS.", the file COLORS. The
+/// root is a verbatim path on Windows (`\\?\`), where the host keeps the
+/// dot and finds nothing.
+#[test]
+fn a_dot_that_ends_a_name_leaves_its_extension_empty() {
+    let base = scratch("trailing_dot");
+    fs::create_dir_all(base.join("GAME")).unwrap();
+    fs::write(base.join("COLORS"), b"palette").unwrap();
+    fs::write(base.join("GAME/INIT"), b"init").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("COLORS.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"palette");
+    disk.close_file(h);
+    let h = disk.open_file(r"C:\GAME.\INIT.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"init");
+    disk.close_file(h);
+    assert!(disk.is_file("colors."));
+    assert_eq!(disk.get_file_attribute("COLORS."), Ok(0x20));
+    assert_eq!(disk.qualify_path("COLORS.").as_deref(), Some(r"C:\COLORS"));
+
+    // A file created by such a name gets the name without the dot.
+    let h = disk.create_file("NEW.", PSP).unwrap();
+    disk.close_file(h);
+    assert!(base.join("NEW").is_file());
+    assert_eq!(disk.open_file("MISSING.", 0, PSP), Err(0x02));
+
+    // So do a directory made and a file renamed by such a name.
+    disk.create_directory("SAVES.").unwrap();
+    assert!(base.join("SAVES").is_dir());
+    disk.rename_file("NEW", r"SAVES\MOVED.").unwrap();
+    assert!(base.join("SAVES/MOVED").is_file());
+    assert!(disk.is_file(r"SAVES\MOVED"));
+
+    // "." and ".." padded with spaces are still themselves.
+    assert_eq!(disk.qualify_path(r"GAME\.. \COLORS").as_deref(), Some(r"C:\COLORS"));
+    assert_eq!(disk.qualify_path(r"GAME\. \INIT").as_deref(), Some(r"C:\GAME\INIT"));
+}
+
+/// A host file whose name ends in a dot, as builds that kept the dot
+/// made for "SAVE.", is still found by that name.
+#[test]
+fn a_host_name_that_ends_in_a_dot_is_found_without_it() {
+    let base = scratch("host_trailing_dot");
+    // A verbatim path on Windows, which keeps the dot.
+    let host = fs::canonicalize(&base).unwrap();
+    fs::write(host.join("SAVE."), b"save").unwrap();
+    let mut disk = DiskController::new(base.clone());
+
+    let h = disk.open_file("SAVE.", 0, PSP).unwrap();
+    assert_eq!(disk.read_file(h, 16).unwrap(), b"save");
+    disk.close_file(h);
+    assert!(disk.is_file("save"));
 }
 
 #[test]
@@ -438,6 +519,40 @@ fn an_image_under_an_overlay_keeps_as_it_is() {
     assert!(disk.open_file(r"D:\GAME.TXT", 0, PSP).is_err());
 }
 
+/// The delta file beside a hard disk image holds the disk's changes: a
+/// read-only mount shows them, and -inplace leaves them out and says so.
+#[test]
+fn the_delta_file_beside_an_image_is_its_disk() {
+    let base = scratch("image_beside");
+    fs::create_dir_all(base.join("c")).unwrap();
+    let blank = DiskImage::blank_hard_disk("base.img", 8 << 20, Some("BASE")).unwrap();
+    let image = base.join("base.img");
+    blank.copy_to(&image).unwrap();
+    let before = fs::read(&image).unwrap();
+    let mut disk = DiskController::new(base.join("c"));
+    disk.mount(3, &image, MountOptions::default(), true).unwrap();
+    disk.bios_image(3).unwrap().write(5000, &[0xCD; 512]).unwrap();
+    let sector = |disk: &DiskController| {
+        let mut sector = [0u8; 512];
+        disk.bios_image(3).unwrap().read(5000, &mut sector).unwrap();
+        sector
+    };
+
+    let ro = MountOptions { read_only: true, ..MountOptions::default() };
+    disk.mount(3, &image, ro, true).unwrap();
+    assert_eq!(sector(&disk), [0xCD; 512]);
+    assert!(disk.bios_image(3).unwrap().write(5000, &[1; 512]).is_err());
+
+    crate::diskdelta::take_notes();
+    let in_place = MountOptions { in_place: true, ..MountOptions::default() };
+    disk.mount(3, &image, in_place, true).unwrap();
+    assert_eq!(disk.bios_image(3).unwrap().delta_path(), None);
+    assert_eq!(sector(&disk), before[5000 * 512..5001 * 512]);
+    let notes = crate::diskdelta::take_notes();
+    assert!(notes.iter().any(|n| n.contains("-inplace leaves out")), "{:?}", notes);
+    assert_eq!(fs::read(&image).unwrap(), before, "the image as it was");
+}
+
 #[test]
 fn names_padded_with_spaces_are_found_and_opened() {
     let base = scratch("pattern_padding");
@@ -547,22 +662,83 @@ fn floppy_free_space_tracks_usage() {
     assert_eq!(disk.get_disk_free_space(5), Err(0x0F));
 }
 
-/// The built-in Windows sees a folder hard disk as a fake 1 GB one whose
-/// free space drops as files are written, while DOS keeps its 80 MB one.
+/// The built-in Windows sees 3.75 GB free on an empty folder hard disk,
+/// in 4 KB clusters, which drops as files are written, while DOS keeps
+/// its 320 MB disk of 16 KB clusters.
 #[test]
 fn windows_sees_a_larger_hard_disk() {
     let base = scratch("windows_hd");
     fs::create_dir_all(base.join("c")).unwrap();
     let disk = DiskController::new(base.join("c"));
-    assert_eq!(disk.windows_free_space(3), Ok((8, 1 << 18, 512, 1 << 18)));
+    assert_eq!(disk.windows_free_space(3), Ok((8, 0xF_0000, 512, 0xF_0000)));
 
     fs::write(base.join("c/SETUP.DAT"), vec![0u8; 16 * 1024]).unwrap();
     assert_eq!(
         disk.windows_free_space(3),
-        Ok((8, (1 << 18) - 4, 512, 1 << 18))
+        Ok((8, 0xF_0000 - 4, 512, 0xF_0000))
     );
-    assert_eq!(disk.get_disk_free_space32(3), Ok((8, 19996, 512, 20000)));
+    assert_eq!(disk.get_disk_free_space32(3), Ok((32, 19999, 512, 20000)));
     assert_eq!(disk.windows_free_space(5), Err(0x0F));
+}
+
+/// The built-in Windows counts a CD in clusters of 16 sectors, as many
+/// as fill the volume its primary descriptor gives, none of them free:
+/// Windows 98 SE gives Drakan's disc of 199641 sectors as 16 sectors of
+/// 2048 bytes, 0 free and 12477 in all. DOS keeps single sectors.
+#[test]
+fn windows_counts_a_cd_in_32_kb_clusters() {
+    let base = scratch("windows_cd");
+    let mut disk = DiskController::new(base.clone());
+    let mut disc = crate::cdrom::iso9660::joliet_disc();
+    let pvd = 16 * 2048;
+    disc[pvd + 80..pvd + 84].copy_from_slice(&199_641u32.to_le_bytes());
+    disk.mount_memory_image(3, "DRAKAN.ISO", disc.into(), cdrom())
+        .unwrap();
+    assert_eq!(disk.windows_free_space(4), Ok((16, 0, 2048, 12477)));
+    assert_eq!(disk.get_disk_free_space32(4), Ok((1, 0, 2048, 0xFFFF)));
+
+    // A folder's disc holds its files.
+    fs::create_dir_all(base.join("e")).unwrap();
+    fs::write(base.join("e/DATA.BIN"), vec![0u8; 64 * 2048]).unwrap();
+    disk.mount(4, &base.join("e"), cdrom(), false).unwrap();
+    let (spc, free, bps, total) = disk.windows_free_space(5).unwrap();
+    assert_eq!((spc, free, bps), (16, 0, 2048));
+    assert!((4..=5).contains(&total), "{total}");
+}
+
+/// A file on a CD image can't have its attributes changed: access
+/// denied, which Drakan's CD check asks of its icon on the disc. A name
+/// the disc hasn't is not found, and one in a directory the disc hasn't
+/// is path not found, to getting attributes and setting them alike.
+#[test]
+fn a_cd_image_file_denies_new_attributes() {
+    let mut disk = DiskController::new(scratch("cd_attributes"));
+    let disc = crate::cdrom::iso9660::joliet_disc();
+    disk.mount_memory_image(3, "JOLIET.ISO", disc.into(), cdrom())
+        .unwrap();
+    assert_eq!(disk.set_file_attribute("D:\\README.TXT", 0), Err(0x05));
+    assert_eq!(disk.set_file_attribute("D:\\PROGRAM_", 0), Err(0x05));
+    assert_eq!(disk.set_file_attribute("D:\\NONE.TXT", 0), Err(0x02));
+    assert_eq!(disk.set_file_attribute("D:\\NODIR\\A.TXT", 0), Err(0x03));
+    assert_eq!(disk.get_file_attribute("D:\\NONE.TXT"), Err(0x02));
+    assert_eq!(disk.get_file_attribute("D:\\NODIR\\A.TXT"), Err(0x03));
+}
+
+/// The built-in Windows's free space of a folder hard disk stays between
+/// 1.75 GB and 3.75 GB in 4 KB clusters, below 4 GB, however much the
+/// folder holds, and drops by each cluster written.
+#[test]
+fn windows_free_space_stays_between_1_75_and_3_75_gb() {
+    use super::search::windows_hard_disk_free as free;
+    const GB: u64 = 1 << 18;
+    assert_eq!(free(0), 0xF_0000);
+    assert_eq!(free(1), 0xF_0000 - 1);
+    assert_eq!(free(2 * GB - 1), 0x7_0001);
+    assert_eq!(free(2 * GB), 0xF_0000);
+    for used in (0..20 * GB).step_by(12_345) {
+        let f = free(used) as u64;
+        assert!((0x7_0001..=0xF_0000).contains(&f), "{used}: {f}");
+    }
 }
 
 #[test]
@@ -611,7 +787,7 @@ fn floppies_have_a_1_44_mb_diskette_layout() {
 
     let hdd = DriveKind::HardDisk.layout();
     assert_eq!((hdd.sectors_per_fat, hdd.fs_type()), (79, b"FAT16   "));
-    assert_eq!(hdd.total_sectors(), 191 + 8 * 20000);
+    assert_eq!(hdd.total_sectors(), 191 + 32 * 20000);
     let bpb = hdd.bpb();
     assert_eq!((bpb[0x08], bpb[0x09], bpb[0x0A]), (0, 0, 0xF8));
     assert_eq!(u32::from_le_bytes(bpb[0x15..0x19].try_into().unwrap()), hdd.total_sectors());
@@ -1584,4 +1760,72 @@ fn an_open_system_file_reads_as_the_files_shown() {
     // Then the state's version of Windows shows other files.
     loaded.set_system_files(r"C:\WINDOWS\SYSTEM", shown(b"MZ98"));
     assert_eq!(loaded.read_file(h, 2).unwrap(), b"98");
+}
+
+#[test]
+fn a_created_long_name_keeps_its_case_and_a_short_one_is_uppercased() {
+    let root = scratch("create_keeps_long_case");
+    let mut disk = DiskController::new(root.clone());
+    for name in [r"C:\level0_Final.dat", r"C:\readme.txt"] {
+        let handle = disk.create_file(name, PSP).unwrap();
+        disk.close_file(handle);
+    }
+    disk.rename_file(r"C:\README.TXT", r"C:\Read Me First.txt").unwrap();
+    let mut names: Vec<String> =
+        fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["Read Me First.txt", "level0_Final.dat"]);
+    // Opening it again in another case finds it, as on Windows.
+    assert!(disk.is_file(r"C:\LEVEL0_FINAL.DAT"));
+}
+
+/// Where the host's own file pointer of the host file open at `sft` is,
+/// asked of the host.
+fn host_pointer(disk: &DiskController, sft: u16) -> u64 {
+    let OpenData::Host(file, _) = &disk.open_files[&sft].data else {
+        panic!("not a host file")
+    };
+    (&file.file).stream_position().unwrap()
+}
+
+#[test]
+fn a_host_file_position_kept_without_asking_the_host_follows_its_pointer() {
+    let base = scratch("host_position");
+    fs::write(base.join("DATA.PAK"), b"0123456789").unwrap();
+    let mut disk = DiskController::new(base.clone());
+    let h = disk.open_file(r"C:\DATA.PAK", 0x02, PSP).unwrap();
+    let other = disk.open_file(r"C:\DATA.PAK", 0x00, PSP).unwrap();
+    let check = |disk: &DiskController, sft: u16, at: u64| {
+        assert_eq!(disk.position(sft), Some(at));
+        assert_eq!(host_pointer(disk, sft), at);
+    };
+    check(&disk, h, 0);
+    assert_eq!(disk.read_file(h, 4).unwrap(), b"0123");
+    check(&disk, h, 4);
+    // A seek to where the pointer is, as a program that saves and
+    // restores the position does, and one from there by nothing.
+    assert_eq!(disk.seek_file(h, 4, 0), Ok(4));
+    assert_eq!(disk.seek_file(h, 0, 1), Ok(4));
+    check(&disk, h, 4);
+    assert_eq!(disk.write_file(h, b"ab"), Ok(2));
+    check(&disk, h, 6);
+    // Each handle has a pointer of its own.
+    check(&disk, other, 0);
+    assert_eq!(disk.read_file(other, 6).unwrap(), b"0123ab");
+    check(&disk, other, 6);
+    check(&disk, h, 6);
+    assert_eq!(disk.seek_file(h, -1, 2), Ok(9));
+    check(&disk, h, 9);
+    // Cutting the file leaves the pointer past its end, and a read there
+    // reads nothing and moves nothing.
+    assert_eq!(disk.set_file_size(h, 3), Ok(()));
+    check(&disk, h, 9);
+    assert_eq!(disk.read_file(h, 4).unwrap(), b"");
+    check(&disk, h, 9);
+    // A seek before the start fails and leaves the pointer.
+    assert_eq!(disk.seek_file(h, -20, 1), Err(0x19));
+    check(&disk, h, 9);
+    assert_eq!(disk.seek_file(h, 1, 0), Ok(1));
+    assert_eq!(disk.read_file(h, 4).unwrap(), b"12");
+    check(&disk, h, 3);
 }

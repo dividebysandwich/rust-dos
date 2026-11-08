@@ -40,13 +40,13 @@ pub mod lfb;
 pub mod mem;
 pub mod mirror;
 pub mod overlay;
-pub mod pages;
 pub mod raster;
 pub mod register;
 pub mod regs;
 pub mod setup;
 pub mod tables;
 pub mod texture;
+pub mod tracker;
 pub mod tsu;
 pub mod workers;
 
@@ -359,6 +359,51 @@ pub struct Effect {
     pub settle: bool,
 }
 
+/// Where jobs draw (`Voodoo::drawn`): colour buffers by their word
+/// offset, and the byte ranges of texture data queued, each with the
+/// batch of the latest job there.
+#[derive(Default)]
+struct Drawn {
+    buffers: Vec<(usize, u64)>,
+    bytes: Vec<(u32, u64, u64)>,
+}
+
+/// A place a job draws into (`Voodoo::note_drawn`).
+pub(crate) enum Place {
+    Buffer(usize),
+    Bytes(u32, u64),
+}
+
+impl Drawn {
+    fn note(&mut self, place: Place, batch: u64) {
+        match place {
+            Place::Buffer(dest) => match self.buffers.iter_mut().find(|(d, _)| *d == dest) {
+                Some(entry) => entry.1 = batch,
+                None => self.buffers.push((dest, batch)),
+            },
+            // A texture downloaded again over the same bytes keeps one
+            // entry, as a buffer drawn into again does.
+            Place::Bytes(at, len) => {
+                match self.bytes.iter_mut().find(|(a, l, _)| (*a, *l) == (at, len)) {
+                    Some(entry) => entry.2 = batch,
+                    None => self.bytes.push((at, len, batch)),
+                }
+            }
+        }
+    }
+
+    /// The jobs in batches up to `mark` are drawn with it.
+    fn forget_before(&mut self, mark: u64) {
+        self.buffers.retain(|&(_, batch)| batch > mark);
+        self.bytes.retain(|&(_, _, batch)| batch > mark);
+    }
+
+    fn clear(&mut self) {
+        self.buffers.clear();
+        self.bytes.clear();
+    }
+}
+
 /// A swap waiting for the vertical retrace it is due at: the retrace's
 /// number (`CrtTiming::retraces`) and when it begins, in PIT ticks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -572,6 +617,18 @@ pub struct Voodoo {
     /// they last finished.
     pool: workers::Pool,
     drawn_to: Vec<usize>,
+    /// What the picture shown needs drawn (`catch_up_shown`): the last
+    /// batch given out before the swap that showed it. None where that
+    /// isn't known: no swap since a load or a reset, or jobs held back
+    /// then.
+    front_jobs: Option<u64>,
+    /// The same for each Banshee swap waiting for its retrace, beside
+    /// its `overlay_queue`.
+    swap_marks: VecDeque<Option<u64>>,
+    /// Where the jobs given out or waiting since the workers last
+    /// finished draw (`note_drawn`), each with the batch of the latest
+    /// job there: one after `front_jobs` if it is a later batch.
+    drawn: RefCell<Drawn>,
     /// Jobs were given to the workers since they last finished, and the
     /// texture units queued triangles read.
     outstanding: Cell<bool>,
@@ -601,23 +658,19 @@ pub struct Voodoo {
     /// With `voodoo_readback=gpu`: whether the renderer's pictures of the
     /// buffers are what reads of them get (`gpu_reads`), whether the
     /// memory is behind them (jobs since were left to the renderer
-    /// alone), whether the program used alpha planes, which the renderer
-    /// keeps where they can't be read back, and the read backs and the
-    /// jobs left to the renderer, for the debugger.
+    /// alone; which bytes are, the tracker in `gpu` keeps), and the read
+    /// backs and the jobs left to the renderer, for the debugger. Whether
+    /// the renderer has the alpha planes the program read, the recording
+    /// keeps (`gpu_alpha`).
     gpu_reads: bool,
     gpu_behind: Cell<bool>,
-    /// The buffers behind the renderer (`gpu_behind`), by their key in
-    /// the recording (a colour buffer's word offset, None for the
-    /// auxiliary buffer), and rows of each that are, apart from one
-    /// another.
-    gpu_stale: RefCell<Vec<gpu::Stale>>,
-    gpu_alpha: Cell<bool>,
     gpu_read_backs: Cell<u64>,
     /// What the reads back covered (`gpu::ReadRows`).
     gpu_rows: RefCell<gpu::ReadRows>,
     gpu_only: Cell<u64>,
-    /// The renderer's copy of a Banshee's memory: which pages it lacks
-    /// (`banshee_scanout`) and which only it has (`gpu`).
+    /// What the renderer has of the card's memory (`tracker`): which
+    /// pages of a Banshee's memory it lacks (`banshee_scanout`), and which
+    /// bytes only it has, in its copy of the memory or in its 3D buffers.
     gpu: RefCell<gpu::Gpu>,
     /// A Banshee's picture changed, which the software picture took
     /// first (`prepare_display`), so the renderer's scanout still has to
@@ -626,7 +679,7 @@ pub struct Voodoo {
     /// Messages already logged once.
     logged: u32,
     /// Where the card's accesses are recorded (`RUST_DOS_VOODOO_RECORD`),
-    /// for `tests/voodoo_tests.rs` to replay and compare.
+    /// for `tests/video/voodoo_tests.rs` to replay and compare.
     recorder: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>>,
     /// Lines for the log, which the bus writes out.
     pub log: Vec<String>,
@@ -701,6 +754,9 @@ impl Voodoo {
             palette_dirty: true,
             pool: workers::Pool::new(workers),
             drawn_to: Vec::new(),
+            front_jobs: None,
+            swap_marks: VecDeque::new(),
+            drawn: RefCell::new(Drawn::default()),
             outstanding: Cell::new(false),
             tmu_in_use: Cell::new(0),
             footprint: RefCell::new(Footprint::default()),
@@ -714,8 +770,6 @@ impl Voodoo {
             mirror: RefCell::new(None),
             gpu_reads: false,
             gpu_behind: Cell::new(false),
-            gpu_stale: RefCell::new(Vec::new()),
-            gpu_alpha: Cell::new(false),
             gpu_read_backs: Cell::new(0),
             gpu_rows: RefCell::default(),
             gpu_only: Cell::new(0),
@@ -763,7 +817,9 @@ impl Voodoo {
         self.blt_queue_stale();
         self.pool.reset_stats();
         self.counters_read.set(false);
-        self.gpu_alpha.set(false);
+        if let Some(mirror) = self.mirror.get_mut() {
+            mirror.forget_alpha_lost();
+        }
         self.reg.fill(0);
         self.pci = PciConfig::default();
         self.dac = [0; 8];
@@ -772,6 +828,8 @@ impl Voodoo {
         self.stats = Stats::default();
         self.clut = default_clut();
         self.swaps.clear();
+        self.swap_marks.clear();
+        self.front_jobs = None;
         self.last_swap = 0;
         self.fifo_writes = 0;
         self.capped_at = 0;
@@ -898,8 +956,8 @@ impl Voodoo {
         }
     }
 
-    /// Record an access as `tests/voodoo_tests.rs` replays it: a kind and
-    /// three words, little-endian.
+    /// Record an access as `tests/video/voodoo_tests.rs` replays it: a kind
+    /// and three words, little-endian.
     fn record(&self, kind: u8, words: [u32; 3]) {
         use std::io::Write;
         let mut recorder = self.recorder.borrow_mut();
@@ -976,10 +1034,11 @@ impl Voodoo {
     }
 
     /// The same where what comes reads only `ranges` of the memory's
-    /// bytes (`catch_up_in`).
+    /// bytes (`catch_up_in`). The rows of the 3D buffers read back there
+    /// turn hot (`gpu_catch_up_hot`).
     pub(crate) fn flush_in(&mut self, ranges: &[(u32, u32)]) {
-        for &range in ranges {
-            self.gpu_catch_up_in(Some(range));
+        for &(start, end) in ranges {
+            self.gpu_catch_up_hot(start, end);
         }
         self.catch_up_workers();
         self.drawn_to.clear();
@@ -994,7 +1053,10 @@ impl Voodoo {
     /// memory (with None any of it): of the buffers behind the OpenGL
     /// renderer (`gpu_behind`), only the rows there are read back.
     pub(crate) fn catch_up_in(&self, range: Option<(u32, u32)>) {
-        self.gpu_catch_up_in(range);
+        match range {
+            Some((start, end)) => self.gpu_catch_up_hot(start, end),
+            None => self.gpu_catch_up(),
+        }
         self.catch_up_workers();
     }
 
@@ -1005,7 +1067,11 @@ impl Voodoo {
         }
         self.submit_words();
         self.release_backlog();
-        self.pool.flush();
+        {
+            let _zone = crate::profile::zone(crate::profile::Zone::VoodooWait);
+            self.pool.flush();
+        }
+        self.drawn.borrow_mut().clear();
         self.outstanding.set(false);
         self.tmu_in_use.set(0);
         self.footprint.borrow_mut().clear();
@@ -1065,14 +1131,24 @@ impl Voodoo {
     /// Queue `job` after the frame buffer writes before it: held back
     /// with its `access`, or given to the workers.
     pub(crate) fn submit(&self, job: Job, access: Option<Access>) {
-        if access.as_ref().is_some_and(|a| self.gpu_takes(&job, a)) {
-            self.gpu_left(&job);
+        if let Some(bytes) = access.as_ref().and_then(|a| self.gpu_takes(&job, a)) {
+            self.gpu_left(&job, bytes);
             return;
         }
         // Drawn here, over the memory as the renderer has it.
-        self.gpu_catch_up();
+        self.gpu_draws_here(&job);
         if let Job::Triangle { texcount, .. } = &job {
             self.tmu_in_use.set(self.tmu_in_use.get() | ((1u8 << texcount) - 1));
+        }
+        // A job into memory the program reads back every frame (hot) goes
+        // to the workers at once, after those held: the read comes before
+        // the frame ends, and would otherwise wait on this thread for the
+        // whole frame's jobs to be drawn then, instead of the last few.
+        if access.is_some() && self.gpu_job_hot(&job) {
+            self.submit_words();
+            self.release_backlog();
+            self.hand_over([job]);
+            return;
         }
         self.submit_outside(job, access);
     }
@@ -1173,12 +1249,21 @@ impl Voodoo {
             .spare(range, &given_out, |a, b| self.gpu_sync_quiet(a as u32, b as u32))
     }
 
-    /// Whether frame buffer writes have to wait their turn behind jobs.
+    /// Whether frame buffer writes have to wait their turn behind jobs:
+    /// those the workers draw (`workers_queue`), or those left to the
+    /// OpenGL renderer.
     pub(crate) fn writes_queue(&self) -> bool {
+        self.workers_queue() || self.gpu_behind.get()
+    }
+
+    /// Whether jobs or frame buffer writes wait for the workers
+    /// (`catch_up_workers`). A Banshee's read or write of its memory that
+    /// reads back the rows behind the renderer there first (`gpu_sync`)
+    /// needs to catch up only these: the read back catches them up too.
+    fn workers_queue(&self) -> bool {
         self.outstanding.get()
             || !self.words.borrow().is_empty()
             || !self.backlog.borrow().is_empty()
-            || self.gpu_behind.get()
     }
 
     /// Frame buffer writes for the queue (`writes_queue`): held back with
@@ -1372,10 +1457,26 @@ impl Voodoo {
         let words = fbi.ram.len();
         let layout = match recorded {
             Some(key) => {
-                let [a, b, c] = key.color.map(word);
-                let bases = [a, b, c, word(key.aux)];
-                let size = (key.width, key.height);
-                TileLayout::new(bases, size, key.stride, key.aux_stride, words)
+                // The backlog's tiles have one stride and width for the
+                // colour buffers, and three of them: colBufferAddr's, and
+                // the recording's others that share its stride and width,
+                // in the recording's order, which a swap between them
+                // leaves as it is.
+                let current = key.color_at(fbi.rgboffs[0]).or(key.colors().next());
+                let current = current.copied().unwrap_or(mirror::BufferKey::NONE);
+                let mut others = 0;
+                let mut colour = key.colors().filter(|b| {
+                    let take = (b.stride, b.width) == (current.stride, current.width)
+                        && (b.at == current.at || others < 2);
+                    others += (take && b.at != current.at) as usize;
+                    take
+                });
+                let mut bases = [None, None, None, word(key.aux.at)];
+                for slot in &mut bases[..3] {
+                    *slot = colour.next().and_then(|b| word(b.at));
+                }
+                let size = (current.width, key.height);
+                TileLayout::new(bases, size, current.stride, key.aux.stride, words)
             }
             None => {
                 let [a, b, c] = fbi.rgboffs.map(word);
@@ -1483,19 +1584,106 @@ impl Voodoo {
             // Jobs may still be drawing into what it shows. Those that draw
             // elsewhere, into the next frame, go on beside the program.
             if draw && self.writes_queue() {
-                self.flush();
+                self.catch_up_shown();
             }
             return draw;
         }
         // Jobs may still be drawing into the buffer shown.
         let front = self.fbi.rgboffs[self.fbi.frontbuf as usize];
         if front != NONE && self.drawn_to.contains(&(front as usize / 2)) {
-            self.flush();
+            self.catch_up_shown();
         }
         if self.palette_dirty {
             self.build_palette();
         }
         changed || switched
+    }
+
+    /// Wait for the jobs the picture shown needs: those given out before
+    /// the swap that showed it (`front_jobs`). The later ones draw the
+    /// next frame into another buffer, beside the program, unless one of
+    /// them draws into what the card shows now: then, or where the swap's
+    /// jobs aren't known, wait for all of them. What they draw into is
+    /// looked at now, not as they come, so a buffer drawn into while it
+    /// was shown (double buffering's next frame, sent before the retrace
+    /// of its swap) and hidden since doesn't count, and one drawn into
+    /// while hidden and shown since does. Of the later jobs, the queue
+    /// keeps at most half of what it may hold (`Pool::wait_for_shown`).
+    fn catch_up_shown(&mut self) {
+        match self.front_jobs {
+            Some(number)
+                if self.words.borrow().is_empty()
+                    && self.backlog.borrow().is_empty()
+                    && !self.gpu_behind.get()
+                    && !self.drawn_shown(number) =>
+            {
+                self.pool.wait_for_shown(number)
+            }
+            _ => self.flush(),
+        }
+    }
+
+    /// Whether a job in a batch after `number` draws into what the card
+    /// shows.
+    fn drawn_shown(&self, number: u64) -> bool {
+        let drawn = self.drawn.borrow();
+        let mut buffers = drawn.buffers.iter().filter(|&&(_, batch)| batch > number);
+        let mut bytes = drawn.bytes.iter().filter(|&&(_, _, batch)| batch > number);
+        match &self.banshee {
+            Some(b) => {
+                buffers.any(|&(dest, _)| b.shows(dest as u32 * 2))
+                    || bytes.any(|&(at, len, _)| b.shows_bytes(at, Some(len)))
+            }
+            None => {
+                let front = self.color_buffer(0);
+                buffers.any(|&(dest, _)| front == Some(dest))
+            }
+        }
+    }
+
+    /// A swap shows what the jobs up to batch `mark` drew
+    /// (`swap_mark`): what came before it is drawn when the picture is.
+    /// A swap still waiting for its retrace has an earlier mark when one
+    /// is shown at once past it, and what was drawn after its mark stays
+    /// noted for when it shows its buffer.
+    fn shown_up_to(&mut self, mark: Option<u64>) {
+        self.front_jobs = mark;
+        if let Some(mark) = mark {
+            let waiting = self.swap_marks.iter().flatten().copied().min();
+            let drawn = waiting.map_or(mark, |w| w.min(mark));
+            self.drawn.get_mut().forget_before(drawn);
+        }
+    }
+
+    /// The job just submitted draws into `place`: colour buffer `dest`
+    /// (a word offset), or `len` bytes from byte `at`.
+    pub(crate) fn note_drawn(&self, place: Place) {
+        // Frame buffer writes waiting (`words`) go out with the next job
+        // submitted, or at the next swap, in the batch after the last one
+        // given out. Jobs held back for the OpenGL renderer go out in a
+        // batch not known yet, which may come after a swap's from before
+        // the recording: noted as later than any, they hold the picture
+        // until the workers catch up.
+        let batch = if self.deferring() {
+            u64::MAX
+        } else if self.words.borrow().is_empty() {
+            self.pool.latest_batch()
+        } else {
+            self.pool.next_batch()
+        };
+        self.drawn.borrow_mut().note(place, batch);
+    }
+
+    /// The batch the jobs submitted so far end with, given out (with the
+    /// frame buffer writes waiting): what a swap now needs drawn before
+    /// the buffer it shows is. None while jobs are held back for the
+    /// OpenGL renderer, which `catch_up_shown` doesn't wait for apart.
+    pub(crate) fn swap_mark(&self) -> Option<u64> {
+        if self.recording() || !self.backlog.borrow().is_empty() {
+            return None;
+        }
+        self.submit_words();
+        Some(self.pool.mark())
     }
 
     /// Draw the front buffer into `rgba` (RGBA8, `width` pixels a row,
@@ -1641,7 +1829,9 @@ impl Voodoo {
     }
 
     fn swap_now(&mut self, data: u32, now: Now, effect: &mut Effect) {
+        let mark = self.swap_mark();
         self.rotate_buffers();
+        self.shown_up_to(mark);
         let current = self.retraces(now.ns);
         if data & 1 == 0 {
             self.last_swap = current;
@@ -1742,11 +1932,23 @@ impl Voodoo {
         }
     }
 
-    /// The status register (`register_r`'s status case).
+    /// Whether the card's video is in the vertical retrace at `now`. Every
+    /// chip's status register shows it in bit 6, which is clear during the
+    /// retrace and set outside it.
+    fn in_vretrace(&self, now: Now) -> bool {
+        self.timing.status(now.ns) & 0x08 != 0
+    }
+
+    /// The status register (`register_r`'s status case). Bit 6 is set
+    /// outside the vertical retrace and clear during it, as the Voodoo
+    /// and Voodoo2 specifications say. 3dfx's drivers read it that way:
+    /// grSstVRetraceOn in the Voodoo2's glide2x.dll 2.56.00.0456 (driver
+    /// 3.03.00) returns whether `status & 0x40` is 0, and so does the
+    /// vertical blank test of its DirectDraw driver, 3dfx32v2.dll.
     fn status(&self, now: Now) -> u32 {
         let pending = self.pending_swaps(now.ticks) as u32;
         let mut result = 0x3F;
-        if self.timing.status(now.ns) & 0x08 != 0 {
+        if !self.in_vretrace(now) {
             result |= 1 << 6;
         }
         if pending > 0 {
@@ -1783,8 +1985,15 @@ impl Voodoo {
         self.update_timing();
         self.palette_dirty = true;
         self.display_dirty = true;
+        // The swaps' batches were the workers' before the load: each swap
+        // still pending waits for all, and those queued later keep their
+        // place beside `overlay_queue`.
+        let pending = self.banshee.as_ref().map_or(0, |b| b.overlay_queue.len());
+        self.swap_marks = std::iter::repeat_n(None, pending).collect();
+        self.front_jobs = None;
         // The memory loaded is newer than anything on the GPU.
-        self.gpu.get_mut().pages.mark_all();
+        self.gpu.get_mut().tracker.mark_all();
+        self.gpu_behind.set(false);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.invalidate();
             mirror.forget_textures();
@@ -1805,7 +2014,7 @@ impl Voodoo {
             self.release_backlog();
             self.update_tiles();
             // A renderer starting over has none of the picture.
-            self.gpu.get_mut().pages.mark_all();
+            self.gpu.get_mut().tracker.mark_all();
             self.display_dirty = true;
         }
     }
@@ -1861,14 +2070,14 @@ impl Voodoo {
         // pages it changed, which the renderer's copy of the memory may
         // now be read or drawn into at: it gets them again.
         for (start, end) in old.iter().flat_map(|old| old.spans()).map(clamp) {
-            self.gpu.get_mut().pages.mark(start, end);
+            self.gpu.get_mut().tracker.mark(start, end);
         }
         // The software renderer draws the buffers into the memory from
         // now on, where the GPU may have done a 2D operation.
         for (start, end) in key.spans().map(clamp) {
             self.gpu_sync(start, end);
         }
-        let snapshot = self.snapshot(key.layout());
+        let snapshot = self.snapshot(&key);
         if let Some(mirror) = self.mirror.get_mut() {
             mirror.resync(snapshot, key);
         }
@@ -1882,38 +2091,41 @@ impl Voodoo {
             return self.banshee_mirror_key(old);
         }
         let fbi = &self.fbi;
+        let buffer = |offs: u32, stride| mirror::BufferKey::new(offs, stride, fbi.width);
+        let mut color = [mirror::BufferKey::NONE; mirror::COLOR_BUFFERS];
+        for (c, &offs) in color.iter_mut().zip(&fbi.rgboffs) {
+            *c = buffer(offs, fbi.stride);
+        }
+        let aux = buffer(fbi.auxoffs, fbi.aux_stride);
         mirror::LayoutKey {
             width: fbi.width,
-            height: fbi.height,
-            stride: fbi.stride,
-            aux_stride: fbi.aux_stride,
-            color: fbi.rgboffs,
-            aux: fbi.auxoffs,
+            ..mirror::LayoutKey::new(fbi.height, color, aux)
         }
     }
 
-    fn snapshot(&self, layout: mirror::Layout) -> mirror::Snapshot {
+    /// The pixels of `key`'s buffers, each in a picture of the key's
+    /// width: its columns past its own width are 0.
+    fn snapshot(&self, key: &mirror::LayoutKey) -> mirror::Snapshot {
         let ram = &self.fbi.ram;
-        let (width, height) = (layout.width as usize, layout.height as usize);
-        let pixels = |base: u32, stride: raster::Stride| -> Vec<u16> {
+        let (width, height) = (key.width as usize, key.height as usize);
+        let pixels = |b: &mirror::BufferKey| -> Vec<u16> {
+            let (base, stride) = (b.at as usize / 2, b.stride);
+            let own = (b.width as usize).min(width);
             let mut out = Vec::with_capacity(width * height);
             for y in 0..height {
-                let row = base as usize + stride.row(y);
-                out.extend((0..width).map(|x| {
+                let row = base + stride.row(y);
+                out.extend((0..own).map(|x| {
                     let at = row + stride.col(x);
                     if at < ram.len() { ram.get(at) } else { 0 }
                 }));
+                out.resize((y + 1) * width, 0);
             }
             out
         };
         mirror::Snapshot {
-            color: layout
-                .color
-                .iter()
-                .map(|&offs| pixels(offs, layout.stride))
-                .collect(),
-            aux: layout.aux.map(|offs| pixels(offs, layout.aux_stride)),
-            layout,
+            color: key.colors().map(pixels).collect(),
+            aux: key.aux.is_some().then(|| pixels(&key.aux)),
+            layout: key.layout(),
         }
     }
 
@@ -1928,6 +2140,9 @@ impl Voodoo {
                 (front != NONE).then_some(front / 2)
             }
         };
+        // The rows read back cool after a second or so of frames, whether
+        // the card shows its picture or not.
+        self.gpu_frame();
         let output = self.output();
         let scanout = if output && self.banshee.is_some() {
             self.banshee_scanout(&key)
@@ -1956,7 +2171,7 @@ impl Voodoo {
             return;
         };
         // The renderer's copy of the memory gets the pages again.
-        self.gpu.get_mut().pages.mark(start, end);
+        self.gpu.get_mut().tracker.mark(start, end);
         // The texture units read the same memory: what the recording
         // decoded from there is out of date.
         for tmu in &mut self.tmu {
@@ -1983,22 +2198,23 @@ impl Voodoo {
         // are fewer: a tiled buffer's rows come in bands of 32, which a
         // burst into one tile would push whole.
         let rows = key.rows_in(start, end);
+        let width = |dest| key.buffer(dest).map_or(0, |b| b.width);
         let pixels: u64 = rows
             .iter()
-            .map(|&(_, first, last)| (last - first) as u64 * key.width as u64)
+            .map(|&(dest, first, last)| (last - first) as u64 * width(dest) as u64)
             .sum();
         if (end - start).div_ceil(2) as u64 <= pixels {
             by_word(mirror);
             return;
         }
         for (dest, first, last) in rows {
-            let (base, stride) = match dest {
-                Some(offs) => (offs, key.stride),
-                None => (key.aux / 2, key.aux_stride),
+            let Some(&buffer) = key.buffer(dest) else {
+                continue;
             };
+            let (base, stride) = (buffer.at / 2, buffer.stride);
             for y in first..last {
                 let row = base as usize + stride.row(y as usize);
-                for x in 0..key.width {
+                for x in 0..buffer.width {
                     let value = word(row + stride.col(x as usize));
                     mirror.pixel(dest, x, y, value, key.width);
                 }
@@ -2014,16 +2230,24 @@ impl Voodoo {
         let fbi = &self.fbi;
         // The recorded buffers' size: on a Banshee the 3D engine reaches
         // further down than they go (`banshee_buffers`).
-        let (width, height) =
-            mirror.layout().map_or((fbi.width, fbi.height), |k| (k.width, k.height));
-        if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
-            return;
+        let key = mirror.layout().copied();
+        let size = |buffer: Option<u32>| match &key {
+            Some(k) => (k.buffer(buffer).map_or(k.width, |b| b.width), k.height),
+            None => (fbi.width, fbi.height),
+        };
+        let inside = |(width, height): (u32, u32)| {
+            x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height
+        };
+        let dest = Some(dest as u32);
+        if let Some(value) = color
+            && inside(size(dest))
+        {
+            mirror.pixel(dest, x as u32, y as u32, value, size(dest).0);
         }
-        if let Some(value) = color {
-            mirror.pixel(Some(dest as u32), x as u32, y as u32, value, width);
-        }
-        if let Some(value) = aux {
-            mirror.pixel(None, x as u32, y as u32, value, width);
+        if let Some(value) = aux
+            && inside(size(None))
+        {
+            mirror.pixel(None, x as u32, y as u32, value, size(None).0);
         }
     }
 
@@ -2071,7 +2295,9 @@ impl Voodoo {
             "held_jobs": self.backlog.borrow().len(),
             "pruned_jobs": self.backlog.borrow().pruned,
             "catch_ups": self.catch_ups.get(),
+            "queue_full": self.pool.full_waits(),
             "gpu_reads": self.gpu_reads,
+            "gpu_alpha": self.gpu_alpha(),
             "gpu_read_backs": self.gpu_read_backs.get(),
             "gpu_read_rows": self.gpu_rows.borrow().rows,
             "gpu_partial_reads": self.gpu_rows.borrow().partial,

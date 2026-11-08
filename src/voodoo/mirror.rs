@@ -17,7 +17,12 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 /// A vertex: where it is in the buffer in pixels, rows counted from the
 /// top of the buffer (the Y origin applied), and the values the card
 /// iterates there: the colour in 8-bit units, Z in 16-bit units, W, and
-/// each texture unit's S, T and W (16.32 values as numbers).
+/// each texture unit's S, T and W (16.32 values as numbers). The rest is
+/// the triangle's and the same at its three vertices. `lod` is each unit's
+/// level of detail without perspective (8.8, `Tmu::prepare`). `grad` is
+/// each unit's gradients of S, T and W across the screen and down it, from
+/// which a pixel in perspective works out its own level
+/// (`raster::footprint`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vertex {
@@ -25,6 +30,8 @@ pub struct Vertex {
     pub color: [f32; 4],
     pub zw: [f32; 2],
     pub tex: [[f32; 3]; 2],
+    pub lod: [f32; 2],
+    pub grad: [[[f32; 3]; 2]; 2],
 }
 
 /// A texture unit as triangles draw with it.
@@ -45,6 +52,10 @@ pub struct TexUnit {
     pub lodmin: i32,
     pub lodmax: i32,
     pub lodbias: i32,
+    /// The levels the texture has (`TmuRaster::lodmask`), and the fraction
+    /// bits bilinear filtering blends with (`Chip::bilinear_mask`).
+    pub lodmask: u32,
+    pub bilinear_mask: i32,
     pub detailmax: i32,
     pub detailbias: i32,
     pub detailscale: u32,
@@ -117,68 +128,133 @@ pub struct Pixels {
     pub values: Vec<u16>,
 }
 
-/// Where the buffers are: their size in pixels, how their rows lie in
-/// memory (the colour buffers' and the auxiliary buffer's, linear or in
-/// a Banshee's tiles), and the word offsets of the colour buffers and the
-/// auxiliary buffer.
+/// The renderer's pictures of the buffers: their size in pixels, the
+/// same for all of them (as wide as the widest buffer, `LayoutKey`), and
+/// the word offsets of the colour buffers and the auxiliary buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub width: u32,
     pub height: u32,
-    pub stride: Stride,
-    pub aux_stride: Stride,
     pub color: Vec<u32>,
     pub aux: Option<u32>,
 }
 
+/// The most colour buffers a layout has: a Voodoo2's three, and on a
+/// Banshee or Voodoo3 the render targets a program draws into in turn
+/// (`banshee_mirror_key`), such as a game's two back buffers and the
+/// textures it draws into each frame.
+pub const COLOR_BUFFERS: usize = 8;
+
+/// A buffer of a layout: the byte offset of its first pixel (`NONE` for
+/// none), how its rows lie in memory (linear or in a Banshee's tiles),
+/// and its width in pixels. Each buffer has its own, so that a program
+/// that draws into render targets of different widths in turn keeps
+/// them all in one layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferKey {
+    pub at: u32,
+    pub stride: Stride,
+    pub width: u32,
+}
+
+impl BufferKey {
+    pub const NONE: Self = Self {
+        at: NONE,
+        stride: Stride::linear(0),
+        width: 0,
+    };
+
+    pub fn new(at: u32, stride: Stride, width: u32) -> Self {
+        if at == NONE {
+            return Self::NONE;
+        }
+        Self { at, stride, width }
+    }
+
+    pub fn is_some(&self) -> bool {
+        self.at != NONE
+    }
+
+    /// The bytes of the frame buffer its `height` rows take.
+    pub fn span(&self, height: u32) -> (u64, u64) {
+        let base = self.at as u64;
+        (base, base + span(self.stride, height) as u64 * 2)
+    }
+}
+
 /// What the layout is worked out from, which the card compares on every
-/// command without building a `Layout`: the size, the strides and the
-/// byte offsets of the colour buffers and the auxiliary buffer (`NONE`
-/// where there is none).
+/// command without building a `Layout`: the rows the buffers have, the
+/// colour buffers and the auxiliary buffer (`BufferKey::NONE` where there
+/// is none), and the width of the renderer's pictures, the widest
+/// buffer's (`new`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutKey {
     pub width: u32,
     pub height: u32,
-    pub stride: Stride,
-    pub aux_stride: Stride,
-    pub color: [u32; 3],
-    pub aux: u32,
+    pub color: [BufferKey; COLOR_BUFFERS],
+    pub aux: BufferKey,
 }
 
 impl LayoutKey {
+    /// The layout of these buffers, `height` rows each. The renderer
+    /// draws every one of them in a picture as wide as the widest, and
+    /// only a buffer's own columns are its pixels.
+    pub fn new(height: u32, color: [BufferKey; COLOR_BUFFERS], aux: BufferKey) -> Self {
+        let buffers = color.iter().chain([&aux]).filter(|b| b.is_some());
+        Self {
+            width: buffers.map(|b| b.width).max().unwrap_or(0).max(1),
+            height,
+            color,
+            aux,
+        }
+    }
+
+    /// The colour buffers there are.
+    pub fn colors(&self) -> impl Iterator<Item = &BufferKey> + '_ {
+        self.color.iter().filter(|b| b.is_some())
+    }
+
+    /// The colour buffer whose first byte is `at`, if there is one.
+    pub fn color_at(&self, at: u32) -> Option<&BufferKey> {
+        self.colors().find(|b| b.at == at)
+    }
+
+    /// The buffer with key `key` in the recording (`buffers`): a colour
+    /// buffer by its word offset, or with None the auxiliary buffer.
+    pub fn buffer(&self, key: Option<u32>) -> Option<&BufferKey> {
+        match key {
+            Some(offs) => self.color_at(offs.checked_mul(2)?),
+            None => Some(&self.aux).filter(|b| b.is_some()),
+        }
+    }
+
     pub fn layout(&self) -> Layout {
         Layout {
             width: self.width,
             height: self.height,
-            stride: self.stride,
-            aux_stride: self.aux_stride,
-            color: self
-                .color
-                .iter()
-                .filter(|&&offs| offs != NONE)
-                .map(|&offs| offs / 2)
-                .collect(),
-            aux: (self.aux != NONE).then_some(self.aux / 2),
+            color: self.colors().map(|b| b.at / 2).collect(),
+            aux: self.aux.is_some().then_some(self.aux.at / 2),
         }
     }
 
     /// The buffers: each one's word offset, its key in the recording (the
-    /// offset for a colour buffer, None for the auxiliary buffer) and its
-    /// stride.
-    fn buffers(&self) -> impl Iterator<Item = (u32, Option<u32>, Stride)> + '_ {
-        let color = self.color.iter().filter(|&&offs| offs != NONE);
-        let color = color.map(|&offs| (offs / 2, Some(offs / 2), self.stride));
-        let aux = (self.aux != NONE).then_some((self.aux / 2, None, self.aux_stride));
-        color.chain(aux)
+    /// offset for a colour buffer, None for the auxiliary buffer), its
+    /// stride and its width.
+    fn buffers(&self) -> impl Iterator<Item = (u32, Option<u32>, Stride, u32)> + '_ {
+        let color = self
+            .colors()
+            .map(|b| (b.at / 2, Some(b.at / 2), b.stride, b.width));
+        let aux = Some(self.aux).filter(|b| b.is_some());
+        color.chain(aux.map(|b| (b.at / 2, None, b.stride, b.width)))
     }
 
     /// Where word `at` of the frame buffer is in the buffers: the buffer's
     /// key (`buffers`) and the pixel's column and row, if it is a pixel
     /// of one.
     pub fn locate(&self, at: u32) -> Option<(Option<u32>, u32, u32)> {
-        self.buffers().find_map(|(base, key, stride)| {
+        self.buffers().find_map(|(base, key, stride, width)| {
             let (x, y) = pixel_at(stride, at.checked_sub(base)? as usize)?;
-            (x < self.width && y < self.height).then_some((key, x, y))
+            (x < width && y < self.height).then_some((key, x, y))
         })
     }
 
@@ -190,33 +266,23 @@ impl LayoutKey {
 
     /// The bytes of the frame buffer each buffer takes, first to last.
     pub fn spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.buffers().map(|(base, _, stride)| {
-            let (base, span) = (base as u64 * 2, span(stride, self.height) as u64 * 2);
-            (base, base + span)
-        })
+        let aux = Some(&self.aux).filter(|b| b.is_some());
+        self.colors().chain(aux).map(|b| b.span(self.height))
     }
 
     /// The buffers' rows that bytes `start..end` of the frame buffer may
     /// hold pixels of: the buffer's key (`buffers`) and rows `first..last`.
     pub fn rows_in(&self, start: u32, end: u32) -> Vec<(Option<u32>, u32, u32)> {
         self.buffers()
-            .filter_map(|(base, key, stride)| {
-                let (base, words) = (base as u64 * 2, stride.words.max(1) as u64);
-                let span = span(stride, self.height) as u64 * 2;
-                let (start, end) = ((start as u64).max(base), (end as u64).min(base + span));
+            .filter_map(|(base, key, stride, _)| {
+                let (first, last) = row_bytes(base, stride, (0, self.height));
+                let (start, end) = (start.max(first), end.min(last));
                 if start >= end {
                     return None;
                 }
-                let (w0, w1) = ((start - base) / 2, (end - base).div_ceil(2));
-                // Rows, or with tiles bands of 32 rows.
-                let (r0, r1) = (w0 / words, (w1 - 1) / words + 1);
-                let (r0, r1) = if stride.tiled {
-                    (r0 * 32, r1 * 32)
-                } else {
-                    (r0, r1)
-                };
-                let r1 = r1.min(self.height as u64);
-                (r0 < r1).then_some((key, r0 as u32, r1 as u32))
+                let (r0, r1) = rows_of(base, stride, (start, end));
+                let r1 = r1.min(self.height);
+                (r0 < r1).then_some((key, r0, r1))
             })
             .collect()
     }
@@ -229,6 +295,26 @@ pub fn span(stride: Stride, height: u32) -> usize {
     } else {
         height as usize * stride.words
     }
+}
+
+/// The bytes of the memory rows `top..bottom` of a buffer take, the
+/// buffer at word offset `base` with rows `stride` apart: whole rows, or
+/// in tiles whole bands of 32 rows.
+pub fn row_bytes(base: u32, stride: Stride, (top, bottom): (u32, u32)) -> (u32, u32) {
+    let (unit, per) = (stride.words as u64 * 2, if stride.tiled { 32 } else { 1 });
+    let at = |rows: u64| (base as u64 * 2 + rows * unit).min(u32::MAX as u64) as u32;
+    (at(top as u64 / per), at((bottom as u64).div_ceil(per)))
+}
+
+/// The rows of such a buffer that bytes `start..end` of the memory hold
+/// pixels of, rounded out to whole rows (or bands of 32 rows in tiles).
+/// The bytes are within the buffer: `start` is at or after its first.
+pub fn rows_of(base: u32, stride: Stride, (start, end): (u32, u32)) -> (u32, u32) {
+    let unit = stride.words.max(1) as u64 * 2;
+    let per = if stride.tiled { 32 } else { 1 };
+    let (a, b) = (start as u64 - base as u64 * 2, end as u64 - base as u64 * 2);
+    let rows = |n: u64| (n * per).min(u32::MAX as u64) as u32;
+    (rows(a / unit), rows(b.div_ceil(unit)))
 }
 
 /// The column and row of the pixel `at` words from a buffer's first.
@@ -281,32 +367,71 @@ pub enum Command {
     Texture(Box<Texture>),
     FreeTexture(u32),
     /// Bytes of a Banshee's or Voodoo3's memory of `size` bytes, from
-    /// byte `at` on (whole pages, `pages::PAGE`), for the renderer's copy
+    /// byte `at` on (whole pages, `tracker::PAGE`), for the renderer's copy
     /// of it.
     Memory { size: u32, at: u32, bytes: Vec<u8> },
     /// A 2D operation the renderer does in its copy of the memory, which
     /// the card's memory doesn't get until something reads it there
     /// (`gpu`).
     Blit(Box<Blit>),
+    /// A copy between colour buffers in the renderer's pictures of them,
+    /// which the card's memory doesn't get until the rows are read back.
+    Copy(BufferCopy),
+}
+
+/// A copy of pixels from colour buffer `from` to colour buffer `to` (word
+/// offsets, as `Draw`'s `dest`): `rect` of `to` (left, right, top,
+/// bottom, the right and bottom ones not drawn, as `Fill`'s) gets the
+/// pixels of `from` from (`src[0]`, `src[1]`) on. The two rectangles
+/// share no pixel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferCopy {
+    pub from: u32,
+    pub to: u32,
+    pub src: [u32; 2],
+    pub rect: [u32; 4],
 }
 
 /// A surface in a Banshee's or Voodoo3's memory, for a 2D operation: its
 /// first byte, the bytes from one row to the next, and its bytes a pixel
-/// (1 to 4).
+/// (1 to 4). In tiles (`tiled`), as the 2D engine addresses them, the
+/// rows lie in tiles of 128 bytes by 32 rows, and `stride` is the bytes
+/// from one row of tiles to the next; a pixel is then 1, 2 or 4 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plane {
     pub start: u32,
     pub stride: u32,
     pub bpp: u32,
+    pub tiled: bool,
 }
 
 impl Plane {
-    /// The bytes rows `top..bottom` of columns `left..right` span.
+    /// The byte address of pixel (`x`, `y`), which are not negative.
+    pub fn at(&self, x: u32, y: u32) -> u32 {
+        let x = x * self.bpp;
+        if self.tiled {
+            self.start + (x & 127) + (x >> 7) * 128 * 32 + (y & 31) * 128 + (y >> 5) * self.stride
+        } else {
+            self.start + x + y * self.stride
+        }
+    }
+
+    /// The bytes rows `top..bottom` of columns `left..right` span, first
+    /// to last: in tiles, from the first byte of the first column in the
+    /// first row of its tiles to the last of the last column in the last
+    /// row of its tiles.
     pub fn span(&self, [left, top, right, bottom]: [i32; 4]) -> (u32, u32) {
         let (left, top) = (left.max(0) as u32, top.max(0) as u32);
         let (right, bottom) = (right.max(0) as u32, bottom.max(0) as u32);
         if left >= right || top >= bottom {
             return (self.start, self.start);
+        }
+        if self.tiled {
+            // A byte's place in its row of tiles, which grows with it.
+            let col = |x: u32| (x & 127) + (x >> 7) * 128 * 32;
+            let first = self.start + col(left * self.bpp) + (top >> 5) * self.stride;
+            let last = col(right * self.bpp - 1) + ((bottom - 1) >> 5) * self.stride + 31 * 128;
+            return (first, self.start + last + 1);
         }
         let first = self.start + top * self.stride + left * self.bpp;
         (first, self.start + (bottom - 1) * self.stride + right * self.bpp)
@@ -501,8 +626,8 @@ struct TexKey {
 
 struct Cached {
     id: u32,
-    /// The bytes of texture RAM its levels come from, all of it if they
-    /// wrap.
+    /// The bytes of texture RAM the levels it was decoded from lie in,
+    /// first to last (`TmuRaster::texel_span`), all of it if they wrap.
     start: u32,
     end: u32,
     /// The unit's write count it was last known good at.
@@ -518,6 +643,83 @@ struct LastTexture {
     writes: u32,
     id: u32,
     frame: u64,
+}
+
+/// Where the OpenGL renderer keeps the alpha planes, which the card keeps
+/// in its one auxiliary buffer (`Row::finish`): in the alpha of the
+/// colour buffer drawn into, so of one colour buffer at a time. The
+/// recording and the renderer follow it from the same commands
+/// (`command`), so the card knows which alpha the renderer has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlphaPlanes {
+    /// The colour buffer (its word offset) whose alpha holds what the
+    /// auxiliary buffer holds as alpha planes: the one drawn into by the
+    /// last command that wrote alpha planes there. None while the
+    /// auxiliary buffer holds depth or values the renderer keeps in its
+    /// depth buffer: frame buffer writes, a snapshot, the blitter's or
+    /// the 2D engine's fills.
+    pub owner: Option<u32>,
+}
+
+impl AlphaPlanes {
+    /// Follow `command`: true if it is a triangle that reads alpha planes
+    /// the renderer doesn't have where it draws (`alpha_read`).
+    pub fn command(&mut self, command: &Command) -> bool {
+        match command {
+            Command::Resync(_) => self.owner = None,
+            Command::Draw(draw) => {
+                let s = &draw.state;
+                let missing = match alpha_read(s.fbz_mode, s.alpha_mode, s.aux) {
+                    AlphaRead::None => false,
+                    AlphaRead::Blend => self.owner != Some(s.dest),
+                    AlphaRead::DepthTest => true,
+                };
+                if s.aux && s.fbz_mode & (1 << 10) != 0 {
+                    self.owner = (s.fbz_mode & (1 << 18) != 0).then_some(s.dest);
+                }
+                return missing;
+            }
+            Command::Fill(fill) if fill.aux.is_some() => {
+                self.owner = fill.alpha_planes.then_some(fill.dest);
+            }
+            Command::Pixels(Pixels { dest: None, .. }) => self.owner = None,
+            // The renderer copies the alpha with the colours.
+            Command::Copy(copy) if self.owner == Some(copy.to) => self.owner = None,
+            _ => {}
+        }
+        false
+    }
+}
+
+/// How a triangle drawn with fbzMode `fbz` and alphaMode `am` reads the
+/// alpha planes, which it has (fbzMode bit 18) in an auxiliary buffer if
+/// `aux` (`Row::finish`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlphaRead {
+    None,
+    /// It blends with the destination's alpha: a colour factor of
+    /// ADST_ALPHA, AOMDST_ALPHA or ASATURATE, or the destination's alpha
+    /// added to the alpha it writes. The renderer blends with the alpha
+    /// of the colour buffer drawn into.
+    Blend,
+    /// Its depth test compares with the alpha there, which the renderer
+    /// doesn't do.
+    DepthTest,
+}
+
+fn alpha_read(fbz: u32, am: u32, aux: bool) -> AlphaRead {
+    if fbz & (1 << 18) == 0 || !aux {
+        return AlphaRead::None;
+    }
+    let blend = am & (1 << 4) != 0;
+    let (src, dst, dst_alpha) = ((am >> 8) & 15, (am >> 12) & 15, (am >> 20) & 15);
+    if fbz & (1 << 4) != 0 {
+        AlphaRead::DepthTest
+    } else if blend && (matches!(src, 3 | 7 | 15) || matches!(dst, 3 | 7) || dst_alpha == 4) {
+        AlphaRead::Blend
+    } else {
+        AlphaRead::None
+    }
 }
 
 /// The recording.
@@ -540,6 +742,12 @@ pub struct Mirror {
     /// Each unit's look-up table as hashed last: its change count
     /// (`Tmu::lookup_key`) and the hash of its colours.
     lookups: [(u64, u64); 2],
+    /// Where the renderer keeps the alpha planes, as of the commands
+    /// recorded.
+    alpha: AlphaPlanes,
+    /// A triangle recorded read alpha planes the renderer didn't have
+    /// (`alpha_lost`).
+    alpha_lost: bool,
 }
 
 impl Default for Mirror {
@@ -561,7 +769,23 @@ impl Mirror {
             last_open: 0,
             last_texture: [None; 2],
             lookups: [(0, 0); 2],
+            alpha: AlphaPlanes::default(),
+            alpha_lost: false,
         }
+    }
+
+    /// Whether a triangle recorded since the recording started (or since
+    /// `forget_alpha_lost`) read alpha planes the renderer didn't have: an
+    /// alpha written with another colour buffer, by the CPU or by the
+    /// blitter, or a depth test against them (`AlphaPlanes`). The
+    /// renderer drew it with other values than the card.
+    pub(crate) fn alpha_lost(&self) -> bool {
+        self.alpha_lost
+    }
+
+    /// Start `alpha_lost` over: the card was reset.
+    pub(crate) fn forget_alpha_lost(&mut self) {
+        self.alpha_lost = false;
     }
 
     /// The layout the next command is in: a snapshot first if it is new,
@@ -583,7 +807,9 @@ impl Mirror {
         });
         self.open.clear();
         self.layout = Some(key);
-        self.commands.push(Command::Resync(Box::new(snapshot)));
+        let command = Command::Resync(Box::new(snapshot));
+        self.alpha.command(&command);
+        self.commands.push(command);
     }
 
     /// Take a snapshot before the next command: the memory changed under
@@ -603,7 +829,10 @@ impl Mirror {
 
     fn push(&mut self, command: Command) {
         // The frame buffer writes before a drawing come before it.
-        if matches!(command, Command::Draw(_) | Command::Fill(_) | Command::Blit(_)) {
+        if matches!(
+            command,
+            Command::Draw(_) | Command::Fill(_) | Command::Blit(_) | Command::Copy(_)
+        ) {
             self.close_rows();
         }
         self.push_command(command);
@@ -619,6 +848,7 @@ impl Mirror {
             self.layout = None;
             self.dropped = true;
         }
+        self.alpha_lost |= self.alpha.command(&command);
         self.commands.push(command);
     }
 
@@ -639,6 +869,11 @@ impl Mirror {
     /// A 2D operation for the renderer to do in its copy of the memory.
     pub(crate) fn blit(&mut self, blit: Blit) {
         self.push(Command::Blit(Box::new(blit)));
+    }
+
+    /// A copy between colour buffers for the renderer to do.
+    pub(crate) fn copy(&mut self, copy: BufferCopy) {
+        self.push(Command::Copy(copy));
     }
 
     /// Whether commands were dropped since the last call, with the memory
@@ -677,6 +912,10 @@ impl Mirror {
         let state = draw_state(st, stipple, tmu);
         let flip = st.fbz_mode & (1 << 17) != 0;
         let (ax, ay) = ((p.ax >> 4) as f64, (p.ay >> 4) as f64);
+        let number = |d: i64| (d as f64 / 4_294_967_296.0) as f32;
+        let grad = p.tmu.map(|q| {
+            [[q.dsdx, q.dtdx, q.dwdx], [q.dsdy, q.dtdy, q.dwdy]].map(|d| d.map(number))
+        });
         let vertices = verts.map(|(x, y)| {
             // The card iterates from vertex A's pixel, sampling each pixel
             // at its top left corner; here the values are at the vertex.
@@ -699,6 +938,8 @@ impl Mirror {
                 ],
                 zw: [color(p.startz, p.dzdx, p.dzdy), wide(p.startw, p.dwdx, p.dwdy)],
                 tex,
+                lod: p.tmu.map(|q| q.lodbase as f32),
+                grad,
             }
         });
         // LFB writes between identical draws must stay between them,
@@ -797,8 +1038,7 @@ impl Mirror {
     /// The texture unit `unit` draws with, decoded if it isn't yet or its
     /// RAM or colours changed since.
     fn texture(&mut self, unit: usize, t: &TmuRaster, tmu: &Tmu) -> TexUnit {
-        let first = (t.lodmin >> 8).clamp(0, 8);
-        let last = (t.lodmax >> 8).clamp(first, 8);
+        let (first, last) = t.levels();
         let key = TexKey {
             unit: unit as u8,
             base: t.lodoffset[0],
@@ -821,6 +1061,8 @@ impl Mirror {
             lodmin: t.lodmin,
             lodmax: t.lodmax,
             lodbias: t.lodbias,
+            lodmask: t.lodmask,
+            bilinear_mask: t.bilinear_mask,
             detailmax: t.detailmax,
             detailbias: t.detailbias,
             detailscale: t.detailscale,
@@ -865,8 +1107,8 @@ impl Mirror {
                     self.next_id = self.next_id.wrapping_add(1).max(1);
                     self.next_id
                 });
-                let (start, end) = (t.lodoffset[0], t.lodoffset[8].wrapping_add(8));
-                let (start, end) = if end > start && end <= t.mask + 1 { (start, end - 1) } else { (0, t.mask) };
+                let (start, end) = t.texel_span();
+                let (start, end) = (start as u32, end.saturating_sub(1) as u32);
                 self.textures.insert(key, Cached { id, start, end, good_at: tmu.writes, used: frame });
                 self.push(Command::Texture(Box::new(Texture { id, levels: decode(t, first, last) })));
                 id
@@ -961,11 +1203,7 @@ pub fn decode(t: &TmuRaster, first: i32, last: i32) -> Vec<Level> {
     (first..=last)
         .map(|level| {
             let (width, height) = ((t.wmask >> level) + 1, (t.hmask >> level) + 1);
-            let mut source = level;
-            if (t.lodmask >> source) & 1 == 0 {
-                source += 1;
-            }
-            let source = source.clamp(0, 8);
+            let source = t.level_read(level);
             let shift = source - level;
             let (smax, tmax) = (t.wmask >> source, t.hmask >> source);
             let texbase = t.lodoffset[source as usize];
@@ -995,14 +1233,48 @@ mod tests {
         } else {
             Stride::linear(100)
         };
-        LayoutKey {
-            width: 96,
-            height: 40,
-            stride,
-            aux_stride: Stride::linear(64),
-            color: [0x1_0000, NONE, NONE],
-            aux: 0x4_0000,
-        }
+        let mut color = [BufferKey::NONE; COLOR_BUFFERS];
+        color[0] = BufferKey::new(0x1_0000, stride, 96);
+        LayoutKey::new(40, color, BufferKey::new(0x4_0000, Stride::linear(64), 64))
+    }
+
+    #[test]
+    fn the_alpha_planes_follow_what_writes_the_auxiliary_buffer() {
+        let fill = |aux, alpha_planes| {
+            Command::Fill(Fill {
+                dest: 8,
+                rect: [0, 4, 0, 4],
+                color: None,
+                aux,
+                alpha_planes,
+                pattern: None,
+            })
+        };
+        let pixels = |dest| Command::Pixels(Pixels { dest, x: 0, y: 0, values: vec![0] });
+        let mut a = AlphaPlanes::default();
+        a.command(&fill(Some(0x80), true));
+        assert_eq!(a.owner, Some(8));
+        // Colours alone leave them.
+        a.command(&fill(None, false));
+        a.command(&pixels(Some(8)));
+        assert_eq!(a.owner, Some(8));
+        // The blitter's or the 2D engine's fill of the auxiliary buffer.
+        a.command(&fill(Some(0x80), false));
+        assert_eq!(a.owner, None);
+        // Frame buffer writes there, which the renderer keeps as depth.
+        a.command(&fill(Some(0x80), true));
+        a.command(&pixels(None));
+        assert_eq!(a.owner, None);
+        // A copy into the buffer brings the alpha of the one copied.
+        a.command(&fill(Some(0x80), true));
+        let copy = BufferCopy {
+            from: 16,
+            to: 8,
+            src: [0, 0],
+            rect: [0, 4, 0, 4],
+        };
+        a.command(&Command::Copy(copy));
+        assert_eq!(a.owner, None);
     }
 
     #[test]

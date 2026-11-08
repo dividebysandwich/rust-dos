@@ -116,8 +116,9 @@ const TANDY_BIOS_NAME: &[u8] = b"!BIOS ROM version 02.00.00\r\nCompatibility Sof
 
 /// What says which machine this is, for the display adapter `bus` has:
 /// the model byte at F000:FFFE (FFh a Tandy 1000, FDh a PCjr, FCh an AT),
-/// the Tandy's BIOS name at F000:C000, and the base memory (BDA 0413h),
-/// less the video memory at the top of 640 KB on a Tandy.
+/// the Tandy's BIOS name at F000:C000, the base memory (BDA 0413h), less
+/// the video memory at the top of 640 KB on a Tandy, and the total memory
+/// (BDA 0415h), which a Tandy's or PCjr's BIOS keeps and others leave 0.
 pub fn set_machine_id(bus: &mut Bus) {
     let adapter = bus.vga.adapter;
     let model = match adapter {
@@ -133,6 +134,16 @@ pub fn set_machine_id(bus: &mut Bus) {
     write_rom(bus, TANDY_SIGNATURE, &name);
     let kb = crate::mcb::conventional_end(bus) / 64;
     bus.write_16(0x0413, kb);
+    // The PCjr's BIOS keeps the memory installed, video memory included,
+    // in KB at 40:15h (TRUE_MEM), and the Tandy 1000's does too, as
+    // DOSBox has them. Civilization's Tandy driver takes 40:13h from it to
+    // find how much video memory past DOS's blocks it can use. An AT keeps
+    // no size there.
+    let total = match adapter {
+        Adapter::Tandy | Adapter::Pcjr => crate::mcb::END_OF_CONVENTIONAL / 64,
+        _ => 0,
+    };
+    bus.write_16(0x0415, total);
 }
 
 fn write_rom(bus: &mut Bus, offset: u16, code: &[u8]) {

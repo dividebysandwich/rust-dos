@@ -21,6 +21,7 @@ const DEVICES: u32 = 0;
 const DEVICES_EX: u32 = 1;
 const MODES: u32 = 2;
 const SURFACES: u32 = 3;
+const CREATABLE: u32 = 4;
 
 /// The task's variables: the kind, the callback, its context, the size
 /// of the descriptions it gets, where the list is at, and the items.
@@ -146,7 +147,7 @@ const DDENUMSURFACES_CANBECREATED: u32 = 0x8;
 const DDENUMSURFACES_DOESEXIST: u32 = 0x10;
 
 /// EnumSurfaces(this, flags, desc, context, callback): the surfaces
-/// that exist. Those that could be made aren't listed.
+/// that exist, or the one that could be made.
 pub fn enum_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let [this, flags, desc_at, context, callback] = args[..] else {
         return Some(DDERR_INVALIDPARAMS);
@@ -160,11 +161,11 @@ pub fn enum_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     if which.count_ones() != 1 || how.count_ones() != 1 {
         return Some(DDERR_INVALIDPARAMS);
     }
-    if how == DDENUMSURFACES_CANBECREATED {
-        return Some(DD_OK);
-    }
     let version = super::version(vtable);
     let size = if version >= 4 { 124 } else { 108 };
+    if how == DDENUMSURFACES_CANBECREATED {
+        return can_be_created(cpu, dd, version, which, desc_at, [context, callback]);
+    }
     let filter = if which != DDENUMSURFACES_ALL {
         hr!(surface::desc_size(cpu, desc_at, version));
         Some(Desc::read(cpu, desc_at, size))
@@ -188,6 +189,66 @@ pub fn enum_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         }
     }
     task::start(cpu, task::DDRAW_ENUM, vars, SCRATCH)
+}
+
+/// EnumSurfaces with DDENUMSURFACES_CANBECREATED: "the first surface
+/// that can be created and meets the search criterion", which only
+/// DDENUMSURFACES_MATCH may give (the DirectX 7 SDK). As in Wine's
+/// ddraw7_EnumSurfaces, the surface is made, 512 wide or high where the
+/// description has no size, and the callback gets NULL for it with the
+/// made surface's description, so with the size, pitch and pixel format
+/// CreateSurface would choose. The surface goes after the callback. One
+/// that can't be made gives no callback, and the function still returns
+/// DD_OK. RenderWare 3's Direct3D 7 driver (Zanzarah) learns this way
+/// which texture formats it has, and without them makes no textures.
+fn can_be_created(
+    cpu: &mut Cpu,
+    dd: u32,
+    version: u32,
+    which: u32,
+    desc_at: u32,
+    [context, callback]: [u32; 2],
+) -> Option<u32> {
+    if which != DDENUMSURFACES_MATCH {
+        return Some(DDERR_INVALIDPARAMS);
+    }
+    let size = hr!(surface::desc_size(cpu, desc_at, version));
+    let mut desc = Desc::read(cpu, desc_at, size);
+    for (flag, side) in [
+        (surface::DDSD_WIDTH, &mut desc.width),
+        (surface::DDSD_HEIGHT, &mut desc.height),
+    ] {
+        if desc.flags & flag == 0 {
+            desc.flags |= flag;
+            *side = 512;
+        }
+    }
+    let level = super::directdraw::ddraw(cpu, dd).map_or(0, |d| d.level);
+    let made = if level == 0 {
+        None
+    } else {
+        surface::make(cpu, dd, version, level, &desc).ok()
+    };
+    let Some(&root) = made.as_ref().and_then(|ids| ids.first()) else {
+        return Some(DD_OK);
+    };
+    let vars = vec![CREATABLE, callback, context, size, 0, root];
+    task::start(cpu, task::DDRAW_ENUM, vars, SCRATCH)
+}
+
+/// The surface DDENUMSURFACES_CANBECREATED made to the callback, then
+/// away.
+fn creatable(cpu: &mut Cpu, t: &mut Task) -> Next {
+    let root = t.var(ITEMS);
+    if t.step == 0 {
+        let size = t.var(DESC_SIZE);
+        if let Some(s) = state(cpu).surface(root).cloned() {
+            s.desc(size).write(cpu, t.scratch, size);
+            return Next::call(t.var(CALLBACK), &[0, t.scratch, t.var(CONTEXT)], 1);
+        }
+    }
+    super::destroy(cpu, root);
+    Next::Done(DD_OK)
 }
 
 /// Whether the surface `s` is what the description `f` asks for.
@@ -230,6 +291,7 @@ pub fn enum_attached_surfaces(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 pub fn step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     match t.var(KIND) {
         DEVICES | DEVICES_EX => devices(cpu, t, value),
+        CREATABLE => creatable(cpu, t),
         _ => list(cpu, t, value),
     }
 }

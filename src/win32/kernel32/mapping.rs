@@ -3,7 +3,8 @@
 //! view of a mapping is at the same address, in each process and in one
 //! process however often it maps it, and views look to VirtualQuery as
 //! private memory reserved with PAGE_NOACCESS. A mapping of a file has
-//! the file's contents, written back to it when a view goes and with
+//! the file's contents, read from it a page at a time when the pages are
+//! first touched, and written back to it when a view goes and with
 //! FlushViewOfFile. Windows 95 doesn't check a handle's access; the
 //! mapping's protection says what views may do.
 
@@ -47,7 +48,8 @@ fn sft_of_handle(cpu: &mut Cpu, dos: u16) -> Option<u16> {
     crate::dos_files::sft_of(&mut cpu.bus, psp, dos)
 }
 
-/// Write a file mapping's pages back to its file, if it may write it.
+/// Write a file mapping's pages back to its file, if it may write it:
+/// those read from it, since the others are as the file has them.
 fn write_back(cpu: &mut Cpu, index: usize) {
     let Some(Some(section)) = cpu.bus.win32.sections.get(index) else {
         return;
@@ -55,32 +57,47 @@ fn write_back(cpu: &mut Cpu, index: usize) {
     let (Some((_, sft)), PAGE_READWRITE) = (section.file, section.protect) else {
         return;
     };
-    let mut data = Vec::with_capacity(section.size as usize);
+    // The runs of pages read: their offset in the file and contents.
+    let mut runs: Vec<(u32, Vec<u8>)> = Vec::new();
     for (i, &phys) in section.pages.iter().enumerate() {
-        let len = (section.size - i as u32 * PAGE).min(PAGE);
-        data.extend((0..len).map(|b| cpu.bus.read_8((phys + b) as usize)));
+        if phys == 0 {
+            continue;
+        }
+        let offset = i as u32 * PAGE;
+        let len = (section.size - offset).min(PAGE);
+        let bytes = (0..len).map(|b| cpu.bus.read_8((phys + b) as usize));
+        match runs.last_mut() {
+            Some((at, data)) if *at + data.len() as u32 == offset => data.extend(bytes),
+            _ => runs.push((offset, bytes.collect())),
+        }
     }
     let disk = &mut cpu.bus.disk;
     let Ok(position) = disk.seek_file(sft, 0, 1) else {
         return;
     };
-    if disk.seek_file(sft, 0, 0).is_ok() {
-        let _ = disk.write_file(sft, &data);
+    for (offset, data) in runs {
+        if disk.seek_file(sft, offset as i64, 0).is_ok() {
+            let _ = disk.write_file(sft, &data);
+        }
     }
     let _ = disk.seek_file(sft, position as i64, 0);
 }
 
 /// Let go of the mappings whose objects are gone and that no running
 /// process has a view of: their pages go back to the pool, their files
-/// written back.
-pub(super) fn sweep(cpu: &mut Cpu) {
+/// written back. Whether it changed anything, which an idle proof can't
+/// follow; it runs after every call, and most often finds nothing.
+pub(super) fn sweep(cpu: &mut Cpu) -> bool {
     let running: Vec<u32> = cpu.bus.win32.processes.iter().map(|p| p.id).collect();
+    let mut changed = false;
     for index in 0..cpu.bus.win32.sections.len() {
         let win32 = &mut cpu.bus.win32;
         let Some(section) = win32.sections[index].as_mut() else {
             continue;
         };
-        section.views.retain(|(id, _)| running.contains(id));
+        let views = section.views.len();
+        section.views.retain(|(id, _, _)| running.contains(id));
+        changed |= section.views.len() != views;
         let alive = matches!(
             win32.objects.get(section.object).map(|o| &o.kind),
             Some(Kind::Mapping { section }) if *section as usize == index
@@ -88,6 +105,7 @@ pub(super) fn sweep(cpu: &mut Cpu) {
         if alive || !section.views.is_empty() {
             continue;
         }
+        changed = true;
         write_back(cpu, index);
         let section = cpu.bus.win32.sections[index].take().expect("checked");
         for phys in section.pages.into_iter().filter(|&p| p != 0) {
@@ -97,6 +115,7 @@ pub(super) fn sweep(cpu: &mut Cpu) {
             cpu.bus.win32.objects.release(file);
         }
     }
+    changed
 }
 
 /// Where a mapping of `len` bytes can go: a place in the mappings' part of
@@ -131,10 +150,11 @@ fn place(cpu: &mut Cpu, len: u32) -> Option<u32> {
     }
 }
 
-/// The contents of the file `sft` (DOS's open file) from its start, `len`
-/// bytes of it, the file made that long first when `grow` (with zeroes);
-/// its size when `len` is None.
-fn read_file(cpu: &mut Cpu, sft: u16, len: Option<u32>, grow: bool) -> Result<Vec<u8>, u32> {
+/// The size of a mapping of the file `sft` (DOS's open file): `len`, the
+/// file made that long first when `grow` (with zeroes), or with `len`
+/// None the file's size. Nothing is read: a page is read from the file
+/// when it is first touched (win32/mapping.rs).
+fn file_size(cpu: &mut Cpu, sft: u16, len: Option<u32>, grow: bool) -> Result<u32, u32> {
     let disk = &mut cpu.bus.disk;
     let position = disk
         .seek_file(sft, 0, 1)
@@ -154,10 +174,8 @@ fn read_file(cpu: &mut Cpu, sft: u16, len: Option<u32>, grow: bool) -> Result<Ve
             return Err(ERROR_ACCESS_DENIED);
         }
     }
-    let _ = disk.seek_file(sft, 0, 0);
-    let data = crate::interrupts::int21::read_open_file(cpu, sft, len as usize).unwrap_or_default();
-    let _ = cpu.bus.disk.seek_file(sft, position as i64, 0);
-    Ok(data)
+    let _ = disk.seek_file(sft, position as i64, 0);
+    Ok(len)
 }
 
 /// CreateFileMappingA(file, attributes, protect, size high, size low,
@@ -197,12 +215,12 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
     }
-    let (contents, file) = if file == INVALID_HANDLE_VALUE {
+    let (size, file) = if file == INVALID_HANDLE_VALUE {
         if size == 0 {
             set_error(cpu, ERROR_INVALID_PARAMETER);
             return Some(0);
         }
-        (None, None)
+        (size, None)
     } else {
         let Some(id) = object::resolve(cpu, file) else {
             set_error(cpu, ERROR_INVALID_HANDLE);
@@ -239,29 +257,31 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
             return Some(0);
         }
         let len = (size != 0).then_some(size);
-        let data = match read_file(cpu, sft, len, access == PAGE_READWRITE) {
-            Ok(data) => data,
+        let size = match file_size(cpu, sft, len, access == PAGE_READWRITE) {
+            Ok(size) => size,
             Err(error) => {
                 set_error(cpu, error);
                 return Some(0);
             }
         };
-        if data.is_empty() {
+        if size == 0 {
             set_error(cpu, ERROR_FILE_INVALID);
             return Some(0);
         }
-        (Some(data), Some((id, sft)))
+        (size, Some((id, sft)))
     };
-    let size = contents.as_ref().map_or(size, |c| c.len() as u32);
     let count = size.div_ceil(PAGE);
-    let reserve = protect & SEC_RESERVE != 0 && contents.is_none();
+    let reserve = protect & SEC_RESERVE != 0 && file.is_none();
     let Some(base) = count.checked_mul(PAGE).and_then(|len| place(cpu, len)) else {
         set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
         return Some(0);
     };
+    // A mapping of the swap file has its pages from the start, unless
+    // they are only reserved; one of a file reads each from the file when
+    // it is first touched (win32/mapping.rs).
     let mut pages = Vec::with_capacity(count as usize);
-    if !reserve {
-        for i in 0..count {
+    if !reserve && file.is_none() {
+        for _ in 0..count {
             let Some(phys) = memory::pool_page(&mut cpu.bus) else {
                 for phys in pages {
                     memory::free_page(&mut cpu.bus, phys);
@@ -269,11 +289,6 @@ pub(super) fn create_file_mapping_a(cpu: &mut Cpu, args: &[u32]) -> Option<u32> 
                 set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
                 return Some(0);
             };
-            if let Some(data) = &contents {
-                let from = (i * PAGE) as usize;
-                let to = (from + PAGE as usize).min(data.len());
-                cpu.bus.load_bytes(phys as usize, &data[from..to]);
-            }
             pages.push(phys);
         }
     } else {
@@ -438,7 +453,7 @@ fn map_view(
     let address = section.base + offset;
     let id = process(cpu).id;
     if let Some(section) = cpu.bus.win32.sections[index].as_mut() {
-        section.views.push((id, address));
+        section.views.push((id, address, protect));
     }
     cpu.tlb.flush();
     Some(address)
@@ -461,11 +476,10 @@ pub(super) fn dib_view(cpu: &mut Cpu, handle: u32) -> Option<(u32, u32)> {
 /// The section with a view of the running process at `at`.
 fn view_at(cpu: &mut Cpu, at: u32) -> Option<usize> {
     let id = process(cpu).id;
-    cpu.bus
-        .win32
-        .sections
-        .iter()
-        .position(|s| s.as_ref().is_some_and(|s| s.views.contains(&(id, at))))
+    cpu.bus.win32.sections.iter().position(|s| {
+        s.as_ref()
+            .is_some_and(|s| s.views.iter().any(|&(p, a, _)| (p, a) == (id, at)))
+    })
 }
 
 /// UnmapViewOfFile(address): the view there goes, written back to its
@@ -481,10 +495,10 @@ pub(super) fn unmap_view_of_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let i = section
         .views
         .iter()
-        .position(|&v| v == (id, at))
+        .position(|&(p, a, _)| (p, a) == (id, at))
         .expect("found");
     section.views.remove(i);
-    let last = !section.views.iter().any(|&(p, _)| p == id);
+    let last = !section.viewed_by(id);
     let (base, len) = (section.base, section.pages.len() as u32 * PAGE);
     write_back(cpu, index);
     if last {
@@ -505,9 +519,8 @@ pub(super) fn flush_view_of_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let at = args[0];
     let id = process(cpu).id;
     let found = cpu.bus.win32.sections.iter().position(|s| {
-        s.as_ref().is_some_and(|s| {
-            (s.base..s.end()).contains(&at) && s.views.iter().any(|&(p, _)| p == id)
-        })
+        s.as_ref()
+            .is_some_and(|s| (s.base..s.end()).contains(&at) && s.viewed_by(id))
     });
     match found {
         Some(index) => {
@@ -523,7 +536,9 @@ pub(super) fn flush_view_of_file(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
 
 /// VirtualAlloc's MEM_COMMIT of the pages from `first` to `end` of a view
 /// of a SEC_RESERVE mapping: the mapping gets pages there, which every
-/// process with a view of it sees, the running one with `protect`.
+/// process with a view of it sees, the running one with `protect`. The
+/// pages of a mapping of a file are committed already: those not read
+/// from the file yet stay so.
 pub(super) fn commit(cpu: &mut Cpu, first: u32, end: u32, protect: u32) -> Result<u32, u32> {
     let id = process(cpu).id;
     let index = cpu
@@ -532,16 +547,16 @@ pub(super) fn commit(cpu: &mut Cpu, first: u32, end: u32, protect: u32) -> Resul
         .sections
         .iter()
         .position(|s| {
-            s.as_ref().is_some_and(|s| {
-                s.base <= first && end <= s.end() && s.views.iter().any(|&(p, _)| p == id)
-            })
+            s.as_ref()
+                .is_some_and(|s| s.base <= first && end <= s.end() && s.viewed_by(id))
         })
         .ok_or(ERROR_INVALID_ADDRESS)?;
-    let base = cpu.bus.win32.sections[index].as_ref().expect("found").base;
+    let found = cpu.bus.win32.sections[index].as_ref().expect("found");
+    let (base, of_file) = (found.base, found.file.is_some());
     let mut new = Vec::new();
     for page in (first..end).step_by(PAGE as usize) {
         let i = ((page - base) / PAGE) as usize;
-        if cpu.bus.win32.sections[index].as_ref().expect("found").pages[i] != 0 {
+        if of_file || cpu.bus.win32.sections[index].as_ref().expect("found").pages[i] != 0 {
             continue;
         }
         let Some(phys) = memory::pool_page(&mut cpu.bus) else {
@@ -563,7 +578,7 @@ pub(super) fn commit(cpu: &mut Cpu, first: u32, end: u32, protect: u32) -> Resul
     let running = cpu.bus.win32.running;
     for p in 0..cpu.bus.win32.processes.len() {
         let pid = cpu.bus.win32.processes[p].id;
-        if !section.views.iter().any(|&(v, _)| v == pid) {
+        if !section.viewed_by(pid) {
             continue;
         }
         let protect = if p == running { protect } else { others };
@@ -571,8 +586,8 @@ pub(super) fn commit(cpu: &mut Cpu, first: u32, end: u32, protect: u32) -> Resul
         for page in (first..end).step_by(PAGE as usize) {
             let i = ((page - base) / PAGE) as usize;
             let entry = process.memory.entry(&cpu.bus, page).unwrap_or(0);
-            if entry == 0 || p == running {
-                let phys = section.pages[i];
+            let phys = section.pages[i];
+            if phys != 0 && (entry == 0 || p == running) {
                 process
                     .memory
                     .set_entry(&mut cpu.bus, page, phys | protection_bits(protect));

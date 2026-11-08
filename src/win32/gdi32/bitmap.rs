@@ -896,13 +896,23 @@ pub fn read_dib(
 /// Decode an RLE8 or RLE4 DIB into rows of its bits, bottom first.
 fn decode_rle(data: &[u8], info: &DibInfo) -> Vec<u8> {
     let stride = info.stride();
-    let height = info.abs_height() as usize;
-    let mut out = vec![0u8; stride * height];
+    let mut out = vec![0u8; stride * info.abs_height() as usize];
     let four = info.compression == BI_RLE4;
+    rle_onto(&mut out, data, info.width.max(0) as usize, stride, four);
+    out
+}
+
+/// Draw the RLE8 codes `data` (RLE4 with `four`) onto `out`, rows of
+/// `stride` bytes from the bottom, `width` pixels wide. Pixels the codes
+/// pass over, with a delta or by ending a line or the bitmap early, keep
+/// what `out` had: an AVI file's frames after the first are drawn that
+/// way onto the picture before.
+pub fn rle_onto(out: &mut [u8], data: &[u8], width: usize, stride: usize, four: bool) {
+    let height = out.len().checked_div(stride).unwrap_or(0);
     let (mut x, mut y) = (0usize, 0usize);
     let mut i = 0;
-    let put = |out: &mut Vec<u8>, x: usize, y: usize, v: u8| {
-        if y >= height || x >= info.width as usize {
+    let put = |out: &mut [u8], x: usize, y: usize, v: u8| {
+        if y >= height || x >= width {
             return;
         }
         let row = y * stride;
@@ -927,7 +937,7 @@ fn decode_rle(data: &[u8], info: &DibInfo) -> Vec<u8> {
                 } else {
                     v
                 };
-                put(&mut out, x, y, value);
+                put(out, x, y, value);
                 x += 1;
             }
             continue;
@@ -959,14 +969,13 @@ fn decode_rle(data: &[u8], info: &DibInfo) -> Vec<u8> {
                     } else {
                         byte
                     };
-                    put(&mut out, x, y, value);
+                    put(out, x, y, value);
                     x += 1;
                 }
                 i += bytes.next_multiple_of(2);
             }
         }
     }
-    out
 }
 
 /// SetDIBits(hdc, bitmap, start, lines, bits, info, usage).

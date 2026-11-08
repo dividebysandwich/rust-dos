@@ -8,22 +8,39 @@
 //! program's code (MSVC's `_except_handler3`, C++'s), called through
 //! `call` (see call.rs).
 //!
+//! As Windows 98's KERNEL32 does (BFF76819h to BFF76854h), each handler
+//! is called with a frame of the system's on top of the chain, below the
+//! dispatcher's own stack: the next frame, its handler (a nested
+//! exception's or a collided unwind's, which KERNEL32 has as
+//! NestedExceptionHandler and NestedUnwindHandler), and the frame whose
+//! handler runs. `fs:[0]` is that frame while the handler runs, so the
+//! handler's own frame is `fs:[0]`'s next, and the frame comes off when
+//! the handler returns. Petite's unpacker finds its stack that way: its
+//! handler, which doesn't return, takes the frame after `fs:[0]`'s
+//! (Grom's CmdLineExt02.dll). An exception raised in a handler reaches
+//! the system's frame first, which marks it as nested and goes on to the
+//! frames after it; an unwind that reaches the frame of an unwind that
+//! runs goes on from where that one got to.
+//!
 //! A page fault in the part of a thread's stack that is reserved but not
 //! committed yet commits it, and the program goes on: stacks grow as on
-//! Windows. A write to a module's resources, which are read-only, makes
-//! their page writable and goes through, as on Windows 98 (VirtualQuery
-//! says PAGE_READONLY and IsBadWritePtr TRUE, and the write still works).
-//! InstallShield's engine changes the bitmaps it loads in place.
+//! Windows. One on a page of a view of a file reads the page from the
+//! file (win32/mapping.rs). A write to a module's resources, which are
+//! read-only, makes their page writable and goes through, as on Windows
+//! 98 (VirtualQuery says PAGE_READONLY and IsBadWritePtr TRUE, and the
+//! write still works). InstallShield's engine changes the bitmaps it
+//! loads in place.
 
 use super::call::{self, Call, SEH_FILTER, SEH_HANDLER, SEH_UNWIND};
 use super::memory::{PAGE, PAGE_READWRITE, USER, WRITABLE};
 use super::{Context, ESP, process};
-use crate::cpu::{Cpu, Seg};
+use crate::cpu::{Cpu, CpuFlags, Seg};
 use crate::instructions::fpu::control;
 
 /// Exception codes.
 pub const ACCESS_VIOLATION: u32 = 0xC000_0005;
 const NONCONTINUABLE_EXCEPTION: u32 = 0xC000_0025;
+const INVALID_DISPOSITION: u32 = 0xC000_0026;
 const UNWIND: u32 = 0xC000_0027;
 const BREAKPOINT: u32 = 0x8000_0003;
 const SINGLE_STEP: u32 = 0x8000_0004;
@@ -45,21 +62,36 @@ const STACK_OVERFLOW: u32 = 0xC000_00FD;
 const NONCONTINUABLE: u32 = 1;
 const UNWINDING: u32 = 2;
 const EXIT_UNWIND: u32 = 4;
+/// Set while the dispatcher calls the handlers between a nested
+/// exception and the frame whose handler it was raised in.
+const NESTED_CALL: u32 = 0x10;
 
 /// What handlers return.
 const CONTINUE_EXECUTION: u32 = 0;
+const CONTINUE_SEARCH: u32 = 1;
+const NESTED_EXCEPTION: u32 = 2;
+const COLLIDED_UNWIND: u32 = 3;
 /// What filters return.
 const FILTER_EXECUTE_HANDLER: u32 = 1;
 const FILTER_CONTINUE_EXECUTION: u32 = 0xFFFF_FFFF;
+/// The exit code of a process an unhandled exception ends, on Windows 98
+/// whatever the exception was, and with no stack to raise it on too.
+const UNHANDLED_EXIT_CODE: u32 = 0xFFFF_FFFF;
 
+/// CONTEXT without the extended registers, as Windows 98's headers have
+/// it.
+pub const CONTEXT_BASE_SIZE: u32 = 0xCC;
 /// CONTEXT's size, its flags (CONTEXT_i386 with the control, integer,
 /// segment and floating-point parts) and its fields' offsets.
-pub const CONTEXT_SIZE: u32 = 0x2CC;
+const CONTEXT_SIZE: u32 = 0x2CC;
 pub const CONTEXT_FULL: u32 = 0x1_000F;
 const CONTEXT_CONTROL: u32 = 0x1;
 const CONTEXT_INTEGER: u32 = 0x2;
 const CONTEXT_SEGMENTS: u32 = 0x4;
 const CONTEXT_FLOATING_POINT: u32 = 0x8;
+const CONTEXT_DEBUG_REGISTERS: u32 = 0x10;
+/// Dr0-Dr3, Dr6 and Dr7, in this order.
+const CTX_DR0: u32 = 0x04;
 const CTX_FLOAT: u32 = 0x1C;
 const CTX_GS: u32 = 0x8C;
 const CTX_EDI: u32 = 0x9C;
@@ -70,50 +102,115 @@ const MAX_PARAMETERS: u32 = 15;
 /// Below the record on the stack: EXCEPTION_POINTERS and the dispatcher
 /// context handlers get.
 const BELOW_RECORD: u32 = 16;
+/// The system's frame around a handler: the next frame, the handler and
+/// the frame whose handler runs.
+const GUARD_SIZE: u32 = 12;
+const GUARD_ESTABLISHER: u32 = 8;
 
 /// The TIB's first field: the exception handler chain.
 const TIB_EXCEPTION_LIST: u32 = 0x00;
 const TIB_STACK_LIMIT: u32 = 0x08;
 const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
-/// Write the context `ctx` and the FPU's state `fpu` as a CONTEXT at `at`,
-/// with the flags `flags`.
-pub fn write_context(cpu: &mut Cpu, at: u32, ctx: &Context, fpu: &[u8; 108], flags: u32) {
+/// A thread's debug registers as a CONTEXT has them: DR0-DR3, DR6, DR7.
+pub type DebugRegs = [u32; 6];
+
+/// The processor's debug registers, as a CONTEXT has them.
+pub fn debug_registers(cpu: &Cpu) -> DebugRegs {
+    let dr = &cpu.dr;
+    [dr[0], dr[1], dr[2], dr[3], dr[6], dr[7]]
+}
+
+/// The bits of DR7 a context sets: the breakpoints' enable, R/W and LEN
+/// bits. GD and the reserved bits aren't a program's to set.
+const DR7_SETTABLE: u32 = 0xFFFF_00FF;
+
+/// The debug registers `regs` a context sets, with only the bits of DR7
+/// a program may set.
+pub fn settable(regs: &DebugRegs) -> DebugRegs {
+    let mut regs = *regs;
+    regs[5] &= DR7_SETTABLE;
+    regs
+}
+
+/// Load the debug registers `regs`.
+pub fn set_debug_registers(cpu: &mut Cpu, regs: &DebugRegs) {
+    let regs = settable(regs);
+    cpu.dr[..4].copy_from_slice(&regs[..4]);
+    cpu.dr[6] = regs[4];
+    cpu.dr[7] = regs[5];
+}
+
+/// Write the context `ctx`, the FPU's state `fpu` and the debug registers
+/// `dr` as a CONTEXT at `at`, with the flags `flags`: the parts they name,
+/// and 0 in the rest of CONTEXT_SIZE bytes.
+pub fn write_context(
+    cpu: &mut Cpu,
+    at: u32,
+    ctx: &Context,
+    fpu: &[u8; 108],
+    dr: &DebugRegs,
+    flags: u32,
+) {
     cpu.bus.guest_fill(at, CONTEXT_SIZE as usize, 0);
     cpu.bus.guest_write_32(at, flags);
-    cpu.bus.guest_write_bytes(at + CTX_FLOAT, fpu);
-    // GS, FS, ES, DS; EDI, ESI, EBX, EDX, ECX, EAX; EBP, EIP, CS, EFLAGS,
-    // ESP, SS.
+    write_context_parts(cpu, at, ctx, fpu, dr, flags);
+}
+
+/// Write the parts of the CONTEXT at `at` that `flags` names, from the
+/// context `ctx`, the FPU's state `fpu` and the debug registers `dr`, and
+/// leave the rest of it as it was.
+pub fn write_context_parts(
+    cpu: &mut Cpu,
+    at: u32,
+    ctx: &Context,
+    fpu: &[u8; 108],
+    dr: &DebugRegs,
+    flags: u32,
+) {
     let s = |seg: Seg| ctx.seg[seg as usize] as u32;
     let g = |i: usize| ctx.gpr[i];
-    let words = [
-        s(Seg::GS),
-        s(Seg::FS),
-        s(Seg::ES),
-        s(Seg::DS),
-        g(7),
-        g(6),
-        g(3),
-        g(2),
-        g(1),
-        g(0),
-        g(5),
-        ctx.eip,
-        s(Seg::CS),
-        ctx.eflags,
-        g(ESP),
-        s(Seg::SS),
-    ];
-    for (i, word) in words.into_iter().enumerate() {
-        cpu.bus.guest_write_32(at + CTX_GS + 4 * i as u32, word);
+    let words = |cpu: &mut Cpu, from: u32, words: &[u32]| {
+        for (i, &word) in words.iter().enumerate() {
+            cpu.bus.guest_write_32(at + from + 4 * i as u32, word);
+        }
+    };
+    if flags & CONTEXT_DEBUG_REGISTERS != 0 {
+        words(cpu, CTX_DR0, dr);
+    }
+    if flags & CONTEXT_FLOATING_POINT != 0 {
+        cpu.bus.guest_write_bytes(at + CTX_FLOAT, fpu);
+        words(cpu, CTX_FLOAT + 108, &[0]);
+    }
+    if flags & CONTEXT_SEGMENTS != 0 {
+        let segments = [s(Seg::GS), s(Seg::FS), s(Seg::ES), s(Seg::DS)];
+        words(cpu, CTX_GS, &segments);
+    }
+    if flags & CONTEXT_INTEGER != 0 {
+        words(cpu, CTX_EDI, &[g(7), g(6), g(3), g(2), g(1), g(0)]);
+    }
+    if flags & CONTEXT_CONTROL != 0 {
+        let control = [g(5), ctx.eip, s(Seg::CS), ctx.eflags, g(ESP), s(Seg::SS)];
+        words(cpu, CTX_EBP, &control);
     }
 }
 
-/// Change `ctx` and `fpu` to the parts the CONTEXT at `at` has by its
-/// flags.
-pub fn read_context(cpu: &mut Cpu, at: u32, ctx: &mut Context, fpu: &mut [u8; 108]) {
+/// Change `ctx`, `fpu` and the debug registers `dr` to the parts the
+/// CONTEXT at `at` has by its flags.
+pub fn read_context(
+    cpu: &mut Cpu,
+    at: u32,
+    ctx: &mut Context,
+    fpu: &mut [u8; 108],
+    dr: &mut DebugRegs,
+) {
     let flags = cpu.bus.guest_read_32(at);
     let word = |cpu: &mut Cpu, offset: u32| cpu.bus.guest_read_32(at + offset);
+    if flags & CONTEXT_DEBUG_REGISTERS != 0 {
+        for (i, reg) in dr.iter_mut().enumerate() {
+            *reg = word(cpu, CTX_DR0 + 4 * i as u32);
+        }
+    }
     if flags & CONTEXT_SEGMENTS != 0 {
         for (i, seg) in [Seg::GS, Seg::FS, Seg::ES, Seg::DS].into_iter().enumerate() {
             ctx.seg[seg as usize] = word(cpu, CTX_GS + 4 * i as u32) as u16;
@@ -204,8 +301,14 @@ fn write_resource(cpu: &mut Cpu, address: u32) -> bool {
 }
 
 /// The code and parameters of the exception a fault (`vector`, with the
-/// error code `error`) is, and what it says in a message.
-fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>, String) {
+/// error code `error`, of the instruction at `eip`) is, and what it says
+/// in a message.
+fn fault_exception(
+    cpu: &Cpu,
+    vector: u8,
+    error: Option<u32>,
+    eip: u32,
+) -> (u32, Vec<u32>, String) {
     let name = match vector {
         0 => "divide error",
         1 => "debug exception",
@@ -241,22 +344,32 @@ fn fault_exception(cpu: &Cpu, vector: u8, error: Option<u32>) -> (u32, Vec<u32>,
         6 => (ILLEGAL_INSTRUCTION, vec![]),
         // Writing, as the error code's bit 1 says, and where.
         14 => (ACCESS_VIOLATION, vec![error.unwrap_or(0) >> 1 & 1, cpu.cr2]),
-        13 if error.unwrap_or(0) == 0 && privileged(cpu) => (PRIV_INSTRUCTION, vec![]),
+        13 if error.unwrap_or(0) == 0 && privileged(cpu, eip) => (PRIV_INSTRUCTION, vec![]),
         16 => (fpu_exception(cpu), vec![]),
         _ => (ACCESS_VIOLATION, vec![0, 0xFFFF_FFFF]),
     };
     (code, params, what)
 }
 
-/// Whether the instruction that faulted is one only the system may run:
-/// HLT, CLI, STI, IN or OUT, or a move to or from a control register.
-fn privileged(cpu: &Cpu) -> bool {
-    let process = super::running(cpu).expect("a Win32 process");
-    let Some(phys) = process.memory.translate(&cpu.bus, cpu.eip()) else {
-        return false;
-    };
-    let byte = cpu.bus.read_8(phys as usize);
-    matches!(byte, 0xF4 | 0xFA | 0xFB | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F)
+/// The `len` bytes of the program's code at `eip`, read through its page
+/// tables without a page fault: None where a page isn't there. A fault's
+/// instruction is at its context's EIP: the CPU's own EIP is the trap's
+/// in the ROM by then.
+fn code_at(cpu: &Cpu, eip: u32, len: usize) -> Option<Vec<u8>> {
+    let process = super::running(cpu)?;
+    super::loader::peek(&cpu.bus, &process.memory, eip, len)
+}
+
+/// Whether the instruction at `eip`, which faulted, is one only the
+/// system may run: HLT, IN or OUT, or a move to or from a control
+/// register. CLI and STI go on (`is_interrupt_flag_change`).
+fn privileged(cpu: &Cpu, eip: u32) -> bool {
+    let byte = |at: u32| code_at(cpu, at, 1).map(|b| b[0]);
+    match byte(eip) {
+        Some(0x0F) => matches!(byte(eip.wrapping_add(1)), Some(0x20 | 0x22)),
+        Some(b) => matches!(b, 0xF4 | 0xE4..=0xE7 | 0xEC..=0xEF | 0x6C..=0x6F),
+        None => false,
+    }
 }
 
 /// The exception code of an FPU error, from the status word's flags.
@@ -274,9 +387,55 @@ fn fpu_exception(cpu: &Cpu) -> u32 {
     }
 }
 
+/// INT 68h is WDEB386's interface, which programs call to find the
+/// debugger: with it loaded, AH=43h answers F386h. Its gate is the
+/// system's, so a program's INT 68h is a #GP whose error code names the
+/// gate (vector 68h, bit 1 for the IDT). Windows 98's VMM takes that #GP
+/// and passes the interrupt on to the system VM, where nothing answers
+/// without the debugger, and the program goes on after the INT with its
+/// registers as they were. SafeDisc 1's loader (Omikron's RUNTIME.EXE)
+/// calls it with AX=4300h and takes AX still 4300h for "no debugger";
+/// its handlers don't take the fault.
+const DEBUGGER_INT_ERROR: u32 = 0x68 << 3 | 2;
+
+/// Whether the instruction at `eip` is INT 68h.
+fn is_debugger_int(cpu: &Cpu, eip: u32) -> bool {
+    code_at(cpu, eip, 2).as_deref() == Some(&[0xCD, 0x68])
+}
+
+/// Whether the instruction at `eip` is CLI or STI. The program runs at
+/// level 3 with IOPL 0, so either is a #GP, which Windows 98's VMM takes
+/// and simulates on the system VM's virtual interrupt flag, as it does
+/// for Win16 code in the same VM: the program goes on after it, with no
+/// exception. SafeDisc 2.30's Windows 9x path (Anachronox) brackets its
+/// writes to the IDT with CLI and STI, and fails its checks when they
+/// raise one. The virtual flag isn't kept here: hardware interrupts
+/// reach the program's process as before.
+fn is_interrupt_flag_change(cpu: &Cpu, eip: u32) -> bool {
+    matches!(code_at(cpu, eip, 1).as_deref(), Some([0xFA | 0xFB]))
+}
+
+/// The length of the instruction at `eip` whose #GP, with the error code
+/// `error`, Windows 98's VMM takes without an exception for the program,
+/// which goes on after it: INT 68h (`is_debugger_int`), CLI or STI
+/// (`is_interrupt_flag_change`).
+fn simulated(cpu: &Cpu, error: Option<u32>, eip: u32) -> Option<u32> {
+    match error? {
+        DEBUGGER_INT_ERROR if is_debugger_int(cpu, eip) => Some(2),
+        0 if is_interrupt_flag_change(cpu, eip) => Some(1),
+        _ => None,
+    }
+}
+
 /// A fault in the program, at `ctx`: an exception for its handlers.
-pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
+pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, mut ctx: Context) {
     if vector == 14 && process(cpu).current.is_some() && grow_stack(cpu, cpu.cr2) {
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    // A page that isn't there (error code bit 0 clear) of a view of a
+    // file, read from the file now.
+    if vector == 14 && error.is_some_and(|e| e & 1 == 0) && super::mapping::fault_in(cpu, cpu.cr2) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
@@ -285,14 +444,27 @@ pub fn fault(cpu: &mut Cpu, vector: u8, error: Option<u32>, ctx: Context) {
         super::system::enter_user(cpu, &ctx);
         return;
     }
-    let (code, params, what) = fault_exception(cpu, vector, error);
+    if vector == 13
+        && let Some(len) = simulated(cpu, error, ctx.eip)
+    {
+        ctx.eip = ctx.eip.wrapping_add(len);
+        super::system::enter_user(cpu, &ctx);
+        return;
+    }
+    let (code, params, what) = fault_exception(cpu, vector, error, ctx.eip);
+    // The context of a debug exception has TF clear, so that a handler
+    // that continues goes on running. To step on, it sets TF there. Any
+    // other exception's context keeps the TF the program had.
+    if vector == 1 {
+        ctx.eflags &= !CpuFlags::TF.bits();
+    }
     let code = if vector == 14 && in_stack_reserve(cpu, cpu.cr2) {
         STACK_OVERFLOW
     } else {
         code
     };
     let Some(thread) = process(cpu).current_thread_mut() else {
-        super::fatal(cpu, &what, Some(&ctx));
+        super::fatal_with(cpu, &what, Some(&ctx), UNHANDLED_EXIT_CODE);
         return;
     };
     thread.fault = what;
@@ -321,32 +493,50 @@ pub fn raise(
     address: u32,
     params: &[u32],
 ) {
+    raise_record(cpu, ctx, fpu, [code, flags, 0, address], params);
+}
+
+/// Raise an exception as `raise` does, whose record starts with the
+/// words `head`: the code, the flags, the record of the exception it was
+/// raised for (0 for none) and the address. The record is written whole
+/// before the first handler is called, since the process may end there.
+fn raise_record(cpu: &mut Cpu, ctx: Context, fpu: &[u8; 108], head: [u32; 4], params: &[u32]) {
     let ctx_at = (ctx.gpr[ESP].wrapping_sub(CONTEXT_SIZE)) & !3;
     let record = ctx_at.wrapping_sub(RECORD_SIZE);
     let esp = record.wrapping_sub(BELOW_RECORD);
     if !present(cpu, esp, ctx.gpr[ESP].wrapping_sub(esp)) {
         let what = std::mem::take(&mut process(cpu).current_thread_mut().unwrap().fault);
-        super::fatal(
+        super::fatal_with(
             cpu,
-            &format!("{}, and its stack is gone", describe(code, &what)),
+            &format!("{}, and its stack is gone", describe(head[0], &what)),
             Some(&ctx),
+            UNHANDLED_EXIT_CODE,
         );
         return;
     }
+    // The handlers run with TF clear, whatever the context says: else
+    // each of their instructions would raise another exception. DF is
+    // clear too, as Windows 98 has it, and the context keeps both. RF is
+    // clear, as entering an interrupt handler leaves it, so a breakpoint
+    // on the handler's first instruction isn't skipped.
     let mut here = ctx;
     here.gpr[ESP] = esp;
+    here.eflags &= !(CpuFlags::TF | CpuFlags::DF | CpuFlags::RF).bits();
     super::system::enter_user(cpu, &here);
-    write_context(cpu, ctx_at, &ctx, fpu, CONTEXT_FULL);
-    write_record(cpu, record, code, flags, address, params);
+    let context_flags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
+    let dr = debug_registers(cpu);
+    write_context(cpu, ctx_at, &ctx, fpu, &dr, context_flags);
+    write_record(cpu, record, head, params);
     let frame = handlers(cpu);
-    dispatch(cpu, record, ctx_at, frame);
+    dispatch(cpu, record, ctx_at, frame, 0);
 }
 
-/// Write an EXCEPTION_RECORD at `at`.
-fn write_record(cpu: &mut Cpu, at: u32, code: u32, flags: u32, address: u32, params: &[u32]) {
+/// Write an EXCEPTION_RECORD at `at`, which starts with the words `head`
+/// (the code, the flags, the inner record and the address).
+fn write_record(cpu: &mut Cpu, at: u32, head: [u32; 4], params: &[u32]) {
     cpu.bus.guest_fill(at, RECORD_SIZE as usize, 0);
     let n = (params.len() as u32).min(MAX_PARAMETERS);
-    for (i, word) in [code, flags, 0, address, n].into_iter().enumerate() {
+    for (i, word) in head.into_iter().chain([n]).enumerate() {
         cpu.bus.guest_write_32(at + 4 * i as u32, word);
     }
     for (i, &param) in params.iter().take(n as usize).enumerate() {
@@ -367,8 +557,9 @@ pub fn set_handlers(cpu: &mut Cpu, frame: u32) {
 
 /// Call the handler of the frame `frame` for the exception whose record
 /// and context are at `record` and `ctx_at`, or with none left, the
-/// unhandled exception filter.
-fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32) {
+/// unhandled exception filter. `nested` is the frame whose handler a
+/// nested exception was raised in, until the search has passed it, or 0.
+fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32, nested: u32) {
     if frame == END_OF_CHAIN || frame == 0 || !present(cpu, frame, 8) {
         unhandled(cpu, record, ctx_at);
         return;
@@ -376,56 +567,153 @@ fn dispatch(cpu: &mut Cpu, record: u32, ctx_at: u32, frame: u32) {
     let handler = cpu.bus.guest_read_32(frame + 4);
     let dispatcher = record - 12;
     let resume = call::here(cpu);
-    if !call::call(
-        cpu,
-        handler,
-        &[record, frame, ctx_at, dispatcher],
-        SEH_HANDLER,
-        resume,
-        vec![record, ctx_at, frame],
-    ) {
-        super::fatal(cpu, "an exception, and its stack is gone", None);
+    if !push_guard(cpu, "NestedExceptionHandler", frame)
+        || !call::call(
+            cpu,
+            handler,
+            &[record, frame, ctx_at, dispatcher],
+            SEH_HANDLER,
+            resume,
+            vec![record, ctx_at, frame, nested],
+        )
+    {
+        let what = "an exception, and its stack is gone";
+        super::fatal_with(cpu, what, None, UNHANDLED_EXIT_CODE);
     }
 }
 
-/// A handler returned: the program goes on at the context, or the next
-/// handler is called.
-pub fn handler_returned(cpu: &mut Cpu, value: u32, call: Call) {
-    let &[record, ctx_at, frame] = call.data.as_slice() else {
-        return;
+/// Put the system's frame for a call of the handler of `frame` on the
+/// chain, below the stack, with the handler of KERNEL32's called
+/// `handler`. False, with nothing changed, if the stack isn't there.
+fn push_guard(cpu: &mut Cpu, handler: &str, frame: u32) -> bool {
+    let at = cpu.esp().wrapping_sub(GUARD_SIZE);
+    if !cpu.bus.guest_probe(at, GUARD_SIZE as usize, true) {
+        return false;
+    }
+    let next = handlers(cpu);
+    let handler = super::kernel32::address_of(handler);
+    cpu.bus.guest_write_32(at, next);
+    cpu.bus.guest_write_32(at + 4, handler);
+    cpu.bus.guest_write_32(at + GUARD_ESTABLISHER, frame);
+    cpu.set_esp(at);
+    set_handlers(cpu, at);
+    true
+}
+
+/// Take the system's frame at `at` off the chain, as KERNEL32 pops it
+/// when the handler returns: `fs:[0]` becomes the next frame it holds,
+/// whatever the handler did to the chain, and the stack is above it.
+fn pop_guard(cpu: &mut Cpu, at: u32) {
+    let next = cpu.bus.guest_read_32(at);
+    set_handlers(cpu, next);
+    cpu.set_esp(at.wrapping_add(GUARD_SIZE));
+}
+
+/// NestedExceptionHandler(record, frame, context, dispatcher): the
+/// handler of the system's frame around an exception handler, which an
+/// exception raised in that handler reaches first. Unwinding, it lets
+/// the frame go (ExceptionContinueSearch); otherwise it gives the
+/// dispatcher the frame whose handler runs, and the exception is nested
+/// (ExceptionNestedException). Windows 98's is at BFF76855h.
+pub fn nested_exception_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guard_handler(cpu, args, false, NESTED_EXCEPTION)
+}
+
+/// NestedUnwindHandler(record, frame, context, dispatcher): the handler
+/// of the system's frame around a handler RtlUnwind calls. An unwind
+/// that reaches it collided with that one: it gives the frame that one
+/// was unwinding (ExceptionCollidedUnwind). An exception it lets go.
+/// Windows 98's is at BFF7687Ah.
+pub fn nested_unwind_handler(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    guard_handler(cpu, args, true, COLLIDED_UNWIND)
+}
+
+/// What the handler of a system's frame does: when the record's
+/// unwinding flags say `unwinding` is how it was reached, it puts the
+/// frame whose handler runs in the dispatcher's word and returns
+/// `answer`; otherwise ExceptionContinueSearch.
+fn guard_handler(cpu: &mut Cpu, args: &[u32], unwinding: bool, answer: u32) -> Option<u32> {
+    let &[record, frame, _, dispatcher] = args else {
+        unreachable!()
     };
-    if value == CONTINUE_EXECUTION {
-        let flags = cpu.bus.guest_read_32(record + 4);
-        if flags & NONCONTINUABLE != 0 {
-            let address = cpu.bus.guest_read_32(record + 12);
-            let mut ctx = Context::of(cpu);
-            ctx.gpr[ESP] = record - BELOW_RECORD;
-            let fpu = control::save_image(cpu);
-            raise(
-                cpu,
-                ctx,
-                &fpu,
-                NONCONTINUABLE_EXCEPTION,
-                NONCONTINUABLE,
-                address,
-                &[],
-            );
+    let flags = cpu.bus.guest_read_32(record + 4);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    if (flags & (UNWINDING | EXIT_UNWIND) != 0) != unwinding {
+        return Some(CONTINUE_SEARCH);
+    }
+    let establisher = cpu.bus.guest_read_32(frame + GUARD_ESTABLISHER);
+    cpu.bus.guest_write_32(dispatcher, establisher);
+    if cpu.bus.guest_faulted() {
+        return None;
+    }
+    Some(answer)
+}
+
+/// A handler returned: the program goes on at the context, or the next
+/// handler is called. As Windows 98's dispatcher does (BFF87FE9h), a
+/// nested exception marks the record as nested until the search passes
+/// the frame it was raised in, and an answer that isn't one raises
+/// STATUS_INVALID_DISPOSITION.
+pub fn handler_returned(cpu: &mut Cpu, value: u32, call: Call) {
+    let (record, ctx_at, frame, mut nested) = match *call.data.as_slice() {
+        [record, ctx_at, frame, nested] => {
+            pop_guard(cpu, call.esp);
+            (record, ctx_at, frame, nested)
+        }
+        // A state saved while a handler ran without the system's frame.
+        [record, ctx_at, frame] => (record, ctx_at, frame, 0),
+        _ => return,
+    };
+    let flags = cpu.bus.guest_read_32(record + 4);
+    if frame == nested {
+        cpu.bus.guest_write_32(record + 4, flags & !NESTED_CALL);
+        nested = 0;
+    }
+    match value {
+        CONTINUE_EXECUTION if flags & NONCONTINUABLE != 0 => {
+            raise_for(cpu, record, NONCONTINUABLE_EXCEPTION);
             return;
         }
-        continue_at(cpu, ctx_at);
-        return;
+        CONTINUE_EXECUTION => {
+            continue_at(cpu, ctx_at);
+            return;
+        }
+        CONTINUE_SEARCH => {}
+        NESTED_EXCEPTION => {
+            let flags = cpu.bus.guest_read_32(record + 4);
+            cpu.bus.guest_write_32(record + 4, flags | NESTED_CALL);
+            nested = nested.max(cpu.bus.guest_read_32(record - 12));
+        }
+        _ => {
+            raise_for(cpu, record, INVALID_DISPOSITION);
+            return;
+        }
     }
-    // Go on searching (nested and collided exceptions too).
     let next = cpu.bus.guest_read_32(frame);
-    dispatch(cpu, record, ctx_at, next);
+    dispatch(cpu, record, ctx_at, next, nested);
+}
+
+/// Raise `code`, which can't be continued, for what a handler answered
+/// for the exception at `record`, at the stack as it is: its record
+/// leads to that one, as Windows 98's has it.
+fn raise_for(cpu: &mut Cpu, record: u32, code: u32) {
+    let address = cpu.bus.guest_read_32(record + 12);
+    let ctx = Context::of(cpu);
+    let fpu = control::save_image(cpu);
+    let head = [code, NONCONTINUABLE, record, address];
+    raise_record(cpu, ctx, &fpu, head, &[]);
 }
 
 /// Go on in the running thread at the CONTEXT at `at`.
 pub fn continue_at(cpu: &mut Cpu, at: u32) {
     let mut ctx = Context::of(cpu);
     let mut fpu = control::save_image(cpu);
-    read_context(cpu, at, &mut ctx, &mut fpu);
+    let mut dr = debug_registers(cpu);
+    read_context(cpu, at, &mut ctx, &mut fpu, &mut dr);
     control::load_image(cpu, &fpu);
+    set_debug_registers(cpu, &dr);
     if let Some(thread) = process(cpu).current_thread_mut() {
         thread.fault.clear();
     }
@@ -459,6 +747,9 @@ fn unhandled(cpu: &mut Cpu, record: u32, ctx_at: u32) {
     if filter != 0 {
         cpu.bus.guest_write_32(pointers, record);
         cpu.bus.guest_write_32(pointers + 4, ctx_at);
+        // The next handler gets DF as the last one left it, the filter
+        // doesn't: on Windows 98 it starts with DF clear either way.
+        cpu.set_cpu_flag(CpuFlags::DF, false);
         let resume = call::here(cpu);
         if call::call(
             cpu,
@@ -479,12 +770,13 @@ fn die(cpu: &mut Cpu, record: u32, ctx_at: u32) {
     let code = cpu.bus.guest_read_32(record);
     let mut ctx = Context::of(cpu);
     let mut fpu = [0; 108];
-    read_context(cpu, ctx_at, &mut ctx, &mut fpu);
+    let mut dr = [0; 6];
+    read_context(cpu, ctx_at, &mut ctx, &mut fpu, &mut dr);
     let what = process(cpu)
         .current_thread_mut()
         .map(|t| std::mem::take(&mut t.fault))
         .unwrap_or_default();
-    super::fatal(cpu, &describe(code, &what), Some(&ctx));
+    super::fatal_with(cpu, &describe(code, &what), Some(&ctx), UNHANDLED_EXIT_CODE);
 }
 
 /// What a message says of the exception `code`: what the fault was, if
@@ -521,10 +813,7 @@ pub fn filter_returned(cpu: &mut Cpu, value: u32, call: Call) {
     }
     match value {
         FILTER_CONTINUE_EXECUTION => continue_at(cpu, ctx_at),
-        FILTER_EXECUTE_HANDLER => {
-            let code = cpu.bus.guest_read_32(record);
-            super::exit(cpu, code);
-        }
+        FILTER_EXECUTE_HANDLER => super::exit(cpu, UNHANDLED_EXIT_CODE),
         _ => die(cpu, record, ctx_at),
     }
 }
@@ -668,9 +957,9 @@ pub fn rtl_unwind(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     }
     let ctx = Context::of(cpu);
     let fpu = control::save_image(cpu);
-    write_context(cpu, ctx_at, &ctx, &fpu, CONTEXT_FULL);
+    write_context(cpu, ctx_at, &ctx, &fpu, &[0; 6], CONTEXT_FULL);
     let record = if record == 0 {
-        write_record(cpu, own_record, UNWIND, 0, resume.0, &[]);
+        write_record(cpu, own_record, [UNWIND, 0, 0, resume.0], &[]);
         own_record
     } else {
         record
@@ -697,25 +986,56 @@ fn unwind(cpu: &mut Cpu, state: [u32; 5], resume: (u32, u32)) {
         return;
     }
     let handler = cpu.bus.guest_read_32(frame + 4);
-    let dispatcher = ctx_at - RECORD_SIZE - 12;
+    let dispatcher = unwind_dispatcher(ctx_at);
+    if !push_guard(cpu, "NestedUnwindHandler", frame) {
+        call::finish(cpu, resume, value);
+        return;
+    }
+    // The state, and that the system's frame is on the chain.
+    let mut data = state.to_vec();
+    data.push(1);
     if !call::call(
         cpu,
         handler,
         &[record, frame, ctx_at, dispatcher],
         SEH_UNWIND,
         resume,
-        state.to_vec(),
+        data,
     ) {
+        pop_guard(cpu, cpu.esp());
         call::finish(cpu, resume, value);
     }
 }
 
+/// The word RtlUnwind gives the handlers it calls as their dispatcher
+/// context, below its context at `ctx_at` and the record it may make.
+fn unwind_dispatcher(ctx_at: u32) -> u32 {
+    ctx_at - RECORD_SIZE - 12
+}
+
 /// A handler returned from unwinding: its frame comes off the chain, and
-/// the next one unwinds.
-pub fn unwind_handler_returned(cpu: &mut Cpu, _: u32, call: Call) {
-    let Ok(mut state) = <[u32; 5]>::try_from(call.data.as_slice()) else {
+/// the next one unwinds. As Windows 98's RtlUnwind does (BFF884AAh), an
+/// unwind that collided with another goes on from the frame that one had
+/// got to, and an answer that isn't one raises
+/// STATUS_INVALID_DISPOSITION.
+pub fn unwind_handler_returned(cpu: &mut Cpu, value: u32, call: Call) {
+    let data = call.data.as_slice();
+    let Some(Ok(mut state)) = data.get(..5).map(<[u32; 5]>::try_from) else {
         return;
     };
+    // A state saved while a handler ran without the system's frame has
+    // only the unwind's own.
+    if data.len() > 5 {
+        pop_guard(cpu, call.esp);
+    }
+    match value {
+        CONTINUE_SEARCH => {}
+        COLLIDED_UNWIND => state[2] = cpu.bus.guest_read_32(unwind_dispatcher(state[1])),
+        _ => {
+            raise_for(cpu, state[0], INVALID_DISPOSITION);
+            return;
+        }
+    }
     let next = cpu.bus.guest_read_32(state[2]);
     set_handlers(cpu, next);
     state[2] = next;

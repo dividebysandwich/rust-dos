@@ -18,7 +18,7 @@
 
 use super::mem::Vram;
 use super::mirror::{pixel_at, span};
-use super::raster::{RasterState, Stride, TmuRaster, screen_y};
+use super::raster::{RasterState, Stride, screen_y};
 use super::setup::render_triangle;
 use super::workers::{Job, Word};
 use std::collections::{HashMap, VecDeque};
@@ -337,7 +337,7 @@ impl Access {
 
 /// Rows `y0..y1` as a triangle or fastfill counts them, as buffer rows
 /// `r0..r1` (the Y origin applied); None if they could wrap around.
-fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
+pub(crate) fn buffer_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
     if y0 >= y1 {
         return Some((0, 0));
     }
@@ -393,8 +393,16 @@ pub fn spills(st: &RasterState, verts: &[(f32, f32); 3], height: u32) -> bool {
 
 /// The same for a fastfill of columns `..x1` and rows `y0..y1`.
 pub fn fill_spills(st: &RasterState, x1: i32, y0: i32, y1: i32, height: u32) -> bool {
+    // Only the buffers it writes have rows to spill past: a depth clear
+    // isn't limited by the colour buffer's rows, which colBufferAddr may
+    // leave at a narrower surface than the depth buffer (the Direct3D
+    // HAL's clears, `hal::card_fill`).
+    let rgb = st.fbz_mode & (1 << 9) != 0;
+    let aux = st.fbz_mode & (1 << 10) != 0 && st.aux.is_some();
+    let past = |pixels: usize| x1 > pixels as i32;
+    let across = rgb && past(st.rowpixels) || aux && past(st.aux_stride.pixels());
     match buffer_rows(st, y0, y1) {
-        Some((r0, r1)) => x1 > st.rowpixels as i32 || (r1 > height as i32 && r1 > r0.max(0)),
+        Some((r0, r1)) => across || (r1 > height as i32 && r1 > r0.max(0)),
         None => true,
     }
 }
@@ -417,17 +425,15 @@ pub fn triangle(layout: &TileLayout, st: &RasterState, verts: &[(f32, f32); 3]) 
     // rounded vertex coordinates, with a pixel to spare.
     let bound = |f: fn(f32, f32) -> f32, c: fn(&(f32, f32)) -> f32| verts.iter().map(c).fold(c(&verts[0]), f);
     let (minx, maxx) = (bound(f32::min, |v| v.0), bound(f32::max, |v| v.0));
-    let (miny, maxy) = (bound(f32::min, |v| v.1), bound(f32::max, |v| v.1));
     let clamp = |v: f32| v.clamp(-8192.0, 8192.0) as i32;
     let (mut x0, mut x1) = (clamp(minx.floor()) - 1, clamp(maxx.ceil()) + 2);
-    let (y0, y1) = ((clamp(miny.floor()) - 1).max(-2048), (clamp(maxy.ceil()) + 2).min(4096));
-    let Some((mut r0, mut r1)) = buffer_rows(st, y0, y1) else { return Access::PINNED };
+    let Some((r0, r1)) = triangle_rows(st, verts) else {
+        return Access::PINNED;
+    };
     if fbz & 1 != 0 {
-        let (left, right, low, high) = st.clip();
+        let (left, right, _, _) = st.clip();
         x0 = x0.max(left);
         x1 = x1.min(right);
-        r0 = r0.max(low);
-        r1 = r1.min(high);
     }
     let Some(rect) = inside(layout, x0, x1, r0, r1) else { return Access::PINNED };
     let touched = layout.tiles(rect, false);
@@ -450,6 +456,34 @@ pub fn triangle(layout: &TileLayout, st: &RasterState, verts: &[(f32, f32); 3]) 
     }
     access.sampled = textures_read(layout, st);
     access
+}
+
+/// The buffer rows `r0..r1` a triangle with vertices `verts` drawn with
+/// `st` can write: its rounded vertex rows with a pixel to spare, within
+/// the clip rectangle when clipping is on. None if they could wrap around
+/// or a vertex isn't a number.
+pub fn triangle_rows(st: &RasterState, verts: &[(f32, f32); 3]) -> Option<(i32, i32)> {
+    if verts.iter().any(|v| !v.1.is_finite()) {
+        return None;
+    }
+    let miny = verts.iter().map(|v| v.1).fold(f32::INFINITY, f32::min);
+    let maxy = verts.iter().map(|v| v.1).fold(f32::NEG_INFINITY, f32::max);
+    let clamp = |v: f32| v.clamp(-8192.0, 8192.0) as i32;
+    let y0 = (clamp(miny.floor()) - 1).max(-2048);
+    let y1 = (clamp(maxy.ceil()) + 2).min(4096);
+    let (mut r0, mut r1) = buffer_rows(st, y0, y1)?;
+    if st.fbz_mode & 1 != 0 {
+        let (_, _, low, high) = st.clip();
+        r0 = r0.max(low);
+        r1 = r1.min(high);
+    }
+    Some((r0, r1))
+}
+
+/// The buffer rows a fastfill of rows `y0..y1` drawn with `st` writes;
+/// None if they could wrap around.
+pub fn fill_rows(st: &RasterState, y0: i32, y1: i32) -> Option<(i32, i32)> {
+    buffer_rows(st, y0, y1)
 }
 
 /// Whether `st` draws with rows or an auxiliary buffer other than the
@@ -488,7 +522,7 @@ fn frame_buffer_units(st: &RasterState) -> impl Iterator<Item = (usize, (u64, u6
         let t = t
             .as_ref()
             .filter(|t| t.lodmin < 8 << 8 && t.ram.same(&st.fb))?;
-        Some((unit, texture_bytes(t)))
+        Some((unit, t.texel_span()))
     })
 }
 
@@ -498,38 +532,14 @@ fn frame_buffer_texels(st: &RasterState) -> impl Iterator<Item = (u64, u64)> + '
     frame_buffer_units(st).map(|(_, range)| range)
 }
 
-/// The bytes the texture `t` may take texels from, first to past the
-/// last: the levels its LOD range picks, or all of the memory where they
-/// wrap around. The rasterizer clamps the LOD to lodmin..lodmax, and a
-/// level the texture hasn't takes the next (`texture`). The levels
-/// outside the range aren't read: Glide points texBaseAddr below a
-/// texture whose largest level is smaller than 256x256, so those lie in
-/// other memory, a colour buffer's among it.
-fn texture_bytes(t: &TmuRaster) -> (u64, u64) {
-    let wide = ((t.mode >> 8) & 0xF >= 8) as u32;
-    let memory = t.mask as u64 + 1;
-    let first = (t.lodmin.min(t.lodmax) >> 8).clamp(0, 8) as usize;
-    let last = ((t.lodmax >> 8) + 1).clamp(0, 8) as usize;
-    let (mut start, mut end) = (memory, 0);
-    for (level, &base) in t.lodoffset.iter().enumerate().take(last + 1).skip(first) {
-        let texels = ((t.wmask >> level) + 1) as u64 * ((t.hmask >> level) + 1) as u64;
-        let last = base as u64 + (texels << wide);
-        if last > memory {
-            return (0, memory);
-        }
-        start = start.min(base as u64);
-        end = end.max(last);
-    }
-    (start, end)
-}
-
 /// The card's memory the jobs given out or held back may read or write,
 /// for a write by the CPU that needn't wait for them when it is
 /// elsewhere (`Voodoo::banshee_texture_download`): the bytes their
-/// texture units take texels from in the frame buffer's memory, and the
-/// lowest byte of a buffer they draw into or of a word they write. A
-/// buffer is taken to reach from there to the end of the memory, which
-/// Glide's buffers on a Banshee do, above its textures.
+/// texture units take texels from in the frame buffer's memory, the
+/// words texture data queued goes into (`Job::Bytes`), and the lowest
+/// byte of a buffer they draw into or of a word they write. A buffer is
+/// taken to reach from there to the end of the memory, which Glide's
+/// buffers on a Banshee do, above its textures.
 #[derive(Clone, Debug)]
 pub struct Footprint {
     textures: Vec<(u64, u64)>,
@@ -562,10 +572,20 @@ impl Footprint {
     /// What `job` may read and write.
     pub fn add(&mut self, job: &Job) {
         self.add_writes(job);
-        if let Job::Triangle { st, .. } = job {
-            for range in frame_buffer_texels(st) {
-                self.texture(range);
+        match job {
+            Job::Triangle { st, .. } => {
+                for range in frame_buffer_texels(st) {
+                    self.texture(range);
+                }
             }
+            // Later data over these bytes has to come after them, and so
+            // does data in the same words: a worker writes half a word by
+            // reading it first.
+            Job::Bytes { at, bytes, .. } => {
+                let (start, end) = (*at as u64, (*at + bytes.len()) as u64);
+                self.texture((start & !1, end.next_multiple_of(2)));
+            }
+            _ => {}
         }
     }
 
@@ -579,8 +599,10 @@ impl Footprint {
             }
             Job::Pixels { words, .. } => self.words(words),
             Job::Rows { base, .. } => self.writes_from = self.writes_from.min(2 * *base as u64),
+            // They don't reach to the end of the memory: see `add`.
+            Job::Bytes { .. } => {}
             #[cfg(test)]
-            Job::Panic => {}
+            Job::Panic | Job::Hold(_) => {}
         }
     }
 
@@ -748,8 +770,8 @@ const MAX_WORDS: usize = 1 << 20;
 const PIXEL_MARKS: usize = 16;
 
 /// The textures held triangles take texels from in the frame buffer's
-/// memory (`texture_bytes`): each range of bytes, with the numbers of the
-/// jobs that read it and through which texture unit.
+/// memory (`TmuRaster::texel_span`): each range of bytes, with the
+/// numbers of the jobs that read it and through which texture unit.
 #[derive(Default)]
 struct Readers {
     ranges: Vec<Reader>,

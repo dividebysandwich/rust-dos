@@ -72,6 +72,20 @@ pub enum Kind {
     Find {
         entries: Vec<FindEntry>,
     },
+    /// A change notification of FindFirstChangeNotificationA: the full
+    /// path of the directory it watches, whether it watches the ones
+    /// below too, its FILE_NOTIFY_CHANGE_* filter, the fingerprint of what
+    /// that watches as it last looked, when it looked (the clock's
+    /// microseconds), and whether a change signaled it
+    /// (kernel32/change.rs).
+    Change {
+        dir: String,
+        subtree: bool,
+        filter: u32,
+        seen: u64,
+        looked: u64,
+        signaled: bool,
+    },
 }
 
 /// A file or directory a search found, as WIN32_FIND_DATA has it.
@@ -270,6 +284,22 @@ pub fn close(cpu: &mut Cpu, handle: u32) -> bool {
     }
 }
 
+/// Close the handle `handle` of the process `pid`, as `close` does one
+/// of the running process's: false if that process or handle isn't
+/// there, as when the process ended and its handles went with it.
+pub fn close_of(cpu: &mut Cpu, pid: u32, handle: u32) -> bool {
+    let win32 = &mut cpu.bus.win32;
+    let Some(process) = win32.processes.iter_mut().find(|p| p.id == pid) else {
+        return false;
+    };
+    let Some(id) = process.handles.remove(handle) else {
+        return false;
+    };
+    win32.objects.release(id);
+    close_files(&mut cpu.bus);
+    true
+}
+
 /// Close in DOS the files whose objects went.
 pub fn close_files(bus: &mut crate::bus::Bus) {
     for sft in std::mem::take(&mut bus.win32.objects.closed) {
@@ -326,6 +356,14 @@ crate::win32::state_variants!(Kind {
         locks
     },
     Find { entries },
+    Change {
+        dir,
+        subtree,
+        filter,
+        seen,
+        looked,
+        signaled
+    },
 });
 crate::state_fields!(FindEntry {
     attributes,

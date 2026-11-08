@@ -33,10 +33,12 @@ pub mod blit2d;
 pub mod ddc;
 pub mod display;
 pub mod fifo;
+mod gpu2d;
 pub mod render3d;
 
 use super::{Effect, Now, Voodoo};
 use crate::video::crt::Extension;
+use blit2d::Footprint;
 use std::collections::VecDeque;
 
 /// The size of BAR0 and of BAR1.
@@ -495,6 +497,40 @@ impl Banshee {
         (width.clamp(8, 2048), height.clamp(1, 2048))
     }
 
+    /// The bytes of a pixel of the desktop: its format's.
+    pub fn desktop_bytes_per_pixel(&self) -> u32 {
+        match (self.reg(VID_PROC_CFG) >> 18) & 7 {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            _ => 4,
+        }
+    }
+
+    /// The rows of the desktop in memory: the CRTC's lines, or half of
+    /// them in half mode, which shows each row twice.
+    pub fn desktop_rows(&self) -> u32 {
+        let (_, lines) = self.desktop_size();
+        if self.reg(VID_PROC_CFG) & VIDPROC_HALF_MODE != 0 {
+            lines / 2
+        } else {
+            lines
+        }
+    }
+
+    /// The bytes a program writes for the desktop's picture: its rows of
+    /// its pixels.
+    pub fn desktop_bytes(&self) -> u32 {
+        let (width, _) = self.desktop_size();
+        width * self.desktop_rows() * self.desktop_bytes_per_pixel()
+    }
+
+    /// Whether the desktop's rows follow each other in memory: it isn't
+    /// tiled.
+    pub fn desktop_linear(&self) -> bool {
+        self.reg(VID_PROC_CFG) & VIDPROC_DESKTOP_TILED == 0
+    }
+
     /// Whether the monitor shows each of the desktop's pixels twice as
     /// wide as it has them: a desktop less than `NARROW_WIDTH` pixels
     /// wide. 3dfx's driver runs such a mode (320x200, 320x240) at half
@@ -686,9 +722,8 @@ impl Voodoo {
     /// program waits for the swap.
     pub(crate) fn banshee_status(&self, now: Now) -> u32 {
         let Some(b) = &self.banshee else { return 0 };
-        let in_retrace = self.timing.status(now.ns) & 0x08 != 0;
         let drawing = self.drawing();
-        b.status(in_retrace, drawing || self.banshee_fifo_waits())
+        b.status(self.in_vretrace(now), drawing || self.banshee_fifo_waits())
     }
 
     /// CRTC register 11h now holds `value`: bit 4 written 0 clears the
@@ -759,8 +794,8 @@ impl Voodoo {
                 return 0xFFFF_FFFF;
             };
             let addr = b.linear_addr(offset - LINEAR);
-            if self.writes_queue() {
-                self.catch_up();
+            if self.workers_queue() {
+                self.catch_up_workers();
             }
             let at = addr & self.fbi.mask;
             self.gpu_sync(at, at + 4);
@@ -836,8 +871,8 @@ impl Voodoo {
     /// queued before done: what reads through BAR1 below the tile base
     /// give, many at once. For a driver in Rust that reads the screen.
     pub fn banshee_memory_read(&self, addr: u32, data: &mut [u8]) {
-        if self.writes_queue() {
-            self.catch_up();
+        if self.workers_queue() {
+            self.catch_up_workers();
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
@@ -859,8 +894,8 @@ impl Voodoo {
         if data.is_empty() {
             return;
         }
-        if self.writes_queue() {
-            self.catch_up();
+        if self.workers_queue() {
+            self.catch_up_workers();
         }
         self.gpu_sync_bytes(addr, data.len());
         let mask = self.fbi.mask;
@@ -879,12 +914,39 @@ impl Voodoo {
     }
 
     /// A 2D register written: the engine runs commands into the memory.
+    /// The bytes a command reads and draws into are brought up to date
+    /// first, as for a program's read: the drawing queued before is done,
+    /// and what only the GPU has there is read back and turns hot, so
+    /// that a buffer of the 3D engine's blitted from every frame is drawn
+    /// in software, as one the program reads every frame is. A command
+    /// whose bytes can't be bounded reads back all of the memory without
+    /// it turning hot: the engine reads little of it, and every 3D buffer
+    /// hot would send all the drawing to software for a second.
     pub(crate) fn banshee_2d_write(&mut self, reg: u32, data: u32) {
-        if self.writes_queue() {
-            self.catch_up();
+        let Some(b) = &self.banshee else { return };
+        if self.writes_queue() || self.gpu.borrow().tracker.any_gpu() {
+            let size = self.fbi.ram.bytes() as u32;
+            let footprint = b.engine.footprint(reg, data, size);
+            // The command drawn on the GPU, where it can be, reads nothing
+            // back and waits for nothing.
+            if let Footprint::Spans(spans) = footprint
+                && self.banshee_2d_gpu(reg, data, &spans)
+            {
+                return;
+            }
+            if footprint != Footprint::Nothing && self.workers_queue() {
+                self.catch_up_workers();
+            }
+            match footprint {
+                Footprint::Nothing => {}
+                Footprint::Spans(spans) => {
+                    for (start, end) in spans.into_iter().flatten() {
+                        self.gpu_sync(start, end);
+                    }
+                }
+                Footprint::All => self.gpu_sync_all(),
+            }
         }
-        // The engine may read and draw anywhere in the memory.
-        self.gpu_sync_all();
         let Some(b) = &mut self.banshee else { return };
         b.engine.write(&self.fbi.ram, reg, data);
         if std::mem::take(&mut b.engine.drawn) {
@@ -920,8 +982,8 @@ impl Voodoo {
         // them, which would keep the workers from drawing while the
         // program builds the next ones.
         let in_ring = mask == 0xFFFF_FFFF && b.fifo.iter().any(|f| f.holds(addr));
-        if self.writes_queue() && !in_ring {
-            self.catch_up();
+        if self.workers_queue() && !in_ring {
+            self.catch_up_workers();
         }
         self.gpu_sync(addr & self.fbi.mask, (addr & self.fbi.mask) + 4);
         let ram = &self.fbi.ram;
@@ -940,7 +1002,7 @@ impl Voodoo {
             // operation there would otherwise undo the packet.
             if self.recording() {
                 let at = addr & fbmask;
-                self.gpu.get_mut().pages.mark(at, at + 4);
+                self.gpu.get_mut().tracker.mark(at, at + 4);
             }
             self.banshee_fifo_written(addr, now, effect);
         } else {

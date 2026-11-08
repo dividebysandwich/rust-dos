@@ -98,6 +98,7 @@ pub static THENS: &[Then] = &[
     super::flat::then_inits,
     super::hook::then,
     super::dpmi::then_callback,
+    super::module::then_boot,
 ];
 
 // Place 0 is then_keep, which no call names now.
@@ -110,6 +111,7 @@ pub const THEN_FLAT_CALL: u16 = 6;
 pub const THEN_FLAT_INITS: u16 = 7;
 pub const THEN_HOOK: u16 = 8;
 pub const THEN_CALLBACK: u16 = 9;
+pub const THEN_BOOT: u16 = 10;
 
 fn post_plain(_: &mut Cpu, value: u32, _: &[u32], _: &mut Context) -> Option<u32> {
     Some(value)
@@ -202,8 +204,19 @@ pub fn enter32(cpu: &mut Cpu, ctx: Context, target: u32, args: &[u32], post: u16
 /// 32-bit code to come (scratch for the structures it is passed): its
 /// address. The call made next with `enter32_at` and the address as its
 /// top doesn't overwrite it.
+///
+/// For 16-bit code's calls, while all of the task's 32-bit code waits in
+/// its frames. A `Then` runs as 32-bit code goes on, whose frame is off
+/// the list by then: this space would be below an older frame, inside
+/// the stack of the code going on. A `Then` uses `scratch32_below` with
+/// its context's ESP instead.
 pub fn scratch32(cpu: &mut Cpu, len: u32) -> u32 {
-    (stack32(cpu) - len.next_multiple_of(4)) & !0xF
+    scratch32_below(stack32(cpu), len)
+}
+
+/// Space of `len` bytes on a 32-bit stack whose top is `top`.
+pub fn scratch32_below(top: u32, len: u32) -> u32 {
+    (top - len.next_multiple_of(4)) & !0xF
 }
 
 /// `enter32` on the 32-bit stack below `top`.
@@ -255,10 +268,19 @@ pub fn win16_return(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {
         crate::win32::fatal(cpu, "a return to 16-bit code that didn't call", None);
         return None;
     };
+    // A plain value, or one of the automatic thunks that converts no
+    // handle (`builtin::post_auto`, whose structures' copies are in RAM),
+    // changes nothing but RAM and registers.
+    let ret = data.first().map(|&ret| ret as u8);
+    let plain = post == POST_PLAIN
+        || post == POST_AUTO && ret.is_some_and(|c| !super::builtin::converts_handle(c));
     let result = match POSTS.get(post as usize) {
         Some(f) => f(cpu, value, &data, &mut ctx),
         None => Some(value),
     };
+    if plain && cpu.bus.observe.on {
+        crate::idle::pure_call(cpu, None);
+    }
     if let Some(value) = result {
         resume16(cpu, ctx, value);
     }

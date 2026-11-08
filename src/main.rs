@@ -1,9 +1,10 @@
 use clap::Parser;
-use sdl2::event::{Event, WindowEvent};
-use sdl2::keyboard::{Keycode, Mod, Scancode};
-use sdl2::mouse::{MouseButton, MouseWheelDirection};
+use sdl3::event::{Event, WindowEvent};
+use sdl3::keyboard::{Keycode, Mod, Scancode};
+use sdl3::mouse::{MouseButton, MouseWheelDirection};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::audio::pump_audio;
@@ -27,6 +28,8 @@ mod input;
 mod main_almanac;
 mod main_host;
 mod monitor_power;
+mod parent_watch;
+mod run_lock;
 mod sdl_audio;
 mod sdl_keys;
 mod startup;
@@ -55,7 +58,6 @@ use crate::input::{
 };
 use crate::main_host::MainHost;
 use crate::monitor_power::{power_off, power_on, resync};
-use crate::sdl_audio::open_audio;
 use crate::startup::{apply_args, create_cpu, game_to_launch, start_debug_hub, start_dos};
 #[cfg(windows)]
 use crate::startup::leave_explorer_console;
@@ -77,18 +79,29 @@ pub static NvOptimusEnablement: u32 = 1;
 #[allow(non_upper_case_globals)]
 pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<ExitCode, String> {
     let mut args = Args::parse();
     match args.command.take() {
         Some(Command::Run(run)) => {
-            std::process::exit(rust_dos::cli::run(rust_dos::cli::RunOptions {
+            // An emulator run like any other, under the run lock; it reads
+            // no configuration file.
+            let run_lock = match run_lock::take(&args, None, None) {
+                Ok(taken) => taken,
+                Err(code) => std::process::exit(code),
+            };
+            let code = rust_dos::cli::run(rust_dos::cli::RunOptions {
                 command: run.command,
                 dir: run.dir.unwrap_or_else(|| std::path::PathBuf::from(".")),
                 cycles: run.cycles,
                 memory_mb: run.mem as usize,
                 screen: run.screen,
                 win32: run.win32,
-            }))
+            });
+            drop(run_lock);
+            std::process::exit(code)
+        }
+        Some(Command::Lock(lock)) => {
+            std::process::exit(rust_dos_runlock::cli::main("rust-dos lock", lock.args))
         }
         Some(Command::Unpack(unpack)) => {
             std::process::exit(rust_dos::unpack::run(rust_dos::unpack::UnpackOptions {
@@ -102,6 +115,19 @@ fn main() -> Result<(), String> {
                 },
             }))
         }
+        Some(Command::Commit(commit)) => {
+            let delta = commit.delta.unwrap_or_else(|| rust_dos::diskdelta::beside(&commit.image));
+            match rust_dos::diskdelta::commit(&commit.image, &delta) {
+                Ok(blocks) => {
+                    println!("{}: {} blocks of changes written in from {}", commit.image.display(), blocks, delta.display());
+                    std::process::exit(0)
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1)
+                }
+            }
+        }
         None => {}
     }
     if let Some(port) = args.relay {
@@ -111,17 +137,49 @@ fn main() -> Result<(), String> {
             name,
             password: args.relay_password,
             port,
-        });
+        })
+        .map(|()| ExitCode::SUCCESS);
     }
+    // The process whose end ends rust-dos, watched from before the window
+    // opens: one gone already ends it at once.
+    let parent_watch = match args.exit_with_parent {
+        None => None,
+        Some(pid) => {
+            let target = pid.map_or(parent_watch::Target::Parent, parent_watch::Target::Pid);
+            match parent_watch::ParentWatch::start(target) {
+                Ok(watch) => Some(watch),
+                Err(parent_watch::StartError::Gone(pid)) => {
+                    eprintln!(
+                        "[EXIT] Process {} has ended already (--exit-with-parent): quitting",
+                        pid
+                    );
+                    return Ok(ExitCode::from(parent_watch::EXIT_CODE));
+                }
+                Err(parent_watch::StartError::Failed(e)) => {
+                    return Err(format!("--exit-with-parent: {}", e));
+                }
+            }
+        }
+    };
     #[cfg(windows)]
     leave_explorer_console();
     let config = load_config(&args)?;
     let mut settings = Settings::from_config(&config);
     apply_args(&mut settings, &args)?;
+    // The machine-wide run lock, held until rust-dos ends; a run that
+    // gives up waiting, or whose watched parent ends meanwhile, exits
+    // before any window or device opens.
+    let parent_gone = parent_watch.as_ref().map(parent_watch::ParentWatch::flag);
+    let mut run_lock = match run_lock::take(&args, config.run_lock.as_ref(), parent_gone) {
+        Ok(taken) => taken,
+        Err(code) => return Ok(ExitCode::from(code as u8)),
+    };
     // Ask rust-dos.com whether there is a newer version while the window
-    // opens; not in runs whose screens must come out the same.
-    let mut update_check = (settings.version_check && !args.deterministic && args.debug_server.is_none())
-        .then(rust_dos::version_check::Check::start);
+    // opens; not in runs whose screens must come out the same, and never
+    // in a copy that a game's installer keeps at one version.
+    let mut update_check =
+        (settings.version_check.is_on() && !args.deterministic && args.debug_server.is_none())
+            .then(rust_dos::version_check::Check::start);
     // A game to launch: its profile, read now so its memory size is the
     // machine's.
     let (startup_game, memory_mb) = game_to_launch(&args, &config, &settings)?;
@@ -134,7 +192,7 @@ fn main() -> Result<(), String> {
     // TODO: Make configurable
     let mut recorder = ScreenRecorder::new(15);
 
-    // SDL2 Setup
+    // SDL3 Setup
     // SDL is told what the headset's session needs of the window's OpenGL
     // context (GLX's under X11, or EGL's), and Xlib is made ready for the
     // headset's thread either way, for a headset turned on in the settings
@@ -145,8 +203,8 @@ fn main() -> Result<(), String> {
         headset.mode = rust_dos::vr::VrMode::Headset;
     }
     display::before_headset(&headset);
-    let sdl_context = sdl2::init()?;
-    let video_subsystem = sdl_context.video()?;
+    let sdl_context = sdl3::init().map_err(|e| e.to_string())?;
+    let video_subsystem = sdl_context.video().map_err(|e| e.to_string())?;
     // Without a desktop session (started over SSH, say) SDL draws on the
     // display itself: a standalone headset's own, taken from its
     // compositor, which doesn't get it back when Rust-DOS quits.
@@ -160,16 +218,16 @@ fn main() -> Result<(), String> {
     if args.vr_probe {
         display::vr_probe(&video_subsystem, &settings.vr);
         if !args.vr {
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
     }
-    // Without a sound device (as in a virtual machine without a sound
-    // card) the emulator runs silent.
-    let audio_device = sdl_context
-        .audio()
-        .and_then(|subsystem| Ok((open_audio(&subsystem, settings.audio_buffer.blocksize)?, subsystem)));
+    let headless = args.hidden
+        || video_subsystem
+            .current_video_driver()
+            .eq_ignore_ascii_case("dummy");
+    let audio_output = sdl_audio::open_output(&sdl_context, &settings, headless);
     // Game controllers for the game port; the emulator does without them.
-    let controller_subsystem = match sdl_context.game_controller() {
+    let controller_subsystem = match sdl_context.gamepad() {
         Ok(subsystem) => Some(subsystem),
         Err(e) => {
             eprintln!("[INPUT] No game controllers: {}", e);
@@ -177,7 +235,7 @@ fn main() -> Result<(), String> {
         }
     };
     // The controllers plugged in, in the order they came.
-    let mut controllers: Vec<sdl2::controller::GameController> = Vec::new();
+    let mut controllers: Vec<sdl3::gamepad::Gamepad> = Vec::new();
 
     // The picture has the size the video mode gives it; the display scales
     // it to the window. The textures are for SDL's renderer, which draws
@@ -198,7 +256,7 @@ fn main() -> Result<(), String> {
     };
     // Typed text is only wanted in the settings window.
     let text_input = video_subsystem.text_input();
-    text_input.stop();
+    text_input.stop(display.window());
     let host_clipboard = video_subsystem.clipboard();
 
     // Deterministic mode sets the clock before the machine's BIOS reads it.
@@ -216,10 +274,11 @@ fn main() -> Result<(), String> {
     }
     // How the sound's channels mix for the viewer in the 3D scene.
     let audio_mix = std::rc::Rc::new(std::cell::Cell::new(display::audio_mix::IDENTITY));
-    sdl_audio::attach(&mut cpu, audio_device, &settings, &audio_mix);
-    // The 3D scene's own sounds, on a device of their own.
+    // The 3D scene's own sounds, on a device of their own, where SDL has one.
+    let room_audio = audio_output.subsystem();
     let mut room_sound = sdl_audio::RoomDevice::new();
-    let room_audio = sdl_context.audio().ok();
+    sdl_audio::attach(&mut cpu, audio_output, &settings, &audio_mix, &room_sound);
+    cpu.bus.mixer.muted = args.mute;
     cpu.bus.log_string(&format!("[DISPLAY] {}", display.renderer()));
     if let Some(warning) = display.shader_warning() {
         config_warning(&mut cpu, warning);
@@ -236,11 +295,12 @@ fn main() -> Result<(), String> {
         drives: mounted_drives(&cpu),
     };
     let mut dbg = start_debug_hub(&mut cpu, &args, &det, &settings)?;
+    run_lock::record_server(&mut run_lock, dbg.server());
     dbg.display = display.renderer().to_string();
     // The keys a game's profile presses, as last stepped in deterministic
     // mode, which steps them in emulated time.
     let mut det_autoinput: Option<rust_dos::autoinput::Status> = None;
-    let mut event_pump = sdl_context.event_pump()?;
+    let mut event_pump = sdl_context.event_pump().map_err(|e| e.to_string())?;
     // RetroAchievements: the session with the site, and when the game's
     // logic is checked next (emulated PIT ticks, every 1/60 s). Hardcore
     // mode needs the debug server off, which could change memory.
@@ -342,7 +402,7 @@ fn main() -> Result<(), String> {
         ($on:expr) => {{
             let on = $on;
             if on != mouse_captured {
-                sdl_mouse.set_relative_mouse_mode(on);
+                sdl_mouse.set_relative_mouse_mode(display.window(), on);
                 mouse_captured = on;
             }
             auto_capture.captured &= on;
@@ -515,7 +575,16 @@ fn main() -> Result<(), String> {
         // frame, which the debug server's journal tells while it holds it.
         let mouse_before = (cpu.bus.mouse.x, cpu.bus.mouse.y, cpu.bus.mouse.buttons);
         let mut host_keys = false;
-        for event in event_pump.poll_iter() {
+        for mut event in event_pump.poll_iter() {
+            // The sdl3 crate's Keycode is an enum of SDL's named keys, and
+            // a key whose character has no name there (ü, ß, ù, ², a dead
+            // key) comes with none. The key still goes to the machine by
+            // its scan code, as with any other: it is an unknown keycode.
+            if let Event::KeyDown { keycode: keycode @ None, .. }
+            | Event::KeyUp { keycode: keycode @ None, .. } = &mut event
+            {
+                *keycode = Some(Keycode::Unknown);
+            }
             // The right button held still for the settings window; its
             // release is swallowed once the window opened.
             match &event {
@@ -537,22 +606,29 @@ fn main() -> Result<(), String> {
             }
             match event {
                 Event::Quit { .. } => break 'running,
+                // SDL3 quits only once every window is closed, and the 3D
+                // scene's headset may have one of its own, never shown.
+                Event::Window { win_event: WindowEvent::CloseRequested, window_id, .. }
+                    if window_id == display.window().id() =>
+                {
+                    break 'running
+                }
                 // Ctrl+Shift and the mouse fly the 3D scene's camera: look
                 // around, drag (left button) to slide, right button or the
                 // wheel to move ahead and back; Home goes back to the start.
                 Event::MouseMotion { xrel, yrel, mousestate, .. } if steering!() => {
                     if mousestate.left() {
-                        display.camera_pan(xrel as f32, yrel as f32);
+                        display.camera_pan(xrel, yrel);
                     } else if mousestate.right() {
-                        display.camera_dolly(-yrel as f32);
+                        display.camera_dolly(-yrel);
                     } else {
-                        display.camera_look(xrel as f32, yrel as f32);
+                        display.camera_look(xrel, yrel);
                     }
                 }
                 Event::MouseButtonDown { .. } | Event::MouseButtonUp { .. } if steering!() => {}
                 Event::MouseWheel { y, direction, .. } if steering!() => {
                     let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
-                    display.camera_dolly(dy as f32 * 20.0);
+                    display.camera_dolly(dy * 20.0);
                 }
                 Event::KeyDown { keycode: Some(keycode @ (Keycode::Home | Keycode::Q | Keycode::E)), keymod, repeat, .. }
                     if display.every_frame()
@@ -575,7 +651,9 @@ fn main() -> Result<(), String> {
                 }
                 // The pointer left the window: coming back, it captures
                 // the mouse again.
-                Event::Window { win_event: WindowEvent::Leave, .. } if !mouse_captured => auto_capture.armed = true,
+                Event::Window { win_event: WindowEvent::MouseLeave, .. } if !mouse_captured => {
+                    auto_capture.armed = true
+                }
                 // Uncovered, resized or moved to another display: the
                 // picture is drawn again.
                 Event::Window {
@@ -585,7 +663,7 @@ fn main() -> Result<(), String> {
                         | WindowEvent::Restored
                         | WindowEvent::Maximized
                         | WindowEvent::Resized(..)
-                        | WindowEvent::SizeChanged(..)
+                        | WindowEvent::PixelSizeChanged(..)
                         | WindowEvent::DisplayChanged(..),
                     ..
                 } => display.redraw(),
@@ -603,7 +681,7 @@ fn main() -> Result<(), String> {
                         // The machine goes on from where rewinding got to,
                         // as when F11 is released.
                         dbg.state_loaded_elsewhere(&cpu, "rewind");
-                        pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
+                        pacer.rebase(&mut cpu.bus, std::time::Instant::now());
                         osd.clear_lasting();
                     }
                 }
@@ -982,7 +1060,7 @@ fn main() -> Result<(), String> {
                         // The game's achievements wait for their conditions
                         // to be false again.
                         achievements.reset();
-                        pacer.rebase(&cpu.bus.clock, std::time::Instant::now());
+                        pacer.rebase(&mut cpu.bus, std::time::Instant::now());
                         osd.clear_lasting();
                         next_capture = (cpu.bus.clock.now_ns() + REWIND_INTERVAL_NS, std::time::Instant::now());
                         continue;
@@ -1018,21 +1096,23 @@ fn main() -> Result<(), String> {
 
                 // Game controllers come and go; the first two are the
                 // game port's.
-                Event::ControllerDeviceAdded { which, .. } => {
+                Event::GamepadAdded { which, .. } => {
                     let Some(subsystem) = &controller_subsystem else { continue };
                     match subsystem.open(which) {
-                        Ok(pad) if controllers.iter().all(|c| c.instance_id() != pad.instance_id()) => {
-                            cpu.bus.log_string(&format!("[INPUT] Game controller: {}", pad.name()));
-                            osd.show(format!("Game controller: {}", pad.name()));
+                        Ok(pad) if controllers.iter().all(|c| c.id().ok() != pad.id().ok()) => {
+                            let name = pad.name().unwrap_or_default();
+                            cpu.bus.log_string(&format!("[INPUT] Game controller: {}", name));
+                            osd.show(format!("Game controller: {}", name));
                             controllers.push(pad);
                         }
                         Ok(_) => {}
                         Err(e) => cpu.bus.log_string(&format!("[INPUT] Can't open game controller {}: {}", which, e)),
                     }
                 }
-                Event::ControllerDeviceRemoved { which, .. } => {
-                    if let Some(i) = controllers.iter().position(|c| c.instance_id() == which) {
-                        osd.show(format!("Game controller unplugged: {}", controllers[i].name()));
+                Event::GamepadRemoved { which, .. } => {
+                    if let Some(i) = controllers.iter().position(|c| c.id().ok() == Some(which)) {
+                        let name = controllers[i].name().unwrap_or_default();
+                        osd.show(format!("Game controller unplugged: {}", name));
                         controllers.remove(i);
                     }
                 }
@@ -1060,12 +1140,13 @@ fn main() -> Result<(), String> {
                     ui.click(fx, fy, &mut host!());
                 }
 
-                Event::MouseWheel { y, direction, .. } if ui.is_open() => {
+                // In whole notches: SDL3 adds them up from a smooth wheel's.
+                Event::MouseWheel { integer_y: y, direction, .. } if ui.is_open() => {
                     let dy = if matches!(direction, MouseWheelDirection::Flipped) { -y } else { y };
                     ui.wheel(dy, &mut host!());
                 }
                 // The game's mapping can bind the mouse's wheel.
-                Event::MouseWheel { y, direction, .. }
+                Event::MouseWheel { integer_y: y, direction, .. }
                     if y != 0
                         && padmap.as_mut().is_some_and(|m| {
                             let up = (y > 0) != matches!(direction, MouseWheelDirection::Flipped);
@@ -1267,7 +1348,7 @@ fn main() -> Result<(), String> {
         let steer = steering!();
         if steer != steering_mouse {
             if !mouse_captured {
-                sdl_mouse.set_relative_mouse_mode(steer);
+                sdl_mouse.set_relative_mouse_mode(display.window(), steer);
             }
             steering_mouse = steer;
         }
@@ -1292,6 +1373,14 @@ fn main() -> Result<(), String> {
         profile::set_host(Zone::Frontend);
         if dbg.quit_requested() {
             shutdown = debug::ShutdownReason::Quit;
+            break 'running;
+        }
+        if let Some(watch) = parent_watch.as_ref().filter(|w| w.gone()) {
+            let line =
+                format!("[EXIT] Process {} ended (--exit-with-parent): quitting", watch.pid());
+            eprintln!("{}", line);
+            cpu.bus.log_string(&line);
+            shutdown = debug::ShutdownReason::Parent;
             break 'running;
         }
         if dbg.take_hotkey() {
@@ -1427,9 +1516,9 @@ fn main() -> Result<(), String> {
                 clipboard.clear();
                 capture_mouse!(false);
                 dbg.release_keys(&mut cpu);
-                text_input.start();
+                text_input.start(display.window());
             } else {
-                text_input.stop();
+                text_input.stop(display.window());
                 // Caps and Num Lock may have changed while the window had
                 // the keys.
                 sync_locks(&mut cpu, sdl_context.keyboard().mod_state());
@@ -1532,6 +1621,9 @@ fn main() -> Result<(), String> {
             cpu.bus.clock.icount
         } else if let Some(refresh) = &refresh {
             pacer.retrace_batch_end(&cpu.bus.clock, refresh, batch_start)
+        } else if det.is_none() {
+            let end = pacer.batch_end(&cpu.bus.clock, batch_start);
+            cpu.bus.past_blanking(end)
         } else {
             pacer.batch_end(&cpu.bus.clock, batch_start)
         };
@@ -1578,7 +1670,12 @@ fn main() -> Result<(), String> {
         } else if achievements.checking() && !waiting {
             // A game's achievements are checked every 1/60 s of emulated
             // time, as in the emulators the sets are made with, fast
-            // forwarding or not: the batch runs to each check.
+            // forwarding or not: the batch runs to each check. The frame
+            // still ends at the emulated time it was to end at if the speed
+            // drops in it (`Bus::end_work_boost`), as a batch does.
+            let mut speed = cpu.bus.clock.cycles_per_ms();
+            let end_ticks = cpu.bus.clock.ticks_at(batch_end);
+            let mut batch_end = batch_end;
             loop {
                 cpu.bus.start_batch(batch_end.min(cpu.bus.clock.icount_at(next_check)));
                 let reason = exec::run_batch(&mut cpu, &mut dbg, dbg_hot);
@@ -1587,6 +1684,10 @@ fn main() -> Result<(), String> {
                     achievements.do_frame(cpu.bus.ram(), cpu.bus.boot.is_some());
                     let frame = timer::frame_ticks();
                     next_check = if next_check + frame <= now { now + frame } else { next_check + frame };
+                }
+                if cpu.bus.clock.cycles_per_ms() != speed {
+                    speed = cpu.bus.clock.cycles_per_ms();
+                    batch_end = cpu.bus.clock.icount_at(end_ticks);
                 }
                 if reason != exec::StopReason::BatchEnd || cpu.bus.clock.icount >= batch_end {
                     break;
@@ -2228,7 +2329,7 @@ fn shut_down(
     shutdown: debug::ShutdownReason,
     video_recording: Option<VideoRecorder>,
     sound_recording: Option<WavWriter>,
-) -> Result<(), String> {
+) -> Result<ExitCode, String> {
     // The profile ends with the machine's last frame, before the monitor's
     // animation, which isn't the machine's work.
     if let Some(path) = &args.profile {
@@ -2251,7 +2352,7 @@ fn shut_down(
 
     // The journal ends, and the debug server's clients get what they
     // waited for.
-    dbg.shutdown(cpu, shutdown, 0);
+    dbg.shutdown(cpu, shutdown);
 
     // The page in the printer comes out, and the job's files are written.
     for notice in cpu.bus.finish_printing() {
@@ -2275,7 +2376,7 @@ fn shut_down(
         eprintln!("The sound recording failed: {}", e);
     }
 
-    Ok(())
+    Ok(ExitCode::from(shutdown.exit_code()))
 }
 
 /// The red dot in the top right corner that says something is being
@@ -2324,6 +2425,25 @@ mod tests {
         assert!(text.starts_with("rust-dos "), "{text}");
         assert!(text.ends_with("[DOS] this run\n"), "{text}");
         assert!(!text.contains("previous run"), "{text}");
+    }
+
+    #[test]
+    fn exit_with_parent_takes_a_pid_that_names_one_process() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["rust-dos", "--no-config"];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).map(|a| a.exit_with_parent)
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["--exit-with-parent"]).unwrap(), Some(None));
+        assert_eq!(parse(&["--exit-with-parent", "1234"]).unwrap(), Some(Some(1234)));
+        // 0 names no process on Windows and the caller's process group to
+        // kill(2); IDs past i32::MAX turn into negative pid_t values, which
+        // kill(2) also takes for groups.
+        assert!(parse(&["--exit-with-parent", "0"]).is_err());
+        assert!(parse(&["--exit-with-parent", "2147483648"]).is_err());
+        // The relay never runs the watch.
+        assert!(parse(&["--exit-with-parent", "--relay", "4000"]).is_err());
     }
 
     #[test]

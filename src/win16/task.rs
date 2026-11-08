@@ -556,6 +556,7 @@ pub(super) fn end_client_task(cpu: &mut Cpu, tid: u32) {
         crate::win32::thread::end(&mut cpu.bus.win32, p, i, 0);
     }
     crate::win32::user32::destroy_thread_windows(cpu, tid);
+    super::comm::task_ended(cpu, task.handle);
     global::free_owned(cpu, task.handle);
     cpu.bus.win32.win16.ldt.free(task.psp, 1);
     global::free(cpu, task.handle);
@@ -691,10 +692,11 @@ fn new_thread(cpu: &mut Cpu, ctx: Context) -> Option<(u32, u32)> {
 
 /// Whether the thread `t` of the process `p` may run now as the Win16
 /// lock goes: one that isn't a task's may; a task may when no other task
-/// holds the lock and can run.
+/// holds the lock and can run, and no task the last message between
+/// tasks went to (`directed`) waits for its turn.
 pub fn may_run(win32: &crate::win32::Win32, p: usize, t: usize) -> bool {
     let win16 = &win32.win16;
-    if win16.pid == 0 || win16.lock == 0 {
+    if win16.pid == 0 || (win16.lock == 0 && win16.directed == 0) {
         return true;
     }
     let Some(process) = win32.processes.get(p) else {
@@ -707,16 +709,47 @@ pub fn may_run(win32: &crate::win32::Win32, p: usize, t: usize) -> bool {
     if thread.id == win16.lock || !win16.tasks.iter().any(|k| k.tid == thread.id) {
         return true;
     }
+    let can_run = |tid: u32| tid != 0 && process.threads.iter().any(|h| h.id == tid && h.ready());
     // The holder can't run (it waits, or ended): the lock is free.
-    !process
-        .threads
-        .iter()
-        .any(|h| h.id == win16.lock && h.ready())
+    if can_run(win16.lock) {
+        return false;
+    }
+    // The task a message or a reply went to has the next turn.
+    thread.id == win16.directed || !can_run(win16.directed)
 }
 
-/// The thread `tid` runs: if it is a task's, it takes the Win16 lock.
+/// A message went between two threads: `from` sent it to a window of
+/// `to`, or replied to one `to` sent. When both are tasks, `to` has the
+/// next turn once the lock is free.
+///
+/// Windows 3.1's SendMessage to another task's window switches to that
+/// task, which handles the message, and the reply switches back: a third
+/// task that is ready doesn't run in between. Here the sender gives up
+/// the lock when it waits for the reply, so the receiver runs next; the
+/// receiver keeps the lock after it replies until it waits, and then the
+/// sender runs. Without this, a task that had just started ran between a
+/// message and its reply: the Metal Marines CD's launcher was still
+/// being activated, as the Video for Windows setup hid its window, when
+/// the setup's next task activated its dialog, and the rest of the
+/// launcher's activation then brought it back over the dialog.
+pub fn hand_turn(win32: &mut crate::win32::Win32, from: u32, to: u32) {
+    if from != to && both_tasks(win32, from, to) {
+        win32.win16.directed = to;
+    }
+}
+
+/// Whether the threads `a` and `b` both run tasks.
+pub fn both_tasks(win32: &crate::win32::Win32, a: u32, b: u32) -> bool {
+    super::is_task(win32, a) && super::is_task(win32, b)
+}
+
+/// The thread `tid` runs: if it is a task's, it takes the Win16 lock,
+/// and the turn handed to it is taken.
 pub fn entered(win32: &mut crate::win32::Win32, tid: u32) {
-    if win32.win16.pid != 0 && win32.win16.tasks.iter().any(|t| t.tid == tid) {
+    if win32.win16.directed == tid {
+        win32.win16.directed = 0;
+    }
+    if super::is_task(win32, tid) {
         win32.win16.lock = tid;
     }
 }
@@ -796,10 +829,15 @@ fn next_init(cpu: &mut Cpu, t: usize) -> Option<u16> {
 }
 
 /// Initialize the library `module` as Windows 95 does when it loads one:
-/// its entry point (`call_lib_main`), then, for a library made for
-/// Windows 4.0, the DllEntryPoint it exports, with DLL_PROCESS_ATTACH.
-/// `then` runs, with `data`, after both.
+/// a self-loading library's loader loads its segments first
+/// (`module::boot`), then its entry point runs (`call_lib_main`), then,
+/// for a library made for Windows 4.0, the DllEntryPoint it exports,
+/// with DLL_PROCESS_ATTACH. `then` runs, with `data`, after them.
 pub fn call_lib_init(cpu: &mut Cpu, module: u16, resume: Context, then: u16, data: Vec<u32>) {
+    if module::needs_boot(cpu, module) {
+        module::boot(cpu, module, resume, then, data);
+        return;
+    }
     let mut chained = vec![then as u32, module as u32];
     chained.extend(data);
     call_lib_main(cpu, module, resume, thunk::THEN_DLL_ENTRY, chained);
@@ -1025,6 +1063,9 @@ pub fn exit(cpu: &mut Cpu, code: u16) {
     }
     // A Win32 process's client: the threads that wait for it go on.
     super::flat::task_ending(cpu, task.tid);
+    // The serial ports it left open close, the last task's too, so that
+    // their lines drop.
+    super::comm::task_ended(cpu, task.handle);
     // The process object its starters wait on.
     let objects = &mut cpu.bus.win32.objects;
     if let Some(object) = objects.get_mut(task.process_object)

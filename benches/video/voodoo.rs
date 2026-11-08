@@ -105,6 +105,32 @@ pub fn pipelines(c: &mut Criterion) {
             [0x0008_43E1, cp, 0x0000_5110, 0xC0, 0x8000_0006, texture],
         );
     }
+    // The Voodoo2 Direct3D driver's states with the most area in a saved
+    // Omikron scene, with clipping, a depth test and both writes on.
+    for (name, alpha, fog) in [
+        ("d3d-darken", 0x0000_601E, 0),
+        ("d3d-opaque", 0x0000_040E, 0),
+        ("d3d-alpha-fog", 0x0000_511E, 0x41),
+    ] {
+        pipeline(
+            c,
+            &format!("video/voodoo/{name}"),
+            [0x0001_0F71, 0x0800_2401, alpha, fog, 0x0000_0507, 0x0824_1507],
+        );
+    }
+    // Myth's Glide renderer on a Voodoo3, which draws its terrain twice:
+    // a palettized texture, then an intensity texture multiplying the
+    // frame by its alpha. TMU 0 combines its own texel alone.
+    for (name, alpha, texture) in [
+        ("myth-terrain", 0x0004_0400, 0x0C26_150F),
+        ("myth-light", 0x0004_2010, 0x0C26_130F),
+    ] {
+        pipeline(
+            c,
+            &format!("video/voodoo/{name}"),
+            [0x0008_4321, 0x0C00_0035, alpha, 0, texture, 0x0422_10C0],
+        );
+    }
 }
 
 fn pipeline(c: &mut Criterion, name: &str, regs: [u32; 6]) {
@@ -131,7 +157,7 @@ fn pipeline(c: &mut Criterion, name: &str, regs: [u32; 6]) {
         tmu: [tp, tp],
         ..Default::default()
     };
-    let variant = raster::variant(&st, 2).expect("the Oni colour path has a variant");
+    let variant = raster::variant(&st, 2).expect("the state has a variant");
     let draw = |variant, stats: &mut Stats| {
         let mut stipple = 0;
         for y in 0..240 {

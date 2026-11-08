@@ -150,8 +150,11 @@ fn done(cpu: &mut Cpu, resume: (u32, u32), data: Vec<u32>) {
             let bases = data[LIST..].to_vec();
             with_process(cpu, |p, bus| {
                 let mut memory = std::mem::take(&mut p.memory);
+                // An entry point that ran may have loaded one again.
                 for base in bases {
-                    loader::unmap(bus, &mut memory, p, base);
+                    if p.modules.iter().any(|m| m.base == base && m.refs == 0) {
+                        loader::unmap(bus, &mut memory, p, base);
+                    }
                 }
                 p.memory = memory;
             });
@@ -446,6 +449,7 @@ const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
 const ERROR_RESOURCE_NAME_NOT_FOUND: u32 = 1814;
 const ERROR_RESOURCE_LANG_NOT_FOUND: u32 = 1815;
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 
 /// The resource directory's data directory.
 const DIR_RESOURCE: u32 = 2;
@@ -615,14 +619,36 @@ pub(super) fn resource_data(
 ) -> Option<Result<(u32, u32), u32>> {
     let kind = res_arg(cpu, kind)?;
     let name = res_arg(cpu, name)?;
+    Some(data_of(cpu, module, &kind, &name))
+}
+
+/// The data of the resource `name` of the named type `kind` ("WAVE") in
+/// the module `module` (0: the program), for WINMM: its address and
+/// size, or the error FindResourceA would set. None if a name's page
+/// isn't there.
+pub(super) fn named_resource_data(
+    cpu: &mut Cpu,
+    module: u32,
+    kind: &str,
+    name: u32,
+) -> Option<Result<(u32, u32), u32>> {
+    let name = res_arg(cpu, name)?;
+    Some(data_of(cpu, module, &Res::Name(kind.to_string()), &name))
+}
+
+fn data_of(cpu: &mut Cpu, module: u32, kind: &Res, name: &Res) -> Result<(u32, u32), u32> {
     let Some(base) = resource_module(cpu, module) else {
-        return Some(Err(ERROR_INVALID_HANDLE));
+        return Err(ERROR_INVALID_HANDLE);
     };
-    Some(find(cpu, base, &kind, &name, None).and_then(|entry| {
+    let (at, size) = find(cpu, base, kind, name, None).and_then(|entry| {
         data_entry(cpu, entry)
             .map(|(rva, size)| (base.wrapping_add(rva), size))
             .ok_or(ERROR_RESOURCE_DATA_NOT_FOUND)
-    }))
+    })?;
+    if !crate::win16::resource::page_in(cpu, base, at, size) {
+        return Err(ERROR_NOT_ENOUGH_MEMORY);
+    }
+    Ok((at, size))
 }
 
 /// FindResourceA(module, name, type).
@@ -649,7 +675,14 @@ pub(super) fn load_resource(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let base = resource_module(cpu, args[0]);
     let found = base.zip((args[1] != 0).then(|| data_entry(cpu, args[1])).flatten());
     match found {
-        Some((base, (rva, _))) => Some(base.wrapping_add(rva)),
+        Some((base, (rva, size))) => {
+            let at = base.wrapping_add(rva);
+            if !crate::win16::resource::page_in(cpu, base, at, size) {
+                set_error(cpu, ERROR_NOT_ENOUGH_MEMORY);
+                return Some(0);
+            }
+            Some(at)
+        }
         None => {
             set_error(cpu, ERROR_RESOURCE_DATA_NOT_FOUND);
             Some(0)

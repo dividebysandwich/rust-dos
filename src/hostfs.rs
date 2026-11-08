@@ -545,6 +545,36 @@ pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     }
 }
 
+/// `canonicalize` without Windows' `\\?\` verbatim prefix
+/// (`without_verbatim`): the path as the user writes it, and as profiles,
+/// settings and messages keep it. A folder drive's root keeps the prefix
+/// (`canonicalize`), under which names ending in a dot or a space work.
+pub fn canonicalize_plain(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+    canonicalize(path).map(|path| without_verbatim(&path))
+}
+
+/// `path` without the `\\?\` verbatim prefix that `std::fs::canonicalize`
+/// adds on Windows: `\\?\C:\dos` is `C:\dos`, and `\\?\UNC\server\share`
+/// is `\\server\share`. Other paths, a volume's GUID path among them
+/// (`\\?\Volume{...}\`), which has no other form, are as they are.
+pub fn without_verbatim(path: &Path) -> PathBuf {
+    path.to_str()
+        .and_then(verbatim_stripped)
+        .map_or_else(|| path.to_path_buf(), PathBuf::from)
+}
+
+/// `without_verbatim` of a path as text; None when it has no prefix to
+/// take off.
+pub fn verbatim_stripped(path: &str) -> Option<String> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{}", rest));
+    }
+    let rest = path.strip_prefix(r"\\?\")?;
+    let drive = rest.as_bytes();
+    let is_drive = drive.len() >= 2 && drive[0].is_ascii_alphabetic() && drive[1] == b':';
+    is_drive.then(|| rest.to_string())
+}
+
 /// `std::path::absolute`; a path with a scheme is as it is.
 pub fn absolute(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     let path = path.as_ref();

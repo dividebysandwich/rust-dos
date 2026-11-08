@@ -272,7 +272,9 @@ impl DiskController {
         for (drive, id) in std::mem::take(&mut self.reverts) {
             let reverted = self.bios_image(drive).ok_or_else(|| "it's gone".to_string()).and_then(|disk| disk.revert_to(id));
             if let Err(e) = reverted {
-                failed.push(format!("drive {}: {}", drive_name(drive), e));
+                // `C:` or `2`: one colon after either.
+                let name = drive_name(drive);
+                failed.push(format!("drive {}: {}", name.trim_end_matches(':'), e));
             }
         }
         failed
@@ -363,6 +365,14 @@ impl DiskController {
             .collect()
     }
 
+    /// The CD-ROM drive a booted system shows, given the one it showed
+    /// before (`current`). See `pick_cd`.
+    pub fn cd_to_show(&self, current: Option<u8>) -> Option<u8> {
+        pick_cd(&self.drives_of_kind(DriveKind::CdRom), current, |d| {
+            self.boot_cd_image(d).is_some()
+        })
+    }
+
     /// Drive a file handle was opened on (Z: for virtual handles).
     pub fn handle_drive(&self, handle: u16) -> Option<u8> {
         self.open_files.get(&handle).map(|f| f.drive)
@@ -409,9 +419,12 @@ impl DiskController {
         };
         let (time, date) = self.file_time(sft).unwrap_or((0, 0));
         let leaf = open.path.rsplit(['\\', '/', ':']).next().unwrap_or("");
-        let (stem, ext) = match open.data {
-            OpenData::Device(_) => (leaf.split('.').next().unwrap_or(""), ""),
-            _ => leaf.rsplit_once('.').unwrap_or((leaf, "")),
+        // A device keeps its name alone, also when it was opened as "NUL:".
+        let device = matches!(open.data, OpenData::Device(_))
+            .then(|| device_name(&open.path).unwrap_or_default());
+        let (stem, ext) = match &device {
+            Some(device) => (device.as_str(), ""),
+            None => leaf.rsplit_once('.').unwrap_or((leaf, "")),
         };
         let mut name = [b' '; 11];
         for (slot, b) in name[..8].iter_mut().zip(stem.trim().bytes()) {
@@ -464,7 +477,7 @@ impl DiskController {
     /// Where in the open file `sft` the next read or write goes.
     pub fn position(&self, sft: u16) -> Option<u64> {
         match &self.open_files.get(&sft)?.data {
-            OpenData::Host(file, _) => (&*file).stream_position().ok(),
+            OpenData::Host(file, _) => file.position().ok(),
             OpenData::Memory(_, pos) | OpenData::Image(_, _, pos) | OpenData::Fat { pos, .. } => Some(pos.get()),
             OpenData::Device(_) => Some(0),
         }
@@ -493,5 +506,80 @@ impl DiskController {
         } else {
             self.drives.iter().position(Option::is_some).unwrap_or(DRIVE_C as usize) as u8
         };
+    }
+
+    /// The current drive and the current directory of each mounted drive,
+    /// for `set_current_directories` to put back.
+    pub fn current_directories(&self) -> (u8, Vec<(u8, String)>) {
+        let dirs = self
+            .drives
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| Some((i as u8, d.as_ref()?.current_dir.clone())))
+            .collect();
+        (self.current_drive, dirs)
+    }
+
+    /// Put back the current directories `current_directories` gave, on
+    /// the drives that are still mounted, and the current drive.
+    pub fn set_current_directories(&mut self, (drive, dirs): &(u8, Vec<(u8, String)>)) {
+        for (i, dir) in dirs {
+            if let Some(Some(d)) = self.drives.get_mut(*i as usize) {
+                d.current_dir = dir.clone();
+            }
+        }
+        self.set_current_drive(*drive);
+    }
+}
+
+/// Which CD-ROM drive a booted system shows, out of `cds` (in drive-letter
+/// order), given the one it showed before (`current`). It stays on that
+/// drive while the drive has a disc. Otherwise it moves to the first drive
+/// with a disc, as the IDE channel does when a disc goes into another CD-ROM
+/// drive. With no disc anywhere it keeps `current`, or the first drive when
+/// `current` is gone.
+fn pick_cd(cds: &[u8], current: Option<u8>, has_disc: impl Fn(u8) -> bool) -> Option<u8> {
+    let current = current.filter(|c| cds.contains(c));
+    if let Some(c) = current.filter(|&c| has_disc(c)) {
+        return Some(c);
+    }
+    cds.iter()
+        .copied()
+        .find(|&d| has_disc(d))
+        .or(current)
+        .or(cds.first().copied())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_cd;
+
+    #[test]
+    fn the_shown_cd_stays_while_it_has_a_disc() {
+        // E: has a disc; a disc going into D: (the first letter) doesn't
+        // move it.
+        assert_eq!(pick_cd(&[3, 4], Some(4), |d| d == 3 || d == 4), Some(4));
+    }
+
+    #[test]
+    fn an_empty_shown_cd_moves_to_a_disc_elsewhere() {
+        assert_eq!(pick_cd(&[3, 4], Some(3), |d| d == 4), Some(4));
+    }
+
+    #[test]
+    fn an_empty_shown_cd_stays_when_no_drive_has_a_disc() {
+        assert_eq!(pick_cd(&[3, 4], Some(4), |_| false), Some(4));
+    }
+
+    #[test]
+    fn at_first_the_drive_with_a_disc_or_the_first_one_is_shown() {
+        assert_eq!(pick_cd(&[3, 4], None, |d| d == 4), Some(4));
+        assert_eq!(pick_cd(&[3, 4], None, |_| false), Some(3));
+        assert_eq!(pick_cd(&[], None, |_| true), None);
+    }
+
+    #[test]
+    fn a_shown_cd_that_is_gone_is_replaced_by_the_first_one() {
+        assert_eq!(pick_cd(&[3], Some(4), |_| false), Some(3));
     }
 }

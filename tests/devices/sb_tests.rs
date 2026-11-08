@@ -1,0 +1,962 @@
+//! Sound hardware through its ports, the way drivers see it: the Sound
+//! Blaster's DSP and mixer, DMA transfers timed in emulated time, the DMA
+//! controllers, the OPL's detection timers and the MPU-401.
+
+use rust_dos::bus::Bus;
+use rust_dos::cpu::Cpu;
+use rust_dos::mixer::{MixerSettings, SbFilter};
+use rust_dos::savestate::machine;
+use rust_dos::sb::{SbConfig, SbModel};
+use std::path::PathBuf;
+
+/// A bus at 1000 instructions per emulated ms with the given card.
+fn bus_with(config: SbConfig) -> Bus {
+    let mut bus = Bus::new(PathBuf::from("."));
+    bus.set_cycles_per_ms(1000);
+    bus.configure_sound(Some(config), true);
+    // Unmask everything but the timer, so the card's IRQ reaches the
+    // PIC's output.
+    bus.io_write(0x21, 0x01);
+    bus.io_write(0xA1, 0x00);
+    bus
+}
+
+fn sb16() -> Bus {
+    bus_with(SbConfig::default())
+}
+
+/// Let `ms` milliseconds of emulated time pass (at `bus_with`'s speed),
+/// running due timer events.
+fn wait_ms(bus: &mut Bus, ms: f64) {
+    spin(bus, (ms * 1000.0) as u64);
+}
+
+/// Run `n` instructions, running due timer events: a driver's delay loop.
+fn spin(bus: &mut Bus, n: u64) {
+    let target = bus.clock.icount + n;
+    while bus.clock.icount < target {
+        let step = (target - bus.clock.icount).min(10);
+        bus.clock.icount += step;
+        if bus.clock.icount >= bus.clock.deadline {
+            bus.service_timers();
+        }
+    }
+}
+
+/// Wait for the DSP to take a byte, as drivers do, then write it. It reads
+/// busy now and then while a transfer runs.
+fn dsp_write(bus: &mut Bus, value: u8) {
+    let mut reads = 0;
+    while bus.io_read(0x22C) & 0x80 != 0 {
+        reads += 1;
+        assert!(reads < 100, "DSP ready for a byte");
+        bus.clock.icount += 1;
+    }
+    bus.io_write(0x22C, value);
+}
+
+fn dsp_read(bus: &mut Bus) -> u8 {
+    assert_eq!(bus.io_read(0x22E) & 0x80, 0x80, "DSP has a byte");
+    bus.io_read(0x22A)
+}
+
+fn reset_dsp(bus: &mut Bus) {
+    bus.io_write(0x226, 1);
+    bus.io_write(0x226, 0);
+    assert_eq!(dsp_read(bus), 0xAA);
+}
+
+/// Program 8-bit DMA channel 1 for a transfer of `len` bytes at `addr`.
+fn program_dma1(bus: &mut Bus, addr: u32, len: u16, auto_init: bool) {
+    bus.io_write(0x0A, 0x05); // mask channel 1
+    bus.io_write(0x0C, 0x00); // clear the flip-flop
+    bus.io_write(0x0B, 0x49 | if auto_init { 0x10 } else { 0 }); // single, read, ch 1
+    bus.io_write(0x02, addr as u8);
+    bus.io_write(0x02, (addr >> 8) as u8);
+    bus.io_write(0x83, (addr >> 16) as u8);
+    bus.io_write(0x03, (len - 1) as u8);
+    bus.io_write(0x03, ((len - 1) >> 8) as u8);
+    bus.io_write(0x0A, 0x01); // unmask
+}
+
+fn dma1_count(bus: &mut Bus) -> u16 {
+    bus.io_write(0x0C, 0);
+    let lo = bus.io_read(0x03) as u16;
+    lo | (bus.io_read(0x03) as u16) << 8
+}
+
+#[test]
+fn dsp_reset_version_and_identification() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (4, 5));
+    dsp_write(&mut bus, 0xE0);
+    dsp_write(&mut bus, 0x55);
+    assert_eq!(dsp_read(&mut bus), 0xAA);
+    dsp_write(&mut bus, 0xE4);
+    dsp_write(&mut bus, 0x3C);
+    dsp_write(&mut bus, 0xE8);
+    assert_eq!(dsp_read(&mut bus), 0x3C);
+
+    let mut bus = bus_with(SbConfig { model: SbModel::Sb2, ..SbConfig::default() });
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (2, 1));
+}
+
+#[test]
+fn single_cycle_transfer_plays_in_emulated_time_and_interrupts() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    // 1000 bytes of a ramp at 10000 Hz: a tenth of a second.
+    let data: Vec<u8> = (0..1000u32).map(|i| (i % 256) as u8).collect();
+    bus.load_bytes(0x20000, &data);
+    program_dma1(&mut bus, 0x20000, 1000, false);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156); // 1e6 / (256 - 156) = 10000 Hz
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, (999 & 0xFF) as u8);
+    dsp_write(&mut bus, (999 >> 8) as u8);
+
+    wait_ms(&mut bus, 50.0);
+    let left = dma1_count(&mut bus);
+    assert!((495..=505).contains(&left), "half played: count {}", left);
+    assert_eq!(bus.pic_pending_irq(), None);
+
+    wait_ms(&mut bus, 51.0);
+    assert_eq!(bus.pic_pending_irq(), Some(7), "block end raises IRQ 7");
+    // The DMA controller saw terminal count; the status read clears it.
+    assert_eq!(bus.io_read(0x08) & 0x02, 0x02);
+    assert_eq!(bus.io_read(0x08) & 0x02, 0x00);
+    // The mixer says it's the 8-bit interrupt; reading 22Eh acknowledges.
+    bus.io_write(0x224, 0x82);
+    assert_eq!(bus.io_read(0x225) & 0x03, 0x01);
+    bus.io_read(0x22E);
+    assert_eq!(bus.pic_pending_irq(), None);
+
+    // The ramp was mixed into the output: 0.1 s of it at 44.1 kHz.
+    bus.audio_catch_up();
+    let loud = bus.audio_out.iter().step_by(2).filter(|s| s.unsigned_abs() > 8000).count();
+    assert!(loud > 1000, "{} loud frames", loud);
+}
+
+#[test]
+fn sb16_auto_init_16bit_stereo_interrupts_every_block() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    // DMA 5 (16-bit): words, page register 8Bh, address in words.
+    let addr: u32 = 0x40000;
+    bus.io_write(0xD4, 0x05); // mask channel 5
+    bus.io_write(0xD8, 0x00);
+    bus.io_write(0xD6, 0x59); // single, auto-init, read, ch 5
+    bus.io_write(0xC4, (addr >> 1) as u8);
+    bus.io_write(0xC4, (addr >> 9) as u8);
+    bus.io_write(0x8B, (addr >> 16) as u8);
+    bus.io_write(0xC6, 0xFF); // 1024 words
+    bus.io_write(0xC6, 0x03);
+    bus.io_write(0xD4, 0x01);
+    // 22050 Hz stereo, signed 16-bit, blocks of 512 samples (256 frames).
+    dsp_write(&mut bus, 0x41);
+    dsp_write(&mut bus, (22050u16 >> 8) as u8);
+    dsp_write(&mut bus, 22050u16 as u8);
+    dsp_write(&mut bus, 0xB6);
+    dsp_write(&mut bus, 0x30);
+    dsp_write(&mut bus, 0xFF);
+    dsp_write(&mut bus, 0x01);
+
+    let mut irqs = 0;
+    // One block is 256 frames: 11.6 ms. Count interrupts over 100 ms.
+    for _ in 0..1000 {
+        wait_ms(&mut bus, 0.1);
+        if bus.pic_pending_irq() == Some(7) {
+            irqs += 1;
+            bus.io_write(0x224, 0x82);
+            assert_eq!(bus.io_read(0x225) & 0x03, 0x02, "16-bit interrupt");
+            bus.io_read(0x22F);
+        }
+    }
+    assert!((8..=9).contains(&irqs), "{} interrupts", irqs);
+}
+
+#[test]
+fn mixer_reports_the_configured_resources() {
+    let mut bus = bus_with(SbConfig { irq: 5, dma8: 1, dma16: 7, ..SbConfig::default() });
+    bus.io_write(0x224, 0x80);
+    assert_eq!(bus.io_read(0x225), 0x02);
+    bus.io_write(0x224, 0x81);
+    assert_eq!(bus.io_read(0x225), 0x82);
+    assert_eq!(SbConfig::default().blaster(), "A220 I7 D1 H5 P330 T6");
+}
+
+#[test]
+fn sb16_driver_selects_its_resources_in_the_mixer() {
+    // Windows 95's driver writes those Device Manager gives it, whatever
+    // the card was set to, and tests the interrupt and DMA on them.
+    let mut bus = bus_with(SbConfig { irq: 5, dma8: 3, dma16: 7, ..SbConfig::default() });
+    reset_dsp(&mut bus);
+    bus.io_write(0x224, 0x80);
+    bus.io_write(0x225, 0x04);
+    assert_eq!(bus.io_read(0x225), 0x04);
+    bus.io_write(0x224, 0x81);
+    bus.io_write(0x225, 0x22);
+    assert_eq!(bus.io_read(0x225), 0x22);
+    dsp_write(&mut bus, 0xF2);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+    bus.io_read(0x22E);
+    assert_eq!(bus.pic_pending_irq(), None);
+
+    // An 8-bit transfer goes over DMA 1 now.
+    bus.load_bytes(0x20000, &[0x80; 100]);
+    program_dma1(&mut bus, 0x20000, 100, false);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156);
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, 99);
+    dsp_write(&mut bus, 0);
+    wait_ms(&mut bus, 11.0);
+    assert_eq!(dma1_count(&mut bus), 0xFFFF, "DMA 1 reached terminal count");
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+}
+
+#[test]
+fn older_cards_take_sb16_only_commands_without_parameters() {
+    for (model, major) in [(SbModel::Sb2, 2), (SbModel::SbPro2, 3)] {
+        let mut bus = bus_with(SbConfig { model, ..SbConfig::default() });
+        reset_dsp(&mut bus);
+        for cmd in [0x41, 0x42, 0x05, 0x08, 0x0E, 0x0F, 0xF9, 0xFA, 0xB6, 0xC6, 0xE7] {
+            dsp_write(&mut bus, cmd);
+        }
+        // None waited for parameters: E1h answers straight away.
+        dsp_write(&mut bus, 0xE1);
+        assert_eq!(dsp_read(&mut bus), major, "{:?}", model);
+    }
+}
+
+#[test]
+fn sb_pro_mixer_lacks_the_sb16_registers() {
+    let mut bus = bus_with(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() });
+    // HMI's setup writes and reads back 3Fh, then reads 80h and 81h.
+    bus.io_write(0x224, 0x3F);
+    bus.io_write(0x225, 0xC0);
+    assert_eq!(bus.io_read(0x225), 0x0A);
+    bus.io_write(0x224, 0x80);
+    assert_eq!(bus.io_read(0x225), 0x0A);
+    bus.io_write(0x224, 0x22);
+    bus.io_write(0x225, 0x99);
+    assert_eq!(bus.io_read(0x225), 0x99);
+}
+
+#[test]
+fn sb16_pro_mixer_registers_show_the_sb16_levels() {
+    let mut bus = sb16();
+    let mut mixer = |reg: u8, value: Option<u8>| {
+        bus.io_write(0x224, reg);
+        if let Some(value) = value {
+            bus.io_write(0x225, value);
+        }
+        bus.io_read(0x225)
+    };
+    // A mixer program sets the master volume through the SB16's own
+    // registers (30h/31h, five bits each); a game reading the SB Pro's
+    // master volume (22h, a nibble a side) sees the same levels.
+    mixer(0x30, Some(0x80));
+    mixer(0x31, Some(0x40));
+    assert_eq!(mixer(0x22, None), 0x84);
+    // Voice (32h/33h as 04h), FM (34h/35h as 26h), CD (36h/37h as 28h).
+    mixer(0x32, Some(0xF8));
+    mixer(0x33, Some(0x00));
+    assert_eq!(mixer(0x04, None), 0xF0);
+    mixer(0x35, Some(0x10));
+    mixer(0x34, Some(0x20));
+    assert_eq!(mixer(0x26, None), 0x21);
+    mixer(0x36, Some(0x00));
+    mixer(0x37, Some(0xF8));
+    assert_eq!(mixer(0x28, None), 0x0F);
+    // And the other way, as before.
+    mixer(0x22, Some(0x9C));
+    assert_eq!((mixer(0x30, None), mixer(0x31, None)), (0x98, 0xC8));
+    assert_eq!(mixer(0x22, None), 0x9C);
+}
+
+#[test]
+fn transfer_waits_while_its_dma_channel_is_masked() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    program_dma1(&mut bus, 0x20000, 100, false);
+    bus.io_write(0x0A, 0x05);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156);
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, 99);
+    dsp_write(&mut bus, 0);
+    wait_ms(&mut bus, 30.0);
+    assert_eq!(bus.pic_pending_irq(), None, "no data, no interrupt");
+    bus.io_write(0x0A, 0x01);
+    wait_ms(&mut bus, 11.0);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+}
+
+#[test]
+fn force_irq_is_level_triggered_until_acknowledged() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0xF2);
+    assert_eq!(bus.pic_pending_irq(), Some(7));
+    bus.io_read(0x22E);
+    assert_eq!(bus.pic_pending_irq(), None);
+}
+
+#[test]
+fn opl_status_tells_opl2_from_opl3_and_times_its_timers() {
+    for opl3 in [true, false] {
+        let mut bus = Bus::new(PathBuf::from("."));
+        bus.set_cycles_per_ms(1000);
+        bus.configure_sound(Some(SbConfig::default()), opl3);
+        let write = |bus: &mut Bus, reg: u8, value: u8| {
+            bus.io_write(0x388, reg);
+            bus.io_write(0x389, value);
+        };
+        write(&mut bus, 0x04, 0x60);
+        write(&mut bus, 0x04, 0x80);
+        assert_eq!(bus.io_read(0x388), if opl3 { 0x00 } else { 0x06 });
+        write(&mut bus, 0x02, 0xFF);
+        write(&mut bus, 0x04, 0x21);
+        assert_eq!(bus.io_read(0x388) & 0xE0, 0x00);
+        bus.clock.icount += 100; // 100 us
+        assert_eq!(bus.io_read(0x388) & 0xE0, 0xC0);
+    }
+}
+
+#[test]
+fn fm_notes_make_sound() {
+    let mut bus = sb16();
+    let write = |bus: &mut Bus, reg: u8, value: u8| {
+        bus.io_write(0x388, reg);
+        bus.io_write(0x389, value);
+    };
+    // A plain sine on channel 0: modulator muted, carrier loud.
+    for (reg, value) in [(0x20, 0x01), (0x40, 0x3F), (0x60, 0xF0), (0x80, 0x77), (0x23, 0x01), (0x43, 0x00), (0x63, 0xF0), (0x83, 0x77), (0xC0, 0x31), (0xA0, 0x98), (0xB0, 0x31)] {
+        write(&mut bus, reg, value);
+    }
+    wait_ms(&mut bus, 20.0);
+    bus.audio_catch_up();
+    let peak = bus.audio_out.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+    assert!(peak > 1000, "peak {}", peak);
+}
+
+#[test]
+fn mpu401_acknowledges_reset_and_uart_mode() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    assert_eq!(bus.io_read(0x331) & 0x80, 0x80, "nothing to read");
+    bus.io_write(0x331, 0xFF);
+    assert_eq!(bus.io_read(0x331) & 0x80, 0x00);
+    assert_eq!(bus.io_read(0x330), 0xFE);
+    bus.io_write(0x331, 0x3F);
+    assert_eq!(bus.io_read(0x330), 0xFE);
+    // MIDI bytes are accepted.
+    for b in [0x90, 60, 100, 0x80, 60, 0] {
+        bus.io_write(0x330, b);
+    }
+    assert_eq!(bus.io_read(0x331) & 0xC0, 0x80);
+}
+
+#[test]
+fn no_card_means_nothing_at_its_ports() {
+    let mut bus = Bus::new(PathBuf::from("."));
+    bus.configure_sound(None, false);
+    bus.io_write(0x226, 1);
+    bus.io_write(0x226, 0);
+    assert_eq!(bus.io_read(0x22E), 0xFF);
+    assert_eq!(bus.io_read(0x22A), 0xFF);
+}
+
+#[test]
+fn silence_interrupts_while_the_driver_polls_the_dsp() {
+    // Tyrian 2000's setup sends 80h for 17 units at 16.7 kHz (about 1 ms)
+    // and reads the write status in a tight loop until its IRQ handler
+    // runs: each read brings the DSP up to date a fraction of a unit on.
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 0xC4);
+    dsp_write(&mut bus, 0x80);
+    dsp_write(&mut bus, 0x10);
+    dsp_write(&mut bus, 0x00);
+    let start = bus.clock.icount;
+    while bus.pic_pending_irq().is_none() && bus.clock.icount - start < 5000 {
+        bus.clock.icount += 1;
+        if bus.clock.icount >= bus.clock.deadline {
+            bus.service_timers();
+        }
+        bus.io_read(0x22C);
+    }
+    let elapsed = bus.clock.icount - start;
+    assert_eq!(bus.pic_pending_irq(), Some(7), "silence ends with IRQ 7");
+    assert!((950..=1100).contains(&elapsed), "after {} instructions (1 ms is 1000)", elapsed);
+}
+
+#[test]
+fn write_status_reads_busy_now_and_then_while_a_transfer_runs() {
+    // Miles' AIL 2 driver (SBPDIG.ADV, Dark Sun 2) stops a block that is
+    // still playing by polling the write status for bit 7 with its IRQ
+    // vector restored, then sending D0h. If the DSP never reads busy, the
+    // block ends first and its IRQ is lost.
+    // Of 200 write status reads 2 us apart (an instruction, then the 1 us
+    // the read takes), how many read busy.
+    let busy_reads = |bus: &mut Bus| {
+        (0..200)
+            .filter(|_| {
+                bus.clock.icount += 1;
+                bus.io_read(0x22C) & 0x80 != 0
+            })
+            .count()
+    };
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    assert_eq!(busy_reads(&mut bus), 0, "an idle DSP is always ready");
+
+    program_dma1(&mut bus, 0x20000, 1000, false);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 156);
+    dsp_write(&mut bus, 0x14);
+    dsp_write(&mut bus, (999 & 0xFF) as u8);
+    dsp_write(&mut bus, (999 >> 8) as u8);
+    let busy = busy_reads(&mut bus);
+    assert!((20..=100).contains(&busy), "busy on {} of 200 reads", busy);
+
+    // Halted with D0h, it is ready again.
+    dsp_write(&mut bus, 0xD0);
+    assert_eq!(busy_reads(&mut bus), 0, "a paused DSP is always ready");
+    assert_eq!(bus.pic_pending_irq(), None, "the halted block raised no IRQ");
+}
+
+fn sb_pro() -> Bus {
+    bus_with(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() })
+}
+
+/// Start 8-bit output of blocks of 1000 bytes at 10000 Hz (0.1 s each)
+/// with DSP command `cmd`, from a 4000-byte auto-init DMA buffer.
+fn start_8bit(bus: &mut Bus, cmd: u8) {
+    program_dma1(bus, 0x20000, 4000, true);
+    dsp_write(bus, 0xD1);
+    dsp_write(bus, 0x40);
+    dsp_write(bus, 156);
+    dsp_write(bus, 0x48);
+    dsp_write(bus, (999 & 0xFF) as u8);
+    dsp_write(bus, (999 >> 8) as u8);
+    dsp_write(bus, cmd);
+}
+
+#[test]
+fn high_speed_dsp_ignores_commands_until_a_reset() {
+    let mut bus = sb_pro();
+    reset_dsp(&mut bus);
+    start_8bit(&mut bus, 0x90);
+    assert_eq!(bus.io_read(0x22C) & 0x80, 0x80, "busy in high-speed mode");
+    // A pause and a version request go nowhere: the block plays on.
+    bus.io_write(0x22C, 0xD0);
+    bus.io_write(0x22C, 0xE1);
+    wait_ms(&mut bus, 50.0);
+    let left = dma1_count(&mut bus);
+    assert!((3495..=3505).contains(&left), "played on through D0h: count {}", left);
+    assert_eq!(bus.io_read(0x22E) & 0x80, 0, "no answer to E1h");
+    assert_eq!(bus.io_read(0x22C) & 0x80, 0x80, "still busy");
+
+    // A reset ends the mode and the transfer, and keeps the speaker on.
+    reset_dsp(&mut bus);
+    let left = dma1_count(&mut bus);
+    wait_ms(&mut bus, 20.0);
+    assert_eq!(dma1_count(&mut bus), left, "the transfer stopped");
+    dsp_write(&mut bus, 0xD8);
+    assert_eq!(dsp_read(&mut bus), 0xFF, "speaker on");
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (3, 2));
+}
+
+#[test]
+fn high_speed_single_cycle_mode_ends_with_its_block() {
+    let mut bus = bus_with(SbConfig { model: SbModel::Sb2, ..SbConfig::default() });
+    reset_dsp(&mut bus);
+    start_8bit(&mut bus, 0x91);
+    wait_ms(&mut bus, 50.0);
+    assert_eq!(bus.io_read(0x22C) & 0x80, 0x80, "busy while the block plays");
+    wait_ms(&mut bus, 51.0);
+    assert_eq!(bus.pic_pending_irq(), Some(7), "block end raises IRQ 7");
+    bus.io_read(0x22E);
+    dsp_write(&mut bus, 0xE1);
+    assert_eq!((dsp_read(&mut bus), dsp_read(&mut bus)), (2, 1));
+}
+
+#[test]
+fn sb16_takes_high_speed_commands_as_plain_transfers() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    start_8bit(&mut bus, 0x90);
+    wait_ms(&mut bus, 20.0);
+    dsp_write(&mut bus, 0xD0);
+    let left = dma1_count(&mut bus);
+    wait_ms(&mut bus, 20.0);
+    assert_eq!(dma1_count(&mut bus), left, "D0h paused the transfer");
+}
+
+#[test]
+fn save_states_keep_high_speed_mode() {
+    let machine = || {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.bus.configure_sound(Some(SbConfig { model: SbModel::SbPro2, ..SbConfig::default() }), true);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    reset_dsp(&mut a.bus);
+    start_8bit(&mut a.bus, 0x90);
+    let high_speed = machine::save(&a);
+    let mut b = machine();
+    machine::load(&mut b, &high_speed).unwrap();
+    assert!(machine::save(&b) == high_speed, "a loaded state saves as the same bytes");
+    assert_eq!(b.bus.io_read(0x22C) & 0x80, 0x80, "a loaded high-speed transfer keeps the DSP busy");
+
+    // An SB16 has no high-speed mode, so the state loads into one that
+    // takes commands.
+    let mut sb16_machine = Cpu::new(PathBuf::from("."));
+    sb16_machine.bus.set_cycles_per_ms(1000);
+    sb16_machine.bus.configure_sound(Some(SbConfig { model: SbModel::Sb16, ..SbConfig::default() }), true);
+    sb16_machine.load_shell();
+    machine::load(&mut sb16_machine, &high_speed).unwrap();
+    assert_eq!(sb16_machine.bus.io_read(0x22C) & 0x80, 0, "an SB16 stays ready");
+
+    // A state with a transfer out of high-speed mode, as every state
+    // rust-dos saved before it kept the mode, leaves the DSP taking
+    // commands.
+    let mut c = machine();
+    reset_dsp(&mut c.bus);
+    start_8bit(&mut c.bus, 0x1C);
+    machine::load(&mut b, &machine::save(&c)).unwrap();
+    dsp_write(&mut b.bus, 0xD0);
+    let left = dma1_count(&mut b.bus);
+    wait_ms(&mut b.bus, 20.0);
+    assert_eq!(dma1_count(&mut b.bus), left, "D0h paused the transfer");
+}
+
+/// What a driver's DMA identification routine does: program 8-bit DMA
+/// channel 1 to write one byte at 2000:0200, send DSP command E2h with
+/// `param`, then poll the DMA status register until channel 1 reaches
+/// terminal count (or give up after 65535 polls). Runs as guest code
+/// until its HLT; returns the byte written and the polls left.
+fn identify_dma(cpu: &mut Cpu, param: u8) -> (u8, u16) {
+    #[rustfmt::skip]
+    let code = [
+        0xB0, 0x05, 0xE6, 0x0A,         // mask channel 1
+        0xB0, 0x00, 0xE6, 0x0C,         // clear the flip-flop
+        0xB0, 0x45, 0xE6, 0x0B,         // single, write to memory, channel 1
+        0xB0, 0x00, 0xE6, 0x02,         // address 0200h
+        0xB0, 0x02, 0xE6, 0x02,
+        0xB0, 0x02, 0xE6, 0x83,         // page 2
+        0xB0, 0x00, 0xE6, 0x03,         // count 0: one byte
+        0xE6, 0x03,
+        0xB0, 0x01, 0xE6, 0x0A,         // unmask channel 1
+        0xBA, 0x2C, 0x02,               // MOV DX, 22Ch
+        0xEC, 0xA8, 0x80, 0x75, 0xFB,   // wait for the DSP
+        0xB0, 0xE2, 0xEE,               // E2h
+        0xEC, 0xA8, 0x80, 0x75, 0xFB,
+        0xB0, param, 0xEE,              // its parameter
+        0xB9, 0xFF, 0xFF,               // MOV CX, FFFFh
+        0xE4, 0x08, 0xA8, 0x02,         // IN AL, 08h; TEST AL, 2
+        0x75, 0x02, 0xE2, 0xF8,         // JNZ done; LOOP poll
+        0xF4,                           // done: HLT
+    ];
+    cpu.bus.load_bytes(0x20000, &code);
+    cpu.bus.write_8(0x20200, 0);
+    cpu.set_cs(0x2000);
+    cpu.set_ip(0);
+    cpu.set_ss(0x3000);
+    cpu.set_sp(0x0400);
+    for _ in 0..10_000 {
+        if cpu.ip() == code.len() as u16 {
+            break;
+        }
+        let end = cpu.bus.clock.icount + 1000;
+        cpu.bus.start_batch(end);
+        rust_dos::exec::run_batch(cpu, &mut rust_dos::exec::NoHook, false);
+    }
+    (cpu.bus.read_8(0x20200), cpu.cx())
+}
+
+#[test]
+fn dsp_dma_identification_writes_its_byte_through_the_8bit_channel() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(Some(SbConfig::default()), true);
+    reset_dsp(&mut cpu.bus);
+    // The values DOSBox's table gives for the first two calls with A5h
+    // and 5Ah: the answer depends on the calls before it.
+    let (byte, polls_left) = identify_dma(&mut cpu, 0xA5);
+    assert_eq!(byte, 0xDD, "the first answer");
+    assert!(polls_left > 0, "the transfer ended without waiting out the poll loop");
+    let (byte, _) = identify_dma(&mut cpu, 0x5A);
+    assert_eq!(byte, 0xDC, "the second answer");
+    // The parameter went to E2h: the DSP takes commands as before.
+    dsp_write(&mut cpu.bus, 0xE1);
+    assert_eq!(dsp_read(&mut cpu.bus), 4);
+}
+
+#[test]
+fn sb16_continue_auto_init_takes_back_an_exit() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    program_dma1(&mut bus, 0x10000, 0x400, true);
+    // 8-bit auto-init output, mono unsigned, blocks of 100h bytes.
+    for byte in [0x41, 0x56, 0x22, 0xC6, 0x00, 0xFF, 0x00] {
+        dsp_write(&mut bus, byte);
+    }
+    dsp_write(&mut bus, 0xDA);
+    dsp_write(&mut bus, 0x45);
+    // Without 45h the transfer would stop after its first block (11 ms).
+    wait_ms(&mut bus, 40.0);
+    let at = dma1_count(&mut bus);
+    wait_ms(&mut bus, 10.0);
+    assert_ne!(dma1_count(&mut bus), at, "the transfer runs on");
+}
+
+/// Program 8-bit DMA channel 1 in `mode` (bits 2-3: 01 write, 10 read)
+/// for one byte at 2000:0200 and leave it masked.
+fn program_dma1_byte(bus: &mut Bus, mode: u8) {
+    bus.io_write(0x0A, 0x05);
+    bus.io_write(0x0C, 0x00);
+    bus.io_write(0x0B, 0x41 | mode);
+    bus.io_write(0x02, 0x00);
+    bus.io_write(0x02, 0x02);
+    bus.io_write(0x83, 0x02);
+    bus.io_write(0x03, 0x00);
+    bus.io_write(0x03, 0x00);
+}
+
+#[test]
+fn dsp_dma_identification_waits_for_its_channel() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    bus.write_8(0x20200, 0);
+    program_dma1_byte(&mut bus, 0x04);
+    dsp_write(&mut bus, 0xE2);
+    dsp_write(&mut bus, 0xA5);
+    assert_eq!(bus.read_8(0x20200), 0, "a masked channel takes nothing");
+    bus.io_write(0x0A, 0x01);
+    assert_eq!(bus.read_8(0x20200), 0xDD, "the answer goes once the channel is unmasked");
+}
+
+#[test]
+fn dsp_dma_identification_leaves_memory_to_a_read_channel() {
+    let mut bus = sb16();
+    reset_dsp(&mut bus);
+    bus.write_8(0x20200, 0x77);
+    program_dma1_byte(&mut bus, 0x08);
+    bus.io_write(0x0A, 0x01);
+    dsp_write(&mut bus, 0xE2);
+    dsp_write(&mut bus, 0xA5);
+    assert_eq!(bus.read_8(0x20200), 0x77, "a channel reading memory writes none");
+    assert_eq!(dma1_count(&mut bus), 0xFFFF, "the channel took its one transfer");
+}
+
+#[test]
+fn a_loaded_state_starts_dma_identification_over() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.set_cycles_per_ms(1000);
+    cpu.bus.configure_sound(Some(SbConfig::default()), true);
+    cpu.load_shell();
+    reset_dsp(&mut cpu.bus);
+    let fresh = machine::save(&cpu);
+    assert_eq!(identify_dma(&mut cpu, 0xA5).0, 0xDD);
+    machine::load(&mut cpu, &fresh).unwrap();
+    // A fresh card answers 5Ah with 76h; the second call answers DCh.
+    assert_eq!(identify_dma(&mut cpu, 0x5A).0, 0x76, "a first call's answer after the load");
+}
+
+/// The initiation key's 32 bytes, after two writes of 0.
+fn isapnp_key(bus: &mut Bus) {
+    bus.io_write(0x279, 0);
+    bus.io_write(0x279, 0);
+    for k in rust_dos::isapnp::KEY {
+        bus.io_write(0x279, k);
+    }
+}
+
+fn isapnp_write(bus: &mut Bus, reg: u8, value: u8) {
+    bus.io_write(0x279, reg);
+    bus.io_write(0xA79, value);
+}
+
+#[test]
+fn a_vibra16c_moves_where_its_plug_and_play_registers_put_it() {
+    let machine = || {
+        let mut cpu = Cpu::new(PathBuf::from("."));
+        cpu.bus.set_cycles_per_ms(1000);
+        cpu.bus.configure_sound(Some(SbConfig { model: SbModel::Sb16Vibra, ..SbConfig::default() }), true);
+        cpu.load_shell();
+        cpu
+    };
+    let mut a = machine();
+    // As the BIOS leaves it: at 220h, a DSP 4.13.
+    reset_dsp(&mut a.bus);
+    dsp_write(&mut a.bus, 0xE1);
+    assert_eq!((dsp_read(&mut a.bus), dsp_read(&mut a.bus)), (4, 13));
+    // Its mixer only reads the IRQ and DMA setup.
+    a.bus.io_write(0x224, 0x80);
+    a.bus.io_write(0x225, 0x02);
+    assert_eq!(a.bus.io_read(0x225), 0x04, "IRQ 7");
+
+    // Card 1's audio device to 240h, IRQ 5, DMA 3 and 7.
+    isapnp_key(&mut a.bus);
+    isapnp_write(&mut a.bus, 0x03, 0x01);
+    isapnp_write(&mut a.bus, 0x07, 0x00);
+    isapnp_write(&mut a.bus, 0x30, 0x00);
+    assert_eq!(a.bus.io_read(0x22E), 0xFF, "a deactivated card is off the bus");
+    for (reg, value) in [(0x60, 0x02), (0x61, 0x40), (0x70, 0x05), (0x74, 0x03), (0x75, 0x07), (0x30, 0x01)] {
+        isapnp_write(&mut a.bus, reg, value);
+    }
+    isapnp_write(&mut a.bus, 0x02, 0x02);
+    a.bus.io_write(0x246, 1);
+    a.bus.io_write(0x246, 0);
+    assert_eq!(a.bus.io_read(0x24A), 0xAA, "the DSP at 240h");
+    a.bus.io_write(0x244, 0x81);
+    assert_eq!(a.bus.io_read(0x245), 0x88, "DMA 3 and 7");
+
+    // A save state keeps the card where it is.
+    let mut b = machine();
+    machine::load(&mut b, &machine::save(&a)).unwrap();
+    b.bus.io_write(0x244, 0x80);
+    assert_eq!(b.bus.io_read(0x245), 0x02, "IRQ 5");
+    b.bus.io_write(0x246, 1);
+    b.bus.io_write(0x246, 0);
+    assert_eq!(b.bus.io_read(0x24A), 0xAA);
+    // A machine with an SB16 can't take it.
+    let mut sb16 = Cpu::new(PathBuf::from("."));
+    sb16.load_shell();
+    assert!(machine::load(&mut sb16, &machine::save(&a)).is_err());
+
+    // The debugger reports where the card answers now.
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A240 I5 D3 H7 P330 T6"));
+    // A program's end leaves it there, as a DOS configuration tool set it.
+    a.bus.reset_sound();
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A240 I5 D3 H7 P330 T6"));
+    reset_dsp_at(&mut a.bus, 0x240);
+    // A base with its low 4 bits set decodes as the 16-port block it is in.
+    isapnp_key(&mut a.bus);
+    isapnp_write(&mut a.bus, 0x03, 0x01);
+    isapnp_write(&mut a.bus, 0x07, 0x00);
+    isapnp_write(&mut a.bus, 0x61, 0x68);
+    isapnp_write(&mut a.bus, 0x02, 0x02);
+    reset_dsp_at(&mut a.bus, 0x260);
+    // A reboot gives it the BIOS's resources back.
+    a.bus.power_on_sound();
+    assert_eq!(a.bus.sb_blaster().as_deref(), Some("A220 I7 D1 H5 P330 T6"));
+    reset_dsp_at(&mut a.bus, 0x220);
+}
+
+/// Reset the DSP at `base` and expect its AAh.
+fn reset_dsp_at(bus: &mut Bus, base: u16) {
+    bus.io_write(base + 6, 1);
+    bus.io_write(base + 6, 0);
+    assert_eq!(bus.io_read(base + 0xA), 0xAA, "the DSP at {:03X}h", base);
+}
+
+/// Play `data` as Prehistorik 2's driver plays its music: a single-cycle
+/// transfer (14h) of the block every 20.017 ms from its timer, at 8403 Hz
+/// (time constant 137), `blocks` times, while the mixer renders every
+/// 1/60 s as the window does and at every DSP write. The card plays a
+/// block in 19.99 ms, so between blocks its DAC holds the last sample.
+/// Returns the left samples rendered, without the output filter and the
+/// capacitor on the card's output, so the DAC's level shows as it is.
+fn play_blocks(data: &[u8], blocks: usize) -> Vec<i16> {
+    let mut bus = sb16();
+    let mut settings = MixerSettings::default();
+    settings.sb_filter = SbFilter::Off;
+    settings.sb_coupling = false;
+    bus.set_mixer(settings);
+    reset_dsp(&mut bus);
+    dsp_write(&mut bus, 0x40);
+    dsp_write(&mut bus, 137);
+    let len = data.len() as u16;
+    let mut next_pump = bus.clock.icount + 16_667;
+    for block in 0..blocks {
+        let addr = 0x20000 + block % 2 * 0x1000;
+        bus.load_bytes(addr, data);
+        program_dma1(&mut bus, addr as u32, len, false);
+        dsp_write(&mut bus, 0x14);
+        dsp_write(&mut bus, ((len - 1) & 0xFF) as u8);
+        dsp_write(&mut bus, ((len - 1) >> 8) as u8);
+        let end = bus.clock.icount + 20_017;
+        while bus.clock.icount < end {
+            let ms = (end.min(next_pump) - bus.clock.icount) as f64 / 1000.0;
+            wait_ms(&mut bus, ms);
+            if bus.clock.icount >= next_pump {
+                bus.audio_catch_up();
+                next_pump += 16_667;
+            }
+        }
+    }
+    bus.audio_catch_up();
+    bus.audio_out.drain(..).step_by(2).collect()
+}
+
+/// The runs of equal samples in `samples`, as (value, length).
+fn runs(samples: &[i16]) -> Vec<(i16, usize)> {
+    let mut runs: Vec<(i16, usize)> = Vec::new();
+    for &s in samples {
+        match runs.last_mut() {
+            Some((v, n)) if *v == s => *n += 1,
+            _ => runs.push((s, 1)),
+        }
+    }
+    runs
+}
+
+/// Between two single-cycle blocks, and whenever the mixer has rendered up
+/// to a moment the card has no sample for yet, the DAC holds its last
+/// sample: the output never falls back to silence. The mixer used to show
+/// the DSP's idle level for the frames it had got ahead of the card's
+/// queue at the end of each stretch it rendered: 4 or 5 frames of silence,
+/// tens of times a second, heard as a hiss on everything the card played
+/// (Prehistorik 2, issue 415).
+#[test]
+fn the_dac_holds_its_sample_between_blocks_and_frames() {
+    let level: Vec<u8> = vec![0xC0; 168];
+    let samples = play_blocks(&level, 12);
+    let first = samples.iter().position(|&s| s != 0).expect("the level is heard");
+    assert!(samples[first] > 5000, "{}", samples[first]);
+    let level = samples[first];
+    let off: Vec<(usize, i16)> = samples[first..]
+        .iter()
+        .enumerate()
+        .filter(|&(_, &s)| s != level)
+        .map(|(i, &s)| (first + i, s))
+        .collect();
+    assert!(
+        off.is_empty(),
+        "{} frames off the level, the first at {:?}",
+        off.len(),
+        off.first()
+    );
+}
+
+/// Each sample of a stream at 8403 Hz lasts 5 or 6 frames at 44.1 kHz. A
+/// sample shown for fewer frames, or one dropped, is the mixer and the card
+/// disagreeing about the time; the card's clock decides, and the only
+/// longer hold is the last sample of a block, kept through the 25 us
+/// before the next one.
+#[test]
+fn every_sample_gets_its_frames() {
+    let ramp: Vec<u8> = (0..168u8).map(|i| 0x40 + i).collect();
+    let blocks = 12;
+    let samples = play_blocks(&ramp, blocks);
+    let first = samples.iter().position(|&s| s != 0).unwrap();
+    let mut runs = runs(&samples[first..]);
+    // The last sample is held for good; the hold's length says nothing.
+    runs.pop();
+    assert_eq!(runs.len(), 168 * blocks - 1, "every sample is heard once");
+    let short: Vec<&(i16, usize)> = runs.iter().filter(|(_, n)| *n < 5).collect();
+    let shown = short.len().min(8);
+    assert!(
+        short.is_empty(),
+        "{} samples shown for under 5 frames: {:?}",
+        short.len(),
+        &short[..shown]
+    );
+    let long: Vec<&(i16, usize)> = runs.iter().filter(|(_, n)| *n > 6).collect();
+    let shown = long.len().min(8);
+    assert!(
+        long.len() <= blocks,
+        "{} samples held over 6 frames: {:?}",
+        long.len(),
+        &long[..shown]
+    );
+    assert!(long.iter().all(|(_, n)| *n <= 12), "{:?}", long);
+}
+
+/// A program's end puts the sound hardware in its power-on state at any
+/// moment, between two renders. What the card played up to then is mixed
+/// before it goes: the frames up to the reset carry its level, those after
+/// it the new card's silence, and none of them comes early or late.
+#[test]
+fn a_reset_between_renders_keeps_the_sound_played_before_it() {
+    let mut bus = sb16();
+    let mut settings = MixerSettings::default();
+    settings.sb_filter = SbFilter::Off;
+    settings.sb_coupling = false;
+    bus.set_mixer(settings);
+    reset_dsp(&mut bus);
+    // Direct DAC output: a level the card holds.
+    dsp_write(&mut bus, 0x10);
+    dsp_write(&mut bus, 0xC0);
+    bus.audio_catch_up();
+    bus.audio_out.clear();
+    let start = bus.audio_frames();
+    wait_ms(&mut bus, 10.0);
+    let frame_at = |bus: &Bus| {
+        rust_dos::timer::mul_div(bus.clock.now_ticks(), 44_100, rust_dos::timer::PIT_HZ)
+    };
+    let played = (frame_at(&bus) - start) as usize;
+    bus.reset_sound();
+    wait_ms(&mut bus, 10.0);
+    bus.audio_catch_up();
+    let samples: Vec<i16> = bus.audio_out.drain(..).step_by(2).collect();
+    let level = samples[0];
+    assert!(level > 5000, "{}", level);
+    let off = samples[..played].iter().position(|&s| s != level);
+    assert_eq!(off, None, "a frame before the reset is off the level");
+    let on = samples[played..].iter().position(|&s| s != 0);
+    assert_eq!(on, None, "a frame after the reset carries the old card's level");
+}
+
+/// The IRQ probe of Kingdom O' Magic's HMI Sound Blaster Pro driver: a
+/// 17-byte block at time constant 64h (2.65 ms), then a delay loop of
+/// about a million instructions, after which the block's IRQ has to have
+/// come.
+fn hmi_irq_probe(bus: &mut Bus) -> Option<u8> {
+    reset_dsp(bus);
+    program_dma1(bus, 0x20000, 17, false);
+    dsp_write(bus, 0x40);
+    dsp_write(bus, 0x64);
+    dsp_write(bus, 0x14);
+    dsp_write(bus, 0x10);
+    dsp_write(bus, 0x00);
+    spin(bus, 1_050_000);
+    bus.pic_pending_irq()
+}
+
+#[test]
+fn a_dsp_reset_ends_the_auto_loading_boost_at_once() {
+    // All the host has: the loop ends before the block does.
+    let mut bus = sb16();
+    bus.set_cycles_per_ms(700_000);
+    assert_eq!(hmi_irq_probe(&mut bus), None);
+
+    // `auto` gives a loading program that speed, to go back to 20,000
+    // once the loading ends: the reset goes back at once.
+    let mut bus = sb16();
+    bus.set_cycles_per_ms(700_000);
+    bus.activity.work_return = Some(20_000);
+    let end_ticks = bus.clock.now_ticks() + rust_dos::timer::PIT_HZ / 60;
+    bus.start_batch(bus.clock.icount_at(end_ticks));
+    bus.io_write(0x226, 1);
+    assert_eq!(bus.clock.cycles_per_ms(), 20_000);
+    assert_eq!(bus.activity.work_return, None);
+    assert_eq!(bus.activity.work_cuts, 1);
+    let end = bus.clock.ticks_at(bus.clock.batch_end());
+    assert!(end.abs_diff(end_ticks) <= 1, "the batch ends at {} ticks, not {}", end, end_ticks);
+    bus.io_write(0x226, 0);
+    bus.io_read(0x22A);
+    bus.start_batch(u64::MAX);
+    assert_eq!(hmi_irq_probe(&mut bus), Some(7));
+    // Once is all: the next reset leaves the speed as it is.
+    assert_eq!(bus.activity.work_cuts, 1);
+
+    // A speed `auto` didn't raise for loading stays.
+    let mut bus = sb16();
+    bus.set_cycles_per_ms(20_000);
+    bus.activity.work_return = Some(50_000);
+    reset_dsp(&mut bus);
+    assert_eq!(bus.clock.cycles_per_ms(), 20_000);
+    assert_eq!(bus.activity.work_cuts, 0);
+}

@@ -23,7 +23,7 @@
 //! a buffer is: the events are set then, by the emulated time at which
 //! the play cursor passed their positions.
 //!
-//! (Phase 3 of docs/native-windows.md.)
+//! ("Sound and input" in docs/builtin-windows-architecture.md.)
 
 mod buffer;
 mod capture;
@@ -43,6 +43,7 @@ pub static DLL: Dll = Dll {
     apis: APIS,
     vars: &[],
     init: None,
+    term: None,
     vtables: VTABLES,
 };
 

@@ -36,9 +36,10 @@ pub type Handler = fn(&mut Cpu, &[u32]) -> Option<u32>;
 
 pub struct Api {
     pub name: &'static str,
-    /// Its ordinal, or 0 for the DLL's own code, which it doesn't export.
-    /// A DLL Windows 98 has exports it under Windows 98's ordinal for its
-    /// name instead (ordinals.rs).
+    /// The ordinal it is exported under, or 0 for the DLL's own code,
+    /// which it doesn't export: Windows 98 SE's ordinal for it, or one
+    /// after Windows' last for a function Windows doesn't have
+    /// (ordinals.rs).
     pub ordinal: u16,
     /// How many 32-bit arguments it takes.
     pub args: u8,
@@ -58,6 +59,8 @@ pub struct Dll {
     /// What fills the variables of a process the DLL is loaded in, once
     /// the process has its memory, heap and environment.
     pub init: Option<Init>,
+    /// What gives back what `init` took, at the last FreeLibrary.
+    pub term: Option<Term>,
     /// The tables of methods of its COM interfaces (com.rs), after the
     /// stubs in its code section.
     pub vtables: &'static [Vtable],
@@ -82,6 +85,9 @@ pub struct Var {
 
 /// A DLL's `init`: the process, which isn't the running one yet.
 pub type Init = fn(&mut crate::bus::Bus, &mut super::Process) -> Option<()>;
+
+/// A DLL's `term`: the process it is going from.
+pub type Term = fn(&mut crate::bus::Bus, &mut super::Process);
 
 /// The built-in DLLs. Append only (see the module's notes).
 pub static DLLS: &[&Dll] = &[
@@ -120,6 +126,21 @@ pub static DLLS: &[&Dll] = &[
     &super::msimg32::DLL,
     &super::opengl32::DLL,
     &super::wow32::DLL,
+    &super::vfw::msvfw32::DLL,
+    &super::vfw::avifil32::DLL,
+    &super::dinput::DLL8,
+    &super::msacm32::DLL,
+    &super::dciman32::DLL,
+    &super::wnaspi32::DLL,
+    &super::dshow::QUARTZ,
+    &super::dshow::AMSTREAM,
+    &super::glide::DLL3,
+    &super::dplayx::DPLAY,
+    &super::tapi32::DLL,
+    &super::imm32::DLL,
+    &super::glu32::DLL,
+    &super::oledlg::DLL,
+    &super::olepro32::DLL,
 ];
 
 /// Bytes each function's stub takes.
@@ -149,17 +170,26 @@ pub fn id(dll: usize, api: usize) -> u16 {
 
 /// Whether the function of the id `id`, of a built-in DLL (16-bit modules
 /// have ids of their own), only reads the emulated clock in milliseconds:
-/// GetTickCount or timeGetTime, which programs call in a loop to wait
-/// (`idle::clock_read`).
+/// GetTickCount, timeGetTime, or the system's time (GetSystemTime,
+/// GetLocalTime, GetSystemTimeAsFileTime), which programs call in a loop
+/// to wait (`idle::clock_read`).
 pub fn reads_clock(id: u16) -> bool {
-    static IDS: std::sync::OnceLock<[Option<u16>; 2]> = std::sync::OnceLock::new();
+    static IDS: std::sync::OnceLock<[Option<u16>; 5]> = std::sync::OnceLock::new();
     let find = |dll: &str, name: &str| {
         let dll = find_dll(dll)?;
         let api = DLLS[dll].apis.iter().position(|api| api.name == name)?;
         Some(self::id(dll, api))
     };
-    IDS.get_or_init(|| [find("KERNEL32", "GetTickCount"), find("WINMM", "timeGetTime")])
-        .contains(&Some(id))
+    IDS.get_or_init(|| {
+        [
+            find("KERNEL32", "GetTickCount"),
+            find("WINMM", "timeGetTime"),
+            find("KERNEL32", "GetSystemTimeAsFileTime"),
+            find("KERNEL32", "GetSystemTime"),
+            find("KERNEL32", "GetLocalTime"),
+        ]
+    })
+    .contains(&Some(id))
 }
 
 /// The DLL and function of the id `id`.
@@ -276,7 +306,7 @@ pub fn image(index: usize, version: super::version::WindowsVersion) -> pe::Image
 /// gives for it (verdll.rs).
 pub fn file(index: usize, version: super::version::WindowsVersion) -> Vec<u8> {
     let mut b = builder(index, version);
-    let resource = super::verdll::builtin_version(DLLS[index].name);
+    let resource = super::verdll::builtin_version(DLLS[index].name, version);
     b.resource(RT_VERSION, VS_VERSION_INFO, LANG_ENGLISH_US, &resource);
     b.build()
 }
@@ -305,13 +335,9 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
         pe::SCN_CODE | pe::SCN_EXECUTE | pe::SCN_READ,
     );
     debug_assert_eq!(rva, CODE_RVA);
-    // Exported under Windows 98's ordinals (ordinals.rs).
-    let win98 = super::ordinals::win98(dll.name);
-    let ordinal = |name: &str, own: u16| win98.map_or(own, |w| w.ordinal(name, own));
     for (i, api) in dll.apis.iter().enumerate() {
         if api.ordinal != 0 && super::version::exports(version, dll.name, api.name) {
-            let ordinal = ordinal(api.name, api.ordinal);
-            b.export(Some(api.name), ordinal, rva + i as u32 * STUB);
+            b.export(Some(api.name), api.ordinal, rva + i as u32 * STUB);
         }
     }
     if !dll.vars.is_empty() {
@@ -325,8 +351,7 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
         debug_assert_eq!(data, data_rva(dll));
         for (var, offset) in dll.vars.iter().zip(offsets) {
             if var.ordinal != 0 {
-                let ordinal = ordinal(var.name, var.ordinal);
-                b.export(Some(var.name), ordinal, data + offset);
+                b.export(Some(var.name), var.ordinal, data + offset);
             }
         }
     }
@@ -337,11 +362,16 @@ fn builder(index: usize, version: super::version::WindowsVersion) -> pe::Builder
 /// program's stack: its return address, then its arguments.
 pub fn call(cpu: &mut Cpu, id: u16) {
     let Some((dll, api)) = api(id) else {
-        super::fatal(
-            cpu,
-            &format!("a call of the unknown function {:04X}h", id),
-            None,
-        );
+        // Win32 code runs in flat segments, so EIP is the linear address
+        // the process's modules are found by.
+        let eip = cpu.eip();
+        let module = super::running(cpu).and_then(|p| {
+            p.modules
+                .iter()
+                .find(|m| (m.base..m.base.saturating_add(m.size)).contains(&eip))
+                .map(|m| m.name.clone())
+        });
+        super::fatal(cpu, &unknown_message(id, module.as_deref()), None);
         return;
     };
     cpu.set_eip(cpu.eip().wrapping_add(4));
@@ -372,8 +402,8 @@ pub fn call(cpu: &mut Cpu, id: u16) {
     let result = (api.handler)(cpu, args);
     // File mappings no handle or view holds go, then the files whose
     // last handle the function closed close in DOS.
-    if !cpu.bus.win32.sections.is_empty() {
-        super::kernel32::sweep_mappings(cpu);
+    if !cpu.bus.win32.sections.is_empty() && super::kernel32::sweep_mappings(cpu) {
+        crate::idle::not_pure(cpu);
     }
     super::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
@@ -401,5 +431,132 @@ pub fn call(cpu: &mut Cpu, id: u16) {
             args.join(", "),
             result
         ));
+    }
+}
+
+/// The fatal message for a call of the stub `id` whose code is in the
+/// module `module`: the table's entry for the id's DLL index, so that a
+/// stale id (saved states keep their stub ids) shows which DLL it was.
+fn unknown_message(id: u16, module: Option<&str>) -> String {
+    let from = module.unwrap_or("code outside any module");
+    let (index, function) = ((id >> 10) as usize, (id & 0x3FF) as usize);
+    let table = match DLLS.get(index) {
+        Some(dll) => format!(
+            "DLL index {} is {}, which has {} functions",
+            index,
+            dll.name,
+            dll.apis.len()
+        ),
+        None => format!("DLL index {} is not in the table", index),
+    };
+    format!(
+        "a call of the unknown function {:04X}h (from {}; {}; no function {})",
+        id, from, table, function
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The DLLs' names in the order of `DLLS`. Saved states keep the
+    /// stubs' ids (DLL index << 10 | function), so a DLL goes at the end
+    /// of this list, never in the middle: a DLL inserted before others
+    /// moves their index, and a state saved before the insert then calls
+    /// a different DLL's functions ("unknown function 881Ah": DINPUT8's
+    /// function 26 was WOW32's index 34 once WOW32 came before it).
+    /// Add the new DLL's name here at the end.
+    const ORDER: &[&str] = &[
+        "KERNEL32.DLL",
+        "ADVAPI32.DLL",
+        "MSVCRT.DLL",
+        "USER32.DLL",
+        "GDI32.DLL",
+        "OLE32.DLL",
+        "DDRAW.DLL",
+        "DSOUND.DLL",
+        "DINPUT.DLL",
+        "WINMM.DLL",
+        "GLIDE2X.DLL",
+        "DPLAYX.DLL",
+        "SHELL32.DLL",
+        "COMCTL32.DLL",
+        "COMDLG32.DLL",
+        "WSOCK32.DLL",
+        "NTDLL.DLL",
+        "DMUSIC.DLL",
+        "DMIME.DLL",
+        "DMLOADER.DLL",
+        "DMSTYLE.DLL",
+        "DMBAND.DLL",
+        "DMCOMPOS.DLL",
+        "LZ32.DLL",
+        "VERSION.DLL",
+        "OLEAUT32.DLL",
+        "ADVPACK.DLL",
+        "WINSPOOL.DRV",
+        "MPR.DLL",
+        "D3D8.DLL",
+        "IMAGEHLP.DLL",
+        "WS2_32.DLL",
+        "MSIMG32.DLL",
+        "OPENGL32.DLL",
+        "WOW32.DLL",
+        "MSVFW32.DLL",
+        "AVIFIL32.DLL",
+        "DINPUT8.DLL",
+        "MSACM32.DLL",
+        "DCIMAN32.DLL",
+        "WNASPI32.DLL",
+        "QUARTZ.DLL",
+        "AMSTREAM.DLL",
+        "GLIDE3X.DLL",
+        "DPLAY.DLL",
+        "TAPI32.DLL",
+        "IMM32.DLL",
+        "GLU32.DLL",
+        "OLEDLG.DLL",
+        "OLEPRO32.DLL",
+    ];
+
+    #[test]
+    fn dlls_are_only_appended() {
+        let names: Vec<&str> = DLLS.iter().map(|dll| dll.name).collect();
+        assert_eq!(names, ORDER, "a DLL inserted before the end moves every later stub id");
+    }
+
+    /// Two DLLs whose images overlap can't both be loaded: the second
+    /// would be mapped over the first.
+    #[test]
+    fn dll_images_dont_overlap() {
+        let version = super::super::version::WindowsVersion::Win98Se;
+        let mut spans: Vec<(u32, u32, &str)> = (0..DLLS.len())
+            .map(|i| {
+                let size = image(i, version).headers.size_of_image;
+                (DLLS[i].base, DLLS[i].base + size, DLLS[i].name)
+            })
+            .collect();
+        spans.sort();
+        for pair in spans.windows(2) {
+            let ((_, end, a), (start, _, b)) = (pair[0], pair[1]);
+            assert!(end <= start, "{a} ends at {end:08X}, past {b}'s base {start:08X}");
+        }
+    }
+
+    #[test]
+    fn stub_id_is_dll_index_and_function() {
+        let dinput8 = ORDER.iter().position(|n| *n == "DINPUT8.DLL").unwrap();
+        assert_eq!(id(dinput8, 26), (dinput8 as u16) << 10 | 26);
+        assert_eq!(id(34, 26), 0x881A);
+    }
+
+    #[test]
+    fn unknown_message_names_the_module_and_the_table_entry() {
+        let text = unknown_message(0x881A, Some("DINPUT8.DLL"));
+        assert!(text.contains("881Ah"), "{text}");
+        assert!(text.contains("from DINPUT8.DLL"), "{text}");
+        assert!(text.contains("DLL index 34 is WOW32.DLL"), "{text}");
+        assert!(text.contains("no function 26"), "{text}");
+        assert!(unknown_message(0x881A, None).contains("outside any module"));
     }
 }

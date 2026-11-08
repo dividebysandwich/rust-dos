@@ -19,7 +19,7 @@ fn round_coordinate(value: f32) -> i32 {
 
 impl Voodoo {
     /// The word offset of a colour buffer, or None for a reserved choice.
-    fn color_buffer(&self, select: u32) -> Option<usize> {
+    pub(super) fn color_buffer(&self, select: u32) -> Option<usize> {
         let index = match select {
             // A Banshee draws where colBufferAddr says, whatever fbzMode
             // selects.
@@ -172,6 +172,9 @@ impl Voodoo {
         super::raster::scene_profile::record(&st, texcount, verts);
         if self.recording() {
             self.mirror_sync();
+            if self.banshee.is_some() && texcount > 0 {
+                self.gpu_texels(&st, texcount);
+            }
             if let Some(mirror) = self.mirror.get_mut() {
                 mirror.triangle(&st, &p, verts, texcount, &self.tmu, self.reg[STIPPLE]);
             }
@@ -185,6 +188,7 @@ impl Voodoo {
             // the triangle, and pixels right of the rows land in the next
             // row, which another worker draws: drawn here, whole.
             self.flush();
+            self.gpu_draws_here(&job);
             let mut stipple = self.reg[STIPPLE];
             let mut stats = self.stats;
             job.run_all(&mut stipple, &mut stats);
@@ -210,6 +214,7 @@ impl Voodoo {
         if shown {
             self.display_dirty = true;
         }
+        self.note_drawn(super::Place::Buffer(dest));
         if !self.drawn_to.contains(&dest) {
             self.drawn_to.push(dest);
         }
@@ -223,7 +228,15 @@ impl Voodoo {
         if !rgb && !aux {
             return;
         }
-        let dest = if rgb { self.color_buffer((fbz >> 14) & 3) } else { Some(0) };
+        // A fill of the alpha planes alone is still for the colour buffer
+        // drawn into: the OpenGL renderer keeps them in its alpha
+        // (`mirror::AlphaPlanes`), which the triangles blending by them
+        // after the fill read.
+        let dest = match self.color_buffer((fbz >> 14) & 3) {
+            Some(dest) if rgb || fbz & (1 << 18) != 0 => Some(dest),
+            _ if rgb => None,
+            _ => Some(0),
+        };
         let Some(dest) = dest else { return };
         let st = self.raster_state(dest, 0);
         let (sx, ex, sy, ey) = st.clip();
@@ -263,6 +276,7 @@ impl Voodoo {
         if spills {
             // Into the next rows' memory, which other workers draw.
             self.flush();
+            self.gpu_draws_here(&job);
             let mut stats = self.stats;
             job.run_all(&mut 0, &mut stats);
             self.stats = stats;

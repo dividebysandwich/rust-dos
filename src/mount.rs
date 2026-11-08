@@ -20,13 +20,16 @@
 //!
 //! A mount spec, as `[drives]` takes it, is the same without the drive:
 //! `<host path> [more images] [type] [-t type] [-label NAME] [-ro]
-//! [-chs C,H,S] [-boot] [-overlay DIR]` where type is `floppy` (alias
-//! `fdd`), `hdd` (alias `dir`) or `cdrom` (alias `iso`).
+//! [-chs C,H,S] [-boot] [-overlay DIR] [-inplace]` where type is `floppy`
+//! (alias `fdd`), `hdd` (alias `dir`) or `cdrom` (alias `iso`).
 //!
 //! `-overlay DIR` leaves a host directory as it is: what DOS changes on
 //! the drive goes to DIR (`overlay`). A disk image's changes go to a delta
-//! file in DIR (`diskdelta`), one image under many. DOSBox's `MOUNT C DIR -t overlay`
-//! gives the drive mounted as C: one.
+//! file in DIR (`diskdelta`), one image under many. DOSBox's
+//! `MOUNT C DIR -t overlay` gives the drive mounted as C: one. Without an
+//! overlay folder, a hard disk image's changes go to a delta file beside
+//! it (`DiskController::default_delta`), and `-inplace` writes the image
+//! itself.
 
 use crate::disk::{DRIVE_Z, DriveKind, LASTDRIVE, MountOptions, NUMBERED_DRIVES, drive_number, numbered_drive};
 use crate::diskimage::Chs;
@@ -39,7 +42,7 @@ Usage: MOUNT drive directory|archive [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
                              [-share|-noshare] [-overlay DIR]\r
        MOUNT drive DIR -t overlay\r
        MOUNT drive image [image ...] [-t floppy|hdd|cdrom] [-label NAME] [-ro]\r
-                         [-chs C,H,S] [-size 512,S,H,C] [-overlay DIR]\r
+                         [-chs C,H,S] [-size 512,S,H,C] [-overlay DIR|-inplace]\r
        MOUNT number image [image ...] [-chs C,H,S] [-ro] [-overlay DIR]\r
        MOUNT -u drive\r
        MOUNT             lists the drives\r
@@ -54,14 +57,17 @@ starts, once the drives are saved. A booted system has a directory on D:\r
 and up as a hard disk (-noshare: not; -share: C: too), and its changes go\r
 back into it when it shuts down; a directory as a CD-ROM drive is a disc.\r
 -overlay DIR leaves the directory or image as it is: changes go to DIR, an\r
-image's to IMAGE.rdelta (-t overlay: to the drive mounted). A zip or 7z is a\r
-drive of its files or the disk or CD image in it; without -overlay, read-only.\r
+image's to IMAGE.rdelta (-t overlay: the drive mounted). Without it, a hard\r
+disk image's go to IMAGE.rdelta beside it; COMMIT or -inplace write the image.\r
+A zip or 7z mounts its files or disk or CD image, read-only without -overlay.\r
 IMGMOUNT is the same command.\r
 ";
 
 /// The extensions of disk and CD images.
-pub(crate) const IMAGE_EXTENSIONS: &[&str] =
-    &["img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin", "gog", "ins", "inst", "bdn", "chd", "vhd"];
+pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
+    "img", "ima", "vfd", "flp", "dsk", "360", "720", "1200", "1440", "86f", "iso", "cue", "bin",
+    "gog", "ins", "inst", "bdn", "chd", "b5t", "b6t", "vhd",
+];
 
 /// Whether a path is a disk or CD image's, by its extension.
 pub(crate) fn is_image_name(path: &Path) -> bool {
@@ -102,7 +108,7 @@ fn parse_size(value: &str) -> Result<Chs, String> {
 /// with a dash (`-label -DISK-`), but can't be one of these.
 const VALUE_OPTIONS: &[&str] = &["-t", "-fs", "-label", "-chs", "-size", "-overlay", "-variant", "-freesize", "-usecd"];
 const FLAGS: &[&str] =
-    &["-u", "-ro", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
+    &["-u", "-ro", "-inplace", "-pr", "-boot", "-share", "-noshare", "-ide", "-ioctl", "-noioctl", "-ioctl_dio", "-ioctl_dx", "-ioctl_mci", "-aspi"];
 
 fn is_option(token: &str) -> bool {
     VALUE_OPTIONS.iter().chain(FLAGS).any(|option| token.eq_ignore_ascii_case(option))
@@ -139,6 +145,7 @@ fn parse_arguments(tokens: &[String]) -> Result<Arguments, String> {
         match option.as_str() {
             "-u" => args.unmount = true,
             "-ro" => args.opts.read_only = true,
+            "-inplace" => args.opts.in_place = true,
             "-pr" => args.config_relative = true,
             "-boot" => args.opts.boot = true,
             "-share" => args.opts.share = Some(true),
@@ -303,6 +310,14 @@ fn parse_drive(word: &str) -> Result<u8, String> {
     }
 }
 
+/// The path `rest` names under `home`, the rest of a `~/` path, with the
+/// host's separator between its parts: `~/dos/game.img`, which
+/// `contract_home` writes on every host, is `C:\Users\u\dos\game.img` on
+/// Windows, not `C:\Users\u\dos/game.img`.
+pub fn home_join(home: &Path, rest: &str) -> PathBuf {
+    home.join(Path::new(rest).components().collect::<PathBuf>())
+}
+
 /// Turn a user-supplied host path into a usable one: `~` expands to the
 /// home directory and relative paths are taken relative to `base`, with
 /// `.` and `..` folded away ("../games" from /home/u/dos is /home/u/games).
@@ -312,7 +327,7 @@ pub fn expand_host_path(raw: &str, base: &Path, home: Option<&Path>) -> PathBuf 
             return home.to_path_buf();
         }
         if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-            return home.join(rest);
+            return home_join(home, rest);
         }
     }
     let path = Path::new(raw);
@@ -398,6 +413,9 @@ fn mount_spec(drive: u8, args: Arguments, paths: &PathContext) -> Result<MountSp
         _ => return Err("Only A: to D: and the drive numbers 0 to 3 can be mounted with -fs none".to_string()),
     };
     let base = paths.config_dir.filter(|_| config_relative).unwrap_or(paths.base);
+    if opts.in_place && overlay.is_some() {
+        return Err("-inplace writes the image, -overlay leaves it as it is: take one".to_string());
+    }
     opts.overlay = overlay.map(|dir| expand_host_path(&dir, base, paths.home));
     let (first, rest) = words.split_first().ok_or("Missing host directory or disk image")?;
     let mut images = find_paths(first, base, paths)?;
@@ -533,17 +551,25 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
 /// `canonicalize` adds.
 pub fn display_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
-    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    crate::hostfs::verbatim_stripped(&s).unwrap_or_else(|| s.into_owned())
 }
 
 /// Host path as the user would write it: under the home directory it
 /// starts with `~/`, which `expand_host_path` turns back into the path.
+/// The rest is separated by `/` too, also on Windows, so the path has one
+/// kind of separator and the settings that only take `~/` read it back.
 pub fn contract_home(path: &Path, home: Option<&Path>) -> String {
     let display = display_host_path(path);
     let Some(home) = home else { return display };
     match Path::new(&display).strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => {
+            let parts: Vec<_> = rest
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
+            format!("~/{}", parts.join("/"))
+        }
         Err(_) => display,
     }
 }
@@ -577,6 +603,9 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
     if spec.opts.read_only {
         value.push_str(" -ro");
     }
+    if spec.opts.in_place {
+        value.push_str(" -inplace");
+    }
     if let Some(chs) = spec.opts.geometry {
         value.push_str(&format!(" -chs {},{},{}", chs.cylinders, chs.heads, chs.sectors));
     }
@@ -606,6 +635,15 @@ pub fn mount_spec_value(spec: &MountSpec, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mistake's message and the usage after it fit on the 80 by 25
+    /// screen with the prompt, so the message doesn't scroll away.
+    #[test]
+    fn the_usage_fits_on_the_screen_under_a_message() {
+        let lines: Vec<&str> = MOUNT_USAGE.split("\r\n").filter(|l| !l.is_empty()).collect();
+        assert!(lines.len() <= 23, "{} lines", lines.len());
+        assert!(lines.iter().all(|l| l.len() < 80), "{:?}", lines);
+    }
 
     fn toks(s: &str) -> Vec<String> {
         tokenize(s).unwrap()
@@ -758,6 +796,10 @@ mod tests {
         assert_eq!(mounted(mount("a disks -t FDD", cwd)).opts.kind, DriveKind::Floppy);
         assert_eq!(mount("c x -t overlay", cwd), Ok(MountCmd::Overlay(2, cwd.join("x"))));
         assert_eq!(mounted(mount("c game -overlay ../saves", cwd)).opts.overlay, Some(PathBuf::from("/saves")));
+        // -inplace writes the image itself, and has no overlay folder.
+        assert!(mounted(mount("c c.img -inplace", cwd)).opts.in_place);
+        assert!(!mounted(mount("c c.img", cwd)).opts.in_place);
+        assert!(mount("c c.img -inplace -overlay x", cwd).unwrap_err().contains("-inplace"));
         // Drive numbers give the BIOS disks without DOS drives.
         let spec = mounted(mount("2 hdd.img -size 512,63,16,142", cwd));
         assert_eq!((spec.drive, spec.path), (numbered_drive(2), cwd.join("hdd.img")));
@@ -884,6 +926,7 @@ mod tests {
                 },
             },
             MountSpec { drive: 2, path: "/hd/win95.img".into(), opts: MountOptions { boot: true, ..Default::default() } },
+            MountSpec { drive: 2, path: "/hd/c.img".into(), opts: MountOptions { in_place: true, ..Default::default() } },
             MountSpec { drive: 3, path: "/home/u/share".into(), opts: MountOptions { share: Some(false), ..Default::default() } },
             MountSpec { drive: 2, path: "/home/u/dos".into(), opts: MountOptions { share: Some(true), ..Default::default() } },
             MountSpec {
@@ -907,6 +950,28 @@ mod tests {
     #[test]
     fn display_strips_verbatim_prefix() {
         assert_eq!(display_host_path(Path::new(r"\\?\C:\dos")), r"C:\dos");
+        assert_eq!(
+            display_host_path(Path::new(r"\\?\UNC\server\share\dos")),
+            r"\\server\share\dos"
+        );
+        // A volume without a letter has no other form.
+        let volume = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\dos";
+        assert_eq!(display_host_path(Path::new(volume)), volume);
         assert_eq!(display_host_path(Path::new("/home/u")), "/home/u");
+    }
+
+    /// Under the home folder, one kind of separator, which the settings
+    /// that only take `~/` read back, on every host.
+    #[test]
+    fn home_contracts_with_slashes() {
+        let home = std::env::temp_dir();
+        let path = home.join("dos").join("game.img");
+        assert_eq!(contract_home(&path, Some(&home)), "~/dos/game.img");
+        // Back with the host's separator alone: not `dos/game.img` after
+        // the home folder on Windows, which `Path`'s `==` lets pass.
+        let expanded = expand_host_path("~/dos/game.img", Path::new("/"), Some(&home));
+        assert_eq!(expanded.as_os_str(), path.as_os_str());
+        assert_eq!(contract_home(&home, Some(&home)), "~");
+        assert_eq!(contract_home(&path, None), path.display().to_string());
     }
 }

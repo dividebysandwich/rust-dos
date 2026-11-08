@@ -45,7 +45,7 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   It runs InstallShield and Wise setups. It runs fewer games than
   booting Windows: a program that calls a function it doesn't have yet
   stops with a message naming it
-  ([docs/native-windows.md](docs/native-windows.md))
+  ([docs/builtin-windows.md](docs/builtin-windows.md))
 * **Graphics:** text, CGA with composite artifact colours, EGA, VGA with
   Mode X, VESA VBE 2.0 up to 1024x768, a Tseng ET4000 with HiColor, an S3
   Trio64 with its 2D accelerator, an
@@ -71,8 +71,9 @@ I wanted to learn more about the nuances of DOS emulation. Also, there's only on
   SC-55 (a port of Nuked-SC55) or the host's MIDI ports, Covox and Disney Sound Source, the Tandy/PCjr sound chip, and CD
   audio
 * **Drives:** host directories as floppy, hard disk and CD-ROM drives, CD
-  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO, CHD) and FAT12, FAT16
-  and FAT32 disk images (raw, VHD, and 86Box's 86F floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
+  images (CUE with BIN, WAV, MP3, OGG or FLAC tracks, ISO, CHD, BlindWrite)
+  and FAT12, FAT16 and FAT32 disk images (raw, VHD, and 86Box's 86F
+  floppies), with DOSBox Staging's `MOUNT` (and `IMGMOUNT`), and emulated
   disk speeds and noises
 * **[Booting disk images](CONFIGURATION.md#booting-a-disk-image)**
   (`BOOT`): MS-DOS, [Windows 95](CONFIGURATION.md#windows-95) and other systems of their own, with a Plug
@@ -125,9 +126,11 @@ Download Rust-DOS for Windows, macOS, Linux, the browser or
 [releases page](https://github.com/dividebysandwich/rust-dos/releases);
 its notes say which file to take.
 
-To build it yourself, install Rust and SDL2's development files
-(`libsdl2-dev` and `libasound2-dev` on Debian and Ubuntu, `brew install sdl2`
-on macOS), then:
+To build it yourself, install Rust and SDL3's development files
+(`libsdl3-dev` and `libasound2-dev` on Debian 13 and Ubuntu 25.04 or
+later, `sdl3` on Arch, `SDL3-devel` on Fedora, `brew install sdl3` on
+macOS; older distributions have none, and need SDL3
+[built from source](https://wiki.libsdl.org/SDL3/README-cmake)), then:
 
 ```sh
 cargo build --release
@@ -145,26 +148,33 @@ runs a DOS tool from the host's shell without a window
 InstallShield installer archives without running its setup
 ([more](CONFIGURATION.md#unpacking-installshield-installers)).
 
-On Windows (MSVC), take SDL2's Visual C++ development package,
-`SDL2-devel-<version>-VC.zip` from
-[SDL's releases](https://github.com/libsdl-org/SDL/releases) (a 2.x release,
-since the SDL3 packages listed beside them have no `SDL2.lib`; CI builds with
-[2.30.0](https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip)),
-unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL2.lib`.
-With 2.30.0 unpacked to `C:\`:
+On Windows (MSVC), take SDL3's Visual C++ development package,
+`SDL3-devel-<version>-VC.zip` from
+[SDL's releases](https://github.com/libsdl-org/SDL/releases) (CI builds
+with
+[3.4.20](https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-VC.zip)),
+unpack it, and add its `lib\x64` to `LIB` so the linker finds `SDL3.lib`.
+With 3.4.20 unpacked to `C:\`:
 
 ```powershell
-$env:LIB = "C:\SDL2-2.30.0\lib\x64;$env:LIB"
+$env:LIB = "C:\SDL3-3.4.20\lib\x64;$env:LIB"
 cargo build --release
 ```
 
-To run the program, put `SDL2.dll` from the same `lib\x64` next to
+To run the program, put `SDL3.dll` from the same `lib\x64` next to
 `rust-dos.exe` (in `target\release`) or on `PATH`. `cargo test` starts the
 debug build in `target\debug` too, so put the DLL on `PATH` for the tests.
 
-`cargo test` runs the tests. A few of them host a LAN relay or look for one
-by broadcast, on all of the computer's network interfaces; if your firewall
-asks about them on every run, `cargo test-local` skips those few.
+`cargo test` runs the tests. CI runs them with
+[cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`,
+then `cargo nextest run`), which runs each test in a process of its own and
+times it. The tests in `tests/` are seven programs, one for each folder,
+and a test's name starts with its file's:
+`cargo nextest run --test dos shell_tests::` runs those in
+`tests/dos/shell_tests.rs`. A few tests host a LAN relay or look for one by
+broadcast, on all of the computer's network interfaces; if your firewall
+asks about them on every run, `cargo test-local` skips those few (with
+nextest, add `--features skip-host-network-tests`).
 `cargo bench` runs the benchmarks ([docs/benchmarks.md](docs/benchmarks.md)).
 
 ## Configuration
@@ -187,6 +197,9 @@ changes most settings without a restart, and F2 saves them to the file.
   [disk speed and noises](CONFIGURATION.md#disk-speed-and-noises)
 * [CRT shaders](CONFIGURATION.md#crt-shaders)
 * [command-line options](CONFIGURATION.md#command-line-options)
+
+**[docs/compatibility.md](docs/compatibility.md)** lists what particular
+games need: settings, drivers, setup steps and known limits.
 
 ## The DOS prompt
 
@@ -334,10 +347,26 @@ A [game profile](CONFIGURATION.md#game-profiles) has slots of its own, in
   states with its own memory size.) The speed (`cycles`) isn't one of
   them: the machine goes on at the speed it runs at, except in
   deterministic mode.
-* Files on the host and in disk images aren't part of a state: what a
-  program wrote since stays written, as in DOSBox. A system [booted from a
-  disk image](CONFIGURATION.md#booting-a-disk-image) is the exception: its
-  disks go back with its state.
+* A slot is the file `slot1.state` (to `slot9.state`): the machine,
+  deflated, with a picture of the screen. Its size follows the memory in
+  use, from about a MB for a DOS game to 10 to 30 MB for Windows with
+  128 MB.
+* Files on the host and in disk images aren't part of a state: a drive
+  mounted from a folder is recorded by its path, and what a program wrote
+  since stays written, as in DOSBox. So a state of a game stays small
+  however big the game is, and loading it after you change the game's
+  files gives the game the changed files. A file the game had open is
+  opened again at the place it had got to: one changed since reads as it
+  is now, and one deleted since stays closed.
+* A system [booted from a disk
+  image](CONFIGURATION.md#booting-a-disk-image) is the exception: its
+  disks go back with its state. A hard disk image's changes are kept
+  beside the slot (`slot1.C.rdelta`), a few MB to a few hundred, and
+  load only over the same image: after a `COMMIT`, or after the image
+  is replaced, the slots of the system from before no longer load. A
+  floppy, or a disk mounted with `-inplace`, is copied whole
+  (`slot1.A.img`, `slot1.C.img`). Copy or delete a slot's `.rdelta` and
+  `.img` files along with its `.state`.
 * The FM chip and MIDI synthesizers are told their registers and
   instruments again, so notes that were playing start again.
 
@@ -434,9 +463,14 @@ curl -o screen.png localhost:8086/api/screenshot
 curl 'localhost:8086/api/memory?addr=DS:SI&len=64'
 ```
 
-Set `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` to run without a window or
-sound device. [docs/llm-debugging.md](docs/llm-debugging.md) is a guide to
-using it.
+Set `SDL_VIDEO_DRIVER=dummy` to run without a window, which also needs no
+sound device: the sound goes to the null output
+([`audio_output`](CONFIGURATION.md#mixer)). Don't set
+`SDL_AUDIO_DRIVER=dummy`: SDL's dummy driver doesn't keep real time, at a
+rate that changes from run to run, and makes any measurement wrong. SDL3
+still reads SDL2's names, `SDL_VIDEODRIVER` and `SDL_AUDIODRIVER`, when
+the new ones are unset. [docs/llm-debugging.md](docs/llm-debugging.md) is
+a guide to using the server, and says what to use for timing runs.
 
 ## Profiling
 

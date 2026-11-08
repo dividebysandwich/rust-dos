@@ -367,6 +367,14 @@ fn arg_bytes_of(c: u8) -> u32 {
     arg_bytes(std::str::from_utf8(&[c]).unwrap_or("w")) as u32
 }
 
+/// Whether a `Run::Win32` argument or return of the kind `c` (`arg_bytes`
+/// letters, `ret` ones) is a handle converted between 16 and 32 bits,
+/// which may make a new one. The other conversions change nothing but
+/// RAM and registers.
+pub fn converts_handle(c: u8) -> bool {
+    matches!(c, b'i' | b'm' | b'a' | b'n')
+}
+
 /// Run the function the trap with id `id` is the stub of, called by 16-bit
 /// code: its far return address on the stack, its arguments above.
 pub fn call(cpu: &mut Cpu, id: u16) {
@@ -415,7 +423,18 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         }
         Run::Win32(dll, function, ret) => {
             match win32_address(dll, function) {
-                Some(target) => auto_thunk(cpu, target, api.args, &raw, ret),
+                Some(target) => {
+                    auto_thunk(cpu, target, api.args, &raw, ret);
+                    // Converting no handle, the stub changes nothing but
+                    // RAM, registers and the frame the function's return
+                    // takes off again (`thunk::win16_return`): an idle
+                    // proof follows it, and the function says for itself
+                    // whether it can go on (`idle::pure_call`), as
+                    // GetTickCount does for GetCurrentTime.
+                    if !api.args.bytes().any(converts_handle) {
+                        crate::idle::pure_call(cpu, None);
+                    }
+                }
                 None => {
                     crate::win32::fatal(
                         cpu,
@@ -431,6 +450,9 @@ pub fn call(cpu: &mut Cpu, id: u16) {
         }
         Run::Value(f) => Some(f(cpu) as u32),
     };
+    if !cpu.bus.win32.win16.comm.is_empty() {
+        super::comm::service(cpu);
+    }
     crate::win32::object::close_files(&mut cpu.bus);
     if cpu.bus.guest_faulted() {
         return;
@@ -556,4 +578,45 @@ pub fn post_auto(cpu: &mut Cpu, value: u32, data: &[u32], _: &mut Context) -> Op
         b'b' => (value != 0) as u32,
         _ => value,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_two_exports_of_a_module_share_an_ordinal_or_a_name() {
+        for def in MODULES {
+            let exported = def.apis.iter().filter(|a| a.ordinal != 0);
+            let mut ordinals = std::collections::HashMap::new();
+            let mut names = std::collections::HashMap::new();
+            for api in exported {
+                if let Some(other) = ordinals.insert(api.ordinal, api.name) {
+                    panic!("{}: {} and {} are both #{}", def.name, other, api.name, api.ordinal);
+                }
+                if names.insert(api.name.to_ascii_uppercase(), api.ordinal).is_some() {
+                    panic!("{}: {} is exported twice", def.name, api.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn names_are_windows_98s() {
+        // GetProcAddress finds a name as Windows 98 SE's modules have it:
+        // GDI's RECTVISIBLE is #104 and #465 RECTVISIBLE_EHH, and
+        // WIN87EM's functions are __WIN87EMINFO and the like.
+        let ordinal = |module: &str, name: &str| {
+            let def = MODULES[find(module).unwrap()];
+            let api = def.apis.iter().find(|a| a.name.eq_ignore_ascii_case(name));
+            api.map(|a| a.ordinal)
+        };
+        assert_eq!(ordinal("GDI", "RECTVISIBLE"), Some(104));
+        assert_eq!(ordinal("GDI", "RECTINREGION"), Some(181));
+        assert_eq!(ordinal("GDI", "RECTVISIBLE_EHH"), Some(465));
+        assert_eq!(ordinal("GDI", "RECTINREGION_EHH"), Some(466));
+        assert_eq!(ordinal("WIN87EM", "__WIN87EMINFO"), Some(3));
+        assert_eq!(ordinal("WIN87EM", "__WIN87EMRESTORE"), Some(4));
+        assert_eq!(ordinal("WIN87EM", "__WIN87EMSAVE"), Some(5));
+    }
 }

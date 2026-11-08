@@ -18,11 +18,13 @@ use super::device::{
 use super::pipeline::{
     self, Fog, Layout, Light, Lighting, Material, Prim, Processed, Setup, Vertex, ViewMap,
 };
+use super::vertexbuffer::Clipped;
 use super::{
     D3D_OK, D3DERR_INBEGIN, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDVERTEXTYPE,
     D3DERR_NOTINBEGIN, D3DERR_VERTEXBUFFERLOCKED, probe, read_bytes, read_dwords,
 };
 use crate::cpu::Cpu;
+use std::sync::Arc;
 
 // DrawPrimitive's flags.
 pub const D3DDP_DONOTCLIP: u32 = 0x4;
@@ -159,8 +161,21 @@ pub fn setup_in(
     flags: u32,
     viewport: u32,
 ) -> Option<Setup> {
-    let d = get(cpu, id)?.clone();
-    let view_map = view_map(cpu, &d, version, viewport);
+    super::device::lend(cpu, id, |cpu, d| {
+        setup_of(cpu, d, version, layout, flags, viewport)
+    })
+}
+
+/// The pipeline's setup for the device `d`, as `setup_in` says.
+fn setup_of(
+    cpu: &mut Cpu,
+    d: &Device,
+    version: u32,
+    layout: &Layout,
+    flags: u32,
+    viewport: u32,
+) -> Setup {
+    let view_map = view_map(cpu, d, version, viewport);
     let s = |r: u32| d.state(r);
     let mut planes = Vec::new();
     if version >= 7 {
@@ -187,7 +202,7 @@ pub fn setup_in(
             (lights, material(&d.material))
         } else {
             let lights = super::light::lights_of(cpu, viewport);
-            let m = super::material::of_handle(cpu, &d, d.light_states[1]).unwrap_or_default();
+            let m = super::material::of_handle(cpu, d, d.light_states[1]).unwrap_or_default();
             (lights, m)
         };
         let a = pipeline::rgba(s(RS_AMBIENT));
@@ -221,7 +236,7 @@ pub fn setup_in(
             range: s(48) != 0,
         });
     let tex = |stage: u32| (d.stage(stage, TSS_TEXCOORDINDEX) & 7) as usize;
-    Some(Setup {
+    Setup {
         world: d.transforms[1],
         view: d.transforms[2],
         projection: d.transforms[3],
@@ -235,7 +250,7 @@ pub fn setup_in(
         fill: s(RS_FILLMODE),
         shade: s(RS_SHADEMODE),
         tex_index: [tex(0), tex(1)],
-    })
+    }
 }
 
 /// Count what was drawn, and the vertices' clip codes and extents, in
@@ -289,17 +304,23 @@ pub fn draw(
     order: Option<&[u32]>,
     flags: u32,
 ) -> Result<(), u32> {
+    let prims = primitives(kind, order, vertices.len())?;
+    draw_prims(cpu, id, version, layout, vertices, &prims, flags)
+}
+
+/// The `kind` primitives of `count` vertices, in the order `order` or
+/// as they are.
+fn primitives(kind: u32, order: Option<&[u32]>, count: usize) -> Result<Vec<Prim>, u32> {
     check_kind(kind)?;
     let all: Vec<u32>;
     let order = match order {
         Some(o) => o,
         None => {
-            all = (0..vertices.len() as u32).collect();
+            all = (0..count as u32).collect();
             &all
         }
     };
-    let prims = pipeline::assemble(kind, order).ok_or(D3DERR_INVALIDPRIMITIVETYPE)?;
-    draw_prims(cpu, id, version, layout, vertices, &prims, flags)
+    pipeline::assemble(kind, order).ok_or(D3DERR_INVALIDPRIMITIVETYPE)
 }
 
 /// Draw the primitives `prims` of `vertices` with the device `id`: for
@@ -315,11 +336,50 @@ pub fn draw_prims(
     prims: &[Prim],
     flags: u32,
 ) -> Result<(), u32> {
+    draw_clipped(cpu, id, version, layout, vertices, None, prims, flags)
+}
+
+/// Draw the primitives `prims` of `vertices`, and with `clip` what
+/// ProcessVertices kept of each it clipped (`VertexBuffer::clipped`). A
+/// vertex is drawn from its clip coordinates only while the viewport
+/// puts them where the buffer has it; after a change of viewport, or
+/// once the program wrote over it, it is drawn where the buffer says,
+/// as before, and a primitive that mixes the two is clipped as
+/// `pipeline::one_kind` says.
+#[allow(clippy::too_many_arguments)]
+fn draw_clipped(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    layout: &Layout,
+    vertices: &[Vertex],
+    clip: Option<&[Option<Clipped>]>,
+    prims: &[Prim],
+    flags: u32,
+) -> Result<(), u32> {
     let Some(setup) = setup(cpu, id, version, layout, flags) else {
         return Err(DDERR_INVALIDPARAMS);
     };
-    let processed = pipeline::process(&setup, vertices, layout);
+    let mut processed = pipeline::process(&setup, vertices, layout);
+    if let Some(clip) = clip {
+        for ((p, v), c) in processed.iter_mut().zip(vertices).zip(clip) {
+            if let Some(c) = c
+                && setup.view_map.screen(c.clip).map(f32::to_bits) == v.position.map(f32::to_bits)
+            {
+                *p = pipeline::at_clip_coordinates(&setup, p, c.clip, c.planes);
+            }
+        }
+    }
     let drawn = rasterize(cpu, id, &setup, &processed, prims);
+    if clip.is_some() {
+        // ProcessVertices put their clip codes in the clip status
+        // already. Drawn, they are screen vertices, which add none:
+        // counted again, a draw of some of them would add the codes
+        // that only those share.
+        for p in &mut processed {
+            p.code = 0;
+        }
+    }
     account(cpu, id, &setup, &processed, drawn, flags);
     Ok(())
 }
@@ -333,9 +393,7 @@ fn rasterize(
     verts: &[Processed],
     prims: &[Prim],
 ) -> pipeline::Drawn {
-    let card = get(cpu, id)
-        .cloned()
-        .and_then(|d| super::hal::bind(cpu, &d, setup));
+    let card = super::device::lend(cpu, id, |cpu, d| super::hal::bind(cpu, d, setup)).flatten();
     match card {
         Some(card) => {
             let mut raster = super::hal::Raster::new(cpu, card);
@@ -528,13 +586,8 @@ pub fn draw_indexed_primitive_strided(cpu: &mut Cpu, args: &[u32]) -> Option<u32
 }
 
 /// The vertices `start` to `start + count` of the vertex buffer `vb`,
-/// and its layout.
-fn buffer_vertices(
-    cpu: &mut Cpu,
-    vb: u32,
-    start: u32,
-    count: u32,
-) -> Result<(Layout, Vec<Vertex>), u32> {
+/// its layout, and what ProcessVertices kept of them.
+fn buffer_vertices(cpu: &mut Cpu, vb: u32, start: u32, count: u32) -> Result<BufferVertices, u32> {
     let (_, bid) = super::vertexbuffer::buffer_of(cpu, vb)?;
     let b = super::object(cpu, bid)
         .and_then(|o| o.buffer.clone())
@@ -547,7 +600,40 @@ fn buffer_vertices(
         return Err(DDERR_INVALIDPARAMS);
     }
     let at = b.memory + start * layout.size;
-    Ok((layout, read_vertices(cpu, at, &layout, count)?))
+    let vertices = read_vertices(cpu, at, &layout, count)?;
+    Ok(BufferVertices {
+        layout,
+        vertices,
+        clipped: b.clipped,
+        start: start as usize,
+    })
+}
+
+/// A vertex buffer's layout, its vertices from `start` on, and what
+/// ProcessVertices kept of the buffer.
+struct BufferVertices {
+    layout: Layout,
+    vertices: Vec<Vertex>,
+    clipped: Arc<Vec<Option<Clipped>>>,
+    start: usize,
+}
+
+/// Draw `kind` primitives of a vertex buffer's `vertices` (in the order
+/// `order`, or as they are), clipped at their clip coordinates if
+/// ProcessVertices kept them.
+fn draw_buffer(
+    cpu: &mut Cpu,
+    id: u32,
+    version: u32,
+    b: &BufferVertices,
+    kind: u32,
+    order: Option<&[u32]>,
+    flags: u32,
+) -> Result<(), u32> {
+    let prims = primitives(kind, order, b.vertices.len())?;
+    let (layout, vertices) = (&b.layout, &b.vertices);
+    let clip = b.clipped.get(b.start..b.start + vertices.len());
+    draw_clipped(cpu, id, version, layout, vertices, clip, &prims, flags)
 }
 
 /// DrawPrimitiveVB(this, type, buffer, start, count, flags).
@@ -556,14 +642,13 @@ pub fn draw_primitive_vb(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
-    let (layout, vertices) = hr!(buffer_vertices(cpu, vb, start, count));
-    hr!(draw(
+    let buffer = hr!(buffer_vertices(cpu, vb, start, count));
+    hr!(draw_buffer(
         cpu,
         id,
         version(vtable),
-        &layout,
+        &buffer,
         kind,
-        &vertices,
         None,
         flags
     ));
@@ -581,15 +666,14 @@ pub fn draw_indexed_primitive_vb3(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let count = super::object(cpu, bid)
         .and_then(|o| o.buffer.as_ref().map(|b| b.count))
         .unwrap_or(0);
-    let (layout, vertices) = hr!(buffer_vertices(cpu, vb, 0, count));
+    let buffer = hr!(buffer_vertices(cpu, vb, 0, count));
     let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw(
+    hr!(draw_buffer(
         cpu,
         id,
         version(vtable),
-        &layout,
+        &buffer,
         kind,
-        &vertices,
         Some(&order),
         flags
     ));
@@ -603,15 +687,14 @@ pub fn draw_indexed_primitive_vb7(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
         return Some(DDERR_INVALIDPARAMS);
     };
     let (vtable, id) = hr!(device_of(cpu, this));
-    let (layout, vertices) = hr!(buffer_vertices(cpu, vb, start, count));
+    let buffer = hr!(buffer_vertices(cpu, vb, start, count));
     let order = hr!(read_indices(cpu, indices, icount));
-    hr!(draw(
+    hr!(draw_buffer(
         cpu,
         id,
         version(vtable),
-        &layout,
+        &buffer,
         kind,
-        &vertices,
         Some(&order),
         flags
     ));

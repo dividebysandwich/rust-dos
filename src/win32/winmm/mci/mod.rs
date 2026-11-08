@@ -13,10 +13,22 @@
 //!
 //! Wave audio's device (waveaudio, waveaudio.rs) plays WAV files on the
 //! built-in sound device; it is installed when `WAVE_DRIVER` is set.
+//! AVIVideo and MPEGVideo (video.rs) play AVI and MPEG-1 files
+//! (media.rs) in a window.
+//!
+//! A DirectShow filter graph (dshow/graph.rs) plays its file through an
+//! MPEGVideo device of its own, as ActiveMovie's MCIQTZ device plays
+//! through a filter graph on Windows. The program doesn't see that
+//! device: its commands, MCI_SYSINFO and "close all" leave it out, and
+//! the end of its play goes to the graph.
 
+pub mod avi;
 pub mod cdaudio;
+pub mod media;
+pub mod mpeg;
 pub mod sequencer;
 pub mod string;
+pub mod video;
 pub mod waveaudio;
 
 use super::callback;
@@ -153,6 +165,7 @@ pub const MCIERR_MISSING_PARAMETER: u32 = 273;
 pub const MCIERR_UNSUPPORTED_FUNCTION: u32 = 274;
 pub const MCIERR_FILE_NOT_FOUND: u32 = 275;
 pub const MCIERR_DEVICE_NOT_READY: u32 = 276;
+pub const MCIERR_INTERNAL: u32 = 277;
 pub const MCIERR_CANNOT_USE_ALL: u32 = 279;
 pub const MCIERR_EXTENSION_NOT_FOUND: u32 = 281;
 pub const MCIERR_OUTOFRANGE: u32 = 282;
@@ -188,6 +201,8 @@ pub enum Ret {
     Colon4,
     /// `text`.
     Text,
+    /// `rect`: a rectangle's left, top, width and height.
+    Rect,
 }
 
 /// A command's parameters, from its MCI_*_PARMS or its command string,
@@ -216,6 +231,21 @@ pub struct Parms {
     pub open_type_id: u32,
     pub element: String,
     pub alias: String,
+    /// A digitalvideo device's window: MCI_OPEN's style and parent,
+    /// MCI_WINDOW's window, how it shows and its caption; the rectangle
+    /// of MCI_PUT, MCI_WHERE and MCI_UPDATE, as left, top, width and
+    /// height; MCI_UPDATE's DC.
+    pub style: u32,
+    pub parent: u32,
+    pub hwnd: u32,
+    pub cmd_show: u32,
+    pub window_text: String,
+    pub rect: [i32; 4],
+    pub hdc: u32,
+    /// Whether a digitalvideo device opens without a window: the device
+    /// of a DirectShow graph whose pictures go to the program's own
+    /// renderer (dshow/filter.rs), which plays only the sound.
+    pub windowless: bool,
     /// What it returns: a number, how it reads, or text.
     pub ret: u32,
     pub ret_kind: Ret,
@@ -256,12 +286,18 @@ pub struct Device {
     pub seq: sequencer::Seq,
     /// The waveaudio driver's own state.
     pub wave: waveaudio::Wav,
+    pub video: video::Video,
+    /// The DirectShow filter graph that plays through it, by its object
+    /// id (dshow/), or 0 for a device of the program's.
+    pub graph: u32,
 }
 
 /// MCI's state.
 #[derive(Clone, Debug, Default)]
 pub struct Mci {
     pub devices: Vec<Device>,
+    /// The calls into USER32 the threads' commands make (video.rs).
+    pub calls: Vec<video::Calls>,
 }
 
 fn mci(cpu: &mut Cpu) -> &mut Mci {
@@ -277,7 +313,7 @@ fn find(cpu: &Cpu, id: u32) -> Option<usize> {
         .mci
         .devices
         .iter()
-        .position(|d| d.id == id && d.pid == pid)
+        .position(|d| d.id == id && d.pid == pid && d.graph == 0)
 }
 
 /// The device of the running process that `name` names.
@@ -289,11 +325,40 @@ pub fn find_name(cpu: &Cpu, name: &str) -> Option<usize> {
         .mci
         .devices
         .iter()
-        .position(|d| d.pid == pid && d.name.eq_ignore_ascii_case(name))
+        .position(|d| d.pid == pid && d.graph == 0 && d.name.eq_ignore_ascii_case(name))
 }
 
 pub fn device(cpu: &mut Cpu, i: usize) -> &mut Device {
     &mut cpu.bus.win32.winmm.mci.devices[i]
+}
+
+/// The ids of the devices DirectShow's graphs play through: the graph's
+/// id with this bit, which leaves the ids of the program's devices as
+/// Windows numbers them.
+const GRAPH_IDS: u32 = 0x4000_0000;
+
+/// The running process's device `id`, just opened, becomes the one the
+/// DirectShow graph `graph` plays through: its place.
+pub fn give_to_graph(cpu: &mut Cpu, id: u32, graph: u32) -> Option<usize> {
+    let i = find(cpu, id)?;
+    let d = device(cpu, i);
+    d.graph = graph;
+    d.id = GRAPH_IDS | graph;
+    Some(i)
+}
+
+/// The device the DirectShow graph `graph` plays through.
+pub fn graph_device(cpu: &Cpu, graph: u32) -> Option<usize> {
+    if graph == 0 {
+        return None;
+    }
+    cpu.bus
+        .win32
+        .winmm
+        .mci
+        .devices
+        .iter()
+        .position(|d| d.graph == graph)
 }
 
 /// Whether `id` is all devices: the 32-bit id or Windows 95's 16-bit
@@ -312,6 +377,8 @@ fn installed() -> Vec<(u32, &'static str)> {
     if WAVE_DRIVER.is_some() {
         list.push((MCI_DEVTYPE_WAVEFORM_AUDIO, "waveaudio"));
     }
+    list.push((video::AVI_VIDEO, "AVIVideo"));
+    list.push((video::MCI_DEVTYPE_DIGITAL_VIDEO, "MPEGVideo"));
     list
 }
 
@@ -329,8 +396,18 @@ fn type_of_file(element: &str) -> Option<u32> {
         "mid" | "rmi" => Some(MCI_DEVTYPE_SEQUENCER),
         "wav" if WAVE_DRIVER.is_some() => Some(MCI_DEVTYPE_WAVEFORM_AUDIO),
         "cda" => Some(MCI_DEVTYPE_CD_AUDIO),
+        // The MPEG-1 files of WIN.INI's [mci extensions], which
+        // ActiveMovie gives MPEGVideo.
+        "mpg" | "mpeg" | "mpe" | "m1v" | "mpa" | "mp2" => Some(video::MCI_DEVTYPE_DIGITAL_VIDEO),
+        "avi" => Some(video::AVI_VIDEO),
         _ => None,
     }
+}
+
+/// The device type (MCI_DEVTYPE_*) of a device's kind: AVIVideo's kind
+/// has the digitalvideo type below a flag that tells it from MPEGVideo.
+pub fn device_type(kind: u32) -> u32 {
+    kind & 0xFFFF
 }
 
 /// The name of a device type.
@@ -339,6 +416,8 @@ pub fn type_name(kind: u32) -> &'static str {
         MCI_DEVTYPE_CD_AUDIO => "cdaudio",
         MCI_DEVTYPE_SEQUENCER => "sequencer",
         MCI_DEVTYPE_WAVEFORM_AUDIO => "waveaudio",
+        video::MCI_DEVTYPE_DIGITAL_VIDEO => "MPEGVideo",
+        video::AVI_VIDEO => "AVIVideo",
         _ => "other",
     }
 }
@@ -375,6 +454,11 @@ pub fn abort(cpu: &mut Cpu, i: usize) {
 fn play_ended(cpu: &mut Cpu, i: usize) {
     let d = device(cpu, i);
     let id = d.id;
+    if d.graph != 0 {
+        let graph = d.graph;
+        crate::win32::dshow::play_ended(cpu, graph);
+        return;
+    }
     if let Some(hwnd) = d.pending.take() {
         post(cpu, hwnd, MCI_NOTIFY_SUCCESSFUL, id);
     }
@@ -390,6 +474,7 @@ fn busy_until(cpu: &Cpu, i: usize) -> Option<u64> {
         MCI_DEVTYPE_CD_AUDIO => d.cd.end_at,
         MCI_DEVTYPE_SEQUENCER => sequencer::end_at(d),
         MCI_DEVTYPE_WAVEFORM_AUDIO => waveaudio::end_at(d),
+        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => video::end_at(d),
         _ => None,
     }
 }
@@ -415,6 +500,9 @@ pub fn device_command(cpu: &mut Cpu, i: usize, msg: u32, flags: u32, p: &mut Par
     let error = match kind {
         MCI_DEVTYPE_CD_AUDIO => cdaudio::command(cpu, i, msg, flags, p),
         MCI_DEVTYPE_SEQUENCER => sequencer::command(cpu, i, msg, flags, p),
+        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {
+            video::command(cpu, i, msg, flags, p)
+        }
         _ => match WAVE_DRIVER {
             Some(driver) => driver(cpu, i, msg, flags, p),
             None => MCIERR_UNSUPPORTED_FUNCTION,
@@ -476,6 +564,9 @@ pub fn close_device(cpu: &mut Cpu, i: usize) {
     match device(cpu, i).kind {
         MCI_DEVTYPE_CD_AUDIO => cdaudio::close(cpu, i),
         MCI_DEVTYPE_SEQUENCER => sequencer::close(cpu, i),
+        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {
+            video::command(cpu, i, MCI_CLOSE, 0, &mut Parms::default());
+        }
         _ => {
             if let Some(driver) = WAVE_DRIVER {
                 driver(cpu, i, MCI_CLOSE, 0, &mut Parms::default());
@@ -505,7 +596,7 @@ pub fn open(cpu: &mut Cpu, flags: u32, p: &mut Parms, auto: bool) -> u32 {
     let kind = if flags & MCI_OPEN_TYPE != 0 {
         if flags & MCI_OPEN_TYPE_ID != 0 {
             let id = p.open_type_id & 0xFFFF;
-            match installed().into_iter().find(|&(t, _)| t == id) {
+            match installed().into_iter().find(|&(t, _)| device_type(t) == id) {
                 Some((t, _)) => t,
                 None => return MCIERR_INVALID_DEVICE_NAME,
             }
@@ -587,6 +678,9 @@ fn open_kind(
     let error = match kind {
         MCI_DEVTYPE_CD_AUDIO => cdaudio::open(cpu, i),
         MCI_DEVTYPE_SEQUENCER => sequencer::open(cpu, i),
+        video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => {
+            video::command(cpu, i, MCI_OPEN, flags, p)
+        }
         _ => match WAVE_DRIVER {
             Some(driver) => driver(cpu, i, MCI_OPEN, flags, p),
             None => MCIERR_INVALID_DEVICE_NAME,
@@ -611,6 +705,8 @@ fn open_kind(
 /// MCI_SYSINFO, of all devices (`kind` None) or those of a type: how
 /// many there are, installed or open, or the name of one.
 pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u32 {
+    // By its device type: AVIVideo and MPEGVideo are both digitalvideo.
+    let kind = kind.map(device_type);
     let pid = crate::win32::user32::current_pid(cpu);
     let open: Vec<String> = cpu
         .bus
@@ -619,12 +715,13 @@ pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u
         .mci
         .devices
         .iter()
-        .filter(|d| d.pid == pid && kind.is_none_or(|k| d.kind == k))
+        .filter(|d| d.pid == pid && d.graph == 0)
+        .filter(|d| kind.is_none_or(|k| device_type(d.kind) == k))
         .map(|d| d.name.clone())
         .collect();
     let types: Vec<String> = installed()
         .into_iter()
-        .filter(|&(t, _)| kind.is_none_or(|k| k == t))
+        .filter(|&(t, _)| kind.is_none_or(|k| k == device_type(t)))
         .map(|(_, n)| n.to_string())
         .collect();
     let list = if flags & MCI_SYSINFO_OPEN != 0 {
@@ -651,27 +748,50 @@ pub fn sysinfo(cpu: &mut Cpu, kind: Option<u32>, flags: u32, p: &mut Parms) -> u
     0
 }
 
-/// mciSendCommandA(id, message, flags, parms).
+/// mciSendCommandA(id, message, flags, parms). A command that calls into
+/// USER32 first (video.rs) has the call made, and runs again.
 pub fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
+    with_calls(cpu, |cpu| send_command(cpu, args))
+}
+
+/// Runs a command's function: when the command wants a call into USER32
+/// made, the call is made and the function runs again; else what it
+/// returns.
+pub fn with_calls(cpu: &mut Cpu, f: impl FnOnce(&mut Cpu) -> Option<u32>) -> Option<u32> {
+    match f(cpu) {
+        Some(video::NEEDS_CALL) => video::make_call(cpu),
+        r => {
+            video::command_done(cpu);
+            r
+        }
+    }
+}
+
+fn send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let &[id, msg, flags, at] = args else {
         unreachable!()
     };
     // The size of each command's parameters, and whether it can go
     // without them.
+    let window_open = video::MCI_DGV_OPEN_WS | video::MCI_DGV_OPEN_PARENT;
     let size: u32 = match msg {
         MCI_OPEN | MCI_SYSINFO => 20,
-        MCI_STATUS => 16,
+        video::MCI_UPDATE => 24,
+        MCI_STATUS | video::MCI_WINDOW => 16,
         MCI_PLAY | MCI_GETDEVCAPS | MCI_INFO => 12,
-        MCI_SET => 20,
-        MCI_SEEK => 8,
+        MCI_SET | video::MCI_PUT | video::MCI_WHERE => 20,
+        MCI_SEEK | MCI_STEP => 8,
         _ => 4,
     };
-    if at == 0
-        && !matches!(
-            msg,
-            MCI_CLOSE | MCI_STOP | MCI_PAUSE | MCI_RESUME | MCI_BREAK
-        )
-    {
+    // A play or a seek whose flags name no field of its parameters, such
+    // as MCI_SEEK_TO_END, runs without them on Windows 98, which Drakan's
+    // CD check counts on.
+    let needs_no_parms = match msg {
+        MCI_CLOSE | MCI_STOP | MCI_PAUSE | MCI_RESUME | MCI_BREAK => true,
+        MCI_PLAY | MCI_SEEK => flags & (MCI_NOTIFY | MCI_FROM | MCI_TO) == 0,
+        _ => false,
+    };
+    if at == 0 && !needs_no_parms {
         return Some(MCIERR_NULL_PARAMETER_BLOCK);
     }
     if at != 0 && !cpu.bus.guest_probe(at, size as usize, true) {
@@ -704,6 +824,13 @@ pub fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             if flags & MCI_OPEN_ALIAS != 0 {
                 p.alias = read_string(cpu, al, 128)?;
             }
+            // MCI_DGV_OPEN_PARMSA's style and parent. Other devices
+            // give the flags other meanings (MCI_WAVE_OPEN_BUFFER) with
+            // shorter structures, so they are read only when there.
+            if flags & window_open != 0 && cpu.bus.guest_probe(at, 28, false) {
+                p.style = r(cpu, 20);
+                p.parent = r(cpu, 24);
+            }
             let error = open(cpu, flags, &mut p, false);
             if error == 0 {
                 cpu.bus.guest_write_32(at + 4, p.ret);
@@ -715,6 +842,19 @@ pub fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
             p.to = r(cpu, 8);
         }
         MCI_SEEK => p.to = r(cpu, 4),
+        MCI_STEP => p.number = r(cpu, 4),
+        video::MCI_WINDOW => {
+            p.hwnd = r(cpu, 4);
+            p.cmd_show = r(cpu, 8);
+            if flags & video::MCI_DGV_WINDOW_TEXT != 0 {
+                let text = r(cpu, 12);
+                p.window_text = read_string(cpu, text, 260)?;
+            }
+        }
+        video::MCI_PUT | video::MCI_WHERE | video::MCI_UPDATE => {
+            p.rect = [4, 8, 12, 16].map(|off| r(cpu, off) as i32);
+            p.hdc = r(cpu, 20);
+        }
         MCI_STATUS => {
             p.item = r(cpu, 8);
             p.track = r(cpu, 12);
@@ -771,6 +911,11 @@ pub fn mci_send_command(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // What the command returns.
     match msg {
         MCI_STATUS | MCI_GETDEVCAPS => cpu.bus.guest_write_32(at + 4, p.ret),
+        video::MCI_WHERE => {
+            for (k, v) in p.rect.iter().enumerate() {
+                cpu.bus.guest_write_32(at + 4 + 4 * k as u32, *v as u32);
+            }
+        }
         MCI_INFO | MCI_SYSINFO => {
             let (to, room) = (r(cpu, 4), r(cpu, 8));
             if p.ret_kind == Ret::Int {
@@ -807,7 +952,7 @@ pub fn close_all(cpu: &mut Cpu, flags: u32, p: &mut Parms) {
             .mci
             .devices
             .iter()
-            .position(|d| d.pid == pid)
+            .position(|d| d.pid == pid && d.graph == 0)
     } {
         device_command(cpu, i, MCI_CLOSE, flags, p);
     }
@@ -880,6 +1025,7 @@ pub fn poll(cpu: &mut Cpu, pid: u32, now: u64) {
             MCI_DEVTYPE_CD_AUDIO => cdaudio::poll(cpu, i, now),
             MCI_DEVTYPE_SEQUENCER => sequencer::poll(cpu, i, now),
             MCI_DEVTYPE_WAVEFORM_AUDIO => waveaudio::poll(cpu, i, now),
+            video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => video::poll(cpu, i, now),
             _ => false,
         };
         let before = mci(cpu).devices.len();
@@ -905,6 +1051,7 @@ pub fn next_due(cpu: &Cpu, pid: Option<u32>) -> Option<u64> {
             MCI_DEVTYPE_CD_AUDIO => d.cd.end_at,
             MCI_DEVTYPE_SEQUENCER => sequencer::next_due(d),
             MCI_DEVTYPE_WAVEFORM_AUDIO => waveaudio::end_at(d),
+            video::MCI_DEVTYPE_DIGITAL_VIDEO | video::AVI_VIDEO => video::next_due(d),
             _ => None,
         })
         .min()
@@ -933,6 +1080,8 @@ crate::state_fields!(Device {
     yield_data,
     cd,
     seq,
-    wave
+    wave,
+    video,
+    graph
 });
-crate::state_fields!(Mci { devices });
+crate::state_fields!(Mci { devices, calls });

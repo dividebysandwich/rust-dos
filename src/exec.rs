@@ -8,7 +8,7 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
-use crate::bus::GEN_SHIFT;
+use crate::bus::{Bus, GEN_SHIFT};
 use crate::command::{CommandDispatcher, split_command};
 use crate::cpu::{ATTR_DB, CR0_PG, Cpu, CpuFlags, CpuState, Fault, IntSource, SHELL_SEGMENT, Seg};
 use crate::dynrec::{DynState, Run};
@@ -283,7 +283,8 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
 
         // An instruction in an interrupt shadow runs on its own, as the
         // loop checks for interrupts again after it, and traced code (TF)
-        // on the interpreter, which raises the single-step traps. (IRET,
+        // and code under instruction breakpoints (DR7) on the
+        // interpreter, which raises their debug exceptions. (IRET,
         // which can set TF, ends translated blocks, and POPF stops one
         // where it sets TF.)
         let watching = !HOT && cpu.bus.observe.watching();
@@ -309,7 +310,12 @@ fn run<const HOT: bool, const DYN: bool, const PROF: bool>(cpu: &mut Cpu, fetch:
                 continue;
             }
             instruction::<false, false, PROF>(cpu, fetch, hook)
-        } else if DYN && !cpu.irq_shadow && !cpu.get_cpu_flag(CpuFlags::TF) && cpu.dynamic_active() {
+        } else if DYN
+            && !cpu.irq_shadow
+            && !cpu.get_cpu_flag(CpuFlags::TF)
+            && !cpu.code_breakpoints()
+            && cpu.dynamic_active()
+        {
             dynamic::<HOT, PROF>(cpu, fetch, hook, false)
         } else if !HOT && !DYN {
             instruction::<HOT, true, PROF>(cpu, fetch, hook)
@@ -371,7 +377,10 @@ impl Cpu {
             return;
         }
         let mut fetch = Fetch::new(self);
-        let translated = self.dynamic_active() && !self.irq_shadow && !self.get_cpu_flag(CpuFlags::TF);
+        let translated = self.dynamic_active()
+            && !self.irq_shadow
+            && !self.get_cpu_flag(CpuFlags::TF)
+            && !self.code_breakpoints();
         match (translated, self.bus.profile.is_some()) {
             (true, false) => dynamic::<false, false>(self, &mut fetch, &mut NoHook, true),
             (true, true) => dynamic::<false, true>(self, &mut fetch, &mut NoHook, true),
@@ -454,9 +463,9 @@ fn deliver_pending(cpu: &mut Cpu) -> bool {
         return true;
     }
 
-    // Mouse event handler installed with INT 33h AX=000C, called the
-    // real-mode way.
-    let called = !cpu.pe() && crate::mouse::deliver_callback(cpu);
+    // Mouse event handler installed with INT 33h AX=000C, called in real
+    // mode (reflected there for a DPMI client in protected mode).
+    let called = crate::mouse::deliver_callback(cpu);
     cpu.bus.refresh_irq();
     called
 }
@@ -599,6 +608,15 @@ pub fn run_command_line(cpu: &mut Cpu, cmd: &str) {
     let plain = redirect.input.is_none() && redirect.output.is_none();
     if plain && crate::almanac::ask_first(cpu, &cmd, command) {
         return;
+    }
+    // The output file is made before the program is looked for, as
+    // COMMAND.COM and DOSBox make it: for a program, for a batch file
+    // (whose output still goes to the screen) and for a command that isn't
+    // found, whose message stays on the screen. Wolf runs
+    // `POWER.EXE > C:POWERFL` through COMMAND.COM and opens the file
+    // whether POWER.EXE was there or not.
+    if let Some((path, append)) = &redirect.output {
+        create_output(&mut cpu.bus, path, *append);
     }
     match start(cpu, command, args.trim(), false, false) {
         None => bad_command(cpu),
@@ -775,22 +793,29 @@ fn write_redirected(cpu: &mut Cpu, redirect: &Redirections, captured: &[u8]) {
     }
 }
 
+/// The file a `>` redirection writes to, made empty, or a `>>` one's,
+/// made if it isn't there. A device (NUL, CON) is left alone.
+fn create_output(bus: &mut Bus, path: &str, append: bool) {
+    let is_device = crate::disk::char_device(path).is_some();
+    if !is_device && (!append || !bus.disk.exists(path)) {
+        let _ = bus.disk.write_whole_file(path, &[], None);
+    }
+}
+
 /// Give a program started from the shell the files its command line
-/// redirected: its handle 1 (standard output) and 0 (standard input).
+/// redirected: its handle 1 (standard output) and 0 (standard input). The
+/// shell made the output file before it looked for the program
+/// (`create_output`).
 fn redirect_program(cpu: &mut Cpu, redirect: &Redirections) {
     let psp = cpu.current_psp;
     let bus = &mut cpu.bus;
-    if let Some((path, append)) = &redirect.output {
-        let is_device = crate::disk::char_device(path).is_some();
-        if !is_device && (!append || !bus.disk.exists(path)) {
-            let _ = bus.disk.write_whole_file(path, &[], None);
+    if let Some((path, append)) = &redirect.output
+        && let Ok(sft) = bus.disk.open_file(path, 0x01, psp)
+    {
+        if *append {
+            let _ = bus.disk.seek_file(sft, 0, 2);
         }
-        if let Ok(sft) = bus.disk.open_file(path, 0x01, psp) {
-            if *append {
-                let _ = bus.disk.seek_file(sft, 0, 2);
-            }
-            crate::dos_files::replace(bus, psp, 1, sft);
-        }
+        crate::dos_files::replace(bus, psp, 1, sft);
     }
     if let Some(path) = &redirect.input
         && let Ok(sft) = bus.disk.open_file(path, 0x00, psp)
@@ -858,16 +883,43 @@ fn start(cpu: &mut Cpu, command: &str, args: &str, high: bool, call: bool) -> Op
 /// it: where it says when it names a directory or drive, else in the
 /// current directory and then in those of PATH, in order. Without an
 /// extension it is a .COM, .EXE or .BAT file, the first of them in the
-/// first directory that has one; other extensions don't run.
+/// first directory that has one; other extensions don't run. With the
+/// built-in Windows on, a screen saver named with its .SCR extension runs
+/// too, as Windows starts one (`SCRANTIC.SCR /s`): it is a Windows
+/// program under another extension.
 pub fn find_program(cpu: &Cpu, command: &str) -> Option<String> {
     const RUNNABLE: [&str; 3] = [".COM", ".EXE", ".BAT"];
     let name = command.rsplit(['\\', '/', ':']).next().unwrap_or(command);
-    let names: Vec<String> = match name.rfind('.') {
-        Some(dot) if RUNNABLE.iter().any(|ext| name[dot..].eq_ignore_ascii_case(ext)) => vec![command.to_string()],
+    // The extension from its dot on. Names are byte strings turned into
+    // chars, so a fixed-length slice from the end can split a char.
+    let ext = name.rfind('.').map(|dot| &name[dot..]);
+    let is_scr = ext.is_some_and(|ext| ext.eq_ignore_ascii_case(".SCR"));
+    let names: Vec<String> = match ext {
+        Some(ext) if RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r)) => {
+            vec![command.to_string()]
+        }
+        Some(_) if is_scr && cpu.bus.win32.enabled => vec![command.to_string()],
         Some(_) => return None,
-        None => RUNNABLE.iter().map(|ext| format!("{}{}", command, ext)).collect(),
+        None => RUNNABLE
+            .iter()
+            .map(|r| format!("{}{}", command, r))
+            .collect(),
     };
-    let find = |dir: &str| names.iter().map(|n| format!("{}{}", dir, n)).find(|p| cpu.bus.disk.is_file(p));
+    // A saver is a Windows program, so a .SCR file has to be an MZ image;
+    // without the check its bytes would run as a .COM.
+    let is_mz = |p: &str| {
+        cpu.bus
+            .disk
+            .file_data(p)
+            .and_then(|file| file.read().ok())
+            .is_some_and(|b| b.starts_with(b"MZ"))
+    };
+    let find = |dir: &str| {
+        names
+            .iter()
+            .map(|n| format!("{}{}", dir, n))
+            .find(|p| cpu.bus.disk.is_file(p) && (!is_scr || is_mz(p)))
+    };
     if let Some(path) = find("") {
         return Some(path);
     }
@@ -1027,6 +1079,10 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
     if HOOK && hook.before_exec(cpu, phys_ip, fetch.ram) {
         return Some(StopReason::Paused);
     }
+    let breakpoints = cpu.code_breakpoints();
+    if breakpoints && cpu.instruction_breakpoint(lin_ip) {
+        return None;
+    }
     if PROF {
         note_instruction(cpu, eip, code32);
     }
@@ -1092,7 +1148,7 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
     // TF as the instruction begins: the single-step trap follows it.
     let traced = cpu.get_cpu_flag(CpuFlags::TF);
     cpu.set_eip(next_eip);
-    let mut chains = CHAIN && simple && !traced;
+    let mut chains = CHAIN && simple && !traced && !breakpoints;
     match handler(cpu, instr) {
         Ok(()) => {
             if traced {
@@ -1105,8 +1161,13 @@ fn execute_at<const HOOK: bool, const CHAIN: bool, const PROF: bool>(
             // as it was (the handlers commit everything else last).
             cpu.set_eip(eip);
             cpu.set_esp(start_esp);
-            if after_fault(cpu, fault, fetch.ram, phys_ip) && traced {
-                // An emulator service counts as one instruction.
+            // An emulator service counts as one instruction. One that left
+            // TF clear entered a handler, which drops the trap as INT n does
+            // (`trap_after`).
+            if after_fault(cpu, fault, fetch.ram, phys_ip)
+                && traced
+                && cpu.get_cpu_flag(CpuFlags::TF)
+            {
                 cpu.single_step_trap();
             }
         }
@@ -1476,13 +1537,16 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     if !crate::win32::accepts(cpu, phys_ip, id) {
         return false;
     }
-    // A clock read is the one call a loop being proven may make (`idle`).
+    // A proof goes through a service only if it says it changed nothing
+    // but RAM and registers (`idle::pure_call`), or it reads the clock,
+    // which `idle::clock_read` takes after the call.
+    let observed = cpu.bus.observe.on;
+    if observed {
+        crate::idle::before_service(cpu);
+    }
     // 16-bit modules number their functions apart: the id is another
     // function's there.
     let reads_clock = crate::win32::stubs::reads_clock(id) && !crate::win16::in_16bit_code(cpu);
-    if cpu.bus.observe.on && (!reads_clock || cpu.bus.observe.timing()) {
-        cpu.bus.observe.opaque();
-    }
     let trap = (cpu.cs(), cpu.eip());
     let _profile = profile::zone(profile::Zone::Win32);
     if let Some(p) = &mut cpu.bus.profile {
@@ -1501,6 +1565,9 @@ fn win32_trap(cpu: &mut Cpu, ram: &[u8], phys_ip: usize) -> bool {
     // dropped when the call is done.
     cpu.bus.disk_io.clear();
     crate::win32::service(cpu, id);
+    if observed {
+        crate::idle::after_service(cpu);
+    }
     cpu.bus.disk_io.clear();
     if let Some(before) = &before
         && guest_page_fault(cpu, before)

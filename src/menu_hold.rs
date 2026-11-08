@@ -12,25 +12,26 @@ use std::time::{Duration, Instant};
 pub const HOLD: Duration = Duration::from_millis(1500);
 /// How far the mouse may get from where the press began, on either axis:
 /// window pixels, or the captured mouse's motion.
-const TRAVEL: i32 = 24;
+const TRAVEL: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MenuHold {
     since: Option<Instant>,
-    travel: (i32, i32),
+    travel: (f32, f32),
     fired: bool,
 }
 
 impl MenuHold {
     /// The right button went down.
     pub fn press(&mut self, now: Instant) {
-        *self = Self { since: Some(now), travel: (0, 0), fired: false };
+        *self = Self { since: Some(now), travel: (0.0, 0.0), fired: false };
     }
 
-    /// The mouse moved by `(dx, dy)`.
-    pub fn motion(&mut self, dx: i32, dy: i32) {
+    /// The mouse moved by `(dx, dy)`, which SDL gives in fractions of a
+    /// pixel: a slow drag is many steps of less than one.
+    pub fn motion(&mut self, dx: f32, dy: f32) {
         if self.since.is_some() && !self.fired {
-            self.travel = (self.travel.0.saturating_add(dx), self.travel.1.saturating_add(dy));
+            self.travel = (self.travel.0 + dx, self.travel.1 + dy);
             if self.travel.0.abs() > TRAVEL || self.travel.1.abs() > TRAVEL {
                 self.since = None;
             }
@@ -88,26 +89,37 @@ mod tests {
         let t = Instant::now();
         let mut h = MenuHold::default();
         h.press(t);
-        h.motion(10, -2);
+        h.motion(10.0, -2.0);
         assert!(!h.poll(t + HOLD - Duration::from_millis(1)));
-        h.motion(15, 2);
+        h.motion(15.0, 2.0);
         assert!(!h.poll(t + HOLD));
         assert!(!h.release());
         // A jitter back and forth doesn't, however long its path.
         h.press(t);
         for _ in 0..50 {
-            h.motion(3, 2);
-            h.motion(-3, -2);
+            h.motion(3.0, 2.0);
+            h.motion(-3.0, -2.0);
         }
         h.motion(TRAVEL, -TRAVEL);
         assert!(h.poll(t + HOLD));
     }
 
     #[test]
+    fn fractions_of_a_pixel_add_up() {
+        let t = Instant::now();
+        let mut h = MenuHold::default();
+        h.press(t);
+        for _ in 0..100 {
+            h.motion(0.5, 0.0);
+        }
+        assert!(!h.poll(t + HOLD));
+    }
+
+    #[test]
     fn motion_without_a_press_does_nothing() {
         let t = Instant::now();
         let mut h = MenuHold::default();
-        h.motion(100, 100);
+        h.motion(100.0, 100.0);
         h.press(t);
         assert!(h.poll(t + HOLD));
     }

@@ -345,7 +345,8 @@ impl Core {
             self.tick_rem += PIT_HZ * if fast { AUTOINPUT_FAST_FRAMES } else { 1 };
             self.target_ticks += self.tick_rem / FPS as u64;
             self.tick_rem %= FPS as u64;
-            m.cpu.bus.clock.icount_at(self.target_ticks)
+            let end = m.cpu.bus.clock.icount_at(self.target_ticks);
+            m.cpu.bus.past_blanking(end)
         };
         m.cpu.bus.start_batch(batch_end);
         let clock = &m.cpu.bus.clock;
@@ -629,7 +630,7 @@ impl Core {
     pub fn rebase(&mut self) {
         self.target_ticks = self.m.cpu.bus.clock.now_ticks();
         self.tick_rem = 0;
-        self.m.pacer.rebase(&self.m.cpu.bus.clock, Instant::now());
+        self.m.pacer.rebase(&mut self.m.cpu.bus, Instant::now());
         self.m.cpu.bus.vga.mark_dirty_full();
         self.memmap.forget();
         self.release_input();

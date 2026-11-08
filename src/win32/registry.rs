@@ -31,6 +31,7 @@ pub const HKEY_DYN_DATA: u32 = 0x8000_0006;
 
 /// Value types.
 pub const REG_SZ: u32 = 1;
+pub const REG_EXPAND_SZ: u32 = 2;
 pub const REG_BINARY: u32 = 3;
 pub const REG_DWORD: u32 = 4;
 
@@ -128,6 +129,30 @@ const SEED: &str = r#"REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Classes\Interface\{00000001-0000-0000-C000-000000000046}\ProxyStubClsid32]
 @="{00000320-0000-0000-C000-000000000046}"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0]
+@="OLE Automation"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0\0\win32]
+@="C:\\WINDOWS\\SYSTEM\\STDOLE32.TLB"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0\FLAGS]
+@="0"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\1.0\HELPDIR]
+@="C:\\WINDOWS\\SYSTEM"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0]
+@="OLE Automation"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0\0\win32]
+@="C:\\WINDOWS\\SYSTEM\\STDOLE2.TLB"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0\FLAGS]
+@="0"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\TypeLib\{00020430-0000-0000-C000-000000000046}\2.0\HELPDIR]
+@="C:\\WINDOWS\\SYSTEM"
 "#;
 
 /// A named value. The default value of a key has the empty name.
@@ -653,10 +678,114 @@ pub fn get(cpu: &mut Cpu) -> &mut Registry {
         let file = cpu.bus.disk.file_data(FILE).and_then(|f| f.read().ok());
         let text = file.map(|bytes| crate::dosstr::from_bytes(&bytes));
         let version = cpu.bus.win32.os;
-        cpu.bus.win32.registry = Registry::seeded(text.as_deref(), version);
+        // The CD-ROM drive ASPI shows, and where it is on the IDE
+        // channels: from the secondary master on without MOUNT's -ide.
+        let cd = super::wnaspi32::cd_drive(cpu).map(|(drive, _)| {
+            let slot = cpu.bus.disk.ide_slot(drive);
+            (drive, slot.unwrap_or(crate::ide::IdeSlot::CD_ORDER[0]))
+        });
+        let mut registry = Registry::seeded(text.as_deref(), version);
+        registry.import(&devices(cd));
+        registry.dirty = false;
+        cpu.bus.win32.registry = registry;
     }
     &mut cpu.bus.win32.registry
 }
+
+/// The device keys of the CD-ROM drive `cd` (its DOS drive and its IDE
+/// slot), the one WNASPI32 shows, as Windows 98 SE has them for an ATAPI
+/// drive on an IDE channel: the drive's key under HKLM\Enum\SCSI, named
+/// after its INQUIRY data; its channel's controller under
+/// HKLM\Enum\BIOS\*PNP0600; and their device nodes in
+/// HKEY_DYN_DATA\Config Manager\Enum, which name those keys.
+///
+/// Copy protections find the drive letter of an ASPI target this way.
+/// SafeDisc 2 goes through Config Manager's nodes to the CDROM-class keys,
+/// reads their SCSITargetID, SCSILUN and CurrentDriveLetterAssignment, and
+/// the DeviceDesc of the controller the instance name points to; with no
+/// such key it finds no CD-ROM drive ("Missing CD-ROM").
+///
+/// The values are those Windows 98 SE made for rust-dos's drive on the
+/// secondary master. ESDI_506 names a drive's instance after its
+/// controller's (0F for the primary channel, 10 for the secondary), its
+/// target (0 master, 1 slave) and its LUN. Windows remakes these keys at
+/// each start, so they are made each time the registry is read.
+///
+/// The keys under HKLM\Enum go into the registry file with the rest, so
+/// the drive's keys from an earlier run are deleted first: a drive that
+/// moved to the other channel, or is gone, leaves no second CDROM-class
+/// key with a stale drive letter behind. Without a CD-ROM drive that
+/// deletion is all there is.
+fn devices(cd: Option<(u8, crate::ide::IdeSlot)>) -> String {
+    use crate::ide::ChannelId;
+    use crate::ide::atapi::{INQUIRY_PRODUCT, INQUIRY_REVISION, INQUIRY_VENDOR};
+    // The SCSI hardware id: vendor (8) and product (16), spaces as
+    // underscores, and the revision's first character.
+    let id: String = format!("{INQUIRY_VENDOR:<8.8}{INQUIRY_PRODUCT:<16.16}")
+        .replace(' ', "_")
+        + &INQUIRY_REVISION[..1];
+    let stale = format!("REGEDIT4\n\n[-HKEY_LOCAL_MACHINE\\Enum\\SCSI\\{id}]\n");
+    let Some((drive, slot)) = cd else {
+        return stale;
+    };
+    let (controller, hdc) = match slot.channel {
+        ChannelId::Primary => ("0F", "0000"),
+        ChannelId::Secondary => ("10", "0001"),
+    };
+    let target = u8::from(slot.slave);
+    let instance = format!("BIOS&*PNP0600&{controller}{target}0");
+    let letter = (b'A' + drive) as char;
+    let master = u8::from(!slot.slave);
+    format!(
+        r#"{stale}
+[HKEY_LOCAL_MACHINE\Enum\BIOS\*PNP0600\{controller}]
+"Capabilities"=hex:14,00,00,00
+"HardwareID"="BIOS\\*PNP0600,*PNP0600"
+"ClassGUID"="{{4d36e96a-e325-11ce-bfc1-08002be10318}}"
+"Class"="hdc"
+"Driver"="hdc\\{hdc}"
+"Mfg"="(Standard hard disk drivers)"
+"DeviceDesc"="Standard IDE/ESDI Hard Disk Controller"
+"ConfigFlags"=hex:00,00,00,00
+
+[HKEY_LOCAL_MACHINE\Enum\SCSI\{id}\{instance}]
+"Capabilities"=hex:14,00,00,00
+"AutoInsertNotification"=hex:01
+"SCSITargetID"="{target}"
+"SCSILUN"="0"
+"RevisionLevel"="{INQUIRY_REVISION:<4.4}"
+"ProductId"="{INQUIRY_PRODUCT:<16.16}"
+"Manufacturer"="{INQUIRY_VENDOR}"
+"DeviceType"=hex:05
+"Removable"=hex:01
+"CurrentDriveLetterAssignment"="{letter}"
+"IDEMaster"=hex:{master:02x}
+"HardwareID"="{id},GenCD,SCSI\\{id}"
+"Class"="CDROM"
+"ClassGUID"="{{4d36e965-e325-11ce-bfc1-08002be10318}}"
+"Driver"="CDROM\\0000"
+"Mfg"="(Standard CD-ROM device)"
+"DeviceDesc"="{INQUIRY_VENDOR} {INQUIRY_PRODUCT:<16.16}"
+"ConfigFlags"=hex:00,00,00,00
+
+[HKEY_DYN_DATA\Config Manager\Enum\{HDC_DEVNODE}]
+"HardWareKey"="BIOS\\*PNP0600\\{controller}"
+"Problem"=hex:00,00,00,00
+"Status"=hex:0a,60,00,00
+
+[HKEY_DYN_DATA\Config Manager\Enum\{CD_DEVNODE}]
+"HardWareKey"="SCSI\\{id}\\{instance}"
+"Problem"=hex:00,00,00,00
+"Status"=hex:0a,60,00,00
+"#
+    )
+}
+
+/// The names of the controller's and the CD-ROM drive's device nodes
+/// under Config Manager\Enum. Windows 98 names a node by its address in
+/// the configuration manager's memory; these are two such addresses.
+const HDC_DEVNODE: &str = "C29FF000";
+const CD_DEVNODE: &str = "C2A01000";
 
 /// Write the registry to its file, if it changed.
 pub fn save(cpu: &mut Cpu) {
@@ -693,14 +822,21 @@ pub fn key_exists(cpu: &mut Cpu, hkey: u32, path: &str) -> bool {
     registry.find(root, path).is_some()
 }
 
-/// Put the .reg file `text` into the registry and save it. With no
-/// program running, the registry is read from its file for this and let
-/// go after, so the next program reads it again, as after
-/// `process_ended`.
+/// Put the .reg file `text` into the registry and save it.
 pub fn import_file(cpu: &mut Cpu, text: &str) -> Result<(), String> {
+    let ((), saved) = change_and_save(cpu, |registry| registry.import(text));
+    saved.map_err(|_| format!("the registry can't be saved to {}", FILE))
+}
+
+/// Change the registry with `f` and save it at once, whether a program
+/// runs or not. With no program running, the registry is read from its
+/// file for this and let go after, so the next program reads it again,
+/// as after `process_ended`. What `f` returns, and whether the file was
+/// written.
+fn change_and_save<T>(cpu: &mut Cpu, f: impl FnOnce(&mut Registry) -> T) -> (T, Result<(), u8>) {
     let idle = cpu.bus.win32.processes.is_empty();
     let registry = get(cpu);
-    registry.import(text);
+    let result = f(registry);
     registry.dirty = false;
     let bytes = crate::dosstr::to_bytes(&registry.export());
     let saved = cpu.bus.disk.write_whole_file(FILE, &bytes, None);
@@ -709,7 +845,57 @@ pub fn import_file(cpu: &mut Cpu, text: &str) -> Result<(), String> {
     } else if saved.is_err() {
         cpu.bus.win32.registry.dirty = true;
     }
-    saved.map_err(|_| format!("the registry can't be saved to {}", FILE))
+    (result, saved)
+}
+
+/// The string values (REG_SZ and REG_EXPAND_SZ) of each key of `keys`,
+/// a path under a predefined key, as (name, text), in the order they
+/// were set: the order RegEnumValueA gives them in. Nothing for a key
+/// that isn't there. The registry is read once for all of them, and with
+/// no program running it is let go after, as by `change_and_save`.
+pub fn string_values(cpu: &mut Cpu, keys: &[(u32, &str)]) -> Vec<Vec<(String, String)>> {
+    let idle = cpu.bus.win32.processes.is_empty();
+    let registry = get(cpu);
+    let values = keys
+        .iter()
+        .map(|&(hkey, path)| {
+            let Open::Key(root) = registry.open(hkey, 0) else {
+                return Vec::new();
+            };
+            registry.find(root, path).map_or_else(Vec::new, |key| {
+                registry
+                    .key(key)
+                    .values
+                    .iter()
+                    .filter(|v| v.kind == REG_SZ || v.kind == REG_EXPAND_SZ)
+                    .map(|v| (v.name.clone(), v.text()))
+                    .collect()
+            })
+        })
+        .collect();
+    if idle {
+        cpu.bus.win32.registry = Registry::default();
+    }
+    values
+}
+
+/// Delete the value `name` of the key `path` under the predefined key
+/// `hkey`, and save the registry at once: false if there was no such
+/// value.
+pub fn delete_value_now(cpu: &mut Cpu, hkey: u32, path: &str, name: &str) -> bool {
+    let (deleted, saved) = change_and_save(cpu, |registry| {
+        let Open::Key(root) = registry.open(hkey, 0) else {
+            return false;
+        };
+        registry
+            .find(root, path)
+            .is_some_and(|key| registry.delete_value(key, name))
+    });
+    if saved.is_err() {
+        cpu.bus
+            .log_string(&format!("[W32] The registry can't be saved to {}", FILE));
+    }
+    deleted
 }
 
 /// The process `id` ended: its keys close. After the last process, the
@@ -875,5 +1061,44 @@ mod tests {
         assert!(registry.close(handle, 7));
         assert!(!registry.close(handle, 7));
         assert!(matches!(registry.open(0, 7), Open::Error(ERROR_BADKEY)));
+    }
+
+    /// A string value's text, without its terminating zero.
+    fn text(registry: &Registry, key: u32, name: &str) -> String {
+        let data = &registry.value(key, name).unwrap().data;
+        String::from_utf8(data.strip_suffix(b"\0").unwrap_or(data).to_vec()).unwrap()
+    }
+
+    #[test]
+    fn a_cd_drive_is_found_as_safedisc_looks_for_it() {
+        use crate::ide::{ChannelId, IdeSlot};
+        let mut registry = Registry::seeded(None, Win98Se);
+        registry.import(&devices(Some((3, IdeSlot::new(ChannelId::Primary, true)))));
+        // Config Manager's nodes name the device keys under HKLM\Enum.
+        let nodes = registry.find(DYN_DATA, r"Config Manager\Enum").unwrap();
+        let cd = registry
+            .key(nodes)
+            .children
+            .iter()
+            .filter(|&&node| registry.value(node, "HardWareKey").is_some())
+            .map(|&node| text(&registry, node, "HardWareKey"))
+            .filter_map(|path| registry.find(LOCAL_MACHINE, &format!(r"Enum\{path}")))
+            .find(|&key| registry.value(key, "Class").is_some_and(|v| v.data.starts_with(b"CDROM")))
+            .unwrap();
+        assert_eq!(text(&registry, cd, "CurrentDriveLetterAssignment"), "D");
+        assert_eq!(text(&registry, cd, "SCSITargetID"), "1");
+        assert_eq!(text(&registry, cd, "SCSILUN"), "0");
+        // The instance names its controller: the primary channel's, 0F.
+        let instance = registry.key(cd).name.clone();
+        assert_eq!(instance, "BIOS&*PNP0600&0F10");
+        let hdc = registry.find(LOCAL_MACHINE, r"Enum\BIOS\*PNP0600\0F").unwrap();
+        assert_eq!(text(&registry, hdc, "Class"), "hdc");
+        // A run without the drive deletes the drive's key the registry file
+        // kept, and Config Manager's node, made anew each time, isn't there.
+        let mut later = Registry::seeded(Some(&registry.export()), Win98Se);
+        later.import(&devices(None));
+        let scsi = later.find(LOCAL_MACHINE, r"Enum\SCSI").unwrap();
+        assert!(later.key(scsi).children.is_empty());
+        assert!(later.find(DYN_DATA, r"Config Manager\Enum").is_none());
     }
 }

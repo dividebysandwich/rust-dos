@@ -38,6 +38,7 @@ fn plane(cpu: &mut Cpu, id: u32, s: &Surface) -> Option<Plane> {
         start,
         stride,
         bpp: s.bytes_per_pixel(),
+        tiled: false,
     })
 }
 

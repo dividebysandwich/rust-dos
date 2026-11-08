@@ -259,7 +259,10 @@ pub fn iret(cpu: &mut Cpu, instr: &Instruction) -> CpuResult {
     } else if size == 2 {
         cpu.load_flags16(flags as u16);
     } else {
+        // IRETD loads RF in real mode too (POPFD doesn't): a debugger's
+        // handler sets it to go on past an instruction breakpoint.
         cpu.load_eflags(flags);
+        cpu.set_cpu_flag(CpuFlags::RF, flags & CpuFlags::RF.bits() != 0);
     }
     Ok(())
 }

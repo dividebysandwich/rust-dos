@@ -113,6 +113,11 @@ impl Cmos {
         crate::hosttime::now().naive_local() + self.offset
     }
 
+    /// How far DOS or the BIOS moved the machine's clock from the host's.
+    pub fn offset(&self) -> TimeDelta {
+        self.offset
+    }
+
     /// Set the machine's clock to `at`, a local date and time.
     pub fn set_now(&mut self, at: NaiveDateTime) {
         self.offset = at - crate::hosttime::now().naive_local();

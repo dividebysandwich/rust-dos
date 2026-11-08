@@ -1,0 +1,94 @@
+name: SDL3 from source
+description: >-
+  Build SDL3 from its release tarball into a prefix, or restore the prefix
+  from the cache, and point pkg-config, the linker and the loader at it.
+
+# Ubuntu has no SDL3 before 25.04, so neither the runner images (24.04)
+# nor the -compat container (22.04) can install it. SDL3 is built with
+# every backend it finds headers for (X11, Wayland, ALSA, PulseAudio,
+# PipeWire, udev...) loaded at run time, so the library needs none of them
+# to load, and the release packages ship it (packaging/linux/AppRun,
+# the release workflow). The prefix is cached by version and by `flavor`,
+# which tells apart builds whose glibc differs (a container's from the
+# runner image's).
+#
+# It runs as root where there is no sudo, as in the container jobs.
+
+inputs:
+  version:
+    description: The SDL3 release to build.
+    default: "3.4.20"
+  flavor:
+    description: >-
+      What the build depends on beside the version: the runner image or the
+      container image, which the cache key needs.
+    required: true
+  update:
+    description: Passed to apt-install for the build's packages.
+    default: "false"
+
+outputs:
+  prefix:
+    description: Where SDL3 is installed (lib/, include/, share/licenses/SDL3/).
+    value: ${{ steps.prefix.outputs.prefix }}
+
+runs:
+  using: composite
+  steps:
+    - name: SDL3's prefix
+      id: prefix
+      shell: bash
+      run: echo "prefix=$RUNNER_TEMP/sdl3" >> "$GITHUB_OUTPUT"
+
+    - name: Restore SDL3
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.prefix.outputs.prefix }}
+        key: sdl3-${{ inputs.version }}-${{ inputs.flavor }}-${{ runner.arch }}
+
+    # The headers of the backends SDL3 loads at run time; only to build it.
+    - name: Install SDL3's build dependencies
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: $/.github/actions/apt-install
+      with:
+        packages: >-
+          build-essential cmake pkg-config curl ca-certificates
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev
+          libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev
+          libgl-dev libgbm-dev libdrm-dev libasound2-dev libpulse-dev libpipewire-0.3-dev
+          libdbus-1-dev libudev-dev
+        update: ${{ inputs.update }}
+
+    - name: Build SDL3
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SDL_VERSION: ${{ inputs.version }}
+        PREFIX: ${{ steps.prefix.outputs.prefix }}
+      run: |
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o sdl3.tar.gz \
+          "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz"
+        tar xzf sdl3.tar.gz
+        cmake -S "SDL3-$SDL_VERSION" -B sdl3-build -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
+          -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+        cmake --build sdl3-build --parallel
+        cmake --install sdl3-build
+        rm -rf sdl3-build "SDL3-$SDL_VERSION" sdl3.tar.gz
+
+    # pkg-config for sdl3-sys's build script, LIBRARY_PATH for the link,
+    # LD_LIBRARY_PATH for the programs the tests start.
+    - name: Use SDL3
+      shell: bash
+      env:
+        PREFIX: ${{ steps.prefix.outputs.prefix }}
+      run: |
+        echo "SDL3 needs:"
+        ldd "$PREFIX/lib/libSDL3.so.0"
+        {
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          echo "LIBRARY_PATH=$PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        } >> "$GITHUB_ENV"

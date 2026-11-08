@@ -1,8 +1,8 @@
 # The results of Wine's conformance tests under the built-in Windows, as
-# tests/conformance_tests.rs makes them: for each test file its summary,
-# the checks that failed and the tests skipped (by file and line), or how
-# the program ended before its summary. Write them anew with
-# CONFORMANCE_BLESS=1 cargo test --test conformance_tests.
+# tests/win32/conformance_tests.rs makes them: for each test file its
+# summary, the checks that failed and the tests skipped (by file and line),
+# or how the program ended before its summary. Write them anew with
+# CONFORMANCE_BLESS=1 cargo test --test win32 conformance_tests::
 advapi32/registry: registry: 208 tests executed (0 marked as todo, 0 failures), 17 skipped.
 advapi32/registry: skipped registry.c:234 (x8)
 advapi32/registry: skipped registry.c:539
@@ -95,7 +95,7 @@ d3d8/stateblock: stateblock: 8691 tests executed (0 marked as todo, 0 failures),
 d3d8/surface: surface: 59 tests executed (0 marked as todo, 0 failures), 0 skipped.
 d3d8/texture: texture: 40 tests executed (0 marked as todo, 1 failure), 0 skipped.
 d3d8/texture: failed texture.c:116
-d3d8/visual: visual: 283 tests executed (0 marked as todo, 7 failures), 17 skipped.
+d3d8/visual: visual: 290 tests executed (0 marked as todo, 7 failures), 16 skipped.
 d3d8/visual: failed visual.c:1411
 d3d8/visual: failed visual.c:1413
 d3d8/visual: failed visual.c:1415
@@ -103,7 +103,7 @@ d3d8/visual: failed visual.c:888
 d3d8/visual: failed visual.c:892
 d3d8/visual: failed visual.c:896
 d3d8/visual: skipped visual.c:949
-d3d8/visual: skipped visual.c:1262 (x15)
+d3d8/visual: skipped visual.c:1262 (x14)
 d3d8/visual: failed visual.c:1279
 d3d8/visual: skipped visual.c:1631
 d3d8/volume: volume: 1 tests executed (0 marked as todo, 0 failures), 1 skipped.
@@ -154,8 +154,7 @@ dsound/capture: capture: 29 tests executed (0 marked as todo, 0 failures), 0 ski
 dsound/ds3d: ds3d: 849 tests executed (0 marked as todo, 0 failures), 0 skipped.
 dsound/ds3d8: ds3d8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 dsound/ds3d8: skipped ds3d8.c:1146
-dsound/dsound: dsound: 2040 tests executed (0 marked as todo, 1 failure), 48 skipped.
-dsound/dsound: failed dsound.c:1087
+dsound/dsound: dsound: 2040 tests executed (0 marked as todo, 0 failures), 48 skipped.
 dsound/dsound: skipped dsound.c:741 (x48)
 dsound/dsound8: dsound8: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 dsound/dsound8: skipped dsound8.c:939
@@ -235,13 +234,12 @@ kernel32/locale: skipped locale.c:2372
 kernel32/locale: skipped locale.c:2455
 kernel32/locale: skipped locale.c:2629
 kernel32/locale: skipped locale.c:2645
-kernel32/module: module: 44 tests executed (0 marked as todo, 4 failures), 2 skipped.
+kernel32/module: module: 44 tests executed (0 marked as todo, 3 failures), 2 skipped.
 kernel32/module: skipped module.c:392
 kernel32/module: skipped module.c:242
 kernel32/module: failed module.c:259
 kernel32/module: failed module.c:270
 kernel32/module: failed module.c:282
-kernel32/module: failed module.c:374
 kernel32/path: path: 1797 tests executed (0 marked as todo, 0 failures), 11 skipped.
 kernel32/path: skipped path.c:1710
 kernel32/path: skipped path.c:926 (x3)
@@ -267,7 +265,7 @@ kernel32/thread: skipped thread.c:763
 kernel32/thread: skipped thread.c:1020
 kernel32/thread: skipped thread.c:1248
 kernel32/time: time: 40 tests executed (0 marked as todo, 0 failures), 2 skipped.
-kernel32/time: skipped time.c:297
+kernel32/time: skipped time.c:308
 kernel32/time: skipped time.c:428
 kernel32/timer: timer: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.
 kernel32/timer: skipped timer.c:42
@@ -378,7 +376,7 @@ user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
 user32/msg: msg: 2 tests executed (0 marked as todo, 0 failures), 0 skipped.
-user32/msg: msg: 11069 tests executed (0 marked as todo, 586 failures), 6 skipped.
+user32/msg: msg: 11075 tests executed (0 marked as todo, 586 failures), 6 skipped.
 user32/msg: skipped msg.c:12537
 user32/msg: failed msg.c:8462
 user32/msg: skipped msg.c:12177
@@ -697,7 +695,7 @@ winmm/mci: skipped mci.c:515
 winmm/mci: skipped mci.c:634
 winmm/mci: skipped mci.c:870
 winmm/midi: midi: 226 tests executed (0 marked as todo, 0 failures), 0 skipped.
-winmm/mixer: mixer: 38 tests executed (0 marked as todo, 0 failures), 0 skipped.
+winmm/mixer: mixer: 56 tests executed (0 marked as todo, 0 failures), 0 skipped.
 winmm/mmio: mmio: 219 tests executed (0 marked as todo, 0 failures), 3 skipped.
 winmm/mmio: skipped mmio.c:77
 winmm/mmio: skipped mmio.c:244
