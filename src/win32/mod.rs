@@ -39,7 +39,7 @@ pub(crate) mod kernel32;
 mod launcher;
 pub(crate) mod loader;
 mod lz32;
-mod mapping;
+pub(crate) mod mapping;
 pub(crate) mod memory;
 mod mpr;
 mod msacm32;
