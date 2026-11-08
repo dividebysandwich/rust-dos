@@ -337,6 +337,102 @@ fn a_new_disc_goes_in_spins_up_and_says_it_changed() {
     assert_eq!(tur(&mut bus), Ok(vec![]));
 }
 
+/// Let `ms` milliseconds pass a second at a time, with the CD audio
+/// played as far as the time.
+fn play_on(bus: &mut Bus, ms: f64) {
+    let mut left = ms;
+    while left > 0.0 {
+        let step = left.min(1000.0);
+        wait_ms(bus, step);
+        bus.audio_catch_up();
+        left -= step;
+    }
+}
+
+/// How long, in ms, a packet command takes from the host's first write.
+fn timed(bus: &mut Bus, cdb: [u8; 12], limit: u16) -> f64 {
+    let start = bus.clock.icount;
+    packet(bus, cdb, limit).unwrap();
+    (bus.clock.icount - start) as f64 / 1000.0
+}
+
+#[test]
+fn a_disc_playing_audio_keeps_turning_until_the_play_ends() {
+    // A data track and 20 s of audio. The drive stops a disc 10 s after
+    // the last command (1 s to spin it up again), but not while it plays
+    // audio: the play keeps it turning, and the 10 s count from its end.
+    let dir = cdimage::scratch("ide_play_spin");
+    fs::create_dir_all(dir.join("c")).unwrap();
+    let mut bus = Bus::new(dir.join("c"));
+    let image = iso("TESTDISC", &[file("HELLO.TXT", b"hello")]);
+    let cue = mixed_disc(&dir, &image, 1500);
+    bus.mount_drive(3, &cue, MountOptions::default(), false)
+        .unwrap();
+    bus.set_cycles_per_ms(1000);
+    bus.attach_ide();
+    let track2 = (image.len() / 2048) as u32 + 150;
+    let play = |bus: &mut Bus, sectors: u32| {
+        let (m, s, f) = rust_dos::cdrom::lba_to_msf(track2);
+        let (em, es, ef) = rust_dos::cdrom::lba_to_msf(track2 + sectors);
+        packet(bus, [0x47, 0, 0, m, s, f, em, es, ef, 0, 0, 0], 0).unwrap();
+    };
+    // Spun up by a read.
+    assert!(timed(&mut bus, read10(16, 1), 2048) > 900.0);
+    // The whole track; a read 12 s into it finds the disc turning.
+    play(&mut bus, 1500);
+    play_on(&mut bus, 12_000.0);
+    let during = timed(&mut bus, read10(17, 1), 2048);
+    assert!(during < 500.0, "a read during the play took {during} ms");
+    // Two seconds of it; 11 s after it began, 9 s after it ended, the
+    // disc still turns, and 11 s after that read it has stopped.
+    play_on(&mut bus, 10_000.0);
+    play(&mut bus, 150);
+    play_on(&mut bus, 11_000.0);
+    let after = timed(&mut bus, read10(18, 1), 2048);
+    assert!(after < 500.0, "a read 9 s after the play took {after} ms");
+    play_on(&mut bus, 11_000.0);
+    let stopped = timed(&mut bus, read10(19, 1), 2048);
+    assert!(
+        stopped > 900.0,
+        "a read 11 s after the last took {stopped} ms"
+    );
+}
+
+#[test]
+fn a_new_disc_starts_with_an_empty_buffer() {
+    // The drive reads ahead after a read of sector 16. A new disc goes in:
+    // what the buffer held was the old disc's, so a read of sector 17 of
+    // the new one moves the head and waits for the sector to come round.
+    let (mut bus, _) = drive("change_buffer");
+    let mut cd = rust_dos::ide::Atapi::new(3, true);
+    let mut env = rust_dos::ide::Env {
+        disks: &bus.disk,
+        player: &mut bus.cdaudio,
+        now: 0,
+        hard_disk_ns_per_sector: 0,
+        faked: false,
+        moved: 0,
+    };
+    assert_eq!(cd.run_packet(&read10(16, 1), &[], &mut env).sense, None);
+    cd.media_changed(true, env.now);
+    // TEST UNIT READY, a second apart, until the drive has reported the
+    // disc going in, spinning up and changed, and is ready.
+    let mut reports = Vec::new();
+    for _ in 0..10 {
+        env.now += rust_dos::timer::PIT_HZ;
+        match cd.run_packet(&[0; 12], &[], &mut env).sense {
+            Some(s) => reports.push((s[2] & 0xF, s[12])),
+            None => break,
+        }
+    }
+    assert_eq!(reports.last(), Some(&(2, 0x28)), "{reports:?}");
+    let before = env.now;
+    let read = cd.run_packet(&read10(17, 1), &[], &mut env);
+    assert_eq!(read.sense, None);
+    let ms = (env.now - before) as f64 * 1000.0 / rust_dos::timer::PIT_HZ as f64;
+    assert!(ms > 1.0, "the read took {ms} ms");
+}
+
 #[test]
 fn unknown_commands_say_why() {
     let (mut bus, _) = drive("unknown");

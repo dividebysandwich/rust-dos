@@ -148,7 +148,8 @@ const I_MB_STYLE: usize = 28;
 
 /// EndDialog was called.
 const DF_END: u16 = 0x0001;
-/// A modal dialog disabled its owner, which it enables again.
+/// A modal dialog disabled its owner, which it enables again if the
+/// dialog can't be made. EndDialog enables the owner in any case.
 const DF_OWNERENABLED: u16 = 0x0002;
 /// A message box: DefDlgProcA is its dialog procedure too.
 const DF_MSGBOX: u16 = 0x0100;
@@ -326,14 +327,21 @@ fn parent_of(state: &State, hwnd: u32) -> u32 {
     }
 }
 
-/// GetAncestor(GA_ROOT), or 0 for what isn't a window.
-fn root_of(state: &State, hwnd: u32) -> u32 {
+/// The owner a modal dialog disables and is made with: the first of
+/// `hwnd` and its ancestors that isn't a child window (WS_CHILD without
+/// WS_POPUP), as Windows picks it (Wine's test_dialog_parent), or 0 for
+/// what isn't a window.
+fn modal_owner(state: &State, hwnd: u32) -> u32 {
     if hwnd == DESKTOP || !state.is_window(hwnd) {
         return 0;
     }
     let mut h = hwnd;
-    while state.parent(h) != DESKTOP && state.parent(h) != 0 {
-        h = state.parent(h);
+    while style(state, h) & (WS_POPUP | WS_CHILD) == WS_CHILD {
+        let parent = state.parent(h);
+        if parent == 0 || parent == DESKTOP {
+            break;
+        }
+        h = parent;
     }
     h
 }
@@ -1016,6 +1024,8 @@ const S_CODE: usize = 33;
 const S_I: usize = 34;
 const S_FOUND: usize = 35;
 const S_ID: usize = 36;
+/// Set when DEFDLG_RestoreFocus runs for WM_ACTIVATE.
+const S_ACTIVATE: usize = 39;
 
 /// The subroutines' return steps, and a list of windows.
 const SP: usize = 37;
@@ -1282,8 +1292,15 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 t.set(C_POS, CW_USEDEFAULT);
             }
             if modal {
-                let root = root_of(state, owner);
+                // The modal owner is the dialog's parent or owner too,
+                // whatever the template's style, so the window EndDialog
+                // enables (GWL_HWNDPARENT) is the one disabled here. The
+                // place above was worked out from the owner given.
+                let root = modal_owner(state, owner);
                 t.set(C_ROOT, root);
+                if root != 0 {
+                    t.set(C_OWNER, root);
+                }
                 if root != 0 && style_of_root_enabled(state, root) {
                     t.set(C_FLAGS, DF_OWNERENABLED as u32);
                     return call_api("EnableWindow", &[root, FALSE], 92);
@@ -1483,11 +1500,16 @@ fn create_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
             }
             if value != 0 && (style & DS_CONTROL == 0 || style & WS_VISIBLE != 0) {
                 // TRUE asks for the first control with WS_TABSTOP, which
-                // WM_INITDIALOG may have changed.
+                // WM_INITDIALOG may have changed. It gets the focus as
+                // DEFDLG_SetFocus gives it, so an edit control's text
+                // starts selected, as on Windows 98. A SetFocus of the
+                // dialog procedure's own, which returns FALSE, selects
+                // nothing.
                 let focus = next_tab(state, hwnd, 0, false);
                 update_info(state, hwnd, |i| i.focus = focus);
                 if focus != 0 {
-                    return call_api("SetFocus", &[focus], 114);
+                    t.set(S_CTRL, focus);
+                    return gosub(t, SUB_SET_FOCUS, 114);
                 }
             }
             goto(114)
@@ -1605,9 +1627,9 @@ fn modal_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
         220 => {
             let i = info(user(cpu), hwnd).unwrap_or_default();
             t.set(C_RESULT, i.result);
-            if i.flags & DF_OWNERENABLED != 0 && t.var(C_ROOT) != 0 {
-                return call_api("EnableWindow", &[t.var(C_ROOT), TRUE], 221);
-            }
+            // The owner isn't enabled here: EndDialog did, and Windows
+            // leaves one the program disabled again, or one the loop
+            // left by WM_QUIT, disabled (Wine's test_dialog_parent).
             goto(221)
         }
         221 => call_api("DestroyWindow", &[hwnd], 222),
@@ -1744,12 +1766,16 @@ fn def_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 }
                 WM_ACTIVATE => {
                     if wp != 0 {
+                        t.set(S_ACTIVATE, TRUE);
                         return gosub(t, SUB_RESTORE_FOCUS, 397);
                     }
                     save_focus(state, hwnd);
                     Next::Done(0)
                 }
-                WM_SETFOCUS => gosub(t, SUB_RESTORE_FOCUS, 397),
+                WM_SETFOCUS => {
+                    t.set(S_ACTIVATE, 0);
+                    gosub(t, SUB_RESTORE_FOCUS, 397)
+                }
                 DM_SETDEFID => {
                     if i.flags & DF_END == 0 {
                         t.set(S_ID, wp);
@@ -1861,17 +1887,24 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
     let hwnd = t.var(V_HWND);
     match t.step {
         // DEFDLG_SetFocus(S_CTRL): an edit control's text is selected.
+        // Windows 98 sends EM_SETSEL(0, -2), which a subclassed control
+        // sees.
         600 => send(t.var(S_CTRL), WM_GETDLGCODE, 0, 0, 601),
         601 => {
             if value & DLGC_HASSETSEL != 0 {
-                return send(t.var(S_CTRL), EM_SETSEL, 0, u32::MAX, 602);
+                return send(t.var(S_CTRL), EM_SETSEL, 0, -2i32 as u32, 602);
             }
             goto(602)
         }
         602 => call_api("SetFocus", &[t.var(S_CTRL)], 603),
         603 => ret(t),
         // DEFDLG_RestoreFocus: the saved control, or the first with
-        // WS_TABSTOP.
+        // WS_TABSTOP, through DEFDLG_SetFocus. For WM_ACTIVATE
+        // (S_ACTIVATE) Windows 98 gives a saved control the focus with
+        // its selection as it was, and does nothing without one: the
+        // activation then gives the dialog the focus, and its
+        // WM_SETFOCUS selects the first control's text. An activation
+        // that SetFocus of a control makes selects nothing.
         610 => {
             let state = user(cpu);
             if style(state, hwnd) & WS_MINIMIZE != 0 {
@@ -1884,7 +1917,14 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return ret(t);
             }
             let mut focus = i.focus;
-            if !state.is_window(focus) || focus == hwnd {
+            let saved = state.is_window(focus) && focus != hwnd;
+            if t.var(S_ACTIVATE) != 0 {
+                if saved {
+                    return call_api("SetFocus", &[focus], 611);
+                }
+                return ret(t);
+            }
+            if !saved {
                 focus = next_tab(state, hwnd, 0, false);
                 update_info(state, hwnd, |i| i.focus = focus);
                 if !state.is_window(focus) {
@@ -2010,11 +2050,15 @@ fn sub_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
 fn end_step(cpu: &mut Cpu, t: &mut Task) -> Next {
     let hwnd = t.var(V_HWND);
     match t.step {
+        // The owner (GWL_HWNDPARENT's window) is enabled, whoever
+        // disabled it: the owner of a modeless dialog too, and one the
+        // program disabled itself, as MFC's CDialog::DoModal does. It can
+        // then be activated once the dialog is hidden below. Wine's
+        // test_EndDialog and test_dialog_parent check this on Windows.
         400 => {
-            let (was_enabled, owner) = (t.var(2), t.var(3));
-            let root = root_of(user(cpu), owner);
-            if was_enabled != 0 && root != 0 {
-                return call_api("EnableWindow", &[root, TRUE], 401);
+            let owner = t.var(3);
+            if owner != 0 && owner != DESKTOP && user(cpu).is_window(owner) {
+                return call_api("EnableWindow", &[owner, TRUE], 401);
             }
             goto(401)
         }
@@ -2451,9 +2495,10 @@ pub fn end_dialog(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     i.result = result;
     i.flags |= DF_END;
     set_info(state, hwnd, &i);
-    let was_enabled = (i.flags & DF_OWNERENABLED != 0) as u32;
-    let owner = state.window(hwnd).map_or(0, |w| w.owner);
-    task::start(cpu, TASK_DIALOG, vec![K_END, hwnd, was_enabled, owner], 0)
+    // The variable after the dialog is unused. The owner keeps its
+    // place, so a state saved during an EndDialog goes on after a load.
+    let owner = state.window(hwnd).map_or(0, super::window::hwnd_parent_of);
+    task::start(cpu, TASK_DIALOG, vec![K_END, hwnd, 0, owner], 0)
 }
 
 /// DefDlgProcA(hwnd, msg, wParam, lParam).

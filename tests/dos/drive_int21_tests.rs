@@ -159,9 +159,9 @@ fn free_space_allocation_info_and_dpb() {
     int21(&mut cpu, 0x36);
     assert_eq!((cpu.bx(), cpu.cx()), (0, 2048));
 
-    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 80 MB
+    cpu.set_reg8(Register::DL, 3); // C: empty, the fake 320 MB
     int21(&mut cpu, 0x36);
-    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (8, 20000, 512, 20000));
+    assert_eq!((cpu.ax(), cpu.bx(), cpu.cx(), cpu.dx()), (32, 20000, 512, 20000));
 
     cpu.set_reg8(Register::DL, 7); // G: not mounted
     int21(&mut cpu, 0x36);
@@ -174,7 +174,7 @@ fn free_space_allocation_info_and_dpb() {
     assert_eq!((cpu.get_reg8(Register::AL), cpu.cx(), media), (1, 512, 0xF0));
     int21(&mut cpu, 0x1B); // default drive (C:)
     let media = cpu.bus.read_8(cpu.get_physical_addr(cpu.ds(), cpu.bx()));
-    assert_eq!((cpu.get_reg8(Register::AL), media), (8, 0xF8));
+    assert_eq!((cpu.get_reg8(Register::AL), media), (32, 0xF8));
     cpu.set_reg8(Register::DL, 7);
     int21(&mut cpu, 0x1C);
     assert_eq!(cpu.get_reg8(Register::AL), 0xFF);
@@ -209,7 +209,7 @@ fn disk_free(cpu: &mut Cpu, dl: u8) -> (u16, u16, u16, u16) {
 fn hard_disk_free_space_drops_as_files_are_written() {
     let base = scratch("hd_space", &["c"]);
     let mut cpu = Cpu::new(base.join("c"));
-    assert_eq!(disk_free(&mut cpu, 3), (8, 20000, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 20000, 512, 20000));
 
     set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
     cpu.set_cx(0);
@@ -225,25 +225,25 @@ fn hard_disk_free_space_drops_as_files_are_written() {
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
     assert!(!cf(&cpu));
-    assert_eq!(disk_free(&mut cpu, 3), (8, 19996, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 19999, 512, 20000));
 
     set_dsdx_string(&mut cpu, "C:\\ISCMPRSD.$$$");
     int21(&mut cpu, 0x41);
     assert!(!cf(&cpu));
-    assert_eq!(disk_free(&mut cpu, 3), (8, 20000, 512, 20000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 20000, 512, 20000));
 }
 
-/// A folder holding more than the fake 80 MB still has room: the disk
-/// grows in steps of 80 MB, and AX=7303h tells the same.
+/// A folder holding more than half the fake 320 MB still has room: the
+/// disk grows in steps of 320 MB, and AX=7303h tells the same.
 #[test]
 fn hard_disk_grows_past_what_its_folder_holds() {
     let base = scratch("hd_grow", &["c"]);
-    // 60 MB, 15,000 clusters of 4 KB; sparse where the host allows.
+    // 240 MB, 15,000 clusters of 16 KB; sparse where the host allows.
     let file = fs::File::create(base.join("c/BIG.DAT")).unwrap();
-    file.set_len(15_000 * 4096).unwrap();
+    file.set_len(15_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    assert_eq!(disk_free(&mut cpu, 3), (8, 25000, 512, 40000));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 25000, 512, 40000));
 
     rust_dos::dos_data::set_version(&mut cpu.bus, rust_dos::config::DosVersion::new(7, 10));
     set_dsdx_string(&mut cpu, "C:\\");
@@ -255,21 +255,21 @@ fn hard_disk_grows_past_what_its_folder_holds() {
     assert!(!cf(&cpu));
     let dword = |i: usize| cpu.bus.read_32(0x30000 + 4 + 4 * i);
     // Sectors per cluster, bytes per sector, free and total clusters.
-    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (8, 512, 25000, 40000));
+    assert_eq!((dword(0), dword(1), dword(2), dword(3)), (32, 512, 25000, 40000));
 }
 
-/// Past 65,535 clusters AH=36h would count 32 KB clusters, where a 16 KB
-/// write may not show: the total stops there instead.
+/// Past 65,535 clusters AH=36h would count clusters of 32 KB, where a
+/// 16 KB write may not show: the total stops there instead.
 #[test]
 fn a_full_folder_still_shows_each_cluster_written() {
     let base = scratch("hd_full", &["c/GAMES"]);
-    // 300 MB, 76,800 clusters, in a folder below the root.
+    // 960 MB, 60,000 clusters, in a folder below the root.
     let file = fs::File::create(base.join("c/GAMES/BIG.DAT")).unwrap();
-    file.set_len(76_800 * 4096).unwrap();
+    file.set_len(60_000 * 16384).unwrap();
     drop(file);
     let mut cpu = Cpu::new(base.join("c"));
-    // 100,000 clusters less 76,801 used (the file and its folder).
-    assert_eq!(disk_free(&mut cpu, 3), (8, 23199, 512, 0xFFFF));
+    // 80,000 clusters less 60,001 used (the file and its folder).
+    assert_eq!(disk_free(&mut cpu, 3), (32, 19999, 512, 0xFFFF));
 
     set_dsdx_string(&mut cpu, "C:\\GAMES\\SAVE.DAT");
     cpu.set_cx(0);
@@ -282,7 +282,7 @@ fn a_full_folder_still_shows_each_cluster_written() {
     assert_eq!((cf(&cpu), cpu.ax()), (false, 0x4000));
     cpu.set_bx(handle);
     int21(&mut cpu, 0x3E);
-    assert_eq!(disk_free(&mut cpu, 3), (8, 23195, 512, 0xFFFF));
+    assert_eq!(disk_free(&mut cpu, 3), (32, 19998, 512, 0xFFFF));
 }
 
 #[test]

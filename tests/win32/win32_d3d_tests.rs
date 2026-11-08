@@ -410,6 +410,8 @@ const D3DFVF_NORMAL: u32 = 0x10;
 const D3DFVF_DIFFUSE: u32 = 0x40;
 const D3DVOP_TRANSFORM: u32 = 0x1;
 const D3DVOP_LIGHT: u32 = 0x400;
+const D3DPT_POINTLIST: u32 = 1;
+const D3DPT_LINELIST: u32 = 2;
 const D3DPT_TRIANGLELIST: u32 = 4;
 const D3DVT_TLVERTEX: u32 = 3;
 
@@ -672,6 +674,7 @@ const D3DVOP_CLIP: u32 = 0x4;
 const D3DTRANSFORMSTATE_PROJECTION: u32 = 3;
 const D3DRENDERSTATE_CULLMODE: u32 = 22;
 const D3DCULL_NONE: u32 = 1;
+const D3DCULL_CW: u32 = 2;
 const DEV7_SET_TRANSFORM: u32 = 11;
 const PROJECTION: u32 = LIGHT;
 
@@ -865,14 +868,26 @@ fn a_corner_behind_the_eye_without_clip_data_is_still_clipped_by_the_others() {
 
 // D3DOP_ instructions and D3DPROCESSVERTICES_COPY.
 const D3DOP_TRIANGLE: u8 = 3;
+const D3DOP_STATERENDER: u8 = 8;
 const D3DOP_PROCESSVERTICES: u8 = 9;
 const D3DOP_EXIT: u8 = 11;
 const D3DPROCESSVERTICES_COPY: u32 = 2;
+
+// Execute's flags.
+const D3DEXECUTE_CLIPPED: u32 = 0x1;
+const D3DEXECUTE_UNCLIPPED: u32 = 0x2;
 
 /// Direct3D 5: a device on a 64x64 surface with a viewport, an execute
 /// buffer that copies three screen vertices and draws a triangle of
 /// them, and DrawPrimitive with the same vertices; then GetStats.
 fn execute_program() -> (Vec<u8>, u32) {
+    execute_program_with(0.5, 0, None)
+}
+
+/// `execute_program` with the vertices at depth `z`, `flags` for
+/// Execute, and a STATERENDER instruction setting the render state
+/// `state` between the buffer's PROCESSVERTICES and TRIANGLE.
+fn execute_program_with(z: f32, flags: u32, state: Option<(u32, u32)>) -> (Vec<u8>, u32) {
     let mut d = data();
     target_desc(&mut d, DESC, 108, 64, 64);
     // D3DVIEWPORT2: all of the surface.
@@ -884,16 +899,24 @@ fn execute_program() -> (Vec<u8>, u32) {
     let tl = [(8.0, 8.0), (56.0, 8.0), (32.0, 56.0)];
     for (i, (x, y)) in tl.iter().enumerate() {
         let v = VERTICES + 32 * i as u32;
-        put_f32s(&mut d, v, &[*x, *y, 0.5, 1.0]);
+        put_f32s(&mut d, v, &[*x, *y, z, 1.0]);
         put32(&mut d, v + 16, 0xFFFF_FFFF);
     }
     let code = VERTICES + 96;
     put(&mut d, code, &[D3DOP_PROCESSVERTICES, 16, 1, 0]);
     put32(&mut d, code + 4, D3DPROCESSVERTICES_COPY);
     put32(&mut d, code + 12, 3);
-    put(&mut d, code + 20, &[D3DOP_TRIANGLE, 8, 1, 0]);
-    put(&mut d, code + 24, &[0, 0, 1, 0, 2, 0, 0, 7]);
-    put(&mut d, code + 32, &[D3DOP_EXIT, 0, 0, 0]);
+    let mut at = code + 20;
+    if let Some((s, v)) = state {
+        put(&mut d, at, &[D3DOP_STATERENDER, 8, 1, 0]);
+        put32(&mut d, at + 4, s);
+        put32(&mut d, at + 8, v);
+        at += 12;
+    }
+    put(&mut d, at, &[D3DOP_TRIANGLE, 8, 1, 0]);
+    put(&mut d, at + 4, &[0, 0, 1, 0, 2, 0, 0, 7]);
+    put(&mut d, at + 12, &[D3DOP_EXIT, 0, 0, 0]);
+    let length = at + 16 - code;
     // D3DEXECUTEBUFFERDESC: 256 bytes; D3DEXECUTEDATA: the vertices and
     // the instructions.
     put32(&mut d, EB_DESC, 20);
@@ -902,7 +925,7 @@ fn execute_program() -> (Vec<u8>, u32) {
     put32(&mut d, EXECUTE_DATA, 48);
     put32(&mut d, EXECUTE_DATA + 8, 3);
     put32(&mut d, EXECUTE_DATA + 12, 96);
-    put32(&mut d, EXECUTE_DATA + 16, 36);
+    put32(&mut d, EXECUTE_DATA + 16, length);
     put32(&mut d, STATS, 24);
     put32(&mut d, LOCK_DESC, 108);
     program(&[USER32, DDRAW], &d, |a, l| {
@@ -960,7 +983,7 @@ fn execute_program() -> (Vec<u8>, u32) {
             &[Arg::At(EB_DESC), Arg::At(BUFFER), Arg::I(0)],
         )?;
         c.com(a, l, BUFFER, EB_LOCK, &[Arg::At(EB_DESC)])?;
-        copy(a, l, VERTICES, EB_DESC + 16, 132)?;
+        copy(a, l, VERTICES, EB_DESC + 16, 96 + length)?;
         c.com(a, l, BUFFER, EB_UNLOCK, &[])?;
         c.com(a, l, BUFFER, EB_SET_EXECUTE_DATA, &[Arg::At(EXECUTE_DATA)])?;
         c.com(a, l, DEVICE, DEV2_BEGIN_SCENE, &[])?;
@@ -969,7 +992,7 @@ fn execute_program() -> (Vec<u8>, u32) {
             l,
             DEVICE1,
             DEV1_EXECUTE,
-            &[Arg::Val(BUFFER), Arg::Val(VIEWPORT), Arg::I(0)],
+            &[Arg::Val(BUFFER), Arg::Val(VIEWPORT), Arg::I(flags)],
         )?;
         c.com(
             a,
@@ -1009,18 +1032,73 @@ fn an_execute_buffer_and_draw_primitive_draw_and_count_in_get_stats() {
     run_until_done(&mut cpu, data);
     let r = results(&cpu, data, 22);
     assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
-    // D3DSTATS: triangles, lines, points, spans and vertices processed.
-    let stats = [4, 8, 12, 20].map(|o| peek(&cpu, data + STATS + o));
-    assert_eq!(stats, [2, 0, 0, 6]);
+    assert_eq!(execute_stats(&cpu, data), [2, 0, 0, 6]);
     // The white triangle, on the target's black.
-    let bits = peek(&cpu, data + LOCK_DESC + 0x24);
-    let pitch = peek(&cpu, data + LOCK_DESC + 0x10);
-    let pixel = |x: u32, y: u32| {
-        let at = bits + y * pitch + 2 * x;
-        (peek(&cpu, at & !3) >> (8 * (at & 2))) as u16
-    };
-    assert_eq!(pixel(32, 20), 0xFFFF);
-    assert_eq!(pixel(32, 60), 0);
+    assert_eq!(locked_pixel(&cpu, data, 32, 20), 0xFFFF);
+    assert_eq!(locked_pixel(&cpu, data, 32, 60), 0);
+}
+
+/// The pixel at (`x`, `y`) of the 16-bit target the program locked.
+fn locked_pixel(cpu: &Cpu, data: u32, x: u32, y: u32) -> u16 {
+    let bits = peek(cpu, data + LOCK_DESC + 0x24);
+    let pitch = peek(cpu, data + LOCK_DESC + 0x10);
+    let at = bits + y * pitch + 2 * x;
+    (peek(cpu, at & !3) >> (8 * (at & 2))) as u16
+}
+
+/// D3DSTATS of the execute program: triangles, lines, points and
+/// vertices processed.
+fn execute_stats(cpu: &Cpu, data: u32) -> [u32; 4] {
+    [4, 8, 12, 20].map(|o| peek(cpu, data + STATS + o))
+}
+
+#[test]
+fn an_unclipped_execute_draws_screen_vertices_past_z_1() {
+    // WarGames draws its screen vertices at depths of 4 to 33 with depth
+    // testing off, through Execute with D3DEXECUTE_UNCLIPPED: Direct3D
+    // doesn't clip them, and the triangle shows. DrawPrimitive's copy of
+    // it is clipped at z 1 and draws nothing: one triangle in the stats.
+    let (exe, data) = execute_program_with(4.0, D3DEXECUTE_UNCLIPPED, None);
+    let mut cpu = machine("execute_unclipped", exe);
+    run_until_done(&mut cpu, data);
+    let r = results(&cpu, data, 22);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(execute_stats(&cpu, data), [1, 0, 0, 6]);
+    assert_eq!(locked_pixel(&cpu, data, 32, 20), 0xFFFF);
+    assert_eq!(locked_pixel(&cpu, data, 32, 60), 0);
+}
+
+#[test]
+fn a_clipped_execute_clips_screen_vertices_past_z_1() {
+    // D3DEXECUTE_CLIPPED, alone or with D3DEXECUTE_UNCLIPPED, keeps the
+    // clipping at z 0 and 1: neither the buffer's triangle nor
+    // DrawPrimitive's draws.
+    let both = D3DEXECUTE_CLIPPED | D3DEXECUTE_UNCLIPPED;
+    for flags in [D3DEXECUTE_CLIPPED, both] {
+        let (exe, data) = execute_program_with(4.0, flags, None);
+        let mut cpu = machine("execute_clipped", exe);
+        run_until_done(&mut cpu, data);
+        let r = results(&cpu, data, 22);
+        assert!(r[1..].iter().all(|&hr| hr == 0), "flags {flags}: {r:X?}");
+        assert_eq!(execute_stats(&cpu, data), [0, 0, 0, 6], "flags {flags}");
+        assert_eq!(locked_pixel(&cpu, data, 32, 20), 0, "flags {flags}");
+    }
+}
+
+#[test]
+fn an_execute_draws_with_the_render_states_set_after_processvertices() {
+    // A STATERENDER between PROCESSVERTICES and TRIANGLE sets the cull
+    // mode the triangle is drawn with, as Wine's execute buffer draws
+    // with the device's states at the TRIANGLE. Clockwise culling takes
+    // the triangle out, and DrawPrimitive's after it too.
+    let state = Some((D3DRENDERSTATE_CULLMODE, D3DCULL_CW));
+    let (exe, data) = execute_program_with(0.5, 0, state);
+    let mut cpu = machine("execute_state", exe);
+    run_until_done(&mut cpu, data);
+    let r = results(&cpu, data, 22);
+    assert!(r[1..].iter().all(|&hr| hr == 0), "results: {r:X?}");
+    assert_eq!(execute_stats(&cpu, data), [0, 0, 0, 6]);
+    assert_eq!(locked_pixel(&cpu, data, 32, 20), 0);
 }
 
 // Drawing: scenes of screen vertices drawn on a 64x64 target, which the
@@ -1179,6 +1257,8 @@ enum Step {
     State(u32, u32),
     /// DrawPrimitive of a triangle list.
     Draw(Vec<Tl>),
+    /// DrawPrimitive of another D3DPT_ type, such as a point or line list.
+    Prims(u32, Vec<Tl>),
     /// 256x256 textures made in video memory until there is no more
     /// room (Direct3D 7), as Unreal does.
     Fill,
@@ -1340,7 +1420,7 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
             put32(&mut d, KEY, *key);
             put32(&mut d, KEY + 4, *key);
         }
-        if let Step::Draw(verts) = step {
+        if let Step::Draw(verts) | Step::Prims(_, verts) = step {
             draws.push(at);
             for v in verts {
                 put_f32s(&mut d, at, &[v.x, v.y, v.z, v.rhw]);
@@ -1548,15 +1628,19 @@ fn scene_program_with(scene: &Scene, bpp: u32, checked: &mut Vec<u32>) -> (Vec<u
                     a.test(eax, eax)?;
                     a.jz(again)?;
                 }
-                Step::Draw(verts) => {
+                Step::Draw(verts) | Step::Prims(_, verts) => {
                     let at = *draws.next().unwrap();
+                    let kind = match step {
+                        Step::Prims(kind, _) => *kind,
+                        _ => D3DPT_TRIANGLELIST,
+                    };
                     c.com(
                         a,
                         l,
                         DEVICE,
                         draw,
                         &[
-                            Arg::I(D3DPT_TRIANGLELIST),
+                            Arg::I(kind),
                             Arg::I(TL_FVF),
                             Arg::At(at),
                             Arg::I(verts.len() as u32),
@@ -1872,6 +1956,86 @@ fn a_textured_quad_shows_its_texels() {
     // The last column and row are the quad's too.
     assert_rgb(&p, 63, 0, [0, 255, 0], 8);
     assert_rgb(&p, 63, 63, [255, 255, 255], 8);
+}
+
+#[test]
+fn a_texel_centred_on_each_pixel_is_the_one_the_pixel_samples() {
+    // Direct3D puts a pixel's centre on its integer coordinates. The 8x8
+    // texture over 8x8 pixels, u and v from 0.5/8 to 8.5/8, puts each
+    // texel's centre on a pixel's, as Drakan's menu sky does: the last
+    // column and row sample the last texels. Sampled half a pixel
+    // further on, where the card has a pixel's centre, they would sample
+    // 1, which wraps to the first texels.
+    let texels = std::array::from_fn(|i| match (i % 8, i / 8) {
+        (0, _) | (_, 0) => 0xF800,
+        _ => 0x07E0,
+    });
+    let at = |x: f32, y: f32| Tl {
+        u: (x + 0.5) / 8.0,
+        v: (y + 0.5) / 8.0,
+        ..tl(x, y, 0.5, WHITE)
+    };
+    let (a, b) = (at(0.0, 0.0), at(8.0, 0.0));
+    let (c, d) = (at(0.0, 8.0), at(8.0, 8.0));
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: Some(texels),
+        texture_alpha: false,
+        steps: vec![Step::Draw(vec![a, b, c, b, d, c])],
+    };
+    let p = draw_scene("texel_centres", &scene);
+    assert_rgb(&p, 0, 4, [255, 0, 0], 8);
+    assert_rgb(&p, 4, 0, [255, 0, 0], 8);
+    for (x, y) in [(1, 1), (7, 4), (4, 7), (7, 7)] {
+        assert_rgb(&p, x, y, [0, 255, 0], 8);
+    }
+    // Nothing past the quad.
+    assert_rgb(&p, 8, 4, [0, 0, 0], 8);
+    assert_rgb(&p, 4, 8, [0, 0, 0], 8);
+}
+
+#[test]
+fn points_and_lines_light_the_pixels_3dfxs_driver_lights() {
+    // What 3dfx's own Direct3D driver (4.12.01.0666, Voodoo 3, in 86Box)
+    // draws for these, read back pixel by pixel: a point lights the
+    // pixel whose centre is nearest, the left or upper one when it is
+    // half way between two (10.5 lights 10, 10.6 lights 11), and a line
+    // along a whole coordinate lights that row or column.
+    let point = |x: f32, y: f32| tl(x, y, 0.5, WHITE);
+    let scene = Scene {
+        api: Api::D3D7,
+        card: None,
+        clear: 0,
+        zbuffer: None,
+        texture: None,
+        texture_alpha: false,
+        steps: vec![
+            Step::Prims(
+                D3DPT_POINTLIST,
+                vec![
+                    point(2.0, 2.0),
+                    point(6.4, 6.4),
+                    point(10.5, 10.5),
+                    point(14.6, 14.6),
+                ],
+            ),
+            Step::Prims(D3DPT_LINELIST, vec![point(20.0, 30.0), point(40.0, 30.0)]),
+            Step::Prims(D3DPT_LINELIST, vec![point(50.0, 20.0), point(50.0, 40.0)]),
+        ],
+    };
+    let p = draw_scene("points_and_lines", &scene);
+    let lit = |x: usize, y: usize| p[y * 64 + x] != 0;
+    for (x, y) in [(2, 2), (6, 6), (10, 10), (15, 15)] {
+        assert!(lit(x, y), "pixel ({x}, {y})");
+    }
+    for (x, y) in [(3, 3), (7, 7), (11, 11), (14, 14)] {
+        assert!(!lit(x, y), "pixel ({x}, {y}) lit");
+    }
+    assert!(lit(25, 30) && !lit(25, 29) && !lit(25, 31));
+    assert!(lit(50, 25) && !lit(49, 25) && !lit(51, 25));
 }
 
 #[test]

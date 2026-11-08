@@ -221,6 +221,7 @@ impl Page {
                 Volume(Channel::Windows),
                 SpeakerFilter,
                 SbFilter,
+                SbCoupling,
                 Reverb,
                 ReverbMix,
                 Chorus,

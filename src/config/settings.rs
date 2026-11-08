@@ -534,6 +534,7 @@ pub(super) fn entries(settings: &Settings, home: Option<&Path>) -> Vec<(Section,
     entries.extend([
         (Section::Mixer, "speaker_filter", on_off(settings.mixer.speaker_filter)),
         (Section::Mixer, "sb_filter", Some(settings.mixer.sb_filter.name().to_string())),
+        (Section::Mixer, "sb_coupling", on_off(settings.mixer.sb_coupling)),
         (Section::Mixer, "reverb", Some(settings.mixer.reverb.name().to_string())),
         (Section::Mixer, "reverb_mix", Some(settings.mixer.reverb_mix.to_string())),
         (Section::Mixer, "chorus", Some(settings.mixer.chorus.name().to_string())),

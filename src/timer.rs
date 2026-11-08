@@ -650,10 +650,12 @@ impl Pacer {
     /// Go on from the clock's time as it is now, after it jumped (a save
     /// state loaded): without this, emulated time ahead of the wall clock
     /// would stand still until the wall clock caught up, and time behind it
-    /// would race to catch up.
-    pub fn rebase(&mut self, clock: &Clock, now: Instant) {
+    /// would race to catch up. `Auto` starts over, and the bus forgets the
+    /// speed it had to go back to (`Bus::end_work_boost`).
+    pub fn rebase(&mut self, bus: &mut Bus, now: Instant) {
         self.auto.reset();
-        self.anchor_to(clock, now);
+        bus.activity.work_return = None;
+        self.anchor_to(&bus.clock, now);
     }
 
     /// Make `now` the wall-clock time of the clock's emulated time.
@@ -727,6 +729,12 @@ impl Pacer {
             (executed.saturating_sub(run), exec - watched, overhead + watched);
         let next = self.end_frame(&cpu.bus, cpu.pm_latched, executed, exec, overhead);
         cpu.os_idles = self.auto.idles();
+        // What a device may go back to in the middle of the next frame
+        // (`Bus::end_work_boost`): only a speed `Auto` set.
+        cpu.bus.activity.work_return = match self.speed {
+            CpuSpeed::Auto(_) => self.auto.work_return(),
+            _ => None,
+        };
         next
     }
 

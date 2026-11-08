@@ -1004,6 +1004,12 @@ fn client_of(cpu: &Cpu, tid: u32) -> Option<usize> {
         .position(|c| c.tid == tid)
 }
 
+/// Whether the thread `tid` is a client's task. Between calls it waits in
+/// Win16Serve, which takes no message sent to it.
+pub fn is_client(win32: &crate::win32::Win32, tid: u32) -> bool {
+    win32.win16.clients.iter().any(|c| c.tid == tid)
+}
+
 /// KERNEL32's `Win16Serve`, where a client task's thread waits: it runs
 /// the next request, or waits for one.
 pub fn serve(cpu: &mut Cpu, _: &[u32]) -> Option<u32> {

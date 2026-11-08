@@ -193,17 +193,20 @@ pub fn has_thick_frame(style: u32, _ex: u32) -> bool {
     style & WS_THICKFRAME != 0 && style & (WS_DLGFRAME | WS_BORDER) != WS_DLGFRAME
 }
 
+/// The thin frame is WS_BORDER's, which WS_CAPTION includes. A top-level
+/// window whose caption and frame were taken away with SetWindowLong has
+/// none, as on Windows 95 and later: its client area is the whole window,
+/// which full-screen games such as Railroad Tycoon II draw to. Only
+/// Windows 3.x gave every overlapped window a thin frame.
 pub fn has_thin_frame(style: u32) -> bool {
-    style & WS_BORDER != 0 || style & (WS_CHILD | WS_POPUP) == 0
+    style & WS_BORDER != 0
 }
 
-/// The window rectangle around the client rectangle `r` for the style,
-/// as AdjustWindowRectEx makes it.
-pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+/// The outer frame's width and height for the style, as
+/// AdjustWindowRectEx counts them: thick, dialog, thin or none.
+pub fn frame_size(style: u32, ex: u32) -> (i32, i32) {
     let m = super::sysparams::metric;
-    let mut r = r;
-    // The outer frame and caption.
-    let (dx, dy) = if has_thick_frame(style, ex) {
+    if has_thick_frame(style, ex) {
         (m(32), m(33))
     } else if has_dlg_frame(style, ex) {
         (m(7), m(8))
@@ -211,8 +214,16 @@ pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
         (m(5), m(6))
     } else {
         (0, 0)
-    };
-    r = r.inflate(dx, dy);
+    }
+}
+
+/// The window rectangle around the client rectangle `r` for the style,
+/// as AdjustWindowRectEx makes it.
+pub fn adjust(r: Rect, style: u32, ex: u32, menu: bool) -> Rect {
+    let m = super::sysparams::metric;
+    // The outer frame and caption.
+    let (dx, dy) = frame_size(style, ex);
+    let mut r = r.inflate(dx, dy);
     if style & WS_CAPTION == WS_CAPTION {
         r.top -= if ex & WS_EX_TOOLWINDOW != 0 {
             m(51)
@@ -334,41 +345,211 @@ fn fix_ex_style(style: u32, ex: u32) -> u32 {
     ex
 }
 
-/// Bring the top-level windows `hwnd` owns, and those they own, to just
-/// above it, in the order they had. Topmost ones stay where they are
-/// when `hwnd` isn't topmost.
-fn raise_owned(state: &mut State, hwnd: u32) {
-    let Some(w) = state.window(hwnd) else {
-        return;
+fn is_topmost(state: &State, hwnd: u32) -> bool {
+    state
+        .window(hwnd)
+        .is_some_and(|w| w.ex_style & WS_EX_TOPMOST != 0)
+}
+
+/// The owners of `hwnd`, its own owner first.
+fn owners(state: &State, hwnd: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut o = state.window(hwnd).map_or(0, |w| w.owner);
+    // An owner chain that loops is cut short.
+    while o != 0 && o != hwnd && out.len() < 64 && !out.contains(&o) {
+        out.push(o);
+        o = state.window(o).map_or(0, |w| w.owner);
+    }
+    out
+}
+
+/// `hwnd` and the top-level windows it owns, directly or through other
+/// owned windows, hidden ones too, top of the z-order first.
+fn owned_tree(state: &State, hwnd: u32) -> Vec<u32> {
+    state
+        .top_levels()
+        .into_iter()
+        .filter(|&h| h == hwnd || owners(state, h).contains(&hwnd))
+        .collect()
+}
+
+/// The top-level windows that can move with `hwnd` in the z-order: the
+/// owner at the top of its chain, or itself, and the windows that one
+/// owns.
+fn owner_group(state: &State, hwnd: u32) -> Vec<u32> {
+    let root = owners(state, hwnd).last().copied().unwrap_or(hwnd);
+    owned_tree(state, root)
+}
+
+/// Change WS_EX_TOPMOST as SetWindowPos's `after` asks, on `hwnd` and the
+/// windows that go with it, as Windows 98 SE does. HWND_TOPMOST, or a
+/// place after a topmost window, makes the windows `hwnd` owns topmost
+/// too, and leaves its owners as they are. HWND_NOTOPMOST, and for a
+/// topmost window HWND_BOTTOM or a place after a window that isn't
+/// topmost, take the flag from the windows `hwnd` owns as well, and,
+/// when the owner at the top of its chain is topmost, from that owner
+/// and every window it owns. Returns whether the owners of `hwnd` lost
+/// it.
+fn set_topmost(state: &mut State, hwnd: u32, after: u32) -> bool {
+    if state.parent(hwnd) != DESKTOP {
+        // A child window's flag changes alone.
+        if let Some(w) = state.window_mut(hwnd) {
+            match after {
+                HWND_TOPMOST => w.ex_style |= WS_EX_TOPMOST,
+                HWND_NOTOPMOST => w.ex_style &= !WS_EX_TOPMOST,
+                _ => {}
+            }
+        }
+        return false;
+    }
+    let topmost = is_topmost(state, hwnd);
+    let make = match after {
+        HWND_TOPMOST => Some(true),
+        HWND_NOTOPMOST => Some(false),
+        HWND_TOP => None,
+        HWND_BOTTOM => topmost.then_some(false),
+        h => Some(is_topmost(state, h)).filter(|&t| t != topmost),
     };
-    if w.parent != DESKTOP {
+    match make {
+        None => return false,
+        Some(true) => {
+            for h in owned_tree(state, hwnd) {
+                if let Some(w) = state.window_mut(h) {
+                    w.ex_style |= WS_EX_TOPMOST;
+                }
+            }
+            return false;
+        }
+        Some(false) => {}
+    }
+    let root = owners(state, hwnd).last().copied().unwrap_or(hwnd);
+    let with_owners = root != hwnd && is_topmost(state, root);
+    let windows = owned_tree(state, if with_owners { root } else { hwnd });
+    for h in windows {
+        if let Some(w) = state.window_mut(h) {
+            w.ex_style &= !WS_EX_TOPMOST;
+        }
+    }
+    with_owners
+}
+
+/// The top-level windows `hwnd` owns that are in `moving`, those they
+/// own above each, in the order they have in `list`. `root` is where
+/// the walk started: SetWindowLong(GWL_HWNDPARENT) lets a program make
+/// owners that loop, and a loop leads back to it.
+fn stack_owned(
+    list: &[u32],
+    state: &State,
+    root: u32,
+    hwnd: u32,
+    moving: &[u32],
+    out: &mut Vec<u32>,
+) {
+    for &h in list {
+        if h != hwnd && h != root && state.window(h).is_some_and(|w| w.owner == hwnd) {
+            stack_owned(list, state, root, h, moving, out);
+            if moving.contains(&h) {
+                out.push(h);
+            }
+        }
+    }
+}
+
+/// Bring the top-level windows `hwnd` owns, and those they own, to just
+/// above it: the windows of each owner in the order they had, with the
+/// windows each owns above it. Topmost ones stay where they are when
+/// `hwnd` isn't topmost.
+fn raise_owned(state: &mut State, hwnd: u32) {
+    if state.parent(hwnd) != DESKTOP {
         return;
     }
-    let topmost = w.ex_style & WS_EX_TOPMOST != 0;
-    let list = state
-        .window(DESKTOP)
-        .map(|d| d.children.clone())
-        .unwrap_or_default();
-    let owned_by = |h: u32| {
-        let mut o = state.window(h).map_or(0, |w| w.owner);
-        for _ in 0..64 {
-            if o == 0 || o == hwnd {
-                break;
-            }
-            o = state.window(o).map_or(0, |w| w.owner);
-        }
-        o == hwnd
-            && (topmost
-                || state
-                    .window(h)
-                    .is_some_and(|w| w.ex_style & WS_EX_TOPMOST == 0))
-    };
-    let (moving, mut rest): (Vec<u32>, Vec<u32>) = list.iter().partition(|&&h| owned_by(h));
+    let topmost = is_topmost(state, hwnd);
+    let list = state.top_levels();
+    let moving: Vec<u32> = owned_tree(state, hwnd)
+        .into_iter()
+        .filter(|&h| h != hwnd && (topmost || !is_topmost(state, h)))
+        .collect();
     if moving.is_empty() {
         return;
     }
+    let mut stacked = Vec::new();
+    stack_owned(&list, state, hwnd, hwnd, &moving, &mut stacked);
+    let mut rest: Vec<u32> = list.into_iter().filter(|h| !moving.contains(h)).collect();
     let at = rest.iter().position(|&h| h == hwnd).unwrap_or(0);
-    rest.splice(at..at, moving);
+    rest.splice(at..at, stacked);
+    if let Some(d) = state.window_mut(DESKTOP) {
+        d.children = rest;
+    }
+}
+
+/// The owners of `hwnd` that are topmost if it is, or not if it isn't,
+/// up to the first that is in the other band, its own owner first.
+fn owners_in_band(state: &State, hwnd: u32) -> Vec<u32> {
+    let topmost = is_topmost(state, hwnd);
+    owners(state, hwnd)
+        .into_iter()
+        .take_while(|&o| is_topmost(state, o) == topmost)
+        .collect()
+}
+
+/// Bring the owners of `hwnd` to the top of their band, the one at the
+/// top of the chain first, each with the windows it owns above it, as
+/// Windows 98 SE does before it brings an owned window to the top: the
+/// window then lands above its owners, and each owner's branch that
+/// leads to it above that owner's other windows.
+fn raise_owners(state: &mut State, hwnd: u32) {
+    if state.parent(hwnd) != DESKTOP {
+        return;
+    }
+    for o in owners_in_band(state, hwnd).into_iter().rev() {
+        link(state, o, HWND_TOP);
+        raise_owned(state, o);
+    }
+}
+
+/// Keep `hwnd` above its owners once it has moved below one of them, or
+/// once it and its owners have left the topmost windows together
+/// (`left_topmost`), as Windows 98 SE does: the owner at the top of the
+/// chain and the windows it owns move to where `hwnd` is, with `hwnd`
+/// and the windows it owns just above its owners and the others it owns
+/// above those. Owners in the other band, topmost or not, stay.
+fn keep_above_owners(state: &mut State, hwnd: u32, left_topmost: bool) {
+    if state.parent(hwnd) != DESKTOP {
+        return;
+    }
+    let topmost = is_topmost(state, hwnd);
+    let chain = owners_in_band(state, hwnd);
+    let Some(&root) = chain.last() else {
+        return;
+    };
+    let list = state.top_levels();
+    let Some(at) = list.iter().position(|&h| h == hwnd) else {
+        return;
+    };
+    if !left_topmost && !chain.iter().any(|o| list[..at].contains(o)) {
+        return;
+    }
+    let group: Vec<u32> = owned_tree(state, root)
+        .into_iter()
+        .filter(|&h| is_topmost(state, h) == topmost)
+        .collect();
+    let own = owned_tree(state, hwnd);
+    let mut block: Vec<u32> = group
+        .iter()
+        .copied()
+        .filter(|h| !own.contains(h) && !chain.contains(h))
+        .collect();
+    // An owner of `hwnd` is among the windows it owns only when the
+    // owners loop; it goes with the owners then, once.
+    block.extend(
+        own.iter()
+            .copied()
+            .filter(|h| group.contains(h) && !chain.contains(h)),
+    );
+    block.extend(&chain);
+    let at = list[..at].iter().filter(|h| !block.contains(h)).count();
+    let mut rest: Vec<u32> = list.into_iter().filter(|h| !block.contains(h)).collect();
+    rest.splice(at..at, block);
     if let Some(d) = state.window_mut(DESKTOP) {
         d.children = rest;
     }
@@ -1179,6 +1360,20 @@ pub fn destroy_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                         None => {}
                     }
                 }
+                // Still the active window, as SWP_HIDEWINDOW leaves it, or
+                // one hidden before: another is activated before
+                // WM_DESTROY, as Wine's WIN_SendDestroyMsg does (its
+                // WmDestroyOverlappedSeq). In Wine's test_SetActiveWindow
+                // the owner of a popup hidden so and destroyed is active.
+                t.step = 9;
+                if user(cpu).is_active(hwnd) {
+                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 9);
+                }
+            }
+            9 => {
+                if !user(cpu).is_window(hwnd) {
+                    return Next::Done(TRUE);
+                }
                 // WM_DESTROY to the window, then to its children, each
                 // before its own children.
                 let list = pre_order(user(cpu), hwnd);
@@ -1459,6 +1654,15 @@ pub fn show_step(cpu: &mut Cpu, t: &mut Task, value: u32) -> Next {
                 return Next::call(address_of("SetWindowPos"), &args, 2);
             }
             2 => {
+                // The active window hidden: another is activated, after
+                // WM_WINDOWPOSCHANGED, as in Wine's WmHideOverlappedSeq.
+                if cmd == SW_HIDE && user(cpu).is_active(hwnd) {
+                    t.step = 6;
+                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 6);
+                }
+                t.step = 6;
+            }
+            6 => {
                 if cmd == SW_HIDE {
                     let focus = super::input::focus(cpu);
                     let state = user(cpu);
@@ -1615,8 +1819,10 @@ pub fn set_window_pos(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     // The active window of a queue in the background is: the activation
     // brings it to the foreground if SetForegroundWindow may, as when a
     // program's message box made active behind the foreground (its
-    // SetFocus came first) is then shown.
-    if child || state.foreground_window() == hwnd {
+    // SetFocus came first) is then shown. Hiding it adds nothing: Windows
+    // passes the flags as they were (WM_WINDOWPOSCHANGING of Wine's
+    // WmHideOverlappedSeq and WmSWP_HideOverlappedSeq).
+    if child || (state.foreground_window() == hwnd && flags & SWP_HIDEWINDOW == 0) {
         flags |= SWP_NOACTIVATE;
     }
     let mut after = after;
@@ -1731,10 +1937,24 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                 let state = user(cpu);
                 let under = super::input::under_cursor(state);
                 // What siblings above it cover, which a raise shows.
-                let was_covered = if was_visible && flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0 {
+                let restacked = flags & (SWP_NOZORDER | SWP_NOREDRAW) == 0;
+                let was_covered = if was_visible && restacked {
                     super::paint::covered(state, hwnd)
                 } else {
                     Region::new()
+                };
+                // The same for its owners and the windows they own, which
+                // may move with it, leaving out what it covers: its own
+                // move paints that.
+                let group_covered: Vec<(u32, Region)> = if restacked {
+                    owner_group(state, hwnd)
+                        .into_iter()
+                        .filter(|&h| h != hwnd && state.is_visible(h))
+                        .map(|h| (h, super::paint::covered_but(state, h, hwnd)))
+                        .filter(|(_, r)| !r.is_empty())
+                        .collect()
+                } else {
+                    Vec::new()
                 };
                 let Some(w) = state.window_mut(hwnd) else {
                     return Next::Done(FALSE);
@@ -1751,13 +1971,22 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     w.style &= !WS_VISIBLE;
                 }
                 if flags & SWP_NOZORDER == 0 {
-                    if after == HWND_TOPMOST {
-                        w.ex_style |= WS_EX_TOPMOST;
-                    } else if after == HWND_NOTOPMOST {
-                        w.ex_style &= !WS_EX_TOPMOST;
+                    let left_topmost = set_topmost(state, hwnd, after);
+                    // SWP_NOOWNERZORDER leaves the owners where they are,
+                    // unless they left the topmost windows with it and
+                    // have to leave their band.
+                    let owners_move = flags & SWP_NOOWNERZORDER == 0;
+                    if owners_move
+                        && matches!(after, HWND_TOP | HWND_TOPMOST | HWND_NOTOPMOST)
+                        && !left_topmost
+                    {
+                        raise_owners(state, hwnd);
                     }
                     link(state, hwnd, after);
                     raise_owned(state, hwnd);
+                    if owners_move || left_topmost {
+                        keep_above_owners(state, hwnd, left_topmost);
+                    }
                 }
                 if client.width() == old_client.width() && client.height() == old_client.height() {
                     flags |= SWP_NOCLIENTSIZE;
@@ -1780,6 +2009,11 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     && user(cpu).screen_rect(hwnd) == old_screen
                 {
                     super::paint::raised(cpu, hwnd, &was_covered);
+                }
+                for (h, before) in group_covered {
+                    if user(cpu).is_visible(h) {
+                        super::paint::raised_but(cpu, h, &before, hwnd);
+                    }
                 }
                 if flags & SWP_HIDEWINDOW != 0 {
                     let state = user(cpu);
@@ -1807,14 +2041,13 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     || was_visible != now_visible;
                 super::input::window_moved(cpu, hwnd, under, changed);
                 cpu.bus.guest_write_32(winpos + 24, flags);
-                // Activate it.
+                // Activate it. A window hidden here stays active: Windows
+                // activates another in ShowWindow(SW_HIDE), EndDialog and
+                // DestroyWindow, not here (Wine's test_SetActiveWindow and
+                // msg.c's test_messages check it, on Windows 9x too).
                 let child = user(cpu)
                     .window(hwnd)
                     .is_some_and(|w| w.style & WS_CHILD != 0);
-                if flags & SWP_HIDEWINDOW != 0 && user(cpu).is_active(hwnd) {
-                    t.step = 4;
-                    return Next::call(address_of("ActivateOtherWindow"), &[hwnd], 4);
-                }
                 if flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0 && !child {
                     return Next::call(address_of("SetForegroundWindow"), &[hwnd], 4);
                 }
@@ -1892,7 +2125,22 @@ pub fn set_pos_step(cpu: &mut Cpu, t: &mut Task, _value: u32) -> Next {
                     | SWP_NOCLIENTMOVE;
                 let nothing =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE;
-                if flags & AGG != nothing && flags & SWP_NOSENDCHANGING == 0 {
+                // SWP_NOSENDCHANGING leaves out WM_WINDOWPOSCHANGING
+                // only: WM_WINDOWPOSCHANGED still comes. Its WINDOWPOS
+                // holds the place and size this call gave the window,
+                // relative to its parent, whatever the flags kept from
+                // changing (Wine's win.c checks the place on Windows).
+                // That is the call's own rectangle, as in Wine's
+                // set_window_pos and ReactOS's co_WinPosSetWindowPos, so
+                // a SetWindowPos that the window's WM_ACTIVATE made on
+                // the way doesn't change what this message says. Myth
+                // II's window thread learns that its window is active
+                // only from this message, after its main thread resizes
+                // the window with that flag.
+                if flags & AGG != nothing {
+                    let r = rect_var(t, P_WAS_VISIBLE + 1);
+                    let place = [r.left, r.top, r.width(), r.height()];
+                    write_words(cpu, winpos + 8, &place.map(|v| v as u32));
                     return send(hwnd, WM_WINDOWPOSCHANGED, 0, winpos, 6);
                 }
                 return Next::Done(TRUE);
@@ -2095,7 +2343,7 @@ fn parent_of(state: &State, hwnd: u32) -> u32 {
 
 /// GWL_HWNDPARENT: a window's parent, or the owner of one whose parent
 /// is the desktop, whatever its style says.
-fn hwnd_parent_of(w: &Window) -> u32 {
+pub fn hwnd_parent_of(w: &Window) -> u32 {
     if w.parent == DESKTOP || w.parent == 0 {
         w.owner
     } else {
@@ -3251,6 +3499,33 @@ mod tests {
         assert_eq!((c.left, c.top, c.width(), c.height()), (0, 38, 640, 442));
     }
 
+    /// A top-level window whose style SetWindowLong set to WS_VISIBLE |
+    /// WS_CLIPSIBLINGS, as Railroad Tycoon II's full-screen window, has
+    /// no frame: its client area is the whole window, and the screen's
+    /// corner is in it. Windows 11 gives a 640x480 client area and
+    /// HTCLIENT at (0, 0) for such a window, and AdjustWindowRectEx adds
+    /// nothing for style 0 and one pixel for WS_BORDER. The client area
+    /// the hit test sees is WM_NCCALCSIZE's, as SWP_FRAMECHANGED sets it.
+    #[test]
+    fn a_frameless_top_level_window_is_all_client_area() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let style = WS_VISIBLE | WS_CLIPSIBLINGS;
+        let r = Rect::new(0, 0, 640, 480);
+        assert_eq!(adjust(r, style, 0, false), r);
+        assert_eq!(adjust(r, WS_BORDER, 0, false), Rect::new(-1, -1, 641, 481));
+        let w = Window {
+            style,
+            rect: r,
+            ..Window::default()
+        };
+        let hwnd = user(&mut cpu).new_window(w).expect("a window");
+        let client = client_for(user(&mut cpu), hwnd, r);
+        assert_eq!(client, r);
+        user(&mut cpu).window_mut(hwnd).expect("the window").client = client;
+        let hit = super::super::input::hit_test(user(&mut cpu), hwnd, 0, 0);
+        assert_eq!(hit, super::super::input::HTCLIENT);
+    }
+
     /// A caption without a thick frame keeps its 3-pixel dialog frame
     /// off the screen.
     #[test]
@@ -3294,5 +3569,37 @@ mod tests {
             (mm[2], mm[3], mm[4] as i32, mm[5] as i32),
             (374, 235, 0, 0)
         );
+    }
+
+    /// SetWindowLong(GWL_HWNDPARENT) can make two top-level windows own
+    /// each other. Restacking them ends, and leaves each in the list
+    /// once.
+    #[test]
+    fn owners_that_loop_restack_once() {
+        let mut cpu = Cpu::new(std::path::PathBuf::from("."));
+        let state = user(&mut cpu);
+        let desktop = state.new_window(Window::default()).expect("a desktop");
+        assert_eq!(desktop, DESKTOP);
+        let top_level = || Window {
+            parent: DESKTOP,
+            ..Window::default()
+        };
+        let a = state.new_window(top_level()).expect("a window");
+        let b = state.new_window(top_level()).expect("a window");
+        let d = state.new_window(top_level()).expect("a window");
+        for h in [a, b, d] {
+            link(state, h, HWND_TOP);
+        }
+        state.window_mut(a).expect("a").owner = b;
+        state.window_mut(b).expect("b").owner = a;
+        raise_owned(state, a);
+        raise_owners(state, a);
+        link(state, a, d);
+        keep_above_owners(state, a, false);
+        let mut list = state.top_levels();
+        assert_eq!(list.len(), 3, "{list:X?}");
+        list.sort_unstable();
+        list.dedup();
+        assert_eq!(list.len(), 3, "a window is in the list twice");
     }
 }

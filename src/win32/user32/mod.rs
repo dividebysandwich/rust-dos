@@ -20,6 +20,7 @@ pub mod input;
 pub mod menu;
 pub mod message;
 pub mod monitor;
+pub mod notepad;
 pub mod paint;
 pub mod progman;
 pub mod rect;
@@ -1356,6 +1357,10 @@ static APIS: &[Api] = &[
     // Windows 98's does nothing: there is no debug USER32 to tell.
     stdcall("SetDebugErrorLevel", 522, 1, |_, _| Some(0)),
     stdcall("SetSystemCursor", 557, 2, resource::set_system_cursor),
+    // Notepad, C:\WINDOWS\NOTEPAD.EXE: its start and its window's
+    // procedure (notepad.rs).
+    stdcall("NotepadMain", 0, 0, notepad::main),
+    stdcall("NotepadWndProc", 0, 4, notepad::wnd_proc),
 ];
 
 crate::state_fields!(State {

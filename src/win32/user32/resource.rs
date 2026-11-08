@@ -10,8 +10,8 @@
 use super::message::{WM_CHAR, WM_COMMAND, WM_KEYDOWN, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN};
 use super::{
     ERROR_INVALID_ACCEL_HANDLE, ERROR_INVALID_CURSOR_HANDLE, ERROR_INVALID_ICON_HANDLE,
-    ERROR_INVALID_PARAMETER, ERROR_RESOURCE_NAME_NOT_FOUND, FALSE, TRUE, current_pid, read_words,
-    set_error, user, write_words,
+    ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, ERROR_RESOURCE_NAME_NOT_FOUND, FALSE, TRUE,
+    current_pid, read_words, set_error, user, write_words,
 };
 use crate::cpu::Cpu;
 use crate::win32::gdi32::surface::{Surface, Target};
@@ -1256,8 +1256,16 @@ fn add_accels(cpu: &mut Cpu, table: Vec<Accel>) -> u32 {
 pub fn load_accelerators(cpu: &mut Cpu, args: &[u32]) -> Option<u32> {
     let (at, size) = match kernel32::resource_data(cpu, args[0], RT_ACCELERATOR, args[1])? {
         Ok(found) => found,
-        Err(_) => {
+        Err(code) => {
+            // No table: nothing changes but the last error, which an idle
+            // proof can follow (`idle::pure_call`). Railroad Tycoon II asks
+            // for one it doesn't have in every pass of its main loop. A
+            // table found that found no memory for its pages may have got
+            // some of them (`win16::resource::page_in`).
             set_error(cpu, ERROR_RESOURCE_NAME_NOT_FOUND);
+            if code != ERROR_NOT_ENOUGH_MEMORY {
+                crate::idle::pure_call(cpu, None);
+            }
             return Some(0);
         }
     };

@@ -143,6 +143,11 @@ pub struct Device {
     pub scissor: Option<[u32; 4]>,
     pub depth_bias: i16,
     pub color_off: bool,
+    /// Whether the vertices put a pixel's centre half a pixel right of
+    /// and below its integer coordinates, as OpenGL's window
+    /// coordinates do, where Direct3D's are on them. OpenGL sets it for
+    /// each draw, so a save state leaves it out.
+    pub gl_pixel_centres: bool,
 }
 
 crate::state_fields!(Handle {
@@ -203,6 +208,8 @@ crate::state_fields!(Device {
     scissor,
     depth_bias,
     color_off
+} skip {
+    gl_pixel_centres
 });
 
 /// The version of IDirect3DDevice a vtable is.

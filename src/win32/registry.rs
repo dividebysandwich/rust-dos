@@ -62,6 +62,16 @@ const SEED: &str = r#"REGEDIT4
 
 [HKEY_LOCAL_MACHINE\Software\Classes\CLSID]
 
+[HKEY_LOCAL_MACHINE\Software\Classes\.txt]
+@="txtfile"
+"Content Type"="text/plain"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\txtfile]
+@="Text Document"
+
+[HKEY_LOCAL_MACHINE\Software\Classes\txtfile\shell\open\command]
+@="C:\\WINDOWS\\NOTEPAD.EXE %1"
+
 [HKEY_LOCAL_MACHINE\Software\Microsoft\DirectX]
 "Version"="4.06.00.0318"
 "InstalledVersion"=hex:00,00,00,06,00,00,00,00

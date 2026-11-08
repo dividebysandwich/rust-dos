@@ -1437,6 +1437,34 @@ impl Bus {
         self.clock.schedule(self.next_event());
     }
 
+    /// The program resets hardware it times with delay loops, as a sound
+    /// driver does before it plays a short block to find the card's IRQ.
+    /// If `cycles=auto` gives it all the host has for its reads and writes
+    /// (`Activity::work_return`), it goes back to its speed from this
+    /// instruction on, without waiting for the end of the frame: drivers
+    /// set up in the middle of the loading, and a loop counted for the
+    /// machines of the time ends too soon at the host's speed (Kingdom O'
+    /// Magic's HMI driver waits about a million instructions for a 2.65 ms
+    /// block, and finds no IRQ at 500,000 instructions per ms or more).
+    /// The batch still ends at the emulated time it was to end at, and
+    /// `AutoSpeed` measures afresh from there (`Activity::work_cuts`).
+    pub fn end_work_boost(&mut self) {
+        let Some(speed) = self.activity.work_return.take() else {
+            return;
+        };
+        if speed >= self.clock.cycles_per_ms() {
+            return;
+        }
+        let end = self.clock.batch_end();
+        let end_ticks = (end != u64::MAX).then(|| self.clock.ticks_at(end));
+        self.clock.set_cycles_per_ms(speed);
+        if let Some(ticks) = end_ticks {
+            self.clock.set_batch_end(self.clock.icount_at(ticks));
+        }
+        self.clock.schedule(self.next_event());
+        self.activity.work_cuts += 1;
+    }
+
     /// The next time (PIT ticks) a device needs attention: the timer's
     /// next IRQ 0, the end of the Sound Blaster's current block, the
     /// Ultrasound's next timer, DMA or voice interrupt, the retrace a
@@ -1682,8 +1710,7 @@ impl Bus {
             let (wl, wr) = self.win32.cd_gain();
             (cl * wl, cr * wr)
         };
-        let sb_on =
-            self.sb.as_ref().is_some_and(|sb| sb.speaker_on || sb.config.model.is_sb16());
+        let sb_on = self.sb.as_ref().is_some_and(|sb| sb.output_on());
         const SPEAKER: f32 = 3000.0;
         const GUS_GAIN: f32 = 1.0;
         // The Sound Blaster's output filter, as its model has it: its
@@ -1738,7 +1765,12 @@ impl Bus {
                     self.sb_frame = f;
                 }
                 if sb_on {
-                    let mut frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    // The capacitor on the card's output takes the level
+                    // the DAC holds out. It goes first, before the
+                    // low-pass, so that when it starts settled (after a
+                    // state load) the low-pass gets silence, not a step.
+                    let mut frame = self.mixer.sb_coupling(held);
                     if let Some((cutoff, order)) = sb_filter {
                         frame = self.mixer.sb_filter(frame, cutoff, order);
                     }
@@ -1789,6 +1821,25 @@ impl Bus {
         self.trim_audio();
     }
 
+    /// Whether the Sound Blaster adds nothing to the mix and nothing it
+    /// holds would change: it is idle, or its DAC holds a level that the
+    /// capacitor on its output has already taken out of the sound (a
+    /// program left it off the centre, as ShadowCaster's driver does).
+    fn sb_quiet(&self) -> bool {
+        let Some(sb) = &self.sb else {
+            return true;
+        };
+        if sb.is_idle() {
+            return true;
+        }
+        if sb.held_level() != Some(self.sb_frame) {
+            return false;
+        }
+        let ((vl, vr), _) = sb.volumes();
+        let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+        !sb.output_on() || self.mixer.sb_coupling_rests_on(held)
+    }
+
     /// Whether no source makes a sound, or would move on in a way the
     /// sound coming later depends on, as the frames to mix start (see
     /// `audio_settled`).
@@ -1800,7 +1851,7 @@ impl Bus {
         !speaker
             && self.beep_frames == 0
             && self.opl.is_idle()
-            && self.sb.as_ref().is_none_or(|sb| sb.is_idle())
+            && self.sb_quiet()
             && self.mpu.is_idle()
             && self.cdaudio.is_idle()
             && self.disknoise.is_silent()
@@ -1891,8 +1942,11 @@ impl Bus {
             _ => {
                 // Once, as the reset starts (bit 0 set), not again as it
                 // ends.
-                if offset == 0x6 && value & 1 != 0 && self.game_fixes {
-                    self.apply_code_fixes();
+                if offset == 0x6 && value & 1 != 0 {
+                    if self.game_fixes {
+                        self.apply_code_fixes();
+                    }
+                    self.end_work_boost();
                 }
                 self.audio_catch_up();
                 // The DSP's time up to the command, so what it starts counts
@@ -2269,16 +2323,22 @@ impl Bus {
                 };
                 if complete {
                     // Programs that play sound through the timer rewrite the
-                    // count on every tick. Only log the first count after a
-                    // control word, which is how programs set a new rate.
+                    // count on every tick, so only the first count after a
+                    // control word is logged, which is how programs set a
+                    // new rate. Some send the control word and the same
+                    // count many times a second (Civilization's sound
+                    // drivers), so the count is logged only when it differs
+                    // from the rate in force, which a control word keeps.
                     let was_counting = self.pit0.is_counting();
+                    let previous = self.pit0.reload();
                     self.pit0
                         .write_count(self.pit0_divisor, self.clock.now_ticks());
                     self.clock.schedule(self.next_event());
-                    if !was_counting {
+                    let reload = self.pit0.reload();
+                    if !was_counting && reload != previous {
                         self.log_string(&format!(
                             "[PIT] Channel 0 Frequency set to {} Hz",
-                            1_193_182 / self.pit0.reload()
+                            1_193_182 / reload
                         ));
                     }
                 }
@@ -2820,6 +2880,8 @@ impl Bus {
                 self.vga.mark_dirty_full();
                 self.vga.flipped = true;
             }
+            // After the latch: the picture the display shows from now on.
+            self.activity.set_picture(crate::autospeed::picture(self));
             if self.vga.adapter.gate_array() {
                 self.compare_gate_array();
             }
