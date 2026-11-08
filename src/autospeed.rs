@@ -34,23 +34,24 @@
 //! loading screens unpack its data for 25 seconds at 3000 and for 6 at a
 //! 486's speed. It does from the second measurement that finds it doing so,
 //! as the first may have found DOS loading the program itself, which times
-//! its delay loops right after. Its writes to video memory don't count for
-//! that, as those games draw piecemeal all the time. A protected-mode
-//! program gets all the host has while it reads and writes (loading,
-//! compiling, Windows), and otherwise goes down to a 486's speed, or a
-//! quarter of a faster CPU model's clock: it spins in a loop, as game menus
-//! do. (It was written for a 386 or better, and paces itself.) Under an
-//! operating system that halts the processor when it has nothing to run
+//! its delay loops right after, and not while it waits for the timer most of
+//! the time, as a game playing speech from its CD does. Its writes to video
+//! memory don't count for that, as those games draw piecemeal all the time.
+//! A protected-mode program gets all the host has while it reads and writes
+//! (loading, compiling, Windows), and otherwise goes down to a 486's speed,
+//! or a quarter of a faster CPU model's clock: it spins in a loop, as game
+//! menus do. (It was written for a 386 or better, and paces itself.) Under
+//! an operating system that halts the processor when it has nothing to run
 //! (Windows, OS/2, Linux, and the built-in Windows, which is known to from
 //! the start), a program that keeps it from halting is at work and gets all
 //! the host has as well. Once a program stops reading and writing (a
-//! real-mode one, its drives), it goes back to the speed it had at once,
-//! not a measurement later: programs time their delay loops right after
-//! loading, and a loop timed at all the host has waits for ever (Sam &
-//! Max's General MIDI driver counts to a million in a timer tick, and hangs
-//! if it gets there first). A driver set up in the middle of the loading
-//! can't wait for that: a reset of the Sound Blaster, which comes before a
-//! driver times the card, goes back at once (`Bus::end_work_boost`).
+//! real-mode one, its drives), it goes back to the speed it had at once, not
+//! a measurement later: programs time their delay loops right after loading,
+//! and a loop timed at all the host has waits for ever (Sam & Max's General
+//! MIDI driver counts to a million in a timer tick, and hangs if it gets
+//! there first). A driver set up in the middle of the loading can't wait for
+//! that: a reset of the Sound Blaster, which comes before a driver times the
+//! card, goes back at once (`Bus::end_work_boost`).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -203,6 +204,20 @@ const BUSY: f64 = 0.05;
 /// a program without frames is at work; a real-mode program's on drives
 /// only. Wolf moves 52 KB a second while it loads.
 const WORKING: f64 = 32768.0;
+/// A real-mode program that would sit halted for this share of a
+/// measurement or more at the real-mode speed isn't loading, whatever its
+/// drives move: it waits for the timer with time to spare, as a game
+/// playing speech from its CD does, reading a block now and then. Wolf's
+/// loading screens halt for 0 to 5% of a measurement at 3000, and the
+/// scene loads of Day of the Tentacle and Fate of Atlantis for 0 to 23%.
+/// Their speech halts for 39 to 75% and moves 16 to 72 KB a second, past
+/// `WORKING` when two blocks fall in one measurement (Fate of Atlantis's
+/// office conversation: 37 and 72 KB at 46% and 39%). 30% leaves room on
+/// both sides. The share is of the real-mode speed because a program that
+/// waits for the timer does as much a second at any speed and halts for
+/// the rest: the same speech halts for 99.8% of a measurement at 800,000,
+/// and a scene load with a tick's wait in it for most of one.
+const LOADING_HALTED: f64 = 0.3;
 /// Emulated time without reads and writes (a real-mode program's, on its
 /// drives) after which a program that got all the host has for them goes
 /// back to the speed it had: less than the four timer ticks a delay loop's
@@ -513,6 +528,7 @@ struct Mark {
     ns: u64,
     icount: u64,
     idle: u64,
+    disk_wait: u64,
     bursts: u64,
     copies: u64,
     flips: u64,
@@ -538,6 +554,7 @@ impl Mark {
             ns,
             icount: bus.clock.icount,
             idle: bus.clock.idle,
+            disk_wait: bus.clock.disk_wait,
             bursts: a.bursts,
             copies: a.copies,
             flips: a.flips,
@@ -578,7 +595,9 @@ pub struct Measurement {
     /// The frames the program drew a second, if it drew any to count.
     pub fps: Option<f64>,
     /// The share of the time it polled (waiting in a loop), and sat
-    /// halted (waiting for an interrupt).
+    /// halted (waiting for an interrupt). A slow drive's time, which a
+    /// disk service waits out (`Clock::disk_wait`), isn't halted: the
+    /// program asked for the data, not to wait.
     pub polling: f64,
     pub halted: f64,
     /// Bytes a second it wrote to video memory and moved on drives: whether
@@ -696,7 +715,8 @@ pub struct AutoSpeed {
     output: (u64, u64),
     io: (u64, u64),
     /// The last measurement found a real-mode program without frames
-    /// moving `WORKING` on its drives. It loads once a second one does too:
+    /// moving `WORKING` on its drives, and not waiting for the timer
+    /// (`LOADING_HALTED`). It loads once a second one does too:
     /// one alone may be its own program file, read as it started, and a
     /// delay loop timed right after that would be timed at all the host
     /// has.
@@ -949,10 +969,12 @@ impl AutoSpeed {
         }
         self.unsettled = None;
         let paced = now.ns.saturating_sub(mark.lost_at);
+        let waited = now.disk_wait.saturating_sub(mark.disk_wait);
+        let halted = now.idle.saturating_sub(mark.idle).saturating_sub(waited);
         let measured = Measurement {
             fps,
             polling: if polls > POLLS_PER_SECOND { status.max(0.5) } else { status },
-            halted: now.idle.saturating_sub(mark.idle) as f64 / ran,
+            halted: halted as f64 / ran,
             output: (now.output - mark.output) as f64 / seconds,
             io: (now.io - mark.io) as f64 / seconds,
             refresh,
@@ -1093,12 +1115,15 @@ impl AutoSpeed {
             // does neither spins in a loop, as a game's menu does. A
             // real-mode program loads while it moves data on its drives,
             // from the second measurement running that finds it doing so
-            // (`loading`); its writes to video memory are the 1980s games'
-            // piecemeal drawing, which keeps the real-mode speed.
+            // (`loading`) and runs enough that it wouldn't sit halted for
+            // `LOADING_HALTED` of it at the real-mode speed; its writes to
+            // video memory are the 1980s games' piecemeal drawing, which
+            // keeps the real-mode speed.
             let works = if protected {
                 m.halted < IDLES && m.output >= WORKING
             } else {
-                self.loading = m.io >= WORKING;
+                let running = (1.0 - m.halted) * c;
+                self.loading = m.io >= WORKING && running > (1.0 - LOADING_HALTED) * base as f64;
                 loading && self.loading
             };
             return if works {
@@ -2768,6 +2793,67 @@ mod tests {
         assert_eq!(auto.decide(3000, &doing(0.0), false, HOST), 3000);
         assert_eq!(auto.decide(3000, &doing(52_000.0), false, HOST), 3000);
         assert_eq!(auto.working, None);
+    }
+
+    #[test]
+    fn a_real_mode_program_halted_while_its_drives_move_plays_speech() {
+        let doing = |io, halted| Measurement {
+            io,
+            halted,
+            ..STILL
+        };
+        let pair = |a: Measurement, b: Measurement| {
+            let mut auto = AutoSpeed::new(3000, None);
+            let first = auto.decide(3000, &a, false, HOST);
+            (first, auto.decide(3000, &b, false, HOST), auto.working)
+        };
+        // Fate of Atlantis's office conversation, read from the CD as it
+        // plays: the processor waits for the timer between the blocks.
+        let speech = pair(doing(37_253.0, 0.46), doing(72_178.0, 0.39));
+        assert_eq!(speech, (3000, 3000, None));
+        // Wolf loading a level, and a scene load in Day of the Tentacle,
+        // which halts a little between its reads.
+        let wolf = pair(doing(363_698.0, 0.0), doing(77_304.0, 0.0));
+        assert_eq!(wolf, (3000, HOST, Some(3000)));
+        let scene = pair(doing(68_573.0, 0.2), doing(110_309.0, 0.22));
+        assert_eq!(scene, (3000, HOST, Some(3000)));
+        // At all the host has, the share halted is of that speed: the
+        // speech halts for nearly all of a measurement, and a scene load
+        // that waits for a tick between its reads for most of one, while
+        // it runs far more than it would at 3000.
+        let boosted = |halted| {
+            let mut auto = AutoSpeed::new(3000, None);
+            auto.decide(3000, &doing(363_698.0, 0.0), false, HOST);
+            auto.decide(3000, &doing(77_304.0, 0.0), false, HOST);
+            auto.decide(HOST, &doing(72_178.0, halted), false, HOST)
+        };
+        assert_eq!(boosted(0.998), 3000);
+        assert_eq!(boosted(0.9), HOST);
+    }
+
+    #[test]
+    fn a_slow_drives_time_isnt_halted() {
+        // Reading 30 KB in each half a second, which a disk service waits
+        // out for 300 ms (`floppy_disk_speed`), or the program halts for.
+        let program = |drive: bool| {
+            let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+            cpu.bus.set_cycles_per_ms(3000);
+            let mut auto = AutoSpeed::new(3000, None);
+            let bus = &mut cpu.bus;
+            assert_eq!(auto.update(bus, false, HOST, 0), None);
+            let mut measure = || {
+                bus.clock.icount += 3000 * 500;
+                bus.clock.idle += 3000 * 300;
+                if drive {
+                    bus.clock.disk_wait += 3000 * 300;
+                }
+                bus.activity.io_bytes += 30_000;
+                auto.update(bus, false, HOST, 0)
+            };
+            (measure(), measure())
+        };
+        assert_eq!(program(true), (None, Some(HOST)));
+        assert_eq!(program(false), (None, None));
     }
 
     #[test]
