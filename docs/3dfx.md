@@ -102,17 +102,18 @@ no software Direct3D.
 
 ## Settings
 
-These go in `[emulator]`. The renderer settings work for every 3dfx
-card; the add-on card's settings do nothing on a Voodoo3 or Banshee,
-which always has 16 MB.
+These go in `[emulator]`. `voodoo`, `voodoo_model`, `voodoo_memory` and
+`voodoo_gamma` are the add-on card's and do nothing on a Voodoo3 or
+Banshee, which always has 16 MB. The others work for every 3dfx card.
 
 | Setting | Values (default first) | What it does |
 |---|---|---|
 | `voodoo` | `false`, `true` | Adds the Voodoo Graphics or Voodoo2 add-on card |
 | `voodoo_model` | `voodoo1`, `voodoo2` | The add-on card's chip |
-| `voodoo_memory` | `12`, `8`, `4` | The add-on card's memory in MB: 12 is two texture units with 4 MB each, 8 a Voodoo2 with 2 MB each (it picks the Voodoo2 when `voodoo_model` isn't set), 4 a Voodoo Graphics with one texture unit (a Voodoo2 takes it as 8) |
+| `voodoo_memory` | `12`, `8`, `4` | The add-on card's memory in MB: 12 is two texture units with 4 MB each, 8 a Voodoo2 with 2 MB each (it picks the Voodoo2 when `voodoo_model` isn't set; a Voodoo Graphics takes it as 12), 4 a Voodoo Graphics with one texture unit (a Voodoo2 takes it as 8) |
 | `voodoo_renderer` | `software`, `opengl` | What draws the card's picture. `opengl` draws it again at a higher resolution, and needs OpenGL 3 on the host |
 | `voodoo_scale` | `2`, 1 to 4 | How many times the card's resolution OpenGL draws at |
+| `voodoo_scale_shader` | `true`, `false` | Whether the CRT looks keep one scanline per line of the card's resolution; `false` gives a line per pixel of the bigger picture (above 1x only) |
 | `voodoo_msaa` | `off`, `2`, `4`, `8` | OpenGL's antialiasing |
 | `voodoo_anisotropy` | `off`, `2`, `4`, `8`, `16` | OpenGL's filtering of textures at an angle |
 | `voodoo_dither` | `true`, `false` | Whether OpenGL dithers to 16 bits as the card does; `false` is smoother |
@@ -126,8 +127,8 @@ take effect at the DOS prompt, the others at once. The settings
 window's Emulator page has them as *Video card*, *3dfx Voodoo
 Graphics*, *3dfx card* (the chip and memory together), *3dfx drawn by*
 and the *3dfx* settings after it. They show only while *3dfx Voodoo
-Graphics* is on; on a Voodoo3 or Banshee, set the renderer in the
-configuration file
+Graphics* is on; on a Voodoo3 or Banshee, set the renderer, texture
+sampling and frame rate cap in the configuration file
 ([#821](https://github.com/dividebysandwich/rust-dos/issues/821)).
 
 The Voodoo2 is a single board: SLI, two Voodoo2s drawing alternate

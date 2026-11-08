@@ -380,10 +380,10 @@ limit, so without a connection it goes on as it would with one:
   [3dfx gamma](#3dfx-gamma)); without OpenGL 3 (in the browser, or with
   SDL's dummy video driver) the software rasterizer's picture shows. The
   settings from `voodoo_texture_sampling` on change at once, `voodoo_gamma`
-  at the DOS prompt. `voodoo_renderer` and the OpenGL settings with it also
-  draw a Voodoo3 or Banshee display adapter (`machine=svga_voodoo3` or
-  `svga_banshee`; see [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), whose card
-  and memory don't depend on `voodoo`, `voodoo_model` or `voodoo_memory`.
+  at the DOS prompt. All of them but `voodoo_gamma` also work on a Voodoo3
+  or Banshee display adapter (`machine=svga_voodoo3` or `svga_banshee`; see
+  [3dfx Voodoo3](#3dfx-voodoo3-and-banshee)), whose card and memory don't
+  depend on `voodoo`, `voodoo_model` or `voodoo_memory`.
 * `powervr=pcx1` or `pcx2` adds a PowerVR 3D card beside the display
   adapter, for games with a PowerVR version: the PCX1 (VideoLogic
   Apocalypse 3D) or the PCX2 (Matrox m3D, VideoLogic Apocalypse 3Dx; see
@@ -2137,10 +2137,10 @@ file, so the image stays an 86F image (in memory, as from an archive or the
 web page, the changes stay with its sectors, and it downloads as an
 `.img`). A sector whose data doesn't match its CRC reads with INT 13h's
 CRC error (10h) and a missing one isn't found (04h), as a real drive
-reports them; there is no floppy controller, so copy protections that
-depend on its timing or on sectors of other sizes don't see them, and weak
-bits read the same each time. The image's write-protect flag
-write-protects the disk.
+reports them, and so does a booted system's floppy controller. The built-in
+DOS has no controller, so copy protections that depend on its timing don't
+see them there; sectors of other sizes aren't kept, and weak bits read the
+same each time. The image's write-protect flag write-protects the disk.
 
 The BIOS sees the images as disks: INT 13h reads and writes their sectors by
 cylinder, head and sector and reports their real geometry, and DOS's absolute
@@ -2197,8 +2197,9 @@ mid-1990s (`fast`, ~15 MB/s), the early 1990s (`medium`, ~2.5 MB/s) or the
 ~30 kB/s). Reading, writing, opening and loading files and INT 13h and INT
 25h/26h sector transfers take that long in emulated time; the machine runs
 on meanwhile, so music and animations don't stop. These settings don't apply
-to CD-ROMs; the IDE CD-ROM drive takes a real drive's time of its own (see
-[CD images](#cd-images)).
+to CD-ROMs. The IDE CD-ROM drive takes a real drive's time of its own (see
+[CD images](#cd-images)); CD reads through MSCDEX or the built-in Windows'
+file functions take none.
 
 `hard_disk_noise` and `floppy_disk_noise` in `[sound]` add the drives'
 noises, with DOSBox Staging's recordings: `seek-only` plays the heads

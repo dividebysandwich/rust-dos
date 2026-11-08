@@ -41,6 +41,13 @@ later for another reason, which has an issue of its own:
   doesn't have, on a real one either: the game's minimum is a later card
   ([#645](https://github.com/dividebysandwich/rust-dos/issues/645)).
 
+Discworld Noir's and Grom's checks passed with images made locally to
+keep what each check reads
+([#711](https://github.com/dividebysandwich/rust-dos/issues/711),
+[#630](https://github.com/dividebysandwich/rust-dos/pull/630)). A dump
+of either disc made with the tools in [Dumping a disc](#dumping-a-disc)
+hasn't been tried yet.
+
 **Anachronox** checks disc 2, as its readme says: keep disc 2 in the
 drive while playing. With disc 1 SafeDisc says it can't find the CD, on
 a real PC too.
@@ -62,15 +69,19 @@ their dump measured.
 
 ## DOS games
 
-DOS games read their CDs through MSCDEX. A sector whose EDC doesn't
-match reads as a CRC error there, and a file read over it as a data
-error, as on a real drive. MSCDEX's reads aren't timed, so a DOS
+On the built-in DOS, games read their CDs through MSCDEX. A sector whose
+EDC doesn't match reads as a CRC error there, and a file read over it as
+a data error, as on a real drive. MSCDEX's reads aren't timed, so a DOS
 protection that times the drive doesn't see a real drive's times.
 
 Floppy protections need an 86Box `.86f` image, which keeps sectors with
-bad CRCs and missing sectors. There is no floppy controller: protections
-that depend on its timing, on sectors of other sizes or on weak bits
-don't pass ([disk images](../CONFIGURATION.md#disk-images)).
+bad CRCs and missing sectors. The built-in DOS has no floppy controller,
+only INT 13h, so protections that depend on the controller's timing
+don't pass there. A [booted
+system](../CONFIGURATION.md#booting-a-disk-image) has one, which reads
+only 512-byte sectors. Sectors of other sizes aren't kept, and weak bits
+read the same each time, on either ([disk
+images](../CONFIGURATION.md#disk-images)).
 
 ## Manuals and code wheels
 
