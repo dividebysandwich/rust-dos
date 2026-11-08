@@ -249,19 +249,16 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             .unwrap_or_else(|| crate::hostfs::read(folder.join(&entry.name)).map_err(|e| e.to_string()))
             .unwrap_or_default()
     };
+    // A descriptor's data file as `tracks` holds it: the name without its
+    // folders, in lower case.
+    let file_name = |file: &str| file.rsplit(['/', '\\']).next().unwrap_or(file).to_ascii_lowercase();
     for entry in entries.iter().filter(|e| !e.is_dir) {
         if named(&entry.name, &SHEET_EXTENSIONS) {
             let text = String::from_utf8_lossy(&read(entry)).into_owned();
             tracks.extend(cue_files(&text).into_iter().map(|t| t.to_ascii_lowercase()));
         } else if named(&entry.name, &DESCRIPTOR_EXTENSIONS) {
             let disc = crate::cdrom::b6t::parse(&read(entry)).unwrap_or_default();
-            let name = |file: &str| {
-                file.rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(file)
-                    .to_ascii_lowercase()
-            };
-            tracks.extend(disc.blocks.iter().map(|b| name(&b.file)));
+            tracks.extend(disc.blocks.iter().map(|b| file_name(&b.file)));
             // And DPM data beside it.
             let stem = entry.name.rsplit_once('.').map_or(entry.name.as_str(), |(stem, _)| stem);
             tracks.push(format!("{}.bwa", stem.to_ascii_lowercase()));
@@ -270,9 +267,7 @@ fn scan_entries(folder: &Path, entries: &[Entry]) -> Scan {
             // Alcohol's own name for the data file counts even when the
             // descriptor can't be read, as `.bwa` does for BlindWrite.
             for file in disc.files().into_iter().chain(["*.mdf"]) {
-                let file = crate::cdrom::mds::data_file(&entry.name, file);
-                let file = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_ascii_lowercase();
-                tracks.push(file);
+                tracks.push(file_name(&crate::cdrom::mds::data_file(&entry.name, file)));
             }
         }
     }

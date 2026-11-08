@@ -420,11 +420,6 @@ impl CdImage {
         let error = |e: String| format!("{}: {}", path.display(), e);
         let data = hostfs::read(path).map_err(|e| error(e.to_string()))?;
         let disc = mds::parse(&data).map_err(error)?;
-        let dir = dir_of(path);
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default();
         let mut image = CdImage::new(path, Vec::new(), Vec::new());
         // Each data file opened once, and where the sectors read from it
         // so far end.
@@ -432,7 +427,7 @@ impl CdImage {
         let mut stored: Vec<u64> = Vec::new();
         for session in &disc.sessions {
             for (i, t) in session.tracks.iter().enumerate() {
-                let found = find_file(dir, &mds::data_file(&name, &t.file))?;
+                let found = mds_data_file(path, &t.file)?;
                 let file = match paths.iter().position(|p| *p == found) {
                     Some(file) => file,
                     None => {
@@ -1107,18 +1102,24 @@ fn mds_files(path: &Path) -> Vec<Result<PathBuf, String>> {
     else {
         return Vec::new();
     };
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
     let mut files: Vec<Result<PathBuf, String>> = Vec::new();
     for file in disc.files() {
-        let file = find_file(dir_of(path), &super::mds::data_file(&name, file));
+        let file = mds_data_file(path, file);
         if !files.contains(&file) {
             files.push(file);
         }
     }
     files
+}
+
+/// The data file `name` of the Alcohol 120% descriptor at `path`
+/// (`mds::data_file`), found beside it in any case.
+fn mds_data_file(path: &Path, name: &str) -> Result<PathBuf, String> {
+    let descriptor = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    find_file(dir_of(path), &super::mds::data_file(&descriptor, name))
 }
 
 /// The `.bwa` file of DPM data beside the BlindWrite descriptor at `path`,
@@ -2201,7 +2202,7 @@ mod tests {
             );
             assert_eq!(image.dpm(), dpm, "{}", name);
             let mut raw = [0u8; RAW_SECTOR];
-            for lba in [0, 16, 30, 31, 180, 181, 480] {
+            for lba in 0..481 {
                 image.read_raw(lba, &mut raw).unwrap();
                 assert_eq!(
                     raw[..],

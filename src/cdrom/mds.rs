@@ -149,12 +149,6 @@ impl<'a> Reader<'a> {
         ))
     }
 
-    fn u64(&self, at: usize, what: &str) -> Result<u64, String> {
-        Ok(u64::from_le_bytes(
-            self.bytes(at, 8, what)?.try_into().unwrap(),
-        ))
-    }
-
     /// The name at byte `at`, up to its terminating zero: UTF-16 if
     /// `wide`, else one byte a character.
     fn name(&self, at: usize, wide: bool) -> Result<String, String> {
@@ -205,15 +199,20 @@ pub fn parse(data: &[u8]) -> Result<Descriptor, String> {
     let sessions_at = r.u32(80, "header")? as usize;
     let dpm_at = r.u32(84, "header")? as usize;
 
+    // The offsets add with saturation. On a 32-bit host (the browser
+    // build), an offset near 4 GiB would otherwise wrap round to the
+    // descriptor's start and read other fields; saturated, the read fails
+    // as one past the end.
     let mut sessions = Vec::new();
     for s in 0..count as usize {
-        let at = sessions_at + s * SESSION_BLOCK;
-        let number = r.u16(at + 8, "session block")?;
-        let blocks = r.bytes(at + 10, 1, "session block")?[0] as usize;
-        let blocks_at = r.u32(at + 20, "session block")? as usize;
+        let at = sessions_at.saturating_add(s * SESSION_BLOCK);
+        let block = r.bytes(at, SESSION_BLOCK, "session block")?;
+        let number = u16::from_le_bytes([block[8], block[9]]);
+        let blocks = block[10] as usize;
+        let blocks_at = u32::from_le_bytes(block[20..24].try_into().unwrap()) as usize;
         let mut tracks = Vec::new();
         for b in 0..blocks {
-            if let Some(track) = parse_track(&r, blocks_at + b * TRACK_BLOCK)? {
+            if let Some(track) = parse_track(&r, blocks_at.saturating_add(b * TRACK_BLOCK))? {
                 tracks.push(track);
             }
         }
@@ -221,7 +220,7 @@ pub fn parse(data: &[u8]) -> Result<Descriptor, String> {
     }
     let dpm = match dpm_at {
         0 => None,
-        at => parse_dpm_table(data, at),
+        at => parse_dpm_table(&r, at),
     };
     Ok(Descriptor { sessions, dpm })
 }
@@ -272,7 +271,7 @@ fn parse_track(r: &Reader, at: usize) -> Result<Option<Track>, String> {
     }
     let (pregap, sectors) = (
         r.u32(extra, "track's extra block")?,
-        r.u32(extra + 4, "track's extra block")?,
+        r.u32(extra.saturating_add(4), "track's extra block")?,
     );
     let files = u32_at(48);
     let footer = u32_at(52) as usize;
@@ -281,7 +280,7 @@ fn parse_track(r: &Reader, at: usize) -> Result<Option<Track>, String> {
         (_, 0) | (0, _) => "*.mdf".to_string(),
         (1, at) => {
             let name = r.u32(at, "track's footer")? as usize;
-            let wide = r.u32(at + 4, "track's footer")? != 0;
+            let wide = r.u32(at.saturating_add(4), "track's footer")? != 0;
             r.name(name, wide)?
         }
         (n, _) => {
@@ -298,7 +297,7 @@ fn parse_track(r: &Reader, at: usize) -> Result<Option<Track>, String> {
         stride,
         subchannel,
         start: u32_at(36),
-        offset: r.u64(at + 40, "track block")?,
+        offset: u64::from_le_bytes(block[40..48].try_into().unwrap()),
         pregap,
         sectors,
         file,
@@ -309,19 +308,16 @@ fn parse_track(r: &Reader, at: usize) -> Result<Option<Track>, String> {
 /// block that runs past the descriptor's end, or a block `Dpm::new`
 /// doesn't take, is passed over, as Aaru passes it over; the disc then
 /// reads without it.
-fn parse_dpm_table(data: &[u8], at: usize) -> Option<Dpm> {
-    let word = |at: usize| {
-        data.get(at..at.checked_add(4)?)
-            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
-    };
+fn parse_dpm_table(r: &Reader, at: usize) -> Option<Dpm> {
+    let word = |at: usize| r.u32(at, "DPM table").ok();
     let count = word(at)? as usize;
     // Aaru reads no block of a table whose offsets run past the end.
     let offsets = at.checked_add(4)?;
-    data.get(offsets..offsets.checked_add(count.checked_mul(4)?)?)?;
+    r.bytes(offsets, count.checked_mul(4)?, "DPM table").ok()?;
     (0..count)
         .filter_map(|i| word(offsets + i * 4))
         .filter(|&block| word(block as usize) == Some(DPM_BLOCK))
-        .find_map(|block| dpm::parse_block(data, block as usize + 4))
+        .find_map(|block| dpm::parse_block(r.0, block as usize + 4))
 }
 
 /// A track for `build`: mode byte, subchannel mode, number, INDEX 01
@@ -578,5 +574,10 @@ mod tests {
         let mut dvd = good.clone();
         dvd[18] = 0x10;
         assert!(parse(&dvd).unwrap_err().contains("isn't a CD"));
+        // Session blocks at the last offset a descriptor can name run
+        // past its end, on a 32-bit host too.
+        let mut far = good.clone();
+        far[80..84].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse(&far).unwrap_err().contains("session block"));
     }
 }
