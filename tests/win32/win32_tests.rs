@@ -10098,8 +10098,91 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
     assert!(
-        run_to_exit(&mut cpu, 200),
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_finishes_event_requests_in_the_order_they_came() {
+    // An event READ(10), which waits a second for the drive to spin up,
+    // then at once an event request to target 1, which has no device. One
+    // thread takes the requests in turn, so when the second one's event
+    // is set, the read before it is done.
+    let dir = cdimage::scratch("wnaspi32_order");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &["ExitProcess", "CreateEventA", "WaitForSingleObject"],
+        ),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    let mut read = read10_srb(16);
+    read[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&read);
+    let mut rejected = read10_srb(16);
+    rejected[3] |= 0x40;
+    rejected[8] = 1;
+    data[0x100..0x150].copy_from_slice(&rejected);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (srb, keep) in [(0x40, 0x180), (0x100, 0x184)] {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(srb + 24)), eax)?;
+            a.mov(dword_ptr(l.at(keep)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        for srb in [0x40, 0x100] {
+            a.push(l.at(srb) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 1)?;
+            a.test(eax, eax)?;
+            a.jne(fail)?;
+        }
+        // The rejected request's event: by then the read is done.
+        a.mov(eax, dword_ptr(l.at(0x184)))?;
+        a.push(-1i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(0x101)), 0x82)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_order", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
         printed(&cpu)
     );
@@ -10177,8 +10260,225 @@ fn wnaspi32_finishes_an_event_request_while_the_program_polls() {
     cpu.bus
         .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
         .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
     assert!(
-        run_to_exit(&mut cpu, 200),
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_reads_take_the_time_the_drive_takes_to_reach_their_sectors() {
+    // Three event READ(10)s, each timed with QueryPerformanceCounter
+    // around SendASPI32Command and the wait on its event: sector 16, then
+    // 17, then 300. The drive has 17 in its buffer, read ahead as the disc
+    // turned on from 16, and sends it in under 2 ms. 300 is past what it
+    // reads ahead: it moves the head and waits for the sector to come
+    // round, which takes more than the millisecond the head takes to
+    // settle on its own.
+    let dir = cdimage::scratch("wnaspi32_timing");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    image.resize(400 * 2048, 0);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        ("WNASPI32.DLL", &["GetASPI32SupportInfo", "SendASPI32Command"]),
+        (
+            "KERNEL32.DLL",
+            &[
+                "ExitProcess",
+                "CreateEventA",
+                "WaitForSingleObject",
+                "QueryPerformanceCounter",
+            ],
+        ),
+    ];
+    let mut data = vec![0u8; 0x1000];
+    let srbs = [(0x40, 16), (0x100, 17), (0x1C0, 300)];
+    for (at, lba) in srbs {
+        let mut srb = read10_srb(lba);
+        srb[3] |= 0x40;
+        data[at..at + 0x50].copy_from_slice(&srb);
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (i, (at, _)) in srbs.into_iter().enumerate() {
+            let at = at as u32;
+            let times = 0x300 + i as u32 * 16;
+            // A manual-reset event, not signaled, in the PostProc field;
+            // the buffer.
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(at + 24)), eax)?;
+            a.mov(dword_ptr(l.at(at + 16)), l.at(0x800) as i32)?;
+            a.push(l.at(times) as i32)?;
+            a.call(l.import(5))?;
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(eax, dword_ptr(l.at(at + 24)))?;
+            a.push(-1i32)?;
+            a.push(eax)?;
+            a.call(l.import(4))?;
+            a.push(l.at(times + 8) as i32)?;
+            a.call(l.import(5))?;
+            a.mov(ebx, 1 + i as i32)?;
+            a.cmp(byte_ptr(l.at(at + 1)), 1)?;
+            a.jne(fail)?;
+        }
+        // The counts each read took: 17's in ecx, 300's in edx.
+        a.mov(ecx, dword_ptr(l.at(0x318)))?;
+        a.sub(ecx, dword_ptr(l.at(0x310)))?;
+        a.mov(edx, dword_ptr(l.at(0x328)))?;
+        a.sub(edx, dword_ptr(l.at(0x320)))?;
+        // Sector 17 took time, but less than 2 ms (1193 counts of the
+        // 1.193182 MHz counter a millisecond).
+        a.mov(ebx, 4)?;
+        a.cmp(ecx, 0)?;
+        a.je(fail)?;
+        a.mov(ebx, 5)?;
+        a.cmp(ecx, 2 * 1193)?;
+        a.jae(fail)?;
+        // Sector 300 took more than a millisecond longer.
+        a.mov(ebx, 6)?;
+        a.sub(edx, ecx)?;
+        a.cmp(edx, 1193)?;
+        a.jbe(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_timing", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
+fn wnaspi32_plain_reads_leave_no_drive_time_for_the_event_read_after_them() {
+    // An event READ(10) of sector 16, which waits for the drive to spin
+    // up, then twenty plain ones of 17 to 36, finished inside
+    // SendASPI32Command in no emulated time, then an event read of 37,
+    // timed with QueryPerformanceCounter. The drive read 17 to 36 as it
+    // got each request: 37 is the next sector to come round, and the
+    // event read waits for it alone, not for the time of the twenty.
+    let dir = cdimage::scratch("wnaspi32_plain_reads");
+    let mut image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    image.resize(100 * 2048, 0);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &[
+                "ExitProcess",
+                "CreateEventA",
+                "WaitForSingleObject",
+                "QueryPerformanceCounter",
+            ],
+        ),
+    ];
+    let (first, last, times, buffer) = (0x40u32, 0x780u32, 0x900u32, 0xA00u32);
+    let plain = |i: u32| 0x100 + i * 0x50;
+    let mut data = vec![0u8; 0x1400];
+    let mut put = |at: u32, srb: [u8; 0x50]| {
+        data[at as usize..at as usize + 0x50].copy_from_slice(&srb);
+    };
+    for (at, lba) in [(first, 16), (last, 37)] {
+        let mut srb = read10_srb(lba);
+        srb[3] |= 0x40;
+        put(at, srb);
+    }
+    for i in 0..20 {
+        put(plain(i), read10_srb(17 + i));
+    }
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        // Each event request: a manual-reset event, not signaled, in its
+        // PostProc field, sent, and waited for.
+        let event_read = |a: &mut CodeAssembler, at: u32, timed: bool| {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(at + 24)), eax)?;
+            a.mov(dword_ptr(l.at(at + 16)), l.at(buffer) as i32)?;
+            if timed {
+                a.push(l.at(times) as i32)?;
+                a.call(l.import(5))?;
+            }
+            a.push(l.at(at) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(eax, dword_ptr(l.at(at + 24)))?;
+            a.push(-1i32)?;
+            a.push(eax)?;
+            a.call(l.import(4))?;
+            if timed {
+                a.push(l.at(times + 8) as i32)?;
+                a.call(l.import(5))?;
+            }
+            a.mov(ebx, 1)?;
+            a.cmp(byte_ptr(l.at(at + 1)), 1)?;
+            a.jne(fail)
+        };
+        event_read(a, first, false)?;
+        for i in 0..20 {
+            a.mov(dword_ptr(l.at(plain(i) + 16)), l.at(buffer) as i32)?;
+            a.push(l.at(plain(i)) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 2)?;
+            a.cmp(byte_ptr(l.at(plain(i) + 1)), 1)?;
+            a.jne(fail)?;
+        }
+        event_read(a, last, true)?;
+        // Sector 37 took less than 2 ms (1193 counts of the 1.193182 MHz
+        // counter a millisecond), where the twenty before it took about
+        // 15 ms of the drive's time.
+        a.mov(ecx, dword_ptr(l.at(times + 8)))?;
+        a.sub(ecx, dword_ptr(l.at(times)))?;
+        a.mov(ebx, 3)?;
+        a.cmp(ecx, 2 * 1193)?;
+        a.jae(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_plain_reads", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
         "the program didn't end: {:?}",
         printed(&cpu)
     );
