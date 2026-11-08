@@ -279,7 +279,12 @@ impl Atapi {
                 }
                 Loading::SpinningUp => {
                     self.loading = Loading::Readied;
-                    self.loading_at = Some(env.now + ticks(SPINDOWN));
+                    self.loading_at = Some(self.spindown_at(env));
+                }
+                // A disc that plays audio is spinning: the drive stops it
+                // `SPINDOWN` after the play ends.
+                Loading::Readied | Loading::Ready if env.player.is_busy(self.drive) => {
+                    self.loading_at = Some(self.spindown_at(env));
                 }
                 Loading::Readied | Loading::Ready => self.loading = Loading::Idle,
                 _ => {}
@@ -306,6 +311,19 @@ impl Atapi {
             self.loading = Loading::NoDisc;
             self.loading_at = None;
         }
+    }
+
+    /// When the spinning disc stops if no command comes (PIT ticks):
+    /// `SPINDOWN` after now, or after the end of the audio the drive
+    /// plays, which keeps the disc turning until then.
+    fn spindown_at(&self, env: &Env) -> u64 {
+        let playing = if env.player.is_busy(self.drive) {
+            let (_, end) = env.player.range();
+            end.saturating_sub(env.player.position()) as f64 * 1000.0 / 75.0
+        } else {
+            0.0
+        };
+        env.now + ticks(playing + SPINDOWN)
     }
 
     fn schedule(&mut self, delayed: Delayed, ms: f64, now: u64) {
@@ -641,7 +659,7 @@ impl Atapi {
                 self.loading = Loading::SpinningUp;
                 self.loading_at = Some(env.now + ticks(SPINUP));
             }
-            Loading::Ready if trigger => self.loading_at = Some(env.now + ticks(SPINDOWN)),
+            Loading::Ready if trigger => self.loading_at = Some(self.spindown_at(env)),
             _ => {}
         }
         if env.cd(self.drive).is_none() {
@@ -925,6 +943,12 @@ impl Atapi {
             }
             0x4E => env.player.reset(),
             _ => {}
+        }
+        // A play that starts or resumes keeps the disc turning to its end.
+        if matches!(self.loading, Loading::Readied | Loading::Ready)
+            && env.player.is_busy(self.drive)
+        {
+            self.loading_at = Some(self.spindown_at(env));
         }
         self.count = 0x03;
         self.feature = 0;

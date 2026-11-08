@@ -9554,6 +9554,88 @@ fn wnaspi32_completes_event_requests_for_accepted_and_rejected_targets() {
 }
 
 #[test]
+fn wnaspi32_finishes_event_requests_in_the_order_they_came() {
+    // An event READ(10), which waits a second for the drive to spin up,
+    // then at once an event request to target 1, which has no device. One
+    // thread takes the requests in turn, so when the second one's event
+    // is set, the read before it is done.
+    let dir = cdimage::scratch("wnaspi32_order");
+    let image = cdimage::iso("TESTDISC", &[cdimage::file("HELLO.TXT", b"hello")]);
+    fs::write(dir.join("GAME.BIN"), cdimage::mode1_2352(&image)).unwrap();
+    let cue = dir.join("GAME.CUE");
+    let sheet = "FILE \"GAME.BIN\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n";
+    fs::write(&cue, sheet).unwrap();
+
+    let imports: &[(&str, &[&str])] = &[
+        (
+            "WNASPI32.DLL",
+            &["GetASPI32SupportInfo", "SendASPI32Command"],
+        ),
+        (
+            "KERNEL32.DLL",
+            &["ExitProcess", "CreateEventA", "WaitForSingleObject"],
+        ),
+    ];
+    let mut data = vec![0u8; 0xA00];
+    let mut read = read10_srb(16);
+    read[3] |= 0x40;
+    data[0x40..0x90].copy_from_slice(&read);
+    let mut rejected = read10_srb(16);
+    rejected[3] |= 0x40;
+    rejected[8] = 1;
+    data[0x100..0x150].copy_from_slice(&rejected);
+    let exe = program(BASE, false, imports, &data, |a, l| {
+        let mut fail = a.create_label();
+        for (srb, keep) in [(0x40, 0x180), (0x100, 0x184)] {
+            a.push(0i32)?;
+            a.push(0i32)?;
+            a.push(1i32)?;
+            a.push(0i32)?;
+            a.call(l.import(3))?;
+            a.mov(dword_ptr(l.at(srb + 24)), eax)?;
+            a.mov(dword_ptr(l.at(keep)), eax)?;
+        }
+        a.mov(dword_ptr(l.at(0x50)), l.at(0x200) as i32)?;
+        a.mov(dword_ptr(l.at(0x110)), l.at(0x200) as i32)?;
+        for srb in [0x40, 0x100] {
+            a.push(l.at(srb) as i32)?;
+            a.call(l.import(1))?;
+            a.add(esp, 4)?;
+            a.mov(ebx, 1)?;
+            a.test(eax, eax)?;
+            a.jne(fail)?;
+        }
+        // The rejected request's event: by then the read is done.
+        a.mov(eax, dword_ptr(l.at(0x184)))?;
+        a.push(-1i32)?;
+        a.push(eax)?;
+        a.call(l.import(4))?;
+        a.mov(ebx, 2)?;
+        a.cmp(byte_ptr(l.at(0x101)), 0x82)?;
+        a.jne(fail)?;
+        a.mov(ebx, 3)?;
+        a.cmp(byte_ptr(l.at(0x41)), 1)?;
+        a.jne(fail)?;
+        a.xor(ebx, ebx)?;
+        a.set_label(&mut fail)?;
+        a.push(ebx)?;
+        a.call(l.import(2))?;
+        a.int3()
+    });
+    let mut cpu = machine("wnaspi32_order", exe);
+    cpu.bus
+        .mount_drive(3, &cue, rust_dos::disk::MountOptions::default(), false)
+        .unwrap();
+    // Two seconds: the drive spins up for one before its first read.
+    assert!(
+        run_to_exit(&mut cpu, 400),
+        "the program didn't end: {:?}",
+        printed(&cpu)
+    );
+    assert_eq!(cpu.errorlevel, 0, "{}", printed(&cpu));
+}
+
+#[test]
 fn wnaspi32_finishes_an_event_request_while_the_program_polls() {
     // A program that sends an event request and then watches the block's
     // status byte, calling nothing, sees it finished by the scheduler's
