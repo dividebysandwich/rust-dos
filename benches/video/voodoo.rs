@@ -287,7 +287,8 @@ pub fn frames(c: &mut Criterion) {
     group.finish();
 }
 
-/// A Voodoo2 at 640x480, as `card` sets it up, for the 2D engine.
+/// A Voodoo2 with 640-pixel rows, at the 640x480 a reset leaves, for
+/// the 2D engine.
 fn voodoo2(mirror: bool) -> Voodoo {
     let mut v = Voodoo::with_workers(Board::Voodoo2, 0);
     v.config_write(0x40, 1);
@@ -328,21 +329,24 @@ fn reg3d(v: &mut Voodoo, reg: usize, data: u32) {
 }
 
 /// A CPU-to-screen copy of a whole 640x480 picture of 16-bit pixels,
-/// two a bltData word, as Moto Racer copies its sky each frame. Each word
-/// checks the recording's layout (`mirror_sync`) when the OpenGL renderer
-/// records; the software renderer's words skip it.
+/// two a bltData word: 153,600 words, where Moto Racer sends 40,000 a
+/// frame for its sky. Each word checks the recording's layout
+/// (`mirror_sync`) when the OpenGL renderer records; the software
+/// renderer's words skip it.
 pub fn blt_words(c: &mut Criterion) {
     const WORDS: u32 = 640 * 480 / 2;
+    type Setup = fn(bool) -> Voodoo;
+    type Reg = fn(&mut Voodoo, usize, u32);
     let mut group = c.benchmark_group("video/voodoo/blt_words");
     group.throughput(Throughput::Elements(WORDS as u64));
-    for (card, reg) in [
-        ("voodoo2", write as fn(&mut Voodoo, usize, u32)),
-        ("voodoo3", reg3d),
-    ] {
+    let cards: [(&str, Setup, Reg, u32); 2] = [
+        ("voodoo2", voodoo2, write, 0),
+        ("voodoo3", voodoo3, reg3d, 0x10_0000),
+    ];
+    for (card, setup, reg, base) in cards {
         for (name, mirror) in [("software", false), ("gl", true)] {
-            let mut v = if card == "voodoo2" { voodoo2(mirror) } else { voodoo3(mirror) };
-            let base = if card == "voodoo2" { 0 } else { 0x10_0000 };
-            let mut copy = |v: &mut Voodoo| {
+            let mut v = setup(mirror);
+            let copy = |v: &mut Voodoo| {
                 reg(v, BLT_ROP, 0xCCCC);
                 reg(v, BLT_DST_BASE_ADDR, base);
                 reg(v, BLT_XY_STRIDES, 1280 << 16);
