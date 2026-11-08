@@ -60,15 +60,11 @@ run in place of rust-dos's DPMI host, with no setting to change.
 [win9x-howto.md](win9x-howto.md) has the whole setup of a Windows 95 or
 98 image. The 3dfx part of it:
 
-- **Voodoo3 or Banshee:** install 3dfx's Voodoo3 driver in the image.
-  The [reference driver
+- **Voodoo3 or Banshee:** install 3dfx's [reference driver
   1.07.00](https://archive.org/details/3dfx-voodoo-3-reference-driver-1.07.00)
-  is the one tried; [the Voodoo3
-  driver](win9x-howto.md#the-voodoo3-driver) has the steps. Its
-  Direct3D needs DirectX 7 or later. Glover needs the earlier
-  4.11.01.1151 from 3dfx's [Voodoo3 driver CD
-  1.2](https://archive.org/details/voodoo3v12) (see
-  [compatibility.md](compatibility.md)).
+  in the image; [the Voodoo3 driver](win9x-howto.md#the-voodoo3-driver)
+  has the steps. Its Direct3D needs DirectX 7 or later. A game that
+  needs another driver version is in [compatibility.md](compatibility.md).
 - **Voodoo2 on Windows 98 SE:** install 3dfx's reference driver 3.03.00
   ([`rkv2dx6.exe`](https://archive.org/details/rkv2dx6)) as [3dfx
   Voodoo2](../CONFIGURATION.md#3dfx-voodoo2) says. Windows' OpenGL

@@ -13,63 +13,44 @@ disc as it is.
    needs.
 2. Make that image of your disc with one of the tools in [Dumping a
    disc](#dumping-a-disc). If you don't know the protection, make the
-   most complete image: BlindWrite or Alcohol 120% with subchannel data
-   and data position measurement (DPM), which keeps all that the
-   protections in the table check.
+   most complete image: Alcohol 120% with subchannel data and data
+   position measurement (DPM).
 3. Mount the image as the game's CD (see [Mounting the
    image](#mounting-the-image)), with every file the dump made beside it.
 4. Start the game. If the check fails, see [When the check
    fails](#when-the-check-fails).
 
-## Which protections run
+[compatibility.md](compatibility.md) has what particular games need
+beyond this, such as which of their discs to mount.
 
-| Protection | The image it needs | Games that pass it |
-|---|---|---|
-| SafeDisc 1 | Whole 2352-byte sectors: BIN and CUE, CHD, CloneCD, or BlindWrite or Alcohol 120% in raw mode | Discworld Noir (built-in Windows) |
-| SafeDisc 2 | The same as SafeDisc 1 | Oni (built-in Windows), Anachronox (SafeDisc 2.30, booted Windows) |
-| SecuROM 4.8 | BlindWrite or Alcohol 120% with the subchannel and DPM data | Grom (SecuROM 4.84, built-in Windows) |
-| Code wheels, manual lookups | The manual or wheel as a PDF or picture (see [Manuals and code wheels](#manuals-and-code-wheels)) | Any |
+## The image each protection needs
 
-For a protection not in the table, use the most complete image
-(BlindWrite or Alcohol 120% with subchannel and DPM data), and if the
-check fails, report it as [When the check fails](#when-the-check-fails)
-says.
+| Protection | The image it needs |
+|---|---|
+| SafeDisc 1 and 2 | Whole 2352-byte sectors: BIN and CUE, CHD, or Alcohol 120% in raw mode. An ISO fails. |
+| SecuROM 4.8, and any other disc protection | Alcohol 120% with the subchannel and DPM data |
+| Code wheels, manual lookups | The manual or wheel as a PDF or picture (see [Manuals and code wheels](#manuals-and-code-wheels)) |
 
-"The check passes" means the game gets past its disc check and stops
-later for another reason, which has an issue of its own:
+What each image keeps:
 
-- **Discworld Noir** needs a KERNEL32 function the built-in Windows
-  doesn't have yet
-  ([#812](https://github.com/dividebysandwich/rust-dos/issues/812)).
-- **Grom** then asks Direct3D for 32-bit textures, which a Voodoo3
-  doesn't have, on a real one either: the game's minimum is a later card
-  ([#645](https://github.com/dividebysandwich/rust-dos/issues/645)).
-
-**Anachronox** checks disc 2, as its readme says: keep disc 2 in the
-drive while playing. With disc 1 SafeDisc says it can't find the CD, on
-a real PC too.
-
-Why ISO images fail: SafeDisc's discs have sectors mastered to be
-unreadable, and the protection refuses to run when reading them
-succeeds. An ISO keeps only the 2048 bytes of data of each sector, so
-those sectors read back as good ones and the check fails, as it would on
-Windows 98. An image of whole 2352-byte sectors keeps each sector's
-error-detection code (EDC), and rust-dos reads a sector whose EDC doesn't
-match as the drive did: as an error.
-
-SecuROM 4.8 also reads the subchannel, where its discs have entries
-mastered with errors, and times reads to check where sectors lie on the
-disc. A CUE sheet with BIN files keeps neither the measured positions
-nor, without a `.sub` or `.subcode` file beside it, the subchannel. Only
-BlindWrite's and Alcohol 120%'s images carry DPM data, the positions
-their dump measured.
+- An ISO keeps only the 2048 bytes of data of each sector. SafeDisc's
+  discs have sectors mastered to be unreadable, and they read back from
+  an ISO as good ones, so the check fails, as it would on a real PC.
+- An image of whole 2352-byte sectors keeps each sector's
+  error-detection code, and rust-dos reads a sector whose code doesn't
+  match as an error, as the drive did.
+- SecuROM 4.8 also reads the subchannel and times reads to find where
+  sectors lie on the disc. A CUE sheet keeps the subchannel only with a
+  `.sub` or `.subcode` file beside it, and never the sectors' positions.
+  An Alcohol 120% image made with DPM keeps the positions.
 
 ## DOS games
 
 On the built-in DOS, games read their CDs through MSCDEX. A sector whose
-EDC doesn't match reads as a CRC error there, and a file read over it as
-a data error, as on a real drive. MSCDEX's reads aren't timed, so a DOS
-protection that times the drive doesn't see a real drive's times.
+error-detection code doesn't match reads as a CRC error there, and a file
+read over it as a data error, as on a real drive. MSCDEX's reads aren't
+timed, so a DOS protection that times the drive doesn't see a real
+drive's times.
 
 Floppy protections need an 86Box `.86f` image, which keeps sectors with
 bad CRCs and missing sectors. The built-in DOS has no floppy controller,
@@ -92,12 +73,8 @@ profile, and Ctrl+Shift+M shows it over the game:
 
 | Tool | What it makes | Good for |
 |---|---|---|
-| Tool | What it makes | Good for |
-|---|---|---|
 | [redumper](https://github.com/superg/redumper) or [DiscImageCreator](https://github.com/saramibreak/DiscImageCreator) | CUE, BIN and a `.subcode` or `.sub` subchannel file | SafeDisc |
-| CloneCD | `.ccd`, `.img` and `.sub` (discs of one session) | SafeDisc |
-| [BlindWrite](https://www.vso-software.fr/products/blindwrite/) 5 or 6, with subchannel and DPM | `.b5t` or `.b6t`, its data files, and a `.bwa` file with the DPM data | Everything in the table |
-| [Alcohol 120%](https://www.alcohol-soft.com/), with subchannel and DPM | `.mds` and `.mdf` | Everything in the table |
+| [Alcohol 120%](https://www.alcohol-soft.com/), with subchannel and DPM | `.mds` and `.mdf` | Every protection in the table |
 | [chdman](https://docs.mamedev.org/tools/chdman.html), from a CUE and BIN dump | `.chd` | SafeDisc; rust-dos reads no subchannel from a CHD |
 
 Each tool's own documentation says how to make an exact copy with it:
@@ -106,10 +83,14 @@ it. Keep every file the tool makes together, under the names it gave
 them.
 
 Rust-DOS reads Alcohol 120% descriptors of version 1, of CDs, with the
-tracks in one `.mdf` file
-([#648](https://github.com/dividebysandwich/rust-dos/issues/648) has the
-others). [CD images](../CONFIGURATION.md#cd-images) lists every format
-and what each keeps.
+tracks in one `.mdf` file.
+
+Images you already have from BlindWrite 5 or 6 (`.b5t` or `.b6t`, with
+their data files and `.bwa` DPM file) or CloneCD (`.ccd`, `.img` and
+`.sub`, one session) work too: a BlindWrite image with subchannel and DPM
+keeps what Alcohol 120%'s does, and a CloneCD image what a CUE and BIN
+with a subchannel file do. [CD images](../CONFIGURATION.md#cd-images)
+lists every format and what each keeps.
 
 ## Mounting the image
 
@@ -117,10 +98,10 @@ Mount the descriptor or CUE sheet, not the data file:
 
 ```ini
 [drives]
-D=~/cds/grom.mds cdrom
+D=~/cds/game.mds cdrom
 ```
 
-At the DOS prompt, `MOUNT D ~/cds/grom.mds` does the same. For a game on
+At the DOS prompt, `MOUNT D ~/cds/game.mds` does the same. For a game on
 the built-in Windows, that drive line goes in the game's profile
 ([Windows games](../CONFIGURATION.md#windows-games)). A booted Windows
 image gets the CD in its IDE CD-ROM drive
@@ -134,11 +115,11 @@ label](../CONFIGURATION.md#the-cds-drive-letter-and-label)).
 
 1. **An ISO, or an image made from one:** dump the disc again in one of
    the formats the table names for its protection.
-2. **The wrong disc:** a game on several CDs may check only one of them,
-   as Anachronox does disc 2. Its readme says which.
+2. **The wrong disc:** a game on several CDs may check only one of them.
+   Its readme or [compatibility.md](compatibility.md) says which.
 3. **A file missing beside the image:** a `.sub` or `.subcode` file has
-   to have the CUE sheet's name or a data file's; BlindWrite's and
-   Alcohol's data files and the `.bwa` file stay beside the descriptor.
+   to have the CUE sheet's name or a data file's, and an image's data
+   files (and BlindWrite's `.bwa` file) stay beside its descriptor.
 4. **The other Windows:** a game that fails on the built-in Windows may
    pass on a Windows 98 image, and the other way round.
 5. **On the built-in Windows, a message naming a function or DLL:** the
@@ -152,11 +133,3 @@ that names the game, its release and region, the protection and its
 version if you know them, the tool and format you dumped with, which
 Windows it ran on, and the last lines of the log. Don't attach the disc
 image or anything taken from the disc.
-
-Known limits that a protection could run into:
-
-- On the built-in Windows, ASPI requests without an event finish at
-  once, in no emulated time
-  ([#636](https://github.com/dividebysandwich/rust-dos/issues/636)).
-- A CloneCD image has to be of one session, and a CHD's subchannel isn't
-  read.

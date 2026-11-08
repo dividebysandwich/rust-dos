@@ -185,7 +185,7 @@ read the disc on Windows 98, through WNASPI32 and the CD-ROM drive. An
 image that doesn't keep what the protection checks fails it as it would
 on Windows 98: an ISO fails SafeDisc's check, and an image without DPM
 data fails SecuROM 4.8's. [copy-protection.md](copy-protection.md) says
-which protections pass and the image each needs.
+which image each protection needs and how to make it.
 
 ### What isn't there
 

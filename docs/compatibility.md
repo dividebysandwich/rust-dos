@@ -142,8 +142,8 @@ opcode, `win32_version=98se` when a message names the version, more
 * **SafeDisc and SecuROM games**: use an image of the disc that keeps
   what the protection checks. An ISO fails SafeDisc's check, and an
   image without DPM data SecuROM 4.8's, as on Windows 98.
-  [copy-protection.md](copy-protection.md) has the protections that
-  pass, the image each needs and the tools that make it.
+  [copy-protection.md](copy-protection.md) has the image each
+  protection needs and the tools that make it.
 
 ### Installer archives
 
@@ -170,6 +170,9 @@ with every file the same as Unshield's or idecomp's:
 which drivers to install, and [3dfx.md](3dfx.md) which 3dfx card a game
 needs.
 
+* **Anachronox**: mount disc 2 while you play. Its SafeDisc check reads
+  disc 2, as its readme says, and with disc 1 it says it can't find the
+  CD ([copy-protection.md](copy-protection.md) has the image it needs).
 * **Expendable**: Windows 98 SE on a Voodoo Graphics card,
   `voodoo=true`, `machine=svga_s3virge`, `cpu=pentium_ii`,
   `memsize=128`, and `DisplayDriver [1]` in its `config.txt`
