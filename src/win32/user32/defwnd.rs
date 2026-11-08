@@ -630,19 +630,6 @@ fn caption_buttons(state: &State, hwnd: u32) -> Vec<(u32, Rect)> {
     buttons
 }
 
-/// The frame's width and height, as AdjustWindowRectEx counts them.
-fn frame_size(style: u32, ex: u32) -> (i32, i32) {
-    if window::has_thick_frame(style, ex) {
-        (metric(32), metric(33))
-    } else if window::has_dlg_frame(style, ex) {
-        (metric(7), metric(8))
-    } else if window::has_thin_frame(style) {
-        (metric(5), metric(6))
-    } else {
-        (0, 0)
-    }
-}
-
 /// The caption's rectangle in window coordinates, with the line under
 /// it.
 fn caption_rect(state: &State, hwnd: u32) -> Option<Rect> {
@@ -652,7 +639,7 @@ fn caption_rect(state: &State, hwnd: u32) -> Option<Rect> {
         return None;
     }
     let r = Rect::new(0, 0, w.rect.width(), w.rect.height());
-    let (fx, fy) = frame_size(style, ex);
+    let (fx, fy) = window::frame_size(style, ex);
     let mut r = r.inflate(-fx, -fy);
     if ex & WS_EX_STATICEDGE != 0 {
         r = r.inflate(-metric(5), -metric(6));
@@ -747,7 +734,7 @@ pub fn nc_paint(cpu: &mut Cpu, hwnd: u32, rgn: u32) {
     let thick = window::has_thick_frame(style, ex);
     if thick || window::has_dlg_frame(style, ex) {
         r = paint::edge(cpu, hdc, r, EDGE_RAISED, BF_RECT | BF_ADJUST).1;
-        let (fx, fy) = frame_size(style, ex);
+        let (fx, fy) = window::frame_size(style, ex);
         let (bx, by) = (fx - m(45), fy - m(46));
         let color = if !thick {
             sysparams::COLOR_BTNFACE

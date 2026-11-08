@@ -101,7 +101,7 @@ space is made up: between 1.75 and 3.75 GB through
 `GetDiskFreeSpaceExA`, and at most just under 2 GB through
 `GetDiskFreeSpaceA`, as Windows 95 and 98 give a real disk's space. It
 drops as files are written. A setup that checks for the space it needs
-finds enough. DOS's own answer for such a drive is 80 MB.
+finds enough. DOS's own answer for such a drive is 160 to 480 MB.
 
 ### The system folder
 
@@ -185,6 +185,11 @@ fails it as on Windows 98. Dump the CD with its error-correction data
   composer need the composition engine, which isn't there: they load and
   play nothing.
 - **DirectInput's action maps** and device images (#378).
+- **GLU's quadrics, NURBS and tessellator.** GLU32.DLL scales images,
+  builds mipmaps, sets up matrices and gives its texts. gluSphere,
+  gluNurbsCurve, gluTessVertex and the other drawing functions do
+  nothing, and gluNewQuadric, gluNewNurbsRenderer and gluNewTess return
+  NULL (#741).
 - **Functions not written yet.** A program that calls one stops with a
   message naming it. Please
   [open an issue](https://github.com/dividebysandwich/rust-dos/issues)
