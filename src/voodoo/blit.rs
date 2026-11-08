@@ -653,10 +653,13 @@ impl Voodoo {
         // comes from the CRTC and vidProcCfg, written outside
         // `register_to`, so each word compares it. A recording that lost
         // its layout since (too many commands) gets it back.
-        let height = self.banshee.is_some().then(|| self.banshee_mirror_height());
+        let recorded = (self.mirror.get_mut().as_ref()).map(|m| m.layout().map(|k| k.height));
         let synced = self.blt_queue.get().is_some()
-            && (self.mirror.get_mut().as_ref())
-                .is_none_or(|m| m.layout().is_some_and(|k| height.is_none_or(|h| h == k.height)));
+            && match recorded {
+                None => true,
+                Some(None) => false,
+                Some(Some(h)) => self.banshee.is_none() || h == self.banshee_mirror_height(),
+            };
         let queue = self.blt_queue_cached();
         if queue.is_none() && self.writes_queue() {
             // The rows it has left to write, whose pixels it may read.
