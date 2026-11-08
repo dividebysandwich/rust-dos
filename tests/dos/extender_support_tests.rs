@@ -539,6 +539,102 @@ fn country_date_and_indos() {
     assert_eq!(cpu.bus.read_8(flag), 0);
 }
 
+/// The DBCS lead byte table, which Watcom's C runtime and DOS/4GW read at
+/// startup: empty for code page 437, so no byte starts a two-byte
+/// character. Birthright's DOS/4GW asks with DS:SI = 0000:0000, which
+/// left alone would make the interrupt vectors the table.
+#[test]
+fn dbcs_lead_byte_table_is_empty() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.bus.load_bytes(0, &[0x8B, 0x01, 0xBA, 0x05]);
+    cpu.set_ds(0);
+    cpu.set_si(0);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    int21(&mut cpu, 0x6300);
+    assert!(!cf(&cpu));
+    assert_eq!(cpu.get_al(), 0);
+    let ranges = cpu.get_physical_addr(cpu.ds(), cpu.si());
+    assert_ne!(ranges, 0);
+    assert_eq!(cpu.bus.read_16(ranges), 0, "the list ends at once");
+
+    // AX=6507h: info ID 7 and a far pointer to the same table, with its
+    // length word in front.
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.set_cx(5);
+    int21(&mut cpu, 0x6507);
+    assert!(!cf(&cpu));
+    assert_eq!((cpu.bus.read_8(0x30000), cpu.cx()), (7, 5));
+    assert_eq!(cpu.ax(), 437, "the active code page, as MS-DOS 6.22 returns");
+    let (offset, segment) = (cpu.bus.read_16(0x30001), cpu.bus.read_16(0x30003));
+    let table = cpu.get_physical_addr(segment, offset);
+    assert_eq!(cpu.bus.read_16(table), 0, "length");
+    assert_eq!(table + 2, ranges);
+
+    // Less than 5 bytes of room: error 1, and nothing written.
+    cpu.bus.write_8(0x30000, 0xAA);
+    cpu.set_cx(4);
+    int21(&mut cpu, 0x6507);
+    assert!(cf(&cpu));
+    assert_eq!((cpu.ax(), cpu.bus.read_8(0x30000)), (1, 0xAA));
+
+    // The interim console flag of Far East DOS: MS-DOS without DBCS
+    // support does nothing and succeeds.
+    cpu.set_dx(0x1234);
+    cpu.set_cpu_flag(CpuFlags::CF, true);
+    int21(&mut cpu, 0x6302);
+    assert!(!cf(&cpu));
+    assert_eq!((cpu.ax(), cpu.dx()), (0x6302, 0x1234));
+}
+
+/// AX=6501h copies as much of the country information as CX has room for,
+/// and the length word after the info ID says how much. The bytes are
+/// what MS-DOS 6.22 wrote for CX=40 and 41 in 86Box, the case map
+/// pointer apart, and AX is the active code page there.
+#[test]
+fn extended_country_info_fits_the_buffer() {
+    let mut cpu = Cpu::new(PathBuf::from("."));
+    cpu.set_es(0x3000);
+    cpu.set_di(0);
+    cpu.bus.load_bytes(0x30000, &[0xAA; 48]);
+    cpu.set_cx(9);
+    int21(&mut cpu, 0x6501);
+    assert!(!cf(&cpu));
+    assert_eq!((cpu.ax(), cpu.cx()), (437, 9));
+    assert_eq!((cpu.bus.read_8(0x30000), cpu.bus.read_16(0x30001)), (1, 6));
+    assert_eq!((cpu.bus.read_16(0x30003), cpu.bus.read_16(0x30005)), (1, 437));
+    assert_eq!(cpu.bus.read_16(0x30007), 0, "date format: USA");
+    assert_eq!(cpu.bus.read_8(0x30009), 0xAA);
+
+    cpu.set_cx(64);
+    int21(&mut cpu, 0x6501);
+    assert_eq!((cpu.cx(), cpu.bus.read_16(0x30001)), (41, 38));
+    assert_eq!(cpu.bus.read_8(0x30009), b'$');
+    assert_eq!(cpu.bus.read_8(0x30029), 0xAA);
+
+    #[rustfmt::skip]
+    let msdos: [u8; 41] = [
+        0x01, 0x26, 0x00, 0x01, 0x00, 0xB5, 0x01, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00,
+        0x00, 0x2C, 0x00, 0x2E, 0x00, 0x2D, 0x00, 0x3A, 0x00, 0x00, 0x02, 0x00, 0, 0,
+        0, 0, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    for cx in [40u16, 41] {
+        cpu.bus.load_bytes(0x30000, &[0xAA; 48]);
+        cpu.set_cx(cx);
+        int21(&mut cpu, 0x6501);
+        let mut got = [0u8; 42];
+        for (i, b) in got.iter_mut().enumerate() {
+            *b = cpu.bus.read_8(0x30000 + i);
+        }
+        got[25..29].fill(0); // the case map routine's far pointer
+        let mut want = msdos;
+        want[1] = (cx - 3) as u8;
+        assert_eq!(&got[..cx as usize], &want[..cx as usize], "CX={cx}");
+        assert_eq!(got[cx as usize], 0xAA, "CX={cx}: nothing past the buffer");
+        assert_eq!((cpu.ax(), cpu.cx()), (437, cx));
+    }
+}
+
 #[test]
 fn the_shell_starts_in_real_mode_with_extended_memory_free() {
     let mut cpu = Cpu::new(PathBuf::from("."));
