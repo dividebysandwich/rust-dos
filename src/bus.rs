@@ -1766,7 +1766,12 @@ impl Bus {
                     self.sb_frame = f;
                 }
                 if sb_on {
-                    let mut frame = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    let held = (self.sb_frame.0 as f32 * vl, self.sb_frame.1 as f32 * vr);
+                    // The capacitor on the card's output takes the level
+                    // the DAC holds out. It goes first, before the
+                    // low-pass, so that when it starts settled (after a
+                    // state load) the low-pass gets silence, not a step.
+                    let mut frame = self.mixer.sb_coupling(held);
                     if let Some((cutoff, order)) = sb_filter {
                         frame = self.mixer.sb_filter(frame, cutoff, order);
                     }

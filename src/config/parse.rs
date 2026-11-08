@@ -485,6 +485,10 @@ pub fn parse(text: &str, base_dir: &Path, home: Option<&Path>) -> Config {
                             Some(filter) => mixer.sb_filter = filter,
                             None => warn(format!("invalid sb_filter '{}' (auto or off)", value)),
                         },
+                        "sb_coupling" => match parse_bool(value) {
+                            Some(on) => mixer.sb_coupling = on,
+                            None => warn(format!("invalid sb_coupling '{}' (on or off)", value)),
+                        },
                         "reverb" => match ReverbPreset::parse(value) {
                             Some(preset) => mixer.reverb = preset,
                             None => warn(format!("invalid reverb '{}' (off, tiny, small, medium, large or huge)", value)),

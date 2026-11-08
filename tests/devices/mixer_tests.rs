@@ -181,10 +181,22 @@ fn the_speaker_filter_softens_the_square_wave() {
 }
 
 /// The Sound Blaster `model`'s direct DAC stepping from silence to loud:
-/// its first samples, with its output filter or without.
+/// its first samples, with its output filter or without, and without the
+/// capacitor on its output.
 fn dac_step(model: SbModel, filter: SbFilter) -> Vec<i16> {
+    dac_hold(model, filter, false, 5)
+}
+
+/// The left samples of `ms` after the Sound Blaster `model`'s direct DAC
+/// steps from silence to loud and holds that, with its output filter or
+/// without, and with the capacitor on its output (`sb_coupling`) or
+/// without.
+fn dac_hold(model: SbModel, filter: SbFilter, coupling: bool, ms: u64) -> Vec<i16> {
     let mut bus = bus();
-    bus.set_mixer(unfiltered_with(|m| m.sb_filter = filter));
+    bus.set_mixer(unfiltered_with(|m| {
+        m.sb_filter = filter;
+        m.sb_coupling = coupling;
+    }));
     bus.configure_sound(Some(SbConfig { model, ..SbConfig::default() }), true);
     bus.io_write(0x226, 1);
     bus.io_write(0x226, 0);
@@ -194,8 +206,14 @@ fn dac_step(model: SbModel, filter: SbFilter) -> Vec<i16> {
     samples(&mut bus);
     bus.io_write(0x22C, 0x10);
     bus.io_write(0x22C, 0xF0);
-    wait_ms(&mut bus, 5);
-    samples(&mut bus).chunks(2).map(|frame| frame[0]).collect()
+    // In steps, as the window renders: the mixer starts afresh after a
+    // gap of over half a second.
+    let mut left = Vec::new();
+    for _ in 0..ms.div_ceil(10) {
+        wait_ms(&mut bus, 10.min(ms));
+        left.extend(samples(&mut bus).chunks(2).map(|frame| frame[0]));
+    }
+    left
 }
 
 #[test]
@@ -211,6 +229,27 @@ fn the_sb_filter_follows_the_model() {
     assert!(pro[0] < loud / 4, "{:?}", &pro[..4]);
     assert!(sb2[0] > pro[0] && sb2[0] < loud / 2, "{:?} {:?}", &sb2[..4], &pro[..4]);
     assert!((pro[200] - loud).abs() < loud / 50, "it settles on the level");
+}
+
+/// A level the DAC holds, as ShadowCaster's driver leaves it after its
+/// probe of the card (issue 719), fades out of the mix through the
+/// capacitor on the card's output: the step is heard, and a second later
+/// the output is back at silence. Without the capacitor it stays as a
+/// constant offset.
+#[test]
+fn the_dac_level_held_fades_out_of_the_mix() {
+    for model in [SbModel::Sb2, SbModel::SbPro2, SbModel::Sb16] {
+        let raw = dac_hold(model, SbFilter::Auto, false, 1000);
+        let loud = *raw.last().unwrap();
+        assert!(loud > 10000, "{model:?}: {loud}");
+        let coupled = dac_hold(model, SbFilter::Auto, true, 1000);
+        let peak = *coupled.iter().max().unwrap();
+        assert!(peak > loud - loud / 10, "{model:?}: peak {peak}");
+        let tenth = coupled[6615];
+        assert!(tenth > 0 && tenth < loud / 10, "{model:?}: {tenth}");
+        let tail = &coupled[coupled.len() - 4410..];
+        assert!(tail.iter().all(|s| s.abs() <= 1), "{model:?}: {tail:?}");
+    }
 }
 
 /// An FM note that plays for 50 ms, then the loudness of the 250 ms after

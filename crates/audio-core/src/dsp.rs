@@ -89,10 +89,61 @@ impl OnePoleHighpass {
 
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
-        let y = flush(self.a * (self.y1 + x - self.x1));
+        // The input's change first: on a level held, exactly 0. Adding the
+        // small output to the large input first rounds it to the input's
+        // precision, and the decay stalls at a few units off silence.
+        let y = flush(self.a * (self.y1 + (x - self.x1)));
         self.x1 = x;
         self.y1 = y;
         y
+    }
+}
+
+/// Where the capacitor in series with a sound card's output starts to cut,
+/// in hertz. With the input behind it, it is a first-order high-pass at
+/// 1/(2 pi R C): 4.7 uF into a 10 kOhm line input (TI's application note
+/// SDAA293 on output coupling capacitors) makes about 3 Hz, far below
+/// anything heard.
+pub const COUPLING_HZ: f32 = 3.0;
+
+/// The capacitor in series with each of a sound card's outputs, left and
+/// right: a first-order high-pass at `COUPLING_HZ`. A sound card's
+/// output reaches the line input or the speakers through a capacitor,
+/// which keeps the bias voltage of its amplifier off them (the SB 2.0's
+/// TEA2025B, a single-supply amplifier, drives its speakers that way). A
+/// DAC holds its last sample until the next, however long; the capacitor
+/// lets none of that steady level through, and a level the DAC steps to
+/// fades within a fraction of a second (the time constant is 53 ms),
+/// heard as a click at most.
+///
+/// It starts settled on the first frame it gets after `Default` (a reset
+/// of the mixer's filters, as after a state was loaded): a level the DAC
+/// already held then passes as it would after a long while, as silence,
+/// without a click of its own.
+#[derive(Clone, Copy, Debug)]
+pub struct OutputCoupling {
+    filters: [OnePoleHighpass; 2],
+    settled: bool,
+}
+
+impl Default for OutputCoupling {
+    fn default() -> Self {
+        Self {
+            filters: [OnePoleHighpass::new(COUPLING_HZ); 2],
+            settled: false,
+        }
+    }
+}
+
+impl OutputCoupling {
+    #[inline]
+    pub fn process(&mut self, (l, r): (f32, f32)) -> (f32, f32) {
+        if !self.settled {
+            self.settled = true;
+            self.filters[0].x1 = l;
+            self.filters[1].x1 = r;
+        }
+        (self.filters[0].process(l), self.filters[1].process(r))
     }
 }
 
@@ -466,6 +517,40 @@ mod tests {
             speaker.process(0.0);
         }
         assert_eq!(speaker.process(0.0), 0.0);
+    }
+
+    /// A level the DAC steps to and holds comes through at once and
+    /// fades: under a tenth within 150 ms and out within a second. A tone
+    /// passes as it was.
+    #[test]
+    fn the_output_coupling_lets_a_held_level_fade() {
+        let mut coupling = OutputCoupling::default();
+        assert_eq!(coupling.process((0.0, 0.0)), (0.0, 0.0));
+        let held = (16384.0, -8192.0);
+        let out: Vec<(f32, f32)> = (0..44100).map(|_| coupling.process(held)).collect();
+        assert!((out[0].0 - 16384.0).abs() < 16.0, "{:?}", out[0]);
+        assert!((out[0].1 + 8192.0).abs() < 8.0, "{:?}", out[0]);
+        let tenth = out[6615];
+        assert!(tenth.0 > 0.0 && tenth.0 < 1638.0, "{:?}", tenth);
+        assert!(tenth.1 < 0.0 && tenth.1 > -819.0, "{:?}", tenth);
+        let second = out[44099];
+        assert!(second.0.abs() < 1.0 && second.1.abs() < 1.0, "{:?}", second);
+        let mut coupling = OutputCoupling::default();
+        let gain = gain(|x| coupling.process((x, x)).0, 100.0);
+        assert!((gain - 1.0).abs() < 0.01, "{}", gain);
+    }
+
+    /// After a reset of the mixer's filters the level the DAC holds is
+    /// silence from the first frame, as it would be after a long while,
+    /// and what the DAC plays next passes.
+    #[test]
+    fn the_output_coupling_starts_settled() {
+        let mut coupling = OutputCoupling::default();
+        for _ in 0..1000 {
+            assert_eq!(coupling.process((16384.0, -16384.0)), (0.0, 0.0));
+        }
+        let step = coupling.process((16384.0 + 256.0, -16384.0));
+        assert!((step.0 - 256.0).abs() < 1.0 && step.1 == 0.0, "{:?}", step);
     }
 
     #[test]

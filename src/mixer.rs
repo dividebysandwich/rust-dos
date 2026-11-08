@@ -4,7 +4,7 @@
 //! emulated cards' own levels, such as the Sound Blaster's mixer chip,
 //! which programs set and a new program resets.
 
-use crate::dsp::{Chorus, Reverb, SpeakerFilter, StereoLowpass};
+use crate::dsp::{Chorus, OutputCoupling, Reverb, SpeakerFilter, StereoLowpass};
 pub use crate::dsp::{ChorusPreset, ReverbPreset};
 
 /// A sound source the mixer has a volume for, or `Master` for the mix.
@@ -150,6 +150,9 @@ pub struct MixerSettings {
     /// speaker of a PC (`speaker_filter`).
     pub speaker_filter: bool,
     pub sb_filter: SbFilter,
+    /// The capacitor on the Sound Blaster's output, which keeps the level
+    /// its DAC holds between sounds out of the mix (`sb_coupling`).
+    pub sb_coupling: bool,
     /// The reverb and chorus the FM synthesizer, the Gravis Ultrasound and
     /// MIDI are sent to.
     pub reverb: ReverbPreset,
@@ -168,6 +171,7 @@ impl Default for MixerSettings {
             levels: [100; CHANNELS],
             speaker_filter: true,
             sb_filter: SbFilter::Auto,
+            sb_coupling: true,
             reverb: ReverbPreset::Off,
             chorus: ChorusPreset::Off,
             reverb_mix: DEFAULT_MIX,
@@ -218,6 +222,7 @@ fn dry_wet(mix: u16) -> (f32, f32) {
 struct Dsp {
     speaker: SpeakerFilter,
     sb: StereoLowpass,
+    sb_coupling: OutputCoupling,
     reverb: Option<Reverb>,
     chorus: Option<Chorus>,
 }
@@ -336,6 +341,9 @@ impl Mixer {
         if settings.sb_filter != old.sb_filter {
             self.dsp.sb = StereoLowpass::default();
         }
+        if settings.sb_coupling != old.sb_coupling {
+            self.dsp.sb_coupling = OutputCoupling::default();
+        }
         self.mix();
     }
 
@@ -344,6 +352,7 @@ impl Mixer {
     pub fn clear_tails(&mut self) {
         self.dsp.speaker = SpeakerFilter::default();
         self.dsp.sb = StereoLowpass::default();
+        self.dsp.sb_coupling = OutputCoupling::default();
         self.dsp.reverb = (self.settings.reverb != ReverbPreset::Off).then(|| Reverb::new(self.settings.reverb));
         self.dsp.chorus = (self.settings.chorus != ChorusPreset::Off).then(Chorus::new);
     }
@@ -453,6 +462,17 @@ impl Mixer {
     #[inline]
     pub(crate) fn sb_filter(&mut self, frame: (f32, f32), cutoff: f32, order: usize) -> (f32, f32) {
         self.dsp.sb.process(frame, cutoff, order)
+    }
+
+    /// The Sound Blaster's frame through the capacitor on its output
+    /// (`OutputCoupling`), if `sb_coupling` is on.
+    #[inline]
+    pub(crate) fn sb_coupling(&mut self, frame: (f32, f32)) -> (f32, f32) {
+        if self.settings.sb_coupling {
+            self.dsp.sb_coupling.process(frame)
+        } else {
+            frame
+        }
     }
 
     /// The mix of a frame: the sources with the reverb and chorus of what
