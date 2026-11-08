@@ -17,7 +17,7 @@ const POWERVR_VERSION: u16 = 1;
 const IDE_VERSION: u16 = 2;
 const FDC_VERSION: u16 = 1;
 const DPMI_VERSION: u16 = 2;
-const WIN32_VERSION: u16 = 41;
+const WIN32_VERSION: u16 = 44;
 const NET_VERSION: u16 = 2;
 const SERIAL_VERSION: u16 = 2;
 const VFX1_VERSION: u16 = 1;
@@ -816,6 +816,9 @@ mod tests {
         (39, 0xEC3D_4AFA_6107_B768), // the screens kept under CS_SAVEBITS windows
         (40, 0x7030_77A9_A34C_1A60), // the Win16 task a message handed the turn to
         (41, 0x6147_C450_7D40_D8CF), // the codecs a process opened with ICOpen
+        (42, 0x7540_74DC_C874_40DC), // change notification handles
+        (43, 0x1974_9F8E_624E_4E47), // DirectShow's joints and media type enumerators
+        (44, 0xBE96_CD5A_0B06_51EC), // the program's allocator a DirectShow link uses
     ];
 
     /// The text between the parentheses of `macro_name!(...)` at `from`.

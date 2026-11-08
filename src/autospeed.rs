@@ -15,6 +15,9 @@
 //! memory, the bursts of writes that copy it. A protected-mode program may
 //! copy only what changed since the frame before (Alien Legacy): a burst
 //! too small to be a frame that reaches across the screen is one too.
+//! Where the bus knows which video memory the display shows (in VESA
+//! modes), only writes there count: Gender Wars copies each frame a second
+//! time, to a copy of the screen out of sight.
 //! Under the built-in Windows, a program's blits to the primary surface
 //! and GDI's drawing on the screen copy the picture in the emulator's own
 //! code (Magic & Mayhem blits each frame from system memory): the bursts
@@ -45,7 +48,9 @@
 //! not a measurement later: programs time their delay loops right after
 //! loading, and a loop timed at all the host has waits for ever (Sam &
 //! Max's General MIDI driver counts to a million in a timer tick, and hangs
-//! if it gets there first).
+//! if it gets there first). A driver set up in the middle of the loading
+//! can't wait for that: a reset of the Sound Blaster, which comes before a
+//! driver times the card, goes back at once (`Bus::end_work_boost`).
 
 use crate::bus::Bus;
 use crate::video::VideoMode;
@@ -241,12 +246,22 @@ pub struct Activity {
     /// Bytes written to video memory, and moved on drives.
     pub video_bytes: u64,
     pub io_bytes: u64,
+    /// While `AutoSpeed` gives a protected-mode program all the host has
+    /// for its reads and writes, the speed it goes back to after them
+    /// (`AutoSpeed::work_return`), for `Bus::end_work_boost`.
+    pub work_return: Option<u32>,
+    /// The times a program reset hardware it times with delay loops while
+    /// it had all the host has for its reads and writes, which ended that
+    /// at once (`Bus::end_work_boost`).
+    pub work_cuts: u64,
     /// The burst going on: its bytes, and the instruction of its last write.
     burst: u64,
     last_write: u64,
-    /// The lowest and highest place in video memory it wrote, past its
-    /// last byte. (The recompiler's own writes to the VGA's planes, which
+    /// Of the bytes it wrote in the picture shown (`picture`), how many,
+    /// and the lowest and highest place in video memory they are at, past
+    /// the last. (The recompiler's own writes to the VGA's planes, which
     /// go on a burst without coming here, leave them out.)
+    shown_bytes: u64,
     low: u64,
     high: u64,
     /// A burst's bytes to count as a frame, and its reach and bytes to
@@ -254,6 +269,11 @@ pub struct Activity {
     burst_min: u64,
     span_min: u64,
     copy_min: u64,
+    /// Where the picture shown lies among the offsets writes come with,
+    /// from its first byte to past its last (`picture`), and whether that
+    /// is known.
+    picture: (u64, u64),
+    picture_known: bool,
     /// The display start, and the instruction it last changed at.
     start: u32,
     last_flip: u64,
@@ -295,6 +315,7 @@ impl Activity {
             span_min: u64::MAX,
             copy_min: u64::MAX,
             low: u64::MAX,
+            picture: (0, u64::MAX),
             ..Self::default()
         }
     }
@@ -307,17 +328,31 @@ impl Activity {
     pub fn video_write(&mut self, at: u64, offset: u64, bytes: u64) {
         self.video_bytes += bytes;
         if at.saturating_sub(self.last_write) > BURST_GAP {
-            if self.burst >= self.burst_min {
+            // Only what lands in the picture shown makes a frame: Gender
+            // Wars writes each frame a second time to a copy of the screen
+            // out of sight. Where the picture isn't known, all of a burst
+            // counts, the recompiler's plane writes too.
+            let shown = if self.picture_known { self.shown_bytes } else { self.burst };
+            if shown >= self.burst_min {
                 self.bursts += 1;
-            } else if self.is_copy(self.burst, self.low, self.high) {
+            } else if self.is_copy(shown, self.low, self.high) {
                 self.copies += 1;
             }
             self.burst = 0;
+            self.shown_bytes = 0;
             (self.low, self.high) = (u64::MAX, 0);
         }
         self.burst += bytes;
-        self.low = self.low.min(offset);
-        self.high = self.high.max(offset + bytes);
+        // Only the part in the picture: a string move without paging comes
+        // here whole, and one to the copy out of sight may reach into the
+        // picture's first rows.
+        let (first, end) = self.picture;
+        let (from, to) = (offset.max(first), (offset + bytes).min(end));
+        if from < to {
+            self.shown_bytes += to - from;
+            self.low = self.low.min(from);
+            self.high = self.high.max(to);
+        }
         self.last_write = at;
     }
 
@@ -386,6 +421,32 @@ impl Activity {
         (self.span_min, self.copy_min) =
             if linear { (bytes / 2, bytes / 128) } else { (u64::MAX, u64::MAX) };
     }
+
+    /// Where the picture shown lies among the offsets `video_write` gets,
+    /// from its first byte to past its last, where that is known
+    /// (`picture`); None takes all of them for the picture.
+    pub fn set_picture(&mut self, picture: Option<(u64, u64)>) {
+        self.picture = picture.unwrap_or((0, u64::MAX));
+        self.picture_known = picture.is_some();
+    }
+}
+
+/// Where the picture shown lies among the offsets of the program's writes
+/// to video memory, where that is known: in a VESA mode, the offsets are
+/// video memory's own, and the picture starts at the display start.
+/// Elsewhere they are the window's the program wrote through, and the
+/// whole window counts. So does all of video memory in a ViRGE's full
+/// streams mode: the picture is the primary stream's, and a program that
+/// flips pages with its address (as S3D Toolkit programs do) makes no
+/// flips here, so its drawing out of sight has to count as before.
+pub fn picture(bus: &Bus) -> Option<(u64, u64)> {
+    if bus.video_mode != VideoMode::Vesa
+        || bus.banshee().is_some_and(|b| b.extended())
+        || bus.virge_full_streams()
+    {
+        return None;
+    }
+    bus.vbe.picture()
 }
 
 /// Whether the screen's rows lie one after the other in video memory in
@@ -622,6 +683,8 @@ pub struct AutoSpeed {
     /// While a program gets all the host has for its reads and writes, the
     /// speed it had before.
     working: Option<u32>,
+    /// `Activity::work_cuts` as last seen.
+    work_cuts: u64,
     /// The program gets all the host has. The host estimate is its speed
     /// then, so a frame takes it down with the estimate: a measurement at
     /// an estimate that ran high would leave it behind for half a second
@@ -669,6 +732,7 @@ impl AutoSpeed {
             pace: 1.0,
             behind: false,
             working: None,
+            work_cuts: 0,
             flat_out: false,
             output: (0, 0),
             io: (0, 0),
@@ -737,6 +801,14 @@ impl AutoSpeed {
         self.behind = false;
     }
 
+    /// While a program gets all the host has for its reads and writes, the
+    /// speed it goes back to once they end: the one it had before, or less
+    /// if the work found the host short of that.
+    pub fn work_return(&self) -> Option<u32> {
+        let before = self.working?;
+        Some(self.lagged.map_or(before, |(most, _)| before.min(most)))
+    }
+
     /// Measure afresh. How the host kept up stays: it says the same of
     /// what the same program does next.
     pub fn start_over(&mut self) {
@@ -798,11 +870,25 @@ impl AutoSpeed {
         if now.io != self.io.0 {
             self.io = (now.io, now.ns);
         }
+        let cuts = bus.activity.work_cuts;
+        if cuts != self.work_cuts {
+            self.work_cuts = cuts;
+            if self.working.is_some() {
+                // The bus went back to the speed in the middle of the
+                // frame (`Bus::end_work_boost`): measure afresh from there.
+                if trace() {
+                    eprintln!("[auto] work cut short: at {}", bus.clock.cycles_per_ms());
+                }
+                self.start_over();
+                self.settle_until = now.ns + SETTLE_NS;
+                return None;
+            }
+        }
         // A real-mode program's work is on its drives only (see `decide`).
         let worked = if protected { self.output.1 } else { self.io.1 };
         let done = now.ns.saturating_sub(worked) >= WORK_DONE_NS;
         let current = bus.clock.cycles_per_ms();
-        if let Some(before) = self.working.filter(|_| done) {
+        if let Some(before) = self.work_return().filter(|_| done) {
             return self.work_done(before, now.ns, current);
         }
         let cut = (self.flat_out && current > host_max)
@@ -900,7 +986,7 @@ impl AutoSpeed {
         // going to all the host has for them would only last until the
         // next frame, and time a delay loop that starts after loading at
         // that speed.
-        if let Some(before) = self.working.filter(|_| done) {
+        if let Some(before) = self.work_return().filter(|_| done) {
             return self.work_done(before, now.ns, current);
         }
         if next == current {
@@ -919,8 +1005,6 @@ impl AutoSpeed {
         if trace() {
             eprintln!("[auto] work done: back to {}", before);
         }
-        // The work may have found the host short of that speed.
-        let before = self.lagged.map_or(before, |(most, _)| before.min(most));
         self.start_over();
         self.settle_until = now_ns + SETTLE_NS;
         (before != current).then_some(before)
@@ -2768,6 +2852,35 @@ mod tests {
     }
 
     #[test]
+    fn a_work_boost_cut_short_on_the_bus_measures_afresh() {
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        bus.set_cycles_per_ms(HOST);
+        let mut auto = AutoSpeed::new(3000, None);
+        let loading = Measurement {
+            output: 1e6,
+            ..STILL
+        };
+        assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
+        assert_eq!(auto.work_return(), Some(PROTECTED_LEAST));
+        // No faster than the host kept up with while it worked.
+        auto.lagged = Some((15_000, LAGGED_WINDOWS));
+        assert_eq!(auto.work_return(), Some(15_000));
+        auto.lagged = None;
+        // A driver resets its sound card in the middle of the loading.
+        bus.activity.work_return = auto.work_return();
+        bus.end_work_boost();
+        assert_eq!(bus.clock.cycles_per_ms(), PROTECTED_LEAST);
+        assert_eq!(auto.update(bus, true, HOST, 0), None, "the bus is there already");
+        assert_eq!(auto.work_return(), None);
+        assert_eq!(auto.settle_until, bus.clock.now_ns() + SETTLE_NS);
+        // A cut is news only once: a boost after it isn't cut by it again.
+        assert_eq!(auto.decide(PROTECTED_LEAST, &loading, true, HOST), HOST);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        assert_eq!(auto.work_return(), Some(PROTECTED_LEAST));
+    }
+
+    #[test]
     fn work_done_goes_back_no_higher_than_the_host_keeps_up_with() {
         let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
         let bus = &mut cpu.bus;
@@ -3103,6 +3216,88 @@ mod tests {
             panic!("{:?}", auto.step);
         };
         assert!((27.0..=32.0).contains(&fps), "{fps}");
+    }
+
+    #[test]
+    fn a_copy_out_of_sight_is_no_frame() {
+        // Gender Wars' missions in VESA mode 101h (640x480, 256 colours):
+        // each frame copies what changed to the picture shown, and the
+        // same to a second copy of the screen just after it, out of sight.
+        let mut cpu = crate::cpu::Cpu::new(std::path::PathBuf::from("."));
+        let bus = &mut cpu.bus;
+        let mode = crate::video::vbe::find_mode(0x101, false).unwrap();
+        bus.vbe.set_mode(&mode, false, false);
+        bus.video_mode = VideoMode::Vesa;
+        bus.set_cycles_per_ms(25_000);
+        let mut auto = AutoSpeed::new(3000, None);
+        assert_eq!(auto.update(bus, true, HOST, 0), None);
+        // 30 frames a second, 38,000 bytes of each copied to both.
+        let page = 640 * 480;
+        let half_frame = 25_000_000 / 60;
+        while auto.update(bus, true, HOST, 0).is_none() {
+            for base in [0, page] {
+                bus.clock.icount += half_frame;
+                for row in (0..480).step_by(4) {
+                    bus.clock.icount += 10;
+                    let at = bus.clock.icount;
+                    bus.activity.video_write(at, base + row * 640 + 200, 320);
+                }
+                bus.sync_display();
+            }
+        }
+        // The copies out of sight count for nothing: about 30 frames a
+        // second, where both would be 60, the display's refresh rate.
+        assert_eq!(bus.activity.bursts, 0);
+        let Step::Raised { fps, .. } = auto.step else {
+            panic!("{:?}", auto.step);
+        };
+        assert!((27.0..=32.0).contains(&fps), "{fps}");
+    }
+
+    #[test]
+    fn writes_out_of_sight_make_no_copy() {
+        // Gender Wars with its view scrolled: the picture starts three
+        // rows into video memory, and the copy out of sight, a screen
+        // further on, writes a little before the picture and in its first
+        // rows as well.
+        let page = 640 * 480;
+        let mut a = Activity::new();
+        a.set_screen(page, true);
+        a.set_picture(Some((1932, 1932 + page)));
+        let mut at = 0;
+        for _ in 0..5 {
+            for base in [1932, page] {
+                at += 100_000;
+                a.video_write(at, 368, 64);
+                for row in (0..480).step_by(4) {
+                    at += 10;
+                    a.video_write(at, base + row * 640, 320);
+                }
+            }
+        }
+        // The last one ends with the next write.
+        a.video_write(at + 100_000, 1932, 1);
+        assert_eq!((a.bursts, a.copies), (0, 5));
+    }
+
+    #[test]
+    fn a_move_into_the_picture_counts_only_its_part_there() {
+        // The same, with each screen copied whole by one string move, as
+        // one without paging writes the frame buffer: the copy out of sight
+        // reaches into the picture's first three rows, which are no frame.
+        let page = 640 * 480;
+        let mut a = Activity::new();
+        a.set_screen(page, true);
+        a.set_picture(Some((1932, 1932 + page)));
+        let mut at = 0;
+        for _ in 0..5 {
+            for base in [1932, page] {
+                at += 100_000;
+                a.video_write(at, base, page);
+            }
+        }
+        a.video_write(at + 100_000, 1932, 1);
+        assert_eq!((a.bursts, a.copies), (5, 0));
     }
 
     #[test]

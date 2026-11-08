@@ -258,6 +258,7 @@ pub fn let_go(cpu: &mut Cpu, kind: &Kind) {
         | Kind::Audio { .. }
         | Kind::Decoder { .. }
         | Kind::Pin { .. }
+        | Kind::TypeEnum { .. }
         | Kind::Allocator { .. }
         | Kind::MediaSample { .. }
         | Kind::Clock { .. } => {}
